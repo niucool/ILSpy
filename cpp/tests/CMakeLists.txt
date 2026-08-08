@@ -17,6 +17,7 @@ add_executable(ilspy_tests
     Decompiler/IL/ILAst_Test.cpp
     Decompiler/IL/ILAstInstructions_Test.cpp
     Decompiler/IL/ILReader_Test.cpp
+    Decompiler/IL/ReadIL_Test.cpp
 )
 target_link_libraries(ilspy_tests PRIVATE
     ILSpy::ilspy

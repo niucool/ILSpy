@@ -24,6 +24,8 @@
 
 #include "Decompiler/IL/ILInstruction.hpp"
 
+#include <cstdio>
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -33,15 +35,29 @@ class Block;  // forward declaration; TargetBlock is a non-owning reference
 
 class Branch : public ILInstruction {
 public:
+    // The IL reader emits a Branch carrying TargetOffset (the IL offset of the
+    // target block); BlockBuilder resolves TargetOffset -> TargetBlock later.
+    // A resolved Branch (post-BlockBuilder) carries TargetBlock instead.
+    std::uint32_t TargetOffset = 0;
     Block* TargetBlock = nullptr;
-    explicit Branch(Block* target = nullptr) : ILInstruction(OpCode::Branch), TargetBlock(target) {}
+    bool HasOffset = false;  // true while this is an unresolved offset branch
+
+    explicit Branch(std::uint32_t targetOffset = 0)
+        : ILInstruction(OpCode::Branch), TargetOffset(targetOffset), HasOffset(true) {}
+    explicit Branch(Block* target) : ILInstruction(OpCode::Branch), TargetBlock(target) {}
+
     InstructionFlags DirectFlags() const override {
         return InstructionFlags::MayBranch | InstructionFlags::EndPointUnreachable;
     }
     StackType ResultType() const override { return StackType::Void; }
     int ChildCount() const override { return 0; }
     ILInstruction* GetChild(int) const override { return nullptr; }
-    void WriteTo(std::string& out) const override { out += "br <block>"; }
+    void WriteTo(std::string& out) const override {
+        out += "br IL_";
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%04X", TargetOffset);
+        out += buf;
+    }
 protected:
     std::unique_ptr<ILInstruction> SetChildRaw(int, std::unique_ptr<ILInstruction> n) override { return n; }
 };

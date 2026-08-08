@@ -46,4 +46,14 @@ std::unique_ptr<ILFunction> ReadStraightLineIL(const Metadata::MetadataFile& fil
                                                 std::uint32_t methodToken,
                                                 std::uint32_t rva);
 
+// Branch-aware reader: builds an ILFunction with a single BlockContainer whose
+// blocks are split at branch targets. Handles br/brtrue/brfalse/beq..blt (+_s/
+//_un) as Branch/IfInstruction(condition, Branch(targetOffset)), with fall-through
+// made explicit. Exception handlers and switch still bail (degrade). Branches
+// taken with a non-empty evaluation stack bail (no stack merging yet). Target
+// offsets are resolved to Block pointers at the end. Never throws.
+std::unique_ptr<ILFunction> ReadIL(const Metadata::MetadataFile& file,
+                                   std::uint32_t methodToken,
+                                   std::uint32_t rva);
+
 } // namespace ILSpy::Decompiler::IL

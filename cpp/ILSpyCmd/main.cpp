@@ -47,6 +47,8 @@ int main(int argc, char** argv) {
             ->default_value("false")->implicit_value("true"))
         ("ilast", "Decode straight-line method bodies into an ILAst tree and dump it",
             cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("ilast-all", "Decode method bodies (branch-aware) into an ILAst tree and dump it",
+            cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("t,type", "Restrict --il/--ilast to a single type by full name (Namespace.Type)",
             cxxopts::value<std::string>());
     options.parse_positional({ "assembly" });
@@ -69,10 +71,11 @@ int main(int argc, char** argv) {
     std::string asmPath = parsed["assembly"].as<std::string>();
     bool wantIl = parsed.count("il") != 0 && parsed["il"].as<bool>();
     bool wantIlAst = parsed.count("ilast") != 0 && parsed["ilast"].as<bool>();
+    bool wantIlAstAll = parsed.count("ilast-all") != 0 && parsed["ilast-all"].as<bool>();
     std::string typeFilter = parsed.count("type") != 0 ? parsed["type"].as<std::string>() : "";
 
-    if (!wantIl && !wantIlAst) {
-        std::cout << "ilspycmd: only --il and --ilast are implemented so far. See --help.\n";
+    if (!wantIl && !wantIlAst && !wantIlAstAll) {
+        std::cout << "ilspycmd: only --il, --ilast, and --ilast-all are implemented so far. See --help.\n";
         return 0;
     }
 
@@ -94,6 +97,14 @@ int main(int argc, char** argv) {
         auto methods = file.GetMethods(t.Token);
         for (const auto& m : methods) {
             if (m.RVA == 0) continue;  // abstract/extern/pinvoke-only
+            if (wantIlAstAll) {
+                auto fn = ILSpy::Decompiler::IL::ReadIL(file, m.Token, m.RVA);
+                if (!fn) continue;
+                std::cout << ".method " << t.Namespace << "." << t.Name << "::" << m.Name
+                          << "  (ILAst, branch-aware)\n" << fn->ToString() << "\n\n";
+                ++methodsPrinted;
+                continue;
+            }
             if (wantIlAst) {
                 // Decode the method body into an ILAst tree and dump it. Only
                 // straight-line bodies (no branches/switch/exception handlers)
