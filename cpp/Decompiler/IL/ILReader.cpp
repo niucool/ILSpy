@@ -640,6 +640,38 @@ std::unique_ptr<ILFunction> ReadStraightLineIL(const MetadataFile& file,
                 block->Add(std::make_unique<StObj>(std::move(addr), std::move(val), type));
                 break;
             }
+
+            // ---- indirect loads/stores (ldind.*/stind.*) ----
+            // These are LdObj/StObj over a raw pointer (the C# uses the same
+            // nodes with the address being the popped pointer).
+#define IL_LDIND(opc, kt) \
+    case ILOpCode::opc: { \
+        auto type = std::make_shared<KnownType>(KnownTypeCode::kt); \
+        auto ptr = s.Pop(); \
+        if (!ptr) return nullptr; \
+        if (!s.Push(std::make_unique<LdObj>(std::move(ptr), type))) return nullptr; \
+        break; \
+    }
+                IL_LDIND(Ldind_i1, SByte) IL_LDIND(Ldind_u1, Byte)
+                IL_LDIND(Ldind_i2, Int16) IL_LDIND(Ldind_u2, UInt16)
+                IL_LDIND(Ldind_i4, Int32) IL_LDIND(Ldind_u4, UInt32)
+                IL_LDIND(Ldind_i8, Int64) IL_LDIND(Ldind_i, IntPtr)
+                IL_LDIND(Ldind_r4, Single) IL_LDIND(Ldind_r8, Double)
+                IL_LDIND(Ldind_ref, Object)
+#undef IL_LDIND
+#define IL_STIND(opc, kt) \
+    case ILOpCode::opc: { \
+        auto type = std::make_shared<KnownType>(KnownTypeCode::kt); \
+        auto val = s.Pop(); auto ptr = s.Pop(); \
+        if (!ptr || !val) return nullptr; \
+        block->Add(std::make_unique<StObj>(std::move(ptr), std::move(val), type)); \
+        break; \
+    }
+                IL_STIND(Stind_i1, SByte) IL_STIND(Stind_i2, Int16)
+                IL_STIND(Stind_i4, Int32) IL_STIND(Stind_i8, Int64)
+                IL_STIND(Stind_r4, Single) IL_STIND(Stind_r8, Double)
+                IL_STIND(Stind_ref, Object) IL_STIND(Stind_i, IntPtr)
+#undef IL_STIND
             // The C# represents these as LdObj/StObj over LdFlda/LdsFlda; this port
             // follows that composition so later transforms see the same shape.
             case ILOpCode::Ldfld:
