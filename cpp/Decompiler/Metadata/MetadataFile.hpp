@@ -146,6 +146,11 @@ public:
     // throws.
     std::string ResolveTokenToString(std::uint32_t token) const;
 
+    // Resolve a TypeDef/TypeRef (or TypeSpec) token to an IType. Returns nullptr
+    // for an out-of-range/unsupported token; never throws. Used by the IL reader
+    // for castclass/isinst/box/newarr/ldelem type operands.
+    ILSpy::Decompiler::TypeSystem::ITypePtr ResolveTypeToken(std::uint32_t token) const;
+
     // Decode the method body at `rva` (from a MethodDefInfo::RVA). Returns an
     // invalid MethodBody for abstract/extern methods (RVA 0) or a malformed
     // header; never throws.

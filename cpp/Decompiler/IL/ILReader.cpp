@@ -26,6 +26,7 @@
 #include "Decompiler/IL/Instructions/Conv.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
@@ -35,7 +36,12 @@
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
+#include "Decompiler/IL/Instructions/Box.hpp"
+#include "Decompiler/IL/Instructions/CastClass.hpp"
+#include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/StackTypeOf.hpp"
 #include "Decompiler/Metadata/ILOpCodes.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
@@ -508,7 +514,132 @@ std::unique_ptr<ILFunction> ReadStraightLineIL(const MetadataFile& file,
                 break;
             }
 
-            // ---- field access (ldfld/stfld/ldsfld/stsfld/ldflda/ldsflda) ----
+            // ---- castclass / isinst / box / unbox / unbox.any ----
+            case ILOpCode::Castclass: {
+                std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return nullptr; pos += 4;
+                auto type = file.ResolveTypeToken(tok);
+                auto v = s.Pop();
+                if (!v) return nullptr;
+                if (!s.Push(std::make_unique<CastClass>(type, std::move(v)))) return nullptr;
+                break;
+            }
+            case ILOpCode::Isinst: {
+                std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return nullptr; pos += 4;
+                auto type = file.ResolveTypeToken(tok);
+                auto v = s.Pop();
+                if (!v) return nullptr;
+                if (!s.Push(std::make_unique<IsInst>(type, std::move(v)))) return nullptr;
+                break;
+            }
+            case ILOpCode::Box: {
+                std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return nullptr; pos += 4;
+                auto type = file.ResolveTypeToken(tok);
+                auto v = s.Pop();
+                if (!v) return nullptr;
+                if (!s.Push(std::make_unique<Box>(type, std::move(v)))) return nullptr;
+                break;
+            }
+            case ILOpCode::Unbox: {
+                std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return nullptr; pos += 4;
+                auto type = file.ResolveTypeToken(tok);
+                auto v = s.Pop();
+                if (!v) return nullptr;
+                if (!s.Push(std::make_unique<UnboxAny>(type, std::move(v)))) return nullptr;
+                break;
+            }
+            case ILOpCode::Unbox_any: {
+                std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return nullptr; pos += 4;
+                auto type = file.ResolveTypeToken(tok);
+                auto v = s.Pop();
+                if (!v) return nullptr;
+                if (!s.Push(std::make_unique<UnboxAny>(type, std::move(v)))) return nullptr;
+                break;
+            }
+
+            // ---- arrays: newarr / ldlen / ldelema / ldelem.* / stelem.* ----
+            case ILOpCode::Newarr: {
+                std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return nullptr; pos += 4;
+                auto type = file.ResolveTypeToken(tok);
+                auto count = s.Pop();
+                if (!count) return nullptr;
+                std::vector<std::unique_ptr<ILInstruction>> idx;
+                idx.push_back(std::move(count));
+                if (!s.Push(std::make_unique<NewArr>(type, std::move(idx)))) return nullptr;
+                break;
+            }
+            case ILOpCode::Ldlen: {
+                auto arr = s.Pop();
+                if (!arr) return nullptr;
+                if (!s.Push(std::make_unique<LdLen>(std::move(arr)))) return nullptr;
+                break;
+            }
+            case ILOpCode::Ldelema: {
+                std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return nullptr; pos += 4;
+                auto type = file.ResolveTypeToken(tok);
+                auto idx = s.Pop();
+                auto arr = s.Pop();
+                if (!arr || !idx) return nullptr;
+                std::vector<std::unique_ptr<ILInstruction>> indices;
+                indices.push_back(std::move(idx));
+                if (!s.Push(std::make_unique<LdElema>(type, std::move(arr), std::move(indices)))) return nullptr;
+                break;
+            }
+#define IL_LDELEM(opc, kt) \
+    case ILOpCode::opc: { \
+        auto type = std::make_shared<KnownType>(KnownTypeCode::kt); \
+        auto idx = s.Pop(); auto arr = s.Pop(); \
+        if (!arr || !idx) return nullptr; \
+        std::vector<std::unique_ptr<ILInstruction>> indices; \
+        indices.push_back(std::move(idx)); \
+        auto addr = std::make_unique<LdElema>(type, std::move(arr), std::move(indices)); \
+        if (!s.Push(std::make_unique<LdObj>(std::move(addr), type))) return nullptr; \
+        break; \
+    }
+                IL_LDELEM(Ldelem_i1, SByte) IL_LDELEM(Ldelem_u1, Byte)
+                IL_LDELEM(Ldelem_i2, Int16) IL_LDELEM(Ldelem_u2, UInt16)
+                IL_LDELEM(Ldelem_i4, Int32) IL_LDELEM(Ldelem_u4, UInt32)
+                IL_LDELEM(Ldelem_i8, Int64)
+                IL_LDELEM(Ldelem_r4, Single) IL_LDELEM(Ldelem_r8, Double)
+                IL_LDELEM(Ldelem_i, IntPtr) IL_LDELEM(Ldelem_ref, Object)
+#undef IL_LDELEM
+            case ILOpCode::Ldelem: {
+                std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return nullptr; pos += 4;
+                auto type = file.ResolveTypeToken(tok);
+                auto idx = s.Pop(); auto arr = s.Pop();
+                if (!arr || !idx) return nullptr;
+                std::vector<std::unique_ptr<ILInstruction>> indices;
+                indices.push_back(std::move(idx));
+                auto addr = std::make_unique<LdElema>(type, std::move(arr), std::move(indices));
+                if (!s.Push(std::make_unique<LdObj>(std::move(addr), type))) return nullptr;
+                break;
+            }
+#define IL_STELEM(opc, kt) \
+    case ILOpCode::opc: { \
+        auto type = std::make_shared<KnownType>(KnownTypeCode::kt); \
+        auto val = s.Pop(); auto idx = s.Pop(); auto arr = s.Pop(); \
+        if (!arr || !idx || !val) return nullptr; \
+        std::vector<std::unique_ptr<ILInstruction>> indices; \
+        indices.push_back(std::move(idx)); \
+        auto addr = std::make_unique<LdElema>(type, std::move(arr), std::move(indices)); \
+        block->Add(std::make_unique<StObj>(std::move(addr), std::move(val), type)); \
+        break; \
+    }
+                IL_STELEM(Stelem_i, IntPtr) IL_STELEM(Stelem_i1, SByte)
+                IL_STELEM(Stelem_i2, Int16) IL_STELEM(Stelem_i4, Int32)
+                IL_STELEM(Stelem_i8, Int64) IL_STELEM(Stelem_r4, Single)
+                IL_STELEM(Stelem_r8, Double) IL_STELEM(Stelem_ref, Object)
+#undef IL_STELEM
+            case ILOpCode::Stelem: {
+                std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return nullptr; pos += 4;
+                auto type = file.ResolveTypeToken(tok);
+                auto val = s.Pop(); auto idx = s.Pop(); auto arr = s.Pop();
+                if (!arr || !idx || !val) return nullptr;
+                std::vector<std::unique_ptr<ILInstruction>> indices;
+                indices.push_back(std::move(idx));
+                auto addr = std::make_unique<LdElema>(type, std::move(arr), std::move(indices));
+                block->Add(std::make_unique<StObj>(std::move(addr), std::move(val), type));
+                break;
+            }
             // The C# represents these as LdObj/StObj over LdFlda/LdsFlda; this port
             // follows that composition so later transforms see the same shape.
             case ILOpCode::Ldfld:

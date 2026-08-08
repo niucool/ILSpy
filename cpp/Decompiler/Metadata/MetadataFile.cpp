@@ -342,4 +342,28 @@ std::string MetadataFile::ResolveTokenToString(std::uint32_t token) const {
     return fallback();
 }
 
+ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::ResolveTypeToken(std::uint32_t token) const {
+    if (!IsValid()) return nullptr;
+    std::uint32_t table = token >> 24;
+    std::uint32_t row = token & 0x00FFFFFFu;
+    try {
+        if (table == 0x01 && row && row <= impl_->db->TypeRef.size()) {  // TypeRef
+            auto r = impl_->db->TypeRef[row - 1];
+            return ResolveTypeDefOrRef(*impl_->db,
+                winmd::reader::coded_index<winmd::reader::TypeDefOrRef>(
+                    &impl_->db->get_table<winmd::reader::TypeRef>(),
+                    winmd::reader::TypeDefOrRef::TypeRef, row - 1));
+        }
+        if (table == 0x02 && row && row <= impl_->db->TypeDef.size()) {  // TypeDef
+            return ResolveTypeDefOrRef(*impl_->db,
+                winmd::reader::coded_index<winmd::reader::TypeDefOrRef>(
+                    &impl_->db->get_table<winmd::reader::TypeDef>(),
+                    winmd::reader::TypeDefOrRef::TypeDef, row - 1));
+        }
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+    return nullptr;
+}
+
 } // namespace ILSpy::Decompiler::Metadata
