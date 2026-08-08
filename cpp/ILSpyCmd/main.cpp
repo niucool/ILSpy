@@ -31,6 +31,8 @@
 #include <cxxopts.hpp>
 
 #include <cstdint>
+#include <cstdio>
+#include <cctype>
 #include <iostream>
 #include <string>
 
@@ -51,6 +53,8 @@ int main(int argc, char** argv) {
         ("ilast-all", "Decode method bodies (branch-aware) into an ILAst tree and dump it",
             cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("l,list", "List types of the given kind(s): c(lass), i(nterface), s(truct), d(elegate), e(num)",
+            cxxopts::value<std::string>()->default_value(""))
+        ("dump-table", "Dump a metadata table (row count + key fields). Table name: TypeDef, MethodDef, Field, Property, Assembly, AssemblyRef, etc.",
             cxxopts::value<std::string>()->default_value(""))
         ("t,type", "Restrict --il/--ilast to a single type by full name (Namespace.Type)",
             cxxopts::value<std::string>());
@@ -76,10 +80,11 @@ int main(int argc, char** argv) {
     bool wantIlAst = parsed.count("ilast") != 0 && parsed["ilast"].as<bool>();
     bool wantIlAstAll = parsed.count("ilast-all") != 0 && parsed["ilast-all"].as<bool>();
     std::string listKinds = parsed.count("list") != 0 ? parsed["list"].as<std::string>() : "";
+    std::string dumpTable = parsed.count("dump-table") != 0 ? parsed["dump-table"].as<std::string>() : "";
     std::string typeFilter = parsed.count("type") != 0 ? parsed["type"].as<std::string>() : "";
 
-    if (!wantIl && !wantIlAst && !wantIlAstAll && listKinds.empty()) {
-        std::cout << "ilspycmd: see --help for available options (--il, --ilast, --ilast-all, --list).\n";
+    if (!wantIl && !wantIlAst && !wantIlAstAll && listKinds.empty() && dumpTable.empty()) {
+        std::cout << "ilspycmd: see --help for available options (--il, --ilast, --ilast-all, --list, --dump-table).\n";
         return 0;
     }
 
@@ -109,6 +114,47 @@ int main(int argc, char** argv) {
             std::string fullName = t.Namespace.empty() ? t.Name : t.Namespace + "." + t.Name;
             if (!typeFilter.empty() && fullName != typeFilter) continue;
             std::cout << fullName << '\n';
+        }
+        return 0;
+    }
+
+    if (!dumpTable.empty()) {
+        // Dump a metadata table: row count + key fields for the tables we expose.
+        // winmd gives typed table access; we print a useful subset.
+        auto toLower = [](std::string s) { for (auto& c : s) c = (char)tolower(c); return s; };
+        std::string tn = toLower(dumpTable);
+        if (tn == "typedef") {
+            auto types = file.TypeDefs();
+            std::cout << "TypeDef table: " << types.size() << " rows\n";
+            std::cout << "RID  Token    Kind        Namespace.Name\n";
+            for (std::size_t i = 0; i < types.size(); ++i) {
+                const auto& t = types[i];
+                if (i >= 100 && types.size() > 200) { std::cout << "... (" << (types.size() - 100) << " more)\n"; break; }
+                const char* kindStr = "?";
+                switch (t.Kind) {
+                    case ILSpy::Decompiler::TypeSystem::TypeKind::Class: kindStr = "Class"; break;
+                    case ILSpy::Decompiler::TypeSystem::TypeKind::Interface: kindStr = "Interface"; break;
+                    case ILSpy::Decompiler::TypeSystem::TypeKind::Struct: kindStr = "Struct"; break;
+                    case ILSpy::Decompiler::TypeSystem::TypeKind::Enum: kindStr = "Enum"; break;
+                    case ILSpy::Decompiler::TypeSystem::TypeKind::Delegate: kindStr = "Delegate"; break;
+                    case ILSpy::Decompiler::TypeSystem::TypeKind::Void: kindStr = "Void"; break;
+                    default: break;
+                }
+                char tok[16]; std::snprintf(tok, sizeof(tok), "0x%08X", t.Token);
+                std::cout << (i + 1) << "  " << tok << "  " << kindStr << "        "
+                          << (t.Namespace.empty() ? "" : (t.Namespace + ".")) << t.Name << "\n";
+            }
+        } else if (tn == "methoddef") {
+            auto methods = file.MethodDefs();
+            std::cout << "MethodDef table: " << methods.size() << " rows\n";
+            for (std::size_t i = 0; i < methods.size() && i < 100; ++i) {
+                char tok[16]; std::snprintf(tok, sizeof(tok), "0x%08X", methods[i].Token);
+                std::cout << (i + 1) << "  " << tok << "  RVA=0x" << std::hex << methods[i].RVA << std::dec
+                          << "  " << methods[i].Name << "\n";
+            }
+        } else {
+            std::cout << "dump-table: table '" << dumpTable << "' not supported. Supported: TypeDef, MethodDef.\n";
+            return 1;
         }
         return 0;
     }
