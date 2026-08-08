@@ -138,6 +138,14 @@ public:
     // token). Returns the attribute type namespace+name for each; never throws.
     std::vector<CustomAttributeInfo> GetCustomAttributes(std::uint32_t entityToken) const;
 
+    // Resolve a metadata token to a display string for the IL disassembler and
+    // the IL reader's operand resolution. TypeDef/TypeRef -> "Namespace.Type";
+    // Field/MethodDef -> "Namespace.Type::Member"; MemberRef (TypeRef/TypeDef
+    // parent) -> "Namespace.Type::Member". TypeSpec/StandAloneSig/MethodSpec/
+    // UserString and out-of-range tokens fall back to the raw hex token. Never
+    // throws.
+    std::string ResolveTokenToString(std::uint32_t token) const;
+
     // Decode the method body at `rva` (from a MethodDefInfo::RVA). Returns an
     // invalid MethodBody for abstract/extern methods (RVA 0) or a malformed
     // header; never throws.

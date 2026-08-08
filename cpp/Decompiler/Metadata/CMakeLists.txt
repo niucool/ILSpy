@@ -11,6 +11,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/SignatureDecoder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ILOpCodes.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ILDisassembler.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ILTextEmitter.cpp
 )
 
 # winmd headers use #include "impl/base.h" relative to their own src/ directory;

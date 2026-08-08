@@ -25,6 +25,7 @@
 #include "Decompiler/Metadata/Ecma335/WinmdInclude.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -215,8 +216,7 @@ ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::GetFieldSignature(std::uin
     }
 }
 
-std::vector<CustomAttributeInfo> MetadataFile::GetCustomAttributes(std::uint32_t entityToken) const {
-    std::vector<CustomAttributeInfo> result;
+std::vector<CustomAttributeInfo> MetadataFile::GetCustomAttributes(std::uint32_t entityToken) const {    std::vector<CustomAttributeInfo> result;
     if (!IsValid()) return result;
     std::uint32_t table = entityToken >> 24;
     std::uint32_t row = entityToken & 0x00FFFFFFu;
@@ -278,6 +278,68 @@ std::optional<MethodSignature> MetadataFile::GetMethodSignature(std::uint32_t me
         // matching the decompiler's robustness tenet.
         return std::nullopt;
     }
+}
+
+namespace {
+// "Namespace.Name" form for a type, or just Name when there is no namespace.
+std::string TypeNameStr(std::string_view ns, std::string_view name) {
+    if (ns.empty()) return std::string(name);
+    std::string r(ns);
+    r += '.';
+    r += name;
+    return r;
+}
+} // namespace
+
+std::string MetadataFile::ResolveTokenToString(std::uint32_t token) const {
+    if (!IsValid()) return {};
+    std::uint32_t table = token >> 24;
+    std::uint32_t row = token & 0x00FFFFFFu;
+    auto fallback = [&] {
+        // Raw hex token, e.g. "0x06000007". Used for TypeSpec/StandAloneSig/
+        // MethodSpec/UserString and any out-of-range or unsupported kind.
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "0x%08X", token);
+        return std::string(buf);
+    };
+    try {
+        if (table == 0x01 && row && row <= impl_->db->TypeRef.size()) {  // TypeRef
+            auto r = impl_->db->TypeRef[row - 1];
+            return TypeNameStr(r.TypeNamespace(), r.TypeName());
+        }
+        if (table == 0x02 && row && row <= impl_->db->TypeDef.size()) {  // TypeDef
+            auto r = impl_->db->TypeDef[row - 1];
+            return TypeNameStr(r.TypeNamespace(), r.TypeName());
+        }
+        if (table == 0x04 && row && row <= impl_->db->Field.size()) {  // Field
+            auto f = impl_->db->Field[row - 1];
+            auto p = f.Parent();
+            return TypeNameStr(p.TypeNamespace(), p.TypeName()) + "::" + std::string(f.Name());
+        }
+        if (table == 0x06 && row && row <= impl_->db->MethodDef.size()) {  // MethodDef
+            auto m = impl_->db->MethodDef[row - 1];
+            auto p = m.Parent();
+            return TypeNameStr(p.TypeNamespace(), p.TypeName()) + "::" + std::string(m.Name());
+        }
+        if (table == 0x0A && row && row <= impl_->db->MemberRef.size()) {  // MemberRef
+            auto mr = impl_->db->MemberRef[row - 1];
+            auto parent = mr.Class();
+            using MRP = winmd::reader::MemberRefParent;
+            if (parent.type() == MRP::TypeRef) {
+                auto t = parent.TypeRef();
+                return TypeNameStr(t.TypeNamespace(), t.TypeName()) + "::" + std::string(mr.Name());
+            }
+            if (parent.type() == MRP::TypeDef) {
+                auto t = parent.TypeDef();
+                return TypeNameStr(t.TypeNamespace(), t.TypeName()) + "::" + std::string(mr.Name());
+            }
+            // ModuleRef/MethodDef/TypeSpec parent: best-effort, member name only.
+            return std::string(mr.Name());
+        }
+    } catch (const std::exception&) {
+        // Fall through to the raw-token fallback.
+    }
+    return fallback();
 }
 
 } // namespace ILSpy::Decompiler::Metadata
