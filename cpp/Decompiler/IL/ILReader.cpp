@@ -833,6 +833,41 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             // Only appear in exception-handler bodies; bail without EH support.
             return DecodeOutcome::Bail;
 
+        // ---- overflow-checking conversions (same result types as the non-ovf forms) ----
+#define IL_CONVOVF(opc, target) \
+    case ILOpCode::opc: { \
+        auto v = s.Pop(); \
+        if (!v) return DecodeOutcome::Bail; \
+        if (!s.Push(std::make_unique<Conv>(std::move(v), StackType::target, true))) return DecodeOutcome::Bail; \
+        break; \
+    }
+        IL_CONVOVF(Conv_ovf_i1, I4) IL_CONVOVF(Conv_ovf_u1, I4)
+        IL_CONVOVF(Conv_ovf_i2, I4) IL_CONVOVF(Conv_ovf_u2, I4)
+        IL_CONVOVF(Conv_ovf_i4, I4) IL_CONVOVF(Conv_ovf_u4, I4)
+        IL_CONVOVF(Conv_ovf_i8, I8) IL_CONVOVF(Conv_ovf_u8, I8)
+        IL_CONVOVF(Conv_ovf_i, I) IL_CONVOVF(Conv_ovf_u, I)
+        IL_CONVOVF(Conv_ovf_i1_un, I4) IL_CONVOVF(Conv_ovf_u1_un, I4)
+        IL_CONVOVF(Conv_ovf_i2_un, I4) IL_CONVOVF(Conv_ovf_u2_un, I4)
+        IL_CONVOVF(Conv_ovf_i4_un, I4) IL_CONVOVF(Conv_ovf_u4_un, I4)
+        IL_CONVOVF(Conv_ovf_i8_un, I8) IL_CONVOVF(Conv_ovf_u8_un, I8)
+        IL_CONVOVF(Conv_ovf_i_un, I) IL_CONVOVF(Conv_ovf_u_un, I)
+#undef IL_CONVOVF
+
+        // ---- localloc: stack-allocate (rare; model as a no-op pushing a null ptr) ----
+        case ILOpCode::Localloc: {
+            auto size = s.Pop(); if (!size) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdNull>())) return DecodeOutcome::Bail;  // placeholder
+            break;
+        }
+
+        // ---- mkrefany: make a typed reference (rare) ----
+        case ILOpCode::Mkrefany: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto ptr = s.Pop(); if (!ptr) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdTypeToken>(file.ResolveTokenToString(tok)))) return DecodeOutcome::Bail;
+            break;
+        }
+
         default:
             return DecodeOutcome::Bail;
     }
