@@ -20,6 +20,7 @@
 #include "Decompiler/Metadata/MethodBody.hpp"
 #include "Decompiler/Metadata/MethodBodyReader.hpp"
 #include "Decompiler/Metadata/SignatureDecoder.hpp"
+#include "Decompiler/TypeSystem/TypeKindDerivation.hpp"
 
 #include "Decompiler/Metadata/Ecma335/WinmdInclude.hpp"
 
@@ -131,11 +132,18 @@ std::vector<TypeDefInfo> MetadataFile::TypeDefs() const {
         info.Name = std::string{ t.TypeName() };
         info.Namespace = std::string{ t.TypeNamespace() };
         info.Token = (0x02u << 24) | (index & 0x00FFFFFFu);
+        info.Flags = t.Flags().value;
         auto extends = t.Extends();
         if (extends) {
             try { info.BaseType = ResolveTypeDefOrRef(*impl_->db, extends); }
             catch (const std::exception&) { info.BaseType = nullptr; }
         }
+        // Derive Kind from the flags + base type (matches MetadataTypeDefinition.cs
+        // + SRMExtensions). selfRefName is the dotted "Namespace.Name" form.
+        std::string selfRefName = info.Namespace.empty()
+            ? info.Name : info.Namespace + "." + info.Name;
+        info.Kind = ILSpy::Decompiler::TypeSystem::DeriveTypeKind(
+            info.Flags, info.BaseType, selfRefName);
         result.push_back(std::move(info));
         ++index;
     }
@@ -205,6 +213,44 @@ ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::GetFieldSignature(std::uin
     } catch (const std::exception&) {
         return nullptr;
     }
+}
+
+std::vector<CustomAttributeInfo> MetadataFile::GetCustomAttributes(std::uint32_t entityToken) const {
+    std::vector<CustomAttributeInfo> result;
+    if (!IsValid()) return result;
+    std::uint32_t table = entityToken >> 24;
+    std::uint32_t row = entityToken & 0x00FFFFFFu;
+    // Collect the attribute type namespace+name from each CustomAttribute row in
+    // the entity's range. TypeNamespaceAndName() reads names directly (no cache);
+    // it throws for an unexpected MemberRefParent, so per-attribute try/catch.
+    auto collect = [&](auto range) {
+        for (auto it = range.first; it != range.second; ++it) {
+            try {
+                auto ns_name = (*it).TypeNamespaceAndName();
+                result.push_back({ std::string(ns_name.first), std::string(ns_name.second) });
+            } catch (const std::exception&) {
+                // Skip an attribute whose type name cannot be resolved.
+            }
+        }
+    };
+    try {
+        if (table == 0x02) {  // TypeDef
+            if (row == 0 || row > impl_->db->TypeDef.size()) return result;
+            collect(impl_->db->TypeDef[row - 1].CustomAttribute());
+        } else if (table == 0x04) {  // Field
+            if (row == 0 || row > impl_->db->Field.size()) return result;
+            collect(impl_->db->Field[row - 1].CustomAttribute());
+        } else if (table == 0x06) {  // MethodDef
+            if (row == 0 || row > impl_->db->MethodDef.size()) return result;
+            collect(impl_->db->MethodDef[row - 1].CustomAttribute());
+        } else if (table == 0x17) {  // Property
+            if (row == 0 || row > impl_->db->Property.size()) return result;
+            collect(impl_->db->Property[row - 1].CustomAttribute());
+        }
+    } catch (const std::exception&) {
+        // Malformed image: return whatever was collected so far.
+    }
+    return result;
 }
 
 MethodBody MetadataFile::GetMethodBody(std::uint32_t rva) const {

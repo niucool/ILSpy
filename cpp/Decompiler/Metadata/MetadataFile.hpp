@@ -58,12 +58,18 @@ struct MethodSignature {
     std::uint32_t GenericParameterCount = 0;
 };
 
-// A TypeDef row: name, namespace, metadata token (table 0x02), and the resolved
-// base type (nullptr for System.Object and interfaces with no base).
+// A TypeDef row: name, namespace, metadata token (table 0x02), the resolved
+// base type (nullptr for System.Object and interfaces with no base), and the
+// raw TypeAttributes flags (II.23.1.15). Pseudo-attributes such as
+// [Serializable] (tdSerializable = 0x4000) and [NonSerialized] live in the
+// flags, not in CustomAttribute rows, so the flags are exposed alongside the
+// custom-attribute list.
 struct TypeDefInfo {
     std::string Name;
     std::string Namespace;
     std::uint32_t Token;
+    std::uint32_t Flags;
+    ILSpy::Decompiler::TypeSystem::TypeKind Kind;
     ILSpy::Decompiler::TypeSystem::ITypePtr BaseType;
 };
 
@@ -81,6 +87,15 @@ struct FieldInfo {
 struct PropertyInfo {
     std::string Name;
     std::uint32_t Token;   // table 0x17
+};
+
+// A custom attribute applied to an entity: the attribute type's namespace and
+// name (e.g. "System", "SerializableAttribute"). Constructor/named-argument
+// decoding is deferred to a later phase; the name is enough for the type
+// system's attribute checks ([Serializable], [Obsolete], [Extension], ...).
+struct CustomAttributeInfo {
+    std::string Namespace;
+    std::string Name;
 };
 
 class MetadataFile {
@@ -118,6 +133,10 @@ public:
     // Decode the field type of a Field row (by token). Returns nullptr if the
     // token is out of range or the signature is malformed; never throws.
     ILSpy::Decompiler::TypeSystem::ITypePtr GetFieldSignature(std::uint32_t fieldToken) const;
+
+    // Custom attributes applied to an entity (TypeDef/MethodDef/Field/Property
+    // token). Returns the attribute type namespace+name for each; never throws.
+    std::vector<CustomAttributeInfo> GetCustomAttributes(std::uint32_t entityToken) const;
 
     // Decode the method body at `rva` (from a MethodDefInfo::RVA). Returns an
     // invalid MethodBody for abstract/extern methods (RVA 0) or a malformed

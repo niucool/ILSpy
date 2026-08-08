@@ -9,8 +9,10 @@ add_executable(ilspy_tests
     Decompiler/Metadata/MethodBody_Test.cpp
     Decompiler/Metadata/ILDisassembler_Test.cpp
     Decompiler/Metadata/EntitySurface_Test.cpp
+    Decompiler/Metadata/CustomAttributes_Test.cpp
     Decompiler/TypeSystem/TypeName_Test.cpp
     Decompiler/TypeSystem/SignatureDecoder_Test.cpp
+    Decompiler/TypeSystem/TypeKindDerivation_Test.cpp
 )
 target_link_libraries(ilspy_tests PRIVATE
     ILSpy::ilspy
