@@ -467,10 +467,17 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
                 args.push_back(std::move(a));
             }
             for (auto it = args.rbegin(); it != args.rend(); ++it) call->AddArg(std::move(*it));
-            bool returnsVoid = (callSig->ReturnType &&
-                                callSig->ReturnType->ReflectionName() == "System.Void");
-            if (returnsVoid) block->Add(std::move(call));
-            else if (!s.Push(std::move(call))) return DecodeOutcome::Bail;
+            if (op == ILOpCode::Newobj) {
+                // newobj leaves the constructed object on the stack regardless
+                // of the constructor's declared void return.
+                call->ReturnType = StackType::O;
+                if (!s.Push(std::move(call))) return DecodeOutcome::Bail;
+            } else {
+                bool returnsVoid = (callSig->ReturnType &&
+                                    callSig->ReturnType->ReflectionName() == "System.Void");
+                if (returnsVoid) block->Add(std::move(call));
+                else if (!s.Push(std::move(call))) return DecodeOutcome::Bail;
+            }
             break;
         }
 

@@ -281,10 +281,43 @@ TEST(ReadIL, StackMergeRaisesDecodeCoverage) {
         if (m.RVA == 0) continue;
         if (ReadIL(f, m.Token, m.RVA)) ++decoded;
     }
-    // 16684 bodies decoded before evaluation-stack merging and before the
-    // MemberRef/MethodSpec signature lookup landed; 17829 after. The gate keeps
-    // them from regressing.
-    EXPECT_GE(decoded, 17200) << "stack merge did not raise decode coverage";
+    // Coverage milestones on the framework fixture: 16684 (flat EH), 17829
+    // (stack merge + MemberRef/MethodSpec signatures), 25214 (newobj pushes
+    // the constructed object). The gate keeps them from regressing.
+    EXPECT_GE(decoded, 25000) << "decode coverage regressed";
+}
+
+TEST(ReadIL, NewobjPushesTheConstructedObject) {
+    // newobj leaves the constructed object on the stack (the constructor's
+    // declared void return is irrelevant). The `throw new X(...)` idiom and
+    // `x = new X(...)` must decode with the ctor call nested as a value.
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    int throwNewDecoded = 0;
+    int assignedNewDecoded = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto body = f.GetMethodBody(m.RVA);
+        if (!body.IsValid()) continue;
+        bool hasNewobj = false;
+        for (auto byte : body.IL()) if (byte == 0x73) { hasNewobj = true; break; }
+        if (!hasNewobj) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        fn->CheckInvariant(ILPhase::Normal);
+        std::string dump = fn->ToString();
+        // ctor call nested inside a throw -> the value flowed onto the stack
+        if (dump.find("throw call ") != std::string::npos &&
+            dump.find("::.ctor") != std::string::npos) ++throwNewDecoded;
+        // ctor call as a store value
+        if (dump.find(", call ") != std::string::npos &&
+            dump.find("::.ctor") != std::string::npos) ++assignedNewDecoded;
+        if (throwNewDecoded > 40) break;
+    }
+    EXPECT_GT(throwNewDecoded, 20) << "throw new X(...) methods must decode end-to-end";
+    EXPECT_GT(assignedNewDecoded, 20) << "x = new X(...) methods must decode end-to-end";
 }
 
 TEST(ReadIL, InvalidInputsAreGraceful) {

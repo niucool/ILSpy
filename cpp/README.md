@@ -38,9 +38,9 @@ implemented and green here. Everything else follows the phase plan in
   branch out of the region; `endfinally`/`endfilter` leaves get the innermost
   container). Evaluation-stack values crossing a boundary flush to S_ stack
   slots that unify across predecessors via a merge-representative map.
-  **17829** mscorlib method bodies decode (555+ with nested EH, 387 with merged
-  stack slots), zero dangling branches. The remaining ~70 instruction kinds
-  (and the ~40 IL transforms) remain.
+  **25214** mscorlib method bodies decode (99.6%; 555+ with nested EH, 387+
+  with merged stack slots), zero dangling branches. The remaining ~70
+  instruction kinds (and the ~40 IL transforms) remain.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: a minimal
   ILAst -> C#-text walker that closes the IL -> ILAst -> text pipeline
   end-to-end ahead of the real back end. Statements flatten into blocks,
