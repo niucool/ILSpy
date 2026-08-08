@@ -41,6 +41,7 @@
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/StackTypeOf.hpp"
@@ -179,6 +180,7 @@ enum class DecodeOutcome {
     Bail,         // unsupported opcode / stack underflow / malformed
     Terminal,     // block final set to a Leave/Throw (ret/throw); block ends
     BranchInstr,  // block final set to a Branch/IfInstruction; block ends
+    SwitchInstr,  // block final set to a SwitchInstruction; block ends
 };
 
 // Decode one instruction, mutating `s` (push/pop) and `block` (add statements /
@@ -696,9 +698,36 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         IL_CBR(Blt_un, LessThan, true) IL_CBR(Blt_un_s, LessThan, true)
 #undef IL_CBR
 
-        case ILOpCode::Switch:
-            // SwitchInstruction node not ported yet; bail (degrade gracefully).
-            return DecodeOutcome::Bail;
+        case ILOpCode::Switch: {
+            std::uint32_t n = 0;
+            if (!ReadU32(b, size, pos, n)) return DecodeOutcome::Bail;
+            pos += 4;
+            std::size_t base = pos + static_cast<std::size_t>(n) * 4;
+            // Read the n relative target offsets.
+            std::vector<std::uint32_t> targets;
+            targets.reserve(n);
+            for (std::uint32_t i = 0; i < n; ++i) {
+                std::int32_t rel = 0;
+                if (!ReadI32(b, size, pos, rel)) return DecodeOutcome::Bail;
+                pos += 4;
+                targets.push_back(static_cast<std::uint32_t>(base + rel));
+            }
+            auto value = s.Pop();
+            if (!value) return DecodeOutcome::Bail;
+            auto sw = std::make_unique<SwitchInstruction>(std::move(value));
+            for (std::uint32_t i = 0; i < n; ++i) {
+                auto sec = std::make_unique<SwitchSection>();
+                sec->Labels.insert(static_cast<std::int64_t>(i));
+                sec->SetBody(std::make_unique<Branch>(targets[i]));
+                sw->AddSection(std::move(sec));
+            }
+            // Default section: fall through to the instruction after the switch.
+            auto def = std::make_unique<SwitchSection>();
+            def->SetBody(std::make_unique<Branch>(static_cast<std::uint32_t>(pos)));
+            sw->AddSection(std::move(def));
+            block->SetFinal(std::move(sw));
+            return DecodeOutcome::SwitchInstr;
+        }
 
         case ILOpCode::Leave: case ILOpCode::Leave_s:
         case ILOpCode::Endfinally:
@@ -921,6 +950,26 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
             if (out == DecodeOutcome::Bail) return nullptr;
             if (out == DecodeOutcome::Terminal) {
                 break;  // ret/throw ended the block
+            }
+            if (out == DecodeOutcome::SwitchInstr) {
+                // Create blocks for every switch target (case + default). The
+                // switch final's sections carry Branch(offset) bodies.
+                auto* sw = dynamic_cast<SwitchInstruction*>(block->FinalInstruction.get());
+                if (sw) {
+                    for (int si = 0; si < sw->ChildCount() - 1; ++si) {  // skip Value (slot 0)
+                        if (auto* sec = dynamic_cast<SwitchSection*>(sw->GetChild(si + 1))) {
+                            if (auto* br = dynamic_cast<Branch*>(sec->Body.get())) {
+                                if (br->TargetOffset < size && !byOffset.count(br->TargetOffset))
+                                    makeBlock(br->TargetOffset);
+                            }
+                        }
+                    }
+                }
+                // The default section's target is the instruction after the switch:
+                // a new block starts there too (if within the body).
+                if (pos < size && !byOffset.count(static_cast<std::uint32_t>(pos)))
+                    makeBlock(static_cast<std::uint32_t>(pos));
+                break;
             }
             if (out == DecodeOutcome::BranchInstr) {
                 // A branch may target a block we haven't created yet; create it
