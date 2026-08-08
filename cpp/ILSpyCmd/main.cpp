@@ -26,6 +26,7 @@
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/Metadata/ILTextEmitter.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/TypeSystem/TypeKind.hpp"
 
 #include <cxxopts.hpp>
 
@@ -49,6 +50,8 @@ int main(int argc, char** argv) {
             cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("ilast-all", "Decode method bodies (branch-aware) into an ILAst tree and dump it",
             cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("l,list", "List types of the given kind(s): c(lass), i(nterface), s(truct), d(elegate), e(num)",
+            cxxopts::value<std::string>()->default_value(""))
         ("t,type", "Restrict --il/--ilast to a single type by full name (Namespace.Type)",
             cxxopts::value<std::string>());
     options.parse_positional({ "assembly" });
@@ -72,10 +75,11 @@ int main(int argc, char** argv) {
     bool wantIl = parsed.count("il") != 0 && parsed["il"].as<bool>();
     bool wantIlAst = parsed.count("ilast") != 0 && parsed["ilast"].as<bool>();
     bool wantIlAstAll = parsed.count("ilast-all") != 0 && parsed["ilast-all"].as<bool>();
+    std::string listKinds = parsed.count("list") != 0 ? parsed["list"].as<std::string>() : "";
     std::string typeFilter = parsed.count("type") != 0 ? parsed["type"].as<std::string>() : "";
 
-    if (!wantIl && !wantIlAst && !wantIlAstAll) {
-        std::cout << "ilspycmd: only --il, --ilast, and --ilast-all are implemented so far. See --help.\n";
+    if (!wantIl && !wantIlAst && !wantIlAstAll && listKinds.empty()) {
+        std::cout << "ilspycmd: see --help for available options (--il, --ilast, --ilast-all, --list).\n";
         return 0;
     }
 
@@ -83,6 +87,30 @@ int main(int argc, char** argv) {
     if (!file.IsValid()) {
         std::cerr << "ilspycmd: could not open '" << asmPath << "' as a CLI assembly\n";
         return 1;
+    }
+
+    if (!listKinds.empty()) {
+        // List types of the given kinds. Maps the kind chars to TypeKind values.
+        auto kindMatch = [&](ILSpy::Decompiler::TypeSystem::TypeKind k) {
+            char c = '\0';
+            switch (k) {
+                case ILSpy::Decompiler::TypeSystem::TypeKind::Class: c = 'c'; break;
+                case ILSpy::Decompiler::TypeSystem::TypeKind::Interface: c = 'i'; break;
+                case ILSpy::Decompiler::TypeSystem::TypeKind::Struct: c = 's'; break;
+                case ILSpy::Decompiler::TypeSystem::TypeKind::Delegate: c = 'd'; break;
+                case ILSpy::Decompiler::TypeSystem::TypeKind::Enum: c = 'e'; break;
+                default: return false;
+            }
+            return listKinds.find(c) != std::string::npos;
+        };
+        for (const auto& t : file.TypeDefs()) {
+            if (t.Name == "<Module>") continue;
+            if (!kindMatch(t.Kind)) continue;
+            std::string fullName = t.Namespace.empty() ? t.Name : t.Namespace + "." + t.Name;
+            if (!typeFilter.empty() && fullName != typeFilter) continue;
+            std::cout << fullName << '\n';
+        }
+        return 0;
     }
 
     auto typeMatch = [&](const std::string& ns, const std::string& name) {
