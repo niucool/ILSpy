@@ -35,6 +35,7 @@
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/StackTypeOf.hpp"
 #include "Decompiler/Metadata/ILOpCodes.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
@@ -504,6 +505,49 @@ std::unique_ptr<ILFunction> ReadStraightLineIL(const MetadataFile& file,
                 block->Add(std::make_unique<StLoc>(v, std::move(top)));
                 if (!s.Push(std::make_unique<LdLoc>(v))) return nullptr;
                 if (!s.Push(std::make_unique<LdLoc>(v))) return nullptr;
+                break;
+            }
+
+            // ---- field access (ldfld/stfld/ldsfld/stsfld/ldflda/ldsflda) ----
+            // The C# represents these as LdObj/StObj over LdFlda/LdsFlda; this port
+            // follows that composition so later transforms see the same shape.
+            case ILOpCode::Ldfld:
+            case ILOpCode::Ldflda:
+            case ILOpCode::Stfld:
+            case ILOpCode::Ldsfld:
+            case ILOpCode::Ldsflda:
+            case ILOpCode::Stsfld: {
+                std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return nullptr; pos += 4;
+                auto fieldType = file.GetFieldSignature(tok);
+                std::string fieldName = file.ResolveTokenToString(tok);
+                if (op == ILOpCode::Ldfld || op == ILOpCode::Ldflda || op == ILOpCode::Stfld) {
+                    // Instance: pop the target object, build LdFlda.
+                    auto target = s.Pop();
+                    if (!target) return nullptr;
+                    auto addr = std::make_unique<LdFlda>(std::move(target), fieldName);
+                    addr->DelayExceptions = (op != ILOpCode::Ldflda); // ldfld/stfld defer NRE to LdObj/StObj
+                    if (op == ILOpCode::Ldflda) {
+                        if (!s.Push(std::move(addr))) return nullptr;
+                    } else if (op == ILOpCode::Ldfld) {
+                        if (!s.Push(std::make_unique<LdObj>(std::move(addr), fieldType))) return nullptr;
+                    } else { // Stfld
+                        auto value = s.Pop();
+                        if (!value) return nullptr;
+                        block->Add(std::make_unique<StObj>(std::move(addr), std::move(value), fieldType));
+                    }
+                } else {
+                    // Static: LdsFlda has no target.
+                    auto addr = std::make_unique<LdsFlda>(fieldName);
+                    if (op == ILOpCode::Ldsflda) {
+                        if (!s.Push(std::move(addr))) return nullptr;
+                    } else if (op == ILOpCode::Ldsfld) {
+                        if (!s.Push(std::make_unique<LdObj>(std::move(addr), fieldType))) return nullptr;
+                    } else { // Stsfld
+                        auto value = s.Pop();
+                        if (!value) return nullptr;
+                        block->Add(std::make_unique<StObj>(std::move(addr), std::move(value), fieldType));
+                    }
+                }
                 break;
             }
 
