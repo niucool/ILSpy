@@ -36,13 +36,20 @@ implemented and green here. Everything else follows the phase plan in
   body into an ILFunction tree via the stack simulation. **11208** mscorlib method
   bodies decode. The full worklist/union-find/BlockBuilder reader (branches,
   switch, exception handlers) and the remaining ~70 instruction kinds remain.
+- **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: a minimal
+  ILAst -> C#-text walker that closes the IL -> ILAst -> text pipeline
+  end-to-end ahead of the real back end. Statements flatten into blocks,
+  branches become gotos to `IL_XXXX` labels, `stloc` declares a `var` on
+  first store, and calls/casts/field/array accesses use approximate C#
+  syntax (no resolver, no AST transforms, no type inference).
 - Phases 4-11 (IL transforms, C# AST + resolver + output, disassembler output,
   orchestration, ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
 
-The CLI does `<assembly> --il [-t Type]` (IL text disassembly) and
-`<assembly> --ilast [-t Type]` (decode straight-line bodies to an ILAst tree
-and dump it) end-to-end today; C# output is Phase 5.
+The CLI does `<assembly> --il [-t Type]` (IL text disassembly),
+`<assembly> --ilast[-all] [-t Type]` (decode bodies to an ILAst tree and dump
+it), and `<assembly> --csharp [-t Type]` (translate decodable bodies to
+C#-ish text via the Phase 5 seed) end-to-end today; real C# output is Phase 5.
 
 ## Prerequisites
 

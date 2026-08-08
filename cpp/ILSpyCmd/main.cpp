@@ -22,6 +22,7 @@
 // body, optionally restricted to one type with -t. Token operands are resolved
 // to "Namespace.Type::Member" / "Namespace.Type" names.
 
+#include "Decompiler/CSharp/ILAstToCSharp.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/Metadata/ILTextEmitter.hpp"
@@ -52,6 +53,8 @@ int main(int argc, char** argv) {
             cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("ilast-all", "Decode method bodies (branch-aware) into an ILAst tree and dump it",
             cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("csharp", "Translate method bodies to C#-ish text (Phase 5 seed: gotos for control flow, var locals, approximate casts/names -- the real resolver back end lands in Phase 5)",
+            cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("l,list", "List types of the given kind(s): c(lass), i(nterface), s(truct), d(elegate), e(num)",
             cxxopts::value<std::string>()->default_value(""))
         ("dump-table", "Dump a metadata table (row count + key fields). Table name: TypeDef, MethodDef, Field, Property, Assembly, AssemblyRef, etc.",
@@ -79,12 +82,13 @@ int main(int argc, char** argv) {
     bool wantIl = parsed.count("il") != 0 && parsed["il"].as<bool>();
     bool wantIlAst = parsed.count("ilast") != 0 && parsed["ilast"].as<bool>();
     bool wantIlAstAll = parsed.count("ilast-all") != 0 && parsed["ilast-all"].as<bool>();
+    bool wantCSharp = parsed.count("csharp") != 0 && parsed["csharp"].as<bool>();
     std::string listKinds = parsed.count("list") != 0 ? parsed["list"].as<std::string>() : "";
     std::string dumpTable = parsed.count("dump-table") != 0 ? parsed["dump-table"].as<std::string>() : "";
     std::string typeFilter = parsed.count("type") != 0 ? parsed["type"].as<std::string>() : "";
 
-    if (!wantIl && !wantIlAst && !wantIlAstAll && listKinds.empty() && dumpTable.empty()) {
-        std::cout << "ilspycmd: see --help for available options (--il, --ilast, --ilast-all, --list, --dump-table).\n";
+    if (!wantIl && !wantIlAst && !wantIlAstAll && !wantCSharp && listKinds.empty() && dumpTable.empty()) {
+        std::cout << "ilspycmd: see --help for available options (--il, --ilast, --ilast-all, --csharp, --list, --dump-table).\n";
         return 0;
     }
 
@@ -171,6 +175,30 @@ int main(int argc, char** argv) {
         auto methods = file.GetMethods(t.Token);
         for (const auto& m : methods) {
             if (m.RVA == 0) continue;  // abstract/extern/pinvoke-only
+            if (wantCSharp) {
+                // IL -> ILAst -> C#-ish text, end to end. Return type and
+                // parameter declarations come from the method's signature.
+                auto fn = ILSpy::Decompiler::IL::ReadIL(file, m.Token, m.RVA);
+                if (!fn) continue;
+                std::string returnType = "void";
+                std::string paramDecl;
+                if (auto sig = file.GetMethodSignature(m.Token)) {
+                    if (sig->ReturnType && sig->ReturnType->ReflectionName() != "System.Void")
+                        returnType = sig->ReturnType->ReflectionName();
+                    int base_ = sig->IsInstance ? 1 : 0;
+                    for (std::size_t i = 0; i < sig->ParameterTypes.size(); ++i) {
+                        if (i) paramDecl += ", ";
+                        paramDecl += sig->ParameterTypes[i]->ReflectionName();
+                        paramDecl += " arg_";
+                        paramDecl += std::to_string(base_ + static_cast<int>(i));
+                    }
+                }
+                std::cout << "// " << t.Namespace << "." << t.Name << "\n"
+                          << ILSpy::Decompiler::IL::ILAstToCSharp(*fn, returnType, m.Name, paramDecl)
+                          << '\n';
+                ++methodsPrinted;
+                continue;
+            }
             if (wantIlAstAll) {
                 auto fn = ILSpy::Decompiler::IL::ReadIL(file, m.Token, m.RVA);
                 if (!fn) continue;
