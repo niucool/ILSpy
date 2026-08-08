@@ -127,11 +127,8 @@ void FlushExpressionStack(ReaderState& s, Block* block) {
         s.stackVarsCreated.push_back(v);
     }
     s.expressionStack.clear();
-    // Flushing at a terminal runs after SetFinal; the final sits behind the
-    // instructions list in the child layout, so its ChildIndex tracks the new
-    // size.
-    if (block->FinalInstruction)
-        block->FinalInstruction->ChildIndex = static_cast<int>(block->Instructions.size());
+    // Flushing at a terminal runs after SetFinal; Block::Add keeps the final's
+    // ChildIndex tracking the instruction-list size.
 }
 
 // Follow the merge-representative chain for a stack-slot variable. Merges

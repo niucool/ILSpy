@@ -23,6 +23,7 @@
 // to "Namespace.Type::Member" / "Namespace.Type" names.
 
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
+#include "Decompiler/IL/ControlFlow/ControlFlowSimplification.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/Metadata/ILTextEmitter.hpp"
@@ -176,10 +177,14 @@ int main(int argc, char** argv) {
         for (const auto& m : methods) {
             if (m.RVA == 0) continue;  // abstract/extern/pinvoke-only
             if (wantCSharp) {
-                // IL -> ILAst -> C#-ish text, end to end. Return type and
-                // parameter declarations come from the method's signature.
+                // IL -> ILAst -> C#-ish text, end to end. The ILAst goes
+                // through the pipeline's first transform
+                // (ControlFlowSimplification) before rendering.
                 auto fn = ILSpy::Decompiler::IL::ReadIL(file, m.Token, m.RVA);
                 if (!fn) continue;
+                ILSpy::Decompiler::IL::ILTransformContext transformContext;
+                ILSpy::Decompiler::IL::ControlFlowSimplification().Run(*fn, transformContext);
+                fn->CheckInvariant(ILSpy::Decompiler::IL::ILPhase::Normal);
                 std::string returnType = "void";
                 std::string paramDecl;
                 if (auto sig = file.GetMethodSignature(m.Token)) {

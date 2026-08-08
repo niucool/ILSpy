@@ -21,6 +21,7 @@ add_executable(ilspy_tests
     Decompiler/IL/EHNodes_Test.cpp
     Decompiler/IL/BlockBuilder_Test.cpp
     Decompiler/CSharp/ILAstToCSharp_Test.cpp
+    Decompiler/IL/ControlFlowSimplification_Test.cpp
 )
 target_link_libraries(ilspy_tests PRIVATE
     ILSpy::ilspy

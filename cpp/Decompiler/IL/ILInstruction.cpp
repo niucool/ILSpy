@@ -48,6 +48,15 @@ std::unique_ptr<ILInstruction> ILInstruction::TakeChild(int index) {
     return prev;
 }
 
+void ILInstruction::ReplaceWith(std::unique_ptr<ILInstruction> other) {
+    assert(Parent && "ReplaceWith: node has no parent");
+    assert(other && !other->Parent && "ReplaceWith: replacement must be detached");
+    ILInstruction* parent = Parent;
+    int index = ChildIndex;
+    parent->TakeChild(index);  // destroys `this`; no member access past this line
+    parent->SetChild(index, std::move(other));
+}
+
 bool ILInstruction::IsConnected() const {
     // A node is connected iff it is part of a tree rooted at an ILFunction. A
     // standalone subtree (root not an ILFunction) is disconnected, and so are

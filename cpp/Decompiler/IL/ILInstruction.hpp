@@ -72,6 +72,10 @@ public:
     // Remove and return ownership of the child in slot `index` (orphaning it).
     std::unique_ptr<ILInstruction> TakeChild(int index);
 
+    // Replace this node with `other` in its parent's slot (ILInstruction.ReplaceWith).
+    // This node is destroyed; `other` must be detached (no parent).
+    void ReplaceWith(std::unique_ptr<ILInstruction> other);
+
     // True if this is connected to a root (has a parent, or is itself a root).
     bool IsConnected() const;
     // ILFunction is the tree root; overrides return true.

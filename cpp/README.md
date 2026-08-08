@@ -44,6 +44,14 @@ implemented and green here. Everything else follows the phase plan in
   full element-type range (TypedReference, vararg sentinels, fn-ptr handled
   approximately, custom modifiers), which winmd's WinRT-profile TypeSig rejects.
   The remaining instruction kinds (and the ~40 IL transforms) follow Phase 4.
+- **Phase 4 (start)** -- the ILAst transform pipeline: `IILTransform` /
+  `ILTransformContext` (Transforms/), variable/block usage analysis
+  (`ControlFlow/VariableUsage`: variable Load/Store/Address counts + block
+  incoming-edge counts), and the pipeline's first transform,
+  `ControlFlowSimplification` (branch-chain collapse, dead stack-slot store
+  removal, debug return-block inlining, branch-to-leave folding, single-edge
+  block merging). The CLI applies it before the C# seed. Next per
+  `GetILTransforms()`: SplitVariables, ILInlining, ...
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: a minimal
   ILAst -> C#-text walker that closes the IL -> ILAst -> text pipeline
   end-to-end ahead of the real back end. Statements flatten into blocks,

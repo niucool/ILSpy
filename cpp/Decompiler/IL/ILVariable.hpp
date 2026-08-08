@@ -40,6 +40,19 @@ public:
     // Index in the method's parameter/local list (or -1 for synthetic slots).
     std::int32_t Index = -1;
 
+    // Usage counts populated by ComputeVariableUsage (ControlFlow/VariableUsage).
+    // A parameter starts with StoreCount == 1 (it arrives with a value), matching
+    // the C# usesInitialValue convention.
+    int LoadCount = 0;
+    int StoreCount = 0;
+    int AddressCount = 0;
+
+    // True if the variable is written exactly once and its address is never
+    // taken (ILVariable.IsSingleDefinition).
+    bool IsSingleDefinition() const noexcept {
+        return StoreCount == 1 && AddressCount == 0;
+    }
+
     ILVariable() = default;
     ILVariable(VariableKind kind, TypeSystem::ITypePtr type, std::int32_t index = -1)
         : Kind(kind), Type(std::move(type)), Index(index) {}

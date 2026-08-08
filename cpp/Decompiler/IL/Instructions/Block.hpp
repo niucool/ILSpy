@@ -41,6 +41,10 @@ public:
     // this via the node's ILRange; the BlockBuilder needs it to sort blocks and
     // assign them to nested containers.
     std::uint32_t StartILOffset = 0;
+    // Number of Branch edges targeting this block; computed by
+    // RecomputeIncomingEdgeCounts and maintained by control-flow transforms
+    // (Block.IncomingEdgeCount in the C#).
+    int IncomingEdgeCount = 0;
 
     Block() : ILInstruction(OpCode::Block) {}
     InstructionFlags DirectFlags() const override { return InstructionFlags::None; }
@@ -59,11 +63,27 @@ public:
     void Add(std::unique_ptr<ILInstruction> inst) {
         if (inst) { inst->Parent = this; inst->ChildIndex = static_cast<int>(Instructions.size()); }
         Instructions.push_back(std::move(inst));
+        // If a final was already set, it moved down a slot.
+        if (FinalInstruction) FinalInstruction->ChildIndex = static_cast<int>(Instructions.size());
     }
     // Set the block's final control-flow instruction.
     void SetFinal(std::unique_ptr<ILInstruction> inst) {
         if (inst) { inst->Parent = this; inst->ChildIndex = static_cast<int>(Instructions.size()); }
         FinalInstruction = std::move(inst);
+    }
+    // Erase the instruction at index i (destroying it) and keep every child's
+    // ChildIndex consistent (the final sits behind the instruction list in
+    // the child layout, so it moves down by one too).
+    void RemoveInstructionAt(std::size_t i) {
+        Instructions.erase(Instructions.begin() + i);
+        RenumberChildren();
+    }
+    // Restore ChildIndex = position for all children after direct
+    // Instructions mutation (erase/clear/push_back).
+    void RenumberChildren() {
+        for (std::size_t i = 0; i < Instructions.size(); ++i)
+            Instructions[i]->ChildIndex = static_cast<int>(i);
+        if (FinalInstruction) FinalInstruction->ChildIndex = static_cast<int>(Instructions.size());
     }
 
     void WriteTo(std::string& out) const override {
