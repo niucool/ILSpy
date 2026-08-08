@@ -63,7 +63,9 @@ public:
     virtual ILInstruction* GetChild(int index) const = 0;
 
     // Flags including descendants (DirectFlags | union of children's Flags).
-    InstructionFlags Flags() const;
+    // Virtual: control-flow nodes (If/TryCatch/...) combine branch flags
+    // instead of unioning (the endpoint is reachable if any path is).
+    virtual InstructionFlags Flags() const;
 
     // Place newChild into slot `index`, taking ownership. The new child must not
     // already have a parent (strict-tree invariant); the previous occupant is
@@ -80,6 +82,13 @@ public:
     bool IsConnected() const;
     // ILFunction is the tree root; overrides return true.
     virtual bool IsRoot() const { return false; }
+
+    // True if `ancestor` is a transitive parent of this node (exclusive).
+    bool IsDescendantOf(const ILInstruction* ancestor) const {
+        for (const ILInstruction* p = Parent; p != nullptr; p = p->Parent)
+            if (p == ancestor) return true;
+        return false;
+    }
 
     // Debug-only tree invariant (parent/child consistency, flag consistency,
     // connectedness). Mirrors ILInstruction.CheckInvariant; a no-op in NDEBUG.

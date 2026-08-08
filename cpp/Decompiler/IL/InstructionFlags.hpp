@@ -52,4 +52,12 @@ inline bool HasFlag(InstructionFlags f, InstructionFlags flag) {
     return (static_cast<std::uint32_t>(f) & static_cast<std::uint32_t>(flag)) != 0;
 }
 
+// Port of SemanticHelper.CombineBranches: the endpoint of a conditional is
+// unreachable only if BOTH branches are unreachable.
+inline InstructionFlags CombineBranches(InstructionFlags trueFlags, InstructionFlags falseFlags) {
+    constexpr InstructionFlags andCombined = InstructionFlags::EndPointUnreachable;
+    InstructionFlags union_ = trueFlags | falseFlags;
+    return (trueFlags & falseFlags & andCombined) | (union_ & ~andCombined);
+}
+
 } // namespace ILSpy::Decompiler::IL

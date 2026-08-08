@@ -52,6 +52,14 @@ public:
     }
 
     InstructionFlags DirectFlags() const override { return InstructionFlags::ControlFlow; }
+    InstructionFlags Flags() const override {
+        // ControlFlow | condition | CombineBranches(true, false) -- a missing
+        // else arm means fall-through, so the endpoint is always reachable.
+        InstructionFlags c = Condition ? Condition->Flags() : InstructionFlags::None;
+        InstructionFlags t = TrueInst ? TrueInst->Flags() : InstructionFlags::None;
+        InstructionFlags f = FalseInst ? FalseInst->Flags() : InstructionFlags::None;
+        return InstructionFlags::ControlFlow | c | CombineBranches(t, f);
+    }
     StackType ResultType() const override {
         if (TrueInst && HasFlag(TrueInst->DirectFlags(), InstructionFlags::EndPointUnreachable)) {
             return FalseInst ? FalseInst->ResultType() : StackType::Void;
