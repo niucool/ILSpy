@@ -26,6 +26,7 @@
 #include "Decompiler/IL/ILInstruction.hpp"
 
 #include <cassert>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -36,6 +37,10 @@ class Block : public ILInstruction {
 public:
     std::vector<std::unique_ptr<ILInstruction>> Instructions;
     std::unique_ptr<ILInstruction> FinalInstruction;
+    // The IL offset this block starts at (set by the IL reader). The C# carries
+    // this via the node's ILRange; the BlockBuilder needs it to sort blocks and
+    // assign them to nested containers.
+    std::uint32_t StartILOffset = 0;
 
     Block() : ILInstruction(OpCode::Block) {}
     InstructionFlags DirectFlags() const override { return InstructionFlags::None; }

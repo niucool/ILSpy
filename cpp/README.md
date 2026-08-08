@@ -32,10 +32,13 @@ implemented and green here. Everything else follows the phase plan in
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with
   `CheckInvariant`, `Block`/`BlockContainer`/`ILFunction`, ~30 instruction kinds)
-  and a **straight-line IL reader** (`ReadStraightLineIL`) that decodes a method
-  body into an ILFunction tree via the stack simulation. **11208** mscorlib method
-  bodies decode. The full worklist/union-find/BlockBuilder reader (branches,
-  switch, exception handlers) and the remaining ~70 instruction kinds remain.
+  and a branch- and EH-aware IL reader (`ReadIL`): blocks decode flat, then the
+  `BlockBuilder` nests try/handler/filter regions into
+  `TryCatch`/`TryFinally`/`TryFault` containers (IL `leave` decodes as a plain
+  branch out of the region; `endfinally`/`endfilter` leaves get the innermost
+  container). **16684** mscorlib method bodies decode (555 with nested EH),
+  zero dangling branches. The union-find stack-merge for branches that carry
+  values (and `rethrow`) plus the remaining ~70 instruction kinds remain.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: a minimal
   ILAst -> C#-text walker that closes the IL -> ILAst -> text pipeline
   end-to-end ahead of the real back end. Statements flatten into blocks,

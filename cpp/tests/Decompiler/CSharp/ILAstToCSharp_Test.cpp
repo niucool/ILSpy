@@ -46,6 +46,7 @@
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
@@ -329,6 +330,40 @@ TEST(ILAstToCSharp, ArrayAndLengthExpressions) {
     std::string text = ILAstToCSharp(*fn, "int", "M", "int[] arg_1");
     EXPECT_NE(text.find("    var V_0 = arg_1.Length;\n"), std::string::npos) << text;
     EXPECT_NE(text.find("    return arg_1[V_0];\n"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, ConstantTrueCatchFilterIsOmitted) {
+    // A plain catch carries the constant filter ldc.i4(1) (BlockBuilder.cs);
+    // the C#-text seed prints it as a plain `catch (T name)`, no `when`.
+    auto tryC = std::make_unique<BlockContainer>();
+    {
+        auto tb = std::make_unique<Block>();
+        auto fn0 = tryC.get();
+        tb->SetFinal(std::make_unique<Leave>(nullptr));
+        tryC->AddBlock(std::move(tb));
+        (void)fn0;
+    }
+    auto tc = std::make_unique<TryCatch>(std::move(tryC));
+    auto hxVar = MakeVar(VariableKind::ExceptionStackSlot, "E_5", -1,
+                         std::make_unique<KnownType>(KnownTypeCode::Object));
+    auto bodyC = std::make_unique<BlockContainer>();
+    {
+        auto hb = std::make_unique<Block>();
+        bodyC->AddBlock(std::move(hb));
+    }
+    tc->AddHandler(std::make_unique<TryCatchHandler>(
+        std::make_unique<LdcI4>(1), std::move(bodyC), hxVar));
+
+    auto block = std::make_unique<Block>();
+    block->Add(std::move(tc));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("catch (System.Object E_5)"), std::string::npos) << text;
+    EXPECT_EQ(text.find("when ("), std::string::npos) << text;
 }
 
 TEST(ILAstToCSharp, EmptyBodyEmitsEmptyMethod) {

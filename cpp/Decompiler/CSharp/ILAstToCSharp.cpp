@@ -282,7 +282,13 @@ private:
                                         ? handler->Variable->Type->ReflectionName()
                                         : std::string("System.Exception")) +
                                 " " + handler->Variable->Name + ")";
-                        if (handler->Filter) head += " when (" + Expr(*handler->Filter) + ")";
+                        // A plain catch carries the constant filter ldc.i4(1);
+                        // don't print it as a `when` clause.
+                        bool isAlwaysTrue = false;
+                        if (auto* one = dynamic_cast<const LdcI4*>(handler->Filter.get()))
+                            isAlwaysTrue = (one->Value == 1);
+                        if (handler->Filter && !isAlwaysTrue)
+                            head += " when (" + Expr(*handler->Filter) + ")";
                     }
                     Line(indent, head);
                     if (handler->Body) EmitBraced(*handler->Body, indent); else Line(indent, "{ }");

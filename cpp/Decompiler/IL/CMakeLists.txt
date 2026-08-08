@@ -7,4 +7,5 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ILInstruction.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/StackTypeOf.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ILReader.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/BlockBuilder.cpp
 )

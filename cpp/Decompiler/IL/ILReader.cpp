@@ -16,6 +16,7 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+#include "Decompiler/IL/BlockBuilder.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
@@ -625,6 +626,12 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             auto fieldType = file.GetFieldSignature(tok);
             std::string fieldName = file.ResolveTokenToString(tok);
             if (op == ILOpCode::Ldfld || op == ILOpCode::Ldflda || op == ILOpCode::Stfld) {
+                // stfld pops value (top) then target; the loads pop only target.
+                std::unique_ptr<ILInstruction> storeValue;
+                if (op == ILOpCode::Stfld) {
+                    storeValue = s.Pop();
+                    if (!storeValue) return DecodeOutcome::Bail;
+                }
                 auto target = s.Pop();
                 if (!target) return DecodeOutcome::Bail;
                 auto addr = std::make_unique<LdFlda>(std::move(target), fieldName);
@@ -634,9 +641,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
                 } else if (op == ILOpCode::Ldfld) {
                     if (!s.Push(std::make_unique<LdObj>(std::move(addr), fieldType))) return DecodeOutcome::Bail;
                 } else {
-                    auto value = s.Pop();
-                    if (!value) return DecodeOutcome::Bail;
-                    block->Add(std::make_unique<StObj>(std::move(addr), std::move(value), fieldType));
+                    block->Add(std::make_unique<StObj>(std::move(addr), std::move(storeValue), fieldType));
                 }
             } else {
                 auto addr = std::make_unique<LdsFlda>(fieldName);
@@ -686,9 +691,8 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
                                                            std::make_unique<Branch>(target)));
             return DecodeOutcome::BranchInstr;
         }
-#define IL_CBR(opc, kind, uns) \
+#define IL_CBR(opc, kind, uns, isShort) \
     case ILOpCode::opc: { \
-        bool isShort = (static_cast<std::uint16_t>(op) < 0x40); \
         std::uint32_t target = 0; \
         if (!ReadBranchTarget(b, size, pos, isShort, start, target)) return DecodeOutcome::Bail; \
         auto r = s.Pop(); auto l = s.Pop(); \
@@ -698,16 +702,16 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             std::make_unique<Branch>(target))); \
         return DecodeOutcome::BranchInstr; \
     }
-        IL_CBR(Beq, Equality, false) IL_CBR(Beq_s, Equality, false)
-        IL_CBR(Bge, GreaterThanOrEqual, false) IL_CBR(Bge_s, GreaterThanOrEqual, false)
-        IL_CBR(Bgt, GreaterThan, false) IL_CBR(Bgt_s, GreaterThan, false)
-        IL_CBR(Ble, LessThanOrEqual, false) IL_CBR(Ble_s, LessThanOrEqual, false)
-        IL_CBR(Blt, LessThan, false) IL_CBR(Blt_s, LessThan, false)
-        IL_CBR(Bne_un, Inequality, true) IL_CBR(Bne_un_s, Inequality, true)
-        IL_CBR(Bge_un, GreaterThanOrEqual, true) IL_CBR(Bge_un_s, GreaterThanOrEqual, true)
-        IL_CBR(Bgt_un, GreaterThan, true) IL_CBR(Bgt_un_s, GreaterThan, true)
-        IL_CBR(Ble_un, LessThanOrEqual, true) IL_CBR(Ble_un_s, LessThanOrEqual, true)
-        IL_CBR(Blt_un, LessThan, true) IL_CBR(Blt_un_s, LessThan, true)
+        IL_CBR(Beq, Equality, false, false) IL_CBR(Beq_s, Equality, false, true)
+        IL_CBR(Bge, GreaterThanOrEqual, false, false) IL_CBR(Bge_s, GreaterThanOrEqual, false, true)
+        IL_CBR(Bgt, GreaterThan, false, false) IL_CBR(Bgt_s, GreaterThan, false, true)
+        IL_CBR(Ble, LessThanOrEqual, false, false) IL_CBR(Ble_s, LessThanOrEqual, false, true)
+        IL_CBR(Blt, LessThan, false, false) IL_CBR(Blt_s, LessThan, false, true)
+        IL_CBR(Bne_un, Inequality, true, false) IL_CBR(Bne_un_s, Inequality, true, true)
+        IL_CBR(Bge_un, GreaterThanOrEqual, true, false) IL_CBR(Bge_un_s, GreaterThanOrEqual, true, true)
+        IL_CBR(Bgt_un, GreaterThan, true, false) IL_CBR(Bgt_un_s, GreaterThan, true, true)
+        IL_CBR(Ble_un, LessThanOrEqual, true, false) IL_CBR(Ble_un_s, LessThanOrEqual, true, true)
+        IL_CBR(Blt_un, LessThan, true, false) IL_CBR(Blt_un_s, LessThan, true, true)
 #undef IL_CBR
 
         case ILOpCode::Switch: {
@@ -839,26 +843,27 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         }
 
         case ILOpCode::Leave: case ILOpCode::Leave_s: {
-            // leave exits the innermost try/finally/catch container. Without the
-            // full BlockBuilder nesting we emit Leave(function body) as an
-            // approximation -- semantically lossy but keeps the tree valid. The
-            // leave may carry a value on the stack (for try expressions); we pop
-            // it if the method is non-void.
+            // IL leave transfers control out of a protected region; with regions
+            // nested into containers it decodes as a plain Branch to the target
+            // (as in the C# ILReader's DecodeUnconditionalBranch(isLeave: true)).
             bool isShort = (op == ILOpCode::Leave_s);
             std::uint32_t target = 0;
             if (!ReadBranchTarget(b, size, pos, isShort, start, target)) return DecodeOutcome::Bail;
-            std::unique_ptr<ILInstruction> retVal;
-            if (s.returnStackType != StackType::Void) {
-                retVal = s.Pop();
-                if (!retVal) return DecodeOutcome::Bail;
-            }
-            block->SetFinal(std::make_unique<Leave>(container, std::move(retVal)));
-            return DecodeOutcome::Terminal;
+            if (target >= size) return DecodeOutcome::Bail;
+            block->SetFinal(std::make_unique<Branch>(target));
+            return DecodeOutcome::BranchInstr;
         }
         case ILOpCode::Endfinally: {
-            // endfinally exits the finally container. Without EH nesting we emit
-            // a bare Leave(function body) as an approximation.
-            block->SetFinal(std::make_unique<Leave>(container));
+            // endfinally exits the finally container: Leave with a null target;
+            // the BlockBuilder assigns the innermost enclosing container.
+            block->SetFinal(std::make_unique<Leave>(nullptr));
+            return DecodeOutcome::Terminal;
+        }
+        case ILOpCode::Endfilter: {
+            // endfilter answers the catch filter: Leave(null, verdict).
+            auto verdict = s.Pop();
+            if (!verdict) return DecodeOutcome::Bail;
+            block->SetFinal(std::make_unique<Leave>(nullptr, std::move(verdict)));
             return DecodeOutcome::Terminal;
         }
 
@@ -926,14 +931,17 @@ bool FindBranchTargets(const std::uint8_t* b, std::size_t size, std::set<std::ui
             case ILOpCode::Bge_un: case ILOpCode::Bge_un_s:
             case ILOpCode::Bgt_un: case ILOpCode::Bgt_un_s:
             case ILOpCode::Ble_un: case ILOpCode::Ble_un_s:
-            case ILOpCode::Blt_un: case ILOpCode::Blt_un_s: {
+            case ILOpCode::Blt_un: case ILOpCode::Blt_un_s:
+            // IL leave transfers control out of the region: its target starts a
+            // block just like a branch target does.
+            case ILOpCode::Leave: case ILOpCode::Leave_s: {
                 isShort = (op == ILOpCode::Br_s || op == ILOpCode::Brtrue_s ||
                            op == ILOpCode::Brfalse_s || op == ILOpCode::Beq_s ||
                            op == ILOpCode::Bge_s || op == ILOpCode::Bgt_s ||
                            op == ILOpCode::Ble_s || op == ILOpCode::Blt_s ||
                            op == ILOpCode::Bne_un_s || op == ILOpCode::Bge_un_s ||
                            op == ILOpCode::Bgt_un_s || op == ILOpCode::Ble_un_s ||
-                           op == ILOpCode::Blt_un_s);
+                           op == ILOpCode::Blt_un_s || op == ILOpCode::Leave_s);
                 std::uint32_t target = 0;
                 if (!ReadBranchTarget(b, size, pos, isShort, start, target)) return false;
                 if (target < size) targets.insert(target);
@@ -1047,10 +1055,9 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
     if (rva == 0) return nullptr;
     auto body = file.GetMethodBody(rva);
     if (!body.IsValid()) return nullptr;
-    // EH methods: we now decode them flat (no BlockBuilder nesting yet). Handler
-    // blocks are seeded with an exception-stack-slot variable so the catch body
-    // can pop the exception object. leave/endfinally emit Leave(function body)
-    // as an approximation (the full BlockBuilder would target the try container).
+    // EH methods: blocks are decoded flat (handler entries seeded with the
+    // exception object), then the BlockBuilder nests region blocks into
+    // TryCatch/TryFinally/TryFault containers.
 
     auto sigOpt = file.GetMethodSignature(methodToken);
     if (!sigOpt) return nullptr;
@@ -1067,6 +1074,9 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
     // Pre-scan branch targets so the splitter knows where blocks begin.
     std::set<std::uint32_t> branchTargets;
     if (!FindBranchTargets(b, size, branchTargets)) return nullptr;
+    // A leave target outside the code is invalid IL (the C# emits an
+    // InvalidBranch); the decode of such a leave bails below -- our graceful
+    // degradation for the same case.
 
     // Build a map of handler-offset -> exception variable for seeding catch/filter
     // handler blocks with the exception object the runtime pushes.
@@ -1092,41 +1102,54 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
     auto container = std::make_unique<BlockContainer>();
     auto* containerPtr = container.get();
 
-    // offset -> Block*, built as we decode. Blocks are created lazily when we
-    // reach a branch-target offset (or fall through to one).
+    // Blocks are decoded flat (tagged with their start offset); the BlockBuilder
+    // nests them into EH-region containers at the end. byOffset maps each block's
+    // start offset for branch resolution; the queue drives decode order.
+    std::vector<std::pair<std::uint32_t, std::unique_ptr<Block>>> decodedBlocks;
     std::map<std::uint32_t, Block*> byOffset;
-
-    // The worklist of (offset, block) to decode. Each block starts with an empty
-    // expression stack (we bail if a branch is taken with a non-empty stack -- the
-    // common case is branches at statement boundaries, where the stack is empty).
     std::vector<std::pair<std::uint32_t, Block*>> queue;
     auto makeBlock = [&](std::uint32_t off) -> Block* {
+        // Idempotent: the same offset can be reached from a branch, a
+        // fall-through boundary, and the EH seeding below.
+        auto it = byOffset.find(off);
+        if (it != byOffset.end()) return it->second;
         auto blk = std::make_unique<Block>();
+        blk->StartILOffset = off;
         Block* raw = blk.get();
-        container->AddBlock(std::move(blk));
+        decodedBlocks.push_back({off, std::move(blk)});
         byOffset[off] = raw;
         queue.push_back({off, raw});
         return raw;
     };
     makeBlock(0);
+    // Every EH region boundary begins a block: seed the try, handler, and
+    // filter entries even when ordinary flow never reaches them (the C# does
+    // the same in EnsureExceptionHandlersHaveBlocks so every region container
+    // has content for the BlockBuilder).
+    for (const auto& eh : body.Handlers()) {
+        if (eh.TryOffset < size) makeBlock(eh.TryOffset);
+        if (eh.HandlerOffset < size) makeBlock(eh.HandlerOffset);
+        if (eh.Kind == ExceptionHandlerKind::Filter && eh.ClassTokenOrFilterOffset < size)
+            makeBlock(eh.ClassTokenOrFilterOffset);
+    }
 
-    // Decode each block. We process blocks in creation order (a BFS-ish walk) so
-    // byOffset is populated for forward references.
+    // Decode each block. The reader state is shared across blocks (parameters
+    // and locals must be the same ILVariable instances method-wide); only the
+    // evaluation-stack state resets at each block entry.
     for (std::size_t qi = 0; qi < queue.size(); ++qi) {
         auto [blockStart, block] = queue[qi];
         std::size_t pos = blockStart;
-        // Each block starts with a fresh reader state (parameters/locals shared).
-        ReaderState bs;
-        bs.parameters = s.parameters;     // share the parameter variable pointers
-        bs.locals = s.locals;             // share local pointers (grow is fine; both
-                                         // reference the same shared_ptrs)
-        bs.returnStackType = s.returnStackType;
+        s.expressionStack.clear();
+        s.currentStack.clear();
+        s.stackBase = 0;
         // If this block is a catch/filter handler entry, seed the evaluation
         // stack with the exception object the runtime pushes.
         auto hev = handlerExceptionVar.find(static_cast<std::uint32_t>(blockStart));
         if (hev != handlerExceptionVar.end()) {
-            bs.currentStack.push_back(hev->second);
-            bs.stackBase = bs.currentStack.size();  // the exception is part of the input
+            // The exception object the runtime pushes is consumable input (the
+            // catch body typically stores it immediately), so it sits below
+            // stackBase: Pop may take it, and popping past it still bails.
+            s.currentStack.push_back(hev->second);
         }
 
         while (pos < size) {
@@ -1139,7 +1162,7 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
             }
             std::size_t start = pos;
             ILOpCode op = DecodeOpCode(b, size, pos);
-            DecodeOutcome out = DecodeOne(file, bs, block, containerPtr, op, b, size, pos, start);
+            DecodeOutcome out = DecodeOne(file, s, block, containerPtr, op, b, size, pos, start);
             if (out == DecodeOutcome::Bail) return nullptr;
             if (out == DecodeOutcome::Terminal) {
                 break;  // ret/throw ended the block
@@ -1194,7 +1217,7 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
                 }
                 // A non-empty expression stack at a branch means values cross the
                 // boundary; without stack merging we bail (degrade) for correctness.
-                if (!bs.expressionStack.empty()) return nullptr;
+                if (!s.expressionStack.empty()) return nullptr;
                 break;
             }
         }
@@ -1205,7 +1228,12 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
         }
     }
 
-    // Resolve Branch.TargetOffset -> Block* across the whole tree.
+    // Nest the flat blocks into exception-region containers (no-op ordering
+    // pass for handler-less methods).
+    BlockBuilder bb(body.Handlers(), handlerExceptionVar, static_cast<std::uint32_t>(size));
+    bb.CreateBlocks(*containerPtr, decodedBlocks);
+
+    // Resolve Branch.TargetOffset -> Block* across the (now nested) tree.
     ResolveBranches(containerPtr, byOffset);
 
     fn->Body = std::move(container);
@@ -1213,6 +1241,15 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
     fn->Body->ChildIndex = 0;
     for (auto& v : s.parameters) if (v) fn->Variables.push_back(v);
     for (auto& v : s.locals) if (v) fn->Variables.push_back(v);
+    // The catch/filter exception stack slots are function variables too (the
+    // filter seeding aliases the catch variable, so dedupe by pointer).
+    {
+        std::set<ILVariable*> seen;
+        for (const auto& [offset, v] : handlerExceptionVar) {
+            (void)offset;
+            if (v && seen.insert(v.get()).second) fn->Variables.push_back(v);
+        }
+    }
     fn->CheckInvariant(ILPhase::InILReader);
     return fn;
 }

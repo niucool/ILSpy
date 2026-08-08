@@ -27,7 +27,9 @@
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 
@@ -138,6 +140,57 @@ TEST(ReadIL, SwitchAndExceptionHandlersBailGracefully) {
         if (sawEhBail > 20) break;
     }
     EXPECT_GT(sawEhBail, 0) << "expected at least one EH method to bail";
+}
+
+TEST(ReadIL, StfldUsesTargetThenValueStackOrder) {
+    // stfld pops value (top), then target: the composed tree must be
+    // stobj(ldflda(field, target), value) with target below value on the IL
+    // stack. Trivial property setters (set_X with a short body containing
+    // stfld) pin the order down: the store target is `this`, the value is the
+    // parameter. (Legitimate this.field = this stores exist -- Delegate
+    // ctors -- so the check uses setters, where field = value is canonical.)
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    int checkedStores = 0;
+    int swappedStores = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Name == "<Module>") continue;
+        for (const auto& m : f.GetMethods(t.Token)) {
+            if (m.RVA == 0 || m.Name.rfind("set_", 0) != 0) continue;
+            auto body = f.GetMethodBody(m.RVA);
+            if (!body.IsValid() || body.CodeSize() > 30 || !body.Handlers().empty()) continue;
+            bool hasStfld = false;
+            for (auto byte : body.IL()) if (byte == 0x7D) { hasStfld = true; break; }
+            if (!hasStfld) continue;
+            auto fn = ReadIL(f, m.Token, m.RVA);
+            if (!fn) continue;
+            std::function<void(ILInstruction*)> walk = [&](ILInstruction* i) {
+                if (!i) return;
+                if (i->Op == OpCode::StObj) {
+                    auto* st = static_cast<StObj*>(i);
+                    if (auto* flda = dynamic_cast<LdFlda*>(st->Target.get())) {
+                        auto* tgt = dynamic_cast<LdLoc*>(flda->Target.get());
+                        auto* val = dynamic_cast<LdLoc*>(st->Value.get());
+                        if (tgt && val && tgt->Variable && val->Variable) {
+                            ++checkedStores;
+                            if (tgt->Variable->Name != "this" &&
+                                val->Variable->Name == "this") {
+                                ++swappedStores;
+                                ADD_FAILURE() << "stfld target/value swapped in "
+                                              << m.Name << ": " << fn->ToString();
+                            }
+                        }
+                    }
+                }
+                for (int k = 0; k < i->ChildCount(); ++k) walk(i->GetChild(k));
+            };
+            walk(fn->Body.get());
+        }
+    }
+    EXPECT_GT(checkedStores, 100) << "too few setter stores found to trust the check";
+    EXPECT_EQ(swappedStores, 0) << "stfld must pop value, then target";
 }
 
 TEST(ReadIL, InvalidInputsAreGraceful) {
