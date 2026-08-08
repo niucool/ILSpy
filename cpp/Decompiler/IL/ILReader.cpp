@@ -43,6 +43,7 @@
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/StackTypeOf.hpp"
 #include "Decompiler/Metadata/ILOpCodes.hpp"
@@ -51,6 +52,7 @@
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -727,6 +729,103 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             sw->AddSection(std::move(def));
             block->SetFinal(std::move(sw));
             return DecodeOutcome::SwitchInstr;
+        }
+
+        // ---- ldobj / stobj / initobj (typed memory ops with a type token) ----
+        case ILOpCode::Ldobj: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto type = file.ResolveTypeToken(tok);
+            auto ptr = s.Pop(); if (!ptr) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdObj>(std::move(ptr), type))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Stobj: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto type = file.ResolveTypeToken(tok);
+            auto val = s.Pop(); auto ptr = s.Pop();
+            if (!ptr || !val) return DecodeOutcome::Bail;
+            block->Add(std::make_unique<StObj>(std::move(ptr), std::move(val), type));
+            break;
+        }
+        case ILOpCode::Initobj: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto type = file.ResolveTypeToken(tok);
+            auto ptr = s.Pop(); if (!ptr) return DecodeOutcome::Bail;
+            // Model initobj as stobj(addr, default-value, type). The full ILAst
+            // has an InitObj node; for the reader a StObj with a null/zero value
+            // is a faithful approximation that keeps the tree valid.
+            auto zero = (type && type->ReflectionName() == "System.IntPtr")
+                ? std::unique_ptr<ILInstruction>(std::make_unique<LdcI4>(0))
+                : std::unique_ptr<ILInstruction>(std::make_unique<LdNull>());
+            block->Add(std::make_unique<StObj>(std::move(ptr), std::move(zero), type));
+            break;
+        }
+
+        // ---- ldftn / ldvirtftn / sizeof / ldtoken ----
+        case ILOpCode::Ldftn: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            if (!s.Push(std::make_unique<LdFtn>(file.ResolveTokenToString(tok)))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Ldvirtftn: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            auto target = s.Pop(); if (!target) return DecodeOutcome::Bail;
+            // ldvirtftn pops the object and pushes the function pointer. We emit
+            // the LdVirtFtn but lose the object reference -- approximate; the full
+            // ILAst carries the target as a child.
+            if (!s.Push(std::make_unique<LdVirtFtn>(file.ResolveTokenToString(tok)))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Sizeof: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            if (!s.Push(std::make_unique<SizeOf>(file.ResolveTokenToString(tok)))) return DecodeOutcome::Bail;
+            break;
+        }
+        case ILOpCode::Ldtoken: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            if (!s.Push(std::make_unique<LdTypeToken>(file.ResolveTokenToString(tok)))) return DecodeOutcome::Bail;
+            break;
+        }
+
+        // ---- IL prefixes (volatile./constrained./readonly./unaligned./tail./prefixref) ----
+        // These prefix the next instruction; the full ILAst stores them on the
+        // following instruction's prefix fields. For the reader we skip the prefix
+        // (consuming its operand if any) and continue -- losing the prefix
+        // semantics but keeping the method decodable.
+        case ILOpCode::Volatile:
+        case ILOpCode::Readonly:
+        case ILOpCode::Tail:
+            break;  // no operand; prefix semantics lost but method continues
+        case ILOpCode::Constrained: {
+            std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
+            break;  // type token operand consumed; prefix semantics lost
+        }
+        case ILOpCode::Unaligned: {
+            std::uint8_t v = 0; if (!ReadU8(b, size, pos, v)) return DecodeOutcome::Bail; pos += 1;
+            break;
+        }
+
+        // ---- ldarga.s (short form: 1-byte index) ----
+        case ILOpCode::Ldarga_s: {
+            std::uint8_t idx = 0; if (!ReadU8(b, size, pos, idx)) return DecodeOutcome::Bail; pos += 1;
+            if (idx >= s.parameters.size()) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdLoca>(s.parameters[idx]))) return DecodeOutcome::Bail;
+            break;
+        }
+
+        // ---- ckfinite: a unary op on the top of stack (in-place) ----
+        case ILOpCode::Ckfinite: {
+            // ckfinite operates on the top of stack in-place; pop and re-push.
+            auto v = s.Pop(); if (!v) return DecodeOutcome::Bail;
+            // Model as a no-op wrapper for now (the full ILAst has a Ckfinite node).
+            if (!s.Push(std::move(v))) return DecodeOutcome::Bail;
+            break;
+        }
+
+        // ---- arglist: push the argument list handle (vararg methods) ----
+        case ILOpCode::Arglist: {
+            if (!s.Push(std::make_unique<LdTypeToken>("arglist"))) return DecodeOutcome::Bail;
+            break;
         }
 
         case ILOpCode::Leave: case ILOpCode::Leave_s:
