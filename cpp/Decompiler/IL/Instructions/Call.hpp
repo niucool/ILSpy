@@ -1,0 +1,75 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+// Call: a method invocation. Children are the arguments (in order); the method
+// is identified by a display name the IL reader fills in from the resolved
+// MethodDef/MemberRef token. DirectFlags = SideEffect | MayThrow.
+
+#pragma once
+
+#include "Decompiler/IL/ILInstruction.hpp"
+
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace ILSpy::Decompiler::IL {
+
+class Call : public ILInstruction {
+public:
+    std::string MethodName;  // "Namespace.Type::Method" (resolved by the IL reader)
+    std::vector<std::unique_ptr<ILInstruction>> Arguments;
+    StackType ReturnType = StackType::Unknown;
+
+    explicit Call(std::string method = std::string()) : ILInstruction(OpCode::Call), MethodName(std::move(method)) {}
+
+    InstructionFlags DirectFlags() const override {
+        return InstructionFlags::SideEffect | InstructionFlags::MayThrow;
+    }
+    StackType ResultType() const override { return ReturnType; }
+
+    int ChildCount() const override { return static_cast<int>(Arguments.size()); }
+    ILInstruction* GetChild(int i) const override {
+        return (i >= 0 && i < static_cast<int>(Arguments.size())) ? Arguments[i].get() : nullptr;
+    }
+
+    void AddArg(std::unique_ptr<ILInstruction> a) {
+        if (a) { a->Parent = this; a->ChildIndex = static_cast<int>(Arguments.size()); }
+        Arguments.push_back(std::move(a));
+    }
+
+    void WriteTo(std::string& out) const override {
+        out += "call ";
+        out += MethodName;
+        out += '(';
+        for (std::size_t i = 0; i < Arguments.size(); ++i) {
+            if (i) out += ", ";
+            if (Arguments[i]) Arguments[i]->WriteTo(out); else out += "(null)";
+        }
+        out += ')';
+    }
+protected:
+    std::unique_ptr<ILInstruction> SetChildRaw(int i, std::unique_ptr<ILInstruction> n) override {
+        if (i < 0 || i >= static_cast<int>(Arguments.size())) return n;
+        auto old = std::move(Arguments[i]);
+        Arguments[i] = std::move(n);
+        return old;
+    }
+};
+
+} // namespace ILSpy::Decompiler::IL

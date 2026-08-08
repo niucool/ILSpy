@@ -14,6 +14,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/TypeName_Test.cpp
     Decompiler/TypeSystem/SignatureDecoder_Test.cpp
     Decompiler/TypeSystem/TypeKindDerivation_Test.cpp
+    Decompiler/IL/ILAst_Test.cpp
 )
 target_link_libraries(ilspy_tests PRIVATE
     ILSpy::ilspy

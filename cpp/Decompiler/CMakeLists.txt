@@ -4,3 +4,4 @@
 add_subdirectory(Util)
 add_subdirectory(Metadata)
 add_subdirectory(TypeSystem)
+add_subdirectory(IL)
