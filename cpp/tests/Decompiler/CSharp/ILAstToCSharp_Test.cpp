@@ -41,6 +41,7 @@
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
@@ -364,6 +365,17 @@ TEST(ILAstToCSharp, ConstantTrueCatchFilterIsOmitted) {
     std::string text = ILAstToCSharp(*fn, "void", "M", "");
     EXPECT_NE(text.find("catch (System.Object E_5)"), std::string::npos) << text;
     EXPECT_EQ(text.find("when ("), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, RethrowEmitsBareThrow) {
+    auto block = std::make_unique<Block>();
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Rethrow>());
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("    throw;\n"), std::string::npos) << text;
 }
 
 TEST(ILAstToCSharp, EmptyBodyEmitsEmptyMethod) {

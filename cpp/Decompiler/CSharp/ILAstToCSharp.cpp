@@ -45,6 +45,7 @@
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
@@ -227,6 +228,9 @@ private:
                 Line(indent, "throw " + (th.Argument ? Expr(*th.Argument) : std::string("(rethrow)")) + ";");
                 return;
             }
+            case OpCode::Rethrow:
+                Line(indent, "throw;");
+                return;
             case OpCode::Leave: {
                 const auto& leave = static_cast<const Leave&>(inst);
                 if (leave.Value) Line(indent, "return " + Expr(*leave.Value) + ";");

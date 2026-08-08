@@ -30,6 +30,7 @@
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 
@@ -191,6 +192,99 @@ TEST(ReadIL, StfldUsesTargetThenValueStackOrder) {
     }
     EXPECT_GT(checkedStores, 100) << "too few setter stores found to trust the check";
     EXPECT_EQ(swappedStores, 0) << "stfld must pop value, then target";
+}
+
+TEST(ReadIL, BranchesCarryingStackValuesDecodeViaStackSlots) {
+    // A branch taken with values still pending on the evaluation stack
+    // (diamonds that merge a value, loop-carried temporaries) must not fail
+    // the whole method: the pending values flush into S_ stack-slot variables
+    // and the target block starts with them loaded. Distinct predecessors'
+    // slots for the same stack position merge into one variable.
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    int withStackSlots = 0;
+    int unresolved = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        fn->CheckInvariant(ILPhase::Normal);
+        bool hasSlot = false, hasBranch = false;
+        std::function<void(ILInstruction*)> walk = [&](ILInstruction* i) {
+            if (!i) return;
+            if (i->Op == OpCode::StLoc) {
+                auto* st = static_cast<StLoc*>(i);
+                if (st->Variable && st->Variable->Kind == VariableKind::StackSlot &&
+                    st->Variable->Name.rfind("S_", 0) == 0) {
+                    hasSlot = true;
+                }
+            }
+            if (i->Op == OpCode::Branch) {
+                hasBranch = true;
+                auto* br = static_cast<Branch*>(i);
+                if (br->HasOffset && !br->TargetBlock) ++unresolved;
+            }
+            for (int k = 0; k < i->ChildCount(); ++k) walk(i->GetChild(k));
+        };
+        walk(fn->Body.get());
+        if (hasSlot && hasBranch) ++withStackSlots;
+        if (withStackSlots > 50) break;
+    }
+    EXPECT_GT(withStackSlots, 10)
+        << "too few methods decode with merge stack slots (stack-merge missing?)";
+    EXPECT_EQ(unresolved, 0);
+}
+
+TEST(ReadIL, RethrowDecodesToTerminalNode) {
+    // `catch { throw; }` compiles to the rethrow opcode (FE 1A). Methods with
+    // rethrow must decode, with a Rethrow node ending its block.
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    int found = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto body = f.GetMethodBody(m.RVA);
+        if (!body.IsValid()) continue;
+        bool hasRethrow = false;
+        for (std::size_t i = 0; i + 1 < body.IL().size(); ++i) {
+            if (body.IL()[i] == 0xFE && body.IL()[i + 1] == 0x1A) { hasRethrow = true; break; }
+        }
+        if (!hasRethrow) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        fn->CheckInvariant(ILPhase::Normal);
+        bool sawRethrow = false;
+        std::function<void(ILInstruction*)> walk = [&](ILInstruction* i) {
+            if (!i) return;
+            if (i->Op == OpCode::Rethrow) sawRethrow = true;
+            for (int k = 0; k < i->ChildCount(); ++k) walk(i->GetChild(k));
+        };
+        walk(fn->Body.get());
+        EXPECT_TRUE(sawRethrow) << m.Name << " decoded but lost its rethrow";
+        if (sawRethrow) ++found;
+        if (found >= 5) break;
+    }
+    EXPECT_GE(found, 3) << "too few rethrow methods decode";
+}
+
+TEST(ReadIL, StackMergeRaisesDecodeCoverage) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    int decoded = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        if (ReadIL(f, m.Token, m.RVA)) ++decoded;
+    }
+    // 16684 bodies decoded before evaluation-stack merging and before the
+    // MemberRef/MethodSpec signature lookup landed; 17829 after. The gate keeps
+    // them from regressing.
+    EXPECT_GE(decoded, 17200) << "stack merge did not raise decode coverage";
 }
 
 TEST(ReadIL, InvalidInputsAreGraceful) {

@@ -41,6 +41,7 @@
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
+#include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
@@ -83,6 +84,15 @@ struct ReaderState {
     std::vector<ILVariablePtr> locals;
     StackType returnStackType = StackType::Void;
 
+    // Evaluation-stack merge state (method-wide): the input stack recorded for
+    // each block-start offset, slot-merge representatives, and every stack-slot
+    // variable created by flushes.
+    std::map<std::uint32_t, std::vector<ILVariablePtr>> incomingStacks;
+    std::map<ILVariable*, ILVariablePtr> slotRepresentative;
+    std::vector<ILVariablePtr> stackVarsCreated;
+    int nextStackSlot = 0;
+    bool mergeFailed = false;
+
     bool Push(std::unique_ptr<ILInstruction> inst) {
         if (!inst) return false;
         expressionStack.push_back(std::move(inst));
@@ -102,6 +112,90 @@ struct ReaderState {
         return nullptr;  // stack underflow -> caller bails
     }
 };
+
+// Commit pending expression-stack entries into fresh stack-slot variables, in
+// evaluation (push) order, so values can cross a control-flow boundary without
+// moving side effects past it.
+void FlushExpressionStack(ReaderState& s, Block* block) {
+    for (auto& expr : s.expressionStack) {
+        auto v = std::make_shared<ILVariable>();
+        v->Name = "S_" + std::to_string(s.nextStackSlot++);
+        v->Kind = VariableKind::StackSlot;
+        block->Add(std::make_unique<StLoc>(v, std::move(expr)));
+        s.currentStack.push_back(v);
+        s.stackVarsCreated.push_back(v);
+    }
+    s.expressionStack.clear();
+    // Flushing at a terminal runs after SetFinal; the final sits behind the
+    // instructions list in the child layout, so its ChildIndex tracks the new
+    // size.
+    if (block->FinalInstruction)
+        block->FinalInstruction->ChildIndex = static_cast<int>(block->Instructions.size());
+}
+
+// Follow the merge-representative chain for a stack-slot variable. Merges
+// always point an incoming variable at an already-recorded representative, so
+// chains stay short and deterministic (first-recorded wins).
+ILVariablePtr FindSlotRep(const ReaderState& s, ILVariablePtr v) {
+    ILVariablePtr found = v;
+    std::size_t hops = 0;
+    while (found) {
+        auto it = s.slotRepresentative.find(found.get());
+        if (it == s.slotRepresentative.end()) break;
+        if (it->second.get() == found.get()) break;
+        found = it->second;
+        if (++hops > s.slotRepresentative.size()) break;  // defensive
+    }
+    return found;
+}
+
+// Record/merge the outgoing evaluation stack at a control-flow edge targeting
+// the block starting at `target`. The first edge records the snapshot; later
+// edges unify their slots with the recorded representatives slot-wise
+// (compatible stack types only; the C# inserts a conversion StLoc for the
+// I4/I and F4/F8 pairs, we treat them as mergeable without the conversion).
+void MergeStackIntoTarget(ReaderState& s, std::uint32_t target,
+                          const std::vector<ILVariablePtr>& stack) {
+    auto it = s.incomingStacks.find(target);
+    if (it == s.incomingStacks.end()) {
+        s.incomingStacks[target] = stack;
+        return;
+    }
+    auto& recorded = it->second;
+    if (recorded.size() != stack.size()) {
+        s.mergeFailed = true;  // invalid IL: mismatched stack heights at a join
+        return;
+    }
+    for (std::size_t i = 0; i < stack.size(); ++i) {
+        ILVariablePtr rec = FindSlotRep(s, recorded[i]);
+        ILVariablePtr inc = stack[i];
+        if (rec.get() == inc.get()) continue;
+        StackType a = StackTypeOf(rec ? rec->Type : nullptr);
+        StackType t = StackTypeOf(inc ? inc->Type : nullptr);
+        bool mergeable = (a == t) || a == StackType::Unknown || t == StackType::Unknown ||
+                         (a == StackType::I4 && t == StackType::I) ||
+                         (a == StackType::I && t == StackType::I4) ||
+                         (a == StackType::F4 && t == StackType::F8) ||
+                         (a == StackType::F8 && t == StackType::F4);
+        if (!mergeable) {
+            s.mergeFailed = true;
+            return;
+        }
+        s.slotRepresentative[inc.get()] = rec;
+    }
+}
+
+// Replace merged stack-slot variables with their representatives across the
+// tree (loads, stores, address-ofs).
+void RemapMergedVariables(const ReaderState& s, ILInstruction* inst) {
+    if (!inst) return;
+    ILVariablePtr* slot = nullptr;
+    if (inst->Op == OpCode::StLoc) slot = &static_cast<StLoc*>(inst)->Variable;
+    else if (inst->Op == OpCode::LdLoc) slot = &static_cast<LdLoc*>(inst)->Variable;
+    else if (inst->Op == OpCode::LdLoca) slot = &static_cast<LdLoca*>(inst)->Variable;
+    if (slot && *slot) *slot = FindSlotRep(s, *slot);
+    for (int i = 0; i < inst->ChildCount(); ++i) RemapMergedVariables(s, inst->GetChild(i));
+}
 
 bool ReadU8(const std::uint8_t* b, std::size_t size, std::size_t pos, std::uint8_t& out) {
     if (pos >= size) return false; out = b[pos]; return true;
@@ -349,6 +443,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             auto v = std::make_shared<ILVariable>();
             v->Name = "dup_" + std::to_string(start);
             v->Kind = VariableKind::StackSlot;
+            s.stackVarsCreated.push_back(v);
             block->Add(std::make_unique<StLoc>(v, std::move(top)));
             if (!s.Push(std::make_unique<LdLoc>(v))) return DecodeOutcome::Bail;
             if (!s.Push(std::make_unique<LdLoc>(v))) return DecodeOutcome::Bail;
@@ -402,8 +497,8 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             return DecodeOutcome::Terminal;
         }
         case ILOpCode::Rethrow:
-            // Without EH support we cannot emit a correct Rethrow; bail.
-            return DecodeOutcome::Bail;
+            block->SetFinal(std::make_unique<Rethrow>());
+            return DecodeOutcome::Terminal;
 
         case ILOpCode::Nop:
         case ILOpCode::Break:
@@ -663,6 +758,8 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             bool isShort = (op == ILOpCode::Br_s);
             std::uint32_t target = 0;
             if (!ReadBranchTarget(b, size, pos, isShort, start, target)) return DecodeOutcome::Bail;
+            FlushExpressionStack(s, block);
+            MergeStackIntoTarget(s, target, s.currentStack);
             block->SetFinal(std::make_unique<Branch>(target));
             return DecodeOutcome::BranchInstr;
         }
@@ -687,6 +784,10 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
                 condition = std::make_unique<Comp>(std::move(cond), std::move(zero),
                                                    ComparisonKind::Equality, false);
             }
+            FlushExpressionStack(s, block);
+            MergeStackIntoTarget(s, target, s.currentStack);
+            if (pos < size)
+                MergeStackIntoTarget(s, static_cast<std::uint32_t>(pos), s.currentStack);
             block->SetFinal(std::make_unique<IfInstruction>(std::move(condition),
                                                            std::make_unique<Branch>(target)));
             return DecodeOutcome::BranchInstr;
@@ -698,6 +799,10 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         auto r = s.Pop(); auto l = s.Pop(); \
         if (!l || !r) return DecodeOutcome::Bail; \
         auto comp = std::make_unique<Comp>(std::move(l), std::move(r), ComparisonKind::kind, uns); \
+        FlushExpressionStack(s, block); \
+        MergeStackIntoTarget(s, target, s.currentStack); \
+        if (pos < size) \
+            MergeStackIntoTarget(s, static_cast<std::uint32_t>(pos), s.currentStack); \
         block->SetFinal(std::make_unique<IfInstruction>(std::move(comp), \
             std::make_unique<Branch>(target))); \
         return DecodeOutcome::BranchInstr; \
@@ -730,6 +835,10 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             }
             auto value = s.Pop();
             if (!value) return DecodeOutcome::Bail;
+            FlushExpressionStack(s, block);
+            for (auto t : targets) MergeStackIntoTarget(s, t, s.currentStack);
+            if (pos < size)
+                MergeStackIntoTarget(s, static_cast<std::uint32_t>(pos), s.currentStack);
             auto sw = std::make_unique<SwitchInstruction>(std::move(value));
             for (std::uint32_t i = 0; i < n; ++i) {
                 auto sec = std::make_unique<SwitchSection>();
@@ -850,6 +959,12 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             std::uint32_t target = 0;
             if (!ReadBranchTarget(b, size, pos, isShort, start, target)) return DecodeOutcome::Bail;
             if (target >= size) return DecodeOutcome::Bail;
+            // leave empties the evaluation stack (ECMA-335 III.4.18): pending
+            // values flush to preserve side effects, but the target receives an
+            // empty input stack (the C# clears currentStack before marking).
+            FlushExpressionStack(s, block);
+            static const std::vector<ILVariablePtr> emptyStack;
+            MergeStackIntoTarget(s, target, emptyStack);
             block->SetFinal(std::make_unique<Branch>(target));
             return DecodeOutcome::BranchInstr;
         }
@@ -1132,6 +1247,20 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
         if (eh.Kind == ExceptionHandlerKind::Filter && eh.ClassTokenOrFilterOffset < size)
             makeBlock(eh.ClassTokenOrFilterOffset);
     }
+    // Pre-record the handler/filter entry input stacks: the runtime pushes the
+    // exception object there (the C# StoreStackForOffset in
+    // PrepareBranchTargetsAndStacksForExceptionHandlers).
+    for (const auto& eh : body.Handlers()) {
+        auto it = handlerExceptionVar.find(eh.HandlerOffset);
+        if (it != handlerExceptionVar.end() && it->second)
+            s.incomingStacks.emplace(eh.HandlerOffset, std::vector<ILVariablePtr>{it->second});
+        if (eh.Kind == ExceptionHandlerKind::Filter) {
+            auto fit = handlerExceptionVar.find(eh.ClassTokenOrFilterOffset);
+            if (fit != handlerExceptionVar.end() && fit->second)
+                s.incomingStacks.emplace(eh.ClassTokenOrFilterOffset,
+                                         std::vector<ILVariablePtr>{fit->second});
+        }
+    }
 
     // Decode each block. The reader state is shared across blocks (parameters
     // and locals must be the same ILVariable instances method-wide); only the
@@ -1142,20 +1271,19 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
         s.expressionStack.clear();
         s.currentStack.clear();
         s.stackBase = 0;
-        // If this block is a catch/filter handler entry, seed the evaluation
-        // stack with the exception object the runtime pushes.
-        auto hev = handlerExceptionVar.find(static_cast<std::uint32_t>(blockStart));
-        if (hev != handlerExceptionVar.end()) {
-            // The exception object the runtime pushes is consumable input (the
-            // catch body typically stores it immediately), so it sits below
-            // stackBase: Pop may take it, and popping past it still bails.
-            s.currentStack.push_back(hev->second);
-        }
+        // Start from the block's recorded input stack (empty for the entry
+        // block; the exception slot for handler/filter entries; whatever the
+        // first predecessor merged in otherwise).
+        auto instack = s.incomingStacks.find(static_cast<std::uint32_t>(blockStart));
+        if (instack != s.incomingStacks.end()) s.currentStack = instack->second;
 
         while (pos < size) {
             // If this offset is a branch target AND we're not at the block start,
-            // end the block with an explicit fall-through Branch to it.
+            // end the block with an explicit fall-through Branch to it (merging
+            // the carried evaluation stack into the target's input stack).
             if (pos != blockStart && branchTargets.count(static_cast<std::uint32_t>(pos))) {
+                FlushExpressionStack(s, block);
+                MergeStackIntoTarget(s, static_cast<std::uint32_t>(pos), s.currentStack);
                 block->SetFinal(std::make_unique<Branch>(static_cast<std::uint32_t>(pos)));
                 makeBlock(static_cast<std::uint32_t>(pos));
                 break;
@@ -1165,7 +1293,11 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
             DecodeOutcome out = DecodeOne(file, s, block, containerPtr, op, b, size, pos, start);
             if (out == DecodeOutcome::Bail) return nullptr;
             if (out == DecodeOutcome::Terminal) {
-                break;  // ret/throw ended the block
+                // ret/throw/rethrow/endfinally/endfilter ended the block. Valid
+                // IL has no pending values left at this point; invalid IL does
+                // (the C# drops them) -- flush to preserve side effects anyway.
+                if (!s.expressionStack.empty()) FlushExpressionStack(s, block);
+                break;
             }
             if (out == DecodeOutcome::SwitchInstr) {
                 // Create blocks for every switch target (case + default). The
@@ -1215,9 +1347,8 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
                     if (pos < size && !byOffset.count(static_cast<std::uint32_t>(pos)))
                         makeBlock(static_cast<std::uint32_t>(pos));
                 }
-                // A non-empty expression stack at a branch means values cross the
-                // boundary; without stack merging we bail (degrade) for correctness.
-                if (!s.expressionStack.empty()) return nullptr;
+                // DecodeOne flushed the pending values into stack slots and
+                // merged the carried stack into the branch targets already.
                 break;
             }
         }
@@ -1228,6 +1359,10 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
         }
     }
 
+    // A merge conflict (mismatched stack heights/types at a join) means
+    // invalid or unsupported IL; degrade whole-method rather than guess.
+    if (s.mergeFailed) return nullptr;
+
     // Nest the flat blocks into exception-region containers (no-op ordering
     // pass for handler-less methods).
     BlockBuilder bb(body.Handlers(), handlerExceptionVar, static_cast<std::uint32_t>(size));
@@ -1236,18 +1371,26 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
     // Resolve Branch.TargetOffset -> Block* across the (now nested) tree.
     ResolveBranches(containerPtr, byOffset);
 
+    // Unify the merged stack slots and register the created variables.
+    if (!s.slotRepresentative.empty()) RemapMergedVariables(s, containerPtr);
+
     fn->Body = std::move(container);
     fn->Body->Parent = fn.get();
     fn->Body->ChildIndex = 0;
     for (auto& v : s.parameters) if (v) fn->Variables.push_back(v);
     for (auto& v : s.locals) if (v) fn->Variables.push_back(v);
-    // The catch/filter exception stack slots are function variables too (the
-    // filter seeding aliases the catch variable, so dedupe by pointer).
+    // The catch/filter exception stack slots and the merge stack slots are
+    // function variables too (merges alias slots, so dedupe by pointer after
+    // representative resolution).
     {
         std::set<ILVariable*> seen;
         for (const auto& [offset, v] : handlerExceptionVar) {
             (void)offset;
             if (v && seen.insert(v.get()).second) fn->Variables.push_back(v);
+        }
+        for (auto& v : s.stackVarsCreated) {
+            ILVariablePtr rep = FindSlotRep(s, v);
+            if (rep && seen.insert(rep.get()).second) fn->Variables.push_back(rep);
         }
     }
     fn->CheckInvariant(ILPhase::InILReader);

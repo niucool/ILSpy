@@ -23,6 +23,7 @@
 // arrays become ArrayType, and `this`-bearing methods are flagged IsInstance.
 // This is the bridge from the vendored winmd TypeSig to the port's IType.
 
+#include "Decompiler/Metadata/ILDisassembler.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
@@ -32,6 +33,7 @@
 #include <filesystem>
 #include <set>
 #include <string>
+#include <vector>
 
 static const char* FixturePath() {
 #if defined(_WIN32)
@@ -125,6 +127,108 @@ TEST(SignatureDecoder, ObjectEqualsIsInstanceReturningBoolean) {
         break;
     }
     EXPECT_TRUE(found) << "Object.Equals(object) : bool not found/decoded";
+}
+
+// Walk method bodies' IL and collect call/callvirt/newobj operand tokens from
+// the given metadata table (0x0A MemberRef, 0x2B MethodSpec, ...). If typeToken
+// is 0, scans the whole module (up to maxTokens tokens).
+static std::vector<std::uint32_t> CallOperandTokens(MetadataFile& file, std::uint32_t typeToken,
+                                                     std::uint32_t table, std::size_t maxTokens = 1000000) {
+    std::vector<std::uint32_t> tokens;
+    for (const auto& t : file.TypeDefs()) {
+        if (t.Name == "<Module>") continue;
+        if (typeToken != 0 && t.Token != typeToken) continue;
+        for (const auto& m : file.GetMethods(t.Token)) {
+            if (m.RVA == 0) continue;
+            auto body = file.GetMethodBody(m.RVA);
+            if (!body.IsValid()) continue;
+            auto disasm = ILSpy::Decompiler::Metadata::DisassembleIL(body.IL());
+            for (const auto& inst : disasm.Instructions) {
+                using ILSpy::Decompiler::Metadata::ILOpCode;
+                if (inst.OpCode != ILOpCode::Call && inst.OpCode != ILOpCode::Callvirt &&
+                    inst.OpCode != ILOpCode::Newobj) continue;
+                if (inst.OperandSize != 4) continue;
+                auto il = body.IL();
+                std::uint32_t at = inst.Offset + inst.Length - 4;
+                std::uint32_t tok = static_cast<std::uint32_t>(il[at]) |
+                    (static_cast<std::uint32_t>(il[at + 1]) << 8) |
+                    (static_cast<std::uint32_t>(il[at + 2]) << 16) |
+                    (static_cast<std::uint32_t>(il[at + 3]) << 24);
+                if ((tok & 0xFF000000u) == table) tokens.push_back(tok);
+                if (tokens.size() >= maxTokens) return tokens;
+            }
+        }
+    }
+    return tokens;
+}
+
+TEST(SignatureDecoder, MemberRefSignaturesDecode) {
+    // Method call sites may reference MemberRef tokens (table 0x0A), not
+    // MethodDef; GetMethodSignature must decode the MemberRef row's signature.
+    // mscorlib's MemberRefs target mostly instantiated generic parents (its
+    // same-module calls use MethodDef tokens directly). Discriminator:
+    // a member named ".ctor" ALWAYS returns void; a wrong row lookup returns a
+    // random method's return type.
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+
+    auto memberRefTokens = CallOperandTokens(file, 0, 0x0A000000u, 200);
+    ASSERT_FALSE(memberRefTokens.empty()) << "no MemberRef call sites found";
+
+    int withSig = 0;
+    int ctorsChecked = 0;
+    for (std::uint32_t tok : memberRefTokens) {
+        std::string name = file.ResolveTokenToString(tok);
+        auto sig = file.GetMethodSignature(tok);
+        ASSERT_TRUE(sig.has_value()) << "MemberRef " << name << " gives no signature";
+        ASSERT_NE(sig->ReturnType, nullptr);
+        ++withSig;
+        // A constructor MemberRef is always named ".ctor" (ECMA-335 I.10.5.1);
+        // TypeSpec-parented refs resolve to the bare member name.
+        if (name.size() >= 5 && name.compare(name.size() - 5, 5, ".ctor") == 0) {
+            EXPECT_EQ(sig->ReturnType->ReflectionName(), "System.Void")
+                << "wrong signature row for ctor " << name;
+            ++ctorsChecked;
+        }
+    }
+    EXPECT_GT(withSig, 20);
+    EXPECT_GT(ctorsChecked, 2) << "too few ctor MemberRefs sampled to trust the check";
+}
+
+TEST(SignatureDecoder, MethodSpecSignaturesDecodeViaDefinition) {
+    // Call sites to a generic method instantiation carry a MethodSpec token
+    // (table 0x2B); the signature is the underlying definition's signature.
+    // System.Array's generic BinarySearch<T> shim calls the MethodSpec for
+    // BinarySearch<T>(T[], int, int, T, IComparer<T>): 5 parameters, first one
+    // an SZArray.
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+
+    std::uint32_t arrayTok = 0;
+    for (const auto& t : file.TypeDefs()) {
+        if (t.Namespace == "System" && t.Name == "Array") { arrayTok = t.Token; break; }
+    }
+    ASSERT_NE(arrayTok, 0u);
+
+    auto specTokens = CallOperandTokens(file, arrayTok, 0x2B000000u);
+    ASSERT_FALSE(specTokens.empty()) << "no MethodSpec call sites found on System.Array";
+
+    bool saw5ParamArrayFirst = false;
+    for (std::uint32_t tok : specTokens) {
+        auto sig = file.GetMethodSignature(tok);
+        ASSERT_TRUE(sig.has_value()) << "MethodSpec token unresolved by GetMethodSignature";
+        ASSERT_NE(sig->ReturnType, nullptr);
+        if (sig->ParameterTypes.size() == 5 &&
+            sig->ParameterTypes[0]->Kind() == TypeKind::Array) {
+            saw5ParamArrayFirst = true;
+        }
+    }
+    EXPECT_TRUE(saw5ParamArrayFirst)
+        << "no 5-param MethodSpec with an array first parameter (BinarySearch<T> expected)";
 }
 
 TEST(SignatureDecoder, OutOfRangeTokenIsGraceful) {

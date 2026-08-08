@@ -36,9 +36,11 @@ implemented and green here. Everything else follows the phase plan in
   `BlockBuilder` nests try/handler/filter regions into
   `TryCatch`/`TryFinally`/`TryFault` containers (IL `leave` decodes as a plain
   branch out of the region; `endfinally`/`endfilter` leaves get the innermost
-  container). **16684** mscorlib method bodies decode (555 with nested EH),
-  zero dangling branches. The union-find stack-merge for branches that carry
-  values (and `rethrow`) plus the remaining ~70 instruction kinds remain.
+  container). Evaluation-stack values crossing a boundary flush to S_ stack
+  slots that unify across predecessors via a merge-representative map.
+  **17829** mscorlib method bodies decode (555+ with nested EH, 387 with merged
+  stack slots), zero dangling branches. The remaining ~70 instruction kinds
+  (and the ~40 IL transforms) remain.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: a minimal
   ILAst -> C#-text walker that closes the IL -> ILAst -> text pipeline
   end-to-end ahead of the real back end. Statements flatten into blocks,

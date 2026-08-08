@@ -260,13 +260,29 @@ MethodBody MetadataFile::GetMethodBody(std::uint32_t rva) const {
 
 std::optional<MethodSignature> MetadataFile::GetMethodSignature(std::uint32_t methodToken) const {
     if (!IsValid()) return std::nullopt;
-    // MethodDef tokens are table 0x06; rows are 1-based, the table is 0-indexed.
+    std::uint32_t table = methodToken >> 24;
     std::uint32_t row = methodToken & 0x00FFFFFFu;
-    if (row == 0 || row > impl_->db->MethodDef.size()) return std::nullopt;
     try {
-        auto m = impl_->db->MethodDef[row - 1];
-        auto sig = m.Signature();
-        DecodedMethodSignature d = DecodeMethodSignature(*impl_->db, sig);
+        // The signature blob lives on the MethodDef row (0x06) or the
+        // MemberRef row (0x0A); a MethodSpec (0x2B) unwraps to the underlying
+        // definition's signature (the instantiation only binds generic
+        // arguments, which do not change the parameter list).
+        std::optional<winmd::reader::MethodDefSig> sig;
+        if (table == 0x06 && row && row <= impl_->db->MethodDef.size()) {
+            sig = impl_->db->MethodDef[row - 1].Signature();
+        } else if (table == 0x0A && row && row <= impl_->db->MemberRef.size()) {
+            sig = impl_->db->MemberRef[row - 1].MethodSignature();
+        } else if (table == 0x2B && row && row <= impl_->db->MethodSpec.size()) {
+            // winmd's MethodSpec row has no public column accessors; read the
+            // MethodDefOrRef coded index (column 0) raw: bit 0 is the tag
+            // (0=MethodDef, 1=MemberRef), the rest is the 1-based row.
+            std::uint32_t v = impl_->db->MethodSpec.get_value<std::uint32_t>(row - 1, 0);
+            if (v == 0) return std::nullopt;
+            return GetMethodSignature(((v & 1) ? 0x0A000000u : 0x06000000u) | (v >> 1));
+        } else {
+            return std::nullopt;
+        }
+        DecodedMethodSignature d = DecodeMethodSignature(*impl_->db, *sig);
         MethodSignature out;
         out.ReturnType = std::move(d.ReturnType);
         out.ParameterTypes = std::move(d.ParameterTypes);
