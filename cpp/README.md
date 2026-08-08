@@ -38,9 +38,12 @@ implemented and green here. Everything else follows the phase plan in
   branch out of the region; `endfinally`/`endfilter` leaves get the innermost
   container). Evaluation-stack values crossing a boundary flush to S_ stack
   slots that unify across predecessors via a merge-representative map.
-  **25214** mscorlib method bodies decode (99.6%; 555+ with nested EH, 387+
-  with merged stack slots), zero dangling branches. The remaining ~70
-  instruction kinds (and the ~40 IL transforms) remain.
+  **25315 of 25315** mscorlib method bodies decode (100%; all 1651 EH methods
+  nested; merged stack slots for cross-block values), zero dangling branches.
+  Signatures decode via a hand-rolled ECMA-335 II.23.2 blob parser covering the
+  full element-type range (TypedReference, vararg sentinels, fn-ptr handled
+  approximately, custom modifiers), which winmd's WinRT-profile TypeSig rejects.
+  The remaining instruction kinds (and the ~40 IL transforms) follow Phase 4.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: a minimal
   ILAst -> C#-text walker that closes the IL -> ILAst -> text pipeline
   end-to-end ahead of the real back end. Statements flatten into blocks,

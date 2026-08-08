@@ -41,6 +41,7 @@
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
+#include "Decompiler/IL/Instructions/RefAnyType.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
@@ -437,7 +438,13 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             break;  // discard
         }
         case ILOpCode::Dup: {
-            if (s.expressionStack.empty()) return DecodeOutcome::Bail;
+            if (s.expressionStack.empty()) {
+                // Duplicating a committed stack-slot value is just another load
+                // of the slot (the C# Peek does the same via currentStack).
+                if (s.currentStack.empty()) return DecodeOutcome::Bail;
+                if (!s.Push(std::make_unique<LdLoc>(s.currentStack.back()))) return DecodeOutcome::Bail;
+                break;
+            }
             auto top = s.Pop();
             if (!top) return DecodeOutcome::Bail;
             auto v = std::make_shared<ILVariable>();
@@ -506,6 +513,14 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         case ILOpCode::Rethrow:
             block->SetFinal(std::make_unique<Rethrow>());
             return DecodeOutcome::Terminal;
+
+        // ---- refanytype: TypedReference -> its type handle ----
+        case ILOpCode::Refanytype: {
+            auto v = s.Pop();
+            if (!v) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<RefAnyType>(std::move(v)))) return DecodeOutcome::Bail;
+            break;
+        }
 
         case ILOpCode::Nop:
         case ILOpCode::Break:

@@ -16,25 +16,22 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-// Internal: bridges the vendored microsoft/winmd signature decoders
-// (TypeSig, MethodDefSig, ...) into the port's IType hierarchy. Not part of the
-// public metadata surface; included only by MetadataFile.cpp. Includes winmd,
-// so it pulls in <windows.h> on Windows -- keep it out of public headers.
+// ECMA-335 signature blob decoding (II.23.2) onto the IType model.
+// Method/field/type-specification signatures come in as raw blob bytes (read
+// off the winmd tables); malformed blobs report failure, never throw.
 
 #pragma once
 
-#include "Decompiler/TypeSystem/IType.hpp"
-#include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
-
 #include "Decompiler/Metadata/Ecma335/WinmdInclude.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
 
+#include <cstddef>
 #include <cstdint>
+#include <string_view>
 #include <vector>
 
 namespace ILSpy::Decompiler::Metadata {
 
-// A decoded method signature: the return type, parameter types, whether the
-// signature has an implicit `this` parameter, and the generic parameter count.
 struct DecodedMethodSignature {
     TypeSystem::ITypePtr ReturnType;
     std::vector<TypeSystem::ITypePtr> ParameterTypes;
@@ -42,30 +39,24 @@ struct DecodedMethodSignature {
     std::uint32_t GenericParameterCount = 0;
 };
 
-// Decode a TypeSig into an IType. Handles the ECMA-335 ELEMENT_TYPE_* set:
-// primitives -> KnownType, Class/ValueType -> resolved SimpleType (or KnownType
-// if the name matches), GenericInst -> ParameterizedType, SZArray/Array ->
-// ArrayType, ByRef (via Param/RetType) handled by the caller, Var/MVar ->
-// TypeParameter, Ptr -> PointerType. Unknown/unsupported elements fall back to
-// the UnknownType null object rather than throwing.
-TypeSystem::ITypePtr DecodeType(const winmd::reader::database& db,
-                                const winmd::reader::TypeSig& sig);
+// Build a known type when the [ns, name, arity] triple is a framework type,
+// else an unresolved SimpleType. Shared by the metadata row accessors.
+TypeSystem::ITypePtr MakeTypeRef(std::string_view ns, std::string_view name, int arity);
 
-// Resolve a TypeDefOrRef coded index to an IType. TypeDef/TypeRef become a
-// SimpleType (or KnownType if the name matches a known type); TypeSpec decodes
-// its signature blob recursively.
-TypeSystem::ITypePtr ResolveTypeDefOrRef(
-    const winmd::reader::database& db,
-    winmd::reader::coded_index<winmd::reader::TypeDefOrRef> cod);
+// Decode a method signature blob (MethodDef Signature, MemberRef Signature,
+// or the definition behind a MethodSpec). ok is set false on any malformed
+// content.
+DecodedMethodSignature DecodeMethodSignatureBlob(const winmd::reader::database& db,
+                                                 const std::uint8_t* data, std::size_t size,
+                                                 bool& ok);
 
-// Decode a MethodDefSig into a DecodedMethodSignature.
-DecodedMethodSignature DecodeMethodSignature(
-    const winmd::reader::database& db,
-    const winmd::reader::MethodDefSig& sig);
+// Decode a field signature blob (0x06 marker + type).
+TypeSystem::ITypePtr DecodeFieldSignatureBlob(const winmd::reader::database& db,
+                                              const std::uint8_t* data, std::size_t size);
 
-// Decode a FieldSig into its field type.
-TypeSystem::ITypePtr DecodeFieldSignature(
-    const winmd::reader::database& db,
-    const winmd::reader::FieldSig& sig);
+// Decode a TypeSpec signature blob (the content type: array, instantiation,
+// by-ref, ...).
+TypeSystem::ITypePtr DecodeTypeSpecBlob(const winmd::reader::database& db,
+                                        const std::uint8_t* data, std::size_t size);
 
 } // namespace ILSpy::Decompiler::Metadata

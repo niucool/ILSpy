@@ -106,6 +106,26 @@ std::vector<std::string> MetadataFile::TopTypeNames(std::size_t n) const {
     return result;
 }
 
+namespace {
+// Resolve a TypeDefOrRef coded index (from row accessors like TypeDef::Extends)
+// to the IType name model.
+ILSpy::Decompiler::TypeSystem::ITypePtr ResolveTypeDefOrRefIndex(
+        const winmd::reader::coded_index<winmd::reader::TypeDefOrRef>& cod) {
+    using TDR = winmd::reader::TypeDefOrRef;
+    if (!cod) return nullptr;
+    if (cod.type() == TDR::TypeDef) {
+        auto d = cod.TypeDef();
+        return MakeTypeRef(d.TypeNamespace(), d.TypeName(), 0);
+    }
+    if (cod.type() == TDR::TypeRef) {
+        auto r = cod.TypeRef();
+        return MakeTypeRef(r.TypeNamespace(), r.TypeName(), 0);
+    }
+    // TypeSpec bases do not occur in compiler-emitted TypeDef.Extends.
+    return nullptr;
+}
+} // namespace
+
 std::vector<MethodDefInfo> MetadataFile::MethodDefs() const {
     std::vector<MethodDefInfo> result;
     if (!IsValid()) return result;
@@ -136,7 +156,7 @@ std::vector<TypeDefInfo> MetadataFile::TypeDefs() const {
         info.Flags = t.Flags().value;
         auto extends = t.Extends();
         if (extends) {
-            try { info.BaseType = ResolveTypeDefOrRef(*impl_->db, extends); }
+            try { info.BaseType = ResolveTypeDefOrRefIndex(extends); }
             catch (const std::exception&) { info.BaseType = nullptr; }
         }
         // Derive Kind from the flags + base type (matches MetadataTypeDefinition.cs
@@ -209,8 +229,10 @@ ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::GetFieldSignature(std::uin
     std::uint32_t row = fieldToken & 0x00FFFFFFu;
     if (row == 0 || row > impl_->db->Field.size()) return nullptr;
     try {
-        auto f = impl_->db->Field[row - 1];
-        return DecodeFieldSignature(*impl_->db, f.Signature());
+        auto blobIndex = impl_->db->Field.get_value<std::uint32_t>(row - 1, 2);  // Signature blob
+        auto blob = impl_->db->get_blob(blobIndex);
+        return DecodeFieldSignatureBlob(*impl_->db, blob.begin(),
+                                        static_cast<std::size_t>(blob.end() - blob.begin()));
     } catch (const std::exception&) {
         return nullptr;
     }
@@ -263,15 +285,18 @@ std::optional<MethodSignature> MetadataFile::GetMethodSignature(std::uint32_t me
     std::uint32_t table = methodToken >> 24;
     std::uint32_t row = methodToken & 0x00FFFFFFu;
     try {
-        // The signature blob lives on the MethodDef row (0x06) or the
-        // MemberRef row (0x0A); a MethodSpec (0x2B) unwraps to the underlying
-        // definition's signature (the instantiation only binds generic
-        // arguments, which do not change the parameter list).
-        std::optional<winmd::reader::MethodDefSig> sig;
+        // The signature blob lives on the MethodDef row (0x06, column 4) or
+        // the MemberRef row (0x0A, column 2); a MethodSpec (0x2B) unwraps to
+        // the underlying definition's signature (the instantiation only binds
+        // generic arguments, which do not change the parameter list). Blobs
+        // decode with the hand-rolled ECMA-335 parser (SignatureDecoder.cpp):
+        // winmd's TypeSig window rejects TypedByRef / sentinel / fn-ptr /
+        // custom modifiers that framework signatures use.
+        std::uint32_t blobColumn;
         if (table == 0x06 && row && row <= impl_->db->MethodDef.size()) {
-            sig = impl_->db->MethodDef[row - 1].Signature();
+            blobColumn = impl_->db->MethodDef.get_value<std::uint32_t>(row - 1, 4);
         } else if (table == 0x0A && row && row <= impl_->db->MemberRef.size()) {
-            sig = impl_->db->MemberRef[row - 1].MethodSignature();
+            blobColumn = impl_->db->MemberRef.get_value<std::uint32_t>(row - 1, 2);
         } else if (table == 0x2B && row && row <= impl_->db->MethodSpec.size()) {
             // winmd's MethodSpec row has no public column accessors; read the
             // MethodDefOrRef coded index (column 0) raw: bit 0 is the tag
@@ -282,7 +307,11 @@ std::optional<MethodSignature> MetadataFile::GetMethodSignature(std::uint32_t me
         } else {
             return std::nullopt;
         }
-        DecodedMethodSignature d = DecodeMethodSignature(*impl_->db, *sig);
+        auto blob = impl_->db->get_blob(blobColumn);
+        bool ok = false;
+        DecodedMethodSignature d = DecodeMethodSignatureBlob(
+            *impl_->db, blob.begin(), static_cast<std::size_t>(blob.end() - blob.begin()), ok);
+        if (!ok) return std::nullopt;
         MethodSignature out;
         out.ReturnType = std::move(d.ReturnType);
         out.ParameterTypes = std::move(d.ParameterTypes);
@@ -290,7 +319,7 @@ std::optional<MethodSignature> MetadataFile::GetMethodSignature(std::uint32_t me
         out.GenericParameterCount = d.GenericParameterCount;
         return out;
     } catch (const std::exception&) {
-        // Malformed signature blob: degrade to std::nullopt rather than throwing,
+        // Malformed row/bind data: degrade to std::nullopt rather than throwing,
         // matching the decompiler's robustness tenet.
         return std::nullopt;
     }
@@ -365,16 +394,19 @@ ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::ResolveTypeToken(std::uint
     try {
         if (table == 0x01 && row && row <= impl_->db->TypeRef.size()) {  // TypeRef
             auto r = impl_->db->TypeRef[row - 1];
-            return ResolveTypeDefOrRef(*impl_->db,
-                winmd::reader::coded_index<winmd::reader::TypeDefOrRef>(
-                    &impl_->db->get_table<winmd::reader::TypeRef>(),
-                    winmd::reader::TypeDefOrRef::TypeRef, row - 1));
+            return MakeTypeRef(r.TypeNamespace(), r.TypeName(), 0);
         }
         if (table == 0x02 && row && row <= impl_->db->TypeDef.size()) {  // TypeDef
-            return ResolveTypeDefOrRef(*impl_->db,
-                winmd::reader::coded_index<winmd::reader::TypeDefOrRef>(
-                    &impl_->db->get_table<winmd::reader::TypeDef>(),
-                    winmd::reader::TypeDefOrRef::TypeDef, row - 1));
+            auto r = impl_->db->TypeDef[row - 1];
+            return MakeTypeRef(r.TypeNamespace(), r.TypeName(), 0);
+        }
+        if (table == 0x1B && row && row <= impl_->db->TypeSpec.size()) {  // TypeSpec
+            // Column 0 is the signature blob; decode the content type
+            // (SZArray / multi-dim array / generic instantiation / ptr & byref).
+            auto blobIndex = impl_->db->TypeSpec.get_value<std::uint32_t>(row - 1, 0);
+            auto blob = impl_->db->get_blob(blobIndex);
+            return DecodeTypeSpecBlob(*impl_->db, blob.begin(),
+                                      static_cast<std::size_t>(blob.end() - blob.begin()));
         }
     } catch (const std::exception&) {
         return nullptr;

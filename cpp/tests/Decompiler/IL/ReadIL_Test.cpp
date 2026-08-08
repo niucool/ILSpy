@@ -124,23 +124,52 @@ TEST(ReadIL, DecodesObjectEqualsWhichStraightLineRejects) {
     EXPECT_TRUE(foundBranching) << "no branching Equals overload on System.Object found";
 }
 
-TEST(ReadIL, SwitchAndExceptionHandlersBailGracefully) {
+TEST(ReadIL, ExceptionHandlerMethodsAllDecode) {
+    // EH methods decode to nested TryCatch/TryFinally/TryFault trees. mscorlib:
+    // every handler-bearing method must now decode (the historical bail-outs --
+    // filters, rethrow, TypedReference signatures -- are all implemented).
     const char* path = FixturePath();
     if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
     MetadataFile f(path);
     ASSERT_TRUE(f.IsValid());
-    // Any method with exception handlers must return nullptr, not throw or
-    // produce a wrong tree. Scan a sample.
-    int sawEhBail = 0;
+    int ehMethods = 0;
+    int ehDecoded = 0;
     for (const auto& m : f.MethodDefs()) {
         if (m.RVA == 0) continue;
         auto body = f.GetMethodBody(m.RVA);
         if (!body.IsValid() || body.Handlers().empty()) continue;
-        auto fn = ReadIL(f, m.Token, m.RVA);
-        if (!fn) ++sawEhBail;
-        if (sawEhBail > 20) break;
+        ++ehMethods;
+        if (ReadIL(f, m.Token, m.RVA)) ++ehDecoded;
     }
-    EXPECT_GT(sawEhBail, 0) << "expected at least one EH method to bail";
+    EXPECT_GT(ehMethods, 1000) << "fixture has fewer EH methods than expected";
+    EXPECT_EQ(ehDecoded, ehMethods) << "EH methods must all decode";
+}
+
+TEST(ReadIL, RefAnyTypeDecodes) {
+    // refanytype (FE 1D) pops a TypedReference, pushes its type handle.
+    // System.TypedReference methods use it.
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    bool found = false;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto body = f.GetMethodBody(m.RVA);
+        if (!body.IsValid()) continue;
+        bool hasRefany = false;
+        for (std::size_t i = 0; i + 1 < body.IL().size(); ++i) {
+            if (body.IL()[i] == 0xFE && body.IL()[i + 1] == 0x1D) { hasRefany = true; break; }
+        }
+        if (!hasRefany) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        ASSERT_NE(fn, nullptr) << "refanytype method must decode: " << m.Name;
+        fn->CheckInvariant(ILPhase::Normal);
+        EXPECT_NE(fn->ToString().find("refanytype"), std::string::npos) << m.Name;
+        found = true;
+        break;
+    }
+    EXPECT_TRUE(found) << "no refanytype method found in fixture";
 }
 
 TEST(ReadIL, StfldUsesTargetThenValueStackOrder) {

@@ -231,6 +231,103 @@ TEST(SignatureDecoder, MethodSpecSignaturesDecodeViaDefinition) {
         << "no 5-param MethodSpec with an array first parameter (BinarySearch<T> expected)";
 }
 
+TEST(SignatureDecoder, TypedReferenceSignaturesDecode) {
+    // TypedReference (ELEMENT_TYPE_TYPEDBYREF) is outside the WinMD signature
+    // subset the vendored parser covers; the decoder must handle it.
+    // System.ArgIterator::GetNextArg returns System.TypedReference.
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+
+    std::uint32_t argIterTok = 0;
+    for (const auto& t : file.TypeDefs()) {
+        if (t.Namespace == "System" && t.Name == "ArgIterator") { argIterTok = t.Token; break; }
+    }
+    ASSERT_NE(argIterTok, 0u);
+    bool found = false;
+    for (const auto& m : file.GetMethods(argIterTok)) {
+        if (m.Name != "GetNextArg") continue;
+        auto sig = file.GetMethodSignature(m.Token);
+        if (!sig) continue;
+        if (sig->ReturnType->ReflectionName() == "System.TypedReference") found = true;
+    }
+    EXPECT_TRUE(found) << "no GetNextArg signature decoded with a TypedReference return";
+}
+
+TEST(SignatureDecoder, VarargSignaturesWithSentinelDecode) {
+    // Vararg method signatures interleave a SENTINEL element before the
+    // optional parameters. The decoder must skip the sentinel and yield the
+    // full parameter list.
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+
+    // mscorlib's vararg Concat(Object,...,Object, __arglist) has >= 4 params.
+    bool foundWide = false;
+    int concatSigs = 0;
+    std::uint32_t stringTok = 0;
+    for (const auto& t : file.TypeDefs()) {
+        if (t.Namespace == "System" && t.Name == "String") { stringTok = t.Token; break; }
+    }
+    ASSERT_NE(stringTok, 0u);
+    for (const auto& m : file.GetMethods(stringTok)) {
+        if (m.Name != "Concat") continue;
+        auto body = file.GetMethodBody(m.RVA);
+        if (!body.IsValid()) continue;
+        bool usesArglist = false;
+        for (auto bt : body.IL()) if (bt == 0xFE) { usesArglist = true; break; }
+        (void)usesArglist;
+        auto sig = file.GetMethodSignature(m.Token);
+        if (!sig) continue;
+        ++concatSigs;
+        if (sig->ParameterTypes.size() >= 4) foundWide = true;
+    }
+    EXPECT_GT(concatSigs, 3);
+    EXPECT_TRUE(foundWide) << "the vararg Concat overload's signature must decode";
+}
+
+TEST(SignatureDecoder, TypeSpecOperandsResolve) {
+    // TypeSpec tokens (table 0x1B) appear as newarr/castclass/ldtoken operands
+    // in generic code; ResolveTypeToken must decode their signature blobs
+    // (arrays, instantiations) instead of returning nullptr.
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+
+    std::uint32_t arrayTok = 0;
+    for (const auto& t : file.TypeDefs()) {
+        if (t.Namespace == "System" && t.Name == "Array") { arrayTok = t.Token; break; }
+    }
+    ASSERT_NE(arrayTok, 0u);
+
+    int resolved = 0;
+    int total = 0;
+    for (const auto& m : file.GetMethods(arrayTok)) {
+        if (m.RVA == 0) continue;
+        auto body = file.GetMethodBody(m.RVA);
+        if (!body.IsValid()) continue;
+        auto disasm = ILSpy::Decompiler::Metadata::DisassembleIL(body.IL());
+        for (const auto& inst : disasm.Instructions) {
+            if (inst.OperandSize != 4) continue;  // token operands only
+            auto il = body.IL();
+            std::uint32_t at = inst.Offset + inst.Length - 4;
+            std::uint32_t tok = static_cast<std::uint32_t>(il[at]) |
+                (static_cast<std::uint32_t>(il[at + 1]) << 8) |
+                (static_cast<std::uint32_t>(il[at + 2]) << 16) |
+                (static_cast<std::uint32_t>(il[at + 3]) << 24);
+            if ((tok & 0xFF000000u) != 0x1B000000u) continue;
+            ++total;
+            auto type = file.ResolveTypeToken(tok);
+            if (type && type->Kind() != TypeKind::Unknown) ++resolved;
+        }
+    }
+    EXPECT_GT(total, 0) << "no TypeSpec operands found on System.Array methods";
+    EXPECT_GT(resolved, 0) << "no TypeSpec operand resolved to a real type";
+}
+
 TEST(SignatureDecoder, OutOfRangeTokenIsGraceful) {
     const char* path = FixturePath();
     if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
