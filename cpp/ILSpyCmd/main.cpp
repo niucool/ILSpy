@@ -22,6 +22,8 @@
 // body, optionally restricted to one type with -t. Token operands are resolved
 // to "Namespace.Type::Member" / "Namespace.Type" names.
 
+#include "Decompiler/IL/ILReader.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/Metadata/ILTextEmitter.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 
@@ -43,7 +45,9 @@ int main(int argc, char** argv) {
         ("assembly", "Assembly file to decompile", cxxopts::value<std::string>())
         ("il,ilcode", "Show IL for the assembly's methods", cxxopts::value<bool>()
             ->default_value("false")->implicit_value("true"))
-        ("t,type", "Restrict --il to a single type by full name (Namespace.Type)",
+        ("ilast", "Decode straight-line method bodies into an ILAst tree and dump it",
+            cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("t,type", "Restrict --il/--ilast to a single type by full name (Namespace.Type)",
             cxxopts::value<std::string>());
     options.parse_positional({ "assembly" });
 
@@ -64,10 +68,11 @@ int main(int argc, char** argv) {
 
     std::string asmPath = parsed["assembly"].as<std::string>();
     bool wantIl = parsed.count("il") != 0 && parsed["il"].as<bool>();
+    bool wantIlAst = parsed.count("ilast") != 0 && parsed["ilast"].as<bool>();
     std::string typeFilter = parsed.count("type") != 0 ? parsed["type"].as<std::string>() : "";
 
-    if (!wantIl) {
-        std::cout << "ilspycmd: only --il is implemented so far. See --help.\n";
+    if (!wantIl && !wantIlAst) {
+        std::cout << "ilspycmd: only --il and --ilast are implemented so far. See --help.\n";
         return 0;
     }
 
@@ -89,6 +94,17 @@ int main(int argc, char** argv) {
         auto methods = file.GetMethods(t.Token);
         for (const auto& m : methods) {
             if (m.RVA == 0) continue;  // abstract/extern/pinvoke-only
+            if (wantIlAst) {
+                // Decode the method body into an ILAst tree and dump it. Only
+                // straight-line bodies (no branches/switch/exception handlers)
+                // decode for now; others are skipped with a note.
+                auto fn = ILSpy::Decompiler::IL::ReadStraightLineIL(file, m.Token, m.RVA);
+                if (!fn) continue;
+                std::cout << ".method " << t.Namespace << "." << t.Name << "::" << m.Name
+                          << "  (ILAst)\n" << fn->ToString() << "\n\n";
+                ++methodsPrinted;
+                continue;
+            }
             auto body = file.GetMethodBody(m.RVA);
             if (!body.IsValid()) continue;
             std::cout << ".method " << t.Namespace << "." << t.Name << "::" << m.Name
