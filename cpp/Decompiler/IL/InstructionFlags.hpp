@@ -54,6 +54,26 @@ inline bool HasFlag(InstructionFlags f, InstructionFlags flag) {
 
 // Port of SemanticHelper.CombineBranches: the endpoint of a conditional is
 // unreachable only if BOTH branches are unreachable.
+// Port of SemanticHelper.IsPure: an instruction is pure if it has no side
+// effects, no throws, no branches, no writes (reading locals and internal
+// control flow are fine).
+inline bool IsPure(InstructionFlags f) {
+    constexpr std::uint32_t pureMask =
+        static_cast<std::uint32_t>(InstructionFlags::MayReadLocals) |
+        static_cast<std::uint32_t>(InstructionFlags::ControlFlow);
+    return (static_cast<std::uint32_t>(f) & ~pureMask) == 0;
+}
+
+// Port of SemanticHelper.MayReorder (flag-level approximation): two
+// instructions can be reordered iff at least one is pure and neither writes a
+// variable the other reads.
+inline bool MayReorder(InstructionFlags a, InstructionFlags b) {
+    if (!IsPure(a) && !IsPure(b)) return false;
+    if (HasFlag(a, InstructionFlags::MayReadLocals) && HasFlag(b, InstructionFlags::MayWriteLocals)) return false;
+    if (HasFlag(b, InstructionFlags::MayReadLocals) && HasFlag(a, InstructionFlags::MayWriteLocals)) return false;
+    return true;
+}
+
 inline InstructionFlags CombineBranches(InstructionFlags trueFlags, InstructionFlags falseFlags) {
     constexpr InstructionFlags andCombined = InstructionFlags::EndPointUnreachable;
     InstructionFlags union_ = trueFlags | falseFlags;

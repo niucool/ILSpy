@@ -24,6 +24,7 @@ add_executable(ilspy_tests
     Decompiler/IL/ControlFlowSimplification_Test.cpp
     Decompiler/IL/ControlFlowGraph_Test.cpp
     Decompiler/FlowAnalysis/Dominance_Test.cpp
+    Decompiler/IL/ILInlining_Test.cpp
 )
 target_link_libraries(ilspy_tests PRIVATE
     ILSpy::ilspy

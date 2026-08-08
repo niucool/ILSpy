@@ -49,11 +49,14 @@ implemented and green here. Everything else follows the phase plan in
   (`ControlFlow/VariableUsage`), the pipeline's first transform
   `ControlFlowSimplification` (branch-chain collapse, dead stack-slot store
   removal, debug return-block inlining, branch-to-leave folding, single-edge
-  block merging), and the FlowAnalysis foundation (`ControlFlowNode`,
-  `Dominance` -- Cooper-Harvey-Kennedy dominators, `ControlFlowGraph` --
-  per-container CFG with HasReachableExit). The CLI applies CFS before the
-  C# seed. Next per `GetILTransforms()`: SplitVariables (needs reaching-
-  definitions dataflow), ILInlining, LoopDetection, ConditionDetection, ...
+  block merging), `ILInlining` (single-use variable inlining + dead pure
+  store removal -- the third transform, pulled forward because it works on
+  the per-variable usage counts we already compute), and the FlowAnalysis
+  foundation (`ControlFlowNode`, `Dominance` -- Cooper-Harvey-Kennedy
+  dominators, `ControlFlowGraph` -- per-container CFG with HasReachableExit).
+  The CLI applies CFS + ILInlining before the C# seed. Next per
+  `GetILTransforms()`: SplitVariables (needs reaching-definitions dataflow),
+  LoopDetection, ConditionDetection, ...
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: a minimal
   ILAst -> C#-text walker that closes the IL -> ILAst -> text pipeline
   end-to-end ahead of the real back end. Statements flatten into blocks,
