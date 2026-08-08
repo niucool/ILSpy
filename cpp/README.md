@@ -10,15 +10,39 @@ The *what and why* of the port lives in [`../PORT_PLAN.md`](../PORT_PLAN.md); th
 
 ## Status
 
-Phase 0 (scaffolding) and the start of Phase 1 (the ECMA-335 metadata baseline)
-are implemented here. Everything else follows the phase plan in `PORT_PLAN.md`:
+Phase 0, the bulk of Phase 1 (metadata), the start of Phase 2 (type system),
+and the start of Phase 3 (the ILAst model + a straight-line IL reader) are
+implemented and green here. Everything else follows the phase plan in
+`PORT_PLAN.md`:
 
 - **Phase 0** -- build system, `Util/` primitives (UTF-8/16, `Span`, `ImmutableStack`),
   the three targets, and a Google Test driver. DONE.
-- **Phase 1** -- `Decompiler/Metadata/` on the vendored `microsoft/winmd` baseline,
-  plus the method-body / debug-table / WebCIL / bundle gap fills. STARTED
-  (winmd vendored + `MetadataFile` adapter + smoke test).
-- Phases 2-11 -- per `PORT_PLAN.md`.
+- **Phase 1** -- `Decompiler/Metadata/` on the vendored `microsoft/winmd` ECMA-335
+  baseline: method-body decoding (ECMA-335 II.25.4 tiny/fat + exception handlers),
+  signature decoding (Type/Method/Field -> IType), the entity surface (TypeDef/
+  Method/Field/Property + base types + custom attributes + TypeKind derivation),
+  token resolution, and an IL text disassembler. DONE except: Portable PDB debug
+  tables, WebCIL, single-file bundles, the assembly resolver (`.deps.json`).
+- **Phase 2** -- `Decompiler/TypeSystem/`: naming primitives (`TopLevelTypeName`,
+  `FullTypeName`), `KnownTypeCode` (full 60-entry table), the `IType` hierarchy
+  (`KnownType`/`SimpleType`/`ParameterizedType`/`ArrayType`/`ByReferenceType`/
+  `PointerType`/`TypeParameter`/`SpecialType`), `DeriveTypeKind`. STARTED (the full
+  entity layer, `ICompilation`/`MetadataModule`, interning remain).
+- **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
+  verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
+  `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with
+  `CheckInvariant`, `Block`/`BlockContainer`/`ILFunction`, ~30 instruction kinds)
+  and a **straight-line IL reader** (`ReadStraightLineIL`) that decodes a method
+  body into an ILFunction tree via the stack simulation. **11208** mscorlib method
+  bodies decode. The full worklist/union-find/BlockBuilder reader (branches,
+  switch, exception handlers) and the remaining ~70 instruction kinds remain.
+- Phases 4-11 (IL transforms, C# AST + resolver + output, disassembler output,
+  orchestration, ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
+  `PORT_PLAN.md`.
+
+The CLI does `<assembly> --il [-t Type]` (IL text disassembly) and
+`<assembly> --ilast [-t Type]` (decode straight-line bodies to an ILAst tree
+and dump it) end-to-end today; C# output is Phase 5.
 
 ## Prerequisites
 
