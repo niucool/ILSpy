@@ -22,15 +22,19 @@
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/Conv.hpp"
+#include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/StackTypeOf.hpp"
 #include "Decompiler/Metadata/ILOpCodes.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
@@ -38,6 +42,7 @@
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -317,6 +322,190 @@ std::unique_ptr<ILFunction> ReadStraightLineIL(const MetadataFile& file,
             case ILOpCode::Break:
                 // No-op prefixes; ignore.
                 break;
+
+            // ---- 64-bit and float constants ----
+            case ILOpCode::Ldc_i8: {
+                if (pos + 8 > size) return nullptr;
+                std::int64_t v = 0;
+                for (int i = 0; i < 8; ++i)
+                    v |= static_cast<std::int64_t>(b[pos + i]) << (8 * i);
+                pos += 8;
+                if (!s.Push(std::make_unique<LdcI8>(v))) return nullptr;
+                break;
+            }
+            case ILOpCode::Ldc_r4: {
+                if (pos + 4 > size) return nullptr;
+                std::uint32_t u = static_cast<std::uint32_t>(b[pos])
+                    | (static_cast<std::uint32_t>(b[pos + 1]) << 8)
+                    | (static_cast<std::uint32_t>(b[pos + 2]) << 16)
+                    | (static_cast<std::uint32_t>(b[pos + 3]) << 24);
+                pos += 4;
+                float fv; std::memcpy(&fv, &u, sizeof(fv));
+                if (!s.Push(std::make_unique<LdcF4>(fv))) return nullptr;
+                break;
+            }
+            case ILOpCode::Ldc_r8: {
+                if (pos + 8 > size) return nullptr;
+                std::uint64_t u = 0;
+                for (int i = 0; i < 8; ++i)
+                    u |= static_cast<std::uint64_t>(b[pos + i]) << (8 * i);
+                pos += 8;
+                double dv; std::memcpy(&dv, &u, sizeof(dv));
+                if (!s.Push(std::make_unique<LdcF8>(dv))) return nullptr;
+                break;
+            }
+
+            // ---- more variable ops ----
+            case ILOpCode::Ldloc_s: {
+                std::uint8_t idx = 0; if (!ReadU8(b, size, pos, idx)) return nullptr; pos += 1;
+                if (idx >= s.locals.size()) s.locals.resize(idx + 1);
+                if (!s.locals[idx]) {
+                    auto v = std::make_shared<ILVariable>();
+                    v->Name = "V_" + std::to_string(idx);
+                    v->Kind = VariableKind::Local; v->Index = idx;
+                    s.locals[idx] = v;
+                }
+                if (!s.Push(std::make_unique<LdLoc>(s.locals[idx]))) return nullptr;
+                break;
+            }
+            case ILOpCode::Stloc_s: {
+                std::uint8_t idx = 0; if (!ReadU8(b, size, pos, idx)) return nullptr; pos += 1;
+                if (idx >= s.locals.size()) s.locals.resize(idx + 1);
+                if (!s.locals[idx]) {
+                    auto v = std::make_shared<ILVariable>();
+                    v->Name = "V_" + std::to_string(idx);
+                    v->Kind = VariableKind::Local; v->Index = idx;
+                    s.locals[idx] = v;
+                }
+                auto value = s.Pop();
+                if (!value) return nullptr;
+                block->Add(std::make_unique<StLoc>(s.locals[idx], std::move(value)));
+                break;
+            }
+            case ILOpCode::Ldloca_s: {
+                std::uint8_t idx = 0; if (!ReadU8(b, size, pos, idx)) return nullptr; pos += 1;
+                if (idx >= s.locals.size()) s.locals.resize(idx + 1);
+                if (!s.locals[idx]) {
+                    auto v = std::make_shared<ILVariable>();
+                    v->Name = "V_" + std::to_string(idx);
+                    v->Kind = VariableKind::Local; v->Index = idx;
+                    s.locals[idx] = v;
+                }
+                if (!s.Push(std::make_unique<LdLoca>(s.locals[idx]))) return nullptr;
+                break;
+            }
+            case ILOpCode::Ldarg: {
+                std::uint16_t idx = 0; if (!ReadU16(b, size, pos, idx)) return nullptr; pos += 2;
+                if (idx >= s.parameters.size()) return nullptr;
+                if (!s.Push(std::make_unique<LdLoc>(s.parameters[idx]))) return nullptr;
+                break;
+            }
+            case ILOpCode::Ldarga: {
+                std::uint16_t idx = 0; if (!ReadU16(b, size, pos, idx)) return nullptr; pos += 2;
+                if (idx >= s.parameters.size()) return nullptr;
+                if (!s.Push(std::make_unique<LdLoca>(s.parameters[idx]))) return nullptr;
+                break;
+            }
+            case ILOpCode::Starg: case ILOpCode::Starg_s: {
+                std::uint16_t idx = 0;
+                if (op == ILOpCode::Starg_s) {
+                    std::uint8_t i8 = 0; if (!ReadU8(b, size, pos, i8)) return nullptr; pos += 1; idx = i8;
+                } else {
+                    if (!ReadU16(b, size, pos, idx)) return nullptr; pos += 2;
+                }
+                if (idx >= s.parameters.size()) return nullptr;
+                auto value = s.Pop();
+                if (!value) return nullptr;
+                block->Add(std::make_unique<StLoc>(s.parameters[idx], std::move(value)));
+                break;
+            }
+
+            // ---- binary arithmetic / bitwise / shift ----
+            // Helper: pop two, build a BinaryNumericInstruction, push.
+#define IL_BIN(opc, oper) \
+    case ILOpCode::opc: { \
+        auto r = s.Pop(); auto l = s.Pop(); \
+        if (!l || !r) return nullptr; \
+        if (!s.Push(std::make_unique<BinaryNumericInstruction>(std::move(l), std::move(r), \
+            BinaryNumericOperator::oper, StackType::I4))) return nullptr; \
+        break; \
+    }
+                IL_BIN(Add, Add)
+                IL_BIN(Add_ovf, Add)
+                IL_BIN(Add_ovf_un, Add)
+                IL_BIN(Sub, Sub)
+                IL_BIN(Sub_ovf, Sub)
+                IL_BIN(Sub_ovf_un, Sub)
+                IL_BIN(Mul, Mul)
+                IL_BIN(Mul_ovf, Mul)
+                IL_BIN(Mul_ovf_un, Mul)
+                IL_BIN(Div, Div)
+                IL_BIN(Div_un, Div)
+                IL_BIN(Rem, Rem)
+                IL_BIN(Rem_un, Rem)
+                IL_BIN(And, BitAnd)
+                IL_BIN(Or, BitOr)
+                IL_BIN(Xor, BitXor)
+                IL_BIN(Shl, ShiftLeft)
+                IL_BIN(Shr, ShiftRight)
+                IL_BIN(Shr_un, ShiftRight)
+#undef IL_BIN
+
+            // ---- comparisons (ceq/cgt/clt + .un) ----
+#define IL_CMP(opc, kind, uns) \
+    case ILOpCode::opc: { \
+        auto r = s.Pop(); auto l = s.Pop(); \
+        if (!l || !r) return nullptr; \
+        if (!s.Push(std::make_unique<Comp>(std::move(l), std::move(r), \
+            ComparisonKind::kind, uns))) return nullptr; \
+        break; \
+    }
+                IL_CMP(Ceq, Equality, false)
+                IL_CMP(Cgt, GreaterThan, false)
+                IL_CMP(Cgt_un, GreaterThan, true)
+                IL_CMP(Clt, LessThan, false)
+                IL_CMP(Clt_un, LessThan, true)
+#undef IL_CMP
+
+            // ---- conversions ----
+#define IL_CONV(opc, target) \
+    case ILOpCode::opc: { \
+        auto v = s.Pop(); \
+        if (!v) return nullptr; \
+        if (!s.Push(std::make_unique<Conv>(std::move(v), StackType::target, false))) return nullptr; \
+        break; \
+    }
+                IL_CONV(Conv_i1, I4)
+                IL_CONV(Conv_i2, I4)
+                IL_CONV(Conv_i4, I4)
+                IL_CONV(Conv_u1, I4)
+                IL_CONV(Conv_u2, I4)
+                IL_CONV(Conv_u4, I4)
+                IL_CONV(Conv_i8, I8)
+                IL_CONV(Conv_u8, I8)
+                IL_CONV(Conv_r4, F4)
+                IL_CONV(Conv_r8, F8)
+                IL_CONV(Conv_i, I)
+                IL_CONV(Conv_u, I)
+                IL_CONV(Conv_r_un, F8)
+#undef IL_CONV
+
+            // ---- dup: push a copy of the top ----
+            case ILOpCode::Dup: {
+                if (s.expressionStack.empty()) return nullptr;
+                // Shallow copy via WriteTo/clone is not available; duplicate by
+                // taking the top and pushing it twice would double-own. Instead,
+                // store the top into a fresh anonymous local and load it twice.
+                auto top = s.Pop();
+                if (!top) return nullptr;
+                auto v = std::make_shared<ILVariable>();
+                v->Name = "dup_" + std::to_string(start);
+                v->Kind = VariableKind::StackSlot;
+                block->Add(std::make_unique<StLoc>(v, std::move(top)));
+                if (!s.Push(std::make_unique<LdLoc>(v))) return nullptr;
+                if (!s.Push(std::make_unique<LdLoc>(v))) return nullptr;
+                break;
+            }
 
             default: {
                 // Unsupported (branches, switch, conv.*, binary ops, ldfld, ...) or
