@@ -11,5 +11,6 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/VariableUsage.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/ControlFlowSimplification.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/ControlFlowGraph.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/LoopDetection.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/ILInlining.cpp
 )

@@ -24,6 +24,7 @@
 
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
 #include "Decompiler/IL/ControlFlow/ControlFlowSimplification.hpp"
+#include "Decompiler/IL/ControlFlow/LoopDetection.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
@@ -186,6 +187,7 @@ int main(int argc, char** argv) {
                 ILSpy::Decompiler::IL::ILTransformContext transformContext;
                 ILSpy::Decompiler::IL::ControlFlowSimplification().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::ILInlining().Run(*fn, transformContext);
+                ILSpy::Decompiler::IL::LoopDetection().Run(*fn, transformContext);
                 fn->CheckInvariant(ILSpy::Decompiler::IL::ILPhase::Normal);
                 std::string returnType = "void";
                 std::string paramDecl;
