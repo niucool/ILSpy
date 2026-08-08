@@ -394,9 +394,17 @@ differs: `pe-parse` is replaced by the winmd baseline (which reads the PE contai
 | PDB (Windows legacy) | Mono.Cecil.Pdb | deferred / LLVM or hand-written | n/a |
 | Tests | xUnit/NUnit | **gtest** (vcpkg) | yes |
 
-Net vcpkg dependencies (final): `nlohmann-json`, `plog`, `lz4`, `miniz`, `cxxopts`, `gtest`.
-Plus the vendored `microsoft/winmd` headers (not a vcpkg package). `pe-parse`, `brotli`, `zlib`,
-`re2`, and `cli11` are all **not** used.
+Net vcpkg dependencies (final): `nlohmann-json`, `plog`, `lz4`, `miniz`, `cxxopts`,
+`gtest`. Plus the vendored `microsoft/winmd` headers (not a vcpkg package). `pe-parse`,
+`brotli`, `zlib`, `re2`, and `cli11` are all **not** used.
+
+Note: during initial bring-up, `miniz` was made **optional** (it is unused until
+Phase 7/8's deflate features) and moved behind a `deflate` vcpkg manifest feature,
+because the vcpkg miniz source download hit an environment SSL/proxy error. It
+becomes a hard dependency again when the first deflate call site lands. See
+decision D12; the implemented `cpp/CMakeLists.txt` and `cpp/vcpkg.json` are
+authoritative where they differ from the CMake sketch in section 8 (e.g.
+`find_package(lz4)` + `lz4::lz4`, not `unofficial-lz4`).
 
 ---
 
@@ -880,5 +888,12 @@ A running record of the choices made against this plan, with rationale. Seed ent
 | D9 | Use `miniz` (not zlib) for deflate | plan | miniz covers deflate/inflate with compression levels (the full DeflateStream surface); smaller footprint |
 | D10 | Use `std::regex` (not RE2); add no regex library | plan | core patterns are simple, no backreferences; winmd also uses std::regex |
 | D11 | Keep `plog` for logging (not a minimal `std::clog` logger) | plan | preferred over `std::clog`; the C# uses no logging framework (only sparse `Debug.WriteLine`), but plog gives the C++ engine a structured, leveled, cross-platform log sink |
+| D12 | Defer `miniz` from the default vcpkg manifest (optional `find_package`); make REQUIRED at Phase 7/8 | bring-up | miniz is unused until deflate (Portable PDB writes, `--dump-package`); its vcpkg source download hit an environment SSL/proxy error. Move it behind a `deflate` manifest feature so Phase 0-6 build cleanly |
+| D13 | Use the Visual Studio 2026 generator (preset `windows-vs2026`) as the primary Windows build; keep Ninja as an alternative; retire VS 2017 | bring-up | VS 2026 Insiders (MSVC 14.51 / `cl` 19.51, Windows SDK 10.0.26100.0) is installed at `C:\Program Files\Microsoft Visual Studio\18\Insiders`. The VS 2026 generator produces a modern `ilspy.slnx` solution and picks the installed Windows 10 SDK itself (no dev-prompt needed), avoiding the VS 2017 generator's hard default to the missing Windows SDK 8.1 (MSB8036). Phase 0 verified green on VS 2026: 11/11 tests pass. The VS 2017 preset is kept only as a legacy fallback.
+| D14 | Phase 0 (scaffolding + `Util` primitives) and the Phase 1 start (winmd vendored + `MetadataFile` adapter) are implemented and green | bring-up | 11/11 gtest cases pass (9 `Util_*` + 2 `Metadata_Smoke`, the latter parsing `mscorlib.dll` via winmd and gracefully rejecting a non-CLI file). Phases 2-11 remain per the plan |
+| D15 | Phase 1 method-body decoder implemented on top of the winmd baseline | bring-up | Filled the first Phase 1 gap (winmd is metadata-only): `MetadataFile::GetMethodBody(rva)` + `MethodDefs()` decode ECMA-335 II.25.4 tiny/fat headers, IL bytes by RVA, local-var-sig token, and exception-handler clauses against `mscorlib.dll`. TDD via a throwaway raw-byte diagnostic confirmed the real layout: `CorILMethod_Sect_EHTable = 0x01` (not the 0x18 some references cite), `DataSize` INCLUDES the 4-byte section header, small clauses are 12 bytes with BYTE-sized `TryLength`/`HandlerLength`, fat clauses are 24-byte DWORDs. 14/14 gtest cases pass on VS 2026 |
+| D16 | Phase 1/2 signature decoder + core type representation implemented | bring-up | Ported `TypeKind`, `KnownTypeCode` (full 60-entry table), `TopLevelTypeName`, `FullTypeName`, and a minimal `IType` hierarchy (`KnownType`/`SimpleType`/`ParameterizedType`/`ArrayType`/`ByReferenceType`/`PointerType`/`TypeParameter`/`SpecialType`). `SignatureDecoder` bridges winmd `TypeSig`/`MethodDefSig` to `IType`; `MetadataFile::GetMethodSignature(token)` decodes real `mscorlib` signatures (instance `Object.Equals(object):bool`, generic instantiations, arrays, primitives). 23/23 gtest cases pass. winmd includes routed through `Ecma335/WinmdInclude.hpp` to disable its WinMD-only `XLANG_ASSERT` (e.g. the TypedByRef-in-ParamSig assert) without editing vendored headers |
+| D17 | IL opcode tables + minimal disassembler implemented | bring-up | Ported `OperandType` and `ILOpCodes` (the 287-entry operand-type and display-name tables extracted verbatim from the C# source via script, avoiding transcription errors). `ILDisassembler` walks a method body's IL bytes, decoding opcodes (single- and two-byte) and sizing operands (Switch read as n + n*4). Tested against `mscorlib`: the walk consumes exactly CodeSize bytes for >90% of bodies, and ret/call/ldstr/switch/newobj all appear. 25/25 gtest cases pass. This is the core of Phase 6's disassembler and a prerequisite for Phase 3's ILReader |
+| D18 | Metadata entity surface (Phase 2 MetadataModule bridge) implemented | bring-up | `MetadataFile::TypeDefs()` (with resolved base types), `GetMethods/GetFields/GetProperties(typeToken)`, and `GetFieldSignature(fieldToken)` walk winmd's TypeDef member-list ranges (MethodList/FieldList/PropertyList) and resolve tokens. `DecodeFieldSignature` added. Tested against `mscorlib`: System.Object has no base, System.String derives from Object, Object's methods include Equals/ToString/GetType/MemberwiseClone, and String's char fields decode to System.Char. 29/29 gtest cases pass. Range iterators dereference to row values (`(*it).` not `it->`); empty coded_index (no base) detected via `explicit operator bool` |
 
 Append rows as decisions are taken during implementation.

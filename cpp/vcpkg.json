@@ -1,0 +1,21 @@
+{
+  "name": "ilspy",
+  "version": "1.0.0",
+  "description": "C++ port of the ILSpy decompiler engine (core + CLI). See PORT_PLAN.md and MIRROR_LAYOUT_REORGANIZATION.md.",
+  "homepage": "https://github.com/icsharpcode/ILSpy",
+  "license": "MIT",
+  "dependencies": [
+    "nlohmann-json",
+    "plog",
+    "lz4",
+    "cxxopts",
+    "gtest"
+  ],
+  "features": {
+    "deflate": {
+      "description": "Deflate compression (Portable PDB writes, --dump-package). Needed from Phase 7/8. Not in the default deps because the vcpkg miniz source download hit an environment SSL/proxy issue during initial bring-up; add when the first deflate call site lands.",
+      "dependencies": ["miniz"]
+    }
+  },
+  "builtin-baseline": "a51bb4d1434e6d0927ff79db8033bed8522b85df"
+}

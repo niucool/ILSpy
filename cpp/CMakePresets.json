@@ -1,0 +1,59 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 15, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "windows-vs2026",
+      "description": "Windows + Visual Studio 2026 generator (MSVC 14.5x, x64), vcpkg manifest deps. Produces a .sln solution. Requires VCPKG_ROOT; CMAKE_SYSTEM_VERSION pins the installed Windows 10 SDK so the generator does not fall back to a missing older one.",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET": "x64-windows",
+        "CMAKE_SYSTEM_VERSION": "10.0.26100.0"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "windows-msvc2017",
+      "description": "Windows + Visual Studio 2017 generator, x64, vcpkg manifest deps. Requires VCPKG_ROOT. (Legacy; VS 2017 hard-defaults to the often-missing Windows SDK 8.1, so prefer windows-vs2026 / windows-ninja.)",
+      "generator": "Visual Studio 15 2017",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET": "x64-windows",
+        "CMAKE_SYSTEM_VERSION": "10.0.19041.0"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "windows-ninja",
+      "description": "Windows + Ninja generator, driven by a VS dev environment (run from a Developer Command Prompt, or source vcvarsall.bat x64 first). vcpkg manifest deps; requires VCPKG_ROOT and ninja on PATH.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET": "x64-windows"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "linux-ninja",
+      "description": "Linux + Ninja generator, vcpkg manifest deps. Requires VCPKG_ROOT and a compiler on PATH.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+      },
+      "condition": { "type": "notEquals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "windows-vs2026", "configurePreset": "windows-vs2026", "configuration": "Debug" },
+    { "name": "windows-msvc2017", "configurePreset": "windows-msvc2017", "configuration": "Debug" },
+    { "name": "windows-ninja", "configurePreset": "windows-ninja" },
+    { "name": "linux-ninja", "configurePreset": "linux-ninja" }
+  ]
+}

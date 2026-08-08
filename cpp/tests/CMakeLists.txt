@@ -1,0 +1,21 @@
+# Google Test driver. Test files mirror the source directory structure
+# (e.g. Decompiler/Util/Utf.cpp -> Util/Util_Test.cpp), per the mirror layout.
+
+include(GoogleTest)
+
+add_executable(ilspy_tests
+    Util/Util_Test.cpp
+    Decompiler/Metadata/Metadata_Test.cpp
+    Decompiler/Metadata/MethodBody_Test.cpp
+    Decompiler/Metadata/ILDisassembler_Test.cpp
+    Decompiler/Metadata/EntitySurface_Test.cpp
+    Decompiler/TypeSystem/TypeName_Test.cpp
+    Decompiler/TypeSystem/SignatureDecoder_Test.cpp
+)
+target_link_libraries(ilspy_tests PRIVATE
+    ILSpy::ilspy
+    GTest::gtest
+    GTest::gtest_main
+)
+
+gtest_discover_tests(ilspy_tests)
