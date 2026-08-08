@@ -73,6 +73,11 @@ namespace {
 // values that survived a flush.
 struct ReaderState {
     std::vector<std::unique_ptr<ILInstruction>> expressionStack;
+    // currentStack: the committed evaluation stack (values that survived a
+    // flush or were seeded by the runtime, e.g. an exception object in a catch).
+    // When the expression stack is empty, Pop reads from currentStack.
+    std::vector<ILVariablePtr> currentStack;
+    std::size_t stackBase = 0;  // index where this block's own slots begin
     std::vector<ILVariablePtr> parameters;
     std::vector<ILVariablePtr> locals;
     StackType returnStackType = StackType::Void;
@@ -87,6 +92,11 @@ struct ReaderState {
             auto inst = std::move(expressionStack.back());
             expressionStack.pop_back();
             return inst;
+        }
+        if (currentStack.size() > stackBase) {
+            auto v = currentStack.back();
+            currentStack.pop_back();
+            return std::make_unique<LdLoc>(v);
         }
         return nullptr;  // stack underflow -> caller bails
     }
@@ -828,10 +838,29 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             break;
         }
 
-        case ILOpCode::Leave: case ILOpCode::Leave_s:
-        case ILOpCode::Endfinally:
-            // Only appear in exception-handler bodies; bail without EH support.
-            return DecodeOutcome::Bail;
+        case ILOpCode::Leave: case ILOpCode::Leave_s: {
+            // leave exits the innermost try/finally/catch container. Without the
+            // full BlockBuilder nesting we emit Leave(function body) as an
+            // approximation -- semantically lossy but keeps the tree valid. The
+            // leave may carry a value on the stack (for try expressions); we pop
+            // it if the method is non-void.
+            bool isShort = (op == ILOpCode::Leave_s);
+            std::uint32_t target = 0;
+            if (!ReadBranchTarget(b, size, pos, isShort, start, target)) return DecodeOutcome::Bail;
+            std::unique_ptr<ILInstruction> retVal;
+            if (s.returnStackType != StackType::Void) {
+                retVal = s.Pop();
+                if (!retVal) return DecodeOutcome::Bail;
+            }
+            block->SetFinal(std::make_unique<Leave>(container, std::move(retVal)));
+            return DecodeOutcome::Terminal;
+        }
+        case ILOpCode::Endfinally: {
+            // endfinally exits the finally container. Without EH nesting we emit
+            // a bare Leave(function body) as an approximation.
+            block->SetFinal(std::make_unique<Leave>(container));
+            return DecodeOutcome::Terminal;
+        }
 
         // ---- overflow-checking conversions (same result types as the non-ovf forms) ----
 #define IL_CONVOVF(opc, target) \
@@ -1018,7 +1047,10 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
     if (rva == 0) return nullptr;
     auto body = file.GetMethodBody(rva);
     if (!body.IsValid()) return nullptr;
-    if (!body.Handlers().empty()) return nullptr;  // EH not supported yet
+    // EH methods: we now decode them flat (no BlockBuilder nesting yet). Handler
+    // blocks are seeded with an exception-stack-slot variable so the catch body
+    // can pop the exception object. leave/endfinally emit Leave(function body)
+    // as an approximation (the full BlockBuilder would target the try container).
 
     auto sigOpt = file.GetMethodSignature(methodToken);
     if (!sigOpt) return nullptr;
@@ -1035,6 +1067,26 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
     // Pre-scan branch targets so the splitter knows where blocks begin.
     std::set<std::uint32_t> branchTargets;
     if (!FindBranchTargets(b, size, branchTargets)) return nullptr;
+
+    // Build a map of handler-offset -> exception variable for seeding catch/filter
+    // handler blocks with the exception object the runtime pushes.
+    std::map<std::uint32_t, ILVariablePtr> handlerExceptionVar;
+    for (const auto& eh : body.Handlers()) {
+        branchTargets.insert(eh.HandlerOffset);
+        branchTargets.insert(eh.TryOffset);
+        if (eh.Kind == ExceptionHandlerKind::Catch || eh.Kind == ExceptionHandlerKind::Filter) {
+            auto v = std::make_shared<ILVariable>();
+            v->Name = "E_" + std::to_string(eh.HandlerOffset);
+            v->Kind = VariableKind::ExceptionStackSlot;
+            v->Type = nullptr;  // catch type resolved later; the token is in ClassTokenOrFilterOffset
+            handlerExceptionVar[eh.HandlerOffset] = v;
+        }
+        if (eh.Kind == ExceptionHandlerKind::Filter) {
+            // The filter block also starts with the exception object.
+            handlerExceptionVar[eh.ClassTokenOrFilterOffset] = handlerExceptionVar[eh.HandlerOffset];
+            branchTargets.insert(eh.ClassTokenOrFilterOffset);
+        }
+    }
 
     auto fn = std::make_unique<ILFunction>();
     auto container = std::make_unique<BlockContainer>();
@@ -1069,6 +1121,13 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
         bs.locals = s.locals;             // share local pointers (grow is fine; both
                                          // reference the same shared_ptrs)
         bs.returnStackType = s.returnStackType;
+        // If this block is a catch/filter handler entry, seed the evaluation
+        // stack with the exception object the runtime pushes.
+        auto hev = handlerExceptionVar.find(static_cast<std::uint32_t>(blockStart));
+        if (hev != handlerExceptionVar.end()) {
+            bs.currentStack.push_back(hev->second);
+            bs.stackBase = bs.currentStack.size();  // the exception is part of the input
+        }
 
         while (pos < size) {
             // If this offset is a branch target AND we're not at the block start,
