@@ -38,15 +38,18 @@
 // `match(x) ? true : false -> match(x)` fold (a conditional whose condition is
 // a pattern match and whose arms are ldc.i4 1/0 is redundant -- the MatchInstruction
 // already evaluates to 1/0), plus the VisitBox rewrite (`box ref-type(arg)` ->
-// `arg`; for a reference type, box is a no-op) and the VisitLdElema / VisitNewArr
+// `arg`; for a reference type, box is a no-op), the VisitLdElema / VisitNewArr
 // CleanUpArrayIndices rewrite (drop the redundant `conv.i` widening of an array
 // index -- a SignExtend / ZeroExtend / checked-Truncate conv whose ResultType
-// is I -- now that the Conv node carries its ConversionKind, D85). Deferred vs
-// the C#: the NullableLiftingTransform
+// is I -- now that the Conv node carries its ConversionKind, D85), and the
+// VisitConv conv.r.un combining rewrite (`conv.r4(conv.r.un(x))` /
+// `conv.r8(conv.r.un(x))` -> `conv.r4.un(x)` / `conv.r8.un(x)` -- now unblocked
+// by the D85 Conv Kind model). Deferred vs the C#: the NullableLiftingTransform
 // call (needs the full nullable-lift transform), FixComparisonKindLdNull
 // (already in the standalone EarlyExpressionTransforms, D61), the ldlen /
 // conv o->i null-comparison special cases (need the LdLen model divergence
-// reconciliation), VisitConv / VisitCall / VisitNewObj / VisitLdObj /
+// reconciliation -- the VisitConv `conv.i4(ldlen)` first rewrite is still
+// blocked by it), VisitCall / VisitNewObj / VisitLdObj /
 // VisitLdObjIfRef / VisitStObj / VisitStLoc (TransformAssignment.HandleCompoundAssign)
 // / the remaining VisitIfInstruction pieces (NullableLifting, UserDefinedLogic,
 // TransformDynamicAddAssignOrRemoveAssign) / HandleSwitchExpression (needs
@@ -63,6 +66,7 @@
 namespace ILSpy::Decompiler::IL {
 
 class Comp;
+class Conv;
 class Box;
 class IfInstruction;
 class LdElema;
@@ -132,6 +136,19 @@ private:
     // HandleConditionalOperator block-model adaptation). Returns true if the
     // fold fired (the if is destroyed).
     bool FoldMatchTrueFalse(IfInstruction* iff);
+
+    // VisitConv (the conv.r.un combining subset): `conv.r4(conv.r.un(x))` /
+    // `conv.r8(conv.r.un(x))` -> `conv.r4.un(x)` / `conv.r8.un(x)`. IL conv.r.un
+    // does not indicate whether to convert the target to R4 or R8, so the C#
+    // compiler usually follows it with an explicit conv.r4 or conv.r8; the two
+    // conversions are combined into one that carries the inner conv's input
+    // type/sign but the outer's target (R4/R8). The C# checks
+    // `inst.TargetType.IsFloatType() && inst.Argument is Conv conv && conv.Kind
+    // == ConversionKind.IntToFloat && conv.TargetType == PrimitiveType.R`; this
+    // requires the Conv node's ConversionKind (D85). The `conv.i4(ldlen)` first
+    // rewrite is still blocked by the LdLen model divergence (this port's LdLen
+    // already returns I4), so only the conv.r.un combining is ported here.
+    void VisitConv(Conv* inst);
 
     // VisitBox: `box ref-type(arg)` -> `arg`. For a reference type, box is a
     // no-op (the value is already on the heap). The C# checks

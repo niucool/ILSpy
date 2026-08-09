@@ -89,7 +89,7 @@ implemented and green here. Everything else follows the phase plan in
   `RemoveDeadStores` setting, with no loads or addresses, has its stores dropped
   (a pure value goes with the store; an impure value is unwrapped so its side
   effect survives), and dead-copy chains collapse via a recompute fixpoint.
-  28 of ~40 transforms ported. The switch-detection family is now complete in
+  29 of ~40 transforms ported. The switch-detection family is now complete in
   its core: `LongSet`/`LongInterval` (Util/, ported from LongSet.cs /
   Interval.cs) -- an immutable interval-set of longs whose complement is
   representable (unlike `std::set<int64_t>`) -- backs `SwitchSection::Labels`
@@ -262,7 +262,7 @@ implemented and green here. Everything else follows the phase plan in
   statements, switch-on-nullable `case null:` arms, `is T x` patterns,
   `lock (...) { ... }`, `using (...) { ... }` statements, and
   `V = cond ? V1 : V2` ternaries (the conditional operator) now
-  appear in the output. 28 of ~40 transforms ported (the StatementTransform
+  appear in the output. 29 of ~40 transforms ported (the StatementTransform
   orchestration + its first two children ILInlining and ExpressionTransforms;
   the remaining 14 per-statement children are deferred).
   `DelegateConstruction` (Transforms/, a tested-but-not-yet-wired
@@ -460,7 +460,23 @@ implemented and green here. Everything else follows the phase plan in
   emits ldelema with bare I4 indices; it fires more on Roslyn/64-bit-indexed
   code), so it is a real-corpus ILAst-cleaning transform, not faithfulness-only.
   The D81 `IsLdcI4ZeroMaybeConv` approximation is retired in favor of a faithful
-  `UnwrapConv` (sign/zero-extending convs around the 0 now peel by Kind).
+  `UnwrapConv` (sign/zero-extending convs around the 0 now peel by Kind). It also
+  folds the `VisitConv` `conv.r.un` combining rewrite: `conv.r4(conv.r.un(x))`
+  / `conv.r8(conv.r.un(x))` -> `conv.r4.un(x)` / `conv.r8.un(x)`. IL `conv.r.un`
+  does not indicate whether to convert the target to R4 or R8, so the C#
+  compiler usually follows it with an explicit `conv.r4` or `conv.r8`; the two
+  conversions combine into a single `Conv` carrying the inner `conv.r.un`'s
+  input type/sign but the outer's R4/R8 target (the C# checks
+  `inst.TargetType.IsFloatType() && inst.Argument is Conv conv && conv.Kind ==
+  IntToFloat && conv.TargetType == R`; the port's Conv constructor derives the
+  InputType from the argument's ResultType, which equals the inner's InputType,
+  and `IsLifted` is dropped -- no nullable-lifting model). The `conv.i4(ldlen)`
+  first VisitConv rewrite is still blocked by the LdLen model divergence (this
+  port's LdLen already returns I4, so the conv is a no-op I4->I4 and
+  `conv.i8(ldlen)` cannot be faithfully rewritten). The fold fires 1 time on
+  the 8000-method mscorlib sweep (the legacy csc emits `conv.r.un` rarely; it
+  fires more on Roslyn-compiled / modern .NET), so it is a real-corpus ILAst-
+  cleaning transform, not faithfulness-only.
   The
   remaining 14 per-statement children (DynamicIsEventAssignmentTransform,
   TransformAssignment, NullCoalescingTransform, NullableLiftingStatementTransform,
@@ -472,10 +488,10 @@ implemented and green here. Everything else follows the phase plan in
   option (the ldloca-into-`addressof` path the C# second pass enables, which
   needs an `AddressOf` node + `IsGeneratedTemporaryForAddressOf` +
   `ClassifyExpression`) are deferred, as are the rest of `ExpressionTransforms`
-  (the NullableLifting call, the VisitConv `conv.i4(ldlen)` rewrite (still
+  (the NullableLifting call, the VisitConv `conv.i4(ldlen)` first rewrite (still
   blocked by the LdLen model divergence -- this port's LdLen already returns I4;
-  the `conv.rN(conv.r.un(...))` rewrite is now unblocked by the Conv Kind model
-  but is a separate iteration), the Call/NewObj/LdObj/StObj/StLoc
+  the `conv.rN(conv.r.un(...))` combining rewrite is now ported, unblocked by
+  the D85 Conv Kind model), the Call/NewObj/LdObj/StObj/StLoc
   `HandleCompoundAssign`, the remaining VisitIfInstruction pieces
   (NullableLifting, UserDefinedLogic,
   `TransformDynamicAddAssignOrRemoveAssign`), the SwitchExpression/Dynamic/

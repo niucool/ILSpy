@@ -220,6 +220,10 @@ void ExpressionTransforms::Visit(ILInstruction* inst) {
         VisitBox(static_cast<Box*>(inst));
         return;
     }
+    if (inst->Op == OpCode::Conv) {
+        VisitConv(static_cast<Conv*>(inst));
+        return;
+    }
     if (inst->Op == OpCode::LdElema) {
         VisitLdElema(static_cast<LdElema*>(inst));
         return;
@@ -298,6 +302,46 @@ bool ExpressionTransforms::VisitCompTailRewrites(Comp* comp) {
         return true;
     }
     return false;
+}
+
+void ExpressionTransforms::VisitConv(Conv* inst) {
+    if (!inst) return;
+    // Visit the argument first (the C# `inst.Argument.AcceptVisitor(this)`) so
+    // the Comp/StLoc/Box rewrites cascade into the converted expression before
+    // the conv.r.un combining is considered.
+    if (inst->Argument) Visit(inst->Argument.get());
+
+    // conv.r4(conv.r.un(x)) / conv.r8(conv.r.un(x)) -> conv.r4.un(x) /
+    // conv.r8.un(x). IL conv.r.un does not indicate whether to convert the target
+    // to R4 or R8, so the C# compiler usually follows it with an explicit
+    // conv.r4 or conv.r8; the two conversions are combined into one that carries
+    // the inner conv's input type/sign but the outer's target (R4/R8). The C#
+    // checks `inst.TargetType.IsFloatType() && inst.Argument is Conv conv &&
+    // conv.Kind == ConversionKind.IntToFloat && conv.TargetType ==
+    // PrimitiveType.R`; requires the Conv node's ConversionKind (D85).
+    if (!IsFloatType(inst->TargetType) || !inst->Argument ||
+        inst->Argument->Op != OpCode::Conv) {
+        return;
+    }
+    auto* inner = static_cast<Conv*>(inst->Argument.get());
+    if (inner->Kind != ConversionKind::IntToFloat ||
+        inner->TargetType != PrimitiveType::R) {
+        return;
+    }
+    // Capture the inner conv's InputSign before detaching its argument (the
+    // inner conv is destroyed when the outer is replaced by the new Conv). The
+    // C# `new Conv(conv.Argument, conv.InputType, conv.InputSign, inst.TargetType,
+    // inst.CheckForOverflow, inst.IsLifted | conv.IsLifted)` -- the port's Conv
+    // constructor derives InputType from the argument's ResultType, which equals
+    // the inner's InputType, and IsLifted is dropped (no nullable-lifting model).
+    Sign innerSign = inner->InputSign;
+    auto innerArg = inner->TakeChild(0);  // detach the inner conv's argument
+    auto newConv = std::make_unique<Conv>(std::move(innerArg),
+                                           inst->TargetType,
+                                           inst->CheckForOverflow,
+                                           innerSign);
+    inst->ReplaceWith(std::move(newConv));  // destroys inst + the inner conv shell
+    // The C# does not RequestRerun here; the argument was already visited above.
 }
 
 void ExpressionTransforms::VisitBox(Box* box) {

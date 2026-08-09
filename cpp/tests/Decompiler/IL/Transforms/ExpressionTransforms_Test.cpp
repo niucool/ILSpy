@@ -1160,6 +1160,188 @@ TEST(ExpressionTransforms, CleanUpArrayIndicesLeavesBareIndex) {
         << "a bare index must survive CleanUpArrayIndices unchanged";
 }
 
+// Count `conv.rN(conv.r.un(...))` patterns -- a float-target Conv (R4/R8/R)
+// whose Argument is a Conv with Kind == IntToFloat and TargetType == R (the
+// uncombined conv.r.un the VisitConv fold removes). The fold is monotone non-
+// increasing (each fold removes one such nested pattern; nothing in this subset
+// creates one). Used by the sweep to confirm the transform does not regress.
+int CountConvRUnNested(ILFunction& fn) {
+    int n = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::Conv) {
+            auto* outer = static_cast<Conv*>(inst);
+            if (IsFloatType(outer->TargetType) && outer->Argument &&
+                outer->Argument->Op == OpCode::Conv) {
+                auto* inner = static_cast<Conv*>(outer->Argument.get());
+                if (inner->Kind == ConversionKind::IntToFloat &&
+                    inner->TargetType == PrimitiveType::R) {
+                    ++n;
+                }
+            }
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return n;
+}
+
+// VisitConv combines `conv.r4(conv.r.un(x))` -> `conv.r4.un(x)`: IL conv.r.un
+// does not say whether to convert to R4 or R8, so the C# compiler follows it with
+// an explicit conv.r4; the two convs fold to a single `conv.r4.un` (int-to-
+// float, unsigned input) carrying the inner conv's input sign but the outer's R4
+// target. The integer argument (ldloc i, I4) is preserved as the new conv's
+// argument.
+TEST(ExpressionTransforms, VisitConvCombinesConvR4OverConvRUn) {
+    auto i = MakeParam("i", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Single));
+    // conv.r.un(ldloc i): the reader's Conv_r_un -- Unsigned, TargetType R,
+    // Kind IntToFloat (I4 -> F8).
+    auto inner = std::make_unique<Conv>(
+        std::make_unique<LdLoc>(i), PrimitiveType::R, false, Sign::Unsigned);
+    // conv.r4(conv.r.un(ldloc i)): the reader's Conv_r4 -- Signed (but the outer
+    // conv.r4's InputType is F8, so needsSign is false and InputSign is None); the
+    // fold checks the inner conv's Kind/TargetType, not the outer's sign.
+    auto outer = std::make_unique<Conv>(
+        std::move(inner), PrimitiveType::R4, false, Sign::Signed);
+    auto fn = MakeFnWithBlock({v, i});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(outer)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountConvRUnNested(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountConvRUnNested(*fn), 0)
+        << "conv.r4(conv.r.un(...)) must fold to a single conv.r4.un";
+    auto& blk = fn->Body->Blocks[0];
+    ASSERT_EQ(blk->Instructions.size(), 1u);
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Conv)
+        << "the result must be a single Conv (the combined conv.r4.un)";
+    auto* combined = static_cast<Conv*>(st->Value.get());
+    EXPECT_EQ(combined->TargetType, PrimitiveType::R4)
+        << "the combined conv keeps the outer's R4 target";
+    EXPECT_EQ(combined->Kind, ConversionKind::IntToFloat)
+        << "the combined conv is an int-to-float conversion";
+    EXPECT_EQ(combined->InputSign, Sign::Unsigned)
+        << "the combined conv carries the inner conv.r.un's unsigned sign";
+    ASSERT_EQ(combined->Argument->Op, OpCode::LdLoc)
+        << "the integer argument survives the fold";
+    EXPECT_EQ(static_cast<LdLoc*>(combined->Argument.get())->Variable.get(), i.get());
+}
+
+// VisitConv combines `conv.r8(conv.r.un(x))` -> `conv.r8.un(x)` (the R8 variant).
+TEST(ExpressionTransforms, VisitConvCombinesConvR8OverConvRUn) {
+    auto i = MakeParam("i", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Double));
+    auto inner = std::make_unique<Conv>(
+        std::make_unique<LdLoc>(i), PrimitiveType::R, false, Sign::Unsigned);
+    auto outer = std::make_unique<Conv>(
+        std::move(inner), PrimitiveType::R8, false, Sign::Signed);
+    auto fn = MakeFnWithBlock({v, i});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(outer)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountConvRUnNested(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountConvRUnNested(*fn), 0);
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    auto* combined = static_cast<Conv*>(st->Value.get());
+    ASSERT_EQ(combined->TargetType, PrimitiveType::R8);
+    EXPECT_EQ(combined->Kind, ConversionKind::IntToFloat);
+    EXPECT_EQ(combined->InputSign, Sign::Unsigned);
+}
+
+// VisitConv keeps `conv.r4(ldloc d)` (a bare float argument, not a conv.r.un):
+// the argument is not a Conv, so the combining fold does not fire. (conv.r4 from
+// a double is a FloatPrecisionChange, not an int-to-float combine.)
+TEST(ExpressionTransforms, VisitConvKeepsConvR4OverBareFloat) {
+    auto d = MakeParam("d", std::make_shared<KnownType>(KnownTypeCode::Double));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Single));
+    auto outer = std::make_unique<Conv>(
+        std::make_unique<LdLoc>(d), PrimitiveType::R4, false, Sign::Signed);
+    auto fn = MakeFnWithBlock({v, d});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(outer)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountConvRUnNested(*fn), 0);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountConvRUnNested(*fn), 0)
+        << "a bare-float-argument conv.r4 must not fold";
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Conv)
+        << "the conv.r4 must survive (its argument is not a conv.r.un)";
+    auto* conv = static_cast<Conv*>(st->Value.get());
+    EXPECT_EQ(conv->TargetType, PrimitiveType::R4);
+    ASSERT_EQ(conv->Argument->Op, OpCode::LdLoc)
+        << "the bare float argument survives unchanged";
+}
+
+// VisitConv keeps `conv.r4(conv.r8(ldloc i))`: the inner conv.r8 has Kind
+// IntToFloat but TargetType R8 (not R), so the `conv.TargetType == R` guard
+// excludes it. (This is a precision change from an int via R8, not a
+// conv.r.un combine.)
+TEST(ExpressionTransforms, VisitConvKeepsConvR4OverConvR8) {
+    auto i = MakeParam("i", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Single));
+    auto inner = std::make_unique<Conv>(
+        std::make_unique<LdLoc>(i), PrimitiveType::R8, false, Sign::Signed);
+    auto outer = std::make_unique<Conv>(
+        std::move(inner), PrimitiveType::R4, false, Sign::Signed);
+    auto fn = MakeFnWithBlock({v, i});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(outer)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountConvRUnNested(*fn), 0);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountConvRUnNested(*fn), 0)
+        << "conv.r4(conv.r8(...)) must not fold (the inner is not conv.r.un)";
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    // The two-conv nest must survive (the outer is still a Conv wrapping a Conv).
+    ASSERT_EQ(st->Value->Op, OpCode::Conv);
+    auto* outerConv = static_cast<Conv*>(st->Value.get());
+    ASSERT_EQ(outerConv->Argument->Op, OpCode::Conv)
+        << "the nested conv.r8 must survive (it is not a conv.r.un)";
+}
+
+// VisitConv keeps `conv.i4(conv.r.un(ldloc d))`: the outer's TargetType is I4
+// (an integer type, not a float type), so the `IsFloatType(TargetType)` guard
+// excludes it. (This is a float-to-int conversion, not a conv.r.un combine.)
+TEST(ExpressionTransforms, VisitConvKeepsConvI4OverConvRUn) {
+    auto i = MakeParam("i", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto inner = std::make_unique<Conv>(
+        std::make_unique<LdLoc>(i), PrimitiveType::R, false, Sign::Unsigned);
+    auto outer = std::make_unique<Conv>(
+        std::move(inner), PrimitiveType::I4, false, Sign::None);
+    auto fn = MakeFnWithBlock({v, i});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(outer)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountConvRUnNested(*fn), 0);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountConvRUnNested(*fn), 0)
+        << "conv.i4(conv.r.un(...)) must not fold (the outer target is not float)";
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Conv);
+    auto* outerConv = static_cast<Conv*>(st->Value.get());
+    ASSERT_EQ(outerConv->Argument->Op, OpCode::Conv)
+        << "the nested conv.r.un must survive (the outer is conv.i4, not float)";
+}
+
 // On the real mscorlib corpus, running the full pre-pipeline through the
 // StatementTransform{ILInlining, ExpressionTransforms} (the GetILTransforms()
 // position) preserves the ILAst invariant and the HandleConditionalOperator
@@ -1188,6 +1370,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int before = CountConditionalOperators(*fn);
         int boxesBefore = CountBoxes(*fn);
         int arrayIdxConvBefore = CountArrayIndexConvI(*fn);
+        int convRUnBefore = CountConvRUnNested(*fn);
         {
             StatementTransform st;
             st.AddChild(std::make_unique<ILInlining>());
@@ -1198,6 +1381,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int after = CountConditionalOperators(*fn);
         int boxesAfter = CountBoxes(*fn);
         int arrayIdxConvAfter = CountArrayIndexConvI(*fn);
+        int convRUnAfter = CountConvRUnNested(*fn);
         // The ternary fold is monotone non-decreasing (each fold creates a
         // StLoc-if; nothing in this subset removes one). The VisitComp rewrites
         // (comp(!=0)->x, logic.not push, unsigned normalization) do not create
@@ -1220,6 +1404,16 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         // ldelema/newarr; the per-method monotone-non-increasing invariant is the
         // deterministic correctness gate (the absolute count is not asserted).
         EXPECT_LE(arrayIdxConvAfter, arrayIdxConvBefore);
+        // The VisitConv conv.r.un combining fold (`conv.r4(conv.r.un(x))` /
+        // `conv.r8(conv.r.un(x))` -> a single `conv.r4.un` / `conv.r8.un`) is
+        // monotone non-increasing (each fold removes one nested conv.r.un; nothing
+        // in this subset creates one). The fold fires on the legacy-csc corpus when
+        // the compiler emits `conv.r.un` followed by an explicit `conv.r4`/`conv.r8`
+        // (a Roslyn-era codegen pattern); the per-method monotone-non-increasing
+        // invariant is the deterministic correctness gate (the absolute count is
+        // not asserted -- the .NET Framework 4 legacy-csc corpus may emit
+        // conv.r.un rarely, so the fold may fire 0 times on it).
+        EXPECT_LE(convRUnAfter, convRUnBefore);
         totalFolds += (after - before);
         totalArrayIndexConvDrops += (arrayIdxConvBefore - arrayIdxConvAfter);
         if (processed >= 8000) break;
