@@ -563,6 +563,11 @@ private:
             }
             case OpCode::BinaryNumericInstruction: {
                 const auto& bin = static_cast<const BinaryNumericInstruction&>(inst);
+                // `0 - x` (and `0.0 - x`) is the IL for unary negation `-x`.
+                if (bin.Operator == BinaryNumericOperator::Sub && bin.Left &&
+                    (bin.Left->Op == OpCode::LdcI4 && static_cast<const LdcI4*>(bin.Left.get())->Value == 0)) {
+                    return "-" + Expr(*bin.Right);
+                }
                 const char* op = "+";
                 switch (bin.Operator) {
                     case BinaryNumericOperator::Add: op = "+"; break;

@@ -464,6 +464,24 @@ TEST(ILAstToCSharp, TypedDeclarationUsesCSharpKeyword) {
     EXPECT_NE(text.find("    var V_1 = 0;\n"), std::string::npos) << text;
 }
 
+TEST(ILAstToCSharp, SubtractionFromZeroIsUnaryNegation) {
+    // `0 - x` is the IL for unary negation `-x`.
+    auto x = MakeVar(VariableKind::Parameter, "x", 0);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
+        std::make_unique<BinaryNumericInstruction>(
+            std::make_unique<LdcI4>(0), std::make_unique<LdLoc>(x),
+            BinaryNumericOperator::Sub)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "int x");
+    EXPECT_NE(text.find("    var V_0 = -x;\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("(0 - x)"), std::string::npos) << "not a binary subtraction";
+}
+
 TEST(ILAstToCSharp, ConstantTrueCatchFilterIsOmitted) {
     // A plain catch carries the constant filter ldc.i4(1) (BlockBuilder.cs);
     // the C#-text seed prints it as a plain `catch (T name)`, no `when`.
