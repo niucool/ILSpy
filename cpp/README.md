@@ -89,7 +89,7 @@ implemented and green here. Everything else follows the phase plan in
   `RemoveDeadStores` setting, with no loads or addresses, has its stores dropped
   (a pure value goes with the store; an impure value is unwrapped so its side
   effect survives), and dead-copy chains collapse via a recompute fixpoint.
-  29 of ~40 transforms ported. The switch-detection family is now complete in
+  30 of ~40 transforms ported. The switch-detection family is now complete in
   its core: `LongSet`/`LongInterval` (Util/, ported from LongSet.cs /
   Interval.cs) -- an immutable interval-set of longs whose complement is
   representable (unlike `std::set<int64_t>`) -- backs `SwitchSection::Labels`
@@ -262,7 +262,7 @@ implemented and green here. Everything else follows the phase plan in
   statements, switch-on-nullable `case null:` arms, `is T x` patterns,
   `lock (...) { ... }`, `using (...) { ... }` statements, and
   `V = cond ? V1 : V2` ternaries (the conditional operator) now
-  appear in the output. 29 of ~40 transforms ported (the StatementTransform
+  appear in the output. 30 of ~40 transforms ported (the StatementTransform
   orchestration + its first two children ILInlining and ExpressionTransforms;
   the remaining 14 per-statement children are deferred).
   `DelegateConstruction` (Transforms/, a tested-but-not-yet-wired
@@ -495,7 +495,14 @@ implemented and green here. Everything else follows the phase plan in
   `HandleCompoundAssign`, the remaining VisitIfInstruction pieces
   (NullableLifting, UserDefinedLogic,
   `TransformDynamicAddAssignOrRemoveAssign`), the SwitchExpression/Dynamic/
-  BinaryNumeric/TryCatchHandler visit methods).
+  TryCatchHandler visit methods). It folds the `VisitBinaryNumericInstruction`
+  shift-size rewrite: `a << (b & 31)` / `a >> (b & 31)` -> `a << b` / `a >> b` --
+  a shift's right operand masked with the bit-width minus one is redundant in
+  C# (the shift already masks the count); the mask is dropped when it is the
+  expected width (31 for I4, 63 for I8). The native-int (I) case --
+  `sizeof(IntPtr) * 8 - 1` -- is deferred (needs SizeOf to carry an IType with
+  GetStackType), as is the BitAnd/Boolean nullable-lift case (needs
+  NullableLiftingTransform + InferType).
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
   walk + a corpus probe; the async/iterator state machines

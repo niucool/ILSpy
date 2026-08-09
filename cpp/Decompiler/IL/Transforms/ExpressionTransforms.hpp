@@ -44,7 +44,10 @@
 // is I -- now that the Conv node carries its ConversionKind, D85), and the
 // VisitConv conv.r.un combining rewrite (`conv.r4(conv.r.un(x))` /
 // `conv.r8(conv.r.un(x))` -> `conv.r4.un(x)` / `conv.r8.un(x)` -- now unblocked
-// by the D85 Conv Kind model). Deferred vs the C#: the NullableLiftingTransform
+// by the D85 Conv Kind model), and the VisitBinaryNumericInstruction shift-size
+// rewrite (`a << (b & 31)` / `a >> (b & 63)` -> `a << b` / `a >> b` -- a shift's
+// right operand masked with the bit-width minus one is redundant in C#).
+// Deferred vs the C#: the NullableLiftingTransform
 // call (needs the full nullable-lift transform), FixComparisonKindLdNull
 // (already in the standalone EarlyExpressionTransforms, D61), the ldlen /
 // conv o->i null-comparison special cases (need the LdLen model divergence
@@ -54,10 +57,9 @@
 // / the remaining VisitIfInstruction pieces (NullableLifting, UserDefinedLogic,
 // TransformDynamicAddAssignOrRemoveAssign) / HandleSwitchExpression (needs
 // SwitchExpressions setting + SwitchInstruction guards) / VisitDynamic* /
-// VisitBinaryNumericInstruction (shift-size) / VisitTryCatchHandler -- each
-// needs further infrastructure (AddressOf, LdcDecimal, dynamic nodes, the
-// resolver, MatchLogicAnd/Or, IndexRangeTransform, TransformAssignment, ...)
-// and is a later iteration.
+// VisitTryCatchHandler -- each needs further infrastructure (AddressOf,
+// LdcDecimal, dynamic nodes, the resolver, MatchLogicAnd/Or, IndexRangeTransform,
+// TransformAssignment, ...) and is a later iteration.
 
 #pragma once
 
@@ -71,6 +73,7 @@ class Box;
 class IfInstruction;
 class LdElema;
 class NewArr;
+class BinaryNumericInstruction;
 
 class ExpressionTransforms : public IStatementTransform {
 public:
@@ -178,6 +181,16 @@ private:
     // ExpressionTransforms.CleanUpArrayIndices; requires the Conv node's
     // ConversionKind (D85).
     void CleanUpArrayIndices(std::vector<std::unique_ptr<ILInstruction>>& indices);
+
+    // VisitBinaryNumericInstruction (the shift-size subset): `a << (b & 31)` /
+    // `a >> (b & 31)` -> `a << b` / `a >> b` -- a shift's right operand masked
+    // with the bit-width minus one is redundant in C# (the shift already masks
+    // the count). The mask is dropped when it is the expected width for the
+    // shift's result type (31 for I4, 63 for I8). The native-int (I) case --
+    // `sizeof(IntPtr) * 8 - 1` -- is deferred (needs SizeOf to carry an IType with
+    // GetStackType). The BitAnd/Boolean nullable-lift case is deferred (needs
+    // NullableLiftingTransform + InferType). Mirrors ExpressionTransforms.cs.
+    void VisitBinaryNumericInstruction(BinaryNumericInstruction* inst);
 
     // The settings snapshot for the duration of a Run (the C# stores the
     // StatementTransformContext as a member). Consulted by IsPatternMatch in

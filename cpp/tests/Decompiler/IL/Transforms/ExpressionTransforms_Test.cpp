@@ -54,6 +54,7 @@
 #include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/Conv.hpp"
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
+#include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
@@ -1342,6 +1343,229 @@ TEST(ExpressionTransforms, VisitConvKeepsConvI4OverConvRUn) {
         << "the nested conv.r.un must survive (the outer is conv.i4, not float)";
 }
 
+// Count `shift(x, bitAnd(y, mask))` patterns -- a ShiftLeft/ShiftRight whose
+// Right is a BitAnd whose own Right is the expected bit-width-minus-one mask
+// (ldc.i4 31 for an I4 shift, ldc.i4 63 for an I8 shift). This is the redundant
+// mask the VisitBinaryNumericInstruction shift-size fold removes. The fold is
+// monotone non-increasing (each fold removes one such masked-shift; nothing in
+// this subset creates one). Used by the sweep to confirm the transform does not
+// regress.
+int CountMaskedShifts(ILFunction& fn) {
+    int n = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::BinaryNumericInstruction) {
+            auto* bni = static_cast<BinaryNumericInstruction*>(inst);
+            if ((bni->Operator == BinaryNumericOperator::ShiftLeft ||
+                 bni->Operator == BinaryNumericOperator::ShiftRight) &&
+                bni->Right && bni->Right->Op == OpCode::BinaryNumericInstruction) {
+                auto* bitAnd = static_cast<BinaryNumericInstruction*>(bni->Right.get());
+                if (bitAnd->Operator == BinaryNumericOperator::BitAnd &&
+                    bitAnd->Right && bitAnd->Right->Op == OpCode::LdcI4) {
+                    int mask = static_cast<LdcI4*>(bitAnd->Right.get())->Value;
+                    StackType rt = bni->ResultType();
+                    if ((rt == StackType::I4 && mask == 31) ||
+                        (rt == StackType::I8 && mask == 63)) {
+                        ++n;
+                    }
+                }
+            }
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return n;
+}
+
+// VisitBinaryNumericInstruction drops the redundant `& 31` mask from a left
+// shift: `a << (b & 31)` folds to `a << b` (the shift already masks the count to
+// the low 5 bits for an int). The BitAnd wrapper is destroyed and the real shift
+// amount (`b`) becomes the shift's right operand.
+TEST(ExpressionTransforms, ShiftLeftDropsBitAnd31Mask) {
+    auto a = MakeParam("a", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto b = MakeParam("b", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    // shl(ldloc a, bitAnd(ldloc b, ldc.i4 31)) -- the C#/Roslyn `a << b` shape.
+    auto masked = std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(b), std::make_unique<LdcI4>(31),
+        BinaryNumericOperator::BitAnd, StackType::I4);
+    auto shl = std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(a), std::move(masked),
+        BinaryNumericOperator::ShiftLeft, StackType::I4);
+    auto fn = MakeFnWithBlock({v, a, b});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(shl)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountMaskedShifts(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountMaskedShifts(*fn), 0)
+        << "shl(a, b & 31) must fold to shl(a, b)";
+    auto& blk = fn->Body->Blocks[0];
+    ASSERT_EQ(blk->Instructions.size(), 1u);
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::BinaryNumericInstruction);
+    auto* shift = static_cast<BinaryNumericInstruction*>(st->Value.get());
+    EXPECT_EQ(shift->Operator, BinaryNumericOperator::ShiftLeft)
+        << "the shift operator is preserved";
+    // The right operand is now the bare shift amount (ldloc b), not the BitAnd.
+    ASSERT_EQ(shift->Right->Op, OpCode::LdLoc)
+        << "the & 31 mask must be dropped, leaving the bare shift amount";
+    EXPECT_EQ(static_cast<LdLoc*>(shift->Right.get())->Variable.get(), b.get());
+    ASSERT_EQ(shift->Left->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(shift->Left.get())->Variable.get(), a.get());
+}
+
+// VisitBinaryNumericInstruction drops the `& 31` mask from a right shift too:
+// `a >> (b & 31)` folds to `a >> b`.
+TEST(ExpressionTransforms, ShiftRightDropsBitAnd31Mask) {
+    auto a = MakeParam("a", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto b = MakeParam("b", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto masked = std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(b), std::make_unique<LdcI4>(31),
+        BinaryNumericOperator::BitAnd, StackType::I4);
+    auto shr = std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(a), std::move(masked),
+        BinaryNumericOperator::ShiftRight, StackType::I4);
+    auto fn = MakeFnWithBlock({v, a, b});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(shr)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountMaskedShifts(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountMaskedShifts(*fn), 0);
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    auto* shift = static_cast<BinaryNumericInstruction*>(st->Value.get());
+    EXPECT_EQ(shift->Operator, BinaryNumericOperator::ShiftRight);
+    ASSERT_EQ(shift->Right->Op, OpCode::LdLoc)
+        << "the & 31 mask must be dropped from a right shift";
+    EXPECT_EQ(static_cast<LdLoc*>(shift->Right.get())->Variable.get(), b.get());
+}
+
+// VisitBinaryNumericInstruction drops the `& 63` mask from a long (I8) shift:
+// `a << (b & 63)` folds to `a << b` (a long shift masks the count to the low 6
+// bits).
+TEST(ExpressionTransforms, ShiftLeftI8DropsBitAnd63Mask) {
+    auto a = MakeParam("a", std::make_shared<KnownType>(KnownTypeCode::Int64));
+    auto b = MakeParam("b", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Int64));
+    auto masked = std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(b), std::make_unique<LdcI4>(63),
+        BinaryNumericOperator::BitAnd, StackType::I4);
+    auto shl = std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(a), std::move(masked),
+        BinaryNumericOperator::ShiftLeft, StackType::I8);
+    auto fn = MakeFnWithBlock({v, a, b});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(shl)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountMaskedShifts(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountMaskedShifts(*fn), 0)
+        << "shl(long a, b & 63) must fold (the I8 mask is 63)";
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    auto* shift = static_cast<BinaryNumericInstruction*>(st->Value.get());
+    ASSERT_EQ(shift->Right->Op, OpCode::LdLoc)
+        << "the & 63 mask must be dropped from an I8 shift";
+}
+
+// VisitBinaryNumericInstruction keeps a shift whose mask is the wrong width
+// for its result type: `a << (b & 31)` where `a` is a long (I8) is NOT folded,
+// because 31 is not the expected 63 for a long shift. (The C# would leave it too
+// -- a long shift masked to 5 bits is a real semantic constraint, not the
+// standard C# `& 63` elision.)
+TEST(ExpressionTransforms, ShiftKeepsWrongWidthMask) {
+    auto a = MakeParam("a", std::make_shared<KnownType>(KnownTypeCode::Int64));
+    auto b = MakeParam("b", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Int64));
+    // shl(long a, b & 31) -- the mask 31 does not match the I8 expected 63.
+    auto masked = std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(b), std::make_unique<LdcI4>(31),
+        BinaryNumericOperator::BitAnd, StackType::I4);
+    auto shl = std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(a), std::move(masked),
+        BinaryNumericOperator::ShiftLeft, StackType::I8);
+    auto fn = MakeFnWithBlock({v, a, b});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(shl)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountMaskedShifts(*fn), 0)
+        << "the 31-masked I8 shift is not the expected-mask pattern";
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // The masked shift survives: the right operand is still the BitAnd.
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    auto* shift = static_cast<BinaryNumericInstruction*>(st->Value.get());
+    ASSERT_EQ(shift->Right->Op, OpCode::BinaryNumericInstruction)
+        << "a long shift with a 31 mask (not the expected 63) must stay";
+    auto* bitAnd = static_cast<BinaryNumericInstruction*>(shift->Right.get());
+    EXPECT_EQ(bitAnd->Operator, BinaryNumericOperator::BitAnd);
+}
+
+// VisitBinaryNumericInstruction keeps a shift whose right operand is not a
+// BitAnd (a bare shift amount): `a << b` is already clean, so the fold does not
+// fire.
+TEST(ExpressionTransforms, ShiftKeepsBareShiftAmount) {
+    auto a = MakeParam("a", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto b = MakeParam("b", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto shl = std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(a), std::make_unique<LdLoc>(b),
+        BinaryNumericOperator::ShiftLeft, StackType::I4);
+    auto fn = MakeFnWithBlock({v, a, b});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(shl)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    auto* shift = static_cast<BinaryNumericInstruction*>(st->Value.get());
+    ASSERT_EQ(shift->Right->Op, OpCode::LdLoc)
+        << "a bare shift amount must survive unchanged";
+    EXPECT_EQ(static_cast<LdLoc*>(shift->Right.get())->Variable.get(), b.get());
+}
+
+// VisitBinaryNumericInstruction leaves a top-level BitAnd (not a shift) alone:
+// the BitAnd/Boolean nullable-lift case is deferred, so a plain `a & b` just
+// visits its children and returns (the operands may fold, but the BitAnd stays).
+TEST(ExpressionTransforms, BitAndStaysForDeferredNullableLift) {
+    auto a = MakeParam("a", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto b = MakeParam("b", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto bitAnd = std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(a), std::make_unique<LdLoc>(b),
+        BinaryNumericOperator::BitAnd, StackType::I4);
+    auto fn = MakeFnWithBlock({v, a, b});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(bitAnd)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& blk = fn->Body->Blocks[0];
+    ASSERT_EQ(blk->Instructions.size(), 1u);
+    ASSERT_EQ(blk->Instructions[0]->Op, OpCode::StLoc);
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    EXPECT_EQ(st->Value->Op, OpCode::BinaryNumericInstruction);
+    // (The EXPECT above, not a trailing-decl ASSERT, separates the declaration so
+    // gtest's ASSERT_* fail-goto does not jump over the following declaration.)
+    auto* bni = static_cast<BinaryNumericInstruction*>(st->Value.get());
+    EXPECT_EQ(bni->Operator, BinaryNumericOperator::BitAnd)
+        << "a top-level BitAnd must stay (the boolean nullable-lift is deferred)";
+}
+
 // On the real mscorlib corpus, running the full pre-pipeline through the
 // StatementTransform{ILInlining, ExpressionTransforms} (the GetILTransforms()
 // position) preserves the ILAst invariant and the HandleConditionalOperator
@@ -1371,6 +1595,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int boxesBefore = CountBoxes(*fn);
         int arrayIdxConvBefore = CountArrayIndexConvI(*fn);
         int convRUnBefore = CountConvRUnNested(*fn);
+        int maskedShiftsBefore = CountMaskedShifts(*fn);
         {
             StatementTransform st;
             st.AddChild(std::make_unique<ILInlining>());
@@ -1382,6 +1607,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int boxesAfter = CountBoxes(*fn);
         int arrayIdxConvAfter = CountArrayIndexConvI(*fn);
         int convRUnAfter = CountConvRUnNested(*fn);
+        int maskedShiftsAfter = CountMaskedShifts(*fn);
         // The ternary fold is monotone non-decreasing (each fold creates a
         // StLoc-if; nothing in this subset removes one). The VisitComp rewrites
         // (comp(!=0)->x, logic.not push, unsigned normalization) do not create
@@ -1414,6 +1640,15 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         // not asserted -- the .NET Framework 4 legacy-csc corpus may emit
         // conv.r.un rarely, so the fold may fire 0 times on it).
         EXPECT_LE(convRUnAfter, convRUnBefore);
+        // The VisitBinaryNumericInstruction shift-size fold (`a << (b & 31)` /
+        // `a >> (b & 63)` -> `a << b` / `a >> b`) is monotone non-increasing (each
+        // fold removes one masked-shift; nothing in this subset creates one). The
+        // fold fires on the legacy-csc corpus when the compiler emits an explicit
+        // `& 31`/`& 63` mask on a shift count (a Roslyn-era codegen pattern); the
+        // per-method monotone-non-increasing invariant is the deterministic
+        // correctness gate (the absolute count is not asserted -- the .NET
+        // Framework 4 legacy-csc corpus may emit the mask rarely).
+        EXPECT_LE(maskedShiftsAfter, maskedShiftsBefore);
         totalFolds += (after - before);
         totalArrayIndexConvDrops += (arrayIdxConvBefore - arrayIdxConvAfter);
         if (processed >= 8000) break;

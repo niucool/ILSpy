@@ -21,6 +21,7 @@
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
+#include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
@@ -72,6 +73,26 @@ bool IsLdcI4ZeroMaybeConv(const ILInstruction* inst) {
 
 bool IsEqualityOrInequality(ComparisonKind k) {
     return k == ComparisonKind::Equality || k == ComparisonKind::Inequality;
+}
+
+// Port of ExpressionTransforms.MatchExpectedShiftSize: the mask a shift's right
+// operand is `&`-ed with must be the bit width minus one for the mask to be
+// redundant in C# (the shift already masks the count). `a << (b & 31)` is `a << b`
+// for an int (I4) shift; `a << (b & 63)` for a long (I8). The native-int (I) case
+// is `sizeof(IntPtr) * 8 - 1` -- deferred (this port's SizeOf carries only a name
+// string, no IType with GetStackType, so the `size.MatchSizeOf(out var
+// sizeofType) && sizeofType.GetStackType() == StackType.I` check cannot be
+// faithful); it returns false so the native-int mask is left in place.
+bool MatchExpectedShiftSize(const ILInstruction* rhs, StackType resultType) {
+    switch (resultType) {
+        case StackType::I4:
+            return IsLdcI4(rhs, 31);
+        case StackType::I8:
+            return IsLdcI4(rhs, 63);
+        // case StackType::I: deferred -- needs SizeOf with an IType + GetStackType.
+        default:
+            return false;
+    }
 }
 
 // Approximation of the C# `comp.InputType.IsFloatType()`. The port's Comp carries
@@ -230,6 +251,10 @@ void ExpressionTransforms::Visit(ILInstruction* inst) {
     }
     if (inst->Op == OpCode::NewArr) {
         VisitNewArr(static_cast<NewArr*>(inst));
+        return;
+    }
+    if (inst->Op == OpCode::BinaryNumericInstruction) {
+        VisitBinaryNumericInstruction(static_cast<BinaryNumericInstruction*>(inst));
         return;
     }
     // Default: recurse into children (the C# ILVisitor.Default).
@@ -416,6 +441,38 @@ void ExpressionTransforms::CleanUpArrayIndices(
         // Indices slot (reparenting it). The slot's ChildIndex is preserved.
         index->ReplaceWith(std::move(arg));
     }
+}
+
+void ExpressionTransforms::VisitBinaryNumericInstruction(BinaryNumericInstruction* inst) {
+    if (!inst) return;
+    // Visit the children first (the C# base.VisitBinaryNumericInstruction) so
+    // the Comp/StLoc/Box/Conv rewrites cascade into the operands before the
+    // shift-size mask is considered.
+    if (inst->Left) Visit(inst->Left.get());
+    if (inst->Right) Visit(inst->Right.get());
+
+    // a << (b & 31) => a << b: a shift's right operand masked with the bit-width
+    // minus one is redundant in C# (the shift already masks the count). Drop the
+    // `& mask` when the mask is the expected width for the shift's result type
+    // (31 for I4, 63 for I8). The BitAnd/Boolean nullable-lift case (the C#
+    // `inst.Operator == BitAnd` arm) is deferred -- it needs NullableLiftingTransform
+    // + InferType, neither of which this minimal type system carries; the
+    // native-int (I) mask `sizeof(IntPtr) * 8 - 1` is deferred (needs SizeOf with an
+    // IType + GetStackType).
+    if (inst->Operator != BinaryNumericOperator::ShiftLeft &&
+        inst->Operator != BinaryNumericOperator::ShiftRight) {
+        return;
+    }
+    auto* bitAnd = dynamic_cast<BinaryNumericInstruction*>(inst->Right.get());
+    if (!bitAnd || bitAnd->Operator != BinaryNumericOperator::BitAnd) return;
+    if (!MatchExpectedShiftSize(bitAnd->Right.get(), inst->ResultType())) return;
+    // Detach the BitAnd's Left (the real shift amount) before destroying the
+    // BitAnd, then wire it as the shift's new Right operand. SetChild(1, ...)
+    // destroys the old Right (the BitAnd, now with a null Left) and reparents the
+    // detached amount into the slot -- the same TakeChild-then-SetChild pattern
+    // VisitBox / VisitConv use.
+    auto amount = bitAnd->TakeChild(0);
+    inst->SetChild(1, std::move(amount));
 }
 
 void ExpressionTransforms::VisitIfInstruction(IfInstruction* iff) {
