@@ -212,7 +212,11 @@ private:
                 std::string name = st.Variable ? st.Variable->Name : "?";
                 bool declare = st.Variable && st.Variable->Kind != VariableKind::Parameter &&
                                declared_.insert(name).second;
-                Line(indent, (declare ? "var " + name : name) + " = " + Expr(*st.Value) + ";");
+                // `V = V op expr` -> `V op= expr` (or `V++`/`V--` for +/- 1) when
+                // the binary's left is a load of the same variable. A declaration
+                // (`var V = ...`) is never a compound assignment.
+                std::string assign = declare ? " = " + Expr(*st.Value) : AssignmentText(st, name);
+                Line(indent, (declare ? "var " + name : name) + assign + ";");
                 return;
             }
             case OpCode::Call: {
@@ -381,6 +385,38 @@ private:
             }
         }
         return CallText(call);
+    }
+
+    // `V = V op expr` -> `V op= expr` (or `V++`/`V--` for +/- 1) when the
+    // binary's left is a load of the same variable. A plain `V = expr` (no
+    // self-load, or an operator C# has no compound form for) returns ` = expr`.
+    std::string AssignmentText(const StLoc& st, const std::string& name) {
+        (void)name;
+        auto* bin = dynamic_cast<const BinaryNumericInstruction*>(st.Value.get());
+        if (!bin || !bin->Left || bin->Left->Op != OpCode::LdLoc) return " = " + Expr(*st.Value);
+        auto* ld = static_cast<const LdLoc*>(bin->Left.get());
+        if (!ld->Variable || !st.Variable || ld->Variable.get() != st.Variable.get())
+            return " = " + Expr(*st.Value);
+        const char* op = nullptr;
+        switch (bin->Operator) {
+            case BinaryNumericOperator::Add: op = "+"; break;
+            case BinaryNumericOperator::Sub: op = "-"; break;
+            case BinaryNumericOperator::Mul: op = "*"; break;
+            case BinaryNumericOperator::Div: op = "/"; break;
+            case BinaryNumericOperator::Rem: op = "%"; break;
+            case BinaryNumericOperator::BitAnd: op = "&"; break;
+            case BinaryNumericOperator::BitOr: op = "|"; break;
+            case BinaryNumericOperator::BitXor: op = "^"; break;
+            case BinaryNumericOperator::ShiftLeft: op = "<<"; break;
+            case BinaryNumericOperator::ShiftRight: op = ">>"; break;
+            default: return " = " + Expr(*st.Value);
+        }
+        if ((bin->Operator == BinaryNumericOperator::Add || bin->Operator == BinaryNumericOperator::Sub) &&
+            bin->Right && bin->Right->Op == OpCode::LdcI4 &&
+            static_cast<const LdcI4*>(bin->Right.get())->Value == 1) {
+            return bin->Operator == BinaryNumericOperator::Add ? "++" : "--";
+        }
+        return " " + std::string(op) + "= " + (bin->Right ? Expr(*bin->Right) : std::string("(default)"));
     }
 
     // The C# form of a store target: a field reference, an array element, or

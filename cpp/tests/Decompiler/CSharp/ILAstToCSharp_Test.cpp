@@ -374,6 +374,53 @@ TEST(ILAstToCSharp, ConvI4OverLdLenIsImplicit) {
     EXPECT_EQ(text.find("(int)"), std::string::npos) << "no redundant cast around ldlen";
 }
 
+TEST(ILAstToCSharp, CompoundAssignmentForSelfBinaryStore) {
+    // `V = V + expr` -> `V += expr`; `V = V + 1` -> `V++`; `V = V - 1` -> `V--`.
+    auto V = MakeVar(VariableKind::Local, "V_0", 0);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(V, std::make_unique<LdcI4>(0)));  // declare V_0
+    block->Add(std::make_unique<StLoc>(V,
+        std::make_unique<BinaryNumericInstruction>(
+            std::make_unique<LdLoc>(V), std::make_unique<LdcI4>(2),
+            BinaryNumericOperator::Add)));
+    block->Add(std::make_unique<StLoc>(V,
+        std::make_unique<BinaryNumericInstruction>(
+            std::make_unique<LdLoc>(V), std::make_unique<LdcI4>(1),
+            BinaryNumericOperator::Add)));
+    block->Add(std::make_unique<StLoc>(V,
+        std::make_unique<BinaryNumericInstruction>(
+            std::make_unique<LdLoc>(V), std::make_unique<LdcI4>(1),
+            BinaryNumericOperator::Sub)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("    V_0 += 2;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("    V_0++;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("    V_0--;\n"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, PlainStoreWhenLeftIsNotTheTarget) {
+    // `V = other + expr` (left is a different variable) stays a plain store.
+    auto V = MakeVar(VariableKind::Local, "V_0", 0);
+    auto other = MakeVar(VariableKind::Parameter, "arg_1", 1);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(V,
+        std::make_unique<BinaryNumericInstruction>(
+            std::make_unique<LdLoc>(other), std::make_unique<LdcI4>(1),
+            BinaryNumericOperator::Add)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "int arg_1");
+    EXPECT_NE(text.find("    var V_0 = (arg_1 + 1);\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("V_0 += "), std::string::npos) << "not a compound assignment";
+}
+
 TEST(ILAstToCSharp, ConstantTrueCatchFilterIsOmitted) {
     // A plain catch carries the constant filter ldc.i4(1) (BlockBuilder.cs);
     // the C#-text seed prints it as a plain `catch (T name)`, no `when`.
