@@ -62,6 +62,7 @@
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
 #include "Decompiler/IL/ControlFlow/ControlFlowSimplification.hpp"
 #include "Decompiler/IL/ControlFlow/LoopDetection.hpp"
@@ -460,6 +461,153 @@ TEST(NullCoalescingTransform, RejectsNoNextBlock) {
 
     EXPECT_EQ(CountNullCoalescing(*fn), 0)
         << "a ?? with no next block must not fold (no fall-through target)";
+    EXPECT_EQ(fn->Body->Blocks[0]->FinalInstruction->Op, OpCode::IfInstruction);
+}
+
+// The throw-expression case: `stloc s(value); if (comp(eq, s, ldnull))
+// throw(exc) }` -> `stloc s(if.notnull(value, throw(exc)))` (the C# 7.0
+// `a ?? throw ...` form). Gated on the ThrowExpressions setting (default true).
+// The Throw's resultType is mutated to O so the NullCoalescingInstruction's
+// ResultType (the FallbackInst's) matches the reference-type value.
+TEST(NullCoalescingTransform, ThrowExpressionFoldProducesNullCoalescing) {
+    auto s = MakeStackSlot("s", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto a = MakeLocal("a", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto exc = MakeLocal("exc", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto fn = MakeTwoBlockFn({s, a, exc});
+    // block0: stloc s(ldloc a); if (comp(eq, s, ldnull)) throw(ldloc exc)
+    auto& b0 = fn->Body->Blocks[0];
+    b0->Add(std::make_unique<StLoc>(s, std::make_unique<LdLoc>(a)));
+    auto cond = std::make_unique<Comp>(std::make_unique<LdLoc>(s),
+                                        std::make_unique<LdNull>(),
+                                        ComparisonKind::Equality);
+    // A bare Throw true arm (not wrapped in a Block).
+    auto iff = std::make_unique<IfInstruction>(std::move(cond),
+        std::make_unique<Throw>(std::make_unique<LdLoc>(exc)));
+    b0->SetFinal(std::move(iff));
+    fn->Body->Blocks[1]->Add(std::make_unique<LdLoc>(s));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountNullCoalescing(*fn), 0);
+
+    RunNullCoalescingTransform(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*fn), 1)
+        << "the throw-expression fold must produce exactly one "
+           "NullCoalescingInstruction";
+    auto& b0b = fn->Body->Blocks[0];
+    ASSERT_EQ(b0b->Instructions.size(), 1u);
+    auto* st = static_cast<StLoc*>(b0b->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::NullCoalescingInstruction);
+    auto* nc = static_cast<NullCoalescingInstruction*>(st->Value.get());
+    EXPECT_EQ(nc->Kind, NullCoalescingKind::Ref);
+    EXPECT_EQ(nc->ValueInst->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(nc->ValueInst.get())->Variable.get(), a.get());
+    ASSERT_EQ(nc->FallbackInst->Op, OpCode::Throw)
+        << "FallbackInst is the Throw";
+    auto* th = static_cast<Throw*>(nc->FallbackInst.get());
+    EXPECT_EQ(th->resultType, StackType::O)
+        << "the Throw's resultType must be mutated to O";
+    EXPECT_EQ(th->ResultType(), StackType::O)
+        << "the Throw's ResultType() must report O";
+    EXPECT_EQ(nc->ResultType(), StackType::O)
+        << "the NullCoalescingInstruction's ResultType must be O "
+           "(the FallbackInst's, matching the reference-type value)";
+    ASSERT_EQ(th->Argument->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(th->Argument.get())->Variable.get(), exc.get());
+    ASSERT_EQ(b0b->FinalInstruction->Op, OpCode::Branch)
+        << "the if-final must be replaced with a Branch to the next block";
+}
+
+// The throw-expression fold also fires when the Throw is wrapped in a single-
+// instruction expression Block (Block.Unwrap peels it).
+TEST(NullCoalescingTransform, ThrowExpressionFoldWithBlockWrappedThrow) {
+    auto s = MakeStackSlot("s", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto a = MakeLocal("a", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto exc = MakeLocal("exc", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto fn = MakeTwoBlockFn({s, a, exc});
+    auto& b0 = fn->Body->Blocks[0];
+    b0->Add(std::make_unique<StLoc>(s, std::make_unique<LdLoc>(a)));
+    // A Block wrapping a single Throw (no FinalInstruction -- an expression
+    // Block, the shape ConditionDetection's TryInlineIfFallThrough produces).
+    auto throwBlock = std::make_unique<Block>();
+    throwBlock->Add(std::make_unique<Throw>(std::make_unique<LdLoc>(exc)));
+    auto cond = std::make_unique<Comp>(std::make_unique<LdLoc>(s),
+                                        std::make_unique<LdNull>(),
+                                        ComparisonKind::Equality);
+    b0->SetFinal(std::make_unique<IfInstruction>(std::move(cond),
+        std::move(throwBlock)));
+    fn->Body->Blocks[1]->Add(std::make_unique<LdLoc>(s));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountNullCoalescing(*fn), 0);
+
+    RunNullCoalescingTransform(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*fn), 1);
+    auto& b0b = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(b0b->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::NullCoalescingInstruction);
+    auto* nc = static_cast<NullCoalescingInstruction*>(st->Value.get());
+    ASSERT_EQ(nc->FallbackInst->Op, OpCode::Throw);
+    EXPECT_EQ(static_cast<Throw*>(nc->FallbackInst.get())->resultType, StackType::O);
+}
+
+// Rejects a non-Throw true arm (the throw-expression fold requires the true arm
+// to be a Throw, not some other instruction).
+TEST(NullCoalescingTransform, ThrowExpressionRejectsNonThrowTrueArm) {
+    auto s = MakeStackSlot("s", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto a = MakeLocal("a", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto b = MakeLocal("b", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto fn = MakeTwoBlockFn({s, a, b});
+    auto& b0 = fn->Body->Blocks[0];
+    b0->Add(std::make_unique<StLoc>(s, std::make_unique<LdLoc>(a)));
+    // A true arm that is a bare LdLoc (not a Throw, not a StLoc to s) --
+    // none of the TransformRefTypes cases match.
+    auto cond = std::make_unique<Comp>(std::make_unique<LdLoc>(s),
+                                        std::make_unique<LdNull>(),
+                                        ComparisonKind::Equality);
+    b0->SetFinal(std::make_unique<IfInstruction>(std::move(cond),
+        std::make_unique<LdLoc>(b)));
+    fn->Body->Blocks[1]->Add(std::make_unique<LdLoc>(s));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunNullCoalescingTransform(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*fn), 0)
+        << "a non-Throw true arm must not fold";
+    EXPECT_EQ(fn->Body->Blocks[0]->FinalInstruction->Op, OpCode::IfInstruction);
+}
+
+// ThrowExpressions-off: the throw-expression fold is gated on the setting.
+// When off, a Throw true arm does not fold (the if stays).
+TEST(NullCoalescingTransform, ThrowExpressionsOffKeepsThrow) {
+    auto s = MakeStackSlot("s", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto a = MakeLocal("a", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto exc = MakeLocal("exc", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto fn = MakeTwoBlockFn({s, a, exc});
+    auto& b0 = fn->Body->Blocks[0];
+    b0->Add(std::make_unique<StLoc>(s, std::make_unique<LdLoc>(a)));
+    auto cond = std::make_unique<Comp>(std::make_unique<LdLoc>(s),
+                                        std::make_unique<LdNull>(),
+                                        ComparisonKind::Equality);
+    b0->SetFinal(std::make_unique<IfInstruction>(std::move(cond),
+        std::make_unique<Throw>(std::make_unique<LdLoc>(exc))));
+    fn->Body->Blocks[1]->Add(std::make_unique<LdLoc>(s));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // Run with ThrowExpressions off -- the fold must not fire.
+    StatementTransform st;
+    st.AddChild(std::make_unique<ILInlining>());
+    st.AddChild(std::make_unique<ExpressionTransforms>());
+    st.AddChild(std::make_unique<NullCoalescingTransform>());
+    ILTransformContext ctx;
+    ctx.Settings.ThrowExpressions = false;
+    st.Run(*fn, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*fn), 0)
+        << "with ThrowExpressions off the throw true arm must not fold";
     EXPECT_EQ(fn->Body->Blocks[0]->FinalInstruction->Op, OpCode::IfInstruction);
 }
 

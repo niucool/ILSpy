@@ -28,15 +28,15 @@
 //   stloc s(if.notnull(value, fallback))
 // (then ILInlining folds the single-use `s` into its load). The Nullable<T> `??`
 // is handled by NullableLiftingTransform (deferred). This iteration ports the
-// TransformRefTypes subset -- the simple case and the temp-variable case -- for
-// reference types. The throw-expression cases (TransformRefTypes's `Throw` arm,
-// TransformHoistedConstructorArgumentNullGuard, TransformThrowExpressionValueTypes)
-// are deferred: they need the ThrowExpressions setting + a mutable Throw
-// ResultType (this port's Throw has a fixed Void ResultType, but the
-// NullCoalescingInstruction's FallbackInst, the Throw, must be O-typed to match
-// the value) + ILFunction.Method metadata (IsConstructor/IsStatic) +
-// ILInlining.IsInConstructorInitializer + ILInlining.FindLoadInNext with a
-// movable expression + MatchLogicNot / MatchHasValueCall wiring.
+// TransformRefTypes subset -- the simple case, the temp-variable case, and the
+// throw-expression case (the C# 7.0 `a ?? throw ...` form, gated on the
+// ThrowExpressions setting, which mutates the Throw's resultType to O so the
+// NullCoalescingInstruction's ResultType matches the reference-type value).
+// TransformHoistedConstructorArgumentNullGuard and TransformThrowExpression-
+// ValueTypes are deferred: they need ILFunction.Method metadata
+// (IsConstructor/IsStatic) + ILInlining.IsInConstructorInitializer +
+// ILInlining.FindLoadInNext with a movable expression + MatchLogicNot /
+// MatchHasValueCall wiring for the value-types case.
 //
 // Adapted to this port's if-as-final block model: the C# carries the if as a
 // non-terminal at `block.Instructions[pos+1]` and removes it via
@@ -73,8 +73,9 @@ private:
     // TransformRefTypes: the reference-type `??` pattern
     //   stloc s(value); if (comp(ldloc s == ldnull)) { stloc s(fallback) }
     //   => stloc s(if.notnull(value, fallback))
-    // (plus the temp-variable variant). Adapted to the if-as-final block model.
-    // Returns true if a fold fired.
+    // (plus the temp-variable variant and the throw-expression `a ?? throw ...`
+    // variant, gated on the ThrowExpressions setting). Adapted to the if-as-
+    // final block model. Returns true if a fold fired.
     bool TransformRefTypes(Block& block, int pos, StatementTransformContext& context);
 };
 

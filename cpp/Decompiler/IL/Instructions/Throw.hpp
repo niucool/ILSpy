@@ -35,7 +35,12 @@ public:
     InstructionFlags DirectFlags() const override {
         return InstructionFlags::None | InstructionFlags::MayThrow | InstructionFlags::EndPointUnreachable;
     }
-    StackType ResultType() const override { return StackType::Void; }
+    // Faithful to the C# `internal StackType resultType = StackType.Void;`
+    // field: a throw-expression (`a ?? throw ...`) mutates this to O so the
+    // NullCoalescingInstruction wrapping the Throw has a matching reference-
+    // type result. Defaults to Void for an ordinary `throw ...;` statement.
+    StackType resultType = StackType::Void;
+    StackType ResultType() const override { return resultType; }
     void WriteTo(std::string& out) const override {
         out += "throw ";
         if (Argument) Argument->WriteTo(out); else out += "(null)";

@@ -112,6 +112,14 @@ struct ILTransformSettings {
     // and as a per-statement child of StatementTransform (the void-call /
     // unconstrained-generic patterns).
     bool NullPropagation = true;
+    // Whether to emit throw expressions (`a ?? throw ...`, `arg ?? throw ...`).
+    // DecompilerSettings.ThrowExpressions -- a C# 7.0 setting, default true
+    // (false only for the C# 6 / .NET Framework 1.x compatibility profile).
+    // Gates the NullCoalescingTransform throw-expression folds (the reference-
+    // type `a ?? throw ...` arm and the value-type `?.`-with-throw folds) that
+    // mutate the Throw node's resultType to O so the NullCoalescingInstruction
+    // wrapping it has a matching reference-type result.
+    bool ThrowExpressions = true;
 };
 
 class ILTransformContext {

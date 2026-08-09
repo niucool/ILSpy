@@ -29,6 +29,7 @@
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
 
 namespace ILSpy::Decompiler::IL {
@@ -88,10 +89,11 @@ ILInstruction* BlockUnwrap(ILInstruction* arm) {
 void NullCoalescingTransform::Run(Block& block, int pos, StatementTransformContext& context) {
     if (TransformRefTypes(block, pos, context)) return;
     // TransformHoistedConstructorArgumentNullGuard and TransformThrowExpression-
-    // ValueTypes are deferred (need the ThrowExpressions setting + ILFunction.
-    // Method metadata + ILInlining.IsInConstructorInitializer + ILInlining.
-    // FindLoadInNext with a movable expression + a mutable Throw ResultType +
-    // MatchLogicNot / MatchHasValueCall wiring for the value-types case).
+    // ValueTypes are deferred (need ILFunction.Method metadata +
+    // ILInlining.IsInConstructorInitializer + ILInlining.FindLoadInNext with a
+    // movable expression + MatchLogicNot / MatchHasValueCall wiring for the
+    // value-types case). The reference-type `a ?? throw ...` arm is handled in
+    // TransformRefTypes (gated on the ThrowExpressions setting).
 }
 
 bool NullCoalescingTransform::TransformRefTypes(Block& block, int pos,
@@ -191,10 +193,41 @@ bool NullCoalescingTransform::TransformRefTypes(Block& block, int pos,
         }
     }
 
-    // The throw-expression case (`trueInst is Throw`, the `a ?? throw ...` form)
-    // is deferred (needs the ThrowExpressions setting + a mutable Throw
-    // ResultType so the NullCoalescingInstruction's FallbackInst, the Throw, is
-    // O-typed to match the value -- this port's Throw has a fixed Void ResultType).
+    // The throw-expression case: `stloc s(value); if (comp(eq, s, ldnull))
+    // throw(arg) }` -> `stloc s(if.notnull(value, throw(arg)))` (the C# 7.0
+    // `a ?? throw ...` form). The Throw is normally Void-result, but the
+    // throw-expression form mutates it to O so the NullCoalescingInstruction's
+    // ResultType (the FallbackInst's, the Throw) matches the reference-type
+    // value. Gated on the ThrowExpressions setting (DecompilerSettings, default
+    // true -- false only for the C# 6 / .NET Framework 1.x profile). The true
+    // arm may be a bare Throw or a single-instruction expression Block wrapping
+    // one (Block.Unwrap).
+    if (context.Base.Settings.ThrowExpressions) {
+        ILInstruction* throwArm = BlockUnwrap(iff->TrueInst.get());
+        if (throwArm && throwArm->Op == OpCode::Throw) {
+            auto* throwInst = static_cast<Throw*>(throwArm);
+            context.Base.StepOnce(
+                "NullCoalescingTransform: reference types + throw expression");
+            auto value = stloc->TakeChild(0);
+            // Detach the Throw's argument before the if is destroyed (no GC; a
+            // raw pointer would dangle). Build a fresh Throw carrying the
+            // argument and the O result type -- the throw-expression form
+            // mutates the Throw's resultType to O so the NullCoalescing-
+            // Instruction's ResultType (the FallbackInst's) matches the
+            // reference-type value, faithful to the C#
+            // `throwInst.resultType = StackType.O`.
+            auto throwArg = throwInst->TakeChild(0);
+            auto newThrow = std::make_unique<Throw>(std::move(throwArg));
+            newThrow->resultType = StackType::O;
+            auto nc = std::make_unique<NullCoalescingInstruction>(
+                NullCoalescingKind::Ref, std::move(value), std::move(newThrow));
+            stloc->SetChild(0, std::move(nc));
+            block.SetFinal(std::make_unique<Branch>(nextBlock));
+            InlineOneIfPossible(&block, pos, context.Base);
+            return true;
+        }
+    }
+
     return false;
 }
 

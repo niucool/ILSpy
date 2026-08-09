@@ -561,13 +561,21 @@ implemented and green here. Everything else follows the phase plan in
   `Branch` to the next block -- the fall-through the if's null FalseInst
   represented); `ILInlining.InlineOneIfPossible` was exposed as a public free
   function so the transform can call it after the fold (matching the C#). The
-  throw-expression cases (the `a ?? throw ...` arm, the hoisted-constructor-
-  argument null guard, the value-types throw-expression) are deferred (need the
-  ThrowExpressions setting + a mutable Throw ResultType + ILFunction.Method
-  metadata + ILInlining.IsInConstructorInitializer + MatchLogicNot /
-  MatchHasValueCall wiring). The reference-type `??` lowering is a Roslyn-era
-  codegen pattern; a corpus probe across 8000 mscorlib methods found 1797
-  `comp(eq, ldloc X, ldnull)` null-check ifs and 513 `comp(ne, ..)` but zero
+  throw-expression cases are partially ported: the reference-types `a ??
+  throw ...` arm (the C# 7.0 form `stloc s(value); if (comp(ldloc s == ldnull))
+  throw(arg) }` -> `stloc s(if.notnull(value, throw(arg)))`) is now wired in,
+  gated on the `ThrowExpressions` setting (DecompilerSettings, default true); the
+  Throw node gained a mutable `resultType` field (faithful to the C# `internal
+  StackType resultType = StackType.Void`) that the fold sets to O so the
+  `NullCoalescingInstruction`'s ResultType (the FallbackInst's, the Throw)
+  matches the reference-type value. The hoisted-constructor-argument null guard
+  (needs `ILFunction.Method` metadata + `ILInlining.IsInConstructorInitializer`)
+  and the value-types throw-expression (needs `MatchLogicNot` /
+  `MatchHasValueCall` wiring + `ILInlining.FindLoadInNext` with a movable
+  expression -- the FindLoadInNext helper is file-local in ILInlining.cpp and
+  not yet exposed) are still deferred. The reference-type `??` lowering is a
+  Roslyn-era codegen pattern; a corpus probe across 8000 mscorlib methods found
+  1797 `comp(eq, ldloc X, ldnull)` null-check ifs and 513 `comp(ne, ..)` but zero
   whose arm is a StLoc to the same variable, so the transform fires 0 times on
   the .NET Framework 4 legacy-csc corpus -- ported for faithfulness (the
   hand-built tests verify the rewrite, the sweep verifies the invariant).
