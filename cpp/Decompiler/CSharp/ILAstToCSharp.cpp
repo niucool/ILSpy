@@ -48,6 +48,7 @@
 #include "Decompiler/IL/Instructions/LockInstruction.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/NullableInstructions.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/PinnedRegion.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
@@ -840,6 +841,29 @@ private:
                 std::string left = tv.Left ? Expr(*tv.Left) : std::string("(default)");
                 std::string right = tv.Right ? Expr(*tv.Right) : std::string("(default)");
                 return "(" + left + " | " + right + ")";
+            }
+            case OpCode::NullableRewrap: {
+                // The C# null-conditional rewrap is implicit in the `?.`
+                // surface syntax: `x?.M()` is `nullable.rewrap(M(nullable.unwrap(x)))`,
+                // and the rewrap (which evaluates to null when an inner unwrap
+                // took the null branch) does not appear as a separate operator.
+                // The real back end renders it as a UnaryOperatorExpression
+                // (NullConditionalRewrap) that the output visitor elides. The
+                // seed renders the access-chain argument directly (the Box
+                // precedent -- boxing is implicit in C#; so is the rewrap).
+                const auto& nr = static_cast<const NullableRewrap&>(inst);
+                return nr.Argument ? Expr(*nr.Argument) : std::string("(default)");
+            }
+            case OpCode::NullableUnwrap: {
+                // The C# null-conditional `?.` is the NullableUnwrap. The real
+                // back end renders it as a UnaryOperatorExpression (NullConditional)
+                // whose postfix `?` sits on the receiver of the surrounding
+                // member access (`x?.M`); the seed has no member-access context
+                // here, so it renders the unwrapped value with a trailing `?`
+                // to keep the null-conditional visible (a placeholder until the
+                // real back end lands).
+                const auto& nu = static_cast<const NullableUnwrap&>(inst);
+                return (nu.Argument ? Expr(*nu.Argument) : std::string("(default)")) + "?";
             }
             default:
                 return "(default)/*op=" + std::to_string(static_cast<int>(inst.Op)) + "*/";

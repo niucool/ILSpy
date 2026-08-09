@@ -797,6 +797,31 @@ implemented and green here. Everything else follows the phase plan in
   583-line transform]) and
   the `RunStatements(Block, int)` block transform are the subsequent
   in-order targets.
+  `NullableRewrap` / `NullableUnwrap` (Instructions/, a tested-but-not-yet-wired
+  foundation ported from NullableInstructions.cs) are the ILAst nodes for the C#
+  null-conditional (`?.`) operator -- the next in-order transform
+  (NullPropagationTransform, the `v != null ? v.AccessChain : null` -> `v?.AccessChain`
+  lowering) builds them. `x?.Member` lowers to
+  `nullable.rewrap(Member(nullable.unwrap(x)))`: NullableUnwrap is the `?.`
+  deref (carries MayUnwrapNull so the surrounding rewrap can find it; has a
+  RefInput flag and a ResultType field for the unwrapped type) and
+  NullableRewrap is the join point (DirectFlags ControlFlow, strips the
+  Argument's MayUnwrapNull + EndPointUnreachable and adds ControlFlow, ResultType
+  O for a non-void Argument / Void for a `?.` statement). Neither is an
+  IStoreInstruction (UnaryInstruction, no Variable), so no
+  ComputeVariableUsage case is needed. The seed renders NullableRewrap as its
+  argument (the rewrap is implicit in `?.`) and NullableUnwrap with a trailing
+  `?` (a placeholder for the `?.` postfix). Not wired into any transform yet;
+  the mscorlib sweep constructs a `?.` chain over real LdLoc operands. A
+  corpus probe (D103) found the field-cached delegate shapes (the D77-deferred
+  `WithField` / `RoslynInStaticWithLocal` / `RoslynWithLocal` / VB shapes) do
+  NOT appear in the .NET Framework 4 mscorlib corpus in the C# expected form
+  (0 if-finals comparing a CG `ldsfld` to `ldnull`, 0 `stobj(ldsflda CG,
+  delegateConstruction)` stores); the corpus's 67 CG `ldsflda` nodes are
+  Roslyn display-class cached-delegate fields (`<>c::<>9__N_M`) but in a
+  brtrue/else shape with an extra result temp that the C# shapes do not
+  directly match -- a larger, riskier slice deferred until the exact Roslyn
+  variant is understood.
   `BitSet` (Util/, a tested foundation ported from BitSet.cs) is the
   fixed-capacity 64-bit-word bitset the `DoLift`/`DoLiftBinary` relevance
   analysis returns -- `bits.All(0, nullableVars.Count)` is the "every nullable
