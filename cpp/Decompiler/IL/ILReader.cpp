@@ -807,7 +807,17 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             bool negate = (op == ILOpCode::Brfalse || op == ILOpCode::Brfalse_s);
             std::unique_ptr<ILInstruction> condition;
             if (!negate) {
-                condition = std::move(cond);
+                // brtrue: branch if cond is non-zero / non-null. A bare object
+                // reference is normalized to `cond != null` so the seed renders
+                // `if (value != null)` (and inversion yields `== null`); I4
+                // values stay bare (`if (flag)`). A Comp/IfInstruction already
+                // produces I4 and is left as-is.
+                if (cond->ResultType() == StackType::O) {
+                    condition = std::make_unique<Comp>(std::move(cond),
+                        std::make_unique<LdNull>(), ComparisonKind::Inequality, false);
+                } else {
+                    condition = std::move(cond);
+                }
             } else {
                 // brfalse: branch if cond == 0/null. Emit Comp(Equality, cond, zero).
                 auto zero = (cond->ResultType() == StackType::O)

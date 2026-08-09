@@ -27,6 +27,7 @@
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 
 #include <functional>
@@ -121,7 +122,12 @@ std::unique_ptr<ILInstruction> NegateCondition(std::unique_ptr<ILInstruction> co
         if (iff->FalseInst) iff->FalseInst->ChildIndex = 2;
         return cond;
     }
-    return std::make_unique<Comp>(std::move(cond), std::make_unique<LdcI4>(0),
+    // Otherwise wrap as logic.not: comp(x == 0) for primitives, comp(x == null)
+    // for object-typed conditions (a bare reference used as a boolean).
+    auto zero = (cond->ResultType() == StackType::O)
+        ? std::unique_ptr<ILInstruction>(std::make_unique<LdNull>())
+        : std::unique_ptr<ILInstruction>(std::make_unique<LdcI4>(0));
+    return std::make_unique<Comp>(std::move(cond), std::move(zero),
                                     ComparisonKind::Equality);
 }
 
