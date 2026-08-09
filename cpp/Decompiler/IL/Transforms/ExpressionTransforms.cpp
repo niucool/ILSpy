@@ -31,6 +31,7 @@
 #include "Decompiler/IL/Instructions/Conv.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
@@ -99,6 +100,23 @@ bool IsLdcI4ZeroMaybeConv(const ILInstruction* inst) {
 
 bool IsEqualityOrInequality(ComparisonKind k) {
     return k == ComparisonKind::Equality || k == ComparisonKind::Inequality;
+}
+
+// Port of ILInstruction.MatchLogicNot(out arg): logic.not(X) is this port's
+// `comp(Equality, X, ldc.i4(0))` shape (the reader's brfalse, per the
+// SwitchAnalysis / ConditionDetection / MatchInstruction convention). Returns
+// true and sets `arg` to the negated expression (comp->Left). Sign-independent,
+// so a `comp.eq.un X 0` (Unsigned) is not a brfalse shape. Mirrors the file-local
+// MatchLogicNot in NullableLiftingTransform.cpp / MatchInstruction.hpp.
+bool MatchLogicNot(ILInstruction* inst, ILInstruction*& arg) {
+    arg = nullptr;
+    if (!inst || inst->Op != OpCode::Comp) return false;
+    auto* comp = static_cast<Comp*>(inst);
+    if (comp->Kind != ComparisonKind::Equality || comp->Unsigned) return false;
+    if (!comp->Right || comp->Right->Op != OpCode::LdcI4) return false;
+    if (static_cast<LdcI4*>(comp->Right.get())->Value != 0) return false;
+    arg = comp->Left.get();
+    return true;
 }
 
 // Port of ExpressionTransforms.MatchExpectedShiftSize: the mask a shift's right
@@ -213,6 +231,49 @@ bool ArmIsLdcI4(const ILInstruction* arm, int value) {
         return ArmIsLdcI4(blk->Instructions[0].get(), value);
     }
     return false;
+}
+
+// Build the C#-lifted Comp (`comp(kind, ldloc v, ldc.i4 constant)` lifted C#,
+// the D91 model) and replace the if with it, applying the block-model adaptation
+// (ReplaceWith for a sub-expression value, Add + SetFinal(Branch) for a block-
+// final if). The `ldloc v` loads the Nullable<bool>; the lifted comp checks
+// HasValue then compares the underlying Boolean (I4). Fresh LdLoc / LdcI4 nodes
+// (no ILRange in this port; the C# `.WithILRange(..)` is skipped). The Comp is a
+// value (not control flow), so the block-model adaptation follows FoldMatchTrue
+// False: a clean ReplaceWith when the if is a sub-expression value, or the Comp
+// becomes a non-terminal statement + a Branch to the next block replaces the
+// if-final when the if is a block's FinalInstruction (a Comp cannot be a block
+// final). Returns true if the if was replaced (the if is destroyed).
+bool FinishIfNullableLift(IfInstruction* iff, ComparisonKind kind,
+                         const ILVariablePtr& v, int constant) {
+    auto comp = std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v),
+        std::make_unique<LdcI4>(constant),
+        kind, ComparisonLiftingKind::CSharp, StackType::I4);
+    auto* block = dynamic_cast<Block*>(iff->Parent);
+    bool isBlockFinal = block && block->FinalInstruction.get() == iff;
+    Block* nextBlock = nullptr;
+    if (isBlockFinal) {
+        nextBlock = NextBlockInContainer(block);
+        if (!nextBlock) return false;  // no fall-through target; leave the if
+    }
+    if (isBlockFinal) {
+        // The Comp (a value, no side effect) becomes a non-terminal statement
+        // (its value is discarded, matching the if-as-statement whose value
+        // was discarded) and a Branch to the next block replaces the if-final.
+        block->Add(std::move(comp));
+        block->SetFinal(std::make_unique<Branch>(nextBlock));  // destroys the if
+    } else {
+        // The if is a sub-expression value (e.g. `stloc V(if (...) ..)`);
+        // ReplaceWith is a clean in-place swap (the C# `ifInst.ReplaceWith(lifted)`).
+        iff->ReplaceWith(std::move(comp));  // destroys the if
+    }
+    // The C# does not re-visit the lifted Comp (it is a fresh leaf-load +
+    // constant comparison; no VisitComp rewrite fires on a lifted eq/ne with
+    // a LdLoc Left and a LdcI4 Right -- the head rewrites require Right == 0
+    // for logic.not / comp(!=0)=>x, and RunCompNullableLift requires a GetValueOr
+    // Default call on one side), so no cascade is needed.
+    return true;
 }
 
 } // namespace
@@ -606,6 +667,76 @@ void ExpressionTransforms::VisitCall(Call* inst) {
     for (auto& arg : inst->Arguments) Visit(arg.get());
 }
 
+bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
+    // Port of NullableLiftingTransform.Run(IfInstruction) -- the bool? equality
+    // comparison subset of the `Lift` method. A conditional whose condition is
+    // `call GetValueOrDefault(ldloca v)` on a Nullable<bool> (the underlying
+    // type is Boolean) and whose arms are `v.HasValue` / a ldc.i4 constant folds
+    // into a C#-lifted Comp (the D91 model):
+    //   v.GetValueOrDefault() ? v.HasValue : false  ==> v == true
+    //   v.GetValueOrDefault() ? false : v.HasValue  ==> v == false
+    //   v.GetValueOrDefault() ? !v.HasValue : true  ==> v != true
+    //   v.GetValueOrDefault() ? true : !v.HasValue  ==> v != false
+    // The AnalyzeCondition / LiftNormal path (the multi-HasValue `&&` lift), the
+    // MatchCompOrDecimal / LiftCSharp* path (the comparison lift), the
+    // NullPropagation path, and the `&` / `|` on bool? path (ThreeValuedBoolAnd/
+    // Or) are deferred -- each needs further infrastructure (DoLift, the BitSet
+    // nullable-vars relevance analysis, NullPropagationTransform, MatchNullable
+    // Ctor + ThreeValuedBool nodes). Gated on LiftNullables (the C#
+    // `context.Settings.LiftNullables`).
+    if (!iff || !iff->Condition) return false;
+    if (!settings_ || !settings_->LiftNullables) return false;
+
+    // The condition and arms (non-owning views). The logic.not unwrap loop may
+    // swap the arms (the C# `while (condition.MatchLogicNot(out var arg))
+    // { condition = arg; Swap(ref trueInst, ref falseInst); }`). The condition is
+    // detached only if a fold fires; the arms are never detached (the lifted Comp
+    // uses a fresh LdLoc(v) + LdcI4, not the arms), so the non-owning views stay
+    // valid through the match.
+    ILInstruction* condition = iff->Condition.get();
+    ILInstruction* trueInst = iff->TrueInst.get();
+    ILInstruction* falseInst = iff->FalseInst.get();
+    ILInstruction* inner = nullptr;
+    while (MatchLogicNot(condition, inner)) {
+        condition = inner;
+        std::swap(trueInst, falseInst);
+    }
+
+    // Handle equality comparisons with bool?: the condition is
+    // `call GetValueOrDefault(ldloca v)` on a Nullable<bool> (GetUnderlyingTypeOf
+    // Nullable(v.Type) is Boolean). The four folds produce a C#-lifted Comp whose
+    // Left is `ldloc v` and whose Right is the ldc.i4 constant (1 for `v == true`
+    // / `v != true`, 0 for `v == false` / `v != false`).
+    ILVariablePtr v;
+    if (NullableLiftingTransform::MatchGetValueOrDefault(condition, v) &&
+        v && v->Type &&
+        NullableLiftingTransform::IsKnownType(
+            NullableLiftingTransform::GetUnderlyingTypeOfNullable(v->Type.get()),
+            TypeSystem::KnownTypeCode::Boolean)) {
+        // v.GetValueOrDefault() ? v.HasValue : false ==> v == true
+        if (NullableLiftingTransform::MatchHasValueCall(trueInst, v.get()) &&
+            IsLdcI4(falseInst, 0)) {
+            return FinishIfNullableLift(iff, ComparisonKind::Equality, v, 1);
+        }
+        // v.GetValueOrDefault() ? false : v.HasValue ==> v == false
+        if (IsLdcI4(trueInst, 0) &&
+            NullableLiftingTransform::MatchHasValueCall(falseInst, v.get())) {
+            return FinishIfNullableLift(iff, ComparisonKind::Equality, v, 0);
+        }
+        // v.GetValueOrDefault() ? !v.HasValue : true ==> v != true
+        if (NullableLiftingTransform::MatchNegatedHasValueCall(trueInst, v.get()) &&
+            IsLdcI4(falseInst, 1)) {
+            return FinishIfNullableLift(iff, ComparisonKind::Inequality, v, 1);
+        }
+        // v.GetValueOrDefault() ? true : !v.HasValue ==> v != false
+        if (IsLdcI4(trueInst, 1) &&
+            NullableLiftingTransform::MatchNegatedHasValueCall(falseInst, v.get())) {
+            return FinishIfNullableLift(iff, ComparisonKind::Inequality, v, 0);
+        }
+    }
+    return false;
+}
+
 void ExpressionTransforms::VisitIfInstruction(IfInstruction* iff) {
     if (!iff) return;
     // The C# visits TrueInst and FalseInst (recursing), then runs
@@ -624,10 +755,12 @@ void ExpressionTransforms::VisitIfInstruction(IfInstruction* iff) {
     // Process the condition after the potential modifications (the C# order).
     if (iff->Condition) Visit(iff->Condition.get());
 
-    // The C# then runs NullableLiftingTransform, TransformDynamicAddAssignOr-
-    // RemoveAssign, and UserDefinedLogicTransform (all deferred -- they need the
-    // full nullable-lift transform, DynamicIsEventInstruction, and
-    // MatchLogicAnd/Or respectively) before the `match(x) ? true : false` fold.
+    // The C# then runs NullableLiftingTransform (the Run(IfInstruction) bool?
+    // equality fold -- now ported as RunIfNullableLift), then TransformDynamic-
+    // AddAssignOrRemoveAssign and UserDefinedLogicTransform (both deferred -- they
+    // need DynamicIsEventInstruction and MatchLogicAnd/Or) before the
+    // `match(x) ? true : false` fold.
+    if (RunIfNullableLift(iff)) return;  // the if was replaced by a lifted Comp
     if (FoldMatchTrueFalse(iff)) return;  // the if was replaced by the match
 }
 

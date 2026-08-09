@@ -1653,6 +1653,24 @@ int CountGetValueOrDefaultOneArg(ILFunction& fn) {
     return n;
 }
 
+// Count 1-arg `call get_HasValue(ldloca v)` calls on System.Nullable<T> -- the
+// arm RunIfNullableLift consumes in the bool? equality fold (each fold removes
+// one such call from the true/false arm; nothing in this subset creates one).
+// The fold is monotone non-increasing for this count. Used by the sweep.
+int CountHasValueCall(ILFunction& fn) {
+    int n = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::Call) {
+            ILInstruction* a = nullptr;
+            if (NullableLiftingTransform::MatchHasValueCall(inst, a)) ++n;
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return n;
+}
+
 // VisitCall folds `call Nullable<T>.GetValueOrDefault(nullableValue, fallback)`
 // (a pure fallback) into a NullCoalescingInstruction (NullableWithValueFallback)
 // whose ValueInst is `ldobj Nullable<T>(nullableValue)` and FallbackInst is the
@@ -2072,6 +2090,328 @@ TEST(ExpressionTransforms, RunCompNullableLiftNoOpWhenLiftNullablesOff) {
     ASSERT_EQ(static_cast<Comp*>(stLoc->Value.get())->Left->Op, OpCode::Call);
 }
 
+// RunIfNullableLift (NullableLiftingTransform.Run(IfInstruction) bool? equality
+// fold): `v.GetValueOrDefault() ? v.HasValue : false` ==> `v == true` (a C#-lifted
+// Comp `comp.lifted[C#](ldloc v, ldc.i4 1)`). The condition is the 1-arg
+// GetValueOrDefault call on Nullable<bool>; the true arm is the HasValue call on
+// the same variable; the false arm is ldc.i4 0. The if is a sub-expression value
+// (wrapped in a stloc), so the fold is a clean ReplaceWith.
+TEST(ExpressionTransforms, RunIfNullableLiftFoldsGetValueOrDefaultHasValueFalse) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    // condition: call Nullable<bool>::GetValueOrDefault(ldloca v)
+    auto cond = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    cond->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    cond->AddArg(std::make_unique<LdLoca>(v));
+    // true arm: call Nullable<bool>::get_HasValue(ldloca v)
+    auto hasVal = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    hasVal->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    hasVal->AddArg(std::make_unique<LdLoca>(v));
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(hasVal),
+                                               std::make_unique<LdcI4>(0));
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountLiftedComps(*fn), 0);
+    ASSERT_EQ(CountHasValueCall(*fn), 1);
+    ASSERT_EQ(CountGetValueOrDefaultOneArg(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 1) << "the bool? fold must produce a lifted comp";
+    EXPECT_EQ(CountHasValueCall(*fn), 0) << "the HasValue call must be folded away";
+    EXPECT_EQ(CountGetValueOrDefaultOneArg(*fn), 0)
+        << "the GetValueOrDefault call must be folded away";
+    auto& blk = fn->Body->Blocks[0];
+    ASSERT_EQ(blk->Instructions.size(), 1u);
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp) << "the stloc now wraps the lifted comp";
+    auto* c = static_cast<Comp*>(st->Value.get());
+    EXPECT_EQ(c->LiftingKind, ComparisonLiftingKind::CSharp);
+    EXPECT_EQ(c->Kind, ComparisonKind::Equality) << "==> v == true";
+    ASSERT_EQ(c->Left->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(c->Left.get())->Variable.get(), v.get());
+    ASSERT_EQ(c->Right->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(c->Right.get())->Value, 1) << "==> v == true (1)";
+}
+
+// `v.GetValueOrDefault() ? false : v.HasValue` ==> `v == false`. The true arm is
+// ldc.i4 0 and the false arm is the HasValue call; CanonicalizeLogicAndOr swaps
+// the arms + negates the condition, then the logic.not unwrap in RunIfNullableLift
+// re-swaps, so the `IsLdcI4(trueInst, 0) && MatchHasValueCall(falseInst, v)` branch
+// fires and the fold produces `comp.lifted[C#](ldloc v, ldc.i4 0)`.
+TEST(ExpressionTransforms, RunIfNullableLiftFoldsFalseHasValue) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto cond = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    cond->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    cond->AddArg(std::make_unique<LdLoca>(v));
+    auto hasVal = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    hasVal->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    hasVal->AddArg(std::make_unique<LdLoca>(v));
+    // true arm = ldc.i4 0 (false), false arm = HasValue (the `v == false` shape).
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::make_unique<LdcI4>(0),
+                                               std::move(hasVal));
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 1);
+    EXPECT_EQ(CountHasValueCall(*fn), 0);
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp);
+    auto* c = static_cast<Comp*>(st->Value.get());
+    EXPECT_EQ(c->LiftingKind, ComparisonLiftingKind::CSharp);
+    EXPECT_EQ(c->Kind, ComparisonKind::Equality) << "==> v == false";
+    ASSERT_EQ(c->Right->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(c->Right.get())->Value, 0) << "==> v == false (0)";
+}
+
+// `v.GetValueOrDefault() ? !v.HasValue : true` ==> `v != true`. The true arm is
+// `logic.not(call get_HasValue(ldloca v))` (this port's comp(eq, HasValue, 0)
+// shape) and the false arm is ldc.i4 1.
+TEST(ExpressionTransforms, RunIfNullableLiftFoldsNegatedHasValueTrue) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto cond = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    cond->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    cond->AddArg(std::make_unique<LdLoca>(v));
+    auto hasVal = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    hasVal->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    hasVal->AddArg(std::make_unique<LdLoca>(v));
+    // true arm = !v.HasValue (comp(eq, HasValue, 0)), false arm = ldc.i4 1.
+    auto negHasVal = std::make_unique<Comp>(std::move(hasVal), std::make_unique<LdcI4>(0),
+                                            ComparisonKind::Equality);
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(negHasVal),
+                                               std::make_unique<LdcI4>(1));
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 1);
+    EXPECT_EQ(CountHasValueCall(*fn), 0);
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp);
+    auto* c = static_cast<Comp*>(st->Value.get());
+    EXPECT_EQ(c->LiftingKind, ComparisonLiftingKind::CSharp);
+    EXPECT_EQ(c->Kind, ComparisonKind::Inequality) << "==> v != true";
+    ASSERT_EQ(c->Right->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(c->Right.get())->Value, 1) << "==> v != true (1)";
+}
+
+// `v.GetValueOrDefault() ? true : !v.HasValue` ==> `v != false`. The true arm is
+// ldc.i4 1 and the false arm is `logic.not(call get_HasValue(ldloca v))`.
+TEST(ExpressionTransforms, RunIfNullableLiftFoldsTrueNegatedHasValue) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto cond = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    cond->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    cond->AddArg(std::make_unique<LdLoca>(v));
+    auto hasVal = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    hasVal->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    hasVal->AddArg(std::make_unique<LdLoca>(v));
+    // false arm = !v.HasValue (comp(eq, HasValue, 0)), true arm = ldc.i4 1.
+    auto negHasVal = std::make_unique<Comp>(std::move(hasVal), std::make_unique<LdcI4>(0),
+                                            ComparisonKind::Equality);
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::make_unique<LdcI4>(1),
+                                               std::move(negHasVal));
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 1);
+    EXPECT_EQ(CountHasValueCall(*fn), 0);
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp);
+    auto* c = static_cast<Comp*>(st->Value.get());
+    EXPECT_EQ(c->LiftingKind, ComparisonLiftingKind::CSharp);
+    EXPECT_EQ(c->Kind, ComparisonKind::Inequality) << "==> v != false";
+    ASSERT_EQ(c->Right->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(c->Right.get())->Value, 0) << "==> v != false (0)";
+}
+
+// RunIfNullableLift does not fire when the Nullable's underlying type is not
+// Boolean (here Nullable<int>): the IsKnownType(underlying, Boolean) gate
+// fails, so the if stays.
+TEST(ExpressionTransforms, RunIfNullableLiftRejectsNonBooleanUnderlyingType) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto cond = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    cond->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    cond->AddArg(std::make_unique<LdLoca>(v));
+    auto hasVal = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    hasVal->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    hasVal->AddArg(std::make_unique<LdLoca>(v));
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(hasVal),
+                                               std::make_unique<LdcI4>(0));
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 0)
+        << "a non-Boolean underlying type must not lift";
+    // The HasValue call stays (the fold did not fire).
+    EXPECT_EQ(CountHasValueCall(*fn), 1);
+}
+
+// RunIfNullableLift does not fire when the true arm is the HasValue call but the
+// false arm is not ldc.i4 0 (here ldc.i4 2): none of the four branches match.
+TEST(ExpressionTransforms, RunIfNullableLiftRejectsWrongConstantArm) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto cond = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    cond->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    cond->AddArg(std::make_unique<LdLoca>(v));
+    auto hasVal = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    hasVal->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    hasVal->AddArg(std::make_unique<LdLoca>(v));
+    // false arm = ldc.i4 2 (not 0 or 1) -- no branch matches.
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(hasVal),
+                                               std::make_unique<LdcI4>(2));
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 0) << "a wrong constant arm must not lift";
+}
+
+// RunIfNullableLift does not fire when the condition is not a GetValueOrDefault
+// call (here a bare ldloc v): MatchGetValueOrDefault fails, so the if stays.
+TEST(ExpressionTransforms, RunIfNullableLiftRejectsNonGetValueOrDefaultCondition) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto hasVal = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    hasVal->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    hasVal->AddArg(std::make_unique<LdLoca>(v));
+    // condition = ldloc v (not a GetValueOrDefault call).
+    auto iff = std::make_unique<IfInstruction>(std::make_unique<LdLoc>(v),
+                                               std::move(hasVal),
+                                               std::make_unique<LdcI4>(0));
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 0)
+        << "a non-GetValueOrDefault condition must not lift";
+}
+
+// RunIfNullableLift does not fire when the HasValue call is on a different
+// variable than the GetValueOrDefault call (v vs w): MatchHasValueCall(arm, v)
+// checks the variable, so the fold bails.
+TEST(ExpressionTransforms, RunIfNullableLiftRejectsHasValueOnDifferentVariable) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto w = MakeLocal("w", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto cond = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    cond->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    cond->AddArg(std::make_unique<LdLoca>(v));
+    auto hasVal = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    hasVal->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    hasVal->AddArg(std::make_unique<LdLoca>(w));  // different variable w
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(hasVal),
+                                               std::make_unique<LdcI4>(0));
+    auto fn = MakeFnWithBlock({result, v, w});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 0)
+        << "a HasValue call on a different variable must not lift";
+}
+
+// RunIfNullableLift does not fire when the LiftNullables setting is off (the C#
+// `context.Settings.LiftNullables` gate): the if stays.
+TEST(ExpressionTransforms, RunIfNullableLiftNoOpWhenLiftNullablesOff) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto cond = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    cond->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    cond->AddArg(std::make_unique<LdLoca>(v));
+    auto hasVal = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    hasVal->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    hasVal->AddArg(std::make_unique<LdLoca>(v));
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(hasVal),
+                                               std::make_unique<LdcI4>(0));
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    StatementTransform st;
+    st.AddChild(std::make_unique<ExpressionTransforms>());
+    ILTransformContext ctx;
+    ctx.Settings.LiftNullables = false;
+    st.Run(*fn, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 0) << "LiftNullables=false gates the lift";
+    EXPECT_EQ(CountHasValueCall(*fn), 1) << "the HasValue call stays";
+}
+
+// RunIfNullableLift as a block's FinalInstruction (a statement-if with value
+// arms): the Comp (a value, not control flow) cannot be the final, so it becomes
+// a non-terminal statement + a Branch to the next block replaces the if-final
+// (the FoldMatchTrueFalse block-model adaptation).
+TEST(ExpressionTransforms, RunIfNullableLiftFoldsAsBlockFinal) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto cond = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    cond->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    cond->AddArg(std::make_unique<LdLoca>(v));
+    auto hasVal = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    hasVal->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    hasVal->AddArg(std::make_unique<LdLoca>(v));
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(hasVal),
+                                               std::make_unique<LdcI4>(0));
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto P = std::make_unique<Block>();
+    P->SetFinal(std::move(iff));
+    fn->Body->AddBlock(std::move(P));
+    auto Q = std::make_unique<Block>();
+    Q->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(Q));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& P2 = *fn->Body->Blocks[0];
+    // The Comp became a non-terminal statement; the if-final is now a Branch to Q.
+    ASSERT_EQ(P2.Instructions.size(), 1u);
+    ASSERT_EQ(P2.Instructions[0]->Op, OpCode::Comp)
+        << "the lifted comp must become a non-terminal statement";
+    auto* c = static_cast<Comp*>(P2.Instructions[0].get());
+    EXPECT_EQ(c->LiftingKind, ComparisonLiftingKind::CSharp);
+    EXPECT_EQ(c->Kind, ComparisonKind::Equality) << "==> v == true";
+    ASSERT_EQ(P2.FinalInstruction->Op, OpCode::Branch);
+    EXPECT_EQ(static_cast<Branch*>(P2.FinalInstruction.get())->TargetBlock,
+              fn->Body->Blocks[1].get())
+        << "the if-final must be replaced by a Branch to the next block";
+}
+
 
 // On the real mscorlib corpus, running the full pre-pipeline through the
 // StatementTransform{ILInlining, ExpressionTransforms} (the GetILTransforms()
@@ -2109,6 +2449,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int nullCoalescingBefore = CountNullCoalescing(*fn);
         int liftedCompsBefore = CountLiftedComps(*fn);
         int gvo1Before = CountGetValueOrDefaultOneArg(*fn);
+        int hasValueBefore = CountHasValueCall(*fn);
         {
             StatementTransform st;
             st.AddChild(std::make_unique<ILInlining>());
@@ -2125,6 +2466,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int nullCoalescingAfter = CountNullCoalescing(*fn);
         int liftedCompsAfter = CountLiftedComps(*fn);
         int gvo1After = CountGetValueOrDefaultOneArg(*fn);
+        int hasValueAfter = CountHasValueCall(*fn);
         // The ternary fold is monotone non-decreasing (each fold creates a
         // StLoc-if; nothing in this subset removes one). The VisitComp rewrites
         // (comp(!=0)->x, logic.not push, unsigned normalization) do not create
@@ -2189,6 +2531,17 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         // the per-method monotone invariant is the deterministic correctness gate.
         EXPECT_GE(liftedCompsAfter, liftedCompsBefore);
         EXPECT_LE(gvo1After, gvo1Before);
+        // The RunIfNullableLift bool? equality fold (`v.GetValueOrDefault() ?
+        // v.HasValue : false` -> `comp.lifted[C#](v == true)`, and the three
+        // sibling folds) is monotone non-decreasing for the C#-lifted Comp count
+        // (already asserted above -- both RunCompNullableLift and RunIfNullableLift
+        // produce lifted Comps) and monotone non-increasing for the 1-arg
+        // get_HasValue call count (each bool? fold removes one HasValue call from
+        // an arm; nothing in this subset creates one). The bool? fold is a Roslyn-
+        // era codegen pattern for `bool?` comparisons, which the .NET Framework 4
+        // legacy-csc corpus may emit rarely; the per-method monotone invariant is
+        // the deterministic correctness gate (the absolute count is not asserted).
+        EXPECT_LE(hasValueAfter, hasValueBefore);
         totalFolds += (after - before);
         totalArrayIndexConvDrops += (arrayIdxConvBefore - arrayIdxConvAfter);
         totalNullCoalescingFolds += (nullCoalescingAfter - nullCoalescingBefore);

@@ -609,12 +609,47 @@ implemented and green here. Everything else follows the phase plan in
   transform consumes the new helpers yet (the D92 `Run(Comp)` is the only
   NullableLifting piece wired so far), so the CLI output is unchanged; the
   mscorlib sweep exercises the new helpers on real calls/newobj/DefaultValue
-  sites and asserts they never misfire. The next in-order target the foundation
-  unblocks is `Run(IfInstruction)` (the `MatchGetValueOrDefault(condition, v)` +
-  bool? path -- the four `v.GetValueOrDefault() ? v.HasValue : false` -> `v ==
-  true`/`v == false`/`v != true`/`v != false` folds producing a C#-lifted Comp),
-  which needs the if-as-final block-model adaptation + a corpus probe of the
-  real post-ConditionDetection bool? if shape (the D73/D75/D79 precedent).
+  sites and asserts they never misfire. The `MatchHasValueCall(inst,
+  const ILVariable* v)` match-against-v overload (the C#
+  `MatchHasValueCall(inst, v)` that checks the call is on the given variable,
+  extending the D93 report-variable overload) is now in place too -- the
+  `Run(IfInstruction)` bool? folds consult it.
+  `NullableLiftingTransform.Run(IfInstruction)` -- the bool? equality folds
+  (the second NullableLifting entry point, wired into
+  ExpressionTransforms.VisitIfInstruction) -- is now in place: a conditional
+  whose condition is `call GetValueOrDefault(ldloca v)` on a Nullable<bool>
+  (the underlying type is Boolean) and whose arms are `v.HasValue` / a ldc.i4
+  constant folds into a C#-lifted Comp (the D91 model):
+    `v.GetValueOrDefault() ? v.HasValue : false`  ==> `v == true`
+    `v.GetValueOrDefault() ? false : v.HasValue`  ==> `v == false`
+    `v.GetValueOrDefault() ? !v.HasValue : true`  ==> `v != true`
+    `v.GetValueOrDefault() ? true : !v.HasValue`  ==> `v != false`
+  The `Lift` method's logic.not unwrap loop (swap the arms for each
+  `comp(eq, X, 0)` peeled off the condition) is ported; the
+  AnalyzeCondition/LiftNormal path (the multi-HasValue `&&` lift), the
+  MatchCompOrDecimal/LiftCSharp* path (the comparison lift), the
+  NullPropagation path, and the `&`/`|` on bool? path (ThreeValuedBoolAnd/Or)
+  are deferred. Gated on `LiftNullables`. The Comp is a value (not control flow),
+  so the block-model adaptation follows FoldMatchTrueFalse: a clean ReplaceWith
+  when the if is a sub-expression value, or the Comp becomes a non-terminal + a
+  Branch to the next block when the if is a block's FinalInstruction (the arms
+  are values, so the bool? pattern fires only for a sub-expression value-if;
+  the if-as-final after ConditionDetection has Branch arms that never match).
+  The `MatchHasValueCall(inst, v)` calls use the match-against-v overload
+  (`v.get()`) -- the report-variable overload would overwrite `v` (the C#
+  distinguishes `out ILVariable v` (report) from `ILVariable v` (match) by the
+  `out` modifier; this port distinguishes them by `ILVariablePtr&` (report) vs
+  `const ILVariable*` (match), so an `ILVariablePtr` lvalue binds to the report
+  overload and `v.get()` to the match overload). It fires 0 times on the
+  .NET Framework 4 legacy-csc corpus (a Roslyn-era `bool?` codegen pattern) --
+  ported for faithfulness (the hand-built tests verify the four folds, the
+  sweep verifies the per-method monotone invariant). 33 of ~40 transforms
+  ported.
+  The remaining `Run(IfInstruction)` paths (AnalyzeCondition/LiftNormal,
+  MatchCompOrDecimal/LiftCSharp*, NullPropagation, the `&`/`|` on bool?),
+  `Run(BinaryNumericInstruction)` (the BitAnd-as-short-circuit analysis), and
+  the `RunStatements(Block, int)` block transform are the subsequent
+  in-order targets.
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
   walk + a corpus probe; the async/iterator state machines

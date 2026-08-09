@@ -145,6 +145,17 @@ public:
     // this overload additionally requires the argument to be a `ldloca v`.
     static bool MatchGetValueOrDefault(ILInstruction* inst, ILVariablePtr& v);
 
+    // Port of NullableLiftingTransform.MatchHasValueCall(inst, ILVariable v):
+    // the match-against-v overload. `call get_HasValue(ldloca v)` on
+    // System.Nullable<T> (1 argument, the argument a LdLoca) whose variable is
+    // the given `v`. The report-variable overload above recognises the call and
+    // reports the variable; this overload additionally checks the variable
+    // matches (the C# `MatchHasValueCall(inst, out v2) && v == v2`). An
+    // ILVariablePtr lvalue binds to the `(inst, ILVariablePtr&)` report overload
+    // (identity), not to `const ILVariable*` (no shared_ptr->raw conversion), so
+    // the two overloads are disjoint -- call this overload with `v.get()`.
+    static bool MatchHasValueCall(ILInstruction* inst, const ILVariable* v);
+
     // Port of NullableLiftingTransform.MatchNegatedHasValueCall(inst, ILVariable v):
     // `logic.not(call get_HasValue(ldloca v))` -> recognises v. The logic.not is
     // this port's `comp(Equality, X, ldc.i4(0))` shape (the reader's brfalse, per

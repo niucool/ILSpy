@@ -184,6 +184,14 @@ bool NullableLiftingTransform::MatchHasValueCall(ILInstruction* inst, ILVariable
     return true;
 }
 
+bool NullableLiftingTransform::MatchHasValueCall(ILInstruction* inst, const ILVariable* v) {
+    // Match-against-v: the call's variable (reported by the ldloca-v overload)
+    // must be the given `v` (the C# `MatchHasValueCall(inst, out v2) && v == v2`).
+    ILVariablePtr v2;
+    if (!MatchHasValueCall(inst, v2)) return false;
+    return v2.get() == v;
+}
+
 bool NullableLiftingTransform::MatchGetValueOrDefault(ILInstruction* inst, ILVariablePtr& v) {
     // `call GetValueOrDefault(ldloca v)`: the 1-arg form whose argument is a
     // LdLoca. (The 2-arg value-or-fallback form is a separate overload.)

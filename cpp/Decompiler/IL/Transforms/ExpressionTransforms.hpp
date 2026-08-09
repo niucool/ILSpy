@@ -57,8 +57,10 @@
 // Nullable<T>.GetValueOrDefault(a, b) -> a ?? b fold is now ported) /
 // VisitNewObj / VisitLdObj / VisitLdObjIfRef / VisitStObj / VisitStLoc
 // (TransformAssignment.HandleCompoundAssign) / the remaining VisitIfInstruction
-// pieces (the full NullableLifting Run(IfInstruction)/Run(BinaryNumericInstruction)
-// lift machinery + UserDefinedLogic,
+// pieces (the NullableLifting Run(IfInstruction) bool? equality folds are now
+// ported; the remaining Run(IfInstruction) paths -- AnalyzeCondition/LiftNormal,
+// MatchCompOrDecimal/LiftCSharp*, NullPropagation, the `&`/`|` on bool? -- and
+// Run(BinaryNumericInstruction) + UserDefinedLogic,
 // TransformDynamicAddAssignOrRemoveAssign) / HandleSwitchExpression (needs
 // SwitchExpressions setting + SwitchInstruction guards) / VisitDynamic* /
 // VisitTryCatchHandler -- each needs further infrastructure (AddressOf,
@@ -135,6 +137,23 @@ private:
     // replaces the if-final (the C# does an in-place ReplaceWith since the if is
     // a non-terminal). Returns true if the rewrite fired (the if is destroyed).
     bool HandleConditionalOperator(IfInstruction* iff);
+
+    // RunIfNullableLift: port of NullableLiftingTransform.Run(IfInstruction) --
+    // the bool? equality comparison subset of the `Lift` method. A conditional
+    // whose condition is `call GetValueOrDefault(ldloca v)` on a Nullable<bool>
+    // and whose arms are `v.HasValue` / a ldc.i4 constant folds into a C#-lifted
+    // Comp (the D91 model):
+    //   v.GetValueOrDefault() ? v.HasValue : false  ==> v == true
+    //   v.GetValueOrDefault() ? false : v.HasValue  ==> v == false
+    //   v.GetValueOrDefault() ? !v.HasValue : true  ==> v != true
+    //   v.GetValueOrDefault() ? true : !v.HasValue  ==> v != false
+    // The AnalyzeCondition/LiftNormal, MatchCompOrDecimal/LiftCSharp*, NullPropa-
+    // gation, and the `&`/`|` on bool? paths are deferred. Gated on LiftNullables.
+    // The Comp is a value (not control flow), so the block-model adaptation
+    // follows FoldMatchTrueFalse: ReplaceWith for a sub-expression value-if, or
+    // the Comp becomes a non-terminal + a Branch final when the if is a block's
+    // FinalInstruction. Returns true if the fold fired (the if is destroyed).
+    bool RunIfNullableLift(IfInstruction* iff);
 
     // logic.and/or canonicalization: `if (cond) ldc.i4 0 else RHS` ->
     // `if (!cond) RHS else ldc.i4 0` and `if (cond) RHS else ldc.i4 1` ->
