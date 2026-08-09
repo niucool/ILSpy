@@ -34,6 +34,7 @@
 #include "Decompiler/IL/Transforms/InlineReturnTransform.hpp"
 #include "Decompiler/IL/Transforms/RemoveInfeasiblePathTransform.hpp"
 #include "Decompiler/IL/Transforms/StObjToStLoc.hpp"
+#include "Decompiler/IL/Transforms/SwitchOnNullableTransform.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
 #include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
@@ -246,6 +247,13 @@ int main(int argc, char** argv) {
                 // second CFS and before LoopDetection (per GetILTransforms()), so
                 // loops are still flat back-edges the continue/break analysis walks.
                 ILSpy::Decompiler::IL::SwitchDetection().Run(*fn, transformContext);
+                // SwitchOnNullable: fold the C# compiler's switch-on-
+                // Nullable<T> shapes (legacy csc and Roslyn) into a lifted
+                // SwitchInstruction with an explicit `case null:` arm. Runs
+                // after SwitchDetection and before LoopDetection (per
+                // GetILTransforms()), so ifs are still block finals with
+                // positional fall-through. Gated on LiftNullables (default true).
+                ILSpy::Decompiler::IL::SwitchOnNullableTransform().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::LoopDetection().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::ConditionDetection().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::AssignVariableNames().Run(*fn, transformContext);

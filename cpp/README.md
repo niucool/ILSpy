@@ -89,7 +89,7 @@ implemented and green here. Everything else follows the phase plan in
   `RemoveDeadStores` setting, with no loads or addresses, has its stores dropped
   (a pure value goes with the store; an impure value is unwrapped so its side
   effect survives), and dead-copy chains collapse via a recompute fixpoint.
-  17 of ~40 transforms ported. The switch-detection family is now complete in
+  18 of ~40 transforms ported. The switch-detection family is now complete in
   its core: `LongSet`/`LongInterval` (Util/, ported from LongSet.cs /
   Interval.cs) -- an immutable interval-set of longs whose complement is
   representable (unlike `std::set<int64_t>`) -- backs `SwitchSection::Labels`
@@ -134,15 +134,29 @@ implemented and green here. Everything else follows the phase plan in
   `ParameterizedType` to its generic definition's `KnownTypeCode`).
   `SwitchInstruction` gained `IsLifted`/`Type` and `SwitchSection` gained
   `HasNullLabel` (the `case null:` arm); the seed renders `case null:`.
+  `SwitchOnNullableTransform` (Transforms/, ported from
+  SwitchOnNullableTransform.cs) folds the C# compiler's two switch-on-
+  `Nullable<T>` shapes into a single lifted `SwitchInstruction` with an
+  explicit `case null:` arm: the legacy csc shape (`stloc tmp(ldloca V); stloc
+  sw(call GetValueOrDefault(ldloc tmp)); if (!get_HasValue(ldloc tmp)) br
+  nullCase; switchBlock { switch (ldloc sw) { ... } }`) and the Roslyn shape
+  (`if (!get_HasValue(target)) br nullCase; switchBlock { stloc sw(call
+  GetValueOrDefault(target)); switch (ldloc sw) { ... } }` or the inlined
+  `switch (call GetValueOrDefault(target))`), each becoming a lifted
+  `switch (ldloc V) { ...; case null: nullCase }`. Gated on `LiftNullables`
+  (default true). Adapted to the if-as-final block model (the `br switchBlock`
+  fall-through is the next block in the container; the switchBlock's switch is
+  its `FinalInstruction`); the dead switchBlock stays in the tree (per D58 --
+  `SortBlocks(deleteUnreachableBlocks)` is unsafe in this port) and only the
+  edge counts are refreshed.
   The CLI applies CFS + StObjToStLoc + ILInlining + InlineReturnTransform +
   RemoveInfeasiblePath + DetectPinnedRegions + DetectCatchWhenConditionBlocks +
   LdLocaDupInitObjTransform + EarlyExpressionTransforms + RemoveDeadVariableInit +
-  CFS + SwitchDetection + LoopDetection + ConditionDetection + AssignVariableNames +
-  RemoveRedundantReturn before the C# seed, so `fixed (...) { ... }`, `default(T)`,
-  and reconstructed `switch` statements now appear in the output. Next
-  per `GetILTransforms()`: SwitchOnNullable (now unblocked -- needs wiring the
-  `NullableLiftingTransform` helpers into the legacy/Roslyn matchers + the
-  `LiftNullables` setting, default true),
+  CFS + SwitchDetection + SwitchOnNullable + LoopDetection + ConditionDetection +
+  AssignVariableNames + RemoveRedundantReturn before the C# seed, so `fixed (...)
+  { ... }`, `default(T)`, reconstructed `switch` statements, and switch-on-
+  nullable `case null:` arms now appear in the output. 18 of ~40 transforms
+  ported. Next per `GetILTransforms()`: 
   SwitchOnString (need the `SwitchStatementOnString` setting and
   `SwitchOnStringTransform.MatchComputeStringOrReadOnlySpanHashCall` + a
   `StringToInt` node),
