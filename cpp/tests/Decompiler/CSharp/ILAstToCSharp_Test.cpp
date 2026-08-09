@@ -216,6 +216,28 @@ TEST(ILAstToCSharp, ConstructorCallEmitsNewExpression) {
     EXPECT_NE(text.find("    new System.Text.StringBuilder(arg_1);\n"), std::string::npos) << text;
 }
 
+TEST(ILAstToCSharp, BaseConstructorCallEmitsBase) {
+    // A `.ctor` call statement whose first arg is `this` is a base ctor call:
+    // render as `base(args)`, dropping the implicit `this`.
+    auto thisVar = MakeVar(VariableKind::Parameter, "this", 0);
+    auto arg1 = MakeVar(VariableKind::Parameter, "arg_1", 1);
+    auto call = std::make_unique<Call>("System.Object::.ctor");
+    call->ReturnType = StackType::Void;
+    call->AddArg(std::make_unique<LdLoc>(thisVar));
+    call->AddArg(std::make_unique<LdLoc>(arg1));
+
+    auto block = std::make_unique<Block>();
+    block->Add(std::move(call));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", ".ctor", "int arg_1");
+    EXPECT_NE(text.find("    base(arg_1);\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("new System.Object"), std::string::npos) << "base ctor call is not new";
+}
+
 TEST(ILAstToCSharp, FieldStoreAndLoadThroughLdFlda) {
     auto thisVar = MakeVar(VariableKind::Parameter, "this", 0);
     auto block = std::make_unique<Block>();

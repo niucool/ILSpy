@@ -215,9 +215,10 @@ private:
                 Line(indent, (declare ? "var " + name : name) + " = " + Expr(*st.Value) + ";");
                 return;
             }
-            case OpCode::Call:
-                Line(indent, CallText(static_cast<const Call&>(inst)) + ";");
+            case OpCode::Call: {
+                Line(indent, CtorCallStatementText(static_cast<const Call&>(inst)) + ";");
                 return;
+            }
             case OpCode::StObj: {
                 const auto& st = static_cast<const StObj&>(inst);
                 Line(indent, StoreTargetText(*st.Target) + " = " + Expr(*st.Value) + ";");
@@ -353,6 +354,33 @@ private:
         }
         text += ')';
         return text;
+    }
+
+    // A `.ctor` call used as a statement (void, in a block) whose first arg is
+    // `this` is a base/sibling constructor call; render it as `base(args)` (the
+    // `this` arg is implicit). A newobj (which pushes the new object) is an
+    // expression and goes through CallText as `new Type(args)`. A `.ctor`
+    // statement without a `this` first arg (e.g. a synthetic test) falls back
+    // to `new Type(args)`.
+    std::string CtorCallStatementText(const Call& call) {
+        std::string name = call.MethodName;
+        static const std::string ctorSuffix = "::.ctor";
+        if (name.size() > ctorSuffix.size() &&
+            name.compare(name.size() - ctorSuffix.size(), ctorSuffix.size(), ctorSuffix) == 0 &&
+            !call.Arguments.empty() && call.Arguments[0] &&
+            call.Arguments[0]->Op == OpCode::LdLoc) {
+            auto& ld = static_cast<const LdLoc&>(*call.Arguments[0]);
+            if (ld.Variable && ld.Variable->Name == "this") {
+                std::string text = "base(";
+                for (std::size_t i = 1; i < call.Arguments.size(); ++i) {
+                    if (i > 1) text += ", ";
+                    text += call.Arguments[i] ? Expr(*call.Arguments[i]) : "(default)";
+                }
+                text += ')';
+                return text;
+            }
+        }
+        return CallText(call);
     }
 
     // The C# form of a store target: a field reference, an array element, or
