@@ -510,6 +510,26 @@ TEST(ILAstToCSharp, SubtractionFromZeroIsUnaryNegation) {
     EXPECT_EQ(text.find("(0 - x)"), std::string::npos) << "not a binary subtraction";
 }
 
+TEST(ILAstToCSharp, BooleanEqualityToZeroIsLogicalNot) {
+    // `comp(eq, ldloc boolVar, ldc.i4 0)` is `!boolVar`; `comp(ne, .., 0)` is
+    // just `boolVar`. Only when the variable's type is Boolean.
+    auto flag = MakeVar(VariableKind::Parameter, "flag", 0,
+        std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto block = std::make_unique<Block>();
+    // if (flag == 0) return;
+    block->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(flag), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Equality),
+        std::make_unique<Leave>(nullptr)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "bool flag");
+    EXPECT_NE(text.find("if (!flag)"), std::string::npos) << text;
+    EXPECT_EQ(text.find("flag == 0"), std::string::npos) << "bool == 0 is !bool";
+}
+
 TEST(ILAstToCSharp, ConstantTrueCatchFilterIsOmitted) {
     // A plain catch carries the constant filter ldc.i4(1) (BlockBuilder.cs);
     // the C#-text seed prints it as a plain `catch (T name)`, no `when`.
