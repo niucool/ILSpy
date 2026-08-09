@@ -55,6 +55,7 @@
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/UsingInstruction.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
@@ -818,6 +819,27 @@ private:
                 std::string value = nc.ValueInst ? Expr(*nc.ValueInst) : std::string("(default)");
                 std::string fallback = nc.FallbackInst ? Expr(*nc.FallbackInst) : std::string("(default)");
                 return "(" + value + " ?? " + fallback + ")";
+            }
+            case OpCode::ThreeValuedBoolAnd: {
+                // Three-valued logic `&` on bool?: `left & right`. Faithful to
+                // the real back end's VisitThreeValuedBoolAnd (a
+                // BinaryOperatorExpression with the BitwiseAnd operator; the
+                // operands are converted to bool?). Unlike logic.and() this does
+                // not short-circuit (the three-valued truth tables require both
+                // sides to detect a null result).
+                const auto& tv = static_cast<const ThreeValuedBoolAnd&>(inst);
+                std::string left = tv.Left ? Expr(*tv.Left) : std::string("(default)");
+                std::string right = tv.Right ? Expr(*tv.Right) : std::string("(default)");
+                return "(" + left + " & " + right + ")";
+            }
+            case OpCode::ThreeValuedBoolOr: {
+                // Three-valued logic `|` on bool?: `left | right`. Faithful to
+                // the real back end's VisitThreeValuedBoolOr (a
+                // BinaryOperatorExpression with the BitwiseOr operator).
+                const auto& tv = static_cast<const ThreeValuedBoolOr&>(inst);
+                std::string left = tv.Left ? Expr(*tv.Left) : std::string("(default)");
+                std::string right = tv.Right ? Expr(*tv.Right) : std::string("(default)");
+                return "(" + left + " | " + right + ")";
             }
             default:
                 return "(default)/*op=" + std::to_string(static_cast<int>(inst.Op)) + "*/";

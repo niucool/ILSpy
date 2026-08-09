@@ -645,6 +645,24 @@ implemented and green here. Everything else follows the phase plan in
   ported for faithfulness (the hand-built tests verify the four folds, the
   sweep verifies the per-method monotone invariant). 33 of ~40 transforms
   ported.
+  `ThreeValuedBoolAnd` / `ThreeValuedBoolOr` (Instructions/, a combined
+  `ThreeValuedBoolInstructions.hpp` header mirroring the C# `LogicInstructions.cs`
+  grouping) port the C# three-valued logic `&` / `|` on `bool?` (Nullable<bool>)
+  nodes as a tested-but-not-yet-wired foundation: both are `BinaryInstruction`
+  (Left + Right inlineable), result `bool?` (StackType O), `IsLifted()` true /
+  `UnderlyingResultType()` I4 (the C# `ILiftableInstruction` impl, added as
+  methods per the Comp precedent -- this port has no ILiftableInstruction
+  interface), DirectFlags None (no Flags override needed -- the base
+  `None | Left | Right` equals the C# ComputeFlags), and the faithful dump
+  mnemonics `3vl.bool.and(...)` / `3vl.bool.or(...)`. The seed renders them as
+  `left & right` / `left | right` (faithful to the real back end's
+  VisitThreeValuedBoolAnd/Or). No pipeline transform constructs them yet (the
+  `&`/`|` on bool? codegen is a Roslyn-era pattern, 0 firings on the .NET
+  Framework 4 corpus); the next in-order consumer is the `&`/`|` on bool? path
+  of `NullableLiftingTransform.Run(IfInstruction)`'s `Lift`, which needs them
+  plus `MatchLogicOr`/`MatchLogicAnd` (matching the IfInstruction `if (a)
+  ldc.i4 1 else b` / `if (a) b else ldc.i4 0` patterns) +
+  `MatchThreeValuedLogicConditionPattern`.
   The remaining `Run(IfInstruction)` paths (AnalyzeCondition/LiftNormal,
   MatchCompOrDecimal/LiftCSharp*, NullPropagation, the `&`/`|` on bool?),
   `Run(BinaryNumericInstruction)` (the BitAnd-as-short-circuit analysis), and

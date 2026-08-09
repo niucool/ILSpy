@@ -58,6 +58,7 @@ add_executable(ilspy_tests
     Decompiler/IL/Instructions/Conv_Test.cpp
     Decompiler/IL/Instructions/Comp_Test.cpp
     Decompiler/IL/Instructions/NullCoalescingInstruction_Test.cpp
+    Decompiler/IL/Instructions/ThreeValuedBoolInstructions_Test.cpp
     Decompiler/IL/Transforms/NullCoalescingTransform_Test.cpp
 )
 target_link_libraries(ilspy_tests PRIVATE
