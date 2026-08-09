@@ -23,6 +23,7 @@
 #pragma once
 
 #include "Decompiler/IL/ILInstruction.hpp"
+#include "Decompiler/IL/Instructions/Block.hpp"
 
 #include <cstdio>
 #include <cstdint>
@@ -44,7 +45,12 @@ public:
 
     explicit Branch(std::uint32_t targetOffset = 0)
         : ILInstruction(OpCode::Branch), TargetOffset(targetOffset), HasOffset(true) {}
-    explicit Branch(Block* target) : ILInstruction(OpCode::Branch), TargetBlock(target) {}
+    explicit Branch(Block* target) : ILInstruction(OpCode::Branch), TargetBlock(target) {
+        // Carry the target's IL offset so the seed can label gotos/labels with
+        // the correct IL_XXXX (a Block-target branch synthesised by a transform
+        // has no operand offset of its own).
+        if (target) TargetOffset = target->StartILOffset;
+    }
 
     InstructionFlags DirectFlags() const override {
         return InstructionFlags::MayBranch | InstructionFlags::EndPointUnreachable;

@@ -115,6 +115,18 @@ void ConstructLoop(BlockContainer* parent, FlowAnalysis::ControlFlowNode* header
         else if (exitBlock && br->TargetBlock == exitBlock)
             br->ReplaceWith(std::make_unique<Leave>(loopPtr));
     }
+    // Branches outside the loop that targeted the old entry point (the loop
+    // header) must also be repointed to the new entry point inside the
+    // container, otherwise both the pre-header (oldEntryPoint) and the header
+    // (newEntryPoint) carry the same IL_XXXX label.
+    ILInstruction* root = parent;
+    while (root->Parent) root = root->Parent;
+    WalkAll(root, [&](ILInstruction* inst) {
+        if (auto* br = dynamic_cast<Branch*>(inst)) {
+            if (br->TargetBlock == oldEntryPoint)
+                br->TargetBlock = newEntryPointPtr;
+        }
+    });
 }
 
 } // namespace

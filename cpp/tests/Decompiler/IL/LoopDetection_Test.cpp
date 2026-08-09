@@ -115,6 +115,47 @@ TEST(LoopDetection, DetectsAndWrapsBackEdgeLoop) {
     EXPECT_GE(leaveCount, 1) << "the loop exit branch becomes a Leave";
 }
 
+TEST(LoopDetection, RepointsExternalBranchToHeaderToNewEntryPoint) {
+    // b0: if (cond) br b1 else br b4   (entry: loop header or external b4)
+    // b1: if (cond2) br b3 else br b2  (loop header; b1 dominates b2)
+    // b2: br b1 (back edge)
+    // b3: leave (exit)
+    // b4: br b1 (external entry to the loop header)
+    // After LoopDetection the external b4->b1 must be repointed to the new
+    // entry point inside the loop container, so the pre-header (b1) carries no
+    // branch target and no duplicate IL_XXXX label appears.
+    auto fn = WrapBlocks({});
+    for (int i = 0; i < 5; ++i) fn->Body->AddBlock(std::make_unique<Block>());
+    Block* b1p = fn->Body->Blocks[1].get();
+    Block* b3p = fn->Body->Blocks[3].get();
+    Block* b4p = fn->Body->Blocks[4].get();
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::make_unique<Branch>(b1p), std::make_unique<Branch>(b4p)));
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::make_unique<Branch>(b3p), std::make_unique<Branch>(fn->Body->Blocks[2].get())));
+    fn->Body->Blocks[2]->SetFinal(std::make_unique<Branch>(b1p));
+    fn->Body->Blocks[3]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->Blocks[4]->SetFinal(std::make_unique<Branch>(b1p));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    LoopDetection().Run(*fn, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // No branch in the tree targets the original header (now the pre-header);
+    // all entries (back-edge + external) go to the new entry point.
+    int targetingOldHeader = 0;
+    Walk(fn->Body.get(), [&](ILInstruction* i) {
+        if (auto* br = dynamic_cast<Branch*>(i))
+            if (br->TargetBlock == b1p) ++targetingOldHeader;
+    });
+    EXPECT_EQ(targetingOldHeader, 0)
+        << "external branches to the header must be repointed to the new entry";
+}
+
 TEST(LoopDetection, NoFalseLoopOnAcyclicFlow) {
     // b0: br b1; b1: br b2; b2: leave -- no back edges, no loops.
     auto fn = WrapBlocks({});
