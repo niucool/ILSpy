@@ -17,6 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
+#include "Decompiler/IL/InstructionFlags.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
@@ -78,6 +79,21 @@ void ZeroBlocks(ILInstruction* inst) {
     for (int i = 0; i < inst->ChildCount(); ++i) ZeroBlocks(inst->GetChild(i));
 }
 
+// Also count positional fall-through edges: a block whose final is not
+// EndPointUnreachable falls through to the next block in its container.
+void CountFallThroughEdges(ILInstruction* inst) {
+    if (!inst) return;
+    if (auto* container = dynamic_cast<BlockContainer*>(inst)) {
+        auto& blocks = container->Blocks;
+        for (std::size_t i = 0; i + 1 < blocks.size(); ++i) {
+            ILInstruction* fin = blocks[i]->FinalInstruction.get();
+            if (fin && !HasFlag(fin->Flags(), InstructionFlags::EndPointUnreachable))
+                ++blocks[i + 1]->IncomingEdgeCount;
+        }
+    }
+    for (int i = 0; i < inst->ChildCount(); ++i) CountFallThroughEdges(inst->GetChild(i));
+}
+
 } // namespace
 
 void ComputeVariableUsage(ILFunction& function) {
@@ -98,6 +114,7 @@ void RecomputeIncomingEdgeCounts(ILFunction& function) {
     ZeroBlocks(function.Body.get());
     std::unordered_set<Block*> seen;
     CountEdges(function.Body.get(), seen);
+    CountFallThroughEdges(function.Body.get());
 }
 
 } // namespace ILSpy::Decompiler::IL
