@@ -44,19 +44,26 @@ implemented and green here. Everything else follows the phase plan in
   full element-type range (TypedReference, vararg sentinels, fn-ptr handled
   approximately, custom modifiers), which winmd's WinRT-profile TypeSig rejects.
   The remaining instruction kinds (and the ~40 IL transforms) follow Phase 4.
-- **Phase 4 (start)** -- the ILAst transform pipeline: `IILTransform` /
+- **Phase 4 (in progress)** -- the ILAst transform pipeline: `IILTransform` /
   `ILTransformContext` (Transforms/), variable/block usage analysis
   (`ControlFlow/VariableUsage`), the pipeline's first transform
   `ControlFlowSimplification` (branch-chain collapse, dead stack-slot store
   removal, debug return-block inlining, branch-to-leave folding, single-edge
   block merging), `ILInlining` (single-use variable inlining + dead pure
-  store removal -- the third transform, pulled forward because it works on
-  the per-variable usage counts we already compute), and the FlowAnalysis
-  foundation (`ControlFlowNode`, `Dominance` -- Cooper-Harvey-Kennedy
-  dominators, `ControlFlowGraph` -- per-container CFG with HasReachableExit).
-  The CLI applies CFS + ILInlining before the C# seed. Next per
-  `GetILTransforms()`: SplitVariables (needs reaching-definitions dataflow),
-  LoopDetection, ConditionDetection, ...
+  store removal), `InlineReturnTransform` (duplicate shared return blocks so
+  each `stloc V; br ret` gets a 1-pred return block CFS then merges), and the
+  FlowAnalysis foundation (`ControlFlowNode`, `Dominance` --
+  Cooper-Harvey-Kennedy dominators, `ControlFlowGraph` -- per-container CFG).
+  `LoopDetection` wraps back edges in loop containers; `ConditionDetection`
+  inlines single-pred fall-through into if/else and inverts `if (cond) goto X
+  else { exit }` to `if (!cond) { exit }` (early-exit, condition negation),
+  turning sequential if-throw chains (e.g. `System.Version..ctor`) into clean
+  `if (arg < 0) { throw }` with no gotos. 6 of ~40 transforms ported. The CLI
+  applies CFS + ILInlining + InlineReturnTransform + CFS + LoopDetection +
+  ConditionDetection before the C# seed. Next per `GetILTransforms()`:
+  SplitVariables (needs reaching-definitions dataflow), DetectExitPoints +
+  the full ConditionDetection (multi-pred join blocks), EarlyExpressionTransforms,
+  TransformAssignment, the async/iterator state machines, ...
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: a minimal
   ILAst -> C#-text walker that closes the IL -> ILAst -> text pipeline
   end-to-end ahead of the real back end. Statements flatten into blocks,
