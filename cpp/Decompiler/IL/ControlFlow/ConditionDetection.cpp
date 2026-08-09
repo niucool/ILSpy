@@ -43,6 +43,22 @@ void WalkContainers(ILInstruction* inst, const std::function<void(BlockContainer
     for (int i = 0; i < inst->ChildCount(); ++i) WalkContainers(inst->GetChild(i), visit);
 }
 
+// The trailing exit instruction of an if-arm or block: a Block's final, or
+// the arm itself if it is a bare exit. nullptr if it is not an exit
+// (Branch/Leave/Throw -- something EndPointUnreachable).
+ILInstruction* TrailingExit(ILInstruction* arm) {
+    if (!arm) return nullptr;
+    if (auto* b = dynamic_cast<Block*>(arm)) return b->FinalInstruction.get();
+    return arm;
+}
+
+// Two exits are compatible for a common-exit merge if both are Branches to the
+// same block (the shared-tail pattern). Leaves/throws are not merged here.
+bool CompatibleCommonExit(ILInstruction* e1, ILInstruction* e2) {
+    if (!e1 || !e2 || e1->Op != OpCode::Branch || e2->Op != OpCode::Branch) return false;
+    return static_cast<Branch*>(e1)->TargetBlock == static_cast<Branch*>(e2)->TargetBlock;
+}
+
 // Try to inline the fall-through block (the next block in the container after
 // `block`) into the IfInstruction that is `block`'s final. The fall-through
 // must have exactly one predecessor (this block) so inlining doesn't change
@@ -52,8 +68,11 @@ bool TryInlineIfFallThrough(BlockContainer* container, std::size_t blockIndex) {
     Block* block = container->Blocks[blockIndex].get();
     auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
     if (!iff) return false;
-    // Only the simple `if (cond) br target` shape (no else yet).
-    if (!iff->TrueInst || iff->TrueInst->Op != OpCode::Branch) return false;
+    // The if must have no else yet, and its true arm must be unreachable
+    // (a bare Branch, or a Block ending in a goto/leave/throw) so the if's
+    // fall-through is only the cond-false path -- inlining the fall-through
+    // into the else is then semantics-preserving.
+    if (!iff->TrueInst || !HasFlag(iff->TrueInst->Flags(), InstructionFlags::EndPointUnreachable)) return false;
     if (iff->FalseInst) return false;  // already has an else
 
     Block* fallThrough = container->Blocks[blockIndex + 1].get();
@@ -64,6 +83,20 @@ bool TryInlineIfFallThrough(BlockContainer* container, std::size_t blockIndex) {
     auto* ftNode = cfg.GetNode(fallThrough);
     if (!ftNode || ftNode->Predecessors.size() != 1) return false;
     if (ftNode->Predecessors[0] != cfg.GetNode(block)) return false;
+
+    // Gate: when the true arm is NOT a bare Branch (i.e. it is a Block ending
+    // in an exit, the post-invert shape), only inline if the true arm's exit
+    // and the fall-through's exit are both Branches to the same block -- so the
+    // common-exit drop will fire and the merge is worthwhile. Without this
+    // gate the post-invert inline would wrap the "rest of the method" in an
+    // else (the early-exit pattern: true arm is a throw, fall-through is the
+    // happy path). A bare Branch (the `if-goto` shape) is the first inline that
+    // enables the invert -- no gate.
+    if (iff->TrueInst->Op != OpCode::Branch) {
+        if (!CompatibleCommonExit(TrailingExit(iff->TrueInst.get()),
+                                  fallThrough->FinalInstruction.get()))
+            return false;
+    }
 
     // Move fallThrough's instructions + final into a new Block that becomes
     // the IfInstruction's FalseInst.
@@ -156,40 +189,74 @@ bool TryInvertIfExit(BlockContainer* container, std::size_t blockIndex) {
     return true;
 }
 
+// Get the trailing Branch of an if-arm (a Block's final, or the arm itself if
+// it is a bare Branch). nullptr if the arm does not end in a Branch.
+Branch* TrailingBranch(ILInstruction* arm) {
+    if (!arm) return nullptr;
+    if (auto* b = dynamic_cast<Block*>(arm))
+        return dynamic_cast<Branch*>(b->FinalInstruction.get());
+    return dynamic_cast<Branch*>(arm);
+}
+
+// Drop the trailing Branch from an if-arm. A Block arm has its FinalInstruction
+// nulled (it falls through to after the if); a bare Branch arm becomes an
+// empty Block (an arm must not be null).
+void DropTrailingBranch(std::unique_ptr<ILInstruction>& arm) {
+    if (!arm) return;
+    if (auto* b = dynamic_cast<Block*>(arm.get())) {
+        b->FinalInstruction.reset();
+        b->RenumberChildren();
+    } else {
+        auto empty = std::make_unique<Block>();
+        empty->Parent = arm->Parent;
+        empty->ChildIndex = arm->ChildIndex;
+        arm = std::move(empty);
+    }
+}
+
+// `if (cond) { ...; goto X } else { ...; goto X }` where X is the next block:
+// drop both gotos. The block falls through to X, and the if arms fall through
+// to after the if (then to X). This is the shared-tail / common-exit merge.
+bool TryDropCommonExit(BlockContainer* container, std::size_t blockIndex) {
+    if (blockIndex + 1 >= container->Blocks.size()) return false;
+    Block* block = container->Blocks[blockIndex].get();
+    auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
+    if (!iff || !iff->TrueInst || !iff->FalseInst) return false;
+    auto* tb = TrailingBranch(iff->TrueInst.get());
+    auto* fb = TrailingBranch(iff->FalseInst.get());
+    if (!tb || !fb || !tb->TargetBlock) return false;
+    if (tb->TargetBlock != fb->TargetBlock) return false;
+    // X must be the next block so the block falls through to it after the merge.
+    if (container->Blocks[blockIndex + 1].get() != tb->TargetBlock) return false;
+    DropTrailingBranch(iff->TrueInst);
+    DropTrailingBranch(iff->FalseInst);
+    return true;
+}
+
 } // namespace
 
 void ConditionDetection::Run(ILFunction& function, ILTransformContext& context) {
     (void)context;
-    // Process each container (Normal, Loop, Switch) in reverse block order so
-    // inlining a later block doesn't invalidate earlier indices. Repeat until no
-    // more inlinings are possible (a fixpoint: inlining block i+1 into block i
-    // may make block i eligible for inlining block i+2 into its new FalseInst,
-    // but that's handled by the IfInstruction inside the FalseInst on the next
-    // pass over the nested containers).
+    // Run the three transforms in a combined fixpoint so a step that enables
+    // another (inline a post-invert fall-through; drop a common exit after an
+    // inline) is picked up on the next iteration. Try inline first (reverse
+    // block order), then invert, then drop-common-exit; restart on any change.
     WalkContainers(function.Body.get(), [&](BlockContainer* c) {
         bool changed;
         do {
             changed = false;
             for (std::size_t i = c->Blocks.size(); i-- > 0;) {
-                if (TryInlineIfFallThrough(c, i)) {
-                    changed = true;
-                    break;  // restart from the end (indices shifted)
-                }
+                if (TryInlineIfFallThrough(c, i)) { changed = true; break; }
+            }
+            if (changed) continue;
+            for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
+                if (TryInvertIfExit(c, i)) { changed = true; break; }
+            }
+            if (changed) continue;
+            for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
+                if (TryDropCommonExit(c, i)) { changed = true; break; }
             }
         } while (changed);
-        // Invert if-goto-else-exit into if-not-cond-exit when the goto target is
-        // the fall-through block, eliminating the goto. Iterate to a fixpoint so
-        // a chain of if-throw checks collapses one block at a time.
-        bool inverted;
-        do {
-            inverted = false;
-            for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
-                if (TryInvertIfExit(c, i)) {
-                    inverted = true;
-                    break;
-                }
-            }
-        } while (inverted);
     });
     RecomputeIncomingEdgeCounts(function);
 }

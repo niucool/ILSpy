@@ -35,6 +35,7 @@
 #include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
@@ -45,6 +46,7 @@
 
 #include <filesystem>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <string>
 
@@ -264,3 +266,49 @@ TEST(ConditionDetection, MscorlibSweepReducesGotoCount) {
     EXPECT_GT(transformed, 2000);
     EXPECT_LT(gotosAfter, gotosBefore) << "ConditionDetection must reduce goto count";
 }
+
+TEST(ConditionDetection, MergesCommonExitGotosIntoIfElse) {
+    // The shared-tail pattern: after inline+invert, both arms of the if goto
+    // the same join block (the next block). The common exit is pulled out and
+    // both gotos dropped, yielding `if (cond) { ... } else { ... }` with a
+    // fall-through to the join.
+    //   b0: if (num < 0) br b2;  b1: flags=0; br join;  b2: flags=min; num=-num; br join;
+    //   join: lo=num; return
+    auto fn = WrapBlocks({});
+    for (int i = 0; i < 4; ++i) fn->Body->AddBlock(std::make_unique<Block>());
+    auto V = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    V->Name = "num";
+    fn->Variables.push_back(V);
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(V, std::make_unique<LdcI4>(0)));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(V), std::make_unique<LdcI4>(0),
+                               ComparisonKind::LessThan),
+        std::make_unique<Branch>(fn->Body->Blocks[2].get())));  // if (num<0) br b2
+    fn->Body->Blocks[1]->Add(std::make_unique<StLoc>(V, std::make_unique<LdcI4>(0)));  // flags=0 (approx)
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Branch>(fn->Body->Blocks[3].get()));  // br join
+    fn->Body->Blocks[2]->Add(std::make_unique<StLoc>(V, std::make_unique<LdcI4>(1)));  // flags=min
+    fn->Body->Blocks[2]->SetFinal(std::make_unique<Branch>(fn->Body->Blocks[3].get()));  // br join
+    fn->Body->Blocks[3]->Add(std::make_unique<StLoc>(V, std::make_unique<LdcI4>(2)));  // join body (keeps `br join` alive)
+    fn->Body->Blocks[3]->SetFinal(std::make_unique<Leave>(fn->Body.get()));  // join: return
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunPipeline(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // The join block (b3) must remain, and b0's final must be an if with both
+    // arms present and neither ending in a Branch (the common gotos dropped).
+    EXPECT_EQ(fn->Body->Blocks.size(), 2u) << "b1 and b2 absorbed; join remains";
+    auto* iff = dynamic_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(iff, nullptr);
+    ASSERT_NE(iff->TrueInst, nullptr);
+    ASSERT_NE(iff->FalseInst, nullptr) << "the fall-through is inlined into the else";
+    // Neither arm ends with a Branch (both gotos dropped).
+    auto trailingBranch = [](ILInstruction* arm) -> Branch* {
+        if (!arm) return nullptr;
+        if (auto* b = dynamic_cast<Block*>(arm)) return dynamic_cast<Branch*>(b->FinalInstruction.get());
+        return dynamic_cast<Branch*>(arm);
+    };
+    EXPECT_EQ(trailingBranch(iff->TrueInst.get()), nullptr) << "true arm goto dropped";
+    EXPECT_EQ(trailingBranch(iff->FalseInst.get()), nullptr) << "false arm goto dropped";
+}
+
