@@ -41,6 +41,7 @@
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/PrimitiveType.hpp"
 #include "Decompiler/IL/StackType.hpp"
+#include "Decompiler/IL/StackTypeOf.hpp"
 #include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
@@ -314,6 +315,34 @@ bool MatchThreeValuedLogicConditionPattern(ILInstruction* condition,
     ILInstruction* arg2 = nullptr;
     if (!MatchLogicNot(andRhs, arg2)) return false;
     return NullableLiftingTransform::MatchHasValueCall(arg2, nullable1.get());
+}
+
+// Port of NullableLiftingTransform.AnalyzeCondition: walks a condition that is a
+// HasValue call (on a Nullable<T>) or a BitAnd(I4) of such calls, collecting the
+// nullable variables into `nullableVarsS`. Returns true if the whole tree is
+// HasValue calls (and BitAnds of them); false otherwise. This is the gate the
+// LiftNormal path consults: `(v1 != null && ... && vn != null) ? trueInst :
+// falseInst` (the condition is `v1.HasValue && ... && vn.HasValue`, the BitAnd
+// lowering of `&&`). Mirrors the C# `AnalyzeCondition(condition)` which recurses
+// into a BitAnd's Left/Right and collects each HasValue call's variable.
+bool AnalyzeCondition(ILInstruction* condition,
+                      std::vector<ILVariablePtr>& nullableVarS) {
+    if (!condition) return false;
+    ILVariablePtr v;
+    if (NullableLiftingTransform::MatchHasValueCall(condition, v)) {
+        if (!v) return false;
+        nullableVarS.push_back(v);
+        return true;
+    }
+    if (condition->Op == OpCode::BinaryNumericInstruction) {
+        auto* bni = static_cast<BinaryNumericInstruction*>(condition);
+        if (bni->Operator != BinaryNumericOperator::BitAnd ||
+            bni->ResultType() != StackType::I4)
+            return false;
+        return AnalyzeCondition(bni->Left.get(), nullableVarS) &&
+               AnalyzeCondition(bni->Right.get(), nullableVarS);
+    }
+    return false;
 }
 
 // Detach `inst` from its parent (TakeChild at its ChildIndex), returning owning
@@ -774,13 +803,15 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
     //   v.GetValueOrDefault() ? false : v.HasValue  ==> v == false
     //   v.GetValueOrDefault() ? !v.HasValue : true  ==> v != true
     //   v.GetValueOrDefault() ? true : !v.HasValue  ==> v != false
-    // The AnalyzeCondition / LiftNormal path (the multi-HasValue `&&` lift), the
-    // MatchCompOrDecimal / LiftCSharp* path (the comparison lift), the
-    // NullPropagation path, and the `&` / `|` on bool? path (ThreeValuedBoolAnd/
-    // Or) are deferred -- each needs further infrastructure (DoLift, the BitSet
-    // nullable-vars relevance analysis, NullPropagationTransform, MatchNullable
-    // Ctor + ThreeValuedBool nodes). Gated on LiftNullables (the C#
-    // `context.Settings.LiftNullables`).
+    // The AnalyzeCondition / LiftNormal path (the multi-HasValue `&&` lift) is now
+    // ported in its `v.HasValue ? v : fallback => v ?? fallback` early-out subset
+    // (the simplest LiftNormal case, which needs no DoLift); the DoLift /
+    // LiftCSharpUserComparison / conv.nop.lifted paths and the MatchCompOrDecimal /
+    // LiftCSharp* path (the comparison lift), the NullPropagation path, and the
+    // `&` / `|` on bool? path (ThreeValuedBoolAnd/Or) are deferred -- each needs
+    // further infrastructure (DoLift, the BitSet nullable-vars relevance analysis,
+    // NullPropagationTransform, MatchNullableCtor + ThreeValuedBool nodes). Gated
+    // on LiftNullables (the C# `context.Settings.LiftNullables`).
     if (!iff || !iff->Condition) return false;
     if (!settings_ || !settings_->LiftNullables) return false;
 
@@ -797,6 +828,51 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
     while (MatchLogicNot(condition, inner)) {
         condition = inner;
         std::swap(trueInst, falseInst);
+    }
+
+    // AnalyzeCondition / LiftNormal path (the section of Lift before the bool?
+    // equality folds). AnalyzeCondition walks a BitAnd tree of HasValue calls
+    // collecting the nullable vars; the LiftNormal `v.HasValue ? v : fallback =>
+    // v ?? fallback` early-out fires when there is exactly one nullable var, the
+    // true arm is not a NullableCtor, and the true arm is `ldloc` of that var --
+    // producing a NullCoalescingInstruction(Nullable) whose UnderlyingResultType
+    // is the underlying type's StackType. The DoLift / LiftCSharpUserComparison /
+    // conv.nop.lifted paths (the rest of LiftNormal) are deferred: when
+    // AnalyzeCondition succeeds but the early-out does not fire, return false
+    // (matching the C# which returns null -- the whole Lift returns null, the if
+    // stays as-is). The true/false arms are detached (DetachFromParent) before the
+    // if is destroyed (no GC; the non-owning views would dangle). The NullCoalescing
+    // node is a value (ResultType the fallback's), so ReplaceIfWithLiftedValue
+    // applies the block-model adaptation (ReplaceWith for a sub-expression value-if,
+    // or the node becomes a non-terminal + a Branch final for a block-final if).
+    {
+        std::vector<ILVariablePtr> nullableVarS;
+        if (AnalyzeCondition(condition, nullableVarS)) {
+            const TypeSystem::IType* utype = nullptr;
+            ILInstruction* ctorArg = nullptr;
+            if (nullableVarS.size() == 1 &&
+                !NullableLiftingTransform::MatchNullableCtor(trueInst, utype,
+                                                              ctorArg)) {
+                ILVariable* vLd = nullptr;
+                if (MatchLdLoc(trueInst, vLd) &&
+                    vLd == nullableVarS[0].get()) {
+                    auto trueOwned = DetachFromParent(trueInst);
+                    auto falseOwned = DetachFromParent(falseInst);
+                    auto lifted = std::make_unique<NullCoalescingInstruction>(
+                        NullCoalescingKind::Nullable,
+                        std::move(trueOwned), std::move(falseOwned));
+                    lifted->UnderlyingResultType = StackTypeOf(
+                        NullableLiftingTransform::GetUnderlyingTypeOfNullable(
+                            nullableVarS[0]->Type.get()));
+                    return ReplaceIfWithLiftedValue(iff, std::move(lifted));
+                }
+            }
+            // AnalyzeCondition succeeded but the LiftNormal early-out did not fire;
+            // the DoLift / LiftCSharpUserComparison / conv.nop.lifted paths are
+            // deferred. Matching the C# which returns null (the whole Lift returns
+            // null), do not fall through to the bool? equality folds.
+            return false;
+        }
     }
 
     // Handle equality comparisons with bool?: the condition is

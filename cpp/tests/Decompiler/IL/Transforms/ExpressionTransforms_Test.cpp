@@ -2468,6 +2468,172 @@ TEST(ExpressionTransforms, RunIfNullableLiftFoldsAsBlockFinal) {
         << "the if-final must be replaced by a Branch to the next block";
 }
 
+// RunIfNullableLift AnalyzeCondition/LiftNormal early-out (NullableLiftingTransform.
+// Run(IfInstruction) `Lift` method, the section before the bool? equality folds):
+// `v.HasValue ? v : fallback => v ?? fallback`. The condition is a HasValue call on
+// one Nullable<T> variable (AnalyzeCondition collects it); the true arm is `ldloc v`;
+// the false arm is the fallback (a Nullable<T>). The fold produces a
+// NullCoalescingInstruction(Nullable) whose ValueInst is the true arm (ldloc v) and
+// FallbackInst is the false arm; UnderlyingResultType is the underlying type's
+// StackType (I4 for Nullable<bool>). The if is a sub-expression value (wrapped in
+// a stloc), so the fold is a clean ReplaceWith. The LiftNormal path runs before the
+// bool? equality folds and the `&`/`|` on bool? section (the C# `Lift` order), so a
+// `v.HasValue ? v : (bool?)false` folds to `v ?? (bool?)false` (the LiftNormal
+// early-out), not to `v.HasValue & v` (the `&`/`|` fold).
+TEST(ExpressionTransforms, RunIfNullableLiftFoldsHasValueLdLocFallback) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto fallback = MakeLocal("fallback", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", MakeNullableOf(KnownTypeCode::Boolean));
+    auto iff = std::make_unique<IfInstruction>(
+        MakeHasValueCall(v),                    // condition: v.HasValue
+        std::make_unique<LdLoc>(v),            // true arm: ldloc v
+        std::make_unique<LdLoc>(fallback));    // false arm: ldloc fallback
+    auto fn = MakeFnWithBlock({result, v, fallback});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountNullCoalescing(*fn), 0);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*fn), 1)
+        << "the LiftNormal early-out must produce a NullCoalescing";
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::NullCoalescingInstruction);
+    auto* nc = static_cast<NullCoalescingInstruction*>(st->Value.get());
+    EXPECT_EQ(nc->Kind, NullCoalescingKind::Nullable)
+        << "the fold produces the Nullable kind";
+    ASSERT_EQ(nc->ValueInst->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(nc->ValueInst.get())->Variable.get(), v.get())
+        << "ValueInst is the true arm (ldloc v)";
+    ASSERT_EQ(nc->FallbackInst->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(nc->FallbackInst.get())->Variable.get(),
+              fallback.get())
+        << "FallbackInst is the false arm (ldloc fallback)";
+    EXPECT_EQ(nc->UnderlyingResultType, StackType::I4)
+        << "UnderlyingResultType is the underlying Boolean's StackType (I4)";
+}
+
+// The LiftNormal early-out as a block's FinalInstruction (a statement-if with value
+// arms): the NullCoalescingInstruction becomes a non-terminal statement and a
+// Branch to the next block replaces the if-final (the block-model adaptation
+// shared with the bool? equality fold and the `&`/`|` on bool? fold).
+TEST(ExpressionTransforms, RunIfNullableLiftFoldsHasValueLdLocFallbackAsBlockFinal) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto fallback = MakeLocal("fallback", MakeNullableOf(KnownTypeCode::Boolean));
+    auto iff = std::make_unique<IfInstruction>(
+        MakeHasValueCall(v),
+        std::make_unique<LdLoc>(v),
+        std::make_unique<LdLoc>(fallback));
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto P = std::make_unique<Block>();
+    P->SetFinal(std::move(iff));
+    fn->Body->AddBlock(std::move(P));
+    auto Q = std::make_unique<Block>();
+    Q->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(Q));
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(fallback);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& P2 = *fn->Body->Blocks[0];
+    ASSERT_EQ(P2.Instructions.size(), 1u);
+    ASSERT_EQ(P2.Instructions[0]->Op, OpCode::NullCoalescingInstruction)
+        << "the NullCoalescing must become a non-terminal statement";
+    auto* nc = static_cast<NullCoalescingInstruction*>(P2.Instructions[0].get());
+    EXPECT_EQ(nc->Kind, NullCoalescingKind::Nullable);
+    ASSERT_EQ(P2.FinalInstruction->Op, OpCode::Branch);
+    EXPECT_EQ(static_cast<Branch*>(P2.FinalInstruction.get())->TargetBlock,
+              fn->Body->Blocks[1].get())
+        << "the if-final must be replaced by a Branch to the next block";
+}
+
+// The LiftNormal early-out must not fire when AnalyzeCondition collects more than
+// one nullable var (a 2-nullable BitAnd condition `(v1.HasValue & v2.HasValue)`):
+// the `v.HasValue ? v : fallback => v ?? fallback` early-out requires
+// nullableVars.Count == 1, and the DoLift path (which handles the multi-nullable
+// case) is deferred, so the if stays as-is (matching the C# which returns null).
+TEST(ExpressionTransforms, RunIfNullableLiftRejectsTwoNullableBitAndCondition) {
+    auto v1 = MakeLocal("v1", MakeNullableOf(KnownTypeCode::Boolean));
+    auto v2 = MakeLocal("v2", MakeNullableOf(KnownTypeCode::Boolean));
+    auto fallback = MakeLocal("fallback", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", MakeNullableOf(KnownTypeCode::Boolean));
+    // condition: v1.HasValue & v2.HasValue (a BitAnd(I4) of two HasValue calls)
+    auto bitand = std::make_unique<BinaryNumericInstruction>(
+        MakeHasValueCall(v1), MakeHasValueCall(v2),
+        BinaryNumericOperator::BitAnd, StackType::I4);
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(bitand),
+        std::make_unique<LdLoc>(v1),            // true arm: ldloc v1
+        std::make_unique<LdLoc>(fallback));    // false arm: ldloc fallback
+    auto fn = MakeFnWithBlock({result, v1, v2, fallback});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*fn), 0)
+        << "a 2-nullable BitAnd must not fold (DoLift is deferred)";
+    EXPECT_EQ(CountThreeValuedBool(*fn), 0)
+        << "a 2-nullable BitAnd must not fold as `&`/`|` either";
+}
+
+// The LiftNormal early-out must not fire when the true arm is not `ldloc` of the
+// nullable var (here ldloc of a different variable): the MatchLdLoc check fails
+// (vLd != nullableVars[0]). AnalyzeCondition succeeded, so the if stays as-is
+// (the DoLift / LiftCSharpUserComparison paths are deferred; matching the C#
+// which returns null).
+TEST(ExpressionTransforms, RunIfNullableLiftRejectsTrueArmNotLdLocOfNullableVar) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto other = MakeLocal("other", MakeNullableOf(KnownTypeCode::Boolean));
+    auto fallback = MakeLocal("fallback", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", MakeNullableOf(KnownTypeCode::Boolean));
+    auto iff = std::make_unique<IfInstruction>(
+        MakeHasValueCall(v),
+        std::make_unique<LdLoc>(other),     // not ldloc v
+        std::make_unique<LdLoc>(fallback));
+    auto fn = MakeFnWithBlock({result, v, other, fallback});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*fn), 0)
+        << "a true arm that is not ldloc of the nullable var must not fold";
+}
+
+// The LiftNormal early-out must not fire when the true arm is a NullableCtor (the
+// `!MatchNullableCtor` branch is not taken; the DoLift path that handles the
+// NullableCtor true arm is deferred), so the if stays as-is.
+TEST(ExpressionTransforms, RunIfNullableLiftRejectsTrueArmNullableCtor) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto fallback = MakeLocal("fallback", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", MakeNullableOf(KnownTypeCode::Boolean));
+    auto iff = std::make_unique<IfInstruction>(
+        MakeHasValueCall(v),
+        MakeNullableBoolCtor(0),          // true arm: newobj Nullable<bool>(0)
+        std::make_unique<LdLoc>(fallback));
+    auto fn = MakeFnWithBlock({result, v, fallback});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*fn), 0)
+        << "a NullableCtor true arm must not fold (the DoLift path is deferred)";
+    EXPECT_EQ(CountThreeValuedBool(*fn), 0)
+        << "a NullableCtor true arm must not fold as `&`/`|` either";
+}
+
 // RunIfNullableLift `&`/`|` on bool? fold (NullableLiftingTransform.Run(IfInstruction)
 // `Lift` method, the section after the bool? equality folds): `condition ? v :
 // (bool?)false` ==> `3vl.bool.and(condition, v)` (the D95 node). The condition is a

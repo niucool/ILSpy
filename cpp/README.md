@@ -671,8 +671,25 @@ implemented and green here. Everything else follows the phase plan in
   on bool? codegen is a Roslyn-era pattern, 0 firings on the .NET Framework 4
   corpus; ported for faithfulness (hand-built tests verify the folds, the sweep
   verifies the per-method monotone non-decreasing ThreeValuedBool count).
-  The remaining `Run(IfInstruction)` paths (AnalyzeCondition/LiftNormal,
-  MatchCompOrDecimal/LiftCSharp*, NullPropagation),
+  The `AnalyzeCondition`/`LiftNormal` `v.HasValue ? v : fallback => v ?? fallback`
+  early-out (the section of `Lift` before the bool? equality folds, the C# order) is
+  now ported: `AnalyzeCondition` walks a BitAnd tree of HasValue calls collecting
+  the nullable vars (the gate LiftNormal consults); the early-out fires when there
+  is exactly one nullable var, the true arm is not a NullableCtor, and the true arm
+  is `ldloc` of that var, producing a `NullCoalescingInstruction(Nullable)` whose
+  `UnderlyingResultType` is the underlying type's StackType (a new raw-pointer
+  `StackTypeOf(const IType*)` overload). When `AnalyzeCondition` succeeds but the
+  early-out does not fire, the if stays as-is (the DoLift / LiftCSharpUserComparison
+  / conv.nop.lifted rest of LiftNormal is deferred -- matching the C# which returns
+  null). The `v.HasValue ? v : (bool?)false` folds to `v ?? (bool?)false` (the
+  LiftNormal early-out) NOT to `v.HasValue & v` (the `&`/`|` fold), since the C#
+  `Lift` order runs AnalyzeCondition/LiftNormal first. The `v.HasValue ? v :
+  fallback` pattern is a Roslyn-era `Nullable<T> ?? Nullable<T>` lowering that
+  fires 0 times on the .NET Framework 4 corpus; ported for faithfulness (hand-built
+  tests verify the fold + the block-final fold + 3 negatives, the sweep verifies
+  the per-method monotone invariants hold).
+  The remaining `Run(IfInstruction)` paths (the DoLift / LiftCSharpUserComparison /
+  conv.nop.lifted rest of LiftNormal, MatchCompOrDecimal/LiftCSharp*, NullPropagation),
   `Run(BinaryNumericInstruction)` (the BitAnd-as-short-circuit analysis), and
   the `RunStatements(Block, int)` block transform are the subsequent
   in-order targets.

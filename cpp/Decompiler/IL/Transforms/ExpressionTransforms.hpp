@@ -57,10 +57,12 @@
 // Nullable<T>.GetValueOrDefault(a, b) -> a ?? b fold is now ported) /
 // VisitNewObj / VisitLdObj / VisitLdObjIfRef / VisitStObj / VisitStLoc
 // (TransformAssignment.HandleCompoundAssign) / the remaining VisitIfInstruction
-// pieces (the NullableLifting Run(IfInstruction) bool? equality folds and the
-// `&`/`|` on bool? folds are now ported; the remaining Run(IfInstruction) paths
-// -- AnalyzeCondition/LiftNormal, MatchCompOrDecimal/LiftCSharp*, NullPropagation
-// -- and Run(BinaryNumericInstruction) + UserDefinedLogic,
+// pieces (the NullableLifting Run(IfInstruction) bool? equality folds, the
+// `&`/`|` on bool? folds, and the AnalyzeCondition/LiftNormal `v.HasValue ? v :
+// fallback => v ?? fallback` early-out are now ported; the remaining Run(IfInstruction)
+// paths -- the DoLift / LiftCSharpUserComparison / conv.nop.lifted rest of
+// LiftNormal, MatchCompOrDecimal/LiftCSharp*, NullPropagation -- and
+// Run(BinaryNumericInstruction) + UserDefinedLogic,
 // TransformDynamicAddAssignOrRemoveAssign) / HandleSwitchExpression (needs
 // SwitchExpressions setting + SwitchInstruction guards) / VisitDynamic* /
 // VisitTryCatchHandler -- each needs further infrastructure (AddressOf,
@@ -139,8 +141,14 @@ private:
     bool HandleConditionalOperator(IfInstruction* iff);
 
     // RunIfNullableLift: port of NullableLiftingTransform.Run(IfInstruction) --
-    // the bool? equality comparison subset of the `Lift` method plus the `&`/`|`
-    // on bool? section. A conditional whose condition is `call GetValueOrDefault(
+    // the AnalyzeCondition/LiftNormal `v.HasValue ? v : fallback => v ?? fallback`
+    // early-out subset plus the bool? equality comparison subset of the `Lift`
+    // method plus the `&`/`|` on bool? section. The AnalyzeCondition/LiftNormal
+    // early-out: a conditional whose condition is a HasValue call (or a BitAnd of
+    // HasValue calls) on one Nullable<T> variable and whose true arm is `ldloc` of
+    // that variable folds into a NullCoalescingInstruction(Nullable) (the C# `??`):
+    //   v.HasValue ? v : fallback  ==> v ?? fallback
+    // The bool? equality folds: a conditional whose condition is `call GetValueOrDefault(
     // ldloca v)` on a Nullable<bool> and whose arms are `v.HasValue` / a ldc.i4
     // constant folds into a C#-lifted Comp (the D91 model):
     //   v.GetValueOrDefault() ? v.HasValue : false  ==> v == true
@@ -154,13 +162,13 @@ private:
     //   (n1.GVO || (!n2.GVO && !n1.HV)) ? v : v2
     //     v==n1 && v2==n2                  ==> 3vl.bool.or(v, v2)
     //     v==n2 && v2==n1                  ==> 3vl.bool.and(v2, v)
-    // The AnalyzeCondition/LiftNormal, MatchCompOrDecimal/LiftCSharp*, and NullPropa-
-    // gation paths are deferred. Gated on LiftNullables. The lifted Comp and the
-    // ThreeValuedBool nodes are values (not control flow), so the block-model
-    // adaptation (ReplaceWith for a sub-expression value-if, or the node becomes a
-    // non-terminal + a Branch final when the if is a block's FinalInstruction) is
-    // shared via ReplaceIfWithLiftedValue. Returns true if the fold fired (the if
-    // is destroyed).
+    // The DoLift / LiftCSharpUserComparison / conv.nop.lifted paths (the rest of
+    // LiftNormal), MatchCompOrDecimal/LiftCSharp*, and NullPropagation are deferred.
+    // Gated on LiftNullables. The NullCoalescing / lifted Comp / ThreeValuedBool
+    // nodes are values (not control flow), so the block-model adaptation
+    // (ReplaceWith for a sub-expression value-if, or the node becomes a non-terminal
+    // + a Branch final when the if is a block's FinalInstruction) is shared via
+    // ReplaceIfWithLiftedValue. Returns true if the fold fired (the if is destroyed).
     bool RunIfNullableLift(IfInstruction* iff);
 
     // logic.and/or canonicalization: `if (cond) ldc.i4 0 else RHS` ->

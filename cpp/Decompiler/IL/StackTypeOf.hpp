@@ -29,4 +29,10 @@ namespace ILSpy::Decompiler::IL {
 
 StackType StackTypeOf(const TypeSystem::ITypePtr& type);
 
+// Raw-pointer overload. The NullableLifting lift machinery holds the underlying
+// type of a Nullable<T> as a non-owning `const IType*` (GetUnderlyingTypeOfNullable
+// returns one); this overload maps it to a StackType without constructing a
+// shared_ptr. Faithful to the C# `NullableType.GetUnderlyingType(...).GetStackType()`.
+StackType StackTypeOf(const TypeSystem::IType* type);
+
 } // namespace ILSpy::Decompiler::IL

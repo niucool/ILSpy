@@ -24,8 +24,12 @@ namespace ILSpy::Decompiler::IL {
 using namespace ILSpy::Decompiler::TypeSystem;
 
 StackType StackTypeOf(const ITypePtr& type) {
+    return StackTypeOf(type.get());
+}
+
+StackType StackTypeOf(const IType* type) {
     if (!type) return StackType::Unknown;
-    if (const auto* k = dynamic_cast<const KnownType*>(type.get())) {
+    if (const auto* k = dynamic_cast<const KnownType*>(type)) {
         switch (k->Code()) {
             case KnownTypeCode::Boolean: case KnownTypeCode::Char:
             case KnownTypeCode::SByte: case KnownTypeCode::Byte:
@@ -42,8 +46,8 @@ StackType StackTypeOf(const ITypePtr& type) {
             default: return StackType::O;
         }
     }
-    if (dynamic_cast<const ByReferenceType*>(type.get())) return StackType::Ref;
-    if (dynamic_cast<const PointerType*>(type.get())) return StackType::I;  // unmanaged pointer
+    if (dynamic_cast<const ByReferenceType*>(type)) return StackType::Ref;
+    if (dynamic_cast<const PointerType*>(type)) return StackType::I;  // unmanaged pointer
     return StackType::O;
 }
 
