@@ -47,6 +47,7 @@ add_executable(ilspy_tests
     Decompiler/IL/Transforms/PatternMatchingTransform_Test.cpp
     Decompiler/IL/Transforms/LockTransform_Test.cpp
     Decompiler/IL/Instructions/MatchInstruction_Test.cpp
+    Decompiler/IL/Instructions/UsingInstruction_Test.cpp
 )
 target_link_libraries(ilspy_tests PRIVATE
     ILSpy::ilspy

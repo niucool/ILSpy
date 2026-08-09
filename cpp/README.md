@@ -221,6 +221,25 @@ implemented and green here. Everything else follows the phase plan in
   0 with only the no-flag shapes); the V4 / V4YieldReturn flag shapes (inline
   `stloc obj` as the Enter arg) and the single-block `if(flag){Exit}` finally
   are deferred (0 occurrences in mscorlib).
+  `UsingInstruction` (Instructions/, a tested-but-not-yet-wired
+  foundation) ports the C# `using`-statement ILAst node the next in-order
+  transform (UsingTransform) builds from a `stloc obj(resource); .try { }
+  finally { if (obj != null) callvirt Dispose(obj) }` block tail: two children
+  ResourceExpression (slot 0, inlineable) and Body (slot 1), a Variable (an
+  IStoreInstruction -- ComputeVariableUsage counts it as a store), and
+  IsAsync / IsRefStruct flags (`await using` / ref-struct `using`). DirectFlags
+  = MayWriteLocals | ControlFlow | SideEffect; result Void. The ILAstToCSharp
+  seed renders `using (resource) { body }` (the expression form). The
+  UsingStatement setting (default true) gates the deferred UsingTransform; the
+  UsingTransform itself is the next concrete target -- it needs the block-model
+  adaptation of the `if (obj != null) { Dispose }; leave` finally tail (whose
+  exact shape after ConditionDetection must be probed on the corpus) and a
+  permissive CheckResourceType (this port's minimal type system has no
+  GetAllBaseTypes, so the IDisposable-implements check reduces to a direct
+  KnownTypeCode::IDisposable and the Dispose-method-name structural match is
+  the real proof). TransformUsingVB, TransformAsyncUsing (needs Await), the
+  NullableOfT / ref-struct dispose, and the isinst-temp / MatchInstruction
+  null-check shapes are deferred.
   The CLI applies CFS + StObjToStLoc + ILInlining + InlineReturnTransform +
   RemoveInfeasiblePath + DetectPinnedRegions + DetectCatchWhenConditionBlocks +
   LdLocaDupInitObjTransform + EarlyExpressionTransforms + RemoveDeadVariableInit +
@@ -231,13 +250,16 @@ implemented and green here. Everything else follows the phase plan in
   `lock (...) { ... }` statements now
   appear in the output. 21 of ~40 transforms ported.
   Next per `GetILTransforms()`:
+  UsingTransform (the UsingInstruction node foundation is in place; needs the
+  block-model `if (obj != null) { Dispose }; leave` finally-tail adaptation,
+  probed on the corpus, + a permissive CheckResourceType),
   the async/iterator state machines
   (YieldReturnDecompiler/AsyncAwaitDecompiler), SplitVariables (needs
   reaching-definitions dataflow),
   DetectExitPoints + the full ConditionDetection (multi-pred join blocks),
   the PatternMatchingTransform recursive sub-patterns (DetectPropertySubPatterns /
   PropertyOrFieldAccess / CompatibleExitInstruction),
-  UsingTransform, CachedDelegateInitialization, ...
+  CachedDelegateInitialization, ...
   HighLevelLoopTransform (while/for),
   TransformAssignment, ...
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text

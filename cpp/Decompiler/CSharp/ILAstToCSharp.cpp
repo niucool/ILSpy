@@ -52,6 +52,7 @@
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
+#include "Decompiler/IL/Instructions/UsingInstruction.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
@@ -377,6 +378,17 @@ private:
                 const auto& lk = static_cast<const LockInstruction&>(inst);
                 Line(indent, "lock (" + (lk.OnExpression ? Expr(*lk.OnExpression) : std::string("?")) + ")");
                 if (lk.Body) EmitBraced(*lk.Body, indent); else Line(indent, "{ }");
+                return;
+            }
+            case OpCode::UsingInstruction: {
+                // The C# `using` statement: `using (resource) { body }` (the
+                // expression form). The UsingInstruction also carries the local
+                // the resource is stored into, but the seed elides it (the real
+                // back end declares the using-local via the using, not DeclareVariables).
+                const auto& us = static_cast<const UsingInstruction&>(inst);
+                Line(indent, "using (" +
+                     (us.ResourceExpression ? Expr(*us.ResourceExpression) : std::string("null")) + ")");
+                if (us.Body) EmitBraced(*us.Body, indent); else Line(indent, "{ }");
                 return;
             }
             case OpCode::TryFault: {

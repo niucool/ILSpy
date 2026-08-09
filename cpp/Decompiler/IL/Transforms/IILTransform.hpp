@@ -80,6 +80,12 @@ struct ILTransformSettings {
     // pattern). DecompilerSettings.LockStatement -- a C# 1.0 setting, default
     // true. Gates LockTransform.
     bool LockStatement = true;
+    // Whether to detect `using` statements (the IDisposable try/finally
+    // pattern). DecompilerSettings.UsingStatement -- a C# 1.0 setting, default
+    // true. Gates UsingTransform (the UsingInstruction node itself is
+    // unconditional; this gates the transform that builds it from the
+    // stloc + try/finally + Dispose-block pattern).
+    bool UsingStatement = true;
 };
 
 class ILTransformContext {

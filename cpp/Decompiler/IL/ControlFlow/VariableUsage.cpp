@@ -28,6 +28,7 @@
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
+#include "Decompiler/IL/Instructions/UsingInstruction.hpp"
 
 #include <unordered_set>
 
@@ -54,6 +55,13 @@ void CountUsage(ILInstruction* inst) {
         case OpCode::MatchInstruction: {
             auto* m = static_cast<MatchInstruction*>(inst);
             if (m->Variable) ++m->Variable->StoreCount;
+            break;
+        }
+        // UsingInstruction is an IStoreInstruction (it stores the resource into
+        // Variable), so it counts as a store -- mirroring the C# Connected() hook.
+        case OpCode::UsingInstruction: {
+            auto* u = static_cast<UsingInstruction*>(inst);
+            if (u->Variable) ++u->Variable->StoreCount;
             break;
         }
         case OpCode::LdLoca: {
