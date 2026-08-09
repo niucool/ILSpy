@@ -43,6 +43,7 @@
 #include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
+#include "Decompiler/TypeSystem/TypeUtils.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -55,6 +56,7 @@ namespace {
 
 using TypeSystem::IType;
 using TypeSystem::ITypePtr;
+using TypeSystem::IsReferenceType;
 using TypeSystem::TypeKind;
 
 // The next block in `block`'s container (the implicit fall-through target in
@@ -74,34 +76,6 @@ Block* NextBlockInContainer(Block* block) {
 
 BlockContainer* ParentContainerOf(Block* b) {
     return b ? dynamic_cast<BlockContainer*>(b->Parent) : nullptr;
-}
-
-// IType.IsReferenceType (MetadataTypeDefinition.cs): false for Struct/Enum/Void,
-// true for Class/Interface/Delegate/Array/..., null for TypeParameter/ByRef/
-// Pointer (and the special/unknown kinds). The C# `null` is std::nullopt here.
-// The pattern-matching checks (`!= true`, `== false`, `== true`) map onto the
-// optional accordingly.
-std::optional<bool> IsReferenceType(const IType* t) {
-    if (!t) return std::nullopt;
-    switch (t->Kind()) {
-        case TypeKind::Struct:
-        case TypeKind::Enum:
-        case TypeKind::Void:
-            return false;
-        case TypeKind::TypeParameter:
-        case TypeKind::ByReference:
-        case TypeKind::Pointer:
-        case TypeKind::Unknown:
-        case TypeKind::Null:
-        case TypeKind::None:
-        case TypeKind::Other:
-        case TypeKind::Dynamic:
-        case TypeKind::UnboundTypeArgument:
-        case TypeKind::FunctionPointer:
-            return std::nullopt;
-        default:  // Class, Interface, Delegate, Array, Tuple, ...
-            return true;
-    }
 }
 
 // ---- Small structural match helpers (PatternMatching.cs) ----

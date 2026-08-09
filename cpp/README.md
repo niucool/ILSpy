@@ -89,7 +89,7 @@ implemented and green here. Everything else follows the phase plan in
   `RemoveDeadStores` setting, with no loads or addresses, has its stores dropped
   (a pure value goes with the store; an impure value is unwrapped so its side
   effect survives), and dead-copy chains collapse via a recompute fixpoint.
-  26 of ~40 transforms ported. The switch-detection family is now complete in
+  27 of ~40 transforms ported. The switch-detection family is now complete in
   its core: `LongSet`/`LongInterval` (Util/, ported from LongSet.cs /
   Interval.cs) -- an immutable interval-set of longs whose complement is
   representable (unlike `std::set<int64_t>`) -- backs `SwitchSection::Labels`
@@ -262,7 +262,7 @@ implemented and green here. Everything else follows the phase plan in
   statements, switch-on-nullable `case null:` arms, `is T x` patterns,
   `lock (...) { ... }`, `using (...) { ... }` statements, and
   `V = cond ? V1 : V2` ternaries (the conditional operator) now
-  appear in the output. 26 of ~40 transforms ported (the StatementTransform
+  appear in the output. 27 of ~40 transforms ported (the StatementTransform
   orchestration + its first two children ILInlining and ExpressionTransforms;
   the remaining 14 per-statement children are deferred).
   `DelegateConstruction` (Transforms/, a tested-but-not-yet-wired
@@ -428,7 +428,19 @@ implemented and green here. Everything else follows the phase plan in
   all on `Comp` constant-pattern conditions (`if (x == 5) 1 else 0` -> `x == 5`)
   -- the `MatchInstruction` case fires 0 (PatternMatchingTransform fires 0 on
   the corpus); faithful to the C# (its `IsPatternMatch` treats a
-  Comp-with-constant-right as a constant pattern). The
+  Comp-with-constant-right as a constant pattern). It also folds the
+  `VisitBox` rewrite: `box ref-type(arg)` -> `arg` (for a reference type,
+  `box` is a no-op; the `ResultType` guard -- the arg is stack-type `O`, the box
+  is `O` -- protects a value type's box, whose arg is `I4`/`I8`/.., from a
+  mis-fire, and `IsReferenceType` (a new shared, faithful
+  `Decompiler/TypeSystem/TypeUtils.hpp` helper returning a tri-state
+  `optional<bool>`, promoted from the file-local PatternMatchingTransform copy)
+  returns `nullopt` for the uncertain kinds -- TypeParameter/ByRef/Pointer/
+  Unknown/... -- so a `box T(arg)` over a generic T stays). The fold fires 42
+  times on the .NET Framework 4 mscorlib corpus (a real-corpus ILAst-cleaning
+  transform, not faithfulness-only); the seed already renders `box(arg)` as
+  `arg` for all boxes, so the CLI output is unchanged and the value is ILAst
+  cleanliness for the future real back end. The
   remaining 14 per-statement children (DynamicIsEventAssignmentTransform,
   TransformAssignment, NullCoalescingTransform, NullableLiftingStatementTransform,
   NullPropagationStatementTransform, TransformArrayInitializers,
@@ -439,7 +451,7 @@ implemented and green here. Everything else follows the phase plan in
   option (the ldloca-into-`addressof` path the C# second pass enables, which
   needs an `AddressOf` node + `IsGeneratedTemporaryForAddressOf` +
   `ClassifyExpression`) are deferred, as are the rest of `ExpressionTransforms`
-  (the NullableLifting call, the Conv/Box/Call/NewObj/LdObj/StObj/StLoc
+  (the NullableLifting call, the Conv/Call/NewObj/LdObj/StObj/StLoc
   `HandleCompoundAssign`, the remaining VisitIfInstruction pieces
   (NullableLifting, UserDefinedLogic,
   `TransformDynamicAddAssignOrRemoveAssign`), the SwitchExpression/Dynamic/

@@ -37,12 +37,14 @@
 // `if (!cond) RHS else ldc.i4 0`, the &&/|| form normalization), and the
 // `match(x) ? true : false -> match(x)` fold (a conditional whose condition is
 // a pattern match and whose arms are ldc.i4 1/0 is redundant -- the MatchInstruction
-// already evaluates to 1/0). Deferred vs the C#: the NullableLiftingTransform
+// already evaluates to 1/0), plus the VisitBox rewrite (`box ref-type(arg)` ->
+// `arg`; for a reference type, box is a no-op). Deferred vs the C#: the
+// NullableLiftingTransform
 // call (needs the full nullable-lift transform), FixComparisonKindLdNull
 // (already in the standalone EarlyExpressionTransforms, D61), the Conv unwrap
 // of the right operand (this port's Conv carries no Kind/SignExtend/ZeroExtend,
 // so UnwrapConv cannot be faithful), the ldlen / conv o->i null-comparison
-// special cases (need Conv Kind), VisitConv / VisitBox / VisitLdElema /
+// special cases (need Conv Kind), VisitConv / VisitLdElema /
 // VisitNewArr / VisitCall / VisitNewObj / VisitLdObj / VisitLdObjIfRef /
 // VisitStObj / VisitStLoc (TransformAssignment.HandleCompoundAssign) / the
 // remaining VisitIfInstruction pieces (NullableLifting, UserDefinedLogic,
@@ -60,6 +62,7 @@
 namespace ILSpy::Decompiler::IL {
 
 class Comp;
+class Box;
 class IfInstruction;
 
 class ExpressionTransforms : public IStatementTransform {
@@ -126,6 +129,16 @@ private:
     // HandleConditionalOperator block-model adaptation). Returns true if the
     // fold fired (the if is destroyed).
     bool FoldMatchTrueFalse(IfInstruction* iff);
+
+    // VisitBox: `box ref-type(arg)` -> `arg`. For a reference type, box is a
+    // no-op (the value is already on the heap). The C# checks
+    // `inst.Type.IsReferenceType == true && inst.Argument.ResultType ==
+    // inst.ResultType`; the ResultType guard (the arg is stack-type O, the box is
+    // O) is the real protection against a value-type mis-fire (a value type's arg
+    // is I4/I8/.., never O), and IsReferenceType (TypeUtils) handles the
+    // reference-type kinds, returning nullopt for the uncertain kinds
+    // (TypeParameter/ByRef/Pointer/Unknown/...) so the fold is conservative.
+    void VisitBox(Box* box);
 
     // The settings snapshot for the duration of a Run (the C# stores the
     // StatementTransformContext as a member). Consulted by IsPatternMatch in

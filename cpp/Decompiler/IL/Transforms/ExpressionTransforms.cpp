@@ -20,6 +20,7 @@
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
@@ -30,6 +31,7 @@
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/StackType.hpp"
+#include "Decompiler/TypeSystem/TypeUtils.hpp"
 
 namespace ILSpy::Decompiler::IL {
 
@@ -202,6 +204,10 @@ void ExpressionTransforms::Visit(ILInstruction* inst) {
         VisitIfInstruction(static_cast<IfInstruction*>(inst));
         return;
     }
+    if (inst->Op == OpCode::Box) {
+        VisitBox(static_cast<Box*>(inst));
+        return;
+    }
     // Default: recurse into children (the C# ILVisitor.Default).
     for (int i = 0; i < inst->ChildCount(); ++i) Visit(inst->GetChild(i));
 }
@@ -272,6 +278,35 @@ bool ExpressionTransforms::VisitCompTailRewrites(Comp* comp) {
         return true;
     }
     return false;
+}
+
+void ExpressionTransforms::VisitBox(Box* box) {
+    if (!box) return;
+    // Visit the argument first (the C# `inst.Argument.AcceptVisitor(this)`) so
+    // the Comp/StLoc rewrites cascade into the boxed expression before the box
+    // is considered for removal.
+    if (box->Argument) Visit(box->Argument.get());
+
+    // box ref-type(arg) => arg: for a reference type, box is a no-op (the value
+    // is already on the heap). The C# checks `inst.Type.IsReferenceType == true
+    // && inst.Argument.ResultType == inst.ResultType`. The ResultType guard (the
+    // arg is stack-type O, the box is O) is the real protection against a
+    // value-type mis-fire: a value type's argument is I4/I8/F4/.. (never O), so
+    // even a type whose Kind defaulted to Class (a non-known TypeRef this port's
+    // plain MakeTypeRef leaves as Class) does not fold when the argument is not
+    // object-typed. IsReferenceType (TypeUtils) returns nullopt for the
+    // uncertain kinds (TypeParameter/ByRef/Pointer/Unknown/...), so the fold is
+    // conservative there -- a `box T(arg)` over a generic T does not fold (the
+    // C# folds it only when T has a class constraint this minimal type system
+    // does not track).
+    if (!box->Type) return;
+    auto rt = TypeSystem::IsReferenceType(box->Type.get());
+    if (!rt || !*rt) return;
+    if (!box->Argument || box->Argument->ResultType() != box->ResultType()) return;
+    // Detach the argument before the box is destroyed, then replace the box with
+    // it in its parent's slot (the C# `inst.ReplaceWith(arg)`).
+    auto arg = box->TakeChild(0);
+    box->ReplaceWith(std::move(arg));
 }
 
 void ExpressionTransforms::VisitIfInstruction(IfInstruction* iff) {
