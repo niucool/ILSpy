@@ -868,6 +868,22 @@ implemented and green here. Everything else follows the phase plan in
   via CSharpOperators.LiftUserDefinedOperator) is deferred -- needs the Phase 5
   C# resolver; the existing LiftCSharp* paths bail safely for a Call
   CompOrDecimal, so no fold fires until the resolver-backed lift lands.
+  The `IsGenericNewPattern` fold (the `(default(T) == null) ?
+  Activator.CreateInstance<T>() : default(T)` => `Activator.CreateInstance<T>()`
+  case, the last piece of `Run(IfInstruction)`'s MatchCompOrDecimal equality
+  branch) is now ported: it consults the new `MatchDefaultValue` helper, the
+  `Call::MethodName` (now resolved for a generic call via the
+  `ResolveTokenToString` MethodSpec unwrap), the new `Call::TypeArgumentsCount`
+  (the MethodSpec instantiation count, parsed from the 0x0A-marker
+  MethodSpecSig blob), and `TypeKind::TypeParameter`. The `ResolveTokenToString`
+  MethodSpec unwrap is a general improvement: a generic-instantiation call (a
+  MethodSpec token, table 0x2B) now renders its resolved method name (e.g.
+  `System.Array.IndexOf(...)`, `System.Runtime.InteropServices.Marshal.SizeOf(...)`)
+  instead of the raw hex token -- the IL reader's `ResolveTokenToString` unwraps
+  the MethodSpec to its underlying MethodDefOrRef, the same unwrap
+  `GetMethodSignature` / `ResolveMethodDeclaringType` already use. The
+  IsGenericNewPattern is a Roslyn-era codegen pattern that fires 0 times on the
+  .NET Framework 4 legacy-csc mscorlib corpus (ported for faithfulness).
   The remaining `Run(IfInstruction)` paths (the LiftCSharpUserComparison rest
   of LiftNormal [needs the C# resolver's CSharpOperators.LiftUserDefinedOperator;
   the `Call::IsOperator` gate it consults is now in place], the Decimal lift

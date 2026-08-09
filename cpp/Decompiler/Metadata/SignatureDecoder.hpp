@@ -76,6 +76,13 @@ TypeSystem::ITypePtr DecodeFieldSignatureBlob(const winmd::reader::database& db,
 TypeSystem::ITypePtr DecodeTypeSpecBlob(const winmd::reader::database& db,
                                         const std::uint8_t* data, std::size_t size);
 
+// Decode a MethodSpec Instantiation blob (ECMA-335 II.23.2.15 MethodSpecSig:
+// a 0x0A GENERICINST marker, then a compressed generic-argument count, then
+// that many Type blobs) and return the generic-argument count. Returns -1 for
+// a malformed blob or one whose first byte is not the 0x0A marker.
+int DecodeMethodSpecTypeArgCount(const winmd::reader::database& db,
+                                 const std::uint8_t* data, std::size_t size);
+
 // Decode a LOCAL_SIG blob (0x07 marker + count + types) -- the local-variable
 // signature referenced by a method body's fat header. Returns the local types
 // (with their pinned flag) in index order; an empty/partial vector on a

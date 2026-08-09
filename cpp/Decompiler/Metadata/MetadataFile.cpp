@@ -396,6 +396,17 @@ std::string MetadataFile::ResolveTokenToString(std::uint32_t token) const {
             // ModuleRef/MethodDef parent: best-effort, member name only.
             return std::string(mr.Name());
         }
+        if (table == 0x2B && row && row <= impl_->db->MethodSpec.size()) {
+            // MethodSpec: unwrap to the underlying MethodDefOrRef coded index
+            // (column 0) and resolve that. winmd's MethodSpec row has no public
+            // accessors; read the raw value: bit 0 is the tag (0=MethodDef,
+            // 1=MemberRef), the rest is the 1-based row. So a generic-instantiation
+            // call (e.g. `Activator.CreateInstance<T>()`) renders its resolved
+            // method name, not the raw token.
+            std::uint32_t v = impl_->db->MethodSpec.get_value<std::uint32_t>(row - 1, 0);
+            if (v != 0)
+                return ResolveTokenToString(((v & 1) ? 0x0A000000u : 0x06000000u) | (v >> 1));
+        }
     } catch (const std::exception&) {
         // Fall through to the raw-token fallback.
     }
@@ -478,6 +489,28 @@ ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::ResolveMethodDeclaringType
         return nullptr;
     }
     return nullptr;
+}
+
+int MetadataFile::GetMethodSpecTypeArgumentCount(std::uint32_t methodToken) const {
+    if (!IsValid()) return 0;
+    std::uint32_t table = methodToken >> 24;
+    std::uint32_t row = methodToken & 0x00FFFFFFu;
+    try {
+        if (table == 0x2B && row && row <= impl_->db->MethodSpec.size()) {
+            // Column 1 is the Instantiation blob (the MethodSpecSig). Read it
+            // and decode the generic-argument count. A non-MethodSpec token, an
+            // out-of-range row, or a malformed/missing blob returns 0.
+            std::uint32_t blobIndex = impl_->db->MethodSpec.get_value<std::uint32_t>(row - 1, 1);
+            auto blob = impl_->db->get_blob(blobIndex);
+            int count = DecodeMethodSpecTypeArgCount(
+                *impl_->db, blob.begin(),
+                static_cast<std::size_t>(blob.end() - blob.begin()));
+            return count < 0 ? 0 : count;
+        }
+    } catch (const std::exception&) {
+        return 0;
+    }
+    return 0;
 }
 
 namespace {

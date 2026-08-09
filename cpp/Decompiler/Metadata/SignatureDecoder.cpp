@@ -380,4 +380,24 @@ std::vector<LocalTypeInfo> DecodeLocalSignatureBlob(const winmd::reader::databas
     return result;
 }
 
+int DecodeMethodSpecTypeArgCount(const winmd::reader::database& db,
+                                 const std::uint8_t* data, std::size_t size) {
+    BlobReader r{ data, data + size, &db, false };
+    // ECMA-335 II.23.2.15 MethodSpecSig: a 0x0A GENERICINST marker, then a
+    // compressed generic-argument count, then that many Type blobs. The marker
+    // distinguishes a method-spec instantiation blob from a method-def
+    // signature (whose first byte is the calling convention).
+    std::uint8_t marker = r.Byte();
+    if (r.failed || marker != 0x0A) return -1;
+    std::uint32_t count = r.CompressedUnsigned();
+    if (r.failed) return -1;
+    // Validate the count by skipping each Type blob; a malformed blob means the
+    // count or the format is wrong, so report -1 rather than a stale count.
+    for (std::uint32_t i = 0; i < count && !r.failed; ++i) {
+        (void)DecodeTypeBlob(r);
+    }
+    if (r.failed) return -1;
+    return static_cast<int>(count);
+}
+
 } // namespace ILSpy::Decompiler::Metadata

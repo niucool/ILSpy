@@ -231,6 +231,26 @@ public:
     // Nullable<T> instantiation unwraps).
     static bool MatchNull(ILInstruction* inst, const TypeSystem::IType*& underlyingType);
 
+    // Port of the ILInstruction.MatchDefaultValue(out var type) extension: a
+    // DefaultValue node reports its Type. The general form MatchNull narrows
+    // (it requires the Type be a Nullable<T>); MatchDefaultValue matches any
+    // DefaultValue. Used by IsGenericNewPattern (the `default(T) == null ?
+    // Activator.CreateInstance<T>() : default(T)` fold checks both the comp's
+    // left operand and the false arm are `default(T)` of the same type).
+    static bool MatchDefaultValue(ILInstruction* inst, TypeSystem::ITypePtr& type);
+
+    // Port of NullableLiftingTransform.IsGenericNewPattern(compLeft,
+    // compRight, trueInst, falseInst): the `(default(T) == null) ?
+    // Activator.CreateInstance<T>() : default(T)` => `Activator.CreateInstance<T>()`
+    // fold. The condition compares `default(T)` (a DefaultValue whose Type is a
+    // type parameter) against ldnull; the false arm is another `default(T)` of
+    // the SAME type; the true arm is a call to `System.Activator.CreateInstance`
+    // with exactly one generic type argument. Returns true when the shape
+    // matches (the caller returns the true arm as the lifted value, dropping the
+    // null check + default fallback).
+    static bool IsGenericNewPattern(ILInstruction* compLeft, ILInstruction* compRight,
+                                    ILInstruction* trueInst, ILInstruction* falseInst);
+
     // Port of NullableLiftingTransform.DoLift's result: a (lifted instruction,
     // relevance bitset) pair. A null Lifted means lifting failed (the bitset is
     // then also null); a non-null Lifted carries the relevance bitset (which

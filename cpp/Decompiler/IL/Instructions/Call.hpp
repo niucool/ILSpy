@@ -67,6 +67,15 @@ public:
     // MatchCompOrDecimal's Decimal branch (the 6 comparison operators on
     // System.Decimal, which have no IL Comp instruction and lower to op_* calls).
     bool IsOperator = false;
+    // The number of generic type arguments this call's method-spec
+    // instantiation supplies (0 for a non-generic MethodDef/MemberRef call, N
+    // for a MethodSpec call like `Activator.CreateInstance<T>()` where N == 1).
+    // Populated by the IL reader from the MethodSpec Instantiation blob (the
+    // MethodSpecSig). The C# carries this as `Method.TypeArguments.Count`;
+    // transforms consult it to distinguish a generic-instantiation call from a
+    // non-generic overload (e.g. NullableLiftingTransform.IsGenericNewPattern
+    // checks `Activator.CreateInstance` with exactly one type argument).
+    int TypeArgumentsCount = 0;
 
     explicit Call(std::string method = std::string()) : ILInstruction(OpCode::Call), MethodName(std::move(method)) {}
 

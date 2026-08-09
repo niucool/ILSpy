@@ -782,7 +782,7 @@ TEST(NullableLiftingTransform, MscorlibDeclaringTypeSweep) {
             }
         });
         fn->CheckInvariant(ILPhase::Normal);
-        if (processed >= 8000) break;
+        // scan all methods to find raw-hex MethodSpec calls
     }
     // The reader decodes thousands of methods; real call/callvirt/newobj sites
     // must carry a resolved declaring type (the input the helpers read).
@@ -857,7 +857,7 @@ TEST(NullableLiftingTransform, MscorlibOperatorAndDecimalSweep) {
             }
         });
         fn->CheckInvariant(ILPhase::Normal);
-        if (processed >= 8000) break;
+        // scan all methods to find raw-hex MethodSpec calls
     }
     // mscorlib (.NET Framework 4) defines System.Decimal's comparison
     // operators (op_Equality/op_Inequality/op_LessThan/op_LessThanOrEqual/
@@ -867,6 +867,68 @@ TEST(NullableLiftingTransform, MscorlibOperatorAndDecimalSweep) {
     EXPECT_GT(processed, 5000);
     EXPECT_GT(operatorCalls, 0);
     EXPECT_GT(decimalCompMatches, 0);
+}
+
+// Probe / regression test for the MethodSpec Instantiation blob parser
+// (MetadataFile::GetMethodSpecTypeArgumentCount) and the ResolveTokenToString
+// MethodSpec unwrap. A generic-instantiation call (a MethodSpec token, table
+// 0x2B) must render its resolved method name (not the raw hex token) and carry
+// the generic-argument count the MethodSpecSig blob encodes. This exercises the
+// 0x0A-marker format on the real .NET Framework 4 mscorlib corpus, which has
+// many generic method calls (Array.IndexOf<T>, EqualityComparer<T>.Default,
+// etc.).
+TEST(NullableLiftingTransform, MscorlibMethodSpecTypeArgumentsSweep) {
+#if defined(_WIN32)
+    const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    int processed = 0;
+    int genericCalls = 0;       // calls with TypeArgumentsCount > 0
+    int resolvedGenericNames = 0;  // generic calls whose MethodName is resolved
+    int maxCount = 0;
+    int rawHexCalls = 0;  // any call whose MethodName is the raw-hex fallback
+    ILTransformContext ctx;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++processed;
+        Walk(fn->Body.get(), [&](ILInstruction* inst) {
+            if (!inst || inst->Op != OpCode::Call) return;
+            auto* call = static_cast<Call*>(inst);
+            if (call->TypeArgumentsCount > 0) {
+                ++genericCalls;
+                maxCount = std::max(maxCount, call->TypeArgumentsCount);
+                // The MethodSpec unwrap must resolve the name; the raw-hex
+                // fallback starts with "0x2B".
+                if (call->MethodName.rfind("0x2B", 0) != 0)
+                    ++resolvedGenericNames;
+            }
+            // No call (generic or not) should render the raw-hex MethodSpec
+            // fallback now that ResolveTokenToString unwraps MethodSpec.
+            if (call->MethodName.rfind("0x2B", 0) == 0)
+                ++rawHexCalls;
+        });
+        fn->CheckInvariant(ILPhase::Normal);
+        if (processed >= 8000) break;
+    }
+    // mscorlib has many generic method calls; the reader must populate
+    // TypeArgumentsCount and resolve the name for them. If the MethodSpec blob
+    // format were wrong, genericCalls would be 0 (the parser returns 0 for every
+    // malformed/non-0x0A blob).
+    EXPECT_GT(processed, 5000);
+    EXPECT_GT(genericCalls, 0);
+    EXPECT_EQ(genericCalls, resolvedGenericNames);
+    // No call should render the raw-hex MethodSpec fallback now that
+    // ResolveTokenToString unwraps a MethodSpec to its underlying method name.
+    EXPECT_EQ(rawHexCalls, 0);
+    // Sanity: a generic method has at least one type argument.
+    EXPECT_GE(maxCount, 1);
 }
 
 // --- DoLift / DoLiftBinary / NewNullable tests ---

@@ -529,6 +529,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             call->IsNewObj = (op == ILOpCode::Newobj);
             call->DeclaringType = file.ResolveMethodDeclaringType(tok);
             call->IsOperator = IsOperatorName(call->MethodName);
+            call->TypeArgumentsCount = file.GetMethodSpecTypeArgumentCount(tok);
             std::vector<std::unique_ptr<ILInstruction>> args;
             args.reserve(argCount);
             for (int i = 0; i < argCount; ++i) {

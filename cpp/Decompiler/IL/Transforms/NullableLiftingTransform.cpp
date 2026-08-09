@@ -340,6 +340,43 @@ bool NullableLiftingTransform::MatchNull(ILInstruction* inst, const TypeSystem::
     return true;
 }
 
+bool NullableLiftingTransform::MatchDefaultValue(ILInstruction* inst, TypeSystem::ITypePtr& type) {
+    // Port of ILInstruction.MatchDefaultValue(out var type): a DefaultValue
+    // reports its Type. The general form of MatchNull (which narrows to a
+    // Nullable<T> Type).
+    type = nullptr;
+    if (!inst || inst->Op != OpCode::DefaultValue) return false;
+    type = static_cast<DefaultValue*>(inst)->Type;
+    return true;
+}
+
+bool NullableLiftingTransform::IsGenericNewPattern(ILInstruction* compLeft,
+                                                    ILInstruction* compRight,
+                                                    ILInstruction* trueInst,
+                                                    ILInstruction* falseInst) {
+    // Port of NullableLiftingTransform.IsGenericNewPattern: the
+    //   (default(T) == null) ? Activator.CreateInstance<T>() : default(T)
+    //   => Activator.CreateInstance<T>()
+    // fold. The false arm is `default(T)`, the true arm is a call to
+    // `System.Activator.CreateInstance` with exactly one generic type argument,
+    // the comp's left is another `default(T)` of the SAME type, and the comp's
+    // right is ldnull. The C# checks `c.Method.FullName ==
+    // "System.Activator.CreateInstance"` and `c.Method.TypeArguments.Count == 1`;
+    // this port's Call::MethodName is the resolved "Namespace.Type::Method" form
+    // (the MethodSpec unwrap resolves it), and Call::TypeArgumentsCount carries
+    // the MethodSpec instantiation count.
+    TypeSystem::ITypePtr type, type2;
+    if (!MatchDefaultValue(falseInst, type)) return false;
+    if (!trueInst || trueInst->Op != OpCode::Call) return false;
+    auto* c = static_cast<Call*>(trueInst);
+    if (c->MethodName != "System.Activator::CreateInstance") return false;
+    if (c->TypeArgumentsCount != 1) return false;
+    if (!type || type->Kind() != TypeSystem::TypeKind::TypeParameter) return false;
+    if (!MatchDefaultValue(compLeft, type2)) return false;
+    if (!type2 || !type->Equals(*type2)) return false;
+    return compRight && compRight->Op == OpCode::LdNull;
+}
+
 NullableLiftingTransform::DoLiftResult NullableLiftingTransform::DoLift(
     ILInstruction* inst, const std::vector<ILVariablePtr>& nullableVars) {
     // Port of NullableLiftingTransform.DoLift(inst). The 5 self-contained cases

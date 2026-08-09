@@ -58,6 +58,7 @@
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/BitNot.hpp"
+#include "Decompiler/IL/Instructions/DefaultValue.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
@@ -65,6 +66,7 @@
 #include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
@@ -3541,6 +3543,153 @@ TEST(ExpressionTransforms, RunIfNullableLiftFoldsCLiftedRelationalNegated) {
     EXPECT_EQ(static_cast<LdLoc*>(inner->Left.get())->Variable.get(), v.get());
     ASSERT_EQ(inner->Right->Op, OpCode::LdcI4);
     EXPECT_EQ(static_cast<LdcI4*>(inner->Right.get())->Value, 5);
+}
+
+// RunIfNullableLift MatchCompOrDecimal IsGenericNewPattern case (the D108-
+// deferred Activator.CreateInstance<T>() fold):
+//   (default(T) == null) ? Activator.CreateInstance<T>() : default(T)
+//     ==> Activator.CreateInstance<T>()
+// The condition compares `default(T)` (a DefaultValue whose Type is a type
+// parameter) against ldnull; the false arm is another `default(T)` of the SAME
+// type; the true arm is a call to `System.Activator.CreateInstance` with exactly
+// one generic type argument. The fold returns the Activator call (the if's
+// TrueInst), so the if is replaced by it. A Roslyn-era codegen pattern (fires 0
+// on the .NET Framework 4 legacy-csc corpus, ported for faithfulness).
+TEST(ExpressionTransforms, RunIfNullableLiftFoldsIsGenericNewPattern) {
+    auto T = std::make_shared<ILSpy::Decompiler::TypeSystem::TypeParameter>(
+        0, ILSpy::Decompiler::TypeSystem::TypeParameter::OwnerKind::Method, "T");
+    auto result = MakeLocal("result", T);
+    // condition: comp(eq, default(T), ldnull)
+    auto cond = std::make_unique<Comp>(std::make_unique<DefaultValue>(T),
+                                        std::make_unique<LdNull>(),
+                                        ComparisonKind::Equality, false);
+    // true arm: call System.Activator::CreateInstance (generic, 1 type arg)
+    auto activator = std::make_unique<Call>("System.Activator::CreateInstance");
+    activator->TypeArgumentsCount = 1;
+    activator->ReturnType = StackType::O;
+    // false arm: default(T) (same T)
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(activator),
+                                                std::make_unique<DefaultValue>(T));
+    auto fn = MakeFnWithBlock({result});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // The if is replaced by the Activator call (the true arm); the null check
+    // and the default(T) fallback are dropped.
+    auto& blk = fn->Body->Blocks[0];
+    ASSERT_EQ(blk->Instructions.size(), 1u);
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Call) << "the if must fold to the Activator call";
+    auto* call = static_cast<Call*>(st->Value.get());
+    EXPECT_EQ(call->MethodName, "System.Activator::CreateInstance");
+    EXPECT_EQ(call->TypeArgumentsCount, 1);
+}
+
+// IsGenericNewPattern rejects a non-type-parameter underlying type: the false
+// arm is `default(int)`, not `default(T)`, so the Activator.CreateInstance<int>()
+// shape is not the generic-new pattern (it's a concrete instantiation, not the
+// `default(T) == null` null-check Roslyn emits for `new T()`).
+TEST(ExpressionTransforms, RunIfNullableLiftIsGenericNewPatternRejectsNonTypeParameter) {
+    auto result = MakeLocal("result");
+    auto Int = std::make_shared<KnownType>(KnownTypeCode::Int32);
+    auto cond = std::make_unique<Comp>(std::make_unique<DefaultValue>(Int),
+                                        std::make_unique<LdNull>(),
+                                        ComparisonKind::Equality, false);
+    auto activator = std::make_unique<Call>("System.Activator::CreateInstance");
+    activator->TypeArgumentsCount = 1;
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(activator),
+                                                std::make_unique<DefaultValue>(Int));
+    auto fn = MakeFnWithBlock({result});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // No fold: the if survives.
+    auto& blk = fn->Body->Blocks[0];
+    ASSERT_EQ(blk->Instructions.size(), 1u);
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    EXPECT_EQ(st->Value->Op, OpCode::IfInstruction) << "non-type-parameter default must not fold";
+}
+
+// IsGenericNewPattern rejects mismatched default types: the comp's left is
+// `default(T)` but the false arm is `default(U)` (a different type parameter),
+// so the two defaults are not the same type.
+TEST(ExpressionTransforms, RunIfNullableLiftIsGenericNewPatternRejectsMismatchedDefaults) {
+    auto T = std::make_shared<ILSpy::Decompiler::TypeSystem::TypeParameter>(
+        0, ILSpy::Decompiler::TypeSystem::TypeParameter::OwnerKind::Method, "T");
+    auto U = std::make_shared<ILSpy::Decompiler::TypeSystem::TypeParameter>(
+        1, ILSpy::Decompiler::TypeSystem::TypeParameter::OwnerKind::Method, "U");
+    auto result = MakeLocal("result", T);
+    auto cond = std::make_unique<Comp>(std::make_unique<DefaultValue>(T),
+                                        std::make_unique<LdNull>(),
+                                        ComparisonKind::Equality, false);
+    auto activator = std::make_unique<Call>("System.Activator::CreateInstance");
+    activator->TypeArgumentsCount = 1;
+    // false arm is default(U), not default(T)
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(activator),
+                                                std::make_unique<DefaultValue>(U));
+    auto fn = MakeFnWithBlock({result});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    EXPECT_EQ(st->Value->Op, OpCode::IfInstruction) << "mismatched default types must not fold";
+}
+
+// IsGenericNewPattern rejects a non-Activator method name (and a non-generic
+// Activator call): the true arm is a call to a different method, or the
+// Activator call is not a generic instantiation (TypeArgumentsCount == 0).
+TEST(ExpressionTransforms, RunIfNullableLiftIsGenericNewPatternRejectsNonActivatorAndNonGeneric) {
+    auto T = std::make_shared<ILSpy::Decompiler::TypeSystem::TypeParameter>(
+        0, ILSpy::Decompiler::TypeSystem::TypeParameter::OwnerKind::Method, "T");
+    auto result = MakeLocal("result", T);
+    auto Int = std::make_shared<KnownType>(KnownTypeCode::Int32);
+
+    // Case 1: wrong method name.
+    {
+        auto cond = std::make_unique<Comp>(std::make_unique<DefaultValue>(T),
+                                            std::make_unique<LdNull>(),
+                                            ComparisonKind::Equality, false);
+        auto other = std::make_unique<Call>("System.Environment::Exit");
+        other->TypeArgumentsCount = 1;
+        auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(other),
+                                                    std::make_unique<DefaultValue>(T));
+        auto fn = MakeFnWithBlock({result});
+        fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+        fn->CheckInvariant(ILPhase::Normal);
+        RunExpressionTransforms(*fn);
+        fn->CheckInvariant(ILPhase::Normal);
+        auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+        EXPECT_EQ(st->Value->Op, OpCode::IfInstruction)
+            << "a non-Activator method name must not fold";
+    }
+    // Case 2: non-generic Activator (TypeArgumentsCount == 0).
+    {
+        auto cond = std::make_unique<Comp>(std::make_unique<DefaultValue>(Int),
+                                            std::make_unique<LdNull>(),
+                                            ComparisonKind::Equality, false);
+        auto activator = std::make_unique<Call>("System.Activator::CreateInstance");
+        activator->TypeArgumentsCount = 0;  // not a generic instantiation
+        auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(activator),
+                                                    std::make_unique<DefaultValue>(Int));
+        auto fn = MakeFnWithBlock({result});
+        fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+        fn->CheckInvariant(ILPhase::Normal);
+        RunExpressionTransforms(*fn);
+        fn->CheckInvariant(ILPhase::Normal);
+        auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+        EXPECT_EQ(st->Value->Op, OpCode::IfInstruction)
+            << "a non-generic Activator call must not fold";
+    }
 }
 
 // RunBinaryNumericNullableLift equality case (the VS2017.8 / Roslyn 2.9

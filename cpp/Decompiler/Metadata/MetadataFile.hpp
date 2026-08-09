@@ -161,9 +161,10 @@ public:
     // Resolve a metadata token to a display string for the IL disassembler and
     // the IL reader's operand resolution. TypeDef/TypeRef -> "Namespace.Type";
     // Field/MethodDef -> "Namespace.Type::Member"; MemberRef (TypeRef/TypeDef
-    // parent) -> "Namespace.Type::Member". TypeSpec/StandAloneSig/MethodSpec/
-    // UserString and out-of-range tokens fall back to the raw hex token. Never
-    // throws.
+    // parent) -> "Namespace.Type::Member"; MethodSpec unwraps to its underlying
+    // MethodDefOrRef (so a generic-instantiation call renders its resolved
+    // method name, not the raw token). TypeSpec/StandAloneSig/UserString and
+    // out-of-range tokens fall back to the raw hex token. Never throws.
     std::string ResolveTokenToString(std::uint32_t token) const;
 
     // Resolve a TypeDef/TypeRef (or TypeSpec) token to an IType. Returns nullptr
@@ -191,6 +192,17 @@ public:
     // a TypeRef). Returns false for an out-of-range or unsupported token; never
     // throws.
     bool IsFieldCompilerGeneratedOrInCompilerGeneratedClass(std::uint32_t fieldToken) const;
+
+    // The number of generic type arguments a method-spec instantiation supplies.
+    // For a MethodSpec token (table 0x2B) reads the Instantiation blob
+    // (ECMA-335 II.23.2.15 MethodSpecSig: a 0x0A GENERICINST marker, then a
+    // compressed generic-argument count, then that many Type blobs) and returns
+    // the count. Returns 0 for a non-MethodSpec token, an out-of-range row, a
+    // missing/malformed blob, or a blob whose first byte is not the 0x0A marker;
+    // never throws. Used by the IL reader to populate Call::TypeArgumentsCount so
+    // a transform can distinguish a generic-instantiation call
+    // (e.g. `Activator.CreateInstance<T>()`) from a non-generic overload.
+    int GetMethodSpecTypeArgumentCount(std::uint32_t methodToken) const;
 
     // Decode the method body at `rva` (from a MethodDefInfo::RVA). Returns an
     // invalid MethodBody for abstract/extern methods (RVA 0) or a malformed

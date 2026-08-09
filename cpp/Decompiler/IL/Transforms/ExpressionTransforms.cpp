@@ -1105,18 +1105,20 @@ std::unique_ptr<ILInstruction> ExpressionTransforms::LiftNullableCore(
     // operators on System.Decimal (MatchCompOrDecimal now recognises both), may
     // be a C#-style lifted comparison. The equality/inequality cases
     // (LiftCSharpEqualityComparison, the hasValueComp two-nullable case + the
-    // single-nullable fall-back) and the relational cases (LiftCSharpComparison,
-    // the 4 `comp ? (v1 != null && ...) : ldc.i4` shapes, with a logic.not wrap
-    // for the negated-condition shapes) are ported (Comp branch only); a Decimal
-    // Call CompOrDecimal flows into these and the existing Comp-branch lifts bail
-    // (MakeLifted returns null for a Call, DoLift/DoLiftBinary bail on the Call's
-    // non-nullable arguments), so recognising a Decimal comparison call is safe
-    // (no fold fires until the resolver-backed lift lands). The user-defined-
-    // operator fall-backs (LiftCSharpUserEqualityComparison / the Decimal lift,
-    // which build a lifted user-defined operator via CSharpOperators), the
-    // IsGenericNewPattern special case (needs MatchDefaultValue +
-    // Call.Method.FullName + TypeKind), the NullPropagation path, and the
-    // `&`/`|` on bool? path (D96) are the remaining deferred/ported pieces.
+    // single-nullable fall-back), the IsGenericNewPattern special case (the
+    // `(default(T) == null) ? Activator.CreateInstance<T>() : default(T)` =>
+    // `Activator.CreateInstance<T>()` fold, via MatchDefaultValue +
+    // Call::MethodName + Call::TypeArgumentsCount + TypeKind), and the
+    // relational cases (LiftCSharpComparison, the 4 `comp ? (v1 != null && ...)
+    // : ldc.i4` shapes, with a logic.not wrap for the negated-condition shapes)
+    // are ported (Comp branch only); a Decimal Call CompOrDecimal flows into
+    // these and the existing Comp-branch lifts bail (MakeLifted returns null for
+    // a Call, DoLift/DoLiftBinary bail on the Call's non-nullable arguments), so
+    // recognising a Decimal comparison call is safe (no fold fires until the
+    // resolver-backed lift lands). The user-defined-operator fall-backs
+    // (LiftCSharpUserEqualityComparison / the Decimal lift, which build a lifted
+    // user-defined operator via CSharpOperators), the NullPropagation path, and
+    // the `&`/`|` on bool? path (D96) are the remaining deferred/ported pieces.
     // Gated on LiftNullables (already checked at the top of RunIfNullableLift).
     // The equality swap (the C# `Swap(ref trueInst, ref falseInst)` for
     // Inequality) is local to the equality branch -- the relational branch uses
@@ -1143,12 +1145,24 @@ std::unique_ptr<ILInstruction> ExpressionTransforms::LiftNullableCore(
                     if (lifted)
                         return std::move(lifted);
                     return nullptr;
+                } else if (!comp.IsLifted && NullableLiftingTransform::IsGenericNewPattern(
+                        comp.Left, comp.Right, eqTrueInst, eqFalseInst)) {
+                    // (default(T) == null) ? Activator.CreateInstance<T>() :
+                    // default(T) ==> Activator.CreateInstance<T>(). The C#
+                    // `return trueInst` returns the Activator call as the lift
+                    // result; this port detaches it from the if (it is the if's
+                    // TrueInst arm) and returns it, so RunIfNullableLift's
+                    // ReplaceIfWithLiftedValue applies the block-model adaptation
+                    // (a Call is a value, so a clean ReplaceWith for a
+                    // sub-expression value-if). The pattern's arms are values (a
+                    // Call + a DefaultValue), so the if-as-final after
+                    // ConditionDetection (Branch arms) never matches -- the
+                    // block-final path does not arise here.
+                    return DetachFromParent(eqTrueInst);
                 }
                 // IsGenericNewPattern (the Activator.CreateInstance<T>() case)
-                // is deferred -- needs MatchDefaultValue + Call.Method.FullName +
-                // TypeKind; the C# `else if (!comp.IsLifted && IsGenericNewPattern)`
-                // returns trueInst, which this port cannot recognise, so it falls
-                // through to the bool? equality folds.
+                // is now ported (the MatchDefaultValue + Call::MethodName +
+                // Call::TypeArgumentsCount + TypeKind pieces are in place).
             } else if (!comp.IsLifted) {
                 // Relational (< <= > >=): returns false unless all HasValue bits
                 // are true. The four shapes produce a C#-lifted Comp; the
