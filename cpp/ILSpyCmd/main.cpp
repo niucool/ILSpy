@@ -42,6 +42,7 @@
 #include "Decompiler/IL/Transforms/CachedReadOnlySpanInitialization.hpp"
 #include "Decompiler/IL/Transforms/StatementTransform.hpp"
 #include "Decompiler/IL/Transforms/ExpressionTransforms.hpp"
+#include "Decompiler/IL/Transforms/NullCoalescingTransform.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
 #include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
@@ -348,6 +349,24 @@ int main(int argc, char** argv) {
                     // re-run of it.
                     statementTransform.AddChild(
                         std::make_unique<ILSpy::Decompiler::IL::ExpressionTransforms>());
+                    // NullCoalescingTransform: the reference-type `??` fold
+                    // (the next per-statement child in the C# GetILTransforms()
+                    // order, after the deferred DynamicIsEventAssignmentTransform /
+                    // TransformAssignment). Constructs a NullCoalescingInstruction
+                    // (`if.notnull(value, fallback)`, the C# `??`) from the
+                    //   stloc s(value); if (comp(ldloc s == ldnull)) { stloc s(fallback) }
+                    // block tail, then ILInlining folds the single-use `s` into
+                    // its load. Adapted to the if-as-final block model (the if is
+                    // the block's FinalInstruction, not Instructions[pos+1]); the
+                    // if-final is replaced with a Branch to the next block (the
+                    // fall-through the if's null FalseInst represented). The
+                    // throw-expression cases are deferred (need the ThrowExpressions
+                    // setting + a mutable Throw ResultType). Fires 0 times on the
+                    // .NET Framework 4 legacy-csc corpus (the `??` reference-type
+                    // lowering is a Roslyn-era codegen pattern); ported for
+                    // faithfulness.
+                    statementTransform.AddChild(
+                        std::make_unique<ILSpy::Decompiler::IL::NullCoalescingTransform>());
                     statementTransform.Run(*fn, transformContext);
                 }
                 ILSpy::Decompiler::IL::AssignVariableNames().Run(*fn, transformContext);

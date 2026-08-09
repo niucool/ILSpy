@@ -80,11 +80,20 @@ FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
     return {FindResultType::Stop, nullptr};
 }
 
+} // namespace
+
 // Try to inline the StLoc at `pos` into the next instruction's load of its
 // variable, or remove it if dead. Returns true if the stloc was consumed.
 // `pos` may be out of range after a prior removal shrank the block (the
 // per-statement driver loops at one position); guard and return false so the
 // caller's while-loop terminates without reading out of bounds.
+//
+// At namespace scope (not in the anonymous namespace above) so other
+// per-statement transforms (NullCoalescingTransform, ...) can call it after a
+// fold that opens up an inlining opportunity -- mirroring the C#
+// `ILInlining.InlineOneIfPossible(block, pos, InliningOptions.None, ctx)` static
+// call. The helpers it uses (VariableCanBeUsedForInlining / FindLoadInNext) are
+// in the anonymous namespace above and visible here.
 bool InlineOneIfPossible(Block* block, int pos, ILTransformContext& ctx) {
     if (pos < 0 || static_cast<std::size_t>(pos) >= block->Instructions.size()) return false;
     auto* stloc = dynamic_cast<StLoc*>(block->Instructions[static_cast<std::size_t>(pos)].get());
@@ -131,6 +140,8 @@ bool InlineOneIfPossible(Block* block, int pos, ILTransformContext& ctx) {
 
     return false;
 }
+
+namespace {
 
 bool InlineAllInBlock(Block* block, ILTransformContext& ctx) {
     bool modified = false;

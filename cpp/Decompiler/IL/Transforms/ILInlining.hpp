@@ -42,6 +42,18 @@
 
 namespace ILSpy::Decompiler::IL {
 
+class Block;
+
+// Inline the StLoc at `pos` into the next instruction's load of its variable,
+// or remove it as a dead store. A free function mirroring the C#
+// `ILInlining.InlineOneIfPossible(block, pos, InliningOptions.None, ctx)` static
+// call (the C# InliningOptions enum is not modeled -- this port has no
+// ldloca-inlining / SlotInfo restrictions). Returns true if the stloc was
+// consumed. Exposed so other per-statement transforms (e.g.
+// NullCoalescingTransform) can call it after a fold that opens up an inlining
+// opportunity, matching the C#.
+bool InlineOneIfPossible(Block* block, int pos, ILTransformContext& ctx);
+
 class ILInlining : public IILTransform, public IStatementTransform {
 public:
     // IILTransform: the whole-function inlining pass (runs early in the

@@ -478,8 +478,8 @@ implemented and green here. Everything else follows the phase plan in
   fires more on Roslyn-compiled / modern .NET), so it is a real-corpus ILAst-
   cleaning transform, not faithfulness-only.
   The
-  remaining 14 per-statement children (DynamicIsEventAssignmentTransform,
-  TransformAssignment, NullCoalescingTransform, NullableLiftingStatementTransform,
+  remaining 13 per-statement children (DynamicIsEventAssignmentTransform,
+  TransformAssignment, NullableLiftingStatementTransform,
   NullPropagationStatementTransform, TransformArrayInitializers,
   TransformCollectionAndObjectInitializers, TransformExpressionTrees,
   IndexRangeTransform, DeconstructionTransform, NamedArgumentTransform,
@@ -523,10 +523,30 @@ implemented and green here. Everything else follows the phase plan in
   GetValueOrDefault appears ~47 times, rendered as calls) -- a faithfulness-only
   transform on this corpus that fires on Roslyn-compiled / modern .NET. The
   remaining VisitCall pieces (TransformArrayInitializers /
-  InlineArrayTransform / TransformAssignment.HandleCompoundAssign) and the
-  later NullCoalescingTransform (a separate StatementTransform child that
-  builds NullCoalescingInstructions from `if.notnull` block tails) are
-  deferred. 31 of ~40 transforms ported.
+  InlineArrayTransform / TransformAssignment.HandleCompoundAssign) are
+  deferred. The `NullCoalescingTransform` (the next per-statement child in the
+  C# order, after the deferred DynamicIsEventAssignmentTransform /
+  TransformAssignment) is now wired in: it constructs a
+  `NullCoalescingInstruction` (`if.notnull(value, fallback)`, the C# `??`)
+  from the reference-type `??` block tail
+  `stloc s(value); if (comp(ldloc s == ldnull)) { stloc s(fallback) }` ->
+  `stloc s(if.notnull(value, fallback))` (plus the temp-variable variant),
+  adapted to the if-as-final block model (the if is the block's
+  `FinalInstruction`, not `Instructions[pos+1]`; the if-final is replaced with a
+  `Branch` to the next block -- the fall-through the if's null FalseInst
+  represented); `ILInlining.InlineOneIfPossible` was exposed as a public free
+  function so the transform can call it after the fold (matching the C#). The
+  throw-expression cases (the `a ?? throw ...` arm, the hoisted-constructor-
+  argument null guard, the value-types throw-expression) are deferred (need the
+  ThrowExpressions setting + a mutable Throw ResultType + ILFunction.Method
+  metadata + ILInlining.IsInConstructorInitializer + MatchLogicNot /
+  MatchHasValueCall wiring). The reference-type `??` lowering is a Roslyn-era
+  codegen pattern; a corpus probe across 8000 mscorlib methods found 1797
+  `comp(eq, ldloc X, ldnull)` null-check ifs and 513 `comp(ne, ..)` but zero
+  whose arm is a StLoc to the same variable, so the transform fires 0 times on
+  the .NET Framework 4 legacy-csc corpus -- ported for faithfulness (the
+  hand-built tests verify the rewrite, the sweep verifies the invariant).
+  32 of ~40 transforms ported.
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
   walk + a corpus probe; the async/iterator state machines
