@@ -39,6 +39,7 @@
 #include "Decompiler/IL/Transforms/EarlyExpressionTransforms.hpp"
 #include "Decompiler/IL/Transforms/RemoveDeadVariableInit.hpp"
 #include "Decompiler/IL/Transforms/SwitchOnNullableTransform.hpp"
+#include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
 #include "Decompiler/IL/Transforms/PatternMatchingTransform.hpp"
 #include "Decompiler/IL/Transforms/LockTransform.hpp"
 #include "Decompiler/IL/Transforms/UsingTransform.hpp"
@@ -51,6 +52,7 @@
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/Conv.hpp"
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
@@ -60,7 +62,10 @@
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
@@ -85,6 +90,7 @@ using namespace ILSpy::Decompiler::IL;
 using ILSpy::Decompiler::TypeSystem::ITypePtr;
 using ILSpy::Decompiler::TypeSystem::KnownType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+using ILSpy::Decompiler::TypeSystem::ParameterizedType;
 using ILSpy::Decompiler::Metadata::MetadataFile;
 
 namespace {
@@ -232,6 +238,17 @@ std::unique_ptr<MatchInstruction> MakeMatch(ILVariablePtr v,
     m->CheckType = true;
     m->CheckNotNull = true;
     return m;
+}
+
+// Nullable<T> as a generic instantiation: ParameterizedType(KnownType(NullableOfT), {T}).
+// Mirrors the NullableLiftingTransform_Test helper -- the 2-arg GetValueOrDefault
+// fold's declaring type must resolve to KnownTypeCode::NullableOfT (the
+// KnownTypeCodeOf helper unwraps the ParameterizedType to its generic definition).
+ITypePtr MakeNullableOf(KnownTypeCode underlying) {
+    std::vector<ITypePtr> args;
+    args.push_back(std::make_shared<KnownType>(underlying));
+    return std::make_shared<ParameterizedType>(
+        std::make_shared<KnownType>(KnownTypeCode::NullableOfT), std::move(args));
 }
 
 } // namespace
@@ -1566,6 +1583,217 @@ TEST(ExpressionTransforms, BitAndStaysForDeferredNullableLift) {
         << "a top-level BitAnd must stay (the boolean nullable-lift is deferred)";
 }
 
+// Count NullCoalescingInstruction nodes in the tree. The VisitCall
+// `Nullable<T>.GetValueOrDefault(a, b) -> a ?? b` fold is monotone non-
+// decreasing (each fold creates a NullCoalescingInstruction; nothing in this
+// subset removes one). Used by the sweep to measure the fold's corpus progress.
+int CountNullCoalescing(ILFunction& fn) {
+    int n = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::NullCoalescingInstruction) ++n;
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return n;
+}
+
+// Count 2-arg `call GetValueOrDefault(nullableValue, fallback)` calls on
+// System.Nullable<T> -- the pattern the VisitCall fold matches and removes. The
+// fold is monotone non-increasing for this count (each fold removes one such
+// call; nothing in this subset creates one). Used by the sweep to confirm the
+// transform does not regress.
+int CountGetValueOrDefaultTwoArg(ILFunction& fn) {
+    int n = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::Call) {
+            ILInstruction* nv = nullptr;
+            ILInstruction* fb = nullptr;
+            if (NullableLiftingTransform::MatchGetValueOrDefault(inst, nv, fb)) ++n;
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return n;
+}
+
+// VisitCall folds `call Nullable<T>.GetValueOrDefault(nullableValue, fallback)`
+// (a pure fallback) into a NullCoalescingInstruction (NullableWithValueFallback)
+// whose ValueInst is `ldobj Nullable<T>(nullableValue)` and FallbackInst is the
+// fallback; UnderlyingResultType is the fallback's ResultType. The call is a
+// value (wrapped in a stloc), so ReplaceWith is a clean in-place swap.
+TEST(ExpressionTransforms, VisitCallFoldsGetValueOrDefaultToNullCoalescing) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    // call Nullable<int>::GetValueOrDefault(ldloca v, ldc.i4 0) -- the `v ?? 0`
+    // lowering (an instance call: Arguments[0] is the receiver ldloca v).
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    call->AddArg(std::make_unique<LdcI4>(0));
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(call)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountGetValueOrDefaultTwoArg(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountGetValueOrDefaultTwoArg(*fn), 0)
+        << "the 2-arg GetValueOrDefault call must be folded away";
+    EXPECT_EQ(CountNullCoalescing(*fn), 1)
+        << "the fold must produce exactly one NullCoalescingInstruction";
+    auto& blk = fn->Body->Blocks[0];
+    ASSERT_EQ(blk->Instructions.size(), 1u);
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::NullCoalescingInstruction)
+        << "the call must be replaced by a NullCoalescingInstruction in the value slot";
+    auto* nc = static_cast<NullCoalescingInstruction*>(st->Value.get());
+    EXPECT_EQ(nc->Kind, NullCoalescingKind::NullableWithValueFallback)
+        << "the fold produces the NullableWithValueFallback kind";
+    EXPECT_EQ(nc->UnderlyingResultType, StackType::I4)
+        << "UnderlyingResultType is the fallback's ResultType (ldc.i4 -> I4)";
+    // ValueInst is `ldobj Nullable<int>(ldloca v)`.
+    ASSERT_EQ(nc->ValueInst->Op, OpCode::LdObj);
+    auto* ldObj = static_cast<LdObj*>(nc->ValueInst.get());
+    ASSERT_EQ(ldObj->Target->Op, OpCode::LdLoca)
+        << "the ldobj loads the nullable from the receiver's address";
+    EXPECT_EQ(static_cast<LdLoca*>(ldObj->Target.get())->Variable.get(), v.get());
+    // FallbackInst is the original ldc.i4 0.
+    ASSERT_EQ(nc->FallbackInst->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(nc->FallbackInst.get())->Value, 0);
+}
+
+// VisitCall does not fold when the declaring type is not Nullable<T> (the call
+// resolves to a non-Nullable type): the call stays and its arguments are visited.
+TEST(ExpressionTransforms, VisitCallRejectsNonNullableDeclaringType) {
+    auto v = MakeLocal("v");
+    auto result = MakeLocal("result");
+    // call System.Int32::GetValueOrDefault(ldloca v, ldc.i4 0) -- Int32 is not Nullable.
+    auto call = std::make_unique<Call>("System.Int32::GetValueOrDefault");
+    call->DeclaringType = std::make_shared<KnownType>(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    call->AddArg(std::make_unique<LdcI4>(0));
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(call)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*fn), 0)
+        << "a non-Nullable declaring type must not fold";
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Call)
+        << "the call must stay (the declaring type is not Nullable<T>)";
+}
+
+// VisitCall does not fold the 1-arg GetValueOrDefault form (the fold requires the
+// 2-arg form with a fallback): the 1-arg call stays.
+TEST(ExpressionTransforms, VisitCallRejectsOneArgGetValueOrDefault) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto result = MakeLocal("result");
+    // call Nullable<int>::GetValueOrDefault(ldloca v) -- the 1-arg form.
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(call)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*fn), 0)
+        << "the 1-arg form must not fold (the fold requires the 2-arg form)";
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Call)
+        << "the 1-arg GetValueOrDefault call must stay";
+}
+
+// VisitCall does not fold when the method name is not GetValueOrDefault (e.g.
+// get_HasValue, also on Nullable<T>): the call stays.
+TEST(ExpressionTransforms, VisitCallRejectsWrongMethodName) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    // call Nullable<int>::get_HasValue(ldloca v) -- the method is get_HasValue, not
+    // GetValueOrDefault (and only 1 arg, so it would not match the 2-arg form anyway).
+    auto call = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(call)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*fn), 0)
+        << "a get_HasValue call must not fold";
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Call)
+        << "the get_HasValue call must stay (wrong method name)";
+}
+
+// VisitCall does not fold when the fallback is not pure (folding an impure
+// fallback into the NullCoalescingInstruction's FallbackInst would drop its side
+// effect when the value is non-null -- the C# guards on IsPure(fallback.Flags)).
+// A Call with SideEffect is impure, so the fold does not fire.
+TEST(ExpressionTransforms, VisitCallRejectsImpureFallback) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    // The fallback is a call (SideEffect | MayThrow -> not pure). The call's
+    // declaring type is Nullable<int> (so MatchGetValueOrDefault matches), but
+    // IsPure(fallback.Flags) is false, so the fold does not fire.
+    auto impureFallback = std::make_unique<Call>("System.SomeType::SideEffecting");
+    impureFallback->AddArg(std::make_unique<LdcI4>(1));
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    call->AddArg(std::move(impureFallback));
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(call)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountGetValueOrDefaultTwoArg(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*fn), 0)
+        << "an impure fallback must not fold (would drop the side effect)";
+    EXPECT_EQ(CountGetValueOrDefaultTwoArg(*fn), 1)
+        << "the 2-arg GetValueOrDefault call must stay when the fallback is impure";
+}
+
+// VisitCall does not fold when the call's declaring type could not be resolved
+// (null DeclaringType -- treated like the C# null DeclaringTypeDefinition): the
+// MatchGetValueOrDefault helper returns false, so the call stays.
+TEST(ExpressionTransforms, VisitCallRejectsNullDeclaringType) {
+    auto v = MakeLocal("v");
+    auto result = MakeLocal("result");
+    // call GetValueOrDefault(ldloca v, ldc.i4 0) with a null DeclaringType.
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->AddArg(std::make_unique<LdLoca>(v));
+    call->AddArg(std::make_unique<LdcI4>(0));
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(call)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*fn), 0)
+        << "a null declaring type must not fold";
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Call)
+        << "the call must stay when the declaring type is null";
+}
+
 // On the real mscorlib corpus, running the full pre-pipeline through the
 // StatementTransform{ILInlining, ExpressionTransforms} (the GetILTransforms()
 // position) preserves the ILAst invariant and the HandleConditionalOperator
@@ -1584,6 +1812,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
     int processed = 0;
     int totalFolds = 0;
     int totalArrayIndexConvDrops = 0;
+    int totalNullCoalescingFolds = 0;
     ILTransformContext ctx;
     for (const auto& m : f.MethodDefs()) {
         if (m.RVA == 0) continue;
@@ -1596,6 +1825,8 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int arrayIdxConvBefore = CountArrayIndexConvI(*fn);
         int convRUnBefore = CountConvRUnNested(*fn);
         int maskedShiftsBefore = CountMaskedShifts(*fn);
+        int getValOrDefaultBefore = CountGetValueOrDefaultTwoArg(*fn);
+        int nullCoalescingBefore = CountNullCoalescing(*fn);
         {
             StatementTransform st;
             st.AddChild(std::make_unique<ILInlining>());
@@ -1608,6 +1839,8 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int arrayIdxConvAfter = CountArrayIndexConvI(*fn);
         int convRUnAfter = CountConvRUnNested(*fn);
         int maskedShiftsAfter = CountMaskedShifts(*fn);
+        int getValOrDefaultAfter = CountGetValueOrDefaultTwoArg(*fn);
+        int nullCoalescingAfter = CountNullCoalescing(*fn);
         // The ternary fold is monotone non-decreasing (each fold creates a
         // StLoc-if; nothing in this subset removes one). The VisitComp rewrites
         // (comp(!=0)->x, logic.not push, unsigned normalization) do not create
@@ -1649,8 +1882,21 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         // correctness gate (the absolute count is not asserted -- the .NET
         // Framework 4 legacy-csc corpus may emit the mask rarely).
         EXPECT_LE(maskedShiftsAfter, maskedShiftsBefore);
+        // The VisitCall `Nullable<T>.GetValueOrDefault(a, b) -> a ?? b` fold is
+        // monotone non-increasing for the 2-arg GetValueOrDefault-call count
+        // (each fold removes one such call; nothing in this subset creates one)
+        // and monotone non-decreasing for the NullCoalescingInstruction count
+        // (each fold creates one; nothing in this subset removes one). The fold
+        // fires when the compiler emits the 2-arg GetValueOrDefault for a
+        // `Nullable<T> ?? T` expression; whether the .NET Framework 4 legacy-csc
+        // corpus contains any is corpus-dependent, so the per-method monotone
+        // invariant is the deterministic correctness gate (the absolute count is
+        // not asserted -- the fold may fire 0 times on this corpus).
+        EXPECT_LE(getValOrDefaultAfter, getValOrDefaultBefore);
+        EXPECT_GE(nullCoalescingAfter, nullCoalescingBefore);
         totalFolds += (after - before);
         totalArrayIndexConvDrops += (arrayIdxConvBefore - arrayIdxConvAfter);
+        totalNullCoalescingFolds += (nullCoalescingAfter - nullCoalescingBefore);
         if (processed >= 8000) break;
     }
     EXPECT_GT(processed, 5000);
@@ -1665,4 +1911,10 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
     // surface as zero). The exact count is not asserted (corpus-dependent on how
     // many methods widen an index before ldelema).
     (void)totalArrayIndexConvDrops;
+    // The VisitCall `Nullable<T>.GetValueOrDefault(a, b) -> a ?? b` fold fires
+    // when the compiler emits the 2-arg form for a `Nullable<T> ?? T`
+    // expression; whether the legacy-csc corpus contains any is corpus-dependent
+    // (System.Nullable<T> IS in mscorlib, so `a ?? b` over a nullable may occur).
+    // The count is reported (not asserted) -- a non-zero total is informative.
+    (void)totalNullCoalescingFolds;
 }

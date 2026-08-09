@@ -26,7 +26,9 @@
 //
 //   - MatchHasValueCall: `call get_HasValue(arg)` on System.Nullable<T> -> arg.
 //   - MatchGetValueOrDefault: `call GetValueOrDefault(arg)` (the 1-arg form)
-//     on System.Nullable<T> -> arg.
+//     on System.Nullable<T> -> arg, and the 2-argument form
+//     `call GetValueOrDefault(nullableValue, fallback)` -> (nullableValue, fallback)
+//     consumed by the ExpressionTransforms.VisitCall `a ?? b` fold.
 //
 // The C# checks `call.Method.Name` and `call.Method.DeclaringTypeDefinition?
 // .KnownTypeCode == KnownTypeCode.NullableOfT`. This port's Call carries the
@@ -59,9 +61,20 @@ public:
 
     // Port of NullableLiftingTransform.MatchGetValueOrDefault(inst, out ILInstruction arg):
     // the 1-argument form `call GetValueOrDefault(arg)` on System.Nullable<T>
-    // (the underlying-value accessor). The 2-argument form with a fallback
-    // default is deferred (the switch-on-nullable patterns use the 1-arg form).
+    // (the underlying-value accessor). The switch-on-nullable patterns use this
+    // 1-arg form.
     static bool MatchGetValueOrDefault(ILInstruction* inst, ILInstruction*& arg);
+
+    // Port of NullableLiftingTransform.MatchGetValueOrDefault(inst, out
+    // nullableValue, out fallback): the 2-argument form
+    // `call GetValueOrDefault(nullableValue, fallback)` on System.Nullable<T>
+    // (the value-or-fallback accessor -- the `a ?? b` lowering the
+    // ExpressionTransforms.VisitCall fold consumes). The call must resolve its
+    // declaring type to KnownTypeCode::NullableOfT (a generic instantiation
+    // unwraps to its generic definition); a null DeclaringType does not match.
+    static bool MatchGetValueOrDefault(ILInstruction* inst,
+                                       ILInstruction*& nullableValue,
+                                       ILInstruction*& fallback);
 };
 
 } // namespace ILSpy::Decompiler::IL

@@ -26,15 +26,20 @@
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/Conv.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/PrimitiveType.hpp"
 #include "Decompiler/IL/StackType.hpp"
+#include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
 
 namespace ILSpy::Decompiler::IL {
@@ -257,6 +262,10 @@ void ExpressionTransforms::Visit(ILInstruction* inst) {
         VisitBinaryNumericInstruction(static_cast<BinaryNumericInstruction*>(inst));
         return;
     }
+    if (inst->Op == OpCode::Call) {
+        VisitCall(static_cast<Call*>(inst));
+        return;
+    }
     // Default: recurse into children (the C# ILVisitor.Default).
     for (int i = 0; i < inst->ChildCount(); ++i) Visit(inst->GetChild(i));
 }
@@ -473,6 +482,51 @@ void ExpressionTransforms::VisitBinaryNumericInstruction(BinaryNumericInstructio
     // VisitBox / VisitConv use.
     auto amount = bitAnd->TakeChild(0);
     inst->SetChild(1, std::move(amount));
+}
+
+void ExpressionTransforms::VisitCall(Call* inst) {
+    if (!inst) return;
+    // call Nullable<T>.GetValueOrDefault(a, b) -> a ?? b: a 2-arg
+    // GetValueOrDefault on System.Nullable<T> with a pure fallback folds into a
+    // NullCoalescingInstruction (NullableWithValueFallback) whose ValueInst is
+    // `ldobj Nullable<T>(a)` and FallbackInst is `b` (UnderlyingResultType = b's
+    // ResultType). The C# checks `MatchGetValueOrDefault(inst, out nullableValue,
+    // out fallback) && SemanticHelper.IsPure(fallback.Flags)`.
+    ILInstruction* nullableValue = nullptr;
+    ILInstruction* fallback = nullptr;
+    if (NullableLiftingTransform::MatchGetValueOrDefault(inst, nullableValue, fallback) &&
+        fallback && IsPure(fallback->Flags())) {
+        // A Call is always a value (never a block final -- it is not control
+        // flow), so ReplaceWith is a clean in-place swap (the C#
+        // `inst.ReplaceWith(replacement)`); no block-model adaptation is needed.
+        // Capture the declaring type and the fallback's ResultType before
+        // detaching the children (the call is destroyed by ReplaceWith -- the
+        // precondition-before-mutation discipline).
+        TypeSystem::ITypePtr declaringType = inst->DeclaringType;
+        StackType underlying = fallback->ResultType();
+        auto ldObj = std::make_unique<LdObj>(inst->TakeChild(0), declaringType);
+        auto fallbackOwned = inst->TakeChild(1);
+        auto replacement = std::make_unique<NullCoalescingInstruction>(
+            NullCoalescingKind::NullableWithValueFallback,
+            std::move(ldObj),
+            std::move(fallbackOwned));
+        replacement->UnderlyingResultType = underlying;
+        ILInstruction* repPtr = replacement.get();
+        inst->ReplaceWith(std::move(replacement));  // destroys inst
+        // The C# `replacement.AcceptVisitor(this)`: re-visit the replacement so
+        // the Comp/StLoc/Box/Conv rewrites cascade into the ldObj's target and
+        // the fallback (the call's two arguments, now the NullCoalescing's
+        // children). The NullCoalescingInstruction is not a Call, so the fold
+        // does not re-trigger.
+        Visit(repPtr);
+        return;
+    }
+    // base.VisitCall: visit the arguments (the C# recurses into the children).
+    // The C# then calls TransformArrayInitializers.TransformRuntimeHelpersCreateSpan-
+    // Initialization, InlineArrayTransform.RunOnExpression, and
+    // TransformAssignment.HandleCompoundAssign -- all deferred (need
+    // TransformArrayInitializers / InlineArrayTransform / TransformAssignment).
+    for (auto& arg : inst->Arguments) Visit(arg.get());
 }
 
 void ExpressionTransforms::VisitIfInstruction(IfInstruction* iff) {

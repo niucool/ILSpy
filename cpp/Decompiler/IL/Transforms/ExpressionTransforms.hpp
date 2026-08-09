@@ -52,9 +52,12 @@
 // (already in the standalone EarlyExpressionTransforms, D61), the ldlen /
 // conv o->i null-comparison special cases (need the LdLen model divergence
 // reconciliation -- the VisitConv `conv.i4(ldlen)` first rewrite is still
-// blocked by it), VisitCall / VisitNewObj / VisitLdObj /
-// VisitLdObjIfRef / VisitStObj / VisitStLoc (TransformAssignment.HandleCompoundAssign)
-// / the remaining VisitIfInstruction pieces (NullableLifting, UserDefinedLogic,
+// blocked by it), the remaining VisitCall pieces (TransformArrayInitializers /
+// InlineArrayTransform / TransformAssignment.HandleCompoundAssign -- the
+// Nullable<T>.GetValueOrDefault(a, b) -> a ?? b fold is now ported) /
+// VisitNewObj / VisitLdObj / VisitLdObjIfRef / VisitStObj / VisitStLoc
+// (TransformAssignment.HandleCompoundAssign) / the remaining VisitIfInstruction
+// pieces (NullableLifting, UserDefinedLogic,
 // TransformDynamicAddAssignOrRemoveAssign) / HandleSwitchExpression (needs
 // SwitchExpressions setting + SwitchInstruction guards) / VisitDynamic* /
 // VisitTryCatchHandler -- each needs further infrastructure (AddressOf,
@@ -70,6 +73,7 @@ namespace ILSpy::Decompiler::IL {
 class Comp;
 class Conv;
 class Box;
+class Call;
 class IfInstruction;
 class LdElema;
 class NewArr;
@@ -191,6 +195,20 @@ private:
     // GetStackType). The BitAnd/Boolean nullable-lift case is deferred (needs
     // NullableLiftingTransform + InferType). Mirrors ExpressionTransforms.cs.
     void VisitBinaryNumericInstruction(BinaryNumericInstruction* inst);
+
+    // VisitCall (the Nullable<T>.GetValueOrDefault(a, b) -> a ?? b subset): a
+    // 2-arg `call GetValueOrDefault(nullableValue, fallback)` on
+    // System.Nullable<T> with a pure fallback folds into a NullCoalescingInstruction
+    // (NullCoalescingKind::NullableWithValueFallback) whose ValueInst is
+    // `ldobj Nullable<T>(nullableValue)` and FallbackInst is the fallback; the
+    // UnderlyingResultType is the fallback's ResultType. A Call is always a value
+    // (never a block final -- it is not control flow), so the fold is a clean
+    // value-position ReplaceWith (the C# `inst.ReplaceWith(replacement)`); no
+    // block-model adaptation is needed. The remaining VisitCall pieces
+    // (TransformArrayInitializers.TransformRuntimeHelpersCreateSpanInitialization,
+    // InlineArrayTransform.RunOnExpression, TransformAssignment.HandleCompoundAssign)
+    // are deferred. Mirrors ExpressionTransforms.cs.
+    void VisitCall(Call* inst);
 
     // The settings snapshot for the duration of a Run (the C# stores the
     // StatementTransformContext as a member). Consulted by IsPatternMatch in

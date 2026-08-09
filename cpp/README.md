@@ -89,7 +89,7 @@ implemented and green here. Everything else follows the phase plan in
   `RemoveDeadStores` setting, with no loads or addresses, has its stores dropped
   (a pure value goes with the store; an impure value is unwrapped so its side
   effect survives), and dead-copy chains collapse via a recompute fixpoint.
-  30 of ~40 transforms ported. The switch-detection family is now complete in
+  31 of ~40 transforms ported. The switch-detection family is now complete in
   its core: `LongSet`/`LongInterval` (Util/, ported from LongSet.cs /
   Interval.cs) -- an immutable interval-set of longs whose complement is
   representable (unlike `std::set<int64_t>`) -- backs `SwitchSection::Labels`
@@ -262,7 +262,7 @@ implemented and green here. Everything else follows the phase plan in
   statements, switch-on-nullable `case null:` arms, `is T x` patterns,
   `lock (...) { ... }`, `using (...) { ... }` statements, and
   `V = cond ? V1 : V2` ternaries (the conditional operator) now
-  appear in the output. 30 of ~40 transforms ported (the StatementTransform
+  appear in the output. 31 of ~40 transforms ported (the StatementTransform
   orchestration + its first two children ILInlining and ExpressionTransforms;
   the remaining 14 per-statement children are deferred).
   `DelegateConstruction` (Transforms/, a tested-but-not-yet-wired
@@ -507,14 +507,26 @@ implemented and green here. Everything else follows the phase plan in
   `NullCoalescingKind` Ref/Nullable/NullableWithValueFallback enum, an
   `UnderlyingResultType` field, DirectFlags ControlFlow, ResultType the
   fallback's, Flags `ControlFlow | valueInst | CombineBranches(None, fallback)`
-  faithful to ComputeFlags) is ported as a tested-but-not-yet-wired foundation
-  (the MatchInstruction / UsingInstruction precedent) ahead of the next
-  in-order ExpressionTransforms.VisitCall piece -- the
-  `Nullable<T>.GetValueOrDefault(a, b) -> a ?? b` fold (which needs the 2-arg
-  `MatchGetValueOrDefault` extending the D68 1-arg helper + IsPure + the LdObj
-  construction) -- and the later NullCoalescingTransform; the ILAstToCSharp seed
-  renders it as `value ?? fallback`, and no pipeline transform constructs it
-  yet (0 `??` in the CLI output) so the output is unchanged.
+  faithful to ComputeFlags) is ported, and the
+  `Nullable<T>.GetValueOrDefault(a, b) -> a ?? b` fold in
+  ExpressionTransforms.VisitCall is wired in: a 2-arg
+  `call GetValueOrDefault(nullableValue, fallback)` on System.Nullable<T>
+  with a pure fallback folds into a `NullCoalescingInstruction`
+  (`NullableWithValueFallback`) whose ValueInst is
+  `ldobj Nullable<T>(nullableValue)` and FallbackInst is the fallback; the
+  2-arg `MatchGetValueOrDefault` helper extends the D68 1-arg form. A Call is
+  always a value (never a block final), so the fold is a clean value-position
+  ReplaceWith. The ILAstToCSharp seed renders the node as `value ?? fallback`.
+  The 2-arg GetValueOrDefault is the Roslyn `a ?? b` lowering; the .NET
+  Framework 4 legacy-csc mscorlib uses the 1-arg form + a separate if/ternary
+  (not the 2-arg call), so the fold fires 0 times on that corpus (the 1-arg
+  GetValueOrDefault appears ~47 times, rendered as calls) -- a faithfulness-only
+  transform on this corpus that fires on Roslyn-compiled / modern .NET. The
+  remaining VisitCall pieces (TransformArrayInitializers /
+  InlineArrayTransform / TransformAssignment.HandleCompoundAssign) and the
+  later NullCoalescingTransform (a separate StatementTransform child that
+  builds NullCoalescingInstructions from `if.notnull` block tails) are
+  deferred. 31 of ~40 transforms ported.
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
   walk + a corpus probe; the async/iterator state machines

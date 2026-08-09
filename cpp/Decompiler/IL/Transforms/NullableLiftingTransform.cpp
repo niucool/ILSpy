@@ -76,12 +76,31 @@ bool NullableLiftingTransform::MatchGetValueOrDefault(ILInstruction* inst, ILIns
     if (!inst || inst->Op != OpCode::Call) return false;
     auto* call = static_cast<Call*>(inst);
     // The 1-argument form (the underlying-value accessor). The 2-argument form
-    // (with a fallback default) is a separate overload in the C# and is deferred.
+    // (with a fallback default) is a separate overload below.
     if (call->Arguments.size() != 1) return false;
     if (ShortMethodName(call->MethodName) != "GetValueOrDefault") return false;
     if (KnownTypeCodeOf(call->DeclaringType.get()) != TypeSystem::KnownTypeCode::NullableOfT)
         return false;
     arg = call->Arguments[0].get();
+    return true;
+}
+
+bool NullableLiftingTransform::MatchGetValueOrDefault(ILInstruction* inst,
+                                                       ILInstruction*& nullableValue,
+                                                       ILInstruction*& fallback) {
+    nullableValue = nullptr;
+    fallback = nullptr;
+    if (!inst || inst->Op != OpCode::Call) return false;
+    auto* call = static_cast<Call*>(inst);
+    // The 2-argument form (the value-or-fallback accessor -- the `a ?? b`
+    // lowering). Consumed by ExpressionTransforms.VisitCall; the 1-arg form
+    // above is the switch-on-nullable accessor.
+    if (call->Arguments.size() != 2) return false;
+    if (ShortMethodName(call->MethodName) != "GetValueOrDefault") return false;
+    if (KnownTypeCodeOf(call->DeclaringType.get()) != TypeSystem::KnownTypeCode::NullableOfT)
+        return false;
+    nullableValue = call->Arguments[0].get();
+    fallback = call->Arguments[1].get();
     return true;
 }
 

@@ -35,6 +35,7 @@
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
@@ -203,6 +204,77 @@ TEST(NullableLiftingTransform, MatchGetValueOrDefaultRejectsTwoArgForm) {
     call->AddArg(std::make_unique<LdLoca>(v));
     ILInstruction* arg = nullptr;
     EXPECT_FALSE(NullableLiftingTransform::MatchGetValueOrDefault(call.get(), arg));
+}
+
+// call GetValueOrDefault(nullableValue, fallback) on Nullable<int> matches the
+// 2-arg form, returning the nullable value (Arguments[0]) and the fallback
+// (Arguments[1]) -- the `a ?? b` lowering ExpressionTransforms.VisitCall consumes.
+TEST(NullableLiftingTransform, MatchGetValueOrDefaultTwoArgOnNullable) {
+    auto v = MakeLocal("v");
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    call->AddArg(std::make_unique<LdcI4>(0));
+    ILInstruction* nullableValue = nullptr;
+    ILInstruction* fallback = nullptr;
+    EXPECT_TRUE(NullableLiftingTransform::MatchGetValueOrDefault(
+        call.get(), nullableValue, fallback));
+    ASSERT_NE(nullableValue, nullptr);
+    ASSERT_NE(fallback, nullptr);
+    EXPECT_EQ(nullableValue->Op, OpCode::LdLoca);
+    EXPECT_EQ(fallback->Op, OpCode::LdcI4);
+}
+
+// The 2-arg matcher rejects a non-Nullable declaring type (the 1-arg matcher's
+// same guard, applied to the 2-arg form).
+TEST(NullableLiftingTransform, MatchGetValueOrDefaultTwoArgRejectsNonNullable) {
+    auto v = MakeLocal("v");
+    auto call = std::make_unique<Call>("System.Int32::GetValueOrDefault");
+    call->DeclaringType = std::make_shared<KnownType>(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    call->AddArg(std::make_unique<LdcI4>(0));
+    ILInstruction* nullableValue = nullptr;
+    ILInstruction* fallback = nullptr;
+    EXPECT_FALSE(NullableLiftingTransform::MatchGetValueOrDefault(
+        call.get(), nullableValue, fallback));
+}
+
+// The 2-arg matcher rejects the 1-arg form (it requires exactly 2 arguments).
+TEST(NullableLiftingTransform, MatchGetValueOrDefaultTwoArgRejectsOneArgForm) {
+    auto v = MakeLocal("v");
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    ILInstruction* nullableValue = nullptr;
+    ILInstruction* fallback = nullptr;
+    EXPECT_FALSE(NullableLiftingTransform::MatchGetValueOrDefault(
+        call.get(), nullableValue, fallback));
+}
+
+// The 2-arg matcher rejects a wrong method name (the same guard as the 1-arg).
+TEST(NullableLiftingTransform, MatchGetValueOrDefaultTwoArgRejectsWrongMethodName) {
+    auto v = MakeLocal("v");
+    auto call = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    call->AddArg(std::make_unique<LdcI4>(0));
+    ILInstruction* nullableValue = nullptr;
+    ILInstruction* fallback = nullptr;
+    EXPECT_FALSE(NullableLiftingTransform::MatchGetValueOrDefault(
+        call.get(), nullableValue, fallback));
+}
+
+// The 2-arg matcher rejects a null declaring type (a null DeclaringType is
+// treated like the C# null DeclaringTypeDefinition).
+TEST(NullableLiftingTransform, MatchGetValueOrDefaultTwoArgRejectsNullDeclaringType) {
+    auto v = MakeLocal("v");
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->AddArg(std::make_unique<LdLoca>(v));
+    call->AddArg(std::make_unique<LdcI4>(0));
+    ILInstruction* nullableValue = nullptr;
+    ILInstruction* fallback = nullptr;
+    EXPECT_FALSE(NullableLiftingTransform::MatchGetValueOrDefault(
+        call.get(), nullableValue, fallback));
 }
 
 // A SwitchInstruction carries IsLifted/Type and a SwitchSection carries
