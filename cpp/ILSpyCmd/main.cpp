@@ -38,6 +38,7 @@
 #include "Decompiler/IL/Transforms/PatternMatchingTransform.hpp"
 #include "Decompiler/IL/Transforms/LockTransform.hpp"
 #include "Decompiler/IL/Transforms/UsingTransform.hpp"
+#include "Decompiler/IL/Transforms/CachedDelegateInitialization.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
 #include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
@@ -288,6 +289,16 @@ int main(int argc, char** argv) {
                 // shape, all in the preceding-block stloc placement (the dominant
                 // mscorlib case); the VB / async / NullableOfT shapes are deferred.
                 ILSpy::Decompiler::IL::UsingTransform().Run(*fn, transformContext);
+                // CachedDelegateInitialization: collapse the lazy delegate
+                // cache (`if (v == null) v = new Delegate(...)`) into the
+                // unconditional init. Runs after ConditionDetection /
+                // LockTransform / UsingTransform in the BlockILTransform
+                // post-order set (per GetILTransforms()), before the
+                // StatementTransform. This iteration ports the local-cache
+                // (WithLocal) shape; the field-cached / Roslyn / VB shapes
+                // (needing IField metadata) are deferred. Gated on the
+                // AnonymousMethods setting (default true).
+                ILSpy::Decompiler::IL::CachedDelegateInitialization().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::AssignVariableNames().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::RemoveRedundantReturn().Run(*fn, transformContext);
                 fn->CheckInvariant(ILSpy::Decompiler::IL::ILPhase::Normal);

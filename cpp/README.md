@@ -89,7 +89,7 @@ implemented and green here. Everything else follows the phase plan in
   `RemoveDeadStores` setting, with no loads or addresses, has its stores dropped
   (a pure value goes with the store; an impure value is unwrapped so its side
   effect survives), and dead-copy chains collapse via a recompute fixpoint.
-  22 of ~40 transforms ported. The switch-detection family is now complete in
+  23 of ~40 transforms ported. The switch-detection family is now complete in
   its core: `LongSet`/`LongInterval` (Util/, ported from LongSet.cs /
   Interval.cs) -- an immutable interval-set of longs whose complement is
   representable (unlike `std::set<int64_t>`) -- backs `SwitchSection::Labels`
@@ -257,11 +257,11 @@ implemented and green here. Everything else follows the phase plan in
   RemoveInfeasiblePath + DetectPinnedRegions + DetectCatchWhenConditionBlocks +
   LdLocaDupInitObjTransform + EarlyExpressionTransforms + RemoveDeadVariableInit +
   CFS + SwitchDetection + SwitchOnNullable + LoopDetection + PatternMatching +
-  ConditionDetection + LockTransform + UsingTransform + AssignVariableNames + RemoveRedundantReturn before the
+  ConditionDetection + LockTransform + UsingTransform + CachedDelegateInitialization + AssignVariableNames + RemoveRedundantReturn before the
   C# seed, so `fixed (...) { ... }`, `default(T)`, reconstructed `switch`
   statements, switch-on-nullable `case null:` arms, `is T x` patterns,
   `lock (...) { ... }`, and `using (...) { ... }` statements now
-  appear in the output. 22 of ~40 transforms ported.
+  appear in the output. 23 of ~40 transforms ported.
   `DelegateConstruction` (Transforms/, a tested-but-not-yet-wired
   foundation) ports the `MatchDelegateConstruction` helper the next in-order
   transform (`CachedDelegateInitialization`) and the later `DelegateConstruction`
@@ -290,11 +290,25 @@ implemented and green here. Everything else follows the phase plan in
   output is unchanged; the foundation is exercised by the unit tests + the sweep.
   Next per `GetILTransforms()`:
   `CachedDelegateInitialization` (the next in-order transform after
-  `UsingTransform` in the BlockILTransform post-order set, now unblocked by the
-  `MatchDelegateConstruction` foundation; needs `IField.IsCompilerGeneratedOrIsInCompilerGeneratedClass`,
-  per-variable store lists, and a block-model adaptation of its `block.Instructions[i] is IfInstruction`
-  shape to this port's if-as-FinalInstruction model, plus a corpus probe of the
-  real if/finally shape -- the D73/D75 precedent), then `CachedReadOnlySpanInitialization`,
+  `UsingTransform` in the BlockILTransform post-order set) is now ported in the
+  `WithLocal` subset: a local-cached delegate lazy init
+  (`if (v == null) v = new Delegate(...)`; `<use v>`) collapses to the
+  unconditional init, adapted to this port's if-as-final block model (the
+  `IfInstruction` is the block's `FinalInstruction`, so the "next instruction"
+  the C# reads as `inst.Parent.Children.ElementAtOrDefault(inst.ChildIndex + 1)`
+  is the next block in the container -- the C# sibling-instruction lookup
+  returns null for a block final, so the adaptation is essential) and the
+  per-variable `StoreInstructions` list is replaced by a tree walk (the
+  repeatedly deferred infrastructure piece). The field-cached / Roslyn / VB
+  shapes (needing `IField.IsCompilerGeneratedOrIsInCompilerGeneratedClass`
+  metadata this port does not yet carry -- a field is a name string on
+  `LdsFlda`/`LdFlda`, with no token or attributes) and the temp-collapse
+  (folding the cache temp into the use, which in this port's block model needs
+  merging the host block with the next block) are deferred; the .NET Framework
+  4 legacy csc corpus uses the field-cached shape, not the local one, so the
+  WithLocal fold fires 0 times on mscorlib (the hand-built tests verify the
+  rewrite, the sweep the invariant -- the DetectCatchWhenConditionBlocks /
+  LdLocaDupInitObj / SwitchOnNullable precedent). Then `CachedReadOnlySpanInitialization`,
   the async/iterator state machines
   (YieldReturnDecompiler/AsyncAwaitDecompiler), SplitVariables (needs
   reaching-definitions dataflow),
