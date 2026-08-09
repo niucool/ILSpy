@@ -36,8 +36,8 @@
 //
 // This port ports the `IsProtectedIfInst` static helper, the `MatchNullableRewrap`
 // helper, and the `Run` entry for the ReferenceType mode (the `comp(ldloc v
-// ==/!= null)` condition) with the `ldnull` output case (the simplest -- the
-// `default(Nullable<T>)` and `NullCoalescing` output cases need InferType /
+// ==/!= null)` condition) with the `ldnull` and `default(Nullable<T>)` output
+// cases (the `NullCoalescing` output case needs InferType /
 // NullableType.IsNonNullableValueType, deferred). The NullableByValue /
 // NullableByReference / UnconstrainedType modes and RunStatements are deferred
 // (the former need the ldloca-v MatchGetValueOrDefault / MatchHasValueCall
@@ -91,8 +91,8 @@ public:
     // (the caller peels logic.not); `trueInst`/`falseInst` are the arms. Returns
     // the lifted instruction (a NullableRewrap, owned) or nullptr if no fold
     // fired. The ReferenceType mode (`comp(ldloc v ==/!= null)`) is ported with
-    // the `ldnull` output case (the `default(Nullable<T>)` and `NullCoalescing`
-    // output cases need InferType / NullableType.IsNonNullableValueType,
+    // the `ldnull` and `default(Nullable<T>)` output cases (the `NullCoalescing`
+    // output case needs InferType / NullableType.IsNonNullableValueType,
     // deferred). The NullableByValue / NullableByReference / UnconstrainedType
     // modes are deferred. The caller checks the NullPropagation setting and
     // IsProtectedIfInst before calling.

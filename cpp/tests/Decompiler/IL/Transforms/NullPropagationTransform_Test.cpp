@@ -18,11 +18,11 @@
 
 // Tests for NullPropagationTransform (the C# `?.` null-conditional operator
 // lowering): the IsProtectedIfInst and MatchNullableRewrap static helpers, the
-// Run entry (ReferenceType mode + ldnull output case), the access chain
-// analysis (IsValidAccessChain approximated for the Call/LdFld/LdLen/LdElema/
-// NullableUnwrap cases), and the IntroduceUnwrap rewrap. The NullableByValue /
-// NullableByReference / UnconstrainedType modes, RunStatements, and the
-// default(Nullable<T>) / NullCoalescing output cases are deferred. The
+// Run entry (ReferenceType mode + ldnull and default(Nullable<T>) output
+// cases), the access chain analysis (IsValidAccessChain approximated for the
+// Call/LdFld/LdLen/LdElema/NullableUnwrap cases), and the IntroduceUnwrap
+// rewrap. The NullableByValue / NullableByReference / UnconstrainedType
+// modes, RunStatements, and the NullCoalescing output case are deferred. The
 // ReferenceType `?.` is a Roslyn-era (C# 6.0) codegen pattern that fires 0
 // times on the .NET Framework 4 legacy-csc mscorlib corpus, so the sweep
 // asserts the ILAst invariant holds (not a fold count), matching the
@@ -72,6 +72,7 @@
 #include "Decompiler/IL/Instructions/NullableInstructions.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/DefaultValue.hpp"
 #include "Decompiler/IL/OpCode.hpp"
 #include "Decompiler/IL/StackType.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
@@ -86,9 +87,11 @@
 #include <string>
 
 using namespace ILSpy::Decompiler::IL;
+using ILSpy::Decompiler::TypeSystem::IType;
 using ILSpy::Decompiler::TypeSystem::ITypePtr;
 using ILSpy::Decompiler::TypeSystem::KnownType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+using ILSpy::Decompiler::TypeSystem::ParameterizedType;
 using ILSpy::Decompiler::Metadata::MetadataFile;
 
 namespace {
@@ -97,6 +100,14 @@ ILVariablePtr MakeLocal(std::string name, ITypePtr type = nullptr) {
     auto v = std::make_shared<ILVariable>(VariableKind::Local, std::move(type), 0);
     v->Name = std::move(name);
     return v;
+}
+
+// Nullable<T> as a generic instantiation: ParameterizedType(KnownType(NullableOfT), {T}).
+ITypePtr MakeNullableOf(KnownTypeCode underlying) {
+    std::vector<ITypePtr> args;
+    args.push_back(std::make_shared<KnownType>(underlying));
+    return std::make_shared<ParameterizedType>(
+        std::make_shared<KnownType>(KnownTypeCode::NullableOfT), std::move(args));
 }
 
 // A single-block function whose body block has a Leave final; the test adds
@@ -286,6 +297,74 @@ TEST(NullPropagationTransform, RunFoldsFieldAccessChain) {
     auto* rLdFlda = static_cast<LdFlda*>(rLdObj->Target.get());
     ASSERT_NE(rLdFlda->Target, nullptr);
     EXPECT_EQ(rLdFlda->Target->Op, OpCode::NullableUnwrap);
+}
+
+TEST(NullPropagationTransform, RunFoldsInequalityNullCheckWithDefaultNullableFalseInst) {
+    // `comp(ldloc v != null) ? call ToString(ldloc v) : default(Nullable<int>)`
+    // => `nullable.rewrap(call ToString(nullable.unwrap(ldloc v)))`
+    // The `default(Nullable<T>)` output case (the C# `MatchDefaultValue &&
+    // IsKnownType(NullableOfT)`), ported via the D93 MatchNull helper.
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto cond = std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v), std::make_unique<LdNull>(),
+        ComparisonKind::Inequality);
+    auto call = std::make_unique<Call>("System.Object::ToString");
+    call->IsInstanceCall = true;
+    call->AddArg(std::make_unique<LdLoc>(v));
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(cond), std::move(call),
+        std::make_unique<DefaultValue>(MakeNullableOf(KnownTypeCode::Int32)));
+    auto result = NullPropagationTransform::Run(
+        iff->Condition.get(), iff->TrueInst.get(), iff->FalseInst.get());
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Op, OpCode::NullableRewrap);
+    auto* rewrap = static_cast<NullableRewrap*>(result.get());
+    ASSERT_NE(rewrap->Argument, nullptr);
+    EXPECT_EQ(rewrap->Argument->Op, OpCode::Call);
+    auto* rcall = static_cast<Call*>(rewrap->Argument.get());
+    ASSERT_FALSE(rcall->Arguments.empty());
+    EXPECT_EQ(rcall->Arguments[0]->Op, OpCode::NullableUnwrap);
+}
+
+TEST(NullPropagationTransform, RunFoldsEqualityNullCheckWithDefaultNullableFalseInst) {
+    // `comp(ldloc v == null) ? default(Nullable<int>) : call ToString(ldloc v)`
+    // => `nullable.rewrap(call ToString(nullable.unwrap(ldloc v)))`
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto cond = std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v), std::make_unique<LdNull>(),
+        ComparisonKind::Equality);
+    auto call = std::make_unique<Call>("System.Object::ToString");
+    call->IsInstanceCall = true;
+    call->AddArg(std::make_unique<LdLoc>(v));
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(cond),
+        std::make_unique<DefaultValue>(MakeNullableOf(KnownTypeCode::Int32)),
+        std::move(call));
+    auto result = NullPropagationTransform::Run(
+        iff->Condition.get(), iff->TrueInst.get(), iff->FalseInst.get());
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Op, OpCode::NullableRewrap);
+    auto* rewrap = static_cast<NullableRewrap*>(result.get());
+    ASSERT_NE(rewrap->Argument, nullptr);
+    EXPECT_EQ(rewrap->Argument->Op, OpCode::Call);
+}
+
+TEST(NullPropagationTransform, RunRejectsNonNullableDefaultFalseInst) {
+    // `default(int)` is NOT `default(Nullable<T>)` -- MatchNull returns false,
+    // so the `default(Nullable<T>)` output case does not fire and the if stays.
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto cond = std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v), std::make_unique<LdNull>(),
+        ComparisonKind::Inequality);
+    auto call = std::make_unique<Call>("System.Object::ToString");
+    call->IsInstanceCall = true;
+    call->AddArg(std::make_unique<LdLoc>(v));
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(cond), std::move(call),
+        std::make_unique<DefaultValue>(std::make_shared<KnownType>(KnownTypeCode::Int32)));
+    auto result = NullPropagationTransform::Run(
+        iff->Condition.get(), iff->TrueInst.get(), iff->FalseInst.get());
+    EXPECT_EQ(result, nullptr);
 }
 
 TEST(NullPropagationTransform, RunRejectsNonCompCondition) {

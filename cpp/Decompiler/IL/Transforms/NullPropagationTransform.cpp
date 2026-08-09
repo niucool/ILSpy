@@ -18,12 +18,13 @@
 
 // Port of ICSharpCode.Decompiler/IL/Transforms/NullPropagationTransform.cs
 // (subset). See the header for the scope. This file ports the ReferenceType
-// mode of `Run` + `TryNullPropagation` (the `ldnull` output case) +
+// mode of `Run` + `TryNullPropagation` (the `ldnull` and `default(Nullable<T>)`
+// output cases) +
 // `IsValidAccessChain` (approximated) + `IntroduceUnwrap`, plus the
 // `IsProtectedIfInst` and `MatchNullableRewrap` static helpers. The
 // NullableByValue / NullableByReference / UnconstrainedType modes,
-// RunStatements, the `default(Nullable<T>)` and `NullCoalescing` output cases
-// (need InferType / NullableType.IsNonNullableValueType), and the
+// RunStatements, the `NullCoalescing` output case
+// (needs InferType / NullableType.IsNonNullableValueType), and the
 // AddressOf / LdObjIfRef / Dynamic* access-chain cases are deferred.
 
 #include "Decompiler/IL/Transforms/NullPropagationTransform.hpp"
@@ -287,12 +288,27 @@ std::unique_ptr<ILInstruction> TryNullPropagation(ILVariable* testedVar,
     if (!IsValidAccessChain(testedVar, mode, nonNullInst, varLoad))
         return nullptr;
     // The ldnull output case: `testedVar != null ? testedVar.AccessChain : null`
-    // => `testedVar?.AccessChain` (a NullableRewrap). The default(Nullable<T>)
-    // and NullCoalescing output cases are deferred (need InferType).
+    // => `testedVar?.AccessChain` (a NullableRewrap).
     if (nullInst && nullInst->Op == OpCode::LdNull) {
         IntroduceUnwrap(testedVar, varLoad, mode);
         auto nonNullOwned = DetachFromParent(nonNullInst);
         return std::make_unique<NullableRewrap>(std::move(nonNullOwned));
+    }
+    // The default(Nullable<T>) output case:
+    // `testedVar != null ? testedVar.AccessChain : default(Nullable<T>)`
+    // => `testedVar?.AccessChain` (a NullableRewrap). MatchNull recognises
+    // `default(Nullable<T>)` (a DefaultValue whose Type is a Nullable<T>) -- the
+    // faithful equivalent of the C# `nullInst.MatchDefaultValue(out type) &&
+    // type.IsKnownType(KnownTypeCode.NullableOfT)`: GetUnderlyingTypeOfNullable
+    // checks the generic definition is KnownType(NullableOfT) (what the C#
+    // IsKnownType's GetDefinition() yields for a ParameterizedType).
+    {
+        const TypeSystem::IType* nullUnderlying = nullptr;
+        if (nullInst && NullableLiftingTransform::MatchNull(nullInst, nullUnderlying)) {
+            IntroduceUnwrap(testedVar, varLoad, mode);
+            auto nonNullOwned = DetachFromParent(nonNullInst);
+            return std::make_unique<NullableRewrap>(std::move(nonNullOwned));
+        }
     }
     (void)removedRewrapOrNullableCtor;  // deferred: the NullCoalescing case
     return nullptr;

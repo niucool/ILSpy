@@ -811,10 +811,14 @@ implemented and green here. Everything else follows the phase plan in
   LdElema/NullableUnwrap cases are faithfully matched. `IntroduceUnwrap`
   wraps the receiver load at the end of the access chain in a `NullableUnwrap`
   (the D103 node), and the result is a `NullableRewrap` around the access
-  chain. The NullableByValue/NullableByReference/UnconstrainedType modes,
-  `RunStatements` (the void-call and unconstrained-generic patterns), and the
-  `default(Nullable<T>)`/`NullCoalescing` output cases (need InferType /
-  NullableType.IsNonNullableValueType) are deferred. The ReferenceType `?.` is
+  chain. The ReferenceType mode is ported with the `ldnull` and
+  `default(Nullable<T>)` output cases (the latter via the D93 MatchNull helper,
+  the faithful equivalent of the C# `MatchDefaultValue + IsKnownType(NullableOfT)`);
+  the `NullCoalescing` output case (needs InferType /
+  NullableType.IsNonNullableValueType / IsByRefLike) and the
+  NullableByValue/NullableByReference/UnconstrainedType modes,
+  `RunStatements` (the void-call and unconstrained-generic patterns) are
+  deferred. The ReferenceType `?.` is
   a Roslyn-era (C# 6.0) codegen pattern that fires 0 times on the .NET
   Framework 4 legacy-csc mscorlib corpus, so the sweep asserts the ILAst
   invariant holds (not a fold count), matching the DetectCatchWhenConditionBlocks /
@@ -822,7 +826,7 @@ implemented and green here. Everything else follows the phase plan in
   The remaining `Run(IfInstruction)` paths (the LiftCSharpUserComparison rest
   of LiftNormal [needs the Call-operator case], NullPropagation's remaining
   modes [NullableByValue/NullableByReference/UnconstrainedType + RunStatements
-  + the default(Nullable<T>)/NullCoalescing output cases]) and
+  + the NullCoalescing output case]) and
   the `RunStatements(Block, int)` block transform are the subsequent
   in-order targets.
   `NullableRewrap` / `NullableUnwrap` (Instructions/, a tested-but-not-yet-wired
