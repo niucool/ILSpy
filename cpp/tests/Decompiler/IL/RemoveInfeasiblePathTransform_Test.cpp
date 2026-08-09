@@ -28,6 +28,7 @@
 // target (X) and the next block in the test block's container (Y).
 
 #include "Decompiler/IL/ControlFlow/ControlFlowSimplification.hpp"
+#include "Decompiler/IL/ControlFlow/DetectPinnedRegions.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
@@ -292,4 +293,43 @@ TEST(RemoveInfeasiblePath, MscorlibSweepPreservesInvariant) {
     // constant-store-then-test pattern; the sweep's primary check is that the
     // invariant holds across the corpus.)
     EXPECT_GE(redirects, 0);
+}
+
+// The CLI pipeline runs a second CFS after DetectPinnedRegions. The
+// RemoveInfeasiblePath deletion of unreachable test blocks (matching the C#
+// SortBlocks(deleteUnreachableBlocks: true)) used to free blocks whose nested
+// containers held blocks still referenced by branches elsewhere, dangling those
+// branches' TargetBlock pointers for the second CFS to dereference and crash
+// on (SEH 0xc0000005 on a System.IO.FileStream method, token ~0x0600184E).
+// The deletion is now deferred (the dead blocks stay in the tree, harmless);
+// this sweep confirms the full pipeline -- including the second CFS -- holds
+// the invariant across the corpus without crashing.
+TEST(RemoveInfeasiblePath, SecondCfsSweepPreservesInvariant) {
+#if defined(_WIN32)
+    const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    int processed = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++processed;
+        ILTransformContext ctx;
+        ControlFlowSimplification().Run(*fn, ctx);
+        StObjToStLoc().Run(*fn, ctx);
+        ILInlining().Run(*fn, ctx);
+        InlineReturnTransform().Run(*fn, ctx);
+        RemoveInfeasiblePathTransform().Run(*fn, ctx);
+        DetectPinnedRegions().Run(*fn, ctx);
+        ControlFlowSimplification().Run(*fn, ctx);  // the second CFS
+        fn->CheckInvariant(ILPhase::Normal);
+        if (processed >= 8000) break;
+    }
+    EXPECT_GT(processed, 5000);
 }

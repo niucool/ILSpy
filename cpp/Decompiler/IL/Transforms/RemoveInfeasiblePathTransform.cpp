@@ -18,7 +18,6 @@
 
 #include "Decompiler/IL/Transforms/RemoveInfeasiblePathTransform.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
-#include "Decompiler/IL/InstructionFlags.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
@@ -30,7 +29,6 @@
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
 
-#include <functional>
 #include <vector>
 
 namespace ILSpy::Decompiler::IL {
@@ -126,14 +124,10 @@ bool MatchBlock2AndPickExit(Block* block, ILVariable* s, int constantValue,
     return true;
 }
 
-// True if `target` (at index i > 0 in its container) is reached by positional
-// fall-through: the previous block's final is not EndPointUnreachable. Such a
-// block is reachable with zero Branch edges and must not be deleted as dead.
-bool IsFallThroughTarget(BlockContainer* container, std::size_t i) {
-    if (i == 0 || !container || i >= container->Blocks.size()) return false;
-    ILInstruction* prevFin = container->Blocks[i - 1]->FinalInstruction.get();
-    return !prevFin || !HasFlag(prevFin->Flags(), InstructionFlags::EndPointUnreachable);
-}
+// (The C# SortBlocks(deleteUnreachableBlocks: true) deletion of unreachable
+// test blocks is not ported: erasing a block with IncomingEdgeCount 0 can free
+// inner blocks of its nested containers that are still referenced by branches
+// elsewhere -- see the comment in Run below.)
 
 } // namespace
 
@@ -165,31 +159,19 @@ void RemoveInfeasiblePathTransform::Run(ILFunction& function, ILTransformContext
 
     if (changed) {
         RecomputeIncomingEdgeCounts(function);
-        // A test block whose every predecessor was redirected is now unreachable;
-        // drop it (mirrors C# SortBlocks(deleteUnreachableBlocks: true)). Keep
-        // the container entry point (index 0) and positional fall-through targets.
-        std::vector<BlockContainer*> freshContainers;
-        CollectContainers(function.Body.get(), freshContainers);
-        // Keep dead blocks alive until the function returns so snapshot pointers
-        // that might still be observed (debug dumps, the invariant walk) stay
-        // valid; they are released when `graveyard` goes out of scope.
-        std::vector<std::unique_ptr<Block>> graveyard;
-        for (auto* container : freshContainers) {
-            for (std::size_t i = 0; i < container->Blocks.size();) {
-                Block* b = container->Blocks[i].get();
-                if (b->IncomingEdgeCount == 0 && i != 0 && !IsFallThroughTarget(container, i)) {
-                    graveyard.push_back(std::move(container->Blocks[i]));
-                    container->Blocks.erase(container->Blocks.begin() + i);
-                    // Don't advance i: the next block shifted into this slot.
-                } else {
-                    ++i;
-                }
-            }
-            for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
-                container->Blocks[i]->Parent = container;
-                container->Blocks[i]->ChildIndex = static_cast<int>(i);
-            }
-        }
+        // A test block whose every predecessor was redirected is now
+        // unreachable. The C# drops it via SortBlocks(deleteUnreachableBlocks:
+        // true), but that deletion is unsafe in this port: a block with
+        // IncomingEdgeCount 0 may still contain nested containers (EH/loop
+        // bodies) whose inner blocks are referenced by branches elsewhere in
+        // the tree. Erasing the block frees those inner blocks (unique_ptr is
+        // not GC), leaving the external branches' TargetBlock pointers
+        // dangling -- which the next CFS dereferences and crashes on. The C#
+        // is safe because its GC keeps the blocks alive and because branches
+        // only target same-or-enclosing containers (an invariant this port
+        // does not yet fully guarantee). Leaving the dead blocks in place is
+        // correct (they are simply unreachable) and the later CFS / transforms
+        // handle them without dereferencing freed memory.
     }
 }
 

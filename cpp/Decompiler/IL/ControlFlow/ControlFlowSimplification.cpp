@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <set>
 #include <vector>
 
 namespace ILSpy::Decompiler::IL {
@@ -195,11 +196,17 @@ void InlineVariableInReturnBlock(Block* block, ILTransformContext& context) {
 
 void SimplifyBranchChains(ILFunction& function, ILTransformContext& context,
                           std::vector<std::unique_ptr<Block>>& graveyard) {
+    // Collect branches upfront (the C# uses a lazy Descendants enumerable
+    // that walks the tree live, skipping branches destroyed mid-pass). A
+    // branch replaced by a Leave below is destroyed, so its pointer in this
+    // vector would dangle -- track destroyed ones and skip them.
     std::vector<Branch*> branches;
+    std::set<Branch*> destroyed;
     ForEach(function.Body.get(), [&](ILInstruction* i) {
         if (i->Op == OpCode::Branch) branches.push_back(static_cast<Branch*>(i));
     });
     for (Branch* branch : branches) {
+        if (destroyed.count(branch)) continue;  // replaced by a prior iteration
         Block* target = branch->TargetBlock;
         if (!target) continue;  // unresolved offset branch: leave alone
         // Resolve chains of single-branch trampoline blocks to the end block.
@@ -231,6 +238,7 @@ void SimplifyBranchChains(ILFunction& function, ILTransformContext& context,
             --target->IncomingEdgeCount;
             std::unique_ptr<ILInstruction> dup =
                 std::make_unique<Leave>(targetLeave->TargetContainer);
+            destroyed.insert(branch);
             branch->ReplaceWith(std::move(dup));
         } else if (target->Instructions.empty() &&
                    target->FinalInstruction &&
@@ -248,6 +256,7 @@ void SimplifyBranchChains(ILFunction& function, ILTransformContext& context,
                 --target->IncomingEdgeCount;
                 std::unique_ptr<ILInstruction> dup =
                     std::make_unique<Leave>(targetLeave->TargetContainer, std::move(cloned));
+                destroyed.insert(branch);
                 branch->ReplaceWith(std::move(dup));
             }
         }
