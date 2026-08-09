@@ -51,6 +51,13 @@ struct ILTransformSettings {
     // this port leaves the dead blocks in place either way (see D58), so the
     // setting only affects whether the analysis allows unreachable cases.
     bool RemoveDeadCode = false;
+    // Whether to lift nullable-value operations into nullable-aware forms.
+    // DecompilerSettings.LiftNullables -- a C# 2.0 setting, default true (false
+    // for C# 1). Gates SwitchOnNullableTransform and the nullable-lifting
+    // expression transforms. The nullable-lifting helper subset
+    // (MatchHasValueCall / MatchGetValueOrDefault) consults this implicitly via
+    // the transforms that call them.
+    bool LiftNullables = true;
 };
 
 class ILTransformContext {

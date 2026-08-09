@@ -429,6 +429,55 @@ ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::ResolveTypeToken(std::uint
     return nullptr;
 }
 
+ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::ResolveMethodDeclaringType(std::uint32_t methodToken) const {
+    if (!IsValid()) return nullptr;
+    std::uint32_t table = methodToken >> 24;
+    std::uint32_t row = methodToken & 0x00FFFFFFu;
+    try {
+        if (table == 0x06 && row && row <= impl_->db->MethodDef.size()) {
+            // MethodDef: parent is its enclosing TypeDef.
+            auto m = impl_->db->MethodDef[row - 1];
+            auto p = m.Parent();
+            return MakeTypeRef(p.TypeNamespace(), p.TypeName(), 0);
+        }
+        if (table == 0x0A && row && row <= impl_->db->MemberRef.size()) {
+            // MemberRef: parent is a TypeRef / TypeDef / TypeSpec (or a
+            // ModuleRef/MethodDef, which carry no declaring type here).
+            auto mr = impl_->db->MemberRef[row - 1];
+            auto parent = mr.Class();
+            using MRP = winmd::reader::MemberRefParent;
+            if (parent.type() == MRP::TypeRef) {
+                auto t = parent.TypeRef();
+                return MakeTypeRef(t.TypeNamespace(), t.TypeName(), 0);
+            }
+            if (parent.type() == MRP::TypeDef) {
+                auto t = parent.TypeDef();
+                return MakeTypeRef(t.TypeNamespace(), t.TypeName(), 0);
+            }
+            if (parent.type() == MRP::TypeSpec) {
+                auto ts = parent.get_row<winmd::reader::TypeSpec>();
+                std::uint32_t blobIndex = ts.get_value<std::uint32_t>(0);
+                auto blob = impl_->db->get_blob(blobIndex);
+                return DecodeTypeSpecBlob(*impl_->db, blob.begin(),
+                                          static_cast<std::size_t>(blob.end() - blob.begin()));
+            }
+            return nullptr;
+        }
+        if (table == 0x2B && row && row <= impl_->db->MethodSpec.size()) {
+            // MethodSpec: unwrap to the underlying MethodDefOrRef coded index
+            // (column 0). winmd's MethodSpec row has no public accessors; read
+            // the raw value: bit 0 is the tag (0=MethodDef, 1=MemberRef), the
+            // rest is the 1-based row.
+            std::uint32_t v = impl_->db->MethodSpec.get_value<std::uint32_t>(row - 1, 0);
+            if (v == 0) return nullptr;
+            return ResolveMethodDeclaringType(((v & 1) ? 0x0A000000u : 0x06000000u) | (v >> 1));
+        }
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+    return nullptr;
+}
+
 std::vector<std::string> MetadataFile::GetParameterNames(std::uint32_t methodToken) const {
     std::vector<std::string> result;
     if (!IsValid()) return result;

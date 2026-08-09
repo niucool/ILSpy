@@ -319,7 +319,10 @@ private:
                 Line(indent, "{");
                 for (const auto& section : sw.Sections) {
                     if (!section) continue;
-                    if (section->Labels.IsEmpty()) {
+                    if (section->HasNullLabel) {
+                        Line(indent + 1, "case null:");
+                    }
+                    if (section->Labels.IsEmpty() && !section->HasNullLabel) {
                         Line(indent + 1, "default:");
                     } else {
                         for (const auto& iv : section->Labels.Intervals()) {

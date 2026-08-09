@@ -123,15 +123,29 @@ implemented and green here. Everything else follows the phase plan in
   `AddNullCase` (needs `NullableLiftingTransform.MatchHasValueCall`), and
   `InlineSwitchExpressionDefaultCaseThrowHelper` (needs `IMethod`/`IType`
   resolution). Gated on the `SparseIntegerSwitch` setting (default true).
+  `NullableLiftingTransform` (Transforms/, a tested-but-not-yet-wired
+  foundation) ports the static helper subset the next in-order transform
+  (`SwitchOnNullableTransform`) and SwitchDetection's deferred `AddNullCase`
+  consume: `MatchHasValueCall` / `MatchGetValueOrDefault` recognise
+  `call get_HasValue(arg)` / `call GetValueOrDefault(arg)` on
+  `System.Nullable<T>` by the call's resolved declaring type
+  (`Call::DeclaringType`, a new `ITypePtr` the IL reader fills from the
+  method token via `MetadataFile::ResolveMethodDeclaringType`, unwrapping a
+  `ParameterizedType` to its generic definition's `KnownTypeCode`).
+  `SwitchInstruction` gained `IsLifted`/`Type` and `SwitchSection` gained
+  `HasNullLabel` (the `case null:` arm); the seed renders `case null:`.
   The CLI applies CFS + StObjToStLoc + ILInlining + InlineReturnTransform +
   RemoveInfeasiblePath + DetectPinnedRegions + DetectCatchWhenConditionBlocks +
   LdLocaDupInitObjTransform + EarlyExpressionTransforms + RemoveDeadVariableInit +
   CFS + SwitchDetection + LoopDetection + ConditionDetection + AssignVariableNames +
   RemoveRedundantReturn before the C# seed, so `fixed (...) { ... }`, `default(T)`,
   and reconstructed `switch` statements now appear in the output. Next
-  per `GetILTransforms()`: SwitchOnString/SwitchOnNullable (need
-  `SwitchStatementOnString`/`LiftNullables` settings and the
-  `NullableLiftingTransform`/`SwitchOnStringTransform` helpers),
+  per `GetILTransforms()`: SwitchOnNullable (now unblocked -- needs wiring the
+  `NullableLiftingTransform` helpers into the legacy/Roslyn matchers + the
+  `LiftNullables` setting, default true),
+  SwitchOnString (need the `SwitchStatementOnString` setting and
+  `SwitchOnStringTransform.MatchComputeStringOrReadOnlySpanHashCall` + a
+  `StringToInt` node),
   the async/iterator state machines
   (YieldReturnDecompiler/AsyncAwaitDecompiler), SplitVariables (needs
   reaching-definitions dataflow),

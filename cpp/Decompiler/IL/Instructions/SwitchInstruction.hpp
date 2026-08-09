@@ -25,6 +25,7 @@
 #pragma once
 
 #include "Decompiler/IL/ILInstruction.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/Util/LongSet.hpp"
 
 #include <cassert>
@@ -43,6 +44,12 @@ public:
     // which are infinite and need the interval representation.
     Util::LongSet Labels;
     std::unique_ptr<ILInstruction> Body;  // a Branch (offset form) post-reader
+    // True when this section is the `case null:` arm of a lifted switch on a
+    // Nullable<T> (set by SwitchOnNullableTransform / the AddNullCase path).
+    // Carries no labels (null is not an integer label); the seed renders it as
+    // `case null:`. Mirrors SwitchSection.HasNullLabel in the generated
+    // Instructions.cs.
+    bool HasNullLabel = false;
     SwitchSection() : ILInstruction(OpCode::SwitchSection) {}
     explicit SwitchSection(Util::LongSet labels) : ILInstruction(OpCode::SwitchSection), Labels(std::move(labels)) {}
     InstructionFlags DirectFlags() const override { return InstructionFlags::None; }
@@ -67,6 +74,7 @@ public:
             first = false;
         }
         if (first) out += "default";
+        if (HasNullLabel) out += ", null";
         out += "): ";
         if (Body) Body->WriteTo(out); else out += "(null)";
     }
@@ -83,6 +91,13 @@ class SwitchInstruction : public ILInstruction {
 public:
     std::unique_ptr<ILInstruction> Value;
     std::vector<std::unique_ptr<SwitchSection>> Sections;
+    // True when this switch dispatches on a Nullable<T>'s underlying value and
+    // carries a `case null:` section (set by SwitchOnNullableTransform).
+    // Mirrors SwitchInstruction.IsLifted in the generated Instructions.cs.
+    bool IsLifted = false;
+    // For a lifted switch, the Nullable<T> type the switch dispatches on (the
+    // lift context for the null case). Mirrors SwitchInstruction.Type.
+    TypeSystem::ITypePtr Type;
     explicit SwitchInstruction(std::unique_ptr<ILInstruction> value)
         : ILInstruction(OpCode::SwitchInstruction), Value(std::move(value)) {
         if (Value) { Value->Parent = this; Value->ChildIndex = 0; }
@@ -105,6 +120,7 @@ public:
     void WriteTo(std::string& out) const override {
         out += "switch ";
         if (Value) Value->WriteTo(out); else out += "(null)";
+        if (IsLifted) out += " lifted";
         out += " {\n";
         for (auto& s : Sections) {
             out += "    ";

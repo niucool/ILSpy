@@ -171,6 +171,14 @@ public:
     // for castclass/isinst/box/newarr/ldelem type operands.
     ILSpy::Decompiler::TypeSystem::ITypePtr ResolveTypeToken(std::uint32_t token) const;
 
+    // Resolve the declaring type of a method token (MethodDef parent TypeDef,
+    // MemberRef parent TypeRef/TypeDef/TypeSpec, MethodSpec unwrapped to its
+    // MethodDefOrRef) to an IType. Returns nullptr for an out-of-range or
+    // unsupported token; never throws. Used by the IL reader to populate
+    // Call::DeclaringType so the nullable-lifting helpers can recognise
+    // Nullable<T>.get_HasValue / GetValueOrDefault by KnownTypeCode.
+    ILSpy::Decompiler::TypeSystem::ITypePtr ResolveMethodDeclaringType(std::uint32_t methodToken) const;
+
     // Decode the method body at `rva` (from a MethodDefInfo::RVA). Returns an
     // invalid MethodBody for abstract/extern methods (RVA 0) or a malformed
     // header; never throws.

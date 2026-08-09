@@ -23,6 +23,7 @@
 #pragma once
 
 #include "Decompiler/IL/ILInstruction.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
 
 #include <memory>
 #include <string>
@@ -35,6 +36,14 @@ public:
     std::string MethodName;  // "Namespace.Type::Method" (resolved by the IL reader)
     std::vector<std::unique_ptr<ILInstruction>> Arguments;
     StackType ReturnType = StackType::Unknown;
+    // The declaring type of the resolved method, as an IType. Set by the IL
+    // reader from the method token (MethodDef parent TypeDef, MemberRef parent
+    // TypeRef/TypeDef/TypeSpec, MethodSpec unwrapped). Null when the token
+    // could not be resolved (e.g. an out-of-range or unsupported parent); null
+    // is treated like the C# `Method.DeclaringTypeDefinition == null`. Used by
+    // the nullable-lifting helpers to recognise Nullable<T>.get_HasValue /
+    // GetValueOrDefault via the type's KnownTypeCode.
+    TypeSystem::ITypePtr DeclaringType;
     // True for call/callvirt on an instance method (Arguments[0] is the
     // receiver); false for static calls and newobj. Set by the IL reader.
     bool IsInstanceCall = false;

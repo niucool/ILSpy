@@ -27,4 +27,5 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/EarlyExpressionTransforms.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/RemoveDeadVariableInit.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/HighLevelLoopTransform.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/NullableLiftingTransform.cpp
 )

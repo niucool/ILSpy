@@ -42,6 +42,7 @@ add_executable(ilspy_tests
     Decompiler/IL/ControlFlow/SwitchDetection_Test.cpp
     Decompiler/IL/ControlFlow/LoopContext_Test.cpp
     Decompiler/IL/Transforms/HighLevelLoopTransform_Test.cpp
+    Decompiler/IL/Transforms/NullableLiftingTransform_Test.cpp
 )
 target_link_libraries(ilspy_tests PRIVATE
     ILSpy::ilspy
