@@ -76,11 +76,18 @@ implemented and green here. Everything else follows the phase plan in
   stloc s(ldloca v)` so `s` can be inlined into its later uses. The IL reader
   now models `initobj` as `stobj(addr, DefaultValue(type), type)` (a new
   `DefaultValue` node) so `default(T)` renders correctly instead of a type-
-  erased `null`/`0`. Parameter names and string literals (`ldstr`) now come
+  erased `null`/`0`. `EarlyExpressionTransforms` folds the early expression-
+  level rewrites the rest of the pipeline depends on: `stobj(ldloca V, ..)` ->
+  `stloc V, ..` (store side) and `ldobj(ldloca V)` -> `ldloc V` (load side) so
+  ILInlining can fold them, and comparison-kind normalization against `ldnull`
+  (`gt`/`le` on the right -> `ne`/`eq`, `lt`/`ge` on the left; `box T(arg)
+  ==/!= ldnull` -> `arg ==/!= ldnull` for a type parameter `T`). Parameter
+  names and string literals (`ldstr`) now come
   from the metadata (Param table / #US heap).
-  13 of ~40 transforms ported. The CLI applies CFS + StObjToStLoc + ILInlining +
+  14 of ~40 transforms ported. The CLI applies CFS + StObjToStLoc + ILInlining +
   InlineReturnTransform + RemoveInfeasiblePath + DetectPinnedRegions +
-  DetectCatchWhenConditionBlocks + LdLocaDupInitObjTransform + CFS +
+  DetectCatchWhenConditionBlocks + LdLocaDupInitObjTransform +
+  EarlyExpressionTransforms + CFS +
   LoopDetection + ConditionDetection + AssignVariableNames + RemoveRedundantReturn
   before the C# seed, so `fixed (...) { ... }` and `default(T)` now appear in
   the output. Next

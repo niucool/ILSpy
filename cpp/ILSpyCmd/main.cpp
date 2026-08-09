@@ -36,6 +36,7 @@
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
 #include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
+#include "Decompiler/IL/Transforms/EarlyExpressionTransforms.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/Metadata/ILTextEmitter.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
@@ -218,6 +219,14 @@ int main(int argc, char** argv) {
                 // deferred DetectExitPoints would sit here in the C# order) and before
                 // the second CFS, per GetILTransforms().
                 ILSpy::Decompiler::IL::LdLocaDupInitObjTransform().Run(*fn, transformContext);
+                // Early expression-level rewrites the rest of the pipeline
+                // depends on: stobj(ldloca V, ..) -> stloc V, .., ldobj(ldloca V)
+                // -> ldloc V (so ILInlining can fold them), and comparison-kind
+                // normalization against ldnull (gt/le -> ne/eq, lt/ge on the left;
+                // box T(arg) ==/!= ldnull -> arg ==/!= ldnull for a type parameter T).
+                // Runs after LdLocaDupInitObjTransform, before the second CFS (per
+                // GetILTransforms()).
+                ILSpy::Decompiler::IL::EarlyExpressionTransforms().Run(*fn, transformContext);
                 // Re-run CFS so the duplicated 1-pred return blocks merge and
                 // the single-definition variable inlines to `leave (expr)`.
                 ILSpy::Decompiler::IL::ControlFlowSimplification().Run(*fn, transformContext);
