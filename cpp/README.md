@@ -89,7 +89,7 @@ implemented and green here. Everything else follows the phase plan in
   `RemoveDeadStores` setting, with no loads or addresses, has its stores dropped
   (a pure value goes with the store; an impure value is unwrapped so its side
   effect survives), and dead-copy chains collapse via a recompute fixpoint.
-  23 of ~40 transforms ported. The switch-detection family is now complete in
+  24 of ~40 transforms ported. The switch-detection family is now complete in
   its core: `LongSet`/`LongInterval` (Util/, ported from LongSet.cs /
   Interval.cs) -- an immutable interval-set of longs whose complement is
   representable (unlike `std::set<int64_t>`) -- backs `SwitchSection::Labels`
@@ -257,11 +257,11 @@ implemented and green here. Everything else follows the phase plan in
   RemoveInfeasiblePath + DetectPinnedRegions + DetectCatchWhenConditionBlocks +
   LdLocaDupInitObjTransform + EarlyExpressionTransforms + RemoveDeadVariableInit +
   CFS + SwitchDetection + SwitchOnNullable + LoopDetection + PatternMatching +
-  ConditionDetection + LockTransform + UsingTransform + CachedDelegateInitialization + AssignVariableNames + RemoveRedundantReturn before the
+  ConditionDetection + LockTransform + UsingTransform + CachedDelegateInitialization + CachedReadOnlySpanInitialization + AssignVariableNames + RemoveRedundantReturn before the
   C# seed, so `fixed (...) { ... }`, `default(T)`, reconstructed `switch`
   statements, switch-on-nullable `case null:` arms, `is T x` patterns,
   `lock (...) { ... }`, and `using (...) { ... }` statements now
-  appear in the output. 23 of ~40 transforms ported.
+  appear in the output. 24 of ~40 transforms ported.
   `DelegateConstruction` (Transforms/, a tested-but-not-yet-wired
   foundation) ports the `MatchDelegateConstruction` helper the next in-order
   transform (`CachedDelegateInitialization`) and the later `DelegateConstruction`
@@ -320,13 +320,35 @@ implemented and green here. Everything else follows the phase plan in
   4 legacy csc corpus uses the field-cached shape, not the local one, so the
   WithLocal fold fires 0 times on mscorlib (the hand-built tests verify the
   rewrite, the sweep the invariant -- the DetectCatchWhenConditionBlocks /
-  LdLocaDupInitObj / SwitchOnNullable precedent). Then `CachedReadOnlySpanInitialization`
-  (its IField dependency now met; the remaining work is the block-model
-  adaptation -- this port's ConditionDetection leaves the cache body as the
-  if's FalseInst Block rather than the TrueInst, the inverted shape the C#
-  transform matches -- which has no real corpus occurrence to probe since
-  ReadOnlySpan is not in the .NET Framework 4 mscorlib),
-  the async/iterator state machines
+  LdLocaDupInitObj / SwitchOnNullable precedent). `CachedReadOnlySpanInitialization`
+  (the next in-order transform after `CachedDelegateInitialization`, ported from
+  CachedReadOnlySpanInitialization.cs) collapses the compiler-synthesized lazy
+  cache Roslyn emits for a ReadOnlySpan<T> from an array literal on frameworks
+  without RuntimeHelpers.CreateSpan (`stloc V(ldobj ldsflda cache); if (V ==
+  null) { stloc V(init); stobj(ldsflda cache, ldloc V) }`; single usage of V)
+  into the unconditional init `stloc V(init); ...`, so a later array-initializer
+  transform recovers the literal and the escaped <PrivateImplementationDetails>
+  cache field disappears. A probe through the pre-pipeline (CFS + LoopDetection
+  + ConditionDetection) confirmed this port's post-ConditionDetection shape IS
+  the C# shape: ConditionDetection's TryInlineIfFallThrough inlines the body
+  into the if's FalseInst, then TryInvertIfExit (the usage block is the next
+  block) inverts it -- negating the condition to `comp(V == null)` and moving the
+  body into the TrueInst as a Block (FalseInst null, fall-through to the
+  usage) -- so the transform matches Equality + body in TrueInst. The one
+  port-specific difference (the body Block carries a trailing Branch to the
+  usage, which the C# body does not) is handled by dropping the goto when the
+  body falls through to the next block (the common cache case), so no spurious
+  `goto IL_XXXX` survives. The cache-field gate uses the D78
+  `LdsFlda::IsCompilerGeneratedField` flag; two LdsFlda nodes are the same field
+  by FieldToken (or FieldName). ReadOnlySpan<T> is absent from the .NET
+  Framework 4 mscorlib corpus, so this fires 0 times on it (it fires on
+  Roslyn-compiled / modern .NET with System.Memory); ported for faithfulness
+  (the hand-built tests verify the rewrite, the sweep the invariant -- the
+  DetectCatchWhenConditionBlocks / LdLocaDupInitObj / SwitchOnNullable
+  precedent). Gated on the `ArrayInitializers` setting (default true). The
+  remaining field-cached delegate shapes (now unblocked on the IField side)
+  still need the block-model adaptation + the per-variable store-list tree
+  walk + a corpus probe, the async/iterator state machines
   (YieldReturnDecompiler/AsyncAwaitDecompiler), SplitVariables (needs
   reaching-definitions dataflow),
   DetectExitPoints + the full ConditionDetection (multi-pred join blocks),

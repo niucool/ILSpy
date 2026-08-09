@@ -39,6 +39,7 @@
 #include "Decompiler/IL/Transforms/LockTransform.hpp"
 #include "Decompiler/IL/Transforms/UsingTransform.hpp"
 #include "Decompiler/IL/Transforms/CachedDelegateInitialization.hpp"
+#include "Decompiler/IL/Transforms/CachedReadOnlySpanInitialization.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
 #include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
@@ -299,6 +300,20 @@ int main(int argc, char** argv) {
                 // (needing IField metadata) are deferred. Gated on the
                 // AnonymousMethods setting (default true).
                 ILSpy::Decompiler::IL::CachedDelegateInitialization().Run(*fn, transformContext);
+                // CachedReadOnlySpanInitialization: collapse the lazy
+                // ReadOnlySpan<T>-from-array-literal cache Roslyn emits on
+                // frameworks without RuntimeHelpers.CreateSpan (`stloc
+                // V(ldobj ldsflda cache); if (V == null) { stloc V(init);
+                // stobj(ldsflda cache, ldloc V) }`) into the unconditional init,
+                // so a later array-initializer transform recovers the literal
+                // and the escaped <PrivateImplementationDetails> cache field
+                // disappears. Runs right after CachedDelegateInitialization in
+                // the BlockILTransform post-order set (per GetILTransforms()).
+                // Gated on the ArrayInitializers setting (default true). ReadOnlySpan
+                // is absent from the .NET Framework 4 mscorlib corpus, so this
+                // fires 0 times on it (it fires on Roslyn-compiled / modern .NET
+                // with System.Memory); ported for faithfulness.
+                ILSpy::Decompiler::IL::CachedReadOnlySpanInitialization().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::AssignVariableNames().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::RemoveRedundantReturn().Run(*fn, transformContext);
                 fn->CheckInvariant(ILSpy::Decompiler::IL::ILPhase::Normal);
