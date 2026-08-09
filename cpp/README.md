@@ -94,17 +94,28 @@ implemented and green here. Everything else follows the phase plan in
   immutable interval-set of longs whose complement is representable (unlike
   `std::set<int64_t>`) -- backs `SwitchSection::Labels` and is the prerequisite
   for SwitchAnalysis / SwitchDetection / SwitchOnString / SwitchOnNullable
-  (which compute value-set complements like `new LongSet(val).Invert()`). The CLI applies CFS + StObjToStLoc + ILInlining +
+  (which compute value-set complements like `new LongSet(val).Invert()`).
+  `SwitchAnalysis` (ControlFlow/, ported from SwitchAnalysis.cs) is the
+  analysis helper SwitchDetection depends on: it reconstructs a C# switch
+  compiled to if-statements (non-contiguous case labels) as a list of
+  (LongSet labels, body) sections by walking the if-chain, handling
+  `comp(V OP val)`, `comp((V - sub) OP val)` (AddOffset), bare `ldloc V`
+  (all-except-0), `logic.not` unwrap, and an existing IL `switch(V +/- val)` --
+  adapted to this port's if-as-final block model (the false arm is the next
+  block in the container, with a synthesized-Branch section body). The CLI applies CFS + StObjToStLoc + ILInlining +
   InlineReturnTransform + RemoveInfeasiblePath + DetectPinnedRegions +
   DetectCatchWhenConditionBlocks + LdLocaDupInitObjTransform +
   EarlyExpressionTransforms + RemoveDeadVariableInit + CFS +
   LoopDetection + ConditionDetection + AssignVariableNames + RemoveRedundantReturn
   before the C# seed, so `fixed (...) { ... }` and `default(T)` now appear in
   the output. Next
-  per `GetILTransforms()`: the switch family (SwitchDetection, then
-  SwitchOnString/SwitchOnNullable -- now unblocked by LongSet, but needing the
-  `SparseIntegerSwitch`/`SwitchStatementOnString`/`LiftNullables` settings and
-  the LongSet-based `SwitchAnalysis` helper),
+  per `GetILTransforms()`: SwitchDetection (the transform that consumes
+  SwitchAnalysis to build a SwitchInstruction from the detected sections --
+  needs the `SparseIntegerSwitch` setting, the `LoopContext`/`ControlFlowGraph`
+  continue-break analysis for `UseCSharpSwitch`, and the `HighLevelLoopTransform`
+  `MatchIncrementBlock`/`MatchDoWhileConditionBlock` helpers), then
+  SwitchOnString/SwitchOnNullable (need `SwitchStatementOnString`/`LiftNullables`
+  settings and the `NullableLiftingTransform`/`SwitchOnStringTransform` helpers),
   the async/iterator state machines
   (YieldReturnDecompiler/AsyncAwaitDecompiler), SplitVariables (needs
   reaching-definitions dataflow),
