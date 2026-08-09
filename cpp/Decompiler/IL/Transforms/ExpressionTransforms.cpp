@@ -33,12 +33,18 @@
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/UsingInstruction.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
+#include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/TryInstructions.hpp"
+#include "Decompiler/IL/Instructions/UnboxAny.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/PrimitiveType.hpp"
 #include "Decompiler/IL/StackType.hpp"
@@ -492,6 +498,70 @@ bool ReplaceIfWithLiftedValue(IfInstruction* iff, std::unique_ptr<ILInstruction>
     return true;
 }
 
+// Find the ILFunction root that owns `inst` by walking the Parent chain to the
+// root (ILFunction::IsRoot). Every instruction is connected to a function
+// root, so this never returns null for an in-tree instruction. Used by
+// VisitTryCatchHandler to walk the whole function body for the promoted
+// catch-local's uses (this port keeps no per-variable LoadInstructions /
+// StoreInstructions / AddressInstructions lists, so the uses are gathered by a
+// tree walk instead -- the PatternMatchingTransform.cpp CollectUses precedent).
+ILFunction* FunctionOf(ILInstruction* inst) {
+    for (ILInstruction* p = inst; p != nullptr; p = p->Parent)
+        if (p->IsRoot()) return static_cast<ILFunction*>(p);
+    return nullptr;
+}
+
+// Collect every use (load / address / store) of `v` in the subtree, as
+// non-owning pointers. Mirrors the C# v.LoadInstructions.Concat(
+// v.AddressInstructions).Concat(v.StoreInstructions) TransformCatchVariable
+// consults; this port keeps no per-variable use lists, so the uses are gathered
+// by a tree walk instead. The store cases cover the IStoreInstruction kinds
+// (StLoc, MatchInstruction, UsingInstruction) and the TryCatchHandler (whose
+// Variable the runtime stores the caught exception into).
+void CollectCatchVariableUses(ILInstruction* inst, ILVariable* v,
+                              std::vector<ILInstruction*>& uses) {
+    if (!inst) return;
+    switch (inst->Op) {
+        case OpCode::LdLoc:
+            if (static_cast<LdLoc*>(inst)->Variable.get() == v) uses.push_back(inst);
+            break;
+        case OpCode::LdLoca:
+            if (static_cast<LdLoca*>(inst)->Variable.get() == v) uses.push_back(inst);
+            break;
+        case OpCode::StLoc:
+            if (static_cast<StLoc*>(inst)->Variable.get() == v) uses.push_back(inst);
+            break;
+        case OpCode::MatchInstruction:
+            if (static_cast<MatchInstruction*>(inst)->Variable.get() == v) uses.push_back(inst);
+            break;
+        case OpCode::UsingInstruction:
+            if (static_cast<UsingInstruction*>(inst)->Variable.get() == v) uses.push_back(inst);
+            break;
+        case OpCode::TryCatchHandler:
+            if (static_cast<TryCatchHandler*>(inst)->Variable.get() == v) uses.push_back(inst);
+            break;
+        default:
+            break;
+    }
+    for (int i = 0; i < inst->ChildCount(); ++i)
+        CollectCatchVariableUses(inst->GetChild(i), v, uses);
+}
+
+// AllUsesInsideCatch: every use of `v` (the catch-local being promoted) must
+// be a descendant of `handler` (the TryCatchHandler). A use that escaped the
+// catch (e.g. via a leave carrying the local out) rejects, matching the C#
+// `!inst.IsDescendantOf(handler)` guard. Walks the whole function body to find
+// the uses (no per-variable lists).
+bool AllUsesInsideCatch(ILVariable* v, TryCatchHandler* handler) {
+    ILFunction* fn = FunctionOf(handler);
+    if (!fn || !fn->Body) return false;
+    std::vector<ILInstruction*> uses;
+    CollectCatchVariableUses(fn->Body.get(), v, uses);
+    for (ILInstruction* use : uses)
+        if (!use->IsDescendantOf(handler)) return false;
+    return true;
+}
+
 } // namespace
 
 void ExpressionTransforms::Run(Block& block, int pos, StatementTransformContext& context) {
@@ -574,6 +644,10 @@ void ExpressionTransforms::Visit(ILInstruction* inst) {
     }
     if (inst->Op == OpCode::Call) {
         VisitCall(static_cast<Call*>(inst));
+        return;
+    }
+    if (inst->Op == OpCode::TryCatchHandler) {
+        VisitTryCatchHandler(static_cast<TryCatchHandler*>(inst));
         return;
     }
     // Default: recurse into children (the C# ILVisitor.Default).
@@ -889,6 +963,120 @@ void ExpressionTransforms::VisitCall(Call* inst) {
     // TransformAssignment.HandleCompoundAssign -- all deferred (need
     // TransformArrayInitializers / InlineArrayTransform / TransformAssignment).
     for (auto& arg : inst->Arguments) Visit(arg.get());
+}
+
+void ExpressionTransforms::VisitTryCatchHandler(TryCatchHandler* handler) {
+    if (!handler) return;
+    // base.VisitTryCatchHandler: recurse into the Filter and Body (the C# ILVisitor
+    // visits the children first), so the Comp/StLoc/Box/Conv rewrites cascade
+    // into the catch body's expressions before TransformCatchVariable runs.
+    if (handler->Filter) Visit(handler->Filter.get());
+    if (handler->Body) Visit(handler->Body.get());
+    // The C# runs TransformCatchWhen when the Filter is a single-block container;
+    // a plain catch has a constant-true LdcI4(1) filter (not a container), so the
+    // dynamic_cast is null and this is skipped.
+    if (auto* filterContainer = dynamic_cast<BlockContainer*>(handler->Filter.get())) {
+        if (filterContainer->Blocks.size() == 1 && filterContainer->Blocks[0])
+            TransformCatchWhen(handler, filterContainer->Blocks[0].get());
+    }
+    // The C# runs TransformCatchVariable on the catch body's entry block. The
+    // Body is always a BlockContainer for a real catch.
+    if (auto* catchContainer = dynamic_cast<BlockContainer*>(handler->Body.get())) {
+        if (!catchContainer->Blocks.empty() && catchContainer->Blocks[0])
+            TransformCatchVariable(handler, catchContainer->Blocks[0].get(),
+                                   /*isCatchBlock=*/true);
+    }
+}
+
+void ExpressionTransforms::TransformCatchVariable(TryCatchHandler* handler,
+                                                   Block* entryPoint,
+                                                   bool isCatchBlock) {
+    (void)isCatchBlock;  // the ILRange bookkeeping the C# does only for the catch
+                         // body is deferred (this port carries no per-instruction
+                         // ILRange); the flag is kept for faithfulness.
+    if (!handler || !entryPoint) return;
+    // The catch variable (the E_<offset> exception stack slot) must be a single
+    // definition loaded exactly once. This port's ComputeVariableUsage counts
+    // the TryCatchHandler itself as the slot's single store (the caught
+    // exception), so an E slot loaded once by the copy stloc is
+    // IsSingleDefinition with LoadCount == 1 -- the guard passes naturally
+    // (no UsesInitialValue model needed).
+    if (!handler->Variable || !handler->Variable->IsSingleDefinition() ||
+        handler->Variable->LoadCount != 1)
+        return;
+    if (entryPoint->Instructions.empty()) return;  // bounds guard (C# [0])
+    auto* st = dynamic_cast<StLoc*>(entryPoint->Instructions[0].get());
+    if (!st) {
+        // Not the `stloc v(ldloc ex)` copy pattern. The C# then tries to remove
+        // a pointless inlined UnboxAny (handler.Variable.LoadInstructions.Single()
+        // .Parent is UnboxAny) -- needs catch-type resolution + per-variable load
+        // lists, both deferred; bail conservative (leave the catch as-is).
+        return;
+    }
+    ILVariablePtr exceptionVar = st->Variable;  // the local being promoted
+    if (!exceptionVar) return;
+    if (exceptionVar->Kind != VariableKind::Local &&
+        exceptionVar->Kind != VariableKind::StackSlot)
+        return;
+    ILInstruction* exceptionSlotLoad = st->Value.get();
+    // When catching a type parameter, csc emits an unbox.any wrapping the
+    // exception slot load; unwrap it. Bails when the catch type is unresolved
+    // (this port's handler.Variable.Type stays null until catch-type
+    // resolution lands) -- the type-parameter catch case is deferred with it.
+    if (auto* unboxAny = dynamic_cast<UnboxAny*>(exceptionSlotLoad)) {
+        auto* handlerVarType = handler->Variable->Type.get();
+        if (!unboxAny->Type || !handlerVarType ||
+            !unboxAny->Type->Equals(*handlerVarType))
+            return;
+        exceptionSlotLoad = unboxAny->Argument.get();
+    }
+    ILVariable* slotVar = nullptr;
+    if (!MatchLdLoc(exceptionSlotLoad, slotVar) ||
+        slotVar != handler->Variable.get())
+        return;
+    // The promoted local must be used only inside this catch handler (a use
+    // that escaped via a leave rejects). The tree walk replaces the C# per-
+    // variable LoadInstructions/StoreInstructions/AddressInstructions lists.
+    if (!AllUsesInsideCatch(exceptionVar.get(), handler)) return;
+    // Capture the old catch variable's name/type/generated-name before
+    // reassigning handler->Variable (which would otherwise read the new value).
+    auto oldName = handler->Variable->Name;
+    TypeSystem::ITypePtr oldType = handler->Variable->Type;
+    bool oldHasGeneratedName = handler->Variable->HasGeneratedName;
+    exceptionVar->Kind = VariableKind::ExceptionLocal;
+    exceptionVar->Name = oldName;
+    exceptionVar->Type = oldType;
+    exceptionVar->HasGeneratedName = oldHasGeneratedName;
+    handler->Variable = exceptionVar;  // the local is now the catch variable
+    // Drop the now-redundant copy. RemoveInstructionAt destroys the stloc (the
+    // shared_ptr in handler->Variable keeps the promoted local alive).
+    entryPoint->RemoveInstructionAt(0);
+}
+
+void ExpressionTransforms::TransformCatchWhen(TryCatchHandler* handler,
+                                              Block* entryPoint) {
+    if (!handler || !entryPoint) return;
+    // Run TransformCatchVariable on the filter entry first (the C# passes
+    // isCatchBlock: false).
+    TransformCatchVariable(handler, entryPoint, /*isCatchBlock=*/false);
+    // Inline a single-instruction catch-when filter: the C# checks
+    // entryPoint.Instructions.Count == 1 && [0].MatchLeave(out _, out condition).
+    // In this port's block model the filter entry's leave is the block's
+    // FinalInstruction (control flow leaving the filter container), not a
+    // non-terminal, so the check is: empty non-terminal Instructions + a Leave
+    // final carrying a Value (the condition).
+    if (!entryPoint->Instructions.empty()) return;
+    auto* leave = dynamic_cast<Leave*>(entryPoint->FinalInstruction.get());
+    if (!leave) return;
+    auto condition = leave->TakeChild(0);  // detach the Value before the old
+                                           // filter container is destroyed
+    if (!condition) return;  // a value-less leave is not an inlinable condition
+    condition->Parent = handler;
+    condition->ChildIndex = 0;
+    // Replacing the filter BlockContainer with the condition destroys the old
+    // container (and its entry block + the now-value-less leave); the detached
+    // condition survives in this local and is re-parented to the handler.
+    handler->Filter = std::move(condition);
 }
 
 std::unique_ptr<ILInstruction> ExpressionTransforms::LiftNullableCore(

@@ -52,6 +52,12 @@ public:
     // RemoveDeadStores setting is off (ILVariable.RemoveIfRedundant in the C#).
     bool RemoveIfRedundant = false;
 
+    // True if the variable's name is compiler-generated (e.g. the exception
+    // stack slot's "E_<offset>" name), false for a name taken from a source
+    // symbol. Copied by TransformCatchVariable when a catch-local is promoted to
+    // the catch variable. Mirrors ILVariable.HasGeneratedName.
+    bool HasGeneratedName = false;
+
     // True if the variable is written exactly once and its address is never
     // taken (ILVariable.IsSingleDefinition).
     bool IsSingleDefinition() const noexcept {

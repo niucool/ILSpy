@@ -1355,6 +1355,7 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
             v->Name = "E_" + std::to_string(eh.HandlerOffset);
             v->Kind = VariableKind::ExceptionStackSlot;
             v->Type = nullptr;  // catch type resolved later; the token is in ClassTokenOrFilterOffset
+            v->HasGeneratedName = true;  // matches the C# ILReader's exception-slot name
             handlerExceptionVar[eh.HandlerOffset] = v;
         }
         if (eh.Kind == ExceptionHandlerKind::Filter) {

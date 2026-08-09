@@ -46,7 +46,10 @@
 // `conv.r8(conv.r.un(x))` -> `conv.r4.un(x)` / `conv.r8.un(x)` -- now unblocked
 // by the D85 Conv Kind model), and the VisitBinaryNumericInstruction shift-size
 // rewrite (`a << (b & 31)` / `a >> (b & 63)` -> `a << b` / `a >> b` -- a shift's
-// right operand masked with the bit-width minus one is redundant in C#).
+// right operand masked with the bit-width minus one is redundant in C#), and the
+// VisitTryCatchHandler rewrite (TransformCatchVariable / TransformCatchWhen:
+// inline the catch-variable copy csc emits at the start of every catch block --
+// `catch T; stloc V_0(ldloc E)` -> `catch V_0 : T { <body using V_0> }`).
 // Deferred vs the C#: the NullableLiftingTransform
 // call (needs the full nullable-lift transform), FixComparisonKindLdNull
 // (already in the standalone EarlyExpressionTransforms, D61), the ldlen /
@@ -65,9 +68,10 @@
 // Run(BinaryNumericInstruction) + UserDefinedLogic,
 // TransformDynamicAddAssignOrRemoveAssign) / HandleSwitchExpression (needs
 // SwitchExpressions setting + SwitchInstruction guards) / VisitDynamic* /
-// VisitTryCatchHandler -- each needs further infrastructure (AddressOf,
-// LdcDecimal, dynamic nodes, the resolver, MatchLogicAnd/Or, IndexRangeTransform,
-// TransformAssignment, ...) and is a later iteration.
+// VisitTryCatchHandler's "remove inlined UnboxAny" branch (needs catch-type
+// resolution + per-variable load lists) -- each needs further infrastructure
+// (AddressOf, LdcDecimal, dynamic nodes, the resolver, MatchLogicAnd/Or,
+// IndexRangeTransform, TransformAssignment, ...) and is a later iteration.
 
 #pragma once
 
@@ -84,6 +88,7 @@ class IfInstruction;
 class LdElema;
 class NewArr;
 class BinaryNumericInstruction;
+class TryCatchHandler;
 
 class ExpressionTransforms : public IStatementTransform {
 public:
@@ -277,6 +282,41 @@ private:
     // InlineArrayTransform.RunOnExpression, TransformAssignment.HandleCompoundAssign)
     // are deferred. Mirrors ExpressionTransforms.cs.
     void VisitCall(Call* inst);
+
+    // VisitTryCatchHandler (the TransformCatchVariable / TransformCatchWhen
+    // subset): inlines the catch-variable copy csc emits at the start of every
+    // catch block. The IL `catch T; stloc V_0(ldloc E)` (the runtime pushes the
+    // caught exception into the E_<offset> exception stack slot; csc copies it
+    // into the local V_0 and the body uses V_0) becomes `catch V_0 : T { <body
+    // using V_0> }` -- V_0 is promoted to VariableKind::ExceptionLocal and becomes
+    // the handler's Variable, eliminating the copy. The guard requires
+    // handler.Variable (the E slot) to be IsSingleDefinition with LoadCount == 1
+    // (this port's ComputeVariableUsage counts the TryCatchHandler itself as the
+    // slot's single store -- the caught exception -- so an E slot loaded once by
+    // the copy stloc is IsSingleDefinition), and the copy's value to be
+    // `ldloc handler.Variable` (optionally wrapped in an unbox.any for a type-
+    // parameter catch, deferred while the catch type stays unresolved). Every
+    // use of the promoted local must stay inside the handler (a tree walk replaces
+    // the C# per-variable LoadInstructions/StoreInstructions/AddressInstructions
+    // lists). TransformCatchWhen additionally inlines a single-Leave catch-when
+    // filter condition (the filter entry block's leave is this port's
+    // FinalInstruction, not a non-terminal as in the C#). The "remove inlined
+    // UnboxAny" branch (when the copy was already inlined and the E slot's single
+    // load sits inside an UnboxAny) is deferred (needs catch-type resolution +
+    // per-variable load lists). Mirrors ExpressionTransforms.cs.
+    void VisitTryCatchHandler(TryCatchHandler* handler);
+    // TransformCatchVariable: promote the catch entry's `stloc v(ldloc E)` copy
+    // local `v` to the handler's catch variable. `isCatchBlock` selects the catch
+    // body (true) vs the catch-when filter (false); the ILRange bookkeeping the
+    // C# does only for the catch body is deferred (this port carries no
+    // per-instruction ILRange).
+    void TransformCatchVariable(TryCatchHandler* handler, Block* entryPoint,
+                                bool isCatchBlock);
+    // TransformCatchWhen: run TransformCatchVariable on the filter entry, then
+    // inline a single-instruction catch-when filter (the filter entry block's
+    // leave carries the condition) by replacing the filter BlockContainer with
+    // the leave's Value.
+    void TransformCatchWhen(TryCatchHandler* handler, Block* entryPoint);
 
     // The settings snapshot for the duration of a Run (the C# stores the
     // StatementTransformContext as a member). Consulted by IsPatternMatch in

@@ -494,15 +494,40 @@ implemented and green here. Everything else follows the phase plan in
   the D85 Conv Kind model), the Call/NewObj/LdObj/StObj/StLoc
   `HandleCompoundAssign`, the remaining VisitIfInstruction pieces
   (NullableLifting, UserDefinedLogic,
-  `TransformDynamicAddAssignOrRemoveAssign`), the SwitchExpression/Dynamic/
-  TryCatchHandler visit methods). It folds the `VisitBinaryNumericInstruction`
+  `TransformDynamicAddAssignOrRemoveAssign`), the SwitchExpression/Dynamic
+  visit methods (the TryCatchHandler visit method -- TransformCatchVariable /
+  TransformCatchWhen -- is now ported)). It folds the `VisitBinaryNumericInstruction`
   shift-size rewrite: `a << (b & 31)` / `a >> (b & 31)` -> `a << b` / `a >> b` --
   a shift's right operand masked with the bit-width minus one is redundant in
   C# (the shift already masks the count); the mask is dropped when it is the
   expected width (31 for I4, 63 for I8). The native-int (I) case --
   `sizeof(IntPtr) * 8 - 1` -- is deferred (needs SizeOf to carry an IType with
   GetStackType), as is the BitAnd/Boolean nullable-lift case (needs
-  NullableLiftingTransform + InferType). The `NullCoalescingInstruction` ILAst
+  NullableLiftingTransform + InferType). It folds the `VisitTryCatchHandler`
+  rewrite (TransformCatchVariable / TransformCatchWhen): the catch-variable copy
+  csc emits at the start of every catch block -- `catch T; stloc V_0(ldloc E)`
+  (the runtime pushes the caught exception into the `E_<offset>` exception stack
+  slot; csc copies it into the local V_0 and the body uses V_0) -- is inlined so
+  V_0 becomes the handler's catch variable (Kind=ExceptionLocal, name/type/
+  generated-name copied from the E slot) and the copy stloc is dropped, giving
+  `catch V_0 : T { <body using V_0> }`. The guard requires the E slot to be
+  IsSingleDefinition with LoadCount == 1 (this port's ComputeVariableUsage counts
+  the TryCatchHandler itself as the slot's single store -- the caught exception --
+  so an E slot loaded once by the copy is IsSingleDefinition naturally, with no
+  UsesInitialValue model needed), the copy target to be a Local/StackSlot, the
+  copy's value to be `ldloc E` (optionally wrapped in an unbox.any for a type-
+  parameter catch, unwrapped when the unbox.any's Type equals the catch type),
+  and every use of the promoted local to stay inside the catch handler (a tree
+  walk replaces the C# per-variable use lists). TransformCatchWhen additionally
+  inlines a single-Leave catch-when filter condition (the filter entry block's
+  leave is this port's FinalInstruction, not a non-terminal as in the C#). The
+  "remove inlined UnboxAny" branch (when the copy was already inlined and the E
+  slot's single load sits inside an UnboxAny) is deferred (needs catch-type
+  resolution + per-variable load lists). The fold fires on the .NET Framework 4
+  legacy-csc mscorlib corpus (28 promotions across 8000 methods -- a real-corpus
+  transform, not faithfulness-only; the rest of the ~692 catches are either
+  single-use copies ILInlining already inlined, or have escaped uses / unused
+  variables). The `NullCoalescingInstruction` ILAst
   node (the C# `??` operator node -- ValueInst + FallbackInst children, a
   `NullCoalescingKind` Ref/Nullable/NullableWithValueFallback enum, an
   `UnderlyingResultType` field, DirectFlags ControlFlow, ResultType the

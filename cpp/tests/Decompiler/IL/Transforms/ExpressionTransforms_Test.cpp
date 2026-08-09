@@ -73,6 +73,8 @@
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/TryInstructions.hpp"
+#include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
 #include "Decompiler/IL/ControlFlow/ControlFlowSimplification.hpp"
 #include "Decompiler/IL/ControlFlow/LoopDetection.hpp"
@@ -326,6 +328,110 @@ int CountThreeValuedBool(ILFunction& fn) {
     };
     walk(fn.Body.get());
     return n;
+}
+
+// Count TryCatchHandlers whose catch Variable has been promoted to
+// VariableKind::ExceptionLocal (the TransformCatchVariable fold's effect: the
+// catch-local copy `stloc v(ldloc E)` is promoted so v becomes the catch
+// variable). The fold is monotone non-decreasing for this count (each fold
+// promotes one handler's variable; nothing in this subset demotes one). Used by
+// the sweep to confirm the transform fires on the corpus.
+int CountExceptionLocalHandlers(ILFunction& fn) {
+    int n = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::TryCatchHandler) {
+            auto* h = static_cast<TryCatchHandler*>(inst);
+            if (h->Variable && h->Variable->Kind == VariableKind::ExceptionLocal) ++n;
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return n;
+}
+
+// A try/catch fixture for TransformCatchVariable: the catch handler's Variable
+// is an ExceptionStackSlot `ex` (the E_<offset> slot the runtime pushes the
+// caught exception into), and the catch entry block starts with the csc-emitted
+// copy `stloc v(ldloc ex)` (the local v receives the caught exception, the body
+// uses v). `catchType` is the catch variable's type; `vUses` is the number of
+// `stloc result(ldloc v)` uses appended to the catch entry (so v is live). When
+// `unboxAny` is set, the copy is `stloc v(unbox.any T(ldloc ex))` (the type-
+// parameter catch shape) with the unbox.any's Type = catchType. When
+// `escapedUse` is set, an extra `ldloc v` is planted in the TRY body (outside the
+// catch handler) so a use of v escapes the catch (the fold must reject).
+struct CatchFixture {
+    std::unique_ptr<ILFunction> fn;
+    TryCatchHandler* handler = nullptr;
+    Block* catchEntry = nullptr;
+    ILVariablePtr ex;    // ExceptionStackSlot
+    ILVariablePtr v;      // Local (the copy target)
+    ILVariablePtr result;
+};
+
+CatchFixture BuildCatch(ITypePtr catchType, int vUses = 1, bool unboxAny = false,
+                        bool escapedUse = false,
+                        VariableKind vKind = VariableKind::Local) {
+    CatchFixture fx;
+    fx.fn = std::make_unique<ILFunction>();
+    fx.fn->Body = std::make_unique<BlockContainer>();
+    fx.fn->Body->Parent = fx.fn.get();
+    fx.fn->Body->ChildIndex = 0;
+
+    fx.ex = std::make_shared<ILVariable>(VariableKind::ExceptionStackSlot, catchType, 100);
+    fx.ex->Name = "E_100";
+    fx.ex->HasGeneratedName = true;
+    fx.v = std::make_shared<ILVariable>(vKind, catchType, 0);
+    fx.v->Name = "V_0";
+    fx.result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    fx.fn->Variables.push_back(fx.ex);
+    fx.fn->Variables.push_back(fx.v);
+    fx.fn->Variables.push_back(fx.result);
+
+    // try body: a single empty block (plus an escaped `ldloc v` use if requested).
+    auto tryBody = std::make_unique<BlockContainer>();
+    tryBody->AddBlock(std::make_unique<Block>());
+    if (escapedUse)
+        tryBody->Blocks[0]->Add(std::make_unique<StLoc>(fx.result, std::make_unique<LdLoc>(fx.v)));
+    tryBody->Blocks[0]->SetFinal(std::make_unique<Leave>(tryBody.get()));
+
+    // catch body: entry block with the copy + uses of v + leave.
+    auto catchBody = std::make_unique<BlockContainer>();
+    catchBody->AddBlock(std::make_unique<Block>());
+    fx.catchEntry = catchBody->Blocks[0].get();
+    std::unique_ptr<ILInstruction> slotLoad = std::make_unique<LdLoc>(fx.ex);
+    if (unboxAny)
+        slotLoad = std::make_unique<UnboxAny>(catchType, std::move(slotLoad));
+    fx.catchEntry->Add(std::make_unique<StLoc>(fx.v, std::move(slotLoad)));
+    for (int i = 0; i < vUses; ++i)
+        fx.catchEntry->Add(std::make_unique<StLoc>(fx.result, std::make_unique<LdLoc>(fx.v)));
+    fx.catchEntry->SetFinal(std::make_unique<Leave>(catchBody.get()));
+
+    auto handler = std::make_unique<TryCatchHandler>(
+        std::make_unique<LdcI4>(1),  // constant-true filter (plain catch)
+        std::move(catchBody), fx.ex);
+    fx.handler = handler.get();
+    auto tryCatch = std::make_unique<TryCatch>(std::move(tryBody));
+    tryCatch->AddHandler(std::move(handler));
+
+    auto main = std::make_unique<Block>();
+    main->Add(std::move(tryCatch));
+    main->SetFinal(std::make_unique<Leave>(fx.fn->Body.get()));
+    fx.fn->Body->AddBlock(std::move(main));
+
+    ComputeVariableUsage(*fx.fn);
+    RecomputeIncomingEdgeCounts(*fx.fn);
+    return fx;
+}
+
+// Run only ExpressionTransforms via the StatementTransform driver (the real
+// path, exercising the per-statement Visit dispatch that reaches
+// VisitTryCatchHandler by recursing into the TryInstruction).
+void RunExpressionTransformsOnly(ILFunction& fn) {
+    StatementTransform st;
+    st.AddChild(std::make_unique<ExpressionTransforms>());
+    ILTransformContext ctx;
+    st.Run(fn, ctx);
 }
 
 } // namespace
@@ -3250,6 +3356,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
     int totalArrayIndexConvDrops = 0;
     int totalNullCoalescingFolds = 0;
     int totalLiftedCompFolds = 0;
+    int totalCatchVarPromotions = 0;
     ILTransformContext ctx;
     for (const auto& m : f.MethodDefs()) {
         if (m.RVA == 0) continue;
@@ -3268,6 +3375,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int gvo1Before = CountGetValueOrDefaultOneArg(*fn);
         int hasValueBefore = CountHasValueCall(*fn);
         int threeValuedBoolBefore = CountThreeValuedBool(*fn);
+        int exceptionLocalBefore = CountExceptionLocalHandlers(*fn);
         {
             StatementTransform st;
             st.AddChild(std::make_unique<ILInlining>());
@@ -3286,6 +3394,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int gvo1After = CountGetValueOrDefaultOneArg(*fn);
         int hasValueAfter = CountHasValueCall(*fn);
         int threeValuedBoolAfter = CountThreeValuedBool(*fn);
+        int exceptionLocalAfter = CountExceptionLocalHandlers(*fn);
         // The ternary fold is monotone non-decreasing (each fold creates a
         // StLoc-if; nothing in this subset removes one). The VisitComp rewrites
         // (comp(!=0)->x, logic.not push, unsigned normalization) do not create
@@ -3369,10 +3478,19 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         // method monotone-non-decreasing invariant is the deterministic correctness
         // gate (the absolute count is not asserted).
         EXPECT_GE(threeValuedBoolAfter, threeValuedBoolBefore);
+        // TransformCatchVariable promotes a catch-local copy `stloc v(ldloc E)` to
+        // the catch variable (Kind=ExceptionLocal), so the ExceptionLocal-handler
+        // count is monotone non-decreasing (each fold promotes one handler's
+        // variable; nothing in this subset demotes one). csc emits the copy for
+        // every catch whose variable is used and not already inlined, so the fold
+        // fires on the legacy-csc corpus (a real-corpus high-frequency transform,
+        // unlike many earlier faithfulness-only ones).
+        EXPECT_GE(exceptionLocalAfter, exceptionLocalBefore);
         totalFolds += (after - before);
         totalArrayIndexConvDrops += (arrayIdxConvBefore - arrayIdxConvAfter);
         totalNullCoalescingFolds += (nullCoalescingAfter - nullCoalescingBefore);
         totalLiftedCompFolds += (liftedCompsAfter - liftedCompsBefore);
+        totalCatchVarPromotions += (exceptionLocalAfter - exceptionLocalBefore);
         if (processed >= 8000) break;
     }
     EXPECT_GT(processed, 5000);
@@ -3398,6 +3516,13 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
     // reported (not asserted) -- a non-zero total is informative (it fires on
     // Roslyn-compiled / modern .NET).
     (void)totalLiftedCompFolds;
+    // TransformCatchVariable fires on the legacy-csc corpus: csc emits
+    // `catch T; stloc V_0(ldloc E)` for every catch whose variable is used (and
+    // not already inlined by ILInlining), so the fold promotes thousands of
+    // catch-local copies across the corpus. A zero total would mean the
+    // transform stopped firing -- a regression.
+    EXPECT_GT(totalCatchVarPromotions, 0)
+        << "TransformCatchVariable must promote catch copies on mscorlib";
 }
 
 // RunIfNullableLift MatchCompOrDecimal equality case (LiftCSharpEqualityComparison
@@ -3844,5 +3969,220 @@ TEST(ExpressionTransforms, RunBinaryNumericLiftNoOpWhenLiftNullablesOff) {
     auto* stloc = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
     ASSERT_EQ(stloc->Value->Op, OpCode::BinaryNumericInstruction)
         << "the BitAnd must stay when LiftNullables is off";
+}
+
+// TransformCatchVariable: the catch entry's `stloc v(ldloc ex)` copy (csc emits
+// this for every catch whose variable is used) is promoted -- v becomes the
+// handler's catch variable (Kind=ExceptionLocal, name/type/generated-name copied
+// from the E_<offset> slot) and the copy stloc is dropped. The common case: a
+// concrete catch type, no unbox.any.
+TEST(ExpressionTransforms, TransformCatchVariablePromotesCopyLocalToCatchVariable) {
+    auto catchType = std::make_shared<KnownType>(KnownTypeCode::Exception);
+    auto fx = BuildCatch(catchType, /*vUses=*/2);
+    ASSERT_TRUE(fx.handler && fx.handler->Variable);
+    ASSERT_EQ(fx.handler->Variable->Kind, VariableKind::ExceptionStackSlot)
+        << "the catch variable starts as the E_<offset> exception slot";
+    ASSERT_EQ(fx.handler->Variable->LoadCount, 1) << "the slot is loaded once by the copy";
+    ASSERT_TRUE(fx.handler->Variable->IsSingleDefinition());
+    fx.fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransformsOnly(*fx.fn);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(fx.handler->Variable.get(), fx.v.get())
+        << "the local v is now the catch variable";
+    EXPECT_EQ(fx.v->Kind, VariableKind::ExceptionLocal);
+    EXPECT_EQ(fx.v->Name, "E_100") << "the slot's name is copied to the promoted local";
+    EXPECT_TRUE(fx.v->HasGeneratedName) << "the slot's HasGeneratedName is copied";
+    // The copy `stloc v(ldloc ex)` is removed; the remaining instructions are the
+    // uses of v (`stloc result(ldloc v)`), so no StLoc to v remains in the entry.
+    bool hasStLocToV = false;
+    for (auto& inst : fx.catchEntry->Instructions) {
+        auto* s = dynamic_cast<StLoc*>(inst.get());
+        if (s && s->Variable.get() == fx.v.get()) hasStLocToV = true;
+    }
+    EXPECT_FALSE(hasStLocToV) << "the copy `stloc v(ldloc ex)` is removed";
+}
+
+// TransformCatchVariable must reject when the copy target is not a Local /
+// StackSlot (e.g. a Parameter) -- only a local/stack-slot copy is the csc pattern.
+TEST(ExpressionTransforms, TransformCatchVariableRejectsNonLocalCopyTarget) {
+    auto catchType = std::make_shared<KnownType>(KnownTypeCode::Exception);
+    auto fx = BuildCatch(catchType, /*vUses=*/1, /*unboxAny=*/false, /*escapedUse=*/false,
+                         /*vKind=*/VariableKind::Parameter);
+    ASSERT_EQ(fx.v->Kind, VariableKind::Parameter);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransformsOnly(*fx.fn);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(fx.handler->Variable.get(), fx.ex.get())
+        << "the slot stays the catch variable when the copy target is a Parameter";
+    EXPECT_EQ(fx.v->Kind, VariableKind::Parameter) << "the local is not promoted";
+    ASSERT_FALSE(fx.catchEntry->Instructions.empty());
+    EXPECT_EQ(fx.catchEntry->Instructions[0]->Op, OpCode::StLoc)
+        << "the copy `stloc v(ldloc ex)` stays";
+}
+
+// TransformCatchVariable must reject when the copy's value is not `ldloc ex`
+// (the slot). Here the copy stores a different variable, so the slot is not the
+// loaded one and the pattern does not match.
+TEST(ExpressionTransforms, TransformCatchVariableRejectsNonLdLocSlotValue) {
+    auto catchType = std::make_shared<KnownType>(KnownTypeCode::Exception);
+    auto fx = BuildCatch(catchType, /*vUses=*/1);
+    // Rewrite the copy's value to a different variable's load.
+    auto other = MakeLocal("other", catchType);
+    fx.fn->Variables.push_back(other);
+    static_cast<StLoc*>(fx.catchEntry->Instructions[0].get())->SetChild(
+        0, std::make_unique<LdLoc>(other));
+    ComputeVariableUsage(*fx.fn);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransformsOnly(*fx.fn);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(fx.handler->Variable.get(), fx.ex.get())
+        << "the slot stays the catch variable when the copy does not load it";
+    ASSERT_FALSE(fx.catchEntry->Instructions.empty());
+    EXPECT_EQ(fx.catchEntry->Instructions[0]->Op, OpCode::StLoc)
+        << "the copy stays";
+}
+
+// TransformCatchVariable must reject when a use of the promoted local escapes
+// the catch handler (a `ldloc v` in the try body). The C# `!inst.IsDescendantOf(
+// handler)` guard.
+TEST(ExpressionTransforms, TransformCatchVariableRejectsEscapedUse) {
+    auto catchType = std::make_shared<KnownType>(KnownTypeCode::Exception);
+    auto fx = BuildCatch(catchType, /*vUses=*/1, /*unboxAny=*/false, /*escapedUse=*/true);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransformsOnly(*fx.fn);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(fx.handler->Variable.get(), fx.ex.get())
+        << "the slot stays the catch variable when a use of v escapes";
+}
+
+// TransformCatchVariable must reject when the slot is not a single definition
+// loaded exactly once (here the slot is loaded twice, by a second `ldloc ex` in
+// the catch body).
+TEST(ExpressionTransforms, TransformCatchVariableRejectsMultiLoadSlot) {
+    auto catchType = std::make_shared<KnownType>(KnownTypeCode::Exception);
+    auto fx = BuildCatch(catchType, /*vUses=*/2);
+    // Add a second load of the slot inside the catch body.
+    fx.catchEntry->Add(std::make_unique<StLoc>(fx.result, std::make_unique<LdLoc>(fx.ex)));
+    ComputeVariableUsage(*fx.fn);
+    ASSERT_EQ(fx.handler->Variable->LoadCount, 2);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransformsOnly(*fx.fn);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(fx.handler->Variable.get(), fx.ex.get())
+        << "the slot stays the catch variable when it is loaded more than once";
+}
+
+// TransformCatchVariable unwraps an unbox.any wrapping the slot load when the
+// unbox.any's Type equals the catch variable's type (the type-parameter catch
+// shape `stloc v(unbox.any T(ldloc ex))` => `catch v : T`). The fold promotes v
+// and drops the copy.
+TEST(ExpressionTransforms, TransformCatchVariableUnwrapsUnboxAnyForTypeParameterCatch) {
+    auto catchType = std::make_shared<KnownType>(KnownTypeCode::Exception);
+    auto fx = BuildCatch(catchType, /*vUses=*/1, /*unboxAny=*/true);
+    ASSERT_EQ(fx.handler->Variable->Type.get(), catchType.get())
+        << "the slot's type matches the unbox.any's type";
+    fx.fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransformsOnly(*fx.fn);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(fx.handler->Variable.get(), fx.v.get())
+        << "the local v is promoted even with an unbox.any wrapping the slot load";
+    EXPECT_EQ(fx.v->Kind, VariableKind::ExceptionLocal);
+    bool hasStLocToV = false;
+    for (auto& inst : fx.catchEntry->Instructions) {
+        auto* s = dynamic_cast<StLoc*>(inst.get());
+        if (s && s->Variable.get() == fx.v.get()) hasStLocToV = true;
+    }
+    EXPECT_FALSE(hasStLocToV) << "the copy `stloc v(unbox.any T(ldloc ex))` is removed";
+}
+
+// TransformCatchVariable must reject the unbox.any when its Type does not
+// equal the catch variable's type (a mismatched unbox.any is not the type-
+// parameter catch pattern).
+TEST(ExpressionTransforms, TransformCatchVariableRejectsMismatchedUnboxAnyType) {
+    auto catchType = std::make_shared<KnownType>(KnownTypeCode::Exception);
+    auto otherType = std::make_shared<KnownType>(KnownTypeCode::Object);
+    auto fx = BuildCatch(catchType, /*vUses=*/1, /*unboxAny=*/true);
+    // Rewrite the unbox.any's type to a mismatched type.
+    auto* st = static_cast<StLoc*>(fx.catchEntry->Instructions[0].get());
+    static_cast<UnboxAny*>(st->Value.get())->Type = otherType;
+    fx.fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransformsOnly(*fx.fn);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(fx.handler->Variable.get(), fx.ex.get())
+        << "the slot stays the catch variable when the unbox.any type mismatches";
+}
+
+// TransformCatchVariable must reject when the catch entry's first instruction
+// is not a StLoc (the copy was already inlined or the catch has a different
+// shape). The deferred "remove inlined UnboxAny" branch is not exercised; the
+// fold bails conservative.
+TEST(ExpressionTransforms, TransformCatchVariableRejectsNonStLocFirstInstruction) {
+    auto catchType = std::make_shared<KnownType>(KnownTypeCode::Exception);
+    auto fx = BuildCatch(catchType, /*vUses=*/1);
+    // Replace the copy with a non-StLoc first instruction (a LdLoc of the slot).
+    fx.catchEntry->Instructions[0] = std::make_unique<LdLoc>(fx.ex);
+    fx.catchEntry->Instructions[0]->Parent = fx.catchEntry;
+    fx.catchEntry->Instructions[0]->ChildIndex = 0;
+    fx.catchEntry->RenumberChildren();
+    ComputeVariableUsage(*fx.fn);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransformsOnly(*fx.fn);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(fx.handler->Variable.get(), fx.ex.get())
+        << "the slot stays the catch variable when the first instruction is not a StLoc";
+}
+
+// TransformCatchWhen: a catch-when filter whose entry block is a single Leave
+// carrying the condition is inlined -- the filter BlockContainer is replaced by
+// the leave's Value (the condition). The filter entry's leave is this port's
+// FinalInstruction (not a non-terminal as in the C#), so the check is: empty
+// non-terminal Instructions + a Leave final with a Value. The `when (ex != null)`
+// condition loads the catch slot ex, so ex.LoadCount becomes 2 and the catch
+// body's copy is NOT promoted (the test focuses on the filter inlining).
+TEST(ExpressionTransforms, TransformCatchWhenInlinesSingleLeaveFilter) {
+    auto catchType = std::make_shared<KnownType>(KnownTypeCode::Exception);
+    auto fx = BuildCatch(catchType, /*vUses=*/1);
+    // Replace the constant-true LdcI4(1) filter with a single-block catch-when
+    // filter: a BlockContainer whose one block has empty Instructions and a
+    // Leave(filter, condition) final.
+    auto filter = std::make_unique<BlockContainer>();
+    filter->AddBlock(std::make_unique<Block>());
+    auto cond = std::make_unique<Comp>(std::make_unique<LdLoc>(fx.ex),
+                                       std::make_unique<LdNull>(),
+                                       ComparisonKind::Inequality, false);
+    filter->Blocks[0]->SetFinal(std::make_unique<Leave>(filter.get(), std::move(cond)));
+    fx.handler->Filter = std::move(filter);
+    fx.handler->Filter->Parent = fx.handler;
+    fx.handler->Filter->ChildIndex = 0;
+    ComputeVariableUsage(*fx.fn);
+    RecomputeIncomingEdgeCounts(*fx.fn);
+    ASSERT_EQ(fx.handler->Variable->LoadCount, 2)
+        << "ex is loaded by the filter condition + the catch body copy";
+    fx.fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransformsOnly(*fx.fn);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+
+    ASSERT_NE(fx.handler->Filter, nullptr);
+    EXPECT_EQ(fx.handler->Filter->Op, OpCode::Comp)
+        << "the catch-when filter is inlined to its condition (a Comp)";
+    EXPECT_EQ(fx.handler->Variable.get(), fx.ex.get())
+        << "the catch body copy is not promoted (ex is loaded by the filter too)";
 }
 
