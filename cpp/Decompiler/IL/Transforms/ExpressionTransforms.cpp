@@ -317,6 +317,24 @@ bool MatchThreeValuedLogicConditionPattern(ILInstruction* condition,
     return NullableLiftingTransform::MatchHasValueCall(arg2, nullable1.get());
 }
 
+// Port of context.TypeSystem.FindType(StackType, Sign) (ReflectionHelper.cs):
+// the IType for a stack type + sign. The C# maps Unknown -> SpecialType.UnknownType,
+// Ref -> ByRef(Unknown), default -> FindType(ToKnownTypeCode(stackType, sign)).
+// This minimal port has no SpecialType/ByRef(Unknown); it builds a KnownType for
+// the known primitive codes and returns null for None/Unknown/Ref (the
+// conv.nop.lifted case treats a null utype conservatively -- no conv inserted,
+// matching the C# `utype.ToPrimitiveType() != PrimitiveType.None` guard which is
+// false for UnknownType -> PrimitiveType.Unknown != None is true but a null utype
+// here short-circuits to no conv, the safe approximation for a GVO whose ReturnType
+// was not resolved). Used by the LiftNormal conv.nop.lifted case to build the
+// conv's target type from the GetValueOrDefault call's ResultType (a StackType).
+TypeSystem::ITypePtr FindTypeFromStackType(StackType stackType,
+                                            TypeSystem::Sign sign = TypeSystem::Sign::None) {
+    auto code = TypeSystem::ToKnownTypeCode(stackType, sign);
+    if (code == TypeSystem::KnownTypeCode::None) return nullptr;
+    return std::make_shared<TypeSystem::KnownType>(code);
+}
+
 // Port of NullableLiftingTransform.AnalyzeCondition: walks a condition that is a
 // HasValue call (on a Nullable<T>) or a BitAnd(I4) of such calls, collecting the
 // nullable variables into `nullableVarsS`. Returns true if the whole tree is
@@ -804,14 +822,18 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
     //   v.GetValueOrDefault() ? !v.HasValue : true  ==> v != true
     //   v.GetValueOrDefault() ? true : !v.HasValue  ==> v != false
     // The AnalyzeCondition / LiftNormal path (the multi-HasValue `&&` lift) is now
-    // ported in its `v.HasValue ? v : fallback => v ?? fallback` early-out subset
-    // (the simplest LiftNormal case, which needs no DoLift); the DoLift /
-    // LiftCSharpUserComparison / conv.nop.lifted paths and the MatchCompOrDecimal /
-    // LiftCSharp* path (the comparison lift), the NullPropagation path, and the
-    // `&` / `|` on bool? path (ThreeValuedBoolAnd/Or) are deferred -- each needs
-    // further infrastructure (DoLift, the BitSet nullable-vars relevance analysis,
-    // NullPropagationTransform, MatchNullableCtor + ThreeValuedBool nodes). Gated
-    // on LiftNullables (the C# `context.Settings.LiftNullables`).
+    // ported in its `v.HasValue ? v : fallback => v ?? fallback` early-out (the
+    // simplest LiftNormal case, which needs no DoLift) and its `v.HasValue ?
+    // v.GetValueOrDefault() : fallback => v ?? fallback` conv.nop.lifted case (a
+    // fresh `ldloc v` or `conv.nop.lifted(ldloc v)` wrapped in a
+    // NullCoalescingInstruction(NullableWithValueFallback)); the DoLift path (the
+    // general recursive lift over GetValueOrDefault/Conv/BinaryNumeric/Comp/BitNot,
+    // needs a BitSet nullable-vars relevance analysis), the LiftCSharpUserComparison
+    // path (needs Call.Method.IsOperator + CSharpOperators + DoLift), the
+    // MatchCompOrDecimal / LiftCSharp* path (the comparison lift), the
+    // NullPropagation path, and the `&` / `|` on bool? path (ThreeValuedBoolAnd/Or,
+    // D96) are the remaining deferred pieces. Gated on LiftNullables (the C#
+    // `context.Settings.LiftNullables`).
     if (!iff || !iff->Condition) return false;
     if (!settings_ || !settings_->LiftNullables) return false;
 
@@ -832,45 +854,128 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
 
     // AnalyzeCondition / LiftNormal path (the section of Lift before the bool?
     // equality folds). AnalyzeCondition walks a BitAnd tree of HasValue calls
-    // collecting the nullable vars; the LiftNormal `v.HasValue ? v : fallback =>
-    // v ?? fallback` early-out fires when there is exactly one nullable var, the
-    // true arm is not a NullableCtor, and the true arm is `ldloc` of that var --
-    // producing a NullCoalescingInstruction(Nullable) whose UnderlyingResultType
-    // is the underlying type's StackType. The DoLift / LiftCSharpUserComparison /
-    // conv.nop.lifted paths (the rest of LiftNormal) are deferred: when
-    // AnalyzeCondition succeeds but the early-out does not fire, return false
-    // (matching the C# which returns null -- the whole Lift returns null, the if
-    // stays as-is). The true/false arms are detached (DetachFromParent) before the
-    // if is destroyed (no GC; the non-owning views would dangle). The NullCoalescing
-    // node is a value (ResultType the fallback's), so ReplaceIfWithLiftedValue
-    // applies the block-model adaptation (ReplaceWith for a sub-expression value-if,
-    // or the node becomes a non-terminal + a Branch final for a block-final if).
+    // collecting the nullable vars; LiftNormal then lifts the true arm under the
+    // `(v1 != null && ... && vn != null)` guard. Two LiftNormal cases are ported:
+    // (1) the `v.HasValue ? ldloc v : fallback => v ?? fallback` early-out (a
+    // single nullable var whose true arm is `ldloc v` -> NullCoalescingInstruction
+    // (Nullable)), and (2) the `v.HasValue ? v.GetValueOrDefault() : fallback =>
+    // v ?? fallback` conv.nop.lifted case (a single nullable var whose true arm
+    // is a GetValueOrDefault call on that var -> `ldloc v` or `conv.nop.lifted
+    // (ldloc v)` when the underlying type differs from the GVO's return type,
+    // wrapped in a NullCoalescingInstruction(NullableWithValueFallback)). The
+    // MatchIfInstructionPositiveCondition pre-processing (a Roslyn quirk for a
+    // redundant inner `if (v.HasValue) X else Y` true arm), the DoLift path (the
+    // general recursive lift over GetValueOrDefault/Conv/BinaryNumeric/Comp/
+    // BitNot, needs a BitSet nullable-vars relevance analysis), and the
+    // LiftCSharpUserComparison path (needs Call.Method.IsOperator +
+    // CSharpOperators + DoLift) are deferred: when AnalyzeCondition succeeds but
+    // neither ported case fires, return false (matching the C# which returns
+    // null -- the whole Lift returns null, the if stays as-is). The true/false
+    // arms are detached (DetachFromParent) before the if is destroyed (no GC; the
+    // non-owning views would dangle). The NullCoalescing node is a value (ResultType
+    // the fallback's), so ReplaceIfWithLiftedValue applies the block-model
+    // adaptation (ReplaceWith for a sub-expression value-if, or the node becomes a
+    // non-terminal + a Branch final for a block-final if).
     {
         std::vector<ILVariablePtr> nullableVarS;
         if (AnalyzeCondition(condition, nullableVarS)) {
+            // LiftNormal: utype + exprToLift are set by MatchNullableCtor (the
+            // NullableCtor true-arm case) or by FindType(trueInst.ResultType) +
+            // trueInst (the non-NullableCtor case). isNullCoalescingWithNonNullableFallback
+            // distinguishes the wrap kind (NullableWithValueFallback for the
+            // non-NullableCtor case, Nullable / no-wrap for the NullableCtor case).
             const TypeSystem::IType* utype = nullptr;
             ILInstruction* ctorArg = nullptr;
-            if (nullableVarS.size() == 1 &&
-                !NullableLiftingTransform::MatchNullableCtor(trueInst, utype,
+            bool isNullCoalescingWithNonNullableFallback = false;
+            ILInstruction* exprToLift = nullptr;
+            TypeSystem::ITypePtr utypeOwned;
+            if (!NullableLiftingTransform::MatchNullableCtor(trueInst, utype,
                                                               ctorArg)) {
-                ILVariable* vLd = nullptr;
-                if (MatchLdLoc(trueInst, vLd) &&
-                    vLd == nullableVarS[0].get()) {
-                    auto trueOwned = DetachFromParent(trueInst);
+                isNullCoalescingWithNonNullableFallback = true;
+                utypeOwned = FindTypeFromStackType(trueInst->ResultType());
+                utype = utypeOwned.get();
+                exprToLift = trueInst;
+                // The `v.HasValue ? ldloc v : fallback => v ?? fallback` early-out
+                // (the simplest LiftNormal case): a single nullable var whose true
+                // arm is `ldloc v` -> NullCoalescingInstruction(Nullable) whose
+                // UnderlyingResultType is the underlying type's StackType.
+                if (nullableVarS.size() == 1) {
+                    ILVariable* vLd = nullptr;
+                    if (MatchLdLoc(exprToLift, vLd) &&
+                        vLd == nullableVarS[0].get()) {
+                        auto trueOwned = DetachFromParent(trueInst);
+                        auto falseOwned = DetachFromParent(falseInst);
+                        auto lifted = std::make_unique<NullCoalescingInstruction>(
+                            NullCoalescingKind::Nullable,
+                            std::move(trueOwned), std::move(falseOwned));
+                        lifted->UnderlyingResultType = StackTypeOf(
+                            NullableLiftingTransform::GetUnderlyingTypeOfNullable(
+                                nullableVarS[0]->Type.get()));
+                        return ReplaceIfWithLiftedValue(iff, std::move(lifted));
+                    }
+                }
+                // LiftCSharpUserComparison(trueInst, falseInst) is deferred (needs
+                // Call.Method.IsOperator + CSharpOperators + DoLift); it returns
+                // null in this port.
+            } else {
+                exprToLift = ctorArg;  // the NullableCtor's argument
+            }
+            // The conv.nop.lifted case: `v.HasValue ? v.GetValueOrDefault() :
+            // fallback => v ?? fallback`. A single nullable var whose exprToLift
+            // is a GetValueOrDefault call on that var -> a fresh `ldloc v`, with a
+            // `conv.nop.lifted(ldloc v)` inserted when the underlying type differs
+            // from the GVO's return type (the C# `!inputUType.Equals(utype) &&
+            // utype.ToPrimitiveType() != PrimitiveType.None`; a no-op I4->I4 conv
+            // for Nullable<bool> where the underlying Boolean != the I4-stacked
+            // Int32). The fresh LdLoc + the (optional) Conv are new nodes (not
+            // detached from the if); only falseInst is detached before the if is
+            // destroyed. The wrap is NullableWithValueFallback (the non-NullableCtor
+            // case) or Nullable / no-wrap (the NullableCtor case, gated on
+            // MatchNull(falseInst, utype) -- the `default(Nullable<T>)` fallback).
+            if (nullableVarS.size() == 1 && exprToLift &&
+                NullableLiftingTransform::MatchGetValueOrDefault(
+                    exprToLift, nullableVarS[0].get())) {
+                const TypeSystem::IType* inputUType =
+                    NullableLiftingTransform::GetUnderlyingTypeOfNullable(
+                        nullableVarS[0]->Type.get());
+                std::unique_ptr<ILInstruction> lifted =
+                    std::make_unique<LdLoc>(nullableVarS[0]);
+                if (inputUType && utype && !inputUType->Equals(*utype) &&
+                    TypeSystem::ToPrimitiveType(utype) != PrimitiveType::None) {
+                    lifted = std::make_unique<Conv>(
+                        std::move(lifted),
+                        StackTypeOf(inputUType),            // inputUType.GetStackType()
+                        TypeSystem::GetSign(inputUType),    // inputUType.GetSign()
+                        TypeSystem::ToPrimitiveType(utype), // utype.ToPrimitiveType()
+                        false,                             // checkForOverflow
+                        true);                             // isLifted
+                }
+                StackType underlyingResultType = exprToLift->ResultType();
+                if (isNullCoalescingWithNonNullableFallback) {
                     auto falseOwned = DetachFromParent(falseInst);
-                    auto lifted = std::make_unique<NullCoalescingInstruction>(
+                    auto nc = std::make_unique<NullCoalescingInstruction>(
+                        NullCoalescingKind::NullableWithValueFallback,
+                        std::move(lifted), std::move(falseOwned));
+                    nc->UnderlyingResultType = underlyingResultType;
+                    return ReplaceIfWithLiftedValue(iff, std::move(nc));
+                } else if (!NullableLiftingTransform::MatchNull(falseInst, utype)) {
+                    auto falseOwned = DetachFromParent(falseInst);
+                    auto nc = std::make_unique<NullCoalescingInstruction>(
                         NullCoalescingKind::Nullable,
-                        std::move(trueOwned), std::move(falseOwned));
-                    lifted->UnderlyingResultType = StackTypeOf(
-                        NullableLiftingTransform::GetUnderlyingTypeOfNullable(
-                            nullableVarS[0]->Type.get()));
+                        std::move(lifted), std::move(falseOwned));
+                    nc->UnderlyingResultType = underlyingResultType;
+                    return ReplaceIfWithLiftedValue(iff, std::move(nc));
+                } else {
+                    // falseInst is `default(Nullable<T>)` (MatchNull) -- no wrap,
+                    // the lifted value is the whole result (the C# returns `lifted`
+                    // unwrapped; `v ?? null` is just the lifted `v`).
                     return ReplaceIfWithLiftedValue(iff, std::move(lifted));
                 }
             }
-            // AnalyzeCondition succeeded but the LiftNormal early-out did not fire;
-            // the DoLift / LiftCSharpUserComparison / conv.nop.lifted paths are
-            // deferred. Matching the C# which returns null (the whole Lift returns
-            // null), do not fall through to the bool? equality folds.
+            // AnalyzeCondition succeeded but neither the early-out nor the
+            // conv.nop.lifted case fired; the DoLift / LiftCSharpUserComparison
+            // paths are deferred. Matching the C# which returns null (the whole
+            // Lift returns null), do not fall through to the bool? equality folds.
             return false;
         }
     }

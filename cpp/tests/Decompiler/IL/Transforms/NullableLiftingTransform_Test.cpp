@@ -433,6 +433,36 @@ TEST(NullableLiftingTransform, MatchGetValueOrDefaultLdLocaRejectsTwoArgForm) {
     EXPECT_FALSE(NullableLiftingTransform::MatchGetValueOrDefault(call.get(), matched));
 }
 
+// The match-against-v overload (the D98 MatchGetValueOrDefault(inst, ILVariable
+// v) port): `call GetValueOrDefault(ldloca v)` matches when the call's variable
+// is the given `v` (the C# `MatchGetValueOrDefault(inst, out v2) && v == v2`).
+// Disjoint from the report-variable overload by the shared_ptr/raw-pointer split.
+TEST(NullableLiftingTransform, MatchGetValueOrDefaultLdLocaMatchesGivenVariable) {
+    auto v = MakeLocal("v");
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    EXPECT_TRUE(NullableLiftingTransform::MatchGetValueOrDefault(call.get(), v.get()))
+        << "a GetValueOrDefault call on v must match against v";
+}
+
+// The match-against-v overload rejects a GetValueOrDefault call on a different
+// variable (the C# `v == v2` check fails) and a non-LdLoca argument.
+TEST(NullableLiftingTransform, MatchGetValueOrDefaultLdLocaRejectsDifferentVariable) {
+    auto v = MakeLocal("v");
+    auto w = MakeLocal("w");
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(w));  // on w, not v
+    EXPECT_FALSE(NullableLiftingTransform::MatchGetValueOrDefault(call.get(), v.get()))
+        << "a GetValueOrDefault call on w must not match against v";
+    // A non-LdLoca argument (a bare LdLoc) does not match the ldloca-v overload.
+    auto call2 = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call2->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call2->AddArg(std::make_unique<LdLoc>(v));  // not a LdLoca
+    EXPECT_FALSE(NullableLiftingTransform::MatchGetValueOrDefault(call2.get(), v.get()));
+}
+
 // logic.not(call get_HasValue(ldloca v)) -- the reader's brfalse shape
 // comp(Equality, call get_HasValue(ldloca v), ldc.i4(0)) -- matches
 // MatchNegatedHasValueCall for v.

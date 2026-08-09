@@ -678,18 +678,32 @@ implemented and green here. Everything else follows the phase plan in
   is exactly one nullable var, the true arm is not a NullableCtor, and the true arm
   is `ldloc` of that var, producing a `NullCoalescingInstruction(Nullable)` whose
   `UnderlyingResultType` is the underlying type's StackType (a new raw-pointer
-  `StackTypeOf(const IType*)` overload). When `AnalyzeCondition` succeeds but the
-  early-out does not fire, the if stays as-is (the DoLift / LiftCSharpUserComparison
-  / conv.nop.lifted rest of LiftNormal is deferred -- matching the C# which returns
-  null). The `v.HasValue ? v : (bool?)false` folds to `v ?? (bool?)false` (the
-  LiftNormal early-out) NOT to `v.HasValue & v` (the `&`/`|` fold), since the C#
-  `Lift` order runs AnalyzeCondition/LiftNormal first. The `v.HasValue ? v :
-  fallback` pattern is a Roslyn-era `Nullable<T> ?? Nullable<T>` lowering that
-  fires 0 times on the .NET Framework 4 corpus; ported for faithfulness (hand-built
-  tests verify the fold + the block-final fold + 3 negatives, the sweep verifies
-  the per-method monotone invariants hold).
-  The remaining `Run(IfInstruction)` paths (the DoLift / LiftCSharpUserComparison /
-  conv.nop.lifted rest of LiftNormal, MatchCompOrDecimal/LiftCSharp*, NullPropagation),
+  `StackTypeOf(const IType*)` overload). The `v.HasValue ? v.GetValueOrDefault() :
+  fallback => v ?? fallback` `conv.nop.lifted` case (the LiftNormal section after
+  the early-out) is also ported: when the true arm is a `call GetValueOrDefault(ldloca
+  v)` on the single nullable var, the fold produces a fresh `ldloc v` (or
+  `conv.nop.lifted(ldloc v)` when the underlying type differs from the GVO's return
+  type -- a no-op I4->I4 lifted conv for Nullable<bool>, no conv for Nullable<int>)
+  wrapped in a `NullCoalescingInstruction(NullableWithValueFallback)`. The Conv
+  IsLifted model (a `bool IsLifted` field + a 6-arg lifted constructor + a
+  `ResultType()` override returning `O` for a lifted conv + `UnderlyingResultType()`
+  + a `.lifted` dump suffix, matching the D91 Comp nullable-lifting model) and the
+  `GetSign`/`ToPrimitiveType`/`ToKnownTypeCode` type-system helpers (TypeUtils.hpp)
+  are the foundation the conv.nop.lifted case consumes; a new
+  `MatchGetValueOrDefault(inst, const ILVariable* v)` match-against-v overload
+  recognises the true arm is a GVO call on the single nullable var. When
+  `AnalyzeCondition` succeeds but neither the early-out nor the conv.nop.lifted
+  case fires, the if stays as-is (the DoLift / LiftCSharpUserComparison rest of
+  LiftNormal is deferred -- matching the C# which returns null). The `v.HasValue ? v
+  : (bool?)false` folds to `v ?? (bool?)false` (the LiftNormal early-out) NOT to
+  `v.HasValue & v` (the `&`/`|` fold), since the C# `Lift` order runs
+  AnalyzeCondition/LiftNormal first. The `v.HasValue ? v : fallback` and `v.HasValue ?
+  v.GetValueOrDefault() : fallback` patterns are Roslyn-era `Nullable<T> ?? T`
+  lowerings that fire 0 times on the .NET Framework 4 corpus; ported for
+  faithfulness (hand-built tests verify the folds + the block-final fold +
+  negatives, the sweep verifies the per-method monotone invariants hold).
+  The remaining `Run(IfInstruction)` paths (the DoLift / LiftCSharpUserComparison
+  rest of LiftNormal, MatchCompOrDecimal/LiftCSharp*, NullPropagation),
   `Run(BinaryNumericInstruction)` (the BitAnd-as-short-circuit analysis), and
   the `RunStatements(Block, int)` block transform are the subsequent
   in-order targets.

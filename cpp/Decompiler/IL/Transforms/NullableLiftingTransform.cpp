@@ -203,6 +203,16 @@ bool NullableLiftingTransform::MatchGetValueOrDefault(ILInstruction* inst, ILVar
     return true;
 }
 
+bool NullableLiftingTransform::MatchGetValueOrDefault(ILInstruction* inst, const ILVariable* v) {
+    // Match-against-v: the call's variable (reported by the ldloca-v overload)
+    // must be the given `v` (the C# `MatchGetValueOrDefault(inst, out v2) &&
+    // v == v2`). Disjoint from the report overload by the shared_ptr/raw-pointer
+    // split (the D94 MatchHasValueCall precedent) -- call with `v.get()`.
+    ILVariablePtr v2;
+    if (!MatchGetValueOrDefault(inst, v2)) return false;
+    return v2.get() == v;
+}
+
 bool NullableLiftingTransform::MatchNegatedHasValueCall(ILInstruction* inst, const ILVariable* v) {
     // logic.not(call get_HasValue(ldloca v)): the logic.not is this port's
     // `comp(Equality, X, ldc.i4(0))` shape; the inner call must operate on `v`.

@@ -50,9 +50,15 @@ public:
     StackType InputType = StackType::Unknown;
     Sign InputSign = Sign::None;
     ConversionKind Kind = ConversionKind::Invalid;
+    // Faithful to the C# Conv.IsLifted (the ILiftableInstruction impl): a lifted
+    // conv operates on a boxed Nullable<T> (Argument.ResultType == O, not
+    // InputType) and produces a boxed Nullable<T> result (ResultType == O). Set
+    // by the NullableLifting conv.nop.lifted case; the IL reader's conv.* opcodes
+    // are never lifted. Default false keeps every existing Conv non-lifted.
+    bool IsLifted = false;
 
-    // Mirrors the C# Conv(argument, inputType, inputSign, targetType,
-    // checkForOverflow) constructor: inputType is the argument's ResultType;
+    // Non-lifted form: inputType is the argument's ResultType. Mirrors the C#
+    // Conv(argument, targetType, checkForOverflow, inputSign) constructor;
     // InputSign is the passed sign when the conversion needs one (overflow
     // checking, or int->float), else None; Kind is derived.
     Conv(std::unique_ptr<ILInstruction> argument, PrimitiveType targetType,
@@ -65,7 +71,31 @@ public:
         Kind = GetConversionKind(TargetType, InputType, InputSign);
     }
 
-    StackType ResultType() const override { return GetStackType(TargetType); }
+    // Lifted form: inputType is passed explicitly (the argument's ResultType is O
+    // when lifted, not InputType). Mirrors the C# Conv(argument, inputType,
+    // inputSign, targetType, checkForOverflow, isLifted) constructor used by the
+    // NullableLifting conv.nop.lifted case. The 2nd arg (StackType) vs the
+    // non-lifted constructor's 2nd (PrimitiveType) keeps the overloads disjoint
+    // for typed enum arguments. ResultType is O (a boxed Nullable<T>);
+    // UnderlyingResultType is GetStackType(TargetType).
+    Conv(std::unique_ptr<ILInstruction> argument, StackType inputType,
+         Sign inputSign, PrimitiveType targetType, bool checkForOverflow,
+         bool isLifted = false)
+        : UnaryInstruction(OpCode::Conv, std::move(argument)),
+          TargetType(targetType), CheckForOverflow(checkForOverflow),
+          InputType(inputType), IsLifted(isLifted) {
+        bool needsSign = checkForOverflow || (!IsFloatType(InputType) && IsFloatType(targetType));
+        InputSign = needsSign ? inputSign : Sign::None;
+        Kind = GetConversionKind(TargetType, InputType, InputSign);
+    }
+
+    StackType ResultType() const override {
+        return IsLifted ? StackType::O : GetStackType(TargetType);
+    }
+
+    // The underlying (non-lifted) result stack type. Faithful to the C#
+    // Conv.UnderlyingResultType (ILiftableInstruction): GetStackType(TargetType).
+    StackType UnderlyingResultType() const { return GetStackType(TargetType); }
 
     InstructionFlags DirectFlags() const override {
         return CheckForOverflow ? InstructionFlags::MayThrow : InstructionFlags::None;
@@ -92,10 +122,11 @@ public:
         if (CheckForOverflow) out += ".ovf";
         if (InputSign == Sign::Unsigned) out += ".unsigned";
         else if (InputSign == Sign::Signed) out += ".signed";
+        if (IsLifted) out += ".lifted";
         out += ' ';
         out += StackTypeName(InputType);
         out += "->";
-        out += StackTypeName(GetStackType(TargetType));
+        out += StackTypeName(IsLifted ? StackType::O : GetStackType(TargetType));
         out += ' ';
         switch (Kind) {
             case ConversionKind::SignExtend: out += "<sign extend>"; break;

@@ -156,6 +156,18 @@ public:
     // the two overloads are disjoint -- call this overload with `v.get()`.
     static bool MatchHasValueCall(ILInstruction* inst, const ILVariable* v);
 
+    // Port of NullableLiftingTransform.MatchGetValueOrDefault(inst, ILVariable v):
+    // the match-against-v overload. `call GetValueOrDefault(ldloca v)` on
+    // System.Nullable<T> (1 argument, the argument a LdLoca) whose variable is
+    // the given `v`. The report-variable overload above recognises the call and
+    // reports the variable; this overload additionally checks the variable
+    // matches (the C# `MatchGetValueOrDefault(inst, out v2) && v == v2`).
+    // Disjoint from the `(inst, ILVariablePtr&)` report overload by the same
+    // shared_ptr/raw-pointer split as MatchHasValueCall -- call with `v.get()`.
+    // Used by the LiftNormal conv.nop.lifted case to recognise the true arm is a
+    // GetValueOrDefault call on the single nullable var.
+    static bool MatchGetValueOrDefault(ILInstruction* inst, const ILVariable* v);
+
     // Port of NullableLiftingTransform.MatchNegatedHasValueCall(inst, ILVariable v):
     // `logic.not(call get_HasValue(ldloca v))` -> recognises v. The logic.not is
     // this port's `comp(Equality, X, ldc.i4(0))` shape (the reader's brfalse, per

@@ -39,11 +39,13 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 using namespace ILSpy::Decompiler::IL;
 using ILSpy::Decompiler::TypeSystem::ITypePtr;
 using ILSpy::Decompiler::TypeSystem::KnownType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+using ILSpy::Decompiler::TypeSystem::ParameterizedType;
 using ILSpy::Decompiler::TypeSystem::Sign;
 
 namespace {
@@ -276,4 +278,56 @@ TEST(Conv, UnwrapConvPeelsRequestedKind) {
     const ILInstruction* peeledI8 = UnwrapConvFree(&signExtI8, ConversionKind::SignExtend);
     ASSERT_NE(peeledI8, nullptr);
     EXPECT_EQ(peeledI8->Op, OpCode::LdcI4);
+}
+
+// The lifted Conv (the D98 nullable-lifting conv.nop.lifted model): a Conv with
+// isLifted=true operates on a boxed Nullable<T> (Argument.ResultType == O, not
+// InputType) and produces a boxed Nullable<T> result (ResultType == O). The 6-arg
+// constructor takes InputType explicitly (the argument's ResultType is O when
+// lifted, not InputType); the 4-arg non-lifted constructor derives InputType from
+// the argument's ResultType. The conv.nop.lifted case constructs
+// `conv.nop.lifted(ldloc v)` (a no-op I4->I4 conv, Kind Nop) for Nullable<bool>
+// where the underlying Boolean != the I4-stacked Int32 the GVO returns.
+TEST(Conv, LiftedConvHasResultTypeOAndUnderlyingResultType) {
+    // `conv.nop.lifted(ldloc v)`: a no-op I4 -> I4 lifted conv over a Nullable<bool>
+    // load (the argument is an LdLoc of a Nullable<bool> variable, ResultType O).
+    std::vector<ITypePtr> nboolArgs = {KT(KnownTypeCode::Boolean)};
+    auto v = Var("v", std::make_shared<ParameterizedType>(
+        KT(KnownTypeCode::NullableOfT), std::move(nboolArgs)));
+    Conv lifted(std::make_unique<LdLoc>(v), StackType::I4, Sign::Unsigned,
+                PrimitiveType::I4, false, true);
+    EXPECT_TRUE(lifted.IsLifted)
+        << "the 6-arg constructor with isLifted=true sets IsLifted";
+    EXPECT_EQ(lifted.ResultType(), StackType::O)
+        << "a lifted conv produces a boxed Nullable<T> result (ResultType O)";
+    EXPECT_EQ(lifted.UnderlyingResultType(), StackType::I4)
+        << "the underlying (non-lifted) result is GetStackType(TargetType) = I4";
+    EXPECT_EQ(lifted.InputType, StackType::I4)
+        << "InputType is the explicitly-passed I4 (not the argument's O)";
+    EXPECT_EQ(lifted.Kind, ConversionKind::Nop)
+        << "I4 -> I4 with a non-float target is a Nop conversion";
+    EXPECT_FALSE(lifted.CheckForOverflow)
+        << "conv.nop.lifted is not overflow-checked";
+    // The dump appends ".lifted" after the sign suffix.
+    std::string out;
+    lifted.WriteTo(out);
+    EXPECT_NE(out.find(".lifted"), std::string::npos)
+        << "the dump must annotate a lifted conv with .lifted: " << out;
+}
+
+// The non-lifted 4-arg constructor leaves IsLifted false (the default); ResultType
+// is GetStackType(TargetType) (not O). Every IL-reader conv.* opcode is non-lifted.
+TEST(Conv, NonLiftedConvStaysResultTypeGetStackType) {
+    Conv c(std::make_unique<LdLoc>(Var("v", KT(KnownTypeCode::Int32))),
+           PrimitiveType::I8, false, Sign::None);
+    EXPECT_FALSE(c.IsLifted)
+        << "the 4-arg constructor leaves IsLifted at its false default";
+    EXPECT_EQ(c.ResultType(), StackType::I8)
+        << "a non-lifted conv's ResultType is GetStackType(TargetType) = I8";
+    EXPECT_EQ(c.UnderlyingResultType(), StackType::I8)
+        << "UnderlyingResultType is also GetStackType(TargetType) for non-lifted";
+    std::string out;
+    c.WriteTo(out);
+    EXPECT_EQ(out.find(".lifted"), std::string::npos)
+        << "a non-lifted conv must not annotate .lifted: " << out;
 }

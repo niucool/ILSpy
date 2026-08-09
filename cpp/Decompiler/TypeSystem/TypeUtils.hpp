@@ -36,7 +36,11 @@
 #pragma once
 
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/Sign.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
+#include "Decompiler/IL/PrimitiveType.hpp"
+#include "Decompiler/IL/StackType.hpp"
 
 #include <optional>
 
@@ -85,6 +89,135 @@ inline std::optional<bool> IsReferenceType(const IType* t) {
             return std::nullopt;
     }
     return std::nullopt;  // unreachable; keeps the compiler quiet on a new kind
+}
+
+// Port of TypeUtils.GetSign(IType): the sign of an integer value. None for an
+// unknown / not-applicable type; Signed for the signed primitives + float/
+// decimal; Unsigned for the unsigned primitives + char + bool + pointer /
+// native-uint / function-pointer; Signed for native-int. A non-known type
+// (TypeParameter / ByReference / Unknown / ...) yields None. The C# also
+// unwraps SkipModifiers + GetEnumUnderlyingType; this minimal port models neither
+// (no ModifiedType, no per-enum underlying type), so a KnownType is used directly
+// and an Enum KnownType falls through to None (the conv.nop.lifted case only
+// deals with primitive underlying types).
+inline Sign GetSign(const IType* type) {
+    if (!type) return Sign::None;
+    switch (type->Kind()) {
+        case TypeKind::Pointer:
+        case TypeKind::NUInt:
+        case TypeKind::FunctionPointer:
+            return Sign::Unsigned;
+        case TypeKind::NInt:
+            return Sign::Signed;
+        default:
+            break;
+    }
+    if (const auto* k = dynamic_cast<const KnownType*>(type)) {
+        switch (k->Code()) {
+            case KnownTypeCode::SByte:
+            case KnownTypeCode::Int16:
+            case KnownTypeCode::Int32:
+            case KnownTypeCode::Int64:
+            case KnownTypeCode::IntPtr:
+            case KnownTypeCode::Single:
+            case KnownTypeCode::Double:
+            case KnownTypeCode::Decimal:
+                return Sign::Signed;
+            case KnownTypeCode::UIntPtr:
+            case KnownTypeCode::Char:
+            case KnownTypeCode::Boolean:
+            case KnownTypeCode::Byte:
+            case KnownTypeCode::UInt16:
+            case KnownTypeCode::UInt32:
+            case KnownTypeCode::UInt64:
+                return Sign::Unsigned;
+            default:
+                return Sign::None;
+        }
+    }
+    return Sign::None;
+}
+
+// Port of TypeUtils.ToPrimitiveType(KnownTypeCode): maps a known primitive's
+// code to its PrimitiveType (the signed/unsigned size the StackType lattice
+// collapses). Unknown / non-primitive codes yield None. Used by the
+// NullableLifting conv.nop.lifted case to get the conv's target PrimitiveType.
+inline ILSpy::Decompiler::IL::PrimitiveType ToPrimitiveType(KnownTypeCode code) {
+    using ILSpy::Decompiler::IL::PrimitiveType;
+    switch (code) {
+        case KnownTypeCode::SByte: return PrimitiveType::I1;
+        case KnownTypeCode::Int16: return PrimitiveType::I2;
+        case KnownTypeCode::Int32: return PrimitiveType::I4;
+        case KnownTypeCode::Int64: return PrimitiveType::I8;
+        case KnownTypeCode::Single: return PrimitiveType::R4;
+        case KnownTypeCode::Double: return PrimitiveType::R8;
+        case KnownTypeCode::Byte: return PrimitiveType::U1;
+        case KnownTypeCode::UInt16:
+        case KnownTypeCode::Char:
+            return PrimitiveType::U2;
+        case KnownTypeCode::UInt32: return PrimitiveType::U4;
+        case KnownTypeCode::UInt64: return PrimitiveType::U8;
+        case KnownTypeCode::IntPtr: return PrimitiveType::I;
+        case KnownTypeCode::UIntPtr: return PrimitiveType::U;
+        default: return PrimitiveType::None;
+    }
+}
+
+// Port of TypeUtils.ToPrimitiveType(IType): the PrimitiveType of a resolved
+// type. Unknown -> PrimitiveType::Unknown; ByReference -> Ref; NInt /
+// FunctionPointer -> I; NUInt -> U; otherwise the KnownTypeCode's ToPrimitiveType
+// (None for a non-primitive / non-known type). The C# unwraps
+// GetEnumUnderlyingType().GetDefinition(); this minimal port has no per-enum
+// underlying type, so an Enum KnownType yields None (the conv.nop.lifted case
+// only deals with primitive underlying types).
+inline ILSpy::Decompiler::IL::PrimitiveType ToPrimitiveType(const IType* type) {
+    using ILSpy::Decompiler::IL::PrimitiveType;
+    if (!type) return PrimitiveType::None;
+    switch (type->Kind()) {
+        case TypeKind::Unknown:
+            return PrimitiveType::Unknown;
+        case TypeKind::ByReference:
+            return PrimitiveType::Ref;
+        case TypeKind::NInt:
+        case TypeKind::FunctionPointer:
+            return PrimitiveType::I;
+        case TypeKind::NUInt:
+            return PrimitiveType::U;
+        default:
+            break;
+    }
+    if (const auto* k = dynamic_cast<const KnownType*>(type))
+        return ToPrimitiveType(k->Code());
+    return PrimitiveType::None;
+}
+
+// Port of TypeUtils.ToKnownTypeCode(StackType, Sign): the KnownTypeCode a
+// StackType + Sign maps to. I4 -> Int32 (or UInt32 when unsigned); I8 -> Int64
+// (or UInt64); I -> IntPtr (or UIntPtr); F4 -> Single; F8 -> Double; O -> Object;
+// Void -> Void; Unknown / Ref -> None. Used by the NullableLifting
+// conv.nop.lifted case to build the conv's target type from the GVO call's
+// ResultType (a StackType).
+inline KnownTypeCode ToKnownTypeCode(ILSpy::Decompiler::IL::StackType stackType,
+                                      Sign sign = Sign::None) {
+    using ILSpy::Decompiler::IL::StackType;
+    switch (stackType) {
+        case ILSpy::Decompiler::IL::StackType::I4:
+            return sign == Sign::Unsigned ? KnownTypeCode::UInt32 : KnownTypeCode::Int32;
+        case ILSpy::Decompiler::IL::StackType::I8:
+            return sign == Sign::Unsigned ? KnownTypeCode::UInt64 : KnownTypeCode::Int64;
+        case ILSpy::Decompiler::IL::StackType::I:
+            return sign == Sign::Unsigned ? KnownTypeCode::UIntPtr : KnownTypeCode::IntPtr;
+        case ILSpy::Decompiler::IL::StackType::F4:
+            return KnownTypeCode::Single;
+        case ILSpy::Decompiler::IL::StackType::F8:
+            return KnownTypeCode::Double;
+        case ILSpy::Decompiler::IL::StackType::O:
+            return KnownTypeCode::Object;
+        case ILSpy::Decompiler::IL::StackType::Void:
+            return KnownTypeCode::Void;
+        default:
+            return KnownTypeCode::None;
+    }
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem
