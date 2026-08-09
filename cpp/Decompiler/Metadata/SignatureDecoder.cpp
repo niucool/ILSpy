@@ -293,4 +293,22 @@ DecodedMethodSignature DecodeMethodSignatureBlob(const winmd::reader::database& 
     return out;
 }
 
+std::vector<ITypePtr> DecodeLocalSignatureBlob(const winmd::reader::database& db,
+                                               const std::uint8_t* data, std::size_t size) {
+    std::vector<ITypePtr> result;
+    BlobReader r{ data, data + size, &db, false };
+    std::uint32_t marker = r.Byte();
+    if (r.failed || marker != 0x07) return result;  // IMAGE_CEE_CS_CALLCONV_LOCAL_SIG
+    std::uint32_t count = r.CompressedUnsigned();
+    if (r.failed) return result;
+    for (std::uint32_t i = 0; i < count && !r.failed; ++i) {
+        // A local may be pinned (0x45 PINNED) before its type, and may be a
+        // by-ref; DecodeTypeBlob handles TYPEDBYREF and custom modifiers.
+        if (r.PeekByte() == 0x45) r.Byte();  // PINNED modifier
+        result.push_back(DecodeTypeBlob(r));
+    }
+    if (r.failed) result.clear();
+    return result;
+}
+
 } // namespace ILSpy::Decompiler::Metadata

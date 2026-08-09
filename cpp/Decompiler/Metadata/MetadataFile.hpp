@@ -136,6 +136,11 @@ public:
     // parameters that have no Param row.
     std::vector<std::string> GetParameterNames(std::uint32_t methodToken) const;
 
+    // Decode the local-variable signature referenced by a method body's
+    // LocalVarSigToken (a StandAloneSig token, table 0x11). Returns the local
+    // types in index order; an empty vector if the token is 0/invalid/malformed.
+    std::vector<TypeSystem::ITypePtr> GetLocalTypes(std::uint32_t localVarSigToken) const;
+
     // Decode the field type of a Field row (by token). Returns nullptr if the
     // token is out of range or the signature is malformed; never throws.
     ILSpy::Decompiler::TypeSystem::ITypePtr GetFieldSignature(std::uint32_t fieldToken) const;

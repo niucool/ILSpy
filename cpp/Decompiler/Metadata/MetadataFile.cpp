@@ -441,4 +441,21 @@ std::vector<std::string> MetadataFile::GetParameterNames(std::uint32_t methodTok
     return result;
 }
 
+std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> MetadataFile::GetLocalTypes(std::uint32_t localVarSigToken) const {
+    std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> result;
+    if (!IsValid() || localVarSigToken == 0) return result;
+    std::uint32_t table = localVarSigToken >> 24;
+    std::uint32_t row = localVarSigToken & 0x00FFFFFFu;
+    if (table != 0x11 || row == 0 || row > impl_->db->StandAloneSig.size()) return result;
+    try {
+        std::uint32_t blobColumn = impl_->db->StandAloneSig.get_value<std::uint32_t>(row - 1, 0);
+        auto blob = impl_->db->get_blob(blobColumn);
+        result = DecodeLocalSignatureBlob(
+            *impl_->db, blob.begin(), static_cast<std::size_t>(blob.end() - blob.begin()));
+    } catch (const std::exception&) {
+        result.clear();
+    }
+    return result;
+}
+
 } // namespace ILSpy::Decompiler::Metadata

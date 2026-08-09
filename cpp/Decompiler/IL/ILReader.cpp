@@ -83,6 +83,11 @@ struct ReaderState {
     std::size_t stackBase = 0;  // index where this block's own slots begin
     std::vector<ILVariablePtr> parameters;
     std::vector<ILVariablePtr> locals;
+    // Local-variable types decoded from the method body's LocalVarSig, in
+    // index order. Assigned to the locals on first reference (GetOrCreateLocal)
+    // so the rest of the pipeline (AssignVariableNames, the C# seed) can use
+    // them. Empty for tiny bodies (no locals) or an undecodable signature.
+    std::vector<ITypePtr> localTypes;
     StackType returnStackType = StackType::Void;
 
     // Evaluation-stack merge state (method-wide): the input stack recorded for
@@ -278,6 +283,8 @@ ILVariablePtr GetOrCreateLocal(ReaderState& s, int idx) {
         v->Name = "V_" + std::to_string(idx);
         v->Kind = VariableKind::Local;
         v->Index = idx;
+        if (idx >= 0 && idx < static_cast<int>(s.localTypes.size()))
+            v->Type = s.localTypes[idx];
         s.locals[idx] = v;
     }
     return s.locals[idx];
@@ -1153,6 +1160,7 @@ std::unique_ptr<ILFunction> ReadStraightLineIL(const MetadataFile& file,
 
     ReaderState s;
     InitParameters(s, sig, file.GetParameterNames(methodToken));
+    s.localTypes = file.GetLocalTypes(body.LocalVarSigToken());
     s.returnStackType = ReturnStackTypeOf(sig.ReturnType);
 
     auto fn = std::make_unique<ILFunction>();
@@ -1205,6 +1213,7 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
 
     ReaderState s;
     InitParameters(s, sig, file.GetParameterNames(methodToken));
+    s.localTypes = file.GetLocalTypes(body.LocalVarSigToken());
     s.returnStackType = ReturnStackTypeOf(sig.ReturnType);
 
     const auto* b = body.IL().data();

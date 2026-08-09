@@ -59,4 +59,11 @@ TypeSystem::ITypePtr DecodeFieldSignatureBlob(const winmd::reader::database& db,
 TypeSystem::ITypePtr DecodeTypeSpecBlob(const winmd::reader::database& db,
                                         const std::uint8_t* data, std::size_t size);
 
+// Decode a LOCAL_SIG blob (0x07 marker + count + types) -- the local-variable
+// signature referenced by a method body's fat header. Returns the local types
+// in index order; an empty/partial vector on a malformed blob.
+std::vector<TypeSystem::ITypePtr> DecodeLocalSignatureBlob(
+    const winmd::reader::database& db,
+    const std::uint8_t* data, std::size_t size);
+
 } // namespace ILSpy::Decompiler::Metadata
