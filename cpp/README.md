@@ -707,6 +707,19 @@ implemented and green here. Everything else follows the phase plan in
   `Run(BinaryNumericInstruction)` (the BitAnd-as-short-circuit analysis), and
   the `RunStatements(Block, int)` block transform are the subsequent
   in-order targets.
+  `BitSet` (Util/, a tested-but-not-yet-wired foundation ported from BitSet.cs)
+  is the fixed-capacity 64-bit-word bitset the deferred `DoLift`/`DoLiftBinary`
+  relevance analysis returns -- `bits.All(0, nullableVars.Count)` is the
+  "every nullable var contributed to the lift" gate the MatchCompOrDecimal/
+  LiftCSharp* comparison-lift path (the next in-order target) consults -- and
+  the foundation the deferred DefiniteAssignment / Dominance /
+  ReachingDefinitions analyses are built on. Faithful to the C# API
+  (capacity rounding, `Any`/`All`/set-relation predicates/`Set`/`Clear`/
+  `NextSetBit`/`SetBits`/`ReplaceWith`/`Clone`/`ToString`), with the C# 6-bit
+  `ulong` shift masking replicated explicitly (a >=64-bit shift is UB in
+  C++17) and a portable `TrailingZeroCount64` (C++17 has no
+  `std::countr_zero`). Not wired into any transform yet; exercised by the unit
+  tests.
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
   walk + a corpus probe; the async/iterator state machines
