@@ -37,6 +37,7 @@
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
 #include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
 #include "Decompiler/IL/Transforms/EarlyExpressionTransforms.hpp"
+#include "Decompiler/IL/Transforms/RemoveDeadVariableInit.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/Metadata/ILTextEmitter.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
@@ -227,6 +228,13 @@ int main(int argc, char** argv) {
                 // Runs after LdLocaDupInitObjTransform, before the second CFS (per
                 // GetILTransforms()).
                 ILSpy::Decompiler::IL::EarlyExpressionTransforms().Run(*fn, transformContext);
+                // Remove dead stores to never-read variables: a variable flagged
+                // RemoveIfRedundant (by RemoveInfeasiblePath) or under the
+                // RemoveDeadStores setting, with no loads or addresses, has its
+                // stores dropped. Runs after EarlyExpressionTransforms (so
+                // stobj(ldloca V, ..) has collapsed to stloc V, ..) and before
+                // the second CFS, per GetILTransforms().
+                ILSpy::Decompiler::IL::RemoveDeadVariableInit().Run(*fn, transformContext);
                 // Re-run CFS so the duplicated 1-pred return blocks merge and
                 // the single-definition variable inlines to `leave (expr)`.
                 ILSpy::Decompiler::IL::ControlFlowSimplification().Run(*fn, transformContext);

@@ -84,10 +84,15 @@ implemented and green here. Everything else follows the phase plan in
   ==/!= ldnull` -> `arg ==/!= ldnull` for a type parameter `T`). Parameter
   names and string literals (`ldstr`) now come
   from the metadata (Param table / #US heap).
-  14 of ~40 transforms ported. The CLI applies CFS + StObjToStLoc + ILInlining +
+  `RemoveDeadVariableInit` drops dead stores to never-read variables: a
+  variable flagged `RemoveIfRedundant` (by `RemoveInfeasiblePath`) or under the
+  `RemoveDeadStores` setting, with no loads or addresses, has its stores dropped
+  (a pure value goes with the store; an impure value is unwrapped so its side
+  effect survives), and dead-copy chains collapse via a recompute fixpoint.
+  15 of ~40 transforms ported. The CLI applies CFS + StObjToStLoc + ILInlining +
   InlineReturnTransform + RemoveInfeasiblePath + DetectPinnedRegions +
   DetectCatchWhenConditionBlocks + LdLocaDupInitObjTransform +
-  EarlyExpressionTransforms + CFS +
+  EarlyExpressionTransforms + RemoveDeadVariableInit + CFS +
   LoopDetection + ConditionDetection + AssignVariableNames + RemoveRedundantReturn
   before the C# seed, so `fixed (...) { ... }` and `default(T)` now appear in
   the output. Next

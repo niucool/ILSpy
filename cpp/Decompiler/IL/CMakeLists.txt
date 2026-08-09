@@ -23,4 +23,5 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/DetectCatchWhenConditionBlocks.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/LdLocaDupInitObjTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/EarlyExpressionTransforms.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/RemoveDeadVariableInit.cpp
 )

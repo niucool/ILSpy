@@ -47,6 +47,11 @@ public:
     int StoreCount = 0;
     int AddressCount = 0;
 
+    // Set by transforms (e.g. RemoveInfeasiblePathTransform) to mark a variable
+    // whose dead stores RemoveDeadVariableInit should drop even when the
+    // RemoveDeadStores setting is off (ILVariable.RemoveIfRedundant in the C#).
+    bool RemoveIfRedundant = false;
+
     // True if the variable is written exactly once and its address is never
     // taken (ILVariable.IsSingleDefinition).
     bool IsSingleDefinition() const noexcept {

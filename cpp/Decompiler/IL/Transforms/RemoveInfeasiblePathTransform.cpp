@@ -153,6 +153,10 @@ void RemoveInfeasiblePathTransform::Run(ILFunction& function, ILTransformContext
             block->Instructions.clear();
             block->RenumberChildren();
             block->SetFinal(std::make_unique<Branch>(exit));
+            // Mark the stack slot so RemoveDeadVariableInit drops any remaining
+            // stores to it (the test block's other predecessors may still
+            // store to s). Mirrors the C# `s.RemoveIfRedundant = true`.
+            s->RemoveIfRedundant = true;
             changed = true;
         }
     }
