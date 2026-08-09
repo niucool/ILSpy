@@ -444,6 +444,26 @@ TEST(ILAstToCSharp, PlainStoreWhenLeftIsNotTheTarget) {
     EXPECT_EQ(text.find("V_0 += "), std::string::npos) << "not a compound assignment";
 }
 
+TEST(ILAstToCSharp, TypedDeclarationUsesCSharpKeyword) {
+    // A local whose type is a known primitive declares with the C# keyword
+    // (`int V_0 = ...`), not `var`. A null-typed local (e.g. a stack slot)
+    // falls back to `var`.
+    auto intV = MakeVar(VariableKind::Local, "V_0", 0,
+        std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto untyped = MakeVar(VariableKind::Local, "V_1", 1);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(intV, std::make_unique<LdcI4>(0)));
+    block->Add(std::make_unique<StLoc>(untyped, std::make_unique<LdcI4>(0)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("    int V_0 = 0;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("    var V_1 = 0;\n"), std::string::npos) << text;
+}
+
 TEST(ILAstToCSharp, ConstantTrueCatchFilterIsOmitted) {
     // A plain catch carries the constant filter ldc.i4(1) (BlockBuilder.cs);
     // the C#-text seed prints it as a plain `catch (T name)`, no `when`.

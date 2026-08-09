@@ -53,6 +53,7 @@
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
 #include <cctype>
 #include <cstdio>
@@ -102,6 +103,39 @@ std::string EscapeStringLiteral(std::string_view value) {
 
 std::string TypeDisplayName(const TypeSystem::ITypePtr& type) {
     return type ? type->ReflectionName() : std::string("?");
+}
+
+// A C# type name for a local declaration: the C# keyword for primitives
+// (int, bool, string, ...), the short type name otherwise (a seed
+// approximation -- real C# would carry a using directive). `var` for an
+// unknown type (e.g. an untyped stack slot).
+std::string CSharpTypeName(const TypeSystem::ITypePtr& type) {
+    if (!type) return "var";
+    if (auto* k = dynamic_cast<const TypeSystem::KnownType*>(type.get())) {
+        switch (k->Code()) {
+            case TypeSystem::KnownTypeCode::Boolean: return "bool";
+            case TypeSystem::KnownTypeCode::Char: return "char";
+            case TypeSystem::KnownTypeCode::SByte: return "sbyte";
+            case TypeSystem::KnownTypeCode::Byte: return "byte";
+            case TypeSystem::KnownTypeCode::Int16: return "short";
+            case TypeSystem::KnownTypeCode::UInt16: return "ushort";
+            case TypeSystem::KnownTypeCode::Int32: return "int";
+            case TypeSystem::KnownTypeCode::UInt32: return "uint";
+            case TypeSystem::KnownTypeCode::Int64: return "long";
+            case TypeSystem::KnownTypeCode::UInt64: return "ulong";
+            case TypeSystem::KnownTypeCode::Single: return "float";
+            case TypeSystem::KnownTypeCode::Double: return "double";
+            case TypeSystem::KnownTypeCode::Decimal: return "decimal";
+            case TypeSystem::KnownTypeCode::String: return "string";
+            case TypeSystem::KnownTypeCode::Object: return "object";
+            case TypeSystem::KnownTypeCode::IntPtr: return "nint";
+            case TypeSystem::KnownTypeCode::UIntPtr: return "nuint";
+            default: break;
+        }
+    }
+    std::string rn = type->ReflectionName();
+    auto pos = rn.rfind('.');
+    return pos != std::string::npos ? rn.substr(pos + 1) : rn;
 }
 
 const char* ConvTargetName(StackType target) {
@@ -216,7 +250,8 @@ private:
                 // the binary's left is a load of the same variable. A declaration
                 // (`var V = ...`) is never a compound assignment.
                 std::string assign = declare ? " = " + Expr(*st.Value) : AssignmentText(st, name);
-                Line(indent, (declare ? "var " + name : name) + assign + ";");
+                std::string decl = declare ? CSharpTypeName(st.Variable->Type) + " " + name : name;
+                Line(indent, decl + assign + ";");
                 return;
             }
             case OpCode::Call: {

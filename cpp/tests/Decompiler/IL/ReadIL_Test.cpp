@@ -125,6 +125,30 @@ TEST(ReadIL, UsesMetadataParameterNames) {
     EXPECT_GT(namedParams, 0) << "no parameter picked up a metadata name";
 }
 
+TEST(ReadIL, LocalsGetTypesFromLocalSignature) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    int typedLocals = 0, totalLocals = 0, checked = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++checked;
+        for (auto& v : fn->Variables) {
+            if (v && v->Kind == VariableKind::Local) {
+                ++totalLocals;
+                if (v->Type) ++typedLocals;
+            }
+        }
+        if (checked > 3000) break;
+    }
+    EXPECT_GT(totalLocals, 100) << "expected some locals";
+    EXPECT_GT(typedLocals, 100) << "most locals should have a type from the local sig";
+}
+
 TEST(ReadIL, StringLiteralsResolveFromUserStringHeap) {
     const char* path = FixturePath();
     if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
