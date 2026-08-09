@@ -39,4 +39,16 @@ enum class StackType : std::uint8_t {
     Void,
 };
 
+// Port of ILTypeExtensions.IsIntegerType(StackType): the integer evaluation-stack
+// types (I4, I, I8). F4/F8/O/Ref/Unknown/Void are not.
+inline bool IsIntegerType(StackType s) {
+    return s == StackType::I4 || s == StackType::I || s == StackType::I8;
+}
+
+// Port of ILTypeExtensions.IsFloatType(StackType): the floating-point
+// evaluation-stack types (F4, F8).
+inline bool IsFloatType(StackType s) {
+    return s == StackType::F4 || s == StackType::F8;
+}
+
 } // namespace ILSpy::Decompiler::IL

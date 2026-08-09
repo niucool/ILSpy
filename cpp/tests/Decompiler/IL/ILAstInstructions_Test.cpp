@@ -107,7 +107,7 @@ TEST(ILAstInstructions, UnaryInstructionsFlagsAndResult) {
     EXPECT_TRUE(HasFlag(len.DirectFlags(), InstructionFlags::MayThrow));
     EXPECT_EQ(len.ResultType(), StackType::I4);
 
-    Conv conv(std::make_unique<LdcI4>(1), StackType::I8);
+    Conv conv(std::make_unique<LdcI4>(1), PrimitiveType::I8, false, Sign::None);
     EXPECT_EQ(conv.ResultType(), StackType::I8);
 }
 

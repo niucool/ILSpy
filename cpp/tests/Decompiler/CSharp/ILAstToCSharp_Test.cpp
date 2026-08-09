@@ -414,7 +414,7 @@ TEST(ILAstToCSharp, ConvI4OverLdLenIsImplicit) {
     auto block = std::make_unique<Block>();
     block->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
         std::make_unique<Conv>(
-            std::make_unique<LdLen>(std::make_unique<LdLoc>(arg1)), StackType::I4)));
+            std::make_unique<LdLen>(std::make_unique<LdLoc>(arg1)), PrimitiveType::I4, false, Sign::None)));
     auto fn = MakeFunction({});
     fn->Body->AddBlock(std::move(block));
     fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));

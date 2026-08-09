@@ -89,7 +89,7 @@ implemented and green here. Everything else follows the phase plan in
   `RemoveDeadStores` setting, with no loads or addresses, has its stores dropped
   (a pure value goes with the store; an impure value is unwrapped so its side
   effect survives), and dead-copy chains collapse via a recompute fixpoint.
-  27 of ~40 transforms ported. The switch-detection family is now complete in
+  28 of ~40 transforms ported. The switch-detection family is now complete in
   its core: `LongSet`/`LongInterval` (Util/, ported from LongSet.cs /
   Interval.cs) -- an immutable interval-set of longs whose complement is
   representable (unlike `std::set<int64_t>`) -- backs `SwitchSection::Labels`
@@ -262,7 +262,7 @@ implemented and green here. Everything else follows the phase plan in
   statements, switch-on-nullable `case null:` arms, `is T x` patterns,
   `lock (...) { ... }`, `using (...) { ... }` statements, and
   `V = cond ? V1 : V2` ternaries (the conditional operator) now
-  appear in the output. 27 of ~40 transforms ported (the StatementTransform
+  appear in the output. 28 of ~40 transforms ported (the StatementTransform
   orchestration + its first two children ILInlining and ExpressionTransforms;
   the remaining 14 per-statement children are deferred).
   `DelegateConstruction` (Transforms/, a tested-but-not-yet-wired
@@ -440,7 +440,28 @@ implemented and green here. Everything else follows the phase plan in
   times on the .NET Framework 4 mscorlib corpus (a real-corpus ILAst-cleaning
   transform, not faithfulness-only); the seed already renders `box(arg)` as
   `arg` for all boxes, so the CLI output is unchanged and the value is ILAst
-  cleanliness for the future real back end. The
+  cleanliness for the future real back end. It also folds the
+  `VisitLdElema`/`VisitNewArr` `CleanUpArrayIndices` rewrite: drop the redundant
+  `conv.i` (or `conv.ovf.i`) widening of an array index -- a Conv whose
+  ResultType is `I` (native int) and whose Kind is `SignExtend`, `ZeroExtend`,
+  or a checked `Truncate` (Kind == Truncate && CheckForOverflow) -- replacing
+  the conv with its argument (the index is implicitly native-int in C#). An
+  unchecked Truncate (conv.i from I8) is a real truncation and is kept. This
+  required porting the faithful `ConversionKind` model for the Conv node (the
+  recurring blocker D84 identified): new `Decompiler/TypeSystem/Sign.hpp`,
+  `Decompiler/IL/PrimitiveType.hpp` (the PrimitiveType enum distinguishing the
+  signed/unsigned sizes the StackType lattice collapses -- I1/U1/I4/U4/I8/U8/
+  I/U/R4/R8/R -- plus GetStackType/IsIntegerType/IsFloatType), and
+  `Decompiler/IL/ConversionKind.hpp` (the ConversionKind enum + a faithful
+  `GetConversionKind` porting Ecma-335 Table 8); the Conv node now stores
+  Kind/InputType/InputSign/TargetType/CheckForOverflow and the IL reader emits
+  the per-opcode (PrimitiveType, checkForOverflow, sign) the C# ILReader does.
+  The fold fires 1 time on the 8000-method mscorlib sweep (the legacy csc mostly
+  emits ldelema with bare I4 indices; it fires more on Roslyn/64-bit-indexed
+  code), so it is a real-corpus ILAst-cleaning transform, not faithfulness-only.
+  The D81 `IsLdcI4ZeroMaybeConv` approximation is retired in favor of a faithful
+  `UnwrapConv` (sign/zero-extending convs around the 0 now peel by Kind).
+  The
   remaining 14 per-statement children (DynamicIsEventAssignmentTransform,
   TransformAssignment, NullCoalescingTransform, NullableLiftingStatementTransform,
   NullPropagationStatementTransform, TransformArrayInitializers,
@@ -451,7 +472,10 @@ implemented and green here. Everything else follows the phase plan in
   option (the ldloca-into-`addressof` path the C# second pass enables, which
   needs an `AddressOf` node + `IsGeneratedTemporaryForAddressOf` +
   `ClassifyExpression`) are deferred, as are the rest of `ExpressionTransforms`
-  (the NullableLifting call, the Conv/Call/NewObj/LdObj/StObj/StLoc
+  (the NullableLifting call, the VisitConv `conv.i4(ldlen)` rewrite (still
+  blocked by the LdLen model divergence -- this port's LdLen already returns I4;
+  the `conv.rN(conv.r.un(...))` rewrite is now unblocked by the Conv Kind model
+  but is a separate iteration), the Call/NewObj/LdObj/StObj/StLoc
   `HandleCompoundAssign`, the remaining VisitIfInstruction pieces
   (NullableLifting, UserDefinedLogic,
   `TransformDynamicAddAssignOrRemoveAssign`), the SwitchExpression/Dynamic/

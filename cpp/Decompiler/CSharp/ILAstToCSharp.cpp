@@ -677,11 +677,11 @@ private:
                 const auto& conv = static_cast<const Conv&>(inst);
                 // conv.i4(ldlen) is the IL for `array.Length` (ldlen returns
                 // unsigned int32; the cast to signed i4 is implicit in C#).
-                if (conv.TargetStackType == StackType::I4 && conv.Argument &&
+                if (conv.ResultType() == StackType::I4 && conv.Argument &&
                     conv.Argument->Op == OpCode::LdLen) {
                     return Expr(*conv.Argument);
                 }
-                return "(" + std::string(ConvTargetName(conv.TargetStackType)) + ")(" +
+                return "(" + std::string(ConvTargetName(conv.ResultType())) + ")(" +
                        (conv.Argument ? Expr(*conv.Argument) : "(default)") + ")";
             }
             case OpCode::CastClass: {

@@ -38,16 +38,17 @@
 // `match(x) ? true : false -> match(x)` fold (a conditional whose condition is
 // a pattern match and whose arms are ldc.i4 1/0 is redundant -- the MatchInstruction
 // already evaluates to 1/0), plus the VisitBox rewrite (`box ref-type(arg)` ->
-// `arg`; for a reference type, box is a no-op). Deferred vs the C#: the
-// NullableLiftingTransform
+// `arg`; for a reference type, box is a no-op) and the VisitLdElema / VisitNewArr
+// CleanUpArrayIndices rewrite (drop the redundant `conv.i` widening of an array
+// index -- a SignExtend / ZeroExtend / checked-Truncate conv whose ResultType
+// is I -- now that the Conv node carries its ConversionKind, D85). Deferred vs
+// the C#: the NullableLiftingTransform
 // call (needs the full nullable-lift transform), FixComparisonKindLdNull
-// (already in the standalone EarlyExpressionTransforms, D61), the Conv unwrap
-// of the right operand (this port's Conv carries no Kind/SignExtend/ZeroExtend,
-// so UnwrapConv cannot be faithful), the ldlen / conv o->i null-comparison
-// special cases (need Conv Kind), VisitConv / VisitLdElema /
-// VisitNewArr / VisitCall / VisitNewObj / VisitLdObj / VisitLdObjIfRef /
-// VisitStObj / VisitStLoc (TransformAssignment.HandleCompoundAssign) / the
-// remaining VisitIfInstruction pieces (NullableLifting, UserDefinedLogic,
+// (already in the standalone EarlyExpressionTransforms, D61), the ldlen /
+// conv o->i null-comparison special cases (need the LdLen model divergence
+// reconciliation), VisitConv / VisitCall / VisitNewObj / VisitLdObj /
+// VisitLdObjIfRef / VisitStObj / VisitStLoc (TransformAssignment.HandleCompoundAssign)
+// / the remaining VisitIfInstruction pieces (NullableLifting, UserDefinedLogic,
 // TransformDynamicAddAssignOrRemoveAssign) / HandleSwitchExpression (needs
 // SwitchExpressions setting + SwitchInstruction guards) / VisitDynamic* /
 // VisitBinaryNumericInstruction (shift-size) / VisitTryCatchHandler -- each
@@ -64,6 +65,8 @@ namespace ILSpy::Decompiler::IL {
 class Comp;
 class Box;
 class IfInstruction;
+class LdElema;
+class NewArr;
 
 class ExpressionTransforms : public IStatementTransform {
 public:
@@ -139,6 +142,25 @@ private:
     // reference-type kinds, returning nullopt for the uncertain kinds
     // (TypeParameter/ByRef/Pointer/Unknown/...) so the fold is conservative.
     void VisitBox(Box* box);
+
+    // VisitLdElema / VisitNewArr: visit the children (the array and the index
+    // expressions), then run CleanUpArrayIndices on the index expressions. The
+    // C# VisitLdElema additionally calls IndexRangeTransform.HandleLdElema
+    // (deferred -- needs IndexRangeTransform); the CleanUpArrayIndices part is
+    // self-contained and fires on the corpus (array accesses with a `conv.i`-
+    // widened index). Mirrors ExpressionTransforms.cs.
+    void VisitLdElema(LdElema* inst);
+    void VisitNewArr(NewArr* inst);
+
+    // CleanUpArrayIndices: drop a `conv.i` (or `conv.ovf.i`) widening of an
+    // array index -- a Conv whose ResultType is I and whose Kind is SignExtend,
+    // ZeroExtend, or a checked Truncate (Kind == Truncate && CheckForOverflow).
+    // Such a conv only widens the index to native int and is redundant in C#
+    // (the index is implicitly native-int). An unchecked Truncate (conv.i from
+    // I8, no overflow check) is a real truncation and is kept. Mirrors
+    // ExpressionTransforms.CleanUpArrayIndices; requires the Conv node's
+    // ConversionKind (D85).
+    void CleanUpArrayIndices(std::vector<std::unique_ptr<ILInstruction>>& indices);
 
     // The settings snapshot for the duration of a Run (the C# stores the
     // StatementTransformContext as a member). Consulted by IsPatternMatch in

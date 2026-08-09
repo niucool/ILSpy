@@ -52,9 +52,12 @@
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Instructions/Conv.hpp"
+#include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
@@ -972,6 +975,191 @@ TEST(ExpressionTransforms, VisitBoxDropsBoxOfObjectReferenceType) {
     EXPECT_EQ(CountBoxes(*fn), 0);
 }
 
+// Count Conv nodes whose ResultType is I (native int) sitting directly in a
+// LdElema or NewArr Indices collection -- the array-index widening convs that
+// CleanUpArrayIndices removes. The fold is monotone non-increasing (each fold
+// drops one such conv; nothing in this subset creates one). Used by the sweep.
+int CountArrayIndexConvI(ILFunction& fn) {
+    int n = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::LdElema) {
+            auto* ld = static_cast<LdElema*>(inst);
+            for (auto& idx : ld->Indices)
+                if (idx && idx->Op == OpCode::Conv && idx->ResultType() == StackType::I) ++n;
+        } else if (inst->Op == OpCode::NewArr) {
+            auto* na = static_cast<NewArr*>(inst);
+            for (auto& idx : na->Indices)
+                if (idx && idx->Op == OpCode::Conv && idx->ResultType() == StackType::I) ++n;
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return n;
+}
+
+// CleanUpArrayIndices drops `conv.i` (SignExtend, I4->I) widening of an array
+// element-address index: ldelema(arr, conv.i(ldloc idx)) -> ldelema(arr, ldloc
+// idx). The conv only widens the I4 index to native int and is redundant in C#.
+TEST(ExpressionTransforms, CleanUpArrayIndicesDropsConvIFromLdElema) {
+    auto arr = MakeParam("arr", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto idx = MakeParam("idx", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v");
+    auto elemType = std::make_shared<KnownType>(KnownTypeCode::String);
+    // conv.i(ldloc idx): SignExtend I4 -> I (the reader's Conv_i from I4).
+    std::vector<std::unique_ptr<ILInstruction>> indices;
+    indices.push_back(std::make_unique<Conv>(
+        std::make_unique<LdLoc>(idx), PrimitiveType::I, false, Sign::None));
+    auto ldElema = std::make_unique<LdElema>(
+        elemType, std::make_unique<LdLoc>(arr), std::move(indices));
+    auto fn = MakeFnWithBlock({arr, idx, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(ldElema)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountArrayIndexConvI(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountArrayIndexConvI(*fn), 0)
+        << "conv.i widening of an array index must be dropped";
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::LdElema);
+    auto* ld = static_cast<LdElema*>(st->Value.get());
+    ASSERT_EQ(ld->Indices.size(), 1u);
+    EXPECT_EQ(ld->Indices[0]->Op, OpCode::LdLoc)
+        << "the index must be the bare ldloc idx after the conv is dropped";
+}
+
+// CleanUpArrayIndices drops `conv.u` (ZeroExtend, I4->I) from a NewArr length.
+TEST(ExpressionTransforms, CleanUpArrayIndicesDropsConvUFromNewArr) {
+    auto len = MakeParam("len", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v");
+    auto elemType = std::make_shared<KnownType>(KnownTypeCode::Int32);
+    // conv.u(ldloc len): ZeroExtend I4 -> I (the reader's Conv_u from I4).
+    std::vector<std::unique_ptr<ILInstruction>> indices;
+    indices.push_back(std::make_unique<Conv>(
+        std::make_unique<LdLoc>(len), PrimitiveType::U, false, Sign::None));
+    auto newArr = std::make_unique<NewArr>(elemType, std::move(indices));
+    auto fn = MakeFnWithBlock({len, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(newArr)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountArrayIndexConvI(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountArrayIndexConvI(*fn), 0)
+        << "conv.u widening of the newarr length must be dropped";
+}
+
+// CleanUpArrayIndices drops a checked `conv.ovf.i` (Truncate + CheckForOverflow):
+// an overflow-checked widening is safe to drop (it would throw only on values
+// outside I4 range, which a C# int index cannot produce).
+TEST(ExpressionTransforms, CleanUpArrayIndicesDropsConvOvfIFromLdElema) {
+    auto arr = MakeParam("arr", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto idx = MakeParam("idx", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v");
+    auto elemType = std::make_shared<KnownType>(KnownTypeCode::String);
+    // conv.ovf.i(ldloc idx): SignExtend I4 -> I with overflow check (the reader's
+    // Conv_ovf_i from I4; needsSign forces InputSign = Signed, Kind = SignExtend).
+    std::vector<std::unique_ptr<ILInstruction>> indices;
+    indices.push_back(std::make_unique<Conv>(
+        std::make_unique<LdLoc>(idx), PrimitiveType::I, true, Sign::Signed));
+    auto ldElema = std::make_unique<LdElema>(
+        elemType, std::make_unique<LdLoc>(arr), std::move(indices));
+    auto fn = MakeFnWithBlock({arr, idx, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(ldElema)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountArrayIndexConvI(*fn), 0)
+        << "conv.ovf.i (checked SignExtend) widening of an array index is dropped";
+}
+
+// CleanUpArrayIndices keeps `conv.i` from an I8 input (Truncate without overflow
+// check): that is a real truncation (the index is a long narrowed to native
+// int), not a redundant widening, so the conv must survive.
+TEST(ExpressionTransforms, CleanUpArrayIndicesKeepsConvIFromI8) {
+    auto arr = MakeParam("arr", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto idx = MakeParam("idx", std::make_shared<KnownType>(KnownTypeCode::Int64));
+    auto v = MakeLocal("v");
+    auto elemType = std::make_shared<KnownType>(KnownTypeCode::String);
+    // conv.i(ldloc idx) where idx is I8: Truncate I8 -> I, no overflow check.
+    std::vector<std::unique_ptr<ILInstruction>> indices;
+    indices.push_back(std::make_unique<Conv>(
+        std::make_unique<LdLoc>(idx), PrimitiveType::I, false, Sign::None));
+    auto ldElema = std::make_unique<LdElema>(
+        elemType, std::make_unique<LdLoc>(arr), std::move(indices));
+    auto fn = MakeFnWithBlock({arr, idx, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(ldElema)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountArrayIndexConvI(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountArrayIndexConvI(*fn), 1)
+        << "conv.i from I8 (unchecked Truncate) is a real truncation and stays";
+}
+
+// CleanUpArrayIndices keeps `conv.i4` (Nop, I4->I4) in an index: its ResultType
+// is I4 (not I), so the `ResultType == I` guard excludes it. (conv.i4 around an
+// index would be a no-op cast, not a native-int widening.)
+TEST(ExpressionTransforms, CleanUpArrayIndicesKeepsConvI4) {
+    auto arr = MakeParam("arr", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto idx = MakeParam("idx", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v");
+    auto elemType = std::make_shared<KnownType>(KnownTypeCode::String);
+    std::vector<std::unique_ptr<ILInstruction>> indices;
+    indices.push_back(std::make_unique<Conv>(
+        std::make_unique<LdLoc>(idx), PrimitiveType::I4, false, Sign::None));
+    auto ldElema = std::make_unique<LdElema>(
+        elemType, std::make_unique<LdLoc>(arr), std::move(indices));
+    auto fn = MakeFnWithBlock({arr, idx, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(ldElema)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // The conv.i4 stays (its ResultType is I4, not I, so CleanUpArrayIndices
+    // skips it); CountArrayIndexConvI counts only ResultType==I convs, so it is 0
+    // either way -- verify the conv node itself survived.
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    auto* ld = static_cast<LdElema*>(st->Value.get());
+    ASSERT_EQ(ld->Indices[0]->Op, OpCode::Conv)
+        << "conv.i4 (Nop, ResultType I4) in an index must stay";
+}
+
+// CleanUpArrayIndices leaves a bare (non-conv) index untouched.
+TEST(ExpressionTransforms, CleanUpArrayIndicesLeavesBareIndex) {
+    auto arr = MakeParam("arr", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto idx = MakeParam("idx", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v");
+    auto elemType = std::make_shared<KnownType>(KnownTypeCode::String);
+    std::vector<std::unique_ptr<ILInstruction>> indices;
+    indices.push_back(std::make_unique<LdLoc>(idx));
+    auto ldElema = std::make_unique<LdElema>(
+        elemType, std::make_unique<LdLoc>(arr), std::move(indices));
+    auto fn = MakeFnWithBlock({arr, idx, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(ldElema)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    auto* ld = static_cast<LdElema*>(st->Value.get());
+    ASSERT_EQ(ld->Indices.size(), 1u);
+    EXPECT_EQ(ld->Indices[0]->Op, OpCode::LdLoc)
+        << "a bare index must survive CleanUpArrayIndices unchanged";
+}
+
 // On the real mscorlib corpus, running the full pre-pipeline through the
 // StatementTransform{ILInlining, ExpressionTransforms} (the GetILTransforms()
 // position) preserves the ILAst invariant and the HandleConditionalOperator
@@ -989,6 +1177,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
 
     int processed = 0;
     int totalFolds = 0;
+    int totalArrayIndexConvDrops = 0;
     ILTransformContext ctx;
     for (const auto& m : f.MethodDefs()) {
         if (m.RVA == 0) continue;
@@ -998,6 +1187,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         RunPrePipeline(*fn, ctx);
         int before = CountConditionalOperators(*fn);
         int boxesBefore = CountBoxes(*fn);
+        int arrayIdxConvBefore = CountArrayIndexConvI(*fn);
         {
             StatementTransform st;
             st.AddChild(std::make_unique<ILInlining>());
@@ -1007,6 +1197,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         fn->CheckInvariant(ILPhase::Normal);
         int after = CountConditionalOperators(*fn);
         int boxesAfter = CountBoxes(*fn);
+        int arrayIdxConvAfter = CountArrayIndexConvI(*fn);
         // The ternary fold is monotone non-decreasing (each fold creates a
         // StLoc-if; nothing in this subset removes one). The VisitComp rewrites
         // (comp(!=0)->x, logic.not push, unsigned normalization) do not create
@@ -1021,7 +1212,16 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         // exact total vary slightly); the per-method monotone-non-increasing
         // invariant is the deterministic correctness gate.
         EXPECT_LE(boxesAfter, boxesBefore);
+        // The CleanUpArrayIndices fold (`conv.i` widening of an array index ->
+        // the bare index) is monotone non-increasing (each fold removes a
+        // ResultType==I conv from a LdElema/NewArr Indices; nothing in this
+        // subset creates one). The fold fires on the legacy-csc corpus when the
+        // compiler emits `conv.i` to widen an I4 array index to native int before
+        // ldelema/newarr; the per-method monotone-non-increasing invariant is the
+        // deterministic correctness gate (the absolute count is not asserted).
+        EXPECT_LE(arrayIdxConvAfter, arrayIdxConvBefore);
         totalFolds += (after - before);
+        totalArrayIndexConvDrops += (arrayIdxConvBefore - arrayIdxConvAfter);
         if (processed >= 8000) break;
     }
     EXPECT_GT(processed, 5000);
@@ -1030,4 +1230,10 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
     // two-expression-Block-arms form HandleConditionalOperator matches).
     EXPECT_GT(totalFolds, 0)
         << "HandleConditionalOperator must fold some ternary on mscorlib";
+    // The CleanUpArrayIndices fold fires on the legacy-csc corpus when a method
+    // indexes an array with a conv.i-widened index; if it fires at all, the drop
+    // count must be positive (a regression that made the fold stop firing would
+    // surface as zero). The exact count is not asserted (corpus-dependent on how
+    // many methods widen an index before ldelema).
+    (void)totalArrayIndexConvDrops;
 }

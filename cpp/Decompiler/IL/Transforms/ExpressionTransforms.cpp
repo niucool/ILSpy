@@ -17,8 +17,10 @@
 // DEALINGS IN THE SOFTWARE.
 
 #include "Decompiler/IL/Transforms/ExpressionTransforms.hpp"
+#include "Decompiler/IL/ConversionKind.hpp"
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
@@ -30,6 +32,7 @@
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/PrimitiveType.hpp"
 #include "Decompiler/IL/StackType.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
 
@@ -42,20 +45,29 @@ bool IsLdcI4(const ILInstruction* inst, int value) {
     return static_cast<const LdcI4*>(inst)->Value == value;
 }
 
-// The C# `inst.Right.UnwrapConv(SignExtend).UnwrapConv(ZeroExtend).MatchLdcI4(0)`
-// unwraps sign/zero-extending convs around the 0 before testing it. This port's
-// Conv carries no Kind, so UnwrapConv-by-Kind cannot be faithful; the common
-// shape is a bare `ldc.i4 0` (or a conv wrapping it), both accepted here. A conv
-// of any target type wrapping `ldc.i4 0` is treated as 0 -- the rare non-
-// sign/zero-extend conv around 0 would be mis-recognised, but it does not arise
-// from the IL reader's comparisons today.
-bool IsLdcI4ZeroMaybeConv(const ILInstruction* inst) {
-    if (IsLdcI4(inst, 0)) return true;
-    if (inst && inst->Op == OpCode::Conv) {
+// Port of ILInstruction.UnwrapConv(kind): if inst is a Conv of the requested
+// ConversionKind, descend into its argument (recursively, unwrapping a chain of
+// the same kind); else return inst unchanged. Mirrors the C#
+// `inst.UnwrapConv(kind)` (non-owning). Requires the Conv node's ConversionKind
+// (D85) -- the prior D81 approximation accepted any conv around the 0.
+const ILInstruction* UnwrapConv(const ILInstruction* inst, ConversionKind kind) {
+    while (inst && inst->Op == OpCode::Conv) {
         auto* conv = static_cast<const Conv*>(inst);
-        if (conv->Argument) return IsLdcI4(conv->Argument.get(), 0);
+        if (conv->Kind != kind) break;
+        inst = conv->Argument.get();
     }
-    return false;
+    return inst;
+}
+
+// The C# `inst.Right.UnwrapConv(SignExtend).UnwrapConv(ZeroExtend).MatchLdcI4(0)`
+// unwraps sign/zero-extending convs around the 0 before testing it. With the
+// Conv node now carrying its ConversionKind (D85) this is faithful: a
+// `conv.i(ldc.i4 0)` (SignExtend, I4->I) unwraps to the bare `ldc.i4 0`, while a
+// `conv.i4(ldc.i4 0)` (Nop) does not (it is not a sign/zero-extension).
+bool IsLdcI4ZeroMaybeConv(const ILInstruction* inst) {
+    inst = UnwrapConv(UnwrapConv(inst, ConversionKind::SignExtend),
+                      ConversionKind::ZeroExtend);
+    return IsLdcI4(inst, 0);
 }
 
 bool IsEqualityOrInequality(ComparisonKind k) {
@@ -208,6 +220,14 @@ void ExpressionTransforms::Visit(ILInstruction* inst) {
         VisitBox(static_cast<Box*>(inst));
         return;
     }
+    if (inst->Op == OpCode::LdElema) {
+        VisitLdElema(static_cast<LdElema*>(inst));
+        return;
+    }
+    if (inst->Op == OpCode::NewArr) {
+        VisitNewArr(static_cast<NewArr*>(inst));
+        return;
+    }
     // Default: recurse into children (the C# ILVisitor.Default).
     for (int i = 0; i < inst->ChildCount(); ++i) Visit(inst->GetChild(i));
 }
@@ -307,6 +327,51 @@ void ExpressionTransforms::VisitBox(Box* box) {
     // it in its parent's slot (the C# `inst.ReplaceWith(arg)`).
     auto arg = box->TakeChild(0);
     box->ReplaceWith(std::move(arg));
+}
+
+void ExpressionTransforms::VisitLdElema(LdElema* inst) {
+    if (!inst) return;
+    // base.VisitLdElema: visit the array and the index expressions (the C#
+    // recurses into the children), so the Comp/StLoc/Box rewrites cascade into
+    // the index computation before the indices are cleaned up.
+    if (inst->Array) Visit(inst->Array.get());
+    for (auto& idx : inst->Indices) Visit(idx.get());
+    CleanUpArrayIndices(inst->Indices);
+    // The C# then calls IndexRangeTransform.HandleLdElema(inst, context)
+    // (deferred -- needs IndexRangeTransform).
+}
+
+void ExpressionTransforms::VisitNewArr(NewArr* inst) {
+    if (!inst) return;
+    // base.VisitNewArr: visit the index expressions, then clean them up.
+    for (auto& idx : inst->Indices) Visit(idx.get());
+    CleanUpArrayIndices(inst->Indices);
+}
+
+void ExpressionTransforms::CleanUpArrayIndices(
+        std::vector<std::unique_ptr<ILInstruction>>& indices) {
+    // Port of ExpressionTransforms.CleanUpArrayIndices. A `conv.i` (or
+    // `conv.ovf.i`) widening of an array index -- a Conv whose ResultType is I
+    // (native int) and whose Kind is SignExtend, ZeroExtend, or a checked
+    // Truncate (Kind == Truncate && CheckForOverflow) -- only widens the index to
+    // native int and is redundant in C#. An unchecked Truncate (conv.i from I8
+    // without overflow check) is a real truncation and is kept. Replacing the
+    // conv with its argument mirrors the C# `index.ReplaceWith(conv.Argument)`.
+    for (auto& index : indices) {
+        if (!index || index->Op != OpCode::Conv) continue;
+        auto* conv = static_cast<Conv*>(index.get());
+        if (conv->ResultType() != StackType::I) continue;
+        bool removable =
+            (conv->Kind == ConversionKind::Truncate && conv->CheckForOverflow) ||
+            conv->Kind == ConversionKind::SignExtend ||
+            conv->Kind == ConversionKind::ZeroExtend;
+        if (!removable) continue;
+        // Detach the argument (orphaning it) before replacing the conv with it.
+        auto arg = conv->TakeChild(0);
+        // index.get() is the Conv; ReplaceWith destroys it and puts `arg` in the
+        // Indices slot (reparenting it). The slot's ChildIndex is preserved.
+        index->ReplaceWith(std::move(arg));
+    }
 }
 
 void ExpressionTransforms::VisitIfInstruction(IfInstruction* iff) {

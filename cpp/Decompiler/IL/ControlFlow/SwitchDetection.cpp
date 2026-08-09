@@ -481,7 +481,7 @@ void SwitchDetection::ProcessBlock(Block* block, bool& needsCleanup,
             auto rt = switchValue->ResultType();
             if (!(rt == StackType::I4 || rt == StackType::I8))
                 switchValue = std::make_unique<Conv>(std::move(switchValue),
-                                                      StackType::I8, false);
+                                                      PrimitiveType::I8, false, Sign::None);
             auto sw = std::make_unique<SwitchInstruction>(std::move(switchValue));
             for (auto& s : sections) sw->AddSection(std::move(s));
             auto* swp = sw.get();

@@ -70,6 +70,7 @@ using namespace ILSpy::Decompiler::Metadata;
 using ILSpy::Decompiler::TypeSystem::ITypePtr;
 using ILSpy::Decompiler::TypeSystem::KnownType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+using ILSpy::Decompiler::TypeSystem::Sign;
 
 namespace {
 // The reader's scratch state: a stack of pending expression trees (the decode
@@ -596,19 +597,43 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             break;
         }
 
-#define IL_CONV(opc, target) \
+// Conv emission mirrors the C# ILReader: each conv.* opcode maps to a target
+// PrimitiveType, a CheckForOverflow flag, and an input Sign (None for the plain
+// integer convs, Signed for conv.r4/r8, Unsigned for conv.r.un). The Conv
+// constructor derives InputType from the argument's ResultType and computes the
+// ConversionKind via GetConversionKind (Ecma-335 Table 8).
+#define IL_CONV(opc, prim) \
     case ILOpCode::opc: { \
         auto v = s.Pop(); \
         if (!v) return DecodeOutcome::Bail; \
-        if (!s.Push(std::make_unique<Conv>(std::move(v), StackType::target, false))) return DecodeOutcome::Bail; \
+        if (!s.Push(std::make_unique<Conv>(std::move(v), PrimitiveType::prim, false, Sign::None))) return DecodeOutcome::Bail; \
         break; \
     }
-        IL_CONV(Conv_i1, I4) IL_CONV(Conv_i2, I4) IL_CONV(Conv_i4, I4)
-        IL_CONV(Conv_u1, I4) IL_CONV(Conv_u2, I4) IL_CONV(Conv_u4, I4)
-        IL_CONV(Conv_i8, I8) IL_CONV(Conv_u8, I8)
-        IL_CONV(Conv_r4, F4) IL_CONV(Conv_r8, F8)
-        IL_CONV(Conv_i, I) IL_CONV(Conv_u, I) IL_CONV(Conv_r_un, F8)
+// conv.r4 / conv.r8 carry a Signed input sign (the C# reader passes Sign.Signed
+// for the int->float conversions).
+#define IL_CONV_S(opc, prim) \
+    case ILOpCode::opc: { \
+        auto v = s.Pop(); \
+        if (!v) return DecodeOutcome::Bail; \
+        if (!s.Push(std::make_unique<Conv>(std::move(v), PrimitiveType::prim, false, Sign::Signed))) return DecodeOutcome::Bail; \
+        break; \
+    }
+// conv.r.un carries an Unsigned input sign.
+#define IL_CONV_U(opc, prim) \
+    case ILOpCode::opc: { \
+        auto v = s.Pop(); \
+        if (!v) return DecodeOutcome::Bail; \
+        if (!s.Push(std::make_unique<Conv>(std::move(v), PrimitiveType::prim, false, Sign::Unsigned))) return DecodeOutcome::Bail; \
+        break; \
+    }
+        IL_CONV(Conv_i1, I1) IL_CONV(Conv_i2, I2) IL_CONV(Conv_i4, I4)
+        IL_CONV(Conv_u1, U1) IL_CONV(Conv_u2, U2) IL_CONV(Conv_u4, U4)
+        IL_CONV(Conv_i8, I8) IL_CONV(Conv_u8, U8)
+        IL_CONV_S(Conv_r4, R4) IL_CONV_S(Conv_r8, R8)
+        IL_CONV(Conv_i, I) IL_CONV(Conv_u, U) IL_CONV_U(Conv_r_un, R)
 #undef IL_CONV
+#undef IL_CONV_S
+#undef IL_CONV_U
 
         // ---- cast/isinst/box/unbox ----
         case ILOpCode::Castclass: {
@@ -1038,24 +1063,34 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         }
 
         // ---- overflow-checking conversions (same result types as the non-ovf forms) ----
-#define IL_CONVOVF(opc, target) \
+// The overflow-checking convs: conv.ovf.* carry a Signed input sign; the _un
+// variants (conv.ovf.*.un) carry an Unsigned input sign.
+#define IL_CONVOVF(opc, prim) \
     case ILOpCode::opc: { \
         auto v = s.Pop(); \
         if (!v) return DecodeOutcome::Bail; \
-        if (!s.Push(std::make_unique<Conv>(std::move(v), StackType::target, true))) return DecodeOutcome::Bail; \
+        if (!s.Push(std::make_unique<Conv>(std::move(v), PrimitiveType::prim, true, Sign::Signed))) return DecodeOutcome::Bail; \
         break; \
     }
-        IL_CONVOVF(Conv_ovf_i1, I4) IL_CONVOVF(Conv_ovf_u1, I4)
-        IL_CONVOVF(Conv_ovf_i2, I4) IL_CONVOVF(Conv_ovf_u2, I4)
-        IL_CONVOVF(Conv_ovf_i4, I4) IL_CONVOVF(Conv_ovf_u4, I4)
-        IL_CONVOVF(Conv_ovf_i8, I8) IL_CONVOVF(Conv_ovf_u8, I8)
-        IL_CONVOVF(Conv_ovf_i, I) IL_CONVOVF(Conv_ovf_u, I)
-        IL_CONVOVF(Conv_ovf_i1_un, I4) IL_CONVOVF(Conv_ovf_u1_un, I4)
-        IL_CONVOVF(Conv_ovf_i2_un, I4) IL_CONVOVF(Conv_ovf_u2_un, I4)
-        IL_CONVOVF(Conv_ovf_i4_un, I4) IL_CONVOVF(Conv_ovf_u4_un, I4)
-        IL_CONVOVF(Conv_ovf_i8_un, I8) IL_CONVOVF(Conv_ovf_u8_un, I8)
-        IL_CONVOVF(Conv_ovf_i_un, I) IL_CONVOVF(Conv_ovf_u_un, I)
+#define IL_CONVOVFU(opc, prim) \
+    case ILOpCode::opc: { \
+        auto v = s.Pop(); \
+        if (!v) return DecodeOutcome::Bail; \
+        if (!s.Push(std::make_unique<Conv>(std::move(v), PrimitiveType::prim, true, Sign::Unsigned))) return DecodeOutcome::Bail; \
+        break; \
+    }
+        IL_CONVOVF(Conv_ovf_i1, I1) IL_CONVOVF(Conv_ovf_u1, U1)
+        IL_CONVOVF(Conv_ovf_i2, I2) IL_CONVOVF(Conv_ovf_u2, U2)
+        IL_CONVOVF(Conv_ovf_i4, I4) IL_CONVOVF(Conv_ovf_u4, U4)
+        IL_CONVOVF(Conv_ovf_i8, I8) IL_CONVOVF(Conv_ovf_u8, U8)
+        IL_CONVOVF(Conv_ovf_i, I) IL_CONVOVF(Conv_ovf_u, U)
+        IL_CONVOVFU(Conv_ovf_i1_un, I1) IL_CONVOVFU(Conv_ovf_u1_un, U1)
+        IL_CONVOVFU(Conv_ovf_i2_un, I2) IL_CONVOVFU(Conv_ovf_u2_un, U2)
+        IL_CONVOVFU(Conv_ovf_i4_un, I4) IL_CONVOVFU(Conv_ovf_u4_un, U4)
+        IL_CONVOVFU(Conv_ovf_i8_un, I8) IL_CONVOVFU(Conv_ovf_u8_un, U8)
+        IL_CONVOVFU(Conv_ovf_i_un, I) IL_CONVOVFU(Conv_ovf_u_un, U)
 #undef IL_CONVOVF
+#undef IL_CONVOVFU
 
         // ---- localloc: stack-allocate (rare; model as a no-op pushing a null ptr) ----
         case ILOpCode::Localloc: {
