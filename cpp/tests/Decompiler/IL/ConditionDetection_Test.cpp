@@ -35,8 +35,10 @@
 #include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 
 #include <gtest/gtest.h>
@@ -101,9 +103,10 @@ void RunPipeline(ILFunction& fn) {
 
 } // namespace
 
-TEST(ConditionDetection, InlinesSinglePredFallThroughIntoIfFalseInst) {
+TEST(ConditionDetection, InlinesAndInvertsFallThroughReturn) {
     // b0: if (1 != 0) br b2     b1: return 1 (fall-through, 1 predecessor)
     // b2: return 0
+    // -> b0: if (1 == 0) { return 1 }   (fall-through to b2; goto eliminated)
     auto fn = WrapBlocks({});
     fn->Body->AddBlock(std::make_unique<Block>());
     fn->Body->AddBlock(std::make_unique<Block>());
@@ -119,13 +122,18 @@ TEST(ConditionDetection, InlinesSinglePredFallThroughIntoIfFalseInst) {
     RunPipeline(*fn);
     fn->CheckInvariant(ILPhase::Normal);
 
-    // b1 must be inlined into the IfInstruction's FalseInst.
+    // b1 is inlined into the if, then the if is inverted (b2 is the fall-through):
+    // `if (1 != 0) goto b2; else { return 1 }` -> `if (1 == 0) { return 1 }`.
     auto* iff = dynamic_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get());
     ASSERT_NE(iff, nullptr);
-    ASSERT_NE(iff->FalseInst, nullptr) << "the fall-through must become the else branch";
-    EXPECT_EQ(iff->FalseInst->Op, OpCode::Block) << "FalseInst is the inlined block body";
-    // b1 is no longer a top-level block in the container.
-    EXPECT_EQ(fn->Body->Blocks.size(), 2u) << "the inlined block is removed from the container";
+    auto* cond = dynamic_cast<Comp*>(iff->Condition.get());
+    ASSERT_NE(cond, nullptr);
+    EXPECT_EQ(cond->Kind, ComparisonKind::Equality) << "1 != 0 negated to 1 == 0";
+    ASSERT_NE(iff->TrueInst, nullptr);
+    EXPECT_EQ(iff->TrueInst->Op, OpCode::Block) << "inlined b1 is the (inverted) true arm";
+    EXPECT_EQ(iff->FalseInst, nullptr) << "goto dropped; fall-through to b2";
+    // b1 is removed from the container; b2 stays as the fall-through target.
+    EXPECT_EQ(fn->Body->Blocks.size(), 2u);
 }
 
 TEST(ConditionDetection, DoesNotInlineMultiPredFallThrough) {
@@ -155,6 +163,70 @@ TEST(ConditionDetection, DoesNotInlineMultiPredFallThrough) {
     auto* iff = dynamic_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get());
     ASSERT_NE(iff, nullptr);
     EXPECT_EQ(iff->FalseInst, nullptr) << "multi-pred block must not be inlined into FalseInst";
+}
+
+TEST(ConditionDetection, InvertsIfGotoElseExitWhenTargetIsFallThrough) {
+    // b0: if (arg_0 >= 0) br X else { throw }   (X is the next block)
+    // -> if (arg_0 < 0) { throw }   (fall-through to X, goto eliminated)
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::make_unique<Block>());  // b0
+    fn->Body->AddBlock(std::make_unique<Block>());  // X
+    auto exitBlock = std::make_unique<Block>();
+    exitBlock->SetFinal(std::make_unique<Throw>(std::make_unique<LdNull>()));
+    Block* exitPtr = exitBlock.get();
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdNull>(), std::make_unique<LdcI4>(0),
+                               ComparisonKind::GreaterThanOrEqual),
+        std::make_unique<Branch>(fn->Body->Blocks[1].get()),
+        std::move(exitBlock)));
+    // X is a *value* return so CFS does not pre-convert `br X` into a leave
+    // (CFS only folds branches to void/value-less leaves); the goto must
+    // survive to ConditionDetection so the inversion can fire.
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(0)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunPipeline(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto* iff = dynamic_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(iff, nullptr);
+    // The condition is negated: >=  becomes <
+    auto* cond = dynamic_cast<Comp*>(iff->Condition.get());
+    ASSERT_NE(cond, nullptr) << "condition stays a Comp after negation";
+    EXPECT_EQ(cond->Kind, ComparisonKind::LessThan) << ">= negated to <";
+    // The throw is now the true branch; the false branch is gone (fall-through).
+    ASSERT_NE(iff->TrueInst, nullptr);
+    EXPECT_EQ(iff->TrueInst->Op, OpCode::Block);
+    EXPECT_EQ(iff->FalseInst, nullptr) << "goto dropped, fall-through to X";
+}
+
+TEST(ConditionDetection, DoesNotInvertWhenTargetIsNotNextBlock) {
+    // b0: if (cond) br X else { throw }  where X is NOT the next block (there's
+    // a block between b0 and X). Cannot invert -- fall-through would miss X.
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::make_unique<Block>());  // b0
+    fn->Body->AddBlock(std::make_unique<Block>());  // middle
+    fn->Body->AddBlock(std::make_unique<Block>());  // X
+    auto exitBlock = std::make_unique<Block>();
+    exitBlock->SetFinal(std::make_unique<Throw>(std::make_unique<LdNull>()));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::GreaterThanOrEqual),
+        std::make_unique<Branch>(fn->Body->Blocks[2].get()),  // X is at index 2, not next
+        std::move(exitBlock)));
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(1)));
+    fn->Body->Blocks[2]->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(0)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunPipeline(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto* iff = dynamic_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(iff, nullptr);
+    // Not inverted: the goto to X survives, condition not negated.
+    ASSERT_NE(iff->TrueInst, nullptr);
+    EXPECT_EQ(iff->TrueInst->Op, OpCode::Branch) << "goto to X survives";
+    EXPECT_NE(iff->FalseInst, nullptr) << "else (throw) survives";
 }
 
 TEST(ConditionDetection, MscorlibSweepReducesGotoCount) {

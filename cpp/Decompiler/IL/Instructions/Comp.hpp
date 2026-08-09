@@ -38,6 +38,20 @@ enum class ComparisonKind : std::uint8_t {
     GreaterThanOrEqual,
 };
 
+// Negate a comparison kind (ECMA-335 II.3.2): == <=> !=, < => >=, <= => >.
+// Port of ComparisonKind.Negate in Comp.cs.
+inline ComparisonKind NegateComparison(ComparisonKind kind) {
+    switch (kind) {
+        case ComparisonKind::Equality: return ComparisonKind::Inequality;
+        case ComparisonKind::Inequality: return ComparisonKind::Equality;
+        case ComparisonKind::LessThan: return ComparisonKind::GreaterThanOrEqual;
+        case ComparisonKind::LessThanOrEqual: return ComparisonKind::GreaterThan;
+        case ComparisonKind::GreaterThan: return ComparisonKind::LessThanOrEqual;
+        case ComparisonKind::GreaterThanOrEqual: return ComparisonKind::LessThan;
+    }
+    return ComparisonKind::Inequality;  // unreachable
+}
+
 class Comp : public BinaryInstruction {
 public:
     ComparisonKind Kind = ComparisonKind::Equality;

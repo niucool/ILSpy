@@ -19,11 +19,14 @@
 #include "Decompiler/IL/ControlFlow/ConditionDetection.hpp"
 #include "Decompiler/IL/ControlFlow/ControlFlowGraph.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
+#include "Decompiler/IL/InstructionFlags.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 
 #include <functional>
@@ -92,6 +95,61 @@ bool TryInlineIfFallThrough(BlockContainer* container, std::size_t blockIndex) {
     return true;
 }
 
+// Negate a boolean condition, folding into a Comp when possible (mirrors
+// Comp.LogicNot + ExpressionTransforms.VisitLogicNot). logic.not(comp(a op b))
+// -> comp(a op.Negate b); logic.not(logic.not x) -> x; otherwise wrap as
+// comp(x == 0).
+std::unique_ptr<ILInstruction> NegateCondition(std::unique_ptr<ILInstruction> cond) {
+    if (!cond) return cond;
+    if (auto* comp = dynamic_cast<Comp*>(cond.get())) {
+        // logic.not(comp(inner == 0)) is comp(Equality, inner, ldc.i4 0): unwrap.
+        if (comp->Kind == ComparisonKind::Equality && comp->Right &&
+            comp->Right->Op == OpCode::LdcI4) {
+            if (static_cast<LdcI4*>(comp->Right.get())->Value == 0) {
+                return std::move(comp->Left);
+            }
+        }
+        comp->Kind = NegateComparison(comp->Kind);
+        return cond;
+    }
+    // if (c) t else f  ->  if (c) f else t  (swap branches negates the condition)
+    if (auto* iff = dynamic_cast<IfInstruction*>(cond.get())) {
+        auto t = std::move(iff->TrueInst);
+        iff->TrueInst = std::move(iff->FalseInst);
+        iff->FalseInst = std::move(t);
+        if (iff->TrueInst) iff->TrueInst->ChildIndex = 1;
+        if (iff->FalseInst) iff->FalseInst->ChildIndex = 2;
+        return cond;
+    }
+    return std::make_unique<Comp>(std::move(cond), std::make_unique<LdcI4>(0),
+                                    ComparisonKind::Equality);
+}
+
+// Invert `if (cond) br X else { exit }` to `if (!cond) { exit }` (fall-through
+// to X) when X is the next block in the container. Eliminates the goto to X.
+// The else must be an exit (EndPointUnreachable) so the true arm after the
+// swap is the sole terminating path; the false arm falls through.
+bool TryInvertIfExit(BlockContainer* container, std::size_t blockIndex) {
+    if (blockIndex + 1 >= container->Blocks.size()) return false;
+    Block* block = container->Blocks[blockIndex].get();
+    auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
+    if (!iff) return false;
+    if (!iff->TrueInst || iff->TrueInst->Op != OpCode::Branch) return false;
+    if (!iff->FalseInst) return false;
+    if (!HasFlag(iff->FalseInst->Flags(), InstructionFlags::EndPointUnreachable)) return false;
+    auto* br = static_cast<Branch*>(iff->TrueInst.get());
+    Block* target = br->TargetBlock;
+    if (!target || container->Blocks[blockIndex + 1].get() != target) return false;
+
+    // Negate condition, move the exit into the true arm, drop the goto.
+    iff->Condition = NegateCondition(std::move(iff->Condition));
+    if (iff->Condition) { iff->Condition->Parent = iff; iff->Condition->ChildIndex = 0; }
+    iff->TrueInst = std::move(iff->FalseInst);  // exit becomes the true arm
+    if (iff->TrueInst) { iff->TrueInst->Parent = iff; iff->TrueInst->ChildIndex = 1; }
+    iff->FalseInst.reset();  // drop the goto; fall through to target
+    return true;
+}
+
 } // namespace
 
 void ConditionDetection::Run(ILFunction& function, ILTransformContext& context) {
@@ -113,7 +171,21 @@ void ConditionDetection::Run(ILFunction& function, ILTransformContext& context) 
                 }
             }
         } while (changed);
+        // Invert if-goto-else-exit into if-not-cond-exit when the goto target is
+        // the fall-through block, eliminating the goto. Iterate to a fixpoint so
+        // a chain of if-throw checks collapses one block at a time.
+        bool inverted;
+        do {
+            inverted = false;
+            for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
+                if (TryInvertIfExit(c, i)) {
+                    inverted = true;
+                    break;
+                }
+            }
+        } while (inverted);
     });
+    RecomputeIncomingEdgeCounts(function);
 }
 
 } // namespace ILSpy::Decompiler::IL
