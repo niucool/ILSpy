@@ -34,6 +34,7 @@
 #include "Decompiler/IL/Transforms/RemoveInfeasiblePathTransform.hpp"
 #include "Decompiler/IL/Transforms/StObjToStLoc.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
+#include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/Metadata/ILTextEmitter.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
@@ -203,6 +204,12 @@ int main(int argc, char** argv) {
                 // Detect pinned regions (`fixed` blocks): must run after inlining
                 // and before loop detection (per the C# GetILTransforms() order).
                 ILSpy::Decompiler::IL::DetectPinnedRegions().Run(*fn, transformContext);
+                // Detect catch-when filter entry points: a `catch (T e) when (...)`
+                // filter starts with a redundant isinst type test (the catch is
+                // already typed T); drop it so the entry branches straight to the
+                // when-condition block. Must run after inlining and before loop
+                // detection (per the C# GetILTransforms() order).
+                ILSpy::Decompiler::IL::DetectCatchWhenConditionBlocks().Run(*fn, transformContext);
                 // Re-run CFS so the duplicated 1-pred return blocks merge and
                 // the single-definition variable inlines to `leave (expr)`.
                 ILSpy::Decompiler::IL::ControlFlowSimplification().Run(*fn, transformContext);

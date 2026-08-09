@@ -67,16 +67,22 @@ implemented and green here. Everything else follows the phase plan in
   detects IL `fixed` blocks: a pinned local's store + the region it covers are
   wrapped in a `PinnedRegion` (the GC-pin scope), the trailing unpin store is
   stripped on the region's single-predecessor exit, and the pin block falls
-  through to the exit. Parameter names and string literals (`ldstr`) now come
+  through to the exit. `DetectCatchWhenConditionBlocks` drops the redundant
+  isinst type test at the start of a `catch (T e) when (...)` filter (the catch
+  is already typed T), branching the entry straight to the when-condition
+  block. Parameter names and string literals (`ldstr`) now come
   from the metadata (Param table / #US heap).
-  11 of ~40 transforms ported. The CLI applies CFS + StObjToStLoc + ILInlining +
-  InlineReturnTransform + RemoveInfeasiblePath + DetectPinnedRegions + CFS +
+  12 of ~40 transforms ported. The CLI applies CFS + StObjToStLoc + ILInlining +
+  InlineReturnTransform + RemoveInfeasiblePath + DetectPinnedRegions +
+  DetectCatchWhenConditionBlocks + CFS +
   LoopDetection + ConditionDetection + AssignVariableNames + RemoveRedundantReturn
   before the C# seed, so `fixed (...) { ... }` now appears in the output. Next
-  per `GetILTransforms()`: SplitVariables (needs reaching-definitions dataflow),
+  per `GetILTransforms()`: the async/iterator state machines
+  (YieldReturnDecompiler/AsyncAwaitDecompiler), SplitVariables (needs
+  reaching-definitions dataflow),
   DetectExitPoints + the full ConditionDetection (multi-pred join blocks),
   HighLevelLoopTransform (while/for),
-  TransformAssignment, the async/iterator state machines, ...
+  TransformAssignment, ...
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end. It now produces readable C#: real parameter names (Param
