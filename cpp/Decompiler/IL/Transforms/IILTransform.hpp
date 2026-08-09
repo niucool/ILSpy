@@ -39,6 +39,18 @@ struct ILTransformSettings {
     // case order); true is a diffing aid for obfuscated assemblies. Used by
     // SwitchDetection.SortSwitchSections.
     bool SortSwitchSections = false;
+    // Whether to detect switches compiled to if-chains (non-contiguous case
+    // labels) and reconstruct them as SwitchInstructions. DecompilerSettings.
+    // SparseIntegerSwitch -- a C# 1.0 setting, default true. SwitchDetection.Run
+    // is a no-op when this is off.
+    bool SparseIntegerSwitch = true;
+    // Whether to delete unreachable blocks left over after a transform.
+    // DecompilerSettings.RemoveDeadAndSideEffectFreeCodeUseWithCaution -- an F#
+    // decompilation aid, default false. SwitchDetection uses it to choose
+    // between SortBlocks(deleteUnreachableBlocks) and Blocks.RemoveAll(empty);
+    // this port leaves the dead blocks in place either way (see D58), so the
+    // setting only affects whether the analysis allows unreachable cases.
+    bool RemoveDeadCode = false;
 };
 
 class ILTransformContext {

@@ -129,7 +129,7 @@ TEST(SwitchAnalysis, TwoCaseIfChainProducesThreeSections) {
     auto fx = BuildTwoCase(1, 2);
     SwitchAnalysis a;
     ASSERT_TRUE(a.AnalyzeBlock(fx.root));
-    EXPECT_EQ(a.SwitchVariable, fx.V.get());
+    EXPECT_EQ(a.SwitchVariable.get(), fx.V.get());
     EXPECT_FALSE(a.ContainsILSwitch);
     ASSERT_EQ(a.Sections.size(), 3u);
 
@@ -400,7 +400,7 @@ TEST(SwitchAnalysis, ILSwitchSetsContainsILSwitch) {
     a.AllowUnreachableCases = true;
     ASSERT_TRUE(a.AnalyzeBlock(root));
     EXPECT_TRUE(a.ContainsILSwitch);
-    EXPECT_EQ(a.SwitchVariable, V.get());
+    EXPECT_EQ(a.SwitchVariable.get(), V.get());
     auto* s0 = SectionFor(a.Sections, caseA);
     ASSERT_NE(s0, nullptr);
     EXPECT_TRUE(s0->Labels.Contains(0));
@@ -483,7 +483,7 @@ TEST(SwitchAnalysis, NonComparisonConditionFails) {
     // The true arm is a Leave (not a Branch to a block); the analysis creates a
     // section for it with the complement-of-{0} value set.
     ASSERT_TRUE(a.AnalyzeBlock(root));
-    EXPECT_EQ(a.SwitchVariable, V.get());
+    EXPECT_EQ(a.SwitchVariable.get(), V.get());
     // One section for the true arm (complement of {0}, body = Leave) and one
     // for the fall-through default (body = Branch to def). The Leave body is
     // not a Branch so SectionFor returns nullptr for it; the default branches

@@ -89,12 +89,12 @@ implemented and green here. Everything else follows the phase plan in
   `RemoveDeadStores` setting, with no loads or addresses, has its stores dropped
   (a pure value goes with the store; an impure value is unwrapped so its side
   effect survives), and dead-copy chains collapse via a recompute fixpoint.
-  16 of ~40 transforms ported. The switch-family foundation is now in place:
-  `LongSet`/`LongInterval` (Util/, ported from LongSet.cs / Interval.cs) -- an
-  immutable interval-set of longs whose complement is representable (unlike
-  `std::set<int64_t>`) -- backs `SwitchSection::Labels` and is the prerequisite
-  for SwitchAnalysis / SwitchDetection / SwitchOnString / SwitchOnNullable
-  (which compute value-set complements like `new LongSet(val).Invert()`).
+  17 of ~40 transforms ported. The switch-detection family is now complete in
+  its core: `LongSet`/`LongInterval` (Util/, ported from LongSet.cs /
+  Interval.cs) -- an immutable interval-set of longs whose complement is
+  representable (unlike `std::set<int64_t>`) -- backs `SwitchSection::Labels`
+  and is the prerequisite for the switch family (which computes value-set
+  complements like `new LongSet(val).Invert()`).
   `SwitchAnalysis` (ControlFlow/, ported from SwitchAnalysis.cs) is the
   analysis helper SwitchDetection depends on: it reconstructs a C# switch
   compiled to if-statements (non-contiguous case labels) as a list of
@@ -103,46 +103,35 @@ implemented and green here. Everything else follows the phase plan in
   (all-except-0), `logic.not` unwrap, and an existing IL `switch(V +/- val)` --
   adapted to this port's if-as-final block model (the false arm is the next
   block in the container, with a synthesized-Branch section body).
-  `SwitchDetection` (ControlFlow/, ported from SwitchDetection.cs) lands its
-  self-contained subset first: `SimplifySwitchInstruction` -- the static method
-  the C# pipeline calls twice (1st pass from ControlFlowSimplification, 2nd
-  from SwitchDetection.ProcessBlock) -- de-duplicates sections branching to
-  the same block (merging label sets), moves an Add/Sub offset from
-  `switch(V +/- val)` into the labels (AdjustLabels), and sorts the sections
-  (by branch-target offset by default, or by label value when the
-  `SortSwitchSections` setting is on). It is wired into CFS as the 1st pass,
-  so it runs on every SwitchInstruction the reader emits from a `switch`
-  opcode today. The full `SwitchDetection.Run` (reconstructing a switch from a
-  detected if-chain via `UseCSharpSwitch`) is deferred pending its
-  `LoopContext` / `HighLevelLoopTransform` / `NullableLiftingTransform` /
-  `SwitchOnStringTransform` dependencies; the continue/break analysis half of
-  that is now in place: `SwitchDetection.LoopContext` (ControlFlow/, the
-  continue-depth + break-target analysis over the per-container CFG dominator
-  tree) plus the `HighLevelLoopTransform` static helpers it calls
-  (`MatchIncrement`, `MatchIncrementBlock`, `MatchDoWhileConditionBlock`,
-  `IsSimpleStatement` -- the shape matchers that identify the back-edge blocks a
-  `continue;` jumps to, adapted to the if-as-final block model), so the only
-  pieces left for `SwitchDetection.Run` are the `UseCSharpSwitch` heuristic
-  (AnalyzeControlFlow/SwitchUsesGoto/IsSingleCondition), the
-  `SparseIntegerSwitch` setting gate, and the still-deferred
-  `NullableLiftingTransform.MatchHasValueCall` (AddNullCase) and
-  `SwitchOnStringTransform.MatchComputeStringOrReadOnlySpanHashCall`
-  (MatchRoslynSwitchOnString). The CLI applies CFS + StObjToStLoc + ILInlining +
-  InlineReturnTransform + RemoveInfeasiblePath + DetectPinnedRegions +
-  DetectCatchWhenConditionBlocks + LdLocaDupInitObjTransform +
-  EarlyExpressionTransforms + RemoveDeadVariableInit + CFS +
-  LoopDetection + ConditionDetection + AssignVariableNames + RemoveRedundantReturn
-  before the C# seed, so `fixed (...) { ... }` and `default(T)` now appear in
-  the output. Next
-  per `GetILTransforms()`: the rest of SwitchDetection (the `Run`/ProcessBlock
-  path that consumes SwitchAnalysis to build a SwitchInstruction from the
-  detected if-chain sections via `UseCSharpSwitch` -- now needs only the
-  `SparseIntegerSwitch` setting and the `UseCSharpSwitch` heuristic, since the
-  `LoopContext`/`ControlFlowGraph` continue-break analysis and the
-  `HighLevelLoopTransform` `MatchIncrementBlock`/`MatchDoWhileConditionBlock`
-  helpers it depends on are now ported), then
-  SwitchOnString/SwitchOnNullable (need `SwitchStatementOnString`/`LiftNullables`
-  settings and the `NullableLiftingTransform`/`SwitchOnStringTransform` helpers),
+  `SwitchDetection` (ControlFlow/, ported from SwitchDetection.cs) is the full
+  transform: `SimplifySwitchInstruction` (de-dup sections branching to the
+  same block, AdjustLabels for `switch(V +/- val)`, SortSwitchSections) is the
+  static method the C# pipeline calls twice (1st pass from CFS, 2nd from
+  ProcessBlock); `Run` iterates every container, and per block runs
+  SwitchAnalysis then `UseCSharpSwitch` -- when the if-chain forms a switch,
+  it builds a `SwitchInstruction` from the detected sections (cloning the
+  bodies, since this port has no GC to keep them alive after the inner blocks
+  are cleared), replaces the block's tail, drops the absorbed inner blocks,
+  and sorts the sections; otherwise it runs `SimplifySwitchInstruction` (2nd
+  pass). `UseCSharpSwitch` ports the full heuristic (the default-section
+  lookup, the `ContainsILSwitch` early return, the `ifCount < intervalCount`
+  guard, `AnalyzeControlFlow` + the CFG/LoopContext continue-break analysis,
+  `IsSingleCondition` for single short-circuited conditions, and
+  `SwitchUsesGoto` to avoid poor-quality switches with gotos), adapted to the
+  if-as-final block model. The deferred pieces are `MatchRoslynSwitchOnString`
+  (needs `SwitchOnStringTransform.MatchComputeStringOrReadOnlySpanHashCall`),
+  `AddNullCase` (needs `NullableLiftingTransform.MatchHasValueCall`), and
+  `InlineSwitchExpressionDefaultCaseThrowHelper` (needs `IMethod`/`IType`
+  resolution). Gated on the `SparseIntegerSwitch` setting (default true).
+  The CLI applies CFS + StObjToStLoc + ILInlining + InlineReturnTransform +
+  RemoveInfeasiblePath + DetectPinnedRegions + DetectCatchWhenConditionBlocks +
+  LdLocaDupInitObjTransform + EarlyExpressionTransforms + RemoveDeadVariableInit +
+  CFS + SwitchDetection + LoopDetection + ConditionDetection + AssignVariableNames +
+  RemoveRedundantReturn before the C# seed, so `fixed (...) { ... }`, `default(T)`,
+  and reconstructed `switch` statements now appear in the output. Next
+  per `GetILTransforms()`: SwitchOnString/SwitchOnNullable (need
+  `SwitchStatementOnString`/`LiftNullables` settings and the
+  `NullableLiftingTransform`/`SwitchOnStringTransform` helpers),
   the async/iterator state machines
   (YieldReturnDecompiler/AsyncAwaitDecompiler), SplitVariables (needs
   reaching-definitions dataflow),

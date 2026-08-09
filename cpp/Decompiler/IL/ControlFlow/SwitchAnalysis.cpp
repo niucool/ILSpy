@@ -70,7 +70,7 @@ Block* NextBlockInContainer(Block* block) {
 } // namespace
 
 bool SwitchAnalysis::AnalyzeBlock(Block* block) {
-    SwitchVariable = nullptr;
+    SwitchVariable.reset();
     RootBlock = block;
     targetBlockToSectionIndex_.clear();
     targetContainerToSectionIndex_.clear();
@@ -239,10 +239,10 @@ bool SwitchAnalysis::MatchSwitchVar(ILInstruction* inst) {
     if (!inst || inst->Op != OpCode::LdLoc)
         return false;
     auto* ld = static_cast<LdLoc*>(inst);
-    if (SwitchVariable != nullptr) {
-        return ld->Variable.get() == SwitchVariable;
+    if (SwitchVariable) {
+        return ld->Variable == SwitchVariable;
     }
-    SwitchVariable = ld->Variable.get();
+    SwitchVariable = ld->Variable;
     return true;
 }
 

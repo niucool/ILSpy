@@ -59,9 +59,10 @@ struct SwitchSectionResult {
 
 class SwitchAnalysis {
 public:
-    // The variable that is used to represent the switch expression. nullptr
-    // while analyzing the first block; set by the first successful MatchSwitchVar.
-    ILVariable* SwitchVariable = nullptr;
+    // The variable that is used to represent the switch expression. Null while
+    // analyzing the first block; set by the first successful MatchSwitchVar.
+    // Held as a shared_ptr so SwitchDetection can build a LdLoc from it.
+    ILVariablePtr SwitchVariable;
 
     // Whether at least one of the analyzed blocks contained an IL switch
     // instruction.

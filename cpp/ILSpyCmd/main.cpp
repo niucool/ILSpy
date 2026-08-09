@@ -28,6 +28,7 @@
 #include "Decompiler/IL/ControlFlow/DetectPinnedRegions.hpp"
 #include "Decompiler/IL/ControlFlow/LoopDetection.hpp"
 #include "Decompiler/IL/ControlFlow/RemoveRedundantReturn.hpp"
+#include "Decompiler/IL/ControlFlow/SwitchDetection.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Transforms/InlineReturnTransform.hpp"
@@ -238,6 +239,13 @@ int main(int argc, char** argv) {
                 // Re-run CFS so the duplicated 1-pred return blocks merge and
                 // the single-definition variable inlines to `leave (expr)`.
                 ILSpy::Decompiler::IL::ControlFlowSimplification().Run(*fn, transformContext);
+                // SwitchDetection: reconstruct a C# switch compiled to a sequence
+                // of if-statements (non-contiguous case labels) as a single
+                // SwitchInstruction, and run SimplifySwitchInstruction as the 2nd
+                // pass on the SwitchInstructions the reader emits. Runs after the
+                // second CFS and before LoopDetection (per GetILTransforms()), so
+                // loops are still flat back-edges the continue/break analysis walks.
+                ILSpy::Decompiler::IL::SwitchDetection().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::LoopDetection().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::ConditionDetection().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::AssignVariableNames().Run(*fn, transformContext);

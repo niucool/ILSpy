@@ -17,31 +17,46 @@
 // DEALINGS IN THE SOFTWARE.
 
 // SwitchDetection tests for the SimplifySwitchInstruction subset: de-dup
-// sections branching to the same block, move an Add/Sub offset from the switch
-// value into the labels (AdjustLabels), and sort the sections (SortSwitchSections).
-// The full SwitchDetection.Run (UseCSharpSwitch/LoopContext/AddNullCase) is
-// deferred pending its HighLevelLoopTransform / NullableLiftingTransform
-// dependencies; these tests cover the self-contained piece CFS calls as its
-// 1st pass, which runs on the SwitchInstructions the IL reader emits.
+// SwitchDetection tests: the SimplifySwitchInstruction subset (de-dup,
+// AdjustLabels, SortSwitchSections) and the full Run/ProcessBlock path that
+// reconstructs a C# switch compiled to a sequence of if-statements (non-
+// contiguous case labels) as a single SwitchInstruction via UseCSharpSwitch.
+// The deferred pieces (MatchRoslynSwitchOnString, AddNullCase,
+// InlineSwitchExpressionDefaultCaseThrowHelper) are skipped -- the former two
+// need SwitchOnStringTransform / NullableLiftingTransform helpers, the latter
+// needs IMethod/IType resolution.
 
 #include "Decompiler/IL/ControlFlow/SwitchDetection.hpp"
+#include "Decompiler/IL/ControlFlow/ControlFlowSimplification.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
+#include "Decompiler/IL/ControlFlow/DetectPinnedRegions.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/StackType.hpp"
-#include "Decompiler/IL/ControlFlow/ControlFlowSimplification.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
-#include "Decompiler/Util/LongSet.hpp"
+#include "Decompiler/IL/Transforms/StObjToStLoc.hpp"
+#include "Decompiler/IL/Transforms/ILInlining.hpp"
+#include "Decompiler/IL/Transforms/InlineReturnTransform.hpp"
+#include "Decompiler/IL/Transforms/RemoveInfeasiblePathTransform.hpp"
+#include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
+#include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
+#include "Decompiler/IL/Transforms/EarlyExpressionTransforms.hpp"
+#include "Decompiler/IL/Transforms/RemoveDeadVariableInit.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/Util/LongSet.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 
 #include <gtest/gtest.h>
@@ -55,6 +70,8 @@
 using namespace ILSpy::Decompiler::IL;
 using ILSpy::Decompiler::Util::LongSet;
 using ILSpy::Decompiler::Metadata::MetadataFile;
+using ILSpy::Decompiler::TypeSystem::KnownType;
+using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
 
 namespace {
 
@@ -442,4 +459,217 @@ TEST(SwitchDetection, MscorlibCfsSweepPreservesInvariant) {
     // so the transform is exercised; de-dup can only reduce the section count.
     EXPECT_GT(switchMethods, 0);
     EXPECT_LE(totalSectionsAfter, totalSectionsBefore);
+}
+
+// ---------------------------------------------------------------------------
+// Run / ProcessBlock / UseCSharpSwitch -- the full SwitchDetection transform.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+ILVariablePtr MakeTypedLocal(std::string name, KnownTypeCode code) {
+    auto v = std::make_shared<ILVariable>(VariableKind::Local,
+                                         std::make_shared<KnownType>(code), 0);
+    v->Name = std::move(name);
+    return v;
+}
+
+// Build an if-chain that tests one int variable: `if (V == 0) br caseA; if
+// (V == 1) br caseB; [default] leave`. The blocks are laid out so the root's
+// fall-through is the second if-test (an inner block), whose fall-through is
+// the default/exit. caseA/caseB are the case targets. Returns the function,
+// the root block, the inner (second if-test) block, and the case blocks.
+struct IfChainSwitch {
+    std::unique_ptr<ILFunction> fn;
+    Block* root;    // if (V == 0) br caseA
+    Block* inner;   // if (V == 1) br caseB  (absorbed by the switch)
+    Block* def;     // leave (the default/exit)
+    Block* caseA;
+    Block* caseB;
+    ILVariablePtr V;
+};
+
+IfChainSwitch BuildIfChainSwitch() {
+    IfChainSwitch fx;
+    fx.fn = std::make_unique<ILFunction>();
+    fx.fn->Body = std::make_unique<BlockContainer>();
+    fx.fn->Body->Parent = fx.fn.get();
+    fx.fn->Body->ChildIndex = 0;
+    fx.V = MakeTypedLocal("V", KnownTypeCode::Int32);
+    fx.fn->Variables.push_back(fx.V);
+    for (int i = 0; i < 5; ++i) fx.fn->Body->AddBlock(std::make_unique<Block>());
+    fx.root = fx.fn->Body->Blocks[0].get();
+    fx.inner = fx.fn->Body->Blocks[1].get();
+    fx.def = fx.fn->Body->Blocks[2].get();
+    fx.caseA = fx.fn->Body->Blocks[3].get();
+    fx.caseB = fx.fn->Body->Blocks[4].get();
+    // root: if (V == 0) br caseA; fall-through to inner
+    fx.root->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(fx.V), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Equality),
+        std::make_unique<Branch>(fx.caseA), nullptr));
+    // inner: if (V == 1) br caseB; fall-through to def
+    fx.inner->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(fx.V), std::make_unique<LdcI4>(1),
+                               ComparisonKind::Equality),
+        std::make_unique<Branch>(fx.caseB), nullptr));
+    fx.def->SetFinal(std::make_unique<Leave>(fx.fn->Body.get()));
+    fx.caseA->SetFinal(std::make_unique<Leave>(fx.fn->Body.get()));
+    fx.caseB->SetFinal(std::make_unique<Leave>(fx.fn->Body.get()));
+    RecomputeIncomingEdgeCounts(*fx.fn);
+    return fx;
+}
+
+} // namespace
+
+// An if-chain `if (V == 0) br caseA; if (V == 1) br caseB; [default] leave` is
+// reconstructed as a single SwitchInstruction with three sections ({0}->caseA,
+// {1}->caseB, {complement-of-0,1}->def). The absorbed inner if-test block is
+// removed; the switch value is the bare variable (Int32 -> no Conv widen).
+TEST(SwitchDetection, RunReconstructsIfChainAsSwitch) {
+    auto fx = BuildIfChainSwitch();
+    ASSERT_EQ(fx.fn->Body->Blocks.size(), 5u);
+    ILTransformContext ctx;
+    SwitchDetection().Run(*fx.fn, ctx);
+
+    ASSERT_TRUE(fx.root->FinalInstruction);
+    ASSERT_EQ(fx.root->FinalInstruction->Op, OpCode::SwitchInstruction);
+    auto* sw = static_cast<SwitchInstruction*>(fx.root->FinalInstruction.get());
+    // The switch value is the bare variable (Int32 is I4, so no Conv widen).
+    ASSERT_EQ(sw->Value->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(sw->Value.get())->Variable.get(), fx.V.get());
+    // Three sections: {0}->caseA, {1}->caseB, {complement}->def.
+    ASSERT_EQ(sw->Sections.size(), 3u);
+    bool foundA = false, foundB = false, foundDef = false;
+    for (const auto& s : sw->Sections) {
+        Block* t = SectionTarget(*s);
+        if (t == fx.caseA) {
+            foundA = true;
+            EXPECT_TRUE(s->Labels.Contains(0));
+            EXPECT_EQ(s->Labels.Count(), 1u);
+        } else if (t == fx.caseB) {
+            foundB = true;
+            EXPECT_TRUE(s->Labels.Contains(1));
+            EXPECT_EQ(s->Labels.Count(), 1u);
+        } else if (t == fx.def) {
+            foundDef = true;
+            // The default is the complement of {0,1}: huge, and not 0 or 1.
+            EXPECT_FALSE(s->Labels.Contains(0));
+            EXPECT_FALSE(s->Labels.Contains(1));
+            EXPECT_GT(s->Labels.Count(), 100u);
+        }
+    }
+    EXPECT_TRUE(foundA);
+    EXPECT_TRUE(foundB);
+    EXPECT_TRUE(foundDef);
+    // The inner if-test block was absorbed and removed; the container now has
+    // 4 blocks (root, def, caseA, caseB).
+    EXPECT_EQ(fx.fn->Body->Blocks.size(), 4u);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+}
+
+// When SparseIntegerSwitch is off, Run is a no-op: the if-chain stays as ifs.
+TEST(SwitchDetection, RunIsNoOpWhenSparseIntegerSwitchOff) {
+    auto fx = BuildIfChainSwitch();
+    ILTransformContext ctx;
+    ctx.Settings.SparseIntegerSwitch = false;
+    SwitchDetection().Run(*fx.fn, ctx);
+    // The root's final is still the if (not a switch); the inner block remains.
+    ASSERT_TRUE(fx.root->FinalInstruction);
+    EXPECT_EQ(fx.root->FinalInstruction->Op, OpCode::IfInstruction);
+    EXPECT_EQ(fx.fn->Body->Blocks.size(), 5u);
+    fx.fn->CheckInvariant(ILPhase::Normal);
+}
+
+// A block that does not form a switch (a plain if/branch with no integer
+// variable to switch on, or a single non-recursive block) is left alone -- Run
+// falls through to the 2nd-pass SimplifySwitchInstruction (a no-op on a non-
+// switch final).
+TEST(SwitchDetection, RunLeavesNonSwitchBlockAlone) {
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto V = MakeTypedLocal("V", KnownTypeCode::Int32);
+    fn->Variables.push_back(V);
+    for (int i = 0; i < 2; ++i) fn->Body->AddBlock(std::make_unique<Block>());
+    Block* root = fn->Body->Blocks[0].get();
+    Block* next = fn->Body->Blocks[1].get();
+    root->SetFinal(std::make_unique<Branch>(next));
+    next->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    RecomputeIncomingEdgeCounts(*fn);
+    ILTransformContext ctx;
+    SwitchDetection().Run(*fn, ctx);
+    EXPECT_EQ(root->FinalInstruction->Op, OpCode::Branch);
+    EXPECT_EQ(fn->Body->Blocks.size(), 2u);
+    fn->CheckInvariant(ILPhase::Normal);
+}
+
+// An existing IL SwitchInstruction (the reader emits one from a `switch`
+// opcode) is handled by Run without crashing: with the default settings
+// (RemoveDeadCode off), a switch with a default section is not rebuilt (the
+// analysis bails on the empty default), so Run runs the 2nd-pass
+// SimplifySwitchInstruction on it -- the switch stays a switch.
+TEST(SwitchDetection, RunHandlesExistingILSwitch) {
+    auto V = MakeTypedLocal("V", KnownTypeCode::Int32);
+    auto b = BuildSwitchOnLdLoc(V, {{0, 10}, {1, 20}}, 30);
+    ILTransformContext ctx;
+    SwitchDetection().Run(*b.fn, ctx);
+    // The root still ends in a SwitchInstruction.
+    ASSERT_TRUE(b.root->FinalInstruction);
+    EXPECT_EQ(b.root->FinalInstruction->Op, OpCode::SwitchInstruction);
+    b.fn->CheckInvariant(ILPhase::Normal);
+}
+
+// On the real mscorlib corpus, running the full pre-pipeline through
+// SwitchDetection.Run (at the GetILTransforms() position: after the second CFS,
+// before LoopDetection) must not crash and must preserve the ILAst invariant
+// across thousands of methods.
+TEST(SwitchDetection, MscorlibRunSweepPreservesInvariant) {
+#if defined(_WIN32)
+    const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    int processed = 0;
+    int switchesBefore = 0;
+    int switchesAfter = 0;
+    ILTransformContext ctx;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++processed;
+        // Pre-pipeline through the second CFS, then SwitchDetection (the
+        // GetILTransforms() position -- before LoopDetection).
+        ControlFlowSimplification().Run(*fn, ctx);
+        StObjToStLoc().Run(*fn, ctx);
+        ILInlining().Run(*fn, ctx);
+        InlineReturnTransform().Run(*fn, ctx);
+        RemoveInfeasiblePathTransform().Run(*fn, ctx);
+        DetectPinnedRegions().Run(*fn, ctx);
+        DetectCatchWhenConditionBlocks().Run(*fn, ctx);
+        LdLocaDupInitObjTransform().Run(*fn, ctx);
+        EarlyExpressionTransforms().Run(*fn, ctx);
+        RemoveDeadVariableInit().Run(*fn, ctx);
+        ControlFlowSimplification().Run(*fn, ctx);
+        Walk(fn->Body.get(), [&](ILInstruction* i) {
+            if (i->Op == OpCode::SwitchInstruction) ++switchesBefore;
+        });
+        SwitchDetection().Run(*fn, ctx);
+        Walk(fn->Body.get(), [&](ILInstruction* i) {
+            if (i->Op == OpCode::SwitchInstruction) ++switchesAfter;
+        });
+        fn->CheckInvariant(ILPhase::Normal);
+        if (processed >= 8000) break;
+    }
+    EXPECT_GT(processed, 5000);
+    // The reader emits real SwitchInstructions from `switch` opcodes; Run must
+    // not drop them (the 2nd-pass SimplifySwitchInstruction keeps them, and the
+    // if-chain reconstruction only adds switches).
+    EXPECT_GE(switchesAfter, switchesBefore);
 }
