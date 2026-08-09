@@ -18,16 +18,28 @@
 
 #include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
 
+#include "Decompiler/IL/InstructionFlags.hpp"
 #include "Decompiler/IL/ILInstruction.hpp"
+#include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Instructions/Conv.hpp"
 #include "Decompiler/IL/Instructions/DefaultValue.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
+#include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/Util/BitSet.hpp"
 
+#include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace ILSpy::Decompiler::IL {
 
@@ -76,6 +88,37 @@ bool MatchLogicNot(ILInstruction* inst, ILInstruction*& arg) {
     if (static_cast<LdcI4*>(comp->Right.get())->Value != 0) return false;
     arg = comp->Left.get();
     return true;
+}
+
+// Clone a pure expression (no side effects) so a lifted binary can embed a
+// non-nullable pure operand independently of the original (DoLift "Creates a
+// new lifted instruction without modifying the input instruction"). The C#
+// uses a general virtual Clone(); this port has none, so the simple pure loads
+// (the common operands -- constants and ldloc) are cloned and an uncloneable
+// pure expression returns null, which makes DoLiftBinary bail (return failure)
+// and the if stays as-is -- conservative-correct (the C# would embed it, this
+// port leaves the block). Mirrors the ClonePureLoad fast path in
+// ControlFlowSimplification (the same instruction kinds).
+std::unique_ptr<ILInstruction> ClonePureExpression(const ILInstruction* v) {
+    if (!v) return nullptr;
+    switch (v->Op) {
+        case OpCode::LdLoc:
+            return std::make_unique<LdLoc>(static_cast<const LdLoc*>(v)->Variable);
+        case OpCode::LdcI4:
+            return std::make_unique<LdcI4>(static_cast<const LdcI4*>(v)->Value);
+        case OpCode::LdcI8:
+            return std::make_unique<LdcI8>(static_cast<const LdcI8*>(v)->Value);
+        case OpCode::LdcF4:
+            return std::make_unique<LdcF4>(static_cast<const LdcF4*>(v)->Value);
+        case OpCode::LdcF8:
+            return std::make_unique<LdcF8>(static_cast<const LdcF8*>(v)->Value);
+        case OpCode::LdNull:
+            return std::make_unique<LdNull>();
+        case OpCode::LdStr:
+            return std::make_unique<LdStr>(static_cast<const LdStr*>(v)->Value);
+        default:
+            return nullptr;
+    }
 }
 
 } // namespace
@@ -256,6 +299,197 @@ bool NullableLiftingTransform::MatchNull(ILInstruction* inst, const TypeSystem::
     if (!ut) return false;
     underlyingType = ut;
     return true;
+}
+
+NullableLiftingTransform::DoLiftResult NullableLiftingTransform::DoLift(
+    ILInstruction* inst, const std::vector<ILVariablePtr>& nullableVars) {
+    // Port of NullableLiftingTransform.DoLift(inst). The 5 self-contained cases
+    // are ported; the 6th (a Call to a user-defined operator) is deferred and
+    // falls through to the failure return. Each case builds a NEW lifted
+    // instruction from the shape inside `inst` without modifying `inst` (the
+    // C# "Creates a new lifted instruction without modifying the input").
+    DoLiftResult failure{};  // (null Lifted, null Bits)
+    if (!inst) return failure;
+
+    // Case 1: `call GetValueOrDefault(ldloca v)` -> `ldloc v`. The relevance
+    // bitset marks every nullableVars[i] equal to v.
+    ILVariablePtr v;
+    if (MatchGetValueOrDefault(inst, v)) {
+        auto bits = std::make_unique<BitSet>(static_cast<int>(nullableVars.size()));
+        bool found = false;
+        for (std::size_t i = 0; i < nullableVars.size(); ++i) {
+            if (nullableVars[i].get() == v.get()) {
+                bits->Set(static_cast<int>(i));
+                found = true;
+            }
+        }
+        if (!found) return failure;  // GVO on a var not in nullableVars
+        DoLiftResult r;
+        r.Lifted = std::make_unique<LdLoc>(v);
+        r.Bits = std::move(bits);
+        return r;
+    }
+
+    // Case 2: Conv -> lifted Conv (gated on the MayThrow/CheckForOverflow guard:
+    // a checked conv may throw, so it lifts only when every nullableVar is its
+    // argument, else the lift would drop the throw when a var is null).
+    if (inst->Op == OpCode::Conv) {
+        auto* conv = static_cast<Conv*>(inst);
+        auto argR = DoLift(conv->Argument.get(), nullableVars);
+        if (argR.Lifted) {
+            if (conv->CheckForOverflow && argR.Bits &&
+                !argR.Bits->All(0, static_cast<int>(nullableVars.size()))) {
+                return failure;
+            }
+            DoLiftResult r;
+            r.Bits = std::move(argR.Bits);
+            r.Lifted = std::make_unique<Conv>(
+                std::move(argR.Lifted),
+                conv->InputType, conv->InputSign, conv->TargetType,
+                conv->CheckForOverflow, /*isLifted=*/true);
+            return r;
+        }
+        return failure;
+    }
+
+    // Case 3: BitNot -> lifted BitNot.
+    if (inst->Op == OpCode::BitNot) {
+        auto* bitnot = static_cast<BitNot*>(inst);
+        auto argR = DoLift(bitnot->Argument.get(), nullableVars);
+        if (argR.Lifted) {
+            DoLiftResult r;
+            r.Bits = std::move(argR.Bits);
+            r.Lifted = std::make_unique<BitNot>(
+                std::move(argR.Lifted), /*isLifted=*/true, bitnot->ResultType());
+            return r;
+        }
+        return failure;
+    }
+
+    // Case 4: BinaryNumericInstruction -> lifted binary via DoLiftBinary (the
+    // MayThrow guard: a checked or div/rem binary may throw; lifts only when
+    // every nullableVar is its argument). This port's BNI DirectFlags is None
+    // (the MayThrow for CheckForOverflow/Div/Rem is computed inline here,
+    // matching the C# HasDirectFlag(MayThrow)). DoLiftBinary returns the lifted
+    // left + right; the lifted BNI is built from them.
+    if (inst->Op == OpCode::BinaryNumericInstruction) {
+        auto* bni = static_cast<BinaryNumericInstruction*>(inst);
+        auto binR = DoLiftBinary(bni->Left.get(), bni->Right.get(),
+                                  nullptr, nullptr, nullableVars);
+        if (binR.Left && binR.Right) {
+            bool mayThrow = bni->CheckForOverflow ||
+                            bni->Operator == BinaryNumericOperator::Div ||
+                            bni->Operator == BinaryNumericOperator::Rem;
+            if (mayThrow && binR.Bits &&
+                !binR.Bits->All(0, static_cast<int>(nullableVars.size()))) {
+                return failure;
+            }
+            DoLiftResult r;
+            r.Bits = std::move(binR.Bits);
+            r.Lifted = std::make_unique<BinaryNumericInstruction>(
+                std::move(binR.Left), std::move(binR.Right), bni->Operator,
+                bni->ResultStackType, bni->CheckForOverflow, bni->Signed,
+                /*isLifted=*/true);
+            return r;
+        }
+        return failure;
+    }
+
+    // Case 5: the bool? operator! Comp -- `comp(eq, call GetValueOrDefault(
+    // ldloca v), ldc.i4 0)` on a Nullable<bool> -> a ThreeValuedLogic-lifted
+    // Comp. C# doesn't support ThreeValuedLogic except for operator! on bool?.
+    if (inst->Op == OpCode::Comp) {
+        auto* comp = static_cast<Comp*>(inst);
+        if (!comp->IsLifted() && comp->Kind == ComparisonKind::Equality) {
+            ILVariablePtr cv;
+            if (MatchGetValueOrDefault(comp->Left.get(), cv) &&
+                std::any_of(nullableVars.begin(), nullableVars.end(),
+                            [&](const ILVariablePtr& nv) { return nv.get() == cv.get(); }) &&
+                IsKnownType(GetUnderlyingTypeOfNullable(cv->Type.get()),
+                            TypeSystem::KnownTypeCode::Boolean) &&
+                comp->Right && comp->Right->Op == OpCode::LdcI4 &&
+                static_cast<LdcI4*>(comp->Right.get())->Value == 0) {
+                auto argR = DoLift(comp->Left.get(), nullableVars);
+                // The inner GVO is in nullableVars (checked above), so argR
+                // succeeds; clone the ldc.i4 0 right operand.
+                auto rightClone = ClonePureExpression(comp->Right.get());
+                if (argR.Lifted && rightClone) {
+                    DoLiftResult r;
+                    r.Bits = std::move(argR.Bits);
+                    r.Lifted = std::make_unique<Comp>(
+                        std::move(argR.Lifted), std::move(rightClone),
+                        comp->Kind, ComparisonLiftingKind::ThreeValuedLogic,
+                        comp->InputType, comp->Unsigned);
+                    return r;
+                }
+                return failure;
+            }
+        }
+        return failure;
+    }
+
+    // Case 6 (Call to a user-defined operator) is deferred: needs
+    // Call.Method.IsOperator + CSharpOperators.LiftUserDefinedOperator. Returns
+    // failure (the if stays as-is), matching the C# fall-through.
+    return failure;
+}
+
+NullableLiftingTransform::DoLiftBinaryResult NullableLiftingTransform::DoLiftBinary(
+    ILInstruction* lhs, ILInstruction* rhs,
+    const TypeSystem::IType* leftExpectedType, const TypeSystem::IType* rightExpectedType,
+    const std::vector<ILVariablePtr>& nullableVars) {
+    // Port of NullableLiftingTransform.DoLiftBinary. Lifts both sides; when one
+    // side lifts and the other is a pure non-nullable expression, the pure side
+    // is embedded (NewNullable) so the lifted binary has two nullable operands.
+    DoLiftBinaryResult failure{};  // (null, null, null)
+    auto leftR = DoLift(lhs, nullableVars);
+    auto rightR = DoLift(rhs, nullableVars);
+    if (leftR.Lifted && !rightR.Lifted && IsPure(rhs->Flags())) {
+        // Embed the non-nullable pure rhs in a lifted Nullable<T>. Clone it
+        // (DoLift builds a new instruction without modifying the input); an
+        // uncloneable pure rhs makes this bail (conservative -- the C# would
+        // embed it, this port leaves the binary un-lifted).
+        auto clone = ClonePureExpression(rhs);
+        if (!clone) return failure;
+        rightR.Lifted = NewNullable(std::move(clone), rightExpectedType);
+        // rightR.Bits stays null (the embedded operand contributes no nullable
+        // var), matching the C# `right = NewNullable(...)` (no bits assigned).
+    }
+    if (!leftR.Lifted && rightR.Lifted && IsPure(lhs->Flags())) {
+        auto clone = ClonePureExpression(lhs);
+        if (!clone) return failure;
+        leftR.Lifted = NewNullable(std::move(clone), leftExpectedType);
+    }
+    if (leftR.Lifted && rightR.Lifted) {
+        DoLiftBinaryResult r;
+        // `bits = leftBits ?? rightBits; if (rightBits != null) bits.UnionWith(...)`.
+        // The embedded side's bits are null, so the union degenerates to the
+        // lifted side's bits; when both lifted, both contribute.
+        std::unique_ptr<BitSet> bits = std::move(leftR.Bits);
+        if (!bits) bits = std::move(rightR.Bits);
+        else if (rightR.Bits) bits->UnionWith(*rightR.Bits);
+        r.Left = std::move(leftR.Lifted);
+        r.Right = std::move(rightR.Lifted);
+        r.Bits = std::move(bits);
+        return r;
+    }
+    return failure;
+}
+
+std::unique_ptr<ILInstruction> NullableLiftingTransform::NewNullable(
+    std::unique_ptr<ILInstruction> inst, const TypeSystem::IType* underlyingType) {
+    // Port of NullableLiftingTransform.NewNullable(inst, underlyingType). A
+    // null underlyingType (the SpecialType.UnknownType sentinel -- this port
+    // has no SpecialType) returns `inst` unchanged, matching the C#
+    // `if (underlyingType == SpecialType.UnknownType) return inst`. A real type
+    // would build `new Nullable<T>(inst)` (a newobj Call with a Nullable<T>
+    // declaring type); that path is deferred -- it needs constructing a
+    // Nullable<T> IType from the non-owning `underlyingType` (this port's IType
+    // has no virtual Clone, and the only caller in the wired DoLift path passes
+    // UnknownType for both operands, so the real-type path does not fire yet).
+    // The deferred LiftCSharpComparison path will need a faithful NewNullable.
+    (void)underlyingType;
+    return inst;
 }
 
 } // namespace ILSpy::Decompiler::IL

@@ -57,6 +57,7 @@
 #include "Decompiler/IL/Instructions/Conv.hpp"
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
@@ -2796,6 +2797,130 @@ TEST(ExpressionTransforms, RunIfNullableLiftFoldsGetValueOrDefaultRejectsDiffere
 
     EXPECT_EQ(CountNullCoalescing(*fn), 0)
         << "a GVO on a different variable must not fold (match-against-v fails)";
+}
+
+// RunIfNullableLift AnalyzeCondition/LiftNormal DoLift path (the LiftNormal
+// else-branch after the conv.nop.lifted case): `v.HasValue ? conv.i4(GVO(v)) :
+// fallback` => `conv.lifted(ldloc v) ?? fallback`. The true arm is a Conv
+// wrapping a GVO (not a bare GVO, so the conv.nop.lifted case does not fire);
+// DoLift(Conv) recursively lifts the inner GVO to `ldloc v` and builds a lifted
+// Conv. The wrap is NullableWithValueFallback (the non-NullableCtor case), so
+// the result is a NullCoalescingInstruction(NullableWithValueFallback) whose
+// ValueInst is the lifted Conv. The if is a sub-expression value (a stloc), so
+// the fold is a clean ReplaceWith (no block-model adaptation).
+TEST(ExpressionTransforms, RunIfNullableLiftFoldsHasValueConvGetValueOrDefault) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto fallback = MakeLocal("fallback", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto gvo = MakeGVOCall(v);  // call GetValueOrDefault(ldloca v) on Nullable<int>
+    gvo->ReturnType = StackType::I4;  // GVO on Nullable<int> returns int (I4)
+    // true arm: conv.i4(GVO(v)) -- a Conv wrapping the GVO (not a bare GVO).
+    auto trueArm = std::make_unique<Conv>(
+        std::move(gvo), PrimitiveType::I4, false, Sign::Signed);
+    auto iff = std::make_unique<IfInstruction>(
+        MakeHasValueCall(v),                 // condition: v.HasValue (collects v)
+        std::move(trueArm),                  // true arm: conv.i4(GVO(v))
+        std::make_unique<LdLoc>(fallback));  // false arm: ldloc fallback (an int)
+    auto fn = MakeFnWithBlock({result, v, fallback});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountNullCoalescing(*fn), 0);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*fn), 1)
+        << "the DoLift path must produce a NullCoalescing";
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::NullCoalescingInstruction);
+    auto* nc = static_cast<NullCoalescingInstruction*>(st->Value.get());
+    EXPECT_EQ(nc->Kind, NullCoalescingKind::NullableWithValueFallback)
+        << "the non-NullableCtor wrap is NullableWithValueFallback";
+    // ValueInst is conv.lifted(ldloc v) -- a lifted Conv wrapping an LdLoc.
+    ASSERT_EQ(nc->ValueInst->Op, OpCode::Conv)
+        << "the DoLift(Conv) fold produces a lifted Conv";
+    auto* conv = static_cast<Conv*>(nc->ValueInst.get());
+    EXPECT_TRUE(conv->IsLifted) << "the conv is a lifted conv";
+    EXPECT_EQ(conv->ResultType(), StackType::O)
+        << "the lifted conv produces a boxed Nullable<int> (ResultType O)";
+    ASSERT_EQ(conv->Argument->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(conv->Argument.get())->Variable.get(), v.get())
+        << "the lifted conv wraps a fresh ldloc v";
+    ASSERT_EQ(nc->FallbackInst->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(nc->FallbackInst.get())->Variable.get(), fallback.get())
+        << "FallbackInst is the false arm (ldloc fallback)";
+}
+
+// RunIfNullableLift DoLift path with a BinaryNumericInstruction true arm:
+// `v.HasValue ? binary.add(GVO(v), ldc.i4 5) : fallback` =>
+// `binary.add.lifted(ldloc v, ldc.i4 5) ?? fallback`. The pure non-nullable
+// constant (ldc.i4 5) is embedded (NewNullable returns it unchanged for the
+// UnknownType expected type), so the lifted BNI's right operand is the bare
+// constant.
+TEST(ExpressionTransforms, RunIfNullableLiftFoldsHasValueBinaryNumericGetValueOrDefault) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto fallback = MakeLocal("fallback", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto gvo = MakeGVOCall(v);
+    gvo->ReturnType = StackType::I4;
+    auto trueArm = std::make_unique<BinaryNumericInstruction>(
+        std::move(gvo), std::make_unique<LdcI4>(5),
+        BinaryNumericOperator::Add, StackType::I4);
+    auto iff = std::make_unique<IfInstruction>(
+        MakeHasValueCall(v),
+        std::move(trueArm),
+        std::make_unique<LdLoc>(fallback));
+    auto fn = MakeFnWithBlock({result, v, fallback});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountNullCoalescing(*fn), 0);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*fn), 1)
+        << "the DoLift(BinaryNumeric) path must produce a NullCoalescing";
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::NullCoalescingInstruction);
+    auto* nc = static_cast<NullCoalescingInstruction*>(st->Value.get());
+    ASSERT_EQ(nc->ValueInst->Op, OpCode::BinaryNumericInstruction);
+    auto* bni = static_cast<BinaryNumericInstruction*>(nc->ValueInst.get());
+    EXPECT_TRUE(bni->IsLifted) << "the binary is a lifted binary";
+    EXPECT_EQ(bni->ResultType(), StackType::O);
+    ASSERT_EQ(bni->Left->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(bni->Left.get())->Variable.get(), v.get());
+    ASSERT_EQ(bni->Right->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(bni->Right.get())->Value, 5);
+}
+
+// RunIfNullableLift DoLift path does not fire when AnalyzeCondition collects more
+// than one nullable var but the true arm's DoLift only involves one of them
+// (bits.All fails -- a nullableVar did not contribute). The if stays as-is.
+TEST(ExpressionTransforms, RunIfNullableLiftDoLiftRejectsWhenAVarDoesNotContribute) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto w = MakeLocal("w", MakeNullableOf(KnownTypeCode::Int32));
+    auto fallback = MakeLocal("fallback", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto gvo = MakeGVOCall(v);  // GVO on v, not w
+    gvo->ReturnType = StackType::I4;
+    auto trueArm = std::make_unique<Conv>(
+        std::move(gvo), PrimitiveType::I4, false, Sign::Signed);
+    // condition: v.HasValue && w.HasValue (collects both v and w)
+    auto cond = std::make_unique<BinaryNumericInstruction>(
+        MakeHasValueCall(v), MakeHasValueCall(w),
+        BinaryNumericOperator::BitAnd, StackType::I4);
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(cond), std::move(trueArm),
+        std::make_unique<LdLoc>(fallback));
+    auto fn = MakeFnWithBlock({result, v, w, fallback});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*fn), 0)
+        << "w did not contribute to the lift; the if stays as-is";
 }
 
 // RunIfNullableLift `&`/`|` on bool? fold (NullableLiftingTransform.Run(IfInstruction)

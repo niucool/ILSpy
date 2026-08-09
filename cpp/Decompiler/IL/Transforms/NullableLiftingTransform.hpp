@@ -50,10 +50,17 @@
 #include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/Util/BitSet.hpp"
+
+#include <memory>
 
 namespace ILSpy::Decompiler::IL {
 
 class ILInstruction;
+class Conv;
+class BinaryNumericInstruction;
+class BitNot;
+using BitSet = ILSpy::Decompiler::Util::BitSet;
 
 // Port of NullableLiftingTransform.CompOrDecimal: either a non-lifted IL `Comp`
 // or a call to one of the 6 comparison operators on System.Decimal. This port
@@ -192,6 +199,72 @@ public:
     // GetUnderlyingTypeOfNullable returning non-null is the equivalent (only a
     // Nullable<T> instantiation unwraps).
     static bool MatchNull(ILInstruction* inst, const TypeSystem::IType*& underlyingType);
+
+    // Port of NullableLiftingTransform.DoLift's result: a (lifted instruction,
+    // relevance bitset) pair. A null Lifted means lifting failed (the bitset is
+    // then also null); a non-null Lifted carries the relevance bitset (which
+    // nullableVars contributed). The bitset is null when the lifted instruction
+    // embeds a non-nullable pure operand (NewNullable) -- that operand
+    // contributes no nullable var, matching the C# `(left, leftBits ?? rightBits)`
+    // null-propagation.
+    struct DoLiftResult {
+        std::unique_ptr<ILInstruction> Lifted;
+        std::unique_ptr<BitSet> Bits;
+    };
+
+    // Port of NullableLiftingTransform.DoLiftBinary's result: a (left, right,
+    // relevance bitset) triple. Null Left/Right means lifting failed (the bitset
+    // is then also null). The caller (DoLift's BinaryNumericInstruction case, or
+    // the deferred LiftCSharpComparison) builds the lifted binary from Left +
+    // Right; the bitset is the union of both sides' relevance.
+    struct DoLiftBinaryResult {
+        std::unique_ptr<ILInstruction> Left;
+        std::unique_ptr<ILInstruction> Right;
+        std::unique_ptr<BitSet> Bits;
+    };
+
+    // Port of NullableLiftingTransform.DoLift(inst): a recursive function that
+    // lifts `inst` into a lifted Nullable<T> instruction without modifying the
+    // input (it builds new nodes from the GVO/Conv/BinaryNumeric/Comp/BitNot
+    // shape). `nullableVars` is the collected set of nullable locals the lift
+    // operates over (the C# instance field `this.nullableVars`, set by
+    // AnalyzeCondition before LiftNormal calls DoLift). On success returns the
+    // lifted instruction + a bitset marking which nullableVars were relevant
+    // (bitSet[i] == nullableVars[i] contributed); on failure returns (null,
+    // null). The relevance gate `bits.All(0, nullableVars.Count)` (every nullable
+    // var contributed) is consulted by the caller (LiftNormal). The 5
+    // self-contained cases are ported: GetValueOrDefault -> LdLoc; Conv -> lifted
+    // Conv (gated on the MayThrow/CheckForOverflow guard); BitNot -> lifted
+    // BitNot; BinaryNumericInstruction -> lifted binary via DoLiftBinary; the
+    // bool? operator! Comp (equality, GVO left, Boolean underlying, ldc.i4 0
+    // right) -> a ThreeValuedLogic-lifted Comp. The 6th case (a Call to a
+    // user-defined operator, needs Call.Method.IsOperator +
+    // CSharpOperators.LiftUserDefinedOperator) is deferred and returns failure.
+    static DoLiftResult DoLift(ILInstruction* inst,
+                               const std::vector<ILVariablePtr>& nullableVars);
+
+    // Port of NullableLiftingTransform.DoLiftBinary(lhs, rhs,
+    // leftExpectedType, rightExpectedType): lifts both operands; when one side
+    // lifts and the other is a pure non-nullable expression, the pure side is
+    // embedded (NewNullable) so the lifted binary has two nullable operands.
+    // Returns (left, right, bits) on success or (null, null, null) on failure;
+    // the bitset is the union of both sides' relevance (the embedded side's
+    // bits are null, so the union is just the lifted side's bits).
+    static DoLiftBinaryResult DoLiftBinary(ILInstruction* lhs, ILInstruction* rhs,
+                                     const TypeSystem::IType* leftExpectedType,
+                                     const TypeSystem::IType* rightExpectedType,
+                                     const std::vector<ILVariablePtr>& nullableVars);
+
+    // Port of NullableLiftingTransform.NewNullable(inst, underlyingType):
+    // wraps a non-nullable pure expression in `new Nullable<T>(inst)` so it can
+    // be an operand of a lifted binary. A null underlyingType (the
+    // SpecialType.UnknownType sentinel -- this port has no SpecialType) returns
+    // `inst` unchanged, matching the C#; a real type builds a newobj
+    // `Nullable<T>(inst)` (a Call with IsNewObj and a Nullable<T> declaring
+    // type), the shape MatchNullableCtor recognises. Used by DoLiftBinary's
+    // pure-non-nullable embedding.
+    static std::unique_ptr<ILInstruction> NewNullable(std::unique_ptr<ILInstruction> inst,
+                                                       const TypeSystem::IType* underlyingType);
 };
 
 } // namespace ILSpy::Decompiler::IL

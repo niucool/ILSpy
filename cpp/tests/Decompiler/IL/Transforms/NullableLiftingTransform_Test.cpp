@@ -33,8 +33,11 @@
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Instructions/Conv.hpp"
 #include "Decompiler/IL/Instructions/DefaultValue.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
@@ -63,6 +66,7 @@ using ILSpy::Decompiler::TypeSystem::IType;
 using ILSpy::Decompiler::TypeSystem::KnownType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
 using ILSpy::Decompiler::TypeSystem::ParameterizedType;
+using ILSpy::Decompiler::TypeSystem::Sign;
 using ILSpy::Decompiler::Util::LongSet;
 
 namespace {
@@ -695,4 +699,227 @@ TEST(NullableLiftingTransform, MscorlibDeclaringTypeSweep) {
     (void)getValueOrDefaultLdLocaMatches;
     (void)nullableCtorMatches;
     (void)nullDefaultMatches;
+}
+
+// --- DoLift / DoLiftBinary / NewNullable tests ---
+//
+// The DoLift recursive lift (NullableLiftingTransform.DoLift) builds a lifted
+// Nullable<T> instruction from a GetValueOrDefault/Conv/BinaryNumericInstruction/
+// Comp/BitNot shape. A typed Nullable<T> local is the input; the GVO call is
+// `call GetValueOrDefault(ldloca v)` on that type.
+
+namespace {
+
+ILVariablePtr MakeTypedLocal(std::string name, std::shared_ptr<IType> type) {
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, type, 0);
+    v->Name = std::move(name);
+    return v;
+}
+
+std::unique_ptr<Call> MakeGVOCall(std::shared_ptr<IType> declaringType,
+                                  std::unique_ptr<ILInstruction> arg) {
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = std::move(declaringType);
+    // The real IL reader populates Call::ReturnType from the method signature
+    // (GetValueOrDefault returns the underlying type -- I4 for Nullable<int>/
+    // Nullable<bool>); set it here so BitNot->ResultType() (the argument's
+    // ResultType) is I4, matching the reader's shape.
+    call->ReturnType = StackType::I4;
+    call->AddArg(std::move(arg));
+    return call;
+}
+
+} // namespace
+
+// DoLift case 1: `call GetValueOrDefault(ldloca v)` -> `ldloc v`. The relevance
+// bitset marks the one nullableVars entry equal to v.
+TEST(NullableLiftingTransform, DoLiftLiftsGetValueOrDefaultToLdLoc) {
+    auto v = MakeTypedLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto gvo = MakeGVOCall(MakeNullableOf(KnownTypeCode::Int32),
+                           std::make_unique<LdLoca>(v));
+    std::vector<ILVariablePtr> nullableVars = {v};
+    auto r = NullableLiftingTransform::DoLift(gvo.get(), nullableVars);
+    ASSERT_TRUE(r.Lifted);
+    ASSERT_TRUE(r.Bits);
+    EXPECT_TRUE(r.Bits->All(0, 1)) << "the one nullableVar is relevant";
+    EXPECT_EQ(r.Lifted->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(r.Lifted.get())->Variable.get(), v.get());
+    EXPECT_EQ(r.Lifted->ResultType(), StackType::O)
+        << "a lifted Nullable<T> load has result O";
+}
+
+// DoLift case 2: `conv.i4(GVO(v))` -> a lifted Conv whose argument is `ldloc v`.
+// The lifted Conv has IsLifted true and ResultType O (a boxed Nullable<T>).
+TEST(NullableLiftingTransform, DoLiftLiftsConvGetValueOrDefault) {
+    auto v = MakeTypedLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto gvo = MakeGVOCall(MakeNullableOf(KnownTypeCode::Int32),
+                           std::make_unique<LdLoca>(v));
+    auto conv = std::make_unique<Conv>(
+        std::move(gvo), PrimitiveType::I4, false, Sign::Signed);
+    std::vector<ILVariablePtr> nullableVars = {v};
+    auto r = NullableLiftingTransform::DoLift(conv.get(), nullableVars);
+    ASSERT_TRUE(r.Lifted);
+    ASSERT_TRUE(r.Bits);
+    EXPECT_TRUE(r.Bits->All(0, 1));
+    EXPECT_EQ(r.Lifted->Op, OpCode::Conv);
+    auto* liftedConv = static_cast<Conv*>(r.Lifted.get());
+    EXPECT_TRUE(liftedConv->IsLifted);
+    EXPECT_EQ(liftedConv->ResultType(), StackType::O);
+    EXPECT_EQ(liftedConv->UnderlyingResultType(), StackType::I4);
+    ASSERT_EQ(liftedConv->Argument->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(liftedConv->Argument.get())->Variable.get(), v.get());
+}
+
+// DoLift case 3: `bitnot(GVO(v))` -> a lifted BitNot whose argument is `ldloc v`.
+TEST(NullableLiftingTransform, DoLiftLiftsBitNotGetValueOrDefault) {
+    auto v = MakeTypedLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto gvo = MakeGVOCall(MakeNullableOf(KnownTypeCode::Int32),
+                           std::make_unique<LdLoca>(v));
+    auto bitnot = std::make_unique<BitNot>(std::move(gvo));
+    std::vector<ILVariablePtr> nullableVars = {v};
+    auto r = NullableLiftingTransform::DoLift(bitnot.get(), nullableVars);
+    ASSERT_TRUE(r.Lifted);
+    ASSERT_TRUE(r.Bits);
+    EXPECT_TRUE(r.Bits->All(0, 1));
+    EXPECT_EQ(r.Lifted->Op, OpCode::BitNot);
+    auto* liftedBitNot = static_cast<BitNot*>(r.Lifted.get());
+    EXPECT_TRUE(liftedBitNot->IsLifted);
+    EXPECT_EQ(liftedBitNot->ResultType(), StackType::O);
+    EXPECT_EQ(liftedBitNot->UnderlyingResultType, StackType::I4);
+    ASSERT_EQ(liftedBitNot->Argument->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(liftedBitNot->Argument.get())->Variable.get(), v.get());
+}
+
+// DoLift case 4: `binary.add(GVO(v), ldc.i4 5)` -> a lifted BNI whose left is
+// `ldloc v` and right is `ldc.i4 5` (the pure non-nullable constant embedded).
+TEST(NullableLiftingTransform, DoLiftLiftsBinaryNumericWithPureOperand) {
+    auto v = MakeTypedLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto gvo = MakeGVOCall(MakeNullableOf(KnownTypeCode::Int32),
+                           std::make_unique<LdLoca>(v));
+    auto bni = std::make_unique<BinaryNumericInstruction>(
+        std::move(gvo), std::make_unique<LdcI4>(5),
+        BinaryNumericOperator::Add, StackType::I4);
+    std::vector<ILVariablePtr> nullableVars = {v};
+    auto r = NullableLiftingTransform::DoLift(bni.get(), nullableVars);
+    ASSERT_TRUE(r.Lifted);
+    ASSERT_TRUE(r.Bits);
+    EXPECT_TRUE(r.Bits->All(0, 1));
+    EXPECT_EQ(r.Lifted->Op, OpCode::BinaryNumericInstruction);
+    auto* liftedBni = static_cast<BinaryNumericInstruction*>(r.Lifted.get());
+    EXPECT_TRUE(liftedBni->IsLifted);
+    EXPECT_EQ(liftedBni->ResultType(), StackType::O);
+    EXPECT_EQ(liftedBni->UnderlyingResultType(), StackType::I4);
+    ASSERT_EQ(liftedBni->Left->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(liftedBni->Left.get())->Variable.get(), v.get());
+    ASSERT_EQ(liftedBni->Right->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(liftedBni->Right.get())->Value, 5);
+}
+
+// DoLift case 5: `comp(eq, GVO(v:Nullable<bool>), ldc.i4 0)` (operator! on
+// bool?) -> a ThreeValuedLogic-lifted Comp whose left is `ldloc v` and right is
+// the cloned `ldc.i4 0`. The lifted Comp has ResultType O (a nullable bool).
+TEST(NullableLiftingTransform, DoLiftLiftsBoolNotCompToThreeValuedLogic) {
+    auto v = MakeTypedLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto gvo = MakeGVOCall(MakeNullableOf(KnownTypeCode::Boolean),
+                           std::make_unique<LdLoca>(v));
+    auto comp = std::make_unique<Comp>(
+        std::move(gvo), std::make_unique<LdcI4>(0),
+        ComparisonKind::Equality, false);
+    std::vector<ILVariablePtr> nullableVars = {v};
+    auto r = NullableLiftingTransform::DoLift(comp.get(), nullableVars);
+    ASSERT_TRUE(r.Lifted);
+    ASSERT_TRUE(r.Bits);
+    EXPECT_TRUE(r.Bits->All(0, 1));
+    EXPECT_EQ(r.Lifted->Op, OpCode::Comp);
+    auto* liftedComp = static_cast<Comp*>(r.Lifted.get());
+    EXPECT_TRUE(liftedComp->IsLifted());
+    EXPECT_EQ(liftedComp->LiftingKind, ComparisonLiftingKind::ThreeValuedLogic);
+    EXPECT_EQ(liftedComp->ResultType(), StackType::O);
+    ASSERT_EQ(liftedComp->Left->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(liftedComp->Left.get())->Variable.get(), v.get());
+    ASSERT_EQ(liftedComp->Right->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(liftedComp->Right.get())->Value, 0);
+}
+
+// DoLift returns failure for a shape it cannot lift (a bare LdLoc of a
+// non-nullable, or any instruction not in the 5 cases).
+TEST(NullableLiftingTransform, DoLiftReturnsFailureForUnliftableShape) {
+    auto v = MakeTypedLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto bareLdloc = std::make_unique<LdLoc>(v);  // not a GVO/Conv/BNI/Comp/BitNot
+    std::vector<ILVariablePtr> nullableVars = {v};
+    auto r = NullableLiftingTransform::DoLift(bareLdloc.get(), nullableVars);
+    EXPECT_FALSE(r.Lifted);
+    EXPECT_FALSE(r.Bits);
+}
+
+// DoLift's relevance gate: when a nullableVar does not contribute to the lift
+// (here a second nullable var w that the GVO does not touch), bits.All fails and
+// the caller does not lift. DoLift itself succeeds (the GVO lifts), but the
+// bitset marks only v, not w -- so bits.All(0, 2) is false.
+TEST(NullableLiftingTransform, DoLiftRelevanceGateFailsWhenAVarDoesNotContribute) {
+    auto v = MakeTypedLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto w = MakeTypedLocal("w", MakeNullableOf(KnownTypeCode::Int32));
+    auto gvo = MakeGVOCall(MakeNullableOf(KnownTypeCode::Int32),
+                           std::make_unique<LdLoca>(v));
+    std::vector<ILVariablePtr> nullableVars = {v, w};
+    auto r = NullableLiftingTransform::DoLift(gvo.get(), nullableVars);
+    ASSERT_TRUE(r.Lifted);
+    ASSERT_TRUE(r.Bits);
+    EXPECT_TRUE(r.Bits->All(0, 1)) << "v (bit 0) is relevant";
+    EXPECT_FALSE(r.Bits->All(0, 2)) << "w (bit 1) did not contribute";
+}
+
+// DoLift case 5 rejects a non-Boolean underlying type (the ThreeValuedLogic
+// lift is only for operator! on bool?).
+TEST(NullableLiftingTransform, DoLiftCompThreeValuedLogicRejectsNonBooleanUnderlying) {
+    auto v = MakeTypedLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto gvo = MakeGVOCall(MakeNullableOf(KnownTypeCode::Int32),
+                           std::make_unique<LdLoca>(v));
+    auto comp = std::make_unique<Comp>(
+        std::move(gvo), std::make_unique<LdcI4>(0),
+        ComparisonKind::Equality, false);
+    std::vector<ILVariablePtr> nullableVars = {v};
+    auto r = NullableLiftingTransform::DoLift(comp.get(), nullableVars);
+    EXPECT_FALSE(r.Lifted) << "a non-Boolean comp does not lift to ThreeValuedLogic";
+}
+
+// NewNullable with a null underlying type (the SpecialType.UnknownType sentinel)
+// returns the expression unchanged, matching the C#.
+TEST(NullableLiftingTransform, NewNullableReturnsInstForUnknownType) {
+    auto expr = std::make_unique<LdcI4>(5);
+    auto out = NullableLiftingTransform::NewNullable(std::move(expr), nullptr);
+    ASSERT_TRUE(out);
+    EXPECT_EQ(out->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(out.get())->Value, 5);
+}
+
+// The lifted BitNot node invariant: IsLifted, ResultType O (argument is a
+// lifted Nullable<T>), UnderlyingResultType the original result type, and the
+// `.lifted` dump suffix.
+TEST(NullableLiftingTransform, BitNotLiftedNodeInvariant) {
+    auto v = MakeTypedLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    // A lifted argument: `ldloc v` (result O, since v is Nullable<T>).
+    auto liftedArg = std::make_unique<LdLoc>(v);
+    auto bitnot = std::make_unique<BitNot>(std::move(liftedArg), true, StackType::I4);
+    EXPECT_TRUE(bitnot->IsLifted);
+    EXPECT_EQ(bitnot->UnderlyingResultType, StackType::I4);
+    EXPECT_EQ(bitnot->ResultType(), StackType::O);
+    EXPECT_NE(bitnot->ToString().find("bitnot.lifted"), std::string::npos);
+    bitnot->CheckInvariant(ILPhase::Normal);
+}
+
+// The lifted BinaryNumericInstruction node invariant: IsLifted, ResultType O,
+// UnderlyingResultType the original result type, and the `.lifted` dump suffix.
+TEST(NullableLiftingTransform, BinaryNumericLiftedNodeInvariant) {
+    auto v = MakeTypedLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto left = std::make_unique<LdLoc>(v);
+    auto right = std::make_unique<LdcI4>(5);
+    auto bni = std::make_unique<BinaryNumericInstruction>(
+        std::move(left), std::move(right), BinaryNumericOperator::Add,
+        StackType::I4, false, true, true);
+    EXPECT_TRUE(bni->IsLifted);
+    EXPECT_EQ(bni->ResultType(), StackType::O);
+    EXPECT_EQ(bni->UnderlyingResultType(), StackType::I4);
+    EXPECT_NE(bni->ToString().find("binary.add.lifted"), std::string::npos);
+    bni->CheckInvariant(ILPhase::Normal);
 }

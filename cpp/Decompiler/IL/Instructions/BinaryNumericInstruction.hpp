@@ -52,13 +52,43 @@ public:
     bool Signed = true;       // false for .un forms
     bool CheckForOverflow = false;
     StackType ResultStackType = StackType::I4;
+    // Faithful to the C# BinaryNumericInstruction.IsLifted (the
+    // ILiftableInstruction impl): a lifted binary operates on boxed Nullable<T>
+    // operands (Left/Right.ResultType == O) and produces a boxed Nullable<T>
+    // (ResultType == O). Set only by the NullableLifting DoLift machinery; the
+    // IL reader's binary opcodes are never lifted. Default false keeps every
+    // existing BinaryNumericInstruction non-lifted.
+    bool IsLifted = false;
 
+    // Non-lifted form: the result stack type is the operands' stack type.
     BinaryNumericInstruction(std::unique_ptr<ILInstruction> left, std::unique_ptr<ILInstruction> right,
                               BinaryNumericOperator op, StackType resultStackType = StackType::I4)
         : BinaryInstruction(OpCode::BinaryNumericInstruction, std::move(left), std::move(right)),
           Operator(op), ResultStackType(resultStackType) {}
 
-    StackType ResultType() const override { return ResultStackType; }
+    // Lifted form (the NullableLifting DoLift BinaryNumericInstruction case):
+    // the operands are lifted Nullable<T> values (ResultType O), so ResultType()
+    // returns O; the underlying result type is the original binary's result
+    // type. Mirrors the C# BinaryNumericInstruction(op, left, right,
+    // leftInputType, rightInputType, checkForOverflow, sign, isLifted)
+    // constructor; this port does not model LeftInputType/RightInputType/Sign
+    // (it carries ResultStackType + Signed), so the lifted constructor takes
+    // the underlying result type + the original's Signed/CheckForOverflow.
+    BinaryNumericInstruction(std::unique_ptr<ILInstruction> left, std::unique_ptr<ILInstruction> right,
+                              BinaryNumericOperator op, StackType underlyingResultType,
+                              bool checkForOverflow, bool signed_, bool isLifted)
+        : BinaryInstruction(OpCode::BinaryNumericInstruction, std::move(left), std::move(right)),
+          Operator(op), Signed(signed_), CheckForOverflow(checkForOverflow),
+          ResultStackType(underlyingResultType), IsLifted(isLifted) {}
+
+    // Faithful to the C# BinaryNumericInstruction.ResultType: O for a lifted
+    // binary (a boxed Nullable<T>); the underlying result type otherwise.
+    StackType ResultType() const override {
+        return IsLifted ? StackType::O : ResultStackType;
+    }
+    // The underlying (non-lifted) result stack type. Faithful to the C#
+    // BinaryNumericInstruction.UnderlyingResultType (ILiftableInstruction).
+    StackType UnderlyingResultType() const { return ResultStackType; }
     void WriteTo(std::string& out) const override {
         out += "binary.";
         switch (Operator) {
@@ -76,6 +106,7 @@ public:
         }
         if (!Signed) out += ".un";
         if (CheckForOverflow) out += ".ovf";
+        if (IsLifted) out += ".lifted";
         out += '(';
         if (Left) Left->WriteTo(out); else out += "(null)";
         out += ", ";

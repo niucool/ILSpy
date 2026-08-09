@@ -702,16 +702,44 @@ implemented and green here. Everything else follows the phase plan in
   lowerings that fire 0 times on the .NET Framework 4 corpus; ported for
   faithfulness (hand-built tests verify the folds + the block-final fold +
   negatives, the sweep verifies the per-method monotone invariants hold).
-  The remaining `Run(IfInstruction)` paths (the DoLift / LiftCSharpUserComparison
-  rest of LiftNormal, MatchCompOrDecimal/LiftCSharp*, NullPropagation),
+  The `DoLift`/`DoLiftBinary`/`NewNullable` core of `LiftNormal`'s else-branch
+  (the general recursive lift over GetValueOrDefault/Conv/BinaryNumericInstruction/
+  Comp/BitNot that the D99 BitSet foundation unblocked) is now ported and wired
+  into `RunIfNullableLift`: `DoLift(inst, nullableVars)` builds a lifted
+  Nullable<T> instruction from the GVO/Conv/BNI/Comp/BitNot shape without
+  modifying the input, returning a `(Lifted, Bits)` pair whose `bits.All(0,
+  nullableVars.Count)` is the "every nullable var contributed" gate; the five
+  self-contained cases (GVO -> LdLoc, Conv -> lifted Conv, BitNot -> lifted
+  BitNot [a NEW BitNot ILAst node with IsLifted/UnderlyingResultType],
+  BinaryNumericInstruction -> lifted BNI via DoLiftBinary [the BNI gained
+  IsLifted/UnderlyingResultType/a ResultType-override O + a `.lifted` dump
+  suffix], the bool? operator! Comp -> a ThreeValuedLogic-lifted Comp) are
+  ported; the Call user-defined-operator case is deferred. `DoLiftBinary`
+  embeds a pure non-nullable operand via `NewNullable` (returns it unchanged for
+  the UnknownType expected type, matching the C#); the pure operand is cloned
+  via a `ClonePureExpression` helper (LdcI4/I8/F4/F8/LdNull/LdStr/LdLoc -- the
+  ClonePureLoad set; an uncloneable pure expression makes DoLift bail
+  conservative-correct). The wired LiftNormal else-branch wraps the lifted
+  value per the isNullCoalescingWithNonNullableFallback / MatchNull gates
+  (NullableWithValueFallback / Nullable / no-wrap), with UnderlyingResultType =
+  exprToLift->ResultType(); `ReplaceIfWithLiftedValue` applies the block-model
+  adaptation. The DoLift path is a Roslyn-era `Nullable<T>` expression-lifting
+  codegen pattern that fires 0 times on the .NET Framework 4 corpus; ported for
+  faithfulness (hand-built tests verify the 5 cases + the relevance-gate
+  failure + 3 wired folds; the sweep verifies the per-method monotone
+  invariants hold).
+  The remaining `Run(IfInstruction)` paths (the LiftCSharpUserComparison rest
+  of LiftNormal [needs the Call-operator case], MatchCompOrDecimal/LiftCSharp*
+  [the comparison lift, needs CompOrDecimal.MakeLifted + a faithful
+  NewNullable], NullPropagation [a separate 583-line transform]),
   `Run(BinaryNumericInstruction)` (the BitAnd-as-short-circuit analysis), and
   the `RunStatements(Block, int)` block transform are the subsequent
   in-order targets.
-  `BitSet` (Util/, a tested-but-not-yet-wired foundation ported from BitSet.cs)
-  is the fixed-capacity 64-bit-word bitset the deferred `DoLift`/`DoLiftBinary`
-  relevance analysis returns -- `bits.All(0, nullableVars.Count)` is the
-  "every nullable var contributed to the lift" gate the MatchCompOrDecimal/
-  LiftCSharp* comparison-lift path (the next in-order target) consults -- and
+  `BitSet` (Util/, a tested foundation ported from BitSet.cs) is the
+  fixed-capacity 64-bit-word bitset the `DoLift`/`DoLiftBinary` relevance
+  analysis returns -- `bits.All(0, nullableVars.Count)` is the "every nullable
+  var contributed to the lift" gate the D100 DoLift path (now wired) and the
+  deferred MatchCompOrDecimal/LiftCSharp* comparison-lift path consult -- and
   the foundation the deferred DefiniteAssignment / Dominance /
   ReachingDefinitions analyses are built on. Faithful to the C# API
   (capacity rounding, `Any`/`All`/set-relation predicates/`Set`/`Clear`/

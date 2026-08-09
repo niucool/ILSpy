@@ -855,27 +855,31 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
     // AnalyzeCondition / LiftNormal path (the section of Lift before the bool?
     // equality folds). AnalyzeCondition walks a BitAnd tree of HasValue calls
     // collecting the nullable vars; LiftNormal then lifts the true arm under the
-    // `(v1 != null && ... && vn != null)` guard. Two LiftNormal cases are ported:
+    // `(v1 != null && ... && vn != null)` guard. Three LiftNormal cases are ported:
     // (1) the `v.HasValue ? ldloc v : fallback => v ?? fallback` early-out (a
     // single nullable var whose true arm is `ldloc v` -> NullCoalescingInstruction
-    // (Nullable)), and (2) the `v.HasValue ? v.GetValueOrDefault() : fallback =>
+    // (Nullable)), (2) the `v.HasValue ? v.GetValueOrDefault() : fallback =>
     // v ?? fallback` conv.nop.lifted case (a single nullable var whose true arm
     // is a GetValueOrDefault call on that var -> `ldloc v` or `conv.nop.lifted
     // (ldloc v)` when the underlying type differs from the GVO's return type,
-    // wrapped in a NullCoalescingInstruction(NullableWithValueFallback)). The
-    // MatchIfInstructionPositiveCondition pre-processing (a Roslyn quirk for a
-    // redundant inner `if (v.HasValue) X else Y` true arm), the DoLift path (the
-    // general recursive lift over GetValueOrDefault/Conv/BinaryNumeric/Comp/
-    // BitNot, needs a BitSet nullable-vars relevance analysis), and the
-    // LiftCSharpUserComparison path (needs Call.Method.IsOperator +
-    // CSharpOperators + DoLift) are deferred: when AnalyzeCondition succeeds but
-    // neither ported case fires, return false (matching the C# which returns
-    // null -- the whole Lift returns null, the if stays as-is). The true/false
-    // arms are detached (DetachFromParent) before the if is destroyed (no GC; the
-    // non-owning views would dangle). The NullCoalescing node is a value (ResultType
-    // the fallback's), so ReplaceIfWithLiftedValue applies the block-model
-    // adaptation (ReplaceWith for a sub-expression value-if, or the node becomes a
-    // non-terminal + a Branch final for a block-final if).
+    // wrapped in a NullCoalescingInstruction(NullableWithValueFallback)), and
+    // (3) the general DoLift path (the else-branch after the conv.nop.lifted
+    // case): a recursive lift over GetValueOrDefault/Conv/BinaryNumericInstruction/
+    // Comp/BitNot producing a lifted Nullable<T> instruction, gated on the
+    // `bits.All(0, nullableVars.Count)` relevance check (every nullableVar must
+    // contribute), then wrapped per the isNullCoalescingWithNonNullableFallback /
+    // MatchNull gates. The MatchIfInstructionPositiveCondition pre-processing
+    // (a Roslyn quirk for a redundant inner `if (v.HasValue) X else Y` true arm,
+    // not observable in the current pipeline) and the LiftCSharpUserComparison
+    // path (needs Call.Method.IsOperator + CSharpOperators + DoLift) are
+    // deferred: when AnalyzeCondition succeeds but no ported case fires, return
+    // false (matching the C# which returns null -- the whole Lift returns null,
+    // the if stays as-is). The true/false arms are detached (DetachFromParent)
+    // before the if is destroyed (no GC; the non-owning views would dangle). The
+    // NullCoalescing node is a value (ResultType the fallback's), so
+    // ReplaceIfWithLiftedValue applies the block-model adaptation (ReplaceWith
+    // for a sub-expression value-if, or the node becomes a non-terminal + a
+    // Branch final for a block-final if).
     {
         std::vector<ILVariablePtr> nullableVarS;
         if (AnalyzeCondition(condition, nullableVarS)) {
@@ -972,10 +976,47 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
                     return ReplaceIfWithLiftedValue(iff, std::move(lifted));
                 }
             }
-            // AnalyzeCondition succeeded but neither the early-out nor the
-            // conv.nop.lifted case fired; the DoLift / LiftCSharpUserComparison
-            // paths are deferred. Matching the C# which returns null (the whole
-            // Lift returns null), do not fall through to the bool? equality folds.
+            // The DoLift path (the LiftNormal else-branch after the conv.nop.lifted
+            // case): the general recursive lift over GetValueOrDefault/Conv/
+            // BinaryNumericInstruction/Comp/BitNot. DoLift builds a lifted
+            // Nullable<T> instruction from exprToLift without modifying it; when
+            // it succeeds and every nullableVar is relevant (bits.All), the lifted
+            // value is wrapped per the isNullCoalescingWithNonNullableFallback /
+            // MatchNull gates (matching LiftNormal). The Call user-defined-operator
+            // case and LiftCSharpUserComparison are deferred (DoLift returns failure
+            // for them); matching the C# which returns null, do not fall through to
+            // the bool? equality folds.
+            auto doLift = NullableLiftingTransform::DoLift(exprToLift, nullableVarS);
+            if (doLift.Lifted) {
+                if (doLift.Bits &&
+                    doLift.Bits->All(0, static_cast<int>(nullableVarS.size()))) {
+                    std::unique_ptr<ILInstruction> lifted = std::move(doLift.Lifted);
+                    StackType underlyingResultType = exprToLift->ResultType();
+                    if (isNullCoalescingWithNonNullableFallback) {
+                        auto falseOwned = DetachFromParent(falseInst);
+                        auto nc = std::make_unique<NullCoalescingInstruction>(
+                            NullCoalescingKind::NullableWithValueFallback,
+                            std::move(lifted), std::move(falseOwned));
+                        nc->UnderlyingResultType = underlyingResultType;
+                        return ReplaceIfWithLiftedValue(iff, std::move(nc));
+                    } else if (!NullableLiftingTransform::MatchNull(falseInst, utype)) {
+                        auto falseOwned = DetachFromParent(falseInst);
+                        auto nc = std::make_unique<NullCoalescingInstruction>(
+                            NullCoalescingKind::Nullable,
+                            std::move(lifted), std::move(falseOwned));
+                        nc->UnderlyingResultType = underlyingResultType;
+                        return ReplaceIfWithLiftedValue(iff, std::move(nc));
+                    } else {
+                        // falseInst is `default(Nullable<T>)` (MatchNull) -- no
+                        // wrap, the lifted value is the whole result.
+                        return ReplaceIfWithLiftedValue(iff, std::move(lifted));
+                    }
+                }
+                // A nullableVar did not contribute to the lift -- don't lift.
+                return false;
+            }
+            // DoLift failed (or the deferred Call-operator/LiftCSharpUserComparison
+            // cases); the whole Lift returns null, the if stays as-is.
             return false;
         }
     }
