@@ -36,6 +36,7 @@
 #include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/DefaultValue.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
@@ -923,13 +924,12 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
             auto type = file.ResolveTypeToken(tok);
             auto ptr = s.Pop(); if (!ptr) return DecodeOutcome::Bail;
-            // Model initobj as stobj(addr, default-value, type). The full ILAst
-            // has an InitObj node; for the reader a StObj with a null/zero value
-            // is a faithful approximation that keeps the tree valid.
-            auto zero = (type && type->ReflectionName() == "System.IntPtr")
-                ? std::unique_ptr<ILInstruction>(std::make_unique<LdcI4>(0))
-                : std::unique_ptr<ILInstruction>(std::make_unique<LdNull>());
-            block->Add(std::make_unique<StObj>(std::move(ptr), std::move(zero), type));
+            // Model initobj as stobj(addr, default(T), T): the C# ILReader emits
+            // stobj(target, DefaultValue(type), type). The DefaultValue node carries
+            // the type so downstream transforms (LdLocaDupInitObjTransform) and the
+            // C# seed can render `default(T)` rather than a type-erased null/zero.
+            auto dv = std::make_unique<DefaultValue>(type);
+            block->Add(std::make_unique<StObj>(std::move(ptr), std::move(dv), type));
             break;
         }
 

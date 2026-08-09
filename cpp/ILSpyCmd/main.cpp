@@ -35,6 +35,7 @@
 #include "Decompiler/IL/Transforms/StObjToStLoc.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
+#include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/Metadata/ILTextEmitter.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
@@ -210,6 +211,13 @@ int main(int argc, char** argv) {
                 // when-condition block. Must run after inlining and before loop
                 // detection (per the C# GetILTransforms() order).
                 ILSpy::Decompiler::IL::DetectCatchWhenConditionBlocks().Run(*fn, transformContext);
+                // ldloca; dup; initobj (Roslyn >= 2 codegen for `var v = default;`
+                // + a use of &v): rewrite `stloc s(ldloca v); stobj(ldloc s, default T)`
+                // to `stloc v(default T); stloc s(ldloca v)` so `s` can be inlined into
+                // its subsequent uses. Runs after DetectCatchWhenConditionBlocks (the
+                // deferred DetectExitPoints would sit here in the C# order) and before
+                // the second CFS, per GetILTransforms().
+                ILSpy::Decompiler::IL::LdLocaDupInitObjTransform().Run(*fn, transformContext);
                 // Re-run CFS so the duplicated 1-pred return blocks merge and
                 // the single-definition variable inlines to `leave (expr)`.
                 ILSpy::Decompiler::IL::ControlFlowSimplification().Run(*fn, transformContext);

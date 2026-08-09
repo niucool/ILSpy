@@ -70,13 +70,20 @@ implemented and green here. Everything else follows the phase plan in
   through to the exit. `DetectCatchWhenConditionBlocks` drops the redundant
   isinst type test at the start of a `catch (T e) when (...)` filter (the catch
   is already typed T), branching the entry straight to the when-condition
-  block. Parameter names and string literals (`ldstr`) now come
+  block. `LdLocaDupInitObjTransform` rewrites the Roslyn >= 2 `ldloca; dup;
+  initobj` codegen for `var v = default(T);` + a use of `&v` --
+  `stloc s(ldloca v); stobj(ldloc s, default(T))` becomes `stloc v(default(T));
+  stloc s(ldloca v)` so `s` can be inlined into its later uses. The IL reader
+  now models `initobj` as `stobj(addr, DefaultValue(type), type)` (a new
+  `DefaultValue` node) so `default(T)` renders correctly instead of a type-
+  erased `null`/`0`. Parameter names and string literals (`ldstr`) now come
   from the metadata (Param table / #US heap).
-  12 of ~40 transforms ported. The CLI applies CFS + StObjToStLoc + ILInlining +
+  13 of ~40 transforms ported. The CLI applies CFS + StObjToStLoc + ILInlining +
   InlineReturnTransform + RemoveInfeasiblePath + DetectPinnedRegions +
-  DetectCatchWhenConditionBlocks + CFS +
+  DetectCatchWhenConditionBlocks + LdLocaDupInitObjTransform + CFS +
   LoopDetection + ConditionDetection + AssignVariableNames + RemoveRedundantReturn
-  before the C# seed, so `fixed (...) { ... }` now appears in the output. Next
+  before the C# seed, so `fixed (...) { ... }` and `default(T)` now appear in
+  the output. Next
   per `GetILTransforms()`: the async/iterator state machines
   (YieldReturnDecompiler/AsyncAwaitDecompiler), SplitVariables (needs
   reaching-definitions dataflow),

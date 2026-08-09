@@ -34,6 +34,7 @@
 #include "Decompiler/IL/Instructions/CastClass.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/Conv.hpp"
+#include "Decompiler/IL/Instructions/DefaultValue.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
@@ -712,6 +713,10 @@ private:
                 return "sizeof(" + static_cast<const SizeOf&>(inst).TypeName + ")";
             case OpCode::LdTypeToken:
                 return "typeof(" + FlattenMetadataName(static_cast<const LdTypeToken&>(inst).TokenName) + ")";
+            case OpCode::DefaultValue: {
+                const auto& dv = static_cast<const DefaultValue&>(inst);
+                return "default(" + CSharpTypeName(dv.Type) + ")";
+            }
             default:
                 return "(default)/*op=" + std::to_string(static_cast<int>(inst.Op)) + "*/";
         }
