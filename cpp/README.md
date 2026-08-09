@@ -68,22 +68,24 @@ implemented and green here. Everything else follows the phase plan in
   AssignVariableNames + RemoveRedundantReturn before the C# seed. Next per
   `GetILTransforms()`: SplitVariables (needs reaching-definitions dataflow),
   DetectExitPoints + the full ConditionDetection (multi-pred join blocks),
-  TransformAssignment, the async/iterator state machines, ...
+  HighLevelLoopTransform (while/for), TransformAssignment, the
+  async/iterator state machines, ...
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end. It now produces readable C#: real parameter names (Param
-  table) and string literals (#US heap), type-inferred local names
-  (`AssignVariableNames`: `num`, `text`, `flag`, ...) declared with C# keywords
-  (`int num`, `double x`), `if/else` for fall-through + early-exit if-throw
-  chains with condition negation, `base(args)` for base-ctor calls,
-  `receiver.Method(args)` for instance calls, compound assignments
-  (`V++`, `V += expr`), `value == null` for object null checks, `arr.Length`
-  (no redundant `(int)` cast), `-x` for `0 - x`, and no trailing `return;` / no
-  duplicate loop labels. Remaining gaps vs the real back end: gotos for
-  multi-pred join blocks and loop internals (needs the full ConditionDetection /
-  HighLevelLoopTransform), full type names (no `using` directives),
-  `*(this)` struct derefs, and overload-resolved casts -- these land with the
-  Phase 5 C# AST + resolver.
+  table) and string literals (#US heap), type-inferred local names (`num`,
+  `text`, `array`) declared with C# keywords (`int num`, `double x`),
+  `if/else` for fall-through + early-exit if-throw chains + shared-tail merges
+  with condition negation, `while (true) { ... }` loops with `continue`/`break`,
+  `base(args)` for base-ctor calls, `receiver.Method(args)` for instance
+  calls, compound assignments (`V++`, `V += expr`), `value == null` for object
+  null checks, `arr.Length` (no redundant `(int)` cast), `-x` for `0 - x`,
+  `*(this)`/`*(byref)` rendered as the bare name, and generic `newobj` with
+  its type. No trailing `return;` / no duplicate loop labels. Remaining gaps
+  vs the real back end: gotos for multi-pred join blocks and loop-internal
+  condition/increment jumps (needs DetectExitPoints + HighLevelLoopTransform),
+  full type names (no `using` directives), and overload-resolved casts --
+  these land with the Phase 5 C# AST + resolver.
 - Phases 4-11 (IL transforms, C# AST + resolver + output, disassembler output,
   orchestration, ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
