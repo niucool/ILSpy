@@ -48,6 +48,7 @@
 #include "Decompiler/IL/Instructions/LockInstruction.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/PinnedRegion.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
@@ -805,6 +806,18 @@ private:
                 std::string cond = iff.Condition ? Expr(*iff.Condition) : "(default)";
                 return "(" + cond + " ? " + ArmExpr(iff.TrueInst) +
                        " : " + ArmExpr(iff.FalseInst) + ")";
+            }
+            case OpCode::NullCoalescingInstruction: {
+                // The C# `??` (null-coalescing) operator: `value ?? fallback`.
+                // Faithful to the real back end's VisitNullCoalescingInstruction
+                // (a BinaryOperatorExpression with the NullCoalescing operator).
+                // The Kind (Ref / Nullable / NullableWithValueFallback) is a
+                // semantic flavour the back end uses to pick the conversion; the
+                // surface syntax is the same `??` for all three.
+                const auto& nc = static_cast<const NullCoalescingInstruction&>(inst);
+                std::string value = nc.ValueInst ? Expr(*nc.ValueInst) : std::string("(default)");
+                std::string fallback = nc.FallbackInst ? Expr(*nc.FallbackInst) : std::string("(default)");
+                return "(" + value + " ?? " + fallback + ")";
             }
             default:
                 return "(default)/*op=" + std::to_string(static_cast<int>(inst.Op)) + "*/";

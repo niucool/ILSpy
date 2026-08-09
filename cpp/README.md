@@ -502,7 +502,19 @@ implemented and green here. Everything else follows the phase plan in
   expected width (31 for I4, 63 for I8). The native-int (I) case --
   `sizeof(IntPtr) * 8 - 1` -- is deferred (needs SizeOf to carry an IType with
   GetStackType), as is the BitAnd/Boolean nullable-lift case (needs
-  NullableLiftingTransform + InferType).
+  NullableLiftingTransform + InferType). The `NullCoalescingInstruction` ILAst
+  node (the C# `??` operator node -- ValueInst + FallbackInst children, a
+  `NullCoalescingKind` Ref/Nullable/NullableWithValueFallback enum, an
+  `UnderlyingResultType` field, DirectFlags ControlFlow, ResultType the
+  fallback's, Flags `ControlFlow | valueInst | CombineBranches(None, fallback)`
+  faithful to ComputeFlags) is ported as a tested-but-not-yet-wired foundation
+  (the MatchInstruction / UsingInstruction precedent) ahead of the next
+  in-order ExpressionTransforms.VisitCall piece -- the
+  `Nullable<T>.GetValueOrDefault(a, b) -> a ?? b` fold (which needs the 2-arg
+  `MatchGetValueOrDefault` extending the D68 1-arg helper + IsPure + the LdObj
+  construction) -- and the later NullCoalescingTransform; the ILAstToCSharp seed
+  renders it as `value ?? fallback`, and no pipeline transform constructs it
+  yet (0 `??` in the CLI output) so the output is unchanged.
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
   walk + a corpus probe; the async/iterator state machines
