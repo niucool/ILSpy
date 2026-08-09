@@ -37,6 +37,7 @@
 
 using namespace ILSpy::Decompiler::IL;
 using ILSpy::Decompiler::Metadata::MetadataFile;
+using ILSpy::Decompiler::TypeSystem::ArrayType;
 using ILSpy::Decompiler::TypeSystem::KnownType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
 
@@ -70,10 +71,17 @@ TEST(AssignVariableNames, InfersNameFromType) {
     fn->Variables.push_back(MakeLocal("V_0", KnownTypeCode::Int32));
     fn->Variables.push_back(MakeLocal("V_1", KnownTypeCode::String));
     fn->Variables.push_back(MakeLocal("V_2", KnownTypeCode::Boolean));
+    // An array type is named "array", not the lowercased element type with
+    // brackets (which would yield "byte[]").
+    auto arrLocal = std::make_shared<ILVariable>(VariableKind::Local,
+        std::make_shared<ArrayType>(std::make_shared<KnownType>(KnownTypeCode::Byte)), -1);
+    arrLocal->Name = "V_3";
+    fn->Variables.push_back(arrLocal);
     AssignVariableNames().Run(*fn, Ctx());
     EXPECT_EQ(fn->Variables[0]->Name, "num");
     EXPECT_EQ(fn->Variables[1]->Name, "text");
     EXPECT_EQ(fn->Variables[2]->Name, "flag");
+    EXPECT_EQ(fn->Variables[3]->Name, "array");
 }
 
 TEST(AssignVariableNames, DisambiguatesCollisions) {

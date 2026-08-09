@@ -21,6 +21,7 @@
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
 #include <cctype>
 #include <map>
@@ -53,6 +54,12 @@ const std::map<std::string, std::string>& TypeNameDict() {
 // unknown type so the caller keeps the original V_N name.
 std::string InferName(const TypeSystem::IType* type) {
     if (!type) return "";
+    // An array type is named "array" (not the lowercased element type with
+    // brackets, which yields names like "byte[]").
+    if (dynamic_cast<const TypeSystem::ArrayType*>(type)) return "array";
+    // A byref is named after the element type (the C# uses the underlying).
+    if (auto* byref = dynamic_cast<const TypeSystem::ByReferenceType*>(type))
+        return InferName(byref->Element().get());
     std::string rn = type->ReflectionName();
     auto it = TypeNameDict().find(rn);
     if (it != TypeNameDict().end()) return it->second;
