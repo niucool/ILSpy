@@ -170,9 +170,23 @@ bool NullableLiftingTransform::MatchGetValueOrDefault(ILInstruction* inst,
 
 bool NullableLiftingTransform::MatchCompOrDecimal(ILInstruction* inst, CompOrDecimal& result) {
     // The Comp branch: a non-lifted IL Comp reports its Kind/Left/Right/IsLifted.
-    // The Decimal branch (a Call to op_Equality/op_Inequality/op_LessThan/...
-    // on System.Decimal) is deferred -- it needs Call.Method.IsOperator, which
-    // this port's Call does not carry -- so a Call never matches here.
+    // The Decimal branch: a Call to one of the 6 comparison operators on
+    // System.Decimal (op_Equality/op_Inequality/op_LessThan/op_LessThanOrEqual/
+    // op_GreaterThan/op_GreaterThanOrEqual) -- Decimal has no IL Comp
+    // instruction, so a Decimal comparison lowers to an op_* call. The C# gate
+    // is `call.Method.IsOperator && call.Arguments.Count == 2 && !call.IsLifted`;
+    // this port's Call has no IsLifted field, but the C# `Call.IsLifted` is for
+    // lifted user-defined operators produced by CSharpOperators (which this port
+    // does not produce), so every Call is non-lifted (faithful). The C# then
+    // switches on `call.Method.Name` (the 6 comparison operators) and finally
+    // requires `call.Method.DeclaringType.IsKnownType(KnownTypeCode.Decimal)` --
+    // a user-defined op_Equality on another type does NOT match (DeclaringType
+    // != Decimal), so MatchCompOrDecimal returns false for it. The Decimal lift
+    // (LiftCSharpUserEqualityComparison/LiftCSharpUserComparison, which build a
+    // lifted user-defined operator via CSharpOperators.LiftUserDefinedOperator) is
+    // deferred -- needs the C# resolver; the recognition here is the foundation
+    // those consumers will consult. `result.Left`/`Right` are the call's two
+    // arguments (the C# `call.Arguments[0/1]`); `result.IsLifted` is false.
     result = CompOrDecimal{};
     if (!inst) return false;
     result.Instruction = inst;
@@ -182,6 +196,31 @@ bool NullableLiftingTransform::MatchCompOrDecimal(ILInstruction* inst, CompOrDec
         result.Left = comp->Left.get();
         result.Right = comp->Right.get();
         result.IsLifted = comp->IsLifted();
+        return true;
+    }
+    if (inst->Op == OpCode::Call) {
+        auto* call = static_cast<Call*>(inst);
+        if (!call->IsOperator) return false;
+        if (call->Arguments.size() != 2) return false;
+        auto name = ShortMethodName(call->MethodName);
+        ComparisonKind kind;
+        if (name == "op_Equality") kind = ComparisonKind::Equality;
+        else if (name == "op_Inequality") kind = ComparisonKind::Inequality;
+        else if (name == "op_LessThan") kind = ComparisonKind::LessThan;
+        else if (name == "op_LessThanOrEqual") kind = ComparisonKind::LessThanOrEqual;
+        else if (name == "op_GreaterThan") kind = ComparisonKind::GreaterThan;
+        else if (name == "op_GreaterThanOrEqual") kind = ComparisonKind::GreaterThanOrEqual;
+        else return false;
+        // The C# final gate: the declaring type is System.Decimal. This narrows
+        // the match to Decimal's comparison operators only (a user-defined
+        // op_Equality on another type has IsOperator but not a Decimal
+        // declaring type, so it returns false here).
+        if (!IsKnownType(call->DeclaringType.get(), TypeSystem::KnownTypeCode::Decimal))
+            return false;
+        result.Kind = kind;
+        result.Left = call->Arguments[0].get();
+        result.Right = call->Arguments[1].get();
+        result.IsLifted = false;
         return true;
     }
     return false;

@@ -285,7 +285,7 @@ TEST(NullableLiftingTransform, MatchGetValueOrDefaultTwoArgRejectsNullDeclaringT
 
 // MatchCompOrDecimal recognises a non-lifted IL `Comp` and reports its
 // Kind/Left/Right/IsLifted. The Decimal-operator branch (a Call to op_Equality
-// etc. on System.Decimal) is deferred, so a Call never matches here.
+// etc. on System.Decimal) is also ported; see the Decimal Call tests below.
 TEST(NullableLiftingTransform, MatchCompOrDecimalOnNonLiftedComp) {
     auto v = MakeLocal("v");
     auto comp = std::make_unique<Comp>(std::make_unique<LdLoc>(v),
@@ -318,16 +318,114 @@ TEST(NullableLiftingTransform, MatchCompOrDecimalOnLiftedComp) {
     EXPECT_TRUE(result.IsLifted);
 }
 
-// MatchCompOrDecimal returns false for a non-Comp instruction (a Call, even one
-// whose method name looks like an operator -- the Decimal branch is deferred).
-TEST(NullableLiftingTransform, MatchCompOrDecimalRejectsCall) {
+// MatchCompOrDecimal returns false for a Call that does not carry the
+// IsOperator flag -- the Decimal branch's first gate. (A Decimal op_Equality
+// Call WITH IsOperator set matches; see MatchCompOrDecimalOnDecimalEqualityCall.)
+TEST(NullableLiftingTransform, MatchCompOrDecimalRejectsCallWithoutIsOperator) {
     auto v = MakeLocal("v");
     auto call = std::make_unique<Call>("System.Decimal::op_Equality");
     call->DeclaringType = std::make_shared<KnownType>(KnownTypeCode::Decimal);
     call->AddArg(std::make_unique<LdLoca>(v));
     call->AddArg(std::make_unique<LdLoca>(v));
+    // IsOperator left false (the default) -- the IL reader sets it from the
+    // op_* method name; a hand-built Call without it is rejected.
     CompOrDecimal result;
     EXPECT_FALSE(NullableLiftingTransform::MatchCompOrDecimal(call.get(), result));
+}
+
+// MatchCompOrDecimal recognises a Call to System.Decimal.op_Equality (a
+// Decimal comparison -- Decimal has no IL Comp instruction, so the comparison
+// lowers to an op_* call) when IsOperator is set, reporting Kind=Equality,
+// Left/Right = the call's two arguments, IsLifted=false. This is the
+// recognition foundation; the lift itself (LiftCSharpUserEqualityComparison,
+// which builds a lifted user-defined operator via CSharpOperators) is deferred.
+TEST(NullableLiftingTransform, MatchCompOrDecimalOnDecimalEqualityCall) {
+    auto v = MakeLocal("v");
+    auto call = std::make_unique<Call>("System.Decimal::op_Equality");
+    call->DeclaringType = std::make_shared<KnownType>(KnownTypeCode::Decimal);
+    call->IsOperator = true;
+    call->AddArg(std::make_unique<LdLoca>(v));
+    call->AddArg(std::make_unique<LdLoca>(v));
+    CompOrDecimal result;
+    EXPECT_TRUE(NullableLiftingTransform::MatchCompOrDecimal(call.get(), result));
+    ASSERT_NE(result.Instruction, nullptr);
+    EXPECT_EQ(result.Instruction, call.get());
+    EXPECT_EQ(result.Kind, ComparisonKind::Equality);
+    ASSERT_NE(result.Left, nullptr);
+    EXPECT_EQ(result.Left->Op, OpCode::LdLoca);
+    ASSERT_NE(result.Right, nullptr);
+    EXPECT_EQ(result.Right->Op, OpCode::LdLoca);
+    EXPECT_FALSE(result.IsLifted);
+}
+
+// MatchCompOrDecimal recognises a Call to System.Decimal.op_LessThan,
+// reporting Kind=LessThan (one of the 6 comparison operators the Decimal
+// branch switches on).
+TEST(NullableLiftingTransform, MatchCompOrDecimalOnDecimalLessThanCall) {
+    auto v = MakeLocal("v");
+    auto call = std::make_unique<Call>("System.Decimal::op_LessThan");
+    call->DeclaringType = std::make_shared<KnownType>(KnownTypeCode::Decimal);
+    call->IsOperator = true;
+    call->AddArg(std::make_unique<LdLoca>(v));
+    call->AddArg(std::make_unique<LdLoca>(v));
+    CompOrDecimal result;
+    EXPECT_TRUE(NullableLiftingTransform::MatchCompOrDecimal(call.get(), result));
+    EXPECT_EQ(result.Kind, ComparisonKind::LessThan);
+    EXPECT_FALSE(result.IsLifted);
+}
+
+// MatchCompOrDecimal rejects a Call to a user-defined op_Equality whose
+// declaring type is NOT System.Decimal. The C# final gate
+// `call.Method.DeclaringType.IsKnownType(KnownTypeCode.Decimal)` narrows the
+// match to Decimal's comparison operators only; a user-defined operator on
+// another type has IsOperator but not a Decimal declaring type.
+TEST(NullableLiftingTransform, MatchCompOrDecimalRejectsNonDecimalOperator) {
+    auto v = MakeLocal("v");
+    auto call = std::make_unique<Call>("MyType::op_Equality");
+    // A non-Decimal declaring type (a plain Class KnownType).
+    call->DeclaringType = std::make_shared<KnownType>(KnownTypeCode::Object);
+    call->IsOperator = true;
+    call->AddArg(std::make_unique<LdLoca>(v));
+    call->AddArg(std::make_unique<LdLoca>(v));
+    CompOrDecimal result;
+    EXPECT_FALSE(NullableLiftingTransform::MatchCompOrDecimal(call.get(), result));
+}
+
+// MatchCompOrDecimal rejects a Call to a non-comparison operator on
+// System.Decimal (e.g. op_Addition). The Decimal branch switches on the 6
+// comparison-operator names only; op_Addition is an operator (IsOperator) on a
+// Decimal declaring type but not one of the 6, so the switch falls through.
+TEST(NullableLiftingTransform, MatchCompOrDecimalRejectsNonComparisonOperator) {
+    auto v = MakeLocal("v");
+    auto call = std::make_unique<Call>("System.Decimal::op_Addition");
+    call->DeclaringType = std::make_shared<KnownType>(KnownTypeCode::Decimal);
+    call->IsOperator = true;
+    call->AddArg(std::make_unique<LdLoca>(v));
+    call->AddArg(std::make_unique<LdLoca>(v));
+    CompOrDecimal result;
+    EXPECT_FALSE(NullableLiftingTransform::MatchCompOrDecimal(call.get(), result));
+}
+
+// MatchCompOrDecimal rejects a Call to System.Decimal.op_Equality with the
+// wrong argument count (the C# `call.Arguments.Count == 2` gate).
+TEST(NullableLiftingTransform, MatchCompOrDecimalRejectsCallWithWrongArgCount) {
+    auto v = MakeLocal("v");
+    // 1 argument
+    auto call1 = std::make_unique<Call>("System.Decimal::op_Equality");
+    call1->DeclaringType = std::make_shared<KnownType>(KnownTypeCode::Decimal);
+    call1->IsOperator = true;
+    call1->AddArg(std::make_unique<LdLoca>(v));
+    CompOrDecimal result1;
+    EXPECT_FALSE(NullableLiftingTransform::MatchCompOrDecimal(call1.get(), result1));
+    // 3 arguments
+    auto call3 = std::make_unique<Call>("System.Decimal::op_Equality");
+    call3->DeclaringType = std::make_shared<KnownType>(KnownTypeCode::Decimal);
+    call3->IsOperator = true;
+    call3->AddArg(std::make_unique<LdLoca>(v));
+    call3->AddArg(std::make_unique<LdLoca>(v));
+    call3->AddArg(std::make_unique<LdLoca>(v));
+    CompOrDecimal result3;
+    EXPECT_FALSE(NullableLiftingTransform::MatchCompOrDecimal(call3.get(), result3));
 }
 
 // MatchCompOrDecimal returns false for a non-Comp / non-Call instruction
@@ -699,6 +797,76 @@ TEST(NullableLiftingTransform, MscorlibDeclaringTypeSweep) {
     (void)getValueOrDefaultLdLocaMatches;
     (void)nullableCtorMatches;
     (void)nullDefaultMatches;
+}
+
+// On the real mscorlib corpus the IL reader must mark C# operator-overload
+// calls (Call::IsOperator) from the resolved op_* method name, and
+// MatchCompOrDecimal must recognise the 6 comparison operators on
+// System.Decimal (Decimal has no IL Comp instruction, so a Decimal comparison
+// lowers to an op_* call). The ILAst invariant holds across the corpus.
+TEST(NullableLiftingTransform, MscorlibOperatorAndDecimalSweep) {
+#if defined(_WIN32)
+    const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    auto shortName = [](std::string_view fullName) -> std::string_view {
+        auto pos = fullName.rfind("::");
+        return pos == std::string_view::npos ? fullName : fullName.substr(pos + 2);
+    };
+
+    int processed = 0;
+    int operatorCalls = 0;
+    int decimalCompMatches = 0;
+    ILTransformContext ctx;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++processed;
+        Walk(fn->Body.get(), [&](ILInstruction* inst) {
+            if (!inst || inst->Op != OpCode::Call) return;
+            auto* call = static_cast<Call*>(inst);
+            if (call->IsOperator) {
+                ++operatorCalls;
+                // Every Call marked IsOperator must have a recognised op_* short
+                // name (the reader set the flag from the name).
+                auto name = shortName(call->MethodName);
+                EXPECT_EQ(name.compare(0, 3, "op_"), 0) << call->MethodName;
+            }
+            CompOrDecimal result;
+            if (NullableLiftingTransform::MatchCompOrDecimal(call, result)) {
+                // A Call match is a Decimal comparison operator call: the
+                // instruction is the Call, the kind is one of the 6 comparison
+                // operators, IsLifted is false, and the operands are the 2 args.
+                EXPECT_EQ(result.Instruction, call);
+                EXPECT_FALSE(result.IsLifted);
+                EXPECT_TRUE(result.Kind == ComparisonKind::Equality ||
+                            result.Kind == ComparisonKind::Inequality ||
+                            result.Kind == ComparisonKind::LessThan ||
+                            result.Kind == ComparisonKind::LessThanOrEqual ||
+                            result.Kind == ComparisonKind::GreaterThan ||
+                            result.Kind == ComparisonKind::GreaterThanOrEqual);
+                EXPECT_EQ(result.Left, call->Arguments[0].get());
+                EXPECT_EQ(result.Right, call->Arguments[1].get());
+                ++decimalCompMatches;
+            }
+        });
+        fn->CheckInvariant(ILPhase::Normal);
+        if (processed >= 8000) break;
+    }
+    // mscorlib (.NET Framework 4) defines System.Decimal's comparison
+    // operators (op_Equality/op_Inequality/op_LessThan/op_LessThanOrEqual/
+    // op_GreaterThan/op_GreaterThanOrEqual) plus other operator overloads, so
+    // the reader must mark real operator calls and MatchCompOrDecimal must
+    // recognise the Decimal comparison calls.
+    EXPECT_GT(processed, 5000);
+    EXPECT_GT(operatorCalls, 0);
+    EXPECT_GT(decimalCompMatches, 0);
 }
 
 // --- DoLift / DoLiftBinary / NewNullable tests ---

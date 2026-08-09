@@ -566,10 +566,21 @@ implemented and green here. Everything else follows the phase plan in
   `NullableLiftingTransform::MatchCompOrDecimal` (extending the D68 helper
   subset) ports the Comp branch of the C# MatchCompOrDecimal -- a non-lifted
   IL `Comp` reports its Kind/Left/Right/IsLifted via the new `CompOrDecimal`
-  struct; the Decimal-operator branch (a Call to op_Equality/... on
-  System.Decimal) is deferred (needs `Call.Method.IsOperator`, which this
-  port's Call does not carry). The helper is the bridge the nullable-lifting
-  lift machinery consults to recognise the C#-style lifted comparison shape;
+  struct -- AND the Decimal-operator branch: a Call to one of the 6 comparison
+  operators on System.Decimal (op_Equality/op_Inequality/op_LessThan/
+  op_LessThanOrEqual/op_GreaterThan/op_GreaterThanOrEqual), gated on the new
+  `Call::IsOperator` flag (set by the IL reader from the `op_*` method name --
+  the faithful equivalent of the C# `IMethod.IsOperator`'s SpecialName +
+  name-prefix check) + the 2-arg gate + the name switch + a System.Decimal
+  declaring type. Decimal has no IL Comp instruction, so a Decimal comparison
+  lowers to an op_* call; the branch recognises these. The Decimal lift itself
+  (LiftCSharpUser*, which builds a lifted user-defined operator via
+  CSharpOperators.LiftUserDefinedOperator) is deferred -- needs the Phase 5 C#
+  resolver; the recognition here is the foundation those consumers will consult
+  (the existing LiftCSharp* paths bail safely for a Call CompOrDecimal -- no fold
+  fires until the resolver-backed lift lands). The helper is the bridge the
+  nullable-lifting lift machinery consults to recognise the C#-style lifted
+  comparison shape;
   the full `NullableLiftingStatementTransform` (the `RunStatements` entry +
   `Lift`/`LiftNormal`/`LiftCSharp*` + the bool? `v == true` folds + the
   `ThreeValuedBoolAnd/Or` nodes + the `NullPropagationTransform` path `Lift`
@@ -749,10 +760,13 @@ implemented and green here. Everything else follows the phase plan in
   0)`, ported as a `MakeLogicNot` helper -- `Comp.LogicNot` does NOT fold, unlike
   `NegateCondition`). The user-defined-operator fall-backs
   (LiftCSharpUserEqualityComparison/LiftCSharpUserComparison, need
-  Call.Method.IsOperator + CSharpOperators.LiftUserDefinedOperator), the Decimal
-  branch (needs Call.Method.IsOperator + KnownTypeCode::Decimal), and
+  Call.Method.IsOperator + CSharpOperators.LiftUserDefinedOperator) and
   IsGenericNewPattern (needs MatchDefaultValue + Call.Method.FullName +
-  TypeKind) are deferred. The path is a Roslyn-era codegen pattern that fires 0
+  TypeKind) are deferred. The Decimal-operator branch of MatchCompOrDecimal
+  (a Call to op_Equality/... on System.Decimal) is now ported -- it needs the
+  `Call::IsOperator` flag (set by the IL reader from the `op_*` method name) +
+  the 6-comparison-operator name switch + a System.Decimal declaring type; the
+  Decimal LIFT (LiftCSharpUser*, the resolver-backed lift) stays deferred. The path is a Roslyn-era codegen pattern that fires 0
   times on the .NET Framework 4 legacy-csc corpus (the CLI `??`/lifted-comp
   counts are unchanged); ported for faithfulness -- hand-built tests verify the
   equality hasValueComp + fall-back folds, the relational + IsLifted folds, and
@@ -842,8 +856,22 @@ implemented and green here. Everything else follows the phase plan in
   Framework 4 legacy-csc mscorlib corpus, so the sweep asserts the ILAst
   invariant holds (not a fold count), matching the DetectCatchWhenConditionBlocks /
   LdLocaDupInitObj precedent. 38 of ~40 transforms ported.
+  The `Call::IsOperator` flag (set by the IL reader from the `op_*` method
+  name -- the faithful equivalent of the C# `IMethod.IsOperator`'s SpecialName
+  + name-prefix check) and the `MatchCompOrDecimal` Decimal-operator branch
+  (a Call to one of the 6 comparison operators on System.Decimal, gated on
+  IsOperator + 2 args + the name switch + a Decimal declaring type) are now in
+  place as a tested-but-not-yet-wired foundation: the recognition fires on the
+  real mscorlib corpus (System.Decimal's comparison operators are in-module
+  MethodDefs the reader marks IsOperator and MatchCompOrDecimal recognises), but
+  the Decimal LIFT (LiftCSharpUser*, which build a lifted user-defined operator
+  via CSharpOperators.LiftUserDefinedOperator) is deferred -- needs the Phase 5
+  C# resolver; the existing LiftCSharp* paths bail safely for a Call
+  CompOrDecimal, so no fold fires until the resolver-backed lift lands.
   The remaining `Run(IfInstruction)` paths (the LiftCSharpUserComparison rest
-  of LiftNormal [needs the Call-operator case], NullPropagation's remaining
+  of LiftNormal [needs the C# resolver's CSharpOperators.LiftUserDefinedOperator;
+  the `Call::IsOperator` gate it consults is now in place], the Decimal lift
+  itself [same resolver need], NullPropagation's remaining
   modes [UnconstrainedType + the NullCoalescing output case + the
   unconstrained-generic pattern]) are the subsequent in-order targets.
   `NullableRewrap` / `NullableUnwrap` (Instructions/, a tested-but-not-yet-wired

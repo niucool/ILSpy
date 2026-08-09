@@ -300,6 +300,47 @@ ILVariablePtr GetOrCreateLocal(ReaderState& s, int idx) {
 
 StackType ReturnStackTypeOf(const ITypePtr& t) { return StackTypeOf(t); }
 
+// The short part of a resolved method name -- the substring after the last
+// '::' (the C# `IMethod.Name`). Returns the whole string when no '::' is
+// present.
+std::string_view ShortMethodName(std::string_view fullName) {
+    auto pos = fullName.rfind("::");
+    if (pos == std::string_view::npos) return fullName;
+    return fullName.substr(pos + 2);
+}
+
+// The set of recognised C# operator-overload method names (the C#
+// `OperatorDeclaration.GetOperatorType` table: op_Equality, op_Addition,
+// op_Implicit, op_CheckedAddition, ...). A method whose short name is in this
+// set is a C# operator overload; the IL reader marks the Call `IsOperator` so
+// NullableLiftingTransform::MatchCompOrDecimal's Decimal branch can recognise
+// the 6 comparison operators on System.Decimal (which have no IL Comp
+// instruction and lower to op_* calls). The C# additionally requires the
+// MethodDef's SpecialName/RTSpecialName flag; this port approximates by the
+// name alone (every C#-compiled operator overload carries SpecialName, so the
+// name is the real signal -- reading the flags column for in-module MethodDefs
+// and resolving cross-assembly MemberRefs would need the full type system for
+// no practical gain on C#-compiled corpora).
+bool IsOperatorName(std::string_view fullName) {
+    static constexpr std::string_view opNames[] = {
+        "op_LogicalNot", "op_OnesComplement", "op_Increment", "op_CheckedIncrement",
+        "op_Decrement", "op_CheckedDecrement", "op_True", "op_False",
+        "op_UnaryPlus", "op_UnaryNegation", "op_CheckedUnaryNegation",
+        "op_Addition", "op_CheckedAddition", "op_Subtraction", "op_CheckedSubtraction",
+        "op_Multiply", "op_CheckedMultiply", "op_Division", "op_CheckedDivision",
+        "op_Modulus", "op_BitwiseAnd", "op_BitwiseOr", "op_ExclusiveOr",
+        "op_LeftShift", "op_RightShift", "op_UnsignedRightShift",
+        "op_Equality", "op_Inequality", "op_GreaterThan", "op_LessThan",
+        "op_GreaterThanOrEqual", "op_LessThanOrEqual",
+        "op_Implicit", "op_Explicit", "op_CheckedExplicit",
+    };
+    auto name = ShortMethodName(fullName);
+    for (auto op : opNames) {
+        if (name == op) return true;
+    }
+    return false;
+}
+
 // Outcome of decoding one instruction.
 enum class DecodeOutcome {
     Continue,     // pushed/added a statement; keep going
@@ -487,6 +528,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             call->IsInstanceCall = callSig->IsInstance && op != ILOpCode::Newobj;
             call->IsNewObj = (op == ILOpCode::Newobj);
             call->DeclaringType = file.ResolveMethodDeclaringType(tok);
+            call->IsOperator = IsOperatorName(call->MethodName);
             std::vector<std::unique_ptr<ILInstruction>> args;
             args.reserve(argCount);
             for (int i = 0; i < argCount; ++i) {

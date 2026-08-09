@@ -1101,14 +1101,19 @@ std::unique_ptr<ILInstruction> ExpressionTransforms::LiftNullableCore(
 
     // The MatchCompOrDecimal / LiftCSharp* path (the section of Lift after
     // AnalyzeCondition/LiftNormal and before the bool? equality folds). A
-    // condition that is a non-lifted Comp (the Decimal-operator Call branch is
-    // deferred -- needs Call.Method.IsOperator) may be a C#-style lifted
-    // comparison. The equality/inequality cases (LiftCSharpEqualityComparison,
-    // the hasValueComp two-nullable case + the single-nullable fall-back) and the
-    // relational cases (LiftCSharpComparison, the 4 `comp ? (v1 != null && ...) :
-    // ldc.i4` shapes, with a logic.not wrap for the negated-condition shapes) are
-    // ported (Comp branch only); the user-defined-operator fall-backs
-    // (LiftCSharpUserEqualityComparison, the Decimal branch), the
+    // condition that is a non-lifted Comp, or a Call to one of the 6 comparison
+    // operators on System.Decimal (MatchCompOrDecimal now recognises both), may
+    // be a C#-style lifted comparison. The equality/inequality cases
+    // (LiftCSharpEqualityComparison, the hasValueComp two-nullable case + the
+    // single-nullable fall-back) and the relational cases (LiftCSharpComparison,
+    // the 4 `comp ? (v1 != null && ...) : ldc.i4` shapes, with a logic.not wrap
+    // for the negated-condition shapes) are ported (Comp branch only); a Decimal
+    // Call CompOrDecimal flows into these and the existing Comp-branch lifts bail
+    // (MakeLifted returns null for a Call, DoLift/DoLiftBinary bail on the Call's
+    // non-nullable arguments), so recognising a Decimal comparison call is safe
+    // (no fold fires until the resolver-backed lift lands). The user-defined-
+    // operator fall-backs (LiftCSharpUserEqualityComparison / the Decimal lift,
+    // which build a lifted user-defined operator via CSharpOperators), the
     // IsGenericNewPattern special case (needs MatchDefaultValue +
     // Call.Method.FullName + TypeKind), the NullPropagation path, and the
     // `&`/`|` on bool? path (D96) are the remaining deferred/ported pieces.

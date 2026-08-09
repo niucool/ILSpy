@@ -53,6 +53,20 @@ public:
     // DelegateConstruction.MatchDelegateConstruction (the C# `case NewObj call:`)
     // and the seed's `new Type(args)` rendering path.
     bool IsNewObj = false;
+    // True when the resolved method is a C# operator overload -- a method
+    // whose name (the part after '::') is one of the recognised `op_*` names
+    // (op_Equality, op_Addition, op_Implicit, ...). The C# models this as
+    // `IMethod.IsOperator` (a SymbolKind derived from the MethodDef's
+    // SpecialName/RTSpecialName flag + the `op_` name prefix recognised by
+    // `OperatorDeclaration.GetOperatorType`); this port approximates it by the
+    // name alone, since every C#-compiled operator overload carries SpecialName
+    // (the attribute check would need the MethodDef flags column for in-module
+    // MethodDefs and the full type system to resolve cross-assembly MemberRefs,
+    // neither worth the cost for the name-only signal). Set by the IL reader from
+    // the resolved MethodName. Consumed by NullableLiftingTransform::
+    // MatchCompOrDecimal's Decimal branch (the 6 comparison operators on
+    // System.Decimal, which have no IL Comp instruction and lower to op_* calls).
+    bool IsOperator = false;
 
     explicit Call(std::string method = std::string()) : ILInstruction(OpCode::Call), MethodName(std::move(method)) {}
 

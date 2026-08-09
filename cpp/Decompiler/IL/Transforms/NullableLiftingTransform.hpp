@@ -33,7 +33,9 @@
 //     Kind/Left/Right/IsLifted via the CompOrDecimal struct; the lift
 //     machinery consults it to recognise the C#-style lifted comparison shape.
 //     The Decimal-operator branch (a Call to op_Equality/... on System.Decimal,
-//     needs Call.Method.IsOperator + KnownTypeCode::Decimal) is deferred.
+//     gated on Call::IsOperator + the 6-comparison-operator name switch + a
+//     System.Decimal declaring type) is also ported; the Decimal lift itself
+//     (LiftCSharpUser*, needs the C# resolver) stays deferred.
 //
 // The C# checks `call.Method.Name` and `call.Method.DeclaringTypeDefinition?
 // .KnownTypeCode == KnownTypeCode.NullableOfT`. This port's Call carries the
@@ -64,11 +66,15 @@ using BitSet = ILSpy::Decompiler::Util::BitSet;
 
 // Port of NullableLiftingTransform.CompOrDecimal: either a non-lifted IL `Comp`
 // or a call to one of the 6 comparison operators on System.Decimal. This port
-// carries only the `Comp` case (the Decimal case needs Call.Method.IsOperator +
-// KnownTypeCode::Decimal, deferred); the fields mirror the C# struct so the
-// nullable-lifting lift machinery that consults it reads the same shape.
-// `Instruction` is the matched node (a Comp); `Left`/`Right` are its operands;
-// `Kind` is the comparison kind; `IsLifted` is Comp.IsLifted().
+// carries both cases: the `Comp` case (Kind/Left/Right/IsLifted from the Comp)
+// and the `Decimal` case (a Call with IsOperator, 2 args, one of the 6
+// comparison operator names, and a System.Decimal declaring type -- the C#
+// `call.Method.IsOperator && Arguments.Count == 2 && !IsLifted` + the name
+// switch + `DeclaringType.IsKnownType(KnownTypeCode.Decimal)`). The fields mirror
+// the C# struct so the nullable-lifting lift machinery that consults it reads
+// the same shape; `Instruction` is the matched node (a Comp or a Call);
+// `Left`/`Right` are its operands (the Comp's children or the Call's 2 args);
+// `Kind` is the comparison kind; `IsLifted` is Comp.IsLifted() / false (Call).
 struct CompOrDecimal {
     ILInstruction* Instruction = nullptr;
     ComparisonKind Kind = ComparisonKind::Equality;
@@ -82,12 +88,15 @@ struct CompOrDecimal {
     // comp.InputType, comp.Sign, left, right)` (the D91 model) -- a C#-style lifted
     // comparison whose operands' ResultType is O (Nullable<T>). The Decimal/Call
     // branch (a Call to a lifted user-defined operator, needs
-    // CSharpOperators.LiftUserDefinedOperator) is deferred -- MatchCompOrDecimal
-    // only matches the Comp branch, so a Call Instruction never reaches here.
-    // `LeftExpectedType`/`RightExpectedType` (the Call-branch parameter types)
-    // are not carried: for the Comp branch both are SpecialType.UnknownType
-    // (nullptr), which the caller passes directly to DoLiftBinary. Returns null for
-    // a non-Comp Instruction (the deferred Call branch).
+    // CSharpOperators.LiftUserDefinedOperator) is deferred -- the existing
+    // LiftCSharp* consumers bail for a Call CompOrDecimal (MakeLifted returns
+    // null here, and DoLift/DoLiftBinary bail on the Call's non-nullable
+    // arguments), so recognising a Decimal comparison call is safe (no fold fires
+    // until the resolver-backed lift lands). `LeftExpectedType`/
+    // `RightExpectedType` (the Call-branch parameter types) are not carried: for
+    // the Comp branch both are SpecialType.UnknownType (nullptr), which the
+    // caller passes directly to DoLiftBinary. Returns null for a non-Comp
+    // Instruction (the deferred Call branch).
     std::unique_ptr<ILInstruction> MakeLifted(
         ComparisonKind newComparisonKind,
         std::unique_ptr<ILInstruction> left,
@@ -128,10 +137,15 @@ public:
     // Port of NullableLiftingTransform.MatchCompOrDecimal(inst, out result):
     // recognises a non-lifted IL `Comp` and reports its Kind/Left/Right/IsLifted
     // via `result`. The Decimal-operator branch (a Call to op_Equality/
-    // op_Inequality/op_LessThan/... on System.Decimal) is deferred -- it needs
-    // Call.Method.IsOperator (this port's Call carries only a resolved name +
-    // declaring type, no operator flag) -- so a Call never matches here. Returns
-    // false for every other instruction kind, matching the C# fall-through.
+    // op_Inequality/op_LessThan/op_LessThanOrEqual/op_GreaterThan/
+    // op_GreaterThanOrEqual on System.Decimal) is also ported -- it needs
+    // `Call::IsOperator` (set by the IL reader from the `op_*` method name) +
+    // the 6-comparison-operator name switch + a System.Decimal declaring type.
+    // The Decimal lift (LiftCSharpUser*, which build a lifted user-defined
+    // operator via CSharpOperators.LiftUserDefinedOperator) is deferred -- needs
+    // the C# resolver; the recognition here is the foundation those consumers
+    // will consult. Returns false for every other instruction kind, matching the
+    // C# fall-through.
     static bool MatchCompOrDecimal(ILInstruction* inst, CompOrDecimal& result);
 
     // Port of NullableType.GetUnderlyingType(type): for a Nullable<T> -- a
