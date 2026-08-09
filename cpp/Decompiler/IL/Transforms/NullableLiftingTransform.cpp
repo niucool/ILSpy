@@ -20,6 +20,7 @@
 
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
@@ -102,6 +103,25 @@ bool NullableLiftingTransform::MatchGetValueOrDefault(ILInstruction* inst,
     nullableValue = call->Arguments[0].get();
     fallback = call->Arguments[1].get();
     return true;
+}
+
+bool NullableLiftingTransform::MatchCompOrDecimal(ILInstruction* inst, CompOrDecimal& result) {
+    // The Comp branch: a non-lifted IL Comp reports its Kind/Left/Right/IsLifted.
+    // The Decimal branch (a Call to op_Equality/op_Inequality/op_LessThan/...
+    // on System.Decimal) is deferred -- it needs Call.Method.IsOperator, which
+    // this port's Call does not carry -- so a Call never matches here.
+    result = CompOrDecimal{};
+    if (!inst) return false;
+    result.Instruction = inst;
+    if (inst->Op == OpCode::Comp) {
+        auto* comp = static_cast<Comp*>(inst);
+        result.Kind = comp->Kind;
+        result.Left = comp->Left.get();
+        result.Right = comp->Right.get();
+        result.IsLifted = comp->IsLifted();
+        return true;
+    }
+    return false;
 }
 
 } // namespace ILSpy::Decompiler::IL

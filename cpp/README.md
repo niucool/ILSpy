@@ -547,6 +547,32 @@ implemented and green here. Everything else follows the phase plan in
   the .NET Framework 4 legacy-csc corpus -- ported for faithfulness (the
   hand-built tests verify the rewrite, the sweep verifies the invariant).
   32 of ~40 transforms ported.
+  The `Comp` nullable-lifting model (the foundation the next in-order
+  `NullableLiftingStatementTransform` -- and the ExpressionTransforms
+  VisitComp nullable-lifting pieces -- need) is now in place: the Comp node
+  carries `LiftingKind` (a `ComparisonLiftingKind` None/CSharp/
+  ThreeValuedLogic enum faithful to Comp.cs), `InputType` (the underlying input
+  StackType -- the operands' ResultType for an ordinary comparison, the inner
+  type inside Nullable<T> for a lifted one), `IsLifted()` (`LiftingKind !=
+  None`), `UnderlyingResultType()` (I4), and a `ResultType()` override that
+  flips to O for the SQL-style ThreeValuedLogic lift (whose null result is
+  itself a nullable value). A second `Comp` constructor takes the lifting kind
+  + input type explicitly for the nullable-lifting machinery to build a
+  lifted Comp; the existing 4-arg constructor derives `InputType` from the
+  left operand and defaults `LiftingKind` to None, so every existing Comp
+  stays non-lifted (ResultType stays I4) and the dump appends `.lifted[C#]` /
+  `.lifted[3VL]` only when lifted (the default renders bare, unchanged).
+  `NullableLiftingTransform::MatchCompOrDecimal` (extending the D68 helper
+  subset) ports the Comp branch of the C# MatchCompOrDecimal -- a non-lifted
+  IL `Comp` reports its Kind/Left/Right/IsLifted via the new `CompOrDecimal`
+  struct; the Decimal-operator branch (a Call to op_Equality/... on
+  System.Decimal) is deferred (needs `Call.Method.IsOperator`, which this
+  port's Call does not carry). The helper is the bridge the nullable-lifting
+  lift machinery consults to recognise the C#-style lifted comparison shape;
+  the full `NullableLiftingStatementTransform` (the `RunStatements` entry +
+  `Lift`/`LiftNormal`/`LiftCSharp*` + the bool? `v == true` folds + the
+  `ThreeValuedBoolAnd/Or` nodes + the `NullPropagationTransform` path `Lift`
+  consults first) is the next in-order target the foundation unblocks.
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
   walk + a corpus probe; the async/iterator state machines

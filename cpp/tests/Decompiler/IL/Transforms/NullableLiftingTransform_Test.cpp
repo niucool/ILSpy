@@ -34,6 +34,7 @@
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
@@ -275,6 +276,63 @@ TEST(NullableLiftingTransform, MatchGetValueOrDefaultTwoArgRejectsNullDeclaringT
     ILInstruction* fallback = nullptr;
     EXPECT_FALSE(NullableLiftingTransform::MatchGetValueOrDefault(
         call.get(), nullableValue, fallback));
+}
+
+// MatchCompOrDecimal recognises a non-lifted IL `Comp` and reports its
+// Kind/Left/Right/IsLifted. The Decimal-operator branch (a Call to op_Equality
+// etc. on System.Decimal) is deferred, so a Call never matches here.
+TEST(NullableLiftingTransform, MatchCompOrDecimalOnNonLiftedComp) {
+    auto v = MakeLocal("v");
+    auto comp = std::make_unique<Comp>(std::make_unique<LdLoc>(v),
+                                       std::make_unique<LdcI4>(5),
+                                       ComparisonKind::LessThan, false);
+    CompOrDecimal result;
+    EXPECT_TRUE(NullableLiftingTransform::MatchCompOrDecimal(comp.get(), result));
+    ASSERT_NE(result.Instruction, nullptr);
+    EXPECT_EQ(result.Instruction, comp.get());
+    EXPECT_EQ(result.Kind, ComparisonKind::LessThan);
+    ASSERT_NE(result.Left, nullptr);
+    EXPECT_EQ(result.Left->Op, OpCode::LdLoc);
+    ASSERT_NE(result.Right, nullptr);
+    EXPECT_EQ(result.Right->Op, OpCode::LdcI4);
+    EXPECT_FALSE(result.IsLifted);
+}
+
+// MatchCompOrDecimal reports IsLifted=true for a lifted Comp (the C#-style
+// lift), the shape the nullable-lifting lift machinery produces.
+TEST(NullableLiftingTransform, MatchCompOrDecimalOnLiftedComp) {
+    auto v = MakeLocal("v");
+    auto comp = std::make_unique<Comp>(std::make_unique<LdLoc>(v),
+                                       std::make_unique<LdcI4>(0),
+                                       ComparisonKind::Equality,
+                                       ComparisonLiftingKind::CSharp,
+                                       StackType::I4, false);
+    CompOrDecimal result;
+    EXPECT_TRUE(NullableLiftingTransform::MatchCompOrDecimal(comp.get(), result));
+    EXPECT_EQ(result.Kind, ComparisonKind::Equality);
+    EXPECT_TRUE(result.IsLifted);
+}
+
+// MatchCompOrDecimal returns false for a non-Comp instruction (a Call, even one
+// whose method name looks like an operator -- the Decimal branch is deferred).
+TEST(NullableLiftingTransform, MatchCompOrDecimalRejectsCall) {
+    auto v = MakeLocal("v");
+    auto call = std::make_unique<Call>("System.Decimal::op_Equality");
+    call->DeclaringType = std::make_shared<KnownType>(KnownTypeCode::Decimal);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    call->AddArg(std::make_unique<LdLoca>(v));
+    CompOrDecimal result;
+    EXPECT_FALSE(NullableLiftingTransform::MatchCompOrDecimal(call.get(), result));
+}
+
+// MatchCompOrDecimal returns false for a non-Comp / non-Call instruction
+// (e.g. a bare LdLoc) and for null, matching the C# fall-through.
+TEST(NullableLiftingTransform, MatchCompOrDecimalRejectsNonComp) {
+    auto v = MakeLocal("v");
+    auto ld = std::make_unique<LdLoc>(v);
+    CompOrDecimal result;
+    EXPECT_FALSE(NullableLiftingTransform::MatchCompOrDecimal(ld.get(), result));
+    EXPECT_FALSE(NullableLiftingTransform::MatchCompOrDecimal(nullptr, result));
 }
 
 // A SwitchInstruction carries IsLifted/Type and a SwitchSection carries

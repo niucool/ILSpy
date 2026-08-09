@@ -56,6 +56,7 @@ add_executable(ilspy_tests
     Decompiler/IL/Instructions/MatchInstruction_Test.cpp
     Decompiler/IL/Instructions/UsingInstruction_Test.cpp
     Decompiler/IL/Instructions/Conv_Test.cpp
+    Decompiler/IL/Instructions/Comp_Test.cpp
     Decompiler/IL/Instructions/NullCoalescingInstruction_Test.cpp
     Decompiler/IL/Transforms/NullCoalescingTransform_Test.cpp
 )

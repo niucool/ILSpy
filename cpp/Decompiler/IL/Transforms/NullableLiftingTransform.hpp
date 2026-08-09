@@ -20,7 +20,7 @@
 // ICSharpCode.Decompiler/IL/Transforms/NullableLiftingTransform.cs that the
 // switch-on-nullable family (SwitchOnNullableTransform, and SwitchDetection's
 // AddNullCase) depend on. The full NullableLiftingStatementTransform / lift
-// rewriting is a larger slice and is deferred; this header exposes only the
+// rewriting is a larger slice and is deferred; this header exposes the
 // self-contained shape matchers that recognise Nullable<T>'s HasValue /
 // GetValueOrDefault access patterns:
 //
@@ -29,6 +29,11 @@
 //     on System.Nullable<T> -> arg, and the 2-argument form
 //     `call GetValueOrDefault(nullableValue, fallback)` -> (nullableValue, fallback)
 //     consumed by the ExpressionTransforms.VisitCall `a ?? b` fold.
+//   - MatchCompOrDecimal: recognises a non-lifted IL `Comp` and reports its
+//     Kind/Left/Right/IsLifted via the CompOrDecimal struct; the lift
+//     machinery consults it to recognise the C#-style lifted comparison shape.
+//     The Decimal-operator branch (a Call to op_Equality/... on System.Decimal,
+//     needs Call.Method.IsOperator + KnownTypeCode::Decimal) is deferred.
 //
 // The C# checks `call.Method.Name` and `call.Method.DeclaringTypeDefinition?
 // .KnownTypeCode == KnownTypeCode.NullableOfT`. This port's Call carries the
@@ -41,9 +46,26 @@
 
 #pragma once
 
+#include "Decompiler/IL/Instructions/Comp.hpp"
+
 namespace ILSpy::Decompiler::IL {
 
 class ILInstruction;
+
+// Port of NullableLiftingTransform.CompOrDecimal: either a non-lifted IL `Comp`
+// or a call to one of the 6 comparison operators on System.Decimal. This port
+// carries only the `Comp` case (the Decimal case needs Call.Method.IsOperator +
+// KnownTypeCode::Decimal, deferred); the fields mirror the C# struct so the
+// nullable-lifting lift machinery that consults it reads the same shape.
+// `Instruction` is the matched node (a Comp); `Left`/`Right` are its operands;
+// `Kind` is the comparison kind; `IsLifted` is Comp.IsLifted().
+struct CompOrDecimal {
+    ILInstruction* Instruction = nullptr;
+    ComparisonKind Kind = ComparisonKind::Equality;
+    ILInstruction* Left = nullptr;
+    ILInstruction* Right = nullptr;
+    bool IsLifted = false;
+};
 
 // The static helper subset of NullableLiftingTransform. The full
 // NullableLiftingStatementTransform (the nullable-expression lifting) is
@@ -75,6 +97,15 @@ public:
     static bool MatchGetValueOrDefault(ILInstruction* inst,
                                        ILInstruction*& nullableValue,
                                        ILInstruction*& fallback);
+
+    // Port of NullableLiftingTransform.MatchCompOrDecimal(inst, out result):
+    // recognises a non-lifted IL `Comp` and reports its Kind/Left/Right/IsLifted
+    // via `result`. The Decimal-operator branch (a Call to op_Equality/
+    // op_Inequality/op_LessThan/... on System.Decimal) is deferred -- it needs
+    // Call.Method.IsOperator (this port's Call carries only a resolved name +
+    // declaring type, no operator flag) -- so a Call never matches here. Returns
+    // false for every other instruction kind, matching the C# fall-through.
+    static bool MatchCompOrDecimal(ILInstruction* inst, CompOrDecimal& result);
 };
 
 } // namespace ILSpy::Decompiler::IL
