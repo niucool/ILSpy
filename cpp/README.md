@@ -89,7 +89,7 @@ implemented and green here. Everything else follows the phase plan in
   `RemoveDeadStores` setting, with no loads or addresses, has its stores dropped
   (a pure value goes with the store; an impure value is unwrapped so its side
   effect survives), and dead-copy chains collapse via a recompute fixpoint.
-  24 of ~40 transforms ported. The switch-detection family is now complete in
+  25 of ~40 transforms ported. The switch-detection family is now complete in
   its core: `LongSet`/`LongInterval` (Util/, ported from LongSet.cs /
   Interval.cs) -- an immutable interval-set of longs whose complement is
   representable (unlike `std::set<int64_t>`) -- backs `SwitchSection::Labels`
@@ -257,11 +257,13 @@ implemented and green here. Everything else follows the phase plan in
   RemoveInfeasiblePath + DetectPinnedRegions + DetectCatchWhenConditionBlocks +
   LdLocaDupInitObjTransform + EarlyExpressionTransforms + RemoveDeadVariableInit +
   CFS + SwitchDetection + SwitchOnNullable + LoopDetection + PatternMatching +
-  ConditionDetection + LockTransform + UsingTransform + CachedDelegateInitialization + CachedReadOnlySpanInitialization + AssignVariableNames + RemoveRedundantReturn before the
+  ConditionDetection + LockTransform + UsingTransform + CachedDelegateInitialization + CachedReadOnlySpanInitialization + StatementTransform{ILInlining} + AssignVariableNames + RemoveRedundantReturn before the
   C# seed, so `fixed (...) { ... }`, `default(T)`, reconstructed `switch`
   statements, switch-on-nullable `case null:` arms, `is T x` patterns,
   `lock (...) { ... }`, and `using (...) { ... }` statements now
-  appear in the output. 24 of ~40 transforms ported.
+  appear in the output. 25 of ~40 transforms ported (the StatementTransform
+  orchestration + its first child ILInlining; the remaining 15 per-statement
+  children are deferred).
   `DelegateConstruction` (Transforms/, a tested-but-not-yet-wired
   foundation) ports the `MatchDelegateConstruction` helper the next in-order
   transform (`CachedDelegateInitialization`) and the later `DelegateConstruction`
@@ -345,17 +347,54 @@ implemented and green here. Everything else follows the phase plan in
   Roslyn-compiled / modern .NET with System.Memory); ported for faithfulness
   (the hand-built tests verify the rewrite, the sweep the invariant -- the
   DetectCatchWhenConditionBlocks / LdLocaDupInitObj / SwitchOnNullable
-  precedent). Gated on the `ArrayInitializers` setting (default true). The
-  remaining field-cached delegate shapes (now unblocked on the IField side)
+  precedent). Gated on the `ArrayInitializers` setting (default true).
+  `StatementTransform` (the next in-order block after
+  `CachedReadOnlySpanInitialization`, ported from StatementTransform.cs) is the
+  per-statement driver that ends the BlockILTransform post-order set: it walks
+  every block's non-terminal instructions last-to-first and runs the interleaved
+  per-statement transforms (ILInlining, ExpressionTransforms, TransformAssignment,
+  ...) at each position with rerun mechanics -- a child may call
+  `RequestRerun(pos)` to jump the driver back to `pos` and re-run all children,
+  or `RequestRerun()` to re-run at the current position, so a transform that
+  opens up a new inlining opportunity triggers the ILInlining child to fold it
+  without a separate full-block pass. This iteration ports the orchestration
+  (the `IStatementTransform` interface + `StatementTransformContext` + the
+  `StatementTransform` IILTransform driver) and wires the first child,
+  `ILInlining` (now also an `IStatementTransform` via a per-statement `Run`
+  overload that loops `InlineOneIfPossible` at the given position) -- the C#
+  pipeline's second inlining pass, which folds the single-use variables the
+  intervening transforms (ConditionDetection / Lock / Using / CachedDelegate /
+  CachedReadOnlySpan) created. Adapted to the port's if-as-final block model: the
+  final lives separately (`FinalInstruction`, not in `Instructions`), so the
+  per-statement positions range over the non-terminal `Instructions` only (the
+  C# ranges over `Instructions` including the final, but the final is never a
+  `StLoc`, so the C#'s first iteration at the final is a no-op -- starting at
+  the last non-terminal is equivalent); the per-statement `ILInlining`'s
+  `while (InlineOneIfPossible(block, pos))` loop re-checks `pos < size` after a
+  removal shrank the block (the C# avoids this because the final lives in
+  `Instructions`, so the last non-terminal is at `Count-2` and the shifted-in
+  instruction stays in range). The remaining 15 per-statement children
+  (ExpressionTransforms, DynamicIsEventAssignmentTransform, TransformAssignment,
+  NullCoalescingTransform, NullableLiftingStatementTransform,
+  NullPropagationStatementTransform, TransformArrayInitializers,
+  TransformCollectionAndObjectInitializers, TransformExpressionTrees,
+  IndexRangeTransform, DeconstructionTransform, NamedArgumentTransform,
+  RemoveUnconstrainedGenericReferenceTypeCheck, UserDefinedLogicTransform,
+  InterpolatedStringTransform) and the `ILInlining` `AllowInliningOfLdloca`
+  option (the ldloca-into-`addressof` path the C# second pass enables, which
+  needs an `AddressOf` node + `IsGeneratedTemporaryForAddressOf` +
+  `ClassifyExpression`) are deferred.
+  The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
-  walk + a corpus probe, the async/iterator state machines
+  walk + a corpus probe; the async/iterator state machines
   (YieldReturnDecompiler/AsyncAwaitDecompiler), SplitVariables (needs
   reaching-definitions dataflow),
   DetectExitPoints + the full ConditionDetection (multi-pred join blocks),
   the PatternMatchingTransform recursive sub-patterns (DetectPropertySubPatterns /
   PropertyOrFieldAccess / CompatibleExitInstruction),
-  HighLevelLoopTransform (while/for),
-  TransformAssignment, ...
+  HighLevelLoopTransform (while/for), and the remaining StatementTransform
+  per-statement children (ExpressionTransforms, TransformAssignment, ...) are
+  the subsequent in-order targets.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end. It now produces readable C#: real parameter names (Param

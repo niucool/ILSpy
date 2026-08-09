@@ -40,6 +40,7 @@
 #include "Decompiler/IL/Transforms/UsingTransform.hpp"
 #include "Decompiler/IL/Transforms/CachedDelegateInitialization.hpp"
 #include "Decompiler/IL/Transforms/CachedReadOnlySpanInitialization.hpp"
+#include "Decompiler/IL/Transforms/StatementTransform.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
 #include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
@@ -314,6 +315,26 @@ int main(int argc, char** argv) {
                 // fires 0 times on it (it fires on Roslyn-compiled / modern .NET
                 // with System.Memory); ported for faithfulness.
                 ILSpy::Decompiler::IL::CachedReadOnlySpanInitialization().Run(*fn, transformContext);
+                // StatementTransform: the BlockILTransform post-order set's final
+                // member, a per-statement driver that runs the interleaved
+                // statement transforms (ILInlining, ExpressionTransforms,
+                // TransformAssignment, ...) statement-by-statement with rerun
+                // mechanics (per GetILTransforms()). This iteration ports the
+                // orchestration and wires the first child, ILInlining (the C#
+                // pipeline's second inlining pass); the remaining per-statement
+                // transforms (ExpressionTransforms, TransformAssignment,
+                // NullCoalescingTransform, ...) and the ILInlining
+                // AllowInliningOfLdloca option (the ldloca-into-addressof path)
+                // are deferred. Running ILInlining again here folds the
+                // single-use variables the intervening transforms
+                // (ConditionDetection / Lock / Using / CachedDelegate /
+                // CachedReadOnlySpan) created, the point of the C# second pass.
+                {
+                    ILSpy::Decompiler::IL::StatementTransform statementTransform;
+                    statementTransform.AddChild(
+                        std::make_unique<ILSpy::Decompiler::IL::ILInlining>());
+                    statementTransform.Run(*fn, transformContext);
+                }
                 ILSpy::Decompiler::IL::AssignVariableNames().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::RemoveRedundantReturn().Run(*fn, transformContext);
                 fn->CheckInvariant(ILSpy::Decompiler::IL::ILPhase::Normal);

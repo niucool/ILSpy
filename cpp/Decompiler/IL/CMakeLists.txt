@@ -35,4 +35,5 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/DelegateConstruction.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/CachedDelegateInitialization.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/CachedReadOnlySpanInitialization.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/StatementTransform.cpp
 )

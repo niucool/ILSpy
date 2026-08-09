@@ -82,7 +82,11 @@ FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
 
 // Try to inline the StLoc at `pos` into the next instruction's load of its
 // variable, or remove it if dead. Returns true if the stloc was consumed.
+// `pos` may be out of range after a prior removal shrank the block (the
+// per-statement driver loops at one position); guard and return false so the
+// caller's while-loop terminates without reading out of bounds.
 bool InlineOneIfPossible(Block* block, int pos, ILTransformContext& ctx) {
+    if (pos < 0 || static_cast<std::size_t>(pos) >= block->Instructions.size()) return false;
     auto* stloc = dynamic_cast<StLoc*>(block->Instructions[static_cast<std::size_t>(pos)].get());
     if (!stloc) return false;
     ILVariable* v = stloc->Variable.get();
@@ -161,6 +165,23 @@ void ILInlining::Run(ILFunction& function, ILTransformContext& context) {
                                    v->AddressCount == 0;
                         }),
         vars.end());
+}
+
+// IStatementTransform entry: the per-statement inlining pass the
+// StatementTransform runs interleaved with the other per-statement transforms.
+// Loops InlineOneIfPossible at `pos` until no change, mirroring the C#
+// ILInlining.Run(Block, pos, ctx) overload. After a successful inline at the
+// last position the block shrank (the final is separate in this port, so the
+// last non-terminal is at Instructions.size()-1; RemoveInstructionAt drops the
+// size by one), so the while guard re-checks `pos < size` and stops without
+// reading out of bounds (the C# avoids this because the final lives in
+// Instructions, so the last non-terminal is at Count-2 and the shifted-in
+// instruction stays in range).
+void ILInlining::Run(Block& block, int pos, StatementTransformContext& context) {
+    while (pos >= 0 && static_cast<std::size_t>(pos) < block.Instructions.size()
+           && InlineOneIfPossible(&block, pos, context.Base)) {
+        // repeat inlining until nothing changes
+    }
 }
 
 } // namespace ILSpy::Decompiler::IL
