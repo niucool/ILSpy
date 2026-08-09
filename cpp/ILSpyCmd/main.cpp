@@ -206,12 +206,12 @@ int main(int argc, char** argv) {
                 std::string paramDecl;
                 if (auto sig = file.GetMethodSignature(m.Token)) {
                     if (sig->ReturnType && sig->ReturnType->ReflectionName() != "System.Void")
-                        returnType = sig->ReturnType->ReflectionName();
+                        returnType = ILSpy::Decompiler::IL::CSharpTypeName(sig->ReturnType);
                     auto paramNames = file.GetParameterNames(m.Token);
                     int base_ = sig->IsInstance ? 1 : 0;
                     for (std::size_t i = 0; i < sig->ParameterTypes.size(); ++i) {
                         if (i) paramDecl += ", ";
-                        paramDecl += sig->ParameterTypes[i]->ReflectionName();
+                        paramDecl += ILSpy::Decompiler::IL::CSharpTypeName(sig->ParameterTypes[i]);
                         paramDecl += ' ';
                         if (i < paramNames.size() && !paramNames[i].empty())
                             paramDecl += paramNames[i];

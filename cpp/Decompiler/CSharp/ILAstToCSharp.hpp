@@ -26,10 +26,17 @@
 #pragma once
 
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
 
 #include <string>
+#include <string_view>
 
 namespace ILSpy::Decompiler::IL {
+
+// A C# type name for a declaration: the C# keyword for primitives (int, bool,
+// string, ...), the short type name otherwise, recursing into array/byref.
+// `var` for an unknown type. Used for the method signature and local decls.
+std::string CSharpTypeName(const TypeSystem::ITypePtr& type);
 
 // Emit a C#-ish translation of an ILFunction. `returnType` is the method's
 // return type display name (e.g. "System.Int32" or "void"); `methodName` is

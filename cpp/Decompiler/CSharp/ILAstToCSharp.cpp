@@ -105,44 +105,6 @@ std::string TypeDisplayName(const TypeSystem::ITypePtr& type) {
     return type ? type->ReflectionName() : std::string("?");
 }
 
-// A C# type name for a local declaration: the C# keyword for primitives
-// (int, bool, string, ...), the short type name otherwise (a seed
-// approximation -- real C# would carry a using directive). `var` for an
-// unknown type (e.g. an untyped stack slot).
-std::string CSharpTypeName(const TypeSystem::ITypePtr& type) {
-    if (!type) return "var";
-    // An array: the element type's C# name + "[]" (or ",," for multi-rank).
-    if (auto* a = dynamic_cast<const TypeSystem::ArrayType*>(type.get()))
-        return CSharpTypeName(a->Element()) + (a->IsSzArray() ? "[]" : "[,]");
-    if (auto* byref = dynamic_cast<const TypeSystem::ByReferenceType*>(type.get()))
-        return CSharpTypeName(byref->Element());
-    if (auto* k = dynamic_cast<const TypeSystem::KnownType*>(type.get())) {
-        switch (k->Code()) {
-            case TypeSystem::KnownTypeCode::Boolean: return "bool";
-            case TypeSystem::KnownTypeCode::Char: return "char";
-            case TypeSystem::KnownTypeCode::SByte: return "sbyte";
-            case TypeSystem::KnownTypeCode::Byte: return "byte";
-            case TypeSystem::KnownTypeCode::Int16: return "short";
-            case TypeSystem::KnownTypeCode::UInt16: return "ushort";
-            case TypeSystem::KnownTypeCode::Int32: return "int";
-            case TypeSystem::KnownTypeCode::UInt32: return "uint";
-            case TypeSystem::KnownTypeCode::Int64: return "long";
-            case TypeSystem::KnownTypeCode::UInt64: return "ulong";
-            case TypeSystem::KnownTypeCode::Single: return "float";
-            case TypeSystem::KnownTypeCode::Double: return "double";
-            case TypeSystem::KnownTypeCode::Decimal: return "decimal";
-            case TypeSystem::KnownTypeCode::String: return "string";
-            case TypeSystem::KnownTypeCode::Object: return "object";
-            case TypeSystem::KnownTypeCode::IntPtr: return "nint";
-            case TypeSystem::KnownTypeCode::UIntPtr: return "nuint";
-            default: break;
-        }
-    }
-    std::string rn = type->ReflectionName();
-    auto pos = rn.rfind('.');
-    return pos != std::string::npos ? rn.substr(pos + 1) : rn;
-}
-
 const char* ConvTargetName(StackType target) {
     switch (target) {
         case StackType::I4: return "int";
@@ -758,6 +720,43 @@ private:
 };
 
 } // namespace
+
+// A C# type name for a declaration: the C# keyword for primitives (int, bool,
+// string, ...), the short type name otherwise (a seed approximation -- real
+// C# would carry a using directive), recursing into array/byref. `var` for an
+// unknown type (e.g. an untyped stack slot).
+std::string CSharpTypeName(const TypeSystem::ITypePtr& type) {
+    if (!type) return "var";
+    if (auto* a = dynamic_cast<const TypeSystem::ArrayType*>(type.get()))
+        return CSharpTypeName(a->Element()) + (a->IsSzArray() ? "[]" : "[,]");
+    if (auto* byref = dynamic_cast<const TypeSystem::ByReferenceType*>(type.get()))
+        return CSharpTypeName(byref->Element());
+    if (auto* k = dynamic_cast<const TypeSystem::KnownType*>(type.get())) {
+        switch (k->Code()) {
+            case TypeSystem::KnownTypeCode::Boolean: return "bool";
+            case TypeSystem::KnownTypeCode::Char: return "char";
+            case TypeSystem::KnownTypeCode::SByte: return "sbyte";
+            case TypeSystem::KnownTypeCode::Byte: return "byte";
+            case TypeSystem::KnownTypeCode::Int16: return "short";
+            case TypeSystem::KnownTypeCode::UInt16: return "ushort";
+            case TypeSystem::KnownTypeCode::Int32: return "int";
+            case TypeSystem::KnownTypeCode::UInt32: return "uint";
+            case TypeSystem::KnownTypeCode::Int64: return "long";
+            case TypeSystem::KnownTypeCode::UInt64: return "ulong";
+            case TypeSystem::KnownTypeCode::Single: return "float";
+            case TypeSystem::KnownTypeCode::Double: return "double";
+            case TypeSystem::KnownTypeCode::Decimal: return "decimal";
+            case TypeSystem::KnownTypeCode::String: return "string";
+            case TypeSystem::KnownTypeCode::Object: return "object";
+            case TypeSystem::KnownTypeCode::IntPtr: return "nint";
+            case TypeSystem::KnownTypeCode::UIntPtr: return "nuint";
+            default: break;
+        }
+    }
+    std::string rn = type->ReflectionName();
+    auto pos = rn.rfind('.');
+    return pos != std::string::npos ? rn.substr(pos + 1) : rn;
+}
 
 std::string ILAstToCSharp(const ILFunction& fn,
                           std::string_view returnType,
