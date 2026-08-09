@@ -25,6 +25,7 @@
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
 #include "Decompiler/IL/ControlFlow/ControlFlowSimplification.hpp"
 #include "Decompiler/IL/ControlFlow/ConditionDetection.hpp"
+#include "Decompiler/IL/ControlFlow/DetectPinnedRegions.hpp"
 #include "Decompiler/IL/ControlFlow/LoopDetection.hpp"
 #include "Decompiler/IL/ControlFlow/RemoveRedundantReturn.hpp"
 #include "Decompiler/IL/ILReader.hpp"
@@ -199,6 +200,9 @@ int main(int argc, char** argv) {
                 // to a stack slot and branches to a multi-pred test block skips
                 // the test (redirected to the feasible exit; dead store dropped).
                 ILSpy::Decompiler::IL::RemoveInfeasiblePathTransform().Run(*fn, transformContext);
+                // Detect pinned regions (`fixed` blocks): must run after inlining
+                // and before loop detection (per the C# GetILTransforms() order).
+                ILSpy::Decompiler::IL::DetectPinnedRegions().Run(*fn, transformContext);
                 // Re-run CFS so the duplicated 1-pred return blocks merge and
                 // the single-definition variable inlines to `leave (expr)`.
                 ILSpy::Decompiler::IL::ControlFlowSimplification().Run(*fn, transformContext);

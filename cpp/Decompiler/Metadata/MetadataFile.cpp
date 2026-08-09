@@ -465,6 +465,25 @@ std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> MetadataFile::GetLocalTypes
     try {
         std::uint32_t blobColumn = impl_->db->StandAloneSig.get_value<std::uint32_t>(row - 1, 0);
         auto blob = impl_->db->get_blob(blobColumn);
+        auto infos = DecodeLocalSignatureBlob(
+            *impl_->db, blob.begin(), static_cast<std::size_t>(blob.end() - blob.begin()));
+        result.reserve(infos.size());
+        for (auto& info : infos) result.push_back(std::move(info.Type));
+    } catch (const std::exception&) {
+        result.clear();
+    }
+    return result;
+}
+
+std::vector<ILSpy::Decompiler::Metadata::LocalTypeInfo> MetadataFile::GetLocalTypesWithPinned(std::uint32_t localVarSigToken) const {
+    std::vector<LocalTypeInfo> result;
+    if (!IsValid() || localVarSigToken == 0) return result;
+    std::uint32_t table = localVarSigToken >> 24;
+    std::uint32_t row = localVarSigToken & 0x00FFFFFFu;
+    if (table != 0x11 || row == 0 || row > impl_->db->StandAloneSig.size()) return result;
+    try {
+        std::uint32_t blobColumn = impl_->db->StandAloneSig.get_value<std::uint32_t>(row - 1, 0);
+        auto blob = impl_->db->get_blob(blobColumn);
         result = DecodeLocalSignatureBlob(
             *impl_->db, blob.begin(), static_cast<std::size_t>(blob.end() - blob.begin()));
     } catch (const std::exception&) {

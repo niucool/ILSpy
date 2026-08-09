@@ -63,14 +63,19 @@ implemented and green here. Everything else follows the phase plan in
   `AssignVariableNames` renames `V_0` to type-inferred names (`num`, `text`,
   ...); `RemoveRedundantReturn` drops trailing `return;`; `RemoveInfeasiblePath`
   redirects a constant-store-and-test around the infeasible arm (drops the dead
-  store and the branch straight to the feasible exit). Parameter names and
-  string literals (`ldstr`) now come from the metadata (Param table / #US heap).
-  10 of ~40 transforms ported. The CLI applies CFS + StObjToStLoc + ILInlining +
-  InlineReturnTransform + RemoveInfeasiblePath + CFS + LoopDetection +
-  ConditionDetection + AssignVariableNames + RemoveRedundantReturn before the
-  C# seed. Next per `GetILTransforms()`: SplitVariables (needs
-  reaching-definitions dataflow), DetectExitPoints + the full ConditionDetection
-  (multi-pred join blocks), HighLevelLoopTransform (while/for),
+  store and the branch straight to the feasible exit). `DetectPinnedRegions`
+  detects IL `fixed` blocks: a pinned local's store + the region it covers are
+  wrapped in a `PinnedRegion` (the GC-pin scope), the trailing unpin store is
+  stripped on the region's single-predecessor exit, and the pin block falls
+  through to the exit. Parameter names and string literals (`ldstr`) now come
+  from the metadata (Param table / #US heap).
+  11 of ~40 transforms ported. The CLI applies CFS + StObjToStLoc + ILInlining +
+  InlineReturnTransform + RemoveInfeasiblePath + DetectPinnedRegions + CFS +
+  LoopDetection + ConditionDetection + AssignVariableNames + RemoveRedundantReturn
+  before the C# seed, so `fixed (...) { ... }` now appears in the output. Next
+  per `GetILTransforms()`: SplitVariables (needs reaching-definitions dataflow),
+  DetectExitPoints + the full ConditionDetection (multi-pred join blocks),
+  HighLevelLoopTransform (while/for),
   TransformAssignment, the async/iterator state machines, ...
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the

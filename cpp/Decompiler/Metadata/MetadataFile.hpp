@@ -28,6 +28,7 @@
 #pragma once
 
 #include "Decompiler/Metadata/MethodBody.hpp"
+#include "Decompiler/Metadata/LocalTypeInfo.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
 #include <cstddef>
@@ -144,6 +145,10 @@ public:
     // LocalVarSigToken (a StandAloneSig token, table 0x11). Returns the local
     // types in index order; an empty vector if the token is 0/invalid/malformed.
     std::vector<TypeSystem::ITypePtr> GetLocalTypes(std::uint32_t localVarSigToken) const;
+    // As GetLocalTypes, but also reports each local's pinned flag (the 0x45
+    // ELEMENT_TYPE_PINNED marker). The IL reader uses this to mark
+    // VariableKind::PinnedLocal, the input to DetectPinnedRegions.
+    std::vector<LocalTypeInfo> GetLocalTypesWithPinned(std::uint32_t localVarSigToken) const;
 
     // Decode the field type of a Field row (by token). Returns nullptr if the
     // token is out of range or the signature is malformed; never throws.

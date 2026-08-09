@@ -88,6 +88,10 @@ struct ReaderState {
     // so the rest of the pipeline (AssignVariableNames, the C# seed) can use
     // them. Empty for tiny bodies (no locals) or an undecodable signature.
     std::vector<ITypePtr> localTypes;
+    // Per-local pinned flag (the LOCAL_SIG 0x45 ELEMENT_TYPE_PINNED marker);
+    // a pinned local becomes VariableKind::PinnedLocal, the input to
+    // DetectPinnedRegions.
+    std::vector<bool> localPinned;
     StackType returnStackType = StackType::Void;
 
     // Evaluation-stack merge state (method-wide): the input stack recorded for
@@ -285,6 +289,8 @@ ILVariablePtr GetOrCreateLocal(ReaderState& s, int idx) {
         v->Index = idx;
         if (idx >= 0 && idx < static_cast<int>(s.localTypes.size()))
             v->Type = s.localTypes[idx];
+        if (idx >= 0 && idx < static_cast<int>(s.localPinned.size()) && s.localPinned[idx])
+            v->Kind = VariableKind::PinnedLocal;
         s.locals[idx] = v;
     }
     return s.locals[idx];
@@ -1171,7 +1177,15 @@ std::unique_ptr<ILFunction> ReadStraightLineIL(const MetadataFile& file,
 
     ReaderState s;
     InitParameters(s, sig, file.GetParameterNames(methodToken));
-    s.localTypes = file.GetLocalTypes(body.LocalVarSigToken());
+    {
+        auto infos = file.GetLocalTypesWithPinned(body.LocalVarSigToken());
+        s.localTypes.reserve(infos.size());
+        s.localPinned.reserve(infos.size());
+        for (auto& info : infos) {
+            s.localTypes.push_back(std::move(info.Type));
+            s.localPinned.push_back(info.Pinned);
+        }
+    }
     s.returnStackType = ReturnStackTypeOf(sig.ReturnType);
 
     auto fn = std::make_unique<ILFunction>();
@@ -1224,7 +1238,15 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
 
     ReaderState s;
     InitParameters(s, sig, file.GetParameterNames(methodToken));
-    s.localTypes = file.GetLocalTypes(body.LocalVarSigToken());
+    {
+        auto infos = file.GetLocalTypesWithPinned(body.LocalVarSigToken());
+        s.localTypes.reserve(infos.size());
+        s.localPinned.reserve(infos.size());
+        for (auto& info : infos) {
+            s.localTypes.push_back(std::move(info.Type));
+            s.localPinned.push_back(info.Pinned);
+        }
+    }
     s.returnStackType = ReturnStackTypeOf(sig.ReturnType);
 
     const auto* b = body.IL().data();

@@ -45,6 +45,7 @@
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/PinnedRegion.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
@@ -367,6 +368,16 @@ private:
                 if (tf.TryBlock) EmitBraced(*tf.TryBlock, indent); else Line(indent, "{ }");
                 Line(indent, "fault");
                 if (tf.FaultBlock) EmitBraced(*tf.FaultBlock, indent); else Line(indent, "{ }");
+                return;
+            }
+            case OpCode::PinnedRegion: {
+                const auto& pr = static_cast<const PinnedRegion&>(inst);
+                std::string varType = pr.Variable && pr.Variable->Type
+                    ? CSharpTypeName(pr.Variable->Type) : std::string("var");
+                std::string varName = pr.Variable ? pr.Variable->Name : std::string("pinned");
+                Line(indent, "fixed (" + varType + " " + varName + " = " +
+                             (pr.Init ? Expr(*pr.Init) : std::string("null")) + ")");
+                if (pr.Body) EmitBraced(*pr.Body, indent); else Line(indent, "{ }");
                 return;
             }
             case OpCode::Block:

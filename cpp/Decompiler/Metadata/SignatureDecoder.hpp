@@ -23,6 +23,7 @@
 #pragma once
 
 #include "Decompiler/Metadata/Ecma335/WinmdInclude.hpp"
+#include "Decompiler/Metadata/LocalTypeInfo.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
 #include <cstddef>
@@ -61,8 +62,9 @@ TypeSystem::ITypePtr DecodeTypeSpecBlob(const winmd::reader::database& db,
 
 // Decode a LOCAL_SIG blob (0x07 marker + count + types) -- the local-variable
 // signature referenced by a method body's fat header. Returns the local types
-// in index order; an empty/partial vector on a malformed blob.
-std::vector<TypeSystem::ITypePtr> DecodeLocalSignatureBlob(
+// (with their pinned flag) in index order; an empty/partial vector on a
+// malformed blob.
+std::vector<LocalTypeInfo> DecodeLocalSignatureBlob(
     const winmd::reader::database& db,
     const std::uint8_t* data, std::size_t size);
 
