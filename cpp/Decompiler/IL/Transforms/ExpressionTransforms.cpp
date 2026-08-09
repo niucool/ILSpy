@@ -44,6 +44,7 @@
 #include "Decompiler/IL/StackType.hpp"
 #include "Decompiler/IL/StackTypeOf.hpp"
 #include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
+#include "Decompiler/IL/Transforms/NullPropagationTransform.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
 
@@ -891,6 +892,7 @@ void ExpressionTransforms::VisitCall(Call* inst) {
 }
 
 std::unique_ptr<ILInstruction> ExpressionTransforms::LiftNullableCore(
+    IfInstruction* ifInst,
     ILInstruction* condition, ILInstruction* trueInst, ILInstruction* falseInst,
     std::unique_ptr<ILInstruction>& trueSink, std::unique_ptr<ILInstruction>& falseSink) {
     // Port of NullableLiftingTransform.Lift -- the shared core of
@@ -902,9 +904,9 @@ std::unique_ptr<ILInstruction> ExpressionTransforms::LiftNullableCore(
     // (an if's arm or a BNI operand -- has a Parent) and a fresh-node arm (the
     // BNI falseInst = a fresh LdcI4(0), owned by falseSink). The logic.not
     // unwrap loop swaps both the views and the sinks so the view<->sink
-    // correspondence is preserved across the swap. Gated on LiftNullables.
+    // correspondence is preserved across the swap.
     if (!condition) return nullptr;
-    if (!settings_ || !settings_->LiftNullables) return nullptr;
+    if (!settings_) return nullptr;
 
     ILInstruction* inner = nullptr;
     while (MatchLogicNot(condition, inner)) {
@@ -912,6 +914,21 @@ std::unique_ptr<ILInstruction> ExpressionTransforms::LiftNullableCore(
         std::swap(trueInst, falseInst);
         std::swap(trueSink, falseSink);
     }
+
+    // NullPropagation (the C# `?.` lowering) -- checked before the LiftNullables
+    // gate, matching the C# Lift order. Gated on the NullPropagation setting +
+    // !IsProtectedIfInst(ifInst). The ReferenceType mode (`comp(ldloc v ==/!=
+    // null)` with an access-chain arm and a ldnull fallback) is ported; the
+    // NullableByValue / NullableByReference / UnconstrainedType modes and the
+    // default(Nullable<T>) / NullCoalescing output cases are deferred.
+    if (settings_->NullPropagation &&
+        !NullPropagationTransform::IsProtectedIfInst(ifInst)) {
+        auto nullPropagated = NullPropagationTransform::Run(
+            condition, trueInst, falseInst);
+        if (nullPropagated) return nullPropagated;
+    }
+
+    if (!settings_->LiftNullables) return nullptr;
 
     // AnalyzeCondition / LiftNormal path (the section of Lift before the bool?
     // equality folds). AnalyzeCondition walks a BitAnd tree of HasValue calls
@@ -1310,7 +1327,7 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
     // if). Gated on LiftNullables (checked inside LiftNullableCore).
     if (!iff || !iff->Condition) return false;
     std::unique_ptr<ILInstruction> trueSink, falseSink;
-    auto lifted = LiftNullableCore(iff->Condition.get(), iff->TrueInst.get(),
+    auto lifted = LiftNullableCore(iff, iff->Condition.get(), iff->TrueInst.get(),
                                     iff->FalseInst.get(), trueSink, falseSink);
     if (lifted) return ReplaceIfWithLiftedValue(iff, std::move(lifted));
     return false;
@@ -1334,7 +1351,7 @@ bool ExpressionTransforms::RunBinaryNumericNullableLift(BinaryNumericInstruction
     if (!bni || !bni->Left) return false;
     std::unique_ptr<ILInstruction> trueSink;  // empty (bni.Right is in-tree)
     std::unique_ptr<ILInstruction> falseSink = std::make_unique<LdcI4>(0);
-    auto lifted = LiftNullableCore(bni->Left.get(), bni->Right.get(),
+    auto lifted = LiftNullableCore(nullptr, bni->Left.get(), bni->Right.get(),
                                     falseSink.get(), trueSink, falseSink);
     if (lifted) { bni->ReplaceWith(std::move(lifted)); return true; }
     return false;

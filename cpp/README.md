@@ -792,9 +792,37 @@ implemented and green here. Everything else follows the phase plan in
   (ported for faithfulness, matching the D89/D90/D92/D94/D96/D97/D98/D100/D101
   precedent); the sweep already guards it via the existing per-method monotone
   invariants. 36 of ~40 transforms ported.
+  `NullPropagationTransform` (Transforms/, from NullPropagationTransform.cs)
+  ports the C# 6.0 null-conditional (`?.`) operator lowering -- `v != null ?
+  v.AccessChain : null` -> `v?.AccessChain` -- as a static helper consulted first
+  inside `NullableLiftingTransform.Lift` (before the LiftNullables-gated paths).
+  The `IsProtectedIfInst` static helper (excludes logic.and/or in a condition
+  7 slot from null-propagation), the `MatchNullableRewrap` helper, and the
+  `Run(condition, trueInst, falseInst)` entry (the ReferenceType mode --
+  `comp(ldloc v ==/!= null)` with an access-chain arm and a `ldnull` fallback)
+  are ported and wired into `ExpressionTransforms.LiftNullableCore` (after the
+  logic.not unwrap, before the LiftNullables gate, gated on the `NullPropagation`
+  setting + `!IsProtectedIfInst`). The access chain analysis
+  (`IsValidAccessChain`) is approximated: this port's Call carries no
+  IsStatic/IsExtensionMethod/IsAccessor/IsGetter/ConstrainedTo metadata, so
+  `IsInstanceCall` is the faithful gate (a static method cannot be `?.`-ed;
+  newobj is excluded by `!IsNewObj`); the AddressOf/LdObjIfRef/Dynamic* cases
+  are not modeled and conservatively rejected; the LdFld/LdFlda/LdLen/
+  LdElema/NullableUnwrap cases are faithfully matched. `IntroduceUnwrap`
+  wraps the receiver load at the end of the access chain in a `NullableUnwrap`
+  (the D103 node), and the result is a `NullableRewrap` around the access
+  chain. The NullableByValue/NullableByReference/UnconstrainedType modes,
+  `RunStatements` (the void-call and unconstrained-generic patterns), and the
+  `default(Nullable<T>)`/`NullCoalescing` output cases (need InferType /
+  NullableType.IsNonNullableValueType) are deferred. The ReferenceType `?.` is
+  a Roslyn-era (C# 6.0) codegen pattern that fires 0 times on the .NET
+  Framework 4 legacy-csc mscorlib corpus, so the sweep asserts the ILAst
+  invariant holds (not a fold count), matching the DetectCatchWhenConditionBlocks /
+  LdLocaDupInitObj precedent. 37 of ~40 transforms ported.
   The remaining `Run(IfInstruction)` paths (the LiftCSharpUserComparison rest
-  of LiftNormal [needs the Call-operator case], NullPropagation [a separate
-  583-line transform]) and
+  of LiftNormal [needs the Call-operator case], NullPropagation's remaining
+  modes [NullableByValue/NullableByReference/UnconstrainedType + RunStatements
+  + the default(Nullable<T>)/NullCoalescing output cases]) and
   the `RunStatements(Block, int)` block transform are the subsequent
   in-order targets.
   `NullableRewrap` / `NullableUnwrap` (Instructions/, a tested-but-not-yet-wired

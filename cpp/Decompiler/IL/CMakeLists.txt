@@ -37,5 +37,6 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/CachedReadOnlySpanInitialization.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/StatementTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/ExpressionTransforms.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/NullPropagationTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/NullCoalescingTransform.cpp
 )

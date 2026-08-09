@@ -104,6 +104,14 @@ struct ILTransformSettings {
     // transforms recover the literal and the <PrivateImplementationDetails>
     // cache field disappears from the output.
     bool ArrayInitializers = true;
+    // Whether to detect the C# 6.0 null-conditional operator (`?.`).
+    // DecompilerSettings.NullPropagation -- default true. Gates
+    // NullPropagationTransform (the `v != null ? v.AccessChain : null` ->
+    // `v?.AccessChain` lowering), consulted first inside
+    // NullableLiftingTransform.Lift (before the LiftNullables-gated lift paths)
+    // and as a per-statement child of StatementTransform (the void-call /
+    // unconstrained-generic patterns).
+    bool NullPropagation = true;
 };
 
 class ILTransformContext {

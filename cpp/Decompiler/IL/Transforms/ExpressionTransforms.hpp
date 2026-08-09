@@ -164,17 +164,26 @@ private:
     // LiftNullableCore: the shared NullableLiftingTransform.Lift core --
     // analyses a conditional (condition ? trueInst : falseInst) for a nullable
     // lift, returning the lifted instruction (owned) or nullptr if no fold fired.
-    // The condition is read-only (detached only by the `&`/`|` on bool? path); the
-    // arms are detached on-demand via ConsumeArm (in-tree arm -> DetachFromParent;
-    // fresh-node arm -> move from the sink). The logic.not unwrap loop swaps both
-    // the views and the sinks. Gated on LiftNullables. The ported pieces: the
-    // AnalyzeCondition/LiftNormal early-out + conv.nop.lifted + DoLift paths
-    // (D97/D98/D100), the MatchCompOrDecimal/LiftCSharp* path (D101), the bool?
-    // equality folds (D94), and the `&`/`|` on bool? folds (D96). Deferred: the
+    // `ifInst` is the IfInstruction being lifted (nullptr for the
+    // BinaryNumericInstruction caller -- a BNI is not an IfInstruction, so
+    // IsProtectedIfInst returns false for it, matching the C# `ifInst as
+    // IfInstruction` yielding null). The condition is read-only (detached only
+    // by the `&`/`|` on bool? path); the arms are detached on-demand via
+    // ConsumeArm, which handles an in-tree arm (an if's arm or a BNI operand --
+    // has a Parent) and a fresh-node arm (the BNI falseInst = a fresh LdcI4(0),
+    // owned by falseSink and consumed via ConsumeArm only when a fold needs it).
+    // The logic.not unwrap loop swaps both the views and the sinks. Gated on
+    // NullPropagation (checked before the LiftNullables gate, matching the C#
+    // Lift order) then LiftNullables. The ported pieces: the AnalyzeCondition/
+    // LiftNormal early-out + conv.nop.lifted + DoLift paths (D97/D98/D100), the
+    // MatchCompOrDecimal/LiftCSharp* path (D101), the bool? equality folds
+    // (D94), and the `&`/`|` on bool? folds (D96). Deferred: the
     // LiftCSharpUserComparison rest of LiftNormal (needs Call.Method.IsOperator),
-    // NullPropagation (a separate transform), the Decimal/Call branches of
-    // MatchCompOrDecimal, and IsGenericNewPattern.
+    // NullPropagation's remaining modes (NullableByValue / NullableByReference
+    // / UnconstrainedType), the Decimal/Call branches of MatchCompOrDecimal,
+    // and IsGenericNewPattern.
     std::unique_ptr<ILInstruction> LiftNullableCore(
+        IfInstruction* ifInst,
         ILInstruction* condition, ILInstruction* trueInst, ILInstruction* falseInst,
         std::unique_ptr<ILInstruction>& trueSink, std::unique_ptr<ILInstruction>& falseSink);
 
