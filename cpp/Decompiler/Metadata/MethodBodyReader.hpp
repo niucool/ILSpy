@@ -36,6 +36,8 @@
 namespace ILSpy::Decompiler::Metadata {
 
 using winmd::impl::image_dos_header;
+using winmd::impl::image_data_directory;
+using winmd::impl::image_cor20_header;
 using winmd::impl::image_nt_headers32;
 using winmd::impl::image_nt_headers32plus;
 using winmd::impl::image_section_header;
@@ -105,10 +107,111 @@ public:
         return nullptr;
     }
 
+    // Read a user string from the #US heap (token table 0x70; the row is the
+    // byte offset into the heap). Returns an empty string if the heap could
+    // not be located or the offset is out of range. The #US heap is located by
+    // parsing the CLI metadata root's stream headers (winmd keeps #Strings/#Blob
+    // but discards #US, so we re-parse just that stream lazily).
+    std::string GetUserString(std::uint32_t token) const noexcept {
+        if (!sections_) return {};
+        std::uint32_t off = token & 0x00FFFFFFu;
+        const std::uint8_t* base = UsBase();
+        const std::uint8_t* end = UsEnd();
+        if (!base || off >= static_cast<std::size_t>(end - base)) return {};
+        const std::uint8_t* p = base + off;
+        // ECMA-335 II.23.2: compressed unsigned length (1/2/4 bytes).
+        std::uint32_t len = 0;
+        std::uint8_t b0 = p[0];
+        std::size_t lenBytes = 0;
+        if ((b0 & 0x80) == 0) { len = b0; lenBytes = 1; }
+        else if ((b0 & 0xC0) == 0x80) { len = ((b0 & 0x3F) << 8) | p[1]; lenBytes = 2; }
+        else { len = ((b0 & 0x1F) << 24) | (p[1] << 16) | (p[2] << 8) | p[3]; lenBytes = 4; }
+        if (off + lenBytes + len > static_cast<std::size_t>(end - base) || len < 1) return {};
+        const std::uint8_t* chars = p + lenBytes;
+        // The last byte is a trailing flag (not part of the string); the chars
+        // are UTF-16LE code units.
+        std::size_t charBytes = len - 1;
+        std::string out;
+        out.reserve(charBytes / 2);
+        for (std::size_t i = 0; i + 1 < charBytes; i += 2)
+            out.push_back(static_cast<char>(chars[i]));  // drop high byte (ASCII subset)
+        return out;
+    }
+
 private:
     std::shared_ptr<const std::vector<std::uint8_t>> bytes_;
     const image_section_header* sections_ = nullptr;
     std::uint32_t sectionCount_ = 0;
+
+    // Lazily located #US heap bounds (mutable: computed on first use).
+    mutable const std::uint8_t* usBase_ = nullptr;
+    mutable const std::uint8_t* usEnd_ = nullptr;
+    mutable bool usLocated_ = false;
+
+    const std::uint8_t* UsBase() const {
+        if (!usLocated_) LocateUsHeap();
+        return usBase_;
+    }
+    const std::uint8_t* UsEnd() const {
+        if (!usLocated_) LocateUsHeap();
+        return usEnd_;
+    }
+    void LocateUsHeap() const {
+        usLocated_ = true;
+        if (!sections_ || !bytes_) return;
+        const std::uint8_t* base = bytes_->data();
+        std::size_t size = bytes_->size();
+        if (size < sizeof(image_dos_header)) return;
+        const auto& dos = *reinterpret_cast<const image_dos_header*>(base);
+        if (dos.e_signature != 0x5A4D) return;
+        if (size < dos.e_lfanew + sizeof(image_nt_headers32)) return;
+        const auto* nt = reinterpret_cast<const image_nt_headers32*>(base + dos.e_lfanew);
+        // PE32 (0x10B) and PE32+ (0x20B) place the data directories at different
+        // optional-header offsets; read the COM descriptor RVA from the right layout
+        // (Framework64 assemblies are PE32+).
+        std::uint32_t comRva = 0;
+        if (nt->OptionalHeader.Magic == 0x20B) {
+            const auto* ntPlus = reinterpret_cast<const image_nt_headers32plus*>(base + dos.e_lfanew);
+            comRva = ntPlus->OptionalHeader.DataDirectory[14].VirtualAddress;
+        } else {
+            comRva = nt->OptionalHeader.DataDirectory[14].VirtualAddress;
+        }
+        if (comRva == 0) return;
+        const auto* cor = reinterpret_cast<const image_cor20_header*>(RvaToPtr(comRva));
+        if (!cor) return;
+        std::uint32_t mdRva = cor->MetaData.VirtualAddress;
+        const std::uint8_t* root = RvaToPtr(mdRva);
+        if (!root) return;
+        // ECMA-335 II.24.2.1: signature at +0, version length at +12, stream
+        // count at +versionLength+18, stream headers at +versionLength+20.
+        if (root + 16 > base + size) return;
+        std::uint32_t versionLength = ReadLe<4>(root + 12);
+        std::size_t hdrsAt = static_cast<std::size_t>(versionLength + 20);
+        if (root + hdrsAt + 2 > base + size) return;
+        std::uint32_t streamCount = ReadLe<2>(root + versionLength + 18);
+        const std::uint8_t* p = root + hdrsAt;
+        const std::uint8_t* imageEnd = base + size;
+        for (std::uint32_t i = 0; i < streamCount && p + 8 <= imageEnd; ++i) {
+            std::uint32_t sOff = ReadLe<4>(p);
+            std::uint32_t sSize = ReadLe<4>(p + 4);
+            // Name: null-terminated, padded to a 4-byte boundary.
+            const char* name = reinterpret_cast<const char*>(p + 8);
+            const char* nameEnd = name;
+            while (nameEnd < reinterpret_cast<const char*>(imageEnd) && *nameEnd != 0) ++nameEnd;
+            std::size_t nameLen = static_cast<std::size_t>(nameEnd - name);
+            if (nameLen == 3 && name[0] == '#' && name[1] == 'U' && name[2] == 'S') {
+                usBase_ = root + sOff;
+                usEnd_ = (sSize && static_cast<std::size_t>(sOff + sSize) <= static_cast<std::size_t>(imageEnd - root))
+                             ? root + sOff + sSize : imageEnd;
+                return;
+            }
+            // Advance past offset(4) + size(4) + name (padded to a 4-byte
+            // boundary, the padding already covers the null terminator).
+            std::size_t padding = 4 - (nameLen % 4);
+            if (padding == 0) padding = 4;
+            p += 8 + nameLen + padding;
+        }
+    }
 };
 
 inline ExceptionHandlerKind ClauseKindFromFlags(std::uint32_t flags) {
@@ -177,6 +280,12 @@ public:
         : image_(std::move(image)), pe_(image_) {}
 
     bool HasImage() const noexcept { return pe_.Valid(); }
+
+    // Decode a user-string token (table 0x70) to its text (best-effort: an
+    // empty string if the #US heap is absent or the offset is out of range).
+    std::string GetUserString(std::uint32_t token) const noexcept {
+        return pe_.GetUserString(token);
+    }
 
     // Decode the method body at `rva`. Returns an invalid MethodBody if the RVA
     // is 0 (abstract/extern) or the header is malformed -- graceful degradation

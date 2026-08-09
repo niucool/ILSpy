@@ -342,12 +342,16 @@ std::string MetadataFile::ResolveTokenToString(std::uint32_t token) const {
     std::uint32_t row = token & 0x00FFFFFFu;
     auto fallback = [&] {
         // Raw hex token, e.g. "0x06000007". Used for TypeSpec/StandAloneSig/
-        // MethodSpec/UserString and any out-of-range or unsupported kind.
+        // MethodSpec and any out-of-range or unsupported kind.
         char buf[16];
         std::snprintf(buf, sizeof(buf), "0x%08X", token);
         return std::string(buf);
     };
     try {
+        if (table == 0x70) {  // UserString (#US heap)
+            auto s = GetUserString(token);
+            return s.empty() ? fallback() : s;
+        }
         if (table == 0x01 && row && row <= impl_->db->TypeRef.size()) {  // TypeRef
             auto r = impl_->db->TypeRef[row - 1];
             return TypeNameStr(r.TypeNamespace(), r.TypeName());
@@ -456,6 +460,11 @@ std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> MetadataFile::GetLocalTypes
         result.clear();
     }
     return result;
+}
+
+std::string MetadataFile::GetUserString(std::uint32_t token) const {
+    if (!IsValid() || !impl_->bodyReader) return {};
+    return impl_->bodyReader->GetUserString(token);
 }
 
 } // namespace ILSpy::Decompiler::Metadata

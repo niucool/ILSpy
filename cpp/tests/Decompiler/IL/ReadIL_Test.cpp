@@ -29,6 +29,7 @@
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
@@ -122,6 +123,36 @@ TEST(ReadIL, UsesMetadataParameterNames) {
         if (checked > 3000) break;
     }
     EXPECT_GT(namedParams, 0) << "no parameter picked up a metadata name";
+}
+
+TEST(ReadIL, StringLiteralsResolveFromUserStringHeap) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    int totalLdstr = 0;
+    int realStrings = 0;  // Value is not the raw-hex-token fallback
+    int checked = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (auto* ld = dynamic_cast<LdStr*>(inst)) {
+            ++totalLdstr;
+            // A resolved user string is not the "0x70XXXXXX" fallback.
+            if (ld->Value.rfind("0x70", 0) != 0) ++realStrings;
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++checked;
+        walk(fn->Body.get());
+        if (checked > 4000) break;
+    }
+    EXPECT_GT(totalLdstr, 100) << "expected many ldstr in mscorlib";
+    EXPECT_GT(realStrings, 100) << "user strings should resolve, not stay as 0x70XXXXXX";
 }
 
 TEST(ReadIL, DecodesObjectEqualsWhichStraightLineRejects) {

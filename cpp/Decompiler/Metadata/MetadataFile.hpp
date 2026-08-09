@@ -136,6 +136,10 @@ public:
     // parameters that have no Param row.
     std::vector<std::string> GetParameterNames(std::uint32_t methodToken) const;
 
+    // Decode a user-string token (table 0x70, the #US heap) to its text.
+    // Returns an empty string if the heap is absent or the offset is bad.
+    std::string GetUserString(std::uint32_t token) const;
+
     // Decode the local-variable signature referenced by a method body's
     // LocalVarSigToken (a StandAloneSig token, table 0x11). Returns the local
     // types in index order; an empty vector if the token is 0/invalid/malformed.
