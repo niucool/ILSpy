@@ -19,14 +19,15 @@
 // Tests for NullPropagationTransform (the C# `?.` null-conditional operator
 // lowering): the IsProtectedIfInst and MatchNullableRewrap static helpers, the
 // Run entry (ReferenceType mode + ldnull and default(Nullable<T>) output
-// cases), the access chain analysis (IsValidAccessChain approximated for the
-// Call/LdFld/LdLen/LdElema/NullableUnwrap cases), and the IntroduceUnwrap
-// rewrap. The NullableByValue / NullableByReference / UnconstrainedType
-// modes, RunStatements, and the NullCoalescing output case are deferred. The
-// ReferenceType `?.` is a Roslyn-era (C# 6.0) codegen pattern that fires 0
-// times on the .NET Framework 4 legacy-csc mscorlib corpus, so the sweep
-// asserts the ILAst invariant holds (not a fold count), matching the
-// DetectCatchWhenConditionBlocks / LdLocaDupInitObj / SwitchOnNullable precedent.
+// cases, and the NullableByValue / NullableByReference modes with the same
+// output cases), the access chain analysis (IsValidAccessChain approximated for
+// the Call/LdFld/LdLen/LdElema/NullableUnwrap cases), and the IntroduceUnwrap
+// rewrap. The UnconstrainedType mode, RunStatements, and the NullCoalescing
+// output case are deferred. The `?.` lowering (all modes) is a Roslyn-era
+// (C# 6.0) codegen pattern that fires 0 times on the .NET Framework 4
+// legacy-csc mscorlib corpus, so the sweep asserts the ILAst invariant holds
+// (not a fold count), matching the DetectCatchWhenConditionBlocks /
+// LdLocaDupInitObj / SwitchOnNullable precedent.
 
 #include "Decompiler/IL/Transforms/NullPropagationTransform.hpp"
 #include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
@@ -479,6 +480,195 @@ TEST(NullPropagationTransform, RunRejectsStaticCall) {
     call->AddArg(std::make_unique<LdLoc>(v));
     auto iff = std::make_unique<IfInstruction>(
         std::move(cond), std::move(call), std::make_unique<LdNull>());
+    auto result = NullPropagationTransform::Run(
+        iff->Condition.get(), iff->TrueInst.get(), iff->FalseInst.get());
+    EXPECT_EQ(result, nullptr);
+}
+
+// --- Run tests (NullableByValue / NullableByReference modes) ---
+
+TEST(NullPropagationTransform, RunFoldsNullableByValueHasValueCheckToRewrap) {
+    // `call get_HasValue(ldloca v) ? call ToString(call GetValueOrDefault(ldloca v)) : ldnull`
+    // => `nullable.rewrap(call ToString(nullable.unwrap(ldloc v)))` (NullableByValue)
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    // condition: call get_HasValue(ldloca v)
+    auto cond = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    cond->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    cond->IsInstanceCall = true;
+    cond->AddArg(std::make_unique<LdLoca>(v));
+    // access chain: call ToString(call GetValueOrDefault(ldloca v))
+    auto gvo = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    gvo->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    gvo->IsInstanceCall = true;
+    gvo->ReturnType = StackType::I4;
+    gvo->AddArg(std::make_unique<LdLoca>(v));
+    auto toString = std::make_unique<Call>("System.Int32::ToString");
+    toString->IsInstanceCall = true;
+    toString->ReturnType = StackType::O;
+    toString->AddArg(std::move(gvo));
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(cond), std::move(toString), std::make_unique<LdNull>());
+    auto result = NullPropagationTransform::Run(
+        iff->Condition.get(), iff->TrueInst.get(), iff->FalseInst.get());
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Op, OpCode::NullableRewrap);
+    auto* rewrap = static_cast<NullableRewrap*>(result.get());
+    ASSERT_NE(rewrap->Argument, nullptr);
+    EXPECT_EQ(rewrap->Argument->Op, OpCode::Call);  // ToString
+    auto* rcall = static_cast<Call*>(rewrap->Argument.get());
+    ASSERT_FALSE(rcall->Arguments.empty());
+    EXPECT_EQ(rcall->Arguments[0]->Op, OpCode::NullableUnwrap);
+    auto* unwrap = static_cast<NullableUnwrap*>(rcall->Arguments[0].get());
+    EXPECT_FALSE(unwrap->RefInput);  // NullableByValue: refInput=false
+    ASSERT_NE(unwrap->Argument, nullptr);
+    EXPECT_EQ(unwrap->Argument->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(unwrap->Argument.get())->Variable.get(), v.get());
+    EXPECT_EQ(unwrap->ResultType(), StackType::I4);  // the GVO call's return type
+}
+
+TEST(NullPropagationTransform, RunFoldsNullableByReferenceHasValueCheckToRewrap) {
+    // `call get_HasValue(ldloc v) ? call ToString(call GetValueOrDefault(ldloc v)) : ldnull`
+    // => `nullable.rewrap(call ToString(nullable.unwrap(ldloc v)))` (NullableByReference, refInput=true)
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto cond = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    cond->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    cond->IsInstanceCall = true;
+    cond->AddArg(std::make_unique<LdLoc>(v));
+    auto gvo = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    gvo->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    gvo->IsInstanceCall = true;
+    gvo->ReturnType = StackType::I4;
+    gvo->AddArg(std::make_unique<LdLoc>(v));
+    auto toString = std::make_unique<Call>("System.Int32::ToString");
+    toString->IsInstanceCall = true;
+    toString->ReturnType = StackType::O;
+    toString->AddArg(std::move(gvo));
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(cond), std::move(toString), std::make_unique<LdNull>());
+    auto result = NullPropagationTransform::Run(
+        iff->Condition.get(), iff->TrueInst.get(), iff->FalseInst.get());
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Op, OpCode::NullableRewrap);
+    auto* rewrap = static_cast<NullableRewrap*>(result.get());
+    ASSERT_NE(rewrap->Argument, nullptr);
+    EXPECT_EQ(rewrap->Argument->Op, OpCode::Call);
+    auto* rcall = static_cast<Call*>(rewrap->Argument.get());
+    ASSERT_FALSE(rcall->Arguments.empty());
+    EXPECT_EQ(rcall->Arguments[0]->Op, OpCode::NullableUnwrap);
+    auto* unwrap = static_cast<NullableUnwrap*>(rcall->Arguments[0].get());
+    EXPECT_TRUE(unwrap->RefInput);  // NullableByReference: refInput=true
+    ASSERT_NE(unwrap->Argument, nullptr);
+    EXPECT_EQ(unwrap->Argument->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(unwrap->Argument.get())->Variable.get(), v.get());
+}
+
+TEST(NullPropagationTransform, RunFoldsNullableByValueWithDefaultNullableFalseInst) {
+    // `call get_HasValue(ldloca v) ? call ToString(call GetValueOrDefault(ldloca v)) : default(Nullable<int>)`
+    // => `nullable.rewrap(call ToString(nullable.unwrap(ldloc v)))` (the default(Nullable<T>) output case)
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto cond = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    cond->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    cond->IsInstanceCall = true;
+    cond->AddArg(std::make_unique<LdLoca>(v));
+    auto gvo = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    gvo->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    gvo->IsInstanceCall = true;
+    gvo->ReturnType = StackType::I4;
+    gvo->AddArg(std::make_unique<LdLoca>(v));
+    auto toString = std::make_unique<Call>("System.Int32::ToString");
+    toString->IsInstanceCall = true;
+    toString->ReturnType = StackType::O;
+    toString->AddArg(std::move(gvo));
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(cond), std::move(toString),
+        std::make_unique<DefaultValue>(MakeNullableOf(KnownTypeCode::Int32)));
+    auto result = NullPropagationTransform::Run(
+        iff->Condition.get(), iff->TrueInst.get(), iff->FalseInst.get());
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Op, OpCode::NullableRewrap);
+    auto* rewrap = static_cast<NullableRewrap*>(result.get());
+    ASSERT_NE(rewrap->Argument, nullptr);
+    EXPECT_EQ(rewrap->Argument->Op, OpCode::Call);
+    auto* rcall = static_cast<Call*>(rewrap->Argument.get());
+    ASSERT_FALSE(rcall->Arguments.empty());
+    EXPECT_EQ(rcall->Arguments[0]->Op, OpCode::NullableUnwrap);
+    auto* unwrap = static_cast<NullableUnwrap*>(rcall->Arguments[0].get());
+    EXPECT_FALSE(unwrap->RefInput);
+}
+
+TEST(NullPropagationTransform, RunRejectsNonHasValueCondition) {
+    // A condition that is neither a Comp nor a get_HasValue call does not fold.
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto cond = std::make_unique<Call>("System.Nullable`1::get_SomeOtherMethod");
+    cond->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    cond->IsInstanceCall = true;
+    cond->AddArg(std::make_unique<LdLoca>(v));
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(cond), std::make_unique<LdNull>(), std::make_unique<LdNull>());
+    auto result = NullPropagationTransform::Run(
+        iff->Condition.get(), iff->TrueInst.get(), iff->FalseInst.get());
+    EXPECT_EQ(result, nullptr);
+}
+
+TEST(NullPropagationTransform, RunRejectsNullableByValueNonAccessChain) {
+    // HasValue(ldloca v) condition but the true arm is a bare ldloc v (not an
+    // access chain ending in GetValueOrDefault(ldloca v)) -- no fold.
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto cond = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    cond->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    cond->IsInstanceCall = true;
+    cond->AddArg(std::make_unique<LdLoca>(v));
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(cond), std::make_unique<LdLoc>(v), std::make_unique<LdNull>());
+    auto result = NullPropagationTransform::Run(
+        iff->Condition.get(), iff->TrueInst.get(), iff->FalseInst.get());
+    EXPECT_EQ(result, nullptr);
+}
+
+TEST(NullPropagationTransform, RunRejectsNullableByReferenceWithLdlocaInChain) {
+    // HasValue(ldloc v) (NullableByReference) but the access chain ends in
+    // GetValueOrDefault(ldloca v) (ldloca, not ldloc) -- the NullableByReference
+    // end-of-chain check requires ldloc, so no fold.
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto cond = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    cond->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    cond->IsInstanceCall = true;
+    cond->AddArg(std::make_unique<LdLoc>(v));
+    auto gvo = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    gvo->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    gvo->IsInstanceCall = true;
+    gvo->ReturnType = StackType::I4;
+    gvo->AddArg(std::make_unique<LdLoca>(v));  // ldloca (mismatch with NullableByReference)
+    auto toString = std::make_unique<Call>("System.Int32::ToString");
+    toString->IsInstanceCall = true;
+    toString->ReturnType = StackType::O;
+    toString->AddArg(std::move(gvo));
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(cond), std::move(toString), std::make_unique<LdNull>());
+    auto result = NullPropagationTransform::Run(
+        iff->Condition.get(), iff->TrueInst.get(), iff->FalseInst.get());
+    EXPECT_EQ(result, nullptr);
+}
+
+TEST(NullPropagationTransform, RunRejectsNullableByValueNonLdNullFalseInst) {
+    // HasValue(ldloca v) with a valid access chain but a non-ldnull/non-default
+    // false arm (ldloc v) -- the NullCoalescing output case is deferred, so no fold.
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto cond = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    cond->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    cond->IsInstanceCall = true;
+    cond->AddArg(std::make_unique<LdLoca>(v));
+    auto gvo = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    gvo->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    gvo->IsInstanceCall = true;
+    gvo->ReturnType = StackType::I4;
+    gvo->AddArg(std::make_unique<LdLoca>(v));
+    auto toString = std::make_unique<Call>("System.Int32::ToString");
+    toString->IsInstanceCall = true;
+    toString->ReturnType = StackType::O;
+    toString->AddArg(std::move(gvo));
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(cond), std::move(toString), std::make_unique<LdLoc>(v));
     auto result = NullPropagationTransform::Run(
         iff->Condition.get(), iff->TrueInst.get(), iff->FalseInst.get());
     EXPECT_EQ(result, nullptr);

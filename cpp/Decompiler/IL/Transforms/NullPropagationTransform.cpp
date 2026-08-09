@@ -17,13 +17,12 @@
 // DEALINGS IN THE SOFTWARE.
 
 // Port of ICSharpCode.Decompiler/IL/Transforms/NullPropagationTransform.cs
-// (subset). See the header for the scope. This file ports the ReferenceType
-// mode of `Run` + `TryNullPropagation` (the `ldnull` and `default(Nullable<T>)`
-// output cases) +
+// (subset). See the header for the scope. This file ports the ReferenceType,
+// NullableByValue, and NullableByReference modes of `Run` + `TryNullPropagation`
+// (the `ldnull` and `default(Nullable<T>)` output cases) +
 // `IsValidAccessChain` (approximated) + `IntroduceUnwrap`, plus the
 // `IsProtectedIfInst` and `MatchNullableRewrap` static helpers. The
-// NullableByValue / NullableByReference / UnconstrainedType modes,
-// RunStatements, the `NullCoalescing` output case
+// UnconstrainedType mode, RunStatements, the `NullCoalescing` output case
 // (needs InferType / NullableType.IsNonNullableValueType), and the
 // AddressOf / LdObjIfRef / Dynamic* access-chain cases are deferred.
 
@@ -124,8 +123,9 @@ std::unique_ptr<ILInstruction> DetachFromParent(ILInstruction* inst) {
     return inst->Parent->TakeChild(inst->ChildIndex);
 }
 
-// The Mode enum mirrors the C# NullPropagationTransform.Mode. Only
-// ReferenceType is ported here; the others are deferred.
+// The Mode enum mirrors the C# NullPropagationTransform.Mode. ReferenceType,
+// NullableByValue, and NullableByReference are ported here; UnconstrainedType
+// is deferred (RunStatements only).
 enum class Mode {
     ReferenceType,
     NullableByValue,
@@ -133,7 +133,32 @@ enum class Mode {
     UnconstrainedType,
 };
 
-// Port of NullPropagationTransform.IsValidAccessChain (ReferenceType subset):
+// Port of NullPropagationTransform.IsValidAccessChain.IsValidEndOfChain:
+// dispatches on the mode. ReferenceType -> `ldloc`/`ldloca` of `testedVar`
+// (MatchLdLocRef). NullableByValue -> `call GetValueOrDefault(ldloca testedVar)`
+// (the match-against-v MatchGetValueOrDefault overload, D98).
+// NullableByReference -> `call GetValueOrDefault(ldloc testedVar)` (the 1-arg
+// report MatchGetValueOrDefault overload, D68, plus a match-against-v LdLoc
+// check done inline -- a file-local match-against-v MatchLdLoc overload would
+// be ambiguous with the extract MatchLdLoc(ILVariable*&) for an ILVariable*
+// lvalue, the D66/D94 precedent). UnconstrainedType is deferred.
+bool IsValidEndOfChain(ILInstruction* inst, ILVariable* testedVar, Mode mode) {
+    if (!inst) return false;
+    if (mode == Mode::ReferenceType)
+        return MatchLdLocRef(inst, testedVar);
+    if (mode == Mode::NullableByValue)
+        return NullableLiftingTransform::MatchGetValueOrDefault(inst, testedVar);
+    if (mode == Mode::NullableByReference) {
+        ILInstruction* arg = nullptr;
+        if (!NullableLiftingTransform::MatchGetValueOrDefault(inst, arg))
+            return false;
+        if (!arg || arg->Op != OpCode::LdLoc) return false;
+        return static_cast<LdLoc*>(arg)->Variable.get() == testedVar;
+    }
+    return false;  // UnconstrainedType deferred
+}
+
+// Port of NullPropagationTransform.IsValidAccessChain:
 // walks the access chain from `inst` down to the load of `testedVar`, checking
 // every node is a valid `?.` access (a field load, a field address, an
 // instance method call, an array length, an array element address, or a nested
@@ -151,10 +176,11 @@ bool IsValidAccessChain(ILVariable* testedVar, Mode mode, ILInstruction* inst,
     finalLoad = nullptr;
     int chainLength = 0;
     while (inst) {
-        // IsValidEndOfChain: the ReferenceType end is MatchLdLocRef(testedVar)
-        // (ldloc or ldloca of the tested var). The NullableByValue /
-        // NullableByReference ends are deferred.
-        if (mode == Mode::ReferenceType && MatchLdLocRef(inst, testedVar)) {
+        // IsValidEndOfChain: dispatches on the mode -- ReferenceType ends in
+        // ldloc/ldloca of testedVar; NullableByValue ends in
+        // `call GetValueOrDefault(ldloca testedVar)`; NullableByReference ends
+        // in `call GetValueOrDefault(ldloc testedVar)`.
+        if (IsValidEndOfChain(inst, testedVar, mode)) {
             finalLoad = inst;
             return chainLength >= 1;
         }
@@ -227,7 +253,7 @@ bool IsValidAccessChain(ILVariable* testedVar, Mode mode, ILInstruction* inst,
             // The RefInput/AddressOf special case is not modeled (no AddressOf).
             // The argument of the unwrap cannot be the end of the chain (that
             // would produce two `?.` immediately following each other).
-            if (mode == Mode::ReferenceType && MatchLdLocRef(inst, testedVar))
+            if (IsValidEndOfChain(inst, testedVar, mode))
                 return false;
             chainLength++;
             continue;
@@ -238,25 +264,54 @@ bool IsValidAccessChain(ILVariable* testedVar, Mode mode, ILInstruction* inst,
     return false;
 }
 
-// Port of NullPropagationTransform.IntroduceUnwrap (ReferenceType mode): wraps
-// `varLoad` (the load of the tested variable at the end of the access chain) in
-// a NullableUnwrap. The varLoad is detached from its parent (TakeChild) and
-// re-parented as the NullableUnwrap's Argument; the NullableUnwrap is placed in
-// the parent's slot. The refInput flag is true when the varLoad is a LdLoca
-// (ResultType Ref).
+// Port of NullPropagationTransform.IntroduceUnwrap: wraps the receiver load at
+// the end of the access chain (`varLoad`) in a NullableUnwrap, placed in
+// varLoad's parent slot. ReferenceType / UnconstrainedType reuse `varLoad`
+// itself as the unwrap's Argument (the C# `new NullableUnwrap(varLoad.ResultType,
+// varLoad, refInput: varLoad.ResultType == Ref)`), detaching it via TakeChild.
+// NullableByValue / NullableByReference discard the `varLoad` (a
+// `call GetValueOrDefault(ldloca/ldloc testedVar)`) and build a FRESH
+// `LdLoc(testedVar)` as the unwrap's Argument (the C# `new LdLoc(testedVar)`),
+// with refInput=true for NullableByReference. The shared_ptr to `testedVar` is
+// taken from the call's first argument (the ldloca/ldloc), which holds the same
+// variable; it is extracted BEFORE the TakeChild so a bail leaves the tree
+// intact (no dangling empty slot).
 void IntroduceUnwrap(ILVariable* /*testedVar*/, ILInstruction* varLoad, Mode mode) {
     if (!varLoad || !varLoad->Parent) return;
-    StackType resultType = varLoad->ResultType();
     ILInstruction* parent = varLoad->Parent;
     int childIndex = varLoad->ChildIndex;
-    auto varLoadOwned = parent->TakeChild(childIndex);
-    // ReferenceType / UnconstrainedType: wrap varLoad in nullable.unwrap.
-    // NullableByValue / NullableByReference are deferred (they build a fresh
-    // LdLoc(testedVar) as the unwrap's Argument).
     if (mode == Mode::ReferenceType || mode == Mode::UnconstrainedType) {
+        StackType resultType = varLoad->ResultType();
+        auto varLoadOwned = parent->TakeChild(childIndex);
         auto unwrap = std::make_unique<NullableUnwrap>(
             resultType, std::move(varLoadOwned), resultType == StackType::Ref);
         parent->SetChild(childIndex, std::move(unwrap));
+        return;
+    }
+    if (mode == Mode::NullableByValue || mode == Mode::NullableByReference) {
+        // varLoad is `call GetValueOrDefault(ldloca/ldloc testedVar)`. Get the
+        // shared_ptr to testedVar from the call's first argument (the ldloca/
+        // ldloc), which holds the same variable, BEFORE detaching the varLoad.
+        ILVariablePtr varPtr;
+        if (varLoad->Op == OpCode::Call) {
+            auto* call = static_cast<Call*>(varLoad);
+            if (!call->Arguments.empty()) {
+                ILInstruction* firstArg = call->Arguments[0].get();
+                if (firstArg && firstArg->Op == OpCode::LdLoca)
+                    varPtr = static_cast<LdLoca*>(firstArg)->Variable;
+                else if (firstArg && firstArg->Op == OpCode::LdLoc)
+                    varPtr = static_cast<LdLoc*>(firstArg)->Variable;
+            }
+        }
+        if (!varPtr) return;  // bail before TakeChild (tree intact)
+        StackType resultType = varLoad->ResultType();
+        auto varLoadOwned = parent->TakeChild(childIndex);  // detached; discarded
+        auto ldLoc = std::make_unique<LdLoc>(std::move(varPtr));
+        bool refInput = (mode == Mode::NullableByReference);
+        auto unwrap = std::make_unique<NullableUnwrap>(
+            resultType, std::move(ldLoc), refInput);
+        parent->SetChild(childIndex, std::move(unwrap));
+        return;
     }
 }
 
@@ -355,8 +410,25 @@ std::unique_ptr<ILInstruction> NullPropagationTransform::Run(
                                        Mode::ReferenceType);
         }
     }
-    // NullableByValue / NullableByReference (MatchHasValueCall condition) and
-    // UnconstrainedType (RunStatements only) are deferred.
+    // NullableByValue / NullableByReference: `call get_HasValue(loadInst)` on a
+    // Nullable<T>, where loadInst is `ldloca v` (NullableByValue) or `ldloc v`
+    // (NullableByReference). `loadInst.HasValue ? trueInst : falseInst` folds
+    // into the `?.` lowering. UnconstrainedType is RunStatements-only
+    // (deferred).
+    {
+        ILInstruction* loadInst = nullptr;
+        if (NullableLiftingTransform::MatchHasValueCall(condition, loadInst)) {
+            ILVariable* testedVar = nullptr;
+            if (MatchLdLoca(loadInst, testedVar)) {
+                return TryNullPropagation(testedVar, trueInst, falseInst,
+                                           Mode::NullableByValue);
+            }
+            if (MatchLdLoc(loadInst, testedVar)) {
+                return TryNullPropagation(testedVar, trueInst, falseInst,
+                                           Mode::NullableByReference);
+            }
+        }
+    }
     return nullptr;
 }
 

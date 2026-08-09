@@ -36,14 +36,13 @@
 //
 // This port ports the `IsProtectedIfInst` static helper, the `MatchNullableRewrap`
 // helper, and the `Run` entry for the ReferenceType mode (the `comp(ldloc v
-// ==/!= null)` condition) with the `ldnull` and `default(Nullable<T>)` output
-// cases (the `NullCoalescing` output case needs InferType /
-// NullableType.IsNonNullableValueType, deferred). The NullableByValue /
-// NullableByReference / UnconstrainedType modes and RunStatements are deferred
-// (the former need the ldloca-v MatchGetValueOrDefault / MatchHasValueCall
-// helpers and the IntroduceUnwrap mode-specific construction; RunStatements
-// needs the block-model adaptation of the void-call if/Block shape and the
-// unconstrained-generic pattern).
+// ==/!= null)` condition), the NullableByValue mode (`call get_HasValue(ldloca v)`
+// condition), and the NullableByReference mode (`call get_HasValue(ldloc v)`
+// condition), each with the `ldnull` and `default(Nullable<T>)` output cases
+// (the `NullCoalescing` output case needs InferType /
+// NullableType.IsNonNullableValueType, deferred). The UnconstrainedType mode and
+// RunStatements are deferred (the latter needs the block-model adaptation of the
+// void-call if/Block shape and the unconstrained-generic pattern).
 //
 // The access chain analysis (IsValidAccessChain) is approximated for the
 // Call case: this port's Call carries no IsStatic / IsExtensionMethod /
@@ -90,12 +89,13 @@ public:
     // LiftNullables-gated paths). `condition` is the un-negated condition
     // (the caller peels logic.not); `trueInst`/`falseInst` are the arms. Returns
     // the lifted instruction (a NullableRewrap, owned) or nullptr if no fold
-    // fired. The ReferenceType mode (`comp(ldloc v ==/!= null)`) is ported with
+    // fired. The ReferenceType mode (`comp(ldloc v ==/!= null)`), the
+    // NullableByValue mode (`call get_HasValue(ldloca v)`), and the
+    // NullableByReference mode (`call get_HasValue(ldloc v)`) are ported with
     // the `ldnull` and `default(Nullable<T>)` output cases (the `NullCoalescing`
     // output case needs InferType / NullableType.IsNonNullableValueType,
-    // deferred). The NullableByValue / NullableByReference / UnconstrainedType
-    // modes are deferred. The caller checks the NullPropagation setting and
-    // IsProtectedIfInst before calling.
+    // deferred). The UnconstrainedType mode is deferred. The caller checks the
+    // NullPropagation setting and IsProtectedIfInst before calling.
     static std::unique_ptr<ILInstruction> Run(ILInstruction* condition,
                                                ILInstruction* trueInst,
                                                ILInstruction* falseInst);

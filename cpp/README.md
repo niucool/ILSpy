@@ -797,13 +797,16 @@ implemented and green here. Everything else follows the phase plan in
   v.AccessChain : null` -> `v?.AccessChain` -- as a static helper consulted first
   inside `NullableLiftingTransform.Lift` (before the LiftNullables-gated paths).
   The `IsProtectedIfInst` static helper (excludes logic.and/or in a condition
-  7 slot from null-propagation), the `MatchNullableRewrap` helper, and the
-  `Run(condition, trueInst, falseInst)` entry (the ReferenceType mode --
-  `comp(ldloc v ==/!= null)` with an access-chain arm and a `ldnull` fallback)
-  are ported and wired into `ExpressionTransforms.LiftNullableCore` (after the
-  logic.not unwrap, before the LiftNullables gate, gated on the `NullPropagation`
-  setting + `!IsProtectedIfInst`). The access chain analysis
-  (`IsValidAccessChain`) is approximated: this port's Call carries no
+  slot from null-propagation), the `MatchNullableRewrap` helper, and the
+  `Run(condition, trueInst, falseInst)` entry are ported and wired into
+  `ExpressionTransforms.LiftNullableCore` (after the logic.not unwrap, before
+  the LiftNullables gate, gated on the `NullPropagation` setting +
+  `!IsProtectedIfInst`). `Run` recognises three condition shapes: the
+  ReferenceType mode (`comp(ldloc v ==/!= null)`), the NullableByValue mode
+  (`call get_HasValue(ldloca v)` -- the nullable used by value), and the
+  NullableByReference mode (`call get_HasValue(ldloc v)` -- the nullable used
+  by reference). The access chain analysis (`IsValidAccessChain`) is
+  approximated: this port's Call carries no
   IsStatic/IsExtensionMethod/IsAccessor/IsGetter/ConstrainedTo metadata, so
   `IsInstanceCall` is the faithful gate (a static method cannot be `?.`-ed;
   newobj is excluded by `!IsNewObj`); the AddressOf/LdObjIfRef/Dynamic* cases
@@ -811,22 +814,24 @@ implemented and green here. Everything else follows the phase plan in
   LdElema/NullableUnwrap cases are faithfully matched. `IntroduceUnwrap`
   wraps the receiver load at the end of the access chain in a `NullableUnwrap`
   (the D103 node), and the result is a `NullableRewrap` around the access
-  chain. The ReferenceType mode is ported with the `ldnull` and
-  `default(Nullable<T>)` output cases (the latter via the D93 MatchNull helper,
-  the faithful equivalent of the C# `MatchDefaultValue + IsKnownType(NullableOfT)`);
-  the `NullCoalescing` output case (needs InferType /
-  NullableType.IsNonNullableValueType / IsByRefLike) and the
-  NullableByValue/NullableByReference/UnconstrainedType modes,
-  `RunStatements` (the void-call and unconstrained-generic patterns) are
-  deferred. The ReferenceType `?.` is
-  a Roslyn-era (C# 6.0) codegen pattern that fires 0 times on the .NET
+  chain. For the ReferenceType mode the unwrap wraps the varLoad (the
+  `ldloc`/`ldloca testedVar`) directly; for the NullableByValue/NullableByReference
+  modes the varLoad is the `call GetValueOrDefault(ldloca/ldloc testedVar)` at the
+  end of the chain and the unwrap's Argument is a FRESH `ldloc testedVar` (the C#
+  `new LdLoc(testedVar)`, with `refInput=true` for NullableByReference). The three
+  modes are ported with the `ldnull` and `default(Nullable<T>)` output cases
+  (the latter via the D93 MatchNull helper, the faithful equivalent of the C#
+  `MatchDefaultValue + IsKnownType(NullableOfT)`); the `NullCoalescing` output
+  case (needs InferType / NullableType.IsNonNullableValueType / IsByRefLike), the
+  UnconstrainedType mode (RunStatements only), and `RunStatements` (the void-call
+  and unconstrained-generic patterns) are deferred. The `?.` lowering (all modes)
+  is a Roslyn-era (C# 6.0) codegen pattern that fires 0 times on the .NET
   Framework 4 legacy-csc mscorlib corpus, so the sweep asserts the ILAst
   invariant holds (not a fold count), matching the DetectCatchWhenConditionBlocks /
   LdLocaDupInitObj precedent. 37 of ~40 transforms ported.
   The remaining `Run(IfInstruction)` paths (the LiftCSharpUserComparison rest
   of LiftNormal [needs the Call-operator case], NullPropagation's remaining
-  modes [NullableByValue/NullableByReference/UnconstrainedType + RunStatements
-  + the NullCoalescing output case]) and
+  modes [UnconstrainedType + RunStatements + the NullCoalescing output case]) and
   the `RunStatements(Block, int)` block transform are the subsequent
   in-order targets.
   `NullableRewrap` / `NullableUnwrap` (Instructions/, a tested-but-not-yet-wired
