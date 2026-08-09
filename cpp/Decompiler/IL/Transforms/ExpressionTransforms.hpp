@@ -30,21 +30,25 @@
 //
 // This port models it as an IStatementTransform with a recursive Visit that
 // dispatches on OpCode (the C# ILVisitor's AcceptVisitor). The subset ported
-// here is the VisitComp rewrites above (the highest-value, self-contained
-// piece). Deferred vs the C#: the NullableLiftingTransform call (needs the full
-// nullable-lift transform), FixComparisonKindLdNull (already in the standalone
-// EarlyExpressionTransforms, D61), the Conv unwrap of the right operand (this
-// port's Conv carries no Kind/SignExtend/ZeroExtend, so UnwrapConv cannot be
-// faithful), the ldlen / conv o->i null-comparison special cases (need Conv
-// Kind), VisitConv / VisitBox / VisitLdElema / VisitNewArr / VisitCall /
-// VisitNewObj / VisitLdObj / VisitLdObjIfRef / VisitStObj / VisitStLoc /
-// VisitIfInstruction (HandleConditionalOperator, logic.and/or canonicalization,
-// NullableLifting, UserDefinedLogic, match(x)?true:false) / HandleSwitchExpression
-// (needs SwitchExpressions setting + SwitchInstruction guards) / VisitDynamic*
-// / VisitBinaryNumericInstruction (shift-size) / VisitTryCatchHandler -- each
-// needs further infrastructure (AddressOf, LdcDecimal, dynamic nodes, the
-// resolver, MatchLogicAnd/Or, IndexRangeTransform, TransformAssignment, ...) and
-// is a later iteration.
+// here is the VisitComp rewrites (D81) plus the VisitIfInstruction rewrites:
+// HandleConditionalOperator (`if (cond) stloc A(V1) else stloc A(V2)` ->
+// `stloc A(if (cond) V1 else V2)`, the conditional/ternary operator fold) and
+// the logic.and/or canonicalization (`if (cond) ldc.i4 0 else RHS` ->
+// `if (!cond) RHS else ldc.i4 0`, the &&/|| form normalization). Deferred vs the
+// C#: the NullableLiftingTransform call (needs the full nullable-lift transform),
+// FixComparisonKindLdNull (already in the standalone EarlyExpressionTransforms,
+// D61), the Conv unwrap of the right operand (this port's Conv carries no
+// Kind/SignExtend/ZeroExtend, so UnwrapConv cannot be faithful), the ldlen /
+// conv o->i null-comparison special cases (need Conv Kind), VisitConv / VisitBox
+// / VisitLdElema / VisitNewArr / VisitCall / VisitNewObj / VisitLdObj /
+// VisitLdObjIfRef / VisitStObj / VisitStLoc (TransformAssignment.HandleCompoundAssign)
+// / the remaining VisitIfInstruction pieces (NullableLifting, UserDefinedLogic,
+// the match(x)?true:false pattern, TransformDynamicAddAssignOrRemoveAssign) /
+// HandleSwitchExpression (needs SwitchExpressions setting + SwitchInstruction
+// guards) / VisitDynamic* / VisitBinaryNumericInstruction (shift-size) /
+// VisitTryCatchHandler -- each needs further infrastructure (AddressOf,
+// LdcDecimal, dynamic nodes, the resolver, MatchLogicAnd/Or, IndexRangeTransform,
+// TransformAssignment, ...) and is a later iteration.
 
 #pragma once
 
@@ -53,6 +57,7 @@
 namespace ILSpy::Decompiler::IL {
 
 class Comp;
+class IfInstruction;
 
 class ExpressionTransforms : public IStatementTransform {
 public:
@@ -63,7 +68,7 @@ public:
 
 private:
     // Recursive visitor (the C# ILVisitor's AcceptVisitor / Default). Dispatches
-    // on OpCode; non-Comp nodes recurse into their children (the C# Default).
+    // on OpCode; non-Comp/non-If nodes recurse into their children (the C# Default).
     void Visit(ILInstruction* inst);
 
     // VisitComp head rewrites: logic.not push and `comp(x != 0) => x`. Returns
@@ -75,6 +80,35 @@ private:
     // `comp.unsigned(left > 0)` / `comp.unsigned(left <= 0)` normalization.
     // Returns true if a rewrite fired (the node was mutated and re-visited).
     bool VisitCompTailRewrites(Comp* comp);
+
+    // VisitIfInstruction: visit the arms, run HandleConditionalOperator, run the
+    // logic.and/or canonicalization, then visit the condition. Adapted to the
+    // if-as-final block model (the C# carries the if as a non-terminal at
+    // Instructions[Count-2]; this port makes it the block's FinalInstruction).
+    void VisitIfInstruction(IfInstruction* iff);
+
+    // Visit an if-arm (the C# visits TrueInst/FalseInst). A Block arm with a
+    // FinalInstruction is a control-flow block the block transform already
+    // handled (the C# skips BlockKind.ControlFlow); an expression Block arm (no
+    // FinalInstruction) and a bare non-Block arm are visited.
+    void VisitArm(ILInstruction* arm);
+
+    // HandleConditionalOperator: `if (cond) stloc A(V1) else stloc A(V2)` ->
+    // `stloc A(if (!cond) V2 else V1))` (the conditional/ternary operator fold).
+    // Both arms must be expression Blocks (no FinalInstruction) with exactly one
+    // StLoc to the same variable. Adapted to the if-as-final block model: the
+    // StLoc goes into the block's Instructions and a Branch to the next block
+    // replaces the if-final (the C# does an in-place ReplaceWith since the if is
+    // a non-terminal). Returns true if the rewrite fired (the if is destroyed).
+    bool HandleConditionalOperator(IfInstruction* iff);
+
+    // logic.and/or canonicalization: `if (cond) ldc.i4 0 else RHS` ->
+    // `if (!cond) RHS else ldc.i4 0` and `if (cond) RHS else ldc.i4 1` ->
+    // `if (!cond) ldc.i4 1 else RHS` (swap the arms + negate the condition to
+    // bring &&/|| into their canonical forms). The if stays the block's final
+    // (no block-model issue); an arm is `ldc.i4 N` either bare or a single-
+    // instruction expression Block. Returns true if the arms were swapped.
+    bool CanonicalizeLogicAndOr(IfInstruction* iff);
 };
 
 } // namespace ILSpy::Decompiler::IL

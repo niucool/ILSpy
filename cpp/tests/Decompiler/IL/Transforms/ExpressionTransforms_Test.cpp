@@ -159,19 +159,47 @@ void RunPrePipeline(ILFunction& fn, ILTransformContext& ctx) {
     CachedReadOnlySpanInitialization().Run(fn, ctx);
 }
 
-// Count Comp nodes (any kind). The VisitComp rewrites are monotone in the
-// total Comp count: logic.not push removes the outer comp, `comp(x != 0) -> x`
-// removes a comp, and the unsigned normalization keeps the count. So the total
-// must not rise. Used by the sweep to confirm the transform is monotone.
-int CountComps(ILFunction& fn) {
+// Count StLoc-wrapping-IfInstruction occurrences (the conditional-operator form
+// HandleConditionalOperator produces: `stloc V(if (...) V2 else V1))`). The
+// ternary fold is monotone non-decreasing across ExpressionTransforms (each fold
+// creates one; nothing in this subset removes them). Used by the sweep to confirm
+// the transform makes corpus progress.
+int CountConditionalOperators(ILFunction& fn) {
     int n = 0;
     std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
         if (!inst) return;
-        if (inst->Op == OpCode::Comp) ++n;
+        if (inst->Op == OpCode::StLoc) {
+            auto* st = static_cast<StLoc*>(inst);
+            if (st->Value && st->Value->Op == OpCode::IfInstruction) ++n;
+        }
         for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
     };
     walk(fn.Body.get());
     return n;
+}
+
+// Build a block whose FinalInstruction is an IfInstruction with the given
+// condition and two Block arms (each a single StLoc to `v` of the given values,
+// no FinalInstruction -- the expression-block shape after ConditionDetection's
+// TryDropCommonExit). The arms' FinalInstruction is left null (an expression
+// block); `withFinal=true` instead gives each arm a Branch final (a control-flow
+// block, which HandleConditionalOperator must reject).
+std::unique_ptr<Block> MakeTernaryBlock(ILVariablePtr v,
+                                        std::unique_ptr<ILInstruction> cond,
+                                        std::unique_ptr<ILInstruction> value1,
+                                        std::unique_ptr<ILInstruction> value2,
+                                        bool withFinal = false) {
+    auto trueBlock = std::make_unique<Block>();
+    trueBlock->Add(std::make_unique<StLoc>(v, std::move(value1)));
+    if (withFinal) trueBlock->SetFinal(std::make_unique<Branch>(nullptr));
+    auto falseBlock = std::make_unique<Block>();
+    falseBlock->Add(std::make_unique<StLoc>(v, std::move(value2)));
+    if (withFinal) falseBlock->SetFinal(std::make_unique<Branch>(nullptr));
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(trueBlock),
+                                               std::move(falseBlock));
+    auto P = std::make_unique<Block>();
+    P->SetFinal(std::move(iff));
+    return P;
 }
 
 } // namespace
@@ -389,10 +417,267 @@ TEST(ExpressionTransforms, IfFinalOnlyBlockConditionIsVisited) {
     }
 }
 
+// HandleConditionalOperator folds `if (cond) stloc A(V1) else stloc A(V2)` into
+// `stloc A(if (!cond) V2 else V1))` (the conditional/ternary operator). Both arms
+// are expression Blocks (no FinalInstruction) with a single StLoc to the same
+// variable; the StLoc becomes a non-terminal and a Branch to the next block
+// replaces the if-final (the block-model adaptation).
+TEST(ExpressionTransforms, HandleConditionalOperatorFoldsTernary) {
+    auto a = MakeParam("a");
+    auto b = MakeParam("b");
+    auto v = MakeLocal("v");
+    // if (a != b) { stloc v(a) } else { stloc v(b) }
+    auto cond = std::make_unique<Comp>(std::make_unique<LdLoc>(a),
+                                       std::make_unique<LdLoc>(b),
+                                       ComparisonKind::Inequality, false);
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Body->AddBlock(MakeTernaryBlock(v, std::move(cond),
+                                        std::make_unique<LdLoc>(a),
+                                        std::make_unique<LdLoc>(b)));
+    auto Q = std::make_unique<Block>();
+    Q->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(Q));
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(a);
+    fn->Variables.push_back(b);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& P = *fn->Body->Blocks[0];
+    // The StLoc was appended to the block's non-terminal Instructions.
+    ASSERT_EQ(P.Instructions.size(), 1u);
+    ASSERT_EQ(P.Instructions[0]->Op, OpCode::StLoc);
+    auto* st = static_cast<StLoc*>(P.Instructions[0].get());
+    EXPECT_EQ(st->Variable.get(), v.get()) << "the temp must survive the fold";
+    // The StLoc's value is the conditional operator IfInstruction.
+    ASSERT_EQ(st->Value->Op, OpCode::IfInstruction);
+    auto* newIf = static_cast<IfInstruction*>(st->Value.get());
+    // The condition was negated: comp(ne, a, b) -> comp(eq, a, b).
+    ASSERT_EQ(newIf->Condition->Op, OpCode::Comp);
+    EXPECT_EQ(static_cast<Comp*>(newIf->Condition.get())->Kind, ComparisonKind::Equality)
+        << "the condition must be negated";
+    // TrueInst = V2 (b), FalseInst = V1 (a) -- the C# swaps so `cond ? V1 : V2`.
+    ASSERT_EQ(newIf->TrueInst->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(newIf->TrueInst.get())->Variable.get(), b.get());
+    ASSERT_EQ(newIf->FalseInst->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(newIf->FalseInst.get())->Variable.get(), a.get());
+    // The if-final is now a Branch to Q (the positional fall-through).
+    ASSERT_EQ(P.FinalInstruction->Op, OpCode::Branch);
+    EXPECT_EQ(static_cast<Branch*>(P.FinalInstruction.get())->TargetBlock,
+              fn->Body->Blocks[1].get());
+}
+
+// HandleConditionalOperator does not fold when the two arms store to different
+// variables (the conditional operator requires both arms to assign the same temp).
+TEST(ExpressionTransforms, HandleConditionalOperatorRejectsDifferentVariables) {
+    auto a = MakeParam("a");
+    auto b = MakeParam("b");
+    auto v1 = MakeLocal("v1");
+    auto v2 = MakeLocal("v2");
+    auto cond = std::make_unique<Comp>(std::make_unique<LdLoc>(a),
+                                       std::make_unique<LdLoc>(b),
+                                       ComparisonKind::Inequality, false);
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    // True arm stores to v1, false arm to v2 -- different variables.
+    auto trueBlock = std::make_unique<Block>();
+    trueBlock->Add(std::make_unique<StLoc>(v1, std::make_unique<LdLoc>(a)));
+    auto falseBlock = std::make_unique<Block>();
+    falseBlock->Add(std::make_unique<StLoc>(v2, std::make_unique<LdLoc>(b)));
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(trueBlock),
+                                               std::move(falseBlock));
+    auto P = std::make_unique<Block>();
+    P->SetFinal(std::move(iff));
+    fn->Body->AddBlock(std::move(P));
+    auto Q = std::make_unique<Block>();
+    Q->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(Q));
+    for (auto vv : {v1, v2, a, b}) fn->Variables.push_back(vv);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // The if-final stays (no fold); the block has no non-terminal StLoc.
+    auto& P2 = *fn->Body->Blocks[0];
+    EXPECT_EQ(P2.Instructions.size(), 0u);
+    ASSERT_EQ(P2.FinalInstruction->Op, OpCode::IfInstruction)
+        << "the if must stay when the arms store different variables";
+}
+
+// HandleConditionalOperator does not fold when an arm is a control-flow Block
+// (has a FinalInstruction) -- those were already handled by the block transform
+// and the C# skips BlockKind.ControlFlow.
+TEST(ExpressionTransforms, HandleConditionalOperatorRejectsArmWithFinal) {
+    auto a = MakeParam("a");
+    auto b = MakeParam("b");
+    auto v = MakeLocal("v");
+    auto cond = std::make_unique<Comp>(std::make_unique<LdLoc>(a),
+                                       std::make_unique<LdLoc>(b),
+                                       ComparisonKind::Inequality, false);
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Body->AddBlock(MakeTernaryBlock(v, std::move(cond),
+                                        std::make_unique<LdLoc>(a),
+                                        std::make_unique<LdLoc>(b),
+                                        /*withFinal=*/true));
+    auto Q = std::make_unique<Block>();
+    Q->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(Q));
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(a);
+    fn->Variables.push_back(b);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& P = *fn->Body->Blocks[0];
+    EXPECT_EQ(P.Instructions.size(), 0u);
+    ASSERT_EQ(P.FinalInstruction->Op, OpCode::IfInstruction)
+        << "the if must stay when an arm has a FinalInstruction";
+}
+
+// HandleConditionalOperator does not fold when an arm Block has more than one
+// instruction (the conditional operator requires each arm to be a single store).
+TEST(ExpressionTransforms, HandleConditionalOperatorRejectsMultiInstructionArm) {
+    auto a = MakeParam("a");
+    auto b = MakeParam("b");
+    auto v = MakeLocal("v");
+    auto cond = std::make_unique<Comp>(std::make_unique<LdLoc>(a),
+                                       std::make_unique<LdLoc>(b),
+                                       ComparisonKind::Inequality, false);
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    // True arm: two StLocs to v (not a single store).
+    auto trueBlock = std::make_unique<Block>();
+    trueBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdLoc>(a)));
+    trueBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdLoc>(b)));
+    auto falseBlock = std::make_unique<Block>();
+    falseBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdLoc>(b)));
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(trueBlock),
+                                               std::move(falseBlock));
+    auto P = std::make_unique<Block>();
+    P->SetFinal(std::move(iff));
+    fn->Body->AddBlock(std::move(P));
+    auto Q = std::make_unique<Block>();
+    Q->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(Q));
+    for (auto vv : {v, a, b}) fn->Variables.push_back(vv);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& P2 = *fn->Body->Blocks[0];
+    EXPECT_EQ(P2.Instructions.size(), 0u);
+    ASSERT_EQ(P2.FinalInstruction->Op, OpCode::IfInstruction)
+        << "the if must stay when an arm has more than one instruction";
+}
+
+// The logic.and/or canonicalization swaps the arms and negates the condition
+// when the true arm is ldc.i4 0 and the false arm is not: `if (cond) 0 else RHS`
+// -> `if (!cond) RHS else 0`.
+TEST(ExpressionTransforms, LogicAndOrCanonicalizationSwapsZeroTrueArm) {
+    auto a = MakeParam("a");
+    auto b = MakeParam("b");
+    // if (a) ldc.i4 0 else ldloc b -- the `a && b`-shaped normalization.
+    auto cond = std::make_unique<Comp>(std::make_unique<LdLoc>(a),
+                                       std::make_unique<LdcI4>(0),
+                                       ComparisonKind::Inequality, false);
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto iff = std::make_unique<IfInstruction>(std::move(cond),
+                                               std::make_unique<LdcI4>(0),
+                                               std::make_unique<LdLoc>(b));
+    auto P = std::make_unique<Block>();
+    P->SetFinal(std::move(iff));
+    fn->Body->AddBlock(std::move(P));
+    auto Q = std::make_unique<Block>();
+    Q->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(Q));
+    fn->Variables.push_back(a);
+    fn->Variables.push_back(b);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto* iff2 = dynamic_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(iff2, nullptr);
+    // The arms were swapped: TrueInst is now ldloc b, FalseInst is ldc.i4 0.
+    ASSERT_EQ(iff2->TrueInst->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(iff2->TrueInst.get())->Variable.get(), b.get());
+    ASSERT_EQ(iff2->FalseInst->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(iff2->FalseInst.get())->Value, 0);
+    // The condition was negated: comp(ne, a, 0) -> comp(eq, a, 0) = !a.
+    ASSERT_EQ(iff2->Condition->Op, OpCode::Comp);
+    EXPECT_EQ(static_cast<Comp*>(iff2->Condition.get())->Kind, ComparisonKind::Equality)
+        << "the condition must be negated by the canonicalization";
+}
+
+// The logic.and/or canonicalization does NOT swap when both arms are ldc.i4 1
+// (the infinite-loop guard: swapping `1 else 1` would just re-trigger).
+TEST(ExpressionTransforms, LogicAndOrBothOneNoSwap) {
+    auto a = MakeParam("a");
+    auto b = MakeParam("b");
+    // if (a == b) ldc.i4 1 else ldc.i4 1 -- both arms 1, no swap. The condition
+    // is comp(eq, a, b) (not comp(!=0), so the D81 comp(!=0)->x rewrite leaves it;
+    // not a logic.not, so it stays a Comp) -- isolating the canonicalization.
+    auto cond = std::make_unique<Comp>(std::make_unique<LdLoc>(a),
+                                       std::make_unique<LdLoc>(b),
+                                       ComparisonKind::Equality, false);
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto iff = std::make_unique<IfInstruction>(std::move(cond),
+                                               std::make_unique<LdcI4>(1),
+                                               std::make_unique<LdcI4>(1));
+    auto P = std::make_unique<Block>();
+    P->SetFinal(std::move(iff));
+    fn->Body->AddBlock(std::move(P));
+    auto Q = std::make_unique<Block>();
+    Q->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(Q));
+    fn->Variables.push_back(a);
+    fn->Variables.push_back(b);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto* iff2 = dynamic_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(iff2, nullptr);
+    // No swap: TrueInst stays ldc.i4 1, FalseInst stays ldc.i4 1.
+    ASSERT_EQ(iff2->TrueInst->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(iff2->TrueInst.get())->Value, 1);
+    ASSERT_EQ(iff2->FalseInst->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(iff2->FalseInst.get())->Value, 1);
+    // The condition was not negated (no swap -> no negate): stays comp(eq, a, b).
+    ASSERT_EQ(iff2->Condition->Op, OpCode::Comp);
+    EXPECT_EQ(static_cast<Comp*>(iff2->Condition.get())->Kind, ComparisonKind::Equality)
+        << "the condition must not be negated when the swap is suppressed";
+}
+
 // On the real mscorlib corpus, running the full pre-pipeline through the
 // StatementTransform{ILInlining, ExpressionTransforms} (the GetILTransforms()
-// position) preserves the ILAst invariant and the comp(x != 0) -> x rewrite
-// makes corpus progress (the redundant-inequality-against-0 count drops).
+// position) preserves the ILAst invariant and the HandleConditionalOperator
+// ternary fold makes corpus progress (the StLoc-wrapping-IfInstruction count
+// rises as if/else pairs over the same temp fold to conditional operators).
 TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
 #if defined(_WIN32)
     const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
@@ -404,6 +689,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
     ASSERT_TRUE(f.IsValid());
 
     int processed = 0;
+    int totalFolds = 0;
     ILTransformContext ctx;
     for (const auto& m : f.MethodDefs()) {
         if (m.RVA == 0) continue;
@@ -411,7 +697,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         if (!fn) continue;
         ++processed;
         RunPrePipeline(*fn, ctx);
-        int before = CountComps(*fn);
+        int before = CountConditionalOperators(*fn);
         {
             StatementTransform st;
             st.AddChild(std::make_unique<ILInlining>());
@@ -419,12 +705,19 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
             st.Run(*fn, ctx);
         }
         fn->CheckInvariant(ILPhase::Normal);
-        int after = CountComps(*fn);
-        // The rewrites are monotone in the total Comp count (logic.not push and
-        // comp(x != 0) -> x each remove a comp; unsigned normalization keeps it);
-        // the count must not rise.
-        EXPECT_LE(after, before);
+        int after = CountConditionalOperators(*fn);
+        // The ternary fold is monotone non-decreasing (each fold creates a
+        // StLoc-if; nothing in this subset removes one). The VisitComp rewrites
+        // (comp(!=0)->x, logic.not push, unsigned normalization) do not create
+        // StLoc-if, so the count must not drop.
+        EXPECT_GE(after, before);
+        totalFolds += (after - before);
         if (processed >= 8000) break;
     }
     EXPECT_GT(processed, 5000);
+    // The ternary fold fires on the legacy-csc corpus (csc emits `V = a ? b : c`
+    // as if/else stloc to the same temp, which ConditionDetection shapes into the
+    // two-expression-Block-arms form HandleConditionalOperator matches).
+    EXPECT_GT(totalFolds, 0)
+        << "HandleConditionalOperator must fold some ternary on mscorlib";
 }

@@ -260,7 +260,8 @@ implemented and green here. Everything else follows the phase plan in
   ConditionDetection + LockTransform + UsingTransform + CachedDelegateInitialization + CachedReadOnlySpanInitialization + StatementTransform{ILInlining, ExpressionTransforms} + AssignVariableNames + RemoveRedundantReturn before the
   C# seed, so `fixed (...) { ... }`, `default(T)`, reconstructed `switch`
   statements, switch-on-nullable `case null:` arms, `is T x` patterns,
-  `lock (...) { ... }`, and `using (...) { ... }` statements now
+  `lock (...) { ... }`, `using (...) { ... }` statements, and
+  `V = cond ? V1 : V2` ternaries (the conditional operator) now
   appear in the output. 26 of ~40 transforms ported (the StatementTransform
   orchestration + its first two children ILInlining and ExpressionTransforms;
   the remaining 14 per-statement children are deferred).
@@ -389,17 +390,33 @@ implemented and green here. Everything else follows the phase plan in
   `comp(x != 0)` -> `x` (drop the redundant inequality against 0 when the comp
   is in a condition slot or its left is a comp), and `comp.unsigned(left > 0)` /
   `<= 0` -> `comp(left != 0)` / `== 0` (an unsigned compare against 0 is a
-  (non-)zero test). `IsInConditionSlot` is ported via `Parent` + `ChildIndex`
-  (the port has no `SlotInfo`); the float guard is approximated by the operands'
-  `StackType` (the port's `Comp` carries no `InputType`); the C# `UnwrapConv` of
-  the right operand is approximated (the port's `Conv` carries no `Kind`). Its
-  `Run` visits the statement at `pos` and the if-final's `Condition` at
-  `pos == size-1` (the port's equivalent of the C# visiting the if at
-  `Count-2`), so `if (comp(x != 0))` -> `if (x)` fires on if-final blocks -- the
-  CLI output now shows `if (array.Length)` (from `comp(ldlen != 0)` -> `ldlen`) and
-  `if (!value)` (the kept logic.not of a bool param). The remaining 14
-  per-statement children (DynamicIsEventAssignmentTransform, TransformAssignment,
-  NullCoalescingTransform, NullableLiftingStatementTransform,
+  (non-)zero test). It also folds the `VisitIfInstruction` subset:
+  `HandleConditionalOperator` (`if (cond) stloc A(V1) else stloc A(V2)` ->
+  `stloc A(if (!cond) V2 else V1))`, the conditional/ternary operator --
+  adapted to the if-as-final block model: the `StLoc` becomes a non-terminal in
+  the block's `Instructions` and a `Branch` to the next block replaces the
+  if-final (a `StLoc` is not a valid block final; the C# does an in-place
+  `ReplaceWith` since the if is a non-terminal); both arms must be expression
+  `Block`s (no `FinalInstruction`, the shape after `ConditionDetection`'s
+  `TryDropCommonExit`) with a single `StLoc` to the same variable -- and the
+  logic.and/or canonicalization (`if (cond) ldc.i4 0 else RHS` ->
+  `if (!cond) RHS else ldc.i4 0`, the `&&`/`||` form normalization; the if
+  stays the block's final so no block-model issue, an arm is `ldc.i4 N` either
+  bare or a single-instruction expression `Block`). `IsInConditionSlot` is
+  ported via `Parent` + `ChildIndex` (the port has no `SlotInfo`); the float
+  guard is approximated by the operands' `StackType` (the port's `Comp` carries
+  no `InputType`); the C# `UnwrapConv` of the right operand is approximated
+  (the port's `Conv` carries no `Kind`). Its `Run` visits the statement at
+  `pos` and the if-final (via `VisitIfInstruction`, which visits the arms,
+  runs `HandleConditionalOperator` and the canonicalization, then the
+  condition) at `pos == size-1` (the port's equivalent of the C# visiting the
+  if at `Count-2`), so `if (comp(x != 0))` -> `if (x)` and the ternary fold
+  fire on if-final blocks -- the CLI output now shows `if (array.Length)`
+  (from `comp(ldlen != 0)` -> `ldlen`) and `if (!value)` (the kept logic.not
+  of a bool param), and `V = cond ? V1 : V2` ternaries (the conditional
+  operator) replace the `if/else`-over-the-same-temp pairs csc emits. The
+  remaining 14 per-statement children (DynamicIsEventAssignmentTransform,
+  TransformAssignment, NullCoalescingTransform, NullableLiftingStatementTransform,
   NullPropagationStatementTransform, TransformArrayInitializers,
   TransformCollectionAndObjectInitializers, TransformExpressionTrees,
   IndexRangeTransform, DeconstructionTransform, NamedArgumentTransform,
@@ -408,9 +425,11 @@ implemented and green here. Everything else follows the phase plan in
   option (the ldloca-into-`addressof` path the C# second pass enables, which
   needs an `AddressOf` node + `IsGeneratedTemporaryForAddressOf` +
   `ClassifyExpression`) are deferred, as are the rest of `ExpressionTransforms`
-  (the NullableLifting call, the Conv/Box/Call/NewObj/LdObj/StObj/StLoc/
-  IfInstruction/SwitchExpression/Dynamic/BinaryNumeric/TryCatchHandler visit
-  methods).
+  (the NullableLifting call, the Conv/Box/Call/NewObj/LdObj/StObj/StLoc
+  `HandleCompoundAssign`, the remaining VisitIfInstruction pieces
+  (NullableLifting, UserDefinedLogic, the `match(x) ? true : false` pattern,
+  `TransformDynamicAddAssignOrRemoveAssign`), the SwitchExpression/Dynamic/
+  BinaryNumeric/TryCatchHandler visit methods).
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
   walk + a corpus probe; the async/iterator state machines

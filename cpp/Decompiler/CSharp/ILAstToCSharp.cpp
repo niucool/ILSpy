@@ -782,6 +782,30 @@ private:
                 }
                 return lhs + " is " + pattern;
             }
+            case OpCode::IfInstruction: {
+                // The expression form of an IfInstruction: the conditional
+                // operator `cond ? true : false`. This arises when
+                // ExpressionTransforms.HandleConditionalOperator folds
+                // `if (cond) stloc A(V1) else stloc A(V2)` into
+                // `stloc A(if (!cond) V2 else V1))` (a StLoc whose value is an
+                // IfInstruction). A Block arm (the inlined-fall-through shape)
+                // renders its single instruction; a bare expression arm renders
+                // directly. The statement form (`if (cond) { ... } else { ... }`)
+                // is emitted by the Statement path and does not reach Expr.
+                const auto& iff = static_cast<const IfInstruction&>(inst);
+                auto ArmExpr = [&](const std::unique_ptr<ILInstruction>& arm) -> std::string {
+                    if (!arm) return "(default)";
+                    if (arm->Op == OpCode::Block) {
+                        auto* blk = static_cast<const Block*>(arm.get());
+                        if (!blk->FinalInstruction && blk->Instructions.size() == 1)
+                            return Expr(*blk->Instructions[0]);
+                    }
+                    return Expr(*arm);
+                };
+                std::string cond = iff.Condition ? Expr(*iff.Condition) : "(default)";
+                return "(" + cond + " ? " + ArmExpr(iff.TrueInst) +
+                       " : " + ArmExpr(iff.FalseInst) + ")";
+            }
             default:
                 return "(default)/*op=" + std::to_string(static_cast<int>(inst.Op)) + "*/";
         }
