@@ -32,4 +32,5 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/PatternMatchingTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/LockTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/UsingTransform.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/DelegateConstruction.cpp
 )

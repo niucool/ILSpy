@@ -44,6 +44,22 @@ struct DecodedMethodSignature {
 // else an unresolved SimpleType. Shared by the metadata row accessors.
 TypeSystem::ITypePtr MakeTypeRef(std::string_view ns, std::string_view name, int arity);
 
+// Build a type reference for a TypeDef row, deriving its TypeKind from the
+// row's flags + base type (the same DeriveTypeKind call TypeDefs() makes). A
+// known framework type keeps its KnownType; a non-known in-module type gets an
+// accurate kind (Delegate/Struct/Enum/...) instead of the Class fallback.
+// Used by ResolveMethodDeclaringType (so a delegate constructor's declaring
+// type resolves to Kind == Delegate) and by the signature decoder's
+// TypeDefOrRef element decoder (so a generic delegate's generic definition
+// in a TypeSpec instantiation also carries Kind == Delegate).
+TypeSystem::ITypePtr MakeTypeRefFromTypeDef(winmd::reader::TypeDef d);
+
+// Build a type reference for a TypeRef row. A known framework type keeps its
+// KnownType; a non-known TypeRef is treated as Unknown (the C# leaves an
+// unresolvable cross-assembly TypeRef as UnknownType; MatchDelegateConstruction
+// accepts Kind == Unknown, so a cross-assembly delegate still matches).
+TypeSystem::ITypePtr MakeTypeRefFromTypeRef(winmd::reader::TypeRef r);
+
 // Decode a method signature blob (MethodDef Signature, MemberRef Signature,
 // or the definition behind a MethodSpec). ok is set false on any malformed
 // content.

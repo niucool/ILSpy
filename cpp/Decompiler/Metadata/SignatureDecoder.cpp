@@ -27,6 +27,7 @@
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
+#include "Decompiler/TypeSystem/TypeKindDerivation.hpp"
 
 #include <cstddef>
 #include <string>
@@ -90,6 +91,70 @@ ITypePtr MakeTypeRef(std::string_view ns, std::string_view name, int arity) {
 }
 
 namespace {
+// Resolve a TypeDefOrRef coded index (from a TypeDef.Extends) to the simple
+// name model for use as a base type in DeriveTypeKind. DeriveTypeKind only
+// inspects KnownType bases (Enum/ValueType/MulticastDelegate), so the simple
+// MakeTypeRef form suffices here -- a non-known base is a SimpleType whose
+// Kind DeriveTypeKind ignores (it falls through to Class). TypeSpec bases do
+// not occur in compiler-emitted TypeDef.Extends.
+ITypePtr ResolveBaseForKind(
+        const winmd::reader::coded_index<winmd::reader::TypeDefOrRef>& cod) {
+    using TDR = winmd::reader::TypeDefOrRef;
+    if (!cod) return nullptr;
+    if (cod.type() == TDR::TypeDef) {
+        auto d = cod.TypeDef();
+        return MakeTypeRef(d.TypeNamespace(), d.TypeName(), 0);
+    }
+    if (cod.type() == TDR::TypeRef) {
+        auto r = cod.TypeRef();
+        return MakeTypeRef(r.TypeNamespace(), r.TypeName(), 0);
+    }
+    return nullptr;
+}
+} // namespace
+
+// Build a type reference for a TypeDef row, deriving its TypeKind from the
+// row's flags + base type (the same DeriveTypeKind call TypeDefs() makes). A
+// known framework type keeps its KnownType so the KnownTypeCode consumers
+// (NullableLifting) still recognise it; a non-known in-module type (e.g.
+// System.Action or a generic System.Func`1, a delegate) gets an accurate kind
+// (Delegate/Struct/Enum/Interface/...) instead of the Class fallback
+// MakeTypeRef would otherwise produce. This is what lets
+// DelegateConstruction.MatchDelegateConstruction recognise a delegate
+// constructor's declaring type by Kind == Delegate -- both the in-module
+// non-generic constructor (MethodDef parent) and a generic instantiation's
+// generic definition (the TypeSpec path decodes through here).
+ITypePtr MakeTypeRefFromTypeDef(winmd::reader::TypeDef d) {
+    auto ns = d.TypeNamespace();
+    auto name = d.TypeName();
+    auto known = MakeTypeRef(ns, name, 0);
+    if (dynamic_cast<KnownType*>(known.get())) return known;
+    std::uint32_t flags = 0;
+    try { flags = d.Flags().value; } catch (const std::exception&) {}
+    ITypePtr base;
+    try { base = ResolveBaseForKind(d.Extends()); }
+    catch (const std::exception&) { base = nullptr; }
+    std::string selfRefName = std::string(ns).empty()
+        ? std::string(name) : std::string(ns) + "." + std::string(name);
+    TypeKind kind = DeriveTypeKind(flags, base, selfRefName);
+    const auto* st = static_cast<SimpleType*>(known.get());
+    return std::make_shared<SimpleType>(st->GetTopLevelTypeName(), kind);
+}
+
+// Build a type reference for a TypeRef row. A known framework type keeps its
+// KnownType; a non-known TypeRef is treated as Unknown. The C# leaves an
+// unresolvable cross-assembly TypeRef as UnknownType, and
+// MatchDelegateConstruction accepts Kind == Unknown -- so a cross-assembly
+// delegate constructor still matches via the Unknown allowance, faithful to
+// the C# which also cannot resolve it without the full type system.
+ITypePtr MakeTypeRefFromTypeRef(winmd::reader::TypeRef r) {
+    auto known = MakeTypeRef(r.TypeNamespace(), r.TypeName(), 0);
+    if (dynamic_cast<KnownType*>(known.get())) return known;
+    const auto* st = static_cast<SimpleType*>(known.get());
+    return std::make_shared<SimpleType>(st->GetTopLevelTypeName(), TypeKind::Unknown);
+}
+
+namespace {
 
 // Cursor over a signature blob. Every read checks bounds and latches
 // `failed`; callers must check Failed() (or a null return) before using
@@ -144,11 +209,11 @@ ITypePtr DecodeTypeDefOrRefEncoded(BlobReader& r, std::uint32_t coded) {
     std::uint32_t row = coded >> 2;  // 1-based
     if (tag == 0 && row && row <= r.db->TypeDef.size()) {          // TypeDef
         auto def = r.db->TypeDef[row - 1];
-        return MakeTypeRef(def.TypeNamespace(), def.TypeName(), 0);
+        return MakeTypeRefFromTypeDef(def);
     }
     if (tag == 1 && row && row <= r.db->TypeRef.size()) {          // TypeRef
         auto ref = r.db->TypeRef[row - 1];
-        return MakeTypeRef(ref.TypeNamespace(), ref.TypeName(), 0);
+        return MakeTypeRefFromTypeRef(ref);
     }
     if (tag == 2) {                                                // TypeSpec
         return DecodeTypeSpecRow(r, row);

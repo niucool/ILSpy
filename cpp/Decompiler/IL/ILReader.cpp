@@ -484,6 +484,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             auto call = std::make_unique<Call>(file.ResolveTokenToString(tok));
             call->ReturnType = StackTypeOf(callSig->ReturnType);
             call->IsInstanceCall = callSig->IsInstance && op != ILOpCode::Newobj;
+            call->IsNewObj = (op == ILOpCode::Newobj);
             call->DeclaringType = file.ResolveMethodDeclaringType(tok);
             std::vector<std::unique_ptr<ILInstruction>> args;
             args.reserve(argCount);

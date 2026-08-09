@@ -86,6 +86,14 @@ struct ILTransformSettings {
     // unconditional; this gates the transform that builds it from the
     // stloc + try/finally + Dispose-block pattern).
     bool UsingStatement = true;
+    // Whether to detect anonymous-method / lambda constructs (cached-delegate
+    // initialization, delegate construction, ...). DecompilerSettings.
+    // AnonymousMethods -- default true. Gates CachedDelegateInitialization
+    // (the next in-order transform after UsingTransform); the
+    // DelegateConstruction.MatchDelegateConstruction helper itself is
+    // unconditional (like the NullableLifting helpers), but the transform that
+    // consumes it is gated here.
+    bool AnonymousMethods = true;
 };
 
 class ILTransformContext {

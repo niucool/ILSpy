@@ -262,14 +262,45 @@ implemented and green here. Everything else follows the phase plan in
   statements, switch-on-nullable `case null:` arms, `is T x` patterns,
   `lock (...) { ... }`, and `using (...) { ... }` statements now
   appear in the output. 22 of ~40 transforms ported.
+  `DelegateConstruction` (Transforms/, a tested-but-not-yet-wired
+  foundation) ports the `MatchDelegateConstruction` helper the next in-order
+  transform (`CachedDelegateInitialization`) and the later `DelegateConstruction`
+  transform consume: it recognises a `newobj DelegateType(target, ldftn method)`
+  (a `Call` with the new `IsNewObj` flag, 2 args, the second an ldftn/ldvirtftn)
+  whose declaring type's `Kind` is `Delegate` or `Unknown`, capturing the target,
+  the delegate type, and the ldftn method name. `Call` gained an `IsNewObj`
+  flag (set by the IL reader for `newobj`, distinguishing it from `call`/`callvirt`
+  -- the C# models newobj as a separate `NewObj` node; this port reuses `Call`).
+  The declaring-type `TypeKind` is now derived for resolved type references:
+  `ResolveMethodDeclaringType` (and the signature decoder's `TypeDefOrRef`
+  element decoder) build a `SimpleType` carrying the derived `TypeKind` (via
+  `DeriveTypeKind` over the `TypeDef` row's flags + base) for non-known in-module
+  types, so a delegate constructor's declaring type resolves to `Kind == Delegate`
+  -- both the non-generic in-module constructor (MethodDef parent) and a generic
+  instantiation like `System.Func<int>` (the `TypeSpec` path, whose generic
+  definition now carries the derived kind); a non-known cross-assembly `TypeRef`
+  falls back to `Unknown` (the C# `Kind == Unknown` allowance, faithful to the C#
+  which also cannot resolve it without the full type system). Known framework types
+  keep their `KnownType` so the `KnownTypeCode` consumers (`NullableLifting`) are
+  unaffected. An 8000-method mscorlib sweep confirms the helper matches 59 real
+  `newobj Delegate(.., ldftn ..)` sites (29 non-generic + 30 generic via TypeSpec);
+  the ILAst invariant holds. The `AnonymousMethods` setting (default true, gating
+  `CachedDelegateInitialization`) is added; the helper itself is unconditional.
+  No pipeline transform consumes `MatchDelegateConstruction` yet, so `--csharp`
+  output is unchanged; the foundation is exercised by the unit tests + the sweep.
   Next per `GetILTransforms()`:
+  `CachedDelegateInitialization` (the next in-order transform after
+  `UsingTransform` in the BlockILTransform post-order set, now unblocked by the
+  `MatchDelegateConstruction` foundation; needs `IField.IsCompilerGeneratedOrIsInCompilerGeneratedClass`,
+  per-variable store lists, and a block-model adaptation of its `block.Instructions[i] is IfInstruction`
+  shape to this port's if-as-FinalInstruction model, plus a corpus probe of the
+  real if/finally shape -- the D73/D75 precedent), then `CachedReadOnlySpanInitialization`,
   the async/iterator state machines
   (YieldReturnDecompiler/AsyncAwaitDecompiler), SplitVariables (needs
   reaching-definitions dataflow),
   DetectExitPoints + the full ConditionDetection (multi-pred join blocks),
   the PatternMatchingTransform recursive sub-patterns (DetectPropertySubPatterns /
   PropertyOrFieldAccess / CompatibleExitInstruction),
-  CachedDelegateInitialization, ...
   HighLevelLoopTransform (while/for),
   TransformAssignment, ...
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text

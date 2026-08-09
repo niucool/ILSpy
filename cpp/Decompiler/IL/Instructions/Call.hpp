@@ -47,6 +47,12 @@ public:
     // True for call/callvirt on an instance method (Arguments[0] is the
     // receiver); false for static calls and newobj. Set by the IL reader.
     bool IsInstanceCall = false;
+    // True for a `newobj` call (the C# models this as a separate NewObj node;
+    // this port reuses Call with this flag, matching the IsInstanceCall
+    // precedent). The IL reader sets it from the decoded opcode. Consumed by
+    // DelegateConstruction.MatchDelegateConstruction (the C# `case NewObj call:`)
+    // and the seed's `new Type(args)` rendering path.
+    bool IsNewObj = false;
 
     explicit Call(std::string method = std::string()) : ILInstruction(OpCode::Call), MethodName(std::move(method)) {}
 

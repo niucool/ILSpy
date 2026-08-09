@@ -435,10 +435,12 @@ ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::ResolveMethodDeclaringType
     std::uint32_t row = methodToken & 0x00FFFFFFu;
     try {
         if (table == 0x06 && row && row <= impl_->db->MethodDef.size()) {
-            // MethodDef: parent is its enclosing TypeDef.
+            // MethodDef: parent is its enclosing TypeDef. Derive the TypeKind
+            // from the TypeDef row (flags + base) so a delegate constructor's
+            // declaring type resolves to Kind == Delegate, etc.
             auto m = impl_->db->MethodDef[row - 1];
             auto p = m.Parent();
-            return MakeTypeRef(p.TypeNamespace(), p.TypeName(), 0);
+            return MakeTypeRefFromTypeDef(p);
         }
         if (table == 0x0A && row && row <= impl_->db->MemberRef.size()) {
             // MemberRef: parent is a TypeRef / TypeDef / TypeSpec (or a
@@ -448,11 +450,11 @@ ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::ResolveMethodDeclaringType
             using MRP = winmd::reader::MemberRefParent;
             if (parent.type() == MRP::TypeRef) {
                 auto t = parent.TypeRef();
-                return MakeTypeRef(t.TypeNamespace(), t.TypeName(), 0);
+                return MakeTypeRefFromTypeRef(t);
             }
             if (parent.type() == MRP::TypeDef) {
                 auto t = parent.TypeDef();
-                return MakeTypeRef(t.TypeNamespace(), t.TypeName(), 0);
+                return MakeTypeRefFromTypeDef(t);
             }
             if (parent.type() == MRP::TypeSpec) {
                 auto ts = parent.get_row<winmd::reader::TypeSpec>();
