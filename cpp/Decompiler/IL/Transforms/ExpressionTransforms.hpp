@@ -57,7 +57,8 @@
 // Nullable<T>.GetValueOrDefault(a, b) -> a ?? b fold is now ported) /
 // VisitNewObj / VisitLdObj / VisitLdObjIfRef / VisitStObj / VisitStLoc
 // (TransformAssignment.HandleCompoundAssign) / the remaining VisitIfInstruction
-// pieces (NullableLifting, UserDefinedLogic,
+// pieces (the full NullableLifting Run(IfInstruction)/Run(BinaryNumericInstruction)
+// lift machinery + UserDefinedLogic,
 // TransformDynamicAddAssignOrRemoveAssign) / HandleSwitchExpression (needs
 // SwitchExpressions setting + SwitchInstruction guards) / VisitDynamic* /
 // VisitTryCatchHandler -- each needs further infrastructure (AddressOf,
@@ -100,6 +101,19 @@ private:
     // `comp.unsigned(left > 0)` / `comp.unsigned(left <= 0)` normalization.
     // Returns true if a rewrite fired (the node was mutated and re-visited).
     bool VisitCompTailRewrites(Comp* comp);
+
+    // Port of NullableLiftingTransform.Run(Comp comp): the VS2022.10 / Roslyn 4.10.0
+    // optimization that turns `a == 42` into `a.GetValueOrDefault() == 42`
+    // (no HasValue check) is recognised and lifted back to `comp.lifted[C#](a ==
+    // 42)`. A non-lifted equality/inequality whose one side is
+    // `call GetValueOrDefault(arg)` on System.Nullable<T> and whose other side is
+    // a non-zero integer constant has the GetValueOrDefault call replaced by
+    // `ldobj Nullable<T>(arg)` and is marked C#-lifted. Runs after the head
+    // rewrites (which handle the value==0 case as logic.not / comp(!=0)=>x) and
+    // before recursing into the operands, matching the C# VisitComp order. Gated
+    // on LiftNullables (the C# `context.Settings.LiftNullables`). A Comp is always
+    // a value, so this is a clean child-slot swap (no block-model adaptation).
+    void RunCompNullableLift(Comp* comp);
 
     // VisitIfInstruction: visit the arms, run HandleConditionalOperator, run the
     // logic.and/or canonicalization, then visit the condition. Adapted to the

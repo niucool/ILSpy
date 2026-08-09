@@ -36,6 +36,7 @@
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/PrimitiveType.hpp"
 #include "Decompiler/IL/StackType.hpp"
 #include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
@@ -49,6 +50,26 @@ namespace {
 bool IsLdcI4(const ILInstruction* inst, int value) {
     if (!inst || inst->Op != OpCode::LdcI4) return false;
     return static_cast<const LdcI4*>(inst)->Value == value;
+}
+
+// Match an integer constant (LdcI4 or LdcI8), reporting its value as a long.
+// Port of ILInstruction.MatchLdcI(out long): the C# additionally unwraps
+// SignExtend / ZeroExtend-from-I4 convs around the constant; this port's reader
+// does not wrap ldc constants in conv, so the plain LdcI4/LdcI8 cases cover the
+// NullableLifting Run(Comp) inputs (the constant the `a == 42` optimization
+// emits is a bare ldc.i4 for Nullable<int> / ldc.i8 for Nullable<long>). Mirrors
+// the SwitchAnalysis.cpp MatchLdcI (file-local there for the same reason).
+bool MatchLdcI(const ILInstruction* inst, long long& val) {
+    if (!inst) return false;
+    if (inst->Op == OpCode::LdcI4) {
+        val = static_cast<const LdcI4*>(inst)->Value;
+        return true;
+    }
+    if (inst->Op == OpCode::LdcI8) {
+        val = static_cast<const LdcI8*>(inst)->Value;
+        return true;
+    }
+    return false;
 }
 
 // Port of ILInstruction.UnwrapConv(kind): if inst is a Conv of the requested
@@ -231,10 +252,22 @@ void ExpressionTransforms::Visit(ILInstruction* inst) {
     if (inst->Op == OpCode::Comp) {
         auto* comp = static_cast<Comp*>(inst);
         if (VisitCompHeadRewrites(comp)) return;  // rewritten + re-visited
+        // NullableLiftingTransform.Run(comp) -- the C# VisitComp runs it after the
+        // head rewrites and before base.VisitComp. The value==0 case is handled by
+        // the head rewrites (logic.not / comp(!=0)=>x); RunCompNullableLift only
+        // fires for a non-zero constant, so the two are disjoint.
+        RunCompNullableLift(comp);
         // base.VisitComp: recurse into the operands (children visited before the
-        // tail rewrites, matching the C# order).
+        // tail rewrites, matching the C# order). After RunCompNullableLift the
+        // operands may be the freshly-built ldobj + the constant.
         Visit(comp->Left.get());
         Visit(comp->Right.get());
+        // The C# `if (inst.IsLifted) return;` after base.VisitComp skips the tail
+        // rewrites (FixComparisonKindLdNull / unsigned normalization / ldlen) for
+        // a lifted comp. A RunCompNullableLift-produced comp is an eq/ne lifted comp,
+        // so the unsigned > 0 / <= 0 tail rewrite (GT/LE only) would not fire on it
+        // anyway, but the guard is faithful and forward-compatible.
+        if (comp->IsLifted()) return;
         if (VisitCompTailRewrites(comp)) return;  // rewritten + re-visited
         return;
     }
@@ -336,6 +369,50 @@ bool ExpressionTransforms::VisitCompTailRewrites(Comp* comp) {
         return true;
     }
     return false;
+}
+
+void ExpressionTransforms::RunCompNullableLift(Comp* comp) {
+    // Port of NullableLiftingTransform.Run(Comp comp): the VS2022.10 / Roslyn
+    // 4.10.0 optimization that turns `a == 42` into `a.GetValueOrDefault() == 42`
+    // without any HasValue check is recognised and lifted back to
+    // `comp.lifted[C#](a == 42)`. The comp must be a non-lifted equality/
+    // inequality whose one side is `call GetValueOrDefault(arg)` on
+    // System.Nullable<T> and whose other side is a non-zero integer constant.
+    // The GetValueOrDefault call is replaced by `ldobj Nullable<T>(arg)` and the
+    // comp is marked C#-lifted. Gated on LiftNullables (the C#
+    // `context.Settings.LiftNullables`).
+    if (!comp) return;
+    if (!settings_ || !settings_->LiftNullables) return;
+    if (comp->IsLifted()) return;
+    if (!IsEqualityOrInequality(comp->Kind)) return;
+
+    long long value = 0;
+    // Left is GetValueOrDefault, Right is a non-zero constant.
+    ILInstruction* arg = nullptr;
+    if (NullableLiftingTransform::MatchGetValueOrDefault(comp->Left.get(), arg) &&
+        MatchLdcI(comp->Right.get(), value) && value != 0) {
+        auto* call = static_cast<Call*>(comp->Left.get());
+        // Capture the declaring type (a shared_ptr copy) before the call is
+        // destroyed -- the precondition-before-mutation discipline: TakeChild
+        // detaches the argument, then SetChild destroys the old Left (the call,
+        // now with a null Arguments[0]). The LdObj loads Nullable<T> from the
+        // argument's address (the C# `new LdObj(arg, call.Method.DeclaringType)`).
+        TypeSystem::ITypePtr declaringType = call->DeclaringType;
+        auto argOwned = call->TakeChild(0);
+        comp->LiftingKind = ComparisonLiftingKind::CSharp;
+        comp->SetChild(0, std::make_unique<LdObj>(std::move(argOwned), declaringType));
+        return;
+    }
+    // Right is GetValueOrDefault, Left is a non-zero constant.
+    if (NullableLiftingTransform::MatchGetValueOrDefault(comp->Right.get(), arg) &&
+        MatchLdcI(comp->Left.get(), value) && value != 0) {
+        auto* call = static_cast<Call*>(comp->Right.get());
+        TypeSystem::ITypePtr declaringType = call->DeclaringType;
+        auto argOwned = call->TakeChild(0);
+        comp->LiftingKind = ComparisonLiftingKind::CSharp;
+        comp->SetChild(1, std::make_unique<LdObj>(std::move(argOwned), declaringType));
+        return;
+    }
 }
 
 void ExpressionTransforms::VisitConv(Conv* inst) {

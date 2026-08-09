@@ -550,6 +550,7 @@ implemented and green here. Everything else follows the phase plan in
   The `Comp` nullable-lifting model (the foundation the next in-order
   `NullableLiftingStatementTransform` -- and the ExpressionTransforms
   VisitComp nullable-lifting pieces -- need) is now in place: the Comp node
+  VisitComp nullable-lifting pieces -- need) is now in place: the Comp node
   carries `LiftingKind` (a `ComparisonLiftingKind` None/CSharp/
   ThreeValuedLogic enum faithful to Comp.cs), `InputType` (the underlying input
   StackType -- the operands' ResultType for an ordinary comparison, the inner
@@ -572,7 +573,20 @@ implemented and green here. Everything else follows the phase plan in
   the full `NullableLiftingStatementTransform` (the `RunStatements` entry +
   `Lift`/`LiftNormal`/`LiftCSharp*` + the bool? `v == true` folds + the
   `ThreeValuedBoolAnd/Or` nodes + the `NullPropagationTransform` path `Lift`
-  consults first) is the next in-order target the foundation unblocks.
+  consults first) is the next in-order target the foundation unblocks; the
+  simplest entry point -- `NullableLiftingTransform.Run(Comp comp)`, the
+  ExpressionTransforms.VisitComp `a.GetValueOrDefault() == const` (const != 0)
+  -> `comp.lifted[C#](a == const)` lift -- is now wired in (the first piece of
+  that machinery to land). It recognises the VS2022.10 / Roslyn 4.10.0
+  optimization that turns `a == 42` into `a.GetValueOrDefault() == 42` without a
+  HasValue check and lifts it back: a non-lifted equality/inequality whose one
+  side is `call GetValueOrDefault(arg)` on Nullable<T> and whose other side is a
+  non-zero integer constant has that side replaced by `ldobj Nullable<T>(arg)`
+  and is marked C#-lifted. Gated on `LiftNullables`. A Comp is always a value, so
+  this is a clean child-slot swap (no block-model adaptation). It fires 0 times
+  on the .NET Framework 4 legacy-csc corpus (a Roslyn-4.10 codegen pattern) --
+  ported for faithfulness (the hand-built tests verify the lift, the sweep
+  verifies the per-method monotone invariant).
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
   walk + a corpus probe; the async/iterator state machines

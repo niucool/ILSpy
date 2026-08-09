@@ -60,6 +60,7 @@
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
@@ -1618,6 +1619,40 @@ int CountGetValueOrDefaultTwoArg(ILFunction& fn) {
     return n;
 }
 
+// Count C#-lifted Comp nodes (Comp.IsLifted() -- LiftingKind != None). The
+// RunCompNullableLift fold is monotone non-decreasing for this count (each fold
+// marks one comp C#-lifted; nothing in this subset un-lifts one). Used by the
+// sweep to confirm the transform does not regress.
+int CountLiftedComps(ILFunction& fn) {
+    int n = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::Comp && static_cast<Comp*>(inst)->IsLifted()) ++n;
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return n;
+}
+
+// Count 1-arg `call GetValueOrDefault(arg)` calls on System.Nullable<T> -- the
+// pattern RunCompNullableLift matches on one side of an eq/ne comp and rewrites
+// to `ldobj Nullable<T>(arg)` (marking the comp C#-lifted). The fold is monotone
+// non-increasing for this count (each fold removes one such call from inside a
+// comp; nothing in this subset creates one). Used by the sweep.
+int CountGetValueOrDefaultOneArg(ILFunction& fn) {
+    int n = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::Call) {
+            ILInstruction* a = nullptr;
+            if (NullableLiftingTransform::MatchGetValueOrDefault(inst, a)) ++n;
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return n;
+}
+
 // VisitCall folds `call Nullable<T>.GetValueOrDefault(nullableValue, fallback)`
 // (a pure fallback) into a NullCoalescingInstruction (NullableWithValueFallback)
 // whose ValueInst is `ldobj Nullable<T>(nullableValue)` and FallbackInst is the
@@ -1794,6 +1829,250 @@ TEST(ExpressionTransforms, VisitCallRejectsNullDeclaringType) {
         << "the call must stay when the declaring type is null";
 }
 
+// RunCompNullableLift (NullableLiftingTransform.Run(Comp)) lifts the
+// VS2022.10/Roslyn 4.10 `a.GetValueOrDefault() == const` (no HasValue check)
+// optimization back to a C#-lifted `comp.lifted[C#](a == const)`. A non-lifted
+// equality whose Left is `call GetValueOrDefault(arg)` on Nullable<T> and whose
+// Right is a non-zero ldc.i4 has Left replaced by `ldobj Nullable<T>(arg)` and
+// is marked C#-lifted. The comp is a value (wrapped in a stloc, not in an if
+// condition slot) so the head rewrites (logic.not / comp(!=0)=>x, which require
+// Right == 0) do not fire and RunCompNullableLift is reached.
+TEST(ExpressionTransforms, RunCompNullableLiftFoldsGetValueOrDefaultEqualToConst) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    // call Nullable<int>::GetValueOrDefault(ldloca v) -- the 1-arg accessor.
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    // comp(eq, call GetValueOrDefault(ldloca v), ldc.i4 5)
+    auto comp = std::make_unique<Comp>(std::move(call), std::make_unique<LdcI4>(5),
+                                      ComparisonKind::Equality);
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(comp)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountLiftedComps(*fn), 0);
+    ASSERT_EQ(CountGetValueOrDefaultOneArg(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 1) << "the comp must be marked C#-lifted";
+    EXPECT_EQ(CountGetValueOrDefaultOneArg(*fn), 0)
+        << "the GetValueOrDefault call must be folded away";
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp) << "the stloc still wraps the comp";
+    auto* c = static_cast<Comp*>(st->Value.get());
+    EXPECT_EQ(c->LiftingKind, ComparisonLiftingKind::CSharp);
+    EXPECT_EQ(c->Kind, ComparisonKind::Equality);
+    // Left is now `ldobj Nullable<int>(ldloca v)`.
+    ASSERT_EQ(c->Left->Op, OpCode::LdObj);
+    auto* ldObj = static_cast<LdObj*>(c->Left.get());
+    ASSERT_EQ(ldObj->Target->Op, OpCode::LdLoca)
+        << "the ldobj loads the nullable from the receiver's address";
+    EXPECT_EQ(static_cast<LdLoca*>(ldObj->Target.get())->Variable.get(), v.get());
+    // Right is still the ldc.i4 5.
+    ASSERT_EQ(c->Right->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(c->Right.get())->Value, 5);
+}
+
+// The constant may be on the Left and the GetValueOrDefault call on the Right;
+// RunCompNullableLift's second branch handles `comp(const == a.GetValueOrDefault())`
+// and replaces the Right operand with `ldobj Nullable<T>(arg)`.
+TEST(ExpressionTransforms, RunCompNullableLiftFoldsConstEqualToGetValueOrDefault) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    // comp(eq, ldc.i4 5, call GetValueOrDefault(ldloca v))
+    auto comp = std::make_unique<Comp>(std::make_unique<LdcI4>(5), std::move(call),
+                                      ComparisonKind::Equality);
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(comp)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 1);
+    EXPECT_EQ(CountGetValueOrDefaultOneArg(*fn), 0);
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    auto* c = static_cast<Comp*>(st->Value.get());
+    EXPECT_EQ(c->LiftingKind, ComparisonLiftingKind::CSharp);
+    // Left is still the ldc.i4 5.
+    ASSERT_EQ(c->Left->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(c->Left.get())->Value, 5);
+    // Right is now `ldobj Nullable<int>(ldloca v)`.
+    ASSERT_EQ(c->Right->Op, OpCode::LdObj);
+    ASSERT_EQ(static_cast<LdObj*>(c->Right.get())->Target->Op, OpCode::LdLoca);
+}
+
+// RunCompNullableLift matches ldc.i8 too (a Nullable<long> comparison). MatchLdcI
+// covers LdcI4 and LdcI8; the constant 42 is non-zero so the lift fires.
+TEST(ExpressionTransforms, RunCompNullableLiftFoldsLdcI8Constant) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int64));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int64);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    // comp(eq, call GetValueOrDefault(ldloca v), ldc.i8 42)
+    auto comp = std::make_unique<Comp>(std::move(call), std::make_unique<LdcI8>(42),
+                                      ComparisonKind::Equality);
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(comp)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 1) << "the ldc.i8 constant lifts too";
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    auto* c = static_cast<Comp*>(st->Value.get());
+    ASSERT_EQ(c->Left->Op, OpCode::LdObj);
+    ASSERT_EQ(c->Right->Op, OpCode::LdcI8);
+    EXPECT_EQ(static_cast<LdcI8*>(c->Right.get())->Value, 42);
+}
+
+// RunCompNullableLift rejects a zero constant: the C# only lifts a non-zero
+// constant (`value != 0`), because `a.GetValueOrDefault() == 0` is NOT the same
+// as a lifted `a == 0` (a null nullable has GetValueOrDefault == 0 but the lifted
+// `a == 0` is false). The comp is not in a condition slot (it is a stloc value)
+// and Left is a Call (not a Comp), so neither head rewrite fires and the comp
+// stays non-lifted.
+TEST(ExpressionTransforms, RunCompNullableLiftRejectsZeroConstant) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    // comp(ne, call GetValueOrDefault(ldloca v), ldc.i4 0) -- Inequality, not in a
+    // condition slot, Left a Call (so the comp(!=0)=>x head rewrite does not fire).
+    auto comp = std::make_unique<Comp>(std::move(call), std::make_unique<LdcI4>(0),
+                                      ComparisonKind::Inequality);
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(comp)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 0) << "a zero constant must not lift";
+    EXPECT_EQ(CountGetValueOrDefaultOneArg(*fn), 1)
+        << "the GetValueOrDefault call must stay";
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp);
+    auto* c = static_cast<Comp*>(st->Value.get());
+    EXPECT_FALSE(c->IsLifted());
+    ASSERT_EQ(c->Left->Op, OpCode::Call) << "the call must stay (no lift)";
+}
+
+// RunCompNullableLift only fires for equality/inequality (the C# `comp.Kind
+// .IsEqualityOrInequality()` guard). A LessThan (or any relational) comparison is
+// left alone.
+TEST(ExpressionTransforms, RunCompNullableLiftRejectsRelationalKind) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    // comp(lt, call GetValueOrDefault(ldloca v), ldc.i4 5)
+    auto comp = std::make_unique<Comp>(std::move(call), std::make_unique<LdcI4>(5),
+                                      ComparisonKind::LessThan);
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(comp)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 0) << "a relational kind must not lift";
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp);
+    ASSERT_EQ(static_cast<Comp*>(st->Value.get())->Left->Op, OpCode::Call);
+}
+
+// RunCompNullableLift rejects a GetValueOrDefault whose declaring type is not
+// Nullable<T> (MatchGetValueOrDefault returns false): the call stays and the
+// comp is not lifted.
+TEST(ExpressionTransforms, RunCompNullableLiftRejectsNonNullableDeclaringType) {
+    auto v = MakeLocal("v");
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto call = std::make_unique<Call>("System.Int32::GetValueOrDefault");
+    call->DeclaringType = std::make_shared<KnownType>(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    auto comp = std::make_unique<Comp>(std::move(call), std::make_unique<LdcI4>(5),
+                                      ComparisonKind::Equality);
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(comp)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 0);
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(static_cast<Comp*>(st->Value.get())->Left->Op, OpCode::Call);
+}
+
+// RunCompNullableLift rejects an already-lifted comp (the C# `!comp.IsLifted`
+// guard): a C#-lifted comp is not re-lifted, and its operands are not rewritten.
+TEST(ExpressionTransforms, RunCompNullableLiftRejectsAlreadyLiftedComp) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    // A C#-lifted comp (the 6-arg lifted constructor) with the call still as Left.
+    auto comp = std::make_unique<Comp>(std::move(call), std::make_unique<LdcI4>(5),
+                                      ComparisonKind::Equality,
+                                      ComparisonLiftingKind::CSharp, StackType::I4);
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(comp)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountLiftedComps(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 1) << "no new lift on an already-lifted comp";
+    EXPECT_EQ(CountGetValueOrDefaultOneArg(*fn), 1)
+        << "the call must stay (already-lifted comps are not re-lifted)";
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    auto* c = static_cast<Comp*>(st->Value.get());
+    EXPECT_EQ(c->LiftingKind, ComparisonLiftingKind::CSharp);
+    ASSERT_EQ(c->Left->Op, OpCode::Call) << "the operands must not be rewritten";
+}
+
+// RunCompNullableLift does not fire when the LiftNullables setting is off (the
+// C# `context.Settings.LiftNullables` gate): the comp stays non-lifted with the
+// call.
+TEST(ExpressionTransforms, RunCompNullableLiftNoOpWhenLiftNullablesOff) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    auto comp = std::make_unique<Comp>(std::move(call), std::make_unique<LdcI4>(5),
+                                      ComparisonKind::Equality);
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(comp)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    StatementTransform st;
+    st.AddChild(std::make_unique<ExpressionTransforms>());
+    ILTransformContext ctx;
+    ctx.Settings.LiftNullables = false;
+    st.Run(*fn, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 0) << "LiftNullables=false gates the lift";
+    EXPECT_EQ(CountGetValueOrDefaultOneArg(*fn), 1);
+    auto* stLoc = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(static_cast<Comp*>(stLoc->Value.get())->Left->Op, OpCode::Call);
+}
+
+
 // On the real mscorlib corpus, running the full pre-pipeline through the
 // StatementTransform{ILInlining, ExpressionTransforms} (the GetILTransforms()
 // position) preserves the ILAst invariant and the HandleConditionalOperator
@@ -1813,6 +2092,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
     int totalFolds = 0;
     int totalArrayIndexConvDrops = 0;
     int totalNullCoalescingFolds = 0;
+    int totalLiftedCompFolds = 0;
     ILTransformContext ctx;
     for (const auto& m : f.MethodDefs()) {
         if (m.RVA == 0) continue;
@@ -1827,6 +2107,8 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int maskedShiftsBefore = CountMaskedShifts(*fn);
         int getValOrDefaultBefore = CountGetValueOrDefaultTwoArg(*fn);
         int nullCoalescingBefore = CountNullCoalescing(*fn);
+        int liftedCompsBefore = CountLiftedComps(*fn);
+        int gvo1Before = CountGetValueOrDefaultOneArg(*fn);
         {
             StatementTransform st;
             st.AddChild(std::make_unique<ILInlining>());
@@ -1841,6 +2123,8 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int maskedShiftsAfter = CountMaskedShifts(*fn);
         int getValOrDefaultAfter = CountGetValueOrDefaultTwoArg(*fn);
         int nullCoalescingAfter = CountNullCoalescing(*fn);
+        int liftedCompsAfter = CountLiftedComps(*fn);
+        int gvo1After = CountGetValueOrDefaultOneArg(*fn);
         // The ternary fold is monotone non-decreasing (each fold creates a
         // StLoc-if; nothing in this subset removes one). The VisitComp rewrites
         // (comp(!=0)->x, logic.not push, unsigned normalization) do not create
@@ -1894,9 +2178,21 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         // not asserted -- the fold may fire 0 times on this corpus).
         EXPECT_LE(getValOrDefaultAfter, getValOrDefaultBefore);
         EXPECT_GE(nullCoalescingAfter, nullCoalescingBefore);
+        // The RunCompNullableLift fold (`a.GetValueOrDefault() == const` (const
+        // != 0) -> `comp.lifted[C#](a == const)`) is monotone non-decreasing for
+        // the C#-lifted Comp count (each fold marks one comp lifted; nothing in
+        // this subset un-lifts one) and monotone non-increasing for the 1-arg
+        // GetValueOrDefault-call count (each fold removes one such call from a
+        // comp; nothing in this subset creates one). The fold is the
+        // VS2022.10/Roslyn 4.10 optimization, which the .NET Framework 4
+        // legacy-csc corpus does not emit, so the fold may fire 0 times on it;
+        // the per-method monotone invariant is the deterministic correctness gate.
+        EXPECT_GE(liftedCompsAfter, liftedCompsBefore);
+        EXPECT_LE(gvo1After, gvo1Before);
         totalFolds += (after - before);
         totalArrayIndexConvDrops += (arrayIdxConvBefore - arrayIdxConvAfter);
         totalNullCoalescingFolds += (nullCoalescingAfter - nullCoalescingBefore);
+        totalLiftedCompFolds += (liftedCompsAfter - liftedCompsBefore);
         if (processed >= 8000) break;
     }
     EXPECT_GT(processed, 5000);
@@ -1917,4 +2213,9 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
     // (System.Nullable<T> IS in mscorlib, so `a ?? b` over a nullable may occur).
     // The count is reported (not asserted) -- a non-zero total is informative.
     (void)totalNullCoalescingFolds;
+    // The RunCompNullableLift fold is the VS2022.10/Roslyn 4.10 optimization,
+    // which the .NET Framework 4 legacy-csc corpus does not emit; the count is
+    // reported (not asserted) -- a non-zero total is informative (it fires on
+    // Roslyn-compiled / modern .NET).
+    (void)totalLiftedCompFolds;
 }
