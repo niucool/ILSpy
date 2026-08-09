@@ -61,15 +61,17 @@ implemented and green here. Everything else follows the phase plan in
   `if (arg < 0) { throw }` with no gotos. `InlineReturnTransform` duplicates
   shared return blocks; `StObjToStLoc` turns `*(&V) = value` into `V = value`;
   `AssignVariableNames` renames `V_0` to type-inferred names (`num`, `text`,
-  ...); `RemoveRedundantReturn` drops trailing `return;`. Parameter names and
+  ...); `RemoveRedundantReturn` drops trailing `return;`; `RemoveInfeasiblePath`
+  redirects a constant-store-and-test around the infeasible arm (drops the dead
+  store and the branch straight to the feasible exit). Parameter names and
   string literals (`ldstr`) now come from the metadata (Param table / #US heap).
-  9 of ~40 transforms ported. The CLI applies CFS + StObjToStLoc + ILInlining +
-  InlineReturnTransform + CFS + LoopDetection + ConditionDetection +
-  AssignVariableNames + RemoveRedundantReturn before the C# seed. Next per
-  `GetILTransforms()`: SplitVariables (needs reaching-definitions dataflow),
-  DetectExitPoints + the full ConditionDetection (multi-pred join blocks),
-  HighLevelLoopTransform (while/for), TransformAssignment, the
-  async/iterator state machines, ...
+  10 of ~40 transforms ported. The CLI applies CFS + StObjToStLoc + ILInlining +
+  InlineReturnTransform + RemoveInfeasiblePath + CFS + LoopDetection +
+  ConditionDetection + AssignVariableNames + RemoveRedundantReturn before the
+  C# seed. Next per `GetILTransforms()`: SplitVariables (needs
+  reaching-definitions dataflow), DetectExitPoints + the full ConditionDetection
+  (multi-pred join blocks), HighLevelLoopTransform (while/for),
+  TransformAssignment, the async/iterator state machines, ...
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end. It now produces readable C#: real parameter names (Param

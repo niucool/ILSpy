@@ -30,6 +30,7 @@
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Transforms/InlineReturnTransform.hpp"
+#include "Decompiler/IL/Transforms/RemoveInfeasiblePathTransform.hpp"
 #include "Decompiler/IL/Transforms/StObjToStLoc.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
@@ -194,6 +195,10 @@ int main(int argc, char** argv) {
                 ILSpy::Decompiler::IL::StObjToStLoc().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::ILInlining().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::InlineReturnTransform().Run(*fn, transformContext);
+                // Remove infeasible paths: a block that stores a known constant
+                // to a stack slot and branches to a multi-pred test block skips
+                // the test (redirected to the feasible exit; dead store dropped).
+                ILSpy::Decompiler::IL::RemoveInfeasiblePathTransform().Run(*fn, transformContext);
                 // Re-run CFS so the duplicated 1-pred return blocks merge and
                 // the single-definition variable inlines to `leave (expr)`.
                 ILSpy::Decompiler::IL::ControlFlowSimplification().Run(*fn, transformContext);

@@ -18,4 +18,5 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/InlineReturnTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/AssignVariableNames.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/StObjToStLoc.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/RemoveInfeasiblePathTransform.cpp
 )
