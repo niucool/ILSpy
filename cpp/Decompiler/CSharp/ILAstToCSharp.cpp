@@ -45,6 +45,7 @@
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/LockInstruction.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/PinnedRegion.hpp"
@@ -370,6 +371,12 @@ private:
                 if (tf.TryBlock) EmitBraced(*tf.TryBlock, indent); else Line(indent, "{ }");
                 Line(indent, "finally");
                 if (tf.FinallyBlock) EmitBraced(*tf.FinallyBlock, indent); else Line(indent, "{ }");
+                return;
+            }
+            case OpCode::LockInstruction: {
+                const auto& lk = static_cast<const LockInstruction&>(inst);
+                Line(indent, "lock (" + (lk.OnExpression ? Expr(*lk.OnExpression) : std::string("?")) + ")");
+                if (lk.Body) EmitBraced(*lk.Body, indent); else Line(indent, "{ }");
                 return;
             }
             case OpCode::TryFault: {

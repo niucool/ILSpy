@@ -76,6 +76,10 @@ struct ILTransformSettings {
     // DecompilerSettings.RelationalPatterns -- default true. MatchInstruction.
     // IsPatternMatch gates comparison kinds other than == / != on this.
     bool RelationalPatterns = true;
+    // Whether to detect `lock` statements (the Monitor.Enter/Exit try/finally
+    // pattern). DecompilerSettings.LockStatement -- a C# 1.0 setting, default
+    // true. Gates LockTransform.
+    bool LockStatement = true;
 };
 
 class ILTransformContext {

@@ -36,6 +36,7 @@
 #include "Decompiler/IL/Transforms/StObjToStLoc.hpp"
 #include "Decompiler/IL/Transforms/SwitchOnNullableTransform.hpp"
 #include "Decompiler/IL/Transforms/PatternMatchingTransform.hpp"
+#include "Decompiler/IL/Transforms/LockTransform.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
 #include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
@@ -266,6 +267,16 @@ int main(int argc, char** argv) {
                 // sub-patterns (`expr is C { P: var x }`) are deferred.
                 ILSpy::Decompiler::IL::PatternMatchingTransform().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::ConditionDetection().Run(*fn, transformContext);
+                // LockTransform: detect the Monitor.Enter/Exit try/finally pattern
+                // and fold it into a `lock (expr) { body }`. Runs after
+                // ConditionDetection in the BlockILTransform post-order set (per
+                // GetILTransforms()), by which point CFS has merged the EH wrapper
+                // block (TryFinally alone) with the preceding block (stloc + call
+                // Enter), so the stloc/call/TryFinally sit consecutively in one
+                // block. Gated on the LockStatement setting (default true). This
+                // iteration ports the no-flag MCS/V2 shapes; the flag-based V4 /
+                // Roslyn shapes are deferred.
+                ILSpy::Decompiler::IL::LockTransform().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::AssignVariableNames().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::RemoveRedundantReturn().Run(*fn, transformContext);
                 fn->CheckInvariant(ILSpy::Decompiler::IL::ILPhase::Normal);
