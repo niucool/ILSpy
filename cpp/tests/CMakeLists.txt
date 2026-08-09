@@ -29,6 +29,7 @@ add_executable(ilspy_tests
     Decompiler/IL/ConditionDetection_Test.cpp
     Decompiler/IL/InlineReturnTransform_Test.cpp
     Decompiler/IL/AssignVariableNames_Test.cpp
+    Decompiler/IL/RemoveRedundantReturn_Test.cpp
 )
 target_link_libraries(ilspy_tests PRIVATE
     ILSpy::ilspy

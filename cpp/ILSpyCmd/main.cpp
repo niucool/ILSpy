@@ -26,6 +26,7 @@
 #include "Decompiler/IL/ControlFlow/ControlFlowSimplification.hpp"
 #include "Decompiler/IL/ControlFlow/ConditionDetection.hpp"
 #include "Decompiler/IL/ControlFlow/LoopDetection.hpp"
+#include "Decompiler/IL/ControlFlow/RemoveRedundantReturn.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Transforms/InlineReturnTransform.hpp"
@@ -197,6 +198,7 @@ int main(int argc, char** argv) {
                 ILSpy::Decompiler::IL::LoopDetection().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::ConditionDetection().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::AssignVariableNames().Run(*fn, transformContext);
+                ILSpy::Decompiler::IL::RemoveRedundantReturn().Run(*fn, transformContext);
                 fn->CheckInvariant(ILSpy::Decompiler::IL::ILPhase::Normal);
                 std::string returnType = "void";
                 std::string paramDecl;
