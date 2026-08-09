@@ -111,6 +111,11 @@ std::string TypeDisplayName(const TypeSystem::ITypePtr& type) {
 // unknown type (e.g. an untyped stack slot).
 std::string CSharpTypeName(const TypeSystem::ITypePtr& type) {
     if (!type) return "var";
+    // An array: the element type's C# name + "[]" (or ",," for multi-rank).
+    if (auto* a = dynamic_cast<const TypeSystem::ArrayType*>(type.get()))
+        return CSharpTypeName(a->Element()) + (a->IsSzArray() ? "[]" : "[,]");
+    if (auto* byref = dynamic_cast<const TypeSystem::ByReferenceType*>(type.get()))
+        return CSharpTypeName(byref->Element());
     if (auto* k = dynamic_cast<const TypeSystem::KnownType*>(type.get())) {
         switch (k->Code()) {
             case TypeSystem::KnownTypeCode::Boolean: return "bool";
