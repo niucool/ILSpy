@@ -33,6 +33,7 @@
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/CastClass.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Instructions/Conv.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
@@ -353,6 +354,24 @@ TEST(ILAstToCSharp, ArrayAndLengthExpressions) {
     std::string text = ILAstToCSharp(*fn, "int", "M", "int[] arg_1");
     EXPECT_NE(text.find("    var V_0 = arg_1.Length;\n"), std::string::npos) << text;
     EXPECT_NE(text.find("    return arg_1[V_0];\n"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, ConvI4OverLdLenIsImplicit) {
+    // conv.i4(ldlen(arr)) is the IL for `arr.Length`; the cast to signed i4 is
+    // implicit in C#, so the seed renders just `arr.Length` (no `(int)(...)`).
+    auto arg1 = MakeVar(VariableKind::Parameter, "arg_1", 1);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
+        std::make_unique<Conv>(
+            std::make_unique<LdLen>(std::make_unique<LdLoc>(arg1)), StackType::I4)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "int[] arg_1");
+    EXPECT_NE(text.find("    var V_0 = arg_1.Length;\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("(int)"), std::string::npos) << "no redundant cast around ldlen";
 }
 
 TEST(ILAstToCSharp, ConstantTrueCatchFilterIsOmitted) {
