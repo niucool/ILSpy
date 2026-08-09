@@ -34,6 +34,11 @@ class ILInstruction;
 // Settings the IL transforms consult (a subset of DecompilerSettings for now).
 struct ILTransformSettings {
     bool RemoveDeadStores = false;  // DecompilerSettings.RemoveDeadStores (default false)
+    // Sort switch sections by their label value instead of by IL offset. The C#
+    // default is false (sort by branch-target IL offset, preserving the original
+    // case order); true is a diffing aid for obfuscated assemblies. Used by
+    // SwitchDetection.SortSwitchSections.
+    bool SortSwitchSections = false;
 };
 
 class ILTransformContext {

@@ -16,6 +16,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/DetectPinnedRegions.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/RemoveRedundantReturn.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/SwitchAnalysis.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ControlFlow/SwitchDetection.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/ILInlining.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/InlineReturnTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/AssignVariableNames.cpp

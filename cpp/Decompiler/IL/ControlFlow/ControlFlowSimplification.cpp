@@ -17,6 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 #include "Decompiler/IL/ControlFlow/ControlFlowSimplification.hpp"
+#include "Decompiler/IL/ControlFlow/SwitchDetection.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
@@ -331,6 +332,12 @@ void ControlFlowSimplification::Run(ILFunction& function, ILTransformContext& co
         if (!block) return;
         RemoveDeadStackStores(block, context);
         InlineVariableInReturnBlock(block, context);
+        // 1st pass SimplifySwitchInstruction before SimplifyBranchChains() starts
+        // duplicating return instructions (matches the C# CFS order): de-dup
+        // sections branching to the same block, move Add/Sub offsets into the
+        // labels, and sort the sections of any SwitchInstruction the reader
+        // emitted from a `switch` opcode.
+        SwitchDetection::SimplifySwitchInstruction(block, context);
     });
 
     std::vector<std::unique_ptr<Block>> graveyard;
