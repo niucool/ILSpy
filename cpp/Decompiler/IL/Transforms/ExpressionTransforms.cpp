@@ -37,6 +37,7 @@
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/PrimitiveType.hpp"
 #include "Decompiler/IL/StackType.hpp"
@@ -233,23 +234,109 @@ bool ArmIsLdcI4(const ILInstruction* arm, int value) {
     return false;
 }
 
-// Build the C#-lifted Comp (`comp(kind, ldloc v, ldc.i4 constant)` lifted C#,
-// the D91 model) and replace the if with it, applying the block-model adaptation
-// (ReplaceWith for a sub-expression value, Add + SetFinal(Branch) for a block-
-// final if). The `ldloc v` loads the Nullable<bool>; the lifted comp checks
-// HasValue then compares the underlying Boolean (I4). Fresh LdLoc / LdcI4 nodes
-// (no ILRange in this port; the C# `.WithILRange(..)` is skipped). The Comp is a
-// value (not control flow), so the block-model adaptation follows FoldMatchTrue
-// False: a clean ReplaceWith when the if is a sub-expression value, or the Comp
-// becomes a non-terminal statement + a Branch to the next block replaces the
-// if-final when the if is a block's FinalInstruction (a Comp cannot be a block
-// final). Returns true if the if was replaced (the if is destroyed).
-bool FinishIfNullableLift(IfInstruction* iff, ComparisonKind kind,
-                         const ILVariablePtr& v, int constant) {
-    auto comp = std::make_unique<Comp>(
-        std::make_unique<LdLoc>(v),
-        std::make_unique<LdcI4>(constant),
-        kind, ComparisonLiftingKind::CSharp, StackType::I4);
+// Port of ILInstruction.MatchLdLoc(out ILVariable v): a bare LdLoc reports its
+// variable. This port has no Block-unwrapping here (the C# MatchLdLoc is a direct
+// match); the `&`/`|` on bool? arms are bare value arms (a sub-expression
+// value-if, the only shape the fold fires on -- a block-final if has Branch
+// arms), so a bare match is faithful. Mirrors the PatternMatchingTransform.cpp
+// file-local MatchLdLoc (kept file-local here for the same reason -- no shared
+// PatternMatching header in this port).
+bool MatchLdLoc(ILInstruction* inst, ILVariable*& v) {
+    v = nullptr;
+    if (!inst || inst->Op != OpCode::LdLoc) return false;
+    v = static_cast<LdLoc*>(inst)->Variable.get();
+    return v != nullptr;
+}
+
+// Port of ILInstruction.MatchLogicOr(out lhs, out rhs): an IfInstruction whose
+// TrueInst is `ldc.i4 1` ("if (a) ldc.i4 1 else b"); lhs = Condition, rhs =
+// FalseInst. The C# MatchLdcI4 is a bare match (the arms of a sub-expression
+// value-if are bare; ConditionDetection only reshapes block-final ifs). Used by
+// MatchThreeValuedLogicConditionPattern on the (possibly logic.not-peeled)
+// condition of the outer if.
+bool MatchLogicOr(ILInstruction* inst, ILInstruction*& lhs, ILInstruction*& rhs) {
+    lhs = nullptr;
+    rhs = nullptr;
+    if (!inst || inst->Op != OpCode::IfInstruction) return false;
+    auto* iff = static_cast<IfInstruction*>(inst);
+    if (!IsLdcI4(iff->TrueInst.get(), 1)) return false;
+    lhs = iff->Condition.get();
+    rhs = iff->FalseInst.get();
+    return true;
+}
+
+// Port of ILInstruction.MatchLogicAnd(out lhs, out rhs): an IfInstruction whose
+// FalseInst is `ldc.i4 0` ("if (a) b else ldc.i4 0"); lhs = Condition, rhs =
+// TrueInst. See MatchLogicOr for the bare-arm rationale.
+bool MatchLogicAnd(ILInstruction* inst, ILInstruction*& lhs, ILInstruction*& rhs) {
+    lhs = nullptr;
+    rhs = nullptr;
+    if (!inst || inst->Op != OpCode::IfInstruction) return false;
+    auto* iff = static_cast<IfInstruction*>(inst);
+    if (!IsLdcI4(iff->FalseInst.get(), 0)) return false;
+    lhs = iff->Condition.get();
+    rhs = iff->TrueInst.get();
+    return true;
+}
+
+// Port of NullableLiftingTransform.MatchThreeValuedLogicConditionPattern:
+// matches `nullable1.GetValueOrDefault() || (!nullable2.GetValueOrDefault() &&
+// !nullable1.HasValue)` -- a logic.or whose lhs is a 1-arg GetValueOrDefault on a
+// Nullable<bool> and whose rhs is a logic.and of `!nullable2.GetValueOrDefault()`
+// and `!nullable1.HasValue`. Reports nullable1/nullable2 (the ldloca-v
+// overload of MatchGetValueOrDefault). Each Nullable must be Nullable<bool>.
+// Returns true and sets nullable1/nullable2 on a full match.
+bool MatchThreeValuedLogicConditionPattern(ILInstruction* condition,
+                                            ILVariablePtr& nullable1,
+                                            ILVariablePtr& nullable2) {
+    nullable1.reset();
+    nullable2.reset();
+    ILInstruction* lhs = nullptr;
+    ILInstruction* rhs = nullptr;
+    if (!MatchLogicOr(condition, lhs, rhs)) return false;
+    if (!NullableLiftingTransform::MatchGetValueOrDefault(lhs, nullable1)) return false;
+    if (!nullable1 || !nullable1->Type) return false;
+    if (!NullableLiftingTransform::IsKnownType(
+            NullableLiftingTransform::GetUnderlyingTypeOfNullable(nullable1->Type.get()),
+            TypeSystem::KnownTypeCode::Boolean))
+        return false;
+    ILInstruction* andLhs = nullptr;
+    ILInstruction* andRhs = nullptr;
+    if (!MatchLogicAnd(rhs, andLhs, andRhs)) return false;
+    ILInstruction* arg = nullptr;
+    if (!MatchLogicNot(andLhs, arg)) return false;
+    if (!NullableLiftingTransform::MatchGetValueOrDefault(arg, nullable2)) return false;
+    if (!nullable2 || !nullable2->Type) return false;
+    if (!NullableLiftingTransform::IsKnownType(
+            NullableLiftingTransform::GetUnderlyingTypeOfNullable(nullable2->Type.get()),
+            TypeSystem::KnownTypeCode::Boolean))
+        return false;
+    ILInstruction* arg2 = nullptr;
+    if (!MatchLogicNot(andRhs, arg2)) return false;
+    return NullableLiftingTransform::MatchHasValueCall(arg2, nullable1.get());
+}
+
+// Detach `inst` from its parent (TakeChild at its ChildIndex), returning owning
+// ownership. Used by the `&`/`|` on bool? path to lift the condition/arms out of
+// the if before the if is destroyed (no GC; the non-owning views would dangle).
+// Works uniformly whether `inst` is a direct child of the if (e.g. an arm) or a
+// sub-expression of the if's Condition (the logic.not-peeled inner expression):
+// Parent + ChildIndex identify the slot in both cases.
+std::unique_ptr<ILInstruction> DetachFromParent(ILInstruction* inst) {
+    if (!inst || !inst->Parent) return nullptr;
+    return inst->Parent->TakeChild(inst->ChildIndex);
+}
+
+// Replace the if with `lifted` (a value node), applying the block-model
+// adaptation: a clean ReplaceWith when the if is a sub-expression value, or the
+// lifted value becomes a non-terminal statement + a Branch to the next block
+// replaces the if-final when the if is a block's FinalInstruction (a value node
+// cannot be a block final). The next block is resolved before any mutation (the
+// precondition-before-mutation discipline). Returns true if the if was replaced
+// (the if is destroyed); false if a block-final if had no fall-through target
+// (the if is left intact and the caller must not mutate further). Shared by the
+// bool? equality fold (FinishIfNullableLift) and the `&`/`|` on bool? path.
+bool ReplaceIfWithLiftedValue(IfInstruction* iff, std::unique_ptr<ILInstruction> lifted) {
     auto* block = dynamic_cast<Block*>(iff->Parent);
     bool isBlockFinal = block && block->FinalInstruction.get() == iff;
     Block* nextBlock = nullptr;
@@ -258,22 +345,32 @@ bool FinishIfNullableLift(IfInstruction* iff, ComparisonKind kind,
         if (!nextBlock) return false;  // no fall-through target; leave the if
     }
     if (isBlockFinal) {
-        // The Comp (a value, no side effect) becomes a non-terminal statement
-        // (its value is discarded, matching the if-as-statement whose value
-        // was discarded) and a Branch to the next block replaces the if-final.
-        block->Add(std::move(comp));
+        // The lifted value (no side effect) becomes a non-terminal statement
+        // (its value is discarded, matching the if-as-statement whose value was
+        // discarded) and a Branch to the next block replaces the if-final.
+        block->Add(std::move(lifted));
         block->SetFinal(std::make_unique<Branch>(nextBlock));  // destroys the if
     } else {
         // The if is a sub-expression value (e.g. `stloc V(if (...) ..)`);
         // ReplaceWith is a clean in-place swap (the C# `ifInst.ReplaceWith(lifted)`).
-        iff->ReplaceWith(std::move(comp));  // destroys the if
+        iff->ReplaceWith(std::move(lifted));  // destroys the if
     }
-    // The C# does not re-visit the lifted Comp (it is a fresh leaf-load +
-    // constant comparison; no VisitComp rewrite fires on a lifted eq/ne with
-    // a LdLoc Left and a LdcI4 Right -- the head rewrites require Right == 0
-    // for logic.not / comp(!=0)=>x, and RunCompNullableLift requires a GetValueOr
-    // Default call on one side), so no cascade is needed.
     return true;
+}
+
+// Build the C#-lifted Comp (`comp(kind, ldloc v, ldc.i4 constant)` lifted C#,
+// the D91 model) and replace the if with it via ReplaceIfWithLiftedValue. The
+// `ldloc v` loads the Nullable<bool>; the lifted comp checks HasValue then
+// compares the underlying Boolean (I4). Fresh LdLoc / LdcI4 nodes (no ILRange
+// in this port; the C# `.WithILRange(..)` is skipped). Returns true if the if was
+// replaced (the if is destroyed).
+bool FinishIfNullableLift(IfInstruction* iff, ComparisonKind kind,
+                         const ILVariablePtr& v, int constant) {
+    auto comp = std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v),
+        std::make_unique<LdcI4>(constant),
+        kind, ComparisonLiftingKind::CSharp, StackType::I4);
+    return ReplaceIfWithLiftedValue(iff, std::move(comp));
 }
 
 } // namespace
@@ -732,6 +829,80 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
         if (IsLdcI4(trueInst, 1) &&
             NullableLiftingTransform::MatchNegatedHasValueCall(falseInst, v.get())) {
             return FinishIfNullableLift(iff, ComparisonKind::Inequality, v, 0);
+        }
+    }
+
+    // Handle `&` and `|` on bool? (the section of Lift after the bool? equality
+    // folds). The arms are bare value arms (a sub-expression value-if, the only
+    // shape the fold fires on -- a block-final if has Branch arms), so MatchLdLoc
+    // is a bare match. Three shapes, each producing a ThreeValuedBoolAnd/Or
+    // (the D95 nodes):
+    //   condition ? v : (bool?)false       ==> 3vl.bool.and(condition, v)
+    //   condition ? (bool?)true : v        ==> 3vl.bool.or(condition, v)
+    //   (n1.GVO || (!n2.GVO && !n1.HV)) ? v : v2
+    //     v==n1 && v2==n2                  ==> 3vl.bool.or(v, v2)
+    //     v==n2 && v2==n1                  ==> 3vl.bool.and(v2, v)
+    // The condition/arms are detached (DetachFromParent) before the if is
+    // destroyed (no GC; the non-owning views would dangle). The condition may be
+    // the logic.not-peeled inner expression (a sub-expression of iff->Condition),
+    // so DetachFromParent uses Parent + ChildIndex uniformly. The ThreeValuedBool
+    // nodes are values (ResultType O), so ReplaceIfWithLiftedValue applies the
+    // block-model adaptation (ReplaceWith for a sub-expression value-if, or the
+    // node becomes a non-terminal + a Branch final for a block-final if). For the
+    // two-nullable case the condition (the logic.or pattern) is fully captured by
+    // the operands and is discarded with the if (not detached).
+    {
+        ILVariable* vLd = nullptr;
+        if (MatchLdLoc(trueInst, vLd)) {
+            // condition ? v : (bool?)false ==> condition & v
+            const TypeSystem::IType* utype = nullptr;
+            ILInstruction* ctorArg = nullptr;
+            if (NullableLiftingTransform::MatchNullableCtor(falseInst, utype, ctorArg) &&
+                NullableLiftingTransform::IsKnownType(utype,
+                                                       TypeSystem::KnownTypeCode::Boolean) &&
+                IsLdcI4(ctorArg, 0)) {
+                auto condOwned = DetachFromParent(condition);
+                auto trueOwned = DetachFromParent(trueInst);
+                auto lifted = std::make_unique<ThreeValuedBoolAnd>(
+                    std::move(condOwned), std::move(trueOwned));
+                return ReplaceIfWithLiftedValue(iff, std::move(lifted));
+            }
+            // condition ? v : v2 (the two-nullable three-valued logic pattern)
+            ILVariable* v2 = nullptr;
+            if (MatchLdLoc(falseInst, v2)) {
+                ILVariablePtr nullable1, nullable2;
+                if (MatchThreeValuedLogicConditionPattern(condition, nullable1, nullable2)) {
+                    if (vLd == nullable1.get() && v2 == nullable2.get()) {
+                        // ==> 3vl.bool.or(v, v2)
+                        auto trueOwned = DetachFromParent(trueInst);
+                        auto falseOwned = DetachFromParent(falseInst);
+                        auto lifted = std::make_unique<ThreeValuedBoolOr>(
+                            std::move(trueOwned), std::move(falseOwned));
+                        return ReplaceIfWithLiftedValue(iff, std::move(lifted));
+                    } else if (vLd == nullable2.get() && v2 == nullable1.get()) {
+                        // ==> 3vl.bool.and(v2, v)
+                        auto falseOwned = DetachFromParent(falseInst);
+                        auto trueOwned = DetachFromParent(trueInst);
+                        auto lifted = std::make_unique<ThreeValuedBoolAnd>(
+                            std::move(falseOwned), std::move(trueOwned));
+                        return ReplaceIfWithLiftedValue(iff, std::move(lifted));
+                    }
+                }
+            }
+        } else if (MatchLdLoc(falseInst, vLd)) {
+            // condition ? (bool?)true : v ==> condition | v
+            const TypeSystem::IType* utype = nullptr;
+            ILInstruction* ctorArg = nullptr;
+            if (NullableLiftingTransform::MatchNullableCtor(trueInst, utype, ctorArg) &&
+                NullableLiftingTransform::IsKnownType(utype,
+                                                       TypeSystem::KnownTypeCode::Boolean) &&
+                IsLdcI4(ctorArg, 1)) {
+                auto condOwned = DetachFromParent(condition);
+                auto falseOwned = DetachFromParent(falseInst);
+                auto lifted = std::make_unique<ThreeValuedBoolOr>(
+                    std::move(condOwned), std::move(falseOwned));
+                return ReplaceIfWithLiftedValue(iff, std::move(lifted));
+            }
         }
     }
     return false;

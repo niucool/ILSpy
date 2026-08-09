@@ -67,6 +67,7 @@
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
+#include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
@@ -250,6 +251,61 @@ ITypePtr MakeNullableOf(KnownTypeCode underlying) {
     args.push_back(std::make_shared<KnownType>(underlying));
     return std::make_shared<ParameterizedType>(
         std::make_shared<KnownType>(KnownTypeCode::NullableOfT), std::move(args));
+}
+
+// `call Nullable<bool>::GetValueOrDefault(ldloca v)` -- the 1-arg form on a
+// Nullable<bool> variable. The condition the RunIfNullableLift `&`/`|` paths and
+// the bool? equality fold consume.
+std::unique_ptr<Call> MakeGVOCall(const ILVariablePtr& v) {
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    return call;
+}
+
+// `call Nullable<bool>::get_HasValue(ldloca v)` -- the HasValue accessor on a
+// Nullable<bool> variable.
+std::unique_ptr<Call> MakeHasValueCall(const ILVariablePtr& v) {
+    auto call = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    return call;
+}
+
+// logic.not(inner) in this port's `comp(Equality, inner, ldc.i4 0)` shape (the
+// reader's brfalse, per the SwitchAnalysis/ConditionDetection convention). Used
+// to build the `!v.HasValue` / `!v2.GetValueOrDefault()` arms of the two-nullable
+// three-valued logic condition pattern.
+std::unique_ptr<Comp> MakeLogicNot(std::unique_ptr<ILInstruction> inner) {
+    return std::make_unique<Comp>(std::move(inner), std::make_unique<LdcI4>(0),
+                                 ComparisonKind::Equality);
+}
+
+// `newobj Nullable<bool>(ldc.i4 value)` -- the Nullable<bool> constructor the
+// `&`/`|` on bool? `(bool?)false` / `(bool?)true` arms use. MatchNullableCtor
+// recognises it (IsNewObj + NullableOfT declaring type + 1 arg).
+std::unique_ptr<Call> MakeNullableBoolCtor(int value) {
+    auto call = std::make_unique<Call>("System.Nullable`1::.ctor");
+    call->IsNewObj = true;
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    call->AddArg(std::make_unique<LdcI4>(value));
+    return call;
+}
+
+// Count ThreeValuedBoolAnd/Or nodes in the tree. The RunIfNullableLift `&`/`|`
+// on bool? fold is monotone non-decreasing for this count (each fold creates one;
+// nothing in this subset removes one). Used by the sweep to confirm the
+// transform does not regress.
+int CountThreeValuedBool(ILFunction& fn) {
+    int n = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::ThreeValuedBoolAnd ||
+            inst->Op == OpCode::ThreeValuedBoolOr) ++n;
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return n;
 }
 
 } // namespace
@@ -2412,6 +2468,285 @@ TEST(ExpressionTransforms, RunIfNullableLiftFoldsAsBlockFinal) {
         << "the if-final must be replaced by a Branch to the next block";
 }
 
+// RunIfNullableLift `&`/`|` on bool? fold (NullableLiftingTransform.Run(IfInstruction)
+// `Lift` method, the section after the bool? equality folds): `condition ? v :
+// (bool?)false` ==> `3vl.bool.and(condition, v)` (the D95 node). The condition is a
+// plain bool (ldloc b); the true arm is ldloc v (Nullable<bool>); the false arm
+// is `newobj Nullable<bool>(ldc.i4 0)`. The if is a sub-expression value (wrapped
+// in a stloc), so the fold is a clean ReplaceWith.
+TEST(ExpressionTransforms, RunIfNullableLiftFoldsAndBoolBoolNullable) {
+    auto b = MakeLocal("b", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", MakeNullableOf(KnownTypeCode::Boolean));
+    auto iff = std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(b),               // condition: a plain bool
+        std::make_unique<LdLoc>(v),               // true arm: ldloc v (Nullable<bool>)
+        MakeNullableBoolCtor(0));                 // false arm: (bool?)false
+    auto fn = MakeFnWithBlock({result, v, b});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountThreeValuedBool(*fn), 0);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountThreeValuedBool(*fn), 1) << "the & fold must produce a 3vl.bool.and";
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::ThreeValuedBoolAnd);
+    auto* andNode = static_cast<ThreeValuedBoolAnd*>(st->Value.get());
+    ASSERT_EQ(andNode->Left->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(andNode->Left.get())->Variable.get(), b.get())
+        << "Left is the condition (ldloc b)";
+    ASSERT_EQ(andNode->Right->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(andNode->Right.get())->Variable.get(), v.get())
+        << "Right is the true arm (ldloc v)";
+}
+
+// `condition ? (bool?)true : v` ==> `3vl.bool.or(condition, v)`. The true arm is
+// `newobj Nullable<bool>(ldc.i4 1)` and the false arm is ldloc v. The `|` fold
+// fires via the `else if (MatchLdLoc(falseInst, v))` branch (the true arm is not
+// an LdLoc).
+TEST(ExpressionTransforms, RunIfNullableLiftFoldsOrBoolBoolNullable) {
+    auto b = MakeLocal("b", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", MakeNullableOf(KnownTypeCode::Boolean));
+    auto iff = std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(b),               // condition: a plain bool
+        MakeNullableBoolCtor(1),                 // true arm: (bool?)true
+        std::make_unique<LdLoc>(v));              // false arm: ldloc v
+    auto fn = MakeFnWithBlock({result, v, b});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountThreeValuedBool(*fn), 1) << "the | fold must produce a 3vl.bool.or";
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::ThreeValuedBoolOr);
+    auto* orNode = static_cast<ThreeValuedBoolOr*>(st->Value.get());
+    ASSERT_EQ(orNode->Left->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(orNode->Left.get())->Variable.get(), b.get())
+        << "Left is the condition (ldloc b)";
+    ASSERT_EQ(orNode->Right->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(orNode->Right.get())->Variable.get(), v.get())
+        << "Right is the false arm (ldloc v)";
+}
+
+// The two-nullable `|` on bool? fold: `(n1.GVO || (!n2.GVO && !n1.HV)) ? n1 :
+// n2` ==> `3vl.bool.or(n1, n2)`. The condition is a logic.or (if (n1.GVO) 1 else
+// logic.and) whose logic.and is `if (!n2.GVO) !n1.HV else 0`; the arms are ldloc
+// n1 / ldloc n2 (v==n1 && v2==n2).
+TEST(ExpressionTransforms, RunIfNullableLiftFoldsOrTwoNullables) {
+    auto n1 = MakeLocal("n1", MakeNullableOf(KnownTypeCode::Boolean));
+    auto n2 = MakeLocal("n2", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", MakeNullableOf(KnownTypeCode::Boolean));
+    auto logicAnd = std::make_unique<IfInstruction>(
+        MakeLogicNot(MakeGVOCall(n2)),                 // !n2.GetValueOrDefault()
+        MakeLogicNot(MakeHasValueCall(n1)),           // !n1.HasValue
+        std::make_unique<LdcI4>(0));
+    auto logicOr = std::make_unique<IfInstruction>(
+        MakeGVOCall(n1),                              // n1.GetValueOrDefault()
+        std::make_unique<LdcI4>(1),
+        std::move(logicAnd));
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(logicOr),
+        std::make_unique<LdLoc>(n1),
+        std::make_unique<LdLoc>(n2));
+    auto fn = MakeFnWithBlock({result, n1, n2});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountThreeValuedBool(*fn), 0);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountThreeValuedBool(*fn), 1) << "the two-nullable | fold must fire";
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::ThreeValuedBoolOr);
+    auto* orNode = static_cast<ThreeValuedBoolOr*>(st->Value.get());
+    ASSERT_EQ(orNode->Left->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(orNode->Left.get())->Variable.get(), n1.get())
+        << "Left is the true arm (ldloc n1)";
+    ASSERT_EQ(orNode->Right->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(orNode->Right.get())->Variable.get(), n2.get())
+        << "Right is the false arm (ldloc n2)";
+}
+
+// The two-nullable `&` on bool? fold (the swapped shape): the same condition but
+// the arms are ldloc n2 / ldloc n1 (v==n2 && v2==n1) ==> `3vl.bool.and(n1, n2)`
+// (ThreeValuedBoolAnd(falseInst=ldloc n1, trueInst=ldloc n2)).
+TEST(ExpressionTransforms, RunIfNullableLiftFoldsAndTwoNullables) {
+    auto n1 = MakeLocal("n1", MakeNullableOf(KnownTypeCode::Boolean));
+    auto n2 = MakeLocal("n2", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", MakeNullableOf(KnownTypeCode::Boolean));
+    auto logicAnd = std::make_unique<IfInstruction>(
+        MakeLogicNot(MakeGVOCall(n2)),
+        MakeLogicNot(MakeHasValueCall(n1)),
+        std::make_unique<LdcI4>(0));
+    auto logicOr = std::make_unique<IfInstruction>(
+        MakeGVOCall(n1), std::make_unique<LdcI4>(1), std::move(logicAnd));
+    // The swapped shape: true arm = n2, false arm = n1.
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(logicOr),
+        std::make_unique<LdLoc>(n2),
+        std::make_unique<LdLoc>(n1));
+    auto fn = MakeFnWithBlock({result, n1, n2});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountThreeValuedBool(*fn), 1) << "the two-nullable & fold must fire";
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::ThreeValuedBoolAnd);
+    auto* andNode = static_cast<ThreeValuedBoolAnd*>(st->Value.get());
+    ASSERT_EQ(andNode->Left->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(andNode->Left.get())->Variable.get(), n1.get())
+        << "Left is the false arm (ldloc n1)";
+    ASSERT_EQ(andNode->Right->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(andNode->Right.get())->Variable.get(), n2.get())
+        << "Right is the true arm (ldloc n2)";
+}
+
+// The `&` fold must not fire when the Nullable ctor's underlying type is not
+// Boolean (here Nullable<int>): the IsKnownType(utype, Boolean) gate fails.
+TEST(ExpressionTransforms, RunIfNullableLiftAndBoolBoolNullableRejectsNonBooleanUnderlying) {
+    auto b = MakeLocal("b", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", MakeNullableOf(KnownTypeCode::Boolean));
+    auto ctor = std::make_unique<Call>("System.Nullable`1::.ctor");
+    ctor->IsNewObj = true;
+    ctor->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);  // Nullable<int>
+    ctor->AddArg(std::make_unique<LdcI4>(0));
+    auto iff = std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(b), std::make_unique<LdLoc>(v), std::move(ctor));
+    auto fn = MakeFnWithBlock({result, v, b});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountThreeValuedBool(*fn), 0)
+        << "a non-Boolean underlying type must not fold";
+}
+
+// The `&` fold must not fire when the Nullable ctor's argument is 1 (not the 0
+// the `(bool?)false` arm requires). The `|` fold is not reached (the true arm is
+// an LdLoc, so the `if (MatchLdLoc(trueInst, v))` branch is taken).
+TEST(ExpressionTransforms, RunIfNullableLiftAndBoolBoolNullableRejectsNonZeroCtorArg) {
+    auto b = MakeLocal("b", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", MakeNullableOf(KnownTypeCode::Boolean));
+    auto iff = std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(b), std::make_unique<LdLoc>(v), MakeNullableBoolCtor(1));
+    auto fn = MakeFnWithBlock({result, v, b});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountThreeValuedBool(*fn), 0)
+        << "a non-zero ctor arg must not fold as `&`";
+}
+
+// The two-nullable fold must not fire when the condition is not the
+// three-valued logic.or pattern (here a plain bool): MatchThreeValuedLogic-
+// ConditionPattern's MatchLogicOr fails.
+TEST(ExpressionTransforms, RunIfNullableLiftTwoNullablesRejectsNonMatchingCondition) {
+    auto b = MakeLocal("b", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto n1 = MakeLocal("n1", MakeNullableOf(KnownTypeCode::Boolean));
+    auto n2 = MakeLocal("n2", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", MakeNullableOf(KnownTypeCode::Boolean));
+    auto iff = std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(b),               // not the logic.or pattern
+        std::make_unique<LdLoc>(n1),
+        std::make_unique<LdLoc>(n2));
+    auto fn = MakeFnWithBlock({result, n1, n2, b});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountThreeValuedBool(*fn), 0)
+        << "a non-matching condition must not fold";
+}
+
+// The two-nullable fold must not fire when the arms' variables do not match the
+// condition's nullable1/nullable2 (here n3/n4): neither (v==n1 && v2==n2) nor
+// (v==n2 && v2==n1) holds.
+TEST(ExpressionTransforms, RunIfNullableLiftTwoNullablesRejectsMismatchedVars) {
+    auto n1 = MakeLocal("n1", MakeNullableOf(KnownTypeCode::Boolean));
+    auto n2 = MakeLocal("n2", MakeNullableOf(KnownTypeCode::Boolean));
+    auto n3 = MakeLocal("n3", MakeNullableOf(KnownTypeCode::Boolean));
+    auto n4 = MakeLocal("n4", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", MakeNullableOf(KnownTypeCode::Boolean));
+    auto logicAnd = std::make_unique<IfInstruction>(
+        MakeLogicNot(MakeGVOCall(n2)),
+        MakeLogicNot(MakeHasValueCall(n1)),
+        std::make_unique<LdcI4>(0));
+    auto logicOr = std::make_unique<IfInstruction>(
+        MakeGVOCall(n1), std::make_unique<LdcI4>(1), std::move(logicAnd));
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(logicOr),
+        std::make_unique<LdLoc>(n3),               // neither n1 nor n2
+        std::make_unique<LdLoc>(n4));               // neither n1 nor n2
+    auto fn = MakeFnWithBlock({result, n1, n2, n3, n4});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountThreeValuedBool(*fn), 0)
+        << "mismatched arm variables must not fold";
+}
+
+// The `&` fold as a block's FinalInstruction (a statement-if with value arms):
+// the ThreeValuedBoolAnd becomes a non-terminal statement and a Branch to the
+// next block replaces the if-final (the block-model adaptation shared with the
+// bool? equality fold).
+TEST(ExpressionTransforms, RunIfNullableLiftAndBoolBoolNullableFoldsAsBlockFinal) {
+    auto b = MakeLocal("b", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto iff = std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(b), std::make_unique<LdLoc>(v), MakeNullableBoolCtor(0));
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto P = std::make_unique<Block>();
+    P->SetFinal(std::move(iff));
+    fn->Body->AddBlock(std::move(P));
+    auto Q = std::make_unique<Block>();
+    Q->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(Q));
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(b);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& P2 = *fn->Body->Blocks[0];
+    ASSERT_EQ(P2.Instructions.size(), 1u);
+    ASSERT_EQ(P2.Instructions[0]->Op, OpCode::ThreeValuedBoolAnd)
+        << "the 3vl.bool.and must become a non-terminal statement";
+    auto* andNode = static_cast<ThreeValuedBoolAnd*>(P2.Instructions[0].get());
+    ASSERT_EQ(andNode->Left->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(andNode->Left.get())->Variable.get(), b.get());
+    ASSERT_EQ(andNode->Right->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(andNode->Right.get())->Variable.get(), v.get());
+    ASSERT_EQ(P2.FinalInstruction->Op, OpCode::Branch);
+    EXPECT_EQ(static_cast<Branch*>(P2.FinalInstruction.get())->TargetBlock,
+              fn->Body->Blocks[1].get())
+        << "the if-final must be replaced by a Branch to the next block";
+}
+
 
 // On the real mscorlib corpus, running the full pre-pipeline through the
 // StatementTransform{ILInlining, ExpressionTransforms} (the GetILTransforms()
@@ -2450,6 +2785,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int liftedCompsBefore = CountLiftedComps(*fn);
         int gvo1Before = CountGetValueOrDefaultOneArg(*fn);
         int hasValueBefore = CountHasValueCall(*fn);
+        int threeValuedBoolBefore = CountThreeValuedBool(*fn);
         {
             StatementTransform st;
             st.AddChild(std::make_unique<ILInlining>());
@@ -2467,6 +2803,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int liftedCompsAfter = CountLiftedComps(*fn);
         int gvo1After = CountGetValueOrDefaultOneArg(*fn);
         int hasValueAfter = CountHasValueCall(*fn);
+        int threeValuedBoolAfter = CountThreeValuedBool(*fn);
         // The ternary fold is monotone non-decreasing (each fold creates a
         // StLoc-if; nothing in this subset removes one). The VisitComp rewrites
         // (comp(!=0)->x, logic.not push, unsigned normalization) do not create
@@ -2542,6 +2879,14 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         // legacy-csc corpus may emit rarely; the per-method monotone invariant is
         // the deterministic correctness gate (the absolute count is not asserted).
         EXPECT_LE(hasValueAfter, hasValueBefore);
+        // The RunIfNullableLift `&`/`|` on bool? fold (the section of Lift after the
+        // bool? equality folds) is monotone non-decreasing for the ThreeValuedBool
+        // node count (each fold creates one ThreeValuedBoolAnd/Or; nothing in this
+        // subset removes one). The `&`/`|` on bool? codegen is a Roslyn-era pattern
+        // which the .NET Framework 4 legacy-csc corpus may emit rarely; the per-
+        // method monotone-non-decreasing invariant is the deterministic correctness
+        // gate (the absolute count is not asserted).
+        EXPECT_GE(threeValuedBoolAfter, threeValuedBoolBefore);
         totalFolds += (after - before);
         totalArrayIndexConvDrops += (arrayIdxConvBefore - arrayIdxConvAfter);
         totalNullCoalescingFolds += (nullCoalescingAfter - nullCoalescingBefore);

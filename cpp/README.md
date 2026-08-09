@@ -643,28 +643,36 @@ implemented and green here. Everything else follows the phase plan in
   overload and `v.get()` to the match overload). It fires 0 times on the
   .NET Framework 4 legacy-csc corpus (a Roslyn-era `bool?` codegen pattern) --
   ported for faithfulness (the hand-built tests verify the four folds, the
-  sweep verifies the per-method monotone invariant). 33 of ~40 transforms
+  sweep verifies the per-method monotone invariant). 34 of ~40 transforms
   ported.
   `ThreeValuedBoolAnd` / `ThreeValuedBoolOr` (Instructions/, a combined
   `ThreeValuedBoolInstructions.hpp` header mirroring the C# `LogicInstructions.cs`
   grouping) port the C# three-valued logic `&` / `|` on `bool?` (Nullable<bool>)
-  nodes as a tested-but-not-yet-wired foundation: both are `BinaryInstruction`
-  (Left + Right inlineable), result `bool?` (StackType O), `IsLifted()` true /
-  `UnderlyingResultType()` I4 (the C# `ILiftableInstruction` impl, added as
-  methods per the Comp precedent -- this port has no ILiftableInstruction
-  interface), DirectFlags None (no Flags override needed -- the base
-  `None | Left | Right` equals the C# ComputeFlags), and the faithful dump
-  mnemonics `3vl.bool.and(...)` / `3vl.bool.or(...)`. The seed renders them as
-  `left & right` / `left | right` (faithful to the real back end's
-  VisitThreeValuedBoolAnd/Or). No pipeline transform constructs them yet (the
-  `&`/`|` on bool? codegen is a Roslyn-era pattern, 0 firings on the .NET
-  Framework 4 corpus); the next in-order consumer is the `&`/`|` on bool? path
-  of `NullableLiftingTransform.Run(IfInstruction)`'s `Lift`, which needs them
-  plus `MatchLogicOr`/`MatchLogicAnd` (matching the IfInstruction `if (a)
-  ldc.i4 1 else b` / `if (a) b else ldc.i4 0` patterns) +
-  `MatchThreeValuedLogicConditionPattern`.
+  nodes, and are now WIRED into the `&`/`|` on bool? path of
+  `NullableLiftingTransform.Run(IfInstruction)`'s `Lift` (via
+  `ExpressionTransforms.VisitIfInstruction.RunIfNullableLift`): both are
+  `BinaryInstruction` (Left + Right inlineable), result `bool?` (StackType O),
+  `IsLifted()` true / `UnderlyingResultType()` I4 (the C#
+  `ILiftableInstruction` impl, added as methods per the Comp precedent -- this
+  port has no ILiftableInstruction interface), DirectFlags None (no Flags
+  override needed -- the base `None | Left | Right` equals the C# ComputeFlags),
+  and the faithful dump mnemonics `3vl.bool.and(...)` / `3vl.bool.or(...)`. The
+  seed renders them as `left & right` / `left | right` (faithful to the real
+  back end's VisitThreeValuedBoolAnd/Or). The `&`/`|` on bool? fold handles
+  three shapes: `condition ? v : (bool?)false` ==> `3vl.bool.and(condition, v)`,
+  `condition ? (bool?)true : v` ==> `3vl.bool.or(condition, v)`, and the
+  two-nullable `(n1.GVO || (!n2.GVO && !n1.HV)) ? v : v2` pattern (via the new
+  `MatchLogicOr`/`MatchLogicAnd`/`MatchThreeValuedLogicConditionPattern`
+  helpers) ==> `3vl.bool.or(v, v2)` (v==n1, v2==n2) or `3vl.bool.and(v2, v)`
+  (v==n2, v2==n1). The condition/arms are detached from the if before it is
+  destroyed (no GC); the block-model adaptation is shared via
+  `ReplaceIfWithLiftedValue` (ReplaceWith for a sub-expression value-if, or the
+  node becomes a non-terminal + a Branch final for a block-final if). The `&`/`|`
+  on bool? codegen is a Roslyn-era pattern, 0 firings on the .NET Framework 4
+  corpus; ported for faithfulness (hand-built tests verify the folds, the sweep
+  verifies the per-method monotone non-decreasing ThreeValuedBool count).
   The remaining `Run(IfInstruction)` paths (AnalyzeCondition/LiftNormal,
-  MatchCompOrDecimal/LiftCSharp*, NullPropagation, the `&`/`|` on bool?),
+  MatchCompOrDecimal/LiftCSharp*, NullPropagation),
   `Run(BinaryNumericInstruction)` (the BitAnd-as-short-circuit analysis), and
   the `RunStatements(Block, int)` block transform are the subsequent
   in-order targets.
