@@ -27,6 +27,7 @@
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
+#include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/StackType.hpp"
 
@@ -155,7 +156,12 @@ bool ArmIsLdcI4(const ILInstruction* arm, int value) {
 
 } // namespace
 
-void ExpressionTransforms::Run(Block& block, int pos, StatementTransformContext& /*context*/) {
+void ExpressionTransforms::Run(Block& block, int pos, StatementTransformContext& context) {
+    // Snapshot the settings for the duration of this Run (the C# stores the
+    // StatementTransformContext as a member). IsPatternMatch (in
+    // FoldMatchTrueFalse) consults PatternCombinators/RelationalPatterns.
+    settings_ = &context.Base.Settings;
+
     // Visit the statement at `pos` and its children (the C# AcceptVisitor on
     // block.Instructions[pos]). The sentinel pos = -1 (the driver's signal for an
     // if-final-only block -- see StatementTransform::RunBlock) means "no
@@ -285,6 +291,12 @@ void ExpressionTransforms::VisitIfInstruction(IfInstruction* iff) {
 
     // Process the condition after the potential modifications (the C# order).
     if (iff->Condition) Visit(iff->Condition.get());
+
+    // The C# then runs NullableLiftingTransform, TransformDynamicAddAssignOr-
+    // RemoveAssign, and UserDefinedLogicTransform (all deferred -- they need the
+    // full nullable-lift transform, DynamicIsEventInstruction, and
+    // MatchLogicAnd/Or respectively) before the `match(x) ? true : false` fold.
+    if (FoldMatchTrueFalse(iff)) return;  // the if was replaced by the match
 }
 
 void ExpressionTransforms::VisitArm(ILInstruction* arm) {
@@ -358,6 +370,66 @@ bool ExpressionTransforms::HandleConditionalOperator(IfInstruction* iff) {
     // Cascade the Comp rewrites into the new StLoc's value (the negated
     // condition and the arm values), matching the C# `context.RequestRerun()`.
     Visit(stPtr);
+    return true;
+}
+
+bool ExpressionTransforms::FoldMatchTrueFalse(IfInstruction* iff) {
+    // match(x) ? true : false -> match(x): a conditional whose condition is a
+    // pattern match and whose arms are ldc.i4 1 / ldc.i4 0 is redundant -- the
+    // MatchInstruction already evaluates to 1 (matched) / 0 (not matched), so
+    // the if just re-wraps it. Replace the if with the condition (the pattern
+    // match). The C# does `inst.ReplaceWith(matchCondition)` (the if is always a
+    // non-terminal there); this port's if-as-final block model needs an
+    // adaptation when the if is a block's FinalInstruction (a MatchInstruction
+    // is a value, not control flow, so it cannot be the final).
+    if (!iff || !iff->Condition) return false;
+    const ILInstruction* testedOperand = nullptr;
+    if (!MatchInstruction::IsPatternMatch(iff->Condition.get(), testedOperand, settings_))
+        return false;
+    // Both arms must be the ldc.i4 1 / ldc.i4 0 the compiler emits for the
+    // `match ? true : false` conversion. Bare LdcI4 (a value-position if) or a
+    // single-instruction expression Block wrapping it (the inlined-fall-through
+    // shape) are both accepted (ArmIsLdcI4).
+    if (!ArmIsLdcI4(iff->TrueInst.get(), 1) || !ArmIsLdcI4(iff->FalseInst.get(), 0))
+        return false;
+
+    // The if is the block's FinalInstruction (a statement-if) when its parent is
+    // a Block holding it as the final. The MatchInstruction (a value, not control
+    // flow) cannot be the final, so that case needs the block-model adaptation
+    // (the match becomes a non-terminal + a Branch final); otherwise (the if is a
+    // sub-expression value) ReplaceWith is a clean in-place swap. Resolve which
+    // case applies and verify the block-final case has a fall-through target
+    // BEFORE detaching the condition (a detached condition with no fold would
+    // free the match and leave the if with a null condition, corrupting the tree).
+    auto* block = dynamic_cast<Block*>(iff->Parent);
+    bool isBlockFinal = block && block->FinalInstruction.get() == iff;
+    Block* nextBlock = nullptr;
+    if (isBlockFinal) {
+        nextBlock = NextBlockInContainer(block);
+        if (!nextBlock) return false;  // no fall-through target; leave the if intact
+    }
+
+    // Detach the condition (the pattern match) before the if is destroyed.
+    auto match = iff->TakeChild(0);
+
+    if (isBlockFinal) {
+        // The MatchInstruction becomes a non-terminal statement -- its side
+        // effect (storing the matched value into Variable) is preserved, and
+        // the 1/0 results were discarded either way -- and a Branch to the next
+        // block (the positional fall-through) replaces the if-final. This
+        // mirrors the HandleConditionalOperator block-model adaptation.
+        block->Add(std::move(match));
+        block->SetFinal(std::make_unique<Branch>(nextBlock));  // destroys the if
+    } else {
+        // The if is a sub-expression value (e.g. `stloc V(if (match) 1 else 0)`)
+        // or a non-terminal in a Block. ReplaceWith cleanly swaps the if for the
+        // match in the parent's slot (the C# in-place ReplaceWith).
+        iff->ReplaceWith(std::move(match));  // destroys the if
+    }
+    // The C# does not RequestRerun here (unlike HandleConditionalOperator): the
+    // match was already visited as the if's condition above, so its children
+    // are already rewritten. The fold only moves the already-visited match into
+    // the if's slot; no re-visit is needed.
     return true;
 }
 

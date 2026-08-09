@@ -55,6 +55,7 @@
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
@@ -200,6 +201,17 @@ std::unique_ptr<Block> MakeTernaryBlock(ILVariablePtr v,
     auto P = std::make_unique<Block>();
     P->SetFinal(std::move(iff));
     return P;
+}
+
+// Build a MatchInstruction `expr is T x` (CheckType + CheckNotNull, a type
+// pattern with a designator) over `testedOperand`, storing into `v`. This is the
+// shape PatternMatchValueTypes/PatternMatchRefTypes produce.
+std::unique_ptr<MatchInstruction> MakeMatch(ILVariablePtr v,
+                                             std::unique_ptr<ILInstruction> testedOperand) {
+    auto m = std::make_unique<MatchInstruction>(v, std::move(testedOperand));
+    m->CheckType = true;
+    m->CheckNotNull = true;
+    return m;
 }
 
 } // namespace
@@ -671,6 +683,155 @@ TEST(ExpressionTransforms, LogicAndOrBothOneNoSwap) {
     ASSERT_EQ(iff2->Condition->Op, OpCode::Comp);
     EXPECT_EQ(static_cast<Comp*>(iff2->Condition.get())->Kind, ComparisonKind::Equality)
         << "the condition must not be negated when the swap is suppressed";
+}
+
+// match(x) ? true : false -> match(x): a conditional whose condition is a
+// pattern match and whose arms are ldc.i4 1 / ldc.i4 0 is redundant -- the
+// MatchInstruction already evaluates to 1 (matched) / 0 (not matched). When the
+// if is a sub-expression value (here `stloc boolVar(if (match) 1 else 0)`), the
+// fold is a clean in-place ReplaceWith: the StLoc's value becomes the match.
+TEST(ExpressionTransforms, MatchTrueFalseFoldsToMatchInValuePosition) {
+    auto x = MakeParam("x");
+    auto v = MakeLocal("v");
+    auto boolVar = MakeLocal("boolVar");
+    // stloc boolVar(if (match.type[T].notnull(v = ldloc x)) ldc.i4 1 else ldc.i4 0)
+    auto match = MakeMatch(v, std::make_unique<LdLoc>(x));
+    auto iff = std::make_unique<IfInstruction>(std::move(match),
+                                                std::make_unique<LdcI4>(1),
+                                                std::make_unique<LdcI4>(0));
+    auto fn = MakeFnWithBlock({boolVar, v, x});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(boolVar, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& blk = fn->Body->Blocks[0];
+    ASSERT_EQ(blk->Instructions.size(), 1u);
+    ASSERT_EQ(blk->Instructions[0]->Op, OpCode::StLoc);
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    EXPECT_EQ(st->Variable.get(), boolVar.get());
+    // The StLoc's value is now the MatchInstruction (the if was replaced by it).
+    ASSERT_EQ(st->Value->Op, OpCode::MatchInstruction)
+        << "if (match) 1 else 0 must fold to the match in the value slot";
+    auto* m = static_cast<MatchInstruction*>(st->Value.get());
+    EXPECT_TRUE(m->CheckType && m->CheckNotNull) << "the match pattern is preserved";
+    ASSERT_EQ(m->TestedOperand->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(m->TestedOperand.get())->Variable.get(), x.get());
+    EXPECT_EQ(m->Variable.get(), v.get());
+}
+
+// match(x) ? true : false as a block's FinalInstruction (a statement-if): the
+// MatchInstruction (a value, not control flow) cannot be the final, so it
+// becomes a non-terminal statement (its side effect -- storing into Variable --
+// is preserved) and a Branch to the next block replaces the if-final (the
+// HandleConditionalOperator block-model adaptation).
+TEST(ExpressionTransforms, MatchTrueFalseFoldsToMatchAsBlockFinal) {
+    auto x = MakeParam("x");
+    auto v = MakeLocal("v");
+    // P: if (match.type[T].notnull(v = ldloc x)) ldc.i4 1 else ldc.i4 0  (final)
+    // Q: leave
+    auto match = MakeMatch(v, std::make_unique<LdLoc>(x));
+    auto iff = std::make_unique<IfInstruction>(std::move(match),
+                                                std::make_unique<LdcI4>(1),
+                                                std::make_unique<LdcI4>(0));
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto P = std::make_unique<Block>();
+    P->SetFinal(std::move(iff));
+    fn->Body->AddBlock(std::move(P));
+    auto Q = std::make_unique<Block>();
+    Q->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(Q));
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(x);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& P2 = *fn->Body->Blocks[0];
+    // The match became a non-terminal statement; the if-final is now a Branch to Q.
+    ASSERT_EQ(P2.Instructions.size(), 1u);
+    ASSERT_EQ(P2.Instructions[0]->Op, OpCode::MatchInstruction)
+        << "the match must become a non-terminal statement";
+    ASSERT_EQ(P2.FinalInstruction->Op, OpCode::Branch);
+    EXPECT_EQ(static_cast<Branch*>(P2.FinalInstruction.get())->TargetBlock,
+              fn->Body->Blocks[1].get())
+        << "the if-final must be replaced by a Branch to the next block";
+}
+
+// The fold does not fire when the condition is not a pattern match (a bare
+// ldloc, not a MatchInstruction/Comp-pattern/Call): the if stays.
+TEST(ExpressionTransforms, MatchTrueFalseRejectsNonPatternCondition) {
+    auto x = MakeParam("x");
+    auto boolVar = MakeLocal("boolVar");
+    // stloc boolVar(if (ldloc x) ldc.i4 1 else ldc.i4 0) -- the condition is a
+    // bare load, not a pattern match.
+    auto iff = std::make_unique<IfInstruction>(std::make_unique<LdLoc>(x),
+                                                std::make_unique<LdcI4>(1),
+                                                std::make_unique<LdcI4>(0));
+    auto fn = MakeFnWithBlock({boolVar, x});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(boolVar, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& blk = fn->Body->Blocks[0];
+    ASSERT_EQ(blk->Instructions.size(), 1u);
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    // The if stays (no fold): the StLoc's value is still the IfInstruction.
+    ASSERT_EQ(st->Value->Op, OpCode::IfInstruction)
+        << "a non-pattern condition must not fold";
+}
+
+// The fold does not fire when the true arm is not ldc.i4 1.
+TEST(ExpressionTransforms, MatchTrueFalseRejectsNonOneTrueArm) {
+    auto x = MakeParam("x");
+    auto v = MakeLocal("v");
+    auto boolVar = MakeLocal("boolVar");
+    // stloc boolVar(if (match) ldc.i4 0 else ldc.i4 0) -- true arm is 0, not 1.
+    auto match = MakeMatch(v, std::make_unique<LdLoc>(x));
+    auto iff = std::make_unique<IfInstruction>(std::move(match),
+                                                std::make_unique<LdcI4>(0),
+                                                std::make_unique<LdcI4>(0));
+    auto fn = MakeFnWithBlock({boolVar, v, x});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(boolVar, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::IfInstruction)
+        << "a non-1 true arm must not fold";
+}
+
+// The fold does not fire when the false arm is not ldc.i4 0.
+TEST(ExpressionTransforms, MatchTrueFalseRejectsNonZeroFalseArm) {
+    auto x = MakeParam("x");
+    auto v = MakeLocal("v");
+    auto boolVar = MakeLocal("boolVar");
+    // stloc boolVar(if (match) ldc.i4 1 else ldc.i4 1) -- false arm is 1, not 0.
+    auto match = MakeMatch(v, std::make_unique<LdLoc>(x));
+    auto iff = std::make_unique<IfInstruction>(std::move(match),
+                                                std::make_unique<LdcI4>(1),
+                                                std::make_unique<LdcI4>(1));
+    auto fn = MakeFnWithBlock({boolVar, v, x});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(boolVar, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::IfInstruction)
+        << "a non-0 false arm must not fold";
 }
 
 // On the real mscorlib corpus, running the full pre-pipeline through the

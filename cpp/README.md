@@ -402,19 +402,33 @@ implemented and green here. Everything else follows the phase plan in
   logic.and/or canonicalization (`if (cond) ldc.i4 0 else RHS` ->
   `if (!cond) RHS else ldc.i4 0`, the `&&`/`||` form normalization; the if
   stays the block's final so no block-model issue, an arm is `ldc.i4 N` either
-  bare or a single-instruction expression `Block`). `IsInConditionSlot` is
+  bare or a single-instruction expression `Block`) -- and the
+  `match(x) ? true : false -> match(x)` fold (a conditional whose condition
+  is a pattern match -- `MatchInstruction.IsPatternMatch`, ported in D70 -- and
+  whose arms are `ldc.i4 1` / `ldc.i4 0` is redundant, since the
+  MatchInstruction / Comp constant pattern already evaluates to 1/0; the if is
+  replaced by the condition -- an in-place `ReplaceWith` when the if is a
+  sub-expression value, or the match becomes a non-terminal + a `Branch` to the
+  next block replaces the if-final when the if is a block's `FinalInstruction`,
+  the same block-model adaptation `HandleConditionalOperator` uses). `IsInConditionSlot` is
   ported via `Parent` + `ChildIndex` (the port has no `SlotInfo`); the float
   guard is approximated by the operands' `StackType` (the port's `Comp` carries
   no `InputType`); the C# `UnwrapConv` of the right operand is approximated
   (the port's `Conv` carries no `Kind`). Its `Run` visits the statement at
   `pos` and the if-final (via `VisitIfInstruction`, which visits the arms,
-  runs `HandleConditionalOperator` and the canonicalization, then the
+  runs `HandleConditionalOperator`, the canonicalization, and the
+  match-true-false fold, then the
   condition) at `pos == size-1` (the port's equivalent of the C# visiting the
   if at `Count-2`), so `if (comp(x != 0))` -> `if (x)` and the ternary fold
   fire on if-final blocks -- the CLI output now shows `if (array.Length)`
   (from `comp(ldlen != 0)` -> `ldlen`) and `if (!value)` (the kept logic.not
   of a bool param), and `V = cond ? V1 : V2` ternaries (the conditional
   operator) replace the `if/else`-over-the-same-temp pairs csc emits. The
+  match-true-false fold fires 12 times on the .NET Framework 4 mscorlib corpus,
+  all on `Comp` constant-pattern conditions (`if (x == 5) 1 else 0` -> `x == 5`)
+  -- the `MatchInstruction` case fires 0 (PatternMatchingTransform fires 0 on
+  the corpus); faithful to the C# (its `IsPatternMatch` treats a
+  Comp-with-constant-right as a constant pattern). The
   remaining 14 per-statement children (DynamicIsEventAssignmentTransform,
   TransformAssignment, NullCoalescingTransform, NullableLiftingStatementTransform,
   NullPropagationStatementTransform, TransformArrayInitializers,
@@ -427,7 +441,7 @@ implemented and green here. Everything else follows the phase plan in
   `ClassifyExpression`) are deferred, as are the rest of `ExpressionTransforms`
   (the NullableLifting call, the Conv/Box/Call/NewObj/LdObj/StObj/StLoc
   `HandleCompoundAssign`, the remaining VisitIfInstruction pieces
-  (NullableLifting, UserDefinedLogic, the `match(x) ? true : false` pattern,
+  (NullableLifting, UserDefinedLogic,
   `TransformDynamicAddAssignOrRemoveAssign`), the SwitchExpression/Dynamic/
   BinaryNumeric/TryCatchHandler visit methods).
   The remaining field-cached delegate shapes (now unblocked on the IField side)

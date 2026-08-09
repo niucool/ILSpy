@@ -32,23 +32,26 @@
 // dispatches on OpCode (the C# ILVisitor's AcceptVisitor). The subset ported
 // here is the VisitComp rewrites (D81) plus the VisitIfInstruction rewrites:
 // HandleConditionalOperator (`if (cond) stloc A(V1) else stloc A(V2)` ->
-// `stloc A(if (cond) V1 else V2)`, the conditional/ternary operator fold) and
-// the logic.and/or canonicalization (`if (cond) ldc.i4 0 else RHS` ->
-// `if (!cond) RHS else ldc.i4 0`, the &&/|| form normalization). Deferred vs the
-// C#: the NullableLiftingTransform call (needs the full nullable-lift transform),
-// FixComparisonKindLdNull (already in the standalone EarlyExpressionTransforms,
-// D61), the Conv unwrap of the right operand (this port's Conv carries no
-// Kind/SignExtend/ZeroExtend, so UnwrapConv cannot be faithful), the ldlen /
-// conv o->i null-comparison special cases (need Conv Kind), VisitConv / VisitBox
-// / VisitLdElema / VisitNewArr / VisitCall / VisitNewObj / VisitLdObj /
-// VisitLdObjIfRef / VisitStObj / VisitStLoc (TransformAssignment.HandleCompoundAssign)
-// / the remaining VisitIfInstruction pieces (NullableLifting, UserDefinedLogic,
-// the match(x)?true:false pattern, TransformDynamicAddAssignOrRemoveAssign) /
-// HandleSwitchExpression (needs SwitchExpressions setting + SwitchInstruction
-// guards) / VisitDynamic* / VisitBinaryNumericInstruction (shift-size) /
-// VisitTryCatchHandler -- each needs further infrastructure (AddressOf,
-// LdcDecimal, dynamic nodes, the resolver, MatchLogicAnd/Or, IndexRangeTransform,
-// TransformAssignment, ...) and is a later iteration.
+// `stloc A(if (cond) V1 else V2)`, the conditional/ternary operator fold), the
+// logic.and/or canonicalization (`if (cond) ldc.i4 0 else RHS` ->
+// `if (!cond) RHS else ldc.i4 0`, the &&/|| form normalization), and the
+// `match(x) ? true : false -> match(x)` fold (a conditional whose condition is
+// a pattern match and whose arms are ldc.i4 1/0 is redundant -- the MatchInstruction
+// already evaluates to 1/0). Deferred vs the C#: the NullableLiftingTransform
+// call (needs the full nullable-lift transform), FixComparisonKindLdNull
+// (already in the standalone EarlyExpressionTransforms, D61), the Conv unwrap
+// of the right operand (this port's Conv carries no Kind/SignExtend/ZeroExtend,
+// so UnwrapConv cannot be faithful), the ldlen / conv o->i null-comparison
+// special cases (need Conv Kind), VisitConv / VisitBox / VisitLdElema /
+// VisitNewArr / VisitCall / VisitNewObj / VisitLdObj / VisitLdObjIfRef /
+// VisitStObj / VisitStLoc (TransformAssignment.HandleCompoundAssign) / the
+// remaining VisitIfInstruction pieces (NullableLifting, UserDefinedLogic,
+// TransformDynamicAddAssignOrRemoveAssign) / HandleSwitchExpression (needs
+// SwitchExpressions setting + SwitchInstruction guards) / VisitDynamic* /
+// VisitBinaryNumericInstruction (shift-size) / VisitTryCatchHandler -- each
+// needs further infrastructure (AddressOf, LdcDecimal, dynamic nodes, the
+// resolver, MatchLogicAnd/Or, IndexRangeTransform, TransformAssignment, ...)
+// and is a later iteration.
 
 #pragma once
 
@@ -109,6 +112,25 @@ private:
     // (no block-model issue); an arm is `ldc.i4 N` either bare or a single-
     // instruction expression Block. Returns true if the arms were swapped.
     bool CanonicalizeLogicAndOr(IfInstruction* iff);
+
+    // `match(x) ? true : false -> match(x)`: a conditional whose condition is a
+    // pattern match (MatchInstruction.IsPatternMatch) and whose arms are
+    // ldc.i4 1 / ldc.i4 0 is redundant -- the MatchInstruction already evaluates
+    // to 1 (matched) / 0 (not matched). The if is replaced by the condition (the
+    // pattern match). When the if is a sub-expression value, ReplaceWith is a
+    // clean in-place swap (the C# does `inst.ReplaceWith(matchCondition)`); when
+    // the if is a block's FinalInstruction (a statement-if), the MatchInstruction
+    // (a value, not control flow) cannot be the final, so it becomes a non-
+    // terminal statement (its side effect -- storing into Variable -- is
+    // preserved) and a Branch to the next block replaces the if-final (the
+    // HandleConditionalOperator block-model adaptation). Returns true if the
+    // fold fired (the if is destroyed).
+    bool FoldMatchTrueFalse(IfInstruction* iff);
+
+    // The settings snapshot for the duration of a Run (the C# stores the
+    // StatementTransformContext as a member). Consulted by IsPatternMatch in
+    // FoldMatchTrueFalse; null only between Run calls.
+    const ILTransformSettings* settings_ = nullptr;
 };
 
 } // namespace ILSpy::Decompiler::IL
