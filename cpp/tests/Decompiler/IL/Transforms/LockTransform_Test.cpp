@@ -18,11 +18,17 @@
 
 // Tests for LockTransform: the no-flag MCS and V2 lock shapes (Monitor.Enter /
 // Exit try/finally with a straight `call Exit` finally) fold into a
-// LockInstruction (`lock (expr) { body }`). Adapted to this port's block model
-// (the TryFinally is a non-terminal at block->Instructions[i] with the stloc /
-// call at [i-2] / [i-1] after CFS merges the EH wrapper with the preceding
-// block; the endfinally `leave` is the finally entry's FinalInstruction). The
-// flag-based V4 / Roslyn shapes are deferred to a later iteration.
+// LockInstruction (`lock (expr) { body }`), and the flag-based Roslyn shape
+// (`stloc obj; stloc flag(ldc.i4 0); .try { call Enter(ldloc obj, ldloca flag);
+// body } finally { if (!flag) leave; call Exit(ldloc obj); leave }`) folds the
+// same way. Adapted to this port's block model (the TryFinally is a non-terminal
+// at block->Instructions[i] with the stloc / call at [i-2] / [i-1] after CFS
+// merges the EH wrapper with the preceding block; the endfinally `leave` is the
+// finally entry's FinalInstruction). The flag finally is TWO blocks in this
+// port (the if-skip-leave then the Exit), and the stlocs may sit in a preceding
+// block when CFS did not merge the EH wrapper. The V4 / V4YieldReturn flag
+// shapes (inline `stloc obj` as the Enter arg) and the single-block
+// `if(flag){Exit}` finally are deferred.
 
 #include "Decompiler/IL/Transforms/LockTransform.hpp"
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
@@ -38,8 +44,12 @@
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/LockInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
@@ -96,10 +106,119 @@ std::unique_ptr<Call> MakeMonitorCall(const char* shortName, ILVariablePtr arg) 
     return call;
 }
 
+// `call Monitor.Enter(ldloc obj, ldloca flag)` -- the 2-argument Roslyn flag
+// shape. The flag is taken by address (the ref bool Enter sets to true).
+std::unique_ptr<Call> MakeMonitorEnter2(ILVariablePtr obj, ILVariablePtr flag) {
+    auto call = std::make_unique<Call>(std::string("System.Threading.Monitor::") + "Enter");
+    call->AddArg(std::make_unique<LdLoc>(obj));
+    call->AddArg(std::make_unique<LdLoca>(flag));
+    return call;
+}
+
+// A flag-based finally as it appears in this port after ConditionDetection: TWO
+// blocks. block[0] = `if (comp(eq, ldloc flag, ldc.i4 0)) leave` (skip Exit when
+// the lock was not taken), block[1] = `call Exit(ldloc obj); leave`.
+void AddFlagFinally(BlockContainer* finallyContainer, ILVariablePtr flag, ILVariablePtr obj) {
+    auto b0 = std::make_unique<Block>();
+    auto cond = std::make_unique<Comp>(std::make_unique<LdLoc>(flag),
+                                       std::make_unique<LdcI4>(0),
+                                       ComparisonKind::Equality, false);
+    b0->SetFinal(std::make_unique<IfInstruction>(std::move(cond),
+                                                std::make_unique<Leave>(finallyContainer)));
+    finallyContainer->AddBlock(std::move(b0));
+    auto b1 = std::make_unique<Block>();
+    b1->Add(MakeMonitorCall("Exit", obj));
+    b1->SetFinal(std::make_unique<Leave>(finallyContainer));
+    finallyContainer->AddBlock(std::move(b1));
+}
+
+// A Roslyn try entry: `call Enter(ldloc obj, ldloca flag); <body>; leave(try)`.
+Block* AddRoslynTryEntry(BlockContainer* tryContainer, ILVariablePtr obj, ILVariablePtr flag) {
+    auto entry = std::make_unique<Block>();
+    entry->Add(MakeMonitorEnter2(obj, flag));
+    entry->Add(std::make_unique<Call>("System.Foo::Bar"));
+    entry->SetFinal(std::make_unique<Leave>(tryContainer));
+    auto* p = entry.get();
+    tryContainer->AddBlock(std::move(entry));
+    return p;
+}
+
+// Build a standalone Roslyn flag-lock ILFunction. If `precedingBlock` is true,
+// the stloc obj / stloc flag sit in a separate block before the TryFinally
+// (the dominant mscorlib shape); otherwise they share the TryFinally's block
+// (the C# same-block shape). Returns the function and exposes the lock-object
+// and lock-expression variables via the out-params.
+struct RoslynSetup {
+    std::unique_ptr<ILFunction> fn;
+    ILVariablePtr exprObj;
+    ILVariablePtr lockObj;
+    ILVariablePtr flag;
+};
+RoslynSetup BuildRoslynLock(bool precedingBlock) {
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto exprObj = MakeParam("expr", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto lockObj = MakeLocal("obj", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto flag = MakeLocal("flag", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    fn->Variables.push_back(exprObj);
+    fn->Variables.push_back(lockObj);
+    fn->Variables.push_back(flag);
+
+    auto tryContainer = std::make_unique<BlockContainer>();
+    auto finallyContainer = std::make_unique<BlockContainer>();
+    auto* tryC = tryContainer.get();
+    auto* finC = finallyContainer.get();
+    auto tf = std::make_unique<TryFinally>(std::move(tryContainer), std::move(finallyContainer));
+    AddRoslynTryEntry(tryC, lockObj, flag);
+    AddFlagFinally(finC, flag, lockObj);
+
+    auto next = std::make_unique<Block>();
+    Block* nextPtr = next.get();
+    next->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+
+    if (precedingBlock) {
+        // block P: [stloc obj, stloc flag], final = br Q; block Q: [TryFinally],
+        // final = leave(body).
+        auto P = std::make_unique<Block>();
+        P->Add(std::make_unique<StLoc>(lockObj, std::make_unique<LdLoc>(exprObj)));
+        P->Add(std::make_unique<StLoc>(flag, std::make_unique<LdcI4>(0)));
+        auto Q = std::make_unique<Block>();
+        Block* QPtr = Q.get();
+        P->SetFinal(std::make_unique<Branch>(QPtr));
+        Q->Add(std::move(tf));
+        Q->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+        fn->Body->AddBlock(std::move(P));
+        fn->Body->AddBlock(std::move(Q));
+    } else {
+        // root: [stloc obj, stloc flag, TryFinally], final = br next.
+        auto root = std::make_unique<Block>();
+        root->Add(std::make_unique<StLoc>(lockObj, std::make_unique<LdLoc>(exprObj)));
+        root->Add(std::make_unique<StLoc>(flag, std::make_unique<LdcI4>(0)));
+        root->Add(std::move(tf));
+        root->SetFinal(std::make_unique<Branch>(nextPtr));
+        fn->Body->AddBlock(std::move(root));
+    }
+    fn->Body->AddBlock(std::move(next));
+    return {std::move(fn), exprObj, lockObj, flag};
+}
+
+// Count LockInstruction nodes in a function.
+int CountLocks(ILFunction& fn);
+
 void Walk(ILInstruction* inst, const std::function<void(ILInstruction*)>& visit) {
     if (!inst) return;
     visit(inst);
     for (int i = 0; i < inst->ChildCount(); ++i) Walk(inst->GetChild(i), visit);
+}
+
+int CountLocks(ILFunction& fn) {
+    int n = 0;
+    Walk(fn.Body.get(), [&](ILInstruction* i) {
+        if (i->Op == OpCode::LockInstruction) ++n;
+    });
+    return n;
 }
 
 // Run the full pre-pipeline through LockTransform (the GetILTransforms()
@@ -267,6 +386,133 @@ TEST(LockTransform, TransformLockV2FoldsToLockInstruction) {
     EXPECT_EQ(static_cast<LdLoc*>(lk->OnExpression.get())->Variable.get(), temp.get());
 }
 
+// ---- TransformLockRoslyn (flag-based, same-block) ----
+
+// `stloc obj(lockExpr); stloc flag(ldc.i4 0); .try { call Enter(ldloc obj,
+// ldloca flag); body } finally { if (!flag) leave; call Exit(ldloc obj); leave }`
+// -> `lock (lockExpr) { body }`. The stlocs and TryFinally share one block.
+TEST(LockTransform, TransformLockRoslynSameBlockFolds) {
+    auto setup = BuildRoslynLock(/*precedingBlock=*/false);
+    auto& fn = setup.fn;
+    fn->CheckInvariant(ILPhase::Normal);
+    ILTransformContext ctx;
+    LockTransform().Run(*fn, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ASSERT_EQ(CountLocks(*fn), 1);
+    auto* rootBlock = fn->Body->Blocks[0].get();
+    ASSERT_EQ(rootBlock->Instructions.size(), 1u);
+    ASSERT_EQ(rootBlock->Instructions[0]->Op, OpCode::LockInstruction);
+    auto* lk = static_cast<LockInstruction*>(rootBlock->Instructions[0].get());
+    ASSERT_EQ(lk->OnExpression->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(lk->OnExpression.get())->Variable.get(), setup.exprObj.get());
+    // The call Enter was dropped from the try entry; the lock body still has the
+    // body call.
+    auto* bodyC = static_cast<BlockContainer*>(lk->Body.get());
+    ASSERT_FALSE(bodyC->Blocks.empty());
+    auto* te = bodyC->Blocks[0].get();
+    ASSERT_EQ(te->Instructions.size(), 1u);
+    EXPECT_EQ(te->Instructions[0]->Op, OpCode::Call);
+}
+
+// ---- TransformLockRoslyn (flag-based, preceding-block) ----
+
+// The dominant mscorlib shape: the stloc obj / stloc flag sit in a separate
+// block before the TryFinally's block (CFS did not merge them). The fold puts
+// the LockInstruction in the preceding block, absorbs the TryFinally's block
+// final (the after-lock continuation) into it, and drops the now-empty
+// TryFinally block.
+TEST(LockTransform, TransformLockRoslynPrecedingBlockFolds) {
+    auto setup = BuildRoslynLock(/*precedingBlock=*/true);
+    auto& fn = setup.fn;
+    fn->CheckInvariant(ILPhase::Normal);
+    ILTransformContext ctx;
+    LockTransform().Run(*fn, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ASSERT_EQ(CountLocks(*fn), 1);
+    // The TryFinally's block was dropped; the body now has the (former) preceding
+    // block and the trailing next block.
+    ASSERT_EQ(fn->Body->Blocks.size(), 2u);
+    auto* lockBlock = fn->Body->Blocks[0].get();
+    ASSERT_EQ(lockBlock->Instructions.size(), 1u);
+    ASSERT_EQ(lockBlock->Instructions[0]->Op, OpCode::LockInstruction);
+    auto* lk = static_cast<LockInstruction*>(lockBlock->Instructions[0].get());
+    ASSERT_EQ(lk->OnExpression->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(lk->OnExpression.get())->Variable.get(), setup.exprObj.get());
+    // The preceding block absorbed the TryFinally's block final (the function
+    // body leave).
+    ASSERT_EQ(lockBlock->FinalInstruction->Op, OpCode::Leave);
+}
+
+// ---- Roslyn negatives ----
+
+// A non-Boolean flag (e.g. Int32) must not fold (the flag is the Enter ref bool).
+TEST(LockTransform, RoslynRejectsNonBooleanFlag) {
+    auto setup = BuildRoslynLock(/*precedingBlock=*/false);
+    // Retype the flag to Int32 (not Boolean).
+    setup.flag->Type = std::make_shared<KnownType>(KnownTypeCode::Int32);
+    ILTransformContext ctx;
+    LockTransform().Run(*setup.fn, ctx);
+    EXPECT_EQ(CountLocks(*setup.fn), 0);
+}
+
+// A flag initialised to a non-zero value must not fold (Enter sets the flag;
+// the init must be the canonical ldc.i4 0).
+TEST(LockTransform, RoslynRejectsNonZeroFlagInit) {
+    auto setup = BuildRoslynLock(/*precedingBlock=*/false);
+    // Rebuild the flag store with ldc.i4 1.
+    auto* root = setup.fn->Body->Blocks[0].get();
+    auto* fs = static_cast<StLoc*>(root->Instructions[1].get());
+    fs->Value = std::make_unique<LdcI4>(1);
+    fs->Value->Parent = fs;
+    ILTransformContext ctx;
+    LockTransform().Run(*setup.fn, ctx);
+    EXPECT_EQ(CountLocks(*setup.fn), 0);
+}
+
+// A non-Monitor Enter (some other type's Enter, 2-arg) must not fold.
+TEST(LockTransform, RoslynRejectsNonMonitorEnter) {
+    auto setup = BuildRoslynLock(/*precedingBlock=*/false);
+    // Replace the Enter call's method name.
+    auto* trc = static_cast<BlockContainer*>(
+        static_cast<TryFinally*>(setup.fn->Body->Blocks[0]->Instructions[2].get())->TryBlock.get());
+    auto* enter = static_cast<Call*>(trc->Blocks[0]->Instructions[0].get());
+    enter->MethodName = "MyNamespace.MyType::Enter";
+    ILTransformContext ctx;
+    LockTransform().Run(*setup.fn, ctx);
+    EXPECT_EQ(CountLocks(*setup.fn), 0);
+}
+
+// A lock object loaded three times (Enter + two Exits) exceeds the Roslyn limit
+// of two and must not fold. (The second Exit call stands in for the extra load.)
+TEST(LockTransform, RoslynRejectsHighLoadCount) {
+    auto setup = BuildRoslynLock(/*precedingBlock=*/false);
+    // Add a second Exit call to the finally's Exit block.
+    auto* tf = static_cast<TryFinally*>(setup.fn->Body->Blocks[0]->Instructions[2].get());
+    auto* fin = static_cast<BlockContainer*>(tf->FinallyBlock.get());
+    fin->Blocks[1]->Add(MakeMonitorCall("Exit", setup.lockObj));
+    ILTransformContext ctx;
+    LockTransform().Run(*setup.fn, ctx);
+    EXPECT_EQ(CountLocks(*setup.fn), 0);
+}
+
+// A finally that is not the two-block flag shape (here a single no-flag Exit
+// block) must not fold as a Roslyn lock.
+TEST(LockTransform, RoslynRejectsNonTwoBlockFinally) {
+    auto setup = BuildRoslynLock(/*precedingBlock=*/false);
+    // Replace the finally with a single no-flag Exit block.
+    auto* tf = static_cast<TryFinally*>(setup.fn->Body->Blocks[0]->Instructions[2].get());
+    auto newFin = std::make_unique<BlockContainer>();
+    auto* finC = newFin.get();
+    AddFinallyEntry(finC, setup.lockObj);
+    tf->FinallyBlock = std::move(newFin);
+    tf->FinallyBlock->Parent = tf;
+    ILTransformContext ctx;
+    LockTransform().Run(*setup.fn, ctx);
+    EXPECT_EQ(CountLocks(*setup.fn), 0);
+}
+
 // ---- Negatives ----
 
 // A non-Monitor Enter (some other type's Enter) must not fold.
@@ -426,10 +672,10 @@ TEST(LockTransform, SeedRendersLockStatement) {
 
 // On the real mscorlib corpus, running the full pre-pipeline through
 // LockTransform (the GetILTransforms() position -- after ConditionDetection)
-// preserves the ILAst invariant. The no-flag MCS/V2 shapes fire only on
-// mono-compiled assemblies; the .NET Framework 4 (legacy csc) corpus uses the
-// flag-based V4 shape (deferred), so the sweep asserts the invariant holds,
-// not a specific fold count.
+// preserves the ILAst invariant AND fires the flag-based Roslyn shape (the
+// dominant .NET Framework 4 codegen), so the sweep asserts both the invariant
+// and a non-trivial fold count. The no-flag MCS/V2 shapes fire only on
+// mono-compiled assemblies.
 TEST(LockTransform, MscorlibSweepPreservesInvariant) {
 #if defined(_WIN32)
     const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
@@ -454,8 +700,11 @@ TEST(LockTransform, MscorlibSweepPreservesInvariant) {
             if (i->Op == OpCode::LockInstruction) ++folded;
         });
         fn->CheckInvariant(ILPhase::Normal);
-        if (processed >= 8000) break;
     }
     EXPECT_GT(processed, 5000);
-    (void)folded;  // corpus-dependent; reported not asserted
+    // The flag-based Roslyn shape is the dominant .NET Framework 4 codegen, so
+    // the transform now fires on the corpus (the no-flag MCS/V2 shapes fire only
+    // on mono-compiled assemblies). Assert a non-trivial fold count so a
+    // regression that drops the flag-based path is caught.
+    EXPECT_GT(folded, 100);
 }

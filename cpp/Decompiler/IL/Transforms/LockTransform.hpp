@@ -20,41 +20,57 @@
 // Detects the C# `lock` statement's Monitor.Enter/Exit try/finally pattern and
 // folds it into a LockInstruction (`lock (expr) { body }`).
 //
-// This iteration ports the two *no-flag* shapes that have a straight
-// `call Exit` finally (no `if (flag)` guard):
-//   - TransformLockMCS (the mono/mcs shape): `stloc lockObj(lockExpression);
-//     call Enter(ldloc lockObj); .try { ... } finally { call Exit(ldloc
-//     lockObj); leave }` -> `lock (lockExpression) { ... }`.
-//   - TransformLockV2 (the legacy mono shape with a temp): `stloc
-//     lockObj(ldloc tempVar); call Enter(ldloc tempVar); .try { ... } finally
-//     { call Exit(ldloc lockObj); leave }` -> `lock (ldloc tempVar) { ... }`.
+// Two families are ported:
+//   - The *no-flag* shapes (MCS / V2): a straight `call Exit` finally (no
+//     `if (flag)` guard). `stloc lockObj(lockExpression); call Enter(ldloc
+//     lockObj); .try { ... } finally { call Exit(ldloc lockObj); leave }` ->
+//     `lock (lockExpression) { ... }` (MCS); V2 is the temp variant. These
+//     fire only on mono-compiled assemblies.
+//   - The *flag-based* Roslyn shape (the dominant .NET Framework 4 / Roslyn
+//     codegen): `stloc obj(lockExpression); stloc flag(ldc.i4 0); .try { call
+//     Enter(ldloc obj, ldloca flag); body } finally { if (!flag) leave; call
+//     Exit(ldloc obj); leave }` -> `lock (lockExpression) { body }`.
 //
-// Deferred vs the C#: the three *flag-based* shapes (TransformLockV4 /
-// TransformLockV4YieldReturn / TransformLockRoslyn), which guard the Exit call
-// with `if (ldloc flag) { call Exit }` in the finally. In this port's
-// if-as-final block model the finally's `if (flag) { Exit }` is the block's
-// FinalInstruction (not a non-terminal at Instructions[0]) and the trailing
-// endfinally `leave` is inlined into the if's FalseInst by ConditionDetection
-// (or is the next block); matching that shape is a separate adaptation and
-// lands in a later iteration. The flag-based shapes are the ones the modern
-// Roslyn and the .NET Framework 4 (legacy csc) compilers emit, so they fire on
-// the real corpus; the no-flag MCS/V2 shapes fire only on mono-compiled
-// assemblies, so this subset's mscorlib sweep asserts the invariant holds (not a
-// fold count), matching the LdLocaDupInitObj / DetectCatchWhenConditionBlocks
-// precedent.
+// Block-model adaptation (flag-based): the C# carries the finally's `if (flag)
+// { Exit }` and the endfinally `leave` as two non-terminals of ONE block
+// (Instructions[0]/[1]); this port's if-as-final model and ConditionDetection
+// leave the brfalse-skip as a separate first block, so the flag finally is TWO
+// blocks -- `if (comp(eq,flag,0)) leave` then `call Exit; leave` -- and
+// MatchExitBlockFlag matches that shape (the C# single-block `if(flag){Exit}`
+// shape does not arise here). The stloc obj / stloc flag sit either in the
+// TryFinally's own block (the C# same-block indexing) or, when CFS did not
+// merge the EH wrapper with the preceding block (the dominant mscorlib case:
+// the fall-through branch into the TryFinally resolves to the try entry inside
+// the try container, not the wrapper, so the wrapper has IncomingEdgeCount==0
+// and CFS leaves the stlocs in a separate preceding block), in the preceding
+// block in the same container. The preceding-block fold absorbs the
+// TryFinally's block final into the preceding block and drops the now-empty
+// TryFinally block (the preceding block's `br` into the try would dangle into
+// the lock body once the TryFinally becomes a LockInstruction, so it is
+// discarded -- the LockInstruction subsumes the try entry); the dropped block
+// is moved to a graveyard vector so the container iteration stays valid.
 //
-// Adapted to this port's block model: the C# carries the TryFinally as a
-// non-terminal at block.Instructions[i] with the stloc/call at [i-2]/[i-1];
-// after the pre-pipeline's CFS merges the EH wrapper block (TryFinally alone)
-// with the preceding block (stloc + call + br wrapper), this port has the same
-// shape -- TryFinally at Instructions[i], call at [i-1], stloc at [i-2]. The
-// finally's endfinally `leave` is this port's FinalInstruction (the C# carries
-// it as a non-terminal at Instructions[1]), so MatchExitBlock checks
-// Instructions[0] = call Exit and the FinalInstruction = leave(finally
-// container) instead of Instructions[1]. SortBlocks(deleteUnreachableBlocks)
-// is unsafe in this port (D58), but the rewrite does not delete blocks (it only
-// replaces the TryFinally with a LockInstruction and drops two non-terminal
-// stores), so no block deletion is needed.
+// Deferred vs the C#: the V4 / V4YieldReturn flag shapes (which pass an inline
+// `stloc obj(lockExpression)` as the Enter call's first argument rather than a
+// separate `stloc obj`), and the single-block `if(flag){Exit}` finally shape;
+// neither appears in the .NET Framework 4 mscorlib corpus (0 inline-stloc Enter
+// args, 0 single-block flag finallys across ~600 lock methods), so the hand-
+// built tests cover the Roslyn shape and the mscorlib sweep asserts the fold
+// count.
+//
+// General block-model notes: the C# carries the TryFinally as a non-terminal
+// at block.Instructions[i] with the stloc/call at [i-2]/[i-1]; after the pre-
+// pipeline's CFS merges the EH wrapper block (TryFinally alone) with the
+// preceding block (stloc + call + br wrapper), the no-flag shapes have the
+// same shape here -- TryFinally at Instructions[i], call at [i-1], stloc at
+// [i-2]. The finally's endfinally `leave` is this port's FinalInstruction (the
+// C# carries it as a non-terminal at Instructions[1]), so MatchExitBlockNoFlag
+// checks Instructions[0] = call Exit and the FinalInstruction = leave(finally
+// container). SortBlocks(deleteUnreachableBlocks) is unsafe in this port
+// (D58); the no-flag rewrite does not delete blocks (it only replaces the
+// TryFinally with a LockInstruction and drops two non-terminal stores), and
+// the flag rewrite moves the dropped block to a graveyard rather than erasing
+// it in place.
 
 #pragma once
 

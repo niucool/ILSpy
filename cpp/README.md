@@ -192,30 +192,43 @@ implemented and green here. Everything else follows the phase plan in
   IMember) are deferred -- the top-level `is T` / `is T x` is produced without them.
   `LockTransform` (Transforms/, ported from LockTransform.cs) detects the C#
   `lock` statement's Monitor.Enter/Exit try/finally pattern and folds it into a
-  `LockInstruction` (`lock (expr) { body }`). This iteration ports the two
-  no-flag shapes with a straight `call Exit` finally (the mono/mcs shape and
-  the legacy mono shape with a temp); the flag-based V4 / V4YieldReturn /
-  Roslyn shapes (whose finally guards the Exit call with `if (ldloc flag) {
-  call Exit }`) are deferred -- in this port's if-as-final block model that
-  finally `if` is the block's FinalInstruction and the trailing endfinally
-  `leave` is inlined into the if's FalseInst by ConditionDetection, so the
-  matching shape is a separate adaptation. Adapted to the block model: after
-  the pre-pipeline's CFS merges the EH wrapper block (TryFinally alone) with
-  the preceding block (stloc + call Enter), the stloc/call/TryFinally sit
-  consecutively in one block's Instructions (the C# shape); the endfinally
-  `leave` is this port's FinalInstruction (not a second non-terminal), and the
-  EH-reached try/finally entry single-predecessor checks are ==0 here (the
-  port does not count the container-entry edge, D59). Gated on `LockStatement`
-  (default true). The no-flag shapes fire only on mono-compiled assemblies, so
-  the sweep asserts the invariant holds (not a fold count), matching the
-  LdLocaDupInitObj precedent.
+  `LockInstruction` (`lock (expr) { body }`). Two families are ported: the
+  no-flag MCS / V2 shapes (a straight `call Exit` finally, which fire only on
+  mono-compiled assemblies) and the flag-based Roslyn shape (`stloc
+  obj(lockExpr); stloc flag(ldc.i4 0); .try { call Enter(ldloc obj, ldloca
+  flag); body } finally { if (!flag) leave; call Exit(ldloc obj); leave }`),
+  which is the dominant .NET Framework 4 / Roslyn codegen. Adapted to this
+  port's if-as-final block model: the C# carries the flag finally's `if (flag)
+  { Exit }` and the endfinally `leave` as two non-terminals of one block, but
+  this port's ConditionDetection leaves the brfalse-skip as a separate first
+  block, so the flag finally is TWO blocks (`if (comp(eq,flag,0)) leave` then
+  `call Exit; leave`) and `MatchExitBlockFlag` matches that shape. The stloc
+  obj / stloc flag sit either in the TryFinally's own block (the C# same-block
+  indexing) or, when CFS did not merge the EH wrapper with the preceding
+  block (the dominant mscorlib case: the fall-through branch into the
+  TryFinally resolves to the try entry inside the try container, not the
+  wrapper, so the wrapper has IncomingEdgeCount==0 and CFS leaves the stlocs in
+  a separate preceding block), in the preceding block; the preceding-block
+  fold absorbs the TryFinally's block final into the preceding block and drops
+  the now-empty TryFinally block (the preceding block's `br` into the try
+  would dangle into the lock body once the TryFinally becomes a LockInstruction,
+  so it is discarded -- the LockInstruction subsumes the try entry), moving
+  the dropped block to a graveyard so the container iteration stays valid.
+  The EH-reached try/finally entry single-predecessor checks are ==0 here
+  (the port does not count the container-entry edge, D59). Gated on
+  `LockStatement` (default true). The flag-based shape fires 517 times on
+  the full mscorlib corpus (the CLI emits 517 `lock (...)` statements, up from
+  0 with only the no-flag shapes); the V4 / V4YieldReturn flag shapes (inline
+  `stloc obj` as the Enter arg) and the single-block `if(flag){Exit}` finally
+  are deferred (0 occurrences in mscorlib).
   The CLI applies CFS + StObjToStLoc + ILInlining + InlineReturnTransform +
   RemoveInfeasiblePath + DetectPinnedRegions + DetectCatchWhenConditionBlocks +
   LdLocaDupInitObjTransform + EarlyExpressionTransforms + RemoveDeadVariableInit +
   CFS + SwitchDetection + SwitchOnNullable + LoopDetection + PatternMatching +
   ConditionDetection + LockTransform + AssignVariableNames + RemoveRedundantReturn before the
   C# seed, so `fixed (...) { ... }`, `default(T)`, reconstructed `switch`
-  statements, switch-on-nullable `case null:` arms, and `is T x` patterns now
+  statements, switch-on-nullable `case null:` arms, `is T x` patterns, and
+  `lock (...) { ... }` statements now
   appear in the output. 21 of ~40 transforms ported.
   Next per `GetILTransforms()`:
   the async/iterator state machines
@@ -224,10 +237,7 @@ implemented and green here. Everything else follows the phase plan in
   DetectExitPoints + the full ConditionDetection (multi-pred join blocks),
   the PatternMatchingTransform recursive sub-patterns (DetectPropertySubPatterns /
   PropertyOrFieldAccess / CompatibleExitInstruction),
-  the LockTransform flag-based shapes (V4 / V4YieldReturn / Roslyn -- the
-  `if (ldloc flag) { call Exit }` finally-guarded shapes the modern and legacy
-  csc compilers emit; the if-as-final finally-block adaptation is the open
-  piece), UsingTransform, CachedDelegateInitialization, ...
+  UsingTransform, CachedDelegateInitialization, ...
   HighLevelLoopTransform (while/for),
   TransformAssignment, ...
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
