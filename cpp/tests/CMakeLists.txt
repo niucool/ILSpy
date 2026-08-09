@@ -5,6 +5,7 @@ include(GoogleTest)
 
 add_executable(ilspy_tests
     Util/Util_Test.cpp
+    Util/LongSet_Test.cpp
     Decompiler/Metadata/Metadata_Test.cpp
     Decompiler/Metadata/MethodBody_Test.cpp
     Decompiler/Metadata/ILDisassembler_Test.cpp

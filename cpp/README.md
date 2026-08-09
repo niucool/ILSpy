@@ -89,14 +89,23 @@ implemented and green here. Everything else follows the phase plan in
   `RemoveDeadStores` setting, with no loads or addresses, has its stores dropped
   (a pure value goes with the store; an impure value is unwrapped so its side
   effect survives), and dead-copy chains collapse via a recompute fixpoint.
-  15 of ~40 transforms ported. The CLI applies CFS + StObjToStLoc + ILInlining +
+  15 of ~40 transforms ported. The switch-family foundation is now in place:
+  `LongSet`/`LongInterval` (Util/, ported from LongSet.cs / Interval.cs) -- an
+  immutable interval-set of longs whose complement is representable (unlike
+  `std::set<int64_t>`) -- backs `SwitchSection::Labels` and is the prerequisite
+  for SwitchAnalysis / SwitchDetection / SwitchOnString / SwitchOnNullable
+  (which compute value-set complements like `new LongSet(val).Invert()`). The CLI applies CFS + StObjToStLoc + ILInlining +
   InlineReturnTransform + RemoveInfeasiblePath + DetectPinnedRegions +
   DetectCatchWhenConditionBlocks + LdLocaDupInitObjTransform +
   EarlyExpressionTransforms + RemoveDeadVariableInit + CFS +
   LoopDetection + ConditionDetection + AssignVariableNames + RemoveRedundantReturn
   before the C# seed, so `fixed (...) { ... }` and `default(T)` now appear in
   the output. Next
-  per `GetILTransforms()`: the async/iterator state machines
+  per `GetILTransforms()`: the switch family (SwitchDetection, then
+  SwitchOnString/SwitchOnNullable -- now unblocked by LongSet, but needing the
+  `SparseIntegerSwitch`/`SwitchStatementOnString`/`LiftNullables` settings and
+  the LongSet-based `SwitchAnalysis` helper),
+  the async/iterator state machines
   (YieldReturnDecompiler/AsyncAwaitDecompiler), SplitVariables (needs
   reaching-definitions dataflow),
   DetectExitPoints + the full ConditionDetection (multi-pred join blocks),

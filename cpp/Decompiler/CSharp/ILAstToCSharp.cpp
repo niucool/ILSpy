@@ -319,11 +319,16 @@ private:
                 Line(indent, "{");
                 for (const auto& section : sw.Sections) {
                     if (!section) continue;
-                    if (section->Labels.empty()) {
+                    if (section->Labels.IsEmpty()) {
                         Line(indent + 1, "default:");
                     } else {
-                        for (std::int64_t label : section->Labels)
-                            Line(indent + 1, "case " + std::to_string(label) + ":");
+                        for (const auto& iv : section->Labels.Intervals()) {
+                            if (iv.Start == iv.InclusiveEnd())
+                                Line(indent + 1, "case " + std::to_string(iv.Start) + ":");
+                            else
+                                Line(indent + 1, "case " + std::to_string(iv.Start) +
+                                      ".." + std::to_string(iv.InclusiveEnd()) + ":");
+                        }
                     }
                     if (section->Body) EmitStatement(*section->Body, indent + 1);
                 }

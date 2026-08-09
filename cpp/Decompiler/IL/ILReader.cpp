@@ -892,7 +892,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             auto sw = std::make_unique<SwitchInstruction>(std::move(value));
             for (std::uint32_t i = 0; i < n; ++i) {
                 auto sec = std::make_unique<SwitchSection>();
-                sec->Labels.insert(static_cast<std::int64_t>(i));
+                sec->Labels = Util::LongSet(static_cast<long long>(i));
                 sec->SetBody(std::make_unique<Branch>(targets[i]));
                 sw->AddSection(std::move(sec));
             }

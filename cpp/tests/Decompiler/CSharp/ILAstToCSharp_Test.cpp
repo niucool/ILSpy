@@ -342,7 +342,7 @@ TEST(ILAstToCSharp, SwitchEmitsCaseLabelsWithGotos) {
     brDefault->HasOffset = false;
 
     auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v0));
-    auto caseSection = std::make_unique<SwitchSection>(std::set<std::int64_t>{0});
+    auto caseSection = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
     caseSection->SetBody(std::move(brCase));
     sw->AddSection(std::move(caseSection));
     auto defaultSection = std::make_unique<SwitchSection>();

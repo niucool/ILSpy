@@ -25,11 +25,11 @@
 #pragma once
 
 #include "Decompiler/IL/ILInstruction.hpp"
+#include "Decompiler/Util/LongSet.hpp"
 
 #include <cassert>
 #include <cstdint>
 #include <memory>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -37,10 +37,14 @@ namespace ILSpy::Decompiler::IL {
 
 class SwitchSection : public ILInstruction {
 public:
-    std::set<std::int64_t> Labels;  // case constants; empty = default section
+    // The case constants for this section. The default section carries an empty
+    // LongSet. LongSet (intervals) rather than std::set<int64_t> because the
+    // switch-family transforms compute complements (e.g. `new LongSet(val).Invert()`),
+    // which are infinite and need the interval representation.
+    Util::LongSet Labels;
     std::unique_ptr<ILInstruction> Body;  // a Branch (offset form) post-reader
     SwitchSection() : ILInstruction(OpCode::SwitchSection) {}
-    explicit SwitchSection(std::set<std::int64_t> labels) : ILInstruction(OpCode::SwitchSection), Labels(std::move(labels)) {}
+    explicit SwitchSection(Util::LongSet labels) : ILInstruction(OpCode::SwitchSection), Labels(std::move(labels)) {}
     InstructionFlags DirectFlags() const override { return InstructionFlags::None; }
     StackType ResultType() const override { return StackType::Void; }
     int ChildCount() const override { return Body ? 1 : 0; }
@@ -54,9 +58,12 @@ public:
     void WriteTo(std::string& out) const override {
         out += "section(";
         bool first = true;
-        for (auto l : Labels) {
+        for (const auto& iv : Labels.Intervals()) {
             if (!first) out += ", ";
-            out += std::to_string(l);
+            if (iv.Start == iv.InclusiveEnd())
+                out += std::to_string(iv.Start);
+            else
+                out += std::to_string(iv.Start) + ".." + std::to_string(iv.InclusiveEnd());
             first = false;
         }
         if (first) out += "default";
