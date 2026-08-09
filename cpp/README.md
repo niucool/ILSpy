@@ -89,7 +89,7 @@ implemented and green here. Everything else follows the phase plan in
   `RemoveDeadStores` setting, with no loads or addresses, has its stores dropped
   (a pure value goes with the store; an impure value is unwrapped so its side
   effect survives), and dead-copy chains collapse via a recompute fixpoint.
-  18 of ~40 transforms ported. The switch-detection family is now complete in
+  19 of ~40 transforms ported. The switch-detection family is now complete in
   its core: `LongSet`/`LongInterval` (Util/, ported from LongSet.cs /
   Interval.cs) -- an immutable interval-set of longs whose complement is
   representable (unlike `std::set<int64_t>`) -- backs `SwitchSection::Labels`
@@ -149,17 +149,39 @@ implemented and green here. Everything else follows the phase plan in
   its `FinalInstruction`); the dead switchBlock stays in the tree (per D58 --
   `SortBlocks(deleteUnreachableBlocks)` is unsafe in this port) and only the
   edge counts are refreshed.
+  `MatchInstruction` (Instructions/, a tested-but-not-yet-wired foundation)
+  ports the C# `is`-pattern ILAst node the next in-order transform
+  (PatternMatchingTransform) builds from isinst + null-test blocks: it
+  evaluates TestedOperand, matches against CheckType (`is T`) / CheckNotNull
+  (`is {}`) / neither (`is var`), stores the matched value into Variable (an
+  IStoreInstruction -- ComputeVariableUsage counts it as a store), and
+  evaluates to I4. The static `IsPatternMatch` helper (which the recursive-
+  sub-pattern path consults) recognises a MatchInstruction, a Comp constant /
+  relational pattern (gated on RelationalPatterns / PatternCombinators), a
+  logic.not-wrapped pattern (this port's `comp(eq, X, ldc.i4 0)` shape), and a
+  `string.op_Equality(x, "lit")` string-constant pattern. The ILAstToCSharp
+  seed renders a MatchInstruction condition as `expr is var x` / `is T x` /
+  `is {} x` / `is T`. The four pattern-matching settings (PatternMatching,
+  RecursivePatternMatching, PatternCombinators, RelationalPatterns, all
+  default true) are added. The deconstruct patterns (IsDeconstructCall /
+  IsDeconstructTuple + an IMethod operand) are deferred (need IMethod +
+  TupleType). No pipeline transform constructs MatchInstructions yet, so
+  `--csharp` output is unchanged; the seed's MatchInstruction case is exercised
+  by the unit tests, not the corpus.
   The CLI applies CFS + StObjToStLoc + ILInlining + InlineReturnTransform +
   RemoveInfeasiblePath + DetectPinnedRegions + DetectCatchWhenConditionBlocks +
   LdLocaDupInitObjTransform + EarlyExpressionTransforms + RemoveDeadVariableInit +
   CFS + SwitchDetection + SwitchOnNullable + LoopDetection + ConditionDetection +
   AssignVariableNames + RemoveRedundantReturn before the C# seed, so `fixed (...)
   { ... }`, `default(T)`, reconstructed `switch` statements, and switch-on-
-  nullable `case null:` arms now appear in the output. 18 of ~40 transforms
-  ported. Next per `GetILTransforms()`: 
-  SwitchOnString (need the `SwitchStatementOnString` setting and
-  `SwitchOnStringTransform.MatchComputeStringOrReadOnlySpanHashCall` + a
-  `StringToInt` node),
+  nullable `case null:` arms now appear in the output. 19 of ~40 transforms
+  ported (the MatchInstruction `is`-pattern node is now ported as a tested-
+  but-not-yet-wired foundation for the next in-order PatternMatchingTransform).
+  Next per `GetILTransforms()`:
+  PatternMatchingTransform (the MatchInstruction node + IsPatternMatch helper
+  are in place; still needs `MatchIfAtEndOfBlock`, per-variable load/store
+  instruction lists for `CheckAllUsesDominatedBy`, and
+  `DetectExitPoints.CompatibleExitInstruction`),
   the async/iterator state machines
   (YieldReturnDecompiler/AsyncAwaitDecompiler), SplitVariables (needs
   reaching-definitions dataflow),

@@ -58,6 +58,24 @@ struct ILTransformSettings {
     // (MatchHasValueCall / MatchGetValueOrDefault) consults this implicitly via
     // the transforms that call them.
     bool LiftNullables = true;
+    // Whether to detect C# 7.0 `is` patterns (type / non-null / var). Gates the
+    // PatternMatchingTransform (the next in-order transform after the switch
+    // family). DecompilerSettings.PatternMatching -- default true. The
+    // MatchInstruction node itself is unconditional; this gates the transform
+    // that builds it from isinst + null-test blocks.
+    bool PatternMatching = true;
+    // Whether to detect C# 8.0 recursive patterns (`expr is C { A: var x } z`).
+    // DecompilerSettings.RecursivePatternMatching -- default true. Consulted by
+    // the PatternMatchingTransform recursive-sub-pattern path (deferred).
+    bool RecursivePatternMatching = true;
+    // Whether to detect C# 9.0 `and` / `or` / `not` pattern combinators.
+    // DecompilerSettings.PatternCombinators -- default true. MatchInstruction.
+    // IsPatternMatch gates a negated pattern (logic.not of a pattern) on this.
+    bool PatternCombinators = true;
+    // Whether to detect C# 9.0 relational patterns (`is < 42`, `is >= 0`).
+    // DecompilerSettings.RelationalPatterns -- default true. MatchInstruction.
+    // IsPatternMatch gates comparison kinds other than == / != on this.
+    bool RelationalPatterns = true;
 };
 
 class ILTransformContext {

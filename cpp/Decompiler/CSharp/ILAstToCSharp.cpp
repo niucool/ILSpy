@@ -45,6 +45,7 @@
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/PinnedRegion.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
@@ -724,6 +725,43 @@ private:
             case OpCode::DefaultValue: {
                 const auto& dv = static_cast<const DefaultValue&>(inst);
                 return "default(" + CSharpTypeName(dv.Type) + ")";
+            }
+            case OpCode::MatchInstruction: {
+                // A MatchInstruction renders as the C# `is` pattern
+                // `testedOperand is <pattern>`, matching the real back end's
+                // VisitMatchInstruction (a BinaryOperatorExpression with the Is
+                // operator). The pattern is: `var v` (IsVar), `T v` (CheckType
+                // + designator), `{} v` (CheckNotNull, no type), or `T` (a pure
+                // type test with no designator). Sub-patterns (recursive
+                // patterns) and deconstruct patterns are deferred.
+                const auto& m = static_cast<const MatchInstruction&>(inst);
+                std::string lhs = m.TestedOperand ? Expr(*m.TestedOperand) : std::string("(default)");
+                std::string varName = m.Variable ? m.Variable->Name : std::string("_");
+                std::string pattern;
+                if (m.IsVar()) {
+                    // `expr is var x`
+                    pattern = "var " + varName;
+                } else if (m.CheckType) {
+                    std::string typeName = m.Variable && m.Variable->Type
+                        ? CSharpTypeName(m.Variable->Type) : std::string("var");
+                    if (m.HasDesignator()) {
+                        // `expr is T x` (a CheckNotNull + CheckType is still
+                        // `is T x`; the non-null is implied by the type test for
+                        // reference types).
+                        pattern = typeName + " " + varName;
+                    } else {
+                        // `expr is T` (pure type test, no designator).
+                        pattern = typeName;
+                    }
+                } else if (m.CheckNotNull) {
+                    // `expr is {} x` (non-null pattern, no type).
+                    pattern = "{} " + varName;
+                } else {
+                    // No flags and no sub-patterns but not IsVar (e.g. an empty
+                    // recursive pattern): render the designator as `var x`.
+                    pattern = "var " + varName;
+                }
+                return lhs + " is " + pattern;
             }
             default:
                 return "(default)/*op=" + std::to_string(static_cast<int>(inst.Op)) + "*/";

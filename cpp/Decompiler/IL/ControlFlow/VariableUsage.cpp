@@ -25,6 +25,7 @@
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 
@@ -45,6 +46,14 @@ void CountUsage(ILInstruction* inst) {
         case OpCode::StLoc: {
             auto* st = static_cast<StLoc*>(inst);
             if (st->Variable) ++st->Variable->StoreCount;
+            break;
+        }
+        // MatchInstruction is an IStoreInstruction (it captures the matched
+        // value into Variable), so it counts as a store -- mirroring the C#
+        // Connected() hook that calls variable.AddStoreInstruction(this).
+        case OpCode::MatchInstruction: {
+            auto* m = static_cast<MatchInstruction*>(inst);
+            if (m->Variable) ++m->Variable->StoreCount;
             break;
         }
         case OpCode::LdLoca: {
