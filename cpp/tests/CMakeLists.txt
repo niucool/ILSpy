@@ -40,6 +40,8 @@ add_executable(ilspy_tests
     Decompiler/IL/RemoveDeadVariableInit_Test.cpp
     Decompiler/IL/ControlFlow/SwitchAnalysis_Test.cpp
     Decompiler/IL/ControlFlow/SwitchDetection_Test.cpp
+    Decompiler/IL/ControlFlow/LoopContext_Test.cpp
+    Decompiler/IL/Transforms/HighLevelLoopTransform_Test.cpp
 )
 target_link_libraries(ilspy_tests PRIVATE
     ILSpy::ilspy

@@ -17,6 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 #include "Decompiler/IL/ControlFlow/SwitchDetection.hpp"
+#include "Decompiler/IL/ControlFlow/ControlFlowGraph.hpp"
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
@@ -25,6 +26,7 @@
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
+#include "Decompiler/IL/Transforms/HighLevelLoopTransform.hpp"
 #include "Decompiler/Util/LongSet.hpp"
 
 #include <algorithm>
@@ -204,6 +206,121 @@ void SwitchDetection::SortSwitchSections(SwitchInstruction* sw, ILTransformConte
     // Re-wire each section's ChildIndex (Value is child 0, sections are 1..n).
     for (std::size_t i = 0; i < secs.size(); ++i)
         if (secs[i]) secs[i]->ChildIndex = static_cast<int>(i + 1);
+}
+
+// ---------------------------------------------------------------------------
+// LoopContext
+// ---------------------------------------------------------------------------
+
+SwitchDetection::LoopContext::LoopContext(const ControlFlowGraph& cfg,
+                                          FlowAnalysis::ControlFlowNode* contextNode) {
+    if (!contextNode) return;
+    // Walk contextNode's successors; a node that dominates contextNode is a loop
+    // head (record it, do not recurse), else recurse into its successors. The
+    // C# uses a recursive local function; an explicit stack avoids deep
+    // recursion on large methods.
+    std::vector<FlowAnalysis::ControlFlowNode*> loopHeads;
+    std::vector<FlowAnalysis::ControlFlowNode*> stack;
+    for (auto* s : contextNode->Successors) stack.push_back(s);
+    while (!stack.empty()) {
+        auto* n = stack.back();
+        stack.pop_back();
+        if (!n || n->Visited) continue;
+        n->Visited = true;
+        if (n->Dominates(contextNode))
+            loopHeads.push_back(n);
+        else
+            for (auto* s : n->Successors) stack.push_back(s);
+    }
+    // Reset Visited on every node (the C# ResetVisited(cfg.cfg)).
+    for (const auto& node : cfg.Nodes()) node->Visited = false;
+
+    // Order loop heads by post-order number and assign increasing depths.
+    std::sort(loopHeads.begin(), loopHeads.end(),
+              [](FlowAnalysis::ControlFlowNode* a, FlowAnalysis::ControlFlowNode* b) {
+                  return a->PostOrderNumber < b->PostOrderNumber;
+              });
+    int depth = 1;
+    for (auto* head : loopHeads) {
+        continueDepth_.emplace_back(FindContinue(head), depth);
+        ++depth;
+    }
+}
+
+FlowAnalysis::ControlFlowNode* SwitchDetection::LoopContext::FindContinue(
+        FlowAnalysis::ControlFlowNode* loopHead) {
+    // OnlyOrDefault(p => p != loopHead && loopHead.Dominates(p)): the single
+    // predecessor the loop head dominates (the back-edge source), or null.
+    FlowAnalysis::ControlFlowNode* pred = nullptr;
+    int matchCount = 0;
+    for (auto* p : loopHead->Predecessors) {
+        if (p == loopHead || !loopHead->Dominates(p)) continue;
+        ++matchCount;
+        pred = p;
+    }
+    if (matchCount != 1 || !pred) return loopHead;
+
+    auto* headBlock = static_cast<Block*>(loopHead->UserData);
+    if (pred->Successors.size() == 1) {
+        Block* target = nullptr;
+        if (HighLevelLoopTransform::MatchIncrementBlock(static_cast<Block*>(pred->UserData), target) &&
+            target == headBlock)
+            return pred;
+    }
+    if (pred->Successors.size() <= 2) {
+        Block* t1 = nullptr;
+        Block* t2 = nullptr;
+        if (HighLevelLoopTransform::MatchDoWhileConditionBlock(static_cast<Block*>(pred->UserData), t1, t2) &&
+            (t1 == headBlock || t2 == headBlock))
+            return pred;
+    }
+    return loopHead;
+}
+
+bool SwitchDetection::LoopContext::MatchContinue(FlowAnalysis::ControlFlowNode* node) const {
+    return GetContinueDepth(node) != 0;
+}
+
+bool SwitchDetection::LoopContext::MatchContinue(FlowAnalysis::ControlFlowNode* node, int depth) const {
+    return GetContinueDepth(node) == depth;
+}
+
+int SwitchDetection::LoopContext::GetContinueDepth(FlowAnalysis::ControlFlowNode* node) const {
+    for (const auto& p : continueDepth_) {
+        if (p.first == node) return p.second;
+    }
+    return 0;
+}
+
+std::vector<FlowAnalysis::ControlFlowNode*>
+SwitchDetection::LoopContext::GetBreakTargets(FlowAnalysis::ControlFlowNode* dominator) const {
+    std::vector<FlowAnalysis::ControlFlowNode*> result;
+    if (!dominator) return result;
+    // Pre-order DFS over the dominator tree (skipping continue targets),
+    // collecting each node's successors that the dominator does not dominate
+    // and that are not depth-1 continues. Mirrors TreeTraversal.PreOrder +
+    // SelectMany + Where. May contain duplicates (a successor reachable from
+    // several subtree nodes); the caller dedups.
+    std::vector<FlowAnalysis::ControlFlowNode*> stack;
+    stack.push_back(dominator);
+    while (!stack.empty()) {
+        auto* n = stack.back();
+        stack.pop_back();
+        if (!n) continue;
+        if (n->DominatorTreeChildren) {
+            auto& kids = *n->DominatorTreeChildren;
+            for (auto it = kids.rbegin(); it != kids.rend(); ++it) {
+                if (!MatchContinue(*it)) stack.push_back(*it);
+            }
+        }
+        for (auto* s : n->Successors) {
+            if (!s) continue;
+            if (dominator->Dominates(s)) continue;
+            if (MatchContinue(s, 1)) continue;
+            result.push_back(s);
+        }
+    }
+    return result;
 }
 
 } // namespace ILSpy::Decompiler::IL

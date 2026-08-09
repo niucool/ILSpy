@@ -115,7 +115,19 @@ implemented and green here. Everything else follows the phase plan in
   opcode today. The full `SwitchDetection.Run` (reconstructing a switch from a
   detected if-chain via `UseCSharpSwitch`) is deferred pending its
   `LoopContext` / `HighLevelLoopTransform` / `NullableLiftingTransform` /
-  `SwitchOnStringTransform` dependencies. The CLI applies CFS + StObjToStLoc + ILInlining +
+  `SwitchOnStringTransform` dependencies; the continue/break analysis half of
+  that is now in place: `SwitchDetection.LoopContext` (ControlFlow/, the
+  continue-depth + break-target analysis over the per-container CFG dominator
+  tree) plus the `HighLevelLoopTransform` static helpers it calls
+  (`MatchIncrement`, `MatchIncrementBlock`, `MatchDoWhileConditionBlock`,
+  `IsSimpleStatement` -- the shape matchers that identify the back-edge blocks a
+  `continue;` jumps to, adapted to the if-as-final block model), so the only
+  pieces left for `SwitchDetection.Run` are the `UseCSharpSwitch` heuristic
+  (AnalyzeControlFlow/SwitchUsesGoto/IsSingleCondition), the
+  `SparseIntegerSwitch` setting gate, and the still-deferred
+  `NullableLiftingTransform.MatchHasValueCall` (AddNullCase) and
+  `SwitchOnStringTransform.MatchComputeStringOrReadOnlySpanHashCall`
+  (MatchRoslynSwitchOnString). The CLI applies CFS + StObjToStLoc + ILInlining +
   InlineReturnTransform + RemoveInfeasiblePath + DetectPinnedRegions +
   DetectCatchWhenConditionBlocks + LdLocaDupInitObjTransform +
   EarlyExpressionTransforms + RemoveDeadVariableInit + CFS +
@@ -124,10 +136,11 @@ implemented and green here. Everything else follows the phase plan in
   the output. Next
   per `GetILTransforms()`: the rest of SwitchDetection (the `Run`/ProcessBlock
   path that consumes SwitchAnalysis to build a SwitchInstruction from the
-  detected if-chain sections via `UseCSharpSwitch` -- needs the
-  `SparseIntegerSwitch` setting, the `LoopContext`/`ControlFlowGraph`
-  continue-break analysis, and the `HighLevelLoopTransform`
-  `MatchIncrementBlock`/`MatchDoWhileConditionBlock` helpers), then
+  detected if-chain sections via `UseCSharpSwitch` -- now needs only the
+  `SparseIntegerSwitch` setting and the `UseCSharpSwitch` heuristic, since the
+  `LoopContext`/`ControlFlowGraph` continue-break analysis and the
+  `HighLevelLoopTransform` `MatchIncrementBlock`/`MatchDoWhileConditionBlock`
+  helpers it depends on are now ported), then
   SwitchOnString/SwitchOnNullable (need `SwitchStatementOnString`/`LiftNullables`
   settings and the `NullableLiftingTransform`/`SwitchOnStringTransform` helpers),
   the async/iterator state machines

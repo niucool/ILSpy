@@ -46,11 +46,16 @@
 
 #pragma once
 
+#include "Decompiler/FlowAnalysis/ControlFlowNode.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
+
+#include <vector>
 
 namespace ILSpy::Decompiler::IL {
 
 class Block;
+class BlockContainer;
+class ControlFlowGraph;
 class SwitchInstruction;
 
 class SwitchDetection {
@@ -71,6 +76,52 @@ public:
     // branch-target IL offset (setting off, the C# default; preserves the
     // original case order). Mirrors the C# static SortSwitchSections.
     static void SortSwitchSections(SwitchInstruction* sw, ILTransformContext& context);
+
+    // Port of SwitchDetection.LoopContext: the continue/break analysis over a
+    // per-container control-flow graph that SwitchDetection.Run needs to decide
+    // whether a detected if-chain can become a `switch` without `goto` statements.
+    // A `continue;` jumps to the loop's increment or do-while condition block
+    // (the back-edge block the loop head dominates); this class maps each such
+    // block to its continue depth (1 for the innermost loop, higher for outer
+    // loops) and lists the blocks a `break;` would target. Constructed for one
+    // `contextNode` (the switch head) and its dominator tree. The full
+    // SwitchDetection.Run that consumes this is deferred; this class is exposed
+    // so the foundation is testable in isolation.
+    class LoopContext {
+    public:
+        // Build the continue-depth map for `contextNode` over `cfg`: walk
+        // contextNode's successors, collecting every node that dominates
+        // contextNode (a loop head), then map each loop head's continue target
+        // (its increment/do-while-condition block, via the HighLevelLoopTransform
+        // helpers) to a depth in post-order. Mirrors the C# constructor.
+        LoopContext(const ControlFlowGraph& cfg, FlowAnalysis::ControlFlowNode* contextNode);
+
+        // Whether `node` is a `continue;` target. Mirrors MatchContinue(node).
+        bool MatchContinue(FlowAnalysis::ControlFlowNode* node) const;
+
+        // Whether `node` is a continue target at exactly `depth`. Mirrors
+        // MatchContinue(node, int depth). (The C# also has MatchContinue(node,
+        // out int depth); this port exposes GetContinueDepth instead, since a
+        // C++ `int&` out-overload alongside the by-value `int` overload is
+        // ambiguous for an lvalue argument.)
+        bool MatchContinue(FlowAnalysis::ControlFlowNode* node, int depth) const;
+
+        // The continue depth of `node` (0 when it is not a continue target).
+        // Mirrors GetContinueDepth.
+        int GetContinueDepth(FlowAnalysis::ControlFlowNode* node) const;
+
+        // The blocks a `break;` from the dominator subtree would jump to: every
+        // successor of the subtree (excluding continue targets) that the
+        // `dominator` does not itself dominate and that is not a depth-1 continue.
+        // Mirrors GetBreakTargets. Returned in pre-order traversal order (may
+        // contain duplicates; the caller dedups).
+        std::vector<FlowAnalysis::ControlFlowNode*> GetBreakTargets(FlowAnalysis::ControlFlowNode* dominator) const;
+
+    private:
+        std::vector<std::pair<FlowAnalysis::ControlFlowNode*, int>> continueDepth_;
+
+        static FlowAnalysis::ControlFlowNode* FindContinue(FlowAnalysis::ControlFlowNode* loopHead);
+    };
 };
 
 } // namespace ILSpy::Decompiler::IL
