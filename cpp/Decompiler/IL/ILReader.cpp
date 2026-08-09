@@ -773,6 +773,8 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
                 if (!target) return DecodeOutcome::Bail;
                 auto addr = std::make_unique<LdFlda>(std::move(target), fieldName);
                 addr->DelayExceptions = (op != ILOpCode::Ldflda);
+                addr->FieldToken = tok;
+                addr->IsCompilerGeneratedField = file.IsFieldCompilerGeneratedOrInCompilerGeneratedClass(tok);
                 if (op == ILOpCode::Ldflda) {
                     if (!s.Push(std::move(addr))) return DecodeOutcome::Bail;
                 } else if (op == ILOpCode::Ldfld) {
@@ -782,6 +784,8 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
                 }
             } else {
                 auto addr = std::make_unique<LdsFlda>(fieldName);
+                addr->FieldToken = tok;
+                addr->IsCompilerGeneratedField = file.IsFieldCompilerGeneratedOrInCompilerGeneratedClass(tok);
                 if (op == ILOpCode::Ldsflda) {
                     if (!s.Push(std::move(addr))) return DecodeOutcome::Bail;
                 } else if (op == ILOpCode::Ldsfld) {

@@ -179,6 +179,19 @@ public:
     // Nullable<T>.get_HasValue / GetValueOrDefault by KnownTypeCode.
     ILSpy::Decompiler::TypeSystem::ITypePtr ResolveMethodDeclaringType(std::uint32_t methodToken) const;
 
+    // Whether a field token (FieldDef or a field MemberRef) is compiler-generated
+    // or declared in a compiler-generated class. Mirrors the C#
+    // NRExtensions.IsCompilerGeneratedOrIsInCompilerGeneratedClass: the field's
+    // own [CompilerGenerated] custom attribute, or (recursively up the nesting
+    // chain) its declaring type's. Used by the IL reader to populate
+    // LdFlda/LdsFlda::IsCompilerGeneratedField, the gate the cached-delegate /
+    // cached-ReadOnlySpan transforms consult. A cross-assembly TypeRef parent
+    // cannot be resolved without the full type system, so only an in-module
+    // TypeDef parent is checked (matching the C# which needs the type system for
+    // a TypeRef). Returns false for an out-of-range or unsupported token; never
+    // throws.
+    bool IsFieldCompilerGeneratedOrInCompilerGeneratedClass(std::uint32_t fieldToken) const;
+
     // Decode the method body at `rva` (from a MethodDefInfo::RVA). Returns an
     // invalid MethodBody for abstract/extern methods (RVA 0) or a malformed
     // header; never throws.

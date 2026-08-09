@@ -288,6 +288,17 @@ implemented and green here. Everything else follows the phase plan in
   `CachedDelegateInitialization`) is added; the helper itself is unconditional.
   No pipeline transform consumes `MatchDelegateConstruction` yet, so `--csharp`
   output is unchanged; the foundation is exercised by the unit tests + the sweep.
+  The IField metadata foundation (a tested-but-not-yet-wired foundation, the
+  repeatedly deferred blocker for the field-cached delegate shapes and the
+  next in-order `CachedReadOnlySpanInitialization`) is now in place: `LdFlda` /
+  `LdsFlda` carry an `IsCompilerGeneratedField` flag and a `FieldToken` (the raw
+  metadata token) that the IL reader populates from every field-access site via a
+  new `MetadataFile::IsFieldCompilerGeneratedOrInCompilerGeneratedClass`, which
+  mirrors the C# `NRExtensions.IsCompilerGeneratedOrIsInCompilerGeneratedClass` --
+  the field's own `[CompilerGenerated]` custom attribute, or (recursively up the
+  nesting chain via `TypeDef::EnclosingType`) its declaring type's. The
+  `ArrayInitializers` setting (default true) gates `CachedReadOnlySpanInitialization`.
+  No pipeline transform consults the flag yet, so `--csharp` output is unchanged.
   Next per `GetILTransforms()`:
   `CachedDelegateInitialization` (the next in-order transform after
   `UsingTransform` in the BlockILTransform post-order set) is now ported in the
@@ -300,15 +311,21 @@ implemented and green here. Everything else follows the phase plan in
   returns null for a block final, so the adaptation is essential) and the
   per-variable `StoreInstructions` list is replaced by a tree walk (the
   repeatedly deferred infrastructure piece). The field-cached / Roslyn / VB
-  shapes (needing `IField.IsCompilerGeneratedOrIsInCompilerGeneratedClass`
-  metadata this port does not yet carry -- a field is a name string on
-  `LdsFlda`/`LdFlda`, with no token or attributes) and the temp-collapse
+  shapes (the IField metadata they need is now in place via the
+  `IsCompilerGeneratedField` flag; the remaining work is the block-model
+  adaptation and the per-variable store-list tree walk, plus a corpus probe of
+  the real field-cached if/Block shape) and the temp-collapse
   (folding the cache temp into the use, which in this port's block model needs
   merging the host block with the next block) are deferred; the .NET Framework
   4 legacy csc corpus uses the field-cached shape, not the local one, so the
   WithLocal fold fires 0 times on mscorlib (the hand-built tests verify the
   rewrite, the sweep the invariant -- the DetectCatchWhenConditionBlocks /
-  LdLocaDupInitObj / SwitchOnNullable precedent). Then `CachedReadOnlySpanInitialization`,
+  LdLocaDupInitObj / SwitchOnNullable precedent). Then `CachedReadOnlySpanInitialization`
+  (its IField dependency now met; the remaining work is the block-model
+  adaptation -- this port's ConditionDetection leaves the cache body as the
+  if's FalseInst Block rather than the TrueInst, the inverted shape the C#
+  transform matches -- which has no real corpus occurrence to probe since
+  ReadOnlySpan is not in the .NET Framework 4 mscorlib),
   the async/iterator state machines
   (YieldReturnDecompiler/AsyncAwaitDecompiler), SplitVariables (needs
   reaching-definitions dataflow),

@@ -480,6 +480,71 @@ ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::ResolveMethodDeclaringType
     return nullptr;
 }
 
+namespace {
+// Whether a custom-attribute range contains [CompilerGenerated] (System.Runtime.
+// CompilerServices.CompilerGeneratedAttribute). Mirrors the C#
+// HasKnownAttribute(KnownAttribute.CompilerGenerated) check that NRExtensions /
+// SRMExtensions.IsCompilerGenerated use. The range is a winmd equal_range pair
+// (CustomAttribute rows for one entity); the row type IS the iterator
+// (row_base is a random-access iterator), so the pair is std::pair<Row, Row>.
+template <typename Range>
+bool RangeHasCompilerGenerated(const Range& range) {
+    for (auto it = range.first; it != range.second; ++it) {
+        try {
+            auto ns_name = (*it).TypeNamespaceAndName();
+            if (std::string_view(ns_name.first) == "System.Runtime.CompilerServices"
+                && std::string_view(ns_name.second) == "CompilerGeneratedAttribute")
+                return true;
+        } catch (const std::exception&) {
+            // Skip an attribute whose type name cannot be resolved.
+        }
+    }
+    return false;
+}
+} // namespace
+
+// Whether a field token is compiler-generated or in a compiler-generated class.
+// See the header for the full contract. The field's own [CompilerGenerated] or
+// (recursively up the nesting chain) its declaring type's, mirroring the C#
+// NRExtensions.IsCompilerGeneratedOrIsInCompilerGeneratedClass. A depth guard
+// stops a malformed cyclic NestedClass chain from looping forever.
+bool MetadataFile::IsFieldCompilerGeneratedOrInCompilerGeneratedClass(std::uint32_t fieldToken) const {
+    if (!IsValid()) return false;
+    std::uint32_t table = fieldToken >> 24;
+    std::uint32_t row = fieldToken & 0x00FFFFFFu;
+    // Walk a TypeDef's nesting chain checking each type's [CompilerGenerated].
+    // winmd's row_base::index() is 0-based, so the 1-based token RID is index()+1.
+    auto typeChainIsCG = [](winmd::reader::TypeDef t) -> bool {
+        for (int depth = 0; depth < 64 && t; ++depth) {
+            if (RangeHasCompilerGenerated(t.CustomAttribute())) return true;
+            t = t.EnclosingType();
+        }
+        return false;
+    };
+    try {
+        if (table == 0x04 && row && row <= impl_->db->Field.size()) {
+            // FieldDef: the field's own [CompilerGenerated], then its declaring
+            // type's (up the nesting chain).
+            if (RangeHasCompilerGenerated(impl_->db->Field[row - 1].CustomAttribute())) return true;
+            return typeChainIsCG(impl_->db->Field[row - 1].Parent());
+        }
+        if (table == 0x0A && row && row <= impl_->db->MemberRef.size()) {
+            // MemberRef field: only an in-module TypeDef parent can be checked
+            // here (a cross-assembly TypeRef needs the full type system).
+            auto mr = impl_->db->MemberRef[row - 1];
+            auto parent = mr.Class();
+            using MRP = winmd::reader::MemberRefParent;
+            if (parent.type() == MRP::TypeDef) {
+                return typeChainIsCG(parent.TypeDef());
+            }
+            return false;
+        }
+    } catch (const std::exception&) {
+        return false;
+    }
+    return false;
+}
+
 std::vector<std::string> MetadataFile::GetParameterNames(std::uint32_t methodToken) const {
     std::vector<std::string> result;
     if (!IsValid()) return result;

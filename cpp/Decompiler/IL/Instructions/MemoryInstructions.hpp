@@ -37,10 +37,25 @@ namespace ILSpy::Decompiler::IL {
 
 // ldflda: &target.field. One Target child (inlineable). Result is I (unmanaged
 // pointer) if the target is an integer type, else Ref.
+//
+// IsCompilerGeneratedField is set by the IL reader from the field token's
+// [CompilerGenerated] custom attribute (or its declaring type's), mirroring
+// the C# IField.IsCompilerGeneratedOrIsInCompilerGeneratedClass. It is the
+// gate the cached-delegate / cached-ReadOnlySpan transforms consult to
+// recognise a compiler-synthesized cache field (e.g. a
+// <PrivateImplementationDetails> static or a display-class field); this port's
+// minimal type system does not carry per-field IField metadata, so the check
+// is resolved once at read time and stored on the node.
 class LdFlda : public ILInstruction {
 public:
     std::unique_ptr<ILInstruction> Target;
     std::string FieldName;  // "Namespace.Type::Field" (resolved by the IL reader)
+    // The raw metadata token (table 0x04 FieldDef or 0x0A field MemberRef) the
+    // reader resolved FieldName from. Carried so transforms that need richer
+    // field metadata (the field's type, attributes, ...) can resolve it via
+    // the MetadataFile without re-parsing the name.
+    std::uint32_t FieldToken = 0;
+    bool IsCompilerGeneratedField = false;
     bool DelayExceptions = false;
     LdFlda(std::unique_ptr<ILInstruction> target, std::string field)
         : ILInstruction(OpCode::LdFlda), Target(std::move(target)), FieldName(std::move(field)) {
@@ -75,9 +90,12 @@ protected:
 };
 
 // ldsflda: &field (static). SimpleInstruction (no target). Result Ref.
+// IsCompilerGeneratedField is set by the IL reader; see LdFlda for the detail.
 class LdsFlda : public SimpleInstruction {
 public:
     std::string FieldName;
+    std::uint32_t FieldToken = 0;  // see LdFlda::FieldToken
+    bool IsCompilerGeneratedField = false;
     explicit LdsFlda(std::string field) : SimpleInstruction(OpCode::LdsFlda), FieldName(std::move(field)) {}
     StackType ResultType() const override { return StackType::Ref; }
     void WriteTo(std::string& out) const override {

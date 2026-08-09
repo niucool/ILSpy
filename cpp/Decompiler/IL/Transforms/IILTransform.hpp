@@ -94,6 +94,16 @@ struct ILTransformSettings {
     // unconditional (like the NullableLifting helpers), but the transform that
     // consumes it is gated here.
     bool AnonymousMethods = true;
+    // Whether to recover array/collection/object initializers (and the
+    // compiler-generated ReadOnlySpan<char> cache Roslyn emits for a
+    // multi-byte array literal on frameworks without RuntimeHelpers.
+    // CreateSpan). DecompilerSettings.ArrayInitializers -- default true.
+    // Gates CachedReadOnlySpanInitialization (the next in-order transform after
+    // CachedDelegateInitialization), which collapses the lazy cache back to
+    // the explicit ReadOnlySpan constructor so the later array-initializer
+    // transforms recover the literal and the <PrivateImplementationDetails>
+    // cache field disappears from the output.
+    bool ArrayInitializers = true;
 };
 
 class ILTransformContext {
