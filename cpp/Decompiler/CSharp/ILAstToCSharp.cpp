@@ -484,6 +484,23 @@ private:
 
     // The C# form of a store target: a field reference, an array element, or
     // a dereferenced pointer.
+    // If `target` is a load of a byref variable (a managed ref to its own
+    // type), the C# is just the variable name -- the indirection is implicit.
+    // Handles `*(this)` in value-type methods and `*(byrefParam)`.
+    static std::string ByRefVarName(const ILInstruction& target) {
+        auto* ld = dynamic_cast<const LdLoc*>(&target);
+        if (!ld || !ld->Variable) return std::string{};
+        // The implicit `this` parameter: ldobj(ldarg this) in a value-type
+        // method loads `this` as a value -- render as `this` (the indirection
+        // is implicit). The reader leaves this's type null, so check by name/kind.
+        if (ld->Variable->Kind == VariableKind::Parameter && ld->Variable->Name == "this")
+            return "this";
+        if (!ld->Variable->Type) return std::string{};
+        if (dynamic_cast<const TypeSystem::ByReferenceType*>(ld->Variable->Type.get()))
+            return ld->Variable->Name;
+        return std::string{};
+    }
+
     std::string StoreTargetText(const ILInstruction& target) {
         if (target.Op == OpCode::LdFlda) {
             const auto& f = static_cast<const LdFlda&>(target);
@@ -495,6 +512,8 @@ private:
             return FlattenMetadataName(static_cast<const LdsFlda&>(target).FieldName);
         }
         if (target.Op == OpCode::LdElema) return ElementAccess(static_cast<const LdElema&>(target));
+        auto byref = ByRefVarName(target);
+        if (!byref.empty()) return byref;
         return "*(" + Expr(target) + ")";
     }
 
@@ -667,6 +686,8 @@ private:
             target.Op == OpCode::LdElema) {
             return Expr(target);
         }
+        auto byref = ByRefVarName(target);
+        if (!byref.empty()) return byref;
         return "*(" + Expr(target) + ")";
     }
 };

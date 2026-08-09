@@ -50,6 +50,7 @@
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
 #include <gtest/gtest.h>
@@ -62,6 +63,7 @@
 using namespace ILSpy::Decompiler::IL;
 using ILSpy::Decompiler::Metadata::MetadataFile;
 using ILSpy::Decompiler::TypeSystem::ITypePtr;
+using ILSpy::Decompiler::TypeSystem::ByReferenceType;
 using ILSpy::Decompiler::TypeSystem::KnownType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
 
@@ -280,6 +282,32 @@ TEST(ILAstToCSharp, FieldStoreAndLoadThroughLdFlda) {
     std::string text = ILAstToCSharp(*fn, "int", "get_Count", "");
     EXPECT_NE(text.find("    this.count = 7;\n"), std::string::npos) << text;
     EXPECT_NE(text.find("    return this.count;\n"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, ByRefVariableDerefIsImplicit) {
+    // ldobj/stobj on a byref variable (a managed ref) renders as the variable
+    // name -- the indirection is implicit in C#. `*(this)` in a value-type
+    // method and `*(byrefParam)` both collapse to the bare name.
+    auto thisVar = MakeVar(VariableKind::Parameter, "this", 0);
+    auto refParam = MakeVar(VariableKind::Parameter, "array", 1,
+        std::make_shared<ByReferenceType>(
+            std::make_shared<KnownType>(KnownTypeCode::Int32)));
+    auto block = std::make_unique<Block>();
+    // array = *(array)  (stobj on the byref)
+    block->Add(std::make_unique<StObj>(std::make_unique<LdLoc>(refParam),
+        std::make_unique<LdcI4>(0), nullptr));
+    // return *(this)  (ldobj on this)
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get(),
+        std::make_unique<LdObj>(std::make_unique<LdLoc>(thisVar),
+            std::make_shared<KnownType>(KnownTypeCode::Int32))));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "int", "M", "ref int array");
+    EXPECT_NE(text.find("    array = 0;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("    return this;\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("*("), std::string::npos) << "no explicit deref of a byref";
 }
 
 TEST(ILAstToCSharp, ThrowEmitsThrowStatement) {
