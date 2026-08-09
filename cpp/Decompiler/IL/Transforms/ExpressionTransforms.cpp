@@ -23,6 +23,7 @@
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
@@ -399,6 +400,65 @@ std::unique_ptr<ILInstruction> DetachFromParent(ILInstruction* inst) {
     return inst->Parent->TakeChild(inst->ChildIndex);
 }
 
+// Detach an arm (trueInst/falseInst) that may be an in-tree child of the parent
+// (an if's arm or a BinaryNumericInstruction operand -- has a Parent) or a fresh
+// node owned by `sink` with no Parent (the Run(BinaryNumericInstruction) falseInst
+// is a fresh LdcI4(0)). For the in-tree case this reduces to DetachFromParent
+// (TakeChild at the view's ChildIndex); for the fresh-node case it moves the
+// ownership out of `sink`. The Run(IfInstruction) caller passes empty sinks
+// (both arms in-tree), so ConsumeArm is behaviourally identical to DetachFromParent
+// there; the Run(BinaryNumericInstruction) caller passes a fresh LdcI4(0) in
+// falseSink. The logic.not unwrap loop swaps both the views and the sinks, so the
+// view<->sink correspondence is preserved across the swap.
+std::unique_ptr<ILInstruction> ConsumeArm(ILInstruction* view,
+                                          std::unique_ptr<ILInstruction>& sink) {
+    if (view && view->Parent) return view->Parent->TakeChild(view->ChildIndex);
+    return std::move(sink);
+}
+
+// Conservatively recognize a Boolean-typed value for the
+// Run(BinaryNumericInstruction) BitAnd gate (the C#
+// `inst.InferType(context.TypeSystem).IsKnownType(KnownTypeCode.Boolean)`). The
+// `&&`-as-`&` Roslyn optimization applies only to bool operands, so a conservative
+// recognizer avoids invoking the nullable lift on `int & int` (the common
+// bitwise-and). Recognizes the bool-producing instruction kinds: a Comp (every
+// comparison yields bool), a Nullable<T> get_HasValue call, a Nullable<bool>
+// GetValueOrDefault call, a BitAnd/BitOr of bool operands (recursive), a BitNot
+// bool operands (recursive), a BitNot of a bool operand, and a LdLoc of a
+// Boolean-typed variable. Returns false for anything else (conservative), so a
+// non-bool BitAnd does not enter the lift (the lift would return null anyway,
+// but skipping it avoids wasted work and detaching a fresh falseInst).
+bool IsBooleanValue(ILInstruction* inst) {
+    if (!inst) return false;
+    if (inst->Op == OpCode::Comp) return true;
+    ILVariablePtr v;
+    if (NullableLiftingTransform::MatchHasValueCall(inst, v)) return true;
+    // A 1-arg GetValueOrDefault on Nullable<T> returns the underlying T; for the
+    // BitAnd to be Boolean-typed, T must be Boolean (Nullable<bool>). This lets
+    // the bool? equality BNI case `BitAnd(GVO(v), HV(v))` (`v == true`) pass the
+    // gate -- the C# InferType recognises the GVO call's result as bool.
+    if (NullableLiftingTransform::MatchGetValueOrDefault(inst, v) && v && v->Type)
+        return NullableLiftingTransform::IsKnownType(
+            NullableLiftingTransform::GetUnderlyingTypeOfNullable(v->Type.get()),
+            TypeSystem::KnownTypeCode::Boolean);
+    if (inst->Op == OpCode::BinaryNumericInstruction) {
+        auto* bni = static_cast<BinaryNumericInstruction*>(inst);
+        if (bni->Operator == BinaryNumericOperator::BitAnd ||
+            bni->Operator == BinaryNumericOperator::BitOr)
+            return IsBooleanValue(bni->Left.get()) && IsBooleanValue(bni->Right.get());
+        return false;
+    }
+    if (inst->Op == OpCode::BitNot)
+        return IsBooleanValue(static_cast<BitNot*>(inst)->Argument.get());
+    if (inst->Op == OpCode::LdLoc) {
+        auto* ld = static_cast<LdLoc*>(inst);
+        return ld->Variable && ld->Variable->Type &&
+               NullableLiftingTransform::IsKnownType(ld->Variable->Type.get(),
+                                                     TypeSystem::KnownTypeCode::Boolean);
+    }
+    return false;
+}
+
 // Replace the if with `lifted` (a value node), applying the block-model
 // adaptation: a clean ReplaceWith when the if is a sub-expression value, or the
 // lifted value becomes a non-terminal statement + a Branch to the next block
@@ -406,8 +466,9 @@ std::unique_ptr<ILInstruction> DetachFromParent(ILInstruction* inst) {
 // cannot be a block final). The next block is resolved before any mutation (the
 // precondition-before-mutation discipline). Returns true if the if was replaced
 // (the if is destroyed); false if a block-final if had no fall-through target
-// (the if is left intact and the caller must not mutate further). Shared by the
-// bool? equality fold (FinishIfNullableLift) and the `&`/`|` on bool? path.
+// (the if is left intact and the caller must not mutate further). Used by the
+// RunIfNullableLift thin caller (after LiftNullableCore produces the lifted
+// value) and the `&`/`|` on bool? path within LiftNullableCore.
 bool ReplaceIfWithLiftedValue(IfInstruction* iff, std::unique_ptr<ILInstruction> lifted) {
     auto* block = dynamic_cast<Block*>(iff->Parent);
     bool isBlockFinal = block && block->FinalInstruction.get() == iff;
@@ -428,21 +489,6 @@ bool ReplaceIfWithLiftedValue(IfInstruction* iff, std::unique_ptr<ILInstruction>
         iff->ReplaceWith(std::move(lifted));  // destroys the if
     }
     return true;
-}
-
-// Build the C#-lifted Comp (`comp(kind, ldloc v, ldc.i4 constant)` lifted C#,
-// the D91 model) and replace the if with it via ReplaceIfWithLiftedValue. The
-// `ldloc v` loads the Nullable<bool>; the lifted comp checks HasValue then
-// compares the underlying Boolean (I4). Fresh LdLoc / LdcI4 nodes (no ILRange
-// in this port; the C# `.WithILRange(..)` is skipped). Returns true if the if was
-// replaced (the if is destroyed).
-bool FinishIfNullableLift(IfInstruction* iff, ComparisonKind kind,
-                         const ILVariablePtr& v, int constant) {
-    auto comp = std::make_unique<Comp>(
-        std::make_unique<LdLoc>(v),
-        std::make_unique<LdcI4>(constant),
-        kind, ComparisonLiftingKind::CSharp, StackType::I4);
-    return ReplaceIfWithLiftedValue(iff, std::move(comp));
 }
 
 } // namespace
@@ -763,18 +809,26 @@ void ExpressionTransforms::VisitBinaryNumericInstruction(BinaryNumericInstructio
     if (!inst) return;
     // Visit the children first (the C# base.VisitBinaryNumericInstruction) so
     // the Comp/StLoc/Box/Conv rewrites cascade into the operands before the
-    // shift-size mask is considered.
+    // shift-size mask / nullable-lift is considered.
     if (inst->Left) Visit(inst->Left.get());
     if (inst->Right) Visit(inst->Right.get());
+
+    // NullableLiftingTransform.Run(BinaryNumericInstruction): the `&&`-as-`&`
+    // Roslyn optimization on bool operands, analysed as-if short-circuit. The C#
+    // gates on `InferType == Boolean` for both operands; this port uses the
+    // conservative IsBooleanValue recognizer. A successful lift replaces the
+    // BitAnd (a value) via ReplaceWith, so re-visiting is not needed (the lifted
+    // Comp/NullCoalescing is not a BitAnd). Matches the C# `case BitAnd` arm.
+    if (inst->Operator == BinaryNumericOperator::BitAnd &&
+        IsBooleanValue(inst->Left.get()) && IsBooleanValue(inst->Right.get())) {
+        if (RunBinaryNumericNullableLift(inst)) return;
+    }
 
     // a << (b & 31) => a << b: a shift's right operand masked with the bit-width
     // minus one is redundant in C# (the shift already masks the count). Drop the
     // `& mask` when the mask is the expected width for the shift's result type
-    // (31 for I4, 63 for I8). The BitAnd/Boolean nullable-lift case (the C#
-    // `inst.Operator == BitAnd` arm) is deferred -- it needs NullableLiftingTransform
-    // + InferType, neither of which this minimal type system carries; the
-    // native-int (I) mask `sizeof(IntPtr) * 8 - 1` is deferred (needs SizeOf with an
-    // IType + GetStackType).
+    // (31 for I4, 63 for I8). The native-int (I) mask `sizeof(IntPtr) * 8 - 1` is
+    // deferred (needs SizeOf with an IType + GetStackType).
     if (inst->Operator != BinaryNumericOperator::ShiftLeft &&
         inst->Operator != BinaryNumericOperator::ShiftRight) {
         return;
@@ -836,45 +890,27 @@ void ExpressionTransforms::VisitCall(Call* inst) {
     for (auto& arg : inst->Arguments) Visit(arg.get());
 }
 
-bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
-    // Port of NullableLiftingTransform.Run(IfInstruction) -- the bool? equality
-    // comparison subset of the `Lift` method. A conditional whose condition is
-    // `call GetValueOrDefault(ldloca v)` on a Nullable<bool> (the underlying
-    // type is Boolean) and whose arms are `v.HasValue` / a ldc.i4 constant folds
-    // into a C#-lifted Comp (the D91 model):
-    //   v.GetValueOrDefault() ? v.HasValue : false  ==> v == true
-    //   v.GetValueOrDefault() ? false : v.HasValue  ==> v == false
-    //   v.GetValueOrDefault() ? !v.HasValue : true  ==> v != true
-    //   v.GetValueOrDefault() ? true : !v.HasValue  ==> v != false
-    // The AnalyzeCondition / LiftNormal path (the multi-HasValue `&&` lift) is now
-    // ported in its `v.HasValue ? v : fallback => v ?? fallback` early-out (the
-    // simplest LiftNormal case, which needs no DoLift) and its `v.HasValue ?
-    // v.GetValueOrDefault() : fallback => v ?? fallback` conv.nop.lifted case (a
-    // fresh `ldloc v` or `conv.nop.lifted(ldloc v)` wrapped in a
-    // NullCoalescingInstruction(NullableWithValueFallback)); the DoLift path (the
-    // general recursive lift over GetValueOrDefault/Conv/BinaryNumeric/Comp/BitNot,
-    // needs a BitSet nullable-vars relevance analysis), the LiftCSharpUserComparison
-    // path (needs Call.Method.IsOperator + CSharpOperators + DoLift), the
-    // MatchCompOrDecimal / LiftCSharp* path (the comparison lift), the
-    // NullPropagation path, and the `&` / `|` on bool? path (ThreeValuedBoolAnd/Or,
-    // D96) are the remaining deferred pieces. Gated on LiftNullables (the C#
-    // `context.Settings.LiftNullables`).
-    if (!iff || !iff->Condition) return false;
-    if (!settings_ || !settings_->LiftNullables) return false;
+std::unique_ptr<ILInstruction> ExpressionTransforms::LiftNullableCore(
+    ILInstruction* condition, ILInstruction* trueInst, ILInstruction* falseInst,
+    std::unique_ptr<ILInstruction>& trueSink, std::unique_ptr<ILInstruction>& falseSink) {
+    // Port of NullableLiftingTransform.Lift -- the shared core of
+    // Run(IfInstruction) and Run(BinaryNumericInstruction). A conditional
+    // (condition ? trueInst : falseInst) is analysed for a nullable lift;
+    // returns the lifted instruction (owned) or nullptr if no fold fired. The
+    // condition is read-only (detached only by the `&`/`|` on bool? path); the
+    // arms are detached on-demand via ConsumeArm, which handles an in-tree arm
+    // (an if's arm or a BNI operand -- has a Parent) and a fresh-node arm (the
+    // BNI falseInst = a fresh LdcI4(0), owned by falseSink). The logic.not
+    // unwrap loop swaps both the views and the sinks so the view<->sink
+    // correspondence is preserved across the swap. Gated on LiftNullables.
+    if (!condition) return nullptr;
+    if (!settings_ || !settings_->LiftNullables) return nullptr;
 
-    // The condition and arms (non-owning views). The logic.not unwrap loop may
-    // swap the arms (the C# `while (condition.MatchLogicNot(out var arg))
-    // { condition = arg; Swap(ref trueInst, ref falseInst); }`). The condition is
-    // detached only if a fold fires; the arms are never detached (the lifted Comp
-    // uses a fresh LdLoc(v) + LdcI4, not the arms), so the non-owning views stay
-    // valid through the match.
-    ILInstruction* condition = iff->Condition.get();
-    ILInstruction* trueInst = iff->TrueInst.get();
-    ILInstruction* falseInst = iff->FalseInst.get();
     ILInstruction* inner = nullptr;
     while (MatchLogicNot(condition, inner)) {
         condition = inner;
         std::swap(trueInst, falseInst);
+        std::swap(trueSink, falseSink);
     }
 
     // AnalyzeCondition / LiftNormal path (the section of Lift before the bool?
@@ -932,15 +968,15 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
                     ILVariable* vLd = nullptr;
                     if (MatchLdLoc(exprToLift, vLd) &&
                         vLd == nullableVarS[0].get()) {
-                        auto trueOwned = DetachFromParent(trueInst);
-                        auto falseOwned = DetachFromParent(falseInst);
+                        auto trueOwned = ConsumeArm(trueInst, trueSink);
+                        auto falseOwned = ConsumeArm(falseInst, falseSink);
                         auto lifted = std::make_unique<NullCoalescingInstruction>(
                             NullCoalescingKind::Nullable,
                             std::move(trueOwned), std::move(falseOwned));
                         lifted->UnderlyingResultType = StackTypeOf(
                             NullableLiftingTransform::GetUnderlyingTypeOfNullable(
                                 nullableVarS[0]->Type.get()));
-                        return ReplaceIfWithLiftedValue(iff, std::move(lifted));
+                        return std::move(lifted);
                     }
                 }
                 // LiftCSharpUserComparison(trueInst, falseInst) is deferred (needs
@@ -981,24 +1017,24 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
                 }
                 StackType underlyingResultType = exprToLift->ResultType();
                 if (isNullCoalescingWithNonNullableFallback) {
-                    auto falseOwned = DetachFromParent(falseInst);
+                    auto falseOwned = ConsumeArm(falseInst, falseSink);
                     auto nc = std::make_unique<NullCoalescingInstruction>(
                         NullCoalescingKind::NullableWithValueFallback,
                         std::move(lifted), std::move(falseOwned));
                     nc->UnderlyingResultType = underlyingResultType;
-                    return ReplaceIfWithLiftedValue(iff, std::move(nc));
+                    return std::move(nc);
                 } else if (!NullableLiftingTransform::MatchNull(falseInst, utype)) {
-                    auto falseOwned = DetachFromParent(falseInst);
+                    auto falseOwned = ConsumeArm(falseInst, falseSink);
                     auto nc = std::make_unique<NullCoalescingInstruction>(
                         NullCoalescingKind::Nullable,
                         std::move(lifted), std::move(falseOwned));
                     nc->UnderlyingResultType = underlyingResultType;
-                    return ReplaceIfWithLiftedValue(iff, std::move(nc));
+                    return std::move(nc);
                 } else {
                     // falseInst is `default(Nullable<T>)` (MatchNull) -- no wrap,
                     // the lifted value is the whole result (the C# returns `lifted`
                     // unwrapped; `v ?? null` is just the lifted `v`).
-                    return ReplaceIfWithLiftedValue(iff, std::move(lifted));
+                    return std::move(lifted);
                 }
             }
             // The DoLift path (the LiftNormal else-branch after the conv.nop.lifted
@@ -1018,31 +1054,31 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
                     std::unique_ptr<ILInstruction> lifted = std::move(doLift.Lifted);
                     StackType underlyingResultType = exprToLift->ResultType();
                     if (isNullCoalescingWithNonNullableFallback) {
-                        auto falseOwned = DetachFromParent(falseInst);
+                        auto falseOwned = ConsumeArm(falseInst, falseSink);
                         auto nc = std::make_unique<NullCoalescingInstruction>(
                             NullCoalescingKind::NullableWithValueFallback,
                             std::move(lifted), std::move(falseOwned));
                         nc->UnderlyingResultType = underlyingResultType;
-                        return ReplaceIfWithLiftedValue(iff, std::move(nc));
+                        return std::move(nc);
                     } else if (!NullableLiftingTransform::MatchNull(falseInst, utype)) {
-                        auto falseOwned = DetachFromParent(falseInst);
+                        auto falseOwned = ConsumeArm(falseInst, falseSink);
                         auto nc = std::make_unique<NullCoalescingInstruction>(
                             NullCoalescingKind::Nullable,
                             std::move(lifted), std::move(falseOwned));
                         nc->UnderlyingResultType = underlyingResultType;
-                        return ReplaceIfWithLiftedValue(iff, std::move(nc));
+                        return std::move(nc);
                     } else {
                         // falseInst is `default(Nullable<T>)` (MatchNull) -- no
                         // wrap, the lifted value is the whole result.
-                        return ReplaceIfWithLiftedValue(iff, std::move(lifted));
+                        return std::move(lifted);
                     }
                 }
                 // A nullableVar did not contribute to the lift -- don't lift.
-                return false;
+                return nullptr;
             }
             // DoLift failed (or the deferred Call-operator/LiftCSharpUserComparison
             // cases); the whole Lift returns null, the if stays as-is.
-            return false;
+            return nullptr;
         }
     }
 
@@ -1076,15 +1112,15 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
                     auto lifted = NullableLiftingTransform::LiftCSharpEqualityComparison(
                         comp, ComparisonKind::Equality, eqTrueInst);
                     if (lifted)
-                        return ReplaceIfWithLiftedValue(iff, std::move(lifted));
-                    return false;  // lift failed (deferred user path) -- exit
+                        return std::move(lifted);
+                    return nullptr;  // lift failed (deferred user path) -- exit
                 } else if (IsLdcI4(eqFalseInst, 1)) {
                     // (a.GVO() == b.GVO()) ? (a.HV != b.HV) : true ==> a != b
                     auto lifted = NullableLiftingTransform::LiftCSharpEqualityComparison(
                         comp, ComparisonKind::Inequality, eqTrueInst);
                     if (lifted)
-                        return ReplaceIfWithLiftedValue(iff, std::move(lifted));
-                    return false;
+                        return std::move(lifted);
+                    return nullptr;
                 }
                 // IsGenericNewPattern (the Activator.CreateInstance<T>() case)
                 // is deferred -- needs MatchDefaultValue + Call.Method.FullName +
@@ -1105,8 +1141,8 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
                         auto lifted = NullableLiftingTransform::LiftCSharpComparison(
                             comp, comp.Kind, nullableVars);
                         if (lifted)
-                            return ReplaceIfWithLiftedValue(iff, std::move(lifted));
-                        return false;
+                            return std::move(lifted);
+                        return nullptr;
                     }
                 }
                 if (IsLdcI4(trueInst, 0)) {
@@ -1115,8 +1151,8 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
                         auto lifted = NullableLiftingTransform::LiftCSharpComparison(
                             comp, NegateComparison(comp.Kind), nullableVars);
                         if (lifted)
-                            return ReplaceIfWithLiftedValue(iff, std::move(lifted));
-                        return false;
+                            return std::move(lifted);
+                        return nullptr;
                     }
                 }
                 if (IsLdcI4(falseInst, 1)) {
@@ -1125,9 +1161,8 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
                         auto lifted = NullableLiftingTransform::LiftCSharpComparison(
                             comp, comp.Kind, nullableVars);
                         if (lifted)
-                            return ReplaceIfWithLiftedValue(iff,
-                                MakeLogicNot(std::move(lifted)));
-                        return false;
+                            return MakeLogicNot(std::move(lifted));
+                        return nullptr;
                     }
                 }
                 if (IsLdcI4(trueInst, 1)) {
@@ -1136,9 +1171,8 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
                         auto lifted = NullableLiftingTransform::LiftCSharpComparison(
                             comp, NegateComparison(comp.Kind), nullableVars);
                         if (lifted)
-                            return ReplaceIfWithLiftedValue(iff,
-                                MakeLogicNot(std::move(lifted)));
-                        return false;
+                            return MakeLogicNot(std::move(lifted));
+                        return nullptr;
                     }
                 }
             }
@@ -1159,22 +1193,34 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
         // v.GetValueOrDefault() ? v.HasValue : false ==> v == true
         if (NullableLiftingTransform::MatchHasValueCall(trueInst, v.get()) &&
             IsLdcI4(falseInst, 0)) {
-            return FinishIfNullableLift(iff, ComparisonKind::Equality, v, 1);
+            return std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v),
+        std::make_unique<LdcI4>(1),
+        ComparisonKind::Equality, ComparisonLiftingKind::CSharp, StackType::I4);
         }
         // v.GetValueOrDefault() ? false : v.HasValue ==> v == false
         if (IsLdcI4(trueInst, 0) &&
             NullableLiftingTransform::MatchHasValueCall(falseInst, v.get())) {
-            return FinishIfNullableLift(iff, ComparisonKind::Equality, v, 0);
+            return std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v),
+        std::make_unique<LdcI4>(0),
+        ComparisonKind::Equality, ComparisonLiftingKind::CSharp, StackType::I4);
         }
         // v.GetValueOrDefault() ? !v.HasValue : true ==> v != true
         if (NullableLiftingTransform::MatchNegatedHasValueCall(trueInst, v.get()) &&
             IsLdcI4(falseInst, 1)) {
-            return FinishIfNullableLift(iff, ComparisonKind::Inequality, v, 1);
+            return std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v),
+        std::make_unique<LdcI4>(1),
+        ComparisonKind::Inequality, ComparisonLiftingKind::CSharp, StackType::I4);
         }
         // v.GetValueOrDefault() ? true : !v.HasValue ==> v != false
         if (IsLdcI4(trueInst, 1) &&
             NullableLiftingTransform::MatchNegatedHasValueCall(falseInst, v.get())) {
-            return FinishIfNullableLift(iff, ComparisonKind::Inequality, v, 0);
+            return std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v),
+        std::make_unique<LdcI4>(0),
+        ComparisonKind::Inequality, ComparisonLiftingKind::CSharp, StackType::I4);
         }
     }
 
@@ -1208,10 +1254,10 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
                                                        TypeSystem::KnownTypeCode::Boolean) &&
                 IsLdcI4(ctorArg, 0)) {
                 auto condOwned = DetachFromParent(condition);
-                auto trueOwned = DetachFromParent(trueInst);
+                auto trueOwned = ConsumeArm(trueInst, trueSink);
                 auto lifted = std::make_unique<ThreeValuedBoolAnd>(
                     std::move(condOwned), std::move(trueOwned));
-                return ReplaceIfWithLiftedValue(iff, std::move(lifted));
+                return std::move(lifted);
             }
             // condition ? v : v2 (the two-nullable three-valued logic pattern)
             ILVariable* v2 = nullptr;
@@ -1220,18 +1266,18 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
                 if (MatchThreeValuedLogicConditionPattern(condition, nullable1, nullable2)) {
                     if (vLd == nullable1.get() && v2 == nullable2.get()) {
                         // ==> 3vl.bool.or(v, v2)
-                        auto trueOwned = DetachFromParent(trueInst);
-                        auto falseOwned = DetachFromParent(falseInst);
+                        auto trueOwned = ConsumeArm(trueInst, trueSink);
+                        auto falseOwned = ConsumeArm(falseInst, falseSink);
                         auto lifted = std::make_unique<ThreeValuedBoolOr>(
                             std::move(trueOwned), std::move(falseOwned));
-                        return ReplaceIfWithLiftedValue(iff, std::move(lifted));
+                        return std::move(lifted);
                     } else if (vLd == nullable2.get() && v2 == nullable1.get()) {
                         // ==> 3vl.bool.and(v2, v)
-                        auto falseOwned = DetachFromParent(falseInst);
-                        auto trueOwned = DetachFromParent(trueInst);
+                        auto falseOwned = ConsumeArm(falseInst, falseSink);
+                        auto trueOwned = ConsumeArm(trueInst, trueSink);
                         auto lifted = std::make_unique<ThreeValuedBoolAnd>(
                             std::move(falseOwned), std::move(trueOwned));
-                        return ReplaceIfWithLiftedValue(iff, std::move(lifted));
+                        return std::move(lifted);
                     }
                 }
             }
@@ -1244,13 +1290,53 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
                                                        TypeSystem::KnownTypeCode::Boolean) &&
                 IsLdcI4(ctorArg, 1)) {
                 auto condOwned = DetachFromParent(condition);
-                auto falseOwned = DetachFromParent(falseInst);
+                auto falseOwned = ConsumeArm(falseInst, falseSink);
                 auto lifted = std::make_unique<ThreeValuedBoolOr>(
                     std::move(condOwned), std::move(falseOwned));
-                return ReplaceIfWithLiftedValue(iff, std::move(lifted));
+                return std::move(lifted);
             }
         }
     }
+    return nullptr;
+}
+
+
+bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
+    // Thin caller over LiftNullableCore (the shared Lift core): the if's
+    // condition/arms are in-tree, so both sinks are empty and ConsumeArm reduces
+    // to DetachFromParent. On a successful lift, ReplaceIfWithLiftedValue applies
+    // the block-model adaptation (ReplaceWith for a sub-expression value-if, or
+    // the lifted value becomes a non-terminal + a Branch final for a block-final
+    // if). Gated on LiftNullables (checked inside LiftNullableCore).
+    if (!iff || !iff->Condition) return false;
+    std::unique_ptr<ILInstruction> trueSink, falseSink;
+    auto lifted = LiftNullableCore(iff->Condition.get(), iff->TrueInst.get(),
+                                    iff->FalseInst.get(), trueSink, falseSink);
+    if (lifted) return ReplaceIfWithLiftedValue(iff, std::move(lifted));
+    return false;
+}
+
+bool ExpressionTransforms::RunBinaryNumericNullableLift(BinaryNumericInstruction* bni) {
+    // Port of NullableLiftingTransform.Run(BinaryNumericInstruction): the
+    // VS2017.8 / Roslyn 2.9 optimization that turns `&&` (short-circuit) into `&`
+    // (BitAnd) on bool operands is analysed as-if it were still the short-circuit
+    // form -- Lift(bni, bni.Left, bni.Right, new LdcI4(0)) where bni.Left is the
+    // condition, bni.Right is the true arm, and a fresh LdcI4(0) is the false arm.
+    // The fresh LdcI4(0) is NOT a child of bni, so it is owned by falseSink and
+    // consumed via ConsumeArm only when a fold fires that needs it (the LiftNormal
+    // conv.nop.lifted / DoLift wraps); folds that build fresh nodes
+    // (MatchCompOrDecimal, bool? equality) leave it in falseSink to be discarded.
+    // A BNI is always a value (never a block final), so the lifted result replaces
+    // bni via a clean ReplaceWith (no block-model adaptation). Gated on
+    // LiftNullables (checked inside LiftNullableCore). The caller
+    // (VisitBinaryNumericInstruction) additionally gates on both operands being
+    // Boolean-typed (the C# InferType == Boolean), via IsBooleanValue.
+    if (!bni || !bni->Left) return false;
+    std::unique_ptr<ILInstruction> trueSink;  // empty (bni.Right is in-tree)
+    std::unique_ptr<ILInstruction> falseSink = std::make_unique<LdcI4>(0);
+    auto lifted = LiftNullableCore(bni->Left.get(), bni->Right.get(),
+                                    falseSink.get(), trueSink, falseSink);
+    if (lifted) { bni->ReplaceWith(std::move(lifted)); return true; }
     return false;
 }
 

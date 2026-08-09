@@ -762,10 +762,39 @@ implemented and green here. Everything else follows the phase plan in
   monotone invariants hold (the C#-lifted Comp count is non-decreasing, the
   1-arg get_HasValue/GetValueOrDefault counts are non-increasing). 35 of ~40
   transforms ported.
+  `NullableLiftingTransform.Run(BinaryNumericInstruction)` -- the
+  VS2017.8 / Roslyn 2.9 `&&`-as-`&` optimization on bool operands, analysed
+  as-if short-circuit -- is now ported and wired into
+  `ExpressionTransforms.VisitBinaryNumericInstruction`'s `case BitAnd` arm
+  (gated on both operands being Boolean-typed, the C# `InferType == Boolean`,
+  via a conservative `IsBooleanValue` recognizer). The C# entry is a thin
+  wrapper over `Lift` (`Lift(bni, bni.Left, bni.Right, new LdcI4(0))` then
+  `bni.ReplaceWith(lifted)`), so the `Lift` body is extracted into a shared
+  private member `LiftNullableCore(condition, trueInst, falseInst, trueSink,
+  falseSink) -> unique_ptr<ILInstruction>` consumed by both the thin
+  `RunIfNullableLift` (empty sinks; `ReplaceIfWithLiftedValue` on success) and
+  the thin `RunBinaryNumericNullableLift` (`falseSink` = a fresh `LdcI4(0)`;
+  `bni->ReplaceWith` on success -- a BNI is always a value, no block-model
+  adaptation). KEY ownership divergence: the BNI `falseInst` is a fresh `LdcI4(0)`
+  that is NOT a child of `bni` (no `Parent`), so a new `ConsumeArm(view, sink)`
+  helper detaches an arm that may be in-tree (`DetachFromParent` / `TakeChild`) or
+  a fresh node (`std::move(sink)`); for the `Run(IfInstruction)` caller the sinks
+  are empty so `ConsumeArm` is behaviourally identical to `DetachFromParent` (the
+  refactor is a no-op for the if case). The logic.not unwrap loop swaps both the
+  views and the sinks. The BNI lift fires the same `LiftNullableCore` paths as
+  the if case (the full `Lift` machinery is shared): the `MatchCompOrDecimal`
+  equality hasValueComp case (`BitAnd(comp(eq,GVO(a),GVO(b)), comp(eq,HV(a),HV(b)))`
+  ==> `comp.lifted[C#](eq, ldloc a, ldloc b)`), the bool? equality folds
+  (`BitAnd(GVO(v), HV(v))` on Nullable<bool> ==> `v == true`), the LiftNormal
+  conv.nop.lifted / DoLift wraps (which consume the fresh `LdcI4(0)` falseInst
+  via `ConsumeArm`), and the `&`/`|` on bool? path. It is a Roslyn-era codegen
+  pattern that fires 0 times on the .NET Framework 4 legacy-csc mscorlib corpus
+  (ported for faithfulness, matching the D89/D90/D92/D94/D96/D97/D98/D100/D101
+  precedent); the sweep already guards it via the existing per-method monotone
+  invariants. 36 of ~40 transforms ported.
   The remaining `Run(IfInstruction)` paths (the LiftCSharpUserComparison rest
   of LiftNormal [needs the Call-operator case], NullPropagation [a separate
-  583-line transform]),
-  `Run(BinaryNumericInstruction)` (the BitAnd-as-short-circuit analysis), and
+  583-line transform]) and
   the `RunStatements(Block, int)` block transform are the subsequent
   in-order targets.
   `BitSet` (Util/, a tested foundation ported from BitSet.cs) is the

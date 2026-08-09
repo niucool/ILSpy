@@ -273,6 +273,23 @@ std::unique_ptr<Call> MakeHasValueCall(const ILVariablePtr& v) {
     return call;
 }
 
+// Parameterized Nullable<T> accessor helpers (for Nullable<int> etc., used by the
+// Run(BinaryNumericInstruction) equality-lift tests where the value comparison
+// is on a non-bool underlying type).
+std::unique_ptr<Call> MakeGVOCallOf(const ILVariablePtr& v, KnownTypeCode underlying) {
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = MakeNullableOf(underlying);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    return call;
+}
+
+std::unique_ptr<Call> MakeHasValueCallOf(const ILVariablePtr& v, KnownTypeCode underlying) {
+    auto call = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    call->DeclaringType = MakeNullableOf(underlying);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    return call;
+}
+
 // logic.not(inner) in this port's `comp(Equality, inner, ldc.i4 0)` shape (the
 // reader's brfalse, per the SwitchAnalysis/ConditionDetection convention). Used
 // to build the `!v.HasValue` / `!v2.GetValueOrDefault()` arms of the two-nullable
@@ -1615,7 +1632,15 @@ TEST(ExpressionTransforms, ShiftKeepsBareShiftAmount) {
 // VisitBinaryNumericInstruction leaves a top-level BitAnd (not a shift) alone:
 // the BitAnd/Boolean nullable-lift case is deferred, so a plain `a & b` just
 // visits its children and returns (the operands may fold, but the BitAnd stays).
-TEST(ExpressionTransforms, BitAndStaysForDeferredNullableLift) {
+TEST(ExpressionTransforms, PlainBoolBitAndStaysNoLift) {
+    // A top-level `BitAnd(LdLoc a, LdLoc b)` of two plain bool locals/params: both
+    // operands are Boolean-typed (IsBooleanValue -> true for a Boolean LdLoc), so
+    // the BitAnd gate in VisitBinaryNumericInstruction fires and
+    // RunBinaryNumericNullableLift is invoked. But no nullable-lift fold matches a
+    // plain bool LdLoc pair (the `&`/`|` on bool? fold needs a NullableCtor or a
+    // second-nullable-LdLoc false arm, which the fresh LdcI4(0) falseInst is
+    // not), so LiftNullableCore returns nullptr and the BitAnd stays -- the C#
+    // likewise does not lift a plain `a & b`.
     auto a = MakeParam("a", std::make_shared<KnownType>(KnownTypeCode::Boolean));
     auto b = MakeParam("b", std::make_shared<KnownType>(KnownTypeCode::Boolean));
     auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Boolean));
@@ -1638,7 +1663,7 @@ TEST(ExpressionTransforms, BitAndStaysForDeferredNullableLift) {
     // gtest's ASSERT_* fail-goto does not jump over the following declaration.)
     auto* bni = static_cast<BinaryNumericInstruction*>(st->Value.get());
     EXPECT_EQ(bni->Operator, BinaryNumericOperator::BitAnd)
-        << "a top-level BitAnd must stay (the boolean nullable-lift is deferred)";
+        << "a plain bool BitAnd must stay (no nullable shape to lift)";
 }
 
 // Count NullCoalescingInstruction nodes in the tree. The VisitCall
@@ -3517,3 +3542,158 @@ TEST(ExpressionTransforms, RunIfNullableLiftFoldsCLiftedRelationalNegated) {
     ASSERT_EQ(inner->Right->Op, OpCode::LdcI4);
     EXPECT_EQ(static_cast<LdcI4*>(inner->Right.get())->Value, 5);
 }
+
+// RunBinaryNumericNullableLift equality case (the VS2017.8 / Roslyn 2.9
+// `&&`-as-`&` optimization on bool operands, analysed as-if short-circuit):
+//   BitAnd( comp(eq, GVO(a), GVO(b)), comp(eq, HV(a), HV(b)) )
+//     ==> comp.lifted[C#](eq, ldloc a, ldloc b)
+// bni.Left is the value comparison (a Comp), bni.Right is the HasValue-bits
+// comparison (a Comp), and the fresh LdcI4(0) is the false arm. MatchCompOrDecimal
+// matches the value Comp, LiftCSharpEqualityComparison's hasValueComp case lifts
+// both GVO sides to ldloc and both HasValue operands match, producing the C#-
+// lifted equality. Both operands are Comps so IsBooleanValue gates the BitAnd in.
+// A Roslyn-era codegen pattern (fires 0 times on the .NET Framework 4 legacy-csc
+// corpus).
+TEST(ExpressionTransforms, RunBinaryNumericLiftFoldsCLiftedEqualityComparison) {
+    auto a = MakeLocal("a", MakeNullableOf(KnownTypeCode::Int32));
+    auto b = MakeLocal("b", MakeNullableOf(KnownTypeCode::Int32));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    // bni.Left: comp(eq, GVO(a), GVO(b))  (the value comparison, a Comp)
+    auto valueComp = std::make_unique<Comp>(
+        MakeGVOCallOf(a, KnownTypeCode::Int32),
+        MakeGVOCallOf(b, KnownTypeCode::Int32),
+        ComparisonKind::Equality);
+    // bni.Right: comp(eq, HV(a), HV(b))  (the HasValue-bits comparison, a Comp)
+    auto hasValueComp = std::make_unique<Comp>(
+        MakeHasValueCallOf(a, KnownTypeCode::Int32),
+        MakeHasValueCallOf(b, KnownTypeCode::Int32),
+        ComparisonKind::Equality);
+    auto bitAnd = std::make_unique<BinaryNumericInstruction>(
+        std::move(valueComp), std::move(hasValueComp),
+        BinaryNumericOperator::BitAnd, StackType::I4);
+    auto fn = MakeFnWithBlock({result, a, b});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(bitAnd)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountLiftedComps(*fn), 0);
+    ASSERT_EQ(CountHasValueCall(*fn), 2);
+    ASSERT_EQ(CountGetValueOrDefaultOneArg(*fn), 2);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 1) << "the BNI equality lift must produce a lifted comp";
+    EXPECT_EQ(CountHasValueCall(*fn), 0) << "both HasValue calls must be folded away";
+    EXPECT_EQ(CountGetValueOrDefaultOneArg(*fn), 0)
+        << "both GetValueOrDefault calls must be folded away";
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp) << "the stloc now wraps the lifted comp";
+    auto* c = static_cast<Comp*>(st->Value.get());
+    EXPECT_EQ(c->LiftingKind, ComparisonLiftingKind::CSharp);
+    EXPECT_EQ(c->Kind, ComparisonKind::Equality);
+    ASSERT_EQ(c->Left->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(c->Left.get())->Variable.get(), a.get());
+    ASSERT_EQ(c->Right->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(c->Right.get())->Variable.get(), b.get());
+}
+
+// RunBinaryNumericNullableLift bool? equality case: the `&&`-as-`&` form of
+//   v.GetValueOrDefault() && v.HasValue   (for Nullable<bool>, i.e. `v == true`)
+// lowered to BitAnd(GVO(v), HV(v)). bni.Left is the GVO call (the condition),
+// bni.Right is the HasValue call (the true arm), falseInst is the fresh LdcI4(0).
+// The bool? equality fold matches (MatchGetValueOrDefault(condition) on a
+// Nullable<bool> + MatchHasValueCall(trueInst, v) + IsLdcI4(falseInst, 0)) and
+// produces comp.lifted[C#](eq, ldloc v, ldc.i4 1) (`v == true`). A Roslyn-era
+// codegen pattern.
+TEST(ExpressionTransforms, RunBinaryNumericLiftFoldsBoolEqualityGetValueOrDefaultHasValue) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Boolean));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto bitAnd = std::make_unique<BinaryNumericInstruction>(
+        MakeGVOCall(v), MakeHasValueCall(v),
+        BinaryNumericOperator::BitAnd, StackType::I4);
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(bitAnd)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountLiftedComps(*fn), 0);
+    ASSERT_EQ(CountHasValueCall(*fn), 1);
+    ASSERT_EQ(CountGetValueOrDefaultOneArg(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 1) << "the BNI bool? fold must produce a lifted comp";
+    EXPECT_EQ(CountHasValueCall(*fn), 0) << "the HasValue call must be folded away";
+    EXPECT_EQ(CountGetValueOrDefaultOneArg(*fn), 0)
+        << "the GetValueOrDefault call must be folded away";
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp);
+    auto* c = static_cast<Comp*>(st->Value.get());
+    EXPECT_EQ(c->LiftingKind, ComparisonLiftingKind::CSharp);
+    EXPECT_EQ(c->Kind, ComparisonKind::Equality) << "==> v == true";
+    ASSERT_EQ(c->Left->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(c->Left.get())->Variable.get(), v.get());
+    ASSERT_EQ(c->Right->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(c->Right.get())->Value, 1) << "==> v == true (1)";
+}
+
+// RunBinaryNumericNullableLift does not fire when the operands are not Boolean-
+// typed: an `int & int` BitAnd (IsBooleanValue -> false for an Int32 LdLoc) does
+// not pass the BitAnd gate, so RunBinaryNumericNullableLift is not invoked and the
+// BitAnd stays. This is the common bitwise-and case (the gate's purpose is to
+// avoid the wasted lift attempt on it).
+TEST(ExpressionTransforms, RunBinaryNumericLiftRejectsNonBooleanOperands) {
+    auto a = MakeParam("a", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto b = MakeParam("b", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto bitAnd = std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(a), std::make_unique<LdLoc>(b),
+        BinaryNumericOperator::BitAnd, StackType::I4);
+    auto fn = MakeFnWithBlock({v, a, b});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(bitAnd)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::BinaryNumericInstruction);
+    auto* bni = static_cast<BinaryNumericInstruction*>(st->Value.get());
+    EXPECT_EQ(bni->Operator, BinaryNumericOperator::BitAnd)
+        << "an int BitAnd must stay (not Boolean-typed, gate fails)";
+}
+
+// RunBinaryNumericNullableLift does not fire when LiftNullables is off: the
+// equality BNI shape is recognised by the BitAnd gate (both operands are Comps)
+// and RunBinaryNumericNullableLift is invoked, but LiftNullableCore returns nullptr
+// (the LiftNullables gate inside it), so the BitAnd stays.
+TEST(ExpressionTransforms, RunBinaryNumericLiftNoOpWhenLiftNullablesOff) {
+    auto a = MakeLocal("a", MakeNullableOf(KnownTypeCode::Int32));
+    auto b = MakeLocal("b", MakeNullableOf(KnownTypeCode::Int32));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto valueComp = std::make_unique<Comp>(
+        MakeGVOCallOf(a, KnownTypeCode::Int32),
+        MakeGVOCallOf(b, KnownTypeCode::Int32),
+        ComparisonKind::Equality);
+    auto hasValueComp = std::make_unique<Comp>(
+        MakeHasValueCallOf(a, KnownTypeCode::Int32),
+        MakeHasValueCallOf(b, KnownTypeCode::Int32),
+        ComparisonKind::Equality);
+    auto bitAnd = std::make_unique<BinaryNumericInstruction>(
+        std::move(valueComp), std::move(hasValueComp),
+        BinaryNumericOperator::BitAnd, StackType::I4);
+    auto fn = MakeFnWithBlock({result, a, b});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(bitAnd)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    StatementTransform st;
+    st.AddChild(std::make_unique<ExpressionTransforms>());
+    ILTransformContext ctx;
+    ctx.Settings.LiftNullables = false;
+    st.Run(*fn, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 0) << "LiftNullables off must block the BNI lift";
+    auto* stloc = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(stloc->Value->Op, OpCode::BinaryNumericInstruction)
+        << "the BitAnd must stay when LiftNullables is off";
+}
+

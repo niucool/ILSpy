@@ -75,6 +75,7 @@
 
 namespace ILSpy::Decompiler::IL {
 
+class ILInstruction;
 class Comp;
 class Conv;
 class Box;
@@ -140,36 +141,42 @@ private:
     // a non-terminal). Returns true if the rewrite fired (the if is destroyed).
     bool HandleConditionalOperator(IfInstruction* iff);
 
-    // RunIfNullableLift: port of NullableLiftingTransform.Run(IfInstruction) --
-    // the AnalyzeCondition/LiftNormal `v.HasValue ? v : fallback => v ?? fallback`
-    // early-out subset plus the bool? equality comparison subset of the `Lift`
-    // method plus the `&`/`|` on bool? section. The AnalyzeCondition/LiftNormal
-    // early-out: a conditional whose condition is a HasValue call (or a BitAnd of
-    // HasValue calls) on one Nullable<T> variable and whose true arm is `ldloc` of
-    // that variable folds into a NullCoalescingInstruction(Nullable) (the C# `??`):
-    //   v.HasValue ? v : fallback  ==> v ?? fallback
-    // The bool? equality folds: a conditional whose condition is `call GetValueOrDefault(
-    // ldloca v)` on a Nullable<bool> and whose arms are `v.HasValue` / a ldc.i4
-    // constant folds into a C#-lifted Comp (the D91 model):
-    //   v.GetValueOrDefault() ? v.HasValue : false  ==> v == true
-    //   v.GetValueOrDefault() ? false : v.HasValue  ==> v == false
-    //   v.GetValueOrDefault() ? !v.HasValue : true  ==> v != true
-    //   v.GetValueOrDefault() ? true : !v.HasValue  ==> v != false
-    // And the `&`/`|` on bool? folds produce a ThreeValuedBoolAnd/Or (the D95
-    // nodes):
-    //   condition ? v : (bool?)false       ==> 3vl.bool.and(condition, v)
-    //   condition ? (bool?)true : v        ==> 3vl.bool.or(condition, v)
-    //   (n1.GVO || (!n2.GVO && !n1.HV)) ? v : v2
-    //     v==n1 && v2==n2                  ==> 3vl.bool.or(v, v2)
-    //     v==n2 && v2==n1                  ==> 3vl.bool.and(v2, v)
-    // The DoLift / LiftCSharpUserComparison / conv.nop.lifted paths (the rest of
-    // LiftNormal), MatchCompOrDecimal/LiftCSharp*, and NullPropagation are deferred.
-    // Gated on LiftNullables. The NullCoalescing / lifted Comp / ThreeValuedBool
-    // nodes are values (not control flow), so the block-model adaptation
-    // (ReplaceWith for a sub-expression value-if, or the node becomes a non-terminal
-    // + a Branch final when the if is a block's FinalInstruction) is shared via
-    // ReplaceIfWithLiftedValue. Returns true if the fold fired (the if is destroyed).
+    // RunIfNullableLift: thin caller over LiftNullableCore (the shared Lift core)
+    // for NullableLiftingTransform.Run(IfInstruction). On a successful lift,
+    // ReplaceIfWithLiftedValue applies the block-model adaptation (ReplaceWith for
+    // a sub-expression value-if, or the lifted value becomes a non-terminal + a
+    // Branch final for a block-final if). Gated on LiftNullables (checked inside
+    // LiftNullableCore). Returns true if the fold fired (the if is destroyed).
     bool RunIfNullableLift(IfInstruction* iff);
+
+    // RunBinaryNumericNullableLift: port of NullableLiftingTransform.Run(
+    // BinaryNumericInstruction) -- the VS2017.8 / Roslyn 2.9 `&&`-as-`&`
+    // optimization on bool operands, analysed as-if short-circuit via
+    // LiftNullableCore (condition = bni.Left, true arm = bni.Right, false arm = a
+    // fresh LdcI4(0) owned by falseSink and consumed via ConsumeArm only when a
+    // fold needs it). A BNI is always a value, so the lifted result replaces bni
+    // via a clean ReplaceWith (no block-model adaptation). Gated on LiftNullables
+    // (checked inside LiftNullableCore); the caller additionally gates on both
+    // operands being Boolean-typed via IsBooleanValue. Returns true if the lift
+    // fired (the BNI is destroyed).
+    bool RunBinaryNumericNullableLift(BinaryNumericInstruction* bni);
+
+    // LiftNullableCore: the shared NullableLiftingTransform.Lift core --
+    // analyses a conditional (condition ? trueInst : falseInst) for a nullable
+    // lift, returning the lifted instruction (owned) or nullptr if no fold fired.
+    // The condition is read-only (detached only by the `&`/`|` on bool? path); the
+    // arms are detached on-demand via ConsumeArm (in-tree arm -> DetachFromParent;
+    // fresh-node arm -> move from the sink). The logic.not unwrap loop swaps both
+    // the views and the sinks. Gated on LiftNullables. The ported pieces: the
+    // AnalyzeCondition/LiftNormal early-out + conv.nop.lifted + DoLift paths
+    // (D97/D98/D100), the MatchCompOrDecimal/LiftCSharp* path (D101), the bool?
+    // equality folds (D94), and the `&`/`|` on bool? folds (D96). Deferred: the
+    // LiftCSharpUserComparison rest of LiftNormal (needs Call.Method.IsOperator),
+    // NullPropagation (a separate transform), the Decimal/Call branches of
+    // MatchCompOrDecimal, and IsGenericNewPattern.
+    std::unique_ptr<ILInstruction> LiftNullableCore(
+        ILInstruction* condition, ILInstruction* trueInst, ILInstruction* falseInst,
+        std::unique_ptr<ILInstruction>& trueSink, std::unique_ptr<ILInstruction>& falseSink);
 
     // logic.and/or canonicalization: `if (cond) ldc.i4 0 else RHS` ->
     // `if (!cond) RHS else ldc.i4 0` and `if (cond) RHS else ldc.i4 1` ->
@@ -235,14 +242,17 @@ private:
     // ConversionKind (D85).
     void CleanUpArrayIndices(std::vector<std::unique_ptr<ILInstruction>>& indices);
 
-    // VisitBinaryNumericInstruction (the shift-size subset): `a << (b & 31)` /
-    // `a >> (b & 31)` -> `a << b` / `a >> b` -- a shift's right operand masked
-    // with the bit-width minus one is redundant in C# (the shift already masks
-    // the count). The mask is dropped when it is the expected width for the
-    // shift's result type (31 for I4, 63 for I8). The native-int (I) case --
-    // `sizeof(IntPtr) * 8 - 1` -- is deferred (needs SizeOf to carry an IType with
-    // GetStackType). The BitAnd/Boolean nullable-lift case is deferred (needs
-    // NullableLiftingTransform + InferType). Mirrors ExpressionTransforms.cs.
+    // VisitBinaryNumericInstruction (the shift-size subset + the BitAnd nullable
+    // lift): `a << (b & 31)` / `a >> (b & 31)` -> `a << b` / `a >> b` -- a shift's
+    // right operand masked with the bit-width minus one is redundant in C# (the
+    // shift already masks the count). The mask is dropped when it is the expected
+    // width for the shift's result type (31 for I4, 63 for I8). The native-int (I)
+    // case -- `sizeof(IntPtr) * 8 - 1` -- is deferred (needs SizeOf to carry an
+    // IType with GetStackType). The BitAnd case (the C# `case BitAnd` arm) wires
+    // NullableLiftingTransform.Run(BinaryNumericInstruction) when both operands
+    // are Boolean-typed (the C# InferType == Boolean, via the conservative
+    // IsBooleanValue recognizer) -- the `&&`-as-`&` Roslyn optimization on bool,
+    // analysed as-if short-circuit. Mirrors ExpressionTransforms.cs.
     void VisitBinaryNumericInstruction(BinaryNumericInstruction* inst);
 
     // VisitCall (the Nullable<T>.GetValueOrDefault(a, b) -> a ?? b subset): a
