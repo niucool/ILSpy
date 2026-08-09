@@ -35,6 +35,9 @@ public:
     std::string MethodName;  // "Namespace.Type::Method" (resolved by the IL reader)
     std::vector<std::unique_ptr<ILInstruction>> Arguments;
     StackType ReturnType = StackType::Unknown;
+    // True for call/callvirt on an instance method (Arguments[0] is the
+    // receiver); false for static calls and newobj. Set by the IL reader.
+    bool IsInstanceCall = false;
 
     explicit Call(std::string method = std::string()) : ILInstruction(OpCode::Call), MethodName(std::move(method)) {}
 

@@ -360,6 +360,34 @@ private:
         return text;
     }
 
+    // The short method name (after "::") for an instance call: receiver.Method.
+    static std::string ShortMethodName(std::string_view full) {
+        auto pos = full.rfind("::");
+        return pos != std::string_view::npos ? std::string(full.substr(pos + 2)) : std::string(full);
+    }
+
+    // An instance call (call/callvirt, not newobj) renders as
+    // `receiver.Method(restArgs)`; the receiver is Arguments[0]. A ref/deref
+    // receiver (`&V`, `*(&V)`) is parenthesized so the member access binds.
+    // Static calls and newobj go through CallText.
+    std::string InstanceCallText(const Call& call) {
+        if (call.Arguments.empty() || !call.Arguments[0])
+            return CallText(call);
+        std::string recv = Expr(*call.Arguments[0]);
+        // A ref/deref receiver renders with a leading `&` or `*`, which binds
+        // looser than `.` -- parenthesize so the member access wins. An array
+        // element (`values[0]`) or a plain load needs no parens.
+        bool needsParens = !recv.empty() && (recv[0] == '&' || recv[0] == '*');
+        std::string text = (needsParens ? "(" + recv + ")" : recv) +
+                           "." + ShortMethodName(call.MethodName) + "(";
+        for (std::size_t i = 1; i < call.Arguments.size(); ++i) {
+            if (i > 1) text += ", ";
+            text += call.Arguments[i] ? Expr(*call.Arguments[i]) : "(default)";
+        }
+        text += ')';
+        return text;
+    }
+
     // A `.ctor` call used as a statement (void, in a block) whose first arg is
     // `this` is a base/sibling constructor call; render it as `base(args)` (the
     // `this` arg is implicit). A newobj (which pushes the new object) is an
@@ -384,7 +412,7 @@ private:
                 return text;
             }
         }
-        return CallText(call);
+        return call.IsInstanceCall ? InstanceCallText(call) : CallText(call);
     }
 
     // `V = V op expr` -> `V op= expr` (or `V++`/`V--` for +/- 1) when the
@@ -481,7 +509,9 @@ private:
             case OpCode::LdNull:
                 return "null";
             case OpCode::Call:
-                return CallText(static_cast<const Call&>(inst));
+                return static_cast<const Call&>(inst).IsInstanceCall
+                    ? InstanceCallText(static_cast<const Call&>(inst))
+                    : CallText(static_cast<const Call&>(inst));
             case OpCode::Comp: {
                 const auto& comp = static_cast<const Comp&>(inst);
                 const char* op = "==";

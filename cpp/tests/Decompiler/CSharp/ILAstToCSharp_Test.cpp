@@ -200,6 +200,29 @@ TEST(ILAstToCSharp, VoidCallStatementAndStringEscapes) {
               std::string::npos) << text;
 }
 
+TEST(ILAstToCSharp, InstanceCallRendersAsReceiverDotMethod) {
+    // An instance call `call Type::Method(receiver, arg)` renders as
+    // `receiver.Method(arg)`, not `Type.Method(receiver, arg)`.
+    auto recv = MakeVar(VariableKind::Parameter, "this", 0);
+    auto arg1 = MakeVar(VariableKind::Parameter, "arg_1", 1);
+    auto call = std::make_unique<Call>("System.Object::ToString");
+    call->IsInstanceCall = true;
+    call->ReturnType = StackType::O;
+    call->AddArg(std::make_unique<LdLoc>(recv));
+    call->AddArg(std::make_unique<LdLoc>(arg1));
+
+    auto block = std::make_unique<Block>();
+    block->Add(std::move(call));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "int arg_1");
+    EXPECT_NE(text.find("    this.ToString(arg_1);\n"), std::string::npos) << text;
+    EXPECT_EQ(text.find("System.Object.ToString("), std::string::npos) << "not a static-style call";
+}
+
 TEST(ILAstToCSharp, ConstructorCallEmitsNewExpression) {
     auto call = std::make_unique<Call>("System.Text.StringBuilder::.ctor");
     call->ReturnType = StackType::Void;
