@@ -28,6 +28,7 @@
 #include "Decompiler/IL/ControlFlow/LoopDetection.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
+#include "Decompiler/IL/Transforms/InlineReturnTransform.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/Metadata/ILTextEmitter.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
@@ -188,6 +189,10 @@ int main(int argc, char** argv) {
                 ILSpy::Decompiler::IL::ILTransformContext transformContext;
                 ILSpy::Decompiler::IL::ControlFlowSimplification().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::ILInlining().Run(*fn, transformContext);
+                ILSpy::Decompiler::IL::InlineReturnTransform().Run(*fn, transformContext);
+                // Re-run CFS so the duplicated 1-pred return blocks merge and
+                // the single-definition variable inlines to `leave (expr)`.
+                ILSpy::Decompiler::IL::ControlFlowSimplification().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::LoopDetection().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::ConditionDetection().Run(*fn, transformContext);
                 fn->CheckInvariant(ILSpy::Decompiler::IL::ILPhase::Normal);

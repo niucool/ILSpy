@@ -27,6 +27,7 @@ add_executable(ilspy_tests
     Decompiler/IL/ILInlining_Test.cpp
     Decompiler/IL/LoopDetection_Test.cpp
     Decompiler/IL/ConditionDetection_Test.cpp
+    Decompiler/IL/InlineReturnTransform_Test.cpp
 )
 target_link_libraries(ilspy_tests PRIVATE
     ILSpy::ilspy
