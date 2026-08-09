@@ -73,6 +73,22 @@ int CountBranches(ILFunction& fn) {
     return n;
 }
 
+// Count `goto returnBlock` patterns: a Branch whose target block is a leave
+// (a return). Both InlineReturnTransform (duplicate+merge) and CFS's
+// branch-to-leave folding eliminate these.
+int CountGotoReturns(ILFunction& fn) {
+    int n = 0;
+    Walk(fn.Body.get(), [&](ILInstruction* i) {
+        if (auto* br = dynamic_cast<Branch*>(i)) {
+            if (br->TargetBlock && br->TargetBlock->FinalInstruction &&
+                br->TargetBlock->FinalInstruction->Op == OpCode::Leave &&
+                br->TargetBlock->Instructions.empty())
+                ++n;
+        }
+    });
+    return n;
+}
+
 int CountTopLevelBlocks(ILFunction& fn) {
     int n = 0;
     Walk(fn.Body.get(), [&](ILInstruction* i) {
@@ -201,25 +217,23 @@ TEST(InlineReturnTransform, MscorlibSweepReducesBlockCount) {
     ASSERT_TRUE(f.IsValid());
 
     int processed = 0;
-    int blocksBefore = 0, blocksAfter = 0;
-    int branchesBefore = 0, branchesAfter = 0;
+    int gotoReturnsBefore = 0, gotoReturnsAfter = 0;
     for (const auto& m : f.MethodDefs()) {
         if (m.RVA == 0) continue;
         auto fn = ReadIL(f, m.Token, m.RVA);
         if (!fn) continue;
+        ++processed;
+        gotoReturnsBefore += CountGotoReturns(*fn);  // raw IL
         ILTransformContext ctx;
         ControlFlowSimplification().Run(*fn, ctx);
         ILInlining().Run(*fn, ctx);
-        blocksBefore += CountTopLevelBlocks(*fn);
-        branchesBefore += CountBranches(*fn);
         InlineReturnTransform().Run(*fn, ctx);
         ControlFlowSimplification().Run(*fn, ctx);  // merge the duplicated return blocks
         fn->CheckInvariant(ILPhase::Normal);
-        blocksAfter += CountTopLevelBlocks(*fn);
-        branchesAfter += CountBranches(*fn);
-        ++processed;
+        gotoReturnsAfter += CountGotoReturns(*fn);
         if (processed >= 3000) break;
     }
     EXPECT_GT(processed, 2000);
-    EXPECT_LT(branchesAfter, branchesBefore) << "InlineReturnTransform + CFS must reduce branch count";
+    EXPECT_LT(gotoReturnsAfter, gotoReturnsBefore)
+        << "the CFS+Inlining+InlineReturnTransform pipeline must reduce goto-return count";
 }

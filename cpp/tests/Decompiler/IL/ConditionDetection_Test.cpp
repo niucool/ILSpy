@@ -108,7 +108,9 @@ void RunPipeline(ILFunction& fn) {
 TEST(ConditionDetection, InlinesAndInvertsFallThroughReturn) {
     // b0: if (1 != 0) br b2     b1: return 1 (fall-through, 1 predecessor)
     // b2: return 0
-    // -> b0: if (1 == 0) { return 1 }   (fall-through to b2; goto eliminated)
+    // CFS now folds `br b2` (b2 = return 0) to a direct `return 0`, so b0's
+    // if-true arm becomes the early return; b1 stays as the fall-through.
+    // Result: `if (1 != 0) { return 0; } return 1;` (no goto, no invert needed).
     auto fn = WrapBlocks({});
     fn->Body->AddBlock(std::make_unique<Block>());
     fn->Body->AddBlock(std::make_unique<Block>());
@@ -124,17 +126,17 @@ TEST(ConditionDetection, InlinesAndInvertsFallThroughReturn) {
     RunPipeline(*fn);
     fn->CheckInvariant(ILPhase::Normal);
 
-    // b1 is inlined into the if, then the if is inverted (b2 is the fall-through):
-    // `if (1 != 0) goto b2; else { return 1 }` -> `if (1 == 0) { return 1 }`.
     auto* iff = dynamic_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get());
     ASSERT_NE(iff, nullptr);
+    // The condition is NOT negated (CFS pre-folds the value-return; no invert).
     auto* cond = dynamic_cast<Comp*>(iff->Condition.get());
     ASSERT_NE(cond, nullptr);
-    EXPECT_EQ(cond->Kind, ComparisonKind::Equality) << "1 != 0 negated to 1 == 0";
+    EXPECT_EQ(cond->Kind, ComparisonKind::Inequality) << "condition stays 1 != 0";
+    // The true arm is the folded `return 0` (a Leave), not a Block/goto.
     ASSERT_NE(iff->TrueInst, nullptr);
-    EXPECT_EQ(iff->TrueInst->Op, OpCode::Block) << "inlined b1 is the (inverted) true arm";
-    EXPECT_EQ(iff->FalseInst, nullptr) << "goto dropped; fall-through to b2";
-    // b1 is removed from the container; b2 stays as the fall-through target.
+    EXPECT_EQ(iff->TrueInst->Op, OpCode::Leave) << "br b2 folded to return 0";
+    EXPECT_EQ(iff->FalseInst, nullptr) << "no else; fall-through to b1";
+    // b1 (return 1) stays as the fall-through; b2 was folded away.
     EXPECT_EQ(fn->Body->Blocks.size(), 2u);
 }
 
@@ -181,10 +183,14 @@ TEST(ConditionDetection, InvertsIfGotoElseExitWhenTargetIsFallThrough) {
                                ComparisonKind::GreaterThanOrEqual),
         std::make_unique<Branch>(fn->Body->Blocks[1].get()),
         std::move(exitBlock)));
-    // X is a *value* return so CFS does not pre-convert `br X` into a leave
-    // (CFS only folds branches to void/value-less leaves); the goto must
-    // survive to ConditionDetection so the inversion can fire.
-    fn->Body->Blocks[1]->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(0)));
+    // X has a body (a store) before its leave so CFS does not pre-fold `br X`
+    // into a direct leave -- the goto must survive to ConditionDetection so
+    // the inversion can fire. (CFS folds branches to plain leave blocks.)
+    auto tmp = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    tmp->Name = "tmp";
+    fn->Variables.push_back(tmp);
+    fn->Body->Blocks[1]->Add(std::make_unique<StLoc>(tmp, std::make_unique<LdcI4>(0)));
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
     fn->CheckInvariant(ILPhase::Normal);
 
     RunPipeline(*fn);
@@ -217,7 +223,14 @@ TEST(ConditionDetection, DoesNotInvertWhenTargetIsNotNextBlock) {
         std::make_unique<Branch>(fn->Body->Blocks[2].get()),  // X is at index 2, not next
         std::move(exitBlock)));
     fn->Body->Blocks[1]->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(1)));
-    fn->Body->Blocks[2]->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(0)));
+    // X has a body so CFS does not pre-fold `br X` into a direct leave; the
+    // goto to X must survive (X is not the next block, so the inversion cannot
+    // fire either).
+    auto tmp = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    tmp->Name = "tmp";
+    fn->Variables.push_back(tmp);
+    fn->Body->Blocks[2]->Add(std::make_unique<StLoc>(tmp, std::make_unique<LdcI4>(0)));
+    fn->Body->Blocks[2]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
     fn->CheckInvariant(ILPhase::Normal);
 
     RunPipeline(*fn);

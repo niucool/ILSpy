@@ -24,7 +24,10 @@
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -88,10 +91,47 @@ bool IsLeaveLike(const ILInstruction* inst) {
     return !leave->Value || leave->Value->Op == OpCode::Nop;
 }
 
+// Clone a pure-load value (no side effects) so a branch-to-return can be
+// folded into a direct leave duplicating the return value. Returns nullptr
+// for a value that is not a cheap cloneable pure load (the C# uses
+// DetectExitPoints for the general case; this is the seed-level fast path).
+std::unique_ptr<ILInstruction> ClonePureLoad(const ILInstruction* v) {
+    if (!v) return nullptr;
+    switch (v->Op) {
+        case OpCode::LdLoc: {
+            auto* ld = static_cast<const LdLoc*>(v);
+            return std::make_unique<LdLoc>(ld->Variable);
+        }
+        case OpCode::LdcI4: return std::make_unique<LdcI4>(static_cast<const LdcI4*>(v)->Value);
+        case OpCode::LdcI8: return std::make_unique<LdcI8>(static_cast<const LdcI8*>(v)->Value);
+        case OpCode::LdcF4: return std::make_unique<LdcF4>(static_cast<const LdcF4*>(v)->Value);
+        case OpCode::LdcF8: return std::make_unique<LdcF8>(static_cast<const LdcF8*>(v)->Value);
+        case OpCode::LdNull: return std::make_unique<LdNull>();
+        case OpCode::LdStr: return std::make_unique<LdStr>(static_cast<const LdStr*>(v)->Value);
+        default: return nullptr;
+    }
+}
+
 void ForEach(ILInstruction* inst, const std::function<void(ILInstruction*)>& visit) {
     if (!inst) return;
     visit(inst);
     for (int i = 0; i < inst->ChildCount(); ++i) ForEach(inst->GetChild(i), visit);
+}
+
+// True if `target` is the fall-through of its predecessor in the container: the
+// previous block's final is not EndPointUnreachable (it falls through). Such a
+// block is reachable even with no Branch edges, so CFS must not delete it.
+bool IsFallThroughTarget(Block* target) {
+    if (!target) return false;
+    auto* c = dynamic_cast<BlockContainer*>(target->Parent);
+    if (!c) return false;
+    for (std::size_t i = 1; i < c->Blocks.size(); ++i) {
+        if (c->Blocks[i].get() == target) {
+            ILInstruction* fin = c->Blocks[i - 1]->FinalInstruction.get();
+            return fin && !HasFlag(fin->Flags(), InstructionFlags::EndPointUnreachable);
+        }
+    }
+    return false;
 }
 
 void ForEachContainer(ILInstruction* inst, const std::function<void(BlockContainer*)>& visit) {
@@ -174,7 +214,8 @@ void SimplifyBranchChains(ILFunction& function, ILTransformContext& context,
             if (next->TargetBlock) ++next->TargetBlock->IncomingEdgeCount;
             --target->IncomingEdgeCount;
             branch->TargetBlock = next->TargetBlock;
-            if (target->IncomingEdgeCount == 0) MarkForDeletion(target, graveyard);
+            if (target->IncomingEdgeCount == 0 && !IsFallThroughTarget(target))
+                MarkForDeletion(target, graveyard);
             target = branch->TargetBlock;
             if (!target) break;
         }
@@ -191,8 +232,27 @@ void SimplifyBranchChains(ILFunction& function, ILTransformContext& context,
             std::unique_ptr<ILInstruction> dup =
                 std::make_unique<Leave>(targetLeave->TargetContainer);
             branch->ReplaceWith(std::move(dup));
+        } else if (target->Instructions.empty() &&
+                   target->FinalInstruction &&
+                   target->FinalInstruction->Op == OpCode::Leave) {
+            // Branching to a value-return block (leave with a value): fold to a
+            // direct leave duplicating the value when it is a cheap pure load
+            // (ldloc/ldc/ldstr/ldnull). This turns `goto returnBlock` into
+            // `return value`, eliminating the goto and turning the branch's arm
+            // into an exit (the early-return pattern). The general case
+            // (non-cloneable values) is DetectExitPoints, deferred.
+            auto* targetLeave = static_cast<Leave*>(target->FinalInstruction.get());
+            auto cloned = ClonePureLoad(targetLeave->Value.get());
+            if (cloned) {
+                context.StepOnce("Replace branch to value-return with leave");
+                --target->IncomingEdgeCount;
+                std::unique_ptr<ILInstruction> dup =
+                    std::make_unique<Leave>(targetLeave->TargetContainer, std::move(cloned));
+                branch->ReplaceWith(std::move(dup));
+            }
         }
-        if (target->IncomingEdgeCount == 0) MarkForDeletion(target, graveyard);
+        if (target->IncomingEdgeCount == 0 && !IsFallThroughTarget(target))
+            MarkForDeletion(target, graveyard);
     }
 }
 
