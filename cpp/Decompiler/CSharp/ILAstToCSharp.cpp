@@ -157,6 +157,7 @@ public:
 
     void EmitMethod(const ILFunction& fn, std::string_view returnType,
                     std::string_view methodName, std::string_view paramDecl) {
+        fn_ = &fn;
         out_ += returnType;
         out_ += ' ';
         out_ += methodName;
@@ -164,6 +165,7 @@ public:
         out_ += paramDecl;
         out_ += ")\n{\n";
         if (fn.Body) {
+            CollectLoopHeaders(fn.Body.get());
             CollectLabels(fn.Body.get());
             EmitContainer(*fn.Body, 1);
         }
@@ -172,8 +174,10 @@ public:
 
 private:
     std::string& out_;
+    const ILFunction* fn_ = nullptr;
     std::set<std::string> declared_;          // locals already introduced with `var`
     std::map<const Block*, std::string> labels_;  // branch-target block -> IL_XXXX
+    std::set<const Block*> loopHeaders_;  // first block of each Loop container
 
     void Line(int indent, std::string_view text) {
         out_.append(static_cast<std::size_t>(indent) * 4, ' ');
@@ -189,11 +193,21 @@ private:
 
     // Every branch-target block gets an IL_XXXX label; walk the whole tree so
     // branches nested in if/switch arms are covered too.
+    void CollectLoopHeaders(const ILInstruction* inst) {
+        if (!inst) return;
+        if (auto* c = dynamic_cast<const BlockContainer*>(inst)) {
+            if (c->Kind == ContainerKind::Loop && !c->Blocks.empty())
+                loopHeaders_.insert(c->Blocks.front().get());
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i) CollectLoopHeaders(inst->GetChild(i));
+    }
+
     void CollectLabels(const ILInstruction* inst) {
         if (!inst) return;
         if (inst->Op == OpCode::Branch) {
             const auto* br = static_cast<const Branch*>(inst);
-            if (br->TargetBlock && labels_.find(br->TargetBlock) == labels_.end())
+            if (br->TargetBlock && labels_.find(br->TargetBlock) == labels_.end() &&
+                loopHeaders_.find(br->TargetBlock) == loopHeaders_.end())
                 labels_[br->TargetBlock] = LabelFor(br->TargetOffset);
         }
         for (int i = 0; i < inst->ChildCount(); ++i) CollectLabels(inst->GetChild(i));
@@ -201,6 +215,9 @@ private:
 
     std::string GotoText(const Branch& br) const {
         if (br.TargetBlock) {
+            // A branch to a loop header is a `continue` (the back-edge).
+            if (loopHeaders_.find(br.TargetBlock) != loopHeaders_.end())
+                return "continue;";
             auto it = labels_.find(br.TargetBlock);
             if (it != labels_.end()) return "goto " + it->second + ";";
         }
@@ -208,12 +225,35 @@ private:
     }
 
     void EmitContainer(const BlockContainer& container, int indent) {
+        if (container.Kind == ContainerKind::Loop && !container.Blocks.empty()) {
+            // A loop container renders as `while (true) { ... }`; the back-edge
+            // branch to the header (the first block) is implicit -- the loop
+            // iterates. Only the LAST block's trailing back-edge is dropped (a
+            // mid-loop back-edge is a `continue`, rendered as a goto for now).
+            const Block* header = container.Blocks.front().get();
+            Line(indent, "while (true)");
+            Line(indent, "{");
+            for (std::size_t i = 0; i < container.Blocks.size(); ++i) {
+                const auto& block = container.Blocks[i];
+                if (!block) continue;
+                bool isLast = (i + 1 == container.Blocks.size());
+                bool dropFinal = false;
+                if (isLast && block->FinalInstruction &&
+                    block->FinalInstruction->Op == OpCode::Branch) {
+                    auto* br = static_cast<Branch*>(block->FinalInstruction.get());
+                    if (br->TargetBlock == header) dropFinal = true;
+                }
+                EmitBlock(*block, indent + 1, dropFinal);
+            }
+            Line(indent, "}");
+            return;
+        }
         for (const auto& block : container.Blocks) {
             if (block) EmitBlock(*block, indent);
         }
     }
 
-    void EmitBlock(const Block& block, int indent) {
+    void EmitBlock(const Block& block, int indent, bool dropFinal = false) {
         auto label = labels_.find(&block);
         if (label != labels_.end()) {
             // C# labels start in column 0 by convention.
@@ -223,7 +263,7 @@ private:
         for (const auto& inst : block.Instructions) {
             if (inst && inst->Op != OpCode::Nop) EmitStatement(*inst, indent);
         }
-        if (block.FinalInstruction) EmitStatement(*block.FinalInstruction, indent);
+        if (block.FinalInstruction && !dropFinal) EmitStatement(*block.FinalInstruction, indent);
     }
 
     // A non-Block arm of if/try: brace it at this indent.
@@ -273,8 +313,15 @@ private:
                 return;
             case OpCode::Leave: {
                 const auto& leave = static_cast<const Leave&>(inst);
-                if (leave.Value) Line(indent, "return " + Expr(*leave.Value) + ";");
-                else Line(indent, "return;");
+                // A leave of the function body is `return`; a leave of a loop
+                // container is `break`; other leaves (switch/try) are `break`
+                // for now (the real back end disambiguates).
+                if (fn_ && leave.TargetContainer == fn_->Body.get()) {
+                    if (leave.Value) Line(indent, "return " + Expr(*leave.Value) + ";");
+                    else Line(indent, "return;");
+                } else {
+                    Line(indent, "break;");
+                }
                 return;
             }
             case OpCode::Branch:

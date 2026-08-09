@@ -617,3 +617,45 @@ TEST(ILAstToCSharp, TranslatesEveryDecodableMscorlibMethodWithoutCrashing) {
     }
     EXPECT_GT(translated, 1000) << "too few methods translated";
 }
+
+TEST(ILAstToCSharp, LoopContainerRendersAsWhileTrueWithContinueAndBreak) {
+    // A Loop-kind container renders as `while (true) { ... }`; a back-edge
+    // branch to the header (the first block) is `continue`, and a leave of
+    // the loop container is `break`. A leave of the function body is `return`.
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    // Pre-header block: holds the loop container, then returns.
+    auto preHeader = std::make_unique<Block>();
+    // The loop container.
+    auto loopC = std::make_unique<BlockContainer>();
+    loopC->Kind = ContainerKind::Loop;
+    auto header = std::make_unique<Block>();
+    Block* headerPtr = header.get();
+    loopC->AddBlock(std::move(header));
+    auto body = std::make_unique<Block>();
+    Block* bodyPtr = body.get();
+    loopC->AddBlock(std::move(body));
+    auto incr = std::make_unique<Block>();
+    Block* incrPtr = incr.get();
+    loopC->AddBlock(std::move(incr));
+    // header: leave(loop) (break out). body: br header (mid-loop continue).
+    // incr: br header (last-block back-edge -- implicit, dropped).
+    headerPtr->SetFinal(std::make_unique<Leave>(loopC.get()));
+    bodyPtr->SetFinal(std::make_unique<Branch>(headerPtr));
+    incrPtr->SetFinal(std::make_unique<Branch>(headerPtr));
+    preHeader->Add(std::move(loopC));
+    preHeader->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(preHeader));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("while (true)"), std::string::npos) << text;
+    EXPECT_NE(text.find("break;"), std::string::npos) << text;
+    EXPECT_NE(text.find("continue;"), std::string::npos) << text;
+    EXPECT_NE(text.find("return;"), std::string::npos) << text;
+    // No IL_ labels and no gotos (the loop header is not labeled).
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+}
