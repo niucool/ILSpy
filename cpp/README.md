@@ -89,7 +89,7 @@ implemented and green here. Everything else follows the phase plan in
   `RemoveDeadStores` setting, with no loads or addresses, has its stores dropped
   (a pure value goes with the store; an impure value is unwrapped so its side
   effect survives), and dead-copy chains collapse via a recompute fixpoint.
-  25 of ~40 transforms ported. The switch-detection family is now complete in
+  26 of ~40 transforms ported. The switch-detection family is now complete in
   its core: `LongSet`/`LongInterval` (Util/, ported from LongSet.cs /
   Interval.cs) -- an immutable interval-set of longs whose complement is
   representable (unlike `std::set<int64_t>`) -- backs `SwitchSection::Labels`
@@ -257,13 +257,13 @@ implemented and green here. Everything else follows the phase plan in
   RemoveInfeasiblePath + DetectPinnedRegions + DetectCatchWhenConditionBlocks +
   LdLocaDupInitObjTransform + EarlyExpressionTransforms + RemoveDeadVariableInit +
   CFS + SwitchDetection + SwitchOnNullable + LoopDetection + PatternMatching +
-  ConditionDetection + LockTransform + UsingTransform + CachedDelegateInitialization + CachedReadOnlySpanInitialization + StatementTransform{ILInlining} + AssignVariableNames + RemoveRedundantReturn before the
+  ConditionDetection + LockTransform + UsingTransform + CachedDelegateInitialization + CachedReadOnlySpanInitialization + StatementTransform{ILInlining, ExpressionTransforms} + AssignVariableNames + RemoveRedundantReturn before the
   C# seed, so `fixed (...) { ... }`, `default(T)`, reconstructed `switch`
   statements, switch-on-nullable `case null:` arms, `is T x` patterns,
   `lock (...) { ... }`, and `using (...) { ... }` statements now
-  appear in the output. 25 of ~40 transforms ported (the StatementTransform
-  orchestration + its first child ILInlining; the remaining 15 per-statement
-  children are deferred).
+  appear in the output. 26 of ~40 transforms ported (the StatementTransform
+  orchestration + its first two children ILInlining and ExpressionTransforms;
+  the remaining 14 per-statement children are deferred).
   `DelegateConstruction` (Transforms/, a tested-but-not-yet-wired
   foundation) ports the `MatchDelegateConstruction` helper the next in-order
   transform (`CachedDelegateInitialization`) and the later `DelegateConstruction`
@@ -373,8 +373,32 @@ implemented and green here. Everything else follows the phase plan in
   `while (InlineOneIfPossible(block, pos))` loop re-checks `pos < size` after a
   removal shrank the block (the C# avoids this because the final lives in
   `Instructions`, so the last non-terminal is at `Count-2` and the shifted-in
-  instruction stays in range). The remaining 15 per-statement children
-  (ExpressionTransforms, DynamicIsEventAssignmentTransform, TransformAssignment,
+  instruction stays in range). The driver gained a block-model compensation for
+  an if-final-only block (no non-terminal `Instructions`, so `pos` starts at -1
+  and the per-statement loop never enters): the C# carries the if as a non-
+  terminal at `Instructions[Count-2]`, so the driver visits it and recurses into
+  its condition; this port makes the if the `FinalInstruction`, so the driver
+  now runs each child once with the sentinel `pos = -1` for such blocks so
+  per-statement transforms that handle the if-final's condition fire (children
+  that only handle non-terminal positions, like `ILInlining` which guards `pos
+  >= 0 && pos < size`, no-op).
+  `ExpressionTransforms` (the second child, ported from ExpressionTransforms.cs)
+  is an `IStatementTransform` with a recursive `Visit` (the C# ILVisitor) that
+  folds the self-contained `VisitComp` subset: `logic.not(comp op)` ->
+  `comp(op.Negate)` (push negation into the comparison, `!(a == b)` -> `a != b`),
+  `comp(x != 0)` -> `x` (drop the redundant inequality against 0 when the comp
+  is in a condition slot or its left is a comp), and `comp.unsigned(left > 0)` /
+  `<= 0` -> `comp(left != 0)` / `== 0` (an unsigned compare against 0 is a
+  (non-)zero test). `IsInConditionSlot` is ported via `Parent` + `ChildIndex`
+  (the port has no `SlotInfo`); the float guard is approximated by the operands'
+  `StackType` (the port's `Comp` carries no `InputType`); the C# `UnwrapConv` of
+  the right operand is approximated (the port's `Conv` carries no `Kind`). Its
+  `Run` visits the statement at `pos` and the if-final's `Condition` at
+  `pos == size-1` (the port's equivalent of the C# visiting the if at
+  `Count-2`), so `if (comp(x != 0))` -> `if (x)` fires on if-final blocks -- the
+  CLI output now shows `if (array.Length)` (from `comp(ldlen != 0)` -> `ldlen`) and
+  `if (!value)` (the kept logic.not of a bool param). The remaining 14
+  per-statement children (DynamicIsEventAssignmentTransform, TransformAssignment,
   NullCoalescingTransform, NullableLiftingStatementTransform,
   NullPropagationStatementTransform, TransformArrayInitializers,
   TransformCollectionAndObjectInitializers, TransformExpressionTrees,
@@ -383,7 +407,10 @@ implemented and green here. Everything else follows the phase plan in
   InterpolatedStringTransform) and the `ILInlining` `AllowInliningOfLdloca`
   option (the ldloca-into-`addressof` path the C# second pass enables, which
   needs an `AddressOf` node + `IsGeneratedTemporaryForAddressOf` +
-  `ClassifyExpression`) are deferred.
+  `ClassifyExpression`) are deferred, as are the rest of `ExpressionTransforms`
+  (the NullableLifting call, the Conv/Box/Call/NewObj/LdObj/StObj/StLoc/
+  IfInstruction/SwitchExpression/Dynamic/BinaryNumeric/TryCatchHandler visit
+  methods).
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
   walk + a corpus probe; the async/iterator state machines
@@ -393,7 +420,7 @@ implemented and green here. Everything else follows the phase plan in
   the PatternMatchingTransform recursive sub-patterns (DetectPropertySubPatterns /
   PropertyOrFieldAccess / CompatibleExitInstruction),
   HighLevelLoopTransform (while/for), and the remaining StatementTransform
-  per-statement children (ExpressionTransforms, TransformAssignment, ...) are
+  per-statement children (TransformAssignment, ...) are
   the subsequent in-order targets.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the

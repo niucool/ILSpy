@@ -21,6 +21,7 @@
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 
 #include <functional>
@@ -67,6 +68,25 @@ void StatementTransform::RunBlock(Block* block, ILTransformContext& context) {
     // the final, but the final is never a StLoc, so the first iteration at the
     // final is a no-op -- starting at the last non-terminal is equivalent).
     int pos = static_cast<int>(block->Instructions.size()) - 1;
+    if (pos < 0) {
+        // Block-model compensation: a block whose only instruction is the
+        // if-final (no non-terminal Instructions) is never reached by the
+        // per-statement loop (pos starts at -1). The C# carries the if as a
+        // non-terminal at Instructions[Count-2], so the driver visits it and
+        // recurses into its condition; this port makes the if the
+        // FinalInstruction, so the condition would otherwise go unvisited.
+        // Run each child once with the sentinel pos = -1 so per-statement
+        // transforms that handle the if-final's condition (e.g.
+        // ExpressionTransforms's Comp rewrites) fire on if-final-only blocks.
+        // Children that only handle non-terminal positions (e.g. ILInlining,
+        // which guards `pos >= 0 && pos < size`) no-op. No rerun loop: the if's
+        // condition is a single expression, not a statement sequence.
+        if (block->FinalInstruction &&
+            block->FinalInstruction->Op == OpCode::IfInstruction) {
+            for (auto& child : children_) child->Run(*block, -1, ctx);
+        }
+        return;
+    }
     while (pos >= 0) {
         if (ctx.HasRerunPosition()) {
             // A child requested a rerun at an earlier position; jump back. The

@@ -41,6 +41,7 @@
 #include "Decompiler/IL/Transforms/CachedDelegateInitialization.hpp"
 #include "Decompiler/IL/Transforms/CachedReadOnlySpanInitialization.hpp"
 #include "Decompiler/IL/Transforms/StatementTransform.hpp"
+#include "Decompiler/IL/Transforms/ExpressionTransforms.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
 #include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
@@ -333,6 +334,20 @@ int main(int argc, char** argv) {
                     ILSpy::Decompiler::IL::StatementTransform statementTransform;
                     statementTransform.AddChild(
                         std::make_unique<ILSpy::Decompiler::IL::ILInlining>());
+                    // ExpressionTransforms: the second per-statement child (the
+                    // C# GetILTransforms() order), a recursive visitor that folds
+                    // simple expression patterns -- `logic.not(comp op)` ->
+                    // `comp(op.Negate)` (push negation into the comparison),
+                    // `comp(x != 0)` -> `x` (drop the redundant comparison
+                    // against 0), and `comp.unsigned(left > 0)` / `<= 0` ->
+                    // `comp(left != 0)` / `== 0`. This subset of the C#
+                    // ExpressionTransforms is the self-contained VisitComp piece;
+                    // the rest (Conv/Box/Call/NewObj/IfInstruction/SwitchExpression/
+                    // ...) is deferred. Like ILInlining it does not request
+                    // reruns, so it runs after ILInlining without triggering a
+                    // re-run of it.
+                    statementTransform.AddChild(
+                        std::make_unique<ILSpy::Decompiler::IL::ExpressionTransforms>());
                     statementTransform.Run(*fn, transformContext);
                 }
                 ILSpy::Decompiler::IL::AssignVariableNames().Run(*fn, transformContext);

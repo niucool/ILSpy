@@ -52,6 +52,7 @@ add_executable(ilspy_tests
     Decompiler/IL/Transforms/CachedDelegateInitialization_Test.cpp
     Decompiler/IL/Transforms/CachedReadOnlySpanInitialization_Test.cpp
     Decompiler/IL/Transforms/StatementTransform_Test.cpp
+    Decompiler/IL/Transforms/ExpressionTransforms_Test.cpp
     Decompiler/IL/Instructions/MatchInstruction_Test.cpp
     Decompiler/IL/Instructions/UsingInstruction_Test.cpp
 )
