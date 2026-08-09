@@ -21,6 +21,9 @@
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Instructions/DefaultValue.hpp"
+#include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
@@ -56,6 +59,23 @@ std::string_view ShortMethodName(std::string_view fullName) {
     auto pos = fullName.rfind("::");
     if (pos == std::string_view::npos) return fullName;
     return fullName.substr(pos + 2);
+}
+
+// Port of ILInstruction.MatchLogicNot(out arg): logic.not(X) is this port's
+// `comp(Equality, X, ldc.i4(0))` shape (the reader's brfalse, per the
+// SwitchAnalysis/ConditionDetection convention -- see MatchInstruction's
+// MatchLogicNot). Sign-independent, so the Unsigned flag is irrelevant; the
+// inner expression is comp->Left. Returns true and sets `arg` to the negated
+// expression.
+bool MatchLogicNot(ILInstruction* inst, ILInstruction*& arg) {
+    arg = nullptr;
+    if (!inst || inst->Op != OpCode::Comp) return false;
+    auto* comp = static_cast<Comp*>(inst);
+    if (comp->Kind != ComparisonKind::Equality || comp->Unsigned) return false;
+    if (!comp->Right || comp->Right->Op != OpCode::LdcI4) return false;
+    if (static_cast<LdcI4*>(comp->Right.get())->Value != 0) return false;
+    arg = comp->Left.get();
+    return true;
 }
 
 } // namespace
@@ -122,6 +142,102 @@ bool NullableLiftingTransform::MatchCompOrDecimal(ILInstruction* inst, CompOrDec
         return true;
     }
     return false;
+}
+
+const TypeSystem::IType* NullableLiftingTransform::GetUnderlyingTypeOfNullable(const TypeSystem::IType* type) {
+    // Nullable<T> is a ParameterizedType whose generic definition is
+    // KnownType(NullableOfT) with exactly one type argument T. A bare
+    // Nullable`1 (the generic definition) has no type argument; the full C#
+    // NullableType.GetUnderlyingType unwraps further wrappers -- deferred (the
+    // ParameterizedType case is the shape the metadata reader produces for
+    // every real Nullable<T> in this port).
+    if (!type) return nullptr;
+    if (auto* pt = dynamic_cast<const TypeSystem::ParameterizedType*>(type)) {
+        const auto& gen = pt->GenericType();
+        if (gen) {
+            if (auto* kt = dynamic_cast<const TypeSystem::KnownType*>(gen.get())) {
+                if (kt->Code() == TypeSystem::KnownTypeCode::NullableOfT) {
+                    const auto& args = pt->TypeArguments();
+                    if (args.size() == 1) return args[0].get();
+                }
+            }
+        }
+    }
+    return nullptr;
+}
+
+bool NullableLiftingTransform::IsKnownType(const TypeSystem::IType* type, TypeSystem::KnownTypeCode code) {
+    if (!type) return false;
+    if (auto* kt = dynamic_cast<const TypeSystem::KnownType*>(type))
+        return kt->Code() == code;
+    return false;
+}
+
+bool NullableLiftingTransform::MatchHasValueCall(ILInstruction* inst, ILVariablePtr& v) {
+    // `call get_HasValue(ldloca v)`: the 1-arg form (recognised by the
+    // `(inst, out ILInstruction arg)` overload) whose argument is a LdLoca.
+    v.reset();
+    ILInstruction* arg = nullptr;
+    if (!MatchHasValueCall(inst, arg)) return false;
+    if (!arg || arg->Op != OpCode::LdLoca) return false;
+    v = static_cast<LdLoca*>(arg)->Variable;
+    return true;
+}
+
+bool NullableLiftingTransform::MatchGetValueOrDefault(ILInstruction* inst, ILVariablePtr& v) {
+    // `call GetValueOrDefault(ldloca v)`: the 1-arg form whose argument is a
+    // LdLoca. (The 2-arg value-or-fallback form is a separate overload.)
+    v.reset();
+    ILInstruction* arg = nullptr;
+    if (!MatchGetValueOrDefault(inst, arg)) return false;
+    if (!arg || arg->Op != OpCode::LdLoca) return false;
+    v = static_cast<LdLoca*>(arg)->Variable;
+    return true;
+}
+
+bool NullableLiftingTransform::MatchNegatedHasValueCall(ILInstruction* inst, const ILVariable* v) {
+    // logic.not(call get_HasValue(ldloca v)): the logic.not is this port's
+    // `comp(Equality, X, ldc.i4(0))` shape; the inner call must operate on `v`.
+    if (!inst) return false;
+    ILInstruction* arg = nullptr;
+    if (!MatchLogicNot(inst, arg)) return false;
+    ILVariablePtr hv;
+    if (!MatchHasValueCall(arg, hv)) return false;
+    return hv.get() == v;
+}
+
+bool NullableLiftingTransform::MatchNullableCtor(ILInstruction* inst,
+                                                   const TypeSystem::IType*& underlyingType,
+                                                   ILInstruction*& arg) {
+    // `newobj Nullable<T>(arg)`: a newobj (Call with IsNewObj -- newobj is
+    // always a constructor, so IsNewObj is the faithful equivalent of the C#
+    // newobj.Method.IsConstructor) whose declaring type resolves to
+    // NullableOfT with exactly one argument.
+    underlyingType = nullptr;
+    arg = nullptr;
+    if (!inst || inst->Op != OpCode::Call) return false;
+    auto* call = static_cast<Call*>(inst);
+    if (!call->IsNewObj) return false;
+    if (call->Arguments.size() != 1) return false;
+    if (KnownTypeCodeOf(call->DeclaringType.get()) != TypeSystem::KnownTypeCode::NullableOfT)
+        return false;
+    arg = call->Arguments[0].get();
+    underlyingType = GetUnderlyingTypeOfNullable(call->DeclaringType.get());
+    return true;
+}
+
+bool NullableLiftingTransform::MatchNull(ILInstruction* inst, const TypeSystem::IType*& underlyingType) {
+    // `default(Nullable<T>)`: a DefaultValue whose Type is a Nullable<T> --
+    // GetUnderlyingTypeOfNullable returns the type argument T (non-null only
+    // for a Nullable<T> instantiation, the equivalent of the C#
+    // NullableType.IsNullable check).
+    underlyingType = nullptr;
+    if (!inst || inst->Op != OpCode::DefaultValue) return false;
+    auto* dv = static_cast<DefaultValue*>(inst);
+    const TypeSystem::IType* ut = GetUnderlyingTypeOfNullable(dv->Type.get());
+    if (!ut) return false;
+    underlyingType = ut;
+    return true;
 }
 
 } // namespace ILSpy::Decompiler::IL

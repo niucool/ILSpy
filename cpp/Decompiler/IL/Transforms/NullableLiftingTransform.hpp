@@ -46,7 +46,10 @@
 
 #pragma once
 
+#include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
 namespace ILSpy::Decompiler::IL {
 
@@ -106,6 +109,66 @@ public:
     // declaring type, no operator flag) -- so a Call never matches here. Returns
     // false for every other instruction kind, matching the C# fall-through.
     static bool MatchCompOrDecimal(ILInstruction* inst, CompOrDecimal& result);
+
+    // Port of NullableType.GetUnderlyingType(type): for a Nullable<T> -- a
+    // ParameterizedType whose generic definition is KnownType(NullableOfT) with
+    // one type argument -- returns the type argument T (non-owning); otherwise
+    // null. This port's IType for `Nullable<int>` is
+    // `ParameterizedType(KnownType(NullableOfT), {Int32})`; a bare `Nullable`1`
+    // (the generic definition) has no type argument and returns null. The full
+    // C# NullableType.GetUnderlyingType also unwraps type parameters and other
+    // nullable wrappers -- deferred (this port's minimal type system carries no
+    // NullableType/TypeParameter-with-constraint machinery); the
+    // ParameterizedType case is the shape the metadata reader produces for
+    // every real Nullable<T>.
+    static const TypeSystem::IType* GetUnderlyingTypeOfNullable(const TypeSystem::IType* type);
+
+    // True when `type` is a KnownType of the given code. A faithful subset of
+    // the C# `type.IsKnownType(code)` extension: this port's IType carries no
+    // IsKnownType; a KnownType compares its Code directly, a ParameterizedType
+    // (e.g. `Nullable<int>`) is not itself a known type, matching the C# which
+    // reads the type's KnownTypeCode (None for a non-known type).
+    static bool IsKnownType(const TypeSystem::IType* type, TypeSystem::KnownTypeCode code);
+
+    // Port of NullableLiftingTransform.MatchHasValueCall(inst, out ILVariable v):
+    // the ldloca-v overload. `call get_HasValue(ldloca v)` on System.Nullable<T>
+    // (1 argument, the argument a LdLoca) -> v (the LdLoca's variable). The
+    // 1-arg `(inst, out ILInstruction arg)` overload above recognises the call
+    // and returns its argument; this overload additionally requires the
+    // argument to be a `ldloca v` and reports the variable.
+    static bool MatchHasValueCall(ILInstruction* inst, ILVariablePtr& v);
+
+    // Port of NullableLiftingTransform.MatchGetValueOrDefault(inst, out ILVariable v):
+    // the ldloca-v overload. `call GetValueOrDefault(ldloca v)` on
+    // System.Nullable<T> (the 1-argument form, the argument a LdLoca) -> v.
+    // The 1-arg `(inst, out ILInstruction arg)` overload recognises the call;
+    // this overload additionally requires the argument to be a `ldloca v`.
+    static bool MatchGetValueOrDefault(ILInstruction* inst, ILVariablePtr& v);
+
+    // Port of NullableLiftingTransform.MatchNegatedHasValueCall(inst, ILVariable v):
+    // `logic.not(call get_HasValue(ldloca v))` -> recognises v. The logic.not is
+    // this port's `comp(Equality, X, ldc.i4(0))` shape (the reader's brfalse, per
+    // the SwitchAnalysis/ConditionDetection convention); the inner
+    // `call get_HasValue(ldloca v)` must operate on the given variable.
+    static bool MatchNegatedHasValueCall(ILInstruction* inst, const ILVariable* v);
+
+    // Port of NullableLiftingTransform.MatchNullableCtor(inst, out underlyingType,
+    // out arg): `newobj Nullable<T>(arg)` -> (T, arg). A newobj (a Call with the
+    // IsNewObj flag -- newobj is always a constructor, so IsNewObj is the
+    // faithful equivalent of the C# `newobj.Method.IsConstructor`) whose
+    // declaring type resolves to KnownTypeCode::NullableOfT with exactly one
+    // argument; the underlying type is GetUnderlyingTypeOfNullable(DeclaringType).
+    static bool MatchNullableCtor(ILInstruction* inst,
+                                   const TypeSystem::IType*& underlyingType,
+                                   ILInstruction*& arg);
+
+    // Port of NullableLiftingTransform.MatchNull(inst, out underlyingType):
+    // `default(Nullable<T>)` -> T. A DefaultValue whose Type is a Nullable<T>
+    // (GetUnderlyingTypeOfNullable returns non-null); the underlying type is
+    // the type argument. The C# also checks NullableType.IsNullable(type) --
+    // GetUnderlyingTypeOfNullable returning non-null is the equivalent (only a
+    // Nullable<T> instantiation unwraps).
+    static bool MatchNull(ILInstruction* inst, const TypeSystem::IType*& underlyingType);
 };
 
 } // namespace ILSpy::Decompiler::IL

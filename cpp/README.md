@@ -587,6 +587,34 @@ implemented and green here. Everything else follows the phase plan in
   on the .NET Framework 4 legacy-csc corpus (a Roslyn-4.10 codegen pattern) --
   ported for faithfulness (the hand-built tests verify the lift, the sweep
   verifies the per-method monotone invariant).
+  The remaining ILVariable-based NullableLifting helpers the next in-order
+  `Run(IfInstruction)` entry (and the deferred LiftNormal/LiftCSharp* paths)
+  need are now in place as a tested-but-not-yet-wired foundation: the
+  ldloca-v overloads `MatchHasValueCall(inst, ILVariablePtr& v)` and
+  `MatchGetValueOrDefault(inst, ILVariablePtr& v)` (`call get_HasValue(ldloca v)`
+  / `call GetValueOrDefault(ldloca v)` -> v, the LdLoca's variable, extencing
+  the D68 1-arg forms), `MatchNegatedHasValueCall(inst, const ILVariable* v)`
+  (`logic.not(call get_HasValue(ldloca v))` -> v, the logic.not this port's
+  `comp(Equality, X, ldc.i4(0))` brfalse shape), `MatchNullableCtor(inst,
+  underlyingType, arg)` (`newobj Nullable<T>(arg)` -> (T, arg), a newobj Call
+  with IsNewObj on a NullableOfT declaring type), `MatchNull(inst,
+  underlyingType)` (`default(Nullable<T>)` -> T, a DefaultValue whose Type is a
+  Nullable<T>), and the type-system helpers `GetUnderlyingTypeOfNullable(type)`
+  (unwrap `ParameterizedType(KnownType(NullableOfT), {T})` -> T, the C#
+  `NullableType.GetUnderlyingType`) and `IsKnownType(type, code)` (a KnownType
+  compares its Code; a ParameterizedType is not itself a known type). The
+  ldloca-v overloads take `ILVariablePtr&` (shared_ptr out) so they are
+  overload-disjoint from the existing `ILInstruction*&`-out helpers (no
+  shared_ptr/raw-pointer ambiguity, avoiding the D66 precedent). No pipeline
+  transform consumes the new helpers yet (the D92 `Run(Comp)` is the only
+  NullableLifting piece wired so far), so the CLI output is unchanged; the
+  mscorlib sweep exercises the new helpers on real calls/newobj/DefaultValue
+  sites and asserts they never misfire. The next in-order target the foundation
+  unblocks is `Run(IfInstruction)` (the `MatchGetValueOrDefault(condition, v)` +
+  bool? path -- the four `v.GetValueOrDefault() ? v.HasValue : false` -> `v ==
+  true`/`v == false`/`v != true`/`v != false` folds producing a C#-lifted Comp),
+  which needs the if-as-final block-model adaptation + a corpus probe of the
+  real post-ConditionDetection bool? if shape (the D73/D75/D79 precedent).
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
   walk + a corpus probe; the async/iterator state machines

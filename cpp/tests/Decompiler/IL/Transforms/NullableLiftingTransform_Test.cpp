@@ -35,6 +35,7 @@
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Instructions/DefaultValue.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
@@ -335,6 +336,208 @@ TEST(NullableLiftingTransform, MatchCompOrDecimalRejectsNonComp) {
     EXPECT_FALSE(NullableLiftingTransform::MatchCompOrDecimal(nullptr, result));
 }
 
+// GetUnderlyingTypeOfNullable unwraps a Nullable<T> instantiation to T.
+// Nullable<int> (a ParameterizedType over KnownType(NullableOfT)) -> Int32.
+TEST(NullableLiftingTransform, GetUnderlyingTypeOfNullableUnwrapsInstantiation) {
+    auto nullable = MakeNullableOf(KnownTypeCode::Int32);
+    const IType* underlying = NullableLiftingTransform::GetUnderlyingTypeOfNullable(nullable.get());
+    ASSERT_NE(underlying, nullptr);
+    EXPECT_TRUE(NullableLiftingTransform::IsKnownType(underlying, KnownTypeCode::Int32));
+}
+
+// A bare Nullable`1 (the generic definition, no type argument) has no
+// underlying type -- the C# NullableType.GetUnderlyingType returns the type
+// arg, which a bare Nullable`1 lacks.
+TEST(NullableLiftingTransform, GetUnderlyingTypeOfNullableBareDefinitionIsNull) {
+    auto bare = std::make_shared<KnownType>(KnownTypeCode::NullableOfT);
+    EXPECT_EQ(NullableLiftingTransform::GetUnderlyingTypeOfNullable(bare.get()), nullptr);
+}
+
+// A non-Nullable type (System.Int32, a KnownType) is not a Nullable<T>, so
+// GetUnderlyingTypeOfNullable returns null; null input returns null.
+TEST(NullableLiftingTransform, GetUnderlyingTypeOfNullableNonNullableIsNull) {
+    auto i32 = std::make_shared<KnownType>(KnownTypeCode::Int32);
+    EXPECT_EQ(NullableLiftingTransform::GetUnderlyingTypeOfNullable(i32.get()), nullptr);
+    EXPECT_EQ(NullableLiftingTransform::GetUnderlyingTypeOfNullable(nullptr), nullptr);
+}
+
+// IsKnownType: a KnownType matches its own code, not a different code; a
+// ParameterizedType (e.g. Nullable<int>) is not itself a known type; null is
+// not a known type (matching the C# IsKnownType returning false for None).
+TEST(NullableLiftingTransform, IsKnownTypeChecksCode) {
+    auto i32 = std::make_shared<KnownType>(KnownTypeCode::Int32);
+    EXPECT_TRUE(NullableLiftingTransform::IsKnownType(i32.get(), KnownTypeCode::Int32));
+    EXPECT_FALSE(NullableLiftingTransform::IsKnownType(i32.get(), KnownTypeCode::Boolean));
+    auto nullable = MakeNullableOf(KnownTypeCode::Boolean);
+    EXPECT_FALSE(NullableLiftingTransform::IsKnownType(nullable.get(), KnownTypeCode::Boolean));
+    EXPECT_FALSE(NullableLiftingTransform::IsKnownType(nullptr, KnownTypeCode::Int32));
+}
+
+// call get_HasValue(ldloca v) on Nullable<int> matches the ldloca-v overload
+// and reports the variable.
+TEST(NullableLiftingTransform, MatchHasValueCallLdLocaReportsVariable) {
+    auto v = MakeLocal("v");
+    auto call = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    ILVariablePtr matched;
+    EXPECT_TRUE(NullableLiftingTransform::MatchHasValueCall(call.get(), matched));
+    ASSERT_NE(matched, nullptr);
+    EXPECT_EQ(matched.get(), v.get());
+}
+
+// A get_HasValue whose argument is not a LdLoca (e.g. a LdLoc) does not match
+// the ldloca-v overload -- the 1-arg form matches but the arg isn't a ldloca.
+TEST(NullableLiftingTransform, MatchHasValueCallLdLocaRejectsNonLdLocaArg) {
+    auto v = MakeLocal("v");
+    auto call = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoc>(v));  // not a LdLoca
+    ILVariablePtr matched;
+    EXPECT_FALSE(NullableLiftingTransform::MatchHasValueCall(call.get(), matched));
+}
+
+// A get_HasValue on a non-Nullable declaring type does not match the ldloca-v
+// overload (the 1-arg form rejects it first).
+TEST(NullableLiftingTransform, MatchHasValueCallLdLocaRejectsNonNullable) {
+    auto v = MakeLocal("v");
+    auto call = std::make_unique<Call>("System.Int32::get_HasValue");
+    call->DeclaringType = std::make_shared<KnownType>(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    ILVariablePtr matched;
+    EXPECT_FALSE(NullableLiftingTransform::MatchHasValueCall(call.get(), matched));
+}
+
+// call GetValueOrDefault(ldloca v) on Nullable<int> matches the ldloca-v
+// overload and reports the variable.
+TEST(NullableLiftingTransform, MatchGetValueOrDefaultLdLocaReportsVariable) {
+    auto v = MakeLocal("v");
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    ILVariablePtr matched;
+    EXPECT_TRUE(NullableLiftingTransform::MatchGetValueOrDefault(call.get(), matched));
+    ASSERT_NE(matched, nullptr);
+    EXPECT_EQ(matched.get(), v.get());
+}
+
+// The 2-argument GetValueOrDefault form (with a fallback) does not match the
+// ldloca-v overload (the 1-arg form rejects the 2-arg call).
+TEST(NullableLiftingTransform, MatchGetValueOrDefaultLdLocaRejectsTwoArgForm) {
+    auto v = MakeLocal("v");
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    call->AddArg(std::make_unique<LdcI4>(0));
+    ILVariablePtr matched;
+    EXPECT_FALSE(NullableLiftingTransform::MatchGetValueOrDefault(call.get(), matched));
+}
+
+// logic.not(call get_HasValue(ldloca v)) -- the reader's brfalse shape
+// comp(Equality, call get_HasValue(ldloca v), ldc.i4(0)) -- matches
+// MatchNegatedHasValueCall for v.
+TEST(NullableLiftingTransform, MatchNegatedHasValueCallMatchesLogicNot) {
+    auto v = MakeLocal("v");
+    auto call = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    auto neg = std::make_unique<Comp>(std::move(call),
+                                       std::make_unique<LdcI4>(0),
+                                       ComparisonKind::Equality, false);
+    EXPECT_TRUE(NullableLiftingTransform::MatchNegatedHasValueCall(neg.get(), v.get()));
+}
+
+// MatchNegatedHasValueCall rejects a non-negated HasValue call (no logic.not
+// wrapper) and a logic.not wrapping a call on a different variable.
+TEST(NullableLiftingTransform, MatchNegatedHasValueCallRejectsNonNegatedAndDifferentVar) {
+    auto v = MakeLocal("v");
+    auto w = MakeLocal("w");
+    // A bare HasValue call (no logic.not) does not match.
+    auto call = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoca>(v));
+    EXPECT_FALSE(NullableLiftingTransform::MatchNegatedHasValueCall(call.get(), v.get()));
+    // A logic.not wrapping a HasValue call on a different variable does not match for v.
+    auto call2 = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    call2->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    call2->AddArg(std::make_unique<LdLoca>(w));
+    auto neg = std::make_unique<Comp>(std::move(call2),
+                                       std::make_unique<LdcI4>(0),
+                                       ComparisonKind::Equality, false);
+    EXPECT_FALSE(NullableLiftingTransform::MatchNegatedHasValueCall(neg.get(), v.get()));
+}
+
+// newobj Nullable<bool>(ldloc v) matches MatchNullableCtor: reports the
+// underlying type (Boolean) and the argument.
+TEST(NullableLiftingTransform, MatchNullableCtorMatchesNewObj) {
+    auto v = MakeLocal("v");
+    auto call = std::make_unique<Call>("System.Nullable`1::.ctor");
+    call->IsNewObj = true;
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    auto argInst = std::make_unique<LdLoc>(v);
+    ILInstruction* argPtr = argInst.get();
+    call->AddArg(std::move(argInst));
+    const IType* underlying = nullptr;
+    ILInstruction* arg = nullptr;
+    EXPECT_TRUE(NullableLiftingTransform::MatchNullableCtor(call.get(), underlying, arg));
+    ASSERT_NE(underlying, nullptr);
+    EXPECT_TRUE(NullableLiftingTransform::IsKnownType(underlying, KnownTypeCode::Boolean));
+    EXPECT_EQ(arg, argPtr);
+}
+
+// MatchNullableCtor rejects a non-newobj call (call/callvirt, not a
+// constructor), a non-Nullable declaring type, the wrong arg count, and a
+// null declaring type.
+TEST(NullableLiftingTransform, MatchNullableCtorRejects) {
+    auto v = MakeLocal("v");
+    // Not a newobj (a plain call to .ctor -- IsNewObj is false).
+    auto call = std::make_unique<Call>("System.Nullable`1::.ctor");
+    call->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    call->AddArg(std::make_unique<LdLoc>(v));
+    const IType* ut = nullptr;
+    ILInstruction* arg = nullptr;
+    EXPECT_FALSE(NullableLiftingTransform::MatchNullableCtor(call.get(), ut, arg));
+    // A newobj on a non-Nullable declaring type.
+    auto call2 = std::make_unique<Call>("System.String::.ctor");
+    call2->IsNewObj = true;
+    call2->DeclaringType = std::make_shared<KnownType>(KnownTypeCode::String);
+    call2->AddArg(std::make_unique<LdLoc>(v));
+    EXPECT_FALSE(NullableLiftingTransform::MatchNullableCtor(call2.get(), ut, arg));
+    // A newobj on Nullable with 2 arguments (the ctor must take exactly 1).
+    auto call3 = std::make_unique<Call>("System.Nullable`1::.ctor");
+    call3->IsNewObj = true;
+    call3->DeclaringType = MakeNullableOf(KnownTypeCode::Boolean);
+    call3->AddArg(std::make_unique<LdLoc>(v));
+    call3->AddArg(std::make_unique<LdLoc>(v));
+    EXPECT_FALSE(NullableLiftingTransform::MatchNullableCtor(call3.get(), ut, arg));
+    // A newobj on Nullable whose declaring type could not be resolved (null).
+    auto call4 = std::make_unique<Call>("System.Nullable`1::.ctor");
+    call4->IsNewObj = true;
+    call4->AddArg(std::make_unique<LdLoc>(v));
+    EXPECT_FALSE(NullableLiftingTransform::MatchNullableCtor(call4.get(), ut, arg));
+}
+
+// default(Nullable<int>) matches MatchNull: reports the underlying type (Int32).
+TEST(NullableLiftingTransform, MatchNullMatchesDefaultNullable) {
+    auto dv = std::make_unique<DefaultValue>(MakeNullableOf(KnownTypeCode::Int32));
+    const IType* underlying = nullptr;
+    EXPECT_TRUE(NullableLiftingTransform::MatchNull(dv.get(), underlying));
+    ASSERT_NE(underlying, nullptr);
+    EXPECT_TRUE(NullableLiftingTransform::IsKnownType(underlying, KnownTypeCode::Int32));
+}
+
+// MatchNull rejects default(int) (not a Nullable<T>) and a non-DefaultValue
+// instruction (e.g. a LdLoc) and null.
+TEST(NullableLiftingTransform, MatchNullRejectsNonNullableDefaultAndNonDefaultValue) {
+    const IType* underlying = nullptr;
+    auto dvInt = std::make_unique<DefaultValue>(std::make_shared<KnownType>(KnownTypeCode::Int32));
+    EXPECT_FALSE(NullableLiftingTransform::MatchNull(dvInt.get(), underlying));
+    auto v = MakeLocal("v");
+    auto ld = std::make_unique<LdLoc>(v);
+    EXPECT_FALSE(NullableLiftingTransform::MatchNull(ld.get(), underlying));
+    EXPECT_FALSE(NullableLiftingTransform::MatchNull(nullptr, underlying));
+}
+
 // A SwitchInstruction carries IsLifted/Type and a SwitchSection carries
 // HasNullLabel; the dump renders a lifted switch with a `null` label section.
 TEST(NullableLiftingTransform, SwitchInstructionNullableFieldsAndDump) {
@@ -394,6 +597,10 @@ TEST(NullableLiftingTransform, MscorlibDeclaringTypeSweep) {
     int callsWithDeclaringType = 0;
     int hasValueMatches = 0;
     int getValueOrDefaultMatches = 0;
+    int hasValueLdLocaMatches = 0;
+    int getValueOrDefaultLdLocaMatches = 0;
+    int nullableCtorMatches = 0;
+    int nullDefaultMatches = 0;
     ILTransformContext ctx;
     for (const auto& m : f.MethodDefs()) {
         if (m.RVA == 0) continue;
@@ -401,17 +608,45 @@ TEST(NullableLiftingTransform, MscorlibDeclaringTypeSweep) {
         if (!fn) continue;
         ++processed;
         Walk(fn->Body.get(), [&](ILInstruction* inst) {
-            if (!inst || inst->Op != OpCode::Call) return;
-            auto* call = static_cast<Call*>(inst);
-            if (call->DeclaringType) ++callsWithDeclaringType;
-            ILInstruction* arg = nullptr;
-            if (NullableLiftingTransform::MatchHasValueCall(call, arg)) {
-                ASSERT_NE(arg, nullptr);
-                ++hasValueMatches;
-            }
-            if (NullableLiftingTransform::MatchGetValueOrDefault(call, arg)) {
-                ASSERT_NE(arg, nullptr);
-                ++getValueOrDefaultMatches;
+            if (!inst) return;
+            if (inst->Op == OpCode::Call) {
+                auto* call = static_cast<Call*>(inst);
+                if (call->DeclaringType) ++callsWithDeclaringType;
+                ILInstruction* arg = nullptr;
+                if (NullableLiftingTransform::MatchHasValueCall(call, arg)) {
+                    ASSERT_NE(arg, nullptr);
+                    ++hasValueMatches;
+                }
+                if (NullableLiftingTransform::MatchGetValueOrDefault(call, arg)) {
+                    ASSERT_NE(arg, nullptr);
+                    ++getValueOrDefaultMatches;
+                }
+                // The ldloca-v overloads: a HasValue/GetValueOrDefault call whose
+                // argument is a `ldloca v` reports the variable. Every match must
+                // yield a non-null variable (the helper never misfires).
+                ILVariablePtr v;
+                if (NullableLiftingTransform::MatchHasValueCall(call, v)) {
+                    ASSERT_NE(v, nullptr);
+                    ++hasValueLdLocaMatches;
+                }
+                if (NullableLiftingTransform::MatchGetValueOrDefault(call, v)) {
+                    ASSERT_NE(v, nullptr);
+                    ++getValueOrDefaultLdLocaMatches;
+                }
+                // A newobj Nullable<T>(arg) on a real Nullable constructor.
+                const IType* underlying = nullptr;
+                ILInstruction* ctorArg = nullptr;
+                if (NullableLiftingTransform::MatchNullableCtor(call, underlying, ctorArg)) {
+                    ASSERT_NE(underlying, nullptr);
+                    ASSERT_NE(ctorArg, nullptr);
+                    ++nullableCtorMatches;
+                }
+            } else if (inst->Op == OpCode::DefaultValue) {
+                const IType* underlying = nullptr;
+                if (NullableLiftingTransform::MatchNull(inst, underlying)) {
+                    ASSERT_NE(underlying, nullptr);
+                    ++nullDefaultMatches;
+                }
             }
         });
         fn->CheckInvariant(ILPhase::Normal);
@@ -426,4 +661,8 @@ TEST(NullableLiftingTransform, MscorlibDeclaringTypeSweep) {
     // counts are reported (not asserted) -- a non-zero match is informative.
     (void)hasValueMatches;
     (void)getValueOrDefaultMatches;
+    (void)hasValueLdLocaMatches;
+    (void)getValueOrDefaultLdLocaMatches;
+    (void)nullableCtorMatches;
+    (void)nullDefaultMatches;
 }
