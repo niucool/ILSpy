@@ -37,6 +37,7 @@
 #include "Decompiler/IL/Transforms/SwitchOnNullableTransform.hpp"
 #include "Decompiler/IL/Transforms/PatternMatchingTransform.hpp"
 #include "Decompiler/IL/Transforms/LockTransform.hpp"
+#include "Decompiler/IL/Transforms/UsingTransform.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
 #include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
@@ -277,6 +278,16 @@ int main(int argc, char** argv) {
                 // iteration ports the no-flag MCS/V2 shapes; the flag-based V4 /
                 // Roslyn shapes are deferred.
                 ILSpy::Decompiler::IL::LockTransform().Run(*fn, transformContext);
+                // UsingTransform: detect the IDisposable try/finally pattern and
+                // fold it into a `using (resource) { body }`. Runs after
+                // ConditionDetection and LockTransform in the BlockILTransform
+                // post-order set (per GetILTransforms()). Gated on the
+                // UsingStatement setting (default true). This iteration ports the
+                // reference-type two-block null-check shape (dominant), the
+                // struct one-block ldloca shape, and the isinst-temp two-block
+                // shape, all in the preceding-block stloc placement (the dominant
+                // mscorlib case); the VB / async / NullableOfT shapes are deferred.
+                ILSpy::Decompiler::IL::UsingTransform().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::AssignVariableNames().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::RemoveRedundantReturn().Run(*fn, transformContext);
                 fn->CheckInvariant(ILSpy::Decompiler::IL::ILPhase::Normal);

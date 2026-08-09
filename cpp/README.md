@@ -89,7 +89,7 @@ implemented and green here. Everything else follows the phase plan in
   `RemoveDeadStores` setting, with no loads or addresses, has its stores dropped
   (a pure value goes with the store; an impure value is unwrapped so its side
   effect survives), and dead-copy chains collapse via a recompute fixpoint.
-  21 of ~40 transforms ported. The switch-detection family is now complete in
+  22 of ~40 transforms ported. The switch-detection family is now complete in
   its core: `LongSet`/`LongInterval` (Util/, ported from LongSet.cs /
   Interval.cs) -- an immutable interval-set of longs whose complement is
   representable (unlike `std::set<int64_t>`) -- backs `SwitchSection::Labels`
@@ -221,38 +221,48 @@ implemented and green here. Everything else follows the phase plan in
   0 with only the no-flag shapes); the V4 / V4YieldReturn flag shapes (inline
   `stloc obj` as the Enter arg) and the single-block `if(flag){Exit}` finally
   are deferred (0 occurrences in mscorlib).
-  `UsingInstruction` (Instructions/, a tested-but-not-yet-wired
-  foundation) ports the C# `using`-statement ILAst node the next in-order
-  transform (UsingTransform) builds from a `stloc obj(resource); .try { }
-  finally { if (obj != null) callvirt Dispose(obj) }` block tail: two children
-  ResourceExpression (slot 0, inlineable) and Body (slot 1), a Variable (an
-  IStoreInstruction -- ComputeVariableUsage counts it as a store), and
-  IsAsync / IsRefStruct flags (`await using` / ref-struct `using`). DirectFlags
-  = MayWriteLocals | ControlFlow | SideEffect; result Void. The ILAstToCSharp
-  seed renders `using (resource) { body }` (the expression form). The
-  UsingStatement setting (default true) gates the deferred UsingTransform; the
-  UsingTransform itself is the next concrete target -- it needs the block-model
-  adaptation of the `if (obj != null) { Dispose }; leave` finally tail (whose
-  exact shape after ConditionDetection must be probed on the corpus) and a
-  permissive CheckResourceType (this port's minimal type system has no
-  GetAllBaseTypes, so the IDisposable-implements check reduces to a direct
-  KnownTypeCode::IDisposable and the Dispose-method-name structural match is
-  the real proof). TransformUsingVB, TransformAsyncUsing (needs Await), the
-  NullableOfT / ref-struct dispose, and the isinst-temp / MatchInstruction
-  null-check shapes are deferred.
+  `UsingTransform` (Transforms/, ported from UsingTransform.cs) detects the
+  C# `using` statement's IDisposable try/finally pattern and folds it into a
+  `UsingInstruction` (`using (resource) { body }`), building on the D74
+  `UsingInstruction` node. Runs after ConditionDetection and LockTransform in
+  the BlockILTransform post-order set (the `GetILTransforms()` position). Three
+  finally shapes are matched, all probed on the .NET Framework 4 mscorlib
+  corpus before implementation (the if-as-final block model diverges from the
+  C# structure, so the real shape is discovered empirically, per the D73
+  precedent): Shape A (reference type, two-block -- the C# single-block
+  `if (obj != null) Block { Dispose }; leave` becomes TWO blocks here, the
+  `if (obj == null) leave` skip then the `call Dispose(ldloc obj); leave`, the
+  inverted brfalse form), Shape B (struct / ref-struct, one-block
+  `call Dispose(ldloca obj); leave`, no null check), and Shape C (reference
+  type, two-block with the isinst-temp `stloc temp(isinst IDisposable, ldloc
+  obj); if (ldloc temp == null) leave; call Dispose(ldloc temp)`). The resource
+  `stloc obj(resource)` sits in the PRECEDING block (the dominant mscorlib case
+  -- CFS does not merge the EH wrapper for this shape, the same BlockBuilder
+  quirk as the flag-based lock: the fall-through branch into the TryFinally
+  resolves to the try entry inside the try container, not the wrapper, so
+  `FindResourceStore` accepts a branch target that is the wrapper OR a block
+  inside the TryFinally); the same-block case is also handled. The preceding-
+  block fold puts the UsingInstruction in the preceding block, absorbs the
+  TryFinally's block final (the after-using continuation), discards the `br`
+  into the try, and drops the now-empty TryFinally block to a graveyard.
+  `Run` re-gathers containers after each container that produced a fold -- a
+  fold destroys the TryFinally's nested FinallyBlock container, so a pre-
+  gathered container list would dangle (a use-after-free that crashed the first
+  implementation on a 8000-method sweep). Fires 313 times on the full
+  mscorlib corpus (the CLI emits 313 `using (...)` statements, up from 0);
+  TransformUsingVB, TransformAsyncUsing (needs Await + IAsyncDisposable), the
+  NullableOfT dispose, the ref-struct own-`Dispose` shape, and the
+  MatchInstruction null-check are deferred.
   The CLI applies CFS + StObjToStLoc + ILInlining + InlineReturnTransform +
   RemoveInfeasiblePath + DetectPinnedRegions + DetectCatchWhenConditionBlocks +
   LdLocaDupInitObjTransform + EarlyExpressionTransforms + RemoveDeadVariableInit +
   CFS + SwitchDetection + SwitchOnNullable + LoopDetection + PatternMatching +
-  ConditionDetection + LockTransform + AssignVariableNames + RemoveRedundantReturn before the
+  ConditionDetection + LockTransform + UsingTransform + AssignVariableNames + RemoveRedundantReturn before the
   C# seed, so `fixed (...) { ... }`, `default(T)`, reconstructed `switch`
-  statements, switch-on-nullable `case null:` arms, `is T x` patterns, and
-  `lock (...) { ... }` statements now
-  appear in the output. 21 of ~40 transforms ported.
+  statements, switch-on-nullable `case null:` arms, `is T x` patterns,
+  `lock (...) { ... }`, and `using (...) { ... }` statements now
+  appear in the output. 22 of ~40 transforms ported.
   Next per `GetILTransforms()`:
-  UsingTransform (the UsingInstruction node foundation is in place; needs the
-  block-model `if (obj != null) { Dispose }; leave` finally-tail adaptation,
-  probed on the corpus, + a permissive CheckResourceType),
   the async/iterator state machines
   (YieldReturnDecompiler/AsyncAwaitDecompiler), SplitVariables (needs
   reaching-definitions dataflow),
