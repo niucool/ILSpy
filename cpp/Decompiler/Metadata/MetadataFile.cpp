@@ -382,7 +382,18 @@ std::string MetadataFile::ResolveTokenToString(std::uint32_t token) const {
                 auto t = parent.TypeDef();
                 return TypeNameStr(t.TypeNamespace(), t.TypeName()) + "::" + std::string(mr.Name());
             }
-            // ModuleRef/MethodDef/TypeSpec parent: best-effort, member name only.
+            if (parent.type() == MRP::TypeSpec) {
+                // A generic instantiation: resolve the TypeSpec's signature to a
+                // display name (e.g. "System.Collections.ObjectModel.ReadOnlyCollection`1").
+                auto ts = parent.get_row<winmd::reader::TypeSpec>();
+                std::uint32_t blobIndex = ts.get_value<std::uint32_t>(0);
+                auto blob = impl_->db->get_blob(blobIndex);
+                auto type = DecodeTypeSpecBlob(*impl_->db, blob.begin(),
+                    static_cast<std::size_t>(blob.end() - blob.begin()));
+                std::string tn = type ? type->ReflectionName() : std::string("?");
+                return tn + "::" + std::string(mr.Name());
+            }
+            // ModuleRef/MethodDef parent: best-effort, member name only.
             return std::string(mr.Name());
         }
     } catch (const std::exception&) {
