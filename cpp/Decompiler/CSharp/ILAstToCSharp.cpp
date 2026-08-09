@@ -102,7 +102,7 @@ std::string EscapeStringLiteral(std::string_view value) {
 }
 
 std::string TypeDisplayName(const TypeSystem::ITypePtr& type) {
-    return type ? type->ReflectionName() : std::string("?");
+    return CSharpTypeName(type);
 }
 
 const char* ConvTargetName(StackType target) {

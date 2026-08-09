@@ -380,8 +380,8 @@ TEST(ILAstToCSharp, CastsAndTypeOperators) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "System.String", "M", "object arg_1");
-    EXPECT_NE(text.find("    var V_0 = (arg_1 as System.String);\n"), std::string::npos) << text;
-    EXPECT_NE(text.find("    return (System.String)(V_0);\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("    var V_0 = (arg_1 as string);\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("    return (string)(V_0);\n"), std::string::npos) << text;
 }
 
 TEST(ILAstToCSharp, ArrayAndLengthExpressions) {
