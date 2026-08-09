@@ -728,18 +728,51 @@ implemented and green here. Everything else follows the phase plan in
   faithfulness (hand-built tests verify the 5 cases + the relevance-gate
   failure + 3 wired folds; the sweep verifies the per-method monotone
   invariants hold).
+  The `MatchCompOrDecimal`/`LiftCSharp*` comparison-lift path (the section of
+  `Lift` after the D97/D98/D100 LiftNormal pieces and before the bool? equality
+  folds) is now ported and wired into `RunIfNullableLift`: `CompOrDecimal::
+  MakeLifted` (the Comp branch) builds a C#-lifted Comp (the D91 model carrying
+  the original comp's InputType/Unsigned); `LiftCSharpEqualityComparison`
+  (Comp branch) handles the (in)equality cases -- the two-nullable hasValueComp
+  case (`comp(eq, GVO(v1), GVO(v2)) ? comp(eq, HV(v1), HV(v2)) : false` ==> the
+  C#-lifted `comp.lifted[C#](eq, ldloc v1, ldloc v2)`, DoLift both sides with a
+  single-var list, gate on `leftBits[0] && rightBits[0]` + IsPure) and the
+  single-nullable fall-back (a HasValue call -> LiftCSharpComparison with
+  `[v]`); `LiftCSharpComparison` handles the relational cases -- the `!IsLifted`
+  DoLiftBinary case (DoLiftBinary with both expected types UnknownType +
+  MakeLifted, gated on IsPure + `bits.All`) and the `IsLifted` special case
+  (legacy csc `num.GVO() == const && num.HasValue`, where Run(Comp) already
+  lifted the comp; clone the operands via ClonePureExpression and MakeLifted).
+  The equality swap (Inequality -> Swap(trueInst, falseInst)) is local to the
+  equality branch; the relational `!(v1 != null && ...) : true` shapes wrap the
+  lifted comp in a `Comp.LogicNot` (a non-lifted `comp(Equality, lifted, ldc.i4
+  0)`, ported as a `MakeLogicNot` helper -- `Comp.LogicNot` does NOT fold, unlike
+  `NegateCondition`). The user-defined-operator fall-backs
+  (LiftCSharpUserEqualityComparison/LiftCSharpUserComparison, need
+  Call.Method.IsOperator + CSharpOperators.LiftUserDefinedOperator), the Decimal
+  branch (needs Call.Method.IsOperator + KnownTypeCode::Decimal), and
+  IsGenericNewPattern (needs MatchDefaultValue + Call.Method.FullName +
+  TypeKind) are deferred. The path is a Roslyn-era codegen pattern that fires 0
+  times on the .NET Framework 4 legacy-csc corpus (the CLI `??`/lifted-comp
+  counts are unchanged); ported for faithfulness -- hand-built tests verify the
+  equality hasValueComp + fall-back folds, the relational + IsLifted folds, and
+  the negatives (mismatched kind, non-HasValue operands, irrelevant-var gate,
+  multiple-var IsLifted reject), and the 3 wired folds (equality, relational,
+  relational-negated logic.not wrap); the sweep verifies the per-method
+  monotone invariants hold (the C#-lifted Comp count is non-decreasing, the
+  1-arg get_HasValue/GetValueOrDefault counts are non-increasing). 35 of ~40
+  transforms ported.
   The remaining `Run(IfInstruction)` paths (the LiftCSharpUserComparison rest
-  of LiftNormal [needs the Call-operator case], MatchCompOrDecimal/LiftCSharp*
-  [the comparison lift, needs CompOrDecimal.MakeLifted + a faithful
-  NewNullable], NullPropagation [a separate 583-line transform]),
+  of LiftNormal [needs the Call-operator case], NullPropagation [a separate
+  583-line transform]),
   `Run(BinaryNumericInstruction)` (the BitAnd-as-short-circuit analysis), and
   the `RunStatements(Block, int)` block transform are the subsequent
   in-order targets.
   `BitSet` (Util/, a tested foundation ported from BitSet.cs) is the
   fixed-capacity 64-bit-word bitset the `DoLift`/`DoLiftBinary` relevance
   analysis returns -- `bits.All(0, nullableVars.Count)` is the "every nullable
-  var contributed to the lift" gate the D100 DoLift path (now wired) and the
-  deferred MatchCompOrDecimal/LiftCSharp* comparison-lift path consult -- and
+  var contributed to the lift" gate the D100 DoLift path and the D101
+  MatchCompOrDecimal/LiftCSharp* comparison-lift path consult -- and
   the foundation the deferred DefiniteAssignment / Dominance /
   ReachingDefinitions analyses are built on. Faithful to the C# API
   (capacity rounding, `Any`/`All`/set-relation predicates/`Set`/`Clear`/

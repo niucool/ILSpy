@@ -363,6 +363,31 @@ bool AnalyzeCondition(ILInstruction* condition,
     return false;
 }
 
+// Port of NullableLiftingTransform.AnalyzeNegatedCondition: logic.not(X) whose
+// inner X is an AnalyzeCondition tree (a HasValue call or a BitAnd of them).
+// `condition.MatchLogicNot(out var arg) && AnalyzeCondition(arg)` in the C#.
+// Used by the relational MatchCompOrDecimal cases (the `!(v1 != null && ...)
+// ? true : false` shapes that produce a logic.not-wrapped lifted comparison).
+bool AnalyzeNegatedCondition(ILInstruction* condition,
+                             std::vector<ILVariablePtr>& nullableVarS) {
+    ILInstruction* arg = nullptr;
+    if (!MatchLogicNot(condition, arg)) return false;
+    return AnalyzeCondition(arg, nullableVarS);
+}
+
+// Port of Comp.LogicNot(arg): wrap `condition` in a logic.not
+// (`comp(Equality, condition, ldc.i4 0)`, the reader's brfalse shape). The C#
+// `Comp.LogicNot` is a static `new Comp(ComparisonKind.Equality, Sign.None, arg,
+// new LdcI4(0))` -- it does NOT fold (unlike ConditionDetection::NegateCondition);
+// the relational MatchCompOrDecimal cases wrap the already-lifted comparison
+// result, so the wrap (not a kind-negate) is the faithful behaviour. The
+// returned comp is detached (no parent); the caller wires it into its slot.
+std::unique_ptr<ILInstruction> MakeLogicNot(std::unique_ptr<ILInstruction> condition) {
+    return std::make_unique<Comp>(
+        std::move(condition), std::make_unique<LdcI4>(0),
+        ComparisonKind::Equality, false);
+}
+
 // Detach `inst` from its parent (TakeChild at its ChildIndex), returning owning
 // ownership. Used by the `&`/`|` on bool? path to lift the condition/arms out of
 // the if before the if is destroyed (no GC; the non-owning views would dangle).
@@ -1018,6 +1043,105 @@ bool ExpressionTransforms::RunIfNullableLift(IfInstruction* iff) {
             // DoLift failed (or the deferred Call-operator/LiftCSharpUserComparison
             // cases); the whole Lift returns null, the if stays as-is.
             return false;
+        }
+    }
+
+    // The MatchCompOrDecimal / LiftCSharp* path (the section of Lift after
+    // AnalyzeCondition/LiftNormal and before the bool? equality folds). A
+    // condition that is a non-lifted Comp (the Decimal-operator Call branch is
+    // deferred -- needs Call.Method.IsOperator) may be a C#-style lifted
+    // comparison. The equality/inequality cases (LiftCSharpEqualityComparison,
+    // the hasValueComp two-nullable case + the single-nullable fall-back) and the
+    // relational cases (LiftCSharpComparison, the 4 `comp ? (v1 != null && ...) :
+    // ldc.i4` shapes, with a logic.not wrap for the negated-condition shapes) are
+    // ported (Comp branch only); the user-defined-operator fall-backs
+    // (LiftCSharpUserEqualityComparison, the Decimal branch), the
+    // IsGenericNewPattern special case (needs MatchDefaultValue +
+    // Call.Method.FullName + TypeKind), the NullPropagation path, and the
+    // `&`/`|` on bool? path (D96) are the remaining deferred/ported pieces.
+    // Gated on LiftNullables (already checked at the top of RunIfNullableLift).
+    // The equality swap (the C# `Swap(ref trueInst, ref falseInst)` for
+    // Inequality) is local to the equality branch -- the relational branch uses
+    // the original (unswapped) arms.
+    {
+        CompOrDecimal comp;
+        if (NullableLiftingTransform::MatchCompOrDecimal(condition, comp)) {
+            if (IsEqualityOrInequality(comp.Kind)) {
+                ILInstruction* eqTrueInst = trueInst;
+                ILInstruction* eqFalseInst = falseInst;
+                if (comp.Kind == ComparisonKind::Inequality)
+                    std::swap(eqTrueInst, eqFalseInst);
+                if (IsLdcI4(eqFalseInst, 0)) {
+                    // (a.GVO() == b.GVO()) ? (a.HV == b.HV) : false ==> a == b
+                    auto lifted = NullableLiftingTransform::LiftCSharpEqualityComparison(
+                        comp, ComparisonKind::Equality, eqTrueInst);
+                    if (lifted)
+                        return ReplaceIfWithLiftedValue(iff, std::move(lifted));
+                    return false;  // lift failed (deferred user path) -- exit
+                } else if (IsLdcI4(eqFalseInst, 1)) {
+                    // (a.GVO() == b.GVO()) ? (a.HV != b.HV) : true ==> a != b
+                    auto lifted = NullableLiftingTransform::LiftCSharpEqualityComparison(
+                        comp, ComparisonKind::Inequality, eqTrueInst);
+                    if (lifted)
+                        return ReplaceIfWithLiftedValue(iff, std::move(lifted));
+                    return false;
+                }
+                // IsGenericNewPattern (the Activator.CreateInstance<T>() case)
+                // is deferred -- needs MatchDefaultValue + Call.Method.FullName +
+                // TypeKind; the C# `else if (!comp.IsLifted && IsGenericNewPattern)`
+                // returns trueInst, which this port cannot recognise, so it falls
+                // through to the bool? equality folds.
+            } else if (!comp.IsLifted) {
+                // Relational (< <= > >=): returns false unless all HasValue bits
+                // are true. The four shapes produce a C#-lifted Comp; the
+                // negated-condition shapes (`!(v1 != null && ...) : true`) wrap the
+                // lifted comp in a logic.not (Comp.LogicNot). Each shape's guard
+                // (IsLdcI4 && AnalyzeCondition/NegatedCondition) must fully
+                // succeed before the lift is attempted; if the guard's IsLdcI4
+                // holds but Analyze fails, fall through to the next shape.
+                if (IsLdcI4(falseInst, 0)) {
+                    std::vector<ILVariablePtr> nullableVars;
+                    if (AnalyzeCondition(trueInst, nullableVars)) {
+                        auto lifted = NullableLiftingTransform::LiftCSharpComparison(
+                            comp, comp.Kind, nullableVars);
+                        if (lifted)
+                            return ReplaceIfWithLiftedValue(iff, std::move(lifted));
+                        return false;
+                    }
+                }
+                if (IsLdcI4(trueInst, 0)) {
+                    std::vector<ILVariablePtr> nullableVars;
+                    if (AnalyzeCondition(falseInst, nullableVars)) {
+                        auto lifted = NullableLiftingTransform::LiftCSharpComparison(
+                            comp, NegateComparison(comp.Kind), nullableVars);
+                        if (lifted)
+                            return ReplaceIfWithLiftedValue(iff, std::move(lifted));
+                        return false;
+                    }
+                }
+                if (IsLdcI4(falseInst, 1)) {
+                    std::vector<ILVariablePtr> nullableVars;
+                    if (AnalyzeNegatedCondition(trueInst, nullableVars)) {
+                        auto lifted = NullableLiftingTransform::LiftCSharpComparison(
+                            comp, comp.Kind, nullableVars);
+                        if (lifted)
+                            return ReplaceIfWithLiftedValue(iff,
+                                MakeLogicNot(std::move(lifted)));
+                        return false;
+                    }
+                }
+                if (IsLdcI4(trueInst, 1)) {
+                    std::vector<ILVariablePtr> nullableVars;
+                    if (AnalyzeNegatedCondition(falseInst, nullableVars)) {
+                        auto lifted = NullableLiftingTransform::LiftCSharpComparison(
+                            comp, NegateComparison(comp.Kind), nullableVars);
+                        if (lifted)
+                            return ReplaceIfWithLiftedValue(iff,
+                                MakeLogicNot(std::move(lifted)));
+                        return false;
+                    }
+                }
+            }
         }
     }
 

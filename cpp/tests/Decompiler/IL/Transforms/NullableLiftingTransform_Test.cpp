@@ -923,3 +923,242 @@ TEST(NullableLiftingTransform, BinaryNumericLiftedNodeInvariant) {
     EXPECT_NE(bni->ToString().find("binary.add.lifted"), std::string::npos);
     bni->CheckInvariant(ILPhase::Normal);
 }
+
+// --- CompOrDecimal::MakeLifted / LiftCSharpEqualityComparison / LiftCSharpComparison tests ---
+//
+// The C#-style lifted comparison path (NullableLiftingTransform.Lift's
+// MatchCompOrDecimal section). MakeLifted builds a C#-lifted Comp (the D91
+// model); LiftCSharpEqualityComparison handles the (in)equality cases
+// (the two-nullable hasValueComp case + the single-nullable fall-back),
+// LiftCSharpComparison handles the relational cases (the !IsLifted DoLiftBinary
+// case + the IsLifted legacy-csc special case). The user-defined-operator /
+// Decimal branches are deferred.
+
+// MakeLifted (Comp branch) builds a C#-lifted Comp carrying the original
+// comp's InputType/Unsigned, with the given (already-lifted) operands.
+TEST(NullableLiftingTransform, MakeLiftedCompBranchBuildsCLiftedComp) {
+    auto v = MakeLocal("v");
+    auto comp = std::make_unique<Comp>(std::make_unique<LdLoc>(v),
+                                       std::make_unique<LdcI4>(5),
+                                       ComparisonKind::LessThan, false);
+    CompOrDecimal cd;
+    cd.Instruction = comp.get();
+    auto left = std::make_unique<LdLoc>(v);
+    auto right = std::make_unique<LdcI4>(5);
+    auto lifted = cd.MakeLifted(ComparisonKind::Equality, std::move(left), std::move(right));
+    ASSERT_TRUE(lifted);
+    EXPECT_EQ(lifted->Op, OpCode::Comp);
+    auto* liftedComp = static_cast<Comp*>(lifted.get());
+    EXPECT_TRUE(liftedComp->IsLifted());
+    EXPECT_EQ(liftedComp->LiftingKind, ComparisonLiftingKind::CSharp);
+    EXPECT_EQ(liftedComp->Kind, ComparisonKind::Equality);
+    EXPECT_EQ(liftedComp->InputType, comp->InputType)
+        << "carries the original comp's InputType";
+    liftedComp->CheckInvariant(ILPhase::Normal);
+}
+
+// MakeLifted returns null for a non-Comp Instruction (the deferred Call branch).
+TEST(NullableLiftingTransform, MakeLiftedRejectsNonCompInstruction) {
+    auto v = MakeLocal("v");
+    auto call = std::make_unique<Call>("System.Decimal::op_Equality");
+    CompOrDecimal cd;
+    cd.Instruction = call.get();
+    auto lifted = cd.MakeLifted(ComparisonKind::Equality,
+        std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0));
+    EXPECT_FALSE(lifted);
+}
+
+// LiftCSharpEqualityComparison hasValueComp case: comparing two nullables --
+// `comp(eq, GVO(v1), GVO(v2)) ? comp(eq, HV(v1), HV(v2)) : false` ==> the
+// C#-lifted `comp.lifted[C#](eq, ldloc v1, ldloc v2)` (both HasValue bits
+// compare equal, both GVOs lift to ldloc, both pure).
+TEST(NullableLiftingTransform, LiftCSharpEqualityComparisonFoldsTwoNullables) {
+    auto v1 = MakeTypedLocal("v1", MakeNullableOf(KnownTypeCode::Int32));
+    auto v2 = MakeTypedLocal("v2", MakeNullableOf(KnownTypeCode::Int32));
+    auto gvo1 = MakeGVOCall(MakeNullableOf(KnownTypeCode::Int32), std::make_unique<LdLoca>(v1));
+    auto gvo2 = MakeGVOCall(MakeNullableOf(KnownTypeCode::Int32), std::make_unique<LdLoca>(v2));
+    auto condition = std::make_unique<Comp>(std::move(gvo1), std::move(gvo2),
+                                             ComparisonKind::Equality, false);
+    CompOrDecimal valueComp;
+    ASSERT_TRUE(NullableLiftingTransform::MatchCompOrDecimal(condition.get(), valueComp));
+    auto hv1 = MakeHasValueCall(MakeNullableOf(KnownTypeCode::Int32),
+                                "System.Nullable`1::get_HasValue",
+                                std::make_unique<LdLoca>(v1));
+    auto hv2 = MakeHasValueCall(MakeNullableOf(KnownTypeCode::Int32),
+                                "System.Nullable`1::get_HasValue",
+                                std::make_unique<LdLoca>(v2));
+    auto hasValueTest = std::make_unique<Comp>(std::move(hv1), std::move(hv2),
+                                                ComparisonKind::Equality, false);
+    auto lifted = NullableLiftingTransform::LiftCSharpEqualityComparison(
+        valueComp, ComparisonKind::Equality, hasValueTest.get());
+    ASSERT_TRUE(lifted);
+    EXPECT_EQ(lifted->Op, OpCode::Comp);
+    auto* liftedComp = static_cast<Comp*>(lifted.get());
+    EXPECT_TRUE(liftedComp->IsLifted());
+    EXPECT_EQ(liftedComp->LiftingKind, ComparisonLiftingKind::CSharp);
+    EXPECT_EQ(liftedComp->Kind, ComparisonKind::Equality);
+    ASSERT_EQ(liftedComp->Left->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(liftedComp->Left.get())->Variable.get(), v1.get());
+    ASSERT_EQ(liftedComp->Right->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(liftedComp->Right.get())->Variable.get(), v2.get());
+}
+
+// LiftCSharpEqualityComparison fall-back case: comparing nullable with non-
+// nullable -- `comp(eq, GVO(v), ldc.i4 5) ? HV(v) : false` ==> the C#-lifted
+// `comp.lifted[C#](eq, ldloc v, ldc.i4 5)` (a single HasValue call falls back
+// to LiftCSharpComparison with nullableVars = [v]).
+TEST(NullableLiftingTransform, LiftCSharpEqualityComparisonFoldsSingleNullableFallback) {
+    auto v = MakeTypedLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto gvo = MakeGVOCall(MakeNullableOf(KnownTypeCode::Int32), std::make_unique<LdLoca>(v));
+    auto condition = std::make_unique<Comp>(std::move(gvo), std::make_unique<LdcI4>(5),
+                                             ComparisonKind::Equality, false);
+    CompOrDecimal valueComp;
+    ASSERT_TRUE(NullableLiftingTransform::MatchCompOrDecimal(condition.get(), valueComp));
+    auto hasValueTest = MakeHasValueCall(MakeNullableOf(KnownTypeCode::Int32),
+                                         "System.Nullable`1::get_HasValue",
+                                         std::make_unique<LdLoca>(v));
+    auto lifted = NullableLiftingTransform::LiftCSharpEqualityComparison(
+        valueComp, ComparisonKind::Equality, hasValueTest.get());
+    ASSERT_TRUE(lifted);
+    EXPECT_EQ(lifted->Op, OpCode::Comp);
+    auto* liftedComp = static_cast<Comp*>(lifted.get());
+    EXPECT_TRUE(liftedComp->IsLifted());
+    EXPECT_EQ(liftedComp->LiftingKind, ComparisonLiftingKind::CSharp);
+    ASSERT_EQ(liftedComp->Left->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(liftedComp->Left.get())->Variable.get(), v.get());
+    ASSERT_EQ(liftedComp->Right->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(liftedComp->Right.get())->Value, 5);
+}
+
+// LiftCSharpEqualityComparison rejects a hasValueComp whose effective kind
+// (after the logic.not peel) does not match newComparisonKind.
+TEST(NullableLiftingTransform, LiftCSharpEqualityComparisonRejectsMismatchedKind) {
+    auto v1 = MakeTypedLocal("v1", MakeNullableOf(KnownTypeCode::Int32));
+    auto v2 = MakeTypedLocal("v2", MakeNullableOf(KnownTypeCode::Int32));
+    auto gvo1 = MakeGVOCall(MakeNullableOf(KnownTypeCode::Int32), std::make_unique<LdLoca>(v1));
+    auto gvo2 = MakeGVOCall(MakeNullableOf(KnownTypeCode::Int32), std::make_unique<LdLoca>(v2));
+    auto condition = std::make_unique<Comp>(std::move(gvo1), std::move(gvo2),
+                                             ComparisonKind::Equality, false);
+    CompOrDecimal valueComp;
+    ASSERT_TRUE(NullableLiftingTransform::MatchCompOrDecimal(condition.get(), valueComp));
+    // hasValueComp is Inequality, but newComparisonKind is Equality -- mismatch.
+    auto hv1 = MakeHasValueCall(MakeNullableOf(KnownTypeCode::Int32),
+                                "System.Nullable`1::get_HasValue",
+                                std::make_unique<LdLoca>(v1));
+    auto hv2 = MakeHasValueCall(MakeNullableOf(KnownTypeCode::Int32),
+                                "System.Nullable`1::get_HasValue",
+                                std::make_unique<LdLoca>(v2));
+    auto hasValueTest = std::make_unique<Comp>(std::move(hv1), std::move(hv2),
+                                                ComparisonKind::Inequality, false);
+    auto lifted = NullableLiftingTransform::LiftCSharpEqualityComparison(
+        valueComp, ComparisonKind::Equality, hasValueTest.get());
+    EXPECT_FALSE(lifted);
+}
+
+// LiftCSharpEqualityComparison rejects a hasValueComp whose operands are not
+// both HasValue calls (the C# MatchHasValueCall on Left/Right).
+TEST(NullableLiftingTransform, LiftCSharpEqualityComparisonRejectsNonHasValueOperands) {
+    auto v1 = MakeTypedLocal("v1", MakeNullableOf(KnownTypeCode::Int32));
+    auto gvo1 = MakeGVOCall(MakeNullableOf(KnownTypeCode::Int32), std::make_unique<LdLoca>(v1));
+    auto gvo2 = MakeGVOCall(MakeNullableOf(KnownTypeCode::Int32), std::make_unique<LdLoca>(v1));
+    auto condition = std::make_unique<Comp>(std::move(gvo1), std::move(gvo2),
+                                             ComparisonKind::Equality, false);
+    CompOrDecimal valueComp;
+    ASSERT_TRUE(NullableLiftingTransform::MatchCompOrDecimal(condition.get(), valueComp));
+    // Left is a HasValue call, Right is a bare ldc.i4 (not a HasValue call).
+    auto hv1 = MakeHasValueCall(MakeNullableOf(KnownTypeCode::Int32),
+                                "System.Nullable`1::get_HasValue",
+                                std::make_unique<LdLoca>(v1));
+    auto hasValueTest = std::make_unique<Comp>(std::move(hv1), std::make_unique<LdcI4>(1),
+                                                ComparisonKind::Equality, false);
+    auto lifted = NullableLiftingTransform::LiftCSharpEqualityComparison(
+        valueComp, ComparisonKind::Equality, hasValueTest.get());
+    EXPECT_FALSE(lifted);
+}
+
+// LiftCSharpComparison !IsLifted relational case: `comp(lt, GVO(v), ldc.i4 5)`
+// with nullableVars = [v] ==> the C#-lifted `comp.lifted[C#](lt, ldloc v, ldc.i4 5)`
+// (DoLiftBinary lifts the GVO to ldloc v, embeds the pure ldc.i4 5, bits.All passes).
+TEST(NullableLiftingTransform, LiftCSharpComparisonFoldsRelational) {
+    auto v = MakeTypedLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto gvo = MakeGVOCall(MakeNullableOf(KnownTypeCode::Int32), std::make_unique<LdLoca>(v));
+    auto comp = std::make_unique<Comp>(std::move(gvo), std::make_unique<LdcI4>(5),
+                                       ComparisonKind::LessThan, false);
+    CompOrDecimal cd;
+    ASSERT_TRUE(NullableLiftingTransform::MatchCompOrDecimal(comp.get(), cd));
+    std::vector<ILVariablePtr> nullableVars = {v};
+    auto lifted = NullableLiftingTransform::LiftCSharpComparison(
+        cd, ComparisonKind::LessThan, nullableVars);
+    ASSERT_TRUE(lifted);
+    EXPECT_EQ(lifted->Op, OpCode::Comp);
+    auto* liftedComp = static_cast<Comp*>(lifted.get());
+    EXPECT_TRUE(liftedComp->IsLifted());
+    EXPECT_EQ(liftedComp->LiftingKind, ComparisonLiftingKind::CSharp);
+    EXPECT_EQ(liftedComp->Kind, ComparisonKind::LessThan);
+    ASSERT_EQ(liftedComp->Left->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(liftedComp->Left.get())->Variable.get(), v.get());
+    ASSERT_EQ(liftedComp->Right->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(liftedComp->Right.get())->Value, 5);
+}
+
+// LiftCSharpComparison !IsLifted rejects when a nullableVar does not contribute
+// (bits.All fails) -- a second nullable var w that the GVO does not touch.
+TEST(NullableLiftingTransform, LiftCSharpComparisonRejectsIrrelevantVar) {
+    auto v = MakeTypedLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto w = MakeTypedLocal("w", MakeNullableOf(KnownTypeCode::Int32));
+    auto gvo = MakeGVOCall(MakeNullableOf(KnownTypeCode::Int32), std::make_unique<LdLoca>(v));
+    auto comp = std::make_unique<Comp>(std::move(gvo), std::make_unique<LdcI4>(5),
+                                       ComparisonKind::LessThan, false);
+    CompOrDecimal cd;
+    ASSERT_TRUE(NullableLiftingTransform::MatchCompOrDecimal(comp.get(), cd));
+    std::vector<ILVariablePtr> nullableVars = {v, w};
+    auto lifted = NullableLiftingTransform::LiftCSharpComparison(
+        cd, ComparisonKind::LessThan, nullableVars);
+    EXPECT_FALSE(lifted) << "w did not contribute -> bits.All(0, 2) fails";
+}
+
+// LiftCSharpComparison IsLifted special case: a comp already lifted by Run(Comp)
+// (the legacy csc `num.GVO() == const && num.HasValue` shape) with one operand a
+// ldloc of the single nullableVar -> clone the operands and MakeLifted.
+TEST(NullableLiftingTransform, LiftCSharpComparisonFoldsAlreadyLiftedComp) {
+    auto v = MakeTypedLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto comp = std::make_unique<Comp>(std::make_unique<LdLoc>(v),
+                                       std::make_unique<LdcI4>(5),
+                                       ComparisonKind::Equality,
+                                       ComparisonLiftingKind::CSharp,
+                                       StackType::I4, false);
+    CompOrDecimal cd;
+    ASSERT_TRUE(NullableLiftingTransform::MatchCompOrDecimal(comp.get(), cd));
+    ASSERT_TRUE(cd.IsLifted);
+    std::vector<ILVariablePtr> nullableVars = {v};
+    auto lifted = NullableLiftingTransform::LiftCSharpComparison(
+        cd, ComparisonKind::Equality, nullableVars);
+    ASSERT_TRUE(lifted);
+    EXPECT_EQ(lifted->Op, OpCode::Comp);
+    auto* liftedComp = static_cast<Comp*>(lifted.get());
+    EXPECT_TRUE(liftedComp->IsLifted());
+    EXPECT_EQ(liftedComp->LiftingKind, ComparisonLiftingKind::CSharp);
+    EXPECT_EQ(liftedComp->Kind, ComparisonKind::Equality);
+    ASSERT_EQ(liftedComp->Left->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(liftedComp->Left.get())->Variable.get(), v.get());
+    ASSERT_EQ(liftedComp->Right->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(liftedComp->Right.get())->Value, 5);
+}
+
+// LiftCSharpComparison IsLifted rejects when nullableVars.size() != 1 (the
+// special case only handles a single nullableVar).
+TEST(NullableLiftingTransform, LiftCSharpComparisonAlreadyLiftedRejectsMultipleVars) {
+    auto v = MakeTypedLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto w = MakeTypedLocal("w", MakeNullableOf(KnownTypeCode::Int32));
+    auto comp = std::make_unique<Comp>(std::make_unique<LdLoc>(v),
+                                       std::make_unique<LdcI4>(5),
+                                       ComparisonKind::Equality,
+                                       ComparisonLiftingKind::CSharp,
+                                       StackType::I4, false);
+    CompOrDecimal cd;
+    ASSERT_TRUE(NullableLiftingTransform::MatchCompOrDecimal(comp.get(), cd));
+    std::vector<ILVariablePtr> nullableVars = {v, w};
+    auto lifted = NullableLiftingTransform::LiftCSharpComparison(
+        cd, ComparisonKind::Equality, nullableVars);
+    EXPECT_FALSE(lifted);
+}

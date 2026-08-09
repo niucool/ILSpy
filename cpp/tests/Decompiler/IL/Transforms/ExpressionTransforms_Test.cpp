@@ -3372,3 +3372,148 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
     // Roslyn-compiled / modern .NET).
     (void)totalLiftedCompFolds;
 }
+
+// RunIfNullableLift MatchCompOrDecimal equality case (LiftCSharpEqualityComparison
+// hasValueComp two-nullable case): `comp(eq, GVO(v1), GVO(v2)) ?
+// comp(eq, HV(v1), HV(v2)) : false` ==> the C#-lifted
+// `comp.lifted[C#](eq, ldloc v1, ldloc v2)`. Both HasValue comparisons compare
+// equal, both GVOs lift to ldloc, both pure. A Roslyn-era codegen pattern.
+TEST(ExpressionTransforms, RunIfNullableLiftFoldsCLiftedEqualityComparison) {
+    auto v1 = MakeLocal("v1", MakeNullableOf(KnownTypeCode::Int32));
+    auto v2 = MakeLocal("v2", MakeNullableOf(KnownTypeCode::Int32));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    // condition: comp(eq, GVO(v1), GVO(v2))
+    auto gvo1 = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    gvo1->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    gvo1->ReturnType = StackType::I4;
+    gvo1->AddArg(std::make_unique<LdLoca>(v1));
+    auto gvo2 = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    gvo2->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    gvo2->ReturnType = StackType::I4;
+    gvo2->AddArg(std::make_unique<LdLoca>(v2));
+    auto cond = std::make_unique<Comp>(std::move(gvo1), std::move(gvo2),
+                                       ComparisonKind::Equality, false);
+    // true arm: comp(eq, HV(v1), HV(v2))
+    auto hv1 = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    hv1->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    hv1->AddArg(std::make_unique<LdLoca>(v1));
+    auto hv2 = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    hv2->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    hv2->AddArg(std::make_unique<LdLoca>(v2));
+    auto trueArm = std::make_unique<Comp>(std::move(hv1), std::move(hv2),
+                                            ComparisonKind::Equality, false);
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(trueArm),
+                                                std::make_unique<LdcI4>(0));
+    auto fn = MakeFnWithBlock({result, v1, v2});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountLiftedComps(*fn), 0);
+    ASSERT_EQ(CountHasValueCall(*fn), 2);
+    ASSERT_EQ(CountGetValueOrDefaultOneArg(*fn), 2);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 1) << "the equality fold must produce a lifted comp";
+    EXPECT_EQ(CountHasValueCall(*fn), 0) << "both HasValue calls must be folded away";
+    EXPECT_EQ(CountGetValueOrDefaultOneArg(*fn), 0) << "both GVO calls must be folded away";
+    auto& blk = fn->Body->Blocks[0];
+    ASSERT_EQ(blk->Instructions.size(), 1u);
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp);
+    auto* c = static_cast<Comp*>(st->Value.get());
+    EXPECT_EQ(c->LiftingKind, ComparisonLiftingKind::CSharp);
+    EXPECT_EQ(c->Kind, ComparisonKind::Equality);
+    ASSERT_EQ(c->Left->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(c->Left.get())->Variable.get(), v1.get());
+    ASSERT_EQ(c->Right->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(c->Right.get())->Variable.get(), v2.get());
+}
+
+// RunIfNullableLift MatchCompOrDecimal relational case (LiftCSharpComparison):
+// `comp(lt, GVO(v), ldc.i4 5) ? HV(v) : false` ==> the C#-lifted
+// `comp.lifted[C#](lt, ldloc v, ldc.i4 5)` (DoLiftBinary lifts the GVO to ldloc v,
+// embeds the pure ldc.i4 5, the single nullableVar v contributes).
+TEST(ExpressionTransforms, RunIfNullableLiftFoldsCLiftedRelationalComparison) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto gvo = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    gvo->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    gvo->ReturnType = StackType::I4;
+    gvo->AddArg(std::make_unique<LdLoca>(v));
+    auto cond = std::make_unique<Comp>(std::move(gvo), std::make_unique<LdcI4>(5),
+                                        ComparisonKind::LessThan, false);
+    auto hv = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    hv->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    hv->AddArg(std::make_unique<LdLoca>(v));
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(hv),
+                                                std::make_unique<LdcI4>(0));
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountLiftedComps(*fn), 0);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 1) << "the relational fold must produce a lifted comp";
+    EXPECT_EQ(CountHasValueCall(*fn), 0) << "the HasValue call must be folded away";
+    EXPECT_EQ(CountGetValueOrDefaultOneArg(*fn), 0) << "the GVO call must be folded away";
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp);
+    auto* c = static_cast<Comp*>(st->Value.get());
+    EXPECT_EQ(c->LiftingKind, ComparisonLiftingKind::CSharp);
+    EXPECT_EQ(c->Kind, ComparisonKind::LessThan);
+    ASSERT_EQ(c->Left->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(c->Left.get())->Variable.get(), v.get());
+    ASSERT_EQ(c->Right->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(c->Right.get())->Value, 5);
+}
+
+// RunIfNullableLift MatchCompOrDecimal relational negated-condition case:
+// `comp(lt, GVO(v), ldc.i4 5) ? !HV(v) : true` ==> `logic.not(comp.lifted[C#](lt,
+// ldloc v, ldc.i4 5))` (the `!(v1 != null && ...) : true` shape wraps the lifted
+// relational comp in a Comp.LogicNot). The outer comp is a non-lifted Equality
+// (the logic.not shape), wrapping the inner C#-lifted LessThan.
+TEST(ExpressionTransforms, RunIfNullableLiftFoldsCLiftedRelationalNegated) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto result = MakeLocal("result", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto gvo = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    gvo->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    gvo->ReturnType = StackType::I4;
+    gvo->AddArg(std::make_unique<LdLoca>(v));
+    auto cond = std::make_unique<Comp>(std::move(gvo), std::make_unique<LdcI4>(5),
+                                        ComparisonKind::LessThan, false);
+    auto hv = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    hv->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    hv->AddArg(std::make_unique<LdLoca>(v));
+    // true arm = !v.HasValue (comp(eq, HasValue, 0)), false arm = ldc.i4 1.
+    auto negHasVal = std::make_unique<Comp>(std::move(hv), std::make_unique<LdcI4>(0),
+                                             ComparisonKind::Equality, false);
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(negHasVal),
+                                                std::make_unique<LdcI4>(1));
+    auto fn = MakeFnWithBlock({result, v});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(result, std::move(iff)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountLiftedComps(*fn), 0);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLiftedComps(*fn), 1) << "the relational fold must produce a lifted comp";
+    EXPECT_EQ(CountHasValueCall(*fn), 0) << "the HasValue call must be folded away";
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp)
+        << "the outer logic.not comp wraps the lifted relational";
+    auto* outer = static_cast<Comp*>(st->Value.get());
+    EXPECT_FALSE(outer->IsLifted()) << "the logic.not wrapper is non-lifted (Equality)";
+    EXPECT_EQ(outer->Kind, ComparisonKind::Equality);
+    ASSERT_EQ(outer->Left->Op, OpCode::Comp) << "the inner lifted relational comp";
+    auto* inner = static_cast<Comp*>(outer->Left.get());
+    EXPECT_EQ(inner->LiftingKind, ComparisonLiftingKind::CSharp);
+    EXPECT_EQ(inner->Kind, ComparisonKind::LessThan);
+    ASSERT_EQ(inner->Left->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(inner->Left.get())->Variable.get(), v.get());
+    ASSERT_EQ(inner->Right->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(inner->Right.get())->Value, 5);
+}

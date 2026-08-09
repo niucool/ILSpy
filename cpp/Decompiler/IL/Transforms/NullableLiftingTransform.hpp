@@ -75,6 +75,23 @@ struct CompOrDecimal {
     ILInstruction* Left = nullptr;
     ILInstruction* Right = nullptr;
     bool IsLifted = false;
+
+    // Port of CompOrDecimal.MakeLifted(newComparisonKind, left, right): builds a
+    // C#-lifted instruction from the two (already-lifted) operands. The Comp
+    // branch constructs a `Comp(newComparisonKind, ComparisonLiftingKind.CSharp,
+    // comp.InputType, comp.Sign, left, right)` (the D91 model) -- a C#-style lifted
+    // comparison whose operands' ResultType is O (Nullable<T>). The Decimal/Call
+    // branch (a Call to a lifted user-defined operator, needs
+    // CSharpOperators.LiftUserDefinedOperator) is deferred -- MatchCompOrDecimal
+    // only matches the Comp branch, so a Call Instruction never reaches here.
+    // `LeftExpectedType`/`RightExpectedType` (the Call-branch parameter types)
+    // are not carried: for the Comp branch both are SpecialType.UnknownType
+    // (nullptr), which the caller passes directly to DoLiftBinary. Returns null for
+    // a non-Comp Instruction (the deferred Call branch).
+    std::unique_ptr<ILInstruction> MakeLifted(
+        ComparisonKind newComparisonKind,
+        std::unique_ptr<ILInstruction> left,
+        std::unique_ptr<ILInstruction> right) const;
 };
 
 // The static helper subset of NullableLiftingTransform. The full
@@ -265,6 +282,35 @@ public:
     // pure-non-nullable embedding.
     static std::unique_ptr<ILInstruction> NewNullable(std::unique_ptr<ILInstruction> inst,
                                                        const TypeSystem::IType* underlyingType);
+
+    // Port of NullableLiftingTransform.LiftCSharpEqualityComparison(valueComp,
+    // newComparisonKind, hasValueTest): the C#-style lifted (in)equality
+    // comparison. `hasValueTest` is the trueInst (after the equality swap -- the
+    // C# `Swap(ref trueInst, ref falseInst)` for Inequality is done by the
+    // caller). The hasValueComp case (comparing two nullables: the HasValue
+    // comparison must be the same operator as the Value comparison, DoLift both
+    // sides with a single-var list, gate on leftBits[0] && rightBits[0] + IsPure)
+    // and the fall-back case (comparing nullable with non-nullable: a single
+    // HasValue call -> LiftCSharpComparison) are ported. The
+    // LiftCSharpUserEqualityComparison fall-back (?? LiftCSharpUserEquality-
+    // Comparison, needs Call.Method.IsOperator + CSharpOperators) is deferred.
+    // Returns the lifted instruction or null.
+    static std::unique_ptr<ILInstruction> LiftCSharpEqualityComparison(
+        const CompOrDecimal& valueComp, ComparisonKind newComparisonKind,
+        ILInstruction* hasValueTest);
+
+    // Port of NullableLiftingTransform.LiftCSharpComparison(comp,
+    // newComparisonKind): the C#-style lifted relational comparison. The
+    // !comp.IsLifted case (DoLiftBinary with both expected types UnknownType +
+    // MakeLifted, gated on IsPure + bits.All) and the comp.IsLifted special case
+    // (legacy csc `num.GetValueOrDefault() == const && num.HasValue`, where the
+    // comp was already lifted by Run(Comp); clone the operands and MakeLifted)
+    // are ported. `nullableVars` is the per-call list (the C# instance field,
+    // set by AnalyzeCondition or by LiftCSharpEqualityComparison before calling).
+    // Returns the lifted instruction or null.
+    static std::unique_ptr<ILInstruction> LiftCSharpComparison(
+        const CompOrDecimal& comp, ComparisonKind newComparisonKind,
+        const std::vector<ILVariablePtr>& nullableVars);
 };
 
 } // namespace ILSpy::Decompiler::IL

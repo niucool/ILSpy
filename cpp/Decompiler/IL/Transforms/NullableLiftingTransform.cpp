@@ -492,4 +492,134 @@ std::unique_ptr<ILInstruction> NullableLiftingTransform::NewNullable(
     return inst;
 }
 
+std::unique_ptr<ILInstruction> CompOrDecimal::MakeLifted(
+    ComparisonKind newComparisonKind,
+    std::unique_ptr<ILInstruction> left,
+    std::unique_ptr<ILInstruction> right) const {
+    // Port of CompOrDecimal.MakeLifted (the Comp branch). Builds a C#-lifted Comp
+    // (`Comp(newComparisonKind, ComparisonLiftingKind.CSharp, comp.InputType,
+    // comp.Sign, left, right)`, the D91 model) carrying the original comp's
+    // InputType/Unsigned so the lifted comparison's operands (whose ResultType is
+    // O, a boxed Nullable<T>) compare the underlying value. The Decimal/Call
+    // branch (a Call to a lifted user-defined operator, needs
+    // CSharpOperators.LiftUserDefinedOperator) is deferred -- MatchCompOrDecimal
+    // only matches the Comp branch, so a Call Instruction never reaches here and
+    // the function returns null for a non-Comp Instruction.
+    if (Instruction && Instruction->Op == OpCode::Comp) {
+        auto* comp = static_cast<Comp*>(Instruction);
+        return std::make_unique<Comp>(
+            std::move(left), std::move(right),
+            newComparisonKind, ComparisonLiftingKind::CSharp,
+            comp->InputType, comp->Unsigned);
+    }
+    return nullptr;
+}
+
+std::unique_ptr<ILInstruction> NullableLiftingTransform::LiftCSharpEqualityComparison(
+    const CompOrDecimal& valueComp, ComparisonKind newComparisonKind,
+    ILInstruction* hasValueTest) {
+    // Port of NullableLiftingTransform.LiftCSharpEqualityComparison (Comp
+    // branch). `hasValueTest` is the trueInst after the equality swap (the C#
+    // `Swap(ref trueInst, ref falseInst)` for Inequality is done by the caller).
+    // The hasValueComp case (comparing two nullables) and the fall-back case
+    // (comparing nullable with non-nullable -> LiftCSharpComparison) are ported;
+    // the LiftCSharpUserEqualityComparison fall-back (?? LiftCSharpUserEquality-
+    // Comparison, needs Call.Method.IsOperator + CSharpOperators) is deferred.
+
+    // Peel logic.not from the hasValueTest (the C#
+    // `while (hasValueTest.MatchLogicNot(out var arg))`).
+    bool hasValueTestNegated = false;
+    ILInstruction* peeled = nullptr;
+    while (MatchLogicNot(hasValueTest, peeled)) {
+        hasValueTest = peeled;
+        hasValueTestNegated = !hasValueTestNegated;
+    }
+
+    if (hasValueTest && hasValueTest->Op == OpCode::Comp) {
+        auto* hasValueComp = static_cast<Comp*>(hasValueTest);
+        if (valueComp.IsLifted || hasValueComp->IsLifted()) return nullptr;
+        // The HasValue comparison must be the same operator as the Value
+        // comparison (the negated HasValue kind must match the new value kind).
+        ComparisonKind effectiveKind = hasValueTestNegated
+            ? NegateComparison(hasValueComp->Kind) : hasValueComp->Kind;
+        if (effectiveKind != newComparisonKind) return nullptr;
+        ILVariablePtr leftVar;
+        if (!MatchHasValueCall(hasValueComp->Left.get(), leftVar)) return nullptr;
+        ILVariablePtr rightVar;
+        if (!MatchHasValueCall(hasValueComp->Right.get(), rightVar)) return nullptr;
+        // DoLift the left with [leftVar], then replace [0] with rightVar and
+        // DoLift the right (the C# `nullableVars = { leftVar }; DoLift(Left);
+        // nullableVars[0] = rightVar; DoLift(Right)`). The single-bit relevance
+        // gate `leftBits[0] && rightBits[0]` checks each side's GVO is on its var.
+        std::vector<ILVariablePtr> nullableVars{leftVar};
+        auto leftR = DoLift(valueComp.Left, nullableVars);
+        nullableVars[0] = rightVar;
+        auto rightR = DoLift(valueComp.Right, nullableVars);
+        if (leftR.Lifted && rightR.Lifted && leftR.Bits && rightR.Bits &&
+            (*leftR.Bits)[0] && (*rightR.Bits)[0] &&
+            IsPure(leftR.Lifted->Flags()) && IsPure(rightR.Lifted->Flags())) {
+            return valueComp.MakeLifted(newComparisonKind,
+                std::move(leftR.Lifted), std::move(rightR.Lifted));
+        }
+        return nullptr;
+    }
+    // Fall-back: comparing nullable with non-nullable -> a single HasValue call
+    // on the hasValueTest, fall back to the normal comparison code.
+    ILVariablePtr v;
+    if (newComparisonKind == ComparisonKind::Equality && !hasValueTestNegated &&
+        MatchHasValueCall(hasValueTest, v)) {
+        std::vector<ILVariablePtr> nullableVars{v};
+        return LiftCSharpComparison(valueComp, newComparisonKind, nullableVars);
+    }
+    if (newComparisonKind == ComparisonKind::Inequality && hasValueTestNegated &&
+        MatchHasValueCall(hasValueTest, v)) {
+        std::vector<ILVariablePtr> nullableVars{v};
+        return LiftCSharpComparison(valueComp, newComparisonKind, nullableVars);
+    }
+    return nullptr;
+}
+
+std::unique_ptr<ILInstruction> NullableLiftingTransform::LiftCSharpComparison(
+    const CompOrDecimal& comp, ComparisonKind newComparisonKind,
+    const std::vector<ILVariablePtr>& nullableVars) {
+    // Port of NullableLiftingTransform.LiftCSharpComparison. The !comp.IsLifted
+    // case (DoLiftBinary with both expected types UnknownType + MakeLifted,
+    // gated on IsPure + bits.All) and the comp.IsLifted special case (legacy csc
+    // `num.GetValueOrDefault() == const && num.HasValue`, where the comp was
+    // already lifted by Run(Comp); clone the operands and MakeLifted) are ported.
+    // The Comp branch's LeftExpectedType/RightExpectedType are nullptr
+    // (SpecialType.UnknownType) -- the Call branch's parameter types are
+    // deferred (no Call.Method parameters in this port).
+    if (comp.IsLifted) {
+        // The legacy csc case: the comp was already lifted (Run(Comp) lifted the
+        // lhs of a logic.and). Treat it as if the transform had not undone the
+        // optimization yet -- clone the operands and make a fresh lifted comp.
+        // Only a single nullableVar is handled; one operand must be ldloc of it.
+        if (nullableVars.size() != 1) return nullptr;
+        auto isLdLocOfVar = [](ILInstruction* inst, const ILVariable* v) {
+            return inst && inst->Op == OpCode::LdLoc &&
+                static_cast<LdLoc*>(inst)->Variable.get() == v;
+        };
+        if (isLdLocOfVar(comp.Left, nullableVars[0].get()) ||
+            isLdLocOfVar(comp.Right, nullableVars[0].get())) {
+            auto leftClone = ClonePureExpression(comp.Left);
+            auto rightClone = ClonePureExpression(comp.Right);
+            if (leftClone && rightClone) {
+                return comp.MakeLifted(newComparisonKind,
+                    std::move(leftClone), std::move(rightClone));
+            }
+        }
+        return nullptr;
+    }
+    auto binR = DoLiftBinary(comp.Left, comp.Right, nullptr, nullptr, nullableVars);
+    if (binR.Left && binR.Right && binR.Bits &&
+        IsPure(binR.Left->Flags()) && IsPure(binR.Right->Flags())) {
+        if (!binR.Bits->All(0, static_cast<int>(nullableVars.size())))
+            return nullptr;
+        return comp.MakeLifted(newComparisonKind,
+            std::move(binR.Left), std::move(binR.Right));
+    }
+    return nullptr;
+}
+
 } // namespace ILSpy::Decompiler::IL
