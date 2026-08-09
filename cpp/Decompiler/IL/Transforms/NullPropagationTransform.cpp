@@ -21,10 +21,12 @@
 // NullableByValue, and NullableByReference modes of `Run` + `TryNullPropagation`
 // (the `ldnull` and `default(Nullable<T>)` output cases) +
 // `IsValidAccessChain` (approximated) + `IntroduceUnwrap`, plus the
-// `IsProtectedIfInst` and `MatchNullableRewrap` static helpers. The
-// UnconstrainedType mode, RunStatements, the `NullCoalescing` output case
-// (needs InferType / NullableType.IsNonNullableValueType), and the
-// AddressOf / LdObjIfRef / Dynamic* access-chain cases are deferred.
+// `IsProtectedIfInst` and `MatchNullableRewrap` static helpers, and the
+// void-call subset of `RunStatements` (via `NullPropagationStatementTransform`,
+// the `?.` statement form). The UnconstrainedType mode, the
+// TransformNullPropagationOnUnconstrainedGenericExpression pattern, the
+// `NullCoalescing` output case (needs InferType / NullableType.IsNonNullableValueType),
+// and the AddressOf / LdObjIfRef / Dynamic* access-chain cases are deferred.
 
 #include "Decompiler/IL/Transforms/NullPropagationTransform.hpp"
 #include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
@@ -43,6 +45,9 @@
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/NullableInstructions.hpp"
+#include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/Branch.hpp"
 
 #include <memory>
 
@@ -121,6 +126,22 @@ bool IsInConditionSlot(const ILInstruction* inst) {
 std::unique_ptr<ILInstruction> DetachFromParent(ILInstruction* inst) {
     if (!inst || !inst->Parent) return nullptr;
     return inst->Parent->TakeChild(inst->ChildIndex);
+}
+
+// The next block in `block`'s container (the implicit fall-through target in
+// this port's block model). Mirrors the helper in NullCoalescingTransform /
+// ExpressionTransforms / SwitchAnalysis. nullptr if `block` is not in a
+// container's Blocks list or is the last block.
+Block* NextBlockInContainer(Block* block) {
+    if (!block) return nullptr;
+    auto* container = dynamic_cast<BlockContainer*>(block->Parent);
+    if (!container) return nullptr;
+    for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+        if (container->Blocks[i].get() == block) {
+            return (i + 1 < container->Blocks.size()) ? container->Blocks[i + 1].get() : nullptr;
+        }
+    }
+    return nullptr;
 }
 
 // The Mode enum mirrors the C# NullPropagationTransform.Mode. ReferenceType,
@@ -369,6 +390,74 @@ std::unique_ptr<ILInstruction> TryNullPropagation(ILVariable* testedVar,
     return nullptr;
 }
 
+// Port of NullPropagationTransform.TryNullPropForVoidCall: the void-call `?.`
+// statement form -- `if (testedVar != null) { testedVar.AccessChain(); }`
+// folds into `testedVar?.AccessChain();` (a void NullableRewrap, the `?.`
+// statement whose value is discarded). `ifInst` is the block's FinalInstruction
+// (this port's if-as-final model); `body` is `ifInst->TrueInst` as a Block with
+// exactly one instruction (the void call); the body instruction may be wrapped
+// in a NullableRewrap (stripped before the access chain analysis, matching the
+// C# `bodyInst.MatchNullableRewrap`). `hostBlock` is the block whose
+// FinalInstruction is `ifInst` (for the block-model adaptation: the void
+// NullableRewrap becomes a non-terminal and a Branch to the next block replaces
+// the if-final, the same adaptation NullCoalescingTransform / ReplaceIfWithLiftedValue
+// use). Returns true if the fold fired. The bodyInst is detached from the body
+// Block (TakeChild) before the if is destroyed (no GC); the access chain
+// inside bodyInst is mutated by IntroduceUnwrap (the receiver load is wrapped in
+// a NullableUnwrap) while bodyInst is still in the body Block, then detached.
+bool TryNullPropForVoidCall(ILVariable* testedVar, Mode mode,
+                             IfInstruction* ifInst, Block* hostBlock,
+                             ILTransformContext& context) {
+    if (!ifInst || !ifInst->TrueInst) return false;
+    if (ifInst->TrueInst->Op != OpCode::Block) return false;
+    auto* body = static_cast<Block*>(ifInst->TrueInst.get());
+    if (body->Instructions.size() != 1) return false;
+    ILInstruction* bodyInst = body->Instructions[0].get();
+    if (!bodyInst) return false;
+    // Strip a NullableRewrap wrapper from the body instruction (the C#
+    // `bodyInst.MatchNullableRewrap(out arg); bodyInst = arg`).
+    ILInstruction* rewrapArg = nullptr;
+    if (NullPropagationTransform::MatchNullableRewrap(bodyInst, rewrapArg))
+        bodyInst = rewrapArg;
+    if (!bodyInst) return false;
+    // IsValidAccessChain: the body instruction must be a valid `?.` access chain
+    // on `testedVar` with chainLength >= 1.
+    ILInstruction* varLoad = nullptr;
+    if (!IsValidAccessChain(testedVar, mode, bodyInst, varLoad)) return false;
+    if (!varLoad) return false;
+    // Resolve the fall-through target BEFORE mutating (the precondition-before-
+    // mutation discipline: a detached bodyInst with no fold would corrupt the tree).
+    Block* nextBlock = NextBlockInContainer(hostBlock);
+    if (!nextBlock) return false;  // no fall-through; degenerate end-of-function `?.`
+    context.StepOnce("Null-propagation (void call)");
+    // IntroduceUnwrap: wrap the receiver load at the end of the access chain in
+    // a NullableUnwrap. This mutates the access chain inside bodyInst (which is
+    // still in the body Block / the stripped NullableRewrap at this point).
+    IntroduceUnwrap(testedVar, varLoad, mode);
+    // Detach bodyInst from its parent. When the NullableRewrap was NOT stripped,
+    // bodyInst is body->Instructions[0] (detached from the body Block). When it
+    // WAS stripped, bodyInst is the inner instruction (the Call) inside the
+    // NullableRewrap (body->Instructions[0]->Argument); DetachFromParent detaches
+    // it from the NullableRewrap, leaving the NullableRewrap with a null Argument
+    // (destroyed harmlessly when the if-final is replaced below). The body Block /
+    // the NullableRewrap are owned by the if's TrueInst and are destroyed when the
+    // if-final is replaced (no GC; the detached bodyInst survives).
+    auto bodyInstOwned = DetachFromParent(bodyInst);
+    if (!bodyInstOwned) return false;  // bodyInst had no parent (shouldn't happen)
+    // Build the void NullableRewrap from the body instruction. For a void call
+    // (ReturnType Void) the NullableRewrap's ResultType is Void (the `?.`
+    // statement form); for a non-void access chain it is O (the nullable result).
+    auto rewrap = std::make_unique<NullableRewrap>(std::move(bodyInstOwned));
+    // Block-model adaptation: the if is the host block's FinalInstruction. The
+    // void NullableRewrap becomes a non-terminal statement (its value is
+    // discarded, matching the if-as-statement) and a Branch to the next block
+    // (the fall-through the if's null FalseInst represented) replaces the
+    // if-final. Destroys the if and the now-empty body Block.
+    hostBlock->Add(std::move(rewrap));
+    hostBlock->SetFinal(std::make_unique<Branch>(nextBlock));
+    return true;
+}
+
 } // namespace
 
 // static
@@ -430,6 +519,58 @@ std::unique_ptr<ILInstruction> NullPropagationTransform::Run(
         }
     }
     return nullptr;
+}
+
+void NullPropagationStatementTransform::Run(Block& block, int pos,
+                                             StatementTransformContext& context) {
+    if (!context.Base.Settings.NullPropagation) return;
+    // The void-call `?.` if is the block's FinalInstruction (this port's
+    // if-as-final model). The per-statement driver visits the if-final at the
+    // last non-terminal position (pos == size-1) or for an if-final-only block
+    // (pos == -1 == size-1). Bail at any other position so the fold fires once
+    // (matching how ExpressionTransforms visits the if-final at pos == size-1).
+    if (pos != static_cast<int>(block.Instructions.size()) - 1) return;
+    auto* iff = dynamic_cast<IfInstruction*>(block.FinalInstruction.get());
+    if (!iff) return;
+    // The `?.` void-call pattern has no else (the C# `ifInst.FalseInst.MatchNop()`;
+    // this port's if-as-final with no else has FalseInst == nullptr). Bail if there
+    // is an else arm (not the `?.` void-call shape).
+    if (iff->FalseInst) return;
+    // ReferenceType mode: `comp(ldloc v != null)` (Inequality only, matching the
+    // C# `comp.Kind == ComparisonKind.Inequality && comp.Left.MatchLdLoc &&
+    // comp.Right.MatchLdNull`).
+    if (iff->Condition && iff->Condition->Op == OpCode::Comp) {
+        auto* comp = static_cast<Comp*>(iff->Condition.get());
+        if (comp->Kind == ComparisonKind::Inequality &&
+            comp->LiftingKind == ComparisonLiftingKind::None) {
+            ILVariable* testedVar = nullptr;
+            if (MatchLdLoc(comp->Left.get(), testedVar) &&
+                comp->Right && comp->Right->Op == OpCode::LdNull) {
+                TryNullPropForVoidCall(testedVar, Mode::ReferenceType,
+                                        iff, &block, context.Base);
+                return;
+            }
+        }
+    }
+    // NullableByValue / NullableByReference: `call get_HasValue(loadInst)` on a
+    // Nullable<T>, where loadInst is `ldloca v` (NullableByValue) or `ldloc v`
+    // (NullableByReference). UnconstrainedType is RunStatements-only (deferred).
+    {
+        ILInstruction* loadInst = nullptr;
+        if (NullableLiftingTransform::MatchHasValueCall(iff->Condition.get(), loadInst)) {
+            ILVariable* testedVar = nullptr;
+            if (MatchLdLoca(loadInst, testedVar)) {
+                TryNullPropForVoidCall(testedVar, Mode::NullableByValue,
+                                        iff, &block, context.Base);
+                return;
+            }
+            if (MatchLdLoc(loadInst, testedVar)) {
+                TryNullPropForVoidCall(testedVar, Mode::NullableByReference,
+                                        iff, &block, context.Base);
+                return;
+            }
+        }
+    }
 }
 
 } // namespace ILSpy::Decompiler::IL

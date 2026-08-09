@@ -43,6 +43,7 @@
 #include "Decompiler/IL/Transforms/StatementTransform.hpp"
 #include "Decompiler/IL/Transforms/ExpressionTransforms.hpp"
 #include "Decompiler/IL/Transforms/NullCoalescingTransform.hpp"
+#include "Decompiler/IL/Transforms/NullPropagationTransform.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
 #include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
@@ -367,6 +368,26 @@ int main(int argc, char** argv) {
                     // faithfulness.
                     statementTransform.AddChild(
                         std::make_unique<ILSpy::Decompiler::IL::NullCoalescingTransform>());
+                    // NullPropagationStatementTransform: the void-call `?.`
+                    // statement form (the next per-statement child in the C#
+                    // GetILTransforms() order, after NullCoalescingTransform /
+                    // the deferred NullableLiftingStatementTransform). Folds
+                    //   if (testedVar != null) { testedVar.AccessChain(); }
+                    // into `testedVar?.AccessChain();` (a void NullableRewrap,
+                    // the `?.` statement whose value is discarded). The if is the
+                    // block's FinalInstruction (this port's if-as-final model);
+                    // the TrueInst is a Block with one instruction, the FalseInst
+                    // is null (no else). The if-final is replaced with the void
+                    // NullableRewrap as a non-terminal + a Branch to the next
+                    // block (the fall-through the if's null FalseInst represented).
+                    // The UnconstrainedType mode and the
+                    // TransformNullPropagationOnUnconstrainedGenericExpression
+                    // pattern (a 5-instruction block sequence) are deferred. Gated
+                    // on the NullPropagation setting (default true). Fires 0 times
+                    // on the .NET Framework 4 legacy-csc mscorlib corpus (the `?.`
+                    // operator is C# 6.0 / Roslyn-era); ported for faithfulness.
+                    statementTransform.AddChild(
+                        std::make_unique<ILSpy::Decompiler::IL::NullPropagationStatementTransform>());
                     statementTransform.Run(*fn, transformContext);
                 }
                 ILSpy::Decompiler::IL::AssignVariableNames().Run(*fn, transformContext);

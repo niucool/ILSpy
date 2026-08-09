@@ -30,6 +30,7 @@
 // LdLocaDupInitObj / SwitchOnNullable precedent.
 
 #include "Decompiler/IL/Transforms/NullPropagationTransform.hpp"
+#include "Decompiler/IL/Transforms/NullCoalescingTransform.hpp"
 #include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
 #include "Decompiler/IL/Transforms/ExpressionTransforms.hpp"
 #include "Decompiler/IL/Transforms/StatementTransform.hpp"
@@ -125,9 +126,40 @@ std::unique_ptr<ILFunction> MakeFnWithBlock(std::vector<ILVariablePtr> vars = {}
     return fn;
 }
 
+// A two-block function: block0 (the test adds the if-final here) and
+// block1 (the fall-through, the NextBlockInContainer target). Both carry a
+// Leave final initially; the test overrides block0's final with the if.
+std::unique_ptr<ILFunction> MakeTwoBlockFn(std::vector<ILVariablePtr> vars = {}) {
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto b0 = std::make_unique<Block>();
+    b0->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    auto b1 = std::make_unique<Block>();
+    b1->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    for (auto& v : vars) fn->Variables.push_back(v);
+    return fn;
+}
+
 void RunExpressionTransforms(ILFunction& fn) {
     StatementTransform st;
     st.AddChild(std::make_unique<ExpressionTransforms>());
+    ILTransformContext ctx;
+    st.Run(fn, ctx);
+}
+
+// Run the full StatementTransform pipeline (ILInlining + ExpressionTransforms +
+// NullCoalescingTransform + NullPropagationStatementTransform) matching the
+// CLI wiring, so the void-call `?.` fires through the real per-statement driver.
+void RunStatementTransforms(ILFunction& fn) {
+    StatementTransform st;
+    st.AddChild(std::make_unique<ILInlining>());
+    st.AddChild(std::make_unique<ExpressionTransforms>());
+    st.AddChild(std::make_unique<NullCoalescingTransform>());
+    st.AddChild(std::make_unique<NullPropagationStatementTransform>());
     ILTransformContext ctx;
     st.Run(fn, ctx);
 }
@@ -710,6 +742,283 @@ TEST(NullPropagationTransform, WiredFoldsThroughExpressionTransforms) {
     EXPECT_EQ(rcall->Arguments[0]->Op, OpCode::NullableUnwrap);
 }
 
+// --- RunStatements (void-call `?.`) tests ---
+
+// Build the void-call `?.` shape on block0 of a two-block `fn`:
+//   block0 (no non-terminal Instructions)
+//   block0.FinalInstruction = if (cond) Block { bodyInst } (no FalseInst)
+//   block1 (the fall-through) carries a Leave final.
+// Returns block0.
+Block* BuildVoidCallShape(ILFunction& fn, ILVariablePtr v,
+                           std::unique_ptr<ILInstruction> cond,
+                           std::unique_ptr<ILInstruction> bodyInst) {
+    auto& b0 = fn.Body->Blocks[0];
+    auto body = std::make_unique<Block>();
+    body->Add(std::move(bodyInst));
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(body));
+    b0->SetFinal(std::move(iff));
+    return b0.get();
+}
+
+// `if (v != null) { v.ToString(); }` -> `v?.ToString();` (a void NullableRewrap).
+TEST(NullPropagationTransform, RunStatementsFoldsReferenceTypeVoidCall) {
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto fn = MakeTwoBlockFn({v});
+    auto cond = std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v), std::make_unique<LdNull>(),
+        ComparisonKind::Inequality);
+    auto call = std::make_unique<Call>("System.Object::ToString");
+    call->IsInstanceCall = true;
+    call->ReturnType = StackType::Void;
+    call->AddArg(std::make_unique<LdLoc>(v));
+    BuildVoidCallShape(*fn, v, std::move(cond), std::move(call));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunStatementTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& b0 = fn->Body->Blocks[0];
+    // The if-final was replaced with a Branch to the next block (the fall-through).
+    ASSERT_EQ(b0->FinalInstruction->Op, OpCode::Branch);
+    // The void NullableRewrap is the only non-terminal statement.
+    ASSERT_EQ(b0->Instructions.size(), 1u);
+    auto& rewrap = b0->Instructions[0];
+    ASSERT_EQ(rewrap->Op, OpCode::NullableRewrap);
+    EXPECT_EQ(rewrap->ResultType(), StackType::Void) << "void-call `?.` is the statement form";
+    auto* rw = static_cast<NullableRewrap*>(rewrap.get());
+    ASSERT_NE(rw->Argument, nullptr);
+    EXPECT_EQ(rw->Argument->Op, OpCode::Call);
+    auto* rcall = static_cast<Call*>(rw->Argument.get());
+    ASSERT_FALSE(rcall->Arguments.empty());
+    EXPECT_EQ(rcall->Arguments[0]->Op, OpCode::NullableUnwrap);
+    auto* unwrap = static_cast<NullableUnwrap*>(rcall->Arguments[0].get());
+    ASSERT_NE(unwrap->Argument, nullptr);
+    EXPECT_EQ(unwrap->Argument->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(unwrap->Argument.get())->Variable.get(), v.get());
+    EXPECT_FALSE(unwrap->RefInput) << "ReferenceType: refInput=false";
+}
+
+// `if (v.HasValue) { v.GetValueOrDefault().ToString(); }` -> `v?.ToString();`
+// (NullableByValue, the GVO call at the end of the chain is wrapped in a
+// NullableUnwrap with a fresh ldloc v, refInput=false).
+TEST(NullPropagationTransform, RunStatementsFoldsNullableByValueVoidCall) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto fn = MakeTwoBlockFn({v});
+    auto cond = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    cond->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    cond->IsInstanceCall = true;
+    cond->ReturnType = StackType::I4;
+    cond->AddArg(std::make_unique<LdLoca>(v));
+    auto gvo = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    gvo->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    gvo->IsInstanceCall = true;
+    gvo->ReturnType = StackType::I4;
+    gvo->AddArg(std::make_unique<LdLoca>(v));
+    auto toString = std::make_unique<Call>("System.Int32::ToString");
+    toString->IsInstanceCall = true;
+    toString->ReturnType = StackType::Void;
+    toString->AddArg(std::move(gvo));
+    BuildVoidCallShape(*fn, v, std::move(cond), std::move(toString));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunStatementTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& b0 = fn->Body->Blocks[0];
+    ASSERT_EQ(b0->FinalInstruction->Op, OpCode::Branch);
+    ASSERT_EQ(b0->Instructions.size(), 1u);
+    auto& rewrap = b0->Instructions[0];
+    ASSERT_EQ(rewrap->Op, OpCode::NullableRewrap);
+    auto* rw = static_cast<NullableRewrap*>(rewrap.get());
+    ASSERT_NE(rw->Argument, nullptr);
+    EXPECT_EQ(rw->Argument->Op, OpCode::Call);
+    auto* rcall = static_cast<Call*>(rw->Argument.get());
+    ASSERT_FALSE(rcall->Arguments.empty());
+    EXPECT_EQ(rcall->Arguments[0]->Op, OpCode::NullableUnwrap);
+    auto* unwrap = static_cast<NullableUnwrap*>(rcall->Arguments[0].get());
+    EXPECT_FALSE(unwrap->RefInput) << "NullableByValue: refInput=false";
+    ASSERT_NE(unwrap->Argument, nullptr);
+    EXPECT_EQ(unwrap->Argument->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(unwrap->Argument.get())->Variable.get(), v.get());
+}
+
+// `if (v.HasValue) { v.GetValueOrDefault().ToString(); }` (NullableByReference,
+// ldloc v in the HasValue call and GVO call) -> refInput=true.
+TEST(NullPropagationTransform, RunStatementsFoldsNullableByReferenceVoidCall) {
+    auto v = MakeLocal("v", MakeNullableOf(KnownTypeCode::Int32));
+    auto fn = MakeTwoBlockFn({v});
+    auto cond = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    cond->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    cond->IsInstanceCall = true;
+    cond->ReturnType = StackType::I4;
+    cond->AddArg(std::make_unique<LdLoc>(v));
+    auto gvo = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    gvo->DeclaringType = MakeNullableOf(KnownTypeCode::Int32);
+    gvo->IsInstanceCall = true;
+    gvo->ReturnType = StackType::I4;
+    gvo->AddArg(std::make_unique<LdLoc>(v));
+    auto toString = std::make_unique<Call>("System.Int32::ToString");
+    toString->IsInstanceCall = true;
+    toString->ReturnType = StackType::Void;
+    toString->AddArg(std::move(gvo));
+    BuildVoidCallShape(*fn, v, std::move(cond), std::move(toString));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunStatementTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& b0 = fn->Body->Blocks[0];
+    ASSERT_EQ(b0->FinalInstruction->Op, OpCode::Branch);
+    ASSERT_EQ(b0->Instructions.size(), 1u);
+    auto& rewrap = b0->Instructions[0];
+    ASSERT_EQ(rewrap->Op, OpCode::NullableRewrap);
+    auto* rw = static_cast<NullableRewrap*>(rewrap.get());
+    ASSERT_NE(rw->Argument, nullptr);
+    auto* rcall = static_cast<Call*>(rw->Argument.get());
+    ASSERT_FALSE(rcall->Arguments.empty());
+    EXPECT_EQ(rcall->Arguments[0]->Op, OpCode::NullableUnwrap);
+    auto* unwrap = static_cast<NullableUnwrap*>(rcall->Arguments[0].get());
+    EXPECT_TRUE(unwrap->RefInput) << "NullableByReference: refInput=true";
+}
+
+// An else arm (FalseInst != null) is not the `?.` void-call shape -- no fold.
+TEST(NullPropagationTransform, RunStatementsRejectsElseArm) {
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto fn = MakeTwoBlockFn({v});
+    auto cond = std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v), std::make_unique<LdNull>(),
+        ComparisonKind::Inequality);
+    auto call = std::make_unique<Call>("System.Object::ToString");
+    call->IsInstanceCall = true;
+    call->ReturnType = StackType::Void;
+    call->AddArg(std::make_unique<LdLoc>(v));
+    auto body = std::make_unique<Block>();
+    body->Add(std::move(call));
+    auto& b0 = fn->Body->Blocks[0];
+    b0->SetFinal(std::make_unique<IfInstruction>(
+        std::move(cond), std::move(body),
+        std::make_unique<Branch>(fn->Body->Blocks[1].get())));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunStatementTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+    // The if-final stays (the `?.` void-call pattern requires no else).
+    EXPECT_EQ(fn->Body->Blocks[0]->FinalInstruction->Op, OpCode::IfInstruction);
+}
+
+// A body Block with more than one instruction is not the `?.` void-call shape.
+TEST(NullPropagationTransform, RunStatementsRejectsMultiInstructionBlock) {
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto fn = MakeTwoBlockFn({v});
+    auto cond = std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v), std::make_unique<LdNull>(),
+        ComparisonKind::Inequality);
+    auto call1 = std::make_unique<Call>("System.Object::ToString");
+    call1->IsInstanceCall = true;
+    call1->ReturnType = StackType::Void;
+    call1->AddArg(std::make_unique<LdLoc>(v));
+    auto call2 = std::make_unique<Call>("System.Object::GetHashCode");
+    call2->IsInstanceCall = true;
+    call2->ReturnType = StackType::Void;
+    call2->AddArg(std::make_unique<LdLoc>(v));
+    auto body = std::make_unique<Block>();
+    body->Add(std::move(call1));
+    body->Add(std::move(call2));
+    auto& b0 = fn->Body->Blocks[0];
+    b0->SetFinal(std::make_unique<IfInstruction>(std::move(cond), std::move(body)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunStatementTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_EQ(fn->Body->Blocks[0]->FinalInstruction->Op, OpCode::IfInstruction);
+}
+
+// A non-Block TrueInst is not the `?.` void-call shape.
+TEST(NullPropagationTransform, RunStatementsRejectsNonBlockTrueInst) {
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto fn = MakeTwoBlockFn({v});
+    auto cond = std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v), std::make_unique<LdNull>(),
+        ComparisonKind::Inequality);
+    auto call = std::make_unique<Call>("System.Object::ToString");
+    call->IsInstanceCall = true;
+    call->ReturnType = StackType::Void;
+    call->AddArg(std::make_unique<LdLoc>(v));
+    // TrueInst is a bare Call (not a Block).
+    auto& b0 = fn->Body->Blocks[0];
+    b0->SetFinal(std::make_unique<IfInstruction>(std::move(cond), std::move(call)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunStatementTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_EQ(fn->Body->Blocks[0]->FinalInstruction->Op, OpCode::IfInstruction);
+}
+
+// The ReferenceType void-call requires Inequality (`v != null`), not Equality.
+TEST(NullPropagationTransform, RunStatementsRejectsEqualityCondition) {
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto fn = MakeTwoBlockFn({v});
+    auto cond = std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v), std::make_unique<LdNull>(),
+        ComparisonKind::Equality);
+    auto call = std::make_unique<Call>("System.Object::ToString");
+    call->IsInstanceCall = true;
+    call->ReturnType = StackType::Void;
+    call->AddArg(std::make_unique<LdLoc>(v));
+    BuildVoidCallShape(*fn, v, std::move(cond), std::move(call));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunStatementTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_EQ(fn->Body->Blocks[0]->FinalInstruction->Op, OpCode::IfInstruction);
+}
+
+// A body that is not an access chain on `testedVar` (e.g. a static call) -- no fold.
+TEST(NullPropagationTransform, RunStatementsRejectsNonAccessChainBody) {
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto fn = MakeTwoBlockFn({v});
+    auto cond = std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v), std::make_unique<LdNull>(),
+        ComparisonKind::Inequality);
+    // A static call (IsInstanceCall=false) is not a valid `?.` access chain.
+    auto call = std::make_unique<Call>("System.Console::WriteLine");
+    call->ReturnType = StackType::Void;
+    call->AddArg(std::make_unique<LdLoc>(v));
+    BuildVoidCallShape(*fn, v, std::move(cond), std::move(call));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunStatementTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_EQ(fn->Body->Blocks[0]->FinalInstruction->Op, OpCode::IfInstruction);
+}
+
+// A NullableRewrap-wrapped body is unwrapped before the access chain analysis
+// (the C# `bodyInst.MatchNullableRewrap`), then folded.
+TEST(NullPropagationTransform, RunStatementsUnwrapsNullableRewrapFromBody) {
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto fn = MakeTwoBlockFn({v});
+    auto cond = std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v), std::make_unique<LdNull>(),
+        ComparisonKind::Inequality);
+    auto call = std::make_unique<Call>("System.Object::ToString");
+    call->IsInstanceCall = true;
+    call->ReturnType = StackType::Void;
+    call->AddArg(std::make_unique<LdLoc>(v));
+    auto rewrap = std::make_unique<NullableRewrap>(std::move(call));
+    BuildVoidCallShape(*fn, v, std::move(cond), std::move(rewrap));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunStatementTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+    auto& b0 = fn->Body->Blocks[0];
+    ASSERT_EQ(b0->FinalInstruction->Op, OpCode::Branch);
+    ASSERT_EQ(b0->Instructions.size(), 1u);
+    EXPECT_EQ(b0->Instructions[0]->Op, OpCode::NullableRewrap);
+    auto* rw = static_cast<NullableRewrap*>(b0->Instructions[0].get());
+    ASSERT_NE(rw->Argument, nullptr);
+    EXPECT_EQ(rw->Argument->Op, OpCode::Call) << "the inner NullableRewrap was stripped";
+}
+
 // --- mscorlib sweep ---
 
 TEST(NullPropagationTransform, MscorlibSweepPreservesInvariant) {
@@ -760,6 +1069,8 @@ TEST(NullPropagationTransform, MscorlibSweepPreservesInvariant) {
             StatementTransform st;
             st.AddChild(std::make_unique<ILInlining>());
             st.AddChild(std::make_unique<ExpressionTransforms>());
+            st.AddChild(std::make_unique<NullCoalescingTransform>());
+            st.AddChild(std::make_unique<NullPropagationStatementTransform>());
             st.Run(*fn, ctx);
         }
         fn->CheckInvariant(ILPhase::Normal);

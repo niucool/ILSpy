@@ -40,9 +40,11 @@
 // condition), and the NullableByReference mode (`call get_HasValue(ldloc v)`
 // condition), each with the `ldnull` and `default(Nullable<T>)` output cases
 // (the `NullCoalescing` output case needs InferType /
-// NullableType.IsNonNullableValueType, deferred). The UnconstrainedType mode and
-// RunStatements are deferred (the latter needs the block-model adaptation of the
-// void-call if/Block shape and the unconstrained-generic pattern).
+// NullableType.IsNonNullableValueType, deferred). The void-call subset of
+// RunStatements is ported via `NullPropagationStatementTransform` (the `?.`
+// statement form). The UnconstrainedType mode and the
+// TransformNullPropagationOnUnconstrainedGenericExpression pattern are deferred
+// (the latter needs a 5-instruction block-model sequence + a corpus probe).
 //
 // The access chain analysis (IsValidAccessChain) is approximated for the
 // Call case: this port's Call carries no IsStatic / IsExtensionMethod /
@@ -54,6 +56,8 @@
 // LdFlda / LdLen / LdElema / NullableUnwrap cases are faithfully matched.
 
 #pragma once
+
+#include "Decompiler/IL/Transforms/StatementTransform.hpp"
 
 #include <memory>
 
@@ -99,6 +103,22 @@ public:
     static std::unique_ptr<ILInstruction> Run(ILInstruction* condition,
                                                ILInstruction* trueInst,
                                                ILInstruction* falseInst);
+};
+
+// Port of NullPropagationStatementTransform (the C# IStatementTransform child of
+// StatementTransform that calls NullPropagationTransform.RunStatements). This
+// ports the void-call subset of RunStatements: `if (testedVar != null) {
+// testedVar.AccessChain(); }` folds into `testedVar?.AccessChain();` (a void
+// NullableRewrap, the `?.` statement form). The if is the block's
+// FinalInstruction (this port's if-as-final model), the TrueInst is a Block with
+// exactly one instruction (the void call), and the FalseInst is null (no else).
+// The UnconstrainedType mode and the
+// TransformNullPropagationOnUnconstrainedGenericExpression pattern are
+// deferred (the latter needs a 5-instruction block-model sequence + a corpus
+// probe). Gated on the NullPropagation setting.
+class NullPropagationStatementTransform : public IStatementTransform {
+public:
+    void Run(Block& block, int pos, StatementTransformContext& context) override;
 };
 
 } // namespace ILSpy::Decompiler::IL

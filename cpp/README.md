@@ -823,17 +823,29 @@ implemented and green here. Everything else follows the phase plan in
   (the latter via the D93 MatchNull helper, the faithful equivalent of the C#
   `MatchDefaultValue + IsKnownType(NullableOfT)`); the `NullCoalescing` output
   case (needs InferType / NullableType.IsNonNullableValueType / IsByRefLike), the
-  UnconstrainedType mode (RunStatements only), and `RunStatements` (the void-call
-  and unconstrained-generic patterns) are deferred. The `?.` lowering (all modes)
-  is a Roslyn-era (C# 6.0) codegen pattern that fires 0 times on the .NET
+  UnconstrainedType mode (RunStatements only), and the
+  `TransformNullPropagationOnUnconstrainedGenericExpression` pattern (a
+  5-instruction block sequence) are deferred. The void-call subset of
+  `RunStatements` is now ported via `NullPropagationStatementTransform` (an
+  IStatementTransform child of StatementTransform): `if (testedVar != null) {
+  testedVar.AccessChain(); }` folds into `testedVar?.AccessChain();` (a void
+  NullableRewrap, the `?.` statement form) for all three modes (ReferenceType /
+  NullableByValue / NullableByReference). The if is the block's FinalInstruction
+  (this port's if-as-final model); the TrueInst is a Block with one instruction,
+  the FalseInst is null (no else); the if-final is replaced with the void
+  NullableRewrap as a non-terminal + a Branch to the next block (the
+  fall-through). A NullableRewrap wrapper on the body instruction is stripped
+  before the access chain analysis (the C# `bodyInst.MatchNullableRewrap`),
+  and the stripped inner instruction is detached from the NullableRewrap (not
+  the body Block) before the if is destroyed (no GC). The `?.` lowering (all
+  modes) is a Roslyn-era (C# 6.0) codegen pattern that fires 0 times on the .NET
   Framework 4 legacy-csc mscorlib corpus, so the sweep asserts the ILAst
   invariant holds (not a fold count), matching the DetectCatchWhenConditionBlocks /
-  LdLocaDupInitObj precedent. 37 of ~40 transforms ported.
+  LdLocaDupInitObj precedent. 38 of ~40 transforms ported.
   The remaining `Run(IfInstruction)` paths (the LiftCSharpUserComparison rest
   of LiftNormal [needs the Call-operator case], NullPropagation's remaining
-  modes [UnconstrainedType + RunStatements + the NullCoalescing output case]) and
-  the `RunStatements(Block, int)` block transform are the subsequent
-  in-order targets.
+  modes [UnconstrainedType + the NullCoalescing output case + the
+  unconstrained-generic pattern]) are the subsequent in-order targets.
   `NullableRewrap` / `NullableUnwrap` (Instructions/, a tested-but-not-yet-wired
   foundation ported from NullableInstructions.cs) are the ILAst nodes for the C#
   null-conditional (`?.`) operator -- the next in-order transform
