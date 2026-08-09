@@ -89,7 +89,7 @@ implemented and green here. Everything else follows the phase plan in
   `RemoveDeadStores` setting, with no loads or addresses, has its stores dropped
   (a pure value goes with the store; an impure value is unwrapped so its side
   effect survives), and dead-copy chains collapse via a recompute fixpoint.
-  19 of ~40 transforms ported. The switch-detection family is now complete in
+  20 of ~40 transforms ported. The switch-detection family is now complete in
   its core: `LongSet`/`LongInterval` (Util/, ported from LongSet.cs /
   Interval.cs) -- an immutable interval-set of longs whose complement is
   representable (unlike `std::set<int64_t>`) -- backs `SwitchSection::Labels`
@@ -168,24 +168,43 @@ implemented and green here. Everything else follows the phase plan in
   TupleType). No pipeline transform constructs MatchInstructions yet, so
   `--csharp` output is unchanged; the seed's MatchInstruction case is exercised
   by the unit tests, not the corpus.
+  `PatternMatchingTransform` (Transforms/, ported from
+  PatternMatchingTransform.cs) detects the C# 7.0 `is` patterns the Roslyn
+  compiler emits for `expr is T x` (a type test plus a variable capture) and
+  rewrites the isinst + null-test block tail into a single MatchInstruction
+  condition. Two shapes: `PatternMatchValueTypes` folds `if (isinst T(x) ==
+  null) br falseBlock; br unboxBlock` (where unboxBlock is `stloc V(unbox.any
+  T(x))`) into `if (match.type[T].notnull(V = x)) br unboxBlock; br falseBlock`,
+  and `PatternMatchRefTypes` folds `stloc V(isinst T(x)); if (V == null) br
+  falseBlock; br trueBlock` into `if (match.type[T].notnull(V = x)) br
+  trueBlock; br falseBlock`. The `== null` / logic.not direction swaps the two
+  arms; the double-store form (`stloc s(isinst); stloc v(ldloc s); if (!
+  comp(s != null)) ...`) and the boxed-generic form (`isinst T(box U(x))`) are
+  handled. Adapted to the if-as-final block model (the if is the block's
+  FinalInstruction; the false arm is the next block in the container), so the
+  arm swap tracks the two target blocks and keeps the null path positional
+  when it is the fall-through, materialising an explicit FalseInst otherwise.
+  `CheckAllUsesDominatedBy` is implemented with a tree walk (collect every use
+  of the variable) rather than the C#'s per-variable load/store lists. Gated on
+  `PatternMatching` (default true); the capture variable becomes a
+  `PatternLocal`. The recursive property sub-patterns (`expr is C { P: var x }`,
+  which need `DetectExitPoints.CompatibleExitInstruction` and `PropertyOrFieldAccess`/
+  IMember) are deferred -- the top-level `is T` / `is T x` is produced without them.
   The CLI applies CFS + StObjToStLoc + ILInlining + InlineReturnTransform +
   RemoveInfeasiblePath + DetectPinnedRegions + DetectCatchWhenConditionBlocks +
   LdLocaDupInitObjTransform + EarlyExpressionTransforms + RemoveDeadVariableInit +
-  CFS + SwitchDetection + SwitchOnNullable + LoopDetection + ConditionDetection +
-  AssignVariableNames + RemoveRedundantReturn before the C# seed, so `fixed (...)
-  { ... }`, `default(T)`, reconstructed `switch` statements, and switch-on-
-  nullable `case null:` arms now appear in the output. 19 of ~40 transforms
-  ported (the MatchInstruction `is`-pattern node is now ported as a tested-
-  but-not-yet-wired foundation for the next in-order PatternMatchingTransform).
+  CFS + SwitchDetection + SwitchOnNullable + LoopDetection + PatternMatching +
+  ConditionDetection + AssignVariableNames + RemoveRedundantReturn before the
+  C# seed, so `fixed (...) { ... }`, `default(T)`, reconstructed `switch`
+  statements, switch-on-nullable `case null:` arms, and `is T x` patterns now
+  appear in the output. 20 of ~40 transforms ported.
   Next per `GetILTransforms()`:
-  PatternMatchingTransform (the MatchInstruction node + IsPatternMatch helper
-  are in place; still needs `MatchIfAtEndOfBlock`, per-variable load/store
-  instruction lists for `CheckAllUsesDominatedBy`, and
-  `DetectExitPoints.CompatibleExitInstruction`),
   the async/iterator state machines
   (YieldReturnDecompiler/AsyncAwaitDecompiler), SplitVariables (needs
   reaching-definitions dataflow),
   DetectExitPoints + the full ConditionDetection (multi-pred join blocks),
+  the PatternMatchingTransform recursive sub-patterns (DetectPropertySubPatterns /
+  PropertyOrFieldAccess / CompatibleExitInstruction),
   HighLevelLoopTransform (while/for),
   TransformAssignment, ...
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text

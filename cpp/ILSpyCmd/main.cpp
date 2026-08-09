@@ -35,6 +35,7 @@
 #include "Decompiler/IL/Transforms/RemoveInfeasiblePathTransform.hpp"
 #include "Decompiler/IL/Transforms/StObjToStLoc.hpp"
 #include "Decompiler/IL/Transforms/SwitchOnNullableTransform.hpp"
+#include "Decompiler/IL/Transforms/PatternMatchingTransform.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
 #include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
@@ -255,6 +256,15 @@ int main(int argc, char** argv) {
                 // positional fall-through. Gated on LiftNullables (default true).
                 ILSpy::Decompiler::IL::SwitchOnNullableTransform().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::LoopDetection().Run(*fn, transformContext);
+                // PatternMatching: detect the C# 7.0 `is` patterns Roslyn emits
+                // (a type test plus a variable capture) and rewrite the isinst +
+                // null-test block tail into a single MatchInstruction condition
+                // (`if (expr is T x) ...`). Runs after LoopDetection and before
+                // ConditionDetection (per GetILTransforms()), so ifs are still
+                // block finals with positional fall-through. Gated on the
+                // PatternMatching setting (default true). The recursive property
+                // sub-patterns (`expr is C { P: var x }`) are deferred.
+                ILSpy::Decompiler::IL::PatternMatchingTransform().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::ConditionDetection().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::AssignVariableNames().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::RemoveRedundantReturn().Run(*fn, transformContext);

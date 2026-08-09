@@ -29,4 +29,5 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/HighLevelLoopTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/NullableLiftingTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/SwitchOnNullableTransform.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/PatternMatchingTransform.cpp
 )
