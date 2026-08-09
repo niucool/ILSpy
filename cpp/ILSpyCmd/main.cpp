@@ -30,6 +30,7 @@
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Transforms/InlineReturnTransform.hpp"
+#include "Decompiler/IL/Transforms/StObjToStLoc.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/Metadata/ILTextEmitter.hpp"
@@ -190,6 +191,7 @@ int main(int argc, char** argv) {
                 if (!fn) continue;
                 ILSpy::Decompiler::IL::ILTransformContext transformContext;
                 ILSpy::Decompiler::IL::ControlFlowSimplification().Run(*fn, transformContext);
+                ILSpy::Decompiler::IL::StObjToStLoc().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::ILInlining().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::InlineReturnTransform().Run(*fn, transformContext);
                 // Re-run CFS so the duplicated 1-pred return blocks merge and
