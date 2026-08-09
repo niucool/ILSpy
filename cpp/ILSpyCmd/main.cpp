@@ -201,12 +201,16 @@ int main(int argc, char** argv) {
                 if (auto sig = file.GetMethodSignature(m.Token)) {
                     if (sig->ReturnType && sig->ReturnType->ReflectionName() != "System.Void")
                         returnType = sig->ReturnType->ReflectionName();
+                    auto paramNames = file.GetParameterNames(m.Token);
                     int base_ = sig->IsInstance ? 1 : 0;
                     for (std::size_t i = 0; i < sig->ParameterTypes.size(); ++i) {
                         if (i) paramDecl += ", ";
                         paramDecl += sig->ParameterTypes[i]->ReflectionName();
-                        paramDecl += " arg_";
-                        paramDecl += std::to_string(base_ + static_cast<int>(i));
+                        paramDecl += ' ';
+                        if (i < paramNames.size() && !paramNames[i].empty())
+                            paramDecl += paramNames[i];
+                        else
+                            paramDecl += "arg_" + std::to_string(base_ + static_cast<int>(i));
                     }
                 }
                 std::cout << "// " << t.Namespace << "." << t.Name << "\n"

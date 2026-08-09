@@ -99,6 +99,31 @@ TEST(ReadIL, DecodesBranchingMethodBodies) {
     EXPECT_TRUE(sawResolvedBranch) << "no branch target resolved to a Block";
 }
 
+TEST(ReadIL, UsesMetadataParameterNames) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    int namedParams = 0;
+    int checked = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++checked;
+        for (auto& v : fn->Variables) {
+            if (v && v->Kind == VariableKind::Parameter) {
+                // A real metadata name is not the "arg_N" fallback and not "this".
+                if (v->Name != "this" && v->Name.rfind("arg_", 0) != 0 && !v->Name.empty())
+                    ++namedParams;
+            }
+        }
+        if (checked > 3000) break;
+    }
+    EXPECT_GT(namedParams, 0) << "no parameter picked up a metadata name";
+}
+
 TEST(ReadIL, DecodesObjectEqualsWhichStraightLineRejects) {
     // System.Object has several Equals overloads; find one the straight-line reader
     // rejects (it has branches) and confirm ReadIL decodes it (multi-block, with

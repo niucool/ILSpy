@@ -130,6 +130,12 @@ public:
     std::vector<FieldInfo> GetFields(std::uint32_t typeToken) const;
     std::vector<PropertyInfo> GetProperties(std::uint32_t typeToken) const;
 
+    // Parameter names from the Param table for a MethodDef token (table 0x06).
+    // Index 0 is the first declared parameter (after any implicit `this`); the
+    // vector may be shorter than the parameter count or hold empty strings for
+    // parameters that have no Param row.
+    std::vector<std::string> GetParameterNames(std::uint32_t methodToken) const;
+
     // Decode the field type of a Field row (by token). Returns nullptr if the
     // token is out of range or the signature is malformed; never throws.
     ILSpy::Decompiler::TypeSystem::ITypePtr GetFieldSignature(std::uint32_t fieldToken) const;

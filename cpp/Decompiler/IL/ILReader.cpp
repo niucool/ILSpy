@@ -240,7 +240,8 @@ bool ReadBranchTarget(const std::uint8_t* b, std::size_t size, std::size_t& pos,
     return true;
 }
 
-void InitParameters(ReaderState& s, const MethodSignature& sig) {
+void InitParameters(ReaderState& s, const MethodSignature& sig,
+                   const std::vector<std::string>& names) {
     int first = sig.IsInstance ? 1 : 0;
     int n = static_cast<int>(sig.ParameterTypes.size()) + first;
     s.parameters.resize(n);
@@ -254,14 +255,19 @@ void InitParameters(ReaderState& s, const MethodSignature& sig) {
         s.parameters[0] = v;
         idx = 1;
     }
+    int paramIdx = 0;  // index among the declared (non-this) parameters
     for (const auto& t : sig.ParameterTypes) {
         auto v = std::make_shared<ILVariable>();
-        v->Name = "arg_" + std::to_string(idx);
+        if (paramIdx < static_cast<int>(names.size()) && !names[paramIdx].empty())
+            v->Name = names[paramIdx];
+        else
+            v->Name = "arg_" + std::to_string(idx);
         v->Kind = VariableKind::Parameter;
         v->Type = t;
         v->Index = idx;
         s.parameters[idx] = v;
         ++idx;
+        ++paramIdx;
     }
 }
 
@@ -1146,7 +1152,7 @@ std::unique_ptr<ILFunction> ReadStraightLineIL(const MetadataFile& file,
     const auto& sig = *sigOpt;
 
     ReaderState s;
-    InitParameters(s, sig);
+    InitParameters(s, sig, file.GetParameterNames(methodToken));
     s.returnStackType = ReturnStackTypeOf(sig.ReturnType);
 
     auto fn = std::make_unique<ILFunction>();
@@ -1198,7 +1204,7 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
     const auto& sig = *sigOpt;
 
     ReaderState s;
-    InitParameters(s, sig);
+    InitParameters(s, sig, file.GetParameterNames(methodToken));
     s.returnStackType = ReturnStackTypeOf(sig.ReturnType);
 
     const auto* b = body.IL().data();

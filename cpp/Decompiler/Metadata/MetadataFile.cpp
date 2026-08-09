@@ -414,4 +414,31 @@ ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::ResolveTypeToken(std::uint
     return nullptr;
 }
 
+std::vector<std::string> MetadataFile::GetParameterNames(std::uint32_t methodToken) const {
+    std::vector<std::string> result;
+    if (!IsValid()) return result;
+    std::uint32_t table = methodToken >> 24;
+    std::uint32_t row = methodToken & 0x00FFFFFFu;
+    if (table != 0x06 || row == 0 || row > impl_->db->MethodDef.size()) return result;
+    try {
+        auto m = impl_->db->MethodDef[row - 1];
+        // ParamList is a (first, last) iterator pair into the Param table. A
+        // row with Sequence 0 describes the return value; rows with Sequence
+        // >= 1 name the declared parameters (the implicit `this` is absent).
+        auto range = m.ParamList();
+        for (auto it = range.first; it != range.second; ++it) {
+            auto p = *it;
+            std::uint16_t seq = p.Sequence();
+            if (seq == 0) continue;
+            std::string name{ p.Name() };
+            if (name.empty()) continue;
+            if (result.size() < seq) result.resize(seq);
+            result[seq - 1] = std::move(name);
+        }
+    } catch (const std::exception&) {
+        // Best-effort: a malformed Param row leaves the result short.
+    }
+    return result;
+}
+
 } // namespace ILSpy::Decompiler::Metadata
