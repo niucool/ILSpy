@@ -582,6 +582,18 @@ private:
                 return "(" + targetType + ")(" +
                        (call.Arguments[0] ? Expr(*call.Arguments[0]) : std::string("(default)")) + ")";
             }
+            // A static property accessor: Type.get_X() -> Type.X ;
+            // Type.set_X(value) -> not common (C# set_ is instance); skip.
+            if (call.Arguments.size() <= 1) {
+                std::string prop = AccessorPropertyName(call.MethodName);
+                if (!prop.empty()) {
+                    auto pos = call.MethodName.rfind("::");
+                    std::string_view type = (pos != std::string_view::npos)
+                        ? std::string_view(call.MethodName).substr(0, pos) : std::string_view{};
+                    auto dot = type.rfind('.');
+                    return std::string(dot != std::string_view::npos ? type.substr(dot + 1) : type) + "." + prop;
+                }
+            }
             // A static unary operator: op_UnaryNegation(a) -> (-a), etc.
             if (call.Arguments.size() == 1) {
                 if (const char* sym = UnaryOperatorSymbol(call.MethodName)) {
@@ -626,13 +638,44 @@ private:
         return pos != std::string_view::npos ? std::string(full.substr(pos + 2)) : std::string(full);
     }
 
+    // The property name for a get_/set_ accessor method, or "" if not an
+    // accessor. `get_Major` -> `Major`, `set_Value` -> `Value`.
+    static std::string AccessorPropertyName(std::string_view full) {
+        auto pos = full.rfind("::");
+        std::string_view member = (pos != std::string_view::npos) ? full.substr(pos + 2) : full;
+        if (member.size() > 4 && member.substr(0, 4) == "get_")
+            return std::string(member.substr(4));
+        if (member.size() > 4 && member.substr(0, 4) == "set_")
+            return std::string(member.substr(4));
+        return std::string{};
+    }
+
     // An instance call (call/callvirt, not newobj) renders as
     // `receiver.Method(restArgs)`; the receiver is Arguments[0]. A ref/deref
     // receiver (`&V`, `*(&V)`) is parenthesized so the member access binds.
-    // Static calls and newobj go through CallText.
+    // Static calls and newobj go through CallText. A property accessor
+    // (get_X with 0 extra args / set_X with 1 extra arg) renders as
+    // `receiver.X` / `receiver.X = value`.
     std::string InstanceCallText(const Call& call) {
         if (call.Arguments.empty() || !call.Arguments[0])
             return CallText(call);
+        // Property accessor: get_X(receiver) -> receiver.X ;
+        // set_X(receiver, value) -> receiver.X = value.
+        std::string prop = AccessorPropertyName(call.MethodName);
+        if (!prop.empty()) {
+            std::string recv = Expr(*call.Arguments[0]);
+            bool needsParens = !recv.empty() && (recv[0] == '&' || recv[0] == '*');
+            std::string target = (needsParens ? "(" + recv + ")" : recv) + "." + prop;
+            if (call.MethodName.size() >= 4) {
+                auto pos = call.MethodName.rfind("::");
+                std::string_view member = (pos != std::string_view::npos)
+                    ? std::string_view(call.MethodName).substr(pos + 2) : std::string_view(call.MethodName);
+                if (member.substr(0, 4) == "set_" && call.Arguments.size() >= 2) {
+                    return target + " = " + (call.Arguments[1] ? Expr(*call.Arguments[1]) : std::string("(default)"));
+                }
+            }
+            return target;
+        }
         std::string recv = Expr(*call.Arguments[0]);
         // A ref/deref receiver renders with a leading `&` or `*`, which binds
         // looser than `.` -- parenthesize so the member access wins. An array
