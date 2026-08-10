@@ -53,16 +53,19 @@
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
 #include "Decompiler/IL/ControlFlow/ControlFlowSimplification.hpp"
 #include "Decompiler/IL/ControlFlow/LoopDetection.hpp"
@@ -85,6 +88,7 @@ using namespace ILSpy::Decompiler::IL;
 using ILSpy::Decompiler::TypeSystem::ITypePtr;
 using ILSpy::Decompiler::TypeSystem::KnownType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+using ILSpy::Decompiler::TypeSystem::ParameterizedType;
 using ILSpy::Decompiler::Metadata::MetadataFile;
 
 namespace {
@@ -194,7 +198,307 @@ int CountNullCoalescing(ILFunction& fn) {
     return n;
 }
 
+// Nullable<T> as a generic instantiation: ParameterizedType(KnownType(NullableOfT), {T}).
+ITypePtr MakeNullableOf(KnownTypeCode underlying) {
+    std::vector<ITypePtr> args;
+    args.push_back(std::make_shared<KnownType>(underlying));
+    return std::make_shared<ParameterizedType>(
+        std::make_shared<KnownType>(KnownTypeCode::NullableOfT), std::move(args));
+}
+
+// A `call get_HasValue(arg)` on Nullable<T>.
+std::unique_ptr<Call> MakeHasValueCall(ITypePtr declaringType,
+                                      std::unique_ptr<ILInstruction> arg) {
+    auto call = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    call->DeclaringType = std::move(declaringType);
+    call->AddArg(std::move(arg));
+    return call;
+}
+
+// A `call GetValueOrDefault(arg)` on Nullable<T>.
+std::unique_ptr<Call> MakeGetValueOrDefaultCall(ITypePtr declaringType,
+                                               std::unique_ptr<ILInstruction> arg) {
+    auto call = std::make_unique<Call>("System.Nullable`1::GetValueOrDefault");
+    call->DeclaringType = std::move(declaringType);
+    call->AddArg(std::move(arg));
+    return call;
+}
+
 } // namespace
+
+// Build the POST-ConditionDetection value-types throw-expression shape directly
+// (the probed shape this port's ConditionDetection produces by inverting the
+// early-exit pattern), so the test exercises the transform on the exact shape
+// it sees in the pipeline without depending on the pre-pipeline:
+//   block0 (P): [stloc v(value)], Final = if (call get_HasValue(ldloca v))
+//                 { Block { use(call GetValueOrDefault(ldloca v)); leave } }
+//                 (FalseInst null, fall-through to throwBlock)
+//   block1 (throwBlock): Final = throw(arg)
+// `withUse` false omits the use (to test the no-use reject); `gvoVar` overrides
+// the GetValueOrDefault's variable (to test the wrong-variable reject);
+// `elseArm` adds a FalseInst (to test the no-else guard); `throwArg` overrides
+// the throw's argument.
+struct VTSetup {
+    std::unique_ptr<ILFunction> fn;
+    ILVariablePtr v, a, exc;
+    Block* P = nullptr;
+    Block* throwBlock = nullptr;
+};
+
+VTSetup BuildValueTypesThrowShape(bool withUse = true, ILVariablePtr gvoVar = nullptr,
+                                  bool elseArm = false,
+                                  std::unique_ptr<ILInstruction> throwArg = nullptr) {
+    VTSetup s;
+    auto nullableInt = MakeNullableOf(KnownTypeCode::Int32);
+    s.v = MakeLocal("v", nullableInt);
+    s.a = MakeLocal("a", nullableInt);
+    s.exc = MakeLocal("exc", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Variables.push_back(s.v);
+    fn->Variables.push_back(s.a);
+    fn->Variables.push_back(s.exc);
+
+    // throwBlock: Final = throw(arg)
+    auto throwBlock = std::make_unique<Block>();
+    throwBlock->StartILOffset = 0x60;
+    Block* throwPtr = throwBlock.get();
+    if (!throwArg) throwArg = std::make_unique<LdLoc>(s.exc);
+    throwBlock->SetFinal(std::make_unique<Throw>(std::move(throwArg)));
+
+    // block0 (P): [stloc v(ldloc a)], Final = if (HV(ldloca v)) { Block { use; leave } } [else]
+    auto P = std::make_unique<Block>();
+    P->StartILOffset = 0x00;
+    P->Add(std::make_unique<StLoc>(s.v, std::make_unique<LdLoc>(s.a)));
+    auto cond = MakeHasValueCall(nullableInt, std::make_unique<LdLoca>(s.v));
+    auto trueBlock = std::make_unique<Block>();
+    if (withUse) {
+        auto outer = std::make_unique<Call>("System.Outer::M");
+        ILVariablePtr gvoV = gvoVar ? gvoVar : s.v;
+        outer->AddArg(MakeGetValueOrDefaultCall(nullableInt, std::make_unique<LdLoca>(gvoV)));
+        outer->ReturnType = StackType::I4;
+        trueBlock->Add(std::move(outer));
+    }
+    trueBlock->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    std::unique_ptr<ILInstruction> falseInst = nullptr;
+    if (elseArm) {
+        auto elseBlk = std::make_unique<Block>();
+        elseBlk->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+        falseInst = std::move(elseBlk);
+    }
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(trueBlock),
+                                                std::move(falseInst));
+    P->SetFinal(std::move(iff));
+    s.P = P.get();
+    s.throwBlock = throwPtr;
+
+    fn->Body->AddBlock(std::move(P));
+    fn->Body->AddBlock(std::move(throwBlock));
+    fn->CheckInvariant(ILPhase::Normal);
+    s.fn = std::move(fn);
+    return s;
+}
+
+// TransformThrowExpressionValueTypes positive: `stloc v(value);
+// if (v.HasValue) { call Outer(call GetValueOrDefault(ldloca v)); leave }` with
+// fall-through to `throw(exc)` folds into `call Outer(if.notnull(value, throw))`
+// followed by the leave. The stloc and if are removed; the use (now wrapping
+// the NullCoalescingInstruction) is inlined back into the host block; the throw
+// block is left dead with a Leave placeholder final.
+TEST(NullCoalescingTransform, ThrowExpressionValueTypesFoldsToNullCoalescing) {
+    auto s = BuildValueTypesThrowShape();
+    ASSERT_EQ(CountNullCoalescing(*s.fn), 0);
+
+    RunNullCoalescingTransform(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*s.fn), 1)
+        << "the value-types throw-expression fold must produce one "
+           "NullCoalescingInstruction";
+    // The host block now holds the use (call Outer(nc)) and a leave final; the
+    // stloc and if are gone.
+    auto& P = s.fn->Body->Blocks[0];
+    ASSERT_EQ(P->Instructions.size(), 1u)
+        << "the host block must hold the inlined use";
+    ASSERT_EQ(P->Instructions[0]->Op, OpCode::Call)
+        << "the inlined use is the outer call";
+    auto* outer = static_cast<Call*>(P->Instructions[0].get());
+    ASSERT_EQ(outer->Arguments.size(), 1u);
+    ASSERT_EQ(outer->Arguments[0]->Op, OpCode::NullCoalescingInstruction);
+    auto* nc = static_cast<NullCoalescingInstruction*>(outer->Arguments[0].get());
+    EXPECT_EQ(nc->Kind, NullCoalescingKind::NullableWithValueFallback);
+    EXPECT_EQ(nc->UnderlyingResultType, StackType::I4)
+        << "UnderlyingResultType is the Nullable<int> underlying stack type (I4)";
+    EXPECT_EQ(nc->ValueInst->Op, OpCode::LdLoc)
+        << "ValueInst is the original value (ldloc a)";
+    EXPECT_EQ(static_cast<LdLoc*>(nc->ValueInst.get())->Variable.get(), s.a.get());
+    ASSERT_EQ(nc->FallbackInst->Op, OpCode::Throw)
+        << "FallbackInst is the Throw";
+    auto* th = static_cast<Throw*>(nc->FallbackInst.get());
+    EXPECT_EQ(th->resultType, StackType::I4)
+        << "the Throw's resultType is mutated to the underlying stack type (I4)";
+    EXPECT_EQ(nc->ResultType(), StackType::I4)
+        << "the NullCoalescingInstruction's ResultType is I4 (the FallbackInst's)";
+    ASSERT_EQ(th->Argument->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(th->Argument.get())->Variable.get(), s.exc.get())
+        << "the Throw's argument is the original throw argument (ldloc exc)";
+    ASSERT_EQ(P->FinalInstruction->Op, OpCode::Leave)
+        << "the host block's final is the inlined leave (the function return)";
+    // The throw block is now dead (unreachable) with a Leave placeholder final.
+    auto& throwBlk = s.fn->Body->Blocks[1];
+    EXPECT_EQ(throwBlk->Instructions.size(), 0u);
+    EXPECT_EQ(throwBlk->FinalInstruction->Op, OpCode::Leave)
+        << "the throw block is left with a Leave placeholder final";
+}
+
+// The fold fires through the full pre-pipeline: build the pre-ConditionDetection
+// reader shape (if (comp(eq, HV, 0)) br THROW with fall-through to the use
+// block), run the pre-pipeline (ConditionDetection inverts it), then run
+// NullCoalescingTransform and verify the fold fires.
+TEST(NullCoalescingTransform, ThrowExpressionValueTypesFoldsThroughPrePipeline) {
+    auto nullableInt = MakeNullableOf(KnownTypeCode::Int32);
+    auto v = MakeLocal("v", nullableInt);
+    auto a = MakeLocal("a", nullableInt);
+    auto exc = MakeLocal("exc", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(a);
+    fn->Variables.push_back(exc);
+
+    auto throwBlock = std::make_unique<Block>();
+    throwBlock->StartILOffset = 0x60;
+    Block* throwPtr = throwBlock.get();
+    throwBlock->SetFinal(std::make_unique<Throw>(std::make_unique<LdLoc>(exc)));
+
+    auto P = std::make_unique<Block>();
+    P->StartILOffset = 0x00;
+    P->Add(std::make_unique<StLoc>(v, std::make_unique<LdLoc>(a)));
+    auto cond = std::make_unique<Comp>(MakeHasValueCall(nullableInt, std::make_unique<LdLoca>(v)),
+                                        std::make_unique<LdcI4>(0),
+                                        ComparisonKind::Equality);
+    auto iff = std::make_unique<IfInstruction>(std::move(cond),
+                                               std::make_unique<Branch>(throwPtr));
+    P->SetFinal(std::move(iff));
+    auto useBlock = std::make_unique<Block>();
+    useBlock->StartILOffset = 0x30;
+    auto outer = std::make_unique<Call>("System.Outer::M");
+    outer->AddArg(MakeGetValueOrDefaultCall(nullableInt, std::make_unique<LdLoca>(v)));
+    outer->ReturnType = StackType::I4;
+    useBlock->Add(std::move(outer));
+    useBlock->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+
+    fn->Body->AddBlock(std::move(P));
+    fn->Body->AddBlock(std::move(useBlock));
+    fn->Body->AddBlock(std::move(throwBlock));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ILTransformContext ctx;
+    RunPrePipeline(*fn, ctx);  // ConditionDetection inverts the early-exit pattern
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountNullCoalescing(*fn), 0);
+
+    RunNullCoalescingTransform(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*fn), 1)
+        << "the fold must fire on the post-ConditionDetection (inverted) shape";
+}
+
+// Rejects when the condition is not a HasValue call (a plain comp) --
+// MatchHasValueCall fails.
+TEST(NullCoalescingTransform, ThrowExpressionValueTypesRejectsNonHasValueCondition) {
+    auto s = BuildValueTypesThrowShape();
+    auto* iff = static_cast<IfInstruction*>(s.P->FinalInstruction.get());
+    auto newCond = std::make_unique<Comp>(std::make_unique<LdLoc>(s.v),
+                                          std::make_unique<LdNull>(),
+                                          ComparisonKind::Equality);
+    iff->Condition = std::move(newCond);
+    iff->Condition->Parent = iff;
+    iff->Condition->ChildIndex = 0;
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    RunNullCoalescingTransform(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*s.fn), 0)
+        << "a non-HasValue condition must not fold";
+}
+
+// Rejects when the TrueInst is not a Block (a bare instruction, not the
+// inlined use Block ConditionDetection produces).
+TEST(NullCoalescingTransform, ThrowExpressionValueTypesRejectsNonBlockTrueInst) {
+    auto s = BuildValueTypesThrowShape();
+    auto* iff = static_cast<IfInstruction*>(s.P->FinalInstruction.get());
+    iff->TrueInst = std::make_unique<LdLoc>(s.a);
+    iff->TrueInst->Parent = iff;
+    iff->TrueInst->ChildIndex = 1;
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    RunNullCoalescingTransform(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*s.fn), 0)
+        << "a non-Block TrueInst must not fold";
+}
+
+// Rejects when the if has an else arm (FalseInst != nullptr) -- the throw-
+// expression pattern's throw is the fall-through (no else).
+TEST(NullCoalescingTransform, ThrowExpressionValueTypesRejectsElseArm) {
+    auto s = BuildValueTypesThrowShape(/*withUse=*/true, /*gvoVar=*/nullptr, /*elseArm=*/true);
+    RunNullCoalescingTransform(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*s.fn), 0)
+        << "an if with an else arm must not fold";
+}
+
+// Rejects when the use's load is not a GetValueOrDefault on v (a different
+// variable's ldloca inside the use).
+TEST(NullCoalescingTransform, ThrowExpressionValueTypesRejectsWrongGvoVariable) {
+    auto other = MakeLocal("other", MakeNullableOf(KnownTypeCode::Int32));
+    auto s = BuildValueTypesThrowShape(/*withUse=*/true, /*gvoVar=*/other);
+    s.fn->Variables.push_back(other);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    RunNullCoalescingTransform(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*s.fn), 0)
+        << "a GetValueOrDefault on a different variable must not fold";
+}
+
+// Rejects when there is no use (the TrueInst Block has no instructions, just a
+// leave) -- FindLoadInNext finds no load of v.
+TEST(NullCoalescingTransform, ThrowExpressionValueTypesRejectsNoUse) {
+    auto s = BuildValueTypesThrowShape(/*withUse=*/false);
+    RunNullCoalescingTransform(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*s.fn), 0)
+        << "a TrueInst Block with no use must not fold";
+}
+
+// ThrowExpressions-off: the value-types throw-expression fold is gated on the
+// setting. When off, the fold does not fire.
+TEST(NullCoalescingTransform, ThrowExpressionValueTypesThrowExpressionsOff) {
+    auto s = BuildValueTypesThrowShape();
+    StatementTransform st;
+    st.AddChild(std::make_unique<ILInlining>());
+    st.AddChild(std::make_unique<ExpressionTransforms>());
+    st.AddChild(std::make_unique<NullCoalescingTransform>());
+    ILTransformContext ctx;
+    ctx.Settings.ThrowExpressions = false;
+    st.Run(*s.fn, ctx);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*s.fn), 0)
+        << "with ThrowExpressions off the value-types throw fold must not fire";
+}
 
 // TransformRefTypes simple case: `stloc s(value); if (comp(eq, s, ldnull))
 // { stloc s(fallback) }` -> `stloc s(if.notnull(value, fallback))`. The if-final

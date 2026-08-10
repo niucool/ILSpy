@@ -77,6 +77,21 @@ private:
     // variant, gated on the ThrowExpressions setting). Adapted to the if-as-
     // final block model. Returns true if a fold fired.
     bool TransformRefTypes(Block& block, int pos, StatementTransformContext& context);
+
+    // TransformThrowExpressionValueTypes: the value-types `?? throw` pattern
+    //   stloc v(value)
+    //   if (v.HasValue) { use(call GetValueOrDefault(ldloca v)); ... }
+    //   else (fall-through) throw
+    //   => use(if.notnull(value, throw))
+    // (the C# 7.0 `a ?? throw ...` form for Nullable<T>). Adapted to this port's
+    // post-ConditionDetection shape: the C# carries `if (!v.HasValue) throw;
+    // use` (logic.not condition, throw in the true arm, use as a sibling at
+    // pos+2), but this port's ConditionDetection inverts the early-exit pattern
+    // to `if (v.HasValue) { use; ... }` (bare HasValue call condition, use inside
+    // the if's TrueInst Block, throw in the fall-through block). Returns true if a
+    // fold fired.
+    bool TransformThrowExpressionValueTypes(Block& block, int pos,
+                                            StatementTransformContext& context);
 };
 
 } // namespace ILSpy::Decompiler::IL

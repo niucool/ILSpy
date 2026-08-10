@@ -568,18 +568,30 @@ implemented and green here. Everything else follows the phase plan in
   Throw node gained a mutable `resultType` field (faithful to the C# `internal
   StackType resultType = StackType.Void`) that the fold sets to O so the
   `NullCoalescingInstruction`'s ResultType (the FallbackInst's, the Throw)
-  matches the reference-type value. The hoisted-constructor-argument null guard
-  (needs `ILFunction.Method` metadata + `ILInlining.IsInConstructorInitializer`)
-  and the value-types throw-expression (needs `MatchLogicNot` /
-  `MatchHasValueCall` wiring + the fold logic + a corpus probe) -- the shared
-  prerequisite `ILInlining.FindLoadInNext` (with the `FindResultType` /
-  `FindResult` types) is now exposed as a public free function in
-  `ILInlining.hpp`, faithfully returning `Found` for both `LdLoc(v)` and
-  `LdLoca(v)` (the C# returns `Found` for both; the prior port returned `Stop`
-  for `LdLoca(v)`); `InlineOneIfPossible` gates on the found load being an
-  `LdLoc` to preserve the deferred ldloca-into-addressof behavior. These two
-  throw-expression folds are still deferred -- the next in-order
-  NullCoalescingTransform targets. The reference-type `??` lowering is a
+  matches the reference-type value. The value-types `a ?? throw ...` arm
+  (the C# 7.0 `Nullable<T>` form `stloc v(value); if (!v.HasValue) throw;
+  use(call GetValueOrDefault(ldloca v))` -> `use(if.notnull(value, throw))`) is
+  now wired in via `TransformThrowExpressionValueTypes`, adapted to this port's
+  post-ConditionDetection shape: a pre-pipeline probe confirmed this port's
+  ConditionDetection INVERTS the early-exit pattern (the C# keeps
+  `if (!v.HasValue) throw; use` with the use as a sibling at pos+2; this port
+  inlines the use into the if's TrueInst Block and inverts the condition to the
+  bare `call get_HasValue(ldloca v)`, with the throw in the fall-through block),
+  so the fold finds the `GetValueOrDefault(ldloca v)` inside the TrueInst Block
+  via `ILInlining.FindLoadInNext`, replaces it with a
+  `NullCoalescingInstruction(NullableWithValueFallback, value, throw)`, and
+  inlines the TrueInst Block back into the host block (removing the stloc and
+  replacing the if-final); the dead throw block is left with a Leave
+  placeholder final (a valid but unreachable block, per the don't-delete-
+  unreachable-blocks convention). The shared prerequisite
+  `ILInlining.FindLoadInNext` (with the `FindResultType` / `FindResult` types)
+  is exposed as a public free function in `ILInlining.hpp`, faithfully returning
+  `Found` for both `LdLoc(v)` and `LdLoca(v)` (the C# returns `Found` for both;
+  the prior port returned `Stop` for `LdLoca(v)`); `InlineOneIfPossible` gates on
+  the found load being an `LdLoc` to preserve the deferred ldloca-into-addressof
+  behavior. The hoisted-constructor-argument null guard (needs
+  `ILFunction.Method` metadata + `ILInlining.IsInConstructorInitializer`) is
+  still deferred -- the next in-order NullCoalescingTransform target. The reference-type `??` lowering is a
   Roslyn-era codegen pattern; a corpus probe across 8000 mscorlib methods found
   1797 `comp(eq, ldloc X, ldnull)` null-check ifs and 513 `comp(ne, ..)` but zero
   whose arm is a StLoc to the same variable, so the transform fires 0 times on
