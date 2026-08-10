@@ -235,7 +235,7 @@ private:
             if (header && header->FinalInstruction &&
                 header->FinalInstruction->Op == OpCode::IfInstruction) {
                 const auto& iff = static_cast<const IfInstruction&>(*header->FinalInstruction);
-                if (iff.Condition) cond = Expr(*iff.Condition);
+                if (iff.Condition) cond = CondExpr(*iff.Condition);
             }
             Line(indent, "while (" + cond + ")");
             Line(indent, "{");
@@ -375,7 +375,7 @@ private:
                 return;
             case OpCode::IfInstruction: {
                 const auto& iff = static_cast<const IfInstruction&>(inst);
-                std::string cond = iff.Condition ? Expr(*iff.Condition) : "(default)";
+                std::string cond = iff.Condition ? CondExpr(*iff.Condition) : "(default)";
                 if (!iff.FalseInst && iff.TrueInst && iff.TrueInst->Op == OpCode::Branch) {
                     Line(indent, "if (" + cond + ") " +
                          GotoText(*static_cast<const Branch*>(iff.TrueInst.get())));
@@ -684,6 +684,16 @@ private:
         }
         text += ']';
         return text;
+    }
+
+    // The condition expression for an `if`/`while`: a Comp renders as
+    // `(left op right)` (with outer parens); strip them so `if ((cond))`
+    // becomes `if (cond)`. A non-Comp condition keeps its form.
+    std::string CondExpr(const ILInstruction& inst) {
+        std::string e = Expr(inst);
+        if (inst.Op == OpCode::Comp && e.size() >= 2 && e.front() == '(' && e.back() == ')')
+            return e.substr(1, e.size() - 2);
+        return e;
     }
 
     std::string Expr(const ILInstruction& inst) {

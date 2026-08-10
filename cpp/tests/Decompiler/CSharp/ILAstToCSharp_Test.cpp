@@ -181,7 +181,7 @@ TEST(ILAstToCSharp, ConditionalBranchEmitsIfGotoAndLabel) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "");
-    EXPECT_NE(text.find("    if ((1 == 1)) goto IL_0020;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("    if (1 == 1) goto IL_0020;\n"), std::string::npos) << text;
     EXPECT_NE(text.find("\nIL_0020:\n"), std::string::npos) << text;
 }
 
