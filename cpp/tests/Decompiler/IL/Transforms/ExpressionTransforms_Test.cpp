@@ -83,9 +83,12 @@
 #include "Decompiler/IL/ControlFlow/ConditionDetection.hpp"
 #include "Decompiler/IL/ControlFlow/DetectPinnedRegions.hpp"
 #include "Decompiler/IL/ControlFlow/SwitchDetection.hpp"
+#include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
+#include "Decompiler/TypeSystem/TypeKind.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 
 #include <gtest/gtest.h>
@@ -100,6 +103,9 @@ using ILSpy::Decompiler::TypeSystem::ITypePtr;
 using ILSpy::Decompiler::TypeSystem::KnownType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
 using ILSpy::Decompiler::TypeSystem::ParameterizedType;
+using ILSpy::Decompiler::TypeSystem::SimpleType;
+using ILSpy::Decompiler::TypeSystem::TopLevelTypeName;
+using ILSpy::Decompiler::TypeSystem::TypeKind;
 using ILSpy::Decompiler::Metadata::MetadataFile;
 
 namespace {
@@ -114,6 +120,31 @@ ILVariablePtr MakeParam(std::string name, ITypePtr type = nullptr) {
     auto v = std::make_shared<ILVariable>(VariableKind::Parameter, std::move(type), 1);
     v->Name = std::move(name);
     return v;
+}
+
+// A delegate declaring type: a SimpleType with Kind == Delegate (the shape the
+// type-kind derivation produces for an in-module delegate constructor, and the
+// shape TransformDelegateCtorLdVirtFtnToLdVirtDelegate requires -- the C# checks
+// `Method.DeclaringType.Kind != TypeKind.Delegate`).
+ITypePtr MakeDelegateType(std::string ns, std::string name) {
+    return std::make_shared<SimpleType>(TopLevelTypeName(std::move(ns), std::move(name)),
+                                        TypeKind::Delegate);
+}
+
+// Build a `newobj DelegateType(target, ldvirtftn method)` virtual delegate
+// construction (the shape TransformDelegateCtorLdVirtFtnToLdVirtDelegate folds
+// into an LdVirtDelegate). The C# `new DelegateType(target, ldvirtftn M(target))`.
+std::unique_ptr<Call> MakeNewObjVirtDelegate(ITypePtr delegateType,
+                                            std::unique_ptr<ILInstruction> target,
+                                            std::string ldvirtftnMethod) {
+    auto call = std::make_unique<Call>(
+        delegateType ? delegateType->ReflectionName() + "::.ctor" : std::string("::.ctor"));
+    call->IsNewObj = true;
+    call->ReturnType = StackType::O;
+    call->DeclaringType = std::move(delegateType);
+    call->AddArg(std::move(target));
+    call->AddArg(std::make_unique<LdVirtFtn>(std::move(ldvirtftnMethod)));
+    return call;
 }
 
 // A single-block function whose body block is empty (a Leave final); the test
@@ -381,6 +412,44 @@ int CountDecimalConstantFieldLoads(ILFunction& fn) {
                     nm == "System.Decimal::MinusOne") {
                     ++n;
                 }
+            }
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return n;
+}
+
+// Count LdVirtDelegate ILAst nodes in the tree. The
+// TransformDelegateCtorLdVirtFtnToLdVirtDelegate fold (`newobj Delegate(target,
+// ldvirtftn M(target))` -> `ldvirtdelegate Delegate M(target)`) is monotone
+// non-decreasing (each fold creates one LdVirtDelegate; nothing in this subset
+// removes one). Used by the sweep to confirm the fold does not regress.
+int CountLdVirtDelegate(ILFunction& fn) {
+    int n = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::LdVirtDelegate) ++n;
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return n;
+}
+
+// Count `newobj Delegate(target, ldvirtftn M)` virtual delegate constructions --
+// the TransformDelegateCtorLdVirtFtnToLdVirtDelegate fold's input. A newobj is
+// modelled as a Call with IsNewObj; the fold's input is such a Call whose 2nd
+// arg is an LdVirtFtn. Each fold removes one and produces one LdVirtDelegate, so
+// the count is monotone non-increasing across ExpressionTransforms.
+int CountNewObjVirtDelegate(ILFunction& fn) {
+    int n = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::Call) {
+            auto* call = static_cast<Call*>(inst);
+            if (call->IsNewObj && call->Arguments.size() == 2 &&
+                call->Arguments[1] && call->Arguments[1]->Op == OpCode::LdVirtFtn) {
+                ++n;
             }
         }
         for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
@@ -3397,6 +3466,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
     int totalLiftedCompFolds = 0;
     int totalCatchVarPromotions = 0;
     int totalDecimalFieldFolds = 0;
+    int totalLdVirtDelegateFolds = 0;
     ILTransformContext ctx;
     for (const auto& m : f.MethodDefs()) {
         if (m.RVA == 0) continue;
@@ -3418,6 +3488,8 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int exceptionLocalBefore = CountExceptionLocalHandlers(*fn);
         int ldcDecimalBefore = CountLdcDecimal(*fn);
         int decimalFieldLoadsBefore = CountDecimalConstantFieldLoads(*fn);
+        int ldVirtDelegateBefore = CountLdVirtDelegate(*fn);
+        int newObjVirtDelegateBefore = CountNewObjVirtDelegate(*fn);
         {
             StatementTransform st;
             st.AddChild(std::make_unique<ILInlining>());
@@ -3439,6 +3511,8 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int exceptionLocalAfter = CountExceptionLocalHandlers(*fn);
         int ldcDecimalAfter = CountLdcDecimal(*fn);
         int decimalFieldLoadsAfter = CountDecimalConstantFieldLoads(*fn);
+        int ldVirtDelegateAfter = CountLdVirtDelegate(*fn);
+        int newObjVirtDelegateAfter = CountNewObjVirtDelegate(*fn);
         // The ternary fold is monotone non-decreasing (each fold creates a
         // StLoc-if; nothing in this subset removes one). The VisitComp rewrites
         // (comp(!=0)->x, logic.not push, unsigned normalization) do not create
@@ -3541,12 +3615,25 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         // monotone invariant is the deterministic correctness gate.
         EXPECT_GE(ldcDecimalAfter, ldcDecimalBefore);
         EXPECT_LE(decimalFieldLoadsAfter, decimalFieldLoadsBefore);
+        // TransformDelegateCtorLdVirtFtnToLdVirtDelegate folds a virtual delegate
+        // construction `newobj DelegateType(target, ldvirtftn M(target))` into an
+        // LdVirtDelegate. The LdVirtDelegate count is monotone non-decreasing
+        // (each fold creates one; nothing in this subset removes one) and the
+        // newobj-virtual-delegate count is monotone non-increasing (each fold
+        // removes one; nothing in this subset creates one). The fold fires on the
+        // legacy-csc corpus when a method constructs a delegate from a virtual
+        // method (e.g. an event handler `new EventHandler(this.OnClick)`); the
+        // per-method monotone invariant is the deterministic correctness gate
+        // (the absolute count is not asserted -- it is corpus-dependent).
+        EXPECT_GE(ldVirtDelegateAfter, ldVirtDelegateBefore);
+        EXPECT_LE(newObjVirtDelegateAfter, newObjVirtDelegateBefore);
         totalFolds += (after - before);
         totalArrayIndexConvDrops += (arrayIdxConvBefore - arrayIdxConvAfter);
         totalNullCoalescingFolds += (nullCoalescingAfter - nullCoalescingBefore);
         totalLiftedCompFolds += (liftedCompsAfter - liftedCompsBefore);
         totalCatchVarPromotions += (exceptionLocalAfter - exceptionLocalBefore);
         totalDecimalFieldFolds += (ldcDecimalAfter - ldcDecimalBefore);
+        totalLdVirtDelegateFolds += (ldVirtDelegateAfter - ldVirtDelegateBefore);
         if (processed >= 8000) break;
     }
     EXPECT_GT(processed, 5000);
@@ -3587,6 +3674,16 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
     // faithfulness-only pieces). A zero total would mean the fold stopped firing.
     EXPECT_GT(totalDecimalFieldFolds, 0)
         << "TransformDecimalFieldToConstant must fold Decimal field loads on mscorlib";
+    // TransformDelegateCtorLdVirtFtnToLdVirtDelegate fires on the legacy-csc corpus
+    // when a method constructs a delegate from a virtual method (e.g. an event
+    // handler `new EventHandler(this.OnClick)` where OnClick is virtual). The
+    // count is reported (not asserted) -- whether the legacy-csc corpus contains
+    // any virtual delegate constructions in the 8000-method sweep is
+    // corpus-dependent (a non-zero total is informative; a zero total means the
+    // fold is faithfulness-only on this corpus, firing on Roslyn-compiled /
+    // modern .NET). The per-method monotone invariant (asserted above) is the
+    // deterministic correctness gate regardless.
+    (void)totalLdVirtDelegateFolds;
 }
 
 // RunIfNullableLift MatchCompOrDecimal equality case (LiftCSharpEqualityComparison
@@ -4388,3 +4485,238 @@ TEST(ExpressionTransforms, VisitLdObjRejectsInstanceFieldLoad) {
     EXPECT_EQ(CountLdcDecimal(*fn), 0);
 }
 
+
+// A function whose body stores a `newobj DelegateType(target, ldvirtftn M)` into
+// a local `d` (the shape TransformDelegateCtorLdVirtFtnToLdVirtDelegate folds).
+std::unique_ptr<ILFunction> MakeFnWithNewObjVirtDelegate(ITypePtr delegateType,
+                                                          std::unique_ptr<ILInstruction> target,
+                                                          std::string ldvirtftnMethod) {
+    auto d = MakeLocal("d", delegateType);
+    auto t = MakeLocal("target", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Variables.push_back(d);
+    fn->Variables.push_back(t);
+    auto root = std::make_unique<Block>();
+    root->Add(std::make_unique<StLoc>(d,
+        MakeNewObjVirtDelegate(delegateType, std::move(target), std::move(ldvirtftnMethod))));
+    root->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(root));
+    return fn;
+}
+
+// TransformDelegateCtorLdVirtFtnToLdVirtDelegate folds a virtual delegate
+// construction `newobj DelegateType(target, ldvirtftn M(target))` into an
+// LdVirtDelegate (`ldvirtdelegate DelegateType M(target)`), unifying the target
+// and the virtual method. The newobj Call is replaced in place (a value-position
+// swap -- a newobj is a value, never a block final).
+TEST(ExpressionTransforms, TransformDelegateCtorLdVirtFtnToLdVirtDelegateFolds) {
+    auto delegateType = MakeDelegateType("System", "Action");
+    auto target = MakeLocal("target", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto fn = MakeFnWithNewObjVirtDelegate(delegateType,
+                                           std::make_unique<LdLoc>(target),
+                                           "System.Foo::Bar");
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountNewObjVirtDelegate(*fn), 1);
+    ASSERT_EQ(CountLdVirtDelegate(*fn), 0);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& blk = fn->Body->Blocks[0];
+    ASSERT_EQ(blk->Instructions.size(), 1u);
+    ASSERT_EQ(blk->Instructions[0]->Op, OpCode::StLoc);
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::LdVirtDelegate)
+        << "newobj Delegate(target, ldvirtftn M) must fold to LdVirtDelegate";
+    auto* d = static_cast<LdVirtDelegate*>(st->Value.get());
+    ASSERT_NE(d->Type, nullptr);
+    EXPECT_EQ(d->Type->Kind(), TypeKind::Delegate);
+    EXPECT_EQ(d->MethodName, "System.Foo::Bar");
+    ASSERT_EQ(d->Argument->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(d->Argument.get())->Variable.get(), target.get())
+        << "the LdVirtDelegate carries the newobj's target";
+    EXPECT_EQ(CountNewObjVirtDelegate(*fn), 0);
+    EXPECT_EQ(CountLdVirtDelegate(*fn), 1);
+}
+
+// The fold requires a Delegate declaring type (the C# checks
+// `Method.DeclaringType.Kind != TypeKind.Delegate`); a Class declaring type does
+// not fold.
+TEST(ExpressionTransforms, TransformDelegateCtorRejectsNonDelegateDeclaringType) {
+    auto classType = std::make_shared<SimpleType>(TopLevelTypeName("System", "Foo"),
+                                                  TypeKind::Class);
+    auto target = MakeLocal("target", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto fn = MakeFnWithNewObjVirtDelegate(classType,
+                                           std::make_unique<LdLoc>(target),
+                                           "System.Foo::Bar");
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLdVirtDelegate(*fn), 0)
+        << "a non-Delegate declaring type must not fold";
+    EXPECT_EQ(CountNewObjVirtDelegate(*fn), 1);
+}
+
+// The fold is for virtual delegates only: a `newobj Delegate(target, ldftn M)`
+// (a static/instance method delegate, not a virtual one) does not fold -- the
+// 2nd arg is an LdFtn, not an LdVirtFtn.
+TEST(ExpressionTransforms, TransformDelegateCtorRejectsLdFtnSecondArg) {
+    auto delegateType = MakeDelegateType("System", "Action");
+    auto target = MakeLocal("target", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto d = MakeLocal("d", delegateType);
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Variables.push_back(d);
+    fn->Variables.push_back(target);
+    auto root = std::make_unique<Block>();
+    auto call = std::make_unique<Call>(
+        delegateType->ReflectionName() + "..ctor");
+    call->IsNewObj = true;
+    call->ReturnType = StackType::O;
+    call->DeclaringType = delegateType;
+    call->AddArg(std::make_unique<LdLoc>(target));
+    call->AddArg(std::make_unique<LdFtn>("System.Foo::Bar"));  // ldftn, not ldvirtftn
+    root->Add(std::make_unique<StLoc>(d, std::move(call)));
+    root->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(root));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLdVirtDelegate(*fn), 0)
+        << "a ldftn (non-virtual) delegate construction must not fold";
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    EXPECT_EQ(st->Value->Op, OpCode::Call) << "the newobj Call must stay";
+}
+
+// The fold requires a pure target (the C# `IsPure(Arguments[0].Flags)`); an
+// impure target (a Call with side effects) does not fold.
+TEST(ExpressionTransforms, TransformDelegateCtorRejectsImpureTarget) {
+    auto delegateType = MakeDelegateType("System", "Action");
+    auto target = MakeLocal("target", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto d = MakeLocal("d", delegateType);
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Variables.push_back(d);
+    fn->Variables.push_back(target);
+    // An impure target: a Call (a method call has side effects, so IsPure is
+    // false). The 1st arg is the call, the 2nd is the ldvirtftn.
+    auto impureTarget = std::make_unique<Call>("System.Foo::MakeTarget");
+    impureTarget->ReturnType = StackType::O;
+    auto call = std::make_unique<Call>(
+        delegateType->ReflectionName() + "..ctor");
+    call->IsNewObj = true;
+    call->ReturnType = StackType::O;
+    call->DeclaringType = delegateType;
+    call->AddArg(std::move(impureTarget));
+    call->AddArg(std::make_unique<LdVirtFtn>("System.Foo::Bar"));
+    auto root = std::make_unique<Block>();
+    root->Add(std::make_unique<StLoc>(d, std::move(call)));
+    root->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(root));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLdVirtDelegate(*fn), 0)
+        << "an impure target must not fold (the target must be pure)";
+}
+
+// The fold requires exactly 2 arguments (target + ldvirtftn); a 3-arg newobj
+// delegate does not fold.
+TEST(ExpressionTransforms, TransformDelegateCtorRejectsWrongArgCount) {
+    auto delegateType = MakeDelegateType("System", "Action");
+    auto target = MakeLocal("target", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto d = MakeLocal("d", delegateType);
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Variables.push_back(d);
+    fn->Variables.push_back(target);
+    auto call = std::make_unique<Call>(
+        delegateType->ReflectionName() + "..ctor");
+    call->IsNewObj = true;
+    call->ReturnType = StackType::O;
+    call->DeclaringType = delegateType;
+    call->AddArg(std::make_unique<LdLoc>(target));
+    call->AddArg(std::make_unique<LdVirtFtn>("System.Foo::Bar"));
+    call->AddArg(std::make_unique<LdLoc>(target));  // a 3rd arg -> not the 2-arg shape
+    auto root = std::make_unique<Block>();
+    root->Add(std::make_unique<StLoc>(d, std::move(call)));
+    root->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(root));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLdVirtDelegate(*fn), 0)
+        << "a 3-arg newobj delegate must not fold (the shape is 2-arg)";
+}
+
+// The fold requires a newobj (Call with IsNewObj); a plain call/callvirt with an
+// ldvirtftn 2nd arg does not fold.
+TEST(ExpressionTransforms, TransformDelegateCtorRejectsNonNewObj) {
+    auto delegateType = MakeDelegateType("System", "Action");
+    auto target = MakeLocal("target", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto d = MakeLocal("d", delegateType);
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Variables.push_back(d);
+    fn->Variables.push_back(target);
+    auto call = std::make_unique<Call>(
+        delegateType->ReflectionName() + "::MakeDelegate");
+    call->IsNewObj = false;  // a plain call, not a newobj
+    call->ReturnType = StackType::O;
+    call->DeclaringType = delegateType;
+    call->AddArg(std::make_unique<LdLoc>(target));
+    call->AddArg(std::make_unique<LdVirtFtn>("System.Foo::Bar"));
+    auto root = std::make_unique<Block>();
+    root->Add(std::make_unique<StLoc>(d, std::move(call)));
+    root->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(root));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLdVirtDelegate(*fn), 0)
+        << "a non-newobj call with an ldvirtftn arg must not fold";
+}
+
+// The seed renders an LdVirtDelegate as `new DelegateType(target.Method)` --
+// the real back end's VisitLdVirtDelegate (CallBuilder.Build ->
+// HandleDelegateConstruction) folds the target and the virtual method into a
+// `target.Method` method group inside `new DelegateType(...)`.
+TEST(ExpressionTransforms, SeedRendersLdVirtDelegateAsNewDelegateTargetMethod) {
+    auto delegateType = MakeDelegateType("System", "Action");
+    auto target = MakeLocal("target", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto fn = MakeFnWithNewObjVirtDelegate(delegateType,
+                                           std::make_unique<LdLoc>(target),
+                                           "System.Foo::Bar");
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountLdVirtDelegate(*fn), 1);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "Action d");
+    EXPECT_NE(text.find("new System.Action(target.Bar)"), std::string::npos)
+        << "the LdVirtDelegate must render as `new DelegateType(target.Method)`"
+        << text;
+}

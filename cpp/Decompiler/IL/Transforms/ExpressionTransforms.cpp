@@ -43,6 +43,7 @@
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
@@ -53,6 +54,7 @@
 #include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
 #include "Decompiler/IL/Transforms/NullPropagationTransform.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/TypeKind.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
 
 namespace ILSpy::Decompiler::IL {
@@ -927,6 +929,18 @@ void ExpressionTransforms::VisitBinaryNumericInstruction(BinaryNumericInstructio
 
 void ExpressionTransforms::VisitCall(Call* inst) {
     if (!inst) return;
+    // C# ExpressionTransforms.VisitNewObj pieces (this port models a newobj as
+    // a Call with IsNewObj, so the C# VisitNewObj dispatches from VisitCall).
+    // TransformDelegateCtorLdVirtFtnToLdVirtDelegate folds a virtual delegate
+    // construction `newobj DelegateType(target, ldvirtftn M(target))` into an
+    // LdVirtDelegate; it runs before the GetValueOrDefault fold (the two are
+    // disjoint -- a GetValueOrDefault call is never a newobj). The C# runs the
+    // VisitNewObj pieces before base.VisitNewObj; the remaining VisitNewObj
+    // pieces (TransformSpanTCtorContainingStackAlloc,
+    // TransformArrayInitializers.TransformSpanTArrayInitialization) are
+    // deferred (need LocAlloc/Span + TransformArrayInitializers).
+    if (inst->IsNewObj && TransformDelegateCtorLdVirtFtnToLdVirtDelegate(inst))
+        return;  // inst replaced by an LdVirtDelegate + destroyed
     // call Nullable<T>.GetValueOrDefault(a, b) -> a ?? b: a 2-arg
     // GetValueOrDefault on System.Nullable<T> with a pure fallback folds into a
     // NullCoalescingInstruction (NullableWithValueFallback) whose ValueInst is
@@ -968,6 +982,50 @@ void ExpressionTransforms::VisitCall(Call* inst) {
     // TransformAssignment.HandleCompoundAssign -- all deferred (need
     // TransformArrayInitializers / InlineArrayTransform / TransformAssignment).
     for (auto& arg : inst->Arguments) Visit(arg.get());
+}
+
+bool ExpressionTransforms::TransformDelegateCtorLdVirtFtnToLdVirtDelegate(Call* inst) {
+    // Port of ExpressionTransforms.TransformDelegateCtorLdVirtFtnToLdVirtDelegate
+    // (the C# VisitNewObj piece). A `newobj DelegateType(target, ldvirtftn
+    // Method(target))` folds into `ldvirtdelegate DelegateType Method(target)`,
+    // unifying the delegate target and the virtual method. The C# checks
+    // `Method.DeclaringType.Kind != TypeKind.Delegate`, `Arguments.Count != 2`,
+    // the 2nd arg is an LdVirtFtn, `IsPure(Arguments[0].Flags)`, and
+    // `Arguments[0].Match(ldVirtFtn.Argument).Success`. This port's LdVirtFtn
+    // carries only the method name (the IL reader discards the ldvirtftn
+    // target), so the structural-equality check is skipped -- the newobj's first
+    // argument is the only target in the tree, so the LdVirtDelegate carries it
+    // directly. C# never emits mismatched targets, so the approximation is safe.
+    if (!inst || !inst->IsNewObj) return false;
+    if (!inst->DeclaringType) return false;
+    if (inst->DeclaringType->Kind() != TypeSystem::TypeKind::Delegate) return false;
+    if (inst->Arguments.size() != 2) return false;
+    auto* ldVirtFtn = inst->Arguments[1] ? dynamic_cast<LdVirtFtn*>(inst->Arguments[1].get()) : nullptr;
+    if (!ldVirtFtn) return false;  // the 2nd arg must be an ldvirtftn (a virtual method)
+    if (!inst->Arguments[0] || !IsPure(inst->Arguments[0]->Flags())) return false;
+    // Capture the delegate type and the method name before detaching the target
+    // (the call is destroyed by ReplaceWith -- the precondition-before-mutation
+    // discipline). The method name is the ldvirtftn's resolved name; the delegate
+    // type is the call's resolved DeclaringType (an ITypePtr copy keeps the IType
+    // alive independently of the Call).
+    TypeSystem::ITypePtr delegateType = inst->DeclaringType;
+    std::string methodName = ldVirtFtn->MethodName;
+    auto target = inst->TakeChild(0);  // detach the target (the newobj's 1st arg)
+    // TakeChild(1) would detach the ldvirtftn, but it carries only the method
+    // name (already captured) and has no tree children, so it is discarded with
+    // the call. A LdVirtDelegate is a value, so ReplaceWith is a clean in-place
+    // swap (the C# `inst.ReplaceWith(ldVirtDelegate)`); no block-model
+    // adaptation is needed.
+    auto replacement = std::make_unique<LdVirtDelegate>(std::move(target),
+                                                        std::move(delegateType),
+                                                        std::move(methodName));
+    inst->ReplaceWith(std::move(replacement));  // destroys inst (and the ldvirtftn)
+    // The C# does not re-visit (the LdVirtDelegate's Argument is the original
+    // target, already visited as the newobj's 1st arg in a prior pass; the
+    // delegate type / method name are data, not tree children). The C#
+    // VisitNewObj returns without AcceptVisitor, so the port skips the re-visit
+    // too (matching the C# which just ReplaceWith + EndStep + return).
+    return true;
 }
 
 void ExpressionTransforms::VisitLdObj(LdObj* inst) {

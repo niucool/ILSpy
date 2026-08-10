@@ -30,7 +30,12 @@ bool DelegateConstruction::MatchDelegateConstruction(ILInstruction* inst,
                                                       bool allowTransformed) {
     out = DelegateConstructionMatch{};
     // The C# switches on `inst` (NewObj or LdVirtDelegate); this port models a
-    // newobj as a Call with IsNewObj, and has no LdVirtDelegate node (deferred).
+    // newobj as a Call with IsNewObj, and the LdVirtDelegate node now exists
+    // (D121) but this helper still handles only the NewObj (Call) case -- the
+    // LdVirtDelegate branch lands with the full DelegateConstruction transform
+    // (which runs after StatementTransform, by which point
+    // ExpressionTransforms.TransformDelegateCtorLdVirtFtnToLdVirtDelegate has
+    // already folded virtual delegate constructions to LdVirtDelegate).
     if (!inst || inst->Op != OpCode::Call) return false;
     auto* call = static_cast<Call*>(inst);
     if (!call->IsNewObj) return false;

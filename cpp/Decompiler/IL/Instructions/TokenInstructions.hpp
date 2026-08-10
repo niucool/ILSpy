@@ -27,9 +27,14 @@
 #pragma once
 
 #include "Decompiler/IL/Instructions/SimpleInstruction.hpp"
+#include "Decompiler/IL/Instructions/UnaryInstruction.hpp"
+#include "Decompiler/IL/InstructionFlags.hpp"
 #include "Decompiler/IL/StackType.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
 
+#include <memory>
 #include <string>
+#include <utility>
 
 namespace ILSpy::Decompiler::IL {
 
@@ -66,6 +71,38 @@ public:
     StackType ResultType() const override { return StackType::I4; }
     void WriteTo(std::string& out) const override {
         out += "sizeof("; out += TypeName; out += ')';
+    }
+};
+
+// ldvirtdelegate <DelegateType> <Method>(<target>): the ILAst normalization of a
+// virtual delegate construction `newobj DelegateType(target, ldvirtftn Method(target))`
+// -- ExpressionTransforms.TransformDelegateCtorLdVirtFtnToLdVirtDelegate folds the
+// newobj so the delegate target and the virtual method are unified. A UnaryInstruction
+// (the Argument slot is the target, inlineable) carrying the delegate type (ITypePtr)
+// and the resolved method name string. Result O; MayThrow (a virtual call resolves the
+// method). Port of the C# LdVirtDelegate (generated Instructions.cs) -- the C# carries
+// an IMethod; this port carries the resolved method name string, matching the
+// LdFtn/LdVirtFtn precedent (no IMethod type-system object).
+class LdVirtDelegate : public UnaryInstruction {
+public:
+    TypeSystem::ITypePtr Type;
+    std::string MethodName;
+    LdVirtDelegate(std::unique_ptr<ILInstruction> argument, TypeSystem::ITypePtr type,
+                  std::string method)
+        : UnaryInstruction(OpCode::LdVirtDelegate, std::move(argument)),
+          Type(std::move(type)), MethodName(std::move(method)) {}
+    InstructionFlags DirectFlags() const override {
+        return InstructionFlags::None | InstructionFlags::MayThrow;
+    }
+    StackType ResultType() const override { return StackType::O; }
+    void WriteTo(std::string& out) const override {
+        out += "ldvirtdelegate ";
+        out += Type ? Type->ReflectionName() : std::string("?");
+        out += ' ';
+        out += MethodName;
+        out += '(';
+        if (Argument) Argument->WriteTo(out); else out += "(null)";
+        out += ')';
     }
 };
 

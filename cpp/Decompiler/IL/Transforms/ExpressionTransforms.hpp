@@ -58,7 +58,10 @@
 // blocked by it), the remaining VisitCall pieces (TransformArrayInitializers /
 // InlineArrayTransform / TransformAssignment.HandleCompoundAssign -- the
 // Nullable<T>.GetValueOrDefault(a, b) -> a ?? b fold is now ported) /
-// VisitNewObj / VisitLdObj / VisitLdObjIfRef / VisitStObj / VisitStLoc
+// VisitNewObj (the TransformDelegateCtorLdVirtFtnToLdVirtDelegate
+// `newobj Delegate(target, ldvirtftn M(target))` -> `ldvirtdelegate` fold is now
+// ported; the Span-ctor / array-init VisitNewObj pieces are deferred) /
+// VisitLdObj / VisitLdObjIfRef / VisitStObj / VisitStLoc
 // (TransformAssignment.HandleCompoundAssign) / the remaining VisitIfInstruction
 // pieces (the NullableLifting Run(IfInstruction) bool? equality folds, the
 // `&`/`|` on bool? folds, and the AnalyzeCondition/LiftNormal `v.HasValue ? v :
@@ -289,6 +292,29 @@ private:
     // InlineArrayTransform.RunOnExpression, TransformAssignment.HandleCompoundAssign)
     // are deferred. Mirrors ExpressionTransforms.cs.
     void VisitCall(Call* inst);
+
+    // TransformDelegateCtorLdVirtFtnToLdVirtDelegate (the VisitNewObj piece of
+    // C# ExpressionTransforms -- this port models a newobj as a Call with
+    // IsNewObj, so it dispatches from VisitCall): a `newobj DelegateType(target,
+    // ldvirtftn Method(target))` folds into `ldvirtdelegate DelegateType
+    // Method(target)`, unifying the delegate target and the virtual method so
+    // the later DelegateConstruction transform handles both NewObj and
+    // LdVirtDelegate shapes uniformly. The C# checks
+    // `Method.DeclaringType.Kind != Delegate`, `Arguments.Count != 2`, the 2nd
+    // arg is an LdVirtFtn, `IsPure(Arguments[0].Flags)`, and
+    // `Arguments[0].Match(ldVirtFtn.Argument)` (the newobj target and the
+    // ldvirtftn target are the same instruction). This port's LdVirtFtn carries
+    // only the method name (the IL reader discards the ldvirtftn target -- it is
+    // not a tree child), so the structural-equality check is skipped: the
+    // newobj's first argument is the only target in the tree, so the
+    // LdVirtDelegate carries it directly. C# never emits mismatched targets
+    // (`new DelegateType(ta, ldvirtftn M(tb))` with ta != tb is semantically
+    // incoherent and not produced by any C# compiler), so the approximation is
+    // safe. A LdVirtDelegate is a value, so the fold is a clean value-position
+    // ReplaceWith (the C# `inst.ReplaceWith(ldVirtDelegate)`); no block-model
+    // adaptation is needed. Returns true if the fold fired (the newobj Call is
+    // destroyed and replaced by an LdVirtDelegate).
+    bool TransformDelegateCtorLdVirtFtnToLdVirtDelegate(Call* inst);
 
     // VisitLdObj (the TransformDecimalFieldToConstant subset): a static field
     // load `ldobj(ldsflda System.Decimal::One/Zero/MinusOne)` folds into the

@@ -1104,7 +1104,39 @@ implemented and green here. Everything else follows the phase plan in
   `NearNegativeZero = -0.000000000000000000000000001m` (a real-corpus
   readability improvement). The Decimal lift (`LiftCSharpUserComparison`'s
   Decimal branch, needs the Phase 5 resolver's
-  `CSharpOperators.LiftUserDefinedOperator`) is the subsequent in-order target. 40 of ~40
+  `CSharpOperators.LiftUserDefinedOperator`) is the subsequent in-order target.
+  `ExpressionTransforms.TransformDelegateCtorLdVirtFtnToLdVirtDelegate` (the
+  VisitNewObj piece of C# ExpressionTransforms -- this port models a newobj as
+  a Call with `IsNewObj`, so the C# `VisitNewObj` dispatches from `VisitCall`)
+  folds a virtual delegate construction `newobj DelegateType(target, ldvirtftn
+  Method(target))` into an `LdVirtDelegate` (`ldvirtdelegate DelegateType
+  Method(target)`), unifying the delegate target and the virtual method so the
+  later `DelegateConstruction` transform handles both the NewObj and
+  LdVirtDelegate shapes uniformly. The new `LdVirtDelegate` node (a
+  `UnaryInstruction` with the target as its inlineable `Argument` child, an
+  `ITypePtr Type` [the delegate type], and a `std::string MethodName` [the
+  resolved method name -- the C# carries an `IMethod`; this port carries the
+  resolved name string, matching the `LdFtn`/`LdVirtFtn` precedent], ResultType
+  O, DirectFlags `None | MayThrow`) is faithful to the C# generated node;
+  `OpCode::LdVirtDelegate` was pre-declared. The C# checks the declaring type's
+  `Kind == Delegate`, the 2-arg shape, the 2nd arg is an `LdVirtFtn`, a pure
+  target, and `Arguments[0].Match(ldVirtFtn.Argument)` (the newobj target and
+  the ldvirtftn target are the same instruction); this port's `LdVirtFtn`
+  carries only the method name (the IL reader discards the ldvirtftn target --
+  it is not a tree child), so the structural-equality check is skipped -- the
+  newobj's first argument is the only target in the tree, so the
+  `LdVirtDelegate` carries it directly (C# never emits mismatched targets, so
+  the approximation is safe). A `LdVirtDelegate` is a value, so the fold is a
+  clean value-position `ReplaceWith` (no if-as-final block-model adaptation).
+  The seed renders an `LdVirtDelegate` as `new DelegateType(target.Method)`
+  (the real back end's `VisitLdVirtDelegate` folds the target and the virtual
+  method into a `target.Method` method group). KEY FINDING: the fold fires on
+  the .NET Framework 4 legacy-csc mscorlib corpus -- 6 folds across the
+  8000-method sweep, on virtual delegate constructions such as `new
+  System.Reflection.TypeFilter(__Filters.FilterTypeName)`,
+  `new BeginChildrenCallback(this.BeginChildren)` (the CLI `--csharp` output
+  has 0 `ldvirtftn` two-arg forms; every virtual delegate construction now
+  folds to the cleaner `new DelegateType(target.Method)` form). 40 of ~40
   transforms ported.
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree

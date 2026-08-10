@@ -748,6 +748,22 @@ private:
                 return FlattenMetadataName(static_cast<const LdFtn&>(inst).MethodName);
             case OpCode::LdVirtFtn:
                 return FlattenMetadataName(static_cast<const LdVirtFtn&>(inst).MethodName);
+            case OpCode::LdVirtDelegate: {
+                // A virtual delegate construction renders as
+                // `new DelegateType(target.Method)` -- the real back end's
+                // VisitLdVirtDelegate (CallBuilder.Build -> HandleDelegateConstruction)
+                // folds the target and the virtual method into a `target.Method`
+                // method group inside the `new DelegateType(...)`. The delegate
+                // type renders as its reflection name (matching the existing
+                // newobj rendering `new System.Action(...)`); the method is the
+                // short name (after `::`) so `target.Bar` is the C# method-group
+                // form.
+                const auto& d = static_cast<const LdVirtDelegate&>(inst);
+                std::string typeName = d.Type ? d.Type->ReflectionName() : std::string("var");
+                std::string target = d.Argument ? Expr(*d.Argument) : std::string("(default)");
+                return "new " + typeName + "(" + target + "." +
+                       ShortMethodName(d.MethodName) + ")";
+            }
             case OpCode::SizeOf:
                 return "sizeof(" + static_cast<const SizeOf&>(inst).TypeName + ")";
             case OpCode::LdTypeToken:
