@@ -686,8 +686,12 @@ private:
             }
             case OpCode::Conv: {
                 const auto& conv = static_cast<const Conv&>(inst);
-                // conv.i4(ldlen) is the IL for `array.Length` (ldlen returns
-                // unsigned int32; the cast to signed i4 is implicit in C#).
+                // conv.i4(ldlen) is the IL for `array.Length` (the raw ldlen
+                // pushes a native int; the cast to i4 is implicit in C#). The
+                // VisitConv `conv.iN(ldlen)` fold (ExpressionTransforms) folds
+                // this to a single LdLen(I4, ..) in the pipeline, so this special
+                // case is a fallback for the pre-fold shape (e.g. a test that
+                // calls the seed directly).
                 if (conv.ResultType() == StackType::I4 && conv.Argument &&
                     conv.Argument->Op == OpCode::LdLen) {
                     return Expr(*conv.Argument);

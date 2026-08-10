@@ -757,7 +757,11 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         }
         case ILOpCode::Ldlen: {
             auto arr = s.Pop(); if (!arr) return DecodeOutcome::Bail;
-            if (!s.Push(std::make_unique<LdLen>(std::move(arr)))) return DecodeOutcome::Bail;
+            // The raw `ldlen` opcode pushes a native int (StackType::I), faithful
+            // to the C# LdLen. ExpressionTransforms.VisitConv folds
+            // `conv.i4(ldlen)` / `conv.i8(ldlen)` into a single LdLen(I4/I8, ..)
+            // so the conversion is folded into the load.
+            if (!s.Push(std::make_unique<LdLen>(StackType::I, std::move(arr)))) return DecodeOutcome::Bail;
             break;
         }
         case ILOpCode::Ldelema: {

@@ -53,9 +53,12 @@
 // Deferred vs the C#: the NullableLiftingTransform
 // call (needs the full nullable-lift transform), FixComparisonKindLdNull
 // (already in the standalone EarlyExpressionTransforms, D61), the ldlen /
-// conv o->i null-comparison special cases (need the LdLen model divergence
-// reconciliation -- the VisitConv `conv.i4(ldlen)` first rewrite is still
-// blocked by it), the remaining VisitCall pieces (TransformArrayInitializers /
+// conv o->i null-comparison VisitComp special cases (the VisitConv
+// `conv.iN(ldlen)` first rewrite is now ported; the VisitComp
+// `comp(ldlen == ldc.i4 0)` -> `comp(ldlen.i4 == ldc.i4 0)` and the
+// `comp(conv o->i (ldloc obj) == conv i4->i <0>)` -> `comp(ldloc obj == ldnull)`
+// C++/CLI null-comparison special cases are still deferred -- they need the
+// Comp's settable InputType plus a corpus probe of the post-reader shape), the remaining VisitCall pieces (TransformArrayInitializers /
 // InlineArrayTransform / TransformAssignment.HandleCompoundAssign -- the
 // Nullable<T>.GetValueOrDefault(a, b) -> a ?? b fold is now ported) /
 // VisitNewObj (the TransformDelegateCtorLdVirtFtnToLdVirtDelegate
@@ -224,17 +227,18 @@ private:
     // fold fired (the if is destroyed).
     bool FoldMatchTrueFalse(IfInstruction* iff);
 
-    // VisitConv (the conv.r.un combining subset): `conv.r4(conv.r.un(x))` /
-    // `conv.r8(conv.r.un(x))` -> `conv.r4.un(x)` / `conv.r8.un(x)`. IL conv.r.un
-    // does not indicate whether to convert the target to R4 or R8, so the C#
-    // compiler usually follows it with an explicit conv.r4 or conv.r8; the two
-    // conversions are combined into one that carries the inner conv's input
-    // type/sign but the outer's target (R4/R8). The C# checks
-    // `inst.TargetType.IsFloatType() && inst.Argument is Conv conv && conv.Kind
-    // == ConversionKind.IntToFloat && conv.TargetType == PrimitiveType.R`; this
-    // requires the Conv node's ConversionKind (D85). The `conv.i4(ldlen)` first
-    // rewrite is still blocked by the LdLen model divergence (this port's LdLen
-    // already returns I4), so only the conv.r.un combining is ported here.
+    // VisitConv (the conv.iN(ldlen) + conv.r.un combining rewrites). (1) The
+    // FIRST rewrite `conv.i4(ldlen array) => ldlen.i4(array)` (and the I8/I
+    // variants) folds a native-int `ldlen` followed by an integer `conv.iN` into
+    // a single LdLen(I4/I8/I) so the cast does not appear in the output; the
+    // LdLen node carries a StackType field (I for the raw ldlen, I4/I8 for the
+    // folded forms), faithful to the C#. A checked conv (conv.ovf.iN) folds only
+    // when the AssumeArrayLengthFitsIntoInt32 setting is on. (2) The SECOND
+    // rewrite `conv.r4(conv.r.un(x))` / `conv.r8(conv.r.un(x))` ->
+    // `conv.r4.un(x)` / `conv.r8.un(x)` combines two conversions into one (the
+    // C# checks `inst.TargetType.IsFloatType() && inst.Argument is Conv conv &&
+    // conv.Kind == ConversionKind.IntToFloat && conv.TargetType ==
+    // PrimitiveType.R`; requires the Conv node's ConversionKind, D85).
     void VisitConv(Conv* inst);
 
     // VisitBox: `box ref-type(arg)` -> `arg`. For a reference type, box is a

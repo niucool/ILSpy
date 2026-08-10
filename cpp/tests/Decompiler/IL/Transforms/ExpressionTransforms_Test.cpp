@@ -1651,6 +1651,213 @@ TEST(ExpressionTransforms, VisitConvKeepsConvI4OverConvRUn) {
         << "the nested conv.r.un must survive (the outer is conv.i4, not float)";
 }
 
+// Count Conv nodes whose Argument is a raw `ldlen` (an LdLen returning the
+// native-int StackType::I) -- the `conv.iN(ldlen)` shape the VisitConv
+// `conv.iN(ldlen) => ldlen.iN` fold removes. Each fold removes one such conv
+// (nothing in this subset creates one). Used by the tests and the sweep.
+int CountConvOverLdLenI(ILFunction& fn) {
+    int n = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::Conv) {
+            auto* conv = static_cast<Conv*>(inst);
+            if (conv->Argument && conv->Argument->Op == OpCode::LdLen &&
+                conv->Argument->ResultType() == StackType::I) {
+                ++n;
+            }
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return n;
+}
+
+// VisitConv folds `conv.i4(ldlen array) => ldlen.i4(array)`: the raw `ldlen`
+// pushes a native int (StackType::I); a following `conv.i4` (to an integer
+// target) folds the conversion into a single LdLen(I4, ..) so the cast does
+// not appear in the output (the array length is already i4). The array argument
+// is preserved (detached from the old LdLen before it is destroyed).
+TEST(ExpressionTransforms, VisitConvFoldsConvI4OverLdLen) {
+    auto arr = MakeParam("arr", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    // conv.i4(ldlen.I(arr)): the raw ldlen returns native int I; the conv.i4
+    // (SignExtend I->I4, no overflow check) folds to ldlen.I4.
+    auto conv = std::make_unique<Conv>(
+        std::make_unique<LdLen>(StackType::I, std::make_unique<LdLoc>(arr)),
+        PrimitiveType::I4, false, Sign::None);
+    auto fn = MakeFnWithBlock({v, arr});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(conv)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountConvOverLdLenI(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountConvOverLdLenI(*fn), 0)
+        << "conv.i4(ldlen) must fold to a single ldlen.I4";
+    auto& blk = fn->Body->Blocks[0];
+    ASSERT_EQ(blk->Instructions.size(), 1u);
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::LdLen)
+        << "the result must be a single LdLen (the folded ldlen.I4)";
+    auto* ld = static_cast<LdLen*>(st->Value.get());
+    EXPECT_EQ(ld->resultType, StackType::I4)
+        << "the folded LdLen carries the conv's i4 target";
+    ASSERT_EQ(ld->Argument->Op, OpCode::LdLoc)
+        << "the array argument survives the fold";
+    EXPECT_EQ(static_cast<LdLoc*>(ld->Argument.get())->Variable.get(), arr.get());
+}
+
+// VisitConv folds `conv.i8(ldlen array) => ldlen.i8(array)` (the I8 variant).
+TEST(ExpressionTransforms, VisitConvFoldsConvI8OverLdLen) {
+    auto arr = MakeParam("arr", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Int64));
+    auto conv = std::make_unique<Conv>(
+        std::make_unique<LdLen>(StackType::I, std::make_unique<LdLoc>(arr)),
+        PrimitiveType::I8, false, Sign::None);
+    auto fn = MakeFnWithBlock({v, arr});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(conv)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountConvOverLdLenI(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountConvOverLdLenI(*fn), 0);
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::LdLen);
+    EXPECT_EQ(static_cast<LdLen*>(st->Value.get())->resultType, StackType::I8);
+}
+
+// VisitConv folds `conv.i(ldlen array) => ldlen.I(array)`: a conv.i (native-int
+// target) over a native-int ldlen is a Nop I->I conversion; the fold drops the
+// redundant conv and the result is a bare ldlen.I (the array length as native
+// int).
+TEST(ExpressionTransforms, VisitConvFoldsConvIOverLdLen) {
+    auto arr = MakeParam("arr", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v");
+    auto conv = std::make_unique<Conv>(
+        std::make_unique<LdLen>(StackType::I, std::make_unique<LdLoc>(arr)),
+        PrimitiveType::I, false, Sign::None);
+    auto fn = MakeFnWithBlock({v, arr});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(conv)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountConvOverLdLenI(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountConvOverLdLenI(*fn), 0);
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::LdLen);
+    EXPECT_EQ(static_cast<LdLen*>(st->Value.get())->resultType, StackType::I);
+}
+
+// VisitConv does NOT fold `conv.r4(ldlen)`: the conv's target is a float type
+// (R4), not an integer type, so the `conv.iN(ldlen)` fold's IsIntegerType gate
+// blocks it. (The conv.r.un combining also does not fire -- the argument is an
+// LdLen, not a Conv.) The conv stays.
+TEST(ExpressionTransforms, VisitConvKeepsConvR4OverLdLen) {
+    auto arr = MakeParam("arr", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Single));
+    auto conv = std::make_unique<Conv>(
+        std::make_unique<LdLen>(StackType::I, std::make_unique<LdLoc>(arr)),
+        PrimitiveType::R4, false, Sign::None);
+    auto fn = MakeFnWithBlock({v, arr});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(conv)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountConvOverLdLenI(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountConvOverLdLenI(*fn), 1)
+        << "conv.r4(ldlen) must not fold (the target is float, not integer)";
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Conv);
+}
+
+// VisitConv does NOT fold `conv.i4(ldlen.I4(arr))`: the fold requires the LdLen
+// to be the raw native-int ldlen (ResultType == I); an already-folded ldlen.I4
+// (ResultType == I4) is not the raw ldlen, so the fold does not fire and the
+// (redundant Nop I4->I4) conv stays. This guards against a double-fold.
+TEST(ExpressionTransforms, VisitConvKeepsConvI4OverLdLenI4) {
+    auto arr = MakeParam("arr", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    // ldlen.I4 (already the i4 form) + conv.i4 (a Nop I4->I4): the fold must not
+    // fire (the LdLen is not the raw native-int ldlen).
+    auto conv = std::make_unique<Conv>(
+        std::make_unique<LdLen>(StackType::I4, std::make_unique<LdLoc>(arr)),
+        PrimitiveType::I4, false, Sign::None);
+    auto fn = MakeFnWithBlock({v, arr});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(conv)));
+    fn->CheckInvariant(ILPhase::Normal);
+    // CountConvOverLdLenI counts only LdLen-returning-I arguments; this LdLen is
+    // I4, so the count is 0 even before the fold.
+    ASSERT_EQ(CountConvOverLdLenI(*fn), 0);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountConvOverLdLenI(*fn), 0);
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Conv)
+        << "conv.i4(ldlen.I4) must not fold (the LdLen is not the raw native-int)";
+}
+
+// VisitConv does NOT fold a checked `conv.ovf.i4(ldlen)` when the
+// AssumeArrayLengthFitsIntoInt32 setting is off: a checked conv may throw on
+// overflow, so it folds only when the setting allows assuming the array length
+// fits in int32. With the setting off, the conv stays (it may throw).
+TEST(ExpressionTransforms, VisitConvKeepsCheckedConvI4OverLdLenWhenSettingOff) {
+    auto arr = MakeParam("arr", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto conv = std::make_unique<Conv>(
+        std::make_unique<LdLen>(StackType::I, std::make_unique<LdLoc>(arr)),
+        PrimitiveType::I4, true, Sign::None);  // conv.ovf.i4: CheckForOverflow
+    auto fn = MakeFnWithBlock({v, arr});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(conv)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountConvOverLdLenI(*fn), 1);
+
+    StatementTransform st;
+    st.AddChild(std::make_unique<ExpressionTransforms>());
+    ILTransformContext ctx;
+    ctx.Settings.AssumeArrayLengthFitsIntoInt32 = false;
+    st.Run(*fn, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountConvOverLdLenI(*fn), 1)
+        << "conv.ovf.i4(ldlen) must not fold when AssumeArrayLengthFitsIntoInt32 is off";
+    auto* stLoc = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(stLoc->Value->Op, OpCode::Conv);
+}
+
+// VisitConv DOES fold a checked `conv.ovf.i4(ldlen)` when the
+// AssumeArrayLengthFitsIntoInt32 setting is on (the default): the setting
+// allows assuming the array length fits in int32, so the checked conv folds to
+// ldlen.I4 like the unchecked form.
+TEST(ExpressionTransforms, VisitConvFoldsCheckedConvI4OverLdLenWhenSettingOn) {
+    auto arr = MakeParam("arr", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto conv = std::make_unique<Conv>(
+        std::make_unique<LdLen>(StackType::I, std::make_unique<LdLoc>(arr)),
+        PrimitiveType::I4, true, Sign::None);  // conv.ovf.i4: CheckForOverflow
+    auto fn = MakeFnWithBlock({v, arr});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(conv)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountConvOverLdLenI(*fn), 1);
+
+    RunExpressionTransforms(*fn);  // default settings: AssumeArrayLengthFitsIntoInt32 = true
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountConvOverLdLenI(*fn), 0)
+        << "conv.ovf.i4(ldlen) folds when AssumeArrayLengthFitsIntoInt32 is on";
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::LdLen);
+    EXPECT_EQ(static_cast<LdLen*>(st->Value.get())->resultType, StackType::I4);
+}
+
 // Count `shift(x, bitAnd(y, mask))` patterns -- a ShiftLeft/ShiftRight whose
 // Right is a BitAnd whose own Right is the expected bit-width-minus-one mask
 // (ldc.i4 31 for an I4 shift, ldc.i4 63 for an I8 shift). This is the redundant
@@ -3467,6 +3674,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
     int totalCatchVarPromotions = 0;
     int totalDecimalFieldFolds = 0;
     int totalLdVirtDelegateFolds = 0;
+    int totalConvOverLdLenFolds = 0;
     ILTransformContext ctx;
     for (const auto& m : f.MethodDefs()) {
         if (m.RVA == 0) continue;
@@ -3478,6 +3686,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int boxesBefore = CountBoxes(*fn);
         int arrayIdxConvBefore = CountArrayIndexConvI(*fn);
         int convRUnBefore = CountConvRUnNested(*fn);
+        int convOverLdLenBefore = CountConvOverLdLenI(*fn);
         int maskedShiftsBefore = CountMaskedShifts(*fn);
         int getValOrDefaultBefore = CountGetValueOrDefaultTwoArg(*fn);
         int nullCoalescingBefore = CountNullCoalescing(*fn);
@@ -3501,6 +3710,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int boxesAfter = CountBoxes(*fn);
         int arrayIdxConvAfter = CountArrayIndexConvI(*fn);
         int convRUnAfter = CountConvRUnNested(*fn);
+        int convOverLdLenAfter = CountConvOverLdLenI(*fn);
         int maskedShiftsAfter = CountMaskedShifts(*fn);
         int getValOrDefaultAfter = CountGetValueOrDefaultTwoArg(*fn);
         int nullCoalescingAfter = CountNullCoalescing(*fn);
@@ -3545,6 +3755,19 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         // not asserted -- the .NET Framework 4 legacy-csc corpus may emit
         // conv.r.un rarely, so the fold may fire 0 times on it).
         EXPECT_LE(convRUnAfter, convRUnBefore);
+        // The VisitConv `conv.iN(ldlen)` fold (`conv.i4(ldlen array)` /
+        // `conv.i8(ldlen array)` / `conv.i(ldlen array)` -> a single
+        // `ldlen.I4` / `ldlen.I8` / `ldlen.I`) is monotone non-increasing for the
+        // conv-over-raw-ldlen count (each fold removes one `conv.iN(ldlen)` whose
+        // LdLen argument is the raw native-int ldlen; nothing in this subset
+        // creates one). The fold fires on the legacy-csc corpus whenever the
+        // compiler emits `ldlen; conv.i4`/`conv.i8` (the common `array.Length` /
+        // array-index codegen); the per-method monotone-non-increasing invariant
+        // is the deterministic correctness gate (the absolute count is not
+        // asserted -- the .NET Framework 4 legacy-csc corpus emits `conv.i4(ldlen)`
+        // for most array-length uses, so the fold fires frequently).
+        EXPECT_LE(convOverLdLenAfter, convOverLdLenBefore);
+        if (convOverLdLenBefore > convOverLdLenAfter) ++totalConvOverLdLenFolds;
         // The VisitBinaryNumericInstruction shift-size fold (`a << (b & 31)` /
         // `a >> (b & 63)` -> `a << b` / `a >> b`) is monotone non-increasing (each
         // fold removes one masked-shift; nothing in this subset creates one). The
@@ -3684,6 +3907,14 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
     // modern .NET). The per-method monotone invariant (asserted above) is the
     // deterministic correctness gate regardless.
     (void)totalLdVirtDelegateFolds;
+    // The VisitConv `conv.iN(ldlen)` fold fires on the legacy-csc corpus: csc
+    // emits `ldlen; conv.i4` for every `array.Length` use (the raw ldlen pushes
+    // a native int; the conv.i4 widens it to int32), so the fold fires thousands
+    // of times across the 8000-method sweep. A zero total would mean the fold
+    // stopped firing -- a regression (it is a real-corpus ILAst-cleaning
+    // transform, not faithfulness-only).
+    EXPECT_GT(totalConvOverLdLenFolds, 0)
+        << "VisitConv conv.iN(ldlen) must fold array-length convs on mscorlib";
 }
 
 // RunIfNullableLift MatchCompOrDecimal equality case (LiftCSharpEqualityComparison

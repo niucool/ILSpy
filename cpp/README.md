@@ -476,13 +476,23 @@ implemented and green here. Everything else follows the phase plan in
   `inst.TargetType.IsFloatType() && inst.Argument is Conv conv && conv.Kind ==
   IntToFloat && conv.TargetType == R`; the port's Conv constructor derives the
   InputType from the argument's ResultType, which equals the inner's InputType,
-  and `IsLifted` is dropped -- no nullable-lifting model). The `conv.i4(ldlen)`
-  first VisitConv rewrite is still blocked by the LdLen model divergence (this
-  port's LdLen already returns I4, so the conv is a no-op I4->I4 and
-  `conv.i8(ldlen)` cannot be faithfully rewritten). The fold fires 1 time on
-  the 8000-method mscorlib sweep (the legacy csc emits `conv.r.un` rarely; it
-  fires more on Roslyn-compiled / modern .NET), so it is a real-corpus ILAst-
-  cleaning transform, not faithfulness-only.
+  and `IsLifted` is dropped -- no nullable-lifting model). VisitConv also folds
+  the FIRST rewrite `conv.iN(ldlen array) => ldlen.iN(array)` (conv.i4/conv.i8/
+  conv.i over a native-int `ldlen` folds into a single `LdLen(I4/I8/I, ..)` so
+  the cast does not appear in the output -- the array length is already the
+  target type). This required reconciling the LdLen model: the `LdLen` node now
+  carries a `StackType resultType` field (I for the raw `ldlen` opcode, which
+  pushes a native int; I4/I8 for the synthetic `ldlen.i4`/`ldlen.i8` forms the
+  fold produces), faithful to the C# `LdLen(StackType, ILInstruction)` -- the
+  reader now emits `LdLen(I, array)` for `ldlen` (was a fixed I4). A checked
+  `conv.ovf.iN(ldlen)` folds only when the `AssumeArrayLengthFitsIntoInt32`
+  setting is on (the array length fits in int32). The `conv.iN(ldlen)` fold
+  fires thousands of times across the 8000-method mscorlib sweep (csc emits
+  `ldlen; conv.i4` for every `array.Length` use), so it is a real-corpus
+  ILAst-cleaning transform (the CLI output now has no `(int)array.Length`
+  casts -- the conv is folded into the ldlen before rendering). The `conv.r.un`
+  combining fold fires 1 time on the 8000-method sweep (the legacy csc emits
+  `conv.r.un` rarely; it fires more on Roslyn-compiled / modern .NET).
   The
   remaining 11 per-statement children (DynamicIsEventAssignmentTransform,
   TransformAssignment, NullPropagationStatementTransform,
@@ -494,10 +504,7 @@ implemented and green here. Everything else follows the phase plan in
   option (the ldloca-into-`addressof` path the C# second pass enables, which
   needs an `AddressOf` node + `IsGeneratedTemporaryForAddressOf` +
   `ClassifyExpression`) are deferred, as are the rest of `ExpressionTransforms`
-  (the NullableLifting call, the VisitConv `conv.i4(ldlen)` first rewrite (still
-  blocked by the LdLen model divergence -- this port's LdLen already returns I4;
-  the `conv.rN(conv.r.un(...))` combining rewrite is now ported, unblocked by
-  the D85 Conv Kind model), the Call/NewObj/LdObj/StObj/StLoc
+  (the NullableLifting call, the Call/NewObj/LdObj/StObj/StLoc
   `HandleCompoundAssign`, the remaining VisitIfInstruction pieces
   (NullableLifting, UserDefinedLogic,
   `TransformDynamicAddAssignOrRemoveAssign`), the SwitchExpression/Dynamic

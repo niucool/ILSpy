@@ -120,6 +120,12 @@ struct ILTransformSettings {
     // mutate the Throw node's resultType to O so the NullCoalescingInstruction
     // wrapping it has a matching reference-type result.
     bool ThrowExpressions = true;
+    // Whether the decompiler may assume that `ldlen; conv.i4.ovf` does not throw
+    // an overflow exception (array lengths fit into int32). DecompilerSettings.
+    // AssumeArrayLengthFitsIntoInt32 -- default true. Gates the VisitConv
+    // `conv.iN(ldlen)` fold for the checked (`conv.ovf`) variants, so a checked
+    // conv.i4.ovf(ldlen) folds to ldlen.i4 only when the assumption holds.
+    bool AssumeArrayLengthFitsIntoInt32 = true;
 };
 
 class ILTransformContext {

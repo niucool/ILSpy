@@ -103,9 +103,22 @@ TEST(ILAstInstructions, UnaryInstructionsFlagsAndResult) {
     EXPECT_TRUE(HasFlag(th.DirectFlags(), InstructionFlags::EndPointUnreachable));
     EXPECT_EQ(th.ResultType(), StackType::Void);
 
-    LdLen len(std::make_unique<LdNull>());
+    // LdLen carries a StackType resultType (I for the raw `ldlen` opcode, I4
+    // for the synthetic `ldlen.i4`, I8 for `ldlen.i8`); construct each variant
+    // and verify the ResultType + the dump suffix (faithful to the C#
+    // WriteToCore `ldlen.<resultType>(array)`).
+    LdLen len(StackType::I4, std::make_unique<LdNull>());
     EXPECT_TRUE(HasFlag(len.DirectFlags(), InstructionFlags::MayThrow));
     EXPECT_EQ(len.ResultType(), StackType::I4);
+    EXPECT_NE(len.ToString().find("ldlen.I4("), std::string::npos) << len.ToString();
+
+    LdLen lenI(StackType::I, std::make_unique<LdNull>());
+    EXPECT_EQ(lenI.ResultType(), StackType::I);
+    EXPECT_NE(lenI.ToString().find("ldlen.I("), std::string::npos) << lenI.ToString();
+
+    LdLen lenI8(StackType::I8, std::make_unique<LdNull>());
+    EXPECT_EQ(lenI8.ResultType(), StackType::I8);
+    EXPECT_NE(lenI8.ToString().find("ldlen.I8("), std::string::npos) << lenI8.ToString();
 
     Conv conv(std::make_unique<LdcI4>(1), PrimitiveType::I8, false, Sign::None);
     EXPECT_EQ(conv.ResultType(), StackType::I8);

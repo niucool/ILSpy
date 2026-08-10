@@ -33,6 +33,7 @@
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdcDecimal.hpp"
+#include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
@@ -777,8 +778,33 @@ void ExpressionTransforms::VisitConv(Conv* inst) {
     if (!inst) return;
     // Visit the argument first (the C# `inst.Argument.AcceptVisitor(this)`) so
     // the Comp/StLoc/Box rewrites cascade into the converted expression before
-    // the conv.r.un combining is considered.
+    // the conv.iN(ldlen) / conv.r.un combining is considered.
     if (inst->Argument) Visit(inst->Argument.get());
+
+    // conv.i4(ldlen array) => ldlen.i4(array) (the FIRST VisitConv rewrite,
+    // before the conv.r.un combining). The raw `ldlen` opcode pushes a native
+    // int (StackType::I); a following `conv.iN` to an integer target folds the
+    // conversion into a single LdLen(I4/I8/I) so the cast does not appear in the
+    // output (the array length is already the target type). The C# checks
+    // `inst.Argument.MatchLdLen(StackType.I, out array) && inst.TargetType.
+    // IsIntegerType() && (!inst.CheckForOverflow || AssumeArrayLengthFitsIntoInt32)`.
+    // A checked conv (conv.ovf.i4) may throw on overflow, so it folds only when
+    // the AssumeArrayLengthFitsIntoInt32 setting is on (the array length fits).
+    if (inst->Argument && inst->Argument->Op == OpCode::LdLen &&
+        inst->Argument->ResultType() == StackType::I &&
+        IsIntegerType(inst->TargetType) &&
+        (!inst->CheckForOverflow ||
+         (settings_ && settings_->AssumeArrayLengthFitsIntoInt32))) {
+        auto* ldlenArg = static_cast<LdLen*>(inst->Argument.get());
+        // Detach the array before the old LdLen is destroyed by ReplaceWith
+        // (no GC; a raw pointer to the array would dangle).
+        auto array = ldlenArg->TakeChild(0);
+        auto ldLen = std::make_unique<LdLen>(GetStackType(inst->TargetType),
+                                              std::move(array));
+        inst->ReplaceWith(std::move(ldLen));  // destroys inst + the old LdLen shell
+        // The C# does not RequestRerun here; the argument was already visited.
+        return;
+    }
 
     // conv.r4(conv.r.un(x)) / conv.r8(conv.r.un(x)) -> conv.r4.un(x) /
     // conv.r8.un(x). IL conv.r.un does not indicate whether to convert the target
