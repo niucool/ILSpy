@@ -48,6 +48,7 @@
 #include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
 #include "Decompiler/IL/Transforms/NullPropagationTransform.hpp"
 #include "Decompiler/IL/Transforms/HighLevelLoopTransform.hpp"
+#include "Decompiler/IL/Transforms/CopyPropagation.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
 #include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
@@ -460,6 +461,12 @@ int main(int argc, char** argv) {
                 // StatementTransform and before AssignVariableNames (per
                 // GetILTransforms()).
                 ILSpy::Decompiler::IL::HighLevelLoopTransform::Run(*fn, transformContext);
+                // CopyPropagation: drop dead stores to stack slots and propagate
+                // single-def stack slots assigned from never-assigned parameters
+                // (the argument-to-local copy csc emits). Runs late, after the
+                // StatementTransform + HighLevelLoopTransform (per GetILTransforms:
+                // ProxyCallReplacer, FixRemainingIncrements, CopyPropagation).
+                ILSpy::Decompiler::IL::CopyPropagation().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::AssignVariableNames().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::RemoveRedundantReturn().Run(*fn, transformContext);
                 fn->CheckInvariant(ILSpy::Decompiler::IL::ILPhase::Normal);
