@@ -40,4 +40,5 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/ExpressionTransforms.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/NullPropagationTransform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/NullCoalescingTransform.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Transforms/TransformAssignment.cpp
 )

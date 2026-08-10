@@ -220,4 +220,125 @@ inline KnownTypeCode ToKnownTypeCode(ILSpy::Decompiler::IL::StackType stackType,
     }
 }
 
+// The native-int size in bytes, between Int32 (4) and Int64 (8). Faithful to
+// the C# TypeUtils.NativeIntSize. Pointer-sized types (I/U/Ref, and the IType
+// kinds Pointer/ByReference/Class/NInt/NUInt) report this size from GetSize.
+inline constexpr int kNativeIntSize = 6;
+
+// Port of TypeUtils.GetSize(IType): the size in bytes of a type. Pointer-sized
+// kinds (Pointer/ByReference/Class/NInt/NUInt) report kNativeIntSize; an Enum
+// defers to its underlying type (this minimal port has no per-enum underlying
+// type, so an Enum KnownType falls through to the kind switch and reports
+// kNativeIntSize via the Enum kind not being in the pointer-size list -- the
+// C# unwraps GetEnumUnderlyingType first, which this port does not model, so a
+// KnownType Enum reports 0 unless it is one of the primitive KnownTypeCodes);
+// a KnownType reports its primitive size by KnownTypeCode (1 for Boolean/SByte/
+// Byte, 2 for Char/Int16/UInt16, 4 for Int32/UInt32/Single, kNativeIntSize for
+// IntPtr/UIntPtr, 8 for Int64/UInt64/Double); 0 otherwise (O/F/Void/Unknown).
+inline int GetSize(const IType* type) {
+    if (!type) return 0;
+    switch (type->Kind()) {
+        case TypeKind::Pointer:
+        case TypeKind::ByReference:
+        case TypeKind::Class:
+        case TypeKind::NInt:
+        case TypeKind::NUInt:
+            return kNativeIntSize;
+        case TypeKind::Enum:
+            // The C# unwraps GetEnumUnderlyingType().GetDefinition() and reports
+            // its size; this minimal port has no per-enum underlying type, so an
+            // Enum KnownType falls through to the KnownTypeCode switch below
+            // (which yields 0 for a bare Enum kind). The compound-assignment
+            // validation only consults IsCSharpSmallIntegerType (the KnownTypeCode
+            // switch), so this is the faithful best-effort.
+            break;
+        default:
+            break;
+    }
+    if (const auto* k = dynamic_cast<const KnownType*>(type)) {
+        switch (k->Code()) {
+            case KnownTypeCode::Boolean:
+            case KnownTypeCode::SByte:
+            case KnownTypeCode::Byte:
+                return 1;
+            case KnownTypeCode::Char:
+            case KnownTypeCode::Int16:
+            case KnownTypeCode::UInt16:
+                return 2;
+            case KnownTypeCode::Int32:
+            case KnownTypeCode::UInt32:
+            case KnownTypeCode::Single:
+                return 4;
+            case KnownTypeCode::IntPtr:
+            case KnownTypeCode::UIntPtr:
+                return kNativeIntSize;
+            case KnownTypeCode::Int64:
+            case KnownTypeCode::UInt64:
+            case KnownTypeCode::Double:
+                return 8;
+            default:
+                return 0;
+        }
+    }
+    return 0;
+}
+
+// Port of TypeUtils.IsSmallIntegerType(IType): a small integer type is one
+// whose size is greater than 0 and less than 4 bytes (Boolean/SByte/Byte/Char/
+// Int16/UInt16, and enums with such an underlying type). The TransformAssignment
+// UnwrapSmallIntegerConv + the small-integer store-type guards consult this.
+inline bool IsSmallIntegerType(const IType* type) {
+    int size = GetSize(type);
+    return size > 0 && size < 4;
+}
+
+// Port of TypeUtils.IsCSharpSmallIntegerType(IType): whether the type is a C#
+// small integer (byte/sbyte/short/ushort). Unlike the ILAst IsSmallIntegerType,
+// C# does not consider bool, char or enums to be small integers. The compound-
+// assignment validation consults this to decide whether a small-integer LHS
+// requires the binary to be signed (C# numeric-promotes a small integer to int).
+inline bool IsCSharpSmallIntegerType(const IType* type) {
+    if (const auto* k = dynamic_cast<const KnownType*>(type)) {
+        switch (k->Code()) {
+            case KnownTypeCode::Byte:
+            case KnownTypeCode::SByte:
+            case KnownTypeCode::Int16:
+            case KnownTypeCode::UInt16:
+                return true;
+            default:
+                break;
+        }
+    }
+    return false;
+}
+
+// Port of TransformAssignment.SwapSign: the type with the opposite sign for a
+// primitive integer type (I1<->U1, I2<->U2, I4<->U4, I8<->U8, I<->U). Returns a
+// fresh KnownType for the opposite-sign KnownTypeCode, or nullptr for a type
+// with no opposite sign (the C# throws ArgumentException; this port returns
+// nullptr because the callers only consult SwapSign after a sign-mismatch
+// guard, and a nullptr propagates as a no-fold). The compound-assignment
+// post-inc/dec transform consults this to fix a conv sign mismatch against the
+// store type.
+inline ITypePtr SwapSign(const IType* type) {
+    using ILSpy::Decompiler::IL::PrimitiveType;
+    if (!type) return nullptr;
+    const auto pt = ToPrimitiveType(type);
+    KnownTypeCode target = KnownTypeCode::None;
+    switch (pt) {
+        case PrimitiveType::I1: target = KnownTypeCode::Byte; break;
+        case PrimitiveType::I2: target = KnownTypeCode::UInt16; break;
+        case PrimitiveType::I4: target = KnownTypeCode::UInt32; break;
+        case PrimitiveType::I8: target = KnownTypeCode::UInt64; break;
+        case PrimitiveType::U1: target = KnownTypeCode::SByte; break;
+        case PrimitiveType::U2: target = KnownTypeCode::Int16; break;
+        case PrimitiveType::U4: target = KnownTypeCode::Int32; break;
+        case PrimitiveType::U8: target = KnownTypeCode::Int64; break;
+        case PrimitiveType::I:  target = KnownTypeCode::UIntPtr; break;
+        case PrimitiveType::U:  target = KnownTypeCode::IntPtr; break;
+        default: return nullptr;
+    }
+    return std::make_shared<KnownType>(target);
+}
+
 } // namespace ILSpy::Decompiler::TypeSystem

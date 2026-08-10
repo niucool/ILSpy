@@ -17,6 +17,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/TypeName_Test.cpp
     Decompiler/TypeSystem/SignatureDecoder_Test.cpp
     Decompiler/TypeSystem/TypeKindDerivation_Test.cpp
+    Decompiler/TypeSystem/TypeUtils_Test.cpp
     Decompiler/IL/ILAst_Test.cpp
     Decompiler/IL/ILAstInstructions_Test.cpp
     Decompiler/IL/ILReader_Test.cpp
@@ -65,6 +66,7 @@ add_executable(ilspy_tests
     Decompiler/IL/Instructions/ThreeValuedBoolInstructions_Test.cpp
     Decompiler/IL/Transforms/NullCoalescingTransform_Test.cpp
     Decompiler/IL/Transforms/NullPropagationTransform_Test.cpp
+    Decompiler/IL/Transforms/TransformAssignment_Test.cpp
 )
 target_link_libraries(ilspy_tests PRIVATE
     ILSpy::ilspy

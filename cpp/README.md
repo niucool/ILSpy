@@ -1199,6 +1199,19 @@ implemented and green here. Everything else follows the phase plan in
   from the StLoc pattern at the text level; this node is the ILAst-level
   representation the future `HandleCompoundAssign` produces for the real back
   end).
+  The `TransformAssignment` foundation (the next in-order per-statement child
+  of StatementTransform, after the `NumericCompoundAssign` node) adds the
+  self-contained helpers the compound-assignment folds consult: the
+  type-system queries `GetSize` / `IsSmallIntegerType` / `GetSign` on
+  `PrimitiveType` (mirroring `ILTypeExtensions.cs`) and `GetSize` /
+  `IsSmallIntegerType` / `IsCSharpSmallIntegerType` / `SwapSign` on `IType`
+  (mirroring `TypeUtils.cs`), plus the `UnwrapSmallIntegerConv` transform
+  helper (`TransformAssignment.{hpp,cpp}`, mirroring the C# helper of the
+  same name) that peels the compiler's `conv` truncation to a small integer a
+  compound assign to a small-integer local/field carries. Tested-but-not-
+  yet-wired (the `MatchInstruction` / `UsingInstruction` / `NumericCompoundAssign`
+  precedent); no pipeline transform constructs the helper yet, so `--csharp`
+  output is unchanged.
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
   walk + a corpus probe; the async/iterator state machines
@@ -1208,12 +1221,19 @@ implemented and green here. Everything else follows the phase plan in
   the PatternMatchingTransform recursive sub-patterns (DetectPropertySubPatterns /
   PropertyOrFieldAccess / CompatibleExitInstruction),
   HighLevelLoopTransform (while/for), and the remaining StatementTransform
-  per-statement children (TransformAssignment -- now unblocked on the
-  `NumericCompoundAssign` node side; the `HandleCompoundAssign` transform itself
-  still needs `IsCompoundStore` / `IsMatchingCompoundLoad` / `UnwrapSmallIntegerConv` /
-  `ValidateCompoundAssign` + the BNI Sign/input-type reconciliation + `RecombineVariables`,
-  ...) are
-  the subsequent in-order targets.
+  per-statement children (the full `TransformAssignment` -- the `HandleCompoundAssign` /
+  `TransformPostIncDecOperator` / `TransformPostIncDecOperatorWithInlineStore` folds,
+  now unblocked on the `NumericCompoundAssign` node + `UnwrapSmallIntegerConv` +
+  the type-system helpers side; the transform itself still needs `IsCompoundStore`
+  [needs `InferType` for the StObj case + `IsSameMember` for the Call case +
+  `Variable.Kind` for the StLoc case] / `IsMatchingCompoundLoad` [needs
+  `RecombineVariables` + getter/setter `IMethod`/`AccessorOwner`] /
+  `ValidateCompoundAssign` [needs `NumericCompoundAssign.IsBinaryCompatibleWithType`,
+  which needs the BNI `Sign` + `IsImplicitTruncation`] + the BNI Sign/input-type
+  reconciliation [a contained model change D125 flagged as deferred] +
+  `RecombineVariables` [the finalizeMatch for the StLoc case] + the per-variable
+  store-list tree walk [the repeatedly-deferred infrastructure piece], ...)
+  are the subsequent in-order targets.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end. It now produces readable C#: real parameter names (Param
