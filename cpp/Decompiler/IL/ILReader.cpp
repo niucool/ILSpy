@@ -88,6 +88,14 @@ ITypePtr TypeOfValue(const ILInstruction* inst) {
         return std::make_shared<KnownType>(KnownTypeCode::String);
     if (auto* ln = dynamic_cast<const LdNull*>(inst))
         return std::make_shared<KnownType>(KnownTypeCode::Object);
+    if (auto* c = dynamic_cast<const LdcI4*>(inst))
+        return std::make_shared<KnownType>(KnownTypeCode::Int32);
+    if (dynamic_cast<const LdcI8*>(inst))
+        return std::make_shared<KnownType>(KnownTypeCode::Int64);
+    if (dynamic_cast<const LdcF4*>(inst))
+        return std::make_shared<KnownType>(KnownTypeCode::Single);
+    if (dynamic_cast<const LdcF8*>(inst))
+        return std::make_shared<KnownType>(KnownTypeCode::Double);
     return nullptr;
 }
 
