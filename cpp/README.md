@@ -571,9 +571,15 @@ implemented and green here. Everything else follows the phase plan in
   matches the reference-type value. The hoisted-constructor-argument null guard
   (needs `ILFunction.Method` metadata + `ILInlining.IsInConstructorInitializer`)
   and the value-types throw-expression (needs `MatchLogicNot` /
-  `MatchHasValueCall` wiring + `ILInlining.FindLoadInNext` with a movable
-  expression -- the FindLoadInNext helper is file-local in ILInlining.cpp and
-  not yet exposed) are still deferred. The reference-type `??` lowering is a
+  `MatchHasValueCall` wiring + the fold logic + a corpus probe) -- the shared
+  prerequisite `ILInlining.FindLoadInNext` (with the `FindResultType` /
+  `FindResult` types) is now exposed as a public free function in
+  `ILInlining.hpp`, faithfully returning `Found` for both `LdLoc(v)` and
+  `LdLoca(v)` (the C# returns `Found` for both; the prior port returned `Stop`
+  for `LdLoca(v)`); `InlineOneIfPossible` gates on the found load being an
+  `LdLoc` to preserve the deferred ldloca-into-addressof behavior. These two
+  throw-expression folds are still deferred -- the next in-order
+  NullCoalescingTransform targets. The reference-type `??` lowering is a
   Roslyn-era codegen pattern; a corpus probe across 8000 mscorlib methods found
   1797 `comp(eq, ldloc X, ldnull)` null-check ifs and 513 `comp(ne, ..)` but zero
   whose arm is a StLoc to the same variable, so the transform fires 0 times on

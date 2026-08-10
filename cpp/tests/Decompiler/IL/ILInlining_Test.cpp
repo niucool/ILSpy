@@ -35,6 +35,7 @@
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 
@@ -178,6 +179,121 @@ TEST(ILInlining, DoesNotInlineMultiUseVariable) {
     auto* st = dynamic_cast<StLoc*>(only->Instructions[0].get());
     ASSERT_NE(st, nullptr);
     EXPECT_EQ(st->Variable->Name, "V_0");
+}
+
+// FindLoadInNext is the search for the single load of a variable inside an
+// instruction subtree, into which an expression can be inlined. It is exposed
+// (in ILInlining.hpp) so other per-statement transforms (NullCoalescingTransform's
+// value-types throw-expression fold and the hoisted-constructor-argument null
+// guard) can locate the use they redirect -- the prerequisite the D111
+// NullCoalescingTransform throw-expression port flagged as deferred. These unit
+// tests pin the faithful contract: Found for both an LdLoc(v) and an LdLoca(v)
+// match (the C# returns Found for both; the CALLER gates whether an ldloca can
+// actually be inlined).
+
+// An LdLoc(v) nested as a call argument is found: FindLoadInNext returns Found
+// and reports the load.
+TEST(ILInlining, FindLoadInNextFindsLdLocOfVariable) {
+    auto v = MakeVar(VariableKind::Local, "v", 0);
+    auto call = std::make_unique<Call>("System.Object::Equals");
+    call->AddArg(std::make_unique<LdLoc>(v));
+    call->AddArg(std::make_unique<LdcI4>(1));
+    call->ReturnType = StackType::I4;
+    auto* callPtr = call.get();
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::make_unique<Block>());
+    fn->Body->Blocks[0]->Add(std::move(call));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto moved = std::make_unique<LdcI4>(99);  // a pure expression being moved
+    FindResult r = FindLoadInNext(callPtr, v.get(), moved.get());
+    EXPECT_EQ(r.type, FindResultType::Found);
+    ASSERT_NE(r.loadInst, nullptr);
+    EXPECT_EQ(r.loadInst->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(r.loadInst)->Variable.get(), v.get());
+}
+
+// An LdLoca(v) nested as a call argument is found: FindLoadInNext returns Found
+// and reports the ldloca. This is the faithful change -- the prior port returned
+// Stop for an LdLoca(v) match, but the C# returns Found for both LdLoc(v) and
+// LdLoca(v); the caller decides whether the ldloca can be inlined.
+TEST(ILInlining, FindLoadInNextFindsLdLocaOfVariable) {
+    auto v = MakeVar(VariableKind::Local, "v", 0);
+    auto call = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    call->AddArg(std::make_unique<LdLoca>(v));
+    call->ReturnType = StackType::I4;
+    auto* callPtr = call.get();
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::make_unique<Block>());
+    fn->Body->Blocks[0]->Add(std::move(call));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto moved = std::make_unique<LdcI4>(99);
+    FindResult r = FindLoadInNext(callPtr, v.get(), moved.get());
+    EXPECT_EQ(r.type, FindResultType::Found)
+        << "an LdLoca(v) must be Found, faithful to the C# (the caller gates the "
+           "ldloca inline)";
+    ASSERT_NE(r.loadInst, nullptr);
+    EXPECT_EQ(r.loadInst->Op, OpCode::LdLoca);
+    EXPECT_EQ(static_cast<LdLoca*>(r.loadInst)->Variable.get(), v.get());
+}
+
+// A null expression aborts the search with Stop.
+TEST(ILInlining, FindLoadInNextReturnsStopForNullExpression) {
+    auto v = MakeVar(VariableKind::Local, "v", 0);
+    auto moved = std::make_unique<LdcI4>(99);
+    FindResult r = FindLoadInNext(nullptr, v.get(), moved.get());
+    EXPECT_EQ(r.type, FindResultType::Stop);
+    EXPECT_EQ(r.loadInst, nullptr);
+}
+
+// Regression guard: a variable used once via ldloca (StoreCount 1, LoadCount 0,
+// AddressCount 1) is NOT inlined by InlineOneIfPossible. The ldloca-into-
+// addressof path is deferred (needs an AddressOf node +
+// IsGeneratedTemporaryForAddressOf), so the found LdLoca must be skipped and the
+// stloc must survive. This pins that the LdLoca->Found change plus the
+// InlineOneIfPossible LdLoc-gate preserve the prior "don't inline ldloca"
+// behavior.
+TEST(ILInlining, DoesNotInlineLdLocaOnlyVariable) {
+    auto v = MakeVar(VariableKind::Local, "v", 0);
+    auto a = MakeVar(VariableKind::Parameter, "a", 1);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(v, std::make_unique<LdLoc>(a)));
+    // The single use of v is an ldloca inside a call in the block's final Leave.
+    auto call = std::make_unique<Call>("System.Nullable`1::get_HasValue");
+    call->AddArg(std::make_unique<LdLoca>(v));
+    call->ReturnType = StackType::I4;
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(
+        std::make_unique<Leave>(fn->Body.get(), std::move(call)));
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(a);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ILInlining().Run(*fn, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+
+    const auto& only = fn->Body->Blocks[0];
+    EXPECT_EQ(only->Instructions.size(), 1u)
+        << "the stloc v must survive (ldloca use is not inlined)";
+    auto* st = dynamic_cast<StLoc*>(only->Instructions[0].get());
+    ASSERT_NE(st, nullptr);
+    EXPECT_EQ(st->Variable.get(), v.get());
+    // The ldloca v survives inside the Leave's call value.
+    auto* leave = dynamic_cast<Leave*>(only->FinalInstruction.get());
+    ASSERT_NE(leave, nullptr);
+    ASSERT_NE(leave->Value, nullptr);
+    ASSERT_EQ(leave->Value->Op, OpCode::Call);
+    auto* c = static_cast<Call*>(leave->Value.get());
+    ASSERT_EQ(c->Arguments.size(), 1u);
+    EXPECT_EQ(c->Arguments[0]->Op, OpCode::LdLoca)
+        << "the ldloca v must survive (not inlined)";
+    EXPECT_EQ(static_cast<LdLoca*>(c->Arguments[0].get())->Variable.get(), v.get());
 }
 
 TEST(ILInlining, InliningOnMscorlibReducesVariableCount) {

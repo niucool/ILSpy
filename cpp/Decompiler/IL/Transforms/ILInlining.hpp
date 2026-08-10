@@ -43,6 +43,8 @@
 namespace ILSpy::Decompiler::IL {
 
 class Block;
+class ILInstruction;
+class ILVariable;
 
 // Inline the StLoc at `pos` into the next instruction's load of its variable,
 // or remove it as a dead store. A free function mirroring the C#
@@ -53,6 +55,35 @@ class Block;
 // NullCoalescingTransform) can call it after a fold that opens up an inlining
 // opportunity, matching the C#.
 bool InlineOneIfPossible(Block* block, int pos, ILTransformContext& ctx);
+
+// Result of ILInlining::FindLoadInNext -- the search for the single load of a
+// variable inside an instruction subtree, into which an expression can be
+// inlined. Faithful to the C# ILInlining.FindResultType / FindResult (subset:
+// no NamedArgument / Deconstruction, which need SlotInfo / named-argument and
+// deconstruct infrastructure this port defers).
+//
+//   Found    -- a load of the variable was found; inlining is possible (the
+//               caller decides whether the load's slot permits it).
+//   Stop     -- the load was not found and re-ordering is not possible; abort.
+//   Continue -- the load was not found but the expression can be re-ordered
+//               past the tested subtree; keep searching.
+enum class FindResultType { Found, Stop, Continue };
+struct FindResult {
+    FindResultType type;
+    ILInstruction* loadInst;  // the ldloc/ldloca found (valid when type == Found)
+};
+
+// Find the single load of `v` (an LdLoc or an LdLoca) inside `expr` that can be
+// replaced by `expressionBeingMoved`, mirroring ILInlining.FindLoadInNext.
+// Returns Found for both an LdLoc(v) and an LdLoca(v) match (faithful to the C#,
+// which returns Found for both -- the CALLER gates whether an ldloca can
+// actually be inlined; this port defers the ldloca-into-addressof path, so the
+// inlining caller InlineOneIfPossible skips an LdLoca found). Exposed so other
+// per-statement transforms (NullCoalescingTransform's value-types throw-
+// expression fold and the hoisted-constructor-argument null guard) can locate
+// the use they redirect, matching the C# static call.
+FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
+                          ILInstruction* expressionBeingMoved);
 
 class ILInlining : public IILTransform, public IStatementTransform {
 public:

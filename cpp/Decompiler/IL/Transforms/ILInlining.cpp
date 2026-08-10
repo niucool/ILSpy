@@ -44,16 +44,14 @@ bool VariableCanBeUsedForInlining(const ILVariable* v) {
     return true;
 }
 
-// Result of searching for the load of `v` inside an instruction subtree.
-enum class FindResultType { Found, Stop, Continue };
-struct FindResult {
-    FindResultType type;
-    LdLoc* loadInst;  // valid when type == Found
-};
+} // namespace
 
-// Find the single LdLoc(v) inside `expr` that can be replaced by
-// `expressionBeingMoved`. Mirrors ILInlining.FindLoadInNext (subset: no SlotInfo
-// restrictions, no named-argument handling, no ldloca inlining).
+// Find the single load of `v` (an LdLoc or an LdLoca) inside `expr` that can be
+// replaced by `expressionBeingMoved`. Mirrors ILInlining.FindLoadInNext (subset:
+// no SlotInfo restrictions, no named-argument handling). Faithful to the C#,
+// which returns Found for both an LdLoc(v) and an LdLoca(v) match; the caller
+// gates whether an ldloca can actually be inlined (this port defers the
+// ldloca-into-addressof path, so InlineOneIfPossible skips an LdLoca found).
 FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
                           ILInstruction* expressionBeingMoved) {
     if (!expr) return {FindResultType::Stop, nullptr};
@@ -66,7 +64,7 @@ FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
     }
     if (expr->Op == OpCode::LdLoca) {
         auto* lda = static_cast<LdLoca*>(expr);
-        if (lda->Variable.get() == v) return {FindResultType::Stop, nullptr};
+        if (lda->Variable.get() == v) return {FindResultType::Found, lda};
         if (MayReorder(expressionBeingMoved->Flags(), expr->Flags()))
             return {FindResultType::Continue, nullptr};
         return {FindResultType::Stop, nullptr};
@@ -80,8 +78,6 @@ FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
     return {FindResultType::Stop, nullptr};
 }
 
-} // namespace
-
 // Try to inline the StLoc at `pos` into the next instruction's load of its
 // variable, or remove it if dead. Returns true if the stloc was consumed.
 // `pos` may be out of range after a prior removal shrank the block (the
@@ -92,8 +88,9 @@ FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
 // per-statement transforms (NullCoalescingTransform, ...) can call it after a
 // fold that opens up an inlining opportunity -- mirroring the C#
 // `ILInlining.InlineOneIfPossible(block, pos, InliningOptions.None, ctx)` static
-// call. The helpers it uses (VariableCanBeUsedForInlining / FindLoadInNext) are
-// in the anonymous namespace above and visible here.
+// call. The helper it uses (VariableCanBeUsedForInlining) is in the anonymous
+// namespace above and visible here; FindLoadInNext is also at namespace scope
+// (declared in the header) so other transforms can call it directly.
 bool InlineOneIfPossible(Block* block, int pos, ILTransformContext& ctx) {
     if (pos < 0 || static_cast<std::size_t>(pos) >= block->Instructions.size()) return false;
     auto* stloc = dynamic_cast<StLoc*>(block->Instructions[static_cast<std::size_t>(pos)].get());
@@ -112,7 +109,14 @@ bool InlineOneIfPossible(Block* block, int pos, ILTransformContext& ctx) {
             next = block->FinalInstruction.get();
         auto value = stloc->TakeChild(0);
         FindResult r = FindLoadInNext(next, v, value.get());
-        if (r.type == FindResultType::Found && r.loadInst) {
+        // Only inline an LdLoc found. An LdLoca found is the deferred
+        // ldloca-into-addressof path (needs an AddressOf node +
+        // IsGeneratedTemporaryForAddressOf, not yet ported): skip it and fall
+        // through to the dead-store check, preserving the prior LdLoca->Stop
+        // behavior. Faithful to the C# DoInline, which gates an LdLoca found on
+        // IsGeneratedTemporaryForAddressOf (always false in this port).
+        if (r.type == FindResultType::Found && r.loadInst
+            && r.loadInst->Op == OpCode::LdLoc) {
             ctx.StepOnce("Inline variable");
             r.loadInst->ReplaceWith(std::move(value));
             block->RemoveInstructionAt(static_cast<std::size_t>(pos));
