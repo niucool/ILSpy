@@ -186,9 +186,8 @@ bool IsImplicitTruncation(const ILInstruction* value,
 // -> `stloc tmp(compound.assign.add.old(ldloca target, ldc.i4 1))` = `tmp =
 // target++`), the simplest wired fold the D131 helpers unblock. The operator-call
 // (op_Increment/op_Decrement) case (needs the UserDefinedCompoundAssign node +
-// Call.IsLifted) and the TransformInlineAssignment* / TransformPostIncDecOperator /
-// TransformPreIncDecOperatorWithInlineStore StObj/Call cases (need InferType /
-// IsSameMember / IMethod) are deferred.
+// Call.IsLifted) and the TransformInlineAssignment* / TransformPreIncDecOperatorWithInlineStore
+// StObj/Call cases (need InferType / IsSameMember / IMethod) are deferred.
 class TransformAssignment : public IStatementTransform {
 public:
 	void Run(Block& block, int pos, StatementTransformContext& context) override;
@@ -204,6 +203,19 @@ private:
 	// fired.
 	bool TransformPostIncDecOperatorWithInlineStore(Block& block, int pos,
 	                                                StatementTransformContext& context);
+
+	// TransformPostIncDecOperator (binary, non-inline-store case): folds the
+	// two-instruction post-increment/decrement
+	//   stloc tmp(ldloc target)              at Instructions[i]
+	//   stloc target(binary.op(ldloc tmp, 1)) at Instructions[i+1]
+	// into `stloc tmp(NumericCompoundAssign.op.old(ldloca target, 1))` (= `tmp =
+	// target++`), and removes the store at i+1. When tmp is dead (single-def,
+	// load-count 0), the StLoc is replaced with the compound assign directly (a
+	// statement-level `target++`). The legacy csc emits this two-instruction shape
+	// for local post-increments (the WithInlineStore expression form is Roslyn-era).
+	// Returns true if a fold fired.
+	bool TransformPostIncDecOperator(Block& block, int pos,
+	                                 StatementTransformContext& context);
 };
 
 } // namespace ILSpy::Decompiler::IL

@@ -1377,6 +1377,26 @@ implemented and green here. Everything else follows the phase plan in
   StObj/Call cases (need `InferType` / `IsSameMember` / `IMethod`) are the
   subsequent in-order targets], ...)
   are the subsequent in-order targets.
+  The `TransformPostIncDecOperator` (non-inline-store, the two-instruction
+  `stloc tmp(ldloc target)` + `stloc target(binary.op(ldloc tmp, 1))` local
+  post-increment/decrement fold) is now PORTED (D133, wired into the
+  StatementTransform Run dispatch after the WithInlineStore fold, matching the
+  C# GetILTransforms() order). It folds the legacy-csc / Roslyn post-increment
+  codegen into `stloc tmp(target++)` (or a bare `target++` when tmp is dead), and
+  the store at the next position is removed; a `ComputeVariableUsage` recompute
+  after the removal gives the correct `LoadCount` for the dead-tmp check (the C#
+  InstructionCollection ref-counting cascades `Disconnected()` through the
+  removed store to the `ldloc tmp` inside it, decrementing `tmp.LoadCount`;
+  this port has no ref-counting, so the stored counts are stale). A corpus probe
+  found 16 occurrences of the two-instruction shape across 8000 mscorlib methods
+  (the WithInlineStore expression form fires 0 times), so the fold is a
+  real-corpus transform -- the CLI `--csharp` output now has `++`/`--` operators
+  (2446 lines) instead of the `V = V + 1` form, a readability improvement. The
+  operator-call (`op_Increment`/`op_Decrement`) case (needs
+  `UserDefinedCompoundAssign` + `Call.IsLifted`) and the
+  `TransformInlineAssignmentStObjOrCall` / `TransformInlineAssignmentLocal` /
+  `TransformPreIncDecOperatorWithInlineStore` StObj/Call cases (need
+  `InferType` / `IsSameMember` / `IMethod`) are the subsequent in-order targets.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end. It now produces readable C#: real parameter names (Param

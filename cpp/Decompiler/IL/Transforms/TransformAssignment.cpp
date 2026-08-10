@@ -24,6 +24,7 @@
 #include "Decompiler/IL/Transforms/TransformAssignment.hpp"
 
 #include "Decompiler/IL/ConversionKind.hpp"
+#include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
@@ -376,13 +377,14 @@ bool IsLdcOne(const ILInstruction* inst) {
 void TransformAssignment::Run(Block& block, int pos, StatementTransformContext& context) {
     // The C# gates the inline-assignment folds on MakeAssignmentExpressions and
     // the inc/dec folds on IntroduceIncrementAndDecrement (both must be true for
-    // a compound assign). TransformPostIncDecOperatorWithInlineStore is an
-    // inc/dec fold, so it is gated on IntroduceIncrementAndDecrement (the C#
-    // also requires MakeAssignmentExpressions for the other folds, but the
-    // inc/dec-only gate is faithful for this subset).
+    // a compound assign). TransformPostIncDecOperatorWithInlineStore and
+    // TransformPostIncDecOperator are inc/dec folds, so they are gated on
+    // IntroduceIncrementAndDecrement (the C# also requires MakeAssignmentExpressions
+    // for the other folds, but the inc/dec-only gate is faithful for this subset).
     if (!context.Base.Settings.IntroduceIncrementAndDecrement)
         return;
-    if (TransformPostIncDecOperatorWithInlineStore(block, pos, context))
+    if (TransformPostIncDecOperatorWithInlineStore(block, pos, context) ||
+        TransformPostIncDecOperator(block, pos, context))
         context.RequestRerunCurrentPosition();
 }
 
@@ -485,6 +487,147 @@ bool TransformAssignment::TransformPostIncDecOperatorWithInlineStore(
     // (with its now-null-Right binary and the inline-store StLoc) is destroyed.
     ILVariablePtr tmpVar = stloc->Variable;
     block.SetChild(pos, std::make_unique<StLoc>(tmpVar, std::move(nca)));
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// TransformPostIncDecOperator (D133): the non-inline-store local/StLoc
+// post-increment/decrement fold. The C# comment:
+//   stloc tmp(ldloc target)
+//   stloc target(binary.op(ldloc tmp, ldc.i4 1))
+// -->
+//   stloc tmp(compound.op.old(ldloca target, ldc.i4 1))
+// This pattern occurs with legacy csc for static fields, and with Roslyn for most
+// post-increments (the WithInlineStore expression form is Roslyn-era). When tmp
+// is dead (single-def, load-count 0), the StLoc is replaced with the compound
+// assign directly (a statement-level `target++`). The operator-call
+// (op_Increment/op_Decrement) case (needs UserDefinedCompoundAssign +
+// Call.IsLifted) and the StObj/Call compound-store cases (need InferType /
+// IsSameMember / IMethod) are deferred.
+// ---------------------------------------------------------------------------
+bool TransformAssignment::TransformPostIncDecOperator(
+    Block& block, int pos, StatementTransformContext& context) {
+    // inst = block.Instructions[pos] as StLoc -- the tmp store whose Value is the
+    // load of target (stloc tmp(ldloc target)).
+    if (pos < 0 || static_cast<std::size_t>(pos) >= block.Instructions.size())
+        return false;
+    auto* inst = dynamic_cast<StLoc*>(block.Instructions[static_cast<std::size_t>(pos)].get());
+    if (!inst || !inst->Variable) return false;
+    // store = block.Instructions[pos+1] -- the compound store (stloc target(binary.op(ldloc tmp, 1))).
+    const std::size_t nextIdx = static_cast<std::size_t>(pos) + 1;
+    if (nextIdx >= block.Instructions.size()) return false;
+    ILInstruction* store = block.Instructions[nextIdx].get();
+    if (!store) return false;
+    ILVariablePtr tmpVar = inst->Variable;
+
+    // IsCompoundStore: the store is a stloc V(...) whose Variable is a Local/
+    // Parameter; targetType = V.Type, value = the stored value (a non-owning view).
+    TypeSystem::ITypePtr targetType;
+    ILInstruction* value = nullptr;
+    if (!IsCompoundStore(store, targetType, value)) return false;
+
+    // CheckImplicitTruncation: the inst.Value (ldloc target) must not be
+    // implicitly truncated for the store's target type. For a non-small-integer
+    // target type (the common int case), this returns ValuePreserved immediately.
+    // For a small-integer target, the conservative else-branch returns
+    // ValueChanged (no InferType), so the fold is rejected.
+    const auto truncation =
+        CheckImplicitTruncation(inst->Value.get(), targetType.get(), false);
+    if (truncation == ImplicitTruncationResult::ValueChanged) return false;
+    if (truncation == ImplicitTruncationResult::ValueChangedDueToSignMismatch) {
+        // The sign-mismatch case is only fixable when the store is a StObj whose
+        // Type equals targetType (the C# swaps stObj.Type). For the StLoc case the
+        // store is not a StObj, so the truncation cannot be fixed -- bail.
+        return false;
+    }
+
+    // IsMatchingCompoundLoad: the load (inst.Value = ldloc target) and the store
+    // (stloc target) access the same variable, so the compound-assign target is a
+    // fresh LdLoca(target); the finalizeMatch collapses split-fragment variables
+    // via RecombineVariables (a no-op for the common same-variable case).
+    // forbiddenVariable = tmp rejects a match that moves the store over a use of
+    // tmp. The previousInstruction is only consulted by the (deferred) LdObj/StObj
+    // case, so nullptr is faithful here.
+    std::unique_ptr<ILInstruction> target;
+    CompoundTargetKind targetKind = CompoundTargetKind::Address;
+    CompoundFinalizeMatch finalizeMatch;
+    if (!IsMatchingCompoundLoad(inst->Value.get(), store, target, targetKind,
+                                finalizeMatch, inst->Variable.get()))
+        return false;
+
+    // UnwrapSmallIntegerConv: peel the compiler's conv truncation to a small
+    // integer that a compound assign to a small-integer local carries.
+    Conv* conv = nullptr;
+    ILInstruction* unwrapped = UnwrapSmallIntegerConv(value, conv);
+    auto* binary = dynamic_cast<BinaryNumericInstruction*>(unwrapped);
+    if (binary == nullptr) {
+        // The operator-call (op_Increment/op_Decrement) case is deferred: it
+        // needs the UserDefinedCompoundAssign node + Call.IsLifted. Bail
+        // conservatively (no fold).
+        return false;
+    }
+    // Only Add/Sub (the ++ / -- operators) are valid post-inc/dec.
+    if (!(binary->Operator == BinaryNumericOperator::Add ||
+          binary->Operator == BinaryNumericOperator::Sub))
+        return false;
+    // binary.Left must be ldloc tmp (the temp capturing the old value of target).
+    auto* bleft = dynamic_cast<LdLoc*>(binary->Left.get());
+    if (!bleft || bleft->Variable.get() != tmpVar.get()) return false;
+    // The PointerType target case (PointerArithmeticOffset.Detect) is deferred;
+    // the D129 validator rejects pointer types conservatively, so a pointer
+    // target would fail ValidateCompoundAssign below anyway.
+    if (!IsLdcOne(binary->Right.get())) return false;
+    // When a small-integer conv was unwrapped, fix a sign mismatch between the
+    // store type and the conv's target by flipping the store type's sign
+    // (SwapSign), so ValidateCompoundAssign's conv-match gate sees the corrected
+    // type. Same as the WithInlineStore case.
+    if (conv != nullptr) {
+        const PrimitiveType primitiveType = TypeSystem::ToPrimitiveType(targetType.get());
+        if (GetSize(primitiveType) == GetSize(conv->TargetType) &&
+            GetSign(primitiveType) != GetSign(conv->TargetType)) {
+            if (auto swapped = TypeSystem::SwapSign(targetType.get()))
+                targetType = std::move(swapped);
+        }
+    }
+    if (!ValidateCompoundAssign(binary, conv, targetType.get(), &context.Base.Settings))
+        return false;
+
+    context.Base.StepOnce("TransformPostIncDecOperator (builtin)");
+    ILFunction* fn = FunctionOf(inst);
+    if (finalizeMatch && fn)
+        finalizeMatch(*fn);
+
+    // Detach the binary's right operand (the constant 1) before the store is
+    // destroyed by RemoveInstructionAt (no GC -- a raw pointer into the store
+    // would dangle).
+    auto rhs = std::move(binary->Right);
+    // Build the NumericCompoundAssign from the binary's fields + the fresh
+    // LdLoca target + the detached constant + the (possibly sign-swapped) store
+    // type, in the EvaluatesToOldValue (post-inc/dec) mode.
+    auto nca = std::make_unique<NumericCompoundAssign>(
+        binary->Operator, binary->CheckForOverflow, binary->Sign,
+        binary->LeftInputType, binary->RightInputType, binary->ResultStackType,
+        binary->IsLifted, targetType, CompoundEvalMode::EvaluatesToOldValue,
+        std::move(target), targetKind, std::move(rhs));
+    // inst.Value = nca (replace the ldloc target with the compound assign).
+    inst->SetChild(0, std::move(nca));
+    // Remove the store at pos+1 (the stloc target(binary.op(ldloc tmp, 1))).
+    // RemoveInstructionAt renumbers the remaining instructions' ChildIndex.
+    block.RemoveInstructionAt(nextIdx);
+    // Recompute variable usage after the removal: the C# InstructionCollection
+    // ref-counting cascades Disconnected() through the removed store to the
+    // `ldloc tmp` inside it, decrementing tmp.LoadCount. This port has no
+    // ref-counting, so the stored counts are stale; a fresh ComputeVariableUsage
+    // (the D64 recompute fixpoint precedent) gives the correct LoadCount for the
+    // dead-tmp check below.
+    if (fn) ComputeVariableUsage(*fn);
+    // If tmp is dead (single-def, load-count 0), the StLoc was a
+    // statement-level post-increment: replace it with the compound assign
+    // directly (a bare `target++`). This matches the C# `inst.ReplaceWith(inst.Value)`.
+    if (tmpVar->IsSingleDefinition() && tmpVar->LoadCount == 0) {
+        auto val = inst->TakeChild(0);  // detach the NCA (inst->Value)
+        inst->ReplaceWith(std::move(val));  // replace the StLoc with the NCA
+    }
     return true;
 }
 
