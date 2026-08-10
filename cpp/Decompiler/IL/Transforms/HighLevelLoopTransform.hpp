@@ -54,6 +54,8 @@ namespace ILSpy::Decompiler::IL {
 class Block;
 class ILInstruction;
 class ILVariable;
+class ILFunction;
+struct ILTransformContext;
 
 // The static helper subset of HighLevelLoopTransform. The full transform (the
 // while/for restructuring) is deferred; only the shape matchers LoopContext and
@@ -87,6 +89,16 @@ public:
     // In this port call/callvirt/newobj all emit a Call node, and the compound-
     // assign nodes are not modeled, so only Call/StLoc/StObj are recognized.
     static bool IsSimpleStatement(ILInstruction* inst);
+
+    // Port of HighLevelLoopTransform.Run (MatchWhileLoop subset): for each Loop
+    // container whose entry point's first instruction is `if (cond) leave loop`
+    // (the while-condition break -- break when cond is true => `while (!cond)`),
+    // transform it into a While container: negate the condition, the leave
+    // becomes the false arm (break), a branch to the body becomes the true arm,
+// and the rest of the entry point is extracted into a body block. MatchForLoop
+// and MatchDoWhileLoop are deferred. Adapted to the if-as-final block model
+// (the if is the entry point's FinalInstruction, not Instructions[Count-2]).
+    static void Run(ILFunction& function, ILTransformContext& context);
 };
 
 } // namespace ILSpy::Decompiler::IL

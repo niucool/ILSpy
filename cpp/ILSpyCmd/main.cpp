@@ -47,6 +47,7 @@
 #include "Decompiler/IL/Transforms/NullCoalescingTransform.hpp"
 #include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
 #include "Decompiler/IL/Transforms/NullPropagationTransform.hpp"
+#include "Decompiler/IL/Transforms/HighLevelLoopTransform.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
 #include "Decompiler/IL/Transforms/LdLocaDupInitObjTransform.hpp"
@@ -452,6 +453,13 @@ int main(int argc, char** argv) {
                         std::make_unique<ILSpy::Decompiler::IL::UserDefinedLogicTransform>());
                     statementTransform.Run(*fn, transformContext);
                 }
+                // HighLevelLoopTransform: turn the `while (true)` + break
+                // structure LoopDetection+ConditionDetection produced into a
+                // `while (cond)` container. MatchWhileLoop subset (MatchForLoop
+                // and MatchDoWhileLoop are deferred). Runs after the
+                // StatementTransform and before AssignVariableNames (per
+                // GetILTransforms()).
+                ILSpy::Decompiler::IL::HighLevelLoopTransform::Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::AssignVariableNames().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::RemoveRedundantReturn().Run(*fn, transformContext);
                 fn->CheckInvariant(ILSpy::Decompiler::IL::ILPhase::Normal);

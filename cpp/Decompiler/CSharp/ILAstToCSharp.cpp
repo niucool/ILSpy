@@ -203,6 +203,36 @@ private:
     }
 
     void EmitContainer(const BlockContainer& container, int indent) {
+        if (container.Kind == ContainerKind::While && !container.Blocks.empty()) {
+            // A while container: the entry point's FinalInstruction is the
+            // while condition `if (cond) br body else leave(loop)`. Render as
+            // `while (cond) { body }` -- the condition from the if, the body
+            // from the blocks after the entry.
+            const Block* header = container.Blocks.front().get();
+            std::string cond = "(default)";
+            if (header && header->FinalInstruction &&
+                header->FinalInstruction->Op == OpCode::IfInstruction) {
+                const auto& iff = static_cast<const IfInstruction&>(*header->FinalInstruction);
+                if (iff.Condition) cond = Expr(*iff.Condition);
+            }
+            Line(indent, "while (" + cond + ")");
+            Line(indent, "{");
+            // The body is every block after the entry point.
+            for (std::size_t i = 1; i < container.Blocks.size(); ++i) {
+                const auto& block = container.Blocks[i];
+                if (!block) continue;
+                // Drop a trailing back-edge branch to the entry (implicit iter).
+                bool dropFinal = false;
+                if (block->FinalInstruction &&
+                    block->FinalInstruction->Op == OpCode::Branch) {
+                    auto* br = static_cast<Branch*>(block->FinalInstruction.get());
+                    if (br->TargetBlock == header) dropFinal = true;
+                }
+                EmitBlock(*block, indent + 1, dropFinal);
+            }
+            Line(indent, "}");
+            return;
+        }
         if (container.Kind == ContainerKind::Loop && !container.Blocks.empty()) {
             // A loop container renders as `while (true) { ... }`; the back-edge
             // branch to the header (the first block) is implicit -- the loop

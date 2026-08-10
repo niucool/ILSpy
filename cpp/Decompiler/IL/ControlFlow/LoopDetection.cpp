@@ -21,6 +21,7 @@
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 
@@ -79,6 +80,34 @@ void ConstructLoop(BlockContainer* parent, FlowAnalysis::ControlFlowNode* header
         newEntryPointPtr->SetFinal(std::move(oldEntryPoint->FinalInstruction));
     oldEntryPoint->RenumberChildren();
     newEntryPointPtr->RenumberChildren();
+
+    // The new entry point (the loop header) may carry the while-condition as
+    // its FinalInstruction: `if (cond) br body` with no else. The fall-through
+    // (cond false) is the loop exit, but after the body blocks are moved into
+    // the container the fall-through would go to the body (the next block) --
+    // losing the exit. Materialize it: if the if's true arm branches to a block
+    // that will be inside the loop, add a `leave(loop)` as the false arm so the
+    // exit path is an explicit break. (The body blocks haven't been moved yet,
+    // but `loop` tells us which blocks end up inside.)
+    if (auto* iff = dynamic_cast<IfInstruction*>(newEntryPointPtr->FinalInstruction.get())) {
+        if (!iff->FalseInst && iff->TrueInst && iff->TrueInst->Op == OpCode::Branch) {
+            auto* br = static_cast<Branch*>(iff->TrueInst.get());
+            Block* tgt = br->TargetBlock;
+            if (tgt) {
+                bool tgtInLoop = false;
+                for (auto* n : loop) {
+                    if (n != headerNode && static_cast<Block*>(n->UserData) == tgt) {
+                        tgtInLoop = true; break;
+                    }
+                }
+                if (tgtInLoop) {
+                    iff->FalseInst = std::make_unique<Leave>(loopPtr);
+                    iff->FalseInst->Parent = iff;
+                    iff->FalseInst->ChildIndex = 2;
+                }
+            }
+        }
+    }
 
     oldEntryPoint->Add(std::move(loopContainer));
     {

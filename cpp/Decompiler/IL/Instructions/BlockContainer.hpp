@@ -34,6 +34,7 @@ namespace ILSpy::Decompiler::IL {
 enum class ContainerKind : std::uint8_t {
     Normal,
     Loop,
+    While,
     Switch,
 };
 

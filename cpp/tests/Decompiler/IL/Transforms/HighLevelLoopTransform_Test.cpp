@@ -24,6 +24,7 @@
 // on; the full HighLevelLoopTransform is deferred.
 
 #include "Decompiler/IL/Transforms/HighLevelLoopTransform.hpp"
+#include "Decompiler/IL/Transforms/IILTransform.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
@@ -32,6 +33,7 @@
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
@@ -258,4 +260,62 @@ TEST(HighLevelLoopTransform, IsSimpleStatementClassifiesCallsAndStores) {
     EXPECT_FALSE(HighLevelLoopTransform::IsSimpleStatement(ldloc.get()));
     EXPECT_FALSE(HighLevelLoopTransform::IsSimpleStatement(branch.get()));
     EXPECT_FALSE(HighLevelLoopTransform::IsSimpleStatement(nullptr));
+}
+
+// A loop container whose entry point's first instruction is `if (cond) leave loop`
+// (the while-condition break: break when cond is true => `while (!cond)`) becomes
+// a While container with the condition extracted and the rest as the body.
+TEST(HighLevelLoopTransform, RunTransformsWhileConditionLoop) {
+    // Build: Loop { entry: if (num >= 0) leave loop; body: stloc num(num+1); br entry }
+    // -> While { entry: if (num < 0) leave loop else br body; body: num++ }
+    auto num = MakeLocal("num");
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+
+    auto preHeader = std::make_unique<Block>();
+    preHeader->Add(std::make_unique<StLoc>(num, std::make_unique<LdcI4>(0)));
+    // The loop container sits in the pre-header's instructions.
+    auto loopC = std::make_unique<BlockContainer>();
+    loopC->Kind = ContainerKind::Loop;
+    BlockContainer* loopPtr = loopC.get();
+
+    auto entry = std::make_unique<Block>();
+    Block* entryPtr = entry.get();
+    // if (num >= 0) leave loop  (break when num >= 0 => while (num < 0))
+    entry->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(0),
+                               ComparisonKind::GreaterThanOrEqual),
+        std::make_unique<Leave>(loopPtr)));
+    loopC->AddBlock(std::move(entry));
+
+    auto body = std::make_unique<Block>();
+    Block* bodyPtr = body.get();
+    body->Add(MakeIncrement(num, 1));
+    body->SetFinal(std::make_unique<Branch>(entryPtr));  // back-edge
+    loopC->AddBlock(std::move(body));
+
+    preHeader->Add(std::move(loopC));
+    preHeader->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(preHeader));
+    fn->Variables.push_back(num);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ILTransformContext ctx;
+    HighLevelLoopTransform::Run(*fn, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // The container is now a While kind.
+    ASSERT_EQ(loopPtr->Kind, ContainerKind::While);
+    // The entry point's if is the while condition: negated (>= becomes <), the
+    // true arm branches to the body, the false arm is the leave (break).
+    auto* iff = dynamic_cast<IfInstruction*>(loopPtr->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(iff, nullptr);
+    auto* cond = dynamic_cast<Comp*>(iff->Condition.get());
+    ASSERT_NE(cond, nullptr);
+    EXPECT_EQ(cond->Kind, ComparisonKind::LessThan) << ">= negated to <";
+    // A body block was extracted (the entry had only the if; the body is the
+    // second block).
+    EXPECT_GE(loopPtr->Blocks.size(), 2u);
 }

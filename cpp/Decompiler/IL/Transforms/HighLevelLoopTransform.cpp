@@ -26,15 +26,23 @@
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/ILInstruction.hpp"
+#include "Decompiler/IL/InstructionFlags.hpp"
+#include "Decompiler/IL/StackType.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Transforms/IILTransform.hpp"
 
 #include <cassert>
+#include <functional>
+#include <vector>
 
 namespace ILSpy::Decompiler::IL {
 
@@ -132,6 +140,81 @@ bool HighLevelLoopTransform::MatchDoWhileConditionBlock(Block* block, Block*& ta
         target2 = nullptr;  // return fall-through
     }
     return true;
+}
+
+// Negate a condition (port of Comp.LogicNot): fold into a Comp when possible.
+static std::unique_ptr<ILInstruction> NegateCondition(std::unique_ptr<ILInstruction> cond) {
+    if (!cond) return cond;
+    if (auto* comp = dynamic_cast<Comp*>(cond.get())) {
+        if (comp->Kind == ComparisonKind::Equality && comp->Right &&
+            comp->Right->Op == OpCode::LdcI4 &&
+            static_cast<LdcI4*>(comp->Right.get())->Value == 0)
+            return std::move(comp->Left);  // logic.not(x == 0) -> x
+        comp->Kind = NegateComparison(comp->Kind);
+        return cond;
+    }
+    if (auto* iff = dynamic_cast<IfInstruction*>(cond.get())) {
+        auto t = std::move(iff->TrueInst);
+        iff->TrueInst = std::move(iff->FalseInst);
+        iff->FalseInst = std::move(t);
+        if (iff->TrueInst) iff->TrueInst->ChildIndex = 1;
+        if (iff->FalseInst) iff->FalseInst->ChildIndex = 2;
+        return cond;
+    }
+    auto zero = (cond->ResultType() == StackType::O)
+        ? std::unique_ptr<ILInstruction>(std::make_unique<LdNull>())
+        : std::unique_ptr<ILInstruction>(std::make_unique<LdcI4>(0));
+    return std::make_unique<Comp>(std::move(cond), std::move(zero), ComparisonKind::Equality);
+}
+
+void HighLevelLoopTransform::Run(ILFunction& function, ILTransformContext& context) {
+    (void)context;
+    // Walk every Loop-kind container. (In our model the if is the block's
+    // FinalInstruction; the C# reads it from Instructions[0] because the C#
+    // block carries the if as a non-terminal with an explicit fall-through
+    // Branch. Our entry point's if-as-final with no else (FalseInst null) is the
+    // same shape.)
+    std::vector<BlockContainer*> loops;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (auto* c = dynamic_cast<BlockContainer*>(inst))
+            if (c->Kind == ContainerKind::Loop) loops.push_back(c);
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(function.Body.get());
+    for (BlockContainer* loop : loops) {
+        if (loop->Blocks.empty()) continue;
+        Block* entry = loop->Blocks.front().get();
+        auto* iff = dynamic_cast<IfInstruction*>(entry->FinalInstruction.get());
+        if (!iff) continue;
+        // Shape 1 (C#): `if (cond) leave loop` (TrueInst a Leave, no else).
+        // The while condition is the negated cond. Negate, the leave becomes the
+        // false arm (break), a branch to the body becomes the true arm.
+        if (!iff->FalseInst && iff->TrueInst && iff->TrueInst->Op == OpCode::Leave) {
+            auto* leave = static_cast<Leave*>(iff->TrueInst.get());
+            if (leave->TargetContainer != loop) continue;
+            iff->Condition = NegateCondition(std::move(iff->Condition));
+            if (iff->Condition) { iff->Condition->Parent = iff; iff->Condition->ChildIndex = 0; }
+            iff->FalseInst = std::move(iff->TrueInst);
+            if (iff->FalseInst) { iff->FalseInst->Parent = iff; iff->FalseInst->ChildIndex = 2; }
+            iff->TrueInst = std::make_unique<Branch>(loop->Blocks.size() > 1 ? loop->Blocks[1].get() : entry);
+            iff->TrueInst->Parent = iff;
+            iff->TrueInst->ChildIndex = 1;
+            loop->Kind = ContainerKind::While;
+            continue;
+        }
+        // Shape 2 (this port's LoopDetection): `if (cond) br body else leave loop`
+        // (TrueInst a Branch to a body block, FalseInst a Leave(loop)). The while
+        // condition is cond (no negation). Just mark as While -- the seed extracts
+        // the condition and renders the body blocks.
+        if (iff->FalseInst && iff->FalseInst->Op == OpCode::Leave &&
+            iff->TrueInst && iff->TrueInst->Op == OpCode::Branch) {
+            auto* leave = static_cast<Leave*>(iff->FalseInst.get());
+            if (leave->TargetContainer != loop) continue;
+            loop->Kind = ContainerKind::While;
+            continue;
+        }
+    }
 }
 
 } // namespace ILSpy::Decompiler::IL
