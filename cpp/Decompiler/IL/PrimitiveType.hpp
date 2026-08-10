@@ -183,4 +183,29 @@ inline TypeSystem::Sign GetSign(PrimitiveType p) {
     }
 }
 
+// Port of ILTypeExtensions.HasOppositeSign(PrimitiveType): whether the
+// primitive type has a distinct opposite-sign counterpart (so a sign-mismatch
+// truncation can be fixed by flipping the target's sign). True for the
+// integer primitives I1/I2/I4/I8/U1/U2/U4/U8/I/U; false for the float/ref/
+// none/unknown primitives. Consulted by TransformAssignment.CheckImplicitTruncation's
+// Conv case (a conv to the same size but opposite sign returns
+// ValueChangedDueToSignMismatch only when the target HasOppositeSign).
+inline bool HasOppositeSign(PrimitiveType p) {
+    switch (p) {
+        case PrimitiveType::I1:
+        case PrimitiveType::I2:
+        case PrimitiveType::I4:
+        case PrimitiveType::I8:
+        case PrimitiveType::U1:
+        case PrimitiveType::U2:
+        case PrimitiveType::U4:
+        case PrimitiveType::U8:
+        case PrimitiveType::I:
+        case PrimitiveType::U:
+            return true;
+        default:
+            return false;
+    }
+}
+
 } // namespace ILSpy::Decompiler::IL

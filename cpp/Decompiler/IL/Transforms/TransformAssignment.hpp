@@ -53,6 +53,8 @@
 
 #include "Decompiler/IL/ILInstruction.hpp"
 
+namespace ILSpy::Decompiler::TypeSystem { class IType; }
+
 namespace ILSpy::Decompiler::IL {
 
 class Conv;
@@ -66,5 +68,40 @@ class Conv;
 // non-owning view (the caller holds the ownership); the returned pointer is
 // either `inst` itself or `inst`'s Argument child (still owned by `inst`).
 ILInstruction* UnwrapSmallIntegerConv(ILInstruction* inst, Conv*& conv);
+
+// Port of TransformAssignment.ImplicitTruncationResult: whether a store to a
+// small-integer type would implicitly truncate the value. ValuePreserved: the
+// value fits without truncation; ValueChanged: the value is truncated;// ValueChangedDueToSignMismatch: the value is truncated only because the target
+// sign is wrong (the caller can fix it by flipping the target's sign).
+enum class ImplicitTruncationResult : std::uint8_t {
+	ValuePreserved,
+	ValueChanged,
+	ValueChangedDueToSignMismatch,
+};
+
+// Port of TransformAssignment.CheckImplicitTruncation: whether `stobj type(...,
+// value)` would evaluate to a different value than `value` due to implicit
+// truncation. Implicit truncation in ILAst only happens for small-integer
+// types (the ILReader inserts `conv` for other truncations); the analysis
+// recurses into LdcI4 constants, Convs, Comps (always fit: 0/1), and
+// BitAnd/BitOr/BitXor binaries + IfInstruction arms (the result fits iff both
+// sides fit). The C# else-branch consults `value.InferType(compilation)` to
+// compare the inferred type's size/sign against the target; this minimal type
+// system has no InferType, so the else-branch is approximated conservatively as
+// ValueChanged (matching the C# Unknown case -- a value whose inferred type is
+// unknown might be truncated), so a compound assignment to a small integer with
+// an unmodeled RHS does not fold. `allowNullableValue` (the C# consults it only
+// in the InferType else-branch) is kept for API fidelity but not consulted by
+// the conservative approximation. `value` is a non-owning view.
+ImplicitTruncationResult CheckImplicitTruncation(const ILInstruction* value,
+                                                 const TypeSystem::IType* type,
+                                                 bool allowNullableValue = false);
+
+// Port of TransformAssignment.IsImplicitTruncation: true when
+// CheckImplicitTruncation != ValuePreserved (the value would be changed by an
+// implicit truncation to `type`).
+bool IsImplicitTruncation(const ILInstruction* value,
+                          const TypeSystem::IType* type,
+                          bool allowNullableValue = false);
 
 } // namespace ILSpy::Decompiler::IL

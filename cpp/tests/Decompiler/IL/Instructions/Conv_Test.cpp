@@ -116,6 +116,29 @@ TEST(Conv, IsIntegerAndFloatTypeQueries) {
     EXPECT_FALSE(IsFloatType(StackType::I4));
 }
 
+// HasOppositeSign(PrimitiveType): the integer primitives I1..U8/I/U have a
+// distinct opposite-sign counterpart (so a sign-mismatch truncation can be
+// fixed by flipping the target sign); the float/ref/none/unknown primitives do
+// not. Consulted by TransformAssignment.CheckImplicitTruncation's Conv case.
+TEST(Conv, PrimitiveTypeHasOppositeSign) {
+    EXPECT_TRUE(HasOppositeSign(PrimitiveType::I1));
+    EXPECT_TRUE(HasOppositeSign(PrimitiveType::U1));
+    EXPECT_TRUE(HasOppositeSign(PrimitiveType::I2));
+    EXPECT_TRUE(HasOppositeSign(PrimitiveType::U2));
+    EXPECT_TRUE(HasOppositeSign(PrimitiveType::I4));
+    EXPECT_TRUE(HasOppositeSign(PrimitiveType::U4));
+    EXPECT_TRUE(HasOppositeSign(PrimitiveType::I8));
+    EXPECT_TRUE(HasOppositeSign(PrimitiveType::U8));
+    EXPECT_TRUE(HasOppositeSign(PrimitiveType::I));
+    EXPECT_TRUE(HasOppositeSign(PrimitiveType::U));
+    EXPECT_FALSE(HasOppositeSign(PrimitiveType::R4));
+    EXPECT_FALSE(HasOppositeSign(PrimitiveType::R8));
+    EXPECT_FALSE(HasOppositeSign(PrimitiveType::R));
+    EXPECT_FALSE(HasOppositeSign(PrimitiveType::Ref));
+    EXPECT_FALSE(HasOppositeSign(PrimitiveType::None));
+    EXPECT_FALSE(HasOppositeSign(PrimitiveType::Unknown));
+}
+
 // conv.i from I4 is a SignExtend (I4 -> I): the canonical array-index widening
 // CleanUpArrayIndices drops. ResultType is I.
 TEST(Conv, ConvIFromI4IsSignExtend) {

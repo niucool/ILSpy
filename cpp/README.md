@@ -1233,6 +1233,27 @@ implemented and green here. Everything else follows the phase plan in
   confirms all three `Sign` flavours appear in the corpus and the
   `LeftInputType == Left.ResultType` / `RightInputType == Right.ResultType`
   invariant holds; `--csharp` output is unchanged.
+  The implicit-truncation analysis (D128, the `IsImplicitTruncation` half of
+  the `IsBinaryCompatibleWithType` gate D127 flagged as the natural next piece):
+  `CheckImplicitTruncation` / `IsImplicitTruncation` + the
+  `ImplicitTruncationResult` enum (ValuePreserved / ValueChanged /
+  ValueChangedDueToSignMismatch) + a file-local `CommonImplicitTruncation` in
+  `TransformAssignment.{hpp,cpp}` (mirroring `TransformAssignment.cs`), plus
+  `HasOppositeSign(PrimitiveType)` in `PrimitiveType.hpp` (mirroring
+  `ILTypeExtensions.HasOppositeSign`). Only small-integer targets can truncate
+  (other truncations become explicit `conv`s in the ILReader); the analysis
+  recurses into `LdcI4` (a range check via the target's small-integer
+  `KnownTypeCode`), `Conv` (same-primitive-type preserved; same-size opposite
+  sign + `HasOppositeSign` -> sign-mismatch; else changed), `Comp` (always
+  0/1 -> preserved), `BitAnd`/`BitOr`/`BitXor` (recurse + `CommonImplicitTruncation`,
+  short-circuiting on a plain `ValueChanged` side), and `IfInstruction` arms
+  (recurse both + `CommonImplicitTruncation`). The C# else-branch consults
+  `value.InferType(compilation)`; this minimal type system has no `InferType`,
+  so it is approximated conservatively as `ValueChanged` (the C# Unknown
+  fallthrough -- a compound assignment to a small integer with an unmodeled RHS
+  does not fold). Tested-but-not-yet-wired (no consumer yet -- the
+  `IsBinaryCompatibleWithType` validator is the subsequent iteration); `--csharp`
+  output is unchanged.
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
   walk + a corpus probe; the async/iterator state machines
@@ -1250,7 +1271,11 @@ implemented and green here. Everything else follows the phase plan in
   `Variable.Kind` for the StLoc case] / `IsMatchingCompoundLoad` [needs
   `RecombineVariables` + getter/setter `IMethod`/`AccessorOwner`] /
   `ValidateCompoundAssign` [needs `NumericCompoundAssign.IsBinaryCompatibleWithType`,
-  which now has the BNI `Sign` (D127) but still needs `IsImplicitTruncation`] +
+  which now has the BNI `Sign` (D127) + the `IsImplicitTruncation` analysis (D128)
+  but still needs the `IsLifted`/`Enum`/`Pointer`/native-int gates + an
+  `IsNullable`/`GetUnderlyingType` via the D93 `NullableLiftingTransform::
+  GetUnderlyingTypeOfNullable` + a `PointerArithmeticOffset.Detect` for the
+  `Pointer` case + the `NativeIntegers`/`UnsignedRightShift` settings] +
   `RecombineVariables` [the finalizeMatch for the StLoc case] + the per-variable
   store-list tree walk [the repeatedly-deferred infrastructure piece], ...)
   are the subsequent in-order targets.
