@@ -578,6 +578,32 @@ bool MetadataFile::IsFieldCompilerGeneratedOrInCompilerGeneratedClass(std::uint3
     return false;
 }
 
+MethodDefKindInfo MetadataFile::GetMethodDefKindInfo(std::uint32_t methodToken) const {
+    MethodDefKindInfo info;
+    if (!IsValid()) return info;
+    std::uint32_t table = methodToken >> 24;
+    std::uint32_t row = methodToken & 0x00FFFFFFu;
+    if (table != 0x06 || row == 0 || row > impl_->db->MethodDef.size()) return info;
+    try {
+        auto m = impl_->db->MethodDef[row - 1];
+        auto flags = m.Flags();
+        // Faithful to MetadataMethod's SymbolKind == Constructor gate: a name
+        // of .ctor/.cctor with the SpecialName|RTSpecialName flag. (C#-compiled
+        // constructors always carry RTSpecialName, so the flag check is the
+        // faithful guard; the name distinguishes the two .ctor forms.)
+        if (flags.SpecialName() || flags.RTSpecialName()) {
+            std::string name{ m.Name() };
+            if (name == ".ctor" || name == ".cctor") {
+                info.IsConstructor = true;
+            }
+        }
+        info.IsStatic = flags.Static();
+    } catch (const std::exception&) {
+        // Best-effort: a malformed MethodDef row leaves the defaults.
+    }
+    return info;
+}
+
 std::vector<std::string> MetadataFile::GetParameterNames(std::uint32_t methodToken) const {
     std::vector<std::string> result;
     if (!IsValid()) return result;

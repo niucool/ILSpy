@@ -1273,6 +1273,14 @@ std::unique_ptr<ILFunction> ReadStraightLineIL(const MetadataFile& file,
     s.returnStackType = ReturnStackTypeOf(sig.ReturnType);
 
     auto fn = std::make_unique<ILFunction>();
+    {
+        // Pre-resolve the method's constructor/static status (the subset of the
+        // C# ILFunction.Method handle the transforms consult) from the MethodDef
+        // flags/name, since the port's transforms carry no MetadataFile/IMethod.
+        auto kind = file.GetMethodDefKindInfo(methodToken);
+        fn->IsConstructor = kind.IsConstructor;
+        fn->IsStatic = kind.IsStatic;
+    }
     auto container = std::make_unique<BlockContainer>();
     auto* containerPtr = container.get();
     auto block = std::make_unique<Block>();
@@ -1366,6 +1374,14 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
     }
 
     auto fn = std::make_unique<ILFunction>();
+    {
+        // Pre-resolve the method's constructor/static status (the subset of the
+        // C# ILFunction.Method handle the transforms consult) from the MethodDef
+        // flags/name, since the port's transforms carry no MetadataFile/IMethod.
+        auto kind = file.GetMethodDefKindInfo(methodToken);
+        fn->IsConstructor = kind.IsConstructor;
+        fn->IsStatic = kind.IsStatic;
+    }
     auto container = std::make_unique<BlockContainer>();
     auto* containerPtr = container.get();
 

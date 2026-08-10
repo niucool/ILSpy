@@ -37,6 +37,15 @@ public:
     std::unique_ptr<BlockContainer> Body;
     std::vector<ILVariablePtr> Variables;
 
+    // The constructor/static status of this function's method, the pre-resolved
+    // subset of the C# ILFunction.Method handle the transforms consult. Defaults
+    // false (a null Method, matching the C# `function?.Method is not {...}` bail)
+    // and is populated by the IL reader from the MethodDef flags/name. The gate
+    // the NullCoalescingTransform hoisted-constructor-argument null-guard fold
+    // consults is `IsConstructor && !IsStatic` (an instance constructor).
+    bool IsConstructor = false;
+    bool IsStatic = false;
+
     ILFunction() : ILInstruction(OpCode::ILFunction) {}
     InstructionFlags DirectFlags() const override { return InstructionFlags::None; }
     StackType ResultType() const override { return StackType::Void; }

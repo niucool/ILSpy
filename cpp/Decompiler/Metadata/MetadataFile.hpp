@@ -50,6 +50,20 @@ struct MethodDefInfo {
     std::uint32_t Token;      // metadata token (table 0x06 << 24 | row index, 1-based)
 };
 
+// The constructor/static status of a MethodDef, the subset of the C# IMethod
+// handle the ILAst transforms consult via ILFunction. Pre-resolved at reader
+// time because the port's transforms carry no MetadataFile / IMethod handle
+// (the Call::IsNewObj / IsOperator / LdFlda::IsCompilerGeneratedField
+// precedent). IsConstructor is faithful to the C# MetadataMethod.SymbolKind ==
+// Constructor (a .ctor/.cctor with the SpecialName|RTSpecialName flag); IsStatic
+// is faithful to MethodAttributes.Static. Used by the IL reader to populate
+// ILFunction::IsConstructor / IsStatic, the gate the NullCoalescingTransform
+// hoisted-constructor-argument null-guard fold consults.
+struct MethodDefKindInfo {
+    bool IsConstructor = false;
+    bool IsStatic = false;
+};
+
 // A decoded method signature: resolved return and parameter types, whether
 // the method has an implicit `this` parameter, and the generic parameter count.
 struct MethodSignature {
@@ -213,6 +227,16 @@ public:
     // Returns std::nullopt if the file is invalid or the token is out of range;
     // never throws.
     std::optional<MethodSignature> GetMethodSignature(std::uint32_t methodToken) const;
+
+    // The constructor/static status of a MethodDef (table 0x06): IsConstructor
+    // is true for a .ctor/.cctor carrying the SpecialName|RTSpecialName flag
+    // (the C# MetadataMethod.SymbolKind == Constructor, which gates on those
+    // flags plus the name); IsStatic is the MethodAttributes Static flag. Returns
+    // a default (false/false) MethodDefKindInfo for an out-of-range or unsupported
+    // token; never throws. Used by the IL reader to populate
+    // ILFunction::IsConstructor / IsStatic, the gate the NullCoalescingTransform
+    // hoisted-constructor-argument null-guard fold consults.
+    MethodDefKindInfo GetMethodDefKindInfo(std::uint32_t methodToken) const;
 
 private:
     struct Impl;

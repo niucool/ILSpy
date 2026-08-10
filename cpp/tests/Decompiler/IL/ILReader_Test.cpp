@@ -162,3 +162,141 @@ TEST(ILReader, InvalidInputsAreGraceful) {
     EXPECT_EQ(ReadStraightLineIL(f, 0x06000001u, 0), nullptr);
     EXPECT_EQ(ReadStraightLineIL(f, 0x06FFFFFFu, 0x12345678u), nullptr);
 }
+
+// ILFunction::IsConstructor / IsStatic (the pre-resolved subset of the C#
+// ILFunction.Method handle) -- the metadata foundation the
+// NullCoalescingTransform hoisted-constructor-argument null-guard fold will
+// consult. These tests verify the MetadataFile helper and the IL reader
+// populate the flags faithfully on real mscorlib methods; no transform
+// consumes them yet (a tested-but-not-yet-wired foundation).
+
+TEST(ILFunctionMethod, GetMethodDefKindInfoReportsConstructorAndStatic) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    std::uint32_t objectTok = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == "System" && t.Name == "Object") { objectTok = t.Token; break; }
+    }
+    ASSERT_NE(objectTok, 0u);
+
+    std::uint32_t instanceCtorTok = 0;       // System.Object..ctor
+    std::uint32_t staticRefEqualsTok = 0;    // static ReferenceEquals(object, object)
+    std::uint32_t instanceToStringTok = 0;   // instance ToString()
+    for (const auto& m : f.GetMethods(objectTok)) {
+        if (m.Name == ".ctor" && instanceCtorTok == 0) instanceCtorTok = m.Token;
+        // ReferenceEquals is a single static overload (unambiguous, unlike Equals
+        // which has both an instance and a static overload).
+        if (m.Name == "ReferenceEquals" && staticRefEqualsTok == 0) staticRefEqualsTok = m.Token;
+        if (m.Name == "ToString" && instanceToStringTok == 0) instanceToStringTok = m.Token;
+    }
+    ASSERT_NE(instanceCtorTok, 0u);
+    ASSERT_NE(staticRefEqualsTok, 0u);
+    ASSERT_NE(instanceToStringTok, 0u);
+
+    // System.Object..ctor: an instance constructor -> IsConstructor && !IsStatic.
+    auto kind = f.GetMethodDefKindInfo(instanceCtorTok);
+    EXPECT_TRUE(kind.IsConstructor) << ".ctor must be a constructor";
+    EXPECT_FALSE(kind.IsStatic) << "instance .ctor must not be static";
+
+    // System.Object.ReferenceEquals(object, object) is static -> IsStatic &&
+    // !IsConstructor.
+    auto refEqKind = f.GetMethodDefKindInfo(staticRefEqualsTok);
+    EXPECT_TRUE(refEqKind.IsStatic) << "a static method must report IsStatic";
+    EXPECT_FALSE(refEqKind.IsConstructor);
+
+    // System.Object.ToString() is an instance non-constructor -> neither flag.
+    auto toStringKind = f.GetMethodDefKindInfo(instanceToStringTok);
+    EXPECT_FALSE(toStringKind.IsConstructor);
+    EXPECT_FALSE(toStringKind.IsStatic);
+
+    // An out-of-range / wrong-table token yields the default (false/false),
+    // never throws.
+    auto badKind = f.GetMethodDefKindInfo(0x06FFFFFFu);
+    EXPECT_FALSE(badKind.IsConstructor);
+    EXPECT_FALSE(badKind.IsStatic);
+    auto nonMethodKind = f.GetMethodDefKindInfo(0x02000001u);  // TypeDef token
+    EXPECT_FALSE(nonMethodKind.IsConstructor);
+    EXPECT_FALSE(nonMethodKind.IsStatic);
+}
+
+TEST(ILFunctionMethod, ReadILPopulatesConstructorStaticFlags) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    std::uint32_t objectTok = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == "System" && t.Name == "Object") { objectTok = t.Token; break; }
+    }
+    ASSERT_NE(objectTok, 0u);
+
+    std::uint32_t instanceCtorTok = 0;
+    std::uint32_t instanceCtorRva = 0;
+    for (const auto& m : f.GetMethods(objectTok)) {
+        if (m.Name == ".ctor" && instanceCtorTok == 0) {
+            instanceCtorTok = m.Token;
+            instanceCtorRva = m.RVA;
+        }
+    }
+    ASSERT_NE(instanceCtorTok, 0u);
+    ASSERT_NE(instanceCtorRva, 0u);
+
+    // System.Object..ctor is `ret` only, so both readers decode it. The static
+    // case is covered by the corpus sweep below (many static methods have
+    // branches and bail the straight-line reader; the sweep's cross-check +
+    // `staticMethod > 0` assertion pin the reader flags a static method).
+    auto fnStraight = ReadStraightLineIL(f, instanceCtorTok, instanceCtorRva);
+    ASSERT_NE(fnStraight, nullptr);
+    EXPECT_TRUE(fnStraight->IsConstructor) << "reader must flag an instance .ctor";
+    EXPECT_FALSE(fnStraight->IsStatic);
+
+    auto fnBranch = ReadIL(f, instanceCtorTok, instanceCtorRva);
+    ASSERT_NE(fnBranch, nullptr);
+    EXPECT_TRUE(fnBranch->IsConstructor);
+    EXPECT_FALSE(fnBranch->IsStatic);
+}
+
+TEST(ILFunctionMethod, MscorlibConstructorStaticFlagSweep) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    // Cross-check the reader-populated flags against the helper across the
+    // corpus (the reader must call the helper), and confirm the four flag
+    // combinations all appear (instance ctor, static ctor, instance method,
+    // static method) on the decoded subset.
+    int decoded = 0;
+    int instanceCtor = 0;       // IsConstructor && !IsStatic  (the gate the fold needs)
+    int staticCtor = 0;          // IsConstructor && IsStatic    (.cctor)
+    int instanceMethod = 0;      // !IsConstructor && !IsStatic
+    int staticMethod = 0;        // !IsConstructor && IsStatic
+    int crossCheckOk = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadStraightLineIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++decoded;
+        auto kind = f.GetMethodDefKindInfo(m.Token);
+        if (fn->IsConstructor == kind.IsConstructor && fn->IsStatic == kind.IsStatic) {
+            ++crossCheckOk;
+        } else {
+            ADD_FAILURE() << "reader/helper flag mismatch for method token " << m.Token;
+        }
+        if (fn->IsConstructor && !fn->IsStatic) ++instanceCtor;
+        else if (fn->IsConstructor && fn->IsStatic) ++staticCtor;
+        else if (!fn->IsConstructor && !fn->IsStatic) ++instanceMethod;
+        else ++staticMethod;
+        if (decoded > 4000) break;
+    }
+    EXPECT_GT(decoded, 100) << "too few straight-line methods decoded";
+    EXPECT_EQ(crossCheckOk, decoded) << "reader must populate flags from the helper";
+    EXPECT_GT(instanceCtor, 0) << "corpus must have instance constructors";
+    EXPECT_GT(staticMethod, 0) << "corpus must have static methods";
+    EXPECT_GT(instanceMethod, 0) << "corpus must have instance non-constructors";
+    (void)staticCtor;  // .cctor may or may not appear in the straight-line sample
+}
