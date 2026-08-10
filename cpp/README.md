@@ -1081,9 +1081,30 @@ implemented and green here. Everything else follows the phase plan in
   MinusOne` field references (a real-corpus readability improvement, unlike most
   recent nullable-family faithfulness-only pieces). The sibling
   `EarlyExpressionTransforms.TransformDecimalCtorToConstant` (`newobj
-  Decimal(int/long/ulong/5-arg)` -> `LdcDecimal`, now unblocked by the node +
-  factories) and the Decimal lift (`LiftCSharpUserComparison`'s Decimal branch,
-  needs the Phase 5 resolver) are the subsequent in-order targets. 40 of ~40
+  Decimal(int/uint/long/ulong)` and the 5-arg `newobj Decimal(int, int, int,
+  bool, byte)` -> `LdcDecimal`, now unblocked by the node + the `FromInt32`/
+  `FromUInt32`/`FromInt64`/`FromUInt64`/`FromBits` factories) ports the
+  `EarlyExpressionTransforms.VisitNewObj` piece: a `newobj Decimal(...)` Call
+  (modelled as a Call with `IsNewObj`, D76) whose declaring type resolves to
+  `KnownType(Decimal)` folds into the corresponding `LdcDecimal` constant. The
+  1-arg case dispatches on the first parameter's `KnownTypeCode` (Int32/UInt32/
+  Int64/UInt64) -- the int/uint/long/ulong overloads share the resolved name
+  `System.Decimal::.ctor`, so the parameter type (carried on a new
+  `Call::ParameterIType` vector the IL reader populates from the method
+  signature's `ParameterTypes`, mirroring the `Call::ReturnIType` precedent)
+  distinguishes them, faithfully interpreting the constant's bit pattern as
+  signed vs unsigned. The 5-arg case reads five `LdcI4` args and the C#
+  `unchecked((byte)scale) <= 28` guard. KEY FINDING: the ctor fold fires on the
+  .NET Framework 4 legacy-csc mscorlib corpus -- 9 folds across the full
+  25315-method corpus (3 `newobj Decimal(int)` + 6 5-arg ctors), so the CLI
+  `--csharp` output now shows 21 `m`-suffixed decimal literals (was 12 from the
+  field fold), including the 5-arg-ctor-only large constants
+  `System.Decimal.MaxValue = 79228162514264337593543950335m`,
+  `MinValue = -79228162514264337593543950335m`, and
+  `NearNegativeZero = -0.000000000000000000000000001m` (a real-corpus
+  readability improvement). The Decimal lift (`LiftCSharpUserComparison`'s
+  Decimal branch, needs the Phase 5 resolver's
+  `CSharpOperators.LiftUserDefinedOperator`) is the subsequent in-order target. 40 of ~40
   transforms ported.
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree

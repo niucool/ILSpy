@@ -29,6 +29,7 @@
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
@@ -38,8 +39,11 @@
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/LdcDecimal.hpp"
+#include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/StackType.hpp"
 #include "Decompiler/IL/StackTypeOf.hpp"
+#include "Decompiler/CSharp/ILAstToCSharp.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
 #include "Decompiler/IL/Transforms/EarlyExpressionTransforms.hpp"
@@ -87,6 +91,55 @@ void Walk(ILInstruction* inst, const std::function<void(ILInstruction*)>& visit)
     if (!inst) return;
     visit(inst);
     for (int i = 0; i < inst->ChildCount(); ++i) Walk(inst->GetChild(i), visit);
+}
+
+ITypePtr MakeDecimalType() {
+    return std::make_shared<KnownType>(KnownTypeCode::Decimal);
+}
+
+// Build a vector of owning instructions from individual rvalues (a braced-
+// init-list of unique_ptrs would copy them, which is deleted; the variadic
+// helper moves each argument into the vector, the D82 learning).
+template <typename... Ts>
+std::vector<std::unique_ptr<ILInstruction>> MakeArgs(Ts... args) {
+    std::vector<std::unique_ptr<ILInstruction>> v;
+    v.reserve(sizeof...(Ts));
+    (v.push_back(std::move(args)), ...);
+    return v;
+}
+
+// Build a `newobj Decimal(...)` Call with the given arguments and parameter
+// types (the latter carried on Call::ParameterIType, mirroring the IL reader).
+// DeclaringType is KnownType(Decimal); IsNewObj is set; ReturnType is O (newobj
+// leaves the constructed object on the stack).
+std::unique_ptr<Call> MakeNewObjDecimal(
+    std::vector<std::unique_ptr<ILInstruction>> args,
+    std::vector<ITypePtr> paramTypes) {
+    auto call = std::make_unique<Call>("System.Decimal::.ctor");
+    call->IsNewObj = true;
+    call->ReturnType = StackType::O;
+    call->DeclaringType = MakeDecimalType();
+    call->ParameterIType = std::move(paramTypes);
+    for (auto& a : args)
+        call->AddArg(std::move(a));
+    return call;
+}
+
+// A one-block function assigning a `newobj Decimal(...)` to a local, so the
+// fold replaces the Call with an LdcDecimal and the seed renders the literal.
+std::unique_ptr<ILFunction> MakeFnWithNewObjDecimal(
+    std::unique_ptr<Call> newobjCall) {
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto d = std::make_shared<ILVariable>(VariableKind::Local, MakeDecimalType(), -1);
+    d->Name = "d";
+    fn->Variables.push_back(d);
+    fn->Body->AddBlock(std::make_unique<Block>());
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(d, std::move(newobjCall)));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    return fn;
 }
 
 } // namespace
@@ -510,4 +563,270 @@ TEST(EarlyExpressionTransforms, MscorlibSweepPreservesInvariant) {
     EXPECT_GT(processed, 5000);
     EXPECT_LE(ldobjAfter, ldobjBefore) << "some ldobj(ldloca) should become ldloc";
     EXPECT_LE(stobjAfter, stobjBefore) << "some stobj(ldloca) should become stloc";
+}
+
+// TransformDecimalCtorToConstant: a `newobj Decimal(int)` with a constant
+// argument folds into the corresponding LdcDecimal constant. The 1-arg case
+// dispatches on the first parameter's KnownTypeCode (Int32 here) to interpret
+// the constant's bit pattern as a signed int32.
+TEST(EarlyExpressionTransforms, FoldsNewObjDecimalInt32Ctor) {
+    auto call = MakeNewObjDecimal(MakeArgs(std::make_unique<LdcI4>(42)),
+        {std::make_shared<KnownType>(KnownTypeCode::Int32)});
+    auto fn = MakeFnWithNewObjDecimal(std::move(call));
+    fn->CheckInvariant(ILPhase::Normal);
+    EarlyExpressionTransforms().Run(*fn, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_FALSE(fn->Body->Blocks[0]->Instructions.empty());
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_NE(st->Value, nullptr);
+    ASSERT_EQ(st->Value->Op, OpCode::LdcDecimal) << "newobj Decimal(42) -> ldc.decimal(42)";
+    auto* ldc = static_cast<LdcDecimal*>(st->Value.get());
+    EXPECT_EQ(ldc->Value.ToString(), "42");
+    EXPECT_FALSE(ldc->Value.isNegative);
+}
+
+// The 1-arg Int32 case with a negative constant: FromInt32 carries the sign.
+TEST(EarlyExpressionTransforms, FoldsNewObjDecimalInt32Negative) {
+    auto call = MakeNewObjDecimal(MakeArgs(std::make_unique<LdcI4>(-5)),
+        {std::make_shared<KnownType>(KnownTypeCode::Int32)});
+    auto fn = MakeFnWithNewObjDecimal(std::move(call));
+    EarlyExpressionTransforms().Run(*fn, Ctx());
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    auto* ldc = static_cast<LdcDecimal*>(st->Value.get());
+    EXPECT_EQ(ldc->Value.ToString(), "-5");
+    EXPECT_TRUE(ldc->Value.isNegative);
+}
+
+// The UInt32 overload interprets the same bit pattern as an unsigned magnitude:
+// `newobj Decimal((uint)0xFFFFFFFF)` => 4294967295m (not -1m). Faithful to the
+// C# `new decimal(unchecked((uint)val))`. The .NET Framework 4 legacy-csc corpus
+// has no UInt32-overload Decimal ctors, so this is a faithfulness-only test.
+TEST(EarlyExpressionTransforms, FoldsNewObjDecimalUInt32Ctor) {
+    auto call = MakeNewObjDecimal(MakeArgs(std::make_unique<LdcI4>(static_cast<std::int32_t>(0xFFFFFFFF))),
+        {std::make_shared<KnownType>(KnownTypeCode::UInt32)});
+    auto fn = MakeFnWithNewObjDecimal(std::move(call));
+    EarlyExpressionTransforms().Run(*fn, Ctx());
+    auto* ldc = static_cast<LdcDecimal*>(
+        static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get())->Value.get());
+    EXPECT_EQ(ldc->Value.ToString(), "4294967295");
+    EXPECT_FALSE(ldc->Value.isNegative);
+}
+
+// The Int64 overload takes an LdcI8 (a 64-bit constant).
+TEST(EarlyExpressionTransforms, FoldsNewObjDecimalInt64Ctor) {
+    auto call = MakeNewObjDecimal(MakeArgs(std::make_unique<LdcI8>(9223372036854775807LL)),
+        {std::make_shared<KnownType>(KnownTypeCode::Int64)});
+    auto fn = MakeFnWithNewObjDecimal(std::move(call));
+    EarlyExpressionTransforms().Run(*fn, Ctx());
+    auto* ldc = static_cast<LdcDecimal*>(
+        static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get())->Value.get());
+    EXPECT_EQ(ldc->Value.ToString(), "9223372036854775807");
+}
+
+// The UInt64 overload interprets the constant as an unsigned 64-bit magnitude.
+TEST(EarlyExpressionTransforms, FoldsNewObjDecimalUInt64Ctor) {
+    auto call = MakeNewObjDecimal(MakeArgs(std::make_unique<LdcI8>(static_cast<std::int64_t>(0xFFFFFFFFFFFFFFFFull))),
+        {std::make_shared<KnownType>(KnownTypeCode::UInt64)});
+    auto fn = MakeFnWithNewObjDecimal(std::move(call));
+    EarlyExpressionTransforms().Run(*fn, Ctx());
+    auto* ldc = static_cast<LdcDecimal*>(
+        static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get())->Value.get());
+    EXPECT_EQ(ldc->Value.ToString(), "18446744073709551615");
+    EXPECT_FALSE(ldc->Value.isNegative);
+}
+
+// The 5-arg `newobj Decimal(lo, mid, hi, isNegative, scale)` ctor folds into
+// the LdcDecimal carrying those exact bits, with the decimal point inserted
+// `scale` digits from the right.
+TEST(EarlyExpressionTransforms, FoldsNewObjDecimalFiveArgCtor) {
+    auto call = MakeNewObjDecimal(MakeArgs(std::make_unique<LdcI4>(15), std::make_unique<LdcI4>(0),
+         std::make_unique<LdcI4>(0), std::make_unique<LdcI4>(0),
+         std::make_unique<LdcI4>(1)),
+        {std::make_shared<KnownType>(KnownTypeCode::Int32),
+         std::make_shared<KnownType>(KnownTypeCode::Int32),
+         std::make_shared<KnownType>(KnownTypeCode::Int32),
+         std::make_shared<KnownType>(KnownTypeCode::Boolean),
+         std::make_shared<KnownType>(KnownTypeCode::Byte)});
+    auto fn = MakeFnWithNewObjDecimal(std::move(call));
+    EarlyExpressionTransforms().Run(*fn, Ctx());
+    auto* ldc = static_cast<LdcDecimal*>(
+        static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get())->Value.get());
+    EXPECT_EQ(ldc->Value.ToString(), "1.5");
+}
+
+// A 5-arg ctor with a negative isNegative flag carries the sign.
+TEST(EarlyExpressionTransforms, FoldsNewObjDecimalFiveArgNegative) {
+    auto call = MakeNewObjDecimal(MakeArgs(std::make_unique<LdcI4>(25), std::make_unique<LdcI4>(0),
+         std::make_unique<LdcI4>(0), std::make_unique<LdcI4>(1),
+         std::make_unique<LdcI4>(2)),
+        {std::make_shared<KnownType>(KnownTypeCode::Int32),
+         std::make_shared<KnownType>(KnownTypeCode::Int32),
+         std::make_shared<KnownType>(KnownTypeCode::Int32),
+         std::make_shared<KnownType>(KnownTypeCode::Boolean),
+         std::make_shared<KnownType>(KnownTypeCode::Byte)});
+    auto fn = MakeFnWithNewObjDecimal(std::move(call));
+    EarlyExpressionTransforms().Run(*fn, Ctx());
+    auto* ldc = static_cast<LdcDecimal*>(
+        static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get())->Value.get());
+    EXPECT_EQ(ldc->Value.ToString(), "-0.25");
+}
+
+// A non-Decimal declaring type does not fold (the newobj stays a Call).
+TEST(EarlyExpressionTransforms, RejectsNonDecimalNewObj) {
+    auto call = std::make_unique<Call>("System.Object::.ctor");
+    call->IsNewObj = true;
+    call->ReturnType = StackType::O;
+    call->DeclaringType = std::make_shared<KnownType>(KnownTypeCode::Object);
+    call->ParameterIType = {std::make_shared<KnownType>(KnownTypeCode::Int32)};
+    call->AddArg(std::make_unique<LdcI4>(1));
+    auto fn = MakeFnWithNewObjDecimal(std::move(call));
+    fn->CheckInvariant(ILPhase::Normal);
+    EarlyExpressionTransforms().Run(*fn, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_NE(st->Value, nullptr);
+    EXPECT_EQ(st->Value->Op, OpCode::Call) << "non-Decimal newobj stays a Call";
+}
+
+// A 1-arg Decimal ctor whose argument is not a constant (e.g. a variable
+// load) does not fold -- MatchLdcI fails.
+TEST(EarlyExpressionTransforms, RejectsNonConstantArg) {
+    auto v = MakeLocal("v", KnownTypeCode::Int32);
+    auto call = MakeNewObjDecimal(MakeArgs(std::make_unique<LdLoc>(v)),
+        {std::make_shared<KnownType>(KnownTypeCode::Int32)});
+    auto fn = MakeFnWithNewObjDecimal(std::move(call));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+    EarlyExpressionTransforms().Run(*fn, Ctx());
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    EXPECT_EQ(st->Value->Op, OpCode::Call) << "non-constant arg stays a Call";
+}
+
+// A 2-arg Decimal ctor (an overload this fold does not handle) does not fold.
+TEST(EarlyExpressionTransforms, RejectsTwoArgCtor) {
+    auto call = MakeNewObjDecimal(MakeArgs(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(2)),
+        {std::make_shared<KnownType>(KnownTypeCode::Int32),
+         std::make_shared<KnownType>(KnownTypeCode::Int32)});
+    auto fn = MakeFnWithNewObjDecimal(std::move(call));
+    EarlyExpressionTransforms().Run(*fn, Ctx());
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    EXPECT_EQ(st->Value->Op, OpCode::Call) << "2-arg ctor stays a Call";
+}
+
+// A 5-arg ctor whose scale > 28 (an invalid decimal scale) does not fold --
+// the C# `unchecked((byte)scale) <= 28` guard.
+TEST(EarlyExpressionTransforms, RejectsFiveArgWithBadScale) {
+    auto call = MakeNewObjDecimal(MakeArgs(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+         std::make_unique<LdcI4>(0), std::make_unique<LdcI4>(0),
+         std::make_unique<LdcI4>(29)),
+        {std::make_shared<KnownType>(KnownTypeCode::Int32),
+         std::make_shared<KnownType>(KnownTypeCode::Int32),
+         std::make_shared<KnownType>(KnownTypeCode::Int32),
+         std::make_shared<KnownType>(KnownTypeCode::Boolean),
+         std::make_shared<KnownType>(KnownTypeCode::Byte)});
+    auto fn = MakeFnWithNewObjDecimal(std::move(call));
+    EarlyExpressionTransforms().Run(*fn, Ctx());
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    EXPECT_EQ(st->Value->Op, OpCode::Call) << "5-arg ctor with scale 29 stays a Call";
+}
+
+// A 5-arg ctor whose 3rd arg is not an LdcI4 does not fold.
+TEST(EarlyExpressionTransforms, RejectsFiveArgWithNonConstantArg) {
+    auto v = MakeLocal("v", KnownTypeCode::Int32);
+    auto call = MakeNewObjDecimal(MakeArgs(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+         std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+         std::make_unique<LdcI4>(1)),
+        {std::make_shared<KnownType>(KnownTypeCode::Int32),
+         std::make_shared<KnownType>(KnownTypeCode::Int32),
+         std::make_shared<KnownType>(KnownTypeCode::Int32),
+         std::make_shared<KnownType>(KnownTypeCode::Boolean),
+         std::make_shared<KnownType>(KnownTypeCode::Byte)});
+    auto fn = MakeFnWithNewObjDecimal(std::move(call));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+    EarlyExpressionTransforms().Run(*fn, Ctx());
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    EXPECT_EQ(st->Value->Op, OpCode::Call) << "5-arg ctor with a non-constant arg stays a Call";
+}
+
+// The fold's LdcDecimal renders as the C# decimal literal form with the
+// trailing `m` suffix in the seed's `--csharp` output.
+TEST(EarlyExpressionTransforms, SeedRendersFoldedDecimalLiteral) {
+    auto call = MakeNewObjDecimal(MakeArgs(std::make_unique<LdcI4>(1)),
+        {std::make_shared<KnownType>(KnownTypeCode::Int32)});
+    auto fn = MakeFnWithNewObjDecimal(std::move(call));
+    EarlyExpressionTransforms().Run(*fn, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "decimal d");
+    EXPECT_NE(text.find("d = 1m"), std::string::npos) << text;
+}
+
+// On the real mscorlib corpus, running the full pre-pipeline through
+// EarlyExpressionTransforms preserves the ILAst invariant and the
+// TransformDecimalCtorToConstant fold fires (the .NET Framework 4 legacy-csc
+// corpus constructs Decimal constants via `newobj Decimal(int)` and the 5-arg
+// ctor, so the fold makes real-corpus progress). The per-method LdcDecimal
+// count is monotone non-decreasing (each fold creates one; nothing in this
+// transform removes one) and the newobj-Decimal count is monotone
+// non-increasing (each fold removes one).
+TEST(EarlyExpressionTransforms, MscorlibDecimalCtorSweepPreservesInvariant) {
+#if defined(_WIN32)
+    const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    int processed = 0;
+    int totalDecimalCtorFolds = 0;
+    ILTransformContext ctx;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++processed;
+        ControlFlowSimplification().Run(*fn, ctx);
+        StObjToStLoc().Run(*fn, ctx);
+        ILInlining().Run(*fn, ctx);
+        InlineReturnTransform().Run(*fn, ctx);
+        RemoveInfeasiblePathTransform().Run(*fn, ctx);
+        DetectPinnedRegions().Run(*fn, ctx);
+        DetectCatchWhenConditionBlocks().Run(*fn, ctx);
+        LdLocaDupInitObjTransform().Run(*fn, ctx);
+        int ldcDecimalBefore = 0, newobjDecimalBefore = 0;
+        Walk(fn->Body.get(), [&](ILInstruction* i) {
+            if (i->Op == OpCode::LdcDecimal) ++ldcDecimalBefore;
+            if (i->Op == OpCode::Call) {
+                auto* c = static_cast<Call*>(i);
+                if (c->IsNewObj && c->DeclaringType) {
+                    auto* kt = dynamic_cast<const KnownType*>(c->DeclaringType.get());
+                    if (kt && kt->Code() == KnownTypeCode::Decimal) ++newobjDecimalBefore;
+                }
+            }
+        });
+        EarlyExpressionTransforms().Run(*fn, ctx);
+        int ldcDecimalAfter = 0, newobjDecimalAfter = 0;
+        Walk(fn->Body.get(), [&](ILInstruction* i) {
+            if (i->Op == OpCode::LdcDecimal) ++ldcDecimalAfter;
+            if (i->Op == OpCode::Call) {
+                auto* c = static_cast<Call*>(i);
+                if (c->IsNewObj && c->DeclaringType) {
+                    auto* kt = dynamic_cast<const KnownType*>(c->DeclaringType.get());
+                    if (kt && kt->Code() == KnownTypeCode::Decimal) ++newobjDecimalAfter;
+                }
+            }
+        });
+        fn->CheckInvariant(ILPhase::Normal);
+        EXPECT_GE(ldcDecimalAfter, ldcDecimalBefore);
+        EXPECT_LE(newobjDecimalAfter, newobjDecimalBefore);
+        totalDecimalCtorFolds += (ldcDecimalAfter - ldcDecimalBefore);
+        if (processed >= 8000) break;
+    }
+    EXPECT_GT(processed, 5000);
+    // The fold fires on the legacy-csc corpus: mscorlib constructs Decimal
+    // constants via `newobj Decimal(int)` (3 sites) and the 5-arg ctor (6
+    // sites), so a non-zero total confirms the fold makes real-corpus progress.
+    EXPECT_GT(totalDecimalCtorFolds, 0)
+        << "TransformDecimalCtorToConstant must fold some Decimal ctors on mscorlib";
 }

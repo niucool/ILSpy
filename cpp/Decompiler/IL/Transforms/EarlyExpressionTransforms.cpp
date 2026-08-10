@@ -20,8 +20,12 @@
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
+#include "Decompiler/IL/Instructions/LdcDecimal.hpp"
+#include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
@@ -30,6 +34,7 @@
 #include "Decompiler/IL/StackType.hpp"
 #include "Decompiler/IL/StackTypeOf.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
 
 #include <functional>
@@ -154,6 +159,114 @@ void FixComparisonKindLdNull(Comp* comp, ILTransformContext& context) {
     }
 }
 
+// Match an int32 constant (LdcI4), reporting its value. Mirrors the C#
+// `ILInstruction.MatchLdcI4(out int)` (a bare match -- the reader does not
+// wrap ldc.i4 in conv, so no UnwrapConv unwrap is needed, matching the
+// SwitchAnalysis/ExpressionTransforms MatchLdcI precedent).
+bool MatchLdcI4(const ILInstruction* inst, std::int32_t& val) {
+    if (inst && inst->Op == OpCode::LdcI4) {
+        val = static_cast<const LdcI4*>(inst)->Value;
+        return true;
+    }
+    return false;
+}
+
+// Match an integer constant (LdcI4 or LdcI8), reporting its value as an int64.
+// Mirrors the C# `ILInstruction.MatchLdcI(out long)`: LdcI4 sign-extends the
+// int32 to int64; LdcI8 carries the full 64-bit value. The C# additionally
+// unwraps SignExtend/ZeroExtend-from-I4 convs; this port's reader does not wrap
+// ldc in conv, so the bare LdcI4/LdcI8 cases suffice (the ExpressionTransforms
+// MatchLdcI precedent).
+bool MatchLdcI(const ILInstruction* inst, std::int64_t& val) {
+    if (!inst) return false;
+    if (inst->Op == OpCode::LdcI4) {
+        val = static_cast<const LdcI4*>(inst)->Value;
+        return true;
+    }
+    if (inst->Op == OpCode::LdcI8) {
+        val = static_cast<const LdcI8*>(inst)->Value;
+        return true;
+    }
+    return false;
+}
+
+// The KnownTypeCode of a resolved IType, or None when it is not a known type.
+// A primitive parameter type (int/uint/long/ulong) decodes to a bare KnownType,
+// so the plain dynamic_cast suffices (no ParameterizedType unwrap, unlike the
+// NullableLiftingTransform KnownTypeCodeOf which unwraps generic instantiations
+// -- a Decimal ctor parameter is never a generic instantiation).
+TypeSystem::KnownTypeCode KnownTypeCodeOf(const TypeSystem::IType* type) {
+    if (!type) return TypeSystem::KnownTypeCode::None;
+    if (auto* kt = dynamic_cast<const TypeSystem::KnownType*>(type))
+        return kt->Code();
+    return TypeSystem::KnownTypeCode::None;
+}
+
+// newobj Decimal(int/uint/long/ulong) or newobj Decimal(int, int, int, bool,
+// byte) folds into the corresponding LdcDecimal constant. The C# lives in
+// EarlyExpressionTransforms.VisitNewObj (this port's EarlyExpressionTransforms
+// is the whole-function equivalent); newobj is modelled as a Call with IsNewObj
+// (D76). The 1-arg case dispatches on the first parameter's KnownTypeCode (the
+// int/uint/long/ulong overloads share the resolved name `System.Decimal::.ctor`,
+// so the parameter type -- carried on Call::ParameterIType -- distinguishes
+// them). Returns true and sets `result` on a fold; the Call is replaced by the
+// LdcDecimal via ReplaceWith (a clean value-position swap -- a newobj Call is a
+// value, never a block final).
+bool TransformDecimalCtorToConstant(Call* call, std::unique_ptr<ILInstruction>& result,
+                                     ILTransformContext& context) {
+    if (!call->IsNewObj) return false;
+    if (KnownTypeCodeOf(call->DeclaringType.get()) != TypeSystem::KnownTypeCode::Decimal)
+        return false;
+    const auto& args = call->Arguments;
+    if (args.size() == 1) {
+        std::int64_t val = 0;
+        if (!MatchLdcI(args[0].get(), val)) return false;
+        if (call->ParameterIType.empty()) return false;
+        auto paramCode = KnownTypeCodeOf(call->ParameterIType[0].get());
+        DecimalValue dv;
+        switch (paramCode) {
+            case TypeSystem::KnownTypeCode::Int32:
+                dv = DecimalValue::FromInt32(static_cast<std::int32_t>(val));
+                break;
+            case TypeSystem::KnownTypeCode::UInt32:
+                dv = DecimalValue::FromUInt32(static_cast<std::uint32_t>(val));
+                break;
+            case TypeSystem::KnownTypeCode::Int64:
+                dv = DecimalValue::FromInt64(val);
+                break;
+            case TypeSystem::KnownTypeCode::UInt64:
+                dv = DecimalValue::FromUInt64(static_cast<std::uint64_t>(val));
+                break;
+            default:
+                return false;
+        }
+        context.StepOnce("newobj Decimal(int/uint/long/ulong) => ldc.decimal");
+        result = std::make_unique<LdcDecimal>(dv);
+        return true;
+    }
+    if (args.size() == 5) {
+        std::int32_t lo = 0, mid = 0, hi = 0, isNegative = 0, scale = 0;
+        if (!MatchLdcI4(args[0].get(), lo) || !MatchLdcI4(args[1].get(), mid) ||
+            !MatchLdcI4(args[2].get(), hi) || !MatchLdcI4(args[3].get(), isNegative) ||
+            !MatchLdcI4(args[4].get(), scale))
+            return false;
+        // The C# `unchecked((byte)scale) <= 28` guard: the scale is a 0..28
+        // count of digits right of the point; the byte cast truncates to the low
+        // 8 bits (faithful to the C# unchecked cast), and the guard rejects an
+        // out-of-range scale (the 5-arg ctor's only validation).
+        std::uint8_t sc = static_cast<std::uint8_t>(scale);
+        if (sc > 28) return false;
+        context.StepOnce("newobj Decimal(int, int, int, bool, byte) => ldc.decimal");
+        result = std::make_unique<LdcDecimal>(
+            DecimalValue::FromBits(static_cast<std::uint32_t>(lo),
+                                   static_cast<std::uint32_t>(mid),
+                                   static_cast<std::uint32_t>(hi),
+                                   isNegative != 0, sc));
+        return true;
+    }
+    return false;
+}
+
 } // namespace
 
 void EarlyExpressionTransforms::Run(ILFunction& function, ILTransformContext& context) {
@@ -170,6 +283,27 @@ void EarlyExpressionTransforms::Run(ILFunction& function, ILTransformContext& co
     });
     for (StObj* st : stobjs) StObjToStLoc(st, context);
     for (LdObj* ld : ldobjs) LdObjToLdLoc(ld, context);
+
+    // newobj Decimal(...) -> ldc.decimal: collect NewObj Calls then fold. A
+    // newobj Call is a value (never a block final -- it leaves the constructed
+    // object on the stack), so it is always a child of some node; collecting
+    // the Call* up front is safe because TransformDecimalCtorToConstant only
+    // ReplaceWith'es the matched Call itself (it never touches a sibling), so
+    // no other collected Call is destroyed before it is processed -- matching
+    // the StObjToStLoc/LdObjToLdLoc collect-then-ReplaceWith precedent.
+    std::vector<Call*> newobjCalls;
+    WalkAll(function.Body.get(), [&](ILInstruction* inst) {
+        if (inst->Op == OpCode::Call) {
+            auto* call = static_cast<Call*>(inst);
+            if (call->IsNewObj) newobjCalls.push_back(call);
+        }
+    });
+    for (Call* call : newobjCalls) {
+        std::unique_ptr<ILInstruction> decimalConstant;
+        if (TransformDecimalCtorToConstant(call, decimalConstant, context)) {
+            call->ReplaceWith(std::move(decimalConstant));
+        }
+    }
 
     // Comps last: collect then fix. FixComparisonKindLdNull never replaces a
     // Comp (it mutates Kind, and the box rewrite replaces comp->Left, destroying

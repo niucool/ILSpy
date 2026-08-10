@@ -48,6 +48,19 @@ public:
     // can consult it without a MetadataFile handle (the transforms carry only
     // Settings + Step, per D78).
     TypeSystem::ITypePtr ReturnIType;
+    // The resolved parameter types of the method, as ITypes, in declaration
+    // order (no implicit `this`). Set by the IL reader from the method
+    // signature's ParameterTypes (the same callSig->ParameterTypes ReturnType
+    // is derived from). Empty when the signature could not be resolved. The
+    // faithful equivalent of the C# `Method.Parameters[i].Type` (the C# also
+    // carries the parameter name/kind; this port's transforms consult only the
+    // type -- e.g. EarlyExpressionTransforms.TransformDecimalCtorToConstant
+    // dispatches the 1-arg `newobj Decimal(...)` ctor on the first parameter's
+    // KnownTypeCode to distinguish the int/uint/long/ulong overloads, which the
+    // resolved MethodName `System.Decimal::.ctor` alone cannot). Carried so
+    // transforms that need a parameter type can consult it without a
+    // MetadataFile handle (per D78).
+    std::vector<TypeSystem::ITypePtr> ParameterIType;
     // The declaring type of the resolved method, as an IType. Set by the IL
     // reader from the method token (MethodDef parent TypeDef, MemberRef parent
     // TypeRef/TypeDef/TypeSpec, MethodSpec unwrapped). Null when the token
