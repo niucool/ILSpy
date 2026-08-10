@@ -588,6 +588,12 @@ private:
         if (target.Op == OpCode::LdElema) return ElementAccess(static_cast<const LdElema&>(target));
         auto byref = ByRefVarName(target);
         if (!byref.empty()) return byref;
+        // A pointer-typed local: `*ptr` (the deref is explicit but needs no
+        // parens around a bare name).
+        if (auto* ld = dynamic_cast<const LdLoc*>(&target))
+            if (ld->Variable && ld->Variable->Type &&
+                dynamic_cast<const TypeSystem::PointerType*>(ld->Variable->Type.get()))
+                return "*" + ld->Variable->Name;
         return "*(" + Expr(target) + ")";
     }
 
@@ -1037,6 +1043,10 @@ private:
         }
         auto byref = ByRefVarName(target);
         if (!byref.empty()) return byref;
+        if (auto* ld = dynamic_cast<const LdLoc*>(&target))
+            if (ld->Variable && ld->Variable->Type &&
+                dynamic_cast<const TypeSystem::PointerType*>(ld->Variable->Type.get()))
+                return "*" + ld->Variable->Name;
         return "*(" + Expr(target) + ")";
     }
 };
@@ -1053,6 +1063,8 @@ std::string CSharpTypeName(const TypeSystem::ITypePtr& type) {
         return CSharpTypeName(a->Element()) + (a->IsSzArray() ? "[]" : "[,]");
     if (auto* byref = dynamic_cast<const TypeSystem::ByReferenceType*>(type.get()))
         return CSharpTypeName(byref->Element());
+    if (auto* ptr = dynamic_cast<const TypeSystem::PointerType*>(type.get()))
+        return CSharpTypeName(ptr->Element()) + "*";
     if (auto* k = dynamic_cast<const TypeSystem::KnownType*>(type.get())) {
         switch (k->Code()) {
             case TypeSystem::KnownTypeCode::Boolean: return "bool";
