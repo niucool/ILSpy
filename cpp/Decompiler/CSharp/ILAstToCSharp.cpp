@@ -677,10 +677,10 @@ private:
             return target;
         }
         std::string recv = Expr(*call.Arguments[0]);
-        // A ref/deref receiver renders with a leading `&` or `*`, which binds
-        // looser than `.` -- parenthesize so the member access wins. An array
-        // element (`values[0]`) or a plain load needs no parens.
-        bool needsParens = !recv.empty() && (recv[0] == '&' || recv[0] == '*');
+        // A ref/deref receiver renders with a leading `ref `/`&`/`*`, which
+        // binds looser than `.` -- parenthesize so the member access wins.
+        bool needsParens = recv.size() >= 4 && recv.compare(0, 4, "ref ") == 0;
+        if (!needsParens && !recv.empty()) needsParens = (recv[0] == '&' || recv[0] == '*');
         std::string text = (needsParens ? "(" + recv + ")" : recv) +
                            "." + ShortMethodName(call.MethodName) + "(";
         for (std::size_t i = 1; i < call.Arguments.size(); ++i) {
