@@ -85,6 +85,11 @@
 
 namespace ILSpy::Decompiler::IL {
 
+// Forward declaration for the IsBinaryCompatibleWithType settings parameter
+// (ILTransformSettings is defined in Transforms/IILTransform.hpp; the node
+// header avoids including it to keep the include graph lean).
+struct ILTransformSettings;
+
 // Whether a compound.assign evaluates to the old (post-increment/decrement) or
 // the new (compound assignment / pre-increment) value. Faithful to the C#
 // CompoundEvalMode enum.
@@ -226,6 +231,27 @@ public:
 	}
 	// Faithful to the C# UnderlyingResultType (ILiftableInstruction).
 	StackType UnderlyingResultType() const { return UnderlyingResultTypeField; }
+
+	// Port of NumericCompoundAssign.IsBinaryCompatibleWithType: whether the
+	// specific binary instruction is compatible with a compound operation on
+	// the specified type. The gate the future TransformAssignment.
+	// HandleCompoundAssign consults before building a NumericCompoundAssign from
+	// a `stloc V(binary.op(ldloc V, rhs))` pattern. The settings parameter is
+	// nullable (matching the C# `DecompilerSettings?`); a null settings pointer
+	// is treated as the defaults (NativeIntegers/UnsignedRightShift permissive),
+	// matching the C# Debug.Assert call from the constructor.
+	//
+	// The Pointer case is deferred: the C# consults PointerArithmeticOffset.
+	// Detect (needs the SizeOf node + ComputeSizeOf + UnwrapConv +
+	// NormalizeTypeVisitor.TypeErasure.EquivalentTypes -- a substantial deferred
+	// slice), so the port returns false conservatively for pointer types (no
+	// pointer compound assignment is confirmed). This is behavior-preserving for
+	// the .NET Framework 4 mscorlib corpus (pointer arithmetic requires `unsafe`,
+	// absent from C#-compiled code); the hand-built tests verify the non-Pointer
+	// gates and the conservative pointer reject.
+	static bool IsBinaryCompatibleWithType(const BinaryNumericInstruction* binary,
+	                                       const TypeSystem::IType* type,
+	                                       const ILTransformSettings* settings);
 
 	void WriteTo(std::string& out) const override {
 		// Faithful to the C# WriteToCore:

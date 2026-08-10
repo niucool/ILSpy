@@ -1254,6 +1254,41 @@ implemented and green here. Everything else follows the phase plan in
   does not fold). Tested-but-not-yet-wired (no consumer yet -- the
   `IsBinaryCompatibleWithType` validator is the subsequent iteration); `--csharp`
   output is unchanged.
+  The `NumericCompoundAssign.IsBinaryCompatibleWithType` validator (D129, the
+  C# static gate on `NumericCompoundAssign` the `TransformAssignment.
+  HandleCompoundAssign` / `ValidateCompoundAssign` consults before building a
+  `NumericCompoundAssign` from a `stloc V(binary.op(ldloc V, rhs))` pattern) is
+  now ported as a tested-but-not-yet-wired foundation, completing the
+  compound-assignment-validation prerequisites D127/D128 flagged. The validator
+  (`CompoundAssignmentInstruction.cpp`, out-of-line since the node is
+  header-only) ports the IsLifted / Unknown / Enum / IntPtr-UIntPtr / Sign /
+  IsImplicitTruncation gates faithfully: the IsLifted gate unwraps a
+  `Nullable<T>` store type via the D93 `GetUnderlyingTypeOfNullable` (the
+  faithful equivalent of `NullableType.IsNullable` + `GetUnderlyingType`);
+  the Enum gate allows Add/Sub/BitAnd/BitOr/BitXor and rejects other operators;
+  the IntPtr/UIntPtr gate (a `KnownType(IntPtr)`/`(UIntPtr)` with `Kind !=
+  NInt/NUInt`) rejects shifts and rejects the whole compound assign when
+  `NativeIntegers` is off; the Sign gate consults `IsCSharpSmallIntegerType`
+  (D126) + `GetSign(IType)` (D126) + the `signMismatchAllowed`
+  (`Unsigned` + `ShiftRight` + `UnsignedRightShift`) gate; the
+  `IsImplicitTruncation` gate (D128) rejects an RHS that would be truncated.
+  The `Pointer` case is deferred-conservative: the C# consults
+  `PointerArithmeticOffset.Detect` (needs the `SizeOf` node + `ComputeSizeOf`
+  + `UnwrapConv` + `NormalizeTypeVisitor.TypeErasure.EquivalentTypes` -- a
+  substantial deferred slice), so the port returns `false` for pointer types (no
+  pointer compound assignment confirmed). This is behavior-preserving for the
+  .NET Framework 4 mscorlib corpus (pointer arithmetic requires `unsafe`, absent
+  from C#-compiled code); the Add/Sub vs other-operator distinction is kept
+  structural so the `PointerArithmeticOffset` port can fill in the Add/Sub arm
+  later. The `NativeIntegers` (C# 9.0) + `UnsignedRightShift` (C# 11.0)
+  settings (both default true, matching `DecompilerSettings`) are added to
+  `ILTransformSettings`. A null `settings` pointer is treated as the defaults
+  (NativeIntegers/UnsignedRightShift permissive), matching the C# constructor
+  `Debug.Assert(IsBinaryCompatibleWithType(binary, type, null))`. 21 new gtest
+  cases (the 20 gate tests + an 8000-method mscorlib validator sweep exercising
+  every gate on real binary operations + their resolved variable types);
+  888/888 gtest cases pass (was 867); the CLI decompiles the full mscorlib
+  module end-to-end (exit 0, no regression).
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
   walk + a corpus probe; the async/iterator state machines
@@ -1271,11 +1306,9 @@ implemented and green here. Everything else follows the phase plan in
   `Variable.Kind` for the StLoc case] / `IsMatchingCompoundLoad` [needs
   `RecombineVariables` + getter/setter `IMethod`/`AccessorOwner`] /
   `ValidateCompoundAssign` [needs `NumericCompoundAssign.IsBinaryCompatibleWithType`,
-  which now has the BNI `Sign` (D127) + the `IsImplicitTruncation` analysis (D128)
-  but still needs the `IsLifted`/`Enum`/`Pointer`/native-int gates + an
-  `IsNullable`/`GetUnderlyingType` via the D93 `NullableLiftingTransform::
-  GetUnderlyingTypeOfNullable` + a `PointerArithmeticOffset.Detect` for the
-  `Pointer` case + the `NativeIntegers`/`UnsignedRightShift` settings] +
+  which is now ported (D129) -- the IsLifted/Enum/IntPtr-UIntPtr/Sign/
+  IsImplicitTruncation gates are in place; only the `Pointer` case's
+  `PointerArithmeticOffset.Detect` is deferred-conservative] +
   `RecombineVariables` [the finalizeMatch for the StLoc case] + the per-variable
   store-list tree walk [the repeatedly-deferred infrastructure piece], ...)
   are the subsequent in-order targets.

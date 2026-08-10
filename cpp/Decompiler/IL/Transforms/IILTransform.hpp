@@ -143,6 +143,20 @@ struct ILTransformSettings {
     // MakeAssignmentExpressions and IntroduceIncrementAndDecrement must be true
     // for any compound assignment (incl. increment/decrement) to be introduced.
     bool IntroduceIncrementAndDecrement = true;
+    // Whether to use the C# 9.0 `nint`/`nuint` native-integer types.
+    // DecompilerSettings.NativeIntegers -- a C# 9.0 setting, default true.
+    // NumericCompoundAssign.IsBinaryCompatibleWithType consults this: a
+    // compound assign to a System.IntPtr/UIntPtr LHS (but not nint/nuint) is
+    // only allowed when native integers are available (the RHS must be cast to
+    // n(u)int); with the setting off the compound assign is rejected.
+    bool NativeIntegers = true;
+    // Whether to use the C# 11.0 unsigned right-shift operator (`>>>`).
+    // DecompilerSettings.UnsignedRightShift -- a C# 11.0 setting, default
+    // true. NumericCompoundAssign.IsBinaryCompatibleWithType consults this:
+    // an unsigned right shift against a type whose sign does not match is
+    // allowed only when the unsigned-right-shift operator is available (the
+    // `signMismatchAllowed` gate).
+    bool UnsignedRightShift = true;
 };
 
 class ILTransformContext {

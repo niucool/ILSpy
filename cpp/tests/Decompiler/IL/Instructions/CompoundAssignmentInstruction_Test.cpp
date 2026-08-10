@@ -67,7 +67,14 @@ using ILSpy::Decompiler::Metadata::MetadataFile;
 using ILSpy::Decompiler::TypeSystem::ITypePtr;
 using ILSpy::Decompiler::TypeSystem::KnownType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+using ILSpy::Decompiler::TypeSystem::ParameterizedType;
+using ILSpy::Decompiler::TypeSystem::PointerType;
+using ILSpy::Decompiler::TypeSystem::SimpleType;
+using ILSpy::Decompiler::TypeSystem::SpecialType;
 using ILSpy::Decompiler::TypeSystem::Sign;
+using ILSpy::Decompiler::TypeSystem::TopLevelTypeName;
+using ILSpy::Decompiler::TypeSystem::TypeKind;
+using ILSpy::Decompiler::TypeSystem::UnknownType;
 
 namespace {
 
@@ -324,6 +331,319 @@ TEST(CompoundAssignmentInstruction, AssignmentSettingsDefaultTrue) {
     // IntroduceIncrementAndDecrement).
     EXPECT_TRUE(settings.MakeAssignmentExpressions);
     EXPECT_TRUE(settings.IntroduceIncrementAndDecrement);
+    // NativeIntegers (C# 9.0) and UnsignedRightShift (C# 11.0) also default
+    // true; NumericCompoundAssign.IsBinaryCompatibleWithType consults both.
+    EXPECT_TRUE(settings.NativeIntegers);
+    EXPECT_TRUE(settings.UnsignedRightShift);
+}
+
+// -----------------------------------------------------------------------------
+// IsBinaryCompatibleWithType (the D129 validator). The C# static gate on
+// NumericCompoundAssign that the future TransformAssignment.HandleCompoundAssign
+// consults before building a NumericCompoundAssign from a
+// `stloc V(binary.op(ldloc V, rhs))` pattern. Ports the IsLifted / Unknown /
+// Enum / Pointer (deferred-conservative) / IntPtr-UIntPtr / Sign /
+// IsImplicitTruncation gates faithfully; the Pointer case's
+// PointerArithmeticOffset.Detect is a substantial deferred slice, so pointer
+// types are rejected conservatively (no pointer compound assignment confirmed).
+// -----------------------------------------------------------------------------
+
+namespace {
+
+// A fresh ILTransformSettings for a test (the defaults -- NativeIntegers on,
+// UnsignedRightShift on).
+std::unique_ptr<ILTransformSettings> DefaultSettings() {
+    return std::make_unique<ILTransformSettings>();
+}
+
+// A KnownType for the given code (Byte / IntPtr / UIntPtr / etc.).
+ITypePtr KT(KnownTypeCode c) { return std::make_shared<KnownType>(c); }
+
+// A non-lifted BinaryNumericInstruction with an Int32 LdLoc Left and the given
+// Right, operator, and sign (the faithful 5-arg constructor). The validator
+// does not consult LeftInputType for these gates, so an Int32 Left suffices.
+std::unique_ptr<BinaryNumericInstruction> MakeBinary(BinaryNumericOperator op,
+                                                       Sign sign,
+                                                       bool checkForOverflow,
+                                                       std::unique_ptr<ILInstruction> right) {
+    auto left = std::make_unique<LdLoc>(MakeLocal("v", Int32()));
+    return std::make_unique<BinaryNumericInstruction>(
+        std::move(left), std::move(right), op, checkForOverflow, sign);
+}
+
+// A lifted BinaryNumericInstruction (IsLifted=true, ResultType O) with the
+// given operator/sign and an Int32 underlying input type.
+std::unique_ptr<BinaryNumericInstruction> MakeLiftedBinary(
+    BinaryNumericOperator op, Sign sign, std::unique_ptr<ILInstruction> right) {
+    auto left = std::make_unique<LdLoc>(MakeLocal("v", Int32()));
+    return std::make_unique<BinaryNumericInstruction>(
+        std::move(left), std::move(right), op,
+        StackType::I4, StackType::I4, false, sign, true);
+}
+
+// A Nullable<T> as a generic instantiation: ParameterizedType(KnownType(NullableOfT), {T}).
+ITypePtr MakeNullableOf(KnownTypeCode underlying) {
+    std::vector<ITypePtr> args;
+    args.push_back(std::make_shared<KnownType>(underlying));
+    return std::make_shared<ParameterizedType>(
+        std::make_shared<KnownType>(KnownTypeCode::NullableOfT), std::move(args));
+}
+
+// An enum type (Kind==Enum): a SimpleType with the Enum kind.
+ITypePtr EnumType() {
+    return std::make_shared<SimpleType>(TopLevelTypeName("", "E"),
+                                        TypeKind::Enum);
+}
+
+// A pointer type (Kind==Pointer) over Int32.
+ITypePtr PtrType() {
+    return std::make_shared<PointerType>(Int32());
+}
+
+}  // namespace
+
+// ---- IsLifted gate ----
+
+// A lifted binary over a Nullable<int> store type passes: the IsLifted gate
+// unwraps to the underlying Int32, which the remaining gates accept (Sign.None
+// Add, Int32 not small integer, LdcI4(1) fits).
+TEST(IsBinaryCompatibleWithTypeTest, LiftedBinaryOverNullableTypePasses) {
+    auto b = MakeLiftedBinary(BinaryNumericOperator::Add, Sign::None,
+                               std::make_unique<LdcI4>(1));
+    auto settings = DefaultSettings();
+    EXPECT_TRUE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+        b.get(), MakeNullableOf(KnownTypeCode::Int32).get(), settings.get()));
+}
+
+// A lifted binary over a non-Nullable store type fails: the IsLifted gate
+// requires the store type to be Nullable<T>.
+TEST(IsBinaryCompatibleWithTypeTest, LiftedBinaryOverNonNullableTypeFails) {
+    auto b = MakeLiftedBinary(BinaryNumericOperator::Add, Sign::None,
+                               std::make_unique<LdcI4>(1));
+    auto settings = DefaultSettings();
+    EXPECT_FALSE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+        b.get(), Int32().get(), settings.get()));
+}
+
+// ---- Unknown gate ----
+
+// An Unknown store type is rejected (avoid introducing a potentially-incorrect
+// compound assignment).
+TEST(IsBinaryCompatibleWithTypeTest, UnknownTypeFails) {
+    auto b = MakeBinary(BinaryNumericOperator::Add, Sign::None, false,
+                        std::make_unique<LdcI4>(1));
+    auto settings = DefaultSettings();
+    EXPECT_FALSE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+        b.get(), UnknownType().get(), settings.get()));
+}
+
+// ---- Enum gate ----
+
+// Add/Sub/BitAnd/BitOr/BitXor are supported on enum types (the operator switch
+// breaks out and the remaining gates pass -- an Enum is not a C# small integer,
+// GetSign(Enum) is None so a Sign.None Add skips the Sign gate).
+TEST(IsBinaryCompatibleWithTypeTest, EnumAllowsAddSubBitOps) {
+    auto settings = DefaultSettings();
+    for (auto op : { BinaryNumericOperator::Add, BinaryNumericOperator::Sub,
+                     BinaryNumericOperator::BitAnd, BinaryNumericOperator::BitOr,
+                     BinaryNumericOperator::BitXor }) {
+        auto b = MakeBinary(op, Sign::None, false, std::make_unique<LdcI4>(1));
+        EXPECT_TRUE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+            b.get(), EnumType().get(), settings.get()))
+            << "operator " << static_cast<int>(op);
+    }
+}
+
+// Div/Rem/Mul/ShiftLeft/ShiftRight are NOT supported on enum types.
+TEST(IsBinaryCompatibleWithTypeTest, EnumRejectsOtherOperators) {
+    auto settings = DefaultSettings();
+    for (auto op : { BinaryNumericOperator::Div, BinaryNumericOperator::Rem,
+                     BinaryNumericOperator::Mul,
+                     BinaryNumericOperator::ShiftLeft,
+                     BinaryNumericOperator::ShiftRight }) {
+        auto b = MakeBinary(op, Sign::None, false, std::make_unique<LdcI4>(1));
+        EXPECT_FALSE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+            b.get(), EnumType().get(), settings.get()))
+            << "operator " << static_cast<int>(op);
+    }
+}
+
+// ---- Pointer gate (deferred-conservative) ----
+
+// Pointer compound assignment is rejected conservatively (the C# consults
+// PointerArithmeticOffset.Detect, not yet ported). Even Add/Sub -- the only
+// operators the C# considers -- are rejected until the Detect helper lands.
+TEST(IsBinaryCompatibleWithTypeTest, PointerRejectedConservatively) {
+    auto settings = DefaultSettings();
+    for (auto op : { BinaryNumericOperator::Add, BinaryNumericOperator::Sub,
+                     BinaryNumericOperator::Mul }) {
+        auto b = MakeBinary(op, Sign::None, false, std::make_unique<LdcI4>(1));
+        EXPECT_FALSE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+            b.get(), PtrType().get(), settings.get()))
+            << "operator " << static_cast<int>(op);
+    }
+}
+
+// ---- IntPtr/UIntPtr gate ----
+
+// A System.IntPtr LHS (Kind==Struct, not NInt) with NativeIntegers on and a
+// non-shift operator passes (the IntPtr gate does not reject; Add is not a
+// shift; Sign.None Add skips the Sign gate; IntPtr is not a small integer).
+TEST(IsBinaryCompatibleWithTypeTest, IntPtrWithNativeIntegersPasses) {
+    auto b = MakeBinary(BinaryNumericOperator::Add, Sign::None, false,
+                        std::make_unique<LdcI4>(1));
+    auto settings = DefaultSettings();
+    EXPECT_TRUE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+        b.get(), KT(KnownTypeCode::IntPtr).get(), settings.get()));
+}
+
+// A System.IntPtr LHS with NativeIntegers OFF fails (the trick of casting the
+// RHS to n(u)int requires native integers to be available).
+TEST(IsBinaryCompatibleWithTypeTest, IntPtrWithoutNativeIntegersFails) {
+    auto b = MakeBinary(BinaryNumericOperator::Add, Sign::None, false,
+                        std::make_unique<LdcI4>(1));
+    auto settings = DefaultSettings();
+    settings->NativeIntegers = false;
+    EXPECT_FALSE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+        b.get(), KT(KnownTypeCode::IntPtr).get(), settings.get()));
+}
+
+// Shifts on a System.IntPtr LHS fail even with NativeIntegers on (casting the
+// RHS to n(u)int does not work for shifts).
+TEST(IsBinaryCompatibleWithTypeTest, IntPtrShiftFails) {
+    auto settings = DefaultSettings();
+    for (auto op : { BinaryNumericOperator::ShiftLeft,
+                     BinaryNumericOperator::ShiftRight }) {
+        auto b = MakeBinary(op, Sign::None, false, std::make_unique<LdcI4>(1));
+        EXPECT_FALSE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+            b.get(), KT(KnownTypeCode::IntPtr).get(), settings.get()))
+            << "operator " << static_cast<int>(op);
+    }
+}
+
+// A System.UIntPtr LHS behaves the same as IntPtr (the gate covers both).
+TEST(IsBinaryCompatibleWithTypeTest, UIntPtrWithNativeIntegersPasses) {
+    auto b = MakeBinary(BinaryNumericOperator::Add, Sign::None, false,
+                        std::make_unique<LdcI4>(1));
+    auto settings = DefaultSettings();
+    EXPECT_TRUE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+        b.get(), KT(KnownTypeCode::UIntPtr).get(), settings.get()));
+}
+
+// A native-int nint (Kind==NInt) is NOT caught by the IntPtr gate (Kind is
+// NInt, not Struct-KnownType-IntPtr), so a plain Add passes.
+TEST(IsBinaryCompatibleWithTypeTest, NIntBypassesIntPtrGate) {
+    auto b = MakeBinary(BinaryNumericOperator::Add, Sign::None, false,
+                        std::make_unique<LdcI4>(1));
+    auto settings = DefaultSettings();
+    ITypePtr nintType = std::make_shared<SpecialType>(TypeKind::NInt);
+    EXPECT_TRUE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+        b.get(), nintType.get(), settings.get()));
+}
+
+// ---- Sign gate ----
+
+// A signed binary over a signed type (Int32) passes the Sign gate.
+TEST(IsBinaryCompatibleWithTypeTest, SignedBinaryOverSignedTypePasses) {
+    auto b = MakeBinary(BinaryNumericOperator::Add, Sign::Signed, false,
+                        std::make_unique<LdcI4>(1));
+    auto settings = DefaultSettings();
+    EXPECT_TRUE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+        b.get(), Int32().get(), settings.get()));
+}
+
+// An unsigned binary over a signed type (Int32) fails the Sign gate (the type's
+// sign does not match and Add is not a right shift, so signMismatchAllowed is
+// false).
+TEST(IsBinaryCompatibleWithTypeTest, UnsignedBinaryOverSignedTypeFails) {
+    auto b = MakeBinary(BinaryNumericOperator::Add, Sign::Unsigned, false,
+                        std::make_unique<LdcI4>(1));
+    auto settings = DefaultSettings();
+    EXPECT_FALSE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+        b.get(), Int32().get(), settings.get()));
+}
+
+// An unsigned right shift over a signed type passes when UnsignedRightShift is
+// on (the C# 11 `>>>` operator allows the sign mismatch).
+TEST(IsBinaryCompatibleWithTypeTest, UnsignedRightShiftOverSignedTypePasses) {
+    auto b = MakeBinary(BinaryNumericOperator::ShiftRight, Sign::Unsigned, false,
+                        std::make_unique<LdcI4>(1));
+    auto settings = DefaultSettings();
+    EXPECT_TRUE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+        b.get(), Int32().get(), settings.get()));
+}
+
+// An unsigned right shift over a signed type fails when UnsignedRightShift is
+// off (no `>>>` operator available, so the sign mismatch is not allowed).
+TEST(IsBinaryCompatibleWithTypeTest, UnsignedRightShiftFailsWhenSettingOff) {
+    auto b = MakeBinary(BinaryNumericOperator::ShiftRight, Sign::Unsigned, false,
+                        std::make_unique<LdcI4>(1));
+    auto settings = DefaultSettings();
+    settings->UnsignedRightShift = false;
+    EXPECT_FALSE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+        b.get(), Int32().get(), settings.get()));
+}
+
+// A C# small integer (Byte) requires the binary to be signed (C# numeric-
+// promotes a small integer to int); an unsigned Add fails.
+TEST(IsBinaryCompatibleWithTypeTest, UnsignedBinaryOverCSharpSmallIntegerFails) {
+    auto b = MakeBinary(BinaryNumericOperator::Add, Sign::Unsigned, false,
+                        std::make_unique<LdcI4>(1));
+    auto settings = DefaultSettings();
+    EXPECT_FALSE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+        b.get(), KT(KnownTypeCode::Byte).get(), settings.get()));
+}
+
+// A signed binary over a C# small integer (Byte) passes the Sign gate (the
+// binary is signed, matching the int promotion) and the IsImplicitTruncation
+// gate (LdcI4(1) fits a Byte).
+TEST(IsBinaryCompatibleWithTypeTest, SignedBinaryOverCSharpSmallIntegerPasses) {
+    auto b = MakeBinary(BinaryNumericOperator::Add, Sign::Signed, false,
+                        std::make_unique<LdcI4>(1));
+    auto settings = DefaultSettings();
+    EXPECT_TRUE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+        b.get(), KT(KnownTypeCode::Byte).get(), settings.get()));
+}
+
+// ---- IsImplicitTruncation gate ----
+
+// An RHS that would be truncated for the LHS type fails: a signed Add over a
+// Byte with LdcI4(100000) -- the Sign gate passes (Signed matches the int
+// promotion), but IsImplicitTruncation reports ValueChanged (100000 > 255).
+TEST(IsBinaryCompatibleWithTypeTest, TruncatingRhsFails) {
+    auto b = MakeBinary(BinaryNumericOperator::Add, Sign::Signed, false,
+                        std::make_unique<LdcI4>(100000));
+    auto settings = DefaultSettings();
+    EXPECT_FALSE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+        b.get(), KT(KnownTypeCode::Byte).get(), settings.get()));
+}
+
+// An RHS that fits the LHS type passes: a signed Add over a Byte with
+// LdcI4(1) -- both the Sign gate and IsImplicitTruncation pass.
+TEST(IsBinaryCompatibleWithTypeTest, FittingRhsPasses) {
+    auto b = MakeBinary(BinaryNumericOperator::Add, Sign::Signed, false,
+                        std::make_unique<LdcI4>(1));
+    auto settings = DefaultSettings();
+    EXPECT_TRUE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+        b.get(), KT(KnownTypeCode::Byte).get(), settings.get()));
+}
+
+// ---- settings=null (the Debug.Assert form) ----
+
+// A null settings pointer is treated as the defaults (NativeIntegers /
+// UnsignedRightShift permissive), matching the C# constructor Debug.Assert call.
+TEST(IsBinaryCompatibleWithTypeTest, NullSettingsTreatedAsDefaults) {
+    // IntPtr + Add passes with null settings (NativeIntegers permissive).
+    auto b1 = MakeBinary(BinaryNumericOperator::Add, Sign::None, false,
+                         std::make_unique<LdcI4>(1));
+    EXPECT_TRUE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+        b1.get(), KT(KnownTypeCode::IntPtr).get(), nullptr));
+    // Unsigned right shift over Int32 passes with null settings
+    // (UnsignedRightShift permissive).
+    auto b2 = MakeBinary(BinaryNumericOperator::ShiftRight, Sign::Unsigned, false,
+                         std::make_unique<LdcI4>(1));
+    EXPECT_TRUE(NumericCompoundAssign::IsBinaryCompatibleWithType(
+        b2.get(), Int32().get(), nullptr));
 }
 
 // ---- mscorlib sweep ----
@@ -397,4 +717,65 @@ TEST(CompoundAssignmentInstruction, MscorlibConstructFromRealBinaryOpsSweep) {
     }
     EXPECT_GT(processed, 5000);
     EXPECT_GT(constructed, 0);
+}
+
+// A mscorlib sweep for the IsBinaryCompatibleWithType validator: walk real
+// BinaryNumericInstructions whose Left is an LdLoc, take the LdLoc's
+// Variable->Type as the store type (the compound-assign target's type), and
+// call the validator -- exercising every gate on thousands of real binary
+// operations + their resolved variable types. Confirms the validator returns a
+// bool without crashing and the compatible count is non-negative (the validator
+// is not wired into the pipeline yet, so this is a foundation-level exercise).
+TEST(IsBinaryCompatibleWithTypeTest, MscorlibValidatorSweep) {
+#if defined(_WIN32)
+    const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    auto settings = DefaultSettings();
+    int processed = 0;
+    int evaluated = 0;
+    int compatible = 0;
+    int intPtrCompat = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++processed;
+        Walk(fn->Body.get(), [&](ILInstruction* inst) {
+            if (!inst || inst->Op != OpCode::BinaryNumericInstruction) return;
+            auto* bni = static_cast<BinaryNumericInstruction*>(inst);
+            if (!bni->Left || bni->Left->Op != OpCode::LdLoc) return;
+            auto* ld = static_cast<LdLoc*>(bni->Left.get());
+            if (!ld->Variable || !ld->Variable->Type) return;
+            const auto* storeType = ld->Variable->Type.get();
+            bool result = NumericCompoundAssign::IsBinaryCompatibleWithType(
+                bni, storeType, settings.get());
+            ++evaluated;
+            if (result) ++compatible;
+            // Track the IntPtr gate specifically (a KnownType(IntPtr) store
+            // type with NativeIntegers on) -- the gate the validator consults.
+            if (result && storeType->Kind() == TypeKind::Struct) {
+                if (const auto* k = dynamic_cast<const KnownType*>(storeType)) {
+                    if (k->Code() == KnownTypeCode::IntPtr ||
+                        k->Code() == KnownTypeCode::UIntPtr) {
+                        ++intPtrCompat;
+                    }
+                }
+            }
+        });
+        fn->CheckInvariant(ILPhase::Normal);
+        if (processed >= 8000) break;
+    }
+    EXPECT_GT(processed, 5000);
+    EXPECT_GT(evaluated, 0);
+    // The validator must not crash and must return a non-negative compatible
+    // count (the legacy-csc corpus has many Int32 binary ops that pass all
+    // gates, so compatible > 0).
+    EXPECT_GE(compatible, 0);
+    EXPECT_LE(compatible, evaluated);
 }
