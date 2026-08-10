@@ -50,6 +50,7 @@
 
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Transforms/StatementTransform.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/Util/BitSet.hpp"
@@ -345,6 +346,31 @@ public:
     static std::unique_ptr<ILInstruction> LiftCSharpComparison(
         const CompOrDecimal& comp, ComparisonKind newComparisonKind,
         const std::vector<ILVariablePtr>& nullableVars);
+};
+
+// Port of NullableLiftingStatementTransform (the per-statement entry
+// NullableLiftingTransform.RunStatements). The C# transform is the next
+// per-statement child of the GetILTransforms() StatementTransform after
+// NullCoalescingTransform (the D77/D90/D111/D113/D116 iterations) and before
+// NullPropagationStatementTransform (D55). It lifts the block-tail nullable
+// expression
+//   if (!condition) { leave(default(Nullable<T>)) }; leave(newobj Nullable<T>(expr))
+// into a single leave carrying the lifted value, by calling the shared Lift
+// (ExpressionTransforms::LiftNullableCore) on the two leaves' values. Adapted
+// to this port's post-ConditionDetection shape (confirmed by a pre-pipeline
+// probe, the D73/D75/D79/D113 precedent): the C# carries the if as a non-
+// terminal at Instructions[Count-2] with the else-leave as the block's last
+// instruction; this port's ConditionDetection inverts the early-exit pattern,
+// so the if is the block's FinalInstruction, the true arm is a Block wrapping
+// the newobj-leave (the `condition ? newobj : default` form), and the default-
+// leave is the next block's FinalInstruction. Gated on the LiftNullables /
+// NullPropagation settings (checked inside LiftNullableCore). The
+// NullableLifting block-tail lift is a Roslyn-era codegen pattern that fires 0
+// times on the .NET Framework 4 legacy-csc mscorlib corpus; ported for
+// faithfulness.
+class NullableLiftingStatementTransform : public IStatementTransform {
+public:
+    void Run(Block& block, int pos, StatementTransformContext& context) override;
 };
 
 } // namespace ILSpy::Decompiler::IL

@@ -17,23 +17,32 @@
 // DEALINGS IN THE SOFTWARE.
 
 #include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
+#include "Decompiler/IL/Transforms/ExpressionTransforms.hpp"
+#include "Decompiler/IL/Transforms/NullPropagationTransform.hpp"
+#include "Decompiler/IL/Transforms/IILTransform.hpp"
 
 #include "Decompiler/IL/InstructionFlags.hpp"
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/BitNot.hpp"
+#include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/Conv.hpp"
 #include "Decompiler/IL/Instructions/DefaultValue.hpp"
+#include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/IL/StackType.hpp"
 #include "Decompiler/Util/BitSet.hpp"
 
 #include <string>
@@ -696,6 +705,114 @@ std::unique_ptr<ILInstruction> NullableLiftingTransform::LiftCSharpComparison(
             std::move(binR.Left), std::move(binR.Right));
     }
     return nullptr;
+}
+
+// ---- NullableLiftingStatementTransform (RunStatements) ----
+
+namespace {
+
+// The next block in `block`'s container (the implicit fall-through target in
+// this port's block model). Mirrors the helper in NullCoalescingTransform /
+// NullPropagationTransform / ExpressionTransforms / SwitchAnalysis.
+Block* NextBlockInContainer(Block* block) {
+    if (!block) return nullptr;
+    auto* container = dynamic_cast<BlockContainer*>(block->Parent);
+    if (!container) return nullptr;
+    for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+        if (container->Blocks[i].get() == block) {
+            return (i + 1 < container->Blocks.size()) ? container->Blocks[i + 1].get() : nullptr;
+        }
+    }
+    return nullptr;
+}
+
+// Get the Leave carried by `arm` (the if's TrueInst). Handles the two shapes
+// this port produces: a bare Leave (the arm is the leave directly), and a
+// Block wrapping a single Leave as its FinalInstruction (the post-
+// ConditionDetection inlined form -- the TrueInst is a Block whose
+// FinalInstruction is the leave, Instructions empty). Returns nullptr if the
+// arm is not a leave-carrying shape.
+Leave* GetLeaveFromArm(ILInstruction* arm) {
+    if (!arm) return nullptr;
+    if (arm->Op == OpCode::Leave)
+        return static_cast<Leave*>(arm);
+    if (arm->Op == OpCode::Block) {
+        auto* blk = static_cast<Block*>(arm);
+        if (blk->Instructions.empty() && blk->FinalInstruction &&
+            blk->FinalInstruction->Op == OpCode::Leave)
+            return static_cast<Leave*>(blk->FinalInstruction.get());
+    }
+    return nullptr;
+}
+
+} // namespace
+
+void NullableLiftingStatementTransform::Run(Block& block, int pos,
+                                             StatementTransformContext& context) {
+    // The if is the block's FinalInstruction (this port's if-as-final model).
+    // The per-statement driver visits the if-final at the last non-terminal
+    // position (pos == size-1) or for an if-final-only block (pos == -1 ==
+    // size-1). Bail at any other position so the fold fires once (matching how
+    // NullPropagationStatementTransform visits the if-final).
+    if (pos != static_cast<int>(block.Instructions.size()) - 1) return;
+    auto* iff = dynamic_cast<IfInstruction*>(block.FinalInstruction.get());
+    if (!iff) return;
+    // The block-tail nullable lift has no else (the C# `ifInst.FalseInst.MatchNop()`;
+    // this port's if-as-final with no else has FalseInst == nullptr).
+    if (iff->FalseInst) return;
+    // The true arm carries the then-leave (the newobj Nullable<T>(expr) leave).
+    Leave* thenLeave = GetLeaveFromArm(iff->TrueInst.get());
+    if (!thenLeave || !thenLeave->Value) return;
+    // The fall-through (the next block) carries the else-leave (the
+    // default(Nullable<T>) leave).
+    Block* nextBlock = NextBlockInContainer(&block);
+    if (!nextBlock) return;
+    auto* elseLeave = dynamic_cast<Leave*>(nextBlock->FinalInstruction.get());
+    if (!elseLeave || !elseLeave->Value) return;
+    // Both leaves must target the same container (the C# `elseLeave.TargetContainer
+    // != thenLeave.TargetContainer`).
+    if (thenLeave->TargetContainer != elseLeave->TargetContainer) return;
+    // Lift the two leaves' values via the shared Lift core (the C# `Lift(ifInst,
+    // ifInst.Condition, thenLeave.Value, elseLeave.Value)`). The arms are passed
+    // as non-owning views; LiftNullableCore detaches them on-demand via
+    // ConsumeArm only when a fold needs them. Empty sinks (both arms are in-tree
+    // -- the leaves' Values have Parents).
+    std::unique_ptr<ILInstruction> trueSink, falseSink;
+    auto lifted = ExpressionTransforms::LiftNullableCore(
+        &context.Base.Settings, iff, iff->Condition.get(),
+        thenLeave->Value.get(), elseLeave->Value.get(), trueSink, falseSink);
+    if (!lifted) return;
+    context.Base.StepOnce("NullableLifting (block tail)");
+    // Set the then-leave's value to the lifted value (the C# `thenLeave.Value =
+    // lifted`). The old value (the newobj's argument, or the detached null if
+    // ConsumeArm consumed it) is overwritten/destroyed by the unique_ptr
+    // move-assignment; the lifted value does not reference it (the MatchNull
+    // case builds a fresh LdLoc, the NullCoalescing case wraps the detached
+    // falseOwned -- neither references the then-leave's old value). Use SetChild
+    // (not a direct Value assignment) so the new value is reparented (the D110
+    // direct-assignment-bypasses-reparenting lesson).
+    thenLeave->SetChild(0, std::move(lifted));
+    // Detach the then-leave from its parent (the if's TrueInst, or the Block
+    // wrapping it) and replace the if-final with the then-leave (the C#
+    // `ifInst.ReplaceWith(thenLeave)`). When the TrueInst is a bare Leave, detach
+    // via TakeChild(1) (the TrueInst slot); when it is a Block wrapping the leave
+    // as FinalInstruction, move the leave out of the Block (the Block is the
+    // if's TrueInst, destroyed when the if-final is replaced -- leaving its
+    // FinalInstruction null first is safe).
+    std::unique_ptr<ILInstruction> thenLeaveOwned;
+    if (iff->TrueInst.get() == thenLeave) {
+        thenLeaveOwned = iff->TakeChild(1);
+    } else if (iff->TrueInst && iff->TrueInst->Op == OpCode::Block) {
+        auto* innerBlock = static_cast<Block*>(iff->TrueInst.get());
+        thenLeaveOwned = std::move(innerBlock->FinalInstruction);
+    }
+    if (!thenLeaveOwned) return;  // shouldn't happen (GetLeaveFromArm matched)
+    block.SetFinal(std::move(thenLeaveOwned));
+    // The next block (else-leave) is now unreachable (the if-final was replaced
+    // with the then-leave, which leaves the container -- the next block is no
+    // longer the fall-through). Per the D58 convention, leave it in the tree
+    // (unreachable, harmless) rather than erasing it from the container during
+    // the StatementTransform Walk's tree traversal.
 }
 
 } // namespace ILSpy::Decompiler::IL

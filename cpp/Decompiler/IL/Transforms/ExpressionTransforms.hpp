@@ -186,11 +186,17 @@ private:
     // LiftCSharpUserComparison rest of LiftNormal (needs Call.Method.IsOperator),
     // NullPropagation's remaining modes (NullableByValue / NullableByReference
     // / UnconstrainedType), the Decimal/Call branches of MatchCompOrDecimal,
-    // and IsGenericNewPattern.
-    std::unique_ptr<ILInstruction> LiftNullableCore(
+    // and IsGenericNewPattern. Exposed as a public static method (taking the
+    // settings explicitly) so NullableLiftingStatementTransform.RunStatements can
+    // call the shared Lift without duplicating it; the two ExpressionTransforms
+    // callers (RunIfNullableLift / RunBinaryNumericNullableLift) pass settings_.
+public:
+    static std::unique_ptr<ILInstruction> LiftNullableCore(
+        const ILTransformSettings* settings,
         IfInstruction* ifInst,
         ILInstruction* condition, ILInstruction* trueInst, ILInstruction* falseInst,
         std::unique_ptr<ILInstruction>& trueSink, std::unique_ptr<ILInstruction>& falseSink);
+private:
 
     // logic.and/or canonicalization: `if (cond) ldc.i4 0 else RHS` ->
     // `if (!cond) RHS else ldc.i4 0` and `if (cond) RHS else ldc.i4 1` ->

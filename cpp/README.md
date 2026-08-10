@@ -478,9 +478,9 @@ implemented and green here. Everything else follows the phase plan in
   fires more on Roslyn-compiled / modern .NET), so it is a real-corpus ILAst-
   cleaning transform, not faithfulness-only.
   The
-  remaining 13 per-statement children (DynamicIsEventAssignmentTransform,
-  TransformAssignment, NullableLiftingStatementTransform,
-  NullPropagationStatementTransform, TransformArrayInitializers,
+  remaining 11 per-statement children (DynamicIsEventAssignmentTransform,
+  TransformAssignment, NullPropagationStatementTransform,
+  TransformArrayInitializers,
   TransformCollectionAndObjectInitializers, TransformExpressionTrees,
   IndexRangeTransform, DeconstructionTransform, NamedArgumentTransform,
   RemoveUnconstrainedGenericReferenceTypeCheck, UserDefinedLogicTransform,
@@ -1010,6 +1010,33 @@ implemented and green here. Everything else follows the phase plan in
   C++17) and a portable `TrailingZeroCount64` (C++17 has no
   `std::countr_zero`). Not wired into any transform yet; exercised by the unit
   tests.
+  `NullableLiftingStatementTransform` (the block-tail nullable expression
+  lift, the next per-statement child of the GetILTransforms()
+  StatementTransform after NullCoalescingTransform and before
+  NullPropagationStatementTransform) ports `NullableLiftingTransform.RunStatements`:
+  the block-tail `if (!condition) { leave(default(Nullable<T>)) };
+  leave(newobj Nullable<T>(expr))` lifts into a single leave carrying the lifted
+  value, by calling the shared `Lift` (the C#
+  `Lift(ifInst, ifInst.Condition, thenLeave.Value, elseLeave.Value)`) on the
+  two leaves' values. The shared `Lift` core (`ExpressionTransforms::LiftNullableCore`,
+  extracted in D50) is refactored to a public static method taking the settings
+  explicitly so `NullableLiftingStatementTransform` (a separate IStatementTransform in
+  NullableLiftingTransform.cpp) can call it without duplicating it. A
+  pre-pipeline probe confirmed this port's ConditionDetection INVERTS the
+  early-exit pattern (the C# carries the if as a non-terminal with the
+  else-leave as the block's last instruction; this port makes the if the
+  block's FinalInstruction, the newobj-leave is in the if's TrueInst Block, and
+  the default-leave is the next block's FinalInstruction), so the fold matches
+  the if-as-final, gets the then-leave from the TrueInst Block's FinalInstruction,
+  the else-leave from the next block, calls `LiftNullableCore` on the two
+  leaves' values, and on success sets the then-leave's value to the lifted value
+  (via `SetChild`, not a direct `Value =` -- the D110 reparenting lesson),
+  detaches the then-leave from its parent, and replaces the if-final with the
+  then-leave. The next block (else-leave) becomes unreachable and is left in the
+  tree (per the D58 convention). The block-tail nullable lift is a Roslyn-era
+  codegen pattern that fires 0 times on the .NET Framework 4 legacy-csc mscorlib
+  corpus; ported for faithfulness (the hand-built tests verify the rewrite, the
+  sweep verifies the invariant). 39 of ~40 transforms ported.
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
   walk + a corpus probe; the async/iterator state machines

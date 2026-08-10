@@ -43,6 +43,7 @@
 #include "Decompiler/IL/Transforms/StatementTransform.hpp"
 #include "Decompiler/IL/Transforms/ExpressionTransforms.hpp"
 #include "Decompiler/IL/Transforms/NullCoalescingTransform.hpp"
+#include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
 #include "Decompiler/IL/Transforms/NullPropagationTransform.hpp"
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/IL/Transforms/DetectCatchWhenConditionBlocks.hpp"
@@ -368,10 +369,27 @@ int main(int argc, char** argv) {
                     // faithfulness.
                     statementTransform.AddChild(
                         std::make_unique<ILSpy::Decompiler::IL::NullCoalescingTransform>());
+                    // NullableLiftingStatementTransform: the block-tail nullable
+                    // expression lift (the next per-statement child in the C#
+                    // GetILTransforms() order, after NullCoalescingTransform and
+                    // before NullPropagationStatementTransform). Lifts
+                    //   if (!condition) { leave(default(Nullable<T>)) }; leave(newobj Nullable<T>(expr))
+                    // into a single leave carrying the lifted value, by calling the
+                    // shared Lift (ExpressionTransforms::LiftNullableCore) on the two
+                    // leaves' values. Adapted to this port's post-ConditionDetection
+                    // shape (ConditionDetection inverts the early-exit pattern: the
+                    // if is the block's FinalInstruction, the newobj-leave is in the
+                    // if's TrueInst Block, the default-leave is the next block's
+                    // FinalInstruction). The LiftNullables / NullPropagation gates are
+                    // checked inside LiftNullableCore. Fires 0 times on the .NET
+                    // Framework 4 legacy-csc mscorlib corpus (a Roslyn-era Nullable<T>
+                    // expression-lift codegen pattern); ported for faithfulness.
+                    statementTransform.AddChild(
+                        std::make_unique<ILSpy::Decompiler::IL::NullableLiftingStatementTransform>());
                     // NullPropagationStatementTransform: the void-call `?.`
                     // statement form (the next per-statement child in the C#
                     // GetILTransforms() order, after NullCoalescingTransform /
-                    // the deferred NullableLiftingStatementTransform). Folds
+                    // NullableLiftingStatementTransform). Folds
                     //   if (testedVar != null) { testedVar.AccessChain(); }
                     // into `testedVar?.AccessChain();` (a void NullableRewrap,
                     // the `?.` statement whose value is discarded). The if is the

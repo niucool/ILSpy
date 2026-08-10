@@ -65,6 +65,7 @@
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/DefaultValue.hpp"
 #include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
 #include "Decompiler/IL/ControlFlow/ControlFlowSimplification.hpp"
@@ -222,6 +223,44 @@ std::unique_ptr<Call> MakeGetValueOrDefaultCall(ITypePtr declaringType,
     call->DeclaringType = std::move(declaringType);
     call->AddArg(std::move(arg));
     return call;
+}
+
+// A `newobj Nullable<T>(arg)` (a Call with IsNewObj on a Nullable<T> declaring
+// type).
+std::unique_ptr<Call> MakeNullableCtor(ITypePtr declaringType,
+                                       std::unique_ptr<ILInstruction> arg) {
+    auto call = std::make_unique<Call>("System.Nullable`1::.ctor");
+    call->DeclaringType = std::move(declaringType);
+    call->IsNewObj = true;
+    call->ReturnType = StackType::O;
+    call->AddArg(std::move(arg));
+    return call;
+}
+
+// Run the NullableLiftingStatementTransform as a StatementTransform child (the
+// pipeline position, after NullCoalescingTransform).
+void RunNullableLiftingStatement(ILFunction& fn) {
+    StatementTransform st;
+    st.AddChild(std::make_unique<ILInlining>());
+    st.AddChild(std::make_unique<ExpressionTransforms>());
+    st.AddChild(std::make_unique<NullCoalescingTransform>());
+    st.AddChild(std::make_unique<NullableLiftingStatementTransform>());
+    ILTransformContext ctx;
+    st.Run(fn, ctx);
+}
+
+// Count the LdLoc instructions in the tree (the lifted value is a fresh
+// LdLoc(v); the fold replaces the if + newobj-leave with a single leave
+// carrying the LdLoc).
+int CountLdLoc(ILFunction& fn) {
+    int n = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::LdLoc) ++n;
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return n;
 }
 
 } // namespace
@@ -1317,4 +1356,195 @@ TEST(NullCoalescingTransform, MscorlibSweepPreservesInvariant) {
     // (the fold fires on Roslyn-compiled / modern .NET, not the legacy-csc
     // .NET Framework 4 corpus).
     (void)totalFolds;
+}
+
+// ---- NullableLiftingStatementTransform (RunStatements) tests ----
+
+// Build the POST-ConditionDetection block-tail nullable lift shape directly
+// (the probed shape this port's ConditionDetection produces by inverting the
+// early-exit pattern):
+//   block0 (P): [stloc v(ldloc a)], Final = if (HV(ldloca v))
+//                 { Block { leave(newobj Nullable<T>(GVO(ldloca v))) } }
+//                 (FalseInst null, fall-through to elseBlock)
+//   block1 (elseBlock): Final = leave(default(Nullable<T>))
+// Both leaves target fn->Body. `gvoVar` overrides the GVO call's variable (to
+// test the wrong-variable reject); `elseContainer` overrides the else-leave's
+// target (to test the same-container reject); `hasElse` adds a FalseInst.
+struct NLSetup {
+    std::unique_ptr<ILFunction> fn;
+    ILVariablePtr v, a;
+    Block* P = nullptr;
+    Block* elseBlock = nullptr;
+};
+
+NLSetup BuildRunStatementsShape(ILVariablePtr gvoVar = nullptr,
+                                BlockContainer* elseContainer = nullptr,
+                                bool hasElse = false) {
+    NLSetup s;
+    auto nullableInt = MakeNullableOf(KnownTypeCode::Int32);
+    s.v = MakeLocal("v", nullableInt);
+    s.a = MakeLocal("a", nullableInt);
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Variables.push_back(s.v);
+    fn->Variables.push_back(s.a);
+
+    // elseBlock: leave(default(Nullable<T>)) to fn->Body (or elseContainer)
+    auto elseBlock = std::make_unique<Block>();
+    elseBlock->StartILOffset = 0x60;
+    auto defVal = std::make_unique<DefaultValue>(nullableInt);
+    BlockContainer* elseTarget = elseContainer ? elseContainer : fn->Body.get();
+    elseBlock->SetFinal(std::make_unique<Leave>(elseTarget, std::move(defVal)));
+
+    // block0 (P): [stloc v(ldloc a)], Final = if (HV(ldloca v)) Block { leave(newobj) }
+    auto P = std::make_unique<Block>();
+    P->StartILOffset = 0x00;
+    P->Add(std::make_unique<StLoc>(s.v, std::make_unique<LdLoc>(s.a)));
+    auto cond = MakeHasValueCall(nullableInt, std::make_unique<LdLoca>(s.v));
+    auto trueBlock = std::make_unique<Block>();
+    ILVariablePtr gvoV = gvoVar ? gvoVar : s.v;
+    auto newobj = MakeNullableCtor(nullableInt,
+        MakeGetValueOrDefaultCall(nullableInt, std::make_unique<LdLoca>(gvoV)));
+    trueBlock->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::move(newobj)));
+    std::unique_ptr<ILInstruction> falseInst = nullptr;
+    if (hasElse) {
+        auto elseBlk = std::make_unique<Block>();
+        elseBlk->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+        falseInst = std::move(elseBlk);
+    }
+    auto iff = std::make_unique<IfInstruction>(std::move(cond), std::move(trueBlock),
+                                                std::move(falseInst));
+    P->SetFinal(std::move(iff));
+    s.P = P.get();
+    s.elseBlock = elseBlock.get();
+
+    fn->Body->AddBlock(std::move(P));
+    fn->Body->AddBlock(std::move(elseBlock));
+    fn->CheckInvariant(ILPhase::Normal);
+    s.fn = std::move(fn);
+    return s;
+}
+
+// Positive: the block-tail nullable lift folds
+//   if (v.HasValue) { leave(newobj Nullable<T>(v.GetValueOrDefault())) }
+//   else (fall-through) leave(default(Nullable<T>))
+// into a single leave carrying the lifted LdLoc(v). The if is replaced by the
+// then-leave (now carrying LdLoc(v)); the else-leave (next block) becomes
+// unreachable.
+TEST(NullableLiftingStatementTransform, RunStatementsFoldsBlockTail) {
+    auto s = BuildRunStatementsShape();
+    RunNullableLiftingStatement(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    // After the fold, the if is gone -- block0's FinalInstruction is a Leave
+    // (the then-leave now carrying the lifted LdLoc(v)).
+    auto* P = s.P;
+    ASSERT_EQ(P->Instructions.size(), 1u);  // the stloc v(ldloc a) survives
+    ASSERT_TRUE(P->FinalInstruction != nullptr);
+    EXPECT_EQ(P->FinalInstruction->Op, OpCode::Leave)
+        << "the if-final must be replaced by the then-leave";
+    // The then-leave's Value is the lifted LdLoc(v).
+    auto* leave = static_cast<Leave*>(P->FinalInstruction.get());
+    ASSERT_TRUE(leave->Value != nullptr);
+    EXPECT_EQ(leave->Value->Op, OpCode::LdLoc)
+        << "the lifted value must be a LdLoc(v)";
+}
+
+// Rejects when the if has an else arm (not the block-tail lift shape).
+TEST(NullableLiftingStatementTransform, RunStatementsRejectsElseArm) {
+    auto s = BuildRunStatementsShape(nullptr, nullptr, true);
+    auto* P = s.P;
+    ASSERT_EQ(P->FinalInstruction->Op, OpCode::IfInstruction);
+    RunNullableLiftingStatement(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_EQ(P->FinalInstruction->Op, OpCode::IfInstruction)
+        << "an if with an else arm must not fold";
+}
+
+// Rejects when the GVO call is on a different variable (not the nullable v).
+TEST(NullableLiftingStatementTransform, RunStatementsRejectsWrongGvoVariable) {
+    auto other = MakeLocal("other", MakeNullableOf(KnownTypeCode::Int32));
+    auto s = BuildRunStatementsShape(other);
+    s.fn->Variables.push_back(other);
+    s.fn->CheckInvariant(ILPhase::Normal);
+    auto* P = s.P;
+    RunNullableLiftingStatement(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_EQ(P->FinalInstruction->Op, OpCode::IfInstruction)
+        << "a GVO on a different variable must not fold";
+}
+
+// Rejects when the two leaves target different containers.
+TEST(NullableLiftingStatementTransform, RunStatementsRejectsDifferentContainer) {
+    auto extraContainer = std::make_unique<BlockContainer>();
+    auto s = BuildRunStatementsShape(nullptr, extraContainer.get());
+    s.fn->CheckInvariant(ILPhase::Normal);
+    auto* P = s.P;
+    RunNullableLiftingStatement(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_EQ(P->FinalInstruction->Op, OpCode::IfInstruction)
+        << "leaves targeting different containers must not fold";
+}
+
+// Folds through the full pre-pipeline (ConditionDetection inverts the early-exit
+// pattern, producing the post-ConditionDetection shape the transform matches).
+TEST(NullableLiftingStatementTransform, RunStatementsFoldsThroughPrePipeline) {
+    auto nullableInt = MakeNullableOf(KnownTypeCode::Int32);
+    auto v = MakeLocal("v", nullableInt);
+    auto a = MakeLocal("a", nullableInt);
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(a);
+
+    // L_then block: leave(default(Nullable<T>)) to fn->Body
+    auto thenBlock = std::make_unique<Block>();
+    thenBlock->StartILOffset = 0x60;
+    Block* thenPtr = thenBlock.get();
+    auto defVal = std::make_unique<DefaultValue>(nullableInt);
+    thenBlock->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::move(defVal)));
+
+    // block0: [stloc v(ldloc a)], Final = if (comp(eq, HV(ldloca v), 0)) br L_then
+    auto P = std::make_unique<Block>();
+    P->StartILOffset = 0x00;
+    P->Add(std::make_unique<StLoc>(v, std::make_unique<LdLoc>(a)));
+    auto cond = std::make_unique<Comp>(
+        MakeHasValueCall(nullableInt, std::make_unique<LdLoca>(v)),
+        std::make_unique<LdcI4>(0), ComparisonKind::Equality);
+    auto iff = std::make_unique<IfInstruction>(std::move(cond),
+                                               std::make_unique<Branch>(thenPtr));
+    P->SetFinal(std::move(iff));
+
+    // block1 (fall-through): leave(newobj Nullable<T>(GVO(ldloca v)))
+    auto B = std::make_unique<Block>();
+    B->StartILOffset = 0x30;
+    auto newobj = MakeNullableCtor(nullableInt,
+        MakeGetValueOrDefaultCall(nullableInt, std::make_unique<LdLoca>(v)));
+    B->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::move(newobj)));
+
+    fn->Body->AddBlock(std::move(P));
+    fn->Body->AddBlock(std::move(B));
+    fn->Body->AddBlock(std::move(thenBlock));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ILTransformContext ctx;
+    RunPrePipeline(*fn, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunNullableLiftingStatement(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // After the full pipeline + the fold, the block-tail if must be folded away.
+    bool foundIf = false;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::IfInstruction) foundIf = true;
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn->Body.get());
+    EXPECT_FALSE(foundIf) << "the block-tail if must be folded away";
 }
