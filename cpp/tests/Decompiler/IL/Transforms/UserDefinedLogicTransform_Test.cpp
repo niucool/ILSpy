@@ -654,6 +654,52 @@ TEST(UserDefinedLogicTransform, LegacyPatternFoldsBitwiseOr) {
     ASSERT_EQ(b0b->FinalInstruction->Op, OpCode::Branch);
 }
 
+// ---- TEMPORARY PROBE: post-ConditionDetection RoslynOptimized shape ----
+
+#include <iostream>
+
+TEST(UserDefinedLogicTransform, TEMP_ProbeRoslynOptimizedShape) {
+    auto lhs = MakeLocal("lhs", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto rhs = MakeLocal("rhs", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Variables.push_back(lhs);
+    fn->Variables.push_back(rhs);
+
+    // block0: final = if (comp(eq, call op_False(ldloc lhs), ldc.i4 0)) br L_and
+    //   (brfalse on op_False(lhs): if lhs is true, go to L_and = return bitwise)
+    //   TrueInst = Branch(L_and), FalseInst = null (fall-through to block1)
+    auto b0 = std::make_unique<Block>();
+    auto b1 = std::make_unique<Block>();
+    auto b2 = std::make_unique<Block>();
+    auto* b2ptr = b2.get();
+    auto cond = std::make_unique<Comp>(MakeOpFalseCall(lhs),
+                                        std::make_unique<LdcI4>(0),
+                                        ComparisonKind::Equality);
+    auto iff = std::make_unique<IfInstruction>(std::move(cond),
+                                                 std::make_unique<Branch>(b2ptr));
+    b0->SetFinal(std::move(iff));
+    // block1: leave IL_0000(ldloc lhs) -- return lhs (the false path)
+    b1->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdLoc>(lhs)));
+    // block2 (L_and): leave IL_0000(call op_BitwiseAnd(ldloc lhs, ldloc rhs)) -- return bitwise
+    b2->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+        MakeOpBitwiseAndCall(lhs, std::make_unique<LdLoc>(rhs))));
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ILTransformContext ctx;
+    RunPrePipeline(*fn, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string dump;
+    fn->WriteTo(dump);
+    std::cerr << "=== PROBE RoslynOptimized post-pipeline dump ===\n" << dump << "\n=== END ===\n";
+}
+
 // ---- mscorlib sweep (UserDefinedLogicTransform in the full per-statement pipeline) ----
 
 // The .NET Framework 4 legacy-csc mscorlib corpus carries no op_True / op_False
