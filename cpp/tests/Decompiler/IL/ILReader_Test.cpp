@@ -23,6 +23,7 @@
 // simulation -> ILAst); branches/switch/exception handlers still bail out.
 
 #include "Decompiler/IL/ILReader.hpp"
+#include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
@@ -37,6 +38,7 @@
 
 using namespace ILSpy::Decompiler::IL;
 using ILSpy::Decompiler::Metadata::MetadataFile;
+using ILSpy::Decompiler::TypeSystem::Sign;
 
 static const char* FixturePath() {
 #if defined(_WIN32)
@@ -473,4 +475,75 @@ TEST(ILReader, MscorlibCallReturnITypeSweep) {
     EXPECT_GT(callSites, 0) << "corpus must have call sites";
     EXPECT_GT(callSitesWithReturnIType, 0)
         << "the reader must populate Call::ReturnIType for some call sites";
+}
+
+// The BNI Sign / LeftInputType / RightInputType reconciliation (D125/D126): the
+// IL reader now emits BinaryNumericInstruction with the per-opcode Sign
+// (None/Signed/Unsigned) + CheckForOverflow the C# ILReader BinaryNumeric(op,
+// checkForOverflow, sign) helper sets, and the 5-arg constructor derives the
+// input types from the operands' ResultType. The invariant the C# CheckInvariant
+// enforces (LeftInputType == Left.ResultType, RightInputType == Right.ResultType
+// for a non-lifted binary) must hold across the corpus; Sign must be a valid enum
+// value; and the reader-emitted binaries must not be lifted (the lift machinery
+// runs only in NullableLifting, later in the pipeline).
+TEST(ILReader, MscorlibBinaryNumericSignSweep) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    int decoded = 0;
+    int binarySites = 0;
+    int signedSites = 0;
+    int unsignedSites = 0;
+    int noneSites = 0;
+    int overflowSites = 0;
+    int invariantViolations = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadStraightLineIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++decoded;
+        std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+            if (!inst) return;
+            if (inst->Op == OpCode::BinaryNumericInstruction) {
+                ++binarySites;
+                auto* bni = static_cast<BinaryNumericInstruction*>(inst);
+                if (bni->Sign == Sign::Signed) ++signedSites;
+                else if (bni->Sign == Sign::Unsigned) ++unsignedSites;
+                else if (bni->Sign == Sign::None) ++noneSites;
+                if (bni->CheckForOverflow) ++overflowSites;
+                // The reader-emitted binaries are never lifted (the lift
+                // machinery runs in NullableLifting, later in the pipeline).
+                if (!bni->IsLifted) {
+                    if (bni->Left && bni->LeftInputType != bni->Left->ResultType())
+                        ++invariantViolations;
+                    if (bni->Right && bni->RightInputType != bni->Right->ResultType())
+                        ++invariantViolations;
+                }
+                // The legacy Signed bool must be consistent with Sign.
+                if (bni->Sign == Sign::Unsigned ? bni->Signed : !bni->Signed)
+                    ++invariantViolations;
+            }
+            for (int i = 0; i < inst->ChildCount(); ++i)
+                walk(inst->GetChild(i));
+        };
+        if (fn->Body) {
+            for (auto& b : fn->Body->Blocks) {
+                for (auto& ins : b->Instructions) walk(ins.get());
+                walk(b->FinalInstruction.get());
+            }
+        }
+        if (decoded > 4000) break;
+    }
+    EXPECT_GT(decoded, 100) << "too few straight-line methods decoded";
+    EXPECT_GT(binarySites, 0) << "corpus must have binary numeric sites";
+    EXPECT_EQ(invariantViolations, 0)
+        << "LeftInputType/RightInputType must match the operands' ResultType";
+    // The .NET Framework 4 legacy-csc mscorlib emits all three Sign flavours:
+    // plain add/sub/mul/and/or/xor/shl (None), div/rem/shr (Signed), and the
+    // _un / _ovf_un forms (Unsigned). All three must appear in the corpus.
+    EXPECT_GT(noneSites, 0) << "corpus must have Sign.None binaries (plain add/sub/..)";
+    EXPECT_GT(signedSites, 0) << "corpus must have Sign.Signed binaries (div/rem/shr)";
+    EXPECT_GT(unsignedSites, 0) << "corpus must have Sign.Unsigned binaries (_un forms)";
 }

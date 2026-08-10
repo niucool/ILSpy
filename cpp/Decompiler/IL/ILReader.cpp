@@ -628,21 +628,29 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             break;
 
         // ---- binary arithmetic / bitwise / shift ----
-#define IL_BIN(opc, oper) \
+        // Sign + CheckForOverflow per opcode, faithful to the C# ILReader
+        // BinaryNumeric(op, checkForOverflow, sign) helper: the plain add/sub/
+        // mul/and/or/xor/shl are Sign.None; div/rem/shr are Sign.Signed; the
+        // _un variants are Sign.Unsigned; the _ovf variants are Sign.Signed with
+        // CheckForOverflow; _ovf_un are Sign.Unsigned with CheckForOverflow. The
+        // 5-arg BinaryNumericInstruction constructor derives the input types from
+        // the operands' ResultType and computes the result stack type via
+        // ComputeResultType (Ecma-335 Table 2/5/6/7).
+#define IL_BIN(opc, oper, sign, ovf) \
     case ILOpCode::opc: { \
         auto r = s.Pop(); auto l = s.Pop(); \
         if (!l || !r) return DecodeOutcome::Bail; \
         if (!s.Push(std::make_unique<BinaryNumericInstruction>(std::move(l), std::move(r), \
-            BinaryNumericOperator::oper, StackType::I4))) return DecodeOutcome::Bail; \
+            BinaryNumericOperator::oper, ovf, Sign::sign))) return DecodeOutcome::Bail; \
         break; \
     }
-        IL_BIN(Add, Add) IL_BIN(Add_ovf, Add) IL_BIN(Add_ovf_un, Add)
-        IL_BIN(Sub, Sub) IL_BIN(Sub_ovf, Sub) IL_BIN(Sub_ovf_un, Sub)
-        IL_BIN(Mul, Mul) IL_BIN(Mul_ovf, Mul) IL_BIN(Mul_ovf_un, Mul)
-        IL_BIN(Div, Div) IL_BIN(Div_un, Div)
-        IL_BIN(Rem, Rem) IL_BIN(Rem_un, Rem)
-        IL_BIN(And, BitAnd) IL_BIN(Or, BitOr) IL_BIN(Xor, BitXor)
-        IL_BIN(Shl, ShiftLeft) IL_BIN(Shr, ShiftRight) IL_BIN(Shr_un, ShiftRight)
+        IL_BIN(Add, Add, None, false) IL_BIN(Add_ovf, Add, Signed, true) IL_BIN(Add_ovf_un, Add, Unsigned, true)
+        IL_BIN(Sub, Sub, None, false) IL_BIN(Sub_ovf, Sub, Signed, true) IL_BIN(Sub_ovf_un, Sub, Unsigned, true)
+        IL_BIN(Mul, Mul, None, false) IL_BIN(Mul_ovf, Mul, Signed, true) IL_BIN(Mul_ovf_un, Mul, Unsigned, true)
+        IL_BIN(Div, Div, Signed, false) IL_BIN(Div_un, Div, Unsigned, false)
+        IL_BIN(Rem, Rem, Signed, false) IL_BIN(Rem_un, Rem, Unsigned, false)
+        IL_BIN(And, BitAnd, None, false) IL_BIN(Or, BitOr, None, false) IL_BIN(Xor, BitXor, None, false)
+        IL_BIN(Shl, ShiftLeft, None, false) IL_BIN(Shr, ShiftRight, Signed, false) IL_BIN(Shr_un, ShiftRight, Unsigned, false)
 #undef IL_BIN
 
 #define IL_CMP(opc, kind, uns) \

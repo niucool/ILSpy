@@ -509,7 +509,8 @@ NullableLiftingTransform::DoLiftResult NullableLiftingTransform::DoLift(
             r.Bits = std::move(binR.Bits);
             r.Lifted = std::make_unique<BinaryNumericInstruction>(
                 std::move(binR.Left), std::move(binR.Right), bni->Operator,
-                bni->ResultStackType, bni->CheckForOverflow, bni->Signed,
+                bni->LeftInputType, bni->RightInputType,
+                bni->CheckForOverflow, bni->Sign,
                 /*isLifted=*/true);
             return r;
         }

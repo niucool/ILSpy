@@ -1182,11 +1182,12 @@ implemented and green here. Everything else follows the phase plan in
   `ITypePtr`, the store type); `ResultType = IsLifted ? O : UnderlyingResultType`;
   `DirectFlags = SideEffect` (+ MayThrow for Div/Rem/CheckForOverflow); the dump
   is `compound.assign.<op>[.ovf][.unsigned|.signed].<type>[.lifted].<suffix>(target, value)`.
-  The C# constructor copies these from a `BinaryNumericInstruction`; this port's
-  BNI carries `Signed` (bool) + `ResultStackType` but not the `Sign` enum or the
-  per-operand input types, so the node takes its fields explicitly (the D48
-  lifted-BNI precedent) and a BNI Sign/input-type reconciliation is deferred to
-  the transform. `OpCode::NumericCompoundAssign` / `UserDefinedCompoundAssign` /
+  The C# constructor copies these from a `BinaryNumericInstruction`; the BNI
+  now carries the faithful `Sign` (the TypeSystem::Sign enum) +
+  `LeftInputType` / `RightInputType` (D127), so the node can copy them directly --
+  the foundation tests still construct it explicitly, and the future
+  `HandleCompoundAssign` transform will build it from the BNI's fields.
+  `OpCode::NumericCompoundAssign` / `UserDefinedCompoundAssign` /
   `DynamicCompoundAssign` were pre-declared. `CompoundAssignmentInstruction` extends
   `ILInstruction` (not `IStoreInstruction`), so it needs no `ComputeVariableUsage`
   store-counting case. The `MakeAssignmentExpressions` (C# 2.0, default true) +
@@ -1212,6 +1213,26 @@ implemented and green here. Everything else follows the phase plan in
   yet-wired (the `MatchInstruction` / `UsingInstruction` / `NumericCompoundAssign`
   precedent); no pipeline transform constructs the helper yet, so `--csharp`
   output is unchanged.
+  The BNI Sign / input-type reconciliation (D127, the contained model change
+  D125 flagged as deferred to the TransformAssignment transform): the
+  `BinaryNumericInstruction` now carries the faithful `Sign`
+  (`TypeSystem::Sign` enum: `None` for the sign-independent add/sub/mul/
+  and/or/xor/shl, `Signed` for div/rem/shr and the `_ovf` forms, `Unsigned`
+  for the `_un` forms) + `LeftInputType` / `RightInputType` (derived from the
+  operands' `ResultType` in the non-lifted constructors, taken explicitly in
+  the lifted constructor) + a static `ComputeResultType` (Ecma-335 Table
+  2/5/6/7) the faithful 5-arg reader constructor uses to compute the result
+  stack type. The IL reader's `IL_BIN` macro now passes the per-opcode `Sign`
+  + `CheckForOverflow` faithfully (matching the C# `BinaryNumeric(op,
+  checkForOverflow, sign)` helper); the legacy `Signed` bool is derived
+  (`Sign != Unsigned`) and kept for the dump's `.un` suffix + the
+  `NullableLifting.DoLiftBinary` call site. The `NumericCompoundAssign` node
+  can now copy these from a `BinaryNumericInstruction` directly (the C#
+  constructor does), and the future `ValidateCompoundAssign` /
+  `IsBinaryCompatibleWithType` consult `binary.Sign`. The mscorlib sweep
+  confirms all three `Sign` flavours appear in the corpus and the
+  `LeftInputType == Left.ResultType` / `RightInputType == Right.ResultType`
+  invariant holds; `--csharp` output is unchanged.
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
   walk + a corpus probe; the async/iterator state machines
@@ -1229,8 +1250,7 @@ implemented and green here. Everything else follows the phase plan in
   `Variable.Kind` for the StLoc case] / `IsMatchingCompoundLoad` [needs
   `RecombineVariables` + getter/setter `IMethod`/`AccessorOwner`] /
   `ValidateCompoundAssign` [needs `NumericCompoundAssign.IsBinaryCompatibleWithType`,
-  which needs the BNI `Sign` + `IsImplicitTruncation`] + the BNI Sign/input-type
-  reconciliation [a contained model change D125 flagged as deferred] +
+  which now has the BNI `Sign` (D127) but still needs `IsImplicitTruncation`] +
   `RecombineVariables` [the finalizeMatch for the StLoc case] + the per-variable
   store-list tree walk [the repeatedly-deferred infrastructure piece], ...)
   are the subsequent in-order targets.

@@ -1194,7 +1194,7 @@ TEST(NullableLiftingTransform, BinaryNumericLiftedNodeInvariant) {
     auto right = std::make_unique<LdcI4>(5);
     auto bni = std::make_unique<BinaryNumericInstruction>(
         std::move(left), std::move(right), BinaryNumericOperator::Add,
-        StackType::I4, false, true, true);
+        StackType::I4, StackType::I4, false, Sign::Signed, true);
     EXPECT_TRUE(bni->IsLifted);
     EXPECT_EQ(bni->ResultType(), StackType::O);
     EXPECT_EQ(bni->UnderlyingResultType(), StackType::I4);
