@@ -19,12 +19,13 @@
 
 // Tests for the TransformAssignment foundation + the per-statement Run wiring
 // (D132): the UnwrapSmallIntegerConv helper, the IsCompoundStore /
-// IsMatchingCompoundLoad / ValidateCompoundAssign shared helpers, and the
+// IsMatchingCompoundLoad / ValidateCompoundAssign shared helpers, the
 // TransformPostIncDecOperatorWithInlineStore binary case (the local/StLoc
-// post-increment/decrement fold the helpers unblock). The operator-call
-// (op_Increment/op_Decrement) case and the TransformInlineAssignment* /
-// TransformPostIncDecOperator / TransformPreIncDecOperatorWithInlineStore
-// StObj/Call cases are deferred.
+// post-increment/decrement fold), the TransformPostIncDecOperator (non-inline-
+// store two-instruction) fold, and the TransformPreIncDecOperatorWithInlineStore
+// (local/StLoc pre-increment/decrement inline-store expression fold, D134). The
+// operator-call (op_Increment/op_Decrement) case and the
+// TransformInlineAssignment* StObj/Call cases are deferred.
 
 #include "Decompiler/IL/ConversionKind.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
@@ -1212,6 +1213,216 @@ TEST(TransformAssignmentTest, PostIncDecSettingOffNoOp) {
     ASSERT_EQ(block->Instructions.size(), 2u);
 }
 
+// ---- TransformPreIncDecOperatorWithInlineStore (inline-store expression) tests ----
+// The Roslyn pre-increment expression codegen:
+//   stloc outer(stloc target(binary.op(ldloc target, ldc.i4 1)))
+// -> stloc outer(compound.op.new(ldloca target, ldc.i4 1)) = `outer = ++target`
+// (the C# `EvaluatesToNewValue` compound assign). The outer store's Value is the
+// inner StLoc (the inline-store expression form); the inner stloc target is
+// eliminated (its variable is recombined with the ldloc's via the finalizeMatch,
+// a no-op when they are the same variable). This is a Roslyn-era codegen pattern
+// (the legacy csc emits the statement form); it fires 0 times on the legacy-csc
+// mscorlib corpus (faithfulness-only, matching the D59/D132 precedent).
+
+namespace {
+
+// Build the PreIncDec WithInlineStore block:
+//   block.Instructions[0] = stloc outer(stloc target(binary.op(ldloc target, ldc.i4 rhs)))
+// with a Leave(body) final, in a fresh single-block function. outer is the result
+// variable (the pre-increment expression's value); target is the variable being
+// incremented (also the inner store's variable). Both are Int32 Locals.
+std::unique_ptr<ILFunction> MakePreIncDecWithInlineStore(
+    ILVariablePtr& outer, ILVariablePtr& target,
+    BinaryNumericOperator op, std::int32_t rhsValue) {
+    target = VarIdx("V_0", KT(KnownTypeCode::Int32), VariableKind::Local, 0);
+    outer = VarIdx("V_1", KT(KnownTypeCode::Int32), VariableKind::Local, 1);
+    auto binary = std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(target), std::make_unique<LdcI4>(rhsValue), op, StackType::I4);
+    auto innerStore = std::make_unique<StLoc>(target, std::move(binary));
+    auto outerStore = std::make_unique<StLoc>(outer, std::move(innerStore));
+    auto fn = MakeFn();
+    auto* block = fn->Body->Blocks[0].get();
+    block->Add(std::move(outerStore));
+    block->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(target);
+    fn->Variables.push_back(outer);
+    return fn;
+}
+
+} // namespace
+
+// The positive Add fold: stloc outer(stloc target(binary.add(ldloc target, 1)))
+// -> stloc outer(compound.assign.add.i4.address.new(ldloca target, ldc.i4 1)) =
+// `outer = ++target`.
+TEST(TransformAssignmentTest, PreIncDecWithInlineStoreFoldsAdd) {
+    ILVariablePtr outer, target;
+    auto fn = MakePreIncDecWithInlineStore(outer, target, BinaryNumericOperator::Add, 1);
+    auto* block = fn->Body->Blocks[0].get();
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* result = dynamic_cast<StLoc*>(block->Instructions[0].get());
+    ASSERT_NE(result, nullptr);
+    // The result StLoc carries the outer variable (the pre-increment expression's
+    // result), not the target.
+    EXPECT_EQ(result->Variable.get(), outer.get());
+    auto* nca = dynamic_cast<NumericCompoundAssign*>(result->Value.get());
+    ASSERT_NE(nca, nullptr);
+    EXPECT_EQ(nca->Operator, BinaryNumericOperator::Add);
+    EXPECT_EQ(nca->EvalMode, CompoundEvalMode::EvaluatesToNewValue);
+    EXPECT_EQ(nca->TargetKind, CompoundTargetKind::Address);
+    // The target is a fresh LdLoca of the pre-inc target.
+    auto* lda = dynamic_cast<LdLoca*>(nca->Target.get());
+    ASSERT_NE(lda, nullptr);
+    EXPECT_EQ(lda->Variable.get(), target.get());
+    // The value is the constant 1.
+    auto* one = dynamic_cast<LdcI4*>(nca->Value.get());
+    ASSERT_NE(one, nullptr);
+    EXPECT_EQ(one->Value, 1);
+}
+
+// The Sub fold (pre-decrement `outer = --target`) is also recognised.
+TEST(TransformAssignmentTest, PreIncDecWithInlineStoreFoldsSub) {
+    ILVariablePtr outer, target;
+    auto fn = MakePreIncDecWithInlineStore(outer, target, BinaryNumericOperator::Sub, 1);
+    auto* block = fn->Body->Blocks[0].get();
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* result = dynamic_cast<StLoc*>(block->Instructions[0].get());
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Variable.get(), outer.get());
+    auto* nca = dynamic_cast<NumericCompoundAssign*>(result->Value.get());
+    ASSERT_NE(nca, nullptr);
+    EXPECT_EQ(nca->Operator, BinaryNumericOperator::Sub);
+    EXPECT_EQ(nca->EvalMode, CompoundEvalMode::EvaluatesToNewValue);
+}
+
+// A non-Add/Sub operator (Mul) is not a valid pre-inc/dec and is rejected.
+TEST(TransformAssignmentTest, PreIncDecWithInlineStoreRejectsMul) {
+    ILVariablePtr outer, target;
+    auto fn = MakePreIncDecWithInlineStore(outer, target, BinaryNumericOperator::Mul, 1);
+    auto* block = fn->Body->Blocks[0].get();
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    // No fold: the original shape is unchanged.
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* result = dynamic_cast<StLoc*>(block->Instructions[0].get());
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Variable.get(), outer.get());
+    // The inner stloc target is still the Value (no NCA produced).
+    ASSERT_NE(dynamic_cast<StLoc*>(result->Value.get()), nullptr);
+}
+
+// A non-one right operand is not a pre-inc/dec and is rejected.
+TEST(TransformAssignmentTest, PreIncDecWithInlineStoreRejectsNonOneRight) {
+    ILVariablePtr outer, target;
+    auto fn = MakePreIncDecWithInlineStore(outer, target, BinaryNumericOperator::Add, 2);
+    auto* block = fn->Body->Blocks[0].get();
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* result = dynamic_cast<StLoc*>(block->Instructions[0].get());
+    ASSERT_NE(result, nullptr);
+    ASSERT_NE(dynamic_cast<StLoc*>(result->Value.get()), nullptr);
+}
+
+// A mismatched target type (outer.Type != target.Type) is rejected.
+TEST(TransformAssignmentTest, PreIncDecWithInlineStoreRejectsMismatchedTargetType) {
+    auto target = VarIdx("V_0", KT(KnownTypeCode::Int32), VariableKind::Local, 0);
+    auto outer = VarIdx("V_1", KT(KnownTypeCode::Int64), VariableKind::Local, 1);
+    auto binary = std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(target), std::make_unique<LdcI4>(1),
+        BinaryNumericOperator::Add, StackType::I4);
+    auto innerStore = std::make_unique<StLoc>(target, std::move(binary));
+    auto outerStore = std::make_unique<StLoc>(outer, std::move(innerStore));
+    auto fn = MakeFn();
+    auto* block = fn->Body->Blocks[0].get();
+    block->Add(std::move(outerStore));
+    block->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(target);
+    fn->Variables.push_back(outer);
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    // No fold: the original shape is unchanged.
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* result = dynamic_cast<StLoc*>(block->Instructions[0].get());
+    ASSERT_NE(result, nullptr);
+    ASSERT_NE(dynamic_cast<StLoc*>(result->Value.get()), nullptr);
+}
+
+// A non-Local/Parameter outer variable (a StackSlot outer) is rejected by the
+// stloc_outer.Variable.Kind guard.
+TEST(TransformAssignmentTest, PreIncDecWithInlineStoreRejectsStackSlotOuter) {
+    auto target = VarIdx("V_0", KT(KnownTypeCode::Int32), VariableKind::Local, 0);
+    auto outer = VarIdx("S_0", KT(KnownTypeCode::Int32), VariableKind::StackSlot, -1);
+    auto binary = std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(target), std::make_unique<LdcI4>(1),
+        BinaryNumericOperator::Add, StackType::I4);
+    auto innerStore = std::make_unique<StLoc>(target, std::move(binary));
+    auto outerStore = std::make_unique<StLoc>(outer, std::move(innerStore));
+    auto fn = MakeFn();
+    auto* block = fn->Body->Blocks[0].get();
+    block->Add(std::move(outerStore));
+    block->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(target);
+    fn->Variables.push_back(outer);
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* result = dynamic_cast<StLoc*>(block->Instructions[0].get());
+    ASSERT_NE(result, nullptr);
+    ASSERT_NE(dynamic_cast<StLoc*>(result->Value.get()), nullptr);
+}
+
+// A non-matching ldloc (binary.Left loads a different variable than the inner
+// stloc's) is rejected by IsMatchingCompoundLoad.
+TEST(TransformAssignmentTest, PreIncDecWithInlineStoreRejectsNonMatchingLdLoc) {
+    auto target = VarIdx("V_0", KT(KnownTypeCode::Int32), VariableKind::Local, 0);
+    auto other = VarIdx("V_2", KT(KnownTypeCode::Int32), VariableKind::Local, 2);
+    auto outer = VarIdx("V_1", KT(KnownTypeCode::Int32), VariableKind::Local, 1);
+    auto binary = std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(other), std::make_unique<LdcI4>(1),
+        BinaryNumericOperator::Add, StackType::I4);
+    auto innerStore = std::make_unique<StLoc>(target, std::move(binary));
+    auto outerStore = std::make_unique<StLoc>(outer, std::move(innerStore));
+    auto fn = MakeFn();
+    auto* block = fn->Body->Blocks[0].get();
+    block->Add(std::move(outerStore));
+    block->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(target);
+    fn->Variables.push_back(other);
+    fn->Variables.push_back(outer);
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* result = dynamic_cast<StLoc*>(block->Instructions[0].get());
+    ASSERT_NE(result, nullptr);
+    ASSERT_NE(dynamic_cast<StLoc*>(result->Value.get()), nullptr);
+}
+
+// When the IntroduceIncrementAndDecrement setting is off, the fold does not fire.
+TEST(TransformAssignmentTest, PreIncDecWithInlineStoreSettingOffNoOp) {
+    ILVariablePtr outer, target;
+    auto fn = MakePreIncDecWithInlineStore(outer, target, BinaryNumericOperator::Add, 1);
+    auto* block = fn->Body->Blocks[0].get();
+    ILTransformContext ctx;
+    ctx.Settings.IntroduceIncrementAndDecrement = false;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* result = dynamic_cast<StLoc*>(block->Instructions[0].get());
+    ASSERT_NE(result, nullptr);
+    ASSERT_NE(dynamic_cast<StLoc*>(result->Value.get()), nullptr);
+}
+
 // ---- mscorlib sweep (TransformAssignment in the full per-statement pipeline) ----
 
 // Run the GetILTransforms() pre-pipeline through CachedReadOnlySpanInitialization
@@ -1266,6 +1477,26 @@ int CountNumericCompoundAssignOld(ILFunction& fn) {
     return count;
 }
 
+// Count NumericCompoundAssign nodes with EvaluatesToNewValue (the
+// TransformPreIncDecOperatorWithInlineStore result shape = `outer = ++target`).
+// The pre-increment expression form is a Roslyn-era codegen pattern that fires
+// 0 times on the .NET Framework 4 legacy-csc corpus; the count verifies the
+// transform does not misfire (no NewValue NCAs are produced on this corpus).
+int CountNumericCompoundAssignNew(ILFunction& fn) {
+    int count = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (auto* nca = dynamic_cast<NumericCompoundAssign*>(inst)) {
+            if (nca->EvalMode == CompoundEvalMode::EvaluatesToNewValue)
+                ++count;
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i)
+            walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return count;
+}
+
 // The TransformPostIncDecOperator shape (the non-inline-store two-instruction
 // `stloc tmp(ldloc target)` + `stloc target(binary.op(ldloc tmp, 1))` post-
 // increment) arises on the .NET Framework 4 legacy-csc mscorlib corpus (a corpus
@@ -1287,6 +1518,7 @@ TEST(TransformAssignmentTest, MscorlibSweepPreservesInvariant) {
 
     int processed = 0;
     int totalFolds = 0;
+    int totalNewFolds = 0;
     ILTransformContext ctx;
     for (const auto& m : f.MethodDefs()) {
         if (m.RVA == 0) continue;
@@ -1296,10 +1528,15 @@ TEST(TransformAssignmentTest, MscorlibSweepPreservesInvariant) {
         RunPrePipeline(*fn, ctx);
         fn->CheckInvariant(ILPhase::Normal);
         totalFolds += CountNumericCompoundAssignOld(*fn);
+        totalNewFolds += CountNumericCompoundAssignNew(*fn);
         if (processed >= 8000) break;
     }
     EXPECT_GT(processed, 5000);
     // The TransformPostIncDecOperator fold fires on the legacy-csc corpus (16
     // times across 8000 methods per a corpus probe), so the total NCA count is > 0.
     EXPECT_GT(totalFolds, 0);
+    // The TransformPreIncDecOperatorWithInlineStore pre-increment expression form
+    // is a Roslyn-era codegen pattern that fires 0 times on the legacy-csc corpus,
+    // so the NewValue NCA count is 0 (the transform does not misfire on this corpus).
+    EXPECT_EQ(totalNewFolds, 0);
 }

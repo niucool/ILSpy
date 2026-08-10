@@ -384,7 +384,8 @@ void TransformAssignment::Run(Block& block, int pos, StatementTransformContext& 
     if (!context.Base.Settings.IntroduceIncrementAndDecrement)
         return;
     if (TransformPostIncDecOperatorWithInlineStore(block, pos, context) ||
-        TransformPostIncDecOperator(block, pos, context))
+        TransformPostIncDecOperator(block, pos, context) ||
+        TransformPreIncDecOperatorWithInlineStore(block, pos, context))
         context.RequestRerunCurrentPosition();
 }
 
@@ -628,6 +629,139 @@ bool TransformAssignment::TransformPostIncDecOperator(
         auto val = inst->TakeChild(0);  // detach the NCA (inst->Value)
         inst->ReplaceWith(std::move(val));  // replace the StLoc with the NCA
     }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// TransformPreIncDecOperatorWithInlineStore (D134): the local/StLoc pre-
+// increment/decrement fold (the inline-store expression form). The C# comment:
+//   stloc outer(stloc inner(binary.op(ldloc target, ldc.i4 1)))
+// -->
+//   stloc outer(compound.op.new(ldloca target, ldc.i4 1))
+// = `outer = ++target` (the C# `EvaluatesToNewValue` compound assign). The outer
+// store captures the new value of target (the inner stloc target's stored value is
+// the pre-increment result); the fold collapses the inner stloc into the compound
+// assign directly. The shape is a double IsCompoundStore (the outer store's Value is
+// another StLoc -- the inline-store expression form). This is a Roslyn-era codegen
+// pattern (the legacy csc emits the statement form); the operator-call
+// (op_Increment/op_Decrement) case (needs UserDefinedCompoundAssign + Call.IsLifted)
+// and the StObj/Call compound-store cases (need InferType / IsSameMember / IMethod)
+// are deferred.
+// ---------------------------------------------------------------------------
+bool TransformAssignment::TransformPreIncDecOperatorWithInlineStore(
+    Block& block, int pos, StatementTransformContext& context) {
+    if (pos < 0 || static_cast<std::size_t>(pos) >= block.Instructions.size())
+        return false;
+    ILInstruction* store = block.Instructions[static_cast<std::size_t>(pos)].get();
+    if (!store) return false;
+    // IsCompoundStore on the outer store: a `stloc outer(...)` whose Variable is
+    // a Local/Parameter; targetType1 = outer.Type, value1 = the stored value (a
+    // non-owning view of the StLoc's Value child -- the inner store).
+    TypeSystem::ITypePtr targetType1;
+    ILInstruction* value1 = nullptr;
+    if (!IsCompoundStore(store, targetType1, value1)) return false;
+    // IsCompoundStore on value1: the inner store is a `stloc target(...)` whose
+    // Variable is a Local/Parameter; targetType2 = target.Type, value2 = the
+    // stored value (the binary, possibly wrapped in a small-integer conv).
+    TypeSystem::ITypePtr targetType2;
+    ILInstruction* value2 = nullptr;
+    if (!IsCompoundStore(value1, targetType2, value2)) return false;
+    // The two store types must match (the C# `targetType1 != targetType2` is
+    // reference equality; this port uses structural equality via IType::Equals,
+    // the faithful equivalent since the C# type system deduplicates IType
+    // instances -- the port does not). A null type on either side fails the match.
+    if (!targetType1 || !targetType2 || !targetType1->Equals(*targetType2))
+        return false;
+    auto targetType = targetType1;
+    auto* stloc_outer = dynamic_cast<StLoc*>(store);
+    auto* stloc_inner = dynamic_cast<StLoc*>(value1);
+    // UnwrapSmallIntegerConv: peel the compiler's conv truncation to a small
+    // integer that a compound assign to a small-integer local/field carries.
+    Conv* conv = nullptr;
+    ILInstruction* unwrapped = UnwrapSmallIntegerConv(value2, conv);
+    auto* binary = dynamic_cast<BinaryNumericInstruction*>(unwrapped);
+    LdLoc* ldloc = nullptr;
+    if (binary != nullptr && IsLdcOne(binary->Right.get())) {
+        // Only Add/Sub (the ++ / -- operators) are valid pre-inc/dec.
+        if (!(binary->Operator == BinaryNumericOperator::Add ||
+              binary->Operator == BinaryNumericOperator::Sub))
+            return false;
+        // When a small-integer conv was unwrapped, fix a sign mismatch between
+        // the store type and the conv's target by flipping the store type's
+        // sign (the C# `SwapSign`), so ValidateCompoundAssign's conv-match
+        // gate sees the corrected type. Same as the PostIncDec cases.
+        if (conv != nullptr) {
+            const PrimitiveType primitiveType = TypeSystem::ToPrimitiveType(targetType.get());
+            if (GetSize(primitiveType) == GetSize(conv->TargetType) &&
+                GetSign(primitiveType) != GetSign(conv->TargetType)) {
+                if (auto swapped = TypeSystem::SwapSign(targetType.get()))
+                    targetType = std::move(swapped);
+            }
+        }
+        if (!ValidateCompoundAssign(binary, conv, targetType.get(), &context.Base.Settings))
+            return false;
+        // binary.Left is the ldloc of the target (the variable being
+        // incremented). Unlike the PostIncDec WithInlineStore case where
+        // binary.Left is the inline-store StLoc, here binary.Left is a bare LdLoc
+        // (the inner stloc target is the inline store, and its Value is the
+        // binary whose Left reads the target).
+        ldloc = dynamic_cast<LdLoc*>(binary->Left.get());
+    } else {
+        // The operator-call (op_Increment/op_Decrement) case is deferred: it
+        // needs the UserDefinedCompoundAssign node + Call.IsLifted. Bail
+        // conservatively (no fold) for any other value2 shape.
+        return false;
+    }
+    if (stloc_outer == nullptr || stloc_inner == nullptr || ldloc == nullptr)
+        return false;
+    if (!(stloc_outer->Variable &&
+          (stloc_outer->Variable->Kind == VariableKind::Local ||
+           stloc_outer->Variable->Kind == VariableKind::StackSlot)))
+        return false;
+    // IsMatchingCompoundLoad: the load (ldloc = binary.Left) and the inner store
+    // (stloc_inner) access the same variable (target), so the compound-assign
+    // target is a fresh LdLoca(target); the finalizeMatch collapses split-
+    // fragment variables via RecombineVariables (a no-op for the common
+    // same-variable case). The C# does not pass a forbiddenVariable here.
+    std::unique_ptr<ILInstruction> target;
+    CompoundTargetKind targetKind = CompoundTargetKind::Address;
+    CompoundFinalizeMatch finalizeMatch;
+    if (!IsMatchingCompoundLoad(ldloc, stloc_inner, target, targetKind,
+                                finalizeMatch, nullptr))
+        return false;
+    // The old value (stloc_outer.Value = stloc_inner) must not be implicitly
+    // truncated for the outer variable's type. For a non-small-integer outer
+    // type (the common Int32 case), CheckImplicitTruncation returns ValuePreserved
+    // immediately (the outer guard). For a small-integer outer, the conservative
+    // else-branch (no InferType) returns ValueChanged, rejecting the fold -- a
+    // faithfulness gap, not a bug.
+    if (IsImplicitTruncation(stloc_outer->Value.get(), stloc_outer->Variable->Type.get(), false))
+        return false;
+
+    context.Base.StepOnce("TransformPreIncDecOperatorWithInlineStore");
+    if (finalizeMatch) {
+        if (ILFunction* fn = FunctionOf(store))
+            finalizeMatch(*fn);
+    }
+
+    // Detach the binary's right operand (the constant 1) before the outer store
+    // is destroyed by SetChild (no GC -- a raw pointer into the binary would
+    // dangle). The binary is inside stloc_inner, inside stloc_outer, inside
+    // block.Instructions[pos]; SetChild(pos, ...) destroys all of them.
+    auto rhs = std::move(binary->Right);
+    // Build the NumericCompoundAssign from the binary's fields + the fresh
+    // LdLoca target + the detached constant + the (possibly sign-swapped) store
+    // type, in the EvaluatesToNewValue (pre-inc/dec) mode.
+    auto nca = std::make_unique<NumericCompoundAssign>(
+        binary->Operator, binary->CheckForOverflow, binary->Sign,
+        binary->LeftInputType, binary->RightInputType, binary->ResultStackType,
+        binary->IsLifted, targetType, CompoundEvalMode::EvaluatesToNewValue,
+        std::move(target), targetKind, std::move(rhs));
+    // stloc outer(NumericCompoundAssign.op.new(ldloca target, ldc.i4 1)) =
+    // `outer = ++target`. The new StLoc replaces the store at pos; the old store
+    // (with its inner stloc and the now-null-Right binary) is destroyed.
+    ILVariablePtr outerVar = stloc_outer->Variable;
+    block.SetChild(pos, std::make_unique<StLoc>(outerVar, std::move(nca)));
     return true;
 }
 

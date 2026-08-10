@@ -216,6 +216,18 @@ private:
 	// Returns true if a fold fired.
 	bool TransformPostIncDecOperator(Block& block, int pos,
 	                                 StatementTransformContext& context);
+
+	// TransformPreIncDecOperatorWithInlineStore (binary case): folds the local
+	// pre-increment/decrement `stloc outer(stloc target(binary.op(ldloc target,
+	// ldc.i4 1)))` (a single non-terminal at block.Instructions[pos], the inline-
+	// store expression form) into `stloc outer(NumericCompoundAssign.op.new(
+	// ldloca target, ldc.i4 1))` (= `outer = ++target`), the C#
+	// `EvaluatesToNewValue` compound assign. The inner stloc target is eliminated
+	// (its variable is recombined with the ldloc's via the finalizeMatch; a no-op
+	// when they are the same variable). Gated on IntroduceIncrementAndDecrement.
+	// Returns true if a fold fired.
+	bool TransformPreIncDecOperatorWithInlineStore(Block& block, int pos,
+	                                                StatementTransformContext& context);
 };
 
 } // namespace ILSpy::Decompiler::IL

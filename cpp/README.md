@@ -1394,9 +1394,24 @@ implemented and green here. Everything else follows the phase plan in
   (2446 lines) instead of the `V = V + 1` form, a readability improvement. The
   operator-call (`op_Increment`/`op_Decrement`) case (needs
   `UserDefinedCompoundAssign` + `Call.IsLifted`) and the
-  `TransformInlineAssignmentStObjOrCall` / `TransformInlineAssignmentLocal` /
-  `TransformPreIncDecOperatorWithInlineStore` StObj/Call cases (need
-  `InferType` / `IsSameMember` / `IMethod`) are the subsequent in-order targets.
+  `TransformInlineAssignmentStObjOrCall` / `TransformInlineAssignmentLocal`
+  StObj/Call cases (need `InferType` / `IsSameMember` / `IMethod`) are the
+  subsequent in-order targets.
+  The `TransformPreIncDecOperatorWithInlineStore` (the local/StLoc
+  pre-increment/decrement inline-store expression fold) is now PORTED (D134,
+  wired into the StatementTransform Run dispatch after the PostIncDec folds,
+  matching the C# GetILTransforms() order): it folds the local pre-increment
+  `stloc outer(stloc target(binary.op(ldloc target, ldc.i4 1)))` (a double
+  `IsCompoundStore` -- the outer store's Value is the inner `stloc target`, the
+  inline-store expression form) into `stloc outer(NumericCompoundAssign.op.new(
+  ldloca target, ldc.i4 1))` = `outer = ++target` (the C#
+  `EvaluatesToNewValue` compound assign), eliminating the inner stloc (its
+  variable recombined with the ldloc's via the `finalizeMatch`, a no-op when
+  they are the same variable). The pre-increment expression form is a
+  Roslyn-era codegen pattern that fires 0 times on the .NET Framework 4
+  legacy-csc mscorlib corpus (the legacy csc emits the statement form), so
+  the fold is faithfulness-only on this corpus -- matching the
+  D59/D60/D69/D132 precedent.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end. It now produces readable C#: real parameter names (Param
