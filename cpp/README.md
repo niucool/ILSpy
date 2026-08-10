@@ -271,7 +271,13 @@ implemented and green here. Everything else follows the phase plan in
   transform consume: it recognises a `newobj DelegateType(target, ldftn method)`
   (a `Call` with the new `IsNewObj` flag, 2 args, the second an ldftn/ldvirtftn)
   whose declaring type's `Kind` is `Delegate` or `Unknown`, capturing the target,
-  the delegate type, and the ldftn method name. `Call` gained an `IsNewObj`
+  the delegate type, and the ldftn method name -- AND the `LdVirtDelegate` shape
+  (the C# `case LdVirtDelegate`, which arises after `ExpressionTransforms.
+  TransformDelegateCtorLdVirtFtnToLdVirtDelegate` folds a virtual delegate
+  construction to an `LdVirtDelegate`), capturing the `Argument` (the target), the
+  `MethodName` (the method), and the `Type` (the delegate type), with the same
+  `Delegate`/`Unknown` final gate. The C# `MatchDelegateConstruction` is a
+  `switch` over `NewObj`/`LdVirtDelegate`; both branches are now handled. `Call` gained an `IsNewObj`
   flag (set by the IL reader for `newobj`, distinguishing it from `call`/`callvirt`
   -- the C# models newobj as a separate `NewObj` node; this port reuses `Call`).
   The declaring-type `TypeKind` is now derived for resolved type references:

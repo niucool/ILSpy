@@ -90,6 +90,16 @@ std::unique_ptr<Call> MakeNewObjDelegate(std::shared_ptr<IType> delegateType,
     return call;
 }
 
+// Build an `ldvirtdelegate DelegateType Method(target)` (the node the
+// ExpressionTransforms.TransformDelegateCtorLdVirtFtnToLdVirtDelegate fold
+// produces from a virtual delegate construction).
+std::unique_ptr<LdVirtDelegate> MakeLdVirtDelegate(std::shared_ptr<IType> delegateType,
+                                                   std::unique_ptr<ILInstruction> target,
+                                                   std::string method) {
+    return std::make_unique<LdVirtDelegate>(std::move(target), std::move(delegateType),
+                                            std::move(method));
+}
+
 void Walk(ILInstruction* inst, const std::function<void(ILInstruction*)>& visit) {
     if (!inst) return;
     visit(inst);
@@ -138,6 +148,55 @@ TEST(DelegateConstruction, MatchNewObjDelegateAcceptsUnknownDeclaringType) {
     auto call = MakeNewObjDelegate(unknownType, std::make_unique<LdLoc>(v), "System.Foo::Bar");
     DelegateConstructionMatch m;
     EXPECT_TRUE(DelegateConstruction::MatchDelegateConstruction(call.get(), m, true));
+}
+
+// An `ldvirtdelegate DelegateType Method(target)` (the C# `case LdVirtDelegate`,
+// the shape ExpressionTransforms.TransformDelegateCtorLdVirtFtnToLdVirtDelegate
+// produces from a virtual delegate construction) matches: the target (the
+// Argument), the method name, and the delegate type are captured.
+TEST(DelegateConstruction, MatchLdVirtDelegate) {
+    auto v = MakeLocal("v");
+    auto ldv = MakeLdVirtDelegate(MakeDelegateType("System", "Action"),
+                                  std::make_unique<LdLoc>(v), "System.Foo::Bar");
+    DelegateConstructionMatch m;
+    EXPECT_TRUE(DelegateConstruction::MatchDelegateConstruction(ldv.get(), m, true));
+    ASSERT_NE(m.target, nullptr);
+    EXPECT_EQ(m.target->Op, OpCode::LdLoc);
+    ASSERT_NE(m.delegateType, nullptr);
+    EXPECT_EQ(m.delegateType->Kind(), TypeKind::Delegate);
+    EXPECT_EQ(m.targetMethod, "System.Foo::Bar");
+}
+
+// An LdVirtDelegate whose Type is Unknown (the C# fallback) also matches.
+TEST(DelegateConstruction, MatchLdVirtDelegateAcceptsUnknownType) {
+    auto v = MakeLocal("v");
+    auto unknownType = std::make_shared<SimpleType>(TopLevelTypeName("System", "Action"),
+                                                     TypeKind::Unknown);
+    auto ldv = MakeLdVirtDelegate(unknownType, std::make_unique<LdLoc>(v), "System.Foo::Bar");
+    DelegateConstructionMatch m;
+    EXPECT_TRUE(DelegateConstruction::MatchDelegateConstruction(ldv.get(), m, true));
+    ASSERT_NE(m.delegateType, nullptr);
+    EXPECT_EQ(m.delegateType->Kind(), TypeKind::Unknown);
+}
+
+// An LdVirtDelegate whose Type is a non-delegate (Class) does not match -- the
+// final gate is Kind == Delegate || Unknown.
+TEST(DelegateConstruction, RejectsLdVirtDelegateNonDelegateType) {
+    auto v = MakeLocal("v");
+    auto classType = std::make_shared<SimpleType>(TopLevelTypeName("System", "String"),
+                                                   TypeKind::Class);
+    auto ldv = MakeLdVirtDelegate(classType, std::make_unique<LdLoc>(v), "System.Foo::Bar");
+    DelegateConstructionMatch m;
+    EXPECT_FALSE(DelegateConstruction::MatchDelegateConstruction(ldv.get(), m, true));
+}
+
+// An LdVirtDelegate whose Type could not be resolved (null) does not match -- a
+// null Type is treated like the C# null DeclaringTypeDefinition.
+TEST(DelegateConstruction, RejectsLdVirtDelegateNullType) {
+    auto v = MakeLocal("v");
+    auto ldv = MakeLdVirtDelegate(nullptr, std::make_unique<LdLoc>(v), "System.Foo::Bar");
+    DelegateConstructionMatch m;
+    EXPECT_FALSE(DelegateConstruction::MatchDelegateConstruction(ldv.get(), m, true));
 }
 
 // A non-newobj call (call/callvirt) does not match, even with a delegate

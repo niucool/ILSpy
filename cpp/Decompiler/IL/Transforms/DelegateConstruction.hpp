@@ -49,10 +49,12 @@ struct DelegateConstructionMatch {
 
 class DelegateConstruction {
 public:
-    // Match a `newobj DelegateType(target, ldftn method)` delegate construction
-    // (the C# `case NewObj call:`). The call must be a newobj (Call::IsNewObj)
-    // with exactly two arguments, the second an ldftn or ldvirtftn, and its
-    // declaring type's Kind must be Delegate or Unknown (the C# also accepts
+    // Match a delegate construction -- the C# `case NewObj call:` (a `newobj
+    // DelegateType(target, ldftn/ldvirtftn method)`, modelled as a Call with
+    // IsNewObj, exactly two arguments, the second an ldftn or ldvirtftn) or the
+    // C# `case LdVirtDelegate` (a virtual delegate construction already folded
+    // by ExpressionTransforms.TransformDelegateCtorLdVirtFtnToLdVirtDelegate).
+    // The delegate type's Kind must be Delegate or Unknown (the C# also accepts
     // Unknown for an unresolvable type, e.g. a cross-assembly TypeRef). Returns
     // false for a null declaring type (the C# null DeclaringTypeDefinition).
     // allowTransformed (the C# ILFunction-arg case, which arises after the
