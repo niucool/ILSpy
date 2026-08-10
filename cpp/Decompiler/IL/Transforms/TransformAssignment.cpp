@@ -386,14 +386,98 @@ std::string_view ShortMethodName(std::string_view fullName) {
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// TransformInlineAssignmentLocal: folds the two-instruction inline assignment to
+// a local variable. The C# comment:
+//   stloc s(value)
+//   stloc l(ldloc s)
+//     where neither 'stloc s' nor 'stloc l' truncates the value
+// -->
+//   stloc s(stloc l(value))
+// s is a StackSlot (the compiler's evaluation-stack temp), l is a Local or
+// Parameter. The fold wraps the value in a nested `stloc l` and replaces the
+// outer `stloc s` with the inline-assignment expression so a later transform can
+// treat the whole thing as an assignment expression. This is the self-
+// contained sibling of TransformInlineAssignmentStObjOrCall (which needs InferType
+// / IsSameMember / IMethod for the property/field inline-assign and is deferred);
+// it only consults MatchLdLoc + IsImplicitTruncation + the variable Kinds.
+// ---------------------------------------------------------------------------
+bool TransformAssignment::TransformInlineAssignmentLocal(
+    Block& block, int pos, StatementTransformContext& context) {
+    // inst = block.Instructions[pos] as StLoc -- the stack-slot store of value.
+    if (pos < 0 || static_cast<std::size_t>(pos) >= block.Instructions.size())
+        return false;
+    auto* inst = dynamic_cast<StLoc*>(block.Instructions[static_cast<std::size_t>(pos)].get());
+    if (!inst || !inst->Variable) return false;
+    // nextInst = block.Instructions.ElementAtOrDefault(pos + 1) as StLoc -- the
+    // local/parameter store of ldloc s (the value is forwarded to l).
+    const std::size_t nextIdx = static_cast<std::size_t>(pos) + 1;
+    StLoc* nextInst = nullptr;
+    if (nextIdx < block.Instructions.size())
+        nextInst = dynamic_cast<StLoc*>(block.Instructions[nextIdx].get());
+    if (!nextInst || !nextInst->Variable) return false;
+    // s must be a StackSlot (the compiler's evaluation-stack temp).
+    if (inst->Variable->Kind != VariableKind::StackSlot) return false;
+    // l must be a Local or Parameter.
+    if (!(nextInst->Variable->Kind == VariableKind::Local ||
+          nextInst->Variable->Kind == VariableKind::Parameter))
+        return false;
+    // nextInst.Value must be ldloc s (the C# `nextInst.Value.MatchLdLoc(inst.Variable)`).
+    auto* ldloc = dynamic_cast<LdLoc*>(nextInst->Value.get());
+    if (!ldloc || !ldloc->Variable || ldloc->Variable.get() != inst->Variable.get())
+        return false;
+    // 'stloc s' must not implicitly truncate the value for s's type.
+    if (IsImplicitTruncation(inst->Value.get(), inst->Variable->Type.get(), false))
+        return false;
+    // 'stloc l' must not implicitly truncate the value for l's type.
+    if (IsImplicitTruncation(inst->Value.get(), nextInst->Variable->Type.get(), false))
+        return false;
+    // ref locals need to be initialized when they are declared, so avoid inline
+    // assignments to ref locals (we can't easily check definite assignment here).
+    // The C# `ILVariable.StackType` is `Type.GetStackType()`; the port computes it
+    // via StackTypeOf on the variable's Type.
+    if (StackTypeOf(nextInst->Variable->Type.get()) == StackType::Ref) return false;
+
+    context.Base.StepOnce("Inline assignment to local variable");
+    // Detach inst's Value before RemoveInstructionAt destroys inst (no GC -- a
+    // raw pointer into inst would dangle). Capture the variables too (shared_ptr
+    // copies outlive the StLocs). `inst->Value` is the StLoc's owning unique_ptr
+    // member (not a child via SetChild), so std::move takes ownership cleanly and
+    // leaves inst with ChildCount 0.
+    auto value = std::move(inst->Value);
+    auto stackVar = inst->Variable;
+    auto var = nextInst->Variable;
+    // Remove the stack-slot store at pos. nextInst shifts down to pos and its
+    // ChildIndex is renumbered by RemoveInstructionAt's RenumberChildren, so the
+    // subsequent ReplaceWith (which uses Parent + ChildIndex) targets the correct
+    // (now pos) slot.
+    block.RemoveInstructionAt(static_cast<std::size_t>(pos));
+    // Build `stloc s(stloc l(value))` and replace nextInst (now at pos) with it.
+    // The outer StLoc wraps a fresh inner StLoc carrying l and the detached value.
+    auto inlineAssignment = std::make_unique<StLoc>(
+        stackVar, std::make_unique<StLoc>(var, std::move(value)));
+    nextInst->ReplaceWith(std::move(inlineAssignment));
+    return true;
+}
+
 void TransformAssignment::Run(Block& block, int pos, StatementTransformContext& context) {
-    // The C# gates the inline-assignment folds on MakeAssignmentExpressions and
-    // the inc/dec folds on IntroduceIncrementAndDecrement (both must be true for
-    // a compound assign). TransformPostIncDecOperatorWithInlineStore and
-    // TransformPostIncDecOperator are inc/dec folds, so they are gated on
-    // IntroduceIncrementAndDecrement (the C# also requires MakeAssignmentExpressions
-    // for the other folds, but the inc/dec-only gate is faithful for this subset).
-    if (!context.Base.Settings.IntroduceIncrementAndDecrement)
+    // The C# gates the whole Run on both MakeAssignmentExpressions and
+    // IntroduceIncrementAndDecrement (the inline-assignment folds need
+    // MakeAssignmentExpressions, the inc/dec folds need
+    // IntroduceIncrementAndDecrement; the C# top-level gate requires both).
+    if (!context.Base.Settings.MakeAssignmentExpressions ||
+        !context.Base.Settings.IntroduceIncrementAndDecrement)
+        return;
+    // The C# dispatches TransformInlineAssignmentStObjOrCall ||
+    // TransformInlineAssignmentLocal first (the inline-assignment folds), then
+    // the three inc/dec folds. TransformInlineAssignmentStObjOrCall (the
+    // StObj/Call inline-assign, needs InferType / IsSameMember / IMethod) is
+    // deferred, so only TransformInlineAssignmentLocal is wired here; it runs
+    // before the inc/dec folds so a folded inline-assignment short-circuits the
+    // position (the driver advances or re-runs). The inline-assignment folds do
+    // NOT call RequestRerunCurrentPosition (the C# `return` after them); only the
+    // inc/dec folds request a rerun (the C# `context.RequestRerun()`).
+    if (TransformInlineAssignmentLocal(block, pos, context))
         return;
     if (TransformPostIncDecOperatorWithInlineStore(block, pos, context) ||
         TransformPostIncDecOperator(block, pos, context) ||

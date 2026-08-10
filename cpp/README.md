@@ -1453,6 +1453,38 @@ implemented and green here. Everything else follows the phase plan in
   Framework 4 legacy-csc mscorlib corpus (faithfulness-only, matching the
   D59/D60 precedent), so `--csharp` output is unchanged; the hand-built tests
   verify the fold and an 8000-method sweep verifies the ILAst invariant holds.
+  The `TransformInlineAssignmentLocal` (the inline-assignment-to-local fold,
+  the next in-order `TransformAssignment` piece after D136) is now PORTED (D137,
+  wired into the StatementTransform Run dispatch BEFORE the inc/dec folds,
+  matching the C# GetILTransforms() order). It folds the compiler's stack-temp-
+  to-local copy `stloc s(value)` (s a StackSlot) + `stloc l(ldloc s)` (l a
+  Local/Parameter) into the inline-assignment expression `stloc s(stloc
+  l(value))` so a later transform can treat the whole thing as an assignment
+  expression. The implementation consults only self-contained helpers already
+  in place: `MatchLdLoc` (the `nextInst.Value` must be an `LdLoc` of `s`),
+  the D128 `IsImplicitTruncation` (the value must not be implicitly truncated
+  for s's or l's type), `VariableKind` (s must be StackSlot, l Local/Parameter),
+  and `StackTypeOf` (the C# `nextInst.Variable.StackType == StackType.Ref` reject
+  -- `ILVariable` has no `StackType` member, so the port computes it via
+  `StackTypeOf(Variable->Type.get())`). The block-model adaptation detaches
+  `inst->Value` via `std::move` before `RemoveInstructionAt(pos)` destroys `inst`
+  (no GC), then `ReplaceWith` the shifted `nextInst` (renumbered to `pos`) with
+  the inline-assignment expression. The `Run` gate is updated to its faithful
+  C# top-level gate (`!MakeAssignmentExpressions || !IntroduceIncrementAndDecrement`
+  returns early -- the C# gates the whole Run on BOTH settings, not just
+  `IntroduceIncrementAndDecrement` the D132-only port used). The fold fires 104
+  times across the .NET Framework 4 legacy-csc mscorlib corpus (a real-corpus
+  transform -- `EXPECT_GT(totalInlineAssignFolds, 0)`); the inc/dec fold's
+  `NumericCompoundAssign`-OldValue count is UNCHANGED at 151 (the patterns are
+  disjoint -- the inline-assignment's second store value is a load, the
+  inc/dec's is a binary). The CLI `++`/`--` line count drops to ~2200 as a
+  faithful consequence (the 104 inline-assignment folds change the ILAst shape
+  the later ILInlining/rendering sees; the deterministic NCA-OldValue count is
+  unchanged). The deferred `TransformInlineAssignmentStObjOrCall` StObj/Call
+  inline-assign (needs `InferType` / `IsSameMember` / `IMethod`) and the
+  `HandleCompoundAssign` StObj/Call compound-assign entry (blocked by the same
+  StObj/Call `IsCompoundStore`/`IsMatchingCompoundLoad` prerequisites) are the
+  subsequent in-order targets.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end. It now produces readable C#: real parameter names (Param

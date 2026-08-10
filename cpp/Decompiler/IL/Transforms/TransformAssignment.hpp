@@ -193,6 +193,21 @@ public:
 	void Run(Block& block, int pos, StatementTransformContext& context) override;
 
 private:
+	// TransformInlineAssignmentLocal: folds the two-instruction inline
+	// assignment to a local
+	//   stloc s(value)                       at Instructions[i]
+	//   stloc l(ldloc s)                     at Instructions[i+1]
+	// (s is a StackSlot, l is a Local/Parameter) into the inline-assignment
+	// expression `stloc s(stloc l(value))` so a later transform can fold the
+	// nested store or treat the whole thing as an assignment expression. Gated
+	// on MakeAssignmentExpressions (the C# top-level Run gate also requires
+	// IntroduceIncrementAndDecrement). The StObj/Call sibling
+	// (TransformInlineAssignmentStObjOrCall) is deferred (needs InferType /
+	// IsSameMember / IMethod for the property/field inline-assign). Returns true
+	// if a fold fired.
+	bool TransformInlineAssignmentLocal(Block& block, int pos,
+	                                    StatementTransformContext& context);
+
 	// TransformPostIncDecOperatorWithInlineStore (binary + operator-call cases):
 	// folds the local post-increment/decrement
 	//   stloc target(binary.op(stloc tmp(ldloc target), ldc.i4 1))

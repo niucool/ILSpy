@@ -162,6 +162,7 @@ using ILSpy::Decompiler::IL::ILVariablePtr;
 using ILSpy::Decompiler::IL::VariableKind;
 using ILSpy::Decompiler::Metadata::MetadataFile;
 using ILSpy::Decompiler::TypeSystem::ITypePtr;
+using ILSpy::Decompiler::TypeSystem::ByReferenceType;
 using ILSpy::Decompiler::TypeSystem::KnownType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
 using ILSpy::Decompiler::TypeSystem::Sign;
@@ -953,6 +954,33 @@ std::unique_ptr<ILFunction> MakePreIncDecWithInlineStoreOperatorCall(
     block->SetFinal(std::make_unique<Leave>(fn->Body.get()));
     fn->Variables.push_back(target);
     fn->Variables.push_back(outer);
+    return fn;
+}
+
+// Build the TransformInlineAssignmentLocal block:
+//   block.Instructions[0] = stloc s(value)
+//   block.Instructions[1] = stloc l(ldloc s)
+// with a Leave(body) final, in a fresh single-block function. s is a StackSlot
+// (the compiler's evaluation-stack temp), l is a Local or Parameter. The fold
+// wraps the value in a nested `stloc l` and replaces the outer `stloc s` with
+// `stloc s(stloc l(value))` (the inline-assignment expression form). `sKind` /
+// `lKind` let a negative test vary the variable Kinds (the fold requires s to be
+// a StackSlot and l to be a Local/Parameter).
+std::unique_ptr<ILFunction> MakeInlineAssignLocal(
+    ILVariablePtr& s, ILVariablePtr& l, std::unique_ptr<ILInstruction> value,
+    VariableKind sKind = VariableKind::StackSlot,
+    VariableKind lKind = VariableKind::Local) {
+    s = VarIdx("S_0", KT(KnownTypeCode::Int32), sKind, -1);
+    l = VarIdx("V_0", KT(KnownTypeCode::Int32), lKind, 0);
+    auto firstStore = std::make_unique<StLoc>(s, std::move(value));
+    auto secondStore = std::make_unique<StLoc>(l, std::make_unique<LdLoc>(s));
+    auto fn = MakeFn();
+    auto* block = fn->Body->Blocks[0].get();
+    block->Add(std::move(firstStore));
+    block->Add(std::move(secondStore));
+    block->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(s);
+    fn->Variables.push_back(l);
     return fn;
 }
 
@@ -1799,6 +1827,173 @@ TEST(TransformAssignmentTest, PreIncDecWithInlineStoreOperatorCallFoldsDecrement
     EXPECT_EQ(uca->MethodName, "System.SByte::op_Decrement");
 }
 
+// ---- TransformInlineAssignmentLocal (the inline-assignment-to-local fold) ----
+
+// The positive fold: `stloc s(ldc.i4 5)` + `stloc l(ldloc s)` ->
+// `stloc s(stloc l(ldc.i4 5))` (the inline-assignment expression form). The two
+// instructions merge into one; the outer StLoc carries the StackSlot s and wraps
+// a fresh inner StLoc carrying the Local l and the detached value.
+TEST(TransformAssignmentTest, InlineAssignmentLocalFoldsLocal) {
+    ILVariablePtr s, l;
+    auto fn = MakeInlineAssignLocal(s, l, std::make_unique<LdcI4>(5));
+    auto* block = fn->Body->Blocks[0].get();
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* result = dynamic_cast<StLoc*>(block->Instructions[0].get());
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Variable.get(), s.get());       // outer store is to s (StackSlot)
+    auto* inner = dynamic_cast<StLoc*>(result->Value.get());
+    ASSERT_NE(inner, nullptr);
+    EXPECT_EQ(inner->Variable.get(), l.get());       // inner store is to l (Local)
+    auto* ldc = dynamic_cast<LdcI4*>(inner->Value.get());
+    ASSERT_NE(ldc, nullptr);
+    EXPECT_EQ(ldc->Value, 5);
+}
+
+// The fold also accepts a Parameter as the destination local l (the C# accepts
+// Local || Parameter).
+TEST(TransformAssignmentTest, InlineAssignmentLocalFoldsParameter) {
+    ILVariablePtr s, l;
+    auto fn = MakeInlineAssignLocal(s, l, std::make_unique<LdcI4>(5),
+                                    VariableKind::StackSlot,
+                                    VariableKind::Parameter);
+    auto* block = fn->Body->Blocks[0].get();
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* result = dynamic_cast<StLoc*>(block->Instructions[0].get());
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Variable.get(), s.get());
+    auto* inner = dynamic_cast<StLoc*>(result->Value.get());
+    ASSERT_NE(inner, nullptr);
+    EXPECT_EQ(inner->Variable.get(), l.get());        // inner store is to l (Parameter)
+    EXPECT_EQ(l->Kind, VariableKind::Parameter);
+}
+
+// s must be a StackSlot (the compiler's evaluation-stack temp); a Local does not
+// fold (the fold is for the compiler's stack-temp-to-local copy, not a
+// local-to-local copy).
+TEST(TransformAssignmentTest, InlineAssignmentLocalRejectsNonStackSlotS) {
+    ILVariablePtr s, l;
+    auto fn = MakeInlineAssignLocal(s, l, std::make_unique<LdcI4>(5),
+                                    VariableKind::Local);  // s is a Local, not a StackSlot
+    auto* block = fn->Body->Blocks[0].get();
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 2u);  // no fold
+}
+
+// l must be a Local or Parameter; a StackSlot destination does not fold (the
+// fold promotes a stack temp into a named local, not into another stack temp).
+TEST(TransformAssignmentTest, InlineAssignmentLocalRejectsNonLocalL) {
+    ILVariablePtr s, l;
+    auto fn = MakeInlineAssignLocal(s, l, std::make_unique<LdcI4>(5),
+                                    VariableKind::StackSlot,
+                                    VariableKind::StackSlot);  // l is a StackSlot
+    auto* block = fn->Body->Blocks[0].get();
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 2u);  // no fold
+}
+
+// nextInst.Value must be ldloc s (the value is forwarded to l); a different
+// value (not a load of s) does not fold.
+TEST(TransformAssignmentTest, InlineAssignmentLocalRejectsNonLdLocValue) {
+    auto s = VarIdx("S_0", KT(KnownTypeCode::Int32), VariableKind::StackSlot, -1);
+    auto l = VarIdx("V_0", KT(KnownTypeCode::Int32), VariableKind::Local, 0);
+    // nextInst.Value is a LdcI4 (not a load of s).
+    auto firstStore = std::make_unique<StLoc>(s, std::make_unique<LdcI4>(5));
+    auto secondStore = std::make_unique<StLoc>(l, std::make_unique<LdcI4>(7));
+    auto fn = MakeFn();
+    auto* block = fn->Body->Blocks[0].get();
+    block->Add(std::move(firstStore));
+    block->Add(std::move(secondStore));
+    block->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(s);
+    fn->Variables.push_back(l);
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 2u);  // no fold
+}
+
+// nextInst.Value loading a DIFFERENT variable than s does not fold.
+TEST(TransformAssignmentTest, InlineAssignmentLocalRejectsNonMatchingLdLoc) {
+    auto s = VarIdx("S_0", KT(KnownTypeCode::Int32), VariableKind::StackSlot, -1);
+    auto other = VarIdx("S_1", KT(KnownTypeCode::Int32), VariableKind::StackSlot, -1);
+    auto l = VarIdx("V_0", KT(KnownTypeCode::Int32), VariableKind::Local, 0);
+    auto firstStore = std::make_unique<StLoc>(s, std::make_unique<LdcI4>(5));
+    // nextInst.Value loads `other`, not `s`.
+    auto secondStore = std::make_unique<StLoc>(l, std::make_unique<LdLoc>(other));
+    auto fn = MakeFn();
+    auto* block = fn->Body->Blocks[0].get();
+    block->Add(std::move(firstStore));
+    block->Add(std::move(secondStore));
+    block->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(s);
+    fn->Variables.push_back(other);
+    fn->Variables.push_back(l);
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 2u);  // no fold
+}
+
+// A ref local (StackType.Ref) is not inlined: ref locals must be initialized
+// when declared, and the transform cannot easily check definite assignment, so
+// it bails conservatively (the C# `nextInst.Variable.StackType == StackType.Ref`).
+TEST(TransformAssignmentTest, InlineAssignmentLocalRejectsRefLocal) {
+    auto s = VarIdx("S_0", KT(KnownTypeCode::Int32), VariableKind::StackSlot, -1);
+    auto l = VarIdx("V_0",
+                    std::make_shared<ByReferenceType>(KT(KnownTypeCode::Int32)),
+                    VariableKind::Local, 0);
+    auto firstStore = std::make_unique<StLoc>(s, std::make_unique<LdcI4>(5));
+    auto secondStore = std::make_unique<StLoc>(l, std::make_unique<LdLoc>(s));
+    auto fn = MakeFn();
+    auto* block = fn->Body->Blocks[0].get();
+    block->Add(std::move(firstStore));
+    block->Add(std::move(secondStore));
+    block->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(s);
+    fn->Variables.push_back(l);
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 2u);  // no fold (ref local)
+}
+
+// MakeAssignmentExpressions off: the inline-assignment fold is gated on the
+// MakeAssignmentExpressions setting (the C# top-level Run gate).
+TEST(TransformAssignmentTest, InlineAssignmentLocalMakeAssignmentExpressionsOffNoOp) {
+    ILVariablePtr s, l;
+    auto fn = MakeInlineAssignLocal(s, l, std::make_unique<LdcI4>(5));
+    auto* block = fn->Body->Blocks[0].get();
+    ILTransformContext ctx;
+    ctx.Settings.MakeAssignmentExpressions = false;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 2u);  // no fold (setting off)
+}
+
+// IntroduceIncrementAndDecrement off: the C# top-level Run gate requires BOTH
+// settings, so turning IntroduceIncrementAndDecrement off also disables the
+// inline-assignment fold (the gate is on both, not just MakeAssignmentExpressions).
+TEST(TransformAssignmentTest, InlineAssignmentLocalIntroduceIncDecOffNoOp) {
+    ILVariablePtr s, l;
+    auto fn = MakeInlineAssignLocal(s, l, std::make_unique<LdcI4>(5));
+    auto* block = fn->Body->Blocks[0].get();
+    ILTransformContext ctx;
+    ctx.Settings.IntroduceIncrementAndDecrement = false;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 2u);  // no fold (setting off)
+}
+
 // ---- mscorlib sweep (TransformAssignment in the full per-statement pipeline) ----
 
 // Run the GetILTransforms() pre-pipeline through CachedReadOnlySpanInitialization
@@ -1891,6 +2086,33 @@ int CountUserDefinedCompoundAssign(ILFunction& fn) {
     return count;
 }
 
+// Count the TransformInlineAssignmentLocal result shape: a `stloc s(stloc
+// l(value))` where s is a StackSlot and l is a Local or Parameter (the inline-
+// assignment expression form the fold produces). This is the specific shape
+// TransformInlineAssignmentLocal builds; other transforms do not produce a
+// StackSlot StLoc wrapping a Local/Parameter StLoc, so the count is a reliable
+// signal the fold fired.
+int CountInlineAssignmentLocal(ILFunction& fn) {
+    int count = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (auto* outer = dynamic_cast<StLoc*>(inst)) {
+            if (outer->Variable && outer->Variable->Kind == VariableKind::StackSlot) {
+                if (auto* inner = dynamic_cast<StLoc*>(outer->Value.get())) {
+                    if (inner->Variable &&
+                        (inner->Variable->Kind == VariableKind::Local ||
+                         inner->Variable->Kind == VariableKind::Parameter))
+                        ++count;
+                }
+            }
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i)
+            walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return count;
+}
+
 // The TransformPostIncDecOperator shape (the non-inline-store two-instruction
 // `stloc tmp(ldloc target)` + `stloc target(binary.op(ldloc tmp, 1))` post-
 // increment) arises on the .NET Framework 4 legacy-csc mscorlib corpus (a corpus
@@ -1914,6 +2136,7 @@ TEST(TransformAssignmentTest, MscorlibSweepPreservesInvariant) {
     int totalFolds = 0;
     int totalNewFolds = 0;
     int totalUserDefinedFolds = 0;
+    int totalInlineAssignFolds = 0;
     ILTransformContext ctx;
     for (const auto& m : f.MethodDefs()) {
         if (m.RVA == 0) continue;
@@ -1925,6 +2148,8 @@ TEST(TransformAssignmentTest, MscorlibSweepPreservesInvariant) {
         totalFolds += CountNumericCompoundAssignOld(*fn);
         totalNewFolds += CountNumericCompoundAssignNew(*fn);
         totalUserDefinedFolds += CountUserDefinedCompoundAssign(*fn);
+        int inlineAssignFolds = CountInlineAssignmentLocal(*fn);
+        totalInlineAssignFolds += inlineAssignFolds;
         if (processed >= 8000) break;
     }
     EXPECT_GT(processed, 5000);
@@ -1943,4 +2168,11 @@ TEST(TransformAssignmentTest, MscorlibSweepPreservesInvariant) {
     // D59/D60/D69 precedent); the per-method CheckInvariant above verifies the
     // fold does not crash or corrupt the tree on the corpus.
     EXPECT_EQ(totalUserDefinedFolds, 0);
+    // The TransformInlineAssignmentLocal fold (the `stloc s(value); stloc l(ldloc s)`
+    // -> `stloc s(stloc l(value))` inline-assignment-to-local) fires on the legacy-csc
+    // mscorlib corpus (the compiler's stack-temp-to-local copy is a common codegen
+    // pattern), so the total inline-assignment count is > 0 (the transform fires on
+    // real code, not just faithfulness-only); the per-method CheckInvariant above
+    // verifies the fold does not crash or corrupt the tree on the corpus.
+    EXPECT_GT(totalInlineAssignFolds, 0);
 }
