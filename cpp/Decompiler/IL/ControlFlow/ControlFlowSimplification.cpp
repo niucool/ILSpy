@@ -23,6 +23,7 @@
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
@@ -31,6 +32,7 @@
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
 #include <algorithm>
@@ -112,6 +114,46 @@ std::unique_ptr<ILInstruction> ClonePureLoad(const ILInstruction* v) {
         case OpCode::LdStr: return std::make_unique<LdStr>(static_cast<const LdStr*>(v)->Value);
         default: return nullptr;
     }
+}
+
+// Clone a call whose args are all cheap pure loads (ldloc/ldc/ldstr/ldnull) --
+// the `newobj(ctor, ldstr)`, `call Method(ldstr)`, and `newobj(ctor, call Method(ldstr))`
+// shapes the throw-block fold needs. Recurses one level so a `newobj ArgumentException(ctor,
+// call GetResourceString(ldstr))` clones. Returns nullptr for anything deeper or
+// with side-effecting args.
+std::unique_ptr<ILInstruction> CloneCallWithPureArgs(const Call* call) {
+    auto cloned = std::make_unique<Call>(call->MethodName);
+    cloned->ReturnType = call->ReturnType;
+    cloned->ReturnIType = call->ReturnIType;
+    cloned->ParameterIType = call->ParameterIType;
+    cloned->IsInstanceCall = call->IsInstanceCall;
+    cloned->IsNewObj = call->IsNewObj;
+    cloned->IsOperator = call->IsOperator;
+    cloned->DeclaringType = call->DeclaringType;
+    for (auto& arg : call->Arguments) {
+        std::unique_ptr<ILInstruction> a;
+        if (arg) {
+            if (arg->Op == OpCode::Call) {
+                a = CloneCallWithPureArgs(static_cast<Call*>(arg.get()));
+            } else {
+                a = ClonePureLoad(arg.get());
+            }
+        }
+        if (!a && arg) return nullptr;  // uncloneable (don't clone a partial)
+        cloned->AddArg(std::move(a));
+    }
+    return cloned;
+}
+
+// Clone a throw's argument when it is a cheap newobj(ctor, ldstr) or
+// newobj(ctor, call Method(ldstr)) -- the common `throw new XxxException("msg")`
+// shape -- so `br throwBlock` can be folded to a direct throw, eliminating
+// the goto. Returns nullptr for anything non-cloneable.
+std::unique_ptr<ILInstruction> CloneThrowArgument(const ILInstruction* v) {
+    if (!v || v->Op != OpCode::Call) return nullptr;
+    auto* call = static_cast<const Call*>(v);
+    if (!call->IsNewObj) return nullptr;
+    return CloneCallWithPureArgs(call);
 }
 
 void ForEach(ILInstruction* inst, const std::function<void(ILInstruction*)>& visit) {
@@ -259,6 +301,20 @@ void SimplifyBranchChains(ILFunction& function, ILTransformContext& context,
                     std::make_unique<Leave>(targetLeave->TargetContainer, std::move(cloned));
                 destroyed.insert(branch);
                 branch->ReplaceWith(std::move(dup));
+            }
+        } else if (target->Instructions.empty() &&
+                   target->FinalInstruction &&
+                   target->FinalInstruction->Op == OpCode::Throw) {
+            // Branching to a single-throw block: fold to a direct throw when the
+            // throw's argument is a cloneable newobj(ctor, ldstr) -- the common
+            // `throw new XxxException("msg")` shape. Eliminates `goto throwBlock`.
+            auto* th = static_cast<Throw*>(target->FinalInstruction.get());
+            auto cloned = CloneThrowArgument(th->Argument.get());
+            if (cloned) {
+                context.StepOnce("Replace branch to throw with throw");
+                --target->IncomingEdgeCount;
+                destroyed.insert(branch);
+                branch->ReplaceWith(std::make_unique<Throw>(std::move(cloned)));
             }
         }
         if (target->IncomingEdgeCount == 0 && !IsFallThroughTarget(target))
