@@ -1056,6 +1056,35 @@ implemented and green here. Everything else follows the phase plan in
   codegen pattern that fires 0 times on the .NET Framework 4 legacy-csc mscorlib
   corpus; ported for faithfulness (the hand-built tests verify the rewrite, the
   sweep verifies the invariant). 39 of ~40 transforms ported.
+  The `LdcDecimal` ILAst node (the System.Decimal constant, ported from the
+  generated Instructions.cs) models System.Decimal's internal layout faithfully
+  as a `DecimalValue` struct -- a 96-bit unsigned mantissa (lo/mid/hi), a sign,
+  and a 0..28 scale (the count of digits right of the point) -- the same
+  components the 5-arg `new decimal(lo, mid, hi, isNegative, scale)` constructor
+  exposes, so the value round-trips without a native decimal type. Factory
+  helpers build the value from the int/uint/long/ulong single-arg constructors
+  (handling the INT32_MIN/INT64_MIN magnitude edges) and the Decimal.One/Zero/
+  MinusOne named-constant fields; `ToString` formats the 96-bit mantissa via
+  repeated divmod-by-1e9 and inserts the decimal point `scale` digits from the
+  right (preserving trailing zeros, applying the sign, zero always unsigned);
+  the seed renders the C# literal form with the trailing `m` suffix (`1m`/`0m`/
+  `-1m`/`1.5m`). `ExpressionTransforms.VisitLdObj` (the next in-order visit
+  method) ports `TransformDecimalFieldToConstant`: a static field load
+  `ldobj(ldsflda System.Decimal::One/Zero/MinusOne)` folds into the
+  corresponding `LdcDecimal` constant (the field is recognised by the resolved
+  `LdsFlda::FieldName`, which carries both the declaring type and the field
+  name -- the faithful equivalent of the C# `field.DeclaringType.IsKnownType(
+  Decimal)` + `field.Name` gate). KEY FINDING: the fold fires on the .NET
+  Framework 4 legacy-csc mscorlib corpus -- the CLI `--csharp` output now shows
+  12 `m`-suffixed decimal literals (`0m`/`1m`/`-1m`, e.g.
+  `System.Decimal.op_Equality(d1, 0m)`) with 0 residual `Decimal::One/Zero/
+  MinusOne` field references (a real-corpus readability improvement, unlike most
+  recent nullable-family faithfulness-only pieces). The sibling
+  `EarlyExpressionTransforms.TransformDecimalCtorToConstant` (`newobj
+  Decimal(int/long/ulong/5-arg)` -> `LdcDecimal`, now unblocked by the node +
+  factories) and the Decimal lift (`LiftCSharpUserComparison`'s Decimal branch,
+  needs the Phase 5 resolver) are the subsequent in-order targets. 40 of ~40
+  transforms ported.
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
   walk + a corpus probe; the async/iterator state machines

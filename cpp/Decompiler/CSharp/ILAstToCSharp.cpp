@@ -38,6 +38,7 @@
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
+#include "Decompiler/IL/Instructions/LdcDecimal.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
@@ -605,6 +606,13 @@ private:
                 return std::to_string(static_cast<const LdcI4&>(inst).Value);
             case OpCode::LdcI8:
                 return std::to_string(static_cast<const LdcI8&>(inst).Value);
+            case OpCode::LdcDecimal:
+                // The C# decimal literal form (`1m`, `0m`, `-1m`, `1.5m`),
+                // faithful to the real back end's VisitLdcDecimal
+                // (ConvertConstantValue -> a PrimitiveExpression with the `m`
+                // suffix). The trailing zeros from the scale are preserved
+                // (System.Decimal.ToString semantics).
+                return static_cast<const LdcDecimal&>(inst).Value.ToString() + "m";
             case OpCode::LdcF4: {
                 char buf[32];
                 std::snprintf(buf, sizeof(buf), "%.9g", static_cast<const LdcF4&>(inst).Value);

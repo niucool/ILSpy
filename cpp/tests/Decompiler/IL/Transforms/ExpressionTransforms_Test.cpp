@@ -62,6 +62,7 @@
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdcDecimal.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
@@ -69,6 +70,7 @@
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/CSharp/ILAstToCSharp.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
@@ -343,6 +345,43 @@ int CountExceptionLocalHandlers(ILFunction& fn) {
         if (inst->Op == OpCode::TryCatchHandler) {
             auto* h = static_cast<TryCatchHandler*>(inst);
             if (h->Variable && h->Variable->Kind == VariableKind::ExceptionLocal) ++n;
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return n;
+}
+
+// Count LdcDecimal nodes (the TransformDecimalFieldToConstant fold's output).
+int CountLdcDecimal(ILFunction& fn) {
+    int n = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::LdcDecimal) ++n;
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return n;
+}
+
+// Count `ldobj(ldsflda System.Decimal::One/Zero/MinusOne)` static-field loads --
+// the TransformDecimalFieldToConstant fold's input. Each fold removes one and
+// produces one LdcDecimal, so the count is monotone non-increasing across
+// ExpressionTransforms.
+int CountDecimalConstantFieldLoads(ILFunction& fn) {
+    int n = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::LdObj) {
+            auto* ldobj = static_cast<LdObj*>(inst);
+            auto* addr = ldobj->Target ? dynamic_cast<LdsFlda*>(ldobj->Target.get()) : nullptr;
+            if (addr) {
+                const std::string& nm = addr->FieldName;
+                if (nm == "System.Decimal::One" || nm == "System.Decimal::Zero" ||
+                    nm == "System.Decimal::MinusOne") {
+                    ++n;
+                }
+            }
         }
         for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
     };
@@ -3357,6 +3396,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
     int totalNullCoalescingFolds = 0;
     int totalLiftedCompFolds = 0;
     int totalCatchVarPromotions = 0;
+    int totalDecimalFieldFolds = 0;
     ILTransformContext ctx;
     for (const auto& m : f.MethodDefs()) {
         if (m.RVA == 0) continue;
@@ -3376,6 +3416,8 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int hasValueBefore = CountHasValueCall(*fn);
         int threeValuedBoolBefore = CountThreeValuedBool(*fn);
         int exceptionLocalBefore = CountExceptionLocalHandlers(*fn);
+        int ldcDecimalBefore = CountLdcDecimal(*fn);
+        int decimalFieldLoadsBefore = CountDecimalConstantFieldLoads(*fn);
         {
             StatementTransform st;
             st.AddChild(std::make_unique<ILInlining>());
@@ -3395,6 +3437,8 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int hasValueAfter = CountHasValueCall(*fn);
         int threeValuedBoolAfter = CountThreeValuedBool(*fn);
         int exceptionLocalAfter = CountExceptionLocalHandlers(*fn);
+        int ldcDecimalAfter = CountLdcDecimal(*fn);
+        int decimalFieldLoadsAfter = CountDecimalConstantFieldLoads(*fn);
         // The ternary fold is monotone non-decreasing (each fold creates a
         // StLoc-if; nothing in this subset removes one). The VisitComp rewrites
         // (comp(!=0)->x, logic.not push, unsigned normalization) do not create
@@ -3486,11 +3530,23 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         // fires on the legacy-csc corpus (a real-corpus high-frequency transform,
         // unlike many earlier faithfulness-only ones).
         EXPECT_GE(exceptionLocalAfter, exceptionLocalBefore);
+        // TransformDecimalFieldToConstant folds a `ldobj(ldsflda
+        // System.Decimal::One/Zero/MinusOne)` static-field load into the
+        // corresponding LdcDecimal constant. The LdcDecimal count is monotone
+        // non-decreasing (each fold creates one; nothing in this subset removes
+        // one) and the Decimal-constant-field-load count is monotone
+        // non-increasing (each fold removes one; nothing in this subset creates
+        // one). The fold fires on the legacy-csc corpus when a method references
+        // the Decimal.One/Zero/MinusOne named-constant fields; the per-method
+        // monotone invariant is the deterministic correctness gate.
+        EXPECT_GE(ldcDecimalAfter, ldcDecimalBefore);
+        EXPECT_LE(decimalFieldLoadsAfter, decimalFieldLoadsBefore);
         totalFolds += (after - before);
         totalArrayIndexConvDrops += (arrayIdxConvBefore - arrayIdxConvAfter);
         totalNullCoalescingFolds += (nullCoalescingAfter - nullCoalescingBefore);
         totalLiftedCompFolds += (liftedCompsAfter - liftedCompsBefore);
         totalCatchVarPromotions += (exceptionLocalAfter - exceptionLocalBefore);
+        totalDecimalFieldFolds += (ldcDecimalAfter - ldcDecimalBefore);
         if (processed >= 8000) break;
     }
     EXPECT_GT(processed, 5000);
@@ -3523,6 +3579,14 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
     // transform stopped firing -- a regression.
     EXPECT_GT(totalCatchVarPromotions, 0)
         << "TransformCatchVariable must promote catch copies on mscorlib";
+    // TransformDecimalFieldToConstant fires on the legacy-csc corpus: mscorlib
+    // references the System.Decimal.One/Zero/MinusOne named-constant fields
+    // (e.g. Decimal.op_Multiply by One, Decimal.Equals(Zero)), so a non-zero
+    // total confirms the fold makes real-corpus progress (a real-corpus
+    // readability improvement, unlike most recent nullable-family
+    // faithfulness-only pieces). A zero total would mean the fold stopped firing.
+    EXPECT_GT(totalDecimalFieldFolds, 0)
+        << "TransformDecimalFieldToConstant must fold Decimal field loads on mscorlib";
 }
 
 // RunIfNullableLift MatchCompOrDecimal equality case (LiftCSharpEqualityComparison
@@ -4184,5 +4248,143 @@ TEST(ExpressionTransforms, TransformCatchWhenInlinesSingleLeaveFilter) {
         << "the catch-when filter is inlined to its condition (a Comp)";
     EXPECT_EQ(fx.handler->Variable.get(), fx.ex.get())
         << "the catch body copy is not promoted (ex is loaded by the filter too)";
+}
+
+// ---- TransformDecimalFieldToConstant (VisitLdObj subset) ----
+
+namespace {
+
+// A one-block function assigning a `ldobj(ldsflda <fieldName>)` static-field
+// load (of field type `fieldType`) to a local `d`, the shape
+// TransformDecimalFieldToConstant matches.
+std::unique_ptr<ILFunction> MakeFnWithDecimalFieldLoad(ITypePtr fieldType,
+                                                      std::string fieldName) {
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto d = MakeLocal("d", fieldType);
+    fn->Variables.push_back(d);
+    auto root = std::make_unique<Block>();
+    auto addr = std::make_unique<LdsFlda>(std::move(fieldName));
+    root->Add(std::make_unique<StLoc>(d,
+        std::make_unique<LdObj>(std::move(addr), fieldType)));
+    root->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(root));
+    return fn;
+}
+
+} // namespace
+
+// VisitLdObj folds `ldobj(ldsflda System.Decimal::One)` into the LdcDecimal
+// constant `1m`. The static-field load is replaced by the constant, so the
+// StLoc's value becomes an LdcDecimal.
+TEST(ExpressionTransforms, VisitLdObjFoldsDecimalOneFieldToLdcDecimal) {
+    auto decimalType = std::make_shared<KnownType>(KnownTypeCode::Decimal);
+    auto fn = MakeFnWithDecimalFieldLoad(decimalType, "System.Decimal::One");
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& blk = fn->Body->Blocks[0];
+    ASSERT_EQ(blk->Instructions.size(), 1u);
+    ASSERT_EQ(blk->Instructions[0]->Op, OpCode::StLoc);
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::LdcDecimal)
+        << "ldsfld Decimal.One must fold to LdcDecimal";
+    EXPECT_EQ(static_cast<LdcDecimal*>(st->Value.get())->Value, DecimalValue::One());
+    EXPECT_EQ(CountLdcDecimal(*fn), 1);
+    EXPECT_EQ(CountDecimalConstantFieldLoads(*fn), 0);
+    // The seed renders the folded constant as `d = 1m`.
+    std::string text = ILAstToCSharp(*fn, "void", "M", "decimal d");
+    EXPECT_NE(text.find("d = 1m"), std::string::npos) << text;
+}
+
+// VisitLdObj folds Decimal.Zero -> `0m` and Decimal.MinusOne -> `-1m`.
+TEST(ExpressionTransforms, VisitLdObjFoldsDecimalZeroAndMinusOneFields) {
+    auto decimalType = std::make_shared<KnownType>(KnownTypeCode::Decimal);
+    for (auto [fieldName, expected] : std::vector<std::pair<std::string, DecimalValue>>{
+            {"System.Decimal::Zero", DecimalValue::Zero()},
+            {"System.Decimal::MinusOne", DecimalValue::MinusOne()}}) {
+        auto fn = MakeFnWithDecimalFieldLoad(decimalType, fieldName);
+        fn->CheckInvariant(ILPhase::Normal);
+        RunExpressionTransforms(*fn);
+        fn->CheckInvariant(ILPhase::Normal);
+        auto& blk = fn->Body->Blocks[0];
+        ASSERT_EQ(blk->Instructions[0]->Op, OpCode::StLoc);
+        auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+        ASSERT_EQ(st->Value->Op, OpCode::LdcDecimal)
+            << fieldName << " must fold to LdcDecimal";
+        EXPECT_EQ(static_cast<LdcDecimal*>(st->Value.get())->Value, expected);
+    }
+}
+
+// VisitLdObj keeps a non-Decimal static field load (e.g. `ldsfld
+// System.String::Empty`) -- the field's declaring type is not System.Decimal, so
+// TransformDecimalFieldToConstant does not fire.
+TEST(ExpressionTransforms, VisitLdObjRejectsNonDecimalField) {
+    auto stringType = std::make_shared<KnownType>(KnownTypeCode::String);
+    auto fn = MakeFnWithDecimalFieldLoad(stringType, "System.String::Empty");
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    EXPECT_EQ(st->Value->Op, OpCode::LdObj)
+        << "a non-Decimal static field load must stay (not folded to LdcDecimal)";
+    EXPECT_EQ(CountLdcDecimal(*fn), 0);
+}
+
+// VisitLdObj keeps a Decimal static field that is NOT one of the three
+// named constants (e.g. a hypothetical `System.Decimal::SomeField`) -- only
+// One/Zero/MinusOne fold.
+TEST(ExpressionTransforms, VisitLdObjRejectsNonConstantDecimalField) {
+    auto decimalType = std::make_shared<KnownType>(KnownTypeCode::Decimal);
+    auto fn = MakeFnWithDecimalFieldLoad(decimalType, "System.Decimal::SomeField");
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    EXPECT_EQ(st->Value->Op, OpCode::LdObj)
+        << "a non-constant Decimal static field must stay (only One/Zero/MinusOne fold)";
+    EXPECT_EQ(CountLdcDecimal(*fn), 0);
+}
+
+// VisitLdObj keeps an instance field load `ldobj(ldflda target, F)` -- the
+// target is an LdFlda (not an LdsFlda), so TransformDecimalFieldToConstant does
+// not fire (the fold is for static fields only).
+TEST(ExpressionTransforms, VisitLdObjRejectsInstanceFieldLoad) {
+    auto decimalType = std::make_shared<KnownType>(KnownTypeCode::Decimal);
+    auto target = MakeLocal("target", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto d = MakeLocal("d", decimalType);
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Variables.push_back(target);
+    fn->Variables.push_back(d);
+    auto root = std::make_unique<Block>();
+    root->Add(std::make_unique<StLoc>(d,
+        std::make_unique<LdObj>(
+            std::make_unique<LdFlda>(std::make_unique<LdLoc>(target), "System.Decimal::One"),
+            decimalType)));
+    root->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(root));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto& blk = fn->Body->Blocks[0];
+    auto* st = static_cast<StLoc*>(blk->Instructions[0].get());
+    EXPECT_EQ(st->Value->Op, OpCode::LdObj)
+        << "an instance field load must stay (the fold is for static fields only)";
+    EXPECT_EQ(CountLdcDecimal(*fn), 0);
 }
 

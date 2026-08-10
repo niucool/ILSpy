@@ -32,6 +32,7 @@
 #include "Decompiler/IL/Instructions/Conv.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdcDecimal.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
@@ -646,6 +647,10 @@ void ExpressionTransforms::Visit(ILInstruction* inst) {
         VisitCall(static_cast<Call*>(inst));
         return;
     }
+    if (inst->Op == OpCode::LdObj) {
+        VisitLdObj(static_cast<LdObj*>(inst));
+        return;
+    }
     if (inst->Op == OpCode::TryCatchHandler) {
         VisitTryCatchHandler(static_cast<TryCatchHandler*>(inst));
         return;
@@ -963,6 +968,53 @@ void ExpressionTransforms::VisitCall(Call* inst) {
     // TransformAssignment.HandleCompoundAssign -- all deferred (need
     // TransformArrayInitializers / InlineArrayTransform / TransformAssignment).
     for (auto& arg : inst->Arguments) Visit(arg.get());
+}
+
+void ExpressionTransforms::VisitLdObj(LdObj* inst) {
+    if (!inst) return;
+    // base.VisitLdObj: recurse into the target (the address). The C# ILVisitor
+    // visits the children first; the remaining VisitLdObj pieces
+    // (AddressOfLdLocToLdLoca -- needs an AddressOf node) are deferred.
+    if (inst->Target) Visit(inst->Target.get());
+    // TransformDecimalFieldToConstant: ldsfld Decimal.One/Zero/MinusOne -> the
+    // LdcDecimal constant. The C# runs it after base.VisitLdObj and after
+    // LdObjToLdLoc (which ran in EarlyExpressionTransforms, D81).
+    if (TransformDecimalFieldToConstant(inst)) return;  // inst replaced + destroyed
+}
+
+bool ExpressionTransforms::TransformDecimalFieldToConstant(LdObj* inst) {
+    // Port of ExpressionTransforms.TransformDecimalFieldToConstant: a static
+    // field load `ldobj(ldsflda System.Decimal::One/Zero/MinusOne)` folds into
+    // the corresponding LdcDecimal constant. The C# checks
+    // `inst.MatchLdsFld(out var field) && field.DeclaringType.IsKnownType(Decimal)`
+    // then switches on `field.Name`. This port's reader models `ldsfld F` as
+    // `ldobj(ldsflda F)` where LdsFlda carries the resolved FieldName
+    // ("Namespace.Type::Field", per ResolveTokenToString); the exact name match
+    // "System.Decimal::One"/"Zero"/"MinusOne" carries both the declaring type
+    // (System.Decimal) and the field name, so it is the faithful equivalent of
+    // the two-part C# gate (and robust: a user type with a field named "One" has
+    // a different namespace prefix and does not match).
+    if (!inst || inst->Op != OpCode::LdObj) return false;
+    auto* addr = inst->Target ? dynamic_cast<LdsFlda*>(inst->Target.get()) : nullptr;
+    if (!addr) return false;
+    const std::string& name = addr->FieldName;
+    DecimalValue value;
+    if (name == "System.Decimal::One") {
+        value = DecimalValue::One();
+    } else if (name == "System.Decimal::Zero") {
+        value = DecimalValue::Zero();
+    } else if (name == "System.Decimal::MinusOne") {
+        value = DecimalValue::MinusOne();
+    } else {
+        return false;
+    }
+    auto replacement = std::make_unique<LdcDecimal>(value);
+    ILInstruction* repPtr = replacement.get();
+    inst->ReplaceWith(std::move(replacement));  // destroys inst
+    // The C# does not re-visit the LdcDecimal (it is a leaf constant); there is
+    // nothing to cascade into.
+    (void)repPtr;
+    return true;
 }
 
 void ExpressionTransforms::VisitTryCatchHandler(TryCatchHandler* handler) {

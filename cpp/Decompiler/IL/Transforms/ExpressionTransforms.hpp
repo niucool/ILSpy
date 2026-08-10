@@ -89,6 +89,7 @@ class LdElema;
 class NewArr;
 class BinaryNumericInstruction;
 class TryCatchHandler;
+class LdObj;
 
 class ExpressionTransforms : public IStatementTransform {
 public:
@@ -288,6 +289,19 @@ private:
     // InlineArrayTransform.RunOnExpression, TransformAssignment.HandleCompoundAssign)
     // are deferred. Mirrors ExpressionTransforms.cs.
     void VisitCall(Call* inst);
+
+    // VisitLdObj (the TransformDecimalFieldToConstant subset): a static field
+    // load `ldobj(ldsflda System.Decimal::One/Zero/MinusOne)` folds into the
+    // corresponding LdcDecimal constant (`1m`/`0m`/`-1m`), so a decimal constant
+    // field reference renders as the literal. The field is recognised by the
+    // resolved LdsFlda::FieldName ("System.Decimal::One"/"Zero"/"MinusOne") --
+    // the faithful equivalent of the C# `field.DeclaringType.IsKnownType(Decimal)
+    // && field.Name == "One"`, since the resolved name carries both the
+    // declaring type and the field name. The remaining VisitLdObj pieces
+    // (AddressOfLdLocToLdLoca -- needs an AddressOf node; LdObjToLdLoc already
+    // ran in EarlyExpressionTransforms) are deferred. Mirrors ExpressionTransforms.cs.
+    void VisitLdObj(LdObj* inst);
+    bool TransformDecimalFieldToConstant(LdObj* inst);
 
     // VisitTryCatchHandler (the TransformCatchVariable / TransformCatchWhen
     // subset): inlines the catch-variable copy csc emits at the start of every

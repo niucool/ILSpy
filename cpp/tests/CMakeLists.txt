@@ -59,6 +59,7 @@ add_executable(ilspy_tests
     Decompiler/IL/Instructions/UsingInstruction_Test.cpp
     Decompiler/IL/Instructions/Conv_Test.cpp
     Decompiler/IL/Instructions/Comp_Test.cpp
+    Decompiler/IL/Instructions/LdcDecimal_Test.cpp
     Decompiler/IL/Instructions/NullCoalescingInstruction_Test.cpp
     Decompiler/IL/Instructions/ThreeValuedBoolInstructions_Test.cpp
     Decompiler/IL/Transforms/NullCoalescingTransform_Test.cpp
