@@ -300,3 +300,129 @@ TEST(ILFunctionMethod, MscorlibConstructorStaticFlagSweep) {
     EXPECT_GT(instanceMethod, 0) << "corpus must have instance non-constructors";
     (void)staticCtor;  // .cctor may or may not appear in the straight-line sample
 }
+
+// The IL reader populates each instruction's ILRange (StartILOffset/
+// EndILOffset) at decode time -- the foundation IsInConstructorInitializer (and
+// future debug-info/sequence-point work) consults. A tested-but-not-yet-wired
+// foundation (the D112/D114 precedent); no transform consumes the ranges yet.
+
+namespace {
+void CollectNonSynthetic(ILInstruction* inst, std::vector<ILInstruction*>& out) {
+    if (!inst) return;
+    out.push_back(inst);
+    for (int i = 0; i < inst->ChildCount(); ++i) CollectNonSynthetic(inst->GetChild(i), out);
+}
+} // namespace
+
+TEST(ILFunctionMethod, ReaderPopulatesILRangesOnObjectCtor) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    std::uint32_t objectTok = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == "System" && t.Name == "Object") { objectTok = t.Token; break; }
+    }
+    ASSERT_NE(objectTok, 0u);
+    std::uint32_t ctorTok = 0, ctorRva = 0;
+    for (const auto& m : f.GetMethods(objectTok)) {
+        if (m.Name == ".ctor") { ctorTok = m.Token; ctorRva = m.RVA; break; }
+    }
+    ASSERT_NE(ctorTok, 0u);
+    ASSERT_NE(ctorRva, 0u);
+
+    auto fn = ReadStraightLineIL(f, ctorTok, ctorRva);
+    ASSERT_NE(fn, nullptr);
+    // System.Object..ctor is `ret` only: a single block whose final is a void
+    // Leave, at IL offset 0, length 1 (the ret opcode).
+    ASSERT_NE(fn->Body, nullptr);
+    ASSERT_EQ(fn->Body->Blocks.size(), 1u);
+    auto* block = fn->Body->Blocks[0].get();
+    ASSERT_NE(block->FinalInstruction, nullptr);
+    EXPECT_EQ(block->FinalInstruction->Op, OpCode::Leave);
+    EXPECT_EQ(block->FinalInstruction->StartILOffset, 0)
+        << "the ret is the first (and only) instruction, at offset 0";
+    EXPECT_EQ(block->FinalInstruction->EndILOffset, 1)
+        << "ret is a 1-byte opcode, so the range is [0, 1)";
+    EXPECT_FALSE(block->FinalInstruction->IsILRangeEmpty());
+}
+
+TEST(ILFunctionMethod, ReaderPopulatesMonotoneRangesAcrossMethod) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    // Find a straight-line method with a call (so the body has >= 2 tagged
+    // instructions with distinct ranges to check monotonicity).
+    int checked = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadStraightLineIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        std::vector<ILInstruction*> flat;
+        CollectNonSynthetic(fn->Body.get(), flat);
+        // Collect the reader-produced ranges (non-empty) in source order within
+        // the single block: the block's Instructions (in order) then the final.
+        auto* block = fn->Body->Blocks[0].get();
+        std::vector<std::pair<int, int>> ranges;
+        for (auto& ins : block->Instructions)
+            if (!ins->IsILRangeEmpty()) ranges.emplace_back(ins->StartILOffset, ins->EndILOffset);
+        if (auto* fin = block->FinalInstruction.get())
+            if (!fin->IsILRangeEmpty()) ranges.emplace_back(fin->StartILOffset, fin->EndILOffset);
+        if (ranges.size() < 2) continue;  // need at least two to check monotonicity
+        // Each range is well-formed (Start < End) and they are strictly increasing
+        // (a later instruction starts at or after an earlier one ends).
+        bool monotone = true;
+        for (std::size_t i = 0; i < ranges.size(); ++i) {
+            if (ranges[i].first >= ranges[i].second) { monotone = false; break; }
+            if (i + 1 < ranges.size() && ranges[i + 1].first < ranges[i].second) {
+                monotone = false; break;
+            }
+        }
+        EXPECT_TRUE(monotone) << "ranges must be well-formed and increasing for token " << m.Token;
+        ++checked;
+        if (checked > 200) break;
+    }
+    EXPECT_GT(checked, 0) << "expected at least one multi-instruction straight-line method";
+}
+
+TEST(ILFunctionMethod, MscorlibChainedConstructorCallSweep) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    // For every decoded straight-line method, cross-check ChainedConstructorCallILOffset:
+    // an instance constructor that chains a base/this call reports >= 0; a
+    // non-constructor always reports -1. The .NET Framework 4 mscorlib has many
+    // derived-class .ctors whose body is `ldarg.0; call Base..ctor; ret`, so the
+    // sweep must find chained calls.
+    int decoded = 0;
+    int instanceCtor = 0;
+    int instanceCtorWithChainedCall = 0;  // the gate the fold needs
+    int nonCtorWithMinusOne = 0;
+    int nonCtorCount = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadStraightLineIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++decoded;
+        auto off = fn->ChainedConstructorCallILOffset();
+        if (fn->IsConstructor && !fn->IsStatic) {
+            ++instanceCtor;
+            if (off >= 0) ++instanceCtorWithChainedCall;
+        } else {
+            ++nonCtorCount;
+            if (off == -1) ++nonCtorWithMinusOne;
+        }
+        if (decoded > 4000) break;
+    }
+    EXPECT_GT(decoded, 100) << "too few straight-line methods decoded";
+    EXPECT_GT(instanceCtor, 0) << "corpus must have instance constructors";
+    EXPECT_GT(instanceCtorWithChainedCall, 0)
+        << "some instance .ctor must chain a base/this .ctor call";
+    EXPECT_EQ(nonCtorWithMinusOne, nonCtorCount)
+        << "every non-constructor must report ChainedConstructorCallILOffset -1";
+}

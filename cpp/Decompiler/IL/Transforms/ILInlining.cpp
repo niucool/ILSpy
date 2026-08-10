@@ -78,6 +78,38 @@ FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
     return {FindResultType::Stop, nullptr};
 }
 
+// The top-level statement containing `inst`: the last ancestor (including inst
+// itself) whose parent is a Block. Mirrors the C#
+// `inst.Ancestors.LastOrDefault(instr => instr.Parent is Block)` -- the C#
+// Ancestors enumerable starts at the node itself and walks up the Parent chain,
+// so "last" is the one closest to the root (the outermost direct child of a
+// Block). Returns null when no ancestor (including inst) has a Block parent.
+ILInstruction* TopLevelStatement(const ILInstruction* inst) {
+    ILInstruction* result = nullptr;
+    for (const ILInstruction* node = inst; node != nullptr; node = node->Parent) {
+        if (node->Parent != nullptr && node->Parent->Op == OpCode::Block)
+            result = const_cast<ILInstruction*>(node);
+    }
+    return result;
+}
+
+// True when `inst` sits in the constructor initializer (before the chained
+// `: base(...)`/`: this(...)` call). Faithful to the C#
+// ILInlining.IsInConstructorInitializer: a null function or an instruction
+// whose range ends after the chained call starts is not in the initializer; an
+// instruction whose enclosing top-level statement also ends before the chained
+// call is. When the function is not an instance constructor with a chained call
+// the offset is -1, so any non-empty instruction range (EndILOffset > -1)
+// short-circuits to false (matching the C#).
+bool IsInConstructorInitializer(const ILFunction* function, const ILInstruction* inst) {
+    if (!function || !inst) return false;
+    const std::int32_t ctorCallStart = function->ChainedConstructorCallILOffset();
+    if (inst->EndILOffset > ctorCallStart) return false;
+    auto* topLevelInst = TopLevelStatement(inst);
+    if (!topLevelInst) return false;
+    return topLevelInst->EndILOffset <= ctorCallStart;
+}
+
 // Try to inline the StLoc at `pos` into the next instruction's load of its
 // variable, or remove it if dead. Returns true if the stloc was consumed.
 // `pos` may be out of range after a prior removal shrank the block (the

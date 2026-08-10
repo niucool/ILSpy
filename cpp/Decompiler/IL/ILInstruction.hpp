@@ -31,6 +31,7 @@
 #include "Decompiler/IL/OpCode.hpp"
 #include "Decompiler/IL/StackType.hpp"
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -49,6 +50,41 @@ public:
     const OpCode Op;
     ILInstruction* Parent = nullptr;  // non-owning back-pointer; null at a root
     int ChildIndex = -1;
+
+    // The IL byte-offset range this instruction was decoded from -- the C#
+    // ILInstruction.ILRange (an Interval). Default {0,0} is the empty range
+    // (Start >= End), matching the C# default Interval. Populated by the IL
+    // reader at decode time (the [StartILOffset, EndILOffset) span of the opcode
+    // and its operands); transforms that clone or merge instructions should
+    // propagate the range via AddILRange. Consulted by transforms that compare
+    // instruction positions against the method body -- notably
+    // ILInlining.IsInConstructorInitializer (whether a hoisted null-guard sits
+    // in the constructor initializer, before the chained : base/: this call).
+    std::int32_t StartILOffset = 0;
+    std::int32_t EndILOffset = 0;
+
+    // True when the range is empty (Start >= End). Matches the C# Interval.IsEmpty
+    // (Start > InclusiveEnd == End - 1), simplified to Start >= End; the C# universe
+    // special-case (Start == End == int.MinValue) is not modelled here because no
+    // current consumer needs it.
+    bool IsILRangeEmpty() const noexcept { return StartILOffset >= EndILOffset; }
+
+    // Set the range directly (the reader's per-instruction assignment).
+    void SetILRange(std::int32_t start, std::int32_t end) {
+        StartILOffset = start;
+        EndILOffset = end;
+    }
+    // Copy the range from another instruction (transforms that move an
+    // instruction into a new node, mirroring ILInstruction.SetILRange(source)).
+    void SetILRange(const ILInstruction& src) {
+        StartILOffset = src.StartILOffset;
+        EndILOffset = src.EndILOffset;
+    }
+    // Combine another range into this one (mirrors ILInstruction.AddILRange /
+    // CombineILRange): an empty side adopts the other; disjoint ranges keep the
+    // earlier one; overlapping/adjacent ranges join into [min Start, max End).
+    void AddILRange(std::int32_t start, std::int32_t end);
+    void AddILRange(const ILInstruction& src) { AddILRange(src.StartILOffset, src.EndILOffset); }
 
     virtual ~ILInstruction() = default;
 

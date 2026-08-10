@@ -105,8 +105,16 @@ struct ReaderState {
     int nextStackSlot = 0;
     bool mergeFailed = false;
 
+    // The most recent instruction Pushed onto the expression stack in the
+    // current DecodeOne call (non-owning). The decode loop reads this to tag
+    // the Push's instruction with its IL byte-offset range when the opcode did
+    // not instead add a statement or set the block final. Reset to null after
+    // each opcode is tagged.
+    ILInstruction* lastCreated = nullptr;
+
     bool Push(std::unique_ptr<ILInstruction> inst) {
         if (!inst) return false;
+        lastCreated = inst.get();
         expressionStack.push_back(std::move(inst));
         return true;
     }
@@ -124,6 +132,33 @@ struct ReaderState {
         return nullptr;  // stack underflow -> caller bails
     }
 };
+
+// Tag the instruction an opcode created with its [start, pos) IL byte-offset
+// range -- the faithful equivalent of the C# ILReader calling inst.AddILRange on
+// every instruction it builds. `stackBefore/instrsBefore/finalBefore` are the
+// counts captured before DecodeOne mutated the block/stack. A final-setting
+// opcode (Terminal/SwitchInstr/BranchInstr) is the new FinalInstruction; a
+// statement-adding opcode (stloc, void call, dup's stloc) is the new back of the
+// block's Instructions; otherwise a value-producing opcode Pushed, recorded in
+// s.lastCreated (covers consume-then-push opcodes like add/conv whose net
+// stack change is negative but whose result is the new stack top). No-op
+// opcodes (nop, break) create nothing. Synthetic nodes a single opcode
+// produces in addition to the primary one (dup's two ldlocs, the stack-slot
+// flush's stlocs) keep the empty default; no current consumer consults them.
+void TagCreatedRange(ReaderState& s, Block* block, std::size_t start, std::size_t pos,
+                      std::size_t stackBefore, std::size_t instrsBefore, bool finalBefore) {
+    const std::int32_t s32 = static_cast<std::int32_t>(start);
+    const std::int32_t e32 = static_cast<std::int32_t>(pos);
+    ILInstruction* created = nullptr;
+    if (block->FinalInstruction && !finalBefore)
+        created = block->FinalInstruction.get();
+    else if (block->Instructions.size() > instrsBefore)
+        created = block->Instructions.back().get();
+    else if (s.lastCreated)
+        created = s.lastCreated;
+    if (created) created->SetILRange(s32, e32);
+    s.lastCreated = nullptr;
+}
 
 // Commit pending expression-stack entries into fresh stack-slot variables, in
 // evaluation (push) order, so values can cross a control-flow boundary without
@@ -1292,8 +1327,12 @@ std::unique_ptr<ILFunction> ReadStraightLineIL(const MetadataFile& file,
     while (pos < size) {
         std::size_t start = pos;
         ILOpCode op = DecodeOpCode(b, size, pos);
+        const std::size_t stackBefore = s.expressionStack.size();
+        const std::size_t instrsBefore = block->Instructions.size();
+        const bool finalBefore = (block->FinalInstruction != nullptr);
         DecodeOutcome out = DecodeOne(file, s, block.get(), containerPtr, op, b, size, pos, start);
         if (out == DecodeOutcome::Bail) return nullptr;
+        TagCreatedRange(s, block.get(), start, pos, stackBefore, instrsBefore, finalBefore);
         if (out == DecodeOutcome::Terminal || out == DecodeOutcome::BranchInstr) {
             // Straight-line contract: a branch (not a ret/throw) is unsupported.
             if (out == DecodeOutcome::BranchInstr) return nullptr;
@@ -1458,8 +1497,14 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
             }
             std::size_t start = pos;
             ILOpCode op = DecodeOpCode(b, size, pos);
+            // Snapshots to identify the instruction this opcode created (the C#
+            // ILReader calls inst.AddILRange on every instruction it builds).
+            const std::size_t stackBefore = s.expressionStack.size();
+            const std::size_t instrsBefore = block->Instructions.size();
+            const bool finalBefore = (block->FinalInstruction != nullptr);
             DecodeOutcome out = DecodeOne(file, s, block, containerPtr, op, b, size, pos, start);
             if (out == DecodeOutcome::Bail) return nullptr;
+            TagCreatedRange(s, block, start, pos, stackBefore, instrsBefore, finalBefore);
             if (out == DecodeOutcome::Terminal) {
                 // ret/throw/rethrow/endfinally/endfilter ended the block. Valid
                 // IL has no pending values left at this point; invalid IL does

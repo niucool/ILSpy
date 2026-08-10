@@ -590,16 +590,24 @@ implemented and green here. Everything else follows the phase plan in
   the prior port returned `Stop` for `LdLoca(v)`); `InlineOneIfPossible` gates on
   the found load being an `LdLoc` to preserve the deferred ldloca-into-addressof
   behavior. The hoisted-constructor-argument null guard (the last remaining
-  NullCoalescingTransform target) is partially unblocked: the
-  `ILFunction.Method` metadata half is now in place as a tested-but-not-yet-wired
-  foundation -- `ILFunction::IsConstructor` / `IsStatic` (pre-resolved by the IL
-  reader from the MethodDef flags/name via `MetadataFile::GetMethodDefKindInfo`, a
-  new helper faithful to the C# `MetadataMethod.SymbolKind == Constructor` and
-  `MethodAttributes.Static`; `IsConstructor` is true for `.ctor`/`.cctor` with the
-  `SpecialName|RTSpecialName` flag), the gate `IsConstructor && !IsStatic` the
-  fold consults. `ILInlining.IsInConstructorInitializer` (needs
-  `ChainedConstructorCallILOffset` + per-instruction `StartILOffset`/`EndILOffset`,
-  which this port does not carry) is still deferred. The reference-type `??` lowering is a
+  NullCoalescingTransform target) is now fully unblocked on the prerequisite
+  side: all three pieces the fold consults are in place as tested-but-not-yet-
+  wired foundations -- `ILFunction::IsConstructor` / `IsStatic` (pre-resolved by
+  the IL reader from the MethodDef flags/name via
+  `MetadataFile::GetMethodDefKindInfo`, faithful to the C#
+  `MetadataMethod.SymbolKind == Constructor` and `MethodAttributes.Static`; the
+  gate is `IsConstructor && !IsStatic`), the exposed
+  `ILInlining.FindLoadInNext`, and now `ILInlining.IsInConstructorInitializer`
+  plus its dependencies: a per-instruction ILRange (`StartILOffset` /
+  `EndILOffset` on the `ILInstruction` base, populated centrally by both IL
+  reader decode loops via a `TagCreatedRange` helper that tags the one
+  instruction each opcode created with its `[start, pos)` span),
+  `ILFunction::ChainedConstructorCallILOffset` (the lazy, cached offset of the
+  first `: base(...)` / `: this(...)` `Call` -- not newobj, short name `.ctor`,
+  reference-type `DeclaringType`, parent a Block -- or -1), and
+  `ILFunction::RegisterVariable`. The full fold (which needs only the
+  if-as-final block-model adaptation + the `IsArgumentNullGuard` match, both
+  self-contained) is the subsequent in-order target. The reference-type `??` lowering is a
   Roslyn-era codegen pattern; a corpus probe across 8000 mscorlib methods found
   1797 `comp(eq, ldloc X, ldnull)` null-check ifs and 513 `comp(ne, ..)` but zero
   whose arm is a StLoc to the same variable, so the transform fires 0 times on

@@ -36,8 +36,11 @@
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
 #include <gtest/gtest.h>
 
@@ -48,6 +51,10 @@
 
 using namespace ILSpy::Decompiler::IL;
 using ILSpy::Decompiler::Metadata::MetadataFile;
+using ILSpy::Decompiler::TypeSystem::IType;
+using ILSpy::Decompiler::TypeSystem::ITypePtr;
+using ILSpy::Decompiler::TypeSystem::KnownType;
+using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
 
 namespace {
 
@@ -78,6 +85,43 @@ void Walk(ILInstruction* inst, const std::function<void(ILInstruction*)>& visit)
 ILTransformContext& Ctx() {
     static ILTransformContext ctx;
     return ctx;
+}
+
+// A reference-type declaring type (System.Object) and a value-type one
+// (System.Int32), for exercising the ChainedConstructorCallILOffset
+// IsReferenceType gate by Kind.
+ITypePtr RefType() { return std::make_shared<KnownType>(KnownTypeCode::Object); }
+ITypePtr ValueTypeDecl() { return std::make_shared<KnownType>(KnownTypeCode::Int32); }
+
+// Build a void constructor `call` (the C# `: base(...)`/`: this(...)` shape) --
+// an instance, non-newobj Call named "System.Object::.ctor" added as a block
+// statement, with its IL range set so ChainedConstructorCallILOffset can report
+// it. `offset` is the call's IL byte offset.
+std::unique_ptr<Call> MakeCtorCall(ITypePtr declaringType, std::int32_t offset) {
+    auto call = std::make_unique<Call>("System.Object::.ctor");
+    call->DeclaringType = std::move(declaringType);
+    call->IsInstanceCall = true;
+    call->IsNewObj = false;
+    call->SetILRange(offset, offset + 5);
+    return call;
+}
+
+// An ILFunction wrapping a single empty block with a void Leave final;
+// IsConstructor/IsStatic preset for the constructor-initializer tests. Tests add
+// statements via `fn->Body->Blocks[0]->Add(...)` (Block::Add wires Parent and
+// keeps the final's ChildIndex in step), matching the established
+// WrapBlocks-based test pattern (a vector<unique_ptr> cannot be brace-initialised).
+std::unique_ptr<ILFunction> MakeEmptyCtorFn(bool isCtor, bool isStatic) {
+    auto container = std::make_unique<BlockContainer>();
+    container->AddBlock(std::make_unique<Block>());
+    auto fn = std::make_unique<ILFunction>();
+    fn->IsConstructor = isCtor;
+    fn->IsStatic = isStatic;
+    fn->Body = std::move(container);
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    return fn;
 }
 
 } // namespace
@@ -323,4 +367,215 @@ TEST(ILInlining, InliningOnMscorlibReducesVariableCount) {
     EXPECT_GT(transformed, 5000);
     EXPECT_LT(totalVarsAfter, totalVarsBefore)
         << "inlining must reduce the total variable count";
+}
+
+// ILFunction::ChainedConstructorCallILOffset -- the lazy, cached offset of the
+// first `: base(...)`/`: this(...)` call, the gate IsInConstructorInitializer
+// compares hoisted null-guards against. A tested-but-not-yet-wired foundation
+// (the D112 FindLoadInNext / D114 ILFunction.Method precedent) for the next
+// in-order NullCoalescingTransform hoisted-constructor-argument null-guard fold.
+
+TEST(ILInlining, ChainedConstructorCallILOffsetFindsReferenceTypeCtorCall) {
+    auto fn = MakeEmptyCtorFn(/*isCtor=*/true, /*isStatic=*/false);
+    auto call = MakeCtorCall(RefType(), 10);
+    auto* callPtr = call.get();
+    fn->Body->Blocks[0]->Add(std::move(call));
+    fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_EQ(fn->ChainedConstructorCallILOffset(), 10)
+        << "the chained .ctor Call's StartILOffset is the offset";
+    EXPECT_EQ(callPtr->Parent->Op, OpCode::Block) << "call is a block statement";
+}
+
+TEST(ILInlining, ChainedConstructorCallILOffsetRejectsNewObj) {
+    auto fn = MakeEmptyCtorFn(true, false);
+    auto call = std::make_unique<Call>("System.Object::.ctor");
+    call->DeclaringType = RefType();
+    call->IsNewObj = true;  // the C# `!(call is NewObj)` gate
+    call->SetILRange(10, 15);
+    fn->Body->Blocks[0]->Add(std::move(call));
+    fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_EQ(fn->ChainedConstructorCallILOffset(), -1)
+        << "a newobj is a constructor *call* but not a chained base/this call";
+}
+
+TEST(ILInlining, ChainedConstructorCallILOffsetRejectsValueTypeDeclaringType) {
+    auto fn = MakeEmptyCtorFn(true, false);
+    fn->Body->Blocks[0]->Add(MakeCtorCall(ValueTypeDecl(), 10));  // Int32 is a struct
+    fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_EQ(fn->ChainedConstructorCallILOffset(), -1)
+        << "value-type declaring types are not chained via : base/: this";
+}
+
+TEST(ILInlining, ChainedConstructorCallILOffsetRejectsNonCtorName) {
+    auto fn = MakeEmptyCtorFn(true, false);
+    auto call = std::make_unique<Call>("System.Object::Equals");
+    call->DeclaringType = RefType();
+    call->IsInstanceCall = true;
+    call->IsNewObj = false;
+    call->SetILRange(10, 15);
+    fn->Body->Blocks[0]->Add(std::move(call));
+    fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_EQ(fn->ChainedConstructorCallILOffset(), -1)
+        << "a non-.ctor method is not a chained constructor call";
+}
+
+TEST(ILInlining, ChainedConstructorCallILOffsetRejectsValuePositionCall) {
+    // A .ctor-named call sitting in a value slot (a Leave's value, not a block
+    // statement) fails the `Parent is Block` gate, matching the C#.
+    auto call = std::make_unique<Call>("System.Object::.ctor");
+    call->DeclaringType = RefType();
+    call->IsNewObj = false;
+    call->ReturnType = StackType::I4;  // pretend value-returning so it can be a Leave value
+    call->SetILRange(10, 15);
+    auto* callPtr = call.get();
+    auto fn = MakeEmptyCtorFn(true, false);
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::move(call)));
+    fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_NE(callPtr->Parent, nullptr);
+    EXPECT_NE(callPtr->Parent->Op, OpCode::Block) << "the call is the Leave's value, not a statement";
+    EXPECT_EQ(fn->ChainedConstructorCallILOffset(), -1);
+}
+
+TEST(ILInlining, ChainedConstructorCallILOffsetRejectsNonInstanceConstructor) {
+    auto fn = MakeEmptyCtorFn(/*isCtor=*/false, /*isStatic=*/false);
+    fn->Body->Blocks[0]->Add(MakeCtorCall(RefType(), 10));
+    fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_EQ(fn->ChainedConstructorCallILOffset(), -1)
+        << "a non-constructor has no chained constructor call";
+
+    auto fnStatic = MakeEmptyCtorFn(/*isCtor=*/true, /*isStatic=*/true);
+    fnStatic->Body->Blocks[0]->Add(MakeCtorCall(RefType(), 10));
+    fnStatic->CheckInvariant(ILPhase::Normal);
+    EXPECT_EQ(fnStatic->ChainedConstructorCallILOffset(), -1)
+        << "a static .cctor has no chained instance constructor call";
+}
+
+TEST(ILInlining, ChainedConstructorCallILOffsetEmptyBody) {
+    auto fn = MakeEmptyCtorFn(true, false);  // ctor with no chained call
+    fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_EQ(fn->ChainedConstructorCallILOffset(), -1);
+}
+
+TEST(ILInlining, ChainedConstructorCallILOffsetIsCached) {
+    auto fn = MakeEmptyCtorFn(true, false);
+    fn->Body->Blocks[0]->Add(MakeCtorCall(RefType(), 7));
+    fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_EQ(fn->ChainedConstructorCallILOffset(), 7);
+    EXPECT_EQ(fn->ChainedConstructorCallILOffset(), 7) << "a second call returns the cached value";
+}
+
+// ILFunction::RegisterVariable -- the helper the hoisted-constructor-argument
+// null-guard fold uses to allocate the temp that redirects the parameter's
+// first use.
+
+TEST(ILInlining, RegisterVariableGeneratesHelperName) {
+    auto fn = MakeEmptyCtorFn(true, false);
+    auto v0 = fn->RegisterVariable(VariableKind::StackSlot, nullptr);
+    EXPECT_EQ(v0->Name, "I_0");
+    EXPECT_TRUE(v0->HasGeneratedName);
+    EXPECT_EQ(v0->Kind, VariableKind::StackSlot);
+    ASSERT_EQ(fn->Variables.size(), 1u);
+    EXPECT_EQ(fn->Variables[0].get(), v0.get());
+
+    auto v1 = fn->RegisterVariable(VariableKind::StackSlot, nullptr);
+    EXPECT_EQ(v1->Name, "I_1");
+    EXPECT_TRUE(v1->HasGeneratedName);
+    ASSERT_EQ(fn->Variables.size(), 2u);
+}
+
+TEST(ILInlining, RegisterVariableUsesGivenName) {
+    auto fn = MakeEmptyCtorFn(true, false);
+    auto v = fn->RegisterVariable(VariableKind::StackSlot, RefType(), "temp");
+    EXPECT_EQ(v->Name, "temp");
+    EXPECT_FALSE(v->HasGeneratedName);
+    EXPECT_NE(v->Type, nullptr);
+    // A blank-name call after a named one still continues the counter from 0.
+    auto v2 = fn->RegisterVariable(VariableKind::StackSlot, nullptr);
+    EXPECT_EQ(v2->Name, "I_0");
+}
+
+// TopLevelStatement / IsInConstructorInitializer -- the gate the
+// hoisted-constructor-argument null-guard fold consults.
+
+TEST(ILInlining, TopLevelStatementReturnsBlockDirectChild) {
+    auto fn = MakeEmptyCtorFn(true, false);
+    auto call = std::make_unique<Call>("System.Object::Equals");
+    call->AddArg(std::make_unique<LdNull>());
+    auto* callPtr = call.get();
+    fn->Body->Blocks[0]->Add(std::move(call));
+    fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_EQ(TopLevelStatement(callPtr), callPtr) << "a block statement is its own top level";
+}
+
+TEST(ILInlining, TopLevelStatementFindsEnclosingStatement) {
+    // An LdNull nested as a Call argument: its top-level statement is the Call.
+    auto fn = MakeEmptyCtorFn(true, false);
+    auto ldnull = std::make_unique<LdNull>();
+    auto* ldnullPtr = ldnull.get();
+    auto call = std::make_unique<Call>("System.Object::Equals");
+    call->AddArg(std::move(ldnull));
+    auto* callPtr = call.get();
+    fn->Body->Blocks[0]->Add(std::move(call));
+    fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_EQ(TopLevelStatement(ldnullPtr), callPtr);
+}
+
+TEST(ILInlining, IsInConstructorInitializerTrueForGuardBeforeChainedCall) {
+    // A guard (stand-in: a Call) ending at offset 5, chained call at offset 10.
+    auto fn = MakeEmptyCtorFn(true, false);
+    auto guard = std::make_unique<Call>("System.Object::Equals");
+    guard->SetILRange(2, 5);
+    auto* guardPtr = guard.get();
+    fn->Body->Blocks[0]->Add(std::move(guard));
+    fn->Body->Blocks[0]->Add(MakeCtorCall(RefType(), 10));
+    fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_EQ(fn->ChainedConstructorCallILOffset(), 10);
+    EXPECT_TRUE(IsInConstructorInitializer(fn.get(), guardPtr))
+        << "a guard ending before the chained call is in the initializer";
+}
+
+TEST(ILInlining, IsInConstructorInitializerFalseForGuardAfterChainedCall) {
+    auto fn = MakeEmptyCtorFn(true, false);
+    fn->Body->Blocks[0]->Add(MakeCtorCall(RefType(), 10));
+    auto guard = std::make_unique<Call>("System.Object::Equals");
+    guard->SetILRange(15, 18);  // ends after the chained call starts
+    auto* guardPtr = guard.get();
+    fn->Body->Blocks[0]->Add(std::move(guard));
+    fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_FALSE(IsInConstructorInitializer(fn.get(), guardPtr))
+        << "a guard ending after the chained call is not in the initializer";
+}
+
+TEST(ILInlining, IsInConstructorInitializerFalseForNullFunction) {
+    auto guard = std::make_unique<Call>("System.Object::Equals");
+    guard->SetILRange(2, 5);
+    EXPECT_FALSE(IsInConstructorInitializer(nullptr, guard.get()));
+}
+
+TEST(ILInlining, IsInConstructorInitializerFalseForNonCtorFunction) {
+    // A non-constructor has no chained call (offset -1); any non-empty guard
+    // range (EndILOffset > -1) short-circuits to false.
+    auto fn = MakeEmptyCtorFn(/*isCtor=*/false, /*isStatic=*/false);
+    auto guard = std::make_unique<Call>("System.Object::Equals");
+    guard->SetILRange(2, 5);
+    auto* guardPtr = guard.get();
+    fn->Body->Blocks[0]->Add(std::move(guard));
+    fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_FALSE(IsInConstructorInitializer(fn.get(), guardPtr));
+}
+
+TEST(ILInlining, IsInConstructorInitializerTrueForEmptyRangeGuard) {
+    // An empty-range guard (EndILOffset 0) against a real chained call at 10:
+    // 0 <= 10 passes the first check, the top-level statement is the guard
+    // itself, and 0 <= 10 -> true. This pins the faithful C# behaviour (an
+    // empty range is Start==End==0; EndILOffset 0 <= ctorCallStart).
+    auto fn = MakeEmptyCtorFn(true, false);
+    auto guard = std::make_unique<Call>("System.Object::Equals");
+    // default range {0,0} is empty
+    auto* guardPtr = guard.get();
+    fn->Body->Blocks[0]->Add(std::move(guard));
+    fn->Body->Blocks[0]->Add(MakeCtorCall(RefType(), 10));
+    fn->CheckInvariant(ILPhase::Normal);
+    EXPECT_TRUE(IsInConstructorInitializer(fn.get(), guardPtr))
+        << "an empty-range guard is treated as starting at offset 0, before the call";
 }

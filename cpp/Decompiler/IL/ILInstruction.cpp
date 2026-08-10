@@ -31,6 +31,33 @@ InstructionFlags ILInstruction::Flags() const {
     return f;
 }
 
+void ILInstruction::AddILRange(std::int32_t start, std::int32_t end) {
+    // Port of ILInstruction.CombineILRange: merge (start, end) into the existing
+    // (StartILOffset, EndILOffset). An empty side adopts the other; disjoint
+    // ranges keep the earlier one; overlapping/adjacent ranges join into
+    // [min Start, max End). The C# uses unchecked arithmetic for the int.MaxValue+1
+    // universe sentinel; IL offsets are far below that, so plain int32 is safe.
+    const bool oldEmpty = (StartILOffset >= EndILOffset);
+    const bool newEmpty = (start >= end);
+    if (oldEmpty) { StartILOffset = start; EndILOffset = end; return; }
+    if (newEmpty) return;  // keep the existing range
+    if (start <= StartILOffset) {
+        if (end < StartILOffset) {
+            StartILOffset = start;  // the new range is entirely earlier; adopt it
+            EndILOffset = end;
+        } else if (end > EndILOffset) {
+            StartILOffset = start;  // join overlapping/adjacent
+            EndILOffset = end;
+        } else {
+            StartILOffset = start;  // new covers old's start; end within old
+        }
+    } else if (start <= EndILOffset) {
+        if (end > EndILOffset) EndILOffset = end;  // join overlapping/adjacent
+        // else new is wholly inside old; keep old
+    }
+    // else new is entirely after old; keep the existing range
+}
+
 void ILInstruction::SetChild(int index, std::unique_ptr<ILInstruction> newChild) {
     assert(newChild && "SetChild: newChild must not be null");
     assert((newChild->Parent == nullptr) && "SetChild: child already has a parent (ILAst must form a tree)");

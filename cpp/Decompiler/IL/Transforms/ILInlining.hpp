@@ -43,6 +43,7 @@
 namespace ILSpy::Decompiler::IL {
 
 class Block;
+class ILFunction;
 class ILInstruction;
 class ILVariable;
 
@@ -84,6 +85,22 @@ struct FindResult {
 // the use they redirect, matching the C# static call.
 FindResult FindLoadInNext(ILInstruction* expr, ILVariable* v,
                           ILInstruction* expressionBeingMoved);
+
+// True when `inst` sits in the constructor initializer -- before the chained
+// `: base(...)`/`: this(...)` call -- so a preceding hoisted argument null-guard
+// is necessarily compiler-hoisted and can be folded into the call argument.
+// Faithful to the C# ILInlining.IsInConstructorInitializer: returns false when
+// the function is not an instance constructor with a chained call, or when the
+// instruction (or its enclosing top-level statement) ends after the chained call
+// starts. The top-level statement is the last ancestor (including `inst` itself)
+// whose parent is a Block (the C# inst.Ancestors.LastOrDefault(.. Parent is Block),
+// where Ancestors includes the node itself).
+bool IsInConstructorInitializer(const ILFunction* function, const ILInstruction* inst);
+
+// The top-level statement containing `inst` -- the last ancestor (including
+// inst) whose parent is a Block, or null when no such ancestor exists. Exposed so
+// the hoisted-constructor-argument null-guard fold can reuse the ancestor walk.
+ILInstruction* TopLevelStatement(const ILInstruction* inst);
 
 class ILInlining : public IILTransform, public IStatementTransform {
 public:

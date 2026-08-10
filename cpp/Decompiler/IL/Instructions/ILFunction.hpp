@@ -26,6 +26,7 @@
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 
 #include <cassert>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -45,6 +46,26 @@ public:
     // consults is `IsConstructor && !IsStatic` (an instance constructor).
     bool IsConstructor = false;
     bool IsStatic = false;
+
+    // The IL offset of the first chained `: base(...)`/`: this(...)` constructor
+    // call in this function's body, or -1 when this is not an instance
+    // constructor or no chained call was found. Lazy and cached (the C#
+    // ILFunction.ChainedConstructorCallILOffset). The chained call is the first
+    // descendant `Call` (not newobj) whose method is a constructor on a
+    // reference-type declaring type and whose parent is a Block; its
+    // StartILOffset is the offset the ILInlining.IsInConstructorInitializer gate
+    // compares hoisted null-guards against. -1 means "no initializer", so any
+    // instruction's EndILOffset > -1 (i.e. any non-empty range) short-circuits the
+    // gate to false, matching the C#.
+    std::int32_t ChainedConstructorCallILOffset() const;
+
+    // Create and register a new ILVariable on this function (the C#
+    // ILFunction.RegisterVariable). A blank name is replaced with the generated
+    // `I_<n>` form (HasGeneratedName set); the counter is per-function. The
+    // NullCoalescingTransform hoisted-constructor-argument null-guard fold uses
+    // this to allocate the temp that redirects the parameter's first use.
+    ILVariablePtr RegisterVariable(VariableKind kind, TypeSystem::ITypePtr type,
+                                   const std::string& name = std::string());
 
     ILFunction() : ILInstruction(OpCode::ILFunction) {}
     InstructionFlags DirectFlags() const override { return InstructionFlags::None; }
@@ -67,6 +88,15 @@ protected:
         Body.reset(static_cast<BlockContainer*>(n.release()));
         return old;
     }
+private:
+    // Counter for generated helper-variable names (I_0, I_1, ...), the C#
+    // ILFunction.helperVariableCount. Mutated by RegisterVariable; mutable so the
+    // otherwise-const ChainedConstructorCallILOffset cache can stay separate.
+    int helperVariableCount_ = 0;
+    // Lazy cache for ChainedConstructorCallILOffset (the C# uses int.MinValue as
+    // the not-computed sentinel; this port uses an explicit flag).
+    mutable bool chainedCtorOffsetComputed_ = false;
+    mutable std::int32_t chainedCtorOffset_ = -1;
 };
 
 } // namespace ILSpy::Decompiler::IL
