@@ -1501,28 +1501,54 @@ implemented and green here. Everything else follows the phase plan in
   seed renders `op_BitwiseAnd` as `left && right` and `op_BitwiseOr` as `left || right`,
   faithful to the real back end's `VisitUserDefinedLogicOperator` (a
   `BinaryOperatorExpression` with `ConditionalAnd` / `ConditionalOr`). The node
-  + seed are NOT wired into a pipeline transform yet (no consumer -- the next
-  in-order `UserDefinedLogicTransform` is the subsequent iteration), so `--csharp`
-  output is unchanged. The `OpCode::UserDefinedLogicOperator` value was pre-declared
-  in `OpCode.hpp`, so porting needed only the subclass header (the D95/D125 precedent).
+  The `OpCode::UserDefinedLogicOperator` value was pre-declared in `OpCode.hpp`, so
+  porting the node needed only the subclass header (the D95/D125 precedent).
   8 new gtest cases cover the node invariant/flags/ResultType/dump, the Left/Right
   typed slots + re-parenting, the `CombineBranches` Right-short-circuit flags
   propagation (a Branch Right over a pure LdLoc Left keeps the endpoint reachable),
   the seed rendering of `&&` / `||`, and an 8000-method mscorlib sweep constructing
   the node over real LdLoc operands. 990/990 tests pass; the CLI decompiles mscorlib
-  end-to-end with no regression. The next in-order `UserDefinedLogicTransform` needs
-  this node plus the `MatchCondition` / `MatchBitwiseCall` helpers (recognise a 1-arg
-  `op_True`/`op_False` and a 2-arg `op_BitwiseAnd`/`op_BitwiseOr` operator `Call` --
-  `Call::IsOperator` and `Call::IsLifted` are already in place) and the block-model
-  adaptation for the if-as-final shape (a pre-pipeline corpus probe of the real
-  post-ConditionDetection shape, the D73/D75/D79 precedent), plus an
-  `IsUsedWithin` check ported as a tree walk (the D110/D130 precedent). The remaining
-  in-order per-statement children (`TransformArrayInitializers` /
-  `TransformCollectionAndObjectInitializers` / `TransformExpressionTrees` /
-  `IndexRangeTransform` / `DeconstructionTransform` / `NamedArgumentTransform` /
-  `RemoveUnconstrainedGenericReferenceTypeCheck` / `InterpolatedStringTransform`)
-  and the remaining `TransformAssignment` StObj/Call pieces (blocked by `InferType` /
-  `IsSameMember` / `IMethod`) are the subsequent in-order targets.
+  end-to-end with no regression. The `UserDefinedLogicTransform` (the C# 7
+  user-defined short-circuiting `&&` / `||` operator fold, the next per-statement
+  child of `StatementTransform` after the wired `TransformAssignment` pieces) is now
+  wired into the CLI pipeline as the 7th `StatementTransform` child (after
+  `NullPropagationStatementTransform`, the GetILTransforms() order skipping the
+  deferred `TransformArrayInitializers` / `TransformCollectionAndObjectInitializers`
+  / `TransformExpressionTrees` / `IndexRangeTransform` / `DeconstructionTransform`
+  / `NamedArgumentTransform` / `RemoveUnconstrainedGenericReferenceTypeCheck`). This
+  iteration ports the `LegacyPattern` (the legacy-csc shape) and the shared
+  `MatchCondition` / `MatchBitwiseCall` helpers, adapted to the if-as-final block
+  model (the C# reads `block.Instructions[pos]` as the stloc and
+  `block.Instructions[pos+1]` as the if; this port makes the IfInstruction the
+  block's `FinalInstruction`, so the if is `block->FinalInstruction` and removing it
+  = replacing the if-final with a Branch to the next block, the D90/D113 if-as-final
+  precedent). The `s.IsUsedWithin(call.Arguments[1])` reject (the rhs must not
+  reference s, or short-circuiting would change semantics) is ported as a tree walk
+  (the D110/D130 precedent, not the deferred per-variable use lists). The
+  `RoslynOptimized` pattern (the "in combination with return statement" shape whose
+  if has leave early-return arms + a trailing leave) and the C# `Transform` static
+  method (which would need a general Clone this port has no virtual Clone for) are
+  deferred. The .NET Framework 4 legacy-csc mscorlib corpus carries no `op_True` /
+  `op_False` operator definitions (a user-defined short-circuiting `&&` / `||` is a
+  rare C# feature; mscorlib has no operator-overloading types that define them), so
+  the `LegacyPattern` fires 0 times on it -- a faithfulness-only transform on this
+  corpus, matching the `DetectCatchWhenConditionBlocks` / `LdLocaDupInitObj` /
+  `SwitchOnNullable` precedent (the hand-built tests verify the rewrite, the mscorlib
+  sweep verifies the ILAst invariant holds and the `UserDefinedLogicOperator` count is
+  0). 25 new gtest cases cover `MatchCondition` / `MatchBitwiseCall` positives/negatives
+  and the `LegacyPattern` fold (`&&` + `||`) + 8 negatives (non-StackSlot s, non-if
+  final, non-logic.not condition, condition on a different variable, an else arm, an
+  rhs that references s, a true arm storing to a different variable, a non-bitwise-
+  call true arm) + the mscorlib sweep. 1015/1015 tests pass (25 new; was 990); the CLI
+  decompiles mscorlib end-to-end with no regression (exit 0, 517 lock / 313 using / 78
+  `??` unchanged; no `UserDefinedLogicOperator` nodes are constructed on this corpus so
+  the output is byte-identical to D138). The remaining in-order per-statement children
+  (`TransformArrayInitializers` / `TransformCollectionAndObjectInitializers` /
+  `TransformExpressionTrees` / `IndexRangeTransform` / `DeconstructionTransform` /
+  `NamedArgumentTransform` / `RemoveUnconstrainedGenericReferenceTypeCheck` /
+  `InterpolatedStringTransform`), the `RoslynOptimized` pattern, and the remaining
+  `TransformAssignment` StObj/Call pieces (blocked by `InferType` / `IsSameMember` /
+  `IMethod`) are the subsequent in-order targets.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end. It now produces readable C#: real parameter names (Param

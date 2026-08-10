@@ -43,6 +43,7 @@
 #include "Decompiler/IL/Transforms/StatementTransform.hpp"
 #include "Decompiler/IL/Transforms/ExpressionTransforms.hpp"
 #include "Decompiler/IL/Transforms/TransformAssignment.hpp"
+#include "Decompiler/IL/Transforms/UserDefinedLogicTransform.hpp"
 #include "Decompiler/IL/Transforms/NullCoalescingTransform.hpp"
 #include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
 #include "Decompiler/IL/Transforms/NullPropagationTransform.hpp"
@@ -430,6 +431,25 @@ int main(int argc, char** argv) {
                     // operator is C# 6.0 / Roslyn-era); ported for faithfulness.
                     statementTransform.AddChild(
                         std::make_unique<ILSpy::Decompiler::IL::NullPropagationStatementTransform>());
+                    // UserDefinedLogicTransform: the user-defined short-circuiting
+                    // `&&` / `||` operator fold (the next per-statement child in
+                    // the C# GetILTransforms() order, after the deferred
+                    // TransformArrayInitializers / TransformCollectionAndObject-
+                    // Initializers / TransformExpressionTrees / IndexRangeTransform /
+                    // DeconstructionTransform / NamedArgumentTransform /
+                    // RemoveUnconstrainedGenericReferenceTypeCheck and before
+                    // InterpolatedStringTransform). This iteration ports the
+                    // LegacyPattern (the legacy-csc shape) and the shared
+                    // MatchCondition / MatchBitwiseCall helpers, adapted to the
+                    // if-as-final block model. The RoslynOptimized pattern (the
+                    // "in combination with return statement" shape) is deferred.
+                    // The .NET Framework 4 legacy-csc mscorlib corpus carries no
+                    // op_True / op_False operator definitions, so the fold fires 0
+                    // times on it (faithfulness-only, matching the DetectCatchWhen-
+                    // ConditionBlocks / LdLocaDupInitObj / SwitchOnNullable precedent);
+                    // ported for the future real back end and Roslyn-compiled corpora.
+                    statementTransform.AddChild(
+                        std::make_unique<ILSpy::Decompiler::IL::UserDefinedLogicTransform>());
                     statementTransform.Run(*fn, transformContext);
                 }
                 ILSpy::Decompiler::IL::AssignVariableNames().Run(*fn, transformContext);
