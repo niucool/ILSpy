@@ -25,6 +25,12 @@
 
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/MatchInstruction.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/TryInstructions.hpp"
+#include "Decompiler/IL/Instructions/UsingInstruction.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
 
 #include <optional>
@@ -81,6 +87,52 @@ std::int32_t FindChainedCtorOffset(const ILInstruction* inst) {
     return -1;
 }
 
+// Reassign every load/store/address of `v2` in `inst`'s subtree to `v1`,
+// incrementing v1's usage counts for the reassigned uses. Mirrors the C#
+// ILFunction.RecombineVariables iterating the per-variable LoadInstructions /
+// StoreInstructions / AddressInstructions lists and setting each
+// instruction's Variable (the setter maintains the lists and the counts).
+// This port has no such lists, so a tree walk finds the uses and a manual
+// count increment replaces the setter's bookkeeping. A variable-bearing
+// instruction whose Variable is v2 has its Variable reparented to the v1
+// shared_ptr (the count on v1 grows by exactly one per reassigned use); v2's
+// counts are zeroed by the caller after the walk. The store-bearing opcodes
+// (StLoc, MatchInstruction, UsingInstruction, TryCatchHandler) all count as
+// stores, matching CountUsage in VariableUsage.cpp.
+void ReassignUses(ILInstruction* inst, const ILVariablePtr& v1, const ILVariable* v2) {
+    if (!inst) return;
+    auto reassign = [&](ILVariablePtr& member, int& v1Count) {
+        if (member.get() == v2) {
+            member = v1;
+            ++v1Count;
+        }
+    };
+    switch (inst->Op) {
+        case OpCode::LdLoc:
+            reassign(static_cast<LdLoc*>(inst)->Variable, v1->LoadCount);
+            break;
+        case OpCode::LdLoca:
+            reassign(static_cast<LdLoca*>(inst)->Variable, v1->AddressCount);
+            break;
+        case OpCode::StLoc:
+            reassign(static_cast<StLoc*>(inst)->Variable, v1->StoreCount);
+            break;
+        case OpCode::MatchInstruction:
+            reassign(static_cast<MatchInstruction*>(inst)->Variable, v1->StoreCount);
+            break;
+        case OpCode::UsingInstruction:
+            reassign(static_cast<UsingInstruction*>(inst)->Variable, v1->StoreCount);
+            break;
+        case OpCode::TryCatchHandler:
+            reassign(static_cast<TryCatchHandler*>(inst)->Variable, v1->StoreCount);
+            break;
+        default:
+            break;
+    }
+    for (int i = 0; i < inst->ChildCount(); ++i)
+        ReassignUses(inst->GetChild(i), v1, v2);
+}
+
 } // namespace
 
 std::int32_t ILFunction::ChainedConstructorCallILOffset() const {
@@ -108,6 +160,23 @@ ILVariablePtr ILFunction::RegisterVariable(VariableKind kind, TypeSystem::ITypeP
     }
     Variables.push_back(v);
     return v;
+}
+
+void ILFunction::RecombineVariables(ILVariablePtr variable1, ILVariablePtr variable2) {
+    if (!variable1 || !variable2 || variable1.get() == variable2.get()) return;
+    ReassignUses(Body.get(), variable1, variable2.get());
+    // v2 is now unreferenced in the tree; zero its counts (the C# setter would
+    // have drained its LoadInstructions/StoreInstructions/AddressInstructions
+    // lists) and drop it from the function's Variables list.
+    variable2->LoadCount = 0;
+    variable2->StoreCount = 0;
+    variable2->AddressCount = 0;
+    for (auto it = Variables.begin(); it != Variables.end(); ++it) {
+        if (it->get() == variable2.get()) {
+            Variables.erase(it);
+            break;
+        }
+    }
 }
 
 } // namespace ILSpy::Decompiler::IL

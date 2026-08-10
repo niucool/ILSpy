@@ -67,6 +67,23 @@ public:
     ILVariablePtr RegisterVariable(VariableKind kind, TypeSystem::ITypePtr type,
                                    const std::string& name = std::string());
 
+    // Recombine split variables by replacing all occurrences of variable2 with
+    // variable1 (the C# ILFunction.RecombineVariables). variable1 and variable2
+    // are "equal" per the C# ILVariableEqualityComparer -- split fragments of one
+    // original variable (same Function, Kind, Index) that the decompiler wants
+    // to treat as a single variable again; the LdLoc/StLoc match in
+    // TransformAssignment.IsMatchingCompoundLoad calls this as its finalizeMatch
+    // so a `stloc V(binary.op(ldloc V, rhs))` whose load and store are split
+    // fragments collapses to one variable for the `V op= rhs` compound assign.
+    // Every load/store/address of variable2 in the body is reassigned to
+    // variable1, variable1's usage counts are incremented for the reassigned
+    // uses, variable2's counts are zeroed, and variable2 is removed from the
+    // function's Variables list. This port has no per-variable instruction
+    // lists, so a tree walk replaces the C# list iteration and a manual count
+    // increment replaces the C# property-setter's list maintenance. A no-op
+    // when variable1 and variable2 are the same variable (or either is null).
+    void RecombineVariables(ILVariablePtr variable1, ILVariablePtr variable2);
+
     ILFunction() : ILInstruction(OpCode::ILFunction) {}
     InstructionFlags DirectFlags() const override { return InstructionFlags::None; }
     StackType ResultType() const override { return StackType::Void; }

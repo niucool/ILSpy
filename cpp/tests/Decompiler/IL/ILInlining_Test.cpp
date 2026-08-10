@@ -579,3 +579,151 @@ TEST(ILInlining, IsInConstructorInitializerTrueForEmptyRangeGuard) {
     EXPECT_TRUE(IsInConstructorInitializer(fn.get(), guardPtr))
         << "an empty-range guard is treated as starting at offset 0, before the call";
 }
+
+// ILFunction::RecombineVariables -- replace all occurrences of variable2 with
+// variable1 (the C# ILFunction.RecombineVariables), the finalizeMatch the
+// TransformAssignment.IsMatchingCompoundLoad LdLoc/StLoc branch calls so a
+// `stloc V(binary.op(ldloc V, rhs))` whose load and store are split fragments of
+// one original variable collapses to a single variable for the `V op= rhs`
+// compound assign. A tested-but-not-yet-wired foundation (the D112
+// FindLoadInNext / D114 ILFunction.Method / D115 ILFunction.cpp precedent) for
+// the next in-order TransformAssignment.HandleCompoundAssign fold; this port
+// has no per-variable instruction lists, so a tree walk replaces the C# list
+// iteration and a manual count increment replaces the C# property-setter's
+// list maintenance. Tested here alongside the other ILFunction API methods
+// (RegisterVariable / ChainedConstructorCallILOffset).
+
+TEST(ILInlining, RecombineVariablesIsNoOpForSameVariable) {
+    auto v = MakeVar(VariableKind::Local, "V_0", 0);
+    auto fn = WrapBlocks({});
+    fn->Variables.push_back(v);
+    fn->RecombineVariables(v, v);
+    EXPECT_EQ(fn->Variables.size(), 1u) << "the same variable is not removed";
+    EXPECT_EQ(fn->Variables.front().get(), v.get());
+}
+
+TEST(ILInlining, RecombineVariablesIsNoOpForNullVariable) {
+    auto v = MakeVar(VariableKind::Local, "V_0", 0);
+    auto fn = WrapBlocks({});
+    fn->Variables.push_back(v);
+    fn->RecombineVariables(nullptr, v);
+    fn->RecombineVariables(v, nullptr);
+    fn->RecombineVariables(nullptr, nullptr);
+    EXPECT_EQ(fn->Variables.size(), 1u) << "a null operand is a no-op";
+}
+
+TEST(ILInlining, RecombineVariablesReassignsLoadStoreAndAddress) {
+    auto v1 = MakeVar(VariableKind::Local, "V_0", 0);
+    auto v2 = MakeVar(VariableKind::Local, "V_1", 0);  // split fragment (same Index)
+    auto block = std::make_unique<Block>();
+    auto st = std::make_unique<StLoc>(v2, std::make_unique<LdcI4>(5));
+    auto* stPtr = st.get();
+    block->Add(std::move(st));
+    auto call = std::make_unique<Call>("Foo::Bar");
+    auto lda = std::make_unique<LdLoca>(v2);
+    auto* ldaPtr = lda.get();
+    call->AddArg(std::move(lda));
+    block->Add(std::move(call));
+    auto ld = std::make_unique<LdLoc>(v2);
+    auto* ldPtr = ld.get();
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::move(ld)));
+    fn->Variables.push_back(v1);
+    fn->Variables.push_back(v2);
+    fn->CheckInvariant(ILPhase::Normal);
+    ComputeVariableUsage(*fn);  // v2: Store 1 / Load 1 / Address 1; v1: 0
+    ASSERT_EQ(v2->StoreCount, 1);
+    ASSERT_EQ(v2->LoadCount, 1);
+    ASSERT_EQ(v2->AddressCount, 1);
+
+    fn->RecombineVariables(v1, v2);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(stPtr->Variable.get(), v1.get()) << "the store reassigned to v1";
+    EXPECT_EQ(ldaPtr->Variable.get(), v1.get()) << "the address reassigned to v1";
+    EXPECT_EQ(ldPtr->Variable.get(), v1.get()) << "the load reassigned to v1";
+    EXPECT_EQ(v1->StoreCount, 1) << "v1 gained v2's store";
+    EXPECT_EQ(v1->LoadCount, 1) << "v1 gained v2's load";
+    EXPECT_EQ(v1->AddressCount, 1) << "v1 gained v2's address";
+    EXPECT_EQ(v2->StoreCount, 0) << "v2's counts are drained";
+    EXPECT_EQ(v2->LoadCount, 0);
+    EXPECT_EQ(v2->AddressCount, 0);
+    bool v1Listed = false, v2Listed = false;
+    for (auto& var : fn->Variables) {
+        if (var.get() == v1.get()) v1Listed = true;
+        if (var.get() == v2.get()) v2Listed = true;
+    }
+    EXPECT_TRUE(v1Listed) << "v1 stays on the function";
+    EXPECT_FALSE(v2Listed) << "v2 dropped from the function";
+}
+
+TEST(ILInlining, RecombineVariablesSumsCountsWhenTargetHasExistingUses) {
+    // v1 already has a load (the stloc value); v2 has a store and a load.
+    // After recombine, v1 absorbs v2's store and load on top of its own.
+    auto v1 = MakeVar(VariableKind::Local, "V_0", 0);
+    auto v2 = MakeVar(VariableKind::Local, "V_1", 0);
+    auto block = std::make_unique<Block>();
+    // stloc v2(ldloc v1): v2's store, v1's load
+    auto st = std::make_unique<StLoc>(v2, std::make_unique<LdLoc>(v1));
+    auto* stPtr = st.get();
+    auto* stValueLd = static_cast<StLoc*>(stPtr)->Value.get();
+    block->Add(std::move(st));
+    auto ld = std::make_unique<LdLoc>(v2);  // v2's load
+    auto* ldPtr = ld.get();
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::move(ld)));
+    fn->Variables.push_back(v1);
+    fn->Variables.push_back(v2);
+    fn->CheckInvariant(ILPhase::Normal);
+    ComputeVariableUsage(*fn);  // v1 Load 1; v2 Store 1 / Load 1
+    ASSERT_EQ(v1->LoadCount, 1);
+    ASSERT_EQ(v2->StoreCount, 1);
+    ASSERT_EQ(v2->LoadCount, 1);
+
+    fn->RecombineVariables(v1, v2);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(stPtr->Variable.get(), v1.get()) << "v2's store reassigned to v1";
+    EXPECT_EQ(ldPtr->Variable.get(), v1.get()) << "v2's load reassigned to v1";
+    EXPECT_EQ(stValueLd->Op, OpCode::LdLoc);
+    EXPECT_EQ(static_cast<LdLoc*>(stValueLd)->Variable.get(), v1.get())
+        << "v1's own load is unchanged";
+    EXPECT_EQ(v1->StoreCount, 1) << "v1 gained v2's store (was 0)";
+    EXPECT_EQ(v1->LoadCount, 2) << "v1's own load + v2's reassigned load";
+    EXPECT_EQ(v2->StoreCount, 0);
+    EXPECT_EQ(v2->LoadCount, 0);
+    EXPECT_EQ(fn->Variables.size(), 1u) << "only v1 remains";
+}
+
+TEST(ILInlining, RecombineVariablesPreservesOtherVariablesCounts) {
+    // A third variable v3 with its own uses is untouched by the recombine (the
+    // manual count increment only touches v1 and v2, unlike a full
+    // ComputeVariableUsage recompute that would re-walk every variable).
+    auto v1 = MakeVar(VariableKind::Local, "V_0", 0);
+    auto v2 = MakeVar(VariableKind::Local, "V_1", 0);
+    auto v3 = MakeVar(VariableKind::Local, "V_2", 2);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(v2, std::make_unique<LdcI4>(5)));
+    block->Add(std::make_unique<StLoc>(v3, std::make_unique<LdcI4>(7)));
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(
+        std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdLoc>(v3)));
+    fn->Variables.push_back(v1);
+    fn->Variables.push_back(v2);
+    fn->Variables.push_back(v3);
+    fn->CheckInvariant(ILPhase::Normal);
+    ComputeVariableUsage(*fn);  // v2 Store 1; v3 Store 1 / Load 1; v1 0
+    ASSERT_EQ(v3->StoreCount, 1);
+    ASSERT_EQ(v3->LoadCount, 1);
+
+    fn->RecombineVariables(v1, v2);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(v3->StoreCount, 1) << "v3's counts are unchanged";
+    EXPECT_EQ(v3->LoadCount, 1);
+    EXPECT_EQ(v1->StoreCount, 1) << "v1 absorbed v2's store";
+    EXPECT_EQ(fn->Variables.size(), 2u) << "v2 removed; v1 and v3 remain";
+}
