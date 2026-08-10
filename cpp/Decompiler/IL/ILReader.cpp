@@ -72,6 +72,25 @@ using ILSpy::Decompiler::TypeSystem::KnownType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
 using ILSpy::Decompiler::TypeSystem::Sign;
 
+// Best-effort: extract the IType a stack value carries, so stack slots (dup,
+// flush) can inherit it and brtrue/brfalse picks `null` for reference types.
+// Returns nullptr for values whose type isn't recoverable from the node.
+ITypePtr TypeOfValue(const ILInstruction* inst) {
+    if (!inst) return nullptr;
+    if (auto* ld = dynamic_cast<const LdLoc*>(inst))
+        return ld->Variable ? ld->Variable->Type : nullptr;
+    if (auto* na = dynamic_cast<const NewArr*>(inst))
+        return std::make_shared<TypeSystem::ArrayType>(na->Type);
+    if (auto* cc = dynamic_cast<const CastClass*>(inst)) return cc->Type;
+    if (auto* ii = dynamic_cast<const IsInst*>(inst)) return ii->Type;
+    if (auto* ua = dynamic_cast<const UnboxAny*>(inst)) return ua->Type;
+    if (auto* ls = dynamic_cast<const LdStr*>(inst))
+        return std::make_shared<KnownType>(KnownTypeCode::String);
+    if (auto* ln = dynamic_cast<const LdNull*>(inst))
+        return std::make_shared<KnownType>(KnownTypeCode::Object);
+    return nullptr;
+}
+
 namespace {
 // The reader's scratch state: a stack of pending expression trees (the decode
 // of stack-machine IL into trees) and the committed stack-slot variables for
@@ -168,6 +187,7 @@ void FlushExpressionStack(ReaderState& s, Block* block) {
         auto v = std::make_shared<ILVariable>();
         v->Name = "S_" + std::to_string(s.nextStackSlot++);
         v->Kind = VariableKind::StackSlot;
+        v->Type = TypeOfValue(expr.get());
         block->Add(std::make_unique<StLoc>(v, std::move(expr)));
         s.currentStack.push_back(v);
         s.stackVarsCreated.push_back(v);
@@ -544,6 +564,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             auto v = std::make_shared<ILVariable>();
             v->Name = "dup_" + std::to_string(start);
             v->Kind = VariableKind::StackSlot;
+            v->Type = TypeOfValue(top.get());
             s.stackVarsCreated.push_back(v);
             block->Add(std::make_unique<StLoc>(v, std::move(top)));
             if (!s.Push(std::make_unique<LdLoc>(v))) return DecodeOutcome::Bail;

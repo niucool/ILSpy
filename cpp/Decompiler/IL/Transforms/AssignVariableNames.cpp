@@ -60,6 +60,9 @@ std::string InferName(const TypeSystem::IType* type) {
     // A byref is named after the element type (the C# uses the underlying).
     if (auto* byref = dynamic_cast<const TypeSystem::ByReferenceType*>(type))
         return InferName(byref->Element().get());
+    // A pointer is named "ptr" (not the lowercased element type with *, which
+    // yields names like "byte*" that clash with the type syntax).
+    if (dynamic_cast<const TypeSystem::PointerType*>(type)) return "ptr";
     std::string rn = type->ReflectionName();
     auto it = TypeNameDict().find(rn);
     if (it != TypeNameDict().end()) return it->second;
