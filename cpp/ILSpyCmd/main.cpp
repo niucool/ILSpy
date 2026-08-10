@@ -42,6 +42,7 @@
 #include "Decompiler/IL/Transforms/CachedReadOnlySpanInitialization.hpp"
 #include "Decompiler/IL/Transforms/StatementTransform.hpp"
 #include "Decompiler/IL/Transforms/ExpressionTransforms.hpp"
+#include "Decompiler/IL/Transforms/TransformAssignment.hpp"
 #include "Decompiler/IL/Transforms/NullCoalescingTransform.hpp"
 #include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
 #include "Decompiler/IL/Transforms/NullPropagationTransform.hpp"
@@ -351,6 +352,29 @@ int main(int argc, char** argv) {
                     // re-run of it.
                     statementTransform.AddChild(
                         std::make_unique<ILSpy::Decompiler::IL::ExpressionTransforms>());
+                    // TransformAssignment: the inline- and compound-assignment
+                    // folds (the next per-statement child in the C# GetILTransforms()
+                    // order, after the deferred DynamicIsEventAssignmentTransform).
+                    // This iteration ports the self-contained
+                    // TransformPostIncDecOperatorWithInlineStore binary case
+                    // (the local/StLoc post-increment/decrement fold
+                    //   stloc target(binary.add(stloc tmp(ldloc target), ldc.i4 1))
+                    //   -> stloc tmp(compound.assign.add.old(ldloca target, ldc.i4 1))
+                    //   = `tmp = target++`), the simplest wired fold the D131
+                    // IsCompoundStore / IsMatchingCompoundLoad / ValidateCompound-
+                    // Assign helpers unblock. It operates on a single non-terminal
+                    // block.Instructions[pos] (no if-as-final block-model
+                    // adaptation); the operator-call (op_Increment/op_Decrement)
+                    // case (needs UserDefinedCompoundAssign + Call.IsLifted) and
+                    // the TransformInlineAssignment* / TransformPostIncDecOperator
+                    // / TransformPreIncDecOperatorWithInlineStore StObj/Call cases
+                    // (need InferType / IsSameMember / IMethod) are deferred. Gated
+                    // on IntroduceIncrementAndDecrement (default true). Fires on
+                    // the .NET Framework 4 legacy-csc corpus for local post-increment
+                    // expression uses (a `V++` whose old value is captured into a
+                    // temp).
+                    statementTransform.AddChild(
+                        std::make_unique<ILSpy::Decompiler::IL::TransformAssignment>());
                     // NullCoalescingTransform: the reference-type `??` fold
                     // (the next per-statement child in the C# GetILTransforms()
                     // order, after the deferred DynamicIsEventAssignmentTransform /

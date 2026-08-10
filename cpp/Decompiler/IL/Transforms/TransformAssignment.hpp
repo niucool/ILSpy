@@ -52,6 +52,7 @@
 #pragma once
 
 #include "Decompiler/IL/ILInstruction.hpp"
+#include "Decompiler/IL/Transforms/StatementTransform.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
 #include <functional>
@@ -169,5 +170,40 @@ ImplicitTruncationResult CheckImplicitTruncation(const ILInstruction* value,
 bool IsImplicitTruncation(const ILInstruction* value,
                           const TypeSystem::IType* type,
                           bool allowNullableValue = false);
+
+// Port of ICSharpCode.Decompiler/IL/Transforms/TransformAssignment.cs as an
+// IStatementTransform (a child of the GetILTransforms() StatementTransform, after
+// ILInlining / ExpressionTransforms / the deferred DynamicIsEventAssignmentTransform).
+// The C# Run() dispatches to TransformInlineAssignmentStObjOrCall /
+// TransformInlineAssignmentLocal (gated on MakeAssignmentExpressions) and
+// TransformPostIncDecOperatorWithInlineStore / TransformPostIncDecOperator /
+// TransformPreIncDecOperatorWithInlineStore (gated on
+// IntroduceIncrementAndDecrement); each consults the shared IsCompoundStore /
+// IsMatchingCompoundLoad / UnwrapSmallIntegerConv / ValidateCompoundAssign /
+// RecombineVariables helpers above. This iteration ports the self-contained
+// TransformPostIncDecOperatorWithInlineStore binary case (the local/StLoc
+// post-increment `stloc target(binary.add(stloc tmp(ldloc target), ldc.i4 1))`
+// -> `stloc tmp(compound.assign.add.old(ldloca target, ldc.i4 1))` = `tmp =
+// target++`), the simplest wired fold the D131 helpers unblock. The operator-call
+// (op_Increment/op_Decrement) case (needs the UserDefinedCompoundAssign node +
+// Call.IsLifted) and the TransformInlineAssignment* / TransformPostIncDecOperator /
+// TransformPreIncDecOperatorWithInlineStore StObj/Call cases (need InferType /
+// IsSameMember / IMethod) are deferred.
+class TransformAssignment : public IStatementTransform {
+public:
+	void Run(Block& block, int pos, StatementTransformContext& context) override;
+
+private:
+	// TransformPostIncDecOperatorWithInlineStore (binary case): folds the local
+	// post-increment/decrement `stloc target(binary.op(stloc tmp(ldloc target),
+	// ldc.i4 1))` (a single non-terminal at block.Instructions[pos]) into `stloc
+	// tmp(NumericCompoundAssign.op.old(ldloca target, ldc.i4 1))` (= `tmp =
+	// target++`), the C# `EvaluatesToOldValue` compound assign. Gated on
+	// IntroduceIncrementAndDecrement. The if-as-final block-model adaptation is
+	// trivial (the store is a non-terminal, not a final). Returns true if a fold
+	// fired.
+	bool TransformPostIncDecOperatorWithInlineStore(Block& block, int pos,
+	                                                StatementTransformContext& context);
+};
 
 } // namespace ILSpy::Decompiler::IL

@@ -1351,12 +1351,31 @@ implemented and green here. Everything else follows the phase plan in
   `IsBinaryCompatibleWithType` + the conv TargetType/CheckForOverflow match;
   only the `Pointer` case's `PointerArithmeticOffset.Detect` is
   deferred-conservative] + the per-statement Run wiring [the
-  `TransformPostIncDecOperatorWithInlineStore` local/StLoc-case fold is the
-  simplest wired fold these helpers unblock, firing on the .NET Framework 4
-  legacy-csc corpus for local post-increment; it operates on a single
-  non-terminal `block.Instructions[pos]` so the if-as-final block-model
-  adaptation is trivial, but it needs a corpus probe of the post-pre-pipeline
-  nested-stloc-in-binary shape per the D73/D75/D79 precedent], ...)
+  `TransformPostIncDecOperatorWithInlineStore` local/StLoc-case fold is now
+  PORTED (D132, wired into the StatementTransform pipeline after
+  ExpressionTransforms / before NullCoalescingTransform, gated on
+  IntroduceIncrementAndDecrement) -- it folds the local post-increment/decrement
+  `stloc target(binary.op(stloc tmp(ldloc target), ldc.i4 1))` (a single
+  non-terminal at `block.Instructions[pos]` whose `binary.Left` is the "inline
+  store" `stloc tmp(ldloc target)` -- the compiler's temp that captures the
+  old value and yields it) into `stloc tmp(NumericCompoundAssign.op.old(ldloca
+  target, ldc.i4 1))` = `tmp = target++`. A corpus probe found the WithInlineStore
+  shape (`binary.Left` a StLoc) does NOT arise on the .NET Framework 4 legacy-csc
+  mscorlib corpus (0 `binary.(add|sub)(stloc(` across the full `--ilast`; the
+  legacy csc emits the statement form `stloc V(binary.add(ldloc V, ..))` whose
+  `binary.Left` is an LdLoc -- the deferred `TransformPostIncDecOperator` /
+  `HandleCompoundAssign` shape), so the fold fires 0 times on the corpus --
+  faithfulness-only (the expression-form `x = V++` post-increment is a
+  Roslyn-era codegen pattern), matching the D59/D60/D69 precedent; the
+  `IsImplicitTruncation` conservative approximation (no `InferType`)
+  conservatively rejects the sign-swap + small-integer-tmp case (a faithfulness
+  gap). The operator-call (`op_Increment`/`op_Decrement`) case (needs
+  `UserDefinedCompoundAssign` + `Call.IsLifted`) and the
+  `TransformInlineAssignmentStObjOrCall` / `TransformInlineAssignmentLocal` /
+  `TransformPostIncDecOperator` (non-inline-store, the statement form that DOES
+  arise on the legacy-csc corpus) / `TransformPreIncDecOperatorWithInlineStore`
+  StObj/Call cases (need `InferType` / `IsSameMember` / `IMethod`) are the
+  subsequent in-order targets], ...)
   are the subsequent in-order targets.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
