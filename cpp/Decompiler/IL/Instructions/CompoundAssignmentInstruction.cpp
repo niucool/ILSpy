@@ -24,6 +24,7 @@
 #include "Decompiler/IL/Instructions/CompoundAssignmentInstruction.hpp"
 
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
 #include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
 #include "Decompiler/IL/Transforms/TransformAssignment.hpp"
@@ -33,7 +34,18 @@
 #include "Decompiler/TypeSystem/TypeKind.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
 
+#include <string_view>
+
 namespace ILSpy::Decompiler::IL {
+
+// The short method name (the part after "::") of a Call's resolved display
+// name. The IL reader resolves a call's MethodName to "Namespace.Type::Member";
+// the operator-name checks (IsIncrementOrDecrement / IsStringConcat) consult
+// this short part. Mirrors the NullableLiftingTransform::ShortMethodName helper.
+static std::string_view ShortMethodName(std::string_view fullName) {
+    auto pos = fullName.rfind("::");
+    return pos != std::string_view::npos ? fullName.substr(pos + 2) : fullName;
+}
 
 bool NumericCompoundAssign::IsBinaryCompatibleWithType(const BinaryNumericInstruction* binary,
                                                        const TypeSystem::IType* type,
@@ -128,6 +140,39 @@ bool NumericCompoundAssign::IsBinaryCompatibleWithType(const BinaryNumericInstru
     if (IsImplicitTruncation(binary->Right.get(), effectiveType, binary->IsLifted))
         return false;
     return true;
+}
+
+bool UserDefinedCompoundAssign::IsIncrementOrDecrement(const Call* call,
+                                                       const ILTransformSettings* settings) {
+    if (!call) return false;
+    // The C# `if (!(method.IsOperator && method.IsStatic)) return false;`. This
+    // port's Call carries IsOperator (set by the IL reader from the op_* name)
+    // and IsInstanceCall (true for an instance call; IsStatic is !IsInstanceCall).
+    if (!call->IsOperator || call->IsInstanceCall) return false;
+    auto name = ShortMethodName(call->MethodName);
+    // `op_Increment` / `op_Decrement` are always recognised (the C# 1.0
+    // increment/decrement operators).
+    if (name == "op_Increment" || name == "op_Decrement") return true;
+    // `op_CheckedIncrement` / `op_CheckedDecrement` are the C# 11.0 checked
+    // variants, recognised only when the CheckedOperators setting is on (the
+    // C# `settings?.CheckedOperators ?? true` -- a null settings is permissive,
+    // matching the C# `?? true`).
+    if (name == "op_CheckedIncrement" || name == "op_CheckedDecrement")
+        return settings == nullptr || settings->CheckedOperators;
+    return false;
+}
+
+bool UserDefinedCompoundAssign::IsStringConcat(const Call* call) {
+    if (!call) return false;
+    // The C# `method.Name == "Concat" && method.IsStatic && method.DeclaringType.
+    // IsKnownType(KnownTypeCode.String)`. This port's Call carries MethodName
+    // (the short part is the name), IsInstanceCall (IsStatic is !IsInstanceCall),
+    // and DeclaringType (the resolved declaring IType).
+    if (ShortMethodName(call->MethodName) != "Concat") return false;
+    if (call->IsInstanceCall) return false;
+    return call->DeclaringType &&
+           NullableLiftingTransform::IsKnownType(call->DeclaringType.get(),
+                                                  TypeSystem::KnownTypeCode::String);
 }
 
 }  // namespace ILSpy::Decompiler::IL

@@ -1412,6 +1412,42 @@ implemented and green here. Everything else follows the phase plan in
   legacy-csc mscorlib corpus (the legacy csc emits the statement form), so
   the fold is faithfulness-only on this corpus -- matching the
   D59/D60/D69/D132 precedent.
+  The `UserDefinedCompoundAssign` ILAst node (Instructions/, a
+  tested-but-not-yet-wired foundation) ports the C# user-defined-operator
+  compound-assignment node the operator-call case of the increment/decrement
+  folds (and the deferred `HandleCompoundAssign` string.Concat case) build
+  from -- ahead of that wiring, following the NumericCompoundAssign (D125)
+  precedent. The node carries the resolved method name + declaring type +
+  the return StackType (this port models a method by its resolved name +
+  declaring type, like `Call`, since it has no `IMethod`); `ResultType` is the
+  method's return StackType (`Method.ReturnType.GetStackType()`); `IsLifted`
+  is hardcoded false (faithful to the C# `public bool IsLifted => false; //
+  TODO`); `DirectFlags`/`Flags` add `SideEffect | MayThrow` (a user-defined
+  operator call can throw); the dump is
+  `compound.assign.userdefined.<suffix>(<method>, target, value)` (the
+  family-consistent `compound.assign` root the NumericCompoundAssign node
+  uses). The `IsIncrementOrDecrement(const Call*, settings)` and
+  `IsStringConcat(const Call*)` static helpers (the C# takes the `IMethod`;
+  this port takes the `Call`, which carries the method metadata) are the
+  gates the folds consult on the operator Call before building the node:
+  `IsIncrementOrDecrement` recognises a static `op_Increment`/`op_Decrement`
+  (always) and `op_CheckedIncrement`/`op_CheckedDecrement` (gated on the new
+  `CheckedOperators` C# 11.0 setting, default true -- the C#
+  `settings?.CheckedOperators ?? true`); `IsStringConcat` recognises a static
+  `string.Concat`. `Call` gained an `IsLifted` flag (default false -- the C#
+  `CallInstruction.IsLifted` is `Method is CSharp.Resolver.ILiftedOperator`, a
+  resolver concept this port has no resolver for; the inc/dec folds bail on a
+  lifted operator call with `if (operatorCall.IsLifted) return false; // TODO`,
+  so a default-false call never trips that bail). The ILAstToCSharp seed
+  renders a `UserDefinedCompoundAssign` as the unary `target++`/`++target`/
+  `target--`/`--target` (op_Increment/op_Decrement, postfix for
+  `EvaluatesToOldValue`, prefix for `EvaluatesToNewValue`) or the binary
+  `target op= value` (op_Addition -> `+=`, ..., `string.Concat` -> `+=`),
+  matching the real back end's `VisitUserDefinedCompoundAssign`. No pipeline
+  transform constructs these nodes yet, so `--csharp` output is unchanged;
+  the foundation is exercised by the unit tests + an 8000-method mscorlib
+  sweep that constructs the nodes from real operator calls (System.Decimal's
+  op_Equality/op_Addition/etc.).
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end. It now produces readable C#: real parameter names (Param

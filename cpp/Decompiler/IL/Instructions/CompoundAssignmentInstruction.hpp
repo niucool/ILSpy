@@ -90,6 +90,13 @@ namespace ILSpy::Decompiler::IL {
 // header avoids including it to keep the include graph lean).
 struct ILTransformSettings;
 
+// Forward declaration of Call: the UserDefinedCompoundAssign static helpers
+// (IsIncrementOrDecrement / IsStringConcat) take the operator Call the
+// TransformAssignment folds build the node from. Call.hpp is not included here
+// to keep the node header's include graph lean; the helpers are implemented
+// out-of-line in CompoundAssignmentInstruction.cpp (which includes Call.hpp).
+class Call;
+
 // Whether a compound.assign evaluates to the old (post-increment/decrement) or
 // the new (compound assignment / pre-increment) value. Faithful to the C#
 // CompoundEvalMode enum.
@@ -305,6 +312,118 @@ private:
 			case StackType::Unknown: return "unknown";
 		}
 		return "?";
+	}
+};
+
+// UserDefinedCompoundAssign: a compound assignment built from a user-defined
+// operator call (`target op= value` where op is a user-defined operator, or
+// `target++`/`++target` for op_Increment/op_Decrement). Faithful to the C#
+// UserDefinedCompoundAssign (CompoundAssignmentInstruction; the generated node
+// overrides ComputeFlags/DirectFlags to add SideEffect|MayThrow). This port
+// has no IMethod, so the C# `readonly IMethod Method` is modelled as the
+// resolved method name + declaring type + the return StackType (Method.
+// ReturnType.GetStackType() drives ResultType); the IsLifted flag is hardcoded
+// false, faithful to the C# `public bool IsLifted => false; // TODO`.
+//
+// The IsIncrementOrDecrement / IsStringConcat static helpers are the gates the
+// TransformAssignment folds consult on the operator Call BEFORE building the
+// node (the C# takes the IMethod; this port takes the Call, which carries the
+// method metadata -- IsOperator, IsInstanceCall, MethodName, DeclaringType).
+// They are declared here (forward-declared Call) and implemented out-of-line in
+// CompoundAssignmentInstruction.cpp.
+//
+// This is a tested-but-not-yet-wired foundation (the NumericCompoundAssign /
+// MatchInstruction / UsingInstruction precedent): no pipeline transform
+// constructs a UserDefinedCompoundAssign yet, so `--csharp` output is
+// unchanged. The OpCode::UserDefinedCompoundAssign value was pre-declared in
+// OpCode.hpp, so porting the node needed only the subclass header. The node
+// unblocks the operator-call (op_Increment/op_Decrement) case of the
+// TransformAssignment increment/decrement folds (D134's first deferred target).
+class UserDefinedCompoundAssign : public CompoundAssignmentInstruction {
+public:
+	// The resolved method name ("Namespace.Type::Method"), the faithful
+	// stand-in for the C# `IMethod` (this port models a method by its resolved
+	// name + declaring type, like Call). The seed and the dump consult the part
+	// after "::" to derive the C# operator.
+	std::string MethodName;
+	// The resolved declaring type of the method (the C# `Method.DeclaringType`).
+	// Carried so the IsStringConcat helper and a future HandleCompoundAssign
+	// string.Concat case can consult it without a MetadataFile handle.
+	TypeSystem::ITypePtr MethodDeclaringType;
+	// The method's return StackType (the C# `Method.ReturnType.GetStackType()`).
+	// Drives ResultType -- a user-defined compound assign evaluates to the
+	// operator's return type (e.g. op_Increment returns the type, so `target++`
+	// evaluates to that type).
+	StackType MethodReturnType = StackType::Unknown;
+	// Faithful to the C# `public bool IsLifted => false; // TODO: implement
+	// lifted user-defined compound assignments`. A settable field so a future
+	// resolver-backed path can mark a lifted user-defined operator.
+	bool IsLifted = false;
+
+	UserDefinedCompoundAssign(std::string methodName,
+	                          TypeSystem::ITypePtr methodDeclaringType,
+	                          StackType methodReturnType,
+	                          CompoundEvalMode evalMode,
+	                          std::unique_ptr<ILInstruction> target,
+	                          CompoundTargetKind targetKind,
+	                          std::unique_ptr<ILInstruction> value)
+		: CompoundAssignmentInstruction(OpCode::UserDefinedCompoundAssign, evalMode,
+			std::move(target), targetKind, std::move(value)),
+		  MethodName(std::move(methodName)),
+		  MethodDeclaringType(std::move(methodDeclaringType)),
+		  MethodReturnType(methodReturnType) {}
+
+	// Faithful to the C# ComputeFlags/DirectFlags: base (Target.Flags |
+	// Value.Flags) | SideEffect | MayThrow (a user-defined operator call can
+	// throw).
+	InstructionFlags DirectFlags() const override {
+		return InstructionFlags::SideEffect | InstructionFlags::MayThrow;
+	}
+	InstructionFlags Flags() const override {
+		return (Target ? Target->Flags() : InstructionFlags::None)
+			| (Value ? Value->Flags() : InstructionFlags::None)
+			| InstructionFlags::SideEffect | InstructionFlags::MayThrow;
+	}
+	// Faithful to the C# `public override StackType ResultType => Method.
+	// ReturnType.GetStackType()`.
+	StackType ResultType() const override { return MethodReturnType; }
+
+	// Faithful port of UserDefinedCompoundAssign.IsIncrementOrDecrement: the
+	// operator Call is a static operator overload named op_Increment /
+	// op_Decrement (always), or op_CheckedIncrement / op_CheckedDecrement (only
+	// when the C# 11.0 CheckedOperators setting is on, matching the C#
+	// `settings?.CheckedOperators ?? true`). The C# takes the IMethod; this
+	// port takes the Call (carrying IsOperator / IsInstanceCall / MethodName).
+	// Returns false for a non-operator, an instance method, or an unrelated
+	// operator name.
+	static bool IsIncrementOrDecrement(const Call* call, const ILTransformSettings* settings);
+
+	// Faithful port of UserDefinedCompoundAssign.IsStringConcat: the operator
+	// Call is a static `string.Concat` (the C# compound-assign lowering of
+	// `s += "..."` rewrites the Concat call into a UserDefinedCompoundAssign
+	// that renders as `s += value`). Recognised by the method name "Concat" +
+	// a static call + a System.String declaring type.
+	static bool IsStringConcat(const Call* call);
+
+	void WriteTo(std::string& out) const override {
+		// Faithful to the C# WriteToCore: `OpCode` + WriteSuffix (the C#
+		// `user.compound` root + `.address`/`.property` + `.new`/`.old`) then
+		// the method and the Target/Value operands. This port renders the
+		// `compound.assign` family root (the NumericCompoundAssign precedent)
+		// with a `.userdefined` marker so the family is consistent and the
+		// kind is distinguishable in the ILAst dump.
+		out += "compound.assign.userdefined";
+		if (TargetKind == CompoundTargetKind::Address) out += ".address";
+		else if (TargetKind == CompoundTargetKind::Property) out += ".property";
+		if (EvalMode == CompoundEvalMode::EvaluatesToNewValue) out += ".new";
+		else out += ".old";
+		out += ' ';
+		out += MethodName;
+		out += '(';
+		if (Target) Target->WriteTo(out); else out += "(null)";
+		out += ", ";
+		if (Value) Value->WriteTo(out); else out += "(null)";
+		out += ')';
 	}
 };
 

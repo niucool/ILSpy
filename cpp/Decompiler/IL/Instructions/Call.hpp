@@ -101,6 +101,18 @@ public:
     // non-generic overload (e.g. NullableLiftingTransform.IsGenericNewPattern
     // checks `Activator.CreateInstance` with exactly one type argument).
     int TypeArgumentsCount = 0;
+    // Whether this is a lifted user-defined operator call. Faithful to the C#
+    // `CallInstruction.IsLifted` (`Method is CSharp.Resolver.ILiftedOperator`),
+    // a resolver-level concept: the C# resolver wraps a lifted operator's
+    // method in an `ILiftedOperator` marker, so a `Call` whose `Method` is that
+    // marker reports `IsLifted == true`. This port has no resolver / no
+    // `ILiftedOperator`, so the field defaults false and the IL reader does not
+    // populate it (the common case -- lifted user-defined operators are rare and
+    // the C# `UserDefinedCompoundAssign` folds themselves bail on a lifted
+    // operator call with `if (operatorCall.IsLifted) return false; // TODO`,
+    // so a default-false call never trips that bail). It is a settable field so
+    // a future resolver-backed path can mark a lifted operator call.
+    bool IsLifted = false;
 
     explicit Call(std::string method = std::string()) : ILInstruction(OpCode::Call), MethodName(std::move(method)) {}
 

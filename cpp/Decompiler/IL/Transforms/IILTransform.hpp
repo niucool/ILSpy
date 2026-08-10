@@ -157,6 +157,15 @@ struct ILTransformSettings {
     // allowed only when the unsigned-right-shift operator is available (the
     // `signMismatchAllowed` gate).
     bool UnsignedRightShift = true;
+    // Whether to use C# 11.0 user-defined checked operators
+    // (`op_CheckedIncrement` / `op_CheckedDecrement`). DecompilerSettings.
+    // CheckedOperators -- a C# 11.0 setting, default true (false only for the
+    // C# 10 / .NET Framework 1.x compatibility profile). Consulted by
+    // `UserDefinedCompoundAssign::IsIncrementOrDecrement`: the checked
+    // operator names are only recognised as increment/decrement when this is
+    // on (the C# `settings?.CheckedOperators ?? true`); with it off a checked
+    // operator call does not fold to `++`/`--` and stays as a regular call.
+    bool CheckedOperators = true;
 };
 
 class ILTransformContext {

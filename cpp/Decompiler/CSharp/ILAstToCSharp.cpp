@@ -287,6 +287,13 @@ private:
                 Line(indent, Expr(inst) + ";");
                 return;
             }
+            case OpCode::UserDefinedCompoundAssign: {
+                // A user-defined compound assignment as a statement: `target op= value;`
+                // (or `target++;`/`++target;` for op_Increment/op_Decrement). The Expr
+                // case renders the compound-assign / increment expression form.
+                Line(indent, Expr(inst) + ";");
+                return;
+            }
             case OpCode::Throw: {
                 const auto& th = static_cast<const Throw&>(inst);
                 Line(indent, "throw " + (th.Argument ? Expr(*th.Argument) : std::string("(rethrow)")) + ";");
@@ -944,6 +951,58 @@ private:
                     case BinaryNumericOperator::ShiftLeft: op = "<<="; break;
                     case BinaryNumericOperator::ShiftRight: op = ">>="; break;
                 }
+                return target + " " + op + " " + value;
+            }
+            case OpCode::UserDefinedCompoundAssign: {
+                // A user-defined compound assignment built from a user-defined
+                // operator call. Faithful to the real back end's
+                // VisitUserDefinedCompoundAssign: a 1-arg op_Increment/
+                // op_Decrement renders as the unary `target++`/`++target`/
+                // `target--`/`--target` (EvaluatesToOldValue = postfix,
+                // EvaluatesToNewValue = prefix); a 2-arg operator renders as
+                // `target op= value` (op_Addition -> `+=`, ...); `string.Concat`
+                // renders as `target += value`. The operator is derived from the
+                // method name (the part after "::"), matching the C#
+                // GetUnaryOperatorTypeFromMetadataName /
+                // GetAssignmentOperatorTypeFromMetadataName.
+                const auto& ca = static_cast<const UserDefinedCompoundAssign&>(inst);
+                std::string target;
+                if (ca.TargetKind == CompoundTargetKind::Address &&
+                    ca.Target && ca.Target->Op == OpCode::LdLoca) {
+                    const auto& lda = static_cast<const LdLoca&>(*ca.Target);
+                    target = lda.Variable ? lda.Variable->Name : std::string("?");
+                } else {
+                    target = ca.Target ? Expr(*ca.Target) : std::string("(default)");
+                }
+                // The short method name (after "::") selects the operator.
+                auto pos = ca.MethodName.rfind("::");
+                std::string shortName = (pos != std::string::npos)
+                    ? ca.MethodName.substr(pos + 2) : ca.MethodName;
+                // The 1-arg increment/decrement operators render as the unary
+                // forms (postfix for EvaluatesToOldValue, prefix for NewValue).
+                if (shortName == "op_Increment" || shortName == "op_CheckedIncrement") {
+                    return (ca.EvalMode == CompoundEvalMode::EvaluatesToOldValue)
+                        ? target + "++" : "++" + target;
+                }
+                if (shortName == "op_Decrement" || shortName == "op_CheckedDecrement") {
+                    return (ca.EvalMode == CompoundEvalMode::EvaluatesToOldValue)
+                        ? target + "--" : "--" + target;
+                }
+                // The 2-arg operators (and string.Concat) render as
+                // `target op= value`.
+                std::string value = ca.Value ? Expr(*ca.Value) : std::string("(default)");
+                const char* op = "?=";
+                if (shortName == "Concat" || shortName == "op_Addition") op = "+=";
+                else if (shortName == "op_Subtraction") op = "-=";
+                else if (shortName == "op_Multiply") op = "*=";
+                else if (shortName == "op_Division") op = "/=";
+                else if (shortName == "op_Modulus") op = "%=";
+                else if (shortName == "op_BitwiseAnd") op = "&=";
+                else if (shortName == "op_BitwiseOr") op = "|=";
+                else if (shortName == "op_ExclusiveOr") op = "^=";
+                else if (shortName == "op_LeftShift") op = "<<=";
+                else if (shortName == "op_RightShift") op = ">>=";
+                else if (shortName == "op_UnsignedRightShift") op = ">>>=";
                 return target + " " + op + " " + value;
             }
             default:

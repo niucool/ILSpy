@@ -36,10 +36,12 @@
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/ILReader.hpp"
@@ -335,6 +337,10 @@ TEST(CompoundAssignmentInstruction, AssignmentSettingsDefaultTrue) {
     // true; NumericCompoundAssign.IsBinaryCompatibleWithType consults both.
     EXPECT_TRUE(settings.NativeIntegers);
     EXPECT_TRUE(settings.UnsignedRightShift);
+    // CheckedOperators (C# 11.0) also defaults true; the
+    // UserDefinedCompoundAssign.IsIncrementOrDecrement helper consults it for
+    // the op_CheckedIncrement/op_CheckedDecrement variants.
+    EXPECT_TRUE(settings.CheckedOperators);
 }
 
 // -----------------------------------------------------------------------------
@@ -778,4 +784,385 @@ TEST(IsBinaryCompatibleWithTypeTest, MscorlibValidatorSweep) {
     // gates, so compatible > 0).
     EXPECT_GE(compatible, 0);
     EXPECT_LE(compatible, evaluated);
+}
+
+// =============================================================================
+// UserDefinedCompoundAssign (the C# user-defined-operator compound assignment
+// node, the next foundation after NumericCompoundAssign). A tested-but-not-yet-
+// wired foundation (the NumericCompoundAssign / MatchInstruction / UsingInstruction
+// precedent): no pipeline transform constructs one yet, so `--csharp` output is
+// unchanged. Unblocks the operator-call (op_Increment/op_Decrement) case of the
+// TransformAssignment increment/decrement folds (D134's first deferred target).
+// =============================================================================
+
+namespace {
+
+// Build a standalone ILFunction whose body root block holds a
+// UserDefinedCompoundAssign as a non-terminal statement (it is not control
+// flow, so it cannot be the block final) followed by a `return;` Leave, so the
+// seed-rendering test exercises a realistic statement-level compound assign.
+std::unique_ptr<ILFunction> MakeUserCompoundFn(std::unique_ptr<UserDefinedCompoundAssign> node) {
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto root = std::make_unique<Block>();
+    root->Add(std::move(node));
+    root->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(root));
+    return fn;
+}
+
+// A static operator Call named "Namespace.Type::op_Xxx" with the given
+// declaring type and return stack type (the shape the inc/dec folds build a
+// UserDefinedCompoundAssign from).
+std::unique_ptr<Call> MakeOperatorCall(std::string methodName,
+                                       ITypePtr declaringType,
+                                       StackType returnType) {
+    auto call = std::make_unique<Call>(std::move(methodName));
+    call->IsOperator = true;
+    call->IsInstanceCall = false;  // static
+    call->DeclaringType = std::move(declaringType);
+    call->ReturnType = returnType;
+    return call;
+}
+
+}  // namespace
+
+// ---- Node invariant, flags, ResultType, dump ----
+
+TEST(UserDefinedCompoundAssign, InvariantFlagsAndDump) {
+    auto num = MakeLocal("num", Int32());
+    auto node = std::make_unique<UserDefinedCompoundAssign>(
+        "System.SByte::op_Increment", Int32(), StackType::I4,
+        CompoundEvalMode::EvaluatesToOldValue,
+        std::make_unique<LdLoca>(num), CompoundTargetKind::Address,
+        std::make_unique<LdcI4>(1));
+    EXPECT_EQ(node->Op, OpCode::UserDefinedCompoundAssign);
+    // ResultType is the method's return StackType (Method.ReturnType.GetStackType()).
+    EXPECT_EQ(node->ResultType(), StackType::I4);
+    // DirectFlags is SideEffect | MayThrow (a user-defined operator call can
+    // throw), faithful to the C# generated override.
+    EXPECT_TRUE(HasFlag(node->DirectFlags(), InstructionFlags::SideEffect));
+    EXPECT_TRUE(HasFlag(node->DirectFlags(), InstructionFlags::MayThrow));
+    // IsLifted is hardcoded false (faithful to the C# `public bool IsLifted => false`).
+    EXPECT_FALSE(node->IsLifted);
+    // The dump renders the family-consistent `compound.assign.userdefined`
+    // root + the `.address`/`.old` suffix + the method + the operands.
+    std::string dump = node->ToString();
+    EXPECT_NE(dump.find("compound.assign.userdefined.address.old"), std::string::npos) << dump;
+    EXPECT_NE(dump.find("System.SByte::op_Increment"), std::string::npos) << dump;
+    EXPECT_NE(dump.find("ldloca"), std::string::npos) << dump;
+}
+
+TEST(UserDefinedCompoundAssign, DumpRendersPropertyAndNewValueSuffix) {
+    auto num = MakeLocal("num", Int32());
+    auto node = std::make_unique<UserDefinedCompoundAssign>(
+        "System.SByte::op_Increment", Int32(), StackType::I4,
+        CompoundEvalMode::EvaluatesToNewValue,
+        std::make_unique<LdLoca>(num), CompoundTargetKind::Property,
+        std::make_unique<LdcI4>(1));
+    std::string dump = node->ToString();
+    EXPECT_NE(dump.find(".property.new"), std::string::npos) << dump;
+}
+
+// ---- Children in typed slots (Target/Value) + re-parenting ----
+
+TEST(UserDefinedCompoundAssign, ChildrenAreInTypedSlots) {
+    auto num = MakeLocal("num", Int32());
+    auto target = std::make_unique<LdLoca>(num);
+    auto value = std::make_unique<LdcI4>(1);
+    ILInstruction* targetPtr = target.get();
+    ILInstruction* valuePtr = value.get();
+    auto node = std::make_unique<UserDefinedCompoundAssign>(
+        "System.SByte::op_Increment", Int32(), StackType::I4,
+        CompoundEvalMode::EvaluatesToNewValue,
+        std::move(target), CompoundTargetKind::Address, std::move(value));
+    node->CheckInvariant(ILPhase::Normal);
+    EXPECT_EQ(node->ChildCount(), 2);
+    EXPECT_EQ(node->GetChild(0), targetPtr);
+    EXPECT_EQ(node->GetChild(1), valuePtr);
+    EXPECT_EQ(targetPtr->Parent, node.get());
+    EXPECT_EQ(targetPtr->ChildIndex, 0);
+    EXPECT_EQ(valuePtr->Parent, node.get());
+    EXPECT_EQ(valuePtr->ChildIndex, 1);
+
+    // SetChild re-parents: swapping the Value slot replaces the old occupant.
+    auto newVal = std::make_unique<LdcI4>(2);
+    ILInstruction* newValPtr = newVal.get();
+    node->SetChild(1, std::move(newVal));
+    EXPECT_EQ(node->GetChild(1), newValPtr);
+    EXPECT_EQ(newValPtr->Parent, node.get());
+    EXPECT_EQ(newValPtr->ChildIndex, 1);
+    EXPECT_NE(node->GetChild(1), valuePtr);
+    node->CheckInvariant(ILPhase::Normal);
+}
+
+// ---- Flags propagation: Target | Value | SideEffect | MayThrow ----
+
+TEST(UserDefinedCompoundAssign, FlagsPropagateFromChildren) {
+    auto num = MakeLocal("num", Int32());
+    auto node = std::make_unique<UserDefinedCompoundAssign>(
+        "System.SByte::op_Increment", Int32(), StackType::I4,
+        CompoundEvalMode::EvaluatesToNewValue,
+        std::make_unique<LdLoca>(num), CompoundTargetKind::Address,
+        std::make_unique<LdcI4>(1));
+    EXPECT_TRUE(HasFlag(node->Flags(), InstructionFlags::SideEffect));
+    EXPECT_TRUE(HasFlag(node->Flags(), InstructionFlags::MayThrow));
+    EXPECT_FALSE(HasFlag(node->Flags(), InstructionFlags::ControlFlow));
+}
+
+// ---- IsIncrementOrDecrement helper ----
+
+TEST(UserDefinedCompoundAssign, IsIncrementOrDecrementRecognizesOpIncrement) {
+    auto call = MakeOperatorCall("System.SByte::op_Increment", Int32(), StackType::I4);
+    auto settings = DefaultSettings();
+    EXPECT_TRUE(UserDefinedCompoundAssign::IsIncrementOrDecrement(call.get(), settings.get()));
+}
+
+TEST(UserDefinedCompoundAssign, IsIncrementOrDecrementRecognizesOpDecrement) {
+    auto call = MakeOperatorCall("System.SByte::op_Decrement", Int32(), StackType::I4);
+    auto settings = DefaultSettings();
+    EXPECT_TRUE(UserDefinedCompoundAssign::IsIncrementOrDecrement(call.get(), settings.get()));
+}
+
+TEST(UserDefinedCompoundAssign, IsIncrementOrDecrementRecognizesCheckedWhenSettingOn) {
+    auto call = MakeOperatorCall("System.SByte::op_CheckedIncrement", Int32(), StackType::I4);
+    auto settings = DefaultSettings();
+    settings->CheckedOperators = true;
+    EXPECT_TRUE(UserDefinedCompoundAssign::IsIncrementOrDecrement(call.get(), settings.get()));
+}
+
+TEST(UserDefinedCompoundAssign, IsIncrementOrDecrementRejectsCheckedWhenSettingOff) {
+    auto call = MakeOperatorCall("System.SByte::op_CheckedIncrement", Int32(), StackType::I4);
+    auto settings = DefaultSettings();
+    settings->CheckedOperators = false;
+    EXPECT_FALSE(UserDefinedCompoundAssign::IsIncrementOrDecrement(call.get(), settings.get()));
+}
+
+TEST(UserDefinedCompoundAssign, IsIncrementOrDecrementNullSettingsPermissiveForChecked) {
+    // A null settings pointer is permissive for the checked variants (the C#
+    // `settings?.CheckedOperators ?? true`).
+    auto call = MakeOperatorCall("System.SByte::op_CheckedDecrement", Int32(), StackType::I4);
+    EXPECT_TRUE(UserDefinedCompoundAssign::IsIncrementOrDecrement(call.get(), nullptr));
+}
+
+TEST(UserDefinedCompoundAssign, IsIncrementOrDecrementRejectsNonOperator) {
+    auto call = MakeOperatorCall("System.SByte::op_Increment", Int32(), StackType::I4);
+    call->IsOperator = false;
+    auto settings = DefaultSettings();
+    EXPECT_FALSE(UserDefinedCompoundAssign::IsIncrementOrDecrement(call.get(), settings.get()));
+}
+
+TEST(UserDefinedCompoundAssign, IsIncrementOrDecrementRejectsInstanceCall) {
+    auto call = MakeOperatorCall("System.SByte::op_Increment", Int32(), StackType::I4);
+    call->IsInstanceCall = true;  // not static
+    auto settings = DefaultSettings();
+    EXPECT_FALSE(UserDefinedCompoundAssign::IsIncrementOrDecrement(call.get(), settings.get()));
+}
+
+TEST(UserDefinedCompoundAssign, IsIncrementOrDecrementRejectsOpAddition) {
+    auto call = MakeOperatorCall("System.SByte::op_Addition", Int32(), StackType::I4);
+    auto settings = DefaultSettings();
+    EXPECT_FALSE(UserDefinedCompoundAssign::IsIncrementOrDecrement(call.get(), settings.get()));
+}
+
+TEST(UserDefinedCompoundAssign, IsIncrementOrDecrementRejectsNullCall) {
+    auto settings = DefaultSettings();
+    EXPECT_FALSE(UserDefinedCompoundAssign::IsIncrementOrDecrement(nullptr, settings.get()));
+}
+
+// ---- IsStringConcat helper ----
+
+TEST(UserDefinedCompoundAssign, IsStringConcatRecognizesStringConcat) {
+    auto call = MakeOperatorCall("System.String::Concat",
+                                  std::make_shared<KnownType>(KnownTypeCode::String),
+                                  StackType::O);
+    // `Concat` is not an `op_*` name, so IsOperator would be false from the
+    // reader's name check; but IsStringConcat does not consult IsOperator (the
+    // C# checks Name + IsStatic + DeclaringType only), so set it false to mirror
+    // a real Concat call.
+    call->IsOperator = false;
+    EXPECT_TRUE(UserDefinedCompoundAssign::IsStringConcat(call.get()));
+}
+
+TEST(UserDefinedCompoundAssign, IsStringConcatRejectsNonStringDeclaringType) {
+    auto call = MakeOperatorCall("System.Foo::Concat", Int32(), StackType::O);
+    call->IsOperator = false;
+    EXPECT_FALSE(UserDefinedCompoundAssign::IsStringConcat(call.get()));
+}
+
+TEST(UserDefinedCompoundAssign, IsStringConcatRejectsInstanceCall) {
+    auto call = MakeOperatorCall("System.String::Concat",
+                                  std::make_shared<KnownType>(KnownTypeCode::String),
+                                  StackType::O);
+    call->IsOperator = false;
+    call->IsInstanceCall = true;  // not static
+    EXPECT_FALSE(UserDefinedCompoundAssign::IsStringConcat(call.get()));
+}
+
+TEST(UserDefinedCompoundAssign, IsStringConcatRejectsWrongName) {
+    auto call = MakeOperatorCall("System.String::op_Addition",
+                                  std::make_shared<KnownType>(KnownTypeCode::String),
+                                  StackType::O);
+    EXPECT_FALSE(UserDefinedCompoundAssign::IsStringConcat(call.get()));
+}
+
+TEST(UserDefinedCompoundAssign, IsStringConcatRejectsNullCall) {
+    EXPECT_FALSE(UserDefinedCompoundAssign::IsStringConcat(nullptr));
+}
+
+// ---- Seed rendering ----
+
+TEST(UserDefinedCompoundAssign, SeedRendersPostIncrement) {
+    auto num = MakeLocal("num", Int32());
+    auto fn = MakeUserCompoundFn(std::make_unique<UserDefinedCompoundAssign>(
+        "System.SByte::op_Increment", Int32(), StackType::I4,
+        CompoundEvalMode::EvaluatesToOldValue,
+        std::make_unique<LdLoca>(num), CompoundTargetKind::Address,
+        std::make_unique<LdcI4>(1)));
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("num++;"), std::string::npos) << text;
+}
+
+TEST(UserDefinedCompoundAssign, SeedRendersPreIncrement) {
+    auto num = MakeLocal("num", Int32());
+    auto fn = MakeUserCompoundFn(std::make_unique<UserDefinedCompoundAssign>(
+        "System.SByte::op_Increment", Int32(), StackType::I4,
+        CompoundEvalMode::EvaluatesToNewValue,
+        std::make_unique<LdLoca>(num), CompoundTargetKind::Address,
+        std::make_unique<LdcI4>(1)));
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("++num;"), std::string::npos) << text;
+}
+
+TEST(UserDefinedCompoundAssign, SeedRendersPostDecrement) {
+    auto num = MakeLocal("num", Int32());
+    auto fn = MakeUserCompoundFn(std::make_unique<UserDefinedCompoundAssign>(
+        "System.SByte::op_Decrement", Int32(), StackType::I4,
+        CompoundEvalMode::EvaluatesToOldValue,
+        std::make_unique<LdLoca>(num), CompoundTargetKind::Address,
+        std::make_unique<LdcI4>(1)));
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("num--;"), std::string::npos) << text;
+}
+
+TEST(UserDefinedCompoundAssign, SeedRendersPreDecrement) {
+    auto num = MakeLocal("num", Int32());
+    auto fn = MakeUserCompoundFn(std::make_unique<UserDefinedCompoundAssign>(
+        "System.SByte::op_Decrement", Int32(), StackType::I4,
+        CompoundEvalMode::EvaluatesToNewValue,
+        std::make_unique<LdLoca>(num), CompoundTargetKind::Address,
+        std::make_unique<LdcI4>(1)));
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("--num;"), std::string::npos) << text;
+}
+
+TEST(UserDefinedCompoundAssign, SeedRendersCheckedIncrementAsIncrement) {
+    auto num = MakeLocal("num", Int32());
+    auto fn = MakeUserCompoundFn(std::make_unique<UserDefinedCompoundAssign>(
+        "System.SByte::op_CheckedIncrement", Int32(), StackType::I4,
+        CompoundEvalMode::EvaluatesToOldValue,
+        std::make_unique<LdLoca>(num), CompoundTargetKind::Address,
+        std::make_unique<LdcI4>(1)));
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("num++;"), std::string::npos) << text;
+}
+
+TEST(UserDefinedCompoundAssign, SeedRendersAdditionCompoundAssign) {
+    auto num = MakeLocal("num", Int32());
+    auto fn = MakeUserCompoundFn(std::make_unique<UserDefinedCompoundAssign>(
+        "System.Vector::op_Addition", Int32(), StackType::I4,
+        CompoundEvalMode::EvaluatesToNewValue,
+        std::make_unique<LdLoca>(num), CompoundTargetKind::Address,
+        std::make_unique<LdcI4>(2)));
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("num += 2;"), std::string::npos) << text;
+}
+
+TEST(UserDefinedCompoundAssign, SeedRendersStringConcatCompoundAssign) {
+    auto text = MakeLocal("text", std::make_shared<KnownType>(KnownTypeCode::String));
+    auto fn = MakeUserCompoundFn(std::make_unique<UserDefinedCompoundAssign>(
+        "System.String::Concat",
+        std::make_shared<KnownType>(KnownTypeCode::String), StackType::O,
+        CompoundEvalMode::EvaluatesToNewValue,
+        std::make_unique<LdLoca>(text), CompoundTargetKind::Address,
+        std::make_unique<LdStr>("x")));
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string out = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(out.find("text += "), std::string::npos) << out;
+}
+
+// ---- Setting default ----
+
+TEST(UserDefinedCompoundAssign, CheckedOperatorsSettingDefaultTrue) {
+    ILTransformSettings settings;
+    // DecompilerSettings.CheckedOperators (C# 11.0) defaults true.
+    EXPECT_TRUE(settings.CheckedOperators);
+}
+
+// ---- mscorlib sweep ----
+
+// A mscorlib sweep: decode real methods, find real operator Calls (op_* names)
+// the IL reader marked IsOperator, and construct a UserDefinedCompoundAssign
+// from each (carrying the call's method name + declaring type + return stack
+// type), asserting the node invariant holds and the dump renders. This
+// exercises the node on real operator calls (the volume the future
+// TransformAssignment operator-call fold will see once wired).
+TEST(UserDefinedCompoundAssign, MscorlibConstructFromRealOperatorCallsSweep) {
+#if defined(_WIN32)
+    const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    auto settings = DefaultSettings();
+    int processed = 0;
+    int operatorCalls = 0;
+    int constructed = 0;
+    int incrementOrDecrement = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++processed;
+        Walk(fn->Body.get(), [&](ILInstruction* inst) {
+            if (constructed >= 200) return;
+            if (!inst || inst->Op != OpCode::Call) return;
+            auto* call = static_cast<Call*>(inst);
+            if (!call->IsOperator) return;
+            ++operatorCalls;
+            if (UserDefinedCompoundAssign::IsIncrementOrDecrement(call, settings.get()))
+                ++incrementOrDecrement;
+            // Build a UserDefinedCompoundAssign from the call's method metadata.
+            auto target = std::make_unique<LdLoca>(MakeLocal("t", call->DeclaringType));
+            auto node = std::make_unique<UserDefinedCompoundAssign>(
+                call->MethodName, call->DeclaringType, call->ReturnType,
+                CompoundEvalMode::EvaluatesToNewValue,
+                std::move(target), CompoundTargetKind::Address,
+                std::make_unique<LdcI4>(1));
+            node->CheckInvariant(ILPhase::Normal);
+            std::string dump = node->ToString();
+            EXPECT_NE(dump.find("compound.assign.userdefined"), std::string::npos) << dump;
+            EXPECT_EQ(node->ResultType(), call->ReturnType);
+            ++constructed;
+        });
+        fn->CheckInvariant(ILPhase::Normal);
+        if (processed >= 8000) break;
+    }
+    EXPECT_GT(processed, 5000);
+    // The .NET Framework 4 legacy-csc mscorlib carries operator overloads
+    // (System.Decimal's op_Equality/op_Addition/etc.), so the reader marks real
+    // operator calls and the sweep constructs the nodes.
+    EXPECT_GT(operatorCalls, 0);
+    EXPECT_GT(constructed, 0);
 }
