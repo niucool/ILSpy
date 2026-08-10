@@ -325,14 +325,14 @@ bool ValidateCompoundAssign(const BinaryNumericInstruction* binary, const Conv* 
 // TransformAssignment is an IStatementTransform (a child of the GetILTransforms()
 // StatementTransform, after ILInlining / ExpressionTransforms / the deferred
 // DynamicIsEventAssignmentTransform) that rewrites inline-assignment and compound-
-// assignment patterns into the cleaner ILAst forms. This iteration ports the
-// self-contained TransformPostIncDecOperatorWithInlineStore binary case (the
-// local/StLoc post-increment/decrement fold the D131 helpers unblock); the
-// operator-call (op_Increment/op_Decrement) case (needs the
-// UserDefinedCompoundAssign node + Call.IsLifted) and the
-// TransformInlineAssignment* / TransformPostIncDecOperator (non-inline-store) /
-// TransformPreIncDecOperatorWithInlineStore StObj/Call cases (need InferType /
-// IsSameMember / IMethod) are deferred.
+// assignment patterns into the cleaner ILAst forms. The per-statement Run wires
+// the three inc/dec folds (TransformPostIncDecOperatorWithInlineStore /
+// TransformPostIncDecOperator / TransformPreIncDecOperatorWithInlineStore), each
+// with a binary case (D132/D133/D134, the `binary.op(ldloc, 1)` shape that builds
+// a NumericCompoundAssign) and an operator-call case (D136, the `call
+// op_Increment(arg)` shape that builds a UserDefinedCompoundAssign from the
+// operator Call's resolved method metadata). The TransformInlineAssignment*
+// StObj/Call cases (need InferType / IsSameMember / IMethod) are deferred.
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -372,6 +372,18 @@ bool IsLdcOne(const ILInstruction* inst) {
     }
 }
 
+// The short method name (the part after "::") of a resolved Call MethodName
+// ("Namespace.Type::Member" -> "Member"). The inline-store inc/dec operator-call
+// folds consult the bare name (op_Increment / op_Decrement) rather than
+// UserDefinedCompoundAssign::IsIncrementOrDecrement (which also accepts the
+// checked variants) -- the C# inline-store cases use the bare name only.
+// Mirrors the NullableLiftingTransform::ShortMethodName / the
+// CompoundAssignmentInstruction.cpp ShortMethodName helpers.
+std::string_view ShortMethodName(std::string_view fullName) {
+    const auto pos = fullName.rfind("::");
+    return pos != std::string_view::npos ? fullName.substr(pos + 2) : fullName;
+}
+
 } // namespace
 
 void TransformAssignment::Run(Block& block, int pos, StatementTransformContext& context) {
@@ -408,6 +420,10 @@ bool TransformAssignment::TransformPostIncDecOperatorWithInlineStore(
     ILInstruction* unwrapped = UnwrapSmallIntegerConv(value, conv);
     auto* binary = dynamic_cast<BinaryNumericInstruction*>(unwrapped);
     StLoc* stloc = nullptr;
+    // Set in the operator-call (op_Increment/op_Decrement) branch; nullptr in
+    // the binary branch. The two are disjoint (a Call is never a
+    // BinaryNumericInstruction), so exactly one is set on the success path.
+    Call* operatorCall = nullptr;
     if (binary != nullptr && IsLdcOne(binary->Right.get())) {
         // Only Add/Sub (the ++ / -- operators) are valid post-inc/dec.
         if (!(binary->Operator == BinaryNumericOperator::Add ||
@@ -435,10 +451,24 @@ bool TransformAssignment::TransformPostIncDecOperatorWithInlineStore(
         // captures the old value into tmp and yields it (the binary's left
         // operand). The fold promotes tmp to the compound assign's result.
         stloc = dynamic_cast<StLoc*>(binary->Left.get());
+    } else if ((operatorCall = dynamic_cast<Call*>(value)) != nullptr) {
+        // The operator-call (op_Increment/op_Decrement) case: the C# checks
+        // `value is Call operatorCall && operatorCall.Method.IsOperator &&
+        // operatorCall.Arguments.Count == 1` then the BARE method name (NOT
+        // IsIncrementOrDecrement, which also accepts op_CheckedIncrement /
+        // op_CheckedDecrement -- the inline-store cases in C# use the bare
+        // name only). This port's Call carries IsOperator (set by the IL
+        // reader from the op_* name); IsLifted defaults false (this port has
+        // no resolver / ILiftedOperator). `stloc` is the operator call's
+        // single argument (the inline-store StLoc capturing the old value).
+        if (!operatorCall->IsOperator || operatorCall->Arguments.size() != 1)
+            return false;
+        const auto name = ShortMethodName(operatorCall->MethodName);
+        if (name != "op_Increment" && name != "op_Decrement") return false;
+        if (operatorCall->IsLifted) return false;  // TODO: lifted user-defined operators
+        stloc = dynamic_cast<StLoc*>(operatorCall->Arguments[0].get());
     } else {
-        // The operator-call (op_Increment/op_Decrement) case is deferred: it
-        // needs the UserDefinedCompoundAssign node + Call.IsLifted. Bail
-        // conservatively (no fold) for any other value shape.
+        // Any other value shape is not a post-inc/dec the fold handles.
         return false;
     }
     if (stloc == nullptr) return false;
@@ -470,24 +500,50 @@ bool TransformAssignment::TransformPostIncDecOperatorWithInlineStore(
             finalizeMatch(*fn);
     }
 
-    // Detach the binary's right operand (the constant 1) before the store is
-    // destroyed by SetChild (no GC -- a raw pointer into the store would dangle).
-    auto rhs = std::move(binary->Right);
-    // Build the NumericCompoundAssign from the binary's fields (the C#
-    // NumericCompoundAssign constructor copies Operator/Sign/LeftInputType/
-    // RightInputType/UnderlyingResultType/IsLifted/CheckForOverflow from the
-    // binary) + the fresh LdLoca target + the detached constant + the (possibly
-    // sign-swapped) store type, in the EvaluatesToOldValue (post-inc/dec) mode.
-    auto nca = std::make_unique<NumericCompoundAssign>(
-        binary->Operator, binary->CheckForOverflow, binary->Sign,
-        binary->LeftInputType, binary->RightInputType, binary->ResultStackType,
-        binary->IsLifted, targetType, CompoundEvalMode::EvaluatesToOldValue,
-        std::move(target), targetKind, std::move(rhs));
-    // stloc tmp(NumericCompoundAssign.op.old(ldloca target, ldc.i4 1)) =
-    // `tmp = target++`. The new StLoc replaces the store at pos; the old store
-    // (with its now-null-Right binary and the inline-store StLoc) is destroyed.
+    // The result StLoc carries tmp (the inline-store temp), not the target.
+    // Capture it before SetChild destroys the store (and the inline store).
     ILVariablePtr tmpVar = stloc->Variable;
-    block.SetChild(pos, std::make_unique<StLoc>(tmpVar, std::move(nca)));
+    if (binary != nullptr) {
+        // Detach the binary's right operand (the constant 1) before the store
+        // is destroyed by SetChild (no GC -- a raw pointer into the store
+        // would dangle).
+        auto rhs = std::move(binary->Right);
+        // Build the NumericCompoundAssign from the binary's fields (the C#
+        // NumericCompoundAssign constructor copies Operator/Sign/LeftInputType/
+        // RightInputType/UnderlyingResultType/IsLifted/CheckForOverflow from
+        // the binary) + the fresh LdLoca target + the detached constant + the
+        // (possibly sign-swapped) store type, in the EvaluatesToOldValue
+        // (post-inc/dec) mode.
+        auto nca = std::make_unique<NumericCompoundAssign>(
+            binary->Operator, binary->CheckForOverflow, binary->Sign,
+            binary->LeftInputType, binary->RightInputType, binary->ResultStackType,
+            binary->IsLifted, targetType, CompoundEvalMode::EvaluatesToOldValue,
+            std::move(target), targetKind, std::move(rhs));
+        // stloc tmp(NumericCompoundAssign.op.old(ldloca target, ldc.i4 1)) =
+        // `tmp = target++`. The new StLoc replaces the store at pos; the old
+        // store (with its now-null-Right binary and the inline-store StLoc) is
+        // destroyed.
+        block.SetChild(pos, std::make_unique<StLoc>(tmpVar, std::move(nca)));
+    } else {
+        // The operator-call case builds a UserDefinedCompoundAssign from the
+        // operator Call's resolved method name + declaring type + return stack
+        // type (this port models a method by its resolved name + declaring
+        // type, like Call -- no IMethod), with a fresh LdcI4(1) value (the
+        // post-increment's implicit `1` operand), in the EvaluatesToOldValue
+        // (post-inc/dec) mode. Capture the method metadata before SetChild
+        // destroys the store (and the call): a string copy + a shared_ptr
+        // copy + a StackType. The target LdLoca is already detached (owned
+        // by `target`), so no raw pointer into the call is read after the
+        // SetChild (the precondition-before-mutation discipline).
+        std::string methodName = operatorCall->MethodName;
+        TypeSystem::ITypePtr methodDeclaringType = operatorCall->DeclaringType;
+        StackType methodReturnType = operatorCall->ReturnType;
+        auto uca = std::make_unique<UserDefinedCompoundAssign>(
+            std::move(methodName), std::move(methodDeclaringType), methodReturnType,
+            CompoundEvalMode::EvaluatesToOldValue, std::move(target), targetKind,
+            std::make_unique<LdcI4>(1));
+        block.SetChild(pos, std::make_unique<StLoc>(tmpVar, std::move(uca)));
+    }
     return true;
 }
 
@@ -502,9 +558,10 @@ bool TransformAssignment::TransformPostIncDecOperatorWithInlineStore(
 // post-increments (the WithInlineStore expression form is Roslyn-era). When tmp
 // is dead (single-def, load-count 0), the StLoc is replaced with the compound
 // assign directly (a statement-level `target++`). The operator-call
-// (op_Increment/op_Decrement) case (needs UserDefinedCompoundAssign +
-// Call.IsLifted) and the StObj/Call compound-store cases (need InferType /
-// IsSameMember / IMethod) are deferred.
+// (op_Increment/op_Decrement) case (D136, building a UserDefinedCompoundAssign
+// from the operator Call) is wired into the same recognition + fold. The
+// StObj/Call compound-store cases (need InferType / IsSameMember / IMethod) are
+// deferred.
 // ---------------------------------------------------------------------------
 bool TransformAssignment::TransformPostIncDecOperator(
     Block& block, int pos, StatementTransformContext& context) {
@@ -561,59 +618,109 @@ bool TransformAssignment::TransformPostIncDecOperator(
     Conv* conv = nullptr;
     ILInstruction* unwrapped = UnwrapSmallIntegerConv(value, conv);
     auto* binary = dynamic_cast<BinaryNumericInstruction*>(unwrapped);
-    if (binary == nullptr) {
-        // The operator-call (op_Increment/op_Decrement) case is deferred: it
-        // needs the UserDefinedCompoundAssign node + Call.IsLifted. Bail
-        // conservatively (no fold).
-        return false;
-    }
-    // Only Add/Sub (the ++ / -- operators) are valid post-inc/dec.
-    if (!(binary->Operator == BinaryNumericOperator::Add ||
-          binary->Operator == BinaryNumericOperator::Sub))
-        return false;
-    // binary.Left must be ldloc tmp (the temp capturing the old value of target).
-    auto* bleft = dynamic_cast<LdLoc*>(binary->Left.get());
-    if (!bleft || bleft->Variable.get() != tmpVar.get()) return false;
-    // The PointerType target case (PointerArithmeticOffset.Detect) is deferred;
-    // the D129 validator rejects pointer types conservatively, so a pointer
-    // target would fail ValidateCompoundAssign below anyway.
-    if (!IsLdcOne(binary->Right.get())) return false;
-    // When a small-integer conv was unwrapped, fix a sign mismatch between the
-    // store type and the conv's target by flipping the store type's sign
-    // (SwapSign), so ValidateCompoundAssign's conv-match gate sees the corrected
-    // type. Same as the WithInlineStore case.
-    if (conv != nullptr) {
-        const PrimitiveType primitiveType = TypeSystem::ToPrimitiveType(targetType.get());
-        if (GetSize(primitiveType) == GetSize(conv->TargetType) &&
-            GetSign(primitiveType) != GetSign(conv->TargetType)) {
-            if (auto swapped = TypeSystem::SwapSign(targetType.get()))
-                targetType = std::move(swapped);
+    // Set in the operator-call (op_Increment/op_Decrement) branch; nullptr in
+    // the binary branch. The two are disjoint (a Call is never a
+    // BinaryNumericInstruction), so exactly one is set on the success path.
+    Call* operatorCall = nullptr;
+    if (binary != nullptr) {
+        // Only Add/Sub (the ++ / -- operators) are valid post-inc/dec.
+        if (!(binary->Operator == BinaryNumericOperator::Add ||
+              binary->Operator == BinaryNumericOperator::Sub))
+            return false;
+        // binary.Left must be ldloc tmp (the temp capturing the old value of target).
+        auto* bleft = dynamic_cast<LdLoc*>(binary->Left.get());
+        if (!bleft || bleft->Variable.get() != tmpVar.get()) return false;
+        // The PointerType target case (PointerArithmeticOffset.Detect) is deferred;
+        // the D129 validator rejects pointer types conservatively, so a pointer
+        // target would fail ValidateCompoundAssign below anyway.
+        if (!IsLdcOne(binary->Right.get())) return false;
+        // When a small-integer conv was unwrapped, fix a sign mismatch between the
+        // store type and the conv's target by flipping the store type's sign
+        // (SwapSign), so ValidateCompoundAssign's conv-match gate sees the corrected
+        // type. Same as the WithInlineStore case.
+        if (conv != nullptr) {
+            const PrimitiveType primitiveType = TypeSystem::ToPrimitiveType(targetType.get());
+            if (GetSize(primitiveType) == GetSize(conv->TargetType) &&
+                GetSign(primitiveType) != GetSign(conv->TargetType)) {
+                if (auto swapped = TypeSystem::SwapSign(targetType.get()))
+                    targetType = std::move(swapped);
+            }
         }
-    }
-    if (!ValidateCompoundAssign(binary, conv, targetType.get(), &context.Base.Settings))
+        if (!ValidateCompoundAssign(binary, conv, targetType.get(), &context.Base.Settings))
+            return false;
+    } else if ((operatorCall = dynamic_cast<Call*>(value)) != nullptr) {
+        // The operator-call (op_Increment/op_Decrement) case: the C# checks
+        // `value is Call operatorCall && operatorCall.Method.IsOperator &&
+        // operatorCall.Arguments.Count == 1` then `Arguments[0].MatchLdLoc(tmpVar)`
+        // (the operator's single argument is the tmp load) and
+        // `IsIncrementOrDecrement(Method, settings)` (which ALSO accepts the
+        // op_CheckedIncrement / op_CheckedDecrement variants gated on the
+        // CheckedOperators setting, unlike the inline-store cases which use the
+        // bare name). IsIncrementOrDecrement does the IsOperator + IsStatic gate
+        // internally; the outer IsOperator is redundant but faithful. The
+        // `Debug.Assert(truncation == ValuePreserved)` holds trivially: the
+        // ValueChanged / ValueChangedDueToSignMismatch cases already returned
+        // false above, so the operator-call branch is reached only with
+        // ValuePreserved (a user-defined operator returns the same type).
+        if (!operatorCall->IsOperator || operatorCall->Arguments.size() != 1)
+            return false;
+        auto* arg0 = dynamic_cast<LdLoc*>(operatorCall->Arguments[0].get());
+        if (!arg0 || arg0->Variable.get() != tmpVar.get()) return false;
+        if (!UserDefinedCompoundAssign::IsIncrementOrDecrement(operatorCall,
+                                                                  &context.Base.Settings))
+            return false;
+        if (operatorCall->IsLifted) return false;  // TODO: lifted user-defined operators
+    } else {
+        // Any other value shape is not a post-inc/dec the fold handles.
         return false;
+    }
 
-    context.Base.StepOnce("TransformPostIncDecOperator (builtin)");
+    context.Base.StepOnce(binary != nullptr ? "TransformPostIncDecOperator (builtin)"
+                                            : "TransformPostIncDecOperator (user-defined)");
     ILFunction* fn = FunctionOf(inst);
     if (finalizeMatch && fn)
         finalizeMatch(*fn);
 
-    // Detach the binary's right operand (the constant 1) before the store is
-    // destroyed by RemoveInstructionAt (no GC -- a raw pointer into the store
-    // would dangle).
-    auto rhs = std::move(binary->Right);
-    // Build the NumericCompoundAssign from the binary's fields + the fresh
-    // LdLoca target + the detached constant + the (possibly sign-swapped) store
-    // type, in the EvaluatesToOldValue (post-inc/dec) mode.
-    auto nca = std::make_unique<NumericCompoundAssign>(
-        binary->Operator, binary->CheckForOverflow, binary->Sign,
-        binary->LeftInputType, binary->RightInputType, binary->ResultStackType,
-        binary->IsLifted, targetType, CompoundEvalMode::EvaluatesToOldValue,
-        std::move(target), targetKind, std::move(rhs));
-    // inst.Value = nca (replace the ldloc target with the compound assign).
-    inst->SetChild(0, std::move(nca));
-    // Remove the store at pos+1 (the stloc target(binary.op(ldloc tmp, 1))).
-    // RemoveInstructionAt renumbers the remaining instructions' ChildIndex.
+    if (binary != nullptr) {
+        // Detach the binary's right operand (the constant 1) before the store is
+        // destroyed by RemoveInstructionAt (no GC -- a raw pointer into the store
+        // would dangle).
+        auto rhs = std::move(binary->Right);
+        // Build the NumericCompoundAssign from the binary's fields + the fresh
+        // LdLoca target + the detached constant + the (possibly sign-swapped)
+        // store type, in the EvaluatesToOldValue (post-inc/dec) mode.
+        auto nca = std::make_unique<NumericCompoundAssign>(
+            binary->Operator, binary->CheckForOverflow, binary->Sign,
+            binary->LeftInputType, binary->RightInputType, binary->ResultStackType,
+            binary->IsLifted, targetType, CompoundEvalMode::EvaluatesToOldValue,
+            std::move(target), targetKind, std::move(rhs));
+        // inst.Value = nca (replace the ldloc target with the compound assign).
+        inst->SetChild(0, std::move(nca));
+    } else {
+        // The operator-call case builds a UserDefinedCompoundAssign from the
+        // operator Call's resolved method name + declaring type + return stack
+        // type (this port models a method by its resolved name + declaring
+        // type, like Call -- no IMethod), with a fresh LdcI4(1) value (the
+        // post-increment's implicit `1` operand), in the EvaluatesToOldValue
+        // (post-inc/dec) mode. Capture the method metadata before
+        // RemoveInstructionAt destroys the store (and the call): a string copy
+        // + a shared_ptr copy + a StackType. The target LdLoca is already
+        // detached (owned by `target`); `inst->SetChild(0, ...)` only destroys
+        // inst->Value (the ldloc target), not the store, so the call is still
+        // valid at the capture (the precondition-before-mutation discipline).
+        std::string methodName = operatorCall->MethodName;
+        TypeSystem::ITypePtr methodDeclaringType = operatorCall->DeclaringType;
+        StackType methodReturnType = operatorCall->ReturnType;
+        auto uca = std::make_unique<UserDefinedCompoundAssign>(
+            std::move(methodName), std::move(methodDeclaringType), methodReturnType,
+            CompoundEvalMode::EvaluatesToOldValue, std::move(target), targetKind,
+            std::make_unique<LdcI4>(1));
+        // inst.Value = uca (replace the ldloc target with the compound assign).
+        inst->SetChild(0, std::move(uca));
+    }
+    // Remove the store at pos+1 (the stloc target(binary.op(ldloc tmp, 1)) or
+    // the stloc target(call op_Increment(ldloc tmp))). RemoveInstructionAt
+    // renumbers the remaining instructions' ChildIndex.
     block.RemoveInstructionAt(nextIdx);
     // Recompute variable usage after the removal: the C# InstructionCollection
     // ref-counting cascades Disconnected() through the removed store to the
@@ -626,8 +733,8 @@ bool TransformAssignment::TransformPostIncDecOperator(
     // statement-level post-increment: replace it with the compound assign
     // directly (a bare `target++`). This matches the C# `inst.ReplaceWith(inst.Value)`.
     if (tmpVar->IsSingleDefinition() && tmpVar->LoadCount == 0) {
-        auto val = inst->TakeChild(0);  // detach the NCA (inst->Value)
-        inst->ReplaceWith(std::move(val));  // replace the StLoc with the NCA
+        auto val = inst->TakeChild(0);  // detach the NCA/UCA (inst->Value)
+        inst->ReplaceWith(std::move(val));  // replace the StLoc with the compound assign
     }
     return true;
 }
@@ -644,9 +751,10 @@ bool TransformAssignment::TransformPostIncDecOperator(
 // assign directly. The shape is a double IsCompoundStore (the outer store's Value is
 // another StLoc -- the inline-store expression form). This is a Roslyn-era codegen
 // pattern (the legacy csc emits the statement form); the operator-call
-// (op_Increment/op_Decrement) case (needs UserDefinedCompoundAssign + Call.IsLifted)
-// and the StObj/Call compound-store cases (need InferType / IsSameMember / IMethod)
-// are deferred.
+// (op_Increment/op_Decrement) case (D136, building a UserDefinedCompoundAssign
+// from the operator Call) is wired into the same recognition + fold. The
+// StObj/Call compound-store cases (need InferType / IsSameMember / IMethod) are
+// deferred.
 // ---------------------------------------------------------------------------
 bool TransformAssignment::TransformPreIncDecOperatorWithInlineStore(
     Block& block, int pos, StatementTransformContext& context) {
@@ -681,6 +789,10 @@ bool TransformAssignment::TransformPreIncDecOperatorWithInlineStore(
     ILInstruction* unwrapped = UnwrapSmallIntegerConv(value2, conv);
     auto* binary = dynamic_cast<BinaryNumericInstruction*>(unwrapped);
     LdLoc* ldloc = nullptr;
+    // Set in the operator-call (op_Increment/op_Decrement) branch; nullptr in
+    // the binary branch. The two are disjoint (a Call is never a
+    // BinaryNumericInstruction), so exactly one is set on the success path.
+    Call* operatorCall = nullptr;
     if (binary != nullptr && IsLdcOne(binary->Right.get())) {
         // Only Add/Sub (the ++ / -- operators) are valid pre-inc/dec.
         if (!(binary->Operator == BinaryNumericOperator::Add ||
@@ -706,10 +818,24 @@ bool TransformAssignment::TransformPreIncDecOperatorWithInlineStore(
         // (the inner stloc target is the inline store, and its Value is the
         // binary whose Left reads the target).
         ldloc = dynamic_cast<LdLoc*>(binary->Left.get());
+    } else if ((operatorCall = dynamic_cast<Call*>(value2)) != nullptr) {
+        // The operator-call (op_Increment/op_Decrement) case: the C# checks
+        // `value2 is Call operatorCall && operatorCall.Method.IsOperator &&
+        // operatorCall.Arguments.Count == 1` then the BARE method name (NOT
+        // IsIncrementOrDecrement, which also accepts op_CheckedIncrement /
+        // op_CheckedDecrement -- the inline-store cases in C# use the bare
+        // name only). This port's Call carries IsOperator (set by the IL
+        // reader from the op_* name); IsLifted defaults false (this port has
+        // no resolver / ILiftedOperator). `ldloc` is the operator call's
+        // single argument (the LdLoc of the target being incremented).
+        if (!operatorCall->IsOperator || operatorCall->Arguments.size() != 1)
+            return false;
+        const auto name = ShortMethodName(operatorCall->MethodName);
+        if (name != "op_Increment" && name != "op_Decrement") return false;
+        if (operatorCall->IsLifted) return false;  // TODO: lifted user-defined operators
+        ldloc = dynamic_cast<LdLoc*>(operatorCall->Arguments[0].get());
     } else {
-        // The operator-call (op_Increment/op_Decrement) case is deferred: it
-        // needs the UserDefinedCompoundAssign node + Call.IsLifted. Bail
-        // conservatively (no fold) for any other value2 shape.
+        // Any other value2 shape is not a pre-inc/dec the fold handles.
         return false;
     }
     if (stloc_outer == nullptr || stloc_inner == nullptr || ldloc == nullptr)
@@ -744,24 +870,45 @@ bool TransformAssignment::TransformPreIncDecOperatorWithInlineStore(
             finalizeMatch(*fn);
     }
 
-    // Detach the binary's right operand (the constant 1) before the outer store
-    // is destroyed by SetChild (no GC -- a raw pointer into the binary would
-    // dangle). The binary is inside stloc_inner, inside stloc_outer, inside
-    // block.Instructions[pos]; SetChild(pos, ...) destroys all of them.
-    auto rhs = std::move(binary->Right);
-    // Build the NumericCompoundAssign from the binary's fields + the fresh
-    // LdLoca target + the detached constant + the (possibly sign-swapped) store
-    // type, in the EvaluatesToNewValue (pre-inc/dec) mode.
-    auto nca = std::make_unique<NumericCompoundAssign>(
-        binary->Operator, binary->CheckForOverflow, binary->Sign,
-        binary->LeftInputType, binary->RightInputType, binary->ResultStackType,
-        binary->IsLifted, targetType, CompoundEvalMode::EvaluatesToNewValue,
-        std::move(target), targetKind, std::move(rhs));
-    // stloc outer(NumericCompoundAssign.op.new(ldloca target, ldc.i4 1)) =
-    // `outer = ++target`. The new StLoc replaces the store at pos; the old store
-    // (with its inner stloc and the now-null-Right binary) is destroyed.
+    // The result StLoc carries the outer variable (the pre-increment
+    // expression's result). Capture it before SetChild destroys the store.
     ILVariablePtr outerVar = stloc_outer->Variable;
-    block.SetChild(pos, std::make_unique<StLoc>(outerVar, std::move(nca)));
+    if (binary != nullptr) {
+        // Detach the binary's right operand (the constant 1) before the outer
+        // store is destroyed by SetChild (no GC -- a raw pointer into the
+        // binary would dangle). The binary is inside stloc_inner, inside
+        // stloc_outer, inside block.Instructions[pos]; SetChild(pos, ...)
+        // destroys all of them.
+        auto rhs = std::move(binary->Right);
+        // Build the NumericCompoundAssign from the binary's fields + the fresh
+        // LdLoca target + the detached constant + the (possibly sign-swapped)
+        // store type, in the EvaluatesToNewValue (pre-inc/dec) mode.
+        auto nca = std::make_unique<NumericCompoundAssign>(
+            binary->Operator, binary->CheckForOverflow, binary->Sign,
+            binary->LeftInputType, binary->RightInputType, binary->ResultStackType,
+            binary->IsLifted, targetType, CompoundEvalMode::EvaluatesToNewValue,
+            std::move(target), targetKind, std::move(rhs));
+        block.SetChild(pos, std::make_unique<StLoc>(outerVar, std::move(nca)));
+    } else {
+        // The operator-call case builds a UserDefinedCompoundAssign from the
+        // operator Call's resolved method name + declaring type + return stack
+        // type (this port models a method by its resolved name + declaring
+        // type, like Call -- no IMethod), with a fresh LdcI4(1) value (the
+        // pre-increment's implicit `1` operand), in the EvaluatesToNewValue
+        // (pre-inc/dec) mode. Capture the method metadata before SetChild
+        // destroys the store (and the call): a string copy + a shared_ptr
+        // copy + a StackType. The target LdLoca is already detached (owned
+        // by `target`), so no raw pointer into the call is read after the
+        // SetChild (the precondition-before-mutation discipline).
+        std::string methodName = operatorCall->MethodName;
+        TypeSystem::ITypePtr methodDeclaringType = operatorCall->DeclaringType;
+        StackType methodReturnType = operatorCall->ReturnType;
+        auto uca = std::make_unique<UserDefinedCompoundAssign>(
+            std::move(methodName), std::move(methodDeclaringType), methodReturnType,
+            CompoundEvalMode::EvaluatesToNewValue, std::move(target), targetKind,
+            std::make_unique<LdcI4>(1));
+        block.SetChild(pos, std::make_unique<StLoc>(outerVar, std::move(uca)));
+    }
     return true;
 }
 

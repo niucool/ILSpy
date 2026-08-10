@@ -1392,8 +1392,8 @@ implemented and green here. Everything else follows the phase plan in
   (the WithInlineStore expression form fires 0 times), so the fold is a
   real-corpus transform -- the CLI `--csharp` output now has `++`/`--` operators
   (2446 lines) instead of the `V = V + 1` form, a readability improvement. The
-  operator-call (`op_Increment`/`op_Decrement`) case (needs
-  `UserDefinedCompoundAssign` + `Call.IsLifted`) and the
+  operator-call (`op_Increment`/`op_Decrement`) case (D136, now PORTED --
+  builds a `UserDefinedCompoundAssign` from the operator Call). The
   `TransformInlineAssignmentStObjOrCall` / `TransformInlineAssignmentLocal`
   StObj/Call cases (need `InferType` / `IsSameMember` / `IMethod`) are the
   subsequent in-order targets.
@@ -1443,11 +1443,16 @@ implemented and green here. Everything else follows the phase plan in
   `target--`/`--target` (op_Increment/op_Decrement, postfix for
   `EvaluatesToOldValue`, prefix for `EvaluatesToNewValue`) or the binary
   `target op= value` (op_Addition -> `+=`, ..., `string.Concat` -> `+=`),
-  matching the real back end's `VisitUserDefinedCompoundAssign`. No pipeline
-  transform constructs these nodes yet, so `--csharp` output is unchanged;
-  the foundation is exercised by the unit tests + an 8000-method mscorlib
-  sweep that constructs the nodes from real operator calls (System.Decimal's
-  op_Equality/op_Addition/etc.).
+  matching the real back end's `VisitUserDefinedCompoundAssign`. The
+  operator-call (`op_Increment`/`op_Decrement`) case of all three inc/dec
+  folds (D136) is now WIRED into the per-statement Run: it builds a
+  `UserDefinedCompoundAssign` from a 1-arg operator `Call` (gated on the bare
+  `op_Increment`/`op_Decrement` name for the inline-store cases, or
+  `IsIncrementOrDecrement` for the non-inline-store case which also accepts
+  the checked variants; `!Call.IsLifted`). The fold fires 0 times on the .NET
+  Framework 4 legacy-csc mscorlib corpus (faithfulness-only, matching the
+  D59/D60 precedent), so `--csharp` output is unchanged; the hand-built tests
+  verify the fold and an 8000-method sweep verifies the ILAst invariant holds.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end. It now produces readable C#: real parameter names (Param

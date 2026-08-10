@@ -22,9 +22,10 @@
 // IsMatchingCompoundLoad / ValidateCompoundAssign shared helpers, the
 // TransformPostIncDecOperatorWithInlineStore binary case (the local/StLoc
 // post-increment/decrement fold), the TransformPostIncDecOperator (non-inline-
-// store two-instruction) fold, and the TransformPreIncDecOperatorWithInlineStore
-// (local/StLoc pre-increment/decrement inline-store expression fold, D134). The
-// operator-call (op_Increment/op_Decrement) case and the
+// store two-instruction) fold, the TransformPreIncDecOperatorWithInlineStore
+// (local/StLoc pre-increment/decrement inline-store expression fold, D134), and
+// the operator-call (op_Increment/op_Decrement) case of all three inc/dec folds
+// (D136, building a UserDefinedCompoundAssign from the operator Call). The
 // TransformInlineAssignment* StObj/Call cases are deferred.
 
 #include "Decompiler/IL/ConversionKind.hpp"
@@ -118,6 +119,8 @@ using ILSpy::Decompiler::IL::StackType;
 using ILSpy::Decompiler::IL::StLoc;
 using ILSpy::Decompiler::IL::UnwrapSmallIntegerConv;
 using ILSpy::Decompiler::IL::Branch;
+using ILSpy::Decompiler::IL::Call;
+using ILSpy::Decompiler::IL::UserDefinedCompoundAssign;
 using ILSpy::Decompiler::IL::CachedDelegateInitialization;
 using ILSpy::Decompiler::IL::CachedReadOnlySpanInitialization;
 using ILSpy::Decompiler::IL::ConditionDetection;
@@ -853,6 +856,106 @@ std::unique_ptr<ILFunction> MakePostIncDec(
     return fn;
 }
 
+// A static operator Call named "Namespace.Type::op_Increment" (or op_Decrement
+// when `decrement` is true) with the given argument, declaring type, and return
+// stack type -- the shape the inc/dec operator-call folds build a
+// UserDefinedCompoundAssign from. Mirrors the CompoundAssignmentInstruction_Test
+// MakeOperatorCall helper.
+std::unique_ptr<Call> MakeOperatorIncCall(std::string methodName,
+                                          ITypePtr declaringType,
+                                          StackType returnType,
+                                          std::unique_ptr<ILInstruction> arg) {
+    auto call = std::make_unique<Call>(std::move(methodName));
+    call->IsOperator = true;
+    call->IsInstanceCall = false;  // static
+    call->DeclaringType = std::move(declaringType);
+    call->ReturnType = returnType;
+    call->AddArg(std::move(arg));
+    return call;
+}
+
+// Build the WithInlineStore operator-call block:
+//   block.Instructions[0] = stloc target(call op_Increment(stloc tmp(ldloc target)))
+// with a Leave(body) final, in a fresh single-block function. The operator
+// call's single argument is the inline-store StLoc capturing the old value of
+// target into tmp (the C# `stloc = operatorCall.Arguments[0] as StLoc`). The
+// fold produces `stloc tmp(UserDefinedCompoundAssign.op.old(ldloca target, 1))`
+// = `tmp = target++` (EvaluatesToOldValue).
+std::unique_ptr<ILFunction> MakeWithInlineStoreOperatorCall(
+    ILVariablePtr& target, ILVariablePtr& tmp, bool decrement) {
+    target = VarIdx("V_0", KT(KnownTypeCode::Int32), VariableKind::Local, 0);
+    tmp = VarIdx("S_0", KT(KnownTypeCode::Int32), VariableKind::StackSlot, -1);
+    auto inlineStore = std::make_unique<StLoc>(tmp, std::make_unique<LdLoc>(target));
+    auto call = MakeOperatorIncCall(
+        decrement ? "System.SByte::op_Decrement" : "System.SByte::op_Increment",
+        KT(KnownTypeCode::SByte), StackType::I4, std::move(inlineStore));
+    auto outerStore = std::make_unique<StLoc>(target, std::move(call));
+    auto fn = MakeFn();
+    auto* block = fn->Body->Blocks[0].get();
+    block->Add(std::move(outerStore));
+    block->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(target);
+    fn->Variables.push_back(tmp);
+    return fn;
+}
+
+// Build the non-inline-store (TransformPostIncDecOperator) operator-call block:
+//   block.Instructions[0] = stloc tmp(ldloc target)
+//   block.Instructions[1] = stloc target(call op_Increment(ldloc tmp))
+// with a Leave(body) final, in a fresh single-block function. The operator
+// call's single argument is `ldloc tmp` (the C#
+// `operatorCall.Arguments[0].MatchLdLoc(tmpVar)`). When `tmpIsLive` is false
+// (the default), tmp is dead so the fold produces a statement-level `target++`;
+// when true, a trailing `leave(body, ldloc tmp)` final keeps tmp live so the
+// fold produces `stloc tmp(target++)`.
+std::unique_ptr<ILFunction> MakePostIncDecOperatorCall(
+    ILVariablePtr& target, ILVariablePtr& tmp, bool decrement, bool tmpIsLive = false) {
+    target = VarIdx("V_0", KT(KnownTypeCode::Int32), VariableKind::Local, 0);
+    tmp = VarIdx("S_0", KT(KnownTypeCode::Int32), VariableKind::StackSlot, -1);
+    auto firstStore = std::make_unique<StLoc>(tmp, std::make_unique<LdLoc>(target));
+    auto call = MakeOperatorIncCall(
+        decrement ? "System.SByte::op_Decrement" : "System.SByte::op_Increment",
+        KT(KnownTypeCode::SByte), StackType::I4, std::make_unique<LdLoc>(tmp));
+    auto secondStore = std::make_unique<StLoc>(target, std::move(call));
+    auto fn = MakeFn();
+    auto* block = fn->Body->Blocks[0].get();
+    block->Add(std::move(firstStore));
+    block->Add(std::move(secondStore));
+    if (tmpIsLive) {
+        block->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdLoc>(tmp)));
+    } else {
+        block->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    }
+    fn->Variables.push_back(target);
+    fn->Variables.push_back(tmp);
+    return fn;
+}
+
+// Build the PreIncDecWithInlineStore operator-call block:
+//   block.Instructions[0] = stloc outer(stloc target(call op_Increment(ldloc target)))
+// with a Leave(body) final, in a fresh single-block function. The operator
+// call's single argument is `ldloc target` (the C# `ldloc =
+// operatorCall.Arguments[0] as LdLoc`). The fold produces
+// `stloc outer(UserDefinedCompoundAssign.op.new(ldloca target, 1))` =
+// `outer = ++target` (EvaluatesToNewValue).
+std::unique_ptr<ILFunction> MakePreIncDecWithInlineStoreOperatorCall(
+    ILVariablePtr& outer, ILVariablePtr& target, bool decrement) {
+    target = VarIdx("V_0", KT(KnownTypeCode::Int32), VariableKind::Local, 0);
+    outer = VarIdx("V_1", KT(KnownTypeCode::Int32), VariableKind::Local, 1);
+    auto call = MakeOperatorIncCall(
+        decrement ? "System.SByte::op_Decrement" : "System.SByte::op_Increment",
+        KT(KnownTypeCode::SByte), StackType::I4, std::make_unique<LdLoc>(target));
+    auto innerStore = std::make_unique<StLoc>(target, std::move(call));
+    auto outerStore = std::make_unique<StLoc>(outer, std::move(innerStore));
+    auto fn = MakeFn();
+    auto* block = fn->Body->Blocks[0].get();
+    block->Add(std::move(outerStore));
+    block->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(target);
+    fn->Variables.push_back(outer);
+    return fn;
+}
+
 } // namespace
 
 // The positive Add fold: stloc target(binary.add(stloc tmp(ldloc target), ldc.i4 1))
@@ -1423,6 +1526,279 @@ TEST(TransformAssignmentTest, PreIncDecWithInlineStoreSettingOffNoOp) {
     ASSERT_NE(dynamic_cast<StLoc*>(result->Value.get()), nullptr);
 }
 
+// ---- operator-call (op_Increment/op_Decrement) inc/dec folds (D136) ----
+//
+// The three inc/dec folds each have a binary case (D132/D133/D134, the
+// `binary.op(ldloc, 1)` shape) and an operator-call case (the
+// `call op_Increment(arg)` shape) that builds a UserDefinedCompoundAssign from
+// the operator Call's resolved method metadata. The operator-call case is a
+// Roslyn-era codegen pattern (the legacy csc emits the binary `V = V + 1`
+// form for builtin `++`, but uses `call op_Increment` for user-defined-operator
+// types like System.Decimal); the hand-built tests verify the fold and the
+// mscorlib sweep verifies the ILAst invariant holds across the corpus.
+
+// TransformPostIncDecOperatorWithInlineStore operator-call:
+//   stloc target(call op_Increment(stloc tmp(ldloc target)))
+// -> stloc tmp(UserDefinedCompoundAssign.op.old(ldloca target, ldc.i4 1)) =
+// `tmp = target++` (EvaluatesToOldValue). The operator call's single argument
+// is the inline-store StLoc capturing the old value of target into tmp.
+TEST(TransformAssignmentTest, PostIncDecWithInlineStoreOperatorCallFoldsIncrement) {
+    ILVariablePtr target, tmp;
+    auto fn = MakeWithInlineStoreOperatorCall(target, tmp, /*decrement=*/false);
+    auto* block = fn->Body->Blocks[0].get();
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* result = dynamic_cast<StLoc*>(block->Instructions[0].get());
+    ASSERT_NE(result, nullptr);
+    // The result StLoc carries tmp (the inline-store temp), not the target.
+    EXPECT_EQ(result->Variable.get(), tmp.get());
+    auto* uca = dynamic_cast<UserDefinedCompoundAssign*>(result->Value.get());
+    ASSERT_NE(uca, nullptr);
+    EXPECT_EQ(uca->Op, OpCode::UserDefinedCompoundAssign);
+    EXPECT_EQ(uca->EvalMode, CompoundEvalMode::EvaluatesToOldValue);
+    EXPECT_EQ(uca->TargetKind, CompoundTargetKind::Address);
+    // The target is a fresh LdLoca of the post-inc target.
+    auto* lda = dynamic_cast<LdLoca*>(uca->Target.get());
+    ASSERT_NE(lda, nullptr);
+    EXPECT_EQ(lda->Variable.get(), target.get());
+    // The value is the constant 1 (the post-increment's implicit operand).
+    auto* one = dynamic_cast<LdcI4*>(uca->Value.get());
+    ASSERT_NE(one, nullptr);
+    EXPECT_EQ(one->Value, 1);
+    // The method metadata is the operator call's resolved name.
+    EXPECT_EQ(uca->MethodName, "System.SByte::op_Increment");
+}
+
+// The op_Decrement (post-decrement `tmp = target--`) is also recognised.
+TEST(TransformAssignmentTest, PostIncDecWithInlineStoreOperatorCallFoldsDecrement) {
+    ILVariablePtr target, tmp;
+    auto fn = MakeWithInlineStoreOperatorCall(target, tmp, /*decrement=*/true);
+    auto* block = fn->Body->Blocks[0].get();
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* result = dynamic_cast<StLoc*>(block->Instructions[0].get());
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Variable.get(), tmp.get());
+    auto* uca = dynamic_cast<UserDefinedCompoundAssign*>(result->Value.get());
+    ASSERT_NE(uca, nullptr);
+    EXPECT_EQ(uca->EvalMode, CompoundEvalMode::EvaluatesToOldValue);
+    EXPECT_EQ(uca->MethodName, "System.SByte::op_Decrement");
+}
+
+// The inline-store cases use the BARE name check (op_Increment/op_Decrement
+// only); op_CheckedIncrement is NOT accepted by the inline-store folds (unlike
+// the non-inline-store TransformPostIncDecOperator, which uses
+// IsIncrementOrDecrement and accepts the checked variants gated on the
+// CheckedOperators setting).
+TEST(TransformAssignmentTest, PostIncDecWithInlineStoreOperatorCallRejectsCheckedVariant) {
+    ILVariablePtr target, tmp;
+    target = VarIdx("V_0", KT(KnownTypeCode::Int32), VariableKind::Local, 0);
+    tmp = VarIdx("S_0", KT(KnownTypeCode::Int32), VariableKind::StackSlot, -1);
+    auto inlineStore = std::make_unique<StLoc>(tmp, std::make_unique<LdLoc>(target));
+    auto call = MakeOperatorIncCall(
+        "System.SByte::op_CheckedIncrement", KT(KnownTypeCode::SByte),
+        StackType::I4, std::move(inlineStore));
+    auto outerStore = std::make_unique<StLoc>(target, std::move(call));
+    auto fn = MakeFn();
+    auto* block = fn->Body->Blocks[0].get();
+    block->Add(std::move(outerStore));
+    block->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(target);
+    fn->Variables.push_back(tmp);
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    // No fold: the original shape is unchanged.
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* result = dynamic_cast<StLoc*>(block->Instructions[0].get());
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Variable.get(), target.get());
+    // The Value is still the operator Call (no UCA produced).
+    ASSERT_NE(dynamic_cast<Call*>(result->Value.get()), nullptr);
+}
+
+// A lifted operator call (Call::IsLifted) is rejected (the C# `if
+// (operatorCall.IsLifted) return false; // TODO`). This port's Call::IsLifted
+// defaults false, so the fold fires for the default; this test sets it true to
+// verify the guard.
+TEST(TransformAssignmentTest, PostIncDecWithInlineStoreOperatorCallRejectsLifted) {
+    ILVariablePtr target, tmp;
+    auto fn = MakeWithInlineStoreOperatorCall(target, tmp, /*decrement=*/false);
+    // Set the operator call's IsLifted flag (the default is false).
+    auto* outerStore = dynamic_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_NE(outerStore, nullptr);
+    auto* call = dynamic_cast<Call*>(outerStore->Value.get());
+    ASSERT_NE(call, nullptr);
+    call->IsLifted = true;
+    auto* block = fn->Body->Blocks[0].get();
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    // No fold: the original shape is unchanged.
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* result = dynamic_cast<StLoc*>(block->Instructions[0].get());
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Variable.get(), target.get());
+    ASSERT_NE(dynamic_cast<Call*>(result->Value.get()), nullptr);
+}
+
+// TransformPostIncDecOperator operator-call (dead tmp -> statement-level `target++`):
+//   stloc tmp(ldloc target)
+//   stloc target(call op_Increment(ldloc tmp))
+// -> target++ (the bare UserDefinedCompoundAssign, EvaluatesToOldValue). The
+// operator call's single argument is `ldloc tmp` (MatchLdLoc(tmpVar)).
+TEST(TransformAssignmentTest, PostIncDecOperatorCallFoldsIncrementDeadTmp) {
+    ILVariablePtr target, tmp;
+    auto fn = MakePostIncDecOperatorCall(target, tmp, /*decrement=*/false, /*tmpIsLive=*/false);
+    auto* block = fn->Body->Blocks[0].get();
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    // The store at pos+1 is removed; the StLoc at pos is replaced with the bare
+    // UCA (a statement-level `target++`) because tmp is dead.
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* uca = dynamic_cast<UserDefinedCompoundAssign*>(block->Instructions[0].get());
+    ASSERT_NE(uca, nullptr);
+    EXPECT_EQ(uca->EvalMode, CompoundEvalMode::EvaluatesToOldValue);
+    EXPECT_EQ(uca->TargetKind, CompoundTargetKind::Address);
+    auto* lda = dynamic_cast<LdLoca*>(uca->Target.get());
+    ASSERT_NE(lda, nullptr);
+    EXPECT_EQ(lda->Variable.get(), target.get());
+    auto* one = dynamic_cast<LdcI4*>(uca->Value.get());
+    ASSERT_NE(one, nullptr);
+    EXPECT_EQ(one->Value, 1);
+    EXPECT_EQ(uca->MethodName, "System.SByte::op_Increment");
+}
+
+// TransformPostIncDecOperator operator-call (live tmp -> `stloc tmp(target--)`):
+// the trailing `leave(body, ldloc tmp)` final keeps tmp live so the fold
+// produces `stloc tmp(UserDefinedCompoundAssign.op.old(ldloca target, 1))`.
+TEST(TransformAssignmentTest, PostIncDecOperatorCallFoldsDecrementLiveTmp) {
+    ILVariablePtr target, tmp;
+    auto fn = MakePostIncDecOperatorCall(target, tmp, /*decrement=*/true, /*tmpIsLive=*/true);
+    auto* block = fn->Body->Blocks[0].get();
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    // The store at pos+1 is removed; the StLoc at pos carries the UCA.
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* result = dynamic_cast<StLoc*>(block->Instructions[0].get());
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Variable.get(), tmp.get());
+    auto* uca = dynamic_cast<UserDefinedCompoundAssign*>(result->Value.get());
+    ASSERT_NE(uca, nullptr);
+    EXPECT_EQ(uca->EvalMode, CompoundEvalMode::EvaluatesToOldValue);
+    EXPECT_EQ(uca->MethodName, "System.SByte::op_Decrement");
+}
+
+// The non-inline-store TransformPostIncDecOperator accepts op_CheckedIncrement
+// (gated on the CheckedOperators setting, default true) via IsIncrementOrDecrement.
+TEST(TransformAssignmentTest, PostIncDecOperatorCallFoldsCheckedIncrement) {
+    ILVariablePtr target, tmp;
+    target = VarIdx("V_0", KT(KnownTypeCode::Int32), VariableKind::Local, 0);
+    tmp = VarIdx("S_0", KT(KnownTypeCode::Int32), VariableKind::StackSlot, -1);
+    auto firstStore = std::make_unique<StLoc>(tmp, std::make_unique<LdLoc>(target));
+    auto call = MakeOperatorIncCall(
+        "System.SByte::op_CheckedIncrement", KT(KnownTypeCode::SByte),
+        StackType::I4, std::make_unique<LdLoc>(tmp));
+    auto secondStore = std::make_unique<StLoc>(target, std::move(call));
+    auto fn = MakeFn();
+    auto* block = fn->Body->Blocks[0].get();
+    block->Add(std::move(firstStore));
+    block->Add(std::move(secondStore));
+    block->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(target);
+    fn->Variables.push_back(tmp);
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* uca = dynamic_cast<UserDefinedCompoundAssign*>(block->Instructions[0].get());
+    ASSERT_NE(uca, nullptr);
+    EXPECT_EQ(uca->MethodName, "System.SByte::op_CheckedIncrement");
+}
+
+// A non-matching operator argument (the call's argument is ldloc of a
+// different variable than tmp) is rejected by the MatchLdLoc(tmpVar) gate.
+TEST(TransformAssignmentTest, PostIncDecOperatorCallRejectsNonMatchingArg) {
+    ILVariablePtr target, tmp, other;
+    target = VarIdx("V_0", KT(KnownTypeCode::Int32), VariableKind::Local, 0);
+    tmp = VarIdx("S_0", KT(KnownTypeCode::Int32), VariableKind::StackSlot, -1);
+    other = VarIdx("V_1", KT(KnownTypeCode::Int32), VariableKind::Local, 1);
+    auto firstStore = std::make_unique<StLoc>(tmp, std::make_unique<LdLoc>(target));
+    // The operator call's argument is `ldloc other`, not `ldloc tmp`.
+    auto call = MakeOperatorIncCall(
+        "System.SByte::op_Increment", KT(KnownTypeCode::SByte),
+        StackType::I4, std::make_unique<LdLoc>(other));
+    auto secondStore = std::make_unique<StLoc>(target, std::move(call));
+    auto fn = MakeFn();
+    auto* block = fn->Body->Blocks[0].get();
+    block->Add(std::move(firstStore));
+    block->Add(std::move(secondStore));
+    block->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(target);
+    fn->Variables.push_back(tmp);
+    fn->Variables.push_back(other);
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    // No fold: the two-instruction shape is unchanged.
+    ASSERT_EQ(block->Instructions.size(), 2u);
+}
+
+// TransformPreIncDecOperatorWithInlineStore operator-call:
+//   stloc outer(stloc target(call op_Increment(ldloc target)))
+// -> stloc outer(UserDefinedCompoundAssign.op.new(ldloca target, ldc.i4 1)) =
+// `outer = ++target` (EvaluatesToNewValue). The operator call's single
+// argument is `ldloc target` (the LdLoc of the target being incremented).
+TEST(TransformAssignmentTest, PreIncDecWithInlineStoreOperatorCallFoldsIncrement) {
+    ILVariablePtr outer, target;
+    auto fn = MakePreIncDecWithInlineStoreOperatorCall(outer, target, /*decrement=*/false);
+    auto* block = fn->Body->Blocks[0].get();
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* result = dynamic_cast<StLoc*>(block->Instructions[0].get());
+    ASSERT_NE(result, nullptr);
+    // The result StLoc carries the outer variable (the pre-increment expression's
+    // result), not the target.
+    EXPECT_EQ(result->Variable.get(), outer.get());
+    auto* uca = dynamic_cast<UserDefinedCompoundAssign*>(result->Value.get());
+    ASSERT_NE(uca, nullptr);
+    EXPECT_EQ(uca->EvalMode, CompoundEvalMode::EvaluatesToNewValue);
+    EXPECT_EQ(uca->TargetKind, CompoundTargetKind::Address);
+    auto* lda = dynamic_cast<LdLoca*>(uca->Target.get());
+    ASSERT_NE(lda, nullptr);
+    EXPECT_EQ(lda->Variable.get(), target.get());
+    auto* one = dynamic_cast<LdcI4*>(uca->Value.get());
+    ASSERT_NE(one, nullptr);
+    EXPECT_EQ(one->Value, 1);
+    EXPECT_EQ(uca->MethodName, "System.SByte::op_Increment");
+}
+
+// The op_Decrement (pre-decrement `outer = --target`) is also recognised.
+TEST(TransformAssignmentTest, PreIncDecWithInlineStoreOperatorCallFoldsDecrement) {
+    ILVariablePtr outer, target;
+    auto fn = MakePreIncDecWithInlineStoreOperatorCall(outer, target, /*decrement=*/true);
+    auto* block = fn->Body->Blocks[0].get();
+    ILTransformContext ctx;
+    RunTA(*block, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(block->Instructions.size(), 1u);
+    auto* result = dynamic_cast<StLoc*>(block->Instructions[0].get());
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Variable.get(), outer.get());
+    auto* uca = dynamic_cast<UserDefinedCompoundAssign*>(result->Value.get());
+    ASSERT_NE(uca, nullptr);
+    EXPECT_EQ(uca->EvalMode, CompoundEvalMode::EvaluatesToNewValue);
+    EXPECT_EQ(uca->MethodName, "System.SByte::op_Decrement");
+}
+
 // ---- mscorlib sweep (TransformAssignment in the full per-statement pipeline) ----
 
 // Run the GetILTransforms() pre-pipeline through CachedReadOnlySpanInitialization
@@ -1497,6 +1873,24 @@ int CountNumericCompoundAssignNew(ILFunction& fn) {
     return count;
 }
 
+// Count UserDefinedCompoundAssign nodes (the operator-call op_Increment /
+// op_Decrement inc/dec fold result). Whether the legacy-csc mscorlib corpus
+// contains any user-defined-operator post/pre-increments (e.g. `d++` on a
+// System.Decimal) is corpus-dependent; the count verifies the operator-call
+// fold is exercised on the corpus without crashing or corrupting the tree.
+int CountUserDefinedCompoundAssign(ILFunction& fn) {
+    int count = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (dynamic_cast<UserDefinedCompoundAssign*>(inst))
+            ++count;
+        for (int i = 0; i < inst->ChildCount(); ++i)
+            walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return count;
+}
+
 // The TransformPostIncDecOperator shape (the non-inline-store two-instruction
 // `stloc tmp(ldloc target)` + `stloc target(binary.op(ldloc tmp, 1))` post-
 // increment) arises on the .NET Framework 4 legacy-csc mscorlib corpus (a corpus
@@ -1519,6 +1913,7 @@ TEST(TransformAssignmentTest, MscorlibSweepPreservesInvariant) {
     int processed = 0;
     int totalFolds = 0;
     int totalNewFolds = 0;
+    int totalUserDefinedFolds = 0;
     ILTransformContext ctx;
     for (const auto& m : f.MethodDefs()) {
         if (m.RVA == 0) continue;
@@ -1529,6 +1924,7 @@ TEST(TransformAssignmentTest, MscorlibSweepPreservesInvariant) {
         fn->CheckInvariant(ILPhase::Normal);
         totalFolds += CountNumericCompoundAssignOld(*fn);
         totalNewFolds += CountNumericCompoundAssignNew(*fn);
+        totalUserDefinedFolds += CountUserDefinedCompoundAssign(*fn);
         if (processed >= 8000) break;
     }
     EXPECT_GT(processed, 5000);
@@ -1539,4 +1935,12 @@ TEST(TransformAssignmentTest, MscorlibSweepPreservesInvariant) {
     // is a Roslyn-era codegen pattern that fires 0 times on the legacy-csc corpus,
     // so the NewValue NCA count is 0 (the transform does not misfire on this corpus).
     EXPECT_EQ(totalNewFolds, 0);
+    // The operator-call (op_Increment/op_Decrement) inc/dec fold fires 0 times on
+    // the .NET Framework 4 legacy-csc mscorlib corpus (a corpus probe found 0
+    // UserDefinedCompoundAssign nodes across 8000 methods -- the legacy csc does
+    // not emit `call op_Increment` for `++` on user-defined-operator types in
+    // this corpus), so the count is 0 (faithfulness-only, matching the
+    // D59/D60/D69 precedent); the per-method CheckInvariant above verifies the
+    // fold does not crash or corrupt the tree on the corpus.
+    EXPECT_EQ(totalUserDefinedFolds, 0);
 }

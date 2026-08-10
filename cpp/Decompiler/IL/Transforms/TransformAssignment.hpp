@@ -180,51 +180,58 @@ bool IsImplicitTruncation(const ILInstruction* value,
 // TransformPreIncDecOperatorWithInlineStore (gated on
 // IntroduceIncrementAndDecrement); each consults the shared IsCompoundStore /
 // IsMatchingCompoundLoad / UnwrapSmallIntegerConv / ValidateCompoundAssign /
-// RecombineVariables helpers above. This iteration ports the self-contained
-// TransformPostIncDecOperatorWithInlineStore binary case (the local/StLoc
-// post-increment `stloc target(binary.add(stloc tmp(ldloc target), ldc.i4 1))`
-// -> `stloc tmp(compound.assign.add.old(ldloca target, ldc.i4 1))` = `tmp =
-// target++`), the simplest wired fold the D131 helpers unblock. The operator-call
-// (op_Increment/op_Decrement) case (needs the UserDefinedCompoundAssign node +
-// Call.IsLifted) and the TransformInlineAssignment* / TransformPreIncDecOperatorWithInlineStore
-// StObj/Call cases (need InferType / IsSameMember / IMethod) are deferred.
+// RecombineVariables helpers above. The per-statement Run wires the three
+// inc/dec folds (TransformPostIncDecOperatorWithInlineStore /
+// TransformPostIncDecOperator / TransformPreIncDecOperatorWithInlineStore),
+// each with a binary case (D132/D133/D134, the `binary.op(ldloc, 1)` shape)
+// and an operator-call case (D136, the `call op_Increment(arg)` shape that
+// builds a UserDefinedCompoundAssign from the operator Call's resolved method
+// metadata). The TransformInlineAssignment* StObj/Call cases (need InferType /
+// IsSameMember / IMethod) are deferred.
 class TransformAssignment : public IStatementTransform {
 public:
 	void Run(Block& block, int pos, StatementTransformContext& context) override;
 
 private:
-	// TransformPostIncDecOperatorWithInlineStore (binary case): folds the local
-	// post-increment/decrement `stloc target(binary.op(stloc tmp(ldloc target),
-	// ldc.i4 1))` (a single non-terminal at block.Instructions[pos]) into `stloc
+	// TransformPostIncDecOperatorWithInlineStore (binary + operator-call cases):
+	// folds the local post-increment/decrement
+	//   stloc target(binary.op(stloc tmp(ldloc target), ldc.i4 1))
+	// (a single non-terminal at block.Instructions[pos]) into `stloc
 	// tmp(NumericCompoundAssign.op.old(ldloca target, ldc.i4 1))` (= `tmp =
-	// target++`), the C# `EvaluatesToOldValue` compound assign. Gated on
-	// IntroduceIncrementAndDecrement. The if-as-final block-model adaptation is
-	// trivial (the store is a non-terminal, not a final). Returns true if a fold
-	// fired.
+	// target++`), the C# `EvaluatesToOldValue` compound assign. The operator-call
+	// variant folds `stloc target(call op_Increment(stloc tmp(ldloc target)))`
+	// into `stloc tmp(UserDefinedCompoundAssign.op.old(ldloca target, 1))`. Gated
+	// on IntroduceIncrementAndDecrement. The if-as-final block-model adaptation
+	// is trivial (the store is a non-terminal, not a final). Returns true if a
+	// fold fired.
 	bool TransformPostIncDecOperatorWithInlineStore(Block& block, int pos,
 	                                                StatementTransformContext& context);
 
-	// TransformPostIncDecOperator (binary, non-inline-store case): folds the
-	// two-instruction post-increment/decrement
+	// TransformPostIncDecOperator (binary + operator-call cases, non-inline-store):
+	// folds the two-instruction post-increment/decrement
 	//   stloc tmp(ldloc target)              at Instructions[i]
 	//   stloc target(binary.op(ldloc tmp, 1)) at Instructions[i+1]
 	// into `stloc tmp(NumericCompoundAssign.op.old(ldloca target, 1))` (= `tmp =
-	// target++`), and removes the store at i+1. When tmp is dead (single-def,
-	// load-count 0), the StLoc is replaced with the compound assign directly (a
-	// statement-level `target++`). The legacy csc emits this two-instruction shape
-	// for local post-increments (the WithInlineStore expression form is Roslyn-era).
+	// target++`), and removes the store at i+1. The operator-call variant folds
+	// `stloc target(call op_Increment(ldloc tmp))` into a UserDefinedCompoundAssign.
+	// When tmp is dead (single-def, load-count 0), the StLoc is replaced with the
+	// compound assign directly (a statement-level `target++`). The legacy csc
+	// emits this two-instruction shape for local post-increments (the
+	// WithInlineStore expression form is Roslyn-era).
 	// Returns true if a fold fired.
 	bool TransformPostIncDecOperator(Block& block, int pos,
 	                                 StatementTransformContext& context);
 
-	// TransformPreIncDecOperatorWithInlineStore (binary case): folds the local
-	// pre-increment/decrement `stloc outer(stloc target(binary.op(ldloc target,
-	// ldc.i4 1)))` (a single non-terminal at block.Instructions[pos], the inline-
-	// store expression form) into `stloc outer(NumericCompoundAssign.op.new(
-	// ldloca target, ldc.i4 1))` (= `outer = ++target`), the C#
-	// `EvaluatesToNewValue` compound assign. The inner stloc target is eliminated
-	// (its variable is recombined with the ldloc's via the finalizeMatch; a no-op
-	// when they are the same variable). Gated on IntroduceIncrementAndDecrement.
+	// TransformPreIncDecOperatorWithInlineStore (binary + operator-call cases):
+	// folds the local pre-increment/decrement `stloc outer(stloc target(binary.op(
+	// ldloc target, ldc.i4 1)))` (a single non-terminal at block.Instructions[pos],
+	// the inline-store expression form) into `stloc outer(NumericCompoundAssign.op.
+	// new(ldloca target, ldc.i4 1))` (= `outer = ++target`), the C#
+	// `EvaluatesToNewValue` compound assign. The operator-call variant folds
+	// `stloc outer(stloc target(call op_Increment(ldloc target)))` into a
+	// UserDefinedCompoundAssign. The inner stloc target is eliminated (its
+	// variable is recombined with the ldloc's via the finalizeMatch; a no-op when
+	// they are the same variable). Gated on IntroduceIncrementAndDecrement.
 	// Returns true if a fold fired.
 	bool TransformPreIncDecOperatorWithInlineStore(Block& block, int pos,
 	                                                StatementTransformContext& context);
