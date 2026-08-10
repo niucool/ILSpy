@@ -60,6 +60,7 @@
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
+#include "Decompiler/IL/Instructions/UserDefinedLogicOperator.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -884,6 +885,23 @@ private:
                 std::string left = tv.Left ? Expr(*tv.Left) : std::string("(default)");
                 std::string right = tv.Right ? Expr(*tv.Right) : std::string("(default)");
                 return "(" + left + " | " + right + ")";
+            }
+            case OpCode::UserDefinedLogicOperator: {
+                // A user-defined short-circuiting logic operator: `left && right`
+                // for op_BitwiseAnd, `left || right` for op_BitwiseOr. Faithful
+                // to the real back end's VisitUserDefinedLogicOperator (a
+                // BinaryOperatorExpression with the ConditionalAnd /
+                // ConditionalOr operator derived from the method name). The
+                // operator is the short method name (after "::"), matching
+                // GetBinaryOperatorTypeFromMetadataName.
+                const auto& ul = static_cast<const UserDefinedLogicOperator&>(inst);
+                std::string left = ul.Left ? Expr(*ul.Left) : std::string("(default)");
+                std::string right = ul.Right ? Expr(*ul.Right) : std::string("(default)");
+                auto pos = ul.MethodName.rfind("::");
+                std::string shortName = (pos != std::string::npos)
+                    ? ul.MethodName.substr(pos + 2) : ul.MethodName;
+                const char* op = (shortName == "op_BitwiseOr") ? "||" : "&&";
+                return "(" + left + " " + op + " " + right + ")";
             }
             case OpCode::NullableRewrap: {
                 // The C# null-conditional rewrap is implicit in the `?.`

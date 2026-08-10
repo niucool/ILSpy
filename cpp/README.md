@@ -1485,6 +1485,44 @@ implemented and green here. Everything else follows the phase plan in
   `HandleCompoundAssign` StObj/Call compound-assign entry (blocked by the same
   StObj/Call `IsCompoundStore`/`IsMatchingCompoundLoad` prerequisites) are the
   subsequent in-order targets.
+  The `UserDefinedLogicOperator` ILAst node (Instructions/, a
+  tested-but-not-yet-wired foundation) ports the C# user-defined short-circuiting
+  `&&` / `||` operator node (the `op_BitwiseAnd` / `op_BitwiseOr` overloads paired
+  with `op_True` / `op_False`) ahead of the next in-order
+  `UserDefinedLogicTransform` (the next per-statement child of `StatementTransform`
+  after the wired `TransformAssignment` pieces). It extends `BinaryInstruction`
+  (the `ThreeValuedBoolAnd/Or` precedent) with a `MethodName` + `MethodDeclaringType`
+  `IMethod` stand-in (the `UserDefinedCompoundAssign` / `Call` precedent -- this
+  port has no `IMethod`), `ResultType` O, `DirectFlags` MayThrow|SideEffect|ControlFlow,
+  and a `Flags()` override porting the C# `ComputeFlags` (the Left is always
+  executed, the Right only sometimes -- short-circuit -- so the Right combines via
+  `CombineBranches(None, right.Flags)`, the `NullCoalescingInstruction` / `IfInstruction`
+  precedent). The dump renders `user.logic Method(left, right)`. The ILAstToCSharp
+  seed renders `op_BitwiseAnd` as `left && right` and `op_BitwiseOr` as `left || right`,
+  faithful to the real back end's `VisitUserDefinedLogicOperator` (a
+  `BinaryOperatorExpression` with `ConditionalAnd` / `ConditionalOr`). The node
+  + seed are NOT wired into a pipeline transform yet (no consumer -- the next
+  in-order `UserDefinedLogicTransform` is the subsequent iteration), so `--csharp`
+  output is unchanged. The `OpCode::UserDefinedLogicOperator` value was pre-declared
+  in `OpCode.hpp`, so porting needed only the subclass header (the D95/D125 precedent).
+  8 new gtest cases cover the node invariant/flags/ResultType/dump, the Left/Right
+  typed slots + re-parenting, the `CombineBranches` Right-short-circuit flags
+  propagation (a Branch Right over a pure LdLoc Left keeps the endpoint reachable),
+  the seed rendering of `&&` / `||`, and an 8000-method mscorlib sweep constructing
+  the node over real LdLoc operands. 990/990 tests pass; the CLI decompiles mscorlib
+  end-to-end with no regression. The next in-order `UserDefinedLogicTransform` needs
+  this node plus the `MatchCondition` / `MatchBitwiseCall` helpers (recognise a 1-arg
+  `op_True`/`op_False` and a 2-arg `op_BitwiseAnd`/`op_BitwiseOr` operator `Call` --
+  `Call::IsOperator` and `Call::IsLifted` are already in place) and the block-model
+  adaptation for the if-as-final shape (a pre-pipeline corpus probe of the real
+  post-ConditionDetection shape, the D73/D75/D79 precedent), plus an
+  `IsUsedWithin` check ported as a tree walk (the D110/D130 precedent). The remaining
+  in-order per-statement children (`TransformArrayInitializers` /
+  `TransformCollectionAndObjectInitializers` / `TransformExpressionTrees` /
+  `IndexRangeTransform` / `DeconstructionTransform` / `NamedArgumentTransform` /
+  `RemoveUnconstrainedGenericReferenceTypeCheck` / `InterpolatedStringTransform`)
+  and the remaining `TransformAssignment` StObj/Call pieces (blocked by `InferType` /
+  `IsSameMember` / `IMethod`) are the subsequent in-order targets.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end. It now produces readable C#: real parameter names (Param
