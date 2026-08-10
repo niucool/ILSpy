@@ -863,7 +863,10 @@ private:
             }
             case OpCode::LdLoca: {
                 const auto& ld = static_cast<const LdLoca&>(inst);
-                return "&" + (ld.Variable ? ld.Variable->Name : std::string("?"));
+                // `ldloca V` is the IL idiom for `ref V` (a byref argument or
+                // an address-of). Render as `ref V` (the C# form), not `&V`
+                // (the IL form).
+                return "ref " + (ld.Variable ? ld.Variable->Name : std::string("?"));
             }
             case OpCode::LdcI4:
                 return std::to_string(static_cast<const LdcI4&>(inst).Value);
