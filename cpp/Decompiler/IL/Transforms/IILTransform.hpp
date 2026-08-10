@@ -126,6 +126,23 @@ struct ILTransformSettings {
     // `conv.iN(ldlen)` fold for the checked (`conv.ovf`) variants, so a checked
     // conv.i4.ovf(ldlen) folds to ldlen.i4 only when the assumption holds.
     bool AssumeArrayLengthFitsIntoInt32 = true;
+    // Whether to emit compound assignment expressions (`+=`, `-=`, ...).
+    // DecompilerSettings.MakeAssignmentExpressions -- a C# 2.0 setting, default
+    // true. Gates TransformAssignment.HandleCompoundAssign (the next in-order
+    // per-statement child of StatementTransform), which folds
+    // `stloc V(binary.op(ldloc V, rhs))` into a NumericCompoundAssign
+    // (`V op= rhs`). The CompoundAssignmentInstruction / NumericCompoundAssign
+    // ILAst nodes (the foundation) are unconditional; this gates the transform
+    // that builds them.
+    bool MakeAssignmentExpressions = true;
+    // Whether to emit pre/post-increment and -decrement (`++V`/`V--`).
+    // DecompilerSettings.IntroduceIncrementAndDecrement -- default true. Gates
+    // the increment/decrement cases of TransformAssignment.HandleCompoundAssign
+    // (a NumericCompoundAssign with Add/Sub + a ldc.i4 1 RHS and the
+    // EvaluatesToOldValue (post) / EvaluatesToNewValue (pre) EvalMode). Both
+    // MakeAssignmentExpressions and IntroduceIncrementAndDecrement must be true
+    // for any compound assignment (incl. increment/decrement) to be introduced.
+    bool IntroduceIncrementAndDecrement = true;
 };
 
 class ILTransformContext {

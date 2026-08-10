@@ -49,6 +49,7 @@
 #include "Decompiler/IL/Instructions/LockInstruction.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/CompoundAssignmentInstruction.hpp"
 #include "Decompiler/IL/Instructions/NullableInstructions.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/PinnedRegion.hpp"
@@ -277,6 +278,13 @@ private:
             case OpCode::StObj: {
                 const auto& st = static_cast<const StObj&>(inst);
                 Line(indent, StoreTargetText(*st.Target) + " = " + Expr(*st.Value) + ";");
+                return;
+            }
+            case OpCode::NumericCompoundAssign: {
+                // A numeric compound assignment as a statement: `target op= value;`
+                // (or `target++;`/`target--;` for the post-increment/decrement).
+                // The Expr case renders the compound-assign expression form.
+                Line(indent, Expr(inst) + ";");
                 return;
             }
             case OpCode::Throw: {
@@ -892,6 +900,51 @@ private:
                 // real back end lands).
                 const auto& nu = static_cast<const NullableUnwrap&>(inst);
                 return (nu.Argument ? Expr(*nu.Argument) : std::string("(default)")) + "?";
+            }
+            case OpCode::NumericCompoundAssign: {
+                // A numeric compound assignment `target op= value` (or the
+                // post-increment/decrement `target++`/`target--` for Add/Sub with
+                // a ldc.i4 1 RHS in EvaluatesToOldValue mode). Faithful to the
+                // real back end's VisitNumericCompoundAssign (an
+                // AssignmentExpression with the operator derived from Operator).
+                // The Address Target is an LdLoca; the back end loads the value
+                // at that address (LdObj(Target, Type)), so the seed renders the
+                // target variable's bare name (stripping the address `&`).
+                const auto& ca = static_cast<const NumericCompoundAssign&>(inst);
+                std::string target;
+                if (ca.TargetKind == CompoundTargetKind::Address &&
+                    ca.Target && ca.Target->Op == OpCode::LdLoca) {
+                    const auto& lda = static_cast<const LdLoca&>(*ca.Target);
+                    target = lda.Variable ? lda.Variable->Name : std::string("?");
+                } else {
+                    target = ca.Target ? Expr(*ca.Target) : std::string("(default)");
+                }
+                std::string value = ca.Value ? Expr(*ca.Value) : std::string("(default)");
+                // The post-increment/decrement: Add/Sub with a ldc.i4 1 RHS in
+                // the EvaluatesToOldValue mode renders as `target++`/`target--`.
+                if (ca.EvalMode == CompoundEvalMode::EvaluatesToOldValue &&
+                    (ca.Operator == BinaryNumericOperator::Add ||
+                     ca.Operator == BinaryNumericOperator::Sub) &&
+                    ca.Value && ca.Value->Op == OpCode::LdcI4) {
+                    const auto& c = static_cast<const LdcI4&>(*ca.Value);
+                    if (c.Value == 1) {
+                        return target + (ca.Operator == BinaryNumericOperator::Add ? "++" : "--");
+                    }
+                }
+                const char* op = "?=";
+                switch (ca.Operator) {
+                    case BinaryNumericOperator::Add: op = "+="; break;
+                    case BinaryNumericOperator::Sub: op = "-="; break;
+                    case BinaryNumericOperator::Mul: op = "*="; break;
+                    case BinaryNumericOperator::Div: op = "/="; break;
+                    case BinaryNumericOperator::Rem: op = "%="; break;
+                    case BinaryNumericOperator::BitAnd: op = "&="; break;
+                    case BinaryNumericOperator::BitOr: op = "|="; break;
+                    case BinaryNumericOperator::BitXor: op = "^="; break;
+                    case BinaryNumericOperator::ShiftLeft: op = "<<="; break;
+                    case BinaryNumericOperator::ShiftRight: op = ">>="; break;
+                }
+                return target + " " + op + " " + value;
             }
             default:
                 return "(default)/*op=" + std::to_string(static_cast<int>(inst.Op)) + "*/";

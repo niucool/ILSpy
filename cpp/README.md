@@ -1164,6 +1164,41 @@ implemented and green here. Everything else follows the phase plan in
   has 0 `ldvirtftn` two-arg forms; every virtual delegate construction now
   folds to the cleaner `new DelegateType(target.Method)` form). 40 of ~40
   transforms ported.
+  The `NumericCompoundAssign` ILAst node (Instructions/, a
+  tested-but-not-yet-wired foundation) ports the C# compound-assignment `op=`
+  family the next in-order per-statement child of StatementTransform,
+  `TransformAssignment` (its `HandleCompoundAssign` folds
+  `stloc V(binary.op(ldloc V, rhs))` into a `NumericCompoundAssign`
+  `V op= rhs`), builds from -- ahead of that transform, following the
+  MatchInstruction / UsingInstruction / NullCoalescingInstruction /
+  ThreeValuedBoolAnd/Or precedent. The `CompoundAssignmentInstruction` abstract
+  base carries the two children Target (slot 0, inlineable -- the store target)
+  and Value (slot 1, inlineable -- the RHS), plus `CompoundEvalMode`
+  (EvaluatesToOldValue for post-increment / EvaluatesToNewValue for compound /
+  pre) and `CompoundTargetKind` (Address / Property / Dynamic). `NumericCompoundAssign`
+  carries the `BinaryNumericOperator`, `CheckForOverflow`, `Sign` (the D85
+  TypeSystem::Sign enum), `LeftInputType` / `RightInputType`, `UnderlyingResultType`,
+  `IsLifted` (the ILiftableInstruction impl), and the `Type` operand (an
+  `ITypePtr`, the store type); `ResultType = IsLifted ? O : UnderlyingResultType`;
+  `DirectFlags = SideEffect` (+ MayThrow for Div/Rem/CheckForOverflow); the dump
+  is `compound.assign.<op>[.ovf][.unsigned|.signed].<type>[.lifted].<suffix>(target, value)`.
+  The C# constructor copies these from a `BinaryNumericInstruction`; this port's
+  BNI carries `Signed` (bool) + `ResultStackType` but not the `Sign` enum or the
+  per-operand input types, so the node takes its fields explicitly (the D48
+  lifted-BNI precedent) and a BNI Sign/input-type reconciliation is deferred to
+  the transform. `OpCode::NumericCompoundAssign` / `UserDefinedCompoundAssign` /
+  `DynamicCompoundAssign` were pre-declared. `CompoundAssignmentInstruction` extends
+  `ILInstruction` (not `IStoreInstruction`), so it needs no `ComputeVariableUsage`
+  store-counting case. The `MakeAssignmentExpressions` (C# 2.0, default true) +
+  `IntroduceIncrementAndDecrement` (default true) settings gate the transform;
+  the nodes are unconditional. The seed renders a `NumericCompoundAssign` as
+  `target op= value` (Address Target = an `LdLoca` rendered as the bare variable
+  name; the post-increment/decrement as `target++`/`target--`); an `EmitStatement`
+  case renders the statement form. No pipeline transform constructs these nodes
+  yet, so `--csharp` output is unchanged (the seed already renders `V op= expr`
+  from the StLoc pattern at the text level; this node is the ILAst-level
+  representation the future `HandleCompoundAssign` produces for the real back
+  end).
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
   walk + a corpus probe; the async/iterator state machines
@@ -1173,7 +1208,11 @@ implemented and green here. Everything else follows the phase plan in
   the PatternMatchingTransform recursive sub-patterns (DetectPropertySubPatterns /
   PropertyOrFieldAccess / CompatibleExitInstruction),
   HighLevelLoopTransform (while/for), and the remaining StatementTransform
-  per-statement children (TransformAssignment, ...) are
+  per-statement children (TransformAssignment -- now unblocked on the
+  `NumericCompoundAssign` node side; the `HandleCompoundAssign` transform itself
+  still needs `IsCompoundStore` / `IsMatchingCompoundLoad` / `UnwrapSmallIntegerConv` /
+  `ValidateCompoundAssign` + the BNI Sign/input-type reconciliation + `RecombineVariables`,
+  ...) are
   the subsequent in-order targets.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
