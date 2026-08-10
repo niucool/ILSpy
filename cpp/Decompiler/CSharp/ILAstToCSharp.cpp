@@ -319,7 +319,9 @@ private:
                 // `V = V op expr` -> `V op= expr` (or `V++`/`V--` for +/- 1) when
                 // the binary's left is a load of the same variable. A declaration
                 // (`var V = ...`) is never a compound assignment.
-                std::string assign = declare ? " = " + Expr(*st.Value) : AssignmentText(st, name);
+                std::string valueText = BoolLiteralText(st.Variable.get(), st.Value.get());
+                if (valueText.empty()) valueText = Expr(*st.Value);
+                std::string assign = declare ? " = " + valueText : AssignmentText(st, name);
                 std::string decl = declare ? CSharpTypeName(st.Variable->Type) + " " + name : name;
                 Line(indent, decl + assign + ";");
                 return;
@@ -579,13 +581,31 @@ private:
     // `V = V op expr` -> `V op= expr` (or `V++`/`V--` for +/- 1) when the
     // binary's left is a load of the same variable. A plain `V = expr` (no
     // self-load, or an operator C# has no compound form for) returns ` = expr`.
+    // `ldc.i4 0`/`ldc.i4 1` stored into a Boolean variable renders as
+    // `false`/`true` (the IL idiom for Boolean constants). Returns "" when the
+    // value is not a Boolean literal for a Boolean variable.
+    static std::string BoolLiteralText(const ILVariable* var, const ILInstruction* value) {
+        if (!var || !var->Type || !value || value->Op != OpCode::LdcI4) return {};
+        auto* k = dynamic_cast<const TypeSystem::KnownType*>(var->Type.get());
+        if (!k || k->Code() != TypeSystem::KnownTypeCode::Boolean) return {};
+        auto v = static_cast<const LdcI4*>(value)->Value;
+        if (v == 0) return "false";
+        if (v == 1) return "true";
+        return {};
+    }
+
     std::string AssignmentText(const StLoc& st, const std::string& name) {
         (void)name;
         auto* bin = dynamic_cast<const BinaryNumericInstruction*>(st.Value.get());
-        if (!bin || !bin->Left || bin->Left->Op != OpCode::LdLoc) return " = " + Expr(*st.Value);
+        if (!bin || !bin->Left || bin->Left->Op != OpCode::LdLoc) {
+            auto bl = BoolLiteralText(st.Variable.get(), st.Value.get());
+            return " = " + (bl.empty() ? Expr(*st.Value) : bl);
+        }
         auto* ld = static_cast<const LdLoc*>(bin->Left.get());
-        if (!ld->Variable || !st.Variable || ld->Variable.get() != st.Variable.get())
-            return " = " + Expr(*st.Value);
+        if (!ld->Variable || !st.Variable || ld->Variable.get() != st.Variable.get()) {
+            auto bl = BoolLiteralText(st.Variable.get(), st.Value.get());
+            return " = " + (bl.empty() ? Expr(*st.Value) : bl);
+        }
         const char* op = nullptr;
         switch (bin->Operator) {
             case BinaryNumericOperator::Add: op = "+"; break;
