@@ -116,6 +116,35 @@ bool IsEqualityOrInequality(ComparisonKind k) {
     return k == ComparisonKind::Equality || k == ComparisonKind::Inequality;
 }
 
+// Detach the ldc.i4 0 that IsLdcI4ZeroMaybeConv found at the bottom of a
+// sign/zero-extend conv chain, mirroring the C# `inst.Right = rightWithoutConv`
+// (which detaches the inner constant from the conv; the conv is then GC'd).
+// Walks the same SignExtend-then-ZeroExtend path as IsLdcI4ZeroMaybeConv and
+// returns the owning unique_ptr to the detached ldc.i4 0; the conv chain is left
+// with a null Argument at the bottom and is destroyed when the comp's Right
+// slot is overwritten. Returns null if the Right is not conv-wrapped (a bare
+// ldc.i4 0 needs no detach -- the Right is already the constant).
+std::unique_ptr<ILInstruction> DetachUnwrappedZero(ILInstruction* right) {
+    ILInstruction* inst = right;
+    Conv* innermost = nullptr;
+    // UnwrapConv(SignExtend): walk SignExtend convs.
+    while (inst && inst->Op == OpCode::Conv) {
+        auto* conv = static_cast<Conv*>(inst);
+        if (conv->Kind != ConversionKind::SignExtend) break;
+        innermost = conv;
+        inst = conv->Argument.get();
+    }
+    // UnwrapConv(ZeroExtend): walk ZeroExtend convs.
+    while (inst && inst->Op == OpCode::Conv) {
+        auto* conv = static_cast<Conv*>(inst);
+        if (conv->Kind != ConversionKind::ZeroExtend) break;
+        innermost = conv;
+        inst = conv->Argument.get();
+    }
+    if (!innermost) return nullptr;  // no conv to unwrap (bare ldc.i4 0)
+    return innermost->TakeChild(0);  // detach the ldc.i4 0 from the innermost conv
+}
+
 // Port of ILInstruction.MatchLogicNot(out arg): logic.not(X) is this port's
 // `comp(Equality, X, ldc.i4(0))` shape (the reader's brfalse, per the
 // SwitchAnalysis / ConditionDetection / MatchInstruction convention). Returns
@@ -726,6 +755,51 @@ bool ExpressionTransforms::VisitCompTailRewrites(Comp* comp) {
                          : ComparisonKind::Equality;
         Visit(comp);  // re-visit (the C# `VisitComp(inst); return;`)
         return true;
+    }
+    // The C# `else if (rightWithoutConv.MatchLdcI4(0) && inst.Kind.IsEqualityOr
+    // Inequality())`: a comparison against 0 (after unwrapping sign/zero-extending
+    // convs) whose kind is equality/inequality has two special cases the C#
+    // folds in place (no re-visit -- neither changes the Kind, so the head
+    // rewrites would not re-fire). The `if (Unsigned && ...)` above returned
+    // already for the GT/LE unsigned case, so reaching here means either !Unsigned
+    // or an equality/inequality kind; the C# `else if` does NOT check Sign, so
+    // these fire for both signed and unsigned equality/inequality.
+    if (IsLdcI4ZeroMaybeConv(comp->Right.get()) && IsEqualityOrInequality(comp->Kind)) {
+        // comp(ldlen[I] == conv.i(ldc.i4 0)) => comp(ldlen.i4[I4] == ldc.i4 0):
+        // the C# compiler sometimes compares a raw native-int ldlen against a
+        // sign-extended 0 instead of widening the ldlen (the special case where
+        // it does not generate conv.i4 after ldlen); fold the ldlen to i4 and
+        // drop the conv so both sides are int32 (the InputType becomes I4).
+        if (comp->Left && comp->Left->Op == OpCode::LdLen &&
+            comp->Left->ResultType() == StackType::I) {
+            auto* oldLdLen = static_cast<LdLen*>(comp->Left.get());
+            // Detach the array before the old LdLen is destroyed by SetChild
+            // (no GC; a raw pointer to the array would dangle).
+            auto array = oldLdLen->TakeChild(0);
+            comp->InputType = StackType::I4;
+            comp->SetChild(0, std::make_unique<LdLen>(StackType::I4, std::move(array)));
+            // Drop the conv around the 0 (the C# `inst.Right = rightWithoutConv`),
+            // keeping the bare ldc.i4 0; a bare ldc.i4 0 Right (no conv) stays.
+            auto zero = DetachUnwrappedZero(comp->Right.get());
+            if (zero) comp->SetChild(1, std::move(zero));
+            return true;
+        }
+        // C++/CLI null comparison: comp(conv.i(ldloc obj) == conv.i(ldc.i4 0))
+        // => comp(ldloc obj == ldnull). C++/CLI sometimes compares an object
+        // pointer (conv'd to native int) against a sign-extended 0; fold to the
+        // plain object == null comparison (the InputType becomes O, the Right
+        // becomes a fresh ldnull).
+        if (comp->Left && comp->Left->Op == OpCode::Conv) {
+            auto* conv = static_cast<Conv*>(comp->Left.get());
+            if (conv->TargetType == PrimitiveType::I && conv->Argument &&
+                conv->Argument->ResultType() == StackType::O) {
+                auto arg = conv->TakeChild(0);  // detach the ldloc obj from the conv
+                comp->InputType = StackType::O;
+                comp->SetChild(0, std::move(arg));  // replace the Left (destroys the conv)
+                comp->SetChild(1, std::make_unique<LdNull>());  // replace the Right
+                return true;
+            }
+        }
     }
     return false;
 }

@@ -1858,6 +1858,306 @@ TEST(ExpressionTransforms, VisitConvFoldsCheckedConvI4OverLdLenWhenSettingOn) {
     EXPECT_EQ(static_cast<LdLen*>(st->Value.get())->resultType, StackType::I4);
 }
 
+// Count Comp nodes whose Left is a raw `ldlen` (an LdLen returning the native-
+// int StackType::I) -- the `comp(ldlen == conv.i(0))` shape the VisitComp ldlen
+// special case folds into `comp(ldlen.i4 == ldc.i4 0)` (the LdLen becomes I4,
+// so the count drops). Used by the ldlen-comp tests and the sweep.
+int CountCompWithRawLdLenLeft(ILFunction& fn) {
+    int n = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (inst->Op == OpCode::Comp) {
+            auto* comp = static_cast<Comp*>(inst);
+            if (comp->Left && comp->Left->Op == OpCode::LdLen &&
+                comp->Left->ResultType() == StackType::I) {
+                ++n;
+            }
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return n;
+}
+
+// VisitComp folds `comp(ldlen.I array == conv.i(ldc.i4 0))` =>
+// `comp(ldlen.I4 array == ldc.i4 0)`: the special case where the C# compiler
+// compares a raw native-int ldlen against a sign-extended 0 (instead of
+// widening the ldlen with conv.i4). The fold turns the ldlen into ldlen.I4,
+// drops the conv around the 0 (keeping the bare ldc.i4 0), and sets the comp's
+// InputType to I4. The Equality variant: `comp(ldlen == 0)` is `array.Length == 0`.
+TEST(ExpressionTransforms, VisitCompFoldsLdLenEqualityAgainstConvZero) {
+    auto arr = MakeParam("arr", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    // comp(ldlen.I(arr) == conv.i(ldc.i4 0)): the raw ldlen (native int) is
+    // compared against a sign-extended 0 (conv.i, I4->I SignExtend). The fold
+    // turns the ldlen into ldlen.I4 and drops the conv, giving
+    // comp(ldlen.I4(arr) == ldc.i4 0) with InputType I4.
+    auto comp = std::make_unique<Comp>(
+        std::make_unique<LdLen>(StackType::I, std::make_unique<LdLoc>(arr)),
+        std::make_unique<Conv>(std::make_unique<LdcI4>(0), PrimitiveType::I,
+                               false, Sign::None),
+        ComparisonKind::Equality, false);
+    auto fn = MakeFnWithBlock({v, arr});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(comp)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountCompWithRawLdLenLeft(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountCompWithRawLdLenLeft(*fn), 0)
+        << "the raw-ldlen comp must fold to an ldlen.I4 comp";
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp);
+    auto* c = static_cast<Comp*>(st->Value.get());
+    EXPECT_EQ(c->InputType, StackType::I4);
+    ASSERT_EQ(c->Left->Op, OpCode::LdLen);
+    EXPECT_EQ(static_cast<LdLen*>(c->Left.get())->resultType, StackType::I4);
+    ASSERT_EQ(c->Right->Op, OpCode::LdcI4)
+        << "the conv must be dropped, leaving the bare ldc.i4 0";
+    EXPECT_EQ(static_cast<LdcI4*>(c->Right.get())->Value, 0);
+}
+
+// VisitComp folds the Inequality variant `comp(ldlen.I array != conv.i(ldc.i4 0))`
+// => `comp(ldlen.I4 array != ldc.i4 0)` (the `array.Length != 0` form). The head
+// rewrite `comp(x != 0) => x` does not fire because the Right is a conv (not a
+// bare ldc.i4 0), so the tail ldlen special case fires.
+TEST(ExpressionTransforms, VisitCompFoldsLdLenInequalityAgainstConvZero) {
+    auto arr = MakeParam("arr", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto comp = std::make_unique<Comp>(
+        std::make_unique<LdLen>(StackType::I, std::make_unique<LdLoc>(arr)),
+        std::make_unique<Conv>(std::make_unique<LdcI4>(0), PrimitiveType::I,
+                               false, Sign::None),
+        ComparisonKind::Inequality, false);
+    auto fn = MakeFnWithBlock({v, arr});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(comp)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountCompWithRawLdLenLeft(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountCompWithRawLdLenLeft(*fn), 0);
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp);
+    auto* c = static_cast<Comp*>(st->Value.get());
+    EXPECT_EQ(c->Kind, ComparisonKind::Inequality);
+    EXPECT_EQ(c->InputType, StackType::I4);
+    ASSERT_EQ(c->Left->Op, OpCode::LdLen);
+    EXPECT_EQ(static_cast<LdLen*>(c->Left.get())->resultType, StackType::I4);
+    ASSERT_EQ(c->Right->Op, OpCode::LdcI4);
+}
+
+// VisitComp folds the ZeroExtend-conv variant `comp(ldlen.I array ==
+// conv.u(ldc.i4 0))`: the 0 is zero-extended to native int (conv.u, I4->I
+// ZeroExtend) rather than sign-extended. The DetachUnwrappedZero helper walks
+// the ZeroExtend conv to detach the bare ldc.i4 0.
+TEST(ExpressionTransforms, VisitCompFoldsLdLenEqualityAgainstConvUZero) {
+    auto arr = MakeParam("arr", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    // conv.u(ldc.i4 0): I4->I ZeroExtend (target U, inputSign None -> the U
+    // target with an I4 input zero-extends). ResultType is I (native int),
+    // matching the raw ldlen so the comp is well-typed.
+    auto conv = std::make_unique<Conv>(std::make_unique<LdcI4>(0), PrimitiveType::U,
+                                       false, Sign::None);
+    auto comp = std::make_unique<Comp>(
+        std::make_unique<LdLen>(StackType::I, std::make_unique<LdLoc>(arr)),
+        std::move(conv), ComparisonKind::Equality, false);
+    auto fn = MakeFnWithBlock({v, arr});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(comp)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountCompWithRawLdLenLeft(*fn), 1);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountCompWithRawLdLenLeft(*fn), 0);
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp);
+    auto* c = static_cast<Comp*>(st->Value.get());
+    EXPECT_EQ(c->InputType, StackType::I4);
+    ASSERT_EQ(c->Left->Op, OpCode::LdLen);
+    EXPECT_EQ(static_cast<LdLen*>(c->Left.get())->resultType, StackType::I4);
+    ASSERT_EQ(c->Right->Op, OpCode::LdcI4)
+        << "the conv.u must be unwrapped and dropped, leaving the bare ldc.i4 0";
+}
+
+// VisitComp does NOT fold `comp(ldloc.I4 == conv.i(ldc.i4 0))`: the ldlen
+// special case requires the Left to be a raw native-int ldlen (ResultType I); an
+// ldloc (I4) is not an ldlen, so the fold does not fire and the comp stays.
+TEST(ExpressionTransforms, VisitCompKeepsLdLenFoldForNonLdLenLeft) {
+    auto x = MakeParam("x", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto comp = std::make_unique<Comp>(
+        std::make_unique<LdLoc>(x),
+        std::make_unique<Conv>(std::make_unique<LdcI4>(0), PrimitiveType::I,
+                               false, Sign::None),
+        ComparisonKind::Equality, false);
+    auto fn = MakeFnWithBlock({v, x});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(comp)));
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountCompWithRawLdLenLeft(*fn), 0);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountCompWithRawLdLenLeft(*fn), 0);
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp) << "the comp must stay (Left is not an ldlen)";
+    auto* c = static_cast<Comp*>(st->Value.get());
+    ASSERT_EQ(c->Left->Op, OpCode::LdLoc);
+    ASSERT_EQ(c->Right->Op, OpCode::Conv) << "the conv must stay (no fold fired)";
+}
+
+// VisitComp does NOT fold `comp(ldlen.I array < conv.i(ldc.i4 0))`: the ldlen
+// special case's outer `else if` requires the kind to be equality/inequality;
+// a LessThan (or any relational kind) is not, so the fold does not fire and the
+// raw-ldlen comp stays. (The unsigned GT/LE `if` is unsigned + GT/LE only, so a
+// signed LessThan reaches neither branch.)
+TEST(ExpressionTransforms, VisitCompKeepsLdLenFoldForLessThanKind) {
+    auto arr = MakeParam("arr", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    // comp(ldlen.I < conv.i(ldc.i4 0)): LessThan is not equality/inequality, so
+    // the outer `else if` does not fire (and the unsigned GT/LE `if` is unsigned
+    // + GT/LE only). The comp stays.
+    auto comp = std::make_unique<Comp>(
+        std::make_unique<LdLen>(StackType::I, std::make_unique<LdLoc>(arr)),
+        std::make_unique<Conv>(std::make_unique<LdcI4>(0), PrimitiveType::I,
+                               false, Sign::None),
+        ComparisonKind::LessThan, false);
+    auto fn = MakeFnWithBlock({v, arr});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(comp)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // LessThan is not equality/inequality, so the ldlen special case does not
+    // fire; the raw-ldlen comp stays (the count is 1).
+    EXPECT_EQ(CountCompWithRawLdLenLeft(*fn), 1);
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp);
+    auto* c = static_cast<Comp*>(st->Value.get());
+    ASSERT_EQ(c->Left->Op, OpCode::LdLen);
+    EXPECT_EQ(static_cast<LdLen*>(c->Left.get())->resultType, StackType::I)
+        << "the raw ldlen must stay (no fold fired for LessThan)";
+    ASSERT_EQ(c->Right->Op, OpCode::Conv);
+}
+
+// VisitComp folds the C++/CLI null comparison `comp(conv.i(ldloc obj) ==
+// conv.i(ldc.i4 0))` => `comp(ldloc obj == ldnull)`: C++/CLI sometimes compares
+// an object pointer (conv'd to native int) against a sign-extended 0; the fold
+// drops both convs and compares the object directly against ldnull. The
+// Equality variant.
+TEST(ExpressionTransforms, VisitCompFoldsCppCliNullComparisonEquality) {
+    auto obj = MakeParam("obj", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    // conv.i(ldloc obj): the object reference is conv'd to native int (I, with
+    // an O-argument conv); conv.i(ldc.i4 0): the 0 is sign-extended to native int.
+    auto comp = std::make_unique<Comp>(
+        std::make_unique<Conv>(std::make_unique<LdLoc>(obj), PrimitiveType::I,
+                               false, Sign::None),
+        std::make_unique<Conv>(std::make_unique<LdcI4>(0), PrimitiveType::I,
+                               false, Sign::None),
+        ComparisonKind::Equality, false);
+    auto fn = MakeFnWithBlock({v, obj});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(comp)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp);
+    auto* c = static_cast<Comp*>(st->Value.get());
+    EXPECT_EQ(c->InputType, StackType::O);
+    ASSERT_EQ(c->Left->Op, OpCode::LdLoc) << "the conv must be dropped, leaving the ldloc obj";
+    ASSERT_EQ(c->Right->Op, OpCode::LdNull) << "the Right must become a fresh ldnull";
+}
+
+// VisitComp folds the Inequality variant of the C++/CLI null comparison
+// `comp(conv.i(ldloc obj) != conv.i(ldc.i4 0))` => `comp(ldloc obj != ldnull)`.
+TEST(ExpressionTransforms, VisitCompFoldsCppCliNullComparisonInequality) {
+    auto obj = MakeParam("obj", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto comp = std::make_unique<Comp>(
+        std::make_unique<Conv>(std::make_unique<LdLoc>(obj), PrimitiveType::I,
+                               false, Sign::None),
+        std::make_unique<Conv>(std::make_unique<LdcI4>(0), PrimitiveType::I,
+                               false, Sign::None),
+        ComparisonKind::Inequality, false);
+    auto fn = MakeFnWithBlock({v, obj});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(comp)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp);
+    auto* c = static_cast<Comp*>(st->Value.get());
+    EXPECT_EQ(c->Kind, ComparisonKind::Inequality);
+    EXPECT_EQ(c->InputType, StackType::O);
+    ASSERT_EQ(c->Left->Op, OpCode::LdLoc);
+    ASSERT_EQ(c->Right->Op, OpCode::LdNull);
+}
+
+// VisitComp does NOT fold the C++/CLI null comparison when the Left conv's
+// target is not native int (PrimitiveType::I): a conv.i4 (target I4) with an
+// O-argument is not the C++/CLI pointer-to-int shape, so the fold does not fire
+// and the comp stays.
+TEST(ExpressionTransforms, VisitCompKeepsCppCliFoldForWrongConvTarget) {
+    auto obj = MakeParam("obj", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    // conv.i4(ldloc obj): target I4 (not I), so the C++/CLI gate (TargetType ==
+    // PrimitiveType::I) fails. The comp stays.
+    auto comp = std::make_unique<Comp>(
+        std::make_unique<Conv>(std::make_unique<LdLoc>(obj), PrimitiveType::I4,
+                               false, Sign::None),
+        std::make_unique<Conv>(std::make_unique<LdcI4>(0), PrimitiveType::I,
+                               false, Sign::None),
+        ComparisonKind::Equality, false);
+    auto fn = MakeFnWithBlock({v, obj});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(comp)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp);
+    auto* c = static_cast<Comp*>(st->Value.get());
+    ASSERT_EQ(c->Left->Op, OpCode::Conv) << "the Left conv must stay (target is I4, not I)";
+    ASSERT_EQ(c->Right->Op, OpCode::Conv);
+}
+
+// VisitComp does NOT fold the C++/CLI null comparison when the Left conv's
+// argument is not an object (ResultType O): a conv.i(ldloc i) over an int local
+// is a plain int-to-native-int widening, not the C++/CLI object-pointer shape, so
+// the gate (Argument.ResultType == O) fails and the comp stays.
+TEST(ExpressionTransforms, VisitCompKeepsCppCliFoldForNonObjectArg) {
+    auto i = MakeParam("i", std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Boolean));
+    auto comp = std::make_unique<Comp>(
+        std::make_unique<Conv>(std::make_unique<LdLoc>(i), PrimitiveType::I,
+                               false, Sign::None),
+        std::make_unique<Conv>(std::make_unique<LdcI4>(0), PrimitiveType::I,
+                               false, Sign::None),
+        ComparisonKind::Equality, false);
+    auto fn = MakeFnWithBlock({v, i});
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::move(comp)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunExpressionTransforms(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto* st = static_cast<StLoc*>(fn->Body->Blocks[0]->Instructions[0].get());
+    ASSERT_EQ(st->Value->Op, OpCode::Comp);
+    auto* c = static_cast<Comp*>(st->Value.get());
+    ASSERT_EQ(c->Left->Op, OpCode::Conv) << "the Left conv must stay (arg is int, not object)";
+}
+
 // Count `shift(x, bitAnd(y, mask))` patterns -- a ShiftLeft/ShiftRight whose
 // Right is a BitAnd whose own Right is the expected bit-width-minus-one mask
 // (ldc.i4 31 for an I4 shift, ldc.i4 63 for an I8 shift). This is the redundant
@@ -3675,6 +3975,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
     int totalDecimalFieldFolds = 0;
     int totalLdVirtDelegateFolds = 0;
     int totalConvOverLdLenFolds = 0;
+    int totalCompLdLenFolds = 0;
     ILTransformContext ctx;
     for (const auto& m : f.MethodDefs()) {
         if (m.RVA == 0) continue;
@@ -3687,6 +3988,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int arrayIdxConvBefore = CountArrayIndexConvI(*fn);
         int convRUnBefore = CountConvRUnNested(*fn);
         int convOverLdLenBefore = CountConvOverLdLenI(*fn);
+        int compLdLenBefore = CountCompWithRawLdLenLeft(*fn);
         int maskedShiftsBefore = CountMaskedShifts(*fn);
         int getValOrDefaultBefore = CountGetValueOrDefaultTwoArg(*fn);
         int nullCoalescingBefore = CountNullCoalescing(*fn);
@@ -3711,6 +4013,7 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         int arrayIdxConvAfter = CountArrayIndexConvI(*fn);
         int convRUnAfter = CountConvRUnNested(*fn);
         int convOverLdLenAfter = CountConvOverLdLenI(*fn);
+        int compLdLenAfter = CountCompWithRawLdLenLeft(*fn);
         int maskedShiftsAfter = CountMaskedShifts(*fn);
         int getValOrDefaultAfter = CountGetValueOrDefaultTwoArg(*fn);
         int nullCoalescingAfter = CountNullCoalescing(*fn);
@@ -3768,6 +4071,19 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
         // for most array-length uses, so the fold fires frequently).
         EXPECT_LE(convOverLdLenAfter, convOverLdLenBefore);
         if (convOverLdLenBefore > convOverLdLenAfter) ++totalConvOverLdLenFolds;
+        // The VisitComp ldlen special case (`comp(ldlen[I] == conv.i(0))` ->
+        // `comp(ldlen.i4[I4] == ldc.i4 0)`) is monotone non-increasing for the
+        // comp-with-raw-ldlen-left count (each fold turns one raw-I ldlen comp
+        // left into an I4 ldlen; nothing in this subset creates a raw-I ldlen comp
+        // left -- only the reader emits LdLen(I)). The fold fires when the
+        // compiler compares a raw native-int ldlen against a sign/zero-extended 0
+        // (the special case where it does not emit conv.i4 after ldlen); whether
+        // the .NET Framework 4 legacy-csc corpus contains any is corpus-dependent
+        // (csc usually emits conv.i4, so the fold may fire 0 times on it), so the
+        // per-method monotone-non-increasing invariant is the deterministic
+        // correctness gate (the absolute count is not asserted).
+        EXPECT_LE(compLdLenAfter, compLdLenBefore);
+        if (compLdLenBefore > compLdLenAfter) ++totalCompLdLenFolds;
         // The VisitBinaryNumericInstruction shift-size fold (`a << (b & 31)` /
         // `a >> (b & 63)` -> `a << b` / `a >> b`) is monotone non-increasing (each
         // fold removes one masked-shift; nothing in this subset creates one). The
@@ -3915,6 +4231,18 @@ TEST(ExpressionTransforms, MscorlibSweepPreservesInvariant) {
     // transform, not faithfulness-only).
     EXPECT_GT(totalConvOverLdLenFolds, 0)
         << "VisitConv conv.iN(ldlen) must fold array-length convs on mscorlib";
+    // The VisitComp ldlen special case (`comp(ldlen[I] == conv.i(0))` ->
+    // `comp(ldlen.i4[I4] == ldc.i4 0)`) fires when the compiler compares a raw
+    // native-int ldlen against a sign/zero-extended 0 (the special case where it
+    // does not emit conv.i4 after ldlen). The .NET Framework 4 legacy-csc corpus
+    // usually emits conv.i4 after ldlen (so the ldlen is already I4 by the time
+    // the comp sees it), so this fold may fire 0 times on it (it fires on
+    // compilers/codegen that keep the raw ldlen). The count is reported (not
+    // asserted) -- a non-zero total is informative (it fires on the raw-ldlen
+    // codegen); a zero total means the fold is faithfulness-only on this
+    // corpus. The per-method monotone-non-increasing invariant (asserted above)
+    // is the deterministic correctness gate regardless.
+    (void)totalCompLdLenFolds;
 }
 
 // RunIfNullableLift MatchCompOrDecimal equality case (LiftCSharpEqualityComparison

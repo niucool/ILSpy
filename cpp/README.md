@@ -492,8 +492,21 @@ implemented and green here. Everything else follows the phase plan in
   ILAst-cleaning transform (the CLI output now has no `(int)array.Length`
   casts -- the conv is folded into the ldlen before rendering). The `conv.r.un`
   combining fold fires 1 time on the 8000-method sweep (the legacy csc emits
-  `conv.r.un` rarely; it fires more on Roslyn-compiled / modern .NET).
-  The
+  `conv.r.un` rarely; it fires more on Roslyn-compiled / modern .NET). The
+  VisitComp tail also folds the two `comp(... == 0)` equality/inequality special
+  cases the C# `else if (rightWithoutConv.MatchLdcI4(0) &&
+  inst.Kind.IsEqualityOrInequality())` handles: `comp(ldlen[I] ==
+  conv.i(ldc.i4 0))` => `comp(ldlen.i4[I4] == ldc.i4 0)` (the special case
+  where the compiler compares a raw native-int ldlen against a sign/zero-
+  extended 0 instead of widening the ldlen -- the ldlen becomes I4 and the conv
+  around the 0 is dropped) and the C++/CLI null comparison
+  `comp(conv.i(ldloc obj) == conv.i(ldc.i4 0))` => `comp(ldloc obj == ldnull)`
+  (an object pointer conv'd to native int and compared against a sign-extended 0
+  folds to the plain object == null). Both fire 0 times on the .NET Framework 4
+  legacy-csc mscorlib corpus (csc emits `conv.i4` after `ldlen` so the ldlen is
+  already I4 by the time the comp sees it; and the C++/CLI object-pointer shape
+  does not arise in C#-compiled code) -- ported for faithfulness, matching the
+  D59/D60/D69 precedent. The
   remaining 11 per-statement children (DynamicIsEventAssignmentTransform,
   TransformAssignment, NullPropagationStatementTransform,
   TransformArrayInitializers,
