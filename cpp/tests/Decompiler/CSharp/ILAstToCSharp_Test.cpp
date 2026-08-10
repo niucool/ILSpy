@@ -679,3 +679,24 @@ TEST(ILAstToCSharp, LoopContainerRendersAsWhileTrueWithContinueAndBreak) {
     EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
     EXPECT_EQ(text.find("goto"), std::string::npos) << text;
 }
+
+TEST(ILAstToCSharp, ReturnLdcI4InBoolFunctionIsFalseTrue) {
+    // `leave(ldc.i4(0))` / `leave(ldc.i4(1))` in a Boolean-returning function
+    // renders as `return false;` / `return true;` (the IL idiom for bool
+    // return values). A non-bool function keeps `return 0;` / `return 1;`.
+    auto block = std::make_unique<Block>();
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(0)));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // A bool-returning function: return false.
+    std::string text = ILAstToCSharp(*fn, "bool", "M", "");
+    EXPECT_NE(text.find("return false;"), std::string::npos) << text;
+    EXPECT_EQ(text.find("return 0;"), std::string::npos) << text;
+
+    // An int-returning function: return 0 (not false).
+    std::string textInt = ILAstToCSharp(*fn, "int", "M", "");
+    EXPECT_NE(textInt.find("return 0;"), std::string::npos) << textInt;
+    EXPECT_EQ(textInt.find("return false;"), std::string::npos) << textInt;
+}

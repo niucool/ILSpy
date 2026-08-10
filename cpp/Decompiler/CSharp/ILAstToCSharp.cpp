@@ -136,6 +136,7 @@ public:
     void EmitMethod(const ILFunction& fn, std::string_view returnType,
                     std::string_view methodName, std::string_view paramDecl) {
         fn_ = &fn;
+        returnTypeName_ = std::string(returnType);
         out_ += returnType;
         out_ += ' ';
         out_ += methodName;
@@ -153,6 +154,7 @@ public:
 private:
     std::string& out_;
     const ILFunction* fn_ = nullptr;
+    std::string returnTypeName_;  // the C# name of the function's return type
     std::set<std::string> declared_;          // locals already introduced with `var`
     std::map<const Block*, std::string> labels_;  // branch-target block -> IL_XXXX
     std::set<const Block*> loopHeaders_;  // first block of each Loop container
@@ -363,7 +365,14 @@ private:
                 // container is `break`; other leaves (switch/try) are `break`
                 // for now (the real back end disambiguates).
                 if (fn_ && leave.TargetContainer == fn_->Body.get()) {
-                    if (leave.Value) Line(indent, "return " + Expr(*leave.Value) + ";");
+                    if (leave.Value) {
+                        // `return ldc.i4 0/1` in a Boolean-returning function is
+                        // `return false;`/`return true;` (the IL idiom for bool
+                        // constants in the return position).
+                        std::string val = BoolLiteralFromReturn(leave.Value.get());
+                        if (val.empty()) val = Expr(*leave.Value);
+                        Line(indent, "return " + val + ";");
+                    }
                     else Line(indent, "return;");
                 } else {
                     Line(indent, "break;");
@@ -581,6 +590,16 @@ private:
     // `V = V op expr` -> `V op= expr` (or `V++`/`V--` for +/- 1) when the
     // binary's left is a load of the same variable. A plain `V = expr` (no
     // self-load, or an operator C# has no compound form for) returns ` = expr`.
+    // `ldc.i4 0`/`ldc.i4 1` in the return position of a Boolean-returning
+    // function renders as `false`/`true` (the IL idiom for bool return values).
+    std::string BoolLiteralFromReturn(const ILInstruction* value) const {
+        if (returnTypeName_ != "bool" || !value || value->Op != OpCode::LdcI4) return {};
+        auto v = static_cast<const LdcI4*>(value)->Value;
+        if (v == 0) return "false";
+        if (v == 1) return "true";
+        return {};
+    }
+
     // `ldc.i4 0`/`ldc.i4 1` stored into a Boolean variable renders as
     // `false`/`true` (the IL idiom for Boolean constants). Returns "" when the
     // value is not a Boolean literal for a Boolean variable.
