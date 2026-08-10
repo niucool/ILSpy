@@ -1304,6 +1304,30 @@ implemented and green here. Everything else follows the phase plan in
   rhs))` collapses to one variable for the `V op= rhs` fold. 5 new gtest cases
   (in `ILInlining_Test.cpp` alongside the other ILFunction API methods);
   893/893 pass; the CLI decompiles mscorlib end-to-end (exit 0, no regression).
+  The `TransformAssignment` shared helpers (D131, the next-in-order piece
+  D130 flagged) are now ported as a tested-but-not-yet-wired foundation:
+  `IsCompoundStore` (the StLoc case -- a `stloc V(...)` whose Variable.Kind is
+  Local/Parameter reports `storeType = V.Type` + the stored value; the StObj
+  case needs `InferType` for the target's real type and the Call case needs
+  `IsSameMember` + `IMethod` for the property-setter gate, both deferred),
+  `IsMatchingCompoundLoad` (the LdLoc/StLoc case -- a load that is an `LdLoc`
+  and a store that is an `StLoc` of the same variable per a faithful
+  `ILVariableEqualityComparer` port -- same object, or split fragments with the
+  same Kind + Index; StackSlot/PatternLocal always distinct -- reports a fresh
+  `LdLoca` target, TargetKind Address, and a `RecombineVariables` finalizeMatch
+  callback; a `forbiddenVariable` rejects a match that moves a store over a use;
+  the LdObj/StObj case needs `IsDuplicatedAddressComputation` +
+  `previousInstruction` and the getter/setter case needs `IMethod`/
+  `AccessorOwner`, both deferred), and `ValidateCompoundAssign` (the full
+  wrapper -- the D129 `IsBinaryCompatibleWithType` + the conv TargetType /
+  CheckForOverflow match). The `CompoundFinalizeMatch` callback takes the
+  ILFunction directly (the per-statement Run obtains it via a Parent-chain walk,
+  since the StatementTransformContext carries no function handle) and captures
+  the load/store shared_ptrs so it can call `RecombineVariables` after the
+  match. 17 new gtest cases (4 IsCompoundStore + 7 IsMatchingCompoundLoad + 6
+  ValidateCompoundAssign); 910/910 pass; the CLI decompiles mscorlib end-to-end
+  (exit 0, no regression -- the helpers are not wired so the output is
+  byte-identical to D130).
   The remaining field-cached delegate shapes (now unblocked on the IField side)
   still need the block-model adaptation + the per-variable store-list tree
   walk + a corpus probe; the async/iterator state machines
@@ -1317,19 +1341,22 @@ implemented and green here. Everything else follows the phase plan in
   `TransformPostIncDecOperator` / `TransformPostIncDecOperatorWithInlineStore` folds,
   now unblocked on the `NumericCompoundAssign` node + `UnwrapSmallIntegerConv` +
   the type-system helpers side; the transform itself still needs `IsCompoundStore`
-  [needs `InferType` for the StObj case + `IsSameMember` for the Call case +
-  `Variable.Kind` for the StLoc case] / `IsMatchingCompoundLoad` [the LdLoc/StLoc
-  branch's `RecombineVariables` `finalizeMatch` is now ported (D130); still needs
-  the LdObj/StObj case's `IsDuplicatedAddressComputation` + `previousInstruction`,
-  and the getter/setter `MatchingGetterAndSetterCalls` case's
-  `IMethod`/`AccessorOwner`] /
-  `ValidateCompoundAssign` [needs `NumericCompoundAssign.IsBinaryCompatibleWithType`,
-  which is now ported (D129) -- the IsLifted/Enum/IntPtr-UIntPtr/Sign/
-  IsImplicitTruncation gates are in place; only the `Pointer` case's
-  `PointerArithmeticOffset.Detect` is deferred-conservative] +
-  `RecombineVariables` [the `finalizeMatch` for the StLoc case, now ported
-  (D130) -- the per-variable store-list tree walk is resolved via a tree walk
-  with manual count increment, so no per-variable lists are needed], ...)
+  [the StLoc case is now ported (D131); the StObj case still needs `InferType` +
+  the Call case needs `IsSameMember` + `IMethod`] / `IsMatchingCompoundLoad`
+  [the LdLoc/StLoc case + its `RecombineVariables` `finalizeMatch` are now
+  ported (D130/D131); the LdObj/StObj case still needs
+  `IsDuplicatedAddressComputation` + `previousInstruction`, and the
+  getter/setter `MatchingGetterAndSetterCalls` case needs `IMethod`/
+  `AccessorOwner`] / `ValidateCompoundAssign` [now ported (D131) -- the D129
+  `IsBinaryCompatibleWithType` + the conv TargetType/CheckForOverflow match;
+  only the `Pointer` case's `PointerArithmeticOffset.Detect` is
+  deferred-conservative] + the per-statement Run wiring [the
+  `TransformPostIncDecOperatorWithInlineStore` local/StLoc-case fold is the
+  simplest wired fold these helpers unblock, firing on the .NET Framework 4
+  legacy-csc corpus for local post-increment; it operates on a single
+  non-terminal `block.Instructions[pos]` so the if-as-final block-model
+  adaptation is trivial, but it needs a corpus probe of the post-pre-pipeline
+  nested-stloc-in-binary shape per the D73/D75/D79 precedent], ...)
   are the subsequent in-order targets.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the

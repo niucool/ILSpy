@@ -25,12 +25,20 @@
 
 #include "Decompiler/IL/ConversionKind.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Instructions/CompoundAssignmentInstruction.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/Conv.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/OpCode.hpp"
 #include "Decompiler/IL/PrimitiveType.hpp"
+#include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
@@ -188,6 +196,124 @@ bool IsImplicitTruncation(const ILInstruction* value,
                           bool allowNullableValue) {
     return CheckImplicitTruncation(value, type, allowNullableValue) !=
            ImplicitTruncationResult::ValuePreserved;
+}
+
+// ---------------------------------------------------------------------------
+// IsCompoundStore / IsMatchingCompoundLoad / ValidateCompoundAssign (the
+// D131 foundation subset). The C# IsCompoundStore has three cases -- StObj
+// (the target's real type via InferType + IsCompatibleTypeForMemoryAccess),
+// Call (IsSameMember + IMethod for the property-setter gate), and StLoc
+// (Variable.Kind). This port has no InferType and no IsSameMember/IMethod, so
+// only the StLoc case is ported (the self-contained Variable.Kind check); the
+// StObj/Call cases are deferred (return false). Likewise IsMatchingCompoundLoad
+// has three cases -- LdObj/StObj (IsDuplicatedAddressComputation +
+// previousInstruction), MatchingGetterAndSetterCalls (IMethod/AccessorOwner),
+// and LdLoc/StLoc (variable equality + a fresh LdLoca target +
+// RecombineVariables finalizeMatch). Only the LdLoc/StLoc case is ported; the
+// other two are deferred. ValidateCompoundAssign is the full wrapper (it calls
+// the already-ported IsBinaryCompatibleWithType + the conv-match check).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Port of ILVariableEqualityComparer.Instance.Equals. Two variables are
+// "equal" when they are the same object, or split fragments of one original
+// variable (same Kind + Index). StackSlot/PatternLocal are always distinct.
+// This port's ILVariable has no Function field (variables from different
+// functions are distinct shared_ptrs, already handled by the `x == y` check)
+// and no StateMachineField, so the equality reduces to the Index check. `x` and
+// `y` are non-owning views (may be null).
+bool VariablesEqual(const ILVariable* x, const ILVariable* y) {
+    if (x == y) return true;
+    if (x == nullptr || y == nullptr) return false;
+    if (x->Kind == VariableKind::StackSlot || y->Kind == VariableKind::StackSlot)
+        return false;
+    if (x->Kind == VariableKind::PatternLocal || y->Kind == VariableKind::PatternLocal)
+        return false;
+    if (x->Kind != y->Kind) return false;
+    // Index == -1 marks a synthetic slot (the C# Index == null); a real
+    // Parameter/Local carries a non-negative index. Two split fragments share
+    // the same Kind + Index.
+    if (x->Index >= 0) return x->Index == y->Index;
+    return false;
+}
+
+} // namespace
+
+bool IsCompoundStore(ILInstruction* inst, TypeSystem::ITypePtr& storeType,
+                     ILInstruction*& value) {
+    storeType = nullptr;
+    value = nullptr;
+    if (const auto* stloc = dynamic_cast<StLoc*>(inst)) {
+        // The StLoc case: a local or parameter store. The store type is the
+        // variable's type; the value is the stored value (a non-owning view of
+        // the StLoc's Value child). Returns true (the C# also accepts PinnedLocal
+        // / PinnedRegionLocal here via the `Local || Parameter` Kind check --
+        // those Kinds are not produced for a plain stloc in this port, so the
+        // two-Kind check is faithful).
+        if (stloc->Variable &&
+            (stloc->Variable->Kind == VariableKind::Local ||
+             stloc->Variable->Kind == VariableKind::Parameter)) {
+            storeType = stloc->Variable->Type;
+            value = stloc->Value.get();
+            return true;
+        }
+    }
+    // StObj (needs InferType for the target's real type) and Call (needs
+    // IsSameMember + IMethod for the property-setter gate) are deferred.
+    return false;
+}
+
+bool IsMatchingCompoundLoad(ILInstruction* load, ILInstruction* store,
+                            std::unique_ptr<ILInstruction>& target,
+                            CompoundTargetKind& targetKind,
+                            CompoundFinalizeMatch& finalizeMatch,
+                            const ILVariable* forbiddenVariable) {
+    target = nullptr;
+    targetKind = CompoundTargetKind::Address;
+    finalizeMatch = nullptr;
+    auto* ldloc = dynamic_cast<LdLoc*>(load);
+    auto* stloc = dynamic_cast<StLoc*>(store);
+    if (ldloc && stloc && VariablesEqual(ldloc->Variable.get(), stloc->Variable.get())) {
+        // The LdLoc/StLoc case: the load and store are the same variable. The
+        // compound-assign target is a fresh LdLoca of that variable (the C#
+        // `new LdLoca(ldloc.Variable)`); TargetKind is Address; the finalizeMatch
+        // collapses split-fragment variables via RecombineVariables (a no-op
+        // when they are the same object).
+        if (forbiddenVariable != nullptr &&
+            VariablesEqual(ldloc->Variable.get(), forbiddenVariable)) {
+            return false;
+        }
+        auto ldVar = ldloc->Variable;       // shared_ptr copy (outlives the load)
+        auto stVar = stloc->Variable;        // shared_ptr copy (outlives the store)
+        target = std::make_unique<LdLoca>(ldVar);
+        targetKind = CompoundTargetKind::Address;
+        finalizeMatch = [ldVar, stVar](ILFunction& fn) {
+            fn.RecombineVariables(ldVar, stVar);
+        };
+        return true;
+    }
+    // LdObj/StObj (needs IsDuplicatedAddressComputation + previousInstruction)
+    // and MatchingGetterAndSetterCalls (needs IMethod/AccessorOwner) are
+    // deferred -- return false.
+    return false;
+}
+
+bool ValidateCompoundAssign(const BinaryNumericInstruction* binary, const Conv* conv,
+                            const TypeSystem::IType* targetType,
+                            const ILTransformSettings* settings) {
+    if (!NumericCompoundAssign::IsBinaryCompatibleWithType(binary, targetType, settings))
+        return false;
+    if (conv != nullptr) {
+        // The unwrapped small-integer conv must match the (possibly sign-
+        // swapped) target type's PrimitiveType and the binary's overflow-check
+        // flag, otherwise the conv does not faithfully represent the truncation
+        // the compound assign performs.
+        if (!(conv->TargetType == TypeSystem::ToPrimitiveType(targetType) &&
+              conv->CheckForOverflow == binary->CheckForOverflow))
+            return false;
+    }
+    return true;
 }
 
 } // namespace ILSpy::Decompiler::IL

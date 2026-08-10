@@ -27,15 +27,25 @@
 
 #include "Decompiler/IL/ConversionKind.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
+#include "Decompiler/IL/Instructions/CompoundAssignmentInstruction.hpp"
 #include "Decompiler/IL/Instructions/Conv.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/PrimitiveType.hpp"
 #include "Decompiler/IL/StackType.hpp"
+#include "Decompiler/IL/Transforms/IILTransform.hpp"
 #include "Decompiler/IL/Transforms/TransformAssignment.hpp"
+#include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/Sign.hpp"
@@ -47,20 +57,31 @@
 
 using ILSpy::Decompiler::IL::BinaryNumericInstruction;
 using ILSpy::Decompiler::IL::BinaryNumericOperator;
+using ILSpy::Decompiler::IL::Block;
+using ILSpy::Decompiler::IL::BlockContainer;
 using ILSpy::Decompiler::IL::CheckImplicitTruncation;
 using ILSpy::Decompiler::IL::Comp;
 using ILSpy::Decompiler::IL::ComparisonKind;
+using ILSpy::Decompiler::IL::CompoundFinalizeMatch;
+using ILSpy::Decompiler::IL::CompoundTargetKind;
 using ILSpy::Decompiler::IL::Conv;
 using ILSpy::Decompiler::IL::ConversionKind;
+using ILSpy::Decompiler::IL::ILFunction;
 using ILSpy::Decompiler::IL::ILInstruction;
+using ILSpy::Decompiler::IL::Leave;
 using ILSpy::Decompiler::IL::IfInstruction;
 using ILSpy::Decompiler::IL::ImplicitTruncationResult;
+using ILSpy::Decompiler::IL::IsCompoundStore;
 using ILSpy::Decompiler::IL::IsImplicitTruncation;
+using ILSpy::Decompiler::IL::IsMatchingCompoundLoad;
 using ILSpy::Decompiler::IL::LdcI4;
 using ILSpy::Decompiler::IL::LdLoc;
+using ILSpy::Decompiler::IL::LdLoca;
 using ILSpy::Decompiler::IL::PrimitiveType;
 using ILSpy::Decompiler::IL::StackType;
+using ILSpy::Decompiler::IL::StLoc;
 using ILSpy::Decompiler::IL::UnwrapSmallIntegerConv;
+using ILSpy::Decompiler::IL::ValidateCompoundAssign;
 using ILSpy::Decompiler::IL::ILVariable;
 using ILSpy::Decompiler::IL::ILVariablePtr;
 using ILSpy::Decompiler::IL::VariableKind;
@@ -387,4 +408,296 @@ TEST(CheckImplicitTruncationTest, IsImplicitTruncationMatchesCheck) {
     EXPECT_TRUE(IsImplicitTruncation(overflows.get(), KT(KnownTypeCode::Byte).get()));
     // A non-small-integer target never truncates.
     EXPECT_FALSE(IsImplicitTruncation(overflows.get(), KT(KnownTypeCode::Int32).get()));
+}
+
+// -----------------------------------------------------------------------------
+// IsCompoundStore / IsMatchingCompoundLoad / ValidateCompoundAssign (the D131
+// foundation subset). The shared helpers the next in-order TransformAssignment
+// compound-assignment folds (HandleCompoundAssign / TransformPostIncDecOperator*
+// / TransformPreIncDecOperatorWithInlineStore) consult. Only the StLoc case of
+// IsCompoundStore and the LdLoc/StLoc case of IsMatchingCompoundLoad are ported
+// (the self-contained cases); the StObj/Call cases of IsCompoundStore and the
+// LdObj/StObj + getter/setter cases of IsMatchingCompoundLoad are deferred (need
+// InferType / IsSameMember / IMethod). ValidateCompoundAssign is the full
+// wrapper (IsBinaryCompatibleWithType + the conv-match check).
+// -----------------------------------------------------------------------------
+
+namespace {
+
+// A variable with an explicit Kind + Index (the default `Var` helper makes a
+// Local with Index = -1, the synthetic-slot sentinel; split-fragment variables
+// share a non-negative Index).
+ILVariablePtr VarIdx(std::string name, ITypePtr t, VariableKind kind,
+                      std::int32_t index) {
+    auto v = std::make_shared<ILVariable>();
+    v->Name = std::move(name);
+    v->Kind = kind;
+    v->Type = std::move(t);
+    v->Index = index;
+    return v;
+}
+
+// An empty ILFunction whose body is a single-block container (the
+// RecombineVariables finalizeMatch needs an ILFunction + the variables on its
+// Variables list + a use of the variable in the body).
+std::unique_ptr<ILFunction> MakeFn() {
+    auto container = std::make_unique<BlockContainer>();
+    container->AddBlock(std::make_unique<Block>());
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::move(container);
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    return fn;
+}
+
+} // namespace
+
+// ---- IsCompoundStore (StLoc case) ----
+
+// A stloc V(...) whose Variable is a Local: storeType = V.Type, value = the
+// stored value (a non-owning view of the StLoc's Value child).
+TEST(IsCompoundStoreTest, StLocLocalMatches) {
+    auto v = Var("V_0", KT(KnownTypeCode::Int32));
+    auto st = std::make_unique<StLoc>(v, std::make_unique<LdcI4>(5));
+    auto* valuePtr = st->Value.get();
+    ITypePtr storeType;
+    ILInstruction* value = nullptr;
+    EXPECT_TRUE(IsCompoundStore(st.get(), storeType, value));
+    ASSERT_NE(storeType, nullptr);
+    EXPECT_EQ(storeType.get(), v->Type.get());
+    EXPECT_EQ(value, valuePtr);
+}
+
+// A stloc to a Parameter also matches (the C# accepts Local || Parameter).
+TEST(IsCompoundStoreTest, StLocParameterMatches) {
+    auto p = VarIdx("arg_0", KT(KnownTypeCode::Int32), VariableKind::Parameter, 0);
+    auto st = std::make_unique<StLoc>(p, std::make_unique<LdLoc>(Var("x", KT(KnownTypeCode::Int32))));
+    ITypePtr storeType;
+    ILInstruction* value = nullptr;
+    EXPECT_TRUE(IsCompoundStore(st.get(), storeType, value));
+    ASSERT_NE(storeType, nullptr);
+    EXPECT_EQ(storeType.get(), p->Type.get());
+    EXPECT_NE(value, nullptr);
+}
+
+// A stloc to a StackSlot does not match (a stack slot is not a compound-assign
+// target -- the C# requires Local || Parameter).
+TEST(IsCompoundStoreTest, StLocStackSlotRejects) {
+    auto s = VarIdx("S_0", KT(KnownTypeCode::Int32), VariableKind::StackSlot, -1);
+    auto st = std::make_unique<StLoc>(s, std::make_unique<LdcI4>(5));
+    ITypePtr storeType;
+    ILInstruction* value = nullptr;
+    EXPECT_FALSE(IsCompoundStore(st.get(), storeType, value));
+    EXPECT_EQ(storeType, nullptr);
+    EXPECT_EQ(value, nullptr);
+}
+
+// A non-StLoc instruction (an LdLoc) does not match the StLoc case.
+TEST(IsCompoundStoreTest, NonStLocRejects) {
+    auto ld = std::make_unique<LdLoc>(Var("v", KT(KnownTypeCode::Int32)));
+    ITypePtr storeType;
+    ILInstruction* value = nullptr;
+    EXPECT_FALSE(IsCompoundStore(ld.get(), storeType, value));
+    EXPECT_EQ(storeType, nullptr);
+    EXPECT_EQ(value, nullptr);
+}
+
+// ---- IsMatchingCompoundLoad (LdLoc/StLoc case) ----
+
+// A load that is an LdLoc of V and a store that is an StLoc of the same V: the
+// target is a fresh LdLoca of V, TargetKind is Address, and finalizeMatch is set
+// (to collapse split-fragment variables via RecombineVariables).
+TEST(IsMatchingCompoundLoadTest, LdLocStLocSameVariableMatches) {
+    auto v = Var("V_0", KT(KnownTypeCode::Int32));
+    auto ld = std::make_unique<LdLoc>(v);
+    auto st = std::make_unique<StLoc>(v, std::make_unique<LdcI4>(5));
+    std::unique_ptr<ILInstruction> target;
+    CompoundTargetKind targetKind = CompoundTargetKind::Property;
+    CompoundFinalizeMatch finalizeMatch;
+    EXPECT_TRUE(IsMatchingCompoundLoad(ld.get(), st.get(), target, targetKind, finalizeMatch));
+    ASSERT_NE(target, nullptr);
+    EXPECT_EQ(target->Op, ILSpy::Decompiler::IL::OpCode::LdLoca);
+    auto* lda = static_cast<LdLoca*>(target.get());
+    EXPECT_EQ(lda->Variable.get(), v.get());
+    EXPECT_EQ(targetKind, CompoundTargetKind::Address);
+    EXPECT_NE(finalizeMatch, nullptr);
+}
+
+// Split fragments (different shared_ptrs, same Kind + Index) match: the
+// finalizeMatch collapses them via RecombineVariables.
+TEST(IsMatchingCompoundLoadTest, LdLocStLocSplitFragmentsMatch) {
+    auto v1 = VarIdx("V_0", KT(KnownTypeCode::Int32), VariableKind::Local, 0);
+    auto v2 = VarIdx("V_0b", KT(KnownTypeCode::Int32), VariableKind::Local, 0);
+    auto ld = std::make_unique<LdLoc>(v2);
+    auto st = std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(5));
+    std::unique_ptr<ILInstruction> target;
+    CompoundTargetKind targetKind = CompoundTargetKind::Property;
+    CompoundFinalizeMatch finalizeMatch;
+    EXPECT_TRUE(IsMatchingCompoundLoad(ld.get(), st.get(), target, targetKind, finalizeMatch));
+    ASSERT_NE(target, nullptr);
+    // The target is the load's variable (the C# `new LdLoca(ldloc.Variable)`).
+    auto* lda = static_cast<LdLoca*>(target.get());
+    EXPECT_EQ(lda->Variable.get(), v2.get());
+    ASSERT_NE(finalizeMatch, nullptr);
+    // The finalizeMatch collapses the store's variable into the load's (the C#
+    // `RecombineVariables(ldloc.Variable, stloc.Variable)`): v1 (store) is
+    // reassigned to v2 (load), so the load/store use one variable afterward.
+    auto fn = MakeFn();
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(5)));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fn->Body.get(),
+        std::make_unique<LdLoc>(v1)));
+    fn->Variables.push_back(v1);
+    fn->Variables.push_back(v2);
+    finalizeMatch(*fn);
+    EXPECT_EQ(std::find_if(fn->Variables.begin(), fn->Variables.end(),
+                           [&](const ILVariablePtr& vv) { return vv.get() == v1.get(); }),
+              fn->Variables.end())
+        << "v1 (the store variable) is dropped from the function";
+    bool v2Listed = false;
+    for (auto& vv : fn->Variables) if (vv.get() == v2.get()) v2Listed = true;
+    EXPECT_TRUE(v2Listed) << "v2 (the load variable) stays";
+}
+
+// A forbiddenVariable that is the load/store variable rejects the match (the
+// transform would move a store over a use of the variable).
+TEST(IsMatchingCompoundLoadTest, ForbiddenVariableRejects) {
+    auto v = Var("V_0", KT(KnownTypeCode::Int32));
+    auto ld = std::make_unique<LdLoc>(v);
+    auto st = std::make_unique<StLoc>(v, std::make_unique<LdcI4>(5));
+    std::unique_ptr<ILInstruction> target;
+    CompoundTargetKind targetKind = CompoundTargetKind::Property;
+    CompoundFinalizeMatch finalizeMatch;
+    EXPECT_FALSE(IsMatchingCompoundLoad(ld.get(), st.get(), target, targetKind,
+                                         finalizeMatch, v.get()));
+    EXPECT_EQ(target, nullptr);
+    EXPECT_EQ(finalizeMatch, nullptr);
+}
+
+
+// Two locals with different Index do not match (distinct variable slots).
+TEST(IsMatchingCompoundLoadTest, DifferentIndexRejects) {
+    auto v0 = VarIdx("V_0", KT(KnownTypeCode::Int32), VariableKind::Local, 0);
+    auto v1 = VarIdx("V_1", KT(KnownTypeCode::Int32), VariableKind::Local, 1);
+    auto ld = std::make_unique<LdLoc>(v0);
+    auto st = std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(5));
+    std::unique_ptr<ILInstruction> target;
+    CompoundTargetKind targetKind = CompoundTargetKind::Property;
+    CompoundFinalizeMatch finalizeMatch;
+    EXPECT_FALSE(IsMatchingCompoundLoad(ld.get(), st.get(), target, targetKind, finalizeMatch));
+    EXPECT_EQ(target, nullptr);
+}
+
+// Two DIFFERENT StackSlot variables never match (the
+// ILVariableEqualityComparer treats stack slots as distinct -- a stack slot is
+// not a compound-assign target). A same-object StackSlot pair would match by
+// reference equality, but that case never arises: IsCompoundStore rejects a
+// StackSlot store (Kind != Local && != Parameter) before IsMatchingCompoundLoad
+// is consulted.
+TEST(IsMatchingCompoundLoadTest, DifferentStackSlotsReject) {
+    auto s1 = VarIdx("S_0", KT(KnownTypeCode::Int32), VariableKind::StackSlot, -1);
+    auto s2 = VarIdx("S_1", KT(KnownTypeCode::Int32), VariableKind::StackSlot, -1);
+    auto ld = std::make_unique<LdLoc>(s1);
+    auto st = std::make_unique<StLoc>(s2, std::make_unique<LdcI4>(5));
+    std::unique_ptr<ILInstruction> target;
+    CompoundTargetKind targetKind = CompoundTargetKind::Property;
+    CompoundFinalizeMatch finalizeMatch;
+    EXPECT_FALSE(IsMatchingCompoundLoad(ld.get(), st.get(), target, targetKind, finalizeMatch));
+    EXPECT_EQ(target, nullptr);
+}
+
+// A non-LdLoc load (an LdLoca) does not match the LdLoc/StLoc case.
+TEST(IsMatchingCompoundLoadTest, NonLdLocLoadRejects) {
+    auto v = Var("V_0", KT(KnownTypeCode::Int32));
+    auto lda = std::make_unique<LdLoca>(v);
+    auto st = std::make_unique<StLoc>(v, std::make_unique<LdcI4>(5));
+    std::unique_ptr<ILInstruction> target;
+    CompoundTargetKind targetKind = CompoundTargetKind::Property;
+    CompoundFinalizeMatch finalizeMatch;
+    EXPECT_FALSE(IsMatchingCompoundLoad(lda.get(), st.get(), target, targetKind, finalizeMatch));
+    EXPECT_EQ(target, nullptr);
+}
+
+// A non-StLoc store (an LdLoc) does not match the LdLoc/StLoc case.
+TEST(IsMatchingCompoundLoadTest, NonStLocStoreRejects) {
+    auto v = Var("V_0", KT(KnownTypeCode::Int32));
+    auto ld = std::make_unique<LdLoc>(v);
+    auto ld2 = std::make_unique<LdLoc>(v);
+    std::unique_ptr<ILInstruction> target;
+    CompoundTargetKind targetKind = CompoundTargetKind::Property;
+    CompoundFinalizeMatch finalizeMatch;
+    EXPECT_FALSE(IsMatchingCompoundLoad(ld.get(), ld2.get(), target, targetKind, finalizeMatch));
+    EXPECT_EQ(target, nullptr);
+}
+
+// ---- ValidateCompoundAssign ----
+
+// A plain add of two Int32 values is compatible with an Int32 target.
+TEST(ValidateCompoundAssignTest, CompatibleBinaryAndTypePasses) {
+    auto binary = std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(Var("v", KT(KnownTypeCode::Int32))),
+        std::make_unique<LdcI4>(1), BinaryNumericOperator::Add, StackType::I4);
+    EXPECT_TRUE(ValidateCompoundAssign(binary.get(), nullptr,
+                                       KT(KnownTypeCode::Int32).get(), nullptr));
+}
+
+// A lifted binary over a non-Nullable target fails (the IsBinaryCompatibleWithType
+// IsLifted gate requires a Nullable<T> store type).
+TEST(ValidateCompoundAssignTest, LiftedBinaryOverNonNullableFails) {
+    auto lhs = std::make_unique<LdLoc>(Var("v", KT(KnownTypeCode::Int32)));
+    auto rhs = std::make_unique<LdcI4>(1);
+    auto binary = std::make_unique<BinaryNumericInstruction>(
+        std::move(lhs), std::move(rhs), BinaryNumericOperator::Add,
+        StackType::I4, StackType::I4, false, Sign::None, true /*isLifted*/);
+    EXPECT_FALSE(ValidateCompoundAssign(binary.get(), nullptr,
+                                        KT(KnownTypeCode::Int32).get(), nullptr));
+}
+
+// A null conv (the no-conv case) just delegates to IsBinaryCompatibleWithType.
+TEST(ValidateCompoundAssignTest, NullConvPassesWhenCompatible) {
+    auto binary = std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(Var("v", KT(KnownTypeCode::Byte))),
+        std::make_unique<LdcI4>(1), BinaryNumericOperator::Add, StackType::I4);
+    EXPECT_TRUE(ValidateCompoundAssign(binary.get(), nullptr,
+                                       KT(KnownTypeCode::Byte).get(), nullptr));
+}
+
+// A conv whose TargetType matches the target type's PrimitiveType and whose
+// CheckForOverflow matches the binary's passes.
+TEST(ValidateCompoundAssignTest, MatchingConvPasses) {
+    auto binary = std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(Var("v", KT(KnownTypeCode::Byte))),
+        std::make_unique<LdcI4>(1), BinaryNumericOperator::Add, StackType::I4);
+    auto conv = std::make_unique<Conv>(
+        std::make_unique<LdLoc>(Var("v", KT(KnownTypeCode::Int32))),
+        PrimitiveType::U1, false, Sign::None);
+    // conv.TargetType (U1) == ToPrimitiveType(Byte) (U1), CheckForOverflow false.
+    EXPECT_TRUE(ValidateCompoundAssign(binary.get(), conv.get(),
+                                        KT(KnownTypeCode::Byte).get(), nullptr));
+}
+
+// A conv whose TargetType does not match the target type's PrimitiveType fails.
+TEST(ValidateCompoundAssignTest, ConvTargetTypeMismatchFails) {
+    auto binary = std::make_unique<BinaryNumericInstruction>(
+        std::make_unique<LdLoc>(Var("v", KT(KnownTypeCode::Byte))),
+        std::make_unique<LdcI4>(1), BinaryNumericOperator::Add, StackType::I4);
+    auto conv = std::make_unique<Conv>(
+        std::make_unique<LdLoc>(Var("v", KT(KnownTypeCode::Int32))),
+        PrimitiveType::I1, false, Sign::None);  // I1 != U1 (Byte)
+    EXPECT_FALSE(ValidateCompoundAssign(binary.get(), conv.get(),
+                                         KT(KnownTypeCode::Byte).get(), nullptr));
+}
+
+// A conv whose CheckForOverflow does not match the binary's fails.
+TEST(ValidateCompoundAssignTest, ConvOverflowMismatchFails) {
+    auto lhs = std::make_unique<LdLoc>(Var("v", KT(KnownTypeCode::Int32)));
+    auto rhs = std::make_unique<LdcI4>(1);
+    auto binary = std::make_unique<BinaryNumericInstruction>(
+        std::move(lhs), std::move(rhs), BinaryNumericOperator::Add,
+        true /*checkForOverflow*/, Sign::Signed);
+    auto conv = std::make_unique<Conv>(
+        std::make_unique<LdLoc>(Var("v", KT(KnownTypeCode::Int32))),
+        PrimitiveType::I4, false /*checkForOverflow*/, Sign::None);
+    // conv.CheckForOverflow (false) != binary.CheckForOverflow (true).
+    EXPECT_FALSE(ValidateCompoundAssign(binary.get(), conv.get(),
+                                         KT(KnownTypeCode::Int32).get(), nullptr));
 }
