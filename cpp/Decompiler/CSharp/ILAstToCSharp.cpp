@@ -704,7 +704,7 @@ private:
             const auto& f = static_cast<const LdFlda&>(target);
             std::string field = FlattenMetadataName(f.FieldName);
             std::string obj = f.Target ? Expr(*f.Target) : "(default)";
-            return obj == "this" ? "this." + SimpleName(field) : obj + "." + SimpleName(field);
+            return obj == "this" ? SimpleName(field) : obj + "." + SimpleName(field);
         }
         if (target.Op == OpCode::LdsFlda) {
             return FlattenMetadataName(static_cast<const LdsFlda&>(target).FieldName);
@@ -897,7 +897,7 @@ private:
                 const auto& f = static_cast<const LdFlda&>(inst);
                 std::string field = FlattenMetadataName(f.FieldName);
                 std::string obj = f.Target ? Expr(*f.Target) : "(default)";
-                return obj == "this" ? "this." + SimpleName(field) : obj + "." + SimpleName(field);
+                return obj == "this" ? SimpleName(field) : obj + "." + SimpleName(field);
             }
             case OpCode::LdsFlda:
                 return FlattenMetadataName(static_cast<const LdsFlda&>(inst).FieldName);

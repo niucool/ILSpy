@@ -280,8 +280,8 @@ TEST(ILAstToCSharp, FieldStoreAndLoadThroughLdFlda) {
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "int", "get_Count", "");
-    EXPECT_NE(text.find("    this.count = 7;\n"), std::string::npos) << text;
-    EXPECT_NE(text.find("    return this.count;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("    count = 7;\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("    return count;\n"), std::string::npos) << text;
 }
 
 TEST(ILAstToCSharp, ByRefVariableDerefIsImplicit) {
@@ -604,7 +604,7 @@ TEST(ILAstToCSharp, DecodesRealGetterFromMscorlib) {
         ASSERT_NE(fn, nullptr) << "ReadIL failed on String::get_FirstChar";
         fn->CheckInvariant(ILPhase::Normal);
         std::string text = ILAstToCSharp(*fn, "char", "get_FirstChar", "");
-        EXPECT_NE(text.find("return this.m_firstChar;"), std::string::npos) << text;
+        EXPECT_NE(text.find("return m_firstChar;"), std::string::npos) << text;
         found = true;
         break;
     }
