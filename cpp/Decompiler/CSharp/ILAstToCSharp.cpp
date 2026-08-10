@@ -206,9 +206,18 @@ private:
 
     std::string GotoText(const Branch& br) const {
         if (br.TargetBlock) {
-            // A branch to a loop header is a `continue` (the back-edge).
-            if (loopHeaders_.find(br.TargetBlock) != loopHeaders_.end())
-                return "continue;";
+            // A branch to a loop header is a `continue` (the back-edge) only
+            // when the branch is INSIDE the loop (the header's container is an
+            // ancestor of the branch). A branch from outside the loop (the
+            // pre-header's entry branch) is the implicit loop start, not a
+            // continue -- render it as a goto (or drop it if the loop follows).
+            if (loopHeaders_.find(br.TargetBlock) != loopHeaders_.end()) {
+                auto* loopContainer = dynamic_cast<BlockContainer*>(br.TargetBlock->Parent);
+                bool insideLoop = false;
+                for (const ILInstruction* p = &br; p; p = p->Parent)
+                    if (p == loopContainer) { insideLoop = true; break; }
+                if (insideLoop) return "continue;";
+            }
             auto it = labels_.find(br.TargetBlock);
             if (it != labels_.end()) return "goto " + it->second + ";";
         }
