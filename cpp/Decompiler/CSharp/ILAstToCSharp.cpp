@@ -322,7 +322,13 @@ private:
                 // the binary's left is a load of the same variable. A declaration
                 // (`var V = ...`) is never a compound assignment.
                 std::string valueText = BoolLiteralText(st.Variable.get(), st.Value.get());
-                if (valueText.empty()) valueText = Expr(*st.Value);
+                if (valueText.empty()) {
+                    valueText = Expr(*st.Value);
+                    // Strip the redundant outer parens the seed wraps around `as`
+                    // and `isinst` expressions in an assignment.
+                    if (st.Value && st.Value->Op == OpCode::IsInst)
+                        valueText = StripOuterParens(std::move(valueText));
+                }
                 std::string assign = declare ? " = " + valueText : AssignmentText(st, name);
                 std::string decl = declare ? CSharpTypeName(st.Variable->Type) + " " + name : name;
                 Line(indent, decl + assign + ";");
@@ -738,23 +744,23 @@ private:
         return text;
     }
 
-    // The condition expression for an `if`/`while`: strip redundant outer
-    // parens so `if ((cond))` becomes `if (cond)`. A Comp renders as
-    // `(left op right)`; a binary-operator Call renders as `(a op b)`;
-    // both get their outer parens stripped.
-    std::string CondExpr(const ILInstruction& inst) {
-        std::string e = Expr(inst);
-        if (e.size() >= 2 && e.front() == '(' && e.back() == ')') {
-            // Check that the outer parens enclose the whole string (balanced).
-            int depth = 0;
-            bool balanced = true;
-            for (std::size_t i = 0; i < e.size(); ++i) {
-                if (e[i] == '(') ++depth;
-                else if (e[i] == ')') { --depth; if (depth == 0 && i + 1 < e.size()) { balanced = false; break; } }
-            }
-            if (balanced) return e.substr(1, e.size() - 2);
+    // Strip one layer of outer parens from a string if they enclose the whole
+    // string with balanced nesting (e.g. `(a + b)` -> `a + b`, but
+    // `(a)(b)` stays). Used for assignment values and conditions.
+    static std::string StripOuterParens(std::string e) {
+        if (e.size() < 2 || e.front() != '(' || e.back() != ')') return e;
+        int depth = 0;
+        for (std::size_t i = 0; i < e.size(); ++i) {
+            if (e[i] == '(') ++depth;
+            else if (e[i] == ')') { --depth; if (depth == 0 && i + 1 < e.size()) return e; }
         }
-        return e;
+        return e.substr(1, e.size() - 2);
+    }
+
+    // The condition expression for an `if`/`while`: strip redundant outer
+    // parens so `if ((cond))` becomes `if (cond)`.
+    std::string CondExpr(const ILInstruction& inst) {
+        return StripOuterParens(Expr(inst));
     }
 
     std::string Expr(const ILInstruction& inst) {
