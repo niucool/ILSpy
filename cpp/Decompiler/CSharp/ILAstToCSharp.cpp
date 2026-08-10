@@ -174,8 +174,21 @@ private:
     void CollectLoopHeaders(const ILInstruction* inst) {
         if (!inst) return;
         if (auto* c = dynamic_cast<const BlockContainer*>(inst)) {
-            if (c->Kind == ContainerKind::Loop && !c->Blocks.empty())
+            if ((c->Kind == ContainerKind::Loop || c->Kind == ContainerKind::While) && !c->Blocks.empty()) {
                 loopHeaders_.insert(c->Blocks.front().get());
+                // For a While container, the body entry (the target of the
+                // condition's true-arm Branch) is also unlabeled -- it's the
+                // implicit body start, not a goto target.
+                if (c->Kind == ContainerKind::While) {
+                    const Block* entry = c->Blocks.front().get();
+                    if (entry && entry->FinalInstruction &&
+                        entry->FinalInstruction->Op == OpCode::IfInstruction) {
+                        const auto& iff = static_cast<const IfInstruction&>(*entry->FinalInstruction);
+                        if (iff.TrueInst && iff.TrueInst->Op == OpCode::Branch)
+                            loopHeaders_.insert(static_cast<const Branch*>(iff.TrueInst.get())->TargetBlock);
+                    }
+                }
+            }
         }
         for (int i = 0; i < inst->ChildCount(); ++i) CollectLoopHeaders(inst->GetChild(i));
     }
