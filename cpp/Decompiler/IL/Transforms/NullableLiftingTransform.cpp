@@ -42,6 +42,7 @@
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/TypeUtils.hpp"
 #include "Decompiler/IL/StackType.hpp"
 #include "Decompiler/Util/BitSet.hpp"
 
@@ -261,6 +262,41 @@ bool NullableLiftingTransform::IsKnownType(const TypeSystem::IType* type, TypeSy
     if (!type) return false;
     if (auto* kt = dynamic_cast<const TypeSystem::KnownType*>(type))
         return kt->Code() == code;
+    return false;
+}
+
+bool NullableLiftingTransform::IsNonNullableValueType(const TypeSystem::IType* type) {
+    // NullableType.IsNonNullableValueType: `type.IsReferenceType == false &&
+    // !IsNullable(type)`. IsReferenceType == false means the optional has a
+    // value and it is false (a value type, not a reference type and not the
+    // indeterminate TypeParameter/ByReference/Pointer/Unknown). !IsNullable
+    // means GetUnderlyingTypeOfNullable returns nullptr (not a Nullable<T>).
+    if (!type) return false;
+    auto refKind = IsReferenceType(type);
+    if (!refKind || *refKind) return false;  // null or reference type -> not a value type
+    return GetUnderlyingTypeOfNullable(type) == nullptr;  // not Nullable<T>
+}
+
+bool NullableLiftingTransform::IsByRefLike(const TypeSystem::IType* type) {
+    // A ByReferenceType (Kind == ByReference) is by-ref-like. A ParameterizedType
+    // (e.g. Span<T>) unwraps to its generic definition and checks KnownTypeCode
+    // SpanOfT / ReadOnlySpanOfT. A bare KnownType checks the same codes.
+    // Everything else -> false (permissive; a user-defined ref struct is not
+    // recognised without the [IsByRefLike] attribute, which this port does not
+    // resolve).
+    if (!type) return false;
+    if (type->Kind() == TypeSystem::TypeKind::ByReference) return true;
+    const TypeSystem::KnownType* kt = nullptr;
+    if (auto* pt = dynamic_cast<const TypeSystem::ParameterizedType*>(type)) {
+        const auto& gen = pt->GenericType();
+        if (gen) kt = dynamic_cast<const TypeSystem::KnownType*>(gen.get());
+    } else {
+        kt = dynamic_cast<const TypeSystem::KnownType*>(type);
+    }
+    if (kt) {
+        return kt->Code() == TypeSystem::KnownTypeCode::SpanOfT
+            || kt->Code() == TypeSystem::KnownTypeCode::ReadOnlySpanOfT;
+    }
     return false;
 }
 

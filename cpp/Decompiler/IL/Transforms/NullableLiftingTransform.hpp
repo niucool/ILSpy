@@ -169,6 +169,38 @@ public:
     // reads the type's KnownTypeCode (None for a non-known type).
     static bool IsKnownType(const TypeSystem::IType* type, TypeSystem::KnownTypeCode code);
 
+    // Port of NullableType.IsNonNullableValueType(IType): true when `type` is a
+    // value type that is NOT Nullable<T>. The C# `type.IsReferenceType == false
+    // && !IsNullable(type)`; this port uses the shared D84 IsReferenceType helper
+    // (tri-state optional<bool>) for the value-type check (== false means the
+    // optional has a value and it is false -- a Struct/Enum/Void/NInt/NUInt/
+    // FunctionPointer, NOT a reference type and NOT the indeterminate
+    // TypeParameter/ByReference/Pointer/Unknown) and GetUnderlyingTypeOfNullable
+    // for the not-Nullable<T> check (returns non-null for a Nullable<T>).
+    // Consumed by NullPropagationTransform.TryNullPropagation's NullCoalescing
+    // output case (the `?.AccessChain ?? fallback` fold, which is only valid
+    // when the access chain returns a non-nullable value type that can be
+    // wrapped in Nullable<T> for the `?.`/`??` form).
+    static bool IsNonNullableValueType(const TypeSystem::IType* type);
+
+    // Port of `IType.IsByRefLike`: true when `type` is a by-ref-like type -- a
+    // ByReferenceType or a `ref struct` (Span<T>, ReadOnlySpan<T>, ...). The C#
+    // reads each IType subclass's IsByRefLike property (ByReferenceType -> true,
+    // ParameterizedType -> genericType.IsByRefLike, ModifiedType ->
+    // elementType.IsByRefLike, KnownType -> set from the KnownThings table, a
+    // TypeDefinition -> set from the [IsByRefLike] attribute). This port's
+    // minimal type system carries no IsByRefLike flag and no [IsByRefLike]
+    // attribute resolution, so the helper approximates: a ByReferenceType
+    // (Kind == ByReference) -> true; a ParameterizedType unwraps to its generic
+    // definition and checks KnownTypeCode SpanOfT / ReadOnlySpanOfT (the common
+    // framework ref structs); a bare KnownType checks the same codes; everything
+    // else -> false (permissive -- a user-defined ref struct is not recognised,
+    // matching the D52/D72/D73 permissive-type-recognition precedent). Consumed
+    // by NullPropagationTransform.TryNullPropagation's NullCoalescing output case
+    // (the `?.AccessChain ?? fallback` fold is invalid for a by-ref-like access
+    // chain because a ref struct cannot be wrapped in Nullable<T>).
+    static bool IsByRefLike(const TypeSystem::IType* type);
+
     // Port of NullableLiftingTransform.MatchHasValueCall(inst, out ILVariable v):
     // the ldloca-v overload. `call get_HasValue(ldloca v)` on System.Nullable<T>
     // (1 argument, the argument a LdLoca) -> v (the LdLoca's variable). The

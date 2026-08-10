@@ -475,6 +475,54 @@ TEST(NullableLiftingTransform, IsKnownTypeChecksCode) {
     EXPECT_FALSE(NullableLiftingTransform::IsKnownType(nullptr, KnownTypeCode::Int32));
 }
 
+// IsNonNullableValueType: a value type (Struct/Enum) that is NOT Nullable<T>.
+// Int32 (a Struct, not Nullable<T>) -> true; Nullable<int> (a Struct but IS
+// Nullable<T>) -> false; String (a Class, a reference type) -> false; null ->
+// false. Faithful to NullableType.IsNonNullableValueType (`type.IsReferenceType
+// == false && !IsNullable(type)`).
+TEST(NullableLiftingTransform, IsNonNullableValueTypeChecksValueStructNotNullable) {
+    auto i32 = std::make_shared<KnownType>(KnownTypeCode::Int32);
+    EXPECT_TRUE(NullableLiftingTransform::IsNonNullableValueType(i32.get()));
+    auto boolean = std::make_shared<KnownType>(KnownTypeCode::Boolean);
+    EXPECT_TRUE(NullableLiftingTransform::IsNonNullableValueType(boolean.get()));
+    auto nullableInt = MakeNullableOf(KnownTypeCode::Int32);
+    EXPECT_FALSE(NullableLiftingTransform::IsNonNullableValueType(nullableInt.get()));
+    auto str = std::make_shared<KnownType>(KnownTypeCode::String);
+    EXPECT_FALSE(NullableLiftingTransform::IsNonNullableValueType(str.get()));
+    auto obj = std::make_shared<KnownType>(KnownTypeCode::Object);
+    EXPECT_FALSE(NullableLiftingTransform::IsNonNullableValueType(obj.get()));
+    EXPECT_FALSE(NullableLiftingTransform::IsNonNullableValueType(nullptr));
+}
+
+// IsByRefLike: a ByReferenceType (Kind == ByReference) -> true; a
+// ParameterizedType whose generic definition is SpanOfT / ReadOnlySpanOfT
+// (Span<T>, ReadOnlySpan<T>) -> true; a bare KnownType of those codes -> true;
+// a non-by-ref-like value type (Int32) -> false; null -> false. The
+// approximation is permissive for user-defined ref structs (no [IsByRefLike]
+// attribute resolution).
+TEST(NullableLiftingTransform, IsByRefLikeChecksRefStructsAndByRef) {
+    auto byRef = std::make_shared<ILSpy::Decompiler::TypeSystem::ByReferenceType>(
+        std::make_shared<KnownType>(KnownTypeCode::Int32));
+    EXPECT_TRUE(NullableLiftingTransform::IsByRefLike(byRef.get()));
+    std::vector<std::shared_ptr<IType>> spanArgs;
+    spanArgs.push_back(std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto spanOfInt = std::make_shared<ParameterizedType>(
+        std::make_shared<KnownType>(KnownTypeCode::SpanOfT), std::move(spanArgs));
+    EXPECT_TRUE(NullableLiftingTransform::IsByRefLike(spanOfInt.get()));
+    std::vector<std::shared_ptr<IType>> rosArgs;
+    rosArgs.push_back(std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto rosOfInt = std::make_shared<ParameterizedType>(
+        std::make_shared<KnownType>(KnownTypeCode::ReadOnlySpanOfT), std::move(rosArgs));
+    EXPECT_TRUE(NullableLiftingTransform::IsByRefLike(rosOfInt.get()));
+    auto bareSpan = std::make_shared<KnownType>(KnownTypeCode::SpanOfT);
+    EXPECT_TRUE(NullableLiftingTransform::IsByRefLike(bareSpan.get()));
+    auto i32 = std::make_shared<KnownType>(KnownTypeCode::Int32);
+    EXPECT_FALSE(NullableLiftingTransform::IsByRefLike(i32.get()));
+    auto str = std::make_shared<KnownType>(KnownTypeCode::String);
+    EXPECT_FALSE(NullableLiftingTransform::IsByRefLike(str.get()));
+    EXPECT_FALSE(NullableLiftingTransform::IsByRefLike(nullptr));
+}
+
 // call get_HasValue(ldloca v) on Nullable<int> matches the ldloca-v overload
 // and reports the variable.
 TEST(NullableLiftingTransform, MatchHasValueCallLdLocaReportsVariable) {

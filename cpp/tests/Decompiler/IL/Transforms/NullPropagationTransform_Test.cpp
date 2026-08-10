@@ -22,9 +22,8 @@
 // cases, and the NullableByValue / NullableByReference modes with the same
 // output cases), the access chain analysis (IsValidAccessChain approximated for
 // the Call/LdFld/LdLen/LdElema/NullableUnwrap cases), and the IntroduceUnwrap
-// rewrap. The UnconstrainedType mode, RunStatements, and the NullCoalescing
-// output case are deferred. The `?.` lowering (all modes) is a Roslyn-era
-// (C# 6.0) codegen pattern that fires 0 times on the .NET Framework 4
+// rewrap. The UnconstrainedType mode and RunStatements are the remaining
+// deferred pieces. The `?.` lowering (all modes) is a Roslyn-era (C# 6.0) codegen pattern that fires 0 times on the .NET Framework 4
 // legacy-csc mscorlib corpus, so the sweep asserts the ILAst invariant holds
 // (not a fold count), matching the DetectCatchWhenConditionBlocks /
 // LdLocaDupInitObj / SwitchOnNullable precedent.
@@ -72,6 +71,7 @@
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/NullableInstructions.hpp"
+#include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/DefaultValue.hpp"
@@ -395,6 +395,143 @@ TEST(NullPropagationTransform, RunRejectsNonNullableDefaultFalseInst) {
     auto iff = std::make_unique<IfInstruction>(
         std::move(cond), std::move(call),
         std::make_unique<DefaultValue>(std::make_shared<KnownType>(KnownTypeCode::Int32)));
+    auto result = NullPropagationTransform::Run(
+        iff->Condition.get(), iff->TrueInst.get(), iff->FalseInst.get());
+    EXPECT_EQ(result, nullptr);
+}
+
+TEST(NullPropagationTransform, RunFoldsInequalityNullCheckToNullCoalescing) {
+    // `comp(ldloc v != null) ? call GetHashCode(ldloc v) : ldc.i4 0`
+    // where GetHashCode returns int (a non-nullable value type, not by-ref-like)
+    // => `if.notnull(nullable.rewrap(call GetHashCode(nullable.unwrap(ldloc v))), ldc.i4 0)`
+    // (a NullCoalescingInstruction(NullableWithValueFallback) -- the `?.`/`??` form,
+    // faithful to the C# `testedVar?.AccessChain ?? nullInst`). The
+    // UnderlyingResultType is the fallback's ResultType (I4 for ldc.i4 0).
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto cond = std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v), std::make_unique<LdNull>(),
+        ComparisonKind::Inequality);
+    auto call = std::make_unique<Call>("System.Object::GetHashCode");
+    call->IsInstanceCall = true;
+    call->ReturnType = StackType::I4;
+    call->ReturnIType = std::make_shared<KnownType>(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoc>(v));
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(cond), std::move(call), std::make_unique<LdcI4>(0));
+    auto result = NullPropagationTransform::Run(
+        iff->Condition.get(), iff->TrueInst.get(), iff->FalseInst.get());
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Op, OpCode::NullCoalescingInstruction);
+    auto* nc = static_cast<NullCoalescingInstruction*>(result.get());
+    EXPECT_EQ(nc->Kind, NullCoalescingKind::NullableWithValueFallback);
+    EXPECT_EQ(nc->UnderlyingResultType, StackType::I4);
+    ASSERT_NE(nc->ValueInst, nullptr);
+    EXPECT_EQ(nc->ValueInst->Op, OpCode::NullableRewrap);
+    auto* rewrap = static_cast<NullableRewrap*>(nc->ValueInst.get());
+    ASSERT_NE(rewrap->Argument, nullptr);
+    EXPECT_EQ(rewrap->Argument->Op, OpCode::Call);
+    auto* rcall = static_cast<Call*>(rewrap->Argument.get());
+    ASSERT_FALSE(rcall->Arguments.empty());
+    EXPECT_EQ(rcall->Arguments[0]->Op, OpCode::NullableUnwrap);
+    ASSERT_NE(nc->FallbackInst, nullptr);
+    EXPECT_EQ(nc->FallbackInst->Op, OpCode::LdcI4);
+}
+
+TEST(NullPropagationTransform, RunFoldsFieldAccessChainToNullCoalescing) {
+    // `comp(ldloc v != null) ? ldobj(ldflda(ldloc v, field), Int32) : ldc.i4 0`
+    // where the field is Int32 (a non-nullable value type, not by-ref-like)
+    // => `if.notnull(nullable.rewrap(ldobj(ldflda(nullable.unwrap(ldloc v),
+    //    field), Int32)), ldc.i4 0)`. The InferAccessChainType reads the LdObj's
+    //    Type (the field type), the faithful equivalent of the C# InferType for
+    //    a field access.
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto cond = std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v), std::make_unique<LdNull>(),
+        ComparisonKind::Inequality);
+    auto ldFlda = std::make_unique<LdFlda>(
+        std::make_unique<LdLoc>(v), "System.Object::someField");
+    auto ldObj = std::make_unique<LdObj>(
+        std::move(ldFlda), std::make_shared<KnownType>(KnownTypeCode::Int32));
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(cond), std::move(ldObj), std::make_unique<LdcI4>(0));
+    auto result = NullPropagationTransform::Run(
+        iff->Condition.get(), iff->TrueInst.get(), iff->FalseInst.get());
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Op, OpCode::NullCoalescingInstruction);
+    auto* nc = static_cast<NullCoalescingInstruction*>(result.get());
+    EXPECT_EQ(nc->Kind, NullCoalescingKind::NullableWithValueFallback);
+    EXPECT_EQ(nc->UnderlyingResultType, StackType::I4);
+    ASSERT_NE(nc->ValueInst, nullptr);
+    EXPECT_EQ(nc->ValueInst->Op, OpCode::NullableRewrap);
+    auto* rewrap = static_cast<NullableRewrap*>(nc->ValueInst.get());
+    ASSERT_NE(rewrap->Argument, nullptr);
+    EXPECT_EQ(rewrap->Argument->Op, OpCode::LdObj);
+    ASSERT_NE(nc->FallbackInst, nullptr);
+    EXPECT_EQ(nc->FallbackInst->Op, OpCode::LdcI4);
+}
+
+TEST(NullPropagationTransform, RunRejectsReferenceTypeReturnForNullCoalescing) {
+    // `comp(ldloc v != null) ? call ToString(ldloc v) : ldc.i4 0`
+    // ToString returns string (a reference type) -- IsNonNullableValueType is
+    // false, so the NullCoalescing output case does not fire; ldc.i4 0 is not
+    // ldnull/default(Nullable<T>), so no output case fires (result == nullptr).
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto cond = std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v), std::make_unique<LdNull>(),
+        ComparisonKind::Inequality);
+    auto call = std::make_unique<Call>("System.Object::ToString");
+    call->IsInstanceCall = true;
+    call->ReturnType = StackType::O;
+    call->ReturnIType = std::make_shared<KnownType>(KnownTypeCode::String);
+    call->AddArg(std::make_unique<LdLoc>(v));
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(cond), std::move(call), std::make_unique<LdcI4>(0));
+    auto result = NullPropagationTransform::Run(
+        iff->Condition.get(), iff->TrueInst.get(), iff->FalseInst.get());
+    EXPECT_EQ(result, nullptr);
+}
+
+TEST(NullPropagationTransform, RunRejectsByRefLikeReturnForNullCoalescing) {
+    // `comp(ldloc v != null) ? call returning Span<int> : ldc.i4 0`
+    // Span<T> is a by-ref-like ref struct -- IsByRefLike is true, so the
+    // NullCoalescing output case does not fire (a ref struct cannot be wrapped
+    // in Nullable<T> for the `?.`/`??` form). ldc.i4 0 is not
+    // ldnull/default(Nullable<T>), so no output case fires (result == nullptr).
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto cond = std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v), std::make_unique<LdNull>(),
+        ComparisonKind::Inequality);
+    auto call = std::make_unique<Call>("System.Object::SomeSpanMethod");
+    call->IsInstanceCall = true;
+    std::vector<ITypePtr> spanArgs;
+    spanArgs.push_back(std::make_shared<KnownType>(KnownTypeCode::Int32));
+    call->ReturnIType = std::make_shared<ParameterizedType>(
+        std::make_shared<KnownType>(KnownTypeCode::SpanOfT), std::move(spanArgs));
+    call->AddArg(std::make_unique<LdLoc>(v));
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(cond), std::move(call), std::make_unique<LdcI4>(0));
+    auto result = NullPropagationTransform::Run(
+        iff->Condition.get(), iff->TrueInst.get(), iff->FalseInst.get());
+    EXPECT_EQ(result, nullptr);
+}
+
+TEST(NullPropagationTransform, RunRejectsStrippedRewrapForNullCoalescing) {
+    // `comp(ldloc v != null) ? nullable.rewrap(call GetHashCode(ldloc v)) : ldc.i4 0`
+    // The NullableRewrap is stripped (removedRewrapOrNullableCtor = true), so the
+    // NullCoalescing output case does not fire (the `!removedRewrapOrNullableCtor`
+    // guard); ldc.i4 0 is not ldnull/default(Nullable<T>), so no output case fires.
+    auto v = MakeLocal("v", std::make_shared<KnownType>(KnownTypeCode::Object));
+    auto cond = std::make_unique<Comp>(
+        std::make_unique<LdLoc>(v), std::make_unique<LdNull>(),
+        ComparisonKind::Inequality);
+    auto call = std::make_unique<Call>("System.Object::GetHashCode");
+    call->IsInstanceCall = true;
+    call->ReturnType = StackType::I4;
+    call->ReturnIType = std::make_shared<KnownType>(KnownTypeCode::Int32);
+    call->AddArg(std::make_unique<LdLoc>(v));
+    auto rewrap = std::make_unique<NullableRewrap>(std::move(call));
+    auto iff = std::make_unique<IfInstruction>(
+        std::move(cond), std::move(rewrap), std::make_unique<LdcI4>(0));
     auto result = NullPropagationTransform::Run(
         iff->Condition.get(), iff->TrueInst.get(), iff->FalseInst.get());
     EXPECT_EQ(result, nullptr);

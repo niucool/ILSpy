@@ -915,11 +915,30 @@ implemented and green here. Everything else follows the phase plan in
   modes the varLoad is the `call GetValueOrDefault(ldloca/ldloc testedVar)` at the
   end of the chain and the unwrap's Argument is a FRESH `ldloc testedVar` (the C#
   `new LdLoc(testedVar)`, with `refInput=true` for NullableByReference). The three
-  modes are ported with the `ldnull` and `default(Nullable<T>)` output cases
-  (the latter via the D93 MatchNull helper, the faithful equivalent of the C#
-  `MatchDefaultValue + IsKnownType(NullableOfT)`); the `NullCoalescing` output
-  case (needs InferType / NullableType.IsNonNullableValueType / IsByRefLike), the
-  UnconstrainedType mode (RunStatements only), and the
+  modes are ported with the `ldnull`, `default(Nullable<T>)`, and `NullCoalescing`
+  output cases. The `NullCoalescing` output case (`testedVar != null ?
+  testedVar.AccessChain : nullInst` where the chain returns a non-nullable
+  value type, not a by-ref-like type, and the NullableRewrap/NullableCtor
+  was NOT stripped) folds into `testedVar?.AccessChain ?? nullInst` (a
+  `NullCoalescingInstruction(NullableWithValueFallback)` wrapping a
+  `NullableRewrap`). It is gated on `NullableLiftingTransform::IsNonNullableValueType`
+  (a faithful port of `NullableType.IsNonNullableValueType` via the shared D84
+  `IsReferenceType` helper + `GetUnderlyingTypeOfNullable`) and `IsByRefLike`
+  (a permissive port -- a `ByReferenceType` / a `ParameterizedType` whose
+  generic definition is `SpanOfT`/`ReadOnlySpanOfT` -> true; user-defined ref
+  structs are not recognised without the `[IsByRefLike]` attribute). The return
+  type the gate consults comes from a minimal `InferAccessChainType` helper
+  (a `Call` -> the new `Call::ReturnIType`, populated by the IL reader from the
+  method signature's return type; a `LdObj` -> the LdObj's `Type`; else
+  nullptr) -- the faithful equivalent of the C# `nonNullInst.InferType(typeSystem)`
+  for the access-chain roots the `?.` lowering produces. KEY FINDING: the
+  `NullCoalescing` output case fires 78 times on the .NET Framework 4 legacy-csc
+  mscorlib corpus (the legacy csc emits `v != null ? v.M() : fallback` where
+  `v.M()` returns a value type as a plain if/else / ternary, which the
+  `NullPropagation::Run` detects and folds to `v?.M() ?? fallback`) -- a
+  real-corpus readability improvement (e.g. `obj?.GetHashCode() ??
+  type.GetHashCode()`, `zone?.get_SecurityZone() ?? 0`). The UnconstrainedType
+  mode (RunStatements only) and the
   `TransformNullPropagationOnUnconstrainedGenericExpression` pattern (a
   5-instruction block sequence) are deferred. The void-call subset of
   `RunStatements` is now ported via `NullPropagationStatementTransform` (an
@@ -937,7 +956,7 @@ implemented and green here. Everything else follows the phase plan in
   modes) is a Roslyn-era (C# 6.0) codegen pattern that fires 0 times on the .NET
   Framework 4 legacy-csc mscorlib corpus, so the sweep asserts the ILAst
   invariant holds (not a fold count), matching the DetectCatchWhenConditionBlocks /
-  LdLocaDupInitObj precedent. 38 of ~40 transforms ported.
+  LdLocaDupInitObj precedent. 39 of ~40 transforms ported.
   The `Call::IsOperator` flag (set by the IL reader from the `op_*` method
   name -- the faithful equivalent of the C# `IMethod.IsOperator`'s SpecialName
   + name-prefix check) and the `MatchCompOrDecimal` Decimal-operator branch
@@ -970,8 +989,8 @@ implemented and green here. Everything else follows the phase plan in
   of LiftNormal [needs the C# resolver's CSharpOperators.LiftUserDefinedOperator;
   the `Call::IsOperator` gate it consults is now in place], the Decimal lift
   itself [same resolver need], NullPropagation's remaining
-  modes [UnconstrainedType + the NullCoalescing output case + the
-  unconstrained-generic pattern]) are the subsequent in-order targets.
+  modes [UnconstrainedType + the unconstrained-generic pattern; the NullCoalescing
+  output case is now ported]) are the subsequent in-order targets.
   `NullableRewrap` / `NullableUnwrap` (Instructions/, a tested-but-not-yet-wired
   foundation ported from NullableInstructions.cs) are the ILAst nodes for the C#
   null-conditional (`?.`) operator -- the next in-order transform

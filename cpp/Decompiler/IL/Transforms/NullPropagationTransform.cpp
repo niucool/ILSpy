@@ -19,14 +19,13 @@
 // Port of ICSharpCode.Decompiler/IL/Transforms/NullPropagationTransform.cs
 // (subset). See the header for the scope. This file ports the ReferenceType,
 // NullableByValue, and NullableByReference modes of `Run` + `TryNullPropagation`
-// (the `ldnull` and `default(Nullable<T>)` output cases) +
+// (the `ldnull`, `default(Nullable<T>)`, and `NullCoalescing` output cases) +
 // `IsValidAccessChain` (approximated) + `IntroduceUnwrap`, plus the
 // `IsProtectedIfInst` and `MatchNullableRewrap` static helpers, and the
 // void-call subset of `RunStatements` (via `NullPropagationStatementTransform`,
 // the `?.` statement form). The UnconstrainedType mode, the
-// TransformNullPropagationOnUnconstrainedGenericExpression pattern, the
-// `NullCoalescing` output case (needs InferType / NullableType.IsNonNullableValueType),
-// and the AddressOf / LdObjIfRef / Dynamic* access-chain cases are deferred.
+// TransformNullPropagationOnUnconstrainedGenericExpression pattern, and the
+// AddressOf / LdObjIfRef / Dynamic* access-chain cases are deferred.
 
 #include "Decompiler/IL/Transforms/NullPropagationTransform.hpp"
 #include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
@@ -44,6 +43,7 @@
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/NullableInstructions.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
@@ -336,16 +336,36 @@ void IntroduceUnwrap(ILVariable* /*testedVar*/, ILInstruction* varLoad, Mode mod
     }
 }
 
+// Port of a minimal `ILInstruction.InferType(typeSystem)` for the access
+// chain root: returns the result type IType of `nonNullInst` (the access chain
+// root, after NullableRewrap/NullableCtor stripping). A Call -> the method's
+// return type IType (`Call::ReturnIType`, resolved at reader time from the
+// method signature); a LdObj (LdFld = LdObj(LdFlda(..), type)) -> the LdObj's
+// Type; otherwise nullptr (conservative -- the NullCoalescing output case does
+// not fire). The C# InferType uses the resolver and covers more node kinds; this
+// minimal port covers the access-chain roots the `?.` lowering produces (a Call
+// or a field load), matching the D52/D72/D73 permissive-type-recognition
+// precedent. Used by TryNullPropagation's NullCoalescing output case to gate on
+// NullableType.IsNonNullableValueType(returnType) && !returnType.IsByRefLike.
+const TypeSystem::IType* InferAccessChainType(ILInstruction* inst) {
+    if (!inst) return nullptr;
+    if (inst->Op == OpCode::Call)
+        return static_cast<Call*>(inst)->ReturnIType.get();
+    if (inst->Op == OpCode::LdObj)
+        return static_cast<LdObj*>(inst)->Type.get();
+    return nullptr;
+}
+
 // Port of NullPropagationTransform.TryNullPropagation (ReferenceType + ldnull
 // output subset): `testedVar != null ? nonNullInst : nullInst` folds into
 // `testedVar?.nonNullInst` (a NullableRewrap around the access chain, with the
 // receiver load rewritten to a NullableUnwrap by IntroduceUnwrap). The
 // `default(Nullable<T>)` output case and the `NullCoalescing` output case
 // (testedVar != null ? nonNullInst : nullInst where the chain returns a
-// non-nullable value type) are deferred (need InferType /
-// NullableType.IsNonNullableValueType). Returns the lifted instruction (owned)
-// or nullptr if no fold fired. `nonNullInst` is detached from its parent (the
-// if) before being wrapped in the NullableRewrap (no GC).
+// non-nullable value type, not a by-ref-like type, and the NullableRewrap /
+// NullableCtor was NOT stripped) are now ported. Returns the lifted instruction
+// (owned) or nullptr if no fold fired. `nonNullInst` is detached from its
+// parent (the if) before being wrapped in the NullableRewrap (no GC).
 std::unique_ptr<ILInstruction> TryNullPropagation(ILVariable* testedVar,
                                                    ILInstruction* nonNullInst,
                                                    ILInstruction* nullInst,
@@ -386,7 +406,39 @@ std::unique_ptr<ILInstruction> TryNullPropagation(ILVariable* testedVar,
             return std::make_unique<NullableRewrap>(std::move(nonNullOwned));
         }
     }
-    (void)removedRewrapOrNullableCtor;  // deferred: the NullCoalescing case
+    // The NullCoalescing output case: `testedVar != null ?
+    // testedVar.AccessChain : nullInst` where the access chain returns a
+    // non-nullable value type (and is not a by-ref-like type that cannot be
+    // wrapped in Nullable<T>) => `testedVar?.AccessChain ?? nullInst`. Only
+    // valid when the NullableRewrap/NullableCtor was NOT stripped (the access
+    // chain is directly the non-null arm, not a Nullable<T>-wrapped value).
+    // `returnType` is the access chain root's result IType (InferAccessChainType);
+    // the C# uses `nonNullInst.InferType(context.TypeSystem)`. The
+    // NullCoalescingInstruction(NullableWithValueFallback) wraps the
+    // NullableRewrap (the `?.`) with the fallback (the `??`), with
+    // UnderlyingResultType = nullInst->ResultType() (the C#
+    // `UnderlyingResultType = nullInst.ResultType`).
+    if (!removedRewrapOrNullableCtor && nullInst) {
+        const TypeSystem::IType* returnType = InferAccessChainType(nonNullInst);
+        if (returnType
+            && NullableLiftingTransform::IsNonNullableValueType(returnType)
+            && !NullableLiftingTransform::IsByRefLike(returnType)) {
+            // Capture the fallback's ResultType before detaching (the C#
+            // `UnderlyingResultType = nullInst.ResultType`), following the
+            // precondition-before-mutation discipline.
+            StackType underlyingResultType = nullInst->ResultType();
+            IntroduceUnwrap(testedVar, varLoad, mode);
+            auto nonNullOwned = DetachFromParent(nonNullInst);
+            auto rewrap = std::make_unique<NullableRewrap>(std::move(nonNullOwned));
+            auto nullOwned = DetachFromParent(nullInst);
+            auto nc = std::make_unique<NullCoalescingInstruction>(
+                NullCoalescingKind::NullableWithValueFallback,
+                std::move(rewrap),
+                std::move(nullOwned));
+            nc->UnderlyingResultType = underlyingResultType;
+            return nc;
+        }
+    }
     return nullptr;
 }
 

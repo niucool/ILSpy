@@ -23,6 +23,7 @@
 // simulation -> ILAst); branches/switch/exception handlers still bail out.
 
 #include "Decompiler/IL/ILReader.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
@@ -31,6 +32,7 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <functional>
 #include <string>
 
 using namespace ILSpy::Decompiler::IL;
@@ -425,4 +427,50 @@ TEST(ILFunctionMethod, MscorlibChainedConstructorCallSweep) {
         << "some instance .ctor must chain a base/this .ctor call";
     EXPECT_EQ(nonCtorWithMinusOne, nonCtorCount)
         << "every non-constructor must report ChainedConstructorCallILOffset -1";
+}
+
+// Cross-check that the IL reader populates Call::ReturnIType (the method's
+// return type IType, resolved from the signature) for every call site. The
+// NullCoalescing output case of NullPropagationTransform::TryNullPropagation
+// consults Call::ReturnIType (via InferAccessChainType) to gate on
+// NullableType.IsNonNullableValueType; this sweep verifies the reader wires it
+// for real call/callvirt/newobj sites across the mscorlib corpus, so the fold's
+// InferAccessChainType sees a real return type (not nullptr) on real calls.
+TEST(ILReader, MscorlibCallReturnITypeSweep) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    int decoded = 0;
+    int callSites = 0;
+    int callSitesWithReturnIType = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadStraightLineIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++decoded;
+        // Recursively walk the function body and count Call nodes.
+        std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+            if (!inst) return;
+            if (inst->Op == OpCode::Call) {
+                ++callSites;
+                auto* call = static_cast<Call*>(inst);
+                if (call->ReturnIType) ++callSitesWithReturnIType;
+            }
+            for (int i = 0; i < inst->ChildCount(); ++i)
+                walk(inst->GetChild(i));
+        };
+        if (fn->Body) {
+            for (auto& b : fn->Body->Blocks) {
+                for (auto& ins : b->Instructions) walk(ins.get());
+                walk(b->FinalInstruction.get());
+            }
+        }
+        if (decoded > 4000) break;
+    }
+    EXPECT_GT(decoded, 100) << "too few straight-line methods decoded";
+    EXPECT_GT(callSites, 0) << "corpus must have call sites";
+    EXPECT_GT(callSitesWithReturnIType, 0)
+        << "the reader must populate Call::ReturnIType for some call sites";
 }

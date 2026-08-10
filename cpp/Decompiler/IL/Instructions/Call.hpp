@@ -36,6 +36,18 @@ public:
     std::string MethodName;  // "Namespace.Type::Method" (resolved by the IL reader)
     std::vector<std::unique_ptr<ILInstruction>> Arguments;
     StackType ReturnType = StackType::Unknown;
+    // The return type of the resolved method, as an IType. Set by the IL reader
+    // from the method signature's ReturnType (the same callSig->ReturnType
+    // ReturnType is derived from via StackTypeOf). Null for a void method or
+    // when the signature could not be resolved; for `newobj` the declared void
+    // return is stored here (ReturnType is overridden to O for the constructed
+    // object, but newobj is excluded by `!IsNewObj` in the access-chain check).
+    // Carried so transforms that need the full return IType (e.g. NullPropagation
+    // TryNullPropagation's NullCoalescing output case, which checks
+    // NullableType.IsNonNullableValueType on the access chain's result type)
+    // can consult it without a MetadataFile handle (the transforms carry only
+    // Settings + Step, per D78).
+    TypeSystem::ITypePtr ReturnIType;
     // The declaring type of the resolved method, as an IType. Set by the IL
     // reader from the method token (MethodDef parent TypeDef, MemberRef parent
     // TypeRef/TypeDef/TypeSpec, MethodSpec unwrapped). Null when the token

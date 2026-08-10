@@ -38,11 +38,12 @@
 // helper, and the `Run` entry for the ReferenceType mode (the `comp(ldloc v
 // ==/!= null)` condition), the NullableByValue mode (`call get_HasValue(ldloca v)`
 // condition), and the NullableByReference mode (`call get_HasValue(ldloc v)`
-// condition), each with the `ldnull` and `default(Nullable<T>)` output cases
-// (the `NullCoalescing` output case needs InferType /
-// NullableType.IsNonNullableValueType, deferred). The void-call subset of
-// RunStatements is ported via `NullPropagationStatementTransform` (the `?.`
-// statement form). The UnconstrainedType mode and the
+// condition), each with the `ldnull`, `default(Nullable<T>)`, and `NullCoalescing`
+// output cases (the NullCoalescing case needs InferType, ported via a minimal
+// InferAccessChainType that reads Call::ReturnIType / LdObj::Type, plus
+// NullableLiftingTransform::IsNonNullableValueType / IsByRefLike helpers). The
+// void-call subset of RunStatements is ported via `NullPropagationStatementTransform`
+// (the `?.` statement form). The UnconstrainedType mode and the
 // TransformNullPropagationOnUnconstrainedGenericExpression pattern are deferred
 // (the latter needs a 5-instruction block-model sequence + a corpus probe).
 //
@@ -96,9 +97,11 @@ public:
     // fired. The ReferenceType mode (`comp(ldloc v ==/!= null)`), the
     // NullableByValue mode (`call get_HasValue(ldloca v)`), and the
     // NullableByReference mode (`call get_HasValue(ldloc v)`) are ported with
-    // the `ldnull` and `default(Nullable<T>)` output cases (the `NullCoalescing`
-    // output case needs InferType / NullableType.IsNonNullableValueType,
-    // deferred). The UnconstrainedType mode is deferred. The caller checks the
+    // the `ldnull`, `default(Nullable<T>)`, and `NullCoalescing` output cases
+    // (the NullCoalescing case needs InferType, ported via a minimal
+    // InferAccessChainType that reads Call::ReturnIType / LdObj::Type, plus the
+    // NullableLiftingTransform::IsNonNullableValueType / IsByRefLike helpers).
+    // The UnconstrainedType mode is deferred. The caller checks the
     // NullPropagation setting and IsProtectedIfInst before calling.
     static std::unique_ptr<ILInstruction> Run(ILInstruction* condition,
                                                ILInstruction* trueInst,
