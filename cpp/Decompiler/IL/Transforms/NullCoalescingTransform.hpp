@@ -33,10 +33,11 @@
 // ThrowExpressions setting, which mutates the Throw's resultType to O so the
 // NullCoalescingInstruction's ResultType matches the reference-type value).
 // TransformHoistedConstructorArgumentNullGuard and TransformThrowExpression-
-// ValueTypes are deferred: they need ILFunction.Method metadata
-// (IsConstructor/IsStatic) + ILInlining.IsInConstructorInitializer +
-// ILInlining.FindLoadInNext with a movable expression + MatchLogicNot /
-// MatchHasValueCall wiring for the value-types case.
+// ValueTypes are the subsequent targets: the former needs ILFunction.Method
+// metadata (IsConstructor/IsStatic, D114) + ILInlining.IsInConstructorInitializer
+// (D115) + ILInlining.FindLoadInNext (D112) -- all now in place; the latter
+// needs MatchLogicNot + MatchHasValueCall wiring + FindLoadInNext with a
+// movable expression (D113, ported).
 //
 // Adapted to this port's if-as-final block model: the C# carries the if as a
 // non-terminal at `block.Instructions[pos+1]` and removes it via
@@ -92,6 +93,21 @@ private:
     // fold fired.
     bool TransformThrowExpressionValueTypes(Block& block, int pos,
                                             StatementTransformContext& context);
+
+    // TransformHoistedConstructorArgumentNullGuard: the C# 7.0 `arg ?? throw ...`
+    // form for a constructor argument that is evaluated more than once. The
+    // compiler hoists the null-guard `if (comp(ldloc param == ldnull)) throw`
+    // in front of the chained `: base(...)`/`: this(...)` call. The fold replaces
+    // the guard with `stloc temp(if.notnull(ldloc param, throw))` and redirects
+    // the parameter's first following use (inside the chained call's arguments)
+    // to `temp`, so a later ILInlining pass moves the coalescing into the call
+    // argument. Gated on ThrowExpressions + the function being an instance
+    // constructor + IsInConstructorInitializer. Adapted to this port's
+    // post-ConditionDetection inverted shape (the condition is Inequality, the
+    // use is inside the if's TrueInst Block, the throw is in the fall-through
+    // block). Returns true if a fold fired.
+    bool TransformHoistedConstructorArgumentNullGuard(Block& block, int pos,
+                                                      StatementTransformContext& context);
 };
 
 } // namespace ILSpy::Decompiler::IL

@@ -605,9 +605,24 @@ implemented and green here. Everything else follows the phase plan in
   `ILFunction::ChainedConstructorCallILOffset` (the lazy, cached offset of the
   first `: base(...)` / `: this(...)` `Call` -- not newobj, short name `.ctor`,
   reference-type `DeclaringType`, parent a Block -- or -1), and
-  `ILFunction::RegisterVariable`. The full fold (which needs only the
-  if-as-final block-model adaptation + the `IsArgumentNullGuard` match, both
-  self-contained) is the subsequent in-order target. The reference-type `??` lowering is a
+  `ILFunction::RegisterVariable`. The full fold is now ported
+  (`TransformHoistedConstructorArgumentNullGuard`, the C# 7.0 `arg ?? throw ...`
+  form for a constructor argument that is evaluated more than once): the
+  compiler hoists `if (comp(ldloc param == ldnull)) throw(...)` in front of the
+  chained `: base(...)` call; the fold replaces the guard with
+  `stloc temp(if.notnull(ldloc param, throw))`, redirects the parameter's first
+  use (inside the chained call's arguments) to `temp`, and `InlineOneIfPossible`
+  moves the coalescing into the call argument. A pre-pipeline probe confirmed
+  this port's ConditionDetection INVERTS the early-exit pattern (the C# keeps
+  the guard as a non-terminal with the use as a sibling; this port inlines the
+  call into the if's TrueInst Block, negates the condition to `comp(ne, param,
+  ldnull)` Inequality, and puts the throw in the fall-through block), so the fold
+  finds the `ldloc param` inside the TrueInst Block via `FindLoadInNext`,
+  redirects it to a temp, builds the `stloc temp(nc)`, and inlines the TrueInst
+  Block back into the host block (the block-model compensation for the use
+  living inside the if rather than as a sibling). `ComputeVariableUsage` is
+  re-run before `InlineOneIfPossible` so the fresh temp's counts are fresh (the
+  C# avoids this via incremental variable-usage tracking). The reference-type `??` lowering is a
   Roslyn-era codegen pattern; a corpus probe across 8000 mscorlib methods found
   1797 `comp(eq, ldloc X, ldnull)` null-check ifs and 513 `comp(ne, ..)` but zero
   whose arm is a StLoc to the same variable, so the transform fires 0 times on

@@ -27,6 +27,7 @@
 #include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
+#include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
@@ -35,6 +36,7 @@
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/StackTypeOf.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
+#include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
 
 namespace ILSpy::Decompiler::IL {
 
@@ -88,17 +90,30 @@ ILInstruction* BlockUnwrap(ILInstruction* arm) {
     return blk->Instructions[0].get();
 }
 
+// Find the ILFunction root that owns `inst` by walking the Parent chain to the
+// root (ILFunction::IsRoot). Every instruction is connected to a function
+// root, so this never returns null for an in-tree instruction. Mirrors the
+// ExpressionTransforms.cpp FunctionOf helper (the IStatementTransform Run has
+// no function handle, unlike whole-function IILTransform Runs).
+ILFunction* FunctionOf(ILInstruction* inst) {
+    for (ILInstruction* p = inst; p != nullptr; p = p->Parent)
+        if (p->IsRoot()) return static_cast<ILFunction*>(p);
+    return nullptr;
+}
+
 } // namespace
 
 void NullCoalescingTransform::Run(Block& block, int pos, StatementTransformContext& context) {
     if (TransformRefTypes(block, pos, context)) return;
-    if (TransformThrowExpressionValueTypes(block, pos, context)) return;
-    // TransformHoistedConstructorArgumentNullGuard is deferred (needs
-    // ILFunction.Method metadata [IsConstructor/IsStatic] +
-    // ILInlining.IsInConstructorInitializer). The reference-type `a ?? throw ...`
-    // arm is handled in TransformRefTypes (gated on the ThrowExpressions setting)
-    // and the value-types `a ?? throw ...` arm in TransformThrowExpression-
-    // ValueTypes (gated on the ThrowExpressions setting inside it).
+    if (TransformHoistedConstructorArgumentNullGuard(block, pos, context)) return;
+    TransformThrowExpressionValueTypes(block, pos, context);
+    // The reference-type `a ?? throw ...` arm is handled in TransformRefTypes
+    // (gated on the ThrowExpressions setting) and the value-types `a ?? throw
+    // ...` arm in TransformThrowExpressionValueTypes (gated on the
+    // ThrowExpressions setting inside it). The hoisted-constructor-argument
+    // null guard is handled in TransformHoistedConstructorArgumentNullGuard
+    // (gated on ThrowExpressions + the function being an instance constructor +
+    // IsInConstructorInitializer), matching the C# Run order.
 }
 
 bool NullCoalescingTransform::TransformRefTypes(Block& block, int pos,
@@ -404,6 +419,198 @@ bool NullCoalescingTransform::TransformThrowExpressionValueTypes(
     auto restoredThrow = nc->TakeChild(1);
     auto restoredArg = restoredThrow->TakeChild(0);
     stloc->SetChild(0, std::move(restoredValue));
+    throwOwned->SetChild(0, std::move(restoredArg));  // restore the throw's argument
+    nextBlock->SetFinal(std::move(throwOwned));  // restore the throw block's throw
+    return false;
+}
+
+bool NullCoalescingTransform::TransformHoistedConstructorArgumentNullGuard(
+    Block& block, int pos, StatementTransformContext& context) {
+    // Port of NullCoalescingTransform.TransformHoistedConstructorArgumentNullGuard
+    // (the C# 7.0 `arg ?? throw ...` form for a constructor argument that is
+    // evaluated more than once). The compiler hoists the null-guard
+    //   if (comp(ldloc param == ldnull)) throw(...)
+    //   call Base..ctor(..., ldloc param, ...)
+    // in front of the chained `: base(...)`/`: this(...)` call. The fold
+    // replaces the guard with
+    //   stloc temp(if.notnull(ldloc param, throw(...)))
+    // and redirects the parameter's first following use (inside the chained call's
+    // arguments) to `temp`, so a later ILInlining pass moves the coalescing into
+    // the call argument.
+    //
+    // BLOCK-MODEL DIVERGENCE (confirmed by a pre-pipeline probe): the C# reads
+    // the guard `if (comp(ldloc param == ldnull)) throw` as a NON-TERMINAL at
+    // `block.Instructions[pos]` with the use (the call) as a sibling at pos+1.
+    // This port's ConditionDetection INVERTS the early-exit pattern: the reader
+    // emits `if (comp(eq, ldloc param, ldnull)) br THROW` (brfalse) with
+    // fall-through to the call block; ConditionDetection's TryInlineIfFallThrough
+    // inlines the call block into the if's FalseInst, then TryInvertIfExit
+    // negates the condition (comp(eq, ..) -> comp(ne, ..)) and moves the call
+    // Block into the TrueInst (FalseInst = null, fall-through to THROW). So the
+    // post-ConditionDetection shape this transform sees is:
+    //   block (GUARD): no non-terminal Instructions
+    //     FinalInstruction = if (comp(ne, ldloc param, ldnull))
+    //                          { Block { call(..., ldloc param, ...); leave } }
+    //                        (FalseInst == null, fall-through to THROW)
+    //   nextBlock (THROW): FinalInstruction = throw(...)
+    // i.e. the condition is INEQUALITY (comp(ne, ..), the inverted form), the use
+    // (the call) is INSIDE the if's TrueInst Block (not a sibling), and the throw
+    // is in the fall-through block (not the if's true arm). The fold therefore:
+    // finds the first ldloc param inside the TrueInst Block (FindLoadInNext),
+    // redirects it to a temp, builds `stloc temp(if.notnull(ldloc param,
+    // throw))`, and INLINES the TrueInst Block back into the host block (the call
+    // becomes a non-terminal sibling of the stloc, the leave replaces the if-
+    // final) -- the block-model compensation for the use living inside the if
+    // rather than as a sibling. The throw block becomes unreachable; its throw's
+    // argument is moved into the coalescing and the throw block is left with a
+    // Leave placeholder final (a dead but valid block, per the D58 don't-delete-
+    // unreachable-blocks convention).
+    // Gated on ThrowExpressions (the C# 7.0 throw-expression is the only way to
+    // express the folded form).
+    if (!context.Base.Settings.ThrowExpressions) return false;
+
+    // The function must be an instance constructor (the C#
+    // `function?.Method is { IsConstructor: true, IsStatic: false }`).
+    ILFunction* function = FunctionOf(&block);
+    if (!function || !(function->IsConstructor && !function->IsStatic)) return false;
+
+    // The guard is the block's FinalInstruction (the if). This port's if-as-
+    // final block model: the C# reads `guard = block.Instructions[pos]` where the
+    // if is a non-terminal; here the if is the final.
+    auto* iff = dynamic_cast<IfInstruction*>(block.FinalInstruction.get());
+    if (!iff) return false;
+
+    // The condition: comp(Equality/Inequality, ldloc param, ldnull), where param
+    // is a Parameter. The inverted form is Inequality (comp(ne, param, null));
+    // the non-inverted Equality form does not arise in this port after
+    // ConditionDetection but is accepted for robustness.
+    auto* condComp = dynamic_cast<Comp*>(iff->Condition.get());
+    if (!condComp) return false;
+    if (condComp->Kind != ComparisonKind::Equality &&
+        condComp->Kind != ComparisonKind::Inequality) return false;
+    auto* rhs = condComp->Right.get();
+    auto* lhs = condComp->Left.get();
+    LdLoc* paramLoad = nullptr;
+    int paramSlot = -1;  // the Comp slot holding the ldloc param (0=Left, 1=Right)
+    if (rhs && rhs->Op == OpCode::LdNull && lhs && lhs->Op == OpCode::LdLoc) {
+        paramLoad = static_cast<LdLoc*>(lhs);
+        paramSlot = 0;
+    } else if (lhs && lhs->Op == OpCode::LdNull && rhs && rhs->Op == OpCode::LdLoc) {
+        paramLoad = static_cast<LdLoc*>(rhs);
+        paramSlot = 1;
+    } else {
+        return false;
+    }
+    if (!paramLoad->Variable || paramLoad->Variable->Kind != VariableKind::Parameter)
+        return false;
+
+    // The if has no else (the throw is the fall-through, not an else arm).
+    if (iff->FalseInst) return false;
+
+    // Only the inverted form (Inequality) arises in this port after
+    // ConditionDetection. The Equality form (the C# non-inverted shape where the
+    // throw is in the true arm and the use is in the fall-through) does not
+    // arise here.
+    if (condComp->Kind != ComparisonKind::Inequality) return false;
+
+    // The TrueInst is a Block (the use inlined by ConditionDetection).
+    if (!iff->TrueInst || iff->TrueInst->Op != OpCode::Block) return false;
+
+    // Only a guard sitting in the initializer's argument evaluation, i.e. before
+    // the chained constructor call, is necessarily compiler-hoisted.
+    if (!IsInConstructorInitializer(function, iff)) return false;
+
+    // The throw is in the fall-through block (the next block).
+    Block* nextBlock = NextBlockInContainer(&block);
+    if (!nextBlock) return false;
+    auto* throwInst = dynamic_cast<Throw*>(nextBlock->FinalInstruction.get());
+    if (!throwInst) return false;
+
+    // Capture the guard's ILRange for the stloc (the C# `stloc.AddILRange(guard)`).
+    std::int32_t guardStart = iff->StartILOffset;
+    std::int32_t guardEnd = iff->EndILOffset;
+    ILVariable* paramVar = paramLoad->Variable.get();
+
+    // Build the NullCoalescingInstruction(Ref, ldloc param, throw). Detach the
+    // ldloc param from the condition and move the throw out of the throw block
+    // BEFORE the old nodes are destroyed (no GC; raw pointers would dangle).
+    // The throw-expression form mutates the Throw's resultType to O so the
+    // NullCoalescing's ResultType (the FallbackInst's) matches the reference-
+    // type value (the C# `throwInst.resultType = StackType.O`).
+    auto paramLoadOwned = condComp->TakeChild(paramSlot);  // detach ldloc param
+    auto throwOwned = std::move(nextBlock->FinalInstruction);  // move throw out
+    auto* container = dynamic_cast<BlockContainer*>(nextBlock->Parent);
+    nextBlock->SetFinal(std::make_unique<Leave>(container));  // placeholder
+    auto throwArg = throwOwned->TakeChild(0);  // detach the throw's argument
+    auto freshThrow = std::make_unique<Throw>(std::move(throwArg));
+    freshThrow->resultType = StackType::O;
+    auto nc = std::make_unique<NullCoalescingInstruction>(
+        NullCoalescingKind::Ref, std::move(paramLoadOwned), std::move(freshThrow));
+
+    // Find the single load of paramVar inside the TrueInst Block. FindLoadInNext
+    // returns Found for an LdLoc(v) (and an LdLoca(v), but the C# requires an
+    // LdLoc -- an LdLoca is not a valid redirect target, so bail). FindLoadInNext
+    // recurses into the Block's children (the call + the leave), so it locates
+    // the ldloc param inside the call whether it is the first or a later arg.
+    FindResult r = FindLoadInNext(iff->TrueInst.get(), paramVar, nc.get());
+    if (r.type == FindResultType::Found && r.loadInst &&
+        r.loadInst->Op == OpCode::LdLoc) {
+        context.Base.StepOnce(
+            "NullCoalescingTransform: hoisted constructor argument null guard");
+        auto* firstUse = static_cast<LdLoc*>(r.loadInst);
+        // Redirect the first use to a fresh temp (the C#
+        // `function.RegisterVariable(StackSlot, paramLoad.Variable.Type)`).
+        ILVariablePtr temp = function->RegisterVariable(
+            VariableKind::StackSlot, paramLoad->Variable->Type);
+        firstUse->Variable = temp;
+        // Build `stloc temp(if.notnull(ldloc param, throw))` and set its ILRange
+        // to the guard's range (the C# `stloc.AddILRange(guard)`).
+        auto stloc = std::make_unique<StLoc>(temp, std::move(nc));
+        stloc->SetILRange(guardStart, guardEnd);
+        // Add the stloc as the first non-terminal in the host block (before the
+        // use, so the temp is defined before it is loaded).
+        block.Add(std::move(stloc));
+        // Inline the TrueInst Block back into the host block: detach the Block
+        // from the if (TakeChild(1)), move its instructions after the stloc,
+        // and set the host block's final to the Block's final (the leave). The if
+        // (with its now-empty TrueInst and the redundant condition) is destroyed
+        // by SetFinal.
+        auto trueBlockOwned = iff->TakeChild(1);  // detach TrueInst (slot 1)
+        auto* trueBlock = static_cast<Block*>(trueBlockOwned.get());
+        auto movedInsts = std::move(trueBlock->Instructions);  // move the vector
+        for (auto& inst : movedInsts) block.Add(std::move(inst));
+        block.SetFinal(std::move(trueBlock->FinalInstruction));  // leave replaces if
+        // trueBlockOwned (now an empty Block) is destroyed when it goes out of
+        // scope; the if is destroyed by SetFinal.
+        // (The throw block keeps its Leave placeholder final; it is unreachable
+        // now -- the host block's new final leaves the container.)
+        // Recompute variable usage so the fresh temp's counts are fresh (the
+        // temp was created by RegisterVariable with zero counts; the fold added
+        // a store and redirected a load, but the counts are stale until
+        // ComputeVariableUsage runs). Without this, InlineOneIfPossible's
+        // dead-store path would fire (LoadCount == 0) and replace the stloc with
+        // the nc as a standalone instruction, leaving the call's ldloc temp
+        // dangling -- the C# avoids this via incremental variable-usage
+        // tracking (AddStoreInstruction / the load's Variable reassignment).
+        ComputeVariableUsage(*function);
+        // Try to inline the temp into the use (the C#
+        // `ILInlining.InlineOneIfPossible`). The use is the call (now a
+        // non-terminal in the host block); InlineOneIfPossible finds the ldloc
+        // temp inside it and replaces it with the nc, removing the stloc.
+        InlineOneIfPossible(&block, static_cast<int>(block.Instructions.size()) - 2,
+                            context.Base);
+        return true;
+    }
+
+    // Restore: the fold did not fire (the load was not found, or it was an
+    // LdLoca, or FindLoadInNext returned Stop/Continue). Detach the ldloc param
+    // and the throw's argument from the nc and put them back; restore the throw
+    // block's throw (replacing the Leave placeholder). The C# resets the primary
+    // positions; this port must move the detached children back (no GC).
+    auto restoredParam = nc->TakeChild(0);  // the ldloc param (ValueInst, slot 0)
+    auto restoredThrow = nc->TakeChild(1);  // the fresh Throw (FallbackInst, slot 1)
+    auto restoredArg = restoredThrow->TakeChild(0);  // the throw's argument
+    condComp->SetChild(paramSlot, std::move(restoredParam));  // put ldloc param back
     throwOwned->SetChild(0, std::move(restoredArg));  // restore the throw's argument
     nextBlock->SetFinal(std::move(throwOwned));  // restore the throw block's throw
     return false;

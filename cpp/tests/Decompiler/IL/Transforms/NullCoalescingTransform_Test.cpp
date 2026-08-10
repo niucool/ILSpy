@@ -915,6 +915,357 @@ TEST(NullCoalescingTransform, ThrowExpressionsOffKeepsThrow) {
     EXPECT_EQ(fn->Body->Blocks[0]->FinalInstruction->Op, OpCode::IfInstruction);
 }
 
+// ---------------------------------------------------------------------------
+// TransformHoistedConstructorArgumentNullGuard tests (the C# 7.0 `arg ?? throw
+// ...` form for a constructor argument that is evaluated more than once).
+//
+// The compiler hoists the null-guard `if (comp(ldloc param == ldnull)) throw`
+// in front of the chained `: base(...)`/`: this(...)` call. This port's
+// ConditionDetection INVERTS the early-exit pattern, so the post-ConditionDetection
+// shape is `if (comp(ne, ldloc param, ldnull)) { Block { call; leave } }` with
+// fall-through to the throw block. The fold replaces the guard with
+// `stloc temp(if.notnull(ldloc param, throw))`, redirects the parameter's first
+// use (inside the call) to `temp`, and inlines the TrueInst Block back into the
+// host block; a later InlineOneIfPossible moves the coalescing into the call.
+
+// Build the PRE-ConditionDetection reader shape (the guard `if (comp(eq, param,
+// ldnull)) br THROW` with fall-through to the call block), so the test exercises
+// the full pre-pipeline (ConditionDetection inverts it) and then the fold.
+struct HoistedCtorGuardSetup {
+    std::unique_ptr<ILFunction> fn;
+    ILVariablePtr thisParam, paramVar;
+    Block* guardBlock = nullptr;
+};
+
+HoistedCtorGuardSetup BuildHoistedCtorGuardShape(bool isCtor = true, bool isStatic = false,
+                                                  bool setRanges = true) {
+    HoistedCtorGuardSetup s;
+    auto objectType = std::make_shared<KnownType>(KnownTypeCode::Object);
+    s.thisParam = std::make_shared<ILVariable>(VariableKind::Parameter, objectType, 0);
+    s.thisParam->Name = "this";
+    s.paramVar = std::make_shared<ILVariable>(VariableKind::Parameter, objectType, 1);
+    s.paramVar->Name = "arg";
+
+    auto fn = std::make_unique<ILFunction>();
+    fn->IsConstructor = isCtor;
+    fn->IsStatic = isStatic;
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Variables.push_back(s.thisParam);
+    fn->Variables.push_back(s.paramVar);
+
+    // THROW block: throw(ldnull)
+    auto throwBlock = std::make_unique<Block>();
+    throwBlock->StartILOffset = 0x30;
+    Block* throwPtr = throwBlock.get();
+    throwBlock->SetFinal(std::make_unique<Throw>(std::make_unique<LdNull>()));
+
+    // GUARD block: if (comp(eq, ldloc param, ldnull)) br THROW
+    auto guardBlock = std::make_unique<Block>();
+    guardBlock->StartILOffset = 0x00;
+    auto guardCond = std::make_unique<Comp>(std::make_unique<LdLoc>(s.paramVar),
+                                             std::make_unique<LdNull>(),
+                                             ComparisonKind::Equality);
+    auto guardIf = std::make_unique<IfInstruction>(std::move(guardCond),
+                                                    std::make_unique<Branch>(throwPtr));
+    if (setRanges) guardIf->SetILRange(0x00, 0x06);
+    guardBlock->SetFinal(std::move(guardIf));
+    s.guardBlock = guardBlock.get();
+
+    // CALL block: call Base..ctor(ldloc this, ldloc param); leave
+    auto callBlock = std::make_unique<Block>();
+    callBlock->StartILOffset = 0x10;
+    auto ctorCall = std::make_unique<Call>("System.Object::.ctor");
+    ctorCall->DeclaringType = objectType;
+    ctorCall->AddArg(std::make_unique<LdLoc>(s.thisParam));
+    ctorCall->AddArg(std::make_unique<LdLoc>(s.paramVar));
+    if (setRanges) ctorCall->SetILRange(0x10, 0x16);
+    callBlock->Add(std::move(ctorCall));
+    callBlock->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+
+    fn->Body->AddBlock(std::move(guardBlock));
+    fn->Body->AddBlock(std::move(callBlock));
+    fn->Body->AddBlock(std::move(throwBlock));
+    s.fn = std::move(fn);
+    return s;
+}
+
+// The fold fires through the full pre-pipeline: build the pre-ConditionDetection
+// reader shape, run the pre-pipeline (ConditionDetection inverts it), then run
+// NullCoalescingTransform and verify the fold fires (a NullCoalescingInstruction
+// is produced and the parameter's use is redirected).
+TEST(NullCoalescingTransform, HoistedCtorArgNullGuardFoldsThroughPrePipeline) {
+    auto s = BuildHoistedCtorGuardShape();
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    ILTransformContext ctx;
+    RunPrePipeline(*s.fn, ctx);  // ConditionDetection inverts the early-exit pattern
+    s.fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(CountNullCoalescing(*s.fn), 0);
+
+    RunNullCoalescingTransform(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*s.fn), 1)
+        << "the fold must fire on the post-ConditionDetection (inverted) shape";
+}
+
+// Build the POST-ConditionDetection shape directly (the inverted shape), so the
+// test exercises the transform on the exact shape it sees without depending on
+// the pre-pipeline. The guard block has no non-terminals, the if-final has
+// Inequality condition + a Block TrueInst (the call) + null FalseInst, and the
+// throw is in the fall-through block.
+struct HoistedCtorPostSetup {
+    std::unique_ptr<ILFunction> fn;
+    ILVariablePtr thisParam, paramVar;
+    Block* guardBlock = nullptr;
+    Block* throwBlock = nullptr;
+    IfInstruction* iff = nullptr;
+};
+
+HoistedCtorPostSetup BuildHoistedCtorPostShape(bool isCtor = true, bool isStatic = false,
+                                                 bool setRanges = true) {
+    HoistedCtorPostSetup s;
+    auto objectType = std::make_shared<KnownType>(KnownTypeCode::Object);
+    s.thisParam = std::make_shared<ILVariable>(VariableKind::Parameter, objectType, 0);
+    s.thisParam->Name = "this";
+    s.paramVar = std::make_shared<ILVariable>(VariableKind::Parameter, objectType, 1);
+    s.paramVar->Name = "arg";
+
+    auto fn = std::make_unique<ILFunction>();
+    fn->IsConstructor = isCtor;
+    fn->IsStatic = isStatic;
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Variables.push_back(s.thisParam);
+    fn->Variables.push_back(s.paramVar);
+
+    // THROW block: throw(ldnull)
+    auto throwBlock = std::make_unique<Block>();
+    throwBlock->StartILOffset = 0x30;
+    s.throwBlock = throwBlock.get();
+    throwBlock->SetFinal(std::make_unique<Throw>(std::make_unique<LdNull>()));
+
+    // The use Block (the call) that goes inside the if's TrueInst.
+    auto useBlock = std::make_unique<Block>();
+    auto ctorCall = std::make_unique<Call>("System.Object::.ctor");
+    ctorCall->DeclaringType = objectType;
+    ctorCall->AddArg(std::make_unique<LdLoc>(s.thisParam));
+    ctorCall->AddArg(std::make_unique<LdLoc>(s.paramVar));
+    if (setRanges) ctorCall->SetILRange(0x10, 0x16);
+    useBlock->Add(std::move(ctorCall));
+    useBlock->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+
+    // GUARD block: if (comp(ne, ldloc param, ldnull)) { Block { call; leave } }
+    // (FalseInst null, fall-through to THROW)
+    auto guardBlock = std::make_unique<Block>();
+    guardBlock->StartILOffset = 0x00;
+    auto guardCond = std::make_unique<Comp>(std::make_unique<LdLoc>(s.paramVar),
+                                             std::make_unique<LdNull>(),
+                                             ComparisonKind::Inequality);
+    auto guardIf = std::make_unique<IfInstruction>(std::move(guardCond),
+                                                    std::move(useBlock));
+    if (setRanges) guardIf->SetILRange(0x00, 0x06);
+    s.iff = guardIf.get();
+    guardBlock->SetFinal(std::move(guardIf));
+    s.guardBlock = guardBlock.get();
+
+    fn->Body->AddBlock(std::move(guardBlock));
+    fn->Body->AddBlock(std::move(throwBlock));
+    s.fn = std::move(fn);
+    return s;
+}
+
+// The fold fires on the direct post-ConditionDetection shape (the inverted
+// form), producing a NullCoalescingInstruction and redirecting the parameter's
+// use. After the fold, the guard block has the call (inlined from the TrueInst
+// Block) with the NullCoalescing as an argument, and the throw block is
+// unreachable (a Leave placeholder).
+TEST(NullCoalescingTransform, HoistedCtorArgNullGuardFoldsDirectPostShape) {
+    auto s = BuildHoistedCtorPostShape();
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    RunNullCoalescingTransform(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*s.fn), 1)
+        << "the fold must fire on the direct post-ConditionDetection shape";
+    // The throw block's final is now a Leave placeholder (the throw was moved out).
+    EXPECT_EQ(s.throwBlock->FinalInstruction->Op, OpCode::Leave)
+        << "the throw block's throw was moved into the coalescing; a Leave "
+           "placeholder replaces it";
+    // After the fold, the guard block has the call (inlined from the TrueInst
+    // Block) as its first non-terminal, with the NullCoalescingInstruction
+    // (the `param ?? throw` expression) as the call's argument (InlineOneIfPossible
+    // inlined the stloc temp into the call). The if-final is gone (replaced by
+    // the leave from the TrueInst Block).
+    EXPECT_FALSE(s.guardBlock->Instructions.empty())
+        << "the guard block has the inlined call as a non-terminal";
+    EXPECT_EQ(s.guardBlock->Instructions[0]->Op, OpCode::Call)
+        << "the first non-terminal is the chained constructor call (the stloc "
+           "temp was inlined into it)";
+}
+
+// Rejects when the condition is Equality (the non-inverted form, which does not
+// arise in this port after ConditionDetection).
+TEST(NullCoalescingTransform, HoistedCtorArgNullGuardRejectsEqualityCondition) {
+    auto s = BuildHoistedCtorPostShape();
+    auto* condComp = static_cast<Comp*>(s.iff->Condition.get());
+    condComp->Kind = ComparisonKind::Equality;
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    RunNullCoalescingTransform(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*s.fn), 0)
+        << "the Equality (non-inverted) condition must not fold";
+}
+
+// Rejects when the TrueInst is not a Block (a bare instruction, not the
+// inlined use Block ConditionDetection produces).
+TEST(NullCoalescingTransform, HoistedCtorArgNullGuardRejectsNonBlockTrueInst) {
+    auto s = BuildHoistedCtorPostShape();
+    s.iff->TrueInst = std::make_unique<LdLoc>(s.paramVar);
+    s.iff->TrueInst->Parent = s.iff;
+    s.iff->TrueInst->ChildIndex = 1;
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    RunNullCoalescingTransform(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*s.fn), 0)
+        << "a non-Block TrueInst must not fold";
+}
+
+// Rejects when the if has an else arm (the throw is the fall-through, no else).
+TEST(NullCoalescingTransform, HoistedCtorArgNullGuardRejectsElseArm) {
+    auto s = BuildHoistedCtorPostShape();
+    s.iff->FalseInst = std::make_unique<Branch>(s.throwBlock);
+    s.iff->FalseInst->Parent = s.iff;
+    s.iff->FalseInst->ChildIndex = 2;
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    RunNullCoalescingTransform(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*s.fn), 0)
+        << "an if with an else arm must not fold";
+}
+
+// Rejects when the next block's final is not a Throw (no throw in the
+// fall-through).
+TEST(NullCoalescingTransform, HoistedCtorArgNullGuardRejectsNoThrowInNextBlock) {
+    auto s = BuildHoistedCtorPostShape();
+    s.throwBlock->SetFinal(std::make_unique<Leave>(s.fn->Body.get()));
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    RunNullCoalescingTransform(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*s.fn), 0)
+        << "a next block without a Throw final must not fold";
+}
+
+// Rejects when the function is not an instance constructor (IsConstructor=false).
+TEST(NullCoalescingTransform, HoistedCtorArgNullGuardRejectsNonConstructor) {
+    auto s = BuildHoistedCtorGuardShape(/*isCtor=*/false, /*isStatic=*/false);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    ILTransformContext ctx;
+    RunPrePipeline(*s.fn, ctx);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    RunNullCoalescingTransform(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*s.fn), 0)
+        << "a non-constructor function must not fold";
+}
+
+// Rejects when the function is a static constructor (IsStatic=true).
+TEST(NullCoalescingTransform, HoistedCtorArgNullGuardRejectsStaticCtor) {
+    auto s = BuildHoistedCtorGuardShape(/*isCtor=*/true, /*isStatic=*/true);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    ILTransformContext ctx;
+    RunPrePipeline(*s.fn, ctx);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    RunNullCoalescingTransform(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*s.fn), 0)
+        << "a static constructor must not fold";
+}
+
+// Rejects when the tested variable is not a Parameter (a Local).
+TEST(NullCoalescingTransform, HoistedCtorArgNullGuardRejectsNonParameter) {
+    auto s = BuildHoistedCtorGuardShape();
+    // Change the param variable's kind to Local (not Parameter).
+    s.paramVar->Kind = VariableKind::Local;
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    ILTransformContext ctx;
+    RunPrePipeline(*s.fn, ctx);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    RunNullCoalescingTransform(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*s.fn), 0)
+        << "a non-Parameter variable must not fold";
+}
+
+// Rejects when ThrowExpressions is off.
+TEST(NullCoalescingTransform, HoistedCtorArgNullGuardRejectsThrowExpressionsOff) {
+    auto s = BuildHoistedCtorGuardShape();
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    ILTransformContext ctx;
+    RunPrePipeline(*s.fn, ctx);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    // Run with ThrowExpressions off.
+    StatementTransform st;
+    st.AddChild(std::make_unique<ILInlining>());
+    st.AddChild(std::make_unique<ExpressionTransforms>());
+    st.AddChild(std::make_unique<NullCoalescingTransform>());
+    ctx.Settings.ThrowExpressions = false;
+    st.Run(*s.fn, ctx);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*s.fn), 0)
+        << "ThrowExpressions off must not fold";
+}
+
+// Rejects when the guard is not in the constructor initializer (the chained call
+// is before the guard, so IsInConstructorInitializer returns false). We simulate
+// this by NOT setting ILRanges (the guard's EndILOffset is 0, and the chained
+// call's StartILOffset is also 0 from the default -- but with no ranges set,
+// ChainedConstructorCallILOffset finds the call at StartILOffset=0 and the
+// guard's EndILOffset is 0, so 0 <= 0 passes; we need the guard to end AFTER
+// the call starts). Instead, set the guard's range to be after the call.
+TEST(NullCoalescingTransform, HoistedCtorArgNullGuardRejectsNotInInitializer) {
+    auto s = BuildHoistedCtorGuardShape();
+    // Set the guard's ILRange to be AFTER the chained call's start (0x10),
+    // so IsInConstructorInitializer returns false (guard.EndILOffset > ctorCallStart).
+    auto* iff = static_cast<IfInstruction*>(s.guardBlock->FinalInstruction.get());
+    iff->SetILRange(0x20, 0x26);  // guard ends at 0x26, after the call starts at 0x10
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    ILTransformContext ctx;
+    RunPrePipeline(*s.fn, ctx);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    RunNullCoalescingTransform(*s.fn);
+    s.fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountNullCoalescing(*s.fn), 0)
+        << "a guard not in the constructor initializer must not fold";
+}
+
 // The mscorlib sweep pins the global contract: the ILAst invariant holds across
 // the corpus after NullCoalescingTransform runs. The transform fires 0 times on
 // the .NET Framework 4 legacy-csc corpus (the reference-type `??` lowering is a
