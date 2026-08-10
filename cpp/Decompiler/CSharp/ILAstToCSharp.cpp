@@ -537,16 +537,65 @@ private:
         return nullptr;
     }
 
+    // The symbol for a unary operator method, or nullptr. Returns a 2-char
+    // prefix (e.g. "-", "!", "~") or "++"/"--" for inc/dec.
+    static const char* UnaryOperatorSymbol(std::string_view methodName) {
+        auto pos = methodName.rfind("::");
+        std::string_view op = (pos != std::string_view::npos) ? methodName.substr(pos + 2) : methodName;
+        if (op == "op_UnaryNegation") return "-";
+        if (op == "op_UnaryPlus") return "+";
+        if (op == "op_OnesComplement") return "~";
+        if (op == "op_LogicalNot") return "!";
+        if (op == "op_Increment") return "++";
+        if (op == "op_Decrement") return "--";
+        return nullptr;
+    }
+
+    // The declaring type's short name for a "Namespace.Type::member" string,
+    // for op_Explicit/op_Implicit conversion rendering ((TargetType)value).
+    static std::string DeclaringTypeName(std::string_view methodName) {
+        auto pos = methodName.rfind("::");
+        if (pos == std::string_view::npos) return std::string{};
+        std::string_view type = methodName.substr(0, pos);
+        auto dot = type.rfind('.');
+        return std::string(dot != std::string_view::npos ? type.substr(dot + 1) : type);
+    }
+
+    // True if methodName is op_Explicit or op_Implicit (a conversion operator).
+    static bool IsConversionOperator(std::string_view methodName) {
+        auto pos = methodName.rfind("::");
+        std::string_view op = (pos != std::string_view::npos) ? methodName.substr(pos + 2) : methodName;
+        return op == "op_Explicit" || op == "op_Implicit";
+    }
+
     // "Namespace.Type::.ctor" -> "new Namespace.Type(args)"; other members and
     // plain methods -> "Namespace.Type.Member(args)". A static operator call
-    // (op_Equality etc.) renders as `(arg0 op arg1)`.
+    // (op_Equality etc.) renders as `(arg0 op arg1)`; a unary operator as
+    // `op arg0`; a conversion operator (op_Explicit/op_Implicit) as
+    // `(TargetType)arg0`.
     std::string CallText(const Call& call) {
-        // A static binary operator: Namespace.Type::op_X(a, b) -> (a op b)
-        if (!call.IsInstanceCall && call.Arguments.size() == 2) {
-            if (const char* sym = OperatorSymbol(call.MethodName)) {
-                return "(" + (call.Arguments[0] ? Expr(*call.Arguments[0]) : std::string("(default)")) +
-                       " " + sym + " " +
-                       (call.Arguments[1] ? Expr(*call.Arguments[1]) : std::string("(default)")) + ")";
+        if (!call.IsInstanceCall) {
+            // A static conversion operator: op_Explicit/op_Implicit(value) ->
+            // (TargetType)value. The target type is the declaring type.
+            if (call.Arguments.size() == 1 && IsConversionOperator(call.MethodName)) {
+                std::string targetType = DeclaringTypeName(call.MethodName);
+                return "(" + targetType + ")(" +
+                       (call.Arguments[0] ? Expr(*call.Arguments[0]) : std::string("(default)")) + ")";
+            }
+            // A static unary operator: op_UnaryNegation(a) -> (-a), etc.
+            if (call.Arguments.size() == 1) {
+                if (const char* sym = UnaryOperatorSymbol(call.MethodName)) {
+                    std::string arg = call.Arguments[0] ? Expr(*call.Arguments[0]) : std::string("(default)");
+                    return std::string(sym) + arg;
+                }
+            }
+            // A static binary operator: Namespace.Type::op_X(a, b) -> (a op b)
+            if (call.Arguments.size() == 2) {
+                if (const char* sym = OperatorSymbol(call.MethodName)) {
+                    return "(" + (call.Arguments[0] ? Expr(*call.Arguments[0]) : std::string("(default)")) +
+                           " " + sym + " " +
+                           (call.Arguments[1] ? Expr(*call.Arguments[1]) : std::string("(default)")) + ")";
+                }
             }
         }
         std::string name = call.MethodName;
