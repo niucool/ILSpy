@@ -507,9 +507,42 @@ private:
         }
     }
 
+    // Map a C# operator method name ("op_Equality") to its symbolic form.
+    // Returns nullptr for non-operators.
+    static const char* OperatorSymbol(std::string_view methodName) {
+        auto pos = methodName.rfind("::");
+        std::string_view op = (pos != std::string_view::npos) ? methodName.substr(pos + 2) : methodName;
+        if (op == "op_Equality") return "==";
+        if (op == "op_Inequality") return "!=";
+        if (op == "op_LessThan") return "<";
+        if (op == "op_LessThanOrEqual") return "<=";
+        if (op == "op_GreaterThan") return ">";
+        if (op == "op_GreaterThanOrEqual") return ">=";
+        if (op == "op_Addition") return "+";
+        if (op == "op_Subtraction") return "-";
+        if (op == "op_Multiply") return "*";
+        if (op == "op_Division") return "/";
+        if (op == "op_Modulus") return "%";
+        if (op == "op_BitwiseAnd") return "&";
+        if (op == "op_BitwiseOr") return "|";
+        if (op == "op_ExclusiveOr") return "^";
+        if (op == "op_LeftShift") return "<<";
+        if (op == "op_RightShift") return ">>";
+        return nullptr;
+    }
+
     // "Namespace.Type::.ctor" -> "new Namespace.Type(args)"; other members and
-    // plain methods -> "Namespace.Type.Member(args)".
+    // plain methods -> "Namespace.Type.Member(args)". A static operator call
+    // (op_Equality etc.) renders as `(arg0 op arg1)`.
     std::string CallText(const Call& call) {
+        // A static binary operator: Namespace.Type::op_X(a, b) -> (a op b)
+        if (!call.IsInstanceCall && call.Arguments.size() == 2) {
+            if (const char* sym = OperatorSymbol(call.MethodName)) {
+                return "(" + (call.Arguments[0] ? Expr(*call.Arguments[0]) : std::string("(default)")) +
+                       " " + sym + " " +
+                       (call.Arguments[1] ? Expr(*call.Arguments[1]) : std::string("(default)")) + ")";
+            }
+        }
         std::string name = call.MethodName;
         std::string prefix;
         static const std::string ctorSuffix = "::.ctor";
@@ -705,13 +738,22 @@ private:
         return text;
     }
 
-    // The condition expression for an `if`/`while`: a Comp renders as
-    // `(left op right)` (with outer parens); strip them so `if ((cond))`
-    // becomes `if (cond)`. A non-Comp condition keeps its form.
+    // The condition expression for an `if`/`while`: strip redundant outer
+    // parens so `if ((cond))` becomes `if (cond)`. A Comp renders as
+    // `(left op right)`; a binary-operator Call renders as `(a op b)`;
+    // both get their outer parens stripped.
     std::string CondExpr(const ILInstruction& inst) {
         std::string e = Expr(inst);
-        if (inst.Op == OpCode::Comp && e.size() >= 2 && e.front() == '(' && e.back() == ')')
-            return e.substr(1, e.size() - 2);
+        if (e.size() >= 2 && e.front() == '(' && e.back() == ')') {
+            // Check that the outer parens enclose the whole string (balanced).
+            int depth = 0;
+            bool balanced = true;
+            for (std::size_t i = 0; i < e.size(); ++i) {
+                if (e[i] == '(') ++depth;
+                else if (e[i] == ')') { --depth; if (depth == 0 && i + 1 < e.size()) { balanced = false; break; } }
+            }
+            if (balanced) return e.substr(1, e.size() - 2);
+        }
         return e;
     }
 
