@@ -460,6 +460,12 @@ TEST(ConditionDetection, MscorlibGetStartILOffsetSweep) {
                 } else {
                     expectedEmpty = inst->IsILRangeEmpty();
                 }
+            } else if (dynamic_cast<Block*>(inst)) {
+                // A Block's label (its own StartILOffset field) is the first
+                // instruction's offset; GetStartILOffset returns it with
+                // isEmpty=false (the base ILRange is not propagated through
+                // block-synthesizing transforms, but the label is valid).
+                expectedEmpty = false;
             } else {
                 expectedEmpty = inst->IsILRangeEmpty();
             }

@@ -18,7 +18,7 @@
 
 // Port of ICSharpCode.Decompiler/IL/Transforms/ReduceNestingTransform.cs.
 //
-// Two pieces are ported so far:
+// Three pieces are ported so far:
 //
 //  (1) EliminateRedundantTryFinally: the C# compiler sometimes generates a
 //      try-finally around a `fixed` statement; once DetectPinnedRegions has
@@ -28,14 +28,16 @@
 //        .finally BlockContainer { Block { leave IL_xxxx (nop) } }  ==>  PinnedRegion ...
 //
 //  (2) The nesting-reduction heuristics (ComputeStats / UpdateStats /
-//      ShouldReduceNesting) plus the self-contained pattern helpers
-//      (BlockUnwrap / MatchBranch / MatchLeave / MatchConditionBlock), ported
-//      as a tested-but-not-yet-wired foundation ahead of the wired
-//      Visit / ReduceNesting / ReduceSwitchNesting / ImproveILOrdering /
-//      ExtractElseBlock folds (which need a general ILInstruction.Clone for
-//      the keyword-exit duplication [D147, now landed] + the
-//      ConditionDetection.InvertIf / GetStartILOffset statics exposed + a
-//      block-model corpus probe of the real post-ConditionDetection shape).
+//     ShouldReduceNesting) plus the self-contained pattern helpers
+//     (BlockUnwrap / MatchBranch / MatchLeave / MatchConditionBlock), ported
+//     as a tested foundation for the deferred ReduceNesting / ReduceSwitchNesting /
+//     ExtractElseBlock folds.
+//
+//  (3) ImproveILOrdering (the IL-order-gated InvertIf): the wired fold that
+//      re-inverts ConditionDetection's inversion when the IL order is wrong.
+//      See the ImproveILOrdering comment below for the block-model adaptation.
+//      The trailing-leave handling (CanDuplicateExit) is deferred; the
+//      bail-for-non-keyword-Leave-exit guard is ported.
 //
 // Block-model adaptation: the C# Block.Instructions does NOT include the
 // FinalInstruction (a void block's final is a Nop, and the control flow
@@ -43,11 +45,13 @@
 // non-terminal Instructions from its FinalInstruction (the control flow), so
 // the C# `block.Instructions.Last()` (the last non-terminal, which is the
 // control flow in the C#) is this port's `block->FinalInstruction`. The
-// heuristics are adapted accordingly.
+// heuristics and ImproveILOrdering are adapted accordingly.
 
 #include "Decompiler/IL/Transforms/ReduceNestingTransform.hpp"
 
+#include "Decompiler/IL/ControlFlow/ConditionDetection.hpp"
 #include "Decompiler/IL/ILInstruction.hpp"
+#include "Decompiler/IL/InstructionFlags.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
@@ -196,6 +200,147 @@ bool MatchConditionBlock(BlockContainer* container, Block* block, Block*& bodySt
 	return MatchBranch(iff->TrueInst.get(), bodyStartBlock);
 }
 
+// ---- ImproveILOrdering (the wired ReduceNestingTransform fold) ----
+
+// Whether `leave` exits the function body (Port of Leave.IsLeavingFunction):
+// the target container's parent is the ILFunction. (A copy of the
+// HighLevelLoopTransform file-local helper; ReduceNestingTransform does not
+// link HighLevelLoopTransform.)
+bool IsLeavingFunction(Leave* leave) {
+	return leave && leave->TargetContainer && leave->TargetContainer->Parent &&
+	       leave->TargetContainer->Parent->Op == OpCode::ILFunction;
+}
+
+// The next block in `block`'s container after `block` (the positional
+// fall-through). nullptr if `block` is not in a container's Blocks list or is
+// the last block. (A copy of the ConditionDetection file-local helper; the
+// public ConditionDetection::InvertIf uses the same logic.)
+Block* NextBlockInContainer(Block* block) {
+	if (!block) return nullptr;
+	auto* container = dynamic_cast<BlockContainer*>(block->Parent);
+	if (!container) return nullptr;
+	for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+		if (container->Blocks[i].get() == block)
+			return (i + 1 < container->Blocks.size()) ? container->Blocks[i + 1].get() : nullptr;
+	}
+	return nullptr;
+}
+
+// The "exit" of the TrueInst: the C# `block.Instructions.Last()` (the
+// falseCode's exit). After ConditionDetection's inversion, the TrueInst IS the
+// falseCode+exit (an inlined fall-through). If the TrueInst is a Block wrapping
+// [falseCode, exit], the exit is the Block's FinalInstruction; if the TrueInst
+// is a bare exit (a Leave/Branch/Throw -- the no-falseCode case), it is the
+// TrueInst itself.
+ILInstruction* TrueInstExit(ILInstruction* trueInst) {
+	if (!trueInst) return nullptr;
+	if (auto* b = dynamic_cast<Block*>(trueInst)) return b->FinalInstruction.get();
+	return trueInst;
+}
+
+// The C# `ReduceNestingTransform.ImproveILOrdering`: for an if with an
+// unreachable end point and no else, inverts to match the IL order of the first
+// statement of each branch.
+//
+//   if (cond) { then (exits) }   falseCode...; exit   -- the C# shape
+// -> if (!cond) { falseCode...; exit }   then...        (when then's IL order
+//    is after the falseCode's, i.e. the falseCode comes first in IL)
+//
+// Block-model adaptation (the recurring D73/D75 divergence): the C# reads
+// `ifInst` as a NON-TERMINAL at `block.Instructions[i]` with the
+// `falseCode...; exit` as sibling instructions after it (the C# Block.Instructions
+// includes the control flow; FinalInstruction is a Nop). This port makes the
+// IfInstruction the block's FinalInstruction, so the `falseCode...; exit` is
+// the NEXT block in the container (the fall-through), and the old then moves
+// into that next block. ConditionDetection's TryInlineIfFallThrough +
+// TryInvertIfExit already inverted the if (TrueInst = the inlined falseCode+
+// exit, FalseInst = null, fall-through = the old then / next block), so
+// ImproveILOrdering re-inverts ONLY when the IL order is wrong (the old then /
+// next block comes BEFORE the falseCode / TrueInst in IL).
+//
+// The IL-order gate uses ConditionDetection.GetStartILOffset on the TrueInst
+// (the falseCode+exit's start) and the next block (the old then's start). The
+// GetStartILOffset Block adaptation (Block label = the first instruction's
+// offset) makes both offsets valid for Block TrueInsts and the next block; a
+// bare-Leave TrueInst (the no-falseCode case) whose Leave lost its base ILRange
+// during the pre-pipeline still reports empty and the gate bails (the ILRange
+// propagation through the bare-Leave path is a separate piece).
+//
+// The trailing-leave handling (the C# `block.Instructions.Last() is Leave &&
+// !IsLeavingFunction && TargetContainer.Kind == Normal` check + CanDuplicateExit
+// replacement) is deferred: the CanDuplicateExit try/finally walk is a larger
+// piece. The bail-for-non-keyword-Leave-exit guard is ported so the fold does
+// not introduce a goto (a non-keyword Leave at the fall-through position after
+// InvertIf would render as `goto`); the would-fire cases on this corpus carry a
+// Branch/Throw exit (not a non-keyword Leave), so the guard is a no-op for them.
+// `continueTarget` (the C# parameter, for CanDuplicateExit) is not tracked
+// (deferred with the trailing-leave handling).
+void ImproveILOrdering(Block* block, IfInstruction* ifInst) {
+	if (!block || !ifInst) return;
+	// The if must be the block's FinalInstruction (the C# `ifInst.Parent == block`).
+	if (block->FinalInstruction.get() != ifInst) return;
+	// No else (the C# `IsEmpty(ifInst.FalseInst)`).
+	if (ifInst->FalseInst) return;
+	// The then must exit (the C# `ifInst.TrueInst.HasFlag(EndPointUnreachable)`).
+	if (!ifInst->TrueInst) return;
+	if (!HasFlag(ifInst->TrueInst->Flags(), InstructionFlags::EndPointUnreachable)) return;
+	// The falseCode is the next block (the C# `ifInst != block.Instructions.Last()`;
+	// this port has no falseCode sibling -- the falseCode+exit is the next block).
+	Block* nextBlock = NextBlockInContainer(block);
+	if (!nextBlock) return;
+	// IL-order gate: invert only when the falseCode (next block / old then) comes
+	// BEFORE the then (TrueInst / falseCode+exit) in IL.
+	bool trueEmpty = false, falseEmpty = false;
+	int trueStart = ConditionDetection::GetStartILOffset(ifInst->TrueInst.get(), trueEmpty);
+	int falseStart = ConditionDetection::GetStartILOffset(nextBlock, falseEmpty);
+	if (trueEmpty || falseEmpty || falseStart >= trueStart) return;
+	// Trailing-leave guard (deferred CanDuplicateExit): a non-keyword Leave exit
+	// (a leave of a Normal container that is not the function) at the fall-through
+	// position after InvertIf would render as `goto`; bail rather than introduce it.
+	// The C# replaces it with a keyword exit via CanDuplicateExit (deferred).
+	if (auto* leave = dynamic_cast<Leave*>(TrueInstExit(ifInst->TrueInst.get()))) {
+		if (!IsLeavingFunction(leave) && leave->TargetContainer &&
+		    leave->TargetContainer->Kind == ContainerKind::Normal)
+			return;
+	}
+	ConditionDetection::InvertIf(block, ifInst);
+}
+
+// Visit every BlockContainer's blocks, calling ImproveILOrdering on each
+// if-as-FinalInstruction (the C# `Visit` iterates `block.Instructions` and calls
+// ImproveILOrdering on each if non-terminal; this port's if-as-final model makes
+// the if the block's FinalInstruction, so the visit checks the final). Recurses
+// into nested containers (the if's arms, the block's non-terminal containers).
+// `continueTarget` (the C# Loop/While/DoWhile tracking for CanDuplicateExit) is
+// not tracked (deferred with the trailing-leave handling). The
+// ReduceNesting/ReduceSwitchNesting/ExtractElseBlock folds and the content-block
+// recursion are deferred (need the full CanDuplicateExit/EnsureEndPointUnreachable/
+// ExtractElseBlock helpers + the dominator analysis).
+void VisitContainers(ILInstruction* inst);
+void VisitContainer(BlockContainer* container) {
+	for (auto& block : container->Blocks) {
+		for (auto& inst : block->Instructions)
+			VisitContainers(inst.get());
+		if (auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get())) {
+			ImproveILOrdering(block.get(), iff);
+			VisitContainers(iff->TrueInst.get());
+			VisitContainers(iff->FalseInst.get());
+		} else if (block->FinalInstruction) {
+			VisitContainers(block->FinalInstruction.get());
+		}
+	}
+}
+void VisitContainers(ILInstruction* inst) {
+	if (!inst) return;
+	if (auto* cont = dynamic_cast<BlockContainer*>(inst)) {
+		VisitContainer(cont);
+		return;
+	}
+	if (inst->Op == OpCode::ILFunction) return;  // inline ILFunctions already transformed
+	for (int i = 0; i < inst->ChildCount(); ++i)
+		VisitContainers(inst->GetChild(i));
+}
+
 } // namespace
 
 // Recursively computes the number of statements and maximum nested depth of an
@@ -327,12 +472,23 @@ bool ReduceNestingTransform::ShouldReduceNesting(Block* block, int maxStatements
 }
 
 void ReduceNestingTransform::Run(ILFunction& function, ILTransformContext& context) {
-	// The C# iterates `function.Descendants.OfType<TryFinally>()` and folds
-	// each. This port has no GC: folding an outer TryFinally destroys any
-	// TryFinallys nested in its try block, dangling their collected pointers.
-	// Re-walk the tree for each fold instead (the redundant shape is rare, so
-	// the bounded re-walks are cheap) -- the walk stops at the first candidate,
-	// folds it, then the outer loop re-walks the mutated tree.
+	// The C# `Run` calls `Visit((BlockContainer)function.Body, null)` (the
+	// nesting-reduction + ImproveILOrdering folds) then the
+	// EliminateRedundantTryFinally loop. This iteration ports ImproveILOrdering
+	// (the IL-order-gated InvertIf, the simplest wired fold); the
+	// ReduceNesting/ReduceSwitchNesting/ExtractElseBlock folds are deferred
+	// (need the full CanDuplicateExit/EnsureEndPointUnreachable/ExtractElseBlock
+	// helpers + the D39 dominator analysis). Visit recurses into every
+	// BlockContainer's blocks and calls ImproveILOrdering on each
+	// if-as-FinalInstruction.
+	VisitContainer(dynamic_cast<BlockContainer*>(function.Body.get()));
+	// EliminateRedundantTryFinally: the C# iterates
+	// `function.Descendants.OfType<TryFinally>()` and folds each. This port has
+	// no GC: folding an outer TryFinally destroys any TryFinallys nested in its
+	// try block, dangling their collected pointers. Re-walk the tree for each
+	// fold instead (the redundant shape is rare, so the bounded re-walks are
+	// cheap) -- the walk stops at the first candidate, folds it, then the outer
+	// loop re-walks the mutated tree.
 	bool changed = true;
 	while (changed) {
 		changed = false;

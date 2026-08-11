@@ -41,6 +41,7 @@
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
+#include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/StackType.hpp"
@@ -56,6 +57,8 @@
 #include "Decompiler/IL/Transforms/SwitchOnNullableTransform.hpp"
 #include "Decompiler/IL/Transforms/PatternMatchingTransform.hpp"
 #include "Decompiler/IL/Transforms/HighLevelLoopTransform.hpp"
+#include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/InstructionFlags.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
@@ -681,4 +684,253 @@ TEST(ReduceNestingTransform, MscorlibComputeStatsSweep) {
 	}
 	EXPECT_GT(processed, 2000);
 	EXPECT_GT(maxDepthSeen, 0) << "some method should have nested depth";
+}
+
+// ImproveILOrdering corpus probe: runs the full pre-pipeline through
+// HighLevelLoopTransform (the CLI's ReduceNestingTransform position), then for
+// each if-as-FinalInstruction candidate (TrueInst unreachable + FalseInst null +
+// next block single-pred) checks the IL-order gate (GetStartILOffset(TrueInst)
+// vs GetStartILOffset(nextBlock)) and fires InvertIf on the would-fire
+// candidates, asserting the ILAst invariant holds. The C# ImproveILOrdering
+// operates on an if that is a NON-TERMINAL in the block with the falseCode+exit
+// as siblings; this port's if-as-FinalInstruction model makes the falseCode+exit
+// the next block, so the probe pins the real post-ConditionDetection shape. The
+// gate fires when ConditionDetection's inversion put the code in the "wrong" IL
+// order (the old then / next block comes BEFORE the falseCode / TrueInst in IL);
+// the GetStartILOffset Block-label adaptation (the Block's own StartILOffset
+// field = the first instruction's offset) makes the offsets valid for Block
+// TrueInsts and the next block, so the gate fires on the corpus (a real-corpus
+// transform, not faithfulness-only). The bare-Leave TrueInst path (the
+// no-falseCode case whose Leave lost its base ILRange during the pre-pipeline)
+// still bails at the gate -- the ILRange propagation through that path is a
+// separate piece.
+
+namespace {
+
+bool IsLeavingFunction(Leave* leave) {
+	return leave && leave->TargetContainer && leave->TargetContainer->Parent &&
+	       leave->TargetContainer->Parent->Op == OpCode::ILFunction;
+}
+
+// The "exit" of the TrueInst: if the TrueInst is a Block wrapping [falseCode,
+// exit], the exit is the Block's FinalInstruction (the control flow); if the
+// TrueInst is a bare exit (a Leave/Branch/Throw), it is the TrueInst itself.
+ILInstruction* TrueInstExit(ILInstruction* trueInst) {
+	if (!trueInst) return nullptr;
+	if (auto* b = dynamic_cast<Block*>(trueInst)) return b->FinalInstruction.get();
+	return trueInst;
+}
+
+int CountIfFinals(ILFunction& fn) {
+	int n = 0;
+	std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+		if (!inst) return;
+		if (auto* b = dynamic_cast<Block*>(inst)) {
+			if (dynamic_cast<IfInstruction*>(b->FinalInstruction.get())) ++n;
+		}
+		for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+	};
+	walk(fn.Body.get());
+	return n;
+}
+
+} // namespace
+
+TEST(ReduceNestingTransform, MscorlibImproveILOrderingShapeProbe) {
+#if defined(_WIN32)
+	const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+	const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+	if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+	MetadataFile f(path);
+	ASSERT_TRUE(f.IsValid());
+
+	int processed = 0;
+	int candidates = 0;            // if-final + TrueInst unreachable + FalseInst null
+	int singlePred = 0;            // ... and next block IncomingEdgeCount == 1
+	int gateWouldFire = 0;          // ... and falseRangeStart < trueRangeStart
+	int nonKeywordLeaveBail = 0;    // ... and the exit is a non-keyword Leave (the deferred trailing-leave case)
+	int fires = 0;                 // InvertIf actually fired (one per function)
+	ILTransformContext ctx;
+	for (const auto& m : f.MethodDefs()) {
+		if (m.RVA == 0) continue;
+		auto fn = ReadIL(f, m.Token, m.RVA);
+		if (!fn) continue;
+		++processed;
+		// Full pre-pipeline through HighLevelLoopTransform (the CLI's
+		// ReduceNestingTransform position).
+		ControlFlowSimplification().Run(*fn, ctx);
+		StObjToStLoc().Run(*fn, ctx);
+		ILInlining().Run(*fn, ctx);
+		InlineReturnTransform().Run(*fn, ctx);
+		RemoveInfeasiblePathTransform().Run(*fn, ctx);
+		DetectPinnedRegions().Run(*fn, ctx);
+		DetectCatchWhenConditionBlocks().Run(*fn, ctx);
+		LdLocaDupInitObjTransform().Run(*fn, ctx);
+		EarlyExpressionTransforms().Run(*fn, ctx);
+		RemoveDeadVariableInit().Run(*fn, ctx);
+		ControlFlowSimplification().Run(*fn, ctx);
+		SwitchDetection().Run(*fn, ctx);
+		SwitchOnNullableTransform().Run(*fn, ctx);
+		LoopDetection().Run(*fn, ctx);
+		PatternMatchingTransform().Run(*fn, ctx);
+		ConditionDetection().Run(*fn, ctx);
+		HighLevelLoopTransform::Run(*fn, ctx);
+
+		bool firedThisFn = false;
+		std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+			if (!inst) return;
+			if (auto* container = dynamic_cast<BlockContainer*>(inst)) {
+				for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+					auto* iff = dynamic_cast<IfInstruction*>(container->Blocks[i]->FinalInstruction.get());
+					if (!iff || !iff->TrueInst) continue;
+					if (!HasFlag(iff->TrueInst->Flags(), InstructionFlags::EndPointUnreachable)) continue;
+					if (iff->FalseInst) continue;  // has an else
+					++candidates;
+					Block* nextBlock = (i + 1 < container->Blocks.size())
+					    ? container->Blocks[i + 1].get() : nullptr;
+					if (!nextBlock || nextBlock->IncomingEdgeCount != 1) continue;
+					++singlePred;
+					bool trueEmpty = false, falseEmpty = false;
+					int trueStart = ConditionDetection::GetStartILOffset(iff->TrueInst.get(), trueEmpty);
+					int falseStart = ConditionDetection::GetStartILOffset(nextBlock, falseEmpty);
+					if (trueEmpty || falseEmpty || !(falseStart < trueStart)) continue;
+					++gateWouldFire;
+					// The trailing-leave guard: a non-keyword Leave exit (a leave
+					// of a Normal container that is not the function) bails (the
+					// C# CanDuplicateExit replacement is deferred).
+					if (auto* leave = dynamic_cast<Leave*>(TrueInstExit(iff->TrueInst.get()))) {
+						if (!IsLeavingFunction(leave) && leave->TargetContainer &&
+						    leave->TargetContainer->Kind == ContainerKind::Normal) {
+							++nonKeywordLeaveBail;
+							continue;
+						}
+					}
+					if (firedThisFn) return;  // one InvertIf per function
+					firedThisFn = true;
+					ConditionDetection::InvertIf(container->Blocks[i].get(), iff);
+					fn->CheckInvariant(ILPhase::Normal);
+					++fires;
+				}
+			}
+			for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+		};
+		walk(fn->Body.get());
+		if (processed >= 8000) break;
+	}
+	EXPECT_GT(processed, 5000) << "the sweep must exercise real methods";
+	// The gate fires on the corpus (ConditionDetection's inversion put the code
+	// in the wrong IL order for some methods); the invariant check inside the
+	// loop is the safety gate -- InvertIf must not corrupt the tree on any real
+	// would-fire shape.
+	EXPECT_GT(gateWouldFire, 0) << "the IL-order gate fires on the corpus";
+	EXPECT_GT(fires, 0) << "InvertIf fired on the would-fire candidates";
+	std::cerr << "ImproveILOrdering shape probe: processed=" << processed
+	          << " candidates=" << candidates
+	          << " singlePred=" << singlePred
+	          << " gateWouldFire=" << gateWouldFire
+	          << " nonKeywordLeaveBail=" << nonKeywordLeaveBail
+	          << " fires=" << fires << "\n";
+	(void)candidates; (void)singlePred; (void)nonKeywordLeaveBail;
+}
+
+// ImproveILOrdering through the pre-pipeline shape: an early-return if whose
+// then (the return) is at a HIGHER IL offset than the fall-through (the rest of
+// the method) inverts to match IL order. The hand-built shape mirrors the real
+// post-ConditionDetection shape (the if is the block's FinalInstruction with
+// TrueInst = the inlined falseCode+exit [unreachable], FalseInst = null,
+// fall-through to the old then / next block). After ReduceNestingTransform runs
+// ImproveILOrdering, the if is inverted: the condition is negated, the old then
+// (the next block) moves into the if's TrueInst, and the falseCode (the old
+// TrueInst) moves into the next block. The gate fires because the next block
+// (the old then) comes BEFORE the TrueInst (the falseCode) in IL.
+TEST(ReduceNestingTransform, ImproveILOrderingInvertsToMatchILOrder) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+
+	// block0: if (v == 0) { Block { stloc v(2); leave body } }  (TrueInst = the
+	// inlined falseCode+exit, unreachable; FalseInst = null; fall-through to
+	// block1). The TrueInst (a Block) starts at IL_000A; block1 (the old then)
+	// starts at IL_0002. IL_0002 < IL_000A -> the gate fires and
+	// ImproveILOrdering inverts.
+	auto b0 = std::make_unique<Block>();
+	b0->StartILOffset = 0;
+	auto trueInstBlock = std::make_unique<Block>();
+	trueInstBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(2)));
+	trueInstBlock->SetFinal(std::make_unique<Leave>(body.get()));
+	trueInstBlock->StartILOffset = 10;  // the falseCode (TrueInst) starts at IL_000A
+	trueInstBlock->RenumberChildren();
+	auto iff = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                       ComparisonKind::Equality),
+		std::move(trueInstBlock), nullptr);
+	b0->SetFinal(std::move(iff));
+	body->AddBlock(std::move(b0));
+	// block1: the old then (a leave of body), at IL_0002 < IL_000A.
+	auto b1 = std::make_unique<Block>();
+	b1->StartILOffset = 2;
+	b1->SetFinal(std::make_unique<Leave>(body.get()));
+	body->AddBlock(std::move(b1));
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+	ASSERT_EQ(CountIfFinals(*fn), 1);
+
+	ReduceNestingTransform().Run(*fn, Ctx());
+	fn->CheckInvariant(ILPhase::Normal);
+	// The if is inverted: the condition is negated. NegateCondition folds
+	// `comp(eq, v, 0)` to the bare `ldloc v` (the `comp(x == 0) => x` unwrap,
+	// the negation `!(v == 0)` = `v != 0` = `v` as a bool), so the condition is
+	// now a LdLoc, not a Comp.
+	auto* iff2 = dynamic_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get());
+	ASSERT_NE(iff2, nullptr);
+	ASSERT_NE(iff2->TrueInst, nullptr);
+	EXPECT_EQ(iff2->Condition->Op, OpCode::LdLoc) << "the condition was negated (comp(eq,v,0) => ldloc v)";
+}
+
+// Negative: when the IL order is already correct (the next block / old then
+// comes AFTER the TrueInst / falseCode in IL), ImproveILOrdering does NOT invert
+// -- the gate bails (falseRangeStart >= trueStart).
+TEST(ReduceNestingTransform, ImproveILOrderingNoOpWhenILOrderCorrect) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+
+	auto b0 = std::make_unique<Block>();
+	b0->StartILOffset = 0;
+	auto trueInstBlock = std::make_unique<Block>();
+	trueInstBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(2)));
+	trueInstBlock->SetFinal(std::make_unique<Leave>(body.get()));
+	trueInstBlock->StartILOffset = 2;  // the falseCode (TrueInst) starts at IL_0002
+	trueInstBlock->RenumberChildren();
+	auto iff = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                       ComparisonKind::Equality),
+		std::move(trueInstBlock), nullptr);
+	b0->SetFinal(std::move(iff));
+	body->AddBlock(std::move(b0));
+	auto b1 = std::make_unique<Block>();
+	b1->StartILOffset = 10;  // the old then (next block) at IL_000A > IL_0002 -- IL order correct
+	b1->SetFinal(std::make_unique<Leave>(body.get()));
+	body->AddBlock(std::move(b1));
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	ReduceNestingTransform().Run(*fn, Ctx());
+	fn->CheckInvariant(ILPhase::Normal);
+	// The if is NOT inverted (the condition stays Equality).
+	auto* iff2 = dynamic_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get());
+	ASSERT_NE(iff2, nullptr);
+	auto* cond = dynamic_cast<Comp*>(iff2->Condition.get());
+	ASSERT_NE(cond, nullptr);
+	EXPECT_EQ(cond->Kind, ComparisonKind::Equality) << "the gate bails when the IL order is correct";
 }

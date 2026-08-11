@@ -513,17 +513,19 @@ int main(int argc, char** argv) {
                 // ProxyCallReplacer, FixRemainingIncrements, CopyPropagation).
                 ILSpy::Decompiler::IL::CopyPropagation().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::AssignVariableNames().Run(*fn, transformContext);
-                // ReduceNestingTransform: a subset (EliminateRedundantTryFinally)
-                // that removes the redundant try-finally the C# compiler wraps a
-                // `fixed` block in once DetectPinnedRegions has formed the
-                // PinnedRegion -- the finally is an empty `leave (nop)`, so the
-                // whole try-finally collapses to the PinnedRegion. Runs after
-                // HighLevelLoopTransform (per GetILTransforms: the C# order is
-                // HighLevelLoopTransform, ReduceNestingTransform,
-                // RemoveRedundantReturn). The nesting-reduction pieces
-                // (Visit/ReduceNesting/ReduceSwitchNesting/ImproveILOrdering/
-                // ExtractElseBlock) need a general ILInstruction.Clone and are
-                // deferred.
+                // ReduceNestingTransform: EliminateRedundantTryFinally (the
+                // redundant try-finally the C# compiler wraps a `fixed` block
+                // in, once DetectPinnedRegions has formed the PinnedRegion) +
+                // ImproveILOrdering (the IL-order-gated InvertIf that re-inverts
+                // ConditionDetection's inversion when the IL order is wrong).
+                // Runs after HighLevelLoopTransform (per GetILTransforms: the C#
+                // order is HighLevelLoopTransform, ReduceNestingTransform,
+                // RemoveRedundantReturn). The ReduceNesting /
+                // ReduceSwitchNesting / ExtractElseBlock folds (the rest of the
+                // C# `Visit`) are deferred (need the full CanDuplicateExit /
+                // EnsureEndPointUnreachable / ExtractElseBlock helpers + the
+                // dominator analysis); the trailing-leave handling
+                // (CanDuplicateExit) is deferred.
                 ILSpy::Decompiler::IL::ReduceNestingTransform().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::RemoveRedundantReturn().Run(*fn, transformContext);
                 fn->CheckInvariant(ILSpy::Decompiler::IL::ILPhase::Normal);

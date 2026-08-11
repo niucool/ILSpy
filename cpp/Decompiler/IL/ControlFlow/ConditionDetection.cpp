@@ -101,6 +101,7 @@ bool TryInlineIfFallThrough(BlockContainer* container, std::size_t blockIndex) {
     // Move fallThrough's instructions + final into a new Block that becomes
     // the IfInstruction's FalseInst.
     auto inlineBlock = std::make_unique<Block>();
+    inlineBlock->StartILOffset = fallThrough->StartILOffset;  // label = the fall-through's first-instruction offset (for GetStartILOffset)
     Block* inlinePtr = inlineBlock.get();
     for (auto& inst : fallThrough->Instructions)
         inlineBlock->Add(std::move(inst));  // Add sets parent/index
@@ -285,12 +286,32 @@ Block* NextBlockInContainer(Block* block) {
 // `leave (nop)` artifact) reports its Value's offset; otherwise the
 // instruction's own StartILOffset is returned. `isEmpty` reports whether the
 // effective range is empty.
+//
+// Block adaptation: this port's `Block` shadows the base `ILInstruction`'s
+// `StartILOffset` with its own `uint32` field (the block's label, set by the
+// reader/BlockBuilder to the first instruction's offset), and the base ILRange
+// (StartILOffset/EndILOffset) is NOT propagated through transforms that
+// synthesize or merge blocks (ConditionDetection's inversion, CFS, ...), so a
+// Block's base ILRange is usually empty. The C# `GetStartILOffset` for a Block
+// returns the Block's ILRange start (= the first instruction's offset = the
+// label); this port returns the Block's label field for a Block, which is the
+// faithful equivalent (the label is always a valid offset, set by the
+// reader/BlockBuilder for real blocks and by TryInlineIfFallThrough for the
+// synthesized inline Block).
 int ConditionDetection::GetStartILOffset(ILInstruction* inst, bool& isEmpty) {
     if (auto* leave = dynamic_cast<Leave*>(inst)) {
         if (leave->Value && leave->Value->Op != OpCode::Nop) {
             isEmpty = leave->Value->IsILRangeEmpty();
             return leave->Value->StartILOffset;
         }
+    }
+    if (auto* block = dynamic_cast<Block*>(inst)) {
+        // The Block's label (its own StartILOffset field) is the first
+        // instruction's offset -- the faithful equivalent of the C# Block's
+        // ILRange start. The base ILRange is not propagated through
+        // block-synthesizing transforms, so consult the label.
+        isEmpty = false;
+        return static_cast<int>(block->StartILOffset);
     }
     isEmpty = inst ? inst->IsILRangeEmpty() : true;
     return inst ? inst->StartILOffset : 0;

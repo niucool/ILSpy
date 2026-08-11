@@ -28,16 +28,24 @@
 //    DetectPinnedRegions has formed the PinnedRegion the try-finally is
 //    redundant and is replaced with the PinnedRegion directly).
 //  * The nesting-reduction heuristics (ComputeStats / UpdateStats /
-//    ShouldReduceNesting) as a tested-but-not-yet-wired foundation, plus the
-//    self-contained pattern helpers (BlockUnwrap / MatchBranch / MatchLeave /
+//    ShouldReduceNesting) as a tested foundation, plus the self-contained
+//    pattern helpers (BlockUnwrap / MatchBranch / MatchLeave /
 //    MatchConditionBlock) the heuristics and the future nesting-reduction folds
-//    consult. These are pure analysis helpers -- no tree mutation -- ported
-//    ahead of the wired Visit / ReduceNesting / ReduceSwitchNesting /
-//    ImproveILOrdering / ExtractElseBlock folds (which need a general
-//    ILInstruction.Clone for the keyword-exit duplication [D147, now landed] +
-//    the ConditionDetection.InvertIf / GetStartILOffset statics exposed + a
-//    block-model corpus probe of the real post-ConditionDetection shape, the
-//    recurring D73/D75 divergence).
+//    consult.
+//  * ImproveILOrdering (the IL-order-gated InvertIf): for an if-as-FinalInstruction
+//    with an unreachable TrueInst and no else, re-inverts ConditionDetection's
+//    inversion when the IL order is wrong (the old then / next block comes
+//    BEFORE the falseCode / TrueInst in IL). The gate consults the D150
+//    ConditionDetection.GetStartILOffset (which the Block-label adaptation
+//    makes valid for Block TrueInsts and the next block) and the D151
+//    ConditionDetection.InvertIf. The trailing-leave handling (the C#
+//    CanDuplicateExit try/finally walk that replaces a non-keyword Leave exit
+//    with a keyword) is deferred; the bail-for-non-keyword-Leave-exit guard is
+//    ported so the fold does not introduce a goto. The ReduceNesting /
+//    ReduceSwitchNesting / ExtractElseBlock folds (the rest of the C# `Visit`)
+//    are deferred (need the full CanDuplicateExit / EnsureEndPointUnreachable /
+//    ExtractElseBlock helpers + the D39 dominator analysis for
+//    ReduceSwitchNesting).
 //
 // Block-model adaptation: the C# Block.Instructions does NOT include the
 // FinalInstruction (a void block's final is a Nop, and the control flow
@@ -45,9 +53,11 @@
 // non-terminal Instructions from its FinalInstruction (the control flow), so
 // the C# `block.Instructions.Last()` (the last non-terminal, which is the
 // control flow in the C#) is this port's `block->FinalInstruction`. The
-// heuristics are adapted accordingly: a Block's control flow (this port's
-// FinalInstruction) is counted as a statement the way the C# counts it as the
-// last element of Instructions.
+// heuristics and ImproveILOrdering are adapted accordingly: the C# `Visit`
+// iterates `block.Instructions` and calls ImproveILOrdering on each if
+// non-terminal; this port's if-as-final model makes the if the block's
+// FinalInstruction, so the visit checks the final and the falseCode+exit (the
+// C# siblings after the if) is the next block in the container.
 
 #pragma once
 
