@@ -264,6 +264,23 @@ bool TryDropTrailingGotoToNext(BlockContainer* container, std::size_t blockIndex
 
 } // namespace
 
+// The C# `ConditionDetection.GetStartILOffset` (see header). A valued Leave
+// (a Value that is neither null nor a Nop -- this port's reader emits
+// `Leave(container)` with no Value for a void leave, and a Nop Value for a
+// `leave (nop)` artifact) reports its Value's offset; otherwise the
+// instruction's own StartILOffset is returned. `isEmpty` reports whether the
+// effective range is empty.
+int ConditionDetection::GetStartILOffset(ILInstruction* inst, bool& isEmpty) {
+    if (auto* leave = dynamic_cast<Leave*>(inst)) {
+        if (leave->Value && leave->Value->Op != OpCode::Nop) {
+            isEmpty = leave->Value->IsILRangeEmpty();
+            return leave->Value->StartILOffset;
+        }
+    }
+    isEmpty = inst ? inst->IsILRangeEmpty() : true;
+    return inst ? inst->StartILOffset : 0;
+}
+
 void ConditionDetection::Run(ILFunction& function, ILTransformContext& context) {
     (void)context;
     // Run the three transforms in a combined fixpoint so a step that enables

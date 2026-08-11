@@ -31,6 +31,18 @@ namespace ILSpy::Decompiler::IL {
 class ConditionDetection : public IILTransform {
 public:
     void Run(ILFunction& function, ILTransformContext& context) override;
+
+    // The C# `ConditionDetection.GetStartILOffset`: the IL byte-offset of the
+    // first IL instruction an ILAst instruction represents, for IL-order
+    // comparisons (the wired ReduceNestingTransform.ImproveILOrdering fold
+    // consults it to decide whether inverting an if to match IL order helps).
+    // Some compilers merge the leave instructions for different arguments
+    // using stack variables; these get split and inlined, but the Leave's
+    // Value's ILRange is a better indicator of the actual location, so a
+    // valued Leave (a non-Nop Value) reports its Value's offset. Otherwise the
+    // instruction's own StartILOffset is returned. `isEmpty` reports whether
+    // the range is empty (the C# `out bool isEmpty`).
+    static int GetStartILOffset(ILInstruction* inst, bool& isEmpty);
 };
 
 } // namespace ILSpy::Decompiler::IL

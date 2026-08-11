@@ -38,6 +38,7 @@
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
@@ -360,4 +361,119 @@ TEST(ConditionDetection, DropsTrailingGotoToNextBlockFromIfArm) {
     auto* tb = dynamic_cast<Block*>(iff->TrueInst.get());
     ASSERT_NE(tb, nullptr);
     EXPECT_EQ(tb->FinalInstruction, nullptr) << "trailing goto to next block dropped";
+}
+
+// ---- GetStartILOffset (the tested-but-not-yet-wired foundation the wired
+// ReduceNestingTransform.ImproveILOrdering fold consults to decide whether
+// inverting an if to match IL order helps) ----
+
+TEST(ConditionDetection, GetStartILOffsetReturnsInstructionOffset) {
+    // A plain instruction with a set ILRange reports its own StartILOffset and
+    // isEmpty == false.
+    auto inst = std::make_unique<LdcI4>(42);
+    inst->SetILRange(0x10, 0x14);
+    bool isEmpty = true;
+    EXPECT_EQ(ConditionDetection::GetStartILOffset(inst.get(), isEmpty), 0x10);
+    EXPECT_FALSE(isEmpty);
+}
+
+TEST(ConditionDetection, GetStartILOffsetReturnsEmptyForDefaultRange) {
+    // The default ILRange {0,0} is empty (Start >= End): isEmpty == true, and
+    // StartILOffset is 0.
+    auto inst = std::make_unique<LdcI4>(0);
+    bool isEmpty = false;
+    EXPECT_EQ(ConditionDetection::GetStartILOffset(inst.get(), isEmpty), 0);
+    EXPECT_TRUE(isEmpty);
+}
+
+TEST(ConditionDetection, GetStartILOffsetReturnsLeaveValueOffsetForValuedLeave) {
+    // A valued Leave (a non-Nop Value -- a `return expr`) reports its Value's
+    // StartILOffset, not the Leave's. The C# comment: the Leave's Value's
+    // ILRange is a better indicator of the actual location than the Leave's.
+    auto V = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    V->Name = "num";
+    auto value = std::make_unique<LdLoc>(V);
+    value->SetILRange(0x20, 0x24);
+    auto leave = std::make_unique<Leave>(nullptr, std::move(value));
+    leave->SetILRange(0x30, 0x34);
+    bool isEmpty = true;
+    EXPECT_EQ(ConditionDetection::GetStartILOffset(leave.get(), isEmpty), 0x20);
+    EXPECT_FALSE(isEmpty) << "isEmpty reflects the Value's range, not the Leave's";
+}
+
+TEST(ConditionDetection, GetStartILOffsetReturnsLeaveOffsetForValuelessLeave) {
+    // A value-less Leave (a `return;` -- this port's reader emits Leave(container)
+    // with no Value for a void leave) reports the Leave's own StartILOffset.
+    auto leave = std::make_unique<Leave>(nullptr);  // no Value
+    leave->SetILRange(0x40, 0x44);
+    bool isEmpty = true;
+    EXPECT_EQ(ConditionDetection::GetStartILOffset(leave.get(), isEmpty), 0x40);
+    EXPECT_FALSE(isEmpty);
+}
+
+TEST(ConditionDetection, GetStartILOffsetReturnsLeaveOffsetForNopValuedLeave) {
+    // A Leave whose Value is a Nop (the `leave (nop)` artifact the C# compiler
+    // wraps a `fixed` block in -- a value-less leave materialised as a Nop
+    // Value in the C#) reports the Leave's own StartILOffset, not the Nop's.
+    // This port's reader emits a null Value for the void form, but a Nop Value
+    // can arise from transforms; the helper treats both as "not a valued leave".
+    auto leave = std::make_unique<Leave>(nullptr, std::make_unique<Nop>());
+    leave->SetILRange(0x50, 0x54);
+    bool isEmpty = true;
+    EXPECT_EQ(ConditionDetection::GetStartILOffset(leave.get(), isEmpty), 0x50);
+    EXPECT_FALSE(isEmpty);
+}
+
+TEST(ConditionDetection, MscorlibGetStartILOffsetSweep) {
+    // The wired ImproveILOrdering fold consults GetStartILOffset on the
+    // post-ConditionDetection instructions the reader populated the ILRange
+    // for (D115). The sweep verifies the helper is robust on every real
+    // instruction: it returns a non-negative offset and the isEmpty flag is
+    // consistent with the effective range (IsILRangeEmpty for the non-Leave
+    // case, the Value's IsILRangeEmpty for a valued Leave).
+#if defined(_WIN32)
+    const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    int checked = 0;
+    int valuedLeaves = 0;
+    int emptyRanges = 0;
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        Walk(fn->Body.get(), [&](ILInstruction* inst) {
+            bool isEmpty = false;
+            int offset = ConditionDetection::GetStartILOffset(inst, isEmpty);
+            EXPECT_GE(offset, 0) << "GetStartILOffset must return a non-negative offset";
+            // Cross-check the isEmpty flag against the effective range.
+            bool expectedEmpty;
+            if (auto* leave = dynamic_cast<Leave*>(inst)) {
+                if (leave->Value && leave->Value->Op != OpCode::Nop) {
+                    expectedEmpty = leave->Value->IsILRangeEmpty();
+                    ++valuedLeaves;
+                } else {
+                    expectedEmpty = inst->IsILRangeEmpty();
+                }
+            } else {
+                expectedEmpty = inst->IsILRangeEmpty();
+            }
+            EXPECT_EQ(isEmpty, expectedEmpty)
+                << "isEmpty must match the effective range's IsILRangeEmpty";
+            if (isEmpty) ++emptyRanges;
+            ++checked;
+        });
+        if (checked > 200000) break;  // bound the sweep
+    }
+    EXPECT_GT(checked, 1000) << "the sweep must exercise real instructions";
+    // Sanity: the .NET Framework 4 legacy-csc mscorlib has valued `return expr`
+    // leaves (the helper's special case) and the reader populates non-empty
+    // ranges for most instructions (D115), so both counters should be nonzero.
+    EXPECT_GT(valuedLeaves, 0) << "the corpus carries valued `return expr` leaves";
+    EXPECT_GT(emptyRanges, 0) << "some instructions carry the default empty range";
 }
