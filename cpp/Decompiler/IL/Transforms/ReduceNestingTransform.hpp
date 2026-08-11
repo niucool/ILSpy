@@ -69,6 +69,10 @@
 //    (the no-else and else-if-tree cases) consults it to make a then/else
 //    block exit before InvertIf swaps it with the fall-through; no pipeline
 //    transform consults it yet (the wired fold is the subsequent iteration).
+//  * RemoveRedundantExit (a tested-but-not-yet-wired foundation): the helper
+//    that drops a block's trailing exit when it equals the fall-through. The
+//    wired ReduceNesting fold calls it after a successful fold; no pipeline
+//    transform consults it yet (the wired fold is the subsequent iteration).
 //
 // Block-model adaptation: the C# Block.Instructions does NOT include the
 // FinalInstruction (a void block's final is a Nop, and the control flow
@@ -162,6 +166,28 @@ public:
     // ReduceNesting no-else case (the then block either exits or falls through
     // to the join), so it is a documented faithfulness gap.
     static void EnsureEndPointUnreachable(ILInstruction* inst, ILInstruction* fallthroughExit);
+
+    // The C# `ReduceNestingTransform.RemoveRedundantExit`: removes a redundant
+    // block exit instruction. The wired ReduceNesting fold (the no-else case
+    // and the else-if-tree case) calls it after a successful fold: the block's
+    // trailing exit (the keyword exit the fold duplicated into the then/else
+    // block) is redundant when it equals `implicitExit` (the instruction
+    // following the block's end point, i.e. the fall-through), so it is dropped
+    // and the block falls through. No pipeline transform consults it yet (the
+    // wired fold is the subsequent iteration).
+    //
+    // Block-model adaptation: the C# `block.Instructions.Last()` (the last
+    // non-terminal, which IS the control flow in the C# where FinalInstruction
+    // is a Nop) is this port's `block->FinalInstruction`, and `RemoveLast()`
+    // (leaving a Nop final = a fall-through) is a replacement of the final with
+    // a fall-through: a Branch to the next block in the container (the
+    // positional fall-through), or a Nop final when there is no next block (the
+    // implicit void fall-through). The Match is a structural equality between
+    // the final and `implicitExit` over the keyword-exit kinds (a value-less
+    // Leave -- return/break -- same TargetContainer; a Branch -- continue --
+    // same TargetBlock); other kinds compare unequal (conservative: the exit is
+    // not removed rather than mis-removed).
+    static void RemoveRedundantExit(Block* block, ILInstruction* implicitExit);
 };
 
 } // namespace ILSpy::Decompiler::IL

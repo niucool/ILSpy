@@ -1937,3 +1937,197 @@ TEST(ReduceNestingTransform, MscorlibEnsureEndPointUnreachableSweep) {
 	          << " calls=" << calls << " fallThroughReplaced=" << replaced << "\n";
 	(void)replaced;
 }
+
+// RemoveRedundantExit (a tested-but-not-yet-wired foundation): the helper that
+// drops a block's trailing exit when it equals the fall-through. The wired
+// ReduceNesting fold calls it after a successful fold; no pipeline transform
+// consults it yet.
+
+// A block whose final (a Leave(body)) matches the implicitExit (another
+// Leave(body)) has its final replaced with a Branch to the next block (the
+// positional fall-through). The block's non-terminal content is preserved.
+TEST(ReduceNestingTransform, RemoveRedundantExitReplacesMatchingLeaveWithFallThroughBranch) {
+	auto built = BuildEnsure();
+	built.b0->FinalInstruction.reset();
+	built.b0->SetFinal(std::make_unique<Leave>(built.body));
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ReduceNestingTransform::RemoveRedundantExit(built.b0, built.bodyLeave);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ASSERT_NE(built.b0->FinalInstruction.get(), nullptr);
+	EXPECT_EQ(built.b0->FinalInstruction->Op, OpCode::Branch)
+		<< "the matching Leave is replaced with a fall-through Branch";
+	auto* br = static_cast<Branch*>(built.b0->FinalInstruction.get());
+	EXPECT_EQ(br->TargetBlock, built.b1) << "the Branch targets the next block";
+	EXPECT_EQ(built.b0->Instructions.size(), 1u) << "the stloc content is preserved";
+}
+
+// A block whose final (a Branch to the continue target) matches the
+// implicitExit (a Branch to the same target) has its final replaced with a
+// Branch to the next block. When the next block IS the continue target (the
+// faithful case -- the fall-through IS the continue), the new Branch targets
+// the same block.
+TEST(ReduceNestingTransform, RemoveRedundantExitReplacesMatchingBranchWithFallThroughBranch) {
+	auto built = BuildEnsure();
+	// b0's final is a Branch to b1 (a continue whose target is the next block).
+	built.b0->FinalInstruction.reset();
+	built.b0->SetFinal(std::make_unique<Branch>(built.b1));
+	built.fn->CheckInvariant(ILPhase::Normal);
+	auto implicitBranch = std::make_unique<Branch>(built.b1);
+	auto* implicitPtr = implicitBranch.get();
+	ReduceNestingTransform::RemoveRedundantExit(built.b0, implicitPtr);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ASSERT_NE(built.b0->FinalInstruction.get(), nullptr);
+	EXPECT_EQ(built.b0->FinalInstruction->Op, OpCode::Branch);
+	auto* br = static_cast<Branch*>(built.b0->FinalInstruction.get());
+	EXPECT_EQ(br->TargetBlock, built.b1)
+		<< "the matching continue-Branch is replaced with a fall-through Branch to the next block";
+}
+
+// A block whose final does NOT match the implicitExit is a no-op.
+TEST(ReduceNestingTransform, RemoveRedundantExitIsNoOpWhenFinalDoesNotMatch) {
+	auto built = BuildEnsure();
+	// A separate Normal container as the leave target (different from body).
+	auto otherC = std::make_unique<BlockContainer>();
+	otherC->Kind = ContainerKind::Normal;
+	auto otherPtr = otherC.get();
+	built.fn->CheckInvariant(ILPhase::Normal);
+	built.b0->FinalInstruction.reset();
+	built.b0->SetFinal(std::make_unique<Leave>(built.body));
+	// implicitExit is a Leave of a different container -> no match.
+	auto implicitLeave = std::make_unique<Leave>(otherPtr);
+	auto* implicitPtr = implicitLeave.get();
+	auto* oldFinal = built.b0->FinalInstruction.get();
+	ReduceNestingTransform::RemoveRedundantExit(built.b0, implicitPtr);
+	EXPECT_EQ(built.b0->FinalInstruction.get(), oldFinal) << "a non-matching exit is kept";
+}
+
+// A null implicitExit is a no-op (the C# Match(null) never succeeds).
+TEST(ReduceNestingTransform, RemoveRedundantExitIsNoOpForNullImplicitExit) {
+	auto built = BuildEnsure();
+	built.b0->FinalInstruction.reset();
+	built.b0->SetFinal(std::make_unique<Leave>(built.body));
+	built.fn->CheckInvariant(ILPhase::Normal);
+	auto* oldFinal = built.b0->FinalInstruction.get();
+	ReduceNestingTransform::RemoveRedundantExit(built.b0, nullptr);
+	EXPECT_EQ(built.b0->FinalInstruction.get(), oldFinal) << "a null implicitExit is a no-op";
+}
+
+// A block with no final (a null FinalInstruction) is a no-op: there is no
+// trailing exit to remove.
+TEST(ReduceNestingTransform, RemoveRedundantExitIsNoOpForNullFinal) {
+	auto built = BuildEnsure();
+	built.b0->FinalInstruction.reset();
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ReduceNestingTransform::RemoveRedundantExit(built.b0, built.bodyLeave);
+	EXPECT_EQ(built.b0->FinalInstruction.get(), nullptr) << "a null final is a no-op";
+}
+
+// A block whose final matches the implicitExit but has no next block (it is
+// the last in its container) has its final replaced with a Nop (the implicit
+// void fall-through), matching the C# RemoveLast() leaving a Nop final.
+TEST(ReduceNestingTransform, RemoveRedundantExitReplacesMatchingLeaveWithNopWhenNoNextBlock) {
+	// A single-block body container: b0 with a Leave(body) final, no next block.
+	auto fn = std::make_unique<ILFunction>();
+	auto* body = new BlockContainer();
+	fn->Body = std::unique_ptr<BlockContainer>(body);
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+	auto b0 = std::make_unique<Block>();
+	b0->Add(StLocInt(v, 1));
+	auto leaveBody = std::make_unique<Leave>(body);
+	auto* implicitPtr = leaveBody.get();
+	// b0's final is a separate Leave(body) that matches implicitPtr.
+	b0->SetFinal(std::make_unique<Leave>(body));
+	auto* b0Ptr = b0.get();
+	body->AddBlock(std::move(b0));
+	fn->CheckInvariant(ILPhase::Normal);
+	ReduceNestingTransform::RemoveRedundantExit(b0Ptr, implicitPtr);
+	fn->CheckInvariant(ILPhase::Normal);
+	ASSERT_NE(b0Ptr->FinalInstruction.get(), nullptr);
+	EXPECT_EQ(b0Ptr->FinalInstruction->Op, OpCode::Nop)
+		<< "no next block -> the matching Leave is replaced with a Nop (void fall-through)";
+	EXPECT_EQ(b0Ptr->Instructions.size(), 1u) << "the stloc content is preserved";
+}
+
+// The block's non-terminal content is preserved when the trailing exit is
+// removed (only the final changes).
+TEST(ReduceNestingTransform, RemoveRedundantExitPreservesBlockContent) {
+	auto built = BuildEnsure();
+	auto v2 = MakeLocal("w");
+	built.fn->Variables.push_back(v2);
+	// Reset b0 with two stlocs + a Leave(body) final.
+	built.b0->FinalInstruction.reset();
+	built.b0->Instructions.clear();
+	built.b0->Add(StLocInt(MakeLocal("a"), 1));
+	built.b0->Add(StLocInt(v2, 2));
+	built.b0->SetFinal(std::make_unique<Leave>(built.body));
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ReduceNestingTransform::RemoveRedundantExit(built.b0, built.bodyLeave);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	EXPECT_EQ(built.b0->Instructions.size(), 2u) << "both stlocs are preserved";
+	ASSERT_NE(built.b0->FinalInstruction.get(), nullptr);
+	EXPECT_EQ(built.b0->FinalInstruction->Op, OpCode::Branch)
+		<< "the matching Leave is replaced with a fall-through Branch";
+}
+
+// A mscorlib safety sweep: decode methods and call RemoveRedundantExit on
+// every block whose final is a Leave of the function body (the body is the
+// function's top container, an ancestor of every block, so the leave is
+// valid), passing a fresh Leave(body) as the implicitExit so the helper fires
+// (the final matches). The helper replaces the final with a fall-through
+// Branch to the next block (or a Nop if none); the ILAst invariant must hold
+// after every call. This tests the helper's safety (no crash / tree
+// corruption) on real trees; the faithfulness is tested by the hand-built
+// tests above.
+TEST(ReduceNestingTransform, MscorlibRemoveRedundantExitSweep) {
+#if defined(_WIN32)
+	const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+	const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+	if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+	MetadataFile f(path);
+	ASSERT_TRUE(f.IsValid());
+
+	int processed = 0;
+	int calls = 0;
+	int removed = 0;
+	for (const auto& m : f.MethodDefs()) {
+		if (m.RVA == 0) continue;
+		auto fn = ReadIL(f, m.Token, m.RVA);
+		if (!fn) continue;
+		++processed;
+		auto* body = fn->Body.get();
+		std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+			if (!inst) return;
+			if (auto* block = dynamic_cast<Block*>(inst)) {
+				auto* final = block->FinalInstruction.get();
+				if (final && final->Op == OpCode::Leave) {
+					auto* leave = static_cast<Leave*>(final);
+					if (leave->TargetContainer == body && (!leave->Value || leave->Value->Op == OpCode::Nop)) {
+						auto implicitLeave = std::make_unique<Leave>(body);
+						ReduceNestingTransform::RemoveRedundantExit(block, implicitLeave.get());
+						++removed;
+					}
+				}
+				++calls;
+			}
+			if (auto* cont = dynamic_cast<BlockContainer*>(inst)) {
+				for (auto& blk : cont->Blocks) walk(blk.get());
+				return;
+			}
+			for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+		};
+		walk(fn->Body.get());
+		fn->CheckInvariant(ILPhase::Normal);
+		if (processed >= 3000) break;
+	}
+	EXPECT_GT(processed, 2000) << "the sweep must exercise real methods";
+	EXPECT_GT(calls, 0) << "the sweep must call the helper on real blocks";
+	EXPECT_GT(removed, 0) << "the sweep must fire the helper on real Leave(body) finals";
+	std::cerr << "RemoveRedundantExit sweep: processed=" << processed
+	          << " calls=" << calls << " removed=" << removed << "\n";
+	(void)removed;
+}

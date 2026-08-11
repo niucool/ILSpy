@@ -59,6 +59,10 @@
 //      then/else block exit before InvertIf swaps it with the fall-through; no
 //      pipeline transform consults it yet (the wired fold is the subsequent
 //      iteration).
+//  (7) RemoveRedundantExit (a tested-but-not-yet-wired foundation): the helper
+//      that drops a block's trailing exit when it equals the fall-through. The
+//      wired ReduceNesting fold calls it after a successful fold; no pipeline
+//      transform consults it yet (the wired fold is the subsequent iteration).
 //
 // Block-model adaptation: the C# Block.Instructions does NOT include the
 // FinalInstruction (a void block's final is a Nop, and the control flow
@@ -219,6 +223,39 @@ bool MatchConditionBlock(BlockContainer* container, Block* block, Block*& bodySt
 	if (!iff) return false;
 	if (!iff->FalseInst || !MatchLeave(iff->FalseInst.get(), container)) return false;
 	return MatchBranch(iff->TrueInst.get(), bodyStartBlock);
+}
+
+// Structural equality between two exit instructions (the C#
+// `block.Instructions.Last().Match(implicitExit).Success`). Covers the
+// keyword-exit kinds the wired ReduceNesting fold duplicates: a value-less
+// Leave (return/break -- same TargetContainer, both Value null/Nop, or
+// structurally-equal Values for faithfulness) and a Branch (continue -- same
+// TargetBlock). Two nodes of different kinds, or a kind this does not handle
+// (e.g. a Throw, or any non-exit), compare unequal (conservative: the helper
+// does not remove the exit rather than mis-removing).
+bool ExitsStructurallyEqual(ILInstruction* a, ILInstruction* b) {
+	if (a == b) return true;
+	if (!a || !b) return false;
+	if (a->Op != b->Op) return false;
+	switch (a->Op) {
+		case OpCode::Leave: {
+			auto* la = static_cast<Leave*>(a);
+			auto* lb = static_cast<Leave*>(b);
+			if (la->TargetContainer != lb->TargetContainer) return false;
+			bool aNop = !la->Value || la->Value->Op == OpCode::Nop;
+			bool bNop = !lb->Value || lb->Value->Op == OpCode::Nop;
+			if (aNop && bNop) return true;       // both value-less (the keyword-exit case)
+			if (aNop != bNop) return false;      // one valued, one not
+			return ExitsStructurallyEqual(la->Value.get(), lb->Value.get());
+		}
+		case OpCode::Branch: {
+			auto* ba = static_cast<Branch*>(a);
+			auto* bb = static_cast<Branch*>(b);
+			return ba->TargetBlock == bb->TargetBlock;
+		}
+		default:
+			return false;  // unhandled kind: compare unequal (conservative)
+	}
 }
 
 // ---- ImproveILOrdering (the wired ReduceNestingTransform fold) ----
@@ -612,6 +649,41 @@ void ReduceNestingTransform::EnsureEndPointUnreachable(ILInstruction* inst,
 	// through to the same exit).
 	auto exitClone = fallthroughExit->Clone();
 	block->SetFinal(std::move(exitClone));
+}
+
+// The C# `ReduceNestingTransform.RemoveRedundantExit`: removes a redundant
+// block exit instruction -- when the block's trailing exit (its last
+// instruction / control flow) equals `implicitExit` (the instruction following
+// the block's end point, i.e. the fall-through), drop it so the block falls
+// through. The wired ReduceNesting fold calls it after a successful fold (the
+// fold duplicated the exit into the then/else block, so the block's own
+// trailing exit is now redundant). No pipeline transform consults it yet.
+//
+// Block-model adaptation (the recurring D73/D75 divergence): the C#
+// `block.Instructions.Last()` (the last non-terminal, which IS the control
+// flow in the C# where FinalInstruction is a Nop) is this port's
+// `block->FinalInstruction`, and `RemoveLast()` (leaving a Nop final = a
+// fall-through) is a replacement of the final with a fall-through: a Branch to
+// the next block in the container (the positional fall-through), or a Nop
+// final when there is no next block (the implicit void fall-through). The
+// Match is a structural equality (ExitsStructurallyEqual) over the
+// keyword-exit kinds (a value-less Leave -- return/break; a Branch --
+// continue); other kinds compare unequal so the exit is not removed.
+void ReduceNestingTransform::RemoveRedundantExit(Block* block,
+                                                   ILInstruction* implicitExit) {
+	if (!block || !implicitExit) return;  // a null implicitExit never matches
+	auto* final = block->FinalInstruction.get();
+	if (!final) return;  // no trailing exit to remove
+	if (!ExitsStructurallyEqual(final, implicitExit)) return;
+	// "Remove" the final (the C# `block.Instructions.RemoveLast()`): the block
+	// now falls through. Replace the final with a Branch to the next block in
+	// the container (the positional fall-through), or a Nop when there is no
+	// next block (the implicit void fall-through / container leave).
+	Block* nextBlock = NextBlockInContainer(block);
+	if (nextBlock)
+		block->SetFinal(std::make_unique<Branch>(nextBlock));
+	else
+		block->SetFinal(std::make_unique<Nop>());
 }
 
 // Recursively computes the number of statements and maximum nested depth of an
