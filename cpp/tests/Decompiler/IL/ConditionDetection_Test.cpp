@@ -325,3 +325,38 @@ TEST(ConditionDetection, MergesCommonExitGotosIntoIfElse) {
     EXPECT_EQ(trailingBranch(iff->FalseInst.get()), nullptr) << "false arm goto dropped";
 }
 
+
+TEST(ConditionDetection, DropsTrailingGotoToNextBlockFromIfArm) {
+    // if (cond) { body; goto nextBlock } where nextBlock is the next block:
+    // the goto is redundant -- the arm falls through to nextBlock. The arm's
+    // trailing Branch is dropped.
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::make_unique<Block>());  // b0: the if block
+    fn->Body->AddBlock(std::make_unique<Block>());  // b1: nextBlock (the join)
+    auto V = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    V->Name = "num";
+    fn->Variables.push_back(V);
+    // b0: if (cond) { num = 1; goto b1 } else { return }  -- b1 is the next block.
+    auto trueArm = std::make_unique<Block>();
+    trueArm->Add(std::make_unique<StLoc>(V, std::make_unique<LdcI4>(1)));
+    trueArm->SetFinal(std::make_unique<Branch>(fn->Body->Blocks[1].get()));  // goto b1 (next)
+    auto falseArm = std::make_unique<Block>();
+    falseArm->SetFinal(std::make_unique<Leave>(fn->Body.get()));  // return
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(V), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Equality),
+        std::move(trueArm), std::move(falseArm)));
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Leave>(fn->Body.get()));  // b1: return
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunPipeline(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto* iff = dynamic_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(iff, nullptr);
+    ASSERT_NE(iff->TrueInst, nullptr);
+    // The true arm's trailing Branch is dropped (it had a body, so it's a Block).
+    auto* tb = dynamic_cast<Block*>(iff->TrueInst.get());
+    ASSERT_NE(tb, nullptr);
+    EXPECT_EQ(tb->FinalInstruction, nullptr) << "trailing goto to next block dropped";
+}

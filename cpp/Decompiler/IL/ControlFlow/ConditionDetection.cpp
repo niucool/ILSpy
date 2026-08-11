@@ -233,6 +233,37 @@ bool TryDropCommonExit(BlockContainer* container, std::size_t blockIndex) {
     return true;
 }
 
+// Drop a trailing Branch from a single if-arm when it targets the next block
+// in the container (the fall-through). `if (cond) { ...; goto X }` where X is
+// the next block: the goto is redundant -- the arm falls through to after the
+// if, then the block falls through to X. Handles one arm at a time so the
+// fixpoint re-processes. A bare-Branch arm (no body) that targets the next
+// block becomes a null arm (the if falls through on that path).
+bool TryDropTrailingGotoToNext(BlockContainer* container, std::size_t blockIndex) {
+    if (blockIndex + 1 >= container->Blocks.size()) return false;
+    Block* block = container->Blocks[blockIndex].get();
+    auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
+    if (!iff) return false;
+    Block* nextBlock = container->Blocks[blockIndex + 1].get();
+    if (iff->TrueInst) {
+        if (auto* br = TrailingBranch(iff->TrueInst.get())) {
+            if (br->TargetBlock == nextBlock) {
+                DropTrailingBranch(iff->TrueInst);
+                return true;
+            }
+        }
+    }
+    if (iff->FalseInst) {
+        if (auto* br = TrailingBranch(iff->FalseInst.get())) {
+            if (br->TargetBlock == nextBlock) {
+                DropTrailingBranch(iff->FalseInst);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 void ConditionDetection::Run(ILFunction& function, ILTransformContext& context) {
@@ -255,6 +286,10 @@ void ConditionDetection::Run(ILFunction& function, ILTransformContext& context) 
             if (changed) continue;
             for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
                 if (TryDropCommonExit(c, i)) { changed = true; break; }
+            }
+            if (changed) continue;
+            for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
+                if (TryDropTrailingGotoToNext(c, i)) { changed = true; break; }
             }
         } while (changed);
     });

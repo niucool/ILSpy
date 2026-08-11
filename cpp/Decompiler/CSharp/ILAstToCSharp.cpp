@@ -396,10 +396,33 @@ private:
                          GotoText(*static_cast<const Branch*>(iff.TrueInst.get())));
                     return;
                 }
+                // An empty true arm (a Block with no instructions/final, or null)
+                // with a non-empty else: swap to `if (!cond) { else }` so the
+                // output has no empty `{ }`.
+                auto isEmptyArm = [](const std::unique_ptr<ILInstruction>& arm) {
+                    if (!arm) return true;
+                    if (auto* b = dynamic_cast<const Block*>(arm.get()))
+                        return b->Instructions.empty() && !b->FinalInstruction;
+                    return false;
+                };
+                std::string trueArm = cond;
+                std::unique_ptr<ILInstruction>* elseArm = nullptr;
+                bool negated = false;
+                if (isEmptyArm(iff.TrueInst) && !isEmptyArm(iff.FalseInst)) {
+                    // swap: render if (!cond) { false } -- no else.
+                    negated = true;
+                    cond = StripOuterParens(NegateCondText(*iff.Condition));
+                    elseArm = const_cast<std::unique_ptr<ILInstruction>*>(&iff.TrueInst);
+                    // Render the false arm as the (only) body.
+                    Line(indent, "if (" + cond + ")");
+                    EmitBraced(*iff.FalseInst, indent);
+                    return;
+                }
                 Line(indent, "if (" + cond + ")");
                 if (iff.TrueInst) EmitBraced(*iff.TrueInst, indent);
                 else Line(indent, "{ }");
                 if (iff.FalseInst) {
+                    if (isEmptyArm(iff.FalseInst)) return;  // skip empty else
                     Line(indent, "else");
                     EmitBraced(*iff.FalseInst, indent);
                 }
@@ -834,6 +857,26 @@ private:
         }
         text += ']';
         return text;
+    }
+
+    // Negate a condition's text for the seed: a Comp `(a op b)` becomes
+    // `(a op.Negate b)` (re-render with the negated kind), else wrap as `!(cond)`.
+    std::string NegateCondText(const ILInstruction& cond) {
+        if (auto* comp = dynamic_cast<const Comp*>(&cond)) {
+            std::string left = comp->Left ? Expr(*comp->Left) : "(default)";
+            std::string right = comp->Right ? Expr(*comp->Right) : "(default)";
+            const char* op = "==";
+            switch (NegateComparison(comp->Kind)) {
+                case ComparisonKind::Equality: op = "=="; break;
+                case ComparisonKind::Inequality: op = "!="; break;
+                case ComparisonKind::LessThan: op = "<"; break;
+                case ComparisonKind::LessThanOrEqual: op = "<="; break;
+                case ComparisonKind::GreaterThan: op = ">"; break;
+                case ComparisonKind::GreaterThanOrEqual: op = ">="; break;
+            }
+            return "(" + left + " " + op + " " + right + ")";
+        }
+        return "!(" + Expr(cond) + ")";
     }
 
     // Strip one layer of outer parens from a string if they enclose the whole
