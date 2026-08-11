@@ -28,6 +28,7 @@
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/BlockKind.hpp"
 #include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/Box.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
@@ -85,6 +86,13 @@ std::string FlattenMetadataName(std::string name) {
     if (name.size() >= 2 && name.compare(name.size() - 2, 2, "..") == 0)
         name.erase(name.size() - 1);  // fold ".." left by an empty member segment
     return name;
+}
+
+// The short method name -- the substring after the last "::" in a Call's
+// resolved MethodName ("Namespace.Type::Method" -> "Method").
+std::string_view ShortMethodName(std::string_view fullName) {
+    auto pos = fullName.rfind("::");
+    return (pos == std::string_view::npos) ? fullName : fullName.substr(pos + 2);
 }
 
 std::string EscapeStringLiteral(std::string_view value) {
@@ -373,6 +381,51 @@ private:
         if (block.FinalInstruction && !dropFinal) EmitStatement(*block.FinalInstruction, indent);
     }
 
+    // Render a Block(InterpolatedString) as a C# `$"..."` interpolation.
+    // Walks Instructions[1..] (skipping Instructions[0], the
+    // stloc v(newobj DefaultInterpolatedStringHandler(..)) handler init):
+    // AppendLiteral renders its LdStr arg as literal text (`{`/`}` escaped),
+    // AppendFormatted renders its value as `{expr}` (with optional
+    // `,alignment` and/or `:format`). Faithful to the real back end's
+    // TranslateInterpolatedString. The ToStringAndClear final is the implicit
+    // conversion to string and is not emitted.
+    std::string InterpolatedStringText(const Block& block) {
+        std::string out = "$\"";
+        for (std::size_t i = 1; i < block.Instructions.size(); ++i) {
+            auto* inst = block.Instructions[i].get();
+            if (!inst || inst->Op != OpCode::Call) continue;
+            const auto& call = static_cast<const Call&>(*inst);
+            auto name = ShortMethodName(call.MethodName);
+            if (name == "AppendLiteral" && call.Arguments.size() == 2 &&
+                call.Arguments[1]->Op == OpCode::LdStr) {
+                const auto& lit = static_cast<const LdStr&>(*call.Arguments[1]).Value;
+                for (char c : lit) {
+                    if (c == '{') out += "{{";
+                    else if (c == '}') out += "}}";
+                    else out += c;
+                }
+            } else if (name == "AppendFormatted" && call.Arguments.size() >= 2 &&
+                       call.Arguments.size() <= 4) {
+                std::string value = Expr(*call.Arguments[1]);
+                std::string alignment;
+                std::string format;
+                if (call.Arguments.size() >= 3 && call.Arguments[2]->Op == OpCode::LdcI4)
+                    alignment = std::to_string(static_cast<const LdcI4&>(*call.Arguments[2]).Value);
+                else if (call.Arguments.size() >= 3 && call.Arguments[2]->Op == OpCode::LdStr)
+                    format = static_cast<const LdStr&>(*call.Arguments[2]).Value;
+                if (call.Arguments.size() == 4 && call.Arguments[3]->Op == OpCode::LdStr)
+                    format = static_cast<const LdStr&>(*call.Arguments[3]).Value;
+                out += '{';
+                out += value;
+                if (!alignment.empty()) { out += ','; out += alignment; }
+                if (!format.empty()) { out += ':'; out += format; }
+                out += '}';
+            }
+        }
+        out += '"';
+        return out;
+    }
+
     // A non-Block arm of if/try: brace it at this indent.
     void EmitBraced(const ILInstruction& inst, int indent) {
         Line(indent, "{");
@@ -604,9 +657,15 @@ private:
                 if (pr.Body) EmitBraced(*pr.Body, indent); else Line(indent, "{ }");
                 return;
             }
-            case OpCode::Block:
+            case OpCode::Block: {
+                const auto& blk = static_cast<const Block&>(inst);
+                if (blk.Kind == BlockKind::InterpolatedString) {
+                    Line(indent, InterpolatedStringText(blk) + ";");
+                    return;
+                }
                 EmitBraced(inst, indent);
                 return;
+            }
             case OpCode::BlockContainer:
                 EmitContainer(static_cast<const BlockContainer&>(inst), indent);
                 return;
@@ -983,6 +1042,18 @@ private:
 
     std::string Expr(const ILInstruction& inst) {
         switch (inst.Op) {
+            case OpCode::Block: {
+                // A Block(InterpolatedString) evaluates to the string the
+                // ToStringAndClear final yields; render it as the `$"..."`
+                // interpolation (the ToStringAndClear is the implicit conversion,
+                // matching the real back end's TranslateInterpolatedString).
+                // A plain ControlFlow block cannot evaluate to a value, so it
+                // only reaches Expr via the InterpolatedString kind.
+                const auto& blk = static_cast<const Block&>(inst);
+                if (blk.Kind == BlockKind::InterpolatedString)
+                    return InterpolatedStringText(blk);
+                return "(default)/*op=" + std::to_string(static_cast<int>(inst.Op)) + "*/";
+            }
             case OpCode::LdLoc: {
                 const auto& ld = static_cast<const LdLoc&>(inst);
                 return ld.Variable ? ld.Variable->Name : "?";

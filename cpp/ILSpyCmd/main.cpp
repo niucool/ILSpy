@@ -44,6 +44,8 @@
 #include "Decompiler/IL/Transforms/ExpressionTransforms.hpp"
 #include "Decompiler/IL/Transforms/TransformAssignment.hpp"
 #include "Decompiler/IL/Transforms/UserDefinedLogicTransform.hpp"
+#include "Decompiler/IL/Transforms/InterpolatedStringTransform.hpp"
+#include "Decompiler/IL/Transforms/FixRemainingIncrements.hpp"
 #include "Decompiler/IL/Transforms/NullCoalescingTransform.hpp"
 #include "Decompiler/IL/Transforms/NullableLiftingTransform.hpp"
 #include "Decompiler/IL/Transforms/NullPropagationTransform.hpp"
@@ -452,6 +454,27 @@ int main(int argc, char** argv) {
                     // ported for the future real back end and Roslyn-compiled corpora.
                     statementTransform.AddChild(
                         std::make_unique<ILSpy::Decompiler::IL::UserDefinedLogicTransform>());
+                    // InterpolatedStringTransform: the C# 10/.NET 6 `$"..."`
+                    // via DefaultInterpolatedStringHandler fold (the last
+                    // per-statement child in the C# GetILTransforms() order,
+                    // after UserDefinedLogicTransform). Folds the
+                    //   stloc v(newobj DefaultInterpolatedStringHandler(..))
+                    //   call AppendLiteral/AppendFormatted(ldloca v, ...)
+                    //   ...
+                    //   call ToStringAndClear(ldloca v)
+                    // sequence into a single Block(InterpolatedString) whose
+                    // FinalInstruction is the ToStringAndClear call, so the
+                    // back end can render it as `$"literal{expr}..."`. Gated on
+                    // the StringInterpolation setting (default true).
+                    // DefaultInterpolatedStringHandler is a .NET 6+ type, so the
+                    // fold fires 0 times on the .NET Framework 4 legacy-csc
+                    // mscorlib corpus (the handler-construction codegen is
+                    // absent from it); it fires on Roslyn-compiled / modern .NET.
+                    // Ported for faithfulness (matching the
+                    // DetectCatchWhenConditionBlocks / LdLocaDupInitObj /
+                    // SwitchOnNullable / NullCoalescingTransform precedent).
+                    statementTransform.AddChild(
+                        std::make_unique<ILSpy::Decompiler::IL::InterpolatedStringTransform>());
                     statementTransform.Run(*fn, transformContext);
                 }
                 // HighLevelLoopTransform: turn the `while (true)` + break
@@ -461,6 +484,27 @@ int main(int argc, char** argv) {
                 // StatementTransform and before AssignVariableNames (per
                 // GetILTransforms()).
                 ILSpy::Decompiler::IL::HighLevelLoopTransform::Run(*fn, transformContext);
+                // FixRemainingIncrements: handles the user-defined
+                // `op_Increment`/`op_Decrement` calls that TransformAssignment's
+                // inc/dec folds did NOT fold -- the cases where the variable-
+                // being-incremented was optimized out by Roslyn
+                //   stloc V(call op_Increment(expr))  ->  stloc V(expr); ++V
+                // (a UserDefinedCompoundAssign EvaluatesToNewValue, Address
+                // target, inserted after the store). Runs after the
+                // StatementTransform + HighLevelLoopTransform and before
+                // CopyPropagation (per GetILTransforms: ProxyCallReplacer,
+                // FixRemainingIncrements, CopyPropagation; ProxyCallReplacer is
+                // deferred -- needs the full IMethod/type-system/IL-reader
+                // context). This iteration ports the primary branch (the call
+                // is a StLoc's Value and the StLoc is a non-terminal in a Block);
+                // the else branch (needs ILInstruction.Extract) is deferred.
+                // Decimal is skipped (handled in the C# ReplaceMethodCallsWith-
+                // Operators, a resolver path this port does not model). Fires 0
+                // times on the .NET Framework 4 legacy-csc mscorlib corpus
+                // (no non-Decimal op_Increment/op_Decrement + the Roslyn
+                // optimized-out-variable codegen is absent); ported for
+                // faithfulness.
+                ILSpy::Decompiler::IL::FixRemainingIncrements().Run(*fn, transformContext);
                 // CopyPropagation: drop dead stores to stack slots and propagate
                 // single-def stack slots assigned from never-assigned parameters
                 // (the argument-to-local copy csc emits). Runs late, after the

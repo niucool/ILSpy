@@ -24,6 +24,7 @@
 #pragma once
 
 #include "Decompiler/IL/ILInstruction.hpp"
+#include "Decompiler/IL/BlockKind.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -37,6 +38,12 @@ class Block : public ILInstruction {
 public:
     std::vector<std::unique_ptr<ILInstruction>> Instructions;
     std::unique_ptr<ILInstruction> FinalInstruction;
+    // What this block models beyond plain control flow (ControlFlow by default;
+    // InterpolatedString for a C# 10/.NET 6 $"..." block synthesized by
+    // InterpolatedStringTransform). Mirrors the C# Block.Kind; the back end
+    // switches on it to render initializer/interpolated-string blocks as the
+    // matching C# construct instead of a braced statement list.
+    BlockKind Kind = BlockKind::ControlFlow;
     // The IL offset this block starts at (set by the IL reader). The C# carries
     // this via the node's ILRange; the BlockBuilder needs it to sort blocks and
     // assign them to nested containers.
@@ -70,6 +77,15 @@ public:
     void SetFinal(std::unique_ptr<ILInstruction> inst) {
         if (inst) { inst->Parent = this; inst->ChildIndex = static_cast<int>(Instructions.size()); }
         FinalInstruction = std::move(inst);
+    }
+    // Insert a non-final instruction at index i (shifting later instructions
+    // down) and keep every child's ChildIndex consistent. Mirrors the C#
+    // `block.Instructions.Insert(i, inst)`.
+    void InsertAt(std::size_t i, std::unique_ptr<ILInstruction> inst) {
+        if (i > Instructions.size()) i = Instructions.size();
+        if (inst) { inst->Parent = this; inst->ChildIndex = static_cast<int>(i); }
+        Instructions.insert(Instructions.begin() + i, std::move(inst));
+        RenumberChildren();
     }
     // Erase the instruction at index i (destroying it) and keep every child's
     // ChildIndex consistent (the final sits behind the instruction list in

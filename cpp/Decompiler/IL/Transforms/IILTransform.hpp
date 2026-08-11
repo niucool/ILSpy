@@ -166,6 +166,15 @@ struct ILTransformSettings {
     // on (the C# `settings?.CheckedOperators ?? true`); with it off a checked
     // operator call does not fold to `++`/`--` and stays as a regular call.
     bool CheckedOperators = true;
+
+    // DecompilerSettings.StringInterpolation -- a C# 6.0 setting, default true
+    // (false only for the C# < 6.0 / VS 2013 compatibility profile, per
+    // SetLanguageVersion). Gates InterpolatedStringTransform (the C# 10/.NET 6
+    // `$"..."` via DefaultInterpolatedStringHandler lowering): with it off the
+    // handler-construction + AppendLiteral/AppendFormatted + ToStringAndClear
+    // call sequence stays as the raw calls instead of folding to a $"..."
+    // InterpolatedString block.
+    bool StringInterpolation = true;
 };
 
 class ILTransformContext {
