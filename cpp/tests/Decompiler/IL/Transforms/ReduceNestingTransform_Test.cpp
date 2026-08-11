@@ -40,6 +40,10 @@
 #include "Decompiler/IL/Instructions/PinnedRegion.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
+#include "Decompiler/IL/Instructions/IfInstruction.hpp"
+#include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
+#include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/IL/StackType.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/IL/Transforms/InlineReturnTransform.hpp"
@@ -512,4 +516,169 @@ TEST(ReduceNestingTransform, MscorlibSweepPreservesInvariant) {
     // the correctness gate. Assert at least the sweep ran and did not corrupt
     // the tree on any method.
     (void)totalFolds;
+}
+
+// ---------------------------------------------------------------------------
+// Nesting-reduction heuristics (ComputeStats / UpdateStats / ShouldReduceNesting)
+// + the self-contained pattern helpers. Ported as a tested-but-not-yet-wired
+// foundation; these exercise the helpers indirectly through the public static
+// heuristics on ReduceNestingTransform.
+
+namespace {
+
+// A void function body: one BlockContainer with one block holding the given
+// non-terminal instructions and a value-less Leave(body) final.
+struct BodyBlock {
+	std::unique_ptr<ILFunction> fn;
+	BlockContainer* body;
+	Block* blk;
+};
+
+BodyBlock MakeBodyBlock(std::vector<std::unique_ptr<ILInstruction>> stmts) {
+	BodyBlock out;
+	out.fn = std::make_unique<ILFunction>();
+	out.body = new BlockContainer();
+	out.fn->Body = std::unique_ptr<BlockContainer>(out.body);
+	out.body->Parent = out.fn.get();
+	out.body->ChildIndex = 0;
+	auto blk = std::make_unique<Block>();
+	for (auto& s : stmts) blk->Add(std::move(s));
+	blk->SetFinal(std::make_unique<Leave>(out.body));
+	out.blk = blk.get();
+	out.body->AddBlock(std::move(blk));
+	return out;
+}
+
+ILVariablePtr MakeLocal(std::string name) {
+	auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, -1);
+	v->Name = std::move(name);
+	return v;
+}
+
+std::unique_ptr<StLoc> StLocInt(ILVariablePtr v, int value) {
+	return std::make_unique<StLoc>(v, std::make_unique<LdcI4>(value));
+}
+
+} // namespace
+
+// A bare Block with two StLoc statements + a Leave final: the block counts its
+// instructions as statements (the Leave is the control flow, counted the way the
+// C# counts Instructions.Last()). The block itself is un-counted.
+TEST(ReduceNestingTransform, ComputeStatsCountsBlockStatements) {
+	auto [fn, body, blk] = ([]() {
+		auto v1 = MakeLocal("a"), v2 = MakeLocal("b");
+		std::vector<std::unique_ptr<ILInstruction>> stmts;
+		stmts.push_back(StLocInt(v1, 1));
+		stmts.push_back(StLocInt(v2, 2));
+		return MakeBodyBlock(std::move(stmts));
+	})();
+	(void)fn; (void)body;
+	fn->CheckInvariant(ILPhase::Normal);
+	int numStatements = 0, maxDepth = 0;
+	ReduceNestingTransform::ComputeStats(blk, numStatements, maxDepth, 0, true);
+	// 2 StLocs + 1 Leave (the control flow) = 3 statements; the block itself is
+	// un-counted. Depth 0 (the block is at the top level).
+	EXPECT_EQ(numStatements, 3);
+	EXPECT_EQ(maxDepth, 0);
+}
+
+// A Normal BlockContainer's implicit leave (the trailing Leave(body)) is not
+// counted: 2 StLocs + a Leave => the container counts as 1 + 2 StLocs = 3, the
+// Leave is net 0 (isImplicitExit). Depth 1 (the body block is nested).
+TEST(ReduceNestingTransform, ComputeStatsNormalContainerDropsImplicitLeave) {
+	auto built = ([]() {
+		auto v1 = MakeLocal("a"), v2 = MakeLocal("b");
+		std::vector<std::unique_ptr<ILInstruction>> stmts;
+		stmts.push_back(StLocInt(v1, 1));
+		stmts.push_back(StLocInt(v2, 2));
+		return MakeBodyBlock(std::move(stmts));
+	})();
+	built.fn->CheckInvariant(ILPhase::Normal);
+	int numStatements = 0, maxDepth = 0;
+	ReduceNestingTransform::ComputeStats(built.body, numStatements, maxDepth, 0, true);
+	EXPECT_EQ(numStatements, 3);
+	EXPECT_EQ(maxDepth, 1);
+}
+
+// An if with a then-block of one statement: the if (void) counts the then-block
+// at depth+1, the else (a Nop / null) at depth+1. The then-block has 1 statement
+// + a Leave final.
+TEST(ReduceNestingTransform, ComputeStatsNestedIfAddsDepth) {
+	auto built = ([]() {
+		auto v1 = MakeLocal("a");
+		std::vector<std::unique_ptr<ILInstruction>> stmts;
+		// then-block: one StLoc + a Leave(body) final
+		auto thenBlk = std::make_unique<Block>();
+		thenBlk->Add(StLocInt(v1, 1));
+		thenBlk->SetFinal(std::make_unique<Leave>(nullptr));  // leave of some container
+		auto iff = std::make_unique<IfInstruction>(
+			std::make_unique<LdcI4>(0), std::move(thenBlk), nullptr);
+		stmts.push_back(std::move(iff));
+		return MakeBodyBlock(std::move(stmts));
+	})();
+	built.fn->CheckInvariant(ILPhase::Normal);
+	int numStatements = 0, maxDepth = 0;
+	ReduceNestingTransform::ComputeStats(built.body, numStatements, maxDepth, 0, true);
+	// container(1) - implicit(1) + body: if-then-block(1 StLoc + 1 Leave = 2) +
+	// the if counts the then at depth+1 and the else (null) at depth+1.
+	// maxDepth should be >= 2 (the if body is at depth 2).
+	EXPECT_GE(maxDepth, 2);
+	EXPECT_GT(numStatements, 0);
+}
+
+// ShouldReduceNesting: a shallow block (depth 0) that is not the largest and
+// not twice as large as the largest sibling does NOT reduce.
+TEST(ReduceNestingTransform, ShouldReduceNestingDepthHeuristic) {
+	auto v1 = MakeLocal("a");
+	auto shallow = std::make_unique<Block>();
+	shallow->Add(StLocInt(v1, 1));
+	shallow->SetFinal(std::make_unique<Leave>(nullptr));
+	// maxStatements2 = 2 (1 StLoc + 1 Leave), maxDepth2 = 0; siblings have 10
+	// statements -> 2 >= 2*10 is false, 0 >= 2 is false, 0 >= 1 is false => no
+	// reduction.
+	EXPECT_FALSE(ReduceNestingTransform::ShouldReduceNesting(shallow.get(), 10, 0));
+}
+
+// ShouldReduceNesting: a block twice as large as any sibling reduces even at
+// shallow depth (maxStatements2 >= 2 * maxStatements).
+TEST(ReduceNestingTransform, ShouldReduceNestingSizeHeuristic) {
+	auto v1 = MakeLocal("a");
+	// A block with 4 statements (4x a sibling's 1): 2*1 = 2 <= 4 => reduce.
+	auto big = std::make_unique<Block>();
+	big->Add(StLocInt(v1, 1));
+	big->Add(StLocInt(v1, 2));
+	big->Add(StLocInt(v1, 3));
+	big->Add(StLocInt(v1, 4));
+	big->SetFinal(std::make_unique<Leave>(nullptr));
+	EXPECT_TRUE(ReduceNestingTransform::ShouldReduceNesting(big.get(), 1, 0));
+}
+
+// A mscorlib sweep: run ComputeStats over decoded method bodies, asserting it
+// does not crash and produces non-negative, finite stats (the heuristics must be
+// robust on real trees).
+TEST(ReduceNestingTransform, MscorlibComputeStatsSweep) {
+#if defined(_WIN32)
+	const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+	const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+	if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+	MetadataFile f(path);
+	ASSERT_TRUE(f.IsValid());
+	int processed = 0;
+	int maxDepthSeen = 0;
+	for (const auto& m : f.MethodDefs()) {
+		if (m.RVA == 0) continue;
+		auto fn = ReadIL(f, m.Token, m.RVA);
+		if (!fn || !fn->Body) continue;
+		++processed;
+		int numStatements = 0, maxDepth = 0;
+		ReduceNestingTransform::ComputeStats(fn->Body.get(), numStatements, maxDepth, 0, true);
+		EXPECT_GE(numStatements, 0);
+		EXPECT_GE(maxDepth, 0);
+		maxDepthSeen = std::max(maxDepthSeen, maxDepth);
+		if (processed >= 3000) break;
+	}
+	EXPECT_GT(processed, 2000);
+	EXPECT_GT(maxDepthSeen, 0) << "some method should have nested depth";
 }

@@ -20,14 +20,34 @@
 //
 // ReduceNestingTransform improves code quality by duplicating keyword exits
 // (return/break/continue) to reduce nesting and restoring IL order, plus a
-// separate EliminateRedundantTryFinally pass. This iteration ports ONLY the
-// EliminateRedundantTryFinally piece: the C# compiler sometimes wraps a `fixed`
-// block (a PinnedRegion after DetectPinnedRegions) in a try-finally whose
-// finally is an empty `leave (nop)`; once DetectPinnedRegions has formed the
-// PinnedRegion the try-finally is redundant and is replaced with the
-// PinnedRegion directly. The nesting-reduction pieces (Visit / ReduceNesting /
-// ReduceSwitchNesting / ImproveILOrdering / ExtractElseBlock) need a general
-// ILInstruction.Clone for the keyword-exit duplication and are deferred.
+// separate EliminateRedundantTryFinally pass.
+//
+// This iteration ports:
+//  * EliminateRedundantTryFinally (the C# compiler sometimes wraps a `fixed`
+//    block in a try-finally whose finally is an empty `leave (nop)`; once
+//    DetectPinnedRegions has formed the PinnedRegion the try-finally is
+//    redundant and is replaced with the PinnedRegion directly).
+//  * The nesting-reduction heuristics (ComputeStats / UpdateStats /
+//    ShouldReduceNesting) as a tested-but-not-yet-wired foundation, plus the
+//    self-contained pattern helpers (BlockUnwrap / MatchBranch / MatchLeave /
+//    MatchConditionBlock) the heuristics and the future nesting-reduction folds
+//    consult. These are pure analysis helpers -- no tree mutation -- ported
+//    ahead of the wired Visit / ReduceNesting / ReduceSwitchNesting /
+//    ImproveILOrdering / ExtractElseBlock folds (which need a general
+//    ILInstruction.Clone for the keyword-exit duplication [D147, now landed] +
+//    the ConditionDetection.InvertIf / GetStartILOffset statics exposed + a
+//    block-model corpus probe of the real post-ConditionDetection shape, the
+//    recurring D73/D75 divergence).
+//
+// Block-model adaptation: the C# Block.Instructions does NOT include the
+// FinalInstruction (a void block's final is a Nop, and the control flow
+// Leave/Branch are non-terminals in Instructions). This port splits the block's
+// non-terminal Instructions from its FinalInstruction (the control flow), so
+// the C# `block.Instructions.Last()` (the last non-terminal, which is the
+// control flow in the C#) is this port's `block->FinalInstruction`. The
+// heuristics are adapted accordingly: a Block's control flow (this port's
+// FinalInstruction) is counted as a statement the way the C# counts it as the
+// last element of Instructions.
 
 #pragma once
 
@@ -35,9 +55,24 @@
 
 namespace ILSpy::Decompiler::IL {
 
+class Block;
+class BlockContainer;
+class IfInstruction;
+class ILInstruction;
+
 class ReduceNestingTransform : public IILTransform {
 public:
     void Run(ILFunction& function, ILTransformContext& context) override;
+
+    // Heuristics for the (deferred) nesting-reduction folds, ported as a tested
+    // foundation. ComputeStats tallies the number of statements and the maximum
+    // nested depth of an instruction; UpdateStats takes the max over one path;
+    // ShouldReduceNesting decides whether duplicating exits into the sibling
+    // blocks to reduce the nesting of `block` by 1 is worthwhile.
+    static void ComputeStats(ILInstruction* inst, int& numStatements, int& maxDepth,
+                             int currentDepth, bool isStatement = true);
+    static void UpdateStats(ILInstruction* inst, int& maxStatements, int& maxDepth);
+    static bool ShouldReduceNesting(Block* block, int maxStatements, int maxDepth);
 };
 
 } // namespace ILSpy::Decompiler::IL
