@@ -160,24 +160,31 @@ TEST(ILAstToCSharp, ArithmeticAndComparisonExpressions) {
 }
 
 TEST(ILAstToCSharp, ConditionalBranchEmitsIfGotoAndLabel) {
+    // b0: if (1 == 1) goto b2;  b1: stloc (body);  b2: return.
+    // b2 is NOT the next block (b1 is), so the goto is non-redundant.
     auto b0 = std::make_unique<Block>();
     b0->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
                                     std::make_unique<LdcI4>(0)));
     auto b1 = std::make_unique<Block>();
+    b1->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_1", 1),
+                                    std::make_unique<LdcI4>(1)));
+    auto b2 = std::make_unique<Block>();
 
     auto fn = MakeFunction({});
-    Block* b1Ptr = b1.get();
+    Block* b2Ptr = b2.get();
     fn->Body->AddBlock(std::move(b0));
     fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
 
     auto br = std::make_unique<Branch>(static_cast<std::uint32_t>(0x20));
-    br->TargetBlock = b1Ptr;
+    br->TargetBlock = b2Ptr;
     br->HasOffset = false;
     fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
         std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(1),
                                ComparisonKind::Equality),
         std::move(br)));
-    fn->Body->Blocks[1]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Branch>(b2Ptr));  // b1 -> b2
+    fn->Body->Blocks[2]->SetFinal(ReturnFinal(fn->Body.get()));
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "");

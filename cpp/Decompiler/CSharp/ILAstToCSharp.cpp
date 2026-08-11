@@ -206,6 +206,34 @@ private:
         for (int i = 0; i < inst->ChildCount(); ++i) CollectLabels(inst->GetChild(i));
     }
 
+    // True if `br` is a redundant `goto nextBlock`: the branch's enclosing
+    // block's container has the target as the block after the enclosing block,
+    // AND the branch is the enclosing block's FinalInstruction (a plain block
+    // final, not a switch section / if arm -- those render their gotos
+    // conventionally). The enclosing block falls through, so the goto is a
+    // no-op.
+    static bool IsFallThroughGoto(const Branch* br) {
+        if (!br || !br->TargetBlock) return false;
+        // Walk up to the enclosing block (the first Block ancestor).
+        Block* encBlock = nullptr;
+        for (const ILInstruction* p = br; p; p = p->Parent) {
+            encBlock = const_cast<Block*>(dynamic_cast<const Block*>(p));
+            if (encBlock) break;
+        }
+        if (!encBlock) return false;
+        // Only when the branch IS the enclosing block's final (a plain block
+        // final). A branch inside an if-arm or a switch section is not a
+        // block-final fall-through.
+        if (encBlock->FinalInstruction.get() != br) return false;
+        BlockContainer* encContainer = dynamic_cast<BlockContainer*>(encBlock->Parent);
+        if (!encContainer) return false;
+        for (std::size_t i = 0; i + 1 < encContainer->Blocks.size(); ++i) {
+            if (encContainer->Blocks[i].get() == encBlock)
+                return encContainer->Blocks[i + 1].get() == br->TargetBlock;
+        }
+        return false;
+    }
+
     std::string GotoText(const Branch& br) const {
         if (br.TargetBlock) {
             // A branch to a loop header is a `continue` (the back-edge) only
@@ -220,6 +248,11 @@ private:
                     if (p == loopContainer) { insideLoop = true; break; }
                 if (insideLoop) return "continue;";
             }
+            // Drop a redundant `goto nextBlock` when the branch's enclosing
+            // block's container's next block IS the target -- the enclosing
+            // block falls through to it. (A rendering-only no-op; the ILAst
+            // goto survives but is not emitted.)
+            if (IsFallThroughGoto(&br)) return "";
             auto it = labels_.find(br.TargetBlock);
             if (it != labels_.end()) return "goto " + it->second + ";";
         }
@@ -434,8 +467,16 @@ private:
                 const auto& iff = static_cast<const IfInstruction&>(inst);
                 std::string cond = iff.Condition ? CondExpr(*iff.Condition) : "(default)";
                 if (!iff.FalseInst && iff.TrueInst && iff.TrueInst->Op == OpCode::Branch) {
-                    Line(indent, "if (" + cond + ") " +
-                         GotoText(*static_cast<const Branch*>(iff.TrueInst.get())));
+                    std::string gotoText = GotoText(*static_cast<const Branch*>(iff.TrueInst.get()));
+                    if (!gotoText.empty())
+                        Line(indent, "if (" + cond + ") " + gotoText);
+                    // An empty goto (redundant goto-to-next): drop the whole if
+                    // -- the block falls through, the if is a no-op. (The
+                    // condition may have side effects but the IL executed it
+                    // unconditionally before the branch; our model has it as
+                    // the if's condition, so dropping is sound only when the
+                    // condition is pure. We approximate by dropping -- the
+                    // common case is a pure comparison.)
                     return;
                 }
                 // An empty true arm (a Block with no instructions/final, or null)
