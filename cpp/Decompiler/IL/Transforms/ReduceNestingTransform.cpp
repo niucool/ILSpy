@@ -63,6 +63,12 @@
 //      that drops a block's trailing exit when it equals the fall-through. The
 //      wired ReduceNesting fold calls it after a successful fold; no pipeline
 //      transform consults it yet (the wired fold is the subsequent iteration).
+//  (8) ExtractElseBlock (a tested-but-not-yet-wired foundation): the helper
+//      that extracts an if's else block -- moves the else block whole into the
+//      container after Block A (the if's block) and clears the if's else. The
+//      wired ReduceNesting else-if-tree fold calls it after making the then
+//      exit; no pipeline transform consults it yet (the wired fold is the
+//      subsequent iteration).
 //
 // Block-model adaptation: the C# Block.Instructions does NOT include the
 // FinalInstruction (a void block's final is a Nop, and the control flow
@@ -684,6 +690,54 @@ void ReduceNestingTransform::RemoveRedundantExit(Block* block,
 		block->SetFinal(std::make_unique<Branch>(nextBlock));
 	else
 		block->SetFinal(std::make_unique<Nop>());
+}
+
+// The C# `ReduceNestingTransform.ExtractElseBlock`: extracts an if's else
+// block. See the header for the block-model adaptation (the else Block moves
+// whole into the container after Block A; the if's FalseInst becomes a Nop).
+// The C# asserts `ifInst.TrueInst.HasFlag(EndPointUnreachable)` as a
+// precondition (the wired fold makes the then exit first); this port is
+// defensive and does not assert (the wired fold ensures it).
+void ReduceNestingTransform::ExtractElseBlock(IfInstruction* ifInst) {
+	if (!ifInst) return;
+	auto* block = dynamic_cast<Block*>(ifInst->Parent);
+	if (!block) return;  // the if's parent must be a Block (Block A)
+	auto* container = dynamic_cast<BlockContainer*>(block->Parent);
+	if (!container) return;  // the block's parent must be a BlockContainer
+	auto* falseBlock = dynamic_cast<Block*>(ifInst->FalseInst.get());
+	if (!falseBlock) return;  // the else must be a Block (the C# casts)
+	// Find Block A's index in the container. The C# inserts the else content
+	// after the if (`block.Instructions.IndexOf(ifInst) + 1`); this port's if is
+	// Block A's FinalInstruction, so "after the if" is after Block A in the
+	// container (between Block A and Block B [the exit] when Block B exists).
+	std::size_t blockIdx = 0;
+	bool found = false;
+	for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+		if (container->Blocks[i].get() == block) { blockIdx = i; found = true; break; }
+	}
+	if (!found) return;  // defensive: Block A is not in the container
+	// Detach the else block from the if's FalseInst slot. The C# moves
+	// `falseBlock.Instructions` (content + control flow) into the parent block;
+	// this port moves the whole else Block into the container as a new sibling
+	// after Block A (the if is Block A's FinalInstruction, so the else content
+	// cannot be non-terminals in Block A -- it would precede the if-as-final).
+	// The else block's Instructions (content) and FinalInstruction (control flow)
+	// become the sibling block's content and control flow, and the sibling block
+	// falls through to the next block the way the C#'s inlined else content
+	// falls through to exitInst.
+	auto ownedElse = std::unique_ptr<Block>(
+		static_cast<Block*>(ifInst->FalseInst.release()));
+	container->Blocks.insert(container->Blocks.begin() + blockIdx + 1,
+	                          std::move(ownedElse));
+	// Re-parent and re-number all blocks (the insert shifted the later blocks).
+	for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+		container->Blocks[i]->Parent = container;
+		container->Blocks[i]->ChildIndex = static_cast<int>(i);
+	}
+	// Clear the if's else (the C# `ifInst.FalseInst = new Nop()`).
+	ifInst->FalseInst = std::make_unique<Nop>();
+	ifInst->FalseInst->Parent = ifInst;
+	ifInst->FalseInst->ChildIndex = 2;
 }
 
 // Recursively computes the number of statements and maximum nested depth of an

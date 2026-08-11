@@ -2131,3 +2131,326 @@ TEST(ReduceNestingTransform, MscorlibRemoveRedundantExitSweep) {
 	          << " calls=" << calls << " removed=" << removed << "\n";
 	(void)removed;
 }
+
+// ExtractElseBlock (a tested-but-not-yet-wired foundation): the helper that
+// extracts an if's else block -- moves the else block whole into the container
+// after Block A (the if's block) and clears the if's else. The wired
+// ReduceNesting else-if-tree fold calls it after making the then exit; no
+// pipeline transform consults it yet.
+
+namespace {
+
+struct ExtractBuilt {
+	std::unique_ptr<ILFunction> fn;
+	BlockContainer* body;
+	Block* blockA;       // the if's block (Block A)
+	IfInstruction* ifInst;
+	Block* elseBlock;    // the if's FalseInst (the else to extract)
+	Block* blockB;       // the exit block after Block A (null if !withBlockB)
+};
+
+// Build an if/else: Block A's FinalInstruction is `if (v == 0) { then } else {
+// elseBlock }`, where then exits (a Leave(body) final, EndPointUnreachable) and
+// elseBlock is a Block with a stloc + a Leave(body) final. When `withBlockB`,
+// a second block (Block B, a Leave(body) final) follows Block A in the
+// container -- the positional fall-through / the exit the wired fold would
+// duplicate. The if's TrueInst (then) is EndPointUnreachable (the C#
+// ExtractElseBlock precondition).
+ExtractBuilt BuildExtractElse(bool withBlockB) {
+	ExtractBuilt out;
+	out.fn = std::make_unique<ILFunction>();
+	out.body = new BlockContainer();
+	out.fn->Body = std::unique_ptr<BlockContainer>(out.body);
+	out.body->Parent = out.fn.get();
+	out.body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	out.fn->Variables.push_back(v);
+
+	// then: a stloc + leave(body) final (EndPointUnreachable).
+	auto thenBlock = std::make_unique<Block>();
+	thenBlock->Add(StLocInt(v, 1));
+	thenBlock->SetFinal(std::make_unique<Leave>(out.body));
+
+	// elseBlock: a stloc + leave(body) final.
+	auto elseBlock = std::make_unique<Block>();
+	elseBlock->Add(StLocInt(v, 2));
+	elseBlock->SetFinal(std::make_unique<Leave>(out.body));
+	out.elseBlock = elseBlock.get();
+
+	// if (v == 0) { then } else { elseBlock }
+	auto iff = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                       ComparisonKind::Equality),
+		std::move(thenBlock), std::move(elseBlock));
+	out.ifInst = iff.get();
+
+	// Block A: the if as FinalInstruction (the if-as-final model).
+	auto blockA = std::make_unique<Block>();
+	blockA->SetFinal(std::move(iff));
+	out.blockA = blockA.get();
+	out.body->AddBlock(std::move(blockA));
+
+	if (withBlockB) {
+		auto blockB = std::make_unique<Block>();
+		blockB->SetFinal(std::make_unique<Leave>(out.body));
+		out.blockB = blockB.get();
+		out.body->AddBlock(std::move(blockB));
+	}
+
+	RecomputeIncomingEdgeCounts(*out.fn);
+	return out;
+}
+
+} // namespace
+
+// An if/else with no trailing exit: the else Block moves out of the if's
+// FalseInst into the container as a new sibling after Block A, and the if's
+// FalseInst becomes a Nop.
+TEST(ReduceNestingTransform, ExtractElseBlockMovesElseBlockIntoContainerAfterBlockA) {
+	auto built = BuildExtractElse(/*withBlockB=*/false);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ASSERT_EQ(built.body->Blocks.size(), 1u) << "pre: Block A only";
+	ASSERT_EQ(built.ifInst->FalseInst.get(), built.elseBlock) << "pre: the else is the if's FalseInst";
+	ReduceNestingTransform::ExtractElseBlock(built.ifInst);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	// The else Block is now a sibling in the container after Block A.
+	ASSERT_EQ(built.body->Blocks.size(), 2u);
+	EXPECT_EQ(built.body->Blocks[0].get(), built.blockA) << "Block A stays first";
+	EXPECT_EQ(built.body->Blocks[1].get(), built.elseBlock) << "the else Block follows Block A";
+	// The if's else is cleared (a Nop).
+	ASSERT_NE(built.ifInst->FalseInst.get(), nullptr);
+	EXPECT_EQ(built.ifInst->FalseInst->Op, OpCode::Nop) << "the if's FalseInst is a Nop";
+}
+
+// With a trailing exit (Block B), the else Block is inserted between Block A
+// and Block B (the C# inserts the else content after the if, before the exit).
+TEST(ReduceNestingTransform, ExtractElseBlockInsertsElseBeforeBlockB) {
+	auto built = BuildExtractElse(/*withBlockB=*/true);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ASSERT_EQ(built.body->Blocks.size(), 2u) << "pre: Block A + Block B";
+	ReduceNestingTransform::ExtractElseBlock(built.ifInst);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ASSERT_EQ(built.body->Blocks.size(), 3u);
+	EXPECT_EQ(built.body->Blocks[0].get(), built.blockA) << "Block A stays first";
+	EXPECT_EQ(built.body->Blocks[1].get(), built.elseBlock) << "the else Block is after Block A";
+	EXPECT_EQ(built.body->Blocks[2].get(), built.blockB) << "Block B stays last";
+}
+
+// The else Block's content (the stloc) and control flow (the Leave final) are
+// preserved when it moves into the container.
+TEST(ReduceNestingTransform, ExtractElseBlockPreservesElseContent) {
+	auto built = BuildExtractElse(/*withBlockB=*/false);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ReduceNestingTransform::ExtractElseBlock(built.ifInst);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ASSERT_EQ(built.body->Blocks.size(), 2u);
+	auto* movedElse = built.body->Blocks[1].get();
+	ASSERT_NE(movedElse, nullptr);
+	EXPECT_EQ(movedElse->Instructions.size(), 1u) << "the stloc content is preserved";
+	EXPECT_EQ(movedElse->Instructions[0]->Op, OpCode::StLoc);
+	ASSERT_NE(movedElse->FinalInstruction.get(), nullptr);
+	EXPECT_EQ(movedElse->FinalInstruction->Op, OpCode::Leave) << "the Leave final is preserved";
+	auto* leave = static_cast<Leave*>(movedElse->FinalInstruction.get());
+	EXPECT_EQ(leave->TargetContainer, built.body) << "the Leave still targets the body";
+}
+
+// The moved else Block is reparented to the container (Parent / ChildIndex
+// consistent), and the if's Nop FalseInst is parented to the if.
+TEST(ReduceNestingTransform, ExtractElseBlockReparentsMovedElseBlock) {
+	auto built = BuildExtractElse(/*withBlockB=*/false);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ReduceNestingTransform::ExtractElseBlock(built.ifInst);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	auto* movedElse = built.body->Blocks[1].get();
+	EXPECT_EQ(movedElse->Parent, built.body) << "the moved else Block's Parent is the container";
+	EXPECT_EQ(movedElse->ChildIndex, 1);
+	EXPECT_EQ(built.ifInst->FalseInst->Parent, built.ifInst);
+	EXPECT_EQ(built.ifInst->FalseInst->ChildIndex, 2);
+}
+
+// A null ifInst is a defensive no-op.
+TEST(ReduceNestingTransform, ExtractElseBlockRejectsNull) {
+	ReduceNestingTransform::ExtractElseBlock(nullptr);  // must not crash
+}
+
+// An if whose parent is not a Block (e.g. the if is the TrueInst of an outer
+// IfInstruction, so its Parent is an IfInstruction) is a defensive no-op: the
+// C# casts `ifInst.Parent` to Block.
+TEST(ReduceNestingTransform, ExtractElseBlockRejectsNonBlockParent) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+
+	auto innerThen = std::make_unique<Block>();
+	innerThen->SetFinal(std::make_unique<Leave>(body.get()));
+	auto innerElse = std::make_unique<Block>();
+	innerElse->SetFinal(std::make_unique<Leave>(body.get()));
+	auto* innerElsePtr = innerElse.get();
+	// innerIf is the TrueInst of outerIf, so its Parent is an IfInstruction.
+	auto innerIf = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                       ComparisonKind::Equality),
+		std::move(innerThen), std::move(innerElse));
+	IfInstruction* innerPtr = innerIf.get();
+	auto outerThen = std::make_unique<Block>();
+	outerThen->SetFinal(std::make_unique<Leave>(body.get()));
+	auto outerIf = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(1),
+		                       ComparisonKind::Equality),
+		std::move(innerIf), std::move(outerThen));
+	auto blockA = std::make_unique<Block>();
+	blockA->SetFinal(std::move(outerIf));
+	body->AddBlock(std::move(blockA));
+	auto* bodyPtr = body.get();
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+	ReduceNestingTransform::ExtractElseBlock(innerPtr);
+	fn->CheckInvariant(ILPhase::Normal);
+	EXPECT_EQ(innerPtr->FalseInst.get(), innerElsePtr) << "a non-Block parent -> no-op";
+	EXPECT_EQ(bodyPtr->Blocks.size(), 1u) << "no block is moved";
+}
+
+// An if whose FalseInst is not a Block (e.g. a bare Leave) is a defensive
+// no-op (the C# casts the FalseInst to Block).
+TEST(ReduceNestingTransform, ExtractElseBlockRejectsNonBlockFalseInst) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+	auto thenBlock = std::make_unique<Block>();
+	thenBlock->SetFinal(std::make_unique<Leave>(body.get()));
+	// A bare Leave as the FalseInst (not a Block).
+	auto bareFalse = std::make_unique<Leave>(body.get());
+	auto* barePtr = bareFalse.get();
+	auto iff = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                       ComparisonKind::Equality),
+		std::move(thenBlock), std::move(bareFalse));
+	IfInstruction* ifPtr = iff.get();
+	auto blockA = std::make_unique<Block>();
+	blockA->SetFinal(std::move(iff));
+	body->AddBlock(std::move(blockA));
+	auto* bodyPtr = body.get();
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+	ReduceNestingTransform::ExtractElseBlock(ifPtr);
+	fn->CheckInvariant(ILPhase::Normal);
+	EXPECT_EQ(ifPtr->FalseInst.get(), barePtr) << "a non-Block FalseInst -> no-op";
+	EXPECT_EQ(bodyPtr->Blocks.size(), 1u) << "no block is moved";
+}
+
+// A null FalseInst (no else) is a defensive no-op.
+TEST(ReduceNestingTransform, ExtractElseBlockRejectsNullFalseInst) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+	auto thenBlock = std::make_unique<Block>();
+	thenBlock->SetFinal(std::make_unique<Leave>(body.get()));
+	auto iff = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                       ComparisonKind::Equality),
+		std::move(thenBlock), nullptr);
+	IfInstruction* ifPtr = iff.get();
+	auto blockA = std::make_unique<Block>();
+	blockA->SetFinal(std::move(iff));
+	body->AddBlock(std::move(blockA));
+	auto* bodyPtr = body.get();
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+	ReduceNestingTransform::ExtractElseBlock(ifPtr);
+	fn->CheckInvariant(ILPhase::Normal);
+	EXPECT_EQ(ifPtr->FalseInst.get(), nullptr) << "a null FalseInst -> no-op";
+	EXPECT_EQ(bodyPtr->Blocks.size(), 1u) << "no block is moved";
+}
+
+// A mscorlib safety sweep: decode methods and call ExtractElseBlock on every
+// IfInstruction whose FalseInst is a Block (the else-block case). The else
+// Block moves into the container as a sibling after the if's block; the if's
+// FalseInst becomes a Nop. The ILAst invariant must hold after every call.
+// This tests the helper's safety (no crash / tree corruption) on real trees;
+// the faithfulness is tested by the hand-built tests above.
+TEST(ReduceNestingTransform, MscorlibExtractElseBlockSweep) {
+#if defined(_WIN32)
+	const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+	const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+	if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+	MetadataFile f(path);
+	ASSERT_TRUE(f.IsValid());
+
+	int processed = 0;
+	int calls = 0;
+	int fired = 0;
+	ILTransformContext ctx;
+	for (const auto& m : f.MethodDefs()) {
+		if (m.RVA == 0) continue;
+		auto fn = ReadIL(f, m.Token, m.RVA);
+		if (!fn) continue;
+		++processed;
+		// Run the full pre-pipeline through HighLevelLoopTransform so the
+		// if-as-FinalInstruction + else-block shape (ConditionDetection's
+		// output) arises; after ReadIL alone the if's FalseInst is never a
+		// Block (the else-block shape is a ConditionDetection artifact).
+		ControlFlowSimplification().Run(*fn, ctx);
+		StObjToStLoc().Run(*fn, ctx);
+		ILInlining().Run(*fn, ctx);
+		InlineReturnTransform().Run(*fn, ctx);
+		RemoveInfeasiblePathTransform().Run(*fn, ctx);
+		DetectPinnedRegions().Run(*fn, ctx);
+		DetectCatchWhenConditionBlocks().Run(*fn, ctx);
+		LdLocaDupInitObjTransform().Run(*fn, ctx);
+		EarlyExpressionTransforms().Run(*fn, ctx);
+		RemoveDeadVariableInit().Run(*fn, ctx);
+		ControlFlowSimplification().Run(*fn, ctx);
+		SwitchDetection().Run(*fn, ctx);
+		SwitchOnNullableTransform().Run(*fn, ctx);
+		LoopDetection().Run(*fn, ctx);
+		PatternMatchingTransform().Run(*fn, ctx);
+		ConditionDetection().Run(*fn, ctx);
+		HighLevelLoopTransform::Run(*fn, ctx);
+		// Collect every IfInstruction whose FalseInst is a Block (the
+		// else-block case) BEFORE mutating: ExtractElseBlock inserts a block
+		// into the container, which would invalidate a range-for walk of the
+		// container's Blocks. The if pointers stay valid across the moves
+		// (ExtractElseBlock does not destroy ifs), so collect-then-call is
+		// safe.
+		std::vector<IfInstruction*> ifs;
+		std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+			if (!inst) return;
+			if (auto* iff = dynamic_cast<IfInstruction*>(inst)) {
+				if (dynamic_cast<Block*>(iff->FalseInst.get())) ifs.push_back(iff);
+				++calls;
+			}
+			if (auto* cont = dynamic_cast<BlockContainer*>(inst)) {
+				for (auto& blk : cont->Blocks) walk(blk.get());
+				return;
+			}
+			for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+		};
+		walk(fn->Body.get());
+		for (auto* iff : ifs) {
+			ReduceNestingTransform::ExtractElseBlock(iff);
+			++fired;
+		}
+		fn->CheckInvariant(ILPhase::Normal);
+		if (processed >= 3000) break;
+	}
+	EXPECT_GT(processed, 2000) << "the sweep must exercise real methods";
+	EXPECT_GT(calls, 0) << "the sweep must call the helper on real ifs";
+	EXPECT_GT(fired, 0) << "the sweep must fire the helper on real else blocks";
+	std::cerr << "ExtractElseBlock sweep: processed=" << processed
+	          << " calls=" << calls << " fired=" << fired << "\n";
+	(void)fired;
+}

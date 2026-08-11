@@ -73,6 +73,12 @@
 //    that drops a block's trailing exit when it equals the fall-through. The
 //    wired ReduceNesting fold calls it after a successful fold; no pipeline
 //    transform consults it yet (the wired fold is the subsequent iteration).
+//  * ExtractElseBlock (a tested-but-not-yet-wired foundation): the helper that
+//    extracts an if's else block -- moves the else block whole into the
+//    container after Block A (the if's block) and clears the if's else. The
+//    wired ReduceNesting else-if-tree fold calls it after making the then exit;
+//    no pipeline transform consults it yet (the wired fold is the subsequent
+//    iteration).
 //
 // Block-model adaptation: the C# Block.Instructions does NOT include the
 // FinalInstruction (a void block's final is a Nop, and the control flow
@@ -188,6 +194,32 @@ public:
     // same TargetBlock); other kinds compare unequal (conservative: the exit is
     // not removed rather than mis-removed).
     static void RemoveRedundantExit(Block* block, ILInstruction* implicitExit);
+
+    // The C# `ReduceNestingTransform.ExtractElseBlock`: extracts an if's else
+    // block -- moves the else block's content out of the if's FalseInst into
+    // the parent block after the if, then clears the if's else (FalseInst =
+    // Nop). The wired ReduceNesting else-if-tree fold calls it after making the
+    // then exit (EnsureEndPointUnreachable); the else content becomes the
+    // fall-through after the if. No pipeline transform consults it yet (the
+    // wired fold is the subsequent iteration).
+    //
+    // Block-model adaptation (the recurring D73/D75 divergence): the C#
+    // `block.Instructions` includes the control flow as the last non-terminal
+    // (FinalInstruction is a Nop), so the if is a non-terminal in the parent
+    // block and the else content is inserted after it as non-terminals in the
+    // same block. This port splits the block's non-terminal Instructions from
+    // its FinalInstruction (the control flow); the if is Block A's
+    // FinalInstruction, so the else content cannot be added as non-terminals in
+    // Block A (they would precede the if-as-final). The faithful adaptation is
+    // to move the else Block WHOLE into the container (Block A's parent) as a
+    // new sibling block after Block A -- the else block's Instructions (content)
+    // and FinalInstruction (control flow) become the sibling block's content and
+    // control flow, and the sibling block falls through to the next block (the
+    // exit / Block B) the way the C#'s inlined else content falls through to
+    // exitInst. The if's FalseInst is set to a Nop (the C#
+    // `ifInst.FalseInst = new Nop()`). A non-Block parent or a non-Block else
+    // is a defensive no-op (the C# casts both).
+    static void ExtractElseBlock(IfInstruction* ifInst);
 };
 
 } // namespace ILSpy::Decompiler::IL
