@@ -122,6 +122,7 @@ std::unique_ptr<ILInstruction> ClonePureLoad(const ILInstruction* v) {
 // call GetResourceString(ldstr))` clones. Returns nullptr for anything deeper or
 // with side-effecting args.
 std::unique_ptr<ILInstruction> CloneCallWithPureArgs(const Call* call) {
+    if (!call) return nullptr;
     auto cloned = std::make_unique<Call>(call->MethodName);
     cloned->ReturnType = call->ReturnType;
     cloned->ReturnIType = call->ReturnIType;
@@ -294,6 +295,14 @@ void SimplifyBranchChains(ILFunction& function, ILTransformContext& context,
             // (non-cloneable values) is DetectExitPoints, deferred.
             auto* targetLeave = static_cast<Leave*>(target->FinalInstruction.get());
             auto cloned = ClonePureLoad(targetLeave->Value.get());
+            if (!cloned && target->IncomingEdgeCount == 1) {
+                // A Call value (e.g. `return Method(args)` with pure-load args):
+                // only fold when this is the sole predecessor so the original
+                // return block is deleted (no double-execution of the Call's
+                // side effects). Pure loads can be freely duplicated.
+                cloned = CloneCallWithPureArgs(
+                    dynamic_cast<const Call*>(targetLeave->Value.get()));
+            }
             if (cloned) {
                 context.StepOnce("Replace branch to value-return with leave");
                 --target->IncomingEdgeCount;
