@@ -1027,16 +1027,33 @@ private:
                 const auto& comp = static_cast<const Comp&>(inst);
                 // `comp(eq, ldloc boolVar, ldc.i4 0)` is `!boolVar` (a Boolean
                 // negation); `comp(ne, ldloc boolVar, 0)` is just `boolVar`.
+                // Also `comp(eq, call BoolMethod(..), 0)` is `!BoolMethod(..)`.
                 if (comp.Right && comp.Right->Op == OpCode::LdcI4 &&
                     static_cast<const LdcI4*>(comp.Right.get())->Value == 0 &&
-                    comp.Left && comp.Left->Op == OpCode::LdLoc) {
-                    auto* ld = static_cast<const LdLoc*>(comp.Left.get());
-                    if (ld->Variable && ld->Variable->Type &&
-                        dynamic_cast<const TypeSystem::KnownType*>(ld->Variable->Type.get()) &&
-                        static_cast<const TypeSystem::KnownType*>(ld->Variable->Type.get())->Code() ==
-                            TypeSystem::KnownTypeCode::Boolean) {
-                        return comp.Kind == ComparisonKind::Equality ? "!" + ld->Variable->Name : ld->Variable->Name;
+                    comp.Left) {
+                    bool isBoolLeft = false;
+                    std::string leftExpr;
+                    if (comp.Left->Op == OpCode::LdLoc) {
+                        auto* ld = static_cast<const LdLoc*>(comp.Left.get());
+                        if (ld->Variable && ld->Variable->Type &&
+                            dynamic_cast<const TypeSystem::KnownType*>(ld->Variable->Type.get()) &&
+                            static_cast<const TypeSystem::KnownType*>(ld->Variable->Type.get())->Code() ==
+                                TypeSystem::KnownTypeCode::Boolean) {
+                            isBoolLeft = true;
+                            leftExpr = ld->Variable->Name;
+                        }
+                    } else if (comp.Left->Op == OpCode::Call) {
+                        auto* call = static_cast<const Call*>(comp.Left.get());
+                        if (call->ReturnIType) {
+                            auto* k = dynamic_cast<const TypeSystem::KnownType*>(call->ReturnIType.get());
+                            if (k && k->Code() == TypeSystem::KnownTypeCode::Boolean) {
+                                isBoolLeft = true;
+                                leftExpr = Expr(*comp.Left);
+                            }
+                        }
                     }
+                    if (isBoolLeft)
+                        return comp.Kind == ComparisonKind::Equality ? "!" + leftExpr : leftExpr;
                 }
                 const char* op = "==";
                 switch (comp.Kind) {
