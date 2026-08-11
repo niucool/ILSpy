@@ -130,8 +130,6 @@ bool TryInlineIfFallThrough(BlockContainer* container, std::size_t blockIndex) {
 }
 
 // Negate a boolean condition, folding into a Comp when possible (mirrors
-// Comp.LogicNot + ExpressionTransforms.VisitLogicNot). logic.not(comp(a op b))
-// -> comp(a op.Negate b); logic.not(logic.not x) -> x; otherwise wrap as
 // comp(x == 0).
 std::unique_ptr<ILInstruction> NegateCondition(std::unique_ptr<ILInstruction> cond) {
     if (!cond) return cond;
