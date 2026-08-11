@@ -477,3 +477,341 @@ TEST(ConditionDetection, MscorlibGetStartILOffsetSweep) {
     EXPECT_GT(valuedLeaves, 0) << "the corpus carries valued `return expr` leaves";
     EXPECT_GT(emptyRanges, 0) << "some instructions carry the default empty range";
 }
+
+// ---------------------------------------------------------------------------
+// ConditionDetection::InvertIf -- the "invert if to match IL order / reduce
+// nesting" operation, ported as a tested-but-not-yet-wired foundation (the
+// wired ReduceNestingTransform.ImproveILOrdering / ReduceNesting folds are the
+// subsequent iteration). The C# reads `ifInst` as a non-terminal at
+// `block.Instructions[i]` with the `falseCode...; exit` as sibling
+// instructions; this port makes the `IfInstruction` the block's
+// `FinalInstruction`, so the `falseCode...; exit` is the next block in the
+// container, and the old then moves into that next block.
+
+namespace {
+
+ILVariablePtr MakeLocalVar(const char* name) {
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = name;
+    return v;
+}
+
+} // namespace
+
+// Case 2 (no falseCode, just the exit): the if's then is the bare exit, the
+// old then (a bare exit) moves into the next block as its final.
+TEST(ConditionDetection, InvertIfFoldsBareExitNoFalseCode) {
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::make_unique<Block>());  // b0
+    fn->Body->AddBlock(std::make_unique<Block>());  // b1 (the falseCode + exit)
+    // b0: if (cond) return 7   (then = Leave(body, 7), unreachable; no else)
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(7))));
+    // b1: return  (the exit; no falseCode non-terminals)
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    RecomputeIncomingEdgeCounts(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ConditionDetection::InvertIf(fn->Body->Blocks[0].get(),
+        static_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto* iff = dynamic_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(iff, nullptr);
+    ASSERT_NE(iff->TrueInst, nullptr);
+    EXPECT_EQ(iff->TrueInst->Op, OpCode::Leave) << "if's then is the bare exit (b1's old final)";
+    EXPECT_EQ(iff->FalseInst, nullptr) << "still no else; fall through to b1";
+    // Condition negated: 1 != 0 -> 1 == 0 (NegateComparison on Inequality).
+    auto* cond = dynamic_cast<Comp*>(iff->Condition.get());
+    ASSERT_NE(cond, nullptr);
+    EXPECT_EQ(cond->Kind, ComparisonKind::Equality) << "condition is negated";
+    // b1 now carries the old then (return 7) as its final.
+    ASSERT_EQ(fn->Body->Blocks.size(), 2u);
+    auto* b1Final = fn->Body->Blocks[1]->FinalInstruction.get();
+    ASSERT_NE(b1Final, nullptr);
+    EXPECT_EQ(b1Final->Op, OpCode::Leave);
+    auto* retLeave = static_cast<Leave*>(b1Final);
+    ASSERT_NE(retLeave->Value, nullptr);
+    EXPECT_EQ(retLeave->Value->Op, OpCode::LdcI4);
+    EXPECT_EQ(static_cast<LdcI4*>(retLeave->Value.get())->Value, 7);
+}
+
+// Case 1 (falseCode + exit): wrap the next block's content in a Block as the
+// if's TrueInst; the old then (a bare Branch) moves into the next block.
+TEST(ConditionDetection, InvertIfFoldsFalseCodeIntoBlock) {
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::make_unique<Block>());  // b0
+    fn->Body->AddBlock(std::make_unique<Block>());  // b1 (falseCode + exit)
+    fn->Body->AddBlock(std::make_unique<Block>());  // X (the then target)
+    auto a = MakeLocalVar("a"), b = MakeLocalVar("b");
+    fn->Variables.push_back(a);
+    fn->Variables.push_back(b);
+    // b0: stloc a(1); if (1 != 0) br X   (then = br X, unreachable; no else)
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(a, std::make_unique<LdcI4>(1)));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::make_unique<Branch>(fn->Body->Blocks[2].get())));
+    // b1: stloc b(2); return   (the falseCode + exit)
+    fn->Body->Blocks[1]->Add(std::make_unique<StLoc>(b, std::make_unique<LdcI4>(2)));
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    // X: return 0
+    fn->Body->Blocks[2]->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(0)));
+    RecomputeIncomingEdgeCounts(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ConditionDetection::InvertIf(fn->Body->Blocks[0].get(),
+        static_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto* iff = dynamic_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(iff, nullptr);
+    // if's then is a Block wrapping b1's content (stloc b(2); return).
+    ASSERT_EQ(iff->TrueInst->Op, OpCode::Block);
+    EXPECT_EQ(iff->FalseInst, nullptr);
+    auto* cond = dynamic_cast<Comp*>(iff->Condition.get());
+    ASSERT_NE(cond, nullptr);
+    EXPECT_EQ(cond->Kind, ComparisonKind::Equality) << "condition negated";
+    // b1 now carries the old then (br X) as its final.
+    ASSERT_EQ(fn->Body->Blocks.size(), 3u);
+    auto* b1Final = fn->Body->Blocks[1]->FinalInstruction.get();
+    ASSERT_NE(b1Final, nullptr);
+    EXPECT_EQ(b1Final->Op, OpCode::Branch) << "b1's final is the old then (br X)";
+    EXPECT_EQ(static_cast<Branch*>(b1Final)->TargetBlock, fn->Body->Blocks[2].get());
+}
+
+// The then is a Block (not a bare exit): its non-terminals AND its final move
+// into the next block (this port's then-Block carries the control flow in
+// FinalInstruction, not in Instructions as in the C#).
+TEST(ConditionDetection, InvertIfSpreadsThenBlockIntoNextBlock) {
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::make_unique<Block>());  // b0
+    fn->Body->AddBlock(std::make_unique<Block>());  // b1 (falseCode + exit)
+    fn->Body->AddBlock(std::make_unique<Block>());  // X (the then target)
+    auto c = MakeLocalVar("c"), b = MakeLocalVar("b");
+    fn->Variables.push_back(c);
+    fn->Variables.push_back(b);
+    // then-Block: stloc c(3); br X
+    auto thenBlock = std::make_unique<Block>();
+    thenBlock->Add(std::make_unique<StLoc>(c, std::make_unique<LdcI4>(3)));
+    thenBlock->SetFinal(std::make_unique<Branch>(fn->Body->Blocks[2].get()));
+    // b0: if (cond) { stloc c(3); br X }  (then is a Block, unreachable; no else)
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::move(thenBlock)));
+    // b1: stloc b(2); return
+    fn->Body->Blocks[1]->Add(std::make_unique<StLoc>(b, std::make_unique<LdcI4>(2)));
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->Blocks[2]->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(0)));
+    RecomputeIncomingEdgeCounts(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ConditionDetection::InvertIf(fn->Body->Blocks[0].get(),
+        static_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // b1 now carries the then-Block's content: stloc c(3); br X.
+    ASSERT_EQ(fn->Body->Blocks[1]->Instructions.size(), 1u);
+    auto* stc = dynamic_cast<StLoc*>(fn->Body->Blocks[1]->Instructions[0].get());
+    ASSERT_NE(stc, nullptr);
+    EXPECT_EQ(stc->Variable.get(), c.get());
+    auto* b1Final = fn->Body->Blocks[1]->FinalInstruction.get();
+    ASSERT_NE(b1Final, nullptr);
+    EXPECT_EQ(b1Final->Op, OpCode::Branch) << "then-Block's final (br X) moved into b1";
+}
+
+TEST(ConditionDetection, InvertIfRejectsNonIfFinal) {
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::make_unique<Block>());  // b0
+    fn->Body->AddBlock(std::make_unique<Block>());  // b1
+    // b0: if(cond, then) is a NON-TERMINAL; the final is a Leave. (This shape
+    // does not arise from the reader, but it tests the guard.)
+    auto iff = std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(7)));
+    IfInstruction* iffPtr = iff.get();
+    fn->Body->Blocks[0]->Add(std::move(iff));  // if as a non-terminal
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fn->Body.get()));  // final is a Leave
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    RecomputeIncomingEdgeCounts(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ConditionDetection::InvertIf(fn->Body->Blocks[0].get(), iffPtr);
+    fn->CheckInvariant(ILPhase::Normal);
+    // Unchanged: the if is still a non-terminal, the final is still the Leave.
+    EXPECT_EQ(fn->Body->Blocks[0]->Instructions.size(), 1u);
+    EXPECT_EQ(fn->Body->Blocks[0]->Instructions[0].get(), iffPtr);
+}
+
+TEST(ConditionDetection, InvertIfRejectsWithElse) {
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::make_unique<Block>());
+    fn->Body->AddBlock(std::make_unique<Block>());
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(7)),
+        std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(8))));  // has an else
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    RecomputeIncomingEdgeCounts(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ConditionDetection::InvertIf(fn->Body->Blocks[0].get(),
+        static_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+    // Unchanged: the if still has an else.
+    auto* iff = static_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get());
+    EXPECT_NE(iff->FalseInst, nullptr);
+}
+
+TEST(ConditionDetection, InvertIfRejectsThenNotUnreachable) {
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::make_unique<Block>());
+    fn->Body->AddBlock(std::make_unique<Block>());
+    auto v = MakeLocalVar("v");
+    fn->Variables.push_back(v);
+    // then = ldloc v (a load, NOT EndPointUnreachable).
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::make_unique<LdLoc>(v)));
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    RecomputeIncomingEdgeCounts(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ConditionDetection::InvertIf(fn->Body->Blocks[0].get(),
+        static_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+    // Unchanged: the if's TrueInst is still the ldloc.
+    auto* iff = static_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(iff->TrueInst, nullptr);
+    EXPECT_EQ(iff->TrueInst->Op, OpCode::LdLoc);
+}
+
+TEST(ConditionDetection, InvertIfRejectsNoNextBlock) {
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::make_unique<Block>());  // b0 only (no next block)
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(7))));
+    RecomputeIncomingEdgeCounts(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ConditionDetection::InvertIf(fn->Body->Blocks[0].get(),
+        static_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+    // Unchanged: still one block.
+    EXPECT_EQ(fn->Body->Blocks.size(), 1u);
+}
+
+TEST(ConditionDetection, InvertIfRejectsMultiPredNextBlock) {
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::make_unique<Block>());  // b0
+    fn->Body->AddBlock(std::make_unique<Block>());  // b1 (multi-pred: b0 fall-through + b2 branch)
+    fn->Body->AddBlock(std::make_unique<Block>());  // b2
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(7))));
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    // b2 branches to b1, making b1 multi-pred.
+    fn->Body->Blocks[2]->SetFinal(std::make_unique<Branch>(fn->Body->Blocks[1].get()));
+    RecomputeIncomingEdgeCounts(*fn);
+    ASSERT_EQ(fn->Body->Blocks[1]->IncomingEdgeCount, 2) << "b1 must be multi-pred";
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ConditionDetection::InvertIf(fn->Body->Blocks[0].get(),
+        static_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+    // Unchanged: b1 still carries its original content (the move would
+    // misbranch the b2 edge into the old then, so InvertIf bails).
+    EXPECT_EQ(fn->Body->Blocks[1]->FinalInstruction->Op, OpCode::Leave);
+}
+
+// Corpus probe + invariant sweep: runs the pre-pipeline through
+// ConditionDetection over mscorlib, classifies the if-final shapes InvertIf
+// would consume, and (for the would-fire candidates) calls InvertIf and checks
+// the invariant. This pins the block-model divergence: the C# shape (if as a
+// non-terminal + falseCode as sibling) does not arise in this port (the if is
+// the block's FinalInstruction), and the null-FalseInst + single-pred-next-block
+// shape is the one InvertIf fires on. The probe confirms the shape distribution
+// and that InvertIf is safe on real shapes.
+TEST(ConditionDetection, MscorlibInvertIfShapeProbe) {
+#if defined(_WIN32)
+    const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    int processed = 0;
+    int ifFinals = 0;
+    int candidates = 0;          // if-final + TrueInst unreachable + FalseInst null
+    int withNextBlock = 0;        // ... and a next block exists
+    int wouldFire = 0;            // ... and next block is single-pred (IncomingEdgeCount == 1)
+    int multiPredBail = 0;       // ... and next block is multi-pred (InvertIf bails)
+    int noNextBlock = 0;         // ... and no next block (InvertIf bails)
+    int fires = 0;               // InvertIf actually fired (one per function)
+    for (const auto& m : f.MethodDefs()) {
+        if (m.RVA == 0) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        if (!fn) continue;
+        ++processed;
+        RunPipeline(*fn);  // CFS + ILInlining + LoopDetection + ConditionDetection
+
+        bool firedThisFn = false;
+        Walk(fn->Body.get(), [&](ILInstruction* inst) {
+            auto* container = dynamic_cast<BlockContainer*>(inst);
+            if (!container) return;
+            for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+                auto* iff = dynamic_cast<IfInstruction*>(container->Blocks[i]->FinalInstruction.get());
+                if (!iff) continue;
+                ++ifFinals;
+                if (!iff->TrueInst) continue;
+                if (!HasFlag(iff->TrueInst->Flags(), InstructionFlags::EndPointUnreachable)) continue;
+                if (iff->FalseInst) continue;  // has an else
+                ++candidates;
+                // The next block in the container.
+                Block* nextBlock = (i + 1 < container->Blocks.size())
+                    ? container->Blocks[i + 1].get() : nullptr;
+                if (!nextBlock) { ++noNextBlock; continue; }
+                ++withNextBlock;
+                if (nextBlock->IncomingEdgeCount != 1) { ++multiPredBail; continue; }
+                ++wouldFire;
+                if (firedThisFn) return;  // one InvertIf per function
+                firedThisFn = true;
+                ConditionDetection::InvertIf(container->Blocks[i].get(), iff);
+                fn->CheckInvariant(ILPhase::Normal);
+                ++fires;
+            }
+        });
+        if (processed >= 8000) break;
+    }
+    EXPECT_GT(processed, 5000) << "the sweep must exercise real methods";
+    EXPECT_GT(ifFinals, 0) << "the corpus carries if-final blocks";
+    // The invariant check inside the loop is the safety gate -- InvertIf must
+    // not corrupt the tree on any real shape. The shape counts record the
+    // block-model divergence: the C# ImproveILOrdering shape (if as a
+    // non-terminal + falseCode as sibling) does not arise in this port (the
+    // if is the block's FinalInstruction), and ConditionDetection's
+    // TryInlineIfFallThrough consumes the single-pred fall-through, so the
+    // null-FalseInst candidate shape survives mainly as the multi-pred
+    // next-block case (InvertIf bails) or the no-next-block case.
+    std::cerr << "InvertIf shape probe: processed=" << processed
+              << " ifFinals=" << ifFinals
+              << " candidates=" << candidates
+              << " withNextBlock=" << withNextBlock
+              << " wouldFire(1-pred)=" << wouldFire
+              << " multiPredBail=" << multiPredBail
+              << " noNextBlock=" << noNextBlock
+              << " fires=" << fires << "\n";
+    (void)candidates; (void)withNextBlock; (void)wouldFire; (void)multiPredBail;
+    (void)noNextBlock; (void)fires;
+}

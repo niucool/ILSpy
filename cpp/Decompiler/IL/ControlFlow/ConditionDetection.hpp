@@ -28,6 +28,9 @@
 
 namespace ILSpy::Decompiler::IL {
 
+class Block;
+class IfInstruction;
+
 class ConditionDetection : public IILTransform {
 public:
     void Run(ILFunction& function, ILTransformContext& context) override;
@@ -43,6 +46,27 @@ public:
     // instruction's own StartILOffset is returned. `isEmpty` reports whether
     // the range is empty (the C# `out bool isEmpty`).
     static int GetStartILOffset(ILInstruction* inst, bool& isEmpty);
+
+    // The C# `ConditionDetection.InvertIf` (the `internal static`): the
+    // "invert if to match IL order / reduce nesting" operation.
+    //   if (cond) { then (exits) }   falseCode...; exit
+    // ->
+    //   if (!cond) { falseCode...; exit }   then...
+    // The C# reads `ifInst` as a non-terminal at `block.Instructions[i]` with
+    // the `falseCode...; exit` as sibling instructions after it (the C#
+    // `Block.Instructions` includes the control flow; `FinalInstruction` is a
+    // Nop). This port makes the `IfInstruction` the block's `FinalInstruction`,
+    // so the `falseCode...; exit` is the NEXT block in the container (the
+    // fall-through), and the old then moves into that next block (the
+    // "after the if" position). The next block must be single-predecessor (only
+    // this block's fall-through) so the move is semantics-preserving -- the C#
+    // has the falseCode in the same block as the if, so it is single-pred by
+    // construction; this port checks `IncomingEdgeCount == 1` explicitly.
+    // Assumes `ifInst` is `block`'s `FinalInstruction` with a null `FalseInst`
+    // (no else) and an unreachable `TrueInst` (the C# `Debug.Assert`s).
+    // `ExpressionTransforms.RunOnSingleStatement` (the C# re-visit that folds
+    // `Comp.LogicNot`) is not ported; `NegateCondition` folds directly.
+    static void InvertIf(Block* block, IfInstruction* ifInst);
 };
 
 } // namespace ILSpy::Decompiler::IL

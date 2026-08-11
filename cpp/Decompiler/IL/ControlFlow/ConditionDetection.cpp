@@ -262,6 +262,21 @@ bool TryDropTrailingGotoToNext(BlockContainer* container, std::size_t blockIndex
     return false;
 }
 
+// The next block in `block`'s container after `block` (the positional
+// fall-through). nullptr if `block` is not in a container's Blocks list or is
+// the last block. Mirrors the helper in PatternMatchingTransform /
+// SwitchAnalysis / CachedDelegateInitialization.
+Block* NextBlockInContainer(Block* block) {
+    if (!block) return nullptr;
+    auto* container = dynamic_cast<BlockContainer*>(block->Parent);
+    if (!container) return nullptr;
+    for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+        if (container->Blocks[i].get() == block)
+            return (i + 1 < container->Blocks.size()) ? container->Blocks[i + 1].get() : nullptr;
+    }
+    return nullptr;
+}
+
 } // namespace
 
 // The C# `ConditionDetection.GetStartILOffset` (see header). A valued Leave
@@ -279,6 +294,79 @@ int ConditionDetection::GetStartILOffset(ILInstruction* inst, bool& isEmpty) {
     }
     isEmpty = inst ? inst->IsILRangeEmpty() : true;
     return inst ? inst->StartILOffset : 0;
+}
+
+// The C# `ConditionDetection.InvertIf` (see header). The C# reads `ifInst`
+// as a non-terminal at `block.Instructions[i]` with the `falseCode...; exit`
+// as sibling instructions after it; this port makes the `IfInstruction` the
+// block's `FinalInstruction`, so the `falseCode...; exit` is the next block in
+// the container. The next block must be single-predecessor (only this block's
+// fall-through) so moving its content into the if's TrueInst and the old then
+// into the next block is semantics-preserving.
+void ConditionDetection::InvertIf(Block* block, IfInstruction* ifInst) {
+    if (!block || !ifInst) return;
+    // `ifInst` must be the block's FinalInstruction (the C# `ifInst.Parent == block`).
+    if (block->FinalInstruction.get() != ifInst) return;
+    // No else (the C# `IsEmpty(ifInst.FalseInst)` -- a null FalseInst is this
+    // port's "no else", since the reader emits a void if with a null FalseInst
+    // rather than a Nop FalseInst).
+    if (ifInst->FalseInst) return;
+    // The then must exit (the C# `ifInst.TrueInst.HasFlag(EndPointUnreachable)`).
+    if (!ifInst->TrueInst) return;
+    if (!HasFlag(ifInst->TrueInst->Flags(), InstructionFlags::EndPointUnreachable)) return;
+
+    Block* nextBlock = NextBlockInContainer(block);
+    if (!nextBlock) return;  // no falseCode; degenerate
+
+    // The next block must be single-predecessor (only this block's fall-through)
+    // so the move is semantics-preserving. The C# has the falseCode in the same
+    // block as the if, so it is single-pred by construction; this port checks
+    // `IncomingEdgeCount == 1` explicitly (RecomputeIncomingEdgeCounts counts
+    // the positional fall-through edge, so a 1-pred next block is one with no
+    // Branch edges targeting it).
+    if (nextBlock->IncomingEdgeCount != 1) return;
+
+    // Save the old TrueInst (then). Detach it before the slot is reassigned.
+    auto thenOwned = std::move(ifInst->TrueInst);
+
+    // Build the if's new TrueInst from the next block's content.
+    //   Case 1 (falseCode non-empty): wrap the next block's content in a Block
+    //     (the C# `ExtractBlock` into a `new Block()`).
+    //   Case 2 (no falseCode, just the exit): the if's then is the bare exit
+    //     (the C# `ifInst.TrueInst = exitInst`).
+    if (nextBlock->Instructions.empty()) {
+        ifInst->TrueInst = std::move(nextBlock->FinalInstruction);  // the bare exit
+    } else {
+        auto newBlock = std::make_unique<Block>();
+        for (auto& inst : nextBlock->Instructions) newBlock->Add(std::move(inst));
+        nextBlock->Instructions.clear();
+        if (nextBlock->FinalInstruction) newBlock->SetFinal(std::move(nextBlock->FinalInstruction));
+        newBlock->RenumberChildren();
+        ifInst->TrueInst = std::move(newBlock);
+    }
+    if (ifInst->TrueInst) { ifInst->TrueInst->Parent = ifInst; ifInst->TrueInst->ChildIndex = 1; }
+    nextBlock->FinalInstruction.reset();
+
+    // Move the old then into the next block (the "after the if" position). The
+    // C# `block.Instructions.AddRange(thenBlock.Instructions)` (then-Block) or
+    // `block.Instructions.Add(thenInst)` (bare exit); this port's then-Block
+    // carries the control flow in `FinalInstruction` (not in `Instructions` as
+    // in the C#), so both the non-terminals and the final move across.
+    if (auto* thenBlock = dynamic_cast<Block*>(thenOwned.get())) {
+        for (auto& inst : thenBlock->Instructions) nextBlock->Add(std::move(inst));
+        if (thenBlock->FinalInstruction) nextBlock->SetFinal(std::move(thenBlock->FinalInstruction));
+    } else {
+        nextBlock->SetFinal(std::move(thenOwned));  // then is a bare exit -> next block's final
+    }
+    nextBlock->RenumberChildren();
+
+    // Negate the condition. The C# `Comp.LogicNot` (a non-folding wrap) +
+    // `ExpressionTransforms.RunOnSingleStatement` (the re-visit that folds);
+    // `NegateCondition` folds directly, giving the same net result without the
+    // re-visit (RunOnSingleStatement is not ported; the wired
+    // ImproveILOrdering/ReduceNesting folds handle the re-visit if needed).
+    ifInst->Condition = NegateCondition(std::move(ifInst->Condition));
+    if (ifInst->Condition) { ifInst->Condition->Parent = ifInst; ifInst->Condition->ChildIndex = 0; }
 }
 
 void ConditionDetection::Run(ILFunction& function, ILTransformContext& context) {
