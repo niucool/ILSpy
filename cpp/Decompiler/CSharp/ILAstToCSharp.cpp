@@ -280,8 +280,21 @@ private:
             Line(indent, "}");
             return;
         }
-        for (const auto& block : container.Blocks) {
-            if (block) EmitBlock(*block, indent);
+        for (std::size_t i = 0; i < container.Blocks.size(); ++i) {
+            const auto& block = container.Blocks[i];
+            if (!block) continue;
+            // Drop a trailing `goto nextBlock` when nextBlock is the next block
+            // in the container -- the block falls through, so the goto is
+            // redundant. (CFS can't merge a multi-pred nextBlock, but the goto
+            // is still redundant for rendering.)
+            bool dropFinal = false;
+            if (i + 1 < container.Blocks.size() && block->FinalInstruction &&
+                block->FinalInstruction->Op == OpCode::Branch) {
+                auto* br = static_cast<Branch*>(block->FinalInstruction.get());
+                if (br->TargetBlock == container.Blocks[i + 1].get())
+                    dropFinal = true;
+            }
+            EmitBlock(*block, indent, dropFinal);
         }
     }
 
