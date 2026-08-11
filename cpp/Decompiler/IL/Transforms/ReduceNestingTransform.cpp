@@ -70,12 +70,15 @@
 //      the then blocks and moving the else content out. The wired `Run` Visit
 //      walk calls it after ImproveILOrdering via CanDuplicateExit; the no-else
 //      case fires on this corpus, the else-if-tree case is faithfulness-only.
-//      ReduceSwitchNesting, the content-block recursion (Visit(trueBlock)/
-//      Visit(falseBlock) for single-Block then/else arms), and the separate
+//      ReduceSwitchNesting, and the content-block recursion (Visit(trueBlock)/
+//      Visit(falseBlock) for single-Block then/else arms) are still deferred
+//      (need the D39 dominator analysis for ReduceSwitchNesting and the
+//      content-block nextInstruction plumbing for the recursion). The separate
 //      ExtractElseBlock branch (the `TrueInst.HasFlag(EndPointUnreachable)` +
-//      `FalseInst is Block` case) are still deferred (need the D39 dominator
-//      analysis for ReduceSwitchNesting and the content-block nextInstruction
-//      plumbing for the recursion).
+//      `FalseInst is Block` case) is now wired into the VisitContainer walk
+//      (fires when the then exits and there's a plain else Block, the
+//      `if (cond) { ...; return; } else { ... }` shape); the BlockContainer-then
+//      case of that branch is deferred (the container end-point check).
 //
 // Block-model adaptation: the C# Block.Instructions does NOT include the
 // FinalInstruction (a void block's final is a Nop, and the control flow
@@ -314,6 +317,24 @@ bool BlockExitsReal(Block* b) {
 	return f->Op == OpCode::Leave || f->Op == OpCode::Throw;
 }
 
+// Whether the if's then exits (its end point is unreachable). The C# uses
+// `ifInst.TrueInst.HasFlag(EndPointUnreachable)`. This port's `Block::Flags()`
+// unions ALL children's flags (the D157 divergence -- the C# Block.HasFlag is
+// just the last instruction's flags), so `HasFlag(block->Flags(), EndPoint-
+// Unreachable)` over-fires when a nested child exits but the block falls
+// through. For a Block then, use `BlockExitsReal` (the structural final-is-
+// Leave/Throw check, faithful to the C# Block.HasFlag); for a bare instruction
+// then (a Leave/Throw), `HasFlag` is exact (the instruction carries EndPoint-
+// Unreachable in its DirectFlags). The BlockContainer-then case (the container's
+// end point) is deferred -- `HasFlag` over-fires badly for a container (any
+// nested Leave/Throw sets it), so this returns false for a container then.
+bool ThenExits(ILInstruction* inst) {
+	if (!inst) return false;
+	if (auto* b = dynamic_cast<Block*>(inst)) return BlockExitsReal(b);
+	if (dynamic_cast<BlockContainer*>(inst)) return false;  // deferred
+	return HasFlag(inst->Flags(), InstructionFlags::EndPointUnreachable);
+}
+
 // Remove `blockB` from its container's Blocks list (the dead-exit removal --
 // after the else content is promoted to the container and exits, Block B's
 // trailing exit is unreachable and is dropped). Re-parents and re-numbers the
@@ -541,12 +562,13 @@ void ImproveILOrdering(Block* block, IfInstruction* ifInst, Block* continueTarge
 // no-else `if (cond) { then } exit;` -> `if (!cond) exit; then...; exit;` and the
 // else-if-tree case) is called after ImproveILOrdering via CanDuplicateExit (the
 // C# `Visit` does `CanDuplicateExit(NextInsn()) && ReduceNesting(...) ->
-// RemoveRedundantExit`). ReduceSwitchNesting, the content-block recursion
-// (Visit(trueBlock)/Visit(falseBlock) for single-Block then/else arms), and the
-// separate ExtractElseBlock branch (the `ifInst.TrueInst.HasFlag(EndPointUnreachable)`
-// + `ifInst.FalseInst is Block` case) are deferred (need the D39 dominator
-// analysis for ReduceSwitchNesting and the content-block nextInstruction
-// plumbing for the recursion).
+// RemoveRedundantExit`). The ExtractElseBlock branch (the
+// `ifInst.TrueInst.HasFlag(EndPointUnreachable)` + `ifInst.FalseInst is Block`
+// case -- fires when the then exits and there's a plain else Block) is wired
+// after Visit(trueBlock). ReduceSwitchNesting and the content-block recursion
+// (Visit(trueBlock)/Visit(falseBlock) for single-Block then/else arms) are
+// deferred (need the D39 dominator analysis for ReduceSwitchNesting and the
+// content-block nextInstruction plumbing for the recursion).
 void VisitContainers(ILInstruction* inst, Block* continueTarget);
 void VisitContainer(BlockContainer* container, Block* continueTarget) {
 	// Set continueTarget based on the container's Kind (the C#
@@ -606,6 +628,26 @@ void VisitContainer(BlockContainer* container, Block* continueTarget) {
 				}
 			}
 			VisitContainers(iff->TrueInst.get(), continueTarget);
+			// The C# `Visit(Block)` if-case, after ReduceNesting and Visit(trueBlock):
+			// the ExtractElseBlock branch. When the then exits (EndPointUnreachable)
+			// and the else is a single Block, extract the else -- the else content
+			// becomes the fall-through after the if (the then exits, so the else is
+			// the only fall-through path). This is the
+			//   if (ifInst.TrueInst.HasFlag(EndPointUnreachable)) { ExtractElseBlock(ifInst); break; }
+			// branch. ReduceNesting (above) already handles the else-if-tree case (it
+			// calls ExtractElseBlock on the chain); this branch fires when ReduceNesting
+			// did NOT fire but the then exits and there's a plain else Block (the
+			// `if (cond) { ...; return; } else { ... }` shape with no trailing exit).
+			// ExtractElseBlock (D159) promotes the else to the container as a new
+			// sibling block after Block A and clears the if's FalseInst to a Nop; the
+			// new sibling is visited by this container loop's next iteration (i+1).
+			// The C# `break` exits the block's instruction loop; this port's if-as-final
+			// is the block's last child (no further non-terminals), so no break is
+			// needed. `ThenExits` (above) handles the Block/bare-Leave then; the
+			// BlockContainer-then case is deferred.
+			if (dynamic_cast<Block*>(iff->FalseInst.get()) && ThenExits(iff->TrueInst.get())) {
+				ReduceNestingTransform::ExtractElseBlock(iff);
+			}
 			VisitContainers(iff->FalseInst.get(), continueTarget);
 		} else if (block->FinalInstruction) {
 			VisitContainers(block->FinalInstruction.get(), continueTarget);
