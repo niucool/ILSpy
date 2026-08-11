@@ -114,6 +114,16 @@ public:
     // This node is destroyed; `other` must be detached (no parent).
     void ReplaceWith(std::unique_ptr<ILInstruction> other);
 
+    // Create a deep clone of this instruction (port of ILInstruction.Clone).
+    // The clone is disconnected (no parent, ChildIndex -1) and owns its own
+    // copy of every child and scalar field. ILVariables, Branch target blocks,
+    // and Leave target containers are references (shared / non-owning), not
+    // owned children, so they are copied by reference -- matching the C# where
+    // those are not owned subtrees; a clone inserted elsewhere keeps pointing
+    // at the original tree's variables/blocks/containers and the caller fixes
+    // them up. The IL byte-range (StartILOffset/EndILOffset) is copied.
+    virtual std::unique_ptr<ILInstruction> Clone() const;
+
     // True if this is connected to a root (has a parent, or is itself a root).
     bool IsConnected() const;
     // ILFunction is the tree root; overrides return true.

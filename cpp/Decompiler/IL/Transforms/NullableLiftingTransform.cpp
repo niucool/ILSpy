@@ -102,13 +102,12 @@ bool MatchLogicNot(ILInstruction* inst, ILInstruction*& arg) {
 
 // Clone a pure expression (no side effects) so a lifted binary can embed a
 // non-nullable pure operand independently of the original (DoLift "Creates a
-// new lifted instruction without modifying the input instruction"). The C#
-// uses a general virtual Clone(); this port has none, so the simple pure loads
-// (the common operands -- constants and ldloc) are cloned and an uncloneable
-// pure expression returns null, which makes DoLiftBinary bail (return failure)
-// and the if stays as-is -- conservative-correct (the C# would embed it, this
-// port leaves the block). Mirrors the ClonePureLoad fast path in
-// ControlFlowSimplification (the same instruction kinds).
+// new lifted instruction without modifying the input instruction"). Only the
+// simple pure loads (the common operands -- constants and ldloc) are cloned
+// and an uncloneable pure expression returns null, which makes DoLiftBinary
+// bail (return failure) and the if stays as-is -- conservative-correct (the
+// C# would embed it, this port leaves the block). Mirrors the ClonePureLoad
+// fast path in ControlFlowSimplification (the same instruction kinds).
 std::unique_ptr<ILInstruction> ClonePureExpression(const ILInstruction* v) {
     if (!v) return nullptr;
     switch (v->Op) {

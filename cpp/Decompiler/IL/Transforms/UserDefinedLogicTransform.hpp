@@ -94,11 +94,14 @@ public:
     // The C# Transform static method (the shared core that builds a
     // UserDefinedLogicOperator from a condition + a true arm (ldloc) + a false
     // arm (the bitwise call), used by the RoslynOptimized pattern) is deferred:
-    // this port's ILInstruction has no virtual Clone(), so the C# `new
+    // the C# `new
     // UserDefinedLogicOperator(call.Method, call.Arguments[0], call.Arguments[1])`
-    // (which passes the call's argument instructions, kept alive by GC) would need
-    // either a general Clone or an owning-detach that the LegacyPattern does not
-    // need (it inlines the construction with a TakeChild detach). It lands with
+    // passes the call's argument instructions (kept alive by GC); this port
+    // can detach them via TakeChild (as the LegacyPattern does) or via Clone, so
+    // the construction itself is unblocked -- the deferral is the corpus probe
+    // of the RoslynOptimized if-with-leave-arms shape in this port's if-as-final
+    // block model (the legacy-csc mscorlib corpus carries no op_True/op_False
+    // operators, so the pattern never arises there to probe). It lands with
     // the RoslynOptimized pattern it is the helper for.
 
 private:
