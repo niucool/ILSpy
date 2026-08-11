@@ -57,6 +57,12 @@
 //    ImproveILOrdering trailing-leave handling and the deferred ReduceNesting /
 //    ReduceSwitchNesting folds consult it; no pipeline transform consults it
 //    yet (the wired folds are the subsequent iterations).
+//  * GetElseIfParent (a tested-but-not-yet-wired foundation): the pure-analysis
+//    helper that determines whether an IfInstruction is an else-if (a Block
+//    wrapping only that if, nested as the FalseInst of a parent IfInstruction)
+//    and reports the preceding parent IfInstruction. The deferred ReduceNesting
+//    else-if fold consults it (both the early root-bail and the per-iteration
+//    walk up the else-if tree); no pipeline transform consults it yet.
 //
 // Block-model adaptation: the C# Block.Instructions does NOT include the
 // FinalInstruction (a void block's final is a Nop, and the control flow
@@ -105,6 +111,18 @@ public:
     // a `continue` branches to (null at the top level).
     static bool CanDuplicateExit(ILInstruction* exit, Block* continueTarget,
                                  ILInstruction*& keywordExit);
+
+    // The C# `ReduceNestingTransform.GetElseIfParent`: determines whether
+    // `ifInst` is an else-if (a Block wrapping only that if, nested as the
+    // FalseInst of a parent IfInstruction) and, if so, returns the preceding
+    // parent IfInstruction; otherwise null. The deferred ReduceNesting else-if
+    // fold consults it (both the early root-bail -- an else-if tree is reduced
+    // as a single group from the root -- and the per-iteration walk up the
+    // tree). Pure analysis (no tree mutation). Handles both block models: the
+    // C# model (the else block has the if as its sole non-terminal + a Nop final)
+    // and this port's if-as-final model (the else block has the if as its
+    // FinalInstruction with empty non-terminal Instructions).
+    static IfInstruction* GetElseIfParent(IfInstruction* ifInst);
 };
 
 } // namespace ILSpy::Decompiler::IL

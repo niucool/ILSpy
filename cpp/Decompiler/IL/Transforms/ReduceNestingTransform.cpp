@@ -520,6 +520,49 @@ bool ReduceNestingTransform::CanDuplicateExit(ILInstruction* exit, Block* contin
 	return CanDuplicateExit(targetInst, continueTarget, keywordExit);
 }
 
+// The C# `ReduceNestingTransform.GetElseIfParent`: determines whether `ifInst`
+// is an else-if (a Block wrapping only that if, nested as the FalseInst of a
+// parent IfInstruction) and, if so, returns the preceding parent IfInstruction;
+// otherwise null.
+//
+//   [else-]if (parent-cond) else { ifInst }   -- the C# shape
+//
+// The C# checks: `Block.Unwrap(ifInst.Parent) == ifInst` (the else block has
+// only the if), `ifInst.Parent.Parent is IfInstruction elseIfInst` (the parent
+// of the else block is an IfInstruction), and `elseIfInst.FalseInst ==
+// ifInst.Parent` (the else block is the false arm, not the true arm).
+//
+// Block-model adaptation (the recurring D73/D75 divergence): the C#
+// `Block.Unwrap` returns the block's sole instruction, where the C#
+// `Block.Instructions` includes the control flow as the last non-terminal
+// (FinalInstruction is a Nop) -- so the else block's sole instruction is
+// `Instructions[0]` with a Nop final. This port splits the block's non-terminal
+// Instructions from its FinalInstruction (the control flow), so the else block
+// can carry the if either as a non-terminal (the C# model: Instructions.size()
+// == 1 with a Nop final) or as the FinalInstruction (this port's if-as-final
+// model: Instructions empty with the if as the final). Both shapes unwrap to the
+// if; a block with any other shape (more than one instruction, or a single
+// non-if instruction) does not.
+IfInstruction* ReduceNestingTransform::GetElseIfParent(IfInstruction* ifInst) {
+	if (!ifInst) return nullptr;
+	auto* elseBlock = dynamic_cast<Block*>(ifInst->Parent);
+	if (!elseBlock) return nullptr;
+	// `Block.Unwrap(elseBlock) == ifInst`: the else block has only the if.
+	bool unwrapsToIf = false;
+	if (elseBlock->Instructions.size() == 1 && IsNop(elseBlock->FinalInstruction.get())
+	    && elseBlock->Instructions[0].get() == ifInst)
+		unwrapsToIf = true;  // C# model: the if is the sole non-terminal + a Nop final
+	else if (elseBlock->Instructions.empty() && elseBlock->FinalInstruction.get() == ifInst)
+		unwrapsToIf = true;  // if-as-final model: the if is the FinalInstruction
+	if (!unwrapsToIf) return nullptr;
+	// The parent of the else block must be an IfInstruction (the else-if's parent).
+	auto* elseIfInst = dynamic_cast<IfInstruction*>(elseBlock->Parent);
+	if (!elseIfInst) return nullptr;
+	// The else block must be the false arm (not the true arm).
+	if (elseIfInst->FalseInst.get() != elseBlock) return nullptr;
+	return elseIfInst;
+}
+
 // Recursively computes the number of statements and maximum nested depth of an
 // instruction. Port of ReduceNestingTransform.ComputeStats, adapted to this
 // port's block model (the control flow lives in Block::FinalInstruction, not in

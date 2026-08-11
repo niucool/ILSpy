@@ -1391,3 +1391,308 @@ TEST(ReduceNestingTransform, MscorlibCanDuplicateExitSweep) {
 	std::cerr << "CanDuplicateExit sweep: processed=" << processed
 	          << " checked=" << checked << " duplicable=" << duplicable << "\n";
 }
+
+// ---------------------------------------------------------------------------
+// GetElseIfParent (a tested-but-not-yet-wired foundation): the pure-analysis
+// helper that determines whether an IfInstruction is an else-if (a Block
+// wrapping only that if, nested as the FalseInst of a parent IfInstruction) and
+// reports the preceding parent IfInstruction. The deferred ReduceNesting
+// else-if fold consults it (both the early root-bail and the per-iteration walk
+// up the else-if tree); no pipeline transform consults it yet.
+
+namespace {
+
+struct ElseIfTree {
+	std::unique_ptr<ILFunction> fn;
+	BlockContainer* body;
+	IfInstruction* outerIf;
+	Block* elseBlock;
+	IfInstruction* innerIf;
+};
+
+// Build an else-if tree: outerIf { then } else { elseBlock { innerIf { then } } }.
+// `ifAsFinalModel` picks the else block's shape: the C# model (innerIf as the
+// sole non-terminal + a null/Nop final) or this port's if-as-final model
+// (innerIf as the FinalInstruction with empty non-terminal Instructions).
+// `elseAsTrueArm` puts the else block in the TrueInst slot instead (a negative
+// for the FalseInst check).
+ElseIfTree BuildElseIf(bool ifAsFinalModel, bool elseAsTrueArm = false) {
+	ElseIfTree out;
+	out.fn = std::make_unique<ILFunction>();
+	out.body = new BlockContainer();
+	out.fn->Body = std::unique_ptr<BlockContainer>(out.body);
+	out.body->Parent = out.fn.get();
+	out.body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	out.fn->Variables.push_back(v);
+
+	// innerIf: if (v == 0) { leave body }  (no else)
+	auto innerThen = std::make_unique<Block>();
+	innerThen->SetFinal(std::make_unique<Leave>(out.body));
+	auto innerIf = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                       ComparisonKind::Equality),
+		std::move(innerThen), nullptr);
+	out.innerIf = innerIf.get();
+
+	// elseBlock: a Block whose sole instruction is innerIf.
+	auto elseBlock = std::make_unique<Block>();
+	if (ifAsFinalModel) {
+		elseBlock->SetFinal(std::move(innerIf));  // if-as-final model
+	} else {
+		elseBlock->Add(std::move(innerIf));  // C# model: if as non-terminal
+		// null final (IsNop treats null as a Nop, the C# model's Nop final).
+	}
+	out.elseBlock = elseBlock.get();
+
+	// outerThen: a Block with a leave body final.
+	auto outerThen = std::make_unique<Block>();
+	outerThen->SetFinal(std::make_unique<Leave>(out.body));
+
+	// outerIf: if (v == 1) { outerThen } else { elseBlock }  (or then=elseBlock).
+	std::unique_ptr<Block> trueArm, falseArm;
+	if (elseAsTrueArm) {
+		trueArm = std::move(elseBlock);
+		falseArm = std::move(outerThen);
+	} else {
+		trueArm = std::move(outerThen);
+		falseArm = std::move(elseBlock);
+	}
+	auto outerIf = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(1),
+		                       ComparisonKind::Equality),
+		std::move(trueArm), std::move(falseArm));
+	out.outerIf = outerIf.get();
+
+	// body block: [outerIf] + leave(body) final.
+	auto blk = std::make_unique<Block>();
+	blk->Add(std::move(outerIf));
+	blk->SetFinal(std::make_unique<Leave>(out.body));
+	out.body->AddBlock(std::move(blk));
+
+	RecomputeIncomingEdgeCounts(*out.fn);
+	return out;
+}
+
+} // namespace
+
+// An else-if in the C# block model (the else block has the if as its sole
+// non-terminal + a null/Nop final) is recognized: the parent IfInstruction is
+// reported.
+TEST(ReduceNestingTransform, GetElseIfParentReturnsParentForCSharpModel) {
+	auto built = BuildElseIf(/*ifAsFinalModel=*/false);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	EXPECT_EQ(ReduceNestingTransform::GetElseIfParent(built.innerIf), built.outerIf)
+	    << "the C#-model else block unwraps to the inner if";
+}
+
+// An else-if in this port's if-as-final block model (the else block has the if
+// as its FinalInstruction with empty non-terminal Instructions) is recognized:
+// the parent IfInstruction is reported.
+TEST(ReduceNestingTransform, GetElseIfParentReturnsParentForIfAsFinalModel) {
+	auto built = BuildElseIf(/*ifAsFinalModel=*/true);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	EXPECT_EQ(ReduceNestingTransform::GetElseIfParent(built.innerIf), built.outerIf)
+	    << "the if-as-final else block unwraps to the inner if";
+}
+
+// A null input is rejected (defensive).
+TEST(ReduceNestingTransform, GetElseIfParentRejectsNull) {
+	EXPECT_EQ(ReduceNestingTransform::GetElseIfParent(nullptr), nullptr);
+}
+
+// An if whose parent is not a Block (e.g. the if is directly the FalseInst of a
+// parent IfInstruction, not wrapped in an else Block) is not an else-if.
+TEST(ReduceNestingTransform, GetElseIfParentRejectsNonBlockParent) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+
+	auto innerThen = std::make_unique<Block>();
+	innerThen->SetFinal(std::make_unique<Leave>(body.get()));
+	auto innerIf = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                       ComparisonKind::Equality),
+		std::move(innerThen), nullptr);
+	IfInstruction* innerPtr = innerIf.get();
+
+	auto outerThen = std::make_unique<Block>();
+	outerThen->SetFinal(std::make_unique<Leave>(body.get()));
+	auto outerIf = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(1),
+		                       ComparisonKind::Equality),
+		std::move(outerThen), std::move(innerIf));
+	// innerIf is now outerIf->FalseInst (not wrapped in a Block); its Parent is
+	// outerIf (an IfInstruction, not a Block).
+
+	auto blk = std::make_unique<Block>();
+	blk->Add(std::move(outerIf));
+	blk->SetFinal(std::make_unique<Leave>(body.get()));
+	body->AddBlock(std::move(blk));
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+	EXPECT_EQ(ReduceNestingTransform::GetElseIfParent(innerPtr), nullptr)
+	    << "an if directly in a FalseInst slot (not a Block) is not an else-if";
+}
+
+// An else block with more than one instruction (does not unwrap to a single if)
+// is not an else-if.
+TEST(ReduceNestingTransform, GetElseIfParentRejectsMultiInstructionElseBlock) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+
+	auto innerThen = std::make_unique<Block>();
+	innerThen->SetFinal(std::make_unique<Leave>(body.get()));
+	auto innerIf = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                       ComparisonKind::Equality),
+		std::move(innerThen), nullptr);
+	IfInstruction* innerPtr = innerIf.get();
+
+	auto elseBlock = std::make_unique<Block>();
+	elseBlock->Add(std::move(innerIf));
+	elseBlock->Add(StLocInt(v, 2));  // a second instruction -> does not unwrap
+
+	auto outerThen = std::make_unique<Block>();
+	outerThen->SetFinal(std::make_unique<Leave>(body.get()));
+	auto outerIf = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(1),
+		                       ComparisonKind::Equality),
+		std::move(outerThen), std::move(elseBlock));
+
+	auto blk = std::make_unique<Block>();
+	blk->Add(std::move(outerIf));
+	blk->SetFinal(std::make_unique<Leave>(body.get()));
+	body->AddBlock(std::move(blk));
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+	EXPECT_EQ(ReduceNestingTransform::GetElseIfParent(innerPtr), nullptr)
+	    << "a multi-instruction else block does not unwrap to the if";
+}
+
+// An else block whose parent is not an IfInstruction (e.g. the block is a
+// direct block of a container, not the FalseInst of an IfInstruction) is not an
+// else-if.
+TEST(ReduceNestingTransform, GetElseIfParentRejectsNonIfParent) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+
+	// innerIf in a block that is a direct block of the body container (not the
+	// FalseInst of an IfInstruction).
+	auto blk = std::make_unique<Block>();
+	auto innerThen = std::make_unique<Block>();
+	innerThen->SetFinal(std::make_unique<Leave>(body.get()));
+	auto innerIf = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                       ComparisonKind::Equality),
+		std::move(innerThen), nullptr);
+	IfInstruction* innerPtr = innerIf.get();
+	blk->Add(std::move(innerIf));
+	blk->SetFinal(std::make_unique<Leave>(body.get()));
+	body->AddBlock(std::move(blk));
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+	EXPECT_EQ(ReduceNestingTransform::GetElseIfParent(innerPtr), nullptr)
+	    << "a block whose parent is a container (not an IfInstruction) is not an else-if";
+}
+
+// An else block that is the TrueInst (not the FalseInst) of the parent
+// IfInstruction is not an else-if (GetElseIfParent checks the FalseInst slot).
+TEST(ReduceNestingTransform, GetElseIfParentRejectsTrueArmElseBlock) {
+	auto built = BuildElseIf(/*ifAsFinalModel=*/false, /*elseAsTrueArm=*/true);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	EXPECT_EQ(ReduceNestingTransform::GetElseIfParent(built.innerIf), nullptr)
+	    << "the else block in the TrueInst slot is not an else-if";
+}
+
+// A corpus sweep: GetElseIfParent is pure analysis (no tree mutation), so the
+// tree invariant must hold after walking every IfInstruction. Counts the
+// else-if shapes (C# model vs if-as-final model) on the real post-
+// ConditionDetection corpus to confirm the helper fires on real data.
+TEST(ReduceNestingTransform, MscorlibGetElseIfParentSweep) {
+#if defined(_WIN32)
+	const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+	const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+	if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+	MetadataFile f(path);
+	ASSERT_TRUE(f.IsValid());
+
+	int processed = 0;
+	int totalIfs = 0;
+	int elseIfs = 0;
+	int csharpModel = 0;
+	int ifFinalModel = 0;
+	ILTransformContext ctx;
+	for (const auto& m : f.MethodDefs()) {
+		if (m.RVA == 0) continue;
+		auto fn = ReadIL(f, m.Token, m.RVA);
+		if (!fn) continue;
+		++processed;
+		ControlFlowSimplification().Run(*fn, ctx);
+		StObjToStLoc().Run(*fn, ctx);
+		ILInlining().Run(*fn, ctx);
+		InlineReturnTransform().Run(*fn, ctx);
+		RemoveInfeasiblePathTransform().Run(*fn, ctx);
+		DetectPinnedRegions().Run(*fn, ctx);
+		DetectCatchWhenConditionBlocks().Run(*fn, ctx);
+		LdLocaDupInitObjTransform().Run(*fn, ctx);
+		EarlyExpressionTransforms().Run(*fn, ctx);
+		RemoveDeadVariableInit().Run(*fn, ctx);
+		ControlFlowSimplification().Run(*fn, ctx);
+		SwitchDetection().Run(*fn, ctx);
+		SwitchOnNullableTransform().Run(*fn, ctx);
+		LoopDetection().Run(*fn, ctx);
+		PatternMatchingTransform().Run(*fn, ctx);
+		ConditionDetection().Run(*fn, ctx);
+		HighLevelLoopTransform::Run(*fn, ctx);
+
+		std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+			if (!inst) return;
+			if (auto* iff = dynamic_cast<IfInstruction*>(inst)) {
+				++totalIfs;
+				auto* parent = ReduceNestingTransform::GetElseIfParent(iff);
+				if (parent) {
+					++elseIfs;
+					auto* elseBlock = dynamic_cast<Block*>(iff->Parent);
+					if (elseBlock) {
+						bool nulOrNop = !elseBlock->FinalInstruction ||
+							elseBlock->FinalInstruction->Op == OpCode::Nop;
+						if (elseBlock->Instructions.size() == 1 && nulOrNop)
+							++csharpModel;
+						else if (elseBlock->Instructions.empty() &&
+						         elseBlock->FinalInstruction.get() == iff)
+							++ifFinalModel;
+					}
+				}
+			}
+			for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+		};
+		walk(fn->Body.get());
+		fn->CheckInvariant(ILPhase::Normal);  // the helper is pure; the tree is unchanged
+		if (processed >= 3000) break;
+	}
+	EXPECT_GT(processed, 2000) << "the sweep must exercise real methods";
+	EXPECT_GT(totalIfs, 0) << "the corpus carries IfInstructions";
+	std::cerr << "GetElseIfParent sweep: processed=" << processed
+	          << " totalIfs=" << totalIfs
+	          << " elseIfs=" << elseIfs
+	          << " csharpModel=" << csharpModel
+	          << " ifFinalModel=" << ifFinalModel << "\n";
+	(void)elseIfs; (void)csharpModel; (void)ifFinalModel;
+}
