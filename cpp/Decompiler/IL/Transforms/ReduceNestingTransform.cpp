@@ -47,6 +47,18 @@
 //      deferred ReduceNesting / ReduceSwitchNesting folds consult it; no
 //      pipeline transform consults it yet (the wired folds are the subsequent
 //      iterations).
+//  (5) GetElseIfParent (a tested-but-not-yet-wired foundation): the
+//      pure-analysis helper that determines whether an IfInstruction is an
+//      else-if and reports the preceding parent IfInstruction. The deferred
+//      ReduceNesting else-if fold consults it; no pipeline transform consults
+//      it yet.
+//  (6) EnsureEndPointUnreachable (a tested-but-not-yet-wired foundation): the
+//      helper that ensures a block's end point is unreachable by duplicating
+//      the [exit] instruction following the end point. The wired ReduceNesting
+//      fold (the no-else and else-if-tree cases) consults it to make a
+//      then/else block exit before InvertIf swaps it with the fall-through; no
+//      pipeline transform consults it yet (the wired fold is the subsequent
+//      iteration).
 //
 // Block-model adaptation: the C# Block.Instructions does NOT include the
 // FinalInstruction (a void block's final is a Nop, and the control flow
@@ -567,6 +579,39 @@ IfInstruction* ReduceNestingTransform::GetElseIfParent(IfInstruction* ifInst) {
 	// The else block must be the false arm (not the true arm).
 	if (elseIfInst->FalseInst.get() != elseBlock) return nullptr;
 	return elseIfInst;
+}
+
+// The C# `ReduceNestingTransform.EnsureEndPointUnreachable`: ensures the end
+// point of a block is unreachable by duplicating and appending the [exit]
+// instruction following the end point. See the header for the block-model
+// adaptation (this port's Block uses a Branch for the fall-through, which sets
+// EndPointUnreachable unlike the C# Nop final, so the C# `!HasFlag` check is
+// replaced by a FinalInstruction-opcode check: a Branch/Nop/null final is a
+// fall-through; a Leave/Throw/IfInstruction final is not).
+void ReduceNestingTransform::EnsureEndPointUnreachable(ILInstruction* inst,
+                                                        ILInstruction* fallthroughExit) {
+	if (!inst || !fallthroughExit) return;
+	auto* block = dynamic_cast<Block*>(inst);
+	if (!block) return;  // not a Block: the C# asserts EndPointUnreachable
+	auto* final = block->FinalInstruction.get();
+	// The block falls through (its end point is reachable in the C# sense) iff
+	// its FinalInstruction is a Branch (a fall-through) or a Nop/null (a void
+	// fall-through), NOT a Leave/Throw (a real exit) or an IfInstruction (the
+	// if-as-final block, Block A). A Leave/Throw already makes the end point
+	// unreachable; an IfInstruction is the if-as-final block whose end point is
+	// the if's own control flow, not a fall-through to duplicate an exit into.
+	bool fallsThrough = false;
+	if (!final || final->Op == OpCode::Nop) fallsThrough = true;        // void fall-through
+	else if (final->Op == OpCode::Branch) fallsThrough = true;         // Branch fall-through
+	if (!fallsThrough) return;
+	// Replace the fall-through final with a clone of the exit (the C# appends
+	// to Instructions, keeping the fall-through as dead code; this port's
+	// FinalInstruction IS the control flow, so the fall-through is dropped and
+	// the exit becomes the final -- the block's content in Instructions is
+	// preserved, and the block now exits via the exit instead of falling
+	// through to the same exit).
+	auto exitClone = fallthroughExit->Clone();
+	block->SetFinal(std::move(exitClone));
 }
 
 // Recursively computes the number of statements and maximum nested depth of an

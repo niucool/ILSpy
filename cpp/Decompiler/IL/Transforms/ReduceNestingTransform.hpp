@@ -63,6 +63,12 @@
 //    and reports the preceding parent IfInstruction. The deferred ReduceNesting
 //    else-if fold consults it (both the early root-bail and the per-iteration
 //    walk up the else-if tree); no pipeline transform consults it yet.
+//  * EnsureEndPointUnreachable (a tested-but-not-yet-wired foundation): the
+//    helper that ensures a block's end point is unreachable by duplicating the
+//    [exit] instruction following the end point. The wired ReduceNesting fold
+//    (the no-else and else-if-tree cases) consults it to make a then/else
+//    block exit before InvertIf swaps it with the fall-through; no pipeline
+//    transform consults it yet (the wired fold is the subsequent iteration).
 //
 // Block-model adaptation: the C# Block.Instructions does NOT include the
 // FinalInstruction (a void block's final is a Nop, and the control flow
@@ -123,6 +129,39 @@ public:
     // and this port's if-as-final model (the else block has the if as its
     // FinalInstruction with empty non-terminal Instructions).
     static IfInstruction* GetElseIfParent(IfInstruction* ifInst);
+
+    // The C# `ReduceNestingTransform.EnsureEndPointUnreachable`: ensures the
+    // end point of a block is unreachable by duplicating and appending the
+    // [exit] instruction following the end point. The wired ReduceNesting fold
+    // (the no-else `if (cond) { then } exit;` -> `if (!cond) exit; then; exit;`
+    // and the else-if-tree cases) consults it to make a then/else block exit
+    // before InvertIf swaps it with the fall-through. No pipeline transform
+    // consults it yet (the wired fold is the subsequent iteration).
+    //
+    // Block-model adaptation: the C# appends a clone of `fallthroughExit` to
+    // `block.Instructions` when the block's end point is reachable
+    // (`!HasFlag(EndPointUnreachable)` -- a fall-through block has no
+    // Branch/Leave in Instructions and a Nop final, so it is reachable). This
+    // port splits the block's non-terminal Instructions from its
+    // FinalInstruction (the control flow); a fall-through block's
+    // FinalInstruction is a Branch to the next block (which sets
+    // EndPointUnreachable, unlike the C# Nop final), so the C#
+    // `!HasFlag(EndPointUnreachable)` check cannot distinguish a fall-through
+    // from a real exit. The faithful check is the FinalInstruction's opcode:
+    // the block falls through iff its FinalInstruction is a Branch (a
+    // fall-through) or a Nop/null (a void fall-through), NOT a Leave/Throw (a
+    // real exit) or an IfInstruction (the if-as-final block). When it falls
+    // through, the exit clone REPLACES the fall-through FinalInstruction (the
+    // C# appends to Instructions, keeping the fall-through as dead code; this
+    // port's FinalInstruction IS the control flow, so the fall-through is
+    // dropped and the exit becomes the final -- the block's content in
+    // Instructions is preserved, and the block now exits via the exit instead
+    // of falling through to the same exit). A non-Block is a no-op (the C#
+    // asserts EndPointUnreachable). A goto (a Branch to a non-next block) is
+    // treated as a fall-through by this check; it does not arise in the
+    // ReduceNesting no-else case (the then block either exits or falls through
+    // to the join), so it is a documented faithfulness gap.
+    static void EnsureEndPointUnreachable(ILInstruction* inst, ILInstruction* fallthroughExit);
 };
 
 } // namespace ILSpy::Decompiler::IL

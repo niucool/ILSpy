@@ -58,6 +58,8 @@
 #include "Decompiler/IL/Transforms/PatternMatchingTransform.hpp"
 #include "Decompiler/IL/Transforms/HighLevelLoopTransform.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/Nop.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/InstructionFlags.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -1700,4 +1702,238 @@ TEST(ReduceNestingTransform, MscorlibGetElseIfParentSweep) {
 	          << " csharpModel=" << csharpModel
 	          << " ifFinalModel=" << ifFinalModel << "\n";
 	(void)elseIfs; (void)csharpModel; (void)ifFinalModel;
+}
+
+
+// EnsureEndPointUnreachable (a tested-but-not-yet-wired foundation): the
+// helper that ensures a block's end point is unreachable by duplicating the
+// [exit] instruction following the end point. The wired ReduceNesting fold
+// (the no-else and else-if-tree cases) consults it to make a then/else block
+// exit before InvertIf swaps it with the fall-through; no pipeline transform
+// consults it yet.
+
+namespace {
+
+struct EnsureBuilt {
+	std::unique_ptr<ILFunction> fn;
+	BlockContainer* body;
+	Block* b0;   // the block whose final is the fall-through / exit
+	Block* b1;   // the next block (the fall-through target)
+	ILInstruction* bodyLeave;  // a Leave(body) used as the exit
+};
+
+// Build a body container with two blocks: b0 (a stloc + a Branch-to-b1 final,
+// the fall-through) and b1 (leave body). The bodyLeave is a Leave(body) used
+// as the `fallthroughExit` argument in the tests. Each test may reset b0's
+// final to exercise a different shape.
+EnsureBuilt BuildEnsure() {
+	EnsureBuilt out;
+	out.fn = std::make_unique<ILFunction>();
+	out.body = new BlockContainer();
+	out.fn->Body = std::unique_ptr<BlockContainer>(out.body);
+	out.body->Parent = out.fn.get();
+	out.body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	out.fn->Variables.push_back(v);
+
+	// b1: leave(body)
+	auto b1 = std::make_unique<Block>();
+	auto leaveBody = std::make_unique<Leave>(out.body);
+	out.bodyLeave = leaveBody.get();
+	b1->SetFinal(std::move(leaveBody));
+	out.b1 = b1.get();
+
+	// b0: a stloc + a Branch-to-b1 final (the fall-through).
+	auto b0 = std::make_unique<Block>();
+	b0->Add(StLocInt(v, 1));
+	b0->SetFinal(std::make_unique<Branch>(out.b1));  // b1 is set above; b0 branches to it
+	out.b0 = b0.get();
+
+	out.body->AddBlock(std::move(b0));
+	out.body->AddBlock(std::move(b1));
+	RecomputeIncomingEdgeCounts(*out.fn);
+	return out;
+}
+
+} // namespace
+
+// A fall-through Block (content + a Branch final to the next block) has its
+// Branch replaced with a clone of the exit (a Leave(body)). The content is
+// preserved; the block now exits via the leave instead of falling through.
+TEST(ReduceNestingTransform, EnsureEndPointUnreachableReplacesFallThroughBranchWithExitClone) {
+	auto built = BuildEnsure();
+	built.fn->CheckInvariant(ILPhase::Normal);
+	auto* oldFinal = built.b0->FinalInstruction.get();
+	ASSERT_NE(oldFinal, nullptr);
+	ASSERT_EQ(oldFinal->Op, OpCode::Branch);
+	ReduceNestingTransform::EnsureEndPointUnreachable(built.b0, built.bodyLeave);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ASSERT_NE(built.b0->FinalInstruction.get(), nullptr);
+	EXPECT_EQ(built.b0->FinalInstruction->Op, OpCode::Leave);
+	EXPECT_NE(built.b0->FinalInstruction.get(), oldFinal) << "the Branch is dropped, not kept";
+	EXPECT_EQ(built.b0->Instructions.size(), 1u) << "the stloc content is preserved";
+}
+
+// A Block that already exits (a Leave final) is a no-op: the end point is
+// already unreachable.
+TEST(ReduceNestingTransform, EnsureEndPointUnreachableIsNoOpForRealExit) {
+	auto built = BuildEnsure();
+	built.b0->FinalInstruction.reset();
+	built.b0->SetFinal(std::make_unique<Leave>(built.body));
+	built.fn->CheckInvariant(ILPhase::Normal);
+	auto* oldFinal = built.b0->FinalInstruction.get();
+	ReduceNestingTransform::EnsureEndPointUnreachable(built.b0, built.bodyLeave);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	EXPECT_EQ(built.b0->FinalInstruction.get(), oldFinal) << "a Leave final is a real exit: no-op";
+}
+
+// A Block that exits via a Throw is a no-op.
+TEST(ReduceNestingTransform, EnsureEndPointUnreachableIsNoOpForThrowExit) {
+	auto built = BuildEnsure();
+	built.b0->FinalInstruction.reset();
+	built.b0->SetFinal(std::make_unique<Throw>(std::make_unique<LdNull>()));
+	built.fn->CheckInvariant(ILPhase::Normal);
+	auto* oldFinal = built.b0->FinalInstruction.get();
+	ReduceNestingTransform::EnsureEndPointUnreachable(built.b0, built.bodyLeave);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	EXPECT_EQ(built.b0->FinalInstruction.get(), oldFinal) << "a Throw final is a real exit: no-op";
+}
+
+// A non-Block (a bare instruction) is a no-op (the C# asserts EndPointUnreachable).
+TEST(ReduceNestingTransform, EnsureEndPointUnreachableIsNoOpForNonBlock) {
+	auto built = BuildEnsure();
+	auto bareLdLoc = std::make_unique<LdLoc>(MakeLocal("x"));
+	auto* barePtr = bareLdLoc.get();
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ReduceNestingTransform::EnsureEndPointUnreachable(barePtr, built.bodyLeave);
+	EXPECT_EQ(barePtr->Op, OpCode::LdLoc) << "a non-Block is untouched";
+}
+
+// A null exit is a no-op.
+TEST(ReduceNestingTransform, EnsureEndPointUnreachableIsNoOpForNullExit) {
+	auto built = BuildEnsure();
+	built.fn->CheckInvariant(ILPhase::Normal);
+	auto* oldFinal = built.b0->FinalInstruction.get();
+	ReduceNestingTransform::EnsureEndPointUnreachable(built.b0, nullptr);
+	EXPECT_EQ(built.b0->FinalInstruction.get(), oldFinal) << "a null exit is a no-op";
+}
+
+// A Block whose final is an IfInstruction (the if-as-final block, Block A) is
+// a no-op: the if-as-final block's end point is the if's own control flow, not
+// a fall-through to duplicate an exit into.
+TEST(ReduceNestingTransform, EnsureEndPointUnreachableIsNoOpForIfFinal) {
+	auto built = BuildEnsure();
+	auto v = MakeLocal("w");
+	built.fn->Variables.push_back(v);
+	auto thenBlock = std::make_unique<Block>();
+	thenBlock->SetFinal(std::make_unique<Leave>(built.body));
+	auto iff = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                      ComparisonKind::Equality),
+		std::move(thenBlock), nullptr);
+	built.b0->FinalInstruction.reset();
+	built.b0->SetFinal(std::move(iff));
+	built.fn->CheckInvariant(ILPhase::Normal);
+	auto* oldFinal = built.b0->FinalInstruction.get();
+	ReduceNestingTransform::EnsureEndPointUnreachable(built.b0, built.bodyLeave);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	EXPECT_EQ(built.b0->FinalInstruction.get(), oldFinal)
+		<< "an if-as-final block is not a fall-through: no-op";
+}
+
+// The new final is a fresh clone (a deep copy), not the exit itself; the clone's
+// TargetContainer is copied by reference (the same body).
+TEST(ReduceNestingTransform, EnsureEndPointUnreachableClonesExitNotReuses) {
+	auto built = BuildEnsure();
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ReduceNestingTransform::EnsureEndPointUnreachable(built.b0, built.bodyLeave);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	auto* newFinal = built.b0->FinalInstruction.get();
+	ASSERT_NE(newFinal, nullptr);
+	EXPECT_NE(newFinal, built.bodyLeave) << "the new final is a clone, not the exit itself";
+	EXPECT_EQ(newFinal->Op, OpCode::Leave);
+	EXPECT_EQ(static_cast<Leave*>(newFinal)->TargetContainer, built.body)
+		<< "the clone's TargetContainer is copied by reference (the same body)";
+}
+
+// A Block whose final is a Nop (a void fall-through) is replaced with the exit
+// clone (the void fall-through becomes an exit).
+TEST(ReduceNestingTransform, EnsureEndPointUnreachableReplacesNopFinal) {
+	auto built = BuildEnsure();
+	built.b0->FinalInstruction.reset();
+	built.b0->SetFinal(std::make_unique<Nop>());
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ReduceNestingTransform::EnsureEndPointUnreachable(built.b0, built.bodyLeave);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ASSERT_NE(built.b0->FinalInstruction.get(), nullptr);
+	EXPECT_EQ(built.b0->FinalInstruction->Op, OpCode::Leave)
+		<< "a Nop final (void fall-through) is replaced with the exit clone";
+}
+
+// A Block with no final (a null FinalInstruction, a degenerate void fall-through)
+// is replaced with the exit clone.
+TEST(ReduceNestingTransform, EnsureEndPointUnreachableReplacesNullFinal) {
+	auto built = BuildEnsure();
+	built.b0->FinalInstruction.reset();
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ReduceNestingTransform::EnsureEndPointUnreachable(built.b0, built.bodyLeave);
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ASSERT_NE(built.b0->FinalInstruction.get(), nullptr);
+	EXPECT_EQ(built.b0->FinalInstruction->Op, OpCode::Leave)
+		<< "a null final (degenerate fall-through) is replaced with the exit clone";
+}
+
+// A mscorlib safety sweep: decode methods and call EnsureEndPointUnreachable on
+// every block with a Leave(body) exit (the body is the function's top container,
+// an ancestor of every block, so the leave is valid). The helper either no-ops
+// (a real-exit final) or replaces a fall-through final with a Leave(body)
+// clone; the ILAst invariant must hold after every call. This tests the
+// helper's safety (no crash / tree corruption) on real trees; the
+// faithfulness is tested by the hand-built tests above.
+TEST(ReduceNestingTransform, MscorlibEnsureEndPointUnreachableSweep) {
+#if defined(_WIN32)
+	const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+	const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+	if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+	MetadataFile f(path);
+	ASSERT_TRUE(f.IsValid());
+
+	int processed = 0;
+	int calls = 0;
+	int replaced = 0;
+	for (const auto& m : f.MethodDefs()) {
+		if (m.RVA == 0) continue;
+		auto fn = ReadIL(f, m.Token, m.RVA);
+		if (!fn) continue;
+		++processed;
+		auto* body = fn->Body.get();
+		std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+			if (!inst) return;
+			if (auto* block = dynamic_cast<Block*>(inst)) {
+				auto* final = block->FinalInstruction.get();
+				bool fallsThrough = !final || final->Op == OpCode::Nop || final->Op == OpCode::Branch;
+				if (fallsThrough) ++replaced;
+				++calls;
+				if (body) {
+					auto leave = std::make_unique<Leave>(body);
+					ReduceNestingTransform::EnsureEndPointUnreachable(block, leave.get());
+				}
+			}
+			if (auto* cont = dynamic_cast<BlockContainer*>(inst)) {
+				for (auto& blk : cont->Blocks) walk(blk.get());
+				return;
+			}
+			for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+		};
+		walk(fn->Body.get());
+		fn->CheckInvariant(ILPhase::Normal);
+		if (processed >= 3000) break;
+	}
+	EXPECT_GT(processed, 2000) << "the sweep must exercise real methods";
+	EXPECT_GT(calls, 0) << "the sweep must call the helper on real blocks";
+	std::cerr << "EnsureEndPointUnreachable sweep: processed=" << processed
+	          << " calls=" << calls << " fallThroughReplaced=" << replaced << "\n";
+	(void)replaced;
 }
