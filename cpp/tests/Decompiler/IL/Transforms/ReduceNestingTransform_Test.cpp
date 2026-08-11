@@ -2454,3 +2454,399 @@ TEST(ReduceNestingTransform, MscorlibExtractElseBlockSweep) {
 	          << " calls=" << calls << " fired=" << fired << "\n";
 	(void)fired;
 }
+
+// ---- ReduceNesting (no-else case) ----
+
+// A "deep then" Block that exits (a value-less Leave of `leaveTarget`) with
+// nesting depth 2 (two nested ifs), so the ReduceNesting no-else heuristic
+// (`maxDepth >= 2`) fires:
+//   thenBlock: [if1] + leave(leaveTarget)
+//     if1: if (ldc 0) { Block2 } (no else)
+//     Block2: [if2] + leave(leaveTarget)
+//       if2: if (ldc 0) { Block3 } (no else)
+//       Block3: [stloc v(7)] + leave(leaveTarget)
+// `leaveTarget` is the container the leaves target (an ancestor of the nested
+// blocks -- the function body for the direct-return tests, the try container
+// for the leave-from-try test).
+namespace {
+std::unique_ptr<Block> MakeDeepThen(BlockContainer* leaveTarget, ILVariablePtr v) {
+	auto b3 = std::make_unique<Block>();
+	b3->Add(StLocInt(v, 7));
+	b3->SetFinal(std::make_unique<Leave>(leaveTarget));
+	auto if2 = std::make_unique<IfInstruction>(
+		std::make_unique<LdcI4>(0), std::move(b3), nullptr);
+	auto b2 = std::make_unique<Block>();
+	b2->Add(std::move(if2));
+	b2->SetFinal(std::make_unique<Leave>(leaveTarget));
+	auto if1 = std::make_unique<IfInstruction>(
+		std::make_unique<LdcI4>(0), std::move(b2), nullptr);
+	auto thenBlock = std::make_unique<Block>();
+	thenBlock->Add(std::move(if1));
+	thenBlock->SetFinal(std::make_unique<Leave>(leaveTarget));
+	return thenBlock;
+}
+} // namespace
+
+// The no-else fold: if (cond) { deep then (exits) } return; -> if (!cond) return; then...; return;
+// The if (b0's final) is inverted, its TrueInst becomes the return (Block B's
+// exit), and the deep then moves into Block B.
+TEST(ReduceNestingTransform, ReduceNestingNoElseFoldsDeeplyNestedThen) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+
+	auto b0 = std::make_unique<Block>();
+	b0->StartILOffset = 0;
+	b0->SetFinal(std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                      ComparisonKind::Equality),
+		MakeDeepThen(body.get(), v), nullptr));
+	Block* b0Ptr = b0.get();
+	body->AddBlock(std::move(b0));
+
+	auto b1 = std::make_unique<Block>();
+	b1->StartILOffset = 100;
+	b1->SetFinal(std::make_unique<Leave>(body.get()));
+	Block* b1Ptr = b1.get();
+	body->AddBlock(std::move(b1));
+
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	auto* iff = dynamic_cast<IfInstruction*>(b0Ptr->FinalInstruction.get());
+	ASSERT_NE(iff, nullptr);
+	bool fired = ReduceNestingTransform::ReduceNesting(b0Ptr, iff, b1Ptr->FinalInstruction.get());
+	EXPECT_TRUE(fired) << "the fold fires on the deep-then no-else shape";
+	fn->CheckInvariant(ILPhase::Normal);
+
+	auto* iffAfter = dynamic_cast<IfInstruction*>(b0Ptr->FinalInstruction.get());
+	ASSERT_NE(iffAfter, nullptr);
+	ASSERT_NE(iffAfter->TrueInst, nullptr);
+	EXPECT_EQ(iffAfter->TrueInst->Op, OpCode::Leave) << "the if's then is the return (Block B's exit)";
+	EXPECT_EQ(dynamic_cast<Leave*>(iffAfter->TrueInst.get())->TargetContainer, fn->Body.get());
+	EXPECT_EQ(iffAfter->Condition->Op, OpCode::LdLoc) << "the condition was negated (comp(eq,v,0) => ldloc v)";
+	EXPECT_FALSE(b1Ptr->Instructions.empty()) << "the deep then moved into Block B";
+	EXPECT_EQ(b1Ptr->FinalInstruction->Op, OpCode::Leave) << "Block B's final is the then's exit";
+}
+
+// Bail: a shallow then (depth 0) does not fire (the `maxDepth < 2` heuristic).
+TEST(ReduceNestingTransform, ReduceNestingNoElseBailsOnShallowThen) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+
+	auto shallowThen = std::make_unique<Block>();
+	shallowThen->Add(StLocInt(v, 1));
+	shallowThen->SetFinal(std::make_unique<Leave>(body.get()));
+	auto b0 = std::make_unique<Block>();
+	b0->SetFinal(std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                      ComparisonKind::Equality),
+		std::move(shallowThen), nullptr));
+	Block* b0Ptr = b0.get();
+	body->AddBlock(std::move(b0));
+	auto b1 = std::make_unique<Block>();
+	b1->SetFinal(std::make_unique<Leave>(body.get()));
+	Block* b1Ptr = b1.get();
+	body->AddBlock(std::move(b1));
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	auto* iff = dynamic_cast<IfInstruction*>(b0Ptr->FinalInstruction.get());
+	ASSERT_NE(iff, nullptr);
+	EXPECT_FALSE(ReduceNestingTransform::ReduceNesting(b0Ptr, iff, b1Ptr->FinalInstruction.get()));
+	fn->CheckInvariant(ILPhase::Normal);
+	EXPECT_EQ(b0Ptr->FinalInstruction.get(), iff) << "no mutation on bail";
+}
+
+// Bail: an if with an else does not fire (the else-if-tree case is deferred).
+TEST(ReduceNestingTransform, ReduceNestingNoElseBailsOnElse) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+
+	auto elseBlock = std::make_unique<Block>();
+	elseBlock->SetFinal(std::make_unique<Leave>(body.get()));
+	auto b0 = std::make_unique<Block>();
+	b0->SetFinal(std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                      ComparisonKind::Equality),
+		MakeDeepThen(body.get(), v), std::move(elseBlock)));
+	Block* b0Ptr = b0.get();
+	body->AddBlock(std::move(b0));
+	auto b1 = std::make_unique<Block>();
+	b1->SetFinal(std::make_unique<Leave>(body.get()));
+	Block* b1Ptr = b1.get();
+	body->AddBlock(std::move(b1));
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	auto* iff = dynamic_cast<IfInstruction*>(b0Ptr->FinalInstruction.get());
+	ASSERT_NE(iff, nullptr);
+	EXPECT_FALSE(ReduceNestingTransform::ReduceNesting(b0Ptr, iff, b1Ptr->FinalInstruction.get()));
+	fn->CheckInvariant(ILPhase::Normal);
+	EXPECT_EQ(b0Ptr->FinalInstruction.get(), iff) << "no mutation on bail";
+}
+
+// Bail: no Block B (b0 is the last block) -- InvertIf needs the exit holder.
+TEST(ReduceNestingTransform, ReduceNestingNoElseBailsWhenNoBlockB) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+
+	auto b0 = std::make_unique<Block>();
+	b0->SetFinal(std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                      ComparisonKind::Equality),
+		MakeDeepThen(body.get(), v), nullptr));
+	Block* b0Ptr = b0.get();
+	body->AddBlock(std::move(b0));
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	auto* iff = dynamic_cast<IfInstruction*>(b0Ptr->FinalInstruction.get());
+	ASSERT_NE(iff, nullptr);
+	auto exitLeave = std::make_unique<Leave>(body.get());
+	ILInstruction* exitPtr = exitLeave.get();
+	// exitInst is non-null but there is no Block B to hold it.
+	EXPECT_FALSE(ReduceNestingTransform::ReduceNesting(b0Ptr, iff, exitPtr));
+	fn->CheckInvariant(ILPhase::Normal);
+	EXPECT_EQ(b0Ptr->FinalInstruction.get(), iff) << "no mutation on bail";
+	(void)exitLeave;
+}
+
+// Bail: Block B has falseCode (a non-terminal) -- the no-else case requires the
+// exit directly after the if (no falseCode).
+TEST(ReduceNestingTransform, ReduceNestingNoElseBailsWhenBlockBHasFalseCode) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+
+	auto b0 = std::make_unique<Block>();
+	b0->SetFinal(std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                      ComparisonKind::Equality),
+		MakeDeepThen(body.get(), v), nullptr));
+	Block* b0Ptr = b0.get();
+	body->AddBlock(std::move(b0));
+	auto b1 = std::make_unique<Block>();
+	b1->Add(StLocInt(v, 9));  // falseCode (a non-terminal before the exit)
+	b1->SetFinal(std::make_unique<Leave>(body.get()));
+	Block* b1Ptr = b1.get();
+	body->AddBlock(std::move(b1));
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	auto* iff = dynamic_cast<IfInstruction*>(b0Ptr->FinalInstruction.get());
+	ASSERT_NE(iff, nullptr);
+	EXPECT_FALSE(ReduceNestingTransform::ReduceNesting(b0Ptr, iff, b1Ptr->FinalInstruction.get()));
+	fn->CheckInvariant(ILPhase::Normal);
+	EXPECT_EQ(b0Ptr->FinalInstruction.get(), iff) << "no mutation on bail";
+}
+
+// The leave-from-try case: Block B's exit is a leave of a Normal container (a
+// try body), and `exitInst` is the keyword return found by walking out of the
+// try (CanDuplicateExit). InvertIf makes the if's TrueInst = Block B's leave-
+// from-try; step 6 replaces it with the keyword return clone.
+TEST(ReduceNestingTransform, ReduceNestingNoElseReplacesLeaveFromTryWithKeyword) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+
+	// tryC: [b0 (if), b1 (leave tryC)] -- the try block.
+	auto tryC = std::make_unique<BlockContainer>();
+	auto b0 = std::make_unique<Block>();
+	b0->SetFinal(std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                      ComparisonKind::Equality),
+		MakeDeepThen(tryC.get(), v), nullptr));  // deep then exits via leave(tryC)
+	Block* b0Ptr = b0.get();
+	tryC->AddBlock(std::move(b0));
+	auto b1 = std::make_unique<Block>();
+	b1->SetFinal(std::make_unique<Leave>(tryC.get()));  // leave-from-try
+	Block* b1Ptr = b1.get();
+	tryC->AddBlock(std::move(b1));
+	auto* tryCPtr = tryC.get();
+
+	// finC: an empty finally (a single leave(finC)).
+	auto finC = std::make_unique<BlockContainer>();
+	auto finBlock = std::make_unique<Block>();
+	finBlock->SetFinal(std::make_unique<Leave>(finC.get()));
+	finC->AddBlock(std::move(finBlock));
+
+	auto tf = std::make_unique<TryFinally>(std::move(tryC), std::move(finC));
+	// bx: [tryFinally] + leave(body) -- the return after the try-finally.
+	auto bx = std::make_unique<Block>();
+	bx->Add(std::move(tf));
+	auto returnLeave = std::make_unique<Leave>(body.get());
+	ILInstruction* returnPtr = returnLeave.get();
+	bx->SetFinal(std::move(returnLeave));
+	body->AddBlock(std::move(bx));
+
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	auto* iff = dynamic_cast<IfInstruction*>(b0Ptr->FinalInstruction.get());
+	ASSERT_NE(iff, nullptr);
+	// exitInst = the return after the try-finally (what CanDuplicateExit would
+	// find by walking out of the try).
+	bool fired = ReduceNestingTransform::ReduceNesting(b0Ptr, iff, returnPtr);
+	EXPECT_TRUE(fired) << "the fold fires on the leave-from-try shape";
+	fn->CheckInvariant(ILPhase::Normal);
+
+	auto* iffAfter = dynamic_cast<IfInstruction*>(b0Ptr->FinalInstruction.get());
+	ASSERT_NE(iffAfter, nullptr);
+	ASSERT_NE(iffAfter->TrueInst, nullptr);
+	EXPECT_EQ(iffAfter->TrueInst->Op, OpCode::Leave) << "step 6 replaced the leave-from-try with the keyword return";
+	EXPECT_EQ(dynamic_cast<Leave*>(iffAfter->TrueInst.get())->TargetContainer, fn->Body.get())
+		<< "the if's then is the return (leave body), not the leave-from-try (leave tryC)";
+	// Block B's final is the then's exit (leave tryC), kept.
+	EXPECT_EQ(dynamic_cast<Leave*>(b1Ptr->FinalInstruction.get())->TargetContainer, tryCPtr);
+	(void)b1Ptr;
+}
+
+// A mscorlib safety sweep: run the full pre-pipeline, then fire ReduceNesting
+// on every no-else if-final whose next-block exit is a duplicable keyword exit
+// (replicating the wired VisitContainer walk: continueTarget tracked per
+// container Kind, NextInsn = Block B's first instruction, CanDuplicateExit +
+// ReduceNesting). The ILAst invariant must hold after every fire.
+TEST(ReduceNestingTransform, MscorlibReduceNestingNoElseSweep) {
+#if defined(_WIN32)
+	const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+	const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+	if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+	MetadataFile f(path);
+	ASSERT_TRUE(f.IsValid());
+
+	int processed = 0;
+	int candidates = 0;  // no-else if-finals with a duplicable next-block exit
+	int fired = 0;        // ReduceNesting returned true
+	int bailMaxDepth = 0;     // the then is shallow (maxDepth < 2)
+	int bailNoBlockB = 0;    // no Block B (Block A is the last block)
+	int bailFalseCode = 0;   // Block B has falseCode (a non-terminal)
+	int bailMultiPred = 0;   // Block B is not single-predecessor
+	int deepCandidates = 0;  // candidates with maxDepth >= 2 (past the heuristic)
+	ILTransformContext ctx;
+	for (const auto& m : f.MethodDefs()) {
+		if (m.RVA == 0) continue;
+		auto fn = ReadIL(f, m.Token, m.RVA);
+		if (!fn) continue;
+		++processed;
+		ControlFlowSimplification().Run(*fn, ctx);
+		StObjToStLoc().Run(*fn, ctx);
+		ILInlining().Run(*fn, ctx);
+		InlineReturnTransform().Run(*fn, ctx);
+		RemoveInfeasiblePathTransform().Run(*fn, ctx);
+		DetectPinnedRegions().Run(*fn, ctx);
+		DetectCatchWhenConditionBlocks().Run(*fn, ctx);
+		LdLocaDupInitObjTransform().Run(*fn, ctx);
+		EarlyExpressionTransforms().Run(*fn, ctx);
+		RemoveDeadVariableInit().Run(*fn, ctx);
+		ControlFlowSimplification().Run(*fn, ctx);
+		SwitchDetection().Run(*fn, ctx);
+		SwitchOnNullableTransform().Run(*fn, ctx);
+		LoopDetection().Run(*fn, ctx);
+		PatternMatchingTransform().Run(*fn, ctx);
+		ConditionDetection().Run(*fn, ctx);
+		HighLevelLoopTransform::Run(*fn, ctx);
+		// Run ReduceNestingTransform so the wired ImproveILOrdering fold (the IL-
+		// order-gated InvertIf) has re-inverted the early-return ifs, matching the
+		// shapes the wired ReduceNesting fold would see (ImproveILOrdering runs
+		// before ReduceNesting in the same Visit pass). ReduceNesting itself is not
+		// wired, so this only applies ImproveILOrdering + EliminateRedundantTryFinally.
+		ReduceNestingTransform().Run(*fn, ctx);
+		RecomputeIncomingEdgeCounts(*fn);
+
+		std::function<void(ILInstruction*, Block*)> walk;
+		walk = [&](ILInstruction* inst, Block* continueTarget) {
+			if (!inst) return;
+			if (auto* cont = dynamic_cast<BlockContainer*>(inst)) {
+				Block* ct = continueTarget;
+				switch (cont->Kind) {
+					case ContainerKind::Loop:
+					case ContainerKind::While:
+						ct = cont->Blocks.empty() ? nullptr : cont->Blocks.front().get(); break;
+					case ContainerKind::DoWhile:
+						ct = cont->Blocks.empty() ? nullptr : cont->Blocks.back().get(); break;
+					case ContainerKind::Normal:
+					case ContainerKind::Switch: break;
+				}
+				for (std::size_t i = 0; i < cont->Blocks.size(); ++i) {
+					auto* blk = cont->Blocks[i].get();
+					for (auto& ni : blk->Instructions) walk(ni.get(), ct);
+					auto* iff = dynamic_cast<IfInstruction*>(blk->FinalInstruction.get());
+					if (iff) {
+						if (!iff->FalseInst || iff->FalseInst->Op == OpCode::Nop) {
+							++candidates;
+							Block* blockB = (i + 1 < cont->Blocks.size()) ? cont->Blocks[i + 1].get() : nullptr;
+							ILInstruction* nextInsn = nullptr;
+							if (blockB) nextInsn = blockB->Instructions.empty()
+								? blockB->FinalInstruction.get() : blockB->Instructions[0].get();
+							ILInstruction* keywordExit = nullptr;
+							if (nextInsn && ReduceNestingTransform::CanDuplicateExit(nextInsn, ct, keywordExit)) {
+								// Replicate the ReduceNesting preconditions to count the bail
+								// reasons (the fold is faithfulness-only on this corpus).
+								int ms = 0, md = 0;
+								ReduceNestingTransform::UpdateStats(iff->TrueInst.get(), ms, md);
+								if (md < 2) ++bailMaxDepth;
+								else if (!blockB) ++bailNoBlockB;
+								else if (!blockB->Instructions.empty()) ++bailFalseCode;
+								else if (blockB->IncomingEdgeCount != 1) ++bailMultiPred;
+								else ++deepCandidates;
+								if (ReduceNestingTransform::ReduceNesting(blk, iff, keywordExit)) {
+									++fired;
+									fn->CheckInvariant(ILPhase::Normal);
+								}
+							}
+						}
+						walk(iff->TrueInst.get(), ct);
+						walk(iff->FalseInst.get(), ct);
+					} else if (blk->FinalInstruction) {
+						walk(blk->FinalInstruction.get(), ct);
+					}
+				}
+				return;
+			}
+			if (inst->Op == OpCode::ILFunction) return;
+			for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i), continueTarget);
+		};
+		walk(fn->Body.get(), nullptr);
+		if (processed >= 3000) break;
+	}
+	EXPECT_GT(processed, 2000) << "the sweep must exercise real methods";
+	std::cerr << "ReduceNesting no-else sweep: processed=" << processed
+	          << " candidates=" << candidates << " fired=" << fired
+	          << " bailMaxDepth=" << bailMaxDepth
+	          << " bailNoBlockB=" << bailNoBlockB
+	          << " bailFalseCode=" << bailFalseCode
+	          << " bailMultiPred=" << bailMultiPred
+	          << " deepCandidates=" << deepCandidates << "\n";
+	(void)candidates; (void)bailMaxDepth; (void)bailNoBlockB;
+	(void)bailFalseCode; (void)bailMultiPred; (void)deepCandidates;
+}

@@ -220,6 +220,38 @@ public:
     // `ifInst.FalseInst = new Nop()`). A non-Block parent or a non-Block else
     // is a defensive no-op (the C# casts both).
     static void ExtractElseBlock(IfInstruction* ifInst);
+
+    // The C# `ReduceNestingTransform.ReduceNesting` (the no-else case; the
+    // else-if-tree case is deferred -- returns false). Reduces the nesting of
+    //   if (cond) { then } exit;
+    // to
+    //   if (!cond) exit; then...; exit;
+    // by duplicating the keyword `exit` into the if's then and inverting the
+    // if, so the then (which exits) moves after the if and the exit becomes the
+    // if's (negated) then. `exitInst` is the keyword exit (return/break/continue)
+    // the caller found via `CanDuplicateExit` (the C# `Visit` passes
+    // `keywordExit`). Returns true if the fold fired. No pipeline transform
+    // consults it yet (the wired fold is the subsequent iteration); the corpus
+    // sweep in the test suite fires it on real candidates to validate safety.
+    //
+    // Block-model adaptation (the recurring D73/D75 divergence): the C#
+    // operates on a single block `[ifInst, exit]` (the if is a non-terminal, the
+    // exit is a sibling or the fall-through `nextInstruction`). This port splits
+    // that into Block A (the if is the FinalInstruction) + Block B (the exit is
+    // the FinalInstruction, the fall-through from Block A). Step 3 (the C#
+    // `EnsureEndPointUnreachable(block, exitInst)` that appends the exit so the
+    // block ends in it) is a no-op: this port's Block A always falls through to
+    // Block B (which holds the exit), and InvertIf reads the exit from Block B
+    // (not the block's last instruction). Step 4 ensures the then exits via the
+    // keyword `exitInst` (the C# case-b net result, since the C# step 3 appended
+    // the keyword clone). Step 5 is `ConditionDetection::InvertIf` (reads Block
+    // B's exit into the if's TrueInst, moves the then into Block B). Step 6
+    // replaces the if's TrueInst with the keyword clone when InvertIf made it
+    // Block B's original exit (e.g. a leave-from-try) rather than the keyword.
+    // The fold bails if the if has an else, the then is shallow (`maxDepth < 2`),
+    // Block B is missing or has falseCode, Block B is not single-predecessor, or
+    // the then cannot be made to exit.
+    static bool ReduceNesting(Block* block, IfInstruction* ifInst, ILInstruction* exitInst);
 };
 
 } // namespace ILSpy::Decompiler::IL
