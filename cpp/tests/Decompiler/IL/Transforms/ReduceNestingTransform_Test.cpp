@@ -934,3 +934,303 @@ TEST(ReduceNestingTransform, ImproveILOrderingNoOpWhenILOrderCorrect) {
 	ASSERT_NE(cond, nullptr);
 	EXPECT_EQ(cond->Kind, ComparisonKind::Equality) << "the gate bails when the IL order is correct";
 }
+
+// ---------------------------------------------------------------------------
+// CanDuplicateExit (a tested-but-not-yet-wired foundation): the helper that
+// decides whether an exit is a duplicable keyword exit (return/break/continue),
+// walking out of a try/pinned/lock container to the following instruction when
+// the exit is a leave of a Normal container. The wired ImproveILOrdering
+// trailing-leave handling and the deferred ReduceNesting / ReduceSwitchNesting
+// folds consult it; no pipeline transform consults it yet.
+
+namespace {
+
+// A void function body: one BlockContainer (parent = the ILFunction) with one
+// block holding the given non-terminal instructions and a value-less Leave(body)
+// final. The body's Parent is the ILFunction so a Leave(body) is a return.
+struct ExitBody {
+	std::unique_ptr<ILFunction> fn;
+	BlockContainer* body;
+	Block* blk;
+	Leave* bodyLeave;  // the Leave(body) final (a return)
+};
+
+ExitBody MakeExitBody(std::vector<std::unique_ptr<ILInstruction>> stmts) {
+	ExitBody out;
+	out.fn = std::make_unique<ILFunction>();
+	out.body = new BlockContainer();
+	out.fn->Body = std::unique_ptr<BlockContainer>(out.body);
+	out.body->Parent = out.fn.get();
+	out.body->ChildIndex = 0;
+	auto blk = std::make_unique<Block>();
+	for (auto& s : stmts) blk->Add(std::move(s));
+	auto bodyLeave = std::make_unique<Leave>(out.body);
+	out.bodyLeave = bodyLeave.get();
+	blk->SetFinal(std::move(bodyLeave));
+	out.blk = blk.get();
+	out.body->AddBlock(std::move(blk));
+	return out;
+}
+
+// Build a try-finally whose try block exits via `leave(tryC)` (the exit passed to
+// CanDuplicateExit) and whose finally exits via `leave(finC)` (a normal
+// finally). The TryFinally is a non-terminal in `blk`, followed by a Leave(body)
+// final (the return after the try-finally -- the keyword exit the walk finds).
+//   body (parent = ILFunction)
+//     blk: TryFinally { tryC { tryB: leave(tryC) } finally { finC { finB: leave(finC) } } }
+//          ; leave(body)
+struct TryFinallyWalk {
+	std::unique_ptr<ILFunction> fn;
+	BlockContainer* body;
+	Block* blk;
+	TryFinally* tf;
+	BlockContainer* tryC;
+	BlockContainer* finC;
+	Leave* tryLeave;   // the exit (leave tryC)
+	Leave* bodyLeave;  // the return after the try-finally
+};
+
+TryFinallyWalk MakeTryFinallyWalk() {
+	TryFinallyWalk out;
+	out.fn = std::make_unique<ILFunction>();
+	out.body = new BlockContainer();
+	out.fn->Body = std::unique_ptr<BlockContainer>(out.body);
+	out.body->Parent = out.fn.get();
+	out.body->ChildIndex = 0;
+
+	auto tryC = std::make_unique<BlockContainer>();  // Normal
+	auto tryB = std::make_unique<Block>();
+	auto tryLeave = std::make_unique<Leave>(tryC.get());
+	out.tryLeave = tryLeave.get();
+	tryB->SetFinal(std::move(tryLeave));
+	tryC->AddBlock(std::move(tryB));
+	out.tryC = tryC.get();
+
+	auto finC = std::make_unique<BlockContainer>();  // Normal
+	auto finB = std::make_unique<Block>();
+	finB->SetFinal(std::make_unique<Leave>(finC.get()));  // normal finally exit
+	finC->AddBlock(std::move(finB));
+	out.finC = finC.get();
+
+	auto tf = std::make_unique<TryFinally>(std::move(tryC), std::move(finC));
+	out.tf = tf.get();
+
+	auto blk = std::make_unique<Block>();
+	blk->Add(std::move(tf));
+	auto bodyLeave = std::make_unique<Leave>(out.body);
+	out.bodyLeave = bodyLeave.get();
+	blk->SetFinal(std::move(bodyLeave));
+	out.blk = blk.get();
+	out.body->AddBlock(std::move(blk));
+	return out;
+}
+
+} // namespace
+
+// A Branch to the continue target is a duplicable `continue` (keywordExit = the
+// Branch itself).
+TEST(ReduceNestingTransform, CanDuplicateExitContinueBranch) {
+	auto cont = std::make_unique<BlockContainer>();
+	auto target = std::make_unique<Block>();
+	Block* targetPtr = target.get();
+	cont->AddBlock(std::move(target));
+	auto br = std::make_unique<Branch>(targetPtr);
+	ILInstruction* kw = nullptr;
+	EXPECT_TRUE(ReduceNestingTransform::CanDuplicateExit(br.get(), targetPtr, kw));
+	EXPECT_EQ(kw, br.get()) << "the keyword exit is the continue Branch itself";
+}
+
+// A Leave of the function body is a duplicable `return`.
+TEST(ReduceNestingTransform, CanDuplicateExitReturnLeave) {
+	auto built = MakeExitBody({});
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ILInstruction* kw = nullptr;
+	EXPECT_TRUE(ReduceNestingTransform::CanDuplicateExit(built.bodyLeave, nullptr, kw));
+	EXPECT_EQ(kw, built.bodyLeave) << "the keyword exit is the return Leave itself";
+}
+
+// A Leave of a Loop container (not the function) is a duplicable `break`.
+TEST(ReduceNestingTransform, CanDuplicateExitBreakLeave) {
+	auto loopC = std::make_unique<BlockContainer>();
+	loopC->Kind = ContainerKind::Loop;
+	auto leaveLoop = std::make_unique<Leave>(loopC.get());
+	ILInstruction* kw = nullptr;
+	EXPECT_TRUE(ReduceNestingTransform::CanDuplicateExit(leaveLoop.get(), nullptr, kw));
+	EXPECT_EQ(kw, leaveLoop.get()) << "the keyword exit is the break Leave itself";
+}
+
+// A valued Leave (a `return expr`) is NOT duplicable -- duplicating it would
+// re-evaluate the value.
+TEST(ReduceNestingTransform, CanDuplicateExitRejectsValuedReturn) {
+	auto built = MakeExitBody({});
+	built.fn->CheckInvariant(ILPhase::Normal);
+	auto valuedLeave = std::make_unique<Leave>(built.body);
+	valuedLeave->Value = std::make_unique<LdcI4>(7);
+	valuedLeave->Value->Parent = valuedLeave.get();
+	valuedLeave->Value->ChildIndex = 0;
+	built.blk->SetFinal(std::move(valuedLeave));  // replace the body leave (SetFinal sets Parent)
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ILInstruction* kw = nullptr;
+	EXPECT_FALSE(ReduceNestingTransform::CanDuplicateExit(
+	    built.blk->FinalInstruction.get(), nullptr, kw));
+}
+
+// A non-Leave, non-Branch exit (e.g. a LdLoc) is not duplicable.
+TEST(ReduceNestingTransform, CanDuplicateExitRejectsNonLeaveNonBranch) {
+	auto v = MakeLocal("v");
+	auto ld = std::make_unique<LdLoc>(v);
+	ILInstruction* kw = nullptr;
+	EXPECT_FALSE(ReduceNestingTransform::CanDuplicateExit(ld.get(), nullptr, kw));
+}
+
+// A Leave of a Normal container inside a try-finally walks out to the
+// instruction following the try-finally (a return) and reports that as the
+// keyword exit. The finally exits normally (leave finC) so the walk proceeds.
+TEST(ReduceNestingTransform, CanDuplicateExitWalksOutOfTryFinally) {
+	auto built = MakeTryFinallyWalk();
+	built.fn->CheckInvariant(ILPhase::Normal);
+	ILInstruction* kw = nullptr;
+	EXPECT_TRUE(ReduceNestingTransform::CanDuplicateExit(built.tryLeave, nullptr, kw));
+	EXPECT_EQ(kw, built.bodyLeave)
+	    << "the keyword exit is the return after the try-finally";
+}
+
+// A Leave of the finally container is NOT duplicable (cannot duplicate leaves
+// from finally containers -- the finally must always run).
+TEST(ReduceNestingTransform, CanDuplicateExitRejectsFinallyLeave) {
+	auto built = MakeTryFinallyWalk();
+	built.fn->CheckInvariant(ILPhase::Normal);
+	// The finally block's leave (leave finC).
+	auto* finLeave = built.finC->Blocks[0]->FinalInstruction.get();
+	ASSERT_NE(finLeave, nullptr);
+	ILInstruction* kw = nullptr;
+	EXPECT_FALSE(ReduceNestingTransform::CanDuplicateExit(finLeave, nullptr, kw));
+}
+
+// A Leave of the fault container is NOT duplicable (cannot duplicate leaves
+// from fault containers).
+TEST(ReduceNestingTransform, CanDuplicateExitRejectsFaultLeave) {
+	auto tryC = std::make_unique<BlockContainer>();
+	auto tryB = std::make_unique<Block>();
+	tryB->SetFinal(std::make_unique<Leave>(tryC.get()));
+	tryC->AddBlock(std::move(tryB));
+	auto faultC = std::make_unique<BlockContainer>();
+	auto faultB = std::make_unique<Block>();
+	auto leaveFault = std::make_unique<Leave>(faultC.get());
+	Leave* leaveFaultPtr = leaveFault.get();
+	faultB->SetFinal(std::move(leaveFault));
+	faultC->AddBlock(std::move(faultB));
+	auto tflt = std::make_unique<TryFault>(std::move(tryC), std::move(faultC));
+	auto blk = std::make_unique<Block>();
+	blk->Add(std::move(tflt));
+	blk->SetFinal(std::make_unique<Leave>(nullptr));
+	ILInstruction* kw = nullptr;
+	EXPECT_FALSE(ReduceNestingTransform::CanDuplicateExit(leaveFaultPtr, nullptr, kw));
+}
+
+// A Leave of a try container whose finally always throws (no leave of the
+// finally container -> the finally's end point is unreachable) is NOT
+// duplicable: duplicating the exit would skip the finally that throws.
+TEST(ReduceNestingTransform, CanDuplicateExitRejectsUnreachableFinally) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+
+	auto tryC = std::make_unique<BlockContainer>();
+	auto tryB = std::make_unique<Block>();
+	auto tryLeave = std::make_unique<Leave>(tryC.get());
+	Leave* tryLeavePtr = tryLeave.get();
+	tryB->SetFinal(std::move(tryLeave));
+	tryC->AddBlock(std::move(tryB));
+
+	auto finC = std::make_unique<BlockContainer>();
+	auto finB = std::make_unique<Block>();
+	// The finally always throws (a rethrow): no leave of finC, so the finally's
+	// end point is unreachable per the C# BlockContainer.ComputeFlags semantics.
+	finB->SetFinal(std::make_unique<Throw>(nullptr));
+	finC->AddBlock(std::move(finB));
+
+	auto tf = std::make_unique<TryFinally>(std::move(tryC), std::move(finC));
+	auto blk = std::make_unique<Block>();
+	blk->Add(std::move(tf));
+	blk->SetFinal(std::make_unique<Leave>(body.get()));
+	body->AddBlock(std::move(blk));
+	fn->Body = std::move(body);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	ILInstruction* kw = nullptr;
+	EXPECT_FALSE(ReduceNestingTransform::CanDuplicateExit(tryLeavePtr, nullptr, kw))
+	    << "a finally that always throws makes the exit non-duplicable";
+}
+
+// Corpus sweep: run the full pre-pipeline through HighLevelLoopTransform (the
+// CLI's ReduceNestingTransform position), then call CanDuplicateExit on every
+// Leave and Branch in the tree (with continueTarget=null -- the continue
+// detection needs the Visit walk's continueTarget tracking, deferred),
+// asserting no crash and that the helper is robust on real trees. The recursive
+// walk (out of a try/pinned/lock Normal container) fires on real Leaves of such
+// containers; the EndPointUnreachableCSharp finally check fires on real
+// try-finallys whose finally always throws/returns. The invariant check after
+// each function is the safety gate -- CanDuplicateExit (a read-only helper)
+// must not corrupt the tree.
+TEST(ReduceNestingTransform, MscorlibCanDuplicateExitSweep) {
+#if defined(_WIN32)
+	const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+	const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+	if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+	MetadataFile f(path);
+	ASSERT_TRUE(f.IsValid());
+
+	int processed = 0;
+	int checked = 0;
+	int duplicable = 0;
+	ILTransformContext ctx;
+	for (const auto& m : f.MethodDefs()) {
+		if (m.RVA == 0) continue;
+		auto fn = ReadIL(f, m.Token, m.RVA);
+		if (!fn) continue;
+		++processed;
+		// Full pre-pipeline through HighLevelLoopTransform (the CLI's
+		// ReduceNestingTransform position), so real try-finallys / pinned / lock
+		// containers exist.
+		ControlFlowSimplification().Run(*fn, ctx);
+		StObjToStLoc().Run(*fn, ctx);
+		ILInlining().Run(*fn, ctx);
+		InlineReturnTransform().Run(*fn, ctx);
+		RemoveInfeasiblePathTransform().Run(*fn, ctx);
+		DetectPinnedRegions().Run(*fn, ctx);
+		DetectCatchWhenConditionBlocks().Run(*fn, ctx);
+		LdLocaDupInitObjTransform().Run(*fn, ctx);
+		EarlyExpressionTransforms().Run(*fn, ctx);
+		RemoveDeadVariableInit().Run(*fn, ctx);
+		ControlFlowSimplification().Run(*fn, ctx);
+		SwitchDetection().Run(*fn, ctx);
+		SwitchOnNullableTransform().Run(*fn, ctx);
+		LoopDetection().Run(*fn, ctx);
+		PatternMatchingTransform().Run(*fn, ctx);
+		ConditionDetection().Run(*fn, ctx);
+		HighLevelLoopTransform::Run(*fn, ctx);
+
+		std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+			if (!inst) return;
+			if (inst->Op == OpCode::Leave || inst->Op == OpCode::Branch) {
+				ILInstruction* kw = nullptr;
+				bool dup = ReduceNestingTransform::CanDuplicateExit(inst, nullptr, kw);
+				++checked;
+				if (dup) ++duplicable;
+			}
+			for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+		};
+		walk(fn->Body.get());
+		fn->CheckInvariant(ILPhase::Normal);
+		if (processed >= 3000) break;
+	}
+	EXPECT_GT(processed, 2000) << "the sweep must exercise real methods";
+	EXPECT_GT(checked, 0) << "the corpus carries Leaves/Branches";
+	EXPECT_GT(duplicable, 0) << "some returns/breaks are duplicable";
+	std::cerr << "CanDuplicateExit sweep: processed=" << processed
+	          << " checked=" << checked << " duplicable=" << duplicable << "\n";
+}

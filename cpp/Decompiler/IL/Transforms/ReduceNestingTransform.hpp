@@ -46,6 +46,13 @@
 //    are deferred (need the full CanDuplicateExit / EnsureEndPointUnreachable /
 //    ExtractElseBlock helpers + the D39 dominator analysis for
 //    ReduceSwitchNesting).
+//  * CanDuplicateExit (a tested-but-not-yet-wired foundation): the helper that
+//    decides whether an exit is a duplicable keyword exit (return/break/
+//    continue), walking out of a try/pinned/lock container to the following
+//    instruction when the exit is a leave of a Normal container. The wired
+//    ImproveILOrdering trailing-leave handling and the deferred ReduceNesting /
+//    ReduceSwitchNesting folds consult it; no pipeline transform consults it
+//    yet (the wired folds are the subsequent iterations).
 //
 // Block-model adaptation: the C# Block.Instructions does NOT include the
 // FinalInstruction (a void block's final is a Nop, and the control flow
@@ -83,6 +90,18 @@ public:
                              int currentDepth, bool isStatement = true);
     static void UpdateStats(ILInstruction* inst, int& maxStatements, int& maxDepth);
     static bool ShouldReduceNesting(Block* block, int maxStatements, int maxDepth);
+
+    // The C# `ReduceNestingTransform.CanDuplicateExit`: checks whether an exit
+    // instruction is a duplicable keyword exit (return; break; continue;). The
+    // wired ImproveILOrdering trailing-leave handling and the deferred
+    // ReduceNesting / ReduceSwitchNesting folds consult it. `keywordExit`
+    // reports the keyword exit to duplicate (the exit itself for a direct
+    // return/break/continue, or the keyword exit found by walking out of a
+    // try/pinned/lock container). `continueTarget` is the loop entry-point block
+    // a `continue` branches to (null at the top level). Ported as a tested-
+    // but-not-yet-wired foundation; no pipeline transform consults it yet.
+    static bool CanDuplicateExit(ILInstruction* exit, Block* continueTarget,
+                                 ILInstruction*& keywordExit);
 };
 
 } // namespace ILSpy::Decompiler::IL

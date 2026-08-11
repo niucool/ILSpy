@@ -18,7 +18,7 @@
 
 // Port of ICSharpCode.Decompiler/IL/Transforms/ReduceNestingTransform.cs.
 //
-// Three pieces are ported so far:
+// Three pieces are ported so far, plus a fourth tested foundation:
 //
 //  (1) EliminateRedundantTryFinally: the C# compiler sometimes generates a
 //      try-finally around a `fixed` statement; once DetectPinnedRegions has
@@ -38,6 +38,15 @@
 //      See the ImproveILOrdering comment below for the block-model adaptation.
 //      The trailing-leave handling (CanDuplicateExit) is deferred; the
 //      bail-for-non-keyword-Leave-exit guard is ported.
+//
+//  (4) CanDuplicateExit (a tested-but-not-yet-wired foundation): the helper
+//      that decides whether an exit is a duplicable keyword exit
+//      (return/break/continue), walking out of a try/pinned/lock container to
+//      the following instruction when the exit is a leave of a Normal
+//      container. The wired ImproveILOrdering trailing-leave handling and the
+//      deferred ReduceNesting / ReduceSwitchNesting folds consult it; no
+//      pipeline transform consults it yet (the wired folds are the subsequent
+//      iterations).
 //
 // Block-model adaptation: the C# Block.Instructions does NOT include the
 // FinalInstruction (a void block's final is a Nop, and the control flow
@@ -238,6 +247,58 @@ ILInstruction* TrueInstExit(ILInstruction* trueInst) {
 	return trueInst;
 }
 
+// The instruction following `inst` in `block`'s instruction list (the C#
+// `block.Instructions[block.Instructions.IndexOf(leavingInst) + 1]`). The C#
+// `Block.Instructions` includes the control flow as the last non-terminal
+// (FinalInstruction is a Nop), so the instruction after Instructions[i] is
+// Instructions[i+1]. This port splits the block's non-terminal Instructions
+// from its FinalInstruction (the control flow), so the instruction after
+// Instructions[i] is Instructions[i+1] if it exists, else the FinalInstruction
+// (the control flow). `inst` must be a non-terminal in `block`'s Instructions
+// list (a non-final); returns null if it is not (should not happen for a caller
+// that just confirmed `inst` is a non-final in `block`).
+ILInstruction* FollowingInstructionInBlock(Block* block, ILInstruction* inst) {
+	if (!block || !inst) return nullptr;
+	for (std::size_t i = 0; i < block->Instructions.size(); ++i) {
+		if (block->Instructions[i].get() == inst) {
+			if (i + 1 < block->Instructions.size()) return block->Instructions[i + 1].get();
+			return block->FinalInstruction.get();
+		}
+	}
+	return nullptr;
+}
+
+// The number of `leave(container)` instructions targeting `container` within
+// `inst`'s subtree (the C# `BlockContainer.LeaveCount`). A leave exits its own
+// container, so the targeting leaves live within the container's subtree.
+// Used to replicate the C# BlockContainer.ComputeFlags EndPointUnreachable
+// semantics (set iff LeaveCount == 0) which this port's BlockContainer does not
+// reproduce (the base Flags() propagates the leave's EndPointUnreachable up).
+int CountLeavesTargeting(ILInstruction* inst, BlockContainer* container) {
+	if (!inst || !container) return 0;
+	int n = 0;
+	if (auto* leave = dynamic_cast<Leave*>(inst)) {
+		if (leave->TargetContainer == container) ++n;
+	}
+	for (int i = 0; i < inst->ChildCount(); ++i)
+		n += CountLeavesTargeting(inst->GetChild(i), container);
+	return n;
+}
+
+// Whether `inst`'s end point is unreachable per the C# semantics. For a
+// BlockContainer the C# ComputeFlags sets EndPointUnreachable iff LeaveCount ==
+// 0 (no leave targeting the container); this port's BlockContainer does not
+// replicate that, so the LeaveCount is counted inline. For every other
+// instruction (Block, Leave, Throw, ...) this port's base Flags() is faithful
+// to the C# ComputeFlags, so the flag is read directly.
+bool EndPointUnreachableCSharp(ILInstruction* inst) {
+	if (!inst) return false;
+	if (auto* c = dynamic_cast<BlockContainer*>(inst)) {
+		return CountLeavesTargeting(c, c) == 0;
+	}
+	return HasFlag(inst->Flags(), InstructionFlags::EndPointUnreachable);
+}
+
 // The C# `ReduceNestingTransform.ImproveILOrdering`: for an if with an
 // unreachable end point and no else, inverts to match the IL order of the first
 // statement of each branch.
@@ -342,6 +403,80 @@ void VisitContainers(ILInstruction* inst) {
 }
 
 } // namespace
+
+// The C# `ReduceNestingTransform.CanDuplicateExit`: checks whether an exit
+// instruction is a duplicable keyword exit (return; break; continue;). The
+// wired ImproveILOrdering trailing-leave handling and the deferred
+// ReduceNesting / ReduceSwitchNesting folds consult it. `keywordExit` reports
+// the keyword exit to duplicate (the exit itself for a direct return/break/
+// continue, or the keyword exit found by walking out of a try/pinned/lock
+// container). Ported as a tested-but-not-yet-wired foundation (no pipeline
+// transform consults it yet -- the wired folds are the subsequent iterations).
+//
+// Block-model adaptation (the recurring D73/D75 divergence): the C# walks up
+// from `leave.TargetContainer` until it finds an instruction in a Block that is
+// NOT the last instruction in that block (`!(leavingInst.Parent is Block b) ||
+// leavingInst == b.Instructions.Last()`), then recurses on the FOLLOWING
+// instruction (`block.Instructions[indexOf(leavingInst) + 1]`). The C#
+// `Block.Instructions` includes the control flow as the last non-terminal
+// (FinalInstruction is a Nop), so "the last instruction" is the control flow;
+// this port splits the block's non-terminal Instructions from its FinalInstruction
+// (the control flow), so "the last instruction" is the FinalInstruction, and
+// the "following instruction" of a non-terminal Instructions[i] is
+// Instructions[i+1] if it exists, else the FinalInstruction. The C#
+// `SlotInfo == TryFinally.FinallyBlockSlot` (the FinallyBlock slot) maps to this
+// port's `ChildIndex == 1` on a TryFinally (the FinallyBlock is at ChildIndex 1);
+// likewise `TryFault.FaultBlockSlot` -> `ChildIndex == 1` on a TryFault. The
+// Branch-to-continueTarget check is inlined (not MatchBranch) to avoid the
+// D149 MatchBranch report-overload ambiguity (a `Block*` lvalue binds to the
+// `Block*&` report overload, not the `const Block*` match-against overload).
+bool ReduceNestingTransform::CanDuplicateExit(ILInstruction* exit, Block* continueTarget,
+                                              ILInstruction*& keywordExit) {
+	keywordExit = exit;
+	// keyword is continue: a Branch to the continue target.
+	if (exit) {
+		if (auto* br = dynamic_cast<Branch*>(exit)) {
+			if (br->TargetBlock && br->TargetBlock == continueTarget) return true;
+		}
+	}
+	// Only a value-less Leave can be a duplicable return/break.
+	auto* leave = dynamic_cast<Leave*>(exit);
+	if (!leave || !IsNop(leave->Value.get())) return false;  // don't duplicate valued returns
+	if (!leave->TargetContainer) return false;  // defensive (the C# assumes non-null)
+	// keyword is return (leaving the function) or break (leaving a non-Normal
+	// container -- a Loop/While/DoWhile/Switch).
+	if (IsLeavingFunction(leave) || leave->TargetContainer->Kind != ContainerKind::Normal)
+		return true;
+	// A Leave of a Normal container (a try/pinned/lock/etc. body): walk out to
+	// the instruction following the target container and recurse on it. The C#
+	// loop continues while (parent is not a Block) OR (leavingInst is the last);
+	// the inverse (parent IS a Block AND leavingInst is NOT the last) is the stop.
+	ILInstruction* leavingInst = leave->TargetContainer;
+	while (true) {
+		auto* parentBlock = dynamic_cast<Block*>(leavingInst->Parent);
+		if (parentBlock && parentBlock->FinalInstruction.get() != leavingInst) break;
+		// TryFinally/TryFault checks (the C# checks the parent's slot).
+		if (auto* tf = dynamic_cast<TryFinally*>(leavingInst->Parent)) {
+			if (leavingInst->ChildIndex == 1) return false;  // FinallyBlock: cannot duplicate
+			// The C# `tryFinally.HasFlag(EndPointUnreachable)` = the try block or the
+			// finally block has an unreachable end point (the finally always
+			// throws/returns, or the try block has no leave). This port's BlockContainer
+			// does not replicate the C# LeaveCount-based ComputeFlags, so the C#
+			// semantics are replicated inline (EndPointUnreachableCSharp).
+			if (EndPointUnreachableCSharp(tf->TryBlock.get()) ||
+			    EndPointUnreachableCSharp(tf->FinallyBlock.get()))
+				return false;
+		} else if (auto* tfault = dynamic_cast<TryFault*>(leavingInst->Parent)) {
+			if (leavingInst->ChildIndex == 1) return false;  // FaultBlock: cannot duplicate
+		}
+		leavingInst = leavingInst->Parent;
+		if (!leavingInst || leavingInst->Op == OpCode::ILFunction) return false;  // defensive: walked past the root
+	}
+	auto* block = dynamic_cast<Block*>(leavingInst->Parent);
+	ILInstruction* targetInst = FollowingInstructionInBlock(block, leavingInst);
+	if (!targetInst) return false;  // defensive
+	return CanDuplicateExit(targetInst, continueTarget, keywordExit);
+}
 
 // Recursively computes the number of statements and maximum nested depth of an
 // instruction. Port of ReduceNestingTransform.ComputeStats, adapted to this
