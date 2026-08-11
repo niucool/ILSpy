@@ -2567,8 +2567,11 @@ TEST(ReduceNestingTransform, ReduceNestingNoElseBailsOnShallowThen) {
 	EXPECT_EQ(b0Ptr->FinalInstruction.get(), iff) << "no mutation on bail";
 }
 
-// Bail: an if with an else does not fire (the else-if-tree case is deferred).
-TEST(ReduceNestingTransform, ReduceNestingNoElseBailsOnElse) {
+// Bail: an if with a shallow else block does not fire. The else-if-tree case
+// is now handled, but the fold still bails when the else block is shallow
+// (ShouldReduceNesting returns false -- a single-Leave else with depth 0 is not
+// worth duplicating exits into the thens to reduce its nesting by 1).
+TEST(ReduceNestingTransform, ReduceNestingNoElseBailsOnShallowElse) {
 	auto fn = std::make_unique<ILFunction>();
 	auto body = std::make_unique<BlockContainer>();
 	body->Parent = fn.get();
@@ -2849,4 +2852,455 @@ TEST(ReduceNestingTransform, MscorlibReduceNestingNoElseSweep) {
 	          << " deepCandidates=" << deepCandidates << "\n";
 	(void)candidates; (void)bailMaxDepth; (void)bailNoBlockB;
 	(void)bailFalseCode; (void)bailMultiPred; (void)deepCandidates;
+}
+
+// ---- ReduceNesting (else-if-tree case) ----
+
+// A depth-2 "deep else" Block (the else content) that exits via leave(leaveTarget),
+// so ShouldReduceNesting fires (maxDepth2 >= 2). Two nested ifs, each exiting.
+namespace {
+std::unique_ptr<Block> MakeDeepElse(BlockContainer* leaveTarget, ILVariablePtr v) {
+	auto b3 = std::make_unique<Block>();
+	b3->Add(StLocInt(v, 7));
+	b3->SetFinal(std::make_unique<Leave>(leaveTarget));
+	auto if2 = std::make_unique<IfInstruction>(
+		std::make_unique<LdcI4>(0), std::move(b3), nullptr);
+	auto b2 = std::make_unique<Block>();
+	b2->Add(std::move(if2));
+	b2->SetFinal(std::make_unique<Leave>(leaveTarget));
+	auto if1 = std::make_unique<IfInstruction>(
+		std::make_unique<LdcI4>(0), std::move(b2), nullptr);
+	auto elseBlock = std::make_unique<Block>();
+	elseBlock->Add(std::move(if1));
+	elseBlock->SetFinal(std::make_unique<Leave>(leaveTarget));
+	return elseBlock;
+}
+} // namespace
+
+// The else-if-tree fire case:
+//   if (c1) { shallow then (exits) } else if (c2) { shallow then (exits) } else { deep else (exits) } return;
+// The fold makes the thens exit (no-op -- they already exit), promotes the
+// else-if holder block and the else content block to the container as siblings
+// after Block A, clears both ifs' else, and drops the now-dead trailing return
+// (Block B) because the else content exits.
+TEST(ReduceNestingTransform, ReduceNestingElseIfTreeFoldsDeepElse) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+
+	// innerIf: if (v == 1) { shallow then2 (exits) } else { deep else (exits) }
+	auto then2 = std::make_unique<Block>();
+	then2->Add(StLocInt(v, 2));
+	then2->SetFinal(std::make_unique<Leave>(body.get()));
+	auto innerIf = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(1),
+		                       ComparisonKind::Equality),
+		std::move(then2), MakeDeepElse(body.get(), v));
+	IfInstruction* innerIfPtr = innerIf.get();
+
+	// elseBlock1: the if-as-final else block wrapping innerIf.
+	auto elseBlock1 = std::make_unique<Block>();
+	elseBlock1->SetFinal(std::move(innerIf));
+	Block* elseBlock1Ptr = elseBlock1.get();
+
+	// ifRoot: if (v == 0) { shallow then1 (exits) } else { elseBlock1 (innerIf) }
+	auto then1 = std::make_unique<Block>();
+	then1->Add(StLocInt(v, 1));
+	then1->SetFinal(std::make_unique<Leave>(body.get()));
+	auto ifRoot = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                       ComparisonKind::Equality),
+		std::move(then1), std::move(elseBlock1));
+	IfInstruction* ifRootPtr = ifRoot.get();
+
+	// b0: Block A (ifRoot is the FinalInstruction).
+	auto b0 = std::make_unique<Block>();
+	b0->StartILOffset = 0;
+	b0->SetFinal(std::move(ifRoot));
+	Block* b0Ptr = b0.get();
+	body->AddBlock(std::move(b0));
+
+	// b1: Block B (the trailing return).
+	auto b1 = std::make_unique<Block>();
+	b1->StartILOffset = 100;
+	b1->SetFinal(std::make_unique<Leave>(body.get()));
+	Block* b1Ptr = b1.get();  // dangling after the fold (b1 is dropped); not dereferenced.
+	body->AddBlock(std::move(b1));
+
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	bool fired = ReduceNestingTransform::ReduceNesting(b0Ptr, ifRootPtr, b1Ptr->FinalInstruction.get());
+	EXPECT_TRUE(fired) << "the else-if-tree fold fires on the deep-else shape";
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	// Both ifs' else is cleared (Nop).
+	ASSERT_NE(ifRootPtr->FalseInst, nullptr);
+	EXPECT_EQ(ifRootPtr->FalseInst->Op, OpCode::Nop) << "ifRoot's else was extracted";
+	ASSERT_NE(innerIfPtr->FalseInst, nullptr);
+	EXPECT_EQ(innerIfPtr->FalseInst->Op, OpCode::Nop) << "innerIf's else was extracted";
+	// The else-if holder block and the else content block were promoted to the
+	// container as siblings after Block A; Block B (the dead trailing return)
+	// was dropped because the else content exits.
+	ASSERT_EQ(fn->Body->Blocks.size(), 3u);
+	EXPECT_EQ(fn->Body->Blocks[0].get(), b0Ptr);
+	EXPECT_EQ(fn->Body->Blocks[1].get(), elseBlock1Ptr) << "the innerIf holder was promoted";
+	EXPECT_EQ(fn->Body->Blocks[1]->FinalInstruction.get(), innerIfPtr)
+		<< "the promoted holder's final is innerIf";
+}
+
+// The else-if-tree fire case where the else content falls through (does not
+// exit): Block B (the trailing exit) is kept (it is not dead).
+TEST(ReduceNestingTransform, ReduceNestingElseIfTreeKeepsExitWhenElseFallsThrough) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+
+	// Block B (the trailing return) is created first so the deep else block can
+	// branch to it (a Branch-to-next fall-through, not a Leave). The deep content
+	// makes ShouldReduceNesting fire; the Branch final means the else does not
+	// exit, so Block B is kept. A null/Nop final would make UnwrapElseIf treat the
+	// block as the C#-model else-if wrapping its sole non-terminal, so the Branch
+	// (a non-Nop final) keeps it a plain deep block.
+	auto b1 = std::make_unique<Block>();
+	b1->SetFinal(std::make_unique<Leave>(body.get()));
+	Block* b1Ptr = b1.get();
+
+	auto deepFallThrough = std::make_unique<Block>();
+	{
+		auto b3 = std::make_unique<Block>();
+		b3->Add(StLocInt(v, 7));
+		b3->SetFinal(std::make_unique<Leave>(body.get()));  // inner exit (depth 2 leaf)
+		auto if2 = std::make_unique<IfInstruction>(
+			std::make_unique<LdcI4>(0), std::move(b3), nullptr);
+		auto b2 = std::make_unique<Block>();
+		b2->Add(std::move(if2));
+		b2->SetFinal(std::make_unique<Leave>(body.get()));  // depth 1 exit
+		auto if1 = std::make_unique<IfInstruction>(
+			std::make_unique<LdcI4>(0), std::move(b2), nullptr);
+		deepFallThrough->Add(std::move(if1));
+		deepFallThrough->SetFinal(std::make_unique<Branch>(b1Ptr));  // fall through to Block B
+	}
+
+	auto then2 = std::make_unique<Block>();
+	then2->Add(StLocInt(v, 2));
+	then2->SetFinal(std::make_unique<Leave>(body.get()));
+	auto innerIf = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(1),
+		                       ComparisonKind::Equality),
+		std::move(then2), std::move(deepFallThrough));
+	IfInstruction* innerIfPtr = innerIf.get();
+
+	auto elseBlock1 = std::make_unique<Block>();
+	elseBlock1->SetFinal(std::move(innerIf));
+	Block* elseBlock1Ptr = elseBlock1.get();
+
+	auto then1 = std::make_unique<Block>();
+	then1->Add(StLocInt(v, 1));
+	then1->SetFinal(std::make_unique<Leave>(body.get()));
+	auto ifRoot = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                       ComparisonKind::Equality),
+		std::move(then1), std::move(elseBlock1));
+	IfInstruction* ifRootPtr = ifRoot.get();
+
+	auto b0 = std::make_unique<Block>();
+	b0->SetFinal(std::move(ifRoot));
+	Block* b0Ptr = b0.get();
+	body->AddBlock(std::move(b0));
+	body->AddBlock(std::move(b1));
+
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	bool fired = ReduceNestingTransform::ReduceNesting(b0Ptr, ifRootPtr, b1Ptr->FinalInstruction.get());
+	EXPECT_TRUE(fired) << "the else-if-tree fold fires even when the else falls through";
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	ASSERT_NE(ifRootPtr->FalseInst, nullptr);
+	EXPECT_EQ(ifRootPtr->FalseInst->Op, OpCode::Nop);
+	ASSERT_NE(innerIfPtr->FalseInst, nullptr);
+	EXPECT_EQ(innerIfPtr->FalseInst->Op, OpCode::Nop);
+	// Block B is kept (the else falls through, so the trailing exit is not dead).
+	ASSERT_EQ(fn->Body->Blocks.size(), 4u);
+	EXPECT_EQ(fn->Body->Blocks[0].get(), b0Ptr);
+	EXPECT_EQ(fn->Body->Blocks[1].get(), elseBlock1Ptr);
+	EXPECT_EQ(fn->Body->Blocks.back().get(), b1Ptr) << "Block B (the exit) is kept";
+}
+
+// Bail: a non-root else-if is not a reduction candidate (the else-if tree is
+// reduced as a single group from the root).
+TEST(ReduceNestingTransform, ReduceNestingElseIfTreeBailsOnRootElseIf) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+
+	auto then2 = std::make_unique<Block>();
+	then2->Add(StLocInt(v, 2));
+	then2->SetFinal(std::make_unique<Leave>(body.get()));
+	auto innerIf = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(1),
+		                       ComparisonKind::Equality),
+		std::move(then2), MakeDeepElse(body.get(), v));
+	IfInstruction* innerIfPtr = innerIf.get();
+
+	auto elseBlock1 = std::make_unique<Block>();
+	elseBlock1->SetFinal(std::move(innerIf));
+	Block* elseBlock1Ptr = elseBlock1.get();
+
+	auto then1 = std::make_unique<Block>();
+	then1->Add(StLocInt(v, 1));
+	then1->SetFinal(std::make_unique<Leave>(body.get()));
+	auto ifRoot = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                       ComparisonKind::Equality),
+		std::move(then1), std::move(elseBlock1));
+
+	auto b0 = std::make_unique<Block>();
+	b0->SetFinal(std::move(ifRoot));
+	body->AddBlock(std::move(b0));
+	auto b1 = std::make_unique<Block>();
+	b1->SetFinal(std::make_unique<Leave>(body.get()));
+	Block* b1Ptr = b1.get();
+	body->AddBlock(std::move(b1));
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	// Call ReduceNesting on innerIf (a non-root else-if): GetElseIfParent(innerIf)
+	// == ifRoot (non-null), so the fold bails. `block` is innerIf's parent block
+	// (elseBlock1); the exit is a stand-in (the fold bails before consulting it).
+	EXPECT_FALSE(ReduceNestingTransform::ReduceNesting(elseBlock1Ptr, innerIfPtr, b1Ptr->FinalInstruction.get()));
+	fn->CheckInvariant(ILPhase::Normal);
+	EXPECT_EQ(innerIfPtr->FalseInst->Op, OpCode::Block) << "no mutation on bail";
+}
+
+// Bail: a chain with no trailing else (the leaf's FalseInst is a Nop, not a
+// Block) has no block to reduce.
+TEST(ReduceNestingTransform, ReduceNestingElseIfTreeBailsOnNoTrailingElse) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+
+	// innerIf with no else (FalseInst = null).
+	auto innerThen = std::make_unique<Block>();
+	innerThen->Add(StLocInt(v, 2));
+	innerThen->SetFinal(std::make_unique<Leave>(body.get()));
+	auto innerIf = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(1),
+		                       ComparisonKind::Equality),
+		std::move(innerThen), nullptr);
+	IfInstruction* innerIfPtr = innerIf.get();
+
+	auto elseBlock1 = std::make_unique<Block>();
+	elseBlock1->SetFinal(std::move(innerIf));
+
+	auto then1 = std::make_unique<Block>();
+	then1->Add(StLocInt(v, 1));
+	then1->SetFinal(std::make_unique<Leave>(body.get()));
+	auto ifRoot = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                       ComparisonKind::Equality),
+		std::move(then1), std::move(elseBlock1));
+	IfInstruction* ifRootPtr = ifRoot.get();
+
+	auto b0 = std::make_unique<Block>();
+	b0->SetFinal(std::move(ifRoot));
+	Block* b0Ptr = b0.get();
+	body->AddBlock(std::move(b0));
+	auto b1 = std::make_unique<Block>();
+	b1->SetFinal(std::make_unique<Leave>(body.get()));
+	Block* b1Ptr = b1.get();
+	body->AddBlock(std::move(b1));
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	EXPECT_FALSE(ReduceNestingTransform::ReduceNesting(b0Ptr, ifRootPtr, b1Ptr->FinalInstruction.get()));
+	fn->CheckInvariant(ILPhase::Normal);
+	EXPECT_EQ(b0Ptr->FinalInstruction.get(), ifRootPtr) << "no mutation on bail";
+}
+
+// The plain if-else case (no else-if chain): ifRoot's FalseInst is the deep else
+// block directly (not a Block-wrapped if). The else-if-tree code path handles it
+// (the walk does not descend; leaf == ifRoot).
+TEST(ReduceNestingTransform, ReduceNestingPlainIfElseFoldsDeepElse) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+
+	auto then1 = std::make_unique<Block>();
+	then1->Add(StLocInt(v, 1));
+	then1->SetFinal(std::make_unique<Leave>(body.get()));
+	auto elseBlock = MakeDeepElse(body.get(), v);
+	Block* elseBlockPtr = elseBlock.get();
+	auto ifRoot = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                       ComparisonKind::Equality),
+		std::move(then1), std::move(elseBlock));
+	IfInstruction* ifRootPtr = ifRoot.get();
+
+	auto b0 = std::make_unique<Block>();
+	b0->SetFinal(std::move(ifRoot));
+	Block* b0Ptr = b0.get();
+	body->AddBlock(std::move(b0));
+	auto b1 = std::make_unique<Block>();
+	b1->SetFinal(std::make_unique<Leave>(body.get()));
+	Block* b1Ptr = b1.get();
+	body->AddBlock(std::move(b1));
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	bool fired = ReduceNestingTransform::ReduceNesting(b0Ptr, ifRootPtr, b1Ptr->FinalInstruction.get());
+	EXPECT_TRUE(fired) << "the plain if-else fold fires on the deep-else shape";
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	ASSERT_NE(ifRootPtr->FalseInst, nullptr);
+	EXPECT_EQ(ifRootPtr->FalseInst->Op, OpCode::Nop) << "the else was extracted";
+	// The else block was promoted to the container; Block B was dropped.
+	ASSERT_EQ(fn->Body->Blocks.size(), 2u);
+	EXPECT_EQ(fn->Body->Blocks[0].get(), b0Ptr);
+	EXPECT_EQ(fn->Body->Blocks[1].get(), elseBlockPtr) << "the else block was promoted";
+}
+
+// A mscorlib safety sweep: run the full pre-pipeline + ReduceNestingTransform
+// (so ImproveILOrdering has re-inverted the early-return ifs), then fire
+// ReduceNesting on every if-final whose FalseInst is a Block (has an else), is
+// not an else-if (GetElseIfParent null -- reduce from the root), and whose
+// next-block exit is a duplicable keyword exit. The ILAst invariant must hold
+// after every fire.
+TEST(ReduceNestingTransform, MscorlibReduceNestingElseIfTreeSweep) {
+#if defined(_WIN32)
+	const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+	const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+	if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+	MetadataFile f(path);
+	ASSERT_TRUE(f.IsValid());
+
+	int processed = 0;
+	int candidates = 0;  // root if-finals with an else and a duplicable next-block exit
+	int fired = 0;        // ReduceNesting returned true
+	int bailShallowElse = 0;   // ShouldReduceNesting false (the else is shallow)
+	int bailNoElseBlock = 0;  // the leaf's FalseInst is not a Block (no trailing else)
+	ILTransformContext ctx;
+	for (const auto& m : f.MethodDefs()) {
+		if (m.RVA == 0) continue;
+		auto fn = ReadIL(f, m.Token, m.RVA);
+		if (!fn) continue;
+		++processed;
+		ControlFlowSimplification().Run(*fn, ctx);
+		StObjToStLoc().Run(*fn, ctx);
+		ILInlining().Run(*fn, ctx);
+		InlineReturnTransform().Run(*fn, ctx);
+		RemoveInfeasiblePathTransform().Run(*fn, ctx);
+		DetectPinnedRegions().Run(*fn, ctx);
+		DetectCatchWhenConditionBlocks().Run(*fn, ctx);
+		LdLocaDupInitObjTransform().Run(*fn, ctx);
+		EarlyExpressionTransforms().Run(*fn, ctx);
+		RemoveDeadVariableInit().Run(*fn, ctx);
+		ControlFlowSimplification().Run(*fn, ctx);
+		SwitchDetection().Run(*fn, ctx);
+		SwitchOnNullableTransform().Run(*fn, ctx);
+		LoopDetection().Run(*fn, ctx);
+		PatternMatchingTransform().Run(*fn, ctx);
+		ConditionDetection().Run(*fn, ctx);
+		HighLevelLoopTransform::Run(*fn, ctx);
+		ReduceNestingTransform().Run(*fn, ctx);
+		RecomputeIncomingEdgeCounts(*fn);
+
+		std::function<void(ILInstruction*, Block*)> walk;
+		walk = [&](ILInstruction* inst, Block* continueTarget) {
+			if (!inst) return;
+			if (auto* cont = dynamic_cast<BlockContainer*>(inst)) {
+				Block* ct = continueTarget;
+				switch (cont->Kind) {
+					case ContainerKind::Loop:
+					case ContainerKind::While:
+						ct = cont->Blocks.empty() ? nullptr : cont->Blocks.front().get(); break;
+					case ContainerKind::DoWhile:
+						ct = cont->Blocks.empty() ? nullptr : cont->Blocks.back().get(); break;
+					case ContainerKind::Normal:
+					case ContainerKind::Switch: break;
+				}
+				for (std::size_t i = 0; i < cont->Blocks.size(); ++i) {
+					auto* blk = cont->Blocks[i].get();
+					for (auto& ni : blk->Instructions) walk(ni.get(), ct);
+					auto* iff = dynamic_cast<IfInstruction*>(blk->FinalInstruction.get());
+					if (iff) {
+						// The else case: FalseInst is a Block (not a Nop -- the no-else
+						// case is covered by the no-else sweep), and the if is the root
+						// of its else-if tree (GetElseIfParent null).
+						if (iff->FalseInst && iff->FalseInst->Op != OpCode::Nop
+							&& !ReduceNestingTransform::GetElseIfParent(iff)) {
+							++candidates;
+							Block* blockB = (i + 1 < cont->Blocks.size()) ? cont->Blocks[i + 1].get() : nullptr;
+							ILInstruction* nextInsn = nullptr;
+							if (blockB) nextInsn = blockB->Instructions.empty()
+								? blockB->FinalInstruction.get() : blockB->Instructions[0].get();
+							ILInstruction* keywordExit = nullptr;
+							if (nextInsn && ReduceNestingTransform::CanDuplicateExit(nextInsn, ct, keywordExit)) {
+								if (ReduceNestingTransform::ReduceNesting(blk, iff, keywordExit)) {
+									++fired;
+									fn->CheckInvariant(ILPhase::Normal);
+									RecomputeIncomingEdgeCounts(*fn);
+								} else {
+									// Distinguish the bail reasons: walk down the else-if chain
+									// to the leaf (the innermost if whose FalseInst is not a
+									// Block-wrapped if); the leaf's FalseInst not being a Block
+									// is the 'no trailing else' bail, otherwise the shallow bail.
+									IfInstruction* leaf = iff;
+									while (auto* eb = dynamic_cast<Block*>(leaf->FalseInst.get())) {
+										auto* next = dynamic_cast<IfInstruction*>(eb->FinalInstruction.get());
+										if (!next) break;
+										leaf = next;
+									}
+									auto* elseContent = dynamic_cast<Block*>(leaf->FalseInst.get());
+									if (!elseContent) ++bailNoElseBlock;
+									else ++bailShallowElse;
+								}
+							}
+						}
+						walk(iff->TrueInst.get(), ct);
+						walk(iff->FalseInst.get(), ct);
+					} else if (blk->FinalInstruction) {
+						walk(blk->FinalInstruction.get(), ct);
+					}
+				}
+				return;
+			}
+			if (inst->Op == OpCode::ILFunction) return;
+			for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i), continueTarget);
+		};
+		walk(fn->Body.get(), nullptr);
+		if (processed >= 3000) break;
+	}
+	EXPECT_GT(processed, 2000) << "the sweep must exercise real methods";
+	std::cerr << "ReduceNesting else-if-tree sweep: processed=" << processed
+	          << " candidates=" << candidates << " fired=" << fired
+	          << " bailShallowElse=" << bailShallowElse
+	          << " bailNoElseBlock=" << bailNoElseBlock << "\n";
+	(void)candidates; (void)bailShallowElse; (void)bailNoElseBlock;
 }

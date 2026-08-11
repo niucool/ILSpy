@@ -98,6 +98,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <vector>
 
 namespace ILSpy::Decompiler::IL {
 
@@ -285,6 +286,50 @@ bool ThenCanBeMadeToExit(ILInstruction* then) {
 		return false;
 	}
 	return HasFlag(then->Flags(), InstructionFlags::EndPointUnreachable);
+}
+
+// ---- ReduceNesting (the else-if-tree case) helpers ----
+
+// Whether a block's end point is unreachable -- the block exits via a
+// Leave/Throw final (a real exit), NOT a Branch/Nop final (a fall-through) or
+// an IfInstruction final (the if-as-final block, whose end point is the if's
+// own control flow). The C# `Block.HasFlag(EndPointUnreachable)` would read the
+// flag directly, but this port's Block uses a Branch for the fall-through (which
+// sets EndPointUnreachable unlike the C# Nop final -- the D157 divergence), so
+// the faithful check is the FinalInstruction's opcode (the same check
+// EnsureEndPointUnreachable uses). Used by the ReduceNesting else-if-tree fold
+// to decide whether the trailing exit (Block B) is dead after the else content
+// is promoted to the container.
+bool BlockExitsReal(Block* b) {
+	if (!b) return false;
+	auto* f = b->FinalInstruction.get();
+	if (!f) return false;  // a null final is a void fall-through
+	return f->Op == OpCode::Leave || f->Op == OpCode::Throw;
+}
+
+// Remove `blockB` from its container's Blocks list (the dead-exit removal --
+// after the else content is promoted to the container and exits, Block B's
+// trailing exit is unreachable and is dropped). Re-parents and re-numbers the
+// remaining blocks (the insert/remove pattern). Only removes when `blockB` has
+// no non-terminal Instructions (it holds only the dead exit); a Block B with
+// falseCode is left in place (conservative -- the C# RemoveRange drops the
+// trailing exitInst from a single block, which maps to dropping Block B's
+// final here; a Block B with content would lose its exit, so it is not touched).
+void RemoveEmptyExitBlock(Block* blockB) {
+	if (!blockB) return;
+	auto* container = dynamic_cast<BlockContainer*>(blockB->Parent);
+	if (!container) return;
+	if (!blockB->Instructions.empty()) return;  // conservative: only drop a bare-exit Block B
+	for (auto it = container->Blocks.begin(); it != container->Blocks.end(); ++it) {
+		if (it->get() == blockB) {
+			container->Blocks.erase(it);
+			break;
+		}
+	}
+	for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+		container->Blocks[i]->Parent = container;
+		container->Blocks[i]->ChildIndex = static_cast<int>(i);
+	}
 }
 
 // ---- ImproveILOrdering (the wired ReduceNestingTransform fold) ----
@@ -763,18 +808,21 @@ void ReduceNestingTransform::ExtractElseBlock(IfInstruction* ifInst) {
 	ifInst->FalseInst->ChildIndex = 2;
 }
 
-// The C# `ReduceNestingTransform.ReduceNesting` (the no-else case; the
-// else-if-tree case is deferred): reduces the nesting of
-//   if (cond) { then } exit;
-// to
-//   if (!cond) exit; then...; exit;
-// by duplicating the keyword `exit` into the if's then and inverting the if, so
-// the then (which exits) moves after the if and the exit becomes the if's
-// (negated) then. `exitInst` is the keyword exit (return/break/continue) the
-// caller found via `CanDuplicateExit` (the C# `Visit` passes `keywordExit`).
-// Returns true if the fold fired. No pipeline transform consults it yet (the
-// wired fold is the subsequent iteration); the corpus sweep in the test suite
-// fires it on real candidates to validate safety.
+// The C# `ReduceNestingTransform.ReduceNesting`: reduces the nesting of an
+// if/else-if/else followed by a keyword exit by duplicating the exit into the
+// then blocks and moving the else content out, so the (exiting) thens stay
+// nested but the else content (the bulk) flattens to the fall-through after the
+// if chain. Two cases:
+//  * no-else:   if (cond) { then } exit;              -> if (!cond) exit; then...; exit;
+//  * else-tree: if (c1) { t1 } else if (c2) { t2 } else { elseBlock } exit;
+//              ->  if (c1) { t1; exit; } if (c2) { t2; exit; } elseBlock...; exit;
+// `exitInst` is the keyword exit (return/break/continue) the caller found via
+// `CanDuplicateExit` (the C# `Visit` passes `keywordExit`). Returns true if the
+// fold fired. No pipeline transform consults it yet (the wired Visit walk is the
+// subsequent iteration); the corpus sweep in the test suite fires it on real
+// candidates to validate safety.
+//
+// ---- no-else case ----
 //
 // Block-model adaptation (the recurring D73/D75 divergence): the C# operates on
 // a single block `[ifInst, exit]` (the if is a non-terminal, the exit is a
@@ -804,52 +852,141 @@ void ReduceNestingTransform::ExtractElseBlock(IfInstruction* ifInst) {
 //    B's original FinalInstruction (the exit), which may be a leave-from-try
 //    (not the keyword `exitInst` the caller found by walking out of the try);
 //    replace it with the keyword clone.
-// The fold bails (returns false, no mutation) if: the if has an else (the
-// else-if-tree case, deferred), the then is shallow (`maxDepth < 2`), Block B
-// does not exist or has falseCode (InvertIf needs the no-falseCode exit holder),
-// Block B is not single-predecessor (InvertIf's requirement -- the C# has the
-// falseCode in the same block as the if, so it is single-pred by construction),
-// or the then cannot be made to exit (an if-as-final Block or a bare non-exit --
-// InvertIf would bail, leaving the fold incomplete).
+// The no-else fold bails (returns false, no mutation) if the then is shallow
+// (`maxDepth < 2`), Block B does not exist or has falseCode (InvertIf needs the
+// no-falseCode exit holder), Block B is not single-predecessor (InvertIf's
+// requirement -- the C# has the falseCode in the same block, single-pred by
+// construction), or the then cannot be made to exit (an if-as-final Block or a
+// bare non-exit -- InvertIf would bail, leaving the fold incomplete).
+//
+// ---- else-if-tree case (and the plain if-else case) ----
+//
+// The C# do-while walks the else-if tree leaf-to-root, and per iteration calls
+// `EnsureEndPointUnreachable(ifInst.TrueInst, exitInst)` (make the then exit),
+// checks `ifInst.FalseInst.HasFlag(EndPointUnreachable)` and `RemoveRange`s the
+// trailing exit (the dead exitInst when the else exits), then `ExtractElseBlock`
+// (inline the else content into the parent block). Block-model adaptation (the
+// recurring D73/D75 divergence, the crux D160's deferral flagged): the C# inlines
+// the else content into the PARENT BLOCK (which can be a nested else block),
+// so the else-if chain flattens into a single block `[ifRoot, ifInner, ...,
+// elseContent]`. This port's if-as-final model makes each if a block's
+// FinalInstruction, so the else content cannot be inlined into a nested else
+// block (it would precede the if-as-final). The faithful adaptation is to
+// PROMOTE each else block to the CONTAINER as a new sibling block: after the
+// fold the container is `[Block A (ifRoot), Block C (ifInner's holder), ...,
+// Block E (else content), Block B (exit)]`, which renders the same as the C#'s
+// single-block structure (each block falls through positionally to the next).
+//
+// The KEY ORDERING difference from the C#: the C# does `ExtractElseBlock`
+// leaf-to-root (inlining into the parent block, which always exists). This port
+// MUST do `ExtractElseBlock` ROOT-TO-LEAF, because `ExtractElseBlock` moves the
+// else block to the CONTAINER of the if's parent block, and an intermediate
+// else-if's parent block is another if's FalseInst (not a container) until its
+// own parent if's else block has been promoted. After `ExtractElseBlock(ifRoot)`
+// the next else-if's holder block is in the container, so `ExtractElseBlock`
+// on the next if can promote its else. The `EnsureEndPointUnreachable` calls
+// (the then-exit duplication) are independent of the `FalseInst` moves, so they
+// all precede the `ExtractElseBlock` calls.
+//
+// The dead-exit removal (the C# `RemoveRange`): the C# checks
+// `ifInst.FalseInst.HasFlag(EndPointUnreachable)` per iteration and removes the
+// trailing `exitInst` when the else exits. This port promotes the else content
+// to the container (its end point is invariant across the moves), so a single
+// check on the promoted else content (`BlockExitsReal`) suffices: when the else
+// content exits, Block B (the trailing exit holder) is unreachable and is
+// dropped (`RemoveEmptyExitBlock`, only when Block B has no non-terminals -- a
+// conservative faithfulness gap for the Block-B-with-falseCode case that does
+// not arise in the else-if-tree shape, where the exit is directly after the if).
 bool ReduceNestingTransform::ReduceNesting(Block* block, IfInstruction* ifInst,
                                            ILInstruction* exitInst) {
 	if (!block || !ifInst || !exitInst) return false;
 	// The if must be the block's FinalInstruction (the C# `ifInst.Parent == block`).
 	if (block->FinalInstruction.get() != ifInst) return false;
-	// No else (the C# `ifInst.FalseInst.MatchNop()` -- a null/Nop FalseInst is
-	// this port's "no else"). A non-Nop FalseInst is an else (the else-if-tree
-	// case, deferred).
-	if (!IsNop(ifInst->FalseInst.get())) return false;
-	// Heuristic: the then must be deeply nested (the C# `if (maxDepth < 2) return false`).
+	// Start tallying stats from the root's then (the C# tallies before the
+	// no-else/else-if-tree branch).
 	int maxStatements = 0, maxDepth = 0;
 	UpdateStats(ifInst->TrueInst.get(), maxStatements, maxDepth);
-	if (maxDepth < 2) return false;
-	// Block B (the exit holder) must exist, have no falseCode (the no-else case
-	// `if (cond) { then } exit;` has the exit directly after the if), and be
-	// single-predecessor (InvertIf's requirement; the C# has the falseCode in the
-	// same block, single-pred by construction).
-	Block* blockB = NextBlockInContainer(block);
-	if (!blockB) return false;
-	if (!blockB->Instructions.empty()) return false;
-	if (blockB->IncomingEdgeCount != 1) return false;
-	// The then must exit (or be made to exit by EnsureEndPointUnreachable); an
-	// if-as-final Block or a bare non-exit cannot, so InvertIf would bail.
-	if (!ThenCanBeMadeToExit(ifInst->TrueInst.get())) return false;
-	// Step 4: ensure the then exits via the keyword exit (the C# case-b net
-	// result; see the header for why `exitInst` not Block B's original final).
-	EnsureEndPointUnreachable(ifInst->TrueInst.get(), exitInst);
-	// Step 5: invert (reads Block B's exit into the if's TrueInst, moves the then
-	// into Block B).
-	ConditionDetection::InvertIf(block, ifInst);
-	// Step 6: ensure the if's TrueInst is the keyword exit. InvertIf made it Block
-	// B's original final (the exit), which may be a leave-from-try (not the
-	// keyword `exitInst` the caller found by walking out of the try).
-	if (!ExitsStructurallyEqual(ifInst->TrueInst.get(), exitInst)) {
-		auto exitClone = exitInst->Clone();
-		ifInst->TrueInst = std::move(exitClone);
-		ifInst->TrueInst->Parent = ifInst;
-		ifInst->TrueInst->ChildIndex = 1;
+
+	// ---- no-else case: if (cond) { then } exit; -> if (!cond) exit; then...; exit; ----
+	if (IsNop(ifInst->FalseInst.get())) {
+		// Heuristic: the then must be deeply nested (the C# `if (maxDepth < 2) return false`).
+		if (maxDepth < 2) return false;
+		// Block B (the exit holder) must exist, have no falseCode (the no-else case
+		// `if (cond) { then } exit;` has the exit directly after the if), and be
+		// single-predecessor (InvertIf's requirement; the C# has the falseCode in
+		// the same block, single-pred by construction).
+		Block* blockB = NextBlockInContainer(block);
+		if (!blockB) return false;
+		if (!blockB->Instructions.empty()) return false;
+		if (blockB->IncomingEdgeCount != 1) return false;
+		// The then must exit (or be made to exit by EnsureEndPointUnreachable); an
+		// if-as-final Block or a bare non-exit cannot, so InvertIf would bail.
+		if (!ThenCanBeMadeToExit(ifInst->TrueInst.get())) return false;
+		// Step 4: ensure the then exits via the keyword exit (the C# case-b net
+		// result; see the header for why `exitInst` not Block B's original final).
+		EnsureEndPointUnreachable(ifInst->TrueInst.get(), exitInst);
+		// Step 5: invert (reads Block B's exit into the if's TrueInst, moves the then
+		// into Block B).
+		ConditionDetection::InvertIf(block, ifInst);
+		// Step 6: ensure the if's TrueInst is the keyword exit. InvertIf made it Block
+		// B's original final (the exit), which may be a leave-from-try (not the
+		// keyword `exitInst` the caller found by walking out of the try).
+		if (!ExitsStructurallyEqual(ifInst->TrueInst.get(), exitInst)) {
+			auto exitClone = exitInst->Clone();
+			ifInst->TrueInst = std::move(exitClone);
+			ifInst->TrueInst->Parent = ifInst;
+			ifInst->TrueInst->ChildIndex = 1;
+		}
+		return true;
 	}
+
+	// ---- else-if-tree case (and the plain if-else case) ----
+	// Root-bail: an else-if tree is reduced as a single group from the root
+	// IfInstruction, so a non-root else-if is not itself a reduction candidate.
+	if (GetElseIfParent(ifInst) != nullptr) return false;
+	// Walk down the else-if chain, tallying each else-if's then. The chain is
+	// [ifRoot, ..., leaf] where leaf's FalseInst is the else content (a Block,
+	// not a Block-wrapped if). For a plain if-else (no else-if chain), the walk
+	// does not descend and leaf == ifRoot.
+	std::vector<IfInstruction*> chain;
+	chain.push_back(ifInst);
+	IfInstruction* cur = ifInst;
+	while (auto* elseIfInst = UnwrapElseIf(cur->FalseInst.get())) {
+		UpdateStats(elseIfInst->TrueInst.get(), maxStatements, maxDepth);
+		chain.push_back(elseIfInst);
+		cur = elseIfInst;
+	}
+	IfInstruction* leaf = cur;
+	// The leaf's FalseInst is the else content. A chain with no trailing else
+	// (a bare Nop) has no block to reduce (the C# guards this -- #3891).
+	auto* elseContent = dynamic_cast<Block*>(leaf->FalseInst.get());
+	if (!elseContent || !ShouldReduceNesting(elseContent, maxStatements, maxDepth))
+		return false;
+	// Block B (the exit holder) is the block after Block A. The dead-exit removal
+	// drops it when the else content exits.
+	Block* blockB = NextBlockInContainer(block);
+	// Make every then in the chain exit via the keyword exit (the C# do-while
+	// calls EnsureEndPointUnreachable(ifInst.TrueInst, exitInst) per iteration;
+	// the TrueInst slot is independent of the FalseInst moves, so all the
+	// EnsureEndPointUnreachable calls can precede the ExtractElseBlock calls).
+	for (auto* iff : chain)
+		EnsureEndPointUnreachable(iff->TrueInst.get(), exitInst);
+	// Extract the else blocks root-to-leaf, promoting each else block to the
+	// container as a new sibling after Block A's position. See the header for why
+	// root-to-leaf (not the C# leaf-to-root): an intermediate else-if's parent
+	// block is not in a container until its own parent if's else block has been
+	// promoted. After ExtractElseBlock(ifRoot), the next else-if's holder block
+	// is in the container, so ExtractElseBlock on the next if can promote its else.
+	for (auto* iff : chain)
+		ExtractElseBlock(iff);
+	// Dead-exit removal (the C# `if (ifInst.FalseInst.HasFlag(EndPointUnreachable))
+	// block.Instructions.RemoveRange(...)` inside the do-while): when the else
+	// content exits, the trailing exit (Block B) is unreachable and is dropped.
+	// The C# checks the if's FalseInst per iteration; this port promotes the else
+	// content to the container (its end point is invariant across the moves), so
+	// a single check on the promoted else content suffices.
+	if (blockB && BlockExitsReal(elseContent))
+		RemoveEmptyExitBlock(blockB);
 	return true;
 }
 
