@@ -73,6 +73,7 @@ add_executable(ilspy_tests
     Decompiler/IL/Transforms/InterpolatedStringTransform_Test.cpp
     Decompiler/IL/Transforms/FixRemainingIncrements_Test.cpp
     Decompiler/IL/Transforms/CopyPropagation_Test.cpp
+    Decompiler/IL/Transforms/ReduceNestingTransform_Test.cpp
 )
 target_link_libraries(ilspy_tests PRIVATE
     ILSpy::ilspy
