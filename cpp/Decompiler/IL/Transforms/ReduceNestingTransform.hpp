@@ -39,13 +39,17 @@
 //    ConditionDetection.GetStartILOffset (which the Block-label adaptation
 //    makes valid for Block TrueInsts and the next block) and the D151
 //    ConditionDetection.InvertIf. The trailing-leave handling (the C#
-//    CanDuplicateExit try/finally walk that replaces a non-keyword Leave exit
-//    with a keyword) is deferred; the bail-for-non-keyword-Leave-exit guard is
-//    ported so the fold does not introduce a goto. The ReduceNesting /
+//    `block.Instructions.Last() is Leave` check + the CanDuplicateExit
+//    replacement) is wired: when the if's block's last instruction (Xn = this
+//    port's nextBlock->FinalInstruction, the old-then exit) is a non-keyword
+//    Leave, it is replaced with a keyword exit (return/continue/break) via
+//    CanDuplicateExit before InvertIf, or the fold bails if it can't be
+//    duplicated. `continueTarget` (the loop entry-point block a `continue`
+//    branches to) is tracked by the Visit walk per-container (Loop/While -> the
+//    entry point; DoWhile -> the last block). The ReduceNesting /
 //    ReduceSwitchNesting / ExtractElseBlock folds (the rest of the C# `Visit`)
-//    are deferred (need the full CanDuplicateExit / EnsureEndPointUnreachable /
-//    ExtractElseBlock helpers + the D39 dominator analysis for
-//    ReduceSwitchNesting).
+//    are deferred (need the full EnsureEndPointUnreachable / ExtractElseBlock
+//    helpers + the D39 dominator analysis for ReduceSwitchNesting).
 //  * CanDuplicateExit (a tested-but-not-yet-wired foundation): the helper that
 //    decides whether an exit is a duplicable keyword exit (return/break/
 //    continue), walking out of a try/pinned/lock container to the following
@@ -98,8 +102,7 @@ public:
     // reports the keyword exit to duplicate (the exit itself for a direct
     // return/break/continue, or the keyword exit found by walking out of a
     // try/pinned/lock container). `continueTarget` is the loop entry-point block
-    // a `continue` branches to (null at the top level). Ported as a tested-
-    // but-not-yet-wired foundation; no pipeline transform consults it yet.
+    // a `continue` branches to (null at the top level).
     static bool CanDuplicateExit(ILInstruction* exit, Block* continueTarget,
                                  ILInstruction*& keywordExit);
 };

@@ -328,15 +328,30 @@ bool EndPointUnreachableCSharp(ILInstruction* inst) {
 // propagation through the bare-Leave path is a separate piece).
 //
 // The trailing-leave handling (the C# `block.Instructions.Last() is Leave &&
-// !IsLeavingFunction && TargetContainer.Kind == Normal` check + CanDuplicateExit
-// replacement) is deferred: the CanDuplicateExit try/finally walk is a larger
-// piece. The bail-for-non-keyword-Leave-exit guard is ported so the fold does
-// not introduce a goto (a non-keyword Leave at the fall-through position after
-// InvertIf would render as `goto`); the would-fire cases on this corpus carry a
-// Branch/Throw exit (not a non-keyword Leave), so the guard is a no-op for them.
-// `continueTarget` (the C# parameter, for CanDuplicateExit) is not tracked
-// (deferred with the trailing-leave handling).
-void ImproveILOrdering(Block* block, IfInstruction* ifInst) {
+// !IsLeavingFunction && TargetContainer.Kind == Normal` check + the
+// CanDuplicateExit replacement): the C# checks the if's block's LAST instruction
+// (Xn = the old-then exit). In this port's if-as-FinalInstruction model the C#
+// if's block `[ifInst, oldThen..., Xn]` is split: the if is this block's
+// FinalInstruction (Block A) and the `oldThen...; Xn` is the NEXT block (Block B,
+// the fall-through). So Xn = `nextBlock->FinalInstruction` (Block B's control flow),
+// NOT this block's FinalInstruction (which is ifInst). If Xn is a non-keyword
+// Leave (a Leave of a Normal container that is not the function), InvertIf would
+// move it into the if's then where it would render as `goto`; the C# replaces it
+// with a keyword exit (return/continue/break) via CanDuplicateExit BEFORE InvertIf,
+// so the then gets the keyword exit instead of a goto. If the leave can't be
+// duplicated, bail (don't invert). `continueTarget` (the C# parameter, the loop
+// entry-point block a `continue` branches to) is tracked by the Visit walk and
+// passed in; it is null at the top level. The clone is taken before the
+// SetFinal that destroys the old Xn (CanDuplicateExit may report keywordExit =
+// Xn itself for a direct return/break/continue).
+//
+// On the .NET Framework 4 legacy-csc mscorlib corpus the trailing-leave
+// handling is faithfulness-only (a corpus probe counted 0 non-keyword-leave Xn
+// exits across the gate-would-fire candidates -- they all carry a Branch or
+// `other` exit), matching the D59/D60/D69 precedent; the wired ImproveILOrdering
+// fold still fires (the IL-order gate fires on the candidates whose
+// ConditionDetection inversion put the code in the wrong IL order).
+void ImproveILOrdering(Block* block, IfInstruction* ifInst, Block* continueTarget) {
 	if (!block || !ifInst) return;
 	// The if must be the block's FinalInstruction (the C# `ifInst.Parent == block`).
 	if (block->FinalInstruction.get() != ifInst) return;
@@ -355,14 +370,23 @@ void ImproveILOrdering(Block* block, IfInstruction* ifInst) {
 	int trueStart = ConditionDetection::GetStartILOffset(ifInst->TrueInst.get(), trueEmpty);
 	int falseStart = ConditionDetection::GetStartILOffset(nextBlock, falseEmpty);
 	if (trueEmpty || falseEmpty || falseStart >= trueStart) return;
-	// Trailing-leave guard (deferred CanDuplicateExit): a non-keyword Leave exit
-	// (a leave of a Normal container that is not the function) at the fall-through
-	// position after InvertIf would render as `goto`; bail rather than introduce it.
-	// The C# replaces it with a keyword exit via CanDuplicateExit (deferred).
-	if (auto* leave = dynamic_cast<Leave*>(TrueInstExit(ifInst->TrueInst.get()))) {
+	// Trailing-leave handling: the C# checks the if's block's last instruction
+	// (Xn = this port's nextBlock->FinalInstruction, the old-then exit). If Xn
+	// is a non-keyword Leave, InvertIf would move it into the then where it renders
+	// as `goto`; replace it with a keyword exit via CanDuplicateExit first, or bail
+	// if it can't be duplicated.
+	if (auto* leave = dynamic_cast<Leave*>(nextBlock->FinalInstruction.get())) {
 		if (!IsLeavingFunction(leave) && leave->TargetContainer &&
-		    leave->TargetContainer->Kind == ContainerKind::Normal)
-			return;
+		    leave->TargetContainer->Kind == ContainerKind::Normal) {
+			ILInstruction* keywordExit = nullptr;
+			if (!ReduceNestingTransform::CanDuplicateExit(nextBlock->FinalInstruction.get(),
+			                                  continueTarget, keywordExit))
+				return;  // can't replace with a keyword exit; don't invert
+			// Clone before SetFinal destroys the old Xn (CanDuplicateExit may
+			// report keywordExit = Xn itself for a direct return/break/continue).
+			auto keywordExitClone = keywordExit->Clone();
+			nextBlock->SetFinal(std::move(keywordExitClone));
+		}
 	}
 	ConditionDetection::InvertIf(block, ifInst);
 }
@@ -372,34 +396,53 @@ void ImproveILOrdering(Block* block, IfInstruction* ifInst) {
 // ImproveILOrdering on each if non-terminal; this port's if-as-final model makes
 // the if the block's FinalInstruction, so the visit checks the final). Recurses
 // into nested containers (the if's arms, the block's non-terminal containers).
-// `continueTarget` (the C# Loop/While/DoWhile tracking for CanDuplicateExit) is
-// not tracked (deferred with the trailing-leave handling). The
-// ReduceNesting/ReduceSwitchNesting/ExtractElseBlock folds and the content-block
-// recursion are deferred (need the full CanDuplicateExit/EnsureEndPointUnreachable/
-// ExtractElseBlock helpers + the dominator analysis).
-void VisitContainers(ILInstruction* inst);
-void VisitContainer(BlockContainer* container) {
+// `continueTarget` (the C# Loop/While/DoWhile tracking for CanDuplicateExit's
+// `continue` detection) is set per-container based on the container's Kind
+// (Loop/While -> the entry point Blocks[0]; DoWhile -> the last block
+// Blocks.back(); Normal/Switch -> inherit the parent's continueTarget), matching
+// the C# `Visit(BlockContainer)` switch. The ReduceNesting/ReduceSwitchNesting/
+// ExtractElseBlock folds and the content-block recursion are deferred (need the
+// full EnsureEndPointUnreachable/ExtractElseBlock helpers + the dominator
+// analysis).
+void VisitContainers(ILInstruction* inst, Block* continueTarget);
+void VisitContainer(BlockContainer* container, Block* continueTarget) {
+	// Set continueTarget based on the container's Kind (the C#
+	// `Visit(BlockContainer)` switch). Loop/While -> the entry point (Blocks[0]);
+	// DoWhile -> the last block (Blocks.back()); Normal/Switch -> inherit the
+	// parent's continueTarget (the C# does not override for these kinds).
+	switch (container->Kind) {
+		case ContainerKind::Loop:
+		case ContainerKind::While:
+			continueTarget = container->Blocks.empty() ? nullptr : container->Blocks.front().get();
+			break;
+		case ContainerKind::DoWhile:
+			continueTarget = container->Blocks.empty() ? nullptr : container->Blocks.back().get();
+			break;
+		case ContainerKind::Normal:
+		case ContainerKind::Switch:
+			break;  // inherit the parent's continueTarget
+	}
 	for (auto& block : container->Blocks) {
 		for (auto& inst : block->Instructions)
-			VisitContainers(inst.get());
+			VisitContainers(inst.get(), continueTarget);
 		if (auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get())) {
-			ImproveILOrdering(block.get(), iff);
-			VisitContainers(iff->TrueInst.get());
-			VisitContainers(iff->FalseInst.get());
+			ImproveILOrdering(block.get(), iff, continueTarget);
+			VisitContainers(iff->TrueInst.get(), continueTarget);
+			VisitContainers(iff->FalseInst.get(), continueTarget);
 		} else if (block->FinalInstruction) {
-			VisitContainers(block->FinalInstruction.get());
+			VisitContainers(block->FinalInstruction.get(), continueTarget);
 		}
 	}
 }
-void VisitContainers(ILInstruction* inst) {
+void VisitContainers(ILInstruction* inst, Block* continueTarget) {
 	if (!inst) return;
 	if (auto* cont = dynamic_cast<BlockContainer*>(inst)) {
-		VisitContainer(cont);
+		VisitContainer(cont, continueTarget);
 		return;
 	}
 	if (inst->Op == OpCode::ILFunction) return;  // inline ILFunctions already transformed
 	for (int i = 0; i < inst->ChildCount(); ++i)
-		VisitContainers(inst->GetChild(i));
+		VisitContainers(inst->GetChild(i), continueTarget);
 }
 
 } // namespace
@@ -410,8 +453,7 @@ void VisitContainers(ILInstruction* inst) {
 // ReduceNesting / ReduceSwitchNesting folds consult it. `keywordExit` reports
 // the keyword exit to duplicate (the exit itself for a direct return/break/
 // continue, or the keyword exit found by walking out of a try/pinned/lock
-// container). Ported as a tested-but-not-yet-wired foundation (no pipeline
-// transform consults it yet -- the wired folds are the subsequent iterations).
+// container).
 //
 // Block-model adaptation (the recurring D73/D75 divergence): the C# walks up
 // from `leave.TargetContainer` until it finds an instruction in a Block that is
@@ -616,7 +658,7 @@ void ReduceNestingTransform::Run(ILFunction& function, ILTransformContext& conte
 	// helpers + the D39 dominator analysis). Visit recurses into every
 	// BlockContainer's blocks and calls ImproveILOrdering on each
 	// if-as-FinalInstruction.
-	VisitContainer(dynamic_cast<BlockContainer*>(function.Body.get()));
+	VisitContainer(dynamic_cast<BlockContainer*>(function.Body.get()), nullptr);
 	// EliminateRedundantTryFinally: the C# iterates
 	// `function.Descendants.OfType<TryFinally>()` and folds each. This port has
 	// no GC: folding an outer TryFinally destroys any TryFinallys nested in its

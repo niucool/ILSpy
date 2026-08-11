@@ -935,6 +935,163 @@ TEST(ReduceNestingTransform, ImproveILOrderingNoOpWhenILOrderCorrect) {
 	EXPECT_EQ(cond->Kind, ComparisonKind::Equality) << "the gate bails when the IL order is correct";
 }
 
+// The wired trailing-leave handling: when the if block last instruction
+// (Xn = this port nextBlock->FinalInstruction, the old-then exit) is a
+// non-keyword Leave (a Leave of a Normal container that is not the function),
+// ImproveILOrdering replaces it with a keyword exit via CanDuplicateExit before
+// InvertIf, so the if then gets the keyword exit (return/break/continue)
+// instead of a goto. The if is inside a Normal container (a try-finally try
+// body); the next block exit is a leave(tryC) (a non-keyword Leave of the
+// try body). CanDuplicateExit walks out of the try-finally to the leave(body)
+// (a return) after it, so the non-keyword Leave is replaced with the return.
+// The gate fires (the next block comes before the TrueInst in IL), so
+// ImproveILOrdering inverts: the TrueInst becomes the return clone, the old
+// then (the stloc + leave(tryC)) moves into the next block.
+TEST(ReduceNestingTransform, ImproveILOrderingTrailingLeaveReplacedWithKeyword) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+
+	// The if is inside a try-finally try body (a Normal container).
+	auto tryC = std::make_unique<BlockContainer>();  // Normal
+	auto finC = std::make_unique<BlockContainer>();  // Normal
+	auto* tryCPtr = tryC.get();
+	auto* finCPtr = finC.get();
+
+	// Block A (in tryC): if (v == 0) { Block { stloc v(2); leave(tryC) } }
+	// (TrueInst = the inlined falseCode+exit, unreachable; FalseInst = null;)
+	// the TrueInst starts at IL_000A.
+	auto b0 = std::make_unique<Block>();
+	b0->StartILOffset = 0;
+	auto trueInstBlock = std::make_unique<Block>();
+	trueInstBlock->Add(StLocInt(v, 2));
+	trueInstBlock->SetFinal(std::make_unique<Leave>(tryCPtr));
+	trueInstBlock->StartILOffset = 10;  // the falseCode (TrueInst) at IL_000A
+	trueInstBlock->RenumberChildren();
+	auto iff = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                   ComparisonKind::Equality),
+		std::move(trueInstBlock), nullptr);
+	b0->SetFinal(std::move(iff));
+	tryC->AddBlock(std::move(b0));
+
+	// Block B (next in tryC): leave(tryC) -- Xn, a non-keyword Leave of the
+	// try body (a Normal container, not the function). Starts at IL_0002 <
+	// IL_000A, so the gate fires.
+	auto b1 = std::make_unique<Block>();
+	b1->StartILOffset = 2;
+	b1->SetFinal(std::make_unique<Leave>(tryCPtr));
+	tryC->AddBlock(std::move(b1));
+
+	// Finally: a normal finally (leave(finC)), so CanDuplicateExit does not
+	// bail on the finally (EndPointUnreachableCSharp(finC) is false -- the
+	// finally has a leave of finC).
+	auto finB = std::make_unique<Block>();
+	finB->SetFinal(std::make_unique<Leave>(finCPtr));
+	finC->AddBlock(std::move(finB));
+
+	// The try-finally is a non-terminal in the body block, followed by a
+	// leave(body) (a return) -- the keyword exit the walk finds.
+	auto pre = std::make_unique<Block>();
+	pre->StartILOffset = 0;
+	auto tf = std::make_unique<TryFinally>(std::move(tryC), std::move(finC));
+	pre->Add(std::move(tf));
+	pre->SetFinal(std::make_unique<Leave>(body.get()));
+	body->AddBlock(std::move(pre));
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	ReduceNestingTransform().Run(*fn, Ctx());
+	fn->CheckInvariant(ILPhase::Normal);
+	// Block A is in the try-finally try body: body.Blocks[0] (pre) ->
+	// Instructions[0] (TryFinally) -> TryBlock (tryC) -> Blocks[0].
+	auto* pre2 = fn->Body->Blocks[0].get();
+	auto* tf2 = dynamic_cast<TryFinally*>(pre2->Instructions[0].get());
+	ASSERT_NE(tf2, nullptr);
+	auto* tryC2 = dynamic_cast<BlockContainer*>(tf2->TryBlock.get());
+	ASSERT_NE(tryC2, nullptr);
+	auto* iff2 = dynamic_cast<IfInstruction*>(tryC2->Blocks[0]->FinalInstruction.get());
+	ASSERT_NE(iff2, nullptr);
+	// The trailing-leave handling replaced Xn (leave(tryC), a goto) with the
+	// return clone (leave(body)) before InvertIf, so the if TrueInst is the
+	// return (a Leave targeting the function body), not a Leave targeting tryC.
+	ASSERT_NE(iff2->TrueInst, nullptr);
+	auto* trueLeave = dynamic_cast<Leave*>(iff2->TrueInst.get());
+	ASSERT_NE(trueLeave, nullptr);
+	EXPECT_EQ(trueLeave->TargetContainer, fn->Body.get())
+		<< "the trailing-leave handling replaced the goto with a return";
+}
+
+// When the non-keyword Leave cannot be duplicated (the walk reaches a
+// try-finally whose finally always throws -- EndPointUnreachable, no leave of
+// the finally -- so CanDuplicateExit bails), ImproveILOrdering bails rather
+// than introducing a goto: the if is NOT inverted (the condition stays
+// Equality). Same shape as the fire case but the finally has a Throw (no
+// leave of finC), so EndPointUnreachableCSharp(finC) is true and the walk bails.
+TEST(ReduceNestingTransform, ImproveILOrderingTrailingLeaveBailsWhenNotDuplicable) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+	auto tryC = std::make_unique<BlockContainer>();  // Normal
+	auto finC = std::make_unique<BlockContainer>();  // Normal
+	auto* tryCPtr = tryC.get();
+	auto* finCPtr = finC.get();
+	auto b0 = std::make_unique<Block>();
+	b0->StartILOffset = 0;
+	auto trueInstBlock = std::make_unique<Block>();
+	trueInstBlock->Add(StLocInt(v, 2));
+	trueInstBlock->SetFinal(std::make_unique<Leave>(tryCPtr));
+	trueInstBlock->StartILOffset = 10;
+	trueInstBlock->RenumberChildren();
+	auto iff = std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                   ComparisonKind::Equality),
+		std::move(trueInstBlock), nullptr);
+	b0->SetFinal(std::move(iff));
+	tryC->AddBlock(std::move(b0));
+	auto b1 = std::make_unique<Block>();
+	b1->StartILOffset = 2;
+	b1->SetFinal(std::make_unique<Leave>(tryCPtr));
+	tryC->AddBlock(std::move(b1));
+	// The finally always throws (a Throw, no leave of finC) -- EndPointUnreachable.
+	auto finB = std::make_unique<Block>();
+	finB->SetFinal(std::make_unique<Throw>(nullptr));
+	finC->AddBlock(std::move(finB));
+	auto pre = std::make_unique<Block>();
+	pre->StartILOffset = 0;
+	auto tf = std::make_unique<TryFinally>(std::move(tryC), std::move(finC));
+	pre->Add(std::move(tf));
+	pre->SetFinal(std::make_unique<Leave>(body.get()));
+	body->AddBlock(std::move(pre));
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	ReduceNestingTransform().Run(*fn, Ctx());
+	fn->CheckInvariant(ILPhase::Normal);
+	auto* pre2 = fn->Body->Blocks[0].get();
+	auto* tf2 = dynamic_cast<TryFinally*>(pre2->Instructions[0].get());
+	ASSERT_NE(tf2, nullptr);
+	auto* tryC2 = dynamic_cast<BlockContainer*>(tf2->TryBlock.get());
+	ASSERT_NE(tryC2, nullptr);
+	auto* iff2 = dynamic_cast<IfInstruction*>(tryC2->Blocks[0]->FinalInstruction.get());
+	ASSERT_NE(iff2, nullptr);
+	// The if is NOT inverted: CanDuplicateExit bailed (the finally always
+	// throws), so ImproveILOrdering did not introduce a goto -- the condition
+	// stays Equality.
+	auto* cond = dynamic_cast<Comp*>(iff2->Condition.get());
+	ASSERT_NE(cond, nullptr);
+	EXPECT_EQ(cond->Kind, ComparisonKind::Equality)
+		<< "the trailing-leave handling bails when the leave cannot be duplicated";
+}
+
 // ---------------------------------------------------------------------------
 // CanDuplicateExit (a tested-but-not-yet-wired foundation): the helper that
 // decides whether an exit is a duplicable keyword exit (return/break/continue),
