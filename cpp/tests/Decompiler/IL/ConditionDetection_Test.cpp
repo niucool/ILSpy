@@ -346,6 +346,7 @@ TEST(ConditionDetection, DropsTrailingGotoToNextBlockFromIfArm) {
         std::make_unique<Comp>(std::make_unique<LdLoc>(V), std::make_unique<LdcI4>(0),
                                ComparisonKind::Equality),
         std::move(trueArm), std::move(falseArm)));
+    fn->Body->Blocks[1]->Add(std::make_unique<StLoc>(V, std::make_unique<LdcI4>(2)));  // b1 body (keeps the goto alive)
     fn->Body->Blocks[1]->SetFinal(std::make_unique<Leave>(fn->Body.get()));  // b1: return
     fn->CheckInvariant(ILPhase::Normal);
 
