@@ -23,6 +23,8 @@
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
 
@@ -71,6 +73,47 @@ void ReplaceAllLoads(ILInstruction* root, ILVariable* v, ILVariablePtr src) {
     }
 }
 
+// Whether `value` is an address-loading instruction whose result is always the
+// same for a given operand (ldloca/ldsflda), so it can be copy-propagated by
+// cloning. The C# `CanPerformCopyPropagation` returns true unconditionally for
+// ldloca/ldsflda (they never throw and always yield the same address); it also
+// handles ldElema/ldFlda, gated on `UseRefLocalsForAccurateOrderOfEvaluation`
+// because those may throw and the setting controls whether moving the throw
+// site is acceptable. The setting is not modelled here, so ldElema/ldFlda stay
+// deferred; this port handles the unconditional ldloca/ldsflda pair.
+bool IsAddressLoadSource(ILInstruction* value) {
+    if (!value) return false;
+    return value->Op == OpCode::LdLoca || value->Op == OpCode::LdsFlda;
+}
+
+// Copy-propagate an address-loading source (ldloca/ldsflda): replace every
+// `ldloc v` in the function body with a clone of the source, then drop the
+// store. The C# `DoPropagate` uses a virtual `copiedExpr.Clone()` per load (and
+// un-inlines the source's child-instruction arguments into fresh stack slots --
+// a no-op for ldloca/ldsflda, whose only operand is the variable/field, not a
+// child instruction). This port's `ILInstruction::Clone` (D147) is the
+// foundation; the clone is the same opcode as the source (ldloca/ldsflda), not
+// a ldloc, so the load instruction is replaced rather than re-pointed (unlike
+// the ldloc-source case above). Clearing the clone's IL range matches the C#
+// `clone.SetILRange(new Interval())` -- the expression is copied from afar and
+// reusing the source's IL range would mis-locate sequence points. The source
+// is cloned before the store is removed, so it stays alive across the clones.
+void PropagateAddressSource(ILFunction& function, Block* block,
+                             std::size_t storeIndex, StLoc* st, ILVariable* v) {
+    // Collect the `ldloc v` loads first: ReplaceWith detaches each mid-loop.
+    std::vector<LdLoc*> loads;
+    WalkAll(function.Body.get(), [&](ILInstruction* inst) {
+        if (auto* ld = dynamic_cast<LdLoc*>(inst))
+            if (ld->Variable.get() == v) loads.push_back(ld);
+    });
+    for (LdLoc* ld : loads) {
+        auto clone = st->Value->Clone();
+        clone->SetILRange(0, 0);  // empty: copied from afar
+        ld->ReplaceWith(std::move(clone));
+    }
+    block->RemoveInstructionAt(storeIndex);
+}
+
 } // namespace
 
 void CopyPropagation::Run(ILFunction& function, ILTransformContext& context) {
@@ -108,6 +151,18 @@ void CopyPropagation::Run(ILFunction& function, ILTransformContext& context) {
                 ILVariablePtr src = srcLd->Variable;
                 ReplaceAllLoads(function.Body.get(), v, src);
                 block->RemoveInstructionAt(static_cast<std::size_t>(i));
+                --i;
+            }
+            // Copy propagation of a single-def stack slot from an address load
+            // (ldloca/ldsflda): the clone-based case the D142 subset deferred
+            // until ILInstruction::Clone landed (D147). The C# `CanPerformCopy-
+            // Propagation` returns true for ldloca/ldsflda regardless of the
+            // target's kind (an address load always yields the same value);
+            // this port gates on StackSlot to match the ldloc case's
+            // simplification (the byref-local case, `target.StackType == Ref`,
+            // is the C#-faithful extension this port's StackSlot gating skips).
+            else if (v->Kind == VariableKind::StackSlot && IsAddressLoadSource(st->Value.get())) {
+                PropagateAddressSource(function, block, static_cast<std::size_t>(i), st, v);
                 --i;
             }
         }

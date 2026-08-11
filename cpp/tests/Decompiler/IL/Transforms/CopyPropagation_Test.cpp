@@ -32,6 +32,8 @@
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
@@ -70,6 +72,30 @@ int CountLoads(ILFunction& fn, ILVariable* v) {
     };
     walk(fn.Body.get());
     return n;
+}
+
+int CountAddressLoads(ILFunction& fn, ILVariable* v) {
+    int n = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (auto* lda = dynamic_cast<LdLoca*>(inst))
+            if (lda->Variable.get() == v) ++n;
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return n;
+}
+
+bool HasStoreOf(ILFunction& fn, ILVariable* v) {
+    bool found = false;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst || found) return;
+        if (auto* st = dynamic_cast<StLoc*>(inst))
+            if (st->Variable.get() == v) found = true;
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn.Body.get());
+    return found;
 }
 
 } // namespace
@@ -151,6 +177,131 @@ TEST(CopyPropagation, DoesNotPropagateWhenParameterIsAssigned) {
 
     // Not propagated: S_0 still has a load.
     EXPECT_EQ(CountLoads(*fn, S.get()), 1) << "S_0 not propagated (arg is assigned)";
+}
+
+TEST(CopyPropagation, PropagatesLdLocaSourceToEveryLoad) {
+    // stloc S_0(ldloca src); ldloc S_0; ldloc S_0 -- S_0 is a single-def stack
+    // slot holding a managed pointer (the materialised address of `src`).
+    // Copy propagation replaces each `ldloc S_0` with a clone of `ldloca src`
+    // (a different opcode, so the load is replaced, not re-pointed) and drops
+    // the store. The C# uses a virtual Clone per load; this port's Clone (the
+    // D147 foundation) is the machinery.
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto src = MakeLocal("src", VariableKind::Local);
+    auto S = MakeLocal("S_0", VariableKind::StackSlot);
+    auto dst = MakeLocal("dst", VariableKind::Local);
+    fn->Variables.push_back(src);
+    fn->Variables.push_back(S);
+    fn->Variables.push_back(dst);
+    fn->Body->AddBlock(std::make_unique<Block>());
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(S, std::make_unique<LdLoca>(src)));
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(dst, std::make_unique<LdLoc>(S)));  // use 1
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(dst, std::make_unique<LdLoc>(S)));  // use 2
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    CopyPropagation().Run(*fn, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // S_0 has no remaining ldloc loads (both became ldloca src clones).
+    EXPECT_EQ(CountLoads(*fn, S.get()), 0) << "S_0 ldloc loads propagated to ldloca src";
+    // Two ldloca src now (the clones), where the two ldloc S_0 were.
+    EXPECT_EQ(CountAddressLoads(*fn, src.get()), 2) << "two ldloca src clones inserted";
+    // The store of S_0 is dropped.
+    EXPECT_FALSE(HasStoreOf(*fn, S.get())) << "S_0 store dropped";
+}
+
+TEST(CopyPropagation, PropagatesLdsFldaSourceToEveryLoad) {
+    // stloc S_0(ldsflda field); ldloc S_0 -- a single-def stack slot holding a
+    // static field address. Copy propagation replaces the load with a clone of
+    // `ldsflda field` and drops the store.
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto S = MakeLocal("S_0", VariableKind::StackSlot);
+    auto dst = MakeLocal("dst", VariableKind::Local);
+    fn->Variables.push_back(S);
+    fn->Variables.push_back(dst);
+    fn->Body->AddBlock(std::make_unique<Block>());
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(S, std::make_unique<LdsFlda>("Ns.T::field")));
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(dst, std::make_unique<LdLoc>(S)));  // use
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    CopyPropagation().Run(*fn, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+
+    EXPECT_EQ(CountLoads(*fn, S.get()), 0) << "S_0 ldloc load propagated to ldsflda";
+    EXPECT_FALSE(HasStoreOf(*fn, S.get())) << "S_0 store dropped";
+    // A ldsflda clone now sits where the ldloc S_0 was (inside the dst store).
+    bool foundLdsFlda = false;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (auto* f = dynamic_cast<LdsFlda*>(inst))
+            if (f->FieldName == "Ns.T::field") foundLdsFlda = true;
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn->Body.get());
+    EXPECT_TRUE(foundLdsFlda) << "ldsflda clone inserted";
+}
+
+TEST(CopyPropagation, DoesNotPropagateLdLocaWhenAddressTaken) {
+    // If the stack slot's address is taken (ldloca S_0), S_0 is not single-
+    // definition (AddressCount > 0) and copy propagation is unsafe -- skip.
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto src = MakeLocal("src", VariableKind::Local);
+    auto S = MakeLocal("S_0", VariableKind::StackSlot);
+    auto dst = MakeLocal("dst", VariableKind::Local);
+    fn->Variables.push_back(src);
+    fn->Variables.push_back(S);
+    fn->Variables.push_back(dst);
+    fn->Body->AddBlock(std::make_unique<Block>());
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(S, std::make_unique<LdLoca>(src)));
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(dst, std::make_unique<LdLoca>(S)));  // takes S_0's address
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    CopyPropagation().Run(*fn, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // Not propagated: the ldloca S_0 is still there (S_0 not single-def).
+    EXPECT_EQ(CountAddressLoads(*fn, S.get()), 1) << "S_0 address-taken, not propagated";
+    EXPECT_TRUE(HasStoreOf(*fn, S.get())) << "S_0 store kept";
+}
+
+TEST(CopyPropagation, DoesNotPropagateLdLocaWhenTargetIsNotStackSlot) {
+    // stloc localV(ldloca src); ldloc localV -- localV is a Local, not a
+    // StackSlot. The C# propagates ldloca to any single-def target; this port
+    // gates on StackSlot (the D142 simplification), so a Local target is skipped.
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto src = MakeLocal("src", VariableKind::Local);
+    auto localV = MakeLocal("localV", VariableKind::Local);
+    auto dst = MakeLocal("dst", VariableKind::Local);
+    fn->Variables.push_back(src);
+    fn->Variables.push_back(localV);
+    fn->Variables.push_back(dst);
+    fn->Body->AddBlock(std::make_unique<Block>());
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(localV, std::make_unique<LdLoca>(src)));
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(dst, std::make_unique<LdLoc>(localV)));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    CopyPropagation().Run(*fn, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // Not propagated (Local target, not StackSlot): the ldloc localV remains.
+    EXPECT_EQ(CountLoads(*fn, localV.get()), 1) << "localV not propagated (not a stack slot)";
+    EXPECT_TRUE(HasStoreOf(*fn, localV.get())) << "localV store kept";
 }
 
 TEST(CopyPropagation, MscorlibSweepPreservesInvariant) {

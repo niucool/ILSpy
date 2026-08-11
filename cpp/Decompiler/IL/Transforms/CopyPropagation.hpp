@@ -22,9 +22,12 @@
 // (2) Copy propagation: a single-definition stack slot assigned from a never-
 // assigned parameter (or another single-definition local) has all its loads
 // replaced with the source, and the store is dropped. The C# also handles
-// ldloca/ldsFlda sources and uses a virtual Clone for expression copying; this
-// port handles the common ldloc source (no Clone needed -- just swap the
-// loaded variable), which is the dominant case (argument-to-local copies).
+// ldloca/ldsflda sources and the leaf-instruction virtual-Clone default case;
+// this port handles the common ldloc source (no Clone needed -- just swap the
+// loaded variable, the dominant argument-to-local copy case) and the ldloca/
+// ldsflda address-load source (a clone per load, now that ILInstruction::Clone
+// is available). The ldElema/ldFlda sources (setting-gated) and the generic
+// leaf-instruction virtual-Clone default case stay deferred.
 
 #pragma once
 
