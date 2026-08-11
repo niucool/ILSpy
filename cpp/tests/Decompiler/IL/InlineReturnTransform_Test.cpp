@@ -237,3 +237,60 @@ TEST(InlineReturnTransform, MscorlibSweepReducesBlockCount) {
     EXPECT_LT(gotoReturnsAfter, gotoReturnsBefore)
         << "the CFS+Inlining+InlineReturnTransform pipeline must reduce goto-return count";
 }
+
+// CloneReturnBlock must preserve the cloned Leave's IL byte-range, matching
+// the C# `block.Clone()` (the generated deep-clone copies ILRange). The port's
+// hand-rolled clone previously built a fresh Leave/LdLoc with the default empty
+// range, losing the offset that downstream transforms consult -- notably
+// ReduceNestingTransform.ImproveILOrdering's GetStartILOffset gate on a bare
+// return Leave (the no-falseCode InvertIf path), which bails when the Leave's
+// range is empty. This test pins the range preservation on a multi-pred return
+// block (the shape InlineReturnTransform clones).
+TEST(InlineReturnTransform, ClonePreservesLeaveILRange) {
+	// b0: stloc V, ldc.i4 1; br ret
+	// b1: stloc V, ldc.i4 2; br ret
+	// ret: leave body (ldloc V)   [2 preds: b0, b1]  -- ILRange set to a real span
+	auto fn = std::make_unique<ILFunction>();
+	fn->Body = std::make_unique<BlockContainer>();
+	fn->Body->Parent = fn.get();
+	fn->Body->ChildIndex = 0;
+	auto V = MakeLocal("V_0");
+	fn->Variables.push_back(V);
+	fn->Body->AddBlock(std::make_unique<Block>());
+	fn->Body->AddBlock(std::make_unique<Block>());
+	fn->Body->AddBlock(std::make_unique<Block>());
+	auto& b0 = fn->Body->Blocks[0];
+	auto& b1 = fn->Body->Blocks[1];
+	auto& ret = fn->Body->Blocks[2];
+	b0->Add(std::make_unique<StLoc>(V, std::make_unique<LdcI4>(1)));
+	b0->SetFinal(std::make_unique<Branch>(ret.get()));
+	b1->Add(std::make_unique<StLoc>(V, std::make_unique<LdcI4>(2)));
+	b1->SetFinal(std::make_unique<Branch>(ret.get()));
+	auto ldloc = std::make_unique<LdLoc>(V);
+	ldloc->SetILRange(0x1B, 0x1E);  // the ldloc's span
+	auto leave = std::make_unique<Leave>(fn->Body.get(), std::move(ldloc));
+	leave->SetILRange(0x1A, 0x1F);  // a real non-empty span (the `leave` opcode's bytes)
+	ret->SetFinal(std::move(leave));
+	ret->StartILOffset = 0x1A;  // the block label = the leave's offset
+	Block* b0p = fn->Body->Blocks[0].get();
+	Block* b1p = fn->Body->Blocks[1].get();
+	fn->CheckInvariant(ILPhase::Normal);
+
+	ILTransformContext ctx;
+	InlineReturnTransform().Run(*fn, ctx);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	// Each cloned return block's Leave must carry the original's non-empty ILRange.
+	auto* br0 = dynamic_cast<Branch*>(b0p->FinalInstruction.get());
+	auto* br1 = dynamic_cast<Branch*>(b1p->FinalInstruction.get());
+	ASSERT_NE(br0->TargetBlock, nullptr);
+	ASSERT_NE(br1->TargetBlock, nullptr);
+	auto* leave0 = dynamic_cast<Leave*>(br0->TargetBlock->FinalInstruction.get());
+	auto* leave1 = dynamic_cast<Leave*>(br1->TargetBlock->FinalInstruction.get());
+	ASSERT_NE(leave0, nullptr);
+	ASSERT_NE(leave1, nullptr);
+	EXPECT_FALSE(leave0->IsILRangeEmpty()) << "the cloned return Leave must keep the original's ILRange";
+	EXPECT_FALSE(leave1->IsILRangeEmpty()) << "the cloned return Leave must keep the original's ILRange";
+	EXPECT_EQ(leave0->StartILOffset, 0x1A);
+	EXPECT_EQ(leave1->StartILOffset, 0x1A);
+}

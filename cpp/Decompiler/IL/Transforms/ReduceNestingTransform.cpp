@@ -323,9 +323,15 @@ bool EndPointUnreachableCSharp(ILInstruction* inst) {
 // (the falseCode+exit's start) and the next block (the old then's start). The
 // GetStartILOffset Block adaptation (Block label = the first instruction's
 // offset) makes both offsets valid for Block TrueInsts and the next block; a
-// bare-Leave TrueInst (the no-falseCode case) whose Leave lost its base ILRange
-// during the pre-pipeline still reports empty and the gate bails (the ILRange
-// propagation through the bare-Leave path is a separate piece).
+// bare-Leave TrueInst (the no-falseCode case) reports the Leave's own offset
+// (or its Value's offset for a valued return), which the pre-pipeline clone
+// sites now preserve (the D156 ILRange-propagation fix to CFS branch-to-leave /
+// value-return folds, InlineReturnTransform.CloneReturnBlock, LoopDetection
+// break-leave, and ClonePureLoad), so the gate fires on the bare-Leave path
+// too. A few break-Leaves from the port-specific LoopDetection while-condition
+// false-arm / exit-block-null sites and a couple of valued returns still report
+// empty (the remaining ~28 of ~2200 bare-Leave candidates); closing those is a
+// separate piece.
 //
 // The trailing-leave handling (the C# `block.Instructions.Last() is Leave &&
 // !IsLeavingFunction && TargetContainer.Kind == Normal` check + the

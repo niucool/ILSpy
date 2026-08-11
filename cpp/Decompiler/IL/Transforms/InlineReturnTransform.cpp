@@ -71,7 +71,15 @@ std::unique_ptr<Block> RemoveBlockFromContainer(Block* block) {
 }
 
 // Deep-clone a return block: a Block whose final is a Leave of a LdLoc. The
-// cloned Leave targets the same container and loads the same variable.
+// cloned Leave targets the same container and loads the same variable. The C#
+// clones via `block.Clone()` (the generated deep-clone, which copies each
+// node's IL byte-range); this hand-rolled clone copies the Block's label and the
+// Leave's / LdLoc's ILRange explicitly so a cloned return block keeps the
+// offset of the original `leave` opcode. Downstream transforms consult that
+// offset -- notably ReduceNestingTransform.ImproveILOrdering's GetStartILOffset
+// gate on a bare return Leave (the no-falseCode InvertIf path) bails when the
+// Leave's range is empty, so losing it here would block the gate on every
+// inlined return.
 std::unique_ptr<Block> CloneReturnBlock(Block* block) {
     auto* leave = dynamic_cast<Leave*>(block->FinalInstruction.get());
     auto cloned = std::make_unique<Block>();
@@ -79,10 +87,15 @@ std::unique_ptr<Block> CloneReturnBlock(Block* block) {
     if (leave) {
         auto* ldloc = dynamic_cast<LdLoc*>(leave->Value.get());
         if (ldloc) {
-            cloned->SetFinal(std::make_unique<Leave>(
-                leave->TargetContainer, std::make_unique<LdLoc>(ldloc->Variable)));
+            auto newLdloc = std::make_unique<LdLoc>(ldloc->Variable);
+            newLdloc->SetILRange(*ldloc);
+            auto newLeave = std::make_unique<Leave>(leave->TargetContainer, std::move(newLdloc));
+            newLeave->SetILRange(*leave);
+            cloned->SetFinal(std::move(newLeave));
         } else {
-            cloned->SetFinal(std::make_unique<Leave>(leave->TargetContainer));
+            auto newLeave = std::make_unique<Leave>(leave->TargetContainer);
+            newLeave->SetILRange(*leave);
+            cloned->SetFinal(std::move(newLeave));
         }
     }
     return cloned;

@@ -99,21 +99,30 @@ bool IsLeaveLike(const ILInstruction* inst) {
 // folded into a direct leave duplicating the return value. Returns nullptr
 // for a value that is not a cheap cloneable pure load (the C# uses
 // DetectExitPoints for the general case; this is the seed-level fast path).
+// The clone carries the original's IL byte-range (a faithful Clone copies it);
+// downstream transforms consult it -- notably ReduceNestingTransform.
+// ImproveILOrdering's GetStartILOffset gate on a valued return Leave reports
+// the Value's offset, so a cloned value that lost its range would block the
+// gate on every valued early-return.
 std::unique_ptr<ILInstruction> ClonePureLoad(const ILInstruction* v) {
     if (!v) return nullptr;
+    std::unique_ptr<ILInstruction> clone;
     switch (v->Op) {
         case OpCode::LdLoc: {
             auto* ld = static_cast<const LdLoc*>(v);
-            return std::make_unique<LdLoc>(ld->Variable);
+            clone = std::make_unique<LdLoc>(ld->Variable);
+            break;
         }
-        case OpCode::LdcI4: return std::make_unique<LdcI4>(static_cast<const LdcI4*>(v)->Value);
-        case OpCode::LdcI8: return std::make_unique<LdcI8>(static_cast<const LdcI8*>(v)->Value);
-        case OpCode::LdcF4: return std::make_unique<LdcF4>(static_cast<const LdcF4*>(v)->Value);
-        case OpCode::LdcF8: return std::make_unique<LdcF8>(static_cast<const LdcF8*>(v)->Value);
-        case OpCode::LdNull: return std::make_unique<LdNull>();
-        case OpCode::LdStr: return std::make_unique<LdStr>(static_cast<const LdStr*>(v)->Value);
+        case OpCode::LdcI4: clone = std::make_unique<LdcI4>(static_cast<const LdcI4*>(v)->Value); break;
+        case OpCode::LdcI8: clone = std::make_unique<LdcI8>(static_cast<const LdcI8*>(v)->Value); break;
+        case OpCode::LdcF4: clone = std::make_unique<LdcF4>(static_cast<const LdcF4*>(v)->Value); break;
+        case OpCode::LdcF8: clone = std::make_unique<LdcF8>(static_cast<const LdcF8*>(v)->Value); break;
+        case OpCode::LdNull: clone = std::make_unique<LdNull>(); break;
+        case OpCode::LdStr: clone = std::make_unique<LdStr>(static_cast<const LdStr*>(v)->Value); break;
         default: return nullptr;
     }
+    clone->SetILRange(*v);
+    return clone;
 }
 
 // Clone a call whose args are all cheap pure loads (ldloc/ldc/ldstr/ldnull) --
@@ -143,6 +152,7 @@ std::unique_ptr<ILInstruction> CloneCallWithPureArgs(const Call* call) {
         if (!a && arg) return nullptr;  // uncloneable (don't clone a partial)
         cloned->AddArg(std::move(a));
     }
+    cloned->SetILRange(*call);  // preserve the call's IL byte-range (a faithful Clone copies it)
     return cloned;
 }
 
@@ -276,12 +286,21 @@ void SimplifyBranchChains(ILFunction& function, ILTransformContext& context,
         // the EH-aware flow transforms.)
         if (IsLeaveLike(target->FinalInstruction.get()) &&
             target->Instructions.empty()) {
-            // Branching straight to a plain leave: duplicate the leave.
+            // Branching straight to a plain leave: duplicate the leave. The C#
+            // clones the leave (preserving its IL byte-range) and, when the
+            // branch carries its own range, adds that too; the duplicated leave
+            // thus keeps the offset of the original `leave` opcode (and the
+            // branch site). Downstream transforms consult that offset --
+            // notably ReduceNestingTransform.ImproveILOrdering's GetStartILOffset
+            // gate on a bare return Leave bails when the range is empty.
             context.StepOnce("Replace branch to leave with leave");
             auto* targetLeave = static_cast<Leave*>(target->FinalInstruction.get());
             --target->IncomingEdgeCount;
             std::unique_ptr<ILInstruction> dup =
                 std::make_unique<Leave>(targetLeave->TargetContainer);
+            dup->SetILRange(*targetLeave);
+            if (!branch->IsILRangeEmpty())
+                dup->AddILRange(*branch);
             destroyed.insert(branch);
             branch->ReplaceWith(std::move(dup));
         } else if (target->Instructions.empty() &&
@@ -308,6 +327,9 @@ void SimplifyBranchChains(ILFunction& function, ILTransformContext& context,
                 --target->IncomingEdgeCount;
                 std::unique_ptr<ILInstruction> dup =
                     std::make_unique<Leave>(targetLeave->TargetContainer, std::move(cloned));
+                dup->SetILRange(*targetLeave);
+                if (!branch->IsILRangeEmpty())
+                    dup->AddILRange(*branch);
                 destroyed.insert(branch);
                 branch->ReplaceWith(std::move(dup));
             }

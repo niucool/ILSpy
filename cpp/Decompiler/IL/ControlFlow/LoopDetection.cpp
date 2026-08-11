@@ -141,8 +141,16 @@ void ConstructLoop(BlockContainer* parent, FlowAnalysis::ControlFlowNode* header
     for (auto* br : branches) {
         if (br->TargetBlock == oldEntryPoint)
             br->TargetBlock = newEntryPointPtr;
-        else if (exitBlock && br->TargetBlock == exitBlock)
-            br->ReplaceWith(std::make_unique<Leave>(loopPtr));
+        else if (exitBlock && br->TargetBlock == exitBlock) {
+            // Replace the branch to the loop exit with a `leave(loopContainer)`
+            // (a `break`), carrying the branch's IL byte-range -- the C#
+            // `.WithILRange(branch)`. The break keeps the offset of the branch
+            // site so downstream transforms (notably the ImproveILOrdering
+            // GetStartILOffset gate on a bare break Leave) see a valid range.
+            auto leave = std::make_unique<Leave>(loopPtr);
+            leave->AddILRange(*br);
+            br->ReplaceWith(std::move(leave));
+        }
     }
     // Branches outside the loop that targeted the old entry point (the loop
     // header) must also be repointed to the new entry point inside the

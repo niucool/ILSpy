@@ -701,9 +701,14 @@ TEST(ReduceNestingTransform, MscorlibComputeStatsSweep) {
 // field = the first instruction's offset) makes the offsets valid for Block
 // TrueInsts and the next block, so the gate fires on the corpus (a real-corpus
 // transform, not faithfulness-only). The bare-Leave TrueInst path (the
-// no-falseCode case whose Leave lost its base ILRange during the pre-pipeline)
-// still bails at the gate -- the ILRange propagation through that path is a
-// separate piece.
+// no-falseCode case) was previously blocked because the cloned return / break
+// Leaves and cloned return values lost their base ILRange during the
+// pre-pipeline (CFS branch-to-leave / value-return folds, InlineReturnTransform
+// CloneReturnBlock, LoopDetection break-leave, and ClonePureLoad all built fresh
+// nodes without copying the original's range); the D156 ILRange-propagation fix
+// to those clone sites restores the offset, so the gate now fires on the bare-
+// Leave path too (the count rose from a handful to ~1781 would-fire / ~1356
+// fires across 8000 mscorlib methods, invariant held on every fire).
 
 namespace {
 
