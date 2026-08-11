@@ -214,6 +214,36 @@ void HighLevelLoopTransform::Run(ILFunction& function, ILTransformContext& conte
             loop->Kind = ContainerKind::While;
             continue;
         }
+        // MatchDoWhileLoop: a loop whose last block is a do-while condition --
+        // an if with a true-arm Branch to the loop header (continue) and a
+        // fall-through that exits the loop (break). The entry point has no
+        // while-condition if (it falls straight into the body). Mark as DoWhile
+        // so the seed renders `do { ... } while (cond)`.
+        if (loop->Blocks.size() >= 2) {
+            Block* last = loop->Blocks.back().get();
+            Block* header = loop->Blocks.front().get();
+            if (auto* condIf = dynamic_cast<IfInstruction*>(last->FinalInstruction.get())) {
+                if (!condIf->FalseInst && condIf->TrueInst &&
+                    condIf->TrueInst->Op == OpCode::Branch) {
+                    auto* br = static_cast<Branch*>(condIf->TrueInst.get());
+                    // The true arm branches to the header (the do-while
+                    // continue); the fall-through exits the loop (the entry
+                    // point's final is NOT a while-condition if).
+                    if (br->TargetBlock == header) {
+                        // The entry must not itself be a while-condition (that's
+                        // the While shape, already handled above).
+                        auto* entryIf = dynamic_cast<IfInstruction*>(entry->FinalInstruction.get());
+                        bool entryIsWhileCond = entryIf &&
+                            ((entryIf->TrueInst && entryIf->TrueInst->Op == OpCode::Leave) ||
+                             (entryIf->FalseInst && entryIf->FalseInst->Op == OpCode::Leave));
+                        if (!entryIsWhileCond) {
+                            loop->Kind = ContainerKind::DoWhile;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -35,6 +35,7 @@ enum class ContainerKind : std::uint8_t {
     Normal,
     Loop,
     While,
+    DoWhile,
     Switch,
 };
 
