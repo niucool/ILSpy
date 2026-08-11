@@ -44,32 +44,7 @@ implemented and green here. Everything else follows the phase plan in
   full element-type range (TypedReference, vararg sentinels, fn-ptr handled
   approximately, custom modifiers), which winmd's WinRT-profile TypeSig rejects.
   The remaining instruction kinds (and the ~40 IL transforms) follow Phase 4.
-- **Phase 4 (in progress)** -- the ILAst transform pipeline: `IILTransform` /
-  `ILTransformContext` (Transforms/), variable/block usage analysis
-  (`ControlFlow/VariableUsage`), the pipeline's first transform
-  `ControlFlowSimplification` (branch-chain collapse, dead stack-slot store
-  removal, debug return-block inlining, branch-to-leave folding, single-edge
-  block merging), `ILInlining` (single-use variable inlining + dead pure
-  store removal), `InlineReturnTransform` (duplicate shared return blocks so
-  each `stloc V; br ret` gets a 1-pred return block CFS then merges), and the
-  FlowAnalysis foundation (`ControlFlowNode`, `Dominance` --
-  Cooper-Harvey-Kennedy dominators, `ControlFlowGraph` -- per-container CFG).
-  `LoopDetection` wraps back edges in loop containers; `ConditionDetection`
-  inlines single-pred fall-through into if/else and inverts `if (cond) goto X
-  else { exit }` to `if (!cond) { exit }` (early-exit, condition negation),
-  turning sequential if-throw chains (e.g. `System.Version..ctor`) into clean
-  `if (arg < 0) { throw }` with no gotos. `InlineReturnTransform` duplicates
-  shared return blocks; `StObjToStLoc` turns `*(&V) = value` into `V = value`;
-  `AssignVariableNames` renames `V_0` to type-inferred names (`num`, `text`,
-  ...); `RemoveRedundantReturn` drops trailing `return;`; `RemoveInfeasiblePath`
-  redirects a constant-store-and-test around the infeasible arm (drops the dead
-  store and the branch straight to the feasible exit). `DetectPinnedRegions`
-  detects IL `fixed` blocks: a pinned local's store + the region it covers are
-  wrapped in a `PinnedRegion` (the GC-pin scope), the trailing unpin store is
-  stripped on the region's single-predecessor exit, and the pin block falls
-  through to the exit. `DetectCatchWhenConditionBlocks` drops the redundant
-  isinst type test at the start of a `catch (T e) when (...)` filter (the catch
-  is already typed T), branching the entry straight to the when-condition
+- **Phase 4 (in progress)** -- the ILAst transform pipeline (~20 transforms ported): `ControlFlowSimplification` (branch-chain collapse, dead stack-slot store removal, debug return-block inlining, branch-to-leave/throw/value-return folding, single-edge block merging, fall-through deletion guard), `StObjToStLoc`, `ILInlining`, `InlineReturnTransform`, `RemoveInfeasiblePath`, `DetectPinnedRegions` (IL `fixed`), `DetectCatchWhenConditionBlocks`, `LdLocaDupInitObjTransform`, `EarlyExpressionTransforms`, `RemoveDeadVariableInit`, `SwitchDetection` + `SwitchOnNullable` + `SwitchAnalysis` + `SimplifySwitchInstruction`, `LoopDetection` (back-edge loop containers + exit-path materialization), `PatternMatchingTransform` (C# 7 `is` patterns), `ConditionDetection` (inline fall-through, invert if-exit, merge shared-tail, drop trailing goto-to-next, empty-arm swap), `LockTransform` (Monitor.Enter/Exit), `UsingTransform` (IDisposable), `CachedDelegateInitialization`, `CachedReadOnlySpanInitialization`, `StatementTransform` (per-statement: `ILInlining` + `ExpressionTransforms` [VisitComp/IfInstruction/Box/Conv/LdElema/NewArr/Call/LdObj/TryCatchHandler + Decimal/DelegateCtor folds + NullableLifting + NullCoalescing + NullPropagation + TransformAssignment + UserDefinedLogic]), `HighLevelLoopTransform` (`while(cond)` + `do-while`), `CopyPropagation`, `AssignVariableNames`, `RemoveRedundantReturn`. The FlowAnalysis foundation (`ControlFlowNode`, `Dominance`, `ControlFlowGraph`) supports the loop/switch detection. 84% of sampled mscorlib methods are goto-free.
   block. `LdLocaDupInitObjTransform` rewrites the Roslyn >= 2 `ldloca; dup;
   initobj` codegen for `var v = default(T);` + a use of `&v` --
   `stloc s(ldloca v); stobj(ldloc s, default(T))` becomes `stloc v(default(T));
