@@ -3304,3 +3304,53 @@ TEST(ReduceNestingTransform, MscorlibReduceNestingElseIfTreeSweep) {
 	          << " bailNoElseBlock=" << bailNoElseBlock << "\n";
 	(void)candidates; (void)bailShallowElse; (void)bailNoElseBlock;
 }
+
+// ---- Wired Run walk (the Visit walk calls ReduceNesting after ImproveILOrdering) ----
+
+// The wired `Run` Visit walk fires ReduceNesting on the no-else shape (the same
+// shape as ReduceNestingNoElseFoldsDeeplyNestedThen, but exercised via the wired
+// `Run` walk rather than a direct ReduceNesting call): `if (cond) { deep then
+// (exits) } return;` -> `if (!cond) return; then...; return;`. The if (Block A's
+// final) is inverted, its TrueInst becomes the return (Block B's exit), and the
+// deep then moves into Block B.
+TEST(ReduceNestingTransform, ReduceNestingWiredRunFoldsNoElse) {
+	auto fn = std::make_unique<ILFunction>();
+	auto body = std::make_unique<BlockContainer>();
+	body->Parent = fn.get();
+	body->ChildIndex = 0;
+	auto v = MakeLocal("v");
+	fn->Variables.push_back(v);
+
+	auto b0 = std::make_unique<Block>();
+	b0->StartILOffset = 0;
+	b0->SetFinal(std::make_unique<IfInstruction>(
+		std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+		                      ComparisonKind::Equality),
+		MakeDeepThen(body.get(), v), nullptr));
+	Block* b0Ptr = b0.get();
+	body->AddBlock(std::move(b0));
+
+	auto b1 = std::make_unique<Block>();
+	b1->StartILOffset = 100;
+	b1->SetFinal(std::make_unique<Leave>(body.get()));
+	Block* b1Ptr = b1.get();
+	body->AddBlock(std::move(b1));
+
+	fn->Body = std::move(body);
+	RecomputeIncomingEdgeCounts(*fn);
+	fn->CheckInvariant(ILPhase::Normal);
+
+	// The wired Run walk: ImproveILOrdering (a no-op -- the IL order is already
+	// correct: the then comes before the return) then ReduceNesting (fires on the
+	// deep-then no-else shape via CanDuplicateExit on Block B's leave(body)).
+	ReduceNestingTransform().Run(*fn, Ctx());
+	fn->CheckInvariant(ILPhase::Normal);
+
+	auto* iffAfter = dynamic_cast<IfInstruction*>(b0Ptr->FinalInstruction.get());
+	ASSERT_NE(iffAfter, nullptr) << "Block A still holds the (inverted) if";
+	ASSERT_NE(iffAfter->TrueInst, nullptr);
+	EXPECT_EQ(iffAfter->TrueInst->Op, OpCode::Leave) << "the if's then is the return (Block B's exit)";
+	EXPECT_EQ(dynamic_cast<Leave*>(iffAfter->TrueInst.get())->TargetContainer, fn->Body.get());
+	EXPECT_FALSE(b1Ptr->Instructions.empty()) << "the deep then moved into Block B";
+	EXPECT_EQ(b1Ptr->FinalInstruction->Op, OpCode::Leave) << "Block B's final is the then's exit";
+}

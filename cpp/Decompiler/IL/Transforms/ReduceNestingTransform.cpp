@@ -39,36 +39,43 @@
 //      The trailing-leave handling (CanDuplicateExit) is deferred; the
 //      bail-for-non-keyword-Leave-exit guard is ported.
 //
-//  (4) CanDuplicateExit (a tested-but-not-yet-wired foundation): the helper
-//      that decides whether an exit is a duplicable keyword exit
-//      (return/break/continue), walking out of a try/pinned/lock container to
-//      the following instruction when the exit is a leave of a Normal
-//      container. The wired ImproveILOrdering trailing-leave handling and the
-//      deferred ReduceNesting / ReduceSwitchNesting folds consult it; no
-//      pipeline transform consults it yet (the wired folds are the subsequent
-//      iterations).
-//  (5) GetElseIfParent (a tested-but-not-yet-wired foundation): the
+//  (4) CanDuplicateExit (the wired fold's gate helper): the helper that decides
+//      whether an exit is a duplicable keyword exit (return/break/continue),
+//      walking out of a try/pinned/lock container to the following instruction
+//      when the exit is a leave of a Normal container. The wired
+//      ImproveILOrdering trailing-leave handling and the wired ReduceNesting
+//      fold consult it.
+//  (5) GetElseIfParent (the wired fold's else-if analysis helper): the
 //      pure-analysis helper that determines whether an IfInstruction is an
-//      else-if and reports the preceding parent IfInstruction. The deferred
-//      ReduceNesting else-if fold consults it; no pipeline transform consults
-//      it yet.
-//  (6) EnsureEndPointUnreachable (a tested-but-not-yet-wired foundation): the
+//      else-if and reports the preceding parent IfInstruction. The wired
+//      ReduceNesting else-if fold consults it (both the early root-bail and the
+//      per-iteration walk up the else-if tree).
+//  (6) EnsureEndPointUnreachable (the wired fold's then-exit helper): the
 //      helper that ensures a block's end point is unreachable by duplicating
 //      the [exit] instruction following the end point. The wired ReduceNesting
 //      fold (the no-else and else-if-tree cases) consults it to make a
-//      then/else block exit before InvertIf swaps it with the fall-through; no
-//      pipeline transform consults it yet (the wired fold is the subsequent
-//      iteration).
-//  (7) RemoveRedundantExit (a tested-but-not-yet-wired foundation): the helper
-//      that drops a block's trailing exit when it equals the fall-through. The
-//      wired ReduceNesting fold calls it after a successful fold; no pipeline
-//      transform consults it yet (the wired fold is the subsequent iteration).
-//  (8) ExtractElseBlock (a tested-but-not-yet-wired foundation): the helper
+//      then/else block exit before InvertIf swaps it with the fall-through.
+//  (7) RemoveRedundantExit (the wired fold's dead-exit helper): the helper that
+//      drops a block's trailing exit when it equals the fall-through. The wired
+//      ReduceNesting fold calls it after a successful fold (a no-op at the
+//      container level where nextInstruction is null; the content-block
+//      recursion, deferred, is where it fires with a real nextInstruction).
+//  (8) ExtractElseBlock (the wired fold's else-promotion helper): the helper
 //      that extracts an if's else block -- moves the else block whole into the
 //      container after Block A (the if's block) and clears the if's else. The
 //      wired ReduceNesting else-if-tree fold calls it after making the then
-//      exit; no pipeline transform consults it yet (the wired fold is the
-//      subsequent iteration).
+//      exit.
+//  (9) ReduceNesting (the wired fold's core): reduces the nesting of an
+//      if/else-if/else followed by a keyword exit by duplicating the exit into
+//      the then blocks and moving the else content out. The wired `Run` Visit
+//      walk calls it after ImproveILOrdering via CanDuplicateExit; the no-else
+//      case fires on this corpus, the else-if-tree case is faithfulness-only.
+//      ReduceSwitchNesting, the content-block recursion (Visit(trueBlock)/
+//      Visit(falseBlock) for single-Block then/else arms), and the separate
+//      ExtractElseBlock branch (the `TrueInst.HasFlag(EndPointUnreachable)` +
+//      `FalseInst is Block` case) are still deferred (need the D39 dominator
+//      analysis for ReduceSwitchNesting and the content-block nextInstruction
+//      plumbing for the recursion).
 //
 // Block-model adaptation: the C# Block.Instructions does NOT include the
 // FinalInstruction (a void block's final is a Nop, and the control flow
@@ -520,19 +527,26 @@ void ImproveILOrdering(Block* block, IfInstruction* ifInst, Block* continueTarge
 	ConditionDetection::InvertIf(block, ifInst);
 }
 
-// Visit every BlockContainer's blocks, calling ImproveILOrdering on each
-// if-as-FinalInstruction (the C# `Visit` iterates `block.Instructions` and calls
-// ImproveILOrdering on each if non-terminal; this port's if-as-final model makes
-// the if the block's FinalInstruction, so the visit checks the final). Recurses
-// into nested containers (the if's arms, the block's non-terminal containers).
+// Visit every BlockContainer's blocks, calling ImproveILOrdering then
+// ReduceNesting on each if-as-FinalInstruction (the C# `Visit` iterates
+// `block.Instructions` and calls ImproveILOrdering/ReduceNesting on each if
+// non-terminal; this port's if-as-final model makes the if the block's
+// FinalInstruction, so the visit checks the final). Recurses into nested
+// containers (the if's arms, the block's non-terminal containers).
 // `continueTarget` (the C# Loop/While/DoWhile tracking for CanDuplicateExit's
 // `continue` detection) is set per-container based on the container's Kind
 // (Loop/While -> the entry point Blocks[0]; DoWhile -> the last block
 // Blocks.back(); Normal/Switch -> inherit the parent's continueTarget), matching
-// the C# `Visit(BlockContainer)` switch. The ReduceNesting/ReduceSwitchNesting/
-// ExtractElseBlock folds and the content-block recursion are deferred (need the
-// full EnsureEndPointUnreachable/ExtractElseBlock helpers + the dominator
-// analysis).
+// the C# `Visit(BlockContainer)` switch). The wired ReduceNesting fold (the
+// no-else `if (cond) { then } exit;` -> `if (!cond) exit; then...; exit;` and the
+// else-if-tree case) is called after ImproveILOrdering via CanDuplicateExit (the
+// C# `Visit` does `CanDuplicateExit(NextInsn()) && ReduceNesting(...) ->
+// RemoveRedundantExit`). ReduceSwitchNesting, the content-block recursion
+// (Visit(trueBlock)/Visit(falseBlock) for single-Block then/else arms), and the
+// separate ExtractElseBlock branch (the `ifInst.TrueInst.HasFlag(EndPointUnreachable)`
+// + `ifInst.FalseInst is Block` case) are deferred (need the D39 dominator
+// analysis for ReduceSwitchNesting and the content-block nextInstruction
+// plumbing for the recursion).
 void VisitContainers(ILInstruction* inst, Block* continueTarget);
 void VisitContainer(BlockContainer* container, Block* continueTarget) {
 	// Set continueTarget based on the container's Kind (the C#
@@ -551,16 +565,52 @@ void VisitContainer(BlockContainer* container, Block* continueTarget) {
 		case ContainerKind::Switch:
 			break;  // inherit the parent's continueTarget
 	}
-	for (auto& block : container->Blocks) {
+	// Index-based loop (the C# `Visit(BlockContainer)` iterates by index with a
+	// `container.Blocks[i] == block` assert): the else-if-tree ReduceNesting fold
+	// promotes else blocks to the container (inserts after the current block) and
+	// drops the dead exit block (removes after the current block), so a range-for
+	// over `container->Blocks` would be invalidated. The fold only inserts/removes
+	// blocks AFTER the current index, so the block at the current index is
+	// unchanged (the assert), and the loop re-reads the (possibly grown/shrunk)
+	// block list each iteration.
+	for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+		Block* block = container->Blocks[i].get();
 		for (auto& inst : block->Instructions)
 			VisitContainers(inst.get(), continueTarget);
 		if (auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get())) {
-			ImproveILOrdering(block.get(), iff, continueTarget);
+			ImproveILOrdering(block, iff, continueTarget);
+			// ReduceNesting: the C# `Visit` calls `CanDuplicateExit(NextInsn(), ...)`
+			// then `ReduceNesting(block, ifInst, keywordExit)` then
+			// `RemoveRedundantExit(block, nextInstruction)`. `NextInsn()` (the C#
+			// `block.Instructions.ElementAtOrDefault(i + 1) ?? nextInstruction`) is
+			// the instruction after the if; this port's if-as-final model puts the
+			// exit in the NEXT block (Block B), so `NextInsn()` is Block B's first
+			// instruction (the exit when Block B has no non-terminals, or Block B's
+			// first non-terminal when it has content). The no-else fold fires on
+			// this corpus; the else-if-tree fold is faithfulness-only.
+			Block* nextBlock = (i + 1 < container->Blocks.size())
+				? container->Blocks[i + 1].get() : nullptr;
+			ILInstruction* nextInsn = nullptr;
+			if (nextBlock) nextInsn = nextBlock->Instructions.empty()
+				? nextBlock->FinalInstruction.get() : nextBlock->Instructions[0].get();
+			ILInstruction* keywordExit = nullptr;
+			if (nextInsn && ReduceNestingTransform::CanDuplicateExit(nextInsn, continueTarget, keywordExit)) {
+				if (ReduceNestingTransform::ReduceNesting(block, iff, keywordExit)) {
+					// RemoveRedundantExit: the C# passes `nextInstruction` (the fall-
+					// through after the block); for container blocks the C# passes null
+					// (a container block's end point is unreachable), and after the
+					// fold Block A's FinalInstruction is the if (not a keyword exit),
+					// so this is a no-op here. The content-block recursion (deferred)
+					// is where RemoveRedundantExit fires with a real nextInstruction.
+					ReduceNestingTransform::RemoveRedundantExit(block, nullptr);
+				}
+			}
 			VisitContainers(iff->TrueInst.get(), continueTarget);
 			VisitContainers(iff->FalseInst.get(), continueTarget);
 		} else if (block->FinalInstruction) {
 			VisitContainers(block->FinalInstruction.get(), continueTarget);
 		}
+		assert(container->Blocks[i].get() == block);
 	}
 }
 void VisitContainers(ILInstruction* inst, Block* continueTarget) {
@@ -1120,13 +1170,16 @@ bool ReduceNestingTransform::ShouldReduceNesting(Block* block, int maxStatements
 
 void ReduceNestingTransform::Run(ILFunction& function, ILTransformContext& context) {
 	// The C# `Run` calls `Visit((BlockContainer)function.Body, null)` (the
-	// nesting-reduction + ImproveILOrdering folds) then the
-	// EliminateRedundantTryFinally loop. This iteration ports ImproveILOrdering
-	// (the IL-order-gated InvertIf, the simplest wired fold); the
-	// ReduceNesting/ReduceSwitchNesting/ExtractElseBlock folds are deferred
-	// (need the full CanDuplicateExit/EnsureEndPointUnreachable/ExtractElseBlock
-	// helpers + the D39 dominator analysis). Visit recurses into every
-	// BlockContainer's blocks and calls ImproveILOrdering on each
+	// ImproveILOrdering + ReduceNesting folds) then the
+	// EliminateRedundantTryFinally loop. The Visit walk now wires ReduceNesting
+	// (both the no-else and else-if-tree cases) after ImproveILOrdering via
+	// CanDuplicateExit; ReduceSwitchNesting, the content-block recursion
+	// (Visit(trueBlock)/Visit(falseBlock) for single-Block then/else arms), and
+	// the separate ExtractElseBlock branch (the `TrueInst.HasFlag(EndPointUnreachable)`
+	// + `FalseInst is Block` case) are still deferred (need the D39 dominator
+	// analysis for ReduceSwitchNesting and the content-block nextInstruction
+	// plumbing for the recursion). Visit recurses into every BlockContainer's
+	// blocks and calls ImproveILOrdering then ReduceNesting on each
 	// if-as-FinalInstruction.
 	VisitContainer(dynamic_cast<BlockContainer*>(function.Body.get()), nullptr);
 	// EliminateRedundantTryFinally: the C# iterates

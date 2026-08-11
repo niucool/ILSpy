@@ -231,9 +231,9 @@ public:
     //              ->  if (c1) { t1; exit; } if (c2) { t2; exit; } elseBlock...; exit;
     // `exitInst` is the keyword exit (return/break/continue) the caller found
     // via `CanDuplicateExit` (the C# `Visit` passes `keywordExit`). Returns true
-    // if the fold fired. No pipeline transform consults it yet (the wired Visit
-    // walk is the subsequent iteration); the corpus sweep in the test suite fires
-    // it on real candidates to validate safety.
+    // if the fold fired. The wired `Run` Visit walk calls it after
+    // ImproveILOrdering via CanDuplicateExit; the corpus sweep in the test suite
+    // fires it on real candidates to validate safety.
     //
     // Block-model adaptation (the recurring D73/D75 divergence): the no-else
     // case operates on Block A (the if is the FinalInstruction) + Block B (the
