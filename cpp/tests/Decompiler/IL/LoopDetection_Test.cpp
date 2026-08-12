@@ -209,3 +209,71 @@ TEST(LoopDetection, MscorlibSweepPreservesInvariant) {
     EXPECT_GT(transformed, 3000);
     EXPECT_GT(loopCount, 100) << "mscorlib must have many loops detected";
 }
+
+TEST(LoopDetection, PicksEarliestOutOfLoopExitDeterministically) {
+    // Nondeterminism regression guard (the LoopDetection determinism fix). A loop
+    // with TWO out-of-loop successor blocks -- b4 at a lower StartILOffset and b5
+    // at a higher one -- must exit to the earliest block (b4):
+    //   b1 (header): if (c) br b4 else br b2
+    //   b2 (body):   if (c) br b5 else br b3
+    //   b3 (body):   br b1        (back edge; b1 dominates b2/b3)
+    //   b4, b5: leave (function)  (both loop exits)
+    // FindExitPoint/ConstructLoop used to iterate a std::set<ControlFlowNode*> in
+    // pointer-address order, so a multi-exit loop got a run-to-run-varying exit
+    // (and member block order), breaking output determinism. Now the earliest
+    // out-of-loop successor is chosen and members keep their container order.
+    auto fn = WrapBlocks({});
+    for (int i = 0; i < 6; ++i) fn->Body->AddBlock(std::make_unique<Block>());
+    auto cd = [] {
+        return std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                                      ComparisonKind::Inequality);
+    };
+    Block* b1 = fn->Body->Blocks[1].get();
+    Block* b2 = fn->Body->Blocks[2].get();
+    Block* b3 = fn->Body->Blocks[3].get();
+    Block* b4 = fn->Body->Blocks[4].get();
+    Block* b5 = fn->Body->Blocks[5].get();
+    // Give the blocks increasing StartILOffset so "earliest" is well-defined.
+    const std::uint32_t offs[6] = { 0, 0x10, 0x20, 0x30, 0x40, 0x50 };
+    for (int i = 0; i < 6; ++i) fn->Body->Blocks[i]->StartILOffset = offs[i];
+
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Branch>(b1));
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<IfInstruction>(cd(), std::make_unique<Branch>(b4),
+                                                                  std::make_unique<Branch>(b2)));
+    fn->Body->Blocks[2]->SetFinal(std::make_unique<IfInstruction>(cd(), std::make_unique<Branch>(b5),
+                                                                  std::make_unique<Branch>(b3)));
+    fn->Body->Blocks[3]->SetFinal(std::make_unique<Branch>(b1));
+    fn->Body->Blocks[4]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->Blocks[5]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    LoopDetection().Run(*fn, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // A Loop container was constructed. Find the pre-header block -- the one (in
+    // any container) that directly owns a Loop-kind container as a child. Its
+    // FinalInstruction is the synthesized loop-exit branch; it must target b4
+    // (the earliest out-of-loop successor), never the later b5.
+    Block* preHeader = nullptr;
+    Walk(fn->Body.get(), [&](ILInstruction* i) {
+        auto* blk = dynamic_cast<Block*>(i);
+        if (!blk) return;
+        // A block's Instruction that is a Loop container marks this block as the
+        // pre-header (ConstructLoop replaces the header's content list with the
+        // loop container, leaving a trailing exit Branch as the final).
+        for (const auto& inst : blk->Instructions) {
+            if (auto* c = dynamic_cast<BlockContainer*>(inst.get()))
+                if (c->Kind == ContainerKind::Loop) preHeader = blk;
+        }
+    });
+    ASSERT_NE(preHeader, nullptr) << "the loop must be detected and wrapped";
+    ASSERT_TRUE(preHeader->FinalInstruction) << "pre-header must end in an exit branch";
+    ASSERT_EQ(preHeader->FinalInstruction->Op, OpCode::Branch)
+        << "pre-header final is the synthesized loop-exit branch";
+    auto* exitBr = static_cast<Branch*>(preHeader->FinalInstruction.get());
+    EXPECT_EQ(exitBr->TargetBlock, b4)
+        << "the exit branch must target the earliest out-of-loop successor (b4, "
+           "offset 0x40), not the later b5 (offset 0x50): the exit pick must be "
+           "deterministic, not pointer-order-dependent";
+    EXPECT_NE(exitBr->TargetBlock, b5) << "the later exit b5 must not be chosen";
+}

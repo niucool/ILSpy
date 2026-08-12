@@ -27,7 +27,9 @@
 
 #include <algorithm>
 #include <functional>
+#include <limits>
 #include <set>
+#include <unordered_set>
 #include <vector>
 
 namespace ILSpy::Decompiler::IL {
@@ -47,13 +49,34 @@ void WalkContainers(ILInstruction* inst, const std::function<void(BlockContainer
 }
 
 Block* FindExitPoint(const std::set<FlowAnalysis::ControlFlowNode*>& loop) {
-    for (auto* n : loop) {
+    // Deterministic exit-point pick. Iterating the std::set<ControlFlowNode*>
+    // directly yields raw pointer address order, so which of a multi-exit loop's
+    // out-of-loop successors was returned varied run-to-run (it fed the block
+    // moves and the IL_XXXX label naming downstream). Iterate the members ordered
+    // by block StartILOffset and, among all out-of-loop successor blocks, pick
+    // the earliest one -- the natural layout-next block. The C# picks the exit via
+    // a post-dominance analysis; the port keeps its simplified single-exit model
+    // but makes the choice stable.
+    std::vector<FlowAnalysis::ControlFlowNode*> members(loop.begin(), loop.end());
+    std::sort(members.begin(), members.end(), [](const FlowAnalysis::ControlFlowNode* a,
+                                                 const FlowAnalysis::ControlFlowNode* b) {
+        auto* ba = static_cast<const Block*>(a->UserData);
+        auto* bb = static_cast<const Block*>(b->UserData);
+        return (ba ? ba->StartILOffset : 0) < (bb ? bb->StartILOffset : 0);
+    });
+    Block* best = nullptr;
+    std::uint32_t bestOffset = std::numeric_limits<std::uint32_t>::max();
+    for (auto* n : members) {
         for (auto* s : n->Successors) {
-            if (!loop.count(s) && s->UserData)
-                return static_cast<Block*>(s->UserData);
+            if (loop.count(s) || !s->UserData) continue;
+            auto* block = static_cast<Block*>(s->UserData);
+            if (!best || block->StartILOffset < bestOffset) {
+                best = block;
+                bestOffset = block->StartILOffset;
+            }
         }
     }
-    return nullptr;
+    return best;
 }
 
 void ConstructLoop(BlockContainer* parent, FlowAnalysis::ControlFlowNode* headerNode,
@@ -117,16 +140,24 @@ void ConstructLoop(BlockContainer* parent, FlowAnalysis::ControlFlowNode* header
         oldEntryPoint->SetFinal(std::move(final));
     }
 
+    // Move the loop body blocks into the loop container, scanning parent->Blocks
+    // in the enclosing container's existing block order. The old loop iterated the
+    // `loop` std::set (raw pointer order), so member blocks landed in address
+    // order -- which varies run-to-run, making the emitted block order (and the
+    // IL_XXXX label/goto naming) nondeterministic. Scanning parent->Blocks
+    // preserves the source layout and is stable.
+    std::unordered_set<Block*> memberBlocks;
+    memberBlocks.reserve(loop.size());
     for (auto* n : loop) {
         if (n == headerNode) continue;
-        Block* block = static_cast<Block*>(n->UserData);
-        if (!block || block->Parent != parent) continue;
-        for (auto it = parent->Blocks.begin(); it != parent->Blocks.end(); ++it) {
-            if (it->get() == block) {
-                loopPtr->AddBlock(std::move(*it));
-                parent->Blocks.erase(it);
-                break;
-            }
+        if (auto* b = static_cast<Block*>(n->UserData)) memberBlocks.insert(b);
+    }
+    for (auto it = parent->Blocks.begin(); it != parent->Blocks.end();) {
+        if (memberBlocks.count(it->get())) {
+            loopPtr->AddBlock(std::move(*it));
+            it = parent->Blocks.erase(it);
+        } else {
+            ++it;
         }
     }
     for (std::size_t i = 0; i < parent->Blocks.size(); ++i) {
