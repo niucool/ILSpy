@@ -49,6 +49,7 @@
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -903,4 +904,28 @@ TEST(ILAstToCSharp, RedundantConditionalGotoToNextBlockIsDropped) {
         << "a conditional jump to the immediately-following block is a no-op:\n" << text;
     EXPECT_EQ(text.find("IL_"), std::string::npos)
         << "no loop/block label should be emitted for a dropped jump:\n" << text;
+}
+
+TEST(ILAstToCSharp, GenericMemberRefMetadataNameRendersCSharpForm) {
+    // A reference to a member of a generic type (e.g. `EmptyArray<System.Byte>.Zero`
+    // or `ArraySortHelper<System.Object>::.ctor`) must not leak the ECMA metadata
+    // name's ``N<...>` arity suffix. The arity marker is a CLR encoding detail;
+    // C# writes the type as `Name<args>`.
+    auto fn = MakeFunction({});
+    auto block = std::make_unique<Block>();
+    // return System.EmptyArray`1<System.Byte>::Zero  (static field read as an
+    // expression; the seed renders ldsflda as the raw name for now).
+    block->Add(std::make_unique<StLoc>(
+        MakeVar(VariableKind::Local, "V_0", 0),
+        std::make_unique<LdTypeToken>(
+            "System.Collections.Generic.List`1<System.String>")));
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get(),
+        std::make_unique<LdLoc>(MakeVar(VariableKind::Local, "V_0", 0))));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "object", "M", "");
+    EXPECT_EQ(text.find("`1"), std::string::npos)
+        << "the arity suffix ``N` leaked into the output:\n" << text;
+    EXPECT_NE(text.find("List<System.String>"), std::string::npos) << text;
 }

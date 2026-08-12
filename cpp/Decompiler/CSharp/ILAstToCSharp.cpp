@@ -80,11 +80,35 @@ namespace {
 
 // "Namespace.Type::Member" -> "Namespace.Type.Member"; a trailing "::.ctor"
 // marks a constructor reference (the "new" form is added by the caller).
+// Remove the ``N` type-arity suffix immediately preceding a type-argument
+// list (`List`1<...>` -> `List<...>`), recursing into nested type arguments.
+// The arity is a CLR encoding detail; C# writes the type as `Name<args>`.
+// Compiler-generated names that merely *start* with `<` (e.g. `<>c`,
+// `<Foo>d__0`) do not match because they are not preceded by `` `N ``.
+static void StripGenericArity(std::string& s, std::size_t start) {
+    std::size_t pos = start;
+    while ((pos = s.find('<', pos)) != std::string::npos) {
+        // Walk back over the digits of the arity count, then the backtick.
+        std::size_t digitEnd = pos;
+        std::size_t p = pos;
+        while (p > 0 && s[p - 1] >= '0' && s[p - 1] <= '9') --p;
+        if (p < digitEnd && p > 0 && s[p - 1] == '`') {
+            // s[p-1 .. pos-1] is ``Ndigits` -- erase it.
+            s.erase(p - 1, pos - (p - 1));
+            // Continue scanning from where the erased backtick was (the '<' moved up).
+            pos = p - 1;
+        } else {
+            ++pos;
+        }
+    }
+}
+
 std::string FlattenMetadataName(std::string name) {
     for (std::size_t pos; (pos = name.find("::")) != std::string::npos;)
         name.replace(pos, 2, ".");
     if (name.size() >= 2 && name.compare(name.size() - 2, 2, "..") == 0)
         name.erase(name.size() - 1);  // fold ".." left by an empty member segment
+    StripGenericArity(name, 0);
     return name;
 }
 
