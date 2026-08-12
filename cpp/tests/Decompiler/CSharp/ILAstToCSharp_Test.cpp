@@ -871,3 +871,36 @@ TEST(ILAstToCSharp, NopElseArmIsNotEmitted) {
     EXPECT_EQ(text.find("else"), std::string::npos)
         << "a Nop else arm must not produce an `else` block:\n" << text;
 }
+
+TEST(ILAstToCSharp, RedundantConditionalGotoToNextBlockIsDropped) {
+    // b0: if (1 != 0) br b1   (no else)   -- b1 is the NEXT block, so the
+    //   branch is taken iff the condition holds and falls through otherwise;
+    //   both paths reach b1, so the whole if is a redundant no-op.
+    // The branch is the TRUE ARM of the block-final if (not the block final
+    // itself), which the fall-through drop used to miss, emitting a dangling
+    // `if (1 != 0) goto IL_XXXX;` plus a redundant label.
+    auto fn = MakeFunction({});
+    auto b0 = std::make_unique<Block>();
+    b0->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
+                                    std::make_unique<LdcI4>(1)));
+    auto b1 = std::make_unique<Block>();
+    b1->StartILOffset = 0x20;
+    Block* b1Ptr = b1.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+
+    auto br = std::make_unique<Branch>(b1Ptr);
+    br->TargetOffset = 0x20;
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::move(br)));
+    fn->Body->Blocks[1]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos)
+        << "a conditional jump to the immediately-following block is a no-op:\n" << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos)
+        << "no loop/block label should be emitted for a dropped jump:\n" << text;
+}

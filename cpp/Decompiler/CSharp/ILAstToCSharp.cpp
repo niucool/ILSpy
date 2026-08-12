@@ -135,6 +135,13 @@ const char* ConvTargetName(StackType target) {
     }
 }
 
+// Forward declarations: whether a branch renders no `goto` (a redundant
+// fall-through or a loop pre-header entry). CollectLabels consults these so it
+// only creates a label for a branch target that will actually be referenced by
+// an emitted `goto`. Defined later in the file.
+static bool IsFallThroughGoto(const Branch* br);
+static bool IsLoopEntryFallThrough(const Branch* br);
+
 // Emit an ILFunction body as C#-ish text. See the file header for the level
 // of fidelity this seed aims for.
 class CEmitter {
@@ -252,7 +259,11 @@ private:
         if (!inst) return;
         if (inst->Op == OpCode::Branch) {
             const auto* br = static_cast<const Branch*>(inst);
-            if (br->TargetBlock && labels_.find(br->TargetBlock) == labels_.end() &&
+            // Only a branch that will render a `goto` gets a label; dropped
+            // branches reference the target but emit nothing, so the label must
+            // not be created (it would be orphaned).
+            if (br->TargetBlock && !IsFallThroughGoto(br) && !IsLoopEntryFallThrough(br) &&
+                labels_.find(br->TargetBlock) == labels_.end() &&
                 loopHeaders_.find(br->TargetBlock) == loopHeaders_.end())
                 labels_[br->TargetBlock] = LabelFor(br->TargetOffset);
         }
@@ -274,10 +285,19 @@ private:
             if (encBlock) break;
         }
         if (!encBlock) return false;
-        // Only when the branch IS the enclosing block's final (a plain block
-        // final). A branch inside an if-arm or a switch section is not a
-        // block-final fall-through.
-        if (encBlock->FinalInstruction.get() != br) return false;
+        // The branch must be a block-final fall-through: either it IS the
+        // enclosing block's FinalInstruction, or it is the TRUE ARM of the
+        // block-final `if (cond) br target` with NO else (the enclosing block's
+        // final is that if) -- a conditional jump to the next block is also a
+        // redundant no-op (both paths reach it). A branch inside an if-arm with
+        // an else, or inside a switch section, is not a block-final fall-through.
+        const ILInstruction* final = encBlock->FinalInstruction.get();
+        bool isFinal = (final == br);
+        if (!isFinal) {
+            if (auto* ifFinal = dynamic_cast<const IfInstruction*>(final))
+                isFinal = (ifFinal->TrueInst.get() == br) && !ifFinal->FalseInst;
+        }
+        if (!isFinal) return false;
         BlockContainer* encContainer = dynamic_cast<BlockContainer*>(encBlock->Parent);
         if (!encContainer) return false;
         for (std::size_t i = 0; i + 1 < encContainer->Blocks.size(); ++i) {
