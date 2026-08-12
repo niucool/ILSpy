@@ -158,11 +158,15 @@ public:
     // Decode the local-variable signature referenced by a method body's
     // LocalVarSigToken (a StandAloneSig token, table 0x11). Returns the local
     // types in index order; an empty vector if the token is 0/invalid/malformed.
-    std::vector<TypeSystem::ITypePtr> GetLocalTypes(std::uint32_t localVarSigToken) const;
+    // `ownerMethodToken` (optional) names generic VAR/MVAR params after the
+    // owning method's / method's type's GenericParam rows (D173).
+    std::vector<TypeSystem::ITypePtr> GetLocalTypes(std::uint32_t localVarSigToken,
+                                                    std::uint32_t ownerMethodToken = 0) const;
     // As GetLocalTypes, but also reports each local's pinned flag (the 0x45
     // ELEMENT_TYPE_PINNED marker). The IL reader uses this to mark
     // VariableKind::PinnedLocal, the input to DetectPinnedRegions.
-    std::vector<LocalTypeInfo> GetLocalTypesWithPinned(std::uint32_t localVarSigToken) const;
+    std::vector<LocalTypeInfo> GetLocalTypesWithPinned(std::uint32_t localVarSigToken,
+                                                       std::uint32_t ownerMethodToken = 0) const;
 
     // Decode the field type of a Field row (by token). Returns nullptr if the
     // token is out of range or the signature is malformed; never throws.
@@ -184,7 +188,11 @@ public:
     // Resolve a TypeDef/TypeRef (or TypeSpec) token to an IType. Returns nullptr
     // for an out-of-range/unsupported token; never throws. Used by the IL reader
     // for castclass/isinst/box/newarr/ldelem type operands.
-    ILSpy::Decompiler::TypeSystem::ITypePtr ResolveTypeToken(std::uint32_t token) const;
+    // `ownerMethodToken` (optional) is the method the operand appears in: a
+    // TypeSpec's VAR/MVAR scope to that method's class/method generic params
+    // (e.g. `newarr T` inside a generic method encodes `!!0[`T`]` -- D173).
+    ILSpy::Decompiler::TypeSystem::ITypePtr ResolveTypeToken(std::uint32_t token,
+                                                             std::uint32_t ownerMethodToken = 0) const;
 
     // Resolve the declaring type of a method token (MethodDef parent TypeDef,
     // MemberRef parent TypeRef/TypeDef/TypeSpec, MethodSpec unwrapped to its
@@ -192,7 +200,11 @@ public:
     // unsupported token; never throws. Used by the IL reader to populate
     // Call::DeclaringType so the nullable-lifting helpers can recognise
     // Nullable<T>.get_HasValue / GetValueOrDefault by KnownTypeCode.
-    ILSpy::Decompiler::TypeSystem::ITypePtr ResolveMethodDeclaringType(std::uint32_t methodToken) const;
+    // `ownerMethodToken` (optional) is the method the call appears in: a
+    // MemberRef-parent TypeSpec's VAR/MVAR scope to that method's generic
+    // params (e.g. `new List<T>()` renders its TypeSpec arg named -- D174).
+    ILSpy::Decompiler::TypeSystem::ITypePtr ResolveMethodDeclaringType(std::uint32_t methodToken,
+                                                                       std::uint32_t ownerMethodToken = 0) const;
 
     // Whether a field token (FieldDef or a field MemberRef) is compiler-generated
     // or declared in a compiler-generated class. Mirrors the C#

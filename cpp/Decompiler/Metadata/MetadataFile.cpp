@@ -36,6 +36,31 @@
 namespace ILSpy::Decompiler::Metadata {
 
 namespace {
+
+// Authors' generic parameter names for a method's decode scope (D172/D173):
+// MethodDef.GenericParam rows name this method's MVAR (!!N) params; the
+// declaring TypeDef's GenericParam rows name the class's VAR (!N) params.
+// Lookups are 0-based via the GenericParam.Number column; rows need not be
+// table-ordered in the GenericParam table. Returns an empty context when the
+// row index is out of range (callers then get positional fallback names).
+GenericParamNames BuildGenericParamNames(const winmd::reader::database& db,
+                                         std::uint32_t methodRow /*1-based*/) {
+    GenericParamNames names;
+    if (methodRow == 0 || methodRow > db.MethodDef.size()) return names;
+    auto md = db.MethodDef[methodRow - 1];
+    auto collectInto = [](auto range, std::vector<std::string>& out) {
+        for (auto it = range.first; it != range.second; ++it) {
+            std::uint32_t n = (*it).Number();
+            if (n >= out.size()) out.resize(n + 1);
+            out[n] = std::string((*it).Name());
+        }
+    };
+    collectInto(md.GenericParam(), names.methodNames);
+    collectInto(md.Parent().GenericParam(), names.classNames);  // declaring TypeDef
+    return names;
+}
+
+
 // Read the whole file into a buffer. Used to drive method-body decoding
 // (RVA -> file offset) independently of winmd's own mmap of the metadata
 // streams. Returns nullptr if the file cannot be read.
@@ -231,8 +256,20 @@ ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::GetFieldSignature(std::uin
     try {
         auto blobIndex = impl_->db->Field.get_value<std::uint32_t>(row - 1, 2);  // Signature blob
         auto blob = impl_->db->get_blob(blobIndex);
+        // A field sig's VAR (!N) scopes to the field's declaring TypeDef's
+        // GenericParam rows -- resolvable from the FieldDef row alone.
+        GenericParamNames genNames;
+        {
+            auto range = impl_->db->Field[row - 1].Parent().GenericParam();
+            for (auto it = range.first; it != range.second; ++it) {
+                std::uint32_t n = (*it).Number();
+                if (n >= genNames.classNames.size()) genNames.classNames.resize(n + 1);
+                genNames.classNames[n] = std::string((*it).Name());
+            }
+        }
         return DecodeFieldSignatureBlob(*impl_->db, blob.begin(),
-                                        static_cast<std::size_t>(blob.end() - blob.begin()));
+                                        static_cast<std::size_t>(blob.end() - blob.begin()),
+                                        &genNames);
     } catch (const std::exception&) {
         return nullptr;
     }
@@ -434,7 +471,8 @@ std::string MetadataFile::ResolveTokenToString(std::uint32_t token) const {
     return fallback();
 }
 
-ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::ResolveTypeToken(std::uint32_t token) const {
+ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::ResolveTypeToken(std::uint32_t token,
+                                                                       std::uint32_t ownerMethodToken) const {
     if (!IsValid()) return nullptr;
     std::uint32_t table = token >> 24;
     std::uint32_t row = token & 0x00FFFFFFu;
@@ -450,10 +488,18 @@ ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::ResolveTypeToken(std::uint
         if (table == 0x1B && row && row <= impl_->db->TypeSpec.size()) {  // TypeSpec
             // Column 0 is the signature blob; decode the content type
             // (SZArray / multi-dim array / generic instantiation / ptr & byref).
+            // VAR/MVAR in the blob scope to the owning method body.
+            GenericParamNames genNames;
+            const GenericParamNames* genNamesPtr = nullptr;
+            if ((ownerMethodToken >> 24) == 0x06) {
+                genNames = BuildGenericParamNames(*impl_->db, ownerMethodToken & 0x00FFFFFFu);
+                genNamesPtr = &genNames;
+            }
             auto blobIndex = impl_->db->TypeSpec.get_value<std::uint32_t>(row - 1, 0);
             auto blob = impl_->db->get_blob(blobIndex);
             return DecodeTypeSpecBlob(*impl_->db, blob.begin(),
-                                      static_cast<std::size_t>(blob.end() - blob.begin()));
+                                      static_cast<std::size_t>(blob.end() - blob.begin()),
+                                      genNamesPtr);
         }
     } catch (const std::exception&) {
         return nullptr;
@@ -461,7 +507,8 @@ ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::ResolveTypeToken(std::uint
     return nullptr;
 }
 
-ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::ResolveMethodDeclaringType(std::uint32_t methodToken) const {
+ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::ResolveMethodDeclaringType(std::uint32_t methodToken,
+                                                                                 std::uint32_t ownerMethodToken) const {
     if (!IsValid()) return nullptr;
     std::uint32_t table = methodToken >> 24;
     std::uint32_t row = methodToken & 0x00FFFFFFu;
@@ -489,11 +536,21 @@ ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::ResolveMethodDeclaringType
                 return MakeTypeRefFromTypeDef(t);
             }
             if (parent.type() == MRP::TypeSpec) {
+                // The TypeSpec (e.g. `List<!0>` or `ArraySortHelper<!!0>`) is
+                // instantiated in the CALLER's scope: its VAR/MVAR bind to the
+                // calling method body's class/method generic params.
+                GenericParamNames genNames;
+                const GenericParamNames* genNamesPtr = nullptr;
+                if ((ownerMethodToken >> 24) == 0x06) {
+                    genNames = BuildGenericParamNames(*impl_->db, ownerMethodToken & 0x00FFFFFFu);
+                    genNamesPtr = &genNames;
+                }
                 auto ts = parent.get_row<winmd::reader::TypeSpec>();
                 std::uint32_t blobIndex = ts.get_value<std::uint32_t>(0);
                 auto blob = impl_->db->get_blob(blobIndex);
                 return DecodeTypeSpecBlob(*impl_->db, blob.begin(),
-                                          static_cast<std::size_t>(blob.end() - blob.begin()));
+                                          static_cast<std::size_t>(blob.end() - blob.begin()),
+                                          genNamesPtr);
             }
             return nullptr;
         }
@@ -652,7 +709,8 @@ std::vector<std::string> MetadataFile::GetParameterNames(std::uint32_t methodTok
     return result;
 }
 
-std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> MetadataFile::GetLocalTypes(std::uint32_t localVarSigToken) const {
+std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> MetadataFile::GetLocalTypes(std::uint32_t localVarSigToken,
+                                                                                 std::uint32_t ownerMethodToken) const {
     std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> result;
     if (!IsValid() || localVarSigToken == 0) return result;
     std::uint32_t table = localVarSigToken >> 24;
@@ -661,8 +719,18 @@ std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> MetadataFile::GetLocalTypes
     try {
         std::uint32_t blobColumn = impl_->db->StandAloneSig.get_value<std::uint32_t>(row - 1, 0);
         auto blob = impl_->db->get_blob(blobColumn);
+        // A local sig's VAR/MVAR scope to the owning method body's class /
+        // method generic params; the IL reader passes the method token so
+        // generic-typed locals come back authored-named (T, ...).
+        GenericParamNames genNames;
+        const GenericParamNames* genNamesPtr = nullptr;
+        if ((ownerMethodToken >> 24) == 0x06) {
+            genNames = BuildGenericParamNames(*impl_->db, ownerMethodToken & 0x00FFFFFFu);
+            genNamesPtr = &genNames;
+        }
         auto infos = DecodeLocalSignatureBlob(
-            *impl_->db, blob.begin(), static_cast<std::size_t>(blob.end() - blob.begin()));
+            *impl_->db, blob.begin(), static_cast<std::size_t>(blob.end() - blob.begin()),
+            genNamesPtr);
         result.reserve(infos.size());
         for (auto& info : infos) result.push_back(std::move(info.Type));
     } catch (const std::exception&) {
@@ -671,7 +739,8 @@ std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> MetadataFile::GetLocalTypes
     return result;
 }
 
-std::vector<ILSpy::Decompiler::Metadata::LocalTypeInfo> MetadataFile::GetLocalTypesWithPinned(std::uint32_t localVarSigToken) const {
+std::vector<ILSpy::Decompiler::Metadata::LocalTypeInfo> MetadataFile::GetLocalTypesWithPinned(std::uint32_t localVarSigToken,
+                                                                                              std::uint32_t ownerMethodToken) const {
     std::vector<LocalTypeInfo> result;
     if (!IsValid() || localVarSigToken == 0) return result;
     std::uint32_t table = localVarSigToken >> 24;
@@ -680,8 +749,15 @@ std::vector<ILSpy::Decompiler::Metadata::LocalTypeInfo> MetadataFile::GetLocalTy
     try {
         std::uint32_t blobColumn = impl_->db->StandAloneSig.get_value<std::uint32_t>(row - 1, 0);
         auto blob = impl_->db->get_blob(blobColumn);
+        GenericParamNames genNames;
+        const GenericParamNames* genNamesPtr = nullptr;
+        if ((ownerMethodToken >> 24) == 0x06) {
+            genNames = BuildGenericParamNames(*impl_->db, ownerMethodToken & 0x00FFFFFFu);
+            genNamesPtr = &genNames;
+        }
         result = DecodeLocalSignatureBlob(
-            *impl_->db, blob.begin(), static_cast<std::size_t>(blob.end() - blob.begin()));
+            *impl_->db, blob.begin(), static_cast<std::size_t>(blob.end() - blob.begin()),
+            genNamesPtr);
     } catch (const std::exception&) {
         result.clear();
     }

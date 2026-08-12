@@ -121,6 +121,11 @@ struct ReaderState {
     // a pinned local becomes VariableKind::PinnedLocal, the input to
     // DetectPinnedRegions.
     std::vector<bool> localPinned;
+    // MethodDef token of the method being decoded. Generic-token resolvers
+    // (ResolveTypeToken / ResolveMethodDeclaringType) use it as the VAR/MVAR
+    // scope for TypeSpec operands (a `newarr !!0` in a generic method decodes
+    // with the method's T -- D174).
+    std::uint32_t ownerMethodToken = 0;
     StackType returnStackType = StackType::Void;
 
     // Evaluation-stack merge state (method-wide): the input stack recorded for
@@ -593,7 +598,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             call->ParameterIType = callSig->ParameterTypes;
             call->IsInstanceCall = callSig->IsInstance && op != ILOpCode::Newobj;
             call->IsNewObj = (op == ILOpCode::Newobj);
-            call->DeclaringType = file.ResolveMethodDeclaringType(tok);
+            call->DeclaringType = file.ResolveMethodDeclaringType(tok, s.ownerMethodToken);
             call->IsOperator = IsOperatorName(call->MethodName);
             call->TypeArgumentsCount = file.GetMethodSpecTypeArgumentCount(tok);
             std::vector<std::unique_ptr<ILInstruction>> args;
@@ -755,28 +760,28 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         // ---- cast/isinst/box/unbox ----
         case ILOpCode::Castclass: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
-            auto type = file.ResolveTypeToken(tok);
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
             auto v = s.Pop(); if (!v) return DecodeOutcome::Bail;
             if (!s.Push(std::make_unique<CastClass>(type, std::move(v)))) return DecodeOutcome::Bail;
             break;
         }
         case ILOpCode::Isinst: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
-            auto type = file.ResolveTypeToken(tok);
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
             auto v = s.Pop(); if (!v) return DecodeOutcome::Bail;
             if (!s.Push(std::make_unique<IsInst>(type, std::move(v)))) return DecodeOutcome::Bail;
             break;
         }
         case ILOpCode::Box: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
-            auto type = file.ResolveTypeToken(tok);
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
             auto v = s.Pop(); if (!v) return DecodeOutcome::Bail;
             if (!s.Push(std::make_unique<Box>(type, std::move(v)))) return DecodeOutcome::Bail;
             break;
         }
         case ILOpCode::Unbox: case ILOpCode::Unbox_any: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
-            auto type = file.ResolveTypeToken(tok);
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
             auto v = s.Pop(); if (!v) return DecodeOutcome::Bail;
             if (!s.Push(std::make_unique<UnboxAny>(type, std::move(v)))) return DecodeOutcome::Bail;
             break;
@@ -785,7 +790,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         // ---- arrays ----
         case ILOpCode::Newarr: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
-            auto type = file.ResolveTypeToken(tok);
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
             auto count = s.Pop(); if (!count) return DecodeOutcome::Bail;
             std::vector<std::unique_ptr<ILInstruction>> idx;
             idx.push_back(std::move(count));
@@ -803,7 +808,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         }
         case ILOpCode::Ldelema: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
-            auto type = file.ResolveTypeToken(tok);
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
             auto idx = s.Pop(); auto arr = s.Pop();
             if (!arr || !idx) return DecodeOutcome::Bail;
             std::vector<std::unique_ptr<ILInstruction>> indices;
@@ -831,7 +836,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
 #undef IL_LDELEM
         case ILOpCode::Ldelem: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
-            auto type = file.ResolveTypeToken(tok);
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
             auto idx = s.Pop(); auto arr = s.Pop();
             if (!arr || !idx) return DecodeOutcome::Bail;
             std::vector<std::unique_ptr<ILInstruction>> indices;
@@ -858,7 +863,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
 #undef IL_STELEM
         case ILOpCode::Stelem: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
-            auto type = file.ResolveTypeToken(tok);
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
             auto val = s.Pop(); auto idx = s.Pop(); auto arr = s.Pop();
             if (!arr || !idx || !val) return DecodeOutcome::Bail;
             std::vector<std::unique_ptr<ILInstruction>> indices;
@@ -1059,14 +1064,14 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         // ---- ldobj / stobj / initobj (typed memory ops with a type token) ----
         case ILOpCode::Ldobj: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
-            auto type = file.ResolveTypeToken(tok);
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
             auto ptr = s.Pop(); if (!ptr) return DecodeOutcome::Bail;
             if (!s.Push(std::make_unique<LdObj>(std::move(ptr), type))) return DecodeOutcome::Bail;
             break;
         }
         case ILOpCode::Stobj: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
-            auto type = file.ResolveTypeToken(tok);
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
             auto val = s.Pop(); auto ptr = s.Pop();
             if (!ptr || !val) return DecodeOutcome::Bail;
             block->Add(std::make_unique<StObj>(std::move(ptr), std::move(val), type));
@@ -1074,7 +1079,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         }
         case ILOpCode::Initobj: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
-            auto type = file.ResolveTypeToken(tok);
+            auto type = file.ResolveTypeToken(tok, s.ownerMethodToken);
             auto ptr = s.Pop(); if (!ptr) return DecodeOutcome::Bail;
             // Model initobj as stobj(addr, default(T), T): the C# ILReader emits
             // stobj(target, DefaultValue(type), type). The DefaultValue node carries
@@ -1338,9 +1343,10 @@ std::unique_ptr<ILFunction> ReadStraightLineIL(const MetadataFile& file,
     const auto& sig = *sigOpt;
 
     ReaderState s;
+    s.ownerMethodToken = methodToken;
     InitParameters(s, sig, file.GetParameterNames(methodToken));
     {
-        auto infos = file.GetLocalTypesWithPinned(body.LocalVarSigToken());
+        auto infos = file.GetLocalTypesWithPinned(body.LocalVarSigToken(), methodToken);
         s.localTypes.reserve(infos.size());
         s.localPinned.reserve(infos.size());
         for (auto& info : infos) {
@@ -1411,9 +1417,10 @@ std::unique_ptr<ILFunction> ReadIL(const MetadataFile& file,
     const auto& sig = *sigOpt;
 
     ReaderState s;
+    s.ownerMethodToken = methodToken;
     InitParameters(s, sig, file.GetParameterNames(methodToken));
     {
-        auto infos = file.GetLocalTypesWithPinned(body.LocalVarSigToken());
+        auto infos = file.GetLocalTypesWithPinned(body.LocalVarSigToken(), methodToken);
         s.localTypes.reserve(infos.size());
         s.localPinned.reserve(infos.size());
         for (auto& info : infos) {

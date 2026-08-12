@@ -371,3 +371,38 @@ TEST(SignatureDecoder, GenericParameterNamesResolveFromMetadata) {
     }
     EXPECT_TRUE(foundClass) << "List<T>.Add(T) not found to test class generic param";
 }
+
+TEST(SignatureDecoder, LocalSignatureGenericParamsResolveFromOwner) {
+    // Local-variable signatures of methods on a generic type reference the
+    // declaring type's VAR (!N) params. Decoding a local sig with the owning
+    // method's context should resolve those to authored names (T), not leave
+    // the positional fallback.
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+
+    bool found = false;
+    for (const auto& t : file.TypeDefs()) {
+        if (t.Name.find('`') == std::string::npos) continue;  // generic types carry `N arity
+        bool typeDone = false;
+        for (const auto& m : file.GetMethods(t.Token)) {
+            auto body = file.GetMethodBody(m.RVA);
+            if (!body.IsValid()) continue;
+            auto locals = file.GetLocalTypesWithPinned(body.LocalVarSigToken(), m.Token);
+            for (const auto& lt : locals) {
+                if (!lt.Type || lt.Type->Kind() != TypeKind::TypeParameter) continue;
+                auto* tp = As<TypeParameter>(lt.Type);
+                ASSERT_NE(tp, nullptr);
+                ASSERT_FALSE(tp->Name().empty())
+                    << "local VAR in " << t.Name << "::" << m.Name << " should be named";
+                found = true;
+                typeDone = true;
+                break;
+            }
+            if (typeDone) break;
+        }
+        if (found) break;
+    }
+    EXPECT_TRUE(found) << "no generic-typed local found in any generic type's methods";
+}

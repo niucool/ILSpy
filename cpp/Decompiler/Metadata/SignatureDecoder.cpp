@@ -202,7 +202,10 @@ ITypePtr DecodeTypeSpecRow(BlobReader& r, std::uint32_t row /*1-based*/) {
     // TypeSpec column 0 is the signature blob heap index.
     std::uint32_t blobIndex = r.db->TypeSpec.get_value<std::uint32_t>(row - 1, 0);
     auto view = r.db->get_blob(blobIndex);
-    BlobReader inner{ view.begin(), view.end(), r.db, false };
+    // The inner blob lives in the same VAR/MVAR scope as the outer type (a
+    // TypeSpec wraps one type of the same signature), so the generic-name
+    // context carries across.
+    BlobReader inner{ view.begin(), view.end(), r.db, false, r.genNames };
     ITypePtr t = DecodeTypeBlob(inner);
     if (inner.failed || inner.cur != inner.end) r.failed = true;  // must consume exactly
     return t;
@@ -320,16 +323,18 @@ ITypePtr DecodeTypeBlob(BlobReader& r) {
 } // namespace
 
 ITypePtr DecodeTypeSpecBlob(const winmd::reader::database& db,
-                            const std::uint8_t* data, std::size_t size) {
-    BlobReader r{ data, data + size, &db, false };
+                            const std::uint8_t* data, std::size_t size,
+                            const GenericParamNames* genericNames) {
+    BlobReader r{ data, data + size, &db, false, genericNames };
     ITypePtr t = DecodeTypeBlob(r);
     if (r.failed) return nullptr;
     return t;
 }
 
 ITypePtr DecodeFieldSignatureBlob(const winmd::reader::database& db,
-                                  const std::uint8_t* data, std::size_t size) {
-    BlobReader r{ data, data + size, &db, false };
+                                  const std::uint8_t* data, std::size_t size,
+                                  const GenericParamNames* genericNames) {
+    BlobReader r{ data, data + size, &db, false, genericNames };
     std::uint32_t marker = r.Byte();  // 0x06 = FIELD
     if (r.failed || marker != 0x06) return nullptr;
     ITypePtr t = DecodeTypeBlob(r);
@@ -374,9 +379,10 @@ DecodedMethodSignature DecodeMethodSignatureBlob(const winmd::reader::database& 
 }
 
 std::vector<LocalTypeInfo> DecodeLocalSignatureBlob(const winmd::reader::database& db,
-                                               const std::uint8_t* data, std::size_t size) {
+                                               const std::uint8_t* data, std::size_t size,
+                                               const GenericParamNames* genericNames) {
     std::vector<LocalTypeInfo> result;
-    BlobReader r{ data, data + size, &db, false };
+    BlobReader r{ data, data + size, &db, false, genericNames };
     std::uint32_t marker = r.Byte();
     if (r.failed || marker != 0x07) return result;  // IMAGE_CEE_CS_CALLCONV_LOCAL_SIG
     std::uint32_t count = r.CompressedUnsigned();

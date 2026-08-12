@@ -950,3 +950,40 @@ TEST(ILAstToCSharp, NestedInlineAssignmentRendersChained) {
     EXPECT_EQ(text.find("(default)"), std::string::npos)
         << "inline-assignment value must not be the default fallback:\n" << text;
 }
+
+TEST(ILAstToCSharp, GenericArrayNewRendersMethodTypeParamName) {
+    // In a generic method, `newarr T` carries a TypeSpec operand `!!0[...]`
+    // whose MVAR scopes to the CALLING method's generic params. The IL reader
+    // resolves TypeSpec tokens with that context so the declaration-ordered
+    // method name (T) renders instead of the positional placeholder.
+#if defined(_WIN32)
+    const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    std::uint32_t arrayTok = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == "System" && t.Name == "Array") { arrayTok = t.Token; break; }
+    }
+    ASSERT_NE(arrayTok, 0u);
+
+    bool found = false;
+    for (const auto& m : f.GetMethods(arrayTok)) {
+        if (m.Name != "Resize" || m.RVA == 0) continue;
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        ASSERT_NE(fn, nullptr) << "ReadIL failed on Array::Resize";
+        fn->CheckInvariant(ILPhase::Normal);
+        std::string text = ILAstToCSharp(*fn, "void", "Resize", "");
+        EXPECT_NE(text.find("new T[newSize]"), std::string::npos)
+            << "expected named method type param in newarr emission:\n" << text;
+        EXPECT_EQ(text.find("!!0"), std::string::npos)
+            << "positional MVAR placeholder leaked into emission:\n" << text;
+        found = true;
+        break;
+    }
+    ASSERT_TRUE(found) << "System.Array::Resize<T> not found in fixture";
+}

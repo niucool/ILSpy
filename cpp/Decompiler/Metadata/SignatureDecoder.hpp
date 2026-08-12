@@ -80,14 +80,20 @@ DecodedMethodSignature DecodeMethodSignatureBlob(const winmd::reader::database& 
                                                  bool& ok,
                                                  const GenericParamNames* genericNames = nullptr);
 
-// Decode a field signature blob (0x06 marker + type).
+// Decode a field signature blob (0x06 marker + type). `genericNames`
+// (optional) names VAR/MVAR params -- a field's VAR refers to its declaring
+// type's generic params, so callers that know the FieldDef row should pass
+// the declaring TypeDef's GenericParam names here.
 TypeSystem::ITypePtr DecodeFieldSignatureBlob(const winmd::reader::database& db,
-                                              const std::uint8_t* data, std::size_t size);
+                                              const std::uint8_t* data, std::size_t size,
+                                              const GenericParamNames* genericNames = nullptr);
 
 // Decode a TypeSpec signature blob (the content type: array, instantiation,
-// by-ref, ...).
+// by-ref, ...). `genericNames` (optional) names VAR/MVAR params from the
+// enclosing context the TypeSpec appears in (the calling method's scope).
 TypeSystem::ITypePtr DecodeTypeSpecBlob(const winmd::reader::database& db,
-                                        const std::uint8_t* data, std::size_t size);
+                                        const std::uint8_t* data, std::size_t size,
+                                        const GenericParamNames* genericNames = nullptr);
 
 // Decode a MethodSpec Instantiation blob (ECMA-335 II.23.2.15 MethodSpecSig:
 // a 0x0A GENERICINST marker, then a compressed generic-argument count, then
@@ -100,8 +106,12 @@ int DecodeMethodSpecTypeArgCount(const winmd::reader::database& db,
 // signature referenced by a method body's fat header. Returns the local types
 // (with their pinned flag) in index order; an empty/partial vector on a
 // malformed blob.
+// `genericNames` (optional) names VAR/MVAR params -- a local sig appears in a
+// method body, so its VAR/MVAR scope to the owning method's class/method
+// generic params respectively.
 std::vector<LocalTypeInfo> DecodeLocalSignatureBlob(
     const winmd::reader::database& db,
-    const std::uint8_t* data, std::size_t size);
+    const std::uint8_t* data, std::size_t size,
+    const GenericParamNames* genericNames = nullptr);
 
 } // namespace ILSpy::Decompiler::Metadata
