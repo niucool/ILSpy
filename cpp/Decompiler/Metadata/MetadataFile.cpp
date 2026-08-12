@@ -309,8 +309,29 @@ std::optional<MethodSignature> MetadataFile::GetMethodSignature(std::uint32_t me
         }
         auto blob = impl_->db->get_blob(blobColumn);
         bool ok = false;
+        // Authors' generic parameter names: MethodDef.GenericParam rows name
+        // this method's MVAR (!!N) params; the declaring TypeDef's GenericParam
+        // rows name the class's VAR (!N) params. Lookups are 0-based via the
+        // GenericParam.Number column; rows need not be table-ordered.
+        GenericParamNames genNames;
+        const GenericParamNames* genNamesPtr = nullptr;
+        if (table == 0x06) {  // MethodDef row has both lists; MemberRef has none.
+            auto md = impl_->db->MethodDef[row - 1];
+            auto collectInto = [](auto range, std::vector<std::string>& out) {
+                for (auto it = range.first; it != range.second; ++it) {
+                    std::uint32_t n = (*it).Number();
+                    if (n >= out.size()) out.resize(n + 1);
+                    out[n] = std::string((*it).Name());
+                }
+            };
+            collectInto(md.GenericParam(), genNames.methodNames);
+            auto td = md.Parent();  // declaring TypeDef
+            collectInto(td.GenericParam(), genNames.classNames);
+            genNamesPtr = &genNames;
+        }
         DecodedMethodSignature d = DecodeMethodSignatureBlob(
-            *impl_->db, blob.begin(), static_cast<std::size_t>(blob.end() - blob.begin()), ok);
+            *impl_->db, blob.begin(), static_cast<std::size_t>(blob.end() - blob.begin()), ok,
+            genNamesPtr);
         if (!ok) return std::nullopt;
         MethodSignature out;
         out.ReturnType = std::move(d.ReturnType);

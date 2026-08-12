@@ -337,3 +337,37 @@ TEST(SignatureDecoder, OutOfRangeTokenIsGraceful) {
     EXPECT_FALSE(file.GetMethodSignature(0x06000000u));
     EXPECT_FALSE(file.GetMethodSignature(0x06FFFFFFu));
 }
+
+TEST(SignatureDecoder, GenericParameterNamesResolveFromMetadata) {
+    // Generic signatures reference class (`!N`) and method (`!!N`) type
+    // parameters by INDEX. Their real names (T, TValue, ...) live in the
+    // declaring TypeDef's / MethodDef's GenericParam rows. Decoding should
+    // resolve them, so e.g. List<T>::Add(T) has a param named "T" and
+    // a generic delegate would too.
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+
+    // Find List<T>.Add(T) -- a class generic-parameter VAR.
+    bool foundClass = false;
+    for (const auto& m : file.MethodDefs()) {
+        if (m.Name != "Add") continue;
+        auto sig = file.GetMethodSignature(m.Token);
+        if (!sig || !sig->IsInstance) continue;
+        if (sig->ParameterTypes.size() != 1) continue;
+        const auto& p = sig->ParameterTypes[0];
+        if (p->Kind() != TypeKind::TypeParameter) continue;
+        // List<T>'s T has index 0 (declared on the type), not method (?).
+        auto* tp = As<TypeParameter>(p);
+        ASSERT_NE(tp, nullptr);
+        if (tp->Owner() != TypeParameter::OwnerKind::Class) continue;
+        // The signature decodes via TypeSpec/MemberRef of List<T>.Add... the
+        // method's owner is List<T>; the VAR(0) should resolve to "T".
+        EXPECT_EQ(tp->Name(), "T")
+            << "List<T>.Add should have type parameter named T, got '" << tp->Name() << "'";
+        foundClass = true;
+        break;
+    }
+    EXPECT_TRUE(foundClass) << "List<T>.Add(T) not found to test class generic param";
+}

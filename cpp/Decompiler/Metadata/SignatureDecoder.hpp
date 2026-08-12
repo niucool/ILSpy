@@ -60,12 +60,25 @@ TypeSystem::ITypePtr MakeTypeRefFromTypeDef(winmd::reader::TypeDef d);
 // accepts Kind == Unknown, so a cross-assembly delegate still matches).
 TypeSystem::ITypePtr MakeTypeRefFromTypeRef(winmd::reader::TypeRef r);
 
+// The authored names of the generic type parameters in scope when decoding a
+// method signature. ECMA-335 reference VAR (!N) / MVAR (!!N) indices; their C#
+// names live on the owning TypeDef (VAR) / MethodDef (MVAR) GenericParam rows,
+// keyed by GenericParam.Number (II.22.20). Populated from the method's owner
+// metadata at decode time so a signature like `List<T>.Add(T item)` decodes its
+// parameter to a TypeParameter named "T".
+struct GenericParamNames {
+    std::vector<std::string> classNames;   // VAR (!N) -> Nth entry
+    std::vector<std::string> methodNames;  // MVAR (!!N) -> Nth entry
+};
+
 // Decode a method signature blob (MethodDef Signature, MemberRef Signature,
 // or the definition behind a MethodSpec). ok is set false on any malformed
-// content.
+// content. `genericNames`, when non-null, is consulted to name VAR/MVAR type
+// parameters (default: positional fallback named "!N"/"!!N").
 DecodedMethodSignature DecodeMethodSignatureBlob(const winmd::reader::database& db,
                                                  const std::uint8_t* data, std::size_t size,
-                                                 bool& ok);
+                                                 bool& ok,
+                                                 const GenericParamNames* genericNames = nullptr);
 
 // Decode a field signature blob (0x06 marker + type).
 TypeSystem::ITypePtr DecodeFieldSignatureBlob(const winmd::reader::database& db,

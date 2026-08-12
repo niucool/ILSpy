@@ -164,6 +164,10 @@ struct BlobReader {
     const std::uint8_t* end;
     const winmd::reader::database* db;
     bool failed = false;
+    // Optional: authored generic parameter names by index, for VAR(!N)/
+    // MVAR(!!N) naming. Null means "use positional fallback names" (the old
+    // behavior -- callers that don't know the owner leave names as `!N`/`!!N`).
+    const GenericParamNames* genNames = nullptr;
 
     std::uint8_t Byte() {
         if (cur >= end) { failed = true; return 0; }
@@ -267,12 +271,22 @@ ITypePtr DecodeTypeBlob(BlobReader& r) {
         case 0x11:  // ValueType
         case 0x12:  // Class
             return DecodeTypeDefOrRefEncoded(r, r.CompressedUnsigned());
-        case 0x13:  // Var (class generic parameter)
-            return std::make_shared<TypeParameter>(static_cast<int>(r.CompressedUnsigned()),
-                                                   TypeParameter::OwnerKind::Class, "");
-        case 0x1E:  // MVar (method generic parameter)
-            return std::make_shared<TypeParameter>(static_cast<int>(r.CompressedUnsigned()),
-                                                   TypeParameter::OwnerKind::Method, "");
+        case 0x13: {  // Var (class generic parameter)
+            std::uint32_t idx = r.CompressedUnsigned();
+            std::string name;
+            if (r.genNames && idx < r.genNames->classNames.size())
+                name = r.genNames->classNames[idx];
+            return std::make_shared<TypeParameter>(static_cast<int>(idx),
+                                                   TypeParameter::OwnerKind::Class, std::move(name));
+        }
+        case 0x1E: {  // MVar (method generic parameter)
+            std::uint32_t idx = r.CompressedUnsigned();
+            std::string name;
+            if (r.genNames && idx < r.genNames->methodNames.size())
+                name = r.genNames->methodNames[idx];
+            return std::make_shared<TypeParameter>(static_cast<int>(idx),
+                                                   TypeParameter::OwnerKind::Method, std::move(name));
+        }
         case 0x1D:  // SZArray
             return std::make_shared<ArrayType>(DecodeTypeBlob(r));
         case 0x14: {  // Array (multi-dimensional, possibly non-zero-bounded)
@@ -325,10 +339,11 @@ ITypePtr DecodeFieldSignatureBlob(const winmd::reader::database& db,
 
 DecodedMethodSignature DecodeMethodSignatureBlob(const winmd::reader::database& db,
                                                  const std::uint8_t* data, std::size_t size,
-                                                 bool& ok) {
+                                                 bool& ok,
+                                                 const GenericParamNames* genericNames) {
     ok = false;
     DecodedMethodSignature out;
-    BlobReader r{ data, data + size, &db, false };
+    BlobReader r{ data, data + size, &db, false, genericNames };
 
     std::uint32_t callconv = r.Byte();
     if (r.failed) return out;
