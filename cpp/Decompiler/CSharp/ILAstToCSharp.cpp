@@ -650,6 +650,9 @@ private:
                 // output has no empty `{ }`.
                 auto isEmptyArm = [](const std::unique_ptr<ILInstruction>& arm) {
                     if (!arm) return true;
+                    // A Nop arm carries no content -- treat as empty (an
+                    // `if (c) { } else nop`-shape must not print `else { }`).
+                    if (arm->Op == OpCode::Nop) return true;
                     if (auto* b = dynamic_cast<const Block*>(arm.get()))
                         return b->Instructions.empty() && !b->FinalInstruction;
                     return false;

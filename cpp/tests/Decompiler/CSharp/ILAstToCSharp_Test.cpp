@@ -45,6 +45,7 @@
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
@@ -846,4 +847,27 @@ TEST(ILAstToCSharp, GenericNewObjRendersCSharpTypeArguments) {
     std::string text = ILAstToCSharp(*fn, "void", "M", "");
     EXPECT_NE(text.find("new List<string>()"), std::string::npos) << text;
     EXPECT_EQ(text.find("List`1"), std::string::npos) << "metadata arity suffix leaked:\n" << text;
+}
+
+TEST(ILAstToCSharp, NopElseArmIsNotEmitted) {
+    // An if whose else arm is a Nop (or an empty block) contributes nothing and
+    // must not render an empty `else { }` block.
+    auto fn = MakeFunction({});
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
+                                       std::make_unique<LdcI4>(1)));
+    auto trueArm = std::make_unique<Block>();
+    trueArm->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_1", 1),
+                                         std::make_unique<LdcI4>(2)));
+    block->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::move(trueArm), std::make_unique<Nop>()));
+    fn->Body->AddBlock(std::move(block));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("if (1 != 0)"), std::string::npos) << text;
+    EXPECT_EQ(text.find("else"), std::string::npos)
+        << "a Nop else arm must not produce an `else` block:\n" << text;
 }
