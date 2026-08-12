@@ -277,3 +277,64 @@ TEST(LoopDetection, PicksEarliestOutOfLoopExitDeterministically) {
            "deterministic, not pointer-order-dependent";
     EXPECT_NE(exitBr->TargetBlock, b5) << "the later exit b5 must not be chosen";
 }
+
+TEST(LoopDetection, PrefersConvergenceExitOverEarlyBreakPath) {
+    // The GetCVTypeFromClass shape (mscorlib): a while loop with a bottom
+    // condition and an early break to a match-block that has a LOWER StartILOffset
+    // than the true post-loop convergence.
+    //   b0(0x00): br b4                    (pretest, enter at condition)
+    //   b1(0x06): if (!c) br b3  else fallthrough b2
+    //   b2(0x15): br b5                    (match path: lower offset)
+    //   b3(0x19): br b4                    (increment; back edge b3->b4: b4 dominates b3)
+    //   b4(0x1D): if (c) br b1 else fallthrough b5   (condition; loop header)
+    //   b5(0x27): leave                    (true post-loop convergence -- b2 flows to b5)
+    // Natural loop of back edge b3->b4 = {b4,b1,b3}; its out-of-loop successors are
+    // b2 (0x15) and b5 (0x27). The correct exit is the CONVERGENCE b5 (b2 reaches
+    // b5), not the lowest-offset b2. A pure min-offset pick wrongly exits to the
+    // match path and mangles the loop. FindExitPoint must prefer the candidate all
+    // other candidates converge to; min-offset only breaks ties.
+    auto fn = WrapBlocks({});
+    for (int i = 0; i < 6; ++i) fn->Body->AddBlock(std::make_unique<Block>());
+    const std::uint32_t offs[6] = { 0x00, 0x06, 0x15, 0x19, 0x1D, 0x27 };
+    for (int i = 0; i < 6; ++i) fn->Body->Blocks[i]->StartILOffset = offs[i];
+    auto cd = [] {
+        return std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                                      ComparisonKind::Inequality);
+    };
+    Block* b1 = fn->Body->Blocks[1].get();
+    Block* b2 = fn->Body->Blocks[2].get();
+    Block* b3 = fn->Body->Blocks[3].get();
+    Block* b4 = fn->Body->Blocks[4].get();
+    Block* b5 = fn->Body->Blocks[5].get();
+
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Branch>(b4));
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<IfInstruction>(cd(), std::make_unique<Branch>(b3)));
+    fn->Body->Blocks[2]->SetFinal(std::make_unique<Branch>(b5));
+    fn->Body->Blocks[3]->SetFinal(std::make_unique<Branch>(b4));
+    fn->Body->Blocks[4]->SetFinal(std::make_unique<IfInstruction>(cd(), std::make_unique<Branch>(b1)));
+    fn->Body->Blocks[5]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    LoopDetection().Run(*fn, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // Find the pre-header (the block owning a Loop container) and assert its
+    // synthesized exit branch targets the convergence b5, not the lower-offset
+    // break path b2.
+    Block* preHeader = nullptr;
+    Walk(fn->Body.get(), [&](ILInstruction* i) {
+        if (auto* blk = dynamic_cast<Block*>(i))
+            for (const auto& inst : blk->Instructions)
+                if (auto* c = dynamic_cast<BlockContainer*>(inst.get()))
+                    if (c->Kind == ContainerKind::Loop) preHeader = blk;
+    });
+    ASSERT_NE(preHeader, nullptr) << "the loop must be detected and wrapped";
+    ASSERT_TRUE(preHeader->FinalInstruction);
+    ASSERT_EQ(preHeader->FinalInstruction->Op, OpCode::Branch)
+        << "pre-header final must be the synthesized loop-exit branch";
+    auto* exitBr = static_cast<Branch*>(preHeader->FinalInstruction.get());
+    EXPECT_EQ(exitBr->TargetBlock, b5)
+        << "exit must be the loop convergence b5 (0x27); b2 reaches b5, so b5 is the "
+           "post-dominating exit, not the lower-offset break path b2 (0x15)";
+    EXPECT_NE(exitBr->TargetBlock, b2) << "must not exit into the early break/match path";
+}

@@ -48,15 +48,44 @@ void WalkContainers(ILInstruction* inst, const std::function<void(BlockContainer
     for (int i = 0; i < inst->ChildCount(); ++i) WalkContainers(inst->GetChild(i), visit);
 }
 
+// Whether exit candidate `from` can reach exit candidate `target` following CFG
+// successors WITHOUT re-entering the loop (DFS, visited-set bounded -- the graph
+// is cyclic). Convergence into an exit only counts along post-loop paths.
+static bool ReachesOutsideLoop(FlowAnalysis::ControlFlowNode* from,
+                               FlowAnalysis::ControlFlowNode* target,
+                               const std::set<FlowAnalysis::ControlFlowNode*>& loop) {
+    if (from == target) return true;
+    std::vector<FlowAnalysis::ControlFlowNode*> stack;
+    std::unordered_set<FlowAnalysis::ControlFlowNode*> seen;
+    stack.push_back(from);
+    seen.insert(from);
+    while (!stack.empty()) {
+        auto* n = stack.back();
+        stack.pop_back();
+        for (auto* s : n->Successors) {
+            if (s == target) return true;
+            if (loop.count(s)) continue;  // do not converge by re-entering the loop
+            if (seen.insert(s).second) stack.push_back(s);
+        }
+    }
+    return false;
+}
+
 Block* FindExitPoint(const std::set<FlowAnalysis::ControlFlowNode*>& loop) {
-    // Deterministic exit-point pick. Iterating the std::set<ControlFlowNode*>
-    // directly yields raw pointer address order, so which of a multi-exit loop's
-    // out-of-loop successors was returned varied run-to-run (it fed the block
-    // moves and the IL_XXXX label naming downstream). Iterate the members ordered
-    // by block StartILOffset and, among all out-of-loop successor blocks, pick
-    // the earliest one -- the natural layout-next block. The C# picks the exit via
-    // a post-dominance analysis; the port keeps its simplified single-exit model
-    // but makes the choice stable.
+    // Deterministic, convergence-aware exit-point pick. Iterating the
+    // std::set<ControlFlowNode*> directly would leak raw pointer order, so the
+    // members are ordered by block StartILOffset first. A loop usually has a
+    // single out-of-loop successor; when it has several (an early break path and
+    // a normal loop-completion path), the correct exit is the one every other
+    // path CONVERGES to (the C# post-dominator of the loop exits), NOT the
+    // lowest-offset one -- a match/break block often has a lower StartILOffset
+    // than the block both it and the loop-completion fall-through flow into, and
+    // exiting there mangles the loop structure. Prefer the unique candidate that
+    // all other candidates reach without re-entering the loop; fall back to the
+    // earliest candidate (min StartILOffset) when exits genuinely diverge, which
+    // keeps the choice stable run-to-run. (The C# computes the exact
+    // post-dominator via a reverse-CFG analysis; this convergence check is the
+    // deterministic subset that handles the dominant structured cases.)
     std::vector<FlowAnalysis::ControlFlowNode*> members(loop.begin(), loop.end());
     std::sort(members.begin(), members.end(), [](const FlowAnalysis::ControlFlowNode* a,
                                                  const FlowAnalysis::ControlFlowNode* b) {
@@ -64,16 +93,36 @@ Block* FindExitPoint(const std::set<FlowAnalysis::ControlFlowNode*>& loop) {
         auto* bb = static_cast<const Block*>(b->UserData);
         return (ba ? ba->StartILOffset : 0) < (bb ? bb->StartILOffset : 0);
     });
-    Block* best = nullptr;
-    std::uint32_t bestOffset = std::numeric_limits<std::uint32_t>::max();
+    // Distinct out-of-loop successor nodes, in deterministic first-seen order.
+    std::vector<FlowAnalysis::ControlFlowNode*> cands;
+    std::unordered_set<FlowAnalysis::ControlFlowNode*> seen;
     for (auto* n : members) {
         for (auto* s : n->Successors) {
             if (loop.count(s) || !s->UserData) continue;
-            auto* block = static_cast<Block*>(s->UserData);
-            if (!best || block->StartILOffset < bestOffset) {
-                best = block;
-                bestOffset = block->StartILOffset;
+            if (seen.insert(s).second) cands.push_back(s);
+        }
+    }
+    if (cands.empty()) return nullptr;
+    if (cands.size() > 1) {
+        for (auto* cand : cands) {
+            bool allReach = true;
+            for (auto* other : cands) {
+                if (other != cand && !ReachesOutsideLoop(other, cand, loop)) {
+                    allReach = false;
+                    break;
+                }
             }
+            if (allReach) return static_cast<Block*>(cand->UserData);  // convergence
+        }
+    }
+    // Divergent exits (or a single candidate): pick the earliest by StartILOffset.
+    Block* best = nullptr;
+    std::uint32_t bestOffset = std::numeric_limits<std::uint32_t>::max();
+    for (auto* c : cands) {
+        auto* block = static_cast<Block*>(c->UserData);
+        if (!best || block->StartILOffset < bestOffset) {
+            best = block;
+            bestOffset = block->StartILOffset;
         }
     }
     return best;
