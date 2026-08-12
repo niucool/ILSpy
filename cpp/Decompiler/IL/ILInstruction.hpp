@@ -144,6 +144,18 @@ public:
     virtual void WriteTo(std::string& out) const = 0;
     std::string ToString() const;
 
+    // Whether the tree rooted at this node contains a cycle (a node is its own
+    // descendant). The strict-tree invariant forbids this (a child belongs to
+    // one parent), but a transform bug could produce a Parent-pointer cycle
+    // that WriteTo -- a recursive, unbounded walker -- would follow forever,
+    // emitting a repeated token (e.g. `lock (...)`) ad infinitum and OOM-ing.
+    // Detecting a cycle before a full-tree dump (ToString) lets the caller
+    // emit a marker instead of the runaway. Generic walk via ChildCount/
+    // GetChild (every node implements them) with a visited-set; O(n) time/
+    // space. Mirrors the cycle-detection CheckInvariant would do, but usable
+    // in release builds where CheckInvariant is a no-op.
+    bool HasCycle() const;
+
 protected:
     explicit ILInstruction(OpCode opCode) : Op(opCode) {}
 

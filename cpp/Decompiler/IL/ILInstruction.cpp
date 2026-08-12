@@ -19,7 +19,9 @@
 #include "Decompiler/IL/ILInstruction.hpp"
 
 #include <cassert>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace ILSpy::Decompiler::IL {
 
@@ -114,6 +116,36 @@ std::string ILInstruction::ToString() const {
     std::string out;
     WriteTo(out);
     return out;
+}
+
+bool ILInstruction::HasCycle() const {
+    // Iterative DFS over the strict tree via the generic ChildCount/GetChild
+    // API (every node implements them). A visited-set of child pointers detects
+    // a cycle (a node reachable from itself); the stack tracks the (node, next-
+    // child-index) pairs so a single pass covers the whole tree. A strict tree
+    // has no cycles; a Parent-pointer cycle (a transform bug) makes a node its
+    // own descendant and is caught here.
+    std::unordered_set<const ILInstruction*> seen;
+    struct Frame {
+        const ILInstruction* node;
+        int nextChild;
+    };
+    std::vector<Frame> stack;
+    stack.push_back({this, 0});
+    seen.insert(this);
+    while (!stack.empty()) {
+        auto& top = stack.back();
+        if (top.nextChild >= top.node->ChildCount()) {
+            stack.pop_back();
+            continue;
+        }
+        const ILInstruction* child = top.node->GetChild(top.nextChild);
+        ++top.nextChild;
+        if (!child) continue;
+        if (!seen.insert(child).second) return true;  // already visited -> cycle
+        stack.push_back({child, 0});
+    }
+    return false;
 }
 
 } // namespace ILSpy::Decompiler::IL

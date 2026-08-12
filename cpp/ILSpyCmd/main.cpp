@@ -556,7 +556,18 @@ int main(int argc, char** argv) {
                 auto fn = ILSpy::Decompiler::IL::ReadIL(file, m.Token, m.RVA);
                 if (!fn) continue;
                 std::cout << ".method " << t.Namespace << "." << t.Name << "::" << m.Name
-                          << "  (ILAst, branch-aware)\n" << fn->ToString() << "\n\n";
+                          << "  (ILAst, branch-aware)\n";
+                // Guard against a transform-induced cycle: WriteTo is a
+                // recursive, unbounded walker, so a Parent-pointer cycle would
+                // emit a repeated token (e.g. `lock (...)`) ad infinitum and
+                // OOM the process. Detect the cycle first (generic walk) and
+                // emit a marker instead of the runaway dump.
+                if (fn->HasCycle()) {
+                    std::cout << "  /* dump skipped: ILAst cycle detected "
+                                 "(possible transform bug) */\n\n";
+                } else {
+                    std::cout << fn->ToString() << "\n\n";
+                }
                 ++methodsPrinted;
                 continue;
             }
@@ -567,7 +578,13 @@ int main(int argc, char** argv) {
                 auto fn = ILSpy::Decompiler::IL::ReadStraightLineIL(file, m.Token, m.RVA);
                 if (!fn) continue;
                 std::cout << ".method " << t.Namespace << "." << t.Name << "::" << m.Name
-                          << "  (ILAst)\n" << fn->ToString() << "\n\n";
+                          << "  (ILAst)\n";
+                if (fn->HasCycle()) {
+                    std::cout << "  /* dump skipped: ILAst cycle detected "
+                                 "(possible transform bug) */\n\n";
+                } else {
+                    std::cout << fn->ToString() << "\n\n";
+                }
                 ++methodsPrinted;
                 continue;
             }

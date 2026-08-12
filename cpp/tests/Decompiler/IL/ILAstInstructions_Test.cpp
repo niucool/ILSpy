@@ -29,6 +29,7 @@
 #include "Decompiler/IL/Instructions/CastClass.hpp"
 #include "Decompiler/IL/Instructions/Comp.hpp"
 #include "Decompiler/IL/Instructions/Conv.hpp"
+#include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
@@ -176,4 +177,56 @@ TEST(ILAstInstructions, NestedTreeInvariant) {
     EXPECT_NE(out.find("stloc(x, unbox.any(System.Int32, castclass(System.Object, ldc.i4(0)))"), std::string::npos)
         << out;
     EXPECT_NE(out.find("throw ldnull"), std::string::npos) << out;
+}
+
+
+// HasCycle: the cycle-detection guard for the --ilast dump path. WriteTo is a
+// recursive, unbounded walker; a Parent-pointer cycle (a transform bug) would
+// make it emit a repeated token ad infinitum and OOM. HasCycle detects the
+// cycle generically (via ChildCount/GetChild + a visited-set) so the CLI can
+// emit a marker instead of the runaway.
+TEST(ILAstInstructions, HasCycleIsFalseForStrictTree) {
+    // A valid strict tree: stloc(unbox.any(castclass(ldc.i4(0)))) -- no cycle.
+    auto st = std::make_unique<StLoc>(
+        std::make_shared<ILVariable>(),
+        std::make_unique<UnboxAny>(
+            std::make_shared<KnownType>(KnownTypeCode::Int32),
+            std::make_unique<CastClass>(
+                std::make_shared<KnownType>(KnownTypeCode::Object),
+                std::make_unique<LdcI4>(0))));
+    EXPECT_FALSE(st->HasCycle());
+}
+
+TEST(ILAstInstructions, HasCycleDetectsParentCycle) {
+    // Build a 2-node cycle by hand: an IfInstruction (A) whose TrueInst is a
+    // Block (B), and B's FinalInstruction is A again (A -> B -> A). The strict-
+    // tree invariant forbids this (A would be its own descendant), but a
+    // transform bug could produce it; HasCycle must catch it. The cycle is a
+    // double-free under normal unique_ptr ownership (A owns B via TrueInst, B
+    // owns A via FinalInstruction), so we LEAK the whole cycle: allocate A and
+    // B with new, wire the cross-references, run HasCycle, then release every
+    // owning slot so no destructor runs. The intentional leak is acceptable in
+    // a test (the process exits immediately after).
+    auto* aPtr = new IfInstruction(std::make_unique<LdcI4>(1), nullptr, nullptr);
+    auto* bPtr = new Block();
+    // A.TrueInst = B (A owns B).
+    aPtr->TrueInst = std::unique_ptr<ILInstruction>(bPtr);
+    bPtr->Parent = aPtr;
+    bPtr->ChildIndex = 1;
+    // B.FinalInstruction = A (B owns A -- the cycle). A's existing Condition
+    // (a leaf LdcI4(1)) is destroyed when we... no: A is held by B's Final now,
+    // and A still owns its Condition. The cycle is A->B->A.
+    bPtr->SetFinal(std::unique_ptr<ILInstruction>(aPtr));
+    aPtr->Parent = bPtr;  // A's parent is now B (the cycle's back edge)
+    aPtr->ChildIndex = static_cast<int>(bPtr->Instructions.size());  // the final slot
+
+    EXPECT_TRUE(aPtr->HasCycle())
+        << "A->B->A must be detected as a cycle";
+
+    // Leak the cycle: release every owning slot so no destructor runs (the
+    // cross-ownership would double-free otherwise). The nodes live until the
+    // process exits.
+    aPtr->Condition.release();
+    aPtr->TrueInst.release();
+    bPtr->FinalInstruction.release();
 }
