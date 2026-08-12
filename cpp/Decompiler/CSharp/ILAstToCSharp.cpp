@@ -1233,6 +1233,16 @@ private:
                 const auto& ld = static_cast<const LdLoc&>(inst);
                 return ld.Variable ? ld.Variable->Name : "?";
             }
+            case OpCode::StLoc: {
+                // An inline assignment used as an expression value:
+                // `outer = (inner = value)` -- render as the chained assignment
+                // `outer = inner = value`. Chained assignment is right-
+                // associative, so no parentheses are needed around the inner.
+                const auto& st = static_cast<const StLoc&>(inst);
+                std::string name = st.Variable ? st.Variable->Name : std::string("?");
+                std::string val = st.Value ? Expr(*st.Value) : std::string("(default)");
+                return name + " = " + val;
+            }
             case OpCode::LdLoca: {
                 const auto& ld = static_cast<const LdLoca&>(inst);
                 // `ldloca V` is the IL idiom for `ref V` (a byref argument or

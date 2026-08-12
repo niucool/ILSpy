@@ -929,3 +929,24 @@ TEST(ILAstToCSharp, GenericMemberRefMetadataNameRendersCSharpForm) {
         << "the arity suffix ``N` leaked into the output:\n" << text;
     EXPECT_NE(text.find("List<System.String>"), std::string::npos) << text;
 }
+
+TEST(ILAstToCSharp, NestedInlineAssignmentRendersChained) {
+    // An inline assignment used as the VALUE of another store -- the IL idiom
+    // for C# `a = b = value` -- previously fell through Expr to the `(default)`
+    // comment. Render it as `a = b = value`.
+    auto fn = MakeFunction({});
+    auto block = std::make_unique<Block>();
+    auto aVar = MakeVar(VariableKind::Local, "dup_0", 0);
+    auto bVar = MakeVar(VariableKind::Local, "V_1", 1);
+    // stloc dup_0, stloc V_1, ldc.i4 7   ->  dup_0 = V_1 = 7
+    block->Add(std::make_unique<StLoc>(aVar,
+        std::make_unique<StLoc>(bVar, std::make_unique<LdcI4>(7))));
+    block->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Body->AddBlock(std::move(block));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("dup_0 = V_1 = 7;"), std::string::npos) << text;
+    EXPECT_EQ(text.find("(default)"), std::string::npos)
+        << "inline-assignment value must not be the default fallback:\n" << text;
+}
