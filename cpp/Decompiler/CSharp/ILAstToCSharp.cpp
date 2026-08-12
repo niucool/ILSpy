@@ -167,6 +167,26 @@ private:
     std::map<const Block*, std::string> labels_;  // branch-target block -> IL_XXXX
     std::set<const Block*> loopHeaders_;  // first block of each Loop container
 
+    // Recursion-depth guard. The seed is a recursive AST walker with no
+    // intrinsic bound: EmitStatement / EmitBlock / EmitContainer / EmitBraced /
+    // Expr recurse into children with no depth limit. A malformed ILAst -- a
+    // cycle (a transform bug producing a Parent-pointer loop) or a
+    // pathologically deep tree -- would make these recurse without bound and
+    // emit a runaway (a repeated token such as `lock (...)` ad infinitum),
+    // producing garbage output or an OOM. Bound the depth so a runaway becomes
+    // a single `/* max rendering depth */` marker (statement) or `/* ... */`
+    // placeholder (expression) instead. The underlying tree bug is still
+    // caught by CheckInvariant (run in debug after every transform); this
+    // guard only bounds the production text so a single bad method cannot
+    // corrupt a whole-module dump.
+    static constexpr int kMaxRenderDepth = 300;
+    int depth_ = 0;
+    struct DepthGuard {
+        int& d;
+        explicit DepthGuard(int& d_) : d(d_) { ++d; }
+        ~DepthGuard() { --d; }
+    };
+
     void Line(int indent, std::string_view text) {
         out_.append(static_cast<std::size_t>(indent) * 4, ' ');
         out_ += text;
@@ -268,6 +288,11 @@ private:
     }
 
     void EmitContainer(const BlockContainer& container, int indent) {
+        if (depth_ >= kMaxRenderDepth) {
+            Line(indent, "/* max rendering depth: possible ILAst cycle */");
+            return;
+        }
+        DepthGuard g{depth_};
         if (container.Kind == ContainerKind::While && !container.Blocks.empty()) {
             // A while container: the entry point's FinalInstruction is the
             // while condition `if (cond) br body else leave(loop)`. Render as
@@ -369,6 +394,11 @@ private:
     }
 
     void EmitBlock(const Block& block, int indent, bool dropFinal = false) {
+        if (depth_ >= kMaxRenderDepth) {
+            Line(indent, "/* max rendering depth: possible ILAst cycle */");
+            return;
+        }
+        DepthGuard g{depth_};
         auto label = labels_.find(&block);
         if (label != labels_.end()) {
             // C# labels start in column 0 by convention.
@@ -428,6 +458,12 @@ private:
 
     // A non-Block arm of if/try: brace it at this indent.
     void EmitBraced(const ILInstruction& inst, int indent) {
+        if (depth_ >= kMaxRenderDepth) {
+            Line(indent, "/* max rendering depth: possible ILAst cycle */");
+            Line(indent, "{}");
+            return;
+        }
+        DepthGuard g{depth_};
         Line(indent, "{");
         if (inst.Op == OpCode::Block) {
             EmitBlock(static_cast<const Block&>(inst), indent + 1);
@@ -440,6 +476,11 @@ private:
     }
 
     void EmitStatement(const ILInstruction& inst, int indent) {
+        if (depth_ >= kMaxRenderDepth) {
+            Line(indent, "/* max rendering depth: possible ILAst cycle */");
+            return;
+        }
+        DepthGuard g{depth_};
         switch (inst.Op) {
             case OpCode::StLoc: {
                 const auto& st = static_cast<const StLoc&>(inst);
@@ -1041,6 +1082,10 @@ private:
     }
 
     std::string Expr(const ILInstruction& inst) {
+        if (depth_ >= kMaxRenderDepth) {
+            return "/* max rendering depth: possible ILAst cycle */";
+        }
+        DepthGuard g{depth_};
         switch (inst.Op) {
             case OpCode::Block: {
                 // A Block(InterpolatedString) evaluates to the string the

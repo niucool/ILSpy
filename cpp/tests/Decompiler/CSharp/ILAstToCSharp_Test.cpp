@@ -707,3 +707,43 @@ TEST(ILAstToCSharp, ReturnLdcI4InBoolFunctionIsFalseTrue) {
     EXPECT_NE(textInt.find("return 0;"), std::string::npos) << textInt;
     EXPECT_EQ(textInt.find("return false;"), std::string::npos) << textInt;
 }
+
+
+// The seed's recursive emitters (EmitStatement / EmitBlock / EmitContainer /
+// EmitBraced / Expr) have a recursion-depth guard so a malformed ILAst -- a
+// cycle or a pathologically deep tree -- produces a single `/* max rendering
+// depth */` marker instead of a runaway (a repeated token such as `lock (...)`
+// ad infinitum) that would corrupt the output or OOM. A pathologically deep
+// but otherwise valid strict tree (deeply nested if-then blocks) triggers the
+// guard; the output is bounded and contains the marker.
+TEST(ILAstToCSharp, DepthGuardBoundsPathologicallyDeepTree) {
+    // Build a 150-deep nested if-then: each block's final is an IfInstruction
+    // whose TrueInst is a fresh Block, nested 150x. Each nesting level
+    // increments the seed's depth_ counter ~3x (EmitStatement + EmitBraced +
+    // EmitBlock), so 150 levels exceeds the 300 limit and the guard fires.
+    auto fn = MakeFunction({});
+    auto* container = fn->Body.get();
+    auto rootBlock = std::make_unique<Block>();
+    Block* cur = rootBlock.get();
+    fn->Body->AddBlock(std::move(rootBlock));
+    for (int i = 0; i < 150; ++i) {
+        auto inner = std::make_unique<Block>();
+        Block* innerPtr = inner.get();
+        cur->SetFinal(std::make_unique<IfInstruction>(
+            std::make_unique<LdcI4>(0), std::move(inner), nullptr));
+        cur = innerPtr;  // descend into the fresh inner block (owned by the if)
+    }
+    cur->SetFinal(ReturnFinal(container));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    // The guard must fire: the output contains the marker, not a runaway.
+    EXPECT_NE(text.find("max rendering depth"), std::string::npos)
+        << "the depth guard must fire on a 150-deep tree";
+    // The output is bounded: well under a runaway (a runaway would be
+    // megabytes; a 150-deep tree with the guard is a few KB at most).
+    EXPECT_LT(text.size(), 100000u)
+        << "the output must be bounded, not a runaway";
+    // The guard does NOT crash (the method still renders, bounded by the guard).
+    EXPECT_NE(text.find("void M()"), std::string::npos);
+}
