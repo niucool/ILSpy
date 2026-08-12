@@ -145,6 +145,7 @@ public:
                     std::string_view methodName, std::string_view paramDecl) {
         fn_ = &fn;
         returnTypeName_ = std::string(returnType);
+        methodName_ = std::string(methodName);
         out_ += returnType;
         out_ += ' ';
         out_ += methodName;
@@ -163,6 +164,7 @@ private:
     std::string& out_;
     const ILFunction* fn_ = nullptr;
     std::string returnTypeName_;  // the C# name of the function's return type
+    std::string methodName_;  // the method's display name (for diagnostics)
     std::set<std::string> declared_;          // locals already introduced with `var`
     std::map<const Block*, std::string> labels_;  // branch-target block -> IL_XXXX
     std::set<const Block*> loopHeaders_;  // first block of each Loop container
@@ -186,6 +188,29 @@ private:
         explicit DepthGuard(int& d_) : d(d_) { ++d; }
         ~DepthGuard() { --d; }
     };
+
+    // Whether the recursion-depth guard has fired for this method. Set once
+    // at the first guard trigger so a single debug warning is emitted per
+    // method (not per guarded entry). In a debug build the warning goes to
+    // stderr so a transform-induced cycle (the real cause of the runaway the
+    // guard bounds) surfaces visibly -- the guard only masks the symptom in
+    // the production text; the warning makes the underlying bug diagnosable.
+    bool depthGuardFired_ = false;
+    bool DepthAtLimit() {
+        if (depth_ < kMaxRenderDepth) return false;
+#ifndef NDEBUG
+        if (!depthGuardFired_) {
+            depthGuardFired_ = true;
+            std::fprintf(stderr,
+                "ILAstToCSharp: max rendering depth %d hit -- possible ILAst "
+                "cycle or pathologically deep tree in method '%s'. Output for "
+                "this method is truncated at a /* max rendering depth */ marker.\n",
+                kMaxRenderDepth,
+                methodName_.empty() ? "<unknown>" : methodName_.c_str());
+        }
+#endif
+        return true;
+    }
 
     void Line(int indent, std::string_view text) {
         out_.append(static_cast<std::size_t>(indent) * 4, ' ');
@@ -288,7 +313,7 @@ private:
     }
 
     void EmitContainer(const BlockContainer& container, int indent) {
-        if (depth_ >= kMaxRenderDepth) {
+        if (DepthAtLimit()) {
             Line(indent, "/* max rendering depth: possible ILAst cycle */");
             return;
         }
@@ -394,7 +419,7 @@ private:
     }
 
     void EmitBlock(const Block& block, int indent, bool dropFinal = false) {
-        if (depth_ >= kMaxRenderDepth) {
+        if (DepthAtLimit()) {
             Line(indent, "/* max rendering depth: possible ILAst cycle */");
             return;
         }
@@ -458,7 +483,7 @@ private:
 
     // A non-Block arm of if/try: brace it at this indent.
     void EmitBraced(const ILInstruction& inst, int indent) {
-        if (depth_ >= kMaxRenderDepth) {
+        if (DepthAtLimit()) {
             Line(indent, "/* max rendering depth: possible ILAst cycle */");
             Line(indent, "{}");
             return;
@@ -476,7 +501,7 @@ private:
     }
 
     void EmitStatement(const ILInstruction& inst, int indent) {
-        if (depth_ >= kMaxRenderDepth) {
+        if (DepthAtLimit()) {
             Line(indent, "/* max rendering depth: possible ILAst cycle */");
             return;
         }
@@ -1082,7 +1107,7 @@ private:
     }
 
     std::string Expr(const ILInstruction& inst) {
-        if (depth_ >= kMaxRenderDepth) {
+        if (DepthAtLimit()) {
             return "/* max rendering depth: possible ILAst cycle */";
         }
         DepthGuard g{depth_};
