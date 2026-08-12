@@ -149,3 +149,24 @@ TEST(AssignVariableNames, MscorlibSweepRenamesSomeLocals) {
     EXPECT_GT(processed, 2000);
     EXPECT_GT(renamed, 0) << "some local should pick up a type-based name";
 }
+
+TEST(AssignVariableNames, GenericTypeTakesBaseNameNotTypeArg) {
+    // A List<T>/Dictionary<...> local must be named from its base generic type
+    // ("list"), not from a mangled last-segment substring of the type arguments
+    // ("string>", "exceptionDispatchInfo>"). The reflection name is
+    // `System.Collections.Generic.List`1<System.String>`; cutting the `<...>`
+    // type-argument list before taking the last segment yields the base name.
+    using namespace ILSpy::Decompiler::TypeSystem;
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto listOfString = std::make_shared<ParameterizedType>(
+        std::make_shared<SimpleType>(TopLevelTypeName("System.Collections.Generic.List`1")),
+        std::vector<ITypePtr>{ std::make_shared<KnownType>(KnownTypeCode::String) });
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, listOfString, -1);
+    v->Name = "V_0";
+    fn->Variables.push_back(v);
+    AssignVariableNames().Run(*fn, Ctx());
+    EXPECT_EQ(fn->Variables[0]->Name, "list");
+}

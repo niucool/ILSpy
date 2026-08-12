@@ -901,7 +901,18 @@ private:
             name.erase(name.size() - cctorSuffix.size());
             prefix = "new ";
         }
-        std::string text = prefix + FlattenMetadataName(std::move(name)) + "(";
+        // A newobj on a generic type: render the resolved declaring type via
+        // CSharpTypeName so it comes out as `List<string>` (the C# form), not the
+        // metadata name `List`1<System.String>`. Non-generic ctors leave
+        // DeclaringType unset (or resolve to a SimpleType), so those keep the
+        // full illustrative name from the metadata MethodName unchanged.
+        const TypeSystem::ParameterizedType* genDecl =
+            (call.IsNewObj && call.DeclaringType)
+                ? dynamic_cast<const TypeSystem::ParameterizedType*>(call.DeclaringType.get())
+                : nullptr;
+        std::string typeName = genDecl ? CSharpTypeName(call.DeclaringType)
+                                       : FlattenMetadataName(std::move(name));
+        std::string text = prefix + typeName + "(";
         for (std::size_t i = 0; i < call.Arguments.size(); ++i) {
             if (i) text += ", ";
             text += call.Arguments[i] ? Expr(*call.Arguments[i]) : "(default)";
@@ -1661,6 +1672,28 @@ std::string CSharpTypeName(const TypeSystem::ITypePtr& type) {
             case TypeSystem::KnownTypeCode::UIntPtr: return "nuint";
             default: break;
         }
+    }
+    if (auto* p = dynamic_cast<const TypeSystem::ParameterizedType*>(type.get())) {
+        // A generic type: C# `SimpleName<T1, T2>`. The base (generic definition)
+        // reflection name carries the ``N arity suffix; strip it. Each type
+        // argument renders recursively (so System.String -> string).
+        std::string base;
+        if (p->GenericType()) {
+            std::string rn = p->GenericType()->ReflectionName();
+            auto dot = rn.rfind('.');
+            base = dot != std::string::npos ? rn.substr(dot + 1) : rn;
+        } else {
+            base = "?";
+        }
+        auto bt = base.find('`');
+        if (bt != std::string::npos) base = base.substr(0, bt);  // arity suffix
+        base += "<";
+        for (std::size_t i = 0; i < p->TypeArguments().size(); ++i) {
+            if (i) base += ", ";
+            base += CSharpTypeName(p->TypeArguments()[i]);
+        }
+        base += ">";
+        return base;
     }
     std::string rn = type->ReflectionName();
     auto pos = rn.rfind('.');

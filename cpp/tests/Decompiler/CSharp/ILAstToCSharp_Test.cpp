@@ -806,3 +806,44 @@ TEST(ILAstToCSharp, PreHeaderEntryBranchToWhileConditionIsDropped) {
         << "the entry branch to the while condition must be dropped, not emitted "
            "as a dangling goto:\n" << text;
 }
+
+TEST(ILAstToCSharp, CSharpTypeNameRendersGeneric) {
+    // A parameterized (generic) type must render as C# `List<string>`, not the
+    // ECMA reflection name `List`1<System.String>` nor a mangled last-segment
+    // substring like `String>`.
+    using namespace ILSpy::Decompiler::TypeSystem;
+    auto listOfString = std::make_shared<ParameterizedType>(
+        std::make_shared<SimpleType>(TopLevelTypeName("System.Collections.Generic.List`1")),
+        std::vector<ITypePtr>{ std::make_shared<KnownType>(KnownTypeCode::String) });
+    EXPECT_EQ(CSharpTypeName(listOfString), "List<string>");
+    // Nested: Dictionary<int, List<string>>.
+    auto dictOfIntListString = std::make_shared<ParameterizedType>(
+        std::make_shared<SimpleType>(TopLevelTypeName("System.Collections.Generic.Dictionary`2")),
+        std::vector<ITypePtr>{ std::make_shared<KnownType>(KnownTypeCode::Int32), listOfString });
+    EXPECT_EQ(CSharpTypeName(dictOfIntListString), "Dictionary<int, List<string>>");
+}
+
+TEST(ILAstToCSharp, GenericNewObjRendersCSharpTypeArguments) {
+    // A newobj on a generic type must render `new List<string>(...)` via the
+    // resolved DeclaringType, not the metadata name `List`1<System.String>`.
+    using namespace ILSpy::Decompiler::TypeSystem;
+    auto listOfString = std::make_shared<ParameterizedType>(
+        std::make_shared<SimpleType>(TopLevelTypeName("System.Collections.Generic.List`1")),
+        std::vector<ITypePtr>{ std::make_shared<KnownType>(KnownTypeCode::String) });
+    auto call = std::make_unique<Call>("System.Collections.Generic.List`1<System.String>::.ctor");
+    call->IsNewObj = true;
+    call->ReturnType = StackType::O;
+    call->DeclaringType = listOfString;
+
+    auto v = MakeVar(VariableKind::Local, "list", 0, listOfString);
+    auto block = std::make_unique<Block>();
+    block->Add(std::make_unique<StLoc>(v, std::move(call)));
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(block));
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("new List<string>()"), std::string::npos) << text;
+    EXPECT_EQ(text.find("List`1"), std::string::npos) << "metadata arity suffix leaked:\n" << text;
+}

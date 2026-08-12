@@ -66,6 +66,13 @@ std::string InferName(const TypeSystem::IType* type) {
     std::string rn = type->ReflectionName();
     auto it = TypeNameDict().find(rn);
     if (it != TypeNameDict().end()) return it->second;
+    // A parameterized type's reflection name carries its type arguments in
+    // `<...>` (e.g. `System.Collections.Generic.List`1<System.String>`); the
+    // variable name derives from the base (container) type, so cut the
+    // type-argument list before taking the last segment. Without this the last
+    // '.' lands inside the type args and leaks a mangled name ("string>").
+    auto lt = rn.find('<');
+    if (lt != std::string::npos) rn = rn.substr(0, lt);
     // Short name: the segment after the last '.', lowercased first letter.
     auto pos = rn.rfind('.');
     std::string name = (pos != std::string::npos) ? rn.substr(pos + 1) : rn;
