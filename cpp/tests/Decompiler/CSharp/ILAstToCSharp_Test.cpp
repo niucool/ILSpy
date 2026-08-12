@@ -747,3 +747,62 @@ TEST(ILAstToCSharp, DepthGuardBoundsPathologicallyDeepTree) {
     // The guard does NOT crash (the method still renders, bounded by the guard).
     EXPECT_NE(text.find("void M()"), std::string::npos);
 }
+
+TEST(ILAstToCSharp, PreHeaderEntryBranchToWhileConditionIsDropped) {
+    // A while loop's pre-header entry branch targets the loop condition block.
+    // That block becomes the `while (cond)` head and carries no IL label, so
+    // emitting `goto IL_XXXX;` for the entry branch produces a DANGLING goto
+    // (a reference to a label that is never emitted). The pre-header falls
+    // through into the loop, so the branch must be dropped instead.
+    //
+    //   b0:           br header            (entry; must be dropped)
+    //   preHeader:    { whileC } ; leave   (the While container, emitted next)
+    //   whileC:       header: if (cond) br body else leave(whileC)   (while head)
+    //                 body:   ... ; br header                         (back edge)
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+
+    auto whileC = std::make_unique<BlockContainer>();
+    whileC->Kind = ContainerKind::While;
+    auto header = std::make_unique<Block>();
+    header->StartILOffset = 0x20;
+    Block* headerPtr = header.get();
+    auto body = std::make_unique<Block>();
+    Block* bodyPtr = body.get();
+
+    auto preHeader = std::make_unique<Block>();
+    Block* preHeaderPtr = preHeader.get();
+
+    // header: while condition `if (cond) br body else leave(whileC)`.
+    headerPtr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::make_unique<Branch>(bodyPtr), std::make_unique<Leave>(whileC.get())));
+    // body: a statement, then back-edge to the header (dropped at render).
+    bodyPtr->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
+                                         std::make_unique<LdcI4>(1)));
+    bodyPtr->SetFinal(std::make_unique<Branch>(headerPtr));
+
+    whileC->AddBlock(std::move(header));
+    whileC->AddBlock(std::move(body));
+    preHeader->Add(std::move(whileC));
+    preHeader->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+
+    // b0: the entry branch into the loop condition (the dangling goto if kept).
+    auto b0 = std::make_unique<Block>();
+    auto entryBr = std::make_unique<Branch>(headerPtr);
+    entryBr->TargetOffset = 0x20;  // the label text if (wrongly) emitted
+    b0->SetFinal(std::move(entryBr));
+
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(preHeader));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("while ("), std::string::npos) << text;
+    EXPECT_EQ(text.find("goto IL_0020"), std::string::npos)
+        << "the entry branch to the while condition must be dropped, not emitted "
+           "as a dangling goto:\n" << text;
+}

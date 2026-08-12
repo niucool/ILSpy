@@ -287,6 +287,47 @@ private:
         return false;
     }
 
+    // Whether this block-final branch is the implicit pre-header entry into a
+    // loop (while/do-while/loop) that immediately follows. A loop condition
+    // block becomes the loop head (e.g. `while (cond)`) and carries no IL label,
+    // so a `goto` to it would be a dangling reference. When the loop container
+    // is the leading instruction of the very next block in the enclosing
+    // container, the branch falls through into the loop and must be dropped.
+    static bool IsLoopEntryFallThrough(const Branch* br) {
+        if (!br || !br->TargetBlock) return false;
+        const Block* target = br->TargetBlock;
+        // The branch must be a block's FinalInstruction (a plain block final).
+        const Block* encBlock = nullptr;
+        for (const ILInstruction* p = br; p; p = p->Parent) {
+            encBlock = dynamic_cast<const Block*>(p);
+            if (encBlock) break;
+        }
+        if (!encBlock || encBlock->FinalInstruction.get() != br) return false;
+        if (encBlock == target) return false;
+        // The target must be the FIRST block of a Loop/While/DoWhile container.
+        const auto* loopC = dynamic_cast<const BlockContainer*>(target->Parent);
+        if (!loopC || loopC->Blocks.empty() || loopC->Blocks.front().get() != target) return false;
+        if (loopC->Kind != ContainerKind::Loop && loopC->Kind != ContainerKind::While &&
+            loopC->Kind != ContainerKind::DoWhile)
+            return false;
+        // A branch from INSIDE the loop is a back-edge (continue), not an entry.
+        for (const ILInstruction* p = encBlock; p; p = p->Parent)
+            if (p == loopC) return false;
+        // The loop container must be the leading instruction of the next block in
+        // the enclosing container, so the loop is emitted immediately after.
+        const auto* encContainer = dynamic_cast<const BlockContainer*>(encBlock->Parent);
+        if (!encContainer) return false;
+        for (std::size_t i = 0; i + 1 < encContainer->Blocks.size(); ++i) {
+            if (encContainer->Blocks[i].get() == encBlock) {
+                const Block* next = encContainer->Blocks[i + 1].get();
+                if (!next || next->Instructions.empty()) return false;
+                const auto* lc = dynamic_cast<const BlockContainer*>(next->Instructions[0].get());
+                return lc == loopC;
+            }
+        }
+        return false;
+    }
+
     std::string GotoText(const Branch& br) const {
         if (br.TargetBlock) {
             // A branch to a loop header is a `continue` (the back-edge) only
@@ -304,8 +345,10 @@ private:
             // Drop a redundant `goto nextBlock` when the branch's enclosing
             // block's container's next block IS the target -- the enclosing
             // block falls through to it. (A rendering-only no-op; the ILAst
-            // goto survives but is not emitted.)
-            if (IsFallThroughGoto(&br)) return "";
+            // goto survives but is not emitted.) Likewise drop the pre-header
+            // entry branch to a following loop's condition block: the loop head
+            // carries no label, so the goto would be a dangling reference.
+            if (IsFallThroughGoto(&br) || IsLoopEntryFallThrough(&br)) return "";
             auto it = labels_.find(br.TargetBlock);
             if (it != labels_.end()) return "goto " + it->second + ";";
         }
@@ -579,9 +622,13 @@ private:
                 }
                 return;
             }
-            case OpCode::Branch:
-                Line(indent, GotoText(static_cast<const Branch&>(inst)));
+            case OpCode::Branch: {
+                // A dropped branch (redundant fall-through / loop-entry) yields an
+                // empty GotoText -- emit nothing, not a blank line.
+                std::string gt = GotoText(static_cast<const Branch&>(inst));
+                if (!gt.empty()) Line(indent, gt);
                 return;
+            }
             case OpCode::IfInstruction: {
                 const auto& iff = static_cast<const IfInstruction&>(inst);
                 std::string cond = iff.Condition ? CondExpr(*iff.Condition) : "(default)";
