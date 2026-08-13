@@ -1153,3 +1153,57 @@ TEST(ILAstToCSharp, ForSplitIncrementEmitsNoTrailingContinue) {
     EXPECT_EQ(text.find("goto"), std::string::npos) << text;
     EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
 }
+
+TEST(ILAstToCSharp, WhileLoopHeaderPreambleStatementsRenderInsideBody) {
+    // A While container's header block may carry statements between the entry
+    // (the guard) and the condition if: the do-while-like `u = f(); if (c) }`
+    // shape the C# compiler emits. The emission must not drop them silently.
+    auto num = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    num->Name = "num";
+    auto other = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    other->Name = "other";
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto preHeader = std::make_unique<Block>();
+    preHeader->Add(std::make_unique<StLoc>(num, std::make_unique<LdcI4>(0)));  // num = 0;
+
+    auto loopC = std::make_unique<BlockContainer>();
+    loopC->Kind = ContainerKind::While;
+    BlockContainer* loopPtr = loopC.get();
+    auto entry = std::make_unique<Block>();
+    Block* entryPtr = entry.get();
+    auto body = std::make_unique<Block>();
+    Block* bodyPtr = body.get();
+
+    // header: stloc other(42); then the condition.
+    entry->Add(std::make_unique<StLoc>(other, std::make_unique<LdcI4>(42)));
+    entry->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(5),
+                               ComparisonKind::LessThan),
+        std::make_unique<Branch>(bodyPtr), std::make_unique<Leave>(loopPtr)));
+    loopC->AddBlock(std::move(entry));
+    // body: stloc num(num+1); br entry.
+    body->Add(std::make_unique<StLoc>(
+        num, std::make_unique<BinaryNumericInstruction>(
+                 std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(1),
+                 BinaryNumericOperator::Add, StackType::I4)));
+    bodyPtr->SetFinal(std::make_unique<Branch>(entryPtr));
+    loopC->AddBlock(std::move(body));
+
+    preHeader->Add(std::move(loopC));
+    preHeader->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(preHeader));
+    fn->Variables.push_back(num);
+    fn->Variables.push_back(other);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("while (num < 5)"), std::string::npos) << text;
+    // The header preamble (other = 42) must render inside the loop body --
+    // the current emission drops it silently.
+    EXPECT_NE(text.find("other = 42"), std::string::npos)
+        << "header preamble statement dropped from the While body rendering:\n" << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+}

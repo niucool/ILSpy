@@ -425,6 +425,14 @@ private:
             }
             Line(indent, "while (" + cond + ")");
             Line(indent, "{");
+            // The entry block's non-final Instructions (its preamble between
+            // the guard and the condition: a csc while with body-in-entry or a
+            // do-while's refreshed local) execute at the top of every
+            // iteration -- render them at the body's open, not silently.
+            if (header && !header->Instructions.empty()) {
+                for (const auto& inst : header->Instructions)
+                    if (inst) EmitStatement(*inst, indent + 1);
+            }
             // The body is every block after the entry point.
             for (std::size_t i = 1; i < container.Blocks.size(); ++i) {
                 const auto& block = container.Blocks[i];
@@ -500,6 +508,14 @@ private:
                 }
             }            Line(indent, "for (; " + cond + "; " + incrText + ")");
             Line(indent, "{");
+            // The for-loop header's preamble (a while-initialized value the
+            // csc lowers to an entry statement, or a refreshed do-while local)
+            // executes at the top of every iteration -- render it at the body
+            // open.
+            if (header && !header->Instructions.empty()) {
+                for (const auto& inst : header->Instructions)
+                    if (inst) EmitStatement(*inst, indent + 1);
+            }
             // Index of the last emitted (non-empty) body block: only that
             // block's trailing jump to the increment block is the iteration
             // itself (a dangling `continue` before `}`), so it drops silently;
@@ -548,6 +564,14 @@ private:
             }
             Line(indent, "do");
             Line(indent, "{");
+            // A do-while header block (the first block of the body after the
+            // guard) may also carry statements between the fall into the body
+            // and the first body block -- they execute at the top of every
+            // iteration.
+            if (header && !header->Instructions.empty()) {
+                for (const auto& inst : header->Instructions)
+                    if (inst) EmitStatement(*inst, indent + 1);
+            }
             for (std::size_t i = 0; i < container.Blocks.size(); ++i) {
                 const auto& block = container.Blocks[i];
                 if (!block) continue;
