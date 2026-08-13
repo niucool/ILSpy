@@ -483,6 +483,35 @@ private:
         if (it != switchInlinePlans_.end()) return it->second;
         SwitchInlinePlan& plan = switchInlinePlans_[&sw];  // starts ineligible
         auto bail = [&](const char* /*why*/) -> SwitchInlinePlan& { return plan; };
+        // Whether an if-arm (the true arm of a no-else trailing if) "falls
+        // through" -- it does work but never transfers control (no Branch,
+        // Leave, Throw, or Switch terminator), so both the arm's path and the
+        // if's false path fall positionally to the same place. Such a body
+        // contributes no exit branch; the positional integrity gate checks
+        // the fall goes to the next section's body or the exit.
+        std::function<bool(const ILInstruction*)> armFallsThrough =
+            [&](const ILInstruction* inst) -> bool {
+            if (!inst) return true;
+            if (auto* b = dynamic_cast<const Block*>(inst)) {
+                if (!b->FinalInstruction) return true;
+                return armFallsThrough(b->FinalInstruction.get());
+            }
+            if (auto* iif = dynamic_cast<const IfInstruction*>(inst)) {
+                if (iif->FalseInst)
+                    return armFallsThrough(iif->TrueInst.get()) &&
+                           armFallsThrough(iif->FalseInst.get());
+                return armFallsThrough(iif->TrueInst.get());
+            }
+            switch (inst->Op) {
+            case OpCode::Branch:
+            case OpCode::Leave:
+            case OpCode::Throw:
+            case OpCode::SwitchInstruction:
+                return false;
+            default:
+                return true;
+            }
+        };
         // Locate the host block and its outer container.
         const Block* hostBlock = dynamic_cast<const Block*>(sw.Parent);
         const BlockContainer* outer = hostBlock
@@ -555,6 +584,8 @@ private:
                         };
                         if (trueArmExits(iif->TrueInst.get()))
                             continue;  // contributes no exit; false falls positionally
+                        if (armFallsThrough(iif->TrueInst.get()))
+                            continue;  // true arm does work then falls through; no exit
                         return bail("final-kind");
                     }
                 } else {

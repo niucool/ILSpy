@@ -1540,6 +1540,20 @@ implemented and green here. Everything else follows the phase plan in
   sigs, locals, field sigs, TypeSpec operands (newarr/castclass/box), and
   member-reference strings (`EqualityComparer<T>.Default.Equals`); the
   VAR/MVAR-bearing line count on mscorlib --csharp dropped 3471 -> 0.
+  `while`/`do-while`/`for` loops render with their condition, body, and
+  increment; `for` is matched when the increment block is hoistable, and
+  loop-header preamble statements render inside the body. Construct-exit
+  fall-through `goto`s (out of `using`/`try` bodies to the following block)
+  are dropped. Switch-section body thunks inline under their case labels:
+  `break`-final bodies, throw-final bodies, conditional-exit
+  `if (cond) break;`, conditional-return `if (cond) { return; }` /
+  `if (cond) throw;` (exiting true arm), and falling-through
+  `if (cond) { work; }` (no-else, true arm does work then falls) all
+  inline, with a positional-integrity gate so a non-adjacent fall-through
+  stays a `goto` (faithful to C# `goto case`). Switches with no convergence
+  exit (every body self-terminates or falls) inline with the post-switch
+  block as the implicit exit. mscorlib --csharp: 59 switches inlined,
+  ~17.7k gotos (down from ~18.5k pre-inlining).
   Remaining gaps vs the real back
   end: gotos for multi-pred join blocks and loop-internal condition/increment
   jumps (needs DetectExitPoints + HighLevelLoopTransform), full type names

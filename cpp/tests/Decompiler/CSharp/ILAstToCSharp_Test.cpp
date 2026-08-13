@@ -1526,6 +1526,56 @@ TEST(ILAstToCSharp, SwitchBodyWithConditionalReturnInlineAsIfReturn) {
     EXPECT_NE(text.find("break;"), std::string::npos) << text;
 }
 
+TEST(ILAstToCSharp, SwitchBodyWithFallingThroughTrueArmInlines) {
+    // A case body whose trailing is `if (cond) { work; }` (no else): the true
+    // arm is a Block with real instructions but NO final instruction, so it
+    // falls through. The body contributes no exit branch -- both the true
+    // path (after the work) and the false path fall positionally. The emission
+    // inlines the if in place; the section fall-through handles the rest.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = MakeFunction({});
+    auto host = std::make_unique<Block>(); Block* hostPtr = host.get();
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    auto exitB = std::make_unique<Block>(); Block* exitPtr = exitB.get();
+    fn->Body->AddBlock(std::move(host));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(exitB));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto sec1 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(1)));
+    sec1->SetBody([&]{ auto b=std::make_unique<Branch>(b2Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(sec1));
+    auto sec0 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    sec0->SetBody([&]{ auto b=std::make_unique<Branch>(b1Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(sec0));
+    hostPtr->SetFinal(std::move(sw));
+
+    // case 1 body (first section): stloc; br exit -- sets the convergence exit.
+    b2Ptr->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(2)));
+    b2Ptr->SetFinal(std::make_unique<Branch>(exitPtr));
+    // case 0 body (last section): if (num) { num = 1; } -- true arm is a Block
+    // with an StLoc and no final, so it falls through; no exit branch.
+    auto workBlock = std::make_unique<Block>();
+    workBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(1)));
+    b1Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::move(workBlock)));
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 0:"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 1:"), std::string::npos) << text;
+    EXPECT_NE(text.find("if (num)"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 1"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 2"), std::string::npos) << text;
+}
+
 TEST(ILAstToCSharp, SwitchAllBodiesExitOrFallThroughNoConvergenceExit) {
     // The no-convergence switch: every body self-terminates (throw/return) or
     // falls positionally into the next section's body -- no body branches to a
