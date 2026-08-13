@@ -70,6 +70,7 @@
 #include <cctype>
 #include <cstdio>
 #include <map>
+#include <cstdlib>
 #include <set>
 #include <string>
 #include <string_view>
@@ -328,13 +329,61 @@ private:
                 isFinal = (ifFinal->TrueInst.get() == br) && !ifFinal->FalseInst;
         }
         if (!isFinal) return false;
-        BlockContainer* encContainer = dynamic_cast<BlockContainer*>(encBlock->Parent);
-        if (!encContainer) return false;
-        for (std::size_t i = 0; i + 1 < encContainer->Blocks.size(); ++i) {
-            if (encContainer->Blocks[i].get() == encBlock)
-                return encContainer->Blocks[i + 1].get() == br->TargetBlock;
+        return TextuallyNextEmittedBlock(encBlock) == br->TargetBlock;
+    }
+
+    // The block the emitter visits next in textual emission order after
+    // `block`, walking up construct boundaries: inside a container it is the
+    // next block; at a container's end, the container node's own position
+    // inside its enclosing BLOCK determines the fall-through -- only when the
+    // construct is the enclosing block's last emitted statement (no remaining
+    // instructions, no (relayed) final) does the fall-through continue to the
+    // enclosing block's own next block. Returns nullptr when the fall-through
+    // does not reach a block (e.g. into more statements, a switch arm, or off
+    // the function's end).
+    static const Block* TextuallyNextEmittedBlock(const ILInstruction* node) {
+        const ILInstruction* cur = node;
+        while (cur) {
+            if (const Block* b = dynamic_cast<const Block*>(cur)) {
+                const auto* c = dynamic_cast<const BlockContainer*>(b->Parent);
+                if (!c) return nullptr;
+                bool advanced = false;
+                for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
+                    if (c->Blocks[i].get() == b) {
+                        if (i + 1 < c->Blocks.size()) return c->Blocks[i + 1].get();
+                        // End of this container: continue from whatever owns
+                        // the container as a statement (a construct node or an
+                        // enclosing Block).
+                        cur = c;
+                        advanced = true;
+                        break;
+                    }
+                }
+                if (!advanced) return nullptr;
+                continue;
+            }
+            // cur is a container or a construct node: walk up through
+            // non-Block owners (a UsingInstruction/TryCatch owning its body
+            // container) until a Block carries the whole subtree as one of its
+            // statements. That block must carry it as the last emitted
+            // statement -- the final member of pb->Instructions with no
+            // additional final, or with a final that is itself only a
+            // fall-through Branch to pb's own textual next (the two drops
+            // match).
+            const ILInstruction* owner = cur->Parent;
+            if (!owner) return nullptr;
+            if (!dynamic_cast<const Block*>(owner)) { cur = owner; continue; }
+            const Block* pb = static_cast<const Block*>(owner);
+            if (pb->Instructions.empty() ||
+                pb->Instructions.back().get() != cur) return nullptr;
+            if (const ILInstruction* final = pb->FinalInstruction.get()) {
+                auto* fb = dynamic_cast<const Branch*>(final);
+                if (!fb || fb->TargetBlock != TextuallyNextEmittedBlock(pb))
+                    return nullptr;
+            }
+            cur = pb;
         }
-        return false;
+        return nullptr;
     }
 
     // Whether this block-final branch is the implicit pre-header entry into a

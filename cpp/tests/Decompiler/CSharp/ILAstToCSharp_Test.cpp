@@ -41,6 +41,7 @@
 #include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
+#include "Decompiler/IL/Instructions/UsingInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
@@ -1206,4 +1207,58 @@ TEST(ILAstToCSharp, WhileLoopHeaderPreambleStatementsRenderInsideBody) {
     EXPECT_NE(text.find("other = 42"), std::string::npos)
         << "header preamble statement dropped from the While body rendering:\n" << text;
     EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, GotoFallingOutOfUsingConstructToFollowingBlockIsDropped) {
+    // The using-exit shape `using (r) { ...; br after }; after:` emits a
+    // redundant `goto after;` right before the using brace closes -- the
+    // branch falls out of the construct to the textually-following block.
+    // IsFallThroughGoto must see through the construct boundary (it currently
+    // only checks same-container siblings): the goto drops silently.
+    auto r = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    r->Name = "streamReader";
+
+    auto fn = MakeFunction({});
+
+    // Entry block: holds the UsingInstruction; falls through to the
+    // following block (the construct-exit label).
+    auto entry = std::make_unique<Block>();
+    Block* entryPtr = entry.get();
+
+    // After block: the block the using's interior goto falls out to.
+    auto after = std::make_unique<Block>();
+    Block* afterPtr = after.get();
+    after->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+
+    // The using body container: [loop-like block whose final is br afterPtr].
+    auto usingBody = std::make_unique<BlockContainer>();
+    usingBody->Kind = ContainerKind::Loop;   // exercise loop shapes minimally
+    auto work = std::make_unique<Block>();
+    Block* workPtr = work.get();
+    work->Add(std::make_unique<StLoc>(r, std::make_unique<LdcI4>(42)));
+    // Inside the using, the block's final branches to the block after the
+    // using (the construct-exit fall-through).
+    work->SetFinal(std::make_unique<Branch>(afterPtr));
+    usingBody->AddBlock(std::move(work));
+
+    entry->Add(std::make_unique<UsingInstruction>(
+        r, std::make_unique<LdNull>(), std::move(usingBody)));
+    // The entry falls to the after block.
+    entryPtr->SetFinal(std::make_unique<Branch>(afterPtr));
+    fn->Body->AddBlock(std::move(entry));
+    fn->Body->AddBlock(std::move(after));
+    fn->Variables.push_back(r);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    // The goto inside the using falls out of the construct to `after` -- no
+    // goto should print (it is the construct-exit fall-through).
+    EXPECT_EQ(text.find("goto"), std::string::npos)
+        << "redundant exit-from-construct goto emitted:\n" << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    // The using statement still renders (the seed elides the using-local and
+    // renders `using (resource)` for whatever expression shape the call had).
+    EXPECT_NE(text.find("using (null)"), std::string::npos) << text;
+    // The label-free block content renders.
+    EXPECT_NE(text.find("streamReader = 42"), std::string::npos) << text;
 }
