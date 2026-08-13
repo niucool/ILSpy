@@ -1536,14 +1536,11 @@ implemented and green here. Everything else follows the phase plan in
   null checks, `arr.Length` (no redundant `(int)` cast), `-x` for `0 - x`,
   `*(this)`/`*(byref)` rendered as the bare name, and generic `newobj` with
   its type. No trailing `return;` / no duplicate loop labels. Generic VAR (!N)
-  / MVAR (!!N) params render with their authored names across method sigs,
-  locals, field sigs, and TypeSpec operands (`List<T>`-scope methods read
-  `T` / `T[]`, `Array.Resize<T>`'s newarr emits `new T[newSize]`); the
-  VAR/MVAR-bearing line count on mscorlib --csharp dropped 3471 -> 483.
-  Remaining generic placeholders: static-member reference text built through
-  the string-level FlattenMetadataName path (no IType to consult, e.g.
-  `EqualityComparer`1<!0>.Default`) and MemberRef-signature parameter naming
-  (decodes in the referenced method's scope). Remaining gaps vs the real back
+  / MVAR (!!N) params render with their authored names everywhere: method
+  sigs, locals, field sigs, TypeSpec operands (newarr/castclass/box), and
+  member-reference strings (`EqualityComparer<T>.Default.Equals`); the
+  VAR/MVAR-bearing line count on mscorlib --csharp dropped 3471 -> 0.
+  Remaining gaps vs the real back
   end: gotos for multi-pred join blocks and loop-internal condition/increment
   jumps (needs DetectExitPoints + HighLevelLoopTransform), full type names
   (no `using` directives), and overload-resolved casts -- these land with the
