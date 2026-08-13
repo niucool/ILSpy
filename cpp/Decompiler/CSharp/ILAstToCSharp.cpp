@@ -566,7 +566,7 @@ private:
                 // Leave/Throw): the true arm exits, contributing no exit
                 // branch; the false path falls positionally (integrity-gated).
                 auto* iif = dynamic_cast<const IfInstruction*>(fin);
-                if (iif && !iif->FalseInst && iif->TrueInst) {
+                if (iif && (!iif->FalseInst || iif->FalseInst->Op == OpCode::Nop) && iif->TrueInst) {
                     fbr = dynamic_cast<const Branch*>(iif->TrueInst.get());
                     if (fbr) {
                         conditionalExit = true;  // D182: `if (cond) br exit`
@@ -623,7 +623,7 @@ private:
             const ILInstruction* fin = targets[k]->FinalInstruction.get();
             bool fallsThrough = !fin;
             if (auto* iif = fin ? dynamic_cast<const IfInstruction*>(fin) : nullptr)
-                fallsThrough = !iif->FalseInst;
+                fallsThrough = !iif->FalseInst || iif->FalseInst->Op == OpCode::Nop;
             if (!fallsThrough) continue;
             const Block* want = (k + 1 < targets.size()) ? targets[k + 1] : exit;
             if (!want) return bail("fall-no-target");
@@ -1163,7 +1163,7 @@ private:
                                  static_cast<const Branch*>(fin)->TargetBlock == plan->exit) {
                             Line(indent + 1, "break;");
                         } else if (auto* iif = dynamic_cast<const IfInstruction*>(fin);
-                                   iif && !iif->FalseInst && iif->TrueInst &&
+                                   iif && (!iif->FalseInst || iif->FalseInst->Op == OpCode::Nop) && iif->TrueInst &&
                                    dynamic_cast<const Branch*>(iif->TrueInst.get()) &&
                                    static_cast<const Branch*>(iif->TrueInst.get())->TargetBlock == plan->exit) {
                             // Trailing conditional exit `if (cond) br exit`

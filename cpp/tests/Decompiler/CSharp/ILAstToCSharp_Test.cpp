@@ -1419,6 +1419,73 @@ TEST(ILAstToCSharp, SwitchBodyWithConditionalExitInlineAsIfBreak) {
     EXPECT_LT(text.find("if (num) break;"), text.find("default:")) << text;
 }
 
+TEST(ILAstToCSharp, SwitchBodyWithConditionalExitAndNopElseInlines) {
+    // Same as SwitchBodyWithConditionalExitInlineAsIfBreak but the trailing if
+    // carries a redundant Nop else arm (`if (cond) br exit else nop`). The Nop
+    // else is semantically fall-through (no-op), so the body is equivalent to
+    // a no-else conditional exit and must inline as `if (cond) break;` -- not
+    // bail to the goto thunk form. The emitter already treats a Nop arm as
+    // empty; the analysis must too.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto v1 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    v1->Name = "x";
+    auto v2 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 2);
+    v2->Name = "y";
+    auto fn = MakeFunction({});
+
+    auto host = std::make_unique<Block>();
+    Block* hostPtr = host.get();
+    auto b1 = std::make_unique<Block>();
+    Block* b1Ptr = b1.get();
+    auto b2 = std::make_unique<Block>();
+    Block* b2Ptr = b2.get();
+    auto exitB = std::make_unique<Block>();
+    Block* exitPtr = exitB.get();
+
+    fn->Body->AddBlock(std::move(host));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(exitB));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto sec0 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    auto brCase = std::make_unique<Branch>(b1Ptr);
+    brCase->HasOffset = false;
+    sec0->SetBody(std::move(brCase));
+    sw->AddSection(std::move(sec0));
+    auto secDef = std::make_unique<SwitchSection>();
+    auto brDef = std::make_unique<Branch>(b2Ptr);
+    brDef->HasOffset = false;
+    secDef->SetBody(std::move(brDef));
+    sw->AddSection(std::move(secDef));
+    hostPtr->SetFinal(std::move(sw));
+
+    // case 0 body: x = 1; if (v) br exit else nop -- the redundant Nop else
+    // is fall-through; the false path falls into b2 (next outer == next section).
+    b1Ptr->Add(std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(1)));
+    b1Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::make_unique<Branch>(exitPtr),
+        std::make_unique<Nop>()));
+    // default body: y = 2; br exit
+    b2Ptr->Add(std::make_unique<StLoc>(v2, std::make_unique<LdcI4>(2)));
+    b2Ptr->SetFinal(std::make_unique<Branch>(exitPtr));
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(v1);
+    fn->Variables.push_back(v2);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 0:"), std::string::npos) << text;
+    EXPECT_NE(text.find("if (num) break;"), std::string::npos) << text;
+    EXPECT_NE(text.find("default:"), std::string::npos) << text;
+    EXPECT_NE(text.find("y = 2;"), std::string::npos) << text;
+}
+
 TEST(ILAstToCSharp, SwitchBodyWithThrowExitIsInlined) {
     // A case body that terminates in a `throw` (guarding a public API entry
     // into the switch) has a Throw final, contributing no exit branch. The
