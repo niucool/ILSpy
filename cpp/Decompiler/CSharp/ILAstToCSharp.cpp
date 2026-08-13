@@ -452,6 +452,14 @@ private:
     }
 
     std::string GotoText(const Branch& br) const {
+        // A branch marked as a switch-case `break` (the body's br-exit, found
+        // by the switch-inline analysis, possibly nested under compound
+        // conditions) renders as `break;` wherever it appears in the inlined
+        // case body -- consistent with CollectLabels, which skips label
+        // creation for these. Put this before the loop-header/continue check:
+        // `break;` exits the switch, not the loop, even if the exit block is a
+        // loop header.
+        if (breakBranches_.count(&br)) return "break;";
         if (br.TargetBlock) {
             // A branch to a loop header is a `continue` (the back-edge) only
             // when the branch is INSIDE the loop (the header's container is an
@@ -510,6 +518,28 @@ private:
                 return false;
             default:
                 return true;
+            }
+        };
+        // Collect every Branch terminator reachable in an if-arm's structure
+        // (recursing through Blocks and nested no-else/if-else ifs). Used to
+        // find a body's nested exit branch -- a `br exit` under compound
+        // conditions (`if (c) { if (c2) br exit }` or `if (c) { work; br exit }`),
+        // which the single-level check misses. Leave/Throw self-terminators and
+        // bare statements (fall-through) contribute no branch.
+        std::function<void(const ILInstruction*, std::vector<const Branch*>&)> collectExitBranches =
+            [&](const ILInstruction* inst, std::vector<const Branch*>& out) {
+            if (!inst) return;
+            if (auto* b = dynamic_cast<const Branch*>(inst)) { out.push_back(b); return; }
+            if (auto* blk = dynamic_cast<const Block*>(inst)) {
+                for (const auto& i : blk->Instructions) collectExitBranches(i.get(), out);
+                collectExitBranches(blk->FinalInstruction.get(), out);
+                return;
+            }
+            if (auto* iif = dynamic_cast<const IfInstruction*>(inst)) {
+                collectExitBranches(iif->TrueInst.get(), out);
+                if (iif->FalseInst && iif->FalseInst->Op != OpCode::Nop)
+                    collectExitBranches(iif->FalseInst.get(), out);
+                return;
             }
         };
         // Locate the host block and its outer container.
@@ -586,7 +616,20 @@ private:
                             continue;  // contributes no exit; false falls positionally
                         if (armFallsThrough(iif->TrueInst.get()))
                             continue;  // true arm does work then falls through; no exit
-                        return bail("final-kind");
+                        // The true arm carries a nested exit branch (under
+                        // compound conditions, or work-then-br): collect every
+                        // Branch; they must all target the SAME block (the body's
+                        // exit contribution) or the body is multi-exit.
+                        std::vector<const Branch*> nested;
+                        collectExitBranches(iif->TrueInst.get(), nested);
+                        if (nested.empty()) return bail("final-kind");
+                        const Block* nt = nested[0]->TargetBlock;
+                        for (const Branch* nb : nested)
+                            if (nb->TargetBlock != nt) return bail("final-kind");
+                        fbr = nested[0];
+                        conditionalExit = true;
+                        for (std::size_t i = 1; i < nested.size(); ++i)
+                            bodyExit.push_back(nested[i]);
                     }
                 } else {
                     return bail("final-kind");
