@@ -370,7 +370,14 @@ private:
         while (cur) {
             if (const Block* b = dynamic_cast<const Block*>(cur)) {
                 const auto* c = dynamic_cast<const BlockContainer*>(b->Parent);
-                if (!c) return nullptr;
+                if (!c) {
+                    // The block's parent is a construct node (an if-arm, a
+                    // try/using body) -- the block is the end of that
+                    // construct's body, so fall through to the construct node's
+                    // own position (the walk-up below continues from there).
+                    cur = b->Parent;
+                    continue;
+                }
                 bool advanced = false;
                 for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
                     if (c->Blocks[i].get() == b) {
@@ -393,14 +400,27 @@ private:
             // statement -- the final member of pb->Instructions with no
             // additional final, or with a final that is itself only a
             // fall-through Branch to pb's own textual next (the two drops
-            // match).
+            // match), OR the block's FinalInstruction itself (an if-else as
+            // the block's terminator is the last emitted thing).
             const ILInstruction* owner = cur->Parent;
             if (!owner) return nullptr;
             if (!dynamic_cast<const Block*>(owner)) { cur = owner; continue; }
             const Block* pb = static_cast<const Block*>(owner);
-            if (pb->Instructions.empty() ||
-                pb->Instructions.back().get() != cur) return nullptr;
-            if (const ILInstruction* final = pb->FinalInstruction.get()) {
+            const ILInstruction* final = pb->FinalInstruction.get();
+            bool lastInInstrs = !pb->Instructions.empty() &&
+                                 pb->Instructions.back().get() == cur;
+            bool isTheFinal = (final == cur);
+            if (!lastInInstrs && !isTheFinal) return nullptr;
+            if (isTheFinal) {
+                // cur is pb's terminator (e.g. an if-else as the block's
+                // final) -- after it, the emitter is done with pb's content;
+                // fall through to pb's own next block.
+                cur = pb;
+                continue;
+            }
+            // cur is pb's last statement; the terminator (final) must also
+            // fall through to pb's textual next.
+            if (final) {
                 auto* fb = dynamic_cast<const Branch*>(final);
                 if (!fb || fb->TargetBlock != TextuallyNextEmittedBlock(pb))
                     return nullptr;

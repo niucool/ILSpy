@@ -1272,6 +1272,46 @@ TEST(ILAstToCSharp, GotoFallingOutOfUsingConstructToFollowingBlockIsDropped) {
     EXPECT_NE(text.find("streamReader = 42"), std::string::npos) << text;
 }
 
+TEST(ILAstToCSharp, GotoFallingOutOfIfElseArmsToFollowingBlockIsDropped) {
+    // An if-else whose both arms end with `goto nextBlock`, where nextBlock is
+    // the block after the if's enclosing block: both arm gotos are redundant
+    // fall-throughs (the if completes and control reaches nextBlock). The
+    // then arm's bare goto and the else arm's trailing goto both drop.
+    // IsFallThroughGoto's TextuallyNextEmittedBlock must walk up through the
+    // if-arm (parent = IfInstruction, not a BlockContainer) and through the
+    // if being the enclosing block's FinalInstruction (not an Instructions
+    // entry) to reach the container's next block.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto v1 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    v1->Name = "x";
+    auto fn = MakeFunction({});
+    auto b0 = std::make_unique<Block>(); Block* b0Ptr = b0.get();
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    // then arm: bare goto b1
+    auto thenArm = std::make_unique<Block>();
+    thenArm->SetFinal(std::make_unique<Branch>(b1Ptr));
+    // else arm: work; goto b1
+    auto elseArm = std::make_unique<Block>();
+    elseArm->Add(std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(2)));
+    elseArm->SetFinal(std::make_unique<Branch>(b1Ptr));
+    // b0's final is the if-else
+    b0Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::move(thenArm), std::move(elseArm)));
+    // b1: return
+    b1Ptr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(v1);
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos)
+        << "redundant if-else-arm fall-through goto emitted:\n" << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("x = 2"), std::string::npos) << text;
+}
+
 TEST(ILAstToCSharp, SwitchBodyThunksInlineIntoCaseSections) {
     // The lowered-switch layout the seed receives: a switch instruction whose
     // every section body is a Branch thunk to a body block laid out after the
