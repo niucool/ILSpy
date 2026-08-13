@@ -184,7 +184,7 @@ public:
     // method name, not the raw token). TypeSpec/StandAloneSig/UserString and
     // out-of-range tokens fall back to the raw hex token. Never throws.
     // `ownerMethodToken` (optional) is the method the operand appears in: a
-    // MemberRef-parent TypeSpec's VAR/MVAR bind in that method's scope (D175).
+    // MemberRef-parent TypeSpec's VAR/MVAR bind in that method's scope (D174).
     std::string ResolveTokenToString(std::uint32_t token,
                                      std::uint32_t ownerMethodToken = 0) const;
 
