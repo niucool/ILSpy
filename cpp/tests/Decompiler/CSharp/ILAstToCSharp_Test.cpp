@@ -1262,3 +1262,79 @@ TEST(ILAstToCSharp, GotoFallingOutOfUsingConstructToFollowingBlockIsDropped) {
     // The label-free block content renders.
     EXPECT_NE(text.find("streamReader = 42"), std::string::npos) << text;
 }
+
+TEST(ILAstToCSharp, SwitchBodyThunksInlineIntoCaseSections) {
+    // The lowered-switch layout the seed receives: a switch instruction whose
+    // every section body is a Branch thunk to a body block laid out after the
+    // switch-host block in the same outer container, with the bodies ending in
+    // a Branch to the shared exit block that follows them all. The C# form
+    // places the bodies under their case labels with `break` in place of the
+    // exit branch. The seed previously rendered the thunk gotos and left the
+    // bodies as labeled blocks after the switch.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto v1 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    v1->Name = "x";
+    auto v2 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 2);
+    v2->Name = "y";
+    auto fn = MakeFunction({});
+
+    auto host = std::make_unique<Block>();
+    Block* hostPtr = host.get();
+    auto b1 = std::make_unique<Block>();
+    Block* b1Ptr = b1.get();
+    auto b2 = std::make_unique<Block>();
+    Block* b2Ptr = b2.get();
+    auto exitB = std::make_unique<Block>();
+    Block* exitPtr = exitB.get();
+
+    fn->Body->AddBlock(std::move(host));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(exitB));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto sec0 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    auto brCase = std::make_unique<Branch>(b1Ptr);
+    brCase->HasOffset = false;
+    sec0->SetBody(std::move(brCase));
+    sw->AddSection(std::move(sec0));
+    auto secDef = std::make_unique<SwitchSection>();
+    auto brDef = std::make_unique<Branch>(b2Ptr);
+    brDef->HasOffset = false;
+    secDef->SetBody(std::move(brDef));
+    sw->AddSection(std::move(secDef));
+    hostPtr->SetFinal(std::move(sw));
+
+    // case 0 body: x = 1; br exit
+    b1Ptr->Add(std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(1)));
+    b1Ptr->SetFinal(std::make_unique<Branch>(exitPtr));
+    // default body: y = 2; br exit
+    b2Ptr->Add(std::make_unique<StLoc>(v2, std::make_unique<LdcI4>(2)));
+    b2Ptr->SetFinal(std::make_unique<Branch>(exitPtr));
+    // exit: return
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(v1);
+    fn->Variables.push_back(v2);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    // The bodies inline under their cases: no thunk gotos, no IL labels.
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 0:"), std::string::npos) << text;
+    EXPECT_NE(text.find("default:"), std::string::npos) << text;
+    // The body statements appear INSIDE the switch braces.
+    auto casePos = text.find("case 0:");
+    auto exitPos = text.find("return;");
+    EXPECT_NE(casePos, std::string::npos);
+    EXPECT_NE(text.find("x = 1;"), std::string::npos) << text;
+    EXPECT_NE(text.find("y = 2;"), std::string::npos) << text;
+    EXPECT_LT(text.find("x = 1;"), exitPos) << text;
+    // The exit-branch gotos render as `break;`.
+    EXPECT_NE(text.find("break;"), std::string::npos) << text;
+    // The exit block's label does not print (no gotos remain referencing it).
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+}

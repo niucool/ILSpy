@@ -201,6 +201,26 @@ private:
     std::map<const Block*, std::string> labels_;  // branch-target block -> IL_XXXX
     std::set<const Block*> loopHeaders_;  // first block of each Loop container
 
+    // Section bodies of a switch instruction: each body is a Branch thunk to a
+    // target body block whose content is the real code, laid out after the
+    // switch-host block in the same outer container. When the thunks are all
+    // eligible (computed by AnalyzeSwitchInline), the seed renders the bodies
+    // inline under their case labels and replaces each body's trailing
+    // `br exit` with `break;` -- the C# form. `inlinedBodyBlocks_` are the
+    // target blocks the outer container loop must skip; `breakBranches_` the
+    // individual Branch nodes (thunk or body-exit) that render as `break;`,
+    // for the CollectLabels pass.
+    struct SwitchInlinePlan {
+        bool eligible = false;
+        std::vector<const Block*> targets;
+        const Block* exit = nullptr;
+    };
+    std::unordered_map<const SwitchInstruction*, SwitchInlinePlan> switchInlinePlans_;
+    std::set<const Block*> inlinedBodyBlocks_;
+    std::set<const Branch*> breakBranches_;
+
+
+
     // Recursion-depth guard. The seed is a recursive AST walker with no
     // intrinsic bound: EmitStatement / EmitBlock / EmitContainer / EmitBraced /
     // Expr recurse into children with no depth limit. A malformed ILAst -- a
@@ -288,6 +308,10 @@ private:
 
     void CollectLabels(const ILInstruction* inst) {
         if (!inst) return;
+        if (inst->Op == OpCode::SwitchInstruction)
+            AnalyzeSwitchInline(*static_cast<const SwitchInstruction*>(inst));
+        if (inst->Op == OpCode::Branch && breakBranches_.count(static_cast<const Branch*>(inst)))
+            return;  // a `break`-replaced branch emits no goto, so no label
         if (inst->Op == OpCode::Branch) {
             const auto* br = static_cast<const Branch*>(inst);
             // Only a branch that will render a `goto` gets a label; dropped
@@ -452,6 +476,105 @@ private:
             if (it != labels_.end()) return "goto " + it->second + ";";
         }
         return "goto " + LabelFor(br.TargetOffset) + ";";
+    }
+
+    const SwitchInlinePlan& AnalyzeSwitchInline(const SwitchInstruction& sw) {
+        auto it = switchInlinePlans_.find(&sw);
+        if (it != switchInlinePlans_.end()) return it->second;
+        SwitchInlinePlan& plan = switchInlinePlans_[&sw];  // starts ineligible
+        auto bail = [&](const char* /*why*/) -> SwitchInlinePlan& { return plan; };
+        // Locate the host block and its outer container.
+        const Block* hostBlock = dynamic_cast<const Block*>(sw.Parent);
+        const BlockContainer* outer = hostBlock
+            ? dynamic_cast<const BlockContainer*>(hostBlock->Parent) : nullptr;
+        if (!outer) return bail("no-outer");
+        std::size_t hostIdx = outer->Blocks.size();
+        for (std::size_t i = 0; i < outer->Blocks.size(); ++i)
+            if (outer->Blocks[i].get() == hostBlock) { hostIdx = i; break; }
+        if (hostIdx >= outer->Blocks.size()) return bail("no-host");
+        // Every section body must be a single Branch thunk to a body block in
+        // the same outer container, laid out AFTER the switch host, in the
+        // section order, with no duplicate targets.
+        std::vector<const Block*> targets;
+        std::vector<std::size_t> targetIdx;
+        for (const auto& section : sw.Sections) {
+            if (!section || !section->Body) return bail("null-section");
+            auto* br = dynamic_cast<const Branch*>(section->Body.get());
+            if (!br || !br->TargetBlock) return bail("not-thunk");
+            std::size_t j = outer->Blocks.size();
+            for (j = 0; j < outer->Blocks.size(); ++j)
+                if (outer->Blocks[j].get() == br->TargetBlock) break;
+            if (j >= outer->Blocks.size() || j <= hostIdx) return bail("target-outside");
+            if (std::find(targets.begin(), targets.end(), br->TargetBlock) != targets.end())
+                return bail("dup");
+            targets.push_back(br->TargetBlock);
+            targetIdx.push_back(j);
+        }
+        if (targets.empty()) return bail("empty");
+        std::set<const Block*> tgtSet(targets.begin(), targets.end());
+        std::vector<const Branch*> bodyExit;
+        // The exit is the unique shared convergence of the body-final Branches:
+        // every target's trailing Branch must target the SAME outer block
+        // after the host (a body that returns/throws instead of branching
+        // contributes nothing). This replaces the older positional rule (the
+        // exit had to be the block directly after the last target), which
+        // rejected the far more common unordered/sparse body layouts.
+        const Block* exit = nullptr;
+        for (const Block* t : targets) {
+            const ILInstruction* fin = t->FinalInstruction.get();
+            if (!fin) continue;  // fall-through-only body: contributes nothing
+            if (fin->Op == OpCode::Leave) continue;
+            auto* fbr = dynamic_cast<const Branch*>(fin);
+            if (!fbr) return bail("final-kind");
+            if (!exit) {
+                exit = fbr->TargetBlock;
+                bool inOuter = false;
+                for (const auto& b : outer->Blocks)
+                    if (b.get() == exit) { inOuter = true; break; }
+                if (!inOuter) return bail("exit-outside");
+            } else if (fbr->TargetBlock != exit) {
+                return bail("brk-not-exit");
+            }
+            bodyExit.push_back(fbr);
+        }
+        if (!exit) return bail("no-exit");
+        // The exit itself must not be a body target and must sit after the
+        // host block (a forward switch exit; anything else is a loop-shaped
+        // layout, not a switch).
+        if (tgtSet.count(exit)) return bail("exit-is-target");
+        // Foreign-reference check: nothing outside the switch's own section
+        // thunk Branches and the body's trailing `br exit` may target a
+        // body block.
+        std::unordered_map<const Block*, const Branch*> okBranchFor;
+        for (const auto& section : sw.Sections)
+            okBranchFor[static_cast<const Branch*>(section->Body.get())->TargetBlock] =
+                static_cast<const Branch*>(section->Body.get());
+        bool foreign = false;
+        std::function<void(const ILInstruction*)> check = [&](const ILInstruction* inst) {
+            if (!inst || foreign) return;
+            if (auto* b = dynamic_cast<const Branch*>(inst)) {
+                if (b->TargetBlock && tgtSet.count(b->TargetBlock) &&
+                    b != okBranchFor[b->TargetBlock]) { foreign = true; return; }
+            }
+            for (int i = 0; i < inst->ChildCount(); ++i) check(inst->GetChild(i));
+        };
+        check(fn_->Body.get());
+        if (foreign) return bail("foreign-branch");
+        // Succeed: inline the bodies.
+        plan.eligible = true;
+        plan.targets = targets;
+        plan.exit = exit;
+        inlinedBodyBlocks_.insert(tgtSet.begin(), tgtSet.end());
+        for (const auto& section : sw.Sections)
+            breakBranches_.insert(static_cast<const Branch*>(section->Body.get()));
+        for (const Branch* fb : bodyExit) breakBranches_.insert(fb);
+        // Any `br exit` inside a body block's instruction list becomes
+        // `break` too.
+        for (const Block* t : targets)
+            for (const auto& inst : t->Instructions)
+                if (auto* b = dynamic_cast<const Branch*>(inst.get()))
+                    if (b->TargetBlock == exit) breakBranches_.insert(b);
+        return plan;
     }
 
     void EmitContainer(const BlockContainer& container, int indent) {
@@ -683,6 +806,9 @@ private:
             return;
         }
         DepthGuard g{depth_};
+        // A switch body block inlined into its case is not emitted again as a
+        // standalone labeled block (see AnalyzeSwitchInline).
+        if (inlinedBodyBlocks_.count(&block)) return;
         auto label = labels_.find(&block);
         if (label != labels_.end()) {
             // C# labels start in column 0 by convention.
@@ -898,9 +1024,16 @@ private:
             }
             case OpCode::SwitchInstruction: {
                 const auto& sw = static_cast<const SwitchInstruction&>(inst);
+                const SwitchInlinePlan* plan = nullptr;
+                {
+                    auto pit = switchInlinePlans_.find(&sw);
+                    if (pit != switchInlinePlans_.end() && pit->second.eligible)
+                        plan = &pit->second;
+                }
                 Line(indent, "switch (" + (sw.Value ? Expr(*sw.Value) : std::string("(default)")) + ")");
                 Line(indent, "{");
-                for (const auto& section : sw.Sections) {
+                for (std::size_t k = 0; k < sw.Sections.size(); ++k) {
+                    const auto& section = sw.Sections[k];
                     if (!section) continue;
                     if (section->HasNullLabel) {
                         Line(indent + 1, "case null:");
@@ -916,7 +1049,33 @@ private:
                                       ".." + std::to_string(iv.InclusiveEnd()) + ":");
                         }
                     }
-                    if (section->Body) EmitStatement(*section->Body, indent + 1);
+                    if (!plan) {
+                        if (section->Body) EmitStatement(*section->Body, indent + 1);
+                        continue;
+                    }
+                    // Emit the inlined case body. Its trailing `br exit` (and
+                    // any mid-body `br exit`, both gated at analysis) renders
+                    // as `break`; a Leave stays as `return`/`throw`.
+                    const Block* body = plan->targets[k];
+                    for (const auto& inst : body->Instructions) {
+                        if (!inst || inst->Op == OpCode::Nop) continue;
+                        if (auto* b = dynamic_cast<const Branch*>(inst.get())) {
+                            if (b->TargetBlock == plan->exit) {
+                                Line(indent + 1, "break;");
+                                continue;
+                            }
+                        }
+                        EmitStatement(*inst, indent + 1);
+                    }
+                    if (const ILInstruction* fin = body->FinalInstruction.get()) {
+                        if (fin->Op == OpCode::Leave)
+                            EmitStatement(*fin, indent + 1);
+                        else if (dynamic_cast<const Branch*>(fin) &&
+                                 static_cast<const Branch*>(fin)->TargetBlock == plan->exit)
+                            Line(indent + 1, "break;");
+                        else
+                            EmitStatement(*fin, indent + 1);
+                    }
                 }
                 Line(indent, "}");
                 return;
