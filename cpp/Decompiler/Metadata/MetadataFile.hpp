@@ -183,7 +183,10 @@ public:
     // MethodDefOrRef (so a generic-instantiation call renders its resolved
     // method name, not the raw token). TypeSpec/StandAloneSig/UserString and
     // out-of-range tokens fall back to the raw hex token. Never throws.
-    std::string ResolveTokenToString(std::uint32_t token) const;
+    // `ownerMethodToken` (optional) is the method the operand appears in: a
+    // MemberRef-parent TypeSpec's VAR/MVAR bind in that method's scope (D175).
+    std::string ResolveTokenToString(std::uint32_t token,
+                                     std::uint32_t ownerMethodToken = 0) const;
 
     // Resolve a TypeDef/TypeRef (or TypeSpec) token to an IType. Returns nullptr
     // for an out-of-range/unsupported token; never throws. Used by the IL reader

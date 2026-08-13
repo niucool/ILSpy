@@ -987,3 +987,42 @@ TEST(ILAstToCSharp, GenericArrayNewRendersMethodTypeParamName) {
     }
     ASSERT_TRUE(found) << "System.Array::Resize<T> not found in fixture";
 }
+
+TEST(ILAstToCSharp, StaticCallOnCallerContextGenericRendersNamedArg) {
+    // A static call on a generic type whose declaring-type token is a TypeSpec
+    // (e.g. EqualityComparer<!0>.get_Default inside ValueTuple<T1>) resolves
+    // through ResolveTokenToString. That TypeSpec's VAR binds in the caller's
+    // scope, so the text should read EqualityComparer<T1>.Default.GetHashCode.
+#if defined(_WIN32)
+    const char* path = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    const char* path = "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    std::uint32_t vtTok = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == "System" && t.Name == "ValueTuple`1") { vtTok = t.Token; break; }
+    }
+    ASSERT_NE(vtTok, 0u) << "System.ValueTuple`1 not found in fixture";
+
+    bool found = false;
+    for (const auto& m : f.GetMethods(vtTok)) {
+        if (m.Name != "GetHashCode" || m.RVA == 0) continue;
+        auto sig = f.GetMethodSignature(m.Token);
+        if (!sig || !sig->ParameterTypes.empty()) continue;  // the parameterless one
+        auto fn = ReadIL(f, m.Token, m.RVA);
+        ASSERT_NE(fn, nullptr) << "ReadIL failed on ValueTuple`1::GetHashCode";
+        fn->CheckInvariant(ILPhase::Normal);
+        std::string text = ILAstToCSharp(*fn, "int", "GetHashCode", "");
+        EXPECT_NE(text.find("EqualityComparer<T1>.Default.GetHashCode"), std::string::npos)
+            << "expected caller-scope VAR name in static-call text:\n" << text;
+        EXPECT_EQ(text.find("!0"), std::string::npos)
+            << "positional VAR placeholder leaked into emission:\n" << text;
+        found = true;
+        break;
+    }
+    ASSERT_TRUE(found) << "System.ValueTuple`1::GetHashCode() not found in fixture";
+}

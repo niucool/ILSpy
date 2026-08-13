@@ -394,7 +394,8 @@ std::string TypeNameStr(std::string_view ns, std::string_view name) {
 }
 } // namespace
 
-std::string MetadataFile::ResolveTokenToString(std::uint32_t token) const {
+std::string MetadataFile::ResolveTokenToString(std::uint32_t token,
+                                               std::uint32_t ownerMethodToken) const {
     if (!IsValid()) return {};
     std::uint32_t table = token >> 24;
     std::uint32_t row = token & 0x00FFFFFFu;
@@ -443,11 +444,18 @@ std::string MetadataFile::ResolveTokenToString(std::uint32_t token) const {
             if (parent.type() == MRP::TypeSpec) {
                 // A generic instantiation: resolve the TypeSpec's signature to a
                 // display name (e.g. "System.Collections.ObjectModel.ReadOnlyCollection`1").
+                // VAR/MVAR in the TypeSpec bind in the CALLING method's scope.
+                GenericParamNames genNames;
+                const GenericParamNames* genNamesPtr = nullptr;
+                if ((ownerMethodToken >> 24) == 0x06) {
+                    genNames = BuildGenericParamNames(*impl_->db, ownerMethodToken & 0x00FFFFFFu);
+                    genNamesPtr = &genNames;
+                }
                 auto ts = parent.get_row<winmd::reader::TypeSpec>();
                 std::uint32_t blobIndex = ts.get_value<std::uint32_t>(0);
                 auto blob = impl_->db->get_blob(blobIndex);
                 auto type = DecodeTypeSpecBlob(*impl_->db, blob.begin(),
-                    static_cast<std::size_t>(blob.end() - blob.begin()));
+                    static_cast<std::size_t>(blob.end() - blob.begin()), genNamesPtr);
                 std::string tn = type ? type->ReflectionName() : std::string("?");
                 return tn + "::" + std::string(mr.Name());
             }
@@ -463,7 +471,8 @@ std::string MetadataFile::ResolveTokenToString(std::uint32_t token) const {
             // method name, not the raw token.
             std::uint32_t v = impl_->db->MethodSpec.get_value<std::uint32_t>(row - 1, 0);
             if (v != 0)
-                return ResolveTokenToString(((v & 1) ? 0x0A000000u : 0x06000000u) | (v >> 1));
+                return ResolveTokenToString(((v & 1) ? 0x0A000000u : 0x06000000u) | (v >> 1),
+                                            ownerMethodToken);
         }
     } catch (const std::exception&) {
         // Fall through to the raw-token fallback.

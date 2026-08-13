@@ -915,8 +915,13 @@ private:
                     auto pos = call.MethodName.rfind("::");
                     std::string_view type = (pos != std::string_view::npos)
                         ? std::string_view(call.MethodName).substr(0, pos) : std::string_view{};
+                    // A generic declaring type carries its ECMA arity marker
+                    // (e.g. `EqualityComparer`1<T1>::get_Default`); strip it so
+                    // the accessor renders the C# form (`EqualityComparer<T1>.Default`).
                     auto dot = type.rfind('.');
-                    return std::string(dot != std::string_view::npos ? type.substr(dot + 1) : type) + "." + prop;
+                    std::string shortType(dot != std::string_view::npos ? type.substr(dot + 1) : type);
+                    StripGenericArity(shortType, 0);
+                    return shortType + "." + prop;
                 }
             }
             // A static unary operator: op_UnaryNegation(a) -> (-a), etc.

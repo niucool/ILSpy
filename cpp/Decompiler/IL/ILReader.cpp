@@ -592,7 +592,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             if (!callSig) return DecodeOutcome::Bail;
             int argCount = static_cast<int>(callSig->ParameterTypes.size()) + (callSig->IsInstance ? 1 : 0);
             if (op == ILOpCode::Newobj) argCount = static_cast<int>(callSig->ParameterTypes.size());
-            auto call = std::make_unique<Call>(file.ResolveTokenToString(tok));
+            auto call = std::make_unique<Call>(file.ResolveTokenToString(tok, s.ownerMethodToken));
             call->ReturnType = StackTypeOf(callSig->ReturnType);
             call->ReturnIType = callSig->ReturnType;
             call->ParameterIType = callSig->ParameterTypes;
@@ -625,7 +625,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
 
         case ILOpCode::Ldstr: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
-            if (!s.Push(std::make_unique<LdStr>(file.ResolveTokenToString(tok)))) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdStr>(file.ResolveTokenToString(tok, s.ownerMethodToken)))) return DecodeOutcome::Bail;
             break;
         }
 
@@ -912,7 +912,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         case ILOpCode::Stsfld: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
             auto fieldType = file.GetFieldSignature(tok);
-            std::string fieldName = file.ResolveTokenToString(tok);
+            std::string fieldName = file.ResolveTokenToString(tok, s.ownerMethodToken);
             if (op == ILOpCode::Ldfld || op == ILOpCode::Ldflda || op == ILOpCode::Stfld) {
                 // stfld pops value (top) then target; the loads pop only target.
                 std::unique_ptr<ILInstruction> storeValue;
@@ -1093,7 +1093,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         // ---- ldftn / ldvirtftn / sizeof / ldtoken ----
         case ILOpCode::Ldftn: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
-            if (!s.Push(std::make_unique<LdFtn>(file.ResolveTokenToString(tok)))) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdFtn>(file.ResolveTokenToString(tok, s.ownerMethodToken)))) return DecodeOutcome::Bail;
             break;
         }
         case ILOpCode::Ldvirtftn: {
@@ -1102,17 +1102,17 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             // ldvirtftn pops the object and pushes the function pointer. We emit
             // the LdVirtFtn but lose the object reference -- approximate; the full
             // ILAst carries the target as a child.
-            if (!s.Push(std::make_unique<LdVirtFtn>(file.ResolveTokenToString(tok)))) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdVirtFtn>(file.ResolveTokenToString(tok, s.ownerMethodToken)))) return DecodeOutcome::Bail;
             break;
         }
         case ILOpCode::Sizeof: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
-            if (!s.Push(std::make_unique<SizeOf>(file.ResolveTokenToString(tok)))) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<SizeOf>(file.ResolveTokenToString(tok, s.ownerMethodToken)))) return DecodeOutcome::Bail;
             break;
         }
         case ILOpCode::Ldtoken: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
-            if (!s.Push(std::make_unique<LdTypeToken>(file.ResolveTokenToString(tok)))) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdTypeToken>(file.ResolveTokenToString(tok, s.ownerMethodToken)))) return DecodeOutcome::Bail;
             break;
         }
 
@@ -1229,7 +1229,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         case ILOpCode::Mkrefany: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
             auto ptr = s.Pop(); if (!ptr) return DecodeOutcome::Bail;
-            if (!s.Push(std::make_unique<LdTypeToken>(file.ResolveTokenToString(tok)))) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdTypeToken>(file.ResolveTokenToString(tok, s.ownerMethodToken)))) return DecodeOutcome::Bail;
             break;
         }
 
