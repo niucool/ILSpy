@@ -46,6 +46,77 @@
 
 namespace ILSpy::Decompiler::IL {
 
+// Count the edges into `entry` that originate from a Branch somewhere in the
+// function plus positional fall-through from any preceding block in its
+// container (the same rules VariableUsage's RecomputeIncomingEdgeCounts uses,
+// restricted to a single target).
+static int IncomingEdgesTo(ILInstruction* root, Block* entry) {
+    int count = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (auto* br = dynamic_cast<Branch*>(inst))
+            if (br->TargetBlock == entry) ++count;
+        if (auto* c = dynamic_cast<BlockContainer*>(inst)) {
+            for (std::size_t i = 0; i + 1 < c->Blocks.size(); ++i) {
+                if (c->Blocks[i + 1].get() == entry) {
+                    ILInstruction* fin = c->Blocks[i]->FinalInstruction.get();
+                    if (fin && !HasFlag(fin->Flags(), InstructionFlags::EndPointUnreachable)) ++count;
+                }
+            }
+        }
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(root);
+    return count;
+}
+
+// The C# MatchForLoop "increment block" case: a While-shaped loop whose body
+// state-machine has a trailing block of simple statements (an `i++` block --
+// the block every `continue` targets) ends in a back-edge Branch to the loop
+// head. Move that block to the container's end and remark the loop For, so
+// the emitter can render `for (...; cond; incr) { body }`. The C# also covers
+// the no-dedicated-block case by splitting a trailing increment off the body
+// block; that sub-case is deferred (the seed emitter only consumes the
+// block-at-end shape).
+static bool TryMatchFor(BlockContainer* loop, ILInstruction* functionRoot) {
+    if (loop->Kind != ContainerKind::While || loop->Blocks.size() < 3) return false;
+    Block* entry = loop->Blocks.front().get();
+    // The C# requires exactly two incoming edges at the entry point (pre-header
+    // + the increment back-edge). In this port's model the pre-header never
+    // branches to the loop entry -- the container itself is the statement --
+    // so the only counted edge to the entry block is the increment back-edge;
+    // anything else (a second back-edge skipping the increment, an external
+    // goto) makes the for shape unsafe.
+    if (IncomingEdgesTo(functionRoot, entry) != 1) return false;
+    // Find the increment block: all simple statements + Branch entry.
+    Block* incBlock = nullptr;
+    std::size_t incIndex = 0;
+    for (std::size_t i = 0; i < loop->Blocks.size(); ++i) {
+        Block* b = loop->Blocks[i].get();
+        if (b == entry) continue;
+        Block* head = nullptr;
+        if (!HighLevelLoopTransform::MatchIncrementBlock(b, head) || head != entry) continue;
+        if (b->Instructions.empty()) continue;   // C#: Instructions.Count <= 1 (i.e. no work)
+        incBlock = b;
+        incIndex = i;
+        break;
+    }
+    if (!incBlock) return false;
+    // Move the increment block to the end of the container
+    // (MoveElementToEnd), preserving ChildIndex/Parent bookkeeping.
+    if (incIndex != loop->Blocks.size() - 1) {
+        auto hold = std::move(loop->Blocks[incIndex]);
+        loop->Blocks.erase(loop->Blocks.begin() + incIndex);
+        loop->Blocks.push_back(std::move(hold));
+        for (std::size_t i = 0; i < loop->Blocks.size(); ++i) {
+            loop->Blocks[i]->ChildIndex = static_cast<int>(i);
+            loop->Blocks[i]->Parent = loop;
+        }
+    }
+    loop->Kind = ContainerKind::For;
+    return true;
+}
+
 // The block that follows `block` in its container (the implicit fall-through
 // target of a non-EndPointUnreachable final), or nullptr when `block` is the
 // last block. Mirrors SwitchAnalysis's local helper.
@@ -201,6 +272,7 @@ void HighLevelLoopTransform::Run(ILFunction& function, ILTransformContext& conte
             iff->TrueInst->Parent = iff;
             iff->TrueInst->ChildIndex = 1;
             loop->Kind = ContainerKind::While;
+            if (TryMatchFor(loop, function.Body.get())) continue;
             continue;
         }
         // Shape 2 (this port's LoopDetection): `if (cond) br body else leave loop`
@@ -212,6 +284,7 @@ void HighLevelLoopTransform::Run(ILFunction& function, ILTransformContext& conte
             auto* leave = static_cast<Leave*>(iff->FalseInst.get());
             if (leave->TargetContainer != loop) continue;
             loop->Kind = ContainerKind::While;
+            if (TryMatchFor(loop, function.Body.get())) continue;
             continue;
         }
         // MatchDoWhileLoop: a loop whose last block is a do-while condition --

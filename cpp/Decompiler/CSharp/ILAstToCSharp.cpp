@@ -260,12 +260,13 @@ private:
     void CollectLoopHeaders(const ILInstruction* inst) {
         if (!inst) return;
         if (auto* c = dynamic_cast<const BlockContainer*>(inst)) {
-            if ((c->Kind == ContainerKind::Loop || c->Kind == ContainerKind::While) && !c->Blocks.empty()) {
+            if ((c->Kind == ContainerKind::Loop || c->Kind == ContainerKind::While ||
+                 c->Kind == ContainerKind::For) && !c->Blocks.empty()) {
                 loopHeaders_.insert(c->Blocks.front().get());
                 // For a While container, the body entry (the target of the
                 // condition's true-arm Branch) is also unlabeled -- it's the
                 // implicit body start, not a goto target.
-                if (c->Kind == ContainerKind::While) {
+                if (c->Kind == ContainerKind::While || c->Kind == ContainerKind::For) {
                     const Block* entry = c->Blocks.front().get();
                     if (entry && entry->FinalInstruction &&
                         entry->FinalInstruction->Op == OpCode::IfInstruction) {
@@ -274,6 +275,11 @@ private:
                             loopHeaders_.insert(static_cast<const Branch*>(iff.TrueInst.get())->TargetBlock);
                     }
                 }
+                // For a For container the last block is the increment block: a
+                // branch to it is a `continue` (C# `continue` runs the
+                // for-update), not a goto target.
+                if (c->Kind == ContainerKind::For && c->Blocks.size() >= 2)
+                    loopHeaders_.insert(c->Blocks.back().get());
             }
         }
         for (int i = 0; i < inst->ChildCount(); ++i) CollectLoopHeaders(inst->GetChild(i));
@@ -423,6 +429,87 @@ private:
             for (std::size_t i = 1; i < container.Blocks.size(); ++i) {
                 const auto& block = container.Blocks[i];
                 if (!block) continue;
+                // Drop a trailing back-edge branch to the entry (implicit iter).
+                bool dropFinal = false;
+                if (block->FinalInstruction &&
+                    block->FinalInstruction->Op == OpCode::Branch) {
+                    auto* br = static_cast<Branch*>(block->FinalInstruction.get());
+                    if (br->TargetBlock == header) dropFinal = true;
+                }
+                EmitBlock(*block, indent + 1, dropFinal);
+            }
+            Line(indent, "}");
+            return;
+        }
+        if (container.Kind == ContainerKind::For && container.Blocks.size() >= 2) {
+            // A for container (HighLevelLoopTransform's MatchForLoop): the entry
+            // block's FinalInstruction is the condition if `if (cond) br body
+            // else leave loop`; the increment block (simple statements + an
+            // implicit back-edge to the header) was moved to the container's end
+            // by the transform, but later transforms may leave a trailing empty
+            // block behind it -- so locate it by shape (final Branch to the
+            // header, all-simple statements) instead of assuming position.
+            const Block* header = container.Blocks.front().get();
+            const Block* increment = nullptr;
+            std::size_t incIdx = 0;
+            for (std::size_t i = container.Blocks.size(); i-- > 1;) {
+                const Block* b = container.Blocks[i].get();
+                if (!b || b->Instructions.empty() || !b->FinalInstruction ||
+                    b->FinalInstruction->Op != OpCode::Branch)
+                    continue;
+                auto* br = static_cast<const Branch*>(b->FinalInstruction.get());
+                if (br->TargetBlock != header) continue;
+                bool simple = true;
+                for (const auto& inst : b->Instructions) {
+                    if (!inst) continue;
+                    if (inst->Op != OpCode::StLoc && inst->Op != OpCode::StObj &&
+                        inst->Op != OpCode::Call) { simple = false; break; }
+                }
+                if (simple) { increment = b; incIdx = i; break; }
+            }
+            std::string cond = "(default)";
+            if (header && header->FinalInstruction &&
+                header->FinalInstruction->Op == OpCode::IfInstruction) {
+                const auto& iff = static_cast<const IfInstruction&>(*header->FinalInstruction);
+                if (iff.Condition) cond = CondExpr(*iff.Condition);
+            }
+            // The increment clause renders the increment block's statements
+            // comma-joined (`V = V + 1` -> `V++`; `V = V op x` -> `V op= x`).
+            std::string incrText;
+            if (increment) {
+                for (const auto& inst : increment->Instructions) {
+                    if (!inst) continue;
+                    std::string part;
+                    if (inst->Op == OpCode::StLoc) {
+                        const auto& st = static_cast<const StLoc&>(*inst);
+                        std::string name = st.Variable ? st.Variable->Name : "?";
+                        part = name + AssignmentText(st, name);
+                    } else if (inst->Op == OpCode::StObj) {
+                        const auto& st = static_cast<const StObj&>(*inst);
+                        part = StoreTargetText(*st.Target) + " = " +
+                               (st.Value ? Expr(*st.Value) : std::string("(default)"));
+                    } else if (inst->Op == OpCode::Call) {
+                        part = CallText(static_cast<const Call&>(*inst));
+                    } else {
+                        // Not one of the simple statement kinds MatchIncrementBlock
+                        // admits; render it as an expression statement.
+                        part = Expr(*inst);
+                    }
+                    if (!incrText.empty()) incrText += ", ";
+                    incrText += part;
+                }
+            }            Line(indent, "for (; " + cond + "; " + incrText + ")");
+            Line(indent, "{");
+            for (std::size_t i = 1; i < container.Blocks.size(); ++i) {
+                if (i == incIdx) continue;  // the increment block rendered in the header
+                const auto& block = container.Blocks[i];
+                if (!block) continue;
+                // Drop an empty trailing block whose only edge is back to the
+                // increment block (a dead segment of the pre-for layout).
+                if (block->Instructions.empty() && block->FinalInstruction &&
+                    block->FinalInstruction->Op == OpCode::Branch &&
+                    static_cast<const Branch*>(block->FinalInstruction.get())->TargetBlock == increment)
+                    continue;
                 // Drop a trailing back-edge branch to the entry (implicit iter).
                 bool dropFinal = false;
                 if (block->FinalInstruction &&

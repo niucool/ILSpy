@@ -36,6 +36,10 @@ enum class ContainerKind : std::uint8_t {
     Loop,
     While,
     DoWhile,
+    // A while-style loop whose increment lives in a dedicated block (moved to
+    // the container's end by HighLevelLoopTransform's for-loop match): the
+    // emitter renders it as `for (; cond; increment) { body }`.
+    For,
     Switch,
 };
 

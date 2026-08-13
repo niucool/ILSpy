@@ -319,3 +319,72 @@ TEST(HighLevelLoopTransform, RunTransformsWhileConditionLoop) {
     // second block).
     EXPECT_GE(loopPtr->Blocks.size(), 2u);
 }
+
+TEST(HighLevelLoopTransform, RunTransformsLoopWithIncrementBlockToFor) {
+    // Build: Loop { entry: if (num < 5) br body else leave; body: ... br incr;
+    // incr: num++; br entry } -- the classic csc for-loop lowering where the
+    // increment lives in its own block that `continue`-targets jump to.
+    // -> For: the increment block moves to the container's end (the C#
+    // MatchForLoop MoveElementToEnd(incrementBlock)).
+    auto num = MakeLocal("num");
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+
+    auto loopC = std::make_unique<BlockContainer>();
+    loopC->Kind = ContainerKind::Loop;
+    BlockContainer* loopPtr = loopC.get();
+
+    auto entry = std::make_unique<Block>();
+    Block* entryPtr = entry.get();
+    entry->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(5),
+                               ComparisonKind::LessThan),
+        std::make_unique<Branch>(nullptr),   // TrueInst -> body (patched below)
+        std::make_unique<Leave>(nullptr)));  // FalseInst -> leave loop (patched below)
+    loopC->AddBlock(std::move(entry));
+
+    auto body = std::make_unique<Block>();
+    Block* bodyPtr = body.get();
+    body->Add(std::make_unique<StLoc>(num, std::make_unique<LdcI4>(42)));  // body work
+    // FinalInstruction -> patch to br incr below.
+    loopC->AddBlock(std::move(body));
+
+    auto incr = std::make_unique<Block>();
+    Block* incrPtr = incr.get();
+    incr->Add(MakeIncrement(num, 1));
+    incr->SetFinal(std::make_unique<Branch>(entryPtr));  // back-edge to the loop head
+    loopC->AddBlock(std::move(incr));
+
+    // Patch the entry's arms now the block pointers are stable.
+    auto* iff = dynamic_cast<IfInstruction*>(loopPtr->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(iff, nullptr);
+    auto tru = std::make_unique<Branch>(bodyPtr);
+    iff->TrueInst = std::move(tru);
+    iff->TrueInst->Parent = iff;
+    iff->TrueInst->ChildIndex = 1;
+    auto* lv = dynamic_cast<Leave*>(iff->FalseInst.get());
+    ASSERT_NE(lv, nullptr);
+    lv->TargetContainer = loopPtr;
+
+    bodyPtr->SetFinal(std::make_unique<Branch>(incrPtr));
+
+    auto preHeader = std::make_unique<Block>();
+    preHeader->Add(std::move(loopC));
+    preHeader->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(preHeader));
+    fn->Variables.push_back(num);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ILTransformContext ctx;
+    HighLevelLoopTransform::Run(*fn, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ASSERT_EQ(loopPtr->Kind, ContainerKind::For)
+        << "a while-shaped loop with a dedicated increment block becomes For";
+    // The increment block moved to the end of the container (the C#
+    // MoveElementToEnd), so iteration order is entry, body, increment.
+    ASSERT_EQ(loopPtr->Blocks.size(), 3u);
+    EXPECT_EQ(loopPtr->Blocks.back().get(), incrPtr);
+}
