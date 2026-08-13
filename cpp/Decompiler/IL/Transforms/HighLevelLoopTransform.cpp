@@ -325,7 +325,11 @@ void HighLevelLoopTransform::Run(ILFunction& function, ILTransformContext& conte
         if (loop->Blocks.empty()) continue;
         Block* entry = loop->Blocks.front().get();
         auto* iff = dynamic_cast<IfInstruction*>(entry->FinalInstruction.get());
-        if (!iff) continue;
+        // An entry with no if-final cannot be a While shape, but can still be a
+        // do-while (the C# MatchWhileLoop would not match either way and
+        // MatchDoWhileLoop consults only the condition block); fall through to
+        // the do-while check instead of skipping outright.
+        if (!iff) goto doWhileCheck;
         // Shape 1 (C#): `if (cond) leave loop` (TrueInst a Leave, no else).
         // The while condition is the negated cond. Negate, the leave becomes the
         // false arm (break), a branch to the body becomes the true arm.
@@ -355,11 +359,15 @@ void HighLevelLoopTransform::Run(ILFunction& function, ILTransformContext& conte
             if (TryMatchFor(loop, function.Body.get())) continue;
             continue;
         }
+        doWhileCheck:
         // MatchDoWhileLoop: a loop whose last block is a do-while condition --
         // an if with a true-arm Branch to the loop header (continue) and a
         // fall-through that exits the loop (break). The entry point has no
         // while-condition if (it falls straight into the body). Mark as DoWhile
-        // so the seed renders `do { ... } while (cond)`.
+        // so the seed renders `do { ... } while (cond)`. Multi-condition
+        // variant (the C# AnalyzeDoWhileConditions): trailing ifs whose true
+        // arm also branches to the header combine via a ThreeValuedBoolAnd of
+        // their conditions into the final condition if.
         if (loop->Blocks.size() >= 2) {
             Block* last = loop->Blocks.back().get();
             Block* header = loop->Blocks.front().get();
@@ -377,7 +385,105 @@ void HighLevelLoopTransform::Run(ILFunction& function, ILTransformContext& conte
                         bool entryIsWhileCond = entryIf &&
                             ((entryIf->TrueInst && entryIf->TrueInst->Op == OpCode::Leave) ||
                              (entryIf->FalseInst && entryIf->FalseInst->Op == OpCode::Leave));
+                        // A do-while runs the body BEFORE its condition. An
+                        // entry block that only routes into the condition
+                        // block (no instructions of its own, final Branch
+                        // straight to the last block) means the condition
+                        // evaluates first -- the C# while-shape lowering
+                        // (`while (cond) body`) with the condition hoisted to
+                        // the LAST block (e.g. assignment-in-operation
+                        // `while ((line = reader.ReadLine()) != null)`); the
+                        // do-while rendering would reorder condition-before-
+                        // body and change semantics. Reject the fold.
+                        {
+                            // Structural soundness gate: a do-while executes
+                            // its BODY before its condition on the first
+                            // iteration. The loop's entry path must lead into
+                            // a body block (Blocks[1] in container order), not
+                            // into the trailing condition block. An entry that
+                            // routes straight to the condition block is the
+                            // csc lowering of a WHILE loop with the condition
+                            // hoisted last (e.g. assignment-in-condition
+                            // `while ((line = reader.ReadLine()) != null)`) --
+                            // folding it to do { body } while (cond) would
+                            // execute the body once unconditionally and change
+                            // semantics.
+                            if (loop->Blocks.size() == 2) continue;
+                            Block* bodyFirst = nullptr;
+                            if (auto* entryBr = dynamic_cast<Branch*>(entry->FinalInstruction.get()))
+                                bodyFirst = entryBr->TargetBlock;
+                            else if (!entry->FinalInstruction)
+                                bodyFirst = (loop->Blocks.size() > 1) ? loop->Blocks[1].get() : nullptr;
+                            if (bodyFirst != loop->Blocks[1].get() ||
+                                loop->Blocks[1].get() == last) continue;
+                        }
                         if (!entryIsWhileCond) {
+                            // The C# also folds trailing `if(cond) br entry`
+                            // conditions (non-final) into the condition if,
+                            // building a LogicAnd chain: the combined condition
+                            // is `preCond && cond` (the LoopDetection-simplified
+                            // condition list in AnalyzeDoWhileConditions). Only
+                            // fold when the final if's condition must logically
+                            // follow the pre-condition -- the C# asks for all
+                            // conditions usable as loop guards (TrueInst br entry, no FalseInst).
+                            std::vector<std::size_t> preIfIndices;
+                            for (std::size_t i = last->Instructions.size(); i-- > 0;) {
+                                auto* pre = dynamic_cast<IfInstruction*>(last->Instructions[i].get());
+                                if (!pre) break;
+                                if (pre->FalseInst) break;
+                                if (!pre->TrueInst || pre->TrueInst->Op != OpCode::Branch) break;
+                                auto* preBr = static_cast<Branch*>(pre->TrueInst.get());
+                                if (preBr->TargetBlock != header) break;
+                                preIfIndices.push_back(i);
+                            }
+                            if (!preIfIndices.empty()) {
+                                // Combine: preCond0 && preCond1 && ... && finalCond
+                                // (order preserved -- the seed renders the
+                                // combined if as the do-while condition).
+                                std::unique_ptr<ILInstruction> combined = std::move(last->FinalInstruction);
+                                {
+                                    auto* combinedIf = static_cast<IfInstruction*>(combined.get());
+                                    std::unique_ptr<ILInstruction> cond = std::move(combinedIf->Condition);
+                                    // Build right-associative and-fold: walk conditions from
+                                    // trailing-most to leading (indices descending in the
+                                    // collected vector, which is built from i = last-1 down),
+                                    // then finally chain them behind the final cond.
+                                    for (auto it = preIfIndices.begin(); it != preIfIndices.end(); ++it) {
+                                        std::unique_ptr<ILInstruction> pre = std::move(last->Instructions[*it]);
+                                        auto* preIf = static_cast<IfInstruction*>(pre.get());
+                                        // C#: if (condSoFar == null) start, else LogicAnd(chain, preCond).
+                                        // Rebuild the cond expression as a chain
+                                        // of the collected conditions PLUS the final `cond`.
+                                        if (!cond) { cond = std::move(preIf->Condition); continue; }
+                                        auto next = std::move(preIf->Condition);
+                                        // C# IfInstruction.LogicAnd(lhs, rhs) = if (lhs) rhs else 0
+                                        // (an if-expression, NOT ThreeValuedBool: the && short-circuit
+                                        // must not evaluate rhs when lhs is false).
+                                        cond = std::make_unique<IfInstruction>(
+                                            std::move(next), std::move(cond),
+                                            std::make_unique<LdcI4>(0));
+                                    }
+                                    combinedIf->Condition = std::move(cond);
+                                    if (combinedIf->Condition) {
+                                        combinedIf->Condition->Parent = combinedIf;
+                                        combinedIf->Condition->ChildIndex = 0;
+                                    }
+                                }
+                                // Drop the pre-conditions from the block's Instructions.
+                                std::size_t preFirst = preIfIndices.back();
+                                last->Instructions.erase(last->Instructions.begin() + preFirst,
+                                                         last->Instructions.begin() + preFirst + preIfIndices.size());
+                                // Re-number the ChildIndices of the remaining instructions.
+                                for (std::size_t i = 0; i < last->Instructions.size(); ++i) {
+                                    last->Instructions[i]->ChildIndex = static_cast<int>(i);
+                                    last->Instructions[i]->Parent = last;
+                                }
+                                last->FinalInstruction = std::move(combined);
+                                if (last->FinalInstruction) {
+                                    last->FinalInstruction->Parent = last;
+                                    last->FinalInstruction->ChildIndex = static_cast<int>(last->Instructions.size());
+                                }
+                            }
                             loop->Kind = ContainerKind::DoWhile;
                             continue;
                         }

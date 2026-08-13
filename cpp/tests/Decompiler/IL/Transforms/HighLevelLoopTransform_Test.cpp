@@ -467,3 +467,85 @@ TEST(HighLevelLoopTransform, RunSplitsTrailingIncrementIntoForBlock) {
     ASSERT_NE(bodyFinal, nullptr);
     EXPECT_EQ(bodyFinal->TargetBlock, loopPtr->Blocks[2].get());
 }
+
+TEST(HighLevelLoopTransform, RunCompoundsDoWhileConditions) {
+    // C#'s MatchDoWhileLoop multi-condition case, adapted to this port's
+    // if-as-final block model. Legit do-while topology (body executes first):
+    // the entry carries no condition if and positionally falls through to a
+    // middle BODY block, which falls through to the trailing condition block
+    // carrying TWO `if (cond) br entry` guards (one non-final, one final).
+    // The transform merges the two trailing ifs into the C#
+    // IfInstruction.LogicAnd if-expression and remarks the loop DoWhile.
+    auto num = MakeLocal("num");
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto loopC = std::make_unique<BlockContainer>();
+    loopC->Kind = ContainerKind::Loop;
+    BlockContainer* loopPtr = loopC.get();
+
+    auto entry = std::make_unique<Block>();
+    Block* entryPtr = entry.get();
+    entry->Add(std::make_unique<StLoc>(num, std::make_unique<LdcI4>(0)));  // falls through to body
+    loopC->AddBlock(std::move(entry));
+
+    auto body = std::make_unique<Block>();
+    body->Add(std::make_unique<StLoc>(num, std::make_unique<LdcI4>(42)));  // falls through to cond
+    loopC->AddBlock(std::move(body));
+
+    auto condBlk = std::make_unique<Block>();
+    Block* condBlkPtr = condBlk.get();
+    // A chain of two conditions on the trailing block: non-final then final.
+    condBlk->Add(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(3),
+                               ComparisonKind::LessThan),
+        std::make_unique<Branch>(nullptr)));  // patched to entry below
+    condBlk->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(5),
+                               ComparisonKind::LessThan),
+        std::make_unique<Branch>(nullptr)));  // patched to entry below
+    loopC->AddBlock(std::move(condBlk));
+
+    // Patch the branch targets now that the block pointers are stable.
+    static_cast<Branch*>(
+        dynamic_cast<IfInstruction*>(condBlkPtr->Instructions[0].get())->TrueInst.get())
+        ->TargetBlock = entryPtr;
+    static_cast<Branch*>(
+        dynamic_cast<IfInstruction*>(condBlkPtr->FinalInstruction.get())->TrueInst.get())
+        ->TargetBlock = entryPtr;
+
+    // The loop sits in a pre-header block; the loop's entry falls through to
+    // it from the pre-header...  and the loop's exit (the do-while's
+    // fall-through) must NOT be another Block still in the loop: the trailing
+    // condition block is last. The function body continues to a Leave block.
+    auto preHeader = std::make_unique<Block>();
+    preHeader->Add(std::move(loopC));
+    preHeader->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(preHeader));
+    fn->Variables.push_back(num);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ILTransformContext ctx;
+    HighLevelLoopTransform::Run(*fn, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // The loop folds to do-while with the combined condition (the C#
+    // IfInstruction.LogicAnd if-expression: `if (c1) c2 else 0`).
+    EXPECT_EQ(loopPtr->Kind, ContainerKind::DoWhile);
+    auto* last = loopPtr->Blocks.back().get();
+    // The non-final pre-condition if is consumed into the final condition's
+    // chain (no longer an own instruction).
+    EXPECT_EQ(last->Instructions.size(), 0u);
+    auto* finalIf = dynamic_cast<IfInstruction*>(last->FinalInstruction.get());
+    ASSERT_NE(finalIf, nullptr);
+    ASSERT_NE(finalIf->Condition, nullptr);
+    ASSERT_EQ(finalIf->Condition->Op, OpCode::IfInstruction)
+        << "combined condition is the C# IfInstruction.LogicAnd (if-expr)";
+    auto* condIf = static_cast<IfInstruction*>(finalIf->Condition.get());
+    EXPECT_EQ(condIf->FalseInst ? (int)condIf->FalseInst->Op : -1,
+              (int)OpCode::LdcI4)
+        << "LogicAnd's false arm is ldc.i4(0)";
+    EXPECT_EQ(loopPtr->Blocks.size(), 3u)
+        << "container keeps its 3 blocks (entry/body/cond)";
+}
