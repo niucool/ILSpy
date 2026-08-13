@@ -1425,6 +1425,40 @@ TEST(ILAstToCSharp, GotoIntoImmediatelyFollowingTryEntryIsDropped) {
     EXPECT_NE(text.find("num = 2"), std::string::npos) << text;
 }
 
+TEST(ILAstToCSharp, GotoAcrossTransparentRelayBlockIsDropped) {
+    // A block-final `br X` whose target X is NOT the immediately-next container
+    // block, but the next EMITTED block -- the block(s) between are transparent
+    // relays (no instructions, a Branch final to a later block, which themselves
+    // emit nothing). The inline fall-through drop compared against
+    // container.Blocks[i+1] (the relay), not the next emitted block, so a
+    // redundant `goto X` survived across a relay. Skipping relays finds X.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = MakeFunction({});
+    auto b0 = std::make_unique<Block>(); Block* b0Ptr = b0.get();
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    // b0: work; br b2 (the redundant goto across the relay b1).
+    b0Ptr->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(1)));
+    b0Ptr->SetFinal(std::make_unique<Branch>(b2Ptr));
+    // b1: a transparent relay -- no instructions, br b2 (emits nothing).
+    b1Ptr->SetFinal(std::make_unique<Branch>(b2Ptr));
+    // b2: work2; return.
+    b2Ptr->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(2)));
+    b2Ptr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos)
+        << "redundant goto across a relay emitted:\n" << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 1"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 2"), std::string::npos) << text;
+}
+
 TEST(ILAstToCSharp, SwitchBodyThunksInlineIntoCaseSections) {
     // The lowered-switch layout the seed receives: a switch instruction whose
     // every section body is a Branch thunk to a body block laid out after the

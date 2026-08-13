@@ -365,7 +365,30 @@ private:
                 isFinal = (ifFinal->TrueInst.get() == br);
         }
         if (!isFinal) return false;
-        return FirstEmittedBlockOf(TextuallyNextEmittedBlock(encBlock)) == br->TargetBlock;
+        // The textually next block, walking up construct boundaries (out of
+        // a using/try body to the following block).
+        const Block* nxt = TextuallyNextEmittedBlock(encBlock);
+        if (FirstEmittedBlockOf(nxt) == br->TargetBlock) return true;
+        // Relay skip: `nxt` may be a transparent relay (no instructions + a
+        // forward Branch final) that emits nothing, with the real target one
+        // or more relays further on in the same container. Walk forward from
+        // encBlock's container position, stopping AT the target (a `br` to a
+        // relay that is the immediate next still drops -- fall-through reaches
+        // the relay), skipping relays that are not the target, stopping at the
+        // first block with content. Only applies when encBlock is a direct
+        // child of a container (the common block-final and if-arm cases).
+        if (auto* c = dynamic_cast<const BlockContainer*>(encBlock->Parent)) {
+            for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
+                if (c->Blocks[i].get() != encBlock) continue;
+                for (std::size_t j = i + 1; j < c->Blocks.size(); ++j) {
+                    if (c->Blocks[j].get() == br->TargetBlock) return true;
+                    if (IsTransparentRelay(c, j)) continue;
+                    break;
+                }
+                break;
+            }
+        }
+        return false;
     }
 
     // The block the emitter visits next in textual emission order after
@@ -464,6 +487,31 @@ private:
             return dynamic_cast<const BlockContainer*>(l->Body.get());
         return nullptr;
     }
+    // Whether `container`'s block at index `j` is a transparent relay: no
+    // non-Nop instructions and a Branch final to a LATER block in the same
+    // container (a forward relay that emits nothing -- its own goto drops via
+    // the same fall-through logic). Backward-Branch finals (continue/goto) and
+    // blocks with content or a non-Branch final are NOT transparent.
+    static bool IsTransparentRelay(const BlockContainer* c, std::size_t j) {
+        const Block* bj = c->Blocks[j].get();
+        if (!bj) return true;
+        for (const auto& inst : bj->Instructions)
+            if (inst && inst->Op != OpCode::Nop) return false;
+        const auto* f = bj->FinalInstruction.get();
+        if (!f || f->Op != OpCode::Branch) return false;
+        auto* bbr = static_cast<const Branch*>(f);
+        for (std::size_t k = j + 1; k < c->Blocks.size(); ++k)
+            if (c->Blocks[k].get() == bbr->TargetBlock) return true;
+        return false;
+    }
+    static const Block* NextEmittedSibling(const BlockContainer* c, std::size_t i) {
+        for (std::size_t j = i + 1; j < c->Blocks.size(); ++j) {
+            if (IsTransparentRelay(c, j)) continue;
+            return c->Blocks[j].get();
+        }
+        return nullptr;
+    }
+
     static const Block* FirstEmittedBlockOf(const Block* block) {
         while (block) {
             const ILInstruction* entry = nullptr;
@@ -986,16 +1034,24 @@ private:
         for (std::size_t i = 0; i < container.Blocks.size(); ++i) {
             const auto& block = container.Blocks[i];
             if (!block) continue;
-            // Drop a trailing `goto nextBlock` when nextBlock is the next block
-            // in the container -- the block falls through, so the goto is
-            // redundant. (CFS can't merge a multi-pred nextBlock, but the goto
-            // is still redundant for rendering.)
+            // Drop a trailing `goto nextBlock` when nextBlock is the next EMITTED
+            // block -- the block falls through, so the goto is redundant. The
+            // scan is target-aware: it stops AT the target (a `br` to a relay
+            // that is the immediate next block still drops -- fall-through
+            // reaches the relay), skips transparent relay blocks that are NOT
+            // the target (they emit nothing), and stops at the first block with
+            // content. Switch-body blocks inlined into case sections are also
+            // skipped. (CFS can't merge a multi-pred nextBlock, but the goto is
+            // still redundant for rendering.)
             bool dropFinal = false;
-            if (i + 1 < container.Blocks.size() && block->FinalInstruction &&
-                block->FinalInstruction->Op == OpCode::Branch) {
+            if (block->FinalInstruction && block->FinalInstruction->Op == OpCode::Branch) {
                 auto* br = static_cast<Branch*>(block->FinalInstruction.get());
-                if (br->TargetBlock == container.Blocks[i + 1].get())
-                    dropFinal = true;
+                for (std::size_t j = i + 1; j < container.Blocks.size(); ++j) {
+                    if (br->TargetBlock == container.Blocks[j].get()) { dropFinal = true; break; }
+                    if (inlinedBodyBlocks_.count(container.Blocks[j].get())) continue;
+                    if (IsTransparentRelay(&container, j)) continue;
+                    break;
+                }
             }
             EmitBlock(*block, indent, dropFinal);
         }
