@@ -1093,3 +1093,63 @@ TEST(ILAstToCSharp, ForLoopContainerRendersForWithIncrementClause) {
     EXPECT_EQ(text.find("goto"), std::string::npos) << text;
     EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
 }
+TEST(ILAstToCSharp, ForSplitIncrementEmitsNoTrailingContinue) {
+    // MatchForLoop's no-dedicated-block split leaves the body's final as a
+    // Branch to the NEW increment block. At the end of the loop body that
+    // edge is the iteration itself, not a `continue` -- the emission must
+    // drop the trailing `br increment`, not print a dangling `continue;`
+    // right before the loop close brace.
+    auto num = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    num->Name = "num";
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    auto preHeader = std::make_unique<Block>();
+    preHeader->Add(std::make_unique<StLoc>(num, std::make_unique<LdcI4>(0)));  // num = 0;
+
+    auto loopC = std::make_unique<BlockContainer>();
+    loopC->Kind = ContainerKind::For;
+    BlockContainer* loopPtr = loopC.get();
+    auto entry = std::make_unique<Block>();
+    Block* entryPtr = entry.get();
+    auto body = std::make_unique<Block>();
+    Block* bodyPtr = body.get();
+    auto incr = std::make_unique<Block>();
+    Block* incrPtr = incr.get();
+
+    // entry: if (num < 5) br body else leave loop
+    entry->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(5),
+                               ComparisonKind::LessThan),
+        std::make_unique<Branch>(bodyPtr), std::make_unique<Leave>(loopPtr)));
+    loopC->AddBlock(std::move(entry));
+    // body: num = num * 2; br incr  (the split's iteration step -- drops silently)
+    body->Add(std::make_unique<StLoc>(
+        num, std::make_unique<BinaryNumericInstruction>(
+                 std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(2),
+                 BinaryNumericOperator::Mul, StackType::I4)));
+    bodyPtr->SetFinal(std::make_unique<Branch>(incrPtr));
+    loopC->AddBlock(std::move(body));
+    // incr: num++; br entry (implicit back-edge)
+    incr->Add(std::make_unique<StLoc>(
+        num, std::make_unique<BinaryNumericInstruction>(
+                 std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(1),
+                 BinaryNumericOperator::Add, StackType::I4)));
+    incrPtr->SetFinal(std::make_unique<Branch>(entryPtr));
+    loopC->AddBlock(std::move(incr));
+
+    preHeader->Add(std::move(loopC));
+    preHeader->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(preHeader));
+    fn->Variables.push_back(num);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("for (; num < 5; num++)"), std::string::npos) << text;
+    EXPECT_NE(text.find("num *= 2"), std::string::npos) << text;
+    // The body's trailing br-incr is the iteration, not a continue.
+    EXPECT_EQ(text.find("continue;"), std::string::npos) << text;
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+}

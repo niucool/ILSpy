@@ -70,16 +70,35 @@ static int IncomingEdgesTo(ILInstruction* root, Block* entry) {
     return count;
 }
 
+// Whether `inst` or any descendant is an assignment (StLoc or a compound
+// assign) -- the C# IsAssignment gate on a for-condition sub-expression.
+static bool TreeHasAssignment(ILInstruction* inst) {
+    if (!inst) return false;
+    if (inst->Op == OpCode::StLoc || inst->Op == OpCode::NumericCompoundAssign ||
+        inst->Op == OpCode::UserDefinedCompoundAssign) return true;
+    for (int i = 0; i < inst->ChildCount(); ++i)
+        if (TreeHasAssignment(inst->GetChild(i))) return true;
+    return false;
+}
+
+// Whether `inst` or any descendant loads `variable` -- the C# use-in-condition
+// gate (`condition.Descendants.Any(inst.MatchLdLoc(incrementVariable))`).
+static bool TreeLoadsVariable(ILInstruction* inst, ILVariable* variable) {
+    if (!inst) return false;
+    if (auto* ld = dynamic_cast<LdLoc*>(inst))
+        if (ld->Variable.get() == variable) return true;
+    for (int i = 0; i < inst->ChildCount(); ++i)
+        if (TreeLoadsVariable(inst->GetChild(i), variable)) return true;
+    return false;
+}
+
 // The C# MatchForLoop "increment block" case: a While-shaped loop whose body
 // state-machine has a trailing block of simple statements (an `i++` block --
 // the block every `continue` targets) ends in a back-edge Branch to the loop
 // head. Move that block to the container's end and remark the loop For, so
-// the emitter can render `for (...; cond; incr) { body }`. The C# also covers
-// the no-dedicated-block case by splitting a trailing increment off the body
-// block; that sub-case is deferred (the seed emitter only consumes the
-// block-at-end shape).
+// the emitter can render `for (...; cond; incr) { body }`.
 static bool TryMatchFor(BlockContainer* loop, ILInstruction* functionRoot) {
-    if (loop->Kind != ContainerKind::While || loop->Blocks.size() < 3) return false;
+    if (loop->Kind != ContainerKind::While || loop->Blocks.size() < 2) return false;
     Block* entry = loop->Blocks.front().get();
     // The C# requires exactly two incoming edges at the entry point (pre-header
     // + the increment back-edge). In this port's model the pre-header never
@@ -89,30 +108,79 @@ static bool TryMatchFor(BlockContainer* loop, ILInstruction* functionRoot) {
     // goto) makes the for shape unsafe.
     if (IncomingEdgesTo(functionRoot, entry) != 1) return false;
     // Find the increment block: all simple statements + Branch entry.
-    Block* incBlock = nullptr;
-    std::size_t incIndex = 0;
-    for (std::size_t i = 0; i < loop->Blocks.size(); ++i) {
+    std::size_t incIndex = std::string::npos;
+    for (std::size_t i = 1; i < loop->Blocks.size(); ++i) {
         Block* b = loop->Blocks[i].get();
-        if (b == entry) continue;
         Block* head = nullptr;
         if (!HighLevelLoopTransform::MatchIncrementBlock(b, head) || head != entry) continue;
         if (b->Instructions.empty()) continue;   // C#: Instructions.Count <= 1 (i.e. no work)
-        incBlock = b;
+        // A dedicated increment block still needs a real body between it and
+        // the head (the C# 3-block minimum), so skip it for a 2-block loop.
+        if (loop->Blocks.size() < 3) continue;
         incIndex = i;
         break;
     }
-    if (!incBlock) return false;
-    // Move the increment block to the end of the container
-    // (MoveElementToEnd), preserving ChildIndex/Parent bookkeeping.
-    if (incIndex != loop->Blocks.size() - 1) {
-        auto hold = std::move(loop->Blocks[incIndex]);
-        loop->Blocks.erase(loop->Blocks.begin() + incIndex);
-        loop->Blocks.push_back(std::move(hold));
-        for (std::size_t i = 0; i < loop->Blocks.size(); ++i) {
-            loop->Blocks[i]->ChildIndex = static_cast<int>(i);
-            loop->Blocks[i]->Parent = loop;
+    if (incIndex != std::string::npos) {
+        // Move the increment block to the end of the container
+        // (MoveElementToEnd), preserving ChildIndex/Parent bookkeeping.
+        if (incIndex != loop->Blocks.size() - 1) {
+            auto hold = std::move(loop->Blocks[incIndex]);
+            loop->Blocks.erase(loop->Blocks.begin() + incIndex);
+            loop->Blocks.push_back(std::move(hold));
+            for (std::size_t i = 0; i < loop->Blocks.size(); ++i) {
+                loop->Blocks[i]->ChildIndex = static_cast<int>(i);
+                loop->Blocks[i]->Parent = loop;
+            }
         }
+        loop->Kind = ContainerKind::For;
+        return true;
     }
+    // No dedicated increment block: the C#'s no-dedicated-block case splits a
+    // trailing `stloc V(add(ldloc V, k)); br entry` tail off the body block
+    // into a new increment block appended to the container. The while
+    // condition must use the increment variable and be assignment-free (the
+    // C# SplitConditions gates). This port limits the shape to a single
+    // condition (no `&&`/`||` decomposition, which would need the three-valued
+    // condition nodes, deferred): a non-atomic condition (not a Comp single
+    // comparison) conservatively rejects the split.
+    Block* lastBody = loop->Blocks.back().get();
+    auto* backBr = dynamic_cast<Branch*>(lastBody->FinalInstruction.get());
+    if (!backBr || backBr->TargetBlock != entry) return false;
+    if (lastBody->Instructions.empty()) return false;
+    // A While-condition-in-entry with a separate empty trailing condition
+    // block (a csc 2-block for body) is outside the transform's scope -- the
+    // header must directly branch into the body (handled by the dedicated-
+    // increment case upstream).
+    if (auto* entryIf = dynamic_cast<IfInstruction*>(entry->FinalInstruction.get())) {
+        if (entryIf->TrueInst && entryIf->TrueInst->Op == OpCode::Branch &&
+            static_cast<Branch*>(entryIf->TrueInst.get())->TargetBlock != lastBody)
+            return false;
+    }
+    ILVariablePtr incrVar;
+    if (!HighLevelLoopTransform::MatchIncrement(lastBody->Instructions.back().get(), incrVar) || !incrVar)
+        return false;
+    if (incrVar->Kind == VariableKind::Parameter) return false;
+    auto* cond = dynamic_cast<IfInstruction*>(entry->FinalInstruction.get());
+    if (!cond || !cond->Condition) return false;
+    if (!TreeLoadsVariable(cond->Condition.get(), incrVar.get())) return false;
+    if (TreeHasAssignment(cond->Condition.get())) return false;
+    // A single-compound condition the C# would `&&`- or `||`-split is outside
+    // this port: only a single Comp (or a variable) condition is safe to split,
+    // since only one `if` guard would remain correct for it.
+    if (cond->Condition->Op != OpCode::Comp && cond->Condition->Op != OpCode::LdLoc)
+        return false;
+    // Split: move the increment stloc and the back-edge branch into a new
+    // block appended at the end; the body block now branches to the increment
+    // block.
+    auto newIncr = std::make_unique<Block>();
+    Block* newIncrPtr = newIncr.get();
+    newIncr->Add(std::move(lastBody->Instructions.back()));
+    lastBody->Instructions.pop_back();
+    newIncr->SetFinal(std::make_unique<Branch>(entry));
+    lastBody->SetFinal(std::make_unique<Branch>(newIncrPtr));
+    // Re-parent the moved increment into the new block: Add sets
+    // Parent/ChildIndex; SetFinal the same for the branch.
+    loop->AddBlock(std::move(newIncr));
     loop->Kind = ContainerKind::For;
     return true;
 }

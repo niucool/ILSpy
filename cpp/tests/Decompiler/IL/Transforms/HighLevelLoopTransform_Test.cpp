@@ -266,9 +266,13 @@ TEST(HighLevelLoopTransform, IsSimpleStatementClassifiesCallsAndStores) {
 // (the while-condition break: break when cond is true => `while (!cond)`) becomes
 // a While container with the condition extracted and the rest as the body.
 TEST(HighLevelLoopTransform, RunTransformsWhileConditionLoop) {
-    // Build: Loop { entry: if (num >= 0) leave loop; body: stloc num(num+1); br entry }
-    // -> While { entry: if (num < 0) leave loop else br body; body: num++ }
+    // Build: Loop { entry: if (other >= 0) leave loop; body: stloc num(num+1); br entry }
+    // -> While { entry: if (other < 0) leave loop else br body; body: num++ }
+    // The while condition rides `other` (not the incremented variable), so the
+    // later MatchForLoop split (the condition must USE the increment variable)
+    // correctly leaves this loop a plain While.
     auto num = MakeLocal("num");
+    auto other = MakeLocal("other");
     auto fn = std::make_unique<ILFunction>();
     fn->Body = std::make_unique<BlockContainer>();
     fn->Body->Parent = fn.get();
@@ -283,9 +287,9 @@ TEST(HighLevelLoopTransform, RunTransformsWhileConditionLoop) {
 
     auto entry = std::make_unique<Block>();
     Block* entryPtr = entry.get();
-    // if (num >= 0) leave loop  (break when num >= 0 => while (num < 0))
+    // if (other >= 0) leave loop  (break when other >= 0 => while (other < 0))
     entry->SetFinal(std::make_unique<IfInstruction>(
-        std::make_unique<Comp>(std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(0),
+        std::make_unique<Comp>(std::make_unique<LdLoc>(other), std::make_unique<LdcI4>(0),
                                ComparisonKind::GreaterThanOrEqual),
         std::make_unique<Leave>(loopPtr)));
     loopC->AddBlock(std::move(entry));
@@ -300,13 +304,15 @@ TEST(HighLevelLoopTransform, RunTransformsWhileConditionLoop) {
     preHeader->SetFinal(std::make_unique<Leave>(fn->Body.get()));
     fn->Body->AddBlock(std::move(preHeader));
     fn->Variables.push_back(num);
+    fn->Variables.push_back(other);
     fn->CheckInvariant(ILPhase::Normal);
 
     ILTransformContext ctx;
     HighLevelLoopTransform::Run(*fn, ctx);
     fn->CheckInvariant(ILPhase::Normal);
 
-    // The container is now a While kind.
+    // The container is now a While kind (not For: the condition does not use
+    // the increment variable).
     ASSERT_EQ(loopPtr->Kind, ContainerKind::While);
     // The entry point's if is the while condition: negated (>= becomes <), the
     // true arm branches to the body, the false arm is the leave (break).
@@ -387,4 +393,77 @@ TEST(HighLevelLoopTransform, RunTransformsLoopWithIncrementBlockToFor) {
     // MoveElementToEnd), so iteration order is entry, body, increment.
     ASSERT_EQ(loopPtr->Blocks.size(), 3u);
     EXPECT_EQ(loopPtr->Blocks.back().get(), incrPtr);
+}
+
+TEST(HighLevelLoopTransform, RunSplitsTrailingIncrementIntoForBlock) {
+    // Build: Loop { entry: if (num < 5) br body else leave;                // head
+    //               body: stloc num(42); stloc num(num+1); br entry }      // incr inline
+    // -- the common csc `for` body lowering with no dedicated increment
+    // block. MatchForLoop's no-dedicated-block case splits the trailing
+    // `stloc V(add(ldloc V, k)); br entry` tail into a new block appended to
+    // the container and marks the loop For (the C# MatchForLoop else-branch).
+    auto num = MakeLocal("num");
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+
+    auto loopC = std::make_unique<BlockContainer>();
+    loopC->Kind = ContainerKind::Loop;
+    BlockContainer* loopPtr = loopC.get();
+
+    auto entry = std::make_unique<Block>();
+    Block* entryPtr = entry.get();
+    entry->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(5),
+                               ComparisonKind::LessThan),
+        std::make_unique<Branch>(nullptr),   // patched to body below
+        std::make_unique<Leave>(nullptr)));  // patched to loop below
+    loopC->AddBlock(std::move(entry));
+
+    auto body = std::make_unique<Block>();
+    Block* bodyPtr = body.get();
+    body->Add(std::make_unique<StLoc>(num, std::make_unique<LdcI4>(42)));  // body work
+    body->Add(MakeIncrement(num, 1));                                       // trailing increment
+    body->SetFinal(std::make_unique<Branch>(entryPtr));                     // back-edge
+    loopC->AddBlock(std::move(body));
+
+    auto* iff = dynamic_cast<IfInstruction*>(loopPtr->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(iff, nullptr);
+    auto tru = std::make_unique<Branch>(bodyPtr);
+    iff->TrueInst = std::move(tru);
+    iff->TrueInst->Parent = iff;
+    iff->TrueInst->ChildIndex = 1;
+    auto* lv = dynamic_cast<Leave*>(iff->FalseInst.get());
+    ASSERT_NE(lv, nullptr);
+    lv->TargetContainer = loopPtr;
+
+    auto preHeader = std::make_unique<Block>();
+    preHeader->Add(std::move(loopC));
+    preHeader->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(preHeader));
+    fn->Variables.push_back(num);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ILTransformContext ctx;
+    HighLevelLoopTransform::Run(*fn, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ASSERT_EQ(loopPtr->Kind, ContainerKind::For)
+        << "a body-inline increment tail splits out and the loop becomes For";
+    // Three blocks now: entry, body (without the increment), and the new
+    // increment block appended at the end, which the body now branches to.
+    ASSERT_EQ(loopPtr->Blocks.size(), 3u);
+    const Block* newIncr = loopPtr->Blocks[2].get();
+    ASSERT_EQ(newIncr->Instructions.size(), 1u) << "increment block holds the split stloc";
+    EXPECT_EQ(newIncr->Instructions[0]->Op, OpCode::StLoc);
+    auto* incFinal = dynamic_cast<Branch*>(newIncr->FinalInstruction.get());
+    ASSERT_NE(incFinal, nullptr);
+    EXPECT_EQ(incFinal->TargetBlock, loopPtr->Blocks[0].get());
+    // The body's trailing increment is gone; its final now branches to the
+    // increment block.
+    ASSERT_EQ(loopPtr->Blocks[1]->Instructions.size(), 1u);
+    auto* bodyFinal = dynamic_cast<Branch*>(loopPtr->Blocks[1]->FinalInstruction.get());
+    ASSERT_NE(bodyFinal, nullptr);
+    EXPECT_EQ(bodyFinal->TargetBlock, loopPtr->Blocks[2].get());
 }

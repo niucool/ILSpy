@@ -500,6 +500,13 @@ private:
                 }
             }            Line(indent, "for (; " + cond + "; " + incrText + ")");
             Line(indent, "{");
+            // Index of the last emitted (non-empty) body block: only that
+            // block's trailing jump to the increment block is the iteration
+            // itself (a dangling `continue` before `}`), so it drops silently;
+            // a jump to the increment from any other position is a real
+            // `continue` (the for-update still runs -- the C# `continue`).
+            std::size_t lastBodyIdx = container.Blocks.size() - 1;
+            if (lastBodyIdx == incIdx) --lastBodyIdx;
             for (std::size_t i = 1; i < container.Blocks.size(); ++i) {
                 if (i == incIdx) continue;  // the increment block rendered in the header
                 const auto& block = container.Blocks[i];
@@ -510,12 +517,17 @@ private:
                     block->FinalInstruction->Op == OpCode::Branch &&
                     static_cast<const Branch*>(block->FinalInstruction.get())->TargetBlock == increment)
                     continue;
-                // Drop a trailing back-edge branch to the entry (implicit iter).
+                // Drop a trailing back-edge branch to the entry (implicit iter),
+                // and (only on the last body block) a trailing branch to the
+                // increment block (the iteration -- dropping it anywhere else
+                // would erase a real `continue`).
                 bool dropFinal = false;
                 if (block->FinalInstruction &&
                     block->FinalInstruction->Op == OpCode::Branch) {
                     auto* br = static_cast<Branch*>(block->FinalInstruction.get());
                     if (br->TargetBlock == header) dropFinal = true;
+                    if (i == lastBodyIdx && br->TargetBlock == increment && increment)
+                        dropFinal = true;
                 }
                 EmitBlock(*block, indent + 1, dropFinal);
             }
