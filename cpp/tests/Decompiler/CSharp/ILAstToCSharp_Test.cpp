@@ -1338,3 +1338,74 @@ TEST(ILAstToCSharp, SwitchBodyThunksInlineIntoCaseSections) {
     // The exit block's label does not print (no gotos remain referencing it).
     EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
 }
+
+TEST(ILAstToCSharp, SwitchBodyWithConditionalExitInlineAsIfBreak) {
+    // A body may end with a conditional exit `if (cond) br exit` (a block-
+    // final if with no else): it renders as `if (cond) break;` inline. The
+    // fall-through (the cond-false path) continues into the *next outer
+    // block*; for a mid-switch body that must be the next section's body
+    // (section order == outer order wherever fall-through ordering matters),
+    // otherwise the fold bails to the dbgthunk rendering.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto v1 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    v1->Name = "x";
+    auto v2 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 2);
+    v2->Name = "y";
+    auto fn = MakeFunction({});
+
+    auto host = std::make_unique<Block>();
+    Block* hostPtr = host.get();
+    auto b1 = std::make_unique<Block>();
+    Block* b1Ptr = b1.get();
+    auto b2 = std::make_unique<Block>();
+    Block* b2Ptr = b2.get();
+    auto exitB = std::make_unique<Block>();
+    Block* exitPtr = exitB.get();
+
+    fn->Body->AddBlock(std::move(host));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(exitB));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto sec0 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    auto brCase = std::make_unique<Branch>(b1Ptr);
+    brCase->HasOffset = false;
+    sec0->SetBody(std::move(brCase));
+    sw->AddSection(std::move(sec0));
+    auto secDef = std::make_unique<SwitchSection>();
+    auto brDef = std::make_unique<Branch>(b2Ptr);
+    brDef->HasOffset = false;
+    secDef->SetBody(std::move(brDef));
+    sw->AddSection(std::move(secDef));
+    hostPtr->SetFinal(std::move(sw));
+
+    // case 0 body: x = 1; if (v) br exit   -- the false path falls through
+    // into b2 (the next OUTER block, which is also the next SECTION body).
+    b1Ptr->Add(std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(1)));
+    b1Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::make_unique<Branch>(exitPtr)));
+    // default body: y = 2; br exit
+    b2Ptr->Add(std::make_unique<StLoc>(v2, std::make_unique<LdcI4>(2)));
+    b2Ptr->SetFinal(std::make_unique<Branch>(exitPtr));
+    // exit: return
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(v1);
+    fn->Variables.push_back(v2);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 0:"), std::string::npos) << text;
+    EXPECT_NE(text.find("if (num) break;"), std::string::npos) << text;
+    EXPECT_NE(text.find("default:"), std::string::npos) << text;
+    EXPECT_NE(text.find("y = 2;"), std::string::npos) << text;
+    EXPECT_NE(text.find("break;"), std::string::npos) << text;
+    // The case-0 conditional break comes BEFORE the default block (the
+    // section-order == outer-order constraint is what makes this safe).
+    EXPECT_LT(text.find("if (num) break;"), text.find("default:")) << text;
+}

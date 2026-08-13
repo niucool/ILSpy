@@ -514,18 +514,28 @@ private:
         std::set<const Block*> tgtSet(targets.begin(), targets.end());
         std::vector<const Branch*> bodyExit;
         // The exit is the unique shared convergence of the body-final Branches:
-        // every target's trailing Branch must target the SAME outer block
-        // after the host (a body that returns/throws instead of branching
-        // contributes nothing). This replaces the older positional rule (the
-        // exit had to be the block directly after the last target), which
-        // rejected the far more common unordered/sparse body layouts.
+        // every target's trailing Branch (or no-else trailing `if (cond) br T`)
+        // must target the SAME outer block after the host (a body that
+        // returns/throws or only falls positionally contributes nothing).
         const Block* exit = nullptr;
+        std::size_t kConv = 0;
         for (const Block* t : targets) {
+            ++kConv;
             const ILInstruction* fin = t->FinalInstruction.get();
             if (!fin) continue;  // fall-through-only body: contributes nothing
             if (fin->Op == OpCode::Leave) continue;
-            auto* fbr = dynamic_cast<const Branch*>(fin);
-            if (!fbr) return bail("final-kind");
+            const Branch* fbr = dynamic_cast<const Branch*>(fin);
+            bool conditionalExit = false;
+            if (!fbr) {
+                // A conditional-exit body final: `if (cond) br T` with no else
+                // -- the cond-false path falls positionally (checked below).
+                auto* iif = dynamic_cast<const IfInstruction*>(fin);
+                if (iif && !iif->FalseInst && iif->TrueInst &&
+                    (fbr = dynamic_cast<const Branch*>(iif->TrueInst.get())) != nullptr)
+                    conditionalExit = true;
+                else
+                    return bail("final-kind");
+            }
             if (!exit) {
                 exit = fbr->TargetBlock;
                 bool inOuter = false;
@@ -536,6 +546,23 @@ private:
                 return bail("brk-not-exit");
             }
             bodyExit.push_back(fbr);
+        }
+        // Positional integrity: a body whose trailing lets control continue
+        // positionally (null final, or a no-else `if (cond) br exit`) must
+        // flow into the next outer block equal to the NEXT section's body
+        // (for mid sections) or the exit (for the last section) -- otherwise
+        // the section-order inlining would mis-route the fall-through.
+        for (std::size_t k = 0; k < targets.size(); ++k) {
+            const ILInstruction* fin = targets[k]->FinalInstruction.get();
+            bool fallsThrough = !fin;
+            if (auto* iif = fin ? dynamic_cast<const IfInstruction*>(fin) : nullptr)
+                fallsThrough = !iif->FalseInst;
+            if (!fallsThrough) continue;
+            const Block* want = (k + 1 < targets.size()) ? targets[k + 1] : exit;
+            if (!want) return bail("fall-no-target");
+            if (targetIdx[k] + 1 >= outer->Blocks.size() ||
+                outer->Blocks[targetIdx[k] + 1].get() != want)
+                return bail("fall-order");
         }
         if (!exit) return bail("no-exit");
         // The exit itself must not be a body target and must sit after the
@@ -1068,13 +1095,25 @@ private:
                         EmitStatement(*inst, indent + 1);
                     }
                     if (const ILInstruction* fin = body->FinalInstruction.get()) {
-                        if (fin->Op == OpCode::Leave)
+                        if (fin->Op == OpCode::Leave) {
                             EmitStatement(*fin, indent + 1);
-                        else if (dynamic_cast<const Branch*>(fin) &&
-                                 static_cast<const Branch*>(fin)->TargetBlock == plan->exit)
+                        } else if (dynamic_cast<const Branch*>(fin) &&
+                                 static_cast<const Branch*>(fin)->TargetBlock == plan->exit) {
                             Line(indent + 1, "break;");
-                        else
+                        } else if (auto* iif = dynamic_cast<const IfInstruction*>(fin);
+                                   iif && !iif->FalseInst && iif->TrueInst &&
+                                   dynamic_cast<const Branch*>(iif->TrueInst.get()) &&
+                                   static_cast<const Branch*>(iif->TrueInst.get())->TargetBlock == plan->exit) {
+                            // Trailing conditional exit `if (cond) br exit`
+                            // (analysis-gated): renders as `if (cond) break;`
+                            // -- the false path falls positionally to the next
+                            // section's body or the exit (fall-order-gated).
+                            std::string c = iif->Condition ? CondExpr(*iif->Condition)
+                                                           : std::string("(default)");
+                            Line(indent + 1, "if (" + c + ") break;");
+                        } else {
                             EmitStatement(*fin, indent + 1);
+                        }
                     }
                 }
                 Line(indent, "}");
