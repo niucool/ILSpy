@@ -1553,7 +1553,13 @@ implemented and green here. Everything else follows the phase plan in
   stays a `goto` (faithful to C# `goto case`). Switches with no convergence
   exit (every body self-terminates or falls) inline with the post-switch
   block as the implicit exit. mscorlib --csharp: 59 switches inlined,
-  ~17.7k gotos (down from ~18.5k pre-inlining).
+  ~14.4k gotos (down from ~18.5k pre-inlining). The seed also drops
+  redundant fall-through gotos at the end of if-else arms (a block-final
+  `br X` or a true-arm `br X` of an if whose textual-next is X), gotos that
+  fall into the immediately-following block's construct entry (`goto X;
+  <block>{ try { X: ... } }`), and swaps the resulting empty `if (cond) { }`
+  arms to a negated `if (!cond) { else }` -- together ~3.2k fewer gotos and
+  ~11k fewer lines on mscorlib.
   Remaining gaps vs the real back
   end: gotos for multi-pred join blocks and loop-internal condition/increment
   jumps (needs DetectExitPoints + HighLevelLoopTransform), full type names
