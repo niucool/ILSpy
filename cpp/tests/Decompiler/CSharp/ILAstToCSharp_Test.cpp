@@ -1312,6 +1312,43 @@ TEST(ILAstToCSharp, GotoFallingOutOfIfElseArmsToFollowingBlockIsDropped) {
     EXPECT_NE(text.find("x = 2"), std::string::npos) << text;
 }
 
+TEST(ILAstToCSharp, GotoAsDirectTrueArmOfIfElseToFollowingBlockIsDropped) {
+    // The then arm is a DIRECT Branch (the if's TrueInst, not a Block): `if (cond)
+    // br nextBlock else { work }`, where nextBlock is the block after the if's
+    // enclosing block. The true-arm goto is redundant: the true path falls to
+    // nextBlock (the if's textual next), the false path (work) is untouched.
+    // IsFallThroughGoto previously only accepted a true-arm Branch of a NO-ELSE
+    // if; this if has an else, so it bailed. (The else arm carrying work makes
+    // its goto -- if any -- a Block final that already drops; the asymmetry left
+    // the bare true-arm direct-Branch goto.)
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto v1 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    v1->Name = "x";
+    auto fn = MakeFunction({});
+    auto b0 = std::make_unique<Block>(); Block* b0Ptr = b0.get();
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    // else arm: a Block with work and a fall-through (null final) -- reaches b1
+    // via the if's textual next.
+    auto elseArm = std::make_unique<Block>();
+    elseArm->Add(std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(2)));
+    // b0's final is the if-else; the TRUE arm is a direct Branch to b1.
+    b0Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::make_unique<Branch>(b1Ptr),
+        std::move(elseArm)));
+    b1Ptr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(v1);
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos)
+        << "redundant direct-true-arm fall-through goto emitted:\n" << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("x = 2"), std::string::npos) << text;
+}
+
 TEST(ILAstToCSharp, SwitchBodyThunksInlineIntoCaseSections) {
     // The lowered-switch layout the seed receives: a switch instruction whose
     // every section body is a Branch thunk to a body block laid out after the

@@ -342,15 +342,21 @@ private:
         if (!encBlock) return false;
         // The branch must be a block-final fall-through: either it IS the
         // enclosing block's FinalInstruction, or it is the TRUE ARM of the
-        // block-final `if (cond) br target` with NO else (the enclosing block's
-        // final is that if) -- a conditional jump to the next block is also a
-        // redundant no-op (both paths reach it). A branch inside an if-arm with
-        // an else, or inside a switch section, is not a block-final fall-through.
+        // block-final `if (cond) br target` (the enclosing block's final is
+        // that if). A no-else if's true-arm br is a redundant no-op when the
+        // block's textual next is the target (both paths reach it: true via
+        // the branch, false via fall-through). The same holds for an if WITH
+        // an else: dropping the true-arm br makes the true path fall to the
+        // block's textual next (== the target), and the false path (the else
+        // arm) is untouched -- so the `!ifFinal->FalseInst` restriction is
+        // unnecessary; the textual-next == target check below is the guard.
+        // A branch inside an if-arm whose final is not the enclosing block's
+        // final, or inside a switch section, is not a block-final fall-through.
         const ILInstruction* final = encBlock->FinalInstruction.get();
         bool isFinal = (final == br);
         if (!isFinal) {
             if (auto* ifFinal = dynamic_cast<const IfInstruction*>(final))
-                isFinal = (ifFinal->TrueInst.get() == br) && !ifFinal->FalseInst;
+                isFinal = (ifFinal->TrueInst.get() == br);
         }
         if (!isFinal) return false;
         return TextuallyNextEmittedBlock(encBlock) == br->TargetBlock;
