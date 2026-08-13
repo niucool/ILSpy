@@ -1381,6 +1381,50 @@ TEST(ILAstToCSharp, IfElseWithDroppedFallThroughTrueArmSwapsToNegatedCond) {
     EXPECT_EQ(text.find("else"), std::string::npos) << text;
 }
 
+TEST(ILAstToCSharp, GotoIntoImmediatelyFollowingTryEntryIsDropped) {
+    // The `goto IL_X; try { IL_X: ... }` shape: a block B0 ends with `br X` and
+    // the next sibling block B1 is a pure-construct block (no instructions, a
+    // TryFinally final) whose try-body's FIRST block is X. The goto jumps into
+    // the try's entry -- redundant, since control falls from B0 into B1's try
+    // at X anyway. IsFallThroughGoto must descend into the next block's
+    // construct body to find X as the textually-next emitted block.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = MakeFunction({});
+    // B0: work; br X (X is the try-body entry, in B1).
+    auto b0 = std::make_unique<Block>(); Block* b0Ptr = b0.get();
+    b0->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(1)));
+    // B1: a pure-construct block whose final is the TryFinally.
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    // try body container: first block is X (work2; leave/return).
+    auto tryBody = std::make_unique<BlockContainer>();
+    auto xBlock = std::make_unique<Block>(); Block* xPtr = xBlock.get();
+    xBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(2)));
+    xBlock->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    tryBody->AddBlock(std::move(xBlock));
+    // finally body container: work3; endfinally (Leave null target).
+    auto finallyBody = std::make_unique<BlockContainer>();
+    auto fBlock = std::make_unique<Block>();
+    fBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(3)));
+    fBlock->SetFinal(std::make_unique<Leave>(nullptr));
+    finallyBody->AddBlock(std::move(fBlock));
+    b1Ptr->SetFinal(std::make_unique<TryFinally>(std::move(tryBody), std::move(finallyBody)));
+    // B0's final is the goto into X (the try entry).
+    b0Ptr->SetFinal(std::make_unique<Branch>(xPtr));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos)
+        << "redundant goto-into-try-entry emitted:\n" << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("try"), std::string::npos) << text;
+    EXPECT_NE(text.find("finally"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 1"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 2"), std::string::npos) << text;
+}
+
 TEST(ILAstToCSharp, SwitchBodyThunksInlineIntoCaseSections) {
     // The lowered-switch layout the seed receives: a switch instruction whose
     // every section body is a Branch thunk to a body block laid out after the

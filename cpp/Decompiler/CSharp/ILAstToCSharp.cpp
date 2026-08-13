@@ -166,6 +166,12 @@ const char* ConvTargetName(StackType target) {
 // an emitted `goto`. Defined later in the file.
 static bool IsFallThroughGoto(const Branch* br);
 static bool IsLoopEntryFallThrough(const Branch* br);
+static const Block* TextuallyNextEmittedBlock(const ILInstruction* node);
+// The first block the emitter visits inside `block`: descends into a
+// "pure construct" block (no instructions, a TryFinally/TryCatch/Using/Lock
+// final whose body is a BlockContainer) to the construct body's first block.
+// Defined later in the file.
+static const Block* FirstEmittedBlockOf(const Block* block);
 
 // Emit an ILFunction body as C#-ish text. See the file header for the level
 // of fidelity this seed aims for.
@@ -359,7 +365,7 @@ private:
                 isFinal = (ifFinal->TrueInst.get() == br);
         }
         if (!isFinal) return false;
-        return TextuallyNextEmittedBlock(encBlock) == br->TargetBlock;
+        return FirstEmittedBlockOf(TextuallyNextEmittedBlock(encBlock)) == br->TargetBlock;
     }
 
     // The block the emitter visits next in textual emission order after
@@ -434,6 +440,43 @@ private:
             cur = pb;
         }
         return nullptr;
+    }
+
+    // The first block the emitter visits inside `block`: if `block` is a
+    // "construct-leading" block -- its first instruction (or, with no
+    // instructions, its final) is a TryFinally/TryCatch/Using/Lock whose body is
+    // a BlockContainer -- descend into the construct body's first block
+    // (recursively). Otherwise the block itself is emitted first (its
+    // instructions, or its non-construct final). Used by IsFallThroughGoto so a
+    // `goto X` whose target X is the entry of the immediately-following
+    // block's construct body (a `goto X; <block>{ try { X: ... } ... }` shape,
+    // where the try is a leading statement of the next block) is recognized
+    // as a redundant fall-into-construct.
+    static const BlockContainer* ConstructEntryBody(const ILInstruction* inst) {
+        if (!inst) return nullptr;
+        if (auto* tf = dynamic_cast<const TryFinally*>(inst))
+            return dynamic_cast<const BlockContainer*>(tf->TryBlock.get());
+        if (auto* tc = dynamic_cast<const TryCatch*>(inst))
+            return dynamic_cast<const BlockContainer*>(tc->TryBlock.get());
+        if (auto* u = dynamic_cast<const UsingInstruction*>(inst))
+            return dynamic_cast<const BlockContainer*>(u->Body.get());
+        if (auto* l = dynamic_cast<const LockInstruction*>(inst))
+            return dynamic_cast<const BlockContainer*>(l->Body.get());
+        return nullptr;
+    }
+    static const Block* FirstEmittedBlockOf(const Block* block) {
+        while (block) {
+            const ILInstruction* entry = nullptr;
+            if (!block->Instructions.empty())
+                entry = block->Instructions.front().get();
+            else
+                entry = block->FinalInstruction.get();
+            if (!entry) return block;
+            const BlockContainer* body = ConstructEntryBody(entry);
+            if (!body || body->Blocks.empty()) return block;
+            block = body->Blocks.front().get();
+        }
+        return block;
     }
 
     // Whether this block-final branch is the implicit pre-header entry into a
