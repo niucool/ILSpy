@@ -1409,3 +1409,59 @@ TEST(ILAstToCSharp, SwitchBodyWithConditionalExitInlineAsIfBreak) {
     // section-order == outer-order constraint is what makes this safe).
     EXPECT_LT(text.find("if (num) break;"), text.find("default:")) << text;
 }
+
+TEST(ILAstToCSharp, SwitchBodyWithThrowExitIsInlined) {
+    // A case body that terminates in a `throw` (guarding a public API entry
+    // into the switch) has a Throw final, contributing no exit branch. The
+    // emission inlines it with the throw in place; the other sections must
+    // carry the exit convergence.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = MakeFunction({});
+
+    auto host = std::make_unique<Block>();
+    Block* hostPtr = host.get();
+    auto b1 = std::make_unique<Block>();
+    Block* b1Ptr = b1.get();
+    auto b2 = std::make_unique<Block>();
+    Block* b2Ptr = b2.get();
+    auto exitB = std::make_unique<Block>();
+    Block* exitPtr = exitB.get();
+
+    fn->Body->AddBlock(std::move(host));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(exitB));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto sec0 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(5)));
+    auto brCase = std::make_unique<Branch>(b1Ptr);
+    brCase->HasOffset = false;
+    sec0->SetBody(std::move(brCase));
+    sw->AddSection(std::move(sec0));
+    auto secDef = std::make_unique<SwitchSection>();
+    auto brDef = std::make_unique<Branch>(b2Ptr);
+    brDef->HasOffset = false;
+    secDef->SetBody(std::move(brDef));
+    sw->AddSection(std::move(secDef));
+    hostPtr->SetFinal(std::move(sw));
+
+    // case 5 body: throw new System.ArgumentException("x");
+    b1Ptr->SetFinal(std::make_unique<Throw>(
+        std::make_unique<Call>()));
+    // default body: stloc; br exit
+    b2Ptr->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(2)));
+    b2Ptr->SetFinal(std::make_unique<Branch>(exitPtr));
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 5:"), std::string::npos) << text;
+    EXPECT_NE(text.find("throw"), std::string::npos) << text;
+    EXPECT_NE(text.find("default:"), std::string::npos) << text;
+    EXPECT_NE(text.find("break;"), std::string::npos) << text;
+}

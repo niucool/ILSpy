@@ -527,13 +527,22 @@ private:
             const Branch* fbr = dynamic_cast<const Branch*>(fin);
             bool conditionalExit = false;
             if (!fbr) {
+                // A terminating body final (a case body that always throws)
+                // contributes no exit; the emission keeps the throw in place.
+                if (t->FinalInstruction->Op == OpCode::Throw) continue;
                 // A conditional-exit body final: `if (cond) br T` with no else
                 // -- the cond-false path falls positionally (checked below).
                 auto* iif = dynamic_cast<const IfInstruction*>(fin);
                 if (iif && !iif->FalseInst && iif->TrueInst &&
                     (fbr = dynamic_cast<const Branch*>(iif->TrueInst.get())) != nullptr)
                     conditionalExit = true;
-                else
+                else if (std::getenv("ILSPY_DBG_FK")) {
+                    const char* alt = "?";
+                    if (iif && iif->FalseInst) alt = "if-else-final";
+                    else if (iif) alt = "if-final-other";
+                    std::fprintf(stderr, "FK op=%d alt=%s\n", (int)fin->Op, alt);
+                }
+                if (!conditionalExit)
                     return bail("final-kind");
             }
             if (!exit) {
@@ -1095,7 +1104,7 @@ private:
                         EmitStatement(*inst, indent + 1);
                     }
                     if (const ILInstruction* fin = body->FinalInstruction.get()) {
-                        if (fin->Op == OpCode::Leave) {
+                        if (fin->Op == OpCode::Leave || fin->Op == OpCode::Throw) {
                             EmitStatement(*fin, indent + 1);
                         } else if (dynamic_cast<const Branch*>(fin) &&
                                  static_cast<const Branch*>(fin)->TargetBlock == plan->exit) {
