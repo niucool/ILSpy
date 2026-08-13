@@ -532,18 +532,34 @@ private:
                 if (t->FinalInstruction->Op == OpCode::Throw) continue;
                 // A conditional-exit body final: `if (cond) br T` with no else
                 // -- the cond-false path falls positionally (checked below).
+                // Also accepts `if (cond) { return; }` / `if (cond) throw ...`
+                // (a Block true arm whose final is Leave/Throw, or a bare
+                // Leave/Throw): the true arm exits, contributing no exit
+                // branch; the false path falls positionally (integrity-gated).
                 auto* iif = dynamic_cast<const IfInstruction*>(fin);
-                if (iif && !iif->FalseInst && iif->TrueInst &&
-                    (fbr = dynamic_cast<const Branch*>(iif->TrueInst.get())) != nullptr)
-                    conditionalExit = true;
-                else if (std::getenv("ILSPY_DBG_FK")) {
-                    const char* alt = "?";
-                    if (iif && iif->FalseInst) alt = "if-else-final";
-                    else if (iif) alt = "if-final-other";
-                    std::fprintf(stderr, "FK op=%d alt=%s\n", (int)fin->Op, alt);
-                }
-                if (!conditionalExit)
+                if (iif && !iif->FalseInst && iif->TrueInst) {
+                    fbr = dynamic_cast<const Branch*>(iif->TrueInst.get());
+                    if (fbr) {
+                        conditionalExit = true;  // D182: `if (cond) br exit`
+                    } else {
+                        // True arm exits (returns/throws)?
+                        auto trueArmExits = [](const ILInstruction* arm) -> bool {
+                            if (!arm) return false;
+                            if (arm->Op == OpCode::Leave || arm->Op == OpCode::Throw)
+                                return true;
+                            if (auto* b = dynamic_cast<const Block*>(arm))
+                                if (b->FinalInstruction)
+                                    return b->FinalInstruction->Op == OpCode::Leave ||
+                                           b->FinalInstruction->Op == OpCode::Throw;
+                            return false;
+                        };
+                        if (trueArmExits(iif->TrueInst.get()))
+                            continue;  // contributes no exit; false falls positionally
+                        return bail("final-kind");
+                    }
+                } else {
                     return bail("final-kind");
+                }
             }
             if (!exit) {
                 exit = fbr->TargetBlock;
@@ -556,6 +572,17 @@ private:
             }
             bodyExit.push_back(fbr);
         }
+        // exit is null when every body self-terminates (throw/return) or
+        // falls positionally -- the switch has no shared `break` exit. Use
+        // the block after the last target as the implicit exit (the post-switch
+        // continuation); no body branches to it, so no `break;` lines render.
+        if (!exit) {
+            if (targetIdx.back() + 1 >= outer->Blocks.size())
+                return bail("no-post-exit");
+            exit = outer->Blocks[targetIdx.back() + 1].get();
+        }
+        // The exit itself must not be a body target.
+        if (exit && tgtSet.count(exit)) return bail("exit-is-target");
         // Positional integrity: a body whose trailing lets control continue
         // positionally (null final, or a no-else `if (cond) br exit`) must
         // flow into the next outer block equal to the NEXT section's body
@@ -573,11 +600,6 @@ private:
                 outer->Blocks[targetIdx[k] + 1].get() != want)
                 return bail("fall-order");
         }
-        if (!exit) return bail("no-exit");
-        // The exit itself must not be a body target and must sit after the
-        // host block (a forward switch exit; anything else is a loop-shaped
-        // layout, not a switch).
-        if (tgtSet.count(exit)) return bail("exit-is-target");
         // Foreign-reference check: nothing outside the switch's own section
         // thunk Branches and the body's trailing `br exit` may target a
         // body block.

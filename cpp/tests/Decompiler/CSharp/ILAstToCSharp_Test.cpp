@@ -331,7 +331,10 @@ TEST(ILAstToCSharp, ThrowEmitsThrowStatement) {
     EXPECT_NE(text.find("    throw null;\n"), std::string::npos) << text;
 }
 
-TEST(ILAstToCSharp, SwitchEmitsCaseLabelsWithGotos) {
+TEST(ILAstToCSharp, SwitchInlinesLeaveFinalBodies) {
+    // A switch whose bodies self-terminate (Leave/return) with no shared exit
+    // convergence inlines them: each case renders its body's return directly,
+    // no thunk gotos, no IL_ labels.
     auto v0 = MakeVar(VariableKind::Local, "V_0", 0);
     auto b0 = std::make_unique<Block>();
     auto b1 = std::make_unique<Block>();
@@ -340,9 +343,11 @@ TEST(ILAstToCSharp, SwitchEmitsCaseLabelsWithGotos) {
     auto fn = MakeFunction({});
     Block* b1Ptr = b1.get();
     Block* b2Ptr = b2.get();
+    auto b3 = std::make_unique<Block>();  // post-switch continuation
     fn->Body->AddBlock(std::move(b0));
     fn->Body->AddBlock(std::move(b1));
     fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(b3));
 
     auto brCase = std::make_unique<Branch>(static_cast<std::uint32_t>(0x30));
     brCase->TargetBlock = b1Ptr;
@@ -362,14 +367,18 @@ TEST(ILAstToCSharp, SwitchEmitsCaseLabelsWithGotos) {
 
     fn->Body->Blocks[1]->SetFinal(ReturnFinal(fn->Body.get()));
     fn->Body->Blocks[2]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Body->Blocks[3]->SetFinal(ReturnFinal(fn->Body.get()));
     fn->CheckInvariant(ILPhase::Normal);
 
     std::string text = ILAstToCSharp(*fn, "void", "M", "");
     EXPECT_NE(text.find("    switch (V_0)\n"), std::string::npos) << text;
     EXPECT_NE(text.find("        case 0:\n"), std::string::npos) << text;
-    EXPECT_NE(text.find("        goto IL_0030;\n"), std::string::npos) << text;
     EXPECT_NE(text.find("        default:\n"), std::string::npos) << text;
-    EXPECT_NE(text.find("        goto IL_0040;\n"), std::string::npos) << text;
+    // The bodies inline: no thunk gotos, no IL_ labels.
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    // Each case's return renders inline.
+    EXPECT_NE(text.find("return;"), std::string::npos) << text;
 }
 
 TEST(ILAstToCSharp, CastsAndTypeOperators) {
@@ -1464,4 +1473,114 @@ TEST(ILAstToCSharp, SwitchBodyWithThrowExitIsInlined) {
     EXPECT_NE(text.find("throw"), std::string::npos) << text;
     EXPECT_NE(text.find("default:"), std::string::npos) << text;
     EXPECT_NE(text.find("break;"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, SwitchBodyWithConditionalReturnInlineAsIfReturn) {
+    // A case body whose trailing is `if (cond) { return; }` (no else): the true
+    // arm is a Block whose final is a Leave. The body contributes no exit branch
+    // (the true path returns); the false path falls positionally. The emission
+    // inlines it as `if (cond) { return; }` and the section fall-through handles
+    // the false path.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = MakeFunction({});
+    auto host = std::make_unique<Block>(); Block* hostPtr = host.get();
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    auto exitB = std::make_unique<Block>(); Block* exitPtr = exitB.get();
+    fn->Body->AddBlock(std::move(host));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(exitB));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto sec0 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    auto brCase = std::make_unique<Branch>(b1Ptr); brCase->HasOffset = false;
+    sec0->SetBody(std::move(brCase));
+    sw->AddSection(std::move(sec0));
+    auto secDef = std::make_unique<SwitchSection>();
+    auto brDef = std::make_unique<Branch>(b2Ptr); brDef->HasOffset = false;
+    secDef->SetBody(std::move(brDef));
+    sw->AddSection(std::move(secDef));
+    hostPtr->SetFinal(std::move(sw));
+
+    // case 0 body: if (num) { return; }  -- the true arm is a Block with a Leave final.
+    auto retBlock = std::make_unique<Block>();
+    retBlock->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    b1Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::move(retBlock)));
+    // default body: stloc; br exit
+    b2Ptr->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(2)));
+    b2Ptr->SetFinal(std::make_unique<Branch>(exitPtr));
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 0:"), std::string::npos) << text;
+    EXPECT_NE(text.find("if (num)"), std::string::npos) << text;
+    EXPECT_NE(text.find("return;"), std::string::npos) << text;
+    EXPECT_NE(text.find("default:"), std::string::npos) << text;
+    EXPECT_NE(text.find("break;"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, SwitchAllBodiesExitOrFallThroughNoConvergenceExit) {
+    // The no-convergence switch: every body self-terminates (throw/return) or
+    // falls positionally into the next section's body -- no body branches to a
+    // shared exit. The Win32Error lowering shape: `case A: throw; case B:
+    // doStuff(); case C: if (err) throw; ...; return;`. The fold accepts it
+    // (exit = null); no `break;` lines render.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = MakeFunction({});
+    auto host = std::make_unique<Block>(); Block* hostPtr = host.get();
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    auto b3 = std::make_unique<Block>(); Block* b3Ptr = b3.get();
+    auto postB = std::make_unique<Block>(); Block* postPtr = postB.get();
+    fn->Body->AddBlock(std::move(host));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(b3));
+    fn->Body->AddBlock(std::move(postB));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto s1 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(1)));
+    s1->SetBody([&]{ auto b=std::make_unique<Branch>(b1Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(s1));
+    auto s2 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(2)));
+    s2->SetBody([&]{ auto b=std::make_unique<Branch>(b2Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(s2));
+    auto s3 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(3)));
+    s3->SetBody([&]{ auto b=std::make_unique<Branch>(b3Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(s3));
+    hostPtr->SetFinal(std::move(sw));
+
+    // case 1: throw (self-terminating)
+    b1Ptr->SetFinal(std::make_unique<Throw>(std::make_unique<Call>()));
+    // case 2: null-final (falls positionally into case 3's body)
+    b2Ptr->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(42)));
+    // case 3: if (num) throw; ...; return (self-terminating)
+    auto throwBlk = std::make_unique<Block>();
+    throwBlk->SetFinal(std::make_unique<Throw>(std::make_unique<Call>()));
+    b3Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::move(throwBlk)));
+    // post-switch block (continues after the switch)
+    postPtr->SetFinal(ReturnFinal(fn->Body.get()));
+
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 1:"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 2:"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 3:"), std::string::npos) << text;
+    EXPECT_NE(text.find("throw"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 42"), std::string::npos) << text;
+    // No break: no body branches to a shared exit.
+    EXPECT_EQ(text.find("break;"), std::string::npos) << text;
 }
