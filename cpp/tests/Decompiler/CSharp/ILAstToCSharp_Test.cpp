@@ -1349,6 +1349,38 @@ TEST(ILAstToCSharp, GotoAsDirectTrueArmOfIfElseToFollowingBlockIsDropped) {
     EXPECT_NE(text.find("x = 2"), std::string::npos) << text;
 }
 
+TEST(ILAstToCSharp, IfElseWithDroppedFallThroughTrueArmSwapsToNegatedCond) {
+    // When the true arm of an if-else is a fall-through Branch (dropped per
+    // D189), it renders as an empty `{ }`. The emitter's empty-arm swap must
+    // treat a fall-through Branch arm as empty so `if (cond) { } else { work }`
+    // swaps to `if (!cond) { work }` (cleaner, no empty then, no else).
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto v1 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    v1->Name = "x";
+    auto fn = MakeFunction({});
+    auto b0 = std::make_unique<Block>(); Block* b0Ptr = b0.get();
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    auto elseArm = std::make_unique<Block>();
+    elseArm->Add(std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(2)));
+    b0Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::make_unique<Branch>(b1Ptr),
+        std::move(elseArm)));
+    b1Ptr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(v1);
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("x = 2"), std::string::npos) << text;
+    // The empty then arm swapped: negated condition, no `else`.
+    EXPECT_NE(text.find("if (!(num))"), std::string::npos) << text;
+    EXPECT_EQ(text.find("else"), std::string::npos) << text;
+}
+
 TEST(ILAstToCSharp, SwitchBodyThunksInlineIntoCaseSections) {
     // The lowered-switch layout the seed receives: a switch instruction whose
     // every section body is a Branch thunk to a body block laid out after the

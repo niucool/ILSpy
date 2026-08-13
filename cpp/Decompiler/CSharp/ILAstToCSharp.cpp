@@ -1153,8 +1153,20 @@ private:
                     // A Nop arm carries no content -- treat as empty (an
                     // `if (c) { } else nop`-shape must not print `else { }`).
                     if (arm->Op == OpCode::Nop) return true;
-                    if (auto* b = dynamic_cast<const Block*>(arm.get()))
-                        return b->Instructions.empty() && !b->FinalInstruction;
+                    // A fall-through Branch arm (a redundant goto dropped per
+                    // D188/D189) renders nothing -- treat as empty so
+                    // `if (cond) { } else { work }` swaps to `if (!cond) { work }`.
+                    if (arm->Op == OpCode::Branch)
+                        return IsFallThroughGoto(static_cast<const Branch*>(arm.get()));
+                    if (auto* b = dynamic_cast<const Block*>(arm.get())) {
+                        if (!b->Instructions.empty()) return false;  // has work
+                        if (!b->FinalInstruction) return true;  // null final
+                        // A Block whose only content is a fall-through Branch
+                        // final (the goto dropped) renders empty.
+                        return b->FinalInstruction->Op == OpCode::Branch &&
+                               IsFallThroughGoto(static_cast<const Branch*>(
+                                   b->FinalInstruction.get()));
+                    }
                     return false;
                 };
                 std::string trueArm = cond;
