@@ -423,6 +423,47 @@ TEST(ILAstToCSharp, SwitchSectionWithLeaveBodyInlinesReturn) {
     EXPECT_NE(text.find("V_0 = 7"), std::string::npos) << text;
 }
 
+TEST(ILAstToCSharp, SwitchSectionWithThrowBodyInlinesThrow) {
+    // A switch section whose body is a direct Throw (`case 0: throw new ...;`),
+    // not a Branch thunk to a body block. The seed's switch-inline analysis
+    // bailed such sections as `not-thunk`; the case rendered `goto IL_X;` to a
+    // labeled block `IL_X: throw new ...;` after the switch. The section should
+    // inline: `case 0: throw new ...;` directly under the label, no thunk/goto.
+    auto v0 = MakeVar(VariableKind::Local, "V_0", 0);
+    auto b0 = std::make_unique<Block>();
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    auto b3 = std::make_unique<Block>(); Block* b3Ptr = b3.get();
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(b3));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v0));
+    // case 0: direct Throw -- the section body is a Throw, not a Branch.
+    auto caseSection = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    caseSection->SetBody(std::make_unique<Throw>(std::make_unique<Call>()));
+    sw->AddSection(std::move(caseSection));
+    // default: a Branch thunk to b2 (work; br b3) -- the shared exit convergence.
+    auto defaultSection = std::make_unique<SwitchSection>();
+    auto brDefault = std::make_unique<Branch>(b2Ptr); brDefault->HasOffset = false;
+    defaultSection->SetBody(std::move(brDefault));
+    sw->AddSection(std::move(defaultSection));
+    fn->Body->Blocks[0]->SetFinal(std::move(sw));
+
+    b2Ptr->Add(std::make_unique<StLoc>(v0, std::make_unique<LdcI4>(7)));
+    b2Ptr->SetFinal(std::make_unique<Branch>(b3Ptr));
+    b3Ptr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 0:"), std::string::npos) << text;
+    EXPECT_NE(text.find("throw"), std::string::npos) << text;
+    EXPECT_NE(text.find("default:"), std::string::npos) << text;
+    EXPECT_NE(text.find("V_0 = 7"), std::string::npos) << text;
+}
+
 TEST(ILAstToCSharp, CastsAndTypeOperators) {
     auto arg1 = MakeVar(VariableKind::Parameter, "arg_1", 1);
 
