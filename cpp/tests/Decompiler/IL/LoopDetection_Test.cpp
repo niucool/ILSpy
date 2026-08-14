@@ -115,6 +115,64 @@ TEST(LoopDetection, DetectsAndWrapsBackEdgeLoop) {
     EXPECT_GE(leaveCount, 1) << "the loop exit branch becomes a Leave";
 }
 
+TEST(LoopDetection, DetectsNestedBackEdgeInsideOuterLoop) {
+    // An outer loop whose body contains a nested back-edge: b0 (entry);
+    // b1 (outer header: if cond br b2 else leave); b2 (body; br b3);
+    // b3 (inner header: if cond2 br b4 else br b5); b4 (inner body; br b3 -- the
+    // INNER back-edge); b5 (br b1 -- the OUTER back-edge). b1 dominates b5
+    // (outer loop), b3 dominates b4 (inner loop). LoopDetection must form BOTH:
+    // an outer Loop containing b1..b5, and a nested Loop inside it for b3..b4.
+    // The port used to form only the outer Loop (its body container was skipped
+    // as Loop-kind), leaving the inner back-edge as a goto.
+    auto b0 = std::make_unique<Block>();
+    auto b1 = std::make_unique<Block>();
+    auto b2 = std::make_unique<Block>();
+    auto b3 = std::make_unique<Block>();
+    auto b4 = std::make_unique<Block>();
+    auto b5 = std::make_unique<Block>();
+    auto b6 = std::make_unique<Block>();  // after the outer loop
+    auto fn = WrapBlocks({});
+    Block* b1p = b1.get(); Block* b2p = b2.get(); Block* b3p = b3.get();
+    Block* b4p = b4.get(); Block* b5p = b5.get(); Block* b6p = b6.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(b3));
+    fn->Body->AddBlock(std::move(b4));
+    fn->Body->AddBlock(std::move(b5));
+    fn->Body->AddBlock(std::move(b6));
+    b1p = fn->Body->Blocks[1].get(); b2p = fn->Body->Blocks[2].get();
+    b3p = fn->Body->Blocks[3].get(); b4p = fn->Body->Blocks[4].get();
+    b5p = fn->Body->Blocks[5].get(); b6p = fn->Body->Blocks[6].get();
+
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Branch>(b1p));
+    // b1: outer header -- if (1 != 0) br b2 else leave(fn)
+    b1p->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                              ComparisonKind::Inequality),
+        std::make_unique<Branch>(b2p), std::make_unique<Leave>(fn->Body.get())));
+    b2p->SetFinal(std::make_unique<Branch>(b3p));
+    // b3: inner header -- if (1 != 0) br b4 else br b5
+    b3p->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                              ComparisonKind::Inequality),
+        std::make_unique<Branch>(b4p), std::make_unique<Branch>(b5p)));
+    b4p->SetFinal(std::make_unique<Branch>(b3p));  // inner back-edge
+    b5p->SetFinal(std::make_unique<Branch>(b1p));  // outer back-edge
+    b6p->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    LoopDetection().Run(*fn, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+
+    int loopCount = 0;
+    Walk(fn->Body.get(), [&](ILInstruction* i) {
+        if (auto* c = dynamic_cast<BlockContainer*>(i))
+            if (c->Kind == ContainerKind::Loop) ++loopCount;
+    });
+    EXPECT_EQ(loopCount, 2) << "both the outer and the nested inner loop must be formed";
+}
+
 TEST(LoopDetection, RepointsExternalBranchToHeaderToNewEntryPoint) {
     // b0: if (cond) br b1 else br b4   (entry: loop header or external b4)
     // b1: if (cond2) br b3 else br b2  (loop header; b1 dominates b2)

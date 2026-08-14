@@ -249,18 +249,43 @@ void ConstructLoop(BlockContainer* parent, FlowAnalysis::ControlFlowNode* header
 } // namespace
 
 void LoopDetection::Run(ILFunction& function, ILTransformContext& context) {
-    // Process each Normal-kind container in one pass (innermost loops first via
-    // reverse post-order over the dominator tree). Loop-kind containers created
-    // by this transform are skipped — the C# avoids re-detecting them because the
-    // newly created entry point has no CFG node; we skip by Kind.
-    WalkContainers(function.Body.get(), [&](BlockContainer* c) {
-        if (c->Kind != ContainerKind::Normal) return;
+    // Process containers in post-order (innermost first): a nested back-edge
+    // inside an outer loop's body must be formed into a nested Loop BEFORE the
+    // outer loop is formed (matching the C#'s post-order block-transform order).
+    // Re-snapshot after each pass: processing a container creates new Loop
+    // containers whose bodies may carry nested back-edges. Loop until a pass
+    // creates no new Loop (bounded to avoid infinite re-detection).
+    bool createdAny = true;
+    int pass = 0;
+    while (createdAny && pass < 8) {
+        ++pass;
+        createdAny = false;
+        std::vector<BlockContainer*> containers;
+        // Post-order: recurse into children before visiting the container.
+        std::function<void(ILInstruction*)> walkPost = [&](ILInstruction* inst) {
+            if (!inst) return;
+            for (int i = 0; i < inst->ChildCount(); ++i) walkPost(inst->GetChild(i));
+            if (auto* c = dynamic_cast<BlockContainer*>(inst))
+                if (c->Kind == ContainerKind::Normal || c->Kind == ContainerKind::Loop)
+                    containers.push_back(c);
+        };
+        walkPost(function.Body.get());
+        for (BlockContainer* c : containers) {
         ControlFlowGraph cfg(c);
-        if (cfg.Nodes().empty()) return;
+        if (cfg.Nodes().empty()) continue;
         for (int i = static_cast<int>(cfg.Nodes().size()) - 1; i >= 0; --i) {
             auto* h = cfg.Nodes()[static_cast<std::size_t>(i)].get();
             Block* headerBlock = static_cast<Block*>(h->UserData);
             if (!headerBlock || headerBlock->Parent != c) continue;
+            // Skip a Loop container's own entry block (the structured loop
+            // header ConstructLoop created): its back-edge is the loop's own,
+            // already structured. Re-detecting it would re-wrap the loop into
+            // itself forever. (The first block of a Loop container is the
+            // header; the C# excludes it because the new entry point has no CFG
+            // node.)
+            if (c->Kind == ContainerKind::Loop && !c->Blocks.empty() &&
+                c->Blocks.front().get() == headerBlock)
+                continue;
             bool isLoopHeader = false;
             for (auto* t : h->Predecessors)
                 if (h->Dominates(t)) { isLoopHeader = true; break; }
@@ -281,8 +306,10 @@ void LoopDetection::Run(ILFunction& function, ILTransformContext& context) {
             }
             context.StepOnce("Construct loop");
             ConstructLoop(c, h, loop, context);
+            createdAny = true;
         }
-    });
+        }
+    }
 }
 
 } // namespace ILSpy::Decompiler::IL
