@@ -46,6 +46,7 @@ add_executable(ilspy_tests
     Decompiler/IL/ControlFlow/SwitchDetection_Test.cpp
     Decompiler/IL/ControlFlow/LoopContext_Test.cpp
     Decompiler/IL/ControlFlow/RemoveUnreachableBlocks_Test.cpp
+    Decompiler/IL/ControlFlow/DetectExitPoints_Test.cpp
     Decompiler/IL/Transforms/HighLevelLoopTransform_Test.cpp
     Decompiler/IL/Transforms/NullableLiftingTransform_Test.cpp
     Decompiler/IL/Transforms/SwitchOnNullableTransform_Test.cpp

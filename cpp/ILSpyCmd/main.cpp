@@ -25,6 +25,7 @@
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
 #include "Decompiler/IL/ControlFlow/ControlFlowSimplification.hpp"
 #include "Decompiler/IL/ControlFlow/ConditionDetection.hpp"
+#include "Decompiler/IL/ControlFlow/DetectExitPoints.hpp"
 #include "Decompiler/IL/ControlFlow/DetectPinnedRegions.hpp"
 #include "Decompiler/IL/ControlFlow/LoopDetection.hpp"
 #include "Decompiler/IL/ControlFlow/RemoveRedundantReturn.hpp"
@@ -282,6 +283,11 @@ int main(int argc, char** argv) {
                 // PatternMatching setting (default true). The recursive property
                 // sub-patterns (`expr is C { P: var x }`) are deferred.
                 ILSpy::Decompiler::IL::PatternMatchingTransform().Run(*fn, transformContext);
+                // DetectExitPoints: replace inner Branch-to-loop-exit with
+                // Leave(loop) so the following ConditionDetection can restructure
+                // `if (cond) leave` patterns (invert to `if (!cond) { body }`).
+                // Mirrors the C# DetectExitPoints (runs before ConditionDetection).
+                ILSpy::Decompiler::IL::DetectExitPoints().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::ConditionDetection().Run(*fn, transformContext);
                 // LockTransform: detect the Monitor.Enter/Exit try/finally pattern
                 // and fold it into a `lock (expr) { body }`. Runs after
