@@ -1541,8 +1541,12 @@ implemented and green here. Everything else follows the phase plan in
   member-reference strings (`EqualityComparer<T>.Default.Equals`); the
   VAR/MVAR-bearing line count on mscorlib --csharp dropped 3471 -> 0.
   `while`/`do-while`/`for` loops render with their condition, body, and
-  increment; `for` is matched when the increment block is hoistable, and
-  loop-header preamble statements render inside the body. Construct-exit
+  increment; `for` is matched when the increment block is hoistable (the
+  pre-header entry branch -- a redundant fall-through -- is excluded from the
+  for-loop's incoming-edge count so the common csc lowering matches, and a
+  soundness guard bails when the for-update would reference a variable first
+  declared in the body), and loop-header preamble statements render inside the
+  body. Construct-exit
   fall-through `goto`s (out of `using`/`try` bodies to the following block)
   are dropped. Switch-section body thunks inline under their case labels:
   `break`-final bodies, throw-final bodies, conditional-exit
