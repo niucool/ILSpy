@@ -504,6 +504,65 @@ TEST(ILAstToCSharp, SwitchAtContainerEndWithSelfTerminatingBodiesInlines) {
     EXPECT_EQ(text.find("break;"), std::string::npos) << text;
 }
 
+TEST(ILAstToCSharp, SwitchBodyWithNestedConditionalReturnInlines) {
+    // A case body whose trailing is a NESTED conditional return: the body's
+    // final is `if (cond1) if (cond2) return;` (a no-else if whose true arm is a
+    // BARE no-else IfInstruction whose true arm is a Leave). The only non-fall
+    // path exits (cond1 && cond2 -> return); every other path falls positionally.
+    // The trueArmExits check (D184) recognized a Block-with-Leave-final but not a
+    // bare nested IfInstruction, so this bailed `final-kind`. The body
+    // contributes no exit branch; the emission renders the nested if-leave.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto v1 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    v1->Name = "flag";
+    auto v2 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 2);
+    v2->Name = "flag2";
+    auto fn = MakeFunction({});
+    auto host = std::make_unique<Block>(); Block* hostPtr = host.get();
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    auto exitB = std::make_unique<Block>(); Block* exitPtr = exitB.get();
+    fn->Body->AddBlock(std::move(host));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(exitB));
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto sec0 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    sec0->SetBody([&]{ auto b=std::make_unique<Branch>(b1Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(sec0));
+    auto secDef = std::make_unique<SwitchSection>();
+    secDef->SetBody([&]{ auto b=std::make_unique<Branch>(b2Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(secDef));
+    hostPtr->SetFinal(std::move(sw));
+
+    // case 0 body: x = 1; if (num) if (flag) return;  -- the nested conditional
+    // return. True arm of outer if is a BARE IfInstruction (flag) return.
+    b1Ptr->Add(std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(1)));
+    auto innerIf = std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v2), std::make_unique<Leave>(fn->Body.get()));
+    b1Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::move(innerIf)));
+    // default body: y = 2; br exit
+    b2Ptr->Add(std::make_unique<StLoc>(v1, std::make_unique<LdcI4>(2)));
+    b2Ptr->SetFinal(std::make_unique<Branch>(exitPtr));
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(v1);
+    fn->Variables.push_back(v2);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 0:"), std::string::npos) << text;
+    EXPECT_NE(text.find("if (num)"), std::string::npos) << text;
+    EXPECT_NE(text.find("if (flag2)"), std::string::npos) << text;
+    EXPECT_NE(text.find("return;"), std::string::npos) << text;
+    EXPECT_NE(text.find("flag = 1"), std::string::npos) << text;
+}
+
 TEST(ILAstToCSharp, CastsAndTypeOperators) {
     auto arg1 = MakeVar(VariableKind::Parameter, "arg_1", 1);
 

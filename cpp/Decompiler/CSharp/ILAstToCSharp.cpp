@@ -788,8 +788,12 @@ private:
                     if (fbr) {
                         conditionalExit = true;  // D182: `if (cond) br exit`
                     } else {
-                        // True arm exits (returns/throws)?
-                        auto trueArmExits = [](const ILInstruction* arm) -> bool {
+                        // True arm exits (returns/throws)? A nested no-else
+                        // if whose true arm exits (a `if (cond2) return;`) also
+                        // exits -- the only non-fall path exits, every other
+                        // path falls positionally (recurses for `if (c1) if (c2) return;`).
+                        std::function<bool(const ILInstruction*)> trueArmExits =
+                            [&](const ILInstruction* arm) -> bool {
                             if (!arm) return false;
                             if (arm->Op == OpCode::Leave || arm->Op == OpCode::Throw)
                                 return true;
@@ -797,6 +801,9 @@ private:
                                 if (b->FinalInstruction)
                                     return b->FinalInstruction->Op == OpCode::Leave ||
                                            b->FinalInstruction->Op == OpCode::Throw;
+                            if (auto* iif = dynamic_cast<const IfInstruction*>(arm))
+                                if (!iif->FalseInst && iif->TrueInst)
+                                    return trueArmExits(iif->TrueInst.get());
                             return false;
                         };
                         if (trueArmExits(iif->TrueInst.get()))
