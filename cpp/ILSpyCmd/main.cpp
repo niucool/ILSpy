@@ -28,6 +28,7 @@
 #include "Decompiler/IL/ControlFlow/DetectPinnedRegions.hpp"
 #include "Decompiler/IL/ControlFlow/LoopDetection.hpp"
 #include "Decompiler/IL/ControlFlow/RemoveRedundantReturn.hpp"
+#include "Decompiler/IL/ControlFlow/RemoveUnreachableBlocks.hpp"
 #include "Decompiler/IL/ControlFlow/SwitchDetection.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
@@ -528,6 +529,18 @@ int main(int argc, char** argv) {
                 // (CanDuplicateExit) is deferred.
                 ILSpy::Decompiler::IL::ReduceNestingTransform().Run(*fn, transformContext);
                 ILSpy::Decompiler::IL::RemoveRedundantReturn().Run(*fn, transformContext);
+                // RemoveUnreachableBlocks: drop blocks with no reachable path
+                // from the container entry. The structure-changing transforms
+                // above (LoopDetection, ConditionDetection,
+                // HighLevelLoopTransform, ReduceNesting) can leave dead blocks
+                // behind -- a loop body that branches back to the header leaves
+                // its fall-through successor unreachable; an inlined
+                // fall-through leaves the original next block unreachable. The
+                // seed would otherwise render these as dead code after a
+                // `return;`/`continue;`/`throw`. Mirrors the C#
+                // BlockContainer.SortBlocks(deleteUnreachableBlocks: true)
+                // subset.
+                ILSpy::Decompiler::IL::RemoveUnreachableBlocks().Run(*fn, transformContext);
                 fn->CheckInvariant(ILSpy::Decompiler::IL::ILPhase::Normal);
                 std::string returnType = "void";
                 std::string paramDecl;
