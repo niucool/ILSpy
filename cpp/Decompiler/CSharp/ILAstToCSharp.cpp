@@ -224,6 +224,11 @@ private:
         bool eligible = false;
         std::vector<const Block*> targets;
         const Block* exit = nullptr;
+        // Sections whose body is a direct Leave (a `return value;` or `throw`),
+        // not a Branch thunk to a body block. They inline their Leave directly
+        // under the case label (no body block, no thunk goto). Maps the section
+        // index to its Leave body for emission.
+        std::map<std::size_t, const Leave*> directLeaveSections;
     };
     std::unordered_map<const SwitchInstruction*, SwitchInlinePlan> switchInlinePlans_;
     std::set<const Block*> inlinedBodyBlocks_;
@@ -716,8 +721,17 @@ private:
         // section order, with no duplicate targets.
         std::vector<const Block*> targets;
         std::vector<std::size_t> targetIdx;
+        std::size_t secIdx = 0;
         for (const auto& section : sw.Sections) {
             if (!section || !section->Body) return bail("null-section");
+            // A section whose body is a direct Leave (a `return value;` or
+            // `throw` -- common in switch-on-enum getters) inlines its Leave
+            // directly: no body block, no thunk goto, no exit contribution.
+            if (auto* lv = dynamic_cast<const Leave*>(section->Body.get())) {
+                plan.directLeaveSections[secIdx] = lv;
+                ++secIdx;
+                continue;
+            }
             auto* br = dynamic_cast<const Branch*>(section->Body.get());
             if (!br || !br->TargetBlock) return bail("not-thunk");
             std::size_t j = outer->Blocks.size();
@@ -728,8 +742,9 @@ private:
                 return bail("dup");
             targets.push_back(br->TargetBlock);
             targetIdx.push_back(j);
+            ++secIdx;
         }
-        if (targets.empty()) return bail("empty");
+        if (targets.empty() && plan.directLeaveSections.empty()) return bail("empty");
         std::set<const Block*> tgtSet(targets.begin(), targets.end());
         std::vector<const Branch*> bodyExit;
         // The exit is the unique shared convergence of the body-final Branches:
@@ -811,9 +826,15 @@ private:
         // the block after the last target as the implicit exit (the post-switch
         // continuation); no body branches to it, so no `break;` lines render.
         if (!exit) {
-            if (targetIdx.back() + 1 >= outer->Blocks.size())
-                return bail("no-post-exit");
-            exit = outer->Blocks[targetIdx.back() + 1].get();
+            if (targets.empty()) {
+                // All sections are direct Leave bodies (every case returns);
+                // no body branches to a shared exit, so no `break;` lines
+                // render. Leave exit null.
+            } else {
+                if (targetIdx.back() + 1 >= outer->Blocks.size())
+                    return bail("no-post-exit");
+                exit = outer->Blocks[targetIdx.back() + 1].get();
+            }
         }
         // The exit itself must not be a body target.
         if (exit && tgtSet.count(exit)) return bail("exit-is-target");
@@ -1395,10 +1416,22 @@ private:
                         if (section->Body) EmitStatement(*section->Body, indent + 1);
                         continue;
                     }
+                    // A direct-Leave section (a `return value;` / `throw`
+                    // body, no thunk): emit the Leave directly under the label.
+                    auto dit = plan->directLeaveSections.find(k);
+                    if (dit != plan->directLeaveSections.end()) {
+                        EmitStatement(*dit->second, indent + 1);
+                        continue;
+                    }
                     // Emit the inlined case body. Its trailing `br exit` (and
                     // any mid-body `br exit`, both gated at analysis) renders
                     // as `break`; a Leave stays as `return`/`throw`.
-                    const Block* body = plan->targets[k];
+                    // The thunk index into plan->targets: section k minus the
+                    // direct-Leave sections before it.
+                    std::size_t thunkIdx = k;
+                    for (const auto& dp : plan->directLeaveSections)
+                        if (dp.first < k) --thunkIdx;
+                    const Block* body = plan->targets[thunkIdx];
                     for (const auto& inst : body->Instructions) {
                         if (!inst || inst->Op == OpCode::Nop) continue;
                         if (auto* b = dynamic_cast<const Branch*>(inst.get())) {
