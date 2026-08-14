@@ -327,9 +327,11 @@ TEST(HighLevelLoopTransform, RunTransformsWhileConditionLoop) {
 }
 
 TEST(HighLevelLoopTransform, RunTransformsLoopWithIncrementBlockToFor) {
-    // Build: Loop { entry: if (num < 5) br body else leave; body: ... br incr;
-    // incr: num++; br entry } -- the classic csc for-loop lowering where the
-    // increment lives in its own block that `continue`-targets jump to.
+    // Build: pre: stloc num=0; Loop { entry: if (num < 5) br body else leave;
+    // body: ... br incr; incr: num++; br entry } -- the classic csc for-loop
+    // lowering where the increment lives in its own block that
+    // `continue`-targets jump to. The pre-header init (stloc num=0) makes the
+    // loop variable in scope for the for-update.
     // -> For: the increment block moves to the container's end (the C#
     // MatchForLoop MoveElementToEnd(incrementBlock)).
     auto num = MakeLocal("num");
@@ -377,6 +379,7 @@ TEST(HighLevelLoopTransform, RunTransformsLoopWithIncrementBlockToFor) {
     bodyPtr->SetFinal(std::make_unique<Branch>(incrPtr));
 
     auto preHeader = std::make_unique<Block>();
+    preHeader->Add(std::make_unique<StLoc>(num, std::make_unique<LdcI4>(0)));
     preHeader->Add(std::move(loopC));
     preHeader->SetFinal(std::make_unique<Leave>(fn->Body.get()));
     fn->Body->AddBlock(std::move(preHeader));
@@ -393,6 +396,87 @@ TEST(HighLevelLoopTransform, RunTransformsLoopWithIncrementBlockToFor) {
     // MoveElementToEnd), so iteration order is entry, body, increment.
     ASSERT_EQ(loopPtr->Blocks.size(), 3u);
     EXPECT_EQ(loopPtr->Blocks.back().get(), incrPtr);
+}
+
+TEST(HighLevelLoopTransform, RunMatchForWithPreHeaderEntryBranch) {
+    // The csc lowering shape where the pre-header is a SEPARATE block that
+    // branches to the loop header (`br header`), and the loop container is the
+    // leading instruction of the NEXT block. The pre-header entry branch is a
+    // redundant fall-through (dropped at render time by IsLoopEntryFallThrough),
+    // not a real incoming edge -- so the for-loop match must exclude it and see
+    // exactly one back-edge (the increment's `br header`). Without the
+    // exclusion, IncomingEdgesTo counts 2 (pre-header + back-edge) and bails.
+    auto num = MakeLocal("num");
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+
+    auto loopC = std::make_unique<BlockContainer>();
+    loopC->Kind = ContainerKind::Loop;
+    BlockContainer* loopPtr = loopC.get();
+
+    auto entry = std::make_unique<Block>();
+    Block* entryPtr = entry.get();
+    entry->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(num), std::make_unique<LdcI4>(5),
+                               ComparisonKind::LessThan),
+        std::make_unique<Branch>(nullptr),   // TrueInst -> body (patched below)
+        std::make_unique<Leave>(nullptr)));  // FalseInst -> leave loop (patched below)
+    loopC->AddBlock(std::move(entry));
+
+    auto body = std::make_unique<Block>();
+    Block* bodyPtr = body.get();
+    body->Add(std::make_unique<StLoc>(num, std::make_unique<LdcI4>(42)));
+    loopC->AddBlock(std::move(body));
+
+    auto incr = std::make_unique<Block>();
+    Block* incrPtr = incr.get();
+    incr->Add(MakeIncrement(num, 1));
+    incr->SetFinal(std::make_unique<Branch>(entryPtr));  // back-edge to the loop head
+    loopC->AddBlock(std::move(incr));
+
+    // Patch the entry's arms now the block pointers are stable.
+    auto* iff = dynamic_cast<IfInstruction*>(loopPtr->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(iff, nullptr);
+    iff->TrueInst = std::make_unique<Branch>(bodyPtr);
+    iff->TrueInst->Parent = iff;
+    iff->TrueInst->ChildIndex = 1;
+    auto* lv = dynamic_cast<Leave*>(iff->FalseInst.get());
+    ASSERT_NE(lv, nullptr);
+    lv->TargetContainer = loopPtr;
+    bodyPtr->SetFinal(std::make_unique<Branch>(incrPtr));
+
+    // main container: [pre-header (br header), loop-holder (loop; br exit), exit]
+    auto preHeader = std::make_unique<Block>();
+    Block* preHeaderPtr = preHeader.get();
+    preHeader->Add(std::make_unique<StLoc>(num, std::make_unique<LdcI4>(0)));
+    preHeader->SetFinal(std::make_unique<Branch>(entryPtr));  // pre-header entry branch
+    fn->Body->AddBlock(std::move(preHeader));
+
+    auto loopHolder = std::make_unique<Block>();
+    Block* loopHolderPtr = loopHolder.get();
+    loopHolder->Add(std::move(loopC));   // loop container is the leading instruction
+    auto exitB = std::make_unique<Block>();
+    Block* exitPtr = exitB.get();
+    loopHolder->SetFinal(std::make_unique<Branch>(exitPtr));
+    fn->Body->AddBlock(std::move(loopHolder));
+
+    exitB->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(exitB));
+
+    fn->Variables.push_back(num);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ILTransformContext ctx;
+    HighLevelLoopTransform::Run(*fn, ctx);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    ASSERT_EQ(loopPtr->Kind, ContainerKind::For)
+        << "a pre-header entry branch must not block the for-loop match";
+    ASSERT_EQ(loopPtr->Blocks.size(), 3u);
+    EXPECT_EQ(loopPtr->Blocks.back().get(), incrPtr);
+    (void)preHeaderPtr; (void)loopHolderPtr; (void)exitPtr;
 }
 
 TEST(HighLevelLoopTransform, RunSplitsTrailingIncrementIntoForBlock) {

@@ -548,7 +548,7 @@ private:
         const auto* loopC = dynamic_cast<const BlockContainer*>(target->Parent);
         if (!loopC || loopC->Blocks.empty() || loopC->Blocks.front().get() != target) return false;
         if (loopC->Kind != ContainerKind::Loop && loopC->Kind != ContainerKind::While &&
-            loopC->Kind != ContainerKind::DoWhile)
+            loopC->Kind != ContainerKind::DoWhile && loopC->Kind != ContainerKind::For)
             return false;
         // A branch from INSIDE the loop is a back-edge (continue), not an entry.
         for (const ILInstruction* p = encBlock; p; p = p->Parent)

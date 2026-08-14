@@ -21,6 +21,9 @@
 
 #include "Decompiler/IL/Transforms/HighLevelLoopTransform.hpp"
 
+#include <set>
+#include <vector>
+
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
@@ -50,12 +53,39 @@ namespace ILSpy::Decompiler::IL {
 // function plus positional fall-through from any preceding block in its
 // container (the same rules VariableUsage's RecomputeIncomingEdgeCounts uses,
 // restricted to a single target).
-static int IncomingEdgesTo(ILInstruction* root, Block* entry) {
+static int IncomingEdgesTo(ILInstruction* root, Block* entry, BlockContainer* loop = nullptr) {
     int count = 0;
+    // Whether `br` is the redundant pre-header entry branch into `loop`'s
+    // header (the block before the loop container falls through into the
+    // loop, rendered as nothing by IsLoopEntryFallThrough). Such a branch is
+    // not a real incoming edge for the for-loop shape: it is the implicit
+    // loop start, not a second back-edge.
+    auto isPreHeaderEntry = [&](Branch* br) -> bool {
+        if (!loop || !br || !br->TargetBlock) return false;
+        if (loop->Blocks.empty() || loop->Blocks.front().get() != br->TargetBlock) return false;
+        Block* encBlock = nullptr;
+        for (ILInstruction* p = br; p; p = p->Parent) {
+            encBlock = dynamic_cast<Block*>(p);
+            if (encBlock) break;
+        }
+        if (!encBlock || encBlock->FinalInstruction.get() != br) return false;
+        for (ILInstruction* p = encBlock; p; p = p->Parent)
+            if (p == loop) return false;  // inside the loop: a back-edge
+        auto* encContainer = dynamic_cast<BlockContainer*>(encBlock->Parent);
+        if (!encContainer) return false;
+        for (std::size_t i = 0; i + 1 < encContainer->Blocks.size(); ++i) {
+            if (encContainer->Blocks[i].get() != encBlock) continue;
+            Block* next = encContainer->Blocks[i + 1].get();
+            if (!next || next->Instructions.empty()) return false;
+            auto* lc = dynamic_cast<BlockContainer*>(next->Instructions[0].get());
+            return lc == loop;
+        }
+        return false;
+    };
     std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
         if (!inst) return;
         if (auto* br = dynamic_cast<Branch*>(inst))
-            if (br->TargetBlock == entry) ++count;
+            if (br->TargetBlock == entry && !isPreHeaderEntry(br)) ++count;
         if (auto* c = dynamic_cast<BlockContainer*>(inst)) {
             for (std::size_t i = 0; i + 1 < c->Blocks.size(); ++i) {
                 if (c->Blocks[i + 1].get() == entry) {
@@ -92,6 +122,107 @@ static bool TreeLoadsVariable(ILInstruction* inst, ILVariable* variable) {
     return false;
 }
 
+// Collect every variable loaded (LdLoc) anywhere in `inst`'s subtree.
+static void CollectLoadedVariables(ILInstruction* inst, std::set<ILVariable*>& out) {
+    if (!inst) return;
+    if (auto* ld = dynamic_cast<LdLoc*>(inst))
+        if (ld->Variable) out.insert(ld->Variable.get());
+    for (int i = 0; i < inst->ChildCount(); ++i)
+        CollectLoadedVariables(inst->GetChild(i), out);
+}
+
+// Collect variables stored in the for-loop's "init" region -- the
+// instructions that render immediately before the loop and can be referenced
+// by the for-update (which renders as an expression and cannot declare).
+// These are: the holder block's instructions that come BEFORE the loop
+// container (the `int i = 0;` in the same block as a leading `for`), or, if the
+// loop is the holder's first instruction, the preceding sibling block's
+// instructions (a separate pre-header block).
+static void CollectInitStores(BlockContainer* loop, std::set<ILVariable*>& out) {
+    std::function<void(ILInstruction*)> collectStores = [&](ILInstruction* in) {
+        if (!in) return;
+        if (auto* st = dynamic_cast<StLoc*>(in))
+            if (st->Variable) out.insert(st->Variable.get());
+        for (int i = 0; i < in->ChildCount(); ++i) collectStores(in->GetChild(i));
+    };
+    // Walk up to the Block that holds the loop container as a statement.
+    ILInstruction* p = loop->Parent;
+    Block* holder = nullptr;
+    while (p) {
+        if (auto* b = dynamic_cast<Block*>(p)) { holder = b; break; }
+        p = p->Parent;
+    }
+    if (!holder) return;
+    // The loop container's index in the holder's Instructions.
+    std::size_t loopIdx = holder->Instructions.size();
+    for (std::size_t i = 0; i < holder->Instructions.size(); ++i)
+        if (holder->Instructions[i].get() == loop) { loopIdx = i; break; }
+    if (loopIdx > 0) {
+        // Init is in the same block, before the loop.
+        for (std::size_t i = 0; i < loopIdx; ++i)
+            collectStores(holder->Instructions[i].get());
+        return;
+    }
+    // The loop is the holder's first instruction: the init is in the
+    // preceding sibling block (the pre-header), if any.
+    auto* c = dynamic_cast<BlockContainer*>(holder->Parent);
+    if (!c) return;
+    for (std::size_t i = 0; i < c->Blocks.size(); ++i)
+        if (c->Blocks[i].get() == holder) {
+            if (i > 0)
+                for (const auto& inst : c->Blocks[i - 1]->Instructions)
+                    collectStores(inst.get());
+            return;
+        }
+}
+
+// Whether any variable loaded in `incrBlock` is DECLARED only in the loop
+// body -- i.e., stored in a body block but NOT stored in the pre-header (the
+// loop var init, which renders before the for as `int i = 0;`) or the loop's
+// header (condition) block. The for-update renders BEFORE the body as an
+// expression (it cannot declare variables); a variable first declared in the
+// body would be out of scope in the update, so such a loop must stay `while`.
+// Stores in the increment itself do NOT count as in-scope (the for-update is
+// an expression, not a declaration site).
+static bool IncrementLoadsBodyDeclaredVariable(
+        BlockContainer* loop, Block* incrBlock, const std::set<const Block*>& bodyBlocks) {
+    std::set<ILVariable*> loaded;
+    for (const auto& inst : incrBlock->Instructions)
+        CollectLoadedVariables(inst.get(), loaded);
+    if (loaded.empty()) return false;
+    // In-scope: variables stored in the init region (pre-header) or the loop
+    // header -- these render before the for-update and can be referenced by it.
+    std::set<ILVariable*> inScope;
+    CollectInitStores(loop, inScope);
+    {
+        std::function<void(ILInstruction*)> collectStores = [&](ILInstruction* in) {
+            if (!in) return;
+            if (auto* st = dynamic_cast<StLoc*>(in))
+                if (st->Variable) inScope.insert(st->Variable.get());
+            for (int i = 0; i < in->ChildCount(); ++i) collectStores(in->GetChild(i));
+        };
+        if (Block* header = loop->Blocks.front().get())
+            for (const auto& inst : header->Instructions) collectStores(inst.get());
+    }
+    // A loaded variable stored in a body block but not in scope -> body-declared.
+    for (const Block* b : bodyBlocks) {
+        for (const auto& inst : b->Instructions) {
+            std::function<bool(ILInstruction*)> any = [&](ILInstruction* in) -> bool {
+                if (!in) return false;
+                if (auto* st = dynamic_cast<StLoc*>(in))
+                    if (st->Variable && loaded.count(st->Variable.get()) &&
+                        !inScope.count(st->Variable.get()))
+                        return true;
+                for (int i = 0; i < in->ChildCount(); ++i)
+                    if (any(in->GetChild(i))) return true;
+                return false;
+            };
+            if (any(inst.get())) return true;
+        }
+    }
+    return false;
+}
+
 // The C# MatchForLoop "increment block" case: a While-shaped loop whose body
 // state-machine has a trailing block of simple statements (an `i++` block --
 // the block every `continue` targets) ends in a back-edge Branch to the loop
@@ -106,7 +237,7 @@ static bool TryMatchFor(BlockContainer* loop, ILInstruction* functionRoot) {
     // so the only counted edge to the entry block is the increment back-edge;
     // anything else (a second back-edge skipping the increment, an external
     // goto) makes the for shape unsafe.
-    if (IncomingEdgesTo(functionRoot, entry) != 1) return false;
+    if (IncomingEdgesTo(functionRoot, entry, loop) != 1) return false;
     // Find the increment block: all simple statements + Branch entry.
     std::size_t incIndex = std::string::npos;
     for (std::size_t i = 1; i < loop->Blocks.size(); ++i) {
@@ -117,6 +248,13 @@ static bool TryMatchFor(BlockContainer* loop, ILInstruction* functionRoot) {
         // A dedicated increment block still needs a real body between it and
         // the head (the C# 3-block minimum), so skip it for a 2-block loop.
         if (loop->Blocks.size() < 3) continue;
+        // Soundness: the for-update renders before the body as an expression
+        // (it cannot declare), so it must not reference a variable first
+        // declared (stored) only in a body block. Bail to `while`.
+        std::set<const Block*> bodyBlocks;
+        for (std::size_t k = 1; k < loop->Blocks.size(); ++k)
+            if (k != i) bodyBlocks.insert(loop->Blocks[k].get());
+        if (IncrementLoadsBodyDeclaredVariable(loop, b, bodyBlocks)) continue;
         incIndex = i;
         break;
     }
