@@ -842,9 +842,14 @@ private:
                 // All sections are direct Leave/Throw bodies (every case
                 // returns/throws); no body branches to a shared exit, so no
                 // `break;` lines render. Leave exit null.
+            } else if (targetIdx.back() + 1 >= outer->Blocks.size()) {
+                // No block after the last target (the switch is at the
+                // container's end): no shared exit. Leave exit null -- the
+                // positional-integrity gate below rejects any body that would
+                // need to fall to a next section/exit it cannot reach, so only
+                // self-terminating bodies (return/throw) or bodies whose fall
+                // is intra-body qualify. No `break;` lines render.
             } else {
-                if (targetIdx.back() + 1 >= outer->Blocks.size())
-                    return bail("no-post-exit");
                 exit = outer->Blocks[targetIdx.back() + 1].get();
             }
         }

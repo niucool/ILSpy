@@ -464,6 +464,46 @@ TEST(ILAstToCSharp, SwitchSectionWithThrowBodyInlinesThrow) {
     EXPECT_NE(text.find("V_0 = 7"), std::string::npos) << text;
 }
 
+TEST(ILAstToCSharp, SwitchAtContainerEndWithSelfTerminatingBodiesInlines) {
+    // A switch at the END of its container (no block after the last body block)
+    // where every body self-terminates (return/throw): there is no shared
+    // `break` exit, and no post-switch block to use as the implicit exit. The
+    // analysis used to bail `no-post-exit`; it should accept (exit = null) --
+    // the positional-integrity gate rejects any body that would need to fall to
+    // a next section/exit it cannot reach, so only self-terminating bodies
+    // qualify. No `break;` lines render.
+    auto v0 = MakeVar(VariableKind::Local, "V_0", 0);
+    auto b0 = std::make_unique<Block>();
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));  // last block -- no post-switch block
+
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v0));
+    auto s1 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(1)));
+    s1->SetBody([&]{ auto b=std::make_unique<Branch>(b1Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(s1));
+    auto s2 = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(2)));
+    s2->SetBody([&]{ auto b=std::make_unique<Branch>(b2Ptr); b->HasOffset=false; return b; }());
+    sw->AddSection(std::move(s2));
+    fn->Body->Blocks[0]->SetFinal(std::move(sw));
+
+    // Both bodies self-terminate (return) -- no shared exit, no fall-through.
+    b1Ptr->SetFinal(ReturnFinal(fn->Body.get()));
+    b2Ptr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 1:"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 2:"), std::string::npos) << text;
+    // No break: every body returns, no shared exit.
+    EXPECT_EQ(text.find("break;"), std::string::npos) << text;
+}
+
 TEST(ILAstToCSharp, CastsAndTypeOperators) {
     auto arg1 = MakeVar(VariableKind::Parameter, "arg_1", 1);
 
