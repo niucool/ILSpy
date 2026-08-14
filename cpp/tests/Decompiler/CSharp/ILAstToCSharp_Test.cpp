@@ -1563,6 +1563,68 @@ TEST(ILAstToCSharp, IfElseWithDroppedFallThroughTrueArmSwapsToNegatedCond) {
     EXPECT_EQ(text.find("else"), std::string::npos) << text;
 }
 
+TEST(ILAstToCSharp, LogicAndConditionRendersAsShortCircuitAnd) {
+    // An if whose condition is a LogicAnd -- `if (a) b else ldc.i4 0` (the
+    // C# IfInstruction.LogicAnd form) -- renders as `a && b`, not the ternary
+    // `(a ? b : 0)`. ConditionDetection.IntroduceShortCircuit builds these
+    // chains; the renderer must render them as idiomatic `&&`.
+    auto a = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    a->Name = "a";
+    auto b = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    b->Name = "b";
+    auto fn = MakeFunction({});
+    auto b0 = std::make_unique<Block>(); Block* b0Ptr = b0.get();
+    auto exitB = std::make_unique<Block>(); Block* exitPtr = exitB.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(exitB));
+    // condition = LogicAnd(a, b) = if (a) b else ldc.i4(0)
+    auto cond = std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(a), std::make_unique<LdLoc>(b),
+        std::make_unique<LdcI4>(0));
+    b0Ptr->SetFinal(std::make_unique<IfInstruction>(std::move(cond),
+        std::make_unique<Leave>(fn->Body.get())));
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Variables.push_back(a);
+    fn->Variables.push_back(b);
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("a && b"), std::string::npos)
+        << "LogicAnd condition should render as `a && b`:\n" << text;
+    EXPECT_EQ(text.find("?"), std::string::npos)
+        << "the ternary form must not appear for a LogicAnd:\n" << text;
+}
+
+TEST(ILAstToCSharp, LogicOrConditionRendersAsShortCircuitOr) {
+    // An if whose condition is a LogicOr -- `if (a) ldc.i4 1 else b` (the C#
+    // IfInstruction.LogicOr form) -- renders as `a || b`, not `(a ? 1 : b)`.
+    auto a = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    a->Name = "a";
+    auto b = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    b->Name = "b";
+    auto fn = MakeFunction({});
+    auto b0 = std::make_unique<Block>(); Block* b0Ptr = b0.get();
+    auto exitB = std::make_unique<Block>(); Block* exitPtr = exitB.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(exitB));
+    // condition = LogicOr(a, b) = if (a) ldc.i4(1) else b
+    auto cond = std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(a), std::make_unique<LdcI4>(1),
+        std::make_unique<LdLoc>(b));
+    b0Ptr->SetFinal(std::make_unique<IfInstruction>(std::move(cond),
+        std::make_unique<Leave>(fn->Body.get())));
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Variables.push_back(a);
+    fn->Variables.push_back(b);
+    fn->CheckInvariant(ILPhase::Normal);
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("a || b"), std::string::npos)
+        << "LogicOr condition should render as `a || b`:\n" << text;
+}
+
 TEST(ILAstToCSharp, GotoIntoImmediatelyFollowingTryEntryIsDropped) {
     // The `goto IL_X; try { IL_X: ... }` shape: a block B0 ends with `br X` and
     // the next sibling block B1 is a pure-construct block (no instructions, a
