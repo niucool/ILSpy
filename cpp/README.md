@@ -1556,14 +1556,23 @@ implemented and green here. Everything else follows the phase plan in
   inline, with a positional-integrity gate so a non-adjacent fall-through
   stays a `goto` (faithful to C# `goto case`). Switches with no convergence
   exit (every body self-terminates or falls) inline with the post-switch
-  block as the implicit exit. mscorlib --csharp: 59 switches inlined,
-  ~14.4k gotos (down from ~18.5k pre-inlining). The seed also drops
+  block as the implicit exit. mscorlib --csharp: 161 switches inlined
+  (direct-Leave and direct-Throw case bodies inline too), ~12k gotos
+  (down from ~18.5k pre-inlining), 141 `for` / 444 `while` loops
+  (LoopDetection forms nested loops; HighLevelLoopTransform's `for` match
+  now fires -- the pre-header entry branch is excluded from the for-loop's
+  incoming-edge count, with an init-scope guard). The seed also drops
   redundant fall-through gotos at the end of if-else arms (a block-final
   `br X` or a true-arm `br X` of an if whose textual-next is X), gotos that
   fall into the immediately-following block's construct entry (`goto X;
   <block>{ try { X: ... } }`), and swaps the resulting empty `if (cond) { }`
-  arms to a negated `if (!cond) { else }` -- together ~3.2k fewer gotos and
-  ~11k fewer lines on mscorlib.
+  arms to a negated `if (!cond) { else }` -- together ~6.5k fewer gotos and
+  ~31k fewer lines on mscorlib. A `break;` is emitted for an inner-loop
+  `br` to the loop's exit (and `continue;` for a `br` to a loop header);
+  `endfinally` and construct-body leaves render as nothing (not a bare,
+  invalid `break;`). `RemoveUnreachableBlocks` drops dead blocks the
+  structure transforms leave behind (a port of the C#
+  `SortBlocks(deleteUnreachableBlocks)` subset).
   Remaining gaps vs the real back
   end: gotos for multi-pred join blocks and loop-internal condition/increment
   jumps (needs DetectExitPoints + HighLevelLoopTransform), full type names
