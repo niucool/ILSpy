@@ -1459,6 +1459,69 @@ TEST(ILAstToCSharp, GotoAcrossTransparentRelayBlockIsDropped) {
     EXPECT_NE(text.find("num = 2"), std::string::npos) << text;
 }
 
+TEST(ILAstToCSharp, GotoFromInsideWhileToLoopExitIsBreak) {
+    // A `br exit` from inside a while loop body, where `exit` is the loop's
+    // post-loop block (the block the loop falls to after completion), renders
+    // as `break;` -- the C# loop-exit statement. The branch is the true arm of a
+    // no-else `if (cond) br exit` in the body (a conditional break); the loop's
+    // exit is the block after the loop container's holder.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto v2 = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 1);
+    v2->Name = "flag";
+    auto fn = MakeFunction({});
+    auto loopHolder = std::make_unique<Block>(); Block* loopHolderPtr = loopHolder.get();
+    auto exitB = std::make_unique<Block>(); Block* exitPtr = exitB.get();
+    fn->Body->AddBlock(std::move(loopHolder));
+    fn->Body->AddBlock(std::move(exitB));
+
+    auto loopC = std::make_unique<BlockContainer>();
+    loopC->Kind = ContainerKind::While;
+    BlockContainer* loopPtr = loopC.get();
+
+    // header: if (num) br body1 else leave(loop) -- the while condition.
+    auto header = std::make_unique<Block>(); Block* headerPtr = header.get();
+    header->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v), std::make_unique<Branch>(nullptr),
+        std::make_unique<Leave>(nullptr)));
+    loopC->AddBlock(std::move(header));
+
+    // body1: if (flag) br exit (the conditional break); no else, falls to body2.
+    auto body1 = std::make_unique<Block>(); Block* body1Ptr = body1.get();
+    body1->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<LdLoc>(v2), std::make_unique<Branch>(exitPtr)));
+    loopC->AddBlock(std::move(body1));
+
+    // body2: num = 1; br header (the back-edge).
+    auto body2 = std::make_unique<Block>(); Block* body2Ptr = body2.get();
+    body2->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(1)));
+    body2->SetFinal(std::make_unique<Branch>(headerPtr));
+    loopC->AddBlock(std::move(body2));
+
+    // Patch the header's arms now the block pointers are stable.
+    auto* iff = dynamic_cast<IfInstruction*>(loopPtr->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(iff, nullptr);
+    iff->TrueInst = std::make_unique<Branch>(body1Ptr);
+    iff->TrueInst->Parent = iff;
+    iff->TrueInst->ChildIndex = 1;
+    dynamic_cast<Leave*>(iff->FalseInst.get())->TargetContainer = loopPtr;
+
+    loopHolderPtr->Add(std::move(loopC));
+    loopHolderPtr->SetFinal(std::make_unique<Branch>(exitPtr));  // falls to exit
+    exitPtr->SetFinal(ReturnFinal(fn->Body.get()));
+
+    fn->Variables.push_back(v);
+    fn->Variables.push_back(v2);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("while (num)"), std::string::npos) << text;
+    EXPECT_NE(text.find("if (flag) break;"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 1;"), std::string::npos) << text;
+}
+
 TEST(ILAstToCSharp, SwitchBodyThunksInlineIntoCaseSections) {
     // The lowered-switch layout the seed receives: a switch instruction whose
     // every section body is a Branch thunk to a body block laid out after the

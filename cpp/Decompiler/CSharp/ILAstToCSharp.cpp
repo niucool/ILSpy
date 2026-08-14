@@ -206,6 +206,10 @@ private:
     std::set<std::string> declared_;          // locals already introduced with `var`
     std::map<const Block*, std::string> labels_;  // branch-target block -> IL_XXXX
     std::set<const Block*> loopHeaders_;  // first block of each Loop container
+    // For each loop container, the block it exits to (the post-loop block a
+    // `break;` targets). Used by GotoText to render an inner-loop `br` to the
+    // loop's exit as `break;`.
+    std::map<const BlockContainer*, const Block*> loopExits_;
 
     // Section bodies of a switch instruction: each body is a Branch thunk to a
     // target body block whose content is the real code, laid out after the
@@ -288,8 +292,11 @@ private:
         if (!inst) return;
         if (auto* c = dynamic_cast<const BlockContainer*>(inst)) {
             if ((c->Kind == ContainerKind::Loop || c->Kind == ContainerKind::While ||
-                 c->Kind == ContainerKind::For) && !c->Blocks.empty()) {
-                loopHeaders_.insert(c->Blocks.front().get());
+                 c->Kind == ContainerKind::For || c->Kind == ContainerKind::DoWhile) && !c->Blocks.empty()) {
+                if (const Block* exit = LoopExitBlock(c)) loopExits_[c] = exit;
+                if (c->Kind == ContainerKind::Loop || c->Kind == ContainerKind::While ||
+                    c->Kind == ContainerKind::For)
+                    loopHeaders_.insert(c->Blocks.front().get());
                 // For a While container, the body entry (the target of the
                 // condition's true-arm Branch) is also unlabeled -- it's the
                 // implicit body start, not a goto target.
@@ -324,6 +331,7 @@ private:
             // branches reference the target but emit nothing, so the label must
             // not be created (it would be orphaned).
             if (br->TargetBlock && !IsFallThroughGoto(br) && !IsLoopEntryFallThrough(br) &&
+                !IsLoopBreak(*br) &&
                 labels_.find(br->TargetBlock) == labels_.end() &&
                 loopHeaders_.find(br->TargetBlock) == loopHeaders_.end())
                 labels_[br->TargetBlock] = LabelFor(br->TargetOffset);
@@ -527,6 +535,22 @@ private:
         return block;
     }
 
+    // The block a `break;` exits to for `loop`: the block the loop falls to
+    // after completion -- the block after the loop container's holder, with a
+    // descent into a construct-leading next block (a `goto X; <next>{ try { X: }
+    // }` exits to X). Returns null if the loop has no clean post-loop block.
+    static const Block* LoopExitBlock(const BlockContainer* loop) {
+        const Block* holder = nullptr;
+        for (const ILInstruction* p = loop; p; p = p->Parent) {
+            holder = dynamic_cast<const Block*>(p);
+            if (holder) break;
+        }
+        if (!holder) return nullptr;
+        const Block* next = TextuallyNextEmittedBlock(holder);
+        if (!next) return nullptr;
+        return FirstEmittedBlockOf(next);
+    }
+
     // Whether this block-final branch is the implicit pre-header entry into a
     // loop (while/do-while/loop) that immediately follows. A loop condition
     // block becomes the loop head (e.g. `while (cond)`) and carries no IL label,
@@ -568,6 +592,22 @@ private:
         return false;
     }
 
+    // Whether `br` is a `break;` -- a branch from inside a loop to that loop's
+    // exit (the post-loop block). Walks up the branch's ancestors to the
+    // INNERMOST loop whose recorded exit == the target; a plain C# `break`
+    // exits the innermost loop, so a target that is an OUTER loop's exit (not
+    // the innermost) is NOT a break (stays a goto -- would need a labeled break).
+    bool IsLoopBreak(const Branch& br) const {
+        if (!br.TargetBlock) return false;
+        for (const ILInstruction* p = &br; p; p = p->Parent) {
+            auto* lc = dynamic_cast<const BlockContainer*>(p);
+            if (!lc) continue;
+            auto it = loopExits_.find(lc);
+            if (it != loopExits_.end() && it->second == br.TargetBlock) return true;
+        }
+        return false;
+    }
+
     std::string GotoText(const Branch& br) const {
         // A branch marked as a switch-case `break` (the body's br-exit, found
         // by the switch-inline analysis, possibly nested under compound
@@ -590,6 +630,9 @@ private:
                     if (p == loopContainer) { insideLoop = true; break; }
                 if (insideLoop) return "continue;";
             }
+            // A branch from INSIDE a loop to that loop's exit (the post-loop
+            // block) is a `break;`.
+            if (IsLoopBreak(br)) return "break;";
             // Drop a redundant `goto nextBlock` when the branch's enclosing
             // block's container's next block IS the target -- the enclosing
             // block falls through to it. (A rendering-only no-op; the ILAst
