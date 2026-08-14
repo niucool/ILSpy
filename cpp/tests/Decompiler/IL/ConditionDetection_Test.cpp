@@ -41,6 +41,7 @@
 #include "Decompiler/IL/Instructions/Nop.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 
 #include <gtest/gtest.h>
@@ -139,6 +140,48 @@ TEST(ConditionDetection, InlinesAndInvertsFallThroughReturn) {
     EXPECT_EQ(iff->FalseInst, nullptr) << "no else; fall-through to b1";
     // b1 (return 1) stays as the fall-through; b2 was folded away.
     EXPECT_EQ(fn->Body->Blocks.size(), 2u);
+}
+
+TEST(ConditionDetection, SwapsEmptyThenBranchToNegatedCondition) {
+    // b0's final is `if (cond) Block{} else Block{ work; leave }` -- an empty
+    // then with the work in the else. SwapEmptyThen swaps to
+    // `if (!cond) Block{ work; leave }` (negated condition, work in the true
+    // arm, no else). This lets the following inline/invert transforms see the
+    // exit in the true arm. The port's renderer swaps empty arms, but the
+    // ILAst-level swap is needed for ConditionDetection's restructuring.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::make_unique<Block>());
+    // empty then arm
+    auto emptyThen = std::make_unique<Block>();
+    // else arm: work; leave (return)
+    auto elseArm = std::make_unique<Block>();
+    elseArm->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(7)));
+    elseArm->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::move(emptyThen), std::move(elseArm)));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunPipeline(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto* iff = dynamic_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(iff, nullptr);
+    // The condition is negated (num != 0 -> num == 0).
+    auto* cond = dynamic_cast<Comp*>(iff->Condition.get());
+    ASSERT_NE(cond, nullptr);
+    EXPECT_EQ(cond->Kind, ComparisonKind::Equality) << "condition negated to num == 0";
+    // The true arm now holds the work (the StLoc), the else is gone.
+    ASSERT_NE(iff->TrueInst, nullptr);
+    auto* tb = dynamic_cast<Block*>(iff->TrueInst.get());
+    ASSERT_NE(tb, nullptr);
+    ASSERT_FALSE(tb->Instructions.empty());
+    EXPECT_EQ(tb->Instructions[0]->Op, OpCode::StLoc) << "work moved to the true arm";
+    EXPECT_EQ(iff->FalseInst, nullptr) << "the else is dropped after the swap";
 }
 
 TEST(ConditionDetection, DoesNotInlineMultiPredFallThrough) {
@@ -324,6 +367,43 @@ TEST(ConditionDetection, MergesCommonExitGotosIntoIfElse) {
     };
     EXPECT_EQ(trailingBranch(iff->TrueInst.get()), nullptr) << "true arm goto dropped";
     EXPECT_EQ(trailingBranch(iff->FalseInst.get()), nullptr) << "false arm goto dropped";
+}
+
+TEST(ConditionDetection, RestructuresTwoBlockEarlyExitChain) {
+    // b0: if (cond) br b3 (no else)   b1: if (cond2) throw (falls to b2)
+    // b2: throw   b3: return. The early-exit chain: the goto b3 skips the
+    // throw chain. Expect restructuring to `if (!cond) { if (cond2) throw; throw }`
+    // then fall to b3 (return) -- no goto.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = WrapBlocks({});
+    for (int k = 0; k < 4; ++k) fn->Body->AddBlock(std::make_unique<Block>());
+    Block* b0 = fn->Body->Blocks[0].get();
+    Block* b1 = fn->Body->Blocks[1].get();
+    Block* b2 = fn->Body->Blocks[2].get();
+    Block* b3 = fn->Body->Blocks[3].get();
+    b0->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::make_unique<Branch>(b3)));
+    b1->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(1),
+                               ComparisonKind::Inequality),
+        std::make_unique<Throw>(std::make_unique<Call>())));
+    b2->SetFinal(std::make_unique<Throw>(std::make_unique<Call>()));
+    b3->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+    RunPipeline(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+    int brB3 = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* i) {
+        if (!i) return;
+        if (auto* br = dynamic_cast<Branch*>(i)) if (br->TargetBlock == b3) ++brB3;
+        for (int k = 0; k < i->ChildCount(); ++k) walk(i->GetChild(k));
+    };
+    walk(fn->Body.get());
+    EXPECT_EQ(brB3, 0) << "the goto to b3 should be restructured away";
 }
 
 

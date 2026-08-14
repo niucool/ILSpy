@@ -86,8 +86,8 @@ bool TryInlineIfFallThrough(BlockContainer* container, std::size_t blockIndex) {
 
     // Gate: when the true arm is NOT a bare Branch (i.e. it is a Block ending
     // in an exit, the post-invert shape), only inline if the true arm's exit
-    // and the fall-through's exit are both Branches to the same block -- so the
-    // common-exit drop will fire and the merge is worthwhile. Without this
+    // and the fall-through's exit are both Branches to the same block -- so
+    // the common-exit drop will fire and the merge is worthwhile. Without this
     // gate the post-invert inline would wrap the "rest of the method" in an
     // else (the early-exit pattern: true arm is a throw, fall-through is the
     // happy path). A bare Branch (the `if-goto` shape) is the first inline that
@@ -161,6 +161,41 @@ std::unique_ptr<ILInstruction> NegateCondition(std::unique_ptr<ILInstruction> co
         : std::unique_ptr<ILInstruction>(std::make_unique<LdcI4>(0));
     return std::make_unique<Comp>(std::move(cond), std::move(zero),
                                     ComparisonKind::Equality);
+}
+
+// Whether `arm` is an empty if-arm: a Nop, or a Block with no instructions
+// and a null/Nop final (the C# ConditionDetection.IsEmpty). Mirrors the
+// renderer's isEmptyArm but at the ILAst level, for the swap transform.
+bool IsEmptyArm(const ILInstruction* arm) {
+    if (!arm) return true;
+    if (arm->Op == OpCode::Nop) return true;
+    if (auto* b = dynamic_cast<const Block*>(arm)) {
+        if (!b->Instructions.empty()) return false;
+        if (!b->FinalInstruction) return true;
+        return b->FinalInstruction->Op == OpCode::Nop;
+    }
+    return false;
+}
+
+// Swap `if (cond) {} else { work }` to `if (!cond) { work }` (negate the
+// condition, move the false arm to the true arm, drop the else). The C#
+// ConditionDetection.SwapEmptyThen. This puts the work in the true arm so the
+// inline/invert transforms (which read the true arm) can restructure it.
+bool TrySwapEmptyThen(BlockContainer* container, std::size_t blockIndex) {
+    if (blockIndex >= container->Blocks.size()) return false;
+    Block* block = container->Blocks[blockIndex].get();
+    auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
+    if (!iff) return false;
+    if (!IsEmptyArm(iff->TrueInst.get())) return false;
+    // Only swap when there IS a non-empty else to move (no point swapping two
+    // empty arms; and a no-else if with an empty then is already minimal).
+    if (IsEmptyArm(iff->FalseInst.get())) return false;
+    iff->Condition = NegateCondition(std::move(iff->Condition));
+    if (iff->Condition) { iff->Condition->Parent = iff; iff->Condition->ChildIndex = 0; }
+    iff->TrueInst = std::move(iff->FalseInst);
+    iff->FalseInst.reset();
+    if (iff->TrueInst) { iff->TrueInst->Parent = iff; iff->TrueInst->ChildIndex = 1; }
+    return true;
 }
 
 // Invert `if (cond) br X else { exit }` to `if (!cond) { exit }` (fall-through
@@ -400,6 +435,13 @@ void ConditionDetection::Run(ILFunction& function, ILTransformContext& context) 
         bool changed;
         do {
             changed = false;
+            // Swap empty-then first: `if (cond) {} else { work }` ->
+            // `if (!cond) { work }`, so the work is in the true arm for the
+            // inline/invert transforms (which read the true arm).
+            for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
+                if (TrySwapEmptyThen(c, i)) { changed = true; break; }
+            }
+            if (changed) continue;
             for (std::size_t i = c->Blocks.size(); i-- > 0;) {
                 if (TryInlineIfFallThrough(c, i)) { changed = true; break; }
             }
