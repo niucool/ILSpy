@@ -1246,6 +1246,36 @@ private:
                 return;
             case OpCode::Leave: {
                 const auto& leave = static_cast<const Leave&>(inst);
+                // An `endfinally` is a Leave whose TargetContainer is the
+                // instruction's immediately-enclosing container (the finally
+                // body), not the function body and not a loop -- the finally
+                // ends and control returns to the try's continuation. It
+                // renders as nothing (a bare `break;` would be invalid C# with
+                // no enclosing loop/switch).
+                if (leave.TargetContainer) {
+                    // An `endfinally`/end-of-try-body leave: the TargetContainer
+                    // is the finally/filter/try body (a construct body, not
+                    // the function body and not a loop) and the leave carries no
+                    // value -- the construct ends and control continues. It
+                    // renders as nothing (a bare `break;` would be invalid C#
+                    // with no enclosing loop/switch).
+                    auto* owner = leave.TargetContainer->Parent;
+                    bool isConstructBody = owner &&
+                        (owner->Op == OpCode::TryFinally ||
+                         owner->Op == OpCode::TryCatch ||
+                         owner->Op == OpCode::TryFault ||
+                         owner->Op == OpCode::UsingInstruction ||
+                         owner->Op == OpCode::LockInstruction ||
+                         owner->Op == OpCode::PinnedRegion);
+                    bool isLoop = leave.TargetContainer->Kind == ContainerKind::Loop ||
+                        leave.TargetContainer->Kind == ContainerKind::While ||
+                        leave.TargetContainer->Kind == ContainerKind::For ||
+                        leave.TargetContainer->Kind == ContainerKind::DoWhile;
+                    if (isConstructBody && !isLoop && !leave.Value &&
+                        (!fn_ || leave.TargetContainer != fn_->Body.get()))
+                        return;
+                }
+                if (!leave.TargetContainer) return;
                 // A leave of the function body is `return`; a leave of a loop
                 // container is `break`; other leaves (switch/try) are `break`
                 // for now (the real back end disambiguates).

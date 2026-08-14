@@ -1522,6 +1522,49 @@ TEST(ILAstToCSharp, GotoFromInsideWhileToLoopExitIsBreak) {
     EXPECT_NE(text.find("num = 1;"), std::string::npos) << text;
 }
 
+TEST(ILAstToCSharp, EndFinallyLeaveIsNotEmittedAsBreak) {
+    // An `endfinally` (a Leave with a null TargetContainer) is the implicit
+    // terminator of a finally block: the finally ends and control returns to
+    // the try's continuation. It must render as NOTHING -- not `break;` (there
+    // is no enclosing loop/switch; a bare `break;` is invalid C#). The seed
+    // used to fall through the Leave handler's `else` branch (TargetContainer
+    // != function body) and emit `break;`.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = MakeFunction({});
+    auto b0 = std::make_unique<Block>(); Block* b0Ptr = b0.get();
+    fn->Body->AddBlock(std::move(b0));
+
+    // try body: work; leave(fn) (a return).
+    auto tryBody = std::make_unique<BlockContainer>();
+    auto tBlock = std::make_unique<Block>();
+    tBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(1)));
+    tBlock->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    tryBody->AddBlock(std::move(tBlock));
+
+    // finally body: work2; endfinally (Leave null target).
+    auto finallyBody = std::make_unique<BlockContainer>();
+    auto fBlock = std::make_unique<Block>();
+    fBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(2)));
+    fBlock->SetFinal(std::make_unique<Leave>(nullptr));  // endfinally
+    finallyBody->AddBlock(std::move(fBlock));
+
+    b0Ptr->SetFinal(std::make_unique<TryFinally>(std::move(tryBody), std::move(finallyBody)));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_EQ(text.find("goto"), std::string::npos) << text;
+    EXPECT_EQ(text.find("IL_"), std::string::npos) << text;
+    EXPECT_NE(text.find("try"), std::string::npos) << text;
+    EXPECT_NE(text.find("finally"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 1"), std::string::npos) << text;
+    EXPECT_NE(text.find("num = 2"), std::string::npos) << text;
+    // The endfinally must NOT render as `break;` (no enclosing loop/switch).
+    EXPECT_EQ(text.find("break;"), std::string::npos)
+        << "endfinally rendered as a bare break (invalid C#):\n" << text;
+}
+
 TEST(ILAstToCSharp, SwitchBodyThunksInlineIntoCaseSections) {
     // The lowered-switch layout the seed receives: a switch instruction whose
     // every section body is a Branch thunk to a body block laid out after the
