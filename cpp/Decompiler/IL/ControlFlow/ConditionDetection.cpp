@@ -348,6 +348,39 @@ Block* NextBlockInContainer(Block* block) {
     return nullptr;
 }
 
+// The C# ConditionDetection.OrderIfBlocks: swap the if's then/else arms to
+// match IL order when the false arm comes BEFORE the true arm in IL (the C#
+// emits the then-branch first, so the if's then should be the earlier-IL
+// arm). Runs after the inline/invert loop as a final cleanup. No block
+// removal -- just swaps the arms and negates the condition -- so it is safe
+// for the downstream Lock/Using/HighLevelLoop transforms (it does not change
+// the block structure they detect, unlike InlineTrueBranch which removes a
+// block). The C# `if (IsEmpty(ifInst.FalseInst) ||
+// GetStartILOffset(ifInst.TrueInst) <= GetStartILOffset(ifInst.FalseInst))
+// return;` -- bail when there is no else, or the true arm is already the
+// earlier-IL arm.
+bool TryOrderIfBlocks(BlockContainer* container, std::size_t blockIndex) {
+    if (blockIndex >= container->Blocks.size()) return false;
+    Block* block = container->Blocks[blockIndex].get();
+    auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
+    if (!iff) return false;
+    if (!iff->TrueInst || !iff->FalseInst) return false;
+    if (IsEmptyArm(iff->FalseInst.get())) return false;  // no else (C# IsEmpty)
+    bool trueEmpty = false, falseEmpty = false;
+    int trueOff = ConditionDetection::GetStartILOffset(iff->TrueInst.get(), trueEmpty);
+    int falseOff = ConditionDetection::GetStartILOffset(iff->FalseInst.get(), falseEmpty);
+    if (trueOff <= falseOff) return false;  // already in IL order
+    // Swap the arms + negate the condition (the C# Comp.LogicNot).
+    auto oldTrue = std::move(iff->TrueInst);
+    iff->TrueInst = std::move(iff->FalseInst);
+    iff->FalseInst = std::move(oldTrue);
+    if (iff->TrueInst) { iff->TrueInst->Parent = iff; iff->TrueInst->ChildIndex = 1; }
+    if (iff->FalseInst) { iff->FalseInst->Parent = iff; iff->FalseInst->ChildIndex = 2; }
+    iff->Condition = NegateCondition(std::move(iff->Condition));
+    if (iff->Condition) { iff->Condition->Parent = iff; iff->Condition->ChildIndex = 0; }
+    return true;
+}
+
 } // namespace
 
 // The C# `ConditionDetection.GetStartILOffset` (see header). A valued Leave
@@ -495,6 +528,13 @@ void ConditionDetection::Run(ILFunction& function, ILTransformContext& context) 
             if (changed) continue;
             for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
                 if (TryDropTrailingGotoToNext(c, i)) { changed = true; break; }
+            }
+            if (changed) continue;
+            // OrderIfBlocks: swap if/else arms to match IL order (the C# runs
+            // it after the inline/invert loop as a final cleanup). Safe -- no
+            // block removal, just an arm swap + condition negate.
+            for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
+                if (TryOrderIfBlocks(c, i)) { changed = true; break; }
             }
         } while (changed);
     });

@@ -406,6 +406,43 @@ TEST(ConditionDetection, RestructuresTwoBlockEarlyExitChain) {
     EXPECT_EQ(brB3, 0) << "the goto to b3 should be restructured away";
 }
 
+TEST(ConditionDetection, OrderIfBlocksSwapsArmsToMatchILOrder) {
+    // b0: if (cond) Block(StartIL=20){leave(2)} else Block(StartIL=10){leave(1)}
+    // The false arm (IL offset 10) comes before the true arm (IL offset 20) in
+    // IL order, so OrderIfBlocks swaps the arms + negates the condition ->
+    // if (!cond) Block(StartIL=10){leave(1)} else Block(StartIL=20){leave(2)}.
+    // The C# ConditionDetection.OrderIfBlocks (runs after the inline/invert
+    // loop): swap when GetStartILOffset(TrueInst) > GetStartILOffset(FalseInst).
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = WrapBlocks({});
+    fn->Body->AddBlock(std::make_unique<Block>());
+    auto trueArm = std::make_unique<Block>();
+    trueArm->StartILOffset = 20;
+    trueArm->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(2)));
+    auto falseArm = std::make_unique<Block>();
+    falseArm->StartILOffset = 10;
+    falseArm->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(1)));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::move(trueArm), std::move(falseArm)));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+    RunPipeline(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+    auto* iff = dynamic_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(iff, nullptr);
+    // Condition negated (Inequality -> Equality via NegateCondition's comp flip).
+    auto* cond = dynamic_cast<Comp*>(iff->Condition.get());
+    ASSERT_NE(cond, nullptr);
+    EXPECT_EQ(cond->Kind, ComparisonKind::Equality) << "condition negated to match IL order";
+    // Arms swapped: the true arm is now the original false arm (StartIL=10).
+    auto* tb = dynamic_cast<Block*>(iff->TrueInst.get());
+    ASSERT_NE(tb, nullptr);
+    EXPECT_EQ(tb->StartILOffset, 10u) << "true arm is the earlier-IL block";
+}
+
 TEST(ConditionDetection, IntroduceShortCircuitCombinesNestedIfGoto) {
     // `if (cond1) { if (cond2) br X }` (the true arm a Block whose final is a
     // nested if-goto) -- the argument-validation skip pattern. IntroduceShortCircuit
