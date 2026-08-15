@@ -139,7 +139,9 @@ bool TryInlineTrueBranch(BlockContainer* container, std::size_t blockIndex) {
     auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
     if (!iff) return false;
     if (!iff->TrueInst || iff->TrueInst->Op != OpCode::Branch) return false;
-    if (iff->FalseInst) return false;  // the C# CanInline requires no else
+    // Note: the C# CanInline does NOT require no-else -- it only checks whether
+    // the true arm is a Branch to a single-pred block. An if with an else can
+    // still have its true arm inlined (the else stays).
     auto* br = static_cast<Branch*>(iff->TrueInst.get());
     Block* target = br->TargetBlock;
     if (!target || target->Parent != container) return false;

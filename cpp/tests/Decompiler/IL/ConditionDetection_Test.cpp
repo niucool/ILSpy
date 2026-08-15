@@ -282,9 +282,12 @@ TEST(ConditionDetection, DoesNotInvertWhenTargetIsNotNextBlock) {
 
     auto* iff = dynamic_cast<IfInstruction*>(fn->Body->Blocks[0]->FinalInstruction.get());
     ASSERT_NE(iff, nullptr);
-    // Not inverted: the goto to X survives, condition not negated.
+    // The invert strategy did not fire (X is not the next block), but
+    // InlineTrueBranch inlined X (single-pred) into the true arm: the goto
+    // to X is gone (the true arm is the inlined X block, not a Branch), and
+    // the else (throw) survives.
     ASSERT_NE(iff->TrueInst, nullptr);
-    EXPECT_EQ(iff->TrueInst->Op, OpCode::Branch) << "goto to X survives";
+    EXPECT_NE(iff->TrueInst->Op, OpCode::Branch) << "the goto to X is inlined away";
     EXPECT_NE(iff->FalseInst, nullptr) << "else (throw) survives";
 }
 
