@@ -2040,6 +2040,14 @@ private:
                 // `comp(eq, ldloc boolVar, ldc.i4 0)` is `!boolVar` (a Boolean
                 // negation); `comp(ne, ldloc boolVar, 0)` is just `boolVar`.
                 // Also `comp(eq, call BoolMethod(..), 0)` is `!BoolMethod(..)`.
+                // Also `comp(eq, LogicAnd/LogicOr, 0)` (a value IfInstruction
+                // built by ConditionDetection.IntroduceShortCircuit then
+                // wrapped by TryInvertIfExit's NegateCondition/Comp.LogicNot)
+                // is `!(a && b)` / `!(a || b)` -- the logic.not of a short-
+                // circuit condition. The LogicAnd/LogicOr shape is matched here
+                // (not via a shared helper) to keep the seed renderer
+                // self-contained; the bare LogicAnd/LogicOr Expr case (D204)
+                // renders the inner `(a && b)` / `(a || b)`.
                 if (comp.Right && comp.Right->Op == OpCode::LdcI4 &&
                     static_cast<const LdcI4*>(comp.Right.get())->Value == 0 &&
                     comp.Left) {
@@ -2062,6 +2070,21 @@ private:
                                 isBoolLeft = true;
                                 leftExpr = Expr(*comp.Left);
                             }
+                        }
+                    } else if (comp.Left->Op == OpCode::IfInstruction) {
+                        // LogicAnd(a, b) = `if (a) b else ldc.i4 0`;
+                        // LogicOr(a, b)  = `if (a) ldc.i4 1 else b`.
+                        // Both evaluate to Boolean, so `comp(eq, X, 0)` is `!X`.
+                        auto* iff = static_cast<const IfInstruction*>(comp.Left.get());
+                        auto isLdcI4 = [](const ILInstruction* a, int v) -> bool {
+                            if (!a || a->Op != OpCode::LdcI4) return false;
+                            return static_cast<const LdcI4*>(a)->Value == v;
+                        };
+                        if (iff->Condition &&
+                            ((isLdcI4(iff->FalseInst.get(), 0) && iff->TrueInst) ||
+                             (isLdcI4(iff->TrueInst.get(), 1) && iff->FalseInst))) {
+                            isBoolLeft = true;
+                            leftExpr = Expr(*comp.Left);
                         }
                     }
                     if (isBoolLeft)

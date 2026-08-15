@@ -145,14 +145,19 @@ std::unique_ptr<ILInstruction> NegateCondition(std::unique_ptr<ILInstruction> co
         comp->Kind = NegateComparison(comp->Kind);
         return cond;
     }
-    // if (c) t else f  ->  if (c) f else t  (swap branches negates the condition)
-    if (auto* iff = dynamic_cast<IfInstruction*>(cond.get())) {
-        auto t = std::move(iff->TrueInst);
-        iff->TrueInst = std::move(iff->FalseInst);
-        iff->FalseInst = std::move(t);
-        if (iff->TrueInst) iff->TrueInst->ChildIndex = 1;
-        if (iff->FalseInst) iff->FalseInst->ChildIndex = 2;
-        return cond;
+    // if (c) t else f (a value IfInstruction used as a condition, e.g. a
+    // LogicAnd/LogicOr built by IntroduceShortCircuit) -- negating it is NOT an
+    // arm swap (that is only valid when the arms are boolean complements, which
+    // a LogicAnd `if (c) cond2 else 0` is not). The C# uses Comp.LogicNot, which
+    // wraps the condition as `comp(eq, cond, 0)` (`cond == 0`); that is faithful
+    // for every value if. (The arm-swap is correct for a CONTROL-FLOW if, but
+    // NegateCondition is only ever called on a condition, never a block final.)
+    if (cond->Op == OpCode::IfInstruction) {
+        auto zero = (cond->ResultType() == StackType::O)
+            ? std::unique_ptr<ILInstruction>(std::make_unique<LdNull>())
+            : std::unique_ptr<ILInstruction>(std::make_unique<LdcI4>(0));
+        return std::make_unique<Comp>(std::move(cond), std::move(zero),
+                                      ComparisonKind::Equality);
     }
     // Otherwise wrap as logic.not: comp(x == 0) for primitives, comp(x == null)
     // for object-typed conditions (a bare reference used as a boolean).
@@ -194,6 +199,36 @@ bool TrySwapEmptyThen(BlockContainer* container, std::size_t blockIndex) {
     if (iff->Condition) { iff->Condition->Parent = iff; iff->Condition->ChildIndex = 0; }
     iff->TrueInst = std::move(iff->FalseInst);
     iff->FalseInst.reset();
+    if (iff->TrueInst) { iff->TrueInst->Parent = iff; iff->TrueInst->ChildIndex = 1; }
+    return true;
+}
+
+// `if (cond1) { if (cond2) br X }` (no else; the true arm a Block whose final
+// is a nested if-goto) -> `if (cond1 && cond2) br X`. The C# ConditionDetection.
+// IntroduceShortCircuit. The port's model: the nested if is the true-arm
+// Block's FinalInstruction (not Instructions[0] as in the C#). Combining lets
+// the following inline/invert transforms see a single if-goto (the `&&`
+// condition) instead of a nested if-goto inside a Block.
+bool TryIntroduceShortCircuit(BlockContainer* container, std::size_t blockIndex) {
+    if (blockIndex >= container->Blocks.size()) return false;
+    Block* block = container->Blocks[blockIndex].get();
+    auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
+    if (!iff) return false;
+    if (!IsEmptyArm(iff->FalseInst.get())) return false;  // only a no-else if
+    auto* trueBlock = dynamic_cast<Block*>(iff->TrueInst.get());
+    if (!trueBlock || !trueBlock->Instructions.empty()) return false;
+    auto* nestedIf = dynamic_cast<IfInstruction*>(trueBlock->FinalInstruction.get());
+    if (!nestedIf) return false;
+    // condition = LogicAnd(iff->Condition, nestedIf->Condition) =
+    // if (iff->Condition) nestedIf->Condition else ldc.i4(0).
+    auto combined = std::make_unique<IfInstruction>(
+        std::move(iff->Condition), std::move(nestedIf->Condition),
+        std::make_unique<LdcI4>(0));
+    iff->Condition = std::move(combined);
+    iff->Condition->Parent = iff;
+    iff->Condition->ChildIndex = 0;
+    // The true arm becomes the nested if's true arm (e.g. `br X`).
+    iff->TrueInst = std::move(nestedIf->TrueInst);
     if (iff->TrueInst) { iff->TrueInst->Parent = iff; iff->TrueInst->ChildIndex = 1; }
     return true;
 }
@@ -440,6 +475,10 @@ void ConditionDetection::Run(ILFunction& function, ILTransformContext& context) 
             // inline/invert transforms (which read the true arm).
             for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
                 if (TrySwapEmptyThen(c, i)) { changed = true; break; }
+            }
+            if (changed) continue;
+            for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
+                if (TryIntroduceShortCircuit(c, i)) { changed = true; break; }
             }
             if (changed) continue;
             for (std::size_t i = c->Blocks.size(); i-- > 0;) {

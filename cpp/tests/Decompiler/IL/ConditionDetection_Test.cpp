@@ -406,6 +406,49 @@ TEST(ConditionDetection, RestructuresTwoBlockEarlyExitChain) {
     EXPECT_EQ(brB3, 0) << "the goto to b3 should be restructured away";
 }
 
+TEST(ConditionDetection, IntroduceShortCircuitCombinesNestedIfGoto) {
+    // `if (cond1) { if (cond2) br X }` (the true arm a Block whose final is a
+    // nested if-goto) -- the argument-validation skip pattern. IntroduceShortCircuit
+    // combines to `if (cond1 && cond2) br X`; then the fall-through (the throw
+    // chain) inlines into the else and the if inverts to `if (!(cond1 && cond2))
+    // { throw chain }` fall to X. No goto, and the condition uses `&&`.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = WrapBlocks({});
+    for (int k = 0; k < 3; ++k) fn->Body->AddBlock(std::make_unique<Block>());
+    Block* b0 = fn->Body->Blocks[0].get();
+    Block* b1 = fn->Body->Blocks[1].get();
+    Block* b2 = fn->Body->Blocks[2].get();
+    // b0: if (num != 0) Block { if (num == 1) br b2 } (no else). Falls to b1.
+    auto nestedIf = std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(1),
+                               ComparisonKind::Equality),
+        std::make_unique<Branch>(b2));
+    auto trueBlock = std::make_unique<Block>();
+    trueBlock->SetFinal(std::move(nestedIf));
+    b0->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::move(trueBlock)));
+    // b1: throw (the exit chain). b2: work; return (X, the happy path with work
+    // so `br b2` stays a real goto, not foldable to a return).
+    b1->SetFinal(std::make_unique<Throw>(std::make_unique<Call>()));
+    b2->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(7)));
+    b2->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+    RunPipeline(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+    int brB2 = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* i) {
+        if (!i) return;
+        if (auto* br = dynamic_cast<Branch*>(i)) if (br->TargetBlock == b2) ++brB2;
+        for (int k = 0; k < i->ChildCount(); ++k) walk(i->GetChild(k));
+    };
+    walk(fn->Body.get());
+    EXPECT_EQ(brB2, 0) << "the goto to b2 (the happy path) should be restructured away";
+}
+
 
 TEST(ConditionDetection, DropsTrailingGotoToNextBlockFromIfArm) {
     // if (cond) { body; goto nextBlock } where nextBlock is the next block:
