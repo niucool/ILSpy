@@ -29,6 +29,7 @@
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/TryInstructions.hpp"
 
 #include <functional>
 #include <vector>
@@ -57,6 +58,125 @@ ILInstruction* TrailingExit(ILInstruction* arm) {
 bool CompatibleCommonExit(ILInstruction* e1, ILInstruction* e2) {
     if (!e1 || !e2 || e1->Op != OpCode::Branch || e2->Op != OpCode::Branch) return false;
     return static_cast<Branch*>(e1)->TargetBlock == static_cast<Branch*>(e2)->TargetBlock;
+}
+
+// Walk the Parent chain to the ILFunction root (mirrors the FunctionOf
+// helper in ExpressionTransforms.cpp / NullCoalescingTransform.cpp).
+ILFunction* FunctionOf(ILInstruction* inst) {
+    for (ILInstruction* p = inst; p != nullptr; p = p->Parent)
+        if (p->IsRoot()) return static_cast<ILFunction*>(p);
+    return nullptr;
+}
+
+// Count every Branch targeting `target` across the whole function subtree.
+// The C# IncomingEdgeCount is maintained incrementally and counts ALL Branch
+// edges (from any container, including nested and sibling containers); the
+// per-container ControlFlowGraph only counts edges from the current
+// container's blocks, so it misses edges from sibling/nested containers.
+// InlineTrueBranch inlines a FORWARD target (not the next block), which is
+// more likely to be targeted from elsewhere, so the whole-function count is
+// the faithful single-predecessor gate (a per-container count would miss a
+// sibling-container edge and dangle a freed block's TargetBlock pointer).
+int CountBranchPredecessors(ILFunction* fn, Block* target) {
+    if (!fn || !target) return 0;
+    int n = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (auto* br = dynamic_cast<Branch*>(inst))
+            if (br->TargetBlock == target) ++n;
+        for (int i = 0; i < inst->ChildCount(); ++i) walk(inst->GetChild(i));
+    };
+    walk(fn->Body.get());
+    return n;
+}
+
+// Whether `inst`'s subtree contains a TryInstruction (TryCatch/TryFinally/
+// TryFault) -- the raw EH pattern that UsingTransform/LockTransform/
+// DetectPinnedRegions fold into `using`/`lock`/`fixed`. Inlining a block
+// whose content contains a TryFinally into an if's true arm breaks those
+// transforms' block-arrangement recognition (the stloc + TryFinally must sit
+// in the right preceding-block shape), so InlineTrueBranch bails on such a
+// target. (The Using/Lock/PinnedRegion nodes are produced by transforms that
+// run AFTER ConditionDetection, so at ConditionDetection time the target
+// carries a TryFinally, not a UsingInstruction/LockInstruction.)
+bool ContainsTryInstruction(ILInstruction* inst) {
+    if (!inst) return false;
+    if (dynamic_cast<TryInstruction*>(inst)) return true;
+    for (int i = 0; i < inst->ChildCount(); ++i)
+        if (ContainsTryInstruction(inst->GetChild(i))) return true;
+    return false;
+}
+
+// The C# ConditionDetection.InlineTrueBranch: `if (cond) br trueBlock` ->
+// `if (cond) { trueBlock... }` when trueBlock is single-predecessor (strictly
+// dominated). Complements TryInlineIfFallThrough (which inlines the
+// FALL-THROUGH into the else): InlineTrueBranch inlines the true arm's target
+// regardless of position (a forward jump), where TryInlineIfFallThrough +
+// TryInvertIfExit require the target to be the next block. Wired as a FALLBACK
+// after the fall-through/invert strategy (the port's strategy covers the common
+// single-pred-fall-through cases and produces the structure the downstream
+// transforms expect); InlineTrueBranch fires only when those bail (a multi-pred
+// fall-through with a single-pred forward true-arm target -- the multi-block
+// early-exit chain `if (cond) goto X; <throw chain>; X:` where the throw
+// chain makes the fall-through 2-pred). RESTRICTED to Normal containers (the
+// function body): firing inside Loop/While/For/DoWhile/Switch containers
+// restructures the block layout the downstream MatchForLoop/UsingTransform/
+// LockTransform detect (the for/using counts dropped when unrestricted), and
+// the early-exit chains InlineTrueBranch targets live in the function body.
+bool TryInlineTrueBranch(BlockContainer* container, std::size_t blockIndex) {
+    if (blockIndex >= container->Blocks.size()) return false;
+    if (container->Kind != ContainerKind::Normal) return false;  // function body only
+    // Bail if the container has any TryInstruction (try/catch/finally) in its
+    // subtree: inlining a block changes the block arrangement the downstream
+    // UsingTransform/LockTransform/DetectPinnedRegions expect for the stloc +
+    // TryFinally pattern, and the broken shape (a `goto` into a try body) is
+    // invalid C#. Conservative -- disables InlineTrueBranch for methods with
+    // any try/catch/finally -- but safe (the -38 goto win is from methods
+    // without EH).
+    for (auto& b : container->Blocks)
+        if (ContainsTryInstruction(b.get())) return false;
+    Block* block = container->Blocks[blockIndex].get();
+    auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
+    if (!iff) return false;
+    if (!iff->TrueInst || iff->TrueInst->Op != OpCode::Branch) return false;
+    if (iff->FalseInst) return false;  // the C# CanInline requires no else
+    auto* br = static_cast<Branch*>(iff->TrueInst.get());
+    Block* target = br->TargetBlock;
+    if (!target || target->Parent != container) return false;
+    // Single-predecessor across the WHOLE function (not just this container):
+    // the target must be reached only by this if's true-arm Branch, so inlining
+    // it doesn't dangle any other Branch's TargetBlock pointer (no GC; a freed
+    // block a Branch still points at is a use-after-free).
+    ILFunction* fn = FunctionOf(block);
+    if (CountBranchPredecessors(fn, target) != 1) return false;
+    // Build a new Block from the target's content (Instructions + the control
+    // flow in FinalInstruction) -- the C# sets ifInst.TrueInst = targetBlock
+    // (the Block itself); this port's block model splits the control flow into
+    // FinalInstruction, so the inlined Block carries both the non-terminals and
+    // the final.
+    auto inlineBlock = std::make_unique<Block>();
+    inlineBlock->StartILOffset = target->StartILOffset;  // label for GetStartILOffset
+    for (auto& inst : target->Instructions) inlineBlock->Add(std::move(inst));
+    target->Instructions.clear();
+    if (target->FinalInstruction) inlineBlock->SetFinal(std::move(target->FinalInstruction));
+    target->FinalInstruction.reset();
+    inlineBlock->RenumberChildren();
+    iff->TrueInst = std::move(inlineBlock);
+    iff->TrueInst->Parent = iff;
+    iff->TrueInst->ChildIndex = 1;
+    // Remove the now-empty target block from the container and re-parent/
+    // re-number the remaining blocks.
+    for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+        if (container->Blocks[i].get() == target) {
+            container->Blocks.erase(container->Blocks.begin() + i);
+            break;
+        }
+    }
+    for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+        container->Blocks[i]->ChildIndex = static_cast<int>(i);
+        container->Blocks[i]->Parent = container;
+    }
+    return true;
 }
 
 // Try to inline the fall-through block (the next block in the container after
@@ -535,6 +655,15 @@ void ConditionDetection::Run(ILFunction& function, ILTransformContext& context) 
             // block removal, just an arm swap + condition negate.
             for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
                 if (TryOrderIfBlocks(c, i)) { changed = true; break; }
+            }
+            if (changed) continue;
+            // InlineTrueBranch (fallback, Normal containers only): inline the
+            // true arm's single-pred forward target when the fall-through/invert
+            // strategy bailed -- the multi-block early-exit chain. Restricted to
+            // Normal containers so it does not restructure loop/using/lock
+            // bodies the downstream transforms detect.
+            for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
+                if (TryInlineTrueBranch(c, i)) { changed = true; break; }
             }
         } while (changed);
     });

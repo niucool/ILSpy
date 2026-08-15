@@ -443,6 +443,52 @@ TEST(ConditionDetection, OrderIfBlocksSwapsArmsToMatchILOrder) {
     EXPECT_EQ(tb->StartILOffset, 10u) << "true arm is the earlier-IL block";
 }
 
+TEST(ConditionDetection, InlineTrueBranchInlinesSinglePredForwardTargetInNormalContainer) {
+    // The multi-block early-exit chain where the fall-through is 2-pred (so
+    // TryInlineIfFallThrough bails) but the true-arm target is single-pred:
+    // bPre: if (num != 0) br b1 else br b0  (makes b1 2-pred: bPre + b0's fall)
+    // b0:  if (num == 1) br b2            (no else; true arm = Branch to b2,
+    //                                       single-pred forward, NOT next)
+    // b1:  leave(call)                    (2-pred; CFS won't fold a Call leave)
+    // b2:  stloc(v, call); leave(call)    (single-pred from b0; the happy path)
+    // Without InlineTrueBranch: the goto to b2 survives -- TryInlineIfFallThrough
+    // bails (b1 is 2-pred), TryInvertIfExit bails (no false arm / b2 not next).
+    // With InlineTrueBranch (restricted to Normal containers): b2 is inlined
+    // into b0's true arm; the goto to b2 is eliminated.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = WrapBlocks({});
+    for (int k = 0; k < 4; ++k) fn->Body->AddBlock(std::make_unique<Block>());
+    Block* bPre = fn->Body->Blocks[0].get();
+    Block* b0 = fn->Body->Blocks[1].get();
+    Block* b1 = fn->Body->Blocks[2].get();
+    Block* b2 = fn->Body->Blocks[3].get();
+    bPre->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::make_unique<Branch>(b1),
+        std::make_unique<Branch>(b0)));
+    b0->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdLoc>(v), std::make_unique<LdcI4>(1),
+                               ComparisonKind::Equality),
+        std::make_unique<Branch>(b2)));
+    b1->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<Call>()));
+    b2->Add(std::make_unique<StLoc>(v, std::make_unique<Call>()));
+    b2->SetFinal(std::make_unique<Leave>(fn->Body.get(), std::make_unique<Call>()));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+    RunPipeline(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+    int brB2 = 0;
+    std::function<void(ILInstruction*)> walk = [&](ILInstruction* i) {
+        if (!i) return;
+        if (auto* br = dynamic_cast<Branch*>(i)) if (br->TargetBlock == b2) ++brB2;
+        for (int k = 0; k < i->ChildCount(); ++k) walk(i->GetChild(k));
+    };
+    walk(fn->Body.get());
+    EXPECT_EQ(brB2, 0) << "the goto to b2 should be inlined into b0's true arm";
+}
+
 TEST(ConditionDetection, IntroduceShortCircuitCombinesNestedIfGoto) {
     // `if (cond1) { if (cond2) br X }` (the true arm a Block whose final is a
     // nested if-goto) -- the argument-validation skip pattern. IntroduceShortCircuit
