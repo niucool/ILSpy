@@ -548,9 +548,137 @@ bool TryOrderIfBlocks(BlockContainer* container, std::size_t blockIndex) {
     return true;
 }
 
-} // namespace
+// IsKeywordExit (C# ConditionDetection.IsKeywordExit): whether an exit
+// instruction has a corresponding keyword and thus doesn't strictly need
+// merging. Branches are 'continue' (a back-edge to the loop entry) or a
+// non-keyword goto; Leave is 'return' (of the function body), 'break' (to a
+// non-Normal container), or a non-keyword leave (a try/using/lock exit to a
+// Normal container); all other (throw, using, etc.) are 'Other'.
+enum class BlockExitKeyword { None, Return, Break, Continue, Other };
+bool IsKeywordExit(ILInstruction* exitInst, BlockExitKeyword& keyword) {
+    keyword = BlockExitKeyword::Other;
+    if (auto* br = dynamic_cast<Branch*>(exitInst)) {
+        // A Branch to a loop's entry block (the back-edge target) is a
+        // 'continue'. At ConditionDetection time loops are still
+        // ContainerKind::Loop (HighLevelLoopTransform converts to While/For
+        // later). The C# also checks the for-increment block via
+        // HighLevelLoopTransform.GetIncrementBlock; this port does not, so a
+        // for-continue (a branch to the increment block, not the entry) is
+        // treated as a non-keyword goto. That only diverges from the C# in the
+        // rare `if (cond) continue else {throw}` shape where the C# keeps the
+        // throw at the tail (continue > other-keyword) and this port would
+        // invert (goto > other-keyword); the corpus does not regress.
+        if (br->TargetBlock && br->TargetBlock->Parent) {
+            auto* loop = dynamic_cast<BlockContainer*>(br->TargetBlock->Parent);
+            if (loop && loop->Kind == ContainerKind::Loop && !loop->Blocks.empty() &&
+                loop->Blocks.front().get() == br->TargetBlock) {
+                keyword = BlockExitKeyword::Continue;
+                return true;
+            }
+        }
+        return false;  // a plain goto (non-keyword)
+    }
+    if (auto* leave = dynamic_cast<Leave*>(exitInst)) {
+        // A Leave of the function body is a 'return'.
+        if (leave->TargetContainer && leave->TargetContainer->Parent &&
+            leave->TargetContainer->Parent->Op == OpCode::ILFunction) {
+            keyword = BlockExitKeyword::Return;
+            return true;
+        }
+        // A Leave to a non-Normal container (a loop/switch) is a 'break'.
+        if (leave->TargetContainer &&
+            leave->TargetContainer->Kind != ContainerKind::Normal) {
+            keyword = BlockExitKeyword::Break;
+            return true;
+        }
+        return false;  // a leave to a Normal container (a try/using/lock exit)
+    }
+    return true;  // Other (throw, using, etc.) -- a keyword exit
+}
 
-// The C# `ConditionDetection.GetStartILOffset` (see header). A valued Leave
+// CompareBlockExitPriority (C# ConditionDetection.CompareBlockExitPriority):
+// {-1, 0, 1} if exit1 has {lower, equal, higher} priority than exit2. A higher-
+// priority exit should be kept as the last instruction in a block even if it
+// prevents merging two compatible lower-priority exits. Non-keywords
+// (a try/using/lock leave, or a goto) outrank keywords; among non-keywords a
+// leave outranks a branch. Among keywords (in a non-switch container, the
+// only case modeled here) a continue is highest, break is lowest, and Other
+// (throw) vs Return are equal (the C# tiebreaks those by IL order, not modeled
+// -- PickBetterBlockExit only tests `> 0`, so a 0 tie is a no-invert, matching
+// the C# `> 0` test). The switch-block break special-casing and the
+// outer-container/leave-arg-offset tiebreakers are not modeled.
+int CompareBlockExitPriority(ILInstruction* exit1, ILInstruction* exit2) {
+    BlockExitKeyword k1, k2;
+    bool isKw1 = IsKeywordExit(exit1, k1);
+    bool isKw2 = IsKeywordExit(exit2, k2);
+    // Keywords have lower priority than non-keywords.
+    if (isKw1 != isKw2) return isKw1 ? -1 : 1;
+    if (isKw1) {
+        // Both keywords (non-switch): break is lowest, continue is highest.
+        if ((k1 == BlockExitKeyword::Break) != (k2 == BlockExitKeyword::Break))
+            return k1 == BlockExitKeyword::Break ? -1 : 1;
+        if ((k1 == BlockExitKeyword::Continue) != (k2 == BlockExitKeyword::Continue))
+            return k1 == BlockExitKeyword::Continue ? 1 : -1;
+        return 0;  // Other vs Return, or the same kind
+    }
+    // Both non-keywords (only a Branch or a Leave). A non-keyword Branch (goto)
+    // has lower priority than a non-keyword Leave (a try/using/lock exit).
+    bool isBr1 = exit1 && exit1->Op == OpCode::Branch;
+    bool isBr2 = exit2 && exit2->Op == OpCode::Branch;
+    if (isBr1 != isBr2) return isBr1 ? -1 : 1;
+    return 0;  // the outer-container/IL-order tiebreakers are not modeled
+}
+
+// TryPickBetterBlockExit (C# ConditionDetection.PickBetterBlockExit): when an
+// if has no else and its true arm exits, compare the true-arm exit's priority
+// to the block's fall-through exit; if the true-arm exit outranks it, invert
+// the if (ConditionDetection::InvertIf) so the high-priority exit becomes the
+// block tail (rendered as a natural keyword) and the low-priority exit becomes
+// the if's branch (which a following transform may then drop or merge). This
+// is the case TryInlineIfFallThrough's CompatibleCommonExit gate (D203) blocks
+// -- a Block true arm whose exit and the fall-through's exit don't branch to
+// the same block -- so without PickBetterBlockExit the goto stays in the true
+// arm. Bails in EH-bearing containers: the invert moves the fall-through
+// block's content into the if's true arm, and if that content is a
+// try/using/lock body the downstream UsingTransform/LockTransform block
+// arrangement breaks (the same regression the InlineTrueBranch/
+// InlineExitBranch EH gates prevent).
+bool TryPickBetterBlockExit(BlockContainer* container, std::size_t blockIndex) {
+    // Normal containers only (the function body): the invert moves the
+    // fall-through block's content into the if's true arm, which disrupts the
+    // block arrangement the downstream HighLevelLoopTransform/LoopDetection
+    // expect for loop bodies (Loop/While/For/DoWhile containers) -- inverting
+    // a loop-body if breaks the back-edge/increment shape and the loop falls
+    // back to a goto. Same restriction as InlineTrueBranch (D207).
+    if (container->Kind != ContainerKind::Normal) return false;
+    if (blockIndex + 1 >= container->Blocks.size()) return false;
+    Block* block = container->Blocks[blockIndex].get();
+    auto* iff = dynamic_cast<IfInstruction*>(block->FinalInstruction.get());
+    if (!iff) return false;
+    if (iff->FalseInst) return false;  // has an else (C# IsEmpty(falseInst))
+    if (!iff->TrueInst) return false;
+    // The true arm must exit (EndPointUnreachable).
+    ILInstruction* trueExit = TrailingExit(iff->TrueInst.get());
+    if (!trueExit || !HasFlag(trueExit->Flags(), InstructionFlags::EndPointUnreachable))
+        return false;
+    Block* nextBlock = container->Blocks[blockIndex + 1].get();
+    if (nextBlock->Parent != container) return false;
+    ILInstruction* blockExit = nextBlock->FinalInstruction.get();
+    if (!blockExit) return false;
+    // EH gate: the invert moves nextBlock's content into the if's true arm;
+    // bail if the container carries a try (the using/lock pattern).
+    for (auto& b : container->Blocks)
+        if (ContainsTryInstruction(b.get())) return false;
+    if (CompareBlockExitPriority(trueExit, blockExit) <= 0) return false;
+    // The fall-through next block must be single-pred (only this block's
+    // fall-through) so the move is semantics-preserving; InvertIf re-checks
+    // this via CountBranchPredecessors and bails if multi-pred.
+    if (CountBranchPredecessors(FunctionOf(block), nextBlock) != 0) return false;
+    ConditionDetection::InvertIf(block, iff);
+    return true;
+}
+
+} // namespace
 // (a Value that is neither null nor a Nop -- this port's reader emits
 // `Leave(container)` with no Value for a void leave, and a Nop Value for a
 // `leave (nop)` artifact) reports its Value's offset; otherwise the
@@ -611,11 +739,18 @@ void ConditionDetection::InvertIf(Block* block, IfInstruction* ifInst) {
 
     // The next block must be single-predecessor (only this block's fall-through)
     // so the move is semantics-preserving. The C# has the falseCode in the same
-    // block as the if, so it is single-pred by construction; this port checks
-    // `IncomingEdgeCount == 1` explicitly (RecomputeIncomingEdgeCounts counts
-    // the positional fall-through edge, so a 1-pred next block is one with no
-    // Branch edges targeting it).
-    if (nextBlock->IncomingEdgeCount != 1) return;
+    // block as the if, so it is single-pred by construction. This port's next
+    // block is the positional fall-through (the if has no else, so the block
+    // falls through to it), so its total incoming edges = 1 (this fall-through)
+    // + any Branch edges targeting it; single-pred is therefore "no Branch
+    // edges target it" -- `CountBranchPredecessors == 0`. The whole-function
+    // count is used (not the per-container `IncomingEdgeCount`, which is stale
+    // mid-fixpoint when InvertIf is called from PickBetterBlockExit inside
+    // ConditionDetection::Run; for the post-ConditionDetection callers
+    // ReduceNestingTransform/HighLevelLoopTransform the count is fresh, and
+    // `CountBranchPredecessors == 0` is equivalent to `IncomingEdgeCount == 1`
+    // for a fall-through next block).
+    if (CountBranchPredecessors(FunctionOf(block), nextBlock) != 0) return;
 
     // Save the old TrueInst (then). Detach it before the slot is reassigned.
     auto thenOwned = std::move(ifInst->TrueInst);
@@ -695,6 +830,21 @@ void ConditionDetection::Run(ILFunction& function, ILTransformContext& context) 
             if (changed) continue;
             for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
                 if (TryDropTrailingGotoToNext(c, i)) { changed = true; break; }
+            }
+            if (changed) continue;
+            // PickBetterBlockExit (the C# runs it inside the HandleIfInstruction
+            // loop after each inline + once after): invert an if with no else
+            // when its true-arm exit outranks the block's fall-through exit, so
+            // the high-priority exit becomes the block tail. Runs AFTER the
+            // inline/invert/drop transforms so the bare-Branch cases they
+            // handle (InlineIfFallThrough + InvertIfExit) are already
+            // restructured; PickBetterBlockExit is then the fallback for the
+            // Block-true-arm case whose exit and the fall-through's exit don't
+            // branch to the same block (InlineIfFallThrough's CompatibleCommonExit
+            // gate, D203, blocks it). Normal containers only -- inverting a
+            // loop-body if breaks the back-edge/increment shape (D207 precedent).
+            for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
+                if (TryPickBetterBlockExit(c, i)) { changed = true; break; }
             }
             if (changed) continue;
             // OrderIfBlocks: swap if/else arms to match IL order (the C# runs

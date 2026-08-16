@@ -1030,3 +1030,90 @@ TEST(ConditionDetection, MscorlibInvertIfShapeProbe) {
     (void)candidates; (void)withNextBlock; (void)wouldFire; (void)multiPredBail;
     (void)noNextBlock; (void)fires;
 }
+
+// PickBetterBlockExit (C# ConditionDetection.PickBetterBlockExit): when an
+// if has no else and its true arm exits, the true-arm exit and the block's
+// fall-through exit are compared by priority (leave > branch > other-keyword >
+// continue > return > break); if the true-arm exit outranks the fall-through
+// exit, the if is inverted so the high-priority exit becomes the block tail
+// (rendered as a natural keyword) and the low-priority exit becomes the if's
+// branch. This case uses a Block true arm (not a bare Branch), so
+// TryInlineIfFallThrough's CompatibleCommonExit gate (D203) blocks the inline
+// -- only PickBetterBlockExit's priority check inverts it.
+TEST(ConditionDetection, PickBetterBlockExitInvertsBlockGotoVsReturn) {
+    // b0: if (1 != 0) { stloc; br X }   (true = Block ending in goto X; no else,
+    // falls to b1=return). The true-arm exit (br X, non-keyword goto, priority
+    // "branch") outranks the block exit (return, priority "return"), so
+    // PickBetterBlockExit inverts: if (1 == 0) { return }, and the old then
+    // (stloc; br X) spreads into b1. InlineExitBranch then merges b1 (br X,
+    // single-pred) into X -- the goto is eliminated.
+    auto fn = WrapBlocks({});
+    for (int k = 0; k < 3; ++k) fn->Body->AddBlock(std::make_unique<Block>());
+    Block* b0 = fn->Body->Blocks[0].get();
+    Block* X = fn->Body->Blocks[2].get();
+    auto tmp = MakeLocalVar("tmp");
+    fn->Variables.push_back(tmp);
+    // then-Block: stloc tmp(0); br X
+    auto thenBlock = std::make_unique<Block>();
+    thenBlock->Add(std::make_unique<StLoc>(tmp, std::make_unique<LdcI4>(0)));
+    thenBlock->SetFinal(std::make_unique<Branch>(X));
+    b0->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::move(thenBlock)));
+    // b1: return  (the fall-through exit; no non-terminals)
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    // X: stloc tmp(1); return  (body so CFS does not pre-fold br X)
+    X->Add(std::make_unique<StLoc>(tmp, std::make_unique<LdcI4>(1)));
+    X->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunPipeline(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    int brX = 0;
+    Walk(fn->Body.get(), [&](ILInstruction* i) {
+        if (auto* br = dynamic_cast<Branch*>(i)) if (br->TargetBlock == X) ++brX;
+    });
+    EXPECT_EQ(brX, 0) << "the goto to X should be restructured away";
+}
+
+// The priority gate: when the true-arm exit does NOT outrank the block exit,
+// PickBetterBlockExit must not invert. Here the true arm is a return (priority
+// "return") and the fall-through is a goto (priority "branch"); branch >
+// return, so the true-arm exit does NOT outrank, and the if stays (the goto
+// remains the block tail -- the high-priority exit).
+TEST(ConditionDetection, PickBetterBlockExitDoesNotInvertWhenTrueExitDoesNotOutrank) {
+    // b0: if (1 != 0) { return }   (true = return; no else, falls to b1)
+    // b1: stloc; br X   (the fall-through is a goto; X is the next block so the
+    // goto is a redundant goto-to-next). trueExit = return (priority "return"),
+    // blockExit = br X (priority "branch"). branch > return, so the true-arm
+    // exit (return) does NOT outrank the block exit (goto) -> no invert. The
+    // return stays as the true arm (the early-exit guard).
+    auto fn = WrapBlocks({});
+    for (int k = 0; k < 3; ++k) fn->Body->AddBlock(std::make_unique<Block>());
+    Block* b0 = fn->Body->Blocks[0].get();
+    auto tmp = MakeLocalVar("tmp");
+    fn->Variables.push_back(tmp);
+    b0->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::make_unique<Leave>(fn->Body.get(), std::make_unique<LdcI4>(7))));
+    // b1: stloc tmp(0); br X  (the fall-through, ending in a goto to X)
+    fn->Body->Blocks[1]->Add(std::make_unique<StLoc>(tmp, std::make_unique<LdcI4>(0)));
+    fn->Body->Blocks[1]->SetFinal(std::make_unique<Branch>(fn->Body->Blocks[2].get()));
+    // X: return  (body so CFS does not pre-fold; X is the next block after b1)
+    fn->Body->Blocks[2]->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RunPipeline(*fn);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    auto* iff = dynamic_cast<IfInstruction*>(b0->FinalInstruction.get());
+    ASSERT_NE(iff, nullptr);
+    ASSERT_NE(iff->TrueInst, nullptr);
+    // The return stays as the true arm (NOT moved to the block tail by an
+    // invert): the true arm is still a Leave (return).
+    EXPECT_EQ(iff->TrueInst->Op, OpCode::Leave)
+        << "return stays as the true arm; no invert (return does not outrank goto)";
+}
