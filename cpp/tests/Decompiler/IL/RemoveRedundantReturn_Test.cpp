@@ -21,14 +21,19 @@
 // (the final is dropped, the block falls through). Value returns are kept.
 
 #include "Decompiler/IL/ControlFlow/RemoveRedundantReturn.hpp"
+#include "Decompiler/IL/ControlFlow/RemoveUnreachableBlocks.hpp"
 #include "Decompiler/IL/ILReader.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/IL/Instructions/Branch.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
+#include "Decompiler/Util/LongSet.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 
 #include <gtest/gtest.h>
@@ -132,4 +137,87 @@ TEST(RemoveRedundantReturn, MscorlibSweepDropsSomeTrailingReturns) {
     }
     EXPECT_GT(processed, 2000);
     EXPECT_GT(dropped, 0) << "some trailing void return should be dropped";
+}
+
+TEST(RemoveRedundantReturn, DropsTrailingReturnAfterDeadBlockWhenUnreachableRunsFirst) {
+    // A void function whose last block is an EMPTY unreachable dead block, with
+    // the real trailing `return;` on the second-to-last block. The structure-
+    // changing transforms can leave a trailing empty dead block after a return
+    // (e.g. a `try/finally` that always returns leaves its fall-through successor
+    // unreachable and empty). RemoveRedundantReturn alone bails on the empty
+    // last block; RemoveUnreachableBlocks must run first to drop the dead block,
+    // making the return-block last so RemoveRedundantReturn fires on it.
+    auto v = std::make_shared<ILVariable>();
+    v->Name = "V_0";
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Body->AddBlock(std::make_unique<Block>());  // Block 0: work; return
+    fn->Body->AddBlock(std::make_unique<Block>());  // Block 1: empty dead
+    fn->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(1)));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fn->Body.get()));  // void return
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // The OLD order (RemoveRedundantReturn first) bails on the empty last block.
+    auto fnOld = std::make_unique<ILFunction>();
+    fnOld->Body = std::make_unique<BlockContainer>();
+    fnOld->Body->Parent = fnOld.get();
+    fnOld->Body->ChildIndex = 0;
+    fnOld->Body->AddBlock(std::make_unique<Block>());
+    fnOld->Body->AddBlock(std::make_unique<Block>());
+    fnOld->Body->Blocks[0]->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(1)));
+    fnOld->Body->Blocks[0]->SetFinal(std::make_unique<Leave>(fnOld->Body.get()));
+    RemoveRedundantReturn().Run(*fnOld, Ctx());
+    RemoveUnreachableBlocks().Run(*fnOld, Ctx());
+    fnOld->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(fnOld->Body->Blocks.size(), 1u);
+    EXPECT_NE(fnOld->Body->Blocks[0]->FinalInstruction, nullptr)
+        << "the old order leaves the trailing return (the bug)";
+
+    // The fixed order: RemoveUnreachableBlocks first (drops Block 1), then
+    // RemoveRedundantReturn (drops Block 0's now-trailing return).
+    RemoveUnreachableBlocks().Run(*fn, Ctx());
+    RemoveRedundantReturn().Run(*fn, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+    ASSERT_EQ(fn->Body->Blocks.size(), 1u);
+    EXPECT_EQ(fn->Body->Blocks[0]->FinalInstruction, nullptr)
+        << "the trailing return after the dead block should be dropped";
+}
+
+TEST(RemoveRedundantReturn, KeepsSwitchCaseBodyReturn) {
+    // A void function whose last block is a switch case body (a block a switch
+    // section branches to) ending in `return;`. Removing that return would
+    // change the case body from self-terminating to fall-through and break the
+    // seed's switch-inline analysis. RemoveRedundantReturn must keep it (the
+    // C# avoids this by only recursing into try/lock/using/if, not switch).
+    auto v = std::make_shared<ILVariable>();
+    v->Name = "V_0";
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Body->AddBlock(std::make_unique<Block>());  // Block 0: switch host
+    fn->Body->AddBlock(std::make_unique<Block>());  // Block 1: case body; return
+    Block* caseBody = fn->Body->Blocks[1].get();
+    // Block 1: work; return (the case body).
+    caseBody->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(2)));
+    caseBody->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    // Block 0: switch(V_0) with a section branching to Block 1 (the case body).
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v));
+    auto section = std::make_unique<SwitchSection>(ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    section->SetBody(std::make_unique<Branch>(caseBody));
+    sw->AddSection(std::move(section));
+    fn->Body->Blocks[0]->SetFinal(std::move(sw));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RemoveRedundantReturn().Run(*fn, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // The case body's `return;` is kept (not removed): it is the case body's
+    // terminator, not a method-level trailing return.
+    ASSERT_NE(fn->Body->Blocks[1]->FinalInstruction, nullptr);
+    EXPECT_EQ(fn->Body->Blocks[1]->FinalInstruction->Op, OpCode::Leave)
+        << "the switch case body's return must be kept";
 }

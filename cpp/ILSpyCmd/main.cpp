@@ -534,19 +534,23 @@ int main(int argc, char** argv) {
                 // dominator analysis); the trailing-leave handling
                 // (CanDuplicateExit) is deferred.
                 ILSpy::Decompiler::IL::ReduceNestingTransform().Run(*fn, transformContext);
-                ILSpy::Decompiler::IL::RemoveRedundantReturn().Run(*fn, transformContext);
                 // RemoveUnreachableBlocks: drop blocks with no reachable path
                 // from the container entry. The structure-changing transforms
                 // above (LoopDetection, ConditionDetection,
                 // HighLevelLoopTransform, ReduceNesting) can leave dead blocks
                 // behind -- a loop body that branches back to the header leaves
                 // its fall-through successor unreachable; an inlined
-                // fall-through leaves the original next block unreachable. The
-                // seed would otherwise render these as dead code after a
-                // `return;`/`continue;`/`throw`. Mirrors the C#
-                // BlockContainer.SortBlocks(deleteUnreachableBlocks: true)
-                // subset.
+                // fall-through leaves the original next block unreachable; a
+                // `try/finally` that always returns leaves an empty trailing
+                // dead block after the return. The seed would otherwise render
+                // these as dead code after a `return;`/`continue;`/`throw`.
+                // Mirrors the C# BlockContainer.SortBlocks(deleteUnreachableBlocks:
+                // true) subset. Runs BEFORE RemoveRedundantReturn so a trailing
+                // empty dead block does not shadow the real last reachable
+                // block's `return;` (RemoveRedundantReturn reads the literal last
+                // block; a trailing dead block would make it bail).
                 ILSpy::Decompiler::IL::RemoveUnreachableBlocks().Run(*fn, transformContext);
+                ILSpy::Decompiler::IL::RemoveRedundantReturn().Run(*fn, transformContext);
                 fn->CheckInvariant(ILSpy::Decompiler::IL::ILPhase::Normal);
                 std::string returnType = "void";
                 std::string paramDecl;
