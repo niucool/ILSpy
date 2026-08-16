@@ -455,6 +455,51 @@ bool TryDropTrailingGotoToNext(BlockContainer* container, std::size_t blockIndex
     return false;
 }
 
+// The C# ConditionDetection.InlineExitBranch: `...; br nextBlock` ->
+// `...; { nextBlock... }` -- merge a block whose FinalInstruction is a Branch
+// to a single-pred block in the same container. Runs inside the if-restructuring
+// loop (the C# `while (InlineTrueBranch || InlineExitBranch)`) to catch merges the
+// if-restructuring enables (CFS already ran before ConditionDetection). Only
+// fires on a block whose FinalInstruction is a plain Branch (not an IfInstruction
+// -- the if-restructuring target), so it doesn't interfere with the if transforms.
+bool TryInlineExitBranch(BlockContainer* container, std::size_t blockIndex) {
+    if (blockIndex >= container->Blocks.size()) return false;
+    // Bail in EH-bearing methods: merging a block changes the block arrangement
+    // the downstream UsingTransform/LockTransform/DetectPinnedRegions expect
+    // for the stloc + TryFinally pattern (the same regression the InlineTrueBranch
+    // EH gate prevents -- a using body restructured into a bare try/finally).
+    for (auto& b : container->Blocks)
+        if (ContainsTryInstruction(b.get())) return false;
+    Block* block = container->Blocks[blockIndex].get();
+    if (!block->FinalInstruction || block->FinalInstruction->Op != OpCode::Branch) return false;
+    auto* br = static_cast<Branch*>(block->FinalInstruction.get());
+    Block* target = br->TargetBlock;
+    if (!target || target->Parent != container) return false;
+    // Single-predecessor across the whole function (the C# IncomingEdgeCount
+    // counts ALL Branch edges; a per-container CFG misses parent-container edges).
+    ILFunction* fn = FunctionOf(block);
+    if (CountBranchPredecessors(fn, target) != 1) return false;
+    // Merge: move target's Instructions to block, replace block's final with
+    // target's final, remove target from the container.
+    for (auto& inst : target->Instructions) block->Add(std::move(inst));
+    target->Instructions.clear();
+    block->SetFinal(std::move(target->FinalInstruction));
+    target->FinalInstruction.reset();
+    block->RenumberChildren();
+    // Remove the now-empty target block.
+    for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+        if (container->Blocks[i].get() == target) {
+            container->Blocks.erase(container->Blocks.begin() + i);
+            break;
+        }
+    }
+    for (std::size_t i = 0; i < container->Blocks.size(); ++i) {
+        container->Blocks[i]->ChildIndex = static_cast<int>(i);
+        container->Blocks[i]->Parent = container;
+    }
+    return true;
+}
+
 // The next block in `block`'s container after `block` (the positional
 // fall-through). nullptr if `block` is not in a container's Blocks list or is
 // the last block. Mirrors the helper in PatternMatchingTransform /
@@ -666,6 +711,13 @@ void ConditionDetection::Run(ILFunction& function, ILTransformContext& context) 
             // bodies the downstream transforms detect.
             for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
                 if (TryInlineTrueBranch(c, i)) { changed = true; break; }
+            }
+            if (changed) continue;
+            // InlineExitBranch: merge a block whose final is a single-pred `br
+            // nextBlock` (the C# HandleIfInstruction loop's unconditional-branch
+            // inline, catching merges the if-restructuring enables).
+            for (std::size_t i = 0; i < c->Blocks.size(); ++i) {
+                if (TryInlineExitBranch(c, i)) { changed = true; break; }
             }
         } while (changed);
     });
