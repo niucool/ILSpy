@@ -730,14 +730,38 @@ private:
                 return;
             }
         };
-        // Locate the host block and its outer container.
+        // Locate the host block and its outer container. The host block is
+        // the block directly carrying the switch (sw.Parent). Usually it is
+        // directly in a container, so `outer` is its parent. But the switch
+        // can sit in an if-arm (the host block's parent is the IfInstruction,
+        // not a container) -- `if (cond) { switch ... }` -- in which case the
+        // case bodies live in the ANCESTOR container (the one holding the if).
+        // Walk up to the nearest ancestor block-in-a-container: that block is
+        // the host position (the if's block) and its parent is `outer`, so the
+        // `no-outer` shape still inlines and the after-host target/exit checks
+        // use the if's block position.
         const Block* hostBlock = dynamic_cast<const Block*>(sw.Parent);
-        const BlockContainer* outer = hostBlock
-            ? dynamic_cast<const BlockContainer*>(hostBlock->Parent) : nullptr;
+        const BlockContainer* outer = nullptr;
+        const Block* hostPosBlock = hostBlock;
+        if (hostBlock) {
+            if (auto* c = dynamic_cast<const BlockContainer*>(hostBlock->Parent)) {
+                outer = c;
+            } else {
+                for (const ILInstruction* p = hostBlock->Parent; p; p = p->Parent) {
+                    if (auto* b = dynamic_cast<const Block*>(p)) {
+                        if (auto* c = dynamic_cast<const BlockContainer*>(b->Parent)) {
+                            hostPosBlock = b;
+                            outer = c;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         if (!outer) return bail("no-outer");
         std::size_t hostIdx = outer->Blocks.size();
         for (std::size_t i = 0; i < outer->Blocks.size(); ++i)
-            if (outer->Blocks[i].get() == hostBlock) { hostIdx = i; break; }
+            if (outer->Blocks[i].get() == hostPosBlock) { hostIdx = i; break; }
         if (hostIdx >= outer->Blocks.size()) return bail("no-host");
         // Every section body must be a single Branch thunk to a body block in
         // the same outer container, laid out AFTER the switch host, in the

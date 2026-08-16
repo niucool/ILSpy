@@ -1067,6 +1067,62 @@ TEST(ILAstToCSharp, GotoToLoopHeaderWithCodeBetweenEmitsLabel) {
         << "the loop header must carry an IL_0071: label before the while:\n" << text;
 }
 
+TEST(ILAstToCSharp, SwitchInsideIfArmInlinesCaseBodies) {
+    // A switch whose host block is an if-arm (not directly in a container) --
+    // `if (cond) { switch (V) { case 0: br b1; default: br b2; } }` -- has its
+    // case bodies in the ANCESTOR container (the one holding the if). The
+    // switch-inline analysis must walk up to the nearest BlockContainer to find
+    // the bodies (the `no-outer` shape), so the cases inline their bodies'
+    // returns instead of rendering `goto IL_XXXX;` thunks + labeled blocks.
+    auto v0 = MakeVar(VariableKind::Local, "V_0", 0);
+    auto b0 = std::make_unique<Block>();
+    auto b1 = std::make_unique<Block>();
+    auto b2 = std::make_unique<Block>();
+    auto b3 = std::make_unique<Block>();  // post-switch continuation
+    auto fn = MakeFunction({});
+    Block* b1Ptr = b1.get();
+    Block* b2Ptr = b2.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    fn->Body->AddBlock(std::move(b3));
+
+    // The switch: case 0 -> br b1 (return); default -> br b2 (return).
+    auto sw = std::make_unique<SwitchInstruction>(std::make_unique<LdLoc>(v0));
+    auto caseSection = std::make_unique<SwitchSection>(
+        ILSpy::Decompiler::Util::LongSet(static_cast<long long>(0)));
+    auto brCase = std::make_unique<Branch>(b1Ptr);
+    brCase->TargetOffset = 0x30;
+    caseSection->SetBody(std::move(brCase));
+    sw->AddSection(std::move(caseSection));
+    auto defaultSection = std::make_unique<SwitchSection>();
+    auto brDefault = std::make_unique<Branch>(b2Ptr);
+    brDefault->TargetOffset = 0x40;
+    defaultSection->SetBody(std::move(brDefault));
+    sw->AddSection(std::move(defaultSection));
+
+    // The switch sits in the if's true arm (a Block whose parent is the
+    // IfInstruction, not a container) -- the `no-outer` shape.
+    auto trueArm = std::make_unique<Block>();
+    trueArm->SetFinal(std::move(sw));
+    fn->Body->Blocks[0]->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::move(trueArm)));
+    fn->Body->Blocks[1]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Body->Blocks[2]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->Body->Blocks[3]->SetFinal(ReturnFinal(fn->Body.get()));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    EXPECT_NE(text.find("switch (V_0)"), std::string::npos) << text;
+    EXPECT_NE(text.find("case 0:"), std::string::npos) << text;
+    // The case bodies inline (their returns render under the cases); no thunk
+    // gotos to labeled blocks after the switch.
+    EXPECT_EQ(text.find("goto IL_"), std::string::npos)
+        << "the case bodies should inline, not render goto IL_ thunks:\n" << text;
+}
+
 TEST(ILAstToCSharp, CSharpTypeNameRendersGeneric) {
     // A parameterized (generic) type must render as C# `List<string>`, not the
     // ECMA reflection name `List`1<System.String>` nor a mangled last-segment
