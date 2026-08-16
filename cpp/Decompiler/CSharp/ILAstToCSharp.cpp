@@ -206,6 +206,11 @@ private:
     std::set<std::string> declared_;          // locals already introduced with `var`
     std::map<const Block*, std::string> labels_;  // branch-target block -> IL_XXXX
     std::set<const Block*> loopHeaders_;  // first block of each Loop container
+    // Blocks whose `IL_XXXX:` label was emitted BEFORE a construct keyword
+    // (a loop/try/catch/finally/lock/using whose entry block is a `goto` target
+    // from outside the construct). EmitBlock suppresses the label for these so
+    // it is not emitted a second time inside the construct body.
+    std::set<const Block*> emittedHeaderLabels_;
     // For each loop container, the block it exits to (the post-loop block a
     // `break;` targets). Used by GotoText to render an inner-loop `br` to the
     // loop's exit as `break;`.
@@ -957,16 +962,59 @@ private:
         return plan;
     }
 
-    // Emit the loop header block's `IL_xxxx:` label before the loop keyword
-    // when the header is a `goto` target from outside the loop (a non-continue
-    // branch -- CollectLabels created the label). C# labels start in column 0.
-    void EmitHeaderLabel(const Block* header) {
+    // Whether any Branch targeting `header` renders a real `goto` AND is from
+    // INSIDE `bodyContainer` (the construct body whose entry is `header`). A
+    // goto from inside the construct to its own entry re-enters the construct;
+    // moving the entry's label before the construct keyword would make such an
+    // inside-branch jump OUT of the construct (running a finally/leave) and back
+    // in -- wrong. So the label moves before the keyword only when every
+    // goto-rendering branch to `header` is from OUTSIDE the construct. Branches
+    // that render as `continue`/`break`/a dropped fall-through do not reference
+    // the label (CollectLabels skipped them), so they do not block the move.
+    bool EntryTargetedFromInside(const Block* header, const BlockContainer* body) const {
+        if (!header || !body) return false;
+        std::function<bool(const ILInstruction*)> walk = [&](const ILInstruction* inst) -> bool {
+            if (!inst) return false;
+            if (auto* br = dynamic_cast<const Branch*>(inst))
+                if (br->TargetBlock == header &&
+                    !IsContinueBranch(br) && !IsLoopBreak(*br) &&
+                    !IsFallThroughGoto(br) && !IsLoopEntryFallThrough(br)) {
+                    for (const ILInstruction* p = br; p; p = p->Parent)
+                        if (p == body) return true;
+                }
+            for (int i = 0; i < inst->ChildCount(); ++i)
+                if (walk(inst->GetChild(i))) return true;
+            return false;
+        };
+        return walk(fn_->Body.get());
+    }
+
+    // Emit the construct-entry block's `IL_xxxx:` label BEFORE the construct
+    // keyword (a loop/try/catch/finally/lock/using) when the entry is a `goto`
+    // target from OUTSIDE the construct. C# forbids `goto` into a `try`/
+    // `catch`/`finally`/`lock`/`using` body (and into a loop body), so the entry
+    // block's label must sit before the keyword (outside the construct), making
+    // the goto target the construct statement (valid) rather than a point
+    // inside it. Records the block so EmitBlock suppresses the inside emission
+    // (no double label). C# labels start in column 0. `bodyContainer` is the
+    // construct body whose first block is `header` (the loop/try/catch/finally/
+    // lock/using body); the inside-branch check uses it.
+    void EmitHeaderLabel(const Block* header, const BlockContainer* bodyContainer) {
         if (!header) return;
         auto label = labels_.find(header);
-        if (label != labels_.end()) {
-            out_ += label->second;
-            out_ += ":\n";
-        }
+        if (label == labels_.end()) return;
+        if (EntryTargetedFromInside(header, bodyContainer)) return;  // keep inside
+        out_ += label->second;
+        out_ += ":\n";
+        emittedHeaderLabels_.insert(header);
+    }
+    // Convenience: the body is an ILInstruction (a BlockContainer in practice);
+    // cast and emit the entry label. No-op if the body is empty or not a
+    // BlockContainer.
+    void EmitBodyHeaderLabel(const ILInstruction* bodyInst) {
+        auto* body = dynamic_cast<const BlockContainer*>(bodyInst);
+        if (body && !body->Blocks.empty())
+            EmitHeaderLabel(body->Blocks.front().get(), body);
     }
 
     void EmitContainer(const BlockContainer& container, int indent) {
@@ -981,7 +1029,7 @@ private:
             // `while (cond) { body }` -- the condition from the if, the body
             // from the blocks after the entry.
             const Block* header = container.Blocks.front().get();
-            EmitHeaderLabel(header);
+            EmitHeaderLabel(header, &container);
             std::string cond = "(default)";
             if (header && header->FinalInstruction &&
                 header->FinalInstruction->Op == OpCode::IfInstruction) {
@@ -1023,7 +1071,7 @@ private:
             // block behind it -- so locate it by shape (final Branch to the
             // header, all-simple statements) instead of assuming position.
             const Block* header = container.Blocks.front().get();
-            EmitHeaderLabel(header);
+            EmitHeaderLabel(header, &container);
             const Block* increment = nullptr;
             std::size_t incIdx = 0;
             for (std::size_t i = container.Blocks.size(); i-- > 1;) {
@@ -1159,7 +1207,7 @@ private:
             // iterates. Only the LAST block's trailing back-edge is dropped (a
             // mid-loop back-edge is a `continue`, rendered as a goto for now).
             const Block* header = container.Blocks.front().get();
-            EmitHeaderLabel(header);
+            EmitHeaderLabel(header, &container);
             Line(indent, "while (true)");
             Line(indent, "{");
             for (std::size_t i = 0; i < container.Blocks.size(); ++i) {
@@ -1213,8 +1261,10 @@ private:
         // standalone labeled block (see AnalyzeSwitchInline).
         if (inlinedBodyBlocks_.count(&block)) return;
         auto label = labels_.find(&block);
-        if (label != labels_.end()) {
-            // C# labels start in column 0 by convention.
+        if (label != labels_.end() && !emittedHeaderLabels_.count(&block)) {
+            // C# labels start in column 0 by convention. A block whose label
+            // was already emitted before a construct keyword (EmitHeaderLabel)
+            // is not re-labeled here -- the goto targets the construct statement.
             out_ += label->second;
             out_ += ":\n";
         }
@@ -1560,6 +1610,7 @@ private:
             }
             case OpCode::TryCatch: {
                 const auto& tc = static_cast<const TryCatch&>(inst);
+                EmitBodyHeaderLabel(tc.TryBlock.get());
                 Line(indent, "try");
                 if (tc.TryBlock) EmitBraced(*tc.TryBlock, indent); else Line(indent, "{ }");
                 for (const auto& handler : tc.Handlers) {
@@ -1585,6 +1636,7 @@ private:
             }
             case OpCode::TryFinally: {
                 const auto& tf = static_cast<const TryFinally&>(inst);
+                EmitBodyHeaderLabel(tf.TryBlock.get());
                 Line(indent, "try");
                 if (tf.TryBlock) EmitBraced(*tf.TryBlock, indent); else Line(indent, "{ }");
                 Line(indent, "finally");
@@ -1593,6 +1645,7 @@ private:
             }
             case OpCode::LockInstruction: {
                 const auto& lk = static_cast<const LockInstruction&>(inst);
+                EmitBodyHeaderLabel(lk.Body.get());
                 Line(indent, "lock (" + (lk.OnExpression ? Expr(*lk.OnExpression) : std::string("?")) + ")");
                 if (lk.Body) EmitBraced(*lk.Body, indent); else Line(indent, "{ }");
                 return;
@@ -1603,6 +1656,7 @@ private:
                 // the resource is stored into, but the seed elides it (the real
                 // back end declares the using-local via the using, not DeclareVariables).
                 const auto& us = static_cast<const UsingInstruction&>(inst);
+                EmitBodyHeaderLabel(us.Body.get());
                 Line(indent, "using (" +
                      (us.ResourceExpression ? Expr(*us.ResourceExpression) : std::string("null")) + ")");
                 if (us.Body) EmitBraced(*us.Body, indent); else Line(indent, "{ }");

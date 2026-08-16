@@ -1123,6 +1123,68 @@ TEST(ILAstToCSharp, SwitchInsideIfArmInlinesCaseBodies) {
         << "the case bodies should inline, not render goto IL_ thunks:\n" << text;
 }
 
+TEST(ILAstToCSharp, GotoToTryEntryWithCodeBetweenEmitsLabelBeforeTry) {
+    // The early-exit-guard-into-try shape: `if (cond) goto <try-entry>; return;
+    // try { <try-entry>: ... } finally { ... }`. The goto jumps over the `return`
+    // and into the try's entry block. C# forbids `goto` into a `try` block, so
+    // the entry block's `IL_XXXX:` label must render BEFORE the `try` keyword
+    // (outside the construct), making the goto target the try statement (valid)
+    // rather than a point inside it. Mirrors the loop-header label fix
+    // (GotoToLoopHeaderWithCodeBetweenEmitsLabel) generalized to try/finally.
+    auto v = std::make_shared<ILVariable>(VariableKind::Local, nullptr, 0);
+    v->Name = "num";
+    auto fn = MakeFunction({});
+    // B0: the guard -- `if (1 != 0) br X` (falls to B1=return on false).
+    auto b0 = std::make_unique<Block>(); Block* b0Ptr = b0.get();
+    // B1: the early-exit `return` (the code between the goto and the try).
+    auto b1 = std::make_unique<Block>(); Block* b1Ptr = b1.get();
+    // B2: the pure-construct block carrying the TryFinally.
+    auto b2 = std::make_unique<Block>(); Block* b2Ptr = b2.get();
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(b2));
+    // try body container: first block is X (work; return).
+    auto tryBody = std::make_unique<BlockContainer>();
+    auto xBlock = std::make_unique<Block>(); Block* xPtr = xBlock.get();
+    xBlock->StartILOffset = 0x16;  // IL_0016
+    xBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(2)));
+    xBlock->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    tryBody->AddBlock(std::move(xBlock));
+    // finally body container: work3; endfinally.
+    auto finallyBody = std::make_unique<BlockContainer>();
+    auto fBlock = std::make_unique<Block>();
+    fBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(3)));
+    fBlock->SetFinal(std::make_unique<Leave>(nullptr));
+    finallyBody->AddBlock(std::move(fBlock));
+    b2Ptr->SetFinal(std::make_unique<TryFinally>(std::move(tryBody), std::move(finallyBody)));
+    // B0's final: `if (1 != 0) br X` -- the guard that jumps into the try entry.
+    auto guardBr = std::make_unique<Branch>(xPtr);
+    guardBr->TargetOffset = 0x16;
+    b0Ptr->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::move(guardBr)));
+    // B1: the early-exit return.
+    b1Ptr->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    // The guard's goto renders (it jumps over the return into the try).
+    EXPECT_NE(text.find("goto IL_0016;"), std::string::npos)
+        << "the guard's goto should render, not vanish:\n" << text;
+    // The label is BEFORE the `try` keyword (outside the construct), so the
+    // goto targets the try statement -- valid C#. It must NOT sit on the line
+    // right after `try {` (that would be a goto-into-try, invalid C#).
+    auto labelPos = text.find("IL_0016:");
+    auto tryPos = text.find("try");
+    ASSERT_NE(labelPos, std::string::npos) << text;
+    ASSERT_NE(tryPos, std::string::npos) << text;
+    EXPECT_LT(labelPos, tryPos) << "the label must precede the `try` keyword:\n" << text;
+    EXPECT_EQ(text.find("try\n    {\nIL_0016:"), std::string::npos)
+        << "the label must not sit inside the try body:\n" << text;
+}
+
 TEST(ILAstToCSharp, CSharpTypeNameRendersGeneric) {
     // A parameterized (generic) type must render as C# `List<string>`, not the
     // ECMA reflection name `List`1<System.String>` nor a mangled last-segment
