@@ -1001,6 +1001,72 @@ TEST(ILAstToCSharp, PreHeaderEntryBranchToWhileConditionIsDropped) {
            "as a dangling goto:\n" << text;
 }
 
+TEST(ILAstToCSharp, GotoToLoopHeaderWithCodeBetweenEmitsLabel) {
+    // A `goto` to a loop header from a NON-adjacent position (code between the
+    // goto and the loop) is not a fall-through, so it must render as a real
+    // `goto IL_XXXX;` -- and the loop header must carry an `IL_XXXX:` label so
+    // the goto is not a dangling reference (invalid C#). The early-exit guard
+    // shape: `if (cond) goto loopHeader; return; <loop>` (the goto skips the
+    // return and re-enters the loop).
+    //
+    //   b0:        if (1 != 0) br header else (fall to b1)
+    //   b1:        leave (return; the code between the goto and the loop)
+    //   preHeader: { whileC }
+    //     whileC (While):
+    //       header: if (cond) br body else leave(whileC)   [offset IL_0071]
+    //       body:   ...; br header
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+
+    auto whileC = std::make_unique<BlockContainer>();
+    whileC->Kind = ContainerKind::While;
+    auto header = std::make_unique<Block>();
+    header->StartILOffset = 0x71;  // IL_0071
+    Block* headerPtr = header.get();
+    auto body = std::make_unique<Block>();
+    Block* bodyPtr = body.get();
+    header->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::make_unique<Branch>(bodyPtr), std::make_unique<Leave>(whileC.get())));
+    body->Add(std::make_unique<StLoc>(MakeVar(VariableKind::Local, "V_0", 0),
+                                       std::make_unique<LdcI4>(1)));
+    body->SetFinal(std::make_unique<Branch>(headerPtr));
+    whileC->AddBlock(std::move(header));
+    whileC->AddBlock(std::move(body));
+    auto preHeader = std::make_unique<Block>();
+    preHeader->Add(std::move(whileC));
+    preHeader->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+
+    // b0: the early-exit guard -- `if (1 != 0) br header` (falls to b1 on false).
+    auto b0 = std::make_unique<Block>();
+    auto guardBr = std::make_unique<Branch>(headerPtr);
+    guardBr->TargetOffset = 0x71;
+    b0->SetFinal(std::make_unique<IfInstruction>(
+        std::make_unique<Comp>(std::make_unique<LdcI4>(1), std::make_unique<LdcI4>(0),
+                               ComparisonKind::Inequality),
+        std::move(guardBr)));
+    // b1: the return (the code between the goto and the loop).
+    auto b1 = std::make_unique<Block>();
+    b1->SetFinal(std::make_unique<Leave>(fn->Body.get()));
+    fn->Body->AddBlock(std::move(b0));
+    fn->Body->AddBlock(std::move(b1));
+    fn->Body->AddBlock(std::move(preHeader));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "void", "M", "");
+    // The goto to the loop header renders as a real `goto IL_0071;` (the guard
+    // jumps over the return into the loop), not a dangling reference.
+    EXPECT_NE(text.find("goto IL_0071;"), std::string::npos)
+        << "the guard's goto to the loop header should render, not vanish:\n" << text;
+    // The loop header carries the matching label before the `while` keyword so
+    // the goto is a valid reference (not a dangling goto to a missing label).
+    EXPECT_NE(text.find("IL_0071:\n"), std::string::npos)
+        << "the loop header must carry an IL_0071: label before the while:\n" << text;
+}
+
 TEST(ILAstToCSharp, CSharpTypeNameRendersGeneric) {
     // A parameterized (generic) type must render as C# `List<string>`, not the
     // ECMA reflection name `List`1<System.String>` nor a mangled last-segment

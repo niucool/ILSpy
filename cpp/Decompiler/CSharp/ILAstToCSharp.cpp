@@ -328,6 +328,23 @@ private:
         for (int i = 0; i < inst->ChildCount(); ++i) CollectLoopHeaders(inst->GetChild(i));
     }
 
+    // Whether `br` renders as a `continue` (its target is a loop header AND
+    // the branch is inside that loop's container). Mirrors the `GotoText`
+    // continue check so `CollectLabels` only labels a loop header when a
+    // branch to it renders as a real `goto` (from outside the loop), not a
+    // `continue` (from inside -- no label, the loop head carries none). A
+    // branch to a loop header from outside that is not a fall-through needs a
+    // label before the loop so the `goto` is not a dangling reference.
+    bool IsContinueBranch(const Branch* br) const {
+        if (!br || !br->TargetBlock) return false;
+        if (loopHeaders_.find(br->TargetBlock) == loopHeaders_.end()) return false;
+        auto* loopContainer = dynamic_cast<BlockContainer*>(br->TargetBlock->Parent);
+        if (!loopContainer) return false;
+        for (const ILInstruction* p = br; p; p = p->Parent)
+            if (p == loopContainer) return true;
+        return false;
+    }
+
     void CollectLabels(const ILInstruction* inst) {
         if (!inst) return;
         if (inst->Op == OpCode::SwitchInstruction)
@@ -338,11 +355,13 @@ private:
             const auto* br = static_cast<const Branch*>(inst);
             // Only a branch that will render a `goto` gets a label; dropped
             // branches reference the target but emit nothing, so the label must
-            // not be created (it would be orphaned).
+            // not be created (it would be orphaned). A branch to a loop header
+            // from outside the loop (not a `continue`) DOES need a label so the
+            // `goto` is not a dangling reference -- the loop emits the header's
+            // label before its keyword (EmitContainer).
             if (br->TargetBlock && !IsFallThroughGoto(br) && !IsLoopEntryFallThrough(br) &&
-                !IsLoopBreak(*br) &&
-                labels_.find(br->TargetBlock) == labels_.end() &&
-                loopHeaders_.find(br->TargetBlock) == loopHeaders_.end())
+                !IsLoopBreak(*br) && !IsContinueBranch(br) &&
+                labels_.find(br->TargetBlock) == labels_.end())
                 labels_[br->TargetBlock] = LabelFor(br->TargetOffset);
         }
         for (int i = 0; i < inst->ChildCount(); ++i) CollectLabels(inst->GetChild(i));
@@ -914,6 +933,18 @@ private:
         return plan;
     }
 
+    // Emit the loop header block's `IL_xxxx:` label before the loop keyword
+    // when the header is a `goto` target from outside the loop (a non-continue
+    // branch -- CollectLabels created the label). C# labels start in column 0.
+    void EmitHeaderLabel(const Block* header) {
+        if (!header) return;
+        auto label = labels_.find(header);
+        if (label != labels_.end()) {
+            out_ += label->second;
+            out_ += ":\n";
+        }
+    }
+
     void EmitContainer(const BlockContainer& container, int indent) {
         if (DepthAtLimit()) {
             Line(indent, "/* max rendering depth: possible ILAst cycle */");
@@ -926,6 +957,7 @@ private:
             // `while (cond) { body }` -- the condition from the if, the body
             // from the blocks after the entry.
             const Block* header = container.Blocks.front().get();
+            EmitHeaderLabel(header);
             std::string cond = "(default)";
             if (header && header->FinalInstruction &&
                 header->FinalInstruction->Op == OpCode::IfInstruction) {
@@ -967,6 +999,7 @@ private:
             // block behind it -- so locate it by shape (final Branch to the
             // header, all-simple statements) instead of assuming position.
             const Block* header = container.Blocks.front().get();
+            EmitHeaderLabel(header);
             const Block* increment = nullptr;
             std::size_t incIdx = 0;
             for (std::size_t i = container.Blocks.size(); i-- > 1;) {
@@ -1102,6 +1135,7 @@ private:
             // iterates. Only the LAST block's trailing back-edge is dropped (a
             // mid-loop back-edge is a `continue`, rendered as a goto for now).
             const Block* header = container.Blocks.front().get();
+            EmitHeaderLabel(header);
             Line(indent, "while (true)");
             Line(indent, "{");
             for (std::size_t i = 0; i < container.Blocks.size(); ++i) {
