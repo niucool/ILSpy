@@ -32,11 +32,13 @@
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
+#include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
 #include "Decompiler/Util/LongSet.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 
 #include <gtest/gtest.h>
+#include <functional>
 
 #include <filesystem>
 #include <memory>
@@ -220,4 +222,56 @@ TEST(RemoveRedundantReturn, KeepsSwitchCaseBodyReturn) {
     ASSERT_NE(fn->Body->Blocks[1]->FinalInstruction, nullptr);
     EXPECT_EQ(fn->Body->Blocks[1]->FinalInstruction->Op, OpCode::Leave)
         << "the switch case body's return must be kept";
+}
+
+TEST(RemoveRedundantReturn, ConvertsTryBodyTrailingReturnToFallthrough) {
+    // A void method whose body is a single block whose FinalInstruction is a
+    // TryFinally, and the try body's last block ends in `return;` (a value-less
+    // Leave of the function body). The try/finally is the method's last
+    // statement, so the `return;` is redundant: the try body can fall through to
+    // the finally, which runs, then the method falls through to its implicit
+    // exit. ConvertReturnToFallthrough (the C# RemoveRedundantReturn recursion)
+    // removes the try body's trailing return.
+    auto v = std::make_shared<ILVariable>();
+    v->Name = "V_0";
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Body->AddBlock(std::make_unique<Block>());  // the method body block
+    Block* host = fn->Body->Blocks[0].get();
+    // try body: one block -- work; return.
+    auto tryBody = std::make_unique<BlockContainer>();
+    auto tBlock = std::make_unique<Block>();
+    tBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(1)));
+    tBlock->SetFinal(std::make_unique<Leave>(fn->Body.get()));  // return;
+    tryBody->AddBlock(std::move(tBlock));
+    // finally body: one block -- work; endfinally.
+    auto finallyBody = std::make_unique<BlockContainer>();
+    auto fBlock = std::make_unique<Block>();
+    fBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(2)));
+    fBlock->SetFinal(std::make_unique<Leave>(nullptr));  // endfinally
+    finallyBody->AddBlock(std::move(fBlock));
+    host->SetFinal(std::make_unique<TryFinally>(std::move(tryBody), std::move(finallyBody)));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RemoveRedundantReturn().Run(*fn, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // The try body's last block's `return;` is removed: no `Leave(fn->Body)` (a
+    // function return) remains in the try body -- the try body falls through
+    // to the finally, which runs, then the method falls through.
+    auto* tf = dynamic_cast<TryFinally*>(fn->Body->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(tf, nullptr);
+    int tryReturns = 0;
+    std::function<void(ILInstruction*)> countReturns = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (auto* lv = dynamic_cast<Leave*>(inst))
+            if (lv->TargetContainer == fn->Body.get()) ++tryReturns;
+        for (int i = 0; i < inst->ChildCount(); ++i) countReturns(inst->GetChild(i));
+    };
+    countReturns(tf->TryBlock.get());
+    EXPECT_EQ(tryReturns, 0)
+        << "the try body's trailing return should be converted to a fallthrough";
 }
