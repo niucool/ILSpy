@@ -74,7 +74,11 @@ class SimpleType;
 class MemberType;
 // `ArraySpecifier` is the rank-specifier leaf of an array type (the `[...]`/`[,...]` of a
 // `ComposedType`); the first in-order piece of the `ComposedType` dependency.
+// `Attribute` is the first `GeneralScope`-sub-namespace concrete node (a sealed `AstNode` with a
+// required `AstType` `Type` slot + an `Expression` `Arguments` collection + a `HasArgumentList`
+// bool scalar -- the `MemberType` shape, needed by `AttributeSection`).
 class ArraySpecifier;
+class Attribute;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -112,6 +116,7 @@ public:
     virtual void VisitSimpleType(SimpleType*) = 0;
     virtual void VisitMemberType(MemberType*) = 0;
     virtual void VisitArraySpecifier(ArraySpecifier*) = 0;
+    virtual void VisitAttribute(Attribute*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

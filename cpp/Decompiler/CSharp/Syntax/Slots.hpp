@@ -117,6 +117,27 @@ inline const CSharpSlotInfoT<AstType> Target{"Target", false, nullptr, false};
 // identity only, so the kind is constructed non-collection/non-optional).
 inline const CSharpSlotInfoT<AstType> TypeArgument{"TypeArgument", false, nullptr, false};
 
+// The `Type` kind -- a single `AstType` child (the type reference of a node that takes a type:
+// `Attribute.Type`, `CastExpression.Type`, `AsExpression.Type`, `IsExpression.Type`,
+// `TypeOfExpression.Type`, `TypeReferenceExpression.Type`, `DefaultValueExpression.Type`,
+// `SizeOfExpression.Type`, `ComposedType.BaseType`, ...). Shared by many nodes (every
+// `[Slot("Type")] AstType` declaration collapses to this one kind). A
+// `CSharpSlotInfoT<AstType>` (the element type is `AstType`); no `Slots` variable is named
+// `AstType`, so the unqualified `AstType` resolves to the class (no elaborated specifier
+// needed). The name `Type` does not collide with any class in the `Syntax` namespace (there is
+// `AstType`, not `Type`), unlike the `Expression`/`Identifier` constants.
+inline const CSharpSlotInfoT<AstType> Type{"Type", false, nullptr, false};
+
+// The `Argument` kind -- a collection of `Expression` (the argument list of a node that takes
+// arguments: `Attribute.Arguments`, `InvocationExpression.Arguments`, `IndexerExpression.
+// Arguments`, `ObjectCreateExpression.Arguments`, `ArrayCreateExpression.Arguments`). Shared
+// by every `[Slot("Argument")] AstNodeCollection<Expression>` declaration. A
+// `CSharpSlotInfoT<Expression>` (the element type is `Expression`); defined after the
+// `Expression` constant, so the element type is qualified
+// (`::ILSpy::Decompiler::CSharp::Syntax::Expression`) to avoid resolving to the `Expression`
+// *variable* declared above (the D231 collision note).
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> Argument{"Argument", false, nullptr, false};
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_SLOTS_HPP
