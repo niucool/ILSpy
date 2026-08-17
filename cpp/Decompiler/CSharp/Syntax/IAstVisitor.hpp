@@ -174,6 +174,14 @@ class ObjectCreateExpression;
 // `Slots::Argument`/`Slots::Initializer` kinds and the new `Slots::AdditionalArraySpecifier`
 // kind; both collections are non-incremental since the `Initializer` single slot trails them).
 class ArrayCreateExpression;
+// `ContinueStatement`/`BreakStatement`/`YieldBreakStatement` are the first concrete C# AST
+// statement nodes -- the cleanest leaf statements (no `[Slot]` children, no members), the
+// start of the Statement hierarchy (a leaf with no slots; `BreakStatement`/`YieldBreakStatement`
+// carry a `BreakKeyword`/`YieldKeyword` const string the output visitor emits); plugging into
+// the `IAstVisitor`/`AcceptVisitor` dispatch (the next in-order Phase-5 piece per the D253 plan).
+class ContinueStatement;
+class BreakStatement;
+class YieldBreakStatement;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -229,6 +237,9 @@ public:
     virtual void VisitArrayInitializerExpression(ArrayInitializerExpression*) = 0;
     virtual void VisitObjectCreateExpression(ObjectCreateExpression*) = 0;
     virtual void VisitArrayCreateExpression(ArrayCreateExpression*) = 0;
+    virtual void VisitContinueStatement(ContinueStatement*) = 0;
+    virtual void VisitBreakStatement(BreakStatement*) = 0;
+    virtual void VisitYieldBreakStatement(YieldBreakStatement*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
