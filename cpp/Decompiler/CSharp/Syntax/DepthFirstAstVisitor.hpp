@@ -55,6 +55,7 @@
 #include "PrimitiveType.hpp"
 #include "SimpleType.hpp"
 #include "MemberType.hpp"
+#include "ArraySpecifier.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -143,6 +144,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitMemberType(MemberType* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitArraySpecifier(ArraySpecifier* node) {
         VisitChildren(node);
     }
 };

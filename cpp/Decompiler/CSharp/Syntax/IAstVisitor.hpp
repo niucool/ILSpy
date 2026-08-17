@@ -72,6 +72,9 @@ class ThrowExpression;
 class PrimitiveType;
 class SimpleType;
 class MemberType;
+// `ArraySpecifier` is the rank-specifier leaf of an array type (the `[...]`/`[,...]` of a
+// `ComposedType`); the first in-order piece of the `ComposedType` dependency.
+class ArraySpecifier;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -108,6 +111,7 @@ public:
     virtual void VisitPrimitiveType(PrimitiveType*) = 0;
     virtual void VisitSimpleType(SimpleType*) = 0;
     virtual void VisitMemberType(MemberType*) = 0;
+    virtual void VisitArraySpecifier(ArraySpecifier*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
