@@ -261,6 +261,14 @@ class LabelStatement;
 class CheckedStatement;
 class UncheckedStatement;
 class UnsafeStatement;
+// `LockStatement` is the `WhileStatement` D258 two-required-single-slot shape (a REQUIRED
+// `Expression` lock-object + a REQUIRED `Statement` `EmbeddedStatement` body) with the loop
+// test slot renamed `Expression` -- the next in-order Phase-5 piece per the D260 plan. It
+// reuses the already-ported `Slots::Expression` (by `UnaryOperatorExpression`) and
+// `Slots::EmbeddedStatement` (by `WhileStatement`) kinds with no new `Slots` constant; the
+// `Expression()` accessor shadows the `Expression` base type (the `ExpressionStatement` D255
+// name-shadowing crux), so the port uses the elaborated `class Expression` specifier.
+class LockStatement;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -335,6 +343,7 @@ public:
     virtual void VisitCheckedStatement(CheckedStatement*) = 0;
     virtual void VisitUncheckedStatement(UncheckedStatement*) = 0;
     virtual void VisitUnsafeStatement(UnsafeStatement*) = 0;
+    virtual void VisitLockStatement(LockStatement*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

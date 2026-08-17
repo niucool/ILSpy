@@ -69,6 +69,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/Statements/IfElseWhileDoWhileStatement_Test.cpp
     Decompiler/CSharp/Syntax/Statements/YieldReturnEmptyLabelStatement_Test.cpp
     Decompiler/CSharp/Syntax/Statements/CheckedUncheckedUnsafeStatement_Test.cpp
+    Decompiler/CSharp/Syntax/Statements/LockStatement_Test.cpp
     Decompiler/CSharp/Syntax/PatternMatching/PatternMatching_Test.cpp
     Decompiler/IL/ControlFlowSimplification_Test.cpp
     Decompiler/IL/ControlFlowGraph_Test.cpp

@@ -93,6 +93,7 @@
 #include "Statements/CheckedStatement.hpp"
 #include "Statements/UncheckedStatement.hpp"
 #include "Statements/UnsafeStatement.hpp"
+#include "Statements/LockStatement.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -295,6 +296,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitUnsafeStatement(UnsafeStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitLockStatement(LockStatement* node) {
         VisitChildren(node);
     }
 };
