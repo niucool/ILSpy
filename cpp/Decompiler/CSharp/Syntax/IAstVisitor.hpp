@@ -126,6 +126,15 @@ class IdentifierExpression;
 // already-ported `Slots::Identifier`/`Slots::TypeArgument` kinds and the new `Slots::
 // TargetExpression` kind).
 class MemberReferenceExpression;
+// `PointerReferenceExpression` is the structural twin of `MemberReferenceExpression` (the
+// same `MemberType` shape -- a `Target` `Expression` slot + a `MemberName` string-name `[Slot]` over
+// a backing `MemberNameToken` + a `TypeArguments` `AstNodeCollection<AstType>` collection) but for
+// the `pointer_member_access ::= expression '->' identifier ( '<' type ( ',' type )* '>' )?`
+// production, plus the `ArrowToken` const string "->"; the two are disjoint concrete types so
+// the pattern matcher's `other is PointerReferenceExpression` gate distinguishes them; reusing
+// the already-ported `Slots::TargetExpression`/`Slots::Identifier`/`Slots::TypeArgument` kinds
+// with no new `Slots` constant).
+class PointerReferenceExpression;
 // `InvocationExpression` is the second `Expression` with both a single `Expression` child slot
 // and a collection slot (a sealed `Expression` with a required `Target` `Expression` slot + an
 // `Arguments` `AstNodeCollection<Expression>` collection -- the
@@ -214,6 +223,7 @@ public:
     virtual void VisitSizeOfExpression(SizeOfExpression*) = 0;
     virtual void VisitIdentifierExpression(IdentifierExpression*) = 0;
     virtual void VisitMemberReferenceExpression(MemberReferenceExpression*) = 0;
+    virtual void VisitPointerReferenceExpression(PointerReferenceExpression*) = 0;
     virtual void VisitInvocationExpression(InvocationExpression*) = 0;
     virtual void VisitIndexerExpression(IndexerExpression*) = 0;
     virtual void VisitArrayInitializerExpression(ArrayInitializerExpression*) = 0;

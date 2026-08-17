@@ -56,6 +56,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/IdentifierExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression_Test.cpp
+    Decompiler/CSharp/Syntax/Expressions/PointerReferenceExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/InvocationExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/IndexerExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/ArrayInitializerExpression_Test.cpp
