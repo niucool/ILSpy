@@ -43,6 +43,7 @@
 
 #include "Decompiler/CSharp/Syntax/CSharpSlotInfo.hpp"
 #include "Decompiler/CSharp/Syntax/AstType.hpp"
+#include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/Identifier.hpp"
 
@@ -137,6 +138,16 @@ inline const CSharpSlotInfoT<AstType> Type{"Type", false, nullptr, false};
 // (`::ILSpy::Decompiler::CSharp::Syntax::Expression`) to avoid resolving to the `Expression`
 // *variable* declared above (the D231 collision note).
 inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> Argument{"Argument", false, nullptr, false};
+
+// The `ArraySpecifier` kind -- a collection of `ArraySpecifier` (the rank specifiers of an
+// array type: `ComposedType.ArraySpecifiers`, an `AstNodeCollection<ArraySpecifier>`). Unique
+// to `ComposedType` among the ported nodes. A `CSharpSlotInfoT<ArraySpecifier>` (the element
+// type is the concrete `ArraySpecifier` node, complete via the `ArraySpecifier.hpp` include
+// above). `ArraySpecifier.hpp` does NOT include `Slots.hpp` (it is a leaf with no `[Slot]`
+// children, so it has no per-node slot statics), so this kind lives HERE in `Slots.hpp` (no
+// include cycle) -- unlike `Slots::Attribute`/`Slots::AttributeSection`, whose element-type
+// node headers DO include `Slots.hpp` and so are cycle-broken into their own headers.
+inline const CSharpSlotInfoT<ArraySpecifier> ArraySpecifier{"ArraySpecifier", false, nullptr, false};
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 

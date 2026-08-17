@@ -286,6 +286,30 @@ private:
     AstNodeCollectionT<Attribute> attributes_;
 };
 
+// The `AttributeSection` kind -- the collection-element kind for every
+// `[Slot("AttributeSection")] AstNodeCollection<AttributeSection>` (`ComposedType.Attributes`,
+// and the `Attributes` collections on the Statement/TypeMember/GeneralScope/
+// ParameterDeclaration nodes that land later). A `CSharpSlotInfoT<AttributeSection>` (the
+// element type is the concrete `AttributeSection` node).
+//
+// Defined HERE (in AttributeSection.hpp, after the `AttributeSection` class) rather than in
+// Slots.hpp because `CSharpSlotInfoT<AttributeSection>` needs `AttributeSection` complete (the
+// `dynamic_cast<const AttributeSection*>` is-a test in the ctor), and `AttributeSection` is a
+// concrete node that INCLUDES `Slots.hpp` (its `AttributeTargetTokenSlot` references
+// `&Slots::Identifier` and its `AttributesSlot` references `&Slots::Attribute`). Placing the kind
+// in `Slots.hpp` would form a circular include (the `Slots::Attribute` cycle-breaking precedent
+// in Attribute.hpp): `Slots.hpp` would have to include `AttributeSection.hpp` (for the complete
+// `AttributeSection`), but `AttributeSection.hpp` includes `Slots.hpp` (for `Slots::Identifier`/
+// `Slots::Attribute`), and with `Slots.hpp`'s guard set those definitions would not be visible
+// where `AttributeSection.hpp`'s class body needs them. After the `AttributeSection` class both
+// `CSharpSlotInfoT` (visible via the `Slots.hpp` include) and `AttributeSection` are complete, so
+// the kind defines cleanly. The `inline` variable still has external linkage and one address
+// across translation units (the C++17 `inline` guarantee), preserving the pointer-identity
+// comparison `node.Slot.Kind == &Slots::AttributeSection` the slot system relies on.
+namespace Slots {
+inline const CSharpSlotInfoT<AttributeSection> AttributeSection{"AttributeSection", false, nullptr, false};
+} // namespace Slots
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_ATTRIBUTESECTION_HPP

@@ -84,6 +84,12 @@ class Attribute;
 // `Attributes` collection -- the bracketed group of attributes, needed by `ComposedType`'s
 // Attributes collection and by every Statement/TypeMember/GeneralScope/ParameterDeclaration node).
 class AttributeSection;
+// `ComposedType` is the third concrete `AstType` with a collection slot and the first ported
+// node with TWO collection slots (an `Attributes` collection + a required `BaseType` `AstType`
+// single slot + an `ArraySpecifiers` collection), carrying `HasRefSpecifier`/
+// `HasReadOnlySpecifier`/`HasNullableSpecifier` bools and a `PointerRank` int -- the array/
+// pointer/nullable/modifier wrapper over a `BaseType`.
+class ComposedType;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -123,6 +129,7 @@ public:
     virtual void VisitArraySpecifier(ArraySpecifier*) = 0;
     virtual void VisitAttribute(Attribute*) = 0;
     virtual void VisitAttributeSection(AttributeSection*) = 0;
+    virtual void VisitComposedType(ComposedType*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

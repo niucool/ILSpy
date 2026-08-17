@@ -58,6 +58,7 @@
 #include "ArraySpecifier.hpp"
 #include "Attribute.hpp"
 #include "AttributeSection.hpp"
+#include "ComposedType.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -155,6 +156,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitAttributeSection(AttributeSection* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitComposedType(ComposedType* node) {
         VisitChildren(node);
     }
 };
