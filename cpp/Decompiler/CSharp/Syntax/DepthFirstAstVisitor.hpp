@@ -42,12 +42,14 @@
 #include "Expressions/AssignmentExpression.hpp"
 #include "Expressions/BaseReferenceExpression.hpp"
 #include "Expressions/BinaryOperatorExpression.hpp"
+#include "Expressions/CheckedExpression.hpp"
 #include "Expressions/ConditionalExpression.hpp"
 #include "Expressions/NullReferenceExpression.hpp"
 #include "Expressions/ParenthesizedExpression.hpp"
 #include "Expressions/PrimitiveExpression.hpp"
 #include "Expressions/ThisReferenceExpression.hpp"
 #include "Expressions/UnaryOperatorExpression.hpp"
+#include "Expressions/UncheckedExpression.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -115,6 +117,12 @@ public:
         VisitChildren(node);
     }
     virtual void VisitParenthesizedExpression(ParenthesizedExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitCheckedExpression(CheckedExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitUncheckedExpression(UncheckedExpression* node) {
         VisitChildren(node);
     }
 };

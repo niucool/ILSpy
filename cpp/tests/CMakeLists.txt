@@ -42,6 +42,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/ConditionalExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/ParenthesizedExpression_Test.cpp
+    Decompiler/CSharp/Syntax/Expressions/CheckedUncheckedExpression_Test.cpp
     Decompiler/CSharp/Syntax/PatternMatching/PatternMatching_Test.cpp
     Decompiler/IL/ControlFlowSimplification_Test.cpp
     Decompiler/IL/ControlFlowGraph_Test.cpp
