@@ -54,6 +54,7 @@
 #include "Decompiler/IL/Instructions/NullableInstructions.hpp"
 #include "Decompiler/IL/Instructions/NullCoalescingInstruction.hpp"
 #include "Decompiler/IL/Instructions/PinnedRegion.hpp"
+#include "Decompiler/IL/Instructions/RefAnyType.hpp"
 #include "Decompiler/IL/Instructions/Rethrow.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
@@ -2274,6 +2275,18 @@ private:
                 const auto& isinst = static_cast<const IsInst&>(inst);
                 return "(" + (isinst.Argument ? Expr(*isinst.Argument) : "(default)") +
                        " as " + TypeDisplayName(isinst.Type) + ")";
+            }
+            case OpCode::RefAnyType: {
+                // The `refanytype` IL opcode (the C# `__reftype` undocumented
+                // keyword) returns the System.Type embedded in a TypedReference;
+                // the C# back end renders it as `__reftype(arg).TypeHandle` (the
+                // UndocumentedExpression + `.TypeHandle` member access). This is
+                // the faithful render without the resolver (the resolver would
+                // resolve `.TypeHandle` to the property; the keyword form is valid
+                // C# and matches the C# ILSpy back end's ExpressionBuilder output).
+                const auto& ref = static_cast<const RefAnyType&>(inst);
+                return "__reftype(" + (ref.Argument ? Expr(*ref.Argument) : "(default)") +
+                       ").TypeHandle";
             }
             case OpCode::LdLen: {
                 const auto& ld = static_cast<const LdLen&>(inst);

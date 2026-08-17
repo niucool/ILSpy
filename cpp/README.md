@@ -1570,7 +1570,11 @@ implemented and green here. Everything else follows the phase plan in
   ~31k fewer lines on mscorlib. A `break;` is emitted for an inner-loop
   `br` to the loop's exit (and `continue;` for a `br` to a loop header);
   `endfinally` and construct-body leaves render as nothing (not a bare,
-  invalid `break;`). `RemoveUnreachableBlocks` drops dead blocks the
+  invalid `break;`). The `refanytype` opcode (`RefAnyType`) renders as
+  `__reftype(arg).TypeHandle` (the C# undocumented keyword + `.TypeHandle`
+  member, matching the real back end's `ExpressionBuilder`); no
+  unhandled-instruction `(default)/*op=NN*/` fallthroughs remain on mscorlib.
+  `RemoveUnreachableBlocks` drops dead blocks the
   structure transforms leave behind (a port of the C#
   `SortBlocks(deleteUnreachableBlocks)` subset).
   Remaining gaps vs the real back

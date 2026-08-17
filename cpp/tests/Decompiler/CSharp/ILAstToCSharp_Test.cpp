@@ -37,6 +37,7 @@
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
+#include "Decompiler/IL/Instructions/RefAnyType.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLen.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
@@ -583,6 +584,30 @@ TEST(ILAstToCSharp, CastsAndTypeOperators) {
     std::string text = ILAstToCSharp(*fn, "System.String", "M", "object arg_1");
     EXPECT_NE(text.find("    var V_0 = arg_1 as string;\n"), std::string::npos) << text;
     EXPECT_NE(text.find("    return (string)(V_0);\n"), std::string::npos) << text;
+}
+
+TEST(ILAstToCSharp, RefAnyTypeRendersAsReftypeKeywordDotTypeHandle) {
+    // The `refanytype` IL opcode (the C# `__reftype` undocumented keyword) pops
+    // a TypedReference and yields its embedded type handle. The seed renders
+    // `RefAnyType(arg)` as `__reftype(arg).TypeHandle` (the C# back end's
+    // ExpressionBuilder output -- an UndocumentedExpression + `.TypeHandle`
+    // member access), not the `(default)/*op=NN*/` fallthrough. The 3
+    // System.TypedReference methods on mscorlib (GetTargetType, TargetTypeToken,
+    // GetHashCode) use this; without the case they render the invalid-ish
+    // `(default)/*op=94*/`.
+    auto value = MakeVar(VariableKind::Parameter, "value", 1);
+    auto fn = MakeFunction({});
+    fn->Body->AddBlock(std::make_unique<Block>());
+    fn->Body->Blocks[0]->SetFinal(ReturnFinal(fn->Body.get(),
+        std::make_unique<RefAnyType>(std::make_unique<LdLoc>(value))));
+    fn->CheckInvariant(ILPhase::Normal);
+
+    std::string text = ILAstToCSharp(*fn, "System.RuntimeTypeHandle", "M", "TypedReference value");
+    EXPECT_NE(text.find("__reftype(value).TypeHandle"), std::string::npos)
+        << "RefAnyType should render as __reftype(value).TypeHandle, not the "
+           "(default)/*op=94*/ fallthrough:\n" << text;
+    EXPECT_EQ(text.find("(default)/*op="), std::string::npos)
+        << "no unhandled-instruction fallthrough should remain:\n" << text;
 }
 
 TEST(ILAstToCSharp, ArrayAndLengthExpressions) {
