@@ -79,6 +79,11 @@ class MemberType;
 // bool scalar -- the `MemberType` shape, needed by `AttributeSection`).
 class ArraySpecifier;
 class Attribute;
+// `AttributeSection` is the second `GeneralScope`-sub-namespace concrete node (a sealed
+// `AstNode` with an optional `Identifier` `AttributeTargetToken` slot + an `Attribute`
+// `Attributes` collection -- the bracketed group of attributes, needed by `ComposedType`'s
+// Attributes collection and by every Statement/TypeMember/GeneralScope/ParameterDeclaration node).
+class AttributeSection;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -117,6 +122,7 @@ public:
     virtual void VisitMemberType(MemberType*) = 0;
     virtual void VisitArraySpecifier(ArraySpecifier*) = 0;
     virtual void VisitAttribute(Attribute*) = 0;
+    virtual void VisitAttributeSection(AttributeSection*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

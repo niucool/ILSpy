@@ -57,6 +57,7 @@
 #include "MemberType.hpp"
 #include "ArraySpecifier.hpp"
 #include "Attribute.hpp"
+#include "AttributeSection.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -151,6 +152,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitAttribute(Attribute* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitAttributeSection(AttributeSection* node) {
         VisitChildren(node);
     }
 };

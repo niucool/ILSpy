@@ -271,6 +271,30 @@ private:
     AstNodeCollectionT<Expression> arguments_;
 };
 
+// The `Attribute` kind -- the collection-element kind for every
+// `[Slot("Attribute")] AstNodeCollection<Attribute>` (AttributeSection.Attributes, and the
+// Attributes collections on the Statement/TypeMember/GeneralScope/ParameterDeclaration nodes
+// that land later). A `CSharpSlotInfoT<Attribute>` (the element type is the concrete `Attribute`
+// node).
+//
+// Defined HERE (in Attribute.hpp, after the `Attribute` class) rather than in Slots.hpp because
+// `CSharpSlotInfoT<Attribute>` needs `Attribute` complete (the `dynamic_cast<const Attribute*>`
+// is-a test in the ctor), and `Attribute` is the first concrete node that is BOTH a `Slots`
+// element type AND a node with per-node slot statics (its `TypeSlot`/`ArgumentsSlot` reference
+// `&Slots::Type`/`&Slots::Argument`, so Attribute.hpp includes Slots.hpp). Placing the kind in
+// Slots.hpp would form a circular include: Slots.hpp would have to include Attribute.hpp (for the
+// complete `Attribute`), but Attribute.hpp includes Slots.hpp (for `Slots::Type`/`Slots::Argument`),
+// and with Slots.hpp's guard set the `Slots::Type`/`Slots::Argument` definitions would not be
+// visible where Attribute.hpp's class body needs them. After the `Attribute` class both
+// `CSharpSlotInfoT` (visible via the Slots.hpp include) and `Attribute` are complete, so the
+// kind defines cleanly. The `inline` variable still has external linkage and one address across
+// translation units (the C++17 `inline` guarantee), preserving the pointer-identity comparison
+// `node.Slot.Kind == &Slots::Attribute` the slot system relies on. This is the resolution for
+// every future concrete-node element kind whose node header includes Slots.hpp.
+namespace Slots {
+inline const CSharpSlotInfoT<Attribute> Attribute{"Attribute", false, nullptr, false};
+} // namespace Slots
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_ATTRIBUTE_HPP
