@@ -5,4 +5,5 @@
 
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ILAstToCSharp.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/AstNode.cpp
 )

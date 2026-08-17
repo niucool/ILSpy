@@ -48,11 +48,12 @@
 //
 // Deferred to later Phase-5 slices (each is a larger, separately testable unit): the
 // `AbstractAnnotatable` annotation channel (and the `NodeTrivia` trivia it carries), the
-// `AstNodeCollection<T>` collection slots, the mutation API (`AddChild`/`InsertChild*`/
-// `Remove`/`ReplaceWith`/`Clone` with its `ValidateNewSingleChild` tree invariants), the
 // `IAstVisitor`/`AcceptVisitor` dispatch, the `ToString`/`CSharpOutputVisitor` rendering,
 // and the `GetNextNode`/`GetPrevNode`/`GetNextSibling`/`GetPrevSibling` predicate overloads.
-// The `Trivia` branch of the sibling/slot accessors is dropped along with trivia itself (a
+// The `Clone` virtual is declared (concrete nodes override it; the base throws) but the
+// C# `MemberwiseClone`-based base implementation has no C++ equivalent, so each concrete
+// node's `Clone` does the full deep copy itself rather than sharing a base helper. The
+// `Trivia` branch of the sibling/slot accessors is dropped along with trivia itself (a
 // trivia node has no child slot; it is restored when the trivia system lands).
 //
 // Field access: `parent_` stays private with a read-only `Parent()` and the `SetParent`/
@@ -400,6 +401,193 @@ public:
         return (raw == nullptr || o != nullptr) && DoMatch(o, match);
     }
 
+    // ---- Mutation API ----------------------------------------------------
+    // The C# `public void AddChild<T>(T, CSharpSlotInfo)` -- add a child into the slot
+    // matching `kind` (appending to a collection slot, or filling a single slot). A null
+    // child is a no-op (the C# `if (child == null) return;`).
+    template <class T>
+    void AddChild(T* child, const CSharpSlotInfo* kind) {
+        if (child == nullptr)
+            return;
+        AddChildUnsafe(child, kind);
+    }
+
+    // The C# `internal void AddChildUnsafe(AstNode, CSharpSlotInfo)` -- the null-check-free
+    // add: route to the collection for `kind` (append), or fill the single slot. Defined
+    // out-of-line (in `AstNode.cpp`) because it dereferences `AstNodeCollection*`, which is
+    // only forward-declared here (the full definition lives in `AstNodeCollection.hpp`,
+    // which includes this header -- a circular include if pulled in here).
+    void AddChildUnsafe(AstNode* child, const CSharpSlotInfo* kind);
+
+    // The C# `public void InsertChildBefore<T>(AstNode?, T, CSharpSlotInfo)` -- insert
+    // before the next sibling into the collection for `kind`, or fill the single slot.
+    template <class T>
+    void InsertChildBefore(AstNode* nextSibling, T* child, const CSharpSlotInfo* kind) {
+        if (child == nullptr)
+            return;
+        InsertChildBeforeUnsafe(nextSibling, child, kind);
+    }
+
+    // The C# `internal void InsertChildBeforeUnsafe(AstNode, AstNode, CSharpSlotInfo)` --
+    // defined out-of-line (dereferences `AstNodeCollection*`; see `AddChildUnsafe`).
+    void InsertChildBeforeUnsafe(AstNode* nextSibling, AstNode* child,
+                                const CSharpSlotInfo* kind);
+
+    // The C# `public void InsertChildAfter<T>(AstNode?, T, CSharpSlotInfo)` -- insert after
+    // the previous sibling into the collection for `kind`, or fill the single slot. The
+    // C# inlines the collection dereference; this port routes through the out-of-line
+    // `InsertChildAfterUnsafe` helper (the `Before` sibling the C# does define) so the
+    // template body need not dereference `AstNodeCollection*`.
+    template <class T>
+    void InsertChildAfter(AstNode* prevSibling, T* child, const CSharpSlotInfo* kind) {
+        if (child == nullptr)
+            return;
+        InsertChildAfterUnsafe(prevSibling, child, kind);
+    }
+
+    // The `InsertChildAfter` counterpart to `InsertChildBeforeUnsafe` -- defined out-of-line
+    // (dereferences `AstNodeCollection*`; see `AddChildUnsafe`).
+    void InsertChildAfterUnsafe(AstNode* prevSibling, AstNode* child,
+                               const CSharpSlotInfo* kind);
+
+    // The C# `public void Remove()` -- remove this node from its parent. A no-op when
+    // unparented. (The Trivia branch is dropped with trivia itself.) Defined out-of-line
+    // (dereferences `AstNodeCollection*`; see `AddChildUnsafe`).
+    void Remove();
+
+    // The C# `public void ReplaceWith(AstNode?)` -- replace this node with `newNode`. A
+    // null `newNode` is a `Remove()`; a self-replace is a no-op; the root cannot be
+    // replaced. The new node's type is runtime-checked against the slot's declared child
+    // type, and a node already used in this tree is lifted out (removed) when it is inside
+    // the subtree being replaced (e.g. `x.ReplaceWith(x.Expression)`).
+    void ReplaceWith(AstNode* newNode) {
+        if (newNode == nullptr) {
+            Remove();
+            return;
+        }
+        if (newNode == this)
+            return;
+        if (parent_ == nullptr)
+            throw std::logic_error("AstNode::ReplaceWith: cannot replace the root node");
+        ThrowIfTrivia();
+        parent_->EnsureChildIndices();
+        const CSharpSlotInfo* slot = parent_->GetChildSlotInfo(ChildIndex);
+        if (!slot->IsInstanceOfType(newNode))
+            throw std::invalid_argument(
+                "AstNode::ReplaceWith: the new node is not valid in the slot");
+        if (newNode->Parent() != nullptr) {
+            if (AncestorsContains(newNode, this))
+                newNode->Remove();
+            else
+                throw std::invalid_argument(
+                    "AstNode::ReplaceWith: node is already used in another tree");
+        }
+        parent_->SetChild(ChildIndex, newNode);
+    }
+
+    // The C# `public AstNode? ReplaceWith(Func<AstNode, AstNode?>)` -- remove this node,
+    // pass it to `replaceFunction`, and insert the result at the old position (before the
+    // old next sibling when present, else appended to the old parent). The replace function
+    // must return the root of a detached tree (or null), and the result's type must be
+    // valid for the old slot.
+    AstNode* ReplaceWith(const std::function<AstNode*(AstNode*)>& replaceFunction) {
+        if (!replaceFunction)
+            throw std::invalid_argument("AstNode::ReplaceWith: replaceFunction is null");
+        if (parent_ == nullptr)
+            throw std::logic_error("AstNode::ReplaceWith: cannot replace the root node");
+        ThrowIfTrivia();
+        AstNode* oldParent = parent_;
+        AstNode* oldSuccessor = NextSibling();
+        const CSharpSlotInfo* oldSlot = Slot();
+        const CSharpSlotInfo* oldKind = oldSlot != nullptr ? oldSlot->Kind() : nullptr;
+        Remove();
+        AstNode* replacement = replaceFunction(this);
+        if (oldSuccessor != nullptr && oldSuccessor->Parent() != oldParent)
+            throw std::logic_error(
+                "AstNode::ReplaceWith: replace function changed the nextSibling of the node "
+                "being replaced?");
+        if (replacement != nullptr && oldKind != nullptr) {
+            if (replacement->Parent() != nullptr)
+                throw std::logic_error(
+                    "AstNode::ReplaceWith: replace function must return the root of a tree");
+            if (oldSlot != nullptr && !oldSlot->IsInstanceOfType(replacement))
+                throw std::logic_error(
+                    "AstNode::ReplaceWith: the new node is not valid in the slot");
+            if (oldSuccessor != nullptr)
+                oldParent->InsertChildBeforeUnsafe(oldSuccessor, replacement, oldKind);
+            else
+                oldParent->AddChildUnsafe(replacement, oldKind);
+        }
+        return replacement;
+    }
+
+    // The C# `public AstNode Clone()` -- deep-clone this subtree. C# uses `MemberwiseClone`
+    // (a runtime shallow copy) then `CloneChildrenInto` to deep-copy the children; C++ has
+    // no `MemberwiseClone`, so each concrete node overrides this to copy its scalar fields
+    // and deep-clone its children (the `CloneChildrenInto` virtual is kept for API
+    // fidelity, but the C++ clone is per-concrete-node). The base throws: a concrete node
+    // must override.
+    virtual AstNode* Clone() const {
+        throw std::logic_error("AstNode::Clone: concrete node must override");
+    }
+
+    // The C# `internal void SetChildByKindUntyped(CSharpSlotInfo, AstNode?)` -- set the
+    // single slot matching `kind` (used by the non-generic mutation API). Throws when this
+    // node declares no slot of the kind.
+    void SetChildByKindUntyped(const CSharpSlotInfo* kind, AstNode* child) {
+        int count = GetChildCount();
+        for (int i = 0; i < count; i++) {
+            if (GetChildSlotInfo(i)->Kind() == kind) {
+                SetChild(i, child);
+                return;
+            }
+        }
+        throw std::logic_error("AstNode::SetChildByKindUntyped: no slot of this kind");
+    }
+
+    // The C# `internal void SetChildNode<T>(ref T? field, T? value)` -- write a single-slot
+    // backing field when the slot's flattened index is not statically known (a single slot
+    // following a collection). An in-place replace carries the old child's index; a set or
+    // clear leaves the new child's index unknown and invalidates, to be reassigned by the
+    // next `EnsureChildIndices`. The C# `ref T? field` ports as `T*& field` (a reference to
+    // the backing field, so the write re-parents and re-indexes). `T` must derive from
+    // `AstNode`; the concrete node's backing field is `T*`.
+    template <class T>
+    void SetChildNode(T*& field, T* value) {
+        if (field == value)
+            return;
+        ValidateNewSingleChild(value, field);
+        T* oldField = field;
+        int oldChildIndex = oldField != nullptr ? oldField->ChildIndex : -1;
+        if (oldField != nullptr)
+            oldField->ClearParentAndIndex();
+        field = value;
+        if (value != nullptr)
+            value->SetParent(this);
+        if (oldField != nullptr && value != nullptr)
+            value->ChildIndex = oldChildIndex;
+        else
+            InvalidateChildIndices();
+    }
+
+    // The C# `internal void SetChildNode<T>(ref T? field, T? value, int index)` -- write a
+    // single-slot backing field whose flattened index is known. Filling, clearing, or
+    // replacing a single slot moves no other child, so the index is assigned directly and
+    // the parent's indices stay valid by construction (no invalidate).
+    template <class T>
+    void SetChildNode(T*& field, T* value, int index) {
+        if (field == value)
+            return;
+        ValidateNewSingleChild(value, field);
+        if (field != nullptr)
+            field->ClearParentAndIndex();
+        field = value;
+        if (value != nullptr) {
+            value->SetParent(this);
+            value->ChildIndex = index;
+        }
+    }
+
 private:
     // The C# `IEnumerable<AstNode> GetDescendantsImpl(bool, Func<AstNode,bool>?)` -- the
     // pre-order DFS: at each node, remember its next sibling (so a mid-walk
@@ -432,6 +620,40 @@ private:
             }
         }
         return result;
+    }
+
+    // The C# `void ThrowIfTrivia()` -- attached trivia has no child slot to substitute
+    // into, so the C# throws when replacing trivia. Trivia is dropped with the trivia
+    // system (see the file header), so this guard is a no-op until trivia lands.
+    void ThrowIfTrivia() {}
+
+    // The C# `void ValidateNewSingleChild<T>(T? value, T? oldChild)` -- the self-reference
+    // and two-tree guards shared by the single-slot setters. A null value is accepted; a
+    // value that is this node is rejected; a value already parented is lifted out (removed)
+    // when the old child is its ancestor (e.g. replacing a node with its own subtree),
+    // otherwise rejected as already used in another tree.
+    template <class T>
+    void ValidateNewSingleChild(T* value, T* oldChild) {
+        if (value == nullptr)
+            return;
+        if (value == this)
+            throw std::invalid_argument("Cannot add a node to itself as a child.");
+        if (value->Parent() != nullptr) {
+            if (oldChild != nullptr && AncestorsContains(value, oldChild))
+                value->Remove();
+            else
+                throw std::invalid_argument("Node is already used in another tree.");
+        }
+    }
+
+    // Returns true if `maybeAncestor` is an ancestor of `node` (walks `node`'s parent
+    // chain, excluding `node` itself -- the C# `value.Ancestors.Contains(oldChild)`).
+    static bool AncestorsContains(AstNode* node, AstNode* maybeAncestor) {
+        for (AstNode* cur = node->Parent(); cur != nullptr; cur = cur->Parent()) {
+            if (cur == maybeAncestor)
+                return true;
+        }
+        return false;
     }
 };
 

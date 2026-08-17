@@ -30,6 +30,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/CSharpSlotInfo_Test.cpp
     Decompiler/CSharp/Syntax/AstNode_Test.cpp
     Decompiler/CSharp/Syntax/AstNodeCollection_Test.cpp
+    Decompiler/CSharp/Syntax/AstNodeMutation_Test.cpp
     Decompiler/CSharp/Syntax/PatternMatching/PatternMatching_Test.cpp
     Decompiler/IL/ControlFlowSimplification_Test.cpp
     Decompiler/IL/ControlFlowGraph_Test.cpp
