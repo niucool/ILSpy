@@ -60,6 +60,8 @@
 #include "AttributeSection.hpp"
 #include "ComposedType.hpp"
 #include "Expressions/CastExpression.hpp"
+#include "Expressions/AsExpression.hpp"
+#include "Expressions/IsExpression.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -163,6 +165,12 @@ public:
         VisitChildren(node);
     }
     virtual void VisitCastExpression(CastExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitAsExpression(AsExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitIsExpression(IsExpression* node) {
         VisitChildren(node);
     }
 };

@@ -93,7 +93,13 @@ class ComposedType;
 // `CastExpression` is the first AstType-bearing `Expression` node (a sealed `Expression` with
 // a required `AstType` `Type` slot + a required `Expression` `Expression` slot -- the cast
 // `(type)expression`, reusing the already-ported `Slots::Type`/`Slots::Expression` kinds).
+// `AsExpression`/`IsExpression` are the sibling pair of the CastExpression two-required-slot
+// shape but with the slot order reversed (`Expression` at index 0, `Type` at index 1) plus an
+// `as`/`is` keyword const string -- the `expression 'as'/'is' type` operators, reusing the
+// already-ported `Slots::Type`/`Slots::Expression` kinds.
 class CastExpression;
+class AsExpression;
+class IsExpression;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -135,6 +141,8 @@ public:
     virtual void VisitAttributeSection(AttributeSection*) = 0;
     virtual void VisitComposedType(ComposedType*) = 0;
     virtual void VisitCastExpression(CastExpression*) = 0;
+    virtual void VisitAsExpression(AsExpression*) = 0;
+    virtual void VisitIsExpression(IsExpression*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
