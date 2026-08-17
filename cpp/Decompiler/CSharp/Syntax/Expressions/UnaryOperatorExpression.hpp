@@ -179,6 +179,17 @@ public:
     UnaryOperatorType Operator() const { return op_; }
     void Operator(UnaryOperatorType value) { op_ = value; }
 
+    // The C# `public const string AwaitKeyword = "await"` (the `await` keyword token the
+    // output visitor emits for the `Await` operator). Part of the node's public API: it is
+    // aliased by sibling nodes that also carry an `await` modifier (`UsingStatement.AwaitKeyword`,
+    // `ForeachStatement.AwaitKeyword` both `= UnaryOperatorExpression.AwaitKeyword` in C#), so it
+    // ports now (unlike the per-operator token-string constants `NotToken`/`MinusToken`/...
+    // deferred in D229, which are a lookup table consumed only by the output/resolver stage).
+    // Ports as a `static constexpr const char*` (a static field, not instance state), so the
+    // generator's `MembersToMatch` (which iterates only instance `IPropertySymbol`s) excludes it
+    // from the `DoMatch` (the `CheckedExpression.CheckedKeyword` D234 precedent).
+    static constexpr const char* AwaitKeyword = "await";
+
     // The generated slot static (per-node), pointing at the shared `Slots` kind. The
     // `IsOptional` flag is false (the slot is required -- the C# property is non-nullable);
     // the kind carries identity only. The `Slots::Expression` constant is a new kind (the

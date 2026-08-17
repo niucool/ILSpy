@@ -231,6 +231,21 @@ inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Statement> Fal
 // `Slots::Statement` variable, so the element type is qualified.
 inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Statement> EmbeddedStatement{"EmbeddedStatement", false, nullptr, false};
 
+// The `ResourceAcquisition` kind -- a single `AstNode` child (the resource acquisition of a
+// `UsingStatement` -- the `( local_variable_declaration | expression )` inside `using (...)`, so
+// the slot is typed the abstract `AstNode` base, NOT a specific derived class: it can hold either a
+// `VariableDeclarationStatement` (the local-variable-declaration form) or an `Expression` (the
+// expression form), both of which derive from `AstNode`). Unique to `UsingStatement` among the
+// ported nodes. A `CSharpSlotInfoT<AstNode>` (the element type is the `AstNode` abstract base);
+// `AstNode.hpp` does NOT include `Slots.hpp` (the `AstNode` abstract base has no per-node slot
+// statics -- the `Slots.Statement`/`Slots.TrueStatement` precedent applied to the root base), and
+// `AstNode` is complete where this header is included (it is the base of every type `Slots.hpp`
+// already pulls in -- `Expression`/`AstType`/`Statement`/...), so this kind lives HERE in
+// `Slots.hpp` (no include cycle). No `Slots` variable is named `AstNode`, and no class named
+// `ResourceAcquisition` lives in the `Syntax` namespace, so no elaborated-type-specifier is
+// needed (no name collision in either direction).
+inline const CSharpSlotInfoT<AstNode> ResourceAcquisition{"ResourceAcquisition", false, nullptr, false};
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_SLOTS_HPP

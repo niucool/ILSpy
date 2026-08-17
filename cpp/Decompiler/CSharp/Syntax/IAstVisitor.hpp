@@ -269,6 +269,18 @@ class UnsafeStatement;
 // `Expression()` accessor shadows the `Expression` base type (the `ExpressionStatement` D255
 // name-shadowing crux), so the port uses the elaborated `class Expression` specifier.
 class LockStatement;
+// `UsingStatement` is the `WhileStatement` D258 two-required-single-slot shape plus two bool
+// scalars (`IsAsync`/`IsEnhanced`) and with the first slot typed the abstract `AstNode` base (a
+// REQUIRED `ResourceAcquisition` `AstNode` child -- the `using (...)` production takes EITHER a
+// local-variable-declaration OR an expression, both `AstNode`-derived; plus a REQUIRED
+// `EmbeddedStatement` `Statement` body) -- the next in-order Phase-5 piece per the D261 plan.
+// It adds the new `Slots::ResourceAcquisition` kind (a `CSharpSlotInfoT<AstNode>`, the first ported
+// slot kind whose element type is the abstract `AstNode` base) and reuses the already-ported
+// `Slots::EmbeddedStatement` (by `WhileStatement`). NO name-shadowing crux (no member is named
+// `AstNode`/`Statement`; the `ResourceAcquisition()` accessor does not collide with any class),
+// so no elaborated-type-specifier is needed anywhere. The `AwaitKeyword` const aliases
+// `UnaryOperatorExpression::AwaitKeyword` (the canonical `await` literal).
+class UsingStatement;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -344,6 +356,7 @@ public:
     virtual void VisitUncheckedStatement(UncheckedStatement*) = 0;
     virtual void VisitUnsafeStatement(UnsafeStatement*) = 0;
     virtual void VisitLockStatement(LockStatement*) = 0;
+    virtual void VisitUsingStatement(UsingStatement*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
