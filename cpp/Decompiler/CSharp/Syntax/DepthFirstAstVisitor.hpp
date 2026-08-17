@@ -77,6 +77,9 @@
 #include "Statements/ContinueStatement.hpp"
 #include "Statements/BreakStatement.hpp"
 #include "Statements/YieldBreakStatement.hpp"
+#include "Statements/ReturnStatement.hpp"
+#include "Statements/ThrowStatement.hpp"
+#include "Statements/ExpressionStatement.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -231,6 +234,15 @@ public:
         VisitChildren(node);
     }
     virtual void VisitYieldBreakStatement(YieldBreakStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitReturnStatement(ReturnStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitThrowStatement(ThrowStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitExpressionStatement(ExpressionStatement* node) {
         VisitChildren(node);
     }
 };

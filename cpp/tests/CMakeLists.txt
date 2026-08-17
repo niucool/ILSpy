@@ -63,6 +63,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression_Test.cpp
     Decompiler/CSharp/Syntax/Statements/Statement_Test.cpp
+    Decompiler/CSharp/Syntax/Statements/ReturnThrowExpressionStatement_Test.cpp
     Decompiler/CSharp/Syntax/PatternMatching/PatternMatching_Test.cpp
     Decompiler/IL/ControlFlowSimplification_Test.cpp
     Decompiler/IL/ControlFlowGraph_Test.cpp

@@ -182,6 +182,19 @@ class ArrayCreateExpression;
 class ContinueStatement;
 class BreakStatement;
 class YieldBreakStatement;
+// `ReturnStatement`/`ThrowStatement`/`ExpressionStatement` are the first slot-bearing C# AST
+// statement nodes -- the `UnaryOperatorExpression` D231 single-`Expression`-slot shape applied
+// to a statement: `ReturnStatement`/`ThrowStatement` carry a single NULLABLE `Expression?`
+// [Slot("Expression")] (the returned value / thrown exception, absent for a bare `return;`/
+// rethrow `throw;`) plus a `ReturnKeyword`/`ThrowKeyword` const string; `ExpressionStatement`
+// carries a single REQUIRED `Expression` [Slot("Expression")] (the statement-expression) and no
+// const keyword. The nullable pair uses `MatchOptional` in its `DoMatch`, the required node uses
+// the direct `MatchRequired` dispatch; all three reuse the already-ported `Slots::Expression`
+// kind. The next in-order Phase-5 piece per the D254 plan ("the slot-bearing statements:
+// ReturnStatement ... ThrowStatement ... ExpressionStatement ...").
+class ReturnStatement;
+class ThrowStatement;
+class ExpressionStatement;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -240,6 +253,9 @@ public:
     virtual void VisitContinueStatement(ContinueStatement*) = 0;
     virtual void VisitBreakStatement(BreakStatement*) = 0;
     virtual void VisitYieldBreakStatement(YieldBreakStatement*) = 0;
+    virtual void VisitReturnStatement(ReturnStatement*) = 0;
+    virtual void VisitThrowStatement(ThrowStatement*) = 0;
+    virtual void VisitExpressionStatement(ExpressionStatement*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
