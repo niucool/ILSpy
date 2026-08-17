@@ -52,6 +52,7 @@ public:
 
     AstNode* Clone() const override { return new TestComment(Content, StartLocation(), EndLocation()); }
     bool DoMatch(AstNode* /*other*/, Match /*match*/) override { return false; }
+    void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
 };
 
 // A leaf owning node (no slots) whose `Clone` follows the port's concrete-node shape: copy
@@ -67,6 +68,7 @@ public:
         copy->ReparentTrivia();
         return copy;
     }
+    void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
 };
 
 // A single-slot node (one optional single slot, known-index set) for the `CheckInvariant`
@@ -76,6 +78,7 @@ class TestLeaf : public AstNode {
 public:
     bool DoMatch(AstNode* /*other*/, Match /*match*/) override { return false; }
     AstNode* Clone() const override { return new TestLeaf(); }
+    void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
 };
 
 class StubSingleSlot : public AstNode {
@@ -106,6 +109,7 @@ public:
         copy->ReparentTrivia();
         return copy;
     }
+    void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
 };
 
 } // namespace

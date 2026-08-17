@@ -39,6 +39,7 @@ namespace {
 class StubExpr : public AstNode {
 public:
     bool DoMatch(AstNode* /*other*/, Match /*match*/) override { return false; }
+    void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
 };
 
 // A leaf node that tracks DoMatch calls and records the candidate under a group, so
@@ -56,6 +57,7 @@ public:
         match.Add("captured", other);
         return other != nullptr;
     }
+    void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
 };
 
 // A leaf node that overrides the source-location getters (the single-token leaf case),
@@ -65,6 +67,7 @@ public:
     TextLocation StartLocation() const override { return TextLocation(7, 9); }
     TextLocation EndLocation() const override { return TextLocation(7, 12); }
     bool DoMatch(AstNode* /*other*/, Match /*match*/) override { return false; }
+    void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
 };
 
 // A two-single-slot container (Left/Right) using the known-index set path: SetChild
@@ -110,6 +113,7 @@ public:
         }
     }
     bool DoMatch(AstNode* /*other*/, Match /*match*/) override { return false; }
+    void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
 };
 
 // A collection-style container using the invalidate path: Append stores the child and
@@ -144,6 +148,7 @@ public:
         return &ItemSlot;
     }
     bool DoMatch(AstNode* /*other*/, Match /*match*/) override { return false; }
+    void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
 };
 
 // An INode that is NOT an AstNode (a pattern node), for the INode.DoMatch "non-AstNode

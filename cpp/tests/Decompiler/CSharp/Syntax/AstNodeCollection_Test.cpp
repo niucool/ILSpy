@@ -46,6 +46,7 @@ namespace {
 class StubExpr : public AstNode {
 public:
     bool DoMatch(AstNode*, Match) override { return false; }
+    void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
 };
 
 // A container whose only slot is a collection of `StubExpr`. Derives from `StubExpr` so
@@ -492,6 +493,7 @@ TEST(CSharp_AstNodeCollection, RemoveNodeWrongTypeReturnsFalse) {
     class NotAnExpr : public AstNode {
     public:
         bool DoMatch(AstNode*, Match) override { return false; }
+        void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
     };
     NotAnExpr n;
     EXPECT_FALSE(coll->RemoveNode(&n));

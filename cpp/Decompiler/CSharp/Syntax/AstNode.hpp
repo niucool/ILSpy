@@ -106,12 +106,19 @@ class AstNodeCollection;
 class Trivia;
 class NodeTrivia;
 
-// Forward declarations: the child-enumeration helper types are defined after the `AstNode`
+// Forward declaration: the child-enumeration helper types are defined after the `AstNode`
 // class (their method bodies call `AstNode` members, so they need the complete class).
 // `Children()` returns `ChildrenCollection` by value, so it is declared here and defined
 // after the helper types.
 class ChildEnumerator;
 class ChildrenCollection;
+
+// Forward declaration: the visitor interface (IAstVisitor.hpp) -- `AcceptVisitor` takes
+// it by reference, so a forward declaration suffices here (no include needed), matching the
+// `AstNodeCollection` precedent. The concrete nodes' `AcceptVisitor` overrides call
+// `visitor.Visit<NodeName>(this)`; the per-node `Visit` methods are added to `IAstVisitor` as
+// the concrete node hierarchy lands.
+class IAstVisitor;
 
 // The common base of every C# AST node. Abstract: a concrete node overrides at least
 // `DoMatch` and the slot-storage virtuals for the slots it declares.
@@ -426,6 +433,21 @@ public:
         AstNode* o = dynamic_cast<AstNode*>(raw);
         return (raw == nullptr || o != nullptr) && DoMatch(o, match);
     }
+
+    // ---- Visitor dispatch ------------------------------------------------
+    // The C# `public abstract void AcceptVisitor(IAstVisitor visitor)` -- the dispatch
+    // entry of the visitor pattern. A concrete node overrides this to call
+    // `visitor.Visit<NodeName>(this)` (the matching per-node `Visit` on `IAstVisitor`), so a
+    // visitor walk calls `node.AcceptVisitor(visitor)` and the node routes back to the
+    // right `Visit` overload. `IAstVisitor` is forward-declared (a reference parameter needs
+    // only a forward declaration), so this header does not include `IAstVisitor.hpp`.
+    //
+    // The C# also declares `abstract T AcceptVisitor<T>(IAstVisitor<T>)` and
+    // `abstract S AcceptVisitor<T,S>(IAstVisitor<T,S>, T)` (generic-method dispatch); those
+    // variants are unused by the engine (only the `CSharpOutputVisitor : IAstVisitor`
+    // pretty-printer consumes the visitor) and C++ has no virtual template methods, so they
+    // stay deferred (see IAstVisitor.hpp).
+    virtual void AcceptVisitor(IAstVisitor& visitor) = 0;
 
     // ---- Mutation API ----------------------------------------------------
     // The C# `public void AddChild<T>(T, CSharpSlotInfo)` -- add a child into the slot
