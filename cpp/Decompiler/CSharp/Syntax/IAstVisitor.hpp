@@ -126,6 +126,13 @@ class IdentifierExpression;
 // already-ported `Slots::Identifier`/`Slots::TypeArgument` kinds and the new `Slots::
 // TargetExpression` kind).
 class MemberReferenceExpression;
+// `InvocationExpression` is the second `Expression` with both a single `Expression` child slot
+// and a collection slot (a sealed `Expression` with a required `Target` `Expression` slot + an
+// `Arguments` `AstNodeCollection<Expression>` collection -- the
+// `invocation_expression ::= expression '(' expression* ')'` production, the
+// `MemberReferenceExpression` shape with no string-name `[Slot]` and no scalar; reusing the
+// already-ported `Slots::TargetExpression`/`Slots::Argument` kinds).
+class InvocationExpression;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -175,6 +182,7 @@ public:
     virtual void VisitSizeOfExpression(SizeOfExpression*) = 0;
     virtual void VisitIdentifierExpression(IdentifierExpression*) = 0;
     virtual void VisitMemberReferenceExpression(MemberReferenceExpression*) = 0;
+    virtual void VisitInvocationExpression(InvocationExpression*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
