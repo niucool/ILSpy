@@ -81,6 +81,9 @@
 #include "Statements/ThrowStatement.hpp"
 #include "Statements/ExpressionStatement.hpp"
 #include "Statements/BlockStatement.hpp"
+#include "Statements/GotoStatement.hpp"
+#include "Statements/GotoCaseStatement.hpp"
+#include "Statements/GotoDefaultStatement.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -247,6 +250,15 @@ public:
         VisitChildren(node);
     }
     virtual void VisitBlockStatement(BlockStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitGotoStatement(GotoStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitGotoCaseStatement(GotoCaseStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitGotoDefaultStatement(GotoDefaultStatement* node) {
         VisitChildren(node);
     }
 };

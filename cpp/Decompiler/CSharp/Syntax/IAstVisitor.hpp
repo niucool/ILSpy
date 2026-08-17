@@ -199,9 +199,23 @@ class ExpressionStatement;
 // collection-only `ArrayInitializerExpression` D250 shape applied to the Statement hierarchy:
 // a non-sealed `Statement` whose sole child slot is the `Statements` collection of `Statement`
 // (the `block ::= '{' statement* '}'` production, the statement list inside the braces), with
-// the new `Slots::Statement` kind. The next in-order Phase-5 piece per the D255 plan ("the
+// the new `Slots::Statement` kind. The next-in-order Phase-5 piece per the D255 plan ("the
 // collection-bearing statements: BlockStatement the statement collection").
 class BlockStatement;
+// `GotoStatement`/`GotoCaseStatement`/`GotoDefaultStatement` are the goto family -- the next
+// in-order Phase-5 piece per the D256 plan ("the EmptyStatement/GotoStatement/LabelStatement
+// leaves"). `GotoStatement` is the `SimpleType` D237 string-name-`[Slot]` shape MINUS the
+// `TypeArguments` collection: a single NULLABLE `string?` `Label` string-name `[Slot("Identifier")]`
+// over a backing `LabelToken` `Identifier` slot (optional, the label may be absent), plus the
+// `GotoKeyword` const string. `GotoCaseStatement` is the `ExpressionStatement` D255 shape (a
+// single REQUIRED `Expression` `LabelExpression` slot) applied to the goto family, plus the
+// `GotoKeyword`/`CaseKeyword` const strings. `GotoDefaultStatement` is the cleanest leaf of the
+// goto family (no `[Slot]` children, no match members) plus the `GotoKeyword`/`DefaultKeyword`
+// const strings. All three reuse the already-ported `Slots::Identifier`/`Slots::Expression`
+// kinds with no new `Slots` constant.
+class GotoStatement;
+class GotoCaseStatement;
+class GotoDefaultStatement;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -264,6 +278,9 @@ public:
     virtual void VisitThrowStatement(ThrowStatement*) = 0;
     virtual void VisitExpressionStatement(ExpressionStatement*) = 0;
     virtual void VisitBlockStatement(BlockStatement*) = 0;
+    virtual void VisitGotoStatement(GotoStatement*) = 0;
+    virtual void VisitGotoCaseStatement(GotoCaseStatement*) = 0;
+    virtual void VisitGotoDefaultStatement(GotoDefaultStatement*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
