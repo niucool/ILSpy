@@ -30,6 +30,7 @@
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
+#include "Decompiler/IL/Instructions/PinnedRegion.hpp"
 #include "Decompiler/IL/Instructions/StLoc.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
@@ -274,4 +275,51 @@ TEST(RemoveRedundantReturn, ConvertsTryBodyTrailingReturnToFallthrough) {
     countReturns(tf->TryBlock.get());
     EXPECT_EQ(tryReturns, 0)
         << "the try body's trailing return should be converted to a fallthrough";
+}
+
+TEST(RemoveRedundantReturn, ConvertsPinnedRegionBodyTrailingReturnToFallthrough) {
+    // A void method whose body is a single block whose FinalInstruction is a
+    // PinnedRegion (`fixed`), and the pinned body's last block ends in `return;`.
+    // The fixed is the method's last statement, so the `return;` is redundant:
+    // the pinned body falls through to the end of the fixed, then the method
+    // falls through to its implicit exit. ConvertReturnToFallthrough (the C#
+    // RemoveRedundantReturn recursion, which handles PinnedRegion) removes it.
+    auto v = std::make_shared<ILVariable>();
+    v->Name = "V_0";
+    v->Kind = VariableKind::Local;
+    auto fn = std::make_unique<ILFunction>();
+    fn->Body = std::make_unique<BlockContainer>();
+    fn->Body->Parent = fn.get();
+    fn->Body->ChildIndex = 0;
+    fn->Body->AddBlock(std::make_unique<Block>());  // the method body block
+    Block* host = fn->Body->Blocks[0].get();
+    // pinned body: one block -- work; return.
+    auto pinnedBody = std::make_unique<BlockContainer>();
+    auto pBlock = std::make_unique<Block>();
+    pBlock->Add(std::make_unique<StLoc>(v, std::make_unique<LdcI4>(1)));
+    pBlock->SetFinal(std::make_unique<Leave>(fn->Body.get()));  // return;
+    pinnedBody->AddBlock(std::move(pBlock));
+    // PinnedRegion(V_0, ldloc V_0, <body>) -- a `fixed (V_0 = ...) { ... }`.
+    host->SetFinal(std::make_unique<PinnedRegion>(
+        v, std::make_unique<LdLoc>(v), std::move(pinnedBody)));
+    fn->Variables.push_back(v);
+    fn->CheckInvariant(ILPhase::Normal);
+
+    RemoveRedundantReturn().Run(*fn, Ctx());
+    fn->CheckInvariant(ILPhase::Normal);
+
+    // The pinned body's last block's `return;` is removed (no Leave of the
+    // function body remains in the pinned body).
+    auto* pr = dynamic_cast<PinnedRegion*>(fn->Body->Blocks[0]->FinalInstruction.get());
+    ASSERT_NE(pr, nullptr);
+    int pinnedReturns = 0;
+    std::function<void(ILInstruction*)> countReturns = [&](ILInstruction* inst) {
+        if (!inst) return;
+        if (auto* lv = dynamic_cast<Leave*>(inst))
+            if (lv->TargetContainer == fn->Body.get()) ++pinnedReturns;
+        for (int i = 0; i < inst->ChildCount(); ++i) countReturns(inst->GetChild(i));
+    };
+    countReturns(pr->Body.get());
+    EXPECT_EQ(pinnedReturns, 0)
+        << "the pinned (fixed) body's trailing return should be converted to a fallthrough";
 }

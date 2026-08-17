@@ -24,6 +24,7 @@
 #include "Decompiler/IL/Instructions/IfInstruction.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/LockInstruction.hpp"
+#include "Decompiler/IL/Instructions/PinnedRegion.hpp"
 #include "Decompiler/IL/Instructions/SwitchInstruction.hpp"
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Instructions/UsingInstruction.hpp"
@@ -74,6 +75,7 @@ bool IsConstructOrIf(const ILInstruction* inst) {
                     dynamic_cast<const TryCatch*>(inst) ||
                     dynamic_cast<const LockInstruction*>(inst) ||
                     dynamic_cast<const UsingInstruction*>(inst) ||
+                    dynamic_cast<const PinnedRegion*>(inst) ||
                     dynamic_cast<const IfInstruction*>(inst));
 }
 
@@ -148,6 +150,13 @@ void ConvertReturnToFallthrough(ILInstruction* inst, BlockContainer* fnBody) {
     }
     if (auto* us = dynamic_cast<UsingInstruction*>(inst)) {
         ConvertReturnToFallthrough(us->Body.get(), fnBody);
+        return;
+    }
+    if (auto* pr = dynamic_cast<PinnedRegion*>(inst)) {
+        // A `fixed` block: its Body is the pinned region's body. Recurse so a
+        // trailing `return;` in the fixed body (the fixed is the method's last
+        // statement) is converted to a fallthrough.
+        ConvertReturnToFallthrough(pr->Body.get(), fnBody);
         return;
     }
     if (auto* iff = dynamic_cast<IfInstruction*>(inst)) {
