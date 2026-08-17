@@ -161,6 +161,24 @@ inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> Ar
 // node headers DO include `Slots.hpp` and so are cycle-broken into their own headers.
 inline const CSharpSlotInfoT<ArraySpecifier> ArraySpecifier{"ArraySpecifier", false, nullptr, false};
 
+// The `AdditionalArraySpecifier` kind -- a collection of `ArraySpecifier` (the ADDITIONAL
+// rank specifiers of an `ArrayCreateExpression`: the trailing `[...]`s WITHOUT size info, e.g.
+// the `[]` in `new int[5][]`). `ArrayCreateExpression.AdditionalArraySpecifiers` is an
+// `AstNodeCollection<ArraySpecifier>` whose `[Slot("AdditionalArraySpecifier")]` argument names
+// a slot kind DISTINCT from `ComposedType.ArraySpecifiers`'s `[Slot("ArraySpecifier")]` (the
+// two collections have the same `ArraySpecifier` element type but different kind names, so the
+// slot system can route by kind -- `GetCollectionByKind(&Slots::ArraySpecifier)` returns
+// `ComposedType.ArraySpecifiers`, `GetCollectionByKind(&Slots::AdditionalArraySpecifier)`
+// returns `ArrayCreateExpression.AdditionalArraySpecifiers`). A
+// `CSharpSlotInfoT<ArraySpecifier>` (same element type as `Slots::ArraySpecifier`); the
+// `ArraySpecifier.hpp` include above makes the element type complete (no cycle, same as
+// `Slots::ArraySpecifier`). Defined AFTER the `Slots::ArraySpecifier` *variable*, so the
+// element type is qualified (`::ILSpy::Decompiler::CSharp::Syntax::ArraySpecifier`) to avoid
+// resolving to that variable (the `Expression`/`Condition`/`Argument` collision precedent: an
+// unqualified name shared with a prior `Slots` variable resolves to the variable, not the
+// class, since `Slots` is a namespace and the variable is in scope).
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::ArraySpecifier> AdditionalArraySpecifier{"AdditionalArraySpecifier", false, nullptr, false};
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_SLOTS_HPP

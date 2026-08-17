@@ -72,6 +72,7 @@
 #include "Expressions/IndexerExpression.hpp"
 #include "Expressions/ArrayInitializerExpression.hpp"
 #include "Expressions/ObjectCreateExpression.hpp"
+#include "Expressions/ArrayCreateExpression.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -211,6 +212,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitObjectCreateExpression(ObjectCreateExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitArrayCreateExpression(ArrayCreateExpression* node) {
         VisitChildren(node);
     }
 };

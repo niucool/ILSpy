@@ -156,6 +156,15 @@ class ArrayInitializerExpression;
 // kind; the `Arguments` collection is the first NON-incremental one-collection node since the
 // `Initializer` single slot trails it).
 class ObjectCreateExpression;
+// `ArrayCreateExpression` is the first ported node with TWO collections FOLLOWED BY a single
+// slot (a sealed `Expression` with a required `AstType` `Type` slot + an `Arguments`
+// `AstNodeCollection<Expression>` collection + an `AdditionalArraySpecifiers`
+// `AstNodeCollection<ArraySpecifier>` collection + a nullable `ArrayInitializerExpression`
+// `Initializer` slot -- the `array_creation_expression ::= 'new' type '[' expression* ']'
+// array_specifier* array_initializer?` production, reusing the already-ported `Slots::Type`/
+// `Slots::Argument`/`Slots::Initializer` kinds and the new `Slots::AdditionalArraySpecifier`
+// kind; both collections are non-incremental since the `Initializer` single slot trails them).
+class ArrayCreateExpression;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -209,6 +218,7 @@ public:
     virtual void VisitIndexerExpression(IndexerExpression*) = 0;
     virtual void VisitArrayInitializerExpression(ArrayInitializerExpression*) = 0;
     virtual void VisitObjectCreateExpression(ObjectCreateExpression*) = 0;
+    virtual void VisitArrayCreateExpression(ArrayCreateExpression*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
