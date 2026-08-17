@@ -80,6 +80,7 @@
 #include "Statements/ReturnStatement.hpp"
 #include "Statements/ThrowStatement.hpp"
 #include "Statements/ExpressionStatement.hpp"
+#include "Statements/BlockStatement.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -243,6 +244,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitExpressionStatement(ExpressionStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitBlockStatement(BlockStatement* node) {
         VisitChildren(node);
     }
 };

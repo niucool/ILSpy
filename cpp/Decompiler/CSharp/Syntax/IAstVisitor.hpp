@@ -195,6 +195,13 @@ class YieldBreakStatement;
 class ReturnStatement;
 class ThrowStatement;
 class ExpressionStatement;
+// `BlockStatement` is the first collection-bearing C# AST statement node -- the
+// collection-only `ArrayInitializerExpression` D250 shape applied to the Statement hierarchy:
+// a non-sealed `Statement` whose sole child slot is the `Statements` collection of `Statement`
+// (the `block ::= '{' statement* '}'` production, the statement list inside the braces), with
+// the new `Slots::Statement` kind. The next in-order Phase-5 piece per the D255 plan ("the
+// collection-bearing statements: BlockStatement the statement collection").
+class BlockStatement;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -256,6 +263,7 @@ public:
     virtual void VisitReturnStatement(ReturnStatement*) = 0;
     virtual void VisitThrowStatement(ThrowStatement*) = 0;
     virtual void VisitExpressionStatement(ExpressionStatement*) = 0;
+    virtual void VisitBlockStatement(BlockStatement*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

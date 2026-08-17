@@ -46,6 +46,7 @@
 #include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/Identifier.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/Statement.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax::Slots {
 
@@ -178,6 +179,23 @@ inline const CSharpSlotInfoT<ArraySpecifier> ArraySpecifier{"ArraySpecifier", fa
 // unqualified name shared with a prior `Slots` variable resolves to the variable, not the
 // class, since `Slots` is a namespace and the variable is in scope).
 inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::ArraySpecifier> AdditionalArraySpecifier{"AdditionalArraySpecifier", false, nullptr, false};
+
+// The `Statement` kind -- a collection of `Statement` (the statement list of a block:
+// `BlockStatement.Statements`, an `AstNodeCollection<Statement>`). The first ported
+// collection whose element type is the `Statement` abstract base (the collection-only
+// `BlockStatement` D256 shape). A `CSharpSlotInfoT<Statement>` (the element type is the
+// `Statement` abstract base, complete via the `Statements/Statement.hpp` include above).
+// `Statements/Statement.hpp` does NOT include `Slots.hpp` (the `Statement` abstract base has
+// no per-node slot statics), so this kind lives HERE in `Slots.hpp` (no include cycle) -- the
+// `Slots.ArraySpecifier` D242 precedent (an element-type node header that does not include
+// `Slots.hpp` lives in `Slots.hpp`), applied to an abstract-base element type. The name
+// `Statement` collides with the `Statement` CLASS in the parent `Syntax` namespace (the
+// `Expression`/`Identifier` D231 collision pattern): the template argument in this definition
+// resolves to the class (the constant being declared is not yet in scope at the point its
+// type is parsed), and a LATER `Slots` entry wanting the `Statement` class as its element
+// type must qualify it (`::ILSpy::Decompiler::CSharp::Syntax::Statement`) to avoid resolving
+// to this constant.
+inline const CSharpSlotInfoT<Statement> Statement{"Statement", false, nullptr, false};
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
