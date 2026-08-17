@@ -55,6 +55,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/Expressions/AsIsExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/IdentifierExpression_Test.cpp
+    Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression_Test.cpp
     Decompiler/CSharp/Syntax/PatternMatching/PatternMatching_Test.cpp
     Decompiler/IL/ControlFlowSimplification_Test.cpp
     Decompiler/IL/ControlFlowGraph_Test.cpp

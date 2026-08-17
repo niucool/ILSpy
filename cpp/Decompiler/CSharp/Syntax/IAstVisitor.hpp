@@ -117,6 +117,15 @@ class SizeOfExpression;
 // to `SimpleType` but deriving from `Expression`; reusing the already-ported `Slots::Identifier`
 // and `Slots::TypeArgument` kinds).
 class IdentifierExpression;
+// `MemberReferenceExpression` is the first `Expression` with BOTH a single `Expression` child
+// slot and a collection slot (a sealed `Expression` with a required `Target` `Expression` slot
+// + a required `MemberName` string-name `[Slot]` over a backing `MemberNameToken` + a
+// `TypeArguments` `AstNodeCollection<AstType>` collection -- the
+// `member_reference_expression ::= expression '.' identifier ('<' type (',' type)* '>')?`
+// production, the `MemberType` shape with an `Expression` target and no scalar; reusing the
+// already-ported `Slots::Identifier`/`Slots::TypeArgument` kinds and the new `Slots::
+// TargetExpression` kind).
+class MemberReferenceExpression;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -165,6 +174,7 @@ public:
     virtual void VisitDefaultValueExpression(DefaultValueExpression*) = 0;
     virtual void VisitSizeOfExpression(SizeOfExpression*) = 0;
     virtual void VisitIdentifierExpression(IdentifierExpression*) = 0;
+    virtual void VisitMemberReferenceExpression(MemberReferenceExpression*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

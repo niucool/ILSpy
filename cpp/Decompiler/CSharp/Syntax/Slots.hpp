@@ -110,6 +110,18 @@ inline const CSharpSlotInfoT<Identifier> Identifier{"Identifier", false, nullptr
 // element-type classes).
 inline const CSharpSlotInfoT<AstType> Target{"Target", false, nullptr, false};
 
+// The `TargetExpression` kind -- a single `Expression` child (the target of a member access,
+// invocation, indexer, or pointer reference: `MemberReferenceExpression.Target`,
+// `InvocationExpression.Target`, `IndexerExpression.Target`,
+// `PointerReferenceExpression.Target`). Distinct from the `Target` kind (an `AstType` target,
+// unique to `MemberType`): a member access `expr.Member` has an `Expression`-typed target
+// (`expr`), so its slot kind is `TargetExpression`, not `Target`. A
+// `CSharpSlotInfoT<Expression>` (the element type is `Expression`); defined after the
+// `Expression` constant, so the element type is qualified
+// (`::ILSpy::Decompiler::CSharp::Syntax::Expression`) to avoid resolving to the `Expression`
+// *variable* declared above (the D231 collision note).
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> TargetExpression{"TargetExpression", false, nullptr, false};
+
 // The `TypeArgument` kind -- a collection of `AstType` (the type arguments of a generic
 // type reference, e.g. `SimpleType.TypeArguments`/`MemberType.TypeArguments`/
 // `IdentifierExpression.TypeArguments`/`MemberReferenceExpression.TypeArguments`). A
