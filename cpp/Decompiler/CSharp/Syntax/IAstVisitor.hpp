@@ -133,6 +133,12 @@ class MemberReferenceExpression;
 // `MemberReferenceExpression` shape with no string-name `[Slot]` and no scalar; reusing the
 // already-ported `Slots::TargetExpression`/`Slots::Argument` kinds).
 class InvocationExpression;
+// `IndexerExpression` is structurally identical to `InvocationExpression` (a sealed `Expression`
+// with a required `Target` `Expression` slot + an `Arguments` `AstNodeCollection<Expression>`
+// collection) but for the `element_access ::= expression '[' expression* ']'` production; reusing
+// the already-ported `Slots::TargetExpression`/`Slots::Argument` kinds (the two are disjoint
+// concrete types so the pattern matcher's `other is IndexerExpression` gate distinguishes them).
+class IndexerExpression;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -183,6 +189,7 @@ public:
     virtual void VisitIdentifierExpression(IdentifierExpression*) = 0;
     virtual void VisitMemberReferenceExpression(MemberReferenceExpression*) = 0;
     virtual void VisitInvocationExpression(InvocationExpression*) = 0;
+    virtual void VisitIndexerExpression(IndexerExpression*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
