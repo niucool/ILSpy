@@ -231,6 +231,33 @@ inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Statement> Fal
 // `Slots::Statement` variable, so the element type is qualified.
 inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Statement> EmbeddedStatement{"EmbeddedStatement", false, nullptr, false};
 
+// The `ForInitializer` kind -- a collection of `Statement` (the initializer list of a
+// `ForStatement`: the comma-separated init statements before the first `;` of a
+// `for (init; test; iter) body`, e.g. `a = 2, b = 1` in `for (a = 2, b = 1; a > b; a--)`).
+// Unique to `ForStatement` among the ported nodes (the `Initializers` collection). A
+// `CSharpSlotInfoT<Statement>` (the element type is the `Statement` abstract base, complete via
+// the `Statements/Statement.hpp` include above). `Statements/Statement.hpp` does NOT include
+// `Slots.hpp` (the abstract base has no per-node slot statics), so this kind lives HERE in
+// `Slots.hpp` (no include cycle) -- the `Slots.Statement`/`Slots.EmbeddedStatement` precedent.
+// Defined AFTER the `Slots::Statement` variable, so the element type is qualified
+// (`::ILSpy::Decompiler::CSharp::Syntax::Statement`) to avoid resolving to that variable (the
+// `Expression`/`Condition`/`AdditionalArraySpecifier` collision precedent: an unqualified name
+// shared with a prior `Slots` variable resolves to the variable, not the class).
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Statement> ForInitializer{"ForInitializer", false, nullptr, false};
+
+// The `Iterator` kind -- a collection of `Statement` (the iterator/step list of a
+// `ForStatement`: the comma-separated step statements after the second `;` of a
+// `for (init; test; iter) body`, e.g. `a--` in `for (;; ; a--)`). Unique to `ForStatement`
+// among the ported nodes (the `Iterators` collection); the kind name `Iterator` is DISTINCT from
+// the per-node `Iterators` property name and from the `ForInitializer` kind (the two
+// collections have the same `Statement` element type but different kind names, so the slot system
+// can route by kind). A `CSharpSlotInfoT<Statement>` (the element type is the `Statement`
+// abstract base, complete via the `Statements/Statement.hpp` include above).
+// `Statements/Statement.hpp` does NOT include `Slots.hpp`, so this kind lives HERE (no include
+// cycle) -- the `Slots.Statement`/`Slots.ForInitializer` precedent. Defined AFTER the
+// `Slots::Statement` variable, so the element type is qualified.
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Statement> Iterator{"Iterator", false, nullptr, false};
+
 // The `ResourceAcquisition` kind -- a single `AstNode` child (the resource acquisition of a
 // `UsingStatement` -- the `( local_variable_declaration | expression )` inside `using (...)`, so
 // the slot is typed the abstract `AstNode` base, NOT a specific derived class: it can hold either a

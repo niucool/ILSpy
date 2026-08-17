@@ -95,6 +95,7 @@
 #include "Statements/UnsafeStatement.hpp"
 #include "Statements/LockStatement.hpp"
 #include "Statements/UsingStatement.hpp"
+#include "Statements/ForStatement.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -303,6 +304,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitUsingStatement(UsingStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitForStatement(ForStatement* node) {
         VisitChildren(node);
     }
 };

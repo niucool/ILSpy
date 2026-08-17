@@ -281,6 +281,18 @@ class LockStatement;
 // so no elaborated-type-specifier is needed anywhere. The `AwaitKeyword` const aliases
 // `UnaryOperatorExpression::AwaitKeyword` (the canonical `await` literal).
 class UsingStatement;
+// `ForStatement` is the first ported node with a collection -> single -> collection -> single
+// slot layout -- the next in-order Phase-5 piece per the D262 plan. A sealed `Statement` with an
+// `Initializers` `AstNodeCollection<Statement>` collection (the init statements before the first
+// `;`), a NULLABLE `Expression?` `Condition` (the loop test, absent for `for (;;)`), an
+// `Iterators` `AstNodeCollection<Statement>` collection (the step statements after the second
+// `;`), and a REQUIRED `Statement` `EmbeddedStatement` (the loop body); both collections are
+// non-incremental (two collections), and both single slots follow collections so they use the
+// index-less `SetChildNode` setter. It adds the new `Slots::ForInitializer`/`Slots::Iterator`
+// kinds and reuses the already-ported `Slots::Condition` (by `ConditionalExpression`, the
+// per-node slot carrying `IsOptional=true` for the nullable case)/`Slots::EmbeddedStatement` (by
+// `WhileStatement`); NO name-shadowing crux (no member is named `Expression`/`Statement`).
+class ForStatement;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -357,6 +369,7 @@ public:
     virtual void VisitUnsafeStatement(UnsafeStatement*) = 0;
     virtual void VisitLockStatement(LockStatement*) = 0;
     virtual void VisitUsingStatement(UsingStatement*) = 0;
+    virtual void VisitForStatement(ForStatement*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
