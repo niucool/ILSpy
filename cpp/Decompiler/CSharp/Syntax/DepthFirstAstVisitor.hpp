@@ -39,6 +39,7 @@
 #include "AstNode.hpp"
 #include "IAstVisitor.hpp"
 #include "Identifier.hpp"
+#include "Expressions/AssignmentExpression.hpp"
 #include "Expressions/BaseReferenceExpression.hpp"
 #include "Expressions/BinaryOperatorExpression.hpp"
 #include "Expressions/NullReferenceExpression.hpp"
@@ -99,6 +100,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitBinaryOperatorExpression(BinaryOperatorExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitAssignmentExpression(AssignmentExpression* node) {
         VisitChildren(node);
     }
 };

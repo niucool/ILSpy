@@ -57,6 +57,7 @@ class ThisReferenceExpression;
 class BaseReferenceExpression;
 class PrimitiveExpression;
 class BinaryOperatorExpression;
+class AssignmentExpression;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -82,6 +83,7 @@ public:
     virtual void VisitBaseReferenceExpression(BaseReferenceExpression*) = 0;
     virtual void VisitPrimitiveExpression(PrimitiveExpression*) = 0;
     virtual void VisitBinaryOperatorExpression(BinaryOperatorExpression*) = 0;
+    virtual void VisitAssignmentExpression(AssignmentExpression*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
