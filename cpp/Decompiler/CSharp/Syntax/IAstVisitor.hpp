@@ -100,6 +100,16 @@ class ComposedType;
 class CastExpression;
 class AsExpression;
 class IsExpression;
+// The single-`[Slot("Type")]`-`AstType` `Expression` nodes -- the simplest slot-bearing
+// AstType-bearing `Expression` shape (one required single `AstType` `Type` slot, reusing the
+// already-ported `Slots::Type` kind): `TypeReferenceExpression` (an ILSpy wrapper letting an
+// `AstType` appear in expression position, no const keyword) and the keyword trio
+// `TypeOfExpression`/`DefaultValueExpression`/`SizeOfExpression` (a `typeof`/`default`/`sizeof`
+// keyword const string each). All four share the exact same one-required-single-slot shape.
+class TypeReferenceExpression;
+class TypeOfExpression;
+class DefaultValueExpression;
+class SizeOfExpression;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -143,6 +153,10 @@ public:
     virtual void VisitCastExpression(CastExpression*) = 0;
     virtual void VisitAsExpression(AsExpression*) = 0;
     virtual void VisitIsExpression(IsExpression*) = 0;
+    virtual void VisitTypeReferenceExpression(TypeReferenceExpression*) = 0;
+    virtual void VisitTypeOfExpression(TypeOfExpression*) = 0;
+    virtual void VisitDefaultValueExpression(DefaultValueExpression*) = 0;
+    virtual void VisitSizeOfExpression(SizeOfExpression*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

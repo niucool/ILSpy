@@ -62,6 +62,10 @@
 #include "Expressions/CastExpression.hpp"
 #include "Expressions/AsExpression.hpp"
 #include "Expressions/IsExpression.hpp"
+#include "Expressions/TypeReferenceExpression.hpp"
+#include "Expressions/TypeOfExpression.hpp"
+#include "Expressions/DefaultValueExpression.hpp"
+#include "Expressions/SizeOfExpression.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -171,6 +175,18 @@ public:
         VisitChildren(node);
     }
     virtual void VisitIsExpression(IsExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitTypeReferenceExpression(TypeReferenceExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitTypeOfExpression(TypeOfExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitDefaultValueExpression(DefaultValueExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitSizeOfExpression(SizeOfExpression* node) {
         VisitChildren(node);
     }
 };
