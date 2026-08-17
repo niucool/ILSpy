@@ -46,15 +46,26 @@
 //     in the C#, so the base implements the interface by delegating to the abstract
 //     `DoMatch(AstNode*, Match)` the concrete nodes supply.
 //
-// Deferred to later Phase-5 slices (each is a larger, separately testable unit): the
-// `AbstractAnnotatable` annotation channel (and the `NodeTrivia` trivia it carries), the
-// `IAstVisitor`/`AcceptVisitor` dispatch, the `ToString`/`CSharpOutputVisitor` rendering,
-// and the `GetNextNode`/`GetPrevNode`/`GetNextSibling`/`GetPrevSibling` predicate overloads.
-// The `Clone` virtual is declared (concrete nodes override it; the base throws) but the
-// C# `MemberwiseClone`-based base implementation has no C++ equivalent, so each concrete
-// node's `Clone` does the full deep copy itself rather than sharing a base helper. The
-// `Trivia` branch of the sibling/slot accessors is dropped along with trivia itself (a
-// trivia node has no child slot; it is restored when the trivia system lands).
+// The annotation channel (`AbstractAnnotatable` + the `NodeTrivia` trivia holder + the
+// `AddLeadingTrivia`/`AddTrailingTrivia`/`CopyTriviaFrom`/`ReparentTrivia` mutation path +
+// the `CheckInvariant`/`CheckTriviaInvariant` debug machinery) is ported in this slice:
+// `AstNode` derives from `AbstractAnnotatable` (cpp/.../AbstractAnnotatable.hpp), and the
+// trivia node type + holder live in `Trivia.hpp` (included by `AstNode.cpp`, which defines
+// the trivia mutation path out-of-line -- the holder needs the complete `Trivia` type).
+// Deferred to later Phase-5 slices: the `IAstVisitor`/`AcceptVisitor` dispatch, the
+// `ToString`/`CSharpOutputVisitor` rendering, the `GetNextNode`/`GetPrevNode`/
+// `GetNextSibling`/`GetPrevSibling` predicate overloads, and the sibling/slot/remove
+// navigation trivia branches (the C# `this is Trivia { triviaSiblings: ... }` tests in
+// `NextSibling`/`PrevSibling`/`Slot`/`Remove`/`GetNextNode`/`GetPrevNode`/
+// `ClearParentAndIndex`). Those branches are kept dropped: trivia is reached through the
+// `LeadingTrivia`/`TrailingTrivia` lists (not the sibling/slot space), and the engine never
+// calls `Remove()` on trivia (verified by grep); they land when a transform walks trivia
+// via sibling links. The `Clone` virtual is declared (concrete nodes override it; the base
+// throws) but the C# `MemberwiseClone`-based base implementation has no C++ equivalent, so
+// each concrete node's `Clone` copies its scalar fields, deep-clones its children, then
+// calls `CloneAnnotationsFrom(*this)` + `ReparentTrivia()` to copy the annotation channel
+// (the C# `MemberwiseClone` + `CloneAnnotations` + `ReparentTrivia` combo) rather than
+// sharing a base helper.
 //
 // Field access: `parent_` stays private with a read-only `Parent()` and the `SetParent`/
 // `ClearParentAndIndex` accessors the C# generated code calls (the C# `parent` is private
@@ -72,6 +83,7 @@
 
 #pragma once
 
+#include "Decompiler/CSharp/Syntax/AbstractAnnotatable.hpp"
 #include "Decompiler/CSharp/Syntax/TextLocation.hpp"
 #include "Decompiler/CSharp/Syntax/CSharpSlotInfo.hpp"
 #include "Decompiler/CSharp/Syntax/PatternMatching/INode.hpp"
@@ -86,6 +98,14 @@ namespace ILSpy::Decompiler::CSharp::Syntax {
 // it as the (nullable) return of `GetCollectionByKind`.
 class AstNodeCollection;
 
+// Forward declarations: the trivia node type (`Trivia`) and its holder (`NodeTrivia`) are
+// ported in `Trivia.hpp`, which includes this header (`Trivia : AstNode`). The trivia
+// mutation path on `AstNode` is declared here (params use `Trivia*`, a forward-declared
+// pointer) and defined out-of-line in `AstNode.cpp` (which includes `Trivia.hpp` so the
+// holder and the `NodeTrivia`-typed `Annotation<>` lookup are complete).
+class Trivia;
+class NodeTrivia;
+
 // Forward declarations: the child-enumeration helper types are defined after the `AstNode`
 // class (their method bodies call `AstNode` members, so they need the complete class).
 // `Children()` returns `ChildrenCollection` by value, so it is declared here and defined
@@ -95,7 +115,13 @@ class ChildrenCollection;
 
 // The common base of every C# AST node. Abstract: a concrete node overrides at least
 // `DoMatch` and the slot-storage virtuals for the slots it declares.
-class AstNode : public PatternMatching::INode {
+// The common base of every C# AST node. Derives from `AbstractAnnotatable` (the
+// annotation channel) and `PatternMatching::INode` (the pattern-match interface); both have
+// virtual destructors, so `AstNode` is polymorphic for the `dynamic_cast`-based is-a tests
+// the slot system (`CSharpSlotInfo::IsInstanceOfType`) and the annotation channel
+// (`Annotation<T>()`) use. Abstract: a concrete node overrides at least `DoMatch` and the
+// slot-storage virtuals for the slots it declares.
+class AstNode : public AbstractAnnotatable, public PatternMatching::INode {
     TextLocation startLocation_ = TextLocation::Empty;
     TextLocation endLocation_ = TextLocation::Empty;
 
@@ -522,11 +548,12 @@ public:
     }
 
     // The C# `public AstNode Clone()` -- deep-clone this subtree. C# uses `MemberwiseClone`
-    // (a runtime shallow copy) then `CloneChildrenInto` to deep-copy the children; C++ has
-    // no `MemberwiseClone`, so each concrete node overrides this to copy its scalar fields
-    // and deep-clone its children (the `CloneChildrenInto` virtual is kept for API
-    // fidelity, but the C++ clone is per-concrete-node). The base throws: a concrete node
-    // must override.
+    // (a runtime shallow copy) then `CloneChildrenInto` to deep-copy the children, then
+    // `CloneAnnotations` + `ReparentTrivia` to copy the annotation channel; C++ has no
+    // `MemberwiseClone`, so each concrete node overrides this to copy its scalar fields,
+    // deep-clone its children (the `CloneChildrenInto` virtual is kept for API fidelity),
+    // then call `CloneAnnotationsFrom(*this)` + `ReparentTrivia()` to copy the annotation
+    // channel. The base throws: a concrete node must override.
     virtual AstNode* Clone() const {
         throw std::logic_error("AstNode::Clone: concrete node must override");
     }
@@ -588,7 +615,47 @@ public:
         }
     }
 
+    // ---- Trivia (the annotation channel) ---------------------------------
+    // The trivia mutation path -- comments and preprocessor directives attached to this
+    // node as leading/trailing trivia, kept off the child-index space (held in the
+    // `NodeTrivia` annotation). Declared here (params use `Trivia*`, a forward-declared
+    // pointer) and defined out-of-line in `AstNode.cpp` (which includes `Trivia.hpp` so the
+    // `NodeTrivia` holder and the `Annotation<NodeTrivia>` lookup are complete).
+    //
+    // The C# `IEnumerable<Trivia> LeadingTrivia`/`TrailingTrivia` -- the trivia in
+    // insertion order (empty when none); returned by value as a non-owning pointer view.
+    std::vector<Trivia*> LeadingTrivia() const;
+    std::vector<Trivia*> TrailingTrivia() const;
+    // The C# `void AddLeadingTrivia`/`PrependLeadingTrivia`/`AddTrailingTrivia` -- attach a
+    // trivia to this node (the port takes ownership; the holder owns the trivia).
+    void AddLeadingTrivia(Trivia* trivia);
+    void PrependLeadingTrivia(Trivia* trivia);
+    void AddTrailingTrivia(Trivia* trivia);
+    // The C# `internal void CopyTriviaFrom(AstNode)` -- deep-copy another node's trivia onto
+    // this node, appending to any trivia already present.
+    void CopyTriviaFrom(const AstNode& other);
+
+    // The C# `[Conditional("DEBUG")] internal virtual void CheckInvariant()` -- recursively
+    // verify the slot structure of this subtree (every required single slot filled, each
+    // child's Parent/ChildIndex/type consistent) and the trivia invariants (each trivia's
+    // Parent/sibling-list/index consistent), asserting on a violation. A no-op in NDEBUG
+    // (mirrors the IL AST `CheckInvariant`). Concrete nodes override this (calling `base`)
+    // to assert their own scalar invariants.
+    virtual void CheckInvariant();
+
+protected:
+    // The C# `private void ReparentTrivia()` -- re-point the trivia held in this node's
+    // `NodeTrivia` annotation at this node. The concrete node's `Clone` calls this after
+    // `CloneAnnotationsFrom` so the cloned holder's deep-copied trivia (which still carry the
+    // source owner's parent state) point at the clone. Protected (the C# is private; the
+    // port's per-concrete-node `Clone` needs it, the `SetChildNode` precedent).
+    void ReparentTrivia();
+
 private:
+    // The C# `private NodeTrivia GetOrCreateTrivia()` -- the holder for this node's trivia,
+    // creating it (and adding it as an annotation) on first use.
+    NodeTrivia* GetOrCreateTrivia();
+
     // The C# `IEnumerable<AstNode> GetDescendantsImpl(bool, Func<AstNode,bool>?)` -- the
     // pre-order DFS: at each node, remember its next sibling (so a mid-walk
     // removal/replacement of the current node does not lose the place), yield the node,
