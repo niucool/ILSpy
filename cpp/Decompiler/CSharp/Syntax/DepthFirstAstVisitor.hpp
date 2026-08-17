@@ -44,6 +44,7 @@
 #include "Expressions/BinaryOperatorExpression.hpp"
 #include "Expressions/ConditionalExpression.hpp"
 #include "Expressions/NullReferenceExpression.hpp"
+#include "Expressions/ParenthesizedExpression.hpp"
 #include "Expressions/PrimitiveExpression.hpp"
 #include "Expressions/ThisReferenceExpression.hpp"
 #include "Expressions/UnaryOperatorExpression.hpp"
@@ -111,6 +112,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitConditionalExpression(ConditionalExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitParenthesizedExpression(ParenthesizedExpression* node) {
         VisitChildren(node);
     }
 };
