@@ -35,20 +35,25 @@
 //     `GetChild`, `SetChild`, `GetChildSlotInfo`, `GetCollectionByKind`, `CloneChildrenInto`
 //     -- with the zero-child defaults a childless node (and the pattern placeholder) keep;
 //   * sibling/child navigation (`NextSibling`, `PrevSibling`, `FirstChild`, `LastChild`,
-//     `HasChildren`); and
+//     `HasChildren`);
+//   * child enumeration (`Children` -- the `ChildrenCollection` view + the
+//     `ChildEnumerator` mutation-tolerant enumerator);
+//   * the ancestor/descendant tree walks (`Ancestors`/`AncestorsAndSelf`,
+//     `Descendants`/`DescendantsAndSelf`/`DescendantNodes`/`DescendantNodesAndSelf`),
+//     the `GetParent<T>`/`GetParent(pred)` ancestor lookups, the `GetNextNode`/`GetPrevNode`
+//     document-order walk, and the `Contains`/`IsInside` location queries; and
 //   * the `INode` pattern-match hooks (`DoMatch`/`DoMatchCollection`) -- `AstNode : INode`
 //     in the C#, so the base implements the interface by delegating to the abstract
 //     `DoMatch(AstNode*, Match)` the concrete nodes supply.
 //
 // Deferred to later Phase-5 slices (each is a larger, separately testable unit): the
 // `AbstractAnnotatable` annotation channel (and the `NodeTrivia` trivia it carries), the
-// `AstNodeCollection<T>` collection slots, the `ChildrenCollection`/`ChildEnumerator`
-// enumerator, the ancestor/descendant walks, the mutation API (`AddChild`/`InsertChild*`/
+// `AstNodeCollection<T>` collection slots, the mutation API (`AddChild`/`InsertChild*`/
 // `Remove`/`ReplaceWith`/`Clone` with its `ValidateNewSingleChild` tree invariants), the
 // `IAstVisitor`/`AcceptVisitor` dispatch, the `ToString`/`CSharpOutputVisitor` rendering,
-// and the `Contains`/`IsInside`/`GetNextNode`/`GetPrevNode` queries. The `Trivia` branch of
-// the sibling/slot accessors is dropped along with trivia itself (a trivia node has no
-// child slot; it is restored when the trivia system lands).
+// and the `GetNextNode`/`GetPrevNode`/`GetNextSibling`/`GetPrevSibling` predicate overloads.
+// The `Trivia` branch of the sibling/slot accessors is dropped along with trivia itself (a
+// trivia node has no child slot; it is restored when the trivia system lands).
 //
 // Field access: `parent_` stays private with a read-only `Parent()` and the `SetParent`/
 // `ClearParentAndIndex` accessors the C# generated code calls (the C# `parent` is private
@@ -70,6 +75,7 @@
 #include "Decompiler/CSharp/Syntax/CSharpSlotInfo.hpp"
 #include "Decompiler/CSharp/Syntax/PatternMatching/INode.hpp"
 
+#include <functional>
 #include <stdexcept>
 #include <vector>
 
@@ -78,6 +84,13 @@ namespace ILSpy::Decompiler::CSharp::Syntax {
 // Forward declaration: the collection slot type is ported later; the base only needs
 // it as the (nullable) return of `GetCollectionByKind`.
 class AstNodeCollection;
+
+// Forward declarations: the child-enumeration helper types are defined after the `AstNode`
+// class (their method bodies call `AstNode` members, so they need the complete class).
+// `Children()` returns `ChildrenCollection` by value, so it is declared here and defined
+// after the helper types.
+class ChildEnumerator;
+class ChildrenCollection;
 
 // The common base of every C# AST node. Abstract: a concrete node overrides at least
 // `DoMatch` and the slot-storage virtuals for the slots it declares.
@@ -251,6 +264,114 @@ public:
     // The C# `public bool HasChildren` => `FirstChild != null`.
     bool HasChildren() const { return FirstChild() != nullptr; }
 
+    // ---- Child enumeration ----------------------------------------------
+    // The C# `public ChildrenCollection Children => new ChildrenCollection(this)` -- the
+    // children of this node in document order (see `ChildrenCollection`/`ChildEnumerator`
+    // below). Returned by value; the view holds a pointer to this node, so it is cheap.
+    ChildrenCollection Children();
+
+    // ---- Ancestor / descendant walks ------------------------------------
+    // The C# `public IEnumerable<AstNode> Ancestors` -- the parent chain, excluding this
+    // node. Eagerly collected (C++ has no `yield return`; the C# lazy sequence ports to a
+    // vector with the same document order).
+    std::vector<AstNode*> Ancestors() {
+        std::vector<AstNode*> result;
+        for (AstNode* cur = Parent(); cur != nullptr; cur = cur->Parent())
+            result.push_back(cur);
+        return result;
+    }
+
+    // The C# `public IEnumerable<AstNode> AncestorsAndSelf` -- including this node.
+    std::vector<AstNode*> AncestorsAndSelf() {
+        std::vector<AstNode*> result;
+        for (AstNode* cur = this; cur != nullptr; cur = cur->Parent())
+            result.push_back(cur);
+        return result;
+    }
+
+    // The C# `public IEnumerable<AstNode> Descendants` -- the pre-order descendant walk,
+    // excluding this node.
+    std::vector<AstNode*> Descendants() {
+        return GetDescendantsImpl(false, {});
+    }
+
+    // The C# `public IEnumerable<AstNode> DescendantsAndSelf` -- including this node.
+    std::vector<AstNode*> DescendantsAndSelf() {
+        return GetDescendantsImpl(true, {});
+    }
+
+    // The C# `public IEnumerable<AstNode> DescendantNodes(Func<AstNode,bool>?)` -- the
+    // pre-order walk, optionally skipping the children of any node for which
+    // `descendIntoChildren` returns false (an empty function descends into all).
+    std::vector<AstNode*> DescendantNodes(
+        const std::function<bool(AstNode*)>& descendIntoChildren = {}) {
+        return GetDescendantsImpl(false, descendIntoChildren);
+    }
+
+    // The C# `public IEnumerable<AstNode> DescendantNodesAndSelf(...)`.
+    std::vector<AstNode*> DescendantNodesAndSelf(
+        const std::function<bool(AstNode*)>& descendIntoChildren = {}) {
+        return GetDescendantsImpl(true, descendIntoChildren);
+    }
+
+    // ---- Ancestor lookup -------------------------------------------------
+    // The C# `public T? GetParent<T>()` -- the first ancestor of type `T`, or null. `T`
+    // must be polymorphic (derive from `AstNode`, which has a virtual destructor) for the
+    // `dynamic_cast` is-a test.
+    template <typename T>
+    T* GetParent() {
+        for (AstNode* cur = Parent(); cur != nullptr; cur = cur->Parent()) {
+            if (T* t = dynamic_cast<T*>(cur))
+                return t;
+        }
+        return nullptr;
+    }
+
+    // The C# `public AstNode? GetParent(Func<AstNode,bool>?)` -- the first ancestor
+    // matching `pred` (or the first ancestor when `pred` is empty), or null.
+    AstNode* GetParent(const std::function<bool(AstNode*)>& pred = {}) {
+        for (AstNode* cur = Parent(); cur != nullptr; cur = cur->Parent()) {
+            if (!pred || pred(cur))
+                return cur;
+        }
+        return nullptr;
+    }
+
+    // ---- Document-order navigation --------------------------------------
+    // The C# `public AstNode? GetNextNode` -- the next node in document order: the next
+    // sibling, else the parent's next node. (The Trivia branch is dropped with trivia.)
+    AstNode* GetNextNode() {
+        AstNode* s = NextSibling();
+        if (s != nullptr)
+            return s;
+        AstNode* p = Parent();
+        return p != nullptr ? p->GetNextNode() : nullptr;
+    }
+
+    // The C# `public AstNode? GetPrevNode` -- the previous node in document order.
+    AstNode* GetPrevNode() {
+        AstNode* s = PrevSibling();
+        if (s != nullptr)
+            return s;
+        AstNode* p = Parent();
+        return p != nullptr ? p->GetPrevNode() : nullptr;
+    }
+
+    // ---- Location queries -----------------------------------------------
+    // The C# `public bool Contains(int,int)` / `Contains(TextLocation)` -- the location is
+    // in the half-open [StartLocation, EndLocation) range.
+    bool Contains(int line, int column) const { return Contains(TextLocation(line, column)); }
+    bool Contains(TextLocation location) const {
+        return StartLocation() <= location && location < EndLocation();
+    }
+
+    // The C# `public bool IsInside(int,int)` / `IsInside(TextLocation)` -- the location is
+    // in the closed [StartLocation, EndLocation] range.
+    bool IsInside(int line, int column) const { return IsInside(TextLocation(line, column)); }
+    bool IsInside(TextLocation location) const {
+        return StartLocation() <= location && location <= EndLocation();
+    }
+
     // ---- Pattern matching (INode) ---------------------------------------
     // The abstract `DoMatch(AstNode?, Match)` the concrete nodes supply (the C#
     // `protected internal abstract`). `protected`: the concrete nodes (derived)
@@ -278,6 +399,130 @@ public:
         AstNode* o = dynamic_cast<AstNode*>(raw);
         return (raw == nullptr || o != nullptr) && DoMatch(o, match);
     }
+
+private:
+    // The C# `IEnumerable<AstNode> GetDescendantsImpl(bool, Func<AstNode,bool>?)` -- the
+    // pre-order DFS: at each node, remember its next sibling (so a mid-walk
+    // removal/replacement of the current node does not lose the place), yield the node,
+    // then descend into its first child (unless `descendIntoChildren` vetoes it) or resume
+    // from the stacked sibling. The stack is seeded with a null sentinel so the walk ends
+    // when nothing remains. Eagerly collected (C++ has no `yield`).
+    std::vector<AstNode*> GetDescendantsImpl(bool includeSelf,
+        const std::function<bool(AstNode*)>& descendIntoChildren) {
+        std::vector<AstNode*> result;
+        if (includeSelf) {
+            result.push_back(this);
+            if (descendIntoChildren && !descendIntoChildren(this))
+                return result;
+        }
+        std::vector<AstNode*> nextStack;
+        nextStack.push_back(nullptr);
+        AstNode* pos = FirstChild();
+        while (pos != nullptr) {
+            AstNode* posNext = pos->NextSibling();
+            if (posNext != nullptr)
+                nextStack.push_back(posNext);
+            result.push_back(pos);
+            AstNode* posFirstChild = pos->FirstChild();
+            if (posFirstChild != nullptr && (!descendIntoChildren || descendIntoChildren(pos)))
+                pos = posFirstChild;
+            else {
+                pos = nextStack.back();
+                nextStack.pop_back();
+            }
+        }
+        return result;
+    }
 };
+
+// ---- Child enumeration (helper types for `AstNode::Children`) ------------
+// The C# `AstNode.ChildrenCollection` readonly struct and `ChildEnumerator` struct (nested
+// in `AstNode`): a view over a node's children in document order with an enumerator that
+// captures each child's successor before handing it out, so the loop body may remove or
+// replace the current child mid-traversal without losing the place. Ported as free types
+// (their method bodies call `AstNode` members, so they are defined after the `AstNode`
+// class); the `Trivia` fast-path in the C# enumerator is dropped with trivia itself.
+
+class ChildEnumerator {
+    AstNode* node_ = nullptr;
+    AstNode* current_ = nullptr;
+    AstNode* next_ = nullptr;
+    bool started_ = false;
+
+public:
+    ChildEnumerator() = default;
+    explicit ChildEnumerator(AstNode* node) : node_(node) {}
+
+    // The C# `bool MoveNext()`: hands out the first child on the first call, then the
+    // successor captured before the previous yield. Returns false when exhausted.
+    bool MoveNext() {
+        current_ = started_ ? next_ : (node_ != nullptr ? node_->FirstChild() : nullptr);
+        started_ = true;
+        if (current_ == nullptr)
+            return false;
+        next_ = current_->NextSibling();
+        return true;
+    }
+
+    AstNode* Current() const { return current_; }
+
+    void Reset() {
+        current_ = nullptr;
+        next_ = nullptr;
+        started_ = false;
+    }
+
+    // Range-for input-iterator interface: `begin()` is a `MoveNext`'d enumerator (at the
+    // first child or exhausted), `end()` is the default sentinel (`current_ == nullptr`);
+    // `operator!=` discriminates by `current_`, so a non-empty enumerator is not equal to
+    // the sentinel until it is advanced past its last child.
+    AstNode* operator*() const { return current_; }
+    ChildEnumerator& operator++() { MoveNext(); return *this; }
+    bool operator!=(const ChildEnumerator& rhs) const { return current_ != rhs.current_; }
+    bool operator==(const ChildEnumerator& rhs) const { return current_ == rhs.current_; }
+};
+
+class ChildrenCollection {
+    AstNode* node_ = nullptr;
+
+public:
+    ChildrenCollection() = default;
+    explicit ChildrenCollection(AstNode* node) : node_(node) {}
+
+    // The C# `GetEnumerator()` -- the mutation-tolerant enumerator (call `MoveNext` then
+    // `Current` in a loop).
+    ChildEnumerator GetEnumerator() const { return ChildEnumerator(node_); }
+
+    // Range-for support (`for (AstNode* child : node.Children()) ...`).
+    ChildEnumerator begin() const {
+        ChildEnumerator e(node_);
+        e.MoveNext();
+        return e;
+    }
+    ChildEnumerator end() const { return ChildEnumerator(); }
+
+    // The C# `int Count` -- the number of present (non-null) children.
+    int Count() const {
+        int count = 0;
+        for (ChildEnumerator e = GetEnumerator(); e.MoveNext(); )
+            count++;
+        return count;
+    }
+
+    // The C# `AstNode this[int index]` -- the i-th present child in document order.
+    AstNode* At(int index) const {
+        int i = 0;
+        for (AstNode* child : *this) {
+            if (i++ == index)
+                return child;
+        }
+        throw std::out_of_range("ChildrenCollection::At");
+    }
+    AstNode* operator[](int index) const { return At(index); }
+};
+
+inline ChildrenCollection AstNode::Children() {
+    return ChildrenCollection(this);
+}
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

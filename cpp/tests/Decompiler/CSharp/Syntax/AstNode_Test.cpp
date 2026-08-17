@@ -419,3 +419,283 @@ TEST(CSharp_AstNode, DoMatchCollectionDelegatesAtPosition) {
     Match m3 = Match::CreateNew();
     EXPECT_FALSE(patternNode->DoMatchCollection(empty, 0, m3, bi));
 }
+
+// ---- Children (ChildrenCollection + ChildEnumerator) ----------------------
+
+TEST(CSharp_AstNode, ChildrenCountAndIndex) {
+    StubBinary b;
+    StubExpr left;
+    StubExpr right;
+    b.SetChild(0, &left);
+    b.SetChild(1, &right);
+
+    ChildrenCollection children = b.Children();
+    EXPECT_EQ(children.Count(), 2);
+    EXPECT_EQ(children[0], &left);
+    EXPECT_EQ(children[1], &right);
+}
+
+TEST(CSharp_AstNode, ChildrenRangeForOrder) {
+    StubBinary b;
+    StubExpr left;
+    StubExpr right;
+    b.SetChild(0, &left);
+    b.SetChild(1, &right);
+
+    std::vector<AstNode*> visited;
+    for (AstNode* child : b.Children())
+        visited.push_back(child);
+    ASSERT_EQ(visited.size(), 2u);
+    EXPECT_EQ(visited[0], &left);
+    EXPECT_EQ(visited[1], &right);
+}
+
+TEST(CSharp_AstNode, ChildrenEmptyNode) {
+    StubExpr e;
+    ChildrenCollection children = e.Children();
+    EXPECT_EQ(children.Count(), 0);
+    EXPECT_THROW(children[0], std::out_of_range);
+    // range-for over an empty collection does not execute the body.
+    int count = 0;
+    for (AstNode* child : e.Children())
+        count++;
+    EXPECT_EQ(count, 0);
+}
+
+TEST(CSharp_AstNode, ChildrenEmptySlotsAreSkipped) {
+    // A single slot left empty is skipped: only the Right child is present.
+    StubBinary b;
+    StubExpr right;
+    b.SetChild(1, &right);  // index 0 (Left) empty
+
+    ChildrenCollection children = b.Children();
+    EXPECT_EQ(children.Count(), 1);
+    EXPECT_EQ(children[0], &right);
+}
+
+TEST(CSharp_AstNode, ChildrenEnumeratorMoveNextCurrentReset) {
+    StubList l;
+    StubExpr a;
+    StubExpr c;
+    l.Append(&a);
+    l.Append(&c);
+
+    ChildEnumerator e = l.Children().GetEnumerator();
+    EXPECT_EQ(e.Current(), nullptr);  // before MoveNext
+    EXPECT_TRUE(e.MoveNext());
+    EXPECT_EQ(e.Current(), &a);
+    EXPECT_TRUE(e.MoveNext());
+    EXPECT_EQ(e.Current(), &c);
+    EXPECT_FALSE(e.MoveNext());
+    EXPECT_EQ(e.Current(), nullptr);
+
+    e.Reset();
+    EXPECT_TRUE(e.MoveNext());
+    EXPECT_EQ(e.Current(), &a);
+}
+
+TEST(CSharp_AstNode, ChildrenEnumeratorSkipsReplacementMidLoop) {
+    // The enumerator captures each child's successor before yielding it, so replacing the
+    // current child mid-loop advances to the captured successor (the replacement is not
+    // re-visited) -- the hand-over-hand guarantee the transforms rely on.
+    StubList l;
+    StubExpr a, b, c, x;
+    l.Append(&a);
+    l.Append(&b);
+    l.Append(&c);
+
+    std::vector<AstNode*> visited;
+    ChildEnumerator e = l.Children().GetEnumerator();
+    while (e.MoveNext()) {
+        AstNode* cur = e.Current();
+        visited.push_back(cur);
+        if (cur == &a)
+            l.SetChild(0, &x);  // replace `a` (index 0) with `x`
+    }
+    ASSERT_EQ(visited.size(), 3u);
+    EXPECT_EQ(visited[0], &a);
+    EXPECT_EQ(visited[1], &b);   // the captured successor, not the replacement `x`
+    EXPECT_EQ(visited[2], &c);
+}
+
+// ---- Ancestors / AncestorsAndSelf ----------------------------------------
+
+TEST(CSharp_AstNode, AncestorsWalksParentChain) {
+    // Tree: outer[bin, leaf] where bin[L1, L2].
+    StubList outer;
+    StubBinary bin;
+    StubExpr leaf, L1, L2;
+    outer.Append(&bin);
+    outer.Append(&leaf);
+    bin.SetChild(0, &L1);
+    bin.SetChild(1, &L2);
+
+    auto ancestors = L1.Ancestors();
+    ASSERT_EQ(ancestors.size(), 2u);
+    EXPECT_EQ(ancestors[0], &bin);
+    EXPECT_EQ(ancestors[1], &outer);
+
+    auto andSelf = L1.AncestorsAndSelf();
+    ASSERT_EQ(andSelf.size(), 3u);
+    EXPECT_EQ(andSelf[0], &L1);
+    EXPECT_EQ(andSelf[1], &bin);
+    EXPECT_EQ(andSelf[2], &outer);
+}
+
+TEST(CSharp_AstNode, AncestorsOfRootIsEmpty) {
+    StubExpr root;
+    EXPECT_TRUE(root.Ancestors().empty());
+    ASSERT_EQ(root.AncestorsAndSelf().size(), 1u);
+    EXPECT_EQ(root.AncestorsAndSelf()[0], &root);
+}
+
+// ---- Descendants / DescendantsAndSelf / DescendantNodes -----------------
+
+TEST(CSharp_AstNode, DescendantsPreOrder) {
+    // Tree: outer[bin, leaf] where bin[L1, L2]. Pre-order: bin, L1, L2, leaf.
+    StubList outer;
+    StubBinary bin;
+    StubExpr leaf, L1, L2;
+    outer.Append(&bin);
+    outer.Append(&leaf);
+    bin.SetChild(0, &L1);
+    bin.SetChild(1, &L2);
+
+    auto desc = outer.Descendants();
+    ASSERT_EQ(desc.size(), 4u);
+    EXPECT_EQ(desc[0], &bin);
+    EXPECT_EQ(desc[1], &L1);
+    EXPECT_EQ(desc[2], &L2);
+    EXPECT_EQ(desc[3], &leaf);
+
+    auto descSelf = outer.DescendantsAndSelf();
+    ASSERT_EQ(descSelf.size(), 5u);
+    EXPECT_EQ(descSelf[0], &outer);
+    EXPECT_EQ(descSelf[1], &bin);
+    EXPECT_EQ(descSelf[2], &L1);
+    EXPECT_EQ(descSelf[3], &L2);
+    EXPECT_EQ(descSelf[4], &leaf);
+}
+
+TEST(CSharp_AstNode, DescendantsOfLeafIsEmpty) {
+    StubExpr e;
+    EXPECT_TRUE(e.Descendants().empty());
+    ASSERT_EQ(e.DescendantsAndSelf().size(), 1u);
+    EXPECT_EQ(e.DescendantsAndSelf()[0], &e);
+}
+
+TEST(CSharp_AstNode, DescendantNodesDescendIntoChildrenPredicate) {
+    // Tree: outer[bin, leaf] where bin[L1, L2]. With a predicate that vetoes descending
+    // into `bin`, the walk yields bin then skips its children, resuming at the stacked
+    // sibling `leaf`.
+    StubList outer;
+    StubBinary bin;
+    StubExpr leaf, L1, L2;
+    outer.Append(&bin);
+    outer.Append(&leaf);
+    bin.SetChild(0, &L1);
+    bin.SetChild(1, &L2);
+
+    auto desc = outer.DescendantNodes([&](AstNode* n) { return n != &bin; });
+    ASSERT_EQ(desc.size(), 2u);
+    EXPECT_EQ(desc[0], &bin);
+    EXPECT_EQ(desc[1], &leaf);  // bin's children skipped, resume at the stacked sibling
+
+    // DescendantNodesAndSelf includes `outer` first, then respects the predicate.
+    auto descSelf = outer.DescendantNodesAndSelf([&](AstNode* n) { return n != &bin; });
+    ASSERT_EQ(descSelf.size(), 3u);
+    EXPECT_EQ(descSelf[0], &outer);
+    EXPECT_EQ(descSelf[1], &bin);
+    EXPECT_EQ(descSelf[2], &leaf);
+}
+
+// ---- GetParent ----------------------------------------------------------
+
+TEST(CSharp_AstNode, GetParentTypedReturnsFirstAncestorOfType) {
+    StubList outer;
+    StubBinary bin;
+    StubExpr L1, L2;
+    outer.Append(&bin);
+    bin.SetChild(0, &L1);
+    bin.SetChild(1, &L2);
+
+    EXPECT_EQ(L1.GetParent<StubBinary>(), &bin);
+    EXPECT_EQ(L1.GetParent<StubList>(), &outer);
+    // No StubExpr ancestor (L1's ancestors are bin and outer, neither is a StubExpr).
+    EXPECT_EQ(L1.GetParent<StubExpr>(), nullptr);
+}
+
+TEST(CSharp_AstNode, GetParentPredicate) {
+    StubList outer;
+    StubBinary bin;
+    StubExpr L1, L2;
+    outer.Append(&bin);
+    bin.SetChild(0, &L1);
+    bin.SetChild(1, &L2);
+
+    // Empty predicate: the first ancestor (bin).
+    EXPECT_EQ(L1.GetParent({}), &bin);
+    // Predicate matching outer: returns outer.
+    EXPECT_EQ(L1.GetParent([&](AstNode* n) { return n == &outer; }), &outer);
+    // Predicate matching nothing: returns nullptr.
+    EXPECT_EQ(L1.GetParent([](AstNode* /*n*/) { return false; }), nullptr);
+}
+
+// ---- GetNextNode / GetPrevNode (document order) --------------------------
+
+TEST(CSharp_AstNode, GetNextNodeDocumentOrder) {
+    // Tree: outer[bin, leaf] where bin[L1, L2]. Document order: bin, L1, L2, leaf.
+    StubList outer;
+    StubBinary bin;
+    StubExpr leaf, L1, L2;
+    outer.Append(&bin);
+    outer.Append(&leaf);
+    bin.SetChild(0, &L1);
+    bin.SetChild(1, &L2);
+
+    EXPECT_EQ(L1.GetNextNode(), &L2);   // sibling
+    EXPECT_EQ(L2.GetNextNode(), &leaf); // parent bin's next sibling
+    EXPECT_EQ(bin.GetNextNode(), &leaf);
+    EXPECT_EQ(leaf.GetNextNode(), nullptr);  // root's next is null
+}
+
+TEST(CSharp_AstNode, GetPrevNodeDocumentOrder) {
+    // Tree: outer[bin, leaf] where bin[L1, L2].
+    StubList outer;
+    StubBinary bin;
+    StubExpr leaf, L1, L2;
+    outer.Append(&bin);
+    outer.Append(&leaf);
+    bin.SetChild(0, &L1);
+    bin.SetChild(1, &L2);
+
+    EXPECT_EQ(L2.GetPrevNode(), &L1);   // sibling
+    EXPECT_EQ(leaf.GetPrevNode(), &bin);// PrevSibling(leaf) = bin
+    EXPECT_EQ(L1.GetPrevNode(), nullptr);  // first child; bin's prev is null (root)
+    EXPECT_EQ(bin.GetPrevNode(), nullptr);  // first child; outer is root
+}
+
+// ---- Contains / IsInside (location queries) ------------------------------
+
+TEST(CSharp_AstNode, ContainsAndIsInside) {
+    StubExpr e;
+    e.StorePrintStart(TextLocation(1, 1));
+    e.StorePrintEnd(TextLocation(1, 5));
+
+    // Contains: half-open [start, end).
+    EXPECT_TRUE(e.Contains(1, 1));   // start
+    EXPECT_TRUE(e.Contains(1, 3));  // interior
+    EXPECT_FALSE(e.Contains(1, 5)); // end (excluded)
+    EXPECT_FALSE(e.Contains(2, 1));  // past end (next line)
+    EXPECT_FALSE(e.Contains(1, 0)); // before start
+
+    // IsInside: closed [start, end].
+    EXPECT_TRUE(e.IsInside(1, 1));
+    EXPECT_TRUE(e.IsInside(1, 5));  // end (included)
+    EXPECT_FALSE(e.IsInside(1, 6)); // past end
+    EXPECT_FALSE(e.IsInside(2, 1));
+
+    // TextLocation overloads agree with the (line, column) overloads.
+    EXPECT_TRUE(e.Contains(TextLocation(1, 3)));
+    EXPECT_TRUE(e.IsInside(TextLocation(1, 5)));
+}
