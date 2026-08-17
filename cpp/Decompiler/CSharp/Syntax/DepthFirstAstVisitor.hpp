@@ -84,6 +84,9 @@
 #include "Statements/GotoStatement.hpp"
 #include "Statements/GotoCaseStatement.hpp"
 #include "Statements/GotoDefaultStatement.hpp"
+#include "Statements/IfElseStatement.hpp"
+#include "Statements/WhileStatement.hpp"
+#include "Statements/DoWhileStatement.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -259,6 +262,15 @@ public:
         VisitChildren(node);
     }
     virtual void VisitGotoDefaultStatement(GotoDefaultStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitIfElseStatement(IfElseStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitWhileStatement(WhileStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitDoWhileStatement(DoWhileStatement* node) {
         VisitChildren(node);
     }
 };

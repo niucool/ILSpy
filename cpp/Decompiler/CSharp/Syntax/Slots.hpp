@@ -197,6 +197,40 @@ inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::ArraySpecifier
 // to this constant.
 inline const CSharpSlotInfoT<Statement> Statement{"Statement", false, nullptr, false};
 
+// The `TrueStatement` kind -- a single `Statement` child (the `then` branch of an
+// `IfElseStatement.TrueStatement`). Unique to `IfElseStatement` among the ported nodes (the
+// `ConditionalExpression` arm uses the `True` `Expression` kind, not this). A
+// `CSharpSlotInfoT<Statement>` (the element type is the `Statement` abstract base, complete via
+// the `Statements/Statement.hpp` include above). `Statements/Statement.hpp` does NOT include
+// `Slots.hpp` (the abstract base has no per-node slot statics), so this kind lives HERE in
+// `Slots.hpp` (no include cycle) -- the `Slots.Statement` D256 precedent. Defined AFTER the
+// `Slots::Statement` *variable*, so the element type is qualified
+// (`::ILSpy::Decompiler::CSharp::Syntax::Statement`) to avoid resolving to that variable (the
+// `Expression`/`Condition`/`AdditionalArraySpecifier` collision precedent: an unqualified name
+// shared with a prior `Slots` variable resolves to the variable, not the class).
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Statement> TrueStatement{"TrueStatement", false, nullptr, false};
+
+// The `FalseStatement` kind -- a single NULLABLE `Statement` child (the `else` branch of an
+// `IfElseStatement.FalseStatement`, absent for a bare `if` without `else`). Unique to
+// `IfElseStatement` among the ported nodes (the `ConditionalExpression` arm uses the `False`
+// `Expression` kind, not this). A `CSharpSlotInfoT<Statement>` (the element type is the
+// `Statement` abstract base, complete via the `Statements/Statement.hpp` include above); the
+// per-position `IsOptional` flag lives on the per-node slot (the shared kind carries identity
+// only, constructed non-optional). `Statements/Statement.hpp` does NOT include `Slots.hpp`, so
+// this kind lives HERE (no include cycle) -- the `Slots.Statement`/`Slots.TrueStatement`
+// precedent. Defined AFTER the `Slots::Statement` variable, so the element type is qualified.
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Statement> FalseStatement{"FalseStatement", false, nullptr, false};
+
+// The `EmbeddedStatement` kind -- a single `Statement` child (the loop body of a
+// `WhileStatement`/`DoWhileStatement`/`ForStatement`/`ForeachStatement`/... -- the single
+// statement a loop/using/lock/fixed/... wraps). Shared by every
+// `[Slot("EmbeddedStatement")] Statement` declaration. A `CSharpSlotInfoT<Statement>` (the
+// element type is the `Statement` abstract base, complete via the `Statements/Statement.hpp`
+// include above). `Statements/Statement.hpp` does NOT include `Slots.hpp`, so this kind lives
+// HERE (no include cycle) -- the `Slots.Statement` precedent. Defined AFTER the
+// `Slots::Statement` variable, so the element type is qualified.
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Statement> EmbeddedStatement{"EmbeddedStatement", false, nullptr, false};
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_SLOTS_HPP

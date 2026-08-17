@@ -216,6 +216,22 @@ class BlockStatement;
 class GotoStatement;
 class GotoCaseStatement;
 class GotoDefaultStatement;
+// `IfElseStatement`/`WhileStatement`/`DoWhileStatement` are the Condition+embedded-statement
+// loop/control statements -- the next in-order Phase-5 piece per the D257 plan ("the
+// collection-bearing Condition+embedded-statement nodes: IfElseStatement/WhileStatement/
+// DoWhileStatement"). They are all single-slot statements (no collection slots): `IfElseStatement`
+// is a REQUIRED `Expression` `Condition` + a REQUIRED `Statement` `TrueStatement` + a NULLABLE
+// `Statement?` `FalseStatement` (the `if/else`); `WhileStatement` is a REQUIRED `Expression`
+// `Condition` + a REQUIRED `Statement` `EmbeddedStatement` (the `while`); `DoWhileStatement` is
+// the `WhileStatement` shape with the slot order reversed (`EmbeddedStatement`-0/`Condition`-1,
+// the source declaration order) plus a hand-written `(Expression, Statement)` convenience ctor
+// with the param order reversed. `IfElseStatement` adds the new `Slots::TrueStatement`/
+// `Slots::FalseStatement` kinds; `WhileStatement` adds the new `Slots::EmbeddedStatement` kind;
+// `DoWhileStatement` reuses the already-ported `Slots::EmbeddedStatement`/`Slots::Condition`
+// kinds.
+class IfElseStatement;
+class WhileStatement;
+class DoWhileStatement;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -281,6 +297,9 @@ public:
     virtual void VisitGotoStatement(GotoStatement*) = 0;
     virtual void VisitGotoCaseStatement(GotoCaseStatement*) = 0;
     virtual void VisitGotoDefaultStatement(GotoDefaultStatement*) = 0;
+    virtual void VisitIfElseStatement(IfElseStatement*) = 0;
+    virtual void VisitWhileStatement(WhileStatement*) = 0;
+    virtual void VisitDoWhileStatement(DoWhileStatement*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
