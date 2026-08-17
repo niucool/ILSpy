@@ -51,6 +51,7 @@ namespace ILSpy::Decompiler::CSharp::Syntax {
 // A pointer parameter needs only a forward declaration, so this header does not include the
 // concrete node headers (the node's own header includes this one so its `AcceptVisitor`
 // override can call `visitor.Visit<NodeName>(this)`); more are added as the hierarchy lands.
+class Identifier;
 class NullReferenceExpression;
 class ThisReferenceExpression;
 class BaseReferenceExpression;
@@ -69,8 +70,10 @@ public:
     virtual ~IAstVisitor() = default;
 
     // Per-node `Visit<NodeName>(ConcreteNode*)` pure-virtual methods. Each concrete node's
-    // `AcceptVisitor` override calls the matching `Visit<NodeName>(this)`. The first three
-    // concrete leaf expressions land here (the rest of the generated hierarchy follows):
+    // `AcceptVisitor` override calls the matching `Visit<NodeName>(this)`. The concrete leaf
+    // nodes land here (the rest of the generated hierarchy follows): the `Identifier` token
+    // (the first non-`Expression` concrete node), then the three leaf expressions.
+    virtual void VisitIdentifier(Identifier*) = 0;
     virtual void VisitNullReferenceExpression(NullReferenceExpression*) = 0;
     virtual void VisitThisReferenceExpression(ThisReferenceExpression*) = 0;
     virtual void VisitBaseReferenceExpression(BaseReferenceExpression*) = 0;

@@ -38,6 +38,7 @@
 
 #include "AstNode.hpp"
 #include "IAstVisitor.hpp"
+#include "Identifier.hpp"
 #include "Expressions/BaseReferenceExpression.hpp"
 #include "Expressions/NullReferenceExpression.hpp"
 #include "Expressions/ThisReferenceExpression.hpp"
@@ -74,10 +75,14 @@ public:
     // Per-node `Visit<NodeName>(ConcreteNode*)` overrides. Each defaults to
     // `VisitChildren(node)` (the depth-first walk), matching the C# generator's emitted
     // `public virtual void Visit<NodeName>(<Node> node) { VisitChildren(node); }`; a derived
-    // visitor overrides only the nodes it cares about. The first three concrete leaf
-    // expressions land here (the rest of the generated hierarchy follows). The concrete
-    // node headers are included above so the implicit `ConcreteNode* -> AstNode*` upcast in
-    // `VisitChildren(node)` has the complete derived type.
+    // visitor overrides only the nodes it cares about. The concrete leaf nodes land here (the
+    // rest of the generated hierarchy follows): the `Identifier` token (a leaf, no children),
+    // then the three leaf expressions. The concrete node headers are included above so the
+    // implicit `ConcreteNode* -> AstNode*` upcast in `VisitChildren(node)` has the complete
+    // derived type.
+    virtual void VisitIdentifier(Identifier* node) {
+        VisitChildren(node);
+    }
     virtual void VisitNullReferenceExpression(NullReferenceExpression* node) {
         VisitChildren(node);
     }
