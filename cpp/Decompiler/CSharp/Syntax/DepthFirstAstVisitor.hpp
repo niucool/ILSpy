@@ -54,6 +54,7 @@
 #include "Expressions/UncheckedExpression.hpp"
 #include "PrimitiveType.hpp"
 #include "SimpleType.hpp"
+#include "MemberType.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -139,6 +140,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitSimpleType(SimpleType* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitMemberType(MemberType* node) {
         VisitChildren(node);
     }
 };

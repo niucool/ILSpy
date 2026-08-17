@@ -66,9 +66,12 @@ class UncheckedExpression;
 class DirectionExpression;
 class ThrowExpression;
 // `PrimitiveType` is the first concrete `AstType` (a leaf, no `[Slot]` children);
-// `SimpleType` is the first concrete `AstType` with a collection slot (`TypeArguments`).
+// `SimpleType` is the first concrete `AstType` with a collection slot (`TypeArguments`);
+// `MemberType` is the second collection-slot `AstType` (a `Target` `AstType` + a `MemberName`
+// string-name `[Slot]` + a `TypeArguments` collection).
 class PrimitiveType;
 class SimpleType;
+class MemberType;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -104,6 +107,7 @@ public:
     virtual void VisitThrowExpression(ThrowExpression*) = 0;
     virtual void VisitPrimitiveType(PrimitiveType*) = 0;
     virtual void VisitSimpleType(SimpleType*) = 0;
+    virtual void VisitMemberType(MemberType*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

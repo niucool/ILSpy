@@ -97,6 +97,18 @@ inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> Fa
 // (`::ILSpy::Decompiler::CSharp::Syntax::Identifier`) to avoid resolving to this constant.
 inline const CSharpSlotInfoT<Identifier> Identifier{"Identifier", false, nullptr, false};
 
+// The `Target` kind -- a single `AstType` child (the target of a `MemberType`, e.g.
+// `List<int>.Enumerator` -> the `MemberType` whose `Target` is the `SimpleType` `List<int>`
+// and whose `MemberName` is `Enumerator`). Unique to `MemberType` among the ported nodes
+// (the `Expression`-typed target positions of `MemberReferenceExpression`/
+// `InvocationExpression`/`IndexerExpression`/`PointerReferenceExpression` use the
+// `TargetExpression` kind, not `Target`). A `CSharpSlotInfoT<AstType>` (the element type is
+// `AstType`); defined after `Identifier`/`TypeArgument`, but no `Slots` variable is named
+// `AstType`, so the unqualified `AstType` resolves to the class (no elaborated specifier
+// needed, unlike the `Expression`/`Identifier` constants whose names collide with their
+// element-type classes).
+inline const CSharpSlotInfoT<AstType> Target{"Target", false, nullptr, false};
+
 // The `TypeArgument` kind -- a collection of `AstType` (the type arguments of a generic
 // type reference, e.g. `SimpleType.TypeArguments`/`MemberType.TypeArguments`/
 // `IdentifierExpression.TypeArguments`/`MemberReferenceExpression.TypeArguments`). A
