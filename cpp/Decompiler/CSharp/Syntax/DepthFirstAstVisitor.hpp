@@ -87,6 +87,9 @@
 #include "Statements/IfElseStatement.hpp"
 #include "Statements/WhileStatement.hpp"
 #include "Statements/DoWhileStatement.hpp"
+#include "Statements/YieldReturnStatement.hpp"
+#include "Statements/EmptyStatement.hpp"
+#include "Statements/LabelStatement.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -271,6 +274,15 @@ public:
         VisitChildren(node);
     }
     virtual void VisitDoWhileStatement(DoWhileStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitYieldReturnStatement(YieldReturnStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitEmptyStatement(EmptyStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitLabelStatement(LabelStatement* node) {
         VisitChildren(node);
     }
 };

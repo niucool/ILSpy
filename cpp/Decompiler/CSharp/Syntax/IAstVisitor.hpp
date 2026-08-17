@@ -232,6 +232,22 @@ class GotoDefaultStatement;
 class IfElseStatement;
 class WhileStatement;
 class DoWhileStatement;
+// `YieldReturnStatement`/`EmptyStatement`/`LabelStatement` are the next simple statements -- the
+// next in-order Phase-5 piece per the D258 plan ("the remaining concrete statements:
+// YieldReturnStatement ... EmptyStatement/LabelStatement leaves"). `YieldReturnStatement` is the
+// `ExpressionStatement` D255 shape (a single REQUIRED `Expression` slot) applied to the yield
+// family plus the `YieldKeyword`/`ReturnKeyword` const strings (the `yield return expr;`
+// production); `EmptyStatement` is the first ported statement leaf that carries its OWN
+// `Location` field and overrides `StartLocation`/`EndLocation` (a one-column span, no `[Slot]`
+// children, a type-only `DoMatch`); `LabelStatement` is the `GotoStatement` D257 string-name-
+// `[Slot]` shape MINUS the nullable optionality and MINUS a const keyword (a single REQUIRED
+// `string` `Label` over a backing `LabelToken`, the `identifier ':'` of a labeled statement).
+// `YieldReturnStatement` reuses the already-ported `Slots::Expression` kind; `LabelStatement`
+// reuses the already-ported `Slots::Identifier` kind; `EmptyStatement` adds no `Slots` kind
+// (no slots); all three with no new `Slots` constant.
+class YieldReturnStatement;
+class EmptyStatement;
+class LabelStatement;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -300,6 +316,9 @@ public:
     virtual void VisitIfElseStatement(IfElseStatement*) = 0;
     virtual void VisitWhileStatement(WhileStatement*) = 0;
     virtual void VisitDoWhileStatement(DoWhileStatement*) = 0;
+    virtual void VisitYieldReturnStatement(YieldReturnStatement*) = 0;
+    virtual void VisitEmptyStatement(EmptyStatement*) = 0;
+    virtual void VisitLabelStatement(LabelStatement*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
