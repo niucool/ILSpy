@@ -41,6 +41,7 @@
 #include "Identifier.hpp"
 #include "Expressions/BaseReferenceExpression.hpp"
 #include "Expressions/NullReferenceExpression.hpp"
+#include "Expressions/PrimitiveExpression.hpp"
 #include "Expressions/ThisReferenceExpression.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
@@ -77,7 +78,8 @@ public:
     // `public virtual void Visit<NodeName>(<Node> node) { VisitChildren(node); }`; a derived
     // visitor overrides only the nodes it cares about. The concrete leaf nodes land here (the
     // rest of the generated hierarchy follows): the `Identifier` token (a leaf, no children),
-    // then the three leaf expressions. The concrete node headers are included above so the
+    // then the leaf expressions (the three reference expressions and the literal-carrying
+    // `PrimitiveExpression`, all leaves). The concrete node headers are included above so the
     // implicit `ConcreteNode* -> AstNode*` upcast in `VisitChildren(node)` has the complete
     // derived type.
     virtual void VisitIdentifier(Identifier* node) {
@@ -90,6 +92,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitBaseReferenceExpression(BaseReferenceExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitPrimitiveExpression(PrimitiveExpression* node) {
         VisitChildren(node);
     }
 };
