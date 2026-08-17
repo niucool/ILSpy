@@ -147,6 +147,15 @@ class IndexerExpression;
 // (its `[DecompilerAstNode(hasPatternPlaceholder: true)]` emits a `PatternPlaceholder` subclass --
 // deferred). Reusing the already-ported `Slots::Expression` kind as the collection kind.
 class ArrayInitializerExpression;
+// `ObjectCreateExpression` is the first ported node to combine a collection with a nullable
+// single child slot (a sealed `Expression` with a required `AstType` `Type` slot + an
+// `Arguments` `AstNodeCollection<Expression>` collection + a nullable
+// `ArrayInitializerExpression` `Initializer` slot -- the
+// `object_create_expression ::= 'new' type '(' expression* ')' array_initializer?` production,
+// reusing the already-ported `Slots::Type`/`Slots::Argument` kinds and the new `Slots::Initializer`
+// kind; the `Arguments` collection is the first NON-incremental one-collection node since the
+// `Initializer` single slot trails it).
+class ObjectCreateExpression;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -199,6 +208,7 @@ public:
     virtual void VisitInvocationExpression(InvocationExpression*) = 0;
     virtual void VisitIndexerExpression(IndexerExpression*) = 0;
     virtual void VisitArrayInitializerExpression(ArrayInitializerExpression*) = 0;
+    virtual void VisitObjectCreateExpression(ObjectCreateExpression*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

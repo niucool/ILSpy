@@ -217,6 +217,33 @@ private:
     AstNodeCollectionT<Expression> elements_;
 };
 
+// The `Initializer` kind -- the nullable single-child slot kind for every
+// `[Slot("Initializer")] ArrayInitializerExpression?` (`ObjectCreateExpression.Initializer`,
+// `ArrayCreateExpression.Initializer`). A `CSharpSlotInfoT<ArrayInitializerExpression>` (the
+// element type is the concrete `ArrayInitializerExpression` node).
+//
+// Defined HERE (in ArrayInitializerExpression.hpp, after the `ArrayInitializerExpression` class)
+// rather than in Slots.hpp because `CSharpSlotInfoT<ArrayInitializerExpression>` needs
+// `ArrayInitializerExpression` complete (the `dynamic_cast<const ArrayInitializerExpression*>`
+// is-a test in the ctor), and `ArrayInitializerExpression` is a concrete node with per-node slot
+// statics (its `ElementsSlot` references `&Slots::Expression`, so this header includes Slots.hpp).
+// Placing the kind in Slots.hpp would form a circular include: Slots.hpp would have to include
+// ArrayInitializerExpression.hpp (for the complete `ArrayInitializerExpression`), but
+// ArrayInitializerExpression.hpp includes Slots.hpp (for `Slots::Expression`), and with Slots.hpp's
+// guard set the `Slots::Expression` definition would not be visible where ArrayInitializerExpression's
+// class body needs it. After the class both `CSharpSlotInfoT` (visible via the Slots.hpp include)
+// and `ArrayInitializerExpression` are complete, so the kind defines cleanly. The `inline`
+// variable still has external linkage and one address across translation units (the C++17
+// `inline` guarantee), preserving the pointer-identity comparison `node.Slot.Kind ==
+// &Slots::Initializer` the slot system relies on. This is the `Slots::Attribute`/
+// `Slots::AttributeSection` cycle-breaking precedent (D241/D242) applied to a NULLABLE
+// single-child kind (the first such): the shared constant is constructed non-collection/non-optional
+// (`{"Initializer", false, nullptr, false}`), and the per-node `InitializerSlot` on the owning
+// node carries the `IsOptional` flag (the nullable `[Slot]` makes the per-node slot optional).
+namespace Slots {
+inline const CSharpSlotInfoT<ArrayInitializerExpression> Initializer{"Initializer", false, nullptr, false};
+} // namespace Slots
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_EXPRESSIONS_ARRAYINITIALIZEREXPRESSION_HPP
