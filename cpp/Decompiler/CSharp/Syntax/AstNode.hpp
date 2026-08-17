@@ -413,6 +413,20 @@ public:
 protected:
     virtual bool DoMatch(AstNode* other, PatternMatching::Match match) = 0;
 
+    // The C# `protected static bool MatchOptional(AstNode?, AstNode?, Match)` --
+    // matches two optional children: both absent (null), or both present and the
+    // pattern side's own `DoMatch` decides (e.g. an `OptionalNode` matches an
+    // absent candidate). When the pattern side is absent the candidate must be
+    // absent too. The generated `DoMatch` of a node with a nullable single-child
+    // slot calls this (e.g. `BinaryOperatorExpression` over `Left`/`Right`); a
+    // static member of `AstNode` may call the protected `DoMatch` through an
+    // `AstNode*` (same-class access), which dispatches to the concrete override.
+    static bool MatchOptional(AstNode* thisChild, AstNode* otherChild,
+                              PatternMatching::Match match) {
+        return thisChild != nullptr ? thisChild->DoMatch(otherChild, match)
+                                    : otherChild == nullptr;
+    }
+
 public:
     // The C# `bool INode.DoMatch(INode?, Match)` explicit implementation: a non-null
     // candidate that is not an AstNode fails (matches only AstNodes or an absent

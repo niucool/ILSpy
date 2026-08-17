@@ -40,6 +40,7 @@
 #include "IAstVisitor.hpp"
 #include "Identifier.hpp"
 #include "Expressions/BaseReferenceExpression.hpp"
+#include "Expressions/BinaryOperatorExpression.hpp"
 #include "Expressions/NullReferenceExpression.hpp"
 #include "Expressions/PrimitiveExpression.hpp"
 #include "Expressions/ThisReferenceExpression.hpp"
@@ -95,6 +96,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitPrimitiveExpression(PrimitiveExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitBinaryOperatorExpression(BinaryOperatorExpression* node) {
         VisitChildren(node);
     }
 };
