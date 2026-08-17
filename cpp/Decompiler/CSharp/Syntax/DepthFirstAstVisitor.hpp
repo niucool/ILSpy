@@ -53,6 +53,7 @@
 #include "Expressions/UnaryOperatorExpression.hpp"
 #include "Expressions/UncheckedExpression.hpp"
 #include "PrimitiveType.hpp"
+#include "SimpleType.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -135,6 +136,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitPrimitiveType(PrimitiveType* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitSimpleType(SimpleType* node) {
         VisitChildren(node);
     }
 };

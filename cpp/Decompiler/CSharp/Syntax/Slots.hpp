@@ -42,7 +42,9 @@
 #define ILSPY_DECOMPILER_CSHARP_SYNTAX_SLOTS_HPP
 
 #include "Decompiler/CSharp/Syntax/CSharpSlotInfo.hpp"
+#include "Decompiler/CSharp/Syntax/AstType.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
+#include "Decompiler/CSharp/Syntax/Identifier.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax::Slots {
 
@@ -83,6 +85,25 @@ inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> Tr
 // (the `FalseExpression` arm). The kind name is `False`; the per-node slot static is
 // `FalseExpressionSlot`. Defined after `Expression`, so the element type is qualified.
 inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> False{"False", false, nullptr, false};
+
+// The `Identifier` kind -- the backing `Identifier` token of a string-name `[Slot]` (e.g.
+// `SimpleType.Identifier`, `IdentifierExpression.Identifier`, `MemberReferenceExpression`.
+// `MemberName`). A string `[Slot]` is a convenience string accessor over a generated
+// `Identifier` token child slot; the kind identifies that token position across all nodes
+// that declare a string-name `[Slot]`. The name collides with the `Identifier` class in the
+// parent `Syntax` namespace (the `Expression` precedent): the template argument in this
+// definition resolves to the class (the constant being declared is not yet in scope), and a
+// later `Slots` entry wanting the `Identifier` class as its element type must qualify it
+// (`::ILSpy::Decompiler::CSharp::Syntax::Identifier`) to avoid resolving to this constant.
+inline const CSharpSlotInfoT<Identifier> Identifier{"Identifier", false, nullptr, false};
+
+// The `TypeArgument` kind -- a collection of `AstType` (the type arguments of a generic
+// type reference, e.g. `SimpleType.TypeArguments`/`MemberType.TypeArguments`/
+// `IdentifierExpression.TypeArguments`/`MemberReferenceExpression.TypeArguments`). A
+// `CSharpSlotInfoT<AstType>` (the element type is `AstType`); the per-position
+// `IsCollection`/`IsOptional` flags live on the per-node slot (the shared kind carries
+// identity only, so the kind is constructed non-collection/non-optional).
+inline const CSharpSlotInfoT<AstType> TypeArgument{"TypeArgument", false, nullptr, false};
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 

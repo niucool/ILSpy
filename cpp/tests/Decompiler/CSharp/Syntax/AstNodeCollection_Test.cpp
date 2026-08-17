@@ -559,3 +559,118 @@ TEST(CSharp_AstNodeCollection, DescendantsWalksCollectionElements) {
     EXPECT_EQ(desc[0], &inner);
     EXPECT_EQ(desc[1], &leaf);
 }
+
+// ---- Pattern-matcher surface (NodeCount/NodeAt/AsNodeList/DoMatch) ------
+// The pattern matcher consumes a collection as a node-list view (`AsNodeList`) and matches
+// it against another collection by index with backtracking (`DoMatch` ->
+// `Pattern.DoMatchCollection`). A leaf whose `DoMatch` returns true (matches any candidate)
+// lets the positive path be exercised; the existing `StubExpr` (`DoMatch` returns false)
+// exercises the negative path.
+
+class StubMatchNode : public AstNode {
+public:
+    // A concrete node's `DoMatch` is `other is ConcreteNode && ...`: a type gate that rejects
+    // a null candidate (and a non-`StubMatchNode`). This stub matches any `StubMatchNode`
+    // candidate (so same-count collections of stubs match) but rejects null -- the behaviour a
+    // real node's type gate gives (so a 2-vs-1 collection match fails, the 2nd pattern element
+    // matching the null past-the-end).
+    bool DoMatch(AstNode* other, Match) override {
+        return dynamic_cast<StubMatchNode*>(other) != nullptr;
+    }
+    void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
+};
+
+class StubMatchContainer : public StubMatchNode {
+    AstNodeCollectionT<StubMatchNode> items_;
+public:
+    static inline const CSharpSlotInfoT<StubMatchNode> ItemSlot{"Item", true, nullptr, true};
+
+    StubMatchContainer() : items_(this, &ItemSlot, 0, true) {}
+    AstNodeCollectionT<StubMatchNode>& Items() { return items_; }
+};
+
+// `NodeCount` is the element count (0 until the first `Add`).
+TEST(CSharp_AstNodeCollection, NodeCountIsZeroOnEmptyCollection) {
+    StubCollectionContainer c;
+    EXPECT_EQ(c.Items().NodeCount(), 0);
+}
+
+TEST(CSharp_AstNodeCollection, NodeCountIsElementCount) {
+    StubCollectionContainer c;
+    StubExpr a, b;
+    c.Items().Add(&a);
+    c.Items().Add(&b);
+    EXPECT_EQ(c.Items().NodeCount(), 2);
+}
+
+// `NodeAt` returns the element at the local position as an `INode*` (the upcast `T*` ->
+// `INode*`); past the end throws.
+TEST(CSharp_AstNodeCollection, NodeAtReturnsElementAsINode) {
+    StubCollectionContainer c;
+    StubExpr a, b;
+    c.Items().Add(&a);
+    c.Items().Add(&b);
+    EXPECT_EQ(c.Items().NodeAt(0), &a);
+    EXPECT_EQ(c.Items().NodeAt(1), &b);
+    EXPECT_THROW(c.Items().NodeAt(2), std::out_of_range);
+}
+
+// `AsNodeList` builds a node-list view of the current elements (a snapshot `vector<INode*>`).
+TEST(CSharp_AstNodeCollection, AsNodeListBuildsCurrentElements) {
+    StubCollectionContainer c;
+    StubExpr a, b;
+    c.Items().Add(&a);
+    c.Items().Add(&b);
+    auto view = c.Items().AsNodeList();
+    ASSERT_EQ(view.size(), 2u);
+    EXPECT_EQ(view[0], &a);
+    EXPECT_EQ(view[1], &b);
+}
+
+TEST(CSharp_AstNodeCollection, AsNodeListEmptyOnEmptyCollection) {
+    StubCollectionContainer c;
+    EXPECT_TRUE(c.Items().AsNodeList().empty());
+}
+
+// `DoMatch` of two EMPTY collections succeeds (no elements to mismatch).
+TEST(CSharp_AstNodeCollection, DoMatchEmptyCollectionsMatch) {
+    StubMatchContainer a, b;
+    Match m = Match::CreateNew();
+    EXPECT_TRUE(a.Items().DoMatch(b.Items(), m));
+}
+
+// `DoMatch` of two same-count collections whose elements all match (a `StubMatchNode` matches
+// any candidate) succeeds.
+TEST(CSharp_AstNodeCollection, DoMatchSameCountMatchingElementsMatch) {
+    StubMatchContainer a, b;
+    StubMatchNode a1, a2, b1, b2;
+    a.Items().Add(&a1);
+    a.Items().Add(&a2);
+    b.Items().Add(&b1);
+    b.Items().Add(&b2);
+    Match m = Match::CreateNew();
+    EXPECT_TRUE(a.Items().DoMatch(b.Items(), m));
+}
+
+// `DoMatch` of different-count collections fails (the pattern runs out or the other runs out).
+TEST(CSharp_AstNodeCollection, DoMatchDifferentCountFails) {
+    StubMatchContainer a, b;
+    StubMatchNode a1, b1, b2;
+    a.Items().Add(&a1);
+    b.Items().Add(&b1);
+    b.Items().Add(&b2);
+    Match m = Match::CreateNew();
+    EXPECT_FALSE(a.Items().DoMatch(b.Items(), m));  // 1 vs 2
+    EXPECT_FALSE(b.Items().DoMatch(a.Items(), m));  // 2 vs 1
+}
+
+// `DoMatch` of same-count collections whose elements do NOT match (a `StubExpr`'s `DoMatch`
+// returns false) fails.
+TEST(CSharp_AstNodeCollection, DoMatchSameCountMismatchingElementsFails) {
+    StubCollectionContainer a, b;
+    StubExpr a1, b1;
+    a.Items().Add(&a1);
+    b.Items().Add(&b1);
+    Match m = Match::CreateNew();
+    EXPECT_FALSE(a.Items().DoMatch(b.Items(), m));
+}

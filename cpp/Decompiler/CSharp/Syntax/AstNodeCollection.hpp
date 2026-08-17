@@ -52,10 +52,11 @@
 // per-collection `foreach` the transforms use; the `Children`/`ChildEnumerator` already
 // covers the cross-collection walk), the convenience mutators `AddRange`/`ReplaceWith`/
 // `MoveTo`/`Detach`/`FirstOrNull`/`LastOrNull` (land as the transforms that use them
-// arrive), `Equals`/`GetHashCode` (identity), and the pattern-matcher surface
-// (`NodeCount`/`NodeAt`/`AsNodeList`/`DoMatch` -- the generated nodes' `DoMatch` calls
-// `Pattern.DoMatchCollection` over the collection's node-list view; it lands with the
-// generated node hierarchy). The `IAstVisitor` `AcceptVisitor` lands with the visitor.
+// arrive), `Equals`/`GetHashCode` (identity), and the `IAstVisitor` `AcceptVisitor` (lands
+// with the visitor). The pattern-matcher surface (`NodeCount`/`NodeAt`/`AsNodeList`/`DoMatch`
+// -- the generated nodes' `DoMatch` calls `Pattern.DoMatchCollection` over the
+// collection's node-list view) lands with the first generated node that has a collection
+// slot (`SimpleType`'s `TypeArguments`).
 //
 // Field access: `parent_`, `kind_`, `baseIndex_`, `supportsIncremental_`, and `list_` are
 // private; the public API is the typed surface (`Add`/`Insert*`/`Remove`/`IndexOf`/
@@ -67,6 +68,7 @@
 
 #include "Decompiler/CSharp/Syntax/AstNode.hpp"
 #include "Decompiler/CSharp/Syntax/CSharpSlotInfo.hpp"
+#include "Decompiler/CSharp/Syntax/PatternMatching/Pattern.hpp"
 
 #include <algorithm>
 #include <stdexcept>
@@ -97,6 +99,33 @@ public:
     // The C# `internal abstract bool RemoveNode(AstNode)` -- remove the element by
     // reference; false when it is not in this collection.
     virtual bool RemoveNode(AstNode* node) = 0;
+
+    // ---- Pattern matcher surface ------------------------------------------
+    // The C# `private protected abstract int NodeCount` / `INode NodeAt(int)` -- the
+    // pattern matcher consumes a collection as an `IReadOnlyList<INode>` (`AsNodeList`),
+    // a view separate from the typed collection (having `AstNodeCollection<T>` implement
+    // `IEnumerable<INode>` as well as `IEnumerable<T>` would make every LINQ call on a
+    // typed collection ambiguous). The generic overrides expose the element list through
+    // the `INode` interface; `AsNodeList` builds that view on demand.
+    virtual int NodeCount() const = 0;
+    virtual PatternMatching::INode* NodeAt(int index) const = 0;
+
+    // The C# `internal IReadOnlyList<INode> AsNodeList()` -- the node-list view the
+    // pattern matcher's `DoMatch` passes to `Pattern.DoMatchCollection`. The C# caches a
+    // `NodeListView` (a live view reading through to the collection); this port builds a
+    // fresh `std::vector<INode*>` snapshot each call (C++ has no live `IReadOnlyList` view
+    // without copying, and `DoMatch` is called once per match with no interleaved mutation,
+    // so a snapshot is faithful -- the elements are the same `INode*` pointers the C#
+    // view would yield). The O(n) build matches the C# (the `NodeListView` iterates
+    // `NodeAt` n times in `DoMatchCollection`).
+    std::vector<PatternMatching::INode*> AsNodeList() const {
+        std::vector<PatternMatching::INode*> nodes;
+        int n = NodeCount();
+        nodes.reserve(static_cast<std::size_t>(n));
+        for (int i = 0; i < n; i++)
+            nodes.push_back(NodeAt(i));
+        return nodes;
+    }
 };
 
 // The collection occupying one collection slot of a node. `T` is the element type (the
@@ -272,6 +301,24 @@ public:
     bool RemoveNode(AstNode* node) override {
         T* typed = dynamic_cast<T*>(node);
         return typed != nullptr && Remove(typed);
+    }
+
+    // The C# `private protected override int NodeCount` -- the element count (the list
+    // size; 0 until the first `Add`).
+    int NodeCount() const override { return Count(); }
+
+    // The C# `private protected override INode NodeAt(int)` -- the element at the local
+    // position as an `INode*` (the upcast `T*` -> `INode*`; `T` derives from `AstNode` :
+    // `INode`). Throws `out_of_range` past the end (the C# `list![index]`
+    // `ArgumentOutOfRangeException`).
+    PatternMatching::INode* NodeAt(int index) const override { return At(index); }
+
+    // The C# `internal bool DoMatch(AstNodeCollection<T> other, Match match)` -- match this
+    // collection against `other` element-by-element with backtracking over the
+    // non-deterministic pattern nodes (`Repeat`/`OptionalNode`). Both collections are
+    // already the per-slot child lists, so `Pattern.DoMatchCollection` walks them by index.
+    bool DoMatch(const AstNodeCollectionT<T>& other, PatternMatching::Match match) const {
+        return PatternMatching::Pattern::DoMatchCollection(AsNodeList(), other.AsNodeList(), match);
     }
 
     // Accessors the generated node's `GetChildCount`/`GetChild`/`SetChild` consult when
