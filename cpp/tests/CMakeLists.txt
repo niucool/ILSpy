@@ -34,6 +34,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/AbstractAnnotatable_Test.cpp
     Decompiler/CSharp/Syntax/Trivia_Test.cpp
     Decompiler/CSharp/Syntax/IAstVisitor_Test.cpp
+    Decompiler/CSharp/Syntax/Expressions/Expression_Test.cpp
     Decompiler/CSharp/Syntax/PatternMatching/PatternMatching_Test.cpp
     Decompiler/IL/ControlFlowSimplification_Test.cpp
     Decompiler/IL/ControlFlowGraph_Test.cpp

@@ -38,6 +38,9 @@
 
 #include "AstNode.hpp"
 #include "IAstVisitor.hpp"
+#include "Expressions/BaseReferenceExpression.hpp"
+#include "Expressions/NullReferenceExpression.hpp"
+#include "Expressions/ThisReferenceExpression.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -68,9 +71,22 @@ protected:
 public:
     ~DepthFirstAstVisitor() override = default;
 
-    // Per-node `Visit<NodeName>(ConcreteNode*)` overrides are added here as the concrete
-    // node hierarchy is ported. Each defaults to `VisitChildren(node)`, matching the C#
-    // generator's emitted `public virtual void Visit<NodeName>(<Node> node) { VisitChildren(node); }`.
+    // Per-node `Visit<NodeName>(ConcreteNode*)` overrides. Each defaults to
+    // `VisitChildren(node)` (the depth-first walk), matching the C# generator's emitted
+    // `public virtual void Visit<NodeName>(<Node> node) { VisitChildren(node); }`; a derived
+    // visitor overrides only the nodes it cares about. The first three concrete leaf
+    // expressions land here (the rest of the generated hierarchy follows). The concrete
+    // node headers are included above so the implicit `ConcreteNode* -> AstNode*` upcast in
+    // `VisitChildren(node)` has the complete derived type.
+    virtual void VisitNullReferenceExpression(NullReferenceExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitThisReferenceExpression(ThisReferenceExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitBaseReferenceExpression(BaseReferenceExpression* node) {
+        VisitChildren(node);
+    }
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
