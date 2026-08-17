@@ -44,10 +44,12 @@
 #include "Expressions/BinaryOperatorExpression.hpp"
 #include "Expressions/CheckedExpression.hpp"
 #include "Expressions/ConditionalExpression.hpp"
+#include "Expressions/DirectionExpression.hpp"
 #include "Expressions/NullReferenceExpression.hpp"
 #include "Expressions/ParenthesizedExpression.hpp"
 #include "Expressions/PrimitiveExpression.hpp"
 #include "Expressions/ThisReferenceExpression.hpp"
+#include "Expressions/ThrowExpression.hpp"
 #include "Expressions/UnaryOperatorExpression.hpp"
 #include "Expressions/UncheckedExpression.hpp"
 
@@ -123,6 +125,12 @@ public:
         VisitChildren(node);
     }
     virtual void VisitUncheckedExpression(UncheckedExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitDirectionExpression(DirectionExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitThrowExpression(ThrowExpression* node) {
         VisitChildren(node);
     }
 };

@@ -63,6 +63,8 @@ class ConditionalExpression;
 class ParenthesizedExpression;
 class CheckedExpression;
 class UncheckedExpression;
+class DirectionExpression;
+class ThrowExpression;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -94,6 +96,8 @@ public:
     virtual void VisitParenthesizedExpression(ParenthesizedExpression*) = 0;
     virtual void VisitCheckedExpression(CheckedExpression*) = 0;
     virtual void VisitUncheckedExpression(UncheckedExpression*) = 0;
+    virtual void VisitDirectionExpression(DirectionExpression*) = 0;
+    virtual void VisitThrowExpression(ThrowExpression*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
