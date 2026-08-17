@@ -45,6 +45,7 @@
 #include "Expressions/NullReferenceExpression.hpp"
 #include "Expressions/PrimitiveExpression.hpp"
 #include "Expressions/ThisReferenceExpression.hpp"
+#include "Expressions/UnaryOperatorExpression.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -103,6 +104,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitAssignmentExpression(AssignmentExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitUnaryOperatorExpression(UnaryOperatorExpression* node) {
         VisitChildren(node);
     }
 };

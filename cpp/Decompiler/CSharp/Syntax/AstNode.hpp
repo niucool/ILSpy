@@ -427,6 +427,25 @@ protected:
                                     : otherChild == nullptr;
     }
 
+    // The C# generator's direct-dispatch term for a NON-NULLABLE (required) recursive
+    // child: `this.{member}.DoMatch(o.{member}, match)` (emitted for a `[Slot]` child
+    // whose property type is non-nullable, e.g. `UnaryOperatorExpression`'s `Expression`).
+    // The C# direct call assumes the required child is present (the getter is
+    // null-forgiving `field!`); a missing operand is a null dereference (a
+    // `NullReferenceException`). This same-class static helper dispatches through the
+    // protected `DoMatch` (C++ `[class.access.derived]` forbids a derived node from
+    // calling the protected `DoMatch` through a base `AstNode*`/`Expression*`; a static
+    // member of `AstNode` may, the `MatchOptional` precedent) and guards the missing
+    // operand defensively: a pattern side with a null child does not match (the port
+    // returns false rather than crashing); a candidate side with a null child flows
+    // through the typed `DoMatch(nullptr)`, which returns false, matching the C#.
+    static bool MatchRequired(AstNode* thisChild, AstNode* otherChild,
+                              PatternMatching::Match match) {
+        if (thisChild == nullptr)
+            return false;
+        return thisChild->DoMatch(otherChild, match);
+    }
+
 public:
     // The C# `bool INode.DoMatch(INode?, Match)` explicit implementation: a non-null
     // candidate that is not an AstNode fails (matches only AstNodes or an absent

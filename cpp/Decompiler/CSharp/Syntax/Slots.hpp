@@ -55,6 +55,15 @@ inline const CSharpSlotInfoT<Expression> Left{"Left", false, nullptr, false};
 // expressions.
 inline const CSharpSlotInfoT<Expression> Right{"Right", false, nullptr, false};
 
+// The `Expression` operand position (a single `Expression` child). Used by the unary
+// expressions (`UnaryOperatorExpression`, ...). The name collides with the `Expression`
+// class in the parent `Syntax` namespace; the template argument in this definition resolves
+// to the class (the constant being declared is not yet in scope at the point its type is
+// parsed), and the unqualified `Expression` in any *later* `Slots` entry that wants the
+// class as its element type must be qualified (`::ILSpy::Decompiler::CSharp::Syntax::Expression`)
+// to avoid resolving to this constant.
+inline const CSharpSlotInfoT<Expression> Expression{"Expression", false, nullptr, false};
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_SLOTS_HPP
