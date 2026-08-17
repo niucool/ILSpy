@@ -59,6 +59,7 @@
 #include "Attribute.hpp"
 #include "AttributeSection.hpp"
 #include "ComposedType.hpp"
+#include "Expressions/CastExpression.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -159,6 +160,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitComposedType(ComposedType* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitCastExpression(CastExpression* node) {
         VisitChildren(node);
     }
 };

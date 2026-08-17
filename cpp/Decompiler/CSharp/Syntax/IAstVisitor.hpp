@@ -90,6 +90,10 @@ class AttributeSection;
 // `HasReadOnlySpecifier`/`HasNullableSpecifier` bools and a `PointerRank` int -- the array/
 // pointer/nullable/modifier wrapper over a `BaseType`.
 class ComposedType;
+// `CastExpression` is the first AstType-bearing `Expression` node (a sealed `Expression` with
+// a required `AstType` `Type` slot + a required `Expression` `Expression` slot -- the cast
+// `(type)expression`, reusing the already-ported `Slots::Type`/`Slots::Expression` kinds).
+class CastExpression;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -130,6 +134,7 @@ public:
     virtual void VisitAttribute(Attribute*) = 0;
     virtual void VisitAttributeSection(AttributeSection*) = 0;
     virtual void VisitComposedType(ComposedType*) = 0;
+    virtual void VisitCastExpression(CastExpression*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
