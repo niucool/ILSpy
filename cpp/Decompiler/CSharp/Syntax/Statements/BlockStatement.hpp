@@ -226,6 +226,29 @@ private:
     AstNodeCollectionT<Statement> statements_;
 };
 
+// The `Body` kind -- a single `BlockStatement` child (the body block of a keyword statement
+// that wraps a block: `CheckedStatement.Body`, `UncheckedStatement.Body`, `UnsafeStatement.Body`,
+// and the later `FixedStatement`/`LockStatement`/`UsingStatement`/`UnsafeStatement`-style nodes).
+// A `CSharpSlotInfoT<BlockStatement>` (the element type is the concrete `BlockStatement` node).
+//
+// Defined HERE (in BlockStatement.hpp, after the `BlockStatement` class) rather than in
+// Slots.hpp because `CSharpSlotInfoT<BlockStatement>` needs `BlockStatement` complete (the
+// `dynamic_cast<const BlockStatement*>` is-a test in the ctor), and `BlockStatement` is a
+// concrete node that INCLUDES `Slots.hpp` (its `StatementsSlot` references `&Slots::Statement`).
+// Placing the kind in `Slots.hpp` would form a circular include (the `Slots::Attribute`/
+// `Slots::AttributeSection` cycle-breaking precedent): `Slots.hpp` would have to include
+// `BlockStatement.hpp` (for the complete `BlockStatement`), but `BlockStatement.hpp` includes
+// `Slots.hpp` (for `Slots::Statement`), and with `Slots.hpp`'s guard set those definitions
+// would not be visible where `BlockStatement.hpp`'s class body needs them. After the
+// `BlockStatement` class both `CSharpSlotInfoT` (visible via the `Slots.hpp` include) and
+// `BlockStatement` are complete, so the kind defines cleanly. The `inline` variable still has
+// external linkage and one address across translation units (the C++17 `inline` guarantee),
+// preserving the pointer-identity comparison `node.Slot.Kind == &Slots::Body` the slot system
+// relies on.
+namespace Slots {
+inline const CSharpSlotInfoT<BlockStatement> Body{"Body", false, nullptr, false};
+} // namespace Slots
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_STATEMENTS_BLOCKSTATEMENT_HPP

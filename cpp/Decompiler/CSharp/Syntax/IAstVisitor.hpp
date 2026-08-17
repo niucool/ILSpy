@@ -248,6 +248,19 @@ class DoWhileStatement;
 class YieldReturnStatement;
 class EmptyStatement;
 class LabelStatement;
+// `CheckedStatement`/`UncheckedStatement`/`UnsafeStatement` are the embedded-`BlockStatement`
+// keyword-statement trio -- the next in-order Phase-5 piece per the D259 plan ("the remaining
+// concrete statements: ... CheckedStatement, UncheckedStatement, UnsafeStatement ..."). Each is a
+// sealed `Statement` carrying a single REQUIRED `BlockStatement` `Body` child (the block under
+// the keyword context) plus a const keyword string (the `CheckedStatement.CheckedKeyword` /
+// `UncheckedStatement.UncheckedKeyword` / `UnsafeStatement.UnsafeKeyword`). They are the
+// `ExpressionStatement` D255 single-required-slot shape with a `BlockStatement` child instead of
+// an `Expression`, plus the const keyword (the `CheckedExpression` D234 const-string precedent
+// applied to a statement). All three share the NEW `Slots::Body` kind (cycle-broken into
+// `BlockStatement.hpp`, since `BlockStatement.hpp` includes `Slots.hpp`).
+class CheckedStatement;
+class UncheckedStatement;
+class UnsafeStatement;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -319,6 +332,9 @@ public:
     virtual void VisitYieldReturnStatement(YieldReturnStatement*) = 0;
     virtual void VisitEmptyStatement(EmptyStatement*) = 0;
     virtual void VisitLabelStatement(LabelStatement*) = 0;
+    virtual void VisitCheckedStatement(CheckedStatement*) = 0;
+    virtual void VisitUncheckedStatement(UncheckedStatement*) = 0;
+    virtual void VisitUnsafeStatement(UnsafeStatement*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

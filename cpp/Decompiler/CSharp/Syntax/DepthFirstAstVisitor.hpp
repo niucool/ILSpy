@@ -90,6 +90,9 @@
 #include "Statements/YieldReturnStatement.hpp"
 #include "Statements/EmptyStatement.hpp"
 #include "Statements/LabelStatement.hpp"
+#include "Statements/CheckedStatement.hpp"
+#include "Statements/UncheckedStatement.hpp"
+#include "Statements/UnsafeStatement.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -283,6 +286,15 @@ public:
         VisitChildren(node);
     }
     virtual void VisitLabelStatement(LabelStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitCheckedStatement(CheckedStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitUncheckedStatement(UncheckedStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitUnsafeStatement(UnsafeStatement* node) {
         VisitChildren(node);
     }
 };
