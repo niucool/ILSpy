@@ -64,6 +64,26 @@ inline const CSharpSlotInfoT<Expression> Right{"Right", false, nullptr, false};
 // to avoid resolving to this constant.
 inline const CSharpSlotInfoT<Expression> Expression{"Expression", false, nullptr, false};
 
+// The `Condition` operand position (a single `Expression` child). Shared by
+// `ConditionalExpression` and several statement nodes (`IfElseStatement`/`WhileStatement`/
+// `DoWhileStatement`/`ForStatement`/`TryCatchStatement`/`QueryExpression`, all
+// `Expression`-typed -- `TryCatchStatement`'s is nullable but the kind is the same). Defined
+// AFTER `Expression`, so the element type is qualified to avoid resolving to the `Expression`
+// *variable* declared above (the D231 collision note).
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> Condition{"Condition", false, nullptr, false};
+
+// The `True` operand position (a single `Expression` child). Unique to `ConditionalExpression`
+// (the `TrueExpression` arm). The kind name is `True` (the `[Slot("True")]` argument); the
+// per-node slot static is `TrueExpressionSlot` (named after the property). `True`/`False` are
+// not C++ keywords (only lowercase `true`/`false` are), so the PascalCase identifiers are
+// safe. Defined after `Expression`, so the element type is qualified.
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> True{"True", false, nullptr, false};
+
+// The `False` operand position (a single `Expression` child). Unique to `ConditionalExpression`
+// (the `FalseExpression` arm). The kind name is `False`; the per-node slot static is
+// `FalseExpressionSlot`. Defined after `Expression`, so the element type is qualified.
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> False{"False", false, nullptr, false};
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_SLOTS_HPP

@@ -59,6 +59,7 @@ class PrimitiveExpression;
 class BinaryOperatorExpression;
 class AssignmentExpression;
 class UnaryOperatorExpression;
+class ConditionalExpression;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -86,6 +87,7 @@ public:
     virtual void VisitBinaryOperatorExpression(BinaryOperatorExpression*) = 0;
     virtual void VisitAssignmentExpression(AssignmentExpression*) = 0;
     virtual void VisitUnaryOperatorExpression(UnaryOperatorExpression*) = 0;
+    virtual void VisitConditionalExpression(ConditionalExpression*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
