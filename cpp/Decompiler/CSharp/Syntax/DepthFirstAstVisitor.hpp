@@ -52,6 +52,7 @@
 #include "Expressions/ThrowExpression.hpp"
 #include "Expressions/UnaryOperatorExpression.hpp"
 #include "Expressions/UncheckedExpression.hpp"
+#include "PrimitiveType.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -131,6 +132,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitThrowExpression(ThrowExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitPrimitiveType(PrimitiveType* node) {
         VisitChildren(node);
     }
 };
