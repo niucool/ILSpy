@@ -110,6 +110,13 @@ class TypeReferenceExpression;
 class TypeOfExpression;
 class DefaultValueExpression;
 class SizeOfExpression;
+// `IdentifierExpression` is the first AstType-bearing `Expression` with a COLLECTION slot
+// (a sealed `Expression` with a required `Identifier` string-name `[Slot]` over a backing
+// `IdentifierToken` + a `TypeArguments` `AstNodeCollection<AstType>` collection -- the
+// `simple_name ::= identifier ('<' type (',' type)* '>')?` production, structurally identical
+// to `SimpleType` but deriving from `Expression`; reusing the already-ported `Slots::Identifier`
+// and `Slots::TypeArgument` kinds).
+class IdentifierExpression;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -157,6 +164,7 @@ public:
     virtual void VisitTypeOfExpression(TypeOfExpression*) = 0;
     virtual void VisitDefaultValueExpression(DefaultValueExpression*) = 0;
     virtual void VisitSizeOfExpression(SizeOfExpression*) = 0;
+    virtual void VisitIdentifierExpression(IdentifierExpression*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

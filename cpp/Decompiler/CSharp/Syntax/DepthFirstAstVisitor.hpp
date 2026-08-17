@@ -66,6 +66,7 @@
 #include "Expressions/TypeOfExpression.hpp"
 #include "Expressions/DefaultValueExpression.hpp"
 #include "Expressions/SizeOfExpression.hpp"
+#include "Expressions/IdentifierExpression.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -187,6 +188,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitSizeOfExpression(SizeOfExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitIdentifierExpression(IdentifierExpression* node) {
         VisitChildren(node);
     }
 };
