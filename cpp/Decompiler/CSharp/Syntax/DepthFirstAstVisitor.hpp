@@ -134,6 +134,7 @@
 #include "TupleAstType.hpp"
 #include "DelegateDeclaration.hpp"
 #include "TypeDeclaration.hpp"
+#include "NamespaceDeclaration.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -459,6 +460,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitTypeDeclaration(TypeDeclaration* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitNamespaceDeclaration(NamespaceDeclaration* node) {
         VisitChildren(node);
     }
 };

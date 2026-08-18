@@ -385,6 +385,37 @@ inline const CSharpSlotInfoT<AstType> Import{"Import", false, nullptr, false};
 // D266 non-nullable-string-name-`[Slot]` precedent).
 inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Identifier> Alias{"Alias", false, nullptr, false};
 
+// The `NamespaceName` kind -- a single `AstType` child (the dotted name of a `NamespaceDeclaration`,
+// e.g. `Foo.Bar` -> a `MemberType` whose `Target` is `SimpleType("Foo")` and whose `MemberName` is
+// `"Bar"`). Unique to `NamespaceDeclaration` among the ported nodes. A `CSharpSlotInfoT<AstType>`
+// (the element type is the `AstType` abstract base, complete via the `AstType.hpp` include above).
+// `AstType.hpp` does NOT include `Slots.hpp` (the abstract base has no per-node slot statics -- the
+// `Slots.Type`/`Slots.Target`/`Slots.BaseType`/`Slots.Import` precedent), so this kind lives HERE in
+// `Slots.hpp` (no include cycle). No `Slots` variable is named `AstType`, and no class named
+// `NamespaceName` lives in the `Syntax` namespace (there is `NamespaceDeclaration`, not
+// `NamespaceName`), so the unqualified `AstType` resolves to the class and no elaborated specifier is
+// needed. The shared constant is constructed non-collection/non-optional; the per-node
+// `NamespaceNameSlot` on `NamespaceDeclaration` carries the `IsOptional` flag (the
+// `[Slot("NamespaceName")]` is a required single slot, so `IsOptional=false`).
+inline const CSharpSlotInfoT<AstType> NamespaceName{"NamespaceName", false, nullptr, false};
+
+// The `Member` kind -- a collection of `AstNode` (the namespace-body members of a
+// `NamespaceDeclaration.Members`, an `AstNodeCollection<AstNode>` -- the `{ namespace_member* }` of
+// a block-scoped namespace or the top-level members of a file-scoped namespace). Unique to
+// `NamespaceDeclaration` among the ported nodes. A `CSharpSlotInfoT<AstNode>` (the element type is
+// the `AstNode` abstract root base, complete where this header is included -- it is the base of
+// every type `Slots.hpp` already pulls in -- the `Slots.ResourceAcquisition` precedent applied to a
+// COLLECTION). `AstNode.hpp` does NOT include `Slots.hpp` (the root base has no per-node slot
+// statics -- the `Slots.ResourceAcquisition` D262 `AstNode`-typed-kind precedent), so this kind
+// lives HERE in `Slots.hpp` (no include cycle) -- the FIRST `AstNode`-typed COLLECTION kind
+// (`Slots.ResourceAcquisition` was a single slot). No `Slots` variable is named `AstNode`, and no
+// class named `Member` lives in the `Syntax` namespace (there is `MemberType`/`MemberReferenceExpression`,
+// not `Member` or `Members`), so the unqualified `AstNode` resolves to the class and no elaborated
+// specifier is needed. The shared constant is constructed non-collection/non-optional; the
+// per-node `MembersSlot` on `NamespaceDeclaration` carries the `IsCollection` flag (the
+// `[Slot("Member")]` is a collection slot, the `Slots.TypeArgument`/`Slots.Statement` precedent).
+inline const CSharpSlotInfoT<AstNode> Member{"Member", false, nullptr, false};
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_SLOTS_HPP
