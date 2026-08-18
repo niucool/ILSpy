@@ -580,6 +580,11 @@ class TupleAstType;
 // whose dependencies are all ported).
 class DelegateDeclaration;
 
+// The ported `TypeDeclaration` concrete node (GeneralScope/TypeDeclaration.cs) -- the central
+// type-declaration node (a `class`/`struct`/`interface`/`enum`/`record`), a sealed `EntityDeclaration`
+// with six collections plus one single plus two scalars, reusing all already-ported `Slots` kinds.
+class TypeDeclaration;
+
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
 // on it; `CSharpOutputVisitor` (the pretty-printer) implements it. An abstract base (a
@@ -693,6 +698,7 @@ public:
     virtual void VisitTupleTypeElement(TupleTypeElement*) = 0;
     virtual void VisitTupleType(TupleAstType*) = 0;
     virtual void VisitDelegateDeclaration(DelegateDeclaration*) = 0;
+    virtual void VisitTypeDeclaration(TypeDeclaration*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
