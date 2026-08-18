@@ -593,6 +593,20 @@ class TypeDeclaration;
 // `AstNode`-derived member). The next in-order Phase-5 piece per the D292 plan (the remaining
 // GeneralScope `namespace` container whose dependencies are all ported).
 class NamespaceDeclaration;
+// The preprocessor-directive family (C# lexical grammar 6.5.1): `PreProcessorDirective` (the
+// `pp_directive ::= '#' pp_kind new_line` base, a NOT-sealed `Trivia` leaf carrying a
+// `PreProcessorDirectiveType` enum + a nullable `Argument` string with a HAND-WRITTEN `DoMatch`),
+// plus its two sealed derived classes `LinePreprocessorDirective` (`#line`) and
+// `PragmaWarningPreprocessorDirective` (`#pragma warning ...`, a `Warnings` collection + an
+// `EndLocation` override) -- the next in-order Phase-5 piece per the D293 plan. The generator
+// emits ONE `Visit` method for the whole family (`VisitPreProcessorDirective`): the base
+// `PreProcessorDirective` is concrete-but-its-base-`Trivia`-is-abstract, so `NeedsVisitor` is
+// true for it (the `AcceptVisitor` override + `Visit` method), but the two sealed derived classes'
+// base (`PreProcessorDirective`) is concrete, so `NeedsVisitor` is false for them (no `AcceptVisitor`
+// override, no `Visit` method -- they dispatch polymorphically through the base). Only
+// `PreProcessorDirective` is forward-declared here (the two derived classes are not referenced by
+// `IAstVisitor`); `DepthFirstAstVisitor` includes only `PreProcessorDirective.hpp`.
+class PreProcessorDirective;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -709,6 +723,7 @@ public:
     virtual void VisitDelegateDeclaration(DelegateDeclaration*) = 0;
     virtual void VisitTypeDeclaration(TypeDeclaration*) = 0;
     virtual void VisitNamespaceDeclaration(NamespaceDeclaration*) = 0;
+    virtual void VisitPreProcessorDirective(PreProcessorDirective*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

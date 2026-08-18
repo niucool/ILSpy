@@ -48,6 +48,7 @@
 #include "Decompiler/CSharp/Syntax/Identifier.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/Statement.hpp"
 #include "Decompiler/CSharp/Syntax/VariableDesignation.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax::Slots {
 
@@ -415,6 +416,21 @@ inline const CSharpSlotInfoT<AstType> NamespaceName{"NamespaceName", false, null
 // per-node `MembersSlot` on `NamespaceDeclaration` carries the `IsCollection` flag (the
 // `[Slot("Member")]` is a collection slot, the `Slots.TypeArgument`/`Slots.Statement` precedent).
 inline const CSharpSlotInfoT<AstNode> Member{"Member", false, nullptr, false};
+
+// The `Warning` kind -- a collection of `PrimitiveExpression` (the `PragmaWarningPreprocessorDirective.
+// Warnings`, an `AstNodeCollection<PrimitiveExpression>` -- the `expression*` of a `#pragma warning`
+// directive's disable/restore list, C# lexical grammar). Unique to `PragmaWarningPreprocessorDirective`
+// among the ported nodes. A `CSharpSlotInfoT<PrimitiveExpression>` (the element type is the concrete
+// `PrimitiveExpression` leaf, complete where this header is included via the include added for it --
+// the `Slots.Argument`/`Slots.ArraySpecifier` precedent applied to a `PrimitiveExpression`-typed
+// collection kind). `PrimitiveExpression.hpp` does NOT include `Slots.hpp` (a leaf with no per-node slot
+// statics), so this kind lives HERE in `Slots.hpp` (no include cycle) -- the `Slots.ArraySpecifier`
+// D242 leaf-element-type precedent. No `Slots` variable is named `PrimitiveExpression`, and no class
+// named `Warning` lives in the `Syntax` namespace, so the unqualified `PrimitiveExpression` resolves
+// to the class and no elaborated specifier is needed. The shared constant is constructed
+// non-collection/non-optional; the per-node `WarningsSlot` on `PragmaWarningPreprocessorDirective`
+// carries the `IsCollection` flag (the `[Slot("Warning")]` is a collection slot).
+inline const CSharpSlotInfoT<PrimitiveExpression> Warning{"Warning", false, nullptr, false};
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
