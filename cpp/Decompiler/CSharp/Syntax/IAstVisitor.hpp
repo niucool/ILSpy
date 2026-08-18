@@ -538,6 +538,13 @@ class FixedFieldDeclaration;
 // shape with a `MethodDeclaration` child). It adds the new cycle-broken `Slots::MethodDeclaration`
 // kind (in `MethodDeclaration.hpp`); it reuses no other Slots constant.
 class LocalFunctionDeclarationStatement;
+// `Comment` is the first concrete `Trivia`-derived node (the `comment ::= '//' input_character* |
+// '/*' input_character* '*/'` leaf, C# lexical grammar 6.3.3) -- the next in-order Phase-5 piece
+// per the D287 plan (the remaining GeneralScope nodes). A sealed `Trivia` leaf with NO `[Slot]`
+// children carrying a `CommentType` enum scalar (no `Any` member, so the `DoMatch` term is the
+// plain `==`) and a `Content` string (`MatchString`). The `Trivia` abstract base was ported in
+// D224; `Comment` is the first concrete trivia the output visitor emits verbatim.
+class Comment;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -645,6 +652,7 @@ public:
     virtual void VisitFixedVariableInitializer(FixedVariableInitializer*) = 0;
     virtual void VisitFixedFieldDeclaration(FixedFieldDeclaration*) = 0;
     virtual void VisitLocalFunctionDeclarationStatement(LocalFunctionDeclarationStatement*) = 0;
+    virtual void VisitComment(Comment*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
