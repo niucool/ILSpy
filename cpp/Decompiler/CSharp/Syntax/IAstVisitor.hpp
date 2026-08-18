@@ -497,6 +497,22 @@ class TypeParameterDeclaration;
 // constant. The next in-order Phase-5 piece per the D282 plan (the dependency of
 // `MethodDeclaration.Constraints`).
 class Constraint;
+// `MethodDeclaration` is the `method_declaration ::= attribute_section* modifier* type ( type '.' )?
+// identifier type_parameter* '(' parameter* ')' constraint* ( block | ';' )` node (C# grammar
+// 15.6.1) -- the next in-order Phase-5 piece per the D283 plan (now unblocked by `TypeParameterDeclaration`
+// D282 + `ParameterDeclaration` D278 + `Constraint` just ported). A sealed `EntityDeclaration` (the
+// `[DecompilerAstNode]` default `hasPatternPlaceholder: false`, so `final`) with FOUR collections
+// (`Attributes`/`TypeParameters`/`Parameters`/`Constraints`) plus four singles (`ReturnType`/
+// `PrivateImplementationType`/`NameToken`/`Body`) -- the first ported `EntityDeclaration` with more
+// than two collections. It adds the two NEW cycle-broken `Slots::TypeParameter` (in
+// `TypeParameterDeclaration.hpp`) and `Slots::Constraint` (in `Constraint.hpp`) kinds; the other
+// six kinds (`Slots::AttributeSection`/`Type`/`PrivateImplementationType`/`Identifier`/`Parameter`/
+// `Body`) are all already ported. `NameToken` is NOT `[ExcludeFromMatch]` (unlike
+// `ConstructorDeclaration` D281 / `DestructorDeclaration` D272), so the `Name` `MatchString` term
+// IS in `DoMatch`; the inherited base `Name()` kind-walks (no `Name` override). The
+// `IsExtensionMethod` computed property reads the first `Parameters` element's `HasThisModifier`
+// via `GetChildByKind<ParameterDeclaration>(&Slots::Parameter)` (the D271 kind-based read).
+class MethodDeclaration;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -599,6 +615,7 @@ public:
     virtual void VisitConstructorDeclaration(ConstructorDeclaration*) = 0;
     virtual void VisitTypeParameterDeclaration(TypeParameterDeclaration*) = 0;
     virtual void VisitConstraint(Constraint*) = 0;
+    virtual void VisitMethodDeclaration(MethodDeclaration*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

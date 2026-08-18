@@ -397,6 +397,39 @@ private:
         ILSpy::Decompiler::TypeSystem::VarianceModifier::Invariant;
 };
 
+// The `TypeParameter` kind -- a collection of `TypeParameterDeclaration` (the generic type
+// parameters of a generic method or type: `MethodDeclaration.TypeParameters`/`TypeDeclaration.
+// TypeParameters`/`DelegateDeclaration.TypeParameters`, an `AstNodeCollection<
+// TypeParameterDeclaration>`). Unique to `MethodDeclaration` among the ported nodes (the first
+// owning declaration); `TypeDeclaration`/`DelegateDeclaration` will reuse it when they port.
+//
+// Defined HERE (in `TypeParameterDeclaration.hpp`, after the `TypeParameterDeclaration` class)
+// rather than in `Slots.hpp` because `CSharpSlotInfoT<TypeParameterDeclaration>` needs
+// `TypeParameterDeclaration` complete (the `dynamic_cast<const TypeParameterDeclaration*>` is-a
+// test in the ctor), and `TypeParameterDeclaration` is a concrete node with per-node slot statics
+// (its `AttributesSlot`/`NameTokenSlot` reference `&Slots::AttributeSection`/`&Slots::Identifier`,
+// so this header includes `Slots.hpp`). Placing the kind in `Slots.hpp` would form a circular
+// include: `Slots.hpp` would have to include `TypeParameterDeclaration.hpp` (for the complete
+// `TypeParameterDeclaration`), but `TypeParameterDeclaration.hpp` includes `Slots.hpp` (for
+// `Slots::AttributeSection`/`Slots::Identifier`), and with `Slots.hpp`'s guard set those definitions
+// would not be visible where `TypeParameterDeclaration`'s class body needs them. After the class
+// both `CSharpSlotInfoT` (visible via the `Slots.hpp` include) and `TypeParameterDeclaration` are
+// complete, so the kind defines cleanly. The `inline` variable still has external linkage and one
+// address across translation units (the C++17 `inline` guarantee), preserving the
+// pointer-identity comparison `node.Slot.Kind == &Slots::TypeParameter` the slot system relies on.
+// This is the `Slots::Attribute` D241 / `Slots::AttributeSection` D242 / `Slots::Parameter` D279 /
+// `Slots::Variable` D267 / `Slots::ConstructorInitializer` D281 cycle-breaking precedent applied to
+// a `TypeParameterDeclaration`-typed collection kind. The shared constant is constructed
+// non-collection/non-optional (`{"TypeParameter", false, nullptr, false}`); the per-node
+// `TypeParametersSlot` on the owning node carries the `IsCollection` flag (the collection `[Slot]`
+// makes the per-node slot a collection). The kind name `TypeParameter` collides with no class in
+// the `Syntax` namespace (there is `TypeParameterDeclaration`, not `TypeParameter`), so no
+// elaborated-type-specifier is needed -- the same no-collision discriminator as `Slots::Variable`
+// (there is `VariableInitializer`/`VariableDesignation`, not `Variable`).
+namespace Slots {
+inline const CSharpSlotInfoT<TypeParameterDeclaration> TypeParameter{"TypeParameter", false, nullptr, false};
+} // namespace Slots
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_TYPEPARAMETERDECLARATION_HPP

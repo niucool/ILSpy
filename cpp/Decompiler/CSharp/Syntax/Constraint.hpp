@@ -319,6 +319,39 @@ private:
     AstNodeCollectionT<AstType> baseTypes_;
 };
 
+// The `Constraint` kind -- a collection of `Constraint` (the generic `where` clauses of a generic
+// method or type: `MethodDeclaration.Constraints`/`TypeDeclaration.Constraints`/`DelegateDeclaration.
+// Constraints`, an `AstNodeCollection<Constraint>`). Unique to `MethodDeclaration` among the ported
+// nodes (the first owning declaration); `TypeDeclaration`/`DelegateDeclaration` will reuse it when
+// they port.
+//
+// Defined HERE (in `Constraint.hpp`, after the `Constraint` class) rather than in `Slots.hpp`
+// because `CSharpSlotInfoT<Constraint>` needs `Constraint` complete (the `dynamic_cast<const
+// Constraint*>` is-a test in the ctor), and `Constraint` is a concrete node with per-node slot
+// statics (its `TypeParameterSlot`/`BaseTypesSlot` reference `&Slots::ConstraintTypeParameter`/
+// `&Slots::BaseType`, so this header includes `Slots.hpp`). Placing the kind in `Slots.hpp` would
+// form a circular include: `Slots.hpp` would have to include `Constraint.hpp` (for the complete
+// `Constraint`), but `Constraint.hpp` includes `Slots.hpp` (for `Slots::ConstraintTypeParameter`/
+// `Slots::BaseType`), and with `Slots.hpp`'s guard set those definitions would not be visible where
+// `Constraint`'s class body needs them. After the class both `CSharpSlotInfoT` (visible via the
+// `Slots.hpp` include) and `Constraint` are complete, so the kind defines cleanly. The `inline`
+// variable still has external linkage and one address across translation units (the C++17
+// `inline` guarantee), preserving the pointer-identity comparison `node.Slot.Kind ==
+// &Slots::Constraint` the slot system relies on. This is the `Slots::Attribute` D241 /
+// `Slots::AttributeSection` D242 / `Slots::Parameter` D279 / `Slots::Variable` D267 /
+// `Slots::ConstructorInitializer` D281 / `Slots::TypeParameter` (just added this iteration into
+// `TypeParameterDeclaration.hpp`) cycle-breaking precedent applied to a `Constraint`-typed
+// collection kind. The shared constant is constructed non-collection/non-optional (`{"Constraint",
+// false, nullptr, false}`); the per-node `ConstraintsSlot` on the owning node carries the
+// `IsCollection` flag. The kind name `Constraint` lives in the `Slots` namespace and collides with
+// no class in the `Syntax` namespace (the `Constraint` CLASS is in the parent `Syntax` namespace,
+// the `Slots::Constraint` VARIABLE is in the nested `Slots` namespace -- distinct scopes, no
+// collision; the `Slots::Variable` D267 precedent where the kind name matches no class in the same
+// scope), so no elaborated-type-specifier is needed.
+namespace Slots {
+inline const CSharpSlotInfoT<Constraint> Constraint{"Constraint", false, nullptr, false};
+} // namespace Slots
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_CONSTRAINT_HPP
