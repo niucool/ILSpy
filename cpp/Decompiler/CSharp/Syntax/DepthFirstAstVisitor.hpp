@@ -146,6 +146,7 @@
 #include "PreProcessorDirective.hpp"
 #include "DocumentationReference.hpp"
 #include "Expressions/DeclarationExpression.hpp"
+#include "Expressions/AnonymousTypeCreateExpression.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -507,6 +508,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitDeclarationExpression(DeclarationExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitAnonymousTypeCreateExpression(AnonymousTypeCreateExpression* node) {
         VisitChildren(node);
     }
 };

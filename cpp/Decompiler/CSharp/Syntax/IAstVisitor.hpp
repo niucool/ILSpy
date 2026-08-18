@@ -233,6 +233,16 @@ class UndocumentedExpression;
 // constant. No name-shadowing crux (the `CountExpression` property name differs from its
 // `Expression` type, so no elaborated `class Expression` specifier is needed).
 class StackAllocExpression;
+// `AnonymousTypeCreateExpression` is the `anonymous_object_creation_expression ::=
+// 'new' '{' expression* '}'` (C# grammar 12.8.17.4) -- the `ArrayInitializerExpression` D250 /
+// `TupleExpression` D296 collection-only shape applied to a sealed `Expression` whose sole child
+// slot is the `Initializers` `AstNodeCollection<Expression>` collection (reusing the already-
+// ported `Slots::Expression` kind) plus the `NewKeyword` const string; no scalar, no single
+// slots, no name-shadowing crux (the `Initializers` property name differs from its
+// `Expression` type). The next in-order Phase-5 piece per the D303 plan (a remaining Expression
+// node whose dependencies are all ported). Only `AnonymousTypeCreateExpression` is forward-
+// declared here (no ported derived classes).
+class AnonymousTypeCreateExpression;
 // `ContinueStatement`/`BreakStatement`/`YieldBreakStatement` are the first concrete C# AST
 // statement nodes -- the cleanest leaf statements (no `[Slot]` children, no members), the
 // start of the Statement hierarchy (a leaf with no slots; `BreakStatement`/`YieldBreakStatement`
@@ -808,6 +818,7 @@ public:
     virtual void VisitPreProcessorDirective(PreProcessorDirective*) = 0;
     virtual void VisitDocumentationReference(DocumentationReference*) = 0;
     virtual void VisitDeclarationExpression(DeclarationExpression*) = 0;
+    virtual void VisitAnonymousTypeCreateExpression(AnonymousTypeCreateExpression*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
