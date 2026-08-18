@@ -140,6 +140,7 @@
 #include "UsingAliasDeclaration.hpp"
 #include "TupleTypeElement.hpp"
 #include "TupleAstType.hpp"
+#include "InvocationAstType.hpp"
 #include "DelegateDeclaration.hpp"
 #include "TypeDeclaration.hpp"
 #include "NamespaceDeclaration.hpp"
@@ -509,6 +510,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitTupleType(TupleAstType* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitInvocationType(InvocationAstType* node) {
         VisitChildren(node);
     }
     virtual void VisitDelegateDeclaration(DelegateDeclaration* node) {

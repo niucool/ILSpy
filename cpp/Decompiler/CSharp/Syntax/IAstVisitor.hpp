@@ -692,6 +692,19 @@ class UsingAliasDeclaration;
 // rewriting yields `VisitTupleType` (NOT `VisitTupleAstType`).
 class TupleTypeElement;
 class TupleAstType;
+// `InvocationAstType` is the `invocation_ast_type ::= type '(' argument_list? ')'` node (no spec
+// grammar production -- an ILSpy-internal type form used when a type appears applied to arguments,
+// e.g. an attribute type written with its constructor arguments) -- the next in-order Phase-5 piece
+// per the D312 plan (the remaining GeneralScope `AstType`-bearing nodes). A sealed `AstType` with an
+// `Arguments` `AstNodeCollection<Expression>` collection (the parenthesized argument list, `[Slot
+// ("Expression")]` reusing the already-ported `Slots::Expression` kind as a collection -- the kind-
+// collapsing-by-`[Slot]`-name design) plus a required `BaseType` `AstType` single slot (`[Slot("Type")]
+// reusing the already-ported `Slots::Type` kind) -- the `AnonymousMethodExpression` D306 one-non-
+// incremental-collection-plus-a-required-trailing-single shape applied to the `AstType` hierarchy.
+// `InvocationAstType` ends in "AstType", so the generator's visit-method-name rewriting yields
+// `VisitInvocationType` (NOT `VisitInvocationAstType` -- the `TupleAstType` D290 precedent). Only
+// `InvocationAstType` is forward-declared here (no ported derived classes).
+class InvocationAstType;
 // The `DelegateDeclaration` (the `delegate_declaration ::= attribute_section* modifier*
 // 'delegate' ( 'ref' 'readonly'? )? type identifier type_parameter* '(' parameter* ')'
 // constraint*` -- C# grammar 21.2): a sealed `EntityDeclaration` with four collections
@@ -900,6 +913,7 @@ public:
     virtual void VisitUsingAliasDeclaration(UsingAliasDeclaration*) = 0;
     virtual void VisitTupleTypeElement(TupleTypeElement*) = 0;
     virtual void VisitTupleType(TupleAstType*) = 0;
+    virtual void VisitInvocationType(InvocationAstType*) = 0;
     virtual void VisitDelegateDeclaration(DelegateDeclaration*) = 0;
     virtual void VisitTypeDeclaration(TypeDeclaration*) = 0;
     virtual void VisitNamespaceDeclaration(NamespaceDeclaration*) = 0;
