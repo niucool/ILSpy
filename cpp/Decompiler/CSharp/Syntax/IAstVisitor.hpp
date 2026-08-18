@@ -442,6 +442,20 @@ class EventDeclaration;
 class CustomEventDeclaration;
 class ParameterDeclaration;
 class IndexerDeclaration;
+class OperatorDeclaration;
+// `OperatorDeclaration` is the `operator_declaration ::= attribute_section* modifier+ type
+// ( type '.' )? 'operator' 'checked'? operator_token '(' parameter* ')' ( block | ';' )` node
+// (C# grammar 15.10.1) -- the next in-order Phase-5 piece per the D279 plan (now unblocked -- it
+// needs the `ParameterDeclaration` already ported by D278 for its `Parameters` collection, plus
+// the `OperatorType` enum co-located in `OperatorDeclaration.cs`). A sealed `EntityDeclaration` with
+// an `Attributes` collection + a required `ReturnType` `AstType` + a nullable
+// `PrivateImplementationType` `AstType?` + a `Parameters` `AstNodeCollection<ParameterDeclaration>`
+// collection + a nullable `Body` `BlockStatement?`, plus an `OperatorType` scalar (a settable enum
+// with NO `Any` member, so the `DoMatch` term is the plain `==`) and four const keyword tokens; the
+// `Name`/`NameToken` overrides return the operator's method name / null and throw on set. NO new
+// `Slots` constant (reuses the already-ported `Slots::AttributeSection`/`Type`/
+// `PrivateImplementationType`/`Parameter`/`Body` kinds); the `OperatorType()` accessor shadows the
+// `OperatorType` enum (the `DirectionExpression.FieldDirection` D235 name-shadowing crux).
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -539,6 +553,7 @@ public:
     virtual void VisitCustomEventDeclaration(CustomEventDeclaration*) = 0;
     virtual void VisitParameterDeclaration(ParameterDeclaration*) = 0;
     virtual void VisitIndexerDeclaration(IndexerDeclaration*) = 0;
+    virtual void VisitOperatorDeclaration(OperatorDeclaration*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
