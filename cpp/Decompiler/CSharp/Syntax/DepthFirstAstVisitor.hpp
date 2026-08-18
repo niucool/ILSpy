@@ -110,6 +110,7 @@
 #include "DestructorDeclaration.hpp"
 #include "FieldDeclaration.hpp"
 #include "Accessor.hpp"
+#include "EnumMemberDeclaration.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -363,6 +364,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitAccessor(Accessor* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitEnumMemberDeclaration(EnumMemberDeclaration* node) {
         VisitChildren(node);
     }
 };

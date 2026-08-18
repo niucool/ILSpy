@@ -290,6 +290,20 @@ inline const CSharpSlotInfoT<AstNode> ResourceAcquisition{"ResourceAcquisition",
 // avoid resolving to this constant.
 inline const CSharpSlotInfoT<VariableDesignation> VariableDesignation{"VariableDesignation", false, nullptr, false};
 
+// The `EnumMemberInitializer` kind -- a single NULLABLE `Expression` child (the optional
+// `= expression` initializer of an `EnumMemberDeclaration`, e.g. the `1` in `enum E { A = 1 }`).
+// Unique to `EnumMemberDeclaration` among the ported nodes. A `CSharpSlotInfoT<Expression>`
+// (the element type is the `Expression` abstract base, complete via the `Expression.hpp` include
+// above). `Expression.hpp` does NOT include `Slots.hpp` (the abstract base has no per-node slot
+// statics -- the `Slots.Statement`/`Slots.ArraySpecifier` precedent applied to the expression
+// base), so this kind lives HERE in `Slots.hpp` (no include cycle). Defined AFTER the
+// `Slots::Expression` *variable*, so the element type is qualified
+// (`::ILSpy::Decompiler::CSharp::Syntax::Expression`) to avoid resolving to that variable (the
+// `Expression`/`Condition`/`TargetExpression`/`Argument` collision precedent: an unqualified name
+// shared with a prior `Slots` variable resolves to the variable, not the class, since `Slots` is a
+// namespace and the variable is in scope).
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> EnumMemberInitializer{"EnumMemberInitializer", false, nullptr, false};
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_SLOTS_HPP
