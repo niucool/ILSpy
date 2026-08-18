@@ -112,6 +112,8 @@
 #include "Accessor.hpp"
 #include "EnumMemberDeclaration.hpp"
 #include "PropertyDeclaration.hpp"
+#include "EventDeclaration.hpp"
+#include "CustomEventDeclaration.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -371,6 +373,12 @@ public:
         VisitChildren(node);
     }
     virtual void VisitPropertyDeclaration(PropertyDeclaration* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitEventDeclaration(EventDeclaration* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitCustomEventDeclaration(CustomEventDeclaration* node) {
         VisitChildren(node);
     }
 };

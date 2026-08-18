@@ -433,6 +433,44 @@ namespace Slots {
 inline const CSharpSlotInfoT<Accessor> Setter{"Setter", false, nullptr, false};
 } // namespace Slots
 
+// The `AddAccessor` kind -- a single NULLABLE `Accessor` child (the `add` accessor of a
+// `CustomEventDeclaration.AddAccessor`, absent for an event with no `add` accessor). Shared by
+// every `[Slot("AddAccessor")] Accessor?` declaration. A `CSharpSlotInfoT<Accessor>` (the element
+// type is the concrete `Accessor` node). Defined HERE (in Accessor.hpp, after the `Accessor` class
+// and the `Slots::Getter`/`Slots::Setter` kinds) for the same cycle-breaking reason as
+// `Slots::Getter` (Accessor.hpp includes Slots.hpp for its per-node `AttributesSlot`/`BodySlot`,
+// so the kind cannot live in Slots.hpp). The `inline` variable has external linkage and one
+// address across translation units (the C++17 `inline` guarantee), preserving the
+// pointer-identity comparison `node.Slot.Kind == &Slots::AddAccessor` the slot system relies on.
+// The kind name `AddAccessor` collides with no class in the `Syntax` namespace (there is
+// `Accessor`, not `AddAccessor`), so no elaborated-type-specifier is needed. The shared constant
+// is constructed non-collection/non-optional (`{"AddAccessor", false, nullptr, false}`); the
+// per-node `AddAccessorSlot` on `CustomEventDeclaration` carries the `IsOptional=true` flag (the
+// nullable slot -- the shared kind is constructed non-optional, the per-node slot carries the
+// optionality, the `IfElseStatement.FalseStatement` D258 precedent).
+namespace Slots {
+inline const CSharpSlotInfoT<Accessor> AddAccessor{"AddAccessor", false, nullptr, false};
+} // namespace Slots
+
+// The `RemoveAccessor` kind -- a single NULLABLE `Accessor` child (the `remove` accessor of a
+// `CustomEventDeclaration.RemoveAccessor`, absent for an event with no `remove` accessor). Shared
+// by every `[Slot("RemoveAccessor")] Accessor?` declaration. A `CSharpSlotInfoT<Accessor>` (the
+// element type is the concrete `Accessor` node). Defined HERE (in Accessor.hpp, after the
+// `Accessor` class and the `Slots::Getter`/`Slots::Setter`/`Slots::AddAccessor` kinds) for the
+// same cycle-breaking reason as `Slots::Getter` (Accessor.hpp includes Slots.hpp, so the kind
+// cannot live in Slots.hpp). The `inline` variable has external linkage and one address across
+// translation units (the C++17 `inline` guarantee), preserving the pointer-identity comparison
+// `node.Slot.Kind == &Slots::RemoveAccessor` the slot system relies on. The kind name
+// `RemoveAccessor` collides with no class in the `Syntax` namespace (there is `Accessor`, not
+// `RemoveAccessor`), so no elaborated-type-specifier is needed. The shared constant is
+// constructed non-collection/non-optional (`{"RemoveAccessor", false, nullptr, false}`); the
+// per-node `RemoveAccessorSlot` on `CustomEventDeclaration` carries the `IsOptional=true` flag
+// (the nullable slot -- the shared kind is constructed non-optional, the per-node slot carries the
+// optionality, the `IfElseStatement.FalseStatement` D258 precedent).
+namespace Slots {
+inline const CSharpSlotInfoT<Accessor> RemoveAccessor{"RemoveAccessor", false, nullptr, false};
+} // namespace Slots
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_ACCESSOR_HPP

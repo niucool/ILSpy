@@ -85,6 +85,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/Accessor_Test.cpp
     Decompiler/CSharp/Syntax/EnumMemberDeclaration_Test.cpp
     Decompiler/CSharp/Syntax/PropertyDeclaration_Test.cpp
+    Decompiler/CSharp/Syntax/EventDeclaration_Test.cpp
     Decompiler/CSharp/Syntax/PatternMatching/PatternMatching_Test.cpp
     Decompiler/IL/ControlFlowSimplification_Test.cpp
     Decompiler/IL/ControlFlowGraph_Test.cpp
