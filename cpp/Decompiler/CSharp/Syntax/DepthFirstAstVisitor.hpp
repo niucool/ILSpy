@@ -115,6 +115,7 @@
 #include "EventDeclaration.hpp"
 #include "CustomEventDeclaration.hpp"
 #include "ParameterDeclaration.hpp"
+#include "IndexerDeclaration.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -383,6 +384,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitParameterDeclaration(ParameterDeclaration* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitIndexerDeclaration(IndexerDeclaration* node) {
         VisitChildren(node);
     }
 };

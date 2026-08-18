@@ -502,6 +502,30 @@ private:
         ILSpy::Decompiler::TypeSystem::ReferenceKind::None;
 };
 
+// The `Parameter` kind -- a collection of `ParameterDeclaration` (the `Parameters` slot of an
+// `IndexerDeclaration`/`ConstructorDeclaration`/`OperatorDeclaration`/`MethodDeclaration`, the
+// `[int x]`/`(int x)` parameter list). Shared by every `[Slot("Parameter")]
+// AstNodeCollection<ParameterDeclaration>` declaration. A `CSharpSlotInfoT<ParameterDeclaration>` (the
+// element type is the concrete `ParameterDeclaration` node). Defined HERE (in
+// ParameterDeclaration.hpp, after the `ParameterDeclaration` class) for the cycle-breaking reason:// `ParameterDeclaration.hpp` includes `Slots.hpp` (for `Slots::AttributeSection`/`Slots::Type`/
+// `Slots::Identifier`/`Slots::Expression` used by its per-node `AttributesSlot`/`TypeSlot`/
+// `NameTokenSlot`/`DefaultExpressionSlot`), and with `Slots.hpp`'s guard set those definitions
+// would not be visible where `ParameterDeclaration`'s class body needs them. After the class both
+// `CSharpSlotInfoT` (visible via the `Slots.hpp` include) and `ParameterDeclaration` are complete,
+// so the kind defines cleanly. The `inline` variable still has external linkage and one address
+// across translation units (the C++17 `inline` guarantee), preserving the pointer-identity
+// comparison `node.Slot.Kind == &Slots::Parameter` the slot system relies on. This is the
+// `Slots::Attribute`/`Slots::AttributeSection`/`Slots::Initializer`/`Slots::Variable`
+// cycle-breaking precedent (D241/D242/D251/D267) applied to a `ParameterDeclaration`-typed
+// collection kind. The shared constant is constructed non-collection/non-optional (`{"Parameter",
+// false, nullptr, false}`); the per-node `ParametersSlot` on the owning node carries the
+// `IsCollection` flag (the collection `[Slot]` makes the per-node slot a collection). The kind name
+// `Parameter` collides with no class in the `Syntax` namespace (there is `ParameterDeclaration`,
+// not `Parameter`), so no elaborated-type-specifier is needed.
+namespace Slots {
+inline const CSharpSlotInfoT<ParameterDeclaration> Parameter{"Parameter", false, nullptr, false};
+} // namespace Slots
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_PARAMETERDECLARATION_HPP
