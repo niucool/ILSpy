@@ -476,6 +476,17 @@ class OperatorDeclaration;
 // `Slots::AttributeSection`/`Identifier`/`Parameter`/`ConstructorInitializer`/`Body` kinds).
 class ConstructorInitializer;
 class ConstructorDeclaration;
+// `TypeParameterDeclaration` is the `type_parameter ::= attribute_section* ( 'in' | 'out' )?
+// identifier` node (C# grammar 8.5 / 15.2.3) -- the next in-order Phase-5 piece per the D281 plan (the
+// dependency of `MethodDeclaration.TypeParameters`, and of `TypeDeclaration`/`DelegateDeclaration`
+// `TypeParameters` collections). A sealed direct-`AstNode` node (NOT an `EntityDeclaration`) with an
+// `Attributes` `AttributeSection` collection + a `Variance` `VarianceModifier` enum scalar (no `Any`
+// member, so the `DoMatch` term is the plain `==`) + a non-nullable `string Name` string-name `[Slot]`
+// over a required `NameToken` `Identifier`; reuses the already-ported `Slots::AttributeSection`/
+// `Slots::Identifier` kinds with no new `Slots` constant. The `VarianceModifier` enum ports to
+// `cpp/Decompiler/TypeSystem/VarianceModifier.hpp` (the `SymbolKind` D271 / `ReferenceKind` D278
+// precedent).
+class TypeParameterDeclaration;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -576,6 +587,7 @@ public:
     virtual void VisitOperatorDeclaration(OperatorDeclaration*) = 0;
     virtual void VisitConstructorInitializer(ConstructorInitializer*) = 0;
     virtual void VisitConstructorDeclaration(ConstructorDeclaration*) = 0;
+    virtual void VisitTypeParameterDeclaration(TypeParameterDeclaration*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
