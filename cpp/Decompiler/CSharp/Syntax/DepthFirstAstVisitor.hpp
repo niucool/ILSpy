@@ -99,6 +99,7 @@
 #include "Statements/ForeachStatement.hpp"
 #include "SingleVariableDesignation.hpp"
 #include "ParenthesizedVariableDesignation.hpp"
+#include "VariableInitializer.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -319,6 +320,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitForeachStatement(ForeachStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitVariableInitializer(VariableInitializer* node) {
         VisitChildren(node);
     }
 };

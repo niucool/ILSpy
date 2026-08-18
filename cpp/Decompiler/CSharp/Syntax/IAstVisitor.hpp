@@ -327,6 +327,20 @@ class ParenthesizedVariableDesignation;
 // element types.
 class ForeachStatement;
 
+// `VariableInitializer` is the `variable_declarator ::= identifier ( '=' expression )?` node
+// (C# grammar 15.5.1) -- the element of a `VariableDeclaration`/`FixedStatement`'s `Variables`
+// collection, the next in-order Phase-5 piece per the D265 plan (the dependency of
+// `FixedStatement.Variables` and `VariableDeclarationStatement.Variables`). A non-sealed
+// `AstNode` (the first ported `TypeMembers` node, the `[DecompilerAstNode(hasPatternPlaceholder:
+// true)]` non-`sealed` form -- the `ArrayInitializerExpression` D250 precedent) with a REQUIRED
+// `string Name` string-name `[Slot("Identifier")]` over a backing `NameToken` `Identifier` slot
+// plus a NULLABLE `Expression?` `Initializer` `[Slot("Expression")]` single slot. NO name
+// shadowing (the property is `Name`/`Initializer`, NOT `Identifier`/`Expression` -- the
+// `LabelStatement` D259 / `MemberReferenceExpression.Target` D247 differently-named-property
+// precedent), so no elaborated-type-specifier is needed; both slot kinds are already ported
+// (`Slots::Identifier` by `SimpleType`, `Slots::Expression` by `UnaryOperatorExpression`).
+class VariableInitializer;
+
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
 // on it; `CSharpOutputVisitor` (the pretty-printer) implements it. An abstract base (a
@@ -406,6 +420,7 @@ public:
     virtual void VisitSingleVariableDesignation(SingleVariableDesignation*) = 0;
     virtual void VisitParenthesizedVariableDesignation(ParenthesizedVariableDesignation*) = 0;
     virtual void VisitForeachStatement(ForeachStatement*) = 0;
+    virtual void VisitVariableInitializer(VariableInitializer*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
