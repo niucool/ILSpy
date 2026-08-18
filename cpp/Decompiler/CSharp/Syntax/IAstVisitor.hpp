@@ -557,6 +557,18 @@ class Comment;
 class ExternAliasDeclaration;
 class UsingDeclaration;
 class UsingAliasDeclaration;
+// The tuple type family (C# grammar 8.3.1): `TupleTypeElement` (the `tuple_type_element ::=
+// type identifier?` -- a type plus an optional element name, the dependency of
+// `TupleAstType.Elements`) and `TupleAstType` (the `tuple_type ::= '(' tuple_type_element (','
+// tuple_type_element)+ ')'` -- an `AstType` whose sole slot is the `Elements` collection of
+// `TupleTypeElement`) -- the next in-order Phase-5 piece per the D288 plan (the remaining
+// GeneralScope `AstType`-bearing nodes). `TupleTypeElement` combines the `CastExpression` D243
+// required-`AstType`-slot shape with the `SimpleType` D237 nullable-string-name-`[Slot]` shape;
+// `TupleAstType` is the `ArrayInitializerExpression` D250 collection-only shape applied to the
+// `AstType` hierarchy. `TupleAstType` ends in "AstType", so the generator's visit-method-name
+// rewriting yields `VisitTupleType` (NOT `VisitTupleAstType`).
+class TupleTypeElement;
+class TupleAstType;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -668,6 +680,8 @@ public:
     virtual void VisitExternAliasDeclaration(ExternAliasDeclaration*) = 0;
     virtual void VisitUsingDeclaration(UsingDeclaration*) = 0;
     virtual void VisitUsingAliasDeclaration(UsingAliasDeclaration*) = 0;
+    virtual void VisitTupleTypeElement(TupleTypeElement*) = 0;
+    virtual void VisitTupleType(TupleAstType*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

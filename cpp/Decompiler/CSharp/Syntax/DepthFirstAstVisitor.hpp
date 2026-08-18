@@ -130,6 +130,8 @@
 #include "ExternAliasDeclaration.hpp"
 #include "UsingDeclaration.hpp"
 #include "UsingAliasDeclaration.hpp"
+#include "TupleTypeElement.hpp"
+#include "TupleAstType.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -443,6 +445,12 @@ public:
         VisitChildren(node);
     }
     virtual void VisitUsingAliasDeclaration(UsingAliasDeclaration* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitTupleTypeElement(TupleTypeElement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitTupleType(TupleAstType* node) {
         VisitChildren(node);
     }
 };
