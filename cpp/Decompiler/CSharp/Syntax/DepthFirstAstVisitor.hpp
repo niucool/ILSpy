@@ -74,6 +74,7 @@
 #include "Expressions/ArrayInitializerExpression.hpp"
 #include "Expressions/ObjectCreateExpression.hpp"
 #include "Expressions/ArrayCreateExpression.hpp"
+#include "Expressions/TupleExpression.hpp"
 #include "Statements/ContinueStatement.hpp"
 #include "Statements/BreakStatement.hpp"
 #include "Statements/YieldBreakStatement.hpp"
@@ -282,6 +283,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitArrayCreateExpression(ArrayCreateExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitTupleExpression(TupleExpression* node) {
         VisitChildren(node);
     }
     virtual void VisitContinueStatement(ContinueStatement* node) {

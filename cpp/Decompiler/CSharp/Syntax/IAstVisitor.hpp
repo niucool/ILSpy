@@ -174,6 +174,12 @@ class ObjectCreateExpression;
 // `Slots::Argument`/`Slots::Initializer` kinds and the new `Slots::AdditionalArraySpecifier`
 // kind; both collections are non-incremental since the `Initializer` single slot trails them).
 class ArrayCreateExpression;
+// `TupleExpression` is the `ArrayInitializerExpression` D250 collection-only shape applied to
+// the `tuple_literal ::= '(' expression ( ',' expression )+ ')'` production (a sealed
+// `Expression` whose sole child slot is the `Elements` `AstNodeCollection<Expression>`
+// collection); reusing the already-ported `Slots::Expression` kind as the collection kind (the
+// `ArrayInitializerExpression`/`BlockStatement` collection-kind-reuse precedent).
+class TupleExpression;
 // `ContinueStatement`/`BreakStatement`/`YieldBreakStatement` are the first concrete C# AST
 // statement nodes -- the cleanest leaf statements (no `[Slot]` children, no members), the
 // start of the Statement hierarchy (a leaf with no slots; `BreakStatement`/`YieldBreakStatement`
@@ -670,6 +676,7 @@ public:
     virtual void VisitArrayInitializerExpression(ArrayInitializerExpression*) = 0;
     virtual void VisitObjectCreateExpression(ObjectCreateExpression*) = 0;
     virtual void VisitArrayCreateExpression(ArrayCreateExpression*) = 0;
+    virtual void VisitTupleExpression(TupleExpression*) = 0;
     virtual void VisitContinueStatement(ContinueStatement*) = 0;
     virtual void VisitBreakStatement(BreakStatement*) = 0;
     virtual void VisitYieldBreakStatement(YieldBreakStatement*) = 0;
