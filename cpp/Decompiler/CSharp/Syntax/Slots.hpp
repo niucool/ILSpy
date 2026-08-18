@@ -586,6 +586,69 @@ inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> Pr
 // `Expression`/`Condition`/`Projection` collision precedent).
 inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> Key{"Key", false, nullptr, false};
 
+// The `JoinIdentifier` token position (a single `Identifier` child -- the backing token of the
+// NON-nullable `string` `JoinIdentifier` string-name `[Slot]` on `QueryJoinClause`). Unique to
+// `QueryJoinClause.JoinIdentifierToken` among the ported nodes. A `CSharpSlotInfoT<Identifier>`
+// (the element type is the `Identifier` token, complete via the `Identifier.hpp` include above).
+// `Identifier.hpp` does NOT include `Slots.hpp` (the leaf token has no per-node slot statics --
+// the `Slots.Identifier` precedent), so this kind lives HERE in `Slots.hpp` (no include cycle).
+// The kind name `JoinIdentifier` collides with no class in the `Syntax` namespace, so no
+// elaborated-type-specifier is needed for the kind name. DEFINED AFTER the `Slots.Identifier`
+// variable above, so the element type is qualified
+// (`::ILSpy::Decompiler::CSharp::Syntax::Identifier`) to avoid resolving to that variable (the
+// `Identifier`/`Alias` collision precedent). The shared constant is constructed
+// non-collection/non-optional; the per-node `JoinIdentifierTokenSlot` on `QueryJoinClause`
+// carries the `IsOptional=false` flag (the join name is non-nullable -- the `LabelStatement`/
+// `MemberType.MemberName` non-nullable-string-name-[Slot] precedent).
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Identifier> JoinIdentifier{"JoinIdentifier", false, nullptr, false};
+
+// The `InExpression` operand position (a single `Expression` child). Unique to
+// `QueryJoinClause.InExpression` among the ported nodes. A `CSharpSlotInfoT<Expression>` (the
+// element type is the `Expression` abstract base, complete via the `Expression.hpp` include
+// above). `Expression.hpp` does NOT include `Slots.hpp`, so this kind lives HERE in `Slots.hpp`
+// (no include cycle). The kind name `InExpression` collides with no class in the `Syntax`
+// namespace (there is `Expression`, not `InExpression`), so no elaborated-type-specifier is
+// needed for the kind name. DEFINED AFTER the `Slots.Expression` variable above, so the element
+// type is qualified (`::ILSpy::Decompiler::CSharp::Syntax::Expression`) to avoid resolving to
+// that variable (the `Expression`/`Condition`/`Projection` collision precedent).
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> InExpression{"InExpression", false, nullptr, false};
+
+// The `OnExpression` operand position (a single `Expression` child). Unique to
+// `QueryJoinClause.OnExpression` among the ported nodes. A `CSharpSlotInfoT<Expression>` (the
+// element type is the `Expression` abstract base). `Expression.hpp` does NOT include `Slots.hpp`,
+// so this kind lives HERE in `Slots.hpp` (no include cycle). The kind name `OnExpression`
+// collides with no class in the `Syntax` namespace, so no elaborated-type-specifier is needed
+// for the kind name. DEFINED AFTER the `Slots.Expression` variable above, so the element type
+// is qualified (`::ILSpy::Decompiler::CSharp::Syntax::Expression`) to avoid resolving to that
+// variable (the `Expression`/`InExpression` collision precedent).
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> OnExpression{"OnExpression", false, nullptr, false};
+
+// The `EqualsExpression` operand position (a single `Expression` child). Unique to
+// `QueryJoinClause.EqualsExpression` among the ported nodes. A `CSharpSlotInfoT<Expression>`
+// (the element type is the `Expression` abstract base). `Expression.hpp` does NOT include
+// `Slots.hpp`, so this kind lives HERE in `Slots.hpp` (no include cycle). The kind name
+// `EqualsExpression` collides with no class in the `Syntax` namespace, so no
+// elaborated-type-specifier is needed for the kind name. DEFINED AFTER the `Slots.Expression`
+// variable above, so the element type is qualified
+// (`::ILSpy::Decompiler::CSharp::Syntax::Expression`) to avoid resolving to that variable (the
+// `Expression`/`InExpression`/`OnExpression` collision precedent).
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> EqualsExpression{"EqualsExpression", false, nullptr, false};
+
+// The `IntoIdentifier` token position (a single `Identifier` child -- the backing token of the
+// NULLABLE `string?` `IntoIdentifier` string-name `[Slot]` on `QueryJoinClause`). Unique to
+// `QueryJoinClause.IntoIdentifierToken` among the ported nodes. A `CSharpSlotInfoT<Identifier>`
+// (the element type is the `Identifier` token, complete via the `Identifier.hpp` include above).
+// `Identifier.hpp` does NOT include `Slots.hpp`, so this kind lives HERE in `Slots.hpp` (no
+// include cycle). The kind name `IntoIdentifier` collides with no class in the `Syntax` namespace,
+// so no elaborated-type-specifier is needed for the kind name. DEFINED AFTER the
+// `Slots.Identifier`/`Slots.JoinIdentifier` variables above, so the element type is qualified
+// (`::ILSpy::Decompiler::CSharp::Syntax::Identifier`) to avoid resolving to those variables
+// (the `Identifier`/`Alias`/`JoinIdentifier` collision precedent). The shared constant is
+// constructed non-collection/non-optional; the per-node `IntoIdentifierTokenSlot` on
+// `QueryJoinClause` carries the `IsOptional=true` flag (the group-join name is nullable -- the
+// `GotoStatement.Label`/`CatchClause.VariableName` nullable-string-name-[Slot] precedent).
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Identifier> IntoIdentifier{"IntoIdentifier", false, nullptr, false};
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_SLOTS_HPP

@@ -165,6 +165,7 @@
 #include "QueryGroupClause.hpp"
 #include "QueryFromClause.hpp"
 #include "QueryContinuationClause.hpp"
+#include "QueryJoinClause.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -580,6 +581,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitQueryContinuationClause(QueryContinuationClause* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitQueryJoinClause(QueryJoinClause* node) {
         VisitChildren(node);
     }
 };
