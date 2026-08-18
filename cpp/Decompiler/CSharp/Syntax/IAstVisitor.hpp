@@ -428,6 +428,8 @@ class VariableDeclarationStatement;
 // `VisitAccessor`, `EnumMemberDeclaration` adds `VisitEnumMemberDeclaration`, and
 // `PropertyDeclaration` adds `VisitPropertyDeclaration`, `EventDeclaration` adds
 // `VisitEventDeclaration`, and `CustomEventDeclaration` adds `VisitCustomEventDeclaration`.
+// `ParameterDeclaration` (a direct-`AstNode` node, NOT an `EntityDeclaration` -- the next
+// in-order piece per the D277 plan) adds `VisitParameterDeclaration`.
 class EntityDeclaration;
 class DestructorDeclaration;
 class FieldDeclaration;
@@ -436,6 +438,7 @@ class EnumMemberDeclaration;
 class PropertyDeclaration;
 class EventDeclaration;
 class CustomEventDeclaration;
+class ParameterDeclaration;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -531,6 +534,7 @@ public:
     virtual void VisitPropertyDeclaration(PropertyDeclaration*) = 0;
     virtual void VisitEventDeclaration(EventDeclaration*) = 0;
     virtual void VisitCustomEventDeclaration(CustomEventDeclaration*) = 0;
+    virtual void VisitParameterDeclaration(ParameterDeclaration*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
