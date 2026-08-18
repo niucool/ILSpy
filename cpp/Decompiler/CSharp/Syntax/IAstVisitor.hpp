@@ -180,6 +180,18 @@ class ArrayCreateExpression;
 // collection); reusing the already-ported `Slots::Expression` kind as the collection kind (the
 // `ArrayInitializerExpression`/`BlockStatement` collection-kind-reuse precedent).
 class TupleExpression;
+// `NamedExpression`/`NamedArgumentExpression` are a sibling pair of sealed `Expression` nodes
+// sharing the `FixedVariableInitializer` D286 shape (a required non-nullable `string Name`
+// string-name `[Slot("Identifier")]` over a backing `NameToken` `Identifier` + a required
+// `Expression` `[Slot("Expression")]` slot) applied to the `Expression` hierarchy, with the
+// `Expression`-of-type-`Expression` name-shadowing crux (the `CastExpression` D243 precedent):
+// `named_expression ::= identifier '=' expression` (object initializers, anonymous-object
+// members, named attribute arguments) and `named_argument_expression ::= identifier ':'
+// expression` (named method/attribute arguments); the two differ only in the grammatical role
+// of the `Expression` slot and the visit-method name, reusing the already-ported `Slots::Identifier`/
+// `Slots::Expression` kinds with no new `Slots` constant.
+class NamedExpression;
+class NamedArgumentExpression;
 // `ContinueStatement`/`BreakStatement`/`YieldBreakStatement` are the first concrete C# AST
 // statement nodes -- the cleanest leaf statements (no `[Slot]` children, no members), the
 // start of the Statement hierarchy (a leaf with no slots; `BreakStatement`/`YieldBreakStatement`
@@ -677,6 +689,8 @@ public:
     virtual void VisitObjectCreateExpression(ObjectCreateExpression*) = 0;
     virtual void VisitArrayCreateExpression(ArrayCreateExpression*) = 0;
     virtual void VisitTupleExpression(TupleExpression*) = 0;
+    virtual void VisitNamedExpression(NamedExpression*) = 0;
+    virtual void VisitNamedArgumentExpression(NamedArgumentExpression*) = 0;
     virtual void VisitContinueStatement(ContinueStatement*) = 0;
     virtual void VisitBreakStatement(BreakStatement*) = 0;
     virtual void VisitYieldBreakStatement(YieldBreakStatement*) = 0;
