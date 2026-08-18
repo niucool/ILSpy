@@ -81,6 +81,7 @@
 #include <limits>
 #include <optional>
 #include <ostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>

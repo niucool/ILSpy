@@ -80,6 +80,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -107,6 +108,12 @@ class InsertRequiredSpacesDecorator : public DecoratingTokenWriter {
 public:
 	explicit InsertRequiredSpacesDecorator(TokenWriter* writer)
 		: DecoratingTokenWriter(writer) {}
+
+	// The owning ctor (used by the `TokenWriter::Create` / `CreateWriterThatSetsLocationsInAST`
+	// factories that compose a stack and return a single owning handle to the top) -- takes
+	// ownership of the wrapped writer via the `DecoratingTokenWriter` owning-mode base ctor.
+	explicit InsertRequiredSpacesDecorator(std::unique_ptr<TokenWriter> writer)
+		: DecoratingTokenWriter(std::move(writer)) {}
 
 	void StartNode(AstNode* node) override { DecoratingTokenWriter::StartNode(node); }
 	void EndNode(AstNode* node) override { DecoratingTokenWriter::EndNode(node); }

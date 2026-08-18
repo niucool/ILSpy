@@ -98,6 +98,7 @@
 #ifndef ILSPY_DECOMPILER_CSHARP_OUTPUTVISITOR_INSERTMISSINGTOKENSDECORATOR_HPP
 #define ILSPY_DECOMPILER_CSHARP_OUTPUTVISITOR_INSERTMISSINGTOKENSDECORATOR_HPP
 
+#include <memory>
 #include <stack>
 #include <unordered_set>
 #include <vector>
@@ -150,6 +151,16 @@ public:
 	// empty vector (the root list).
 	explicit InsertMissingTokensDecorator(TokenWriter* writer, ILocatable* locationProvider)
 		: DecoratingTokenWriter(writer), locationProvider_(locationProvider) {}
+
+	// The owning ctor (used by the `TokenWriter::CreateWriterThatSetsLocationsInAST` factory
+	// that composes a stack and returns a single owning handle to the top) -- takes ownership of
+	// the wrapped writer via the `DecoratingTokenWriter` owning-mode base ctor. The
+	// `locationProvider` is read-only after construction (the decorator never mutates it), so a
+	// non-owning pointer is faithful; the caller passes the same writer's `ILocatable` subobject
+	// (the factory grabs it before moving the writer into the decorator, so the pointer stays
+	// valid for the decorator's lifetime -- the owned writer lives inside the decorator).
+	explicit InsertMissingTokensDecorator(std::unique_ptr<TokenWriter> writer, ILocatable* locationProvider)
+		: DecoratingTokenWriter(std::move(writer)), locationProvider_(locationProvider) {}
 
 	// The C# `public override void StartNode(AstNode node)` -- a non-trivia node is pushed onto
 	// the stack (its children will be collected in a fresh list) and marked as awaiting its start

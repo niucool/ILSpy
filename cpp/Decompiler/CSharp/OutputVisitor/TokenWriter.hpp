@@ -77,6 +77,8 @@
 #ifndef ILSPY_DECOMPILER_CSHARP_OUTPUTVISITOR_TOKENWRITER_HPP
 #define ILSPY_DECOMPILER_CSHARP_OUTPUTVISITOR_TOKENWRITER_HPP
 
+#include <iosfwd>     // std::ostream (the factory signatures take it by pointer)
+#include <memory>     // std::unique_ptr (the factory return type)
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -153,6 +155,23 @@ public:
 	// string? argument)` -- a preprocessor directive (the `PreProcessorDirectiveType` kind
 	// plus an optional argument text; `std::nullopt` is the C# `null` argument).
 	virtual void WritePreProcessorDirective(PreProcessorDirectiveType type, std::optional<std::string_view> argument) = 0;
+
+	// The C# `public static TokenWriter Create(TextWriter writer, string indentation = "\t")` /
+	// `CreateWriterThatSetsLocationsInAST` / `InsertRequiredSpaces` /
+	// `WrapInWriterThatSetsLocationsInAST` (ITokenWriter.cs) -- the four static factories that
+	// compose the concrete writer + decorator stacks the output visitor drives. The C# relies on
+	// the GC to own the whole stack and returns the top; the C++ port returns a
+	// `std::unique_ptr<TokenWriter>` owning handle so the caller owns the stack it composes (the
+	// two `Create` factories make the outermost decorator OWN its inner writer so a single handle
+	// owns every layer; the two `Insert`/`Wrap` factories wrap a CALLER-OWNED writer and own only the
+	// new decorator, faithful to the C# where the caller keeps the original alive). The definitions
+	// live out-of-line in `TokenWriter.cpp` (they reference the not-yet-included concrete
+	// `TextWriterTokenWriter` / `InsertRequiredSpacesDecorator` / `InsertMissingTokensDecorator`
+	// types, which would form an include cycle if pulled into this interface header).
+	static std::unique_ptr<TokenWriter> Create(std::ostream* writer, std::string indentation = "\t");
+	static std::unique_ptr<TokenWriter> CreateWriterThatSetsLocationsInAST(std::ostream* writer, std::string indentation = "\t");
+	static std::unique_ptr<TokenWriter> InsertRequiredSpaces(TokenWriter* writer);
+	static std::unique_ptr<TokenWriter> WrapInWriterThatSetsLocationsInAST(TokenWriter* writer);
 };
 
 // The C# `public interface ILocatable` -- a writer (or decorator) that can report the current
@@ -202,6 +221,26 @@ public:
 	void WritePreProcessorDirective(PreProcessorDirectiveType type, std::optional<std::string_view> argument) override { decoratedWriter_->WritePreProcessorDirective(type, argument); }
 
 protected:
+	// The owning-mode ctor (used by the `TokenWriter` static factory functions that compose a
+	// stack and return a single owning handle to the top). Takes ownership of `writer`; the
+	// non-owning `decoratedWriter_` pointer is set to the owned writer so the forwarding overrides
+	// above work unchanged. The C# relies on the GC to own the whole stack; the C++ port makes the
+	// outermost decorator own its inner writer so a single `std::unique_ptr<TokenWriter>` handle
+	// owns the whole stack (destroying it destroys every layer, the faithful equivalent of the
+	// GC collecting the stack from the top).
+	explicit DecoratingTokenWriter(std::unique_ptr<TokenWriter> writer)
+		: ownedWriter_(std::move(writer)), decoratedWriter_(ownedWriter_.get()) {
+		if (decoratedWriter_ == nullptr) {
+			throw std::invalid_argument("DecoratingTokenWriter: decoratedWriter must not be null");
+		}
+	}
+
+	// `ownedWriter_` is declared BEFORE `decoratedWriter_` so the owning ctor's initializer list
+	// (`ownedWriter_(...), decoratedWriter_(ownedWriter_.get())`) initializes in declaration
+	// order (C++ initializes members in declaration order, not initializer-list order); the
+	// non-owning ctor leaves it empty (it default-constructs first, then `decoratedWriter_` is
+	// set from the raw pointer).
+	std::unique_ptr<TokenWriter> ownedWriter_;
 	TokenWriter* decoratedWriter_;
 };
 
