@@ -122,6 +122,7 @@
 #include "TypeParameterDeclaration.hpp"
 #include "Constraint.hpp"
 #include "MethodDeclaration.hpp"
+#include "ExtensionDeclaration.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -411,6 +412,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitMethodDeclaration(MethodDeclaration* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitExtensionDeclaration(ExtensionDeclaration* node) {
         VisitChildren(node);
     }
 };

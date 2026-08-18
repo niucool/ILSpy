@@ -226,6 +226,39 @@ private:
     enum Modifiers modifiers_ = ::ILSpy::Decompiler::CSharp::Syntax::Modifiers::None;
 };
 
+// The `TypeMember` kind -- a collection of `EntityDeclaration` (the member declarations nested in
+// a type body: `TypeDeclaration.Members`/`ExtensionDeclaration.Members`, an
+// `AstNodeCollection<EntityDeclaration>`). The first owning node is `ExtensionDeclaration`; the
+// not-yet-ported `TypeDeclaration` will reuse it for its `Members` collection.
+//
+// Defined HERE (in `EntityDeclaration.hpp`, after the `EntityDeclaration` class) rather than in
+// `Slots.hpp` because `CSharpSlotInfoT<EntityDeclaration>` needs `EntityDeclaration` complete (the
+// `dynamic_cast<const EntityDeclaration*>` is-a test in the ctor), and `EntityDeclaration` is the
+// abstract base whose header includes `Slots.hpp` (this header includes `Slots.hpp` for the base's
+// `GetChildren`/`MatchAttributesAndModifiers` references to `&Slots::AttributeSection`). Placing the
+// kind in `Slots.hpp` would form a circular include: `Slots.hpp` would have to include
+// `EntityDeclaration.hpp` (for the complete `EntityDeclaration`), but `EntityDeclaration.hpp`
+// includes `Slots.hpp`, and with `Slots.hpp`'s guard set those definitions would not be visible
+// where `EntityDeclaration`'s class body needs them. After the class both `CSharpSlotInfoT` (visible
+// via the `Slots.hpp` include) and `EntityDeclaration` are complete, so the kind defines cleanly.
+// The `inline` variable still has external linkage and one address across translation units (the
+// C++17 `inline` guarantee), preserving the pointer-identity comparison `node.Slot.Kind ==
+// &Slots::TypeMember` the slot system relies on. This is the `Slots::Attribute` D241 /
+// `Slots::AttributeSection` D242 / `Slots::Parameter` D279 / `Slots::Variable` D267 /
+// `Slots::ConstructorInitializer` D281 / `Slots::TypeParameter`/`Slots::Constraint` D284
+// cycle-breaking precedent applied to an `EntityDeclaration`-typed (abstract-base) collection kind
+// -- the first such kind whose element type is the `EntityDeclaration` base itself (the
+// `Slots::Statement` D256 / `Slots::VariableDesignation` D264 abstract-base-element-type precedent,
+// but cycle-broken because this base's header includes `Slots.hpp` -- unlike `Statement.hpp` /
+// `VariableDesignation.hpp` which do not). The shared constant is constructed
+// non-collection/non-optional (`{"TypeMember", false, nullptr, false}`); the per-node `MembersSlot`
+// on the owning node carries the `IsCollection` flag. The kind name `TypeMember` collides with no
+// class in the `Syntax` namespace (there is `EntityDeclaration`, not `TypeMember`), so no
+// elaborated-type-specifier is needed.
+namespace Slots {
+inline const CSharpSlotInfoT<EntityDeclaration> TypeMember{"TypeMember", false, nullptr, false};
+} // namespace Slots
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_ENTITYDECLARATION_HPP
