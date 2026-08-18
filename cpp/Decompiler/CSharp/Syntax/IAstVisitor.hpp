@@ -569,6 +569,16 @@ class UsingAliasDeclaration;
 // rewriting yields `VisitTupleType` (NOT `VisitTupleAstType`).
 class TupleTypeElement;
 class TupleAstType;
+// The `DelegateDeclaration` (the `delegate_declaration ::= attribute_section* modifier*
+// 'delegate' ( 'ref' 'readonly'? )? type identifier type_parameter* '(' parameter* ')'
+// constraint*` -- C# grammar 21.2): a sealed `EntityDeclaration` with four collections
+// (`Attributes`/`TypeParameters`/`Parameters`/`Constraints`) plus two singles
+// (`ReturnType`/`NameToken`), the `MethodDeclaration` D284 shape with two trailing singles instead
+// of four (no `PrivateImplementationType`, no `Body`), reusing all already-ported `Slots` kinds
+// (`AttributeSection`/`Type`/`Identifier`/`TypeParameter`/`Parameter`/`Constraint`). The next
+// in-order Phase-5 piece per the D286 plan (the remaining GeneralScope `EntityDeclaration`
+// whose dependencies are all ported).
+class DelegateDeclaration;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -682,6 +692,7 @@ public:
     virtual void VisitUsingAliasDeclaration(UsingAliasDeclaration*) = 0;
     virtual void VisitTupleTypeElement(TupleTypeElement*) = 0;
     virtual void VisitTupleType(TupleAstType*) = 0;
+    virtual void VisitDelegateDeclaration(DelegateDeclaration*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

@@ -132,6 +132,7 @@
 #include "UsingAliasDeclaration.hpp"
 #include "TupleTypeElement.hpp"
 #include "TupleAstType.hpp"
+#include "DelegateDeclaration.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -451,6 +452,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitTupleType(TupleAstType* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitDelegateDeclaration(DelegateDeclaration* node) {
         VisitChildren(node);
     }
 };
