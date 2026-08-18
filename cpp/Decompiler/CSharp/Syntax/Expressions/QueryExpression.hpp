@@ -206,6 +206,23 @@ private:
     AstNodeCollectionT<QueryClause> clauses_;
 };
 
+// The `Slots::PrecedingQuery` kind -- a `CSharpSlotInfoT<QueryExpression>` for the
+// `QueryContinuationClause.PrecedingQuery` single-slot position. CYCLE-BROKEN into
+// `QueryExpression.hpp` (NOT `Slots.hpp`) because `QueryExpression.hpp` includes `Slots.hpp`
+// for its own per-node `ClausesSlot` (referencing `Slots::Clause`), so a `QueryExpression`-typed
+// kind cannot live in `Slots.hpp` (including `QueryExpression.hpp` from `Slots.hpp` would form a
+// circular include -- the `Slots::Attribute` D241 / `Slots::AttributeSection` D242 /
+// `Slots::Initializer` D251 / `Slots::Variable` D267 cycle-breaking precedent applied to a
+// `QueryExpression`-typed single kind). The `QueryExpression` class is complete at this point,
+// and `CSharpSlotInfoT` is visible via the `Slots.hpp` include above. The kind name
+// `PrecedingQuery` collides with no class in the `Syntax` namespace, so no
+// elaborated-type-specifier is needed. A `C++17` `inline` variable has external linkage and one
+// address across translation units, preserving the pointer-identity comparison the slot system
+// relies on.
+namespace Slots {
+inline const CSharpSlotInfoT<QueryExpression> PrecedingQuery{"PrecedingQuery", false, nullptr, false};
+} // namespace Slots
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_EXPRESSIONS_QUERYEXPRESSION_HPP

@@ -563,6 +563,29 @@ inline const CSharpSlotInfoT<InterpolatedStringContent> Content{"Content", false
 // is a collection slot, the `Slots.Content`/`Slots.Ordering` precedent).
 inline const CSharpSlotInfoT<QueryClause> Clause{"Clause", false, nullptr, false};
 
+// The `Projection` operand position (a single `Expression` child). Unique to
+// `QueryGroupClause.Projection` among the ported nodes. A `CSharpSlotInfoT<Expression>` (the
+// element type is the `Expression` abstract base, complete via the `Expression.hpp` include
+// above). `Expression.hpp` does NOT include `Slots.hpp` (the abstract base has no per-node
+// slot statics -- the `Slots.Condition`/`Slots.Content`/`Slots.Clause` precedent), so this kind
+// lives HERE in `Slots.hpp` (no include cycle). The kind name `Projection` collides with no
+// class in the `Syntax` namespace, so no elaborated-type-specifier is needed for the kind
+// name. DEFINED AFTER the `Slots.Expression` variable above, so the element type is qualified
+// (`::ILSpy::Decompiler::CSharp::Syntax::Expression`) to avoid resolving to that variable (the
+// `Expression`/`Condition`/`AdditionalArraySpecifier` collision precedent).
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> Projection{"Projection", false, nullptr, false};
+
+// The `Key` operand position (a single `Expression` child). Unique to
+// `QueryGroupClause.Key` among the ported nodes. A `CSharpSlotInfoT<Expression>` (the element
+// type is the `Expression` abstract base, complete via the `Expression.hpp` include above).
+// `Expression.hpp` does NOT include `Slots.hpp`, so this kind lives HERE in `Slots.hpp` (no
+// include cycle). The kind name `Key` collides with no class in the `Syntax` namespace, so no
+// elaborated-type-specifier is needed for the kind name. DEFINED AFTER the `Slots.Expression`
+// variable above, so the element type is qualified
+// (`::ILSpy::Decompiler::CSharp::Syntax::Expression`) to avoid resolving to that variable (the
+// `Expression`/`Condition`/`Projection` collision precedent).
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> Key{"Key", false, nullptr, false};
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_SLOTS_HPP

@@ -763,15 +763,20 @@ class InterpolatedStringExpression;
 // `QueryOrderClause.Orderings` collection (it derives DIRECTLY from `AstNode`, NOT
 // `QueryClause`); `QueryExpression` is the sealed `Expression` whose sole slot is the
 // `Clauses` collection; `QueryWhereClause`/`QuerySelectClause`/`QueryOrderClause` are the
-// first three concrete clauses ported this iteration (the `where`/`select`/`orderby`
-// productions). The remaining clauses (`QueryContinuationClause`/`QueryFromClause`/
-// `QueryLetClause`/`QueryGroupClause`/`QueryJoinClause`) land in the next iteration.
+// first three concrete clauses; `QueryLetClause`/`QueryGroupClause`/`QueryFromClause`/
+// `QueryContinuationClause` are the four string-name-[Slot] and multi-slot clauses (the
+// `let`/`group`/`from`/`into` productions). The remaining complex clause
+// (`QueryJoinClause` with 6 slots + 5 new `Slots` kinds) lands in the next iteration.
 class QueryClause;
 class QueryOrdering;
 class QueryExpression;
 class QueryWhereClause;
 class QuerySelectClause;
 class QueryOrderClause;
+class QueryLetClause;
+class QueryGroupClause;
+class QueryFromClause;
+class QueryContinuationClause;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -913,6 +918,10 @@ public:
     virtual void VisitQueryWhereClause(QueryWhereClause*) = 0;
     virtual void VisitQuerySelectClause(QuerySelectClause*) = 0;
     virtual void VisitQueryOrderClause(QueryOrderClause*) = 0;
+    virtual void VisitQueryLetClause(QueryLetClause*) = 0;
+    virtual void VisitQueryGroupClause(QueryGroupClause*) = 0;
+    virtual void VisitQueryFromClause(QueryFromClause*) = 0;
+    virtual void VisitQueryContinuationClause(QueryContinuationClause*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

@@ -161,6 +161,10 @@
 #include "QueryWhereClause.hpp"
 #include "QuerySelectClause.hpp"
 #include "QueryOrderClause.hpp"
+#include "QueryLetClause.hpp"
+#include "QueryGroupClause.hpp"
+#include "QueryFromClause.hpp"
+#include "QueryContinuationClause.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -564,6 +568,18 @@ public:
         VisitChildren(node);
     }
     virtual void VisitQueryOrderClause(QueryOrderClause* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitQueryLetClause(QueryLetClause* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitQueryGroupClause(QueryGroupClause* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitQueryFromClause(QueryFromClause* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitQueryContinuationClause(QueryContinuationClause* node) {
         VisitChildren(node);
     }
 };
