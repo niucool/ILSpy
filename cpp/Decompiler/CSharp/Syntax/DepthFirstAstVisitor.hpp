@@ -81,6 +81,7 @@
 #include "Expressions/OutVarDeclarationExpression.hpp"
 #include "Expressions/WithInitializerExpression.hpp"
 #include "Expressions/UndocumentedExpression.hpp"
+#include "Expressions/StackAllocExpression.hpp"
 #include "Statements/ContinueStatement.hpp"
 #include "Statements/BreakStatement.hpp"
 #include "Statements/YieldBreakStatement.hpp"
@@ -310,6 +311,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitUndocumentedExpression(UndocumentedExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitStackAllocExpression(StackAllocExpression* node) {
         VisitChildren(node);
     }
     virtual void VisitContinueStatement(ContinueStatement* node) {

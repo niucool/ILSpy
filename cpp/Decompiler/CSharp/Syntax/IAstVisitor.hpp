@@ -223,6 +223,16 @@ class WithInitializerExpression;
 // `Expression` hierarchy, reusing the already-ported `Slots::Argument` kind with no new
 // `Slots` constant.
 class UndocumentedExpression;
+// `StackAllocExpression` is the `stackalloc_expression ::= 'stackalloc' type '[' expression
+// ']' | 'stackalloc' type? '[' expression? ']' array_initializer` shape (C# grammar section
+// 12.8.22) -- a sealed `Expression` with three single, NULLABLE `[Slot]` children (`Type`
+// `AstType?`, `CountExpression` `Expression?`, `Initializer` `ArrayInitializerExpression?`),
+// no scalar, plus the `StackallocKeyword` const string. The `WithInitializerExpression` D300
+// two-required-single-slot shape generalized to three NULLABLE singles, reusing the already-
+// ported `Slots::Type`/`Slots::Expression`/`Slots::Initializer` kinds with no new `Slots`
+// constant. No name-shadowing crux (the `CountExpression` property name differs from its
+// `Expression` type, so no elaborated `class Expression` specifier is needed).
+class StackAllocExpression;
 // `ContinueStatement`/`BreakStatement`/`YieldBreakStatement` are the first concrete C# AST
 // statement nodes -- the cleanest leaf statements (no `[Slot]` children, no members), the
 // start of the Statement hierarchy (a leaf with no slots; `BreakStatement`/`YieldBreakStatement`
@@ -726,6 +736,7 @@ public:
     virtual void VisitOutVarDeclarationExpression(OutVarDeclarationExpression*) = 0;
     virtual void VisitWithInitializerExpression(WithInitializerExpression*) = 0;
     virtual void VisitUndocumentedExpression(UndocumentedExpression*) = 0;
+    virtual void VisitStackAllocExpression(StackAllocExpression*) = 0;
     virtual void VisitContinueStatement(ContinueStatement*) = 0;
     virtual void VisitBreakStatement(BreakStatement*) = 0;
     virtual void VisitYieldBreakStatement(YieldBreakStatement*) = 0;
