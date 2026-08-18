@@ -309,6 +309,23 @@ class ForStatement;
 // visit-method-name default yields `VisitSingleVariableDesignation`/`VisitParenthesizedVariableDesignation`.
 class SingleVariableDesignation;
 class ParenthesizedVariableDesignation;
+// `ForeachStatement` is the `foreach_statement ::= 'await'? 'foreach' '(' type
+// variable_designation 'in' expression ')' statement` node (C# grammar 13.9.5.1) -- the next
+// in-order Phase-5 piece per the D263 plan (now unblocked by the `VariableDesignation` hierarchy
+// just ported). A sealed `Statement` with FOUR single, REQUIRED (non-nullable) `[Slot]` children --
+// a `VariableType` `AstType` (the element type), a `VariableDesignation` `VariableDesignation`
+// (the loop variable or deconstruction), an `InExpression` `Expression` (the collection), and an
+// `EmbeddedStatement` `Statement` (the loop body) -- plus an `IsAsync` bool scalar (the leading
+// `await`). It reuses the already-ported `Slots::Type` (by `Attribute`),
+// `Slots::VariableDesignation` (by `ParenthesizedVariableDesignation`), `Slots::Expression` (by
+// `UnaryOperatorExpression`), and `Slots::EmbeddedStatement` (by `WhileStatement`) kinds with
+// no new `Slots` constant; the `AwaitKeyword` const aliases `UnaryOperatorExpression::AwaitKeyword`
+// (the `UsingStatement` D262 precedent). The `VariableDesignation()` slot accessor shadows the
+// `VariableDesignation` class (the `Expression()`-of-type-`Expression` D231 crux applied to a
+// `VariableDesignation`-typed slot accessor), so the port uses the elaborated
+// `class VariableDesignation` specifier; the other three slot accessors do not shadow their
+// element types.
+class ForeachStatement;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -388,6 +405,7 @@ public:
     virtual void VisitForStatement(ForStatement*) = 0;
     virtual void VisitSingleVariableDesignation(SingleVariableDesignation*) = 0;
     virtual void VisitParenthesizedVariableDesignation(ParenthesizedVariableDesignation*) = 0;
+    virtual void VisitForeachStatement(ForeachStatement*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

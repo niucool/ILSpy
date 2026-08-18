@@ -96,6 +96,7 @@
 #include "Statements/LockStatement.hpp"
 #include "Statements/UsingStatement.hpp"
 #include "Statements/ForStatement.hpp"
+#include "Statements/ForeachStatement.hpp"
 #include "SingleVariableDesignation.hpp"
 #include "ParenthesizedVariableDesignation.hpp"
 
@@ -315,6 +316,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitParenthesizedVariableDesignation(ParenthesizedVariableDesignation* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitForeachStatement(ForeachStatement* node) {
         VisitChildren(node);
     }
 };
