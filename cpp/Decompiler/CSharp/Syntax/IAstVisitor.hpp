@@ -257,6 +257,20 @@ class AnonymousTypeCreateExpression;
 // Expression node whose dependencies are all ported). Only `LambdaExpression` is forward-
 // declared here (no ported derived classes).
 class LambdaExpression;
+// `AnonymousMethodExpression` is the `anonymous_method_expression ::= 'async'? 'delegate'
+// parameter* block` shape (C# grammar 12.22.1) -- a sealed `Expression` with one collection
+// (`Parameters` `ParameterDeclaration`, non-incremental -- the node's only collection but NOT
+// the last slot, `Body` trails it) plus a trailing single REQUIRED `BlockStatement` `Body` (typed
+// the concrete `BlockStatement` because the production takes ONLY a `block`, unlike
+// `LambdaExpression` whose `Body` is the abstract `AstNode` base) plus an `IsAsync` bool scalar,
+// plus the `DelegateKeyword`/`AsyncModifier` const strings (the latter ALIASED to the canonical
+// `LambdaExpression.AsyncModifier` source). The `Accessor` D274 collection-then-required-single-
+// `BlockStatement`-body shape (MINUS the `Attributes` collection and the `EntityDeclaration` base
+// machinery) applied to the `Expression` hierarchy -- structurally a simplified `LambdaExpression`
+// D305 (no `Attributes` collection, a concrete `BlockStatement` body). The next in-order Phase-5
+// piece per the D305 plan (a remaining Expression node whose dependencies are all ported). Only
+// `AnonymousMethodExpression` is forward-declared here (no ported derived classes).
+class AnonymousMethodExpression;
 // `ContinueStatement`/`BreakStatement`/`YieldBreakStatement` are the first concrete C# AST
 // statement nodes -- the cleanest leaf statements (no `[Slot]` children, no members), the
 // start of the Statement hierarchy (a leaf with no slots; `BreakStatement`/`YieldBreakStatement`
@@ -834,6 +848,7 @@ public:
     virtual void VisitDeclarationExpression(DeclarationExpression*) = 0;
     virtual void VisitAnonymousTypeCreateExpression(AnonymousTypeCreateExpression*) = 0;
     virtual void VisitLambdaExpression(LambdaExpression*) = 0;
+    virtual void VisitAnonymousMethodExpression(AnonymousMethodExpression*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
