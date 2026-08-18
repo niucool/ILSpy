@@ -701,6 +701,32 @@ private:
     BlockStatement* body_ = nullptr;
 };
 
+// The `MethodDeclaration` kind -- a single REQUIRED `MethodDeclaration` child (the wrapped
+// method declaration of a `LocalFunctionDeclarationStatement.Declaration`, the
+// `local_function_declaration ::= method_declaration` production). Unique to
+// `LocalFunctionDeclarationStatement` among the ported nodes. A
+// `CSharpSlotInfoT<MethodDeclaration>` (the element type is the concrete `MethodDeclaration`
+// node). Defined HERE (in MethodDeclaration.hpp, after the `MethodDeclaration` class) for the
+// cycle-breaking reason: MethodDeclaration.hpp includes Slots.hpp for its own per-node slot
+// statics (the `ReturnTypeSlot`/`NameTokenSlot`/... referencing `&Slots::Type`/`&Slots::Identifier`/
+// ...), so a `CSharpSlotInfoT<MethodDeclaration>` kind cannot live in Slots.hpp -- a circular
+// include -- and is defined here where both `CSharpSlotInfoT` (visible via the Slots.hpp include)
+// and `MethodDeclaration` (the class just defined above) are complete (the `Slots::Attribute`
+// D241 / `Slots::Body` D260 / `Slots::Variable` D267 precedent). The `inline` variable has
+// external linkage and one address across translation units (the C++17 `inline` guarantee),
+// preserving the pointer-identity comparison `node.Slot.Kind == &Slots::MethodDeclaration` the
+// slot system relies on. The kind name `MethodDeclaration` collides with the `MethodDeclaration`
+// CLASS in the enclosing `Syntax` namespace, but the variable being declared is not in scope for
+// its own declarator's type, so the template argument `MethodDeclaration` resolves to the class
+// (the `Slots::Attribute` D241 / `Slots::Constraint` D283 same-name-kind precedent); no
+// elaborated-type-specifier is needed. The shared constant is constructed
+// non-collection/non-optional (`{"MethodDeclaration", false, nullptr, false}`); the per-node
+// `DeclarationSlot` on `LocalFunctionDeclarationStatement` carries the `IsOptional=false` flag
+// (the `Declaration` is a required slot).
+namespace Slots {
+inline const CSharpSlotInfoT<MethodDeclaration> MethodDeclaration{"MethodDeclaration", false, nullptr, false};
+} // namespace Slots
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_METHODDECLARATION_HPP

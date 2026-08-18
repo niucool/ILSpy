@@ -532,6 +532,13 @@ class FixedVariableInitializer;
 // finds no `NameToken` slot, so `Name()` returns empty).
 class FixedFieldDeclaration;
 
+// The `LocalFunctionDeclarationStatement` (the `local_function_declaration ::=
+// method_declaration` node, C# grammar 13.6.4) -- a sealed `Statement` wrapping a single REQUIRED
+// `MethodDeclaration` `Declaration` child (the `CheckedStatement` D260 single-required-slot
+// shape with a `MethodDeclaration` child). It adds the new cycle-broken `Slots::MethodDeclaration`
+// kind (in `MethodDeclaration.hpp`); it reuses no other Slots constant.
+class LocalFunctionDeclarationStatement;
+
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
 // on it; `CSharpOutputVisitor` (the pretty-printer) implements it. An abstract base (a
@@ -637,6 +644,7 @@ public:
     virtual void VisitExtensionDeclaration(ExtensionDeclaration*) = 0;
     virtual void VisitFixedVariableInitializer(FixedVariableInitializer*) = 0;
     virtual void VisitFixedFieldDeclaration(FixedFieldDeclaration*) = 0;
+    virtual void VisitLocalFunctionDeclarationStatement(LocalFunctionDeclarationStatement*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

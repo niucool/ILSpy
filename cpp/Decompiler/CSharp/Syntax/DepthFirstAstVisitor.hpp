@@ -125,6 +125,7 @@
 #include "ExtensionDeclaration.hpp"
 #include "FixedVariableInitializer.hpp"
 #include "FixedFieldDeclaration.hpp"
+#include "Statements/LocalFunctionDeclarationStatement.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -423,6 +424,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitFixedFieldDeclaration(FixedFieldDeclaration* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitLocalFunctionDeclarationStatement(LocalFunctionDeclarationStatement* node) {
         VisitChildren(node);
     }
 };
