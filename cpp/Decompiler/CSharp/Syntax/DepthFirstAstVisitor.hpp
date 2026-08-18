@@ -151,6 +151,7 @@
 #include "Expressions/AnonymousMethodExpression.hpp"
 #include "Expressions/SwitchExpression.hpp"
 #include "SwitchExpressionSection.hpp"
+#include "Expressions/RecursivePatternExpression.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -527,6 +528,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitSwitchExpression(SwitchExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitRecursivePatternExpression(RecursivePatternExpression* node) {
         VisitChildren(node);
     }
 };

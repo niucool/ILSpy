@@ -513,6 +513,26 @@ inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> Pa
 // carries `IsOptional=false` (the `[Slot("SwitchExpressionBody")]` is a required single slot).
 inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> SwitchExpressionBody{"SwitchExpressionBody", false, nullptr, false};
 
+// The `SubPattern` kind -- a collection of `Expression` (the nested pattern list of a
+// `RecursivePatternExpression.SubPatterns`, an `AstNodeCollection<Expression>` -- the `pattern*`
+// inside the `{...}`/`(...)` of a recursive pattern; the C# AST models the pattern DSL as
+// `Expression` nodes). Unique to `RecursivePatternExpression` among the ported nodes. A
+// `CSharpSlotInfoT<Expression>` (the element type is the `Expression` abstract base, complete
+// via the `Expression.hpp` include above). `Expression.hpp` does NOT include `Slots.hpp` (the
+// abstract base has no per-node slot statics -- the `Slots.Expression`/`Slots.Argument`/
+// `Slots.Pattern` precedent), so this kind lives HERE in `Slots.hpp` (no include cycle). Defined
+// AFTER the `Slots::Expression` *variable*, so the element type is qualified
+// (`::ILSpy::Decompiler::CSharp::Syntax::Expression`) to avoid resolving to that variable (the
+// `Expression`/`Condition`/`TargetExpression`/`Argument`/`Pattern` collision precedent: an
+// unqualified name shared with a prior `Slots` variable resolves to the variable, not the
+// class, since `Slots` is a namespace and the variable is in scope). The kind name `SubPattern`
+// collides with no class in the `Syntax` namespace, so no elaborated-type-specifier is needed
+// for the kind name. The shared constant is constructed non-collection/non-optional; the
+// per-node `SubPatternsSlot` on `RecursivePatternExpression` carries the `IsCollection` flag
+// (the `[Slot("SubPattern")]` is a collection slot, the `Slots.TypeArgument`/`Slots.Argument`
+// precedent).
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> SubPattern{"SubPattern", false, nullptr, false};
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_SLOTS_HPP

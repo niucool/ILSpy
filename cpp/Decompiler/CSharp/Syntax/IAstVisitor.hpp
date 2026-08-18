@@ -286,6 +286,17 @@ class SwitchExpressionSection;
 // shadows the `Expression` base type (the `CastExpression` D243 name-shadowing crux). Only
 // `SwitchExpression` is forward-declared here (no ported derived classes).
 class SwitchExpression;
+// `RecursivePatternExpression` is the `recursive_pattern ::= type? '{' pattern* '}'
+// variable_designation?` / `type? '(' pattern* ')' variable_designation?` node (C# grammar
+// 11.2.5/11.2.6) -- a sealed `Expression` with a NULLABLE `AstType` `Type` single slot, a
+// `SubPatterns` `AstNodeCollection<Expression>` collection, a NULLABLE `VariableDesignation`
+// `Designation` trailing single slot, and an `IsPositional` bool scalar: the
+// `ObjectCreateExpression` D251 single + non-incremental collection + trailing-nullable-single
+// shape with the leading single nullable and a bool scalar added. No name-shadowing crux (the
+// `Type`/`SubPatterns`/`Designation`/`IsPositional` accessors do not collide with any class in
+// the `Syntax` namespace). Only `RecursivePatternExpression` is forward-declared here (no
+// ported derived classes).
+class RecursivePatternExpression;
 // `ContinueStatement`/`BreakStatement`/`YieldBreakStatement` are the first concrete C# AST
 // statement nodes -- the cleanest leaf statements (no `[Slot]` children, no members), the
 // start of the Statement hierarchy (a leaf with no slots; `BreakStatement`/`YieldBreakStatement`
@@ -866,6 +877,7 @@ public:
     virtual void VisitAnonymousMethodExpression(AnonymousMethodExpression*) = 0;
     virtual void VisitSwitchExpressionSection(SwitchExpressionSection*) = 0;
     virtual void VisitSwitchExpression(SwitchExpression*) = 0;
+    virtual void VisitRecursivePatternExpression(RecursivePatternExpression*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
