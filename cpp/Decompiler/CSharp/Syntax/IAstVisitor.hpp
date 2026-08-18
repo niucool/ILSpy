@@ -192,6 +192,13 @@ class TupleExpression;
 // `Slots::Expression` kinds with no new `Slots` constant.
 class NamedExpression;
 class NamedArgumentExpression;
+// `ErrorExpression` is the unparseable-input placeholder leaf -- a sealed `Expression` with no
+// `[Slot]` children, its own `Location` field (a zero-width point span), and a hand-written
+// `(string error)` ctor attaching the error text as a trailing multi-line `Comment`. The
+// cleanest remaining `Expression` leaf (the `EmptyStatement` D259 own-`Location`-field shape
+// applied to the `Expression` hierarchy), reusing the inherited zero-child slot defaults and a
+// type-only `DoMatch` (the `NullReferenceExpression`/`BreakStatement` precedent).
+class ErrorExpression;
 // `ContinueStatement`/`BreakStatement`/`YieldBreakStatement` are the first concrete C# AST
 // statement nodes -- the cleanest leaf statements (no `[Slot]` children, no members), the
 // start of the Statement hierarchy (a leaf with no slots; `BreakStatement`/`YieldBreakStatement`
@@ -691,6 +698,7 @@ public:
     virtual void VisitTupleExpression(TupleExpression*) = 0;
     virtual void VisitNamedExpression(NamedExpression*) = 0;
     virtual void VisitNamedArgumentExpression(NamedArgumentExpression*) = 0;
+    virtual void VisitErrorExpression(ErrorExpression*) = 0;
     virtual void VisitContinueStatement(ContinueStatement*) = 0;
     virtual void VisitBreakStatement(BreakStatement*) = 0;
     virtual void VisitYieldBreakStatement(YieldBreakStatement*) = 0;

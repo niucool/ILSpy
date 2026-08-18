@@ -77,6 +77,7 @@
 #include "Expressions/TupleExpression.hpp"
 #include "Expressions/NamedExpression.hpp"
 #include "Expressions/NamedArgumentExpression.hpp"
+#include "Expressions/ErrorExpression.hpp"
 #include "Statements/ContinueStatement.hpp"
 #include "Statements/BreakStatement.hpp"
 #include "Statements/YieldBreakStatement.hpp"
@@ -294,6 +295,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitNamedArgumentExpression(NamedArgumentExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitErrorExpression(ErrorExpression* node) {
         VisitChildren(node);
     }
     virtual void VisitContinueStatement(ContinueStatement* node) {
