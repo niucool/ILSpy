@@ -109,6 +109,7 @@
 #include "Statements/VariableDeclarationStatement.hpp"
 #include "DestructorDeclaration.hpp"
 #include "FieldDeclaration.hpp"
+#include "Accessor.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -359,6 +360,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitFieldDeclaration(FieldDeclaration* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitAccessor(Accessor* node) {
         VisitChildren(node);
     }
 };
