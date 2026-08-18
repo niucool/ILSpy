@@ -50,6 +50,7 @@
 #include "Decompiler/CSharp/Syntax/VariableDesignation.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/InterpolatedStringContent.hpp"
+#include "Decompiler/CSharp/Syntax/QueryClause.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax::Slots {
 
@@ -549,6 +550,18 @@ inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> Su
 // `[Slot("Content")]` is a collection slot, the `Slots.TypeArgument`/`Slots.Argument`/
 // `Slots.SubPattern` precedent).
 inline const CSharpSlotInfoT<InterpolatedStringContent> Content{"Content", false, nullptr, false};
+
+// The `Clause` collection position (a `QueryClause`-typed collection). Unique to
+// `QueryExpression.Clauses` among the ported nodes. A `CSharpSlotInfoT<QueryClause>` (the
+// element type is the `QueryClause` abstract base, complete via the `QueryClause.hpp` include
+// above). `QueryClause.hpp` does NOT include `Slots.hpp` (the abstract base has no per-node
+// slot statics -- the `Slots.Statement`/`Slots.ArraySpecifier`/`Slots.Content` precedent), so
+// this kind lives HERE in `Slots.hpp` (no include cycle). The kind name `Clause` collides with
+// no class in the `Syntax` namespace, so no elaborated-type-specifier is needed for the kind
+// name. The shared constant is constructed non-collection/non-optional; the per-node
+// `ClausesSlot` on `QueryExpression` carries the `IsCollection` flag (the `[Slot("Clause")]`
+// is a collection slot, the `Slots.Content`/`Slots.Ordering` precedent).
+inline const CSharpSlotInfoT<QueryClause> Clause{"Clause", false, nullptr, false};
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 

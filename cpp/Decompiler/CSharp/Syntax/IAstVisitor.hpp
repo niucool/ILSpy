@@ -756,6 +756,22 @@ class InterpolatedStringContent;
 class Interpolation;
 class InterpolatedStringText;
 class InterpolatedStringExpression;
+// The query-expression family (`query_expression ::= query_clause+`, C# grammar 12.23.1):
+// `QueryClause` is the abstract base of every clause a `QueryExpression.Clauses` collection
+// holds (it gets NO `Visit` method -- an abstract base); `QueryOrdering` is the
+// `ordering ::= expression ( 'ascending' | 'descending' )?` element of a
+// `QueryOrderClause.Orderings` collection (it derives DIRECTLY from `AstNode`, NOT
+// `QueryClause`); `QueryExpression` is the sealed `Expression` whose sole slot is the
+// `Clauses` collection; `QueryWhereClause`/`QuerySelectClause`/`QueryOrderClause` are the
+// first three concrete clauses ported this iteration (the `where`/`select`/`orderby`
+// productions). The remaining clauses (`QueryContinuationClause`/`QueryFromClause`/
+// `QueryLetClause`/`QueryGroupClause`/`QueryJoinClause`) land in the next iteration.
+class QueryClause;
+class QueryOrdering;
+class QueryExpression;
+class QueryWhereClause;
+class QuerySelectClause;
+class QueryOrderClause;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -892,6 +908,11 @@ public:
     virtual void VisitInterpolation(Interpolation*) = 0;
     virtual void VisitInterpolatedStringText(InterpolatedStringText*) = 0;
     virtual void VisitInterpolatedStringExpression(InterpolatedStringExpression*) = 0;
+    virtual void VisitQueryOrdering(QueryOrdering*) = 0;
+    virtual void VisitQueryExpression(QueryExpression*) = 0;
+    virtual void VisitQueryWhereClause(QueryWhereClause*) = 0;
+    virtual void VisitQuerySelectClause(QuerySelectClause*) = 0;
+    virtual void VisitQueryOrderClause(QueryOrderClause*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

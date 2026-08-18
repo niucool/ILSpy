@@ -155,6 +155,12 @@
 #include "Interpolation.hpp"
 #include "InterpolatedStringText.hpp"
 #include "Expressions/InterpolatedStringExpression.hpp"
+#include "QueryClause.hpp"
+#include "QueryOrdering.hpp"
+#include "Expressions/QueryExpression.hpp"
+#include "QueryWhereClause.hpp"
+#include "QuerySelectClause.hpp"
+#include "QueryOrderClause.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -543,6 +549,21 @@ public:
         VisitChildren(node);
     }
     virtual void VisitInterpolatedStringExpression(InterpolatedStringExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitQueryOrdering(QueryOrdering* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitQueryExpression(QueryExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitQueryWhereClause(QueryWhereClause* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitQuerySelectClause(QuerySelectClause* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitQueryOrderClause(QueryOrderClause* node) {
         VisitChildren(node);
     }
 };
