@@ -456,6 +456,26 @@ class OperatorDeclaration;
 // `Slots` constant (reuses the already-ported `Slots::AttributeSection`/`Type`/
 // `PrivateImplementationType`/`Parameter`/`Body` kinds); the `OperatorType()` accessor shadows the
 // `OperatorType` enum (the `DirectionExpression.FieldDirection` D235 name-shadowing crux).
+// `ConstructorInitializer` is the `constructor_initializer ::= ':' ( 'base' | 'this' ) '(' expression* ')'`
+// node (C# grammar 15.11.1) -- the next in-order Phase-5 piece per the D280 plan (the dependency of
+// `ConstructorDeclaration.Initializer`, its sole child slot is the `Arguments` `AstNodeCollection<
+// Expression>` collection reusing `Slots::Argument`). A sealed `AstNode` (deriving DIRECTLY from the
+// `AstNode` root, NOT an `EntityDeclaration`) with a `ConstructorInitializerType` scalar (`Any`/
+// `Base`/`This`, the `Any`-wildcard `DoMatch` term) and the `Arguments` collection; the
+// `ConstructorInitializerType()` accessor shadows the `ConstructorInitializerType` enum (the D235/
+// D280 name-shadowing crux).
+// `ConstructorDeclaration` is the `constructor_declaration ::= attribute_section* modifier*
+// identifier '(' parameter* ')' constructor_initializer? ( block | ';' )` node (C# grammar 15.11.1)
+// -- the next in-order Phase-5 piece per the D280 plan (now unblocked by `ConstructorInitializer`
+// just ported and `ParameterDeclaration` D278). A sealed `EntityDeclaration` with an `Attributes`
+// collection + a required `NameToken` `Identifier` (the `DestructorDeclaration` D272
+// `[ExcludeFromMatch]` shape -- the `Name` `MatchString` term is NOT in `DoMatch`) + a `Parameters`
+// `AstNodeCollection<ParameterDeclaration>` collection + a nullable `ConstructorInitializer?`
+// `Initializer` + a nullable `BlockStatement?` `Body`; the two-collection `OperatorDeclaration` D280
+// shape with two trailing nullable singles. NO new `Slots` constant (reuses the already-ported
+// `Slots::AttributeSection`/`Identifier`/`Parameter`/`ConstructorInitializer`/`Body` kinds).
+class ConstructorInitializer;
+class ConstructorDeclaration;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -554,6 +574,8 @@ public:
     virtual void VisitParameterDeclaration(ParameterDeclaration*) = 0;
     virtual void VisitIndexerDeclaration(IndexerDeclaration*) = 0;
     virtual void VisitOperatorDeclaration(OperatorDeclaration*) = 0;
+    virtual void VisitConstructorInitializer(ConstructorInitializer*) = 0;
+    virtual void VisitConstructorDeclaration(ConstructorDeclaration*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

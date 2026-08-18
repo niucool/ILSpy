@@ -117,6 +117,8 @@
 #include "ParameterDeclaration.hpp"
 #include "IndexerDeclaration.hpp"
 #include "OperatorDeclaration.hpp"
+#include "ConstructorInitializer.hpp"
+#include "ConstructorDeclaration.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -391,6 +393,12 @@ public:
         VisitChildren(node);
     }
     virtual void VisitOperatorDeclaration(OperatorDeclaration* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitConstructorInitializer(ConstructorInitializer* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitConstructorDeclaration(ConstructorDeclaration* node) {
         VisitChildren(node);
     }
 };
