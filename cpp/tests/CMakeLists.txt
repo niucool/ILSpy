@@ -118,6 +118,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/TypeDeclaration_Test.cpp
     Decompiler/CSharp/Syntax/NamespaceDeclaration_Test.cpp
     Decompiler/CSharp/Syntax/PreProcessorDirective_Test.cpp
+    Decompiler/CSharp/Syntax/SyntaxTree_Test.cpp
     Decompiler/CSharp/Syntax/DocumentationReference_Test.cpp
     Decompiler/CSharp/Syntax/InterpolatedString_Test.cpp
     Decompiler/CSharp/Syntax/QueryExpression_Test.cpp

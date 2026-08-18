@@ -168,6 +168,7 @@
 #include "QueryFromClause.hpp"
 #include "QueryContinuationClause.hpp"
 #include "QueryJoinClause.hpp"
+#include "SyntaxTree.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -592,6 +593,12 @@ public:
         VisitChildren(node);
     }
     virtual void VisitQueryJoinClause(QueryJoinClause* node) {
+        VisitChildren(node);
+    }
+
+    // `SyntaxTree` -- the root compilation_unit node (the class name does not end in "AstType",
+    // so the generator's visit-method-name default yields `VisitSyntaxTree`).
+    virtual void VisitSyntaxTree(SyntaxTree* node) {
         VisitChildren(node);
     }
 };

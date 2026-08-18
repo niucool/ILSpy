@@ -806,6 +806,10 @@ class QueryGroupClause;
 class QueryFromClause;
 class QueryContinuationClause;
 class QueryJoinClause;
+// `SyntaxTree` is the root compilation_unit node (the last remaining GeneralScope node),
+// a sealed `AstNode` whose sole slot is the `Members` `AstNodeCollection<AstNode>` collection
+// (the compilation-unit body of top-level directives/declarations).
+class SyntaxTree;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -954,6 +958,9 @@ public:
     virtual void VisitQueryFromClause(QueryFromClause*) = 0;
     virtual void VisitQueryContinuationClause(QueryContinuationClause*) = 0;
     virtual void VisitQueryJoinClause(QueryJoinClause*) = 0;
+    // `SyntaxTree` -- the root compilation_unit node (the class name does not end in "AstType",
+    // so the generator's visit-method-name default yields `VisitSyntaxTree`).
+    virtual void VisitSyntaxTree(SyntaxTree*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
