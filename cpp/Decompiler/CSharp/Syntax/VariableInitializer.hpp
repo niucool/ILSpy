@@ -320,6 +320,35 @@ private:
     Expression* initializer_ = nullptr;
 };
 
+// The `Variable` kind -- the collection slot kind for every
+// `[Slot("Variable")] AstNodeCollection<VariableInitializer>` (`FixedStatement.Variables`,
+// `VariableDeclarationStatement.Variables`). A `CSharpSlotInfoT<VariableInitializer>` (the element
+// type is the concrete `VariableInitializer` node).
+//
+// Defined HERE (in VariableInitializer.hpp, after the `VariableInitializer` class) rather than in
+// Slots.hpp because `CSharpSlotInfoT<VariableInitializer>` needs `VariableInitializer` complete
+// (the `dynamic_cast<const VariableInitializer*>` is-a test in the ctor), and `VariableInitializer`
+// is a concrete node with per-node slot statics (its `NameTokenSlot`/`InitializerSlot` reference
+// `&Slots::Identifier`/`&Slots::Expression`, so this header includes Slots.hpp). Placing the kind
+// in Slots.hpp would form a circular include: Slots.hpp would have to include
+// VariableInitializer.hpp (for the complete `VariableInitializer`), but VariableInitializer.hpp
+// includes Slots.hpp (for `Slots::Identifier`/`Slots::Expression`), and with Slots.hpp's guard set
+// those definitions would not be visible where VariableInitializer's class body needs them. After
+// the class both `CSharpSlotInfoT` (visible via the Slots.hpp include) and `VariableInitializer` are
+// complete, so the kind defines cleanly. The `inline` variable still has external linkage and one
+// address across translation units (the C++17 `inline` guarantee), preserving the
+// pointer-identity comparison `node.Slot.Kind == &Slots::Variable` the slot system relies on. This
+// is the `Slots::Attribute`/`Slots::AttributeSection`/`Slots::Initializer` cycle-breaking precedent
+// (D241/D242/D251) applied to a collection kind. The shared constant is constructed
+// non-collection/non-optional (`{"Variable", false, nullptr, false}`); the per-node
+// `VariablesSlot` on the owning node carries the `IsCollection` flag (the collection `[Slot]` makes
+// the per-node slot a collection). The kind name `Variable` collides with no class in the `Syntax`
+// namespace (there is `VariableInitializer`/`VariableDesignation`, not `Variable`), so no
+// elaborated-type-specifier is needed.
+namespace Slots {
+inline const CSharpSlotInfoT<VariableInitializer> Variable{"Variable", false, nullptr, false};
+} // namespace Slots
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_VARIABLEINITIALIZER_HPP

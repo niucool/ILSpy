@@ -100,6 +100,7 @@
 #include "SingleVariableDesignation.hpp"
 #include "ParenthesizedVariableDesignation.hpp"
 #include "VariableInitializer.hpp"
+#include "Statements/FixedStatement.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -323,6 +324,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitVariableInitializer(VariableInitializer* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitFixedStatement(FixedStatement* node) {
         VisitChildren(node);
     }
 };

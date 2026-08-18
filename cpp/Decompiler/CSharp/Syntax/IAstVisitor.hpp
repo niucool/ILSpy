@@ -341,6 +341,21 @@ class ForeachStatement;
 // (`Slots::Identifier` by `SimpleType`, `Slots::Expression` by `UnaryOperatorExpression`).
 class VariableInitializer;
 
+// `FixedStatement` is the `fixed_statement ::= 'fixed' '(' type variable_initializer* ')' statement`
+// node (C# grammar 24.7) -- the next in-order Phase-5 piece per the D266 plan (now unblocked -- it
+// needs the `VariableInitializer` just ported plus a NEW `Slots::Variable` kind for its
+// `Variables AstNodeCollection<VariableInitializer>` collection, plus the already-ported
+// `Slots::Type`/`Slots::EmbeddedStatement` kinds). A sealed `Statement` with a single REQUIRED
+// `AstType Type` slot at flattened index 0, a `Variables AstNodeCollection<VariableInitializer>`
+// collection at index 1 (non-incremental since the `EmbeddedStatement` single slot follows), and a
+// single REQUIRED `Statement EmbeddedStatement` at index 2 (the index-less `SetChildNode` setter,
+// following a collection). NO name-shadowing crux (no member is named `AstType`/
+// `VariableInitializer`/`Statement` -- the `ObjectCreateExpression` D251 differently-named-property
+// precedent), so no elaborated-type-specifier is needed; the `Type`/`EmbeddedStatement` slot kinds
+// are already ported (`Slots::Type` by `Attribute`, `Slots::EmbeddedStatement` by `WhileStatement`),
+// and the new `Slots::Variable` kind is cycle-broken into `VariableInitializer.hpp`.
+class FixedStatement;
+
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
 // on it; `CSharpOutputVisitor` (the pretty-printer) implements it. An abstract base (a
@@ -421,6 +436,7 @@ public:
     virtual void VisitParenthesizedVariableDesignation(ParenthesizedVariableDesignation*) = 0;
     virtual void VisitForeachStatement(ForeachStatement*) = 0;
     virtual void VisitVariableInitializer(VariableInitializer*) = 0;
+    virtual void VisitFixedStatement(FixedStatement*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
