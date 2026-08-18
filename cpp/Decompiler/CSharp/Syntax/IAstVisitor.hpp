@@ -271,6 +271,21 @@ class LambdaExpression;
 // piece per the D305 plan (a remaining Expression node whose dependencies are all ported). Only
 // `AnonymousMethodExpression` is forward-declared here (no ported derived classes).
 class AnonymousMethodExpression;
+// `SwitchExpressionSection` is the `switch_expression_arm ::= pattern '=>' expression` node (C#
+// grammar 12.12) -- a sealed direct-`AstNode` node with two REQUIRED single `Expression` slots
+// (`Pattern`/`Body`), the `CastExpression` D243 two-required-single-slot shape applied to a
+// direct-`AstNode` base. The `SwitchExpressionSection` kind's collection consumer is
+// `SwitchExpression.SwitchSections`. Only `SwitchExpressionSection` is forward-declared here (no
+// ported derived classes).
+class SwitchExpressionSection;
+// `SwitchExpression` is the `switch_expression ::= expression 'switch' '{'
+// switch_expression_arm* '}'` node (C# grammar 12.12) -- a sealed `Expression` with one REQUIRED
+// `Expression` slot (the governing expression) plus a `SwitchSections` collection of
+// `SwitchExpressionSection`, the `InvocationExpression` D248 single-`Expression`-slot-plus-a-
+// collection shape with the collection element type a concrete node. The `Expression()` accessor
+// shadows the `Expression` base type (the `CastExpression` D243 name-shadowing crux). Only
+// `SwitchExpression` is forward-declared here (no ported derived classes).
+class SwitchExpression;
 // `ContinueStatement`/`BreakStatement`/`YieldBreakStatement` are the first concrete C# AST
 // statement nodes -- the cleanest leaf statements (no `[Slot]` children, no members), the
 // start of the Statement hierarchy (a leaf with no slots; `BreakStatement`/`YieldBreakStatement`
@@ -849,6 +864,8 @@ public:
     virtual void VisitAnonymousTypeCreateExpression(AnonymousTypeCreateExpression*) = 0;
     virtual void VisitLambdaExpression(LambdaExpression*) = 0;
     virtual void VisitAnonymousMethodExpression(AnonymousMethodExpression*) = 0;
+    virtual void VisitSwitchExpressionSection(SwitchExpressionSection*) = 0;
+    virtual void VisitSwitchExpression(SwitchExpression*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

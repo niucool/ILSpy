@@ -74,6 +74,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/Expressions/AnonymousTypeCreateExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/LambdaExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/AnonymousMethodExpression_Test.cpp
+    Decompiler/CSharp/Syntax/Expressions/SwitchExpression_Test.cpp
     Decompiler/CSharp/Syntax/Statements/Statement_Test.cpp
     Decompiler/CSharp/Syntax/Statements/ReturnThrowExpressionStatement_Test.cpp
     Decompiler/CSharp/Syntax/Statements/BlockStatement_Test.cpp

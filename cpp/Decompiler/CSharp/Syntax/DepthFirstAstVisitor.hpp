@@ -149,6 +149,8 @@
 #include "Expressions/AnonymousTypeCreateExpression.hpp"
 #include "Expressions/LambdaExpression.hpp"
 #include "Expressions/AnonymousMethodExpression.hpp"
+#include "Expressions/SwitchExpression.hpp"
+#include "SwitchExpressionSection.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -519,6 +521,12 @@ public:
         VisitChildren(node);
     }
     virtual void VisitAnonymousMethodExpression(AnonymousMethodExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitSwitchExpressionSection(SwitchExpressionSection* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitSwitchExpression(SwitchExpression* node) {
         VisitChildren(node);
     }
 };

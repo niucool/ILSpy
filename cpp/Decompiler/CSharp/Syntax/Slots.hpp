@@ -476,6 +476,43 @@ inline const CSharpSlotInfoT<AstType> DeclaringType{"DeclaringType", false, null
 // is a required single slot).
 inline const CSharpSlotInfoT<AstType> ConversionOperatorReturnType{"ConversionOperatorReturnType", false, nullptr, false};
 
+// The `Pattern` kind -- a single `Expression` child (the pattern of a `SwitchExpressionSection`:
+// the `Expression` on the left of `=>` in a `switch` expression arm -- the C# AST models the
+// pattern DSL as `Expression` nodes, so the `[Slot("Pattern")] Expression Pattern` is an
+// `Expression`-typed slot whose KIND name is `Pattern`). Unique to `SwitchExpressionSection`
+// among the ported nodes. A `CSharpSlotInfoT<Expression>` (the element type is the `Expression`
+// abstract base, complete via the `Expression.hpp` include above). `Expression.hpp` does NOT
+// include `Slots.hpp` (the abstract base has no per-node slot statics -- the
+// `Slots.Expression`/`Slots.Condition`/`Slots.TargetExpression` precedent), so this kind lives HERE
+// in `Slots.hpp` (no include cycle). Defined AFTER the `Slots::Expression` *variable*, so the
+// element type is qualified (`::ILSpy::Decompiler::CSharp::Syntax::Expression`) to avoid resolving
+// to that variable (the `Expression`/`Condition`/`TargetExpression`/`Argument`/
+// `EnumMemberInitializer`/`ExpressionBody` collision precedent: an unqualified name shared with a
+// prior `Slots` variable resolves to the variable, not the class). The kind name `Pattern` does
+// NOT collide with any class in the `Syntax` namespace (the `PatternMatching::Pattern` is in the
+// nested `PatternMatching` namespace, not found by unqualified lookup in `Syntax`, and no
+// `Slots` variable is named `Pattern`), so no elaborated-type-specifier is needed for the kind
+// name and the per-node `PatternSlot` on `SwitchExpressionSection` references `&Slots::Pattern`
+// unambiguously. The shared constant is constructed non-collection/non-optional; the per-node
+// `PatternSlot` carries `IsOptional=false` (the `[Slot("Pattern")]` is a required single slot).
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> Pattern{"Pattern", false, nullptr, false};
+
+// The `SwitchExpressionBody` kind -- a single `Expression` child (the body of a
+// `SwitchExpressionSection`: the `Expression` on the right of `=>` in a `switch` expression arm).
+// Unique to `SwitchExpressionSection` among the ported nodes. A `CSharpSlotInfoT<Expression>`
+// (the element type is the `Expression` abstract base, complete via the `Expression.hpp` include
+// above). `Expression.hpp` does NOT include `Slots.hpp`, so this kind lives HERE in `Slots.hpp`
+// (no include cycle) -- the `Slots.Pattern`/`Slots.Expression` precedent. Defined AFTER the
+// `Slots::Expression` *variable*, so the element type is qualified
+// (`::ILSpy::Decompiler::CSharp::Syntax::Expression`) to avoid resolving to that variable (the
+// `Expression`/`Condition`/`Pattern` collision precedent). The kind name `SwitchExpressionBody`
+// collides with no class in the `Syntax` namespace (there is `SwitchExpression`/
+// `SwitchExpressionSection`, not `SwitchExpressionBody`), and no `Slots` variable is named
+// `SwitchExpressionBody`, so no elaborated-type-specifier is needed. The shared constant is
+// constructed non-collection/non-optional; the per-node `BodySlot` on `SwitchExpressionSection`
+// carries `IsOptional=false` (the `[Slot("SwitchExpressionBody")]` is a required single slot).
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> SwitchExpressionBody{"SwitchExpressionBody", false, nullptr, false};
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_SLOTS_HPP
