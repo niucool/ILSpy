@@ -515,6 +515,23 @@ class Constraint;
 class MethodDeclaration;
 class ExtensionDeclaration;
 
+// The `FixedVariableInitializer` (the `fixed_size_buffer_declarator ::= identifier '[' expression
+// ']'` element of a `FixedFieldDeclaration.Variables` collection) -- a sealed direct-`AstNode` node
+// with a required `NameToken` `Identifier` + a required `CountExpression` `Expression` (the
+// `VariableInitializer` D266 shape with the `Expression` required, not nullable). It adds the new
+// cycle-broken `Slots::FixedVariable` kind (in `FixedVariableInitializer.hpp`); the two kinds
+// (`Slots::Identifier`/`Slots::Expression`) are already ported.
+class FixedVariableInitializer;
+
+// The `FixedFieldDeclaration` (the `fixed_size_buffer_declaration` node) -- a sealed
+// `EntityDeclaration` with an `Attributes` collection + a required `ReturnType` + a `Variables`
+// `FixedVariableInitializer` collection (the `FieldDeclaration` D273 two-collection shape with
+// the `Variables` element type changed to `FixedVariableInitializer`) plus the `FixedKeyword`
+// const. It reuses `Slots::AttributeSection`/`Slots::Type` and the new cycle-broken
+// `Slots::FixedVariable`; the `Name`/`NameToken` are NOT overridden (the inherited base kind-walk
+// finds no `NameToken` slot, so `Name()` returns empty).
+class FixedFieldDeclaration;
+
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
 // on it; `CSharpOutputVisitor` (the pretty-printer) implements it. An abstract base (a
@@ -618,6 +635,8 @@ public:
     virtual void VisitConstraint(Constraint*) = 0;
     virtual void VisitMethodDeclaration(MethodDeclaration*) = 0;
     virtual void VisitExtensionDeclaration(ExtensionDeclaration*) = 0;
+    virtual void VisitFixedVariableInitializer(FixedVariableInitializer*) = 0;
+    virtual void VisitFixedFieldDeclaration(FixedFieldDeclaration*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

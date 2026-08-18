@@ -123,6 +123,8 @@
 #include "Constraint.hpp"
 #include "MethodDeclaration.hpp"
 #include "ExtensionDeclaration.hpp"
+#include "FixedVariableInitializer.hpp"
+#include "FixedFieldDeclaration.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -415,6 +417,12 @@ public:
         VisitChildren(node);
     }
     virtual void VisitExtensionDeclaration(ExtensionDeclaration* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitFixedVariableInitializer(FixedVariableInitializer* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitFixedFieldDeclaration(FixedFieldDeclaration* node) {
         VisitChildren(node);
     }
 };
