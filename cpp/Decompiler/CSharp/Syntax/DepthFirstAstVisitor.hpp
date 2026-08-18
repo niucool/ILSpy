@@ -136,6 +136,7 @@
 #include "TypeDeclaration.hpp"
 #include "NamespaceDeclaration.hpp"
 #include "PreProcessorDirective.hpp"
+#include "DocumentationReference.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -467,6 +468,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitPreProcessorDirective(PreProcessorDirective* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitDocumentationReference(DocumentationReference* node) {
         VisitChildren(node);
     }
 };

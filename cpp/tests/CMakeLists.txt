@@ -103,6 +103,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/TypeDeclaration_Test.cpp
     Decompiler/CSharp/Syntax/NamespaceDeclaration_Test.cpp
     Decompiler/CSharp/Syntax/PreProcessorDirective_Test.cpp
+    Decompiler/CSharp/Syntax/DocumentationReference_Test.cpp
     Decompiler/CSharp/Syntax/PatternMatching/PatternMatching_Test.cpp
     Decompiler/IL/ControlFlowSimplification_Test.cpp
     Decompiler/IL/ControlFlowGraph_Test.cpp

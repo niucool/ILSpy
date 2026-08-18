@@ -607,6 +607,14 @@ class NamespaceDeclaration;
 // `PreProcessorDirective` is forward-declared here (the two derived classes are not referenced by
 // `IAstVisitor`); `DepthFirstAstVisitor` includes only `PreProcessorDirective.hpp`.
 class PreProcessorDirective;
+// The `DocumentationReference` concrete node (a sealed direct-`AstNode` node modeling an XML-
+// documentation `cref` reference -- the next in-order Phase-5 piece per the D294 plan). It is the
+// first node to combine a HAND-WRITTEN `DoMatch` (a `SymbolKind`-driven conditional that matches
+// `OperatorType`/`ConversionOperatorReturnType` for operators, `MemberName`/`TypeArguments` for
+// named members, and `Parameters` unconditionally) with five `[Slot]` children (three singles + two
+// collections) and three non-`[Slot]` scalars (`SymbolKind`/`OperatorType` enums + `HasParameterList`
+// bool). Only `DocumentationReference` is forward-declared here (it has no ported derived classes).
+class DocumentationReference;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -724,6 +732,7 @@ public:
     virtual void VisitTypeDeclaration(TypeDeclaration*) = 0;
     virtual void VisitNamespaceDeclaration(NamespaceDeclaration*) = 0;
     virtual void VisitPreProcessorDirective(PreProcessorDirective*) = 0;
+    virtual void VisitDocumentationReference(DocumentationReference*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

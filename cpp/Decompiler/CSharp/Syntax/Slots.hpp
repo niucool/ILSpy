@@ -432,6 +432,33 @@ inline const CSharpSlotInfoT<AstNode> Member{"Member", false, nullptr, false};
 // carries the `IsCollection` flag (the `[Slot("Warning")]` is a collection slot).
 inline const CSharpSlotInfoT<PrimitiveExpression> Warning{"Warning", false, nullptr, false};
 
+// The `DeclaringType` kind -- a single `AstType` child (the declaring type of a `DocumentationReference`
+// `cref`, e.g. the `Foo` in `<see cref="Foo.Bar"/>`; null for a bare `member_name` or `type_name`
+// `cref`). Unique to `DocumentationReference` among the ported nodes. A `CSharpSlotInfoT<AstType>`
+// (the element type is the `AstType` abstract base, complete via the `AstType.hpp` include above).
+// `AstType.hpp` does NOT include `Slots.hpp` (the abstract base has no per-node slot statics -- the
+// `Slots.Type`/`Slots.Target`/`Slots.BaseType`/`Slots.Import`/`Slots.NamespaceName` precedent), so this
+// kind lives HERE in `Slots.hpp` (no include cycle). No `Slots` variable is named `AstType`, and no
+// class named `DeclaringType` lives in the `Syntax` namespace, so the unqualified `AstType` resolves
+// to the class and no elaborated specifier is needed. The shared constant is constructed
+// non-collection/non-optional; the per-node `DeclaringTypeSlot` on `DocumentationReference` carries
+// the `IsOptional` flag (the `[Slot("DeclaringType")]` is a nullable single slot, so
+// `IsOptional=true`).
+inline const CSharpSlotInfoT<AstType> DeclaringType{"DeclaringType", false, nullptr, false};
+
+// The `ConversionOperatorReturnType` kind -- a single `AstType` child (the return type of a
+// conversion operator `cref`, used only when `DocumentationReference.SymbolKind == Operator` and
+// `OperatorType` is `Implicit` or `Explicit`). Unique to `DocumentationReference` among the ported
+// nodes. A `CSharpSlotInfoT<AstType>` (the element type is the `AstType` abstract base, complete via
+// the `AstType.hpp` include above). `AstType.hpp` does NOT include `Slots.hpp`, so this kind lives
+// HERE in `Slots.hpp` (no include cycle). No `Slots` variable is named `AstType`, and no class named
+// `ConversionOperatorReturnType` lives in the `Syntax` namespace, so the unqualified `AstType`
+// resolves to the class and no elaborated specifier is needed. The shared constant is constructed
+// non-collection/non-optional; the per-node `ConversionOperatorReturnTypeSlot` on
+// `DocumentationReference` carries `IsOptional=false` (the `[Slot("ConversionOperatorReturnType")]`
+// is a required single slot).
+inline const CSharpSlotInfoT<AstType> ConversionOperatorReturnType{"ConversionOperatorReturnType", false, nullptr, false};
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_SLOTS_HPP
