@@ -627,6 +627,51 @@ public:
         throw std::logic_error("AstNode::SetChildByKindUntyped: no slot of this kind");
     }
 
+    // The C# `public T? GetChild<T>(CSharpSlotInfo<T> slot)` -- the typed single-slot read
+    // by canonical `Slots` kind. Walks the slot storage finding the slot whose `Kind()` is
+    // `slot` and returns its child downcast to `T` (a `dynamic_cast`, faithful to the C#
+    // `GetChild(i) as T`), or null when this node declares no slot of that kind (the C#
+    // returns the default `T?` == null). `slot` is a canonical `Slots` constant
+    // (`CSharpSlotInfoT<T>`); the result type is inferred from the slot's element type, so a
+    // caller writes `node.GetChildByKind(Slots.Identifier)` and gets an `Identifier*`. Used by
+    // the hand-written `Name`/`NameToken`/`ReturnType` virtuals on `EntityDeclaration` (and by
+    // the output/resolver stage) to read a child position by kind rather than by flattened
+    // index. `T` must derive from `AstNode`.
+    //
+    // The C++ name diverges from the C# `GetChild<T>`: the C# `GetChild` is overloaded with
+    // the non-generic `internal AstNode? GetChild(int)` (the slot-storage virtual the
+    // generator overrides). The port keeps that non-template as `GetChild(int)`, so a C++
+    // member template named `GetChild` would share its name with the non-template
+    // `GetChild(int)`, and MSVC's permissive-mode parser then parses `obj.GetChild<T>(...)`
+    // as a less-than (`GetChild < T(...)`) rather than a template-id (C2275). The kind-based
+    // read is therefore named `GetChildByKind<T>` (paralleling the existing
+    // `GetCollectionByKind(CSharpSlotInfo*)` collection-by-kind), a template-only name with
+    // no non-template overload so the `<T>` parses as a template argument list.
+    template <class T>
+    T* GetChildByKind(const CSharpSlotInfoT<T>* slot) const {
+        int count = GetChildCount();
+        for (int i = 0; i < count; i++) {
+            if (GetChildSlotInfo(i)->Kind() == slot) {
+                return dynamic_cast<T*>(GetChild(i));
+            }
+        }
+        return nullptr;
+    }
+
+    // The C# `protected void SetChild<T>(CSharpSlotInfo<T> slot, T? newChild)` -- the typed
+    // single-slot write by canonical `Slots` kind. Delegates to `SetChildByKindUntyped`,
+    // which finds the slot whose `Kind()` is `slot` and writes the child (throwing when this
+    // node declares no slot of the kind). Used by the hand-written `Name`/`ReturnType`
+    // setters on `EntityDeclaration` (and by other hand-written slot setters) to write a
+    // child position by kind. `T` must derive from `AstNode`. Named `SetChildByKind<T>` not
+    // `SetChild<T>` for the same MSVC permissive-mode reason as `GetChildByKind` above (the
+    // name `SetChild` is shared with the non-template `SetChild(int, AstNode*)`
+    // slot-storage virtual).
+    template <class T>
+    void SetChildByKind(const CSharpSlotInfoT<T>* slot, T* newChild) {
+        SetChildByKindUntyped(slot, newChild);
+    }
+
     // The C# `internal void SetChildNode<T>(ref T? field, T? value)` -- write a single-slot
     // backing field when the slot's flattened index is not statically known (a single slot
     // following a collection). An in-place replace carries the old child's index; a set or
