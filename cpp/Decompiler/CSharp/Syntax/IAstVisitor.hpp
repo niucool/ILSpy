@@ -199,6 +199,14 @@ class NamedArgumentExpression;
 // applied to the `Expression` hierarchy), reusing the inherited zero-child slot defaults and a
 // type-only `DoMatch` (the `NullReferenceExpression`/`BreakStatement` precedent).
 class ErrorExpression;
+// `OutVarDeclarationExpression` is the `out_var_declaration_expression ::= type
+// variable_initializer` shape (C# grammar section 12.20) -- a sealed `Expression` with two
+// single, REQUIRED `[Slot]` children (`Type` `AstType` + `Variable` `VariableInitializer`), plus
+// the `OutKeyword` const string aliased to `DirectionExpression.OutKeyword`, and a hand-written
+// `(AstType, string)` convenience ctor that creates a `new VariableInitializer(name)`. The
+// `VariableInitializer` D266 two-required-single-slot shape applied to the `Expression` hierarchy,
+// reusing the already-ported `Slots::Type`/`Slots::Variable` kinds with no new `Slots` constant.
+class OutVarDeclarationExpression;
 // `ContinueStatement`/`BreakStatement`/`YieldBreakStatement` are the first concrete C# AST
 // statement nodes -- the cleanest leaf statements (no `[Slot]` children, no members), the
 // start of the Statement hierarchy (a leaf with no slots; `BreakStatement`/`YieldBreakStatement`
@@ -699,6 +707,7 @@ public:
     virtual void VisitNamedExpression(NamedExpression*) = 0;
     virtual void VisitNamedArgumentExpression(NamedArgumentExpression*) = 0;
     virtual void VisitErrorExpression(ErrorExpression*) = 0;
+    virtual void VisitOutVarDeclarationExpression(OutVarDeclarationExpression*) = 0;
     virtual void VisitContinueStatement(ContinueStatement*) = 0;
     virtual void VisitBreakStatement(BreakStatement*) = 0;
     virtual void VisitYieldBreakStatement(YieldBreakStatement*) = 0;

@@ -78,6 +78,7 @@
 #include "Expressions/NamedExpression.hpp"
 #include "Expressions/NamedArgumentExpression.hpp"
 #include "Expressions/ErrorExpression.hpp"
+#include "Expressions/OutVarDeclarationExpression.hpp"
 #include "Statements/ContinueStatement.hpp"
 #include "Statements/BreakStatement.hpp"
 #include "Statements/YieldBreakStatement.hpp"
@@ -298,6 +299,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitErrorExpression(ErrorExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitOutVarDeclarationExpression(OutVarDeclarationExpression* node) {
         VisitChildren(node);
     }
     virtual void VisitContinueStatement(ContinueStatement* node) {
