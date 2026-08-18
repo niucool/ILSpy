@@ -207,6 +207,13 @@ class ErrorExpression;
 // `VariableInitializer` D266 two-required-single-slot shape applied to the `Expression` hierarchy,
 // reusing the already-ported `Slots::Type`/`Slots::Variable` kinds with no new `Slots` constant.
 class OutVarDeclarationExpression;
+// `WithInitializerExpression` is the `with_expression ::= expression 'with'
+// array_initializer` shape (C# grammar section 12.10) -- a sealed `Expression` with two single,
+// REQUIRED `[Slot]` children (`Expression` + `Initializer` `ArrayInitializerExpression`), no
+// scalar, no const strings. The `CastExpression` D243 two-required-single-slot shape with the
+// second slot an `ArrayInitializerExpression` instead of an `AstType`, reusing the already-
+// ported `Slots::Expression`/`Slots::Initializer` kinds with no new `Slots` constant.
+class WithInitializerExpression;
 // `ContinueStatement`/`BreakStatement`/`YieldBreakStatement` are the first concrete C# AST
 // statement nodes -- the cleanest leaf statements (no `[Slot]` children, no members), the
 // start of the Statement hierarchy (a leaf with no slots; `BreakStatement`/`YieldBreakStatement`
@@ -708,6 +715,7 @@ public:
     virtual void VisitNamedArgumentExpression(NamedArgumentExpression*) = 0;
     virtual void VisitErrorExpression(ErrorExpression*) = 0;
     virtual void VisitOutVarDeclarationExpression(OutVarDeclarationExpression*) = 0;
+    virtual void VisitWithInitializerExpression(WithInitializerExpression*) = 0;
     virtual void VisitContinueStatement(ContinueStatement*) = 0;
     virtual void VisitBreakStatement(BreakStatement*) = 0;
     virtual void VisitYieldBreakStatement(YieldBreakStatement*) = 0;

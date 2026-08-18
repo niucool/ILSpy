@@ -79,6 +79,7 @@
 #include "Expressions/NamedArgumentExpression.hpp"
 #include "Expressions/ErrorExpression.hpp"
 #include "Expressions/OutVarDeclarationExpression.hpp"
+#include "Expressions/WithInitializerExpression.hpp"
 #include "Statements/ContinueStatement.hpp"
 #include "Statements/BreakStatement.hpp"
 #include "Statements/YieldBreakStatement.hpp"
@@ -302,6 +303,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitOutVarDeclarationExpression(OutVarDeclarationExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitWithInitializerExpression(WithInitializerExpression* node) {
         VisitChildren(node);
     }
     virtual void VisitContinueStatement(ContinueStatement* node) {
