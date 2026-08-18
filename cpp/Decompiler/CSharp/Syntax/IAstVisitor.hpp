@@ -545,6 +545,18 @@ class LocalFunctionDeclarationStatement;
 // plain `==`) and a `Content` string (`MatchString`). The `Trivia` abstract base was ported in
 // D224; `Comment` is the first concrete trivia the output visitor emits verbatim.
 class Comment;
+// The namespace-level directive family (C# grammar 14.4-14.6): `ExternAliasDeclaration` (the
+// `extern_alias_directive ::= 'extern' 'alias' identifier ';'`), `UsingDeclaration` (the
+// `using_directive ::= 'using' type ';' | 'using' 'static' type ';'`), and `UsingAliasDeclaration`
+// (the `using_alias_directive ::= 'using' identifier '=' type ';'`) -- three sealed `AstNode`s
+// deriving directly from the `AstNode` root, the next in-order Phase-5 piece per the D288 plan.
+// `ExternAliasDeclaration` is the `LabelStatement` D259 one-REQUIRED-string-name-`[Slot]` shape;
+// `UsingDeclaration` is the `TypeReferenceExpression` D245 one-required-`AstType`-slot shape
+// (it adds the new `Slots::Import` kind shared with `UsingAliasDeclaration`); `UsingAliasDeclaration`
+// is the `VariableInitializer` D266 two-single-slot shape with the second slot an `AstType`.
+class ExternAliasDeclaration;
+class UsingDeclaration;
+class UsingAliasDeclaration;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -653,6 +665,9 @@ public:
     virtual void VisitFixedFieldDeclaration(FixedFieldDeclaration*) = 0;
     virtual void VisitLocalFunctionDeclarationStatement(LocalFunctionDeclarationStatement*) = 0;
     virtual void VisitComment(Comment*) = 0;
+    virtual void VisitExternAliasDeclaration(ExternAliasDeclaration*) = 0;
+    virtual void VisitUsingDeclaration(UsingDeclaration*) = 0;
+    virtual void VisitUsingAliasDeclaration(UsingAliasDeclaration*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

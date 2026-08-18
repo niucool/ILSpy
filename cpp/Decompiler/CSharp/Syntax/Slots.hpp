@@ -354,6 +354,37 @@ inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> Ex
 // `Slots.TypeArgument` precedent).
 inline const CSharpSlotInfoT<AstType> BaseType{"BaseType", false, nullptr, false};
 
+// The `Import` kind -- a single `AstType` (the imported type of a using directive:
+// `UsingDeclaration.Import` and `UsingAliasDeclaration.Import`, both `[Slot("Import")] AstType`).
+// A `CSharpSlotInfoT<AstType>` (the element type is the `AstType` abstract base, complete via the
+// `AstType.hpp` include above). `AstType.hpp` does NOT include `Slots.hpp` (the abstract base has
+// no per-node slot statics -- the `Slots.Type`/`Slots.Target`/`Slots.BaseType` precedent), so this
+// kind lives HERE in `Slots.hpp` (no include cycle). No `Slots` variable is named `AstType`, and no
+// class named `Import` lives in the `Syntax` namespace, so the unqualified `AstType` resolves to
+// the class (no elaborated specifier needed). The shared constant is constructed
+// non-collection/non-optional; the per-node `ImportSlot` on the owning node carries the
+// `IsOptional` flag (the `[Slot("Import")]` is a required single slot, so `IsOptional=false`).
+inline const CSharpSlotInfoT<AstType> Import{"Import", false, nullptr, false};
+
+// The `Alias` kind -- the backing `Identifier` token of a `[Slot("Alias")] string` string-name
+// slot (`UsingAliasDeclaration.Alias`, a non-nullable `string` over a backing `AliasToken`
+// `Identifier`). A `CSharpSlotInfoT<Identifier>` (the element type is the `Identifier` token
+// class, complete via the `Identifier.hpp` include above). `Identifier.hpp` does NOT include
+// `Slots.hpp` (the `Identifier` token is a leaf with no per-node slot statics -- the
+// `Slots.Identifier` precedent), so this kind lives HERE in `Slots.hpp` (no include cycle). The
+// element type MUST be qualified (`::ILSpy::Decompiler::CSharp::Syntax::Identifier`) because the
+// `Slots::Identifier` VARIABLE (a non-type, declared above at the same namespace scope) shadows the
+// unqualified `Identifier` name -- a NEW `Slots` constant defined after a same-named prior `Slots`
+// variable must qualify its element type, even when the prior variable's element type IS that
+// class (the `Slots.AdditionalArraySpecifier` D252 precedent applied to the `Identifier` token
+// type). The kind name `Alias` collides with no class in the `Syntax` namespace, so no
+// elaborated-type-specifier is needed beyond the element-type qualification. The shared constant
+// is constructed non-collection/non-optional; the per-node `AliasTokenSlot` on `UsingAliasDeclaration`
+// carries the `IsOptional` flag (the `[Slot("Alias")]` is a required single slot, so
+// `IsOptional=false` -- the `LabelStatement.LabelTokenSlot` D259 / `VariableInitializer.NameTokenSlot`
+// D266 non-nullable-string-name-`[Slot]` precedent).
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Identifier> Alias{"Alias", false, nullptr, false};
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_SLOTS_HPP

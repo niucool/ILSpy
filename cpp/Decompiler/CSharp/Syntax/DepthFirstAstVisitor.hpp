@@ -127,6 +127,9 @@
 #include "FixedFieldDeclaration.hpp"
 #include "Statements/LocalFunctionDeclarationStatement.hpp"
 #include "Comment.hpp"
+#include "ExternAliasDeclaration.hpp"
+#include "UsingDeclaration.hpp"
+#include "UsingAliasDeclaration.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -431,6 +434,15 @@ public:
         VisitChildren(node);
     }
     virtual void VisitComment(Comment* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitExternAliasDeclaration(ExternAliasDeclaration* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitUsingDeclaration(UsingDeclaration* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitUsingAliasDeclaration(UsingAliasDeclaration* node) {
         VisitChildren(node);
     }
 };
