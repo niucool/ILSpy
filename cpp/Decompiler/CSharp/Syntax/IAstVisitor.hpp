@@ -487,6 +487,16 @@ class ConstructorDeclaration;
 // `cpp/Decompiler/TypeSystem/VarianceModifier.hpp` (the `SymbolKind` D271 / `ReferenceKind` D278
 // precedent).
 class TypeParameterDeclaration;
+// `Constraint` is the `type_parameter_constraints_clause ::= 'where' type ':' type+` node (C#
+// grammar 15.2.5) -- the `where T : ...` clause on a generic method or type. A sealed direct-
+// `AstNode` node (NOT `EntityDeclaration` -- a constraint is a structural node owned by a
+// declaration's `Constraints` collection) with a REQUIRED `SimpleType` `TypeParameter` single
+// slot (the constrained type parameter) + a `BaseTypes` `AstNodeCollection<AstType>` collection (the
+// base-type constraint list); reuses the cycle-broken `Slots::ConstraintTypeParameter` (in
+// `SimpleType.hpp`) and the new `Slots::BaseType` (in `Slots.hpp`) with no further `Slots`
+// constant. The next in-order Phase-5 piece per the D282 plan (the dependency of
+// `MethodDeclaration.Constraints`).
+class Constraint;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -588,6 +598,7 @@ public:
     virtual void VisitConstructorInitializer(ConstructorInitializer*) = 0;
     virtual void VisitConstructorDeclaration(ConstructorDeclaration*) = 0;
     virtual void VisitTypeParameterDeclaration(TypeParameterDeclaration*) = 0;
+    virtual void VisitConstraint(Constraint*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

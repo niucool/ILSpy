@@ -295,6 +295,28 @@ private:
     AstNodeCollectionT<AstType> typeArguments_;
 };
 
+// The `ConstraintTypeParameter` kind -- a single `SimpleType` child (the type parameter a
+// `Constraint` constrains, the `T` in `where T : ...`). Unique to `Constraint` among the ported
+// nodes. A `CSharpSlotInfoT<SimpleType>` (the element type is the concrete `SimpleType` node).
+// Defined HERE (in `SimpleType.hpp`, after the `SimpleType` class) for the cycle-breaking reason:
+// `SimpleType.hpp` includes `Slots.hpp` (for `Slots::Identifier`/`Slots::TypeArgument` used by its
+// per-node `IdentifierTokenSlot`/`TypeArgumentsSlot`), and with `Slots.hpp`'s guard set those
+// definitions would not be visible where `SimpleType`'s class body needs them. After the class
+// both `CSharpSlotInfoT` (visible via the `Slots.hpp` include) and `SimpleType` are complete, so
+// the kind defines cleanly. The `inline` variable still has external linkage and one address
+// across translation units (the C++17 `inline` guarantee), preserving the pointer-identity
+// comparison `node.Slot.Kind == &Slots::ConstraintTypeParameter` the slot system relies on. This
+// is the `Slots::Attribute`/`Slots::AttributeSection`/`Slots::Parameter` cycle-breaking precedent
+// (D241/D242/D279) applied to a `SimpleType`-typed single kind. The shared constant is constructed
+// non-collection/non-optional (`{"ConstraintTypeParameter", false, nullptr, false}`); the per-node
+// `TypeParameterSlot` on `Constraint` carries the required (non-optional) flag. The kind name
+// `ConstraintTypeParameter` collides with no class in the `Syntax` namespace (there is
+// `TypeParameterDeclaration`, not `ConstraintTypeParameter`), so no elaborated-type-specifier is
+// needed.
+namespace Slots {
+inline const CSharpSlotInfoT<SimpleType> ConstraintTypeParameter{"ConstraintTypeParameter", false, nullptr, false};
+} // namespace Slots
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_SIMPLETYPE_HPP

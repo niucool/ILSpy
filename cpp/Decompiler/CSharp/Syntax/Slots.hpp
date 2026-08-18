@@ -339,6 +339,21 @@ inline const CSharpSlotInfoT<AstType> PrivateImplementationType{"PrivateImplemen
 // the `IfElseStatement.FalseStatement` D258 precedent).
 inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> ExpressionBody{"ExpressionBody", false, nullptr, false};
 
+// The `BaseType` kind -- a collection of `AstType` (the base-type constraint list of a
+// `Constraint`: `Constraint.BaseTypes`, an `AstNodeCollection<AstType>` -- the `: Base1, Base2,
+// ...` list of a `where T : ...` clause; `new()`/`struct`/`class` constraints are `PrimitiveType`s,
+// all `AstType`-derived). Unique to `Constraint` among the ported nodes. A `CSharpSlotInfoT<AstType>`
+// (the element type is the `AstType` abstract base, complete via the `AstType.hpp` include above).
+// `AstType.hpp` does NOT include `Slots.hpp` (the abstract base has no per-node slot statics -- the
+// `Slots.Type`/`Slots.TypeArgument`/`Slots.PrivateImplementationType` precedent), so this kind
+// lives HERE in `Slots.hpp` (no include cycle). No `Slots` variable is named `AstType`, and no
+// class named `BaseType` lives in the `Syntax` namespace, so the unqualified `AstType` resolves to
+// the class (no elaborated specifier needed). The shared constant is constructed
+// non-collection/non-optional; the per-node `BaseTypesSlot` on `Constraint` carries the
+// `IsCollection` flag (the collection `[Slot]` makes the per-node slot a collection, the
+// `Slots.TypeArgument` precedent).
+inline const CSharpSlotInfoT<AstType> BaseType{"BaseType", false, nullptr, false};
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_SLOTS_HPP
