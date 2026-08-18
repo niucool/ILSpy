@@ -145,6 +145,18 @@ class AstNodeCollectionT : public AstNodeCollection {
     bool supportsIncremental_;
 
 public:
+    // The detached-empty default ctor -- an empty collection NOT attached to any node.
+    // Used only by `AstNode::GetChildren<T>` for the no-collection-of-this-kind case (a
+    // read-only view: the C# `new AstNodeCollection<T>(this, slot)` for a kind the node
+    // declares no collection slot for). The collection is empty so read paths (`Count`/
+    // iteration/`AsNodeList`/`DoMatch`) are safe and never touch the null parent; MUTATION
+    // (`Add`/`Insert`/`Remove`/`SetAt`) would dereference the null parent and is UB -- but no
+    // caller mutates a `GetChildren`-returned detached empty (the D271 note: writes go through
+    // `AddChild`/`SetChild`, which reject a missing slot). NOT for general construction (use the
+    // `(parent, kind)` / `(parent, kind, baseIndex, incremental)` ctors for a real collection).
+    AstNodeCollectionT() : parent_(nullptr), kind_(nullptr), baseIndex_(0),
+                           supportsIncremental_(false) {}
+
     // The C# `public AstNodeCollection(AstNode, CSharpSlotInfo)` -- delegates to the
     // four-arg ctor with `baseIndex = 0`, `supportsIncremental = false`.
     AstNodeCollectionT(AstNode* parent, const CSharpSlotInfo* kind)

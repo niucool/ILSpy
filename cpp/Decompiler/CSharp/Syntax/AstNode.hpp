@@ -98,6 +98,13 @@ namespace ILSpy::Decompiler::CSharp::Syntax {
 // it as the (nullable) return of `GetCollectionByKind`.
 class AstNodeCollection;
 
+// Forward declaration: the generic collection slot type (`AstNodeCollectionT<T>` in
+// `AstNodeCollection.hpp`, which includes this header). Only the template name is needed here
+// for the `GetChildren<T>` template member's signature; the body is instantiated at the call
+// site (where the concrete `AstNodeCollectionT<T>` is complete -- e.g. `EntityDeclaration.hpp`
+// includes `AstNodeCollection.hpp`).
+template <class T> class AstNodeCollectionT;
+
 // Forward declarations: the trivia node type (`Trivia`) and its holder (`NodeTrivia`) are
 // ported in `Trivia.hpp`, which includes this header (`Trivia : AstNode`). The trivia
 // mutation path on `AstNode` is declared here (params use `Trivia*`, a forward-declared
@@ -670,6 +677,38 @@ public:
     template <class T>
     void SetChildByKind(const CSharpSlotInfoT<T>* slot, T* newChild) {
         SetChildByKindUntyped(slot, newChild);
+    }
+
+    // The C# `public AstNodeCollection<T> GetChildren<T>(CSharpSlotInfo<T> slot)` -- the
+    // kind-based COLLECTION read by canonical `Slots` kind. Returns the collection occupying
+    // the slot (the node's `[Slot]` collection of this kind), or a detached EMPTY collection
+    // when this node declares no collection of that kind (e.g. the parameters of a non-indexer
+    // property read through `GetChildren(Slots.Parameter)`). The C# returns
+    // `new AstNodeCollection<T>(this, slot)` for the detached case; the port returns a
+    // reference to a per-`<T>` static detached-empty collection (the `AstNodeCollectionT<T>`
+    // value type has no stable identity to return by reference from a temporary, and `DoMatch`
+    // is the only consumer that reads a detached empty -- it iterates an empty list, which is
+    // safe on a detached empty whose null parent is never touched). Used by the hand-written
+    // `Attributes` virtual on `EntityDeclaration` (the base body, dead for real nodes since
+    // every concrete `EntityDeclaration` overrides `Attributes` to return its real collection)
+    // and by the deferred output/resolver stage (`entity.GetChildren(Slots.Parameter)` etc.).
+    //
+    // The C++ name keeps the C# `GetChildren` (no non-template overload shares it, unlike
+    // `GetChild<T>` which collides with `GetChild(int)` -- see `GetChildByKind`). Returns
+    // `AstNodeCollectionT<T>&` so a concrete node's by-reference `Attributes()` override can
+    // covariantly return the same type; `slot` deduces `T` from the slot's element type.
+    template <class T>
+    AstNodeCollectionT<T>& GetChildren(const CSharpSlotInfoT<T>* slot) {
+        AstNodeCollection* collection = GetCollectionByKind(slot);
+        if (collection != nullptr)
+            return *static_cast<AstNodeCollectionT<T>*>(collection);
+        // A node has no children of a kind it does not declare a collection slot for; reads of
+        // such a kind get a detached empty collection (the C# `new AstNodeCollection<T>(this,
+        // slot)`). The static is a stable singleton per `<T>` (one detached empty per element
+        // type); it is read-only (the port's detached empty has a null parent, so mutation
+        // would be UB, but reads -- `Count`/iteration/`DoMatch` -- never touch the parent).
+        static AstNodeCollectionT<T> empty;
+        return empty;
     }
 
     // The C# `internal void SetChildNode<T>(ref T? field, T? value)` -- write a single-slot

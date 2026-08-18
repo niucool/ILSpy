@@ -410,6 +410,19 @@ class TryCatchStatement;
 // `Slots.hpp` is unchanged; the `Modifiers` enum lives in its own `Modifiers.hpp` header.
 class VariableDeclarationStatement;
 
+// `EntityDeclaration` (the abstract base of the `TypeMember` hierarchy -- the common base of
+// every type-member declaration node, with the abstract `SymbolKind` property, the virtual
+// `Attributes`/`Name`/`NameToken`/`ReturnType`, the `Modifiers` scalar, and the
+// `MatchAttributesAndModifiers` helper) and `DestructorDeclaration` (the first concrete
+// `TypeMember` -- the simplest `EntityDeclaration`: a sealed node with an `Attributes`
+// `AttributeSection` collection + a required `NameToken` `Identifier` + a nullable `Body`
+// `BlockStatement`, reusing the already-ported `Slots::AttributeSection`/`Identifier`/`Body` kinds
+// with no new `Slots` constant) are the next in-order Phase-5 pieces per the D271 plan. The abstract
+// `EntityDeclaration` base gets NO `Visit` method (`NeedsVisitor` is false for an abstract base);
+// `DestructorDeclaration` adds `VisitDestructorDeclaration`.
+class EntityDeclaration;
+class DestructorDeclaration;
+
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
 // on it; `CSharpOutputVisitor` (the pretty-printer) implements it. An abstract base (a
@@ -497,6 +510,7 @@ public:
     virtual void VisitCatchClause(CatchClause*) = 0;
     virtual void VisitTryCatchStatement(TryCatchStatement*) = 0;
     virtual void VisitVariableDeclarationStatement(VariableDeclarationStatement*) = 0;
+    virtual void VisitDestructorDeclaration(DestructorDeclaration*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

@@ -107,6 +107,7 @@
 #include "CatchClause.hpp"
 #include "Statements/TryCatchStatement.hpp"
 #include "Statements/VariableDeclarationStatement.hpp"
+#include "DestructorDeclaration.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -351,6 +352,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitVariableDeclarationStatement(VariableDeclarationStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitDestructorDeclaration(DestructorDeclaration* node) {
         VisitChildren(node);
     }
 };
