@@ -649,6 +649,22 @@ inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> Eq
 // `GotoStatement.Label`/`CatchClause.VariableName` nullable-string-name-[Slot] precedent).
 inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Identifier> IntoIdentifier{"IntoIdentifier", false, nullptr, false};
 
+// The `CallingConvention` kind -- a collection of `AstType` (the calling-convention specifier
+// list of a `FunctionPointerAstType.CallingConventions`, an `AstNodeCollection<AstType>` --
+// the `managed`/`unmanaged`/`unmanaged[...]` calling-convention specifiers of a C# 9+
+// function pointer type `delegate*<...>`). Unique to `FunctionPointerAstType` among the ported
+// nodes. A `CSharpSlotInfoT<AstType>` (the element type is the `AstType` abstract base, complete
+// via the `AstType.hpp` include above). `AstType.hpp` does NOT include `Slots.hpp` (the abstract
+// base has no per-node slot statics -- the `Slots.Type`/`Slots.Target`/`Slots.BaseType`/
+// `Slots.Import`/`Slots.NamespaceName` precedent), so this kind lives HERE in `Slots.hpp` (no
+// include cycle). No `Slots` variable is named `AstType`, and no class named
+// `CallingConvention` lives in the `Syntax` namespace, so the unqualified `AstType` resolves to
+// the class and no elaborated specifier is needed. The shared constant is constructed
+// non-collection/non-optional; the per-node `CallingConventionsSlot` on
+// `FunctionPointerAstType` carries the `IsCollection` flag (the `[Slot("CallingConvention")]`
+// is a collection slot, the `Slots.TypeArgument`/`Slots.BaseType` precedent).
+inline const CSharpSlotInfoT<AstType> CallingConvention{"CallingConvention", false, nullptr, false};
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_SLOTS_HPP

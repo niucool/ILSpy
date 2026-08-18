@@ -141,6 +141,7 @@
 #include "TupleTypeElement.hpp"
 #include "TupleAstType.hpp"
 #include "InvocationAstType.hpp"
+#include "FunctionPointerAstType.hpp"
 #include "DelegateDeclaration.hpp"
 #include "TypeDeclaration.hpp"
 #include "NamespaceDeclaration.hpp"
@@ -513,6 +514,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitInvocationType(InvocationAstType* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitFunctionPointerType(FunctionPointerAstType* node) {
         VisitChildren(node);
     }
     virtual void VisitDelegateDeclaration(DelegateDeclaration* node) {

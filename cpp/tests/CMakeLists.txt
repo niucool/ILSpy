@@ -113,6 +113,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/NamespaceDirective_Test.cpp
     Decompiler/CSharp/Syntax/TupleAstType_Test.cpp
     Decompiler/CSharp/Syntax/InvocationAstType_Test.cpp
+    Decompiler/CSharp/Syntax/FunctionPointerAstType_Test.cpp
     Decompiler/CSharp/Syntax/DelegateDeclaration_Test.cpp
     Decompiler/CSharp/Syntax/TypeDeclaration_Test.cpp
     Decompiler/CSharp/Syntax/NamespaceDeclaration_Test.cpp

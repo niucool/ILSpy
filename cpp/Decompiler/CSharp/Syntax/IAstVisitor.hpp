@@ -705,6 +705,20 @@ class TupleAstType;
 // `VisitInvocationType` (NOT `VisitInvocationAstType` -- the `TupleAstType` D290 precedent). Only
 // `InvocationAstType` is forward-declared here (no ported derived classes).
 class InvocationAstType;
+// `FunctionPointerAstType` is the `funcptr_type ::= 'delegate' '*' calling_convention_specifier?
+// funcptr_parameter_list funcptr_return_type` node (C# grammar 24.3.3) -- the C# 9+ function
+// pointer type `delegate*<...>`. A sealed `AstType` with a `CallingConventions`
+// `AstNodeCollection<AstType>` collection (the calling-convention specifiers, `[Slot("CallingConvention")]`
+// adding the new `Slots::CallingConvention` kind), a `Parameters` `AstNodeCollection<ParameterDeclaration>`
+// collection (the parameter list, `[Slot("Parameter")]` reusing the already-ported `Slots::Parameter`
+// kind), a required `ReturnType` `AstType` single slot (`[Slot("Type")]` reusing `Slots::Type`), and a
+// `HasUnmanagedCallingConvention` bool scalar -- the `ArrayCreateExpression` D252 two-collection shape
+// with the trailing single REQUIRED and no leading single, the first ported `AstType` with two
+// collections both followed by a required single. `FunctionPointerAstType` ends in "AstType", so the
+// generator's visit-method-name rewriting yields `VisitFunctionPointerType` (the `TupleAstType` D290
+// / `InvocationAstType` D313 precedent). Only `FunctionPointerAstType` is forward-declared here (no
+// ported derived classes).
+class FunctionPointerAstType;
 // The `DelegateDeclaration` (the `delegate_declaration ::= attribute_section* modifier*
 // 'delegate' ( 'ref' 'readonly'? )? type identifier type_parameter* '(' parameter* ')'
 // constraint*` -- C# grammar 21.2): a sealed `EntityDeclaration` with four collections
@@ -914,6 +928,7 @@ public:
     virtual void VisitTupleTypeElement(TupleTypeElement*) = 0;
     virtual void VisitTupleType(TupleAstType*) = 0;
     virtual void VisitInvocationType(InvocationAstType*) = 0;
+    virtual void VisitFunctionPointerType(FunctionPointerAstType*) = 0;
     virtual void VisitDelegateDeclaration(DelegateDeclaration*) = 0;
     virtual void VisitTypeDeclaration(TypeDeclaration*) = 0;
     virtual void VisitNamespaceDeclaration(NamespaceDeclaration*) = 0;
