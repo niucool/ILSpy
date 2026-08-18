@@ -243,6 +243,20 @@ class StackAllocExpression;
 // node whose dependencies are all ported). Only `AnonymousTypeCreateExpression` is forward-
 // declared here (no ported derived classes).
 class AnonymousTypeCreateExpression;
+// `LambdaExpression` is the `lambda_expression ::= attribute_section* 'async'? parameter*
+// '=>' ( block | expression )` shape (C# grammar 12.22.1) -- a sealed `Expression` with two
+// collections (`Attributes` `AttributeSection` + `Parameters` `ParameterDeclaration`, both
+// non-incremental -- the node has two collections) plus a trailing single REQUIRED `AstNode`
+// `Body` (typed the abstract `AstNode` base because the production takes EITHER a
+// `BlockStatement` OR an `Expression`) plus an `IsAsync` bool scalar, plus the `AsyncModifier`
+// const string (the canonical `async` literal aliased by the not-yet-ported
+// `AnonymousMethodExpression.AsyncModifier`). The `ConstructorDeclaration` D281 two-collection
+// shape with an `AstNode`-typed trailing single (the `UsingStatement` `ResourceAcquisition` D262
+// precedent) and a bool scalar, applied to the `Expression` hierarchy (NOT an
+// `EntityDeclaration`). The next in-order Phase-5 piece per the D304 plan (a remaining
+// Expression node whose dependencies are all ported). Only `LambdaExpression` is forward-
+// declared here (no ported derived classes).
+class LambdaExpression;
 // `ContinueStatement`/`BreakStatement`/`YieldBreakStatement` are the first concrete C# AST
 // statement nodes -- the cleanest leaf statements (no `[Slot]` children, no members), the
 // start of the Statement hierarchy (a leaf with no slots; `BreakStatement`/`YieldBreakStatement`
@@ -819,6 +833,7 @@ public:
     virtual void VisitDocumentationReference(DocumentationReference*) = 0;
     virtual void VisitDeclarationExpression(DeclarationExpression*) = 0;
     virtual void VisitAnonymousTypeCreateExpression(AnonymousTypeCreateExpression*) = 0;
+    virtual void VisitLambdaExpression(LambdaExpression*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

@@ -275,6 +275,23 @@ inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Statement> Ite
 // needed (no name collision in either direction).
 inline const CSharpSlotInfoT<AstNode> ResourceAcquisition{"ResourceAcquisition", false, nullptr, false};
 
+// The `LambdaBody` kind -- a single `AstNode` child (the body of a `LambdaExpression` --
+// the `=> block | expression` after the parameter list; typed the abstract `AstNode` base
+// because the production takes EITHER a `BlockStatement` (the block form) OR an `Expression`
+// (the expression form); both derive from `AstNode`, so the slot accepts either). Unique to
+// `LambdaExpression` among the ported nodes. A `CSharpSlotInfoT<AstNode>` (the element type is
+// the `AstNode` abstract root base); `AstNode.hpp` does NOT include `Slots.hpp` (the root base
+// has no per-node slot statics -- the `Slots.ResourceAcquisition` D262 `AstNode`-typed-kind
+// precedent), and `AstNode` is complete where this header is included, so this kind lives
+// HERE in `Slots.hpp` (no include cycle). No `Slots` variable is named `AstNode`, and no class
+// named `LambdaBody` lives in the `Syntax` namespace, so no elaborated-type-specifier is
+// needed (no name collision in either direction). The shared constant is constructed
+// non-collection/non-optional; the per-node `BodySlot` on `LambdaExpression` carries
+// `IsOptional=false` (the `[Slot("LambdaBody")]` is a required single slot -- the C# `AstNode
+// Body` is non-nullable, so the slot is required, unlike `UsingStatement`'s nullable-typed but
+// required `ResourceAcquisition`).
+inline const CSharpSlotInfoT<AstNode> LambdaBody{"LambdaBody", false, nullptr, false};
+
 // The `VariableDesignation` kind -- a collection of `VariableDesignation` (the nested-designation
 // list of a `ParenthesizedVariableDesignation`: `ParenthesizedVariableDesignation.VariableDesignations`,
 // an `AstNodeCollection<VariableDesignation>`). Unique to `ParenthesizedVariableDesignation` among

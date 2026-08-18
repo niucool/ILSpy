@@ -147,6 +147,7 @@
 #include "DocumentationReference.hpp"
 #include "Expressions/DeclarationExpression.hpp"
 #include "Expressions/AnonymousTypeCreateExpression.hpp"
+#include "Expressions/LambdaExpression.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -511,6 +512,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitAnonymousTypeCreateExpression(AnonymousTypeCreateExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitLambdaExpression(LambdaExpression* node) {
         VisitChildren(node);
     }
 };
