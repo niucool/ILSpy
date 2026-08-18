@@ -249,6 +249,43 @@ namespace Slots {
 inline const CSharpSlotInfoT<BlockStatement> Body{"Body", false, nullptr, false};
 } // namespace Slots
 
+// The `TryBlock` kind -- a single REQUIRED `BlockStatement` child (the `try` body of a
+// `TryCatchStatement.TryBlock`). Unique to `TryCatchStatement` among the ported nodes (the
+// `catch`/`finally` bodies are the separate `FinallyBlock` kind). A `CSharpSlotInfoT<BlockStatement>`
+// (the element type is the concrete `BlockStatement` node). Defined HERE (in BlockStatement.hpp,
+// after the `BlockStatement` class and the `Slots::Body` kind) for the same cycle-breaking reason
+// as `Slots::Body` (BlockStatement.hpp includes Slots.hpp for its `StatementsSlot`, so a
+// `CSharpSlotInfoT<BlockStatement>` kind cannot live in Slots.hpp -- a circular include -- and is
+// defined here where both `CSharpSlotInfoT` and `BlockStatement` are complete). The `inline`
+// variable has external linkage and one address across translation units (the C++17 `inline`
+// guarantee), preserving the pointer-identity comparison `node.Slot.Kind == &Slots::TryBlock` the
+// slot system relies on. The kind name `TryBlock` collides with no class in the `Syntax`
+// namespace (there is `BlockStatement`, not `TryBlock`), so no elaborated-type-specifier is needed.
+// The shared constant is constructed non-collection/non-optional (`{"TryBlock", false, nullptr,
+// false}`); the per-node `TryBlockSlot` on `TryCatchStatement` carries the `IsOptional=false`
+// flag (the `TryBlock` is a required slot).
+namespace Slots {
+inline const CSharpSlotInfoT<BlockStatement> TryBlock{"TryBlock", false, nullptr, false};
+} // namespace Slots
+
+// The `FinallyBlock` kind -- a single NULLABLE `BlockStatement` child (the `finally` body of a
+// `TryCatchStatement.FinallyBlock`, absent for a `try`/`catch` without `finally`). Unique to
+// `TryCatchStatement` among the ported nodes. A `CSharpSlotInfoT<BlockStatement>` (the element
+// type is the concrete `BlockStatement` node). Defined HERE (in BlockStatement.hpp, after the
+// `Slots::TryBlock` kind) for the same cycle-breaking reason as `Slots::Body`/`Slots::TryBlock`
+// (BlockStatement.hpp includes Slots.hpp, so the kind cannot live in Slots.hpp). The `inline`
+// variable has external linkage and one address across translation units (the C++17 `inline`
+// guarantee), preserving the pointer-identity comparison `node.Slot.Kind == &Slots::FinallyBlock`.
+// The kind name `FinallyBlock` collides with no class in the `Syntax` namespace (there is
+// `BlockStatement`, not `FinallyBlock`), so no elaborated-type-specifier is needed. The shared
+// constant is constructed non-collection/non-optional (`{"FinallyBlock", false, nullptr,
+// false}`); the per-node `FinallyBlockSlot` on `TryCatchStatement` carries the `IsOptional=true`
+// flag (the `FinallyBlock` is a nullable slot -- the shared kind is constructed non-optional,
+// the per-node slot carries the optionality, the `IfElseStatement.FalseStatement` D258 precedent).
+namespace Slots {
+inline const CSharpSlotInfoT<BlockStatement> FinallyBlock{"FinallyBlock", false, nullptr, false};
+} // namespace Slots
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_STATEMENTS_BLOCKSTATEMENT_HPP

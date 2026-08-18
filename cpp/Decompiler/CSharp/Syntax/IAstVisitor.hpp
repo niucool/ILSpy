@@ -380,6 +380,21 @@ class CaseLabel;
 class SwitchSection;
 class SwitchStatement;
 
+// The try/catch family (the `try_statement` production): `CatchClause` (a non-sealed `AstNode`
+// with four single slots -- a NULLABLE `AstType?` `Type`, a NULLABLE `string?` `VariableName`
+// string-name `[Slot]` over a backing `VariableNameToken` `Identifier`, a NULLABLE `Expression?`
+// `Condition`, and a REQUIRED `BlockStatement` `Body` -- plus `CatchKeyword`/`WhenKeyword`/
+// `CondLPar`/`CondRPar` const strings; `hasPatternPlaceholder: true` so non-`final`; reusing the
+// already-ported `Slots::Type`/`Slots::Identifier`/`Slots::Condition`/`Slots::Body` kinds; plus the
+// NEW cycle-broken `Slots::CatchClause` kind in `CatchClause.hpp`) and `TryCatchStatement` (a
+// sealed `Statement` structurally the `ObjectCreateExpression` D251 shape -- a single REQUIRED
+// `BlockStatement` `TryBlock` + a NON-INCREMENTAL `CatchClauses AstNodeCollection<CatchClause>`
+// collection + a NULLABLE `BlockStatement?` `FinallyBlock` trailing single -- plus
+// `TryKeyword`/`FinallyKeyword` const strings; the NEW cycle-broken `Slots::TryBlock`/
+// `Slots::FinallyBlock` kinds in `BlockStatement.hpp`, reusing `Slots::CatchClause`).
+class CatchClause;
+class TryCatchStatement;
+
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
 // on it; `CSharpOutputVisitor` (the pretty-printer) implements it. An abstract base (a
@@ -464,6 +479,8 @@ public:
     virtual void VisitCaseLabel(CaseLabel*) = 0;
     virtual void VisitSwitchSection(SwitchSection*) = 0;
     virtual void VisitSwitchStatement(SwitchStatement*) = 0;
+    virtual void VisitCatchClause(CatchClause*) = 0;
+    virtual void VisitTryCatchStatement(TryCatchStatement*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

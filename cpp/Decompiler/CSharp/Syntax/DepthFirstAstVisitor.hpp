@@ -104,6 +104,8 @@
 #include "CaseLabel.hpp"
 #include "SwitchSection.hpp"
 #include "Statements/SwitchStatement.hpp"
+#include "CatchClause.hpp"
+#include "Statements/TryCatchStatement.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -339,6 +341,12 @@ public:
         VisitChildren(node);
     }
     virtual void VisitSwitchStatement(SwitchStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitCatchClause(CatchClause* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitTryCatchStatement(TryCatchStatement* node) {
         VisitChildren(node);
     }
 };
