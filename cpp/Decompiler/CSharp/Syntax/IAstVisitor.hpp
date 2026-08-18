@@ -422,6 +422,7 @@ class VariableDeclarationStatement;
 // `DestructorDeclaration` adds `VisitDestructorDeclaration`.
 class EntityDeclaration;
 class DestructorDeclaration;
+class FieldDeclaration;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -511,6 +512,7 @@ public:
     virtual void VisitTryCatchStatement(TryCatchStatement*) = 0;
     virtual void VisitVariableDeclarationStatement(VariableDeclarationStatement*) = 0;
     virtual void VisitDestructorDeclaration(DestructorDeclaration*) = 0;
+    virtual void VisitFieldDeclaration(FieldDeclaration*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
