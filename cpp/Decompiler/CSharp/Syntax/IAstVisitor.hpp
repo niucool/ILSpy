@@ -745,6 +745,17 @@ class DocumentationReference;
 // Expression node whose dependencies are all ported). Only `DeclarationExpression` is forward-
 // declared here (no ported derived classes).
 class DeclarationExpression;
+// `InterpolatedStringContent` is the `interpolated_string_content ::= interpolation |
+// interpolated_string_text` (C# grammar 12.8.3) -- the common base of the two content node
+// kinds an `InterpolatedStringExpression.Content` collection holds. The next in-order Phase-5
+// piece per the D308 plan (the `InterpolatedStringContent` abstract base + the `Interpolation`/
+// `InterpolatedStringText` concrete family + `InterpolatedStringExpression`). The abstract base
+// gets NO `Visit` method (an abstract base's `NeedsVisitor` is false), so only the two
+// concrete content subclasses and `InterpolatedStringExpression` are forward-declared here.
+class InterpolatedStringContent;
+class Interpolation;
+class InterpolatedStringText;
+class InterpolatedStringExpression;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -878,6 +889,9 @@ public:
     virtual void VisitSwitchExpressionSection(SwitchExpressionSection*) = 0;
     virtual void VisitSwitchExpression(SwitchExpression*) = 0;
     virtual void VisitRecursivePatternExpression(RecursivePatternExpression*) = 0;
+    virtual void VisitInterpolation(Interpolation*) = 0;
+    virtual void VisitInterpolatedStringText(InterpolatedStringText*) = 0;
+    virtual void VisitInterpolatedStringExpression(InterpolatedStringExpression*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

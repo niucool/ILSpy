@@ -152,6 +152,9 @@
 #include "Expressions/SwitchExpression.hpp"
 #include "SwitchExpressionSection.hpp"
 #include "Expressions/RecursivePatternExpression.hpp"
+#include "Interpolation.hpp"
+#include "InterpolatedStringText.hpp"
+#include "Expressions/InterpolatedStringExpression.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -531,6 +534,15 @@ public:
         VisitChildren(node);
     }
     virtual void VisitRecursivePatternExpression(RecursivePatternExpression* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitInterpolation(Interpolation* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitInterpolatedStringText(InterpolatedStringText* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitInterpolatedStringExpression(InterpolatedStringExpression* node) {
         VisitChildren(node);
     }
 };

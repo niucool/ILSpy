@@ -49,6 +49,7 @@
 #include "Decompiler/CSharp/Syntax/Statements/Statement.hpp"
 #include "Decompiler/CSharp/Syntax/VariableDesignation.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
+#include "Decompiler/CSharp/Syntax/InterpolatedStringContent.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax::Slots {
 
@@ -532,6 +533,22 @@ inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> Sw
 // (the `[Slot("SubPattern")]` is a collection slot, the `Slots.TypeArgument`/`Slots.Argument`
 // precedent).
 inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> SubPattern{"SubPattern", false, nullptr, false};
+
+// The `Content` kind -- a collection of `InterpolatedStringContent` (the content list of an
+// `InterpolatedStringExpression.Content`, an `AstNodeCollection<InterpolatedStringContent>` --
+// the literal-text runs `InterpolatedStringText` and the expression arms `Interpolation`
+// inside a `$"..."` interpolated string). Unique to `InterpolatedStringExpression` among the
+// ported nodes. A `CSharpSlotInfoT<InterpolatedStringContent>` (the element type is the
+// `InterpolatedStringContent` abstract base, complete via the `InterpolatedStringContent.hpp`
+// include above). `InterpolatedStringContent.hpp` does NOT include `Slots.hpp` (the abstract
+// base has no per-node slot statics -- the `Slots.Statement`/`Slots.ArraySpecifier` precedent),
+// so this kind lives HERE in `Slots.hpp` (no include cycle). The kind name `Content` collides
+// with no class in the `Syntax` namespace, so no elaborated-type-specifier is needed for the
+// kind name. The shared constant is constructed non-collection/non-optional; the per-node
+// `ContentSlot` on `InterpolatedStringExpression` carries the `IsCollection` flag (the
+// `[Slot("Content")]` is a collection slot, the `Slots.TypeArgument`/`Slots.Argument`/
+// `Slots.SubPattern` precedent).
+inline const CSharpSlotInfoT<InterpolatedStringContent> Content{"Content", false, nullptr, false};
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
