@@ -129,6 +129,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/OutputVisitor/CSharpFormattingOptions_Test.cpp
     Decompiler/CSharp/OutputVisitor/CSharpKeywordCheck_Test.cpp
     Decompiler/CSharp/OutputVisitor/TextWriterTokenWriter_Test.cpp
+    Decompiler/CSharp/OutputVisitor/InsertRequiredSpacesDecorator_Test.cpp
     Decompiler/IL/ControlFlowSimplification_Test.cpp
     Decompiler/IL/ControlFlowGraph_Test.cpp
     Decompiler/FlowAnalysis/Dominance_Test.cpp
