@@ -355,6 +355,30 @@ class VariableInitializer;
 // are already ported (`Slots::Type` by `Attribute`, `Slots::EmbeddedStatement` by `WhileStatement`),
 // and the new `Slots::Variable` kind is cycle-broken into `VariableInitializer.hpp`.
 class FixedStatement;
+// `CaseLabel`/`SwitchSection`/`SwitchStatement` are the switch family -- the next in-order
+// Phase-5 piece per the D267 plan ("SwitchStatement, TryCatchStatement,
+// LocalFunctionDeclarationStatement, VariableDeclarationStatement ..."). `CaseLabel` is a sealed
+// `AstNode` (deriving DIRECTLY from the `AstNode` root, a leaf of a `SwitchSection`'s `CaseLabels`
+// collection) with a single NULLABLE `Expression?` `Expression` `[Slot("Expression")]` slot (the
+// case expression, null for `default:` -- the `ReturnStatement` D255 nullable-`Expression?`-slot
+// shape applied to a direct-`AstNode`-derived node) plus `CaseKeyword`/`DefaultKeyword` const
+// strings; the `Expression()` accessor shadows the `Expression` base type (the D231 crux). 
+// `SwitchSection` is a non-sealed `AstNode` (the `[DecompilerAstNode(hasPatternPlaceholder: true)]`
+// non-`sealed` form) with TWO collections -- a `CaseLabels AstNodeCollection<CaseLabel>` (the
+// `case`/`default` labels) and a `Statements AstNodeCollection<Statement>` (the section's
+// statements, `[Slot("EmbeddedStatement")]` reusing the `WhileStatement` D258 kind as a collection
+// -- the kind-collapsing-by-name design); both non-incremental (two collections), the `ComposedType`
+// D242 two-collection shape with NO single slot between. `SwitchStatement` is a sealed `Statement`
+// structurally the `InvocationExpression` D248 shape (a single REQUIRED `Expression` child at index
+// 0 + a `SwitchSections AstNodeCollection<SwitchSection>` collection at index 1, incremental) with
+// the `SwitchKeyword` const string; the `Expression()` accessor shadows the `Expression` base type
+// (the D231 crux). `CaseLabel` reuses the already-ported `Slots::Expression` kind; `SwitchSection`
+// adds the NEW cycle-broken `Slots::CaseLabel` kind (cycle-broken into `CaseLabel.hpp`) and reuses
+// `Slots::EmbeddedStatement`; `SwitchStatement` adds the NEW cycle-broken `Slots::SwitchSection`
+// kind (cycle-broken into `SwitchSection.hpp`) and reuses `Slots::Expression`.
+class CaseLabel;
+class SwitchSection;
+class SwitchStatement;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -437,6 +461,9 @@ public:
     virtual void VisitForeachStatement(ForeachStatement*) = 0;
     virtual void VisitVariableInitializer(VariableInitializer*) = 0;
     virtual void VisitFixedStatement(FixedStatement*) = 0;
+    virtual void VisitCaseLabel(CaseLabel*) = 0;
+    virtual void VisitSwitchSection(SwitchSection*) = 0;
+    virtual void VisitSwitchStatement(SwitchStatement*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

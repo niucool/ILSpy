@@ -101,6 +101,9 @@
 #include "ParenthesizedVariableDesignation.hpp"
 #include "VariableInitializer.hpp"
 #include "Statements/FixedStatement.hpp"
+#include "CaseLabel.hpp"
+#include "SwitchSection.hpp"
+#include "Statements/SwitchStatement.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -327,6 +330,15 @@ public:
         VisitChildren(node);
     }
     virtual void VisitFixedStatement(FixedStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitCaseLabel(CaseLabel* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitSwitchSection(SwitchSection* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitSwitchStatement(SwitchStatement* node) {
         VisitChildren(node);
     }
 };
