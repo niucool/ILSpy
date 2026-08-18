@@ -106,6 +106,7 @@
 #include "Statements/SwitchStatement.hpp"
 #include "CatchClause.hpp"
 #include "Statements/TryCatchStatement.hpp"
+#include "Statements/VariableDeclarationStatement.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -347,6 +348,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitTryCatchStatement(TryCatchStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitVariableDeclarationStatement(VariableDeclarationStatement* node) {
         VisitChildren(node);
     }
 };

@@ -76,6 +76,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/Statements/FixedStatement_Test.cpp
     Decompiler/CSharp/Syntax/Statements/SwitchStatement_Test.cpp
     Decompiler/CSharp/Syntax/Statements/TryCatchStatement_Test.cpp
+    Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement_Test.cpp
     Decompiler/CSharp/Syntax/VariableDesignation_Test.cpp
     Decompiler/CSharp/Syntax/VariableInitializer_Test.cpp
     Decompiler/CSharp/Syntax/PatternMatching/PatternMatching_Test.cpp

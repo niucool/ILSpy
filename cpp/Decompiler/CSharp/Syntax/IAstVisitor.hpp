@@ -395,6 +395,21 @@ class SwitchStatement;
 class CatchClause;
 class TryCatchStatement;
 
+// `VariableDeclarationStatement` is the `local_variable_declaration ::= type
+// variable_initializer+` node (C# grammar 13.6.2.1) -- the next in-order Phase-5 piece per the D269
+// plan (now unblocked -- it needs the `VariableInitializer` already ported by D266 for its
+// `Variables` collection, plus a `Modifiers` `[Flags]` enum scalar). A sealed `Statement` with a
+// single REQUIRED `AstType Type` `[Slot]` at flattened index 0, a `Variables
+// AstNodeCollection<VariableInitializer>` collection `[Slot("Variable")]` at slot 1 (incremental --
+// the node's only collection and its last slot), and a `Modifiers` scalar (a plain settable
+// `Modifiers`-typed property, NOT a `[Slot]` -- the first ported `[Flags]` enum scalar). NO
+// name-shadowing crux (no member is named `AstType`/`VariableInitializer`/`Statement`/`Modifiers` --
+// the `Modifiers()` accessor does not collide with the `Modifiers` `enum class`), so no
+// elaborated-type-specifier is needed; `Slots::Type` is already ported (by `Attribute` D240) and
+// `Slots::Variable` is cycle-broken into `VariableInitializer.hpp` (by `FixedStatement` D267), so
+// `Slots.hpp` is unchanged; the `Modifiers` enum lives in its own `Modifiers.hpp` header.
+class VariableDeclarationStatement;
+
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
 // on it; `CSharpOutputVisitor` (the pretty-printer) implements it. An abstract base (a
@@ -481,6 +496,7 @@ public:
     virtual void VisitSwitchStatement(SwitchStatement*) = 0;
     virtual void VisitCatchClause(CatchClause*) = 0;
     virtual void VisitTryCatchStatement(TryCatchStatement*) = 0;
+    virtual void VisitVariableDeclarationStatement(VariableDeclarationStatement*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
