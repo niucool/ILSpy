@@ -293,6 +293,22 @@ class UsingStatement;
 // per-node slot carrying `IsOptional=true` for the nullable case)/`Slots::EmbeddedStatement` (by
 // `WhileStatement`); NO name-shadowing crux (no member is named `Expression`/`Statement`).
 class ForStatement;
+// `VariableDesignation` is the abstract base of the C# 7 deconstruction designations -- the
+// next in-order Phase-5 piece per the D263 plan (`ForeachStatement` needs the hierarchy). The
+// abstract base itself gets NO `Visit` method (`NeedsVisitor = !IsAbstract && base.IsAbstract`
+// is `false` since `VariableDesignation` is abstract), so only the two concrete subclasses land
+// on `IAstVisitor`: `SingleVariableDesignation` (the `single_variable_designation ::= identifier`
+// leaf, a sealed `VariableDesignation` with a single REQUIRED `string Identifier` string-name
+// `[Slot("Identifier")]` over a backing `IdentifierToken` -- the `LabelStatement` D259 shape with a
+// `VariableDesignation` base, plus the `SimpleType`/`IdentifierExpression` `Identifier` name-shadowing
+// crux) and `ParenthesizedVariableDesignation` (the `tuple_designation ::= '(' designations? ')'`
+// node, a sealed `VariableDesignation` whose sole child slot is the `VariableDesignations`
+// `AstNodeCollection<VariableDesignation>` collection -- the `ArrayInitializerExpression` D250 /
+// `BlockStatement` D256 collection-only shape with a `VariableDesignation` base, plus the new
+// `Slots::VariableDesignation` kind). Neither ends in "AstType", so the generator's
+// visit-method-name default yields `VisitSingleVariableDesignation`/`VisitParenthesizedVariableDesignation`.
+class SingleVariableDesignation;
+class ParenthesizedVariableDesignation;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -370,6 +386,8 @@ public:
     virtual void VisitLockStatement(LockStatement*) = 0;
     virtual void VisitUsingStatement(UsingStatement*) = 0;
     virtual void VisitForStatement(ForStatement*) = 0;
+    virtual void VisitSingleVariableDesignation(SingleVariableDesignation*) = 0;
+    virtual void VisitParenthesizedVariableDesignation(ParenthesizedVariableDesignation*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

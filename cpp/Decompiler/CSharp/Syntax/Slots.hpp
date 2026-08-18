@@ -47,6 +47,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/Identifier.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/Statement.hpp"
+#include "Decompiler/CSharp/Syntax/VariableDesignation.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax::Slots {
 
@@ -272,6 +273,22 @@ inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Statement> Ite
 // `ResourceAcquisition` lives in the `Syntax` namespace, so no elaborated-type-specifier is
 // needed (no name collision in either direction).
 inline const CSharpSlotInfoT<AstNode> ResourceAcquisition{"ResourceAcquisition", false, nullptr, false};
+
+// The `VariableDesignation` kind -- a collection of `VariableDesignation` (the nested-designation
+// list of a `ParenthesizedVariableDesignation`: `ParenthesizedVariableDesignation.VariableDesignations`,
+// an `AstNodeCollection<VariableDesignation>`). Unique to `ParenthesizedVariableDesignation` among
+// the ported nodes. A `CSharpSlotInfoT<VariableDesignation>` (the element type is the
+// `VariableDesignation` abstract base, complete via the `VariableDesignation.hpp` include above).
+// `VariableDesignation.hpp` does NOT include `Slots.hpp` (the abstract base has no per-node slot
+// statics -- the `Slots.Statement`/`Slots.ArraySpecifier` precedent applied to the designation
+// base), so this kind lives HERE in `Slots.hpp` (no include cycle). The name `VariableDesignation`
+// collides with the `VariableDesignation` CLASS in the parent `Syntax` namespace (the
+// `Expression`/`Identifier`/`Statement` collision pattern): the template argument in this
+// definition resolves to the class (the constant being declared is not yet in scope at the point
+// its type is parsed), and a LATER `Slots` entry wanting the `VariableDesignation` class as its
+// element type must qualify it (`::ILSpy::Decompiler::CSharp::Syntax::VariableDesignation`) to
+// avoid resolving to this constant.
+inline const CSharpSlotInfoT<VariableDesignation> VariableDesignation{"VariableDesignation", false, nullptr, false};
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 

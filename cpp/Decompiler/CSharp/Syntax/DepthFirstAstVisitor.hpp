@@ -96,6 +96,8 @@
 #include "Statements/LockStatement.hpp"
 #include "Statements/UsingStatement.hpp"
 #include "Statements/ForStatement.hpp"
+#include "SingleVariableDesignation.hpp"
+#include "ParenthesizedVariableDesignation.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -307,6 +309,12 @@ public:
         VisitChildren(node);
     }
     virtual void VisitForStatement(ForStatement* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitSingleVariableDesignation(SingleVariableDesignation* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitParenthesizedVariableDesignation(ParenthesizedVariableDesignation* node) {
         VisitChildren(node);
     }
 };
