@@ -214,6 +214,15 @@ class OutVarDeclarationExpression;
 // second slot an `ArrayInitializerExpression` instead of an `AstType`, reusing the already-
 // ported `Slots::Expression`/`Slots::Initializer` kinds with no new `Slots` constant.
 class WithInitializerExpression;
+// `UndocumentedExpression` is the `undocumented_expression ::= '__arglist' | '__arglist'
+// '(' expression* ')' | '__refvalue' '(' expression ',' type ')' | '__reftype' '(' expression
+// ')' | '__makeref' '(' expression ')'` shape (no spec grammar production) -- a sealed
+// `Expression` carrying a `UndocumentedExpressionType` scalar (the kind of undocumented
+// expression, no `Any` member) and an `Arguments` `AstNodeCollection<Expression>` collection.
+// The `ConstructorInitializer` D281 collection-only-plus-enum-scalar shape applied to the
+// `Expression` hierarchy, reusing the already-ported `Slots::Argument` kind with no new
+// `Slots` constant.
+class UndocumentedExpression;
 // `ContinueStatement`/`BreakStatement`/`YieldBreakStatement` are the first concrete C# AST
 // statement nodes -- the cleanest leaf statements (no `[Slot]` children, no members), the
 // start of the Statement hierarchy (a leaf with no slots; `BreakStatement`/`YieldBreakStatement`
@@ -716,6 +725,7 @@ public:
     virtual void VisitErrorExpression(ErrorExpression*) = 0;
     virtual void VisitOutVarDeclarationExpression(OutVarDeclarationExpression*) = 0;
     virtual void VisitWithInitializerExpression(WithInitializerExpression*) = 0;
+    virtual void VisitUndocumentedExpression(UndocumentedExpression*) = 0;
     virtual void VisitContinueStatement(ContinueStatement*) = 0;
     virtual void VisitBreakStatement(BreakStatement*) = 0;
     virtual void VisitYieldBreakStatement(YieldBreakStatement*) = 0;

@@ -68,6 +68,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/Expressions/ErrorExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/OutVarDeclarationExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/WithInitializerExpression_Test.cpp
+    Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression_Test.cpp
     Decompiler/CSharp/Syntax/Statements/Statement_Test.cpp
     Decompiler/CSharp/Syntax/Statements/ReturnThrowExpressionStatement_Test.cpp
     Decompiler/CSharp/Syntax/Statements/BlockStatement_Test.cpp
