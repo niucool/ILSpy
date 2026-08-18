@@ -674,6 +674,13 @@ class PreProcessorDirective;
 // collections) and three non-`[Slot]` scalars (`SymbolKind`/`OperatorType` enums + `HasParameterList`
 // bool). Only `DocumentationReference` is forward-declared here (it has no ported derived classes).
 class DocumentationReference;
+// `DeclarationExpression` is the `declaration_expression ::= type variable_designation` (C# grammar
+// 12.20) -- the `CastExpression` D243 two-required-single-slot shape with the second operand a
+// `VariableDesignation` instead of an `Expression` (`Type` `AstType` + `Designation` `VariableDesignation`,
+// no scalar, no name-shadowing crux). The next in-order Phase-5 piece per the D302 plan (a remaining
+// Expression node whose dependencies are all ported). Only `DeclarationExpression` is forward-
+// declared here (no ported derived classes).
+class DeclarationExpression;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -800,6 +807,7 @@ public:
     virtual void VisitNamespaceDeclaration(NamespaceDeclaration*) = 0;
     virtual void VisitPreProcessorDirective(PreProcessorDirective*) = 0;
     virtual void VisitDocumentationReference(DocumentationReference*) = 0;
+    virtual void VisitDeclarationExpression(DeclarationExpression*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

@@ -145,6 +145,7 @@
 #include "NamespaceDeclaration.hpp"
 #include "PreProcessorDirective.hpp"
 #include "DocumentationReference.hpp"
+#include "Expressions/DeclarationExpression.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -503,6 +504,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitDocumentationReference(DocumentationReference* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitDeclarationExpression(DeclarationExpression* node) {
         VisitChildren(node);
     }
 };
