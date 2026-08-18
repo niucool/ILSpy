@@ -126,6 +126,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/QueryJoinClause_Test.cpp
     Decompiler/CSharp/Syntax/PatternMatching/PatternMatching_Test.cpp
     Decompiler/CSharp/OutputVisitor/TokenWriter_Test.cpp
+    Decompiler/CSharp/OutputVisitor/CSharpFormattingOptions_Test.cpp
     Decompiler/IL/ControlFlowSimplification_Test.cpp
     Decompiler/IL/ControlFlowGraph_Test.cpp
     Decompiler/FlowAnalysis/Dominance_Test.cpp
