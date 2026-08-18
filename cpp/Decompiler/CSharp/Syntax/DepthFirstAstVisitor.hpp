@@ -111,6 +111,7 @@
 #include "FieldDeclaration.hpp"
 #include "Accessor.hpp"
 #include "EnumMemberDeclaration.hpp"
+#include "PropertyDeclaration.hpp"
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -367,6 +368,9 @@ public:
         VisitChildren(node);
     }
     virtual void VisitEnumMemberDeclaration(EnumMemberDeclaration* node) {
+        VisitChildren(node);
+    }
+    virtual void VisitPropertyDeclaration(PropertyDeclaration* node) {
         VisitChildren(node);
     }
 };

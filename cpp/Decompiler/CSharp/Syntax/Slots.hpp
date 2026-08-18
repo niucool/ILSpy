@@ -304,6 +304,41 @@ inline const CSharpSlotInfoT<VariableDesignation> VariableDesignation{"VariableD
 // namespace and the variable is in scope).
 inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> EnumMemberInitializer{"EnumMemberInitializer", false, nullptr, false};
 
+// The `PrivateImplementationType` kind -- a single NULLABLE `AstType` child (the explicit-interface
+// implementation type of a `PropertyDeclaration.PrivateImplementationType`, e.g. the `I` in
+// `int I.P { get; set; }`; null when the property is not an explicit interface implementation).
+// Unique to `PropertyDeclaration` among the ported nodes. A `CSharpSlotInfoT<AstType>` (the
+// element type is the `AstType` abstract base, complete via the `AstType.hpp` include above).
+// `AstType.hpp` does NOT include `Slots.hpp` (the abstract base has no per-node slot statics --
+// the `Slots.Statement`/`Slots.ArraySpecifier` precedent), so this kind lives HERE in `Slots.hpp`
+// (no include cycle). No `Slots` variable is named `AstType`, and no class named
+// `PrivateImplementationType` lives in the `Syntax` namespace, so no elaborated-type-specifier is
+// needed (no name collision in either direction). The shared constant is constructed
+// non-collection/non-optional; the per-node `PrivateImplementationTypeSlot` on `PropertyDeclaration`
+// carries the `IsOptional=true` flag (the nullable slot -- the shared kind is constructed
+// non-optional, the per-node slot carries the optionality, the `IfElseStatement.FalseStatement`
+// D258 precedent).
+inline const CSharpSlotInfoT<AstType> PrivateImplementationType{"PrivateImplementationType", false, nullptr, false};
+
+// The `ExpressionBody` kind -- a single NULLABLE `Expression` child (the expression body of an
+// expression-bodied `PropertyDeclaration`/`IndexerDeclaration`, e.g. the `=> expr` of
+// `int P => 5`; absent for a classic `{ get; set; }` property). Shared by every
+// `[Slot("ExpressionBody")] Expression?` declaration. A `CSharpSlotInfoT<Expression>` (the
+// element type is the `Expression` abstract base, complete via the `Expression.hpp` include
+// above). `Expression.hpp` does NOT include `Slots.hpp` (the abstract base has no per-node slot
+// statics -- the `Slots.Statement`/`Slots.ArraySpecifier` precedent), so this kind lives HERE in
+// `Slots.hpp` (no include cycle). Defined AFTER the `Slots::Expression` *variable*, so the element
+// type is qualified (`::ILSpy::Decompiler::CSharp::Syntax::Expression`) to avoid resolving to that
+// variable (the `Expression`/`Condition`/`TargetExpression`/`Argument`/`EnumMemberInitializer`
+// collision precedent: an unqualified name shared with a prior `Slots` variable resolves to the
+// variable, not the class, since `Slots` is a namespace and the variable is in scope). The kind
+// name `ExpressionBody` is DISTINCT from the `Expression` variable, so the constant's own name
+// does not collide. The shared constant is constructed non-collection/non-optional; the per-node
+// `ExpressionBodySlot` on `PropertyDeclaration` carries the `IsOptional=true` flag (the nullable
+// slot -- the shared kind is constructed non-optional, the per-node slot carries the optionality,
+// the `IfElseStatement.FalseStatement` D258 precedent).
+inline const CSharpSlotInfoT<::ILSpy::Decompiler::CSharp::Syntax::Expression> ExpressionBody{"ExpressionBody", false, nullptr, false};
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax::Slots
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_SLOTS_HPP

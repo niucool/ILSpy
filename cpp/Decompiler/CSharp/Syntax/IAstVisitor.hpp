@@ -425,12 +425,14 @@ class VariableDeclarationStatement;
 // kinds) is the next per the D273 plan. The abstract `EntityDeclaration` base gets NO `Visit` method
 // (`NeedsVisitor` is false for an abstract base); `DestructorDeclaration` adds
 // `VisitDestructorDeclaration`, `FieldDeclaration` adds `VisitFieldDeclaration`, `Accessor` adds
-// `VisitAccessor`, and `EnumMemberDeclaration` adds `VisitEnumMemberDeclaration`.
+// `VisitAccessor`, and `EnumMemberDeclaration` adds `VisitEnumMemberDeclaration`, and
+// `PropertyDeclaration` adds `VisitPropertyDeclaration`.
 class EntityDeclaration;
 class DestructorDeclaration;
 class FieldDeclaration;
 class Accessor;
 class EnumMemberDeclaration;
+class PropertyDeclaration;
 
 // The C# `public interface IAstVisitor` -- the void-returning AST visitor interface. The
 // concrete node's `AcceptVisitor(IAstVisitor&)` calls the matching `Visit<NodeName>(this)`
@@ -523,6 +525,7 @@ public:
     virtual void VisitFieldDeclaration(FieldDeclaration*) = 0;
     virtual void VisitAccessor(Accessor*) = 0;
     virtual void VisitEnumMemberDeclaration(EnumMemberDeclaration*) = 0;
+    virtual void VisitPropertyDeclaration(PropertyDeclaration*) = 0;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

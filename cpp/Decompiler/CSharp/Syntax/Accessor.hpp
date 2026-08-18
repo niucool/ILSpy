@@ -394,6 +394,45 @@ private:
     AccessorKind kind_ = AccessorKind::Any;
 };
 
+// The `Getter` kind -- a single NULLABLE `Accessor` child (the `get` accessor of a
+// `PropertyDeclaration.Getter`, absent for a set-only or expression-bodied property). Shared by
+// every `[Slot("Getter")] Accessor?` declaration. A `CSharpSlotInfoT<Accessor>` (the element
+// type is the concrete `Accessor` node). Defined HERE (in Accessor.hpp, after the `Accessor` class)
+// for the cycle-breaking reason: Accessor.hpp includes Slots.hpp (for its per-node `AttributesSlot`/
+// `BodySlot`), so a `CSharpSlotInfoT<Accessor>` kind cannot live in Slots.hpp -- a circular include
+// (with Slots.hpp's guard set the kind would not be visible where Accessor.hpp's class body needs
+// the other Slots kinds) -- and is defined here where both `CSharpSlotInfoT` (via the Slots.hpp
+// include) and `Accessor` are complete. The `inline` variable has external linkage and one address
+// across translation units (the C++17 `inline` guarantee), preserving the pointer-identity
+// comparison `node.Slot.Kind == &Slots::Getter` the slot system relies on. The kind name `Getter`
+// collides with no class in the `Syntax` namespace (there is `Accessor`, not `Getter`), so no
+// elaborated-type-specifier is needed. The shared constant is constructed non-collection/
+// non-optional (`{"Getter", false, nullptr, false}`); the per-node `GetterSlot` on
+// `PropertyDeclaration` carries the `IsOptional=true` flag (the `Getter` is a nullable slot --
+// the shared kind is constructed non-optional, the per-node slot carries the optionality, the
+// `IfElseStatement.FalseStatement` D258 precedent).
+namespace Slots {
+inline const CSharpSlotInfoT<Accessor> Getter{"Getter", false, nullptr, false};
+} // namespace Slots
+
+// The `Setter` kind -- a single NULLABLE `Accessor` child (the `set`/`init` accessor of a
+// `PropertyDeclaration.Setter`, absent for a get-only or expression-bodied property). Shared by
+// every `[Slot("Setter")] Accessor?` declaration. A `CSharpSlotInfoT<Accessor>` (the element
+// type is the concrete `Accessor` node). Defined HERE (in Accessor.hpp, after the `Accessor` class
+// and the `Slots::Getter` kind) for the same cycle-breaking reason as `Slots::Getter`
+// (Accessor.hpp includes Slots.hpp, so the kind cannot live in Slots.hpp). The `inline` variable
+// has external linkage and one address across translation units (the C++17 `inline` guarantee),
+// preserving the pointer-identity comparison `node.Slot.Kind == &Slots::Setter` the slot system
+// relies on. The kind name `Setter` collides with no class in the `Syntax` namespace (there is
+// `Accessor`, not `Setter`), so no elaborated-type-specifier is needed. The shared constant is
+// constructed non-collection/non-optional (`{"Setter", false, nullptr, false}`); the per-node
+// `SetterSlot` on `PropertyDeclaration` carries the `IsOptional=true` flag (the `Setter` is a
+// nullable slot -- the shared kind is constructed non-optional, the per-node slot carries the
+// optionality, the `IfElseStatement.FalseStatement` D258 precedent).
+namespace Slots {
+inline const CSharpSlotInfoT<Accessor> Setter{"Setter", false, nullptr, false};
+} // namespace Slots
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 
 #endif // ILSPY_DECOMPILER_CSHARP_SYNTAX_ACCESSOR_HPP
