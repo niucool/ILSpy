@@ -84,6 +84,8 @@
 #include "Decompiler/CSharp/Syntax/MemberType.hpp"
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
 #include "Decompiler/CSharp/Syntax/ConstructorInitializer.hpp"
+#include "Decompiler/CSharp/Syntax/ConstructorDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
 #include "Decompiler/CSharp/Syntax/TupleTypeElement.hpp"
 #include "Decompiler/CSharp/Syntax/TupleAstType.hpp"
@@ -1731,7 +1733,32 @@ void CSharpOutputVisitor::VisitConstructorInitializer(Syntax::ConstructorInitial
 	WriteCommaSeparatedListInParenthesis(ToVector(constructorInitializer->Arguments()), policy_.SpaceWithinMethodCallParentheses);
 	EndNode(constructorInitializer);
 }
-void CSharpOutputVisitor::VisitConstructorDeclaration(Syntax::ConstructorDeclaration*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitConstructorDeclaration(Syntax::ConstructorDeclaration* constructorDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitConstructorDeclaration. The name is the ctor's
+	// own NameToken, UNLESS the ctor is a member of a TypeDeclaration whose name differs (the
+	// `(Identifier)type.NameToken.Clone()` branch) -- the C# clones the type's NameToken so a
+	// renamed-type ctor keeps the type's name (a name-mismatch ctor is a separate Identifier node).
+	StartNode(constructorDeclaration);
+	WriteAttributes(ToVector(constructorDeclaration->Attributes()));
+	WriteModifiers(constructorDeclaration->Modifiers());
+	auto* type = dynamic_cast<Syntax::TypeDeclaration*>(constructorDeclaration->Parent());
+	if (type != nullptr && type->Name() != constructorDeclaration->NameToken()->Name()) {
+		std::unique_ptr<Syntax::Identifier> cloned(type->NameToken()->Clone());
+		WriteIdentifier(cloned.get());
+	} else {
+		WriteIdentifier(constructorDeclaration->NameToken());
+	}
+	Space(policy_.SpaceBeforeConstructorDeclarationParentheses);
+	WriteCommaSeparatedListInParenthesis(ToVector(constructorDeclaration->Parameters()), policy_.SpaceWithinMethodDeclarationParentheses);
+	if (constructorDeclaration->Initializer() != nullptr) {
+		NewLine();
+		writer_->Indent();
+		constructorDeclaration->Initializer()->AcceptVisitor(*this);
+		writer_->Unindent();
+	}
+	WriteMethodBody(constructorDeclaration->Body(), policy_.ConstructorBraceStyle);
+	EndNode(constructorDeclaration);
+}
 void CSharpOutputVisitor::VisitTypeParameterDeclaration(Syntax::TypeParameterDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitConstraint(Syntax::Constraint*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitMethodDeclaration(Syntax::MethodDeclaration*) { NotImplemented(); }

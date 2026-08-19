@@ -88,6 +88,7 @@
 #include "Decompiler/CSharp/Syntax/MemberType.hpp"
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
 #include "Decompiler/CSharp/Syntax/ConstructorInitializer.hpp"
+#include "Decompiler/CSharp/Syntax/ConstructorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
 #include "Decompiler/CSharp/Syntax/TupleTypeElement.hpp"
 #include "Decompiler/CSharp/Syntax/TupleAstType.hpp"
@@ -184,6 +185,7 @@ using ILSpy::Decompiler::CSharp::Syntax::CatchClause;
 using ILSpy::Decompiler::CSharp::Syntax::TryCatchStatement;
 using ILSpy::Decompiler::CSharp::Syntax::ConstructorInitializer;
 using ILSpy::Decompiler::CSharp::Syntax::ConstructorInitializerType;
+using ILSpy::Decompiler::CSharp::Syntax::ConstructorDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::DestructorDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::Accessor;
 using ILSpy::Decompiler::CSharp::Syntax::AccessorKind;
@@ -3852,4 +3854,110 @@ TEST(CSharp_OutputVisitor, VisitConstructorInitializerThisOneArg) {
 	EXPECT_EQ(h.inner.calls[7], "end");
 	EXPECT_EQ(h.inner.calls[8], "tok:)");
 	EXPECT_EQ(h.inner.calls[9], "end");
+}
+
+// `VisitConstructorDeclaration` over `Foo() {}` -- a parentless ctor (no Attributes, no
+// Modifiers, NameToken `Foo`, no Parameters, no Initializer, an empty Body). WriteAttributes is
+// a no-op (empty), WriteModifiers(0) is a no-op, the `Parent as TypeDeclaration` is null so the
+// `else` writes NameToken, Space(false) before the parens is a no-op, the empty Parameters list
+// writes `(` `)`, no Initializer, then WriteMethodBody(Body) writes the block braces + a newline.
+TEST(CSharp_OutputVisitor, VisitConstructorDeclarationBare) {
+	V h;
+	auto body = std::make_unique<BlockStatement>();
+	auto node = std::make_unique<ConstructorDeclaration>();
+	node->NameToken(Identifier::Create("Foo"));
+	node->Body(body.get());
+	h.visitor->VisitConstructorDeclaration(node.get());
+	// The port WriteIdentifier is a direct writer call (id:Foo only, NOT the C# recursive
+	// start/VisitIdentifier/end -- the D334/D338 convention); OpenBrace inserts a space before
+	// { since the line carries "Foo()".
+	// start, id:Foo, tok:(, tok:), start, space, tok:{, indent, newline, unindent, tok:}, end, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 14u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "id:Foo");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "tok:)");
+	EXPECT_EQ(h.inner.calls[4], "start");
+	EXPECT_EQ(h.inner.calls[5], "space");
+	EXPECT_EQ(h.inner.calls[6], "tok:{");
+	EXPECT_EQ(h.inner.calls[7], "indent");
+	EXPECT_EQ(h.inner.calls[8], "newline");
+	EXPECT_EQ(h.inner.calls[9], "unindent");
+	EXPECT_EQ(h.inner.calls[10], "tok:}");
+	EXPECT_EQ(h.inner.calls[11], "end");
+	EXPECT_EQ(h.inner.calls[12], "newline");
+	EXPECT_EQ(h.inner.calls[13], "end");
+}
+
+// `VisitConstructorDeclaration` over `Foo(int x)` -- one parameter recurses through
+// VisitParameterDeclaration between the parens (no comma for a single element). The parameter
+// has a null Type and null NameToken, so VisitParameterDeclaration drives only its own
+// start/end (no inner tokens); the parens still bracket it, and the body braces follow.
+TEST(CSharp_OutputVisitor, VisitConstructorDeclarationOneParam) {
+	V h;
+	auto body = std::make_unique<BlockStatement>();
+	auto param = std::make_unique<ParameterDeclaration>();
+	auto node = std::make_unique<ConstructorDeclaration>();
+	node->NameToken(Identifier::Create("Foo"));
+	node->Parameters().Add(param.get());
+	node->Body(body.get());
+	h.visitor->VisitConstructorDeclaration(node.get());
+	ASSERT_GE(h.inner.calls.size(), 10u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "id:Foo");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	// the parameter recursion (VisitParameterDeclaration) sits at index 3+; assert the parens
+	// bracket it and the body braces follow the close paren.
+	auto rpar = std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:)");
+	ASSERT_NE(rpar, h.inner.calls.end()) << "the parameter list must close with tok:)";
+	auto lbrace = std::find(rpar, h.inner.calls.end(), "tok:{");
+	ASSERT_NE(lbrace, h.inner.calls.end()) << "the body block must open with tok:{";
+}
+
+// `VisitConstructorDeclaration` over `Foo() : base(1)` -- an Initializer (the D344
+// VisitConstructorInitializer) recurses after the parens, indented: NewLine + writer.Indent +
+// VisitConstructorInitializer + writer.Unindent, then the body. The initializer `: base(1)`
+// drives tok:: / space / kw:base / tok:( / <primval> / tok:).
+TEST(CSharp_OutputVisitor, VisitConstructorDeclarationWithInitializer) {
+	V h;
+	auto body = std::make_unique<BlockStatement>();
+	auto arg = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto init = std::make_unique<ConstructorInitializer>(ConstructorInitializerType::Base);
+	init->Arguments().Add(arg.get());
+	auto node = std::make_unique<ConstructorDeclaration>();
+	node->NameToken(Identifier::Create("Foo"));
+	node->Initializer(init.get());
+	node->Body(body.get());
+	h.visitor->VisitConstructorDeclaration(node.get());
+	// start, id:Foo, tok:(, tok:), newline, indent,
+	// <VisitConstructorInitializer>: start, tok::, space, kw:base, tok:(, start, primval, end, tok:), end,
+	// unindent, <body: start, space, tok:{, indent, newline, unindent, tok:}, end>, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 27u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "id:Foo");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "tok:)");
+	EXPECT_EQ(h.inner.calls[4], "newline");
+	EXPECT_EQ(h.inner.calls[5], "indent");
+	EXPECT_EQ(h.inner.calls[6], "start");
+	EXPECT_EQ(h.inner.calls[7], "tok::");
+	EXPECT_EQ(h.inner.calls[8], "space");
+	EXPECT_EQ(h.inner.calls[9], "kw:base");
+	EXPECT_EQ(h.inner.calls[10], "tok:(");
+	EXPECT_EQ(h.inner.calls[11], "start");
+	EXPECT_EQ(h.inner.calls[12], "primval");
+	EXPECT_EQ(h.inner.calls[13], "end");
+	EXPECT_EQ(h.inner.calls[14], "tok:)");
+	EXPECT_EQ(h.inner.calls[15], "end");
+	EXPECT_EQ(h.inner.calls[16], "unindent");
+	EXPECT_EQ(h.inner.calls[17], "start");
+	EXPECT_EQ(h.inner.calls[18], "space");
+	EXPECT_EQ(h.inner.calls[19], "tok:{");
+	EXPECT_EQ(h.inner.calls[20], "indent");
+	EXPECT_EQ(h.inner.calls[21], "newline");
+	EXPECT_EQ(h.inner.calls[22], "unindent");
+	EXPECT_EQ(h.inner.calls[23], "tok:}");
+	EXPECT_EQ(h.inner.calls[24], "end");
+	EXPECT_EQ(h.inner.calls[25], "newline");
+	EXPECT_EQ(h.inner.calls[26], "end");
 }
