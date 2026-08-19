@@ -83,6 +83,10 @@
 #include "Decompiler/CSharp/Syntax/MemberType.hpp"
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
 #include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
+#include "Decompiler/CSharp/Syntax/TupleTypeElement.hpp"
+#include "Decompiler/CSharp/Syntax/TupleAstType.hpp"
+#include "Decompiler/CSharp/Syntax/InvocationAstType.hpp"
+#include "Decompiler/CSharp/Syntax/FunctionPointerAstType.hpp"
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Syntax/PreProcessorDirective.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
@@ -187,6 +191,10 @@ using ILSpy::Decompiler::CSharp::Syntax::VariableInitializer;
 using ILSpy::Decompiler::CSharp::Syntax::ErrorExpression;
 using ILSpy::Decompiler::CSharp::Syntax::SingleVariableDesignation;
 using ILSpy::Decompiler::CSharp::Syntax::ParenthesizedVariableDesignation;
+using ILSpy::Decompiler::CSharp::Syntax::TupleTypeElement;
+using ILSpy::Decompiler::CSharp::Syntax::TupleAstType;
+using ILSpy::Decompiler::CSharp::Syntax::InvocationAstType;
+using ILSpy::Decompiler::CSharp::Syntax::FunctionPointerAstType;
 
 namespace {
 
@@ -2412,4 +2420,178 @@ TEST(CSharp_OutputVisitor, VisitParenthesizedVariableDesignationTwo) {
 	EXPECT_EQ(h.inner.calls[8], "end");
 	EXPECT_EQ(h.inner.calls[9], "tok:)");
 	EXPECT_EQ(h.inner.calls[10], "end");
+}
+
+// `VisitTupleTypeElement` with a name `int Name` -- the `Type` recurses through
+// `VisitPrimitiveType`, then an explicit `Space`, then the `NameToken` recurses through
+// `VisitIdentifier` (which is a flat token, no `StartNode`/`EndNode` per the D325 contract).
+TEST(CSharp_OutputVisitor, VisitTupleTypeElementNamed) {
+	V h;
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto node = std::make_unique<TupleTypeElement>(type.get(), std::string("Name"));
+	h.visitor->VisitTupleTypeElement(node.get());
+	// start, start(PrimitiveType), primtype:int, end(PrimitiveType), space, id:Name, end
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primtype:int");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "id:Name");
+	EXPECT_EQ(h.inner.calls[6], "end");
+}
+
+// `VisitTupleTypeElement` without a name `int` -- the nullable `NameToken` is absent, so the
+// `Space` + `NameToken` recursion is skipped (the bare `type` element form); the node's own
+// `StartNode`/`EndNode` still bracket the `Type` recursion.
+TEST(CSharp_OutputVisitor, VisitTupleTypeElementNameless) {
+	V h;
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto node = std::make_unique<TupleTypeElement>();
+	node->Type(type.get());
+	h.visitor->VisitTupleTypeElement(node.get());
+	// start(TupleTypeElement), start(PrimitiveType), primtype:int, end(PrimitiveType), end(TupleTypeElement)
+	ASSERT_EQ(h.inner.calls.size(), 5u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primtype:int");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "end");
+}
+
+// `VisitTupleType` over `(int, string)` -- the elements in parentheses, comma-separated (the
+// default policy has no bracket-comma spaces); each `TupleTypeElement` recurses through
+// `VisitTupleTypeElement` (its own `start`/`end` plus the `Type`'s `start`/`primtype`/`end`), so
+// the first element `int` contributes 5 entries and the second `string` contributes 5.
+TEST(CSharp_OutputVisitor, VisitTupleType) {
+	V h;
+	auto intType = std::make_unique<PrimitiveType>(std::string("int"));
+	auto e0 = std::make_unique<TupleTypeElement>();
+	e0->Type(intType.get());
+	auto strType = std::make_unique<SimpleType>(std::string("string"));
+	auto e1 = std::make_unique<TupleTypeElement>();
+	e1->Type(strType.get());
+	auto node = std::make_unique<TupleAstType>();
+	node->Elements().Add(e0.get());
+	node->Elements().Add(e1.get());
+	h.visitor->VisitTupleType(node.get());
+	// start, tok:(, start, start, primtype:int, end, end, tok:,, start, start, id:string, end, end, tok:), end
+	ASSERT_EQ(h.inner.calls.size(), 15u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "tok:(");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primtype:int");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "end");
+	EXPECT_EQ(h.inner.calls[7], "tok:,");
+	EXPECT_EQ(h.inner.calls[8], "start");
+	EXPECT_EQ(h.inner.calls[9], "start");
+	EXPECT_EQ(h.inner.calls[10], "id:string");
+	EXPECT_EQ(h.inner.calls[11], "end");
+	EXPECT_EQ(h.inner.calls[12], "end");
+	EXPECT_EQ(h.inner.calls[13], "tok:)");
+	EXPECT_EQ(h.inner.calls[14], "end");
+}
+
+// `VisitInvocationType` over `Foo()` -- the `BaseType` recurses through `VisitSimpleType`, then
+// the empty `Arguments` list renders just the parens (the C# uses `WriteToken(Tokens.LPar/RPar)`
+// rather than the `LPar()`/`RPar()` helpers).
+TEST(CSharp_OutputVisitor, VisitInvocationTypeNoArgs) {
+	V h;
+	auto baseType = std::make_unique<SimpleType>(std::string("Foo"));
+	auto node = std::make_unique<InvocationAstType>();
+	node->BaseType(baseType.get());
+	h.visitor->VisitInvocationType(node.get());
+	// start, start(SimpleType), id:Foo, end(SimpleType), tok:(, tok:), end
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "id:Foo");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "tok:(");
+	EXPECT_EQ(h.inner.calls[5], "tok:)");
+	EXPECT_EQ(h.inner.calls[6], "end");
+}
+
+// `VisitInvocationType` over `Foo(null)` -- a single `Arguments` element recurses through
+// `VisitNullReferenceExpression` (a `start/primval/end` sub-trace) between the parens.
+TEST(CSharp_OutputVisitor, VisitInvocationTypeOneArg) {
+	V h;
+	auto baseType = std::make_unique<SimpleType>(std::string("Foo"));
+	auto arg = std::make_unique<NullReferenceExpression>();
+	auto node = std::make_unique<InvocationAstType>();
+	node->BaseType(baseType.get());
+	node->Arguments().Add(arg.get());
+	h.visitor->VisitInvocationType(node.get());
+	// start, start(SimpleType), id:Foo, end, tok:(, start, primval, end, tok:), end
+	ASSERT_EQ(h.inner.calls.size(), 10u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "id:Foo");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "tok:(");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "primval");
+	EXPECT_EQ(h.inner.calls[7], "end");
+	EXPECT_EQ(h.inner.calls[8], "tok:)");
+	EXPECT_EQ(h.inner.calls[9], "end");
+}
+
+// `VisitFunctionPointerType` over `delegate*<int>` -- no unmanaged calling convention, no
+// calling-convention list, and an empty `Parameters` (so the angle-bracket list is just the
+// `ReturnType` `int`); the `delegate` keyword and the `*` pointer token have no space between
+// them (the decorator does not insert one for a keyword followed by `*`).
+TEST(CSharp_OutputVisitor, VisitFunctionPointerTypeBare) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("int"));
+	auto node = std::make_unique<FunctionPointerAstType>();
+	node->ReturnType(retType.get());
+	h.visitor->VisitFunctionPointerType(node.get());
+	// start, kw:delegate, tok:*, tok:<, start, primtype:int, end, tok:>, end
+	ASSERT_EQ(h.inner.calls.size(), 9u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:delegate");
+	EXPECT_EQ(h.inner.calls[2], "tok:*");
+	EXPECT_EQ(h.inner.calls[3], "tok:<");
+	EXPECT_EQ(h.inner.calls[4], "start");
+	EXPECT_EQ(h.inner.calls[5], "primtype:int");
+	EXPECT_EQ(h.inner.calls[6], "end");
+	EXPECT_EQ(h.inner.calls[7], "tok:>");
+	EXPECT_EQ(h.inner.calls[8], "end");
+}
+
+// `VisitFunctionPointerType` over `delegate* unmanaged[Cdecl]<int>` -- the
+// `HasUnmanagedCallingConvention` gate inserts a `Space` + the `unmanaged` keyword, the
+// `CallingConventions` list renders the `[Cdecl]` bracket group (the convention is a `SimpleType`
+// recursing through `VisitSimpleType`), and the empty `Parameters` leaves the `ReturnType` `int`
+// as the sole angle-bracket element.
+TEST(CSharp_OutputVisitor, VisitFunctionPointerTypeUnmanagedConvention) {
+	V h;
+	auto conv = std::make_unique<SimpleType>(std::string("Cdecl"));
+	auto retType = std::make_unique<PrimitiveType>(std::string("int"));
+	auto node = std::make_unique<FunctionPointerAstType>();
+	node->HasUnmanagedCallingConvention(true);
+	node->CallingConventions().Add(conv.get());
+	node->ReturnType(retType.get());
+	h.visitor->VisitFunctionPointerType(node.get());
+	// start, kw:delegate, tok:*, space, kw:unmanaged, tok:[, start, id:Cdecl, end, tok:], tok:<,
+	// start, primtype:int, end, tok:>, end
+	ASSERT_EQ(h.inner.calls.size(), 16u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:delegate");
+	EXPECT_EQ(h.inner.calls[2], "tok:*");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "kw:unmanaged");
+	EXPECT_EQ(h.inner.calls[5], "tok:[");
+	EXPECT_EQ(h.inner.calls[6], "start");
+	EXPECT_EQ(h.inner.calls[7], "id:Cdecl");
+	EXPECT_EQ(h.inner.calls[8], "end");
+	EXPECT_EQ(h.inner.calls[9], "tok:]");
+	EXPECT_EQ(h.inner.calls[10], "tok:<");
+	EXPECT_EQ(h.inner.calls[11], "start");
+	EXPECT_EQ(h.inner.calls[12], "primtype:int");
+	EXPECT_EQ(h.inner.calls[13], "end");
+	EXPECT_EQ(h.inner.calls[14], "tok:>");
+	EXPECT_EQ(h.inner.calls[15], "end");
 }

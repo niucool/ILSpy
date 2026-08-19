@@ -74,6 +74,10 @@
 #include "Decompiler/CSharp/Syntax/MemberType.hpp"
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
 #include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
+#include "Decompiler/CSharp/Syntax/TupleTypeElement.hpp"
+#include "Decompiler/CSharp/Syntax/TupleAstType.hpp"
+#include "Decompiler/CSharp/Syntax/InvocationAstType.hpp"
+#include "Decompiler/CSharp/Syntax/FunctionPointerAstType.hpp"
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Syntax/PreProcessorDirective.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
@@ -1402,10 +1406,91 @@ void CSharpOutputVisitor::VisitComment(Syntax::Comment* comment) {
 void CSharpOutputVisitor::VisitExternAliasDeclaration(Syntax::ExternAliasDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitUsingDeclaration(Syntax::UsingDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitUsingAliasDeclaration(Syntax::UsingAliasDeclaration*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitTupleTypeElement(Syntax::TupleTypeElement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitTupleType(Syntax::TupleAstType*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitInvocationType(Syntax::InvocationAstType*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitFunctionPointerType(Syntax::FunctionPointerAstType*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitTupleTypeElement(Syntax::TupleTypeElement* tupleTypeElement) {
+	// The C# `VisitTupleTypeElement`: `StartNode` + `Type.AcceptVisitor` + an optional `Space` +
+	// `NameToken.AcceptVisitor` (the name is a nullable `string?` over a backing `NameToken`, so
+	// the token guard is the C# `NameToken is not null`) + `EndNode`. The `Type` is a required
+	// `AstType` slot (the C# does not guard it); the port guards it null-safely (the D327
+	// `VisitMemberType` required-slot-guard precedent) so a half-constructed test node renders
+	// just the node wrapper rather than dereferencing null.
+	StartNode(tupleTypeElement);
+	if (tupleTypeElement->Type() != nullptr) {
+		tupleTypeElement->Type()->AcceptVisitor(*this);
+	}
+	if (tupleTypeElement->NameToken() != nullptr) {
+		Space();
+		tupleTypeElement->NameToken()->AcceptVisitor(*this);
+	}
+	EndNode(tupleTypeElement);
+}
+
+void CSharpOutputVisitor::VisitTupleType(Syntax::TupleAstType* tupleType) {
+	// The C# `VisitTupleType`: `StartNode` + `LPar` + `WriteCommaSeparatedList(Elements)` + `RPar`
+	// + `EndNode` (the `Debug.Assert(Elements.Count >= 2)` is a structural invariant the AST
+	// maintains, not an output concern -- the port renders whatever elements the node carries).
+	// The `LPar`/`RPar` helpers wrap `WriteToken(Tokens::LPar/RPar)`; the eager-vector snapshot of
+	// the `Elements` collection is the D325 `ToVector` convention.
+	StartNode(tupleType);
+	LPar();
+	WriteCommaSeparatedList(ToVector(tupleType->Elements()));
+	RPar();
+	EndNode(tupleType);
+}
+
+void CSharpOutputVisitor::VisitInvocationType(Syntax::InvocationAstType* invocationType) {
+	// The C# `VisitInvocationType`: `StartNode` + `BaseType.AcceptVisitor` + `WriteToken(LPar)` +
+	// `WriteCommaSeparatedList(Arguments)` + `WriteToken(RPar)` + `EndNode`. The C# uses
+	// `WriteToken(Tokens.LPar/RPar)` (NOT the `LPar()`/`RPar()` helpers) faithfully; the `BaseType`
+	// is a required `AstType` slot (guarded null-safely, the `VisitMemberType` precedent); the
+	// `Arguments` collection snapshot is the `ToVector` convention.
+	StartNode(invocationType);
+	if (invocationType->BaseType() != nullptr) {
+		invocationType->BaseType()->AcceptVisitor(*this);
+	}
+	WriteToken(Tokens::LPar);
+	WriteCommaSeparatedList(ToVector(invocationType->Arguments()));
+	WriteToken(Tokens::RPar);
+	EndNode(invocationType);
+}
+
+void CSharpOutputVisitor::VisitFunctionPointerType(Syntax::FunctionPointerAstType* functionPointerType) {
+	// The C# `VisitFunctionPointerType`: `StartNode` + `WriteKeyword(DelegateKeyword)` +
+	// `WriteToken(PointerToken)` + an optional `Space` + `WriteKeyword("unmanaged")` (the
+	// `HasUnmanagedCallingConvention` gate) + an optional `[CallingConventions]` bracket list +
+	// `WriteToken(LChevron)` + `WriteCommaSeparatedList(Parameters.Concat(ReturnType))` +
+	// `WriteToken(RChevron)` + `EndNode`. The `Parameters.Concat(ReturnType)` is a single
+	// `IEnumerable<AstNode>` joining the parameter list with the return type (the return type is
+	// the LAST element of the angle-bracket list); the port builds an eager `std::vector<AstNode*>`
+	// combining the `Parameters` collection snapshot with the `ReturnType` (both upcast to
+	// `AstNode*`, the common base the `WriteCommaSeparatedList<AstNode>` template recurses through).
+	StartNode(functionPointerType);
+	WriteKeyword(Tokens::DelegateKeyword);
+	WriteToken(Syntax::FunctionPointerAstType::PointerToken);
+	if (functionPointerType->HasUnmanagedCallingConvention()) {
+		Space();
+		WriteKeyword("unmanaged");
+	}
+	const auto& conventions = functionPointerType->CallingConventions();
+	if (conventions.Count() > 0) {
+		WriteToken(Tokens::LBracket);
+		WriteCommaSeparatedList(ToVector(conventions));
+		WriteToken(Tokens::RBracket);
+	}
+	WriteToken(Tokens::LChevron);
+	std::vector<Syntax::AstNode*> combined;
+	const auto& params = functionPointerType->Parameters();
+	int paramCount = params.Count();
+	combined.reserve(static_cast<std::size_t>(paramCount) + 1);
+	for (int i = 0; i < paramCount; ++i) {
+		combined.push_back(params.At(i));
+	}
+	if (functionPointerType->ReturnType() != nullptr) {
+		combined.push_back(functionPointerType->ReturnType());
+	}
+	WriteCommaSeparatedList(combined);
+	WriteToken(Tokens::RChevron);
+	EndNode(functionPointerType);
+}
 void CSharpOutputVisitor::VisitDelegateDeclaration(Syntax::DelegateDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitTypeDeclaration(Syntax::TypeDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitNamespaceDeclaration(Syntax::NamespaceDeclaration*) { NotImplemented(); }
