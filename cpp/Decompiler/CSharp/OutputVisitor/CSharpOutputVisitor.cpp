@@ -88,6 +88,7 @@
 #include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/EnumMemberDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ExtensionDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/EventDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
 #include "Decompiler/CSharp/Syntax/TupleTypeElement.hpp"
@@ -1702,7 +1703,20 @@ void CSharpOutputVisitor::VisitEnumMemberDeclaration(Syntax::EnumMemberDeclarati
 	EndNode(enumMemberDeclaration);
 }
 void CSharpOutputVisitor::VisitPropertyDeclaration(Syntax::PropertyDeclaration*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitEventDeclaration(Syntax::EventDeclaration*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitEventDeclaration(Syntax::EventDeclaration* eventDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitEventDeclaration: `event ReturnType v1, v2, ...;`.
+	StartNode(eventDeclaration);
+	WriteAttributes(ToVector(eventDeclaration->Attributes()));
+	WriteModifiers(eventDeclaration->Modifiers());
+	WriteKeyword(Syntax::EventKeyword);
+	if (eventDeclaration->ReturnType() != nullptr) {
+		eventDeclaration->ReturnType()->AcceptVisitor(*this);
+	}
+	Space();
+	WriteCommaSeparatedList(ToVector(eventDeclaration->Variables()));
+	Semicolon();
+	EndNode(eventDeclaration);
+}
 void CSharpOutputVisitor::VisitCustomEventDeclaration(Syntax::CustomEventDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitParameterDeclaration(Syntax::ParameterDeclaration* parameterDeclaration) {
 	StartNode(parameterDeclaration);

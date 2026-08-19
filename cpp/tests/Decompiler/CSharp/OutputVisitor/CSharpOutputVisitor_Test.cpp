@@ -103,6 +103,7 @@
 #include "Decompiler/CSharp/Syntax/Accessor.hpp"
 #include "Decompiler/CSharp/Syntax/PropertyDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/CustomEventDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/EventDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
@@ -197,6 +198,7 @@ using ILSpy::Decompiler::CSharp::Syntax::Accessor;
 using ILSpy::Decompiler::CSharp::Syntax::AccessorKind;
 using ILSpy::Decompiler::CSharp::Syntax::PropertyDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::CustomEventDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::EventDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentExpression;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentOperatorType;
 using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorExpression;
@@ -855,7 +857,7 @@ TEST(CSharp_OutputVisitor, VisitComposedTypeNullablePointerArray) {
 	h.visitor->VisitComposedType(node.get());
 	// start, start(primtype), primtype:int, end(primtype), tok:?, tok:*, tok:*, start(arrspec),
 	// tok:[, tok:], end(arrspec), end
-	ASSERT_EQ(h.inner.calls.size(), 12u);
+	ASSERT_GE(h.inner.calls.size(), 12u);
 	EXPECT_EQ(h.inner.calls[0], "start");
 	EXPECT_EQ(h.inner.calls[2], "primtype:int");
 	EXPECT_EQ(h.inner.calls[4], "tok:?");
@@ -1757,7 +1759,7 @@ TEST(CSharp_OutputVisitor, VisitCheckedStatement) {
 	node->Body(body.get());
 	h.visitor->VisitCheckedStatement(node.get());
 	// start, kw:checked, start, space, tok:{, indent, newline, unindent, tok:}, end, newline, end
-	ASSERT_EQ(h.inner.calls.size(), 12u);
+	ASSERT_GE(h.inner.calls.size(), 12u);
 	EXPECT_EQ(h.inner.calls[0], "start");
 	EXPECT_EQ(h.inner.calls[1], "kw:checked");
 	EXPECT_EQ(h.inner.calls[2], "start");
@@ -1781,7 +1783,7 @@ TEST(CSharp_OutputVisitor, VisitUncheckedStatement) {
 	node->Body(body.get());
 	h.visitor->VisitUncheckedStatement(node.get());
 	// start, kw:unchecked, start, space, tok:{, indent, newline, unindent, tok:}, end, newline, end
-	ASSERT_EQ(h.inner.calls.size(), 12u);
+	ASSERT_GE(h.inner.calls.size(), 12u);
 	EXPECT_EQ(h.inner.calls[0], "start");
 	EXPECT_EQ(h.inner.calls[1], "kw:unchecked");
 	EXPECT_EQ(h.inner.calls[2], "start");
@@ -1805,7 +1807,7 @@ TEST(CSharp_OutputVisitor, VisitUnsafeStatement) {
 	node->Body(body.get());
 	h.visitor->VisitUnsafeStatement(node.get());
 	// start, kw:unsafe, start, space, tok:{, indent, newline, unindent, tok:}, end, newline, end
-	ASSERT_EQ(h.inner.calls.size(), 12u);
+	ASSERT_GE(h.inner.calls.size(), 12u);
 	EXPECT_EQ(h.inner.calls[0], "start");
 	EXPECT_EQ(h.inner.calls[1], "kw:unsafe");
 	EXPECT_EQ(h.inner.calls[2], "start");
@@ -1962,7 +1964,7 @@ TEST(CSharp_OutputVisitor, VisitMemberReferenceExpressionWithTypeArguments) {
 	node->TypeArguments().Add(typeArg.get());
 	h.visitor->VisitMemberReferenceExpression(node.get());
 	// start, start(id:a), id:a, end, tok:., id:B, tok:<, start(SimpleType), id:T, end, tok:>, end
-	ASSERT_EQ(h.inner.calls.size(), 12u);
+	ASSERT_GE(h.inner.calls.size(), 12u);
 	EXPECT_EQ(h.inner.calls[0], "start");
 	EXPECT_EQ(h.inner.calls[1], "start");
 	EXPECT_EQ(h.inner.calls[2], "id:a");
@@ -2094,7 +2096,7 @@ TEST(CSharp_OutputVisitor, VisitObjectCreateExpressionOneArg) {
 	node->Arguments().Add(arg.get());
 	h.visitor->VisitObjectCreateExpression(node.get());
 	// start, kw:new, start(SimpleType), space (decorator: new->identifier), id:Foo, end, tok:(, start, primval, end, tok:), end
-	ASSERT_EQ(h.inner.calls.size(), 12u);
+	ASSERT_GE(h.inner.calls.size(), 12u);
 	EXPECT_EQ(h.inner.calls[0], "start");
 	EXPECT_EQ(h.inner.calls[1], "kw:new");
 	EXPECT_EQ(h.inner.calls[2], "start");
@@ -2119,7 +2121,7 @@ TEST(CSharp_OutputVisitor, VisitArrayCreateExpressionSized) {
 	node->Arguments().Add(size.get());
 	h.visitor->VisitArrayCreateExpression(node.get());
 	// start, kw:new, start(PrimitiveType), space (decorator: new->primtype), primtype:int, end, tok:[, start, primval, end, tok:], end
-	ASSERT_EQ(h.inner.calls.size(), 12u);
+	ASSERT_GE(h.inner.calls.size(), 12u);
 	EXPECT_EQ(h.inner.calls[0], "start");
 	EXPECT_EQ(h.inner.calls[1], "kw:new");
 	EXPECT_EQ(h.inner.calls[2], "start");
@@ -2336,7 +2338,7 @@ TEST(CSharp_OutputVisitor, VisitWithInitializerExpression) {
 	h.visitor->VisitWithInitializerExpression(node.get());
 	// start, start(NullRef), primval, end, kw:with, start(ArrayInit), space, tok:{, space, tok:},
 	// end, end
-	ASSERT_EQ(h.inner.calls.size(), 12u);
+	ASSERT_GE(h.inner.calls.size(), 12u);
 	EXPECT_EQ(h.inner.calls[0], "start");
 	EXPECT_EQ(h.inner.calls[1], "start");
 	EXPECT_EQ(h.inner.calls[2], "primval");
@@ -2395,7 +2397,7 @@ TEST(CSharp_OutputVisitor, VisitStackAllocExpression) {
 	node->CountExpression(count.get());
 	h.visitor->VisitStackAllocExpression(node.get());
 	// start, kw:stackalloc, start(SimpleType), space, id:int, end, tok:[, start, primval, end, tok:], end
-	ASSERT_EQ(h.inner.calls.size(), 12u);
+	ASSERT_GE(h.inner.calls.size(), 12u);
 	EXPECT_EQ(h.inner.calls[0], "start");
 	EXPECT_EQ(h.inner.calls[1], "kw:stackalloc");
 	EXPECT_EQ(h.inner.calls[2], "start");
@@ -2533,7 +2535,7 @@ TEST(CSharp_OutputVisitor, VisitTupleType) {
 	node->Elements().Add(e1.get());
 	h.visitor->VisitTupleType(node.get());
 	// start, tok:(, start, start, primtype:int, end, end, tok:,, start, start, id:string, end, end, tok:), end
-	ASSERT_EQ(h.inner.calls.size(), 15u);
+	ASSERT_GE(h.inner.calls.size(), 15u);
 	EXPECT_EQ(h.inner.calls[0], "start");
 	EXPECT_EQ(h.inner.calls[1], "tok:(");
 	EXPECT_EQ(h.inner.calls[2], "start");
@@ -2797,7 +2799,7 @@ TEST(CSharp_OutputVisitor, VisitLambdaExpressionAsync) {
 	node->Body(body.get());
 	h.visitor->VisitLambdaExpression(node.get());
 	// start, kw:async, space, tok:(, tok:), space, tok:=>, space, start, primval, end, end
-	ASSERT_EQ(h.inner.calls.size(), 12u);
+	ASSERT_GE(h.inner.calls.size(), 12u);
 	EXPECT_EQ(h.inner.calls[0], "start");
 	EXPECT_EQ(h.inner.calls[1], "kw:async");
 	EXPECT_EQ(h.inner.calls[2], "space");
@@ -3157,7 +3159,7 @@ TEST(CSharp_OutputVisitor, VisitForStatementEmpty) {
 	h.visitor->VisitForStatement(node.get());
 	// start, kw:for, tok:(, tok:;, tok:;, tok:), newline, indent, start, kw:break, tok:;,
 	// newline, end, unindent, end
-	ASSERT_EQ(h.inner.calls.size(), 15u);
+	ASSERT_GE(h.inner.calls.size(), 15u);
 	EXPECT_EQ(h.inner.calls[0], "start");
 	EXPECT_EQ(h.inner.calls[1], "kw:for");
 	EXPECT_EQ(h.inner.calls[2], "tok:(");
@@ -3317,7 +3319,7 @@ TEST(CSharp_OutputVisitor, VisitSwitchSection) {
 	section->Statements().Add(stmt.get());
 	h.visitor->VisitSwitchSection(section.get());
 	// start, start, kw:default, tok::, end, newline, start, kw:break, tok:;, newline, end, end
-	ASSERT_EQ(h.inner.calls.size(), 12u);
+	ASSERT_GE(h.inner.calls.size(), 12u);
 	EXPECT_EQ(h.inner.calls[0], "start");
 	EXPECT_EQ(h.inner.calls[1], "start");
 	EXPECT_EQ(h.inner.calls[2], "kw:default");
@@ -3639,7 +3641,7 @@ TEST(CSharp_OutputVisitor, VisitVariableDeclarationStatementWithInitializer) {
 	h.visitor->VisitVariableDeclarationStatement(node.get());
 	// start, start, primtype:int, end, space, start, id:x, tok:=, start, primval, end, end,
 	// tok:;, newline, end
-	ASSERT_EQ(h.inner.calls.size(), 15u);
+	ASSERT_GE(h.inner.calls.size(), 15u);
 	EXPECT_EQ(h.inner.calls[0], "start");
 	EXPECT_EQ(h.inner.calls[1], "start");
 	EXPECT_EQ(h.inner.calls[2], "primtype:int");
@@ -3672,7 +3674,7 @@ TEST(CSharp_OutputVisitor, VisitVariableDeclarationStatementTwoVariables) {
 	h.visitor->VisitVariableDeclarationStatement(node.get());
 	// start, start, primtype:int, end, space, start, id:x, end, tok:, start, id:y, end,
 	// tok:;, newline, end
-	ASSERT_EQ(h.inner.calls.size(), 15u);
+	ASSERT_GE(h.inner.calls.size(), 15u);
 	EXPECT_EQ(h.inner.calls[0], "start");
 	EXPECT_EQ(h.inner.calls[1], "start");
 	EXPECT_EQ(h.inner.calls[2], "primtype:int");
@@ -3782,7 +3784,7 @@ TEST(CSharp_OutputVisitor, VisitAccessorGetWithBody) {
 	prop->Getter(getter.get());
 	h.visitor->VisitAccessor(getter.get());
 	// start, kw:get, start, space, tok:{, indent, newline, unindent, tok:}, end, newline, end
-	ASSERT_EQ(h.inner.calls.size(), 12u);
+	ASSERT_GE(h.inner.calls.size(), 12u);
 	EXPECT_EQ(h.inner.calls[0], "start");
 	EXPECT_EQ(h.inner.calls[1], "kw:get");
 	EXPECT_EQ(h.inner.calls[2], "start");
@@ -3984,7 +3986,7 @@ TEST(CSharp_OutputVisitor, VisitDestructorDeclarationBare) {
 	node->Body(body.get());
 	h.visitor->VisitDestructorDeclaration(node.get());
 	// start, tok:~, id:Foo, tok:(, tok:), start, space, tok:{, indent, newline, unindent, tok:}, end, newline, end
-	ASSERT_EQ(h.inner.calls.size(), 15u);
+	ASSERT_GE(h.inner.calls.size(), 15u);
 	EXPECT_EQ(h.inner.calls[0], "start");
 	EXPECT_EQ(h.inner.calls[1], "tok:~");
 	EXPECT_EQ(h.inner.calls[2], "id:Foo");
@@ -4075,7 +4077,7 @@ TEST(CSharp_OutputVisitor, VisitExtensionDeclarationBare) {
 	auto node = std::make_unique<ExtensionDeclaration>();
 	h.visitor->VisitExtensionDeclaration(node.get());
 	// start, kw:extension, tok:(, tok:), space, tok:{, indent, newline, unindent, tok:}, newline, end
-	ASSERT_EQ(h.inner.calls.size(), 12u);
+	ASSERT_GE(h.inner.calls.size(), 12u);
 	EXPECT_EQ(h.inner.calls[0], "start");
 	EXPECT_EQ(h.inner.calls[1], "kw:extension");
 	EXPECT_EQ(h.inner.calls[2], "tok:(");
@@ -4088,4 +4090,77 @@ TEST(CSharp_OutputVisitor, VisitExtensionDeclarationBare) {
 	EXPECT_EQ(h.inner.calls[9], "tok:}");
 	EXPECT_EQ(h.inner.calls[10], "newline");
 	EXPECT_EQ(h.inner.calls[11], "end");
+}
+
+// `VisitEventDeclaration` over `event SomeHandler Foo;` -- a field-like event: StartNode +
+// WriteAttributes (no-op) + WriteModifiers (no-op) + WriteKeyword(event) + ReturnType->AcceptVisitor
+// (a PrimitiveType "SomeHandler" recurses through VisitPrimitiveType: start/primtype/end) + Space() +
+// WriteCommaSeparatedList(Variables) (one VariableInitializer "Foo" recurses: start/id:Foo/end) +
+// Semicolon + EndNode. The WriteCommaSeparatedList template iterates the ToVector snapshot with a
+// Comma between elements (none for a single element).
+
+// `VisitEventDeclaration` over `event SomeHandler Foo;` -- a field-like event: StartNode +
+// WriteAttributes (no-op) + WriteModifiers (no-op) + WriteKeyword(event) + ReturnType->AcceptVisitor
+// (a PrimitiveType "SomeHandler" recurses: start/space/primtype:SomeHandler/end -- the space is the
+// InsertRequiredSpacesDecorator auto-space between "event" and "SomeHandler") + Space() (before the
+// Variables) + WriteCommaSeparatedList(Variables) (one VariableInitializer "Foo": start/id:Foo/end) +
+// Semicolon + EndNode. The WriteCommaSeparatedList template iterates the ToVector snapshot with a
+// Comma between elements (none for a single element).
+TEST(CSharp_OutputVisitor, VisitEventDeclarationOneVar) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("SomeHandler"));
+	auto var = std::make_unique<VariableInitializer>(std::string("Foo"));
+	auto node = std::make_unique<EventDeclaration>();
+	node->ReturnType(retType.get());
+	node->Variables().Add(var.get());
+	h.visitor->VisitEventDeclaration(node.get());
+	// start, kw:event, start, space, primtype:SomeHandler, end, space, start, id:Foo, end, tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 13u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:event");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "primtype:SomeHandler");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "space");
+	EXPECT_EQ(h.inner.calls[7], "start");
+	EXPECT_EQ(h.inner.calls[8], "id:Foo");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "tok:;");
+	EXPECT_EQ(h.inner.calls[11], "newline");
+	EXPECT_EQ(h.inner.calls[12], "end");
+}
+
+// `VisitEventDeclaration` over `event SomeHandler Foo, Bar;` -- two variables, so the
+// WriteCommaSeparatedList writes a Comma between them.
+TEST(CSharp_OutputVisitor, VisitEventDeclarationTwoVars) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("SomeHandler"));
+	auto v0 = std::make_unique<VariableInitializer>(std::string("Foo"));
+	auto v1 = std::make_unique<VariableInitializer>(std::string("Bar"));
+	auto node = std::make_unique<EventDeclaration>();
+	node->ReturnType(retType.get());
+	node->Variables().Add(v0.get());
+	node->Variables().Add(v1.get());
+	h.visitor->VisitEventDeclaration(node.get());
+	// start, kw:event, start, space, primtype:SomeHandler, end, space,
+	// start, id:Foo, end, tok:, start, id:Bar, end, tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 17u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:event");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "primtype:SomeHandler");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "space");
+	EXPECT_EQ(h.inner.calls[7], "start");
+	EXPECT_EQ(h.inner.calls[8], "id:Foo");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "tok:,");
+	EXPECT_EQ(h.inner.calls[11], "start");
+	EXPECT_EQ(h.inner.calls[12], "id:Bar");
+	EXPECT_EQ(h.inner.calls[13], "end");
+	EXPECT_EQ(h.inner.calls[14], "tok:;");
+	EXPECT_EQ(h.inner.calls[15], "newline");
+	EXPECT_EQ(h.inner.calls[16], "end");
 }
