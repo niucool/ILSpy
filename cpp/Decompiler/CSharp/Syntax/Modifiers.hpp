@@ -46,13 +46,17 @@
 // exact-value comparison with an `Any` escape hatch.
 //
 // The `CSharpModifiers` static helper (`GetModifierName`/`AllModifiers`, the output-order
-// lookup table consumed by the output visitor) is DEFERRED until the output stage lands -- it is a
-// behaviour helper, not part of the value type's core semantics.
+// lookup table consumed by the output visitor) is ported below the enum + operators, completing
+// the D270 deferral now that the output stage (D316+) has landed. It is a behaviour helper, not
+// part of the value type's core semantics.
 
 #ifndef ILSPY_DECOMPILER_CSHARP_SYNTAX_MODIFIERS_HPP
 #define ILSPY_DECOMPILER_CSHARP_SYNTAX_MODIFIERS_HPP
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -112,6 +116,65 @@ inline Modifiers operator^(Modifiers a, Modifiers b) {
 inline Modifiers operator~(Modifiers a) {
     return static_cast<Modifiers>(~static_cast<std::uint32_t>(a));
 }
+
+// The C# `public static class CSharpModifiers` -- the output-order modifier lookup table the
+// `CSharpOutputVisitor.WriteModifiers` iterates (`AllModifiers`) and the per-modifier keyword
+// name it writes (`GetModifierName`). A C# `static class` ports as a namespace of free
+// functions/variables (the `FormattingOptionsFactory` D317 / `Tokens` D323 precedent). The C#
+// `ImmutableArray<Modifiers> AllModifiers` ports as an `inline const std::array<Modifiers, N>`
+// (one definition shared across TUs, the established `inline`-namespace-variable convention).
+// `GetModifierName` returns a `const char*` (a string literal with static storage duration, so
+// the pointer is valid for the program lifetime and binds directly to the `std::string_view`
+// parameter of `TokenWriter::WriteKeyword` without an allocation). The C# default `throw new
+// NotSupportedException` ports to `std::invalid_argument` (an invalid enum value is a bad
+// argument, the D316 `ArgumentNullException` -> `std::invalid_argument` precedent).
+namespace CSharpModifiers {
+
+// The C# `AllModifiers` -- the modifiers in the order they should be output when generating
+// code (the C# `ImmutableArray.Create(...)` list, verbatim). 20 entries (the 19 real modifiers
+// plus the `Any` pattern-matching wildcard, which the comment in the C# source notes 'needs to be
+// in this list to be usable in the AST').
+inline const std::array<Modifiers, 20> AllModifiers{{
+    Modifiers::Public, Modifiers::Private, Modifiers::Protected, Modifiers::Internal,
+    Modifiers::New,
+    Modifiers::Unsafe,
+    Modifiers::Static, Modifiers::Abstract, Modifiers::Virtual, Modifiers::Sealed, Modifiers::Override,
+    Modifiers::Required, Modifiers::Readonly, Modifiers::Volatile,
+    Modifiers::Ref,
+    Modifiers::Extern, Modifiers::Partial, Modifiers::Const,
+    Modifiers::Async,
+    Modifiers::Any,
+}};
+
+// The C# `GetModifierName(Modifiers modifier)` -- the lowercase keyword name for a modifier.
+inline const char* GetModifierName(Modifiers modifier) {
+    switch (modifier) {
+        case Modifiers::Private:    return "private";
+        case Modifiers::Internal:   return "internal";
+        case Modifiers::Protected:  return "protected";
+        case Modifiers::Public:     return "public";
+        case Modifiers::Abstract:   return "abstract";
+        case Modifiers::Virtual:    return "virtual";
+        case Modifiers::Sealed:     return "sealed";
+        case Modifiers::Static:     return "static";
+        case Modifiers::Override:    return "override";
+        case Modifiers::Readonly:   return "readonly";
+        case Modifiers::Const:     return "const";
+        case Modifiers::New:        return "new";
+        case Modifiers::Partial:    return "partial";
+        case Modifiers::Extern:     return "extern";
+        case Modifiers::Volatile:   return "volatile";
+        case Modifiers::Unsafe:     return "unsafe";
+        case Modifiers::Async:      return "async";
+        case Modifiers::Ref:        return "ref";
+        case Modifiers::Required:   return "required";
+        case Modifiers::Any:        return "any";
+        default:
+            throw std::invalid_argument("Invalid value for Modifiers");
+    }
+}
+
+} // namespace CSharpModifiers
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 
