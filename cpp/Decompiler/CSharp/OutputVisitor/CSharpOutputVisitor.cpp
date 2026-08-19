@@ -60,6 +60,10 @@
 #include "Decompiler/CSharp/Syntax/Statements/GotoCaseStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/GotoDefaultStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/LabelStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/DoWhileStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/YieldReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/MemberType.hpp"
@@ -799,10 +803,66 @@ void CSharpOutputVisitor::VisitGotoDefaultStatement(Syntax::GotoDefaultStatement
 	Semicolon();
 	EndNode(gotoDefaultStatement);
 }
-void CSharpOutputVisitor::VisitIfElseStatement(Syntax::IfElseStatement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitWhileStatement(Syntax::WhileStatement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitDoWhileStatement(Syntax::DoWhileStatement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitYieldReturnStatement(Syntax::YieldReturnStatement*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitIfElseStatement(Syntax::IfElseStatement* ifElseStatement) {
+	StartNode(ifElseStatement);
+	WriteKeyword(IfElseStatement::IfKeyword);
+	Space(policy_.SpaceBeforeIfParentheses);
+	LPar();
+	Space(policy_.SpacesWithinIfParentheses);
+	ifElseStatement->Condition()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinIfParentheses);
+	RPar();
+
+	if (ifElseStatement->FalseStatement() == nullptr) {
+		WriteEmbeddedStatement(ifElseStatement->TrueStatement());
+	} else {
+		WriteEmbeddedStatement(ifElseStatement->TrueStatement(), policy_.ElseNewLinePlacement);
+		WriteKeyword(IfElseStatement::ElseKeyword);
+		// A nested `else if` is a single `IfElseStatement` as the `FalseStatement`: recurse
+		// directly so `else` and `if` stay on one line (no newline between them).
+		if (dynamic_cast<IfElseStatement*>(ifElseStatement->FalseStatement()) != nullptr) {
+			ifElseStatement->FalseStatement()->AcceptVisitor(*this);
+		} else {
+			WriteEmbeddedStatement(ifElseStatement->FalseStatement());
+		}
+	}
+	EndNode(ifElseStatement);
+}
+void CSharpOutputVisitor::VisitWhileStatement(Syntax::WhileStatement* whileStatement) {
+	StartNode(whileStatement);
+	WriteKeyword(WhileStatement::WhileKeyword);
+	Space(policy_.SpaceBeforeWhileParentheses);
+	LPar();
+	Space(policy_.SpacesWithinWhileParentheses);
+	whileStatement->Condition()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinWhileParentheses);
+	RPar();
+	WriteEmbeddedStatement(whileStatement->EmbeddedStatement());
+	EndNode(whileStatement);
+}
+void CSharpOutputVisitor::VisitDoWhileStatement(Syntax::DoWhileStatement* doWhileStatement) {
+	StartNode(doWhileStatement);
+	WriteKeyword(DoWhileStatement::DoKeyword);
+	WriteEmbeddedStatement(doWhileStatement->EmbeddedStatement(), policy_.WhileNewLinePlacement);
+	WriteKeyword(DoWhileStatement::WhileKeyword);
+	Space(policy_.SpaceBeforeWhileParentheses);
+	LPar();
+	Space(policy_.SpacesWithinWhileParentheses);
+	doWhileStatement->Condition()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinWhileParentheses);
+	RPar();
+	Semicolon();
+	EndNode(doWhileStatement);
+}
+void CSharpOutputVisitor::VisitYieldReturnStatement(Syntax::YieldReturnStatement* yieldReturnStatement) {
+	StartNode(yieldReturnStatement);
+	WriteKeyword(YieldReturnStatement::YieldKeyword);
+	WriteKeyword(YieldReturnStatement::ReturnKeyword);
+	Space();
+	yieldReturnStatement->Expression()->AcceptVisitor(*this);
+	Semicolon();
+	EndNode(yieldReturnStatement);
+}
 void CSharpOutputVisitor::VisitEmptyStatement(Syntax::EmptyStatement* emptyStatement) {
 	// An empty statement that carries a comment renders as just that comment (emitted as trivia by
 	// `StartNode`/`EndNode`); otherwise it is a bare semicolon.

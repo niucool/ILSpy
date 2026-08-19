@@ -73,6 +73,10 @@
 #include "Decompiler/CSharp/Syntax/Statements/GotoDefaultStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/LabelStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/DoWhileStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/YieldReturnStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Modifiers.hpp"
 
 using namespace ILSpy::Decompiler::CSharp::OutputVisitor;
@@ -108,6 +112,10 @@ using ILSpy::Decompiler::CSharp::Syntax::SimpleType;
 using ILSpy::Decompiler::CSharp::Syntax::ThisReferenceExpression;
 using ILSpy::Decompiler::CSharp::Syntax::TypeReferenceExpression;
 using ILSpy::Decompiler::CSharp::Syntax::YieldBreakStatement;
+using ILSpy::Decompiler::CSharp::Syntax::YieldReturnStatement;
+using ILSpy::Decompiler::CSharp::Syntax::WhileStatement;
+using ILSpy::Decompiler::CSharp::Syntax::DoWhileStatement;
+using ILSpy::Decompiler::CSharp::Syntax::ForStatement;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentExpression;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentOperatorType;
 using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorExpression;
@@ -468,12 +476,12 @@ TEST(CSharp_OutputVisitor, WriteCommaSeparatedListInParenthesisEmpty) {
 // ---- The 130 Visit stubs throw ---------------------------------------------
 
 // A representative still-unported `Visit` method throws `std::logic_error` (the throwing-stub
-// design); `VisitIfElseStatement` remains a stub (the leaf + simple-statement `Visit` methods
-// below are implemented).
+// design); `VisitForStatement` remains a stub (the leaf + simple-statement + control-flow
+// `Visit` methods below are implemented).
 TEST(CSharp_OutputVisitor, VisitStubThrows) {
 	V h;
-	auto stmt = std::make_unique<IfElseStatement>();
-	EXPECT_THROW(h.visitor->VisitIfElseStatement(stmt.get()), std::logic_error);
+	auto stmt = std::make_unique<ForStatement>();
+	EXPECT_THROW(h.visitor->VisitForStatement(stmt.get()), std::logic_error);
 }
 
 // ---- The implemented leaf Visit methods ------------------------------------
@@ -1209,4 +1217,275 @@ TEST(CSharp_OutputVisitor, VisitLabelStatementWithFollowingStatementNoSemicolon)
 	EXPECT_EQ(h.inner.calls[2], "tok::");
 	EXPECT_EQ(h.inner.calls[3], "newline");
 	EXPECT_EQ(h.inner.calls[4], "end");
+}
+
+// ---- The control-flow statement Visit methods -----------------------------
+
+// `VisitWhileStatement` writes `while (cond) body`: the condition is a required `Expression`
+// (a `PrimitiveExpression` records `start`/`primval`/`end`), the body a required embedded
+// `Statement`. With the default policy (no space before/within the parens), a non-block `break`
+// body renders as newline + indent + the break's own sequence + unindent; the `Semicolon` emits a
+// `tok:;` then a `newline`.
+TEST(CSharp_OutputVisitor, VisitWhileStatementNonBlockBody) {
+	V h;
+	auto node = std::make_unique<WhileStatement>();
+	auto cond = std::make_unique<PrimitiveExpression>(int32_t(1));
+	auto body = std::make_unique<BreakStatement>();
+	node->Condition(cond.get());
+	node->EmbeddedStatement(body.get());
+	h.visitor->VisitWhileStatement(node.get());
+	// start, kw:while, tok:(, start, primval, end, tok:), newline, indent, start, kw:break, tok:;,
+	// newline, end, unindent, end
+	ASSERT_EQ(h.inner.calls.size(), 16u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:while");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:)");
+	EXPECT_EQ(h.inner.calls[7], "newline");
+	EXPECT_EQ(h.inner.calls[8], "indent");
+	EXPECT_EQ(h.inner.calls[9], "start");
+	EXPECT_EQ(h.inner.calls[10], "kw:break");
+	EXPECT_EQ(h.inner.calls[11], "tok:;");
+	EXPECT_EQ(h.inner.calls[12], "newline");
+	EXPECT_EQ(h.inner.calls[13], "end");
+	EXPECT_EQ(h.inner.calls[14], "unindent");
+	EXPECT_EQ(h.inner.calls[15], "end");
+}
+
+// `VisitWhileStatement` with a `BlockStatement` body renders the block inline via
+// `WriteEmbeddedStatement`'s block path (`WriteBlock` + newline). The `OpenBrace` for the default
+// `EndOfLine` brace style inserts a `space` before `tok:{` because the line is not empty (the
+// close paren was just written), so the block records `start`/`space`/`tok:{`/.../`tok:}`/`end`.
+TEST(CSharp_OutputVisitor, VisitWhileStatementBlockBody) {
+	V h;
+	auto node = std::make_unique<WhileStatement>();
+	auto cond = std::make_unique<PrimitiveExpression>(int32_t(1));
+	auto body = std::make_unique<BlockStatement>();
+	node->Condition(cond.get());
+	node->EmbeddedStatement(body.get());
+	h.visitor->VisitWhileStatement(node.get());
+	// start, kw:while, tok:(, start, primval, end, tok:), start, space, tok:{, indent, newline,
+	// unindent, tok:}, end, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 17u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:while");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:)");
+	EXPECT_EQ(h.inner.calls[7], "start");
+	EXPECT_EQ(h.inner.calls[8], "space");
+	EXPECT_EQ(h.inner.calls[9], "tok:{");
+	EXPECT_EQ(h.inner.calls[10], "indent");
+	EXPECT_EQ(h.inner.calls[11], "newline");
+	EXPECT_EQ(h.inner.calls[12], "unindent");
+	EXPECT_EQ(h.inner.calls[13], "tok:}");
+	EXPECT_EQ(h.inner.calls[14], "end");
+	EXPECT_EQ(h.inner.calls[15], "newline");
+	EXPECT_EQ(h.inner.calls[16], "end");
+}
+
+// `VisitDoWhileStatement` writes `do body while (cond);`: the body precedes the `while` clause
+// (the slot order is reversed relative to `WhileStatement`), the block body's `OpenBrace`
+// inserts a `space` after `do`, and a trailing `Semicolon` (tok:; + newline) closes the statement.
+TEST(CSharp_OutputVisitor, VisitDoWhileStatement) {
+	V h;
+	auto node = std::make_unique<DoWhileStatement>();
+	auto cond = std::make_unique<PrimitiveExpression>(int32_t(1));
+	auto body = std::make_unique<BlockStatement>();
+	node->EmbeddedStatement(body.get());
+	node->Condition(cond.get());
+	h.visitor->VisitDoWhileStatement(node.get());
+	// start, kw:do, start, space, tok:{, indent, newline, unindent, tok:}, end, newline, kw:while,
+	// tok:(, start, primval, end, tok:), tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 20u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:do");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "tok:{");
+	EXPECT_EQ(h.inner.calls[5], "indent");
+	EXPECT_EQ(h.inner.calls[6], "newline");
+	EXPECT_EQ(h.inner.calls[7], "unindent");
+	EXPECT_EQ(h.inner.calls[8], "tok:}");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "newline");
+	EXPECT_EQ(h.inner.calls[11], "kw:while");
+	EXPECT_EQ(h.inner.calls[12], "tok:(");
+	EXPECT_EQ(h.inner.calls[13], "start");
+	EXPECT_EQ(h.inner.calls[14], "primval");
+	EXPECT_EQ(h.inner.calls[15], "end");
+	EXPECT_EQ(h.inner.calls[16], "tok:)");
+	EXPECT_EQ(h.inner.calls[17], "tok:;");
+	EXPECT_EQ(h.inner.calls[18], "newline");
+	EXPECT_EQ(h.inner.calls[19], "end");
+}
+
+// `VisitIfElseStatement` with no `FalseStatement` writes `if (cond) body` (the single-branch
+// `WriteEmbeddedStatement(TrueStatement)` path). The condition `PrimitiveExpression` records its
+// own `start`/`primval`/`end`; the non-block `break` body renders as newline + indent + the
+// break's sequence + unindent.
+TEST(CSharp_OutputVisitor, VisitIfElseStatementSingleBranch) {
+	V h;
+	auto node = std::make_unique<IfElseStatement>();
+	auto cond = std::make_unique<PrimitiveExpression>(int32_t(1));
+	auto body = std::make_unique<BreakStatement>();
+	node->Condition(cond.get());
+	node->TrueStatement(body.get());
+	h.visitor->VisitIfElseStatement(node.get());
+	// start, kw:if, tok:(, start, primval, end, tok:), newline, indent, start, kw:break, tok:;,
+	// newline, end, unindent, end
+	ASSERT_EQ(h.inner.calls.size(), 16u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:if");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:)");
+	EXPECT_EQ(h.inner.calls[7], "newline");
+	EXPECT_EQ(h.inner.calls[8], "indent");
+	EXPECT_EQ(h.inner.calls[9], "start");
+	EXPECT_EQ(h.inner.calls[10], "kw:break");
+	EXPECT_EQ(h.inner.calls[11], "tok:;");
+	EXPECT_EQ(h.inner.calls[12], "newline");
+	EXPECT_EQ(h.inner.calls[13], "end");
+	EXPECT_EQ(h.inner.calls[14], "unindent");
+	EXPECT_EQ(h.inner.calls[15], "end");
+}
+
+// `VisitIfElseStatement` with a non-`IfElseStatement` `FalseStatement` writes `if (cond) body
+// else body` -- the `else` keyword follows the true branch (on its own line per the default
+// `ElseNewLinePlacement`), then the false branch is written as another embedded statement. No
+// `space` is inserted before `kw:else` because the true branch's `Semicolon` `newline` and the
+// following `unindent` both leave `lastWritten` as `Whitespace`.
+TEST(CSharp_OutputVisitor, VisitIfElseStatementElseBranch) {
+	V h;
+	auto node = std::make_unique<IfElseStatement>();
+	auto cond = std::make_unique<PrimitiveExpression>(int32_t(1));
+	auto trueBody = std::make_unique<BreakStatement>();
+	auto falseBody = std::make_unique<ContinueStatement>();
+	node->Condition(cond.get());
+	node->TrueStatement(trueBody.get());
+	node->FalseStatement(falseBody.get());
+	h.visitor->VisitIfElseStatement(node.get());
+	// start, kw:if, tok:(, start, primval, end, tok:), newline, indent, start, kw:break, tok:;,
+	// newline, end, unindent, kw:else, newline, indent, start, kw:continue, tok:;, newline, end,
+	// unindent, end
+	ASSERT_EQ(h.inner.calls.size(), 25u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:if");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:)");
+	EXPECT_EQ(h.inner.calls[7], "newline");
+	EXPECT_EQ(h.inner.calls[8], "indent");
+	EXPECT_EQ(h.inner.calls[9], "start");
+	EXPECT_EQ(h.inner.calls[10], "kw:break");
+	EXPECT_EQ(h.inner.calls[11], "tok:;");
+	EXPECT_EQ(h.inner.calls[12], "newline");
+	EXPECT_EQ(h.inner.calls[13], "end");
+	EXPECT_EQ(h.inner.calls[14], "unindent");
+	EXPECT_EQ(h.inner.calls[15], "kw:else");
+	EXPECT_EQ(h.inner.calls[16], "newline");
+	EXPECT_EQ(h.inner.calls[17], "indent");
+	EXPECT_EQ(h.inner.calls[18], "start");
+	EXPECT_EQ(h.inner.calls[19], "kw:continue");
+	EXPECT_EQ(h.inner.calls[20], "tok:;");
+	EXPECT_EQ(h.inner.calls[21], "newline");
+	EXPECT_EQ(h.inner.calls[22], "end");
+	EXPECT_EQ(h.inner.calls[23], "unindent");
+	EXPECT_EQ(h.inner.calls[24], "end");
+}
+
+// `VisitIfElseStatement` with a nested `IfElseStatement` as the `FalseStatement` writes
+// `else if` on one line -- the false branch is recursed directly (no `WriteEmbeddedStatement`
+// newline/indent), and the `InsertRequiredSpacesDecorator` inserts a `space` between `else` and
+// the nested `if` because the two `WriteKeyword` calls would merge (the `StartNode` between them
+// does not reset `lastWritten`).
+TEST(CSharp_OutputVisitor, VisitIfElseStatementElseIf) {
+	V h;
+	auto node = std::make_unique<IfElseStatement>();
+	auto cond = std::make_unique<PrimitiveExpression>(int32_t(1));
+	auto trueBody = std::make_unique<BreakStatement>();
+	auto nested = std::make_unique<IfElseStatement>();
+	auto nestedCond = std::make_unique<PrimitiveExpression>(int32_t(2));
+	auto nestedBody = std::make_unique<ContinueStatement>();
+	nested->Condition(nestedCond.get());
+	nested->TrueStatement(nestedBody.get());
+	node->Condition(cond.get());
+	node->TrueStatement(trueBody.get());
+	node->FalseStatement(nested.get());
+	h.visitor->VisitIfElseStatement(node.get());
+	// start, kw:if, tok:(, start, primval, end, tok:), newline, indent, start, kw:break, tok:;,
+	// newline, end, unindent, kw:else, start (nested), space (decorator), kw:if, tok:(, start,
+	// primval, end, tok:), newline, indent, start, kw:continue, tok:;, newline, end, unindent,
+	// end (nested), end (outer)
+	ASSERT_EQ(h.inner.calls.size(), 34u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:if");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:)");
+	EXPECT_EQ(h.inner.calls[7], "newline");
+	EXPECT_EQ(h.inner.calls[8], "indent");
+	EXPECT_EQ(h.inner.calls[9], "start");
+	EXPECT_EQ(h.inner.calls[10], "kw:break");
+	EXPECT_EQ(h.inner.calls[11], "tok:;");
+	EXPECT_EQ(h.inner.calls[12], "newline");
+	EXPECT_EQ(h.inner.calls[13], "end");
+	EXPECT_EQ(h.inner.calls[14], "unindent");
+	EXPECT_EQ(h.inner.calls[15], "kw:else");
+	EXPECT_EQ(h.inner.calls[16], "start");
+	EXPECT_EQ(h.inner.calls[17], "space");
+	EXPECT_EQ(h.inner.calls[18], "kw:if");
+	EXPECT_EQ(h.inner.calls[19], "tok:(");
+	EXPECT_EQ(h.inner.calls[20], "start");
+	EXPECT_EQ(h.inner.calls[21], "primval");
+	EXPECT_EQ(h.inner.calls[22], "end");
+	EXPECT_EQ(h.inner.calls[23], "tok:)");
+	EXPECT_EQ(h.inner.calls[24], "newline");
+	EXPECT_EQ(h.inner.calls[25], "indent");
+	EXPECT_EQ(h.inner.calls[26], "start");
+	EXPECT_EQ(h.inner.calls[27], "kw:continue");
+	EXPECT_EQ(h.inner.calls[28], "tok:;");
+	EXPECT_EQ(h.inner.calls[29], "newline");
+	EXPECT_EQ(h.inner.calls[30], "end");
+	EXPECT_EQ(h.inner.calls[31], "unindent");
+	EXPECT_EQ(h.inner.calls[32], "end");
+	EXPECT_EQ(h.inner.calls[33], "end");
+}
+
+// `VisitYieldReturnStatement` writes `yield return expr;`: two consecutive `WriteKeyword` calls
+// (`yield` then `return`) would merge into one lexeme without the `InsertRequiredSpacesDecorator`,
+// which inserts the inter-keyword `space`; then a `Space` + the expression (its own
+// `start`/`primval`/`end`) + `Semicolon` (tok:; + newline).
+TEST(CSharp_OutputVisitor, VisitYieldReturnStatement) {
+	V h;
+	auto node = std::make_unique<YieldReturnStatement>();
+	auto expr = std::make_unique<PrimitiveExpression>(int32_t(1));
+	node->Expression(expr.get());
+	h.visitor->VisitYieldReturnStatement(node.get());
+	// start, kw:yield, space (decorator-inserted), kw:return, space (visitor-written), start,
+	// primval, end, tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 11u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:yield");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "kw:return");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "primval");
+	EXPECT_EQ(h.inner.calls[7], "end");
+	EXPECT_EQ(h.inner.calls[8], "tok:;");
+	EXPECT_EQ(h.inner.calls[9], "newline");
+	EXPECT_EQ(h.inner.calls[10], "end");
 }
