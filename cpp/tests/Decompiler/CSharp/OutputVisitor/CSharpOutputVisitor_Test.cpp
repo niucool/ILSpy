@@ -121,6 +121,8 @@
 #include "Decompiler/CSharp/Syntax/Statements/SwitchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/SwitchSection.hpp"
 #include "Decompiler/CSharp/Syntax/CaseLabel.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/SwitchExpression.hpp"
+#include "Decompiler/CSharp/Syntax/SwitchExpressionSection.hpp"
 #include "Decompiler/CSharp/Syntax/CatchClause.hpp"
 #include "Decompiler/CSharp/Syntax/Modifiers.hpp"
 
@@ -168,6 +170,8 @@ using ILSpy::Decompiler::CSharp::Syntax::FixedStatement;
 using ILSpy::Decompiler::CSharp::Syntax::SwitchStatement;
 using ILSpy::Decompiler::CSharp::Syntax::SwitchSection;
 using ILSpy::Decompiler::CSharp::Syntax::CaseLabel;
+using ILSpy::Decompiler::CSharp::Syntax::SwitchExpression;
+using ILSpy::Decompiler::CSharp::Syntax::SwitchExpressionSection;
 using ILSpy::Decompiler::CSharp::Syntax::CatchClause;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentExpression;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentOperatorType;
@@ -3354,4 +3358,109 @@ TEST(CSharp_OutputVisitor, VisitSwitchStatement) {
 	EXPECT_EQ(h.inner.calls[26], "tok:}");
 	EXPECT_EQ(h.inner.calls[27], "newline");
 	EXPECT_EQ(h.inner.calls[28], "end");
+}
+
+// `VisitSwitchExpressionSection` -- a switch-expression arm `pattern => body`. The `Pattern`
+// recurses through `VisitPrimitiveExpression` (its own `start`/`primval`/`end`), then an explicit
+// `Space`, the `=>` arrow token, another explicit `Space`, and the `Body` recursing through
+// `VisitPrimitiveExpression` (likewise `start`/`primval`/`end`). Both explicit `Space` calls reset
+// the decorator's `lastWritten` so no decorator-inserted space precedes the arrow.
+TEST(CSharp_OutputVisitor, VisitSwitchExpressionSection) {
+	V h;
+	auto section = std::make_unique<SwitchExpressionSection>();
+	auto pattern = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto body = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(2)));
+	section->Pattern(pattern.get());
+	section->Body(body.get());
+	h.visitor->VisitSwitchExpressionSection(section.get());
+	// start, start, primval, end, space, tok:=>, space, start, primval, end, end
+	ASSERT_EQ(h.inner.calls.size(), 11u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primval");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "tok:=>");
+	EXPECT_EQ(h.inner.calls[6], "space");
+	EXPECT_EQ(h.inner.calls[7], "start");
+	EXPECT_EQ(h.inner.calls[8], "primval");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "end");
+}
+
+// `VisitSwitchExpression` -- `expr switch { arm => body, }`. The governing `Expression` recurses
+// through `VisitPrimitiveExpression`, then an explicit `Space`, the `switch` keyword, `OpenBrace`
+// (EndOfLine array-initializer style, `newLine=true`) inserts a `space` before `{` (the line is not
+// empty after `switch`), then `{`, `indent`, `newline`; the single section recurses through
+// `VisitSwitchExpressionSection`; `Comma` writes a trailing `tok:,` (C# writes a comma after every
+// arm including the last) with no surrounding spaces (the default `SpaceBeforeBracketComma` /
+// `SpaceAfterBracketComma` are both false); `NewLine`; `CloseBrace` (EndOfLine) `unindent`s then
+// emits `}`.
+TEST(CSharp_OutputVisitor, VisitSwitchExpression) {
+	V h;
+	auto node = std::make_unique<SwitchExpression>();
+	auto governingExpr = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(0)));
+	auto section = std::make_unique<SwitchExpressionSection>();
+	auto pattern = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto body = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(2)));
+	node->Expression(governingExpr.get());
+	section->Pattern(pattern.get());
+	section->Body(body.get());
+	node->SwitchSections().Add(section.get());
+	h.visitor->VisitSwitchExpression(node.get());
+	// start, start, primval, end, space, kw:switch, space, tok:{, indent, newline,
+	// start, start, primval, end, space, tok:=>, space, start, primval, end, end,
+	// tok:,, newline, unindent, tok:}, end
+	ASSERT_EQ(h.inner.calls.size(), 26u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primval");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "kw:switch");
+	EXPECT_EQ(h.inner.calls[6], "space");
+	EXPECT_EQ(h.inner.calls[7], "tok:{");
+	EXPECT_EQ(h.inner.calls[8], "indent");
+	EXPECT_EQ(h.inner.calls[9], "newline");
+	EXPECT_EQ(h.inner.calls[10], "start");
+	EXPECT_EQ(h.inner.calls[11], "start");
+	EXPECT_EQ(h.inner.calls[12], "primval");
+	EXPECT_EQ(h.inner.calls[13], "end");
+	EXPECT_EQ(h.inner.calls[14], "space");
+	EXPECT_EQ(h.inner.calls[15], "tok:=>");
+	EXPECT_EQ(h.inner.calls[16], "space");
+	EXPECT_EQ(h.inner.calls[17], "start");
+	EXPECT_EQ(h.inner.calls[18], "primval");
+	EXPECT_EQ(h.inner.calls[19], "end");
+	EXPECT_EQ(h.inner.calls[20], "end");
+	EXPECT_EQ(h.inner.calls[21], "tok:,");
+	EXPECT_EQ(h.inner.calls[22], "newline");
+	EXPECT_EQ(h.inner.calls[23], "unindent");
+	EXPECT_EQ(h.inner.calls[24], "tok:}");
+	EXPECT_EQ(h.inner.calls[25], "end");
+}
+
+// `VisitSwitchExpression` with no sections -- the `foreach` loop body never runs, so no `Comma` /
+// `NewLine` per arm; `OpenBrace` and `CloseBrace` still bracket the (empty) arm list.
+TEST(CSharp_OutputVisitor, VisitSwitchExpressionEmpty) {
+	V h;
+	auto node = std::make_unique<SwitchExpression>();
+	auto governingExpr = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(0)));
+	node->Expression(governingExpr.get());
+	h.visitor->VisitSwitchExpression(node.get());
+	// start, start, primval, end, space, kw:switch, space, tok:{, indent, newline, unindent, tok:}, end
+	ASSERT_EQ(h.inner.calls.size(), 13u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primval");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "kw:switch");
+	EXPECT_EQ(h.inner.calls[6], "space");
+	EXPECT_EQ(h.inner.calls[7], "tok:{");
+	EXPECT_EQ(h.inner.calls[8], "indent");
+	EXPECT_EQ(h.inner.calls[9], "newline");
+	EXPECT_EQ(h.inner.calls[10], "unindent");
+	EXPECT_EQ(h.inner.calls[11], "tok:}");
+	EXPECT_EQ(h.inner.calls[12], "end");
 }

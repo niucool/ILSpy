@@ -126,6 +126,8 @@
 #include "Decompiler/CSharp/Syntax/Expressions/StackAllocExpression.hpp"
 #include "Decompiler/CSharp/Syntax/VariableInitializer.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/SwitchExpression.hpp"
+#include "Decompiler/CSharp/Syntax/SwitchExpressionSection.hpp"
 #include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
 #include "Decompiler/CSharp/Syntax/ParenthesizedVariableDesignation.hpp"
 #include "Decompiler/CSharp/OutputVisitor/InsertRequiredSpacesDecorator.hpp"
@@ -1818,8 +1820,31 @@ void CSharpOutputVisitor::VisitAnonymousMethodExpression(Syntax::AnonymousMethod
 	WriteBlock(anonymousMethodExpression->Body(), policy_.AnonymousMethodBraceStyle);
 	EndNode(anonymousMethodExpression);
 }
-void CSharpOutputVisitor::VisitSwitchExpressionSection(Syntax::SwitchExpressionSection*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitSwitchExpression(Syntax::SwitchExpression*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitSwitchExpressionSection(Syntax::SwitchExpressionSection* switchExpressionSection) {
+	StartNode(switchExpressionSection);
+	switchExpressionSection->Pattern()->AcceptVisitor(*this);
+	Space();
+	WriteToken(Tokens::Arrow);
+	Space();
+	switchExpressionSection->Body()->AcceptVisitor(*this);
+	EndNode(switchExpressionSection);
+}
+void CSharpOutputVisitor::VisitSwitchExpression(Syntax::SwitchExpression* switchExpression) {
+	StartNode(switchExpression);
+	switchExpression->Expression()->AcceptVisitor(*this);
+	Space();
+	WriteKeyword(SwitchExpression::SwitchKeyword);
+	OpenBrace(policy_.ArrayInitializerBraceStyle);
+	auto& sections = switchExpression->SwitchSections();
+	int sectionCount = sections.Count();
+	for (int i = 0; i < sectionCount; ++i) {
+		sections.At(i)->AcceptVisitor(*this);
+		Comma(sections.At(i));
+		NewLine();
+	}
+	CloseBrace(policy_.ArrayInitializerBraceStyle);
+	EndNode(switchExpression);
+}
 void CSharpOutputVisitor::VisitRecursivePatternExpression(Syntax::RecursivePatternExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitInterpolation(Syntax::Interpolation*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitInterpolatedStringText(Syntax::InterpolatedStringText*) { NotImplemented(); }
