@@ -74,6 +74,9 @@
 #include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ForeachStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/SwitchStatement.hpp"
+#include "Decompiler/CSharp/Syntax/SwitchSection.hpp"
+#include "Decompiler/CSharp/Syntax/CaseLabel.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/MemberType.hpp"
@@ -1492,9 +1495,72 @@ void CSharpOutputVisitor::VisitFixedStatement(Syntax::FixedStatement* fixedState
 	WriteEmbeddedStatement(fixedStatement->EmbeddedStatement());
 	EndNode(fixedStatement);
 }
-void CSharpOutputVisitor::VisitCaseLabel(Syntax::CaseLabel*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitSwitchSection(Syntax::SwitchSection*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitSwitchStatement(Syntax::SwitchStatement*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitCaseLabel(Syntax::CaseLabel* caseLabel) {
+	StartNode(caseLabel);
+	if (caseLabel->Expression() == nullptr) {
+		WriteKeyword(CaseLabel::DefaultKeyword);
+	} else {
+		WriteKeyword(CaseLabel::CaseKeyword);
+		Space();
+		caseLabel->Expression()->AcceptVisitor(*this);
+	}
+	WriteToken(Tokens::Colon);
+	EndNode(caseLabel);
+}
+void CSharpOutputVisitor::VisitSwitchSection(Syntax::SwitchSection* switchSection) {
+	StartNode(switchSection);
+	bool first = true;
+	auto& labels = switchSection->CaseLabels();
+	int labelCount = labels.Count();
+	for (int i = 0; i < labelCount; ++i) {
+		if (!first) {
+			NewLine();
+		}
+		labels.At(i)->AcceptVisitor(*this);
+		first = false;
+	}
+	auto& stmts = switchSection->Statements();
+	int stmtCount = stmts.Count();
+	bool isBlock = (stmtCount == 1) && (dynamic_cast<BlockStatement*>(stmts.At(0)) != nullptr);
+	if (policy_.IndentCaseBody && !isBlock) {
+		writer_->Indent();
+	}
+	if (!isBlock) {
+		NewLine();
+	}
+	for (int i = 0; i < stmtCount; ++i) {
+		stmts.At(i)->AcceptVisitor(*this);
+	}
+	if (policy_.IndentCaseBody && !isBlock) {
+		writer_->Unindent();
+	}
+	EndNode(switchSection);
+}
+void CSharpOutputVisitor::VisitSwitchStatement(Syntax::SwitchStatement* switchStatement) {
+	StartNode(switchStatement);
+	WriteKeyword(SwitchStatement::SwitchKeyword);
+	Space(policy_.SpaceBeforeSwitchParentheses);
+	LPar();
+	Space(policy_.SpacesWithinSwitchParentheses);
+	switchStatement->Expression()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinSwitchParentheses);
+	RPar();
+	OpenBrace(policy_.StatementBraceStyle);
+	if (!policy_.IndentSwitchBody) {
+		writer_->Unindent();
+	}
+	auto& sections = switchStatement->SwitchSections();
+	int sectionCount = sections.Count();
+	for (int i = 0; i < sectionCount; ++i) {
+		sections.At(i)->AcceptVisitor(*this);
+	}
+	if (!policy_.IndentSwitchBody) {
+		writer_->Indent();
+	}
+	CloseBrace(policy_.StatementBraceStyle);
+	NewLine();
+	EndNode(switchStatement);
+}
 void CSharpOutputVisitor::VisitCatchClause(Syntax::CatchClause*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitTryCatchStatement(Syntax::TryCatchStatement*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitVariableDeclarationStatement(Syntax::VariableDeclarationStatement*) { NotImplemented(); }

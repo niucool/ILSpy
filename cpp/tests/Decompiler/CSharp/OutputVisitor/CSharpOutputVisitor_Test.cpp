@@ -119,6 +119,9 @@
 #include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/SwitchStatement.hpp"
+#include "Decompiler/CSharp/Syntax/SwitchSection.hpp"
+#include "Decompiler/CSharp/Syntax/CaseLabel.hpp"
+#include "Decompiler/CSharp/Syntax/CatchClause.hpp"
 #include "Decompiler/CSharp/Syntax/Modifiers.hpp"
 
 using namespace ILSpy::Decompiler::CSharp::OutputVisitor;
@@ -163,6 +166,9 @@ using ILSpy::Decompiler::CSharp::Syntax::LockStatement;
 using ILSpy::Decompiler::CSharp::Syntax::UsingStatement;
 using ILSpy::Decompiler::CSharp::Syntax::FixedStatement;
 using ILSpy::Decompiler::CSharp::Syntax::SwitchStatement;
+using ILSpy::Decompiler::CSharp::Syntax::SwitchSection;
+using ILSpy::Decompiler::CSharp::Syntax::CaseLabel;
+using ILSpy::Decompiler::CSharp::Syntax::CatchClause;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentExpression;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentOperatorType;
 using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorExpression;
@@ -562,12 +568,12 @@ TEST(CSharp_OutputVisitor, WriteCommaSeparatedListInParenthesisEmpty) {
 // ---- The 130 Visit stubs throw ---------------------------------------------
 
 // A representative still-unported `Visit` method throws `std::logic_error` (the throwing-stub
-// design); `VisitSwitchStatement` remains a stub (the leaf + simple-statement + control-flow
-// `Visit` methods below are implemented).
+// design); `VisitCatchClause` remains a stub (the switch family `Visit` methods are now
+// implemented, the try/catch family below is still a stub).
 TEST(CSharp_OutputVisitor, VisitStubThrows) {
 	V h;
-	auto stmt = std::make_unique<SwitchStatement>();
-	EXPECT_THROW(h.visitor->VisitSwitchStatement(stmt.get()), std::logic_error);
+	auto clause = std::make_unique<CatchClause>();
+	EXPECT_THROW(h.visitor->VisitCatchClause(clause.get()), std::logic_error);
 }
 
 // ---- The implemented leaf Visit methods ------------------------------------
@@ -3226,4 +3232,126 @@ TEST(CSharp_OutputVisitor, VisitFixedStatement) {
 	EXPECT_EQ(h.inner.calls[17], "end");
 	EXPECT_EQ(h.inner.calls[18], "unindent");
 	EXPECT_EQ(h.inner.calls[19], "end");
+}
+
+// `VisitCaseLabel` for `case 0:` -- the `case` keyword, an explicit `Space`, the case
+// `Expression` recursing through `VisitPrimitiveExpression` (its own `start`/`primval`/`end`),
+// then the `Colon` token. The `InsertRequiredSpacesDecorator` inserts no spurious spaces: the
+// explicit `Space()` after `kw:case` resets `lastWritten` to `Whitespace`, so the primitive value
+// needs no leading decorator space.
+TEST(CSharp_OutputVisitor, VisitCaseLabel) {
+	V h;
+	auto node = std::make_unique<CaseLabel>();
+	auto expr = std::make_unique<PrimitiveExpression>(PrimitiveValue(int32_t(0)));
+	node->Expression(expr.get());
+	h.visitor->VisitCaseLabel(node.get());
+	// start, kw:case, space, start, primval, end, tok::, end
+	ASSERT_EQ(h.inner.calls.size(), 8u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:case");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok::");
+	EXPECT_EQ(h.inner.calls[7], "end");
+}
+
+// `VisitCaseLabel` for `default:` -- a null `Expression` selects the `DefaultKeyword` branch
+// (no `case` keyword, no `Space`), then the `Colon` token. The decorator inserts no space between
+// the `default` keyword and the `:` token (`:` is not one of the `+`/`-`/`&`/`?` merge-guards).
+TEST(CSharp_OutputVisitor, VisitCaseLabelDefault) {
+	V h;
+	auto node = std::make_unique<CaseLabel>();
+	h.visitor->VisitCaseLabel(node.get());
+	// start, kw:default, tok::, end
+	ASSERT_EQ(h.inner.calls.size(), 4u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:default");
+	EXPECT_EQ(h.inner.calls[2], "tok::");
+	EXPECT_EQ(h.inner.calls[3], "end");
+}
+
+// `VisitSwitchSection` -- one `default:` label + one `break;` statement (not a `BlockStatement`).
+// The labels loop emits the label with no leading `NewLine` (the `first` gate), the `isBlock` test
+// is `false` (the single statement is a `BreakStatement`, not a `BlockStatement`), so a `NewLine`
+// separates the label from the statement, then the `break` recurses through
+// `VisitBreakStatement` (a `Semicolon` emitting `tok:;` + `newline`). The default
+// `IndentCaseBody=false` means the `Indent`/`Unindent` around the statements are skipped.
+TEST(CSharp_OutputVisitor, VisitSwitchSection) {
+	V h;
+	auto section = std::make_unique<SwitchSection>();
+	auto label = std::make_unique<CaseLabel>();
+	auto stmt = std::make_unique<BreakStatement>();
+	section->CaseLabels().Add(label.get());
+	section->Statements().Add(stmt.get());
+	h.visitor->VisitSwitchSection(section.get());
+	// start, start, kw:default, tok::, end, newline, start, kw:break, tok:;, newline, end, end
+	ASSERT_EQ(h.inner.calls.size(), 12u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "kw:default");
+	EXPECT_EQ(h.inner.calls[3], "tok::");
+	EXPECT_EQ(h.inner.calls[4], "end");
+	EXPECT_EQ(h.inner.calls[5], "newline");
+	EXPECT_EQ(h.inner.calls[6], "start");
+	EXPECT_EQ(h.inner.calls[7], "kw:break");
+	EXPECT_EQ(h.inner.calls[8], "tok:;");
+	EXPECT_EQ(h.inner.calls[9], "newline");
+	EXPECT_EQ(h.inner.calls[10], "end");
+	EXPECT_EQ(h.inner.calls[11], "end");
+}
+
+// `VisitSwitchStatement` -- a `switch (null) { default: break; }`. The `switch` keyword, the parens
+// (default policy adds no surrounding spaces), the governing `Expression` recursing through
+// `VisitNullReferenceExpression` (its own `start`/`primval`/`end`), then `OpenBrace` (EndOfLine
+// style, default `newLine=true`) inserts a `space` before `{` (the line is not empty after `)`),
+// then `{`, `indent`, `newline`; the default `IndentSwitchBody=false` `Unindent`s the body; the
+// single section recurses through `VisitSwitchSection`; the `IndentSwitchBody=false` `Indent`
+// restores the indent; `CloseBrace` `Unindent`s then emits `}`; a trailing `NewLine`.
+TEST(CSharp_OutputVisitor, VisitSwitchStatement) {
+	V h;
+	auto node = std::make_unique<SwitchStatement>();
+	auto governingExpr = std::make_unique<NullReferenceExpression>();
+	auto section = std::make_unique<SwitchSection>();
+	auto label = std::make_unique<CaseLabel>();
+	auto stmt = std::make_unique<BreakStatement>();
+	node->Expression(governingExpr.get());
+	section->CaseLabels().Add(label.get());
+	section->Statements().Add(stmt.get());
+	node->SwitchSections().Add(section.get());
+	h.visitor->VisitSwitchStatement(node.get());
+	// start, kw:switch, tok:(, start, primval, end, tok:), space, tok:{, indent, newline, unindent,
+	// start, start, kw:default, tok::, end, newline, start, kw:break, tok:;, newline, end, end,
+	// indent, unindent, tok:}, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 29u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:switch");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:)");
+	EXPECT_EQ(h.inner.calls[7], "space");
+	EXPECT_EQ(h.inner.calls[8], "tok:{");
+	EXPECT_EQ(h.inner.calls[9], "indent");
+	EXPECT_EQ(h.inner.calls[10], "newline");
+	EXPECT_EQ(h.inner.calls[11], "unindent");
+	EXPECT_EQ(h.inner.calls[12], "start");
+	EXPECT_EQ(h.inner.calls[13], "start");
+	EXPECT_EQ(h.inner.calls[14], "kw:default");
+	EXPECT_EQ(h.inner.calls[15], "tok::");
+	EXPECT_EQ(h.inner.calls[16], "end");
+	EXPECT_EQ(h.inner.calls[17], "newline");
+	EXPECT_EQ(h.inner.calls[18], "start");
+	EXPECT_EQ(h.inner.calls[19], "kw:break");
+	EXPECT_EQ(h.inner.calls[20], "tok:;");
+	EXPECT_EQ(h.inner.calls[21], "newline");
+	EXPECT_EQ(h.inner.calls[22], "end");
+	EXPECT_EQ(h.inner.calls[23], "end");
+	EXPECT_EQ(h.inner.calls[24], "indent");
+	EXPECT_EQ(h.inner.calls[25], "unindent");
+	EXPECT_EQ(h.inner.calls[26], "tok:}");
+	EXPECT_EQ(h.inner.calls[27], "newline");
+	EXPECT_EQ(h.inner.calls[28], "end");
 }
