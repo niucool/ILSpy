@@ -112,6 +112,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/NamedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/OutVarDeclarationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DeclarationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/WithInitializerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/StackAllocExpression.hpp"
@@ -640,6 +641,19 @@ bool CSharpOutputVisitor::InsertNewLineWhenInMethodCallChain(MemberReferenceExpr
 	isAtStartOfLine_ = true;
 	isAfterSpace_ = false;
 	return true;
+}
+
+// The C# `protected bool LambdaNeedsParenthesis(LambdaExpression)` -- a lambda with exactly one
+// parameter that has no type, no modifier, and no `params` may omit the parentheses
+// (`x => ...`); every other shape needs them. The `Parameters.Single()` ports to `At(0)`.
+bool CSharpOutputVisitor::LambdaNeedsParenthesis(Syntax::LambdaExpression* lambdaExpression) {
+	if (lambdaExpression->Parameters().Count() != 1) {
+		return true;
+	}
+	Syntax::ParameterDeclaration* p = lambdaExpression->Parameters().At(0);
+	return !(p->Type() == nullptr
+		&& p->ParameterModifier() == ILSpy::Decompiler::TypeSystem::ReferenceKind::None
+		&& !p->IsParams());
 }
 
 // ---- The 130 IAstVisitor Visit methods (throwing stubs) -------------------
@@ -1503,10 +1517,79 @@ void CSharpOutputVisitor::VisitPreProcessorDirective(Syntax::PreProcessorDirecti
 	writer_->EndNode(preProcessorDirective);
 }
 void CSharpOutputVisitor::VisitDocumentationReference(Syntax::DocumentationReference*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitDeclarationExpression(Syntax::DeclarationExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitAnonymousTypeCreateExpression(Syntax::AnonymousTypeCreateExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitLambdaExpression(Syntax::LambdaExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitAnonymousMethodExpression(Syntax::AnonymousMethodExpression*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitDeclarationExpression(Syntax::DeclarationExpression* declarationExpression) {
+	// The C# `VisitDeclarationExpression`: `StartNode` + `Type.AcceptVisitor` + `Space` +
+	// `Designation.AcceptVisitor` + `EndNode` (the `T x` declaration form used by deconstruction
+	// and out-var-declaration; both slots are required, so no null guards). The `Type` recurses
+	// through its own `Visit` method (e.g. `VisitPrimitiveType`/`VisitSimpleType`), and the
+	// `Designation` recurses through `VisitSingleVariableDesignation`/
+	// `VisitParenthesizedVariableDesignation`.
+	StartNode(declarationExpression);
+	declarationExpression->Type()->AcceptVisitor(*this);
+	Space();
+	declarationExpression->Designation()->AcceptVisitor(*this);
+	EndNode(declarationExpression);
+}
+void CSharpOutputVisitor::VisitAnonymousTypeCreateExpression(Syntax::AnonymousTypeCreateExpression* anonymousTypeCreateExpression) {
+	// The C# `VisitAnonymousTypeCreateExpression`: `StartNode` + `WriteKeyword(NewKeyword)` +
+	// `PrintInitializerElements(Initializers)` + `EndNode`. Unlike `VisitObjectCreateExpression`
+	// (which renders the type then a parenthesized argument list), an anonymous object creation
+	// renders just `new` followed by the initializer braces directly over the `Initializers`
+	// collection (no nested `ArrayInitializerExpression` node, no type, no argument list).
+	StartNode(anonymousTypeCreateExpression);
+	WriteKeyword(Syntax::AnonymousTypeCreateExpression::NewKeyword);
+	PrintInitializerElements(ToVector(anonymousTypeCreateExpression->Initializers()));
+	EndNode(anonymousTypeCreateExpression);
+}
+void CSharpOutputVisitor::VisitLambdaExpression(Syntax::LambdaExpression* lambdaExpression) {
+	// The C# `VisitLambdaExpression`: `StartNode` + `WriteAttributes(Attributes)` + the optional
+	// `async` modifier + the parameter list (parenthesized when `LambdaNeedsParenthesis`, else
+	// the single parameter inline) + `Space` + `WriteToken(Arrow)` + the body (a `WriteBlock` when
+	// the body is a `BlockStatement`, else `Space` + the expression-body `AcceptVisitor`) +
+	// `EndNode`. The `Body` is typed the abstract `AstNode` base (a lambda body is either a
+	// `BlockStatement` or an `Expression`), so the `is BlockStatement` test ports to a
+	// `dynamic_cast` is-a branch.
+	StartNode(lambdaExpression);
+	WriteAttributes(ToVector(lambdaExpression->Attributes()));
+	if (lambdaExpression->IsAsync()) {
+		WriteKeyword(Syntax::LambdaExpression::AsyncModifier);
+		Space();
+	}
+	if (LambdaNeedsParenthesis(lambdaExpression)) {
+		WriteCommaSeparatedListInParenthesis(ToVector(lambdaExpression->Parameters()),
+			policy_.SpaceWithinMethodDeclarationParentheses);
+	} else {
+		lambdaExpression->Parameters().At(0)->AcceptVisitor(*this);
+	}
+	Space();
+	WriteToken(Tokens::Arrow);
+	if (auto* body = dynamic_cast<Syntax::BlockStatement*>(lambdaExpression->Body())) {
+		WriteBlock(body, policy_.AnonymousMethodBraceStyle);
+	} else {
+		Space();
+		lambdaExpression->Body()->AcceptVisitor(*this);
+	}
+	EndNode(lambdaExpression);
+}
+void CSharpOutputVisitor::VisitAnonymousMethodExpression(Syntax::AnonymousMethodExpression* anonymousMethodExpression) {
+	// The C# `VisitAnonymousMethodExpression`: `StartNode` + the optional `async` modifier +
+	// `WriteKeyword(DelegateKeyword)` + the parameter list (omitted entirely when `Parameters` is
+	// empty, so `delegate {}` rather than `delegate() {}`) + `WriteBlock(Body)` + `EndNode`. The
+	// `Body` is typed the concrete `BlockStatement` (an anonymous method always takes a block).
+	StartNode(anonymousMethodExpression);
+	if (anonymousMethodExpression->IsAsync()) {
+		WriteKeyword(Syntax::AnonymousMethodExpression::AsyncModifier);
+		Space();
+	}
+	WriteKeyword(Syntax::AnonymousMethodExpression::DelegateKeyword);
+	if (anonymousMethodExpression->Parameters().Count() > 0) {
+		Space(policy_.SpaceBeforeAnonymousMethodParentheses);
+		WriteCommaSeparatedListInParenthesis(ToVector(anonymousMethodExpression->Parameters()),
+			policy_.SpaceWithinAnonymousMethodParentheses);
+	}
+	WriteBlock(anonymousMethodExpression->Body(), policy_.AnonymousMethodBraceStyle);
+	EndNode(anonymousMethodExpression);
+}
 void CSharpOutputVisitor::VisitSwitchExpressionSection(Syntax::SwitchExpressionSection*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitSwitchExpression(Syntax::SwitchExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitRecursivePatternExpression(Syntax::RecursivePatternExpression*) { NotImplemented(); }

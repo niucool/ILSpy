@@ -234,6 +234,13 @@ protected:
 	int GetCallChainLengthLimited(Syntax::MemberReferenceExpression* expr);
 	int ShouldInsertNewLineWhenInMethodCallChain(Syntax::MemberReferenceExpression* expr);
 	virtual bool InsertNewLineWhenInMethodCallChain(Syntax::MemberReferenceExpression* expr);
+
+	// The C# `protected bool LambdaNeedsParenthesis(LambdaExpression)` -- consulted by
+	// `VisitLambdaExpression` to decide whether the parameter list needs parentheses. A lambda
+	// with exactly one parameter that has no type, no modifier, and no `params` may omit the
+	// parentheses (`x => ...`); every other shape (zero, two+, or a typed/modified/params single)
+	// needs them. The `Parameters.Single()` ports to `Parameters().At(0)` (the single element).
+	bool LambdaNeedsParenthesis(Syntax::LambdaExpression* lambdaExpression);
 public:
 	// ---- The 130 IAstVisitor Visit methods --------------------------------
 	// Declared here (override the IAstVisitor pure-virtuals) so the class is a concrete,

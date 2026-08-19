@@ -77,6 +77,10 @@
 #include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayInitializerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AnonymousTypeCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/LambdaExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AnonymousMethodExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DeclarationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Identifier.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/SimpleType.hpp"
@@ -195,6 +199,10 @@ using ILSpy::Decompiler::CSharp::Syntax::TupleTypeElement;
 using ILSpy::Decompiler::CSharp::Syntax::TupleAstType;
 using ILSpy::Decompiler::CSharp::Syntax::InvocationAstType;
 using ILSpy::Decompiler::CSharp::Syntax::FunctionPointerAstType;
+using ILSpy::Decompiler::CSharp::Syntax::AnonymousTypeCreateExpression;
+using ILSpy::Decompiler::CSharp::Syntax::LambdaExpression;
+using ILSpy::Decompiler::CSharp::Syntax::AnonymousMethodExpression;
+using ILSpy::Decompiler::CSharp::Syntax::DeclarationExpression;
 
 namespace {
 
@@ -2594,4 +2602,246 @@ TEST(CSharp_OutputVisitor, VisitFunctionPointerTypeUnmanagedConvention) {
 	EXPECT_EQ(h.inner.calls[13], "end");
 	EXPECT_EQ(h.inner.calls[14], "tok:>");
 	EXPECT_EQ(h.inner.calls[15], "end");
+}
+
+// ---- VisitDeclarationExpression / VisitAnonymousTypeCreateExpression /
+//      VisitLambdaExpression / VisitAnonymousMethodExpression ----------------
+
+// `VisitDeclarationExpression` over `int x` (the `T x` declaration form) -- the `Type` recurses
+// through `VisitPrimitiveType` (start/primtype:int/end), an explicit `Space`, then the
+// `Designation` recurses through `VisitSingleVariableDesignation` (start/id:x/end).
+TEST(CSharp_OutputVisitor, VisitDeclarationExpression) {
+	V h;
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto designation = std::make_unique<SingleVariableDesignation>(std::string("x"));
+	auto node = std::make_unique<DeclarationExpression>(type.get(), designation.get());
+	h.visitor->VisitDeclarationExpression(node.get());
+	// start, start(PrimitiveType), primtype:int, end, space, start(designation), id:x, end, end
+	ASSERT_EQ(h.inner.calls.size(), 9u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primtype:int");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "id:x");
+	EXPECT_EQ(h.inner.calls[7], "end");
+	EXPECT_EQ(h.inner.calls[8], "end");
+}
+
+// `VisitDeclarationExpression` over `var (a, b)` (a deconstruction) -- the `Type` recurses through
+// `VisitSimpleType` (start/id:var/end), an explicit `Space`, then the `ParenthesizedVariableDesignation`
+// recurses through `VisitParenthesizedVariableDesignation` rendering `(a, b)`.
+TEST(CSharp_OutputVisitor, VisitDeclarationExpressionVarDeconstruction) {
+	V h;
+	auto type = std::make_unique<SimpleType>(std::string("var"));
+	auto a = std::make_unique<SingleVariableDesignation>(std::string("a"));
+	auto b = std::make_unique<SingleVariableDesignation>(std::string("b"));
+	auto designation = std::make_unique<ParenthesizedVariableDesignation>();
+	designation->VariableDesignations().Add(a.get());
+	designation->VariableDesignations().Add(b.get());
+	auto node = std::make_unique<DeclarationExpression>(type.get(), designation.get());
+	h.visitor->VisitDeclarationExpression(node.get());
+	// start, start(SimpleType), id:var, end, space, start(ParenDesig), tok:(, start, id:a, end,
+	// tok:,, start, id:b, end, tok:), end, end
+	ASSERT_EQ(h.inner.calls.size(), 17u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "id:var");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "tok:(");
+	EXPECT_EQ(h.inner.calls[7], "start");
+	EXPECT_EQ(h.inner.calls[8], "id:a");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "tok:,");
+	EXPECT_EQ(h.inner.calls[11], "start");
+	EXPECT_EQ(h.inner.calls[12], "id:b");
+	EXPECT_EQ(h.inner.calls[13], "end");
+	EXPECT_EQ(h.inner.calls[14], "tok:)");
+	EXPECT_EQ(h.inner.calls[15], "end");
+	EXPECT_EQ(h.inner.calls[16], "end");
+}
+
+// `VisitAnonymousTypeCreateExpression` over `new {}` (empty initializers) -- `new` then the
+// initializer braces directly over the (empty) `Initializers` collection (no type, no nested
+// `ArrayInitializerExpression` node). `PrintInitializerElements` emits the OpenBrace space (the
+// line is not empty after `kw:new`), one inner space, and the close brace.
+TEST(CSharp_OutputVisitor, VisitAnonymousTypeCreateExpressionEmpty) {
+	V h;
+	auto node = std::make_unique<AnonymousTypeCreateExpression>();
+	h.visitor->VisitAnonymousTypeCreateExpression(node.get());
+	// start, kw:new, space, tok:{, space, tok:}, end
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:new");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "tok:{");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "tok:}");
+	EXPECT_EQ(h.inner.calls[6], "end");
+}
+
+// `VisitAnonymousTypeCreateExpression` over `new { 1, 2 }` (two simple primitive initializers) --
+// `PrintInitializerElements` does not wrap (two simple primitives), so the braces hug the list
+// with inner spaces and a bare comma between the elements.
+TEST(CSharp_OutputVisitor, VisitAnonymousTypeCreateExpressionTwoElements) {
+	V h;
+	auto e1 = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto e2 = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(2)));
+	auto node = std::make_unique<AnonymousTypeCreateExpression>();
+	node->Initializers().Add(e1.get());
+	node->Initializers().Add(e2.get());
+	h.visitor->VisitAnonymousTypeCreateExpression(node.get());
+	// start, kw:new, space, tok:{, space, start, primval, end, tok:,, space, start, primval, end,
+	// space, tok:}, end
+	ASSERT_EQ(h.inner.calls.size(), 16u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:new");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "tok:{");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "primval");
+	EXPECT_EQ(h.inner.calls[7], "end");
+	EXPECT_EQ(h.inner.calls[8], "tok:,");
+	EXPECT_EQ(h.inner.calls[9], "space");
+	EXPECT_EQ(h.inner.calls[10], "start");
+	EXPECT_EQ(h.inner.calls[11], "primval");
+	EXPECT_EQ(h.inner.calls[12], "end");
+	EXPECT_EQ(h.inner.calls[13], "space");
+	EXPECT_EQ(h.inner.calls[14], "tok:}");
+	EXPECT_EQ(h.inner.calls[15], "end");
+}
+
+// `VisitLambdaExpression` over `() => null` (empty parameters, expression body) -- the empty
+// parameter list is parenthesized (`LambdaNeedsParenthesis` returns true for zero parameters),
+// then the `=>` arrow and the expression body (a `NullReferenceExpression`).
+TEST(CSharp_OutputVisitor, VisitLambdaExpressionExpressionBody) {
+	V h;
+	auto body = std::make_unique<NullReferenceExpression>();
+	auto node = std::make_unique<LambdaExpression>();
+	node->Body(body.get());
+	h.visitor->VisitLambdaExpression(node.get());
+	// start, tok:(, tok:), space, tok:=>, space, start(NullRef), primval, end, end
+	ASSERT_EQ(h.inner.calls.size(), 10u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "tok:(");
+	EXPECT_EQ(h.inner.calls[2], "tok:)");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "tok:=>");
+	EXPECT_EQ(h.inner.calls[5], "space");
+	EXPECT_EQ(h.inner.calls[6], "start");
+	EXPECT_EQ(h.inner.calls[7], "primval");
+	EXPECT_EQ(h.inner.calls[8], "end");
+	EXPECT_EQ(h.inner.calls[9], "end");
+}
+
+// `VisitLambdaExpression` over `async () => null` (async, empty parameters, expression body) --
+// the `async` modifier keyword plus an explicit `Space` precede the parenthesized parameter list.
+TEST(CSharp_OutputVisitor, VisitLambdaExpressionAsync) {
+	V h;
+	auto body = std::make_unique<NullReferenceExpression>();
+	auto node = std::make_unique<LambdaExpression>();
+	node->IsAsync(true);
+	node->Body(body.get());
+	h.visitor->VisitLambdaExpression(node.get());
+	// start, kw:async, space, tok:(, tok:), space, tok:=>, space, start, primval, end, end
+	ASSERT_EQ(h.inner.calls.size(), 12u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:async");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "tok:(");
+	EXPECT_EQ(h.inner.calls[4], "tok:)");
+	EXPECT_EQ(h.inner.calls[5], "space");
+	EXPECT_EQ(h.inner.calls[6], "tok:=>");
+	EXPECT_EQ(h.inner.calls[7], "space");
+	EXPECT_EQ(h.inner.calls[8], "start");
+	EXPECT_EQ(h.inner.calls[9], "primval");
+	EXPECT_EQ(h.inner.calls[10], "end");
+	EXPECT_EQ(h.inner.calls[11], "end");
+}
+// `VisitLambdaExpression` over `() => { }` (empty parameters, block body) -- the body is a
+// `BlockStatement`, so it recurses through `WriteBlock` (no `Space` before the block, the
+// `OpenBrace` inserts its own space since the line is not empty after `=>`).
+TEST(CSharp_OutputVisitor, VisitLambdaExpressionBlockBody) {
+	V h;
+	auto body = std::make_unique<BlockStatement>();
+	auto node = std::make_unique<LambdaExpression>();
+	node->Body(body.get());
+	h.visitor->VisitLambdaExpression(node.get());
+	// start, tok:(, tok:), space, tok:=>, start(block), space, tok:{, indent, newline,
+	// unindent, tok:}, end, end (the `WriteBlock` body's `OpenBrace` defaults `newLine=true`, so it
+	// emits `indent`+`newline` after `{`, and `CloseBrace` defaults `unindent=true`, so it emits
+	// `unindent` before `}`).
+	ASSERT_EQ(h.inner.calls.size(), 14u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "tok:(");
+	EXPECT_EQ(h.inner.calls[2], "tok:)");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "tok:=>");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "space");
+	EXPECT_EQ(h.inner.calls[7], "tok:{");
+	EXPECT_EQ(h.inner.calls[8], "indent");
+	EXPECT_EQ(h.inner.calls[9], "newline");
+	EXPECT_EQ(h.inner.calls[10], "unindent");
+	EXPECT_EQ(h.inner.calls[11], "tok:}");
+	EXPECT_EQ(h.inner.calls[12], "end");
+	EXPECT_EQ(h.inner.calls[13], "end");
+}
+
+// `VisitAnonymousMethodExpression` over `delegate {}` (empty parameters, empty block body) --
+// the `delegate` keyword, the parameter list omitted entirely (empty `Parameters`), then the
+// `WriteBlock` body.
+TEST(CSharp_OutputVisitor, VisitAnonymousMethodExpression) {
+	V h;
+	auto body = std::make_unique<BlockStatement>();
+	auto node = std::make_unique<AnonymousMethodExpression>();
+	node->Body(body.get());
+	h.visitor->VisitAnonymousMethodExpression(node.get());
+	// start, kw:delegate, start(block), space, tok:{, indent, newline, unindent, tok:}, end, end
+	// (the `WriteBlock` body's `OpenBrace` defaults `newLine=true` -> `indent`+`newline`, and
+	// `CloseBrace` defaults `unindent=true` -> `unindent`).
+	ASSERT_EQ(h.inner.calls.size(), 11u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:delegate");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "tok:{");
+	EXPECT_EQ(h.inner.calls[5], "indent");
+	EXPECT_EQ(h.inner.calls[6], "newline");
+	EXPECT_EQ(h.inner.calls[7], "unindent");
+	EXPECT_EQ(h.inner.calls[8], "tok:}");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "end");
+}
+
+// `VisitAnonymousMethodExpression` over `async delegate {}` (async, empty parameters, empty block
+// body) -- the `async` modifier keyword plus an explicit `Space` precede the `delegate` keyword.
+TEST(CSharp_OutputVisitor, VisitAnonymousMethodExpressionAsync) {
+	V h;
+	auto body = std::make_unique<BlockStatement>();
+	auto node = std::make_unique<AnonymousMethodExpression>();
+	node->IsAsync(true);
+	node->Body(body.get());
+	h.visitor->VisitAnonymousMethodExpression(node.get());
+	// start, kw:async, space, kw:delegate, start(block), space, tok:{, indent, newline, unindent,
+	// tok:}, end, end (the `WriteBlock` body's `OpenBrace`/`CloseBrace` default `newLine=true`/
+	// `unindent=true`).
+	ASSERT_EQ(h.inner.calls.size(), 13u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:async");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "kw:delegate");
+	EXPECT_EQ(h.inner.calls[4], "start");
+	EXPECT_EQ(h.inner.calls[5], "space");
+	EXPECT_EQ(h.inner.calls[6], "tok:{");
+	EXPECT_EQ(h.inner.calls[7], "indent");
+	EXPECT_EQ(h.inner.calls[8], "newline");
+	EXPECT_EQ(h.inner.calls[9], "unindent");
+	EXPECT_EQ(h.inner.calls[10], "tok:}");
+	EXPECT_EQ(h.inner.calls[11], "end");
+	EXPECT_EQ(h.inner.calls[12], "end");
 }
