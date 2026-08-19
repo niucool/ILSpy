@@ -74,6 +74,7 @@
 #include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ForeachStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/SwitchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/SwitchSection.hpp"
@@ -1617,7 +1618,15 @@ void CSharpOutputVisitor::VisitTryCatchStatement(Syntax::TryCatchStatement* tryC
 	NewLine();
 	EndNode(tryCatchStatement);
 }
-void CSharpOutputVisitor::VisitVariableDeclarationStatement(Syntax::VariableDeclarationStatement*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitVariableDeclarationStatement(Syntax::VariableDeclarationStatement* variableDeclarationStatement) {
+	StartNode(variableDeclarationStatement);
+	WriteModifiers(variableDeclarationStatement->Modifiers());
+	variableDeclarationStatement->Type()->AcceptVisitor(*this);
+	Space();
+	WriteCommaSeparatedList(ToVector(variableDeclarationStatement->Variables()));
+	Semicolon();
+	EndNode(variableDeclarationStatement);
+}
 void CSharpOutputVisitor::VisitDestructorDeclaration(Syntax::DestructorDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitFieldDeclaration(Syntax::FieldDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitAccessor(Syntax::Accessor*) { NotImplemented(); }

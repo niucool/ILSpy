@@ -94,6 +94,7 @@
 #include "Decompiler/CSharp/Syntax/FunctionPointerAstType.hpp"
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Syntax/PreProcessorDirective.hpp"
+#include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
@@ -177,6 +178,7 @@ using ILSpy::Decompiler::CSharp::Syntax::SwitchExpression;
 using ILSpy::Decompiler::CSharp::Syntax::SwitchExpressionSection;
 using ILSpy::Decompiler::CSharp::Syntax::CatchClause;
 using ILSpy::Decompiler::CSharp::Syntax::TryCatchStatement;
+using ILSpy::Decompiler::CSharp::Syntax::DestructorDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentExpression;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentOperatorType;
 using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorExpression;
@@ -576,12 +578,13 @@ TEST(CSharp_OutputVisitor, WriteCommaSeparatedListInParenthesisEmpty) {
 // ---- The 130 Visit stubs throw ---------------------------------------------
 
 // A representative still-unported `Visit` method throws `std::logic_error` (the throwing-stub
-// design); `VisitCatchClause` remains a stub (the switch family `Visit` methods are now
-// implemented, the try/catch family below is still a stub).
+// design); `VisitDestructorDeclaration` remains a stub (the `VariableDeclarationStatement` and
+// the try/catch family `Visit` methods above are now implemented, the TypeMember hierarchy
+// below is still a stub).
 TEST(CSharp_OutputVisitor, VisitStubThrows) {
 	V h;
-	auto stmt = std::make_unique<VariableDeclarationStatement>();
-	EXPECT_THROW(h.visitor->VisitVariableDeclarationStatement(stmt.get()), std::logic_error);
+	auto decl = std::make_unique<DestructorDeclaration>();
+	EXPECT_THROW(h.visitor->VisitDestructorDeclaration(decl.get()), std::logic_error);
 }
 
 // ---- The implemented leaf Visit methods ------------------------------------
@@ -3569,4 +3572,101 @@ TEST(CSharp_OutputVisitor, VisitTryCatchStatement) {
 	EXPECT_EQ(h.inner.calls[21], "end");
 	EXPECT_EQ(h.inner.calls[22], "newline");
 	EXPECT_EQ(h.inner.calls[23], "end");
+}
+
+// ---- VisitVariableDeclarationStatement -----------------------------------
+
+// `VisitVariableDeclarationStatement` writes `Modifiers Type v1, v2, ...;`: the `WriteModifiers`
+// (empty for `None`), the `Type` recursing (a `PrimitiveType` contributes `start`/`primtype`/
+// `end`), an explicit `Space`, the comma-separated `Variables` list (a `VariableInitializer`
+// contributes `start`/`id:x`/`end`), then `Semicolon` (`tok:;` + `newline`). The default
+// `SpaceAroundAssignment`/`SpaceBeforeBracketComma`/`SpaceAfterBracketComma` policies are false,
+// so no extra spaces appear; the `InsertRequiredSpacesDecorator` inserts none either (the
+// explicit `Space()` resets `lastWritten`, so the identifier after it needs no leading space).
+TEST(CSharp_OutputVisitor, VisitVariableDeclarationStatement) {
+	V h;
+	auto node = std::make_unique<VariableDeclarationStatement>();
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto var = std::make_unique<VariableInitializer>(std::string("x"));
+	node->Type(type.get());
+	node->Variables().Add(var.get());
+	h.visitor->VisitVariableDeclarationStatement(node.get());
+	// start, start, primtype:int, end, space, start, id:x, end, tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 11u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primtype:int");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "id:x");
+	EXPECT_EQ(h.inner.calls[7], "end");
+	EXPECT_EQ(h.inner.calls[8], "tok:;");
+	EXPECT_EQ(h.inner.calls[9], "newline");
+	EXPECT_EQ(h.inner.calls[10], "end");
+}
+
+// `int x = 0;` -- the `VariableInitializer` carries a `PrimitiveExpression` initializer: the
+// `=` token is written with `SpaceAroundAssignment=false` (no surrounding spaces), and the
+// `PrimitiveExpression` recurses through `VisitPrimitiveExpression` (`start`/`primval`/`end`).
+TEST(CSharp_OutputVisitor, VisitVariableDeclarationStatementWithInitializer) {
+	V h;
+	auto node = std::make_unique<VariableDeclarationStatement>();
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto init = std::make_unique<PrimitiveExpression>(int32_t(0));
+	auto var = std::make_unique<VariableInitializer>(std::string("x"), init.get());
+	node->Type(type.get());
+	node->Variables().Add(var.get());
+	h.visitor->VisitVariableDeclarationStatement(node.get());
+	// start, start, primtype:int, end, space, start, id:x, tok:=, start, primval, end, end,
+	// tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 15u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primtype:int");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "id:x");
+	EXPECT_EQ(h.inner.calls[7], "tok:=");
+	EXPECT_EQ(h.inner.calls[8], "start");
+	EXPECT_EQ(h.inner.calls[9], "primval");
+	EXPECT_EQ(h.inner.calls[10], "end");
+	EXPECT_EQ(h.inner.calls[11], "end");
+	EXPECT_EQ(h.inner.calls[12], "tok:;");
+	EXPECT_EQ(h.inner.calls[13], "newline");
+	EXPECT_EQ(h.inner.calls[14], "end");
+}
+
+// `int x, y;` -- two `VariableInitializer` elements in the `Variables` collection: the
+// `WriteCommaSeparatedList` template emits a `Comma` (just `tok:,` with the default
+// `SpaceBeforeBracketComma`/`SpaceAfterBracketComma` both false) between the two elements.
+TEST(CSharp_OutputVisitor, VisitVariableDeclarationStatementTwoVariables) {
+	V h;
+	auto node = std::make_unique<VariableDeclarationStatement>();
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto var1 = std::make_unique<VariableInitializer>(std::string("x"));
+	auto var2 = std::make_unique<VariableInitializer>(std::string("y"));
+	node->Type(type.get());
+	node->Variables().Add(var1.get());
+	node->Variables().Add(var2.get());
+	h.visitor->VisitVariableDeclarationStatement(node.get());
+	// start, start, primtype:int, end, space, start, id:x, end, tok:, start, id:y, end,
+	// tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 15u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primtype:int");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "id:x");
+	EXPECT_EQ(h.inner.calls[7], "end");
+	EXPECT_EQ(h.inner.calls[8], "tok:,");
+	EXPECT_EQ(h.inner.calls[9], "start");
+	EXPECT_EQ(h.inner.calls[10], "id:y");
+	EXPECT_EQ(h.inner.calls[11], "end");
+	EXPECT_EQ(h.inner.calls[12], "tok:;");
+	EXPECT_EQ(h.inner.calls[13], "newline");
+	EXPECT_EQ(h.inner.calls[14], "end");
 }
