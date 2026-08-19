@@ -89,6 +89,7 @@
 #include "Decompiler/CSharp/Syntax/EnumMemberDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ExtensionDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/EventDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/CustomEventDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
 #include "Decompiler/CSharp/Syntax/TupleTypeElement.hpp"
@@ -1717,7 +1718,30 @@ void CSharpOutputVisitor::VisitEventDeclaration(Syntax::EventDeclaration* eventD
 	Semicolon();
 	EndNode(eventDeclaration);
 }
-void CSharpOutputVisitor::VisitCustomEventDeclaration(Syntax::CustomEventDeclaration*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitCustomEventDeclaration(Syntax::CustomEventDeclaration* customEventDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitCustomEventDeclaration: `event ReturnType Name { add; remove; }`.
+	StartNode(customEventDeclaration);
+	WriteAttributes(ToVector(customEventDeclaration->Attributes()));
+	WriteModifiers(customEventDeclaration->Modifiers());
+	WriteKeyword(Syntax::EventKeyword);
+	if (customEventDeclaration->ReturnType() != nullptr) {
+		customEventDeclaration->ReturnType()->AcceptVisitor(*this);
+	}
+	Space();
+	WritePrivateImplementationType(customEventDeclaration->PrivateImplementationType());
+	WriteIdentifier(customEventDeclaration->NameToken());
+	OpenBrace(policy_.EventBraceStyle);
+	// Output add/remove in their original tree order (the C# FirstChild/NextSibling walk).
+	for (Syntax::AstNode* node = customEventDeclaration->FirstChild(); node != nullptr; node = node->NextSibling()) {
+		const Syntax::CSharpSlotInfo* slot = node->Slot();
+		if (slot != nullptr && (slot->Kind() == &Syntax::Slots::AddAccessor || slot->Kind() == &Syntax::Slots::RemoveAccessor)) {
+			node->AcceptVisitor(*this);
+		}
+	}
+	CloseBrace(policy_.EventBraceStyle);
+	NewLine();
+	EndNode(customEventDeclaration);
+}
 void CSharpOutputVisitor::VisitParameterDeclaration(Syntax::ParameterDeclaration* parameterDeclaration) {
 	StartNode(parameterDeclaration);
 	WriteAttributes(ToVector(parameterDeclaration->Attributes()));

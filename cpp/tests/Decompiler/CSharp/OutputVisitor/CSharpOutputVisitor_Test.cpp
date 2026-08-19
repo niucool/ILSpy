@@ -4164,3 +4164,67 @@ TEST(CSharp_OutputVisitor, VisitEventDeclarationTwoVars) {
 	EXPECT_EQ(h.inner.calls[15], "newline");
 	EXPECT_EQ(h.inner.calls[16], "end");
 }
+
+// `VisitCustomEventDeclaration` over `event SomeHandler Foo { }` -- a custom event with no
+// add/remove accessors (an empty body). StartNode + WriteAttributes (no-op) + WriteModifiers
+// (no-op) + WriteKeyword(event) + ReturnType->AcceptVisitor (PrimitiveType "SomeHandler":
+// start/space/primtype:SomeHandler/end) + Space() + WritePrivateImplementationType(nullptr)
+// (no-op) + WriteIdentifier(NameToken "Foo") + OpenBrace(EventBraceStyle=EndOfLine: space/tok:{/
+// indent/newline) + the add/remove loop (no accessors, no-op) + CloseBrace (unindent/tok:}) +
+// NewLine + EndNode.
+TEST(CSharp_OutputVisitor, VisitCustomEventDeclarationBare) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("SomeHandler"));
+	auto node = std::make_unique<CustomEventDeclaration>();
+	node->ReturnType(retType.get());
+	node->NameToken(Identifier::Create("Foo"));
+	h.visitor->VisitCustomEventDeclaration(node.get());
+	// start, kw:event, start, space, primtype:SomeHandler, end, space, id:Foo,
+	// space, tok:{, indent, newline, unindent, tok:}, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 16u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:event");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "primtype:SomeHandler");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "space");
+	EXPECT_EQ(h.inner.calls[7], "id:Foo");
+	EXPECT_EQ(h.inner.calls[8], "space");
+	EXPECT_EQ(h.inner.calls[9], "tok:{");
+	EXPECT_EQ(h.inner.calls[10], "indent");
+	EXPECT_EQ(h.inner.calls[11], "newline");
+	EXPECT_EQ(h.inner.calls[12], "unindent");
+	EXPECT_EQ(h.inner.calls[13], "tok:}");
+	EXPECT_EQ(h.inner.calls[14], "newline");
+	EXPECT_EQ(h.inner.calls[15], "end");
+}
+
+// `VisitCustomEventDeclaration` over `event SomeHandler Foo { add; remove; }` -- with add and
+// remove accessors. The FirstChild/NextSibling loop finds the AddAccessor and RemoveAccessor
+// slot children and recurses through VisitAccessor (each accessor with an empty Body renders
+// start/kw:add|remove/start/space/tok:{/indent/newline/unindent/tok:}/end).
+TEST(CSharp_OutputVisitor, VisitCustomEventDeclarationWithAccessors) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("SomeHandler"));
+	auto addBody = std::make_unique<BlockStatement>();
+	auto removeBody = std::make_unique<BlockStatement>();
+	auto add = std::make_unique<Accessor>(AccessorKind::Adder);
+	auto remove = std::make_unique<Accessor>(AccessorKind::Remover);
+	add->Body(addBody.get());
+	remove->Body(removeBody.get());
+	auto node = std::make_unique<CustomEventDeclaration>();
+	node->ReturnType(retType.get());
+	node->NameToken(Identifier::Create("Foo"));
+	node->AddAccessor(add.get());
+	node->RemoveAccessor(remove.get());
+	h.visitor->VisitCustomEventDeclaration(node.get());
+	// The add/remove accessors sit between the OpenBrace and CloseBrace. Find the opening
+	// brace, then assert the add keyword appears before the remove keyword (source order).
+	auto lbrace = std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:{");
+	ASSERT_NE(lbrace, h.inner.calls.end()) << "the event body must open with tok:{";
+	auto addKw = std::find(lbrace, h.inner.calls.end(), "kw:add");
+	ASSERT_NE(addKw, h.inner.calls.end()) << "the add accessor must render kw:add";
+	auto removeKw = std::find(addKw, h.inner.calls.end(), "kw:remove");
+	ASSERT_NE(removeKw, h.inner.calls.end()) << "the remove accessor must render kw:remove after add";
+}
