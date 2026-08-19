@@ -65,6 +65,14 @@
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/EmptyStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ThrowStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoCaseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoDefaultStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/LabelStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/IfElseStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Modifiers.hpp"
 
 using namespace ILSpy::Decompiler::CSharp::OutputVisitor;
@@ -78,7 +86,13 @@ using ILSpy::Decompiler::CSharp::Syntax::ComposedType;
 using ILSpy::Decompiler::CSharp::Syntax::Comment;
 using ILSpy::Decompiler::CSharp::Syntax::CommentType;
 using ILSpy::Decompiler::CSharp::Syntax::ContinueStatement;
+using ILSpy::Decompiler::CSharp::Syntax::GotoCaseStatement;
+using ILSpy::Decompiler::CSharp::Syntax::GotoDefaultStatement;
+using ILSpy::Decompiler::CSharp::Syntax::GotoStatement;
+using ILSpy::Decompiler::CSharp::Syntax::IfElseStatement;
+using ILSpy::Decompiler::CSharp::Syntax::LabelStatement;
 using ILSpy::Decompiler::CSharp::Syntax::EmptyStatement;
+using ILSpy::Decompiler::CSharp::Syntax::ExpressionStatement;
 using ILSpy::Decompiler::CSharp::Syntax::Identifier;
 using ILSpy::Decompiler::CSharp::Syntax::LiteralFormat;
 using ILSpy::Decompiler::CSharp::Syntax::MemberType;
@@ -87,6 +101,7 @@ using ILSpy::Decompiler::CSharp::Syntax::NullReferenceExpression;
 using ILSpy::Decompiler::CSharp::Syntax::PreProcessorDirective;
 using ILSpy::Decompiler::CSharp::Syntax::PreProcessorDirectiveType;
 using ILSpy::Decompiler::CSharp::Syntax::PrimitiveExpression;
+using ILSpy::Decompiler::CSharp::Syntax::ReturnStatement;
 using ILSpy::Decompiler::CSharp::Syntax::PrimitiveType;
 using ILSpy::Decompiler::CSharp::Syntax::PrimitiveValue;
 using ILSpy::Decompiler::CSharp::Syntax::SimpleType;
@@ -103,6 +118,7 @@ using ILSpy::Decompiler::CSharp::Syntax::DirectionExpression;
 using ILSpy::Decompiler::CSharp::Syntax::FieldDirection;
 using ILSpy::Decompiler::CSharp::Syntax::ParenthesizedExpression;
 using ILSpy::Decompiler::CSharp::Syntax::ThrowExpression;
+using ILSpy::Decompiler::CSharp::Syntax::ThrowStatement;
 using ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorExpression;
 using ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType;
 using ILSpy::Decompiler::CSharp::Syntax::UncheckedExpression;
@@ -452,11 +468,12 @@ TEST(CSharp_OutputVisitor, WriteCommaSeparatedListInParenthesisEmpty) {
 // ---- The 130 Visit stubs throw ---------------------------------------------
 
 // A representative still-unported `Visit` method throws `std::logic_error` (the throwing-stub
-// design); `VisitBlockStatement` remains a stub (the leaf `Visit` methods below are implemented).
+// design); `VisitIfElseStatement` remains a stub (the leaf + simple-statement `Visit` methods
+// below are implemented).
 TEST(CSharp_OutputVisitor, VisitStubThrows) {
 	V h;
-	auto stmt = std::make_unique<BlockStatement>();
-	EXPECT_THROW(h.visitor->VisitBlockStatement(stmt.get()), std::logic_error);
+	auto stmt = std::make_unique<IfElseStatement>();
+	EXPECT_THROW(h.visitor->VisitIfElseStatement(stmt.get()), std::logic_error);
 }
 
 // ---- The implemented leaf Visit methods ------------------------------------
@@ -1008,4 +1025,188 @@ TEST(CSharp_OutputVisitor, VisitThrowExpression) {
 	EXPECT_EQ(h.inner.calls[4], "primval");
 	EXPECT_EQ(h.inner.calls[5], "end");
 	EXPECT_EQ(h.inner.calls[6], "end");
+}
+
+// ---- The implemented statement Visit methods (the simple statements) ----------
+
+// `VisitReturnStatement` with no expression writes `return;`.
+TEST(CSharp_OutputVisitor, VisitReturnStatementNoExpression) {
+	V h;
+	auto node = std::make_unique<ReturnStatement>();
+	h.visitor->VisitReturnStatement(node.get());
+	// start, kw:return, tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 5u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:return");
+	EXPECT_EQ(h.inner.calls[2], "tok:;");
+	EXPECT_EQ(h.inner.calls[3], "newline");
+	EXPECT_EQ(h.inner.calls[4], "end");
+}
+
+// `VisitReturnStatement` with an expression writes `return <expr>;`.
+TEST(CSharp_OutputVisitor, VisitReturnStatementWithExpression) {
+	V h;
+	auto expr = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(42)));
+	auto node = std::make_unique<ReturnStatement>();
+	node->Expression(expr.get());
+	h.visitor->VisitReturnStatement(node.get());
+	// start, kw:return, space, start, primval, end, tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 9u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:return");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:;");
+	EXPECT_EQ(h.inner.calls[7], "newline");
+	EXPECT_EQ(h.inner.calls[8], "end");
+}
+
+// `VisitThrowStatement` with no expression writes `throw;`.
+TEST(CSharp_OutputVisitor, VisitThrowStatementNoExpression) {
+	V h;
+	auto node = std::make_unique<ThrowStatement>();
+	h.visitor->VisitThrowStatement(node.get());
+	// start, kw:throw, tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 5u);
+	EXPECT_EQ(h.inner.calls[1], "kw:throw");
+	EXPECT_EQ(h.inner.calls[2], "tok:;");
+}
+
+// `VisitThrowStatement` with an expression writes `throw <expr>;`.
+TEST(CSharp_OutputVisitor, VisitThrowStatementWithExpression) {
+	V h;
+	auto expr = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto node = std::make_unique<ThrowStatement>();
+	node->Expression(expr.get());
+	h.visitor->VisitThrowStatement(node.get());
+	// start, kw:throw, space, start, primval, end, tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 9u);
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+}
+
+// `VisitExpressionStatement` writes the expression then a semicolon.
+TEST(CSharp_OutputVisitor, VisitExpressionStatement) {
+	V h;
+	auto expr = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(7)));
+	auto node = std::make_unique<ExpressionStatement>(expr.get());
+	h.visitor->VisitExpressionStatement(node.get());
+	// start, start, primval, end, tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primval");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "tok:;");
+	EXPECT_EQ(h.inner.calls[5], "newline");
+	EXPECT_EQ(h.inner.calls[6], "end");
+}
+
+// `VisitGotoStatement` writes `goto <label>;` -- the `InsertRequiredSpacesDecorator`
+// inserts the space between the `goto` keyword and the label identifier.
+TEST(CSharp_OutputVisitor, VisitGotoStatement) {
+	V h;
+	auto node = std::make_unique<GotoStatement>(std::string("myLabel"));
+	h.visitor->VisitGotoStatement(node.get());
+	// start, kw:goto, space, id:myLabel, tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:goto");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "id:myLabel");
+	EXPECT_EQ(h.inner.calls[4], "tok:;");
+	EXPECT_EQ(h.inner.calls[5], "newline");
+	EXPECT_EQ(h.inner.calls[6], "end");
+}
+
+// `VisitGotoCaseStatement` writes `goto case <expr>;` -- the decorator inserts the space
+// between the two keywords, and the explicit `Space()` precedes the label expression.
+TEST(CSharp_OutputVisitor, VisitGotoCaseStatement) {
+	V h;
+	auto expr = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto node = std::make_unique<GotoCaseStatement>(expr.get());
+	h.visitor->VisitGotoCaseStatement(node.get());
+	// start, kw:goto, space, kw:case, space, start, primval, end, tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 11u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:goto");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "kw:case");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "primval");
+	EXPECT_EQ(h.inner.calls[7], "end");
+	EXPECT_EQ(h.inner.calls[8], "tok:;");
+	EXPECT_EQ(h.inner.calls[9], "newline");
+	EXPECT_EQ(h.inner.calls[10], "end");
+}
+
+// `VisitGotoDefaultStatement` writes `goto default;` -- the decorator inserts the space.
+TEST(CSharp_OutputVisitor, VisitGotoDefaultStatement) {
+	V h;
+	auto node = std::make_unique<GotoDefaultStatement>();
+	h.visitor->VisitGotoDefaultStatement(node.get());
+	// start, kw:goto, space, kw:default, tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:goto");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "kw:default");
+	EXPECT_EQ(h.inner.calls[4], "tok:;");
+	EXPECT_EQ(h.inner.calls[5], "newline");
+	EXPECT_EQ(h.inner.calls[6], "end");
+}
+
+// `VisitBlockStatement` on an empty block writes `{` indent newline unindent `}` then a newline.
+TEST(CSharp_OutputVisitor, VisitBlockStatementEmpty) {
+	V h;
+	auto node = std::make_unique<BlockStatement>();
+	h.visitor->VisitBlockStatement(node.get());
+	// start, tok:{, indent, newline, unindent, tok:}, end, newline
+	ASSERT_EQ(h.inner.calls.size(), 8u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "tok:{");
+	EXPECT_EQ(h.inner.calls[2], "indent");
+	EXPECT_EQ(h.inner.calls[3], "newline");
+	EXPECT_EQ(h.inner.calls[4], "unindent");
+	EXPECT_EQ(h.inner.calls[5], "tok:}");
+	EXPECT_EQ(h.inner.calls[6], "end");
+	EXPECT_EQ(h.inner.calls[7], "newline");
+}
+
+// `VisitLabelStatement` on a parentless label (no following sibling) emits a trailing
+// semicolon so the label is syntactically valid as the last statement.
+TEST(CSharp_OutputVisitor, VisitLabelStatementAloneEmitsSemicolon) {
+	V h;
+	auto node = std::make_unique<LabelStatement>(std::string("myLabel"));
+	h.visitor->VisitLabelStatement(node.get());
+	// start, id:myLabel, tok::, tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 6u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "id:myLabel");
+	EXPECT_EQ(h.inner.calls[2], "tok::");
+	EXPECT_EQ(h.inner.calls[3], "tok:;");
+	EXPECT_EQ(h.inner.calls[4], "newline");
+	EXPECT_EQ(h.inner.calls[5], "end");
+}
+
+// `VisitLabelStatement` on a label that has a following sibling statement (same slot kind)
+// emits no trailing semicolon -- the following statement already makes the label valid.
+TEST(CSharp_OutputVisitor, VisitLabelStatementWithFollowingStatementNoSemicolon) {
+	V h;
+	auto block = std::make_unique<BlockStatement>();
+	auto label = std::make_unique<LabelStatement>(std::string("myLabel"));
+	auto brk = std::make_unique<BreakStatement>();
+	block->Statements().Add(label.get());
+	block->Statements().Add(brk.get());
+	h.visitor->VisitLabelStatement(label.get());
+	// start, id:myLabel, tok::, newline, end (no semicolon)
+	ASSERT_EQ(h.inner.calls.size(), 5u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "id:myLabel");
+	EXPECT_EQ(h.inner.calls[2], "tok::");
+	EXPECT_EQ(h.inner.calls[3], "newline");
+	EXPECT_EQ(h.inner.calls[4], "end");
 }

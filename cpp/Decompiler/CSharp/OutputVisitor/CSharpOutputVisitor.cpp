@@ -53,6 +53,13 @@
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/EmptyStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ThrowStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ExpressionStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoCaseStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/GotoDefaultStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/LabelStatement.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/MemberType.hpp"
@@ -739,13 +746,59 @@ void CSharpOutputVisitor::VisitYieldBreakStatement(Syntax::YieldBreakStatement* 
 	Semicolon();
 	EndNode(yieldBreakStatement);
 }
-void CSharpOutputVisitor::VisitReturnStatement(Syntax::ReturnStatement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitThrowStatement(Syntax::ThrowStatement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitExpressionStatement(Syntax::ExpressionStatement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitBlockStatement(Syntax::BlockStatement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitGotoStatement(Syntax::GotoStatement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitGotoCaseStatement(Syntax::GotoCaseStatement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitGotoDefaultStatement(Syntax::GotoDefaultStatement*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitReturnStatement(Syntax::ReturnStatement* returnStatement) {
+	StartNode(returnStatement);
+	WriteKeyword(ReturnStatement::ReturnKeyword);
+	if (returnStatement->Expression() != nullptr) {
+		Space();
+		returnStatement->Expression()->AcceptVisitor(*this);
+	}
+	Semicolon();
+	EndNode(returnStatement);
+}
+void CSharpOutputVisitor::VisitThrowStatement(Syntax::ThrowStatement* throwStatement) {
+	StartNode(throwStatement);
+	WriteKeyword(ThrowStatement::ThrowKeyword);
+	if (throwStatement->Expression() != nullptr) {
+		Space();
+		throwStatement->Expression()->AcceptVisitor(*this);
+	}
+	Semicolon();
+	EndNode(throwStatement);
+}
+void CSharpOutputVisitor::VisitExpressionStatement(Syntax::ExpressionStatement* expressionStatement) {
+	StartNode(expressionStatement);
+	expressionStatement->Expression()->AcceptVisitor(*this);
+	Semicolon();
+	EndNode(expressionStatement);
+}
+void CSharpOutputVisitor::VisitBlockStatement(Syntax::BlockStatement* blockStatement) {
+	WriteBlock(blockStatement, policy_.StatementBraceStyle);
+	NewLine();
+}
+void CSharpOutputVisitor::VisitGotoStatement(Syntax::GotoStatement* gotoStatement) {
+	StartNode(gotoStatement);
+	WriteKeyword(GotoStatement::GotoKeyword);
+	WriteIdentifier(gotoStatement->LabelToken());
+	Semicolon();
+	EndNode(gotoStatement);
+}
+void CSharpOutputVisitor::VisitGotoCaseStatement(Syntax::GotoCaseStatement* gotoCaseStatement) {
+	StartNode(gotoCaseStatement);
+	WriteKeyword(GotoCaseStatement::GotoKeyword);
+	WriteKeyword(GotoCaseStatement::CaseKeyword);
+	Space();
+	gotoCaseStatement->LabelExpression()->AcceptVisitor(*this);
+	Semicolon();
+	EndNode(gotoCaseStatement);
+}
+void CSharpOutputVisitor::VisitGotoDefaultStatement(Syntax::GotoDefaultStatement* gotoDefaultStatement) {
+	StartNode(gotoDefaultStatement);
+	WriteKeyword(GotoDefaultStatement::GotoKeyword);
+	WriteKeyword(GotoDefaultStatement::DefaultKeyword);
+	Semicolon();
+	EndNode(gotoDefaultStatement);
+}
 void CSharpOutputVisitor::VisitIfElseStatement(Syntax::IfElseStatement*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitWhileStatement(Syntax::WhileStatement*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitDoWhileStatement(Syntax::DoWhileStatement*) { NotImplemented(); }
@@ -759,7 +812,31 @@ void CSharpOutputVisitor::VisitEmptyStatement(Syntax::EmptyStatement* emptyState
 	}
 	EndNode(emptyStatement);
 }
-void CSharpOutputVisitor::VisitLabelStatement(Syntax::LabelStatement*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitLabelStatement(Syntax::LabelStatement* labelStatement) {
+	StartNode(labelStatement);
+	WriteIdentifier(labelStatement->LabelToken());
+	WriteToken(Tokens::Colon);
+	// A label must be followed by a statement. If the label is the last sibling in its block
+	// (no following sibling sharing its slot kind), emit a bare semicolon so the output stays
+	// syntactically valid (the C# loop walks `NextSibling` looking for a following labelled
+	// statement with the same slot kind).
+	const CSharpSlotInfo* labelSlot = labelStatement->Slot();
+	const CSharpSlotInfo* labelKind = (labelSlot != nullptr) ? labelSlot->Kind() : nullptr;
+	bool foundLabelledStatement = false;
+	for (AstNode* tmp = labelStatement->NextSibling(); tmp != nullptr; tmp = tmp->NextSibling()) {
+		const CSharpSlotInfo* tmpSlot = tmp->Slot();
+		const CSharpSlotInfo* tmpKind = (tmpSlot != nullptr) ? tmpSlot->Kind() : nullptr;
+		if (tmpKind == labelKind) {
+			foundLabelledStatement = true;
+			break;
+		}
+	}
+	if (!foundLabelledStatement) {
+		WriteToken(Tokens::Semicolon);
+	}
+	NewLine();
+	EndNode(labelStatement);
+}
 void CSharpOutputVisitor::VisitCheckedStatement(Syntax::CheckedStatement*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitUncheckedStatement(Syntax::UncheckedStatement*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitUnsafeStatement(Syntax::UnsafeStatement*) { NotImplemented(); }
