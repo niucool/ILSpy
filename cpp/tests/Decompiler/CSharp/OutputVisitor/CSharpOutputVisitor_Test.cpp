@@ -98,6 +98,8 @@
 #include "Decompiler/CSharp/Syntax/PreProcessorDirective.hpp"
 #include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/FieldDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/FixedFieldDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/FixedVariableInitializer.hpp"
 #include "Decompiler/CSharp/Syntax/EnumMemberDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ExtensionDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Accessor.hpp"
@@ -192,6 +194,8 @@ using ILSpy::Decompiler::CSharp::Syntax::ConstructorInitializerType;
 using ILSpy::Decompiler::CSharp::Syntax::ConstructorDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::DestructorDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::FieldDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::FixedFieldDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::FixedVariableInitializer;
 using ILSpy::Decompiler::CSharp::Syntax::EnumMemberDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::ExtensionDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::Accessor;
@@ -4285,4 +4289,68 @@ TEST(CSharp_OutputVisitor, VisitFieldDeclarationTwoVars) {
 	EXPECT_EQ(h.inner.calls[9], "start");
 	EXPECT_EQ(h.inner.calls[10], "id:y");
 	EXPECT_EQ(h.inner.calls[11], "end");
+}
+
+// `VisitFixedVariableInitializer` over `ptr` (no count expression): StartNode +
+// WriteIdentifier(NameToken) + EndNode (structurally like VisitVariableInitializer
+// [D334] but on the FixedVariableInitializer node).
+TEST(CSharp_OutputVisitor, VisitFixedVariableInitializerNoCount) {
+	V h;
+	auto node = std::make_unique<FixedVariableInitializer>();
+	node->NameToken(Identifier::Create("ptr"));
+	h.visitor->VisitFixedVariableInitializer(node.get());
+	// start, id:ptr, end
+	ASSERT_EQ(h.inner.calls.size(), 3u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "id:ptr");
+	EXPECT_EQ(h.inner.calls[2], "end");
+}
+
+// `VisitFixedVariableInitializer` over `ptr[10]` -- with a CountExpression (a
+// PrimitiveExpression(10)). WriteToken(LBracket) + Space(false) + CountExpression->AcceptVisitor
+// + Space(false) + WriteToken(RBracket).
+TEST(CSharp_OutputVisitor, VisitFixedVariableInitializerWithCount) {
+	V h;
+	auto count = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(10)));
+	auto node = std::make_unique<FixedVariableInitializer>();
+	node->NameToken(Identifier::Create("ptr"));
+	node->CountExpression(count.get());
+	h.visitor->VisitFixedVariableInitializer(node.get());
+	// start, id:ptr, tok:[, start, primval, end, tok:], end
+	ASSERT_EQ(h.inner.calls.size(), 8u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "id:ptr");
+	EXPECT_EQ(h.inner.calls[2], "tok:[");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:]");
+	EXPECT_EQ(h.inner.calls[7], "end");
+}
+
+// `VisitFixedFieldDeclaration` over `fixed int* ptr;` -- a fixed field: StartNode +
+// WriteAttributes (no-op) + WriteModifiers (no-op) + WriteKeyword(fixed) + Space() +
+// ReturnType->AcceptVisitor (PrimitiveType "int*") + Space() + WriteCommaSeparatedList(Variables)
+// (one FixedVariableInitializer "ptr": start/id:ptr/end) + Semicolon + EndNode.
+TEST(CSharp_OutputVisitor, VisitFixedFieldDeclarationBare) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("int*"));
+	auto var = std::make_unique<FixedVariableInitializer>();
+	var->NameToken(Identifier::Create("ptr"));
+	auto node = std::make_unique<FixedFieldDeclaration>();
+	node->ReturnType(retType.get());
+	node->Variables().Add(var.get());
+	h.visitor->VisitFixedFieldDeclaration(node.get());
+	// start, kw:fixed, space, start, space, primtype:int*, end, space, start, id:ptr, end, tok:;, newline, end
+	ASSERT_GE(h.inner.calls.size(), 10u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:fixed");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	// the ReturnType recurses here (PrimitiveType: start/space/primtype:int*/end)
+	auto primtype = std::find(h.inner.calls.begin(), h.inner.calls.end(), "primtype:int*");
+	ASSERT_NE(primtype, h.inner.calls.end()) << "the ReturnType must render primtype:int*";
+	// the fixed variable initializer renders id:ptr
+	auto idPtr = std::find(h.inner.calls.begin(), h.inner.calls.end(), "id:ptr");
+	ASSERT_NE(idPtr, h.inner.calls.end()) << "the variable must render id:ptr";
+	EXPECT_LT(primtype, idPtr) << "the type must precede the variable";
 }

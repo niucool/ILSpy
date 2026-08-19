@@ -91,6 +91,8 @@
 #include "Decompiler/CSharp/Syntax/EventDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/CustomEventDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/FieldDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/FixedFieldDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/FixedVariableInitializer.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
 #include "Decompiler/CSharp/Syntax/TupleTypeElement.hpp"
@@ -1882,8 +1884,34 @@ void CSharpOutputVisitor::VisitExtensionDeclaration(Syntax::ExtensionDeclaration
 	NewLine();
 	EndNode(extensionDeclaration);
 }
-void CSharpOutputVisitor::VisitFixedVariableInitializer(Syntax::FixedVariableInitializer*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitFixedFieldDeclaration(Syntax::FixedFieldDeclaration*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitFixedVariableInitializer(Syntax::FixedVariableInitializer* fixedVariableInitializer) {
+	// Faithful port of CSharpOutputVisitor.cs VisitFixedVariableInitializer: `name[count]?`.
+	StartNode(fixedVariableInitializer);
+	WriteIdentifier(fixedVariableInitializer->NameToken());
+	if (fixedVariableInitializer->CountExpression() != nullptr) {
+		WriteToken(Tokens::LBracket);
+		Space(policy_.SpacesWithinBrackets);
+		fixedVariableInitializer->CountExpression()->AcceptVisitor(*this);
+		Space(policy_.SpacesWithinBrackets);
+		WriteToken(Tokens::RBracket);
+	}
+	EndNode(fixedVariableInitializer);
+}
+void CSharpOutputVisitor::VisitFixedFieldDeclaration(Syntax::FixedFieldDeclaration* fixedFieldDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitFixedFieldDeclaration: `fixed ReturnType v1, v2, ...;`.
+	StartNode(fixedFieldDeclaration);
+	WriteAttributes(ToVector(fixedFieldDeclaration->Attributes()));
+	WriteModifiers(fixedFieldDeclaration->Modifiers());
+	WriteKeyword(Syntax::FixedFieldDeclaration::FixedKeyword());
+	Space();
+	if (fixedFieldDeclaration->ReturnType() != nullptr) {
+		fixedFieldDeclaration->ReturnType()->AcceptVisitor(*this);
+	}
+	Space();
+	WriteCommaSeparatedList(ToVector(fixedFieldDeclaration->Variables()));
+	Semicolon();
+	EndNode(fixedFieldDeclaration);
+}
 void CSharpOutputVisitor::VisitLocalFunctionDeclarationStatement(Syntax::LocalFunctionDeclarationStatement*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitComment(Syntax::Comment* comment) {
 	// A `Comment` is trivia -- the C# drives the writer DIRECTLY (`writer.StartNode`/`writer.EndNode`,
