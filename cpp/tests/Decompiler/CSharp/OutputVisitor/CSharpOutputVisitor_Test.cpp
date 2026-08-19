@@ -95,6 +95,9 @@
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Syntax/PreProcessorDirective.hpp"
 #include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/Accessor.hpp"
+#include "Decompiler/CSharp/Syntax/PropertyDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/CustomEventDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
@@ -179,6 +182,10 @@ using ILSpy::Decompiler::CSharp::Syntax::SwitchExpressionSection;
 using ILSpy::Decompiler::CSharp::Syntax::CatchClause;
 using ILSpy::Decompiler::CSharp::Syntax::TryCatchStatement;
 using ILSpy::Decompiler::CSharp::Syntax::DestructorDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::Accessor;
+using ILSpy::Decompiler::CSharp::Syntax::AccessorKind;
+using ILSpy::Decompiler::CSharp::Syntax::PropertyDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::CustomEventDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentExpression;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentOperatorType;
 using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorExpression;
@@ -3669,4 +3676,133 @@ TEST(CSharp_OutputVisitor, VisitVariableDeclarationStatementTwoVariables) {
 	EXPECT_EQ(h.inner.calls[12], "tok:;");
 	EXPECT_EQ(h.inner.calls[13], "newline");
 	EXPECT_EQ(h.inner.calls[14], "end");
+}
+
+// ---- Accessor (the EntityDeclaration family start) -----------------------------------------
+// The `Accessor` is the `get`/`set`/`init`/`add`/`remove` accessor of a property/indexer/event.
+// `VisitAccessor` dispatches on the slot the accessor occupies in its PARENT (the `Slot()?.Kind`
+// pointer compare against `Slots::Getter`/`Setter`/`AddAccessor`/`RemoveAccessor`), writing the
+// keyword (`get`/`set`/`init`/`add`/`remove`) then the body via `WriteMethodBody`. A null body
+// yields a `;` (the `get;`/`set;` auto-property form); the `Semicolon` helper's auto-property
+// `skipNewLine` (a `get`/`set` with no body/attributes and `AutoPropertyFormatting==SingleLine`)
+// replaces the trailing `NewLine` with a `Space` so the `get;` and `set;` stay on one line.
+
+// `get;` -- a getter accessor (parented in a `PropertyDeclaration`'s `Getter` slot) with no body:
+// the auto-property `skipNewLine` replaces the post-semicolon `NewLine` with a `Space`.
+TEST(CSharp_OutputVisitor, VisitAccessorGet) {
+	V h;
+	auto prop = std::make_unique<PropertyDeclaration>();
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto name = MakeId("X");
+	prop->ReturnType(type.get());
+	prop->NameToken(name.get());
+	auto getter = std::make_unique<Accessor>(AccessorKind::Getter);
+	prop->Getter(getter.get());
+	h.visitor->VisitAccessor(getter.get());
+	// start, kw:get, tok:;, space, end
+	ASSERT_EQ(h.inner.calls.size(), 5u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:get");
+	EXPECT_EQ(h.inner.calls[2], "tok:;");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "end");
+}
+
+// `set;` -- a setter accessor (parented in a `PropertyDeclaration`'s `Setter` slot, `Kind=Setter`)
+// with no body: the auto-property `skipNewLine` replaces the post-semicolon `NewLine` with a
+// `Space` (the `set` keyword is emitted, NOT `init`, since `Kind != Init`).
+TEST(CSharp_OutputVisitor, VisitAccessorSet) {
+	V h;
+	auto prop = std::make_unique<PropertyDeclaration>();
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto name = MakeId("X");
+	prop->ReturnType(type.get());
+	prop->NameToken(name.get());
+	auto setter = std::make_unique<Accessor>(AccessorKind::Setter);
+	prop->Setter(setter.get());
+	h.visitor->VisitAccessor(setter.get());
+	// start, kw:set, tok:;, space, end
+	ASSERT_EQ(h.inner.calls.size(), 5u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:set");
+	EXPECT_EQ(h.inner.calls[2], "tok:;");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "end");
+}
+
+// `init;` -- an init-only setter accessor (parented in a `PropertyDeclaration`'s `Setter` slot,
+// `Kind=Init`): the `init` keyword is emitted (the `Kind == Init` branch), and the auto-property
+// `skipNewLine` replaces the post-semicolon `NewLine` with a `Space`.
+TEST(CSharp_OutputVisitor, VisitAccessorInit) {
+	V h;
+	auto prop = std::make_unique<PropertyDeclaration>();
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto name = MakeId("X");
+	prop->ReturnType(type.get());
+	prop->NameToken(name.get());
+	auto init = std::make_unique<Accessor>(AccessorKind::Init);
+	prop->Setter(init.get());
+	h.visitor->VisitAccessor(init.get());
+	// start, kw:init, tok:;, space, end
+	ASSERT_EQ(h.inner.calls.size(), 5u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:init");
+	EXPECT_EQ(h.inner.calls[2], "tok:;");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "end");
+}
+
+// `get { }` -- a getter accessor with an empty `BlockStatement` body: `WriteMethodBody` calls
+// `WriteBlock` (the block's `StartNode` is recorded BEFORE `OpenBrace`; the `OpenBrace(EndOfLine)`
+// inserts a `Space` before `{` since the line is not empty after `get`, then `Indent`+`NewLine`;
+// `CloseBrace` does `Unindent`+`}`) then a trailing `NewLine` -- distinct from the auto-property
+// `get;` form (the D329 `VisitCheckedStatement` 12-entry sequence precedent).
+TEST(CSharp_OutputVisitor, VisitAccessorGetWithBody) {
+	V h;
+	auto prop = std::make_unique<PropertyDeclaration>();
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto name = MakeId("X");
+	prop->ReturnType(type.get());
+	prop->NameToken(name.get());
+	auto body = std::make_unique<BlockStatement>();
+	auto getter = std::make_unique<Accessor>(AccessorKind::Getter);
+	getter->Body(body.get());
+	prop->Getter(getter.get());
+	h.visitor->VisitAccessor(getter.get());
+	// start, kw:get, start, space, tok:{, indent, newline, unindent, tok:}, end, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 12u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:get");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "tok:{");
+	EXPECT_EQ(h.inner.calls[5], "indent");
+	EXPECT_EQ(h.inner.calls[6], "newline");
+	EXPECT_EQ(h.inner.calls[7], "unindent");
+	EXPECT_EQ(h.inner.calls[8], "tok:}");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "newline");
+	EXPECT_EQ(h.inner.calls[11], "end");
+}
+
+// `add;` -- an `add` accessor (parented in a `CustomEventDeclaration`'s `AddAccessor` slot) with
+// no body: the `Semicolon` `skipNewLine` applies ONLY to `Slots::Getter`/`Slots::Setter` (NOT
+// `AddAccessor`), so a `NewLine` (NOT a `Space`) follows the semicolon.
+TEST(CSharp_OutputVisitor, VisitAccessorAdd) {
+	V h;
+	auto evt = std::make_unique<CustomEventDeclaration>();
+	auto type = std::make_unique<PrimitiveType>(std::string("EventHandler"));
+	auto name = MakeId("E");
+	evt->ReturnType(type.get());
+	evt->NameToken(name.get());
+	auto add = std::make_unique<Accessor>(AccessorKind::Adder);
+	evt->AddAccessor(add.get());
+	h.visitor->VisitAccessor(add.get());
+	// start, kw:add, tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 5u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:add");
+	EXPECT_EQ(h.inner.calls[2], "tok:;");
+	EXPECT_EQ(h.inner.calls[3], "newline");
+	EXPECT_EQ(h.inner.calls[4], "end");
 }

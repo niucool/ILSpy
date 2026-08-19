@@ -1629,7 +1629,33 @@ void CSharpOutputVisitor::VisitVariableDeclarationStatement(Syntax::VariableDecl
 }
 void CSharpOutputVisitor::VisitDestructorDeclaration(Syntax::DestructorDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitFieldDeclaration(Syntax::FieldDeclaration*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitAccessor(Syntax::Accessor*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitAccessor(Syntax::Accessor* accessor) {
+	StartNode(accessor);
+	WriteAttributes(ToVector(accessor->Attributes()));
+	WriteModifiers(accessor->Modifiers());
+	BraceStyle style = policy_.StatementBraceStyle;
+	const CSharpSlotInfo* slot = accessor->Slot();
+	const CSharpSlotInfo* kind = (slot != nullptr) ? slot->Kind() : nullptr;
+	if (kind == &Slots::Getter) {
+		WriteKeyword("get");
+		style = policy_.PropertyGetBraceStyle;
+	} else if (kind == &Slots::Setter) {
+		if (accessor->Kind() == Syntax::AccessorKind::Init) {
+			WriteKeyword("init");
+		} else {
+			WriteKeyword("set");
+		}
+		style = policy_.PropertySetBraceStyle;
+	} else if (kind == &Slots::AddAccessor) {
+		WriteKeyword("add");
+		style = policy_.EventAddBraceStyle;
+	} else if (kind == &Slots::RemoveAccessor) {
+		WriteKeyword("remove");
+		style = policy_.EventRemoveBraceStyle;
+	}
+	WriteMethodBody(accessor->Body(), style);
+	EndNode(accessor);
+}
 void CSharpOutputVisitor::VisitEnumMemberDeclaration(Syntax::EnumMemberDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitPropertyDeclaration(Syntax::PropertyDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitEventDeclaration(Syntax::EventDeclaration*) { NotImplemented(); }
