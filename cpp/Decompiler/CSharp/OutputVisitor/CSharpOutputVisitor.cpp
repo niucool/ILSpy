@@ -61,6 +61,15 @@
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Syntax/PreProcessorDirective.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ConditionalExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ParenthesizedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/CheckedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UncheckedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ThrowExpression.hpp"
 #include "Decompiler/CSharp/OutputVisitor/InsertRequiredSpacesDecorator.hpp"
 
 namespace ILSpy::Decompiler::CSharp::OutputVisitor {
@@ -456,15 +465,168 @@ void CSharpOutputVisitor::VisitPrimitiveExpression(Syntax::PrimitiveExpression* 
 	isAfterSpace_ = false;
 	EndNode(primitiveExpression);
 }
-void CSharpOutputVisitor::VisitBinaryOperatorExpression(Syntax::BinaryOperatorExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitAssignmentExpression(Syntax::AssignmentExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitUnaryOperatorExpression(Syntax::UnaryOperatorExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitConditionalExpression(Syntax::ConditionalExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitParenthesizedExpression(Syntax::ParenthesizedExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitCheckedExpression(Syntax::CheckedExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitUncheckedExpression(Syntax::UncheckedExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitDirectionExpression(Syntax::DirectionExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitThrowExpression(Syntax::ThrowExpression*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitBinaryOperatorExpression(Syntax::BinaryOperatorExpression* binaryOperatorExpression) {
+	StartNode(binaryOperatorExpression);
+	if (binaryOperatorExpression->Left() != nullptr)
+		binaryOperatorExpression->Left()->AcceptVisitor(*this);
+	bool spacePolicy;
+	switch (binaryOperatorExpression->Operator()) {
+		case Syntax::BinaryOperatorType::BitwiseAnd:
+		case Syntax::BinaryOperatorType::BitwiseOr:
+		case Syntax::BinaryOperatorType::ExclusiveOr:
+			spacePolicy = policy_.SpaceAroundBitwiseOperator;
+			break;
+		case Syntax::BinaryOperatorType::ConditionalAnd:
+		case Syntax::BinaryOperatorType::ConditionalOr:
+			spacePolicy = policy_.SpaceAroundLogicalOperator;
+			break;
+		case Syntax::BinaryOperatorType::GreaterThan:
+		case Syntax::BinaryOperatorType::GreaterThanOrEqual:
+		case Syntax::BinaryOperatorType::LessThanOrEqual:
+		case Syntax::BinaryOperatorType::LessThan:
+			spacePolicy = policy_.SpaceAroundRelationalOperator;
+			break;
+		case Syntax::BinaryOperatorType::Equality:
+		case Syntax::BinaryOperatorType::InEquality:
+			spacePolicy = policy_.SpaceAroundEqualityOperator;
+			break;
+		case Syntax::BinaryOperatorType::Add:
+		case Syntax::BinaryOperatorType::Subtract:
+			spacePolicy = policy_.SpaceAroundAdditiveOperator;
+			break;
+		case Syntax::BinaryOperatorType::Multiply:
+		case Syntax::BinaryOperatorType::Divide:
+		case Syntax::BinaryOperatorType::Modulus:
+			spacePolicy = policy_.SpaceAroundMultiplicativeOperator;
+			break;
+		case Syntax::BinaryOperatorType::ShiftLeft:
+		case Syntax::BinaryOperatorType::ShiftRight:
+		case Syntax::BinaryOperatorType::UnsignedShiftRight:
+			spacePolicy = policy_.SpaceAroundShiftOperator;
+			break;
+		case Syntax::BinaryOperatorType::NullCoalescing:
+		case Syntax::BinaryOperatorType::IsPattern:
+			spacePolicy = true;
+			break;
+		case Syntax::BinaryOperatorType::Range:
+			spacePolicy = false;
+			break;
+		default:
+			throw std::out_of_range("Invalid value for BinaryOperatorType");
+	}
+	Space(spacePolicy);
+	const char* operatorToken = Syntax::BinaryOperatorExpression::GetOperatorToken(binaryOperatorExpression->Operator());
+	if (operatorToken == Syntax::BinaryOperatorExpression::IsKeyword) {
+		WriteKeyword(operatorToken);
+	} else {
+		WriteToken(operatorToken);
+	}
+	Space(spacePolicy);
+	if (binaryOperatorExpression->Right() != nullptr)
+		binaryOperatorExpression->Right()->AcceptVisitor(*this);
+	EndNode(binaryOperatorExpression);
+}
+
+void CSharpOutputVisitor::VisitAssignmentExpression(Syntax::AssignmentExpression* assignmentExpression) {
+	StartNode(assignmentExpression);
+	assignmentExpression->Left()->AcceptVisitor(*this);
+	Space(policy_.SpaceAroundAssignment);
+	WriteToken(Syntax::AssignmentExpression::GetOperatorToken(assignmentExpression->Operator()));
+	Space(policy_.SpaceAroundAssignment);
+	assignmentExpression->Right()->AcceptVisitor(*this);
+	EndNode(assignmentExpression);
+}
+
+void CSharpOutputVisitor::VisitUnaryOperatorExpression(Syntax::UnaryOperatorExpression* unaryOperatorExpression) {
+	StartNode(unaryOperatorExpression);
+	Syntax::UnaryOperatorType opType = unaryOperatorExpression->Operator();
+	auto opSymbol = Syntax::UnaryOperatorExpression::GetOperatorToken(opType);
+	if (opType == Syntax::UnaryOperatorType::Await || opType == Syntax::UnaryOperatorType::PatternNot) {
+		WriteKeyword(*opSymbol);
+		Space();
+	} else if (!Syntax::UnaryOperatorExpression::IsPostfixOperator(opType) && opSymbol.has_value()) {
+		WriteToken(*opSymbol);
+	}
+	unaryOperatorExpression->Expression()->AcceptVisitor(*this);
+	if (Syntax::UnaryOperatorExpression::IsPostfixOperator(opType)) {
+		WriteToken(*opSymbol);
+	}
+	EndNode(unaryOperatorExpression);
+}
+
+void CSharpOutputVisitor::VisitConditionalExpression(Syntax::ConditionalExpression* conditionalExpression) {
+	StartNode(conditionalExpression);
+	conditionalExpression->Condition()->AcceptVisitor(*this);
+	Space(policy_.SpaceBeforeConditionalOperatorCondition);
+	WriteToken(Syntax::ConditionalExpression::QuestionMarkToken);
+	Space(policy_.SpaceAfterConditionalOperatorCondition);
+	conditionalExpression->TrueExpression()->AcceptVisitor(*this);
+	Space(policy_.SpaceBeforeConditionalOperatorSeparator);
+	WriteToken(Syntax::ConditionalExpression::ColonToken);
+	Space(policy_.SpaceAfterConditionalOperatorSeparator);
+	conditionalExpression->FalseExpression()->AcceptVisitor(*this);
+	EndNode(conditionalExpression);
+}
+
+void CSharpOutputVisitor::VisitParenthesizedExpression(Syntax::ParenthesizedExpression* parenthesizedExpression) {
+	StartNode(parenthesizedExpression);
+	LPar();
+	Space(policy_.SpacesWithinParentheses);
+	parenthesizedExpression->Expression()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinParentheses);
+	RPar();
+	EndNode(parenthesizedExpression);
+}
+
+void CSharpOutputVisitor::VisitCheckedExpression(Syntax::CheckedExpression* checkedExpression) {
+	StartNode(checkedExpression);
+	WriteKeyword(Syntax::CheckedExpression::CheckedKeyword);
+	LPar();
+	Space(policy_.SpacesWithinCheckedExpressionParantheses);
+	checkedExpression->Expression()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinCheckedExpressionParantheses);
+	RPar();
+	EndNode(checkedExpression);
+}
+
+void CSharpOutputVisitor::VisitUncheckedExpression(Syntax::UncheckedExpression* uncheckedExpression) {
+	StartNode(uncheckedExpression);
+	WriteKeyword(Syntax::UncheckedExpression::UncheckedKeyword);
+	LPar();
+	Space(policy_.SpacesWithinCheckedExpressionParantheses);
+	uncheckedExpression->Expression()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinCheckedExpressionParantheses);
+	RPar();
+	EndNode(uncheckedExpression);
+}
+
+void CSharpOutputVisitor::VisitDirectionExpression(Syntax::DirectionExpression* directionExpression) {
+	StartNode(directionExpression);
+	switch (directionExpression->FieldDirection()) {
+		case Syntax::FieldDirection::Out:
+			WriteKeyword(Syntax::DirectionExpression::OutKeyword);
+			break;
+		case Syntax::FieldDirection::Ref:
+			WriteKeyword(Syntax::DirectionExpression::RefKeyword);
+			break;
+		case Syntax::FieldDirection::In:
+			WriteKeyword(Syntax::DirectionExpression::InKeyword);
+			break;
+		default:
+			throw std::out_of_range("Invalid value for FieldDirection");
+	}
+	Space();
+	directionExpression->Expression()->AcceptVisitor(*this);
+	EndNode(directionExpression);
+}
+
+void CSharpOutputVisitor::VisitThrowExpression(Syntax::ThrowExpression* throwExpression) {
+	StartNode(throwExpression);
+	WriteKeyword(Syntax::ThrowExpression::ThrowKeyword);
+	Space();
+	throwExpression->Expression()->AcceptVisitor(*this);
+	EndNode(throwExpression);
+}
 void CSharpOutputVisitor::VisitPrimitiveType(Syntax::PrimitiveType* primitiveType) {
 	StartNode(primitiveType);
 	writer_->WritePrimitiveType(primitiveType->Keyword());

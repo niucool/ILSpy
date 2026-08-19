@@ -43,6 +43,15 @@
 #include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ConditionalExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ParenthesizedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/CheckedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UncheckedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ThrowExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Identifier.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/SimpleType.hpp"
@@ -84,6 +93,19 @@ using ILSpy::Decompiler::CSharp::Syntax::SimpleType;
 using ILSpy::Decompiler::CSharp::Syntax::ThisReferenceExpression;
 using ILSpy::Decompiler::CSharp::Syntax::TypeReferenceExpression;
 using ILSpy::Decompiler::CSharp::Syntax::YieldBreakStatement;
+using ILSpy::Decompiler::CSharp::Syntax::AssignmentExpression;
+using ILSpy::Decompiler::CSharp::Syntax::AssignmentOperatorType;
+using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorExpression;
+using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType;
+using ILSpy::Decompiler::CSharp::Syntax::CheckedExpression;
+using ILSpy::Decompiler::CSharp::Syntax::ConditionalExpression;
+using ILSpy::Decompiler::CSharp::Syntax::DirectionExpression;
+using ILSpy::Decompiler::CSharp::Syntax::FieldDirection;
+using ILSpy::Decompiler::CSharp::Syntax::ParenthesizedExpression;
+using ILSpy::Decompiler::CSharp::Syntax::ThrowExpression;
+using ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorExpression;
+using ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType;
+using ILSpy::Decompiler::CSharp::Syntax::UncheckedExpression;
 
 namespace {
 
@@ -757,4 +779,233 @@ TEST(CSharp_OutputVisitor, VisitPreProcessorDirectiveNoArgument) {
 	EXPECT_EQ(h.inner.calls[0], "start");
 	EXPECT_EQ(h.inner.calls[1], "pp:<null>");
 	EXPECT_EQ(h.inner.calls[2], "end");
+}
+
+// ---- The operator-bearing + simple Expression Visit methods (D326) --------
+
+// `VisitBinaryOperatorExpression` over `a + b` (default policy: no space around additive
+// operators) renders as start, the left `primval`, the `+` token, the right `primval`, end.
+// The default `CSharpFormattingOptions` has `SpaceAroundAdditiveOperator=false`, so no spaces.
+TEST(CSharp_OutputVisitor, VisitBinaryOperatorExpressionAdd) {
+	V h;
+	auto left = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto right = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(2)));
+	auto node = std::make_unique<BinaryOperatorExpression>(left.get(), BinaryOperatorType::Add, right.get());
+	h.visitor->VisitBinaryOperatorExpression(node.get());
+	// start, start, primval, end, tok:+, start, primval, end, end
+	ASSERT_EQ(h.inner.calls.size(), 9u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primval");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "tok:+");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "primval");
+	EXPECT_EQ(h.inner.calls[7], "end");
+	EXPECT_EQ(h.inner.calls[8], "end");
+}
+
+// `VisitBinaryOperatorExpression` over `a ?? b` -- the `NullCoalescing` operator always has
+// `spacePolicy=true`, so spaces are inserted around the `??` token.
+TEST(CSharp_OutputVisitor, VisitBinaryOperatorExpressionNullCoalescing) {
+	V h;
+	auto left = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto right = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(2)));
+	auto node = std::make_unique<BinaryOperatorExpression>(left.get(), BinaryOperatorType::NullCoalescing, right.get());
+	h.visitor->VisitBinaryOperatorExpression(node.get());
+	// start, start, primval, end, space, tok:??, space, start, primval, end, end
+	ASSERT_EQ(h.inner.calls.size(), 11u);
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "tok:??");
+	EXPECT_EQ(h.inner.calls[6], "space");
+}
+
+// `VisitBinaryOperatorExpression` over the `is` pattern operator uses `WriteKeyword` (the token
+// equals `BinaryOperatorExpression::IsKeyword`), not `WriteToken`; `IsPattern` always has
+// `spacePolicy=true`.
+TEST(CSharp_OutputVisitor, VisitBinaryOperatorExpressionIsPattern) {
+	V h;
+	auto left = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto right = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(2)));
+	auto node = std::make_unique<BinaryOperatorExpression>(left.get(), BinaryOperatorType::IsPattern, right.get());
+	h.visitor->VisitBinaryOperatorExpression(node.get());
+	// start, start, primval, end, space, kw:is, space, start, primval, end, end
+	ASSERT_EQ(h.inner.calls.size(), 11u);
+	EXPECT_EQ(h.inner.calls[5], "kw:is");
+}
+
+// `VisitAssignmentExpression` over `a = b` (default policy: no space around assignment).
+TEST(CSharp_OutputVisitor, VisitAssignmentExpression) {
+	V h;
+	auto left = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto right = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(2)));
+	auto node = std::make_unique<AssignmentExpression>(left.get(), right.get());
+	h.visitor->VisitAssignmentExpression(node.get());
+	// start, start, primval, end, tok:=, start, primval, end, end
+	ASSERT_EQ(h.inner.calls.size(), 9u);
+	EXPECT_EQ(h.inner.calls[4], "tok:=");
+}
+
+// `VisitUnaryOperatorExpression` over `-a` (prefix minus, no space policy).
+TEST(CSharp_OutputVisitor, VisitUnaryOperatorExpressionMinus) {
+	V h;
+	auto expr = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto node = std::make_unique<UnaryOperatorExpression>(expr.get(), UnaryOperatorType::Minus);
+	h.visitor->VisitUnaryOperatorExpression(node.get());
+	// start, tok:-, start, primval, end, end
+	ASSERT_EQ(h.inner.calls.size(), 6u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "tok:-");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "primval");
+	EXPECT_EQ(h.inner.calls[4], "end");
+	EXPECT_EQ(h.inner.calls[5], "end");
+}
+
+// `VisitUnaryOperatorExpression` over `await a` -- the `Await` operator uses `WriteKeyword` +
+// an explicit `Space()`.
+TEST(CSharp_OutputVisitor, VisitUnaryOperatorExpressionAwait) {
+	V h;
+	auto expr = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto node = std::make_unique<UnaryOperatorExpression>(expr.get(), UnaryOperatorType::Await);
+	h.visitor->VisitUnaryOperatorExpression(node.get());
+	// start, kw:await, space, start, primval, end, end
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:await");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "end");
+}
+
+// `VisitUnaryOperatorExpression` over `a++` (postfix increment -- the token is written AFTER
+// the expression).
+TEST(CSharp_OutputVisitor, VisitUnaryOperatorExpressionPostIncrement) {
+	V h;
+	auto expr = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto node = std::make_unique<UnaryOperatorExpression>(expr.get(), UnaryOperatorType::PostIncrement);
+	h.visitor->VisitUnaryOperatorExpression(node.get());
+	// start, start, primval, end, tok:++, end
+	ASSERT_EQ(h.inner.calls.size(), 6u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primval");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "tok:++");
+	EXPECT_EQ(h.inner.calls[5], "end");
+}
+
+// `VisitConditionalExpression` over `a ? b : c` (default policy: no conditional spaces).
+TEST(CSharp_OutputVisitor, VisitConditionalExpression) {
+	V h;
+	auto cond = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto trueExpr = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(2)));
+	auto falseExpr = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(3)));
+	auto node = std::make_unique<ConditionalExpression>(cond.get(), trueExpr.get(), falseExpr.get());
+	h.visitor->VisitConditionalExpression(node.get());
+	// start, start, primval, end, tok:?, start, primval, end, tok::, start, primval, end, end
+	ASSERT_EQ(h.inner.calls.size(), 13u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[4], "tok:?");
+	EXPECT_EQ(h.inner.calls[8], "tok::");
+	EXPECT_EQ(h.inner.calls[12], "end");
+}
+
+// `VisitParenthesizedExpression` over `(a)` (default policy: no spaces within parentheses).
+TEST(CSharp_OutputVisitor, VisitParenthesizedExpression) {
+	V h;
+	auto inner = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(42)));
+	auto node = std::make_unique<ParenthesizedExpression>(inner.get());
+	h.visitor->VisitParenthesizedExpression(node.get());
+	// start, tok:(, start, primval, end, tok:), end
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "tok:(");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "primval");
+	EXPECT_EQ(h.inner.calls[4], "end");
+	EXPECT_EQ(h.inner.calls[5], "tok:)");
+	EXPECT_EQ(h.inner.calls[6], "end");
+}
+
+// `VisitCheckedExpression` over `checked(a)` -- writes the `checked` keyword then parens.
+TEST(CSharp_OutputVisitor, VisitCheckedExpression) {
+	V h;
+	auto inner = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(42)));
+	auto node = std::make_unique<CheckedExpression>(inner.get());
+	h.visitor->VisitCheckedExpression(node.get());
+	// start, kw:checked, tok:(, start, primval, end, tok:), end
+	ASSERT_EQ(h.inner.calls.size(), 8u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:checked");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:)");
+	EXPECT_EQ(h.inner.calls[7], "end");
+}
+
+// `VisitUncheckedExpression` over `unchecked(a)` -- writes the `unchecked` keyword then parens.
+TEST(CSharp_OutputVisitor, VisitUncheckedExpression) {
+	V h;
+	auto inner = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(42)));
+	auto node = std::make_unique<UncheckedExpression>(inner.get());
+	h.visitor->VisitUncheckedExpression(node.get());
+	// start, kw:unchecked, tok:(, start, primval, end, tok:), end
+	ASSERT_EQ(h.inner.calls.size(), 8u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:unchecked");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:)");
+	EXPECT_EQ(h.inner.calls[7], "end");
+}
+
+// `VisitDirectionExpression` over `out a` -- writes the `out` keyword then a space then the expr.
+TEST(CSharp_OutputVisitor, VisitDirectionExpressionOut) {
+	V h;
+	auto inner = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(42)));
+	auto node = std::make_unique<DirectionExpression>(FieldDirection::Out, inner.get());
+	h.visitor->VisitDirectionExpression(node.get());
+	// start, kw:out, space, start, primval, end, end
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:out");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "end");
+}
+
+// `VisitDirectionExpression` over `ref a` -- writes the `ref` keyword then a space then the expr.
+TEST(CSharp_OutputVisitor, VisitDirectionExpressionRef) {
+	V h;
+	auto inner = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(42)));
+	auto node = std::make_unique<DirectionExpression>(FieldDirection::Ref, inner.get());
+	h.visitor->VisitDirectionExpression(node.get());
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[1], "kw:ref");
+}
+
+// `VisitThrowExpression` over `throw a` -- writes the `throw` keyword then a space then the expr.
+TEST(CSharp_OutputVisitor, VisitThrowExpression) {
+	V h;
+	auto inner = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(42)));
+	auto node = std::make_unique<ThrowExpression>(inner.get());
+	h.visitor->VisitThrowExpression(node.get());
+	// start, kw:throw, space, start, primval, end, end
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:throw");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "end");
 }

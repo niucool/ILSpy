@@ -45,12 +45,11 @@
 // convenience: Operator defaults to Assign"); the generated empty ctor likewise leaves
 // `Operator = Assign`, and the generated all-params `(left, op, right)` ctor is also carried.
 //
-// The hand-written `GetOperatorToken`/`GetCorrespondingBinaryOperator`/`GetLinqNodeType`/
-// `GetAssignmentOperatorTypeFromExpressionType` static helpers and the token-string constants
-// (`AssignToken`, `AddToken`, ...) are DEFERRED: they map the operator to its token string and
-// to `System.Linq.Expressions.ExpressionType` (a BCL enum), used by the resolver/output stage
-// (not the AST structure); they land when the output visitor / resolver consume them (the
-// D229 `BinaryOperatorExpression` precedent deferred the same helpers).
+// The hand-written `GetOperatorToken` static helper and the token-string constants
+// (`AssignToken`, `AddToken`, ...) are now ported (the D326 output-visitor slice that
+// implements `VisitAssignmentExpression`); `GetCorrespondingBinaryOperator`/
+// `GetLinqNodeType`/`GetAssignmentOperatorTypeFromExpressionType` (map to `System.Linq.
+// Expressions.ExpressionType`, a BCL enum) stay deferred until the resolver consumes them.
 
 #ifndef ILSPY_DECOMPILER_CSHARP_SYNTAX_EXPRESSIONS_ASSIGNMENTEXPRESSION_HPP
 #define ILSPY_DECOMPILER_CSHARP_SYNTAX_EXPRESSIONS_ASSIGNMENTEXPRESSION_HPP
@@ -97,6 +96,42 @@ enum class AssignmentOperatorType {
 class AssignmentExpression final : public Expression {
 public:
     ~AssignmentExpression() override = default;
+
+    // The C# `public const string` token constants -- the compound-assignment operator symbol
+    // strings the output visitor emits via `WriteToken`. Compile-time literals carried as
+    // `static constexpr const char*` (static fields, not instance state).
+    static constexpr const char* AssignToken = "=";
+    static constexpr const char* AddToken = "+=";
+    static constexpr const char* SubtractToken = "-=";
+    static constexpr const char* MultiplyToken = "*=";
+    static constexpr const char* DivideToken = "/=";
+    static constexpr const char* ModulusToken = "%=";
+    static constexpr const char* ShiftLeftToken = "<<=";
+    static constexpr const char* ShiftRightToken = ">>=";
+    static constexpr const char* UnsignedShiftRightToken = ">>>=";
+    static constexpr const char* BitwiseAndToken = "&=";
+    static constexpr const char* BitwiseOrToken = "|=";
+    static constexpr const char* ExclusiveOrToken = "^=";
+
+    // The C# `public static string GetOperatorToken(AssignmentOperatorType op)` -- maps the
+    // enum to its token string. The `default` case throws `NotSupportedException`.
+    static const char* GetOperatorToken(AssignmentOperatorType op) {
+        switch (op) {
+            case AssignmentOperatorType::Assign: return AssignToken;
+            case AssignmentOperatorType::Add: return AddToken;
+            case AssignmentOperatorType::Subtract: return SubtractToken;
+            case AssignmentOperatorType::Multiply: return MultiplyToken;
+            case AssignmentOperatorType::Divide: return DivideToken;
+            case AssignmentOperatorType::Modulus: return ModulusToken;
+            case AssignmentOperatorType::ShiftLeft: return ShiftLeftToken;
+            case AssignmentOperatorType::ShiftRight: return ShiftRightToken;
+            case AssignmentOperatorType::UnsignedShiftRight: return UnsignedShiftRightToken;
+            case AssignmentOperatorType::BitwiseAnd: return BitwiseAndToken;
+            case AssignmentOperatorType::BitwiseOr: return BitwiseOrToken;
+            case AssignmentOperatorType::ExclusiveOr: return ExclusiveOrToken;
+            default: throw std::out_of_range("Invalid value for AssignmentOperatorType");
+        }
+    }
 
     // The generated empty ctor (the C# `public AssignmentExpression()`). `Operator` defaults
     // to `Assign` (the enum's zero value -- the C# default for an uninitialized

@@ -43,12 +43,11 @@
 // `Operator`, deep-clones the child through the setter (which re-parents), and copies the
 // annotation channel.
 //
-// The hand-written `GetOperatorToken`/`GetLinqNodeType` static helpers and the token-string
-// constants (`NotToken`, `MinusToken`, ...) are DEFERRED: they map the operator to its token
-// string and to `System.Linq.Expressions.ExpressionType` (a BCL enum), used by the
-// resolver/output stage (not the AST structure); they land when the output visitor /
-// resolver consume them (the D229 `BinaryOperatorExpression` / D230 `AssignmentExpression`
-// precedent deferred the same helpers).
+// The hand-written `GetOperatorToken` static helper, the `IsPostfixOperator` predicate, and
+// the token-string constants (`NotToken`, `MinusToken`, ...) are now ported (the D326 output-
+// visitor slice that implements `VisitUnaryOperatorExpression`); `GetLinqNodeType` (maps to
+// `System.Linq.Expressions.ExpressionType`, a BCL enum) stays deferred until the resolver
+// consumes it.
 //
 // C++ name-shadowing crux: the C# property is `Expression` of type `Expression` (a property
 // named the same as its type -- legal in C#, which keeps property and type names in separate
@@ -67,13 +66,16 @@
 #define ILSPY_DECOMPILER_CSHARP_SYNTAX_EXPRESSIONS_UNARYOPERATOREXPRESSION_HPP
 
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/IAstVisitor.hpp"
 #include "Decompiler/CSharp/Syntax/Slots.hpp"
 #include "Decompiler/CSharp/Syntax/TextLocation.hpp"
 
 #include "Decompiler/CSharp/Syntax/PatternMatching/Match.hpp"
 
+#include <optional>
 #include <stdexcept>
+#include <string_view>
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -183,12 +185,79 @@ public:
     // output visitor emits for the `Await` operator). Part of the node's public API: it is
     // aliased by sibling nodes that also carry an `await` modifier (`UsingStatement.AwaitKeyword`,
     // `ForeachStatement.AwaitKeyword` both `= UnaryOperatorExpression.AwaitKeyword` in C#), so it
-    // ports now (unlike the per-operator token-string constants `NotToken`/`MinusToken`/...
-    // deferred in D229, which are a lookup table consumed only by the output/resolver stage).
+    // ports now alongside the per-operator token-string constants `NotToken`/`MinusToken`/...
+    // (ported by the D326 output-visitor slice, consumed by the output visitor's
+    // `VisitUnaryOperatorExpression`).
     // Ports as a `static constexpr const char*` (a static field, not instance state), so the
     // generator's `MembersToMatch` (which iterates only instance `IPropertySymbol`s) excludes it
     // from the `DoMatch` (the `CheckedExpression.CheckedKeyword` D234 precedent).
     static constexpr const char* AwaitKeyword = "await";
+
+    // The C# `public const string` token constants -- the operator symbol strings the output
+    // visitor emits via `WriteToken`/`WriteKeyword`. Compile-time literals carried as `static
+    // constexpr const char*` (static fields, not instance state).
+    static constexpr const char* NotToken = "!";
+    static constexpr const char* BitNotToken = "~";
+    static constexpr const char* MinusToken = "-";
+    static constexpr const char* PlusToken = "+";
+    static constexpr const char* IncrementToken = "++";
+    static constexpr const char* DecrementToken = "--";
+    static constexpr const char* DereferenceToken = "*";
+    static constexpr const char* AddressOfToken = "&";
+    static constexpr const char* NullConditionalToken = "?";
+    static constexpr const char* SuppressNullableWarningToken = "!";
+    static constexpr const char* IndexFromEndToken = "^";
+    static constexpr const char* PatternNotKeyword = "not";
+
+    // The C# `public static string? GetOperatorToken(UnaryOperatorType op)` -- maps the enum
+    // to its token string, or `std::nullopt` for operators with no syntax (`NullConditionalRewrap`/
+    // `IsTrue`). Returns `std::optional<std::string_view>` (zero-copy; the token constants have
+    // static storage duration). The relational-pattern cases reuse `BinaryOperatorExpression`'s
+    // token constants (the C# `return BinaryOperatorExpression.LessThanToken` etc.).
+    static std::optional<std::string_view> GetOperatorToken(UnaryOperatorType op) {
+        switch (op) {
+            case UnaryOperatorType::Not: return NotToken;
+            case UnaryOperatorType::BitNot: return BitNotToken;
+            case UnaryOperatorType::Minus: return MinusToken;
+            case UnaryOperatorType::Plus: return PlusToken;
+            case UnaryOperatorType::Increment:
+            case UnaryOperatorType::PostIncrement: return IncrementToken;
+            case UnaryOperatorType::Decrement:
+            case UnaryOperatorType::PostDecrement: return DecrementToken;
+            case UnaryOperatorType::Dereference: return DereferenceToken;
+            case UnaryOperatorType::AddressOf: return AddressOfToken;
+            case UnaryOperatorType::Await: return AwaitKeyword;
+            case UnaryOperatorType::NullConditional: return NullConditionalToken;
+            case UnaryOperatorType::NullConditionalRewrap:
+            case UnaryOperatorType::IsTrue: return std::nullopt;
+            case UnaryOperatorType::SuppressNullableWarning: return SuppressNullableWarningToken;
+            case UnaryOperatorType::IndexFromEnd: return IndexFromEndToken;
+            case UnaryOperatorType::PatternNot: return PatternNotKeyword;
+            case UnaryOperatorType::PatternRelationalLessThan:
+                return BinaryOperatorExpression::LessThanToken;
+            case UnaryOperatorType::PatternRelationalLessThanOrEqual:
+                return BinaryOperatorExpression::LessThanOrEqualToken;
+            case UnaryOperatorType::PatternRelationalGreaterThan:
+                return BinaryOperatorExpression::GreaterThanToken;
+            case UnaryOperatorType::PatternRelationalGreaterThanOrEqual:
+                return BinaryOperatorExpression::GreaterThanOrEqualToken;
+            default: throw std::out_of_range("Invalid value for UnaryOperatorType");
+        }
+    }
+
+    // The C# `static bool IsPostfixOperator(UnaryOperatorType op)` -- returns true for the
+    // postfix operators (`PostIncrement`/`PostDecrement`/`NullConditional`/
+    // `SuppressNullableWarning`) whose token is written AFTER the operand expression. A
+    // file-local static helper in the C# (a `private static` on the output visitor); the
+    // port places it on the node so the output visitor's `VisitUnaryOperatorExpression` can
+    // call it (the C# calls it through the output visitor's private static, which is
+    // equivalent).
+    static bool IsPostfixOperator(UnaryOperatorType op) {
+        return op == UnaryOperatorType::PostIncrement
+            || op == UnaryOperatorType::PostDecrement
+            || op == UnaryOperatorType::NullConditional
+            || op == UnaryOperatorType::SuppressNullableWarning;
+    }
 
     // The generated slot static (per-node), pointing at the shared `Slots` kind. The
     // `IsOptional` flag is false (the slot is required -- the C# property is non-nullable);

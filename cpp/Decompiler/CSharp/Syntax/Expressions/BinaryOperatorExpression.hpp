@@ -42,11 +42,10 @@
 // `Operator`, deep-clones the children through the setters (which re-parent), and copies the
 // annotation channel.
 //
-// The hand-written `GetOperatorToken`/`GetLinqNodeType` static helpers are DEFERRED: they map
-// `BinaryOperatorType` to the token string and to `System.Linq.Expressions.ExpressionType`
-// (a BCL enum), used by the resolver/output stage (not the AST structure); they land when the
-// output visitor / resolver consume them. The token-string constants (`BitwiseAndToken`, ...)
-// are likewise deferred with those helpers.
+// The hand-written `GetOperatorToken` static helper and the token-string constants
+// (`BitwiseAndToken`, ...) are now ported (the D326 output-visitor slice that implements
+// `VisitBinaryOperatorExpression`); `GetLinqNodeType` (maps to `System.Linq.Expressions.
+// ExpressionType`, a BCL enum) stays deferred until the resolver consumes it.
 
 #ifndef ILSPY_DECOMPILER_CSHARP_SYNTAX_EXPRESSIONS_BINARYOPERATOREXPRESSION_HPP
 #define ILSPY_DECOMPILER_CSHARP_SYNTAX_EXPRESSIONS_BINARYOPERATOREXPRESSION_HPP
@@ -101,6 +100,67 @@ enum class BinaryOperatorType {
 class BinaryOperatorExpression final : public Expression {
 public:
     ~BinaryOperatorExpression() override = default;
+
+    // The C# `public const string` token constants -- the operator symbol strings the output
+    // visitor emits via `WriteToken`/`WriteKeyword`. Compile-time literals carried as
+    // `static constexpr const char*` (static fields, not instance state), so they are not in
+    // `MembersToMatch`/`DoMatch` (the generator's scan adds only instance `IPropertySymbol`s).
+    static constexpr const char* BitwiseAndToken = "&";
+    static constexpr const char* BitwiseOrToken = "|";
+    static constexpr const char* ConditionalAndToken = "&&";
+    static constexpr const char* ConditionalOrToken = "||";
+    static constexpr const char* ExclusiveOrToken = "^";
+    static constexpr const char* GreaterThanToken = ">";
+    static constexpr const char* GreaterThanOrEqualToken = ">=";
+    static constexpr const char* EqualityToken = "==";
+    static constexpr const char* InEqualityToken = "!=";
+    static constexpr const char* LessThanToken = "<";
+    static constexpr const char* LessThanOrEqualToken = "<=";
+    static constexpr const char* AddToken = "+";
+    static constexpr const char* SubtractToken = "-";
+    static constexpr const char* MultiplyToken = "*";
+    static constexpr const char* DivideToken = "/";
+    static constexpr const char* ModulusToken = "%";
+    static constexpr const char* ShiftLeftToken = "<<";
+    static constexpr const char* ShiftRightToken = ">>";
+    static constexpr const char* UnsignedShiftRightToken = ">>>";
+    static constexpr const char* NullCoalescingToken = "??";
+    static constexpr const char* RangeToken = "..";
+    // The C# `public const string IsKeyword = IsExpression.IsKeyword` -- the `is` keyword token
+    // for the `IsPattern` operator. `IsExpression` is not yet ported; the value is the literal
+    // "is" (the cross-reference to `IsExpression::IsKeyword` is re-pointed when that node lands).
+    static constexpr const char* IsKeyword = "is";
+
+    // The C# `public static string GetOperatorToken(BinaryOperatorType op)` -- maps the enum
+    // to its token string. The `default` case throws `NotSupportedException` (an invalid enum
+    // value), faithfully mirroring the C#.
+    static const char* GetOperatorToken(BinaryOperatorType op) {
+        switch (op) {
+            case BinaryOperatorType::BitwiseAnd: return BitwiseAndToken;
+            case BinaryOperatorType::BitwiseOr: return BitwiseOrToken;
+            case BinaryOperatorType::ConditionalAnd: return ConditionalAndToken;
+            case BinaryOperatorType::ConditionalOr: return ConditionalOrToken;
+            case BinaryOperatorType::ExclusiveOr: return ExclusiveOrToken;
+            case BinaryOperatorType::GreaterThan: return GreaterThanToken;
+            case BinaryOperatorType::GreaterThanOrEqual: return GreaterThanOrEqualToken;
+            case BinaryOperatorType::Equality: return EqualityToken;
+            case BinaryOperatorType::InEquality: return InEqualityToken;
+            case BinaryOperatorType::LessThan: return LessThanToken;
+            case BinaryOperatorType::LessThanOrEqual: return LessThanOrEqualToken;
+            case BinaryOperatorType::Add: return AddToken;
+            case BinaryOperatorType::Subtract: return SubtractToken;
+            case BinaryOperatorType::Multiply: return MultiplyToken;
+            case BinaryOperatorType::Divide: return DivideToken;
+            case BinaryOperatorType::Modulus: return ModulusToken;
+            case BinaryOperatorType::ShiftLeft: return ShiftLeftToken;
+            case BinaryOperatorType::ShiftRight: return ShiftRightToken;
+            case BinaryOperatorType::UnsignedShiftRight: return UnsignedShiftRightToken;
+            case BinaryOperatorType::NullCoalescing: return NullCoalescingToken;
+            case BinaryOperatorType::Range: return RangeToken;
+            case BinaryOperatorType::IsPattern: return IsKeyword;
+            default: throw std::out_of_range("Invalid value for BinaryOperatorType");
+        }
+    }
 
     // The generated empty ctor (the C# `public BinaryOperatorExpression()`). `Operator`
     // defaults to `Any` (the enum's zero value, the C# default); `Left`/`Right` default to

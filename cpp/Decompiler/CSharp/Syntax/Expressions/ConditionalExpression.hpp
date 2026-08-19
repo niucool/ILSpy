@@ -45,11 +45,11 @@
 // deep-clones the three children through the setters (which re-parent) and copies the
 // annotation channel. There is no scalar member (no `Operator`), so `Clone` copies no scalar.
 //
-// The hand-written `QuestionMarkToken`/`ColonToken` const-string fields are DEFERRED: they are
-// the `?`/`:` token strings the output visitor emits (the pretty-printer), not the AST
-// structure; they land when the output visitor consumes them (the D229 `BinaryOperatorExpression`
-// / D230 `AssignmentExpression` / D231 `UnaryOperatorExpression` precedent deferred the same
-// token-string / `GetOperatorToken` helpers).
+// The hand-written `QuestionMarkToken`/`ColonToken` const-string fields (the `?`/`:` token
+// strings the output visitor emits) are now ported as `static constexpr const char*` public
+// members (the D326 output-visitor slice that implements `VisitConditionalExpression`), the
+// same convention as `CheckedExpression::CheckedKeyword`. `ColonToken` is the same value as
+// `Tokens::Colon` (the C# `ColonToken = Tokens.Colon`).
 //
 // No C++ name-shadowing crux here: the accessors are `Condition`/`TrueExpression`/`FalseExpression`
 // (none named `Expression`), so the `Expression` base type is unshadowed in this class scope and
@@ -77,6 +77,15 @@ namespace ILSpy::Decompiler::CSharp::Syntax {
 class ConditionalExpression final : public Expression {
 public:
     ~ConditionalExpression() override = default;
+
+    // The C# `public const string QuestionMarkToken = "?"` / `ColonToken = Tokens.Colon` --
+    // the `?`/`:` tokens the output visitor emits for the conditional `cond ? a : b`. Compile-
+    // time literals carried as `static constexpr const char*` (static fields, not instance
+    // state), so they are not in `MembersToMatch`/`DoMatch` (the generator's scan adds only
+    // instance `IPropertySymbol`s). `ColonToken` is the literal `":""` (same value as
+    // `Tokens::Colon`, the C# `ColonToken = Tokens.Colon` alias).
+    static constexpr const char* QuestionMarkToken = "?";
+    static constexpr const char* ColonToken = ":";
 
     // The generated empty ctor (the C# `public ConditionalExpression()`). All three slots
     // default to null (no operands). Null slots violate the required-slot invariant, so a
