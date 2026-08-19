@@ -87,6 +87,7 @@
 #include "Decompiler/CSharp/Syntax/ConstructorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/EnumMemberDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/ExtensionDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
 #include "Decompiler/CSharp/Syntax/TupleTypeElement.hpp"
@@ -1802,7 +1803,33 @@ void CSharpOutputVisitor::VisitConstructorDeclaration(Syntax::ConstructorDeclara
 void CSharpOutputVisitor::VisitTypeParameterDeclaration(Syntax::TypeParameterDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitConstraint(Syntax::Constraint*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitMethodDeclaration(Syntax::MethodDeclaration*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitExtensionDeclaration(Syntax::ExtensionDeclaration*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitExtensionDeclaration(Syntax::ExtensionDeclaration* extensionDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitExtensionDeclaration: `extension<T> (...) { ... }`.
+	StartNode(extensionDeclaration);
+	WriteAttributes(ToVector(extensionDeclaration->Attributes()));
+	WriteModifiers(extensionDeclaration->Modifiers());
+	WriteKeyword(Syntax::ExtensionDeclaration::ExtensionKeyword);
+	WriteTypeParameters(ToVector(extensionDeclaration->TypeParameters()));
+	Space(policy_.SpaceBeforeMethodDeclarationParentheses);
+	WriteCommaSeparatedListInParenthesis(ToVector(extensionDeclaration->ReceiverParameters()), policy_.SpaceWithinMethodDeclarationParentheses);
+	for (auto* constraint : ToVector(extensionDeclaration->Constraints())) {
+		if (constraint) constraint->AcceptVisitor(*this);
+	}
+	OpenBrace(policy_.ClassBraceStyle);
+	bool first = true;
+	for (auto* member : ToVector(extensionDeclaration->Members())) {
+		if (!member) continue;
+		if (!first) {
+			for (int i = 0; i < policy_.MinimumBlankLinesBetweenMembers; ++i)
+				NewLine();
+		}
+		first = false;
+		member->AcceptVisitor(*this);
+	}
+	CloseBrace(policy_.ClassBraceStyle);
+	NewLine();
+	EndNode(extensionDeclaration);
+}
 void CSharpOutputVisitor::VisitFixedVariableInitializer(Syntax::FixedVariableInitializer*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitFixedFieldDeclaration(Syntax::FixedFieldDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitLocalFunctionDeclarationStatement(Syntax::LocalFunctionDeclarationStatement*) { NotImplemented(); }

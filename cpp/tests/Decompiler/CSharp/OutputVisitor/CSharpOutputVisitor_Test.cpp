@@ -99,6 +99,7 @@
 #include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/FieldDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/EnumMemberDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/ExtensionDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Accessor.hpp"
 #include "Decompiler/CSharp/Syntax/PropertyDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/CustomEventDeclaration.hpp"
@@ -191,6 +192,7 @@ using ILSpy::Decompiler::CSharp::Syntax::ConstructorDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::DestructorDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::FieldDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::EnumMemberDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::ExtensionDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::Accessor;
 using ILSpy::Decompiler::CSharp::Syntax::AccessorKind;
 using ILSpy::Decompiler::CSharp::Syntax::PropertyDeclaration;
@@ -4059,4 +4061,31 @@ TEST(CSharp_OutputVisitor, VisitEnumMemberDeclarationWithInitializer) {
 	EXPECT_EQ(h.inner.calls[4], "primval");
 	EXPECT_EQ(h.inner.calls[5], "end");
 	EXPECT_EQ(h.inner.calls[6], "end");
+}
+
+// `VisitExtensionDeclaration` over a bare `extension () { }` (no Attributes, no Modifiers, no
+// TypeParameters, empty ReceiverParameters, no Constraints, no Members). WriteAttributes and
+// WriteModifiers are no-ops (None), WriteKeyword("extension"), WriteTypeParameters (empty) is a
+// no-op, Space(false) is a no-op, the empty ReceiverParameters writes `(` `)`, the Constraints
+// loop is a no-op, OpenBrace(ClassBraceStyle=EndOfLine) inserts a space (not at start of line after
+// `extension ()`) + `{` + indent + newline, the Members loop is a no-op, CloseBrace writes unindent
+// + `}`, then NewLine, EndNode.
+TEST(CSharp_OutputVisitor, VisitExtensionDeclarationBare) {
+	V h;
+	auto node = std::make_unique<ExtensionDeclaration>();
+	h.visitor->VisitExtensionDeclaration(node.get());
+	// start, kw:extension, tok:(, tok:), space, tok:{, indent, newline, unindent, tok:}, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 12u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:extension");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "tok:)");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "tok:{");
+	EXPECT_EQ(h.inner.calls[6], "indent");
+	EXPECT_EQ(h.inner.calls[7], "newline");
+	EXPECT_EQ(h.inner.calls[8], "unindent");
+	EXPECT_EQ(h.inner.calls[9], "tok:}");
+	EXPECT_EQ(h.inner.calls[10], "newline");
+	EXPECT_EQ(h.inner.calls[11], "end");
 }
