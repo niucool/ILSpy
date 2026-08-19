@@ -27,6 +27,8 @@
 #include <cassert>
 #include <stdexcept>
 #include <utility>
+#include <vector>
+#include <algorithm>
 
 // The concrete AST nodes the infrastructure methods dereference (the throwing `Visit` stubs only
 // name their parameter types by pointer, so they need only the forward declarations the included
@@ -97,6 +99,11 @@
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TupleExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/LambdaExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AnonymousMethodExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AnonymousTypeCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayInitializerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/InterpolatedStringContent.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
@@ -122,6 +129,41 @@ std::vector<T*> ToVector(const AstNodeCollectionT<T>& collection) {
 		result.push_back(collection.At(i));
 	}
 	return result;
+}
+
+// The C# local functions `IsSimpleExpression`/`IsComplexExpression` nested in
+// `PrintInitializerElements` (the array-initializer wrapping classifier). They do not access
+// `this` or the policy (pure type tests on the element), so they port as file-local free
+// functions in this anonymous namespace. `IsSimpleExpression`'s `MemberReferenceExpression {
+// Target: ThisReferenceExpression or IdentifierExpression or BaseReferenceExpression }`
+// recursive pattern ports to a `dynamic_cast<MemberReferenceExpression*>` plus a `dynamic_cast`
+// is-a test on the `Target` against the three simple-target types.
+bool IsSimpleExpression(Expression* ex) {
+	if (dynamic_cast<NullReferenceExpression*>(ex) != nullptr)
+		return true;
+	if (dynamic_cast<ThisReferenceExpression*>(ex) != nullptr)
+		return true;
+	if (dynamic_cast<PrimitiveExpression*>(ex) != nullptr)
+		return true;
+	if (dynamic_cast<IdentifierExpression*>(ex) != nullptr)
+		return true;
+	if (auto* mre = dynamic_cast<MemberReferenceExpression*>(ex)) {
+		AstNode* t = mre->Target();
+		if (dynamic_cast<ThisReferenceExpression*>(t) != nullptr
+			|| dynamic_cast<IdentifierExpression*>(t) != nullptr
+			|| dynamic_cast<BaseReferenceExpression*>(t) != nullptr) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool IsComplexExpression(Expression* ex) {
+	return dynamic_cast<AnonymousMethodExpression*>(ex) != nullptr
+		|| dynamic_cast<LambdaExpression*>(ex) != nullptr
+		|| dynamic_cast<AnonymousTypeCreateExpression*>(ex) != nullptr
+		|| dynamic_cast<ObjectCreateExpression*>(ex) != nullptr
+		|| dynamic_cast<NamedExpression*>(ex) != nullptr;
 }
 
 }  // namespace
@@ -377,6 +419,71 @@ void CSharpOutputVisitor::WriteBlock(BlockStatement* blockStatement, BraceStyle 
 	}
 	CloseBrace(style);
 	EndNode(blockStatement);
+}
+
+// ---- Initializer helpers --------------------------------------------------
+// The C# `protected virtual void PrintInitializerElements(AstNodeCollection<Expression>)` --
+// renders the braces around a comma-separated element list, wrapping to one-element-per-line
+// when `ArrayInitializerWrapping == WrapAlways`, when any non-simple expression is present with
+// more than one element, when any complex expression is present, or when there are more than 10
+// elements. The eager-vector convention (the D221/D325 precedent) makes the port take a
+// `std::vector<Expression*>` snapshot; the `foreach (var (idx, node) in elements.WithIndex())`
+// ports to an indexed loop (the vector provides the index natively). The two local classifier
+// functions are file-local free functions in the anonymous namespace above.
+void CSharpOutputVisitor::PrintInitializerElements(const std::vector<Expression*>& elements) {
+	bool wrapAlways = policy_.ArrayInitializerWrapping == Wrapping::WrapAlways
+		|| (static_cast<int>(elements.size()) > 1
+			&& std::any_of(elements.begin(), elements.end(), [](Expression* e) { return !IsSimpleExpression(e); }))
+		|| std::any_of(elements.begin(), elements.end(), IsComplexExpression);
+	bool wrap = wrapAlways || static_cast<int>(elements.size()) > 10;
+	OpenBrace(wrap ? policy_.ArrayInitializerBraceStyle : BraceStyle::EndOfLine, wrap);
+	if (!wrap)
+		Space();
+	for (std::size_t idx = 0; idx < elements.size(); ++idx) {
+		if (idx > 0) {
+			Comma(elements[idx], true);
+			if (wrapAlways || idx % 10 == 0)
+				NewLine();
+			else
+				Space();
+		}
+		elements[idx]->AcceptVisitor(*this);
+	}
+	if (wrap)
+		NewLine();
+	else
+		Space();
+	CloseBrace(wrap ? policy_.ArrayInitializerBraceStyle : BraceStyle::EndOfLine, wrap);
+}
+
+// The C# `protected bool IsObjectOrCollectionInitializer(AstNode?)` -- the `node` argument is the
+// PARENT of the `ArrayInitializerExpression` being visited; it returns true when that parent is
+// itself an `ArrayInitializerExpression` (the outer braces of `new T { { ... } }` / `name = { ... }`)
+// whose own parent is an `ObjectCreateExpression` (the outer braces occupy the `Initializer` slot)
+// or a `NamedExpression` (the outer braces occupy the `Expression` slot). The `node.Slot?.Kind ==
+// Slots.X` null-propagating pointer compare ports to a null-safe `Slot()` + `Kind()` pointer compare
+// (a parented node's `Slot()` is non-null; `Kind()` returns the shared `Slots` constant address).
+bool CSharpOutputVisitor::IsObjectOrCollectionInitializer(AstNode* node) {
+	if (dynamic_cast<ArrayInitializerExpression*>(node) == nullptr)
+		return false;
+	AstNode* parent = node->Parent();
+	if (dynamic_cast<ObjectCreateExpression*>(parent) != nullptr) {
+		const CSharpSlotInfo* slot = node->Slot();
+		return slot != nullptr && slot->Kind() == &Slots::Initializer;
+	}
+	if (dynamic_cast<NamedExpression*>(parent) != nullptr) {
+		const CSharpSlotInfo* slot = node->Slot();
+		return slot != nullptr && slot->Kind() == &Slots::Expression;
+	}
+	return false;
+}
+
+// The C# `protected bool CanBeConfusedWithObjectInitializer(Expression)` -- an `AssignmentExpression`
+// with the `Assign` operator inside a collection initializer would read as an object initializer
+// (`{ a = 1 }`), so the nested braces cannot be omitted for it (the port keeps them).
+bool CSharpOutputVisitor::CanBeConfusedWithObjectInitializer(Expression* expr) {
+	auto* ae = dynamic_cast<AssignmentExpression*>(expr);
+	return ae != nullptr && ae->Operator() == AssignmentOperatorType::Assign;
 }
 
 void CSharpOutputVisitor::WriteTypeArguments(const std::vector<AstType*>& typeArguments) {
@@ -901,9 +1008,55 @@ void CSharpOutputVisitor::VisitIndexerExpression(Syntax::IndexerExpression* inde
 	WriteCommaSeparatedListInBrackets(ToVector(indexerExpression->Arguments()));
 	EndNode(indexerExpression);
 }
-void CSharpOutputVisitor::VisitArrayInitializerExpression(Syntax::ArrayInitializerExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitObjectCreateExpression(Syntax::ObjectCreateExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitArrayCreateExpression(Syntax::ArrayCreateExpression*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitArrayInitializerExpression(Syntax::ArrayInitializerExpression* arrayInitializerExpression) {
+	StartNode(arrayInitializerExpression);
+	// "new List<int> { { 1 } }" and "new List<int> { 1 }" are the same semantically. The AST always
+	// uses two nested ArrayInitializerExpressions for collection initializers; the output visitor
+	// omits the nested braces when they are optional (a single non-assignment element whose
+	// enclosing initializer is an object/collection initializer slot).
+	auto& elements = arrayInitializerExpression->Elements();
+	bool bracesAreOptional = elements.Count() == 1
+		&& IsObjectOrCollectionInitializer(arrayInitializerExpression->Parent())
+		&& !CanBeConfusedWithObjectInitializer(elements.At(0));
+	if (bracesAreOptional) {
+		elements.At(0)->AcceptVisitor(*this);
+	} else {
+		PrintInitializerElements(ToVector(elements));
+	}
+	EndNode(arrayInitializerExpression);
+}
+void CSharpOutputVisitor::VisitObjectCreateExpression(Syntax::ObjectCreateExpression* objectCreateExpression) {
+	StartNode(objectCreateExpression);
+	WriteKeyword(Syntax::ObjectCreateExpression::NewKeyword);
+	objectCreateExpression->Type()->AcceptVisitor(*this);
+	bool useParenthesis = objectCreateExpression->Arguments().Count() > 0
+		|| objectCreateExpression->Initializer() == nullptr;
+	if (useParenthesis) {
+		Space(policy_.SpaceBeforeMethodCallParentheses);
+		WriteCommaSeparatedListInParenthesis(ToVector(objectCreateExpression->Arguments()),
+			policy_.SpaceWithinMethodCallParentheses);
+	}
+	if (objectCreateExpression->Initializer() != nullptr)
+		objectCreateExpression->Initializer()->AcceptVisitor(*this);
+	EndNode(objectCreateExpression);
+}
+void CSharpOutputVisitor::VisitArrayCreateExpression(Syntax::ArrayCreateExpression* arrayCreateExpression) {
+	StartNode(arrayCreateExpression);
+	WriteKeyword(Syntax::ArrayCreateExpression::NewKeyword);
+	if (arrayCreateExpression->Type() != nullptr)
+		arrayCreateExpression->Type()->AcceptVisitor(*this);
+	if (arrayCreateExpression->Arguments().Count() > 0) {
+		WriteCommaSeparatedListInBrackets(ToVector(arrayCreateExpression->Arguments()));
+	}
+	auto& specifiers = arrayCreateExpression->AdditionalArraySpecifiers();
+	int sn = specifiers.Count();
+	for (int i = 0; i < sn; ++i) {
+		specifiers.At(i)->AcceptVisitor(*this);
+	}
+	if (arrayCreateExpression->Initializer() != nullptr)
+		arrayCreateExpression->Initializer()->AcceptVisitor(*this);
+	EndNode(arrayCreateExpression);
+}
 void CSharpOutputVisitor::VisitTupleExpression(Syntax::TupleExpression* tupleExpression) {
 	StartNode(tupleExpression);
 	LPar();

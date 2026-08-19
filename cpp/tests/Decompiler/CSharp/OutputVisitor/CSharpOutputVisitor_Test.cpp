@@ -66,6 +66,9 @@
 #include "Decompiler/CSharp/Syntax/Expressions/TupleExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayInitializerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Identifier.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/SimpleType.hpp"
@@ -164,6 +167,9 @@ using ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType;
 using ILSpy::Decompiler::CSharp::Syntax::UncheckedStatement;
 using ILSpy::Decompiler::CSharp::Syntax::UnsafeStatement;
 using ILSpy::Decompiler::CSharp::Syntax::UncheckedExpression;
+using ILSpy::Decompiler::CSharp::Syntax::ObjectCreateExpression;
+using ILSpy::Decompiler::CSharp::Syntax::ArrayCreateExpression;
+using ILSpy::Decompiler::CSharp::Syntax::ArrayInitializerExpression;
 
 namespace {
 
@@ -1973,5 +1979,207 @@ TEST(CSharp_OutputVisitor, VisitTupleExpression) {
 	EXPECT_EQ(h.inner.calls[8], "end");
 	EXPECT_EQ(h.inner.calls[9], "tok:)");
 	EXPECT_EQ(h.inner.calls[10], "end");
+}
+
+// `VisitObjectCreateExpression` over `new Foo()` -- no arguments and no initializer, so the
+// `useParenthesis = Arguments.Any() || Initializer is null` gate emits the empty call parens
+// (the default policy has no space before/within the call parentheses).
+TEST(CSharp_OutputVisitor, VisitObjectCreateExpressionNoArgsNoInitializer) {
+	V h;
+	auto type = std::make_unique<SimpleType>(std::string("Foo"));
+	auto node = std::make_unique<ObjectCreateExpression>(type.get());
+	h.visitor->VisitObjectCreateExpression(node.get());
+	// start, kw:new, start(SimpleType), space (decorator: new->identifier), id:Foo, end, tok:(, tok:), end
+	ASSERT_EQ(h.inner.calls.size(), 9u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:new");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "id:Foo");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:(");
+	EXPECT_EQ(h.inner.calls[7], "tok:)");
+	EXPECT_EQ(h.inner.calls[8], "end");
+}
+
+// `VisitObjectCreateExpression` over `new Foo(1)` -- one argument, so the call parens wrap the
+// comma-separated argument list (the default policy has no inner spaces).
+TEST(CSharp_OutputVisitor, VisitObjectCreateExpressionOneArg) {
+	V h;
+	auto type = std::make_unique<SimpleType>(std::string("Foo"));
+	auto arg = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto node = std::make_unique<ObjectCreateExpression>(type.get());
+	node->Arguments().Add(arg.get());
+	h.visitor->VisitObjectCreateExpression(node.get());
+	// start, kw:new, start(SimpleType), space (decorator: new->identifier), id:Foo, end, tok:(, start, primval, end, tok:), end
+	ASSERT_EQ(h.inner.calls.size(), 12u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:new");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "id:Foo");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:(");
+	EXPECT_EQ(h.inner.calls[7], "start");
+	EXPECT_EQ(h.inner.calls[8], "primval");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "tok:)");
+	EXPECT_EQ(h.inner.calls[11], "end");
+}
+
+// `VisitArrayCreateExpression` over `new int[5]` -- a sized array (the `Type` recurses through
+// `VisitPrimitiveType`, the size expression in brackets, no initializer).
+TEST(CSharp_OutputVisitor, VisitArrayCreateExpressionSized) {
+	V h;
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto size = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(5)));
+	auto node = std::make_unique<ArrayCreateExpression>(type.get());
+	node->Arguments().Add(size.get());
+	h.visitor->VisitArrayCreateExpression(node.get());
+	// start, kw:new, start(PrimitiveType), space (decorator: new->primtype), primtype:int, end, tok:[, start, primval, end, tok:], end
+	ASSERT_EQ(h.inner.calls.size(), 12u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:new");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "primtype:int");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:[");
+	EXPECT_EQ(h.inner.calls[7], "start");
+	EXPECT_EQ(h.inner.calls[8], "primval");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "tok:]");
+	EXPECT_EQ(h.inner.calls[11], "end");
+}
+
+// `VisitArrayCreateExpression` over `new int[] { 1, 2 }` -- an empty size bracket followed by an
+// `ArrayInitializerExpression` (the empty `Arguments` skips the bracket write; the initializer
+// recurses through `VisitArrayInitializerExpression`).
+TEST(CSharp_OutputVisitor, VisitArrayCreateExpressionWithInitializer) {
+	V h;
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto e0 = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto e1 = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(2)));
+	auto init = std::make_unique<ArrayInitializerExpression>();
+	init->Elements().Add(e0.get());
+	init->Elements().Add(e1.get());
+	auto node = std::make_unique<ArrayCreateExpression>(type.get());
+	node->Initializer(init.get());
+	h.visitor->VisitArrayCreateExpression(node.get());
+	// start, kw:new, start(PrimitiveType), space (decorator: new->primtype), primtype:int, end, then the initializer
+	// { 1, 2 }: start, space (OpenBrace, line not empty), tok:{, space, start, primval, end, tok:,, space,
+	// start, primval, end, space, tok:}, end, then end.
+	ASSERT_EQ(h.inner.calls.size(), 22u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:new");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "primtype:int");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "start");
+	EXPECT_EQ(h.inner.calls[7], "space");
+	EXPECT_EQ(h.inner.calls[8], "tok:{");
+	EXPECT_EQ(h.inner.calls[9], "space");
+	EXPECT_EQ(h.inner.calls[10], "start");
+	EXPECT_EQ(h.inner.calls[11], "primval");
+	EXPECT_EQ(h.inner.calls[12], "end");
+	EXPECT_EQ(h.inner.calls[13], "tok:,");
+	EXPECT_EQ(h.inner.calls[14], "space");
+	EXPECT_EQ(h.inner.calls[15], "start");
+	EXPECT_EQ(h.inner.calls[16], "primval");
+	EXPECT_EQ(h.inner.calls[17], "end");
+	EXPECT_EQ(h.inner.calls[18], "space");
+	EXPECT_EQ(h.inner.calls[19], "tok:}");
+	EXPECT_EQ(h.inner.calls[20], "end");
+	EXPECT_EQ(h.inner.calls[21], "end");
+}
+
+// `VisitArrayCreateExpression` over `new int[5][]` -- a sized first bracket followed by an
+// additional rank-2 `ArraySpecifier` (the trailing `[,]` without size info).
+TEST(CSharp_OutputVisitor, VisitArrayCreateExpressionAdditionalSpecifier) {
+	V h;
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto size = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(5)));
+	auto spec = std::make_unique<ArraySpecifier>(2);
+	auto node = std::make_unique<ArrayCreateExpression>(type.get());
+	node->Arguments().Add(size.get());
+	node->AdditionalArraySpecifiers().Add(spec.get());
+	h.visitor->VisitArrayCreateExpression(node.get());
+	// start, kw:new, start(PrimitiveType), space (decorator: new->primtype), primtype:int, end, tok:[, start, primval, end, tok:],
+	// then VisitArraySpecifier rank 2: start, tok:[, tok:,, tok:], end, then end.
+	ASSERT_EQ(h.inner.calls.size(), 17u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:new");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "primtype:int");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:[");
+	EXPECT_EQ(h.inner.calls[7], "start");
+	EXPECT_EQ(h.inner.calls[8], "primval");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "tok:]");
+	EXPECT_EQ(h.inner.calls[11], "start");
+	EXPECT_EQ(h.inner.calls[12], "tok:[");
+	EXPECT_EQ(h.inner.calls[13], "tok:,");
+	EXPECT_EQ(h.inner.calls[14], "tok:]");
+	EXPECT_EQ(h.inner.calls[15], "end");
+	EXPECT_EQ(h.inner.calls[16], "end");
+}
+
+// `VisitArrayInitializerExpression` over a standalone `{ 1, 2 }` -- the `PrintInitializerElements`
+// path (the `bracesAreOptional` gate is false for a parentless initializer), the default policy
+// does not wrap two simple primitives, so the braces hug with inner spaces.
+TEST(CSharp_OutputVisitor, VisitArrayInitializerExpressionTwoElements) {
+	V h;
+	auto e0 = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto e1 = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(2)));
+	auto node = std::make_unique<ArrayInitializerExpression>();
+	node->Elements().Add(e0.get());
+	node->Elements().Add(e1.get());
+	h.visitor->VisitArrayInitializerExpression(node.get());
+	// start, tok:{, space, start, primval, end, tok:,, space, start, primval, end, space, tok:}, end
+	ASSERT_EQ(h.inner.calls.size(), 14u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "tok:{");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:,");
+	EXPECT_EQ(h.inner.calls[7], "space");
+	EXPECT_EQ(h.inner.calls[8], "start");
+	EXPECT_EQ(h.inner.calls[9], "primval");
+	EXPECT_EQ(h.inner.calls[10], "end");
+	EXPECT_EQ(h.inner.calls[11], "space");
+	EXPECT_EQ(h.inner.calls[12], "tok:}");
+	EXPECT_EQ(h.inner.calls[13], "end");
+}
+
+// `VisitArrayInitializerExpression` over the inner `{ 1 }` of `new List { { 1 } }` -- the
+// `bracesAreOptional` gate is true (a single non-assignment element whose enclosing initializer is
+// the `Initializer` slot of an `ObjectCreateExpression`), so the nested braces are omitted and only
+// the single element renders. The full parent chain (`inner` is an `Elements` child of `outer`,
+// which is the `Initializer` of `objCreate`) is built so `IsObjectOrCollectionInitializer` sees
+// the outer initializer's slot kind.
+TEST(CSharp_OutputVisitor, VisitArrayInitializerExpressionBracesOptional) {
+	V h;
+	auto type = std::make_unique<SimpleType>(std::string("List"));
+	auto prim1 = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto inner = std::make_unique<ArrayInitializerExpression>();
+	inner->Elements().Add(prim1.get());
+	auto outer = std::make_unique<ArrayInitializerExpression>();
+	outer->Elements().Add(inner.get());
+	auto objCreate = std::make_unique<ObjectCreateExpression>(type.get());
+	objCreate->Initializer(outer.get());
+	h.visitor->VisitArrayInitializerExpression(inner.get());
+	// start(inner), start(PrimitiveExpression), primval, end, end(inner) -- the nested braces are
+	// optional so only the single element renders.
+	ASSERT_EQ(h.inner.calls.size(), 5u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primval");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "end");
 }
 

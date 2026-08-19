@@ -206,6 +206,21 @@ public:
 	virtual void WriteAttributes(const std::vector<Syntax::AttributeSection*>& attributes);
 	virtual void WritePrivateImplementationType(Syntax::AstType* privateImplementationType);
 
+	// ---- Initializer helpers -----------------------------------------------
+	// The C# `protected virtual void PrintInitializerElements(AstNodeCollection<Expression>)`/
+	// `protected bool IsObjectOrCollectionInitializer(AstNode?)`/`protected bool
+	// CanBeConfusedWithObjectInitializer(Expression)` -- consulted by
+	// `VisitArrayInitializerExpression` (and `VisitAnonymousTypeCreateExpression` when it lands).
+	// `new List<int> { { 1 } }` and `new List<int> { 1 }` are the same semantically; the AST always
+	// uses two nested `ArrayInitializerExpression`s for collection initializers, and the output
+	// visitor omits the nested braces when they are optional (a single non-assignment element whose
+	// enclosing initializer is an object/collection initializer slot). The eager-vector convention
+	// (the D221/D325 precedent) makes `PrintInitializerElements` take a `std::vector<Expression*>`
+	// snapshot the caller builds via `ToVector`.
+	virtual void PrintInitializerElements(const std::vector<Syntax::Expression*>& elements);
+	bool IsObjectOrCollectionInitializer(Syntax::AstNode* node);
+	bool CanBeConfusedWithObjectInitializer(Syntax::Expression* expr);
+
 	// ---- Method-call-chain newline helpers --------------------------------
 	// The C# `GetCallChainLengthLimited`/`ShouldInsertNewLineWhenInMethodCallChain` (private)
 	// and `InsertNewLineWhenInMethodCallChain` (protected virtual) -- consulted by
