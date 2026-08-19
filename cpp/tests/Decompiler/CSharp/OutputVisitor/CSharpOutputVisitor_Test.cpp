@@ -87,6 +87,7 @@
 #include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/MemberType.hpp"
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
+#include "Decompiler/CSharp/Syntax/ConstructorInitializer.hpp"
 #include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
 #include "Decompiler/CSharp/Syntax/TupleTypeElement.hpp"
 #include "Decompiler/CSharp/Syntax/TupleAstType.hpp"
@@ -181,6 +182,8 @@ using ILSpy::Decompiler::CSharp::Syntax::SwitchExpression;
 using ILSpy::Decompiler::CSharp::Syntax::SwitchExpressionSection;
 using ILSpy::Decompiler::CSharp::Syntax::CatchClause;
 using ILSpy::Decompiler::CSharp::Syntax::TryCatchStatement;
+using ILSpy::Decompiler::CSharp::Syntax::ConstructorInitializer;
+using ILSpy::Decompiler::CSharp::Syntax::ConstructorInitializerType;
 using ILSpy::Decompiler::CSharp::Syntax::DestructorDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::Accessor;
 using ILSpy::Decompiler::CSharp::Syntax::AccessorKind;
@@ -3805,4 +3808,48 @@ TEST(CSharp_OutputVisitor, VisitAccessorAdd) {
 	EXPECT_EQ(h.inner.calls[2], "tok:;");
 	EXPECT_EQ(h.inner.calls[3], "newline");
 	EXPECT_EQ(h.inner.calls[4], "end");
+}
+
+// `VisitConstructorInitializer` over `: base()` -- the `Base` initializer with no arguments.
+// `StartNode`, `WriteToken(:)`, `Space()`, `WriteKeyword(base)`, then
+// `WriteCommaSeparatedListInParenthesis([], SpaceWithinMethodCallParentheses=false)` writes
+// `(` `)` (empty list: no inner spaces, no comma), then `EndNode`. The `Space(SpaceBeforeMethod-
+// CallParentheses=false)` before the parens is a no-op (default policy).
+TEST(CSharp_OutputVisitor, VisitConstructorInitializerBaseNoArgs) {
+	V h;
+	auto node = std::make_unique<ConstructorInitializer>(ConstructorInitializerType::Base);
+	h.visitor->VisitConstructorInitializer(node.get());
+	// start, tok::, space, kw:base, tok:(, tok:), end
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "tok::");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "kw:base");
+	EXPECT_EQ(h.inner.calls[4], "tok:(");
+	EXPECT_EQ(h.inner.calls[5], "tok:)");
+	EXPECT_EQ(h.inner.calls[6], "end");
+}
+
+// `VisitConstructorInitializer` over `: this(1)` -- the `This` initializer with one argument.
+// The argument recurses through `VisitPrimitiveExpression` between the parentheses (no comma
+// for a single-element list; the default policy's `SpaceWithinMethodCallParentheses=false` so
+// no inner spaces).
+TEST(CSharp_OutputVisitor, VisitConstructorInitializerThisOneArg) {
+	V h;
+	auto arg = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto node = std::make_unique<ConstructorInitializer>(ConstructorInitializerType::This);
+	node->Arguments().Add(arg.get());
+	h.visitor->VisitConstructorInitializer(node.get());
+	// start, tok::, space, kw:this, tok:(, start, primval, end, tok:), end
+	ASSERT_EQ(h.inner.calls.size(), 10u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "tok::");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "kw:this");
+	EXPECT_EQ(h.inner.calls[4], "tok:(");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "primval");
+	EXPECT_EQ(h.inner.calls[7], "end");
+	EXPECT_EQ(h.inner.calls[8], "tok:)");
+	EXPECT_EQ(h.inner.calls[9], "end");
 }

@@ -83,6 +83,7 @@
 #include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/MemberType.hpp"
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
+#include "Decompiler/CSharp/Syntax/ConstructorInitializer.hpp"
 #include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
 #include "Decompiler/CSharp/Syntax/TupleTypeElement.hpp"
 #include "Decompiler/CSharp/Syntax/TupleAstType.hpp"
@@ -1716,7 +1717,20 @@ void CSharpOutputVisitor::VisitParameterDeclaration(Syntax::ParameterDeclaration
 }
 void CSharpOutputVisitor::VisitIndexerDeclaration(Syntax::IndexerDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitOperatorDeclaration(Syntax::OperatorDeclaration*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitConstructorInitializer(Syntax::ConstructorInitializer*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitConstructorInitializer(Syntax::ConstructorInitializer* constructorInitializer) {
+	// Faithful port of CSharpOutputVisitor.cs VisitConstructorInitializer: `: base(...)` / `: this(...)`.
+	StartNode(constructorInitializer);
+	WriteToken(Tokens::Colon);
+	Space();
+	if (constructorInitializer->ConstructorInitializerType() == Syntax::ConstructorInitializerType::This) {
+		WriteKeyword(Syntax::ConstructorInitializer::ThisKeyword);
+	} else {
+		WriteKeyword(Syntax::ConstructorInitializer::BaseKeyword);
+	}
+	Space(policy_.SpaceBeforeMethodCallParentheses);
+	WriteCommaSeparatedListInParenthesis(ToVector(constructorInitializer->Arguments()), policy_.SpaceWithinMethodCallParentheses);
+	EndNode(constructorInitializer);
+}
 void CSharpOutputVisitor::VisitConstructorDeclaration(Syntax::ConstructorDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitTypeParameterDeclaration(Syntax::TypeParameterDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitConstraint(Syntax::Constraint*) { NotImplemented(); }
