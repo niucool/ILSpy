@@ -90,6 +90,7 @@
 #include "Decompiler/CSharp/Syntax/ExtensionDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/EventDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/CustomEventDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/FieldDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
 #include "Decompiler/CSharp/Syntax/TupleTypeElement.hpp"
@@ -1661,7 +1662,20 @@ void CSharpOutputVisitor::VisitDestructorDeclaration(Syntax::DestructorDeclarati
 	WriteMethodBody(destructorDeclaration->Body(), policy_.DestructorBraceStyle);
 	EndNode(destructorDeclaration);
 }
-void CSharpOutputVisitor::VisitFieldDeclaration(Syntax::FieldDeclaration*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitFieldDeclaration(Syntax::FieldDeclaration* fieldDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitFieldDeclaration: `ReturnType v1, v2, ...;`.
+	// Structurally identical to VisitEventDeclaration (D349) minus the `event` keyword.
+	StartNode(fieldDeclaration);
+	WriteAttributes(ToVector(fieldDeclaration->Attributes()));
+	WriteModifiers(fieldDeclaration->Modifiers());
+	if (fieldDeclaration->ReturnType() != nullptr) {
+		fieldDeclaration->ReturnType()->AcceptVisitor(*this);
+	}
+	Space();
+	WriteCommaSeparatedList(ToVector(fieldDeclaration->Variables()));
+	Semicolon();
+	EndNode(fieldDeclaration);
+}
 void CSharpOutputVisitor::VisitAccessor(Syntax::Accessor* accessor) {
 	StartNode(accessor);
 	WriteAttributes(ToVector(accessor->Attributes()));

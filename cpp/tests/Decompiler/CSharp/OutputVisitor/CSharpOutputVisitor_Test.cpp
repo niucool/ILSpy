@@ -598,14 +598,15 @@ TEST(CSharp_OutputVisitor, WriteCommaSeparatedListInParenthesisEmpty) {
 // ---- The 130 Visit stubs throw ---------------------------------------------
 
 // A representative still-unported `Visit` method throws `std::logic_error` (the throwing-stub
-// design); `VisitFieldDeclaration` remains a stub (the `VariableDeclarationStatement`, the
-// try/catch family, `ConstructorInitializer`, `ConstructorDeclaration`, and now
-// `DestructorDeclaration` `Visit` methods above are implemented, the TypeMember hierarchy
-// below `FieldDeclaration` is still a stub).
+// design); `VisitPropertyDeclaration` remains a stub (the `VariableDeclarationStatement`, the
+// try/catch family, `ConstructorInitializer`, `ConstructorDeclaration`, `DestructorDeclaration`,
+// `EnumMemberDeclaration`, `ExtensionDeclaration`, `EventDeclaration`, `CustomEventDeclaration`,
+// and now `FieldDeclaration` `Visit` methods above are implemented, the TypeMember hierarchy
+// below `PropertyDeclaration` is still a stub).
 TEST(CSharp_OutputVisitor, VisitStubThrows) {
 	V h;
-	auto decl = std::make_unique<FieldDeclaration>();
-	EXPECT_THROW(h.visitor->VisitFieldDeclaration(decl.get()), std::logic_error);
+	auto decl = std::make_unique<PropertyDeclaration>();
+	EXPECT_THROW(h.visitor->VisitPropertyDeclaration(decl.get()), std::logic_error);
 }
 
 // ---- The implemented leaf Visit methods ------------------------------------
@@ -4227,4 +4228,61 @@ TEST(CSharp_OutputVisitor, VisitCustomEventDeclarationWithAccessors) {
 	ASSERT_NE(addKw, h.inner.calls.end()) << "the add accessor must render kw:add";
 	auto removeKw = std::find(addKw, h.inner.calls.end(), "kw:remove");
 	ASSERT_NE(removeKw, h.inner.calls.end()) << "the remove accessor must render kw:remove after add";
+}
+
+// `VisitFieldDeclaration` over `int x;` -- a single field. Structurally identical to
+// VisitEventDeclaration (D349) minus the `event` keyword: StartNode + WriteAttributes (no-op) +
+// WriteModifiers (no-op) + ReturnType->AcceptVisitor (PrimitiveType "int": start/primtype:int/end)
+// + Space() + WriteCommaSeparatedList(Variables) (one VariableInitializer "x": start/id:x/end) +
+// Semicolon + EndNode. The ReturnType is the first token (no preceding keyword), so no
+// auto-space before it.
+TEST(CSharp_OutputVisitor, VisitFieldDeclarationOneVar) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("int"));
+	auto var = std::make_unique<VariableInitializer>(std::string("x"));
+	auto node = std::make_unique<FieldDeclaration>();
+	node->ReturnType(retType.get());
+	node->Variables().Add(var.get());
+	h.visitor->VisitFieldDeclaration(node.get());
+	// start, start, primtype:int, end, space, start, id:x, end, tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 11u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primtype:int");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "id:x");
+	EXPECT_EQ(h.inner.calls[7], "end");
+	EXPECT_EQ(h.inner.calls[8], "tok:;");
+	EXPECT_EQ(h.inner.calls[9], "newline");
+	EXPECT_EQ(h.inner.calls[10], "end");
+}
+
+// `VisitFieldDeclaration` over `int x, y;` -- two fields, so the WriteCommaSeparatedList
+// writes a Comma between them.
+TEST(CSharp_OutputVisitor, VisitFieldDeclarationTwoVars) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("int"));
+	auto v0 = std::make_unique<VariableInitializer>(std::string("x"));
+	auto v1 = std::make_unique<VariableInitializer>(std::string("y"));
+	auto node = std::make_unique<FieldDeclaration>();
+	node->ReturnType(retType.get());
+	node->Variables().Add(v0.get());
+	node->Variables().Add(v1.get());
+	h.visitor->VisitFieldDeclaration(node.get());
+	// start, start, primtype:int, end, space, start, id:x, end, tok:, start, id:y, end, tok:;, newline, end
+	ASSERT_GE(h.inner.calls.size(), 13u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primtype:int");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "id:x");
+	EXPECT_EQ(h.inner.calls[7], "end");
+	EXPECT_EQ(h.inner.calls[8], "tok:,");
+	EXPECT_EQ(h.inner.calls[9], "start");
+	EXPECT_EQ(h.inner.calls[10], "id:y");
+	EXPECT_EQ(h.inner.calls[11], "end");
 }
