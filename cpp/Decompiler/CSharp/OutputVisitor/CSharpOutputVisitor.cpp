@@ -90,6 +90,10 @@
 #include "Decompiler/CSharp/Syntax/Expressions/TypeOfExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DefaultValueExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/SizeOfExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/NamedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
 #include "Decompiler/CSharp/OutputVisitor/InsertRequiredSpacesDecorator.hpp"
 
 namespace ILSpy::Decompiler::CSharp::OutputVisitor {
@@ -780,17 +784,44 @@ void CSharpOutputVisitor::VisitSizeOfExpression(Syntax::SizeOfExpression* sizeOf
 
 	EndNode(sizeOfExpression);
 }
-void CSharpOutputVisitor::VisitIdentifierExpression(Syntax::IdentifierExpression*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitIdentifierExpression(Syntax::IdentifierExpression* identifierExpression) {
+	StartNode(identifierExpression);
+	WriteIdentifier(identifierExpression->IdentifierToken());
+	WriteTypeArguments(ToVector(identifierExpression->TypeArguments()));
+	EndNode(identifierExpression);
+}
 void CSharpOutputVisitor::VisitMemberReferenceExpression(Syntax::MemberReferenceExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitPointerReferenceExpression(Syntax::PointerReferenceExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitInvocationExpression(Syntax::InvocationExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitIndexerExpression(Syntax::IndexerExpression*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitIndexerExpression(Syntax::IndexerExpression* indexerExpression) {
+	StartNode(indexerExpression);
+	if (indexerExpression->Target() != nullptr)
+		indexerExpression->Target()->AcceptVisitor(*this);
+	Space(policy_.SpaceBeforeMethodCallParentheses);
+	WriteCommaSeparatedListInBrackets(ToVector(indexerExpression->Arguments()));
+	EndNode(indexerExpression);
+}
 void CSharpOutputVisitor::VisitArrayInitializerExpression(Syntax::ArrayInitializerExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitObjectCreateExpression(Syntax::ObjectCreateExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitArrayCreateExpression(Syntax::ArrayCreateExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitTupleExpression(Syntax::TupleExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitNamedExpression(Syntax::NamedExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitNamedArgumentExpression(Syntax::NamedArgumentExpression*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitNamedExpression(Syntax::NamedExpression* namedExpression) {
+	StartNode(namedExpression);
+	WriteIdentifier(namedExpression->NameToken());
+	Space();
+	WriteToken(Tokens::Assign);
+	Space();
+	namedExpression->Expression()->AcceptVisitor(*this);
+	EndNode(namedExpression);
+}
+void CSharpOutputVisitor::VisitNamedArgumentExpression(Syntax::NamedArgumentExpression* namedArgumentExpression) {
+	StartNode(namedArgumentExpression);
+	WriteIdentifier(namedArgumentExpression->NameToken());
+	WriteToken(Tokens::Colon);
+	Space();
+	namedArgumentExpression->Expression()->AcceptVisitor(*this);
+	EndNode(namedArgumentExpression);
+}
 void CSharpOutputVisitor::VisitErrorExpression(Syntax::ErrorExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitOutVarDeclarationExpression(Syntax::OutVarDeclarationExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitWithInitializerExpression(Syntax::WithInitializerExpression*) { NotImplemented(); }

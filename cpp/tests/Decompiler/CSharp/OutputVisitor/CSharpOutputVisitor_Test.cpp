@@ -58,6 +58,10 @@
 #include "Decompiler/CSharp/Syntax/Expressions/TypeOfExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DefaultValueExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/SizeOfExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/NamedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Identifier.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/SimpleType.hpp"
@@ -142,6 +146,10 @@ using ILSpy::Decompiler::CSharp::Syntax::CastExpression;
 using ILSpy::Decompiler::CSharp::Syntax::TypeOfExpression;
 using ILSpy::Decompiler::CSharp::Syntax::DefaultValueExpression;
 using ILSpy::Decompiler::CSharp::Syntax::SizeOfExpression;
+using ILSpy::Decompiler::CSharp::Syntax::IdentifierExpression;
+using ILSpy::Decompiler::CSharp::Syntax::IndexerExpression;
+using ILSpy::Decompiler::CSharp::Syntax::NamedExpression;
+using ILSpy::Decompiler::CSharp::Syntax::NamedArgumentExpression;
 using ILSpy::Decompiler::CSharp::Syntax::ThrowStatement;
 using ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorExpression;
 using ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType;
@@ -1714,4 +1722,116 @@ TEST(CSharp_OutputVisitor, VisitUnsafeStatement) {
 	EXPECT_EQ(h.inner.calls[9], "end");
 	EXPECT_EQ(h.inner.calls[10], "newline");
 	EXPECT_EQ(h.inner.calls[11], "end");
+}
+
+// ---- The simple member/argument expression Visit methods -------------------
+
+// `VisitIdentifierExpression` (named, no type arguments) writes the backing `IdentifierToken`.
+// Structurally `VisitSimpleType` applied to the `Expression` hierarchy (the D325 `ToVector`
+// snapshot of an empty `TypeArguments` collection writes nothing).
+TEST(CSharp_OutputVisitor, VisitIdentifierExpressionNamed) {
+	V h;
+	auto node = std::make_unique<IdentifierExpression>(std::string("Foo"));
+	h.visitor->VisitIdentifierExpression(node.get());
+	// start, id:Foo, end
+	ASSERT_EQ(h.inner.calls.size(), 3u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "id:Foo");
+	EXPECT_EQ(h.inner.calls[2], "end");
+}
+
+// `VisitIdentifierExpression` with a `TypeArguments` collection renders `List<T>` -- the
+// `WriteTypeArguments` writes the chevrons and recurses through `VisitSimpleType`.
+TEST(CSharp_OutputVisitor, VisitIdentifierExpressionWithTypeArguments) {
+	V h;
+	auto typeArg = std::make_unique<SimpleType>(std::string("T"));
+	auto node = std::make_unique<IdentifierExpression>(std::string("List"));
+	node->TypeArguments().Add(typeArg.get());
+	h.visitor->VisitIdentifierExpression(node.get());
+	// start, id:List, tok:<, start(SimpleType), id:T, end(SimpleType), tok:>, end
+	ASSERT_EQ(h.inner.calls.size(), 8u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "id:List");
+	EXPECT_EQ(h.inner.calls[2], "tok:<");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "id:T");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:>");
+	EXPECT_EQ(h.inner.calls[7], "end");
+}
+
+// `VisitIndexerExpression` over `a[0]` -- the `Target` recurses through `VisitIdentifierExpression`,
+// then the bracketed argument list (the default policy has no spaces before/within the brackets).
+TEST(CSharp_OutputVisitor, VisitIndexerExpression) {
+	V h;
+	auto target = std::make_unique<IdentifierExpression>(std::string("a"));
+	auto arg = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(0)));
+	auto node = std::make_unique<IndexerExpression>(target.get());
+	node->Arguments().Add(arg.get());
+	h.visitor->VisitIndexerExpression(node.get());
+	// start, start(IdentifierExpression), id:a, end, tok:[, start(PrimitiveExpression), primval,
+	// end, tok:], end
+	ASSERT_EQ(h.inner.calls.size(), 10u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "id:a");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "tok:[");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "primval");
+	EXPECT_EQ(h.inner.calls[7], "end");
+	EXPECT_EQ(h.inner.calls[8], "tok:]");
+	EXPECT_EQ(h.inner.calls[9], "end");
+}
+
+// `VisitIndexerExpression` with a null `Target` and an empty argument list renders `[]`.
+TEST(CSharp_OutputVisitor, VisitIndexerExpressionNoTargetEmpty) {
+	V h;
+	auto node = std::make_unique<IndexerExpression>();
+	h.visitor->VisitIndexerExpression(node.get());
+	// start, tok:[, tok:], end
+	ASSERT_EQ(h.inner.calls.size(), 4u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "tok:[");
+	EXPECT_EQ(h.inner.calls[2], "tok:]");
+	EXPECT_EQ(h.inner.calls[3], "end");
+}
+
+// `VisitNamedArgumentExpression` over `name: 0` -- the name identifier, a colon, an explicit
+// `Space()`, then the argument expression.
+TEST(CSharp_OutputVisitor, VisitNamedArgumentExpression) {
+	V h;
+	auto expr = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(0)));
+	auto node = std::make_unique<NamedArgumentExpression>(std::string("name"), expr.get());
+	h.visitor->VisitNamedArgumentExpression(node.get());
+	// start, id:name, tok::, space, start(PrimitiveExpression), primval, end, end
+	ASSERT_EQ(h.inner.calls.size(), 8u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "id:name");
+	EXPECT_EQ(h.inner.calls[2], "tok::");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "start");
+	EXPECT_EQ(h.inner.calls[5], "primval");
+	EXPECT_EQ(h.inner.calls[6], "end");
+	EXPECT_EQ(h.inner.calls[7], "end");
+}
+
+// `VisitNamedExpression` over `name = 0` -- the name identifier, an explicit `Space()`, the
+// assign token, another explicit `Space()`, then the initializer expression.
+TEST(CSharp_OutputVisitor, VisitNamedExpression) {
+	V h;
+	auto expr = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(0)));
+	auto node = std::make_unique<NamedExpression>(std::string("name"), expr.get());
+	h.visitor->VisitNamedExpression(node.get());
+	// start, id:name, space, tok:=, space, start(PrimitiveExpression), primval, end, end
+	ASSERT_EQ(h.inner.calls.size(), 9u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "id:name");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "tok:=");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "primval");
+	EXPECT_EQ(h.inner.calls[7], "end");
+	EXPECT_EQ(h.inner.calls[8], "end");
 }
