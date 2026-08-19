@@ -206,6 +206,20 @@ public:
 	virtual void WriteAttributes(const std::vector<Syntax::AttributeSection*>& attributes);
 	virtual void WritePrivateImplementationType(Syntax::AstType* privateImplementationType);
 
+	// ---- Method-call-chain newline helpers --------------------------------
+	// The C# `GetCallChainLengthLimited`/`ShouldInsertNewLineWhenInMethodCallChain` (private)
+	// and `InsertNewLineWhenInMethodCallChain` (protected virtual) -- consulted by
+	// `VisitMemberReferenceExpression`/`VisitInvocationExpression` to break long
+	// `a.B().C().D()` chains across lines. The chain length is the count of
+	// `InvocationExpression`-over-`MemberReferenceExpression` links above the given member
+	// reference; a chain of length >= 3 in a statement/lambda context (NOT an interpolated
+	// string) inserts a `NewLine` (and an `Indent` at exactly 3) before the dot, with a
+	// matching `Unindent` after the closing token.
+protected:
+	int GetCallChainLengthLimited(Syntax::MemberReferenceExpression* expr);
+	int ShouldInsertNewLineWhenInMethodCallChain(Syntax::MemberReferenceExpression* expr);
+	virtual bool InsertNewLineWhenInMethodCallChain(Syntax::MemberReferenceExpression* expr);
+public:
 	// ---- The 130 IAstVisitor Visit methods --------------------------------
 	// Declared here (override the IAstVisitor pure-virtuals) so the class is a concrete,
 	// instantiable visitor; the unported ones are defined as throwing stubs in the .cpp and

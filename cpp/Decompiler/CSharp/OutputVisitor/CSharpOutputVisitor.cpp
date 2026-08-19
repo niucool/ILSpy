@@ -92,6 +92,12 @@
 #include "Decompiler/CSharp/Syntax/Expressions/SizeOfExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/PointerReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TupleExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/LambdaExpression.hpp"
+#include "Decompiler/CSharp/Syntax/InterpolatedStringContent.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
 #include "Decompiler/CSharp/OutputVisitor/InsertRequiredSpacesDecorator.hpp"
@@ -454,6 +460,69 @@ void CSharpOutputVisitor::WritePrivateImplementationType(AstType* privateImpleme
 	}
 }
 
+// ---- Method-call-chain newline helpers ------------------------------------
+
+// The C# `int GetCallChainLengthLimited(MemberReferenceExpression expr)` -- walks the
+// `Target` chain counting `InvocationExpression`-over-`MemberReferenceExpression` links, capped
+// at 4 (the `callChainLength < 4` guard). A standalone `a.B` (the `Target` is an
+// `IdentifierExpression`, not an `InvocationExpression`) yields 0.
+int CSharpOutputVisitor::GetCallChainLengthLimited(MemberReferenceExpression* expr) {
+	int callChainLength = 0;
+	auto* node = expr;
+	while (callChainLength < 4) {
+		auto* invocation = dynamic_cast<InvocationExpression*>(node->Target());
+		if (invocation == nullptr) {
+			break;
+		}
+		auto* mre = dynamic_cast<MemberReferenceExpression*>(invocation->Target());
+		if (mre == nullptr) {
+			break;
+		}
+		node = mre;
+		++callChainLength;
+	}
+	return callChainLength;
+}
+
+// The C# `int ShouldInsertNewLineWhenInMethodCallChain(MemberReferenceExpression expr)` --
+// returns 0 (no break) for chains shorter than 3 or when the nearest
+// statement/lambda/interpolated-string ancestor IS an interpolated string (a chain inside an
+// interpolated-string hole stays on one line); otherwise returns the chain length.
+int CSharpOutputVisitor::ShouldInsertNewLineWhenInMethodCallChain(MemberReferenceExpression* expr) {
+	int callChainLength = GetCallChainLengthLimited(expr);
+	if (callChainLength < 3) {
+		return 0;
+	}
+	AstNode* ancestor = expr->GetParent([](AstNode* n) {
+		return dynamic_cast<Statement*>(n) != nullptr
+			|| dynamic_cast<LambdaExpression*>(n) != nullptr
+			|| dynamic_cast<InterpolatedStringContent*>(n) != nullptr;
+	});
+	if (dynamic_cast<InterpolatedStringContent*>(ancestor) != nullptr) {
+		return 0;
+	}
+	return callChainLength;
+}
+
+// The C# `protected virtual bool InsertNewLineWhenInMethodCallChain(MemberReferenceExpression
+// expr)` -- inserts a `NewLine` (and an `Indent` at exactly chain length 3) before the dot when
+// the chain should break; resets the inter-token whitespace state. Returns whether a newline
+// was inserted (the caller unindents after the closing token when the member reference is not
+// itself the target of an enclosing invocation).
+bool CSharpOutputVisitor::InsertNewLineWhenInMethodCallChain(MemberReferenceExpression* expr) {
+	int callChainLength = ShouldInsertNewLineWhenInMethodCallChain(expr);
+	if (callChainLength == 0) {
+		return false;
+	}
+	if (callChainLength == 3) {
+		writer_->Indent();
+	}
+	writer_->NewLine();
+	isAtStartOfLine_ = true;
+	isAfterSpace_ = false;
+	return true;
+}
+
 // ---- The 130 IAstVisitor Visit methods (throwing stubs) -------------------
 void CSharpOutputVisitor::VisitIdentifier(Syntax::Identifier* identifier) {
 	// The C# deliberately does NOT call `StartNode`/`EndNode` for `Identifier` -- the
@@ -790,9 +859,40 @@ void CSharpOutputVisitor::VisitIdentifierExpression(Syntax::IdentifierExpression
 	WriteTypeArguments(ToVector(identifierExpression->TypeArguments()));
 	EndNode(identifierExpression);
 }
-void CSharpOutputVisitor::VisitMemberReferenceExpression(Syntax::MemberReferenceExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitPointerReferenceExpression(Syntax::PointerReferenceExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitInvocationExpression(Syntax::InvocationExpression*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitMemberReferenceExpression(Syntax::MemberReferenceExpression* memberReferenceExpression) {
+	StartNode(memberReferenceExpression);
+	memberReferenceExpression->Target()->AcceptVisitor(*this);
+	bool insertedNewLine = InsertNewLineWhenInMethodCallChain(memberReferenceExpression);
+	WriteToken(Tokens::Dot);
+	WriteIdentifier(memberReferenceExpression->MemberNameToken());
+	WriteTypeArguments(ToVector(memberReferenceExpression->TypeArguments()));
+	if (insertedNewLine && dynamic_cast<Syntax::InvocationExpression*>(memberReferenceExpression->Parent()) == nullptr) {
+		writer_->Unindent();
+	}
+	EndNode(memberReferenceExpression);
+}
+void CSharpOutputVisitor::VisitPointerReferenceExpression(Syntax::PointerReferenceExpression* pointerReferenceExpression) {
+	StartNode(pointerReferenceExpression);
+	pointerReferenceExpression->Target()->AcceptVisitor(*this);
+	WriteToken(Syntax::PointerReferenceExpression::ArrowToken);
+	WriteIdentifier(pointerReferenceExpression->MemberNameToken());
+	WriteTypeArguments(ToVector(pointerReferenceExpression->TypeArguments()));
+	EndNode(pointerReferenceExpression);
+}
+void CSharpOutputVisitor::VisitInvocationExpression(Syntax::InvocationExpression* invocationExpression) {
+	StartNode(invocationExpression);
+	invocationExpression->Target()->AcceptVisitor(*this);
+	Space(policy_.SpaceBeforeMethodCallParentheses);
+	WriteCommaSeparatedListInParenthesis(ToVector(invocationExpression->Arguments()), policy_.SpaceWithinMethodCallParentheses);
+	if (dynamic_cast<Syntax::MemberReferenceExpression*>(invocationExpression->Parent()) == nullptr) {
+		auto* mre = dynamic_cast<Syntax::MemberReferenceExpression*>(invocationExpression->Target());
+		if (mre != nullptr) {
+			if (ShouldInsertNewLineWhenInMethodCallChain(mre) >= 3)
+				writer_->Unindent();
+		}
+	}
+	EndNode(invocationExpression);
+}
 void CSharpOutputVisitor::VisitIndexerExpression(Syntax::IndexerExpression* indexerExpression) {
 	StartNode(indexerExpression);
 	if (indexerExpression->Target() != nullptr)
@@ -804,7 +904,13 @@ void CSharpOutputVisitor::VisitIndexerExpression(Syntax::IndexerExpression* inde
 void CSharpOutputVisitor::VisitArrayInitializerExpression(Syntax::ArrayInitializerExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitObjectCreateExpression(Syntax::ObjectCreateExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitArrayCreateExpression(Syntax::ArrayCreateExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitTupleExpression(Syntax::TupleExpression*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitTupleExpression(Syntax::TupleExpression* tupleExpression) {
+	StartNode(tupleExpression);
+	LPar();
+	WriteCommaSeparatedList(ToVector(tupleExpression->Elements()));
+	RPar();
+	EndNode(tupleExpression);
+}
 void CSharpOutputVisitor::VisitNamedExpression(Syntax::NamedExpression* namedExpression) {
 	StartNode(namedExpression);
 	WriteIdentifier(namedExpression->NameToken());

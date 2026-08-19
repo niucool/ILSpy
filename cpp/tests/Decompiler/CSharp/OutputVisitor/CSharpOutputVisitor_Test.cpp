@@ -60,6 +60,10 @@
 #include "Decompiler/CSharp/Syntax/Expressions/SizeOfExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/PointerReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TupleExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Identifier.hpp"
@@ -148,6 +152,10 @@ using ILSpy::Decompiler::CSharp::Syntax::DefaultValueExpression;
 using ILSpy::Decompiler::CSharp::Syntax::SizeOfExpression;
 using ILSpy::Decompiler::CSharp::Syntax::IdentifierExpression;
 using ILSpy::Decompiler::CSharp::Syntax::IndexerExpression;
+using ILSpy::Decompiler::CSharp::Syntax::MemberReferenceExpression;
+using ILSpy::Decompiler::CSharp::Syntax::PointerReferenceExpression;
+using ILSpy::Decompiler::CSharp::Syntax::InvocationExpression;
+using ILSpy::Decompiler::CSharp::Syntax::TupleExpression;
 using ILSpy::Decompiler::CSharp::Syntax::NamedExpression;
 using ILSpy::Decompiler::CSharp::Syntax::NamedArgumentExpression;
 using ILSpy::Decompiler::CSharp::Syntax::ThrowStatement;
@@ -1835,3 +1843,135 @@ TEST(CSharp_OutputVisitor, VisitNamedExpression) {
 	EXPECT_EQ(h.inner.calls[7], "end");
 	EXPECT_EQ(h.inner.calls[8], "end");
 }
+
+// `VisitMemberReferenceExpression` over `a.B` -- the `Target` recurses through
+// `VisitIdentifierExpression`, then the dot and the member-name identifier. A standalone member
+// reference (the `Target` is not an `InvocationExpression`) has chain length 0, so no chain
+// newline/indent is inserted.
+TEST(CSharp_OutputVisitor, VisitMemberReferenceExpression) {
+	V h;
+	auto target = std::make_unique<IdentifierExpression>(std::string("a"));
+	auto node = std::make_unique<MemberReferenceExpression>(target.get(), std::string("B"));
+	h.visitor->VisitMemberReferenceExpression(node.get());
+	// start, start(IdentifierExpression), id:a, end, tok:., id:B, end
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "id:a");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "tok:.");
+	EXPECT_EQ(h.inner.calls[5], "id:B");
+	EXPECT_EQ(h.inner.calls[6], "end");
+}
+
+// `VisitMemberReferenceExpression` with a `TypeArguments` collection renders `a.B<T>` -- the
+// `WriteTypeArguments` writes the chevrons and recurses through `VisitSimpleType`.
+TEST(CSharp_OutputVisitor, VisitMemberReferenceExpressionWithTypeArguments) {
+	V h;
+	auto target = std::make_unique<IdentifierExpression>(std::string("a"));
+	auto typeArg = std::make_unique<SimpleType>(std::string("T"));
+	auto node = std::make_unique<MemberReferenceExpression>(target.get(), std::string("B"));
+	node->TypeArguments().Add(typeArg.get());
+	h.visitor->VisitMemberReferenceExpression(node.get());
+	// start, start(id:a), id:a, end, tok:., id:B, tok:<, start(SimpleType), id:T, end, tok:>, end
+	ASSERT_EQ(h.inner.calls.size(), 12u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "id:a");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "tok:.");
+	EXPECT_EQ(h.inner.calls[5], "id:B");
+	EXPECT_EQ(h.inner.calls[6], "tok:<");
+	EXPECT_EQ(h.inner.calls[7], "start");
+	EXPECT_EQ(h.inner.calls[8], "id:T");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "tok:>");
+	EXPECT_EQ(h.inner.calls[11], "end");
+}
+
+// `VisitPointerReferenceExpression` over `a->B` -- the structural twin of the member reference,
+// using the `ArrowToken` (`->`) instead of the dot. No chain newline logic (the C# source has
+// none for pointer member access).
+TEST(CSharp_OutputVisitor, VisitPointerReferenceExpression) {
+	V h;
+	auto target = std::make_unique<IdentifierExpression>(std::string("a"));
+	auto node = std::make_unique<PointerReferenceExpression>(target.get(), std::string("B"));
+	h.visitor->VisitPointerReferenceExpression(node.get());
+	// start, start(IdentifierExpression), id:a, end, tok:->, id:B, end
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "id:a");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "tok:->");
+	EXPECT_EQ(h.inner.calls[5], "id:B");
+	EXPECT_EQ(h.inner.calls[6], "end");
+}
+
+// `VisitInvocationExpression` over `Foo()` -- the `Target` recurses through
+// `VisitIdentifierExpression`, then the empty argument list in parentheses (the default policy
+// has no space before/within the call parentheses).
+TEST(CSharp_OutputVisitor, VisitInvocationExpression) {
+	V h;
+	auto target = std::make_unique<IdentifierExpression>(std::string("Foo"));
+	auto node = std::make_unique<InvocationExpression>(target.get());
+	h.visitor->VisitInvocationExpression(node.get());
+	// start, start(IdentifierExpression), id:Foo, end, tok:(, tok:), end
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "id:Foo");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "tok:(");
+	EXPECT_EQ(h.inner.calls[5], "tok:)");
+	EXPECT_EQ(h.inner.calls[6], "end");
+}
+
+// `VisitInvocationExpression` over `Foo(1)` -- a single argument recurses through
+// `VisitPrimitiveExpression` between the parentheses (no comma for a single-element list).
+TEST(CSharp_OutputVisitor, VisitInvocationExpressionOneArg) {
+	V h;
+	auto target = std::make_unique<IdentifierExpression>(std::string("Foo"));
+	auto arg = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto node = std::make_unique<InvocationExpression>(target.get());
+	node->Arguments().Add(arg.get());
+	h.visitor->VisitInvocationExpression(node.get());
+	// start, start(id:Foo), id:Foo, end, tok:(, start, primval, end, tok:), end
+	ASSERT_EQ(h.inner.calls.size(), 10u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "id:Foo");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "tok:(");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "primval");
+	EXPECT_EQ(h.inner.calls[7], "end");
+	EXPECT_EQ(h.inner.calls[8], "tok:)");
+	EXPECT_EQ(h.inner.calls[9], "end");
+}
+
+// `VisitTupleExpression` over `(1, 2)` -- the elements in parentheses, comma-separated (the
+// default policy has no bracket-comma spaces).
+TEST(CSharp_OutputVisitor, VisitTupleExpression) {
+	V h;
+	auto e0 = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto e1 = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(2)));
+	auto node = std::make_unique<TupleExpression>();
+	node->Elements().Add(e0.get());
+	node->Elements().Add(e1.get());
+	h.visitor->VisitTupleExpression(node.get());
+	// start, tok:(, start, primval, end, tok:,, start, primval, end, tok:), end
+	ASSERT_EQ(h.inner.calls.size(), 11u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "tok:(");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "primval");
+	EXPECT_EQ(h.inner.calls[4], "end");
+	EXPECT_EQ(h.inner.calls[5], "tok:,");
+	EXPECT_EQ(h.inner.calls[6], "start");
+	EXPECT_EQ(h.inner.calls[7], "primval");
+	EXPECT_EQ(h.inner.calls[8], "end");
+	EXPECT_EQ(h.inner.calls[9], "tok:)");
+	EXPECT_EQ(h.inner.calls[10], "end");
+}
+
