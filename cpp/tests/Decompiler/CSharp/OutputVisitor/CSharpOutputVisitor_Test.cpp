@@ -118,12 +118,14 @@
 #include "Decompiler/CSharp/Syntax/Statements/LockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/SwitchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/SwitchSection.hpp"
 #include "Decompiler/CSharp/Syntax/CaseLabel.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/SwitchExpression.hpp"
 #include "Decompiler/CSharp/Syntax/SwitchExpressionSection.hpp"
 #include "Decompiler/CSharp/Syntax/CatchClause.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Modifiers.hpp"
 
 using namespace ILSpy::Decompiler::CSharp::OutputVisitor;
@@ -167,12 +169,14 @@ using ILSpy::Decompiler::CSharp::Syntax::ForeachStatement;
 using ILSpy::Decompiler::CSharp::Syntax::LockStatement;
 using ILSpy::Decompiler::CSharp::Syntax::UsingStatement;
 using ILSpy::Decompiler::CSharp::Syntax::FixedStatement;
+using ILSpy::Decompiler::CSharp::Syntax::VariableDeclarationStatement;
 using ILSpy::Decompiler::CSharp::Syntax::SwitchStatement;
 using ILSpy::Decompiler::CSharp::Syntax::SwitchSection;
 using ILSpy::Decompiler::CSharp::Syntax::CaseLabel;
 using ILSpy::Decompiler::CSharp::Syntax::SwitchExpression;
 using ILSpy::Decompiler::CSharp::Syntax::SwitchExpressionSection;
 using ILSpy::Decompiler::CSharp::Syntax::CatchClause;
+using ILSpy::Decompiler::CSharp::Syntax::TryCatchStatement;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentExpression;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentOperatorType;
 using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorExpression;
@@ -576,8 +580,8 @@ TEST(CSharp_OutputVisitor, WriteCommaSeparatedListInParenthesisEmpty) {
 // implemented, the try/catch family below is still a stub).
 TEST(CSharp_OutputVisitor, VisitStubThrows) {
 	V h;
-	auto clause = std::make_unique<CatchClause>();
-	EXPECT_THROW(h.visitor->VisitCatchClause(clause.get()), std::logic_error);
+	auto stmt = std::make_unique<VariableDeclarationStatement>();
+	EXPECT_THROW(h.visitor->VisitVariableDeclarationStatement(stmt.get()), std::logic_error);
 }
 
 // ---- The implemented leaf Visit methods ------------------------------------
@@ -3463,4 +3467,106 @@ TEST(CSharp_OutputVisitor, VisitSwitchExpressionEmpty) {
 	EXPECT_EQ(h.inner.calls[10], "unindent");
 	EXPECT_EQ(h.inner.calls[11], "tok:}");
 	EXPECT_EQ(h.inner.calls[12], "end");
+}
+
+// ---- The try/catch family ------------------------------------------------
+
+// `VisitCatchClause` on a bare `catch {}` (no `Type`, no `VariableName`, no `Condition`, an
+// empty `Body`): `StartNode`, `WriteKeyword(catch)`, then `WriteBlock(Body)` (the `OpenBrace`
+// inserts a `Space` since the line is not empty after the keyword) directly (NOT via
+// `VisitBlockStatement`, so no trailing `NewLine`), then `EndNode`.
+TEST(CSharp_OutputVisitor, VisitCatchClauseBare) {
+	V h;
+	auto body = std::make_unique<BlockStatement>();
+	auto clause = std::make_unique<CatchClause>(nullptr, std::string(), nullptr, body.get());
+	h.visitor->VisitCatchClause(clause.get());
+	// start, kw:catch, start, space, tok:{, indent, newline, unindent, tok:}, end, end
+	ASSERT_EQ(h.inner.calls.size(), 11u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:catch");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "tok:{");
+	EXPECT_EQ(h.inner.calls[5], "indent");
+	EXPECT_EQ(h.inner.calls[6], "newline");
+	EXPECT_EQ(h.inner.calls[7], "unindent");
+	EXPECT_EQ(h.inner.calls[8], "tok:}");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "end");
+}
+
+// `VisitCatchClause` with a `when` filter and no caught type: `catch when (true) {}`. The
+// `Condition` is a `PrimitiveExpression(true)` whose `VisitPrimitiveExpression` contributes its
+// own `start`/`primval`/`end`. The `Space(SpaceBeforeIfParentheses=false)` and
+// `Space(SpacesWithinIfParentheses=false)` calls are no-ops (default policy).
+TEST(CSharp_OutputVisitor, VisitCatchClauseWithFilter) {
+	V h;
+	auto body = std::make_unique<BlockStatement>();
+	auto cond = std::make_unique<PrimitiveExpression>(PrimitiveValue(true));
+	auto clause = std::make_unique<CatchClause>(nullptr, std::string(), cond.get(), body.get());
+	h.visitor->VisitCatchClause(clause.get());
+	// start, kw:catch, space, kw:when, tok:(, start, primval, end, tok:),
+	// start, space, tok:{, indent, newline, unindent, tok:}, end, end
+	ASSERT_EQ(h.inner.calls.size(), 18u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:catch");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "kw:when");
+	EXPECT_EQ(h.inner.calls[4], "tok:(");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "primval");
+	EXPECT_EQ(h.inner.calls[7], "end");
+	EXPECT_EQ(h.inner.calls[8], "tok:)");
+	EXPECT_EQ(h.inner.calls[9], "start");
+	EXPECT_EQ(h.inner.calls[10], "space");
+	EXPECT_EQ(h.inner.calls[11], "tok:{");
+	EXPECT_EQ(h.inner.calls[12], "indent");
+	EXPECT_EQ(h.inner.calls[13], "newline");
+	EXPECT_EQ(h.inner.calls[14], "unindent");
+	EXPECT_EQ(h.inner.calls[15], "tok:}");
+	EXPECT_EQ(h.inner.calls[16], "end");
+	EXPECT_EQ(h.inner.calls[17], "end");
+}
+
+// `VisitTryCatchStatement` with `try {} catch {}` (an empty `TryBlock`, one bare `CatchClause`,
+// no `FinallyBlock`). The default `CatchNewLinePlacement` is `DoNotCare` (not `SameLine`), so a
+// `NewLine` precedes the catch clause; the catch clause recurses through `VisitCatchClause`; a
+// trailing `NewLine` follows before `EndNode`. The catch clause is added to `CatchClauses` so its
+// `Parent` is the `TryCatchStatement` (the `StartNode` nesting-order assert).
+TEST(CSharp_OutputVisitor, VisitTryCatchStatement) {
+	V h;
+	auto tryBlock = std::make_unique<BlockStatement>();
+	auto tryStmt = std::make_unique<TryCatchStatement>(tryBlock.get());
+	auto catchBody = std::make_unique<BlockStatement>();
+	auto clause = std::make_unique<CatchClause>(nullptr, std::string(), nullptr, catchBody.get());
+	tryStmt->CatchClauses().Add(clause.get());
+	h.visitor->VisitTryCatchStatement(tryStmt.get());
+	// start, kw:try, start, space, tok:{, indent, newline, unindent, tok:}, end,
+	// newline, start, kw:catch, start, space, tok:{, indent, newline, unindent, tok:}, end, end,
+	// newline, end
+	ASSERT_EQ(h.inner.calls.size(), 24u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:try");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "tok:{");
+	EXPECT_EQ(h.inner.calls[5], "indent");
+	EXPECT_EQ(h.inner.calls[6], "newline");
+	EXPECT_EQ(h.inner.calls[7], "unindent");
+	EXPECT_EQ(h.inner.calls[8], "tok:}");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "newline");
+	EXPECT_EQ(h.inner.calls[11], "start");
+	EXPECT_EQ(h.inner.calls[12], "kw:catch");
+	EXPECT_EQ(h.inner.calls[13], "start");
+	EXPECT_EQ(h.inner.calls[14], "space");
+	EXPECT_EQ(h.inner.calls[15], "tok:{");
+	EXPECT_EQ(h.inner.calls[16], "indent");
+	EXPECT_EQ(h.inner.calls[17], "newline");
+	EXPECT_EQ(h.inner.calls[18], "unindent");
+	EXPECT_EQ(h.inner.calls[19], "tok:}");
+	EXPECT_EQ(h.inner.calls[20], "end");
+	EXPECT_EQ(h.inner.calls[21], "end");
+	EXPECT_EQ(h.inner.calls[22], "newline");
+	EXPECT_EQ(h.inner.calls[23], "end");
 }

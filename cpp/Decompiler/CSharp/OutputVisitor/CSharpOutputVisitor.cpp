@@ -75,6 +75,7 @@
 #include "Decompiler/CSharp/Syntax/Statements/ForeachStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/SwitchStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/SwitchSection.hpp"
 #include "Decompiler/CSharp/Syntax/CaseLabel.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
@@ -1563,8 +1564,59 @@ void CSharpOutputVisitor::VisitSwitchStatement(Syntax::SwitchStatement* switchSt
 	NewLine();
 	EndNode(switchStatement);
 }
-void CSharpOutputVisitor::VisitCatchClause(Syntax::CatchClause*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitTryCatchStatement(Syntax::TryCatchStatement*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitCatchClause(Syntax::CatchClause* catchClause) {
+	StartNode(catchClause);
+	WriteKeyword(Syntax::CatchClause::CatchKeyword);
+	if (catchClause->Type() != nullptr) {
+		Space(policy_.SpaceBeforeCatchParentheses);
+		LPar();
+		Space(policy_.SpacesWithinCatchParentheses);
+		catchClause->Type()->AcceptVisitor(*this);
+		auto name = catchClause->VariableName();
+		if (name.has_value() && !name->empty()) {
+			Space();
+			WriteIdentifier(catchClause->VariableNameToken());
+		}
+		Space(policy_.SpacesWithinCatchParentheses);
+		RPar();
+	}
+	if (catchClause->Condition() != nullptr) {
+		Space();
+		WriteKeyword(Syntax::CatchClause::WhenKeyword);
+		Space(policy_.SpaceBeforeIfParentheses);
+		WriteToken(Syntax::CatchClause::CondLPar);
+		Space(policy_.SpacesWithinIfParentheses);
+		catchClause->Condition()->AcceptVisitor(*this);
+		Space(policy_.SpacesWithinIfParentheses);
+		WriteToken(Syntax::CatchClause::CondRPar);
+	}
+	WriteBlock(catchClause->Body(), policy_.StatementBraceStyle);
+	EndNode(catchClause);
+}
+void CSharpOutputVisitor::VisitTryCatchStatement(Syntax::TryCatchStatement* tryCatchStatement) {
+	StartNode(tryCatchStatement);
+	WriteKeyword(Syntax::TryCatchStatement::TryKeyword);
+	WriteBlock(tryCatchStatement->TryBlock(), policy_.StatementBraceStyle);
+	auto& clauses = tryCatchStatement->CatchClauses();
+	int clauseCount = clauses.Count();
+	for (int i = 0; i < clauseCount; ++i) {
+		if (policy_.CatchNewLinePlacement == NewLinePlacement::SameLine)
+			Space();
+		else
+			NewLine();
+		clauses.At(i)->AcceptVisitor(*this);
+	}
+	if (tryCatchStatement->FinallyBlock() != nullptr) {
+		if (policy_.FinallyNewLinePlacement == NewLinePlacement::SameLine)
+			Space();
+		else
+			NewLine();
+		WriteKeyword(Syntax::TryCatchStatement::FinallyKeyword);
+		WriteBlock(tryCatchStatement->FinallyBlock(), policy_.StatementBraceStyle);
+	}
+	NewLine();
+	EndNode(tryCatchStatement);
+}
 void CSharpOutputVisitor::VisitVariableDeclarationStatement(Syntax::VariableDeclarationStatement*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitDestructorDeclaration(Syntax::DestructorDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitFieldDeclaration(Syntax::FieldDeclaration*) { NotImplemented(); }
