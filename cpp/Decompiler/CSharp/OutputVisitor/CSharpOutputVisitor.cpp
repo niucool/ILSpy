@@ -112,6 +112,9 @@
 #include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/StackAllocExpression.hpp"
 #include "Decompiler/CSharp/Syntax/VariableInitializer.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
+#include "Decompiler/CSharp/Syntax/ParenthesizedVariableDesignation.hpp"
 #include "Decompiler/CSharp/OutputVisitor/InsertRequiredSpacesDecorator.hpp"
 
 namespace ILSpy::Decompiler::CSharp::OutputVisitor {
@@ -1086,7 +1089,13 @@ void CSharpOutputVisitor::VisitNamedArgumentExpression(Syntax::NamedArgumentExpr
 	namedArgumentExpression->Expression()->AcceptVisitor(*this);
 	EndNode(namedArgumentExpression);
 }
-void CSharpOutputVisitor::VisitErrorExpression(Syntax::ErrorExpression*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitErrorExpression(Syntax::ErrorExpression* errorExpression) {
+	// The C# `void IAstVisitor.VisitErrorNode(AstNode errorNode)` -- a leaf placeholder with no
+	// [Slot] children, so it renders as just a StartNode/EndNode pair (the `InsertMissingTokensDecorator`
+	// records the span onto `ErrorExpression::Location` from `StartNode`'s `ILocatable` position).
+	StartNode(errorExpression);
+	EndNode(errorExpression);
+}
 void CSharpOutputVisitor::VisitOutVarDeclarationExpression(Syntax::OutVarDeclarationExpression* outVarDeclarationExpression) {
 	StartNode(outVarDeclarationExpression);
 	WriteKeyword(Syntax::OutVarDeclarationExpression::OutKeyword);
@@ -1330,8 +1339,19 @@ void CSharpOutputVisitor::VisitUnsafeStatement(Syntax::UnsafeStatement* unsafeSt
 void CSharpOutputVisitor::VisitLockStatement(Syntax::LockStatement*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitUsingStatement(Syntax::UsingStatement*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitForStatement(Syntax::ForStatement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitSingleVariableDesignation(Syntax::SingleVariableDesignation*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitParenthesizedVariableDesignation(Syntax::ParenthesizedVariableDesignation*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitSingleVariableDesignation(Syntax::SingleVariableDesignation* singleVariableDesignation) {
+	StartNode(singleVariableDesignation);
+	WriteIdentifier(singleVariableDesignation->IdentifierToken());
+	EndNode(singleVariableDesignation);
+}
+
+void CSharpOutputVisitor::VisitParenthesizedVariableDesignation(Syntax::ParenthesizedVariableDesignation* parenthesizedVariableDesignation) {
+	StartNode(parenthesizedVariableDesignation);
+	LPar();
+	WriteCommaSeparatedList(ToVector(parenthesizedVariableDesignation->VariableDesignations()));
+	RPar();
+	EndNode(parenthesizedVariableDesignation);
+}
 void CSharpOutputVisitor::VisitForeachStatement(Syntax::ForeachStatement*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitVariableInitializer(Syntax::VariableInitializer* variableInitializer) {
 	StartNode(variableInitializer);

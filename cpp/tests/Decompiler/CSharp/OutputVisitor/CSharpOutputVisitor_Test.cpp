@@ -71,6 +71,9 @@
 #include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/StackAllocExpression.hpp"
 #include "Decompiler/CSharp/Syntax/VariableInitializer.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
+#include "Decompiler/CSharp/Syntax/ParenthesizedVariableDesignation.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayInitializerExpression.hpp"
@@ -181,6 +184,9 @@ using ILSpy::Decompiler::CSharp::Syntax::UndocumentedExpression;
 using ILSpy::Decompiler::CSharp::Syntax::UndocumentedExpressionType;
 using ILSpy::Decompiler::CSharp::Syntax::StackAllocExpression;
 using ILSpy::Decompiler::CSharp::Syntax::VariableInitializer;
+using ILSpy::Decompiler::CSharp::Syntax::ErrorExpression;
+using ILSpy::Decompiler::CSharp::Syntax::SingleVariableDesignation;
+using ILSpy::Decompiler::CSharp::Syntax::ParenthesizedVariableDesignation;
 
 namespace {
 
@@ -2339,3 +2345,71 @@ TEST(CSharp_OutputVisitor, VisitStackAllocExpression) {
 	EXPECT_EQ(h.inner.calls[11], "end");
 }
 
+
+// `VisitErrorExpression` over a default-constructed node -- the C# `VisitErrorNode` is a
+// `StartNode`/`EndNode` pair with no body (a leaf placeholder with no [Slot] children); the
+// `InsertMissingTokensDecorator` records the span onto `ErrorExpression::Location` from
+// `StartNode`'s `ILocatable` position.
+TEST(CSharp_OutputVisitor, VisitErrorExpression) {
+	V h;
+	auto node = std::make_unique<ErrorExpression>();
+	h.visitor->VisitErrorExpression(node.get());
+	// start, end
+	ASSERT_EQ(h.inner.calls.size(), 2u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "end");
+}
+
+// `VisitSingleVariableDesignation` over `x` -- the `StartNode`, the `IdentifierToken` rendered as
+// a flat identifier (no nested StartNode/EndNode, the `VisitIdentifier` ITokenWriter contract),
+// and the `EndNode`.
+TEST(CSharp_OutputVisitor, VisitSingleVariableDesignation) {
+	V h;
+	auto node = std::make_unique<SingleVariableDesignation>(std::string("x"));
+	h.visitor->VisitSingleVariableDesignation(node.get());
+	// start, id:x, end
+	ASSERT_EQ(h.inner.calls.size(), 3u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "id:x");
+	EXPECT_EQ(h.inner.calls[2], "end");
+}
+
+// `VisitParenthesizedVariableDesignation` over `()` -- the `LPar`, an empty comma list (no inner
+// tokens), and the `RPar`.
+TEST(CSharp_OutputVisitor, VisitParenthesizedVariableDesignationEmpty) {
+	V h;
+	auto node = std::make_unique<ParenthesizedVariableDesignation>();
+	h.visitor->VisitParenthesizedVariableDesignation(node.get());
+	// start, tok:(, tok:), end
+	ASSERT_EQ(h.inner.calls.size(), 4u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "tok:(");
+	EXPECT_EQ(h.inner.calls[2], "tok:)");
+	EXPECT_EQ(h.inner.calls[3], "end");
+}
+
+// `VisitParenthesizedVariableDesignation` over `(x, y)` -- the two `SingleVariableDesignation`
+// children recurse through `VisitSingleVariableDesignation` (the comma-separated list inserts a
+// `tok:,` between them; the default policy has no bracket-comma spaces).
+TEST(CSharp_OutputVisitor, VisitParenthesizedVariableDesignationTwo) {
+	V h;
+	auto a = std::make_unique<SingleVariableDesignation>(std::string("x"));
+	auto b = std::make_unique<SingleVariableDesignation>(std::string("y"));
+	auto node = std::make_unique<ParenthesizedVariableDesignation>();
+	node->VariableDesignations().Add(a.get());
+	node->VariableDesignations().Add(b.get());
+	h.visitor->VisitParenthesizedVariableDesignation(node.get());
+	// start, tok:(, start, id:x, end, tok:,, start, id:y, end, tok:), end
+	ASSERT_EQ(h.inner.calls.size(), 11u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "tok:(");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "id:x");
+	EXPECT_EQ(h.inner.calls[4], "end");
+	EXPECT_EQ(h.inner.calls[5], "tok:,");
+	EXPECT_EQ(h.inner.calls[6], "start");
+	EXPECT_EQ(h.inner.calls[7], "id:y");
+	EXPECT_EQ(h.inner.calls[8], "end");
+	EXPECT_EQ(h.inner.calls[9], "tok:)");
+	EXPECT_EQ(h.inner.calls[10], "end");
+}
