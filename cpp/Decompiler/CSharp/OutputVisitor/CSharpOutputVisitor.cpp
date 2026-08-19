@@ -69,6 +69,11 @@
 #include "Decompiler/CSharp/Syntax/Statements/CheckedStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/UncheckedStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/UnsafeStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/LockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ForeachStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/MemberType.hpp"
@@ -1354,9 +1359,80 @@ void CSharpOutputVisitor::VisitUnsafeStatement(Syntax::UnsafeStatement* unsafeSt
 	unsafeStatement->Body()->AcceptVisitor(*this);
 	EndNode(unsafeStatement);
 }
-void CSharpOutputVisitor::VisitLockStatement(Syntax::LockStatement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitUsingStatement(Syntax::UsingStatement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitForStatement(Syntax::ForStatement*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitLockStatement(Syntax::LockStatement* lockStatement) {
+	StartNode(lockStatement);
+	WriteKeyword(LockStatement::LockKeyword);
+	Space(policy_.SpaceBeforeLockParentheses);
+	LPar();
+	Space(policy_.SpacesWithinLockParentheses);
+	lockStatement->Expression()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinLockParentheses);
+	RPar();
+	WriteEmbeddedStatement(lockStatement->EmbeddedStatement());
+	EndNode(lockStatement);
+}
+void CSharpOutputVisitor::VisitUsingStatement(Syntax::UsingStatement* usingStatement) {
+	StartNode(usingStatement);
+	if (usingStatement->IsAsync()) {
+		WriteKeyword(UsingStatement::AwaitKeyword);
+	}
+	WriteKeyword(UsingStatement::UsingKeyword);
+	if (usingStatement->IsEnhanced()) {
+		Space();
+	} else {
+		Space(policy_.SpaceBeforeUsingParentheses);
+		LPar();
+		Space(policy_.SpacesWithinUsingParentheses);
+	}
+	usingStatement->ResourceAcquisition()->AcceptVisitor(*this);
+	if (usingStatement->IsEnhanced()) {
+		Semicolon();
+	} else {
+		Space(policy_.SpacesWithinUsingParentheses);
+		RPar();
+	}
+	if (usingStatement->IsEnhanced()) {
+		BlockStatement* blockStatement = dynamic_cast<BlockStatement*>(usingStatement->EmbeddedStatement());
+		if (blockStatement != nullptr) {
+			StartNode(blockStatement);
+			auto& stmts = blockStatement->Statements();
+			int n = stmts.Count();
+			for (int i = 0; i < n; ++i) {
+				stmts.At(i)->AcceptVisitor(*this);
+			}
+			EndNode(blockStatement);
+		} else {
+			usingStatement->EmbeddedStatement()->AcceptVisitor(*this);
+		}
+	} else {
+		WriteEmbeddedStatement(usingStatement->EmbeddedStatement());
+	}
+	EndNode(usingStatement);
+}
+void CSharpOutputVisitor::VisitForStatement(Syntax::ForStatement* forStatement) {
+	StartNode(forStatement);
+	WriteKeyword(ForStatement::ForKeyword);
+	Space(policy_.SpaceBeforeForParentheses);
+	LPar();
+	Space(policy_.SpacesWithinForParentheses);
+	WriteCommaSeparatedList(ToVector(forStatement->Initializers()));
+	Space(policy_.SpaceBeforeForSemicolon);
+	WriteToken(Tokens::Semicolon);
+	Space(policy_.SpaceAfterForSemicolon);
+	if (forStatement->Condition() != nullptr) {
+		forStatement->Condition()->AcceptVisitor(*this);
+	}
+	Space(policy_.SpaceBeforeForSemicolon);
+	WriteToken(Tokens::Semicolon);
+	if (forStatement->Iterators().Count() > 0) {
+		Space(policy_.SpaceAfterForSemicolon);
+		WriteCommaSeparatedList(ToVector(forStatement->Iterators()));
+	}
+	Space(policy_.SpacesWithinForParentheses);
+	RPar();
+	WriteEmbeddedStatement(forStatement->EmbeddedStatement());
+	EndNode(forStatement);
+}
 void CSharpOutputVisitor::VisitSingleVariableDesignation(Syntax::SingleVariableDesignation* singleVariableDesignation) {
 	StartNode(singleVariableDesignation);
 	WriteIdentifier(singleVariableDesignation->IdentifierToken());
@@ -1370,7 +1446,27 @@ void CSharpOutputVisitor::VisitParenthesizedVariableDesignation(Syntax::Parenthe
 	RPar();
 	EndNode(parenthesizedVariableDesignation);
 }
-void CSharpOutputVisitor::VisitForeachStatement(Syntax::ForeachStatement*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitForeachStatement(Syntax::ForeachStatement* foreachStatement) {
+	StartNode(foreachStatement);
+	if (foreachStatement->IsAsync()) {
+		WriteKeyword(ForeachStatement::AwaitKeyword);
+	}
+	WriteKeyword(ForeachStatement::ForeachKeyword);
+	Space(policy_.SpaceBeforeForeachParentheses);
+	LPar();
+	Space(policy_.SpacesWithinForeachParentheses);
+	foreachStatement->VariableType()->AcceptVisitor(*this);
+	Space();
+	foreachStatement->VariableDesignation()->AcceptVisitor(*this);
+	Space();
+	WriteKeyword(ForeachStatement::InKeyword);
+	Space();
+	foreachStatement->InExpression()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinForeachParentheses);
+	RPar();
+	WriteEmbeddedStatement(foreachStatement->EmbeddedStatement());
+	EndNode(foreachStatement);
+}
 void CSharpOutputVisitor::VisitVariableInitializer(Syntax::VariableInitializer* variableInitializer) {
 	StartNode(variableInitializer);
 	WriteIdentifier(variableInitializer->NameToken());
@@ -1382,7 +1478,20 @@ void CSharpOutputVisitor::VisitVariableInitializer(Syntax::VariableInitializer* 
 	}
 	EndNode(variableInitializer);
 }
-void CSharpOutputVisitor::VisitFixedStatement(Syntax::FixedStatement*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitFixedStatement(Syntax::FixedStatement* fixedStatement) {
+	StartNode(fixedStatement);
+	WriteKeyword(FixedStatement::FixedKeyword);
+	Space(policy_.SpaceBeforeUsingParentheses);
+	LPar();
+	Space(policy_.SpacesWithinUsingParentheses);
+	fixedStatement->Type()->AcceptVisitor(*this);
+	Space();
+	WriteCommaSeparatedList(ToVector(fixedStatement->Variables()));
+	Space(policy_.SpacesWithinUsingParentheses);
+	RPar();
+	WriteEmbeddedStatement(fixedStatement->EmbeddedStatement());
+	EndNode(fixedStatement);
+}
 void CSharpOutputVisitor::VisitCaseLabel(Syntax::CaseLabel*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitSwitchSection(Syntax::SwitchSection*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitSwitchStatement(Syntax::SwitchStatement*) { NotImplemented(); }

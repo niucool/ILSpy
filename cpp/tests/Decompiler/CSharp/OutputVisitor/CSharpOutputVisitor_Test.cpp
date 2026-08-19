@@ -114,6 +114,11 @@
 #include "Decompiler/CSharp/Syntax/Statements/UncheckedStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/UnsafeStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ForeachStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/LockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/UsingStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/FixedStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/SwitchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Modifiers.hpp"
 
 using namespace ILSpy::Decompiler::CSharp::OutputVisitor;
@@ -153,6 +158,11 @@ using ILSpy::Decompiler::CSharp::Syntax::YieldReturnStatement;
 using ILSpy::Decompiler::CSharp::Syntax::WhileStatement;
 using ILSpy::Decompiler::CSharp::Syntax::DoWhileStatement;
 using ILSpy::Decompiler::CSharp::Syntax::ForStatement;
+using ILSpy::Decompiler::CSharp::Syntax::ForeachStatement;
+using ILSpy::Decompiler::CSharp::Syntax::LockStatement;
+using ILSpy::Decompiler::CSharp::Syntax::UsingStatement;
+using ILSpy::Decompiler::CSharp::Syntax::FixedStatement;
+using ILSpy::Decompiler::CSharp::Syntax::SwitchStatement;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentExpression;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentOperatorType;
 using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorExpression;
@@ -552,12 +562,12 @@ TEST(CSharp_OutputVisitor, WriteCommaSeparatedListInParenthesisEmpty) {
 // ---- The 130 Visit stubs throw ---------------------------------------------
 
 // A representative still-unported `Visit` method throws `std::logic_error` (the throwing-stub
-// design); `VisitForStatement` remains a stub (the leaf + simple-statement + control-flow
+// design); `VisitSwitchStatement` remains a stub (the leaf + simple-statement + control-flow
 // `Visit` methods below are implemented).
 TEST(CSharp_OutputVisitor, VisitStubThrows) {
 	V h;
-	auto stmt = std::make_unique<ForStatement>();
-	EXPECT_THROW(h.visitor->VisitForStatement(stmt.get()), std::logic_error);
+	auto stmt = std::make_unique<SwitchStatement>();
+	EXPECT_THROW(h.visitor->VisitSwitchStatement(stmt.get()), std::logic_error);
 }
 
 // ---- The implemented leaf Visit methods ------------------------------------
@@ -2991,4 +3001,229 @@ TEST(CSharp_OutputVisitor, VisitParameterDeclarationThisModifier) {
 	EXPECT_EQ(h.inner.calls[6], "space");
 	EXPECT_EQ(h.inner.calls[7], "id:x");
 	EXPECT_EQ(h.inner.calls[8], "end");
+}
+
+// ---- The control-flow statement Visit methods (Lock/Using/For/Foreach/Fixed) -------------
+
+// `VisitLockStatement` writes `lock (expr) body`: the `Expression` is a required slot recursed
+// inside the parens, the body a required embedded `Statement`. With the default policy (no space
+// before/within the lock parens) and a non-block `break` body, the sequence is the keyword, the
+// parenthesized expression, then the embedded `break` (newline + indent + the break's own
+// sequence + unindent).
+TEST(CSharp_OutputVisitor, VisitLockStatement) {
+	V h;
+	auto node = std::make_unique<LockStatement>();
+	auto expr = std::make_unique<NullReferenceExpression>();
+	auto body = std::make_unique<BreakStatement>();
+	node->Expression(expr.get());
+	node->EmbeddedStatement(body.get());
+	h.visitor->VisitLockStatement(node.get());
+	// start, kw:lock, tok:(, start, primval, end, tok:), newline, indent, start, kw:break, tok:;,
+	// newline, end, unindent, end
+	ASSERT_EQ(h.inner.calls.size(), 16u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:lock");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:)");
+	EXPECT_EQ(h.inner.calls[7], "newline");
+	EXPECT_EQ(h.inner.calls[8], "indent");
+	EXPECT_EQ(h.inner.calls[9], "start");
+	EXPECT_EQ(h.inner.calls[10], "kw:break");
+	EXPECT_EQ(h.inner.calls[11], "tok:;");
+	EXPECT_EQ(h.inner.calls[12], "newline");
+	EXPECT_EQ(h.inner.calls[13], "end");
+	EXPECT_EQ(h.inner.calls[14], "unindent");
+	EXPECT_EQ(h.inner.calls[15], "end");
+}
+
+// `VisitUsingStatement` writes `using (resource) body` (the non-enhanced, non-async form). The
+// `ResourceAcquisition` is a required `AstNode`-typed slot recursed inside the parens; the body a
+// required embedded `Statement`. With the default policy and a non-block `break` body, the
+// sequence mirrors `VisitLockStatement` (the `using` keyword, the parenthesized resource, the
+// embedded `break`).
+TEST(CSharp_OutputVisitor, VisitUsingStatement) {
+	V h;
+	auto node = std::make_unique<UsingStatement>();
+	auto resource = std::make_unique<NullReferenceExpression>();
+	auto body = std::make_unique<BreakStatement>();
+	node->ResourceAcquisition(resource.get());
+	node->EmbeddedStatement(body.get());
+	h.visitor->VisitUsingStatement(node.get());
+	// start, kw:using, tok:(, start, primval, end, tok:), newline, indent, start, kw:break, tok:;,
+	// newline, end, unindent, end
+	ASSERT_EQ(h.inner.calls.size(), 16u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:using");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:)");
+	EXPECT_EQ(h.inner.calls[7], "newline");
+	EXPECT_EQ(h.inner.calls[8], "indent");
+	EXPECT_EQ(h.inner.calls[9], "start");
+	EXPECT_EQ(h.inner.calls[10], "kw:break");
+	EXPECT_EQ(h.inner.calls[11], "tok:;");
+	EXPECT_EQ(h.inner.calls[12], "newline");
+	EXPECT_EQ(h.inner.calls[13], "end");
+	EXPECT_EQ(h.inner.calls[14], "unindent");
+	EXPECT_EQ(h.inner.calls[15], "end");
+}
+
+// `VisitUsingStatement` with `IsAsync` writes the leading `await` keyword before `using`. The
+// `InsertRequiredSpacesDecorator` inserts a space between the two consecutive `WriteKeyword`
+// calls (`await` then `using`) that the `Visit` method never writes explicitly, so the sequence
+// carries a decorator-inserted `space` between `kw:await` and `kw:using`.
+TEST(CSharp_OutputVisitor, VisitUsingStatementAsync) {
+	V h;
+	auto node = std::make_unique<UsingStatement>();
+	auto resource = std::make_unique<NullReferenceExpression>();
+	auto body = std::make_unique<BreakStatement>();
+	node->IsAsync(true);
+	node->ResourceAcquisition(resource.get());
+	node->EmbeddedStatement(body.get());
+	h.visitor->VisitUsingStatement(node.get());
+	// start, kw:await, space(decorator), kw:using, tok:(, start, primval, end, tok:), newline,
+	// indent, start, kw:break, tok:;, newline, end, unindent, end
+	ASSERT_EQ(h.inner.calls.size(), 18u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:await");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "kw:using");
+	EXPECT_EQ(h.inner.calls[4], "tok:(");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "primval");
+	EXPECT_EQ(h.inner.calls[7], "end");
+	EXPECT_EQ(h.inner.calls[8], "tok:)");
+	EXPECT_EQ(h.inner.calls[9], "newline");
+	EXPECT_EQ(h.inner.calls[10], "indent");
+	EXPECT_EQ(h.inner.calls[11], "start");
+	EXPECT_EQ(h.inner.calls[12], "kw:break");
+	EXPECT_EQ(h.inner.calls[13], "tok:;");
+	EXPECT_EQ(h.inner.calls[14], "newline");
+	EXPECT_EQ(h.inner.calls[15], "end");
+	EXPECT_EQ(h.inner.calls[16], "unindent");
+	EXPECT_EQ(h.inner.calls[17], "end");
+}
+
+// `VisitForStatement` writes `for (init; cond; iter) body`. With empty `Initializers`, a null
+// `Condition`, and empty `Iterators` (the `for (;;)` form), the two `WriteToken(Semicolon)`
+// calls emit two bare `tok:;` tokens (the default policy adds no surrounding spaces), then the
+// closing paren and the embedded `break` body.
+TEST(CSharp_OutputVisitor, VisitForStatementEmpty) {
+	V h;
+	auto node = std::make_unique<ForStatement>();
+	auto body = std::make_unique<BreakStatement>();
+	node->EmbeddedStatement(body.get());
+	h.visitor->VisitForStatement(node.get());
+	// start, kw:for, tok:(, tok:;, tok:;, tok:), newline, indent, start, kw:break, tok:;,
+	// newline, end, unindent, end
+	ASSERT_EQ(h.inner.calls.size(), 15u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:for");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "tok:;");
+	EXPECT_EQ(h.inner.calls[4], "tok:;");
+	EXPECT_EQ(h.inner.calls[5], "tok:)");
+	EXPECT_EQ(h.inner.calls[6], "newline");
+	EXPECT_EQ(h.inner.calls[7], "indent");
+	EXPECT_EQ(h.inner.calls[8], "start");
+	EXPECT_EQ(h.inner.calls[9], "kw:break");
+	EXPECT_EQ(h.inner.calls[10], "tok:;");
+	EXPECT_EQ(h.inner.calls[11], "newline");
+	EXPECT_EQ(h.inner.calls[12], "end");
+	EXPECT_EQ(h.inner.calls[13], "unindent");
+	EXPECT_EQ(h.inner.calls[14], "end");
+}
+
+// `VisitForeachStatement` writes `foreach (T x in e) body`: the `VariableType` recurses, an
+// explicit `Space`, the `VariableDesignation` recurses, an explicit `Space`, the `in` keyword,
+// an explicit `Space`, the `InExpression` recurses, then the closing paren and the embedded
+// body. A `PrimitiveType` type and a `SingleVariableDesignation` designation each contribute their
+// own `start`/.../`end` sub-trace.
+TEST(CSharp_OutputVisitor, VisitForeachStatement) {
+	V h;
+	auto node = std::make_unique<ForeachStatement>();
+	auto varType = std::make_unique<PrimitiveType>(std::string("int"));
+	auto designation = std::make_unique<SingleVariableDesignation>(std::string("x"));
+	auto inExpr = std::make_unique<NullReferenceExpression>();
+	auto body = std::make_unique<BreakStatement>();
+	node->VariableType(varType.get());
+	node->VariableDesignation(designation.get());
+	node->InExpression(inExpr.get());
+	node->EmbeddedStatement(body.get());
+	h.visitor->VisitForeachStatement(node.get());
+	// start, kw:foreach, tok:(, start, primtype:int, end, space, start, id:x, end, space, kw:in,
+	// space, start, primval, end, tok:), newline, indent, start, kw:break, tok:;, newline, end,
+	// unindent, end
+	ASSERT_EQ(h.inner.calls.size(), 26u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:foreach");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primtype:int");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "space");
+	EXPECT_EQ(h.inner.calls[7], "start");
+	EXPECT_EQ(h.inner.calls[8], "id:x");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "space");
+	EXPECT_EQ(h.inner.calls[11], "kw:in");
+	EXPECT_EQ(h.inner.calls[12], "space");
+	EXPECT_EQ(h.inner.calls[13], "start");
+	EXPECT_EQ(h.inner.calls[14], "primval");
+	EXPECT_EQ(h.inner.calls[15], "end");
+	EXPECT_EQ(h.inner.calls[16], "tok:)");
+	EXPECT_EQ(h.inner.calls[17], "newline");
+	EXPECT_EQ(h.inner.calls[18], "indent");
+	EXPECT_EQ(h.inner.calls[19], "start");
+	EXPECT_EQ(h.inner.calls[20], "kw:break");
+	EXPECT_EQ(h.inner.calls[21], "tok:;");
+	EXPECT_EQ(h.inner.calls[22], "newline");
+	EXPECT_EQ(h.inner.calls[23], "end");
+	EXPECT_EQ(h.inner.calls[24], "unindent");
+	EXPECT_EQ(h.inner.calls[25], "end");
+}
+
+// `VisitFixedStatement` writes `fixed (T v) body`: the `Type` recurses, an explicit `Space`, the
+// comma-separated `Variables` list (a single `VariableInitializer` rendering `start`/`id:x`/
+// `end`), then the closing paren and the embedded `break` body. It reuses the `using` paren
+// policy fields (`SpaceBeforeUsingParentheses`/`SpacesWithinUsingParentheses`), both default
+// `false`, so no surrounding spaces appear.
+TEST(CSharp_OutputVisitor, VisitFixedStatement) {
+	V h;
+	auto node = std::make_unique<FixedStatement>();
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto var = std::make_unique<VariableInitializer>(std::string("x"));
+	auto body = std::make_unique<BreakStatement>();
+	node->Type(type.get());
+	node->Variables().Add(var.get());
+	node->EmbeddedStatement(body.get());
+	h.visitor->VisitFixedStatement(node.get());
+	// start, kw:fixed, tok:(, start, primtype:int, end, space, start, id:x, end, tok:), newline,
+	// indent, start, kw:break, tok:;, newline, end, unindent, end
+	ASSERT_EQ(h.inner.calls.size(), 20u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:fixed");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primtype:int");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "space");
+	EXPECT_EQ(h.inner.calls[7], "start");
+	EXPECT_EQ(h.inner.calls[8], "id:x");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "tok:)");
+	EXPECT_EQ(h.inner.calls[11], "newline");
+	EXPECT_EQ(h.inner.calls[12], "indent");
+	EXPECT_EQ(h.inner.calls[13], "start");
+	EXPECT_EQ(h.inner.calls[14], "kw:break");
+	EXPECT_EQ(h.inner.calls[15], "tok:;");
+	EXPECT_EQ(h.inner.calls[16], "newline");
+	EXPECT_EQ(h.inner.calls[17], "end");
+	EXPECT_EQ(h.inner.calls[18], "unindent");
+	EXPECT_EQ(h.inner.calls[19], "end");
 }
