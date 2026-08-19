@@ -66,6 +66,11 @@
 #include "Decompiler/CSharp/Syntax/Expressions/TupleExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/OutVarDeclarationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/WithInitializerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/StackAllocExpression.hpp"
+#include "Decompiler/CSharp/Syntax/VariableInitializer.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayInitializerExpression.hpp"
@@ -170,6 +175,12 @@ using ILSpy::Decompiler::CSharp::Syntax::UncheckedExpression;
 using ILSpy::Decompiler::CSharp::Syntax::ObjectCreateExpression;
 using ILSpy::Decompiler::CSharp::Syntax::ArrayCreateExpression;
 using ILSpy::Decompiler::CSharp::Syntax::ArrayInitializerExpression;
+using ILSpy::Decompiler::CSharp::Syntax::OutVarDeclarationExpression;
+using ILSpy::Decompiler::CSharp::Syntax::WithInitializerExpression;
+using ILSpy::Decompiler::CSharp::Syntax::UndocumentedExpression;
+using ILSpy::Decompiler::CSharp::Syntax::UndocumentedExpressionType;
+using ILSpy::Decompiler::CSharp::Syntax::StackAllocExpression;
+using ILSpy::Decompiler::CSharp::Syntax::VariableInitializer;
 
 namespace {
 
@@ -2181,5 +2192,150 @@ TEST(CSharp_OutputVisitor, VisitArrayInitializerExpressionBracesOptional) {
 	EXPECT_EQ(h.inner.calls[2], "primval");
 	EXPECT_EQ(h.inner.calls[3], "end");
 	EXPECT_EQ(h.inner.calls[4], "end");
+}
+
+// `VisitVariableInitializer` over `x` (a name with no initializer) -- the `NameToken` identifier is
+// written as a flat token (no `StartNode`/`EndNode`), and the nullable `Initializer` is absent so
+// the `=` clause is skipped.
+TEST(CSharp_OutputVisitor, VisitVariableInitializer) {
+	V h;
+	auto node = std::make_unique<VariableInitializer>(std::string("x"));
+	h.visitor->VisitVariableInitializer(node.get());
+	// start, id:x, end
+	ASSERT_EQ(h.inner.calls.size(), 3u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "id:x");
+	EXPECT_EQ(h.inner.calls[2], "end");
+}
+
+// `VisitVariableInitializer` over `x = 1` -- the default `SpaceAroundAssignment=false` omits the
+// spaces around the `=` token, and the `Initializer` recurses through `VisitPrimitiveExpression`.
+TEST(CSharp_OutputVisitor, VisitVariableInitializerWithInitializer) {
+	V h;
+	auto init = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto node = std::make_unique<VariableInitializer>(std::string("x"), init.get());
+	h.visitor->VisitVariableInitializer(node.get());
+	// start, id:x, tok:=, start, primval, end, end
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "id:x");
+	EXPECT_EQ(h.inner.calls[2], "tok:=");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "end");
+}
+
+// `VisitOutVarDeclarationExpression` over `out int x` -- the `out` keyword, an explicit space, the
+// `Type` recursing through `VisitSimpleType`, another explicit space, and the `Variable` recursing
+// through `VisitVariableInitializer` (the name only, no initializer).
+TEST(CSharp_OutputVisitor, VisitOutVarDeclarationExpression) {
+	V h;
+	auto type = std::make_unique<SimpleType>(std::string("int"));
+	auto variable = std::make_unique<VariableInitializer>(std::string("x"));
+	auto node = std::make_unique<OutVarDeclarationExpression>(type.get(), variable.get());
+	h.visitor->VisitOutVarDeclarationExpression(node.get());
+	// start, kw:out, space, start(SimpleType), id:int, end, space, start(VariableInitializer),
+	// id:x, end, end
+	ASSERT_EQ(h.inner.calls.size(), 11u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:out");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "id:int");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "space");
+	EXPECT_EQ(h.inner.calls[7], "start");
+	EXPECT_EQ(h.inner.calls[8], "id:x");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "end");
+}
+
+// `VisitWithInitializerExpression` over `null with { }` -- the `Expression` recurses through
+// `VisitNullReferenceExpression`, the `with` keyword follows, and the empty `Initializer`
+// `ArrayInitializerExpression` renders its braces (the `bracesAreOptional` gate is false since the
+// enclosing slot is the `WithInitializerExpression`, not an object/collection initializer). The
+// `OpenBrace` inserts a space before `{` (the line is not empty), and `PrintInitializerElements`
+// inserts another space before the closing `}` (the `if (!wrap) Space()` before the empty list).
+TEST(CSharp_OutputVisitor, VisitWithInitializerExpression) {
+	V h;
+	auto expr = std::make_unique<NullReferenceExpression>();
+	auto initializer = std::make_unique<ArrayInitializerExpression>();
+	auto node = std::make_unique<WithInitializerExpression>(expr.get(), initializer.get());
+	h.visitor->VisitWithInitializerExpression(node.get());
+	// start, start(NullRef), primval, end, kw:with, start(ArrayInit), space, tok:{, space, tok:},
+	// end, end
+	ASSERT_EQ(h.inner.calls.size(), 12u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primval");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "kw:with");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "space");
+	EXPECT_EQ(h.inner.calls[7], "tok:{");
+	EXPECT_EQ(h.inner.calls[8], "space");
+	EXPECT_EQ(h.inner.calls[9], "tok:}");
+	EXPECT_EQ(h.inner.calls[10], "end");
+	EXPECT_EQ(h.inner.calls[11], "end");
+}
+
+// `VisitUndocumentedExpression` over `__arglist()` (the `ArgList` case with empty `Arguments`) --
+// the `__arglist` keyword, no space (the default `SpaceBeforeMethodCallParentheses=false`), and the
+// empty argument list in parentheses.
+TEST(CSharp_OutputVisitor, VisitUndocumentedExpressionArgListEmpty) {
+	V h;
+	auto node = std::make_unique<UndocumentedExpression>(UndocumentedExpressionType::ArgList);
+	h.visitor->VisitUndocumentedExpression(node.get());
+	// start, kw:__arglist, tok:(, tok:), end
+	ASSERT_EQ(h.inner.calls.size(), 5u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:__arglist");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "tok:)");
+	EXPECT_EQ(h.inner.calls[4], "end");
+}
+
+// `VisitUndocumentedExpression` over `__arglist` (the `ArgListAccess` case) -- the `ArgListAccess`
+// branch writes only the keyword and skips the argument-list parentheses (the C# `!= ArgListAccess`
+// gate).
+TEST(CSharp_OutputVisitor, VisitUndocumentedExpressionArgListAccess) {
+	V h;
+	auto node = std::make_unique<UndocumentedExpression>();
+	h.visitor->VisitUndocumentedExpression(node.get());
+	// start, kw:__arglist, end
+	ASSERT_EQ(h.inner.calls.size(), 3u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:__arglist");
+	EXPECT_EQ(h.inner.calls[2], "end");
+}
+
+// `VisitStackAllocExpression` over `stackalloc int[1]` (a `Type`, a `CountExpression`, no
+// `Initializer`) -- the `stackalloc` keyword, the `Type` recursing through `VisitSimpleType` (the
+// `InsertRequiredSpacesDecorator` inserts a space before `id:int` since `int` is a keyword), and the
+// single-element `CountExpression` in brackets (the default `SpacesWithinBrackets=false` omits the
+// inner spaces).
+TEST(CSharp_OutputVisitor, VisitStackAllocExpression) {
+	V h;
+	auto type = std::make_unique<SimpleType>(std::string("int"));
+	auto count = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto node = std::make_unique<StackAllocExpression>();
+	node->Type(type.get());
+	node->CountExpression(count.get());
+	h.visitor->VisitStackAllocExpression(node.get());
+	// start, kw:stackalloc, start(SimpleType), space, id:int, end, tok:[, start, primval, end, tok:], end
+	ASSERT_EQ(h.inner.calls.size(), 12u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:stackalloc");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "id:int");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:[");
+	EXPECT_EQ(h.inner.calls[7], "start");
+	EXPECT_EQ(h.inner.calls[8], "primval");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "tok:]");
+	EXPECT_EQ(h.inner.calls[11], "end");
 }
 

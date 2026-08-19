@@ -107,6 +107,11 @@
 #include "Decompiler/CSharp/Syntax/InterpolatedStringContent.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/OutVarDeclarationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/WithInitializerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/StackAllocExpression.hpp"
+#include "Decompiler/CSharp/Syntax/VariableInitializer.hpp"
 #include "Decompiler/CSharp/OutputVisitor/InsertRequiredSpacesDecorator.hpp"
 
 namespace ILSpy::Decompiler::CSharp::OutputVisitor {
@@ -1082,10 +1087,60 @@ void CSharpOutputVisitor::VisitNamedArgumentExpression(Syntax::NamedArgumentExpr
 	EndNode(namedArgumentExpression);
 }
 void CSharpOutputVisitor::VisitErrorExpression(Syntax::ErrorExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitOutVarDeclarationExpression(Syntax::OutVarDeclarationExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitWithInitializerExpression(Syntax::WithInitializerExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitUndocumentedExpression(Syntax::UndocumentedExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitStackAllocExpression(Syntax::StackAllocExpression*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitOutVarDeclarationExpression(Syntax::OutVarDeclarationExpression* outVarDeclarationExpression) {
+	StartNode(outVarDeclarationExpression);
+	WriteKeyword(Syntax::OutVarDeclarationExpression::OutKeyword);
+	Space();
+	outVarDeclarationExpression->Type()->AcceptVisitor(*this);
+	Space();
+	outVarDeclarationExpression->Variable()->AcceptVisitor(*this);
+	EndNode(outVarDeclarationExpression);
+}
+void CSharpOutputVisitor::VisitWithInitializerExpression(Syntax::WithInitializerExpression* withInitializerExpression) {
+	StartNode(withInitializerExpression);
+	withInitializerExpression->Expression()->AcceptVisitor(*this);
+	WriteKeyword("with");
+	withInitializerExpression->Initializer()->AcceptVisitor(*this);
+	EndNode(withInitializerExpression);
+}
+void CSharpOutputVisitor::VisitUndocumentedExpression(Syntax::UndocumentedExpression* undocumentedExpression) {
+	StartNode(undocumentedExpression);
+	switch (undocumentedExpression->UndocumentedExpressionType()) {
+		case Syntax::UndocumentedExpressionType::ArgList:
+		case Syntax::UndocumentedExpressionType::ArgListAccess:
+			WriteKeyword(Syntax::UndocumentedExpression::ArglistKeyword);
+			break;
+		case Syntax::UndocumentedExpressionType::MakeRef:
+			WriteKeyword(Syntax::UndocumentedExpression::MakerefKeyword);
+			break;
+		case Syntax::UndocumentedExpressionType::RefType:
+			WriteKeyword(Syntax::UndocumentedExpression::ReftypeKeyword);
+			break;
+		case Syntax::UndocumentedExpressionType::RefValue:
+			WriteKeyword(Syntax::UndocumentedExpression::RefvalueKeyword);
+			break;
+	}
+	if (undocumentedExpression->UndocumentedExpressionType() != Syntax::UndocumentedExpressionType::ArgListAccess) {
+		Space(policy_.SpaceBeforeMethodCallParentheses);
+		WriteCommaSeparatedListInParenthesis(ToVector(undocumentedExpression->Arguments()), policy_.SpaceWithinMethodCallParentheses);
+	}
+	EndNode(undocumentedExpression);
+}
+void CSharpOutputVisitor::VisitStackAllocExpression(Syntax::StackAllocExpression* stackAllocExpression) {
+	StartNode(stackAllocExpression);
+	WriteKeyword(Syntax::StackAllocExpression::StackallocKeyword);
+	if (stackAllocExpression->Type() != nullptr)
+		stackAllocExpression->Type()->AcceptVisitor(*this);
+	{
+		std::vector<Syntax::Expression*> count;
+		if (stackAllocExpression->CountExpression() != nullptr)
+			count.push_back(stackAllocExpression->CountExpression());
+		WriteCommaSeparatedListInBrackets(count);
+	}
+	if (stackAllocExpression->Initializer() != nullptr)
+		stackAllocExpression->Initializer()->AcceptVisitor(*this);
+	EndNode(stackAllocExpression);
+}
 void CSharpOutputVisitor::VisitContinueStatement(Syntax::ContinueStatement* continueStatement) {
 	StartNode(continueStatement);
 	WriteKeyword("continue");
@@ -1278,7 +1333,17 @@ void CSharpOutputVisitor::VisitForStatement(Syntax::ForStatement*) { NotImplemen
 void CSharpOutputVisitor::VisitSingleVariableDesignation(Syntax::SingleVariableDesignation*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitParenthesizedVariableDesignation(Syntax::ParenthesizedVariableDesignation*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitForeachStatement(Syntax::ForeachStatement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitVariableInitializer(Syntax::VariableInitializer*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitVariableInitializer(Syntax::VariableInitializer* variableInitializer) {
+	StartNode(variableInitializer);
+	WriteIdentifier(variableInitializer->NameToken());
+	if (variableInitializer->Initializer() != nullptr) {
+		Space(policy_.SpaceAroundAssignment);
+		WriteToken(Tokens::Assign);
+		Space(policy_.SpaceAroundAssignment);
+		variableInitializer->Initializer()->AcceptVisitor(*this);
+	}
+	EndNode(variableInitializer);
+}
 void CSharpOutputVisitor::VisitFixedStatement(Syntax::FixedStatement*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitCaseLabel(Syntax::CaseLabel*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitSwitchSection(Syntax::SwitchSection*) { NotImplemented(); }
