@@ -10,10 +10,13 @@ The *what and why* of the port lives in [`../PORT_PLAN.md`](../PORT_PLAN.md); th
 
 ## Status
 
-Phase 0, the bulk of Phase 1 (metadata), the start of Phase 2 (type system),
-and the start of Phase 3 (the ILAst model + a straight-line IL reader) are
-implemented and green here. Everything else follows the phase plan in
-`PORT_PLAN.md`:
+Phase 0, Phase 1 (metadata), Phase 2 (type system), Phase 3 (the ILAst model
++ IL reader), and Phase 4 (the ~40-transform IL pipeline + the ILAst-to-C#-text
+seed) are implemented and green here; Phase 5 (the real C# AST + output back
+end) is in progress -- the C# AST node family and the `CSharpOutputVisitor`
+pretty-printer are being ported alongside the seed, exercised by direct unit
+tests, and not yet wired into the `--csharp` CLI path (the seed still drives
+it). Everything else follows the phase plan in `PORT_PLAN.md`:
 
 - **Phase 0** -- build system, `Util/` primitives (UTF-8/16, `Span`, `ImmutableStack`),
   the three targets, and a Google Test driver. DONE.
@@ -1524,6 +1527,40 @@ implemented and green here. Everything else follows the phase plan in
   `InterpolatedStringTransform`), the `RoslynOptimized` pattern, and the remaining
   `TransformAssignment` StObj/Call pieces (blocked by `InferType` / `IsSameMember` /
   `IMethod`) are the subsequent in-order targets.
+- **Phase 5 (in progress -- the real C# AST + output back end)** -- the C#
+  `Syntax` AST node family and the `CSharpOutputVisitor` pretty-printer (the
+  ports of `ICSharpCode.Decompiler/CSharp/Syntax` and
+  `.../CSharp/OutputVisitor/CSharpOutputVisitor.cs`), being built alongside
+  the Phase 5 seed so the `--csharp` CLI output stays byte-identical while the
+  real back end is wired in. **76** C# AST node headers are ported
+  (`Decompiler/CSharp/Syntax/`, the `AstNode` hierarchy + `Role`/`Slots` +
+  the `IAstVisitor`/`DepthFirstAstVisitor` Visit surface). The output stage is
+  in place: `ITextOutput`/`TokenWriter` (`TokenWriter`/`TextWriterTokenWriter`),
+  the two decorator writers (`InsertRequiredSpacesDecorator`,
+  `InsertMissingTokensDecorator`), and the four `TokenWriter` composition
+  factories (`Create`/`CreateWriterThatSetsLocationsInAST`/
+  `InsertRequiredSpaces`/`WrapInWriterThatSetsLocationsInAST`). The
+  `CSharpOutputVisitor` infrastructure (the ctors, the writer/policy/
+  container-stack fields + inter-token state, `StartNode`/`EndNode`, the
+  Comma/token/brace writers, `WriteBlock`, `Tokens`, `CSharpModifiers`) is
+  ported with all **130** `IAstVisitor` Visit methods declared; **89** are now
+  implemented as faithful ports of the C# source (the leaf expressions, the
+  operator-bearing expressions + their `GetOperatorToken` helpers, the
+  statement/control-flow family, the `AstType` family, the
+  declaration/anonymous/lambda family, the switch + switch-expression +
+  try/catch families, `ParameterDeclaration`, and
+  `VariableDeclarationStatement`), and **41** `NotImplemented()` stubs remain
+  (the type/member-declaration family -- `TypeDeclaration`/
+  `MethodDeclaration`/`FieldDeclaration`/`PropertyDeclaration`/
+  `ConstructorDeclaration`/`DelegateDeclaration`/`NamespaceDeclaration`/... --
+  the query-expression family, the interpolation family, `SyntaxTree`, and
+  `RecursivePatternExpression`). The port is exercised by direct unit tests
+  (5859 gtest cases; the CLI `--csharp` output is byte-identical run-to-run at
+  the known-good seed signature). Remaining to wire `--csharp` to the real
+  back end: the declaration/query/interpolation Visit methods, the
+  `ExpressionBuilder`/`StatementBuilder`/`CallBuilder` (the resolver-checked
+  translation from ILAst to the C# AST), the ~15 AST prettification
+  transforms, and the `RequiredNamespaceCollector`.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end. It now produces readable C#: real parameter names (Param
@@ -1580,16 +1617,19 @@ implemented and green here. Everything else follows the phase plan in
   Remaining gaps vs the real back
   end: gotos for multi-pred join blocks and loop-internal condition/increment
   jumps (needs DetectExitPoints + HighLevelLoopTransform), full type names
-  (no `using` directives), and overload-resolved casts -- these land with the
-  Phase 5 C# AST + resolver.
-- Phases 4-11 (IL transforms, C# AST + resolver + output, disassembler output,
-  orchestration, ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
+  (no `using` directives), and overload-resolved casts -- these land as the
+  Phase 5 C# AST + resolver back end (above) is wired in to replace the seed.
+- Phases 5-11 (C# AST + resolver + output, disassembler output, orchestration,
+  ILSpyX, BamlDecompiler, the full `ilspycmd`, integration) -- per
   `PORT_PLAN.md`.
 
 The CLI does `<assembly> --il [-t Type]` (IL text disassembly),
 `<assembly> --ilast[-all] [-t Type]` (decode bodies to an ILAst tree and dump
 it), and `<assembly> --csharp [-t Type]` (translate decodable bodies to
-C#-ish text via the Phase 5 seed) end-to-end today; real C# output is Phase 5.
+C#-ish text via the Phase 5 seed) end-to-end today; the real C# AST +
+`CSharpOutputVisitor` back end (Phase 5, in progress) will replace the seed
+once the `ExpressionBuilder`/`StatementBuilder`/`CallBuilder` resolver and
+the remaining Visit methods are ported.
 
 ## Prerequisites
 
