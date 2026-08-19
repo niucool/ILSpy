@@ -98,6 +98,7 @@
 #include "Decompiler/CSharp/Syntax/PreProcessorDirective.hpp"
 #include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/FieldDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/EnumMemberDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Accessor.hpp"
 #include "Decompiler/CSharp/Syntax/PropertyDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/CustomEventDeclaration.hpp"
@@ -189,6 +190,7 @@ using ILSpy::Decompiler::CSharp::Syntax::ConstructorInitializerType;
 using ILSpy::Decompiler::CSharp::Syntax::ConstructorDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::DestructorDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::FieldDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::EnumMemberDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::Accessor;
 using ILSpy::Decompiler::CSharp::Syntax::AccessorKind;
 using ILSpy::Decompiler::CSharp::Syntax::PropertyDeclaration;
@@ -4020,4 +4022,41 @@ TEST(CSharp_OutputVisitor, VisitDestructorDeclarationWithModifier) {
 	EXPECT_EQ(h.inner.calls[3], "tok:~");
 	EXPECT_EQ(h.inner.calls[4], "id:Foo");
 	EXPECT_EQ(h.inner.calls[5], "tok:(");
+}
+
+// `VisitEnumMemberDeclaration` over `Foo` (no initializer): StartNode + WriteAttributes (no-op,
+// empty) + WriteModifiers (no-op, None) + WriteIdentifier(NameToken) + EndNode. The port
+// WriteIdentifier is the direct writer call (id:Foo only, the D345 convention).
+TEST(CSharp_OutputVisitor, VisitEnumMemberDeclarationBare) {
+	V h;
+	auto node = std::make_unique<EnumMemberDeclaration>();
+	node->NameToken(Identifier::Create("Foo"));
+	h.visitor->VisitEnumMemberDeclaration(node.get());
+	// start, id:Foo, end
+	ASSERT_EQ(h.inner.calls.size(), 3u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "id:Foo");
+	EXPECT_EQ(h.inner.calls[2], "end");
+}
+
+// `VisitEnumMemberDeclaration` over `Foo = 1` -- an Initializer (a PrimitiveExpression).
+// Space(SpaceAroundAssignment=false) is a no-op (default policy), WriteToken(Assign "="),
+// Space(false) is a no-op, then the Initializer recurses through VisitPrimitiveExpression
+// (start/primval/end).
+TEST(CSharp_OutputVisitor, VisitEnumMemberDeclarationWithInitializer) {
+	V h;
+	auto init = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto node = std::make_unique<EnumMemberDeclaration>();
+	node->NameToken(Identifier::Create("Foo"));
+	node->Initializer(init.get());
+	h.visitor->VisitEnumMemberDeclaration(node.get());
+	// start, id:Foo, tok:=, start, primval, end, end
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "id:Foo");
+	EXPECT_EQ(h.inner.calls[2], "tok:=");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primval");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "end");
 }

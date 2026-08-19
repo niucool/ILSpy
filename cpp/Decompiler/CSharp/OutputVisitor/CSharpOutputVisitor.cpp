@@ -86,6 +86,7 @@
 #include "Decompiler/CSharp/Syntax/ConstructorInitializer.hpp"
 #include "Decompiler/CSharp/Syntax/ConstructorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/EnumMemberDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
 #include "Decompiler/CSharp/Syntax/TupleTypeElement.hpp"
@@ -1685,7 +1686,20 @@ void CSharpOutputVisitor::VisitAccessor(Syntax::Accessor* accessor) {
 	WriteMethodBody(accessor->Body(), style);
 	EndNode(accessor);
 }
-void CSharpOutputVisitor::VisitEnumMemberDeclaration(Syntax::EnumMemberDeclaration*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitEnumMemberDeclaration(Syntax::EnumMemberDeclaration* enumMemberDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitEnumMemberDeclaration: `Name` or `Name = initializer`.
+	StartNode(enumMemberDeclaration);
+	WriteAttributes(ToVector(enumMemberDeclaration->Attributes()));
+	WriteModifiers(enumMemberDeclaration->Modifiers());
+	WriteIdentifier(enumMemberDeclaration->NameToken());
+	if (enumMemberDeclaration->Initializer() != nullptr) {
+		Space(policy_.SpaceAroundAssignment);
+		WriteToken(Tokens::Assign);
+		Space(policy_.SpaceAroundAssignment);
+		enumMemberDeclaration->Initializer()->AcceptVisitor(*this);
+	}
+	EndNode(enumMemberDeclaration);
+}
 void CSharpOutputVisitor::VisitPropertyDeclaration(Syntax::PropertyDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitEventDeclaration(Syntax::EventDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitCustomEventDeclaration(Syntax::CustomEventDeclaration*) { NotImplemented(); }
