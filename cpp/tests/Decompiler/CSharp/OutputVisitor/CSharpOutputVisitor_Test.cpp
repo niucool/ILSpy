@@ -76,6 +76,9 @@
 #include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/DoWhileStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldReturnStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/CheckedStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/UncheckedStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/UnsafeStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ForStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Modifiers.hpp"
 
@@ -121,6 +124,7 @@ using ILSpy::Decompiler::CSharp::Syntax::AssignmentOperatorType;
 using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorExpression;
 using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType;
 using ILSpy::Decompiler::CSharp::Syntax::CheckedExpression;
+using ILSpy::Decompiler::CSharp::Syntax::CheckedStatement;
 using ILSpy::Decompiler::CSharp::Syntax::ConditionalExpression;
 using ILSpy::Decompiler::CSharp::Syntax::DirectionExpression;
 using ILSpy::Decompiler::CSharp::Syntax::FieldDirection;
@@ -129,6 +133,8 @@ using ILSpy::Decompiler::CSharp::Syntax::ThrowExpression;
 using ILSpy::Decompiler::CSharp::Syntax::ThrowStatement;
 using ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorExpression;
 using ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType;
+using ILSpy::Decompiler::CSharp::Syntax::UncheckedStatement;
+using ILSpy::Decompiler::CSharp::Syntax::UnsafeStatement;
 using ILSpy::Decompiler::CSharp::Syntax::UncheckedExpression;
 
 namespace {
@@ -1488,4 +1494,79 @@ TEST(CSharp_OutputVisitor, VisitYieldReturnStatement) {
 	EXPECT_EQ(h.inner.calls[8], "tok:;");
 	EXPECT_EQ(h.inner.calls[9], "newline");
 	EXPECT_EQ(h.inner.calls[10], "end");
+}
+
+// `VisitCheckedStatement` writes `checked` then recurses into the `Body` block via
+// `AcceptVisitor` (dispatching to `VisitBlockStatement` -> `WriteBlock` + `NewLine`). The default
+// `EndOfLine` brace style inserts a `space` before `tok:{` because the line is not empty (the
+// `checked` keyword was just written), so the block records `start`/`space`/`tok:{`/`indent`/
+// `newline`/`unindent`/`tok:}`/`end`/`newline`.
+TEST(CSharp_OutputVisitor, VisitCheckedStatement) {
+	V h;
+	auto node = std::make_unique<CheckedStatement>();
+	auto body = std::make_unique<BlockStatement>();
+	node->Body(body.get());
+	h.visitor->VisitCheckedStatement(node.get());
+	// start, kw:checked, start, space, tok:{, indent, newline, unindent, tok:}, end, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 12u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:checked");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "tok:{");
+	EXPECT_EQ(h.inner.calls[5], "indent");
+	EXPECT_EQ(h.inner.calls[6], "newline");
+	EXPECT_EQ(h.inner.calls[7], "unindent");
+	EXPECT_EQ(h.inner.calls[8], "tok:}");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "newline");
+	EXPECT_EQ(h.inner.calls[11], "end");
+}
+
+// `VisitUncheckedStatement` is the structural twin of `VisitCheckedStatement` with the
+// `unchecked` keyword; the recorded sequence is identical except for the keyword.
+TEST(CSharp_OutputVisitor, VisitUncheckedStatement) {
+	V h;
+	auto node = std::make_unique<UncheckedStatement>();
+	auto body = std::make_unique<BlockStatement>();
+	node->Body(body.get());
+	h.visitor->VisitUncheckedStatement(node.get());
+	// start, kw:unchecked, start, space, tok:{, indent, newline, unindent, tok:}, end, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 12u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:unchecked");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "tok:{");
+	EXPECT_EQ(h.inner.calls[5], "indent");
+	EXPECT_EQ(h.inner.calls[6], "newline");
+	EXPECT_EQ(h.inner.calls[7], "unindent");
+	EXPECT_EQ(h.inner.calls[8], "tok:}");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "newline");
+	EXPECT_EQ(h.inner.calls[11], "end");
+}
+
+// `VisitUnsafeStatement` is the structural twin of `VisitCheckedStatement` with the `unsafe`
+// keyword; the recorded sequence is identical except for the keyword.
+TEST(CSharp_OutputVisitor, VisitUnsafeStatement) {
+	V h;
+	auto node = std::make_unique<UnsafeStatement>();
+	auto body = std::make_unique<BlockStatement>();
+	node->Body(body.get());
+	h.visitor->VisitUnsafeStatement(node.get());
+	// start, kw:unsafe, start, space, tok:{, indent, newline, unindent, tok:}, end, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 12u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:unsafe");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "space");
+	EXPECT_EQ(h.inner.calls[4], "tok:{");
+	EXPECT_EQ(h.inner.calls[5], "indent");
+	EXPECT_EQ(h.inner.calls[6], "newline");
+	EXPECT_EQ(h.inner.calls[7], "unindent");
+	EXPECT_EQ(h.inner.calls[8], "tok:}");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "newline");
+	EXPECT_EQ(h.inner.calls[11], "end");
 }

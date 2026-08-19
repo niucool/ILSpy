@@ -64,6 +64,9 @@
 #include "Decompiler/CSharp/Syntax/Statements/WhileStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/DoWhileStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldReturnStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/CheckedStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/UncheckedStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/UnsafeStatement.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/MemberType.hpp"
@@ -897,9 +900,24 @@ void CSharpOutputVisitor::VisitLabelStatement(Syntax::LabelStatement* labelState
 	NewLine();
 	EndNode(labelStatement);
 }
-void CSharpOutputVisitor::VisitCheckedStatement(Syntax::CheckedStatement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitUncheckedStatement(Syntax::UncheckedStatement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitUnsafeStatement(Syntax::UnsafeStatement*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitCheckedStatement(Syntax::CheckedStatement* checkedStatement) {
+	StartNode(checkedStatement);
+	WriteKeyword(CheckedStatement::CheckedKeyword);
+	checkedStatement->Body()->AcceptVisitor(*this);
+	EndNode(checkedStatement);
+}
+void CSharpOutputVisitor::VisitUncheckedStatement(Syntax::UncheckedStatement* uncheckedStatement) {
+	StartNode(uncheckedStatement);
+	WriteKeyword(UncheckedStatement::UncheckedKeyword);
+	uncheckedStatement->Body()->AcceptVisitor(*this);
+	EndNode(uncheckedStatement);
+}
+void CSharpOutputVisitor::VisitUnsafeStatement(Syntax::UnsafeStatement* unsafeStatement) {
+	StartNode(unsafeStatement);
+	WriteKeyword(UnsafeStatement::UnsafeKeyword);
+	unsafeStatement->Body()->AcceptVisitor(*this);
+	EndNode(unsafeStatement);
+}
 void CSharpOutputVisitor::VisitLockStatement(Syntax::LockStatement*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitUsingStatement(Syntax::UsingStatement*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitForStatement(Syntax::ForStatement*) { NotImplemented(); }
