@@ -81,6 +81,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/LambdaExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AnonymousMethodExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DeclarationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/ParameterDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Identifier.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/SimpleType.hpp"
@@ -203,6 +204,8 @@ using ILSpy::Decompiler::CSharp::Syntax::AnonymousTypeCreateExpression;
 using ILSpy::Decompiler::CSharp::Syntax::LambdaExpression;
 using ILSpy::Decompiler::CSharp::Syntax::AnonymousMethodExpression;
 using ILSpy::Decompiler::CSharp::Syntax::DeclarationExpression;
+using ILSpy::Decompiler::CSharp::Syntax::ParameterDeclaration;
+using ILSpy::Decompiler::TypeSystem::ReferenceKind;
 
 namespace {
 
@@ -2844,4 +2847,148 @@ TEST(CSharp_OutputVisitor, VisitAnonymousMethodExpressionAsync) {
 	EXPECT_EQ(h.inner.calls[10], "tok:}");
 	EXPECT_EQ(h.inner.calls[11], "end");
 	EXPECT_EQ(h.inner.calls[12], "end");
+}
+
+// `VisitParameterDeclaration` over `int x` (a plain value parameter, no modifiers) -- the `Type`
+// recurses through `VisitSimpleType` (start/id:int/end), a `Space` separates the type from the
+// name (the `Type is not null && Name` non-empty gate), and the `NameToken` identifier follows.
+// `WriteAttributes` over the empty `Attributes` collection records nothing.
+TEST(CSharp_OutputVisitor, VisitParameterDeclarationPlain) {
+	V h;
+	auto type = std::make_unique<SimpleType>(std::string("int"));
+	auto node = std::make_unique<ParameterDeclaration>();
+	node->Type(type.get());
+	node->Name("x");
+	h.visitor->VisitParameterDeclaration(node.get());
+	// start, start(SimpleType), id:int, end, space, id:x, end
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "id:int");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "id:x");
+	EXPECT_EQ(h.inner.calls[6], "end");
+}
+
+// `VisitParameterDeclaration` over `out int x` (the `Out` `ParameterModifier` branch) -- the
+// `out` keyword + an explicit `Space` precede the type/name (the `ReferenceKind.Out` switch
+// case).
+TEST(CSharp_OutputVisitor, VisitParameterDeclarationOut) {
+	V h;
+	auto type = std::make_unique<SimpleType>(std::string("int"));
+	auto node = std::make_unique<ParameterDeclaration>();
+	node->ParameterModifier(ReferenceKind::Out);
+	node->Type(type.get());
+	node->Name("x");
+	h.visitor->VisitParameterDeclaration(node.get());
+	// start, kw:out, space, start, id:int, end, space, id:x, end
+	ASSERT_EQ(h.inner.calls.size(), 9u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:out");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "id:int");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "space");
+	EXPECT_EQ(h.inner.calls[7], "id:x");
+	EXPECT_EQ(h.inner.calls[8], "end");
+}
+
+// `VisitParameterDeclaration` over `ref readonly int x` (the `RefReadOnly` branch) -- the `ref`
+// keyword, a decorator-inserted space (two consecutive `WriteKeyword` calls), the `readonly`
+// keyword, an explicit `Space`, then the type/name. The `InsertRequiredSpacesDecorator` inserts
+// the space between `ref` and `readonly` (its `WriteKeyword` override: `lastWritten ==
+// KeywordOrIdentifier` -> `Space()`).
+TEST(CSharp_OutputVisitor, VisitParameterDeclarationRefReadOnly) {
+	V h;
+	auto type = std::make_unique<SimpleType>(std::string("int"));
+	auto node = std::make_unique<ParameterDeclaration>();
+	node->ParameterModifier(ReferenceKind::RefReadOnly);
+	node->Type(type.get());
+	node->Name("x");
+	h.visitor->VisitParameterDeclaration(node.get());
+	// start, kw:ref, space(decorator), kw:readonly, space(explicit), start, id:int, end, space,
+	// id:x, end
+	ASSERT_EQ(h.inner.calls.size(), 11u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:ref");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "kw:readonly");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "id:int");
+	EXPECT_EQ(h.inner.calls[7], "end");
+	EXPECT_EQ(h.inner.calls[8], "space");
+	EXPECT_EQ(h.inner.calls[9], "id:x");
+	EXPECT_EQ(h.inner.calls[10], "end");
+}
+
+// `VisitParameterDeclaration` over `int x = 5` (a `DefaultExpression`) -- the type/name render,
+// then the default (`= expr`) with the default `SpaceAroundAssignment=false` policy so no spaces
+// around `=`, and the `DefaultExpression` recurses through `VisitPrimitiveExpression`.
+TEST(CSharp_OutputVisitor, VisitParameterDeclarationWithDefault) {
+	V h;
+	auto type = std::make_unique<SimpleType>(std::string("int"));
+	auto defaultExpr = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(5)));
+	auto node = std::make_unique<ParameterDeclaration>();
+	node->Type(type.get());
+	node->Name("x");
+	node->DefaultExpression(defaultExpr.get());
+	h.visitor->VisitParameterDeclaration(node.get());
+	// start, start(SimpleType), id:int, end, space, id:x, tok:=, start(Primitive), primval, end,
+	// end
+	ASSERT_EQ(h.inner.calls.size(), 11u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "id:int");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "id:x");
+	EXPECT_EQ(h.inner.calls[6], "tok:=");
+	EXPECT_EQ(h.inner.calls[7], "start");
+	EXPECT_EQ(h.inner.calls[8], "primval");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "end");
+}
+
+// `VisitParameterDeclaration` over a nameless `int` (a `Type` with no `Name`) -- the type
+// recurses, but the `Type is not null && Name` non-empty gate is false (the name is empty) so
+// no `Space` and no `WriteIdentifier`; the parameter renders just the type.
+TEST(CSharp_OutputVisitor, VisitParameterDeclarationNameless) {
+	V h;
+	auto type = std::make_unique<SimpleType>(std::string("int"));
+	auto node = std::make_unique<ParameterDeclaration>();
+	node->Type(type.get());
+	h.visitor->VisitParameterDeclaration(node.get());
+	// start, start(SimpleType), id:int, end, end (no name -> no space, no identifier)
+	ASSERT_EQ(h.inner.calls.size(), 5u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "id:int");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "end");
+}
+
+// `VisitParameterDeclaration` over `this int x` (an extension-method `this` parameter) -- the
+// `this` keyword + an explicit `Space` precede the type/name (the `HasThisModifier` branch).
+TEST(CSharp_OutputVisitor, VisitParameterDeclarationThisModifier) {
+	V h;
+	auto type = std::make_unique<SimpleType>(std::string("int"));
+	auto node = std::make_unique<ParameterDeclaration>();
+	node->HasThisModifier(true);
+	node->Type(type.get());
+	node->Name("x");
+	h.visitor->VisitParameterDeclaration(node.get());
+	// start, kw:this, space, start(SimpleType), id:int, end, space, id:x, end
+	ASSERT_EQ(h.inner.calls.size(), 9u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:this");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "id:int");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "space");
+	EXPECT_EQ(h.inner.calls[7], "id:x");
+	EXPECT_EQ(h.inner.calls[8], "end");
 }

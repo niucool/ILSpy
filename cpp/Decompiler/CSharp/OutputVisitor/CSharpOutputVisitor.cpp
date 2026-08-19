@@ -1396,7 +1396,60 @@ void CSharpOutputVisitor::VisitEnumMemberDeclaration(Syntax::EnumMemberDeclarati
 void CSharpOutputVisitor::VisitPropertyDeclaration(Syntax::PropertyDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitEventDeclaration(Syntax::EventDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitCustomEventDeclaration(Syntax::CustomEventDeclaration*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitParameterDeclaration(Syntax::ParameterDeclaration*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitParameterDeclaration(Syntax::ParameterDeclaration* parameterDeclaration) {
+	StartNode(parameterDeclaration);
+	WriteAttributes(ToVector(parameterDeclaration->Attributes()));
+	if (parameterDeclaration->HasThisModifier()) {
+		WriteKeyword(Syntax::ParameterDeclaration::ThisModifier);
+		Space();
+	}
+	if (parameterDeclaration->IsParams()) {
+		WriteKeyword(Syntax::ParameterDeclaration::ParamsModifier);
+		Space();
+	}
+	if (parameterDeclaration->IsScopedRef()) {
+		WriteKeyword(Syntax::ParameterDeclaration::ScopedRefKeyword);
+		Space();
+	}
+	switch (parameterDeclaration->ParameterModifier()) {
+		case ILSpy::Decompiler::TypeSystem::ReferenceKind::Ref:
+			WriteKeyword(Syntax::ParameterDeclaration::RefModifier);
+			Space();
+			break;
+		case ILSpy::Decompiler::TypeSystem::ReferenceKind::RefReadOnly:
+			WriteKeyword(Syntax::ParameterDeclaration::RefModifier);
+			WriteKeyword(Syntax::ParameterDeclaration::ReadonlyModifier);
+			Space();
+			break;
+		case ILSpy::Decompiler::TypeSystem::ReferenceKind::Out:
+			WriteKeyword(Syntax::ParameterDeclaration::OutModifier);
+			Space();
+			break;
+		case ILSpy::Decompiler::TypeSystem::ReferenceKind::In:
+			WriteKeyword(Syntax::ParameterDeclaration::InModifier);
+			Space();
+			break;
+		case ILSpy::Decompiler::TypeSystem::ReferenceKind::None:
+			break;
+	}
+	if (auto* type = parameterDeclaration->Type()) {
+		type->AcceptVisitor(*this);
+	}
+	auto name = parameterDeclaration->Name();
+	if (parameterDeclaration->Type() != nullptr && name.has_value() && !name->empty()) {
+		Space();
+	}
+	if (name.has_value() && !name->empty()) {
+		WriteIdentifier(parameterDeclaration->NameToken());
+	}
+	if (auto* defaultExpr = parameterDeclaration->DefaultExpression()) {
+		Space(policy_.SpaceAroundAssignment);
+		WriteToken(Tokens::Assign);
+		Space(policy_.SpaceAroundAssignment);
+		defaultExpr->AcceptVisitor(*this);
+	}
+	EndNode(parameterDeclaration);
+}
 void CSharpOutputVisitor::VisitIndexerDeclaration(Syntax::IndexerDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitOperatorDeclaration(Syntax::OperatorDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitConstructorInitializer(Syntax::ConstructorInitializer*) { NotImplemented(); }
