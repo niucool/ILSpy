@@ -40,8 +40,14 @@
 #include "Decompiler/CSharp/OutputVisitor/TokenWriter.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Identifier.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/EmptyStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Modifiers.hpp"
 
 using namespace ILSpy::Decompiler::CSharp::OutputVisitor;
@@ -52,9 +58,15 @@ using ILSpy::Decompiler::CSharp::Syntax::Identifier;
 using ILSpy::Decompiler::CSharp::Syntax::LiteralFormat;
 using ILSpy::Decompiler::CSharp::Syntax::Modifiers;
 using ILSpy::Decompiler::CSharp::Syntax::NullReferenceExpression;
+using ILSpy::Decompiler::CSharp::Syntax::BaseReferenceExpression;
+using ILSpy::Decompiler::CSharp::Syntax::BreakStatement;
+using ILSpy::Decompiler::CSharp::Syntax::ContinueStatement;
+using ILSpy::Decompiler::CSharp::Syntax::EmptyStatement;
 using ILSpy::Decompiler::CSharp::Syntax::PreProcessorDirectiveType;
+using ILSpy::Decompiler::CSharp::Syntax::PrimitiveExpression;
 using ILSpy::Decompiler::CSharp::Syntax::PrimitiveValue;
 using ILSpy::Decompiler::CSharp::Syntax::ThisReferenceExpression;
+using ILSpy::Decompiler::CSharp::Syntax::YieldBreakStatement;
 
 namespace {
 
@@ -400,11 +412,135 @@ TEST(CSharp_OutputVisitor, WriteCommaSeparatedListInParenthesisEmpty) {
 
 // ---- The 130 Visit stubs throw ---------------------------------------------
 
-// A representative unported `Visit` method throws `std::logic_error` (the throwing-stub design).
+// A representative still-unported `Visit` method throws `std::logic_error` (the throwing-stub
+// design); `VisitBlockStatement` remains a stub (the leaf `Visit` methods below are implemented).
 TEST(CSharp_OutputVisitor, VisitStubThrows) {
 	V h;
-	auto node = std::make_unique<NullReferenceExpression>();
-	EXPECT_THROW(h.visitor->VisitNullReferenceExpression(node.get()), std::logic_error);
 	auto stmt = std::make_unique<BlockStatement>();
 	EXPECT_THROW(h.visitor->VisitBlockStatement(stmt.get()), std::logic_error);
+}
+
+// ---- The implemented leaf Visit methods ------------------------------------
+
+// `VisitNullReferenceExpression` writes the `null` literal: `StartNode`, `WritePrimitiveValue`
+// (the monostate/null alternative), `EndNode` (the `isAfterSpace_ = false` is internal state).
+TEST(CSharp_OutputVisitor, VisitNullReferenceExpression) {
+	V h;
+	auto node = std::make_unique<NullReferenceExpression>();
+	h.visitor->VisitNullReferenceExpression(node.get());
+	// start, primval, end
+	ASSERT_EQ(h.inner.calls.size(), 3u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "primval");
+	EXPECT_EQ(h.inner.calls[2], "end");
+}
+
+// `VisitThisReferenceExpression` writes the `this` keyword.
+TEST(CSharp_OutputVisitor, VisitThisReferenceExpression) {
+	V h;
+	auto node = std::make_unique<ThisReferenceExpression>();
+	h.visitor->VisitThisReferenceExpression(node.get());
+	// start, kw:this, end
+	ASSERT_EQ(h.inner.calls.size(), 3u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:this");
+	EXPECT_EQ(h.inner.calls[2], "end");
+}
+
+// `VisitBaseReferenceExpression` writes the `base` keyword.
+TEST(CSharp_OutputVisitor, VisitBaseReferenceExpression) {
+	V h;
+	auto node = std::make_unique<BaseReferenceExpression>();
+	h.visitor->VisitBaseReferenceExpression(node.get());
+	// start, kw:base, end
+	ASSERT_EQ(h.inner.calls.size(), 3u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:base");
+	EXPECT_EQ(h.inner.calls[2], "end");
+}
+
+// `VisitPrimitiveExpression` writes the literal value via `WritePrimitiveValue`.
+TEST(CSharp_OutputVisitor, VisitPrimitiveExpression) {
+	V h;
+	auto node = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(42)));
+	h.visitor->VisitPrimitiveExpression(node.get());
+	// start, primval, end
+	ASSERT_EQ(h.inner.calls.size(), 3u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "primval");
+	EXPECT_EQ(h.inner.calls[2], "end");
+}
+
+// `VisitBreakStatement` writes `break` then a semicolon (the `Semicolon` helper writes the token
+// and a trailing newline for a parentless node's default slot kind).
+TEST(CSharp_OutputVisitor, VisitBreakStatement) {
+	V h;
+	auto node = std::make_unique<BreakStatement>();
+	h.visitor->VisitBreakStatement(node.get());
+	// start, kw:break, tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 5u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:break");
+	EXPECT_EQ(h.inner.calls[2], "tok:;");
+	EXPECT_EQ(h.inner.calls[3], "newline");
+	EXPECT_EQ(h.inner.calls[4], "end");
+}
+
+// `VisitContinueStatement` writes `continue` then a semicolon.
+TEST(CSharp_OutputVisitor, VisitContinueStatement) {
+	V h;
+	auto node = std::make_unique<ContinueStatement>();
+	h.visitor->VisitContinueStatement(node.get());
+	// start, kw:continue, tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 5u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:continue");
+	EXPECT_EQ(h.inner.calls[2], "tok:;");
+	EXPECT_EQ(h.inner.calls[3], "newline");
+	EXPECT_EQ(h.inner.calls[4], "end");
+}
+
+// `VisitYieldBreakStatement` writes `yield break;` -- the `InsertRequiredSpacesDecorator` inserts
+// the inter-keyword space the C# formatter relies on it to insert (two consecutive keywords
+// would otherwise merge into one lexeme).
+TEST(CSharp_OutputVisitor, VisitYieldBreakStatement) {
+	V h;
+	auto node = std::make_unique<YieldBreakStatement>();
+	h.visitor->VisitYieldBreakStatement(node.get());
+	// start, kw:yield, space, kw:break, tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:yield");
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "kw:break");
+	EXPECT_EQ(h.inner.calls[4], "tok:;");
+	EXPECT_EQ(h.inner.calls[5], "newline");
+	EXPECT_EQ(h.inner.calls[6], "end");
+}
+
+// `VisitEmptyStatement` (no trivia) writes a bare semicolon; a statement carrying a comment
+// would render as just that comment (the trivia path needs `VisitComment` to exercise end-to-end).
+TEST(CSharp_OutputVisitor, VisitEmptyStatement) {
+	V h;
+	auto node = std::make_unique<EmptyStatement>();
+	h.visitor->VisitEmptyStatement(node.get());
+	// start, tok:;, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 4u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "tok:;");
+	EXPECT_EQ(h.inner.calls[2], "newline");
+	EXPECT_EQ(h.inner.calls[3], "end");
+}
+
+// An end-to-end snippet: a `break;` statement driven through the visitor and its
+// `InsertRequiredSpacesDecorator` into the recording sink yields the `break ;` token stream (the
+// decorator inserts no space here -- a keyword followed by a punctuation token does not merge).
+TEST(CSharp_OutputVisitor, VisitBreakStatementEndToEnd) {
+	V h;
+	auto node = std::make_unique<BreakStatement>();
+	h.visitor->VisitBreakStatement(node.get());
+	// The recorded sequence is the visitor's full output for the node.
+	ASSERT_GE(h.inner.calls.size(), 5u);
+	EXPECT_EQ(h.inner.calls[1], "kw:break");
+	EXPECT_EQ(h.inner.calls[2], "tok:;");
 }

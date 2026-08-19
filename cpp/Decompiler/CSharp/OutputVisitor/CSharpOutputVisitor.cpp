@@ -43,8 +43,16 @@
 #include "Decompiler/CSharp/Syntax/ParameterDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/TypeParameterDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/Statement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/EmptyStatement.hpp"
 #include "Decompiler/CSharp/OutputVisitor/InsertRequiredSpacesDecorator.hpp"
 
 namespace ILSpy::Decompiler::CSharp::OutputVisitor {
@@ -387,10 +395,33 @@ void CSharpOutputVisitor::WritePrivateImplementationType(AstType* privateImpleme
 
 // ---- The 130 IAstVisitor Visit methods (throwing stubs) -------------------
 void CSharpOutputVisitor::VisitIdentifier(Syntax::Identifier*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitNullReferenceExpression(Syntax::NullReferenceExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitThisReferenceExpression(Syntax::ThisReferenceExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitBaseReferenceExpression(Syntax::BaseReferenceExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitPrimitiveExpression(Syntax::PrimitiveExpression*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitNullReferenceExpression(Syntax::NullReferenceExpression* nullReferenceExpression) {
+	// The C# `writer.WritePrimitiveValue(null)` -- the default-constructed `PrimitiveValue` holds
+	// `std::monostate` (the C# `null` boxed object), rendered by the writer as the `null` literal.
+	StartNode(nullReferenceExpression);
+	writer_->WritePrimitiveValue(PrimitiveValue());
+	isAfterSpace_ = false;
+	EndNode(nullReferenceExpression);
+}
+
+void CSharpOutputVisitor::VisitThisReferenceExpression(Syntax::ThisReferenceExpression* thisReferenceExpression) {
+	StartNode(thisReferenceExpression);
+	WriteKeyword("this");
+	EndNode(thisReferenceExpression);
+}
+
+void CSharpOutputVisitor::VisitBaseReferenceExpression(Syntax::BaseReferenceExpression* baseReferenceExpression) {
+	StartNode(baseReferenceExpression);
+	WriteKeyword("base");
+	EndNode(baseReferenceExpression);
+}
+
+void CSharpOutputVisitor::VisitPrimitiveExpression(Syntax::PrimitiveExpression* primitiveExpression) {
+	StartNode(primitiveExpression);
+	writer_->WritePrimitiveValue(primitiveExpression->Value(), primitiveExpression->Format());
+	isAfterSpace_ = false;
+	EndNode(primitiveExpression);
+}
 void CSharpOutputVisitor::VisitBinaryOperatorExpression(Syntax::BinaryOperatorExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitAssignmentExpression(Syntax::AssignmentExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitUnaryOperatorExpression(Syntax::UnaryOperatorExpression*) { NotImplemented(); }
@@ -430,9 +461,27 @@ void CSharpOutputVisitor::VisitOutVarDeclarationExpression(Syntax::OutVarDeclara
 void CSharpOutputVisitor::VisitWithInitializerExpression(Syntax::WithInitializerExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitUndocumentedExpression(Syntax::UndocumentedExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitStackAllocExpression(Syntax::StackAllocExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitContinueStatement(Syntax::ContinueStatement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitBreakStatement(Syntax::BreakStatement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitYieldBreakStatement(Syntax::YieldBreakStatement*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitContinueStatement(Syntax::ContinueStatement* continueStatement) {
+	StartNode(continueStatement);
+	WriteKeyword("continue");
+	Semicolon();
+	EndNode(continueStatement);
+}
+
+void CSharpOutputVisitor::VisitBreakStatement(Syntax::BreakStatement* breakStatement) {
+	StartNode(breakStatement);
+	WriteKeyword("break");
+	Semicolon();
+	EndNode(breakStatement);
+}
+
+void CSharpOutputVisitor::VisitYieldBreakStatement(Syntax::YieldBreakStatement* yieldBreakStatement) {
+	StartNode(yieldBreakStatement);
+	WriteKeyword(YieldBreakStatement::YieldKeyword);
+	WriteKeyword(YieldBreakStatement::BreakKeyword);
+	Semicolon();
+	EndNode(yieldBreakStatement);
+}
 void CSharpOutputVisitor::VisitReturnStatement(Syntax::ReturnStatement*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitThrowStatement(Syntax::ThrowStatement*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitExpressionStatement(Syntax::ExpressionStatement*) { NotImplemented(); }
@@ -444,7 +493,15 @@ void CSharpOutputVisitor::VisitIfElseStatement(Syntax::IfElseStatement*) { NotIm
 void CSharpOutputVisitor::VisitWhileStatement(Syntax::WhileStatement*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitDoWhileStatement(Syntax::DoWhileStatement*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitYieldReturnStatement(Syntax::YieldReturnStatement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitEmptyStatement(Syntax::EmptyStatement*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitEmptyStatement(Syntax::EmptyStatement* emptyStatement) {
+	// An empty statement that carries a comment renders as just that comment (emitted as trivia by
+	// `StartNode`/`EndNode`); otherwise it is a bare semicolon.
+	StartNode(emptyStatement);
+	if (emptyStatement->LeadingTrivia().empty() && emptyStatement->TrailingTrivia().empty()) {
+		Semicolon();
+	}
+	EndNode(emptyStatement);
+}
 void CSharpOutputVisitor::VisitLabelStatement(Syntax::LabelStatement*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitCheckedStatement(Syntax::CheckedStatement*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitUncheckedStatement(Syntax::UncheckedStatement*) { NotImplemented(); }
