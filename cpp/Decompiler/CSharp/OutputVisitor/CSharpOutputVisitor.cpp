@@ -53,11 +53,39 @@
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/YieldBreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/EmptyStatement.hpp"
+#include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
+#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
+#include "Decompiler/CSharp/Syntax/MemberType.hpp"
+#include "Decompiler/CSharp/Syntax/ComposedType.hpp"
+#include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
+#include "Decompiler/CSharp/Syntax/Comment.hpp"
+#include "Decompiler/CSharp/Syntax/PreProcessorDirective.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
 #include "Decompiler/CSharp/OutputVisitor/InsertRequiredSpacesDecorator.hpp"
 
 namespace ILSpy::Decompiler::CSharp::OutputVisitor {
 
 using namespace ILSpy::Decompiler::CSharp::Syntax;
+
+namespace {
+
+// Builds an eager `std::vector<T*>` snapshot of an `AstNodeCollectionT<T>` -- the C# passes a
+// lazy `IEnumerable<T>` to the write helpers; the port's helpers take an eager vector (the
+// established D221 tree-walk convention), so each `Visit` method that calls `WriteTypeArguments`/
+// `WriteCommaSeparatedList` builds its snapshot once (the collection is not mutated during the
+// output walk, so the snapshot is faithful to the lazy view).
+template <typename T>
+std::vector<T*> ToVector(const AstNodeCollectionT<T>& collection) {
+	std::vector<T*> result;
+	int n = collection.Count();
+	result.reserve(n);
+	for (int i = 0; i < n; ++i) {
+		result.push_back(collection.At(i));
+	}
+	return result;
+}
+
+}  // namespace
 
 // ---- ctors / dtor ---------------------------------------------------------
 
@@ -394,7 +422,13 @@ void CSharpOutputVisitor::WritePrivateImplementationType(AstType* privateImpleme
 }
 
 // ---- The 130 IAstVisitor Visit methods (throwing stubs) -------------------
-void CSharpOutputVisitor::VisitIdentifier(Syntax::Identifier*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitIdentifier(Syntax::Identifier* identifier) {
+	// The C# deliberately does NOT call `StartNode`/`EndNode` for `Identifier` -- the
+	// `ITokenWriter` assumes each node processed between a `StartNode`/`EndNode` pair is a child
+	// of the parent node, and an `Identifier` is a token handled directly by the writer, so it
+	// is emitted as a flat token (not a nested node).
+	WriteIdentifier(identifier);
+}
 void CSharpOutputVisitor::VisitNullReferenceExpression(Syntax::NullReferenceExpression* nullReferenceExpression) {
 	// The C# `writer.WritePrimitiveValue(null)` -- the default-constructed `PrimitiveValue` holds
 	// `std::monostate` (the C# `null` boxed object), rendered by the writer as the `null` literal.
@@ -431,17 +465,78 @@ void CSharpOutputVisitor::VisitCheckedExpression(Syntax::CheckedExpression*) { N
 void CSharpOutputVisitor::VisitUncheckedExpression(Syntax::UncheckedExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitDirectionExpression(Syntax::DirectionExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitThrowExpression(Syntax::ThrowExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitPrimitiveType(Syntax::PrimitiveType*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitSimpleType(Syntax::SimpleType*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitMemberType(Syntax::MemberType*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitArraySpecifier(Syntax::ArraySpecifier*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitPrimitiveType(Syntax::PrimitiveType* primitiveType) {
+	StartNode(primitiveType);
+	writer_->WritePrimitiveType(primitiveType->Keyword());
+	isAfterSpace_ = false;
+	EndNode(primitiveType);
+}
+void CSharpOutputVisitor::VisitSimpleType(Syntax::SimpleType* simpleType) {
+	StartNode(simpleType);
+	// An unbound generic type argument (the `<>` in `typeof(List<>)`) is a nameless `SimpleType`
+	// whose backing `IdentifierToken` is null; only a named `SimpleType` writes its identifier.
+	if (simpleType->IdentifierToken() != nullptr) {
+		WriteIdentifier(simpleType->IdentifierToken());
+	}
+	WriteTypeArguments(ToVector(simpleType->TypeArguments()));
+	EndNode(simpleType);
+}
+void CSharpOutputVisitor::VisitMemberType(Syntax::MemberType* memberType) {
+	StartNode(memberType);
+	memberType->Target()->AcceptVisitor(*this);
+	WriteToken(memberType->IsDoubleColon() ? Tokens::DoubleColon : Tokens::Dot);
+	WriteIdentifier(memberType->MemberNameToken());
+	WriteTypeArguments(ToVector(memberType->TypeArguments()));
+	EndNode(memberType);
+}
+void CSharpOutputVisitor::VisitArraySpecifier(Syntax::ArraySpecifier* arraySpecifier) {
+	StartNode(arraySpecifier);
+	WriteToken(Tokens::LBracket);
+	// A rank of N renders as `[` + (N-1) commas + `]` (e.g. rank 1 -> `[]`, rank 2 -> `[,]`).
+	for (int i = 0; i < arraySpecifier->Dimensions() - 1; ++i) {
+		writer_->WriteToken(",");
+	}
+	WriteToken(Tokens::RBracket);
+	EndNode(arraySpecifier);
+}
 void CSharpOutputVisitor::VisitAttribute(Syntax::Attribute*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitAttributeSection(Syntax::AttributeSection*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitComposedType(Syntax::ComposedType*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitComposedType(Syntax::ComposedType* composedType) {
+	StartNode(composedType);
+	// The optional leading attributes (a `[Flags]`-style attribute on the type usage).
+	auto& attrs = composedType->Attributes();
+	int attrCount = attrs.Count();
+	for (int i = 0; i < attrCount; ++i) {
+		attrs.At(i)->AcceptVisitor(*this);
+	}
+	if (composedType->HasRefSpecifier()) {
+		WriteKeyword(ComposedType::RefKeyword);
+	}
+	if (composedType->HasReadOnlySpecifier()) {
+		WriteKeyword(ComposedType::ReadonlyKeyword);
+	}
+	composedType->BaseType()->AcceptVisitor(*this);
+	if (composedType->HasNullableSpecifier()) {
+		WriteToken(ComposedType::NullableToken);
+	}
+	for (int i = 0; i < composedType->PointerRank(); ++i) {
+		WriteToken(ComposedType::PointerToken);
+	}
+	auto& arraySpecs = composedType->ArraySpecifiers();
+	int specCount = arraySpecs.Count();
+	for (int i = 0; i < specCount; ++i) {
+		arraySpecs.At(i)->AcceptVisitor(*this);
+	}
+	EndNode(composedType);
+}
 void CSharpOutputVisitor::VisitCastExpression(Syntax::CastExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitAsExpression(Syntax::AsExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitIsExpression(Syntax::IsExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitTypeReferenceExpression(Syntax::TypeReferenceExpression*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitTypeReferenceExpression(Syntax::TypeReferenceExpression* typeReferenceExpression) {
+	StartNode(typeReferenceExpression);
+	typeReferenceExpression->Type()->AcceptVisitor(*this);
+	EndNode(typeReferenceExpression);
+}
 void CSharpOutputVisitor::VisitTypeOfExpression(Syntax::TypeOfExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitDefaultValueExpression(Syntax::DefaultValueExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitSizeOfExpression(Syntax::SizeOfExpression*) { NotImplemented(); }
@@ -539,7 +634,15 @@ void CSharpOutputVisitor::VisitExtensionDeclaration(Syntax::ExtensionDeclaration
 void CSharpOutputVisitor::VisitFixedVariableInitializer(Syntax::FixedVariableInitializer*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitFixedFieldDeclaration(Syntax::FixedFieldDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitLocalFunctionDeclarationStatement(Syntax::LocalFunctionDeclarationStatement*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitComment(Syntax::Comment*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitComment(Syntax::Comment* comment) {
+	// A `Comment` is trivia -- the C# drives the writer DIRECTLY (`writer.StartNode`/`writer.EndNode`,
+	// NOT the visitor's `StartNode`/`EndNode`): trivia is not part of the node-nesting stack and
+	// must not trigger the visitor's leading/trailing-trivia walk (a comment has no slots), so it
+	// is emitted as a flat token group by the writer.
+	writer_->StartNode(comment);
+	writer_->WriteComment(comment->CommentType(), comment->Content());
+	writer_->EndNode(comment);
+}
 void CSharpOutputVisitor::VisitExternAliasDeclaration(Syntax::ExternAliasDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitUsingDeclaration(Syntax::UsingDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitUsingAliasDeclaration(Syntax::UsingAliasDeclaration*) { NotImplemented(); }
@@ -550,7 +653,14 @@ void CSharpOutputVisitor::VisitFunctionPointerType(Syntax::FunctionPointerAstTyp
 void CSharpOutputVisitor::VisitDelegateDeclaration(Syntax::DelegateDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitTypeDeclaration(Syntax::TypeDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitNamespaceDeclaration(Syntax::NamespaceDeclaration*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitPreProcessorDirective(Syntax::PreProcessorDirective*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitPreProcessorDirective(Syntax::PreProcessorDirective* preProcessorDirective) {
+	// A `PreProcessorDirective` is trivia -- like `VisitComment`, it drives the writer DIRECTLY
+	// (`writer.StartNode`/`writer.EndNode`, not the visitor's `StartNode`/`EndNode`), emitting the
+	// directive type and its optional argument as a flat token group by the writer.
+	writer_->StartNode(preProcessorDirective);
+	writer_->WritePreProcessorDirective(preProcessorDirective->Type(), preProcessorDirective->Argument());
+	writer_->EndNode(preProcessorDirective);
+}
 void CSharpOutputVisitor::VisitDocumentationReference(Syntax::DocumentationReference*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitDeclarationExpression(Syntax::DeclarationExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitAnonymousTypeCreateExpression(Syntax::AnonymousTypeCreateExpression*) { NotImplemented(); }

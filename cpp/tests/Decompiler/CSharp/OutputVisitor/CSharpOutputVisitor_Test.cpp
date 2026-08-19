@@ -42,7 +42,15 @@
 #include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Identifier.hpp"
+#include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
+#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
+#include "Decompiler/CSharp/Syntax/MemberType.hpp"
+#include "Decompiler/CSharp/Syntax/ComposedType.hpp"
+#include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
+#include "Decompiler/CSharp/Syntax/Comment.hpp"
+#include "Decompiler/CSharp/Syntax/PreProcessorDirective.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
@@ -52,20 +60,29 @@
 
 using namespace ILSpy::Decompiler::CSharp::OutputVisitor;
 using ILSpy::Decompiler::CSharp::Syntax::AstNode;
+using ILSpy::Decompiler::CSharp::Syntax::AstType;
+using ILSpy::Decompiler::CSharp::Syntax::ArraySpecifier;
 using ILSpy::Decompiler::CSharp::Syntax::BlockStatement;
-using ILSpy::Decompiler::CSharp::Syntax::CommentType;
-using ILSpy::Decompiler::CSharp::Syntax::Identifier;
-using ILSpy::Decompiler::CSharp::Syntax::LiteralFormat;
-using ILSpy::Decompiler::CSharp::Syntax::Modifiers;
-using ILSpy::Decompiler::CSharp::Syntax::NullReferenceExpression;
-using ILSpy::Decompiler::CSharp::Syntax::BaseReferenceExpression;
 using ILSpy::Decompiler::CSharp::Syntax::BreakStatement;
+using ILSpy::Decompiler::CSharp::Syntax::BaseReferenceExpression;
+using ILSpy::Decompiler::CSharp::Syntax::ComposedType;
+using ILSpy::Decompiler::CSharp::Syntax::Comment;
+using ILSpy::Decompiler::CSharp::Syntax::CommentType;
 using ILSpy::Decompiler::CSharp::Syntax::ContinueStatement;
 using ILSpy::Decompiler::CSharp::Syntax::EmptyStatement;
+using ILSpy::Decompiler::CSharp::Syntax::Identifier;
+using ILSpy::Decompiler::CSharp::Syntax::LiteralFormat;
+using ILSpy::Decompiler::CSharp::Syntax::MemberType;
+using ILSpy::Decompiler::CSharp::Syntax::Modifiers;
+using ILSpy::Decompiler::CSharp::Syntax::NullReferenceExpression;
+using ILSpy::Decompiler::CSharp::Syntax::PreProcessorDirective;
 using ILSpy::Decompiler::CSharp::Syntax::PreProcessorDirectiveType;
 using ILSpy::Decompiler::CSharp::Syntax::PrimitiveExpression;
+using ILSpy::Decompiler::CSharp::Syntax::PrimitiveType;
 using ILSpy::Decompiler::CSharp::Syntax::PrimitiveValue;
+using ILSpy::Decompiler::CSharp::Syntax::SimpleType;
 using ILSpy::Decompiler::CSharp::Syntax::ThisReferenceExpression;
+using ILSpy::Decompiler::CSharp::Syntax::TypeReferenceExpression;
 using ILSpy::Decompiler::CSharp::Syntax::YieldBreakStatement;
 
 namespace {
@@ -543,4 +560,201 @@ TEST(CSharp_OutputVisitor, VisitBreakStatementEndToEnd) {
 	ASSERT_GE(h.inner.calls.size(), 5u);
 	EXPECT_EQ(h.inner.calls[1], "kw:break");
 	EXPECT_EQ(h.inner.calls[2], "tok:;");
+}
+
+// ---- The AstType Visit family --------------------------------------------
+
+// `VisitIdentifier` writes the identifier token directly (NO `StartNode`/`EndNode` -- the C#
+// deliberately omits them so the `ITokenWriter` treats the identifier as a flat token, not a
+// nested child node).
+TEST(CSharp_OutputVisitor, VisitIdentifier) {
+	V h;
+	auto id = MakeId("Foo");
+	h.visitor->VisitIdentifier(id.get());
+	ASSERT_EQ(h.inner.calls.size(), 1u);
+	EXPECT_EQ(h.inner.calls[0], "id:Foo");
+}
+
+// `VisitPrimitiveType` writes the primitive-type keyword (e.g. `int`) via `WritePrimitiveType`.
+TEST(CSharp_OutputVisitor, VisitPrimitiveType) {
+	V h;
+	auto node = std::make_unique<PrimitiveType>(std::string("int"));
+	h.visitor->VisitPrimitiveType(node.get());
+	// start, primtype:int, end
+	ASSERT_EQ(h.inner.calls.size(), 3u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "primtype:int");
+	EXPECT_EQ(h.inner.calls[2], "end");
+}
+
+// `VisitArraySpecifier` of rank 1 renders as `[]`.
+TEST(CSharp_OutputVisitor, VisitArraySpecifierRank1) {
+	V h;
+	auto node = std::make_unique<ArraySpecifier>(1);
+	h.visitor->VisitArraySpecifier(node.get());
+	// start, tok:[, tok:], end
+	ASSERT_EQ(h.inner.calls.size(), 4u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "tok:[");
+	EXPECT_EQ(h.inner.calls[2], "tok:]");
+	EXPECT_EQ(h.inner.calls[3], "end");
+}
+
+// `VisitArraySpecifier` of rank 2 renders as `[,]` (one comma for the second dimension).
+TEST(CSharp_OutputVisitor, VisitArraySpecifierRank2) {
+	V h;
+	auto node = std::make_unique<ArraySpecifier>(2);
+	h.visitor->VisitArraySpecifier(node.get());
+	// start, tok:[, tok:,, tok:], end
+	ASSERT_EQ(h.inner.calls.size(), 5u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "tok:[");
+	EXPECT_EQ(h.inner.calls[2], "tok:,");
+	EXPECT_EQ(h.inner.calls[3], "tok:]");
+	EXPECT_EQ(h.inner.calls[4], "end");
+}
+
+// `VisitSimpleType` (named, no type arguments) writes the backing `IdentifierToken`.
+TEST(CSharp_OutputVisitor, VisitSimpleTypeNamed) {
+	V h;
+	auto node = std::make_unique<SimpleType>(std::string("Foo"));
+	h.visitor->VisitSimpleType(node.get());
+	// start, id:Foo, end
+	ASSERT_EQ(h.inner.calls.size(), 3u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "id:Foo");
+	EXPECT_EQ(h.inner.calls[2], "end");
+}
+
+// `VisitSimpleType` with no backing token (the nameless `typeof(List<>)` case) writes nothing
+// but the `StartNode`/`EndNode` pair (no identifier, no type arguments).
+TEST(CSharp_OutputVisitor, VisitSimpleTypeNameless) {
+	V h;
+	auto node = std::make_unique<SimpleType>();
+	h.visitor->VisitSimpleType(node.get());
+	// start, end
+	ASSERT_EQ(h.inner.calls.size(), 2u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "end");
+}
+
+// `VisitMemberType` writes `Target.MemberName` (a dot separator by default): the target `SimpleType`
+// recurses through `VisitSimpleType`, then the dot, then the member-name identifier.
+TEST(CSharp_OutputVisitor, VisitMemberType) {
+	V h;
+	auto target = std::make_unique<SimpleType>(std::string("System"));
+	auto node = std::make_unique<MemberType>(target.get(), std::string("Math"));
+	h.visitor->VisitMemberType(node.get());
+	// start(MemberType), start(SimpleType), id:System, end(SimpleType), tok:., id:Math, end(MemberType)
+	ASSERT_EQ(h.inner.calls.size(), 7u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "id:System");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "tok:.");
+	EXPECT_EQ(h.inner.calls[5], "id:Math");
+	EXPECT_EQ(h.inner.calls[6], "end");
+}
+
+// `VisitComposedType` with a bare `BaseType` (no specifiers) recurses into the base type only.
+TEST(CSharp_OutputVisitor, VisitComposedTypeBare) {
+	V h;
+	auto baseType = std::make_unique<PrimitiveType>(std::string("int"));
+	auto node = std::make_unique<ComposedType>();
+	node->BaseType(baseType.get());
+	h.visitor->VisitComposedType(node.get());
+	// start(ComposedType), start(PrimitiveType), primtype:int, end(PrimitiveType), end(ComposedType)
+	ASSERT_EQ(h.inner.calls.size(), 5u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primtype:int");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "end");
+}
+
+// `VisitComposedType` with a nullable specifier, a pointer rank, and an array specifier renders
+// `int?**[]` after the base type (the `?`, two `*`, then the array specifier recurses).
+TEST(CSharp_OutputVisitor, VisitComposedTypeNullablePointerArray) {
+	V h;
+	auto baseType = std::make_unique<PrimitiveType>(std::string("int"));
+	auto arrSpec = std::make_unique<ArraySpecifier>(1);
+	auto node = std::make_unique<ComposedType>();
+	node->BaseType(baseType.get());
+	node->HasNullableSpecifier(true);
+	node->PointerRank(2);
+	node->ArraySpecifiers().Add(arrSpec.get());
+	h.visitor->VisitComposedType(node.get());
+	// start, start(primtype), primtype:int, end(primtype), tok:?, tok:*, tok:*, start(arrspec),
+	// tok:[, tok:], end(arrspec), end
+	ASSERT_EQ(h.inner.calls.size(), 12u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[2], "primtype:int");
+	EXPECT_EQ(h.inner.calls[4], "tok:?");
+	EXPECT_EQ(h.inner.calls[5], "tok:*");
+	EXPECT_EQ(h.inner.calls[6], "tok:*");
+	EXPECT_EQ(h.inner.calls[7], "start");
+	EXPECT_EQ(h.inner.calls[8], "tok:[");
+	EXPECT_EQ(h.inner.calls[9], "tok:]");
+	EXPECT_EQ(h.inner.calls[10], "end");
+	EXPECT_EQ(h.inner.calls[11], "end");
+}
+
+// `VisitTypeReferenceExpression` writes just its `Type` child (a bare type-name expression
+// such as `int` used as a value renders the type alone).
+TEST(CSharp_OutputVisitor, VisitTypeReferenceExpression) {
+	V h;
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto node = std::make_unique<TypeReferenceExpression>(type.get());
+	h.visitor->VisitTypeReferenceExpression(node.get());
+	// start(TypeReferenceExpression), start(PrimitiveType), primtype:int, end(PrimitiveType),
+	// end(TypeReferenceExpression)
+	ASSERT_EQ(h.inner.calls.size(), 5u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primtype:int");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "end");
+}
+
+// ---- The Trivia Visit leaves ---------------------------------------------
+
+// `VisitComment` drives the writer directly (NOT the visitor's `StartNode`/`EndNode`): a comment
+// is trivia emitted as a flat token group (start, the comment text, end).
+TEST(CSharp_OutputVisitor, VisitComment) {
+	V h;
+	auto node = std::make_unique<Comment>(std::string("hello"));
+	h.visitor->VisitComment(node.get());
+	// start, comment:hello, end (no visitor StartNode/EndNode, so no trivia walk)
+	ASSERT_EQ(h.inner.calls.size(), 3u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "comment:hello");
+	EXPECT_EQ(h.inner.calls[2], "end");
+}
+
+// `VisitPreProcessorDirective` drives the writer directly with the directive type and its
+// optional argument (a `#if DEBUG` renders as start, pp:DEBUG, end).
+TEST(CSharp_OutputVisitor, VisitPreProcessorDirective) {
+	V h;
+	auto node = std::make_unique<PreProcessorDirective>();
+	node->Type(PreProcessorDirectiveType::If);
+	node->Argument(std::string("DEBUG"));
+	h.visitor->VisitPreProcessorDirective(node.get());
+	// start, pp:DEBUG, end
+	ASSERT_EQ(h.inner.calls.size(), 3u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "pp:DEBUG");
+	EXPECT_EQ(h.inner.calls[2], "end");
+}
+
+// `VisitPreProcessorDirective` with no argument renders the null argument as `<null>`.
+TEST(CSharp_OutputVisitor, VisitPreProcessorDirectiveNoArgument) {
+	V h;
+	auto node = std::make_unique<PreProcessorDirective>();
+	node->Type(PreProcessorDirectiveType::Region);
+	h.visitor->VisitPreProcessorDirective(node.get());
+	// start, pp:<null>, end
+	ASSERT_EQ(h.inner.calls.size(), 3u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "pp:<null>");
+	EXPECT_EQ(h.inner.calls[2], "end");
 }
