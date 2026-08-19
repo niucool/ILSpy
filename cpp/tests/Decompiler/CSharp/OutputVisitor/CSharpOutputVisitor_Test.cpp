@@ -52,6 +52,12 @@
 #include "Decompiler/CSharp/Syntax/Expressions/UncheckedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThrowExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AsExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeOfExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DefaultValueExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/SizeOfExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Identifier.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/SimpleType.hpp"
@@ -130,6 +136,12 @@ using ILSpy::Decompiler::CSharp::Syntax::DirectionExpression;
 using ILSpy::Decompiler::CSharp::Syntax::FieldDirection;
 using ILSpy::Decompiler::CSharp::Syntax::ParenthesizedExpression;
 using ILSpy::Decompiler::CSharp::Syntax::ThrowExpression;
+using ILSpy::Decompiler::CSharp::Syntax::AsExpression;
+using ILSpy::Decompiler::CSharp::Syntax::IsExpression;
+using ILSpy::Decompiler::CSharp::Syntax::CastExpression;
+using ILSpy::Decompiler::CSharp::Syntax::TypeOfExpression;
+using ILSpy::Decompiler::CSharp::Syntax::DefaultValueExpression;
+using ILSpy::Decompiler::CSharp::Syntax::SizeOfExpression;
 using ILSpy::Decompiler::CSharp::Syntax::ThrowStatement;
 using ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorExpression;
 using ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType;
@@ -767,6 +779,139 @@ TEST(CSharp_OutputVisitor, VisitTypeReferenceExpression) {
 	EXPECT_EQ(h.inner.calls[2], "primtype:int");
 	EXPECT_EQ(h.inner.calls[3], "end");
 	EXPECT_EQ(h.inner.calls[4], "end");
+}
+
+// ---- The type-keyword expression Visit methods ----------------------------
+
+// `VisitCastExpression` over `(int)a` -- writes `( ` + Type + ` )` + the cast operand; the default
+// policy has no spaces within the cast parens nor after the typecast, so it renders `(int)a`.
+TEST(CSharp_OutputVisitor, VisitCastExpression) {
+	V h;
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto expr = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(42)));
+	auto node = std::make_unique<CastExpression>(type.get(), expr.get());
+	h.visitor->VisitCastExpression(node.get());
+	// start, tok:(, start(PrimitiveType), primtype:int, end(PrimitiveType), tok:),
+	// start(PrimitiveExpression), primval, end(PrimitiveExpression), end
+	ASSERT_EQ(h.inner.calls.size(), 10u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "tok:(");
+	EXPECT_EQ(h.inner.calls[2], "start");
+	EXPECT_EQ(h.inner.calls[3], "primtype:int");
+	EXPECT_EQ(h.inner.calls[4], "end");
+	EXPECT_EQ(h.inner.calls[5], "tok:)");
+	EXPECT_EQ(h.inner.calls[6], "start");
+	EXPECT_EQ(h.inner.calls[7], "primval");
+	EXPECT_EQ(h.inner.calls[8], "end");
+	EXPECT_EQ(h.inner.calls[9], "end");
+}
+
+// `VisitAsExpression` over `42 as int` -- writes the operand, an explicit space, the `as` keyword,
+// an explicit space, then the type (the C# writes both spaces explicitly, so the decorator inserts
+// none before the type).
+TEST(CSharp_OutputVisitor, VisitAsExpression) {
+	V h;
+	auto expr = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(42)));
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto node = std::make_unique<AsExpression>(expr.get(), type.get());
+	h.visitor->VisitAsExpression(node.get());
+	// start, start(PrimitiveExpression), primval, end(PrimitiveExpression), space, kw:as, space,
+	// start(PrimitiveType), primtype:int, end(PrimitiveType), end
+	ASSERT_EQ(h.inner.calls.size(), 11u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primval");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "kw:as");
+	EXPECT_EQ(h.inner.calls[6], "space");
+	EXPECT_EQ(h.inner.calls[7], "start");
+	EXPECT_EQ(h.inner.calls[8], "primtype:int");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "end");
+}
+
+// `VisitIsExpression` over `42 is int` -- writes the operand, a space, the `is` keyword, then the
+// type; the C# writes NO explicit space after `is`, so the decorator inserts the separating space
+// before the primitive type (a keyword-then-primitive-type merge guard).
+TEST(CSharp_OutputVisitor, VisitIsExpression) {
+	V h;
+	auto expr = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(42)));
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto node = std::make_unique<IsExpression>(expr.get(), type.get());
+	h.visitor->VisitIsExpression(node.get());
+	// start, start(PrimitiveExpression), primval, end(PrimitiveExpression), space, kw:is,
+	// start(PrimitiveType), space (decorator-inserted before the primitive type), primtype:int,
+	// end(PrimitiveType), end
+	ASSERT_EQ(h.inner.calls.size(), 11u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "start");
+	EXPECT_EQ(h.inner.calls[2], "primval");
+	EXPECT_EQ(h.inner.calls[3], "end");
+	EXPECT_EQ(h.inner.calls[4], "space");
+	EXPECT_EQ(h.inner.calls[5], "kw:is");
+	EXPECT_EQ(h.inner.calls[6], "start");
+	EXPECT_EQ(h.inner.calls[7], "space");
+	EXPECT_EQ(h.inner.calls[8], "primtype:int");
+	EXPECT_EQ(h.inner.calls[9], "end");
+	EXPECT_EQ(h.inner.calls[10], "end");
+}
+
+// `VisitTypeOfExpression` over `typeof(int)` -- writes the `typeof` keyword, parens, and the type;
+// the default policy has no spaces within the parens, so it renders `typeof(int)`.
+TEST(CSharp_OutputVisitor, VisitTypeOfExpression) {
+	V h;
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto node = std::make_unique<TypeOfExpression>(type.get());
+	h.visitor->VisitTypeOfExpression(node.get());
+	// start, kw:typeof, tok:(, start(PrimitiveType), primtype:int, end(PrimitiveType), tok:), end
+	ASSERT_EQ(h.inner.calls.size(), 8u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:typeof");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primtype:int");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:)");
+	EXPECT_EQ(h.inner.calls[7], "end");
+}
+
+// `VisitDefaultValueExpression` over `default(int)` -- structurally identical to `typeof(int)`
+// but with the `default` keyword (the C# uses the same `SpacesWithinTypeOfParentheses` policy).
+TEST(CSharp_OutputVisitor, VisitDefaultValueExpression) {
+	V h;
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto node = std::make_unique<DefaultValueExpression>(type.get());
+	h.visitor->VisitDefaultValueExpression(node.get());
+	// start, kw:default, tok:(, start(PrimitiveType), primtype:int, end(PrimitiveType), tok:), end
+	ASSERT_EQ(h.inner.calls.size(), 8u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:default");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primtype:int");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:)");
+	EXPECT_EQ(h.inner.calls[7], "end");
+}
+
+// `VisitSizeOfExpression` over `sizeof(int)` -- structurally identical to `typeof(int)` but with
+// the `sizeof` keyword and the `SpacesWithinSizeOfParentheses` policy.
+TEST(CSharp_OutputVisitor, VisitSizeOfExpression) {
+	V h;
+	auto type = std::make_unique<PrimitiveType>(std::string("int"));
+	auto node = std::make_unique<SizeOfExpression>(type.get());
+	h.visitor->VisitSizeOfExpression(node.get());
+	// start, kw:sizeof, tok:(, start(PrimitiveType), primtype:int, end(PrimitiveType), tok:), end
+	ASSERT_EQ(h.inner.calls.size(), 8u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:sizeof");
+	EXPECT_EQ(h.inner.calls[2], "tok:(");
+	EXPECT_EQ(h.inner.calls[3], "start");
+	EXPECT_EQ(h.inner.calls[4], "primtype:int");
+	EXPECT_EQ(h.inner.calls[5], "end");
+	EXPECT_EQ(h.inner.calls[6], "tok:)");
+	EXPECT_EQ(h.inner.calls[7], "end");
 }
 
 // ---- The Trivia Visit leaves ---------------------------------------------

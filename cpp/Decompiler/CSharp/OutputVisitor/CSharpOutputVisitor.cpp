@@ -84,6 +84,12 @@
 #include "Decompiler/CSharp/Syntax/Expressions/UncheckedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThrowExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AsExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeOfExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DefaultValueExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/SizeOfExpression.hpp"
 #include "Decompiler/CSharp/OutputVisitor/InsertRequiredSpacesDecorator.hpp"
 
 namespace ILSpy::Decompiler::CSharp::OutputVisitor {
@@ -705,17 +711,75 @@ void CSharpOutputVisitor::VisitComposedType(Syntax::ComposedType* composedType) 
 	}
 	EndNode(composedType);
 }
-void CSharpOutputVisitor::VisitCastExpression(Syntax::CastExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitAsExpression(Syntax::AsExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitIsExpression(Syntax::IsExpression*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitCastExpression(Syntax::CastExpression* castExpression) {
+	StartNode(castExpression);
+	LPar();
+	Space(policy_.SpacesWithinCastParentheses);
+	castExpression->Type()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinCastParentheses);
+	RPar();
+	Space(policy_.SpaceAfterTypecast);
+	castExpression->Expression()->AcceptVisitor(*this);
+	EndNode(castExpression);
+}
+void CSharpOutputVisitor::VisitAsExpression(Syntax::AsExpression* asExpression) {
+	StartNode(asExpression);
+	asExpression->Expression()->AcceptVisitor(*this);
+	Space();
+	WriteKeyword(Syntax::AsExpression::AsKeyword);
+	Space();
+	asExpression->Type()->AcceptVisitor(*this);
+	EndNode(asExpression);
+}
+void CSharpOutputVisitor::VisitIsExpression(Syntax::IsExpression* isExpression) {
+	StartNode(isExpression);
+	isExpression->Expression()->AcceptVisitor(*this);
+	Space();
+	WriteKeyword(Syntax::IsExpression::IsKeyword);
+	isExpression->Type()->AcceptVisitor(*this);
+	EndNode(isExpression);
+}
 void CSharpOutputVisitor::VisitTypeReferenceExpression(Syntax::TypeReferenceExpression* typeReferenceExpression) {
 	StartNode(typeReferenceExpression);
 	typeReferenceExpression->Type()->AcceptVisitor(*this);
 	EndNode(typeReferenceExpression);
 }
-void CSharpOutputVisitor::VisitTypeOfExpression(Syntax::TypeOfExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitDefaultValueExpression(Syntax::DefaultValueExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitSizeOfExpression(Syntax::SizeOfExpression*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitTypeOfExpression(Syntax::TypeOfExpression* typeOfExpression) {
+	StartNode(typeOfExpression);
+
+	WriteKeyword(Syntax::TypeOfExpression::TypeofKeyword);
+	LPar();
+	Space(policy_.SpacesWithinTypeOfParentheses);
+	typeOfExpression->Type()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinTypeOfParentheses);
+	RPar();
+
+	EndNode(typeOfExpression);
+}
+void CSharpOutputVisitor::VisitDefaultValueExpression(Syntax::DefaultValueExpression* defaultValueExpression) {
+	StartNode(defaultValueExpression);
+
+	WriteKeyword(Syntax::DefaultValueExpression::DefaultKeyword);
+	LPar();
+	Space(policy_.SpacesWithinTypeOfParentheses);
+	defaultValueExpression->Type()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinTypeOfParentheses);
+	RPar();
+
+	EndNode(defaultValueExpression);
+}
+void CSharpOutputVisitor::VisitSizeOfExpression(Syntax::SizeOfExpression* sizeOfExpression) {
+	StartNode(sizeOfExpression);
+
+	WriteKeyword(Syntax::SizeOfExpression::SizeofKeyword);
+	LPar();
+	Space(policy_.SpacesWithinSizeOfParentheses);
+	sizeOfExpression->Type()->AcceptVisitor(*this);
+	Space(policy_.SpacesWithinSizeOfParentheses);
+	RPar();
+
+	EndNode(sizeOfExpression);
+}
 void CSharpOutputVisitor::VisitIdentifierExpression(Syntax::IdentifierExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitMemberReferenceExpression(Syntax::MemberReferenceExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitPointerReferenceExpression(Syntax::PointerReferenceExpression*) { NotImplemented(); }
