@@ -85,6 +85,7 @@
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
 #include "Decompiler/CSharp/Syntax/ConstructorInitializer.hpp"
 #include "Decompiler/CSharp/Syntax/ConstructorDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
 #include "Decompiler/CSharp/Syntax/TupleTypeElement.hpp"
@@ -1630,7 +1631,32 @@ void CSharpOutputVisitor::VisitVariableDeclarationStatement(Syntax::VariableDecl
 	Semicolon();
 	EndNode(variableDeclarationStatement);
 }
-void CSharpOutputVisitor::VisitDestructorDeclaration(Syntax::DestructorDeclaration*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitDestructorDeclaration(Syntax::DestructorDeclaration* destructorDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitDestructorDeclaration: `~Name()`. The
+	// WriteModifiers trailing Space (per keyword) plus the explicit `if (Modifiers != None)
+	// Space()` is idempotent (the port Space() no-ops when isAfterSpace_), so only one space
+	// precedes the `~`. The name is the destructor's own NameToken unless its parent
+	// TypeDeclaration's name differs (the Clone branch, like VisitConstructorDeclaration).
+	StartNode(destructorDeclaration);
+	WriteAttributes(ToVector(destructorDeclaration->Attributes()));
+	WriteModifiers(destructorDeclaration->Modifiers());
+	if (destructorDeclaration->Modifiers() != Syntax::Modifiers::None) {
+		Space();
+	}
+	WriteToken(Syntax::DestructorDeclaration::TildeToken);
+	auto* type = dynamic_cast<Syntax::TypeDeclaration*>(destructorDeclaration->Parent());
+	if (type != nullptr && type->Name() != destructorDeclaration->NameToken()->Name()) {
+		std::unique_ptr<Syntax::Identifier> cloned(type->NameToken()->Clone());
+		WriteIdentifier(cloned.get());
+	} else {
+		WriteIdentifier(destructorDeclaration->NameToken());
+	}
+	Space(policy_.SpaceBeforeConstructorDeclarationParentheses);
+	LPar();
+	RPar();
+	WriteMethodBody(destructorDeclaration->Body(), policy_.DestructorBraceStyle);
+	EndNode(destructorDeclaration);
+}
 void CSharpOutputVisitor::VisitFieldDeclaration(Syntax::FieldDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitAccessor(Syntax::Accessor* accessor) {
 	StartNode(accessor);

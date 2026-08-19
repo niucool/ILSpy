@@ -97,6 +97,7 @@
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Syntax/PreProcessorDirective.hpp"
 #include "Decompiler/CSharp/Syntax/DestructorDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/FieldDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Accessor.hpp"
 #include "Decompiler/CSharp/Syntax/PropertyDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/CustomEventDeclaration.hpp"
@@ -187,6 +188,7 @@ using ILSpy::Decompiler::CSharp::Syntax::ConstructorInitializer;
 using ILSpy::Decompiler::CSharp::Syntax::ConstructorInitializerType;
 using ILSpy::Decompiler::CSharp::Syntax::ConstructorDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::DestructorDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::FieldDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::Accessor;
 using ILSpy::Decompiler::CSharp::Syntax::AccessorKind;
 using ILSpy::Decompiler::CSharp::Syntax::PropertyDeclaration;
@@ -590,13 +592,14 @@ TEST(CSharp_OutputVisitor, WriteCommaSeparatedListInParenthesisEmpty) {
 // ---- The 130 Visit stubs throw ---------------------------------------------
 
 // A representative still-unported `Visit` method throws `std::logic_error` (the throwing-stub
-// design); `VisitDestructorDeclaration` remains a stub (the `VariableDeclarationStatement` and
-// the try/catch family `Visit` methods above are now implemented, the TypeMember hierarchy
-// below is still a stub).
+// design); `VisitFieldDeclaration` remains a stub (the `VariableDeclarationStatement`, the
+// try/catch family, `ConstructorInitializer`, `ConstructorDeclaration`, and now
+// `DestructorDeclaration` `Visit` methods above are implemented, the TypeMember hierarchy
+// below `FieldDeclaration` is still a stub).
 TEST(CSharp_OutputVisitor, VisitStubThrows) {
 	V h;
-	auto decl = std::make_unique<DestructorDeclaration>();
-	EXPECT_THROW(h.visitor->VisitDestructorDeclaration(decl.get()), std::logic_error);
+	auto decl = std::make_unique<FieldDeclaration>();
+	EXPECT_THROW(h.visitor->VisitFieldDeclaration(decl.get()), std::logic_error);
 }
 
 // ---- The implemented leaf Visit methods ------------------------------------
@@ -3960,4 +3963,61 @@ TEST(CSharp_OutputVisitor, VisitConstructorDeclarationWithInitializer) {
 	EXPECT_EQ(h.inner.calls[24], "end");
 	EXPECT_EQ(h.inner.calls[25], "newline");
 	EXPECT_EQ(h.inner.calls[26], "end");
+}
+
+// `VisitDestructorDeclaration` over `~Foo() {}` -- a parentless destructor (no Attributes,
+// no Modifiers, NameToken `Foo`, an empty Body). WriteAttributes is a no-op (empty),
+// WriteModifiers(None) is a no-op, the `if (Modifiers != None) Space()` is skipped, then
+// WriteToken(~) + the `Parent as TypeDeclaration` is null so the `else` writes NameToken,
+// Space(false) before the parens is a no-op, LPar + RPar, then WriteMethodBody(Body) writes
+// the block braces + a trailing newline. The port WriteIdentifier is the direct writer call
+// (id:Foo only, the D345 convention).
+TEST(CSharp_OutputVisitor, VisitDestructorDeclarationBare) {
+	V h;
+	auto body = std::make_unique<BlockStatement>();
+	auto node = std::make_unique<DestructorDeclaration>();
+	node->NameToken(Identifier::Create("Foo"));
+	node->Body(body.get());
+	h.visitor->VisitDestructorDeclaration(node.get());
+	// start, tok:~, id:Foo, tok:(, tok:), start, space, tok:{, indent, newline, unindent, tok:}, end, newline, end
+	ASSERT_EQ(h.inner.calls.size(), 15u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "tok:~");
+	EXPECT_EQ(h.inner.calls[2], "id:Foo");
+	EXPECT_EQ(h.inner.calls[3], "tok:(");
+	EXPECT_EQ(h.inner.calls[4], "tok:)");
+	EXPECT_EQ(h.inner.calls[5], "start");
+	EXPECT_EQ(h.inner.calls[6], "space");
+	EXPECT_EQ(h.inner.calls[7], "tok:{");
+	EXPECT_EQ(h.inner.calls[8], "indent");
+	EXPECT_EQ(h.inner.calls[9], "newline");
+	EXPECT_EQ(h.inner.calls[10], "unindent");
+	EXPECT_EQ(h.inner.calls[11], "tok:}");
+	EXPECT_EQ(h.inner.calls[12], "end");
+	EXPECT_EQ(h.inner.calls[13], "newline");
+	EXPECT_EQ(h.inner.calls[14], "end");
+}
+
+// `VisitDestructorDeclaration` with a modifier set (e.g. `static ~Foo() {}` -- not valid C#,
+// but the node allows it). WriteModifiers writes the keyword + a trailing Space, then the
+// `if (Modifiers != None) Space()` is a second Space -- a no-op since the port Space() is
+// idempotent (isAfterSpace_ is true after WriteModifiers trailing space), so only ONE space
+// precedes the `~`. Then tok:~ / id:Foo / tok:( / tok:) / the body.
+TEST(CSharp_OutputVisitor, VisitDestructorDeclarationWithModifier) {
+	V h;
+	auto body = std::make_unique<BlockStatement>();
+	auto node = std::make_unique<DestructorDeclaration>();
+	node->NameToken(Identifier::Create("Foo"));
+	node->Body(body.get());
+	node->Modifiers(Modifiers::Static);
+	h.visitor->VisitDestructorDeclaration(node.get());
+	ASSERT_GE(h.inner.calls.size(), 6u);
+	EXPECT_EQ(h.inner.calls[0], "start");
+	EXPECT_EQ(h.inner.calls[1], "kw:static");
+	// WriteModifiers writes a trailing space after the keyword; the explicit Space() is a
+	// no-op (isAfterSpace_), so the next token is the tilde.
+	EXPECT_EQ(h.inner.calls[2], "space");
+	EXPECT_EQ(h.inner.calls[3], "tok:~");
+	EXPECT_EQ(h.inner.calls[4], "id:Foo");
+	EXPECT_EQ(h.inner.calls[5], "tok:(");
 }
