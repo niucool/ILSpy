@@ -117,6 +117,7 @@
 #include "Decompiler/CSharp/Syntax/UsingAliasDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/UsingDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ExternAliasDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/DelegateDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
@@ -280,6 +281,7 @@ using ILSpy::Decompiler::CSharp::Syntax::Constraint;
 using ILSpy::Decompiler::CSharp::Syntax::UsingAliasDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::UsingDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::ExternAliasDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::DelegateDeclaration;
 using ILSpy::Decompiler::TypeSystem::ReferenceKind;
 using ILSpy::Decompiler::TypeSystem::VarianceModifier;
 
@@ -5319,5 +5321,113 @@ TEST(CSharp_OutputVisitor, VisitExternAliasDeclarationBare) {
 	ASSERT_NE(name, h.inner.calls.end()) << "the alias name must render after kw:alias";
 	auto semi = std::find(name, h.inner.calls.end(), "tok:;");
 	ASSERT_NE(semi, h.inner.calls.end()) << "the extern alias must close with tok:;";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// ---- VisitDelegateDeclaration (D361, the declaration family: the first GeneralScope
+// declaration after the D360 directive family) ---------------------------------------
+
+// `VisitDelegateDeclaration` over `delegate void Foo();` -- the `delegate_declaration ::=
+// attribute_section* modifier* 'delegate' type identifier type_parameter* '(' parameter* ')'
+// constraint* ';'` (C# grammar 21.2): the `delegate` keyword, the `ReturnType` (a `PrimitiveType`
+// renders just its type), an explicit `Space()`, the `NameToken` identifier, the empty parameter
+// list (`tok:(`/`tok:)`), then a `Semicolon` (tok:; + newline -- the delegate closes with `;`,
+// no body). The find-based ordering pins the `delegate` keyword before the ReturnType before the
+// name before the parens before the terminating semicolon (the `VisitMethodDeclaration` D354
+// shape minus the body plus a leading `delegate` keyword).
+TEST(CSharp_OutputVisitor, VisitDelegateDeclarationBare) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("void"));
+	auto node = std::make_unique<DelegateDeclaration>();
+	node->ReturnType(retType.get());
+	node->NameToken(Identifier::Create("Foo"));
+	h.visitor->VisitDelegateDeclaration(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto delegateKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:delegate");
+	ASSERT_NE(delegateKw, h.inner.calls.end()) << "the delegate must open with kw:delegate";
+	auto retTypeTok = std::find(delegateKw, h.inner.calls.end(), "primtype:void");
+	ASSERT_NE(retTypeTok, h.inner.calls.end()) << "the ReturnType must render after kw:delegate";
+	auto nameTok = std::find(retTypeTok, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end()) << "the NameToken must render after the ReturnType";
+	auto lpar = std::find(nameTok, h.inner.calls.end(), "tok:(");
+	ASSERT_NE(lpar, h.inner.calls.end()) << "the parameter list must open with tok:( after the name";
+	auto rpar = std::find(lpar, h.inner.calls.end(), "tok:)");
+	ASSERT_NE(rpar, h.inner.calls.end()) << "the parameter list must close with tok:)";
+	auto semi = std::find(rpar, h.inner.calls.end(), "tok:;");
+	ASSERT_NE(semi, h.inner.calls.end()) << "a delegate must close with tok:; (no body)";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitDelegateDeclaration` over `delegate void Foo(int x);` -- one parameter recurses through
+// `VisitParameterDeclaration` between the parens. The parameter type (`int`) and name (`x`) are
+// distinct from the `void` ReturnType so the find-based ordering pins each unambiguously.
+TEST(CSharp_OutputVisitor, VisitDelegateDeclarationOneParam) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("void"));
+	auto paramType = std::make_unique<PrimitiveType>(std::string("int"));
+	auto param = std::make_unique<ParameterDeclaration>();
+	param->Type(paramType.get());
+	param->NameToken(Identifier::Create("x"));
+	auto node = std::make_unique<DelegateDeclaration>();
+	node->ReturnType(retType.get());
+	node->NameToken(Identifier::Create("Foo"));
+	node->Parameters().Add(param.get());
+	h.visitor->VisitDelegateDeclaration(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto delegateKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:delegate");
+	ASSERT_NE(delegateKw, h.inner.calls.end());
+	auto retTypeTok = std::find(delegateKw, h.inner.calls.end(), "primtype:void");
+	ASSERT_NE(retTypeTok, h.inner.calls.end());
+	auto nameTok = std::find(retTypeTok, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end());
+	auto lpar = std::find(nameTok, h.inner.calls.end(), "tok:(");
+	ASSERT_NE(lpar, h.inner.calls.end());
+	auto paramTypeTok = std::find(lpar, h.inner.calls.end(), "primtype:int");
+	ASSERT_NE(paramTypeTok, h.inner.calls.end()) << "the parameter type must render after tok:(";
+	auto paramName = std::find(paramTypeTok, h.inner.calls.end(), "id:x");
+	ASSERT_NE(paramName, h.inner.calls.end()) << "the parameter name must render after its type";
+	auto rpar = std::find(paramName, h.inner.calls.end(), "tok:)");
+	ASSERT_NE(rpar, h.inner.calls.end()) << "tok:) must render after the parameter name";
+	auto semi = std::find(rpar, h.inner.calls.end(), "tok:;");
+	ASSERT_NE(semi, h.inner.calls.end()) << "the delegate must close with tok:;";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitDelegateDeclaration` over `delegate string Foo(int x);` -- a non-void ReturnType (`string`)
+// with one parameter, all distinct tokens (the `string` return, `int` param type, `x` param name,
+// `Foo` delegate name). Pins the non-void ReturnType renders after `kw:delegate` (not merged with
+// the keyword) and the param renders between the parens after the name.
+TEST(CSharp_OutputVisitor, VisitDelegateDeclarationStringReturnWithParam) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("string"));
+	auto paramType = std::make_unique<PrimitiveType>(std::string("int"));
+	auto param = std::make_unique<ParameterDeclaration>();
+	param->Type(paramType.get());
+	param->NameToken(Identifier::Create("x"));
+	auto node = std::make_unique<DelegateDeclaration>();
+	node->ReturnType(retType.get());
+	node->NameToken(Identifier::Create("Foo"));
+	node->Parameters().Add(param.get());
+	h.visitor->VisitDelegateDeclaration(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto delegateKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:delegate");
+	ASSERT_NE(delegateKw, h.inner.calls.end());
+	auto retTypeTok = std::find(delegateKw, h.inner.calls.end(), "primtype:string");
+	ASSERT_NE(retTypeTok, h.inner.calls.end()) << "the non-void ReturnType must render after kw:delegate";
+	auto nameTok = std::find(retTypeTok, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end());
+	auto lpar = std::find(nameTok, h.inner.calls.end(), "tok:(");
+	ASSERT_NE(lpar, h.inner.calls.end());
+	auto paramTypeTok = std::find(lpar, h.inner.calls.end(), "primtype:int");
+	ASSERT_NE(paramTypeTok, h.inner.calls.end()) << "the parameter type must render after tok:(";
+	auto paramName = std::find(paramTypeTok, h.inner.calls.end(), "id:x");
+	ASSERT_NE(paramName, h.inner.calls.end()) << "the parameter name must render after its type";
+	auto rpar = std::find(paramName, h.inner.calls.end(), "tok:)");
+	ASSERT_NE(rpar, h.inner.calls.end());
+	auto semi = std::find(rpar, h.inner.calls.end(), "tok:;");
+	ASSERT_NE(semi, h.inner.calls.end()) << "the delegate must close with tok:;";
 	EXPECT_EQ(h.inner.calls.back(), "end");
 }

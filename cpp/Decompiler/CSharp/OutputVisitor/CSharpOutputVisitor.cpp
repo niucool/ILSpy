@@ -48,6 +48,7 @@
 #include "Decompiler/CSharp/Syntax/UsingAliasDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/UsingDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ExternAliasDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/DelegateDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
@@ -2324,7 +2325,36 @@ void CSharpOutputVisitor::VisitFunctionPointerType(Syntax::FunctionPointerAstTyp
 	WriteToken(Tokens::RChevron);
 	EndNode(functionPointerType);
 }
-void CSharpOutputVisitor::VisitDelegateDeclaration(Syntax::DelegateDeclaration*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitDelegateDeclaration(Syntax::DelegateDeclaration* delegateDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitDelegateDeclaration (line 1514):
+	// `Modifiers delegate ReturnType NameToken<TypeParameters>(Parameters) Constraints;` -- the
+	// `delegate_declaration` (C# grammar 21.2), structurally `VisitMethodDeclaration` [D354] minus
+	// the `PrivateImplementationType`/`Body` slots plus a leading `delegate` keyword and a trailing
+	// `Semicolon` (a delegate has no body; it closes with `;`). The C# `delegateDeclaration.ReturnType?.AcceptVisitor(this)`
+	// null-conditional ports to an explicit nullptr guard (the D354 VisitMethodDeclaration precedent);
+	// the lazy `AstNodeCollection` snapshots via the D325 `ToVector` helper before the write helpers
+	// and the `foreach Constraint` loop (the collections are not mutated during the visit). The
+	// `Tokens::DelegateKeyword` is the namespace-scope `Tokens` const (the `VisitFunctionPointerType`
+	// precedent at line 2300); `SpaceBeforeDelegateDeclarationParentheses` defaults to false, so the
+	// `Space(...)` before the parens is a no-op under the default `CSharpFormattingOptions{}`.
+	StartNode(delegateDeclaration);
+	WriteAttributes(ToVector(delegateDeclaration->Attributes()));
+	WriteModifiers(delegateDeclaration->Modifiers());
+	WriteKeyword(Tokens::DelegateKeyword);
+	if (delegateDeclaration->ReturnType() != nullptr) {
+		delegateDeclaration->ReturnType()->AcceptVisitor(*this);
+	}
+	Space();
+	WriteIdentifier(delegateDeclaration->NameToken());
+	WriteTypeParameters(ToVector(delegateDeclaration->TypeParameters()));
+	Space(policy_.SpaceBeforeDelegateDeclarationParentheses);
+	WriteCommaSeparatedListInParenthesis(ToVector(delegateDeclaration->Parameters()), policy_.SpaceWithinMethodDeclarationParentheses);
+	for (Syntax::Constraint* constraint : ToVector(delegateDeclaration->Constraints())) {
+		constraint->AcceptVisitor(*this);
+	}
+	Semicolon();
+	EndNode(delegateDeclaration);
+}
 void CSharpOutputVisitor::VisitTypeDeclaration(Syntax::TypeDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitNamespaceDeclaration(Syntax::NamespaceDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitPreProcessorDirective(Syntax::PreProcessorDirective* preProcessorDirective) {
