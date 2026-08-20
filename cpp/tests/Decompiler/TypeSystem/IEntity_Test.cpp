@@ -39,6 +39,9 @@
 #include "Decompiler/TypeSystem/IEntity.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
+#include "Decompiler/TypeSystem/IModule.hpp"
+#include "Decompiler/TypeSystem/INamespace.hpp"
+#include "Decompiler/TypeSystem/Version.hpp"
 
 #include <gtest/gtest.h>
 
@@ -56,13 +59,13 @@ namespace ILSpy::Decompiler::TypeSystem {
 // every pure-virtual with a trivial return (it is constructed only for pointer-identity via
 // `id()` -- no `ITypeDefinition` accessor is read through it in these tests).
 
-// Minimal test stand-in for `IModule` (the metadata-module interface). Only a virtual
-// destructor; the real `IModule` pulls `MetadataFile` / `INamespace` / `ITypeDefinition` /
-// `IAttribute` / `TopLevelTypeName`.
-class IModule {
-public:
-    virtual ~IModule() = default;
-};
+// `IModule` is now the real port (cpp/Decompiler/TypeSystem/IModule.hpp, D396); it is
+// included above rather than forward-declared as a stand-in. The `TestModule` stub below
+// derives from the real `IModule` and overrides every pure-virtual (it is constructed for
+// `ParentModule` pointer-identity and its `AssemblyName` is read). Its `Compilation()` and
+// `RootNamespace()` are declared here and defined out-of-line (after `TestCompilation` and
+// a `TestNamespace` stub are complete) because they return `const ICompilation&` / `const
+// INamespace&` references backed by function-local singletons.
 
 // `IAttribute` is now the real port (cpp/Decompiler/TypeSystem/IAttribute.hpp, D386); it
 // is included above rather than forward-declared as a stand-in. `IMethod` (its `Constructor`
@@ -152,11 +155,62 @@ private:
     ILSpy::Decompiler::TypeSystem::FullTypeName fullTypeName_;
 };
 
-// A minimal concrete `IModule` for testing.
+// A minimal concrete `IModule` for testing: derives from the real `IModule` (D396) and
+// overrides every pure-virtual. It is constructed for `ParentModule` pointer-identity and
+// its `AssemblyName` is read (the existing `NullablePointerSlotsReturnConfiguredTargets`
+// test). The `Name()` override returns the assembly short name (the C# `IModule` inherits
+// `ISymbol.Name`); `AssemblyName()` now OVERRIDES the real `virtual std::string
+// AssemblyName() const` (distinct from the stand-in-era `const std::string&` return -- the
+// override returns `std::string` by value, and `EXPECT_EQ(..., "mscorlib")` still holds).
+// `Compilation()` and `RootNamespace()` are declared here and defined out-of-line below
+// (after `TestCompilation` and a `TestNamespace` stub are complete) backed by function-local
+// singletons -- these tests never read either through a `TestModule`.
 class TestModule : public ILSpy::Decompiler::TypeSystem::IModule {
 public:
     explicit TestModule(std::string assemblyName) : assemblyName_(std::move(assemblyName)) {}
-    const std::string& AssemblyName() const { return assemblyName_; }
+    std::string AssemblyName() const override { return assemblyName_; }
+
+    // --- ISymbol ---
+    ILSpy::Decompiler::TypeSystem::SymbolKind SymbolKind() const override
+    {
+        return ILSpy::Decompiler::TypeSystem::SymbolKind::Module;
+    }
+    std::string Name() const override { return assemblyName_; }
+    // --- ICompilationProvider (out-of-line below) ---
+    const ILSpy::Decompiler::TypeSystem::ICompilation& Compilation() const override;
+    // --- IModule ---
+    const ILSpy::Decompiler::Metadata::MetadataFile* MetadataFile() const override { return nullptr; }
+    bool IsMainModule() const override { return false; }
+    ILSpy::Decompiler::TypeSystem::Version AssemblyVersion() const override { return {}; }
+    std::string FullAssemblyName() const override { return {}; }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IAttribute*> GetAssemblyAttributes() const override
+    {
+        return {};
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IAttribute*> GetModuleAttributes() const override
+    {
+        return {};
+    }
+    bool InternalsVisibleTo(const ILSpy::Decompiler::TypeSystem::IModule&) const override
+    {
+        return false;
+    }
+    // --- IModule::RootNamespace (out-of-line below; needs a concrete `INamespace`) ---
+    const ILSpy::Decompiler::TypeSystem::INamespace& RootNamespace() const override;
+    const ILSpy::Decompiler::TypeSystem::ITypeDefinition* GetTypeDefinition(
+        const ILSpy::Decompiler::TypeSystem::TopLevelTypeName&) const override
+    {
+        return nullptr;
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::ITypeDefinition*> TopLevelTypeDefinitions() const override
+    {
+        return {};
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::ITypeDefinition*> TypeDefinitions() const override
+    {
+        return {};
+    }
+
 private:
     std::string assemblyName_;
 };
@@ -204,6 +258,80 @@ const ILSpy::Decompiler::TypeSystem::ICompilation& TestTypeDefinition::Compilati
 {
     static TestCompilation s_compilation(0);
     return s_compilation;
+}
+
+// A COMPACT concrete `INamespace` for testing: used ONLY so `TestModule::RootNamespace()` can
+// return a valid `const INamespace&` (the IEntity tests never read an `INamespace` accessor
+// through it). It overrides every `INamespace` / `ISymbol` / `ICompilationProvider` pure-virtual
+// with a trivial return; `Compilation()` returns the held `TestCompilation` reference. It
+// lives in the anonymous namespace (file-local), so it does not ODR-conflict with the
+// `TestNamespace` in `INamespace_Test.cpp` / `IModule_Test.cpp`.
+class TestNamespace : public ILSpy::Decompiler::TypeSystem::INamespace {
+public:
+    explicit TestNamespace(const TestCompilation& compilation) : compilation_(compilation) {}
+
+    // --- ISymbol ---
+    ILSpy::Decompiler::TypeSystem::SymbolKind SymbolKind() const override
+    {
+        return ILSpy::Decompiler::TypeSystem::SymbolKind::Namespace;
+    }
+    std::string Name() const override { return {}; }
+    // --- ICompilationProvider ---
+    const ILSpy::Decompiler::TypeSystem::ICompilation& Compilation() const override
+    {
+        return compilation_;
+    }
+    // --- INamespace ---
+    std::string ExternAlias() const override { return {}; }
+    std::string FullName() const override { return {}; }
+    const ILSpy::Decompiler::TypeSystem::INamespace* ParentNamespace() const override
+    {
+        return nullptr;
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::INamespace*> ChildNamespaces() const override
+    {
+        return {};
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::ITypeDefinition*> Types() const override
+    {
+        return {};
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IModule*> ContributingModules() const override
+    {
+        return {};
+    }
+    const ILSpy::Decompiler::TypeSystem::INamespace* GetChildNamespace(
+        const std::string&) const override
+    {
+        return nullptr;
+    }
+    const ILSpy::Decompiler::TypeSystem::ITypeDefinition* GetTypeDefinition(
+        const std::string&, int) const override
+    {
+        return nullptr;
+    }
+
+private:
+    const TestCompilation& compilation_;
+};
+
+// Out-of-line `TestModule::Compilation()` (declared above): returns a reference to a
+// function-local `TestCompilation` singleton (these tests never read `Compilation()` through
+// a `TestModule`).
+const ILSpy::Decompiler::TypeSystem::ICompilation& TestModule::Compilation() const
+{
+    static TestCompilation s_compilation(0);
+    return s_compilation;
+}
+
+// Out-of-line `TestModule::RootNamespace()` (declared above): returns a reference to a
+// function-local `TestNamespace` singleton backed by its own function-local `TestCompilation`
+// (these tests never read `RootNamespace()` through a `TestModule`; a singleton is harmless).
+const ILSpy::Decompiler::TypeSystem::INamespace& TestModule::RootNamespace() const
+{
+    static TestCompilation s_compilation(0);
+    static TestNamespace s_namespace(s_compilation);
+    return s_namespace;
 }
 
 // A minimal concrete `IEntity` for testing: holds the configured scalar/pointer state and

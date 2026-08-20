@@ -36,6 +36,7 @@
 
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
+#include "Decompiler/TypeSystem/IModule.hpp"
 #include "Decompiler/TypeSystem/TypeConstraint.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -57,11 +58,9 @@ namespace ILSpy::Decompiler::TypeSystem {
 // included above; the `TestTypeDefinition` stub below derives from it (it is never instantiated,
 // so it stays abstract and overrides nothing).
 
-// Minimal test stand-in for `IModule` -- IDENTICAL to the stand-in in `IEntity_Test.cpp`.
-class IModule {
-public:
-    virtual ~IModule() = default;
-};
+// `IModule` is now the real port (cpp/Decompiler/TypeSystem/IModule.hpp, D396), included
+// above; the `TestModule` stub below derives from it (it is never instantiated, so it stays
+// abstract and overrides nothing).
 
 // `IAttribute` is now the real port (cpp/Decompiler/TypeSystem/IAttribute.hpp, D386);
 // it is included above rather than forward-declared as a stand-in. `IMethod` (its
@@ -87,13 +86,9 @@ private:
     int id_;
 };
 
-// A minimal concrete `IModule` for testing.
+// `TestModule` derives from the real `IModule` (D396) and is defined but never instantiated
+// in these tests, so it stays abstract (derives from the real `IModule`, overrides nothing).
 class TestModule : public ILSpy::Decompiler::TypeSystem::IModule {
-public:
-    explicit TestModule(std::string assemblyName) : assemblyName_(std::move(assemblyName)) {}
-    const std::string& AssemblyName() const { return assemblyName_; }
-private:
-    std::string assemblyName_;
 };
 
 // A minimal concrete `IAttribute` for testing (identity-testable via pointer compare).

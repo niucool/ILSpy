@@ -50,15 +50,19 @@
 //    in the anonymous namespace (file-local), so it does not ODR-conflict with the
 //    richer `TestTypeDefinition` in `ITypeDefinition_Test.cpp`.
 //  - `TestCompilation` is the minimal concrete `ICompilation` stand-in (the D379
-//    pattern). `ICompilation` and `IModule` stand-ins are defined IDENTICALLY to the
-//    other TypeSystem test files (virtual destructor only); the identical class
-//    definitions across translation units satisfy the One Definition Rule. `IModule`
-//    is NOT yet ported, so a stand-in (not the real header) backs the
-//    `ContributingModules` element type -- the stand-in is concrete (only a virtual
-//    destructor), so the test instantiates it directly for the snapshot.
+//    pattern). The `ICompilation` stand-in is defined IDENTICALLY to the other
+//    TypeSystem test files (virtual destructor only); the identical class definitions
+//    across translation units satisfy the One Definition Rule.
+//  - `TestModule` is a COMPACT concrete `IModule` (the real port, D396) used ONLY for
+//    pointer identity in the `ContributingModules` snapshot (the INamespace tests never
+//    read an `IModule` accessor through the snapshot pointers). It lives in the anonymous
+//    namespace (file-local), so it does not ODR-conflict with the `TestModule` in other
+//    test files.
 
 #include "Decompiler/TypeSystem/INamespace.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
+#include "Decompiler/TypeSystem/IModule.hpp"
+#include "Decompiler/TypeSystem/Version.hpp"
 #include "Decompiler/TypeSystem/FullTypeName.hpp"
 
 #include <gtest/gtest.h>
@@ -79,20 +83,6 @@ namespace ILSpy::Decompiler::TypeSystem {
 class ICompilation {
 public:
     virtual ~ICompilation() = default;
-};
-
-// Minimal test stand-in for `IModule` (the metadata-module interface). IDENTICAL to the
-// stand-in in `IEntity_Test.cpp` / `ITypeParameter_Test.cpp` (a virtual destructor only); the
-// identical class definitions across translation units satisfy the One Definition Rule. The
-// real `IModule` pulls `MetadataFile` / `INamespace` / `ITypeDefinition` / `IAttribute` /
-// `TopLevelTypeName` / `Version` and is not yet ported. The stand-in is concrete (only a
-// virtual destructor), so the test instantiates it directly for the `ContributingModules`
-// snapshot -- distinct from `ITypeDefinition` (already ported) which the test cannot stand-in
-// (the real header is included by other TUs in this executable, so an ODR-violating stand-in
-// is impossible; the real header is included above and a compact concrete stub is used).
-class IModule {
-public:
-    virtual ~IModule() = default;
 };
 
 } // namespace ILSpy::Decompiler::TypeSystem
@@ -329,6 +319,70 @@ private:
     std::vector<const ILSpy::Decompiler::TypeSystem::IModule*> contributingModules_;
 };
 
+// A COMPACT concrete `IModule` for testing: used ONLY for pointer identity in the
+// `INamespace::ContributingModules` snapshot (the INamespace tests never read an `IModule`
+// accessor through the snapshot pointers). `IModule` is now the real port (D396), so the
+// snapshot element type is the abstract interface and a concrete stub backs the instances.
+// It overrides every `IModule` / `ISymbol` / `ICompilationProvider` pure-virtual with a
+// trivial return; `RootNamespace()` returns a reference to the held `TestNamespace` (the
+// non-null `const INamespace&` return requires a concrete `INamespace`, which `TestNamespace`
+// provides). It lives in the anonymous namespace (file-local), so it does not ODR-conflict
+// with the `TestModule` in other test files.
+class TestModule : public ILSpy::Decompiler::TypeSystem::IModule {
+public:
+    explicit TestModule(const TestCompilation& compilation) : rootNamespace_("", "", "", compilation) {}
+
+    // --- ISymbol ---
+    ILSpy::Decompiler::TypeSystem::SymbolKind SymbolKind() const override
+    {
+        return ILSpy::Decompiler::TypeSystem::SymbolKind::Module;
+    }
+    std::string Name() const override { return {}; }
+    // --- ICompilationProvider ---
+    const ILSpy::Decompiler::TypeSystem::ICompilation& Compilation() const override
+    {
+        return rootNamespace_.Compilation();
+    }
+    // --- IModule ---
+    const ILSpy::Decompiler::Metadata::MetadataFile* MetadataFile() const override { return nullptr; }
+    bool IsMainModule() const override { return false; }
+    std::string AssemblyName() const override { return {}; }
+    ILSpy::Decompiler::TypeSystem::Version AssemblyVersion() const override { return {}; }
+    std::string FullAssemblyName() const override { return {}; }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IAttribute*> GetAssemblyAttributes() const override
+    {
+        return {};
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IAttribute*> GetModuleAttributes() const override
+    {
+        return {};
+    }
+    bool InternalsVisibleTo(const ILSpy::Decompiler::TypeSystem::IModule&) const override
+    {
+        return false;
+    }
+    const ILSpy::Decompiler::TypeSystem::INamespace& RootNamespace() const override
+    {
+        return rootNamespace_;
+    }
+    const ILSpy::Decompiler::TypeSystem::ITypeDefinition* GetTypeDefinition(
+        const ILSpy::Decompiler::TypeSystem::TopLevelTypeName&) const override
+    {
+        return nullptr;
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::ITypeDefinition*> TopLevelTypeDefinitions() const override
+    {
+        return {};
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::ITypeDefinition*> TypeDefinitions() const override
+    {
+        return {};
+    }
+
+private:
+    TestNamespace rootNamespace_;
+};
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -420,15 +474,16 @@ TEST(INamespaceTest, TypesAndGetTypeDefinitionReturnConfiguredValues)
 
 // ---------------------------------------------------------------------------
 // INamespace -- `ContributingModules` returns the configured non-owning `const IModule*`
-// snapshot (pointer identity preserved). `IModule` is NOT yet ported, so the stand-in (a
-// concrete virtual-destructor-only class) backs the element type and is instantiated directly.
+// snapshot (pointer identity preserved). `IModule` is now the real port (D396, an abstract
+// interface), so the snapshot element type is the abstract `IModule` and the test uses a
+// concrete `TestModule` stub for the instances.
 // ---------------------------------------------------------------------------
 TEST(INamespaceTest, ContributingModulesReturnsConfiguredSnapshot)
 {
     using namespace ILSpy::Decompiler::TypeSystem;
     TestCompilation compilation(5);
-    IModule moduleA;
-    IModule moduleB;
+    TestModule moduleA(compilation);
+    TestModule moduleB(compilation);
     TestNamespace system("System", "System", "", compilation);
     system.SetContributingModules({&moduleA, &moduleB});
 
