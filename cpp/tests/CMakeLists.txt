@@ -30,6 +30,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/IEntity_Test.cpp
     Decompiler/TypeSystem/IParameter_Test.cpp
     Decompiler/TypeSystem/ITypeParameter_Test.cpp
+    Decompiler/TypeSystem/MethodSemanticsAttributes_Test.cpp
     Decompiler/Output/IAmbience_Test.cpp
     Decompiler/IL/ILAst_Test.cpp
     Decompiler/IL/ILAstInstructions_Test.cpp
