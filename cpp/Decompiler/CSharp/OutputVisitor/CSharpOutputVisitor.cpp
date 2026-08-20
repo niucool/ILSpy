@@ -153,6 +153,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/SwitchExpression.hpp"
 #include "Decompiler/CSharp/Syntax/SwitchExpressionSection.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/RecursivePatternExpression.hpp"
 #include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
 #include "Decompiler/CSharp/Syntax/ParenthesizedVariableDesignation.hpp"
 #include "Decompiler/CSharp/OutputVisitor/InsertRequiredSpacesDecorator.hpp"
@@ -2683,7 +2684,33 @@ void CSharpOutputVisitor::VisitSwitchExpression(Syntax::SwitchExpression* switch
 	CloseBrace(policy_.ArrayInitializerBraceStyle);
 	EndNode(switchExpression);
 }
-void CSharpOutputVisitor::VisitRecursivePatternExpression(Syntax::RecursivePatternExpression*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitRecursivePatternExpression(Syntax::RecursivePatternExpression* recursivePatternExpression) {
+	StartNode(recursivePatternExpression);
+	// The C# `Type?.AcceptVisitor(this)` -- `Type` is a nullable `AstType`, so a nullptr guard gates
+	// the recursion (the D354 ReturnType nullable-`?.` precedent).
+	if (recursivePatternExpression->Type() != nullptr)
+		recursivePatternExpression->Type()->AcceptVisitor(*this);
+	Space();
+	if (recursivePatternExpression->IsPositional())
+		WriteToken(Tokens::LPar);
+	else
+		WriteToken(Tokens::LBrace);
+	Space();
+	WriteCommaSeparatedList(ToVector(recursivePatternExpression->SubPatterns()));
+	Space();
+	if (recursivePatternExpression->IsPositional())
+		WriteToken(Tokens::RPar);
+	else
+		WriteToken(Tokens::RBrace);
+	// The C# `if (Designation is not null) { Space(); Designation.AcceptVisitor(this); }` --
+	// `Designation` is a nullable `VariableDesignation`, so a nullptr guard gates the trailing
+	// `var x`/`x`/`(x, y)` declaration (the D354 nullable-`?.` precedent).
+	if (recursivePatternExpression->Designation() != nullptr) {
+		Space();
+		recursivePatternExpression->Designation()->AcceptVisitor(*this);
+	}
+	EndNode(recursivePatternExpression);
+}
 void CSharpOutputVisitor::VisitInterpolation(Syntax::Interpolation*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitInterpolatedStringText(Syntax::InterpolatedStringText*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitInterpolatedStringExpression(Syntax::InterpolatedStringExpression*) { NotImplemented(); }

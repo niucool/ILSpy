@@ -74,6 +74,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
 #include "Decompiler/CSharp/Syntax/ParenthesizedVariableDesignation.hpp"
+#include "Decompiler/CSharp/Syntax/Interpolation.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayInitializerExpression.hpp"
@@ -289,6 +290,7 @@ using ILSpy::Decompiler::CSharp::Syntax::DelegateDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::DocumentationReference;
 using ILSpy::Decompiler::CSharp::Syntax::NamespaceDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::RecursivePatternExpression;
+using ILSpy::Decompiler::CSharp::Syntax::Interpolation;
 using ILSpy::Decompiler::TypeSystem::ReferenceKind;
 using ILSpy::Decompiler::TypeSystem::SymbolKind;
 using ILSpy::Decompiler::TypeSystem::VarianceModifier;
@@ -638,18 +640,19 @@ TEST(CSharp_OutputVisitor, WriteCommaSeparatedListInParenthesisEmpty) {
 // ---- The 130 Visit stubs throw ---------------------------------------------
 
 // A representative still-unported `Visit` method throws `std::logic_error` (the throwing-stub
-// design); `VisitDocumentationReference` remains a stub (the `VariableDeclarationStatement`, the
+// design); `VisitInterpolation` remains a stub (the `VariableDeclarationStatement`, the
 // try/catch family, `ConstructorInitializer`, `ConstructorDeclaration`, `DestructorDeclaration`,
 // `EnumMemberDeclaration`, `ExtensionDeclaration`, `EventDeclaration`, `CustomEventDeclaration`,
 // `FieldDeclaration`, `FixedFieldDeclaration`, `IndexerDeclaration`, `MethodDeclaration`,
-// `OperatorDeclaration`, `PropertyDeclaration`, `DelegateDeclaration`, `NamespaceDeclaration`
-// and `TypeDeclaration` `Visit` methods above are implemented -- the full EntityDeclaration family
-// plus the GeneralScope declaration/directive members are done; the remaining GeneralScope/
-// pattern/interpolated-string/query/SyntaxTree members below are still stubs).
+// `OperatorDeclaration`, `PropertyDeclaration`, `DelegateDeclaration`, `NamespaceDeclaration`,
+// `TypeDeclaration` and `RecursivePatternExpression` `Visit` methods above are implemented -- the
+// full EntityDeclaration family plus the GeneralScope declaration/directive members and the
+// first pattern node are done; the remaining interpolated-string/query/SyntaxTree members below
+// are still stubs).
 TEST(CSharp_OutputVisitor, VisitStubThrows) {
 	V h;
-	auto node = std::make_unique<RecursivePatternExpression>();
-	EXPECT_THROW(h.visitor->VisitRecursivePatternExpression(node.get()), std::logic_error);
+	auto node = std::make_unique<Interpolation>();
+	EXPECT_THROW(h.visitor->VisitInterpolation(node.get()), std::logic_error);
 }
 
 // ---- The implemented leaf Visit methods ------------------------------------
@@ -5752,5 +5755,108 @@ TEST(CSharp_OutputVisitor, VisitDocumentationReferenceOperator) {
 	ASSERT_NE(opKw, h.inner.calls.end()) << "the Operator case must write kw:operator";
 	auto opTok = std::find(opKw, h.inner.calls.end(), "tok:+");
 	ASSERT_NE(opTok, h.inner.calls.end()) << "the Addition operator must render its token tok:+";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// ---- VisitRecursivePatternExpression (D365, the first pattern node; the
+// `recursive_pattern ::= type? '{' pattern* '}' variable_designation?`
+// | `type? '(' pattern* ')' variable_designation?` -- C# grammar 11.2.5/11.2.6)
+// ------------------------------------------------------------------------
+
+// `VisitRecursivePatternExpression` over the bare `{ }` property form (the `IsPositional=false`
+// default, no `Type`, no `SubPatterns`, no `Designation`): the `else WriteToken(Tokens::LBrace)`
+// branch writes `tok:{` and the matching `else WriteToken(Tokens::RBrace)` writes `tok:}`. The
+// find-based ordering pins `start < tok:{ < tok:} < end` and asserts the parens are absent.
+TEST(CSharp_OutputVisitor, VisitRecursivePatternExpressionPropertyBare) {
+	V h;
+	auto node = std::make_unique<RecursivePatternExpression>();
+	h.visitor->VisitRecursivePatternExpression(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto lbrace = std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:{");
+	ASSERT_NE(lbrace, h.inner.calls.end()) << "the property form must open with tok:{";
+	auto rbrace = std::find(lbrace, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(rbrace, h.inner.calls.end()) << "the property form must close with tok:}";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+	ASSERT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:("), h.inner.calls.end())
+		<< "the property form must not use parens";
+	ASSERT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:)"), h.inner.calls.end())
+		<< "the property form must not use parens";
+}
+
+// `VisitRecursivePatternExpression` over the bare `( )` positional form (`IsPositional=true`, no
+// `Type`, no `SubPatterns`, no `Designation`): the `if IsPositional WriteToken(Tokens::LPar)`
+// branch writes `tok:(` and the matching `if IsPositional WriteToken(Tokens::RPar)` writes
+// `tok:)`. The find-based ordering pins `start < tok:( < tok:) < end` and asserts the braces are
+// absent.
+TEST(CSharp_OutputVisitor, VisitRecursivePatternExpressionPositionalBare) {
+	V h;
+	auto node = std::make_unique<RecursivePatternExpression>();
+	node->IsPositional(true);
+	h.visitor->VisitRecursivePatternExpression(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto lpar = std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:(");
+	ASSERT_NE(lpar, h.inner.calls.end()) << "the positional form must open with tok:(";
+	auto rpar = std::find(lpar, h.inner.calls.end(), "tok:)");
+	ASSERT_NE(rpar, h.inner.calls.end()) << "the positional form must close with tok:)";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+	ASSERT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:{"), h.inner.calls.end())
+		<< "the positional form must not use braces";
+	ASSERT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:}"), h.inner.calls.end())
+		<< "the positional form must not use braces";
+}
+
+// `VisitRecursivePatternExpression` over the positional form with two `SubPatterns` (`(a, b)`,
+// `IsPositional=true`): `WriteCommaSeparatedList` renders the first `IdentifierExpression`
+// (`id:a`), then a `Comma` (`tok:,`), then the second (`id:b`), all between `tok:(` and `tok:)`.
+// The find-based ordering pins `tok:( < id:a < tok:, < id:b < tok:)`.
+TEST(CSharp_OutputVisitor, VisitRecursivePatternExpressionPositionalWithSubPatterns) {
+	V h;
+	auto a = std::make_unique<IdentifierExpression>(std::string("a"));
+	auto b = std::make_unique<IdentifierExpression>(std::string("b"));
+	auto node = std::make_unique<RecursivePatternExpression>();
+	node->IsPositional(true);
+	node->SubPatterns().Add(a.get());
+	node->SubPatterns().Add(b.get());
+	h.visitor->VisitRecursivePatternExpression(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto lpar = std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:(");
+	ASSERT_NE(lpar, h.inner.calls.end()) << "the positional form must open with tok:(";
+	auto aTok = std::find(lpar, h.inner.calls.end(), "id:a");
+	ASSERT_NE(aTok, h.inner.calls.end()) << "the first sub-pattern must render after tok:(";
+	auto comma = std::find(aTok, h.inner.calls.end(), "tok:,");
+	ASSERT_NE(comma, h.inner.calls.end()) << "a comma must separate the two sub-patterns";
+	auto bTok = std::find(comma, h.inner.calls.end(), "id:b");
+	ASSERT_NE(bTok, h.inner.calls.end()) << "the second sub-pattern must render after the comma";
+	auto rpar = std::find(bTok, h.inner.calls.end(), "tok:)");
+	ASSERT_NE(rpar, h.inner.calls.end()) << "the positional form must close with tok:) after the sub-patterns";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitRecursivePatternExpression` over the property form with a `Type` and a `Designation`
+// (`Point { } x`, `IsPositional=false`): the optional `Type?.AcceptVisitor` renders first (the
+// `SimpleType` writes `id:Point`), then `tok:{`/`tok:}`, then -- because `Designation is not
+// null` -- a `Space` and the `Designation.AcceptVisitor` (the `SingleVariableDesignation` writes
+// `id:x`). The find-based ordering pins `id:Point < tok:{ < tok:} < id:x < end`.
+TEST(CSharp_OutputVisitor, VisitRecursivePatternExpressionPropertyWithTypeAndDesignation) {
+	V h;
+	auto type = std::make_unique<SimpleType>(std::string("Point"));
+	auto designation = std::make_unique<SingleVariableDesignation>(std::string("x"));
+	auto node = std::make_unique<RecursivePatternExpression>();
+	node->Type(type.get());
+	node->Designation(designation.get());
+	h.visitor->VisitRecursivePatternExpression(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto typeTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "id:Point");
+	ASSERT_NE(typeTok, h.inner.calls.end()) << "the Type must render first";
+	auto lbrace = std::find(typeTok, h.inner.calls.end(), "tok:{");
+	ASSERT_NE(lbrace, h.inner.calls.end()) << "the property form must open with tok:{ after the type";
+	auto rbrace = std::find(lbrace, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(rbrace, h.inner.calls.end()) << "the property form must close with tok:}";
+	auto desigTok = std::find(rbrace, h.inner.calls.end(), "id:x");
+	ASSERT_NE(desigTok, h.inner.calls.end()) << "the Designation must render after tok:}";
 	EXPECT_EQ(h.inner.calls.back(), "end");
 }
