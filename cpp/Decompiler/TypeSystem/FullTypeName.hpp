@@ -26,6 +26,7 @@
 
 #include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
 
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -54,6 +55,26 @@ public:
     std::string ReflectionName() const;
     std::string FullName() const;
     int TypeParameterCount() const;
+
+    // The name of the nested type at the given nesting level (the C#
+    // `GetNestedTypeName`). Throws if this is not a nested type (the C# throws
+    // `InvalidOperationException` when `nestedTypes == null`; the C++ `nested_`
+    // is empty for a top-level name).
+    std::string GetNestedTypeName(int nestingLevel) const {
+        if (nested_.empty())
+            throw std::logic_error("FullTypeName::GetNestedTypeName: not a nested type");
+        return nested_[nestingLevel].Name;
+    }
+
+    // The number of additional type parameters of the nested type at the given
+    // level (the C# `GetNestedTypeAdditionalTypeParameterCount`). Throws if this
+    // is not a nested type, mirroring the C# `InvalidOperationException`.
+    int GetNestedTypeAdditionalTypeParameterCount(int nestingLevel) const {
+        if (nested_.empty())
+            throw std::logic_error(
+                "FullTypeName::GetNestedTypeAdditionalTypeParameterCount: not a nested type");
+        return nested_[nestingLevel].AdditionalTypeParameterCount;
+    }
 
     bool operator==(const FullTypeName& o) const noexcept {
         return topLevel_ == o.topLevel_ && nested_ == o.nested_;

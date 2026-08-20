@@ -46,6 +46,8 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/IModule_Test.cpp
     Decompiler/TypeSystem/StringComparer_Test.cpp
     Decompiler/TypeSystem/ICompilation_Test.cpp
+    Decompiler/TypeSystem/TopLevelTypeNameComparer_Test.cpp
+    Decompiler/TypeSystem/FullTypeNameComparer_Test.cpp
     Decompiler/Output/IAmbience_Test.cpp
     Decompiler/IL/ILAst_Test.cpp
     Decompiler/IL/ILAstInstructions_Test.cpp
