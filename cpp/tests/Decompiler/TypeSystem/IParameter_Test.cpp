@@ -39,6 +39,7 @@
 // dropped when the real headers land.
 
 #include "Decompiler/TypeSystem/IParameter.hpp"
+#include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/SymbolKind.hpp"
@@ -54,14 +55,9 @@
 
 namespace ILSpy::Decompiler::TypeSystem {
 
-// Minimal test stand-in for `IAttribute` (the attribute interface). Only a virtual
-// destructor; the real `IAttribute` pulls `IType` / `IMethod` and the
-// `CustomAttributeTypedArgument` / `CustomAttributeNamedArgument` value-argument structs.
-// IDENTICAL to the stand-in in `IEntity_Test.cpp` (ODR-safe across translation units).
-class IAttribute {
-public:
-    virtual ~IAttribute() = default;
-};
+// `IAttribute` is now the real port (cpp/Decompiler/TypeSystem/IAttribute.hpp, D386);
+// it is included above rather than forward-declared as a stand-in. `IMethod` (its
+// `Constructor` slot return type) remains forward-declared inside `IAttribute.hpp`.
 
 // Minimal test stand-in for `IParameterizedMember` (the method/property base). Only a
 // virtual destructor; the real `IParameterizedMember` pulls `IMember` (which needs
@@ -88,12 +84,26 @@ private:
 };
 
 // A minimal concrete `IAttribute` for testing (identity-testable via pointer compare).
+// Derives from the real `IAttribute` (D386) and implements every pure-virtual with simple
+// defaults (`AttributeType` returns a `KnownType(Object)` by reference, `Constructor` is
+// null, `HasDecodeErrors` is false, the argument vectors are empty); the test-specific `id()`
+// accessor and `id_` member are kept so the existing `GetAttributes` pointer-identity tests
+// continue to work.
 class TestAttribute : public ILSpy::Decompiler::TypeSystem::IAttribute {
 public:
-    explicit TestAttribute(int id) : id_(id) {}
+    explicit TestAttribute(int id) : id_(id), attributeType_(ILSpy::Decompiler::TypeSystem::KnownTypeCode::Object) {}
     int id() const { return id_; }
+
+    // --- IAttribute ---
+    const ILSpy::Decompiler::TypeSystem::IType& AttributeType() const override { return attributeType_; }
+    const ILSpy::Decompiler::TypeSystem::IMethod* Constructor() const override { return nullptr; }
+    bool HasDecodeErrors() const override { return false; }
+    std::vector<ILSpy::Decompiler::TypeSystem::CustomAttributeTypedArgument> FixedArguments() const override { return {}; }
+    std::vector<ILSpy::Decompiler::TypeSystem::CustomAttributeNamedArgument> NamedArguments() const override { return {}; }
+
 private:
     int id_;
+    ILSpy::Decompiler::TypeSystem::KnownType attributeType_;
 };
 
 // A minimal concrete `IParameter` for testing: holds the configured scalar/pointer state

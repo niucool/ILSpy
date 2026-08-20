@@ -37,6 +37,7 @@
 // stand-ins are the sole definitions (ODR-safe for the test executable).
 
 #include "Decompiler/TypeSystem/IEntity.hpp"
+#include "Decompiler/TypeSystem/IAttribute.hpp"
 
 #include <gtest/gtest.h>
 
@@ -66,13 +67,9 @@ public:
     virtual ~IModule() = default;
 };
 
-// Minimal test stand-in for `IAttribute` (the attribute interface). Only a virtual
-// destructor; the real `IAttribute` pulls `IType` / `IMethod` and the
-// `CustomAttributeTypedArgument` / `CustomAttributeNamedArgument` value-argument structs.
-class IAttribute {
-public:
-    virtual ~IAttribute() = default;
-};
+// `IAttribute` is now the real port (cpp/Decompiler/TypeSystem/IAttribute.hpp, D386); it
+// is included above rather than forward-declared as a stand-in. `IMethod` (its `Constructor`
+// slot return type) remains forward-declared inside `IAttribute.hpp`.
 
 // Minimal test stand-in for `ICompilation` (the parent compilation interface). Only a
 // virtual destructor is declared here -- this is the complete type the inherited
@@ -111,13 +108,29 @@ private:
     std::string assemblyName_;
 };
 
-// A minimal concrete `IAttribute` for testing.
+// A minimal concrete `IAttribute` for testing. Derives from the real `IAttribute` (D386)
+// and implements every pure-virtual: `AttributeType` returns a `KnownType(Object)` by
+// reference (the non-null owned-type convention), `Constructor` is null (no resolved ctor in
+// these tests), `HasDecodeErrors` is false, and the argument vectors are empty. The test-
+// specific `Kind()` accessor and `KnownAttribute kind_` member are kept so the existing
+// `HasAttribute` / `GetAttribute` tests (which classify attributes by `KnownAttribute`)
+// continue to work.
 class TestAttribute : public ILSpy::Decompiler::TypeSystem::IAttribute {
 public:
-    explicit TestAttribute(ILSpy::Decompiler::TypeSystem::KnownAttribute kind) : kind_(kind) {}
+    explicit TestAttribute(ILSpy::Decompiler::TypeSystem::KnownAttribute kind)
+        : kind_(kind), attributeType_(ILSpy::Decompiler::TypeSystem::KnownTypeCode::Object) {}
     ILSpy::Decompiler::TypeSystem::KnownAttribute Kind() const { return kind_; }
+
+    // --- IAttribute ---
+    const ILSpy::Decompiler::TypeSystem::IType& AttributeType() const override { return attributeType_; }
+    const ILSpy::Decompiler::TypeSystem::IMethod* Constructor() const override { return nullptr; }
+    bool HasDecodeErrors() const override { return false; }
+    std::vector<ILSpy::Decompiler::TypeSystem::CustomAttributeTypedArgument> FixedArguments() const override { return {}; }
+    std::vector<ILSpy::Decompiler::TypeSystem::CustomAttributeNamedArgument> NamedArguments() const override { return {}; }
+
 private:
     ILSpy::Decompiler::TypeSystem::KnownAttribute kind_;
+    ILSpy::Decompiler::TypeSystem::KnownType attributeType_;
 };
 
 // A minimal concrete `ICompilation` stand-in so the inherited `ICompilationProvider`
