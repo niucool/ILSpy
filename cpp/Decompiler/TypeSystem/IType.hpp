@@ -378,6 +378,88 @@ private:
     std::vector<ReferenceKind> parameterReferenceKinds_;
 };
 
+// A C# 7 tuple type (`(int, string)`, `(int x, string y)`): a tuple built atop an underlying
+// `System.ValueTuple<...>` parameterized type. The C# `TupleType : AbstractType,
+// ICompilationProvider` holds the `ICompilation` it was built from and constructs its
+// `UnderlyingType` (the `System.ValueTuple<...>` chain) at ctor time via the recursive
+// `CreateUnderlyingType` / `FindValueTupleType` helpers (which call `ICompilation.FindType` at
+// runtime, threading 8-ary `ValueTuple<T1..T7,TRest>` nesting through `RestPosition = 8`).
+// The minimal port flattens `AbstractType` to a direct `: IType` derivation (the
+// D401/D402/D404 flatten-AbstractType precedent) and DEFERS the `CreateUnderlyingType` /
+// `FindValueTupleType` recursion by accepting an ALREADY-BUILT `UnderlyingType` as a ctor
+// parameter -- the caller (a future port of the `TupleType` ctor or `FromUnderlyingType` /
+// the type-resolution stage) builds the `System.ValueTuple<...>` `ParameterizedType` and
+// hands it in, so this minimal leaf needs no `ICompilation` at construction. The `Compilation`
+// property (the `ICompilationProvider` surface the C# `TupleType` implements), the static
+// `IsTupleCompatible` / `FromUnderlyingType` / `GetTupleElementTypes` helpers, the
+// `GetHashCode` / `ToString` / member-access delegations (`GetMethods` / `GetProperties` /
+// `GetFields` / ... forward to `UnderlyingType`), and the `AcceptVisitor` / `VisitChildren`
+// `TypeVisitor` dispatch (this is the fourth and final concrete leaf toward `TypeVisitor` /
+// `TypeParameterSubstitution`) land with the rest of Phase 2; this minimal leaf lands ONLY the
+// concrete type so the not-yet-ported `TypeVisitor` / `TypeParameterSubstitution` can reference it.
+// `Kind()` is `TypeKind::Tuple` (a unique discriminator, unlike `NullabilityAnnotatedType` D402
+// whose `Kind` delegates to its base -- so a `TupleType`-vs-non-`TupleType` comparison
+// short-circuits in `IType::Equals` before `StructuralEquals`, no UB). `Name()` / `ReflectionName()`
+// delegate to the `UnderlyingType` verbatim (the C# `FullName` / `Name` / `ReflectionName` /
+// `Namespace` all delegate to `UnderlyingType`); `TypeParameterCount()` is `0` (the C#
+// `TupleType` overrides it to `0`, distinct from the underlying `ValueTuple<...>` which has
+// arity 8 -- the tuple's own type-parameter count is 0, the arity lives on the underlying type).
+// `Equals` (via `IType::Equals` -> `StructuralEquals`) compares `UnderlyingType.Equals` AND
+// `ElementNames` element-wise, faithful to the C# `Equals(IType)` override (de-duplicated: the C#
+// source calls `UnderlyingType.Equals(o.UnderlyingType)` twice -- a redundant source quirk; the
+// effective condition is `UnderlyingType.Equals(o.UnderlyingType) && ElementNames.SequenceEqual`).
+class TupleType : public IType {
+public:
+    // The ctor takes a PRE-BUILT `underlyingType` (the `System.ValueTuple<...>` parameterized
+    // type), the tuple `elementTypes`, and the optional `elementNames` (empty strings for
+    // unnamed elements). An empty `elementNames` is the "not provided" sentinel (the C#
+    // `default(ImmutableArray<string>)`): it is filled with empty strings matching
+    // `elementTypes.size()`, mirroring the C# ctor's `Enumerable.Repeat<string>(null, ...)`.
+    TupleType(ITypePtr underlyingType, std::vector<ITypePtr> elementTypes,
+              std::vector<std::string> elementNames = {})
+        : underlyingType_(std::move(underlyingType)),
+          elementTypes_(std::move(elementTypes)),
+          elementNames_(std::move(elementNames))
+    {
+        if (elementNames_.empty() && !elementTypes_.empty()) {
+            elementNames_.assign(elementTypes_.size(), std::string());
+        }
+        // The C# `Debug.Assert(elementNames.Length == elementTypes.Length)` when names are
+        // provided -- a non-empty names vector must match the element count.
+        assert(elementNames_.empty() || elementNames_.size() == elementTypes_.size());
+    }
+    TypeKind Kind() const override { return TypeKind::Tuple; }
+    // The C# `Name` / `ReflectionName` / `FullName` / `Namespace` delegate to `UnderlyingType`.
+    std::string Name() const override {
+        return underlyingType_ ? underlyingType_->Name() : std::string();
+    }
+    std::string ReflectionName() const override {
+        return underlyingType_ ? underlyingType_->ReflectionName() : std::string();
+    }
+    int TypeParameterCount() const override { return 0; }
+    // The C# `Cardinality => ElementTypes.Length`.
+    int Cardinality() const noexcept { return static_cast<int>(elementTypes_.size()); }
+    const std::vector<ITypePtr>& ElementTypes() const noexcept { return elementTypes_; }
+    const std::vector<std::string>& ElementNames() const noexcept { return elementNames_; }
+    const ITypePtr& UnderlyingType() const noexcept { return underlyingType_; }
+protected:
+    bool StructuralEquals(const IType& other) const override {
+        const auto& o = static_cast<const TupleType&>(other);
+        // The C# `Equals`: `UnderlyingType.Equals(o.UnderlyingType) && ElementNames.SequenceEqual`.
+        if (!underlyingType_ || !o.underlyingType_) return underlyingType_ == o.underlyingType_;
+        if (!underlyingType_->Equals(*o.underlyingType_)) return false;
+        if (elementNames_.size() != o.elementNames_.size()) return false;
+        for (std::size_t i = 0; i < elementNames_.size(); ++i) {
+            if (elementNames_[i] != o.elementNames_[i]) return false;
+        }
+        return true;
+    }
+private:
+    ITypePtr underlyingType_;
+    std::vector<ITypePtr> elementTypes_;
+    std::vector<std::string> elementNames_;
+};
+
 // Convenience: the UnknownType null object.
 inline ITypePtr UnknownType() { return std::make_shared<SpecialType>(TypeKind::Unknown); }
 
