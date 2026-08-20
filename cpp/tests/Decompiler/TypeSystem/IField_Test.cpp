@@ -39,6 +39,7 @@
 // (ODR-safe across translation units); `IAttribute` is the real port (D386), included below.
 
 #include "Decompiler/TypeSystem/IField.hpp"
+#include "Decompiler/TypeSystem/TestCompilationStubs.hpp"
 #include "Decompiler/TypeSystem/IMember.hpp"
 #include "Decompiler/TypeSystem/IVariable.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
@@ -56,30 +57,60 @@
 #include <utility>
 #include <vector>
 
-namespace ILSpy::Decompiler::TypeSystem {
-
-// Minimal test stand-in for `ICompilation` (the parent compilation interface). IDENTICAL to the
-// stand-in in `ICompilationProvider_Test.cpp` / `IEntity_Test.cpp` / `ITypeParameter_Test.cpp` /
-// `IMember_Test.cpp` (a virtual destructor only); the identical class definitions across
-// translation units satisfy the One Definition Rule. Replaced by the real `ICompilation.hpp`
-// when that lands.
-class ICompilation {
-public:
-    virtual ~ICompilation() = default;
-};
-
-} // namespace ILSpy::Decompiler::TypeSystem
-
 namespace {
 
 // A minimal concrete `ICompilation` stand-in so the inherited `ICompilationProvider` base can
 // return a compilation (the D379 test stand-in pattern).
 class TestCompilation : public ILSpy::Decompiler::TypeSystem::ICompilation {
 public:
-    explicit TestCompilation(int id) : id_(id) {}
+    explicit TestCompilation(int id) : id_(id), mainModule_(*this) {}
+
     int id() const { return id_; }
+
+    const ILSpy::Decompiler::TypeSystem::IModule& MainModule() const override
+    {
+        return mainModule_;
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IModule*> Modules() const override
+    {
+        return {&mainModule_};
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IModule*> ReferencedModules() const override
+    {
+        return {};
+    }
+    const ILSpy::Decompiler::TypeSystem::INamespace& RootNamespace() const override
+    {
+        return mainModule_.RootNamespace();
+    }
+    const ILSpy::Decompiler::TypeSystem::INamespace* GetNamespaceForExternAlias(
+        const std::string&) const override
+    {
+        return nullptr;
+    }
+    const ILSpy::Decompiler::TypeSystem::IType& FindType(
+        ILSpy::Decompiler::TypeSystem::KnownTypeCode) const override
+    {
+        return knownType_;
+    }
+    const ILSpy::Decompiler::TypeSystem::StringComparer& NameComparer() const override
+    {
+        return ILSpy::Decompiler::TypeSystem::StringComparer::Ordinal();
+    }
+    const ILSpy::Decompiler::Util::CacheManager& CacheManager() const override
+    {
+        return cacheManager_;
+    }
+    ILSpy::Decompiler::TypeSystem::TypeSystemOptions TypeSystemOptions() const override
+    {
+        return ILSpy::Decompiler::TypeSystem::TypeSystemOptions::None;
+    }
+
 private:
     int id_;
+    ILSpy::Decompiler::TypeSystem::TestSupport::TestModule mainModule_;
+    ILSpy::Decompiler::TypeSystem::KnownType knownType_{ILSpy::Decompiler::TypeSystem::KnownTypeCode::Object};
+    ILSpy::Decompiler::Util::CacheManager cacheManager_;
 };
 
 // A minimal concrete `IAttribute` for testing. Derives from the real `IAttribute` (D386) and

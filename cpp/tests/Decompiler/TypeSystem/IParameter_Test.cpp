@@ -39,6 +39,7 @@
 // dropped when the real headers land.
 
 #include "Decompiler/TypeSystem/IParameter.hpp"
+#include "Decompiler/TypeSystem/TestCompilationStubs.hpp"
 #include "Decompiler/TypeSystem/IParameterizedMember.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -55,43 +56,60 @@
 #include <utility>
 #include <vector>
 
-namespace ILSpy::Decompiler::TypeSystem {
-
-// `IAttribute` is now the real port (cpp/Decompiler/TypeSystem/IAttribute.hpp, D386);
-// it is included above rather than forward-declared as a stand-in. `IMethod` (its
-// `Constructor` slot return type) remains forward-declared inside `IAttribute.hpp`.
-// `IParameterizedMember` is now the real port (cpp/Decompiler/TypeSystem/IParameterizedMember.hpp,
-// D388); it is included above rather than forward-declared as a stand-in. Its base `IMember`
-// (which forward-declares `TypeParameterSubstitution` / `TypeVisitor`) is pulled in
-// transitively, so the reconciled `TestParameterizedMember` stub below derives from the real
-// interface and overrides every pure-virtual (the documented stand-in-reconciliation step,
-// the D386 `IAttribute`-stand-in-reconciliation precedent).
-
-// Minimal test stand-in for `ICompilation` (the parent compilation interface). IDENTICAL to
-// the stand-in in `ICompilationProvider_Test.cpp` / `IEntity_Test.cpp` / `ITypeParameter_Test.cpp`
-// / `IMember_Test.cpp` / `IParameterizedMember_Test.cpp` (a virtual destructor only); the
-// identical class definitions across translation units satisfy the One Definition Rule.
-// Replaced by the real `ICompilation.hpp` when that lands. Required here because the
-// reconciled `TestParameterizedMember` (deriving from the real `IParameterizedMember` ->
-// `IMember` -> `IEntity` -> `ICompilationProvider`) must override `Compilation()` returning
-// `const ICompilation&`, which needs a complete `ICompilation` to bind to.
-class ICompilation {
-public:
-    virtual ~ICompilation() = default;
-};
-
-} // namespace ILSpy::Decompiler::TypeSystem
-
 namespace {
 
 // A minimal concrete `ICompilation` stand-in so the reconciled `TestParameterizedMember`
 // can hold and return a compilation (the D379 test stand-in pattern).
 class TestCompilation : public ILSpy::Decompiler::TypeSystem::ICompilation {
 public:
-    explicit TestCompilation(int id) : id_(id) {}
+    explicit TestCompilation(int id) : id_(id), mainModule_(*this) {}
+
     int id() const { return id_; }
+
+    const ILSpy::Decompiler::TypeSystem::IModule& MainModule() const override
+    {
+        return mainModule_;
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IModule*> Modules() const override
+    {
+        return {&mainModule_};
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IModule*> ReferencedModules() const override
+    {
+        return {};
+    }
+    const ILSpy::Decompiler::TypeSystem::INamespace& RootNamespace() const override
+    {
+        return mainModule_.RootNamespace();
+    }
+    const ILSpy::Decompiler::TypeSystem::INamespace* GetNamespaceForExternAlias(
+        const std::string&) const override
+    {
+        return nullptr;
+    }
+    const ILSpy::Decompiler::TypeSystem::IType& FindType(
+        ILSpy::Decompiler::TypeSystem::KnownTypeCode) const override
+    {
+        return knownType_;
+    }
+    const ILSpy::Decompiler::TypeSystem::StringComparer& NameComparer() const override
+    {
+        return ILSpy::Decompiler::TypeSystem::StringComparer::Ordinal();
+    }
+    const ILSpy::Decompiler::Util::CacheManager& CacheManager() const override
+    {
+        return cacheManager_;
+    }
+    ILSpy::Decompiler::TypeSystem::TypeSystemOptions TypeSystemOptions() const override
+    {
+        return ILSpy::Decompiler::TypeSystem::TypeSystemOptions::None;
+    }
+
 private:
     int id_;
+    ILSpy::Decompiler::TypeSystem::TestSupport::TestModule mainModule_;
+    ILSpy::Decompiler::TypeSystem::KnownType knownType_{ILSpy::Decompiler::TypeSystem::KnownTypeCode::Object};
+    ILSpy::Decompiler::Util::CacheManager cacheManager_;
 };
 
 // A concrete `IParameterizedMember` for testing (identity-testable via pointer compare).

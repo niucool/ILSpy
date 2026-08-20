@@ -36,6 +36,7 @@
 // stand-in is the sole definition (ODR-safe for the test executable).
 
 #include "Decompiler/TypeSystem/ICompilationProvider.hpp"
+#include "Decompiler/TypeSystem/TestCompilationStubs.hpp"
 
 #include <gtest/gtest.h>
 
@@ -43,32 +44,60 @@
 #include <type_traits>
 #include <utility>
 
-namespace ILSpy::Decompiler::TypeSystem {
-
-// Minimal test stand-in for `ICompilation` (the parent compilation interface). Only a
-// virtual destructor is declared here -- this is the complete type the
-// `ICompilationProvider::Compilation()` reference return needs to bind to, NOT a faithful
-// port of the full `ICompilation` surface. Replaced by the real `ICompilation.hpp` when
-// that lands.
-class ICompilation {
-public:
-    virtual ~ICompilation() = default;
-};
-
-} // namespace ILSpy::Decompiler::TypeSystem
-
 namespace {
 
 // A minimal concrete `ICompilation` for testing: a marker object the
 // `TestCompilationProvider` can hold and return (identity-testable via pointer compare).
 class TestCompilation : public ILSpy::Decompiler::TypeSystem::ICompilation {
 public:
-    explicit TestCompilation(int id) : id_(id) {}
+    explicit TestCompilation(int id) : id_(id), mainModule_(*this) {}
 
     int id() const { return id_; }
 
+    const ILSpy::Decompiler::TypeSystem::IModule& MainModule() const override
+    {
+        return mainModule_;
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IModule*> Modules() const override
+    {
+        return {&mainModule_};
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IModule*> ReferencedModules() const override
+    {
+        return {};
+    }
+    const ILSpy::Decompiler::TypeSystem::INamespace& RootNamespace() const override
+    {
+        return mainModule_.RootNamespace();
+    }
+    const ILSpy::Decompiler::TypeSystem::INamespace* GetNamespaceForExternAlias(
+        const std::string&) const override
+    {
+        return nullptr;
+    }
+    const ILSpy::Decompiler::TypeSystem::IType& FindType(
+        ILSpy::Decompiler::TypeSystem::KnownTypeCode) const override
+    {
+        return knownType_;
+    }
+    const ILSpy::Decompiler::TypeSystem::StringComparer& NameComparer() const override
+    {
+        return ILSpy::Decompiler::TypeSystem::StringComparer::Ordinal();
+    }
+    const ILSpy::Decompiler::Util::CacheManager& CacheManager() const override
+    {
+        return cacheManager_;
+    }
+    ILSpy::Decompiler::TypeSystem::TypeSystemOptions TypeSystemOptions() const override
+    {
+        return ILSpy::Decompiler::TypeSystem::TypeSystemOptions::None;
+    }
+
 private:
     int id_;
+    ILSpy::Decompiler::TypeSystem::TestSupport::TestModule mainModule_;
+    ILSpy::Decompiler::TypeSystem::KnownType knownType_{ILSpy::Decompiler::TypeSystem::KnownTypeCode::Object};
+    ILSpy::Decompiler::Util::CacheManager cacheManager_;
 };
 
 // A minimal concrete `ICompilationProvider` for testing: holds a reference to a

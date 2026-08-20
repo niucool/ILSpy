@@ -37,6 +37,7 @@
 // stand-ins are the sole definitions (ODR-safe for the test executable).
 
 #include "Decompiler/TypeSystem/IEntity.hpp"
+#include "Decompiler/TypeSystem/TestCompilationStubs.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/IModule.hpp"
@@ -50,43 +51,6 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
-
-namespace ILSpy::Decompiler::TypeSystem {
-
-// `ITypeDefinition` is now the real port (cpp/Decompiler/TypeSystem/ITypeDefinition.hpp,
-// D393); it is included above rather than forward-declared as a stand-in. The
-// `TestTypeDefinition` stub below derives from the real `ITypeDefinition` and overrides
-// every pure-virtual with a trivial return (it is constructed only for pointer-identity via
-// `id()` -- no `ITypeDefinition` accessor is read through it in these tests).
-
-// `IModule` is now the real port (cpp/Decompiler/TypeSystem/IModule.hpp, D396); it is
-// included above rather than forward-declared as a stand-in. The `TestModule` stub below
-// derives from the real `IModule` and overrides every pure-virtual (it is constructed for
-// `ParentModule` pointer-identity and its `AssemblyName` is read). Its `Compilation()` and
-// `RootNamespace()` are declared here and defined out-of-line (after `TestCompilation` and
-// a `TestNamespace` stub are complete) because they return `const ICompilation&` / `const
-// INamespace&` references backed by function-local singletons.
-
-// `IAttribute` is now the real port (cpp/Decompiler/TypeSystem/IAttribute.hpp, D386); it
-// is included above rather than forward-declared as a stand-in. `IMethod` (its `Constructor`
-// slot return type) remains forward-declared inside `IAttribute.hpp`.
-
-// Minimal test stand-in for `ICompilation` (the parent compilation interface). Only a
-// virtual destructor is declared here -- this is the complete type the inherited
-// `ICompilationProvider::Compilation()` reference return needs to bind to so the
-// `TestEntity` stub can hold and return a concrete `TestCompilation`, NOT a faithful port
-// of the full `ICompilation` surface (which pulls `IModule` / `INamespace` / `IType` /
-// `KnownTypeCode` / `CacheManager` / `TypeSystemOptions` / `StringComparer`). This stand-in
-// is IDENTICAL to the one in `ICompilationProvider_Test.cpp`; the two identical class
-// definitions across translation units satisfy the One Definition Rule (a class type may
-// be defined identically in multiple TUs, as a header is), so both test files coexist in
-// the `ilspy_tests` executable. Replaced by the real `ICompilation.hpp` when that lands.
-class ICompilation {
-public:
-    virtual ~ICompilation() = default;
-};
-
-} // namespace ILSpy::Decompiler::TypeSystem
 
 namespace {
 
@@ -244,10 +208,54 @@ private:
 // base can return a compilation (the D379 test stand-in pattern).
 class TestCompilation : public ILSpy::Decompiler::TypeSystem::ICompilation {
 public:
-    explicit TestCompilation(int id) : id_(id) {}
+    explicit TestCompilation(int id) : id_(id), mainModule_(*this) {}
+
     int id() const { return id_; }
+
+    const ILSpy::Decompiler::TypeSystem::IModule& MainModule() const override
+    {
+        return mainModule_;
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IModule*> Modules() const override
+    {
+        return {&mainModule_};
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IModule*> ReferencedModules() const override
+    {
+        return {};
+    }
+    const ILSpy::Decompiler::TypeSystem::INamespace& RootNamespace() const override
+    {
+        return mainModule_.RootNamespace();
+    }
+    const ILSpy::Decompiler::TypeSystem::INamespace* GetNamespaceForExternAlias(
+        const std::string&) const override
+    {
+        return nullptr;
+    }
+    const ILSpy::Decompiler::TypeSystem::IType& FindType(
+        ILSpy::Decompiler::TypeSystem::KnownTypeCode) const override
+    {
+        return knownType_;
+    }
+    const ILSpy::Decompiler::TypeSystem::StringComparer& NameComparer() const override
+    {
+        return ILSpy::Decompiler::TypeSystem::StringComparer::Ordinal();
+    }
+    const ILSpy::Decompiler::Util::CacheManager& CacheManager() const override
+    {
+        return cacheManager_;
+    }
+    ILSpy::Decompiler::TypeSystem::TypeSystemOptions TypeSystemOptions() const override
+    {
+        return ILSpy::Decompiler::TypeSystem::TypeSystemOptions::None;
+    }
+
 private:
     int id_;
+    ILSpy::Decompiler::TypeSystem::TestSupport::TestModule mainModule_;
+    ILSpy::Decompiler::TypeSystem::KnownType knownType_{ILSpy::Decompiler::TypeSystem::KnownTypeCode::Object};
+    ILSpy::Decompiler::Util::CacheManager cacheManager_;
 };
 
 // Out-of-line `TestTypeDefinition::Compilation()` (declared above): returns a reference to a

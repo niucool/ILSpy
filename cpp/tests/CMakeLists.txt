@@ -45,6 +45,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/Version_Test.cpp
     Decompiler/TypeSystem/IModule_Test.cpp
     Decompiler/TypeSystem/StringComparer_Test.cpp
+    Decompiler/TypeSystem/ICompilation_Test.cpp
     Decompiler/Output/IAmbience_Test.cpp
     Decompiler/IL/ILAst_Test.cpp
     Decompiler/IL/ILAstInstructions_Test.cpp
@@ -216,6 +217,7 @@ add_executable(ilspy_tests
     Decompiler/IL/Transforms/CopyPropagation_Test.cpp
     Decompiler/IL/Transforms/ReduceNestingTransform_Test.cpp
 )
+target_include_directories(ilspy_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ilspy_tests PRIVATE
     ILSpy::ilspy
     GTest::gtest

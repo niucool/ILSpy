@@ -35,6 +35,7 @@
 // (D386), both included above.
 
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
+#include "Decompiler/TypeSystem/TestCompilationStubs.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/IModule.hpp"
 #include "Decompiler/TypeSystem/TypeConstraint.hpp"
@@ -51,29 +52,6 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
-
-namespace ILSpy::Decompiler::TypeSystem {
-
-// `ITypeDefinition` is now the real port (cpp/Decompiler/TypeSystem/ITypeDefinition.hpp, D393),
-// included above; the `TestTypeDefinition` stub below derives from it (it is never instantiated,
-// so it stays abstract and overrides nothing).
-
-// `IModule` is now the real port (cpp/Decompiler/TypeSystem/IModule.hpp, D396), included
-// above; the `TestModule` stub below derives from it (it is never instantiated, so it stays
-// abstract and overrides nothing).
-
-// `IAttribute` is now the real port (cpp/Decompiler/TypeSystem/IAttribute.hpp, D386);
-// it is included above rather than forward-declared as a stand-in. `IMethod` (its
-// `Constructor` slot return type) remains forward-declared inside `IAttribute.hpp`.
-
-// Minimal test stand-in for `ICompilation` -- IDENTICAL to the stand-in in `IEntity_Test.cpp`
-// (ODR-safe across translation units).
-class ICompilation {
-public:
-    virtual ~ICompilation() = default;
-};
-
-} // namespace ILSpy::Decompiler::TypeSystem
 
 namespace {
 
@@ -118,10 +96,54 @@ private:
 // return a compilation (the D379 test stand-in pattern).
 class TestCompilation : public ILSpy::Decompiler::TypeSystem::ICompilation {
 public:
-    explicit TestCompilation(int id) : id_(id) {}
+    explicit TestCompilation(int id) : id_(id), mainModule_(*this) {}
+
     int id() const { return id_; }
+
+    const ILSpy::Decompiler::TypeSystem::IModule& MainModule() const override
+    {
+        return mainModule_;
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IModule*> Modules() const override
+    {
+        return {&mainModule_};
+    }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IModule*> ReferencedModules() const override
+    {
+        return {};
+    }
+    const ILSpy::Decompiler::TypeSystem::INamespace& RootNamespace() const override
+    {
+        return mainModule_.RootNamespace();
+    }
+    const ILSpy::Decompiler::TypeSystem::INamespace* GetNamespaceForExternAlias(
+        const std::string&) const override
+    {
+        return nullptr;
+    }
+    const ILSpy::Decompiler::TypeSystem::IType& FindType(
+        ILSpy::Decompiler::TypeSystem::KnownTypeCode) const override
+    {
+        return knownType_;
+    }
+    const ILSpy::Decompiler::TypeSystem::StringComparer& NameComparer() const override
+    {
+        return ILSpy::Decompiler::TypeSystem::StringComparer::Ordinal();
+    }
+    const ILSpy::Decompiler::Util::CacheManager& CacheManager() const override
+    {
+        return cacheManager_;
+    }
+    ILSpy::Decompiler::TypeSystem::TypeSystemOptions TypeSystemOptions() const override
+    {
+        return ILSpy::Decompiler::TypeSystem::TypeSystemOptions::None;
+    }
+
 private:
     int id_;
+    ILSpy::Decompiler::TypeSystem::TestSupport::TestModule mainModule_;
+    ILSpy::Decompiler::TypeSystem::KnownType knownType_{ILSpy::Decompiler::TypeSystem::KnownTypeCode::Object};
+    ILSpy::Decompiler::Util::CacheManager cacheManager_;
 };
 
 // A minimal concrete `IEntity` for testing the `Owner` slot: holds the configured state and
