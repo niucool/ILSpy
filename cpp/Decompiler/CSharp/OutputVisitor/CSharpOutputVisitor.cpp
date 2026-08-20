@@ -49,6 +49,7 @@
 #include "Decompiler/CSharp/Syntax/UsingDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ExternAliasDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/DelegateDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/NamespaceDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
@@ -2356,7 +2357,59 @@ void CSharpOutputVisitor::VisitDelegateDeclaration(Syntax::DelegateDeclaration* 
 	EndNode(delegateDeclaration);
 }
 void CSharpOutputVisitor::VisitTypeDeclaration(Syntax::TypeDeclaration*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitNamespaceDeclaration(Syntax::NamespaceDeclaration*) { NotImplemented(); }
+
+// The C# `void MaybeNewLinesAfterUsings(AstNode node)` (line 2722) -- after a `using`/`using
+// alias` directive that is NOT followed by another `using`/`using alias` sibling, emit
+// `MinimumBlankLinesAfterUsings` blank lines. The C# `node is UsingDeclaration || node is
+// UsingAliasDeclaration` type-test ports to a `dynamic_cast` pair; the C# `nextSibling is
+// UsingDeclaration || nextSibling is UsingAliasDeclaration` (where a null `nextSibling`
+// short-circuits the C# `is` to false) ports to a null-guarded `dynamic_cast` pair. A no-op
+// under the default `CSharpFormattingOptions{}` (`MinimumBlankLinesAfterUsings == 0`).
+void CSharpOutputVisitor::MaybeNewLinesAfterUsings(Syntax::AstNode* node) {
+	Syntax::AstNode* nextSibling = node->NextSibling();
+	bool nodeIsUsing = dynamic_cast<Syntax::UsingDeclaration*>(node) != nullptr
+		|| dynamic_cast<Syntax::UsingAliasDeclaration*>(node) != nullptr;
+	bool nextIsUsing = nextSibling != nullptr
+		&& (dynamic_cast<Syntax::UsingDeclaration*>(nextSibling) != nullptr
+			|| dynamic_cast<Syntax::UsingAliasDeclaration*>(nextSibling) != nullptr);
+	if (nodeIsUsing && !nextIsUsing) {
+		for (int i = 0; i < policy_.MinimumBlankLinesAfterUsings; ++i)
+			NewLine();
+	}
+}
+
+void CSharpOutputVisitor::VisitNamespaceDeclaration(Syntax::NamespaceDeclaration* namespaceDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitNamespaceDeclaration (line 1534):
+	// `namespace Name { Members }` (block-scoped) or `namespace Name;` (C# 10 file-scoped) -- the
+	// `namespace_declaration` (C# grammar 14.3). The `NamespaceName` is a REQUIRED `AstType` (the C#
+	// calls `NamespaceName.AcceptVisitor(this)` with no `?.`, so NO nullptr guard -- the D357
+	// VisitAttribute required-slot precedent); the lazy `Members` collection snapshots via the
+	// D325 `ToVector` helper before the `foreach` loop (the collection is not mutated during the
+	// visit; `MaybeNewLinesAfterUsings` reads each member's `NextSibling`, which is unchanged by
+	// the snapshot). The file-scoped form (`IsFileScoped`) closes with `Semicolon` + `NewLine`
+	// (no braces); the block form opens with `OpenBrace(NamespaceBraceStyle)`, recurses the
+	// members (each followed by `MaybeNewLinesAfterUsings`), then `CloseBrace(NamespaceBraceStyle)`
+	// + `NewLine`. `Tokens::NamespaceKeyword` is the namespace-scope `Tokens` const (the
+	// `Tokens::DelegateKeyword` D361 precedent).
+	StartNode(namespaceDeclaration);
+	WriteKeyword(Tokens::NamespaceKeyword);
+	namespaceDeclaration->NamespaceName()->AcceptVisitor(*this);
+	if (namespaceDeclaration->IsFileScoped()) {
+		Semicolon();
+		NewLine();
+	} else {
+		OpenBrace(policy_.NamespaceBraceStyle);
+	}
+	for (Syntax::AstNode* member : ToVector(namespaceDeclaration->Members())) {
+		member->AcceptVisitor(*this);
+		MaybeNewLinesAfterUsings(member);
+	}
+	if (!namespaceDeclaration->IsFileScoped()) {
+		CloseBrace(policy_.NamespaceBraceStyle);
+		NewLine();
+	}
+	EndNode(namespaceDeclaration);
+}
 void CSharpOutputVisitor::VisitPreProcessorDirective(Syntax::PreProcessorDirective* preProcessorDirective) {
 	// A `PreProcessorDirective` is trivia -- like `VisitComment`, it drives the writer DIRECTLY
 	// (`writer.StartNode`/`writer.EndNode`, not the visitor's `StartNode`/`EndNode`), emitting the

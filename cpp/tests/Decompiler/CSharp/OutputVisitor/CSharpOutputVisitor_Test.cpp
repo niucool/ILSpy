@@ -118,6 +118,7 @@
 #include "Decompiler/CSharp/Syntax/UsingDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ExternAliasDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/DelegateDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/NamespaceDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
@@ -282,6 +283,7 @@ using ILSpy::Decompiler::CSharp::Syntax::UsingAliasDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::UsingDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::ExternAliasDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::DelegateDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::NamespaceDeclaration;
 using ILSpy::Decompiler::TypeSystem::ReferenceKind;
 using ILSpy::Decompiler::TypeSystem::VarianceModifier;
 
@@ -5429,5 +5431,93 @@ TEST(CSharp_OutputVisitor, VisitDelegateDeclarationStringReturnWithParam) {
 	ASSERT_NE(rpar, h.inner.calls.end());
 	auto semi = std::find(rpar, h.inner.calls.end(), "tok:;");
 	ASSERT_NE(semi, h.inner.calls.end()) << "the delegate must close with tok:;";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// ---- VisitNamespaceDeclaration (D362, the declaration family: the second GeneralScope
+// declaration after the D361 delegate; also ports the MaybeNewLinesAfterUsings helper) ------
+
+// `VisitNamespaceDeclaration` over `namespace Foo { }` -- the block-scoped
+// `namespace_declaration ::= 'namespace' type '{' namespace_member* '}'` (C# grammar 14.3) with
+// an empty `Members` body: the `namespace` keyword, the `NamespaceName` (a `SimpleType` renders
+// just its identifier), the `OpenBrace(NamespaceBraceStyle)` (EndOfLine: a leading space, the
+// `{`, an indent, and a newline), then -- no members -- the `CloseBrace(NamespaceBraceStyle)`
+// (an unindent and the `}`) and a trailing newline. The find-based ordering pins the keyword
+// before the name before the open brace before the close brace (the empty body case).
+TEST(CSharp_OutputVisitor, VisitNamespaceDeclarationBare) {
+	V h;
+	auto name = std::make_unique<SimpleType>(std::string("Foo"));
+	auto node = std::make_unique<NamespaceDeclaration>(name.get());
+	h.visitor->VisitNamespaceDeclaration(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto nsKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:namespace");
+	ASSERT_NE(nsKw, h.inner.calls.end()) << "the namespace must open with kw:namespace";
+	auto nameTok = std::find(nsKw, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end()) << "the NamespaceName must render after kw:namespace";
+	auto openBrace = std::find(nameTok, h.inner.calls.end(), "tok:{");
+	ASSERT_NE(openBrace, h.inner.calls.end()) << "the body must open with tok:{ after the name";
+	auto closeBrace = std::find(openBrace, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(closeBrace, h.inner.calls.end()) << "the body must close with tok:} after tok:{";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitNamespaceDeclaration` over `namespace Foo;` -- the C# 10 file-scoped form
+// (`IsFileScoped == true`): the `namespace` keyword, the `NamespaceName`, then a `Semicolon` +
+// `NewLine` (NO braces -- the `if (IsFileScoped)` branch). The find-based ordering pins the
+// keyword before the name before the terminating semicolon (no open/close brace).
+TEST(CSharp_OutputVisitor, VisitNamespaceDeclarationFileScoped) {
+	V h;
+	auto name = std::make_unique<SimpleType>(std::string("Foo"));
+	auto node = std::make_unique<NamespaceDeclaration>(name.get());
+	node->IsFileScoped(true);
+	h.visitor->VisitNamespaceDeclaration(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto nsKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:namespace");
+	ASSERT_NE(nsKw, h.inner.calls.end()) << "the namespace must open with kw:namespace";
+	auto nameTok = std::find(nsKw, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end()) << "the NamespaceName must render after kw:namespace";
+	auto semi = std::find(nameTok, h.inner.calls.end(), "tok:;");
+	ASSERT_NE(semi, h.inner.calls.end()) << "a file-scoped namespace must close with tok:; (no braces)";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+	// No braces in the file-scoped form.
+	EXPECT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:{"), h.inner.calls.end())
+		<< "the file-scoped form must not emit an open brace";
+	EXPECT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:}"), h.inner.calls.end())
+		<< "the file-scoped form must not emit a close brace";
+}
+
+// `VisitNamespaceDeclaration` over `namespace Foo { using System; }` -- a block-scoped namespace
+// with one `UsingDeclaration` member, exercising the `foreach (member in Members)` body
+// (the member recurses through `VisitUsingDeclaration`) and the `MaybeNewLinesAfterUsings`
+// helper (the using IS followed by a non-using sibling -- the next iteration's nullptr -- so the
+// condition fires, but `MinimumBlankLinesAfterUsings` is 0 under the default policy, a no-op).
+// The find-based ordering pins the using directive renders BETWEEN the open brace and the close
+// brace (the `kw:using`/`id:System`/`tok:;` of the member sit after `tok:{` and before `tok:}`).
+TEST(CSharp_OutputVisitor, VisitNamespaceDeclarationWithUsingMember) {
+	V h;
+	auto name = std::make_unique<SimpleType>(std::string("Foo"));
+	auto import = std::make_unique<SimpleType>(std::string("System"));
+	auto usingDecl = std::make_unique<UsingDeclaration>(import.get());
+	auto node = std::make_unique<NamespaceDeclaration>(name.get());
+	node->Members().Add(usingDecl.get());
+	h.visitor->VisitNamespaceDeclaration(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto nsKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:namespace");
+	ASSERT_NE(nsKw, h.inner.calls.end()) << "the namespace must open with kw:namespace";
+	auto nameTok = std::find(nsKw, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end()) << "the NamespaceName must render after kw:namespace";
+	auto openBrace = std::find(nameTok, h.inner.calls.end(), "tok:{");
+	ASSERT_NE(openBrace, h.inner.calls.end()) << "the body must open with tok:{ after the name";
+	auto usingKw = std::find(openBrace, h.inner.calls.end(), "kw:using");
+	ASSERT_NE(usingKw, h.inner.calls.end()) << "the using member must render after tok:{";
+	auto systemTok = std::find(usingKw, h.inner.calls.end(), "id:System");
+	ASSERT_NE(systemTok, h.inner.calls.end()) << "the using's import must render after kw:using";
+	auto usingSemi = std::find(systemTok, h.inner.calls.end(), "tok:;");
+	ASSERT_NE(usingSemi, h.inner.calls.end()) << "the using member must close with tok:;";
+	auto closeBrace = std::find(usingSemi, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(closeBrace, h.inner.calls.end()) << "tok:} must render after the using member's tok:;";
 	EXPECT_EQ(h.inner.calls.back(), "end");
 }

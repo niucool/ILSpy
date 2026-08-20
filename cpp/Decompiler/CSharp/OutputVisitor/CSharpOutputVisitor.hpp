@@ -382,6 +382,14 @@ private:
 	// would silently produce no output and could mask a forgotten node).
 	[[noreturn]] static void NotImplemented();
 
+	// The C# `void MaybeNewLinesAfterUsings(AstNode node)` -- consulted by
+	// `VisitNamespaceDeclaration`/`VisitSyntaxTree` after each top-level member: when a
+	// `using`/`using alias` directive is followed by a non-`using` sibling, emit
+	// `MinimumBlankLinesAfterUsings` blank lines (a no-op under the default policy, which is 0).
+	// A private non-virtual (the C# `void`, not `public`/`virtual`); the `node is X`/`nextSibling
+	// is X` type-tests port to `dynamic_cast` pairs (the D357 dynamic_cast-on-Parent precedent).
+	void MaybeNewLinesAfterUsings(Syntax::AstNode* node);
+
 	// ---- Fields ------------------------------------------------------------
 	// The C# `readonly protected TokenWriter writer` -- the top of the writer stack the visitor
 	// drives (non-owning; points into `writerOwner_`'s stack). Protected so a subclass and the
