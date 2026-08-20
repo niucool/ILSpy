@@ -28,6 +28,8 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/KnownAttribute_Test.cpp
     Decompiler/TypeSystem/ICompilationProvider_Test.cpp
     Decompiler/TypeSystem/Nullability_Test.cpp
+    Decompiler/TypeSystem/SignatureCallingConvention_Test.cpp
+    Decompiler/TypeSystem/FunctionPointerType_Test.cpp
     Decompiler/TypeSystem/IEntity_Test.cpp
     Decompiler/TypeSystem/IParameter_Test.cpp
     Decompiler/TypeSystem/ITypeParameter_Test.cpp

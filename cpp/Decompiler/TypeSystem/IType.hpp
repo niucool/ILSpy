@@ -29,9 +29,12 @@
 #include "Decompiler/TypeSystem/FullTypeName.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/Nullability.hpp"
+#include "Decompiler/TypeSystem/ReferenceKind.hpp"
+#include "Decompiler/TypeSystem/SignatureCallingConvention.hpp"
 #include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
 
+#include <cassert>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -292,6 +295,87 @@ protected:
 private:
     ITypePtr baseType_;
     ::ILSpy::Decompiler::TypeSystem::Nullability nullability_;
+};
+
+// A function pointer type (C# 9 `delegate*`): `delegate* <returnType>(parameterTypes)`,
+// optionally `unmanaged` with a calling convention and/or custom `CallConv*` modifiers.
+// The C# FunctionPointerType derives from AbstractType (the full IType base) and holds a
+// cross-layer `MetadataModule module` used only by `Kind()` (which returns `TypeKind::Struct`
+// when `TypeSystemOptions.FunctionPointers` is disabled, acting as a UIntPtr alias) and
+// `GetDefinition()` (resolves the UIntPtr alias). The minimal port derives directly from
+// IType (the D401/D402 flatten-AbstractType precedent), drops the deferred `module`, and
+// returns `TypeKind::FunctionPointer` unconditionally -- the common case where the type
+// system advertises function-pointer support; the module-dependent `Kind()` gate and the
+// `GetDefinition()` UIntPtr-alias fallback land with the rest of Phase 2. `Name()` /
+// `ReflectionName()` are `"delegate*"` (the C# `Name` is literally `"delegate*"` and
+// `ReflectionName` falls through to `AbstractType.FullName` = `Name`, since `Namespace` is
+// the empty default) -- every function-pointer type shares the same rendered name; the
+// signature (return type + parameters + calling convention) is carried by the dedicated
+// accessors and the (deferred) `ToString` / `AcceptVisitor` / `VisitChildren`, NOT by
+// `Name` / `ReflectionName`. `StructuralEquals` faithfully compares the six core fields
+// the C# `Equals` compares (calling convention + custom calling conventions + return type +
+// return-ref-readonly flag + parameter types + parameter reference kinds).
+class FunctionPointerType : public IType {
+public:
+    FunctionPointerType(SignatureCallingConvention callingConvention,
+                        std::vector<ITypePtr> customCallingConventions,
+                        ITypePtr returnType, bool returnIsRefReadOnly,
+                        std::vector<ITypePtr> parameterTypes,
+                        std::vector<ReferenceKind> parameterReferenceKinds)
+        : callingConvention_(callingConvention),
+          customCallingConventions_(std::move(customCallingConventions)),
+          returnType_(std::move(returnType)),
+          returnIsRefReadOnly_(returnIsRefReadOnly),
+          parameterTypes_(std::move(parameterTypes)),
+          parameterReferenceKinds_(std::move(parameterReferenceKinds))
+    {
+        // The C# `Debug.Assert(parameterTypes.Length == parameterReferenceKinds.Length)` --
+        // every parameter carries exactly one reference kind.
+        assert(parameterTypes_.size() == parameterReferenceKinds_.size());
+    }
+    TypeKind Kind() const override { return TypeKind::FunctionPointer; }
+    std::string Name() const override { return "delegate*"; }
+    // The C# `ReflectionName` is `AbstractType.FullName` = `Name` (Namespace is the empty
+    // default), so every function-pointer type renders the same reflection name.
+    std::string ReflectionName() const override { return "delegate*"; }
+    int TypeParameterCount() const override { return 0; }
+    SignatureCallingConvention CallingConvention() const noexcept { return callingConvention_; }
+    const std::vector<ITypePtr>& CustomCallingConventions() const noexcept { return customCallingConventions_; }
+    const ITypePtr& ReturnType() const noexcept { return returnType_; }
+    bool ReturnIsRefReadOnly() const noexcept { return returnIsRefReadOnly_; }
+    const std::vector<ITypePtr>& ParameterTypes() const noexcept { return parameterTypes_; }
+    const std::vector<ReferenceKind>& ParameterReferenceKinds() const noexcept { return parameterReferenceKinds_; }
+protected:
+    bool StructuralEquals(const IType& other) const override {
+        const auto& o = static_cast<const FunctionPointerType&>(other);
+        if (callingConvention_ != o.callingConvention_) return false;
+        if (returnIsRefReadOnly_ != o.returnIsRefReadOnly_) return false;
+        if (parameterTypes_.size() != o.parameterTypes_.size()) return false;
+        if (parameterReferenceKinds_.size() != o.parameterReferenceKinds_.size()) return false;
+        if (customCallingConventions_.size() != o.customCallingConventions_.size()) return false;
+        // ReturnType.Equals (the C# `ReturnType.Equals(fpt.ReturnType)`).
+        if (!returnType_->Equals(*o.returnType_)) return false;
+        // ParameterTypes.SequenceEqual (element-wise Equals).
+        for (std::size_t i = 0; i < parameterTypes_.size(); ++i) {
+            if (!parameterTypes_[i]->Equals(*o.parameterTypes_[i])) return false;
+        }
+        // ParameterReferenceKinds.SequenceEqual.
+        for (std::size_t i = 0; i < parameterReferenceKinds_.size(); ++i) {
+            if (parameterReferenceKinds_[i] != o.parameterReferenceKinds_[i]) return false;
+        }
+        // CustomCallingConventions.SequenceEqual (element-wise Equals).
+        for (std::size_t i = 0; i < customCallingConventions_.size(); ++i) {
+            if (!customCallingConventions_[i]->Equals(*o.customCallingConventions_[i])) return false;
+        }
+        return true;
+    }
+private:
+    SignatureCallingConvention callingConvention_;
+    std::vector<ITypePtr> customCallingConventions_;
+    ITypePtr returnType_;
+    bool returnIsRefReadOnly_;
+    std::vector<ITypePtr> parameterTypes_;
+    std::vector<ReferenceKind> parameterReferenceKinds_;
 };
 
 // Convenience: the UnknownType null object.
