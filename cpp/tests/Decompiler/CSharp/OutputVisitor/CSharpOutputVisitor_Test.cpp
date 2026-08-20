@@ -87,6 +87,8 @@
 #include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/MemberType.hpp"
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
+#include "Decompiler/CSharp/Syntax/Attribute.hpp"
+#include "Decompiler/CSharp/Syntax/AttributeSection.hpp"
 #include "Decompiler/CSharp/Syntax/ConstructorInitializer.hpp"
 #include "Decompiler/CSharp/Syntax/ConstructorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
@@ -152,6 +154,8 @@ using ILSpy::Decompiler::CSharp::Syntax::BlockStatement;
 using ILSpy::Decompiler::CSharp::Syntax::BreakStatement;
 using ILSpy::Decompiler::CSharp::Syntax::BaseReferenceExpression;
 using ILSpy::Decompiler::CSharp::Syntax::ComposedType;
+using ILSpy::Decompiler::CSharp::Syntax::Attribute;
+using ILSpy::Decompiler::CSharp::Syntax::AttributeSection;
 using ILSpy::Decompiler::CSharp::Syntax::Comment;
 using ILSpy::Decompiler::CSharp::Syntax::CommentType;
 using ILSpy::Decompiler::CSharp::Syntax::ContinueStatement;
@@ -4808,5 +4812,157 @@ TEST(CSharp_OutputVisitor, VisitPropertyDeclarationWithInitializer) {
 	ASSERT_NE(initVal, h.inner.calls.end()) << "the initializer value must render after tok:=";
 	auto semi = std::find(initVal, h.inner.calls.end(), "tok:;");
 	ASSERT_NE(semi, h.inner.calls.end()) << "the initialized property must close with tok:;";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// ---- VisitAttribute / VisitAttributeSection (D357, the next GeneralScope family) ----------
+
+// `VisitAttribute` over `[Foo]` (no arguments, HasArgumentList false) -- the bare attribute: just
+// the type reference. The Attribute's Type slot is a SimpleType "Foo" (VisitSimpleType renders
+// start/id:Foo/end). Renders: StartNode(Attribute) + Type->AcceptVisitor (the SimpleType's own
+// start/id:Foo/end) + EndNode(Attribute) -- no argument list, so the Space + InParenthesis branch
+// is skipped (Arguments.Count == 0 AND HasArgumentList == false).
+TEST(CSharp_OutputVisitor, VisitAttributeBare) {
+	V h;
+	auto type = std::make_unique<SimpleType>(Identifier::Create("Foo"));
+	auto node = std::make_unique<Attribute>();
+	node->Type(type.get());
+	h.visitor->VisitAttribute(node.get());
+
+	// The type identifier renders between the two StartNode calls and the two EndNode calls.
+	auto firstStart = std::find(h.inner.calls.begin(), h.inner.calls.end(), "start");
+	ASSERT_NE(firstStart, h.inner.calls.end());
+	auto idTok = std::find(firstStart, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(idTok, h.inner.calls.end()) << "the attribute type must render id:Foo";
+	auto lastEnd = std::find(idTok, h.inner.calls.end(), "end");
+	ASSERT_NE(lastEnd, h.inner.calls.end()) << "the attribute must end with end";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitAttribute` over `[Foo()]` (HasArgumentList true, no arguments) -- an empty argument list
+// is still an argument list, so the Space(SpaceBeforeMethodCallParentheses) +
+// WriteCommaSeparatedListInParenthesis branch runs. The default SpaceBeforeMethodCallParentheses is
+// false, so the Space is a no-op; the empty list renders just tok:( / tok:). Renders: start /
+// [SimpleType start/id:Foo/end] / tok:( / tok:) / end.
+TEST(CSharp_OutputVisitor, VisitAttributeWithEmptyArgumentList) {
+	V h;
+	auto type = std::make_unique<SimpleType>(Identifier::Create("Foo"));
+	auto node = std::make_unique<Attribute>();
+	node->Type(type.get());
+	node->HasArgumentList(true);
+	h.visitor->VisitAttribute(node.get());
+
+	// The type renders before the open paren, which renders before the close paren, before the end.
+	auto idTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(idTok, h.inner.calls.end());
+	auto lpar = std::find(idTok, h.inner.calls.end(), "tok:(");
+	ASSERT_NE(lpar, h.inner.calls.end()) << "tok:( must render after the attribute type";
+	auto rpar = std::find(lpar, h.inner.calls.end(), "tok:)");
+	ASSERT_NE(rpar, h.inner.calls.end()) << "tok:) must render after tok:(";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitAttribute` over `[Foo(1)]` (one PrimitiveExpression argument) -- the argument recurses
+// through VisitPrimitiveExpression (start/primval/end) inside the parens. Renders: start /
+// [SimpleType start/id:Foo/end] / tok:( / [PrimitiveExpression start/primval/end] / tok:) / end.
+TEST(CSharp_OutputVisitor, VisitAttributeWithOneArgument) {
+	V h;
+	auto type = std::make_unique<SimpleType>(Identifier::Create("Foo"));
+	auto arg = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto node = std::make_unique<Attribute>();
+	node->Type(type.get());
+	node->Arguments().Add(arg.get());
+	h.visitor->VisitAttribute(node.get());
+
+	// The type < open paren < the argument value < close paren < end.
+	auto idTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(idTok, h.inner.calls.end());
+	auto lpar = std::find(idTok, h.inner.calls.end(), "tok:(");
+	ASSERT_NE(lpar, h.inner.calls.end()) << "tok:( must render after the attribute type";
+	auto primval = std::find(lpar, h.inner.calls.end(), "primval");
+	ASSERT_NE(primval, h.inner.calls.end()) << "the argument value must render inside the parens";
+	auto rpar = std::find(primval, h.inner.calls.end(), "tok:)");
+	ASSERT_NE(rpar, h.inner.calls.end()) << "tok:) must render after the argument value";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitAttributeSection` over `[Foo]` (no target, no parent -> the default switch branch emits a
+// NewLine). Renders: StartNode(section) + WriteToken(LBracket) + [no target] +
+// WriteCommaSeparatedList (the one Attribute, recursing through VisitAttributeBare's type) +
+// WriteToken(RBracket) + NewLine (the default branch) + EndNode.
+TEST(CSharp_OutputVisitor, VisitAttributeSectionBare) {
+	V h;
+	auto type = std::make_unique<SimpleType>(Identifier::Create("Foo"));
+	auto attr = std::make_unique<Attribute>();
+	attr->Type(type.get());
+	auto node = std::make_unique<AttributeSection>();
+	node->Attributes().Add(attr.get());
+	h.visitor->VisitAttributeSection(node.get());
+
+	// tok:[ < the attribute type < tok:] < newline < end.
+	auto lbracket = std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:[");
+	ASSERT_NE(lbracket, h.inner.calls.end()) << "the section must open with tok:[";
+	auto idTok = std::find(lbracket, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(idTok, h.inner.calls.end()) << "the attribute type must render after tok:[";
+	auto rbracket = std::find(idTok, h.inner.calls.end(), "tok:]");
+	ASSERT_NE(rbracket, h.inner.calls.end()) << "tok:] must render after the attribute type";
+	auto nl = std::find(rbracket, h.inner.calls.end(), "newline");
+	ASSERT_NE(nl, h.inner.calls.end()) << "the default branch must emit a newline after tok:]";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitAttributeSection` over `[return: Foo]` (AttributeTarget "return") -- the target branch:
+// WriteKeyword("return") + WriteToken(Colon) + Space() between the `[` and the attribute list.
+// Renders: start / tok:[ / kw:return / tok:: / space / [Attribute start/id:Foo/end] / tok:] /
+// newline / end.
+TEST(CSharp_OutputVisitor, VisitAttributeSectionWithTarget) {
+	V h;
+	auto type = std::make_unique<SimpleType>(Identifier::Create("Foo"));
+	auto attr = std::make_unique<Attribute>();
+	attr->Type(type.get());
+	auto node = std::make_unique<AttributeSection>();
+	node->AttributeTarget("return");
+	node->Attributes().Add(attr.get());
+	h.visitor->VisitAttributeSection(node.get());
+
+	// tok:[ < kw:return < tok:: < space < id:Foo < tok:] < newline < end.
+	auto lbracket = std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:[");
+	ASSERT_NE(lbracket, h.inner.calls.end());
+	auto targetKw = std::find(lbracket, h.inner.calls.end(), "kw:return");
+	ASSERT_NE(targetKw, h.inner.calls.end()) << "the target keyword must render after tok:[";
+	auto colon = std::find(targetKw, h.inner.calls.end(), "tok::");
+	ASSERT_NE(colon, h.inner.calls.end()) << "tok:: must render after the target keyword";
+	auto sp = std::find(colon, h.inner.calls.end(), "space");
+	ASSERT_NE(sp, h.inner.calls.end()) << "a space must render after the colon";
+	auto idTok = std::find(sp, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(idTok, h.inner.calls.end()) << "the attribute type must render after the target space";
+	auto rbracket = std::find(idTok, h.inner.calls.end(), "tok:]");
+	ASSERT_NE(rbracket, h.inner.calls.end()) << "tok:] must render after the attribute type";
+	auto nl = std::find(rbracket, h.inner.calls.end(), "newline");
+	ASSERT_NE(nl, h.inner.calls.end()) << "the default branch must emit a newline after tok:]";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitAttributeSection` whose Parent is a ParameterDeclaration (the ParameterDeclaration switch
+// branch) and is the last (only) attribute section -- the `pd.Attributes.Last() == section` else
+// branch emits a Space() (not the SpaceBetweenParameterAttributeSections, and not the default
+// NewLine). Adding the section to the parameter's Attributes collection sets the section's Parent.
+TEST(CSharp_OutputVisitor, VisitAttributeSectionOnParameter) {
+	V h;
+	auto type = std::make_unique<SimpleType>(Identifier::Create("Foo"));
+	auto attr = std::make_unique<Attribute>();
+	attr->Type(type.get());
+	auto section = std::make_unique<AttributeSection>();
+	section->Attributes().Add(attr.get());
+	auto param = std::make_unique<ParameterDeclaration>();
+	param->Attributes().Add(section.get());
+	h.visitor->VisitAttributeSection(section.get());
+
+	// tok:[ < id:Foo < tok:] < space < end (a space, not a newline -- the ParameterDeclaration
+	// is-last branch).
+	auto rbracket = std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:]");
+	ASSERT_NE(rbracket, h.inner.calls.end()) << "tok:] must render";
+	auto sp = std::find(rbracket, h.inner.calls.end(), "space");
+	ASSERT_NE(sp, h.inner.calls.end()) << "the is-last parameter branch must emit a space after tok:]";
 	EXPECT_EQ(h.inner.calls.back(), "end");
 }

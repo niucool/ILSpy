@@ -914,8 +914,56 @@ void CSharpOutputVisitor::VisitArraySpecifier(Syntax::ArraySpecifier* arraySpeci
 	WriteToken(Tokens::RBracket);
 	EndNode(arraySpecifier);
 }
-void CSharpOutputVisitor::VisitAttribute(Syntax::Attribute*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitAttributeSection(Syntax::AttributeSection*) { NotImplemented(); }
+// Faithful port of CSharpOutputVisitor.cs VisitAttribute (the `[Type(Args?)]` attribute -- a
+// required AstType Type slot + an Expression Arguments collection + a HasArgumentList bool). The
+// argument list renders only when there are arguments OR HasArgumentList is set (the `[Foo()]`
+// empty-list case). The Type is a required non-nullable slot (the C# calls
+// `attribute.Type.AcceptVisitor(this)` with no null-conditional), so no nullptr guard is added.
+void CSharpOutputVisitor::VisitAttribute(Attribute* attribute) {
+	StartNode(attribute);
+	attribute->Type()->AcceptVisitor(*this);
+	if (attribute->Arguments().Count() != 0 || attribute->HasArgumentList()) {
+		Space(policy_.SpaceBeforeMethodCallParentheses);
+		WriteCommaSeparatedListInParenthesis(ToVector(attribute->Arguments()), policy_.SpaceWithinMethodCallParentheses);
+	}
+	EndNode(attribute);
+}
+
+// Faithful port of CSharpOutputVisitor.cs VisitAttributeSection (the `[target: attr1, attr2]`
+// bracketed group). The optional AttributeTarget string (empty when absent) gates the
+// `target:` prefix. The trailing whitespace after `]` is driven by the parent node kind: a
+// ParameterDeclaration parent emits a Space (the inter-section spacing unless this is the last
+// attribute section, which gets a plain Space); a TypeParameterDeclaration/ComposedType/
+// LambdaExpression parent emits a Space; anything else (including a null parent) emits a NewLine.
+// The C# `pd.Attributes.Last() != attributeSection` reference comparison ports to a pointer
+// identity check against the last element of the parent's Attributes collection.
+void CSharpOutputVisitor::VisitAttributeSection(AttributeSection* attributeSection) {
+	StartNode(attributeSection);
+	WriteToken(Tokens::LBracket);
+	if (!attributeSection->AttributeTarget().empty()) {
+		WriteKeyword(attributeSection->AttributeTarget());
+		WriteToken(Tokens::Colon);
+		Space();
+	}
+	WriteCommaSeparatedList(ToVector(attributeSection->Attributes()));
+	WriteToken(Tokens::RBracket);
+	AstNode* parent = attributeSection->Parent();
+	if (auto* pd = dynamic_cast<ParameterDeclaration*>(parent)) {
+		auto& attrs = pd->Attributes();
+		if (attrs.At(attrs.Count() - 1) != attributeSection) {
+			Space(policy_.SpaceBetweenParameterAttributeSections);
+		} else {
+			Space();
+		}
+	} else if (dynamic_cast<TypeParameterDeclaration*>(parent)
+			|| dynamic_cast<ComposedType*>(parent)
+			|| dynamic_cast<LambdaExpression*>(parent)) {
+		Space();
+	} else {
+		NewLine();
+	}
+	EndNode(attributeSection);
+}
 void CSharpOutputVisitor::VisitComposedType(Syntax::ComposedType* composedType) {
 	StartNode(composedType);
 	// The optional leading attributes (a `[Flags]`-style attribute on the type usage).
