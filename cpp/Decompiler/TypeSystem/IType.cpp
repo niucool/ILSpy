@@ -125,4 +125,23 @@ std::string SpecialType::Name() const {
     }
 }
 
+// ---- ModifiedType ----
+
+std::string ModifiedType::ReflectionName() const {
+    std::string s = element_ ? element_->ReflectionName() : std::string("?");
+    s += (isRequired_ ? " modreq" : " modopt");
+    if (modifier_) {
+        s += "(";
+        s += modifier_->ReflectionName();
+        s += ")";
+    }
+    return s;
+}
+bool ModifiedType::StructuralEquals(const IType& other) const {
+    const auto& o = static_cast<const ModifiedType&>(other);
+    return isRequired_ == o.isRequired_
+        && modifier_->Equals(*o.modifier_)
+        && element_->Equals(*o.element_);
+}
+
 } // namespace ILSpy::Decompiler::TypeSystem

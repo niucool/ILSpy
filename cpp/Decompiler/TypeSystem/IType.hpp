@@ -220,6 +220,37 @@ private:
     TypeKind kind_;
 };
 
+// A modopt/modreq modified type (ECMA-335 II.23.2.7 custom modifier): a type decorated
+// with an optional (modopt) or required (modreq) custom modifier type. Follows the existing
+// minimal-port TypeWithElementType-flattened convention (ByReferenceType / PointerType /
+// ArrayType): the decoration suffix (" modopt(<modifier>)" / " modreq(<modifier>)") is carried
+// only by ReflectionName, and Name() is the element's name -- matching the sibling minimal-port
+// types which keep the suffix in ReflectionName only. The C# ModifiedType derives from
+// TypeWithElementType (Name = element.Name + NameSuffix); the minimal port flattens that. The
+// full IType surface (ChangeNullability, member access, AcceptVisitor, VisitChildren -- the
+// TypeVisitor dispatch this type is one of four concrete leaves toward) lands with the rest
+// of Phase 2; this minimal leaf lands the concrete type so the not-yet-ported TypeVisitor /
+// TypeParameterSubstitution can reference it.
+class ModifiedType : public IType {
+public:
+    ModifiedType(ITypePtr modifier, ITypePtr unmodifiedType, bool isRequired)
+        : modifier_(std::move(modifier)), element_(std::move(unmodifiedType)),
+          isRequired_(isRequired) {}
+    TypeKind Kind() const override { return isRequired_ ? TypeKind::ModReq : TypeKind::ModOpt; }
+    std::string Name() const override { return element_ ? element_->Name() : std::string(); }
+    std::string ReflectionName() const override;
+    int TypeParameterCount() const override { return 0; }
+    const ITypePtr& Modifier() const noexcept { return modifier_; }
+    const ITypePtr& Element() const noexcept { return element_; }
+    bool IsRequired() const noexcept { return isRequired_; }
+protected:
+    bool StructuralEquals(const IType& other) const override;
+private:
+    ITypePtr modifier_;
+    ITypePtr element_;
+    bool isRequired_;
+};
+
 // Convenience: the UnknownType null object.
 inline ITypePtr UnknownType() { return std::make_shared<SpecialType>(TypeKind::Unknown); }
 
