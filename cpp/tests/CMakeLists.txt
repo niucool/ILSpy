@@ -27,6 +27,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/KnownAttribute_Test.cpp
     Decompiler/TypeSystem/ICompilationProvider_Test.cpp
     Decompiler/TypeSystem/Nullability_Test.cpp
+    Decompiler/TypeSystem/IEntity_Test.cpp
     Decompiler/Output/IAmbience_Test.cpp
     Decompiler/IL/ILAst_Test.cpp
     Decompiler/IL/ILAstInstructions_Test.cpp
