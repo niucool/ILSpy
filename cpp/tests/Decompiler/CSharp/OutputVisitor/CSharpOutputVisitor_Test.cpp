@@ -112,6 +112,8 @@
 #include "Decompiler/CSharp/Syntax/MethodDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/OperatorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/TypeParameterDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/Constraint.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
@@ -268,7 +270,10 @@ using ILSpy::Decompiler::CSharp::Syntax::LambdaExpression;
 using ILSpy::Decompiler::CSharp::Syntax::AnonymousMethodExpression;
 using ILSpy::Decompiler::CSharp::Syntax::DeclarationExpression;
 using ILSpy::Decompiler::CSharp::Syntax::ParameterDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::TypeParameterDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::Constraint;
 using ILSpy::Decompiler::TypeSystem::ReferenceKind;
+using ILSpy::Decompiler::TypeSystem::VarianceModifier;
 
 namespace {
 
@@ -4964,5 +4969,114 @@ TEST(CSharp_OutputVisitor, VisitAttributeSectionOnParameter) {
 	ASSERT_NE(rbracket, h.inner.calls.end()) << "tok:] must render";
 	auto sp = std::find(rbracket, h.inner.calls.end(), "space");
 	ASSERT_NE(sp, h.inner.calls.end()) << "the is-last parameter branch must emit a space after tok:]";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// ---- VisitTypeParameterDeclaration / VisitConstraint (D358, the generic-parameter family) --
+
+// `VisitTypeParameterDeclaration` over `T` (VarianceModifier::Invariant, no attributes) -- the
+// Invariant switch case breaks without writing a variance keyword, so only the name token
+// renders. Renders: StartNode(tpd) + [no attributes] + [Invariant: break] + WriteIdentifier(T) +
+// EndNode(tpd) -- start / id:T / end.
+TEST(CSharp_OutputVisitor, VisitTypeParameterDeclarationBare) {
+	V h;
+	auto node = std::make_unique<TypeParameterDeclaration>(std::string("T"));
+	node->Variance(VarianceModifier::Invariant);
+	h.visitor->VisitTypeParameterDeclaration(node.get());
+
+	// start < id:T < end (the Invariant case writes no variance keyword).
+	auto startCall = std::find(h.inner.calls.begin(), h.inner.calls.end(), "start");
+	ASSERT_NE(startCall, h.inner.calls.end());
+	auto idTok = std::find(startCall, h.inner.calls.end(), "id:T");
+	ASSERT_NE(idTok, h.inner.calls.end()) << "the type parameter name must render id:T";
+	auto endCall = std::find(idTok, h.inner.calls.end(), "end");
+	ASSERT_NE(endCall, h.inner.calls.end()) << "the type parameter must end with end";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitTypeParameterDeclaration` over `out T` (VarianceModifier::Covariant) -- the Covariant
+// switch case writes the `out` variance keyword before the name. The InsertRequiredSpacesDecorator
+// inserts a space between the `out` keyword and the `T` identifier (they would merge into `outT`).
+// Renders: start / kw:out / space / id:T / end.
+TEST(CSharp_OutputVisitor, VisitTypeParameterDeclarationCovariant) {
+	V h;
+	auto node = std::make_unique<TypeParameterDeclaration>(std::string("T"));
+	node->Variance(VarianceModifier::Covariant);
+	h.visitor->VisitTypeParameterDeclaration(node.get());
+
+	// start < kw:out < id:T < end (the Covariant case writes the `out` keyword before the name).
+	auto outKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:out");
+	ASSERT_NE(outKw, h.inner.calls.end()) << "the Covariant case must write kw:out";
+	auto idTok = std::find(outKw, h.inner.calls.end(), "id:T");
+	ASSERT_NE(idTok, h.inner.calls.end()) << "the name must render after kw:out";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitTypeParameterDeclaration` over `in T` (VarianceModifier::Contravariant) -- the
+// Contravariant switch case writes the `in` variance keyword before the name. The decorator
+// inserts a space between `in` and `T` (they would merge into `inT`). Renders: start / kw:in /
+// space / id:T / end.
+TEST(CSharp_OutputVisitor, VisitTypeParameterDeclarationContravariant) {
+	V h;
+	auto node = std::make_unique<TypeParameterDeclaration>(std::string("T"));
+	node->Variance(VarianceModifier::Contravariant);
+	h.visitor->VisitTypeParameterDeclaration(node.get());
+
+	// start < kw:in < id:T < end (the Contravariant case writes the `in` keyword before the name).
+	auto inKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:in");
+	ASSERT_NE(inKw, h.inner.calls.end()) << "the Contravariant case must write kw:in";
+	auto idTok = std::find(inKw, h.inner.calls.end(), "id:T");
+	ASSERT_NE(idTok, h.inner.calls.end()) << "the name must render after kw:in";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitConstraint` over `where T : Base` (one base type) -- the leading Space, the `where`
+// keyword, the constrained TypeParameter (a SimpleType `T`), the Space/Colon/Space, and the one
+// base type (a SimpleType `Base`). The decorator inserts a space between `where` and `T` (they
+// would merge into `whereT`). Renders: start / space / kw:where / [SimpleType start/space/id:T/end]
+// / space / tok:: / space / [SimpleType start/id:Base/end] / end.
+TEST(CSharp_OutputVisitor, VisitConstraintBare) {
+	V h;
+	auto typeParam = std::make_unique<SimpleType>(Identifier::Create("T"));
+	auto base = std::make_unique<SimpleType>(Identifier::Create("Base"));
+	auto node = std::make_unique<Constraint>(typeParam.get());
+	node->BaseTypes().Add(base.get());
+	h.visitor->VisitConstraint(node.get());
+
+	// space < kw:where < id:T < tok:: < id:Base < end.
+	auto whereKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:where");
+	ASSERT_NE(whereKw, h.inner.calls.end()) << "the constraint must open with kw:where";
+	auto idT = std::find(whereKw, h.inner.calls.end(), "id:T");
+	ASSERT_NE(idT, h.inner.calls.end()) << "the constrained type parameter must render after kw:where";
+	auto colon = std::find(idT, h.inner.calls.end(), "tok::");
+	ASSERT_NE(colon, h.inner.calls.end()) << "tok:: must render after the type parameter";
+	auto idBase = std::find(colon, h.inner.calls.end(), "id:Base");
+	ASSERT_NE(idBase, h.inner.calls.end()) << "the base type must render after tok::";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitConstraint` over `where T : Base1, Base2` (two base types) -- the WriteCommaSeparatedList
+// recurses through both base types with a Comma (tok:,) between them. Renders: start / space /
+// kw:where / [SimpleType T] / space / tok:: / space / [SimpleType Base1] / tok:, / [SimpleType
+// Base2] / end.
+TEST(CSharp_OutputVisitor, VisitConstraintMultipleBaseTypes) {
+	V h;
+	auto typeParam = std::make_unique<SimpleType>(Identifier::Create("T"));
+	auto base1 = std::make_unique<SimpleType>(Identifier::Create("Base1"));
+	auto base2 = std::make_unique<SimpleType>(Identifier::Create("Base2"));
+	auto node = std::make_unique<Constraint>(typeParam.get());
+	node->BaseTypes().Add(base1.get());
+	node->BaseTypes().Add(base2.get());
+	h.visitor->VisitConstraint(node.get());
+
+	// kw:where < id:T < tok:: < id:Base1 < tok:, < id:Base2 < end (the comma separates the bases).
+	auto colon = std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok::");
+	ASSERT_NE(colon, h.inner.calls.end());
+	auto idBase1 = std::find(colon, h.inner.calls.end(), "id:Base1");
+	ASSERT_NE(idBase1, h.inner.calls.end()) << "the first base type must render after tok::";
+	auto comma = std::find(idBase1, h.inner.calls.end(), "tok:,");
+	ASSERT_NE(comma, h.inner.calls.end()) << "a comma must separate the two base types";
+	auto idBase2 = std::find(comma, h.inner.calls.end(), "id:Base2");
+	ASSERT_NE(idBase2, h.inner.calls.end()) << "the second base type must render after the comma";
 	EXPECT_EQ(h.inner.calls.back(), "end");
 }

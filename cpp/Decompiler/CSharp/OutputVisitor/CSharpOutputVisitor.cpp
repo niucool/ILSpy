@@ -44,6 +44,7 @@
 #include "Decompiler/CSharp/Syntax/Accessor.hpp"
 #include "Decompiler/CSharp/Syntax/ParameterDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/TypeParameterDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/Constraint.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
@@ -2038,8 +2039,48 @@ void CSharpOutputVisitor::VisitConstructorDeclaration(Syntax::ConstructorDeclara
 	WriteMethodBody(constructorDeclaration->Body(), policy_.ConstructorBraceStyle);
 	EndNode(constructorDeclaration);
 }
-void CSharpOutputVisitor::VisitTypeParameterDeclaration(Syntax::TypeParameterDeclaration*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitConstraint(Syntax::Constraint*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitTypeParameterDeclaration(Syntax::TypeParameterDeclaration* typeParameterDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitTypeParameterDeclaration (line 2913): the
+	// optional leading attribute sections, the `in`/`out`/none variance keyword, then the name
+	// token. The C# `switch (typeParameterDeclaration.Variance)` over the `VarianceModifier` enum
+	// ports to a switch on `ILSpy::Decompiler::TypeSystem::VarianceModifier` (the enum lives in the
+	// `TypeSystem` namespace, NOT brought in by the `using namespace ...::Syntax`, so it is
+	// fully-qualified -- the `ReferenceKind` qualification precedent); the `default` throw of
+	// `NotSupportedException` ports to `std::out_of_range` (the `DirectionExpression.FieldDirection`
+	// precedent at line 869).
+	StartNode(typeParameterDeclaration);
+	WriteAttributes(ToVector(typeParameterDeclaration->Attributes()));
+	switch (typeParameterDeclaration->Variance()) {
+		case ILSpy::Decompiler::TypeSystem::VarianceModifier::Invariant:
+			break;
+		case ILSpy::Decompiler::TypeSystem::VarianceModifier::Covariant:
+			WriteKeyword(TypeParameterDeclaration::OutVarianceKeyword);
+			break;
+		case ILSpy::Decompiler::TypeSystem::VarianceModifier::Contravariant:
+			WriteKeyword(TypeParameterDeclaration::InVarianceKeyword);
+			break;
+		default:
+			throw std::out_of_range("Invalid value for VarianceModifier");
+	}
+	WriteIdentifier(typeParameterDeclaration->NameToken());
+	EndNode(typeParameterDeclaration);
+}
+void CSharpOutputVisitor::VisitConstraint(Syntax::Constraint* constraint) {
+	// Faithful port of CSharpOutputVisitor.cs VisitConstraint (line 2934): the leading Space, the
+	// `where` keyword, the constrained type parameter (a SimpleType), the Space/Colon/Space, and
+	// the comma-separated base-type list. The C# `constraint.BaseTypes` lazy collection snapshots
+	// via the `ToVector` helper before `WriteCommaSeparatedList` (the D325 eager-iteration
+	// convention; the collection is not mutated during the visit).
+	StartNode(constraint);
+	Space();
+	WriteKeyword(Tokens::WhereKeyword);
+	constraint->TypeParameter()->AcceptVisitor(*this);
+	Space();
+	WriteToken(Tokens::Colon);
+	Space();
+	WriteCommaSeparatedList(ToVector(constraint->BaseTypes()));
+	EndNode(constraint);
+}
 void CSharpOutputVisitor::VisitMethodDeclaration(Syntax::MethodDeclaration* methodDeclaration) {
 	// Faithful port of CSharpOutputVisitor.cs VisitMethodDeclaration:
 	// `Modifiers ReturnType NameToken<TypeParameters>(Parameters) Constraints { Body }` or `... ;`.
