@@ -16,16 +16,15 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-// Tests for the `CSharpOutputVisitor` infrastructure skeleton
-// (OutputVisitor/CSharpOutputVisitor.hpp) -- the first in-order slice of the C# pretty-printer.
-// The class implements `IAstVisitor` (130 `Visit` methods), but only the infrastructure helpers
-// (the two ctors, `StartNode`/`EndNode`, the `Comma` family, the token/brace writers, the
-// write-construct helpers) are ported; the 130 `Visit` methods are throwing stubs (verified here
-// to throw `std::logic_error`). The infrastructure is exercised directly through a recording
-// inner `TokenWriter` (the visitor's second ctor wraps it in an `InsertRequiredSpacesDecorator`;
-// the decorator only inserts a space where two tokens would merge, so the recorded call sequence
-// for the punctuation/keyword/newline calls under test is exactly what the visitor wrote). This is
-// the next in-order Phase-5 piece of the output stage per the D322 decision-log entry.
+// Tests for the `CSharpOutputVisitor` (OutputVisitor/CSharpOutputVisitor.hpp) -- the C#
+// pretty-printer. The class implements `IAstVisitor` (130 `Visit` methods); the infrastructure
+// helpers (the two ctors, `StartNode`/`EndNode`, the `Comma` family, the token/brace writers, the
+// write-construct helpers) and all 130 `Visit` methods are ported -- the throwing-stub scaffolding
+// is fully replaced, one node-family at a time, per the PORT_PLAN decision log (D322 onward). The
+// infrastructure and each `Visit` method are exercised directly through a recording inner
+// `TokenWriter` (the visitor's second ctor wraps it in an `InsertRequiredSpacesDecorator`; the
+// decorator only inserts a space where two tokens would merge, so the recorded call sequence for
+// the punctuation/keyword/newline calls under test is exactly what the visitor wrote).
 
 #include <gtest/gtest.h>
 
@@ -666,24 +665,90 @@ TEST(CSharp_OutputVisitor, WriteCommaSeparatedListInParenthesisEmpty) {
 	EXPECT_EQ(h.inner.calls[1], "tok:)");
 }
 
-// ---- The 130 Visit stubs throw ---------------------------------------------
+// ---- VisitSyntaxTree (D368, the root `compilation_unit` node; the final Visit method --
+// the last throwing stub, completing all 130 `Visit` methods) ----------------
 
-// A representative still-unported `Visit` method throws `std::logic_error` (the throwing-stub
-// design); `VisitSyntaxTree` remains a stub (the `VariableDeclarationStatement`, the
-// try/catch family, `ConstructorInitializer`, `ConstructorDeclaration`, `DestructorDeclaration`,
-// `EnumMemberDeclaration`, `ExtensionDeclaration`, `EventDeclaration`, `CustomEventDeclaration`,
-// `FieldDeclaration`, `FixedFieldDeclaration`, `IndexerDeclaration`, `MethodDeclaration`,
-// `OperatorDeclaration`, `PropertyDeclaration`, `DelegateDeclaration`, `NamespaceDeclaration`,
-// `TypeDeclaration`, `RecursivePatternExpression`, `Interpolation`, `InterpolatedStringText`,
-// `InterpolatedStringExpression` and the full query family -- `QueryExpression`, the 8 query
-// clauses and `QueryOrdering` -- `Visit` methods above are implemented -- the full
-// EntityDeclaration family, the GeneralScope declaration/directive members, the first pattern
-// node, the interpolated-string family and the query family are done; the remaining `SyntaxTree`
-// member below is still a stub).
-TEST(CSharp_OutputVisitor, VisitStubThrows) {
+// `VisitSyntaxTree` over an empty compilation unit (no leading trivia, no children): the C#
+// does nothing -- no `StartNode`/`EndNode` bracketing (the tree's children are visited directly),
+// the `LeadingTrivia` foreach is empty, and the `FirstChild`/`NextSibling` walk finds no
+// children. The recorded sequence is EMPTY (no `start`/`end`, no tokens), pinning the deliberate
+// omission of `StartNode`/`EndNode` (a bracketing `Visit` would emit `start`/`end` even for an
+// empty node).
+TEST(CSharp_OutputVisitor, VisitSyntaxTreeBare) {
 	V h;
 	auto node = std::make_unique<SyntaxTree>();
-	EXPECT_THROW(h.visitor->VisitSyntaxTree(node.get()), std::logic_error);
+	h.visitor->VisitSyntaxTree(node.get());
+	EXPECT_TRUE(h.inner.calls.empty())
+		<< "an empty SyntaxTree emits no tokens (no StartNode/EndNode bracketing)";
+}
+
+// `VisitSyntaxTree` over a compilation unit with one `using System;` member: the
+// `FirstChild`/`NextSibling` walk recurses into the member (through `VisitUsingDeclaration`),
+// which itself recurses into the `SimpleType` import (through `VisitSimpleType`). Both emit their
+// own `start`/`end`, so the recorded sequence has exactly two `start` and two `end` calls (the
+// using + the `SimpleType`) with NO wrapping `start`/`end` for the tree (a bracketing `Visit`
+// would add a third `start`/`end` pair). The find-based ordering pins `kw:using < id:System < tok:;`.
+TEST(CSharp_OutputVisitor, VisitSyntaxTreeWithUsingMember) {
+	V h;
+	auto import = std::make_unique<SimpleType>(std::string("System"));
+	auto usingDecl = std::make_unique<UsingDeclaration>(import.get());
+	auto node = std::make_unique<SyntaxTree>();
+	node->Members().Add(usingDecl.get());
+	h.visitor->VisitSyntaxTree(node.get());
+
+	EXPECT_EQ(std::count(h.inner.calls.begin(), h.inner.calls.end(), "start"), 2)
+		<< "the tree must NOT emit its own StartNode (only the using + SimpleType starts)";
+	EXPECT_EQ(std::count(h.inner.calls.begin(), h.inner.calls.end(), "end"), 2)
+		<< "the tree must NOT emit its own EndNode (only the using + SimpleType ends)";
+	auto usingKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:using");
+	ASSERT_NE(usingKw, h.inner.calls.end()) << "the using member must render via the child walk";
+	auto ns = std::find(usingKw, h.inner.calls.end(), "id:System");
+	ASSERT_NE(ns, h.inner.calls.end()) << "the imported namespace must render after kw:using";
+	auto semi = std::find(ns, h.inner.calls.end(), "tok:;");
+	ASSERT_NE(semi, h.inner.calls.end()) << "the using member must close with tok:;";
+}
+
+// `VisitSyntaxTree` with a `Comment` leading trivia (e.g. a file header) and no children: the
+// `LeadingTrivia` foreach recurses into `VisitComment` (which drives the writer directly), so the
+// recorded sequence is the comment's own `start`/`comment:hello`/`end` with NO wrapping
+// `start`/`end` for the tree. The trivia is heap-allocated and handed to `AddLeadingTrivia` (the
+// tree's `NodeTrivia` holder takes ownership and deletes it).
+TEST(CSharp_OutputVisitor, VisitSyntaxTreeWithLeadingTrivia) {
+	V h;
+	auto node = std::make_unique<SyntaxTree>();
+	node->AddLeadingTrivia(new Comment(std::string("hello")));
+	h.visitor->VisitSyntaxTree(node.get());
+
+	EXPECT_EQ(std::count(h.inner.calls.begin(), h.inner.calls.end(), "start"), 1)
+		<< "the tree must NOT emit its own StartNode (only the comment's start)";
+	EXPECT_EQ(std::count(h.inner.calls.begin(), h.inner.calls.end(), "end"), 1)
+		<< "the tree must NOT emit its own EndNode (only the comment's end)";
+	auto comment = std::find(h.inner.calls.begin(), h.inner.calls.end(), "comment:hello");
+	ASSERT_NE(comment, h.inner.calls.end()) << "the leading comment must render via the trivia walk";
+}
+
+// `VisitSyntaxTree` with a `#if DEBUG` preprocessor leading trivia followed by a `using System;`
+// member: the `LeadingTrivia` foreach renders the trivia FIRST (the `pp:DEBUG` of
+// `VisitPreProcessorDirective`), then the `FirstChild`/`NextSibling` walk renders the member
+// (`kw:using` of `VisitUsingDeclaration`). The find-based ordering pins `pp:DEBUG < kw:using`
+// (the leading trivia precedes the children).
+TEST(CSharp_OutputVisitor, VisitSyntaxTreeWithLeadingTriviaAndMember) {
+	V h;
+	auto* pp = new PreProcessorDirective();
+	pp->Type(PreProcessorDirectiveType::If);
+	pp->Argument(std::string("DEBUG"));
+	auto import = std::make_unique<SimpleType>(std::string("System"));
+	auto usingDecl = std::make_unique<UsingDeclaration>(import.get());
+	auto node = std::make_unique<SyntaxTree>();
+	node->AddLeadingTrivia(pp);
+	node->Members().Add(usingDecl.get());
+	h.visitor->VisitSyntaxTree(node.get());
+
+	auto ppTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "pp:DEBUG");
+	ASSERT_NE(ppTok, h.inner.calls.end()) << "the leading preprocessor directive must render";
+	auto usingKw = std::find(ppTok, h.inner.calls.end(), "kw:using");
+	ASSERT_NE(usingKw, h.inner.calls.end())
+		<< "the using member must render after the leading trivia";
 }
 
 // ---- The implemented leaf Visit methods ------------------------------------

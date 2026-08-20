@@ -168,6 +168,7 @@
 #include "Decompiler/CSharp/Syntax/QueryOrdering.hpp"
 #include "Decompiler/CSharp/Syntax/QueryGroupClause.hpp"
 #include "Decompiler/CSharp/Syntax/QuerySelectClause.hpp"
+#include "Decompiler/CSharp/Syntax/SyntaxTree.hpp"
 #include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
 #include "Decompiler/CSharp/Syntax/ParenthesizedVariableDesignation.hpp"
 #include "Decompiler/CSharp/OutputVisitor/InsertRequiredSpacesDecorator.hpp"
@@ -2991,6 +2992,28 @@ void CSharpOutputVisitor::VisitQueryJoinClause(Syntax::QueryJoinClause* queryJoi
 	}
 	EndNode(queryJoinClause);
 }
-void CSharpOutputVisitor::VisitSyntaxTree(Syntax::SyntaxTree*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitSyntaxTree(Syntax::SyntaxTree* syntaxTree) {
+	// Faithful port of CSharpOutputVisitor.cs VisitSyntaxTree (line 2733): the root
+	// `compilation_unit` node (C# grammar 14.2) -- the top-level container of the file's
+	// `extern alias`/`using` directives, global attributes, and namespace/type declarations.
+	// The `SyntaxTree` is NOT bracketed by `StartNode`/`EndNode` (its children are visited
+	// directly), so emit its own leading trivia (e.g. generated `#define` directives) here, then
+	// walk the children via `FirstChild`/`NextSibling` (the manual sibling-chain walk the C#
+	// uses, NOT a collection `foreach`), recursing each child and consulting
+	// `MaybeNewLinesAfterUsings` after each (the D362 helper, shared with
+	// `VisitNamespaceDeclaration`). The C# "don't do node tracking as we visit all children
+	// directly" ports verbatim: no `StartNode`/`EndNode` (unlike every other `Visit` method), so the
+	// recording writer sees only the children's/trivia's own `start`/`end` pairs -- no wrapping
+	// `start`/`end` for the tree itself. The `LeadingTrivia()` view is a non-owning pointer
+	// snapshot (the `NodeTrivia` holder retains ownership); each `Trivia*` dispatches
+	// polymorphically to `VisitComment`/`VisitPreProcessorDirective` via the virtual
+	// `AcceptVisitor` (the D363 polymorphic-base precedent applied to the `Trivia` base).
+	for (Syntax::Trivia* trivia : syntaxTree->LeadingTrivia())
+		trivia->AcceptVisitor(*this);
+	for (Syntax::AstNode* node = syntaxTree->FirstChild(); node != nullptr; node = node->NextSibling()) {
+		node->AcceptVisitor(*this);
+		MaybeNewLinesAfterUsings(node);
+	}
+}
 
 } // namespace ILSpy::Decompiler::CSharp::OutputVisitor
