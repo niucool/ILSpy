@@ -118,6 +118,7 @@
 #include "Decompiler/CSharp/Syntax/UsingDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ExternAliasDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/DelegateDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/DocumentationReference.hpp"
 #include "Decompiler/CSharp/Syntax/NamespaceDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
@@ -225,6 +226,7 @@ using ILSpy::Decompiler::CSharp::Syntax::MethodDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::OperatorDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::OperatorType;
 using ILSpy::Decompiler::CSharp::Syntax::TypeDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::ClassType;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentExpression;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentOperatorType;
 using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorExpression;
@@ -283,6 +285,7 @@ using ILSpy::Decompiler::CSharp::Syntax::UsingAliasDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::UsingDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::ExternAliasDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::DelegateDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::DocumentationReference;
 using ILSpy::Decompiler::CSharp::Syntax::NamespaceDeclaration;
 using ILSpy::Decompiler::TypeSystem::ReferenceKind;
 using ILSpy::Decompiler::TypeSystem::VarianceModifier;
@@ -632,17 +635,18 @@ TEST(CSharp_OutputVisitor, WriteCommaSeparatedListInParenthesisEmpty) {
 // ---- The 130 Visit stubs throw ---------------------------------------------
 
 // A representative still-unported `Visit` method throws `std::logic_error` (the throwing-stub
-// design); `VisitTypeDeclaration` remains a stub (the `VariableDeclarationStatement`, the
+// design); `VisitDocumentationReference` remains a stub (the `VariableDeclarationStatement`, the
 // try/catch family, `ConstructorInitializer`, `ConstructorDeclaration`, `DestructorDeclaration`,
 // `EnumMemberDeclaration`, `ExtensionDeclaration`, `EventDeclaration`, `CustomEventDeclaration`,
 // `FieldDeclaration`, `FixedFieldDeclaration`, `IndexerDeclaration`, `MethodDeclaration`,
-// `OperatorDeclaration` and `PropertyDeclaration` `Visit` methods above are implemented -- the
-// full EntityDeclaration family is done; the GeneralScope/TypeDeclaration members below are
-// still stubs).
+// `OperatorDeclaration`, `PropertyDeclaration`, `DelegateDeclaration`, `NamespaceDeclaration`
+// and `TypeDeclaration` `Visit` methods above are implemented -- the full EntityDeclaration family
+// plus the GeneralScope declaration/directive members are done; the remaining GeneralScope/
+// pattern/interpolated-string/query/SyntaxTree members below are still stubs).
 TEST(CSharp_OutputVisitor, VisitStubThrows) {
 	V h;
-	auto decl = std::make_unique<TypeDeclaration>();
-	EXPECT_THROW(h.visitor->VisitTypeDeclaration(decl.get()), std::logic_error);
+	auto decl = std::make_unique<DocumentationReference>();
+	EXPECT_THROW(h.visitor->VisitDocumentationReference(decl.get()), std::logic_error);
 }
 
 // ---- The implemented leaf Visit methods ------------------------------------
@@ -5520,4 +5524,123 @@ TEST(CSharp_OutputVisitor, VisitNamespaceDeclarationWithUsingMember) {
 	auto closeBrace = std::find(usingSemi, h.inner.calls.end(), "tok:}");
 	ASSERT_NE(closeBrace, h.inner.calls.end()) << "tok:} must render after the using member's tok:;";
 	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// ---- VisitTypeDeclaration (D363, the declaration family: the last GeneralScope declaration;
+// the central `type_declaration` node with the `ClassType`-switch brace style + enum/member
+// iteration body) ----------------------------------------------------------
+
+// `VisitTypeDeclaration` over `class Foo { }` -- the default `ClassType::Class` case (the
+// `switch` `default` branch writes `kw:class` + `ClassBraceStyle`), no `TypeParameters`, no
+// primary constructor, no base types, no constraints, and an empty `Members` body. The
+// `isEmptyRecord` guard is false (`Class` is neither `RecordClass` nor `RecordStruct`), so the
+// `else` branch runs: `OpenBrace(ClassBraceStyle=EndOfLine)` (a leading space, `tok:{`, an
+// indent, a newline), the non-enum member loop (no members, nothing), then `CloseBrace`
+// (an unindent, `tok:}`) and a trailing newline. The find-based ordering pins the keyword
+// before the name before the open brace before the close brace (the empty-body class case).
+TEST(CSharp_OutputVisitor, VisitTypeDeclarationBareClass) {
+	V h;
+	auto node = std::make_unique<TypeDeclaration>();
+	node->NameToken(Identifier::Create("Foo"));
+	h.visitor->VisitTypeDeclaration(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto classKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:class");
+	ASSERT_NE(classKw, h.inner.calls.end()) << "a class must open with kw:class";
+	auto nameTok = std::find(classKw, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end()) << "the NameToken must render after kw:class";
+	auto openBrace = std::find(nameTok, h.inner.calls.end(), "tok:{");
+	ASSERT_NE(openBrace, h.inner.calls.end()) << "the body must open with tok:{ after the name";
+	auto closeBrace = std::find(openBrace, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(closeBrace, h.inner.calls.end()) << "the body must close with tok:} after tok:{";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitTypeDeclaration` over `enum Foo { A }` -- the `ClassType::Enum` case (the `switch`
+// writes `kw:enum` + `EnumBraceStyle`), one `EnumMemberDeclaration` member `A`. The `else`
+// branch runs (not an empty record): `OpenBrace(EnumBraceStyle=EndOfLine)` then the ENUM member
+// loop -- the first member sets `first=false` and recurses through `VisitEnumMemberDeclaration`
+// (which renders just `id:A`; no `Comma` for a single member), then the trailing `NewLine`, then
+// `CloseBrace` + `NewLine`. The find-based ordering pins `kw:enum` < `id:Foo` < `tok:{` <
+// `id:A` (the member renders between the braces) < `tok:}`.
+TEST(CSharp_OutputVisitor, VisitTypeDeclarationEnumOneMember) {
+	V h;
+	auto node = std::make_unique<TypeDeclaration>();
+	node->ClassType(ClassType::Enum);
+	node->NameToken(Identifier::Create("Foo"));
+	auto member = std::make_unique<EnumMemberDeclaration>();
+	member->NameToken(Identifier::Create("A"));
+	node->Members().Add(member.get());
+	h.visitor->VisitTypeDeclaration(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto enumKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:enum");
+	ASSERT_NE(enumKw, h.inner.calls.end()) << "an enum must open with kw:enum";
+	auto nameTok = std::find(enumKw, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end()) << "the NameToken must render after kw:enum";
+	auto openBrace = std::find(nameTok, h.inner.calls.end(), "tok:{");
+	ASSERT_NE(openBrace, h.inner.calls.end()) << "the body must open with tok:{ after the name";
+	auto memberTok = std::find(openBrace, h.inner.calls.end(), "id:A");
+	ASSERT_NE(memberTok, h.inner.calls.end()) << "the enum member must render after tok:{";
+	auto closeBrace = std::find(memberTok, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(closeBrace, h.inner.calls.end()) << "tok:} must render after the enum member";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitTypeDeclaration` over `class Foo : Bar { }` -- the default `ClassType::Class` case with
+// one base type `Bar`, exercising the `BaseTypes.Count() != 0` branch: `Space()` +
+// `WriteToken(Colon)` + `Space()` + `WriteCommaSeparatedList(BaseTypes)` (the `Bar` `SimpleType`
+// recurses through `VisitSimpleType`, rendering `id:Bar`). The base-type list renders BETWEEN
+// the name and the open brace. The find-based ordering pins `kw:class` < `id:Foo` < `tok::` <
+// `id:Bar` < `tok:{` < `tok:}`.
+TEST(CSharp_OutputVisitor, VisitTypeDeclarationWithBaseType) {
+	V h;
+	auto node = std::make_unique<TypeDeclaration>();
+	node->NameToken(Identifier::Create("Foo"));
+	auto baseType = std::make_unique<SimpleType>(std::string("Bar"));
+	node->BaseTypes().Add(baseType.get());
+	h.visitor->VisitTypeDeclaration(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto classKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:class");
+	ASSERT_NE(classKw, h.inner.calls.end()) << "a class must open with kw:class";
+	auto nameTok = std::find(classKw, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end()) << "the NameToken must render after kw:class";
+	auto colon = std::find(nameTok, h.inner.calls.end(), "tok::");
+	ASSERT_NE(colon, h.inner.calls.end()) << "the base-type list must open with tok:: after the name";
+	auto baseTok = std::find(colon, h.inner.calls.end(), "id:Bar");
+	ASSERT_NE(baseTok, h.inner.calls.end()) << "the base type must render after tok::";
+	auto openBrace = std::find(baseTok, h.inner.calls.end(), "tok:{");
+	ASSERT_NE(openBrace, h.inner.calls.end()) << "the body must open with tok:{ after the base type";
+	auto closeBrace = std::find(openBrace, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(closeBrace, h.inner.calls.end()) << "the body must close with tok:} after tok:{";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitTypeDeclaration` over `record Foo;` -- the `ClassType::RecordClass` case (the `switch`
+// writes `kw:record` + `ClassBraceStyle`) with NO members, exercising the `isEmptyRecord` guard
+// (`RecordClass || RecordStruct` AND `Members.Count() == 0`): a bare `Semicolon` (no braces).
+// The root (unparented) node's `Semicolon` writes `tok:;` + `NewLine` (the D360 directive
+// precedent -- `Slot()` is null so `skipToken`/`skipNewLine` both return false). The find-based
+// ordering pins `kw:record` < `id:Foo` < `tok:;`, and asserts NO braces in the empty-record form.
+TEST(CSharp_OutputVisitor, VisitTypeDeclarationEmptyRecord) {
+	V h;
+	auto node = std::make_unique<TypeDeclaration>();
+	node->ClassType(ClassType::RecordClass);
+	node->NameToken(Identifier::Create("Foo"));
+	h.visitor->VisitTypeDeclaration(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto recordKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:record");
+	ASSERT_NE(recordKw, h.inner.calls.end()) << "a record must open with kw:record";
+	auto nameTok = std::find(recordKw, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end()) << "the NameToken must render after kw:record";
+	auto semi = std::find(nameTok, h.inner.calls.end(), "tok:;");
+	ASSERT_NE(semi, h.inner.calls.end()) << "an empty record must close with tok:; (no braces)";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+	// No braces in the empty-record form.
+	EXPECT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:{"), h.inner.calls.end())
+		<< "an empty record must not emit an open brace";
+	EXPECT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:}"), h.inner.calls.end())
+		<< "an empty record must not emit a close brace";
 }

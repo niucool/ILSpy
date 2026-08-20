@@ -2356,7 +2356,107 @@ void CSharpOutputVisitor::VisitDelegateDeclaration(Syntax::DelegateDeclaration* 
 	Semicolon();
 	EndNode(delegateDeclaration);
 }
-void CSharpOutputVisitor::VisitTypeDeclaration(Syntax::TypeDeclaration*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitTypeDeclaration(Syntax::TypeDeclaration* typeDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitTypeDeclaration (line 1561):
+	// `Modifiers (class|struct|interface|enum|record|record struct) NameToken<TypeParameters>
+	// (PrimaryConstructorParameters)? (: BaseTypes)? Constraints { Members }` -- the
+	// `type_declaration` (C# grammar 15.2.1/16.2.1/19.2.1/20.2). The `ClassType` switch picks the
+	// kind keyword and the `BraceStyle`; `RecordStruct` writes the two-keyword `record struct`
+	// (`RecordStructKeyword` "record" then `StructKeyword` "struct"). The primary constructor
+	// (`HasPrimaryConstructor`, C# 12) writes `(...PrimaryConstructorParameters)` after the type
+	// parameters (the same `Space(SpaceBeforeMethodDeclarationParentheses)` +
+	// `WriteCommaSeparatedListInParenthesis` shape as `VisitMethodDeclaration` [D354]). The base
+	// types render `: BaseTypes` (Space + Colon + Space + `WriteCommaSeparatedList`) when non-empty
+	// (the `BaseTypes.Any()` ports to `BaseTypes().Count() != 0`). A record (RecordClass or
+	// RecordStruct) with NO members closes with a bare `Semicolon` (no braces); everything else
+	// opens `OpenBrace(braceStyle)`, and for `ClassType.Enum` iterates the members comma-separated
+	// (`Comma(member, noSpaceAfterComma: true)` + `NewLine` between members, a trailing `NewLine`
+	// after the last), else iterates the members with `MinimumBlankLinesBetweenMembers` blank
+	// lines between, then `CloseBrace(braceStyle)` + `NewLine`. The lazy collections snapshot via
+	// the D325 `ToVector` helper before the write helpers and the `foreach` loops (the collections
+	// are not mutated during the visit). `NameToken` is a REQUIRED `Identifier` written via
+	// `WriteIdentifier` (the C# passes the token, not the string).
+	StartNode(typeDeclaration);
+	WriteAttributes(ToVector(typeDeclaration->Attributes()));
+	WriteModifiers(typeDeclaration->Modifiers());
+	BraceStyle braceStyle;
+	switch (typeDeclaration->ClassType()) {
+		case Syntax::ClassType::Enum:
+			WriteKeyword(Tokens::EnumKeyword);
+			braceStyle = policy_.EnumBraceStyle;
+			break;
+		case Syntax::ClassType::Interface:
+			WriteKeyword(Tokens::InterfaceKeyword);
+			braceStyle = policy_.InterfaceBraceStyle;
+			break;
+		case Syntax::ClassType::Struct:
+			WriteKeyword(Tokens::StructKeyword);
+			braceStyle = policy_.StructBraceStyle;
+			break;
+		case Syntax::ClassType::RecordClass:
+			WriteKeyword(Tokens::RecordKeyword);
+			braceStyle = policy_.ClassBraceStyle;
+			break;
+		case Syntax::ClassType::RecordStruct:
+			WriteKeyword(Tokens::RecordStructKeyword);
+			WriteKeyword(Tokens::StructKeyword);
+			braceStyle = policy_.StructBraceStyle;
+			break;
+		default:
+			WriteKeyword(Tokens::ClassKeyword);
+			braceStyle = policy_.ClassBraceStyle;
+			break;
+	}
+	WriteIdentifier(typeDeclaration->NameToken());
+	WriteTypeParameters(ToVector(typeDeclaration->TypeParameters()));
+	if (typeDeclaration->HasPrimaryConstructor()) {
+		Space(policy_.SpaceBeforeMethodDeclarationParentheses);
+		WriteCommaSeparatedListInParenthesis(ToVector(typeDeclaration->PrimaryConstructorParameters()), policy_.SpaceWithinMethodDeclarationParentheses);
+	}
+	if (typeDeclaration->BaseTypes().Count() != 0) {
+		Space();
+		WriteToken(Tokens::Colon);
+		Space();
+		WriteCommaSeparatedList(ToVector(typeDeclaration->BaseTypes()));
+	}
+	for (Syntax::Constraint* constraint : ToVector(typeDeclaration->Constraints())) {
+		constraint->AcceptVisitor(*this);
+	}
+	bool isEmptyRecord = (typeDeclaration->ClassType() == Syntax::ClassType::RecordClass
+		|| typeDeclaration->ClassType() == Syntax::ClassType::RecordStruct)
+		&& typeDeclaration->Members().Count() == 0;
+	if (isEmptyRecord) {
+		Semicolon();
+	} else {
+		OpenBrace(braceStyle);
+		if (typeDeclaration->ClassType() == Syntax::ClassType::Enum) {
+			bool first = true;
+			for (Syntax::EntityDeclaration* member : ToVector(typeDeclaration->Members())) {
+				if (first) {
+					first = false;
+				} else {
+					Comma(member, true);
+					NewLine();
+				}
+				member->AcceptVisitor(*this);
+			}
+			NewLine();
+		} else {
+			bool first = true;
+			for (Syntax::EntityDeclaration* member : ToVector(typeDeclaration->Members())) {
+				if (!first) {
+					for (int i = 0; i < policy_.MinimumBlankLinesBetweenMembers; ++i)
+						NewLine();
+				}
+				first = false;
+				member->AcceptVisitor(*this);
+			}
+		}
+		CloseBrace(braceStyle);
+		NewLine();
+	}
+	EndNode(typeDeclaration);
+}
 
 // The C# `void MaybeNewLinesAfterUsings(AstNode node)` (line 2722) -- after a `using`/`using
 // alias` directive that is NOT followed by another `using`/`using alias` sibling, emit
