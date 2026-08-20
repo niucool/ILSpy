@@ -208,6 +208,7 @@
 #include "Decompiler/CSharp/Syntax/AstNodeCollection.hpp"
 #include "Decompiler/CSharp/Syntax/AstType.hpp"
 #include "Decompiler/CSharp/Syntax/IAstVisitor.hpp"
+#include "Decompiler/CSharp/Syntax/IAstVisitorBool.hpp"
 #include "Decompiler/CSharp/Syntax/Identifier.hpp"
 #include "Decompiler/CSharp/Syntax/OperatorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ParameterDeclaration.hpp"
@@ -394,6 +395,16 @@ public:
     // routes back to `VisitDocumentationReference`.
     void AcceptVisitor(IAstVisitor& visitor) override {
         visitor.VisitDocumentationReference(this);
+    }
+
+    // The C# `public override T AcceptVisitor<T>(IAstVisitor<T> visitor)` (instantiated
+    // `T = bool`) -- the `<bool>`-variant dispatch entry: routes back to
+    // `VisitDocumentationReference`, returning its `bool` result (the stop/continue signal the
+    // `DepthFirstAstVisitor<bool>` walk consumes). Mirrors the void `AcceptVisitor`
+    // above; `IAstVisitorBool` is the `IAstVisitor<out S>` interface instantiated
+    // `S = bool` (IAstVisitorBool.hpp).
+    bool AcceptVisitorBool(IAstVisitorBool& visitor) override {
+        return visitor.VisitDocumentationReference(this);
     }
 
     // ---- Slot storage (the generated overrides) --------------------------------------------

@@ -76,6 +76,7 @@
 
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/IAstVisitor.hpp"
+#include "Decompiler/CSharp/Syntax/IAstVisitorBool.hpp"
 #include "Decompiler/CSharp/Syntax/AstNodeCollection.hpp"
 #include "Decompiler/CSharp/Syntax/SwitchExpressionSection.hpp"
 #include "Decompiler/CSharp/Syntax/Slots.hpp"
@@ -166,6 +167,16 @@ public:
     // routes back to `VisitSwitchExpression`.
     void AcceptVisitor(IAstVisitor& visitor) override {
         visitor.VisitSwitchExpression(this);
+    }
+
+    // The C# `public override T AcceptVisitor<T>(IAstVisitor<T> visitor)` (instantiated
+    // `T = bool`) -- the `<bool>`-variant dispatch entry: routes back to
+    // `VisitSwitchExpression`, returning its `bool` result (the stop/continue signal the
+    // `DepthFirstAstVisitor<bool>` walk consumes). Mirrors the void `AcceptVisitor`
+    // above; `IAstVisitorBool` is the `IAstVisitor<out S>` interface instantiated
+    // `S = bool` (IAstVisitorBool.hpp).
+    bool AcceptVisitorBool(IAstVisitorBool& visitor) override {
+        return visitor.VisitSwitchExpression(this);
     }
 
     // ---- Slot storage (the generated overrides) ---------------------------------------

@@ -126,6 +126,15 @@ class ChildrenCollection;
 // `visitor.Visit<NodeName>(this)`; the per-node `Visit` methods are added to `IAstVisitor` as
 // the concrete node hierarchy lands.
 class IAstVisitor;
+// Forward declaration: the `IAstVisitor<out S>` generic-variant interface instantiated
+// `S = bool` (IAstVisitorBool.hpp) -- `AcceptVisitorBool` takes it by reference, so a forward
+// declaration suffices here (no include needed). The concrete nodes' `AcceptVisitorBool`
+// overrides call `visitor.Visit<NodeName>(this)` returning the `bool` result; this is the
+// C++-realization of the C# generic `abstract T AcceptVisitor<T>(IAstVisitor<T>)` dispatch for
+// the `bool` instantiation (C++ has no virtual template methods, hence the per-instantiation
+// virtual; the sole engine consumer is `GenericGrammarAmbiguityVisitor`, the
+// `DepthFirstAstVisitor<bool>`-derived ambiguity resolver).
+class IAstVisitorBool;
 
 // The common base of every C# AST node. Abstract: a concrete node overrides at least
 // `DoMatch` and the slot-storage virtuals for the slots it declares.
@@ -483,11 +492,23 @@ public:
     // only a forward declaration), so this header does not include `IAstVisitor.hpp`.
     //
     // The C# also declares `abstract T AcceptVisitor<T>(IAstVisitor<T>)` and
-    // `abstract S AcceptVisitor<T,S>(IAstVisitor<T,S>, T)` (generic-method dispatch); those
-    // variants are unused by the engine (only the `CSharpOutputVisitor : IAstVisitor`
-    // pretty-printer consumes the visitor) and C++ has no virtual template methods, so they
-    // stay deferred (see IAstVisitor.hpp).
+    // `abstract S AcceptVisitor<T,S>(IAstVisitor<T,S>, T)` (generic-method dispatch). C++ has
+    // no virtual template methods, so each engine-consumed instantiation is realized as a
+    // per-result-type virtual: `AcceptVisitorBool` below (for the `bool` instantiation consumed
+    // by `GenericGrammarAmbiguityVisitor : DepthFirstAstVisitor<bool>`), mirroring the void
+    // `AcceptVisitor` dispatch above. The two-argument `<T,S>` variant stays deferred (no
+    // engine consumer); see IAstVisitor.hpp / IAstVisitorBool.hpp.
     virtual void AcceptVisitor(IAstVisitor& visitor) = 0;
+
+    // The C# `public abstract T AcceptVisitor<T>(IAstVisitor<T> visitor)` instantiated `T =
+    // bool` -- the `<bool>`-variant dispatch entry of the visitor pattern. A concrete node
+    // overrides this to call `visitor.Visit<NodeName>(this)` (the matching per-node `Visit` on
+    // `IAstVisitorBool`) and return its `bool` result, so a `DepthFirstAstVisitor<bool>` walk
+    // calls `node.AcceptVisitorBool(visitor)` and the node routes back to the right `Visit`
+    // overload, propagating the stop/continue result. `IAstVisitorBool` is forward-declared (a
+    // reference parameter needs only a forward declaration), so this header does not include
+    // `IAstVisitorBool.hpp`.
+    virtual bool AcceptVisitorBool(IAstVisitorBool& visitor) = 0;
 
     // ---- Mutation API ----------------------------------------------------
     // The C# `public void AddChild<T>(T, CSharpSlotInfo)` -- add a child into the slot

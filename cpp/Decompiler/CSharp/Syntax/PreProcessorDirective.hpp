@@ -77,6 +77,7 @@
 #define ILSPY_DECOMPILER_CSHARP_SYNTAX_PREPROCESSORDIRECTIVE_HPP
 
 #include "Decompiler/CSharp/Syntax/IAstVisitor.hpp"
+#include "Decompiler/CSharp/Syntax/IAstVisitorBool.hpp"
 #include "Decompiler/CSharp/Syntax/PatternMatching/Match.hpp"
 #include "Decompiler/CSharp/Syntax/PatternMatching/Pattern.hpp"
 #include "Decompiler/CSharp/Syntax/TextLocation.hpp"
@@ -169,6 +170,16 @@ public:
     // dispatches through this to `VisitPreProcessorDirective`.
     void AcceptVisitor(IAstVisitor& visitor) override {
         visitor.VisitPreProcessorDirective(this);
+    }
+
+    // The C# `public override T AcceptVisitor<T>(IAstVisitor<T> visitor)` (instantiated
+    // `T = bool`) -- the `<bool>`-variant dispatch entry: routes back to
+    // `VisitPreProcessorDirective`, returning its `bool` result (the stop/continue signal the
+    // `DepthFirstAstVisitor<bool>` walk consumes). Mirrors the void `AcceptVisitor`
+    // above; `IAstVisitorBool` is the `IAstVisitor<out S>` interface instantiated
+    // `S = bool` (IAstVisitorBool.hpp).
+    bool AcceptVisitorBool(IAstVisitorBool& visitor) override {
+        return visitor.VisitPreProcessorDirective(this);
     }
 
     // ---- DoMatch (the HAND-WRITTEN pattern match, NOT generated) -------------------------

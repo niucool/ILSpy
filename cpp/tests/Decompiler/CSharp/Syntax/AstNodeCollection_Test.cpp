@@ -47,6 +47,7 @@ class StubExpr : public AstNode {
 public:
     bool DoMatch(AstNode*, Match) override { return false; }
     void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
+    bool AcceptVisitorBool(IAstVisitorBool& /*visitor*/) override { return false; }
 };
 
 // A container whose only slot is a collection of `StubExpr`. Derives from `StubExpr` so
@@ -494,6 +495,7 @@ TEST(CSharp_AstNodeCollection, RemoveNodeWrongTypeReturnsFalse) {
     public:
         bool DoMatch(AstNode*, Match) override { return false; }
         void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
+    bool AcceptVisitorBool(IAstVisitorBool& /*visitor*/) override { return false; }
     };
     NotAnExpr n;
     EXPECT_FALSE(coll->RemoveNode(&n));
@@ -578,6 +580,7 @@ public:
         return dynamic_cast<StubMatchNode*>(other) != nullptr;
     }
     void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
+    bool AcceptVisitorBool(IAstVisitorBool& /*visitor*/) override { return false; }
 };
 
 class StubMatchContainer : public StubMatchNode {

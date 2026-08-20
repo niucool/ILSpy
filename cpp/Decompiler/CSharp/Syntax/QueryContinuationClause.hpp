@@ -79,6 +79,7 @@
 
 #include "Decompiler/CSharp/Syntax/Expressions/QueryExpression.hpp"
 #include "Decompiler/CSharp/Syntax/IAstVisitor.hpp"
+#include "Decompiler/CSharp/Syntax/IAstVisitorBool.hpp"
 #include "Decompiler/CSharp/Syntax/Identifier.hpp"
 #include "Decompiler/CSharp/Syntax/QueryClause.hpp"
 #include "Decompiler/CSharp/Syntax/Slots.hpp"
@@ -176,6 +177,16 @@ public:
     // routes back to `VisitQueryContinuationClause`.
     void AcceptVisitor(IAstVisitor& visitor) override {
         visitor.VisitQueryContinuationClause(this);
+    }
+
+    // The C# `public override T AcceptVisitor<T>(IAstVisitor<T> visitor)` (instantiated
+    // `T = bool`) -- the `<bool>`-variant dispatch entry: routes back to
+    // `VisitQueryContinuationClause`, returning its `bool` result (the stop/continue signal the
+    // `DepthFirstAstVisitor<bool>` walk consumes). Mirrors the void `AcceptVisitor`
+    // above; `IAstVisitorBool` is the `IAstVisitor<out S>` interface instantiated
+    // `S = bool` (IAstVisitorBool.hpp).
+    bool AcceptVisitorBool(IAstVisitorBool& visitor) override {
+        return visitor.VisitQueryContinuationClause(this);
     }
 
     // ---- Slot storage (the generated overrides) ---------------------------

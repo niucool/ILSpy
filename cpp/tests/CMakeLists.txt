@@ -34,6 +34,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/AbstractAnnotatable_Test.cpp
     Decompiler/CSharp/Syntax/Trivia_Test.cpp
     Decompiler/CSharp/Syntax/IAstVisitor_Test.cpp
+    Decompiler/CSharp/Syntax/DepthFirstAstVisitorBool_Test.cpp
     Decompiler/CSharp/Syntax/AstNodeSlotKind_Test.cpp
     Decompiler/CSharp/Syntax/Identifier_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/Expression_Test.cpp

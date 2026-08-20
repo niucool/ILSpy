@@ -40,6 +40,7 @@ class StubExpr : public AstNode {
 public:
     bool DoMatch(AstNode* /*other*/, Match /*match*/) override { return false; }
     void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
+    bool AcceptVisitorBool(IAstVisitorBool& /*visitor*/) override { return false; }
 };
 
 // A leaf node that tracks DoMatch calls and records the candidate under a group, so
@@ -58,6 +59,7 @@ public:
         return other != nullptr;
     }
     void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
+    bool AcceptVisitorBool(IAstVisitorBool& /*visitor*/) override { return false; }
 };
 
 // A leaf node that overrides the source-location getters (the single-token leaf case),
@@ -68,6 +70,7 @@ public:
     TextLocation EndLocation() const override { return TextLocation(7, 12); }
     bool DoMatch(AstNode* /*other*/, Match /*match*/) override { return false; }
     void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
+    bool AcceptVisitorBool(IAstVisitorBool& /*visitor*/) override { return false; }
 };
 
 // A two-single-slot container (Left/Right) using the known-index set path: SetChild
@@ -114,6 +117,7 @@ public:
     }
     bool DoMatch(AstNode* /*other*/, Match /*match*/) override { return false; }
     void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
+    bool AcceptVisitorBool(IAstVisitorBool& /*visitor*/) override { return false; }
 };
 
 // A collection-style container using the invalidate path: Append stores the child and
@@ -149,6 +153,7 @@ public:
     }
     bool DoMatch(AstNode* /*other*/, Match /*match*/) override { return false; }
     void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
+    bool AcceptVisitorBool(IAstVisitorBool& /*visitor*/) override { return false; }
 };
 
 // An INode that is NOT an AstNode (a pattern node), for the INode.DoMatch "non-AstNode

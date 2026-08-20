@@ -133,6 +133,7 @@ protected:
 
 public:
     void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
+    bool AcceptVisitorBool(IAstVisitorBool& /*visitor*/) override { return false; }
 };
 
 } // namespace

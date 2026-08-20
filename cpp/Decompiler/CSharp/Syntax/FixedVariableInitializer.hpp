@@ -112,6 +112,7 @@
 
 #include "Decompiler/CSharp/Syntax/AstNode.hpp"
 #include "Decompiler/CSharp/Syntax/IAstVisitor.hpp"
+#include "Decompiler/CSharp/Syntax/IAstVisitorBool.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/Identifier.hpp"
 #include "Decompiler/CSharp/Syntax/Slots.hpp"
@@ -216,6 +217,16 @@ public:
     // `VisitFixedVariableInitializer`).
     void AcceptVisitor(IAstVisitor& visitor) override {
         visitor.VisitFixedVariableInitializer(this);
+    }
+
+    // The C# `public override T AcceptVisitor<T>(IAstVisitor<T> visitor)` (instantiated
+    // `T = bool`) -- the `<bool>`-variant dispatch entry: routes back to
+    // `VisitFixedVariableInitializer`, returning its `bool` result (the stop/continue signal the
+    // `DepthFirstAstVisitor<bool>` walk consumes). Mirrors the void `AcceptVisitor`
+    // above; `IAstVisitorBool` is the `IAstVisitor<out S>` interface instantiated
+    // `S = bool` (IAstVisitorBool.hpp).
+    bool AcceptVisitorBool(IAstVisitorBool& visitor) override {
+        return visitor.VisitFixedVariableInitializer(this);
     }
 
     // ---- Slot storage (the generated overrides) ---------------------------

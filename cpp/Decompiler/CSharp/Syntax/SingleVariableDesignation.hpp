@@ -78,6 +78,7 @@
 
 #include "Decompiler/CSharp/Syntax/VariableDesignation.hpp"
 #include "Decompiler/CSharp/Syntax/IAstVisitor.hpp"
+#include "Decompiler/CSharp/Syntax/IAstVisitorBool.hpp"
 #include "Decompiler/CSharp/Syntax/Identifier.hpp"
 #include "Decompiler/CSharp/Syntax/Slots.hpp"
 
@@ -167,6 +168,16 @@ public:
     // `VisitSingleVariableDesignation`).
     void AcceptVisitor(IAstVisitor& visitor) override {
         visitor.VisitSingleVariableDesignation(this);
+    }
+
+    // The C# `public override T AcceptVisitor<T>(IAstVisitor<T> visitor)` (instantiated
+    // `T = bool`) -- the `<bool>`-variant dispatch entry: routes back to
+    // `VisitSingleVariableDesignation`, returning its `bool` result (the stop/continue signal the
+    // `DepthFirstAstVisitor<bool>` walk consumes). Mirrors the void `AcceptVisitor`
+    // above; `IAstVisitorBool` is the `IAstVisitor<out S>` interface instantiated
+    // `S = bool` (IAstVisitorBool.hpp).
+    bool AcceptVisitorBool(IAstVisitorBool& visitor) override {
+        return visitor.VisitSingleVariableDesignation(this);
     }
 
     // ---- Slot storage (the generated overrides) ---------------------------

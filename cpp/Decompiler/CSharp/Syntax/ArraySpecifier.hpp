@@ -57,6 +57,7 @@
 
 #include "Decompiler/CSharp/Syntax/AstNode.hpp"
 #include "Decompiler/CSharp/Syntax/IAstVisitor.hpp"
+#include "Decompiler/CSharp/Syntax/IAstVisitorBool.hpp"
 #include "Decompiler/CSharp/Syntax/TextLocation.hpp"
 
 #include "Decompiler/CSharp/Syntax/PatternMatching/Match.hpp"
@@ -94,6 +95,16 @@ public:
     // entry: routes back to `VisitArraySpecifier`.
     void AcceptVisitor(IAstVisitor& visitor) override {
         visitor.VisitArraySpecifier(this);
+    }
+
+    // The C# `public override T AcceptVisitor<T>(IAstVisitor<T> visitor)` (instantiated
+    // `T = bool`) -- the `<bool>`-variant dispatch entry: routes back to
+    // `VisitArraySpecifier`, returning its `bool` result (the stop/continue signal the
+    // `DepthFirstAstVisitor<bool>` walk consumes). Mirrors the void `AcceptVisitor`
+    // above; `IAstVisitorBool` is the `IAstVisitor<out S>` interface instantiated
+    // `S = bool` (IAstVisitorBool.hpp).
+    bool AcceptVisitorBool(IAstVisitorBool& visitor) override {
+        return visitor.VisitArraySpecifier(this);
     }
 
     // The generated `protected internal override bool DoMatch(AstNode? other, Match match)`:

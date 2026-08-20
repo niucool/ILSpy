@@ -51,6 +51,7 @@
 #define ILSPY_DECOMPILER_CSHARP_SYNTAX_STATEMENTS_EXPRESSIONSTATEMENT_HPP
 
 #include "Decompiler/CSharp/Syntax/IAstVisitor.hpp"
+#include "Decompiler/CSharp/Syntax/IAstVisitorBool.hpp"
 #include "Decompiler/CSharp/Syntax/Slots.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/Statement.hpp"
 
@@ -113,6 +114,16 @@ public:
     // routes back to `VisitExpressionStatement`.
     void AcceptVisitor(IAstVisitor& visitor) override {
         visitor.VisitExpressionStatement(this);
+    }
+
+    // The C# `public override T AcceptVisitor<T>(IAstVisitor<T> visitor)` (instantiated
+    // `T = bool`) -- the `<bool>`-variant dispatch entry: routes back to
+    // `VisitExpressionStatement`, returning its `bool` result (the stop/continue signal the
+    // `DepthFirstAstVisitor<bool>` walk consumes). Mirrors the void `AcceptVisitor`
+    // above; `IAstVisitorBool` is the `IAstVisitor<out S>` interface instantiated
+    // `S = bool` (IAstVisitorBool.hpp).
+    bool AcceptVisitorBool(IAstVisitorBool& visitor) override {
+        return visitor.VisitExpressionStatement(this);
     }
 
     // ---- Slot storage (the generated overrides) ---------------------------

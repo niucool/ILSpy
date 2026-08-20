@@ -49,6 +49,7 @@ class StubNode : public AstNode {
 public:
     bool DoMatch(AstNode*, Match) override { return false; }
     void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
+    bool AcceptVisitorBool(IAstVisitorBool& /*visitor*/) override { return false; }
 };
 
 // A leaf node (no children) carrying a scalar `Tag` so `Clone`'s scalar copy can be
@@ -457,6 +458,7 @@ TEST(CSharp_AstNodeMutation, ReplaceWithRejectsTypeMismatch) {
     public:
         bool DoMatch(AstNode*, Match) override { return false; }
         void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
+    bool AcceptVisitorBool(IAstVisitorBool& /*visitor*/) override { return false; }
     };
     NotAStubNode x;
     EXPECT_THROW(a.ReplaceWith(&x), std::invalid_argument);

@@ -80,6 +80,11 @@ public:
         if (auto* rv = dynamic_cast<RecordingVisitor*>(&visitor))
             rv->VisitLeaf(this);
     }
+
+    // The `<bool>`-variant dispatch entry (the new pure virtual on `AstNode`): this stub
+    // is used only with the void visitor above, so the bool variant is a no-op returning
+    // `false` (default(bool)); it is never exercised by this test.
+    bool AcceptVisitorBool(IAstVisitorBool& /*visitor*/) override { return false; }
 };
 
 // A container stub (one collection slot of `AstNode` children) used to exercise the
@@ -136,6 +141,11 @@ public:
         if (auto* rv = dynamic_cast<RecordingVisitor*>(&visitor))
             rv->VisitParent(this);
     }
+
+    // The `<bool>`-variant dispatch entry (the new pure virtual on `AstNode`): this stub
+    // is used only with the void visitor above, so the bool variant is a no-op returning
+    // `false` (default(bool)); it is never exercised by this test.
+    bool AcceptVisitorBool(IAstVisitorBool& /*visitor*/) override { return false; }
 };
 
 // The `Visit` methods (defined after the stubs are complete): record the node, then recurse

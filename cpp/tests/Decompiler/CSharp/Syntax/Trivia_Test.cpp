@@ -53,6 +53,7 @@ public:
     AstNode* Clone() const override { return new TestComment(Content, StartLocation(), EndLocation()); }
     bool DoMatch(AstNode* /*other*/, Match /*match*/) override { return false; }
     void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
+    bool AcceptVisitorBool(IAstVisitorBool& /*visitor*/) override { return false; }
 };
 
 // A leaf owning node (no slots) whose `Clone` follows the port's concrete-node shape: copy
@@ -69,6 +70,7 @@ public:
         return copy;
     }
     void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
+    bool AcceptVisitorBool(IAstVisitorBool& /*visitor*/) override { return false; }
 };
 
 // A single-slot node (one optional single slot, known-index set) for the `CheckInvariant`
@@ -79,6 +81,7 @@ public:
     bool DoMatch(AstNode* /*other*/, Match /*match*/) override { return false; }
     AstNode* Clone() const override { return new TestLeaf(); }
     void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
+    bool AcceptVisitorBool(IAstVisitorBool& /*visitor*/) override { return false; }
 };
 
 class StubSingleSlot : public AstNode {
@@ -110,6 +113,7 @@ public:
         return copy;
     }
     void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
+    bool AcceptVisitorBool(IAstVisitorBool& /*visitor*/) override { return false; }
 };
 
 } // namespace

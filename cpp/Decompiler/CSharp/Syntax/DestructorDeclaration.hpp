@@ -109,6 +109,7 @@
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/AstNodeCollection.hpp"
 #include "Decompiler/CSharp/Syntax/IAstVisitor.hpp"
+#include "Decompiler/CSharp/Syntax/IAstVisitorBool.hpp"
 #include "Decompiler/CSharp/Syntax/Slots.hpp"
 
 #include "Decompiler/CSharp/Syntax/PatternMatching/Match.hpp"
@@ -204,6 +205,16 @@ public:
     // routes back to `VisitDestructorDeclaration`.
     void AcceptVisitor(IAstVisitor& visitor) override {
         visitor.VisitDestructorDeclaration(this);
+    }
+
+    // The C# `public override T AcceptVisitor<T>(IAstVisitor<T> visitor)` (instantiated
+    // `T = bool`) -- the `<bool>`-variant dispatch entry: routes back to
+    // `VisitDestructorDeclaration`, returning its `bool` result (the stop/continue signal the
+    // `DepthFirstAstVisitor<bool>` walk consumes). Mirrors the void `AcceptVisitor`
+    // above; `IAstVisitorBool` is the `IAstVisitor<out S>` interface instantiated
+    // `S = bool` (IAstVisitorBool.hpp).
+    bool AcceptVisitorBool(IAstVisitorBool& visitor) override {
+        return visitor.VisitDestructorDeclaration(this);
     }
 
     // ---- Slot storage (the generated overrides) -------------------------------------------

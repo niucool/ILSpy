@@ -33,12 +33,14 @@ class StubExpr : public AstNode {
 public:
     bool DoMatch(AstNode* /*other*/, PatternMatching::Match /*match*/) override { return false; }
     void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
+    bool AcceptVisitorBool(IAstVisitorBool& /*visitor*/) override { return false; }
 };
 
 class StubStmt : public AstNode {
 public:
     bool DoMatch(AstNode* /*other*/, PatternMatching::Match /*match*/) override { return false; }
     void AcceptVisitor(IAstVisitor& /*visitor*/) override {}
+    bool AcceptVisitorBool(IAstVisitorBool& /*visitor*/) override { return false; }
 };
 
 // A subtype of StubExpr, so the is-a test also accepts a subtype (the CLR

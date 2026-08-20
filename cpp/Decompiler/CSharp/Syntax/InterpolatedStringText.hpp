@@ -54,6 +54,7 @@
 
 #include "Decompiler/CSharp/Syntax/InterpolatedStringContent.hpp"
 #include "Decompiler/CSharp/Syntax/IAstVisitor.hpp"
+#include "Decompiler/CSharp/Syntax/IAstVisitorBool.hpp"
 
 #include "Decompiler/CSharp/Syntax/PatternMatching/Match.hpp"
 #include "Decompiler/CSharp/Syntax/PatternMatching/Pattern.hpp"
@@ -94,6 +95,16 @@ public:
     // routes back to `VisitInterpolatedStringText`.
     void AcceptVisitor(IAstVisitor& visitor) override {
         visitor.VisitInterpolatedStringText(this);
+    }
+
+    // The C# `public override T AcceptVisitor<T>(IAstVisitor<T> visitor)` (instantiated
+    // `T = bool`) -- the `<bool>`-variant dispatch entry: routes back to
+    // `VisitInterpolatedStringText`, returning its `bool` result (the stop/continue signal the
+    // `DepthFirstAstVisitor<bool>` walk consumes). Mirrors the void `AcceptVisitor`
+    // above; `IAstVisitorBool` is the `IAstVisitor<out S>` interface instantiated
+    // `S = bool` (IAstVisitorBool.hpp).
+    bool AcceptVisitorBool(IAstVisitorBool& visitor) override {
+        return visitor.VisitInterpolatedStringText(this);
     }
 
     // ---- DoMatch (the generated pattern match) ----------------------------
