@@ -38,6 +38,7 @@
 
 #include "Decompiler/TypeSystem/IEntity.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
+#include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 
 #include <gtest/gtest.h>
 
@@ -49,15 +50,11 @@
 
 namespace ILSpy::Decompiler::TypeSystem {
 
-// Minimal test stand-in for `ITypeDefinition` (the resolved type-definition interface).
-// Only a virtual destructor is declared here -- this is the complete type the
-// `IEntity::DeclaringTypeDefinition()` nullable pointer return needs to point at, NOT a
-// faithful port of the full `ITypeDefinition` surface (which pulls `IMember` / `IField` /
-// ...). Replaced by the real `ITypeDefinition.hpp` when that lands.
-class ITypeDefinition {
-public:
-    virtual ~ITypeDefinition() = default;
-};
+// `ITypeDefinition` is now the real port (cpp/Decompiler/TypeSystem/ITypeDefinition.hpp,
+// D393); it is included above rather than forward-declared as a stand-in. The
+// `TestTypeDefinition` stub below derives from the real `ITypeDefinition` and overrides
+// every pure-virtual with a trivial return (it is constructed only for pointer-identity via
+// `id()` -- no `ITypeDefinition` accessor is read through it in these tests).
 
 // Minimal test stand-in for `IModule` (the metadata-module interface). Only a virtual
 // destructor; the real `IModule` pulls `MetadataFile` / `INamespace` / `ITypeDefinition` /
@@ -91,12 +88,68 @@ public:
 namespace {
 
 // A minimal concrete `ITypeDefinition` for testing (identity-testable via pointer compare).
+// Derives from the real `ITypeDefinition` (D393) and overrides every pure-virtual with a
+// trivial return; it is constructed only for pointer-identity (`id()`) -- no `ITypeDefinition`
+// accessor is read through it in these tests. `Compilation()` is declared here and defined
+// out-of-line (after `TestCompilation` is complete) because the inherited
+// `ICompilationProvider::Compilation()` returns `const ICompilation&` and the stub returns a
+// reference to a `TestCompilation`, which must be complete at the point of the return
+// conversion. The `SymbolKind` / `KnownTypeCode` / `FullTypeName` / `ExtensionInfo` /
+// `Accessibility` / `Nullability` return types are fully qualified because the stub inherits
+// the same-named member functions (the D372 cross-scope name-hiding crux).
 class TestTypeDefinition : public ILSpy::Decompiler::TypeSystem::ITypeDefinition {
 public:
     explicit TestTypeDefinition(int id) : id_(id) {}
     int id() const { return id_; }
+
+    // --- IType (ITypeDefinition redeclarations: disambiguate the shared-IType-base diamond) ---
+    ILSpy::Decompiler::TypeSystem::TypeKind Kind() const override { return ILSpy::Decompiler::TypeSystem::TypeKind::Class; }
+    std::string Name() const override { return {}; }
+    std::string ReflectionName() const override { return {}; }
+    int TypeParameterCount() const override { return 0; }
+    // --- ITypeDefinitionOrUnknown ---
+    const ILSpy::Decompiler::TypeSystem::FullTypeName& FullTypeName() const override { return fullTypeName_; }
+    // --- ISymbol ---
+    ILSpy::Decompiler::TypeSystem::SymbolKind SymbolKind() const override { return ILSpy::Decompiler::TypeSystem::SymbolKind::TypeDefinition; }
+    // --- INamedElement ---
+    std::string FullName() const override { return {}; }
+    std::string Namespace() const override { return {}; }
+    // --- ICompilationProvider (defined out-of-line below; needs `TestCompilation` complete) ---
+    const ILSpy::Decompiler::TypeSystem::ICompilation& Compilation() const override;
+    // --- IEntity ---
+    std::uint32_t MetadataToken() const override { return 0u; }
+    const ILSpy::Decompiler::TypeSystem::ITypeDefinition* DeclaringTypeDefinition() const override { return nullptr; }
+    ILSpy::Decompiler::TypeSystem::ITypePtr DeclaringType() const override { return {}; }
+    const ILSpy::Decompiler::TypeSystem::IModule* ParentModule() const override { return nullptr; }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IAttribute*> GetAttributes() const override { return {}; }
+    bool HasAttribute(ILSpy::Decompiler::TypeSystem::KnownAttribute) const override { return false; }
+    const ILSpy::Decompiler::TypeSystem::IAttribute* GetAttribute(ILSpy::Decompiler::TypeSystem::KnownAttribute) const override { return nullptr; }
+    ILSpy::Decompiler::TypeSystem::Accessibility Accessibility() const override { return ILSpy::Decompiler::TypeSystem::Accessibility::Public; }
+    bool IsStatic() const override { return false; }
+    bool IsAbstract() const override { return false; }
+    bool IsSealed() const override { return false; }
+    // --- ITypeDefinition-own ---
+    std::vector<const ILSpy::Decompiler::TypeSystem::ITypeDefinition*> NestedTypes() const override { return {}; }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IMember*> Members() const override { return {}; }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IField*> Fields() const override { return {}; }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IMethod*> Methods() const override { return {}; }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IProperty*> Properties() const override { return {}; }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IEvent*> Events() const override { return {}; }
+    ILSpy::Decompiler::TypeSystem::KnownTypeCode KnownTypeCode() const override { return ILSpy::Decompiler::TypeSystem::KnownTypeCode::None; }
+    ILSpy::Decompiler::TypeSystem::ITypePtr EnumUnderlyingType() const override { return {}; }
+    bool IsReadOnly() const override { return false; }
+    std::string MetadataName() const override { return {}; }
+    bool HasExtensions() const override { return false; }
+    const ILSpy::Decompiler::TypeSystem::ExtensionInfo* ExtensionInfo() const override { return nullptr; }
+    ILSpy::Decompiler::TypeSystem::Nullability NullableContext() const override { return ILSpy::Decompiler::TypeSystem::Nullability::Oblivious; }
+    bool IsRecord() const override { return false; }
+
+protected:
+    bool StructuralEquals(const ILSpy::Decompiler::TypeSystem::IType&) const override { return false; }
+
 private:
     int id_;
+    ILSpy::Decompiler::TypeSystem::FullTypeName fullTypeName_;
 };
 
 // A minimal concrete `IModule` for testing.
@@ -142,6 +195,16 @@ public:
 private:
     int id_;
 };
+
+// Out-of-line `TestTypeDefinition::Compilation()` (declared above): returns a reference to a
+// function-local `TestCompilation` singleton. Defined here (after `TestCompilation` is
+// complete) so the `TestCompilation` -> `const ICompilation&` derived-to-base conversion
+// resolves.
+const ILSpy::Decompiler::TypeSystem::ICompilation& TestTypeDefinition::Compilation() const
+{
+    static TestCompilation s_compilation(0);
+    return s_compilation;
+}
 
 // A minimal concrete `IEntity` for testing: holds the configured scalar/pointer state and
 // returns it from every accessor (the shape a real `MetadataTypeDefinition` /

@@ -30,11 +30,12 @@
 // through `IType*` / `ISymbol*` / `ITypeParameter*` all reach it.
 //
 // The `Owner` accessor returns `const IEntity*` (a nullable raw pointer), so the test provides a
-// minimal concrete `IEntity` stand-in (`TestEntity`) to point at. The `ITypeDefinition` / `IModule`
-// / `IAttribute` / `ICompilation` stand-ins are IDENTICAL to those in `IEntity_Test.cpp` (ODR-safe
-// across translation units); `IAttribute` is also IDENTICAL to the stand-in in `IParameter_Test.cpp`.
+// minimal concrete `IEntity` stand-in (`TestEntity`) to point at. The `IModule` / `ICompilation` stand-ins are IDENTICAL to those in `IEntity_Test.cpp` (ODR-safe
+// across translation units); `ITypeDefinition` is the real port (D393) and `IAttribute` the real port
+// (D386), both included above.
 
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
+#include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/TypeConstraint.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -52,12 +53,9 @@
 
 namespace ILSpy::Decompiler::TypeSystem {
 
-// Minimal test stand-in for `ITypeDefinition` -- IDENTICAL to the stand-in in `IEntity_Test.cpp`
-// (ODR-safe across translation units).
-class ITypeDefinition {
-public:
-    virtual ~ITypeDefinition() = default;
-};
+// `ITypeDefinition` is now the real port (cpp/Decompiler/TypeSystem/ITypeDefinition.hpp, D393),
+// included above; the `TestTypeDefinition` stub below derives from it (it is never instantiated,
+// so it stays abstract and overrides nothing).
 
 // Minimal test stand-in for `IModule` -- IDENTICAL to the stand-in in `IEntity_Test.cpp`.
 class IModule {
