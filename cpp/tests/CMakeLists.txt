@@ -135,6 +135,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/OutputVisitor/TokenWriterFactories_Test.cpp
     Decompiler/CSharp/OutputVisitor/CSharpOutputVisitor_Test.cpp
     Decompiler/CSharp/OutputVisitor/InsertParenthesesVisitor_Test.cpp
+    Decompiler/CSharp/OutputVisitor/GenericGrammarAmbiguityVisitor_Test.cpp
     Decompiler/IL/ControlFlowSimplification_Test.cpp
     Decompiler/IL/ControlFlowGraph_Test.cpp
     Decompiler/FlowAnalysis/Dominance_Test.cpp
