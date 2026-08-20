@@ -150,6 +150,7 @@
 #include "Decompiler/CSharp/Syntax/CaseLabel.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/SwitchExpression.hpp"
 #include "Decompiler/CSharp/Syntax/SwitchExpressionSection.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/RecursivePatternExpression.hpp"
 #include "Decompiler/CSharp/Syntax/CatchClause.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/LocalFunctionDeclarationStatement.hpp"
@@ -287,7 +288,9 @@ using ILSpy::Decompiler::CSharp::Syntax::ExternAliasDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::DelegateDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::DocumentationReference;
 using ILSpy::Decompiler::CSharp::Syntax::NamespaceDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::RecursivePatternExpression;
 using ILSpy::Decompiler::TypeSystem::ReferenceKind;
+using ILSpy::Decompiler::TypeSystem::SymbolKind;
 using ILSpy::Decompiler::TypeSystem::VarianceModifier;
 
 namespace {
@@ -645,8 +648,8 @@ TEST(CSharp_OutputVisitor, WriteCommaSeparatedListInParenthesisEmpty) {
 // pattern/interpolated-string/query/SyntaxTree members below are still stubs).
 TEST(CSharp_OutputVisitor, VisitStubThrows) {
 	V h;
-	auto decl = std::make_unique<DocumentationReference>();
-	EXPECT_THROW(h.visitor->VisitDocumentationReference(decl.get()), std::logic_error);
+	auto node = std::make_unique<RecursivePatternExpression>();
+	EXPECT_THROW(h.visitor->VisitRecursivePatternExpression(node.get()), std::logic_error);
 }
 
 // ---- The implemented leaf Visit methods ------------------------------------
@@ -5643,4 +5646,111 @@ TEST(CSharp_OutputVisitor, VisitTypeDeclarationEmptyRecord) {
 		<< "an empty record must not emit an open brace";
 	EXPECT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:}"), h.inner.calls.end())
 		<< "an empty record must not emit a close brace";
+}
+
+// ---- VisitDocumentationReference (D364, the GeneralScope `cref` reference node; the structural
+// reference inside XML documentation comments -- not C# source syntax, no grammar production)
+// ------------------------------------------------------------------------
+
+// `VisitDocumentationReference` over `<see cref="Foo"/>` where `Foo` is a named member (the
+// `SymbolKind::None` default case): no `DeclaringType`, so the optional `DeclaringType` + `Dot`
+// block is skipped, and the `switch` `default` branch writes the `NameToken` identifier. No
+// type arguments, no parameter list. The find-based ordering pins just the `id:Foo` between the
+// node's `start`/`end` markers.
+TEST(CSharp_OutputVisitor, VisitDocumentationReferenceNamedMember) {
+	V h;
+	auto node = std::make_unique<DocumentationReference>();
+	node->NameToken(Identifier::Create("Foo"));
+	h.visitor->VisitDocumentationReference(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto nameTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end()) << "the default branch must write the NameToken";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitDocumentationReference` over `<see cref="Foo.Bar"/>` where `Bar` is a named member (the
+// `SymbolKind::None` case) of the declaring type `Foo`: the `DeclaringType` (a `SimpleType`
+// recursing through `VisitSimpleType`) renders first, then -- because `SymbolKind` is not
+// `TypeDefinition` -- a `Tokens::Dot`, then the `default` branch writes the `NameToken` `Bar`.
+// The find-based ordering pins `id:Foo` < `tok:.` < `id:Bar` (the `type_name '.' member_name`
+// form).
+TEST(CSharp_OutputVisitor, VisitDocumentationReferenceWithDeclaringType) {
+	V h;
+	auto node = std::make_unique<DocumentationReference>();
+	auto declType = std::make_unique<SimpleType>(std::string("Foo"));
+	node->DeclaringType(declType.get());
+	node->NameToken(Identifier::Create("Bar"));
+	h.visitor->VisitDocumentationReference(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto declTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(declTok, h.inner.calls.end()) << "the DeclaringType must render first";
+	auto dot = std::find(declTok, h.inner.calls.end(), "tok:.");
+	ASSERT_NE(dot, h.inner.calls.end()) << "a member cref must separate the type from the name with tok:.";
+	auto nameTok = std::find(dot, h.inner.calls.end(), "id:Bar");
+	ASSERT_NE(nameTok, h.inner.calls.end()) << "the member name must render after tok:.";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitDocumentationReference` over an indexer `cref` (`Foo.this[int x]`): `SymbolKind::Indexer`
+// writes the `IndexerDeclaration.ThisKeyword` (`this`) in place of a member name, and with
+// `HasParameterList` true the `SymbolKind == Indexer` branch renders the parameters in BRACKETS
+// (`WriteCommaSeparatedListInBrackets` -> `tok:[` ... `tok:]`), not parens. The find-based
+// ordering pins `id:Foo` < `tok:.` < `kw:this` < `tok:[` < `id:x` (the param) < `tok:]`.
+TEST(CSharp_OutputVisitor, VisitDocumentationReferenceIndexer) {
+	V h;
+	auto node = std::make_unique<DocumentationReference>();
+	node->SymbolKind(SymbolKind::Indexer);
+	auto declType = std::make_unique<SimpleType>(std::string("Foo"));
+	node->DeclaringType(declType.get());
+	node->HasParameterList(true);
+	auto param = std::make_unique<ParameterDeclaration>();
+	auto ptype = std::make_unique<SimpleType>(std::string("int"));
+	param->Type(ptype.get());
+	param->Name("x");
+	node->Parameters().Add(param.get());
+	h.visitor->VisitDocumentationReference(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto declTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(declTok, h.inner.calls.end()) << "the DeclaringType must render first";
+	auto dot = std::find(declTok, h.inner.calls.end(), "tok:.");
+	ASSERT_NE(dot, h.inner.calls.end()) << "the indexer cref must separate the type with tok:.";
+	auto thisKw = std::find(dot, h.inner.calls.end(), "kw:this");
+	ASSERT_NE(thisKw, h.inner.calls.end()) << "the Indexer case must write kw:this (ThisKeyword)";
+	auto lbrack = std::find(thisKw, h.inner.calls.end(), "tok:[");
+	ASSERT_NE(lbrack, h.inner.calls.end()) << "an indexer parameter list must open with tok:[";
+	auto paramTok = std::find(lbrack, h.inner.calls.end(), "id:x");
+	ASSERT_NE(paramTok, h.inner.calls.end()) << "the parameter must render inside the brackets";
+	auto rbrack = std::find(paramTok, h.inner.calls.end(), "tok:]");
+	ASSERT_NE(rbrack, h.inner.calls.end()) << "the indexer parameter list must close with tok:]";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitDocumentationReference` over a binary-operator `cref` (`Foo.operator+`):
+// `SymbolKind::Operator` with `OperatorType::Addition` (a non-conversion, non-checked binary
+// operator) writes `kw:operator` + a `Space` + the operator token from `OperatorDeclaration.
+// GetToken` (`tok:+` for `Addition`), with NO `explicit`/`implicit`/`checked` keyword. The
+// find-based ordering pins `id:Foo` < `tok:.` < `kw:operator` < `tok:+` (the
+// `else WriteToken(GetToken(opType))` branch).
+TEST(CSharp_OutputVisitor, VisitDocumentationReferenceOperator) {
+	V h;
+	auto node = std::make_unique<DocumentationReference>();
+	node->SymbolKind(SymbolKind::Operator);
+	node->OperatorType(OperatorType::Addition);
+	auto declType = std::make_unique<SimpleType>(std::string("Foo"));
+	node->DeclaringType(declType.get());
+	h.visitor->VisitDocumentationReference(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto declTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(declTok, h.inner.calls.end()) << "the DeclaringType must render first";
+	auto dot = std::find(declTok, h.inner.calls.end(), "tok:.");
+	ASSERT_NE(dot, h.inner.calls.end()) << "the operator cref must separate the type with tok:.";
+	auto opKw = std::find(dot, h.inner.calls.end(), "kw:operator");
+	ASSERT_NE(opKw, h.inner.calls.end()) << "the Operator case must write kw:operator";
+	auto opTok = std::find(opKw, h.inner.calls.end(), "tok:+");
+	ASSERT_NE(opTok, h.inner.calls.end()) << "the Addition operator must render its token tok:+";
+	EXPECT_EQ(h.inner.calls.back(), "end");
 }

@@ -105,6 +105,7 @@
 #include "Decompiler/CSharp/Syntax/OperatorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/PropertyDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/DocumentationReference.hpp"
 #include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
 #include "Decompiler/CSharp/Syntax/TupleTypeElement.hpp"
 #include "Decompiler/CSharp/Syntax/TupleAstType.hpp"
@@ -2518,7 +2519,72 @@ void CSharpOutputVisitor::VisitPreProcessorDirective(Syntax::PreProcessorDirecti
 	writer_->WritePreProcessorDirective(preProcessorDirective->Type(), preProcessorDirective->Argument());
 	writer_->EndNode(preProcessorDirective);
 }
-void CSharpOutputVisitor::VisitDocumentationReference(Syntax::DocumentationReference*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitDocumentationReference(Syntax::DocumentationReference* documentationReference) {
+	// Faithful port of CSharpOutputVisitor.cs VisitDocumentationReference (the `cref` reference
+	// inside XML documentation comments): the optional `DeclaringType` + `Dot`, the `SymbolKind`
+	// switch (TypeDefinition/Indexer/Operator/default), `WriteTypeArguments`, and the optional
+	// parameter list (brackets for an indexer, parens otherwise). A documentation `cref` is a
+	// structural reference node (not C# source syntax), so it has no grammar production. The
+	// `SymbolKind` enum lives in the `TypeSystem` namespace (NOT brought in by the `using
+	// namespace ...::Syntax`), so it is fully qualified everywhere; the `OperatorType` enum lives
+	// in the `Syntax` namespace (shadowed by the node's `OperatorType()` accessor only inside the
+	// node's own class scope, not here, so `Syntax::OperatorType::...` suffices). The
+	// `DeclaringType` is nullable (the C# `is not null` gate ports to a `nullptr` guard); the
+	// `ConversionOperatorReturnType` is required and deref'd only in the conversion-operator
+	// branch with no C# `?.`, so no guard (the D357 required-slot convention).
+	StartNode(documentationReference);
+	if (documentationReference->DeclaringType() != nullptr) {
+		documentationReference->DeclaringType()->AcceptVisitor(*this);
+		if (documentationReference->SymbolKind() != ILSpy::Decompiler::TypeSystem::SymbolKind::TypeDefinition) {
+			WriteToken(Tokens::Dot);
+		}
+	}
+	switch (documentationReference->SymbolKind()) {
+		case ILSpy::Decompiler::TypeSystem::SymbolKind::TypeDefinition:
+			// we already printed the DeclaringType
+			break;
+		case ILSpy::Decompiler::TypeSystem::SymbolKind::Indexer:
+			WriteKeyword(Syntax::IndexerDeclaration::ThisKeyword);
+			break;
+		case ILSpy::Decompiler::TypeSystem::SymbolKind::Operator: {
+			auto opType = documentationReference->OperatorType();
+			if (opType == Syntax::OperatorType::Explicit || opType == Syntax::OperatorType::CheckedExplicit) {
+				WriteKeyword(Syntax::OperatorDeclaration::ExplicitKeyword);
+			} else if (opType == Syntax::OperatorType::Implicit) {
+				WriteKeyword(Syntax::OperatorDeclaration::ImplicitKeyword);
+			}
+			WriteKeyword(Syntax::OperatorDeclaration::OperatorKeyword);
+			Space();
+			if (Syntax::OperatorDeclaration::IsChecked(opType)) {
+				WriteKeyword(Syntax::OperatorDeclaration::CheckedKeyword);
+				Space();
+			}
+			if (opType == Syntax::OperatorType::Explicit
+				|| opType == Syntax::OperatorType::Implicit
+				|| opType == Syntax::OperatorType::CheckedExplicit) {
+				documentationReference->ConversionOperatorReturnType()->AcceptVisitor(*this);
+			} else {
+				WriteToken(Syntax::OperatorDeclaration::GetToken(opType));
+			}
+			break;
+		}
+		default:
+			WriteIdentifier(documentationReference->NameToken());
+			break;
+	}
+	WriteTypeArguments(ToVector(documentationReference->TypeArguments()));
+	if (documentationReference->HasParameterList()) {
+		Space(policy_.SpaceBeforeMethodDeclarationParentheses);
+		if (documentationReference->SymbolKind() == ILSpy::Decompiler::TypeSystem::SymbolKind::Indexer) {
+			WriteCommaSeparatedListInBrackets(ToVector(documentationReference->Parameters()),
+				policy_.SpaceWithinMethodDeclarationParentheses);
+		} else {
+			WriteCommaSeparatedListInParenthesis(ToVector(documentationReference->Parameters()),
+				policy_.SpaceWithinMethodDeclarationParentheses);
+		}
+	}
+	EndNode(documentationReference);
+}
 void CSharpOutputVisitor::VisitDeclarationExpression(Syntax::DeclarationExpression* declarationExpression) {
 	// The C# `VisitDeclarationExpression`: `StartNode` + `Type.AcceptVisitor` + `Space` +
 	// `Designation.AcceptVisitor` + `EndNode` (the `T x` declaration form used by deconstruction
