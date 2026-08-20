@@ -28,6 +28,7 @@
 
 #include "Decompiler/TypeSystem/FullTypeName.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/Nullability.hpp"
 #include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
 
@@ -249,6 +250,48 @@ private:
     ITypePtr modifier_;
     ITypePtr element_;
     bool isRequired_;
+};
+
+// A type annotated with a C# 8 nullable-reference annotation: a decorator wrapping a
+// base type and carrying one of the three Nullability states (Oblivious / NotNullable /
+// Nullable). The C# NullabilityAnnotatedType derives from DecoratedType (an abstract
+// delegating base forwarding Name / ReflectionName / Kind / TypeParameterCount / ... to
+// its baseType); the minimal port flattens that, deriving directly from IType and
+// delegating the same accessors to the wrapped baseType_ -- the D401 ModifiedType
+// flatten-TypeWithElementType precedent applied to DecoratedType. Name() /
+// ReflectionName() return the base type's names verbatim (the C# DecoratedType delegates
+// INamedElement.Name / ReflectionName to baseType; the `?` / `!` / `~` annotation the C#
+// surfaces only in ToString(), NOT in Name / ReflectionName -- so the faithful minimal
+// port does NOT append the annotation to ReflectionName either). The full IType surface
+// (ChangeNullability, AcceptVisitor, VisitChildren -- the TypeVisitor dispatch this type
+// is one of four concrete leaves toward, plus the NullabilityAnnotatedTypeParameter
+// nested subclass that implements ITypeParameter by delegating to a base ITypeParameter)
+// lands with the rest of Phase 2; this minimal leaf lands the concrete type so the
+// not-yet-ported TypeVisitor / TypeParameterSubstitution can reference it.
+class NullabilityAnnotatedType : public IType {
+public:
+    NullabilityAnnotatedType(ITypePtr baseType, Nullability nullability)
+        : baseType_(std::move(baseType)), nullability_(nullability) {}
+    TypeKind Kind() const override { return baseType_ ? baseType_->Kind() : TypeKind::Unknown; }
+    std::string Name() const override { return baseType_ ? baseType_->Name() : std::string(); }
+    std::string ReflectionName() const override {
+        return baseType_ ? baseType_->ReflectionName() : std::string();
+    }
+    int TypeParameterCount() const override {
+        return baseType_ ? baseType_->TypeParameterCount() : 0;
+    }
+    Nullability Nullability() const noexcept { return nullability_; }
+    // The C# `TypeWithoutAnnotation => baseType`: the un-annotated wrapped type.
+    const ITypePtr& TypeWithoutAnnotation() const noexcept { return baseType_; }
+protected:
+    bool StructuralEquals(const IType& other) const override {
+        const auto& o = static_cast<const NullabilityAnnotatedType&>(other);
+        return nullability_ == o.nullability_
+            && baseType_->Equals(*o.baseType_);
+    }
+private:
+    ITypePtr baseType_;
+    ::ILSpy::Decompiler::TypeSystem::Nullability nullability_;
 };
 
 // Convenience: the UnknownType null object.
