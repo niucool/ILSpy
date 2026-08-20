@@ -78,6 +78,7 @@
 #include "Decompiler/CSharp/Syntax/Statements/VariableDeclarationStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/SwitchStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/LocalFunctionDeclarationStatement.hpp"
 #include "Decompiler/CSharp/Syntax/SwitchSection.hpp"
 #include "Decompiler/CSharp/Syntax/CaseLabel.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
@@ -2157,7 +2158,20 @@ void CSharpOutputVisitor::VisitFixedFieldDeclaration(Syntax::FixedFieldDeclarati
 	Semicolon();
 	EndNode(fixedFieldDeclaration);
 }
-void CSharpOutputVisitor::VisitLocalFunctionDeclarationStatement(Syntax::LocalFunctionDeclarationStatement*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitLocalFunctionDeclarationStatement(Syntax::LocalFunctionDeclarationStatement* localFunctionDeclarationStatement) {
+	// Faithful port of CSharpOutputVisitor.cs VisitLocalFunctionDeclarationStatement (line 2218):
+	// the `local_function_declaration ::= method_declaration` (C# grammar 13.6.4) wrapper -- a
+	// sealed `Statement` whose entire content is its single REQUIRED `MethodDeclaration`
+	// `Declaration` child, so the Visit just `StartNode` + `Declaration.AcceptVisitor` (which
+	// recurses through `VisitMethodDeclaration` [D354]) + `EndNode`. The `Declaration` is a required
+	// non-nullable slot (the C# calls `localFunctionDeclarationStatement.Declaration.AcceptVisitor(this)`
+	// with no null-conditional), so no nullptr guard is added (the `VisitAttribute` D357 required-slot
+	// precedent); the recursion renders the wrapped method's `Modifiers ReturnType Name(params)
+	// { Body }` / `... ;` form unchanged.
+	StartNode(localFunctionDeclarationStatement);
+	localFunctionDeclarationStatement->Declaration()->AcceptVisitor(*this);
+	EndNode(localFunctionDeclarationStatement);
+}
 void CSharpOutputVisitor::VisitComment(Syntax::Comment* comment) {
 	// A `Comment` is trivia -- the C# drives the writer DIRECTLY (`writer.StartNode`/`writer.EndNode`,
 	// NOT the visitor's `StartNode`/`EndNode`): trivia is not part of the node-nesting stack and

@@ -146,6 +146,7 @@
 #include "Decompiler/CSharp/Syntax/SwitchExpressionSection.hpp"
 #include "Decompiler/CSharp/Syntax/CatchClause.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/TryCatchStatement.hpp"
+#include "Decompiler/CSharp/Syntax/Statements/LocalFunctionDeclarationStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Modifiers.hpp"
 
 using namespace ILSpy::Decompiler::CSharp::OutputVisitor;
@@ -199,6 +200,7 @@ using ILSpy::Decompiler::CSharp::Syntax::SwitchExpression;
 using ILSpy::Decompiler::CSharp::Syntax::SwitchExpressionSection;
 using ILSpy::Decompiler::CSharp::Syntax::CatchClause;
 using ILSpy::Decompiler::CSharp::Syntax::TryCatchStatement;
+using ILSpy::Decompiler::CSharp::Syntax::LocalFunctionDeclarationStatement;
 using ILSpy::Decompiler::CSharp::Syntax::ConstructorInitializer;
 using ILSpy::Decompiler::CSharp::Syntax::ConstructorInitializerType;
 using ILSpy::Decompiler::CSharp::Syntax::ConstructorDeclaration;
@@ -5078,5 +5080,113 @@ TEST(CSharp_OutputVisitor, VisitConstraintMultipleBaseTypes) {
 	ASSERT_NE(comma, h.inner.calls.end()) << "a comma must separate the two base types";
 	auto idBase2 = std::find(comma, h.inner.calls.end(), "id:Base2");
 	ASSERT_NE(idBase2, h.inner.calls.end()) << "the second base type must render after the comma";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// ---- VisitLocalFunctionDeclarationStatement (D359, the local-function wrapper) ------------
+
+// `VisitLocalFunctionDeclarationStatement` over `void Foo() {}` -- the wrapper delegates the
+// entire render to its single REQUIRED `MethodDeclaration` `Declaration` child, recursing through
+// `VisitMethodDeclaration` (D354). The outer `LocalFunctionDeclarationStatement` contributes just
+// a `start`/`end` pair around the wrapped method's full token sequence. Renders: start(lfds) /
+// [VisitMethodDeclaration `void Foo() {}`: start/primtype:void/space/id:Foo/tok:(/tok:)/tok:{/
+// indent/newline/unindent/tok:}/newline/end] / end(lfds). The find-based ordering pins the outer
+// `start` first, the wrapped method's key tokens in order between it and the trailing `end`, and
+// the outer `end` last -- confirming the delegation wraps the method render without reordering it.
+TEST(CSharp_OutputVisitor, VisitLocalFunctionDeclarationStatementBare) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("void"));
+	auto body = std::make_unique<BlockStatement>();
+	auto method = std::make_unique<MethodDeclaration>();
+	method->ReturnType(retType.get());
+	method->NameToken(Identifier::Create("Foo"));
+	method->Body(body.get());
+	auto node = std::make_unique<LocalFunctionDeclarationStatement>(method.get());
+	h.visitor->VisitLocalFunctionDeclarationStatement(node.get());
+
+	// The outer wrapper opens with `start` and closes with `end`; the wrapped method's key tokens
+	// (ReturnType < NameToken < ( < ) < { < }) render in order between them.
+	EXPECT_EQ(h.inner.calls.front(), "start") << "the outer wrapper must open with start";
+	auto retTypeTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "primtype:void");
+	ASSERT_NE(retTypeTok, h.inner.calls.end()) << "the wrapped method's ReturnType must render";
+	auto nameTok = std::find(retTypeTok, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end()) << "the wrapped method's NameToken must render after the ReturnType";
+	auto lpar = std::find(nameTok, h.inner.calls.end(), "tok:(");
+	ASSERT_NE(lpar, h.inner.calls.end()) << "the parameter list must open with tok:( after the name";
+	auto rpar = std::find(lpar, h.inner.calls.end(), "tok:)");
+	ASSERT_NE(rpar, h.inner.calls.end()) << "the parameter list must close with tok:)";
+	auto lbrace = std::find(rpar, h.inner.calls.end(), "tok:{");
+	ASSERT_NE(lbrace, h.inner.calls.end()) << "the body must open with tok:{ after the close paren";
+	auto rbrace = std::find(lbrace, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(rbrace, h.inner.calls.end()) << "the body must close with tok:} after tok:{";
+	EXPECT_EQ(h.inner.calls.back(), "end") << "the outer wrapper must close with end";
+}
+
+// `VisitLocalFunctionDeclarationStatement` over `void Foo(int x) {}` -- the wrapped method has
+// one parameter, which recurses through `VisitParameterDeclaration` between the parens. The
+// `int`/`x` parameter is distinct from the `void` ReturnType so the find-based ordering pins each
+// unambiguously, confirming the delegation carries the parameter render through unchanged.
+TEST(CSharp_OutputVisitor, VisitLocalFunctionDeclarationStatementWithParam) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("void"));
+	auto paramType = std::make_unique<PrimitiveType>(std::string("int"));
+	auto param = std::make_unique<ParameterDeclaration>();
+	param->Type(paramType.get());
+	param->NameToken(Identifier::Create("x"));
+	auto body = std::make_unique<BlockStatement>();
+	auto method = std::make_unique<MethodDeclaration>();
+	method->ReturnType(retType.get());
+	method->NameToken(Identifier::Create("Foo"));
+	method->Parameters().Add(param.get());
+	method->Body(body.get());
+	auto node = std::make_unique<LocalFunctionDeclarationStatement>(method.get());
+	h.visitor->VisitLocalFunctionDeclarationStatement(node.get());
+
+	// Outer start < ReturnType < NameToken < ( < param type < param name < ) < { < } < outer end.
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto retTypeTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "primtype:void");
+	ASSERT_NE(retTypeTok, h.inner.calls.end());
+	auto nameTok = std::find(retTypeTok, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end());
+	auto lpar = std::find(nameTok, h.inner.calls.end(), "tok:(");
+	ASSERT_NE(lpar, h.inner.calls.end());
+	auto paramTypeTok = std::find(lpar, h.inner.calls.end(), "primtype:int");
+	ASSERT_NE(paramTypeTok, h.inner.calls.end()) << "the parameter type must render after tok:(";
+	auto paramName = std::find(paramTypeTok, h.inner.calls.end(), "id:x");
+	ASSERT_NE(paramName, h.inner.calls.end()) << "the parameter name must render after its type";
+	auto rpar = std::find(paramName, h.inner.calls.end(), "tok:)");
+	ASSERT_NE(rpar, h.inner.calls.end()) << "tok:) must render after the parameter name";
+	auto lbrace = std::find(rpar, h.inner.calls.end(), "tok:{");
+	ASSERT_NE(lbrace, h.inner.calls.end());
+	auto rbrace = std::find(lbrace, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(rbrace, h.inner.calls.end());
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitLocalFunctionDeclarationStatement` over `void Foo();` -- the wrapped method is bodyless
+// (an abstract/interface/extern local function), so `WriteMethodBody(nullptr)` writes a
+// `Semicolon` (tok:;) instead of a block. The delegation must carry the `;` through unchanged.
+TEST(CSharp_OutputVisitor, VisitLocalFunctionDeclarationStatementNoBody) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("void"));
+	auto method = std::make_unique<MethodDeclaration>();
+	method->ReturnType(retType.get());
+	method->NameToken(Identifier::Create("Foo"));
+	auto node = std::make_unique<LocalFunctionDeclarationStatement>(method.get());
+	h.visitor->VisitLocalFunctionDeclarationStatement(node.get());
+
+	// Outer start < ReturnType < NameToken < ( < ) < ; < outer end (the bodyless method closes
+	// with tok:; via WriteMethodBody(nullptr)).
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto retTypeTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "primtype:void");
+	ASSERT_NE(retTypeTok, h.inner.calls.end());
+	auto nameTok = std::find(retTypeTok, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end());
+	auto lpar = std::find(nameTok, h.inner.calls.end(), "tok:(");
+	ASSERT_NE(lpar, h.inner.calls.end());
+	auto rpar = std::find(lpar, h.inner.calls.end(), "tok:)");
+	ASSERT_NE(rpar, h.inner.calls.end());
+	auto semi = std::find(rpar, h.inner.calls.end(), "tok:;");
+	ASSERT_NE(semi, h.inner.calls.end()) << "a bodyless wrapped method must close with tok:;";
 	EXPECT_EQ(h.inner.calls.back(), "end");
 }
