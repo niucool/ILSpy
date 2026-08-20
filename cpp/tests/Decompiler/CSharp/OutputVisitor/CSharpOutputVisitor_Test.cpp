@@ -75,6 +75,9 @@
 #include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
 #include "Decompiler/CSharp/Syntax/ParenthesizedVariableDesignation.hpp"
 #include "Decompiler/CSharp/Syntax/Interpolation.hpp"
+#include "Decompiler/CSharp/Syntax/InterpolatedStringText.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InterpolatedStringExpression.hpp"
+#include "Decompiler/CSharp/Syntax/QueryOrdering.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayInitializerExpression.hpp"
@@ -291,6 +294,9 @@ using ILSpy::Decompiler::CSharp::Syntax::DocumentationReference;
 using ILSpy::Decompiler::CSharp::Syntax::NamespaceDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::RecursivePatternExpression;
 using ILSpy::Decompiler::CSharp::Syntax::Interpolation;
+using ILSpy::Decompiler::CSharp::Syntax::InterpolatedStringText;
+using ILSpy::Decompiler::CSharp::Syntax::InterpolatedStringExpression;
+using ILSpy::Decompiler::CSharp::Syntax::QueryOrdering;
 using ILSpy::Decompiler::TypeSystem::ReferenceKind;
 using ILSpy::Decompiler::TypeSystem::SymbolKind;
 using ILSpy::Decompiler::TypeSystem::VarianceModifier;
@@ -640,19 +646,20 @@ TEST(CSharp_OutputVisitor, WriteCommaSeparatedListInParenthesisEmpty) {
 // ---- The 130 Visit stubs throw ---------------------------------------------
 
 // A representative still-unported `Visit` method throws `std::logic_error` (the throwing-stub
-// design); `VisitInterpolation` remains a stub (the `VariableDeclarationStatement`, the
+// design); `VisitQueryOrdering` remains a stub (the `VariableDeclarationStatement`, the
 // try/catch family, `ConstructorInitializer`, `ConstructorDeclaration`, `DestructorDeclaration`,
 // `EnumMemberDeclaration`, `ExtensionDeclaration`, `EventDeclaration`, `CustomEventDeclaration`,
 // `FieldDeclaration`, `FixedFieldDeclaration`, `IndexerDeclaration`, `MethodDeclaration`,
 // `OperatorDeclaration`, `PropertyDeclaration`, `DelegateDeclaration`, `NamespaceDeclaration`,
-// `TypeDeclaration` and `RecursivePatternExpression` `Visit` methods above are implemented -- the
-// full EntityDeclaration family plus the GeneralScope declaration/directive members and the
-// first pattern node are done; the remaining interpolated-string/query/SyntaxTree members below
+// `TypeDeclaration`, `RecursivePatternExpression`, `Interpolation`, `InterpolatedStringText` and
+// `InterpolatedStringExpression` `Visit` methods above are implemented -- the full
+// EntityDeclaration family, the GeneralScope declaration/directive members, the first pattern
+// node and the interpolated-string family are done; the remaining query/SyntaxTree members below
 // are still stubs).
 TEST(CSharp_OutputVisitor, VisitStubThrows) {
 	V h;
-	auto node = std::make_unique<Interpolation>();
-	EXPECT_THROW(h.visitor->VisitInterpolation(node.get()), std::logic_error);
+	auto node = std::make_unique<QueryOrdering>();
+	EXPECT_THROW(h.visitor->VisitQueryOrdering(node.get()), std::logic_error);
 }
 
 // ---- The implemented leaf Visit methods ------------------------------------
@@ -5858,5 +5865,172 @@ TEST(CSharp_OutputVisitor, VisitRecursivePatternExpressionPropertyWithTypeAndDes
 	ASSERT_NE(rbrace, h.inner.calls.end()) << "the property form must close with tok:}";
 	auto desigTok = std::find(rbrace, h.inner.calls.end(), "id:x");
 	ASSERT_NE(desigTok, h.inner.calls.end()) << "the Designation must render after tok:}";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// ---- VisitInterpolatedStringText (D366, the literal-text run; the
+// `interpolated_string_text ::= text_character+` leaf -- C# lexical grammar 12.8.3)
+// ------------------------------------------------------------------------
+
+// `VisitInterpolatedStringText` over a bare `"hello"` text run: the leaf writes its `Text`
+// verbatim via `WriteInterpolatedText` (no surrounding quotes, no `isAfterSpace` reset) between
+// the `start`/`end` pair. The find-based ordering pins `start < interp:hello < end`.
+TEST(CSharp_OutputVisitor, VisitInterpolatedStringTextBare) {
+	V h;
+	auto node = std::make_unique<InterpolatedStringText>(std::string("hello"));
+	h.visitor->VisitInterpolatedStringText(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto textTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "interp:hello");
+	ASSERT_NE(textTok, h.inner.calls.end()) << "the Text must render as interp:hello";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// ---- VisitInterpolation (D366, the `{expr[,align][:format]}` arm; the `interpolation`
+// production -- C# grammar 12.8.3)
+// ------------------------------------------------------------------------
+
+// `VisitInterpolation` over the bare `{x}` form (an `IdentifierExpression` operand, `Alignment`
+// 0, no `Suffix`): the C# drives the writer directly -- `tok:{`, the operand (`start`/`id:x`/
+// `end`), `tok:}` -- between the outer `start`/`end`. The find-based ordering pins
+// `start < tok:{ < id:x < tok:} < end` and asserts the comma/colon/primval are absent.
+TEST(CSharp_OutputVisitor, VisitInterpolationBare) {
+	V h;
+	auto expr = std::make_unique<IdentifierExpression>(std::string("x"));
+	auto node = std::make_unique<Interpolation>(expr.get());
+	h.visitor->VisitInterpolation(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto lbrace = std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:{");
+	ASSERT_NE(lbrace, h.inner.calls.end()) << "the interpolation must open with tok:{";
+	auto exprTok = std::find(lbrace, h.inner.calls.end(), "id:x");
+	ASSERT_NE(exprTok, h.inner.calls.end()) << "the operand must render after tok:{";
+	auto rbrace = std::find(exprTok, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(rbrace, h.inner.calls.end()) << "the interpolation must close with tok:} after the operand";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+	ASSERT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:,"), h.inner.calls.end())
+		<< "the bare form must not write an alignment comma";
+	ASSERT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok::"), h.inner.calls.end())
+		<< "the bare form must not write a format colon";
+	ASSERT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "primval"), h.inner.calls.end())
+		<< "the bare form must not write a primitive value";
+}
+
+// `VisitInterpolation` over the `{x,5}` form (a non-zero `Alignment` 5, no `Suffix`): after the
+// operand the `Alignment != 0` branch writes `tok:,` then the boxed-int `WritePrimitiveValue`
+// (`primval`). The find-based ordering pins `tok:{ < id:x < tok:, < primval < tok:}`.
+TEST(CSharp_OutputVisitor, VisitInterpolationWithAlignment) {
+	V h;
+	auto expr = std::make_unique<IdentifierExpression>(std::string("x"));
+	auto node = std::make_unique<Interpolation>(expr.get(), 5);
+	h.visitor->VisitInterpolation(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto lbrace = std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:{");
+	ASSERT_NE(lbrace, h.inner.calls.end()) << "the interpolation must open with tok:{";
+	auto exprTok = std::find(lbrace, h.inner.calls.end(), "id:x");
+	ASSERT_NE(exprTok, h.inner.calls.end()) << "the operand must render after tok:{";
+	auto comma = std::find(exprTok, h.inner.calls.end(), "tok:,");
+	ASSERT_NE(comma, h.inner.calls.end()) << "a comma must separate the operand from the alignment";
+	auto primval = std::find(comma, h.inner.calls.end(), "primval");
+	ASSERT_NE(primval, h.inner.calls.end()) << "the alignment must render as a primitive value after the comma";
+	auto rbrace = std::find(primval, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(rbrace, h.inner.calls.end()) << "the interpolation must close with tok:} after the alignment";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+	ASSERT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok::"), h.inner.calls.end())
+		<< "the alignment form must not write a format colon";
+}
+
+// `VisitInterpolation` over the `{x:N0}` form (no `Alignment`, a `Suffix` "N0"): after the
+// operand the `Suffix != null` branch writes `tok:` then `WriteInterpolatedText` (`interp:N0`).
+// The find-based ordering pins `tok:{ < id:x < tok: < interp:N0 < tok:}`.
+TEST(CSharp_OutputVisitor, VisitInterpolationWithSuffix) {
+	V h;
+	auto expr = std::make_unique<IdentifierExpression>(std::string("x"));
+	auto node = std::make_unique<Interpolation>(expr.get(), 0, std::optional<std::string>(std::string("N0")));
+	h.visitor->VisitInterpolation(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto lbrace = std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:{");
+	ASSERT_NE(lbrace, h.inner.calls.end()) << "the interpolation must open with tok:{";
+	auto exprTok = std::find(lbrace, h.inner.calls.end(), "id:x");
+	ASSERT_NE(exprTok, h.inner.calls.end()) << "the operand must render after tok:{";
+	auto colon = std::find(exprTok, h.inner.calls.end(), "tok::");
+	ASSERT_NE(colon, h.inner.calls.end()) << "a colon must separate the operand from the format suffix";
+	auto suffixTok = std::find(colon, h.inner.calls.end(), "interp:N0");
+	ASSERT_NE(suffixTok, h.inner.calls.end()) << "the Suffix must render as interp:N0 after the colon";
+	auto rbrace = std::find(suffixTok, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(rbrace, h.inner.calls.end()) << "the interpolation must close with tok:} after the suffix";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+	ASSERT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:,"), h.inner.calls.end())
+		<< "the suffix form must not write an alignment comma";
+}
+
+// ---- VisitInterpolatedStringExpression (D366, the `$"..."` interpolated string; the
+// `interpolated_string_expression ::= interpolated_string_content*` -- C# grammar 12.8.3)
+// ------------------------------------------------------------------------
+
+// `VisitInterpolatedStringExpression` over the bare `$""` form (empty `Content`): the open
+// quote `tok:$"` and the close quote `tok:"` render back-to-back between the outer `start`/`end`
+// (the `isAfterSpace_ = false` reset is internal state). The find-based ordering pins
+// `start < tok:$" < tok:" < end` and asserts no content rendered.
+TEST(CSharp_OutputVisitor, VisitInterpolatedStringExpressionBare) {
+	V h;
+	auto node = std::make_unique<InterpolatedStringExpression>();
+	h.visitor->VisitInterpolatedStringExpression(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto openQuote = std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:$\"");
+	ASSERT_NE(openQuote, h.inner.calls.end()) << "the interpolated string must open with tok:$\"";
+	auto closeQuote = std::find(openQuote, h.inner.calls.end(), "tok:\"");
+	ASSERT_NE(closeQuote, h.inner.calls.end()) << "the interpolated string must close with tok:\" after the open quote";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+	ASSERT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "interp:hello"), h.inner.calls.end())
+		<< "the bare form must not render any content";
+}
+
+// `VisitInterpolatedStringExpression` over `$"hello"` (a single `InterpolatedStringText`
+// content element): the open quote, the text run (`interp:hello`), the close quote. The
+// find-based ordering pins `tok:$" < interp:hello < tok:"`.
+TEST(CSharp_OutputVisitor, VisitInterpolatedStringExpressionWithText) {
+	V h;
+	auto text = std::make_unique<InterpolatedStringText>(std::string("hello"));
+	auto node = std::make_unique<InterpolatedStringExpression>();
+	node->Content().Add(text.get());
+	h.visitor->VisitInterpolatedStringExpression(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto openQuote = std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:$\"");
+	ASSERT_NE(openQuote, h.inner.calls.end()) << "the interpolated string must open with tok:$\"";
+	auto textTok = std::find(openQuote, h.inner.calls.end(), "interp:hello");
+	ASSERT_NE(textTok, h.inner.calls.end()) << "the text run must render after the open quote";
+	auto closeQuote = std::find(textTok, h.inner.calls.end(), "tok:\"");
+	ASSERT_NE(closeQuote, h.inner.calls.end()) << "the interpolated string must close with tok:\" after the text";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitInterpolatedStringExpression` over `$"x"` (a single `Interpolation` content element):
+// the open quote, the interpolation arm (`tok:{`/`id:x`/`tok:}`), the close quote. The
+// find-based ordering pins `tok:$" < tok:{ < id:x < tok:} < tok:"`, exercising the polymorphic
+// `Content` dispatch to `VisitInterpolation`.
+TEST(CSharp_OutputVisitor, VisitInterpolatedStringExpressionWithInterpolation) {
+	V h;
+	auto expr = std::make_unique<IdentifierExpression>(std::string("x"));
+	auto interp = std::make_unique<Interpolation>(expr.get());
+	auto node = std::make_unique<InterpolatedStringExpression>();
+	node->Content().Add(interp.get());
+	h.visitor->VisitInterpolatedStringExpression(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto openQuote = std::find(h.inner.calls.begin(), h.inner.calls.end(), "tok:$\"");
+	ASSERT_NE(openQuote, h.inner.calls.end()) << "the interpolated string must open with tok:$\"";
+	auto lbrace = std::find(openQuote, h.inner.calls.end(), "tok:{");
+	ASSERT_NE(lbrace, h.inner.calls.end()) << "the interpolation must open with tok:{ after the open quote";
+	auto exprTok = std::find(lbrace, h.inner.calls.end(), "id:x");
+	ASSERT_NE(exprTok, h.inner.calls.end()) << "the operand must render after tok:{";
+	auto rbrace = std::find(exprTok, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(rbrace, h.inner.calls.end()) << "the interpolation must close with tok:} after the operand";
+	auto closeQuote = std::find(rbrace, h.inner.calls.end(), "tok:\"");
+	ASSERT_NE(closeQuote, h.inner.calls.end()) << "the interpolated string must close with tok:\" after the interpolation";
 	EXPECT_EQ(h.inner.calls.back(), "end");
 }

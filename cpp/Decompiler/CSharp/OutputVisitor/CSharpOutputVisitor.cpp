@@ -142,6 +142,9 @@
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayInitializerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/InterpolatedStringContent.hpp"
+#include "Decompiler/CSharp/Syntax/Interpolation.hpp"
+#include "Decompiler/CSharp/Syntax/InterpolatedStringText.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InterpolatedStringExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/OutVarDeclarationExpression.hpp"
@@ -2711,9 +2714,67 @@ void CSharpOutputVisitor::VisitRecursivePatternExpression(Syntax::RecursivePatte
 	}
 	EndNode(recursivePatternExpression);
 }
-void CSharpOutputVisitor::VisitInterpolation(Syntax::Interpolation*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitInterpolatedStringText(Syntax::InterpolatedStringText*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitInterpolatedStringExpression(Syntax::InterpolatedStringExpression*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitInterpolation(Syntax::Interpolation* interpolation) {
+	// Faithful port of CSharpOutputVisitor.cs VisitInterpolation (line 1161): the `{expr}` /
+	// `{expr,align}` / `{expr,align:format}` arm inside an interpolated string -- the
+	// `interpolation` production (C# grammar 12.8.3). The C# drives the writer DIRECTLY
+	// (`writer.WriteToken`, NOT the visitor `WriteToken` helper), so the port calls
+	// `writer_->WriteToken` directly (no `isAfterSpace_`/`isAtStartOfLine_` update), mirroring the
+	// `WriteQualifiedIdentifier` `writer_->WriteToken(".")` precedent. `Expression` is a REQUIRED
+	// slot the C# dereferences with no `?.`, so NO nullptr guard (the D357 required-slot
+	// convention); the `Alignment` int and the `Suffix` nullable string are the two get-only
+	// scalars. The `Alignment != 0` gate ports verbatim; the `Suffix != null` gate ports to
+	// `has_value()` (the `std::optional<std::string>` nullable-string semantics). The
+	// `WritePrimitiveValue(interpolation.Alignment)` boxes the int -- the port wraps it in a
+	// `PrimitiveValue` (the variant's `std::int32_t` alternative); the `WriteInterpolatedText` takes
+	// a `std::string_view`, so the `Suffix` optional is dereferenced.
+	StartNode(interpolation);
+	writer_->WriteToken("{");
+	interpolation->Expression()->AcceptVisitor(*this);
+	if (interpolation->Alignment() != 0) {
+		writer_->WriteToken(",");
+		writer_->WritePrimitiveValue(PrimitiveValue(static_cast<std::int32_t>(interpolation->Alignment())));
+	}
+	if (interpolation->Suffix().has_value()) {
+		writer_->WriteToken(":");
+		writer_->WriteInterpolatedText(*interpolation->Suffix());
+	}
+	writer_->WriteToken("}");
+	EndNode(interpolation);
+}
+void CSharpOutputVisitor::VisitInterpolatedStringText(Syntax::InterpolatedStringText* interpolatedStringText) {
+	// Faithful port of CSharpOutputVisitor.cs VisitInterpolatedStringText (line 1182): the
+	// literal-text run between interpolations -- a leaf `InterpolatedStringContent` whose `Text`
+	// string the writer emits verbatim via `WriteInterpolatedText` (the escaped interpolated-string
+	// text, no surrounding quotes). The C# drives the writer directly with no `isAfterSpace` reset,
+	// so the port mirrors it with a single `writer_->WriteInterpolatedText` (no `isAfterSpace_`
+	// update).
+	StartNode(interpolatedStringText);
+	writer_->WriteInterpolatedText(interpolatedStringText->Text());
+	EndNode(interpolatedStringText);
+}
+void CSharpOutputVisitor::VisitInterpolatedStringExpression(Syntax::InterpolatedStringExpression* interpolatedStringExpression) {
+	// Faithful port of CSharpOutputVisitor.cs VisitInterpolatedStringExpression (line 1146): the
+	// `$"..."` interpolated string -- an `Expression` whose `Content` collection of
+	// `InterpolatedStringContent` (the `InterpolatedStringText` runs and `Interpolation` arms) is
+	// rendered between the `$"` open quote and the `"` close quote. The C# drives the writer
+	// DIRECTLY (`writer.WriteToken`, NOT the visitor `WriteToken` helper) for both quotes, then
+	// explicitly resets `isAfterSpace = false` after the close quote (the only `isAfterSpace` touch
+	// in the family); the port mirrors with `writer_->WriteToken` (no helper) and the trailing
+	// `isAfterSpace_ = false`. The lazy `Content` foreach ports to a `ToVector` snapshot + range-for
+	// (the D325 collection-iteration convention; the collection is not mutated during the visit),
+	// recursing each element polymorphically through its own concrete `Visit` via the virtual
+	// `AcceptVisitor` (the abstract `InterpolatedStringContent` base dispatches to
+	// `VisitInterpolation`/`VisitInterpolatedStringText`).
+	StartNode(interpolatedStringExpression);
+	writer_->WriteToken("$\"");
+	for (Syntax::InterpolatedStringContent* element : ToVector(interpolatedStringExpression->Content())) {
+		element->AcceptVisitor(*this);
+	}
+	writer_->WriteToken("\"");
+	isAfterSpace_ = false;
+	EndNode(interpolatedStringExpression);
+}
 void CSharpOutputVisitor::VisitQueryOrdering(Syntax::QueryOrdering*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitQueryExpression(Syntax::QueryExpression*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitQueryWhereClause(Syntax::QueryWhereClause*) { NotImplemented(); }
