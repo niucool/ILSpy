@@ -93,6 +93,7 @@
 #include "Decompiler/CSharp/Syntax/FieldDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/FixedFieldDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/FixedVariableInitializer.hpp"
+#include "Decompiler/CSharp/Syntax/IndexerDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
 #include "Decompiler/CSharp/Syntax/TupleTypeElement.hpp"
@@ -1812,7 +1813,48 @@ void CSharpOutputVisitor::VisitParameterDeclaration(Syntax::ParameterDeclaration
 	}
 	EndNode(parameterDeclaration);
 }
-void CSharpOutputVisitor::VisitIndexerDeclaration(Syntax::IndexerDeclaration*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitIndexerDeclaration(Syntax::IndexerDeclaration* indexerDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitIndexerDeclaration:
+	// `ReturnType this[Parameters] { get; set; }` or `ReturnType this[Parameters] => expr;`.
+	StartNode(indexerDeclaration);
+	WriteAttributes(ToVector(indexerDeclaration->Attributes()));
+	WriteModifiers(indexerDeclaration->Modifiers());
+	if (indexerDeclaration->ReturnType() != nullptr) {
+		indexerDeclaration->ReturnType()->AcceptVisitor(*this);
+	}
+	Space();
+	WritePrivateImplementationType(indexerDeclaration->PrivateImplementationType());
+	WriteKeyword(Syntax::IndexerDeclaration::ThisKeyword);
+	Space(policy_.SpaceBeforeMethodDeclarationParentheses);
+	WriteCommaSeparatedListInBrackets(ToVector(indexerDeclaration->Parameters()), policy_.SpaceWithinMethodDeclarationParentheses);
+	if (indexerDeclaration->ExpressionBody() == nullptr) {
+		bool isSingleLine =
+			(policy_.AutoPropertyFormatting == PropertyFormatting::SingleLine)
+			&& (indexerDeclaration->Getter() == nullptr || indexerDeclaration->Getter()->Body() == nullptr)
+			&& (indexerDeclaration->Setter() == nullptr || indexerDeclaration->Setter()->Body() == nullptr)
+			&& (indexerDeclaration->Getter() == nullptr || indexerDeclaration->Getter()->Attributes().Count() == 0)
+			&& (indexerDeclaration->Setter() == nullptr || indexerDeclaration->Setter()->Attributes().Count() == 0);
+		OpenBrace(isSingleLine ? BraceStyle::EndOfLine : policy_.PropertyBraceStyle, !isSingleLine);
+		if (isSingleLine)
+			Space();
+		// Output get/set in their original tree order (the C# FirstChild/NextSibling walk).
+		for (Syntax::AstNode* node = indexerDeclaration->FirstChild(); node != nullptr; node = node->NextSibling()) {
+			const Syntax::CSharpSlotInfo* slot = node->Slot();
+			if (slot != nullptr && (slot->Kind() == &Syntax::Slots::Getter || slot->Kind() == &Syntax::Slots::Setter)) {
+				node->AcceptVisitor(*this);
+			}
+		}
+		CloseBrace(isSingleLine ? BraceStyle::EndOfLine : policy_.PropertyBraceStyle, !isSingleLine);
+		NewLine();
+	} else {
+		Space();
+		WriteToken(Tokens::Arrow);
+		Space();
+		indexerDeclaration->ExpressionBody()->AcceptVisitor(*this);
+		Semicolon();
+	}
+	EndNode(indexerDeclaration);
+}
 void CSharpOutputVisitor::VisitOperatorDeclaration(Syntax::OperatorDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitConstructorInitializer(Syntax::ConstructorInitializer* constructorInitializer) {
 	// Faithful port of CSharpOutputVisitor.cs VisitConstructorInitializer: `: base(...)` / `: this(...)`.

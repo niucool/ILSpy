@@ -106,6 +106,8 @@
 #include "Decompiler/CSharp/Syntax/PropertyDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/CustomEventDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/EventDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/IndexerDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/OperatorDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
@@ -203,6 +205,8 @@ using ILSpy::Decompiler::CSharp::Syntax::AccessorKind;
 using ILSpy::Decompiler::CSharp::Syntax::PropertyDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::CustomEventDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::EventDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::IndexerDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::OperatorDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentExpression;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentOperatorType;
 using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorExpression;
@@ -602,15 +606,15 @@ TEST(CSharp_OutputVisitor, WriteCommaSeparatedListInParenthesisEmpty) {
 // ---- The 130 Visit stubs throw ---------------------------------------------
 
 // A representative still-unported `Visit` method throws `std::logic_error` (the throwing-stub
-// design); `VisitPropertyDeclaration` remains a stub (the `VariableDeclarationStatement`, the
+// design); `VisitOperatorDeclaration` remains a stub (the `VariableDeclarationStatement`, the
 // try/catch family, `ConstructorInitializer`, `ConstructorDeclaration`, `DestructorDeclaration`,
 // `EnumMemberDeclaration`, `ExtensionDeclaration`, `EventDeclaration`, `CustomEventDeclaration`,
-// and now `FieldDeclaration` `Visit` methods above are implemented, the TypeMember hierarchy
-// below `PropertyDeclaration` is still a stub).
+// `FieldDeclaration`, `FixedFieldDeclaration` and now `IndexerDeclaration` `Visit` methods above are
+// implemented, the TypeMember hierarchy below `OperatorDeclaration` is still a stub).
 TEST(CSharp_OutputVisitor, VisitStubThrows) {
 	V h;
-	auto decl = std::make_unique<PropertyDeclaration>();
-	EXPECT_THROW(h.visitor->VisitPropertyDeclaration(decl.get()), std::logic_error);
+	auto decl = std::make_unique<OperatorDeclaration>();
+	EXPECT_THROW(h.visitor->VisitOperatorDeclaration(decl.get()), std::logic_error);
 }
 
 // ---- The implemented leaf Visit methods ------------------------------------
@@ -4353,4 +4357,103 @@ TEST(CSharp_OutputVisitor, VisitFixedFieldDeclarationBare) {
 	auto idPtr = std::find(h.inner.calls.begin(), h.inner.calls.end(), "id:ptr");
 	ASSERT_NE(idPtr, h.inner.calls.end()) << "the variable must render id:ptr";
 	EXPECT_LT(primtype, idPtr) << "the type must precede the variable";
+}
+
+// `VisitIndexerDeclaration` over `int this[string x] { get; set; }` -- an auto-property indexer with
+// a getter and setter (no bodies, no attributes, so `isSingleLine` is true under the default
+// `AutoPropertyFormatting == SingleLine` policy). The `string` parameter type is chosen distinct
+// from the `int` return type so the find-based ordering assertions can pin each unambiguously.
+// Renders: StartNode + WriteAttributes (no-op) + WriteModifiers (no-op) + ReturnType->AcceptVisitor
+// (PrimitiveType "int") + Space() + WritePrivateImplementationType(nullptr) (no-op) +
+// WriteKeyword("this") + Space(SpaceBeforeMethodDeclarationParentheses=false, no-op) +
+// WriteCommaSeparatedListInBrackets (the one ParameterDeclaration "string x") + OpenBrace (EndOfLine,
+// newLine=false) + isSingleLine Space() + the FirstChild/NextSibling walk recursing through
+// VisitAccessor for the Getter (the auto-property Semicolon emits tok:; + Space, not a NewLine) and
+// the Setter + CloseBrace (EndOfLine, unindent=false) + NewLine + EndNode.
+TEST(CSharp_OutputVisitor, VisitIndexerDeclarationAutoPropertyGetSet) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("int"));
+	auto paramType = std::make_unique<PrimitiveType>(std::string("string"));
+	auto param = std::make_unique<ParameterDeclaration>();
+	param->Type(paramType.get());
+	param->NameToken(Identifier::Create("x"));
+	auto getter = std::make_unique<Accessor>(AccessorKind::Getter);
+	auto setter = std::make_unique<Accessor>(AccessorKind::Setter);
+	auto node = std::make_unique<IndexerDeclaration>();
+	node->ReturnType(retType.get());
+	node->Parameters().Add(param.get());
+	node->Getter(getter.get());
+	node->Setter(setter.get());
+	h.visitor->VisitIndexerDeclaration(node.get());
+
+	// Ordering of the key tokens (robust to the InsertRequiredSpacesDecorator's inter-token
+	// spaces): ReturnType < this < [ < param type < param name < ] < { < get < set < } < end.
+	auto retTypeTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "primtype:int");
+	ASSERT_NE(retTypeTok, h.inner.calls.end()) << "the ReturnType must render primtype:int";
+	auto thisKw = std::find(retTypeTok, h.inner.calls.end(), "kw:this");
+	ASSERT_NE(thisKw, h.inner.calls.end()) << "kw:this must render after the ReturnType";
+	auto lbracket = std::find(thisKw, h.inner.calls.end(), "tok:[");
+	ASSERT_NE(lbracket, h.inner.calls.end()) << "tok:[ must render after kw:this";
+	auto paramTypeTok = std::find(lbracket, h.inner.calls.end(), "primtype:string");
+	ASSERT_NE(paramTypeTok, h.inner.calls.end()) << "the parameter type must render after tok:[";
+	auto paramName = std::find(paramTypeTok, h.inner.calls.end(), "id:x");
+	ASSERT_NE(paramName, h.inner.calls.end()) << "the parameter name must render after its type";
+	auto rbracket = std::find(paramName, h.inner.calls.end(), "tok:]");
+	ASSERT_NE(rbracket, h.inner.calls.end()) << "tok:] must render after the parameter name";
+	auto lbrace = std::find(rbracket, h.inner.calls.end(), "tok:{");
+	ASSERT_NE(lbrace, h.inner.calls.end()) << "the indexer body must open with tok:{ after tok:]";
+	auto getKw = std::find(lbrace, h.inner.calls.end(), "kw:get");
+	ASSERT_NE(getKw, h.inner.calls.end()) << "the get accessor must render kw:get after tok:{";
+	auto setKw = std::find(getKw, h.inner.calls.end(), "kw:set");
+	ASSERT_NE(setKw, h.inner.calls.end()) << "the set accessor must render kw:set after kw:get";
+	auto rbrace = std::find(setKw, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(rbrace, h.inner.calls.end()) << "the body must close with tok:} after kw:set";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitIndexerDeclaration` over `int this[string x] => 1` -- an expression-bodied indexer (the
+// ExpressionBody is non-null, so the else branch runs). The `string` parameter type is chosen
+// distinct from the `int` return type and the body is a `PrimitiveExpression(1)` (rendering
+// `primval`) so the find-based ordering assertions can pin each unambiguously. Renders: StartNode +
+// WriteAttributes (no-op) + WriteModifiers (no-op) + ReturnType->AcceptVisitor (PrimitiveType "int")
+// + Space() + WritePrivateImplementationType(nullptr) (no-op) + WriteKeyword("this") +
+// Space(SpaceBeforeMethodDeclarationParentheses=false, no-op) + WriteCommaSeparatedListInBrackets
+// (the one ParameterDeclaration "string x") + the else branch: Space() + WriteToken(Tokens::Arrow
+// "=>") + Space() + ExpressionBody->AcceptVisitor (PrimitiveExpression(1): primval) + Semicolon
+// (tok:;/newline) + EndNode.
+TEST(CSharp_OutputVisitor, VisitIndexerDeclarationExpressionBody) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("int"));
+	auto paramType = std::make_unique<PrimitiveType>(std::string("string"));
+	auto param = std::make_unique<ParameterDeclaration>();
+	param->Type(paramType.get());
+	param->NameToken(Identifier::Create("x"));
+	auto body = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto node = std::make_unique<IndexerDeclaration>();
+	node->ReturnType(retType.get());
+	node->Parameters().Add(param.get());
+	node->ExpressionBody(body.get());
+	h.visitor->VisitIndexerDeclaration(node.get());
+
+	// Ordering of the key tokens (robust to the InsertRequiredSpacesDecorator's inter-token
+	// spaces): ReturnType < this < [ < param type < param name < ] < => < body < ; < end.
+	auto retTypeTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "primtype:int");
+	ASSERT_NE(retTypeTok, h.inner.calls.end()) << "the ReturnType must render primtype:int";
+	auto thisKw = std::find(retTypeTok, h.inner.calls.end(), "kw:this");
+	ASSERT_NE(thisKw, h.inner.calls.end()) << "kw:this must render after the ReturnType";
+	auto lbracket = std::find(thisKw, h.inner.calls.end(), "tok:[");
+	ASSERT_NE(lbracket, h.inner.calls.end()) << "tok:[ must render after kw:this";
+	auto paramTypeTok = std::find(lbracket, h.inner.calls.end(), "primtype:string");
+	ASSERT_NE(paramTypeTok, h.inner.calls.end()) << "the parameter type must render after tok:[";
+	auto paramName = std::find(paramTypeTok, h.inner.calls.end(), "id:x");
+	ASSERT_NE(paramName, h.inner.calls.end()) << "the parameter name must render after its type";
+	auto rbracket = std::find(paramName, h.inner.calls.end(), "tok:]");
+	ASSERT_NE(rbracket, h.inner.calls.end()) << "tok:] must render after the parameter name";
+	auto arrow = std::find(rbracket, h.inner.calls.end(), "tok:=>");
+	ASSERT_NE(arrow, h.inner.calls.end()) << "the expression body must render tok:=> after tok:]";
+	auto bodyVal = std::find(arrow, h.inner.calls.end(), "primval");
+	ASSERT_NE(bodyVal, h.inner.calls.end()) << "the expression body must render primval after tok:=>";
+	auto semi = std::find(bodyVal, h.inner.calls.end(), "tok:;");
+	ASSERT_NE(semi, h.inner.calls.end()) << "the expression-bodied indexer must close with tok:;";
+	EXPECT_EQ(h.inner.calls.back(), "end");
 }
