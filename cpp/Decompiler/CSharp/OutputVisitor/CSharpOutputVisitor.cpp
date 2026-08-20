@@ -45,6 +45,9 @@
 #include "Decompiler/CSharp/Syntax/ParameterDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/TypeParameterDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Constraint.hpp"
+#include "Decompiler/CSharp/Syntax/UsingAliasDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/UsingDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/ExternAliasDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
@@ -2181,9 +2184,61 @@ void CSharpOutputVisitor::VisitComment(Syntax::Comment* comment) {
 	writer_->WriteComment(comment->CommentType(), comment->Content());
 	writer_->EndNode(comment);
 }
-void CSharpOutputVisitor::VisitExternAliasDeclaration(Syntax::ExternAliasDeclaration*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitUsingDeclaration(Syntax::UsingDeclaration*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitUsingAliasDeclaration(Syntax::UsingAliasDeclaration*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitExternAliasDeclaration(Syntax::ExternAliasDeclaration* externAliasDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitExternAliasDeclaration (line 1680): the
+	// `extern_alias_directive ::= 'extern' 'alias' identifier ';'` (C# grammar 14.4). The two
+	// keywords are the namespace-scope `Tokens::ExternKeyword`/`Tokens::AliasKeyword` consts,
+	// each followed by an explicit `Space()` (the C# `Space()` default-arg `addSpace=true`, the
+	// `VisitAsExpression` D322 keyword-Space-keyword precedent); the `NameToken` is a REQUIRED
+	// `Identifier` slot written via `WriteIdentifier`; the `Semicolon` writes `tok:;` + `NewLine`
+	// (the root node's `Slot()` is null, so neither the `skipToken` nor the auto-property
+	// `skipNewLine` path applies -- the `dynamic_cast<Accessor*>` on the directive node fails).
+	StartNode(externAliasDeclaration);
+	WriteKeyword(Tokens::ExternKeyword);
+	Space();
+	WriteKeyword(Tokens::AliasKeyword);
+	Space();
+	WriteIdentifier(externAliasDeclaration->NameToken());
+	Semicolon();
+	EndNode(externAliasDeclaration);
+}
+void CSharpOutputVisitor::VisitUsingDeclaration(Syntax::UsingDeclaration* usingDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitUsingDeclaration (line 1671): the
+	// `using_directive ::= 'using' type ';'` (C# grammar 14.6.3). The `UsingKeyword` is a static
+	// `constexpr const char*` const on `UsingDeclaration` (shared verbatim with
+	// `UsingAliasDeclaration.UsingKeyword` -- the `CheckedExpression.CheckedKeyword` D234
+	// static-const precedent); the `Import` is a REQUIRED `AstType` slot (the C# calls
+	// `usingDeclaration.Import.AcceptVisitor(this)` with no null-conditional), so no nullptr
+	// guard is added (the `VisitAttribute` D357 required-slot precedent); the `Semicolon` writes
+	// `tok:;` + `NewLine` (the root node's `Slot()` is null).
+	StartNode(usingDeclaration);
+	WriteKeyword(UsingDeclaration::UsingKeyword);
+	usingDeclaration->Import()->AcceptVisitor(*this);
+	Semicolon();
+	EndNode(usingDeclaration);
+}
+void CSharpOutputVisitor::VisitUsingAliasDeclaration(Syntax::UsingAliasDeclaration* usingAliasDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitUsingAliasDeclaration (line 1658): the
+	// `using_alias_directive ::= 'using' identifier '=' type ';'` (C# grammar 14.6.2). The
+	// `UsingKeyword` is a static `constexpr const char*` const on `UsingAliasDeclaration` (shared
+	// verbatim with `UsingDeclaration.UsingKeyword`); the `AliasToken` is a REQUIRED `Identifier`
+	// slot written via `WriteIdentifier` (the C# passes the `AliasToken` token, not the `Alias`
+	// string, so the token's leading/trailing trivia would render); the two `Space(SpaceAroundEqualityOperator)`
+	// calls flank the `Tokens::Assign` (no-ops under the default options where
+	// `SpaceAroundEqualityOperator=false`); the `Import` is a REQUIRED `AstType` slot (the C# calls
+	// `usingAliasDeclaration.Import.AcceptVisitor(this)` with no null-conditional), so no nullptr
+	// guard is added (the `VisitAttribute` D357 required-slot precedent); the `Semicolon` writes
+	// `tok:;` + `NewLine` (the root node's `Slot()` is null).
+	StartNode(usingAliasDeclaration);
+	WriteKeyword(UsingAliasDeclaration::UsingKeyword);
+	WriteIdentifier(usingAliasDeclaration->AliasToken());
+	Space(policy_.SpaceAroundEqualityOperator);
+	WriteToken(Tokens::Assign);
+	Space(policy_.SpaceAroundEqualityOperator);
+	usingAliasDeclaration->Import()->AcceptVisitor(*this);
+	Semicolon();
+	EndNode(usingAliasDeclaration);
+}
 void CSharpOutputVisitor::VisitTupleTypeElement(Syntax::TupleTypeElement* tupleTypeElement) {
 	// The C# `VisitTupleTypeElement`: `StartNode` + `Type.AcceptVisitor` + an optional `Space` +
 	// `NameToken.AcceptVisitor` (the name is a nullable `string?` over a backing `NameToken`, so

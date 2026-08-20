@@ -114,6 +114,9 @@
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/TypeParameterDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Constraint.hpp"
+#include "Decompiler/CSharp/Syntax/UsingAliasDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/UsingDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/ExternAliasDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
@@ -274,6 +277,9 @@ using ILSpy::Decompiler::CSharp::Syntax::DeclarationExpression;
 using ILSpy::Decompiler::CSharp::Syntax::ParameterDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::TypeParameterDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::Constraint;
+using ILSpy::Decompiler::CSharp::Syntax::UsingAliasDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::UsingDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::ExternAliasDeclaration;
 using ILSpy::Decompiler::TypeSystem::ReferenceKind;
 using ILSpy::Decompiler::TypeSystem::VarianceModifier;
 
@@ -5188,5 +5194,130 @@ TEST(CSharp_OutputVisitor, VisitLocalFunctionDeclarationStatementNoBody) {
 	ASSERT_NE(rpar, h.inner.calls.end());
 	auto semi = std::find(rpar, h.inner.calls.end(), "tok:;");
 	ASSERT_NE(semi, h.inner.calls.end()) << "a bodyless wrapped method must close with tok:;";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// ---- VisitUsingDeclaration / VisitUsingAliasDeclaration / VisitExternAliasDeclaration (D360,
+// the namespace-level directive family: using_directive / using_alias_directive /
+// extern_alias_directive, C# grammar 14.4-14.6) --------------------------------------
+
+// `VisitUsingDeclaration` over `using System;` -- the `using_directive ::= 'using' type ';'`
+// (C# grammar 14.6.3): the `UsingKeyword` then the required `Import` AstType (a SimpleType renders
+// just its identifier) then a `Semicolon` (tok:; + NewLine). The find-based ordering pins the
+// `using` keyword before the imported namespace identifier before the terminating semicolon.
+TEST(CSharp_OutputVisitor, VisitUsingDeclarationBare) {
+	V h;
+	auto import = std::make_unique<SimpleType>(std::string("System"));
+	auto node = std::make_unique<UsingDeclaration>(import.get());
+	h.visitor->VisitUsingDeclaration(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto usingKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:using");
+	ASSERT_NE(usingKw, h.inner.calls.end()) << "the using directive must open with kw:using";
+	auto ns = std::find(usingKw, h.inner.calls.end(), "id:System");
+	ASSERT_NE(ns, h.inner.calls.end()) << "the imported namespace must render after kw:using";
+	auto semi = std::find(ns, h.inner.calls.end(), "tok:;");
+	ASSERT_NE(semi, h.inner.calls.end()) << "the using directive must close with tok:;";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitUsingDeclaration` over `using System.Collections;` -- the `Import` is a `MemberType`
+// (`System.Collections`), so the render recurses through `VisitSimpleType` (the `System` target)
+// then `VisitMemberType` (the `.Collections` member). The find-based ordering pins the dotted
+// namespace: kw:using < id:System < tok:. < id:Collections < tok:;.
+TEST(CSharp_OutputVisitor, VisitUsingDeclarationDotted) {
+	V h;
+	auto target = std::make_unique<SimpleType>(std::string("System"));
+	auto import = std::make_unique<MemberType>(target.get(), std::string("Collections"));
+	auto node = std::make_unique<UsingDeclaration>(import.get());
+	h.visitor->VisitUsingDeclaration(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto usingKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:using");
+	ASSERT_NE(usingKw, h.inner.calls.end());
+	auto ns = std::find(usingKw, h.inner.calls.end(), "id:System");
+	ASSERT_NE(ns, h.inner.calls.end()) << "the MemberType target must render after kw:using";
+	auto dot = std::find(ns, h.inner.calls.end(), "tok:.");
+	ASSERT_NE(dot, h.inner.calls.end()) << "the dot separator must render between the two names";
+	auto member = std::find(dot, h.inner.calls.end(), "id:Collections");
+	ASSERT_NE(member, h.inner.calls.end()) << "the member name must render after the dot";
+	auto semi = std::find(member, h.inner.calls.end(), "tok:;");
+	ASSERT_NE(semi, h.inner.calls.end()) << "the using directive must close with tok:;";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitUsingAliasDeclaration` over `using A = System;` -- the
+// `using_alias_directive ::= 'using' identifier '=' type ';'` (C# grammar 14.6.2): the `UsingKeyword`,
+// the `AliasToken` identifier, the `Tokens::Assign` (flanked by the `SpaceAroundEqualityOperator`
+// spaces, no-ops under the default options), the required `Import` AstType, then a `Semicolon`.
+// The find-based ordering pins kw:using < id:A < tok:= < id:System < tok:;.
+TEST(CSharp_OutputVisitor, VisitUsingAliasDeclarationBare) {
+	V h;
+	auto import = std::make_unique<SimpleType>(std::string("System"));
+	auto node = std::make_unique<UsingAliasDeclaration>(std::string("A"), import.get());
+	h.visitor->VisitUsingAliasDeclaration(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto usingKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:using");
+	ASSERT_NE(usingKw, h.inner.calls.end()) << "the alias directive must open with kw:using";
+	auto alias = std::find(usingKw, h.inner.calls.end(), "id:A");
+	ASSERT_NE(alias, h.inner.calls.end()) << "the alias identifier must render after kw:using";
+	auto assign = std::find(alias, h.inner.calls.end(), "tok:=");
+	ASSERT_NE(assign, h.inner.calls.end()) << "the assignment token must render after the alias";
+	auto ns = std::find(assign, h.inner.calls.end(), "id:System");
+	ASSERT_NE(ns, h.inner.calls.end()) << "the imported type must render after tok:=";
+	auto semi = std::find(ns, h.inner.calls.end(), "tok:;");
+	ASSERT_NE(semi, h.inner.calls.end()) << "the alias directive must close with tok:;";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitUsingAliasDeclaration` over `using B = System.Collections;` -- the `Import` is a
+// `MemberType` (`System.Collections`), so the alias pins a dotted namespace after the
+// assignment: kw:using < id:B < tok:= < id:System < tok:. < id:Collections < tok:;.
+TEST(CSharp_OutputVisitor, VisitUsingAliasDeclarationDotted) {
+	V h;
+	auto target = std::make_unique<SimpleType>(std::string("System"));
+	auto import = std::make_unique<MemberType>(target.get(), std::string("Collections"));
+	auto node = std::make_unique<UsingAliasDeclaration>(std::string("B"), import.get());
+	h.visitor->VisitUsingAliasDeclaration(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto usingKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:using");
+	ASSERT_NE(usingKw, h.inner.calls.end());
+	auto alias = std::find(usingKw, h.inner.calls.end(), "id:B");
+	ASSERT_NE(alias, h.inner.calls.end());
+	auto assign = std::find(alias, h.inner.calls.end(), "tok:=");
+	ASSERT_NE(assign, h.inner.calls.end());
+	auto ns = std::find(assign, h.inner.calls.end(), "id:System");
+	ASSERT_NE(ns, h.inner.calls.end()) << "the MemberType target must render after tok:=";
+	auto dot = std::find(ns, h.inner.calls.end(), "tok:.");
+	ASSERT_NE(dot, h.inner.calls.end()) << "the dot separator must render between the two names";
+	auto member = std::find(dot, h.inner.calls.end(), "id:Collections");
+	ASSERT_NE(member, h.inner.calls.end()) << "the member name must render after the dot";
+	auto semi = std::find(member, h.inner.calls.end(), "tok:;");
+	ASSERT_NE(semi, h.inner.calls.end()) << "the alias directive must close with tok:;";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitExternAliasDeclaration` over `extern alias G;` -- the
+// `extern_alias_directive ::= 'extern' 'alias' identifier ';'` (C# grammar 14.4): the two
+// namespace-scope keyword consts (`Tokens::ExternKeyword`/`Tokens::AliasKeyword`), each followed
+// by an explicit `Space()`, then the `NameToken` identifier, then a `Semicolon`. The find-based
+// ordering pins the keyword sequence kw:extern < kw:alias before the name identifier before the
+// terminating semicolon.
+TEST(CSharp_OutputVisitor, VisitExternAliasDeclarationBare) {
+	V h;
+	auto node = std::make_unique<ExternAliasDeclaration>(std::string("G"));
+	h.visitor->VisitExternAliasDeclaration(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto externKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:extern");
+	ASSERT_NE(externKw, h.inner.calls.end()) << "the extern alias must open with kw:extern";
+	auto aliasKw = std::find(externKw, h.inner.calls.end(), "kw:alias");
+	ASSERT_NE(aliasKw, h.inner.calls.end()) << "kw:alias must render after kw:extern";
+	auto name = std::find(aliasKw, h.inner.calls.end(), "id:G");
+	ASSERT_NE(name, h.inner.calls.end()) << "the alias name must render after kw:alias";
+	auto semi = std::find(name, h.inner.calls.end(), "tok:;");
+	ASSERT_NE(semi, h.inner.calls.end()) << "the extern alias must close with tok:;";
 	EXPECT_EQ(h.inner.calls.back(), "end");
 }
