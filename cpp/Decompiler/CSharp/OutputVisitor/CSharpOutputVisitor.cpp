@@ -157,6 +157,17 @@
 #include "Decompiler/CSharp/Syntax/Expressions/SwitchExpression.hpp"
 #include "Decompiler/CSharp/Syntax/SwitchExpressionSection.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/RecursivePatternExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/QueryExpression.hpp"
+#include "Decompiler/CSharp/Syntax/QueryClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryContinuationClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryFromClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryLetClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryWhereClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryJoinClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryOrderClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryOrdering.hpp"
+#include "Decompiler/CSharp/Syntax/QueryGroupClause.hpp"
+#include "Decompiler/CSharp/Syntax/QuerySelectClause.hpp"
 #include "Decompiler/CSharp/Syntax/SingleVariableDesignation.hpp"
 #include "Decompiler/CSharp/Syntax/ParenthesizedVariableDesignation.hpp"
 #include "Decompiler/CSharp/OutputVisitor/InsertRequiredSpacesDecorator.hpp"
@@ -2775,16 +2786,211 @@ void CSharpOutputVisitor::VisitInterpolatedStringExpression(Syntax::Interpolated
 	isAfterSpace_ = false;
 	EndNode(interpolatedStringExpression);
 }
-void CSharpOutputVisitor::VisitQueryOrdering(Syntax::QueryOrdering*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitQueryExpression(Syntax::QueryExpression*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitQueryWhereClause(Syntax::QueryWhereClause*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitQuerySelectClause(Syntax::QuerySelectClause*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitQueryOrderClause(Syntax::QueryOrderClause*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitQueryLetClause(Syntax::QueryLetClause*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitQueryGroupClause(Syntax::QueryGroupClause*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitQueryFromClause(Syntax::QueryFromClause*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitQueryContinuationClause(Syntax::QueryContinuationClause*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitQueryJoinClause(Syntax::QueryJoinClause*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitQueryOrdering(Syntax::QueryOrdering* queryOrdering) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQueryOrdering (line 1427): a single ordering
+	// inside an `orderby` clause -- the operand `Expression` followed by an optional direction
+	// keyword (`ascending`/`descending`). The C# `switch (Direction)` has only the Ascending and
+	// Descending cases (the `None` zero value falls through, writing no keyword -- the ordering
+	// renders as the bare operand), so the port mirrors the two cases and a `default: break;` (the
+	// faithful no-action fall-through, no `std::out_of_range` throw unlike the D235 FieldDirection
+	// switch whose C# source throws). `Expression` is a REQUIRED slot the C# derefs with no `?.`,
+	// so NO nullptr guard (the D357 VisitAttribute required-slot-no-`?.` convention).
+	StartNode(queryOrdering);
+	queryOrdering->Expression()->AcceptVisitor(*this);
+	switch (queryOrdering->Direction()) {
+		case Syntax::QueryOrderingDirection::Ascending:
+			Space();
+			WriteKeyword(Syntax::QueryOrdering::AscendingKeyword);
+			break;
+		case Syntax::QueryOrderingDirection::Descending:
+			Space();
+			WriteKeyword(Syntax::QueryOrdering::DescendingKeyword);
+			break;
+		default:
+			break;
+	}
+	EndNode(queryOrdering);
+}
+void CSharpOutputVisitor::VisitQueryExpression(Syntax::QueryExpression* queryExpression) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQueryExpression (line 1316): the top-level
+	// `query_expression ::= query_clause+` (C# grammar 12.23.1). A top-level query (one NOT
+	// nested as a `QueryContinuationClause.PrecedingQuery`) indents its clause sequence; a
+	// continuation-nested query does NOT (it is already inside the continuation's indentation).
+	// The C# `queryExpression.Slot?.Kind != Slots.PrecedingQuery` null-propagating pointer
+	// compare ports to a null-safe `Slot()` + `Kind()` pointer compare (the D251
+	// IsObjectOrCollectionInitializer precedent): a root/unparented query's `Slot()` is null, so
+	// the `!= &Slots::PrecedingQuery` test is true and the Indent runs (captured once into
+	// `topLevel` to avoid the double `Slot()` call the C# repeats). The clauses are separated by a
+	// `NewLine` EXCEPT a `QueryContinuationClause` (an `into` clause continues the same line as
+	// its preceding query); the `clause is QueryContinuationClause` type-test ports to a
+	// `dynamic_cast` (the D357 dynamic_cast-on-Parent precedent applied to a clause test). The
+	// lazy `AstNodeCollection<QueryClause>` `Clauses` snapshots via the D325 `ToVector` helper
+	// before the loop (the collection is not mutated during the visit), recursing each clause
+	// polymorphically through its own concrete `Visit` via the virtual `AcceptVisitor`.
+	StartNode(queryExpression);
+	const Syntax::CSharpSlotInfo* slot = queryExpression->Slot();
+	bool topLevel = slot == nullptr || slot->Kind() != &Slots::PrecedingQuery;
+	if (topLevel)
+		writer_->Indent();
+	bool first = true;
+	for (Syntax::QueryClause* clause : ToVector(queryExpression->Clauses())) {
+		if (first) {
+			first = false;
+		} else {
+			if (dynamic_cast<Syntax::QueryContinuationClause*>(clause) == nullptr)
+				NewLine();
+		}
+		clause->AcceptVisitor(*this);
+	}
+	if (topLevel)
+		writer_->Unindent();
+	EndNode(queryExpression);
+}
+void CSharpOutputVisitor::VisitQueryWhereClause(Syntax::QueryWhereClause* queryWhereClause) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQueryWhereClause (line 1381): the `where
+	// condition` filter clause -- the `where` keyword, a Space, then the `Condition` expression.
+	// `Condition` is a REQUIRED slot the C# derefs with no `?.`, so NO nullptr guard (the D357
+	// required-slot-no-`?.` convention).
+	StartNode(queryWhereClause);
+	WriteKeyword(Syntax::QueryWhereClause::WhereKeyword);
+	Space();
+	queryWhereClause->Condition()->AcceptVisitor(*this);
+	EndNode(queryWhereClause);
+}
+void CSharpOutputVisitor::VisitQuerySelectClause(Syntax::QuerySelectClause* querySelectClause) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQuerySelectClause (line 1445): the `select
+	// expr` projection clause -- the `select` keyword, a Space, then the projection `Expression`.
+	// `Expression` is a REQUIRED slot the C# derefs with no `?.`, so NO nullptr guard (the D357
+	// required-slot-no-`?.` convention).
+	StartNode(querySelectClause);
+	WriteKeyword(Syntax::QuerySelectClause::SelectKeyword);
+	Space();
+	querySelectClause->Expression()->AcceptVisitor(*this);
+	EndNode(querySelectClause);
+}
+void CSharpOutputVisitor::VisitQueryOrderClause(Syntax::QueryOrderClause* queryOrderClause) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQueryOrderClause (line 1418): the `orderby
+	// ordering+` clause -- the `orderby` keyword, a Space, then the comma-separated `Orderings`
+	// collection (each `QueryOrdering` recurses through `VisitQueryOrdering` via the virtual
+	// `AcceptVisitor`). The lazy `AstNodeCollection<QueryOrdering>` `Orderings` snapshots via the
+	// D325 `ToVector` helper before `WriteCommaSeparatedList` (the collection is not mutated
+	// during the visit).
+	StartNode(queryOrderClause);
+	WriteKeyword(Syntax::QueryOrderClause::OrderbyKeyword);
+	Space();
+	WriteCommaSeparatedList(ToVector(queryOrderClause->Orderings()));
+	EndNode(queryOrderClause);
+}
+void CSharpOutputVisitor::VisitQueryLetClause(Syntax::QueryLetClause* queryLetClause) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQueryLetClause (line 1368): the `let id =
+	// expr` clause -- the `let` keyword, a Space, the range-variable `IdentifierToken`, the two
+	// `Space(SpaceAroundAssignment)` calls flanking `Tokens::Assign`, then the bound `Expression`.
+	// `SpaceAroundAssignment` defaults to false in `CSharpFormattingOptions{}`, so the two
+	// policy-gated `Space(...)` calls are no-ops under the default policy (the D354/D360
+	// precedent); the `InsertRequiredSpacesDecorator` still inserts the strictly-required spaces
+	// between the identifier and `=` and between `=` and the expression. `IdentifierToken` and
+	// `Expression` are REQUIRED slots the C# derefs with no `?.`, so NO nullptr guards.
+	StartNode(queryLetClause);
+	WriteKeyword(Syntax::QueryLetClause::LetKeyword);
+	Space();
+	WriteIdentifier(queryLetClause->IdentifierToken());
+	Space(policy_.SpaceAroundAssignment);
+	WriteToken(Tokens::Assign);
+	Space(policy_.SpaceAroundAssignment);
+	queryLetClause->Expression()->AcceptVisitor(*this);
+	EndNode(queryLetClause);
+}
+void CSharpOutputVisitor::VisitQueryGroupClause(Syntax::QueryGroupClause* queryGroupClause) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQueryGroupClause (line 1454): the `group
+	// projection by key` clause -- the `group` keyword, a Space, the `Projection`, a Space, the
+	// `by` keyword, a Space, the `Key`. `Projection` and `Key` are REQUIRED slots the C# derefs
+	// with no `?.`, so NO nullptr guards (the D357 required-slot-no-`?.` convention).
+	StartNode(queryGroupClause);
+	WriteKeyword(Syntax::QueryGroupClause::GroupKeyword);
+	Space();
+	queryGroupClause->Projection()->AcceptVisitor(*this);
+	Space();
+	WriteKeyword(Syntax::QueryGroupClause::ByKeyword);
+	Space();
+	queryGroupClause->Key()->AcceptVisitor(*this);
+	EndNode(queryGroupClause);
+}
+void CSharpOutputVisitor::VisitQueryFromClause(Syntax::QueryFromClause* queryFromClause) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQueryFromClause (line 1353): the `from type?
+	// id in expr` clause -- the `from` keyword, a Space, the optional `Type`, a Space, the
+	// `IdentifierToken`, a Space, the `in` keyword, a Space, the `Expression`. The `Type` is a
+	// NULLABLE slot (the C# `Type?.AcceptVisitor`), so the port guards with `!= nullptr` (the
+	// D354 nullable-`?.` convention); the two flanking `Space()` calls emit unconditionally (the
+	// C# emits them regardless of whether `Type` is present), so `from x in e` (no type) renders
+	// `kw:from < id:x < kw:in < ...` with the decorator deduping the consecutive spaces.
+	// `IdentifierToken` and `Expression` are REQUIRED slots, deref'd with no `?.`, so NO guards.
+	StartNode(queryFromClause);
+	WriteKeyword(Syntax::QueryFromClause::FromKeyword);
+	Space();
+	if (queryFromClause->Type() != nullptr)
+		queryFromClause->Type()->AcceptVisitor(*this);
+	Space();
+	WriteIdentifier(queryFromClause->IdentifierToken());
+	Space();
+	WriteKeyword(Syntax::QueryFromClause::InKeyword);
+	Space();
+	queryFromClause->Expression()->AcceptVisitor(*this);
+	EndNode(queryFromClause);
+}
+void CSharpOutputVisitor::VisitQueryContinuationClause(Syntax::QueryContinuationClause* queryContinuationClause) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQueryContinuationClause (line 1342): the
+	// `into id` continuation clause -- the preceding `QueryExpression` (rendered inline, no
+	// separating NewLine -- the `VisitQueryExpression` loop special-cases this clause), a Space,
+	// the `into` keyword, a Space, the `IdentifierToken`. `PrecedingQuery` and `IdentifierToken`
+	// are REQUIRED slots the C# derefs with no `?.`, so NO nullptr guards (the D357
+	// required-slot-no-`?.` convention).
+	StartNode(queryContinuationClause);
+	queryContinuationClause->PrecedingQuery()->AcceptVisitor(*this);
+	Space();
+	WriteKeyword(Syntax::QueryContinuationClause::IntoKeyword);
+	Space();
+	WriteIdentifier(queryContinuationClause->IdentifierToken());
+	EndNode(queryContinuationClause);
+}
+void CSharpOutputVisitor::VisitQueryJoinClause(Syntax::QueryJoinClause* queryJoinClause) {
+	// Faithful port of CSharpOutputVisitor.cs VisitQueryJoinClause (line 1390): the `join type?
+	// id in inExpr on onExpr equals equalsExpr [into intoId]` clause -- the `join` keyword, the
+	// optional `Type` (nullable, `?.`-guarded), a Space, the `JoinIdentifierToken`, a Space, the
+	// `in` keyword, a Space, the `InExpression`, a Space, the `on` keyword, a Space, the
+	// `OnExpression`, a Space, the `equals` keyword, a Space, the `EqualsExpression`, then the
+	// optional `IsGroupJoin` tail (a Space, the `into` keyword, the `IntoIdentifierToken`). The
+	// `Type` is a NULLABLE slot (the C# `Type?.AcceptVisitor`), so the port guards with `!=
+	// nullptr` (the D354 nullable-`?.` convention); note the C# emits NO Space between `join` and
+	// the optional `Type` (the first `Space()` comes AFTER the Type). The `IsGroupJoin` gate is
+	// the C# `if (queryJoinClause.IsGroupJoin)`; `IsGroupJoin()` is true iff `IntoIdentifier` is
+	// present and non-empty, which guarantees `IntoIdentifierToken()` is non-null in the branch,
+	// so the C# `IntoIdentifierToken!` null-forgiving deref is safe (the `Expression` slots are
+	// REQUIRED, deref'd with no `?.`, so NO guards).
+	StartNode(queryJoinClause);
+	WriteKeyword(Syntax::QueryJoinClause::JoinKeyword);
+	if (queryJoinClause->Type() != nullptr)
+		queryJoinClause->Type()->AcceptVisitor(*this);
+	Space();
+	WriteIdentifier(queryJoinClause->JoinIdentifierToken());
+	Space();
+	WriteKeyword(Syntax::QueryJoinClause::InKeyword);
+	Space();
+	queryJoinClause->InExpression()->AcceptVisitor(*this);
+	Space();
+	WriteKeyword(Syntax::QueryJoinClause::OnKeyword);
+	Space();
+	queryJoinClause->OnExpression()->AcceptVisitor(*this);
+	Space();
+	WriteKeyword(Syntax::QueryJoinClause::EqualsKeyword);
+	Space();
+	queryJoinClause->EqualsExpression()->AcceptVisitor(*this);
+	if (queryJoinClause->IsGroupJoin()) {
+		Space();
+		WriteKeyword(Syntax::QueryJoinClause::IntoKeyword);
+		WriteIdentifier(queryJoinClause->IntoIdentifierToken());
+	}
+	EndNode(queryJoinClause);
+}
 void CSharpOutputVisitor::VisitSyntaxTree(Syntax::SyntaxTree*) { NotImplemented(); }
 
 } // namespace ILSpy::Decompiler::CSharp::OutputVisitor

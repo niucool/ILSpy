@@ -78,6 +78,17 @@
 #include "Decompiler/CSharp/Syntax/InterpolatedStringText.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InterpolatedStringExpression.hpp"
 #include "Decompiler/CSharp/Syntax/QueryOrdering.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/QueryExpression.hpp"
+#include "Decompiler/CSharp/Syntax/QueryClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryContinuationClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryFromClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryLetClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryWhereClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryJoinClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryOrderClause.hpp"
+#include "Decompiler/CSharp/Syntax/QueryGroupClause.hpp"
+#include "Decompiler/CSharp/Syntax/QuerySelectClause.hpp"
+#include "Decompiler/CSharp/Syntax/SyntaxTree.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayInitializerExpression.hpp"
@@ -297,6 +308,18 @@ using ILSpy::Decompiler::CSharp::Syntax::Interpolation;
 using ILSpy::Decompiler::CSharp::Syntax::InterpolatedStringText;
 using ILSpy::Decompiler::CSharp::Syntax::InterpolatedStringExpression;
 using ILSpy::Decompiler::CSharp::Syntax::QueryOrdering;
+using ILSpy::Decompiler::CSharp::Syntax::QueryOrderingDirection;
+using ILSpy::Decompiler::CSharp::Syntax::QueryExpression;
+using ILSpy::Decompiler::CSharp::Syntax::QueryClause;
+using ILSpy::Decompiler::CSharp::Syntax::QueryContinuationClause;
+using ILSpy::Decompiler::CSharp::Syntax::QueryFromClause;
+using ILSpy::Decompiler::CSharp::Syntax::QueryLetClause;
+using ILSpy::Decompiler::CSharp::Syntax::QueryWhereClause;
+using ILSpy::Decompiler::CSharp::Syntax::QueryJoinClause;
+using ILSpy::Decompiler::CSharp::Syntax::QueryOrderClause;
+using ILSpy::Decompiler::CSharp::Syntax::QueryGroupClause;
+using ILSpy::Decompiler::CSharp::Syntax::QuerySelectClause;
+using ILSpy::Decompiler::CSharp::Syntax::SyntaxTree;
 using ILSpy::Decompiler::TypeSystem::ReferenceKind;
 using ILSpy::Decompiler::TypeSystem::SymbolKind;
 using ILSpy::Decompiler::TypeSystem::VarianceModifier;
@@ -646,20 +669,21 @@ TEST(CSharp_OutputVisitor, WriteCommaSeparatedListInParenthesisEmpty) {
 // ---- The 130 Visit stubs throw ---------------------------------------------
 
 // A representative still-unported `Visit` method throws `std::logic_error` (the throwing-stub
-// design); `VisitQueryOrdering` remains a stub (the `VariableDeclarationStatement`, the
+// design); `VisitSyntaxTree` remains a stub (the `VariableDeclarationStatement`, the
 // try/catch family, `ConstructorInitializer`, `ConstructorDeclaration`, `DestructorDeclaration`,
 // `EnumMemberDeclaration`, `ExtensionDeclaration`, `EventDeclaration`, `CustomEventDeclaration`,
 // `FieldDeclaration`, `FixedFieldDeclaration`, `IndexerDeclaration`, `MethodDeclaration`,
 // `OperatorDeclaration`, `PropertyDeclaration`, `DelegateDeclaration`, `NamespaceDeclaration`,
-// `TypeDeclaration`, `RecursivePatternExpression`, `Interpolation`, `InterpolatedStringText` and
-// `InterpolatedStringExpression` `Visit` methods above are implemented -- the full
+// `TypeDeclaration`, `RecursivePatternExpression`, `Interpolation`, `InterpolatedStringText`,
+// `InterpolatedStringExpression` and the full query family -- `QueryExpression`, the 8 query
+// clauses and `QueryOrdering` -- `Visit` methods above are implemented -- the full
 // EntityDeclaration family, the GeneralScope declaration/directive members, the first pattern
-// node and the interpolated-string family are done; the remaining query/SyntaxTree members below
-// are still stubs).
+// node, the interpolated-string family and the query family are done; the remaining `SyntaxTree`
+// member below is still a stub).
 TEST(CSharp_OutputVisitor, VisitStubThrows) {
 	V h;
-	auto node = std::make_unique<QueryOrdering>();
-	EXPECT_THROW(h.visitor->VisitQueryOrdering(node.get()), std::logic_error);
+	auto node = std::make_unique<SyntaxTree>();
+	EXPECT_THROW(h.visitor->VisitSyntaxTree(node.get()), std::logic_error);
 }
 
 // ---- The implemented leaf Visit methods ------------------------------------
@@ -6033,4 +6057,423 @@ TEST(CSharp_OutputVisitor, VisitInterpolatedStringExpressionWithInterpolation) {
 	auto closeQuote = std::find(rbrace, h.inner.calls.end(), "tok:\"");
 	ASSERT_NE(closeQuote, h.inner.calls.end()) << "the interpolated string must close with tok:\" after the interpolation";
 	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// ---- VisitQueryOrdering (D367, an `orderby` ordering -- the operand `Expression` plus an
+// optional `ascending`/`descending` direction keyword; the `query_ordering` inside a
+// `QueryOrderClause.Orderings` collection)
+// ------------------------------------------------------------------------
+
+// `VisitQueryOrdering` over `x ascending` (Direction=Ascending): the operand renders, then the
+// `ascending` keyword. The find-based ordering pins `id:x < kw:ascending`.
+TEST(CSharp_OutputVisitor, VisitQueryOrderingAscending) {
+	V h;
+	auto expr = std::make_unique<IdentifierExpression>(std::string("x"));
+	auto node = std::make_unique<QueryOrdering>(expr.get(), QueryOrderingDirection::Ascending);
+	h.visitor->VisitQueryOrdering(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto exprTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "id:x");
+	ASSERT_NE(exprTok, h.inner.calls.end()) << "the operand must render";
+	auto asc = std::find(exprTok, h.inner.calls.end(), "kw:ascending");
+	ASSERT_NE(asc, h.inner.calls.end()) << "the ascending keyword must render after the operand";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+	ASSERT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:descending"), h.inner.calls.end())
+		<< "the ascending form must not write the descending keyword";
+}
+
+// `VisitQueryOrdering` over `x descending` (Direction=Descending): the operand, then the
+// `descending` keyword. The find-based ordering pins `id:x < kw:descending`.
+TEST(CSharp_OutputVisitor, VisitQueryOrderingDescending) {
+	V h;
+	auto expr = std::make_unique<IdentifierExpression>(std::string("x"));
+	auto node = std::make_unique<QueryOrdering>(expr.get(), QueryOrderingDirection::Descending);
+	h.visitor->VisitQueryOrdering(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto exprTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "id:x");
+	ASSERT_NE(exprTok, h.inner.calls.end()) << "the operand must render";
+	auto desc = std::find(exprTok, h.inner.calls.end(), "kw:descending");
+	ASSERT_NE(desc, h.inner.calls.end()) << "the descending keyword must render after the operand";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+	ASSERT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:ascending"), h.inner.calls.end())
+		<< "the descending form must not write the ascending keyword";
+}
+
+// `VisitQueryOrdering` over `x` (Direction=None, the zero default): the bare operand with NO
+// direction keyword (the C# switch falls through the unhandled None case). The find-based
+// ordering pins `id:x` and asserts NO `kw:ascending`/`kw:descending`.
+TEST(CSharp_OutputVisitor, VisitQueryOrderingNone) {
+	V h;
+	auto expr = std::make_unique<IdentifierExpression>(std::string("x"));
+	auto node = std::make_unique<QueryOrdering>(expr.get(), QueryOrderingDirection::None);
+	h.visitor->VisitQueryOrdering(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto exprTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "id:x");
+	ASSERT_NE(exprTok, h.inner.calls.end()) << "the operand must render";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+	ASSERT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:ascending"), h.inner.calls.end())
+		<< "the None direction must not write the ascending keyword";
+	ASSERT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:descending"), h.inner.calls.end())
+		<< "the None direction must not write the descending keyword";
+}
+
+// ---- VisitQueryWhereClause (D367, the `where condition` filter clause)
+// ------------------------------------------------------------------------
+
+// `VisitQueryWhereClause` over `where x`: the `where` keyword, then the `Condition` operand.
+// The find-based ordering pins `kw:where < id:x`.
+TEST(CSharp_OutputVisitor, VisitQueryWhereClauseBare) {
+	V h;
+	auto cond = std::make_unique<IdentifierExpression>(std::string("x"));
+	auto node = std::make_unique<QueryWhereClause>(cond.get());
+	h.visitor->VisitQueryWhereClause(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto where = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:where");
+	ASSERT_NE(where, h.inner.calls.end()) << "the where keyword must render";
+	auto condTok = std::find(where, h.inner.calls.end(), "id:x");
+	ASSERT_NE(condTok, h.inner.calls.end()) << "the condition must render after the where keyword";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// ---- VisitQuerySelectClause (D367, the `select expr` projection clause)
+// ------------------------------------------------------------------------
+
+// `VisitQuerySelectClause` over `select x`: the `select` keyword, then the projection operand.
+// The find-based ordering pins `kw:select < id:x`.
+TEST(CSharp_OutputVisitor, VisitQuerySelectClauseBare) {
+	V h;
+	auto proj = std::make_unique<IdentifierExpression>(std::string("x"));
+	auto node = std::make_unique<QuerySelectClause>(proj.get());
+	h.visitor->VisitQuerySelectClause(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto select = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:select");
+	ASSERT_NE(select, h.inner.calls.end()) << "the select keyword must render";
+	auto projTok = std::find(select, h.inner.calls.end(), "id:x");
+	ASSERT_NE(projTok, h.inner.calls.end()) << "the projection must render after the select keyword";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// ---- VisitQueryLetClause (D367, the `let id = expr` clause)
+// ------------------------------------------------------------------------
+
+// `VisitQueryLetClause` over `let x = y`: the `let` keyword, the range-variable identifier, the
+// `=` token, then the bound expression. The find-based ordering pins `kw:let < id:x < tok:= <
+// id:y` (the two policy-gated `Space(SpaceAroundAssignment)` calls are no-ops under the default
+// policy; the decorator inserts the strictly-required spaces).
+TEST(CSharp_OutputVisitor, VisitQueryLetClauseBare) {
+	V h;
+	auto expr = std::make_unique<IdentifierExpression>(std::string("y"));
+	auto node = std::make_unique<QueryLetClause>(std::string("x"), expr.get());
+	h.visitor->VisitQueryLetClause(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto let = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:let");
+	ASSERT_NE(let, h.inner.calls.end()) << "the let keyword must render";
+	auto idTok = std::find(let, h.inner.calls.end(), "id:x");
+	ASSERT_NE(idTok, h.inner.calls.end()) << "the range-variable identifier must render after the let keyword";
+	auto assign = std::find(idTok, h.inner.calls.end(), "tok:=");
+	ASSERT_NE(assign, h.inner.calls.end()) << "the assignment token must render after the identifier";
+	auto exprTok = std::find(assign, h.inner.calls.end(), "id:y");
+	ASSERT_NE(exprTok, h.inner.calls.end()) << "the bound expression must render after the assignment";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// ---- VisitQueryFromClause (D367, the `from type? id in expr` clause)
+// ------------------------------------------------------------------------
+
+// `VisitQueryFromClause` over `from x in e` (no Type, the nullable `Type` slot absent): the
+// `from` keyword, the `IdentifierToken`, the `in` keyword, then the `Expression`. The
+// find-based ordering pins `kw:from < id:x < kw:in < id:e` and asserts NO `primtype:` (the
+// optional Type is absent).
+TEST(CSharp_OutputVisitor, VisitQueryFromClauseBare) {
+	V h;
+	auto expr = std::make_unique<IdentifierExpression>(std::string("e"));
+	auto node = std::make_unique<QueryFromClause>(nullptr, std::string("x"), expr.get());
+	h.visitor->VisitQueryFromClause(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto from = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:from");
+	ASSERT_NE(from, h.inner.calls.end()) << "the from keyword must render";
+	auto idTok = std::find(from, h.inner.calls.end(), "id:x");
+	ASSERT_NE(idTok, h.inner.calls.end()) << "the range-variable identifier must render after the from keyword";
+	auto inKw = std::find(idTok, h.inner.calls.end(), "kw:in");
+	ASSERT_NE(inKw, h.inner.calls.end()) << "the in keyword must render after the identifier";
+	auto exprTok = std::find(inKw, h.inner.calls.end(), "id:e");
+	ASSERT_NE(exprTok, h.inner.calls.end()) << "the expression must render after the in keyword";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+	ASSERT_EQ(std::find_if(h.inner.calls.begin(), h.inner.calls.end(),
+		[](const std::string& s) { return s.rfind("primtype:", 0) == 0; }), h.inner.calls.end())
+		<< "the no-type form must not render a type";
+}
+
+// `VisitQueryFromClause` over `from int x in e` (an explicit `SimpleType` Type): the `from`
+// keyword, the `Type` (a `SimpleType` renders as an `id:` identifier, NOT a `primtype:` -- the
+// `VisitSimpleType` D237 convention), the `IdentifierToken`, the `in` keyword, the `Expression`.
+// The find-based ordering pins `kw:from < id:int < id:x < kw:in < id:e`.
+TEST(CSharp_OutputVisitor, VisitQueryFromClauseWithType) {
+	V h;
+	auto type = std::make_unique<SimpleType>(std::string("int"));
+	auto expr = std::make_unique<IdentifierExpression>(std::string("e"));
+	auto node = std::make_unique<QueryFromClause>(type.get(), std::string("x"), expr.get());
+	h.visitor->VisitQueryFromClause(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto from = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:from");
+	ASSERT_NE(from, h.inner.calls.end()) << "the from keyword must render";
+	auto typeTok = std::find(from, h.inner.calls.end(), "id:int");
+	ASSERT_NE(typeTok, h.inner.calls.end()) << "the type must render after the from keyword";
+	auto idTok = std::find(typeTok, h.inner.calls.end(), "id:x");
+	ASSERT_NE(idTok, h.inner.calls.end()) << "the range-variable identifier must render after the type";
+	auto inKw = std::find(idTok, h.inner.calls.end(), "kw:in");
+	ASSERT_NE(inKw, h.inner.calls.end()) << "the in keyword must render after the identifier";
+	auto exprTok = std::find(inKw, h.inner.calls.end(), "id:e");
+	ASSERT_NE(exprTok, h.inner.calls.end()) << "the expression must render after the in keyword";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// ---- VisitQueryGroupClause (D367, the `group projection by key` clause)
+// ------------------------------------------------------------------------
+
+// `VisitQueryGroupClause` over `group x by y`: the `group` keyword, the `Projection`, the `by`
+// keyword, then the `Key`. The find-based ordering pins `kw:group < id:x < kw:by < id:y`.
+TEST(CSharp_OutputVisitor, VisitQueryGroupClauseBare) {
+	V h;
+	auto proj = std::make_unique<IdentifierExpression>(std::string("x"));
+	auto key = std::make_unique<IdentifierExpression>(std::string("y"));
+	auto node = std::make_unique<QueryGroupClause>(proj.get(), key.get());
+	h.visitor->VisitQueryGroupClause(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto group = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:group");
+	ASSERT_NE(group, h.inner.calls.end()) << "the group keyword must render";
+	auto projTok = std::find(group, h.inner.calls.end(), "id:x");
+	ASSERT_NE(projTok, h.inner.calls.end()) << "the projection must render after the group keyword";
+	auto byKw = std::find(projTok, h.inner.calls.end(), "kw:by");
+	ASSERT_NE(byKw, h.inner.calls.end()) << "the by keyword must render after the projection";
+	auto keyTok = std::find(byKw, h.inner.calls.end(), "id:y");
+	ASSERT_NE(keyTok, h.inner.calls.end()) << "the key must render after the by keyword";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// ---- VisitQueryJoinClause (D367, the `join type? id in inExpr on onExpr equals equalsExpr
+// [into intoId]` clause)
+// ------------------------------------------------------------------------
+
+// `VisitQueryJoinClause` over `join x in a on b equals c` (no Type, no group join): the `join`
+// keyword, the `JoinIdentifierToken`, the `in` keyword, the `InExpression`, the `on` keyword,
+// the `OnExpression`, the `equals` keyword, then the `EqualsExpression`. The find-based
+// ordering pins `kw:join < id:x < kw:in < id:a < kw:on < id:b < kw:equals < id:c` and asserts NO
+// `kw:into` (the group-join tail is absent).
+TEST(CSharp_OutputVisitor, VisitQueryJoinClauseBare) {
+	V h;
+	auto inExpr = std::make_unique<IdentifierExpression>(std::string("a"));
+	auto onExpr = std::make_unique<IdentifierExpression>(std::string("b"));
+	auto eqExpr = std::make_unique<IdentifierExpression>(std::string("c"));
+	auto node = std::make_unique<QueryJoinClause>(nullptr, std::string("x"),
+		inExpr.get(), onExpr.get(), eqExpr.get(), std::string());
+	h.visitor->VisitQueryJoinClause(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto join = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:join");
+	ASSERT_NE(join, h.inner.calls.end()) << "the join keyword must render";
+	auto idTok = std::find(join, h.inner.calls.end(), "id:x");
+	ASSERT_NE(idTok, h.inner.calls.end()) << "the join identifier must render after the join keyword";
+	auto inKw = std::find(idTok, h.inner.calls.end(), "kw:in");
+	ASSERT_NE(inKw, h.inner.calls.end()) << "the in keyword must render after the join identifier";
+	auto inExprTok = std::find(inKw, h.inner.calls.end(), "id:a");
+	ASSERT_NE(inExprTok, h.inner.calls.end()) << "the in-expression must render after the in keyword";
+	auto onKw = std::find(inExprTok, h.inner.calls.end(), "kw:on");
+	ASSERT_NE(onKw, h.inner.calls.end()) << "the on keyword must render after the in-expression";
+	auto onExprTok = std::find(onKw, h.inner.calls.end(), "id:b");
+	ASSERT_NE(onExprTok, h.inner.calls.end()) << "the on-expression must render after the on keyword";
+	auto eqKw = std::find(onExprTok, h.inner.calls.end(), "kw:equals");
+	ASSERT_NE(eqKw, h.inner.calls.end()) << "the equals keyword must render after the on-expression";
+	auto eqExprTok = std::find(eqKw, h.inner.calls.end(), "id:c");
+	ASSERT_NE(eqExprTok, h.inner.calls.end()) << "the equals-expression must render after the equals keyword";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+	ASSERT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:into"), h.inner.calls.end())
+		<< "the non-group-join form must not write the into keyword";
+}
+
+// `VisitQueryJoinClause` over `join x in a on b equals c into g` (a group join, the `IsGroupJoin`
+// tail present): the bare-join sequence followed by the `into` keyword and the
+// `IntoIdentifierToken`. The find-based ordering pins the bare sequence and then
+// `kw:equals < id:c < kw:into < id:g`.
+TEST(CSharp_OutputVisitor, VisitQueryJoinClauseGroupJoin) {
+	V h;
+	auto inExpr = std::make_unique<IdentifierExpression>(std::string("a"));
+	auto onExpr = std::make_unique<IdentifierExpression>(std::string("b"));
+	auto eqExpr = std::make_unique<IdentifierExpression>(std::string("c"));
+	auto node = std::make_unique<QueryJoinClause>(nullptr, std::string("x"),
+		inExpr.get(), onExpr.get(), eqExpr.get(), std::string("g"));
+	h.visitor->VisitQueryJoinClause(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto eqKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:equals");
+	ASSERT_NE(eqKw, h.inner.calls.end()) << "the equals keyword must render";
+	auto eqExprTok = std::find(eqKw, h.inner.calls.end(), "id:c");
+	ASSERT_NE(eqExprTok, h.inner.calls.end()) << "the equals-expression must render after the equals keyword";
+	auto intoKw = std::find(eqExprTok, h.inner.calls.end(), "kw:into");
+	ASSERT_NE(intoKw, h.inner.calls.end()) << "the into keyword must render after the equals-expression (the group-join tail)";
+	auto intoId = std::find(intoKw, h.inner.calls.end(), "id:g");
+	ASSERT_NE(intoId, h.inner.calls.end()) << "the into identifier must render after the into keyword";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// ---- VisitQueryOrderClause (D367, the `orderby ordering+` clause)
+// ------------------------------------------------------------------------
+
+// `VisitQueryOrderClause` over `orderby x` (one ordering, Direction=None): the `orderby`
+// keyword, a Space, then the single ordering (which recurses through `VisitQueryOrdering`).
+// The find-based ordering pins `kw:orderby < id:x`.
+TEST(CSharp_OutputVisitor, VisitQueryOrderClauseOneOrdering) {
+	V h;
+	auto expr = std::make_unique<IdentifierExpression>(std::string("x"));
+	auto ordering = std::make_unique<QueryOrdering>(expr.get(), QueryOrderingDirection::None);
+	auto node = std::make_unique<QueryOrderClause>();
+	node->Orderings().Add(ordering.get());
+	h.visitor->VisitQueryOrderClause(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto orderby = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:orderby");
+	ASSERT_NE(orderby, h.inner.calls.end()) << "the orderby keyword must render";
+	auto exprTok = std::find(orderby, h.inner.calls.end(), "id:x");
+	ASSERT_NE(exprTok, h.inner.calls.end()) << "the ordering operand must render after the orderby keyword";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitQueryOrderClause` over `orderby x, y` (two orderings): the `orderby` keyword, then the
+// two comma-separated orderings. The find-based ordering pins `kw:orderby < id:x < tok:, <
+// id:y`, exercising the `WriteCommaSeparatedList` separator.
+TEST(CSharp_OutputVisitor, VisitQueryOrderClauseTwoOrderings) {
+	V h;
+	auto expr1 = std::make_unique<IdentifierExpression>(std::string("x"));
+	auto expr2 = std::make_unique<IdentifierExpression>(std::string("y"));
+	auto ordering1 = std::make_unique<QueryOrdering>(expr1.get(), QueryOrderingDirection::None);
+	auto ordering2 = std::make_unique<QueryOrdering>(expr2.get(), QueryOrderingDirection::None);
+	auto node = std::make_unique<QueryOrderClause>();
+	node->Orderings().Add(ordering1.get());
+	node->Orderings().Add(ordering2.get());
+	h.visitor->VisitQueryOrderClause(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto orderby = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:orderby");
+	ASSERT_NE(orderby, h.inner.calls.end()) << "the orderby keyword must render";
+	auto first = std::find(orderby, h.inner.calls.end(), "id:x");
+	ASSERT_NE(first, h.inner.calls.end()) << "the first ordering must render after the orderby keyword";
+	auto comma = std::find(first, h.inner.calls.end(), "tok:,");
+	ASSERT_NE(comma, h.inner.calls.end()) << "a comma must separate the two orderings";
+	auto second = std::find(comma, h.inner.calls.end(), "id:y");
+	ASSERT_NE(second, h.inner.calls.end()) << "the second ordering must render after the comma";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// ---- VisitQueryExpression (D367, the top-level `query_expression ::= query_clause+` --
+// C# grammar 12.23.1)
+// ------------------------------------------------------------------------
+
+// `VisitQueryExpression` over `from x in e select y` (a top-level, root/unparented query: a
+// `QueryFromClause` then a `QuerySelectClause`): the top-level gate (`Slot()` is null, so
+// `!= &Slots::PrecedingQuery` is true) emits `indent` before the clauses and `unindent` after,
+// and the two clauses render in order. The find-based ordering pins `indent < kw:from <
+// id:e < kw:select < id:y < unindent` (the from-clause's `in`/identifier and the select-clause's
+// projection sit between the keywords), exercising the polymorphic `Clauses` dispatch and the
+// top-level indent gate.
+TEST(CSharp_OutputVisitor, VisitQueryExpressionFromSelect) {
+	V h;
+	auto fromExpr = std::make_unique<IdentifierExpression>(std::string("e"));
+	auto fromClause = std::make_unique<QueryFromClause>(nullptr, std::string("x"), fromExpr.get());
+	auto selExpr = std::make_unique<IdentifierExpression>(std::string("y"));
+	auto selectClause = std::make_unique<QuerySelectClause>(selExpr.get());
+	auto node = std::make_unique<QueryExpression>();
+	node->Clauses().Add(fromClause.get());
+	node->Clauses().Add(selectClause.get());
+	h.visitor->VisitQueryExpression(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto indent = std::find(h.inner.calls.begin(), h.inner.calls.end(), "indent");
+	ASSERT_NE(indent, h.inner.calls.end()) << "a top-level query must indent before its clauses";
+	auto from = std::find(indent, h.inner.calls.end(), "kw:from");
+	ASSERT_NE(from, h.inner.calls.end()) << "the from keyword must render after the indent";
+	auto inExprTok = std::find(from, h.inner.calls.end(), "id:e");
+	ASSERT_NE(inExprTok, h.inner.calls.end()) << "the from-clause expression must render after the from keyword";
+	auto select = std::find(inExprTok, h.inner.calls.end(), "kw:select");
+	ASSERT_NE(select, h.inner.calls.end()) << "the select keyword must render after the from clause";
+	auto projTok = std::find(select, h.inner.calls.end(), "id:y");
+	ASSERT_NE(projTok, h.inner.calls.end()) << "the select projection must render after the select keyword";
+	auto unindent = std::find(projTok, h.inner.calls.end(), "unindent");
+	ASSERT_NE(unindent, h.inner.calls.end()) << "a top-level query must unindent after its clauses";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitQueryExpression` over `from x in e where p select y` (three clauses): the `where` clause
+// sits BETWEEN the `from` and `select` clauses, separated from the preceding `from` clause by a
+// `newline` (the non-continuation clause separator), and the `select` clause follows after its
+// own `newline`. The find-based ordering pins `kw:from < newline < kw:where < newline < kw:select`,
+// exercising the inter-clause `NewLine` separator (the non-`QueryContinuationClause` branch).
+TEST(CSharp_OutputVisitor, VisitQueryExpressionMultipleClausesWithNewLines) {
+	V h;
+	auto fromExpr = std::make_unique<IdentifierExpression>(std::string("e"));
+	auto fromClause = std::make_unique<QueryFromClause>(nullptr, std::string("x"), fromExpr.get());
+	auto whereCond = std::make_unique<IdentifierExpression>(std::string("p"));
+	auto whereClause = std::make_unique<QueryWhereClause>(whereCond.get());
+	auto selExpr = std::make_unique<IdentifierExpression>(std::string("y"));
+	auto selectClause = std::make_unique<QuerySelectClause>(selExpr.get());
+	auto node = std::make_unique<QueryExpression>();
+	node->Clauses().Add(fromClause.get());
+	node->Clauses().Add(whereClause.get());
+	node->Clauses().Add(selectClause.get());
+	h.visitor->VisitQueryExpression(node.get());
+
+	auto from = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:from");
+	ASSERT_NE(from, h.inner.calls.end()) << "the from keyword must render";
+	auto nl1 = std::find(from, h.inner.calls.end(), "newline");
+	ASSERT_NE(nl1, h.inner.calls.end()) << "a newline must separate the from clause from the where clause";
+	auto where = std::find(nl1, h.inner.calls.end(), "kw:where");
+	ASSERT_NE(where, h.inner.calls.end()) << "the where keyword must render after the first newline";
+	auto nl2 = std::find(where, h.inner.calls.end(), "newline");
+	ASSERT_NE(nl2, h.inner.calls.end()) << "a newline must separate the where clause from the select clause";
+	auto select = std::find(nl2, h.inner.calls.end(), "kw:select");
+	ASSERT_NE(select, h.inner.calls.end()) << "the select keyword must render after the second newline";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// ---- VisitQueryContinuationClause (D367, the `into id` continuation clause)
+// ------------------------------------------------------------------------
+
+// `VisitQueryContinuationClause` over `from x in e select y into z` (a continuation wrapping a
+// `QueryExpression`): the preceding query renders FIRST (recursing through `VisitQueryExpression`
+// -- and as the continuation's `PrecedingQuery` slot child its `Slot()->Kind() == &
+// Slots::PrecedingQuery`, so it does NOT indent/unindent), then a Space, the `into` keyword, a
+// Space, and the `IdentifierToken`. The find-based ordering pins the inner query's `kw:select <
+// id:y < kw:into < id:z` and asserts the inner query wrote NO `indent` (the continuation-nested
+// query is NOT top-level).
+TEST(CSharp_OutputVisitor, VisitQueryContinuationClauseBare) {
+	V h;
+	auto fromExpr = std::make_unique<IdentifierExpression>(std::string("e"));
+	auto fromClause = std::make_unique<QueryFromClause>(nullptr, std::string("x"), fromExpr.get());
+	auto selExpr = std::make_unique<IdentifierExpression>(std::string("y"));
+	auto selectClause = std::make_unique<QuerySelectClause>(selExpr.get());
+	auto inner = std::make_unique<QueryExpression>();
+	inner->Clauses().Add(fromClause.get());
+	inner->Clauses().Add(selectClause.get());
+	auto node = std::make_unique<QueryContinuationClause>(inner.get(), std::string("z"));
+	h.visitor->VisitQueryContinuationClause(node.get());
+
+	EXPECT_EQ(h.inner.calls.front(), "start");
+	auto select = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:select");
+	ASSERT_NE(select, h.inner.calls.end()) << "the inner query's select keyword must render";
+	auto projTok = std::find(select, h.inner.calls.end(), "id:y");
+	ASSERT_NE(projTok, h.inner.calls.end()) << "the inner query's select projection must render";
+	auto into = std::find(projTok, h.inner.calls.end(), "kw:into");
+	ASSERT_NE(into, h.inner.calls.end()) << "the into keyword must render after the inner query";
+	auto idTok = std::find(into, h.inner.calls.end(), "id:z");
+	ASSERT_NE(idTok, h.inner.calls.end()) << "the continuation identifier must render after the into keyword";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+	ASSERT_EQ(std::find(h.inner.calls.begin(), h.inner.calls.end(), "indent"), h.inner.calls.end())
+		<< "the continuation-nested (PrecedingQuery) query must NOT indent (it is not top-level)";
 }
