@@ -20,6 +20,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/TypeUtils_Test.cpp
     Decompiler/TypeSystem/ISymbol_Test.cpp
     Decompiler/TypeSystem/IVariable_Test.cpp
+    Decompiler/TypeSystem/INamedElement_Test.cpp
     Decompiler/TypeSystem/Accessibility_Test.cpp
     Decompiler/Output/IAmbience_Test.cpp
     Decompiler/IL/ILAst_Test.cpp
