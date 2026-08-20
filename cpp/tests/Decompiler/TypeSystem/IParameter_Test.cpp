@@ -39,6 +39,7 @@
 // dropped when the real headers land.
 
 #include "Decompiler/TypeSystem/IParameter.hpp"
+#include "Decompiler/TypeSystem/IParameterizedMember.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
@@ -47,6 +48,7 @@
 #include <gtest/gtest.h>
 
 #include <any>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <type_traits>
@@ -58,29 +60,140 @@ namespace ILSpy::Decompiler::TypeSystem {
 // `IAttribute` is now the real port (cpp/Decompiler/TypeSystem/IAttribute.hpp, D386);
 // it is included above rather than forward-declared as a stand-in. `IMethod` (its
 // `Constructor` slot return type) remains forward-declared inside `IAttribute.hpp`.
+// `IParameterizedMember` is now the real port (cpp/Decompiler/TypeSystem/IParameterizedMember.hpp,
+// D388); it is included above rather than forward-declared as a stand-in. Its base `IMember`
+// (which forward-declares `TypeParameterSubstitution` / `TypeVisitor`) is pulled in
+// transitively, so the reconciled `TestParameterizedMember` stub below derives from the real
+// interface and overrides every pure-virtual (the documented stand-in-reconciliation step,
+// the D386 `IAttribute`-stand-in-reconciliation precedent).
 
-// Minimal test stand-in for `IParameterizedMember` (the method/property base). Only a
-// virtual destructor; the real `IParameterizedMember` pulls `IMember` (which needs
-// `TypeParameterSubstitution` / `TypeVisitor`) and `IParameter`. This is the first test
-// file to define it; future test files needing it complete must define the IDENTICAL
-// stand-in until the real `IParameterizedMember.hpp` lands.
-class IParameterizedMember {
+// Minimal test stand-in for `ICompilation` (the parent compilation interface). IDENTICAL to
+// the stand-in in `ICompilationProvider_Test.cpp` / `IEntity_Test.cpp` / `ITypeParameter_Test.cpp`
+// / `IMember_Test.cpp` / `IParameterizedMember_Test.cpp` (a virtual destructor only); the
+// identical class definitions across translation units satisfy the One Definition Rule.
+// Replaced by the real `ICompilation.hpp` when that lands. Required here because the
+// reconciled `TestParameterizedMember` (deriving from the real `IParameterizedMember` ->
+// `IMember` -> `IEntity` -> `ICompilationProvider`) must override `Compilation()` returning
+// `const ICompilation&`, which needs a complete `ICompilation` to bind to.
+class ICompilation {
 public:
-    virtual ~IParameterizedMember() = default;
+    virtual ~ICompilation() = default;
 };
 
 } // namespace ILSpy::Decompiler::TypeSystem
 
 namespace {
 
-// A minimal concrete `IParameterizedMember` for testing (identity-testable via pointer
-// compare).
-class TestParameterizedMember : public ILSpy::Decompiler::TypeSystem::IParameterizedMember {
+// A minimal concrete `ICompilation` stand-in so the reconciled `TestParameterizedMember`
+// can hold and return a compilation (the D379 test stand-in pattern).
+class TestCompilation : public ILSpy::Decompiler::TypeSystem::ICompilation {
 public:
-    explicit TestParameterizedMember(int id) : id_(id) {}
+    explicit TestCompilation(int id) : id_(id) {}
     int id() const { return id_; }
 private:
     int id_;
+};
+
+// A concrete `IParameterizedMember` for testing (identity-testable via pointer compare).
+// Reconciled to derive from the REAL `IParameterizedMember` (D388) now that the header has
+// landed: it overrides every `IMember` / `IEntity` / `ICompilationProvider` / `INamedElement`
+// / `ISymbol` pure-virtual with simple defaults, plus the `IParameterizedMember`-own
+// `Parameters` (empty). The test-specific `id()` accessor and `id_` member are kept so the
+// existing `Owner` identity test (`static_cast<const TestParameterizedMember*>(...)->id()`)
+// continues to work. The single `Name()` override is the final overrider for the
+// `ISymbol::Name()` / `INamedElement::Name()` / `IEntity::Name()` diamond (disambiguated by
+// `IEntity`'s redeclaration). The three long-pole-dep members (`Substitution` /
+// `Specialize` / `Equals`) use the `nullptr` / `this` / identity stand-ins (the documented
+// "forward-declared-IMember, deferring the long-pole deps" shell strategy).
+class TestParameterizedMember : public ILSpy::Decompiler::TypeSystem::IParameterizedMember {
+public:
+    explicit TestParameterizedMember(int id)
+        : id_(id),
+          returnType_(std::make_shared<ILSpy::Decompiler::TypeSystem::KnownType>(
+              ILSpy::Decompiler::TypeSystem::KnownTypeCode::Void)) {}
+
+    int id() const { return id_; }
+
+    // --- ISymbol ---
+    ILSpy::Decompiler::TypeSystem::SymbolKind SymbolKind() const override
+    {
+        return ILSpy::Decompiler::TypeSystem::SymbolKind::Method;
+    }
+    std::string Name() const override { return "method"; }
+
+    // --- INamedElement ---
+    std::string FullName() const override { return "method"; }
+    std::string ReflectionName() const override { return "method"; }
+    std::string Namespace() const override { return {}; }
+
+    // --- ICompilationProvider ---
+    const ILSpy::Decompiler::TypeSystem::ICompilation& Compilation() const override
+    {
+        return compilation_;
+    }
+
+    // --- IEntity ---
+    std::uint32_t MetadataToken() const override { return 0u; }
+    const ILSpy::Decompiler::TypeSystem::ITypeDefinition* DeclaringTypeDefinition() const override
+    {
+        return nullptr;
+    }
+    ILSpy::Decompiler::TypeSystem::ITypePtr DeclaringType() const override { return nullptr; }
+    const ILSpy::Decompiler::TypeSystem::IModule* ParentModule() const override { return nullptr; }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IAttribute*> GetAttributes() const override
+    {
+        return {};
+    }
+    bool HasAttribute(ILSpy::Decompiler::TypeSystem::KnownAttribute) const override { return false; }
+    const ILSpy::Decompiler::TypeSystem::IAttribute* GetAttribute(
+        ILSpy::Decompiler::TypeSystem::KnownAttribute) const override
+    {
+        return nullptr;
+    }
+    ILSpy::Decompiler::TypeSystem::Accessibility Accessibility() const override
+    {
+        return ILSpy::Decompiler::TypeSystem::Accessibility::Public;
+    }
+    bool IsStatic() const override { return false; }
+    bool IsAbstract() const override { return false; }
+    bool IsSealed() const override { return false; }
+
+    // --- IMember ---
+    const ILSpy::Decompiler::TypeSystem::IMember* MemberDefinition() const override { return this; }
+    const ILSpy::Decompiler::TypeSystem::IType& ReturnType() const override { return *returnType_; }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IMember*> ExplicitlyImplementedInterfaceMembers() const override
+    {
+        return {};
+    }
+    bool IsExplicitInterfaceImplementation() const override { return false; }
+    bool IsVirtual() const override { return false; }
+    bool IsOverride() const override { return false; }
+    bool IsOverridable() const override { return false; }
+    const ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution* Substitution() const override
+    {
+        return nullptr;
+    }
+    const ILSpy::Decompiler::TypeSystem::IMember* Specialize(
+        const ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution*) const override
+    {
+        return this;
+    }
+    bool Equals(const ILSpy::Decompiler::TypeSystem::IMember* obj,
+                const ILSpy::Decompiler::TypeSystem::TypeVisitor*) const override
+    {
+        return obj == this;
+    }
+
+    // --- IParameterizedMember ---
+    std::vector<const ILSpy::Decompiler::TypeSystem::IParameter*> Parameters() const override
+    {
+        return {};
+    }
+
+private:
+    int id_;
+    TestCompilation compilation_{0};
+    ILSpy::Decompiler::TypeSystem::ITypePtr returnType_;
 };
 
 // A minimal concrete `IAttribute` for testing (identity-testable via pointer compare).
