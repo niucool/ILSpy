@@ -441,8 +441,9 @@ public:
     // `::ILSpy::...::OperatorType` (a qualified name is looked up in the named namespace, NOT
     // class scope, so it ignores the `OperatorType()` member-function shadowing; the leading space
     // after `<` dodges the `<:` digraph edge case). DEFERRED: `GetOperatorType` (the reverse
-    // lookup by method name), `IsChecked` (the `checked`-operator predicate), and `GetToken` (the
-    // operator token like `"+"`) -- consumed only by the unported output/resolver stage.
+    // lookup by method name) -- consumed only by the unported resolver stage. `IsChecked` (the
+    // `checked`-operator predicate) and `GetToken` (the operator token like `"+"`) are now ported
+    // (consumed by `CSharpOutputVisitor.VisitOperatorDeclaration`).
     static std::optional<std::string> GetName(std::optional< ::ILSpy::Decompiler::CSharp::Syntax::OperatorType > type) {
         if (!type.has_value())
             return std::nullopt;
@@ -491,6 +492,85 @@ public:
         if (idx < 0 || idx >= kCount)
             return std::nullopt;
         return std::string(kMethodNames[idx]);
+    }
+
+    // ---- The `IsChecked` static helper (the C# 11 `checked`-operator predicate) -------------
+    // The C# `public static bool IsChecked(OperatorType type)` -- true for the eight
+    // `checked`-flavoured operator kinds (the `OperatorType.Checked*` variants). Consumed by
+    // `CSharpOutputVisitor.VisitOperatorDeclaration`, which emits the `checked` keyword before the
+    // operator token when this returns true (the `operator checked +(..)` / `checked explicit
+    // operator T(..)` C# 11 syntax). The parameter type is the fully-qualified
+    // `::ILSpy::...::OperatorType` (a qualified name is looked up in the named namespace, NOT class
+    // scope, so it ignores the `OperatorType()` member-function shadowing; the leading space after
+    // `<` dodges the `<:` digraph edge case -- the `GetName` precedent). The C# `switch` expression
+    // ports to a chain of `==` comparisons against the eight checked variants.
+    static bool IsChecked(::ILSpy::Decompiler::CSharp::Syntax::OperatorType type) {
+        return type == ::ILSpy::Decompiler::CSharp::Syntax::OperatorType::CheckedAddition
+            || type == ::ILSpy::Decompiler::CSharp::Syntax::OperatorType::CheckedSubtraction
+            || type == ::ILSpy::Decompiler::CSharp::Syntax::OperatorType::CheckedMultiply
+            || type == ::ILSpy::Decompiler::CSharp::Syntax::OperatorType::CheckedDivision
+            || type == ::ILSpy::Decompiler::CSharp::Syntax::OperatorType::CheckedUnaryNegation
+            || type == ::ILSpy::Decompiler::CSharp::Syntax::OperatorType::CheckedIncrement
+            || type == ::ILSpy::Decompiler::CSharp::Syntax::OperatorType::CheckedDecrement
+            || type == ::ILSpy::Decompiler::CSharp::Syntax::OperatorType::CheckedExplicit;
+    }
+
+    // ---- The `GetToken` static helper (the operator-token lookup) ---------------------------
+    // The C# `public static string GetToken(OperatorType type)` -- the operator's source token
+    // (the `+` of `operator +`, the `>>` of `operator >>`, the `implicit`/`explicit` of the
+    // conversion operators), read from the FIRST column of the hand-written `names` table. The
+    // `GetName` helper above reads the SECOND column (the method name); `GetToken` reads the FIRST.
+    // Consumed by `CSharpOutputVisitor.VisitOperatorDeclaration`, which writes the token for a
+    // non-conversion operator (the conversion operators write the return type instead). The
+    // parameter type is the fully-qualified `::ILSpy::...::OperatorType` (the `GetName`/`IsChecked`
+    // shadowing-dodging precedent). The port replaces the C# table with a `constexpr` array of the
+    // token column indexed by the enum value (the same observable behavior, no static-init-order
+    // concern -- the `GetName` precedent). 35 entries, parallel to `kMethodNames`.
+    static std::string GetToken(::ILSpy::Decompiler::CSharp::Syntax::OperatorType type) {
+        // The token column of the C# `names` table, indexed by the `OperatorType` value.
+        // 35 entries (`LogicalNot`=0 .. `CheckedExplicit`=34), parallel to `kMethodNames`.
+        static constexpr const char* const kTokens[] = {
+            "!",            // LogicalNot
+            "~",            // OnesComplement
+            "++",           // Increment
+            "++",           // CheckedIncrement
+            "--",           // Decrement
+            "--",           // CheckedDecrement
+            "true",         // True
+            "false",        // False
+            "+",            // UnaryPlus
+            "-",            // UnaryNegation
+            "-",            // CheckedUnaryNegation
+            "+",            // Addition
+            "+",            // CheckedAddition
+            "-",            // Subtraction
+            "-",            // CheckedSubtraction
+            "*",            // Multiply
+            "*",            // CheckedMultiply
+            "/",            // Division
+            "/",            // CheckedDivision
+            "%",            // Modulus
+            "&",            // BitwiseAnd
+            "|",            // BitwiseOr
+            "^",            // ExclusiveOr
+            "<<",           // LeftShift
+            ">>",           // RightShift
+            ">>>",          // UnsignedRightShift
+            "==",           // Equality
+            "!=",           // Inequality
+            ">",            // GreaterThan
+            "<",            // LessThan
+            ">=",           // GreaterThanOrEqual
+            "<=",           // LessThanOrEqual
+            "implicit",     // Implicit
+            "explicit",     // Explicit
+            "explicit"      // CheckedExplicit
+        };
+        constexpr int kCount = static_cast<int>(sizeof(kTokens) / sizeof(kTokens[0]));
+        int idx = static_cast<int>(type);
+        if (idx < 0 || idx >= kCount)
+            return std::string();
+        return std::string(kTokens[idx]);
     }
 
     // ---- The per-node slot statics (pointing at the shared `Slots` kinds) ------------------

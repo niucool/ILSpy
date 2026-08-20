@@ -107,7 +107,9 @@
 #include "Decompiler/CSharp/Syntax/CustomEventDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/EventDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/IndexerDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/MethodDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/OperatorDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/BreakStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ContinueStatement.hpp"
@@ -206,7 +208,10 @@ using ILSpy::Decompiler::CSharp::Syntax::PropertyDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::CustomEventDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::EventDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::IndexerDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::MethodDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::OperatorDeclaration;
+using ILSpy::Decompiler::CSharp::Syntax::OperatorType;
+using ILSpy::Decompiler::CSharp::Syntax::TypeDeclaration;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentExpression;
 using ILSpy::Decompiler::CSharp::Syntax::AssignmentOperatorType;
 using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorExpression;
@@ -606,15 +611,17 @@ TEST(CSharp_OutputVisitor, WriteCommaSeparatedListInParenthesisEmpty) {
 // ---- The 130 Visit stubs throw ---------------------------------------------
 
 // A representative still-unported `Visit` method throws `std::logic_error` (the throwing-stub
-// design); `VisitOperatorDeclaration` remains a stub (the `VariableDeclarationStatement`, the
+// design); `VisitTypeDeclaration` remains a stub (the `VariableDeclarationStatement`, the
 // try/catch family, `ConstructorInitializer`, `ConstructorDeclaration`, `DestructorDeclaration`,
 // `EnumMemberDeclaration`, `ExtensionDeclaration`, `EventDeclaration`, `CustomEventDeclaration`,
-// `FieldDeclaration`, `FixedFieldDeclaration` and now `IndexerDeclaration` `Visit` methods above are
-// implemented, the TypeMember hierarchy below `OperatorDeclaration` is still a stub).
+// `FieldDeclaration`, `FixedFieldDeclaration`, `IndexerDeclaration`, `MethodDeclaration`,
+// `OperatorDeclaration` and `PropertyDeclaration` `Visit` methods above are implemented -- the
+// full EntityDeclaration family is done; the GeneralScope/TypeDeclaration members below are
+// still stubs).
 TEST(CSharp_OutputVisitor, VisitStubThrows) {
 	V h;
-	auto decl = std::make_unique<OperatorDeclaration>();
-	EXPECT_THROW(h.visitor->VisitOperatorDeclaration(decl.get()), std::logic_error);
+	auto decl = std::make_unique<TypeDeclaration>();
+	EXPECT_THROW(h.visitor->VisitTypeDeclaration(decl.get()), std::logic_error);
 }
 
 // ---- The implemented leaf Visit methods ------------------------------------
@@ -4455,5 +4462,351 @@ TEST(CSharp_OutputVisitor, VisitIndexerDeclarationExpressionBody) {
 	ASSERT_NE(bodyVal, h.inner.calls.end()) << "the expression body must render primval after tok:=>";
 	auto semi = std::find(bodyVal, h.inner.calls.end(), "tok:;");
 	ASSERT_NE(semi, h.inner.calls.end()) << "the expression-bodied indexer must close with tok:;";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitMethodDeclaration` over `void Foo() {}` -- the bare method: a `void` ReturnType, a `Foo`
+// NameToken, an empty parameter list, and an empty Body block. Renders: StartNode + WriteAttributes
+// (no-op) + WriteModifiers (no-op) + ReturnType->AcceptVisitor (PrimitiveType "void") + Space() +
+// WritePrivateImplementationType(nullptr) (no-op) + WriteIdentifier("Foo") + WriteTypeParameters
+// (empty, no-op) + Space(SpaceBeforeMethodDeclarationParentheses=false, no-op) +
+// WriteCommaSeparatedListInParenthesis (empty: tok:( / tok:)) + the empty Constraints loop +
+// WriteMethodBody(Body) (the block braces + a trailing newline) + EndNode. The ReturnType is
+// `void` and the param-less `Foo()` shape, so the find-based ordering pins each unambiguously.
+TEST(CSharp_OutputVisitor, VisitMethodDeclarationBare) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("void"));
+	auto body = std::make_unique<BlockStatement>();
+	auto node = std::make_unique<MethodDeclaration>();
+	node->ReturnType(retType.get());
+	node->NameToken(Identifier::Create("Foo"));
+	node->Body(body.get());
+	h.visitor->VisitMethodDeclaration(node.get());
+
+	// Ordering of the key tokens: ReturnType < NameToken < ( < ) < { < } < end.
+	auto retTypeTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "primtype:void");
+	ASSERT_NE(retTypeTok, h.inner.calls.end()) << "the ReturnType must render primtype:void";
+	auto nameTok = std::find(retTypeTok, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end()) << "the NameToken must render after the ReturnType";
+	auto lpar = std::find(nameTok, h.inner.calls.end(), "tok:(");
+	ASSERT_NE(lpar, h.inner.calls.end()) << "the parameter list must open with tok:( after the name";
+	auto rpar = std::find(lpar, h.inner.calls.end(), "tok:)");
+	ASSERT_NE(rpar, h.inner.calls.end()) << "the parameter list must close with tok:)";
+	auto lbrace = std::find(rpar, h.inner.calls.end(), "tok:{");
+	ASSERT_NE(lbrace, h.inner.calls.end()) << "the body must open with tok:{ after the close paren";
+	auto rbrace = std::find(lbrace, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(rbrace, h.inner.calls.end()) << "the body must close with tok:} after tok:{";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitMethodDeclaration` over `void Foo(int x) {}` -- one parameter recurses through
+// VisitParameterDeclaration between the parens. The parameter type (`int`) and name (`x`) are
+// distinct from the `void` ReturnType so the find-based ordering pins each unambiguously.
+TEST(CSharp_OutputVisitor, VisitMethodDeclarationOneParam) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("void"));
+	auto paramType = std::make_unique<PrimitiveType>(std::string("int"));
+	auto param = std::make_unique<ParameterDeclaration>();
+	param->Type(paramType.get());
+	param->NameToken(Identifier::Create("x"));
+	auto body = std::make_unique<BlockStatement>();
+	auto node = std::make_unique<MethodDeclaration>();
+	node->ReturnType(retType.get());
+	node->NameToken(Identifier::Create("Foo"));
+	node->Parameters().Add(param.get());
+	node->Body(body.get());
+	h.visitor->VisitMethodDeclaration(node.get());
+
+	// Ordering: ReturnType < NameToken < ( < param type < param name < ) < { < } < end.
+	auto retTypeTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "primtype:void");
+	ASSERT_NE(retTypeTok, h.inner.calls.end());
+	auto nameTok = std::find(retTypeTok, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end());
+	auto lpar = std::find(nameTok, h.inner.calls.end(), "tok:(");
+	ASSERT_NE(lpar, h.inner.calls.end());
+	auto paramTypeTok = std::find(lpar, h.inner.calls.end(), "primtype:int");
+	ASSERT_NE(paramTypeTok, h.inner.calls.end()) << "the parameter type must render after tok:(";
+	auto paramName = std::find(paramTypeTok, h.inner.calls.end(), "id:x");
+	ASSERT_NE(paramName, h.inner.calls.end()) << "the parameter name must render after its type";
+	auto rpar = std::find(paramName, h.inner.calls.end(), "tok:)");
+	ASSERT_NE(rpar, h.inner.calls.end()) << "tok:) must render after the parameter name";
+	auto lbrace = std::find(rpar, h.inner.calls.end(), "tok:{");
+	ASSERT_NE(lbrace, h.inner.calls.end());
+	auto rbrace = std::find(lbrace, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(rbrace, h.inner.calls.end());
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitMethodDeclaration` over `void Foo();` -- a bodyless method (an abstract/interface/extern
+// method declaration). WriteMethodBody(nullptr) writes a Semicolon (tok:;/newline), so the
+// signature closes with `;` instead of a block.
+TEST(CSharp_OutputVisitor, VisitMethodDeclarationNoBody) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("void"));
+	auto node = std::make_unique<MethodDeclaration>();
+	node->ReturnType(retType.get());
+	node->NameToken(Identifier::Create("Foo"));
+	h.visitor->VisitMethodDeclaration(node.get());
+
+	// Ordering: ReturnType < NameToken < ( < ) < ; < end.
+	auto retTypeTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "primtype:void");
+	ASSERT_NE(retTypeTok, h.inner.calls.end());
+	auto nameTok = std::find(retTypeTok, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end());
+	auto lpar = std::find(nameTok, h.inner.calls.end(), "tok:(");
+	ASSERT_NE(lpar, h.inner.calls.end());
+	auto rpar = std::find(lpar, h.inner.calls.end(), "tok:)");
+	ASSERT_NE(rpar, h.inner.calls.end());
+	auto semi = std::find(rpar, h.inner.calls.end(), "tok:;");
+	ASSERT_NE(semi, h.inner.calls.end()) << "a bodyless method must close with tok:;";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitOperatorDeclaration` over `long operator +(string a, int b) {}` -- a binary operator
+// (OperatorType::Addition): the non-conversion shape writes the ReturnType first, then
+// `operator +` (the operator keyword + GetToken's `+`), then the parameter list, then the body.
+// The `long` ReturnType and `string`/`int` param types are all distinct so the find-based ordering
+// pins each unambiguously, and crucially verifies the ReturnType renders BEFORE `operator` (the
+// non-conversion shape) -- the discriminator vs the conversion operators below.
+TEST(CSharp_OutputVisitor, VisitOperatorDeclarationAddition) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("long"));
+	auto paramTypeA = std::make_unique<PrimitiveType>(std::string("string"));
+	auto paramA = std::make_unique<ParameterDeclaration>();
+	paramA->Type(paramTypeA.get());
+	paramA->NameToken(Identifier::Create("a"));
+	auto paramTypeB = std::make_unique<PrimitiveType>(std::string("int"));
+	auto paramB = std::make_unique<ParameterDeclaration>();
+	paramB->Type(paramTypeB.get());
+	paramB->NameToken(Identifier::Create("b"));
+	auto body = std::make_unique<BlockStatement>();
+	auto node = std::make_unique<OperatorDeclaration>();
+	node->ReturnType(retType.get());
+	node->OperatorType(OperatorType::Addition);
+	node->Parameters().Add(paramA.get());
+	node->Parameters().Add(paramB.get());
+	node->Body(body.get());
+	h.visitor->VisitOperatorDeclaration(node.get());
+
+	// Ordering: ReturnType < kw:operator < tok:+ < ( < param a type < param a name < ,
+	// < param b type < param b name < ) < { < } < end.
+	auto retTypeTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "primtype:long");
+	ASSERT_NE(retTypeTok, h.inner.calls.end()) << "the ReturnType must render primtype:long";
+	auto opKw = std::find(retTypeTok, h.inner.calls.end(), "kw:operator");
+	ASSERT_NE(opKw, h.inner.calls.end()) << "kw:operator must render AFTER the ReturnType (non-conversion shape)";
+	auto plusTok = std::find(opKw, h.inner.calls.end(), "tok:+");
+	ASSERT_NE(plusTok, h.inner.calls.end()) << "the operator token tok:+ must render after kw:operator";
+	auto lpar = std::find(plusTok, h.inner.calls.end(), "tok:(");
+	ASSERT_NE(lpar, h.inner.calls.end());
+	auto paramAType = std::find(lpar, h.inner.calls.end(), "primtype:string");
+	ASSERT_NE(paramAType, h.inner.calls.end());
+	auto paramAName = std::find(paramAType, h.inner.calls.end(), "id:a");
+	ASSERT_NE(paramAName, h.inner.calls.end());
+	auto comma = std::find(paramAName, h.inner.calls.end(), "tok:,");
+	ASSERT_NE(comma, h.inner.calls.end()) << "the comma must render between the two parameters";
+	auto paramBType = std::find(comma, h.inner.calls.end(), "primtype:int");
+	ASSERT_NE(paramBType, h.inner.calls.end());
+	auto paramBName = std::find(paramBType, h.inner.calls.end(), "id:b");
+	ASSERT_NE(paramBName, h.inner.calls.end());
+	auto rpar = std::find(paramBName, h.inner.calls.end(), "tok:)");
+	ASSERT_NE(rpar, h.inner.calls.end());
+	auto lbrace = std::find(rpar, h.inner.calls.end(), "tok:{");
+	ASSERT_NE(lbrace, h.inner.calls.end());
+	auto rbrace = std::find(lbrace, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(rbrace, h.inner.calls.end());
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitOperatorDeclaration` over `implicit operator int(string value) {}` -- a conversion
+// operator (OperatorType::Implicit): the conversion shape writes the `implicit` keyword (NOT the
+// ReturnType) before `operator`, then the ReturnType AFTER `operator` (the conversion target type).
+// IsChecked(Implicit) is false, so no `checked` keyword. The `int` ReturnType and `string` param
+// type are distinct so the find-based ordering pins the ReturnType-after-operator shape.
+TEST(CSharp_OutputVisitor, VisitOperatorDeclarationImplicit) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("int"));
+	auto paramType = std::make_unique<PrimitiveType>(std::string("string"));
+	auto param = std::make_unique<ParameterDeclaration>();
+	param->Type(paramType.get());
+	param->NameToken(Identifier::Create("value"));
+	auto body = std::make_unique<BlockStatement>();
+	auto node = std::make_unique<OperatorDeclaration>();
+	node->ReturnType(retType.get());
+	node->OperatorType(OperatorType::Implicit);
+	node->Parameters().Add(param.get());
+	node->Body(body.get());
+	h.visitor->VisitOperatorDeclaration(node.get());
+
+	// Ordering: kw:implicit < kw:operator < ReturnType < ( < param type < param name < ) < { < } < end.
+	// The `kw:implicit` precedes `kw:operator`, and the ReturnType renders AFTER `kw:operator`
+	// (the conversion-operator shape, the discriminator vs the binary/unary shape above).
+	auto implicitKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:implicit");
+	ASSERT_NE(implicitKw, h.inner.calls.end()) << "kw:implicit must render for an implicit conversion";
+	auto opKw = std::find(implicitKw, h.inner.calls.end(), "kw:operator");
+	ASSERT_NE(opKw, h.inner.calls.end()) << "kw:operator must render after kw:implicit";
+	auto retTypeTok = std::find(opKw, h.inner.calls.end(), "primtype:int");
+	ASSERT_NE(retTypeTok, h.inner.calls.end()) << "the ReturnType must render AFTER kw:operator (conversion shape)";
+	auto lpar = std::find(retTypeTok, h.inner.calls.end(), "tok:(");
+	ASSERT_NE(lpar, h.inner.calls.end());
+	auto paramTypeTok = std::find(lpar, h.inner.calls.end(), "primtype:string");
+	ASSERT_NE(paramTypeTok, h.inner.calls.end());
+	auto paramName = std::find(paramTypeTok, h.inner.calls.end(), "id:value");
+	ASSERT_NE(paramName, h.inner.calls.end());
+	auto rpar = std::find(paramName, h.inner.calls.end(), "tok:)");
+	ASSERT_NE(rpar, h.inner.calls.end());
+	auto lbrace = std::find(rpar, h.inner.calls.end(), "tok:{");
+	ASSERT_NE(lbrace, h.inner.calls.end());
+	auto rbrace = std::find(lbrace, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(rbrace, h.inner.calls.end());
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitOperatorDeclaration` over `checked explicit operator int(string value) {}` -- a checked
+// conversion operator (OperatorType::CheckedExplicit): the `explicit` keyword before `operator`,
+// then the `checked` keyword (IsChecked(CheckedExplicit) is true), then the ReturnType (the
+// conversion target), then the parameter list, then the body. Pins the three-keyword sequence
+// `kw:explicit < kw:operator < kw:checked` and the ReturnType-after-`checked` shape.
+TEST(CSharp_OutputVisitor, VisitOperatorDeclarationCheckedExplicit) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("int"));
+	auto paramType = std::make_unique<PrimitiveType>(std::string("string"));
+	auto param = std::make_unique<ParameterDeclaration>();
+	param->Type(paramType.get());
+	param->NameToken(Identifier::Create("value"));
+	auto body = std::make_unique<BlockStatement>();
+	auto node = std::make_unique<OperatorDeclaration>();
+	node->ReturnType(retType.get());
+	node->OperatorType(OperatorType::CheckedExplicit);
+	node->Parameters().Add(param.get());
+	node->Body(body.get());
+	h.visitor->VisitOperatorDeclaration(node.get());
+
+	// Ordering: kw:explicit < kw:operator < kw:checked < ReturnType < ( < param type < param name
+	// < ) < { < } < end.
+	auto explicitKw = std::find(h.inner.calls.begin(), h.inner.calls.end(), "kw:explicit");
+	ASSERT_NE(explicitKw, h.inner.calls.end()) << "kw:explicit must render for an explicit conversion";
+	auto opKw = std::find(explicitKw, h.inner.calls.end(), "kw:operator");
+	ASSERT_NE(opKw, h.inner.calls.end()) << "kw:operator must render after kw:explicit";
+	auto checkedKw = std::find(opKw, h.inner.calls.end(), "kw:checked");
+	ASSERT_NE(checkedKw, h.inner.calls.end()) << "kw:checked must render after kw:operator (CheckedExplicit)";
+	auto retTypeTok = std::find(checkedKw, h.inner.calls.end(), "primtype:int");
+	ASSERT_NE(retTypeTok, h.inner.calls.end()) << "the ReturnType must render AFTER kw:checked";
+	auto lpar = std::find(retTypeTok, h.inner.calls.end(), "tok:(");
+	ASSERT_NE(lpar, h.inner.calls.end());
+	auto paramTypeTok = std::find(lpar, h.inner.calls.end(), "primtype:string");
+	ASSERT_NE(paramTypeTok, h.inner.calls.end());
+	auto paramName = std::find(paramTypeTok, h.inner.calls.end(), "id:value");
+	ASSERT_NE(paramName, h.inner.calls.end());
+	auto rpar = std::find(paramName, h.inner.calls.end(), "tok:)");
+	ASSERT_NE(rpar, h.inner.calls.end());
+	auto lbrace = std::find(rpar, h.inner.calls.end(), "tok:{");
+	ASSERT_NE(lbrace, h.inner.calls.end());
+	auto rbrace = std::find(lbrace, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(rbrace, h.inner.calls.end());
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitPropertyDeclaration` over `int Foo { get; set; }` -- an auto-property with a getter and
+// setter (no bodies, no attributes), so `isSingleLine` is true under the default
+// `AutoPropertyFormatting == SingleLine` policy: the braces are EndOfLine with no inner newline, an
+// isSingleLine Space() separates `{` from the accessors, and the get/set accessors render in their
+// tree order (the FirstChild/NextSibling walk) as `kw:get`/`kw:set` (the auto-property Semicolon +
+// space each). No Initializer, so a NewLine closes the property. Mirrors the D353
+// VisitIndexerDeclarationAutoPropertyGetSet shape (the auto-property Semicolon skipNewLine path).
+TEST(CSharp_OutputVisitor, VisitPropertyDeclarationAutoPropertyGetSet) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("int"));
+	auto getter = std::make_unique<Accessor>(AccessorKind::Getter);
+	auto setter = std::make_unique<Accessor>(AccessorKind::Setter);
+	auto node = std::make_unique<PropertyDeclaration>();
+	node->ReturnType(retType.get());
+	node->NameToken(Identifier::Create("Foo"));
+	node->Getter(getter.get());
+	node->Setter(setter.get());
+	h.visitor->VisitPropertyDeclaration(node.get());
+
+	// Ordering: ReturnType < NameToken < { < kw:get < kw:set < } < end.
+	auto retTypeTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "primtype:int");
+	ASSERT_NE(retTypeTok, h.inner.calls.end());
+	auto nameTok = std::find(retTypeTok, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end()) << "the NameToken must render after the ReturnType";
+	auto lbrace = std::find(nameTok, h.inner.calls.end(), "tok:{");
+	ASSERT_NE(lbrace, h.inner.calls.end()) << "the property body must open with tok:{ after the name";
+	auto getKw = std::find(lbrace, h.inner.calls.end(), "kw:get");
+	ASSERT_NE(getKw, h.inner.calls.end()) << "kw:get must render after tok:{";
+	auto setKw = std::find(getKw, h.inner.calls.end(), "kw:set");
+	ASSERT_NE(setKw, h.inner.calls.end()) << "kw:set must render after kw:get";
+	auto rbrace = std::find(setKw, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(rbrace, h.inner.calls.end()) << "the body must close with tok:} after kw:set";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitPropertyDeclaration` over `int Foo => 1` -- an expression-bodied property (the ExpressionBody
+// is non-null, so the else branch runs): Space() + WriteToken(Tokens::Arrow `=>`) + Space() +
+// ExpressionBody->AcceptVisitor (PrimitiveExpression(1): primval) + Semicolon (tok:;/newline) +
+// EndNode. Mirrors the D353 VisitIndexerDeclarationExpressionBody shape.
+TEST(CSharp_OutputVisitor, VisitPropertyDeclarationExpressionBody) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("int"));
+	auto body = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto node = std::make_unique<PropertyDeclaration>();
+	node->ReturnType(retType.get());
+	node->NameToken(Identifier::Create("Foo"));
+	node->ExpressionBody(body.get());
+	h.visitor->VisitPropertyDeclaration(node.get());
+
+	// Ordering: ReturnType < NameToken < => < primval < ; < end.
+	auto retTypeTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "primtype:int");
+	ASSERT_NE(retTypeTok, h.inner.calls.end());
+	auto nameTok = std::find(retTypeTok, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end());
+	auto arrow = std::find(nameTok, h.inner.calls.end(), "tok:=>");
+	ASSERT_NE(arrow, h.inner.calls.end()) << "the expression body must render tok:=> after the name";
+	auto bodyVal = std::find(arrow, h.inner.calls.end(), "primval");
+	ASSERT_NE(bodyVal, h.inner.calls.end()) << "the expression body must render primval after tok:=>";
+	auto semi = std::find(bodyVal, h.inner.calls.end(), "tok:;");
+	ASSERT_NE(semi, h.inner.calls.end()) << "the expression-bodied property must close with tok:;";
+	EXPECT_EQ(h.inner.calls.back(), "end");
+}
+
+// `VisitPropertyDeclaration` over `int Foo { get; set; } = 1` -- an auto-property WITH an
+// Initializer: the same `isSingleLine` get/set body as the auto-property test, then (no Initializer
+// is false here) Space(SpaceAroundAssignment=false, no-op) + WriteToken(Tokens::Assign `=`) +
+// Space(false, no-op) + Initializer->AcceptVisitor (PrimitiveExpression(1): primval) + Semicolon
+// (tok:;/newline) + EndNode. Pins the `tok:=` initializer-assignment token between the close brace
+// and the initializer value.
+TEST(CSharp_OutputVisitor, VisitPropertyDeclarationWithInitializer) {
+	V h;
+	auto retType = std::make_unique<PrimitiveType>(std::string("int"));
+	auto getter = std::make_unique<Accessor>(AccessorKind::Getter);
+	auto setter = std::make_unique<Accessor>(AccessorKind::Setter);
+	auto init = std::make_unique<PrimitiveExpression>(PrimitiveValue(std::int32_t(1)));
+	auto node = std::make_unique<PropertyDeclaration>();
+	node->ReturnType(retType.get());
+	node->NameToken(Identifier::Create("Foo"));
+	node->Getter(getter.get());
+	node->Setter(setter.get());
+	node->Initializer(init.get());
+	h.visitor->VisitPropertyDeclaration(node.get());
+
+	// Ordering: ReturnType < NameToken < { < kw:get < kw:set < } < tok:= < primval < ; < end.
+	auto retTypeTok = std::find(h.inner.calls.begin(), h.inner.calls.end(), "primtype:int");
+	ASSERT_NE(retTypeTok, h.inner.calls.end());
+	auto nameTok = std::find(retTypeTok, h.inner.calls.end(), "id:Foo");
+	ASSERT_NE(nameTok, h.inner.calls.end());
+	auto lbrace = std::find(nameTok, h.inner.calls.end(), "tok:{");
+	ASSERT_NE(lbrace, h.inner.calls.end());
+	auto getKw = std::find(lbrace, h.inner.calls.end(), "kw:get");
+	ASSERT_NE(getKw, h.inner.calls.end());
+	auto setKw = std::find(getKw, h.inner.calls.end(), "kw:set");
+	ASSERT_NE(setKw, h.inner.calls.end());
+	auto rbrace = std::find(setKw, h.inner.calls.end(), "tok:}");
+	ASSERT_NE(rbrace, h.inner.calls.end()) << "the body must close with tok:} before the initializer";
+	auto assign = std::find(rbrace, h.inner.calls.end(), "tok:=");
+	ASSERT_NE(assign, h.inner.calls.end()) << "the initializer assignment tok:= must render after tok:}";
+	auto initVal = std::find(assign, h.inner.calls.end(), "primval");
+	ASSERT_NE(initVal, h.inner.calls.end()) << "the initializer value must render after tok:=";
+	auto semi = std::find(initVal, h.inner.calls.end(), "tok:;");
+	ASSERT_NE(semi, h.inner.calls.end()) << "the initialized property must close with tok:;";
 	EXPECT_EQ(h.inner.calls.back(), "end");
 }

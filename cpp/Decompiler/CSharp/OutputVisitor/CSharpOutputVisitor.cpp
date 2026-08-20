@@ -94,6 +94,9 @@
 #include "Decompiler/CSharp/Syntax/FixedFieldDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/FixedVariableInitializer.hpp"
 #include "Decompiler/CSharp/Syntax/IndexerDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/MethodDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/OperatorDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/PropertyDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/TypeDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/ArraySpecifier.hpp"
 #include "Decompiler/CSharp/Syntax/TupleTypeElement.hpp"
@@ -1720,7 +1723,56 @@ void CSharpOutputVisitor::VisitEnumMemberDeclaration(Syntax::EnumMemberDeclarati
 	}
 	EndNode(enumMemberDeclaration);
 }
-void CSharpOutputVisitor::VisitPropertyDeclaration(Syntax::PropertyDeclaration*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitPropertyDeclaration(Syntax::PropertyDeclaration* propertyDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitPropertyDeclaration:
+	// `ReturnType Name { get; set; }`, `ReturnType Name { get; set; } = init;`, or `ReturnType Name => expr;`.
+	StartNode(propertyDeclaration);
+	WriteAttributes(ToVector(propertyDeclaration->Attributes()));
+	WriteModifiers(propertyDeclaration->Modifiers());
+	if (propertyDeclaration->ReturnType() != nullptr) {
+		propertyDeclaration->ReturnType()->AcceptVisitor(*this);
+	}
+	Space();
+	WritePrivateImplementationType(propertyDeclaration->PrivateImplementationType());
+	WriteIdentifier(propertyDeclaration->NameToken());
+	if (propertyDeclaration->ExpressionBody() == nullptr) {
+		bool isSingleLine =
+			(policy_.AutoPropertyFormatting == PropertyFormatting::SingleLine)
+			&& (propertyDeclaration->Getter() == nullptr || propertyDeclaration->Getter()->Body() == nullptr)
+			&& (propertyDeclaration->Setter() == nullptr || propertyDeclaration->Setter()->Body() == nullptr)
+			&& (propertyDeclaration->Getter() == nullptr || propertyDeclaration->Getter()->Attributes().Count() == 0)
+			&& (propertyDeclaration->Setter() == nullptr || propertyDeclaration->Setter()->Attributes().Count() == 0);
+		OpenBrace(isSingleLine ? BraceStyle::EndOfLine : policy_.PropertyBraceStyle, !isSingleLine);
+		if (isSingleLine)
+			Space();
+		// Output get/set in their original tree order (the C# FirstChild/NextSibling walk).
+		for (Syntax::AstNode* node = propertyDeclaration->FirstChild(); node != nullptr; node = node->NextSibling()) {
+			const Syntax::CSharpSlotInfo* slot = node->Slot();
+			if (slot != nullptr && (slot->Kind() == &Syntax::Slots::Getter || slot->Kind() == &Syntax::Slots::Setter)) {
+				node->AcceptVisitor(*this);
+			}
+		}
+		CloseBrace(isSingleLine ? BraceStyle::EndOfLine : policy_.PropertyBraceStyle, !isSingleLine);
+		if (propertyDeclaration->Initializer() != nullptr) {
+			Space(policy_.SpaceAroundAssignment);
+			WriteToken(Tokens::Assign);
+			Space(policy_.SpaceAroundAssignment);
+			propertyDeclaration->Initializer()->AcceptVisitor(*this);
+			Semicolon();
+		} else {
+			// The Semicolon() call above prints a newline too; with no Initializer, emit the
+			// newline that closes the property (the C# comment).
+			NewLine();
+		}
+	} else {
+		Space();
+		WriteToken(Tokens::Arrow);
+		Space();
+		propertyDeclaration->ExpressionBody()->AcceptVisitor(*this);
+		Semicolon();
+	}
+	EndNode(propertyDeclaration);
+}
 void CSharpOutputVisitor::VisitEventDeclaration(Syntax::EventDeclaration* eventDeclaration) {
 	// Faithful port of CSharpOutputVisitor.cs VisitEventDeclaration: `event ReturnType v1, v2, ...;`.
 	StartNode(eventDeclaration);
@@ -1855,7 +1907,49 @@ void CSharpOutputVisitor::VisitIndexerDeclaration(Syntax::IndexerDeclaration* in
 	}
 	EndNode(indexerDeclaration);
 }
-void CSharpOutputVisitor::VisitOperatorDeclaration(Syntax::OperatorDeclaration*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitOperatorDeclaration(Syntax::OperatorDeclaration* operatorDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitOperatorDeclaration:
+	// `Modifiers ReturnType operator <token>(Parameters) { Body }` (the binary/unary operators),
+	// `explicit operator ReturnType(Parameters) { Body }`, or `implicit operator ReturnType(...)`.
+	// The conversion operators (`Explicit`/`CheckedExplicit`/`Implicit`) write the `explicit`/
+	// `implicit` keyword in place of the return type (before `operator`) and the return type after
+	// the `checked` keyword; the other operators write the return type first and the operator
+	// token after `operator [checked]`.
+	StartNode(operatorDeclaration);
+	WriteAttributes(ToVector(operatorDeclaration->Attributes()));
+	WriteModifiers(operatorDeclaration->Modifiers());
+	if (operatorDeclaration->OperatorType() == Syntax::OperatorType::Explicit
+		|| operatorDeclaration->OperatorType() == Syntax::OperatorType::CheckedExplicit) {
+		WriteKeyword(Syntax::OperatorDeclaration::ExplicitKeyword);
+	} else if (operatorDeclaration->OperatorType() == Syntax::OperatorType::Implicit) {
+		WriteKeyword(Syntax::OperatorDeclaration::ImplicitKeyword);
+	} else {
+		if (operatorDeclaration->ReturnType() != nullptr) {
+			operatorDeclaration->ReturnType()->AcceptVisitor(*this);
+		}
+	}
+	Space();
+	WritePrivateImplementationType(operatorDeclaration->PrivateImplementationType());
+	WriteKeyword(Syntax::OperatorDeclaration::OperatorKeyword);
+	Space();
+	if (Syntax::OperatorDeclaration::IsChecked(operatorDeclaration->OperatorType())) {
+		WriteKeyword(Syntax::OperatorDeclaration::CheckedKeyword);
+		Space();
+	}
+	if (operatorDeclaration->OperatorType() == Syntax::OperatorType::Explicit
+		|| operatorDeclaration->OperatorType() == Syntax::OperatorType::CheckedExplicit
+		|| operatorDeclaration->OperatorType() == Syntax::OperatorType::Implicit) {
+		if (operatorDeclaration->ReturnType() != nullptr) {
+			operatorDeclaration->ReturnType()->AcceptVisitor(*this);
+		}
+	} else {
+		WriteToken(Syntax::OperatorDeclaration::GetToken(operatorDeclaration->OperatorType()));
+	}
+	Space(policy_.SpaceBeforeMethodDeclarationParentheses);
+	WriteCommaSeparatedListInParenthesis(ToVector(operatorDeclaration->Parameters()), policy_.SpaceWithinMethodDeclarationParentheses);
+	WriteMethodBody(operatorDeclaration->Body(), policy_.MethodBraceStyle);
+	EndNode(operatorDeclaration);
+}
 void CSharpOutputVisitor::VisitConstructorInitializer(Syntax::ConstructorInitializer* constructorInitializer) {
 	// Faithful port of CSharpOutputVisitor.cs VisitConstructorInitializer: `: base(...)` / `: this(...)`.
 	StartNode(constructorInitializer);
@@ -1898,7 +1992,27 @@ void CSharpOutputVisitor::VisitConstructorDeclaration(Syntax::ConstructorDeclara
 }
 void CSharpOutputVisitor::VisitTypeParameterDeclaration(Syntax::TypeParameterDeclaration*) { NotImplemented(); }
 void CSharpOutputVisitor::VisitConstraint(Syntax::Constraint*) { NotImplemented(); }
-void CSharpOutputVisitor::VisitMethodDeclaration(Syntax::MethodDeclaration*) { NotImplemented(); }
+void CSharpOutputVisitor::VisitMethodDeclaration(Syntax::MethodDeclaration* methodDeclaration) {
+	// Faithful port of CSharpOutputVisitor.cs VisitMethodDeclaration:
+	// `Modifiers ReturnType NameToken<TypeParameters>(Parameters) Constraints { Body }` or `... ;`.
+	StartNode(methodDeclaration);
+	WriteAttributes(ToVector(methodDeclaration->Attributes()));
+	WriteModifiers(methodDeclaration->Modifiers());
+	if (methodDeclaration->ReturnType() != nullptr) {
+		methodDeclaration->ReturnType()->AcceptVisitor(*this);
+	}
+	Space();
+	WritePrivateImplementationType(methodDeclaration->PrivateImplementationType());
+	WriteIdentifier(methodDeclaration->NameToken());
+	WriteTypeParameters(ToVector(methodDeclaration->TypeParameters()));
+	Space(policy_.SpaceBeforeMethodDeclarationParentheses);
+	WriteCommaSeparatedListInParenthesis(ToVector(methodDeclaration->Parameters()), policy_.SpaceWithinMethodDeclarationParentheses);
+	for (Syntax::Constraint* constraint : ToVector(methodDeclaration->Constraints())) {
+		constraint->AcceptVisitor(*this);
+	}
+	WriteMethodBody(methodDeclaration->Body(), policy_.MethodBraceStyle);
+	EndNode(methodDeclaration);
+}
 void CSharpOutputVisitor::VisitExtensionDeclaration(Syntax::ExtensionDeclaration* extensionDeclaration) {
 	// Faithful port of CSharpOutputVisitor.cs VisitExtensionDeclaration: `extension<T> (...) { ... }`.
 	StartNode(extensionDeclaration);
