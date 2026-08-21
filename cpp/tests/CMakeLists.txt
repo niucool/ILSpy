@@ -35,6 +35,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/IParameter_Test.cpp
     Decompiler/TypeSystem/ITypeParameter_Test.cpp
     Decompiler/TypeSystem/MethodSemanticsAttributes_Test.cpp
+    Decompiler/TypeSystem/ExpressionType_Test.cpp
     Decompiler/TypeSystem/CustomAttributeArguments_Test.cpp
     Decompiler/TypeSystem/IAttribute_Test.cpp
     Decompiler/TypeSystem/IMember_Test.cpp
