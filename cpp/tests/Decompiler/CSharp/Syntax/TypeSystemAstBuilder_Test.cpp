@@ -33,6 +33,12 @@
 
 #include <gtest/gtest.h>
 
+#include <any>
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <utility>
+
 namespace Syntax = ILSpy::Decompiler::CSharp::Syntax;
 namespace TS = ILSpy::Decompiler::TypeSystem;
 using Syntax::Modifiers;
@@ -134,4 +140,240 @@ TEST(TypeSystemAstBuilderTest, CompositeModifiersAreDistinctFromSingleModifiers)
         Accessibility::ProtectedAndInternal, true);
     EXPECT_NE(privateProtected, Modifiers::Private);
     EXPECT_NE(privateProtected, Modifiers::Protected);
+}
+
+// ===========================================================================
+// Pure-math fraction helpers (TypeSystemAstBuilder.cs lines 1458-1490 and
+// 1725-1773), the family backing ConvertFloatingPointLiteral. They are pure
+// (no type-system state) and port ahead of the instance method that drives
+// them. The C# `long` is 64-bit, so the port uses std::int64_t; the C#
+// `(long Num, long Den)` tuple ports to std::pair<std::int64_t, std::int64_t>.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// IsValidFraction: a zero numerator or non-positive denominator is never valid.
+// ---------------------------------------------------------------------------
+TEST(TypeSystemAstBuilderTest, IsValidFractionRejectsZeroNumerator)
+{
+    EXPECT_FALSE(Syntax::IsValidFraction(0, 5));
+}
+
+TEST(TypeSystemAstBuilderTest, IsValidFractionRejectsNonPositiveDenominator)
+{
+    EXPECT_FALSE(Syntax::IsValidFraction(1, 0));
+    EXPECT_FALSE(Syntax::IsValidFraction(1, -2));
+    EXPECT_FALSE(Syntax::IsValidFraction(3, -6));
+}
+
+// ---------------------------------------------------------------------------
+// A whole fraction (den == 1) or a unit fraction (|num| == 1) is always valid,
+// regardless of the 5-smooth denominator gate -- these are the short-form cases.
+// ---------------------------------------------------------------------------
+TEST(TypeSystemAstBuilderTest, IsValidFractionAcceptsDenominatorOne)
+{
+    EXPECT_TRUE(Syntax::IsValidFraction(3, 1));
+    EXPECT_TRUE(Syntax::IsValidFraction(-3, 1));
+}
+
+TEST(TypeSystemAstBuilderTest, IsValidFractionAcceptsUnitNumerator)
+{
+    EXPECT_TRUE(Syntax::IsValidFraction(1, 7));
+    EXPECT_TRUE(Syntax::IsValidFraction(-1, 7));
+    EXPECT_TRUE(Syntax::IsValidFraction(1, 11));
+}
+
+// ---------------------------------------------------------------------------
+// A proper fraction (|num| < den) with a 5-smooth denominator (divisible by
+// 2, 3, or 5) is valid; a non-5-smooth denominator is rejected even when
+// proper -- the gate that rejects coincidental fractions such as 113/355.
+// ---------------------------------------------------------------------------
+TEST(TypeSystemAstBuilderTest, IsValidFractionAcceptsProperFractionWithSmoothDenominator)
+{
+    EXPECT_TRUE(Syntax::IsValidFraction(3, 6));   // 6 % 2 == 0
+    EXPECT_TRUE(Syntax::IsValidFraction(3, 9));   // 9 % 3 == 0
+    EXPECT_TRUE(Syntax::IsValidFraction(2, 10));  // 10 % 2 == 0
+    EXPECT_TRUE(Syntax::IsValidFraction(1, 15));  // |1| == 1 (also smooth)
+}
+
+TEST(TypeSystemAstBuilderTest, IsValidFractionRejectsProperFractionWithNonSmoothDenominator)
+{
+    EXPECT_FALSE(Syntax::IsValidFraction(3, 7));  // 7 not divisible by 2, 3, or 5
+    EXPECT_FALSE(Syntax::IsValidFraction(2, 7));
+    EXPECT_FALSE(Syntax::IsValidFraction(5, 13));
+}
+
+// ---------------------------------------------------------------------------
+// An improper fraction (|num| >= den) is rejected (it is not a proper
+// fraction; the caller would reduce it first).
+// ---------------------------------------------------------------------------
+TEST(TypeSystemAstBuilderTest, IsValidFractionRejectsImproperFraction)
+{
+    EXPECT_FALSE(Syntax::IsValidFraction(7, 3));
+    EXPECT_FALSE(Syntax::IsValidFraction(6, 6));
+    EXPECT_FALSE(Syntax::IsValidFraction(-7, 3));
+}
+
+// ---------------------------------------------------------------------------
+// EqualDoubles / EqualFloats are plain IEEE equality. Equal values (including
+// the +0.0 == -0.0 identity) return true; different values and NaN return false
+// (NaN != NaN is the IEEE rule the C# == operator follows).
+// ---------------------------------------------------------------------------
+TEST(TypeSystemAstBuilderTest, EqualDoublesReturnsTrueForEqualValues)
+{
+    EXPECT_TRUE(Syntax::EqualDoubles(1.5, 1.5));
+}
+
+TEST(TypeSystemAstBuilderTest, EqualDoublesReturnsFalseForDifferentValues)
+{
+    EXPECT_FALSE(Syntax::EqualDoubles(1.5, 2.5));
+}
+
+TEST(TypeSystemAstBuilderTest, EqualDoublesTreatsSignedZeroAsEqual)
+{
+    EXPECT_TRUE(Syntax::EqualDoubles(0.0, -0.0));
+}
+
+TEST(TypeSystemAstBuilderTest, EqualDoublesReturnsFalseForNaN)
+{
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_FALSE(Syntax::EqualDoubles(nan, nan));
+}
+
+TEST(TypeSystemAstBuilderTest, EqualFloatsReturnsTrueForEqualValues)
+{
+    EXPECT_TRUE(Syntax::EqualFloats(1.5f, 1.5f));
+}
+
+TEST(TypeSystemAstBuilderTest, EqualFloatsReturnsFalseForDifferentValues)
+{
+    EXPECT_FALSE(Syntax::EqualFloats(1.5f, 2.5f));
+}
+
+// ---------------------------------------------------------------------------
+// IsEqual dispatches to EqualDoubles/EqualFloats by the isDouble flag,
+// dividing the candidate (num, den) in the matching floating-point precision.
+// The C# `(double)`/`(float)` cast on a mismatched box throws InvalidCastException;
+// the std::any port throws std::bad_any_cast.
+// ---------------------------------------------------------------------------
+TEST(TypeSystemAstBuilderTest, IsEqualReturnsTrueWhenFractionMatchesDoubleValue)
+{
+    EXPECT_TRUE(Syntax::IsEqual(1, 2, std::any(0.5), true));
+}
+
+TEST(TypeSystemAstBuilderTest, IsEqualReturnsFalseWhenFractionDoesNotMatchDoubleValue)
+{
+    EXPECT_FALSE(Syntax::IsEqual(1, 3, std::any(0.5), true));
+}
+
+TEST(TypeSystemAstBuilderTest, IsEqualReturnsTrueWhenFractionMatchesFloatValue)
+{
+    EXPECT_TRUE(Syntax::IsEqual(1, 2, std::any(0.5f), false));
+}
+
+TEST(TypeSystemAstBuilderTest, IsEqualReturnsFalseWhenFractionDoesNotMatchFloatValue)
+{
+    EXPECT_FALSE(Syntax::IsEqual(1, 3, std::any(0.5f), false));
+}
+
+TEST(TypeSystemAstBuilderTest, IsEqualThrowsOnWrongBoxedType)
+{
+    // A float box with isDouble=true: the double cast on a float any throws.
+    EXPECT_THROW(Syntax::IsEqual(1, 2, std::any(0.5f), true), std::bad_any_cast);
+    // A double box with isDouble=false: the float cast on a double any throws.
+    EXPECT_THROW(Syntax::IsEqual(1, 2, std::any(0.5), false), std::bad_any_cast);
+}
+
+// ---------------------------------------------------------------------------
+// FractionApprox returns the best rational approximation within the
+// max-denominator bound. Exact rationals (1/2, 1/3) round-trip; a negative
+// value re-applies the sign to the numerator.
+// ---------------------------------------------------------------------------
+TEST(TypeSystemAstBuilderTest, FractionApproxHalfReturnsOneHalf)
+{
+    auto r = Syntax::FractionApprox(0.5, 100);
+    EXPECT_EQ(r.first, 1);
+    EXPECT_EQ(r.second, 2);
+}
+
+TEST(TypeSystemAstBuilderTest, FractionApproxThirdReturnsOneThird)
+{
+    auto r = Syntax::FractionApprox(1.0 / 3.0, 100);
+    EXPECT_EQ(r.first, 1);
+    EXPECT_EQ(r.second, 3);
+}
+
+TEST(TypeSystemAstBuilderTest, FractionApproxNegativeHalfReturnsNegativeOneHalf)
+{
+    auto r = Syntax::FractionApprox(-0.5, 100);
+    EXPECT_EQ(r.first, -1);
+    EXPECT_EQ(r.second, 2);
+}
+
+TEST(TypeSystemAstBuilderTest, FractionApproxNegativeThirdReturnsNegativeOneThird)
+{
+    auto r = Syntax::FractionApprox(-1.0 / 3.0, 100);
+    EXPECT_EQ(r.first, -1);
+    EXPECT_EQ(r.second, 3);
+}
+
+// ---------------------------------------------------------------------------
+// The celebrated PI approximation 355/113 is the best convergent within
+// maxDenominator 1000 (the next convergent 103993/33102 exceeds the bound).
+// ---------------------------------------------------------------------------
+TEST(TypeSystemAstBuilderTest, FractionApproxPiReturnsThreeFiftyFiveOverOneHundredThirteen)
+{
+    const double pi = 3.141592653589793; // Math.PI
+    auto r = Syntax::FractionApprox(pi, 1000);
+    EXPECT_EQ(r.first, 355);
+    EXPECT_EQ(r.second, 113);
+}
+
+// ---------------------------------------------------------------------------
+// When maxDenominator cuts off between two convergents, the best result may
+// be a SEMI-CONVERGENT (the secondN/secondD path). For value 0.6 with bound 4,
+// the convergent 1/2 (delta 0.1) loses to the semi-convergent 2/3 (delta
+// 0.0667), so the second path is taken.
+// ---------------------------------------------------------------------------
+TEST(TypeSystemAstBuilderTest, FractionApproxPicksSemiConvergentWhenCloser)
+{
+    auto r = Syntax::FractionApprox(0.6, 4);
+    EXPECT_EQ(r.first, 2);
+    EXPECT_EQ(r.second, 3);
+}
+
+TEST(TypeSystemAstBuilderTest, FractionApproxPicksNegativeSemiConvergentWhenCloser)
+{
+    auto r = Syntax::FractionApprox(-0.6, 4);
+    EXPECT_EQ(r.first, -2);
+    EXPECT_EQ(r.second, 3);
+}
+
+// ---------------------------------------------------------------------------
+// The magnitude guard: |value| > 0x7FFFFFFF returns (0, 0) so the sign-stripped
+// continued-fraction loop is never entered with an overflow-prone magnitude.
+// ---------------------------------------------------------------------------
+TEST(TypeSystemAstBuilderTest, FractionApproxLargeMagnitudeReturnsZeroZero)
+{
+    auto r = Syntax::FractionApprox(1e18, 1000);
+    EXPECT_EQ(r.first, 0);
+    EXPECT_EQ(r.second, 0);
+}
+
+TEST(TypeSystemAstBuilderTest, FractionApproxLargeNegativeMagnitudeReturnsZeroZero)
+{
+    auto r = Syntax::FractionApprox(-1e18, 1000);
+    EXPECT_EQ(r.first, 0);
+    EXPECT_EQ(r.second, 0);
+}
+
+// ---------------------------------------------------------------------------
+// FractionApprox(0, ...) yields (0, 1) (the algorithm's first convergent for a
+// zero value); IsValidFraction(0, 1) then rejects it, so zero is rendered as a
+// plain literal rather than a fraction by the caller.
+// ---------------------------------------------------------------------------
+TEST(TypeSystemAstBuilderTest, FractionApproxZeroReturnsZeroOverOne)
+{
+    auto r = Syntax::FractionApprox(0.0, 100);
+    EXPECT_EQ(r.first, 0);
+    EXPECT_EQ(r.second, 1);
 }
