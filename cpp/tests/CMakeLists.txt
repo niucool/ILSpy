@@ -83,6 +83,7 @@ add_executable(ilspy_tests
     Decompiler/Semantics/NamespaceResolveResult_Test.cpp
     Decompiler/Semantics/InitializedObjectResolveResult_Test.cpp
     Decompiler/Semantics/ThrowResolveResult_Test.cpp
+    Decompiler/Semantics/ErrorResolveResult_Test.cpp
     Decompiler/Output/IAmbience_Test.cpp
     Decompiler/IL/ILAst_Test.cpp
     Decompiler/IL/ILAstInstructions_Test.cpp
