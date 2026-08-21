@@ -54,6 +54,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/NullabilityAnnotatedType_Test.cpp
     Decompiler/TypeSystem/TupleType_Test.cpp
     Decompiler/TypeSystem/TypeVisitor_Test.cpp
+    Decompiler/TypeSystem/TypeParameterSubstitution_Test.cpp
     Decompiler/Output/IAmbience_Test.cpp
     Decompiler/IL/ILAst_Test.cpp
     Decompiler/IL/ILAstInstructions_Test.cpp
