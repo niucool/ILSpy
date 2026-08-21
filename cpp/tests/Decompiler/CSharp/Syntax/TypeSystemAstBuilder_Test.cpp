@@ -1021,3 +1021,69 @@ TEST(TypeSystemAstBuilderTest, MakeMemberTypeComposesWithMakeSimpleTypeTarget)
     EXPECT_EQ(*st->Identifier(), "System");
     delete outer;
 }
+
+// ===========================================================================
+// CalculateHammingWeight (TypeSystemAstBuilder.cs line 1427), the local
+// population-count function inside `PrepareConstant` (inside `ConvertEnumValue`).
+// The `[Flags]` enum decomposition prefers single-bit members (weight == 1), so
+// each enum member's constant value is reduced to its bit-weight via this helper.
+// It is pure (no type-system state), so it ports ahead of the instance method
+// that drives it, and the tests need no stubs -- just the raw 64-bit values.
+// ===========================================================================
+
+// Zero has no set bits.
+TEST(TypeSystemAstBuilderTest, CalculateHammingWeightZeroReturnsZero)
+{
+    EXPECT_EQ(Syntax::CalculateHammingWeight(0), 0);
+}
+
+// A single set bit (the least-significant) has weight 1.
+TEST(TypeSystemAstBuilderTest, CalculateHammingWeightOneReturnsOne)
+{
+    EXPECT_EQ(Syntax::CalculateHammingWeight(1), 1);
+}
+
+// All 64 bits set yields the full 64 -- the load-bearing high-byte accumulation
+// path (the `(x * h01) >> 56` fold) must reach the top byte.
+TEST(TypeSystemAstBuilderTest, CalculateHammingWeightAllOnesReturnsSixtyFour)
+{
+    EXPECT_EQ(Syntax::CalculateHammingWeight(~0ULL), 64);
+}
+
+// A single bit at each extreme (bit 0 and bit 63) yields 1, exercising both the
+// low and the high end of the SWAR accumulation.
+TEST(TypeSystemAstBuilderTest, CalculateHammingWeightSingleBitAtEachExtreme)
+{
+    EXPECT_EQ(Syntax::CalculateHammingWeight(1ULL << 0), 1);
+    EXPECT_EQ(Syntax::CalculateHammingWeight(1ULL << 63), 1);
+}
+
+// A run of n set bits (2^n - 1) yields exactly n -- the canonical popcount shape.
+TEST(TypeSystemAstBuilderTest, CalculateHammingWeightPowerOfTwoMinusOneCountsAllBits)
+{
+    EXPECT_EQ(Syntax::CalculateHammingWeight(0xFFULL), 8);
+    EXPECT_EQ(Syntax::CalculateHammingWeight(0xFFFFULL), 16);
+    EXPECT_EQ(Syntax::CalculateHammingWeight(0xFFFFFFFFULL), 32);
+}
+
+// An arbitrary value (0b101101 = 0x2D = 45) has 4 set bits -- the non-trivial
+// case the enum decomposition relies on for a multi-flag combined value.
+TEST(TypeSystemAstBuilderTest, CalculateHammingWeightArbitraryValue)
+{
+    EXPECT_EQ(Syntax::CalculateHammingWeight(0x2DULL), 4);
+}
+
+// The alternating-bit patterns (0x55... and 0xAA...) each have 32 set bits,
+// exercising the even/odd bit positions across the full 64-bit width.
+TEST(TypeSystemAstBuilderTest, CalculateHammingWeightAlternatingBitsPattern)
+{
+    EXPECT_EQ(Syntax::CalculateHammingWeight(0x5555555555555555ULL), 32);
+    EXPECT_EQ(Syntax::CalculateHammingWeight(0xAAAAAAAAAAAAAAAAULL), 32);
+}
+
+// Bits confined to the high byte (0xFF00...00) yield 8 -- the high-byte fold
+// path that a naive shift-only popcount would mishandle.
+TEST(TypeSystemAstBuilderTest, CalculateHammingWeightHighByteOnly)
+{
+    EXPECT_EQ(Syntax::CalculateHammingWeight(0xFF00000000000000ULL), 8);
+}

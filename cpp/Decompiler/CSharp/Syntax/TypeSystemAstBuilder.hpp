@@ -503,4 +503,32 @@ inline MemberType* MakeMemberType(AstType* target, std::string name) {
     return new MemberType(target, std::move(name));
 }
 
+// ---------------------------------------------------------------------------
+// CalculateHammingWeight (TypeSystemAstBuilder.cs line 1427). A local function
+// inside `PrepareConstant` (itself a local function inside `ConvertEnumValue`)
+// that computes the Hamming weight (population count) of a 64-bit value -- the
+// number of set bits. The `[Flags]` enum decomposition prefers single-bit
+// members directly (a value equal to a member whose weight is 1 is rendered as
+// the member name alone), so each enum member's constant value is reduced to its
+// weight to gate that path.
+//
+// The C# `ulong` is System.UInt64 (64-bit unsigned); the port uses std::uint64_t
+// (NOT the 32-bit MSVC `unsigned long`). The bit-manipulation algorithm (the
+// Wikipedia Hamming_weight bit-twiddling form, a SWAR popcount) is ported
+// verbatim; the C# `unchecked` (wraparound arithmetic on the final cast) ports to
+// the well-defined unsigned modular arithmetic of std::uint64_t and the
+// truncating `static_cast<int>` of the high byte (identical two's-complement bit
+// pattern to the C# `unchecked (int) ...`).
+// ---------------------------------------------------------------------------
+inline int CalculateHammingWeight(std::uint64_t value) noexcept {
+    const std::uint64_t m1  = 0x5555555555555555; //binary: 0101...
+    const std::uint64_t m2  = 0x3333333333333333; //binary: 00110011..
+    const std::uint64_t m4  = 0x0f0f0f0f0f0f0f0f; //binary:  4 zeros,  4 ones ...
+    const std::uint64_t h01 = 0x0101010101010101; //the sum of 256 to the power of 0,1,2,3...
+    std::uint64_t x = value - ((value >> 1) & m1); //put count of each 2 bits into those 2 bits
+    x = (x & m2) + ((x >> 2) & m2);               //put count of each 4 bits into those 4 bits
+    x = (x + (x >> 4)) & m4;                      //put count of each 8 bits into those 8 bits
+    return static_cast<int>((x * h01) >> 56);    //returns left 8 bits of x + (x<<8) + (x<<16) + ...
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax
