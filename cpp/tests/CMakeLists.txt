@@ -74,6 +74,7 @@ add_executable(ilspy_tests
     Decompiler/Semantics/ResolveResult_Test.cpp
     Decompiler/Semantics/TypeResolveResult_Test.cpp
     Decompiler/Semantics/ThisResolveResult_Test.cpp
+    Decompiler/Semantics/TypeOfResolveResult_Test.cpp
     Decompiler/Output/IAmbience_Test.cpp
     Decompiler/IL/ILAst_Test.cpp
     Decompiler/IL/ILAstInstructions_Test.cpp
