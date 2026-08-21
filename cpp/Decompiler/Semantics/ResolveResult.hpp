@@ -97,6 +97,17 @@ public:
 
     const ILSpy::Decompiler::TypeSystem::IType& Type() const { return *type_; }
 
+    // The owning `shared_ptr<IType>` handle behind `Type()` -- exposed (as a
+    // `const` reference) to subclasses so a subclass ctor can forward the stored
+    // `IType` to ANOTHER `ResolveResult` base (e.g. `ByReferenceResolveResult`'s
+    // public ctor wraps the element-result's type in a `ByReferenceType` and
+    // forwards it to its own base). The reference-return keeps the `shared_ptr`
+    // shared (a copy increments the refcount) without exposing a non-const
+    // rebind. The first consumer is `ByReferenceResolveResult` (the first
+    // `ResolveResult` subclass that holds another `ResolveResult` member and
+    // builds its own type from that member's type).
+    const ILSpy::Decompiler::TypeSystem::ITypePtr& TypePtr() const { return type_; }
+
     virtual bool IsCompileTimeConstant() const { return false; }
 
     virtual std::any ConstantValue() const { return {}; }
