@@ -22,26 +22,26 @@
 // `Conversion` base port. The 666-line C# `Conversion.cs` carries the abstract base plus
 // six nested sealed subclasses (`InvalidConversion` / `NumericOrEnumerationConversion` /
 // `BuiltinConversion` / `UserDefinedConv` / `MethodGroupConv` / `TupleConv`) and a set of
-// `static readonly` factory fields plus four `static` factory methods. This header ports
-// the two subclasses backing the singleton factory FIELDS that take no extra state beyond
-// a `bool isImplicit` and a `byte type` discriminator -- `InvalidConversion` (backs `None`)
-// and `BuiltinConversion` (backs the ~18 builtin-conversion singleton fields:
-// `IdentityConversion` / `NullLiteralConversion` / the reference / dynamic / nullable /
-// pointer / boxing / unboxing / try-cast / interpolated-string / throw-expression /
-// inline-array / span conversions) -- plus a `Conversions` factory holder exposing them
-// as `std::shared_ptr<Conversion>` singletons. This header additionally ports the two
-// IMethod-free value-based subclasses: `NumericOrEnumerationConversion` (backs the four
-// numeric-conversion singleton fields `ImplicitNumericConversion` /
-// `ExplicitNumericConversion` / `ImplicitLiftedNumericConversion` /
-// `ExplicitLiftedNumericConversion` and the `EnumerationConversion` factory method) and
-// `TupleConv` (backs the `TupleConversion` factory method) -- they carry value-based
-// `Equals` / `GetHashCode` overrides (two distinct instances with equal state are equal),
-// distinct from the reference-equality the two singleton subclasses above inherit. The
-// remaining two subclasses (`UserDefinedConv` / `MethodGroupConv`) and their factory
-// methods (`UserDefinedConversion` / `MethodGroupConversion` /
-// `InvalidMethodGroupConversion`) are deferred -- they carry an `IMethod` method handle the
-// value-based `Equals` / `GetHashCode` fold (the C# `method.Equals` / `method.GetHashCode`
-// resolve to `object.Equals` / `object.GetHashCode`, i.e. reference-equality and the
+// `static readonly` factory fields plus four `static` factory methods. This header ports ALL
+// SIX concrete subclasses plus a `Conversions` factory holder exposing every singleton
+// FIELD and factory METHOD: `InvalidConversion` (backs `None`) and `BuiltinConversion`
+// (backs the ~18 builtin-conversion singleton fields) are the two singleton subclasses
+// with no extra state beyond a `bool isImplicit` and a `byte type` discriminator;
+// `NumericOrEnumerationConversion` (backs the four numeric-conversion singleton fields and
+// the `EnumerationConversion` factory method) and `TupleConv` (backs the `TupleConversion`
+// factory method) are the two `IMethod`-free value-based subclasses; and `UserDefinedConv`
+// (backs the `UserDefinedConversion` factory method) and `MethodGroupConv` (backs the
+// `MethodGroupConversion` / `InvalidMethodGroupConversion` factory methods) are the two
+// `IMethod`-bearing value-based subclasses. The two singleton subclasses (`InvalidConversion`
+// / `BuiltinConversion`) inherit the base reference-equality `Equals` / identity
+// `GetHashCode` (their factories return shared singletons, so reference-equality is
+// faithful); the four value-based subclasses (`NumericOrEnumerationConversion` / `TupleConv`
+// / `UserDefinedConv` / `MethodGroupConv`) override `Equals` / `GetHashCode` with value-based
+// implementations (two distinct instances with equal state are equal) because their
+// factory METHODS build a NEW instance per call. The `UserDefinedConv` / `MethodGroupConv`
+// value-based `Equals` / `GetHashCode` fold the `IMethod` method handle by reference-equality
+// and identity hash (the C# `method.Equals(o.method)` / `method.GetHashCode()` one-argument
+// calls resolve to `object.Equals` / `object.GetHashCode`, i.e. reference-equality and the
 // identity hash, since the one-argument call does not match the two-argument
 // `IMember.Equals(IMember, TypeVisitor)`).
 //
@@ -72,18 +72,23 @@
 //    `GetHashCode` -- they inherit the base reference-equality (`this == &other`) and
 //    identity-hash. Since the factories return shared SINGLETONS, two calls to the same
 //    factory return the same instance, so the inherited reference-equality is the faithful
-//    match for the C# singleton-field reference-equality. `NumericOrEnumerationConversion`
-//    and `TupleConv` (ported here) DO override `Equals` / `GetHashCode` with value-based
-//    implementations -- two distinct instances with equal state are equal, distinct from
-//    the singleton reference-equality above. (The remaining `UserDefinedConv` /
-//    `MethodGroupConv` value-based overrides are deferred.)
+//    match for the C# singleton-field reference-equality. The four value-based subclasses
+//    (`NumericOrEnumerationConversion` / `TupleConv` / `UserDefinedConv` / `MethodGroupConv`)
+//    DO override `Equals` / `GetHashCode` with value-based implementations -- two distinct
+//    instances with equal state are equal, distinct from the singleton reference-equality
+//    above. The `IMethod`-bearing pair (`UserDefinedConv` / `MethodGroupConv`) folds the
+//    method handle by reference-equality / identity-hash (the C# one-argument
+//    `method.Equals` / `method.GetHashCode` resolve to `object.Equals` / `object.GetHashCode`).
 
 #ifndef ILSPY_DECOMPILER_SEMANTICS_CONVERSION_FACTORIES_HPP
 #define ILSPY_DECOMPILER_SEMANTICS_CONVERSION_FACTORIES_HPP
 
 #include "Decompiler/Semantics/Conversion.hpp"
+#include "Decompiler/TypeSystem/IMethod.hpp"
 
+#include <cassert>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -314,6 +319,171 @@ private:
     bool isImplicit_;
 };
 
+// The C# `sealed class UserDefinedConv : Conversion` -- the user-defined (op_Implicit /
+// op_Explicit) conversion backing the `UserDefinedConversion` factory method. It carries an
+// `IMethod method` handle (non-owning; the method is owned by the type system), a `bool
+// isLifted`, two `Conversion`s (`conversionBeforeUserDefinedOperator` /
+// `conversionAfterUserDefinedOperator`, nullable, shared via `shared_ptr`), a `bool
+// isImplicit`, and a computed `bool isValid` (= `!isAmbiguous`). It overrides `IsValid` /
+// `IsImplicit` / `IsExplicit` / `IsLifted` / `IsUserDefined` /
+// `ConversionBeforeUserDefinedOperator` / `ConversionAfterUserDefinedOperator` / `Method` plus
+// a value-based `Equals` / `GetHashCode` (two distinct instances with equal state are equal
+// -- the `UserDefinedConversion` factory METHOD builds a NEW instance per call, so two
+// calls with equal args must compare equal by value). The `method` is folded into the
+// value-based `Equals` / `GetHashCode` by reference-equality / identity-hash (the C#
+// `method.Equals(o.method)` / `method.GetHashCode()` one-argument calls resolve to
+// `object.Equals` / `object.GetHashCode`, NOT the two-argument `IMember.Equals(IMember,
+// TypeVisitor)`).
+class UserDefinedConv final : public Conversion {
+public:
+    // The C# `UserDefinedConv(bool isImplicit, IMethod method, Conversion
+    // conversionBeforeUserDefinedOperator, Conversion conversionAfterUserDefinedOperator,
+    // bool isLifted, bool isAmbiguous)` -- stores the fields and computes `isValid =
+    // !isAmbiguous`. The C# `IMethod method` (a non-null reference the factory guards with
+    // `ArgumentNullException`) ports to a non-owning `const IMethod*` raw pointer (the
+    // method is owned by the type system; the D437 `MemberResolveResult` non-owning
+    // `const IMember*` precedent). The two `Conversion` reference fields (nullable in C#)
+    // port to `std::shared_ptr<Conversion>` (shared ownership; the D451 self-referential
+    // `shared_ptr<Conversion>` convention).
+    UserDefinedConv(bool isImplicit, const ILSpy::Decompiler::TypeSystem::IMethod* method,
+                    std::shared_ptr<Conversion> conversionBeforeUserDefinedOperator,
+                    std::shared_ptr<Conversion> conversionAfterUserDefinedOperator,
+                    bool isLifted, bool isAmbiguous)
+        : method_(method),
+          isLifted_(isLifted),
+          conversionBefore_(std::move(conversionBeforeUserDefinedOperator)),
+          conversionAfter_(std::move(conversionAfterUserDefinedOperator)),
+          isImplicit_(isImplicit),
+          isValid_(!isAmbiguous) {}
+
+    bool IsValid() const override { return isValid_; }
+    bool IsImplicit() const override { return isImplicit_; }
+    bool IsExplicit() const override { return !isImplicit_; }
+    bool IsLifted() const override { return isLifted_; }
+    bool IsUserDefined() const override { return true; }
+
+    std::shared_ptr<Conversion> ConversionBeforeUserDefinedOperator() const override {
+        return conversionBefore_;
+    }
+    std::shared_ptr<Conversion> ConversionAfterUserDefinedOperator() const override {
+        return conversionAfter_;
+    }
+
+    const ILSpy::Decompiler::TypeSystem::IMethod* Method() const override { return method_; }
+
+    // The C# `override bool Equals(Conversion other)` -- `other as UserDefinedConv` then
+    // compare `isLifted` / `isImplicit` / `isValid` and `method.Equals(o.method)`. The
+    // `method.Equals(o.method)` one-argument call resolves to `object.Equals` (reference-
+    // equality), so the port compares the `IMethod*` pointers for identity. Value-based:
+    // two distinct instances with equal state (incl. the same method pointer) are equal.
+    bool Equals(const Conversion& other) const override {
+        const auto* o = dynamic_cast<const UserDefinedConv*>(&other);
+        return o != nullptr
+            && isLifted_ == o->isLifted_
+            && isImplicit_ == o->isImplicit_
+            && isValid_ == o->isValid_
+            && method_ == o->method_;
+    }
+
+    // The C# `override int GetHashCode() => unchecked(method.GetHashCode() + (isLifted ?
+    // 31 : 27) + (isImplicit ? 71 : 61) + (isValid ? 107 : 109))`. The `method.GetHashCode()`
+    // resolves to `object.GetHashCode` (the identity hash), ported to
+    // `std::hash<const IMethod*>`. The `unchecked` wraparound ports to `unsigned int`
+    // accumulation + `static_cast<int>` return (well-defined modular wraparound, no signed-
+    // overflow UB; the D400 `FullTypeNameComparer.GetHashCode` precedent).
+    int GetHashCode() const override {
+        unsigned int hash = static_cast<unsigned int>(
+            std::hash<const ILSpy::Decompiler::TypeSystem::IMethod*>{}(method_));
+        hash += static_cast<unsigned int>(isLifted_ ? 31 : 27);
+        hash += static_cast<unsigned int>(isImplicit_ ? 71 : 61);
+        hash += static_cast<unsigned int>(isValid_ ? 107 : 109);
+        return static_cast<int>(hash);
+    }
+
+    // The C# `override string ToString() => (isImplicit ? "implicit" : "explicit") +
+    // (isLifted ? " lifted" : "") + (isValid ? "" : " ambiguous") + "user-defined conversion
+    // (" + method + ")"`. The `+ method` calls `method.ToString()` which the minimal `IMethod`
+    // port does NOT expose (no `ToString` virtual); the faithful counterpart uses
+    // `method_->FullName()` (the closest meaningful fully-qualified representation the C#
+    // `method.ToString()` includes for a real `IMethod` implementation) -- a documented
+    // deviation (the D433 `NamespaceResolveResult` `ns.ToString()`-to-`FullName()` precedent
+    // applied to a method).
+    std::string ToString() const {
+        return std::string(isImplicit_ ? "implicit" : "explicit")
+            + (isLifted_ ? " lifted" : "")
+            + (isValid_ ? "" : " ambiguous")
+            + "user-defined conversion (" + method_->FullName() + ")";
+    }
+
+private:
+    const ILSpy::Decompiler::TypeSystem::IMethod* method_;
+    bool isLifted_;
+    std::shared_ptr<Conversion> conversionBefore_;
+    std::shared_ptr<Conversion> conversionAfter_;
+    bool isImplicit_;
+    bool isValid_;
+};
+
+// The C# `sealed class MethodGroupConv : Conversion` -- the method-group conversion
+// backing the `MethodGroupConversion` / `InvalidMethodGroupConversion` factory methods. It
+// carries an `IMethod method` handle (non-owning), a `bool isVirtualMethodLookup`, a `bool
+// delegateCapturesFirstArgument`, and a `bool isValid` (set by the factory: `true` for
+// `MethodGroupConversion`, `false` for `InvalidMethodGroupConversion`). It overrides
+// `IsValid` / `IsImplicit` (always `true`) / `IsMethodGroupConversion` /
+// `IsVirtualMethodLookup` / `DelegateCapturesFirstArgument` / `Method` plus a value-based
+// `Equals` / `GetHashCode` folding ONLY the `method` handle by reference-equality /
+// identity-hash (the C# `Equals` compares `method.Equals(o.method)` alone -- the other
+// fields do NOT participate, so two method-group conversions over the SAME method but
+// different lookup/capture flags are EQUAL). The C# does NOT override `ToString`, so the
+// port adds none.
+class MethodGroupConv final : public Conversion {
+public:
+    // The C# `MethodGroupConv(IMethod method, bool isVirtualMethodLookup, bool
+    // delegateCapturesFirstArgument, bool isValid)` -- stores all four fields. The C#
+    // `IMethod method` (a non-null reference the factory guards with `ArgumentNullException`)
+    // ports to a non-owning `const IMethod*` raw pointer (the D437 precedent).
+    MethodGroupConv(const ILSpy::Decompiler::TypeSystem::IMethod* method,
+                    bool isVirtualMethodLookup, bool delegateCapturesFirstArgument,
+                    bool isValid)
+        : method_(method),
+          isVirtualMethodLookup_(isVirtualMethodLookup),
+          delegateCapturesFirstArgument_(delegateCapturesFirstArgument),
+          isValid_(isValid) {}
+
+    bool IsValid() const override { return isValid_; }
+    bool IsImplicit() const override { return true; }
+    bool IsMethodGroupConversion() const override { return true; }
+    bool IsVirtualMethodLookup() const override { return isVirtualMethodLookup_; }
+    bool DelegateCapturesFirstArgument() const override {
+        return delegateCapturesFirstArgument_;
+    }
+    const ILSpy::Decompiler::TypeSystem::IMethod* Method() const override { return method_; }
+
+    // The C# `override bool Equals(Conversion other) => other is MethodGroupConv o &&
+    // method.Equals(o.method)` -- compares ONLY the `method` (the other fields do NOT
+    // participate). The `method.Equals(o.method)` one-argument call resolves to
+    // `object.Equals` (reference-equality), so the port compares the `IMethod*` pointers
+    // for identity. Two method-group conversions over the SAME method (even with different
+    // lookup/capture flags or different `isValid`) are EQUAL.
+    bool Equals(const Conversion& other) const override {
+        const auto* o = dynamic_cast<const MethodGroupConv*>(&other);
+        return o != nullptr && method_ == o->method_;
+    }
+
+    // The C# `override int GetHashCode() => method.GetHashCode()` -- the identity hash of
+    // the method (the one-argument `GetHashCode` resolves to `object.GetHashCode`).
+    int GetHashCode() const override {
+        return static_cast<int>(
+            std::hash<const ILSpy::Decompiler::TypeSystem::IMethod*>{}(method_));
+    }
+
+private:
+    const ILSpy::Decompiler::TypeSystem::IMethod* method_;
+    bool isVirtualMethodLookup_;
+    bool delegateCapturesFirstArgument_;
+    bool isValid_;
+};
+
 // The factory holder mirroring the C# `Conversion` `static readonly` fields and the
 // `static` factory methods. The C# static members live ON the
 // `Conversion` class; the C++ port cannot add static members to the `Conversion` class from
@@ -486,6 +656,49 @@ struct Conversions {
     static std::shared_ptr<Conversion> TupleConversion(
             std::vector<std::shared_ptr<Conversion>> conversions) {
         return std::make_shared<TupleConv>(std::move(conversions));
+    }
+
+    // `public static Conversion UserDefinedConversion(IMethod operatorMethod, bool
+    // isImplicit, Conversion conversionBeforeUserDefinedOperator, Conversion
+    // conversionAfterUserDefinedOperator, bool isLifted = false, bool isAmbiguous = false)
+    // => new UserDefinedConv(...)` -- a FACTORY METHOD (a NEW instance per call). The C#
+    // `operatorMethod == null` `ArgumentNullException` guard ports to an `assert` (the D424
+    // convention). Two calls with equal args return DISTINCT instances that compare EQUAL
+    // by value (the `UserDefinedConv` value-based `Equals`).
+    static std::shared_ptr<Conversion> UserDefinedConversion(
+            const ILSpy::Decompiler::TypeSystem::IMethod* operatorMethod, bool isImplicit,
+            std::shared_ptr<Conversion> conversionBeforeUserDefinedOperator,
+            std::shared_ptr<Conversion> conversionAfterUserDefinedOperator,
+            bool isLifted = false, bool isAmbiguous = false) {
+        assert(operatorMethod != nullptr);
+        return std::make_shared<UserDefinedConv>(isImplicit, operatorMethod,
+            std::move(conversionBeforeUserDefinedOperator),
+            std::move(conversionAfterUserDefinedOperator), isLifted, isAmbiguous);
+    }
+
+    // `public static Conversion MethodGroupConversion(IMethod chosenMethod, bool
+    // isVirtualMethodLookup, bool delegateCapturesFirstArgument) => new MethodGroupConv(
+    // ..., isValid: true)` -- the VALID method-group conversion factory method. The C#
+    // `chosenMethod == null` `ArgumentNullException` guard ports to an `assert`.
+    static std::shared_ptr<Conversion> MethodGroupConversion(
+            const ILSpy::Decompiler::TypeSystem::IMethod* chosenMethod,
+            bool isVirtualMethodLookup, bool delegateCapturesFirstArgument) {
+        assert(chosenMethod != nullptr);
+        return std::make_shared<MethodGroupConv>(chosenMethod, isVirtualMethodLookup,
+            delegateCapturesFirstArgument, /*isValid*/ true);
+    }
+
+    // `public static Conversion InvalidMethodGroupConversion(IMethod chosenMethod, bool
+    // isVirtualMethodLookup, bool delegateCapturesFirstArgument) => new MethodGroupConv(
+    // ..., isValid: false)` -- the INVALID method-group conversion factory method (the
+    // `isValid: false` twin of `MethodGroupConversion`). The C# `chosenMethod == null`
+    // `ArgumentNullException` guard ports to an `assert`.
+    static std::shared_ptr<Conversion> InvalidMethodGroupConversion(
+            const ILSpy::Decompiler::TypeSystem::IMethod* chosenMethod,
+            bool isVirtualMethodLookup, bool delegateCapturesFirstArgument) {
+        assert(chosenMethod != nullptr);
+        return std::make_shared<MethodGroupConv>(chosenMethod, isVirtualMethodLookup,
+            delegateCapturesFirstArgument, /*isValid*/ false);
     }
 };
 

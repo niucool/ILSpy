@@ -32,19 +32,26 @@
 
 #include "Decompiler/Semantics/Conversion.hpp"
 #include "Decompiler/Semantics/ConversionFactories.hpp"
+#include "Decompiler/TypeSystem/IMethod.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/TestCompilationStubs.hpp"
 
 #include <gtest/gtest.h>
 
 #include <memory>
 #include <string>
 #include <type_traits>
+#include <utility>
 
 using ILSpy::Decompiler::Semantics::BuiltinConversion;
 using ILSpy::Decompiler::Semantics::Conversion;
 using ILSpy::Decompiler::Semantics::Conversions;
 using ILSpy::Decompiler::Semantics::InvalidConversion;
+using ILSpy::Decompiler::Semantics::MethodGroupConv;
 using ILSpy::Decompiler::Semantics::NumericOrEnumerationConversion;
 using ILSpy::Decompiler::Semantics::TupleConv;
+using ILSpy::Decompiler::Semantics::UserDefinedConv;
 
 // ---------------------------------------------------------------------------
 // InvalidConversion (backs `Conversions::None`)
@@ -945,4 +952,546 @@ TEST(ConversionsTest, TupleConversionEmptyIsImplicit)
     ASSERT_NE(c, nullptr);
     EXPECT_TRUE(c->IsImplicit());
     EXPECT_TRUE(c->ElementConversions().empty());
+}
+
+// ---------------------------------------------------------------------------
+// UserDefinedConv (backs the `UserDefinedConversion` factory method) and
+// MethodGroupConv (backs the `MethodGroupConversion` / `InvalidMethodGroupConversion`
+// factory methods) -- the two IMethod-bearing value-based Conversion subclasses.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A minimal concrete `ICompilation` stand-in so the inherited `ICompilationProvider` base
+// of the `TestMethod` stub can return a compilation (the D399 test stand-in pattern,
+// identical in shape to the `TestCompilation` in `ForEachResolveResult_Test.cpp`).
+class TestCompilation : public ILSpy::Decompiler::TypeSystem::ICompilation {
+public:
+    TestCompilation() : mainModule_(*this) {}
+    const ILSpy::Decompiler::TypeSystem::IModule& MainModule() const override { return mainModule_; }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IModule*> Modules() const override { return {&mainModule_}; }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IModule*> ReferencedModules() const override { return {}; }
+    const ILSpy::Decompiler::TypeSystem::INamespace& RootNamespace() const override { return mainModule_.RootNamespace(); }
+    const ILSpy::Decompiler::TypeSystem::INamespace* GetNamespaceForExternAlias(const std::string&) const override { return nullptr; }
+    const ILSpy::Decompiler::TypeSystem::IType& FindType(ILSpy::Decompiler::TypeSystem::KnownTypeCode) const override { return knownType_; }
+    const ILSpy::Decompiler::TypeSystem::StringComparer& NameComparer() const override { return ILSpy::Decompiler::TypeSystem::StringComparer::Ordinal(); }
+    const ILSpy::Decompiler::Util::CacheManager& CacheManager() const override { return cacheManager_; }
+    ILSpy::Decompiler::TypeSystem::TypeSystemOptions TypeSystemOptions() const override { return ILSpy::Decompiler::TypeSystem::TypeSystemOptions::None; }
+private:
+    ILSpy::Decompiler::TypeSystem::TestSupport::TestModule mainModule_;
+    ILSpy::Decompiler::TypeSystem::KnownType knownType_{ILSpy::Decompiler::TypeSystem::KnownTypeCode::Object};
+    ILSpy::Decompiler::Util::CacheManager cacheManager_;
+};
+
+// A minimal concrete `IMethod` for the `UserDefinedConv` / `MethodGroupConv` tests: holds a
+// `TestCompilation` reference (for the inherited `ICompilationProvider::Compilation`) and a
+// return type (for the inherited `IMember::ReturnType`), and returns trivial defaults for
+// every other accessor. `Name()` / `FullName()` / `ReflectionName()` are configurable so the
+// `UserDefinedConv::ToString` test can pin the format; pointer-identity (the address) is the
+// load-bearing field for the value-based `Equals` / `GetHashCode` (the method is folded by
+// reference-equality / identity-hash), so two distinct `TestMethod` instances are NOT equal
+// even with the same name.
+class TestMethod : public ILSpy::Decompiler::TypeSystem::IMethod {
+public:
+    TestMethod(const TestCompilation& compilation,
+               std::string name = "op_Implicit",
+               std::string fullName = "Test.op_Implicit")
+        : compilation_(compilation),
+          name_(std::move(name)),
+          fullName_(std::move(fullName)),
+          returnType_(std::make_shared<ILSpy::Decompiler::TypeSystem::KnownType>(
+              ILSpy::Decompiler::TypeSystem::KnownTypeCode::Int32)) {}
+
+    // --- ISymbol ---
+    ILSpy::Decompiler::TypeSystem::SymbolKind SymbolKind() const override {
+        return ILSpy::Decompiler::TypeSystem::SymbolKind::Method;
+    }
+    std::string Name() const override { return name_; }
+
+    // --- INamedElement ---
+    std::string FullName() const override { return fullName_; }
+    std::string ReflectionName() const override { return fullName_; }
+    std::string Namespace() const override { return {}; }
+
+    // --- ICompilationProvider ---
+    const ILSpy::Decompiler::TypeSystem::ICompilation& Compilation() const override { return compilation_; }
+
+    // --- IEntity ---
+    std::uint32_t MetadataToken() const override { return 0; }
+    const ILSpy::Decompiler::TypeSystem::ITypeDefinition* DeclaringTypeDefinition() const override { return nullptr; }
+    ILSpy::Decompiler::TypeSystem::ITypePtr DeclaringType() const override { return {}; }
+    const ILSpy::Decompiler::TypeSystem::IModule* ParentModule() const override { return nullptr; }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IAttribute*> GetAttributes() const override { return {}; }
+    bool HasAttribute(ILSpy::Decompiler::TypeSystem::KnownAttribute) const override { return false; }
+    const ILSpy::Decompiler::TypeSystem::IAttribute* GetAttribute(ILSpy::Decompiler::TypeSystem::KnownAttribute) const override { return nullptr; }
+    ILSpy::Decompiler::TypeSystem::Accessibility Accessibility() const override {
+        return ILSpy::Decompiler::TypeSystem::Accessibility::Public;
+    }
+    bool IsStatic() const override { return false; }
+    bool IsAbstract() const override { return false; }
+    bool IsSealed() const override { return false; }
+
+    // --- IMember ---
+    const ILSpy::Decompiler::TypeSystem::IMember* MemberDefinition() const override { return this; }
+    const ILSpy::Decompiler::TypeSystem::IType& ReturnType() const override { return *returnType_; }
+    std::vector<const ILSpy::Decompiler::TypeSystem::IMember*> ExplicitlyImplementedInterfaceMembers() const override { return {}; }
+    bool IsExplicitInterfaceImplementation() const override { return false; }
+    bool IsVirtual() const override { return false; }
+    bool IsOverride() const override { return false; }
+    bool IsOverridable() const override { return false; }
+    const ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution* Substitution() const override { return nullptr; }
+    // The covariant `IMethod::Specialize` override (the D389 convention).
+    const ILSpy::Decompiler::TypeSystem::IMethod* Specialize(const ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution*) const override { return this; }
+    bool Equals(const ILSpy::Decompiler::TypeSystem::IMember* obj, const ILSpy::Decompiler::TypeSystem::TypeVisitor*) const override { return obj == this; }
+
+    // --- IParameterizedMember ---
+    std::vector<const ILSpy::Decompiler::TypeSystem::IParameter*> Parameters() const override { return {}; }
+
+    // --- IMethod ---
+    std::vector<const ILSpy::Decompiler::TypeSystem::IAttribute*> GetReturnTypeAttributes() const override { return {}; }
+    bool ReturnTypeIsRefReadOnly() const override { return false; }
+    bool IsInitOnly() const override { return false; }
+    bool ThisIsRefReadOnly() const override { return false; }
+    std::vector<const ILSpy::Decompiler::TypeSystem::ITypeParameter*> TypeParameters() const override { return {}; }
+    std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> TypeArguments() const override { return {}; }
+    bool IsExtensionMethod() const override { return false; }
+    bool IsLocalFunction() const override { return false; }
+    bool IsConstructor() const override { return false; }
+    bool IsDestructor() const override { return false; }
+    bool IsOperator() const override { return false; }
+    bool HasBody() const override { return false; }
+    bool IsAccessor() const override { return false; }
+    const ILSpy::Decompiler::TypeSystem::IMember* AccessorOwner() const override { return nullptr; }
+    ILSpy::Decompiler::TypeSystem::MethodSemanticsAttributes AccessorKind() const override {
+        return ILSpy::Decompiler::TypeSystem::MethodSemanticsAttributes::None;
+    }
+    const ILSpy::Decompiler::TypeSystem::IMethod* ReducedFrom() const override { return nullptr; }
+
+private:
+    const TestCompilation& compilation_;
+    std::string name_;
+    std::string fullName_;
+    ILSpy::Decompiler::TypeSystem::ITypePtr returnType_;
+};
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// UserDefinedConv (backs the `UserDefinedConversion` factory method)
+// ---------------------------------------------------------------------------
+
+TEST(UserDefinedConvTest, CtorStoresAllFieldsAndComputesIsValid)
+{
+    // The C# `UserDefinedConv(bool isImplicit, IMethod method, Conversion before, Conversion
+    // after, bool isLifted, bool isAmbiguous)` stores the fields and computes `isValid =
+    // !isAmbiguous`. The `isAmbiguous` arg is the load-bearing crux for `IsValid`.
+    TestCompilation comp;
+    TestMethod method(comp);
+    auto before = Conversions::IdentityConversion();
+    auto after = Conversions::IdentityConversion();
+    UserDefinedConv c(true, &method, before, after, /*isLifted*/ false, /*isAmbiguous*/ false);
+    EXPECT_EQ(c.Method(), &method);
+    EXPECT_TRUE(c.IsValid());
+    EXPECT_TRUE(c.IsImplicit());
+    EXPECT_FALSE(c.IsExplicit());
+    EXPECT_FALSE(c.IsLifted());
+    EXPECT_TRUE(c.IsUserDefined());
+    EXPECT_EQ(c.ConversionBeforeUserDefinedOperator().get(), before.get());
+    EXPECT_EQ(c.ConversionAfterUserDefinedOperator().get(), after.get());
+}
+
+TEST(UserDefinedConvTest, IsAmbiguousMakesIsValidFalse)
+{
+    // The C# `isValid = !isAmbiguous` -- an ambiguous user-defined conversion is NOT valid
+    // (the load-bearing crux the `ConversionResolveResult.IsError => !IsValid` path reaches
+    // for the ambiguous case).
+    TestCompilation comp;
+    TestMethod method(comp);
+    UserDefinedConv c(true, &method, nullptr, nullptr, false, /*isAmbiguous*/ true);
+    EXPECT_FALSE(c.IsValid());
+}
+
+TEST(UserDefinedConvTest, IsExplicitIsNegationOfIsImplicit)
+{
+    TestCompilation comp;
+    TestMethod method(comp);
+    UserDefinedConv implicit_(true, &method, nullptr, nullptr, false, false);
+    UserDefinedConv explicit_(false, &method, nullptr, nullptr, false, false);
+    EXPECT_TRUE(implicit_.IsImplicit());
+    EXPECT_FALSE(implicit_.IsExplicit());
+    EXPECT_FALSE(explicit_.IsImplicit());
+    EXPECT_TRUE(explicit_.IsExplicit());
+}
+
+TEST(UserDefinedConvTest, IsLiftedRoundTrips)
+{
+    TestCompilation comp;
+    TestMethod method(comp);
+    UserDefinedConv c(true, &method, nullptr, nullptr, /*isLifted*/ true, false);
+    EXPECT_TRUE(c.IsLifted());
+}
+
+TEST(UserDefinedConvTest, NullableBeforeAfterConversionsDefaultToNull)
+{
+    // The C# nullable `Conversion` reference fields default to `null` when the caller passes
+    // `null`; the C++ `std::shared_ptr<Conversion>` ports to an empty `shared_ptr`.
+    TestCompilation comp;
+    TestMethod method(comp);
+    UserDefinedConv c(true, &method, nullptr, nullptr, false, false);
+    EXPECT_EQ(c.ConversionBeforeUserDefinedOperator(), nullptr);
+    EXPECT_EQ(c.ConversionAfterUserDefinedOperator(), nullptr);
+}
+
+TEST(UserDefinedConvTest, ValueBasedEqualsTwoDistinctInstancesWithSameStateAreEqual)
+{
+    // The load-bearing crux distinguishing a value-based conversion from the singleton
+    // reference-equality: two DISTINCT `UserDefinedConv` instances with equal state (the
+    // SAME method pointer + equal bools + equal before/after conversions) are EQUAL by
+    // value. The `UserDefinedConversion` factory METHOD builds a NEW instance per call, so
+    // two calls with equal args are distinct instances that must compare equal by value --
+    // this `Equals` is what makes that work. The method is folded by REFERENCE-equality
+    // (the C# `method.Equals(o.method)` resolves to `object.Equals`), so the SAME method
+    // pointer is required.
+    TestCompilation comp;
+    TestMethod method(comp);
+    auto before = Conversions::IdentityConversion();
+    auto after = Conversions::IdentityConversion();
+    UserDefinedConv a(true, &method, before, after, false, false);
+    UserDefinedConv b(true, &method, before, after, false, false);
+    EXPECT_NE(&a, &b);       // distinct instances
+    EXPECT_TRUE(a.Equals(b));  // but value-equal
+    EXPECT_TRUE(b.Equals(a));  // symmetric
+}
+
+TEST(UserDefinedConvTest, EqualsReturnsFalseForDifferentSubtype)
+{
+    // The C# `other as UserDefinedConv` yields null for a different subtype, so `Equals`
+    // returns false. A `BuiltinConversion` is NOT a `UserDefinedConv`.
+    TestCompilation comp;
+    TestMethod method(comp);
+    UserDefinedConv a(true, &method, nullptr, nullptr, false, false);
+    BuiltinConversion b(true, 0);
+    EXPECT_FALSE(a.Equals(b));
+}
+
+TEST(UserDefinedConvTest, EqualsReturnsFalseForDifferentMethod)
+{
+    // The `method` is folded by reference-equality (the C# `method.Equals(o.method)` ->
+    // `object.Equals`), so two `UserDefinedConv`s over DIFFERENT method instances are NOT
+    // equal even with identical other state.
+    TestCompilation comp;
+    TestMethod methodA(comp);
+    TestMethod methodB(comp);
+    UserDefinedConv a(true, &methodA, nullptr, nullptr, false, false);
+    UserDefinedConv b(true, &methodB, nullptr, nullptr, false, false);
+    EXPECT_FALSE(a.Equals(b));
+}
+
+TEST(UserDefinedConvTest, EqualsReturnsFalseForDifferentBools)
+{
+    // The C# `Equals` compares `isLifted` / `isImplicit` / `isValid`; a difference in any one
+    // makes the conversions unequal (the SAME method is used so the method comparison
+    // passes).
+    TestCompilation comp;
+    TestMethod method(comp);
+    UserDefinedConv base(true, &method, nullptr, nullptr, false, false);
+    UserDefinedConv diffLifted(true, &method, nullptr, nullptr, /*isLifted*/ true, false);
+    UserDefinedConv diffImplicit(false, &method, nullptr, nullptr, false, false);
+    UserDefinedConv diffValid(true, &method, nullptr, nullptr, false, /*isAmbiguous*/ true);
+    EXPECT_FALSE(base.Equals(diffLifted));
+    EXPECT_FALSE(base.Equals(diffImplicit));
+    EXPECT_FALSE(base.Equals(diffValid));
+}
+
+TEST(UserDefinedConvTest, GetHashCodeIsConsistentWithEquals)
+{
+    TestCompilation comp;
+    TestMethod method(comp);
+    auto before = Conversions::IdentityConversion();
+    auto after = Conversions::IdentityConversion();
+    UserDefinedConv a(true, &method, before, after, false, false);
+    UserDefinedConv b(true, &method, before, after, false, false);
+    EXPECT_TRUE(a.Equals(b));
+    EXPECT_EQ(a.GetHashCode(), b.GetHashCode());
+}
+
+TEST(UserDefinedConvTest, GetHashCodeDistinguishesBoolsAndMethod)
+{
+    // The C# `GetHashCode => unchecked(method.GetHashCode() + (isLifted ? 31 : 27) +
+    // (isImplicit ? 71 : 61) + (isValid ? 107 : 109))` -- the bools and the method identity
+    // hash all participate. Two conversions with the same method but different bools hash
+    // differently; two with different methods hash differently.
+    TestCompilation comp;
+    TestMethod method(comp);
+    UserDefinedConv validImplicitNonLifted(true, &method, nullptr, nullptr, false, false);
+    UserDefinedConv validImplicitLifted(true, &method, nullptr, nullptr, true, false);
+    UserDefinedConv validExplicitNonLifted(false, &method, nullptr, nullptr, false, false);
+    UserDefinedConv invalidImplicitNonLifted(true, &method, nullptr, nullptr, false, true);
+    EXPECT_NE(validImplicitNonLifted.GetHashCode(), validImplicitLifted.GetHashCode());
+    EXPECT_NE(validImplicitNonLifted.GetHashCode(), validExplicitNonLifted.GetHashCode());
+    EXPECT_NE(validImplicitNonLifted.GetHashCode(), invalidImplicitNonLifted.GetHashCode());
+    TestMethod methodB(comp);
+    UserDefinedConv otherMethod(true, &methodB, nullptr, nullptr, false, false);
+    EXPECT_NE(validImplicitNonLifted.GetHashCode(), otherMethod.GetHashCode());
+}
+
+TEST(UserDefinedConvTest, ToStringImplicitNonLiftedValidNoSpaceQuirk)
+{
+    // The C# `ToString => (isImplicit ? "implicit" : "explicit") + (isLifted ? " lifted" :
+    // "") + (isValid ? "" : " ambiguous") + "user-defined conversion (" + method + ")"`.
+    // NOTE the C# source quirk: there is NO space between the kind/lifted/ambiguous prefix
+    // and "user-defined" (the " lifted" / " ambiguous" arms carry LEADING spaces, but the
+    // bare implicit/explicit and the final "user-defined" have no space between them), so a
+    // bare implicit non-lifted valid conversion renders "implicituser-defined conversion".
+    // Ported verbatim (not "fixed"); the `+ method` uses `method->FullName()` (a documented
+    // deviation since the minimal `IMethod` port has no `ToString` virtual).
+    TestCompilation comp;
+    TestMethod method(comp, "op_Implicit", "Test.op_Implicit");
+    UserDefinedConv c(true, &method, nullptr, nullptr, false, false);
+    EXPECT_EQ(c.ToString(), "implicituser-defined conversion (Test.op_Implicit)");
+}
+
+TEST(UserDefinedConvTest, ToStringExplicitLiftedAndAmbiguousNoSpaceQuirk)
+{
+    // The same no-space quirk: " lifted" and " ambiguous" carry leading spaces, so the
+    // lifted/ambiguous forms render "explicit lifteduser-defined conversion" and
+    // "implicit ambiguoususer-defined conversion" (the space is BEFORE "lifted"/"ambiguous",
+    // not before "user-defined").
+    TestCompilation comp;
+    TestMethod method(comp, "op_Explicit", "NS.op_Explicit");
+    UserDefinedConv explicitLifted(false, &method, nullptr, nullptr, /*isLifted*/ true, false);
+    EXPECT_EQ(explicitLifted.ToString(), "explicit lifteduser-defined conversion (NS.op_Explicit)");
+    UserDefinedConv ambiguous(true, &method, nullptr, nullptr, false, /*isAmbiguous*/ true);
+    EXPECT_EQ(ambiguous.ToString(), "implicit ambiguoususer-defined conversion (NS.op_Explicit)");
+}
+
+TEST(UserDefinedConvTest, IsFinalAndDerivesFromConversion)
+{
+    static_assert(std::is_final_v<UserDefinedConv>,
+                  "UserDefinedConv is final (mirrors the C# `sealed`).");
+    static_assert(std::is_base_of_v<Conversion, UserDefinedConv>,
+                  "UserDefinedConv derives from Conversion.");
+    static_assert(std::has_virtual_destructor_v<UserDefinedConv>,
+                  "UserDefinedConv has a virtual destructor.");
+}
+
+// ---------------------------------------------------------------------------
+// MethodGroupConv (backs the `MethodGroupConversion` / `InvalidMethodGroupConversion`
+// factory methods)
+// ---------------------------------------------------------------------------
+
+TEST(MethodGroupConvTest, CtorStoresAllFields)
+{
+    // The C# `MethodGroupConv(IMethod method, bool isVirtualMethodLookup, bool
+    // delegateCapturesFirstArgument, bool isValid)` stores all four fields.
+    TestCompilation comp;
+    TestMethod method(comp);
+    MethodGroupConv c(&method, /*isVirtualMethodLookup*/ true,
+                      /*delegateCapturesFirstArgument*/ false, /*isValid*/ true);
+    EXPECT_EQ(c.Method(), &method);
+    EXPECT_TRUE(c.IsValid());
+    EXPECT_TRUE(c.IsImplicit());  // always true for a method-group conversion
+    EXPECT_FALSE(c.IsExplicit());
+    EXPECT_TRUE(c.IsMethodGroupConversion());
+    EXPECT_TRUE(c.IsVirtualMethodLookup());
+    EXPECT_FALSE(c.DelegateCapturesFirstArgument());
+}
+
+TEST(MethodGroupConvTest, InvalidMethodGroupConvIsValidFalse)
+{
+    TestCompilation comp;
+    TestMethod method(comp);
+    MethodGroupConv c(&method, false, false, /*isValid*/ false);
+    EXPECT_FALSE(c.IsValid());
+    EXPECT_TRUE(c.IsMethodGroupConversion());
+}
+
+TEST(MethodGroupConvTest, IsImplicitAlwaysTrue)
+{
+    // The C# `public override bool IsImplicit => true` -- a method-group conversion is
+    // ALWAYS implicit (regardless of the lookup/capture/valid flags).
+    TestCompilation comp;
+    TestMethod method(comp);
+    MethodGroupConv valid(&method, false, false, true);
+    MethodGroupConv invalid(&method, false, false, false);
+    EXPECT_TRUE(valid.IsImplicit());
+    EXPECT_TRUE(invalid.IsImplicit());
+}
+
+TEST(MethodGroupConvTest, DelegateCapturesFirstArgumentRoundTrips)
+{
+    TestCompilation comp;
+    TestMethod method(comp);
+    MethodGroupConv c(&method, false, /*delegateCapturesFirstArgument*/ true, true);
+    EXPECT_TRUE(c.DelegateCapturesFirstArgument());
+}
+
+TEST(MethodGroupConvTest, ValueBasedEqualsComparesOnlyMethod)
+{
+    // The load-bearing crux: the C# `Equals => other is MethodGroupConv o &&
+    // method.Equals(o.method)` compares ONLY the `method` (the other fields do NOT
+    // participate). Two method-group conversions over the SAME method but DIFFERENT
+    // lookup/capture/valid flags are EQUAL. The `method.Equals` resolves to
+    // `object.Equals` (reference-equality), so the SAME method pointer is required.
+    TestCompilation comp;
+    TestMethod method(comp);
+    MethodGroupConv a(&method, true, true, true);
+    MethodGroupConv b(&method, false, false, false);  // different flags, SAME method
+    EXPECT_NE(&a, &b);
+    EXPECT_TRUE(a.Equals(b));  // equal by value (same method, flags ignored)
+    EXPECT_TRUE(b.Equals(a));  // symmetric
+}
+
+TEST(MethodGroupConvTest, EqualsReturnsFalseForDifferentSubtype)
+{
+    TestCompilation comp;
+    TestMethod method(comp);
+    MethodGroupConv a(&method, false, false, true);
+    BuiltinConversion b(true, 0);
+    EXPECT_FALSE(a.Equals(b));
+}
+
+TEST(MethodGroupConvTest, EqualsReturnsFalseForDifferentMethod)
+{
+    TestCompilation comp;
+    TestMethod methodA(comp);
+    TestMethod methodB(comp);
+    MethodGroupConv a(&methodA, false, false, true);
+    MethodGroupConv b(&methodB, false, false, true);
+    EXPECT_FALSE(a.Equals(b));
+}
+
+TEST(MethodGroupConvTest, GetHashCodeIsMethodIdentityHash)
+{
+    // The C# `GetHashCode => method.GetHashCode()` -- the identity hash of the method (the
+    // one-argument `GetHashCode` resolves to `object.GetHashCode`). Two conversions over the
+    // SAME method hash equally (consistent with the method-only `Equals`); two over
+    // DIFFERENT methods may or may not collide but the identity-hash invariant holds.
+    TestCompilation comp;
+    TestMethod method(comp);
+    MethodGroupConv a(&method, true, true, true);
+    MethodGroupConv b(&method, false, false, false);
+    EXPECT_EQ(a.GetHashCode(), b.GetHashCode());  // same method -> same hash
+    EXPECT_EQ(a.GetHashCode(), a.GetHashCode());  // stable
+}
+
+TEST(MethodGroupConvTest, IsFinalAndDerivesFromConversion)
+{
+    static_assert(std::is_final_v<MethodGroupConv>,
+                  "MethodGroupConv is final (mirrors the C# `sealed`).");
+    static_assert(std::is_base_of_v<Conversion, MethodGroupConv>,
+                  "MethodGroupConv derives from Conversion.");
+    static_assert(std::has_virtual_destructor_v<MethodGroupConv>,
+                  "MethodGroupConv has a virtual destructor.");
+}
+
+// ---------------------------------------------------------------------------
+// Conversions factory accessors (the `UserDefinedConversion` / `MethodGroupConversion` /
+// `InvalidMethodGroupConversion` factory METHODS)
+// ---------------------------------------------------------------------------
+
+TEST(ConversionsTest, UserDefinedConversionIsFactoryMethodNotSingleton)
+{
+    // `UserDefinedConversion` is a FACTORY METHOD (a NEW instance per call), NOT a singleton:
+    // two calls with equal args return DISTINCT instances that compare EQUAL by value (the
+    // `UserDefinedConv` value-based `Equals`).
+    TestCompilation comp;
+    TestMethod method(comp);
+    auto before = Conversions::IdentityConversion();
+    auto after = Conversions::IdentityConversion();
+    auto a = Conversions::UserDefinedConversion(&method, true, before, after);
+    auto b = Conversions::UserDefinedConversion(&method, true, before, after);
+    EXPECT_NE(a.get(), b.get());   // distinct instances
+    EXPECT_TRUE(a->Equals(*b));    // but value-equal
+    EXPECT_NE(dynamic_cast<UserDefinedConv*>(a.get()), nullptr);
+}
+
+TEST(ConversionsTest, UserDefinedConversionWiring)
+{
+    // `Conversion.UserDefinedConversion(operatorMethod, isImplicit, before, after,
+    // isLifted = false, isAmbiguous = false) => new UserDefinedConv(...)` -- a user-defined
+    // conversion (`IsUserDefined` true, `IsValid` true when not ambiguous).
+    TestCompilation comp;
+    TestMethod method(comp);
+    auto before = Conversions::IdentityConversion();
+    auto after = Conversions::IdentityConversion();
+    auto c = Conversions::UserDefinedConversion(&method, true, before, after);
+    ASSERT_NE(c, nullptr);
+    EXPECT_TRUE(c->IsUserDefined());
+    EXPECT_TRUE(c->IsValid());
+    EXPECT_TRUE(c->IsImplicit());
+    EXPECT_FALSE(c->IsLifted());
+    EXPECT_EQ(c->Method(), &method);
+    EXPECT_EQ(c->ConversionBeforeUserDefinedOperator().get(), before.get());
+    EXPECT_EQ(c->ConversionAfterUserDefinedOperator().get(), after.get());
+}
+
+TEST(ConversionsTest, UserDefinedConversionLiftedAndAmbiguous)
+{
+    TestCompilation comp;
+    TestMethod method(comp);
+    auto lifted = Conversions::UserDefinedConversion(&method, false, nullptr, nullptr,
+                                                     /*isLifted*/ true);
+    ASSERT_NE(lifted, nullptr);
+    EXPECT_TRUE(lifted->IsLifted());
+    EXPECT_TRUE(lifted->IsExplicit());
+    auto ambiguous = Conversions::UserDefinedConversion(&method, true, nullptr, nullptr, false,
+                                                        /*isAmbiguous*/ true);
+    ASSERT_NE(ambiguous, nullptr);
+    EXPECT_FALSE(ambiguous->IsValid());  // ambiguous -> not valid
+}
+
+TEST(ConversionsTest, MethodGroupConversionIsFactoryMethodNotSingleton)
+{
+    TestCompilation comp;
+    TestMethod method(comp);
+    auto a = Conversions::MethodGroupConversion(&method, true, true);
+    auto b = Conversions::MethodGroupConversion(&method, true, true);
+    EXPECT_NE(a.get(), b.get());   // distinct instances
+    EXPECT_TRUE(a->Equals(*b));    // but value-equal (method-only Equals)
+    EXPECT_NE(dynamic_cast<MethodGroupConv*>(a.get()), nullptr);
+}
+
+TEST(ConversionsTest, MethodGroupConversionWiring)
+{
+    // `Conversion.MethodGroupConversion(chosenMethod, isVirtualMethodLookup,
+    // delegateCapturesFirstArgument) => new MethodGroupConv(..., isValid: true)` -- the
+    // VALID method-group conversion.
+    TestCompilation comp;
+    TestMethod method(comp);
+    auto c = Conversions::MethodGroupConversion(&method, true, false);
+    ASSERT_NE(c, nullptr);
+    EXPECT_TRUE(c->IsValid());
+    EXPECT_TRUE(c->IsMethodGroupConversion());
+    EXPECT_TRUE(c->IsImplicit());
+    EXPECT_TRUE(c->IsVirtualMethodLookup());
+    EXPECT_FALSE(c->DelegateCapturesFirstArgument());
+    EXPECT_EQ(c->Method(), &method);
+}
+
+TEST(ConversionsTest, InvalidMethodGroupConversionWiring)
+{
+    // `Conversion.InvalidMethodGroupConversion(...) => new MethodGroupConv(..., isValid:
+    // false)` -- the INVALID method-group conversion (the `isValid: false` twin).
+    TestCompilation comp;
+    TestMethod method(comp);
+    auto c = Conversions::InvalidMethodGroupConversion(&method, false, true);
+    ASSERT_NE(c, nullptr);
+    EXPECT_FALSE(c->IsValid());
+    EXPECT_TRUE(c->IsMethodGroupConversion());
+    EXPECT_FALSE(c->IsVirtualMethodLookup());
+    EXPECT_TRUE(c->DelegateCapturesFirstArgument());
+}
+
+TEST(ConversionsTest, MethodGroupConversionEqualsInvalidOverSameMethod)
+{
+    // The method-only `Equals` makes a `MethodGroupConversion` and an
+    // `InvalidMethodGroupConversion` over the SAME method EQUAL (the `isValid` flag does NOT
+    // participate in `Equals`), faithfully mirroring the C# `method.Equals(o.method)` alone.
+    TestCompilation comp;
+    TestMethod method(comp);
+    auto valid = Conversions::MethodGroupConversion(&method, false, false);
+    auto invalid = Conversions::InvalidMethodGroupConversion(&method, false, false);
+    EXPECT_NE(valid->IsValid(), invalid->IsValid());  // valid differs...
+    EXPECT_TRUE(valid->Equals(*invalid));              // ...but they are Equals-equal
 }
