@@ -44,6 +44,7 @@
 namespace ILSpy::Decompiler::TypeSystem {
 
 class IType;
+class ITypeDefinition;
 class TypeVisitor;
 using ITypePtr = std::shared_ptr<IType>;
 
@@ -82,6 +83,24 @@ public:
     // UnknownType return their ctor-supplied bool?. ByReferenceType / PointerType
     // inherit the `std::nullopt` default, faithful to the C# `return null`.
     virtual std::optional<bool> IsReferenceType() const { return std::nullopt; }
+
+    // Gets the underlying type definition (faithful port of IType.cs `ITypeDefinition?
+    // GetDefinition()`). Can return null for types which do not have a type definition (for
+    // example arrays, pointers, type parameters, the C++-only minimal KnownType / SimpleType
+    // / SpecialType). The C# interface declares this `abstract` (no AbstractType default); the
+    // minimal port makes it virtual-WITH-DEFAULT `nullptr` (the D406 flattened-AbstractType
+    // convention, mirroring the C# AbstractType.GetDefinition() `return null`) so the C++-only
+    // minimal types and the not-yet-concrete interfaces inherit it without a big-bang churn.
+    // The delegating decorators (ModifiedType / NullabilityAnnotatedType / ParameterizedType /
+    // TupleType) override it to forward to their element / generic / underlying / base type
+    // (the C# DecoratedType / ModifiedType / ParameterizedType / TupleType overrides);
+    // FunctionPointerType inherits the `nullptr` default -- the faithful common case (the C#
+    // override returns null when TypeSystemOptions.FunctionPointers is enabled, which the
+    // minimal port assumes unconditionally per the D404 module-field deferral; the UIntPtr-alias
+    // fallback stays deferred with the module field). The real MetadataTypeDefinition that
+    // production `ICompilation.FindType` returns overrides this to return `this` (it IS an
+    // ITypeDefinition); the minimal KnownType is NOT an ITypeDefinition and inherits `nullptr`.
+    virtual const ITypeDefinition* GetDefinition() const { return nullptr; }
 
     // The TypeVisitor dispatch (faithful port of IType.cs AcceptVisitor /
     // VisitChildren). The C# interface declares these abstract and AbstractType
@@ -167,6 +186,12 @@ public:
     // (delegates to the generic definition).
     std::optional<bool> IsReferenceType() const override {
         return genericType_ ? genericType_->IsReferenceType() : std::nullopt;
+    }
+    // Faithful port of ParameterizedType.cs `ITypeDefinition GetDefinition() => genericType.GetDefinition()`
+    // (delegates to the generic definition; a type-argument substitution carries no definition
+    // of its own -- `List<int>.GetDefinition()` is the `List` definition).
+    const ITypeDefinition* GetDefinition() const override {
+        return genericType_ ? genericType_->GetDefinition() : nullptr;
     }
     // Faithful port of ParameterizedType.cs AcceptVisitor / VisitChildren: dispatch
     // to VisitParameterizedType and reconstruct (genericType + type args) if any
@@ -326,6 +351,11 @@ public:
     std::optional<bool> IsReferenceType() const override {
         return element_ ? element_->IsReferenceType() : std::nullopt;
     }
+    // Faithful port of ModifiedType.cs `ITypeDefinition GetDefinition() => elementType.GetDefinition()`
+    // (delegates to the decorated element type; a custom modifier carries no definition).
+    const ITypeDefinition* GetDefinition() const override {
+        return element_ ? element_->GetDefinition() : nullptr;
+    }
     // Faithful port of ModifiedType.cs AcceptVisitor (ModReq / ModOpt split) /
     // VisitChildren (element + modifier).
     ITypePtr AcceptVisitor(TypeVisitor& visitor) override;
@@ -374,6 +404,12 @@ public:
     // wrapped base type -- the nullability annotation does not change reference-ness).
     std::optional<bool> IsReferenceType() const override {
         return baseType_ ? baseType_->IsReferenceType() : std::nullopt;
+    }
+    // Faithful port of the C# DecoratedType `ITypeDefinition GetDefinition() => baseType.GetDefinition()`
+    // (NullabilityAnnotatedType derives from DecoratedType which delegates to the wrapped base
+    // type; a nullability annotation carries no definition of its own).
+    const ITypeDefinition* GetDefinition() const override {
+        return baseType_ ? baseType_->GetDefinition() : nullptr;
     }
     // Faithful port of NullabilityAnnotatedType.cs AcceptVisitor /
     // VisitChildren (baseType; the C# ChangeNullability / IsReferenceType /
@@ -550,6 +586,12 @@ public:
     // (delegates to the underlying ValueTuple<...> parameterized type).
     std::optional<bool> IsReferenceType() const override {
         return underlyingType_ ? underlyingType_->IsReferenceType() : std::nullopt;
+    }
+    // Faithful port of TupleType.cs `ITypeDefinition GetDefinition() => UnderlyingType.GetDefinition()`
+    // (delegates to the underlying `System.ValueTuple<...>` parameterized type; a tuple carries
+    // no definition of its own).
+    const ITypeDefinition* GetDefinition() const override {
+        return underlyingType_ ? underlyingType_->GetDefinition() : nullptr;
     }
     // Faithful port of TupleType.cs VisitChildren (element types; the underlying
     // ValueTuple<...> and element names are carried over; the C# Compilation /
