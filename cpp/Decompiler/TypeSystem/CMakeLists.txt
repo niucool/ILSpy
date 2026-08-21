@@ -17,4 +17,5 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ParameterizedTypeReference.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/NestedTypeReference.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/DefaultAssemblyReference.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/KnownTypeCache.cpp
 )
