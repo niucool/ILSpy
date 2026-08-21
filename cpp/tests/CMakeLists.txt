@@ -97,6 +97,7 @@ add_executable(ilspy_tests
     Decompiler/Semantics/NamedArgumentResolveResult_Test.cpp
     Decompiler/Semantics/UnknownMemberResolveResult_Test.cpp
     Decompiler/Semantics/OperatorResolveResult_Test.cpp
+    Decompiler/Semantics/TupleResolveResult_Test.cpp
     Decompiler/Output/IAmbience_Test.cpp
     Decompiler/IL/ILAst_Test.cpp
     Decompiler/IL/ILAstInstructions_Test.cpp
