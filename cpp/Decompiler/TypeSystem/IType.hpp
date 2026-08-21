@@ -67,6 +67,22 @@ public:
     virtual std::string ReflectionName() const = 0;
     virtual int TypeParameterCount() const = 0;
 
+    // Whether the type is a reference type or value type (faithful port of
+    // IType.cs `bool? IsReferenceType`): `std::optional<bool>(true)` = reference
+    // type, `std::optional<bool>(false)` = value type, `std::nullopt` = not known
+    // (e.g. an unconstrained type parameter or a not-yet-resolved name reference).
+    // The C# interface declares this `abstract` (no AbstractType default); the
+    // minimal port makes it virtual-WITH-DEFAULT `std::nullopt` (the D406
+    // flattened-AbstractType convention) to avoid the D370 big-bang churn a
+    // pure-virtual would force on every IType subclass and test stub. The
+    // concrete types with a clear C# value override it: ArrayType -> true,
+    // FunctionPointerType -> false, the delegating decorators ModifiedType /
+    // ParameterizedType / TupleType / NullabilityAnnotatedType forward to their
+    // element/generic/underlying/base type, and the stored-field SpecialType /
+    // UnknownType return their ctor-supplied bool?. ByReferenceType / PointerType
+    // inherit the `std::nullopt` default, faithful to the C# `return null`.
+    virtual std::optional<bool> IsReferenceType() const { return std::nullopt; }
+
     // The TypeVisitor dispatch (faithful port of IType.cs AcceptVisitor /
     // VisitChildren). The C# interface declares these abstract and AbstractType
     // provides the defaults (VisitOtherType for the no-dedicated-Visit-method
@@ -103,6 +119,7 @@ public:
     std::string Name() const override;
     std::string ReflectionName() const override;
     int TypeParameterCount() const override;
+    std::optional<bool> IsReferenceType() const override;
     KnownTypeCode Code() const noexcept { return code_; }
 protected:
     bool StructuralEquals(const IType& other) const override {
@@ -146,6 +163,11 @@ public:
     int TypeParameterCount() const override { return static_cast<int>(typeArgs_.size()); }
     const ITypePtr& GenericType() const noexcept { return genericType_; }
     const std::vector<ITypePtr>& TypeArguments() const noexcept { return typeArgs_; }
+    // Faithful port of ParameterizedType.cs `bool? IsReferenceType => genericType.IsReferenceType`
+    // (delegates to the generic definition).
+    std::optional<bool> IsReferenceType() const override {
+        return genericType_ ? genericType_->IsReferenceType() : std::nullopt;
+    }
     // Faithful port of ParameterizedType.cs AcceptVisitor / VisitChildren: dispatch
     // to VisitParameterizedType and reconstruct (genericType + type args) if any
     // child changed, else return this.
@@ -173,6 +195,9 @@ public:
     const ITypePtr& Element() const noexcept { return element_; }
     int Rank() const noexcept { return rank_; }
     bool IsSzArray() const noexcept { return isSzArray_; }
+    // Faithful port of ArrayType.cs `bool? IsReferenceType => true` (an array is
+    // always a reference type).
+    std::optional<bool> IsReferenceType() const override { return std::optional<bool>(true); }
     // Faithful port of ArrayType.cs VisitChildren: reconstruct with the visited
     // element if it changed, else return this.
     ITypePtr AcceptVisitor(TypeVisitor& visitor) override;
@@ -251,17 +276,26 @@ private:
 // SpecialType usage where UnknownType is the null object for IType.
 class SpecialType : public IType {
 public:
-    explicit SpecialType(TypeKind kind) : kind_(kind) {}
+    explicit SpecialType(TypeKind kind, std::optional<bool> isReferenceType = std::nullopt)
+        : kind_(kind), isReferenceType_(isReferenceType) {}
     TypeKind Kind() const override { return kind_; }
     std::string Name() const override;
     std::string ReflectionName() const override { return Name(); }
     int TypeParameterCount() const override { return 0; }
+    // Faithful port of SpecialType.cs `bool? IsReferenceType => isReferenceType`
+    // (the stored field set per static singleton: NullType/Dynamic -> true,
+    // NInt/NUInt -> false, UnknownType/NoType/ArgList/UnboundTypeArgument -> null).
+    // The minimal port's `UnknownType()` convenience constructs
+    // `SpecialType(TypeKind::Unknown)` (isReferenceType defaults to nullopt),
+    // faithful to the C# `SpecialType.UnknownType` singleton (isReferenceType: null).
+    std::optional<bool> IsReferenceType() const override { return isReferenceType_; }
 protected:
     bool StructuralEquals(const IType& other) const override {
         return kind_ == static_cast<const SpecialType&>(other).kind_;
     }
 private:
     TypeKind kind_;
+    std::optional<bool> isReferenceType_;
 };
 
 // A modopt/modreq modified type (ECMA-335 II.23.2.7 custom modifier): a type decorated
@@ -287,6 +321,11 @@ public:
     const ITypePtr& Modifier() const noexcept { return modifier_; }
     const ITypePtr& Element() const noexcept { return element_; }
     bool IsRequired() const noexcept { return isRequired_; }
+    // Faithful port of ModifiedType.cs `bool? IsReferenceType => elementType.IsReferenceType`
+    // (delegates to the decorated element type).
+    std::optional<bool> IsReferenceType() const override {
+        return element_ ? element_->IsReferenceType() : std::nullopt;
+    }
     // Faithful port of ModifiedType.cs AcceptVisitor (ModReq / ModOpt split) /
     // VisitChildren (element + modifier).
     ITypePtr AcceptVisitor(TypeVisitor& visitor) override;
@@ -330,6 +369,12 @@ public:
     Nullability Nullability() const noexcept { return nullability_; }
     // The C# `TypeWithoutAnnotation => baseType`: the un-annotated wrapped type.
     const ITypePtr& TypeWithoutAnnotation() const noexcept { return baseType_; }
+    // Faithful port of the C# DecoratedType `bool? IsReferenceType => baseType.IsReferenceType`
+    // (NullabilityAnnotatedType derives from DecoratedType which delegates to the
+    // wrapped base type -- the nullability annotation does not change reference-ness).
+    std::optional<bool> IsReferenceType() const override {
+        return baseType_ ? baseType_->IsReferenceType() : std::nullopt;
+    }
     // Faithful port of NullabilityAnnotatedType.cs AcceptVisitor /
     // VisitChildren (baseType; the C# ChangeNullability / IsReferenceType /
     // TypeParameter edge cases are deferred to the Phase 2 nullability-lifting
@@ -390,6 +435,9 @@ public:
     // default), so every function-pointer type renders the same reflection name.
     std::string ReflectionName() const override { return "delegate*"; }
     int TypeParameterCount() const override { return 0; }
+    // Faithful port of FunctionPointerType.cs `bool? IsReferenceType => false`
+    // (a function pointer is a value type).
+    std::optional<bool> IsReferenceType() const override { return std::optional<bool>(false); }
     SignatureCallingConvention CallingConvention() const noexcept { return callingConvention_; }
     const std::vector<ITypePtr>& CustomCallingConventions() const noexcept { return customCallingConventions_; }
     const ITypePtr& ReturnType() const noexcept { return returnType_; }
@@ -498,6 +546,11 @@ public:
     const std::vector<ITypePtr>& ElementTypes() const noexcept { return elementTypes_; }
     const std::vector<std::string>& ElementNames() const noexcept { return elementNames_; }
     const ITypePtr& UnderlyingType() const noexcept { return underlyingType_; }
+    // Faithful port of TupleType.cs `bool? IsReferenceType => UnderlyingType.IsReferenceType`
+    // (delegates to the underlying ValueTuple<...> parameterized type).
+    std::optional<bool> IsReferenceType() const override {
+        return underlyingType_ ? underlyingType_->IsReferenceType() : std::nullopt;
+    }
     // Faithful port of TupleType.cs VisitChildren (element types; the underlying
     // ValueTuple<...> and element names are carried over; the C# Compilation /
     // GetDefinition().ParentModule reconstruction inputs are deferred to the
@@ -544,9 +597,10 @@ private:
 class UnknownType : public IType {
 public:
     UnknownType(std::optional<std::string> ns, std::string name,
-                int typeParameterCount)
+                int typeParameterCount,
+                std::optional<bool> isReferenceType = std::nullopt)
         : fullTypeName_(ns.value_or(""), std::move(name), typeParameterCount),
-          namespaceKnown_(ns.has_value()) {}
+          namespaceKnown_(ns.has_value()), isReferenceType_(isReferenceType) {}
 
     TypeKind Kind() const override { return TypeKind::Unknown; }
     std::string Name() const override { return fullTypeName_.Name(); }
@@ -558,17 +612,24 @@ public:
     {
         return fullTypeName_.TypeParameterCount();
     }
+    // Faithful port of UnknownType.cs `bool? IsReferenceType => isReferenceType`
+    // (the stored field, defaulting to null = "not known", passed by the
+    // TypeProvider when it can derive reference-ness from the metadata raw type
+    // kind).
+    std::optional<bool> IsReferenceType() const override { return isReferenceType_; }
     const TopLevelTypeName& FullTypeName() const noexcept { return fullTypeName_; }
 protected:
     bool StructuralEquals(const IType& other) const override
     {
         const auto& o = static_cast<const UnknownType&>(other);
         return namespaceKnown_ == o.namespaceKnown_
-               && fullTypeName_ == o.fullTypeName_;
+               && fullTypeName_ == o.fullTypeName_
+               && isReferenceType_ == o.isReferenceType_;
     }
 private:
     TopLevelTypeName fullTypeName_;
     bool namespaceKnown_;
+    std::optional<bool> isReferenceType_;
 };
 
 // Convenience: the UnknownType null object (a `SpecialType(TypeKind::Unknown)`

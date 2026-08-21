@@ -71,6 +71,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/KnownTypeCache_Test.cpp
     Decompiler/TypeSystem/MergedNamespace_Test.cpp
     Decompiler/TypeSystem/SimpleCompilation_Test.cpp
+    Decompiler/TypeSystem/IsReferenceType_Test.cpp
     Decompiler/Semantics/ResolveResult_Test.cpp
     Decompiler/Semantics/TypeResolveResult_Test.cpp
     Decompiler/Semantics/ThisResolveResult_Test.cpp

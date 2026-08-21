@@ -48,6 +48,25 @@ int KnownType::TypeParameterCount() const {
     return r ? r->TypeParameterCount : 0;
 }
 
+std::optional<bool> KnownType::IsReferenceType() const {
+    // Faithful port of how a resolved known type's reference-ness derives from its
+    // Kind (the MetadataTypeDefinition.cs `bool? IsReferenceType` switch): Struct /
+    // Enum / Void are value types (false), every other kind is a reference type
+    // (true); an unknown kind (a KnownTypeCode not in the table) is "not known"
+    // (nullopt), faithful to the TypeKind.Unknown case where the reference-ness is
+    // not derivable from the kind alone.
+    TypeKind k = Kind();
+    if (k == TypeKind::Unknown) return std::nullopt;
+    switch (k) {
+        case TypeKind::Struct:
+        case TypeKind::Enum:
+        case TypeKind::Void:
+            return std::optional<bool>(false);
+        default:
+            return std::optional<bool>(true);
+    }
+}
+
 // ---- ParameterizedType ----
 
 std::string ParameterizedType::Name() const {
