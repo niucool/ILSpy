@@ -57,6 +57,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/TypeParameterSubstitution_Test.cpp
     Decompiler/TypeSystem/ITypeReference_Test.cpp
     Decompiler/TypeSystem/ITypeResolveContext_Test.cpp
+    Decompiler/TypeSystem/SimpleTypeResolveContext_Test.cpp
     Decompiler/Output/IAmbience_Test.cpp
     Decompiler/IL/ILAst_Test.cpp
     Decompiler/IL/ILAstInstructions_Test.cpp
