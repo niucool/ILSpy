@@ -29,13 +29,21 @@
 // `IdentityConversion` / `NullLiteralConversion` / the reference / dynamic / nullable /
 // pointer / boxing / unboxing / try-cast / interpolated-string / throw-expression /
 // inline-array / span conversions) -- plus a `Conversions` factory holder exposing them
-// as `std::shared_ptr<Conversion>` singletons. The remaining four subclasses
-// (`NumericOrEnumerationConversion` / `UserDefinedConv` / `MethodGroupConv` / `TupleConv`)
-// and their factory methods (the `static` methods that build a NEW instance per call, plus
-// the four numeric-conversion readonly fields) are deferred to a follow-up iteration --
-// they carry extra state (the method handle, the before/after conversions, the element
-// conversions) and value-based `Equals` / `GetHashCode` overrides absent from the two
-// subclasses ported here.
+// as `std::shared_ptr<Conversion>` singletons. This header additionally ports the two
+// IMethod-free value-based subclasses: `NumericOrEnumerationConversion` (backs the four
+// numeric-conversion singleton fields `ImplicitNumericConversion` /
+// `ExplicitNumericConversion` / `ImplicitLiftedNumericConversion` /
+// `ExplicitLiftedNumericConversion` and the `EnumerationConversion` factory method) and
+// `TupleConv` (backs the `TupleConversion` factory method) -- they carry value-based
+// `Equals` / `GetHashCode` overrides (two distinct instances with equal state are equal),
+// distinct from the reference-equality the two singleton subclasses above inherit. The
+// remaining two subclasses (`UserDefinedConv` / `MethodGroupConv`) and their factory
+// methods (`UserDefinedConversion` / `MethodGroupConversion` /
+// `InvalidMethodGroupConversion`) are deferred -- they carry an `IMethod` method handle the
+// value-based `Equals` / `GetHashCode` fold (the C# `method.Equals` / `method.GetHashCode`
+// resolve to `object.Equals` / `object.GetHashCode`, i.e. reference-equality and the
+// identity hash, since the one-argument call does not match the two-argument
+// `IMember.Equals(IMember, TypeVisitor)`).
 //
 // KEY PORT CONVENTIONS:
 //  * The C# nested `sealed class XxxConversion : Conversion` subclasses are PRIVATE to the
@@ -64,9 +72,11 @@
 //    `GetHashCode` -- they inherit the base reference-equality (`this == &other`) and
 //    identity-hash. Since the factories return shared SINGLETONS, two calls to the same
 //    factory return the same instance, so the inherited reference-equality is the faithful
-//    match for the C# singleton-field reference-equality. (The value-based `Equals` /
-//    `GetHashCode` overrides come with the deferred subclasses that carry distinguishing
-//    state.)
+//    match for the C# singleton-field reference-equality. `NumericOrEnumerationConversion`
+//    and `TupleConv` (ported here) DO override `Equals` / `GetHashCode` with value-based
+//    implementations -- two distinct instances with equal state are equal, distinct from
+//    the singleton reference-equality above. (The remaining `UserDefinedConv` /
+//    `MethodGroupConv` value-based overrides are deferred.)
 
 #ifndef ILSPY_DECOMPILER_SEMANTICS_CONVERSION_FACTORIES_HPP
 #define ILSPY_DECOMPILER_SEMANTICS_CONVERSION_FACTORIES_HPP
@@ -76,6 +86,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace ILSpy::Decompiler::Semantics {
 
@@ -158,8 +169,153 @@ private:
     std::uint8_t type_;
 };
 
-// The factory holder mirroring the C# `Conversion` `static readonly` fields (and, in a
-// follow-up iteration, the `static` factory methods). The C# static members live ON the
+// The C# `sealed class NumericOrEnumerationConversion : Conversion` -- the numeric or
+// enumeration conversion backing the four numeric-conversion singleton fields and the
+// `EnumerationConversion` factory method. It carries three bool fields (`isImplicit` /
+// `isLifted` / `isEnumeration`) and overrides `IsImplicit` / `IsExplicit` /
+// `IsNumericConversion` / `IsEnumerationConversion` / `IsLifted` plus a value-based
+// `Equals` / `GetHashCode` (two distinct instances with the same three bools are equal,
+// distinct from the singleton reference-equality the `InvalidConversion` /
+// `BuiltinConversion` factories inherit). This is the load-bearing crux distinguishing a
+// value-based conversion (the `static` factory METHOD `EnumerationConversion` builds a
+// NEW instance per call, so two calls with equal args are distinct instances that must
+// compare equal by value) from a singleton-backed field.
+class NumericOrEnumerationConversion final : public Conversion {
+public:
+    // The C# `NumericOrEnumerationConversion(bool isImplicit, bool isLifted, bool
+    // isEnumeration = false)` -- the `isEnumeration` defaulted arg lets the four numeric
+    // readonly fields omit it while `EnumerationConversion` passes `true`. The C++ port
+    // mirrors the defaulted arg.
+    NumericOrEnumerationConversion(bool isImplicit, bool isLifted, bool isEnumeration = false)
+        : isImplicit_(isImplicit), isLifted_(isLifted), isEnumeration_(isEnumeration) {}
+
+    bool IsImplicit() const override { return isImplicit_; }
+    // The C# `public override bool IsExplicit => !isImplicit`.
+    bool IsExplicit() const override { return !isImplicit_; }
+    // The C# `public override bool IsNumericConversion => !isEnumeration`.
+    bool IsNumericConversion() const override { return !isEnumeration_; }
+    bool IsEnumerationConversion() const override { return isEnumeration_; }
+    bool IsLifted() const override { return isLifted_; }
+
+    // The C# `override string ToString()` -- `(isImplicit ? "implicit" : "explicit") +
+    // (isLifted ? " lifted" : "") + (isEnumeration ? " enumeration" : " numeric") +
+    // " conversion"`. Non-virtual (the base omits `ToString`); the `final` class needs no
+    // further-override concern.
+    std::string ToString() const {
+        return std::string(isImplicit_ ? "implicit" : "explicit")
+            + (isLifted_ ? " lifted" : "")
+            + (isEnumeration_ ? " enumeration" : " numeric")
+            + " conversion";
+    }
+
+    // The C# `override bool Equals(Conversion other)` -- `other as
+    // NumericOrEnumerationConversion` then compare the three bools. Value-based: two
+    // distinct instances with equal state are equal (the dynamic_cast-yields-null path
+    // returns false for a different subtype, mirroring the C# `as`-returns-null).
+    bool Equals(const Conversion& other) const override {
+        const auto* o = dynamic_cast<const NumericOrEnumerationConversion*>(&other);
+        return o != nullptr
+            && isImplicit_ == o->isImplicit_
+            && isLifted_ == o->isLifted_
+            && isEnumeration_ == o->isEnumeration_;
+    }
+
+    // The C# `override int GetHashCode() => (isImplicit ? 1 : 0) + (isLifted ? 2 : 0) +
+    // (isEnumeration ? 4 : 0)` -- a pure-int bit-OR-by-addition hash (the three bools map
+    // to disjoint bits 1/2/4, so the hash distinguishes all eight combinations).
+    int GetHashCode() const override {
+        return (isImplicit_ ? 1 : 0) + (isLifted_ ? 2 : 0) + (isEnumeration_ ? 4 : 0);
+    }
+
+private:
+    bool isImplicit_;
+    bool isLifted_;
+    bool isEnumeration_;
+};
+
+// The C# `sealed class TupleConv : Conversion` -- the tuple conversion backing the
+// `TupleConversion` factory method. It carries an `ImmutableArray<Conversion>
+// ElementConversions` (ported to `std::vector<std::shared_ptr<Conversion>>`) and a computed
+// `IsImplicit` (`elementConversions.All(c => c.IsImplicit)` -- true for an empty array,
+// vacuously). It overrides `IsImplicit` / `IsExplicit` / `ElementConversions` /
+// `IsTupleConversion` plus a value-based `Equals` (`ElementConversions.SequenceEqual`,
+// which calls each element's `Equals`) and `GetHashCode` (the `hash * 31 + conv.GetHashCode`
+// fold). Two distinct `TupleConv`s with `SequenceEqual` element conversions are equal.
+class TupleConv final : public Conversion {
+public:
+    // The C# `TupleConv(ImmutableArray<Conversion> elementConversions)` stores the array
+    // and computes `IsImplicit = elementConversions.All(c => c.IsImplicit)`. The C# struct
+    // `ImmutableArray<Conversion>` ports to `std::vector<std::shared_ptr<Conversion>>`
+    // (shared ownership of each element; a snapshot, the D438 `IList<ResolveResult>`-to-
+    // `shared_ptr`-vector precedent). The ctor takes the vector by value and moves it.
+    explicit TupleConv(std::vector<std::shared_ptr<Conversion>> elementConversions)
+        : elementConversions_(std::move(elementConversions)),
+          isImplicit_(ComputeIsImplicit(elementConversions_)) {}
+
+    bool IsImplicit() const override { return isImplicit_; }
+    bool IsExplicit() const override { return !isImplicit_; }
+    bool IsTupleConversion() const override { return true; }
+
+    // The C# `public override ImmutableArray<Conversion> ElementConversions { get; }` --
+    // returns a copy of the stored vector (a snapshot of shared handles).
+    std::vector<std::shared_ptr<Conversion>> ElementConversions() const override {
+        return elementConversions_;
+    }
+
+    // The C# `override string ToString() => (IsImplicit ? "implicit " : "explicit ") +
+    // " tuple conversion"` -- note the source carries a leading space in " tuple
+    // conversion" AND a trailing space in "implicit "/"explicit ", so the result has TWO
+    // spaces between the kind and "tuple" (e.g. "implicit  tuple conversion"). Ported
+    // verbatim (not "fixed"); the double-space is a C# source quirk.
+    std::string ToString() const {
+        return std::string(isImplicit_ ? "implicit " : "explicit ") + " tuple conversion";
+    }
+
+    // The C# `override bool Equals(Conversion other) => other is TupleConv o &&
+    // ElementConversions.SequenceEqual(o.ElementConversions)` -- `SequenceEqual` uses the
+    // `IEquatable<Conversion>.Equals` for each element pair, so the port calls each
+    // element's virtual `Equals` (value-based for the concrete subclasses, reference for
+    // the base). A size-mismatch short-circuits before the element loop.
+    bool Equals(const Conversion& other) const override {
+        const auto* o = dynamic_cast<const TupleConv*>(&other);
+        if (o == nullptr) return false;
+        if (elementConversions_.size() != o->elementConversions_.size()) return false;
+        for (std::size_t i = 0; i < elementConversions_.size(); ++i) {
+            if (!elementConversions_[i]->Equals(*o->elementConversions_[i])) return false;
+        }
+        return true;
+    }
+
+    // The C# `override int GetHashCode()` -- `unchecked { int hash = 0; foreach (var conv
+    // in ElementConversions) { hash *= 31; hash += conv.GetHashCode(); } return hash; }`.
+    // The `unchecked` wraparound ports to `unsigned int` accumulation + `static_cast<int>`
+    // return (well-defined modular wraparound, no signed-overflow UB; the D400
+    // `FullTypeNameComparer.GetHashCode` precedent). An empty array yields hash 0.
+    int GetHashCode() const override {
+        unsigned int hash = 0;
+        for (const auto& conv : elementConversions_) {
+            hash = hash * 31u + static_cast<unsigned int>(conv->GetHashCode());
+        }
+        return static_cast<int>(hash);
+    }
+
+private:
+    // The C# `elementConversions.All(c => c.IsImplicit)` -- true for an empty array
+    // (vacuously, the `All` over an empty sequence is true), so an empty `TupleConv` is
+    // implicit.
+    static bool ComputeIsImplicit(const std::vector<std::shared_ptr<Conversion>>& convs) {
+        for (const auto& c : convs) {
+            if (!c->IsImplicit()) return false;
+        }
+        return true;
+    }
+
+    std::vector<std::shared_ptr<Conversion>> elementConversions_;
+    bool isImplicit_;
+};
+
+// The factory holder mirroring the C# `Conversion` `static readonly` fields and the
+// `static` factory methods. The C# static members live ON the
 // `Conversion` class; the C++ port cannot add static members to the `Conversion` class from
 // a separate header without a circular include (the factories build the concrete
 // subclasses, which derive from `Conversion`), so a dedicated `Conversions` struct holds
@@ -281,6 +437,55 @@ struct Conversions {
     static std::shared_ptr<Conversion> ImplicitSpanConversion() {
         static const auto singleton = std::make_shared<BuiltinConversion>(true, 13);
         return singleton;
+    }
+
+    // `public static readonly Conversion ImplicitNumericConversion = new
+    // NumericOrEnumerationConversion(true, false);` -- the implicit numeric-conversion
+    // singleton (`IsImplicit` true, `IsLifted` false, `IsNumericConversion` true).
+    static std::shared_ptr<Conversion> ImplicitNumericConversion() {
+        static const auto singleton = std::make_shared<NumericOrEnumerationConversion>(true, false);
+        return singleton;
+    }
+
+    // `public static readonly Conversion ExplicitNumericConversion = new
+    // NumericOrEnumerationConversion(false, false);`.
+    static std::shared_ptr<Conversion> ExplicitNumericConversion() {
+        static const auto singleton = std::make_shared<NumericOrEnumerationConversion>(false, false);
+        return singleton;
+    }
+
+    // `public static readonly Conversion ImplicitLiftedNumericConversion = new
+    // NumericOrEnumerationConversion(true, true);`.
+    static std::shared_ptr<Conversion> ImplicitLiftedNumericConversion() {
+        static const auto singleton = std::make_shared<NumericOrEnumerationConversion>(true, true);
+        return singleton;
+    }
+
+    // `public static readonly Conversion ExplicitLiftedNumericConversion = new
+    // NumericOrEnumerationConversion(false, true);`.
+    static std::shared_ptr<Conversion> ExplicitLiftedNumericConversion() {
+        static const auto singleton = std::make_shared<NumericOrEnumerationConversion>(false, true);
+        return singleton;
+    }
+
+    // `public static Conversion EnumerationConversion(bool isImplicit, bool isLifted) =>
+    // new NumericOrEnumerationConversion(isImplicit, isLifted, true)` -- a FACTORY METHOD (a
+    // NEW instance per call, NOT a singleton): two calls with equal args return DISTINCT
+    // instances that compare EQUAL by value (the `NumericOrEnumerationConversion` value-
+    // based `Equals`). This is the structural distinction from the singleton FIELDS above:
+    // the FIELDS return the same instance (reference-equal), the METHODS return fresh
+    // instances (value-equal).
+    static std::shared_ptr<Conversion> EnumerationConversion(bool isImplicit, bool isLifted) {
+        return std::make_shared<NumericOrEnumerationConversion>(isImplicit, isLifted, true);
+    }
+
+    // `public static Conversion TupleConversion(ImmutableArray<Conversion> conversions)
+    // => new TupleConv(conversions)` -- a FACTORY METHOD (a NEW instance per call). Two
+    // calls with `SequenceEqual` conversions return DISTINCT instances that compare EQUAL
+    // by value (the `TupleConv` value-based `Equals`).
+    static std::shared_ptr<Conversion> TupleConversion(
+            std::vector<std::shared_ptr<Conversion>> conversions) {
+        return std::make_shared<TupleConv>(std::move(conversions));
     }
 };
 

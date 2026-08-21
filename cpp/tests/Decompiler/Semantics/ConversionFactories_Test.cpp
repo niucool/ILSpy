@@ -43,6 +43,8 @@ using ILSpy::Decompiler::Semantics::BuiltinConversion;
 using ILSpy::Decompiler::Semantics::Conversion;
 using ILSpy::Decompiler::Semantics::Conversions;
 using ILSpy::Decompiler::Semantics::InvalidConversion;
+using ILSpy::Decompiler::Semantics::NumericOrEnumerationConversion;
+using ILSpy::Decompiler::Semantics::TupleConv;
 
 // ---------------------------------------------------------------------------
 // InvalidConversion (backs `Conversions::None`)
@@ -482,4 +484,465 @@ TEST(ConversionsTest, FactoryReturnsAreUsableAsSharedConversion)
     EXPECT_TRUE(c->IsBoxingConversion());
     // Polymorphic dispatch through the base pointer reaches the `BuiltinConversion` override.
     EXPECT_TRUE(c->IsValid());
+}
+
+// ---------------------------------------------------------------------------
+// NumericOrEnumerationConversion (backs the four numeric-conversion singleton fields
+// and the `EnumerationConversion` factory method)
+// ---------------------------------------------------------------------------
+
+TEST(NumericOrEnumerationConversionTest, CtorStoresThreeBools)
+{
+    // The C# `NumericOrEnumerationConversion(bool isImplicit, bool isLifted, bool
+    // isEnumeration = false)` ctor stores all three bools. The `isImplicit` flag drives
+    // `IsImplicit` / `IsExplicit`; the `isLifted` flag drives `IsLifted`; the `isEnumeration`
+    // flag drives `IsNumericConversion` / `IsEnumerationConversion`.
+    NumericOrEnumerationConversion implicitLiftedEnum(true, true, true);
+    EXPECT_TRUE(implicitLiftedEnum.IsImplicit());
+    EXPECT_TRUE(implicitLiftedEnum.IsLifted());
+    EXPECT_TRUE(implicitLiftedEnum.IsEnumerationConversion());
+    EXPECT_FALSE(implicitLiftedEnum.IsNumericConversion());
+}
+
+TEST(NumericOrEnumerationConversionTest, IsExplicitIsNegationOfIsImplicit)
+{
+    // The C# `public override bool IsExplicit => !isImplicit`.
+    NumericOrEnumerationConversion implicit_(true, false);
+    NumericOrEnumerationConversion explicit_(false, false);
+    EXPECT_TRUE(implicit_.IsImplicit());
+    EXPECT_FALSE(implicit_.IsExplicit());
+    EXPECT_FALSE(explicit_.IsImplicit());
+    EXPECT_TRUE(explicit_.IsExplicit());
+}
+
+TEST(NumericOrEnumerationConversionTest, IsNumericConversionIsNegationOfIsEnumeration)
+{
+    // The C# `public override bool IsNumericConversion => !isEnumeration` and
+    // `public override bool IsEnumerationConversion => isEnumeration` -- a conversion is
+    // numeric OR enumeration, never both.
+    NumericOrEnumerationConversion numeric(true, false, false);
+    NumericOrEnumerationConversion enumeration(true, false, true);
+    EXPECT_TRUE(numeric.IsNumericConversion());
+    EXPECT_FALSE(numeric.IsEnumerationConversion());
+    EXPECT_FALSE(enumeration.IsNumericConversion());
+    EXPECT_TRUE(enumeration.IsEnumerationConversion());
+}
+
+TEST(NumericOrEnumerationConversionTest, DefaultedIsEnumerationArgIsFalse)
+{
+    // The C# `bool isEnumeration = false` defaulted arg lets the four numeric readonly
+    // fields omit it. A two-arg construction defaults `isEnumeration` to false (a numeric
+    // conversion, NOT an enumeration conversion).
+    NumericOrEnumerationConversion twoArg(true, true);
+    EXPECT_FALSE(twoArg.IsEnumerationConversion());
+    EXPECT_TRUE(twoArg.IsNumericConversion());
+}
+
+TEST(NumericOrEnumerationConversionTest, ToStringFormats)
+{
+    // The C# `ToString` -- `(isImplicit ? "implicit" : "explicit") + (isLifted ? " lifted"
+    // : "") + (isEnumeration ? " enumeration" : " numeric") + " conversion"`. Pin a
+    // representative spread: the bare implicit numeric, the explicit lifted numeric, and
+    // the implicit enumeration.
+    EXPECT_EQ(NumericOrEnumerationConversion(true, false, false).ToString(),
+              "implicit numeric conversion");
+    EXPECT_EQ(NumericOrEnumerationConversion(false, true, false).ToString(),
+              "explicit lifted numeric conversion");
+    EXPECT_EQ(NumericOrEnumerationConversion(true, false, true).ToString(),
+              "implicit enumeration conversion");
+    EXPECT_EQ(NumericOrEnumerationConversion(false, true, true).ToString(),
+              "explicit lifted enumeration conversion");
+}
+
+TEST(NumericOrEnumerationConversionTest, ValueBasedEqualsTwoDistinctInstancesWithSameBoolsAreEqual)
+{
+    // The load-bearing crux distinguishing a value-based conversion from the singleton
+    // reference-equality the `InvalidConversion` / `BuiltinConversion` factories inherit:
+    // two DISTINCT instances with the same three bools are EQUAL by value (the
+    // `dynamic_cast` + bool comparison), NOT reference-equal. The `static` factory METHOD
+    // `EnumerationConversion` builds a NEW instance per call, so two calls with equal args
+    // are distinct instances that must compare equal by value -- this `Equals` is what
+    // makes that work.
+    NumericOrEnumerationConversion a(true, true, false);
+    NumericOrEnumerationConversion b(true, true, false);
+    EXPECT_NE(&a, &b);       // distinct instances
+    EXPECT_TRUE(a.Equals(b));  // but value-equal
+    EXPECT_TRUE(b.Equals(a));  // symmetric
+}
+
+TEST(NumericOrEnumerationConversionTest, EqualsReturnsFalseForDifferentSubtype)
+{
+    // The C# `other as NumericOrEnumerationConversion` yields null for a different subtype,
+    // so `Equals` returns false. A `BuiltinConversion` is NOT a
+    // `NumericOrEnumerationConversion`.
+    NumericOrEnumerationConversion a(true, false, false);
+    BuiltinConversion b(true, 0);
+    EXPECT_FALSE(a.Equals(b));
+}
+
+TEST(NumericOrEnumerationConversionTest, EqualsReturnsFalseForDifferentBoolCombination)
+{
+    // The C# `Equals` compares all three bools; a difference in any one makes the
+    // conversions unequal.
+    NumericOrEnumerationConversion a(true, false, false);
+    NumericOrEnumerationConversion b(false, false, false);  // isImplicit differs
+    NumericOrEnumerationConversion c(true, true, false);    // isLifted differs
+    NumericOrEnumerationConversion d(true, false, true);    // isEnumeration differs
+    EXPECT_FALSE(a.Equals(b));
+    EXPECT_FALSE(a.Equals(c));
+    EXPECT_FALSE(a.Equals(d));
+}
+
+TEST(NumericOrEnumerationConversionTest, GetHashCodeMatchesBitFormula)
+{
+    // The C# `GetHashCode => (isImplicit ? 1 : 0) + (isLifted ? 2 : 0) + (isEnumeration ?
+    // 4 : 0)` -- the three bools map to disjoint bits 1/2/4. Pin the representative spread.
+    EXPECT_EQ(NumericOrEnumerationConversion(false, false, false).GetHashCode(), 0);
+    EXPECT_EQ(NumericOrEnumerationConversion(true, false, false).GetHashCode(), 1);
+    EXPECT_EQ(NumericOrEnumerationConversion(false, true, false).GetHashCode(), 2);
+    EXPECT_EQ(NumericOrEnumerationConversion(true, true, false).GetHashCode(), 3);
+    EXPECT_EQ(NumericOrEnumerationConversion(false, false, true).GetHashCode(), 4);
+    EXPECT_EQ(NumericOrEnumerationConversion(true, false, true).GetHashCode(), 5);
+    EXPECT_EQ(NumericOrEnumerationConversion(false, true, true).GetHashCode(), 6);
+    EXPECT_EQ(NumericOrEnumerationConversion(true, true, true).GetHashCode(), 7);
+}
+
+TEST(NumericOrEnumerationConversionTest, GetHashCodeIsConsistentWithEquals)
+{
+    // Equal conversions have equal hashes (the hash-consistent-with-equality invariant the
+    // `ConversionResolveResult` / interning consumers rely on).
+    NumericOrEnumerationConversion a(true, true, false);
+    NumericOrEnumerationConversion b(true, true, false);
+    EXPECT_TRUE(a.Equals(b));
+    EXPECT_EQ(a.GetHashCode(), b.GetHashCode());
+}
+
+TEST(NumericOrEnumerationConversionTest, IsFinalAndDerivesFromConversion)
+{
+    static_assert(std::is_final_v<NumericOrEnumerationConversion>,
+                  "NumericOrEnumerationConversion is final (mirrors the C# `sealed`).");
+    static_assert(std::is_base_of_v<Conversion, NumericOrEnumerationConversion>,
+                  "NumericOrEnumerationConversion derives from Conversion.");
+    static_assert(std::has_virtual_destructor_v<NumericOrEnumerationConversion>,
+                  "NumericOrEnumerationConversion has a virtual destructor.");
+}
+
+// ---------------------------------------------------------------------------
+// TupleConv (backs the `TupleConversion` factory method)
+// ---------------------------------------------------------------------------
+
+namespace {
+// A pair of singletons usable as `TupleConv` element conversions: the identity conversion
+// (a `BuiltinConversion`, `IsImplicit` true) and the explicit reference conversion
+// (`IsImplicit` false). Reused across the `TupleConv` tests.
+std::shared_ptr<Conversion> ImplicitElement() { return Conversions::IdentityConversion(); }
+std::shared_ptr<Conversion> ExplicitElement() { return Conversions::ExplicitReferenceConversion(); }
+} // namespace
+
+TEST(TupleConvTest, CtorStoresElementConversions)
+{
+    // The C# `TupleConv(ImmutableArray<Conversion> elementConversions)` stores the array.
+    // The port stores a `std::vector<std::shared_ptr<Conversion>>` snapshot.
+    std::vector<std::shared_ptr<Conversion>> elems = {ImplicitElement(), ExplicitElement()};
+    TupleConv t(elems);
+    ASSERT_EQ(t.ElementConversions().size(), 2u);
+    EXPECT_EQ(t.ElementConversions()[0].get(), elems[0].get());
+    EXPECT_EQ(t.ElementConversions()[1].get(), elems[1].get());
+}
+
+TEST(TupleConvTest, IsImplicitTrueWhenAllElementsImplicit)
+{
+    // The C# `IsImplicit = elementConversions.All(c => c.IsImplicit)` -- true when every
+    // element is implicit.
+    std::vector<std::shared_ptr<Conversion>> elems = {ImplicitElement(), ImplicitElement()};
+    TupleConv t(elems);
+    EXPECT_TRUE(t.IsImplicit());
+    EXPECT_FALSE(t.IsExplicit());
+}
+
+TEST(TupleConvTest, IsImplicitTrueForEmptyArrayVacuously)
+{
+    // The C# `All` over an empty sequence is true (vacuously), so an empty `TupleConv` is
+    // implicit.
+    std::vector<std::shared_ptr<Conversion>> elems;
+    TupleConv t(elems);
+    EXPECT_TRUE(t.IsImplicit());
+    EXPECT_FALSE(t.IsExplicit());
+}
+
+TEST(TupleConvTest, IsImplicitFalseWhenAnyElementExplicit)
+{
+    // The C# `All` returns false as soon as any element is NOT implicit.
+    std::vector<std::shared_ptr<Conversion>> elems = {ImplicitElement(), ExplicitElement()};
+    TupleConv t(elems);
+    EXPECT_FALSE(t.IsImplicit());
+    EXPECT_TRUE(t.IsExplicit());
+}
+
+TEST(TupleConvTest, IsTupleConversionTrue)
+{
+    // The C# `public override bool IsTupleConversion => true`.
+    std::vector<std::shared_ptr<Conversion>> elems;
+    TupleConv t(elems);
+    EXPECT_TRUE(t.IsTupleConversion());
+}
+
+TEST(TupleConvTest, ElementConversionsReturnsSnapshot)
+{
+    // The `ElementConversions()` accessor returns a copy of the stored vector (a snapshot
+    // of shared handles); mutating the returned copy does not affect the `TupleConv`.
+    std::vector<std::shared_ptr<Conversion>> elems = {ImplicitElement()};
+    TupleConv t(elems);
+    auto snap = t.ElementConversions();
+    ASSERT_EQ(snap.size(), 1u);
+    snap.clear();
+    EXPECT_EQ(t.ElementConversions().size(), 1u);  // the stored vector is unaffected
+}
+
+TEST(TupleConvTest, ToStringImplicitDoubleSpaceQuirk)
+{
+    // The C# `ToString => (IsImplicit ? "implicit " : "explicit ") + " tuple conversion"` --
+    // the source carries a trailing space in "implicit " AND a leading space in " tuple
+    // conversion", so the result has TWO spaces between the kind and "tuple" (a C# source
+    // quirk ported verbatim).
+    std::vector<std::shared_ptr<Conversion>> elems;  // empty -> implicit
+    TupleConv t(elems);
+    EXPECT_EQ(t.ToString(), "implicit  tuple conversion");
+}
+
+TEST(TupleConvTest, ToStringExplicitDoubleSpaceQuirk)
+{
+    std::vector<std::shared_ptr<Conversion>> elems = {ExplicitElement()};  // explicit
+    TupleConv t(elems);
+    EXPECT_EQ(t.ToString(), "explicit  tuple conversion");
+}
+
+TEST(TupleConvTest, ValueBasedEqualsTwoDistinctInstancesWithSequenceEqualElements)
+{
+    // The load-bearing crux: two DISTINCT `TupleConv`s with `SequenceEqual` element
+    // conversions are EQUAL by value (the element-wise `Equals` loop), NOT reference-equal.
+    std::vector<std::shared_ptr<Conversion>> aElems = {ImplicitElement(), ImplicitElement()};
+    std::vector<std::shared_ptr<Conversion>> bElems = {ImplicitElement(), ImplicitElement()};
+    TupleConv a(aElems);
+    TupleConv b(bElems);
+    EXPECT_NE(&a, &b);       // distinct instances
+    EXPECT_TRUE(a.Equals(b));  // but value-equal (SequenceEqual elements)
+    EXPECT_TRUE(b.Equals(a));  // symmetric
+}
+
+TEST(TupleConvTest, EqualsReturnsFalseForDifferentSubtype)
+{
+    // The C# `other is TupleConv o` -- a non-`TupleConv` conversion is not equal.
+    std::vector<std::shared_ptr<Conversion>> elems;
+    TupleConv a(elems);
+    BuiltinConversion b(true, 0);
+    EXPECT_FALSE(a.Equals(b));
+}
+
+TEST(TupleConvTest, EqualsReturnsFalseForSizeMismatch)
+{
+    // The C# `SequenceEqual` returns false when the counts differ; the port short-circuits
+    // on a size mismatch before the element loop.
+    std::vector<std::shared_ptr<Conversion>> aElems = {ImplicitElement()};
+    std::vector<std::shared_ptr<Conversion>> bElems = {ImplicitElement(), ImplicitElement()};
+    TupleConv a(aElems);
+    TupleConv b(bElems);
+    EXPECT_FALSE(a.Equals(b));
+}
+
+TEST(TupleConvTest, EqualsReturnsFalseForElementMismatch)
+{
+    // The C# `SequenceEqual` compares element-wise; a single differing element (here an
+    // implicit vs an explicit element) makes the tuples unequal.
+    std::vector<std::shared_ptr<Conversion>> aElems = {ImplicitElement(), ImplicitElement()};
+    std::vector<std::shared_ptr<Conversion>> bElems = {ImplicitElement(), ExplicitElement()};
+    TupleConv a(aElems);
+    TupleConv b(bElems);
+    EXPECT_FALSE(a.Equals(b));
+}
+
+TEST(TupleConvTest, GetHashCodeEmptyIsZero)
+{
+    // The C# `GetHashCode` starts `hash = 0` and the empty-array loop does not run, so an
+    // empty `TupleConv` yields hash 0.
+    std::vector<std::shared_ptr<Conversion>> elems;
+    TupleConv t(elems);
+    EXPECT_EQ(t.GetHashCode(), 0);
+}
+
+TEST(TupleConvTest, GetHashCodeIsConsistentWithEquals)
+{
+    // Equal tuples have equal hashes (the fold of each element's `GetHashCode`).
+    std::vector<std::shared_ptr<Conversion>> aElems = {ImplicitElement(), ImplicitElement()};
+    std::vector<std::shared_ptr<Conversion>> bElems = {ImplicitElement(), ImplicitElement()};
+    TupleConv a(aElems);
+    TupleConv b(bElems);
+    EXPECT_TRUE(a.Equals(b));
+    EXPECT_EQ(a.GetHashCode(), b.GetHashCode());
+}
+
+TEST(TupleConvTest, IsFinalAndDerivesFromConversion)
+{
+    static_assert(std::is_final_v<TupleConv>, "TupleConv is final (mirrors the C# `sealed`).");
+    static_assert(std::is_base_of_v<Conversion, TupleConv>,
+                  "TupleConv derives from Conversion.");
+    static_assert(std::has_virtual_destructor_v<TupleConv>,
+                  "TupleConv has a virtual destructor.");
+}
+
+// ---------------------------------------------------------------------------
+// Conversions factory accessors (the four numeric-conversion singleton FIELDS and the
+// `EnumerationConversion` / `TupleConversion` factory METHODS)
+// ---------------------------------------------------------------------------
+
+TEST(ConversionsTest, ImplicitNumericConversionWiring)
+{
+    // `Conversion.ImplicitNumericConversion = new NumericOrEnumerationConversion(true,
+    // false)` -- the implicit non-lifted numeric-conversion singleton.
+    auto c = Conversions::ImplicitNumericConversion();
+    ASSERT_NE(c, nullptr);
+    EXPECT_TRUE(c->IsValid());
+    EXPECT_TRUE(c->IsImplicit());
+    EXPECT_FALSE(c->IsExplicit());
+    EXPECT_TRUE(c->IsNumericConversion());
+    EXPECT_FALSE(c->IsEnumerationConversion());
+    EXPECT_FALSE(c->IsLifted());
+    EXPECT_NE(dynamic_cast<NumericOrEnumerationConversion*>(c.get()), nullptr);
+}
+
+TEST(ConversionsTest, ExplicitNumericConversionWiring)
+{
+    // `Conversion.ExplicitNumericConversion = new NumericOrEnumerationConversion(false,
+    // false)`.
+    auto c = Conversions::ExplicitNumericConversion();
+    ASSERT_NE(c, nullptr);
+    EXPECT_TRUE(c->IsExplicit());
+    EXPECT_TRUE(c->IsNumericConversion());
+    EXPECT_FALSE(c->IsLifted());
+    EXPECT_FALSE(c->IsEnumerationConversion());
+}
+
+TEST(ConversionsTest, ImplicitLiftedNumericConversionWiring)
+{
+    // `Conversion.ImplicitLiftedNumericConversion = new NumericOrEnumerationConversion(true,
+    // true)`.
+    auto c = Conversions::ImplicitLiftedNumericConversion();
+    ASSERT_NE(c, nullptr);
+    EXPECT_TRUE(c->IsImplicit());
+    EXPECT_TRUE(c->IsLifted());
+    EXPECT_TRUE(c->IsNumericConversion());
+}
+
+TEST(ConversionsTest, ExplicitLiftedNumericConversionWiring)
+{
+    // `Conversion.ExplicitLiftedNumericConversion = new NumericOrEnumerationConversion(false,
+    // true)`.
+    auto c = Conversions::ExplicitLiftedNumericConversion();
+    ASSERT_NE(c, nullptr);
+    EXPECT_TRUE(c->IsExplicit());
+    EXPECT_TRUE(c->IsLifted());
+    EXPECT_TRUE(c->IsNumericConversion());
+}
+
+TEST(ConversionsTest, NumericSingletonIdentityIsStableAcrossCalls)
+{
+    // The four numeric-conversion FIELDS are singletons (one instance shared by every
+    // consumer, reference-equal across uses) -- the C# `static readonly` field semantics.
+    EXPECT_EQ(Conversions::ImplicitNumericConversion().get(),
+              Conversions::ImplicitNumericConversion().get());
+    EXPECT_EQ(Conversions::ExplicitNumericConversion().get(),
+              Conversions::ExplicitNumericConversion().get());
+    EXPECT_EQ(Conversions::ImplicitLiftedNumericConversion().get(),
+              Conversions::ImplicitLiftedNumericConversion().get());
+    EXPECT_EQ(Conversions::ExplicitLiftedNumericConversion().get(),
+              Conversions::ExplicitLiftedNumericConversion().get());
+}
+
+TEST(ConversionsTest, NumericSingletonsAreDistinct)
+{
+    // Each numeric-conversion FIELD is a distinct singleton instance.
+    EXPECT_NE(Conversions::ImplicitNumericConversion().get(),
+              Conversions::ExplicitNumericConversion().get());
+    EXPECT_NE(Conversions::ImplicitNumericConversion().get(),
+              Conversions::ImplicitLiftedNumericConversion().get());
+    EXPECT_NE(Conversions::ImplicitLiftedNumericConversion().get(),
+              Conversions::ExplicitLiftedNumericConversion().get());
+}
+
+TEST(ConversionsTest, NumericSingletonsAreAllValid)
+{
+    // The `NumericOrEnumerationConversion` keeps the base `IsValid` default of `true` (it
+    // does NOT override `IsValid`), so all four numeric-conversion singletons are valid.
+    EXPECT_TRUE(Conversions::ImplicitNumericConversion()->IsValid());
+    EXPECT_TRUE(Conversions::ExplicitNumericConversion()->IsValid());
+    EXPECT_TRUE(Conversions::ImplicitLiftedNumericConversion()->IsValid());
+    EXPECT_TRUE(Conversions::ExplicitLiftedNumericConversion()->IsValid());
+}
+
+TEST(ConversionsTest, EnumerationConversionIsFactoryMethodNotSingleton)
+{
+    // The load-bearing distinction between a singleton FIELD and a factory METHOD: two
+    // calls to `EnumerationConversion` with equal args return DISTINCT instances (NOT
+    // reference-equal, unlike the singleton fields), but they compare EQUAL by value (the
+    // `NumericOrEnumerationConversion` value-based `Equals`). The factory METHOD builds a
+    // NEW instance per call; the value-based `Equals` is what makes two such instances
+    // compare equal.
+    auto a = Conversions::EnumerationConversion(true, false);
+    auto b = Conversions::EnumerationConversion(true, false);
+    EXPECT_NE(a.get(), b.get());   // distinct instances (factory method, not singleton)
+    EXPECT_TRUE(a->Equals(*b));    // but value-equal
+    EXPECT_NE(dynamic_cast<NumericOrEnumerationConversion*>(a.get()), nullptr);
+}
+
+TEST(ConversionsTest, EnumerationConversionWiring)
+{
+    // `Conversion.EnumerationConversion(isImplicit, isLifted) => new
+    // NumericOrEnumerationConversion(isImplicit, isLifted, true)` -- an enumeration
+    // conversion (`IsEnumerationConversion` true, `IsNumericConversion` false).
+    auto c = Conversions::EnumerationConversion(true, false);
+    ASSERT_NE(c, nullptr);
+    EXPECT_TRUE(c->IsEnumerationConversion());
+    EXPECT_FALSE(c->IsNumericConversion());
+    EXPECT_TRUE(c->IsImplicit());
+    EXPECT_FALSE(c->IsLifted());
+
+    auto lifted = Conversions::EnumerationConversion(false, true);
+    EXPECT_TRUE(lifted->IsEnumerationConversion());
+    EXPECT_TRUE(lifted->IsLifted());
+    EXPECT_TRUE(lifted->IsExplicit());
+}
+
+TEST(ConversionsTest, TupleConversionIsFactoryMethodNotSingleton)
+{
+    // `TupleConversion` is a factory METHOD (a NEW instance per call), NOT a singleton: two
+    // calls with equal conversions return DISTINCT instances that compare EQUAL by value.
+    std::vector<std::shared_ptr<Conversion>> aElems = {ImplicitElement()};
+    std::vector<std::shared_ptr<Conversion>> bElems = {ImplicitElement()};
+    auto a = Conversions::TupleConversion(aElems);
+    auto b = Conversions::TupleConversion(bElems);
+    EXPECT_NE(a.get(), b.get());   // distinct instances
+    EXPECT_TRUE(a->Equals(*b));     // but value-equal
+    EXPECT_NE(dynamic_cast<TupleConv*>(a.get()), nullptr);
+}
+
+TEST(ConversionsTest, TupleConversionWiring)
+{
+    // `Conversion.TupleConversion(conversions) => new TupleConv(conversions)` -- a tuple
+    // conversion (`IsTupleConversion` true, `IsImplicit` derived from the elements).
+    std::vector<std::shared_ptr<Conversion>> elems = {ImplicitElement(), ImplicitElement()};
+    auto c = Conversions::TupleConversion(elems);
+    ASSERT_NE(c, nullptr);
+    EXPECT_TRUE(c->IsTupleConversion());
+    EXPECT_TRUE(c->IsImplicit());
+    EXPECT_EQ(c->ElementConversions().size(), 2u);
+}
+
+TEST(ConversionsTest, TupleConversionEmptyIsImplicit)
+{
+    // An empty `TupleConversion` is implicit (the `All` over an empty sequence is true).
+    std::vector<std::shared_ptr<Conversion>> elems;
+    auto c = Conversions::TupleConversion(elems);
+    ASSERT_NE(c, nullptr);
+    EXPECT_TRUE(c->IsImplicit());
+    EXPECT_TRUE(c->ElementConversions().empty());
 }
