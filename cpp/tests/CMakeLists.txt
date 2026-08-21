@@ -60,6 +60,8 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/SimpleTypeResolveContext_Test.cpp
     Decompiler/TypeSystem/KnownTypeReference_Test.cpp
     Decompiler/TypeSystem/ISupportsInterning_Test.cpp
+    Decompiler/TypeSystem/ByReferenceTypeReference_Test.cpp
+    Decompiler/TypeSystem/PointerTypeReference_Test.cpp
     Decompiler/Output/IAmbience_Test.cpp
     Decompiler/IL/ILAst_Test.cpp
     Decompiler/IL/ILAstInstructions_Test.cpp

@@ -11,4 +11,6 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/TypeVisitor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/TypeParameterSubstitution.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/KnownTypeReference.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ByReferenceTypeReference.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/PointerTypeReference.cpp
 )
