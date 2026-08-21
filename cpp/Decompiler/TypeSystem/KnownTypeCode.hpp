@@ -16,11 +16,19 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-// Port of ICSharpCode.Decompiler/TypeSystem/KnownTypeReference.cs. A known type
-// is one of the framework types the decompiler treats specially (primitives,
-// System.Object, System.String, System.Void, the collection interfaces, ...).
-// KnownTypeCode indexes a fixed table so the type system can compare types by
-// code rather than by name. The table is the full set from the C# source.
+// Port of the `KnownTypeCode` enum and the known-type table from
+// ICSharpCode.Decompiler/TypeSystem/KnownTypeReference.cs. A known type is one of
+// the framework types the decompiler treats specially (primitives, System.Object,
+// System.String, System.Void, the collection interfaces, ...). `KnownTypeCode`
+// indexes a fixed table so the type system can compare types by code rather than
+// by name. The table is the full set from the C# source.
+//
+// The faithful `KnownTypeReference : ITypeReference` class (the C# `sealed class
+// KnownTypeReference` that resolves a known-type reference against an
+// `ITypeResolveContext` via `context.Compilation.FindType`) is ported in
+// `KnownTypeReference.hpp`; this file holds only the enum and the table-row
+// metadata struct `KnownTypeReferenceEntry` (the table backing the CLI type-
+// resolution path, accessed by `SignatureDecoder` / `KnownType`).
 
 #pragma once
 
@@ -96,8 +104,8 @@ enum class KnownTypeCode : std::uint8_t {
 
 // Static description of one known type: its code, kind, namespace, name, and the
 // number of type parameters. References are by string_view into compile-time
-// string literals, so a KnownTypeReference is trivially copyable.
-struct KnownTypeReference {
+// string literals, so a KnownTypeReferenceEntry is trivially copyable.
+struct KnownTypeReferenceEntry {
     KnownTypeCode Code;
     TypeKind Kind;
     std::string_view Namespace;
@@ -107,10 +115,10 @@ struct KnownTypeReference {
 
 // The full known-type table, indexed by KnownTypeCode. Order matches the enum
 // so `KnownTypeTable()[i]` corresponds to `KnownTypeCode(i)`.
-const KnownTypeReference* KnownTypeTable();
+const KnownTypeReferenceEntry* KnownTypeTable();
 std::size_t KnownTypeTableSize();
 
 // Look up the reference for a code, or nullptr for None.
-const KnownTypeReference* LookupKnownType(KnownTypeCode code);
+const KnownTypeReferenceEntry* LookupKnownType(KnownTypeCode code);
 
 } // namespace ILSpy::Decompiler::TypeSystem

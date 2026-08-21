@@ -25,7 +25,7 @@ namespace ILSpy::Decompiler::TypeSystem {
 
 namespace {
 // Ordered exactly as KnownTypeCode so the table is indexable by the enum.
-constexpr std::array<KnownTypeReference, 60> kTable = {{
+constexpr std::array<KnownTypeReferenceEntry, 60> kTable = {{
     { KnownTypeCode::None,    TypeKind::Unknown,  "", "", 0 },
     { KnownTypeCode::Object,   TypeKind::Class,    "System", "Object", 0 },
     { KnownTypeCode::DBNull,   TypeKind::Class,    "System", "DBNull", 0 },
@@ -89,10 +89,10 @@ constexpr std::array<KnownTypeReference, 60> kTable = {{
 }};
 } // namespace
 
-const KnownTypeReference* KnownTypeTable() { return kTable.data(); }
+const KnownTypeReferenceEntry* KnownTypeTable() { return kTable.data(); }
 std::size_t KnownTypeTableSize() { return kTable.size(); }
 
-const KnownTypeReference* LookupKnownType(KnownTypeCode code) {
+const KnownTypeReferenceEntry* LookupKnownType(KnownTypeCode code) {
     auto i = static_cast<std::size_t>(code);
     if (i == 0 || i >= kTable.size()) return nullptr; // None has no entry
     return &kTable[i];
