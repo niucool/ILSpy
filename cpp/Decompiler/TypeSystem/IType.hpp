@@ -640,4 +640,15 @@ private:
 // the class, `UnknownType()` to this function).
 inline ITypePtr UnknownType() { return std::make_shared<SpecialType>(TypeKind::Unknown); }
 
+// Convenience: the C# `SpecialType.NoType` singleton (a `SpecialType(TypeKind::None)`
+// with name "?" and `isReferenceType: null`). Used by `ResolveResult` subclasses for
+// expressions without a type (method groups, lambdas, namespaces, throw
+// statements) -- the C# `NamespaceResolveResult` / `ThrowResolveResult` pass
+// `SpecialType.NoType` to the `ResolveResult` base ctor. The minimal port's
+// `SpecialType(TypeKind::None)` has `isReferenceType` defaulting to `nullopt`
+// (the C# `null`), faithful to the C# singleton. Distinct from `UnknownType()`
+// (which is `TypeKind::Unknown`, the error-type null object) -- `NoType` is
+// `TypeKind::None` (no type at all, e.g. a method group or a namespace reference).
+inline ITypePtr NoType() { return std::make_shared<SpecialType>(TypeKind::None); }
+
 } // namespace ILSpy::Decompiler::TypeSystem
