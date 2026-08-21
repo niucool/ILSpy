@@ -43,11 +43,17 @@
 namespace ILSpy::Decompiler::TypeSystem {
 
 class IType;
+class TypeVisitor;
 using ITypePtr = std::shared_ptr<IType>;
 
 // The root of the type representation. Equality is structural: two ITypes are
-// equal iff they have the same Kind and the same constituent names/types.
-class IType {
+// equal iff they have the same Kind and the same constituent names/types. IType
+// derives from std::enable_shared_from_this so that VisitChildren can hand back
+// a shared_ptr to itself when no child changed (the C# `return this` reference-
+// identity semantics); the types are shared_ptr-owned throughout the port (the
+// signature decoder / IL reader / type system all construct them via make_shared),
+// so shared_from_this is valid whenever a Visit is in progress.
+class IType : public std::enable_shared_from_this<IType> {
 public:
     virtual ~IType() = default;
     virtual TypeKind Kind() const = 0;
@@ -59,6 +65,24 @@ public:
     // name handling lives in FullTypeName for type definitions.
     virtual std::string ReflectionName() const = 0;
     virtual int TypeParameterCount() const = 0;
+
+    // The TypeVisitor dispatch (faithful port of IType.cs AcceptVisitor /
+    // VisitChildren). The C# interface declares these abstract and AbstractType
+    // provides the defaults (VisitOtherType for the no-dedicated-Visit-method
+    // types, `return this` for the no-children types); the minimal port has no
+    // AbstractType (flattened onto IType), so the defaults live here. Concrete
+    // types with a dedicated Visit* method or with children override these
+    // (see ParameterizedType / ArrayType / ByReferenceType / PointerType /
+    // TupleType / ModifiedType / NullabilityAnnotatedType / FunctionPointerType);
+    // the C++-only minimal types (KnownType / SimpleType / SpecialType /
+    // TypeParameter) and the not-yet-concrete interfaces (ITypeDefinition /
+    // ITypeParameter) inherit the defaults. AcceptVisitor is out-of-line (it
+    // calls TypeVisitor::VisitOtherType, which needs TypeVisitor complete).
+    virtual ITypePtr AcceptVisitor(TypeVisitor& visitor);
+    // The default reconstructs nothing (no children) and returns this; the
+    // shared_ptr identity is the C# `return this` reference identity.
+    virtual ITypePtr VisitChildren(TypeVisitor& visitor) { return shared_from_this(); }
+
     // Structural equality; derived classes override StructuralEquals.
     bool Equals(const IType& other) const {
         if (Kind() != other.Kind()) return false;
@@ -121,6 +145,11 @@ public:
     int TypeParameterCount() const override { return static_cast<int>(typeArgs_.size()); }
     const ITypePtr& GenericType() const noexcept { return genericType_; }
     const std::vector<ITypePtr>& TypeArguments() const noexcept { return typeArgs_; }
+    // Faithful port of ParameterizedType.cs AcceptVisitor / VisitChildren: dispatch
+    // to VisitParameterizedType and reconstruct (genericType + type args) if any
+    // child changed, else return this.
+    ITypePtr AcceptVisitor(TypeVisitor& visitor) override;
+    ITypePtr VisitChildren(TypeVisitor& visitor) override;
 protected:
     bool StructuralEquals(const IType& other) const override;
 private:
@@ -143,6 +172,10 @@ public:
     const ITypePtr& Element() const noexcept { return element_; }
     int Rank() const noexcept { return rank_; }
     bool IsSzArray() const noexcept { return isSzArray_; }
+    // Faithful port of ArrayType.cs VisitChildren: reconstruct with the visited
+    // element if it changed, else return this.
+    ITypePtr AcceptVisitor(TypeVisitor& visitor) override;
+    ITypePtr VisitChildren(TypeVisitor& visitor) override;
 protected:
     bool StructuralEquals(const IType& other) const override;
 private:
@@ -159,6 +192,9 @@ public:
     std::string ReflectionName() const override;
     int TypeParameterCount() const override { return element_ ? element_->TypeParameterCount() : 0; }
     const ITypePtr& Element() const noexcept { return element_; }
+    // Faithful port of ByReferenceType.cs VisitChildren.
+    ITypePtr AcceptVisitor(TypeVisitor& visitor) override;
+    ITypePtr VisitChildren(TypeVisitor& visitor) override;
 protected:
     bool StructuralEquals(const IType& other) const override {
         return element_->Equals(*static_cast<const ByReferenceType&>(other).element_);
@@ -175,6 +211,9 @@ public:
     std::string ReflectionName() const override;
     int TypeParameterCount() const override { return element_ ? element_->TypeParameterCount() : 0; }
     const ITypePtr& Element() const noexcept { return element_; }
+    // Faithful port of PointerType.cs VisitChildren.
+    ITypePtr AcceptVisitor(TypeVisitor& visitor) override;
+    ITypePtr VisitChildren(TypeVisitor& visitor) override;
 protected:
     bool StructuralEquals(const IType& other) const override {
         return element_->Equals(*static_cast<const PointerType&>(other).element_);
@@ -247,6 +286,10 @@ public:
     const ITypePtr& Modifier() const noexcept { return modifier_; }
     const ITypePtr& Element() const noexcept { return element_; }
     bool IsRequired() const noexcept { return isRequired_; }
+    // Faithful port of ModifiedType.cs AcceptVisitor (ModReq / ModOpt split) /
+    // VisitChildren (element + modifier).
+    ITypePtr AcceptVisitor(TypeVisitor& visitor) override;
+    ITypePtr VisitChildren(TypeVisitor& visitor) override;
 protected:
     bool StructuralEquals(const IType& other) const override;
 private:
@@ -286,6 +329,13 @@ public:
     Nullability Nullability() const noexcept { return nullability_; }
     // The C# `TypeWithoutAnnotation => baseType`: the un-annotated wrapped type.
     const ITypePtr& TypeWithoutAnnotation() const noexcept { return baseType_; }
+    // Faithful port of NullabilityAnnotatedType.cs AcceptVisitor /
+    // VisitChildren (baseType; the C# ChangeNullability / IsReferenceType /
+    // TypeParameter edge cases are deferred to the Phase 2 nullability-lifting
+    // stage that consumes TypeVisitor -- the minimal leaf reconstructs the
+    // wrapper with the visited base and the same nullability).
+    ITypePtr AcceptVisitor(TypeVisitor& visitor) override;
+    ITypePtr VisitChildren(TypeVisitor& visitor) override;
 protected:
     bool StructuralEquals(const IType& other) const override {
         const auto& o = static_cast<const NullabilityAnnotatedType&>(other);
@@ -345,6 +395,11 @@ public:
     bool ReturnIsRefReadOnly() const noexcept { return returnIsRefReadOnly_; }
     const std::vector<ITypePtr>& ParameterTypes() const noexcept { return parameterTypes_; }
     const std::vector<ReferenceKind>& ParameterReferenceKinds() const noexcept { return parameterReferenceKinds_; }
+    // Faithful port of FunctionPointerType.cs VisitChildren (return type +
+    // parameter types; the custom calling conventions are carried over unvisited,
+    // matching the C# source).
+    ITypePtr AcceptVisitor(TypeVisitor& visitor) override;
+    ITypePtr VisitChildren(TypeVisitor& visitor) override;
 protected:
     bool StructuralEquals(const IType& other) const override {
         const auto& o = static_cast<const FunctionPointerType&>(other);
@@ -442,6 +497,13 @@ public:
     const std::vector<ITypePtr>& ElementTypes() const noexcept { return elementTypes_; }
     const std::vector<std::string>& ElementNames() const noexcept { return elementNames_; }
     const ITypePtr& UnderlyingType() const noexcept { return underlyingType_; }
+    // Faithful port of TupleType.cs VisitChildren (element types; the underlying
+    // ValueTuple<...> and element names are carried over; the C# Compilation /
+    // GetDefinition().ParentModule reconstruction inputs are deferred to the
+    // Phase 2 type-resolution stage -- the minimal leaf reconstructs with the
+    // same underlying type and names).
+    ITypePtr AcceptVisitor(TypeVisitor& visitor) override;
+    ITypePtr VisitChildren(TypeVisitor& visitor) override;
 protected:
     bool StructuralEquals(const IType& other) const override {
         const auto& o = static_cast<const TupleType&>(other);
