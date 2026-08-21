@@ -30,6 +30,13 @@
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/CSharp/Syntax/Modifiers.hpp"
 #include "Decompiler/TypeSystem/Accessibility.hpp"
+#include "Decompiler/TypeSystem/ITypeParameter.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/ISymbol.hpp"
+#include "Decompiler/TypeSystem/SymbolKind.hpp"
+#include "Decompiler/TypeSystem/TypeKind.hpp"
+#include "Decompiler/TypeSystem/VarianceModifier.hpp"
+#include "Decompiler/TypeSystem/Nullability.hpp"
 
 #include <gtest/gtest.h>
 
@@ -37,7 +44,10 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace Syntax = ILSpy::Decompiler::CSharp::Syntax;
 namespace TS = ILSpy::Decompiler::TypeSystem;
@@ -376,4 +386,102 @@ TEST(TypeSystemAstBuilderTest, FractionApproxZeroReturnsZeroOverOne)
     auto r = Syntax::FractionApprox(0.0, 100);
     EXPECT_EQ(r.first, 0);
     EXPECT_EQ(r.second, 1);
+}
+
+// ---------------------------------------------------------------------------
+// GetNullabilityDisambiguator (TypeSystemAstBuilder.cs line 2707) returns the
+// constraint keyword that keeps `T?` as a nullable annotation on an override or
+// explicit interface implementation, or nullopt where the type parameter
+// neither needs nor permits one. The switch is on tp.IsReferenceType (the D429
+// std::optional<bool> accessor ITypeParameter inherits from IType):
+//   true    => "class"    (a reference type)
+//   nullopt => "default"  (neither ref nor value)
+//   false   => nullopt     (a value type uses Nullable<T>)
+//
+// The test stub is a minimal concrete ITypeParameter that exposes a configurable
+// IsReferenceType() (the sole accessor the helper reads); every other
+// ITypeParameter / IType / ISymbol pure-virtual is overridden with a trivial
+// default.
+// ---------------------------------------------------------------------------
+namespace {
+
+class TestDisambiguatorTypeParameter : public TS::ITypeParameter {
+public:
+    explicit TestDisambiguatorTypeParameter(std::optional<bool> isReferenceType)
+        : isReferenceType_(isReferenceType) {}
+
+    // --- IType ---
+    TS::TypeKind Kind() const override { return TS::TypeKind::TypeParameter; }
+    // The single Name() override is the final overrider for IType::Name,
+    // ISymbol::Name, and ITypeParameter::Name (the D381 diamond disambiguation).
+    std::string Name() const override { return {}; }
+    std::string ReflectionName() const override { return {}; }
+    int TypeParameterCount() const override { return 0; }
+    std::optional<bool> IsReferenceType() const override { return isReferenceType_; }
+
+    // --- ISymbol ---
+    TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::TypeParameter; }
+
+    // --- ITypeParameter ---
+    TS::SymbolKind OwnerType() const override { return TS::SymbolKind::TypeDefinition; }
+    const TS::IEntity* Owner() const override { return nullptr; }
+    int Index() const override { return 0; }
+    std::vector<const TS::IAttribute*> GetAttributes() const override { return {}; }
+    TS::VarianceModifier Variance() const override { return TS::VarianceModifier::Invariant; }
+    TS::ITypePtr EffectiveBaseClass() const override { return nullptr; }
+    std::vector<TS::ITypePtr> EffectiveInterfaceSet() const override { return {}; }
+    bool HasDefaultConstructorConstraint() const override { return false; }
+    bool HasReferenceTypeConstraint() const override { return false; }
+    bool HasValueTypeConstraint() const override { return false; }
+    bool HasUnmanagedConstraint() const override { return false; }
+    bool AllowsRefLikeType() const override { return false; }
+    TS::Nullability NullabilityConstraint() const override { return TS::Nullability::Oblivious; }
+    std::vector<TS::TypeConstraint> TypeConstraints() const override { return {}; }
+
+protected:
+    bool StructuralEquals(const TS::IType& /*other*/) const override { return false; }
+
+private:
+    std::optional<bool> isReferenceType_;
+};
+
+} // namespace
+
+TEST(TypeSystemAstBuilderTest, GetNullabilityDisambiguatorReturnsClassForReferenceType)
+{
+    TestDisambiguatorTypeParameter tp(std::optional<bool>(true));
+    auto r = Syntax::GetNullabilityDisambiguator(tp);
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, "class");
+}
+
+TEST(TypeSystemAstBuilderTest, GetNullabilityDisambiguatorReturnsDefaultForUnconstrained)
+{
+    TestDisambiguatorTypeParameter tp(std::nullopt);
+    auto r = Syntax::GetNullabilityDisambiguator(tp);
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, "default");
+}
+
+TEST(TypeSystemAstBuilderTest, GetNullabilityDisambiguatorReturnsNulloptForValueType)
+{
+    TestDisambiguatorTypeParameter tp(std::optional<bool>(false));
+    auto r = Syntax::GetNullabilityDisambiguator(tp);
+    EXPECT_FALSE(r.has_value());
+}
+
+TEST(TypeSystemAstBuilderTest, GetNullabilityDisambiguatorDistinguishesAllThreeStates)
+{
+    TestDisambiguatorTypeParameter refType(std::optional<bool>(true));
+    TestDisambiguatorTypeParameter unknown(std::nullopt);
+    TestDisambiguatorTypeParameter valueType(std::optional<bool>(false));
+
+    auto rRef = Syntax::GetNullabilityDisambiguator(refType);
+    auto rUnknown = Syntax::GetNullabilityDisambiguator(unknown);
+    auto rValue = Syntax::GetNullabilityDisambiguator(valueType);
+
+    ASSERT_TRUE(rRef.has_value());
+    ASSERT_TRUE(rUnknown.has_value());
+    EXPECT_FALSE(rValue.has_value());
+    EXPECT_NE(*rRef, *rUnknown);
 }

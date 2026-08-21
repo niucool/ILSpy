@@ -38,11 +38,14 @@
 #include "Modifiers.hpp"
 
 #include "Decompiler/TypeSystem/Accessibility.hpp"
+#include "Decompiler/TypeSystem/ITypeParameter.hpp"
 
 #include <any>
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
+#include <string>
 #include <utility>
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
@@ -196,6 +199,35 @@ inline std::pair<std::int64_t, std::int64_t> FractionApprox(double value, int ma
     if (firstDelta < secondDelta)
         return {startValue < 0 ? -firstN : firstN, firstD};
     return {startValue < 0 ? -secondN : secondN, secondD};
+}
+
+// ---------------------------------------------------------------------------
+// GetNullabilityDisambiguator (TypeSystemAstBuilder.cs line 2707). Returns the
+// constraint keyword that keeps `T?` meaning a nullable annotation on an
+// override or explicit interface implementation, or nullopt where the type
+// parameter neither needs nor permits one. The C# `string?` return ports to
+// `std::optional<std::string>` (nullopt = the C# null string).
+//
+// The switch is on `tp.IsReferenceType`, the `bool?` (D429 `std::optional<bool>`)
+// accessor `ITypeParameter` inherits from `IType`:
+//   true      => "class"    (a reference type: the constraint keeps the nullable
+//                            annotation; C# accepts only plain `class`, never
+//                            `class?`, because the constraint's own nullability
+//                            is inherited from the base member)
+//   nullopt   => "default"  (constrained to neither a reference type nor a value
+//                            type)
+//   false     => nullopt     (a value type uses `Nullable<T>` rather than a
+//                            nullable annotation)
+// ---------------------------------------------------------------------------
+inline std::optional<std::string> GetNullabilityDisambiguator(
+    const ::ILSpy::Decompiler::TypeSystem::ITypeParameter& tp) {
+    const auto refType = tp.IsReferenceType();
+    if (refType.has_value()) {
+        if (*refType)
+            return std::optional<std::string>("class");
+        return std::nullopt;
+    }
+    return std::optional<std::string>("default");
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
