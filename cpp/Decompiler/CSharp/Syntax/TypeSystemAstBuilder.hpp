@@ -40,6 +40,7 @@
 #include "Modifiers.hpp"
 
 #include "Decompiler/TypeSystem/Accessibility.hpp"
+#include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
@@ -51,6 +52,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <typeinfo>
 #include <utility>
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
@@ -296,6 +298,168 @@ inline void MergeReadOnlyModifiers(EntityDeclaration& decl,
         accessor2->Modifiers(accessor2->Modifiers() & ~Modifiers::Readonly);
         decl.Modifiers(decl.Modifiers() | Modifiers::Readonly);
     }
+}
+
+// ---------------------------------------------------------------------------
+// CompareType / CompareAttribute (TypeSystemAstBuilder.cs lines 886 and 835),
+// the local static attribute-sorting pair inside `ConvertAttributes`. The
+// `SortAttributes` path orders an entity's attributes by attribute type, then by
+// the decoded arguments, so the emitted `[Attr(...)]` list is stable across
+// re-decompilations. `CompareType` orders two types by their full name;
+// `CompareAttribute` orders two attributes by type, decode-errors, then the
+// positional (Fixed) and named argument lists.
+//
+// The C# `IType.FullName` (the qualified `Namespace.Name`) is NOT exposed by the
+// minimal IType port (deferred to Phase 2 with the rest of the `AbstractType`
+// surface); `ReflectionName()` is the closest equivalent (the D433/D455
+// FullName-to-ReflectionName convention), so `CompareType` compares
+// `ReflectionName` -- a documented deviation that holds for the attribute types
+// the decoder produces (their `ReflectionName` is the namespace-qualified name
+// the C# `FullName` would yield for a top-level type).
+//
+// The C# `argA.Value is IComparable compA && argB.Value is IComparable compB
+// ? compA.CompareTo(compB) : 0` has no direct C++ counterpart: `std::any` is
+// type-erased with no polymorphic `CompareTo`, so a `CompareAny` helper
+// dispatches on `std::any::type()` (a typeid ladder) to the comparable BCL
+// primitives (`bool`, `char`, the integer types, `float`, `double`, `string`)
+// and the boxed `ITypePtr` (a `System.Type`, compared by `ReflectionName` as the
+// C# `Type.CompareTo` full-name ordering), comparing same-type pairs. An empty
+// `std::any` (the C# `null`, which is not `IComparable`) yields 0; mismatched or
+// unhandled types (arrays, the boxed nested `CustomAttributeTypedArgument`)
+// yield 0 too -- the C# `else -> 0` branch for a non-`IComparable`, and a
+// documented deviation for the mismatched-type case (the C# `CompareTo` would
+// throw `ArgumentException`, but the well-formed same-AttributeType case never
+// reaches it, so the port returns 0 rather than throw so a malformed pair does
+// not crash the sort).
+// ---------------------------------------------------------------------------
+
+// `CompareType` (TypeSystemAstBuilder.cs line 886). Orders two types by their
+// (reflection) name. The C# `a.FullName.CompareTo(b.FullName)` ports to
+// `a.ReflectionName().compare(b.ReflectionName())` (the FullName-to-ReflectionName
+// deviation).
+inline int CompareType(const ::ILSpy::Decompiler::TypeSystem::IType& a,
+                       const ::ILSpy::Decompiler::TypeSystem::IType& b) {
+    return a.ReflectionName().compare(b.ReflectionName());
+}
+
+namespace Detail {
+// A typed comparison for a comparable primitive: the C# `IComparable<T>.CompareTo`
+// ordering (negative / zero / positive) via the built-in `<` / `>`.
+template <typename T>
+int ComparePrimitive(const std::any& a, const std::any& b) {
+    const T av = std::any_cast<T>(a), bv = std::any_cast<T>(b);
+    return av < bv ? -1 : (av > bv ? 1 : 0);
+}
+} // namespace Detail
+
+// `CompareAny`: the C# `argA.Value is IComparable compA && argB.Value is
+// IComparable compB ? compA.CompareTo(compB) : 0` port. Returns the C# `CompareTo`
+// ordering for two same-type comparable boxed values, and 0 otherwise (an empty
+// `std::any` = the C# `null`, mismatched types, or a non-comparable type).
+inline int CompareAny(const std::any& a, const std::any& b) {
+    if (!a.has_value() || !b.has_value())
+        return 0;
+    const auto& ta = a.type();
+    const auto& tb = b.type();
+    if (ta != tb)
+        return 0;
+    if (ta == typeid(bool)) {
+        // `Boolean.CompareTo`: `true` is greater than `false`.
+        const bool av = std::any_cast<bool>(a), bv = std::any_cast<bool>(b);
+        return av == bv ? 0 : (av ? 1 : -1);
+    }
+    if (ta == typeid(char16_t))
+        return Detail::ComparePrimitive<char16_t>(a, b);
+    if (ta == typeid(std::int8_t))
+        return Detail::ComparePrimitive<std::int8_t>(a, b);
+    if (ta == typeid(std::uint8_t))
+        return Detail::ComparePrimitive<std::uint8_t>(a, b);
+    if (ta == typeid(std::int16_t))
+        return Detail::ComparePrimitive<std::int16_t>(a, b);
+    if (ta == typeid(std::uint16_t))
+        return Detail::ComparePrimitive<std::uint16_t>(a, b);
+    if (ta == typeid(std::int32_t))
+        return Detail::ComparePrimitive<std::int32_t>(a, b);
+    if (ta == typeid(std::uint32_t))
+        return Detail::ComparePrimitive<std::uint32_t>(a, b);
+    if (ta == typeid(std::int64_t))
+        return Detail::ComparePrimitive<std::int64_t>(a, b);
+    if (ta == typeid(std::uint64_t))
+        return Detail::ComparePrimitive<std::uint64_t>(a, b);
+    if (ta == typeid(float))
+        return Detail::ComparePrimitive<float>(a, b);
+    if (ta == typeid(double))
+        return Detail::ComparePrimitive<double>(a, b);
+    if (ta == typeid(std::string))
+        return std::any_cast<std::string>(a).compare(std::any_cast<std::string>(b));
+    if (ta == typeid(::ILSpy::Decompiler::TypeSystem::ITypePtr)) {
+        // A boxed `System.Type` is `IComparable` by full name; the C++ box is an
+        // `ITypePtr`, compared by `ReflectionName` (the FullName-to-ReflectionName
+        // convention). A null `ITypePtr` (an undecoded type) yields 0.
+        const auto av = std::any_cast<::ILSpy::Decompiler::TypeSystem::ITypePtr>(a);
+        const auto bv = std::any_cast<::ILSpy::Decompiler::TypeSystem::ITypePtr>(b);
+        if (!av || !bv)
+            return 0;
+        return av->ReflectionName().compare(bv->ReflectionName());
+    }
+    return 0;
+}
+
+// `CompareAttribute` (TypeSystemAstBuilder.cs line 835). Orders two attributes by
+// their type, then by the decode-errors flag (an errored attribute sorts
+// first), then by the positional (Fixed) and named argument lists. The
+// argument lists compare element-wise: each fixed-argument position by
+// argument type then by the boxed value (via `CompareAny`); each named argument
+// by member name, type, then value. The C# `argA.Type`/`argB.Type` (non-null for
+// a decoded argument) port to an unguarded deref of the `ITypePtr` (the D354
+// `!`-to-unguarded-deref convention) -- the decoder overwrites the zero-fill
+// sentinel before use, so the deref is safe by contract.
+inline int CompareAttribute(const ::ILSpy::Decompiler::TypeSystem::IAttribute& a,
+                            const ::ILSpy::Decompiler::TypeSystem::IAttribute& b) {
+    namespace TS = ::ILSpy::Decompiler::TypeSystem;
+    int result = CompareType(a.AttributeType(), b.AttributeType());
+    if (result != 0)
+        return result;
+    if (a.HasDecodeErrors() && b.HasDecodeErrors())
+        return 0;
+    if (a.HasDecodeErrors())
+        return -1;
+    if (b.HasDecodeErrors())
+        return 1;
+    const auto fixedA = a.FixedArguments();
+    const auto fixedB = b.FixedArguments();
+    result = static_cast<int>(fixedA.size()) - static_cast<int>(fixedB.size());
+    if (result != 0)
+        return result;
+    for (std::size_t i = 0; i < fixedA.size(); ++i) {
+        const auto& argA = fixedA[i];
+        const auto& argB = fixedB[i];
+        result = CompareType(*argA.Type(), *argB.Type());
+        if (result != 0)
+            return result;
+        result = CompareAny(argA.Value(), argB.Value());
+        if (result != 0)
+            return result;
+    }
+    const auto namedA = a.NamedArguments();
+    const auto namedB = b.NamedArguments();
+    result = static_cast<int>(namedA.size()) - static_cast<int>(namedB.size());
+    if (result != 0)
+        return result;
+    for (std::size_t i = 0; i < namedA.size(); ++i) {
+        const auto& argA = namedA[i];
+        const auto& argB = namedB[i];
+        result = argA.Name().compare(argB.Name());
+        if (result != 0)
+            return result;
+        result = CompareType(*argA.Type(), *argB.Type());
+        if (result != 0)
+            return result;
+        result = CompareAny(argA.Value(), argB.Value());
+        if (result != 0)
+            return result;
+    }
+    return 0;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

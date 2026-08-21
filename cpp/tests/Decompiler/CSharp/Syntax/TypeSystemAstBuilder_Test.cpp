@@ -33,9 +33,14 @@
 #include "Decompiler/CSharp/Syntax/MethodDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Modifiers.hpp"
 #include "Decompiler/TypeSystem/Accessibility.hpp"
+#include "Decompiler/TypeSystem/CustomAttributeNamedArgument.hpp"
+#include "Decompiler/TypeSystem/CustomAttributeNamedArgumentKind.hpp"
+#include "Decompiler/TypeSystem/CustomAttributeTypedArgument.hpp"
+#include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/ISymbol.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/SymbolKind.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
 #include "Decompiler/TypeSystem/VarianceModifier.hpp"
@@ -598,4 +603,330 @@ TEST(TypeSystemAstBuilderTest, MergeReadOnlyModifiersPreservesExistingDeclModifi
     EXPECT_TRUE(decl.HasModifier(Modifiers::Public));
     EXPECT_TRUE(decl.HasModifier(Modifiers::Readonly));
     EXPECT_EQ(decl.Modifiers(), Modifiers::Public | Modifiers::Readonly);
+}
+
+// ===========================================================================
+// CompareType / CompareAny / CompareAttribute (TypeSystemAstBuilder.cs lines
+// 886 and 835), the local static attribute-sorting pair inside `ConvertAttributes`.
+// `CompareType` orders two types by their (reflection) name; `CompareAttribute`
+// orders two attributes by type, decode-errors, then the fixed and named argument
+// lists; `CompareAny` is the `IComparable` dispatch on the `std::any`-boxed
+// argument values (the C# `is IComparable ? CompareTo : 0` port). The C#
+// `IType.FullName` is the minimal-port-deferred accessor, so `CompareType` compares
+// `ReflectionName` (the D433/D455 FullName-to-ReflectionName convention).
+//
+// The `TestAttribute` stub is a concrete `IAttribute` holding a configurable
+// attribute type, decode-errors flag, and the fixed/named argument snapshots; it
+// is anonymous-namespace-scoped so it does not ODR-conflict with the existing
+// `TestAttribute` stubs in the D386 `IAttribute_Test` / D393 `ITypeDefinition_Test`
+// / etc. reconciliation files (each anonymous namespace is a distinct scope).
+// ===========================================================================
+namespace {
+
+class TestAttribute : public TS::IAttribute {
+public:
+    TestAttribute(TS::ITypePtr attributeType, bool hasDecodeErrors,
+                 std::vector<TS::CustomAttributeTypedArgument> fixedArgs,
+                 std::vector<TS::CustomAttributeNamedArgument> namedArgs)
+        : attributeType_(std::move(attributeType)), hasDecodeErrors_(hasDecodeErrors),
+          fixedArgs_(std::move(fixedArgs)), namedArgs_(std::move(namedArgs)) {}
+
+    const TS::IType& AttributeType() const override { return *attributeType_; }
+    const TS::IMethod* Constructor() const override { return nullptr; }
+    bool HasDecodeErrors() const override { return hasDecodeErrors_; }
+    std::vector<TS::CustomAttributeTypedArgument> FixedArguments() const override { return fixedArgs_; }
+    std::vector<TS::CustomAttributeNamedArgument> NamedArguments() const override { return namedArgs_; }
+
+private:
+    TS::ITypePtr attributeType_;
+    bool hasDecodeErrors_;
+    std::vector<TS::CustomAttributeTypedArgument> fixedArgs_;
+    std::vector<TS::CustomAttributeNamedArgument> namedArgs_;
+};
+
+// A helper that boxes a `KnownType` as an `ITypePtr` in a `std::any` (the `System.Type`
+// box the decoder would produce for a `typeof(...)` argument).
+std::any BoxType(TS::KnownTypeCode code) {
+    return std::any(TS::ITypePtr(std::make_shared<TS::KnownType>(code)));
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// CompareType orders by the reflection (full) name: `System.Object` precedes
+// `System.String`; equal types yield 0; the reverse pair is the negation.
+// ---------------------------------------------------------------------------
+TEST(TypeSystemAstBuilderTest, CompareTypeOrdersByReflectionName)
+{
+    TS::KnownType object(TS::KnownTypeCode::Object);  // "System.Object"
+    TS::KnownType string(TS::KnownTypeCode::String);  // "System.String"
+    EXPECT_LT(Syntax::CompareType(object, string), 0);
+}
+
+TEST(TypeSystemAstBuilderTest, CompareTypeReturnsZeroForEqualTypes)
+{
+    TS::KnownType a(TS::KnownTypeCode::Object);
+    TS::KnownType b(TS::KnownTypeCode::Object);
+    EXPECT_EQ(Syntax::CompareType(a, b), 0);
+}
+
+TEST(TypeSystemAstBuilderTest, CompareTypeReverseIsNegation)
+{
+    TS::KnownType object(TS::KnownTypeCode::Object);
+    TS::KnownType string(TS::KnownTypeCode::String);
+    EXPECT_GT(Syntax::CompareType(string, object), 0);
+}
+
+// ---------------------------------------------------------------------------
+// CompareAny: an empty `std::any` (the C# `null`, which is not `IComparable`)
+// yields 0 regardless of the other operand -- the C# `&&` short-circuits on the
+// null side.
+// ---------------------------------------------------------------------------
+TEST(TypeSystemAstBuilderTest, CompareAnyReturnsZeroForBothEmpty)
+{
+    EXPECT_EQ(Syntax::CompareAny(std::any(), std::any()), 0);
+}
+
+TEST(TypeSystemAstBuilderTest, CompareAnyReturnsZeroForOneEmpty)
+{
+    EXPECT_EQ(Syntax::CompareAny(std::any(static_cast<std::int32_t>(3)), std::any()), 0);
+    EXPECT_EQ(Syntax::CompareAny(std::any(), std::any(static_cast<std::int32_t>(3))), 0);
+}
+
+// ---------------------------------------------------------------------------
+// CompareAny compares two same-type primitives by the C# `CompareTo` ordering
+// (negative / zero / positive).
+// ---------------------------------------------------------------------------
+TEST(TypeSystemAstBuilderTest, CompareAnyComparesInt32)
+{
+    using I = std::int32_t;
+    EXPECT_LT(Syntax::CompareAny(std::any(I(3)), std::any(I(5))), 0);
+    EXPECT_EQ(Syntax::CompareAny(std::any(I(3)), std::any(I(3))), 0);
+    EXPECT_GT(Syntax::CompareAny(std::any(I(5)), std::any(I(3))), 0);
+}
+
+TEST(TypeSystemAstBuilderTest, CompareAnyComparesInt64)
+{
+    using I = std::int64_t;
+    EXPECT_LT(Syntax::CompareAny(std::any(I(3)), std::any(I(5))), 0);
+    EXPECT_GT(Syntax::CompareAny(std::any(I(5)), std::any(I(3))), 0);
+}
+
+TEST(TypeSystemAstBuilderTest, CompareAnyComparesDouble)
+{
+    EXPECT_LT(Syntax::CompareAny(std::any(1.5), std::any(2.5)), 0);
+    EXPECT_GT(Syntax::CompareAny(std::any(2.5), std::any(1.5)), 0);
+}
+
+TEST(TypeSystemAstBuilderTest, CompareAnyComparesString)
+{
+    EXPECT_LT(Syntax::CompareAny(std::any(std::string("aaa")), std::any(std::string("bbb"))), 0);
+    EXPECT_EQ(Syntax::CompareAny(std::any(std::string("x")), std::any(std::string("x"))), 0);
+    EXPECT_GT(Syntax::CompareAny(std::any(std::string("bbb")), std::any(std::string("aaa"))), 0);
+}
+
+// `Boolean.CompareTo`: `true` is greater than `false`.
+TEST(TypeSystemAstBuilderTest, CompareAnyComparesBool)
+{
+    EXPECT_LT(Syntax::CompareAny(std::any(false), std::any(true)), 0);
+    EXPECT_GT(Syntax::CompareAny(std::any(true), std::any(false)), 0);
+    EXPECT_EQ(Syntax::CompareAny(std::any(true), std::any(true)), 0);
+}
+
+TEST(TypeSystemAstBuilderTest, CompareAnyComparesChar)
+{
+    EXPECT_LT(Syntax::CompareAny(std::any(char16_t('A')), std::any(char16_t('B'))), 0);
+    EXPECT_EQ(Syntax::CompareAny(std::any(char16_t('A')), std::any(char16_t('A'))), 0);
+}
+
+// A boxed `System.Type` is `IComparable` by full name; the C++ `ITypePtr` box
+// compares by `ReflectionName` (the `System.Object` name precedes `System.String`).
+TEST(TypeSystemAstBuilderTest, CompareAnyComparesITypePtrByReflectionName)
+{
+    EXPECT_LT(Syntax::CompareAny(BoxType(TS::KnownTypeCode::Object),
+                                 BoxType(TS::KnownTypeCode::String)), 0);
+    EXPECT_EQ(Syntax::CompareAny(BoxType(TS::KnownTypeCode::Object),
+                                BoxType(TS::KnownTypeCode::Object)), 0);
+    EXPECT_GT(Syntax::CompareAny(BoxType(TS::KnownTypeCode::String),
+                               BoxType(TS::KnownTypeCode::Object)), 0);
+}
+
+// Different comparable types (int vs string) yield 0 -- the documented deviation
+// (the C# `CompareTo` would throw; the well-formed same-AttributeType case never
+// reaches it, so the port returns 0 rather than crash the sort).
+TEST(TypeSystemAstBuilderTest, CompareAnyReturnsZeroForDifferentTypes)
+{
+    EXPECT_EQ(Syntax::CompareAny(std::any(static_cast<std::int32_t>(3)),
+                               std::any(std::string("3"))), 0);
+}
+
+// An unhandled type (a boxed `std::vector<int>` is not `IComparable`) yields 0 --
+// the C# `else -> 0` branch for a non-`IComparable`.
+TEST(TypeSystemAstBuilderTest, CompareAnyReturnsZeroForUnhandledType)
+{
+    std::vector<int> v{1, 2, 3};
+    EXPECT_EQ(Syntax::CompareAny(std::any(v), std::any(v)), 0);
+}
+
+// ---------------------------------------------------------------------------
+// CompareAttribute: two attributes of different attribute types order by the
+// type name (the first discriminiator).
+// ---------------------------------------------------------------------------
+TEST(TypeSystemAstBuilderTest, CompareAttributeOrdersByAttributeType)
+{
+    TestAttribute objectAttr(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), false, {}, {});
+    TestAttribute stringAttr(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::String), false, {}, {});
+    EXPECT_LT(Syntax::CompareAttribute(objectAttr, stringAttr), 0);
+    EXPECT_GT(Syntax::CompareAttribute(stringAttr, objectAttr), 0);
+}
+
+// Two attributes of the same type with no arguments compare equal (0).
+TEST(TypeSystemAstBuilderTest, CompareAttributeReturnsZeroForEqualTypes)
+{
+    TestAttribute a(std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), false, {}, {});
+    TestAttribute b(std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), false, {}, {});
+    EXPECT_EQ(Syntax::CompareAttribute(a, b), 0);
+}
+
+// A decode-errored attribute sorts before a clean one (the `HasDecodeErrors`
+// discriminator after the type match).
+TEST(TypeSystemAstBuilderTest, CompareAttributeErroredSortsFirst)
+{
+    TestAttribute clean(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), false, {}, {});
+    TestAttribute errored(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), true, {}, {});
+    EXPECT_LT(Syntax::CompareAttribute(errored, clean), 0);  // errored sorts first (< 0)
+    EXPECT_GT(Syntax::CompareAttribute(clean, errored), 0);
+}
+
+// Both decode-errored attributes compare equal (the `&&` early return).
+TEST(TypeSystemAstBuilderTest, CompareAttributeBothErroredReturnsZero)
+{
+    TestAttribute a(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), true, {}, {});
+    TestAttribute b(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), true, {}, {});
+    EXPECT_EQ(Syntax::CompareAttribute(a, b), 0);
+}
+
+// Attributes of the same type with different fixed-argument counts order by the
+// count (the length discriminator before the element-wise loop).
+TEST(TypeSystemAstBuilderTest, CompareAttributeOrdersByFixedArgCount)
+{
+    TS::ITypePtr intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    TestAttribute one(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), false,
+        {TS::CustomAttributeTypedArgument(intType, std::any(static_cast<std::int32_t>(1)))}, {});
+    TestAttribute two(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), false,
+        {TS::CustomAttributeTypedArgument(intType, std::any(static_cast<std::int32_t>(1))),
+         TS::CustomAttributeTypedArgument(intType, std::any(static_cast<std::int32_t>(2)))},
+        {});
+    EXPECT_LT(Syntax::CompareAttribute(one, two), 0);  // 1 < 2 args
+    EXPECT_GT(Syntax::CompareAttribute(two, one), 0);
+}
+
+// Same count, different argument type: order by the type name (via `CompareType`).
+TEST(TypeSystemAstBuilderTest, CompareAttributeOrdersByFixedArgType)
+{
+    TS::ITypePtr intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);   // "System.Int32"
+    TS::ITypePtr stringType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::String); // "System.String"
+    TestAttribute intAttr(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), false,
+        {TS::CustomAttributeTypedArgument(intType, std::any(static_cast<std::int32_t>(1)))}, {});
+    TestAttribute stringAttr(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), false,
+        {TS::CustomAttributeTypedArgument(stringType, std::any(std::string("1")))}, {});
+    EXPECT_LT(Syntax::CompareAttribute(intAttr, stringAttr), 0);  // Int32 < String
+}
+
+// Same count and type, different value: order by the boxed value (via `CompareAny`).
+TEST(TypeSystemAstBuilderTest, CompareAttributeOrdersByFixedArgValue)
+{
+    TS::ITypePtr intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    TestAttribute small(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), false,
+        {TS::CustomAttributeTypedArgument(intType, std::any(static_cast<std::int32_t>(3)))}, {});
+    TestAttribute large(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), false,
+        {TS::CustomAttributeTypedArgument(intType, std::any(static_cast<std::int32_t>(5)))}, {});
+    EXPECT_LT(Syntax::CompareAttribute(small, large), 0);
+    EXPECT_GT(Syntax::CompareAttribute(large, small), 0);
+}
+
+// Named-argument count discriminates after the fixed arguments.
+TEST(TypeSystemAstBuilderTest, CompareAttributeOrdersByNamedArgCount)
+{
+    TS::ITypePtr intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    TS::CustomAttributeNamedArgument oneArg(
+        std::string("A"), TS::CustomAttributeNamedArgumentKind::Field, intType,
+        std::any(static_cast<std::int32_t>(1)));
+    TestAttribute zero(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), false, {}, {});
+    TestAttribute one(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), false, {}, {oneArg});
+    EXPECT_LT(Syntax::CompareAttribute(zero, one), 0);
+    EXPECT_GT(Syntax::CompareAttribute(one, zero), 0);
+}
+
+// Same named-arg count, different member name: order by the name.
+TEST(TypeSystemAstBuilderTest, CompareAttributeOrdersByNamedArgName)
+{
+    TS::ITypePtr intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    TestAttribute aName(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), false, {},
+        {TS::CustomAttributeNamedArgument(std::string("A"), TS::CustomAttributeNamedArgumentKind::Field,
+                                         intType, std::any(static_cast<std::int32_t>(1)))});
+    TestAttribute bName(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), false, {},
+        {TS::CustomAttributeNamedArgument(std::string("B"), TS::CustomAttributeNamedArgumentKind::Field,
+                                         intType, std::any(static_cast<std::int32_t>(1)))});
+    EXPECT_LT(Syntax::CompareAttribute(aName, bName), 0);  // "A" < "B"
+}
+
+// Same name and type, different value: order by the boxed value (via `CompareAny`).
+TEST(TypeSystemAstBuilderTest, CompareAttributeOrdersByNamedArgValue)
+{
+    TS::ITypePtr intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    TestAttribute small(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), false, {},
+        {TS::CustomAttributeNamedArgument(std::string("A"), TS::CustomAttributeNamedArgumentKind::Field,
+                                         intType, std::any(static_cast<std::int32_t>(3)))});
+    TestAttribute large(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), false, {},
+        {TS::CustomAttributeNamedArgument(std::string("A"), TS::CustomAttributeNamedArgumentKind::Field,
+                                         intType, std::any(static_cast<std::int32_t>(5)))});
+    EXPECT_LT(Syntax::CompareAttribute(small, large), 0);
+    EXPECT_GT(Syntax::CompareAttribute(large, small), 0);
+}
+
+// Two structurally-identical attributes (same type, no errors, same arguments)
+// compare equal -- the full crux pinning every discriminiator returns 0.
+TEST(TypeSystemAstBuilderTest, CompareAttributeEqualReturnsZero)
+{
+    TS::ITypePtr intType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    std::vector<TS::CustomAttributeTypedArgument> fixed = {
+        TS::CustomAttributeTypedArgument(intType, std::any(static_cast<std::int32_t>(42)))};
+    std::vector<TS::CustomAttributeNamedArgument> named = {
+        TS::CustomAttributeNamedArgument(std::string("N"), TS::CustomAttributeNamedArgumentKind::Field,
+                                       intType, std::any(static_cast<std::int32_t>(7)))};
+    TestAttribute a(std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), false, fixed, named);
+    TestAttribute b(std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), false, fixed, named);
+    EXPECT_EQ(Syntax::CompareAttribute(a, b), 0);
+}
+
+// The function dispatches through the `IAttribute` interface (the base-class
+// pointer reaches the concrete stub's overrides).
+TEST(TypeSystemAstBuilderTest, CompareAttributeDispatchesThroughInterface)
+{
+    TestAttribute objectAttr(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Object), false, {}, {});
+    TestAttribute stringAttr(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::String), false, {}, {});
+    const TS::IAttribute& a = objectAttr;
+    const TS::IAttribute& b = stringAttr;
+    EXPECT_LT(Syntax::CompareAttribute(a, b), 0);
 }
