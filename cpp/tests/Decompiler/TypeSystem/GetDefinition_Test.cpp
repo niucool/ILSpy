@@ -44,6 +44,7 @@
 // `MetadataTypeDefinition.IType.GetDefinition() => this` pattern (a resolved type
 // definition IS an `ITypeDefinition`, so its own definition is itself).
 
+#include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinitionOrUnknown.hpp"
@@ -444,3 +445,91 @@ TEST(GetDefinitionTest, TypeDefinitionGetDefinitionDispatchesThroughITypePointer
     const IType* asIType = &objectDef;
     EXPECT_EQ(asIType->GetDefinition(), static_cast<const ITypeDefinition*>(&objectDef));
 }
+
+// ===========================================================================
+// IsObjectOrValueType (TypeSystemAstBuilder.cs line 2736) -- the first consumer
+// of the D459 `IType::GetDefinition()` virtual-with-default. Returns true when
+// `type` resolves to the `System.Object` or `System.ValueType` type definition --
+// the two base types whose nullable-annotation disambiguation the builder handles
+// specially. The body reads `type.GetDefinition()` then `ITypeDefinition.KnownTypeCode()`
+// and compares against `KnownTypeCode::Object` / `KnownTypeCode::ValueType`.
+//
+// These tests are co-located with the `GetDefinition` tests (rather than in the
+// `TypeSystemAstBuilderTest` suite) because the `TestDefinition` stub above -- a
+// compact concrete `ITypeDefinition` with a CONFIGURABLE `KnownTypeCode()` and a
+// `GetDefinition() => this` override -- was designed (D459) to back exactly this
+// consumer: the `TestDefinition(FullTypeName, KnownTypeCode, TypeKind, ICompilation)`
+// ctor pins the known-type code the `IsObjectOrValueType` body switches on, so the
+// same stub exercises the `Object`-true, `ValueType`-true, other-known-false, and
+// `None`-false branches. The nullptr-`GetDefinition` branch uses the C++-only
+// minimal `KnownType` (a D459 `nullptr`-default inheritor). A distinct gtest suite
+// name (`IsObjectOrValueTypeTest`) keeps the suite list uncluttered.
+// ===========================================================================
+
+namespace Syntax = ILSpy::Decompiler::CSharp::Syntax;
+
+TEST(IsObjectOrValueTypeTest, ReturnsTrueForObjectTypeDefinition) {
+    TestCompilation compilation;
+    TestDefinition objectDef(FullTypeName("System.Object"), KnownTypeCode::Object,
+                              TypeKind::Class, compilation);
+    EXPECT_TRUE(Syntax::IsObjectOrValueType(objectDef));
+}
+
+TEST(IsObjectOrValueTypeTest, ReturnsTrueForValueTypeTypeDefinition) {
+    TestCompilation compilation;
+    TestDefinition valueTypeDef(FullTypeName("System.ValueType"), KnownTypeCode::ValueType,
+                                TypeKind::Class, compilation);
+    EXPECT_TRUE(Syntax::IsObjectOrValueType(valueTypeDef));
+}
+
+TEST(IsObjectOrValueTypeTest, ReturnsFalseForOtherKnownTypeDefinition) {
+    TestCompilation compilation;
+    TestDefinition int32Def(FullTypeName("System.Int32"), KnownTypeCode::Int32,
+                           TypeKind::Struct, compilation);
+    EXPECT_FALSE(Syntax::IsObjectOrValueType(int32Def));
+
+    TestDefinition stringDef(FullTypeName("System.String"), KnownTypeCode::String,
+                             TypeKind::Class, compilation);
+    EXPECT_FALSE(Syntax::IsObjectOrValueType(stringDef));
+}
+
+TEST(IsObjectOrValueTypeTest, ReturnsFalseForNoneKnownTypeDefinition) {
+    TestCompilation compilation;
+    // A non-known type definition (e.g. a user-defined class) has KnownTypeCode::None,
+    // which is neither Object nor ValueType -- the builder renders it as a plain type.
+    TestDefinition userDef(FullTypeName(TopLevelTypeName("MyApp", "Customer")),
+                           KnownTypeCode::None, TypeKind::Class, compilation);
+    EXPECT_FALSE(Syntax::IsObjectOrValueType(userDef));
+}
+
+TEST(IsObjectOrValueTypeTest, ReturnsFalseWhenGetDefinitionReturnsNull) {
+    // The C++-only minimal KnownType inherits the D459 nullptr default for
+    // GetDefinition, so IsObjectOrValueType short-circuits at the d != null check.
+    // Even a KnownTypeCode::Object KnownType has GetDefinition() == nullptr
+    // (it is a name placeholder, NOT an ITypeDefinition).
+    auto objectKnown = std::make_shared<KnownType>(KnownTypeCode::Object);
+    EXPECT_EQ(objectKnown->GetDefinition(), nullptr);
+    EXPECT_FALSE(Syntax::IsObjectOrValueType(*objectKnown));
+}
+
+TEST(IsObjectOrValueTypeTest, DispatchesThroughITypeBasePointer) {
+    TestCompilation compilation;
+    TestDefinition objectDef(FullTypeName("System.Object"), KnownTypeCode::Object,
+                              TypeKind::Class, compilation);
+    // IsObjectOrValueType takes a `const IType&`; a TestDefinition IS-A IType
+    // (via ITypeDefinitionOrUnknown), so dispatch through the IType base pointer
+    // reaches the virtual GetDefinition override returning the TestDefinition itself.
+    const IType* asIType = &objectDef;
+    EXPECT_TRUE(Syntax::IsObjectOrValueType(*asIType));
+}
+
+TEST(IsObjectOrValueTypeTest, DispatchesThroughITypeDefinitionBasePointer) {
+    TestCompilation compilation;
+    TestDefinition valueTypeDef(FullTypeName("System.ValueType"), KnownTypeCode::ValueType,
+                                TypeKind::Class, compilation);
+    // Dispatch through the ITypeDefinition base pointer (a more derived IType) --
+    // the GetDefinition override still returns `this`, and KnownTypeCode is ValueType.
+    const ITypeDefinition* asTypeDef = &valueTypeDef;
+    EXPECT_TRUE(Syntax::IsObjectOrValueType(*asTypeDef));
+}
+

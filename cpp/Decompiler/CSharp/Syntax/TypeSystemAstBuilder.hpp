@@ -38,7 +38,10 @@
 #include "Modifiers.hpp"
 
 #include "Decompiler/TypeSystem/Accessibility.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
 #include <any>
 #include <cmath>
@@ -228,6 +231,29 @@ inline std::optional<std::string> GetNullabilityDisambiguator(
         return std::nullopt;
     }
     return std::optional<std::string>("default");
+}
+
+// ---------------------------------------------------------------------------
+// IsObjectOrValueType (TypeSystemAstBuilder.cs line 2736). Returns true when
+// `type` resolves to the `System.Object` or `System.ValueType` type definition --
+// the two base types whose nullable-annotation disambiguation the builder must
+// handle specially (a `T?` where `T : object`/`T : ValueType` keeps the nullable
+// annotation rather than collapsing to a `Nullable<T>`). The C# body is
+// `d = type.GetDefinition(); return d != null && (d.KnownTypeCode == Object ||
+// d.KnownTypeCode == ValueType)` -- it reads `IType.GetDefinition()` (the D459
+// virtual-with-default `nullptr` accessor) then `ITypeDefinition.KnownTypeCode()`
+// (the D393 accessor returning the D271 enum by value).
+//
+// A type whose `GetDefinition()` returns null (arrays, pointers, type parameters,
+// the C++-only minimal `KnownType`/`SimpleType`/`SpecialType`, ... -- the D459
+// `nullptr`-default inheritors) yields false; a resolved type definition yields
+// true only when its `KnownTypeCode` is `Object` or `ValueType`.
+// ---------------------------------------------------------------------------
+inline bool IsObjectOrValueType(const ::ILSpy::Decompiler::TypeSystem::IType& type) {
+    const auto* d = type.GetDefinition();
+    return d != nullptr &&
+           (d->KnownTypeCode() == ::ILSpy::Decompiler::TypeSystem::KnownTypeCode::Object ||
+            d->KnownTypeCode() == ::ILSpy::Decompiler::TypeSystem::KnownTypeCode::ValueType);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
