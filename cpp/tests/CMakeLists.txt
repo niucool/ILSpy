@@ -69,6 +69,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/IModuleReference_Test.cpp
     Decompiler/TypeSystem/DefaultAssemblyReference_Test.cpp
     Decompiler/TypeSystem/KnownTypeCache_Test.cpp
+    Decompiler/TypeSystem/MergedNamespace_Test.cpp
     Decompiler/Output/IAmbience_Test.cpp
     Decompiler/IL/ILAst_Test.cpp
     Decompiler/IL/ILAstInstructions_Test.cpp
