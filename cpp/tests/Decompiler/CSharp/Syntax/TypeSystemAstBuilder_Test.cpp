@@ -28,6 +28,9 @@
 // usePrivateProtected gate for the C# 7.2 `private protected` accessibility.
 
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
+#include "Decompiler/CSharp/Syntax/Accessor.hpp"
+#include "Decompiler/CSharp/Syntax/EntityDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/MethodDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Modifiers.hpp"
 #include "Decompiler/TypeSystem/Accessibility.hpp"
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
@@ -484,4 +487,115 @@ TEST(TypeSystemAstBuilderTest, GetNullabilityDisambiguatorDistinguishesAllThreeS
     ASSERT_TRUE(rUnknown.has_value());
     EXPECT_FALSE(rValue.has_value());
     EXPECT_NE(*rRef, *rUnknown);
+}
+
+// ===========================================================================
+// MergeReadOnlyModifiers (TypeSystemAstBuilder.cs line 2277), a local static
+// helper inside ConvertProperty / ConvertIndexer / ConvertCustomEvent that lifts
+// the `readonly` modifier from the accessor(s) to the declaration when all
+// carrying accessors agree -- the C# 7.2 `readonly` on a property/event is stored
+// on the declaration, but the resolver may have placed it on the individual
+// accessors. The C# `EntityDeclaration decl` (non-null) ports to
+// `EntityDeclaration&`; the C# `Accessor?` (nullable) ports to `Accessor*`.
+//
+// The tests use a `MethodDeclaration` for the `decl` parameter (a concrete
+// `EntityDeclaration` with an empty ctor) and `Accessor` instances for the two
+// accessor parameters; `Modifiers()` / `HasModifier()` are inherited from
+// `EntityDeclaration` and work identically on both.
+// ===========================================================================
+
+// accessor1 null: the helper returns immediately; decl and accessor2 are
+// untouched (the early-return before any modifier read).
+TEST(TypeSystemAstBuilderTest, MergeReadOnlyModifiersNoOpWhenAccessor1IsNull)
+{
+    Syntax::MethodDeclaration decl;
+    decl.Modifiers(Modifiers::Public);
+    Syntax::Accessor accessor2;
+    accessor2.Modifiers(Modifiers::Readonly);
+
+    Syntax::MergeReadOnlyModifiers(decl, nullptr, &accessor2);
+
+    EXPECT_EQ(decl.Modifiers(), Modifiers::Public);
+    EXPECT_EQ(accessor2.Modifiers(), Modifiers::Readonly);
+}
+
+// accessor1 has readonly and accessor2 is null: the readonly bit is lifted from
+// accessor1 to the declaration (the first if-branch).
+TEST(TypeSystemAstBuilderTest, MergeReadOnlyModifiersLiftsReadOnlyFromSingleAccessorToDecl)
+{
+    Syntax::MethodDeclaration decl;
+    Syntax::Accessor accessor1;
+    accessor1.Modifiers(Modifiers::Readonly);
+
+    Syntax::MergeReadOnlyModifiers(decl, &accessor1, nullptr);
+
+    EXPECT_FALSE(accessor1.HasModifier(Modifiers::Readonly));
+    EXPECT_TRUE(decl.HasModifier(Modifiers::Readonly));
+}
+
+// both accessors have readonly: the readonly bit is lifted from both to the
+// declaration (the else-if branch).
+TEST(TypeSystemAstBuilderTest, MergeReadOnlyModifiersLiftsReadOnlyFromBothAccessorsToDecl)
+{
+    Syntax::MethodDeclaration decl;
+    Syntax::Accessor accessor1;
+    Syntax::Accessor accessor2;
+    accessor1.Modifiers(Modifiers::Readonly);
+    accessor2.Modifiers(Modifiers::Readonly);
+
+    Syntax::MergeReadOnlyModifiers(decl, &accessor1, &accessor2);
+
+    EXPECT_FALSE(accessor1.HasModifier(Modifiers::Readonly));
+    EXPECT_FALSE(accessor2.HasModifier(Modifiers::Readonly));
+    EXPECT_TRUE(decl.HasModifier(Modifiers::Readonly));
+}
+
+// accessor1 has readonly, accessor2 is non-null but does NOT have readonly: the
+// else-if fails (not both carry it), so no modifier is moved.
+TEST(TypeSystemAstBuilderTest, MergeReadOnlyModifiersNoOpWhenOnlyAccessor1HasReadOnly)
+{
+    Syntax::MethodDeclaration decl;
+    Syntax::Accessor accessor1;
+    Syntax::Accessor accessor2;
+    accessor1.Modifiers(Modifiers::Readonly);
+
+    Syntax::MergeReadOnlyModifiers(decl, &accessor1, &accessor2);
+
+    EXPECT_TRUE(accessor1.HasModifier(Modifiers::Readonly));
+    EXPECT_FALSE(accessor2.HasModifier(Modifiers::Readonly));
+    EXPECT_FALSE(decl.HasModifier(Modifiers::Readonly));
+}
+
+// accessor1 lacks readonly (accessor2 non-null): no modifier is moved regardless
+// of accessor2's state -- the first if and the else-if both require accessor1 to
+// carry readonly.
+TEST(TypeSystemAstBuilderTest, MergeReadOnlyModifiersNoOpWhenAccessor1LacksReadOnly)
+{
+    Syntax::MethodDeclaration decl;
+    Syntax::Accessor accessor1;
+    Syntax::Accessor accessor2;
+    accessor2.Modifiers(Modifiers::Readonly);
+
+    Syntax::MergeReadOnlyModifiers(decl, &accessor1, &accessor2);
+
+    EXPECT_FALSE(accessor1.HasModifier(Modifiers::Readonly));
+    EXPECT_TRUE(accessor2.HasModifier(Modifiers::Readonly));
+    EXPECT_FALSE(decl.HasModifier(Modifiers::Readonly));
+}
+
+// The decl's existing modifiers are preserved: the readonly bit is OR'd in, not
+// replacing the prior value (the read-modify-write through the Modifiers()
+// getter/setter pair).
+TEST(TypeSystemAstBuilderTest, MergeReadOnlyModifiersPreservesExistingDeclModifiers)
+{
+    Syntax::MethodDeclaration decl;
+    decl.Modifiers(Modifiers::Public);
+    Syntax::Accessor accessor1;
+    accessor1.Modifiers(Modifiers::Readonly);
+
+    Syntax::MergeReadOnlyModifiers(decl, &accessor1, nullptr);
+
+    EXPECT_TRUE(decl.HasModifier(Modifiers::Public));
+    EXPECT_TRUE(decl.HasModifier(Modifiers::Readonly));
+    EXPECT_EQ(decl.Modifiers(), Modifiers::Public | Modifiers::Readonly);
 }

@@ -35,6 +35,8 @@
 
 #pragma once
 
+#include "Accessor.hpp"
+#include "EntityDeclaration.hpp"
 #include "Modifiers.hpp"
 
 #include "Decompiler/TypeSystem/Accessibility.hpp"
@@ -254,6 +256,46 @@ inline bool IsObjectOrValueType(const ::ILSpy::Decompiler::TypeSystem::IType& ty
     return d != nullptr &&
            (d->KnownTypeCode() == ::ILSpy::Decompiler::TypeSystem::KnownTypeCode::Object ||
             d->KnownTypeCode() == ::ILSpy::Decompiler::TypeSystem::KnownTypeCode::ValueType);
+}
+
+// ---------------------------------------------------------------------------
+// MergeReadOnlyModifiers (TypeSystemAstBuilder.cs line 2277). A local static
+// helper inside ConvertProperty/ConvertIndexer/ConvertCustomEvent that lifts the
+// `readonly` modifier from the accessor(s) to the declaration when ALL accessors
+// carrying it agree -- the C# 7.2 `readonly` on a property/event is stored on the
+// declaration, but the resolver may have placed it on the individual accessors.
+//
+// The C# `EntityDeclaration decl` (non-null) ports to `EntityDeclaration& decl`
+// (a non-null reference); the C# `Accessor? accessor1`/`accessor2` (nullable) port
+// to `Accessor*` (a nullable raw pointer, nullptr = the C# null). The C#
+// `accessor2!.HasModifier(...)` null-forgiving deref ports to an unguarded
+// `accessor2->HasModifier(...)` (the D354 `!`-to-unguarded-deref convention): the
+// dereference is safe because the `&&` short-circuits on the preceding
+// `accessor1->HasModifier(Readonly)` and the first `if`-branch already returned
+// when `accessor1` has `readonly` and `accessor2` is null, so the `else if` only
+// reaches the `accessor2->` dereference when `accessor2` is non-null.
+//
+// The `Modifiers &= ~Readonly` / `|= Readonly` compound assignments port to
+// read-modify-write through the `Modifiers()` getter/setter pair (a property with
+// no `&=`/`|=` C++ counterpart on an `enum class`): `accessor1->Modifiers(
+// accessor1->Modifiers() & ~Modifiers::Readonly)` clears the bit, `decl.Modifiers(
+// decl.Modifiers() | Modifiers::Readonly)` sets it. The `[Flags]` bitwise
+// operators (`|`, `&`, `~`) on `Modifiers` are the D270 free functions.
+// ---------------------------------------------------------------------------
+inline void MergeReadOnlyModifiers(EntityDeclaration& decl,
+                                  Accessor* accessor1,
+                                  Accessor* accessor2) {
+    if (accessor1 == nullptr)
+        return;
+    if (accessor1->HasModifier(Modifiers::Readonly) && accessor2 == nullptr) {
+        accessor1->Modifiers(accessor1->Modifiers() & ~Modifiers::Readonly);
+        decl.Modifiers(decl.Modifiers() | Modifiers::Readonly);
+    } else if (accessor1->HasModifier(Modifiers::Readonly) &&
+               accessor2->HasModifier(Modifiers::Readonly)) {
+        accessor1->Modifiers(accessor1->Modifiers() & ~Modifiers::Readonly);
+        accessor2->Modifiers(accessor2->Modifiers() & ~Modifiers::Readonly);
+        decl.Modifiers(decl.Modifiers() | Modifiers::Readonly);
+    }
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
