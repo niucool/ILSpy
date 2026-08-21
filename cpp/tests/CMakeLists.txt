@@ -91,6 +91,7 @@ add_executable(ilspy_tests
     Decompiler/Semantics/ArrayCreateResolveResult_Test.cpp
     Decompiler/Semantics/AmbiguousResolveResult_Test.cpp
     Decompiler/Semantics/InterpolatedStringResolveResult_Test.cpp
+    Decompiler/Semantics/LocalResolveResult_Test.cpp
     Decompiler/Output/IAmbience_Test.cpp
     Decompiler/IL/ILAst_Test.cpp
     Decompiler/IL/ILAstInstructions_Test.cpp
