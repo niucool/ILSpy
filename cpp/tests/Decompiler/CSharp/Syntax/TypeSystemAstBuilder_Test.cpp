@@ -1087,3 +1087,231 @@ TEST(TypeSystemAstBuilderTest, CalculateHammingWeightHighByteOnly)
 {
     EXPECT_EQ(Syntax::CalculateHammingWeight(0xFF00000000000000ULL), 8);
 }
+
+// ===========================================================================
+// TryGetSpecialConstant (TypeSystemAstBuilder.cs line 1252, the
+// `specialConstants` static readonly Dictionary). The lookup maps a boxed BCL
+// primitive value to the (KnownTypeCode, member-name) pair of the BCL static
+// field that renders it as a named reference. The tests exercise each BCL
+// primitive arm -- the integer MinValue/MaxValue pairs, the unsigned MaxValue
+// singletons, and the float/double NaN / infinities / MinValue / MaxValue /
+// Epsilon -- plus the not-found (nullopt) cases for a non-special value and an
+// unmatched type. The NaN cases use std::isnan (NaN != NaN), so they are the
+// load-bearing crux distinguishing the isnan arm from a naive == comparison.
+// ===========================================================================
+
+// A boxed byte.MaxValue (255) maps to (Byte, "MaxValue").
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantByteMaxValue)
+{
+    auto r = Syntax::TryGetSpecialConstant(std::any(static_cast<std::uint8_t>(255)));
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(r->first, TS::KnownTypeCode::Byte);
+    EXPECT_EQ(r->second, "MaxValue");
+}
+
+// A boxed sbyte.MinValue (-128) maps to (SByte, "MinValue").
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantSByteMinValue)
+{
+    auto r = Syntax::TryGetSpecialConstant(std::any(static_cast<std::int8_t>(-128)));
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(r->first, TS::KnownTypeCode::SByte);
+    EXPECT_EQ(r->second, "MinValue");
+}
+
+// A boxed sbyte.MaxValue (127) maps to (SByte, "MaxValue").
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantSByteMaxValue)
+{
+    auto r = Syntax::TryGetSpecialConstant(std::any(static_cast<std::int8_t>(127)));
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(r->first, TS::KnownTypeCode::SByte);
+    EXPECT_EQ(r->second, "MaxValue");
+}
+
+// A boxed short.MinValue / MaxValue maps to the Int16 pair.
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantInt16MinMax)
+{
+    auto mn = Syntax::TryGetSpecialConstant(std::any(static_cast<std::int16_t>(-32768)));
+    ASSERT_TRUE(mn.has_value());
+    EXPECT_EQ(mn->first, TS::KnownTypeCode::Int16);
+    EXPECT_EQ(mn->second, "MinValue");
+    auto mx = Syntax::TryGetSpecialConstant(std::any(static_cast<std::int16_t>(32767)));
+    ASSERT_TRUE(mx.has_value());
+    EXPECT_EQ(mx->first, TS::KnownTypeCode::Int16);
+    EXPECT_EQ(mx->second, "MaxValue");
+}
+
+// A boxed ushort.MaxValue maps to (UInt16, "MaxValue").
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantUInt16MaxValue)
+{
+    auto r = Syntax::TryGetSpecialConstant(std::any(static_cast<std::uint16_t>(65535)));
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(r->first, TS::KnownTypeCode::UInt16);
+    EXPECT_EQ(r->second, "MaxValue");
+}
+
+// A boxed int.MinValue / MaxValue maps to the Int32 pair.
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantInt32MinMax)
+{
+    auto mn = Syntax::TryGetSpecialConstant(std::any(std::numeric_limits<std::int32_t>::min()));
+    ASSERT_TRUE(mn.has_value());
+    EXPECT_EQ(mn->first, TS::KnownTypeCode::Int32);
+    EXPECT_EQ(mn->second, "MinValue");
+    auto mx = Syntax::TryGetSpecialConstant(std::any(std::numeric_limits<std::int32_t>::max()));
+    ASSERT_TRUE(mx.has_value());
+    EXPECT_EQ(mx->first, TS::KnownTypeCode::Int32);
+    EXPECT_EQ(mx->second, "MaxValue");
+}
+
+// A boxed uint.MaxValue maps to (UInt32, "MaxValue").
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantUInt32MaxValue)
+{
+    auto r = Syntax::TryGetSpecialConstant(std::any(std::numeric_limits<std::uint32_t>::max()));
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(r->first, TS::KnownTypeCode::UInt32);
+    EXPECT_EQ(r->second, "MaxValue");
+}
+
+// A boxed long.MinValue / MaxValue maps to the Int64 pair.
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantInt64MinMax)
+{
+    auto mn = Syntax::TryGetSpecialConstant(std::any(std::numeric_limits<std::int64_t>::min()));
+    ASSERT_TRUE(mn.has_value());
+    EXPECT_EQ(mn->first, TS::KnownTypeCode::Int64);
+    EXPECT_EQ(mn->second, "MinValue");
+    auto mx = Syntax::TryGetSpecialConstant(std::any(std::numeric_limits<std::int64_t>::max()));
+    ASSERT_TRUE(mx.has_value());
+    EXPECT_EQ(mx->first, TS::KnownTypeCode::Int64);
+    EXPECT_EQ(mx->second, "MaxValue");
+}
+
+// A boxed ulong.MaxValue maps to (UInt64, "MaxValue").
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantUInt64MaxValue)
+{
+    auto r = Syntax::TryGetSpecialConstant(std::any(std::numeric_limits<std::uint64_t>::max()));
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(r->first, TS::KnownTypeCode::UInt64);
+    EXPECT_EQ(r->second, "MaxValue");
+}
+
+// A boxed float NaN maps to (Single, "NaN") -- the load-bearing isnan crux,
+// since a naive == comparison would fail (NaN != NaN).
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantSingleNaN)
+{
+    auto r = Syntax::TryGetSpecialConstant(std::any(std::numeric_limits<float>::quiet_NaN()));
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(r->first, TS::KnownTypeCode::Single);
+    EXPECT_EQ(r->second, "NaN");
+}
+
+// A boxed float positive/negative infinity maps to the matching member.
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantSingleInfinities)
+{
+    auto neg = Syntax::TryGetSpecialConstant(std::any(-std::numeric_limits<float>::infinity()));
+    ASSERT_TRUE(neg.has_value());
+    EXPECT_EQ(neg->first, TS::KnownTypeCode::Single);
+    EXPECT_EQ(neg->second, "NegativeInfinity");
+    auto pos = Syntax::TryGetSpecialConstant(std::any(std::numeric_limits<float>::infinity()));
+    ASSERT_TRUE(pos.has_value());
+    EXPECT_EQ(pos->first, TS::KnownTypeCode::Single);
+    EXPECT_EQ(pos->second, "PositiveInfinity");
+}
+
+// A boxed float MinValue / MaxValue maps to the Single pair. C# float.MinValue
+// is the most-negative finite = -numeric_limits<float>::max(), NOT FLT_MIN.
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantSingleMinMax)
+{
+    auto mn = Syntax::TryGetSpecialConstant(std::any(-std::numeric_limits<float>::max()));
+    ASSERT_TRUE(mn.has_value());
+    EXPECT_EQ(mn->first, TS::KnownTypeCode::Single);
+    EXPECT_EQ(mn->second, "MinValue");
+    auto mx = Syntax::TryGetSpecialConstant(std::any(std::numeric_limits<float>::max()));
+    ASSERT_TRUE(mx.has_value());
+    EXPECT_EQ(mx->first, TS::KnownTypeCode::Single);
+    EXPECT_EQ(mx->second, "MaxValue");
+}
+
+// A boxed float Epsilon (the smallest positive subnormal) maps to (Single,
+// "Epsilon") -- denorm_min(), NOT FLT_EPSILON (the 1-to-next gap).
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantSingleEpsilon)
+{
+    auto r = Syntax::TryGetSpecialConstant(std::any(std::numeric_limits<float>::denorm_min()));
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(r->first, TS::KnownTypeCode::Single);
+    EXPECT_EQ(r->second, "Epsilon");
+}
+
+// A boxed double NaN maps to (Double, "NaN").
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantDoubleNaN)
+{
+    auto r = Syntax::TryGetSpecialConstant(std::any(std::numeric_limits<double>::quiet_NaN()));
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(r->first, TS::KnownTypeCode::Double);
+    EXPECT_EQ(r->second, "NaN");
+}
+
+// A boxed double positive/negative infinity maps to the matching member.
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantDoubleInfinities)
+{
+    auto neg = Syntax::TryGetSpecialConstant(std::any(-std::numeric_limits<double>::infinity()));
+    ASSERT_TRUE(neg.has_value());
+    EXPECT_EQ(neg->first, TS::KnownTypeCode::Double);
+    EXPECT_EQ(neg->second, "NegativeInfinity");
+    auto pos = Syntax::TryGetSpecialConstant(std::any(std::numeric_limits<double>::infinity()));
+    ASSERT_TRUE(pos.has_value());
+    EXPECT_EQ(pos->first, TS::KnownTypeCode::Double);
+    EXPECT_EQ(pos->second, "PositiveInfinity");
+}
+
+// A boxed double MinValue / MaxValue maps to the Double pair.
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantDoubleMinMax)
+{
+    auto mn = Syntax::TryGetSpecialConstant(std::any(-std::numeric_limits<double>::max()));
+    ASSERT_TRUE(mn.has_value());
+    EXPECT_EQ(mn->first, TS::KnownTypeCode::Double);
+    EXPECT_EQ(mn->second, "MinValue");
+    auto mx = Syntax::TryGetSpecialConstant(std::any(std::numeric_limits<double>::max()));
+    ASSERT_TRUE(mx.has_value());
+    EXPECT_EQ(mx->first, TS::KnownTypeCode::Double);
+    EXPECT_EQ(mx->second, "MaxValue");
+}
+
+// A boxed double Epsilon (the smallest positive subnormal) maps to (Double,
+// "Epsilon").
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantDoubleEpsilon)
+{
+    auto r = Syntax::TryGetSpecialConstant(std::any(std::numeric_limits<double>::denorm_min()));
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(r->first, TS::KnownTypeCode::Double);
+    EXPECT_EQ(r->second, "Epsilon");
+}
+
+// A non-special integer value (42) yields nullopt.
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantNonSpecialValueReturnsNullopt)
+{
+    auto r = Syntax::TryGetSpecialConstant(std::any(static_cast<std::int32_t>(42)));
+    EXPECT_FALSE(r.has_value());
+}
+
+// The runtime type distinguishes keys: a boxed int 255 (NOT byte.MaxValue, the
+// int arm has no entry for 255) yields nullopt, even though byte.MaxValue is 255.
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantTypeDistinguishesByteFromInt)
+{
+    // A boxed int32_t 255 is NOT a special constant (the int arm only matches
+    // int.MinValue / int.MaxValue).
+    auto r = Syntax::TryGetSpecialConstant(std::any(static_cast<std::int32_t>(255)));
+    EXPECT_FALSE(r.has_value());
+}
+
+// An empty std::any (the C# null constant) yields nullopt.
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantEmptyAnyReturnsNullopt)
+{
+    auto r = Syntax::TryGetSpecialConstant(std::any());
+    EXPECT_FALSE(r.has_value());
+}
+
+// An unmatched type (a boxed std::string) yields nullopt.
+TEST(TypeSystemAstBuilderTest, TryGetSpecialConstantUnmatchedTypeReturnsNullopt)
+{
+    auto r = Syntax::TryGetSpecialConstant(std::any(std::string("hello")));
+    EXPECT_FALSE(r.has_value());
+}

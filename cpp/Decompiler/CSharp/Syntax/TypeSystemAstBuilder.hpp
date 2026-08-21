@@ -531,4 +531,113 @@ inline int CalculateHammingWeight(std::uint64_t value) noexcept {
     return static_cast<int>((x * h01) >> 56);    //returns left 8 bits of x + (x<<8) + (x<<16) + ...
 }
 
+// ---------------------------------------------------------------------------
+// TryGetSpecialConstant (TypeSystemAstBuilder.cs line 1252, the
+// `specialConstants` static readonly Dictionary<object, (KnownTypeCode, string)>).
+// The lookup half of the `IsSpecialConstant` instance method: a boxed BCL
+// primitive value (the decoded constant value) maps to the (KnownTypeCode,
+// member-name) pair of the BCL static field that renders it as a named reference
+// rather than a literal (e.g. `byte.MaxValue` -> `(Byte, "MaxValue")`,
+// `double.NaN` -> `(Double, "NaN")`). The full `IsSpecialConstant` method
+// (which resolves the field via `compilation.FindType(info.Type).GetFields(...)`
+// and constructs the AST reference) depends on the unported CSharpResolver /
+// ITypeDefinition.GetFields / Expression-construction and is deferred; the pure
+// lookup lands here ahead of it.
+//
+// The C# `Dictionary<object, ...>.TryGetValue` uses the boxed value type's
+// value-based `Equals`/`GetHashCode` (a `byte.MaxValue` key matches any boxed
+// `byte` 255, NOT a boxed `int` 255 -- the runtime type distinguishes them), so
+// the faithful C++ port dispatches on `std::any::type()` (the typeid, the D462
+// CompareAny precedent) to the matching BCL primitive arm and compares the
+// unboxed value with `==`. A type not in the table (including the deferred
+// `decimal` -- the C++ port has no decimal value type, the D432/D462
+// no-decimal-arm convention) yields `std::nullopt`.
+//
+// The C# `float.NaN`/`double.NaN` are matched via `std::isnan` (NOT `==`, which
+// is false for NaN); the infinities via `std::isinf` then the sign. The C#
+// `float.MinValue`/`float.MaxValue`/`float.Epsilon` map to
+// `-std::numeric_limits<float>::max()` / `max()` / `denorm_min()` respectively
+// (C# `float.MinValue` is the most-negative finite, NOT `FLT_MIN` which is the
+// smallest positive normal; C# `float.Epsilon` is the smallest positive
+// subnormal = `denorm_min()`, NOT `FLT_EPSILON` which is the 1-to-next gap).
+// Same for `double`.
+// ---------------------------------------------------------------------------
+inline std::optional<std::pair<::ILSpy::Decompiler::TypeSystem::KnownTypeCode, std::string>>
+TryGetSpecialConstant(const std::any& constant) {
+    namespace TS = ::ILSpy::Decompiler::TypeSystem;
+    using KC = TS::KnownTypeCode;
+    if (!constant.has_value())
+        return std::nullopt;
+    const auto& t = constant.type();
+    if (t == typeid(std::uint8_t)) {
+        const auto v = std::any_cast<std::uint8_t>(constant);
+        if (v == std::numeric_limits<std::uint8_t>::max())
+            return std::make_pair(KC::Byte, std::string("MaxValue"));
+    } else if (t == typeid(std::int8_t)) {
+        const auto v = std::any_cast<std::int8_t>(constant);
+        if (v == std::numeric_limits<std::int8_t>::min())
+            return std::make_pair(KC::SByte, std::string("MinValue"));
+        if (v == std::numeric_limits<std::int8_t>::max())
+            return std::make_pair(KC::SByte, std::string("MaxValue"));
+    } else if (t == typeid(std::int16_t)) {
+        const auto v = std::any_cast<std::int16_t>(constant);
+        if (v == std::numeric_limits<std::int16_t>::min())
+            return std::make_pair(KC::Int16, std::string("MinValue"));
+        if (v == std::numeric_limits<std::int16_t>::max())
+            return std::make_pair(KC::Int16, std::string("MaxValue"));
+    } else if (t == typeid(std::uint16_t)) {
+        const auto v = std::any_cast<std::uint16_t>(constant);
+        if (v == std::numeric_limits<std::uint16_t>::max())
+            return std::make_pair(KC::UInt16, std::string("MaxValue"));
+    } else if (t == typeid(std::int32_t)) {
+        const auto v = std::any_cast<std::int32_t>(constant);
+        if (v == std::numeric_limits<std::int32_t>::min())
+            return std::make_pair(KC::Int32, std::string("MinValue"));
+        if (v == std::numeric_limits<std::int32_t>::max())
+            return std::make_pair(KC::Int32, std::string("MaxValue"));
+    } else if (t == typeid(std::uint32_t)) {
+        const auto v = std::any_cast<std::uint32_t>(constant);
+        if (v == std::numeric_limits<std::uint32_t>::max())
+            return std::make_pair(KC::UInt32, std::string("MaxValue"));
+    } else if (t == typeid(std::int64_t)) {
+        const auto v = std::any_cast<std::int64_t>(constant);
+        if (v == std::numeric_limits<std::int64_t>::min())
+            return std::make_pair(KC::Int64, std::string("MinValue"));
+        if (v == std::numeric_limits<std::int64_t>::max())
+            return std::make_pair(KC::Int64, std::string("MaxValue"));
+    } else if (t == typeid(std::uint64_t)) {
+        const auto v = std::any_cast<std::uint64_t>(constant);
+        if (v == std::numeric_limits<std::uint64_t>::max())
+            return std::make_pair(KC::UInt64, std::string("MaxValue"));
+    } else if (t == typeid(float)) {
+        const auto v = std::any_cast<float>(constant);
+        if (std::isnan(v))
+            return std::make_pair(KC::Single, std::string("NaN"));
+        if (std::isinf(v))
+            return std::make_pair(KC::Single, v < 0 ? std::string("NegativeInfinity") : std::string("PositiveInfinity"));
+        if (v == -std::numeric_limits<float>::max())
+            return std::make_pair(KC::Single, std::string("MinValue"));
+        if (v == std::numeric_limits<float>::max())
+            return std::make_pair(KC::Single, std::string("MaxValue"));
+        if (v == std::numeric_limits<float>::denorm_min())
+            return std::make_pair(KC::Single, std::string("Epsilon"));
+    } else if (t == typeid(double)) {
+        const auto v = std::any_cast<double>(constant);
+        if (std::isnan(v))
+            return std::make_pair(KC::Double, std::string("NaN"));
+        if (std::isinf(v))
+            return std::make_pair(KC::Double, v < 0 ? std::string("NegativeInfinity") : std::string("PositiveInfinity"));
+        if (v == -std::numeric_limits<double>::max())
+            return std::make_pair(KC::Double, std::string("MinValue"));
+        if (v == std::numeric_limits<double>::max())
+            return std::make_pair(KC::Double, std::string("MaxValue"));
+        if (v == std::numeric_limits<double>::denorm_min())
+            return std::make_pair(KC::Double, std::string("Epsilon"));
+    }
+    // The C# `decimal.MinValue`/`decimal.MaxValue` entries are deferred: the C++
+    // port has no decimal value type (the D432/D462 no-decimal-arm convention), so
+    // a boxed decimal (or any other unmatched type/value) yields nullopt.
+    return std::nullopt;
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax
