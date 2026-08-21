@@ -64,6 +64,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/PointerTypeReference_Test.cpp
     Decompiler/TypeSystem/ArrayTypeReference_Test.cpp
     Decompiler/TypeSystem/ParameterizedTypeReference_Test.cpp
+    Decompiler/TypeSystem/NestedTypeReference_Test.cpp
     Decompiler/Output/IAmbience_Test.cpp
     Decompiler/IL/ILAst_Test.cpp
     Decompiler/IL/ILAstInstructions_Test.cpp

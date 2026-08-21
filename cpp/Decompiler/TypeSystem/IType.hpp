@@ -37,6 +37,7 @@
 #include <cassert>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -522,7 +523,60 @@ private:
     std::vector<std::string> elementNames_;
 };
 
-// Convenience: the UnknownType null object.
+// A minimal port of the C# `UnknownType` (ICSharpCode.Decompiler/TypeSystem/
+// Implementation/UnknownType.cs) -- an unknown type where (part of) the name is known.
+// The C# `UnknownType` carries a `FullTypeName` (namespace + name + type-parameter-
+// count) and a `namespaceKnown` flag (false when the namespace was passed as null).
+// `Name` returns the known name, `TypeParameterCount` the known count, `Kind` is
+// `TypeKind::Unknown`, and `ReflectionName` is "?" when the namespace is unknown.
+// The full `IType` surface (`GetDefinitionOrUnknown`, `Namespace`, `FullName`,
+// `TypeParameters`, `TypeArguments`, `IsReferenceType`, `ChangeNullability`,
+// `GetHashCode`, `Equals`, `ToString`, `AcceptVisitor`, `VisitChildren`) lands with
+// the rest of Phase 2; this minimal leaf lands the concrete type so the
+// `NestedTypeReference` (and future consumers) can construct the null-namespace
+// `UnknownType(null, name, tpc)` fallback the `Resolve` path produces.
+//
+// The C# `string? namespaceName` (nullable reference) ports to
+// `std::optional<std::string>` (`std::nullopt` = the C# `null` -> `namespaceKnown =
+// false` -> `ReflectionName = "?"`; a present string = the C# non-null ->
+// `namespaceKnown = true`), faithfully modeling the C# null-vs-non-null distinction
+// that a bare `std::string` cannot.
+class UnknownType : public IType {
+public:
+    UnknownType(std::optional<std::string> ns, std::string name,
+                int typeParameterCount)
+        : fullTypeName_(ns.value_or(""), std::move(name), typeParameterCount),
+          namespaceKnown_(ns.has_value()) {}
+
+    TypeKind Kind() const override { return TypeKind::Unknown; }
+    std::string Name() const override { return fullTypeName_.Name(); }
+    std::string ReflectionName() const override
+    {
+        return namespaceKnown_ ? fullTypeName_.ReflectionName() : std::string("?");
+    }
+    int TypeParameterCount() const override
+    {
+        return fullTypeName_.TypeParameterCount();
+    }
+    const TopLevelTypeName& FullTypeName() const noexcept { return fullTypeName_; }
+protected:
+    bool StructuralEquals(const IType& other) const override
+    {
+        const auto& o = static_cast<const UnknownType&>(other);
+        return namespaceKnown_ == o.namespaceKnown_
+               && fullTypeName_ == o.fullTypeName_;
+    }
+private:
+    TopLevelTypeName fullTypeName_;
+    bool namespaceKnown_;
+};
+
+// Convenience: the UnknownType null object (a `SpecialType(TypeKind::Unknown)`
+// with no name). Distinct from the `UnknownType` CLASS above (which carries a
+// known name); the class and this function share the name `UnknownType` via the
+// C++ tag-vs-ordinary-namespace distinction (a class type and a function can
+// coexist in the same scope -- `std::make_shared<UnknownType>(...)` resolves to
+// the class, `UnknownType()` to this function).
 inline ITypePtr UnknownType() { return std::make_shared<SpecialType>(TypeKind::Unknown); }
 
 } // namespace ILSpy::Decompiler::TypeSystem
