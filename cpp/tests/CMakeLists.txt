@@ -8,6 +8,7 @@ add_executable(ilspy_tests
     Util/LongSet_Test.cpp
     Util/BitSet_Test.cpp
     Util/CacheManager_Test.cpp
+    Util/LazyInit_Test.cpp
     Decompiler/Metadata/Metadata_Test.cpp
     Decompiler/Metadata/MethodBody_Test.cpp
     Decompiler/Metadata/ILDisassembler_Test.cpp
