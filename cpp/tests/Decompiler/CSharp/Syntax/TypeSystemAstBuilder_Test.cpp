@@ -30,8 +30,10 @@
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/CSharp/Syntax/Accessor.hpp"
 #include "Decompiler/CSharp/Syntax/EntityDeclaration.hpp"
+#include "Decompiler/CSharp/Syntax/MemberType.hpp"
 #include "Decompiler/CSharp/Syntax/MethodDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/Modifiers.hpp"
+#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/TypeSystem/Accessibility.hpp"
 #include "Decompiler/TypeSystem/CustomAttributeNamedArgument.hpp"
 #include "Decompiler/TypeSystem/CustomAttributeNamedArgumentKind.hpp"
@@ -52,6 +54,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -929,4 +932,92 @@ TEST(TypeSystemAstBuilderTest, CompareAttributeDispatchesThroughInterface)
     const TS::IAttribute& a = objectAttr;
     const TS::IAttribute& b = stringAttr;
     EXPECT_LT(Syntax::CompareAttribute(a, b), 0);
+}
+
+// ---------------------------------------------------------------------------
+// MakeSimpleType / MakeMemberType (TypeSystemAstBuilder.cs lines 747 and 762),
+// the local static name-to-AstType factories. The C# 7 discard identifier `_`
+// is a reserved token, so a type named `_` is emitted as the verbatim `@_` to
+// keep it a valid identifier. The factories return a raw `new`-ed node (the
+// non-owning leak model); the tests read the name back through the node
+// accessors and delete the node to avoid leaking across the test process.
+// ---------------------------------------------------------------------------
+
+// MakeSimpleType with a normal name returns a SimpleType carrying that name.
+TEST(TypeSystemAstBuilderTest, MakeSimpleTypeReturnsSimpleTypeWithName)
+{
+    std::unique_ptr<Syntax::SimpleType> st(Syntax::MakeSimpleType("List"));
+    ASSERT_NE(st, nullptr);
+    ASSERT_TRUE(st->Identifier().has_value());
+    EXPECT_EQ(*st->Identifier(), "List");
+}
+
+// The reserved `_` discard identifier is substituted with the verbatim `@_`:
+// `Identifier::Create` strips the `@` prefix and stores it as the `IsVerbatim`
+// flag (the lexical `@`-escaping detail), so the token's `Name` is `_` and its
+// `IsVerbatim` flag is true -- the load-bearing crux distinguishing a verbatim
+// `@_` (emitted by `MakeSimpleType`) from a plain `_` (which would be the
+// reserved discard, not a valid type name).
+TEST(TypeSystemAstBuilderTest, MakeSimpleTypeSubstitutesVerbatimAtForDiscard)
+{
+    std::unique_ptr<Syntax::SimpleType> st(Syntax::MakeSimpleType("_"));
+    ASSERT_NE(st, nullptr);
+    ASSERT_TRUE(st->Identifier().has_value());
+    EXPECT_EQ(*st->Identifier(), "_");
+    EXPECT_TRUE(st->IdentifierToken()->IsVerbatim());
+}
+
+// MakeSimpleType returns a `SimpleType` (IS-A `AstType`), so the returned
+// pointer binds to an `AstType*` -- the shape the ConvertType call sites rely on.
+TEST(TypeSystemAstBuilderTest, MakeSimpleTypeReturnsAstTypeSubclass)
+{
+    Syntax::AstType* ast = Syntax::MakeSimpleType("Foo");
+    ASSERT_NE(ast, nullptr);
+    EXPECT_EQ(dynamic_cast<Syntax::SimpleType*>(ast), ast);
+    delete ast;
+}
+
+// MakeMemberType with a normal name returns a MemberType carrying the target
+// and the member name.
+TEST(TypeSystemAstBuilderTest, MakeMemberTypeReturnsMemberTypeWithTargetAndName)
+{
+    auto* target = Syntax::MakeSimpleType("System");
+    std::unique_ptr<Syntax::MemberType> mt(Syntax::MakeMemberType(target, "Collections"));
+    ASSERT_NE(mt, nullptr);
+    EXPECT_EQ(mt->Target(), target);
+    EXPECT_EQ(mt->MemberName(), "Collections");
+}
+
+// The reserved `_` discard identifier is substituted with the verbatim `@_` in
+// the member name (the `@` stripped into the token's `IsVerbatim` flag, so the
+// `MemberName` is `_` with `IsVerbatim` true), while the target is carried
+// through unchanged.
+TEST(TypeSystemAstBuilderTest, MakeMemberTypeSubstitutesVerbatimAtForDiscard)
+{
+    auto* target = Syntax::MakeSimpleType("System");
+    std::unique_ptr<Syntax::MemberType> mt(Syntax::MakeMemberType(target, "_"));
+    ASSERT_NE(mt, nullptr);
+    EXPECT_EQ(mt->Target(), target);
+    EXPECT_EQ(mt->MemberName(), "_");
+    EXPECT_TRUE(mt->MemberNameToken()->IsVerbatim());
+}
+
+// MakeMemberType returns a `MemberType` (IS-A `AstType`), and its target IS-A
+// `AstType` (a `SimpleType`), so the dotted-name chain
+// `MakeMemberType(MakeSimpleType(ns), name)` composes through the `AstType*`
+// parameter -- the shape the ConvertType dotted-name call site relies on.
+TEST(TypeSystemAstBuilderTest, MakeMemberTypeComposesWithMakeSimpleTypeTarget)
+{
+    Syntax::AstType* outer = Syntax::MakeMemberType(Syntax::MakeSimpleType("System"), "Collections");
+    ASSERT_NE(outer, nullptr);
+    auto* mt = dynamic_cast<Syntax::MemberType*>(outer);
+    ASSERT_NE(mt, nullptr);
+    EXPECT_EQ(mt->MemberName(), "Collections");
+    auto* target = mt->Target();
+    ASSERT_NE(target, nullptr);
+    auto* st = dynamic_cast<Syntax::SimpleType*>(target);
+    ASSERT_NE(st, nullptr);
+    ASSERT_TRUE(st->Identifier().has_value());
+    EXPECT_EQ(*st->Identifier(), "System");
+    delete outer;
 }

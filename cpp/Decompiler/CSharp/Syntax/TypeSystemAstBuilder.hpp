@@ -37,7 +37,9 @@
 
 #include "Accessor.hpp"
 #include "EntityDeclaration.hpp"
+#include "MemberType.hpp"
 #include "Modifiers.hpp"
+#include "SimpleType.hpp"
 
 #include "Decompiler/TypeSystem/Accessibility.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
@@ -460,6 +462,45 @@ inline int CompareAttribute(const ::ILSpy::Decompiler::TypeSystem::IAttribute& a
             return result;
     }
     return 0;
+}
+
+// ---------------------------------------------------------------------------
+// MakeSimpleType / MakeMemberType (TypeSystemAstBuilder.cs lines 747 and 762),
+// the local static name-to-AstType factories used throughout the ConvertType
+// path (the top-level `MakeSimpleType(top.Name)` / the dotted `MakeMemberType(
+// MakeSimpleType(top.Namespace), top.Name)` / the nested-type walk
+// `MakeMemberType(type, fullTypeName.GetNestedTypeName(i))`, plus the
+// constraint `MakeSimpleType(tp.Name)` and the type-parameter argument walk).
+// The C# `static SimpleType MakeSimpleType(string name)` returns a `new
+// SimpleType("@_")` when `name == "_"` (the C# 7 discard identifier `_` is a
+// reserved token, so a type named `_` is emitted as the verbatim `@_` to keep it
+// a valid identifier), else `new SimpleType(name)`; `MakeMemberType` is the
+// `MemberType` twin taking the `AstType target` plus the member name.
+//
+// The C# reference-type return (`SimpleType`/`MemberType` are AST nodes,
+// GC-owned) ports to a raw `new`-ed pointer (the D223 non-owning leak model, the
+// `Identifier::Create` factory precedent): the caller attaches the returned
+// node to the tree via `AddChild`/a slot setter (which re-parent but do not take
+// ownership, faithful to the C# GC ownership). The C# `AstType target`
+// (non-null reference) ports to `AstType*` (a non-null raw pointer, the callee
+// assumes it is never null).
+// ---------------------------------------------------------------------------
+
+// `MakeSimpleType` (TypeSystemAstBuilder.cs line 747). Maps a type name to a
+// `SimpleType`, substituting the verbatim `@_` for the reserved `_` discard.
+inline SimpleType* MakeSimpleType(std::string name) {
+    if (name == "_")
+        return new SimpleType("@_");
+    return new SimpleType(std::move(name));
+}
+
+// `MakeMemberType` (TypeSystemAstBuilder.cs line 762). Maps a `target.name`
+// pair to a `MemberType`, substituting the verbatim `@_` for the reserved `_`
+// discard in the member name.
+inline MemberType* MakeMemberType(AstType* target, std::string name) {
+    if (name == "_")
+        return new MemberType(target, "@_");
+    return new MemberType(target, std::move(name));
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
