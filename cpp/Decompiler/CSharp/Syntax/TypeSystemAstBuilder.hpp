@@ -46,6 +46,7 @@
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
+#include "Decompiler/TypeSystem/KnownAttribute.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
 #include <any>
@@ -638,6 +639,31 @@ TryGetSpecialConstant(const std::any& constant) {
     // port has no decimal value type (the D432/D462 no-decimal-arm convention), so
     // a boxed decimal (or any other unmatched type/value) yields nullopt.
     return std::nullopt;
+}
+
+// ---------------------------------------------------------------------------
+// IsFlagsEnum (TypeSystemAstBuilder.cs line 1292). The `[Flags]` enum predicate
+// that gates the entire flag-decomposition path in `ConvertEnumValue`: a
+// `[Flags]` enum's combined values are rendered as a bitwise-OR of their
+// single-bit members (e.g. `FileAccess.Read | FileAccess.Write`), while a
+// non-flags enum's values are rendered as a single member reference or a plain
+// numeric cast. The classification is by the presence of the `System.FlagsAttribute`
+// attribute on the type definition (the D378 `KnownAttribute::Flags` kind).
+//
+// The C# source declares this as an INSTANCE method (`bool IsFlagsEnum(ITypeDefinition
+// type)`), but it does NOT reference `this` or any instance field -- it is a pure
+// delegation to `type.HasAttribute(KnownAttribute.Flags)`. The faithful free-function
+// port therefore advances it ahead of the full instance method: the behavior is
+// identical (no instance state is read), and it lands now that `ITypeDefinition`
+// (D393), the inherited `IEntity.HasAttribute(KnownAttribute)` (D381), and
+// `KnownAttribute::Flags` (D378) are all ported. This is the FIRST instance-method-
+// shaped helper on TypeSystemAstBuilder ported as a free function (the D456-D465
+// helpers were all `static` in the C# source); it is the smallest self-contained
+// piece of the `ConvertEnumValue` surface not yet blocked by the unported
+// `CSharpResolver` / `IField.GetConstantValue` / `Expression`-construction deps.
+// ---------------------------------------------------------------------------
+inline bool IsFlagsEnum(const ::ILSpy::Decompiler::TypeSystem::ITypeDefinition& type) {
+    return type.HasAttribute(::ILSpy::Decompiler::TypeSystem::KnownAttribute::Flags);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

@@ -75,6 +75,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -90,6 +91,7 @@ using ILSpy::Decompiler::TypeSystem::FunctionPointerType;
 using ILSpy::Decompiler::TypeSystem::IType;
 using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
 using ILSpy::Decompiler::TypeSystem::ITypePtr;
+using ILSpy::Decompiler::TypeSystem::KnownAttribute;
 using ILSpy::Decompiler::TypeSystem::KnownType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
 using ILSpy::Decompiler::TypeSystem::ModifiedType;
@@ -183,11 +185,13 @@ public:
     // class body (including the ctor parameter list and the override return types).
     TestDefinition(::ILSpy::Decompiler::TypeSystem::FullTypeName fullTypeName,
                     ::ILSpy::Decompiler::TypeSystem::KnownTypeCode knownTypeCode,
-                    TypeKind typeKind, const ILSpy::Decompiler::TypeSystem::ICompilation& compilation)
+                    TypeKind typeKind, const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                    std::vector<::ILSpy::Decompiler::TypeSystem::KnownAttribute> attributes = {})
         : fullTypeName_(std::move(fullTypeName)),
           knownTypeCode_(knownTypeCode),
           typeKind_(typeKind),
-          compilation_(compilation) {}
+          compilation_(compilation),
+          attributes_(std::move(attributes)) {}
 
     // --- IType (inherited unambiguously; only Name/ReflectionName are redeclared) ---
     TypeKind Kind() const override { return typeKind_; }
@@ -220,9 +224,10 @@ public:
     {
         return {};
     }
-    bool HasAttribute(ILSpy::Decompiler::TypeSystem::KnownAttribute) const override
+    bool HasAttribute(ILSpy::Decompiler::TypeSystem::KnownAttribute attribute) const override
     {
-        return false;
+        return std::find(attributes_.begin(), attributes_.end(), attribute)
+            != attributes_.end();
     }
     const ILSpy::Decompiler::TypeSystem::IAttribute* GetAttribute(
         ILSpy::Decompiler::TypeSystem::KnownAttribute) const override
@@ -277,6 +282,7 @@ private:
     ::ILSpy::Decompiler::TypeSystem::KnownTypeCode knownTypeCode_;
     TypeKind typeKind_;
     const ILSpy::Decompiler::TypeSystem::ICompilation& compilation_;
+    std::vector<::ILSpy::Decompiler::TypeSystem::KnownAttribute> attributes_;
 };
 
 // A custom-modifier type (System.Runtime.CompilerServices.IsConst), used as the
@@ -533,3 +539,69 @@ TEST(IsObjectOrValueTypeTest, DispatchesThroughITypeDefinitionBasePointer) {
     EXPECT_TRUE(Syntax::IsObjectOrValueType(*asTypeDef));
 }
 
+
+// ===========================================================================
+// IsFlagsEnum (TypeSystemAstBuilder.cs line 1292) -- the [Flags] enum predicate
+// gating the flag-decomposition path in ConvertEnumValue. The body is a pure
+// delegation to type.HasAttribute(KnownAttribute.Flags), so it lands ahead of the
+// full instance method (the first instance-method-shaped TypeSystemAstBuilder
+// helper ported as a free function). These tests are co-located with the
+// GetDefinition/IsObjectOrValueType tests because the TestDefinition stub above
+// now carries a configurable attributes_ vector backing HasAttribute -- the same
+// compact concrete ITypeDefinition backs the Flags-true and Flags-false branches.
+// ===========================================================================
+
+TEST(IsFlagsEnumTest, ReturnsTrueForFlagsAttributedTypeDefinition) {
+    TestCompilation compilation;
+    // A [Flags] enum carries the System.FlagsAttribute, classified by the
+    // KnownAttribute::Flags kind.
+    TestDefinition flagsEnum(
+        FullTypeName(TopLevelTypeName("System.IO", "FileAttributes")),
+        KnownTypeCode::None, TypeKind::Enum, compilation,
+        {KnownAttribute::Flags});
+    EXPECT_TRUE(Syntax::IsFlagsEnum(flagsEnum));
+}
+
+TEST(IsFlagsEnumTest, ReturnsFalseForTypeDefinitionWithoutFlagsAttribute) {
+    TestCompilation compilation;
+    // A plain enum (no [Flags] attribute) is not a flags enum.
+    TestDefinition plainEnum(
+        FullTypeName(TopLevelTypeName("MyApp", "Color")),
+        KnownTypeCode::None, TypeKind::Enum, compilation);
+    EXPECT_FALSE(Syntax::IsFlagsEnum(plainEnum));
+}
+
+TEST(IsFlagsEnumTest, ReturnsFalseForNonEnumTypeDefinitionWithFlagsAttribute) {
+    TestCompilation compilation;
+    // IsFlagsEnum does not itself check TypeKind::Enum -- it is a pure
+    // HasAttribute(Flags) delegation, so a class carrying [Flags] (unusual but
+    // structurally permitted) yields true, faithfully mirroring the C# source.
+    TestDefinition flagsOnClass(
+        FullTypeName(TopLevelTypeName("MyApp", "OddlyAttributed")),
+        KnownTypeCode::None, TypeKind::Class, compilation,
+        {KnownAttribute::Flags});
+    EXPECT_TRUE(Syntax::IsFlagsEnum(flagsOnClass));
+}
+
+TEST(IsFlagsEnumTest, ReturnsFalseWhenOtherKnownAttributePresentButNotFlags) {
+    TestCompilation compilation;
+    // A type carrying a different known attribute (Serializable) but NOT Flags
+    // is not a flags enum -- the predicate keys on the Flags kind specifically.
+    TestDefinition serializableEnum(
+        FullTypeName(TopLevelTypeName("MyApp", "State")),
+        KnownTypeCode::None, TypeKind::Enum, compilation,
+        {KnownAttribute::Serializable});
+    EXPECT_FALSE(Syntax::IsFlagsEnum(serializableEnum));
+}
+
+TEST(IsFlagsEnumTest, DispatchesThroughITypeDefinitionBasePointer) {
+    TestCompilation compilation;
+    TestDefinition flagsEnum(
+        FullTypeName(TopLevelTypeName("System.IO", "FileAttributes")),
+        KnownTypeCode::None, TypeKind::Enum, compilation,
+        {KnownAttribute::Flags});
+    // IsFlagsEnum takes a `const ITypeDefinition&`; dispatch through the
+    // ITypeDefinition base pointer reaches the virtual HasAttribute override.
+    const ITypeDefinition* asTypeDef = &flagsEnum;
+    EXPECT_TRUE(Syntax::IsFlagsEnum(*asTypeDef));
+}
