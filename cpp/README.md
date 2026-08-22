@@ -1562,7 +1562,7 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   translation from ILAst to the C# AST), the ~15 AST prettification
   transforms, and the `RequiredNamespaceCollector`.
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
-  surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **8** ported leaves
+  surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **10** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
   `TypeSystemAstBuilder` / `CSharpAmbience`): the twin Alias `ResolveResult`
   subclasses `AliasTypeResolveResult` + `AliasNamespaceResolveResult`
@@ -1577,20 +1577,39 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `DynamicInvocationResolveResult` + its co-located `DynamicInvocationType`
   enum (a `: ResolveResult` with `SpecialType.Dynamic` base carrying a
   `Target` + `InvocationType` + `Arguments`/`InitializerStatements` lists +
-  a nullable `Symbol`, D471); and the `CSharpInvocationResolveResult` (an
+  a nullable `Symbol`, D471); the `CSharpInvocationResolveResult` (an
   `: InvocationResolveResult` D438 carrying the `OverloadResolutionErrors` mask
   + 3 C#-specific bools + the `argumentToParameterMap`, with the `IsError`
-  crux and the property-name-shares-enum-type `Errors` type-alias fix, D472).
-  All 8 are header-only and dead in the CLI call graph (the CLI uses the seed,
+  crux and the property-name-shares-enum-type `Errors` type-alias fix, D472);
+  and the `LambdaResolveResult` + `LambdaConversion` pair (D473): the ABSTRACT
+  `LambdaResolveResult : ResolveResult` (the anonymous-method/lambda resolve
+  result -- the C# ctor forwards `SpecialType.NoType`, a lambda has NO type;
+  declares the eight-member pure-virtual lambda surface `HasParameterList` /
+  `IsAnonymousMethod` / `IsImplicitlyTyped` / `IsAsync` /
+  `GetInferredReturnType(IType[])` / `Parameters` / `ReturnType` /
+  `IsValid(IType[], IType, CSharpConversions)` / `Body`, with the one concrete
+  member `GetChildResults()` => `{ Body }`; `CSharpConversions` is
+  forward-declared for the unported ~2500-line conversion controller the
+  `IsValid` signature references) and the internal singleton
+  `LambdaConversion : Conversion` (`IsAnonymousFunctionConversion` +
+  `IsImplicit` both true, the Meyers-singleton `Instance()` preserving the C#
+  `static readonly` field's reference identity). The third class in the C#
+  file, the concrete `DecompiledLambdaResolveResult`, is DEFERRED: its
+  `IsAsync`/`Parameters`/`ReturnType` delegate to `ILFunction.IsAsync`/
+  `ILFunction.Parameters`/`ILFunction.ReturnType` (the port's `ILFunction`
+  carries none of those surfaces) and its `IsValid` composes
+  `CSharpConversions.IdentityConversion`/`ImplicitConversion` (unported).
+  All 10 are header-only and dead in the CLI call graph (the CLI uses the seed,
   not the `Resolver` leaves), confirmed by the byte-identical `--csharp`
-  output. The 8 leaves add **73 gtest cases** across 6 test suites (this
-  session's 5 commits: gnhf 121 D468 through gnhf 125 D472). The remaining
-  small `CSharp/Resolver` `ResolveResult` subclasses (`LambdaResolveResult`
-  ~180 lines / `MethodGroupResolveResult` ~290 lines) and the larger
-  `MemberLookup` helper (~1000 lines, unblocks `TypeDefinitionNameableInBaseList`,
-  the last unported `TypeSystemAstBuilder` static helper) are the subsequent
-  in-order targets, advancing the `CSharpResolver` dependency surface ahead of
-  the full 2986-line `CSharpResolver` class.
+  output. The 10 leaves add **95 gtest cases** across 7 test suites. The
+  remaining small `CSharp/Resolver` `ResolveResult` subclasses
+  (`DecompiledLambdaResolveResult` [blocked on the `ILFunction` async/parameter
+  surfaces + `CSharpConversions`] / `MethodGroupResolveResult` ~290 lines) and
+  the larger `MemberLookup` helper (~1000 lines, unblocks
+  `TypeDefinitionNameableInBaseList`, the last unported `TypeSystemAstBuilder`
+  static helper) are the subsequent in-order targets, advancing the
+  `CSharpResolver` dependency surface ahead of the full 2986-line
+  `CSharpResolver` class.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end. It now produces readable C#: real parameter names (Param
