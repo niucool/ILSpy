@@ -1561,6 +1561,36 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `ExpressionBuilder`/`StatementBuilder`/`CallBuilder` (the resolver-checked
   translation from ILAst to the C# AST), the ~15 AST prettification
   transforms, and the `RequiredNamespaceCollector`.
+- **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
+  surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **8** ported leaves
+  toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
+  `TypeSystemAstBuilder` / `CSharpAmbience`): the twin Alias `ResolveResult`
+  subclasses `AliasTypeResolveResult` + `AliasNamespaceResolveResult`
+  (`: Semantics::TypeResolveResult` / `: NamespaceResolveResult`, D467); the
+  twin enum leaves `NameLookupMode` (the 5-value lookup-mode enum) +
+  `OverloadResolutionErrors` (the 12-flag `[Flags]` error mask, D468); the
+  `DynamicMemberResolveResult` (a `: ResolveResult` with `SpecialType.Dynamic`
+  base carrying a `Target` child + a `Member` name + a nullable `IMember`
+  Symbol, D469); the `AwaitResolveResult` (a `: ResolveResult` carrying the
+  `GetAwaiterInvocation` + `AwaiterType` + 3 nullable awaiter-pattern
+  members with the `IsError` `TypeKind.Dynamic` short-circuit crux, D470); the
+  `DynamicInvocationResolveResult` + its co-located `DynamicInvocationType`
+  enum (a `: ResolveResult` with `SpecialType.Dynamic` base carrying a
+  `Target` + `InvocationType` + `Arguments`/`InitializerStatements` lists +
+  a nullable `Symbol`, D471); and the `CSharpInvocationResolveResult` (an
+  `: InvocationResolveResult` D438 carrying the `OverloadResolutionErrors` mask
+  + 3 C#-specific bools + the `argumentToParameterMap`, with the `IsError`
+  crux and the property-name-shares-enum-type `Errors` type-alias fix, D472).
+  All 8 are header-only and dead in the CLI call graph (the CLI uses the seed,
+  not the `Resolver` leaves), confirmed by the byte-identical `--csharp`
+  output. The 8 leaves add **73 gtest cases** across 6 test suites (this
+  session's 5 commits: gnhf 121 D468 through gnhf 125 D472). The remaining
+  small `CSharp/Resolver` `ResolveResult` subclasses (`LambdaResolveResult`
+  ~180 lines / `MethodGroupResolveResult` ~290 lines) and the larger
+  `MemberLookup` helper (~1000 lines, unblocks `TypeDefinitionNameableInBaseList`,
+  the last unported `TypeSystemAstBuilder` static helper) are the subsequent
+  in-order targets, advancing the `CSharpResolver` dependency surface ahead of
+  the full 2986-line `CSharpResolver` class.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end. It now produces readable C#: real parameter names (Param
