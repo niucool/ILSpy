@@ -209,6 +209,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/TypeSystemAstBuilder_Test.cpp
     Decompiler/CSharp/Resolver/AliasResolveResult_Test.cpp
     Decompiler/CSharp/Resolver/NameLookupAndOverloadResolutionErrors_Test.cpp
+    Decompiler/CSharp/Resolver/DynamicMemberResolveResult_Test.cpp
     Decompiler/CSharp/Syntax/InterpolatedString_Test.cpp
     Decompiler/CSharp/Syntax/QueryExpression_Test.cpp
     Decompiler/CSharp/Syntax/QueryClauses_Test.cpp
