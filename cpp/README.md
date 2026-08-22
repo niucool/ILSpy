@@ -1562,7 +1562,7 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   translation from ILAst to the C# AST), the ~15 AST prettification
   transforms, and the `RequiredNamespaceCollector`.
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
-  surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **11** ported leaves
+  surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
   `TypeSystemAstBuilder` / `CSharpAmbience`): the twin Alias `ResolveResult`
   subclasses `AliasTypeResolveResult` + `AliasNamespaceResolveResult`
@@ -1662,10 +1662,31 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   declares such an accessor, INCLUDING the ctor parameter types and field
   declarations that follow it (MSVC looks the names up in the complete-class
   context, where the member name shadows the type).
-  All 12 are header-only (TypeSystemExtensions additionally has a .cpp) and
+  and the `Log` helper (D476): the resolver's opt-in debug logging wrapper
+  around `System.Diagnostics.Debug` -- a `final`, non-instantiable
+  all-static class carrying the compile-time off-switch `IsEnabled == false`
+  (the C# `const bool logEnabled = false`), the two-`WriteLine`-overloads-
+  collapsed-into-one variadic `{N}`-format `WriteLine`, the range-template
+  `WriteCollection` (the `<empty collection>` marker / text-line-first-
+  element / `text.Length`-padded continuation layout factored into a
+  unit-testable `LogDetail::FormatCollectionLines`), and `Indent` /
+  `Unindent` (a private indent level rendered as level * 4 spaces, clamping
+  at 0 like the .NET `Trace.IndentLevel` setter). The C# `[Conditional(
+  "LOG_DISABLED")]` call-site elision ports to per-method discarded
+  `if constexpr (IsEnabled)` branches (every call compiles to nothing in
+  the committed configuration; the documented divergence: the ARGUMENTS are
+  still evaluated at the call site, unlike the C# attribute -- caller-side
+  `if constexpr (Log::IsEnabled)` wrappers restore full elision parity when
+  the still-unported `OverloadResolution` / `TypeInference` logging trails
+  land). The `LogDetail` helpers (the `string.Format` `{N}` stand-in
+  [unmatched placeholders are left unreplaced, never throw], the
+  `object.ToString()`-dispatch / null-`shared_ptr` `"<null>"` marker) are
+  unconditionally compiled and directly unit-tested, so flipping the switch
+  exercises an already-tested path.
+  All 13 are header-only (TypeSystemExtensions additionally has a .cpp) and
   dead in the CLI call graph (the CLI uses the seed,
   not the `Resolver` leaves), confirmed by the byte-identical `--csharp`
-  output. The 12 leaves add **191 gtest cases** across 11 test suites. The
+  output. The 13 leaves add **213 gtest cases** across 12 test suites. The
   remaining small `CSharp/Resolver` `ResolveResult` subclass
   (`DecompiledLambdaResolveResult` [blocked on the `ILFunction` async/parameter
   surfaces + `CSharpConversions`]) and the larger `MemberLookup` helper's
