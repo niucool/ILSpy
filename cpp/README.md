@@ -1621,15 +1621,57 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   extension-method machinery (`GetExtensionMethods`'s resolver-fetch +
   `GetEligibleExtensionMethods`) and `PerformOverloadResolution` -- they need
   `OverloadResolution`/`TypeInference`/`CSharpConversions` (all unported); a
-  resolver-less `GetExtensionMethods()` returns empty.
-  All 11 are header-only and dead in the CLI call graph (the CLI uses the seed,
+  resolver-less `GetExtensionMethods()` returns empty; and the `MemberLookup`
+  accessibility surface (D475): the `IsInvocable` static helper (`member is
+  IEvent || member is IMethod` via SymbolKind dispatch, else the
+  Dynamic/Delegate/FunctionPointer return-type arm), the nullable
+  currentTypeDefinition / currentModule / isInEnumMemberInitializer ctor, the
+  two `IsProtectedAccessAllowed` overloads (a ThisResolveResult target always
+  allows; an IType target unwraps a single type-parameter
+  EffectiveBaseClass then walks the current type's DeclaringTypeDefinition
+  chain with IsDerivedFrom, null-definition and null-context short-circuits),
+  the C# 4.0 spec 3.5.2 `IsAccessible` switch (None / Private [the
+  outer-class walk] / Public / Protected / Internal /
+  ProtectedOrInternal / ProtectedAndInternal), and the two private helpers
+  `IsInternalAccessible` (InternalsVisibleTo over the two modules) and
+  `IsProtectedAccessible` (IsStatic / TypeDefinition-force of
+  allowProtectedAccess + the declaring-type-definition equality and
+  derivation walks). The port unblocks `TypeSystemAstBuilder::
+  TypeDefinitionNameableInBaseList`'s `lookup.IsAccessible(td, false)` call.
+  DEFERRED from the C# file: the LookupGroup / GetAccessibleMembers /
+  LookupType / Lookup region (it needs the GetMembers / GetNestedTypes
+  GetMemberOptions member-enumeration surface on IType and its definitions,
+  which the minimal port does not carry).
+  The MemberLookup port required the previously-deferred base-type traversal
+  surface (D475): `IType::DirectBaseTypes()` (virtual-with-default {}, the
+  DirectBaseTypes() + GetDefinition()/IsReferenceType() precedent), the
+  `TypeSystem/Implementation/BaseTypeCollector` (the DFS add-at-the-end
+  traversal with the active-types cycle guard and the duplicate-output
+  suppression; pointer identity, NOT structural equality, for both -- the C#
+  default IType.Equals is structural, but identity preserves the two
+  documented guarantees it protects and avoids collapsing distinct
+  structurally-equal instances), and the base-type region of
+  `TypeSystemExtensions` (GetAllBaseTypes / GetNonInterfaceBaseTypes /
+  GetAllBaseTypeDefinitions [Select(GetDefinition).Where(!=null).Distinct()] /
+  IsDerivedFrom x2, with the null-type std::invalid_argument, the
+  cross-compilation std::runtime_error, and the KnownTypeCode FindType
+  lookup). The new test stubs needed two MSVC complete-class-lookup
+  accommodations not previously hit in the port: a self-named accessor's
+  return type (`SymbolKind SymbolKind()`, `Accessibility Accessibility()`,
+  ...) must be written qualified (`TS::SymbolKind`) in every class that
+  declares such an accessor, INCLUDING the ctor parameter types and field
+  declarations that follow it (MSVC looks the names up in the complete-class
+  context, where the member name shadows the type).
+  All 12 are header-only (TypeSystemExtensions additionally has a .cpp) and
+  dead in the CLI call graph (the CLI uses the seed,
   not the `Resolver` leaves), confirmed by the byte-identical `--csharp`
-  output. The 11 leaves add **119 gtest cases** across 8 test suites. The
+  output. The 12 leaves add **191 gtest cases** across 11 test suites. The
   remaining small `CSharp/Resolver` `ResolveResult` subclass
   (`DecompiledLambdaResolveResult` [blocked on the `ILFunction` async/parameter
-  surfaces + `CSharpConversions`]) and the larger `MemberLookup` helper (~1000
-  lines, unblocks `TypeDefinitionNameableInBaseList`, the last unported
-  `TypeSystemAstBuilder` static helper) are the subsequent in-order targets,
+  surfaces + `CSharpConversions`]) and the larger `MemberLookup` helper's
+  `LookupGroup` region (~600 lines, the GET-members enumeration the port's
+  minimal IType/ITypeDefinition surface does not yet carry) are the
+  subsequent in-order targets,
   advancing the `CSharpResolver` dependency surface ahead of the full
   2986-line `CSharpResolver` class.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text

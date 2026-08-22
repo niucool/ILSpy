@@ -1,0 +1,581 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify,
+// merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+// permit persons to whom the Software is furnished to do so, subject to the following
+// conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies
+// or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+// PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+// HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+// CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+// OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+// Shared test stubs for the MemberLookup / TypeSystemExtensions surface (the
+// D399 TestCompilationStubs.hpp precedent). The member-lookup accessibility
+// tests and the base-type-traversal tests both need a small but COMPLETE type
+// universe: a compilation with a FindType(KnownTypeCode) registry, type
+// definitions wired into hand-built DirectBaseTypes / DeclaringTypeDefinition
+// graphs, plain entities (for the IsAccessible / IsProtectedAccessible
+// arguments the C# declares as IEntity), events/methods for IsInvocable, a
+// type parameter for the EffectiveBaseClass unwrap, and a friend-aware module
+// for the InternalsVisibleTo accessibility arm. Rather than duplicate the ~40
+// trivial overrides per test file, this header provides the universe once in
+// the `TestSupport` namespace (not the anonymous namespace), the
+// TestCompilationStubs.hpp ODR-avoidance precedent.
+//
+// All wiring is mutable (Set/Add methods) and all instances default to the
+// trivial return; a stub is valid for its lifetime without external wiring
+// beyond what a test sets.
+
+#pragma once
+
+#include "Decompiler/TypeSystem/ICompilation.hpp"
+#include "Decompiler/TypeSystem/IEntity.hpp"
+#include "Decompiler/TypeSystem/IEvent.hpp"
+#include "Decompiler/TypeSystem/IMember.hpp"
+#include "Decompiler/TypeSystem/IMethod.hpp"
+#include "Decompiler/TypeSystem/IModule.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/ITypeDefinition.hpp"
+#include "Decompiler/TypeSystem/ITypeParameter.hpp"
+#include "Decompiler/TypeSystem/Accessibility.hpp"
+#include "Decompiler/TypeSystem/FullTypeName.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/Nullability.hpp"
+#include "Decompiler/TypeSystem/StringComparer.hpp"
+#include "Decompiler/TypeSystem/SymbolKind.hpp"
+#include "Decompiler/TypeSystem/TypeConstraint.hpp"
+#include "Decompiler/TypeSystem/TypeKind.hpp"
+#include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
+#include "Decompiler/TypeSystem/VarianceModifier.hpp"
+#include "Decompiler/TypeSystem/Version.hpp"
+#include "Decompiler/Util/CacheManager.hpp"
+
+#include "Decompiler/TypeSystem/TestCompilationStubs.hpp"
+
+#include <algorithm>
+#include <map>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace ILSpy::Decompiler::TypeSystem::TestSupport {
+
+// MSVC hides an enum/class type behind a member accessor of the SAME name
+// (`SymbolKind SymbolKind()` poisons `SymbolKind` for the rest of the class),
+// so every such self-named accessor's return type -- and any member declared
+// after it -- uses the qualified `TS::` form (the ITypeDefinition_Test /
+// IEntity_Test stub convention). A local alias keeps that noise down.
+namespace TS = ILSpy::Decompiler::TypeSystem;
+
+// A friend-aware `IModule` for the InternalsVisibleTo accessibility arm: the
+// friend list is a set of assembly names the module grants internals access to
+// (`InternalsVisibleTo(module)` consults the callee's own list against the
+// argument's AssemblyName, plus the reflexive same-module rule the real
+// metadata module implements).
+class LookupModule : public IModule {
+public:
+    explicit LookupModule(const ICompilation& compilation, std::string assemblyName)
+        : compilation_(compilation), assemblyName_(std::move(assemblyName)),
+          rootNamespace_(compilation) {}
+
+    void AddFriendAssembly(std::string name) { friendAssemblies_.push_back(std::move(name)); }
+
+    // --- ISymbol ---
+    TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Module; }
+    std::string Name() const override { return assemblyName_; }
+
+    // --- ICompilationProvider ---
+    const ICompilation& Compilation() const override { return compilation_; }
+
+    // --- IModule ---
+    const ILSpy::Decompiler::Metadata::MetadataFile* MetadataFile() const override
+    {
+        return nullptr;
+    }
+    bool IsMainModule() const override { return true; }
+    std::string AssemblyName() const override { return assemblyName_; }
+    Version AssemblyVersion() const override { return {}; }
+    std::string FullAssemblyName() const override { return assemblyName_; }
+    std::vector<const IAttribute*> GetAssemblyAttributes() const override { return {}; }
+    std::vector<const IAttribute*> GetModuleAttributes() const override { return {}; }
+    bool InternalsVisibleTo(const IModule& module) const override
+    {
+        if (&module == this)
+            return true;
+        return std::find(friendAssemblies_.begin(), friendAssemblies_.end(), module.AssemblyName())
+            != friendAssemblies_.end();
+    }
+    const INamespace& RootNamespace() const override { return rootNamespace_; }
+    const ITypeDefinition* GetTypeDefinition(const TopLevelTypeName&) const override
+    {
+        return nullptr;
+    }
+    std::vector<const ITypeDefinition*> TopLevelTypeDefinitions() const override { return {}; }
+    std::vector<const ITypeDefinition*> TypeDefinitions() const override { return {}; }
+
+private:
+    const ICompilation& compilation_;
+    std::string assemblyName_;
+    std::vector<std::string> friendAssemblies_;
+    TestNamespace rootNamespace_;
+};
+
+// A compililation whose `FindType(KnownTypeCode)` consults a known-type
+// registry (RegisterKnownType stubs the framework type the
+// `IsDerivedFrom(type, KnownTypeCode)` overload looks up through
+// `Compilation.FindType(...)`); unregistered codes fall back to a shared
+// unknown-type (the C# would return a real unknown type; the tests only ever
+// exercise registered codes).
+class LookupCompilation : public ICompilation {
+public:
+    LookupCompilation() : mainModule_(*this, "LookupTests") {}
+
+    void RegisterKnownType(KnownTypeCode code, const IType* type) { knownTypes_[code] = type; }
+
+    // --- ICompilation ---
+    const IModule& MainModule() const override { return mainModule_; }
+    std::vector<const IModule*> Modules() const override { return { &mainModule_ }; }
+    std::vector<const IModule*> ReferencedModules() const override { return {}; }
+    const INamespace& RootNamespace() const override { return mainModule_.RootNamespace(); }
+    const INamespace* GetNamespaceForExternAlias(const std::string&) const override
+    {
+        return nullptr;
+    }
+    const IType& FindType(KnownTypeCode code) const override
+    {
+        auto it = knownTypes_.find(code);
+        if (it != knownTypes_.end())
+            return *it->second;
+        return unknownType_;
+    }
+    const StringComparer& NameComparer() const override { return StringComparer::Ordinal(); }
+    const ILSpy::Decompiler::Util::CacheManager& CacheManager() const override
+    {
+        return cacheManager_;
+    }
+    TS::TypeSystemOptions TypeSystemOptions() const override { return TS::TypeSystemOptions::None; }
+
+private:
+    LookupModule mainModule_;
+    SpecialType unknownType_{ TypeKind::Unknown };
+    ILSpy::Decompiler::Util::CacheManager cacheManager_;
+    std::map<KnownTypeCode, const IType*> knownTypes_;
+};
+
+// A fully wired `ITypeDefinition` stub: the DirectBaseTypes graph (for the
+// base-type traversal / IsDerivedFrom), the DeclaringTypeDefinition chain
+// (for the private/protected outer-class walks), the accessibility +
+// ParentModule + Compilation (for the IsAccessible switch), and the name /
+// FullTypeName identity accessors. `GetDefinition()` returns `this` (a type
+// definition IS its own definition, faithful to the real
+// MetadataTypeDefinition) and `DirectBaseTypes()` returns the hand-wired
+// shared_ptr list. Instances are shared_ptr-owned (DirectBaseTypes yields
+// `ITypePtr` handles, so the stubs participate in the shared ownership the
+// IType interface is built on).
+class LookupTypeDefinition : public ITypeDefinition {
+public:
+    LookupTypeDefinition(std::string name,
+                         std::string ns,
+                         TS::FullTypeName fullTypeName,
+                         TypeKind kind,
+                         TS::Accessibility accessibility,
+                         const ICompilation& compilation,
+                         const IModule* parentModule,
+                         TS::KnownTypeCode knownTypeCode = TS::KnownTypeCode::None)
+        : fullName_(std::move(name)), namespace_(std::move(ns)),
+          fullTypeName_(std::move(fullTypeName)), kind_(kind),
+          accessibility_(accessibility), compilation_(compilation),
+          parentModule_(parentModule), knownTypeCode_(knownTypeCode) {}
+
+    void AddDirectBaseType(ITypePtr base) { directBaseTypes_.push_back(std::move(base)); }
+    void SetDeclaringTypeDefinition(const ITypeDefinition* d) { declaringTypeDefinition_ = d; }
+    void SetStatic(bool v) { isStatic_ = v; }
+
+    // --- IType ---
+    TypeKind Kind() const override { return kind_; }
+    // The single `Name()` override is the final overrider for the
+    // IType-vs-INamedElement diamond (the ITypeDefinition redeclarations).
+    std::string Name() const override { return fullTypeName_.Name(); }
+    std::string ReflectionName() const override { return fullTypeName_.ReflectionName(); }
+    int TypeParameterCount() const override { return fullTypeName_.TypeParameterCount(); }
+    const ITypeDefinition* GetDefinition() const override { return this; }
+    std::vector<ITypePtr> DirectBaseTypes() const override { return directBaseTypes_; }
+
+    // --- ITypeDefinitionOrUnknown ---
+    const TS::FullTypeName& FullTypeName() const override { return fullTypeName_; }
+
+    // --- ISymbol ---
+    TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::TypeDefinition; }
+
+    // --- INamedElement ---
+    std::string FullName() const override { return fullName_; }
+    std::string Namespace() const override { return namespace_; }
+
+    // --- ICompilationProvider ---
+    const ICompilation& Compilation() const override { return compilation_; }
+
+    // --- IEntity ---
+    std::uint32_t MetadataToken() const override { return 0; }
+    const ITypeDefinition* DeclaringTypeDefinition() const override
+    {
+        return declaringTypeDefinition_;
+    }
+    ITypePtr DeclaringType() const override { return {}; }
+    const IModule* ParentModule() const override { return parentModule_; }
+    std::vector<const IAttribute*> GetAttributes() const override { return {}; }
+    bool HasAttribute(KnownAttribute) const override { return false; }
+    const IAttribute* GetAttribute(KnownAttribute) const override { return nullptr; }
+    TS::Accessibility Accessibility() const override { return accessibility_; }
+    bool IsStatic() const override { return isStatic_; }
+    bool IsAbstract() const override { return false; }
+    bool IsSealed() const override { return false; }
+
+    // --- ITypeDefinition-own ---
+    std::vector<const ITypeDefinition*> NestedTypes() const override { return {}; }
+    std::vector<const IMember*> Members() const override { return {}; }
+    std::vector<const IField*> Fields() const override { return {}; }
+    std::vector<const IMethod*> Methods() const override { return {}; }
+    std::vector<const IProperty*> Properties() const override { return {}; }
+    std::vector<const IEvent*> Events() const override { return {}; }
+    TS::KnownTypeCode KnownTypeCode() const override { return knownTypeCode_; }
+    ITypePtr EnumUnderlyingType() const override { return {}; }
+    bool IsReadOnly() const override { return false; }
+    std::string MetadataName() const override { return fullTypeName_.Name(); }
+    bool HasExtensions() const override { return false; }
+    const TS::ExtensionInfo* ExtensionInfo() const override { return nullptr; }
+    Nullability NullableContext() const override { return Nullability::Oblivious; }
+    bool IsRecord() const override { return false; }
+
+protected:
+    bool StructuralEquals(const IType& other) const override
+    {
+        return this == &other; // identity equality for the test stub
+    }
+
+private:
+    std::string fullName_, namespace_;
+    TS::FullTypeName fullTypeName_;
+    TypeKind kind_;
+    TS::Accessibility accessibility_;
+    const ICompilation& compilation_;
+    const IModule* parentModule_;
+    TS::KnownTypeCode knownTypeCode_;
+    bool isStatic_ = false;
+    const ITypeDefinition* declaringTypeDefinition_ = nullptr;
+    std::vector<ITypePtr> directBaseTypes_;
+};
+
+// A plain `IEntity` stub (NOT an IMember) -- the smallest concrete entity for
+// the C#-`IEntity`-typed MemberLookup arguments (IsAccessible /
+// IsProtectedAccessible) where the tests vary the accessibility, the static
+// flag, the declaring type definition, and the parent module.
+class LookupEntity : public IEntity {
+public:
+    LookupEntity(std::string name,
+                 TS::SymbolKind kind,
+                 TS::Accessibility accessibility,
+                 bool isStatic,
+                 const ITypeDefinition* declaringTypeDefinition,
+                 const IModule* parentModule,
+                 const ICompilation& compilation)
+        : name_(std::move(name)), kind_(kind), accessibility_(accessibility),
+          isStatic_(isStatic), declaringTypeDefinition_(declaringTypeDefinition),
+          parentModule_(parentModule), compilation_(compilation) {}
+
+    // --- ISymbol ---
+    TS::SymbolKind SymbolKind() const override { return kind_; }
+    // The single `Name()` override is the final overrider for the
+    // ISymbol-vs-INamedElement `Name()` declarations.
+    std::string Name() const override { return name_; }
+
+    // --- INamedElement ---
+    std::string FullName() const override { return name_; }
+    std::string ReflectionName() const override { return name_; }
+    std::string Namespace() const override { return {}; }
+
+    // --- ICompilationProvider ---
+    const ICompilation& Compilation() const override { return compilation_; }
+
+    // --- IEntity ---
+    std::uint32_t MetadataToken() const override { return 0; }
+    const ITypeDefinition* DeclaringTypeDefinition() const override
+    {
+        return declaringTypeDefinition_;
+    }
+    ITypePtr DeclaringType() const override { return {}; }
+    const IModule* ParentModule() const override { return parentModule_; }
+    std::vector<const IAttribute*> GetAttributes() const override { return {}; }
+    bool HasAttribute(KnownAttribute) const override { return false; }
+    const IAttribute* GetAttribute(KnownAttribute) const override { return nullptr; }
+    TS::Accessibility Accessibility() const override { return accessibility_; }
+    bool IsStatic() const override { return isStatic_; }
+    bool IsAbstract() const override { return false; }
+    bool IsSealed() const override { return false; }
+
+private:
+    std::string name_;
+    TS::SymbolKind kind_;
+    TS::Accessibility accessibility_;
+    bool isStatic_;
+    const ITypeDefinition* declaringTypeDefinition_;
+    const IModule* parentModule_;
+    const ICompilation& compilation_;
+};
+
+// A minimal `IMember` stub for the IsInvocable return-type arms: a non-event,
+// non-method member whose SymbolKind (Field / Property / Accessor) and
+// ReturnType (Struct / Dynamic / Delegate / FunctionPointer kinds) the test
+// configures. Serves the `member is IEvent || member is IMethod` FALSE side of
+// IsInvocable; the TRUE side is covered by LookupEvent / LookupMethod.
+class LookupMember : public IMember {
+public:
+    LookupMember(std::string name,
+                 TS::SymbolKind kind,
+                 ITypePtr returnType,
+                 const ICompilation& compilation)
+        : name_(std::move(name)), kind_(kind), returnType_(std::move(returnType)),
+          compilation_(compilation) {}
+
+    // --- ISymbol ---
+    TS::SymbolKind SymbolKind() const override { return kind_; }
+    std::string Name() const override { return name_; }
+
+    // --- INamedElement ---
+    std::string FullName() const override { return name_; }
+    std::string ReflectionName() const override { return name_; }
+    std::string Namespace() const override { return {}; }
+
+    // --- ICompilationProvider ---
+    const ICompilation& Compilation() const override { return compilation_; }
+
+    // --- IEntity ---
+    std::uint32_t MetadataToken() const override { return 0; }
+    const ITypeDefinition* DeclaringTypeDefinition() const override { return nullptr; }
+    ITypePtr DeclaringType() const override { return {}; }
+    const IModule* ParentModule() const override { return nullptr; }
+    std::vector<const IAttribute*> GetAttributes() const override { return {}; }
+    bool HasAttribute(KnownAttribute) const override { return false; }
+    const IAttribute* GetAttribute(KnownAttribute) const override { return nullptr; }
+    TS::Accessibility Accessibility() const override { return TS::Accessibility::Public; }
+    bool IsStatic() const override { return false; }
+    bool IsAbstract() const override { return false; }
+    bool IsSealed() const override { return false; }
+
+    // --- IMember ---
+    const IMember* MemberDefinition() const override { return this; }
+    const IType& ReturnType() const override { return *returnType_; }
+    std::vector<const IMember*> ExplicitlyImplementedInterfaceMembers() const override
+    {
+        return {};
+    }
+    bool IsExplicitInterfaceImplementation() const override { return false; }
+    bool IsVirtual() const override { return false; }
+    bool IsOverride() const override { return false; }
+    bool IsOverridable() const override { return false; }
+    const TypeParameterSubstitution* Substitution() const override { return nullptr; }
+    const IMember* Specialize(const TypeParameterSubstitution*) const override { return this; }
+    bool Equals(const IMember* obj, const TypeVisitor*) const override { return obj == this; }
+
+private:
+    std::string name_;
+    TS::SymbolKind kind_;
+    ITypePtr returnType_;
+    const ICompilation& compilation_;
+};
+
+// A minimal `IMethod` for the `member is IMethod` TRUE side of IsInvocable.
+// The covariant `const IMethod* Specialize` override covers the inherited
+// `IMember::Specialize` slot (the MethodGroupResolveResult_Test precedent).
+class LookupMethod : public IMethod {
+public:
+    LookupMethod(std::string name, const ICompilation& compilation)
+        : name_(std::move(name)), compilation_(compilation) {}
+
+    // --- ISymbol ---
+    TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Method; }
+    std::string Name() const override { return name_; }
+
+    // --- INamedElement ---
+    std::string FullName() const override { return name_; }
+    std::string ReflectionName() const override { return name_; }
+    std::string Namespace() const override { return {}; }
+
+    // --- ICompilationProvider ---
+    const ICompilation& Compilation() const override { return compilation_; }
+
+    // --- IEntity ---
+    std::uint32_t MetadataToken() const override { return 0; }
+    const ITypeDefinition* DeclaringTypeDefinition() const override { return nullptr; }
+    ITypePtr DeclaringType() const override { return {}; }
+    const IModule* ParentModule() const override { return nullptr; }
+    std::vector<const IAttribute*> GetAttributes() const override { return {}; }
+    bool HasAttribute(KnownAttribute) const override { return false; }
+    const IAttribute* GetAttribute(KnownAttribute) const override { return nullptr; }
+    TS::Accessibility Accessibility() const override { return TS::Accessibility::Public; }
+    bool IsStatic() const override { return false; }
+    bool IsAbstract() const override { return false; }
+    bool IsSealed() const override { return false; }
+
+    // --- IMember ---
+    const IMember* MemberDefinition() const override { return this; }
+    const IType& ReturnType() const override { return returnType_; }
+    std::vector<const IMember*> ExplicitlyImplementedInterfaceMembers() const override
+    {
+        return {};
+    }
+    bool IsExplicitInterfaceImplementation() const override { return false; }
+    bool IsVirtual() const override { return false; }
+    bool IsOverride() const override { return false; }
+    bool IsOverridable() const override { return false; }
+    const TypeParameterSubstitution* Substitution() const override { return nullptr; }
+    bool Equals(const IMember* obj, const TypeVisitor*) const override { return obj == this; }
+
+    // --- IParameterizedMember ---
+    std::vector<const IParameter*> Parameters() const override { return {}; }
+
+    // --- IMethod ---
+    std::vector<const IAttribute*> GetReturnTypeAttributes() const override { return {}; }
+    bool ReturnTypeIsRefReadOnly() const override { return false; }
+    bool IsInitOnly() const override { return false; }
+    bool ThisIsRefReadOnly() const override { return false; }
+    std::vector<const ITypeParameter*> TypeParameters() const override { return {}; }
+    std::vector<ITypePtr> TypeArguments() const override { return {}; }
+    bool IsExtensionMethod() const override { return false; }
+    bool IsLocalFunction() const override { return false; }
+    bool IsConstructor() const override { return false; }
+    bool IsDestructor() const override { return false; }
+    bool IsOperator() const override { return false; }
+    bool HasBody() const override { return false; }
+    bool IsAccessor() const override { return false; }
+    const IMember* AccessorOwner() const override { return nullptr; }
+    MethodSemanticsAttributes AccessorKind() const override
+    {
+        return MethodSemanticsAttributes::None;
+    }
+    const IMethod* ReducedFrom() const override { return nullptr; }
+    const IMethod* Specialize(const TypeParameterSubstitution*) const override { return this; }
+
+private:
+    std::string name_;
+    const ICompilation& compilation_;
+    KnownType returnType_{ KnownTypeCode::Object };
+};
+
+// A minimal `IEvent` for the `member is IEvent` TRUE side of IsInvocable.
+class LookupEvent : public IEvent {
+public:
+    LookupEvent(std::string name, ITypePtr handlerType, const ICompilation& compilation)
+        : name_(std::move(name)), handlerType_(std::move(handlerType)),
+          compilation_(compilation) {}
+
+    // --- ISymbol ---
+    TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Event; }
+    std::string Name() const override { return name_; }
+
+    // --- INamedElement ---
+    std::string FullName() const override { return name_; }
+    std::string ReflectionName() const override { return name_; }
+    std::string Namespace() const override { return {}; }
+
+    // --- ICompilationProvider ---
+    const ICompilation& Compilation() const override { return compilation_; }
+
+    // --- IEntity ---
+    std::uint32_t MetadataToken() const override { return 0; }
+    const ITypeDefinition* DeclaringTypeDefinition() const override { return nullptr; }
+    ITypePtr DeclaringType() const override { return {}; }
+    const IModule* ParentModule() const override { return nullptr; }
+    std::vector<const IAttribute*> GetAttributes() const override { return {}; }
+    bool HasAttribute(KnownAttribute) const override { return false; }
+    const IAttribute* GetAttribute(KnownAttribute) const override { return nullptr; }
+    TS::Accessibility Accessibility() const override { return TS::Accessibility::Public; }
+    bool IsStatic() const override { return false; }
+    bool IsAbstract() const override { return false; }
+    bool IsSealed() const override { return false; }
+
+    // --- IMember ---
+    const IMember* MemberDefinition() const override { return this; }
+    const IType& ReturnType() const override { return *handlerType_; }
+    std::vector<const IMember*> ExplicitlyImplementedInterfaceMembers() const override
+    {
+        return {};
+    }
+    bool IsExplicitInterfaceImplementation() const override { return false; }
+    bool IsVirtual() const override { return false; }
+    bool IsOverride() const override { return false; }
+    bool IsOverridable() const override { return false; }
+    const TypeParameterSubstitution* Substitution() const override { return nullptr; }
+    const IMember* Specialize(const TypeParameterSubstitution*) const override { return this; }
+    bool Equals(const IMember* obj, const TypeVisitor*) const override { return obj == this; }
+
+    // --- IEvent ---
+    bool CanAdd() const override { return true; }
+    bool CanRemove() const override { return true; }
+    bool CanInvoke() const override { return false; }
+    const IMethod* AddAccessor() const override { return nullptr; }
+    const IMethod* RemoveAccessor() const override { return nullptr; }
+    const IMethod* InvokeAccessor() const override { return nullptr; }
+
+private:
+    std::string name_;
+    ITypePtr handlerType_;
+    const ICompilation& compilation_;
+};
+
+// A minimal `ITypeParameter` for the IsProtectedAccessAllowed type-parameter
+// unwrap (EffectiveBaseClass is hand-wired; an un-set effective base class is
+// a null promise, which the port treats as not-protected-accessible rather
+// than the C#'s would-be NRE).
+class LookupTypeParameter : public ITypeParameter {
+public:
+    explicit LookupTypeParameter(std::string name) : name_(std::move(name)) {}
+
+    void SetEffectiveBaseClass(ITypePtr t) { effectiveBaseClass_ = std::move(t); }
+
+    // --- IType ---
+    TypeKind Kind() const override { return TypeKind::TypeParameter; }
+    // The single `Name()` override is the final overrider for IType::Name /
+    // ISymbol::Name / ITypeParameter::Name (the D381 diamond disambiguation).
+    std::string Name() const override { return name_; }
+    std::string ReflectionName() const override { return name_; }
+    int TypeParameterCount() const override { return 0; }
+
+    // --- ISymbol ---
+    TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::TypeParameter; }
+
+    // --- ITypeParameter ---
+    TS::SymbolKind OwnerType() const override { return TS::SymbolKind::Method; }
+    const IEntity* Owner() const override { return nullptr; }
+    int Index() const override { return 0; }
+    std::vector<const IAttribute*> GetAttributes() const override { return {}; }
+    VarianceModifier Variance() const override { return VarianceModifier::Invariant; }
+    ITypePtr EffectiveBaseClass() const override { return effectiveBaseClass_; }
+    std::vector<ITypePtr> EffectiveInterfaceSet() const override { return {}; }
+    bool HasDefaultConstructorConstraint() const override { return false; }
+    bool HasReferenceTypeConstraint() const override { return false; }
+    bool HasValueTypeConstraint() const override { return false; }
+    bool HasUnmanagedConstraint() const override { return false; }
+    bool AllowsRefLikeType() const override { return false; }
+    Nullability NullabilityConstraint() const override { return Nullability::Oblivious; }
+    std::vector<TypeConstraint> TypeConstraints() const override { return {}; }
+
+protected:
+    bool StructuralEquals(const IType& other) const override
+    {
+        return this == &other; // identity equality for the test stub
+    }
+
+private:
+    std::string name_;
+    ITypePtr effectiveBaseClass_;
+};
+
+} // namespace ILSpy::Decompiler::TypeSystem::TestSupport

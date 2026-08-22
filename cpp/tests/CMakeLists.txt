@@ -28,6 +28,8 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/ITypeDefinitionOrUnknown_Test.cpp
     Decompiler/TypeSystem/KnownAttribute_Test.cpp
     Decompiler/TypeSystem/ICompilationProvider_Test.cpp
+    Decompiler/TypeSystem/BaseTypeCollector_Test.cpp
+    Decompiler/TypeSystem/TypeSystemExtensions_Test.cpp
     Decompiler/TypeSystem/Nullability_Test.cpp
     Decompiler/TypeSystem/SignatureCallingConvention_Test.cpp
     Decompiler/TypeSystem/FunctionPointerType_Test.cpp
@@ -215,6 +217,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Resolver/CSharpInvocationResolveResult_Test.cpp
     Decompiler/CSharp/Resolver/LambdaResolveResult_Test.cpp
     Decompiler/CSharp/Resolver/MethodGroupResolveResult_Test.cpp
+    Decompiler/CSharp/Resolver/MemberLookup_Test.cpp
     Decompiler/CSharp/Syntax/InterpolatedString_Test.cpp
     Decompiler/CSharp/Syntax/QueryExpression_Test.cpp
     Decompiler/CSharp/Syntax/QueryClauses_Test.cpp

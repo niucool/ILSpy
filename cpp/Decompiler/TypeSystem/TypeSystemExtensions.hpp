@@ -1,0 +1,107 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify,
+// merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+// permit persons to whom the Software is furnished to do so, subject to the following
+// conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies
+// or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+// PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+// HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+// CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+// OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+// Port of ICSharpCode.Decompiler/TypeSystem/TypeSystemExtensions.cs -- the base-
+// type traversal region of the extension-method class. The C# is a static class
+// of extension methods; per the extension-method convention they port as free
+// functions in the type's namespace (`ILSpy::Decompiler::TypeSystem`).
+//
+// PORTED here (the base-type region the C# `MemberLookup` / `IsDerivedFrom`
+// consumers depend on): GetAllBaseTypes / GetNonInterfaceBaseTypes /
+// GetAllBaseTypeDefinitions / IsDerivedFrom (both overloads), plus the
+// `BaseTypeCollector` traversal under TypeSystem/Implementation/.
+//
+// The remaining 800+ lines of TypeSystemExtensions.cs (the Cecil/metadata
+// helpers, the generic-instantiation/substitution visitors, the member
+// lookup helpers the C# resolver uses, the OpenComponent helpers, ...) follow
+// with their consumers.
+
+#pragma once
+
+#include "Decompiler/TypeSystem/ICompilation.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/ITypeDefinition.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+
+#include <stdexcept>
+#include <vector>
+
+namespace ILSpy::Decompiler::TypeSystem {
+
+// The C# `IEnumerable<IType> GetAllBaseTypes(this IType type)`:
+//
+// "Gets all base types. This is the reflexive and transitive closure of
+// `IType.DirectBaseTypes`. Note that this method does not return all
+// supertypes - doing so is impossible due to contravariance (and undesirable
+// for covariance as the list could become very large). The output is ordered
+// so that base types occur before derived types."
+//
+// The C# extension's null-check / ArgumentNullException ports to a
+// `const IType*` overload (raw pointers may be null only where documented);
+// a `const IType&` convenience delegates to it. The returned raw pointers
+// observe the visited types (the caller outlives them; the collector stores
+// the addresses of the DirectBaseTypes() snapshot contents, which the port's
+// type interfaces keep alive via the shared ownership of IType).
+std::vector<const IType*> GetAllBaseTypes(const IType* type);
+inline std::vector<const IType*> GetAllBaseTypes(const IType& type)
+{
+    return GetAllBaseTypes(&type);
+}
+
+// The C# `IEnumerable<IType> GetNonInterfaceBaseTypes(this IType type)`:
+//
+// "Gets all non-interface base types. When `type` is an interface, this method
+// will also return base interfaces (return same output as GetAllBaseTypes()).
+// The output is ordered so that base types occur before derived types."
+std::vector<const IType*> GetNonInterfaceBaseTypes(const IType* type);
+inline std::vector<const IType*> GetNonInterfaceBaseTypes(const IType& type)
+{
+    return GetNonInterfaceBaseTypes(&type);
+}
+
+// The C# `IEnumerable<ITypeDefinition> GetAllBaseTypeDefinitions(this IType type)`:
+//
+// "Gets all base type definitions. The output is ordered so that base types
+// occur before derived types. This is equivalent to
+// `type.GetAllBaseTypes().Select(t => t.GetDefinition()).Where(d => d != null).Distinct()`."
+//
+// The C# `.Distinct()` uses the default (reference) equality for ITypeDefinition
+// (type definitions do not override Equals), so the port's pointer-identity
+// dedup is exact.
+std::vector<const ITypeDefinition*> GetAllBaseTypeDefinitions(const IType* type);
+inline std::vector<const ITypeDefinition*> GetAllBaseTypeDefinitions(const IType& type)
+{
+    return GetAllBaseTypeDefinitions(&type);
+}
+
+// The C# `bool IsDerivedFrom(this ITypeDefinition type, ITypeDefinition baseType)`:
+//
+// "Gets whether this type definition is derived from the base type definition."
+// A null baseType returns false; a mismatch of both entities'
+// ICompilationProvider::Compilation() throws `std::runtime_error` (the
+// SimpleCompilation precedent for a ported C# `InvalidOperationException`).
+bool IsDerivedFrom(const ITypeDefinition& type, const ITypeDefinition* baseType);
+
+// The C# `bool IsDerivedFrom(this ITypeDefinition type, KnownTypeCode baseType)`:
+//
+// "Gets whether this type definition is derived from a given known type."
+// KnownTypeCode::None returns false (the C# has no known type to look up).
+bool IsDerivedFrom(const ITypeDefinition& type, KnownTypeCode baseType);
+
+} // namespace ILSpy::Decompiler::TypeSystem

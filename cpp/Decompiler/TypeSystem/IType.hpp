@@ -119,6 +119,19 @@ public:
     // shared_ptr identity is the C# `return this` reference identity.
     virtual ITypePtr VisitChildren(TypeVisitor& visitor) { return shared_from_this(); }
 
+    // The C# `IEnumerable<IType> DirectBaseTypes { get; }` -- the direct base types,
+    // including interfaces (IType.cs). The C# interface declares it abstract and
+    // AbstractType / the concrete types supply the list; the minimal port has no
+    // AbstractType (flattened onto IType), so the default lands here as a
+    // virtual-WITH-DEFAULT empty list (the GetDefinition / IsReferenceType precedent):
+    // concrete types with real base types (the ported MinimalResolveContext types,
+    // and later the MetadataTypeDefinition) override this; the C++-only minimal
+    // types (KnownType / SimpleType / SpecialType / TypeParameter / ...) carry no
+    // recorded base list, so they inherit the empty default. The returned types are
+    // non-null shared_ptrs (the C# never yields a null IType); by-value snapshot,
+    // mirroring the C# deferred enumeration's materialization point.
+    virtual std::vector<ITypePtr> DirectBaseTypes() const { return {}; }
+
     // Structural equality; derived classes override StructuralEquals.
     bool Equals(const IType& other) const {
         if (Kind() != other.Kind()) return false;
