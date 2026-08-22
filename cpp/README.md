@@ -1562,7 +1562,7 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   translation from ILAst to the C# AST), the ~15 AST prettification
   transforms, and the `RequiredNamespaceCollector`.
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
-  surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **10** ported leaves
+  surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **11** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
   `TypeSystemAstBuilder` / `CSharpAmbience`): the twin Alias `ResolveResult`
   subclasses `AliasTypeResolveResult` + `AliasNamespaceResolveResult`
@@ -1598,18 +1598,40 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `IsAsync`/`Parameters`/`ReturnType` delegate to `ILFunction.IsAsync`/
   `ILFunction.Parameters`/`ILFunction.ReturnType` (the port's `ILFunction`
   carries none of those surfaces) and its `IsValid` composes
-  `CSharpConversions.IdentityConversion`/`ImplicitConversion` (unported).
-  All 10 are header-only and dead in the CLI call graph (the CLI uses the seed,
+  `CSharpConversions.IdentityConversion`/`ImplicitConversion` (unported); and
+  the `MethodListWithDeclaringType` + `MethodGroupResolveResult` pair (D474):
+  `MethodListWithDeclaringType` (the per-declaring-type method bucket -- the C#
+  `class MethodListWithDeclaringType : List<IParameterizedMember>` ports to a
+  `std::vector<const IParameterizedMember*>`-derived value type carrying a
+  `DeclaringType()`; the type system owns the methods, the bucket observes
+  them) and `MethodGroupResolveResult : ResolveResult` (the method group a
+  delegate-creating method reference resolves to -- the base is
+  `SpecialType.NoType`, a method group has NO type, distinct from
+  `UnknownType`; carries the nullable `TargetResult` `shared_ptr` + the
+  `TargetType` null-target short-circuit to `SpecialType.UnknownType`, the
+  `MethodName`, the `Methods` flatten across declaring-type buckets [the
+  `SelectMany(...).Cast<IMethod>()` -- a `static_cast<const
+  IParameterizedMember*>` to `const IMethod*` up the single-inheritance chain,
+  requiring both `IMethod.hpp`/`IParameterizedMember.hpp` INCLUDED, not
+  forward-declared] and `MethodsGroupedByDeclaringType` [base types first],
+  the `TypeArguments` snapshot, the nullable `ChosenMethod`, the
+  `WithChosenMethod` runtime-type-preserving clone, the custom
+  `"[MethodGroupResolveResult with N method(s)]"` `ToString`, and the
+  `GetChildResults` => `{ target }` / empty). DEFERRED from the C# file: the
+  extension-method machinery (`GetExtensionMethods`'s resolver-fetch +
+  `GetEligibleExtensionMethods`) and `PerformOverloadResolution` -- they need
+  `OverloadResolution`/`TypeInference`/`CSharpConversions` (all unported); a
+  resolver-less `GetExtensionMethods()` returns empty.
+  All 11 are header-only and dead in the CLI call graph (the CLI uses the seed,
   not the `Resolver` leaves), confirmed by the byte-identical `--csharp`
-  output. The 10 leaves add **95 gtest cases** across 7 test suites. The
-  remaining small `CSharp/Resolver` `ResolveResult` subclasses
+  output. The 11 leaves add **119 gtest cases** across 8 test suites. The
+  remaining small `CSharp/Resolver` `ResolveResult` subclass
   (`DecompiledLambdaResolveResult` [blocked on the `ILFunction` async/parameter
-  surfaces + `CSharpConversions`] / `MethodGroupResolveResult` ~290 lines) and
-  the larger `MemberLookup` helper (~1000 lines, unblocks
-  `TypeDefinitionNameableInBaseList`, the last unported `TypeSystemAstBuilder`
-  static helper) are the subsequent in-order targets, advancing the
-  `CSharpResolver` dependency surface ahead of the full 2986-line
-  `CSharpResolver` class.
+  surfaces + `CSharpConversions`]) and the larger `MemberLookup` helper (~1000
+  lines, unblocks `TypeDefinitionNameableInBaseList`, the last unported
+  `TypeSystemAstBuilder` static helper) are the subsequent in-order targets,
+  advancing the `CSharpResolver` dependency surface ahead of the full
+  2986-line `CSharpResolver` class.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end. It now produces readable C#: real parameter names (Param
