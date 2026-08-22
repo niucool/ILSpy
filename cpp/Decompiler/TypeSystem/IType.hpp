@@ -36,6 +36,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -45,8 +46,39 @@ namespace ILSpy::Decompiler::TypeSystem {
 
 class IType;
 class ITypeDefinition;
+class IEvent;
+class IField;
+class IMember;
+class IMethod;
+class IProperty;
 class TypeVisitor;
 using ITypePtr = std::shared_ptr<IType>;
+
+// The C# `[Flags] enum GetMemberOptions` (IType.cs) -- the bitmask selecting which
+// members the member-enumeration functions below return / whether type substitution
+// is performed. An `int`-backed `enum class` (the C# has no underlying-type
+// annotation). The `|`/`&` bitwise operators the C# `[Flags]` enum has implicitly
+// are defined as free functions here (the C++ `enum class` has none), the
+// D376 `TypeSystemOptions` / D468 `OverloadResolutionErrors` precedent.
+enum class GetMemberOptions : std::int32_t {
+	// No options specified (the default): members are specialized, inherited members included.
+	None = 0x00,
+	// Do not specialize the returned members; return the (generic) member definitions directly.
+	ReturnMemberDefinitions = 0x01,
+	// Do not list inherited members; only members defined directly on this type.
+	IgnoreInheritedMembers = 0x02,
+};
+inline constexpr GetMemberOptions operator|(GetMemberOptions a, GetMemberOptions b) {
+	return static_cast<GetMemberOptions>(
+		static_cast<std::int32_t>(a) | static_cast<std::int32_t>(b));
+}
+inline constexpr GetMemberOptions operator&(GetMemberOptions a, GetMemberOptions b) {
+	return static_cast<GetMemberOptions>(
+		static_cast<std::int32_t>(a) & static_cast<std::int32_t>(b));
+}
+inline constexpr GetMemberOptions operator~(GetMemberOptions a) {
+	return static_cast<GetMemberOptions>(~static_cast<std::int32_t>(a));
+}
 
 // The root of the type representation. Equality is structural: two ITypes are
 // equal iff they have the same Kind and the same constituent names/types. IType
@@ -119,6 +151,112 @@ public:
     // shared_ptr identity is the C# `return this` reference identity.
     virtual ITypePtr VisitChildren(TypeVisitor& visitor) { return shared_from_this(); }
 
+    // ---- The member-enumeration surface (IType.cs `GetNestedTypes`/`GetConstructors`/
+    // `GetMethods`/`GetProperties`/`GetFields`/`GetEvents`/`GetMembers`/`GetAccessors`) ----
+    // The C# `interface IType` declares these `abstract`; the C#
+    // `Implementation.AbstractType` supplies the defaults (empty for the specific
+    // families; `GetMembers` composes `GetMethods.Concat(GetProperties).Concat(GetFields)
+    // .Concat(GetEvents)`), and the concrete `IType` implementations route them through
+    // `Implementation.GetMembersHelper` (apply the filter + `GetMemberOptions` flags +
+    // specialization). This minimal port has no `AbstractType` (the D406 flattened
+    // convention), so the `AbstractType` DEFAULTS land here as `virtual`-with-defaults:
+    // the specific families default to an empty snapshot, and `GetMembers` defaults to the
+    // virtual composition of the four families (so a derived type that overrides only the
+    // families sees them aggregated, faithful to the C#). The concrete routing / the
+    // specialization machinery (`GetMembersHelper`, `SpecializedMethod`/`SpecializedProperty`/
+    // `SpecializedField`/`SpecializedEvent`) is deferred to the next leaf; a real consumer
+    // (the `MemberLookup` Lookup region's `type.GetMembers(...)` / `type.GetNestedTypes(...)`)
+    // calls these through the `IType&`. The C# `IEnumerable` deferred sequences port to
+    // by-value `std::vector<const T*>` snapshots of non-owning pointers (the D271
+    // `IParameterizedMember::Parameters` precedent -- the members are owned by the type
+    // system / the concrete type definition). The C# `Delegate<Predicate>` filters port to
+    // `std::function<bool(const T*)>` AFTER the default (C++ has no `[Nullable]` annotated
+    // reference; the filter's by-value position + a default `nullptr` is the faithful
+    // "no filter" sentinel the C# `= null` models), and the C# `GetMemberOptions` default
+    // values port verbatim.
+
+    // The C# `IEnumerable<IType> GetNestedTypes(Delegate<Predicate{ITypeDefinition}> filter,
+    // GetMemberOptions options = None)` -- the inner classes (including inherited inner
+    // classes) un-type-argument-constrained. Defaults to the C# `AbstractType` empty list.
+    virtual std::vector<ITypePtr> GetNestedTypes(
+        std::function<bool(const ITypeDefinition*)> filter = nullptr,
+        GetMemberOptions options = GetMemberOptions::None) const { (void)filter; (void)options; return {}; }
+
+    // The C# `IEnumerable<IType> GetNestedTypes(IReadOnlyList<IType> typeArguments,
+    // Delegate<Predicate{ITypeDefinition}> filter, GetMemberOptions options = None)` -- the
+    // inner classes that have `typeArguments.size()` additional type parameters. Defaults to
+    // the C# `AbstractType` empty list.
+    virtual std::vector<ITypePtr> GetNestedTypes(
+        const std::vector<ITypePtr>& typeArguments,
+        std::function<bool(const ITypeDefinition*)> filter = nullptr,
+        GetMemberOptions options = GetMemberOptions::None) const { (void)typeArguments; (void)filter; (void)options; return {}; }
+
+    // The C# `IEnumerable<IMethod> GetConstructors(Delegate<Predicate{IMethod}> filter,
+    // GetMemberOptions options = IgnoreInheritedMembers)` -- the instance constructors
+    // (NOT static constructors; base-class constructors are not returned by default). Defaults
+    // to the C# `AbstractType` empty list.
+    virtual std::vector<const IMethod*> GetConstructors(
+        std::function<bool(const IMethod*)> filter = nullptr,
+        GetMemberOptions options = GetMemberOptions::IgnoreInheritedMembers) const { (void)filter; (void)options; return {}; }
+
+    // The C# `IEnumerable<IMethod> GetMethods(Delegate<Predicate{IMethod}> filter,
+    // GetMemberOptions options = None)` -- all methods callable on this type (not ctors or
+    // accessors). Defaults to the C# `AbstractType` empty list.
+    virtual std::vector<const IMethod*> GetMethods(
+        std::function<bool(const IMethod*)> filter = nullptr,
+        GetMemberOptions options = GetMemberOptions::None) const { (void)filter; (void)options; return {}; }
+
+    // The C# `IEnumerable<IMethod> GetMethods(IReadOnlyList<IType> typeArguments,
+    // Delegate<Predicate{IMethod}> filter, GetMemberOptions options = None)` -- the generic
+    // methods callable with the specified type arguments. Defaults to the C# `AbstractType`
+    // empty list.
+    virtual std::vector<const IMethod*> GetMethods(
+        const std::vector<ITypePtr>& typeArguments,
+        std::function<bool(const IMethod*)> filter = nullptr,
+        GetMemberOptions options = GetMemberOptions::None) const { (void)typeArguments; (void)filter; (void)options; return {}; }
+
+    // The C# `IEnumerable<IProperty> GetProperties(Delegate<Predicate{IProperty}> filter,
+    // GetMemberOptions options = None)` -- the properties callable on this type. Defaults to
+    // the C# `AbstractType` empty list.
+    virtual std::vector<const IProperty*> GetProperties(
+        std::function<bool(const IProperty*)> filter = nullptr,
+        GetMemberOptions options = GetMemberOptions::None) const { (void)filter; (void)options; return {}; }
+
+    // The C# `IEnumerable<IField> GetFields(Delegate<Predicate{IField}> filter,
+    // GetMemberOptions options = None)` -- the fields accessible on this type. Defaults to
+    // the C# `AbstractType` empty list.
+    virtual std::vector<const IField*> GetFields(
+        std::function<bool(const IField*)> filter = nullptr,
+        GetMemberOptions options = GetMemberOptions::None) const { (void)filter; (void)options; return {}; }
+
+    // The C# `IEnumerable<IEvent> GetEvents(Delegate<Predicate{IEvent}> filter,
+    // GetMemberOptions options = None)` -- the events accessible on this type. Defaults to
+    // the C# `AbstractType` empty list.
+    virtual std::vector<const IEvent*> GetEvents(
+        std::function<bool(const IEvent*)> filter = nullptr,
+        GetMemberOptions options = GetMemberOptions::None) const { (void)filter; (void)options; return {}; }
+
+    // The C# `IEnumerable<IMember> GetMembers(Delegate<Predicate{IMember}> filter,
+    // GetMemberOptions options = None)` -- all members callable on this type (methods,
+    // properties, fields, events; NOT ctors). The `AbstractType` default composes
+    // `GetMethods.Concat(GetProperties).Concat(GetFields).Concat(GetEvents)`; the port
+    // reproduces that composition over the four virtual families in `IType.cpp` (the
+    // composed up-casts to `const IMember*` need the member-family headers complete, and
+    // those headers include `IType.hpp` transitively -- a header-side composition would
+    // cycle the includes), so a type that overrides only the families sees them
+    // aggregated here, faithful to the C#.
+    virtual std::vector<const IMember*> GetMembers(
+        std::function<bool(const IMember*)> filter = nullptr,
+        GetMemberOptions options = GetMemberOptions::None) const;
+
+    // The C# `IEnumerable<IMethod> GetAccessors(Delegate<Predicate{IMethod}> filter,
+    // GetMemberOptions options = None)` -- the accessors of the properties / events on this
+    // type (not returned by `GetMembers` / `GetMethods`). Defaults to the C# `AbstractType`
+    // empty list.
+    virtual std::vector<const IMethod*> GetAccessors(
+        std::function<bool(const IMethod*)> filter = nullptr,
+        GetMemberOptions options = GetMemberOptions::None) const { (void)filter; (void)options; return {}; }
+
     // The C# `IEnumerable<IType> DirectBaseTypes { get; }` -- the direct base types,
     // including interfaces (IType.cs). The C# interface declares it abstract and
     // AbstractType / the concrete types supply the list; the minimal port has no
@@ -140,6 +278,15 @@ public:
 protected:
     virtual bool StructuralEquals(const IType& other) const = 0;
 };
+
+// The `GetMembers` definition lands in `IType.cpp`: the faithful `AbstractType`
+// composition `GetMethods.Concat(GetProperties).Concat(GetFields).Concat(GetEvents)`
+// up-casts the family `const IMethod*` / `const IProperty*` / `const IField*` /
+// `const IEvent*` elements to `const IMember*`, which needs the member-family headers
+// (`IMethod.hpp` / `IProperty.hpp` / `IField.hpp` / `IEvent.hpp`) COMPLETE -- and those
+// headers transitively include this one (via `IEntity.hpp` / `IVariable.hpp`), so the
+// composition cannot live inline in this header without an include cycle. `IType.cpp`
+// includes them and defines `IType::GetMembers`.
 
 // A type that is known by code (a primitive or framework type). Cheap to
 // construct and compare; the decompiler's type system looks these up by code

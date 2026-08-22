@@ -1686,12 +1686,53 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   All 13 are header-only (TypeSystemExtensions additionally has a .cpp) and
   dead in the CLI call graph (the CLI uses the seed,
   not the `Resolver` leaves), confirmed by the byte-identical `--csharp`
-  output. The 13 leaves add **213 gtest cases** across 12 test suites. The
-  remaining small `CSharp/Resolver` `ResolveResult` subclass
+  output. The 13 leaves add **213 gtest cases** across 12 test suites.
+  The member-enumeration surface the `MemberLookup` Lookup region
+  enumerates members through (D477): the `GetMemberOptions` `[Flags]`
+  enum (`None = 0x00` / `ReturnMemberDefinitions = 0x01` /
+  `IgnoreInheritedMembers = 0x02`; the C# `int` default backing, plus the
+  `|` / `&` / `~` operators the C# `[Flags]` enum has implicitly) and the
+  nine `IType` member-enumeration declarations (`GetNestedTypes` x2 /
+  `GetConstructors` / `GetMethods` x2 / `GetProperties` / `GetFields` /
+  `GetEvents` / `GetMembers` / `GetAccessors`), ported as `virtual`-with-
+  default leaves the D406 flattened-`AbstractType` convention dictates:
+  the seven specific families take the C# `AbstractType` empty default
+  (their C# `Delegate<Predicate>` filters port to by-value
+  `std::function<bool(const T*)>` + a default `nullptr` "no filter"
+  sentinel, their C# `GetMemberOptions` default values port verbatim --
+  notably `GetConstructors` binding `IgnoreInheritedMembers`, the ONE
+  family defaulting off `None`), and `GetMembers` defaults to the C#
+  `AbstractType.GetMembers` virtual composition of the four families
+  (`GetMethods.Concat(GetProperties).Concat(GetFields).Concat(GetEvents)`)
+  out-of-line in `IType.cpp` (the composed `const IMethod*` /
+  `const IProperty*` / `const IField*` / `const IEvent*` -> `const
+  IMember*` up-casts need the member-family headers COMPLETE, and they
+  transitively include `IType.hpp` -- a header-side composition would
+  cycle the includes; the `.cpp` definition is where they can be include-
+  d). Concrete types with real members override the families (and the
+  base compositions sees them aggregated, faithful to the C#). The
+  concrete routing (`GetMembersHelper` + `SpecializedMethod`/
+  `SpecializedProperty`/`SpecializedField`/`SpecializedEvent`
+  specialization) remains the next in-order leaf. One pre-existing latent
+  ODR violation surfaced: `IAttribute_Test.cpp` carried a namespace-scope
+  minimal `IMethod` stand-in (dropped per its own fixture comment now
+  that the real `IMethod.hpp` has landed -- the linked binary otherwise
+  saw two `TS::IMethod` definitions the moment `IType.cpp` started to
+  reference the real ones, an UB vtable collision that crashed under
+  `IAttributeTest`'s second case); the file now uses the reusable
+  `LookupMethod` stub from `LookupStubs.hpp`. **33** new gtest cases
+  across 3 (`GetMemberOptionsTest`) / 2 (`MemberEnumerationDefaultTest` +
+  `MemberEnumerationDispatchTest`) suites cover the `[Flags]` literals,
+  the virtual dispatch through a `IType&` base reference + the per-family
+  default-options binding, and the composed-`GetMembers` shape; the suite
+  went RED first (`GetMemberOptions` not a member of the namespace)
+  before the header port made it green. The remaining small
+  `CSharp/Resolver` `ResolveResult` subclass
   (`DecompiledLambdaResolveResult` [blocked on the `ILFunction` async/parameter
   surfaces + `CSharpConversions`]) and the larger `MemberLookup` helper's
-  `LookupGroup` region (~600 lines, the GET-members enumeration the port's
-  minimal IType/ITypeDefinition surface does not yet carry) are the
+  `LookupGroup` region (~600 lines, now unblocked for the
+  member-DECLARATION surface; blocked on the `GetMembersHelper` routing +
+  `SignatureComparer.Ordinal`) are the
   subsequent in-order targets,
   advancing the `CSharpResolver` dependency surface ahead of the full
   2986-line `CSharpResolver` class.

@@ -17,6 +17,10 @@
 // DEALINGS IN THE SOFTWARE.
 
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/IEvent.hpp"
+#include "Decompiler/TypeSystem/IField.hpp"
+#include "Decompiler/TypeSystem/IMethod.hpp"
+#include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/TypeSystem/TypeVisitor.hpp"
 
 #include <utility>
@@ -307,6 +311,31 @@ ITypePtr TupleType::VisitChildren(TypeVisitor& visitor) {
     // and the element names; the C# Compilation / GetDefinition().ParentModule
     // reconstruction inputs are deferred to the Phase 2 type-resolution stage.
     return std::make_shared<TupleType>(underlyingType_, std::move(newElementTypes), elementNames_);
+}
+
+// ---- IType member-enumeration defaults ----
+
+// The faithful `AbstractType.GetMembers` default: GetMethods.Concat(GetProperties)
+// .Concat(GetFields).Concat(GetEvents), with the caller's `Delegate<Predicate>` filter
+// applied to the composed set and the caller's `GetMemberOptions` forwarded to every
+// family. Defined here (not inline in the header) because the composed up-casts
+// (`const IMethod*` / `const IProperty*` / `const IField*` / `const IEvent*` ->
+// `const IMember*`) need the member-family headers complete, and those headers include
+// `IType.hpp` transitively -- a header-side body would cycle the includes. A derived
+// type overriding only the family virtuals sees them aggregated here.
+std::vector<const IMember*> IType::GetMembers(std::function<bool(const IMember*)> filter,
+                                              GetMemberOptions options) const {
+    std::vector<const IMember*> members;
+    auto append = [&](auto family) {
+        for (const auto* m : family)
+            if (!filter || filter(static_cast<const IMember*>(m)))
+                members.push_back(static_cast<const IMember*>(m));
+    };
+    append(GetMethods(nullptr, options));
+    append(GetProperties(nullptr, options));
+    append(GetFields(nullptr, options));
+    append(GetEvents(nullptr, options));
+    return members;
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem

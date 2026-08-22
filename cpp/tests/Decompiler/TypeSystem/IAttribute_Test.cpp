@@ -26,11 +26,13 @@
 // argument-vector snapshots, polymorphic dispatch through an `IAttribute*`, and the virtual
 // destructor.
 //
-// The `IMethod` stand-in (the `Constructor` return type) is a minimal complete stand-in
-// defined in the `ILSpy::Decompiler::TypeSystem` namespace (a TEST FIXTURE, NOT a faithful
-// port of the full `IMethod` surface); a forward declaration would suffice for a null
-// `Constructor` return, but the non-null case needs a concrete object to point at. It is
-// IDENTICAL to any future stand-in that needs `IMethod` complete (ODR-safe across TUs).
+// The `Constructor` return type is the REAL `IMethod` interface (cpp/Decompiler/TypeSystem/
+// IMethod.hpp, D389): a forward declaration would suffice for a null `Constructor` return,
+// but the non-null case needs a concrete object to point at, supplied by the reusable
+// `LookupMethod` stub from `LookupStubs.hpp` (this file originally defined its own minimal
+// namespace-scope `IMethod` stand-in; it is dropped per its own fixture comment now that the
+// real `IMethod.hpp` has landed -- a namespace-scope stand-in sharing the production class
+// name is an ODR violation the moment any linked TU sees the real definition).
 
 #include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/CustomAttributeNamedArgument.hpp"
@@ -38,6 +40,8 @@
 #include "Decompiler/TypeSystem/CustomAttributeTypedArgument.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/LookupStubs.hpp"
+#include "Decompiler/TypeSystem/IMethod.hpp"
 
 #include <gtest/gtest.h>
 
@@ -49,19 +53,6 @@
 #include <utility>
 #include <vector>
 
-namespace ILSpy::Decompiler::TypeSystem {
-
-// Minimal test stand-in for `IMethod` (the method interface). Only a virtual destructor; the
-// real `IMethod` pulls `IParameterizedMember` / `ITypeParameter` / `IAttribute` /
-// `MethodSemanticsAttributes` and the member family. A TEST FIXTURE, NOT a faithful port;
-// dropped when the real `IMethod.hpp` lands. IDENTICAL to any future stand-in (ODR-safe).
-class IMethod {
-public:
-    virtual ~IMethod() = default;
-};
-
-} // namespace ILSpy::Decompiler::TypeSystem
-
 namespace TS = ILSpy::Decompiler::TypeSystem;
 using TS::CustomAttributeNamedArgument;
 using TS::CustomAttributeNamedArgumentKind;
@@ -71,17 +62,18 @@ using TS::IMethod;
 using TS::IType;
 using TS::KnownType;
 using TS::KnownTypeCode;
+using TS::TestSupport::LookupCompilation;
+using TS::TestSupport::LookupMethod;
 
 namespace {
 
-// A minimal concrete `IMethod` for testing the non-null `Constructor` slot.
-class TestMethod : public IMethod {
-public:
-    explicit TestMethod(int id) : id_(id) {}
-    int id() const { return id_; }
-private:
-    int id_;
-};
+// The shared compilation the `LookupMethod` stub requires (the `Constructor` slot test only
+// compares the pointer, never dispatches through the compilation).
+LookupCompilation& Comp()
+{
+    static LookupCompilation compilation;
+    return compilation;
+}
 
 // A minimal concrete `IAttribute` for testing: holds the configured state and returns it from
 // every accessor (the shape a real `DefaultAttribute` / `CustomAttribute` takes). The
@@ -143,10 +135,10 @@ TEST(IAttributeTest, AttributeTypeReturnsConfiguredType)
 // ---------------------------------------------------------------------------
 TEST(IAttributeTest, ConstructorReturnsConfiguredMethod)
 {
-    TestMethod ctor(7);
+    LookupMethod ctor{ "ctor", Comp() };
     auto type = MakeType(KnownTypeCode::Object);
     TestAttribute attr(type, &ctor, false, {}, {});
-    EXPECT_EQ(attr.Constructor(), &ctor);
+    EXPECT_EQ(attr.Constructor(), static_cast<const IMethod*>(&ctor));
 }
 
 // ---------------------------------------------------------------------------
@@ -244,7 +236,7 @@ TEST(IAttributeTest, EmptyArgumentsByDefault)
 // ---------------------------------------------------------------------------
 TEST(IAttributeTest, DispatchesPolymorphicallyThroughIAttributePointer)
 {
-    TestMethod ctor(3);
+    LookupMethod ctor{ "ctor", Comp() };
     auto argType = MakeType(KnownTypeCode::Int32);
     std::vector<CustomAttributeTypedArgument> fixedArgs{
         CustomAttributeTypedArgument(argType, std::int32_t(9))
