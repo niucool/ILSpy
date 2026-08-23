@@ -1803,10 +1803,43 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   constructed `TypeParameterSubstitution(typeArguments, null)`); the suite went
   RED first (`GetSubstitution` / `GetTypeArgument` not members of
   `ParameterizedType`) before the header + `.cpp` port made it green.
+  The first of the `Specialized*` member leaves the `GetMembersHelper`
+  routing needs (D480): `Implementation/SpecializedParameter.hpp` -- the
+  sealed `IParameter` a `SpecializedParameterizedMember` builds its
+  substituted parameter list out of (the C# `new SpecializedParameter(p,
+  p.Type.AcceptVisitor(substitution), this)` per parameter). It wraps a base
+  `IParameter` and a new `IType`, delegating the whole `IParameter` /
+  `IVariable` / `ISymbol` surface to the base EXCEPT `Type` (the new type) and
+  `Owner` (the new owning member). HEADER-ONLY (all simple delegations; no
+  `TypeVisitor` / complete-type needs beyond `IParameter`): it is not added
+  to the ilspy `CMakeLists.txt` (it compiles into each TU that includes it,
+  the `ParameterListComparer.hpp` precedent) -- only the test `.cpp` is wired.
+  The base parameter is held as an OWNING `std::shared_ptr<IParameter>` (keeps
+  the base alive for the parameter's lifetime, the `NullabilityAnnotatedType::
+  baseType_` precedent), the new type as an owning `ITypePtr` (`Type()` returns
+  `*newType_`, a reference to the same `IType` passed in), and the new owner as
+  a NON-OWNING nullable `const IParameterizedMember*` (the `IParameter::Owner`
+  "May return null" contract; the specializing member owns the parameter, the
+  back-reference is non-owning). The D372 name-shadowing crux applies to the
+  `ReferenceKind()` / `SymbolKind()` overrides (the inherited `IParameter::
+  ReferenceKind` / `ISymbol::SymbolKind` member names shadow the namespace-scope
+  enums in MSVC's complete-class lookup), so both return types are
+  GLOBALLY QUALIFIED (the `DummyTypeParameter::SymbolKind` precedent).
+  DEFERRED: `ToString()` (the C# delegates to the not-yet-ported
+  `DefaultParameter.ToString(this)` static helper, the shared `IParameter`
+  signature renderer -- lands with the `DefaultParameter` leaf). The leaf is
+  dead in the CLI path (the routing is not yet wired) and the `--csharp`
+  output is byte-identical. **15** new gtest cases in 1 suite pin the new-type /
+  new-owner overrides, the per-member delegation (incl. `GetAttributes` /
+  `GetConstantValue` forwarding), the nullable owner, and the `is_base_of_v` /
+  `is_final_v` class shape; the suite went RED first (the header absent) and
+  again on the unqualified `ReferenceKind` / `SymbolKind` return types (the
+  D372 crux) before the global-qualification fix made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
-  substitution surface are exercised by unit tests and stay dead in the CLI
+  substitution surface + the D480 `SpecializedParameter` leaf are exercised by
+  unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param
   table) and string literals (#US heap), type-inferred local names (`num`,
