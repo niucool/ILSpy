@@ -51,6 +51,7 @@ class IField;
 class IMember;
 class IMethod;
 class IProperty;
+class ITypeParameter;
 class TypeParameterSubstitution;
 class TypeVisitor;
 using ITypePtr = std::shared_ptr<IType>;
@@ -100,6 +101,28 @@ public:
     // name handling lives in FullTypeName for type definitions.
     virtual std::string ReflectionName() const = 0;
     virtual int TypeParameterCount() const = 0;
+
+    // The C# `IReadOnlyList<ITypeParameter> TypeParameters` (IType.cs:111) -- the type
+    // parameters of this type ("Returns an empty list if this type is not generic").
+    // The C# interface declares it `abstract` and `AbstractType` supplies the
+    // `EmptyList<ITypeParameter>.Instance` default; the port flattens that default here
+    // (the D406 convention) as a virtual-WITH-DEFAULT returning an empty
+    // `std::vector<const ITypeParameter*>` (NON-OWNING raw pointers -- the `NestedTypes` /
+    // `GetMethods` "type system owns the entities, the caller holds raw pointers"
+    // convention; `const ITypeParameter*` is a complete pointer type regardless of
+    // `ITypeParameter`'s own completeness, so the `std::vector` instantiates). A concrete
+    // `ITypeDefinition` (the `MetadataTypeDefinition`, not yet ported) overrides it to
+    // return its real type parameters. This is the `IType` surface the
+    // `SpecializedMember.DeclaringType` `else` arm reads
+    // (`new ParameterizedType(definitionDeclaringTypeDef, definitionDeclaringTypeDef
+    // .TypeParameters).AcceptVisitor(substitution)`). The dominant C# usage is
+    // `ITypeParameter`-typed (`.Count` / `[i]` / `GenericContext` / `.Skip`); the one
+    // `IEnumerable<IType>`-covariance use (the `ParameterizedType` ctor in
+    // `SpecializedMember`) is a `SpecializedMember`-leaf concern (the `const ITypeParameter*`
+    // -> `ITypePtr` conversion), not this leaf's. NO name-hiding qualification: the member
+    // name `TypeParameters` does not collide with a namespace-scope type in the
+    // `TypeSystem` namespace (the D375 collision-free convention).
+    virtual std::vector<const ITypeParameter*> TypeParameters() const { return {}; }
 
     // Whether the type is a reference type or value type (faithful port of
     // IType.cs `bool? IsReferenceType`): `std::optional<bool>(true)` = reference

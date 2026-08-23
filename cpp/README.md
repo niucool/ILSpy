@@ -1835,11 +1835,41 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `is_final_v` class shape; the suite went RED first (the header absent) and
   again on the unqualified `ReferenceKind` / `SymbolKind` return types (the
   D372 crux) before the global-qualification fix made it green.
+  The `IType::TypeParameters` surface addition (D481) -- the `IType` member
+  the `SpecializedMember.DeclaringType` `else` arm reads (`new
+  ParameterizedType(definitionDeclaringTypeDef, definitionDeclaringTypeDef
+  .TypeParameters).AcceptVisitor(substitution)`). The C# `IReadOnlyList<
+  ITypeParameter> TypeParameters` ("Returns an empty list if this type is not
+  generic") has the `AbstractType` `EmptyList<ITypeParameter>.Instance` default;
+  the port flattens it onto `IType` as a virtual-WITH-DEFAULT returning an empty
+  `std::vector<const ITypeParameter*>` (the D406 convention; NON-OWNING raw
+  pointers, the `NestedTypes` / `GetMethods` "type system owns the entities,
+  caller holds raw pointers" convention -- `const ITypeParameter*` is a complete
+  pointer type regardless of `ITypeParameter`'s own completeness, so the
+  `std::vector` instantiates with `ITypeParameter` still being defined). `ITypeParameter`
+  is now forward-declared in `IType.hpp` (it was only in `TypeVisitor.hpp`); the
+  re-declaration in `TypeVisitor.hpp` is harmless (C++ permits repeated forward
+  declarations). A concrete `ITypeDefinition` (the `MetadataTypeDefinition`, not
+  yet ported) overrides it to return its real type parameters. The dominant C#
+  usage is `ITypeParameter`-typed (`.Count` / `[i]` / `GenericContext` / `.Skip`);
+  the one `IEnumerable<IType>`-covariance use (the `ParameterizedType` ctor in
+  `SpecializedMember`) is a `SpecializedMember`-leaf concern (the `const
+  ITypeParameter*` -> `ITypePtr` conversion), not this leaf's. The leaf is dead
+  in the CLI path (the `IType` surface addition stays dead in the CLI path --
+  the `--csharp` output is byte-identical). **11** new gtest cases in 1 suite pin
+  the empty default across the existing concrete `IType` subclasses (incl.
+  `ParameterizedType` -- `TypeParameters` the formal params is DISTINCT from
+  `TypeArguments` the args), `DummyTypeParameter` (an `ITypeParameter` has no
+  params of its own), the virtual dispatch through an `IType&` base reference,
+  and the `TypeParameterCount` / `TypeParameters().size()` agreement; the suite
+  went RED first (`TypeParameters` not a member of `IType`, the stub `override`
+  finding no base) before the virtual-WITH-DEFAULT made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
-  substitution surface + the D480 `SpecializedParameter` leaf are exercised by
-  unit tests and stay dead in the CLI
+  substitution surface + the D480 `SpecializedParameter` leaf + the D481
+  `IType::TypeParameters` surface are exercised by unit tests and stay dead in
+  the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param
   table) and string literals (#US heap), type-inferred local names (`num`,
