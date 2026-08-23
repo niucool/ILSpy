@@ -21,6 +21,7 @@
 #include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/TypeSystem/IProperty.hpp"
+#include "Decompiler/TypeSystem/TypeParameterSubstitution.hpp"
 #include "Decompiler/TypeSystem/TypeVisitor.hpp"
 
 #include <utility>
@@ -396,6 +397,31 @@ ITypePtr UnknownType::ChangeNullability(::ILSpy::Decompiler::TypeSystem::Nullabi
         return shared_from_this();
     }
     return std::make_shared<NullabilityAnnotatedType>(shared_from_this(), nullability);
+}
+
+// ---- ParameterizedType substitution surface (D479) ----
+// Faithful port of the three ParameterizedType.cs members the GetMembersHelper routing
+// binds against. `GetTypeArgument` is the C# `typeArguments[index]` (no bounds check; the
+// caller's contract). `GetSubstitution()` is `new TypeParameterSubstitution(typeArguments,
+// null)`; the two-arg overload is `new TypeParameterSubstitution(typeArguments,
+// methodTypeArguments)`. Both return BY VALUE (the C# heap allocation realized as a value,
+// the D407 convention): a fresh `std::optional<std::vector<ITypePtr>>` holds copies of
+// this type's `typeArgs_` (the managed IType objects are shared via the shared_ptrs), and
+// the method list is `std::nullopt` (the no-arg overload) or the moved-in argument.
+
+ITypePtr ParameterizedType::GetTypeArgument(int index) const {
+    return typeArgs_[index];
+}
+
+TypeParameterSubstitution ParameterizedType::GetSubstitution() const {
+    return TypeParameterSubstitution(
+        std::optional<std::vector<ITypePtr>>(typeArgs_), std::nullopt);
+}
+
+TypeParameterSubstitution ParameterizedType::GetSubstitution(
+    std::optional<std::vector<ITypePtr>> methodTypeArguments) const {
+    return TypeParameterSubstitution(
+        std::optional<std::vector<ITypePtr>>(typeArgs_), std::move(methodTypeArguments));
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem

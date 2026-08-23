@@ -1774,11 +1774,41 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `IType::Nullability` virtual exposed pre-existing test stubs using the
   bare enum name after an inherited accessor; they were namespace-qualified
   (the D372 crux).
+  The `ParameterizedType` substitution surface the `GetMembersHelper` routing
+  binds against (D479): `GetTypeArgument(int)` (the C# `typeArguments[index]`,
+  returning the stored `ITypePtr` by value -- the managed `IType` is shared with
+  `TypeArguments()[index]`) and the two `GetSubstitution` overloads
+  (`GetSubstitution()` -> `new TypeParameterSubstitution(typeArguments, null)`;
+  `GetSubstitution(methodTypeArguments)` -> `new TypeParameterSubstitution(
+  typeArguments, methodTypeArguments)`), ported returning the substitution BY
+  VALUE (the C# heap allocation realized as a value, the D407 convention; the
+  class type arguments are a fresh `std::optional<std::vector<ITypePtr>>` holding
+  copies of the type's `typeArgs_`, the method list is `std::nullopt` for the
+  no-arg overload or the moved-in argument for the two-arg). The trio is
+  OUT-OF-LINE in `IType.cpp`: `TypeParameterSubstitution` is a concrete
+  `TypeVisitor` whose header includes `TypeVisitor.hpp`, which includes
+  `IType.hpp`, so `IType.hpp` cannot include `TypeParameterSubstitution.hpp`
+  without a cycle -- the by-value return type is only FORWARD-DECLARED in the
+  header (a member-function declaration permits an incomplete return type),
+  and the definitions in `IType.cpp` include `TypeParameterSubstitution.hpp`
+  (complete there). `GetMembersHelper.GetMethodsImpl` calls
+  `pt.GetSubstitution(methodTypeArguments)`, the `SpecializedMember`
+  constructors call `pt.GetSubstitution()`, and `GetNestedTypesImpl` reads
+  `pt.GetTypeArgument(i)` -- the leaf is dead in the CLI path (the routing is
+  not yet wired) and the `--csharp` output is byte-identical. **10** new gtest
+  cases in 1 suite pin the Nth-argument / shared-instance access, the
+  absent-vs-present method list, the class/method type-parameter substitution
+  semantics (the real correctness check, exercising `VisitTypeParameter`), and
+  the faithful-construction equivalence (`GetSubstitution()` equals a directly
+  constructed `TypeParameterSubstitution(typeArguments, null)`); the suite went
+  RED first (`GetSubstitution` / `GetTypeArgument` not members of
+  `ParameterizedType`) before the header + `.cpp` port made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
-  real back end (the comparer leaves D478 are exercised by unit tests and
-  stay dead in the CLI path -- the `--csharp` output is byte-identical to
-  D477). It now produces readable C#: real parameter names (Param
+  real back end (the comparer leaves D478 + the D479 `ParameterizedType`
+  substitution surface are exercised by unit tests and stay dead in the CLI
+  path -- the `--csharp` output is byte-identical to D478). It now produces
+  readable C#: real parameter names (Param
   table) and string literals (#US heap), type-inferred local names (`num`,
   `text`, `array`) declared with C# keywords (`int num`, `double x`),
   `if/else` for fall-through + early-exit if-throw chains + shared-tail merges

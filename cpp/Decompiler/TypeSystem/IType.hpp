@@ -51,6 +51,7 @@ class IField;
 class IMember;
 class IMethod;
 class IProperty;
+class TypeParameterSubstitution;
 class TypeVisitor;
 using ITypePtr = std::shared_ptr<IType>;
 
@@ -391,6 +392,44 @@ public:
     // Faithful port of ParameterizedType.cs ChangeNullability: forwards to the
     // generic type and rebuilds only when it changed (defined in IType.cpp).
     ITypePtr ChangeNullability(::ILSpy::Decompiler::TypeSystem::Nullability nullability) override;
+
+    // Faithful port of ParameterizedType.cs `IType GetTypeArgument(int index)` -- the
+    // `index`-th type argument (the C# is literally `typeArguments[index]`). Returns the
+    // stored `ITypePtr` BY VALUE (a shared_ptr copy, sharing the managed `IType` with
+    // `TypeArguments()[index]`). The C# has no bounds check (an out-of-range index is the
+    // caller's contract); the port mirrors that -- defined in IType.cpp alongside the
+    // `GetSubstitution` pair (the class body keeps the declaration only). See the header
+    // comment on `GetSubstitution` for the include-graph reason the trio is out-of-line.
+    ITypePtr GetTypeArgument(int index) const;
+
+    // Faithful port of ParameterizedType.cs `TypeParameterSubstitution GetSubstitution()` --
+    // returns `new TypeParameterSubstitution(typeArguments, null)` (the substitution of
+    // the generic type's CLASS type parameters with this parameterized type's type
+    // arguments; no method type arguments). The port returns the substitution BY VALUE
+    // (the C# heap allocation realized as a value, the D407 convention); the class type
+    // arguments are a fresh `std::optional<std::vector<ITypePtr>>` holding copies of this
+    // type's `typeArgs_` (the managed `IType` objects are shared via the shared_ptrs), and
+    // the method list is `std::nullopt` (the C# `null`). The `GetMembersHelper` routing
+    // and the `SpecializedMember` constructors bind against this surface.
+    //
+    // PLACEMENT / INCLUDE GRAPH: `TypeParameterSubstitution` is a concrete `TypeVisitor`
+    // whose header includes `TypeVisitor.hpp`, which in turn includes THIS header
+    // (`IType.hpp`) -- so `IType.hpp` cannot include `TypeParameterSubstitution.hpp` without
+    // a cycle. The by-value return type is only FORWARD-DECLARED here (a member-function
+    // declaration permits an incomplete return type); the DEFINITION is out-of-line in
+    // `IType.cpp`, which includes `TypeParameterSubstitution.hpp` (the type is complete
+    // there). The `GetTypeArgument` member is kept out-of-line too for a single grouping.
+    TypeParameterSubstitution GetSubstitution() const;
+
+    // Faithful port of ParameterizedType.cs `TypeParameterSubstitution GetSubstitution(
+    // IReadOnlyList<IType> methodTypeArguments)` -- returns `new TypeParameterSubstitution(
+    // typeArguments, methodTypeArguments)`: the class type parameters substituted with this
+    // type's type arguments AND the method type parameters substituted with the supplied
+    // method type arguments. The `methodTypeArguments` parameter is the nullable list (`std::nullopt`
+    // = the C# `null`, "keep this kind of type parameter unmodified"); a present (possibly empty)
+    // list substitutes the method type parameters. Returns the substitution BY VALUE (the D407
+    // convention). Out-of-line in IType.cpp for the include-graph reason above.
+    TypeParameterSubstitution GetSubstitution(std::optional<std::vector<ITypePtr>> methodTypeArguments) const;
 protected:
     bool StructuralEquals(const IType& other) const override;
 private:
