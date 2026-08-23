@@ -251,7 +251,7 @@ public:
     std::string MetadataName() const override { return fullTypeName_.Name(); }
     bool HasExtensions() const override { return false; }
     const TS::ExtensionInfo* ExtensionInfo() const override { return nullptr; }
-    Nullability NullableContext() const override { return Nullability::Oblivious; }
+    ::ILSpy::Decompiler::TypeSystem::Nullability NullableContext() const override { return ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious; }
     bool IsRecord() const override { return false; }
 
 protected:
@@ -564,7 +564,7 @@ public:
     bool HasValueTypeConstraint() const override { return false; }
     bool HasUnmanagedConstraint() const override { return false; }
     bool AllowsRefLikeType() const override { return false; }
-    Nullability NullabilityConstraint() const override { return Nullability::Oblivious; }
+    ::ILSpy::Decompiler::TypeSystem::Nullability NullabilityConstraint() const override { return ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious; }
     std::vector<TypeConstraint> TypeConstraints() const override { return {}; }
 
 protected:

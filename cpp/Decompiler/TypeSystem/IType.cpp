@@ -146,6 +146,11 @@ std::string SpecialType::Name() const {
         case TypeKind::Null: return "null";
         case TypeKind::None: return "None";
         case TypeKind::Dynamic: return "dynamic";
+        // The C# SpecialType.NInt / NUInt singleton names (added when the
+        // normalize-to-nint/nuint arm landed them; the rest of the table lands
+        // with the remaining special singletons).
+        case TypeKind::NInt: return "nint";
+        case TypeKind::NUInt: return "nuint";
         case TypeKind::UnboundTypeArgument: return "?";
         default: return "?";
     }
@@ -336,6 +341,61 @@ std::vector<const IMember*> IType::GetMembers(std::function<bool(const IMember*)
     append(GetFields(nullptr, options));
     append(GetEvents(nullptr, options));
     return members;
+}
+
+// ---- ChangeNullability overrides ----
+// The faithful C# per-type overrides (the AbstractType default -- ignore the change
+// and return `this` -- is inline on IType; ArrayType inherits it because the port's
+// ArrayType carries no nullability field).
+
+// NullabilityAnnotatedType.cs: same nullability -> this, else forward to the
+// unwrapped base type.
+ITypePtr NullabilityAnnotatedType::ChangeNullability(::ILSpy::Decompiler::TypeSystem::Nullability nullability) {
+    if (nullability == nullability_) {
+        return shared_from_this();
+    }
+    return baseType_->ChangeNullability(nullability);
+}
+
+// SpecialType.cs: only Dynamic annotates; Oblivious and every other kind return
+// this (the C# compares against `base.Nullability`, the AbstractType Oblivious
+// default).
+ITypePtr SpecialType::ChangeNullability(::ILSpy::Decompiler::TypeSystem::Nullability nullability) {
+    if (nullability == Nullability::Oblivious || kind_ != TypeKind::Dynamic) {
+        return shared_from_this();
+    }
+    return std::make_shared<NullabilityAnnotatedType>(shared_from_this(), nullability);
+}
+
+// ParameterizedType.cs: forward to the generic type; rebuild only when it changed
+// (pointer identity is the C# `newGenericType == genericType` reference check).
+ITypePtr ParameterizedType::ChangeNullability(::ILSpy::Decompiler::TypeSystem::Nullability nullability) {
+    if (!genericType_) {
+        return shared_from_this();
+    }
+    ITypePtr newGenericType = genericType_->ChangeNullability(nullability);
+    if (newGenericType.get() == genericType_.get()) {
+        return shared_from_this();
+    }
+    return std::make_shared<ParameterizedType>(std::move(newGenericType), typeArgs_);
+}
+
+// ModifiedType.cs: forward to the element type; rebuild only when it changed.
+ITypePtr ModifiedType::ChangeNullability(::ILSpy::Decompiler::TypeSystem::Nullability nullability) {
+    ITypePtr newElementType = element_ ? element_->ChangeNullability(nullability) : nullptr;
+    if (newElementType.get() == element_.get()) {
+        return shared_from_this();
+    }
+    return std::make_shared<ModifiedType>(modifier_, std::move(newElementType), isRequired_);
+}
+
+// UnknownType.cs (the Implementation/UnknownType.cs override): Oblivious (and
+// known value types) return this; otherwise wrap in NullabilityAnnotatedType.
+ITypePtr UnknownType::ChangeNullability(::ILSpy::Decompiler::TypeSystem::Nullability nullability) {
+    if (nullability == Nullability::Oblivious || isReferenceType_ == false) {
+        return shared_from_this();
+    }
+    return std::make_shared<NullabilityAnnotatedType>(shared_from_this(), nullability);
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem

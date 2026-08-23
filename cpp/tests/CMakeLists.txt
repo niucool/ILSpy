@@ -31,6 +31,9 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/BaseTypeCollector_Test.cpp
     Decompiler/TypeSystem/TypeSystemExtensions_Test.cpp
     Decompiler/TypeSystem/MemberEnumeration_Test.cpp
+    Decompiler/TypeSystem/DummyTypeParameter_Test.cpp
+    Decompiler/TypeSystem/NormalizeTypeVisitor_Test.cpp
+    Decompiler/TypeSystem/ParameterListComparer_Test.cpp
     Decompiler/TypeSystem/Nullability_Test.cpp
     Decompiler/TypeSystem/SignatureCallingConvention_Test.cpp
     Decompiler/TypeSystem/FunctionPointerType_Test.cpp

@@ -1731,14 +1731,54 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   (`DecompiledLambdaResolveResult` [blocked on the `ILFunction` async/parameter
   surfaces + `CSharpConversions`]) and the larger `MemberLookup` helper's
   `LookupGroup` region (~600 lines, now unblocked for the
-  member-DECLARATION surface; blocked on the `GetMembersHelper` routing +
-  `SignatureComparer.Ordinal`) are the
+  member-DECLARATION surface and for `SignatureComparer.Ordinal` -- D478;
+  still blocked on the `GetMembersHelper` routing + `SpecializedMethod`/
+  `SpecializedProperty`/`SpecializedField`/`SpecializedEvent`
+  specialization) are the
   subsequent in-order targets,
   advancing the `CSharpResolver` dependency surface ahead of the full
   2986-line `CSharpResolver` class.
+  The `SignatureComparer.Ordinal` comparer surface the `LookupGroup` region
+  (and `InheritanceHelper.GetBaseMembers`) binds against (D478):
+  `TypeSystem/ParameterListComparer.{hpp}` holds BOTH of the C# file's
+  comparers -- `ParameterListComparer` (the `Instance` / `WithOptions`
+  factories; the include-modifiers `ref`/`out`+`params` arm; the
+  per-element normalized type compare) and `SignatureComparer` (the
+  name-comparer + kind + method type-parameter count + the parameter-list
+  compare, and the name-hash x 33 mix), `TypeSystem/NormalizeTypeVisitor.{hpp,cpp}`
+  is the shape-eraser the comparers visit every parameter type through (the
+  eight public option fields verbatim, the `TypeErasure` /
+  `IgnoreNullabilityAndTuples` / `IgnoreNullability` Meyers-singleton
+  configurations, the opposite-direction object -> `SpecialType.Dynamic`
+  mapping, the IntPtr/UIntPtr -> nint/nuint arms, tuple -> underlying
+  `ValueTuple`, modifier and nullability removal), and
+  `Implementation/DummyTypeParameter.{hpp,cpp}` is the placeholder type
+  parameter the normalizer substitutes by (owner-kind, index) -- the two C#
+  `Interlocked.CompareExchange`-grown static arrays port to mutex-grown
+  static vectors (stable unique instance per pair, so identity equals the
+  C# reference identity). The port required three small IType-surface
+  additions: `IType::Nullability` (the flattened-`AbstractType` `Oblivious`
+  default virtual, overridden implicitly by `NullabilityAnnotatedType`),
+  `IType::ChangeNullability` (the `AbstractType` return-this default plus
+  the faithful `NullabilityAnnotatedType` / `SpecialType` [Dynamic-only
+  wrap] / `ParameterizedType` / `ModifiedType` / `UnknownType`-class
+  rebuild overrides; the port's `ArrayType` carries no nullability field,
+  so its non-Oblivious arm inherits the default -- documented divergence),
+  and the `NullabilityAnnotatedTypeParameter` wrapper (the C# nested class
+  lands in `ITypeParameter.hpp` since it needs `ITypeParameter` complete;
+  it carries TWO non-virtual `IType` subobjects, so its `shared_from_this`
+  paths are documented as not exercised). **49** new gtest cases across 5
+  suites pin the name forms / caches / dispatch, the eight-field
+  configurations, the object-vs-dynamic + method-type-parameter
+  normalization cruxes, and the comparer + hash contracts. The
+  `IType::Nullability` virtual exposed pre-existing test stubs using the
+  bare enum name after an inherited accessor; they were namespace-qualified
+  (the D372 crux).
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
-  real back end. It now produces readable C#: real parameter names (Param
+  real back end (the comparer leaves D478 are exercised by unit tests and
+  stay dead in the CLI path -- the `--csharp` output is byte-identical to
+  D477). It now produces readable C#: real parameter names (Param
   table) and string literals (#US heap), type-inferred local names (`num`,
   `text`, `array`) declared with C# keywords (`int num`, `double x`),
   `if/else` for fall-through + early-exit if-throw chains + shared-tail merges

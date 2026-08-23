@@ -261,8 +261,11 @@ public:
 
     // The C# `Nullability NullableContext` -- the nullability specified in the
     // `[NullableContext]` attribute on the type (the default nullability for members of the type
-    // without a `[Nullable]` attribute). The ported `Nullability` enum (D380), returned by value.
-    virtual Nullability NullableContext() const = 0;
+    // without a `[Nullable]` attribute). The ported `Nullability` enum (D380), returned by
+    // value. The return type is globally qualified because the inherited `IType::Nullability()`
+    // hides the namespace-scope `Nullability` enum in this derived class (the D372
+    // `SymbolKind`/`KnownTypeCode` crux).
+    virtual ::ILSpy::Decompiler::TypeSystem::Nullability NullableContext() const = 0;
 
     // The C# `bool IsRecord` -- whether the type has the necessary members to be considered a
     // C# 9 record or C# 10 record struct.

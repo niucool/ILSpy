@@ -21,4 +21,6 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/MergedNamespace.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/SimpleCompilation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/TypeSystemExtensions.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/NormalizeTypeVisitor.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Implementation/DummyTypeParameter.cpp
 )

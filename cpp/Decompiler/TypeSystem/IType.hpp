@@ -116,6 +116,36 @@ public:
     // inherit the `std::nullopt` default, faithful to the C# `return null`.
     virtual std::optional<bool> IsReferenceType() const { return std::nullopt; }
 
+    // The C# `Nullability Nullability { get; }` -- the nullability annotation carried by
+    // the type itself (`Oblivious` when the type carries no annotation). The C# interface
+    // declares it `abstract` and `AbstractType` supplies the `Nullability.Oblivious`
+    // default; the port flattens that default here (the D406 convention), and only the
+    // `NullabilityAnnotatedType` decorator overrides it. The return type and every later
+    // `Nullability` mention in this class are namespace-qualified: the member name
+    // shadows the enum type in MSVC's complete-class lookup (the D372/D475 crux).
+    virtual ::ILSpy::Decompiler::TypeSystem::Nullability Nullability() const {
+        return ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious;
+    }
+
+    // The C# `IType ChangeNullability(Nullability newNullability)` -- returns this type
+    // annotated with the requested nullability. `AbstractType`'s default ignores the
+    // change and returns `this` (only some types support nullability) -- flattened onto
+    // `IType` here per the D406 convention, as a virtual-WITH-DEFAULT returning
+    // `shared_from_this()` (the C# `return this` reference identity). The concrete
+    // overrides mirror the C# override set the port's concrete types carry:
+    // `NullabilityAnnotatedType` (same annotation -> this, else forward to the unwrapped
+    // base), `SpecialType` (only `Dynamic` annotates), `ParameterizedType` and
+    // `ModifiedType` (rebuild when the substituted child changed), and the `UnknownType`
+    // class (non-Oblivious reference-types wrap in `NullabilityAnnotatedType`). The
+    // port's `ArrayType` carries no nullability field (the C# ctor's `nullability`
+    // argument is deferred), so it inherits the default -- a documented divergence for
+    // the non-Oblivious arm. NON-CONST (like `AcceptVisitor` / `VisitChildren`): it may
+    // return `shared_from_this()`.
+    virtual ITypePtr ChangeNullability(::ILSpy::Decompiler::TypeSystem::Nullability nullability) {
+        (void)nullability;
+        return shared_from_this();
+    }
+
     // Gets the underlying type definition (faithful port of IType.cs `ITypeDefinition?
     // GetDefinition()`). Can return null for types which do not have a type definition (for
     // example arrays, pointers, type parameters, the C++-only minimal KnownType / SimpleType
@@ -358,6 +388,9 @@ public:
     // child changed, else return this.
     ITypePtr AcceptVisitor(TypeVisitor& visitor) override;
     ITypePtr VisitChildren(TypeVisitor& visitor) override;
+    // Faithful port of ParameterizedType.cs ChangeNullability: forwards to the
+    // generic type and rebuilds only when it changed (defined in IType.cpp).
+    ITypePtr ChangeNullability(::ILSpy::Decompiler::TypeSystem::Nullability nullability) override;
 protected:
     bool StructuralEquals(const IType& other) const override;
 private:
@@ -474,6 +507,9 @@ public:
     // `SpecialType(TypeKind::Unknown)` (isReferenceType defaults to nullopt),
     // faithful to the C# `SpecialType.UnknownType` singleton (isReferenceType: null).
     std::optional<bool> IsReferenceType() const override { return isReferenceType_; }
+    // Faithful port of SpecialType.cs ChangeNullability: only `Dynamic` annotates;
+    // `Oblivious` and every non-Dynamic kind return `this` (defined in IType.cpp).
+    ITypePtr ChangeNullability(::ILSpy::Decompiler::TypeSystem::Nullability nullability) override;
 protected:
     bool StructuralEquals(const IType& other) const override {
         return kind_ == static_cast<const SpecialType&>(other).kind_;
@@ -520,6 +556,10 @@ public:
     // VisitChildren (element + modifier).
     ITypePtr AcceptVisitor(TypeVisitor& visitor) override;
     ITypePtr VisitChildren(TypeVisitor& visitor) override;
+    // Faithful port of ModifiedType.cs ChangeNullability: forwards to the element
+    // type and rebuilds the modifier wrapper only when it changed (defined in
+    // IType.cpp).
+    ITypePtr ChangeNullability(::ILSpy::Decompiler::TypeSystem::Nullability nullability) override;
 protected:
     bool StructuralEquals(const IType& other) const override;
 private:
@@ -546,7 +586,11 @@ private:
 // not-yet-ported TypeVisitor / TypeParameterSubstitution can reference it.
 class NullabilityAnnotatedType : public IType {
 public:
-    NullabilityAnnotatedType(ITypePtr baseType, Nullability nullability)
+    // The `Nullability` parameter/return types are namespace-qualified throughout
+    // this class: its own `Nullability()` accessor shadows the enum type in MSVC's
+    // complete-class lookup (the D372 crux; `ChangeNullability` above applies the
+    // same). 
+    NullabilityAnnotatedType(ITypePtr baseType, ::ILSpy::Decompiler::TypeSystem::Nullability nullability)
         : baseType_(std::move(baseType)), nullability_(nullability) {}
     TypeKind Kind() const override { return baseType_ ? baseType_->Kind() : TypeKind::Unknown; }
     std::string Name() const override { return baseType_ ? baseType_->Name() : std::string(); }
@@ -556,7 +600,7 @@ public:
     int TypeParameterCount() const override {
         return baseType_ ? baseType_->TypeParameterCount() : 0;
     }
-    Nullability Nullability() const noexcept { return nullability_; }
+    ::ILSpy::Decompiler::TypeSystem::Nullability Nullability() const noexcept { return nullability_; }
     // The C# `TypeWithoutAnnotation => baseType`: the un-annotated wrapped type.
     const ITypePtr& TypeWithoutAnnotation() const noexcept { return baseType_; }
     // Faithful port of the C# DecoratedType `bool? IsReferenceType => baseType.IsReferenceType`
@@ -572,12 +616,16 @@ public:
         return baseType_ ? baseType_->GetDefinition() : nullptr;
     }
     // Faithful port of NullabilityAnnotatedType.cs AcceptVisitor /
-    // VisitChildren (baseType; the C# ChangeNullability / IsReferenceType /
-    // TypeParameter edge cases are deferred to the Phase 2 nullability-lifting
-    // stage that consumes TypeVisitor -- the minimal leaf reconstructs the
-    // wrapper with the visited base and the same nullability).
+    // VisitChildren (baseType; the C# IsReferenceType / TypeParameter edge
+    // cases are deferred to the Phase 2 nullability-lifting stage that consumes
+    // TypeVisitor -- the minimal leaf reconstructs the wrapper with the visited
+    // base and the same nullability).
     ITypePtr AcceptVisitor(TypeVisitor& visitor) override;
     ITypePtr VisitChildren(TypeVisitor& visitor) override;
+    // Faithful port of NullabilityAnnotatedType.cs ChangeNullability: identical
+    // nullability -> this; otherwise forward to the unwrapped base type (defined
+    // in IType.cpp).
+    ITypePtr ChangeNullability(::ILSpy::Decompiler::TypeSystem::Nullability nullability) override;
 protected:
     bool StructuralEquals(const IType& other) const override {
         const auto& o = static_cast<const NullabilityAnnotatedType&>(other);
@@ -820,6 +868,10 @@ public:
     // kind).
     std::optional<bool> IsReferenceType() const override { return isReferenceType_; }
     const TopLevelTypeName& FullTypeName() const noexcept { return fullTypeName_; }
+    // Faithful port of UnknownType.cs ChangeNullability: `Oblivious` (and value
+    // types) return `this`; a non-`Oblivious` annotation on a reference type wraps
+    // in `NullabilityAnnotatedType` (defined in IType.cpp).
+    ITypePtr ChangeNullability(::ILSpy::Decompiler::TypeSystem::Nullability nullability) override;
 protected:
     bool StructuralEquals(const IType& other) const override
     {

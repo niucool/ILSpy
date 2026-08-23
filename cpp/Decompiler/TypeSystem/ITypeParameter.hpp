@@ -88,6 +88,8 @@
 #include "Decompiler/TypeSystem/TypeConstraint.hpp"
 #include "Decompiler/TypeSystem/VarianceModifier.hpp"
 
+#include <memory>
+#include <utility>
 #include <vector>
 
 namespace ILSpy::Decompiler::TypeSystem {
@@ -175,13 +177,146 @@ public:
 
     // The C# `Nullability NullabilityConstraint { get; }` -- the nullability of the
     // reference type constraint (e.g. `where T : class?`). The ported `Nullability` enum
-    // (D380), returned by value.
-    virtual Nullability NullabilityConstraint() const = 0;
+    // (D380), returned by value. The return type is globally qualified because the
+    // inherited `IType::Nullability()` hides the namespace-scope `Nullability` enum in
+    // this derived class (the D372 crux).
+    virtual ::ILSpy::Decompiler::TypeSystem::Nullability NullabilityConstraint() const = 0;
 
     // The C# `IReadOnlyList<TypeConstraint> TypeConstraints { get; }` -- the type
     // constraints on this type parameter (the `Base` / `IInterface` in
     // `where T : Base, IInterface`). A by-value vector of `TypeConstraint` value structs.
     virtual std::vector<TypeConstraint> TypeConstraints() const = 0;
+};
+
+// Port of the C# `NullabilityAnnotatedTypeParameter` (the nested class in
+// Implementation/NullabilityAnnotatedType.cs) -- a nullability-annotated type
+// parameter: a `NullabilityAnnotatedType` that additionally implements
+// `ITypeParameter` by delegating the whole type-parameter surface to the wrapped
+// base parameter. Created by `ITypeParameter::ChangeNullability(non-Oblivious)`
+// (e.g. `DummyTypeParameter::ChangeNullability`) and recognized by
+// `NormalizeTypeVisitor.VisitTypeParameter`'s `RemoveNullability` arm (the C# `type
+// is NullabilityAnnotatedTypeParameter natp` check). PLACEMENT: the C# nests it in
+// NullabilityAnnotatedType.cs, but the port flattened `NullabilityAnnotatedType`
+// into `IType.hpp` (D402) and this addition needs `ITypeParameter` COMPLETE -- in
+// the pre-flattened layout that would cycle back into `IType.hpp`, so it lands
+// here beside the interface it implements.
+//
+// MULTIPLE INHERITANCE: `NullabilityAnnotatedType` (path A) and `ITypeParameter`
+// (path B) both derive `IType` NON-virtually (the port convention), so the object
+// carries two `IType` subobjects. The overrides below are the final overriders for
+// BOTH paths (`Name` / `Kind` / `ReflectionName` / `TypeParameterCount` /
+// `StructuralEquals` are ambiguous otherwise and the class would stay abstract),
+// mirroring the LookupStubs `LookupTypeParameter` diamond-disambiguation shape. All
+// delegate to the wrapped parameter (the C# delegates via the `ITypeParameter`
+// explicit-interface implementations; the `IType` members it inherits from
+// `NullabilityAnnotatedType` -- which itself delegates to the same wrapped base).
+class NullabilityAnnotatedTypeParameter final : public NullabilityAnnotatedType,
+                                                public ITypeParameter {
+public:
+    // The C# `internal NullabilityAnnotatedTypeParameter(ITypeParameter type,
+    // Nullability nullability)` -- `type` is shared with the
+    // `NullabilityAnnotatedType` base (its `TypeWithoutAnnotation`) AND kept as the
+    // typed parameter reference every ITypeParameter member delegates to.
+    NullabilityAnnotatedTypeParameter(std::shared_ptr<ITypeParameter> type,
+                                      ::ILSpy::Decompiler::TypeSystem::Nullability nullability)
+        : NullabilityAnnotatedType(type, nullability),
+          typeParameter_(std::move(type)) {}
+
+    // The C# `ITypeParameter OriginalTypeParameter` -- the un-annotated wrapped
+    // parameter (the same object `TypeWithoutAnnotation()` exposes as `IType`).
+    const std::shared_ptr<ITypeParameter>& OriginalTypeParameter() const noexcept {
+        return typeParameter_;
+    }
+
+    // Disambiguation for the two `IType` subobjects' members a caller reaches
+    // through this class: `Equals` (non-virtual; the wrapper's single-IType
+    // semantics) and `Nullability` (virtual; the final overrider must live here so
+    // unqualified lookup does not see both paths). Declaring a member in this
+    // class stops the lookup from reaching EITHER base copy (the D381 diamond
+    // precedent applied to inherited members).
+    using NullabilityAnnotatedType::Equals;
+    ::ILSpy::Decompiler::TypeSystem::Nullability Nullability() const noexcept override {
+        return NullabilityAnnotatedType::Nullability();
+    }
+
+    // NOTE: `shared_from_this()`-based paths (the base `ChangeNullability` /
+    // `VisitChildren` no-change arms) must not be exercised on an instance of this
+    // class: the two `IType` subobjects leave `enable_shared_from_this`'s weak
+    // back-reference unbound (ambiguous in the shared_ptr ctor), so they would
+    // throw `bad_weak_ptr`. The C# single-object identity model has no such
+    // hazard; the normalizers reach an annotated parameter only through the
+    // `VisitTypeParameter` / `VisitNullabilityAnnotatedType` unwrap arms.
+
+    // --- IType (final overriders for BOTH IType subobjects; all delegate to the
+    //     wrapped parameter, faithful to the inherited NullabilityAnnotatedType
+    //     behavior) ---
+    TypeKind Kind() const override { return typeParameter_->Kind(); }
+    // The single `Name()` override is the final overrider for the
+    // IType / ISymbol / ITypeParameter diamond (the D381 convention).
+    std::string Name() const override { return typeParameter_->Name(); }
+    std::string ReflectionName() const override { return typeParameter_->ReflectionName(); }
+    int TypeParameterCount() const override { return typeParameter_->TypeParameterCount(); }
+
+    // --- ISymbol ---
+    // The C# `ISymbol.SymbolKind => SymbolKind.TypeParameter`. The return type is
+    // qualified (the member name shadows the enum type in MSVC's complete-class
+    // lookup, the D372 crux; every later `SymbolKind` mention is qualified too).
+    ::ILSpy::Decompiler::TypeSystem::SymbolKind SymbolKind() const override {
+        return ::ILSpy::Decompiler::TypeSystem::SymbolKind::TypeParameter;
+    }
+
+    // --- ITypeParameter (the C# explicit-interface delegations to baseType) ---
+    ::ILSpy::Decompiler::TypeSystem::SymbolKind OwnerType() const override {
+        return typeParameter_->OwnerType();
+    }
+    const IEntity* Owner() const override { return typeParameter_->Owner(); }
+    int Index() const override { return typeParameter_->Index(); }
+    std::vector<const IAttribute*> GetAttributes() const override {
+        return typeParameter_->GetAttributes();
+    }
+    VarianceModifier Variance() const override { return typeParameter_->Variance(); }
+    ITypePtr EffectiveBaseClass() const override { return typeParameter_->EffectiveBaseClass(); }
+    std::vector<ITypePtr> EffectiveInterfaceSet() const override {
+        return typeParameter_->EffectiveInterfaceSet();
+    }
+    bool HasDefaultConstructorConstraint() const override {
+        return typeParameter_->HasDefaultConstructorConstraint();
+    }
+    bool HasReferenceTypeConstraint() const override {
+        return typeParameter_->HasReferenceTypeConstraint();
+    }
+    bool HasUnmanagedConstraint() const override {
+        return typeParameter_->HasUnmanagedConstraint();
+    }
+    bool HasValueTypeConstraint() const override {
+        return typeParameter_->HasValueTypeConstraint();
+    }
+    bool AllowsRefLikeType() const override { return typeParameter_->AllowsRefLikeType(); }
+    ::ILSpy::Decompiler::TypeSystem::Nullability NullabilityConstraint() const override {
+        return typeParameter_->NullabilityConstraint();
+    }
+    std::vector<TypeConstraint> TypeConstraints() const override {
+        return typeParameter_->TypeConstraints();
+    }
+
+protected:
+    // The C# equality resolves to the inherited `NullabilityAnnotatedType.Equals`:
+    // same annotation + equal base type. Hits a plain `NullabilityAnnotatedType`
+    // too (a NATP IS one in C#), and `dynamic_cast` (not the sibling `static_cast`
+    // convention) because a bare type parameter shares this type's `Kind()` -- the
+    // structural pre-check in `IType::Equals` cannot discriminate it.
+    bool StructuralEquals(const IType& other) const override {
+        const auto* nat = dynamic_cast<const NullabilityAnnotatedType*>(&other);
+        if (!nat) {
+            return false;
+        }
+        return nat->Nullability() == Nullability() &&
+               nat->TypeWithoutAnnotation() &&
+               nat->TypeWithoutAnnotation()->Equals(*typeParameter_);
+    }
+
+private:
+    std::shared_ptr<ITypeParameter> typeParameter_;
 };
 
 } // namespace ILSpy::Decompiler::TypeSystem

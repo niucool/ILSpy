@@ -264,7 +264,7 @@ public:
     {
         return nullptr;
     }
-    Nullability NullableContext() const override { return Nullability::Oblivious; }
+    ::ILSpy::Decompiler::TypeSystem::Nullability NullableContext() const override { return ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious; }
     bool IsRecord() const override { return false; }
 
     // --- The load-bearing override: a resolved type definition IS its own definition ---
