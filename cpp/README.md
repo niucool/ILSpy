@@ -1910,12 +1910,46 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   most-vexing-parse / `TypeArguments`-not-on-`IType` cruxes) before the fixes made
   it green (one test needed the same-instance convention for pointer-identity
   hashing, the `TypeParameterSubstitutionTest::GetHashCodeIsConsistent` precedent).
+  The first concrete `Specialized*` leaf (D483): `Implementation/SpecializedField.hpp`
+  -- the concrete `IField` a `GetMembersHelper.GetFieldsImpl` builds for a field on a
+  parameterized type (`new SpecializedField(m, pt.GetSubstitution())`). It derives
+  `SpecializedMember, IField`, so it hits the TWO-IMember-SUBOBJECT DIAMOND
+  (`SpecializedMember : IMember` + `IField : IMember, IVariable` -> two `IMember`
+  subobjects, three `ISymbol` subobjects). The `NullabilityAnnotatedTypeParameter`
+  D402 precedent applied to `IMember`: ONE override per method name is the final
+  overrider for ALL the subobject vtables (the standard C++ rule), and each
+  delegates to the `SpecializedMember::` qualified call (sub A's already-
+  implemented override, which itself delegates to `baseMember_`) -- `return
+  SpecializedMember::Name();` is a static, qualified dispatch to sub A, NOT a
+  virtual re-dispatch. The `IField`-own surface (`IsReadOnly` /
+  `ReturnTypeIsRefReadOnly` / `IsVolatile`) and the `IVariable` surface (`IsConst` /
+  `GetConstantValue`) delegate to `fieldDefinition_` (an OWNING `shared_ptr<IField>`
+  shared with `baseMember_`); the C# `IVariable.Type => this.ReturnType` ports to
+  `IVariable::Type()` returning `SpecializedMember::ReturnType()` (the substituted
+  type). The D372 crux applies to `SymbolKind()` / `Accessibility()` (globally
+  qualified). HEADER-ONLY (all simple delegations; the complex lazy
+  `ReturnType` / `DeclaringType` are inherited); not added to the ilspy
+  `CMakeLists.txt` (the `SpecializedParameter.hpp` precedent). The two-`IMember`
+  diamond makes a `SpecializedField*` -> `IMember*` upcast AMBIGUOUS (which
+  `IMember` subobject?) -- the test upcasts through the unambiguous
+  `SpecializedMember*` (one `IMember`), the `IField` header-comment diamond-upcast
+  convention. DEFERRED: the C# `internal static IField Create(...)` factory (needs
+  the owning-`Specialize` design). The leaf is dead in the CLI path (the
+  `GetMembersHelper` routing is not yet wired) and the `--csharp` output is
+  byte-identical. **13** new gtest cases in 1 suite pin the ctor substitution
+  wiring, the trivial delegations, the `ReturnType` / `DeclaringType` substitution
+  effect, `IVariable::Type` == `ReturnType`, the `IField`-own / `IVariable` surface
+  delegation, the diamond dispatch through `IField*` / `IMember*` (via
+  `SpecializedMember*`) / `IVariable*`, the `Specialize` delegation, the inherited
+  `Equals` / `GetHashCode`, and the `is_base_of_v` / `is_final_v` class shape; the
+  suite went RED first (the `TestSupport` namespace, the ambiguous `IMember*`
+  upcast C2594, the `SpecializedMember` using) before the fixes made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
   substitution surface + the D480 `SpecializedParameter` leaf + the D481
-  `IType::TypeParameters` surface + the D482 `SpecializedMember` base are
-  exercised by unit tests and stay dead in the CLI
+  `IType::TypeParameters` surface + the D482 `SpecializedMember` base + the D483
+  `SpecializedField` leaf are exercised by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param
   table) and string literals (#US heap), type-inferred local names (`num`,
