@@ -2053,13 +2053,67 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `GetHashCode`, and the `is_base_of_v` / `is_final_v` class shape; the suite went RED first
   (`SpecializedProperty` abstract -- the `Parameters()` sub C redeclaration the three-`IMember`
   diamond forces) before the redeclaration made it green.
+  The `AbstractTypeParameter` base (D487) -- the abstract base for `ITypeParameter`
+  implementations (`Implementation/AbstractTypeParameter.{hpp,cpp}`). It holds the owner /
+  index / name / variance and supplies the shared `IType` / `ISymbol` / `ITypeParameter` /
+  `ICompilationProvider` surface every concrete type-parameter impl shares
+  (`SpecializedTypeParameter` [nested in `SpecializedMethod`], `MetadataTypeParameter`, ...).
+  It lands now that ALL its deps are ported: `ITypeParameter` (D383), `ICompilationProvider`
+  (D379), the `NullabilityAnnotatedTypeParameter` wrapper (D402, for `ChangeNullability`),
+  `TypeVisitor` (D406, for `AcceptVisitor`), `TypeConstraint` (D383). The C# `abstract class
+  AbstractTypeParameter : ITypeParameter, ICompilationProvider` ports to `AbstractTypeParameter
+  : public ITypeParameter, public ICompilationProvider` with PROTECTED ctors (the
+  abstract-by-protected-ctor convention); `ITypeParameter : IType, ISymbol` is the D383 `Name`
+  diamond (the single `Name()` override covers both), and `ICompilationProvider` is a fresh
+  independent base (ONE `IType` subobject, `shared_from_this()` works). The two ctors
+  (owner-based -- reads `compilation` / `ownerType` from `owner`; compilation-based -- takes
+  both) port with a NON-OWNING `const ICompilation* compilation_` pointer member (a reference
+  member cannot be conditionally initialized before the owner-based ctor's null-check throw;
+  `Compilation()` returns `*compilation_`, non-null by contract) and a NON-OWNING nullable
+  `const IEntity* owner_` (null for the compilation-based ctor). The C# `name ?? ((OwnerType ==
+  Method ? "!!" : "!") + index)` default-name ports to an empty-string sentinel (the port's
+  `std::string` has no null). DEFERRED: the computed `EffectiveBaseClass` /
+  `EffectiveInterfaceSet` (the C# `CalculateEffective*` with the `BusyManager`
+  cyclic-protection + `ICompilation.FindType` + `IsDerivedFrom`; `BusyManager` is NOT ported) ->
+  `EffectiveBaseClass` returns `UnknownType()`, `EffectiveInterfaceSet` returns empty (the
+  `DummyTypeParameter` precedent); `IsReferenceType` inherits the `nullopt` default (with
+  `EffectiveBaseClass` deferred to `UnknownType`, the computed `IsReferenceType` returns
+  `nullopt` anyway); the member-enumeration methods (`GetConstructors` / `GetMethods` / ... --
+  the C# `IgnoreInheritedMembers` short-circuit + `FakeMethod.CreateDummyConstructor` + the
+  `GetMembersHelper` routing) inherit the `IType` empty defaults (the routed versions land with
+  `GetMembersHelper` / `FakeMethod`). `GetDefinitionOrUnknown` / `IType.GetSubstitution`
+  (interface-level) / `IType.TypeArguments` (interface-level) / `IType.IsByRefLike` /
+  `IType.DeclaringType` are NOT on the ported `IType` surface (omitted; the `DummyTypeParameter`
+  no-such-member precedent). `Equals(IType)` (the C# `virtual => this == other`, reference
+  equality) ports to `StructuralEquals` (`this == &other`); `GetHashCode` / `ToString` are
+  PLAIN members (the port has no `object.GetHashCode` / `object.ToString` virtual). The D372
+  crux applies to `SymbolKind()` / `OwnerType()` (globally qualified). `AcceptVisitor` /
+  `ChangeNullability` are out-of-line (need `TypeVisitor` / `NullabilityAnnotatedTypeParameter`
+  complete); `ChangeNullability` mirrors `DummyTypeParameter::ChangeNullability` (the
+  `static_pointer_cast<ITypeParameter>(shared_from_this())` -> `NullabilityAnnotatedTypeParameter`
+  -> returned through `ITypeParameter` -- the wrapper's two-`IType`-subobject ambiguity).
+  `DirectBaseTypes` reads the (abstract) `TypeConstraints()` -> `TypeConstraint::Type()`.
+  The leaf unblocks `SpecializedMethod`'s nested `SpecializedTypeParameter` (the LAST
+  `Specialized*` leaf's blocker); it is dead in the CLI path and the `--csharp` output is
+  byte-identical. **16** new gtest cases in 1 suite pin both ctors (owner-based derives /
+  compilation-based null owner / the null-owner throw), the default-name computation (class /
+  method), `Kind` / `SymbolKind` / `TypeParameterCount`, the `ReflectionName` backtick form,
+  `AcceptVisitor` -> `VisitTypeParameter`, `ChangeNullability` (`Oblivious` -> self / else ->
+  `NullabilityAnnotatedTypeParameter`), `DirectBaseTypes` -> `TypeConstraints`, the deferred
+  `EffectiveBaseClass` -> `UnknownType` / `EffectiveInterfaceSet` -> empty, `StructuralEquals`
+  reference equality, `GetHashCode` / `ToString` plain members, the abstract-overrides
+  delegation, and the `is_base_of_v` / `is_abstract_v` class shape; the suite went RED first (the
+  `Implementation` namespace using, the D372 `Nullability` / `SymbolKind` cruxes in the
+  `TestTypeParameter` stub, the missing `TypeParameterSubstitution.hpp` include, the `{}`
+  `make_shared` braced-init-list) before the fixes made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
   substitution surface + the D480 `SpecializedParameter` leaf + the D481
   `IType::TypeParameters` surface + the D482 `SpecializedMember` base + the D483
   `SpecializedField` leaf + the D484 `SpecializedParameterizedMember` base + the
-  D485 `SpecializedEvent` leaf + the D486 `SpecializedProperty` leaf are exercised
+  D485 `SpecializedEvent` leaf + the D486 `SpecializedProperty` leaf + the D487
+  `AbstractTypeParameter` base are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param
