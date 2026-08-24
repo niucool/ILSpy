@@ -2021,14 +2021,46 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   custom `TestAccessorMethod` hit the `IMethod` covariant-`Specialize` / nonexistent-
   `CallingConvention` cruxes, replaced by the reusable `LookupMethod` -- the `Lookup*`
   usings) before the fixes made it green.
+  The third concrete `Specialized*` leaf (D486): `Implementation/SpecializedProperty.hpp`
+  -- the concrete `IProperty` a `GetMembersHelper.GetPropertiesImpl` builds for a property
+  on a parameterized type (`new SpecializedProperty(m, pt.GetSubstitution())`). It derives
+  `SpecializedParameterizedMember, IProperty`, hitting the THREE-IMember-SUBOBJECT DIAMOND
+  (`SpecializedParameterizedMember : SpecializedMember, IParameterizedMember` +
+  `IProperty : IParameterizedMember` -- three `IMember` subobjects: `SpecializedMember`'s
+  (sub A), the `IParameterizedMember` inside `SpecializedParameterizedMember` (sub B), and
+  `IProperty`'s OWN `IParameterizedMember` (sub C)). The `SpecializedField` /
+  `SpecializedEvent` pattern: ONE delegating override per method name (each calls
+  `SpecializedMember::` qualified, sub A's override). The `Parameters()` crux: the inherited
+  `SpecializedParameterizedMember::Parameters()` covers sub B ONLY (its OWN
+  `IParameterizedMember`); sub C (`IProperty`'s OWN `IParameterizedMember`) is a SEPARATE
+  subobject with its own unresolved `Parameters()` pure-virtual, so `Parameters()` IS
+  redeclared here, delegating to the inherited `SpecializedParameterizedMember::Parameters()`
+  (sub B's override, a static qualified dispatch resolving sub C) -- a divergence from the
+  `SpecializedField`/`SpecializedEvent` two-`IMember` case where `Parameters()` is not on the
+  surface. The `IProperty`-own bools (`CanGet` / `CanSet` / `IsIndexer` /
+  `ReturnTypeIsRefReadOnly`) delegate to `propertyDefinition_` verbatim. The two accessor
+  properties (`Getter` / `Setter`) are DEFERRED to return the BASE accessor UNSPECIALIZED
+  (the `WrapAccessor` owning-`Specialize` design is not yet in place; the
+  `GetMembersHelper` / `LookupGroup` routing does not use the accessors). The C# `internal
+  static IProperty Create(...)` factory is DEFERRED (needs the owning-`Specialize` design).
+  HEADER-ONLY (the `SpecializedEvent` precedent); not added to the ilspy `CMakeLists.txt`.
+  The leaf is dead in the CLI path and the `--csharp` output is byte-identical. **12** new
+  gtest cases in 1 suite pin the ctor substitution wiring, the trivial delegations, the
+  `ReturnType` / `DeclaringType` substitution effect, the SUBSTITUTED `Parameters` (a class
+  type-parameter param -> the substituted type), the `IProperty`-own bools delegation, the
+  DEFERRED accessor delegation, the three-`IMember` diamond dispatch through `IProperty*` /
+  `IMember*` (via `SpecializedMember*`), the `Specialize` delegation, the inherited `Equals` /
+  `GetHashCode`, and the `is_base_of_v` / `is_final_v` class shape; the suite went RED first
+  (`SpecializedProperty` abstract -- the `Parameters()` sub C redeclaration the three-`IMember`
+  diamond forces) before the redeclaration made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
   substitution surface + the D480 `SpecializedParameter` leaf + the D481
   `IType::TypeParameters` surface + the D482 `SpecializedMember` base + the D483
   `SpecializedField` leaf + the D484 `SpecializedParameterizedMember` base + the
-  D485 `SpecializedEvent` leaf are exercised by unit tests and stay dead in the
-  CLI
+  D485 `SpecializedEvent` leaf + the D486 `SpecializedProperty` leaf are exercised
+  by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param
   table) and string literals (#US heap), type-inferred local names (`num`,
