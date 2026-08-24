@@ -1944,12 +1944,58 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `Equals` / `GetHashCode`, and the `is_base_of_v` / `is_final_v` class shape; the
   suite went RED first (the `TestSupport` namespace, the ambiguous `IMember*`
   upcast C2594, the `SpecializedMember` using) before the fixes made it green.
+  The abstract `SpecializedParameterizedMember` base (D484) -- the
+  `SpecializedMember, IParameterizedMember` base adding the lazily-computed
+  `Parameters` list (`Implementation/SpecializedParameterizedMember.{hpp,cpp}`).
+  `SpecializedMethod` / `SpecializedProperty` derive from it; the `Parameters`
+  getter builds the substituted parameter list ONCE (lazily, via `LazyInit`), each
+  parameter a `SpecializedParameter` wrapping the base member's parameter with its
+  type run through the member's substitution. The C# `IReadOnlyList<IParameter>
+  parameters` lazy-cached field ports to a `mutable std::shared_ptr<std::vector<
+  std::shared_ptr<IParameter>>> parameters_` -- an OWNING cache (the `shared_ptr`
+  owns the vector, the vector owns the `SpecializedParameter` instances);
+  `IParameterizedMember::Parameters()` returns a non-owning snapshot, so the
+  override builds the owning cache ONCE then returns a snapshot (the expensive
+  `SpecializedParameter` build is cached). `CreateParameters` reads the base
+  member's parameters via `dynamic_cast<const IParameterizedMember*>(baseMember_)`
+  (the C# `((IParameterizedMember)baseMember).Parameters` downcast), and wraps
+  each non-owning `const IParameter*` in a `SpecializedParameter` (non-owning
+  base pointer, owning new type, `this` as the non-owning `Owner`). The class is
+  ABSTRACT (the two-`IMember`-subobject diamond leaves sub B's `IMember` pure-
+  virtuals unresolved; it overrides ONLY `Parameters()`); the CONCRETE derived
+  leaves add the diamond overrides (the `SpecializedField` pattern) -- the test
+  exercises it via a test-only public-ctor subclass with those overrides. The
+  `Substitution()` call in `CreateParameters` is qualified `SpecializedMember::
+  Substitution()` (ambiguous via the two `IMember` subobjects otherwise).
+  REVISION to D480 (a follow-up fix to a committed session leaf, motivated by
+  the `CreateParameters` call site): `SpecializedParameter::baseParameter_`
+  changed from an OWNING `shared_ptr<IParameter>` to a NON-OWNING `const
+  IParameter*` (the faithful counterpart of the C# non-owning `readonly
+  IParameter baseParameter` reference; the `SpecializedParameterizedMember` /
+  base member owns the base parameter, not the `SpecializedParameter`). The D480
+  owning choice was a DEVIATION that the `CreateParameters` call site surfaced
+  (`IParameterizedMember::Parameters()` returns non-owning `const IParameter*`,
+  which an owning `shared_ptr` ctor cannot take without an aliasing trick); the
+  non-owning raw pointer is the faithful, clean design. The D480 test passes
+  `.get()` instead of moving the `shared_ptr`. The leaf is dead in the CLI path
+  and the `--csharp` output is byte-identical. **8** new gtest cases in 1 suite
+  pin the empty-when-base-has-none, the specialized list (count + substituted
+  type + base-name delegation), `IVariable::Type` == substituted type, the
+  caching (pointer-identity across calls), the `Owner` == the specialized
+  member, `CreateParameters` with a custom substitution, the base-surface
+  delegation, and the `is_base_of_v` class shape; the suite went RED first (the
+  ambiguous `Substitution()` C2385, the `TestSupport` namespace, the D372
+  `ReferenceKind` crux in the `TestBaseParameter` stub, the missing
+  `SpecializedParameter.hpp` / `KnownAttribute.hpp` includes, the unqualified
+  `KnownAttribute` in the diamond overrides, the `{}` `make_shared`
+  braced-init-list) before the fixes made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
   substitution surface + the D480 `SpecializedParameter` leaf + the D481
   `IType::TypeParameters` surface + the D482 `SpecializedMember` base + the D483
-  `SpecializedField` leaf are exercised by unit tests and stay dead in the CLI
+  `SpecializedField` leaf + the D484 `SpecializedParameterizedMember` base are
+  exercised by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param
   table) and string literals (#US heap), type-inferred local names (`num`,

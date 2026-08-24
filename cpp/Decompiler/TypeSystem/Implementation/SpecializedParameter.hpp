@@ -38,14 +38,25 @@
 //      convention; `final` mirrors `sealed`). `IParameter : IVariable : ISymbol` is
 //      SINGLE inheritance (no diamond), so the single `Name()` override is the final
 //      overrider for all three (the D374 inherited-virtual-covers-the-`new` precedent).
-//  (b) The C# `readonly IParameter baseParameter` (a held reference) ports to
-//      `std::shared_ptr<IParameter> baseParameter_` -- an OWNING shared_ptr that keeps
-//      the base parameter alive for the specialized parameter's lifetime (the
-//      `NullabilityAnnotatedType::baseType_` / `NullabilityAnnotatedTypeParameter::
-//      typeParameter_` precedent: the port holds wrapped members as owning
-//      `shared_ptr`s). The C# `Debug.Assert(baseParameter != null && newType != null)`
-//      is a debug-only contract; the port documents the non-null contract without a
-//      runtime assert (the `DummyTypeParameter` no-assert precedent).
+//  (b) The C# `readonly IParameter baseParameter` (a held reference -- the C# does NOT
+//      own the base parameter; the `SpecializedParameterizedMember` / base member owns
+//      it) ports to `const IParameter* baseParameter_` -- a NON-OWNING raw pointer,
+//      non-null by contract. This is the faithful counterpart of the C# non-owning
+//      reference: the `SpecializedParameter` does not keep the base alive; the owning
+//      chain is `SpecializedParameterizedMember` -> `baseMember_` -> its parameters (the
+//      base member owns its parameters; the `SpecializedParameterizedMember` holds
+//      `baseMember_` owning, so the base parameters outlive the `SpecializedParameter`
+//      instances in the `Parameters` cache). The C# `Debug.Assert(baseParameter != null
+//      && newType != null)` is a debug-only contract; the port documents the non-null
+//      contract without a runtime assert (the `DummyTypeParameter` no-assert
+//      precedent). The D480 first cut held `baseParameter_` as an OWNING `shared_ptr`;
+//      that was a DEVIATION from the C# non-owning reference that the D484
+//      `SpecializedParameterizedMember.CreateParameters` call site surfaced
+//      (`CreateParameters` reads `((IParameterizedMember)baseMember).Parameters`, which
+//      returns NON-OWNING `const IParameter*`; an owning `shared_ptr` ctor cannot take a
+//      non-owning pointer without an aliasing-`shared_ptr` trick). The non-owning raw
+//      pointer is the faithful, clean design; the revision is a follow-up fix to the
+//      D480 committed leaf, motivated by the `CreateParameters` call site.
 //  (c) The C# `readonly IType newType` ports to `ITypePtr newType_` (an owning
 //      `shared_ptr<IType>`). `IVariable::Type()` returns `const IType&`, so `Type()`
 //      returns `*newType_` (the managed `IType` is the same object passed in -- the
@@ -88,13 +99,14 @@ namespace ILSpy::Decompiler::TypeSystem::Implementation {
 class SpecializedParameter final : public IParameter {
 public:
     // The C# `SpecializedParameter(IParameter baseParameter, IType newType,
-    // IParameterizedMember newOwner)`. `baseParameter` and `newType` are moved into
-    // owning `shared_ptr` members (non-null by contract); `newOwner` is a nullable
-    // non-owning pointer.
-    SpecializedParameter(std::shared_ptr<IParameter> baseParameter,
+    // IParameterizedMember newOwner)`. `baseParameter` is a NON-OWNING non-null pointer
+    // (the C# reference; the caller owns the base parameter); `newType` is moved into an
+    // owning `ITypePtr` member (non-null by contract); `newOwner` is a nullable non-owning
+    // pointer.
+    SpecializedParameter(const IParameter* baseParameter,
                          ITypePtr newType,
                          const IParameterizedMember* newOwner)
-        : baseParameter_(std::move(baseParameter)),
+        : baseParameter_(baseParameter),
           newType_(std::move(newType)),
           newOwner_(newOwner) {}
 
@@ -177,7 +189,7 @@ public:
     }
 
 private:
-    std::shared_ptr<IParameter> baseParameter_;
+    const IParameter* baseParameter_;
     ITypePtr newType_;
     const IParameterizedMember* newOwner_;
 };

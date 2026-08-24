@@ -145,7 +145,7 @@ private:
 TEST(SpecializedParameterTest, TypeReturnsNewType)
 {
     auto base = std::make_shared<TestBaseParameter>(String(), "x");
-    auto sp = std::make_shared<SpecializedParameter>(base, Int32(), /*owner*/ nullptr);
+    auto sp = std::make_shared<SpecializedParameter>(base.get(), Int32(), /*owner*/ nullptr);
     EXPECT_EQ(sp->Type().Name(), "Int32");
     EXPECT_NE(sp->Type().Name(), "String"); // not the base's type
 }
@@ -157,7 +157,7 @@ TEST(SpecializedParameterTest, TypeReturnsSameInstancePassedIn)
 {
     auto base = std::make_shared<TestBaseParameter>(String(), "x");
     auto newType = Int32();
-    auto sp = std::make_shared<SpecializedParameter>(base, newType, /*owner*/ nullptr);
+    auto sp = std::make_shared<SpecializedParameter>(base.get(), newType, /*owner*/ nullptr);
     EXPECT_EQ(&sp->Type(), newType.get());
 }
 
@@ -167,7 +167,7 @@ TEST(SpecializedParameterTest, TypeReturnsSameInstancePassedIn)
 TEST(SpecializedParameterTest, NameDelegatesToBase)
 {
     auto base = std::make_shared<TestBaseParameter>(String(), "value");
-    auto sp = std::make_shared<SpecializedParameter>(base, Int32(), /*owner*/ nullptr);
+    auto sp = std::make_shared<SpecializedParameter>(base.get(), Int32(), /*owner*/ nullptr);
     EXPECT_EQ(sp->Name(), "value");
 }
 
@@ -177,7 +177,7 @@ TEST(SpecializedParameterTest, NameDelegatesToBase)
 TEST(SpecializedParameterTest, SymbolKindIsParameter)
 {
     auto base = std::make_shared<TestBaseParameter>(String(), "x");
-    auto sp = std::make_shared<SpecializedParameter>(base, Int32(), /*owner*/ nullptr);
+    auto sp = std::make_shared<SpecializedParameter>(base.get(), Int32(), /*owner*/ nullptr);
     EXPECT_EQ(sp->SymbolKind(), SymbolKind::Parameter);
 }
 
@@ -187,7 +187,7 @@ TEST(SpecializedParameterTest, SymbolKindIsParameter)
 TEST(SpecializedParameterTest, ReferenceKindDelegatesToBase)
 {
     auto base = std::make_shared<TestBaseParameter>(String(), "x", ReferenceKind::Ref);
-    auto sp = std::make_shared<SpecializedParameter>(base, Int32(), /*owner*/ nullptr);
+    auto sp = std::make_shared<SpecializedParameter>(base.get(), Int32(), /*owner*/ nullptr);
     EXPECT_EQ(sp->ReferenceKind(), ReferenceKind::Ref);
 }
 
@@ -200,7 +200,7 @@ TEST(SpecializedParameterTest, LifetimeDelegatesToBase)
     scoped.ScopedRef(true);
     auto base = std::make_shared<TestBaseParameter>(String(), "x", ReferenceKind::None,
                                                     scoped);
-    auto sp = std::make_shared<SpecializedParameter>(base, Int32(), /*owner*/ nullptr);
+    auto sp = std::make_shared<SpecializedParameter>(base.get(), Int32(), /*owner*/ nullptr);
     EXPECT_TRUE(sp->Lifetime().ScopedRef());
 }
 
@@ -211,7 +211,7 @@ TEST(SpecializedParameterTest, IsParamsDelegatesToBase)
 {
     auto base = std::make_shared<TestBaseParameter>(String(), "x", ReferenceKind::None,
                                                     LifetimeAnnotation{}, /*isParams*/ true);
-    auto sp = std::make_shared<SpecializedParameter>(base, Int32(), /*owner*/ nullptr);
+    auto sp = std::make_shared<SpecializedParameter>(base.get(), Int32(), /*owner*/ nullptr);
     EXPECT_TRUE(sp->IsParams());
 }
 
@@ -223,7 +223,7 @@ TEST(SpecializedParameterTest, IsOptionalDelegatesToBase)
     auto base = std::make_shared<TestBaseParameter>(String(), "x", ReferenceKind::None,
                                                     LifetimeAnnotation{}, /*isParams*/ false,
                                                     /*isOptional*/ true);
-    auto sp = std::make_shared<SpecializedParameter>(base, Int32(), /*owner*/ nullptr);
+    auto sp = std::make_shared<SpecializedParameter>(base.get(), Int32(), /*owner*/ nullptr);
     EXPECT_TRUE(sp->IsOptional());
 }
 
@@ -236,7 +236,7 @@ TEST(SpecializedParameterTest, HasConstantValueInSignatureDelegatesToBase)
                                                     LifetimeAnnotation{}, /*isParams*/ false,
                                                     /*isOptional*/ true,
                                                     /*hasConstantValueInSignature*/ true);
-    auto sp = std::make_shared<SpecializedParameter>(base, Int32(), /*owner*/ nullptr);
+    auto sp = std::make_shared<SpecializedParameter>(base.get(), Int32(), /*owner*/ nullptr);
     EXPECT_TRUE(sp->HasConstantValueInSignature());
 }
 
@@ -255,7 +255,7 @@ TEST(SpecializedParameterTest, GetAttributesDelegatesToBase)
                                                     LifetimeAnnotation{}, false, false, false,
                                                     false, nullptr,
                                                     std::vector<const ILSpy::Decompiler::TypeSystem::IAttribute*>{attrA, attrB});
-    auto sp = std::make_shared<SpecializedParameter>(base, Int32(), /*owner*/ nullptr);
+    auto sp = std::make_shared<SpecializedParameter>(base.get(), Int32(), /*owner*/ nullptr);
     auto attrs = sp->GetAttributes();
     ASSERT_EQ(attrs.size(), 2u);
     EXPECT_EQ(attrs[0], attrA);
@@ -270,7 +270,7 @@ TEST(SpecializedParameterTest, IsConstDelegatesToBase)
     auto base = std::make_shared<TestBaseParameter>(String(), "x", ReferenceKind::None,
                                                     LifetimeAnnotation{}, false, false, false,
                                                     /*isConst*/ true);
-    auto sp = std::make_shared<SpecializedParameter>(base, Int32(), /*owner*/ nullptr);
+    auto sp = std::make_shared<SpecializedParameter>(base.get(), Int32(), /*owner*/ nullptr);
     EXPECT_TRUE(sp->IsConst());
 }
 
@@ -284,7 +284,7 @@ TEST(SpecializedParameterTest, GetConstantValueDelegatesToBase)
                                                     /*isOptional*/ true, false, false, nullptr,
                                                     std::vector<const ILSpy::Decompiler::TypeSystem::IAttribute*>{},
                                                     std::any(42));
-    auto sp = std::make_shared<SpecializedParameter>(base, Int32(), /*owner*/ nullptr);
+    auto sp = std::make_shared<SpecializedParameter>(base.get(), Int32(), /*owner*/ nullptr);
     // The default `throwOnInvalidMetadata = false` lives on the `IVariable` interface
     // (the port convention: defaults are not repeated in overrides); call with the
     // explicit value the C# default would supply.
@@ -308,7 +308,7 @@ TEST(SpecializedParameterTest, OwnerReturnsNewOwner)
     auto base = std::make_shared<TestBaseParameter>(String(), "x", ReferenceKind::None,
                                                     LifetimeAnnotation{}, false, false, false,
                                                     false, baseOwner);
-    auto sp = std::make_shared<SpecializedParameter>(base, Int32(), newOwner);
+    auto sp = std::make_shared<SpecializedParameter>(base.get(), Int32(), newOwner);
     EXPECT_EQ(sp->Owner(), newOwner);
     EXPECT_NE(sp->Owner(), baseOwner); // not the base's owner
 }
@@ -320,7 +320,7 @@ TEST(SpecializedParameterTest, OwnerReturnsNewOwner)
 TEST(SpecializedParameterTest, OwnerIsNullableWhenConstructedWithNull)
 {
     auto base = std::make_shared<TestBaseParameter>(String(), "x"); // base owner is null too
-    auto sp = std::make_shared<SpecializedParameter>(base, Int32(), /*owner*/ nullptr);
+    auto sp = std::make_shared<SpecializedParameter>(base.get(), Int32(), /*owner*/ nullptr);
     EXPECT_EQ(sp->Owner(), nullptr);
 }
 
@@ -334,7 +334,7 @@ TEST(SpecializedParameterTest, IsAnIParameterAndFinal)
     // A SpecializedParameter is usable through an IParameter base reference.
     auto base = std::make_shared<TestBaseParameter>(String(), "x");
     std::shared_ptr<IParameter> asParam =
-        std::make_shared<SpecializedParameter>(base, Int32(), nullptr);
+        std::make_shared<SpecializedParameter>(base.get(), Int32(), nullptr);
     EXPECT_EQ(asParam->Name(), "x");
     EXPECT_EQ(asParam->Type().Name(), "Int32");
     EXPECT_EQ(asParam->SymbolKind(), SymbolKind::Parameter);
