@@ -1989,13 +1989,46 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `SpecializedParameter.hpp` / `KnownAttribute.hpp` includes, the unqualified
   `KnownAttribute` in the diamond overrides, the `{}` `make_shared`
   braced-init-list) before the fixes made it green.
+  The second concrete `Specialized*` leaf (D485): `Implementation/SpecializedEvent.hpp`
+  -- the concrete `IEvent` a `GetMembersHelper.GetEventsImpl` builds for an event on a
+  parameterized type (`new SpecializedEvent(ev, pt.GetSubstitution())`). It derives
+  `SpecializedMember, IEvent`, hitting the same TWO-IMember-SUBOBJECT DIAMOND as
+  `SpecializedField` (`SpecializedMember : IMember` + `IEvent : IMember` -- two `IMember`
+  subobjects; `IEvent` does NOT derive `IVariable`, so NO third `ISymbol` -- simpler than
+  `IField`). The `SpecializedField` D483 pattern: ONE delegating override per method name
+  (each calls `SpecializedMember::` qualified, sub A's override). The `IEvent`-own bools
+  (`CanAdd` / `CanRemove` / `CanInvoke`) delegate to `eventDefinition_` verbatim. The three
+  accessor properties (`AddAccessor` / `RemoveAccessor` / `InvokeAccessor`) are DEFERRED
+  to return the BASE accessor UNSPECIALIZED -- the C# `WrapAccessor(ref cachingField,
+  eventDefinition.AddAccessor)` lazily builds a `SpecializedMethod` via
+  `accessorDefinition.Specialize(substitution)` and caches it (an OWNING `LazyInit`
+  cache); the port's `IMember::Specialize` returns a NON-OWNING `const IMember*`, so the
+  owning-`Specialize` / owning-cache design `WrapAccessor` needs is not yet in place. The
+  deferred override delegates to `eventDefinition_->AddAccessor()` (the base accessor,
+  unspecialized) -- a documented divergence (the accessor's `DeclaringType` / `ReturnType`
+  are not substituted); the `GetMembersHelper` / `LookupGroup` routing (the blocker) does
+  NOT use the accessors (it builds the `SpecializedEvent` for the member list, not for
+  accessor dispatch), so the divergence is benign for the routing. The C# `internal static
+  IEvent Create(...)` factory is DEFERRED (needs the owning-`Specialize` design).
+  HEADER-ONLY (the `SpecializedField` precedent); not added to the ilspy `CMakeLists.txt`.
+  The leaf is dead in the CLI path and the `--csharp` output is byte-identical. **11** new
+  gtest cases in 1 suite pin the ctor substitution wiring, the trivial delegations, the
+  `ReturnType` / `DeclaringType` substitution effect, the `IEvent`-own bools delegation,
+  the DEFERRED accessor delegation, the diamond dispatch through `IEvent*` / `IMember*`
+  (via `SpecializedMember*`), the `Specialize` delegation, the inherited `Equals` /
+  `GetHashCode`, and the `is_base_of_v` / `is_final_v` class shape; the suite went RED
+  first (the `TestSupport` namespace, the `LookupMethod` accessor stub -- an attempted
+  custom `TestAccessorMethod` hit the `IMethod` covariant-`Specialize` / nonexistent-
+  `CallingConvention` cruxes, replaced by the reusable `LookupMethod` -- the `Lookup*`
+  usings) before the fixes made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
   substitution surface + the D480 `SpecializedParameter` leaf + the D481
   `IType::TypeParameters` surface + the D482 `SpecializedMember` base + the D483
-  `SpecializedField` leaf + the D484 `SpecializedParameterizedMember` base are
-  exercised by unit tests and stay dead in the CLI
+  `SpecializedField` leaf + the D484 `SpecializedParameterizedMember` base + the
+  D485 `SpecializedEvent` leaf are exercised by unit tests and stay dead in the
+  CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param
   table) and string literals (#US heap), type-inferred local names (`num`,
