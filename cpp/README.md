@@ -2106,6 +2106,62 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `Implementation` namespace using, the D372 `Nullability` / `SymbolKind` cruxes in the
   `TestTypeParameter` stub, the missing `TypeParameterSubstitution.hpp` include, the `{}`
   `make_shared` braced-init-list) before the fixes made it green.
+  The last concrete `Specialized*` leaf (D488): `Implementation/SpecializedMethod.{hpp,cpp}`
+  -- the concrete `IMethod` a `GetMembersHelper.GetMethodsImpl` builds for a method on a
+  parameterized type (`new SpecializedMethod(m, pt.GetSubstitution(methodTypeArguments))`).
+  It derives `SpecializedParameterizedMember, IMethod`, the THREE-IMember-SUBOBJECT DIAMOND
+  (the `SpecializedProperty` D486 pattern -- `Parameters()` redeclared for sub C). The CRUX
+  is the method-type-parameter specialization machinery: when the base method is generic
+  (`methodDefinition.TypeParameters.Count > 0`), the ctor builds a per-base-type-parameter
+  `SpecializedTypeParameter` array (owning) + a `substitutionWithoutSpecializedTypeParameters`
+  field (the substitution WITHOUT the specialized type parameters) that `Equals` /
+  `GetHashCode` / `Specialize` use to avoid double-counting. The `isParameterized` flag is
+  `substitution.MethodTypeArguments.has_value()` (the C# `!= null`); the dance: if
+  `!isParameterized`, record the current `substitution_` (Identity) as the
+  `substitutionWithoutSpecializedTypeParameters_`, then `AddSubstitution(TypeParameterSubstitution(
+  nullopt, specializedTypeParameters))` (substitutes the base method's type params with the
+  specialized ones); `AddSubstitution(substitution)` (the main); if `!isParameterized`, compose
+  the main with the recorded Identity (= the main without the specialized type params), else
+  use the whole substitution; then set each `SpecializedTypeParameter`'s `substitution` to
+  `&substitution_` (stable for the method's lifetime). The COVARIANT `IMethod::Specialize`: a
+  SINGLE `const IMethod* Specialize` override is the final overrider for all three
+  `IMember::Specialize` subobjects + `IMethod::Specialize` (the standard C++ rule; the
+  covariant return is valid -- `IMethod` derives `IMember`), delegating to
+  `methodDefinition_->Specialize(Compose(newSub, substitutionWithoutSpecializedTypeParameters_))`.
+  `Equals` / `GetHashCode` OVERRIDE the `SpecializedMember` versions using
+  `substitutionWithoutSpecializedTypeParameters_`. The nested `SpecializedTypeParameter :
+  AbstractTypeParameter` (D487) -- `final`, co-located here (the C# nests it) -- holds a
+  NON-OWNING `const ITypeParameter* baseTp_` (the `methodDefinition_` owns the base; the D480
+  non-owning precedent) + a `mutable const TypeParameterSubstitution* substitution_` (set by
+  the `SpecializedMethod` ctor via `friend`; the lazy `TypeConstraints` recomputes each
+  `baseTp.TypeConstraints` through it with the D482/D484 `const_cast`). The C# `Equals(IType)`
+  (compare `baseTp` + `Owner`, NOT `substitution` -- the substitution may contain this type
+  parameter recursively) ports to `StructuralEquals`; `GetHashCode` (`baseTp ^ Owner` identity)
+  is a plain member. DEFERRED: `AccessorOwner` (the C# lazy `LazyInit` owning-`Specialize`
+  design -- returns the base accessor owner unspecialized, the `SpecializedProperty::Getter`
+  precedent); `ToString` (needs `IType::ToString`); the `internal static IMethod Create`
+  factory (needs the owning-`Specialize` design). The `IMethod`-own bools (`IsExtensionMethod`
+  / `IsConstructor` / ...) + `GetReturnTypeAttributes` / `AccessorKind` delegate to
+  `methodDefinition_`; `ReducedFrom` -> `null`. The complex members are out-of-line in the
+  `.cpp` (added to the ilspy `CMakeLists.txt`). The leaf is dead in the CLI path (the
+  `GetMembersHelper` routing is not yet wired) and the `--csharp` output is byte-identical.
+  **16** new gtest cases in 1 suite pin the ctor substitution wiring, the trivial delegations,
+  the `ReturnType` / `DeclaringType` / `Parameters` substitution effect, the `IMethod`-own
+  bools delegation, the SPECIALIZED `TypeParameters` (count + `SpecializedTypeParameter` /
+  `Owner` == the `SpecializedMethod`) for a generic method / empty for a non-generic,
+  `TypeArguments` from the substitution, the substituted `SpecializedTypeParameter.TypeConstraints`,
+  `ReducedFrom` / `AccessorOwner` (deferred), the covariant `Specialize` delegation, the
+  `Equals` / `GetHashCode`, the three-`IMember` diamond dispatch through `IMethod*` / `IMember*`
+  (via `SpecializedMember*`), and the `is_base_of_v` / `is_final_v` class shape; the suite went
+  RED first (the `Lookup*` `TestSupport` usings, the `AbstractTypeParameter` using, the
+  `substitutionWithoutSpecializedTypeParameters_` no-default-ctor member-init, the `Compose` /
+  `Equals` `const_cast` + deref frictions in the `const` methods, `GetHashCode` is not
+  virtual -- no `override`, the `SpecializedTypeParameter` owner should be `this` not
+  `methodDefinition_`) before the fixes made it green. This completes the four concrete
+  `Specialized*` leaves + the two abstract bases + `SpecializedParameter` (D480-D486 +
+  D488) -- the `GetMembersHelper`/`LookupGroup` routing's `Specialized*` deps are now in
+  place; the remaining blocker is the owning-`Specialize`/`WrapAccessor` design (for the
+  deferred accessor properties across `SpecializedProperty`/`SpecializedEvent`/`SpecializedMethod`).
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2113,7 +2169,7 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `IType::TypeParameters` surface + the D482 `SpecializedMember` base + the D483
   `SpecializedField` leaf + the D484 `SpecializedParameterizedMember` base + the
   D485 `SpecializedEvent` leaf + the D486 `SpecializedProperty` leaf + the D487
-  `AbstractTypeParameter` base are exercised
+  `AbstractTypeParameter` base + the D488 `SpecializedMethod` leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param
