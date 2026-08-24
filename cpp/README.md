@@ -1864,12 +1864,58 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   and the `TypeParameterCount` / `TypeParameters().size()` agreement; the suite
   went RED first (`TypeParameters` not a member of `IType`, the stub `override`
   finding no base) before the virtual-WITH-DEFAULT made it green.
+  The abstract `SpecializedMember` base (D482) -- the `IMember` base a
+  specialized method / property / field / event derives from
+  (`Implementation/SpecializedMember.{hpp,cpp}`). It wraps a base
+  (unspecialized) member and a `TypeParameterSubstitution`, delegating the whole
+  `IMember` / `IEntity` / `INamedElement` / `ICompilationProvider` / `ISymbol`
+  surface to the base EXCEPT `ReturnType` / `DeclaringType` / `Substitution`
+  (re-computed through the substitution). The lazy `ReturnType` / `DeclaringType`
+  (the C# `LazyInit.VolatileRead` / `GetOrSet`) port to `mutable ITypePtr`
+  fields + the `Util::VolatileRead` / `Util::GetOrSet` free functions (the C#
+  `static class LazyInit` -> a namespace of free functions); `substitution_` is
+  `mutable TypeParameterSubstitution` so the `const` lazy accessors can pass it
+  as a non-const `TypeVisitor&` to `IType::AcceptVisitor` (the D406 non-const-
+  `TypeVisitor` convention). The `DeclaringType` three reachable arms: a non-
+  `ITypeDefinition` declaring type -> `AcceptVisitor`; a generic
+  `ITypeDefinition` with MATCHING class args -> `new ParameterizedType(def,
+  classArgs)` (the owning `ITypePtr` passed directly -- the `ITypeDefinition` IS-
+  an `IType` via `ITypeDefinitionOrUnknown`, no cast needed); a null declaring
+  type -> null. The `else` sub-branch (a generic `ITypeDefinition` with
+  non-matching class args -> `new ParameterizedType(def, def.TypeParameters).
+  AcceptVisitor(substitution)`) is DEFERRED (the port's `IType::TypeParameters`
+  is non-owning, but `ParameterizedType` needs owning `ITypePtr`; lands with the
+  `MetadataTypeDefinition` ownership work) -- it falls through to `AcceptVisitor`
+  (a reasonable fallback; the `GetMembersHelper` routing always supplies
+  matching class args, so the deferred arm is never hit there).
+  `ExplicitlyImplementedInterfaceMembers` is DEFERRED to forward the base list
+  UNSPECIALIZED (the C# `Select(m => m.Specialize(substitution))` needs the
+  owning-`Specialize` design -- `IMember::Specialize` returns non-owning; the
+  owning design lands with the concrete `Specialized*` leaves); the common
+  empty case is faithful. `WrapAccessor` is OMITTED (needs owning-`Specialize`
+  for the `LazyInit` cache; lands with `SpecializedProperty` / `SpecializedEvent`).
+  `Specialize` delegates to `baseMember.Specialize(Compose(...))` (the `IMember`
+  "type system owns" convention). `Equals(IMember*, TypeVisitor*)` / the
+  standalone `Equals(const SpecializedMember*)` / `GetHashCode` (pointer-identity
+  for the base member, the C# `object.GetHashCode` -> `std::hash<IMember*>`) /
+  `ToString` (DEFERRED -- `IType` has no `ToString`) follow. The D372 crux applies
+  to `SymbolKind()` / `Accessibility()` (globally qualified). **27** new gtest
+  cases in 1 suite pin the ctor asserts (null / `SpecializedMember` base), the
+  `Identity`-by-default + `AddSubstitution` composition, the trivial delegations,
+  the `ReturnType` substitution effect (a class type parameter -> the class
+  arg), the three `DeclaringType` arms + the deferred arm + caching, the
+  `Specialize` delegation, the `ExplicitlyImplementedInterfaceMembers` forwarding,
+  the `Equals` / `GetHashCode` contracts; the suite went RED first (the header
+  absent, then the `Util::` / `const_cast` / `TestSupport` namespace /
+  most-vexing-parse / `TypeArguments`-not-on-`IType` cruxes) before the fixes made
+  it green (one test needed the same-instance convention for pointer-identity
+  hashing, the `TypeParameterSubstitutionTest::GetHashCodeIsConsistent` precedent).
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
   substitution surface + the D480 `SpecializedParameter` leaf + the D481
-  `IType::TypeParameters` surface are exercised by unit tests and stay dead in
-  the CLI
+  `IType::TypeParameters` surface + the D482 `SpecializedMember` base are
+  exercised by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param
   table) and string literals (#US heap), type-inferred local names (`num`,
