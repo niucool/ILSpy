@@ -2240,6 +2240,46 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `namespace GMH = ...` alias; a `DeclaringType()->GetDefinition()` assertion over-reached the
   `LookupMethod` stub whose `DeclaringType()` is null -- dropped, the substitution effect covered
   by the `ReturnType` tests) before the fixes made it green.
+  The `ParameterizedType` member-enumeration ROUTING arm (D491): the `else` branch of each
+  `ParameterizedType.cs` member override -- `GetMembersHelper.GetXxx(this, filter, options)`,
+  which builds the `Specialized*` instances. The D489 leaf ported the `ReturnMemberDefinitions`
+  arm (delegate to the generic type); this leaf ports the routing arm. The crux is the OWNING
+  CACHE: `GetMembersHelper.GetXxx` returns owning `std::vector<std::shared_ptr<const T>>` (the
+  `Specialized*` are `make_shared`-allocated), but `IType::GetXxx` returns NON-OWNING
+  `const T*` snapshots ("the type system owns the entities, the caller holds raw pointers",
+  D477). The `ParameterizedType` therefore caches the owning vectors in `mutable` members (lazy,
+  built once with a `nullptr` filter + `IgnoreInheritedMembers` -- the declared-specialized set
+  `MemberLookup.LookupGroup` uses; `MemberLookup` does its own `GetNonInterfaceBaseTypes`
+  traversal and calls each base's `GetMembers(IgnoreInheritedMembers)`, so the cache is exactly
+  that base's declared-specialized members), and returns non-owning `const T*` pointers into the
+  cache, applying the caller's filter at return time. The cache lives for the
+  `ParameterizedType`'s lifetime (the `Specialized*` are stable raw pointers, the D477
+  convention); a second call yields the same instances (pointer identity, pinned by a test). The
+  5 simple family overrides (`GetMethods` / `GetConstructors` / `GetAccessors` / `GetProperties`
+  / `GetFields` / `GetEvents`) move OUT-OF-LINE to `IType.cpp` (the routing arm calls
+  `GetMembersHelper::GetXxx`, and `GetMembersHelper.hpp` includes `IType.hpp` -- a header cycle
+  if inline); the `ReturnMemberDefinitions` arm stays (the `if` branch delegates to
+  `genericType_` unchanged). `GetMembers` is NOT overridden -- the inherited
+  `IType::GetMembers` composition calls the four family routing arms and applies the `IMember`
+  filter at the composition level (behaviorally equivalent to the C# override's routing arm for
+  the name filters `MemberLookup` uses). The `GetMethods(typeArguments, ...)` generic-method
+  overload keeps the D489 arm; its routing arm is deferred (not needed by `LookupGroup`; the
+  typeArguments-specific `Specialized*` would need a per-args cache). `GetNestedTypes` is
+  deferred (the most complex family). The non-`IgnoreInheritedMembers` routing case (base-type
+  traversal) reduces to the `IgnoreInheritedMembers` case in the port because
+  `ParameterizedType::DirectBaseTypes` is not yet overridden (empty default) -- the PT has no
+  base types to traverse, so `GetMembersHelper` yields the declared-specialized set either way;
+  porting `DirectBaseTypes` (the substituted base types) is a later leaf. The D489 test
+  `GetMethodsWithoutReturnDefsIsDeferredEmpty` (which asserted the routing arm returned empty)
+  is updated to `GetMethodsWithoutReturnDefsBuildsSpecialized` (the routing arm now fires). The
+  leaf is dead in the CLI path (`ParameterizedType` member enumeration is not exercised by
+  `--csharp`) and the output is byte-identical. **10** new gtest cases in 1 suite pin the routing
+  arm building `Specialized*` per family, the `ReturnType` substitution effect, the filter
+  pass-through, the cache stability (pointer identity), the `GetMembers` composition, and the
+  D489 `ReturnMemberDefinitions` arm still delegating; the suite went RED first (9/10 fail with
+  the old `return {}` deferred routing arm -- verified by stashing the IType.hpp/IType.cpp
+  implementation; the 1 pass is the D489 `ReturnMemberDefinitions` arm, unchanged) before the
+  implementation made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2249,7 +2289,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   D485 `SpecializedEvent` leaf + the D486 `SpecializedProperty` leaf + the D487
   `AbstractTypeParameter` base + the D488 `SpecializedMethod` leaf + the D489
   `ParameterizedType` member-enumeration `ReturnMemberDefinitions` arm leaf + the D490
-  `GetMembersHelper` routing leaf are exercised
+  `GetMembersHelper` routing leaf + the D491 `ParameterizedType` member-enumeration routing
+  arm leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param

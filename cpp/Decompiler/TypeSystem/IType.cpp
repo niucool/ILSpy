@@ -23,6 +23,7 @@
 #include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/TypeSystem/TypeParameterSubstitution.hpp"
 #include "Decompiler/TypeSystem/TypeVisitor.hpp"
+#include "Decompiler/TypeSystem/Implementation/GetMembersHelper.hpp"  // D490 routing arm
 
 #include <utility>
 #include <vector>
@@ -422,6 +423,119 @@ TypeParameterSubstitution ParameterizedType::GetSubstitution(
     std::optional<std::vector<ITypePtr>> methodTypeArguments) const {
     return TypeParameterSubstitution(
         std::optional<std::vector<ITypePtr>>(typeArgs_), std::move(methodTypeArguments));
+}
+
+// ---- ParameterizedType member-enumeration routing arm (D490) ----
+// The `else` branch of each `ParameterizedType.cs` member-enumeration override:
+// `GetMembersHelper.GetXxx(this, ...)`. `GetMembersHelper` builds the `Specialized*` (owning
+// `shared_ptr<const T>`); the `ParameterizedType` caches them in `mutable` members (lazy, built
+// once with `nullptr` filter + `IgnoreInheritedMembers` -- the declared-specialized set
+// `MemberLookup.LookupGroup` uses) and returns NON-OWNING `const T*` snapshots (the D477 "type
+// system owns" convention), applying the caller's filter at return time. The
+// `ReturnMemberDefinitions` arm (D489) delegates to `genericType_` unchanged. A `nullptr`
+// `genericType_` (the defensive guard) yields empty. See the IType.hpp `ParameterizedType` comment.
+
+namespace {
+inline bool ptReturningDefs(GetMemberOptions options) {
+    return (static_cast<std::int32_t>(options) &
+            static_cast<std::int32_t>(GetMemberOptions::ReturnMemberDefinitions)) != 0;
+}
+} // namespace
+
+std::vector<const IMethod*> ParameterizedType::GetMethods(
+    std::function<bool(const IMethod*)> filter,
+    GetMemberOptions options) const {
+    if (ptReturningDefs(options))
+        return genericType_ ? genericType_->GetMethods(filter, options) : std::vector<const IMethod*>{};
+    if (methodsCache_.empty() && genericType_) {
+        methodsCache_ = Implementation::GetMembersHelper::GetMethods(
+            this, nullptr, GetMemberOptions::IgnoreInheritedMembers);
+    }
+    std::vector<const IMethod*> result;
+    for (const auto& m : methodsCache_) {
+        if (!filter || filter(m.get())) result.push_back(m.get());
+    }
+    return result;
+}
+
+std::vector<const IMethod*> ParameterizedType::GetConstructors(
+    std::function<bool(const IMethod*)> filter,
+    GetMemberOptions options) const {
+    if (ptReturningDefs(options))
+        return genericType_ ? genericType_->GetConstructors(filter, options) : std::vector<const IMethod*>{};
+    if (constructorsCache_.empty() && genericType_) {
+        constructorsCache_ = Implementation::GetMembersHelper::GetConstructors(
+            this, nullptr, GetMemberOptions::IgnoreInheritedMembers);
+    }
+    std::vector<const IMethod*> result;
+    for (const auto& m : constructorsCache_) {
+        if (!filter || filter(m.get())) result.push_back(m.get());
+    }
+    return result;
+}
+
+std::vector<const IMethod*> ParameterizedType::GetAccessors(
+    std::function<bool(const IMethod*)> filter,
+    GetMemberOptions options) const {
+    if (ptReturningDefs(options))
+        return genericType_ ? genericType_->GetAccessors(filter, options) : std::vector<const IMethod*>{};
+    if (accessorsCache_.empty() && genericType_) {
+        accessorsCache_ = Implementation::GetMembersHelper::GetAccessors(
+            this, nullptr, GetMemberOptions::IgnoreInheritedMembers);
+    }
+    std::vector<const IMethod*> result;
+    for (const auto& m : accessorsCache_) {
+        if (!filter || filter(m.get())) result.push_back(m.get());
+    }
+    return result;
+}
+
+std::vector<const IProperty*> ParameterizedType::GetProperties(
+    std::function<bool(const IProperty*)> filter,
+    GetMemberOptions options) const {
+    if (ptReturningDefs(options))
+        return genericType_ ? genericType_->GetProperties(filter, options) : std::vector<const IProperty*>{};
+    if (propertiesCache_.empty() && genericType_) {
+        propertiesCache_ = Implementation::GetMembersHelper::GetProperties(
+            this, nullptr, GetMemberOptions::IgnoreInheritedMembers);
+    }
+    std::vector<const IProperty*> result;
+    for (const auto& m : propertiesCache_) {
+        if (!filter || filter(m.get())) result.push_back(m.get());
+    }
+    return result;
+}
+
+std::vector<const IField*> ParameterizedType::GetFields(
+    std::function<bool(const IField*)> filter,
+    GetMemberOptions options) const {
+    if (ptReturningDefs(options))
+        return genericType_ ? genericType_->GetFields(filter, options) : std::vector<const IField*>{};
+    if (fieldsCache_.empty() && genericType_) {
+        fieldsCache_ = Implementation::GetMembersHelper::GetFields(
+            this, nullptr, GetMemberOptions::IgnoreInheritedMembers);
+    }
+    std::vector<const IField*> result;
+    for (const auto& m : fieldsCache_) {
+        if (!filter || filter(m.get())) result.push_back(m.get());
+    }
+    return result;
+}
+
+std::vector<const IEvent*> ParameterizedType::GetEvents(
+    std::function<bool(const IEvent*)> filter,
+    GetMemberOptions options) const {
+    if (ptReturningDefs(options))
+        return genericType_ ? genericType_->GetEvents(filter, options) : std::vector<const IEvent*>{};
+    if (eventsCache_.empty() && genericType_) {
+        eventsCache_ = Implementation::GetMembersHelper::GetEvents(
+            this, nullptr, GetMemberOptions::IgnoreInheritedMembers);
+    }
+    std::vector<const IEvent*> result;
+    for (const auto& m : eventsCache_) {
+        if (!filter || filter(m.get())) result.push_back(m.get());
+    }
+    return result;
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem

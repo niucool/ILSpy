@@ -46,6 +46,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/SpecializedMethod_Test.cpp
     Decompiler/TypeSystem/ParameterizedTypeReturnDefs_Test.cpp
     Decompiler/TypeSystem/GetMembersHelper_Test.cpp
+    Decompiler/TypeSystem/ParameterizedTypeRouting_Test.cpp
     Decompiler/TypeSystem/Nullability_Test.cpp
     Decompiler/TypeSystem/SignatureCallingConvention_Test.cpp
     Decompiler/TypeSystem/FunctionPointerType_Test.cpp
