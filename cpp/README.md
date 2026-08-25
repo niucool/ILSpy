@@ -2199,6 +2199,47 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `FullTypeName` class name in the base-initializer -- globally-qualified; the stub
   initially ignoring the filter so the `AppliesFilter` case missed) before the fixes made it
   green.
+  The `GetMembersHelper` routing (D490): `Implementation/GetMembersHelper.{hpp,cpp}` -- the
+  C# `static class GetMembersHelper` (a namespace of free functions in the C++ port) that
+  routes member enumeration for an `IType` implementation. It applies the caller's filter +
+  `GetMemberOptions` flags, traverses the non-interface base types (`TypeSystemExtensions::
+  GetNonInterfaceBaseTypes`) when `IgnoreInheritedMembers` is unset, and -- for a
+  `ParameterizedType` base (or a call supplying method type arguments) -- builds the
+  `Specialized*` instances (`SpecializedMethod` / `SpecializedProperty` / `SpecializedField`
+  / `SpecializedEvent`) that substitute the type parameters with the type arguments; otherwise
+  returns the unspecialized definitions aliased to the base type. The seven public entries mirror
+  the `ParameterizedType.cs` member-enumeration overrides' routing arm: `GetMethods` (x2 -- the
+  generic-method overload adds `FilterTypeParameterCount(typeArguments.Count).And(filter)`),
+  `GetConstructors`, `GetAccessors`, `GetProperties`, `GetFields`, `GetEvents`, `GetMembers`
+  (composes the four families; the `IMember` filter is passed to each family `*Impl` via the
+  `std::function`-invocable-with-derived-arg conversion -- the C# `Predicate<in T>` contravariance
+  analogue). OWNING RETURN MODEL: the C# returns `IEnumerable<T>` of GC-owned `new`-allocated
+  `Specialized*`; the C++ returns OWNING `std::vector<std::shared_ptr<const T>>` -- the
+  `Specialized*` are `std::make_shared`-allocated (the definitions arm aliases the non-owning
+  `const T*` from `IType::Get*` (D477) to the base type via `baseType->shared_from_this()` +
+  `const_cast`, since the base transitively owns its declared members). The `const_cast`
+  reconciles the port's const-correct `const T*` with the non-const `std::shared_ptr<IMethod>` /
+  `IProperty` / `IField` / `IEvent` the `Specialized*` ctors take (the C# `IMethod m` is
+  non-const). A LATER leaf (the `ParameterizedType` routing arm) caches these owning vectors in a
+  `mutable` member and returns the non-owning `const T*` snapshots `IType::GetMethods` promises;
+  the `declaredMembers` (`IgnoreInheritedMembers | ReturnMemberDefinitions`) `GetMembersHelper`
+  adds to its `baseType->Get*` call is the bound on the mutual recursion with the D489
+  `ParameterizedType` `ReturnMemberDefinitions` arm (no `StackOverflowException`). DEFERRED:
+  `GetNestedTypes` (the most complex family; not used by `MemberLookup.LookupGroup`); the
+  `DeclaringType = pt` C# object-initializer setter (the `SpecializedMember` lazy `DeclaringType`
+  getter computes the parameterized declaring type from the substitution, so the explicit set is
+  unnecessary). The leaf is dead in the CLI path (the `ParameterizedType` routing arm is not yet
+  wired -- it returns the inherited empty default for non-`ReturnMemberDefinitions`) and the
+  output is byte-identical. **13** new gtest cases in 1 suite pin the `IgnoreInheritedMembers` ->
+  declared (definitions arm, def base), the `ParameterizedType` -> `Specialized*` (specialization
+  arm), `ReturnMemberDefinitions` over a PT -> unspecialized definitions, the
+  `FilterTypeParameterCount` filter, the base-type traversal (non-`IgnoreInheritedMembers`), the
+  `ReturnType` substitution effect (T at index 0 -> the type argument), the `GetMembers`
+  composition, and the null filter / name-filter selection; the suite went RED first (the
+  `using ...::GetMembersHelper;` using-declaration fails on a namespace -- replaced with a
+  `namespace GMH = ...` alias; a `DeclaringType()->GetDefinition()` assertion over-reached the
+  `LookupMethod` stub whose `DeclaringType()` is null -- dropped, the substitution effect covered
+  by the `ReturnType` tests) before the fixes made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2207,7 +2248,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `SpecializedField` leaf + the D484 `SpecializedParameterizedMember` base + the
   D485 `SpecializedEvent` leaf + the D486 `SpecializedProperty` leaf + the D487
   `AbstractTypeParameter` base + the D488 `SpecializedMethod` leaf + the D489
-  `ParameterizedType` member-enumeration `ReturnMemberDefinitions` arm leaf are exercised
+  `ParameterizedType` member-enumeration `ReturnMemberDefinitions` arm leaf + the D490
+  `GetMembersHelper` routing leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param
