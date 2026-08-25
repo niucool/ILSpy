@@ -2332,6 +2332,29 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   unspecialized, the `nestedTypeArguments` count filter, and the `ITypeDefinition` filter; the
   suite went RED first (verified by stubbing `GetNestedTypesImpl` to `return {}` -- 6/6 fail) before
   the implementation made it green.
+  The `ParameterizedType.GetNestedTypes` ROUTING arm (D494): the `else` branch of each
+  `ParameterizedType.cs` `GetNestedTypes` override -- `GetMembersHelper.GetNestedTypes(this, ...)`,
+  which builds the parameterized nested types. The D492 leaf ported the `ReturnMemberDefinitions` arm
+  (delegate to the generic type); this leaf ports the routing arm. KEY: UNLIKE the member-family
+  routing arm (D491, which caches the owning `Specialized*` in `mutable` members because the member
+  families return non-owning `const T*`), `GetNestedTypes` returns OWNING `ITypePtr` (shared_ptr) --
+  the routing arm needs NO owning cache: `GetMembersHelper.GetNestedTypes` returns
+  `std::vector<ITypePtr>` directly, which is exactly what the override returns. Both overrides move
+  OUT-OF-LINE to `IType.cpp` (the routing arm calls `GetMembersHelper::GetNestedTypes`, and
+  `GetMembersHelper.hpp` includes `IType.hpp` -- a header cycle if inline); the
+  `ReturnMemberDefinitions` arm (the `if` branch) is a single delegation
+  (`genericType_->GetNestedTypes(...)`) but the whole override is out-of-line to keep both arms
+  together. The `GetMethods(typeArguments)` generic-method overload's routing arm is NOT ported (the
+  D491 deferral holds -- not needed by `LookupGroup`; the typeArguments-specific `Specialized*` would
+  need a per-args cache). The D493 `GetMembersHelper.GetNestedTypes` (the helper this arm delegates to)
+  is already in place (D493). The leaf is dead in the CLI path (`ParameterizedType` nested-type
+  enumeration is not exercised by `--csharp`) and the output is byte-identical. **5** new gtest cases
+  in 1 suite pin the routing arm over a `ParameterizedType` outer (non-generic nested ->
+  unspecialized; generic nested -> `ParameterizedType` with outer args + `UnboundTypeArgument`; the
+  typeArguments overload routes; the filter; the D492 `ReturnMemberDefinitions` arm still delegating);
+  the suite went RED first (5/5 fail with the D493 state -- the routing arm returns the inherited
+  empty default; verified by stashing the IType.hpp/IType.cpp implementation) before the
+  implementation made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2343,7 +2366,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `ParameterizedType` member-enumeration `ReturnMemberDefinitions` arm leaf + the D490
   `GetMembersHelper` routing leaf + the D491 `ParameterizedType` member-enumeration routing
   arm leaf + the D492 `ParameterizedType.GetNestedTypes` `ReturnMemberDefinitions` arm leaf + the
-  D493 `GetMembersHelper.GetNestedTypes` routing leaf are exercised
+  D493 `GetMembersHelper.GetNestedTypes` routing leaf + the D494 `ParameterizedType.GetNestedTypes`
+  routing arm leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param

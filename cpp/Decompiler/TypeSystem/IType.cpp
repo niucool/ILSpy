@@ -538,4 +538,30 @@ std::vector<const IEvent*> ParameterizedType::GetEvents(
     return result;
 }
 
+// ---- ParameterizedType.GetNestedTypes routing arm (D494) ----
+// The `else` branch of the `ParameterizedType.cs` `GetNestedTypes` overrides:
+// `GetMembersHelper.GetNestedTypes(this, ...)`. Unlike the member families (which return non-owning
+// `const T*` and so cache the owning `Specialized*`), `GetNestedTypes` returns OWNING `ITypePtr`
+// (shared_ptr) -- this helper returns `std::vector<ITypePtr>` directly, which is exactly what the
+// override returns. NO owning cache needed. The `ReturnMemberDefinitions` arm (the `if`) delegates to
+// `genericType_` unchanged. See the IType.hpp `ParameterizedType` comment.
+
+std::vector<ITypePtr> ParameterizedType::GetNestedTypes(
+    std::function<bool(const ITypeDefinition*)> filter,
+    GetMemberOptions options) const {
+    if (ptReturningDefs(options))
+        return genericType_ ? genericType_->GetNestedTypes(filter, options) : std::vector<ITypePtr>{};
+    return Implementation::GetMembersHelper::GetNestedTypes(this, filter, options);
+}
+
+std::vector<ITypePtr> ParameterizedType::GetNestedTypes(
+    const std::vector<ITypePtr>& typeArguments,
+    std::function<bool(const ITypeDefinition*)> filter,
+    GetMemberOptions options) const {
+    if (ptReturningDefs(options))
+        return genericType_ ? genericType_->GetNestedTypes(typeArguments, filter, options)
+                           : std::vector<ITypePtr>{};
+    return Implementation::GetMembersHelper::GetNestedTypes(this, &typeArguments, filter, options);
+}
+
 } // namespace ILSpy::Decompiler::TypeSystem

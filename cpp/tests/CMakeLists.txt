@@ -49,6 +49,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/ParameterizedTypeRouting_Test.cpp
     Decompiler/TypeSystem/ParameterizedTypeNestedTypesReturnDefs_Test.cpp
     Decompiler/TypeSystem/GetMembersHelperNestedTypes_Test.cpp
+    Decompiler/TypeSystem/ParameterizedTypeNestedTypesRouting_Test.cpp
     Decompiler/TypeSystem/Nullability_Test.cpp
     Decompiler/TypeSystem/SignatureCallingConvention_Test.cpp
     Decompiler/TypeSystem/FunctionPointerType_Test.cpp

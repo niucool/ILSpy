@@ -522,35 +522,35 @@ public:
         std::function<bool(const IEvent*)> filter,
         GetMemberOptions options) const override;
 
-    // ---- The GetNestedTypes ReturnMemberDefinitions arm (D492) ----
-    // Faithful port of the `ParameterizedType.cs` `GetNestedTypes` overrides' `ReturnMemberDefinitions`
-    // arm: `if (options & ReturnMemberDefinitions) return genericType.GetNestedTypes(filter, options);
-    // else return GetMembersHelper.GetNestedTypes(this, filter, options);`. This leaf ports the
-    // `ReturnMemberDefinitions` arm only (delegate to the generic type, passing `options` THROUGH
-    // unchanged); the routing arm (`GetMembersHelper.GetNestedTypes(this, ...)`, which builds
-    // parameterized nested types with a mix of outer-type arguments and nested-type arguments) is
-    // deferred to a later leaf and returns the inherited empty default. Unlike the member families
-    // (`GetMethods` etc., which return non-owning `const T*`), `GetNestedTypes` returns OWNING
-    // `ITypePtr` (shared_ptr), so the routing arm will need no owning cache -- `GetMembersHelper.
-    // GetNestedTypes` returns `std::vector<ITypePtr>` directly. The overrides are inline (each is a
-    // single delegation / `return {}` -- no `GetMembersHelper` dependency, so no header cycle).
+    // ---- The GetNestedTypes overrides (D492 ReturnMemberDefinitions arm + D494 routing arm) ----
+    // Faithful port of the `ParameterizedType.cs` `GetNestedTypes` overrides -- each a two-arm
+    // switch: `if (options & ReturnMemberDefinitions) return genericType.GetNestedTypes(...); else
+    // return GetMembersHelper.GetNestedTypes(this, ...);`.
+    //
+    // D492 ported the `ReturnMemberDefinitions` arm (delegate to the generic type, passing `options`
+    // through unchanged). D494 ports the routing arm (the `else`): it calls
+    // `GetMembersHelper::GetNestedTypes(this, ...)` which builds the parameterized nested types (owning
+    // `ITypePtr`), and -- since `IType::GetNestedTypes` returns OWNING `ITypePtr` (shared_ptr), UNLIKE
+    // the member families' non-owning `const T*` -- the `ParameterizedType` needs NO owning cache: this
+    // helper returns `std::vector<ITypePtr>` directly, which is exactly what the override returns.
+    //
+    // `GetMembersHelper` calls back into these overrides with `options | declaredMembers`
+    // (`IgnoreInheritedMembers | ReturnMemberDefinitions`), so the `ReturnMemberDefinitions` arm is
+    // the bound on the mutual recursion (the `GetMembersHelper` header comment's invariant).
+    //
+    // Both overrides are OUT-OF-LINE in `IType.cpp` (the routing arm calls
+    // `GetMembersHelper::GetNestedTypes`, and `GetMembersHelper.hpp` includes `IType.hpp` -- a header
+    // cycle if inline). The `ReturnMemberDefinitions` arm is a single delegation (`genericType_`), but
+    // the whole override is out-of-line to keep both arms together.
 
     std::vector<ITypePtr> GetNestedTypes(
         std::function<bool(const ITypeDefinition*)> filter,
-        GetMemberOptions options) const override {
-        if (static_cast<std::int32_t>(options) & static_cast<std::int32_t>(GetMemberOptions::ReturnMemberDefinitions))
-            return genericType_ ? genericType_->GetNestedTypes(filter, options) : std::vector<ITypePtr>{};
-        return {};
-    }
+        GetMemberOptions options) const override;
 
     std::vector<ITypePtr> GetNestedTypes(
         const std::vector<ITypePtr>& typeArguments,
         std::function<bool(const ITypeDefinition*)> filter,
-        GetMemberOptions options) const override {
-        if (static_cast<std::int32_t>(options) & static_cast<std::int32_t>(GetMemberOptions::ReturnMemberDefinitions))
-            return genericType_ ? genericType_->GetNestedTypes(typeArguments, filter, options) : std::vector<ITypePtr>{};
-        return {};
-    }
+        GetMemberOptions options) const override;
 protected:
     bool StructuralEquals(const IType& other) const override;
 private:
