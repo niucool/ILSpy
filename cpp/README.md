@@ -2162,6 +2162,43 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   D488) -- the `GetMembersHelper`/`LookupGroup` routing's `Specialized*` deps are now in
   place; the remaining blocker is the owning-`Specialize`/`WrapAccessor` design (for the
   deferred accessor properties across `SpecializedProperty`/`SpecializedEvent`/`SpecializedMethod`).
+  The `ParameterizedType` member-enumeration `ReturnMemberDefinitions` arm (D489): the
+  `ParameterizedType.cs` member-enumeration overrides (`GetMethods` x2 / `GetConstructors`
+  / `GetAccessors` / `GetProperties` / `GetFields` / `GetEvents`) are each a two-arm switch
+  -- `if (options & ReturnMemberDefinitions) return genericType.GetXxx(filter, options); else
+  return GetMembersHelper.GetXxx(this, filter, options);`. This leaf ports the
+  `ReturnMemberDefinitions` arm only (the OTHER arm, the `GetMembersHelper` routing that
+  builds the `Specialized*` instances, is deferred to the next leaf and returns the
+  inherited empty default for now). The arm delegates to the generic type, passing the
+  caller's `options` THROUGH unchanged (the C# passes `options` verbatim, NOT `options |
+  declaredMembers`); a null `genericType_` (the defensive guard for the notional null base)
+  returns empty. `GetMembers` is NOT overridden here -- the inherited `IType::GetMembers`
+  composition (`GetMethods + GetProperties + GetFields + GetEvents`, defined in IType.cpp)
+  is behaviorally equivalent to the C# override's `ReturnMemberDefinitions` arm, since each
+  delegated family yields `genericType->GetFamily(filter, options)` and the composition
+  reconstructs `genericType->GetMembers(filter, options)` (the `SelectMany`-is-flat
+  equivalence: `Concat(F_i(t))` over families == `(Concat F_i)(t)`); the test pins this
+  (`GetMembers` composes the four delegated families). `GetNestedTypes` is deferred (the
+  most complex family; not used by `MemberLookup.LookupGroup`). This arm is the
+  PREREQUISITE for the `GetMembersHelper` routing: a `GetMembersHelper.GetMethodsImpl` over
+  a `ParameterizedType` base calls `pt->GetMethods(filter, options | declaredMembers)`
+  (`declaredMembers = IgnoreInheritedMembers | ReturnMemberDefinitions`), which hits this
+  arm and delegates to `genericType->GetMethods(filter, options | declaredMembers)` (the
+  generic definition's declared methods); the recursion is bounded by the
+  `ReturnMemberDefinitions` flag (the C# `GetMembersHelper` header comment's "both
+  IgnoreInheritedMembers and ReturnMemberDefinitions set" invariant -- no
+  `StackOverflowException`). The overrides are inline in `IType.hpp` (each is a single
+  delegation / `return {}` -- no out-of-line body); `IMethod`/`IProperty`/`IField`/`IEvent`
+  are already forward-declared in `IType.hpp` (the existing `IType::Get*` default
+  declarations). The leaf is dead in the CLI path (`ParameterizedType` member enumeration is
+  not exercised by `--csharp`) and the output is byte-identical. **9** new gtest cases in 1
+  suite pin the options-through delegation per family (via a `TestTypeDefinition` stub that
+  records the `GetMemberOptions` it received), the filter pass-through, the non-
+  `ReturnMemberDefinitions` deferred-empty, and the inherited `GetMembers` composition; the
+  suite went RED first (the `LookupTypeDefinition::FullTypeName()` accessor shadowing the
+  `FullTypeName` class name in the base-initializer -- globally-qualified; the stub
+  initially ignoring the filter so the `AppliesFilter` case missed) before the fixes made it
+  green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2169,7 +2206,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `IType::TypeParameters` surface + the D482 `SpecializedMember` base + the D483
   `SpecializedField` leaf + the D484 `SpecializedParameterizedMember` base + the
   D485 `SpecializedEvent` leaf + the D486 `SpecializedProperty` leaf + the D487
-  `AbstractTypeParameter` base + the D488 `SpecializedMethod` leaf are exercised
+  `AbstractTypeParameter` base + the D488 `SpecializedMethod` leaf + the D489
+  `ParameterizedType` member-enumeration `ReturnMemberDefinitions` arm leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param

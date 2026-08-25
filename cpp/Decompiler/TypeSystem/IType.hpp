@@ -453,6 +453,95 @@ public:
     // list substitutes the method type parameters. Returns the substitution BY VALUE (the D407
     // convention). Out-of-line in IType.cpp for the include-graph reason above.
     TypeParameterSubstitution GetSubstitution(std::optional<std::vector<ITypePtr>> methodTypeArguments) const;
+
+    // ---- The member-enumeration `ReturnMemberDefinitions` arm (D489) ----
+    // Faithful port of the `ParameterizedType.cs` member-enumeration overrides'
+    // `ReturnMemberDefinitions` arm: `if ((options & ReturnMemberDefinitions) ==
+    // ReturnMemberDefinitions) return genericType.GetXxx(filter, options); else return
+    // GetMembersHelper.GetXxx(this, filter, options);`. This leaf ports the
+    // `ReturnMemberDefinitions` arm only (delegate to the generic type, passing the caller's
+    // `options` THROUGH unchanged -- the C# passes `options` verbatim, NOT `options |
+    // declaredMembers`); the else (routing) arm -- `GetMembersHelper.GetXxx(this, ...)`, which
+    // builds the `Specialized*` instances -- is deferred to a later leaf and returns the
+    // inherited empty default for now.
+    //
+    // `GetMembersHelper` calls back into these overrides with `options | declaredMembers`
+    // (`IgnoreInheritedMembers | ReturnMemberDefinitions`), so the `ReturnMemberDefinitions`
+    // arm is the prerequisite for the `GetMembersHelper` routing: a `GetMembersHelper.GetMethodsImpl`
+    // over a `ParameterizedType` base calls `pt->GetMethods(filter, options | declaredMembers)`,
+    // which hits this arm and delegates to `genericType->GetMethods(filter, options |
+    // declaredMembers)` (the generic definition's declared methods). The recursion is bounded
+    // by the `ReturnMemberDefinitions` flag (the `GetMembersHelper` header comment's
+    // "both IgnoreInheritedMembers and ReturnMemberDefinitions set" invariant).
+    //
+    // `GetMembers` is NOT overridden here: the inherited `IType::GetMembers` composition
+    // (`GetMethods + GetProperties + GetFields + GetEvents`, defined in IType.cpp) is
+    // behaviorally equivalent to the C# override's `ReturnMemberDefinitions` arm -- each
+    // delegated family yields `genericType->GetFamily(filter, options)`, and the composition
+    // reconstructs `genericType->GetMembers(filter, options)` (the `SelectMany`-is-flat
+    // equivalence: `Concat(F_i(t))` over families `F_i` == `(Concat F_i)(t)`). `GetNestedTypes`
+    // is deferred (the most complex family; not used by `MemberLookup.LookupGroup`).
+    //
+    // The overrides are inline: each is a single delegation `return genericType_->GetFamily(...)`
+    // (or `return {}` for the deferred else arm) -- no out-of-line body is needed, and
+    // `genericType_` (a complete `IType`) carries every family virtual.
+
+    std::vector<const IMethod*> GetMethods(
+        std::function<bool(const IMethod*)> filter,
+        GetMemberOptions options) const override {
+        if (static_cast<std::int32_t>(options) & static_cast<std::int32_t>(GetMemberOptions::ReturnMemberDefinitions))
+            return genericType_ ? genericType_->GetMethods(filter, options) : std::vector<const IMethod*>{};
+        return {};
+    }
+
+    std::vector<const IMethod*> GetMethods(
+        const std::vector<ITypePtr>& typeArguments,
+        std::function<bool(const IMethod*)> filter,
+        GetMemberOptions options) const override {
+        if (static_cast<std::int32_t>(options) & static_cast<std::int32_t>(GetMemberOptions::ReturnMemberDefinitions))
+            return genericType_ ? genericType_->GetMethods(typeArguments, filter, options) : std::vector<const IMethod*>{};
+        return {};
+    }
+
+    std::vector<const IMethod*> GetConstructors(
+        std::function<bool(const IMethod*)> filter,
+        GetMemberOptions options) const override {
+        if (static_cast<std::int32_t>(options) & static_cast<std::int32_t>(GetMemberOptions::ReturnMemberDefinitions))
+            return genericType_ ? genericType_->GetConstructors(filter, options) : std::vector<const IMethod*>{};
+        return {};
+    }
+
+    std::vector<const IMethod*> GetAccessors(
+        std::function<bool(const IMethod*)> filter,
+        GetMemberOptions options) const override {
+        if (static_cast<std::int32_t>(options) & static_cast<std::int32_t>(GetMemberOptions::ReturnMemberDefinitions))
+            return genericType_ ? genericType_->GetAccessors(filter, options) : std::vector<const IMethod*>{};
+        return {};
+    }
+
+    std::vector<const IProperty*> GetProperties(
+        std::function<bool(const IProperty*)> filter,
+        GetMemberOptions options) const override {
+        if (static_cast<std::int32_t>(options) & static_cast<std::int32_t>(GetMemberOptions::ReturnMemberDefinitions))
+            return genericType_ ? genericType_->GetProperties(filter, options) : std::vector<const IProperty*>{};
+        return {};
+    }
+
+    std::vector<const IField*> GetFields(
+        std::function<bool(const IField*)> filter,
+        GetMemberOptions options) const override {
+        if (static_cast<std::int32_t>(options) & static_cast<std::int32_t>(GetMemberOptions::ReturnMemberDefinitions))
+            return genericType_ ? genericType_->GetFields(filter, options) : std::vector<const IField*>{};
+        return {};
+    }
+
+    std::vector<const IEvent*> GetEvents(
+        std::function<bool(const IEvent*)> filter,
+        GetMemberOptions options) const override {
+        if (static_cast<std::int32_t>(options) & static_cast<std::int32_t>(GetMemberOptions::ReturnMemberDefinitions))
+            return genericType_ ? genericType_->GetEvents(filter, options) : std::vector<const IEvent*>{};
+        return {};
+    }
 protected:
     bool StructuralEquals(const IType& other) const override;
 private:
