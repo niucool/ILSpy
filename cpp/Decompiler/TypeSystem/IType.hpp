@@ -521,6 +521,36 @@ public:
     std::vector<const IEvent*> GetEvents(
         std::function<bool(const IEvent*)> filter,
         GetMemberOptions options) const override;
+
+    // ---- The GetNestedTypes ReturnMemberDefinitions arm (D492) ----
+    // Faithful port of the `ParameterizedType.cs` `GetNestedTypes` overrides' `ReturnMemberDefinitions`
+    // arm: `if (options & ReturnMemberDefinitions) return genericType.GetNestedTypes(filter, options);
+    // else return GetMembersHelper.GetNestedTypes(this, filter, options);`. This leaf ports the
+    // `ReturnMemberDefinitions` arm only (delegate to the generic type, passing `options` THROUGH
+    // unchanged); the routing arm (`GetMembersHelper.GetNestedTypes(this, ...)`, which builds
+    // parameterized nested types with a mix of outer-type arguments and nested-type arguments) is
+    // deferred to a later leaf and returns the inherited empty default. Unlike the member families
+    // (`GetMethods` etc., which return non-owning `const T*`), `GetNestedTypes` returns OWNING
+    // `ITypePtr` (shared_ptr), so the routing arm will need no owning cache -- `GetMembersHelper.
+    // GetNestedTypes` returns `std::vector<ITypePtr>` directly. The overrides are inline (each is a
+    // single delegation / `return {}` -- no `GetMembersHelper` dependency, so no header cycle).
+
+    std::vector<ITypePtr> GetNestedTypes(
+        std::function<bool(const ITypeDefinition*)> filter,
+        GetMemberOptions options) const override {
+        if (static_cast<std::int32_t>(options) & static_cast<std::int32_t>(GetMemberOptions::ReturnMemberDefinitions))
+            return genericType_ ? genericType_->GetNestedTypes(filter, options) : std::vector<ITypePtr>{};
+        return {};
+    }
+
+    std::vector<ITypePtr> GetNestedTypes(
+        const std::vector<ITypePtr>& typeArguments,
+        std::function<bool(const ITypeDefinition*)> filter,
+        GetMemberOptions options) const override {
+        if (static_cast<std::int32_t>(options) & static_cast<std::int32_t>(GetMemberOptions::ReturnMemberDefinitions))
+            return genericType_ ? genericType_->GetNestedTypes(typeArguments, filter, options) : std::vector<ITypePtr>{};
+        return {};
+    }
 protected:
     bool StructuralEquals(const IType& other) const override;
 private:

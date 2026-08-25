@@ -2280,6 +2280,26 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   the old `return {}` deferred routing arm -- verified by stashing the IType.hpp/IType.cpp
   implementation; the 1 pass is the D489 `ReturnMemberDefinitions` arm, unchanged) before the
   implementation made it green.
+  The `ParameterizedType.GetNestedTypes` `ReturnMemberDefinitions` arm (D492): the
+  `ParameterizedType.cs` `GetNestedTypes` overrides (the simple + the typeArguments overload) are
+  each a two-arm switch -- `if (options & ReturnMemberDefinitions) return
+  genericType.GetNestedTypes(...); else return GetMembersHelper.GetNestedTypes(this, ...);`, exactly
+  like the member-family overrides (D489/D491). This leaf ports the `ReturnMemberDefinitions` arm
+  only (delegate to the generic type, passing `options` through unchanged); the routing arm (the
+  `GetMembersHelper.GetNestedTypes` that builds parameterized nested types with a mix of outer-type
+  arguments and nested-type arguments) is deferred. A KEY DIFFERENCE from the member families:
+  `GetNestedTypes` returns OWNING `ITypePtr` (shared_ptr) -- NOT the non-owning `const T*` the member
+  families return -- so the routing arm (a later leaf) needs NO owning cache:
+  `GetMembersHelper.GetNestedTypes` returns `std::vector<ITypePtr>` directly, which is exactly what
+  `IType::GetNestedTypes` returns. The overrides are inline in `IType.hpp` (the `ReturnMemberDefinitions`
+  arm is a single delegation / `return {}` -- no `GetMembersHelper` dependency, so no header cycle;
+  `ITypeDefinition` is already forward-declared in `IType.hpp` for the `GetNestedTypes` default
+  declarations). The leaf is dead in the CLI path (`ParameterizedType` nested-type enumeration is
+  not exercised by `--csharp`) and the output is byte-identical. **4** new gtest cases in 1 suite
+  pin the options-through delegation (simple + typeArguments overload), the filter pass-through, and
+  the non-`ReturnMemberDefinitions` deferred-empty; the suite went RED first (2/4 fail -- the 2
+  delegation tests; the deferred-empty and filter-rejects-all pass by coincidence with the empty
+  default) before the implementation made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2290,7 +2310,7 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `AbstractTypeParameter` base + the D488 `SpecializedMethod` leaf + the D489
   `ParameterizedType` member-enumeration `ReturnMemberDefinitions` arm leaf + the D490
   `GetMembersHelper` routing leaf + the D491 `ParameterizedType` member-enumeration routing
-  arm leaf are exercised
+  arm leaf + the D492 `ParameterizedType.GetNestedTypes` `ReturnMemberDefinitions` arm leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param
