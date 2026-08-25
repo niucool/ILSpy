@@ -2355,6 +2355,33 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   the suite went RED first (5/5 fail with the D493 state -- the routing arm returns the inherited
   empty default; verified by stashing the IType.hpp/IType.cpp implementation) before the
   implementation made it green.
+  The `MemberLookup.LookupGroup` helper class (D495): `CSharp/Resolver/LookupGroup.hpp` -- the value
+  type the `MemberLookup` Lookup region (the `GetAccessibleMembers` / `LookupType` / `Lookup` /
+  `LookupIndexers` methods, all still deferred) builds per (declaring-type, member-name) group and
+  mutates as it traverses the base types -- hiding members shadowed by a derived class and substituting
+  an override for the virtual it replaces. The C# `sealed class LookupGroup` is nested in `MemberLookup`;
+  the port makes it a separate class in the `CSharp::Resolver` namespace (the C++-nested-class-in-
+  header-only convention is awkward). The ctor sets `MethodsAreHidden = (methods == null ||
+  methods.Count == 0)` and `NonMethodIsHidden = (nonMethod == null)`; `AllHidden` is
+  `(!nestedTypes_.empty() ? false : nonMethodIsHidden_ && methodsAreHidden_)`. FIELD OWNING MODEL: the
+  C# `List<T>`-GC model maps to `DeclaringType` = non-owning `const IType*` (the Lookup regions receive
+  `const IType*` from `GetNonInterfaceBaseTypes`; `AddMembers`/`AddNestedTypes` compare
+  `typeBaseTypes.Contains(lookupGroup.DeclaringType)` -- pointer-identity, the C# reference-equality);
+  `NestedTypes` = OWNING `std::vector<ITypePtr>` (`GetNestedTypes` returns owning `ITypePtr`, D494),
+  mutable (cleared when hidden -- the C# sets it to `null`, the port clears the vector; `AllHidden`'s
+  `.Count > 0` maps to `!empty()`); `Methods` = owning `std::vector<const IParameterizedMember*>` (the
+  vector is owned, the ELEMENTS are non-owning -- the type system owns the methods, D477), mutable for
+  the override-replacement (`AddMembers` does `Methods[j] = method`); `NonMethod` = non-owning
+  `const IMember*`, mutable (`AddMembers` replaces it); `MethodsAreHidden`/`NonMethodIsHidden` = plain
+  `bool` via non-const-ref accessors (the Lookup region sets them directly). The nullable `methods`/
+  `nestedTypes` ctor params map to nullable `const std::vector<T>*` (a null pointer is the C# `null`).
+  The leaf is dead in the CLI path (the Lookup regions are not yet wired) and the output is
+  byte-identical. **7** new gtest cases in 1 suite pin the ctor's two hidden-flag arms (empty
+  methods + null nonMethod -> both hidden; non-empty methods -> !MethodsAreHidden; non-null nonMethod
+  -> !NonMethodIsHidden), the `AllHidden` computation (nested-types-present -> !AllHidden; empty +
+  both-hidden -> AllHidden), and the mutability of `NestedTypes`/`NonMethod`/`MethodsAreHidden`/
+  `NonMethodIsHidden`; the suite went RED first (verified by stubbing `AllHidden` to `return true` --
+  the `NestedTypesPresentNotAllHidden` case fails) before the implementation made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2367,7 +2394,7 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `GetMembersHelper` routing leaf + the D491 `ParameterizedType` member-enumeration routing
   arm leaf + the D492 `ParameterizedType.GetNestedTypes` `ReturnMemberDefinitions` arm leaf + the
   D493 `GetMembersHelper.GetNestedTypes` routing leaf + the D494 `ParameterizedType.GetNestedTypes`
-  routing arm leaf are exercised
+  routing arm leaf + the D495 `MemberLookup.LookupGroup` helper class leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param
