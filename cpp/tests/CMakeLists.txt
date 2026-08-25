@@ -52,6 +52,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/ParameterizedTypeNestedTypesRouting_Test.cpp
     Decompiler/CSharp/Resolver/LookupGroup_Test.cpp
     Decompiler/CSharp/Resolver/AddNestedTypes_Test.cpp
+    Decompiler/CSharp/Resolver/AddMembers_Test.cpp
     Decompiler/TypeSystem/Nullability_Test.cpp
     Decompiler/TypeSystem/SignatureCallingConvention_Test.cpp
     Decompiler/TypeSystem/FunctionPointerType_Test.cpp

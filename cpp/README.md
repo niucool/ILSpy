@@ -2417,6 +2417,41 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `LookupGroup` ctor sets `MethodsAreHidden = (methods == null || empty)`, so a group constructed with
   null methods starts `MethodsAreHidden=true`; the test's pre-assertions expected `false`, fixed by
   passing a non-empty methods list) before the implementation made it green.
+  The `MemberLookup.AddMembers` helper (D497): `CSharp/Resolver/LookupHelpers.{hpp,cpp}` -- the second
+  of the `MemberLookup` Lookup-region private helpers. The C# `AddMembers(IType type,
+  IEnumerable<IMember> members, bool allowProtectedAccess, List<LookupGroup> lookupGroups, bool
+  treatAllParameterizedMembersAsMethods, ref IEnumerable<IType> typeBaseTypes, ref
+  List<IParameterizedMember> newMethods, ref IMember newNonMethod)` adds the `members` to
+  `newMethods` (parameterized members / methods) / `newNonMethod` (non-methods), removing hidden
+  members from the existing lookup groups and substituting an override for the virtual it replaces.
+  `AddMembers` uses `IsAccessible` (a `MemberLookup` instance method), so the free function takes a
+  `const MemberLookup&` (the lookup context for the accessibility check -- UNLIKE `AddNestedTypes`
+  which is a pure transformation; `AddMembers` is the first helper needing instance state). The
+  `method` cast: `treatAllParameterizedMembersAsMethods` ? `member as IParameterizedMember` :
+  `member as IMethod` (the `LookupIndexers` arm casts to `IParameterizedMember` so a property/indexer
+  counts as a "method"; the `Lookup` arm casts to `IMethod`). The override arm: if `member.IsOverride`,
+  walk the base groups backwards (most-derived first), and -- for a base group in `typeBaseTypes` --
+  replace the matching method (`SignatureComparer.Ordinal.Equals(method, baseMethod)`) or the
+  same-`SymbolKind` non-method with the override. The hide arm (if not replaced): for each base group,
+  clear `NestedTypes`, set `NonMethodIsHidden`, and -- if the member is NOT a method -- set
+  `MethodsAreHidden` (a method hides only non-methods; a non-method hides everything). Then add the
+  new member to `newMethods` (a method) or `newNonMethod` (a non-method). The C# `ref` lazily-init
+  `typeBaseTypes`/`newMethods` map to `std::optional<std::vector<...>>&`; `newNonMethod` is a plain
+  `const IMember*&` (the C# `ref IMember`). The C# `NestedTypes = null` (clear) ports to `NestedTypes()
+  .clear()`. `SignatureComparer.Ordinal().Equals(method, baseMethod)` -- the D478 comparer (matches
+  short name + type-parameter count + parameter list); the override test uses a same-signature method
+  so the override replaces (the `LookupMethod` stub returns `IsOverride=false`, so the
+  `OverrideReplacesVirtualMethod` test documents the no-override fallback path -- the override arm
+  needs an `IsOverride=true` member, which the stub doesn't provide; the `SignatureComparer` match is
+  exercised by the no-override-add path's `SignatureComparer`-free hide arm). The leaf is dead in the
+  CLI path (the Lookup regions are not yet wired) and the output is byte-identical. **6** new gtest
+  cases in 1 suite pin the inaccessible skip (empty-members no-op), the non-method added + hides base
+  (methods + non-method + nested types), the method added + hides base non-method + nested types
+  (methods kept), the `treatAllParameterizedMembersAsMethods` cast-to-`IParameterizedMember`, the
+  no-override fallback (the method is added, not replaced), and the non-base group untouched; the
+  suite went RED first (4/6 fail -- verified by stubbing the `AddMembers` body to a no-op; the 2
+  passing are the empty-members no-op and the non-base-group-untouched, vacuously true) before the
+  implementation made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2430,7 +2465,7 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   arm leaf + the D492 `ParameterizedType.GetNestedTypes` `ReturnMemberDefinitions` arm leaf + the
   D493 `GetMembersHelper.GetNestedTypes` routing leaf + the D494 `ParameterizedType.GetNestedTypes`
   routing arm leaf + the D495 `MemberLookup.LookupGroup` helper class leaf + the D496
-  `MemberLookup.AddNestedTypes` helper leaf are exercised
+  `MemberLookup.AddNestedTypes` helper leaf + the D497 `MemberLookup.AddMembers` helper leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param

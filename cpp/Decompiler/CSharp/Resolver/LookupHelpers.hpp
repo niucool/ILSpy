@@ -46,11 +46,20 @@
 
 #include "Decompiler/CSharp/Resolver/LookupGroup.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/IMember.hpp"
+#include "Decompiler/TypeSystem/IParameterizedMember.hpp"
 
 #include <optional>
 #include <vector>
 
-namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
+namespace ILSpy::Decompiler::CSharp::Resolver {
+
+// Forward declaration: `AddMembers` takes a `const MemberLookup&` (for the `IsAccessible` check);
+// `MemberLookup` is defined in `MemberLookup.hpp` (full definition not needed here -- the helper
+// only references it through a reference parameter).
+class MemberLookup;
+
+namespace Detail {
 
 // The C# `static int InnerTypeParameterCount(IType type)`:
 //   return type.TypeParameterCount - (type.DeclaringType != null ? type.DeclaringType.TypeParameterCount : 0);
@@ -75,4 +84,28 @@ void AddNestedTypes(const ILSpy::Decompiler::TypeSystem::IType& type,
                     std::optional<std::vector<const ILSpy::Decompiler::TypeSystem::IType*>>& typeBaseTypes,
                     std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& newNestedTypes);
 
+// The C# `void AddMembers(IType type, IEnumerable<IMember> members, bool allowProtectedAccess,
+// List<LookupGroup> lookupGroups, bool treatAllParameterizedMembersAsMethods, ref IEnumerable<IType>
+// typeBaseTypes, ref List<IParameterizedMember> newMethods, ref IMember newNonMethod)`.
+// Adds the `members` to `newMethods` (for parameterized members / methods) / `newNonMethod` (for
+// non-methods), removing hidden members from the existing lookup groups and substituting an override
+// for the virtual it replaces. `AddMembers` uses `IsAccessible` (a `MemberLookup` instance method), so
+// the free function takes a `const MemberLookup&` (the lookup context for the accessibility check).
+// `treatAllParameterizedMembersAsMethods` makes a property/indexer count as a "method" (the
+// `LookupIndexers` arm -- it casts `member as IParameterizedMember` instead of `as IMethod`); the
+// `typeArguments.Count != 0` caller (`Lookup`) only fetches methods, so a method's `SymbolKind` is
+// `Method` either way. The C# `ref` lazily-initialized `typeBaseTypes` / `newMethods` map to
+// `std::optional<std::vector<...>>&`; `newNonMethod` is a plain `const IMember*&` (the C# `ref IMember`).
+void AddMembers(const MemberLookup& lookup,
+                const ILSpy::Decompiler::TypeSystem::IType& type,
+                const std::vector<const ILSpy::Decompiler::TypeSystem::IMember*>& members,
+                bool allowProtectedAccess,
+                std::vector<LookupGroup>& lookupGroups,
+                bool treatAllParameterizedMembersAsMethods,
+                std::optional<std::vector<const ILSpy::Decompiler::TypeSystem::IType*>>& typeBaseTypes,
+                std::optional<std::vector<const ILSpy::Decompiler::TypeSystem::IParameterizedMember*>>& newMethods,
+                const ILSpy::Decompiler::TypeSystem::IMember*& newNonMethod);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
+
+} // namespace ILSpy::Decompiler::CSharp::Resolver

@@ -21,7 +21,11 @@
 
 #include "Decompiler/CSharp/Resolver/LookupHelpers.hpp"
 
+#include "Decompiler/CSharp/Resolver/MemberLookup.hpp"  // AddMembers uses lookup.IsAccessible
+#include "Decompiler/TypeSystem/IMethod.hpp"  // dynamic_cast<IMethod>
+#include "Decompiler/TypeSystem/IParameterizedMember.hpp"  // dynamic_cast<IParameterizedMember>
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"  // GetDefinition + DeclaringType (via IEntity)
+#include "Decompiler/TypeSystem/ParameterListComparer.hpp"  // SignatureComparer.Ordinal
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // GetNonInterfaceBaseTypes
 
 #include <algorithm>
@@ -73,6 +77,92 @@ void AddNestedTypes(const ILSpy::Decompiler::TypeSystem::IType& type,
             newNestedTypes = std::vector<ITypePtr>{};
         }
         newNestedTypes->push_back(nestedType);
+    }
+}
+
+void AddMembers(const MemberLookup& lookup,
+                const ILSpy::Decompiler::TypeSystem::IType& type,
+                const std::vector<const ILSpy::Decompiler::TypeSystem::IMember*>& members,
+                bool allowProtectedAccess,
+                std::vector<LookupGroup>& lookupGroups,
+                bool treatAllParameterizedMembersAsMethods,
+                std::optional<std::vector<const ILSpy::Decompiler::TypeSystem::IType*>>& typeBaseTypes,
+                std::optional<std::vector<const ILSpy::Decompiler::TypeSystem::IParameterizedMember*>>& newMethods,
+                const ILSpy::Decompiler::TypeSystem::IMember*& newNonMethod) {
+    using namespace ILSpy::Decompiler::TypeSystem;
+    for (const IMember* member : members) {
+        if (!lookup.IsAccessible(*member, allowProtectedAccess))
+            continue;
+
+        // C#: method = treatAllParameterizedMembersAsMethods ? member as IParameterizedMember
+        //                                              : member as IMethod;
+        const IParameterizedMember* method = nullptr;
+        if (treatAllParameterizedMembersAsMethods) {
+            method = dynamic_cast<const IParameterizedMember*>(member);
+        } else {
+            method = dynamic_cast<const IMethod*>(member);
+        }
+
+        bool replacedVirtualMemberWithOverride = false;
+        if (member->IsOverride()) {
+            // Replacing virtual member with override: go backwards to find the most-derived virtual.
+            for (int i = static_cast<int>(lookupGroups.size()) - 1; i >= 0 && !replacedVirtualMemberWithOverride; i--) {
+                if (!typeBaseTypes.has_value()) {
+                    typeBaseTypes = GetNonInterfaceBaseTypes(&type);
+                }
+                const auto& baseTypes = *typeBaseTypes;
+                LookupGroup& lookupGroup = lookupGroups[static_cast<std::size_t>(i)];
+                if (std::find(baseTypes.begin(), baseTypes.end(), lookupGroup.DeclaringType()) !=
+                    baseTypes.end()) {
+                    if (method != nullptr && !lookupGroup.MethodsAreHidden()) {
+                        // Find the matching method and replace it with the override.
+                        for (auto& baseMethod : lookupGroup.Methods()) {
+                            if (SignatureComparer::Ordinal().Equals(method, baseMethod)) {
+                                baseMethod = method;
+                                replacedVirtualMemberWithOverride = true;
+                                break;
+                            }
+                        }
+                    } else {
+                        // If the member type matches, replace the non-method with the override.
+                        if (lookupGroup.NonMethod() != nullptr &&
+                            lookupGroup.NonMethod()->SymbolKind() == member->SymbolKind()) {
+                            lookupGroup.NonMethod() = member;
+                            replacedVirtualMemberWithOverride = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (!replacedVirtualMemberWithOverride) {
+            // Make the member hide other members.
+            for (LookupGroup& lookupGroup : lookupGroups) {
+                if (lookupGroup.AllHidden()) continue;  // everything is already hidden
+                if (!typeBaseTypes.has_value()) {
+                    typeBaseTypes = GetNonInterfaceBaseTypes(&type);
+                }
+                const auto& baseTypes = *typeBaseTypes;
+                if (std::find(baseTypes.begin(), baseTypes.end(), lookupGroup.DeclaringType()) !=
+                    baseTypes.end()) {
+                    // Methods hide all non-methods; non-methods hide everything.
+                    lookupGroup.NestedTypes().clear();  // C# NestedTypes = null -> clear the vector
+                    lookupGroup.NonMethodIsHidden() = true;
+                    if (method == nullptr) {  // !(member is IMethod)
+                        lookupGroup.MethodsAreHidden() = true;
+                    }
+                }
+            }
+            // Add the new member.
+            if (method != nullptr) {
+                if (!newMethods.has_value()) {
+                    newMethods = std::vector<const IParameterizedMember*>{};
+                }
+                newMethods->push_back(method);
+            } else {
+                newNonMethod = member;
+            }
+        }
     }
 }
 
