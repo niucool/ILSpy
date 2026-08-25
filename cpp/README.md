@@ -2300,6 +2300,38 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   the non-`ReturnMemberDefinitions` deferred-empty; the suite went RED first (2/4 fail -- the 2
   delegation tests; the deferred-empty and filter-rejects-all pass by coincidence with the empty
   default) before the implementation made it green.
+  The `GetMembersHelper.GetNestedTypes` routing (D493): the `GetNestedTypesImpl` -- the last member-
+  enumeration family the C# `GetMembersHelper` routes. It enumerates the outer type's definition's
+  `NestedTypes`; for each nested type: skip if `nestedTypeArguments` is non-null and the nested's
+  ADDITIONAL type-parameter count (`nested.TypeParameterCount - outer.TypeParameterCount`) does not
+  match its size; apply the `ITypeDefinition` filter; if the nested has no type parameters OR
+  `ReturnMemberDefinitions` is set, yield the unspecialized `ITypeDefinition` (an `ITypePtr` -- the
+  definition IS-A `IType`); else build a `ParameterizedType` over the nested definition with
+  `newTypeArguments`: the outer type parameters filled from the outer `ParameterizedType`'s
+  `GetTypeArgument(i)` (or the outer definition's `TypeParameters()[i]` when the outer is not
+  parameterized), and the nested's OWN type parameters (beyond the outer's) from `nestedTypeArguments`
+  (or the new `UnboundTypeArgument()` sentinel when the caller supplied none). The two public
+  entries mirror the C#: the simple `GetNestedTypes(type, filter, options)` delegates to the
+  typeArguments overload with `null`; both apply `IgnoreInheritedMembers` (declared-only) else
+  `GetNonInterfaceBaseTypes` traversal. KEY DIFFERENCE from the member families: `GetNestedTypes`
+  returns OWNING `ITypePtr` (shared_ptr) -- NOT the non-owning `const T*` the member families return
+  -- so the `ParameterizedType.GetNestedTypes` routing arm (the next leaf) needs NO owning cache: this
+  helper returns `std::vector<ITypePtr>` directly, which is exactly what `IType::GetNestedTypes`
+  returns. The `shared_from_this()` on a `const ITypeDefinition*` returns `shared_ptr<const IType>`
+  (the const overload); the nested definition is owned by the outer definition (the
+  `ITypeDefinition::NestedTypes()` returns non-owning `const ITypeDefinition*` -- the outer owns
+  them), so a `const_pointer_cast<IType>` drops the const (an aliasing cast the outer's ownership
+  backs). The leaf adds the `UnboundTypeArgument()` convenience (a `SpecialType(TypeKind::
+  UnboundTypeArgument)` -- the C# `SpecialType.UnboundTypeArgument` singleton, the placeholder for
+  an unbound nested type parameter; distinct from `UnknownType()` which is `TypeKind::Unknown`).
+  The leaf is dead in the CLI path (the `ParameterizedType.GetNestedTypes` routing arm is not yet
+  wired) and the output is byte-identical. **6** new gtest cases in 1 suite pin the
+  `IgnoreInheritedMembers` -> declared, the non-parameterized outer -> unspecialized, the
+  parameterized outer + non-generic nested -> unspecialized, the parameterized outer + generic nested
+  -> `ParameterizedType` with outer args + `UnboundTypeArgument`, the `ReturnMemberDefinitions` ->
+  unspecialized, the `nestedTypeArguments` count filter, and the `ITypeDefinition` filter; the
+  suite went RED first (verified by stubbing `GetNestedTypesImpl` to `return {}` -- 6/6 fail) before
+  the implementation made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2310,7 +2342,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `AbstractTypeParameter` base + the D488 `SpecializedMethod` leaf + the D489
   `ParameterizedType` member-enumeration `ReturnMemberDefinitions` arm leaf + the D490
   `GetMembersHelper` routing leaf + the D491 `ParameterizedType` member-enumeration routing
-  arm leaf + the D492 `ParameterizedType.GetNestedTypes` `ReturnMemberDefinitions` arm leaf are exercised
+  arm leaf + the D492 `ParameterizedType.GetNestedTypes` `ReturnMemberDefinitions` arm leaf + the
+  D493 `GetMembersHelper.GetNestedTypes` routing leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param

@@ -313,6 +313,74 @@ std::vector<std::shared_ptr<const IMember>> GetMembersImpl(
     return result;
 }
 
+// ---- GetNestedTypesImpl ----
+// The C# `GetNestedTypesImpl(IType outerType, IReadOnlyList<IType> nestedTypeArguments,
+// Predicate<ITypeDefinition> filter, GetMemberOptions options)`. Enumerates the outer type's
+// definition's `NestedTypes`; for each nested type:
+//  - if `nestedTypeArguments` is non-null, skip nested types whose ADDITIONAL type-parameter count
+//    (`nestedType.TypeParameterCount - outerTypeParameterCount`) does not match its size;
+//  - apply the `ITypeDefinition` filter (skip if it rejects);
+//  - if the nested type has no type parameters OR `ReturnMemberDefinitions` is set, yield the
+//    unspecialized `ITypeDefinition` (an `ITypePtr` -- the definition IS-A `IType`);
+//  - else build a `ParameterizedType` over the nested definition with `newTypeArguments`: the
+//    outer type parameters filled from the outer `ParameterizedType`'s type arguments (or the
+//    outer definition's own type parameters if the outer is not parameterized), and the nested
+//    type's OWN type parameters (beyond the outer's) filled from `nestedTypeArguments` (or
+//    `UnboundTypeArgument` when the caller supplied none).
+std::vector<ITypePtr> GetNestedTypesImpl(
+    const IType* outerType,
+    const std::vector<ITypePtr>* nestedTypeArguments,
+    std::function<bool(const ITypeDefinition*)> filter,
+    GetMemberOptions options) {
+
+    std::vector<ITypePtr> result;
+    const ITypeDefinition* outerTypeDef = outerType ? outerType->GetDefinition() : nullptr;
+    if (!outerTypeDef) return result;
+
+    int outerTypeParameterCount = outerTypeDef->TypeParameterCount();
+    const auto* pt = dynamic_cast<const ParameterizedType*>(outerType);
+    for (const ITypeDefinition* nestedType : outerTypeDef->NestedTypes()) {
+        int totalTypeParameterCount = nestedType->TypeParameterCount();
+        if (nestedTypeArguments != nullptr) {
+            if (totalTypeParameterCount - outerTypeParameterCount !=
+                static_cast<int>(nestedTypeArguments->size())) {
+                continue;
+            }
+        }
+        if (!(filter == nullptr || filter(nestedType))) {
+            continue;
+        }
+        if (totalTypeParameterCount == 0 || returningDefinitions(options)) {
+            // The unspecialized nested definition (an ITypePtr -- ITypeDefinition IS-A IType).
+            // `shared_from_this()` on a `const` pointer returns `shared_ptr<const IType>`;
+            // the nested definition is owned elsewhere (the outer definition owns it), so the
+            // const-cast to `shared_ptr<IType>` is an aliasing cast the outer's ownership backs.
+            result.push_back(std::const_pointer_cast<IType>(nestedType->shared_from_this()));
+            continue;
+        }
+        // Parameterize the nested type.
+        std::vector<ITypePtr> newTypeArguments;
+        newTypeArguments.reserve(static_cast<std::size_t>(totalTypeParameterCount));
+        for (int i = 0; i < outerTypeParameterCount; i++) {
+            newTypeArguments.push_back(
+                pt != nullptr ? pt->GetTypeArgument(i)
+                              : std::const_pointer_cast<IType>(
+                                    outerTypeDef->TypeParameters()[i]->shared_from_this()));
+        }
+        for (int i = outerTypeParameterCount; i < totalTypeParameterCount; i++) {
+            if (nestedTypeArguments != nullptr) {
+                newTypeArguments.push_back((*nestedTypeArguments)[i - outerTypeParameterCount]);
+            } else {
+                newTypeArguments.push_back(UnboundTypeArgument());
+            }
+        }
+        result.push_back(std::make_shared<ParameterizedType>(
+            std::const_pointer_cast<IType>(nestedType->shared_from_this()),
+            std::move(newTypeArguments)));
+    }
+    return result;
+}
+
 } // namespace
 
 // ---- Public entries ----
@@ -440,6 +508,31 @@ std::vector<std::shared_ptr<const IMember>> GetMembers(
     std::vector<std::shared_ptr<const IMember>> result;
     for (const IType* t : GetNonInterfaceBaseTypes(type)) {
         auto part = GetMembersImpl(t, filter, options);
+        for (auto& m : part) {
+            result.push_back(std::move(m));
+        }
+    }
+    return result;
+}
+
+std::vector<ITypePtr> GetNestedTypes(
+    const IType* type,
+    std::function<bool(const ITypeDefinition*)> filter,
+    GetMemberOptions options) {
+    return GetNestedTypes(type, nullptr, filter, options);
+}
+
+std::vector<ITypePtr> GetNestedTypes(
+    const IType* type,
+    const std::vector<ITypePtr>* nestedTypeArguments,
+    std::function<bool(const ITypeDefinition*)> filter,
+    GetMemberOptions options) {
+    if (ignoringInherited(options)) {
+        return GetNestedTypesImpl(type, nestedTypeArguments, filter, options);
+    }
+    std::vector<ITypePtr> result;
+    for (const IType* t : GetNonInterfaceBaseTypes(type)) {
+        auto part = GetNestedTypesImpl(t, nestedTypeArguments, filter, options);
         for (auto& m : part) {
             result.push_back(std::move(m));
         }

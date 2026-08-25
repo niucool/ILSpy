@@ -63,6 +63,7 @@
 #include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IEvent.hpp"
+#include "Decompiler/TypeSystem/ITypeDefinition.hpp"  // NestedTypes (GetNestedTypes routing)
 
 #include <functional>
 #include <memory>
@@ -134,6 +135,30 @@ std::vector<std::shared_ptr<const IEvent>> GetEvents(
 std::vector<std::shared_ptr<const IMember>> GetMembers(
     const IType* type,
     std::function<bool(const IMember*)> filter,
+    GetMemberOptions options);
+
+// The C# `GetNestedTypes(IType type, Predicate<ITypeDefinition> filter, GetMemberOptions
+// options)` -- the simple overload (no nested-type-arguments constraint); delegates to the
+// typeArguments overload with `null` (the C# `return GetNestedTypes(type, null, filter, options)`).
+// Unlike the member families (which return non-owning `const T*` and so the `ParameterizedType`
+// routing arm caches the owning `Specialized*`), `GetNestedTypes` returns OWNING `ITypePtr`
+// (shared_ptr) directly -- the nested types are freshly built `ParameterizedType`s or the
+// unspecialized `ITypeDefinition`s, so the `ParameterizedType.GetNestedTypes` routing arm needs no
+// owning cache (it returns this helper's `std::vector<ITypePtr>` verbatim).
+std::vector<ITypePtr> GetNestedTypes(
+    const IType* type,
+    std::function<bool(const ITypeDefinition*)> filter,
+    GetMemberOptions options);
+
+// The C# `GetNestedTypes(IType type, IReadOnlyList<IType> nestedTypeArguments, Predicate<
+// ITypeDefinition> filter, GetMemberOptions options)` -- the inner classes that have
+// `nestedTypeArguments.size()` ADDITIONAL type parameters (beyond the outer type's count). A null
+// `nestedTypeArguments` (the C# `null`) means "no count constraint; fill the nested type's own
+// type parameters (beyond the outer's) with `UnboundTypeArgument`".
+std::vector<ITypePtr> GetNestedTypes(
+    const IType* type,
+    const std::vector<ITypePtr>* nestedTypeArguments,
+    std::function<bool(const ITypeDefinition*)> filter,
     GetMemberOptions options);
 
 } // namespace GetMembersHelper

@@ -1067,15 +1067,18 @@ private:
 // the class, `UnknownType()` to this function).
 inline ITypePtr UnknownType() { return std::make_shared<SpecialType>(TypeKind::Unknown); }
 
-// Convenience: the C# `SpecialType.NoType` singleton (a `SpecialType(TypeKind::None)`
-// with name "?" and `isReferenceType: null`). Used by `ResolveResult` subclasses for
-// expressions without a type (method groups, lambdas, namespaces, throw
-// statements) -- the C# `NamespaceResolveResult` / `ThrowResolveResult` pass
-// `SpecialType.NoType` to the `ResolveResult` base ctor. The minimal port's
-// `SpecialType(TypeKind::None)` has `isReferenceType` defaulting to `nullopt`
-// (the C# `null`), faithful to the C# singleton. Distinct from `UnknownType()`
-// (which is `TypeKind::Unknown`, the error-type null object) -- `NoType` is
-// `TypeKind::None` (no type at all, e.g. a method group or a namespace reference).
+// Convenience: the C# `SpecialType.NoType` singleton (a `SpecialType(TypeKind::None)`).
 inline ITypePtr NoType() { return std::make_shared<SpecialType>(TypeKind::None); }
+
+// Convenience: the C# `SpecialType.UnboundTypeArgument` singleton (a
+// `SpecialType(TypeKind::UnboundTypeArgument)`). The C# uses this as the placeholder for a type
+// parameter that was not bound to a type argument -- `GetMembersHelper.GetNestedTypesImpl` fills
+// the nested type's OWN type parameters (beyond the outer type's count) with `UnboundTypeArgument`
+// when the caller supplied no `nestedTypeArguments`. A separate factory (not `UnknownType()`,
+// which is `TypeKind::Unknown` -- the error-type null object) so the two distinct C# singletons stay
+// distinct: `UnboundTypeArgument` is a legitimate "open" type parameter, `UnknownType` is an error.
+inline ITypePtr UnboundTypeArgument() {
+    return std::make_shared<SpecialType>(TypeKind::UnboundTypeArgument);
+}
 
 } // namespace ILSpy::Decompiler::TypeSystem
