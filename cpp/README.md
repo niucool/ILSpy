@@ -2382,6 +2382,41 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   both-hidden -> AllHidden), and the mutability of `NestedTypes`/`NonMethod`/`MethodsAreHidden`/
   `NonMethodIsHidden`; the suite went RED first (verified by stubbing `AllHidden` to `return true` --
   the `NestedTypesPresentNotAllHidden` case fails) before the implementation made it green.
+  The `MemberLookup.AddNestedTypes` helper (D496): `CSharp/Resolver/LookupHelpers.{hpp,cpp}` -- the
+  first of the `MemberLookup` Lookup-region private helpers. The C# `AddNestedTypes(IType type,
+  IEnumerable<IType> nestedTypes, int typeArgumentCount, List<LookupGroup> lookupGroups, ref
+  IEnumerable<IType> typeBaseTypes, ref List<IType> newNestedTypes)` adds the `nestedTypes` to
+  `newNestedTypes`, and -- for each existing lookup group whose `DeclaringType` is a base of `type`
+  (i.e. in `type.GetNonInterfaceBaseTypes()`) -- hides the group's methods + non-method and removes its
+  same-`InnerTypeParameterCount` nested types (the base's nested types are hidden by the derived
+  `type`'s). `AllHidden` groups are skipped. The C# nests `AddNestedTypes` as a `private` method of
+  `MemberLookup`; since it is a PURE transformation over its arguments (no `this`/instance-state
+  reference -- only `IsAccessible` does, which `AddMembers` takes as a bool), the port lifts it and
+  `InnerTypeParameterCount` to free functions in a `CSharp::Resolver::Detail` namespace so they are
+  individually unit-testable (TDD) ahead of the public Lookup methods that will compose them
+  (`MemberLookup::Lookup`/`LookupType`/`GetAccessibleMembers`/`LookupIndexers`, a later leaf, call
+  `Detail::AddNestedTypes`). The C# `ref` lazily-initialized `typeBaseTypes` (filled on demand from
+  `GetNonInterfaceBaseTypes`) and `newNestedTypes` (allocated on the first nested type) map to
+  `std::optional<std::vector<...>>&` (`std::nullopt` = the C# `null`). `InnerTypeParameterCount` (the
+  C# `static int InnerTypeParameterCount(IType)`) computes `type.TypeParameterCount -
+  type.DeclaringType.TypeParameterCount`; the port's `IType` (D271) does NOT declare `DeclaringType`
+  (the D388 decision -- avoids the C# `IType.DeclaringType`-vs-`IEntity.DeclaringType` ambiguity;
+  `ITypeDefinition` inherits `IEntity::DeclaringType()`), so the helper reads the declaring type via
+  `type.GetDefinition()->DeclaringType()` -- the definition's (unspecialized) declaring type, whose
+  `TypeParameterCount` equals the parameterized declaring type's count, so the inner count is correct
+  for both the unspecialized and the parameterized nested-type case (no need to port
+  `ParameterizedType.DeclaringType`). `typeBaseTypes.Contains(lookupGroup.DeclaringType)` is a
+  pointer-identity `std::find` (the C# reference-equality on `IType`; `GetNonInterfaceBaseTypes`
+  returns `const IType*`). `NestedTypes.RemoveAll(pred)` ports to `erase(remove_if)` (the
+  C#-`RemoveAll`-to-`erase`-`remove_if` idiom). The leaf is dead in the CLI path (the Lookup regions
+  are not yet wired) and the output is byte-identical. **6** new gtest cases in 1 suite pin
+  `InnerTypeParameterCount` (top-level -> full TPC), the base-group hiding + same-count nested-type
+  removal + new-nested-type accumulation, the non-base group untouched, the `AllHidden` skip (+
+  `typeBaseTypes` not filled), the only-same-count-removed (a count-1 nested type survives a count-0
+  add), and the empty-`nestedTypes` no-op; the suite went RED first (3/6 fail -- the
+  `LookupGroup` ctor sets `MethodsAreHidden = (methods == null || empty)`, so a group constructed with
+  null methods starts `MethodsAreHidden=true`; the test's pre-assertions expected `false`, fixed by
+  passing a non-empty methods list) before the implementation made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2394,7 +2429,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `GetMembersHelper` routing leaf + the D491 `ParameterizedType` member-enumeration routing
   arm leaf + the D492 `ParameterizedType.GetNestedTypes` `ReturnMemberDefinitions` arm leaf + the
   D493 `GetMembersHelper.GetNestedTypes` routing leaf + the D494 `ParameterizedType.GetNestedTypes`
-  routing arm leaf + the D495 `MemberLookup.LookupGroup` helper class leaf are exercised
+  routing arm leaf + the D495 `MemberLookup.LookupGroup` helper class leaf + the D496
+  `MemberLookup.AddNestedTypes` helper leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param
