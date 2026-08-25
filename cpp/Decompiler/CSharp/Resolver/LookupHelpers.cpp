@@ -166,4 +166,52 @@ void AddMembers(const MemberLookup& lookup,
     }
 }
 
+void RemoveInterfaceMembersHiddenByClassMembers(std::vector<LookupGroup>& lookupGroups) {
+    using namespace ILSpy::Decompiler::TypeSystem;
+    for (LookupGroup& classLookupGroup : lookupGroups) {
+        if (IsInterfaceOrSystemObject(*classLookupGroup.DeclaringType()))
+            continue;
+        // The current lookup group contains class members that might hide interface members.
+        bool hasNestedTypes = !classLookupGroup.NestedTypes().empty();  // C# NestedTypes != null && .Count > 0
+        if (hasNestedTypes || !classLookupGroup.NonMethodIsHidden()) {
+            // Hide all members from interface types.
+            for (LookupGroup& interfaceLookupGroup : lookupGroups) {
+                if (IsInterfaceOrSystemObject(*interfaceLookupGroup.DeclaringType())) {
+                    interfaceLookupGroup.NestedTypes().clear();  // C# NestedTypes = null
+                    interfaceLookupGroup.NonMethodIsHidden() = true;
+                    interfaceLookupGroup.MethodsAreHidden() = true;
+                }
+            }
+        } else if (!classLookupGroup.MethodsAreHidden()) {
+            for (const IParameterizedMember* classMethod : classLookupGroup.Methods()) {
+                // Hide all non-methods from interface types, and all methods with the same signature
+                // as a method in this class type.
+                for (LookupGroup& interfaceLookupGroup : lookupGroups) {
+                    if (IsInterfaceOrSystemObject(*interfaceLookupGroup.DeclaringType())) {
+                        interfaceLookupGroup.NestedTypes().clear();
+                        interfaceLookupGroup.NonMethodIsHidden() = true;
+                        // The C# `Methods != null && !MethodsAreHidden` -- the port's `Methods` is
+                        // never null (an empty vector is the C# null), so `!MethodsAreHidden`.
+                        if (!interfaceLookupGroup.MethodsAreHidden()) {
+                            auto& methods = interfaceLookupGroup.Methods();
+                            methods.erase(std::remove_if(methods.begin(), methods.end(),
+                                [&](const IParameterizedMember* m) {
+                                    return SignatureComparer::Ordinal().Equals(classMethod, m);
+                                }), methods.end());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+bool IsInterfaceOrSystemObject(const ILSpy::Decompiler::TypeSystem::IType& type) {
+    using namespace ILSpy::Decompiler::TypeSystem;
+    if (type.Kind() == TypeKind::Interface)
+        return true;
+    const ITypeDefinition* d = type.GetDefinition();
+    return d != nullptr && d->KnownTypeCode() == KnownTypeCode::Object;
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

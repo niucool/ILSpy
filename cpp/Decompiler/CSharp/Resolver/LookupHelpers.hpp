@@ -106,6 +106,19 @@ void AddMembers(const MemberLookup& lookup,
                 std::optional<std::vector<const ILSpy::Decompiler::TypeSystem::IParameterizedMember*>>& newMethods,
                 const ILSpy::Decompiler::TypeSystem::IMember*& newNonMethod);
 
+// The C# `void RemoveInterfaceMembersHiddenByClassMembers(List<LookupGroup> lookupGroups)`.
+// Walks the lookup groups: a CLASS group (NOT interface/Object) with nested types OR a visible
+// non-method hides ALL interface groups' members (methods + non-method + nested types); a class group
+// with visible methods (no nested, non-method hidden) removes the same-signature methods from interface
+// groups (`SignatureComparer.Ordinal.Equals`) + hides interface non-methods + nested types. An
+// interface/Object group is skipped (not treated as a "class" group). A pure transformation over
+// `lookupGroups` (no instance state), so it lifts to a free function.
+void RemoveInterfaceMembersHiddenByClassMembers(std::vector<LookupGroup>& lookupGroups);
+
+// The C# `static bool IsInterfaceOrSystemObject(IType type)` -- "return true if type is an interface or
+// System.Object": `type.Kind == Interface || type.GetDefinition()?.KnownTypeCode == Object`.
+bool IsInterfaceOrSystemObject(const ILSpy::Decompiler::TypeSystem::IType& type);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

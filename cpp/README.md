@@ -2452,6 +2452,30 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   suite went RED first (4/6 fail -- verified by stubbing the `AddMembers` body to a no-op; the 2
   passing are the empty-members no-op and the non-base-group-untouched, vacuously true) before the
   implementation made it green.
+  The `MemberLookup.RemoveInterfaceMembersHiddenByClassMembers` + `IsInterfaceOrSystemObject` helpers
+  (D498): `CSharp/Resolver/LookupHelpers.{hpp,cpp}` -- the third of the `MemberLookup` Lookup-region
+  private helpers. `IsInterfaceOrSystemObject` (the C# `static bool`) returns true if the type is an
+  interface (`type.Kind == Interface`) OR `System.Object` (`type.GetDefinition()?.KnownTypeCode ==
+  Object`). `RemoveInterfaceMembersHiddenByClassMembers(List<LookupGroup>)` walks the lookup groups: a
+  CLASS group (NOT interface/Object) with nested types OR a visible non-method hides ALL interface
+  groups' members (methods + non-method + nested types); a class group with visible methods (no nested,
+  non-method hidden) removes the same-signature methods from interface groups
+  (`SignatureComparer.Ordinal.Equals(classMethod, m)`) + hides interface non-methods + nested types. An
+  interface/Object group is skipped (not treated as a "class" group). Both are PURE transformations over
+  `lookupGroups` (no instance state -- `IsInterfaceOrSystemObject` is `static`,
+  `RemoveInterfaceMembersHiddenByClassMembers` reads only the groups), so both lift to `Detail` free
+  functions. The C# `NestedTypes = null` (clear) ports to `NestedTypes().clear()`, and
+  `Methods.RemoveAll(pred)` ports to `erase(remove_if)`; the C# `Methods != null` guard drops (the
+  port's `Methods` is never null -- an empty vector is the C# `null`). The leaf is dead in the CLI path
+  (the Lookup regions are not yet wired) and the output is byte-identical. **5** new gtest cases in 1
+  suite pin `IsInterfaceOrSystemObject` (interface -> true, class -> false, System.Object -> true,
+  non-definition -> false), the class-with-nested-types hides-all-interface-members, the
+  class-with-visible-non-method hides-all, the class-with-visible-methods removes-same-signature (a
+  same-name method removed, a different-name method survives, non-method + nested types hidden,
+  `MethodsAreHidden` NOT set), and the interface-group-skipped-as-class-group; the suite went RED first
+  (1/5 fail -- a test-expectation bug: the class group's nested type survives `RemoveInterfaceMembers`,
+  which only clears INTERFACE groups' nested types, not the class group's; the assertion expected
+  `empty()`, fixed to `size() == 1`) before the fix made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2465,7 +2489,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   arm leaf + the D492 `ParameterizedType.GetNestedTypes` `ReturnMemberDefinitions` arm leaf + the
   D493 `GetMembersHelper.GetNestedTypes` routing leaf + the D494 `ParameterizedType.GetNestedTypes`
   routing arm leaf + the D495 `MemberLookup.LookupGroup` helper class leaf + the D496
-  `MemberLookup.AddNestedTypes` helper leaf + the D497 `MemberLookup.AddMembers` helper leaf are exercised
+  `MemberLookup.AddNestedTypes` helper leaf + the D497 `MemberLookup.AddMembers` helper leaf + the D498
+  `MemberLookup.RemoveInterfaceMembersHiddenByClassMembers` + `IsInterfaceOrSystemObject` helper leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param
