@@ -2611,6 +2611,40 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   same-name member + nested type both yielded (grouped by name); the suite went RED first (4/5 fail --
   verified by stubbing the `GetAccessibleMembers` body to `return {}`; the empty case passes vacuously)
   before the implementation made it green.
+  The `InheritanceHelper.GetBaseMember`/`GetBaseMembers` helper (D504):
+  `TypeSystem/InheritanceHelper.{hpp,cpp}` -- the base-member lookup ("Gets the base member that has the
+  same signature"). The C# `public static class InheritanceHelper` (a namespace of free functions, the
+  C#-static-class convention) provides the base-member/derived-member/attribute inheritance helpers.
+  This leaf ports the core `GetBaseMember(member)` / `GetBaseMembers(member, includeImplementedInterfaces)`
+  pair: if `includeImplementedInterfaces` and the member is an explicit interface impl with exactly one
+  explicitly-implemented member, switch to that member; strip the generic specialization
+  (`member = member.MemberDefinition`); if no `DeclaringTypeDefinition` (a global method), yield empty (the
+  SharpDevelop UDC crash 4524 guard); for each base type (in reverse -- derived-last; the C#
+  `GetNonInterfaceBaseTypes`/`GetAllBaseTypes` return base-first, so `std::reverse` to derived-last),
+  if it's not the member's own declaring type, fetch the base type's `GetMembers` (or `GetAccessors` for
+  an `Accessor` SymbolKind) filtered by name + `Accessibility > Private`, and yield the
+  `SignatureComparer.Ordinal.Equals` matches specialized with the original `substitution`
+  (`baseMember->Specialize(substitution)`). `GetBaseMember` = the first of `GetBaseMembers(member, false)`
+  (the derived-most base member, or nullptr). Returns non-owning `const IMember*` snapshots (the base
+  members are owned by the base types' graph -- `Specialize` returns a non-owning handle, "the type system
+  owns it"; the member's `DeclaringTypeDefinition` graph keeps the base types alive). All deps are ported:
+  `SignatureComparer.Ordinal` (D478), `GetNonInterfaceBaseTypes`/`GetAllBaseTypes` (`TypeSystemExtensions`),
+  `IType::GetMembers`/`GetAccessors` (D477), the `IMember` surface (`MemberDefinition`/`Substitution`/
+  `Specialize`/`DeclaringTypeDefinition`/`IsExplicitInterfaceImplementation`/
+  `ExplicitlyImplementedInterfaceMembers`), `Accessibility`, `SymbolKind`. The `> Private` filter uses the
+  `GetMemberOptions::IgnoreInheritedMembers` options (the declared-members-only arm). The
+  `allBaseTypes.Reverse()` (derived-last) ports to `std::reverse` -- the `result` appends in that order, so
+  the derived-most base member is first (the C# "derived-most base class returned first" guarantee). The
+  leaf is dead in the CLI path (`InheritanceHelper` is not yet called by `--csharp`) and the output is
+  byte-identical. **7** new gtest cases in 1 suite pin the null-`DeclaringTypeDefinition` short-circuit
+  (the `LookupMethod` stub path -- no base members), the `includeImplementedInterfaces`-false skip +
+  the include-with-no-explicit-impl no-switch, the real base-member-matching (a `TestMember` with a real
+  `DeclaringTypeDefinition` + a base `TestTypeDefinition` carrying a same-signature member -> the base
+  member is yielded, `GetBaseMember` returns it), the own-declaring-type skip (the base type's own members
+  are not "base" of themselves), and the different-name-no-match filter (a base "Other" member is not matched
+  for a derived "M"); the suite went RED first (1/7 fail -- verified by stubbing `GetBaseMembers` to
+  `return {}`; the `BaseMemberMatchedAndSpecialized` case expects a real base member, the stub returns empty;
+  the 6 empty/null-expecting tests pass vacuously) before the implementation made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2628,7 +2662,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `MemberLookup.RemoveInterfaceMembersHiddenByClassMembers` + `IsInterfaceOrSystemObject` helper leaf + the
   D499 `MemberLookup.CreateResult` helper leaf + the D500 `MemberLookup.Lookup` public method leaf + the
   D501 `MemberLookup.LookupType` public method leaf + the D502 `MemberLookup.LookupIndexers` public method
-  leaf + the D503 `MemberLookup.GetAccessibleMembers` public method leaf are exercised
+  leaf + the D503 `MemberLookup.GetAccessibleMembers` public method leaf + the D504
+  `InheritanceHelper.GetBaseMember`/`GetBaseMembers` leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param
