@@ -2584,6 +2584,33 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   went RED first (1/4 fail -- verified by stubbing the `LookupIndexers` body to `return {}`; the
   `IndexerYieldsOneBucket` case expects 1 bucket, the stub returns empty) before the implementation made it
   green.
+  The `MemberLookup.GetAccessibleMembers` public method (D503): `CSharp/Resolver/MemberLookup.cpp` -- the
+  LAST of the `MemberLookup` Lookup-region public methods. The C# `GetAccessibleMembers(ResolveResult
+  targetResolveResult)` retrieves all accessible, non-hidden members + nested type definitions (NOT
+  extension methods). For each base type (base-first via `GetNonInterfaceBaseTypes`), it fetches
+  `GetMembers(IgnoreInheritedMembers)` + (if not a type parameter) `GetNestedTypes(IgnoreInheritedMembers |
+  ReturnMemberDefinitions)` projected to `GetDefinition()` (filtering null), groups by name (the C#
+  `Dictionary<string, List<LookupGroup>>`; the port's `std::map<std::string, ...>` is name-sorted, faithful
+  enough -- the callers iterate without order dependence), composes `AddNestedTypes` (the nested-type
+  `ITypePtr`s, `typeArgumentCount=0`) / `AddMembers` (the members) per name group, builds a `LookupGroup` per
+  base type; after all base types, if `targetIsTypeParameter`, `RemoveInterfaceMembersHiddenByClassMembers`
+  per name; then yields the non-hidden methods (`IParameterizedMember*` upcast to `IEntity*`), the non-hidden
+  non-method, and the nested-type definitions (from `GetDefinition()`). OWNING MODEL: returns an owning
+  `std::vector<std::shared_ptr<const IEntity>>` (the C# `IEnumerable<IEntity>` of GC-owned entities); each
+  yielded entity is ALIASED to the target type's `shared_from_this` (the target type owns its base types'
+  members transitively -- the base types come from `GetNonInterfaceBaseTypes(&targetType)`, owned by
+  `targetType`'s `shared_from_this` graph; aliasing each entity to `targetOwner` keeps the graph alive for
+  the yielded `shared_ptr`'s lifetime). The `IMember*`/`ITypeDefinition*` upcast to `const IEntity*` is a
+  `static_cast` (both derive `IEntity`). The nested-type `ITypePtr` for `AddNestedTypes` aliases via
+  `td->shared_from_this()` + `const_pointer_cast<IType>` (the `ITypeDefinition` is `enable_shared_from_this`
+  via `IType`). The `NameGroups` per-name struct holds the `std::vector<LookupGroup>`; the by-name grouping
+  merges the members (`const IMember*`) + nested-type `ITypePtr`s by `IEntity::Name()`. The leaf is dead in
+  the CLI path (the `GetAccessibleMembers` method is not yet called by `--csharp`) and the output is
+  byte-identical. **5** new gtest cases in 1 suite pin the no-members-no-nested -> empty, the field member
+  yielded, the method member yielded, the nested-type definition yielded (its `GetDefinition()`), and the
+  same-name member + nested type both yielded (grouped by name); the suite went RED first (4/5 fail --
+  verified by stubbing the `GetAccessibleMembers` body to `return {}`; the empty case passes vacuously)
+  before the implementation made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2601,7 +2628,7 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `MemberLookup.RemoveInterfaceMembersHiddenByClassMembers` + `IsInterfaceOrSystemObject` helper leaf + the
   D499 `MemberLookup.CreateResult` helper leaf + the D500 `MemberLookup.Lookup` public method leaf + the
   D501 `MemberLookup.LookupType` public method leaf + the D502 `MemberLookup.LookupIndexers` public method
-  leaf are exercised
+  leaf + the D503 `MemberLookup.GetAccessibleMembers` public method leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param

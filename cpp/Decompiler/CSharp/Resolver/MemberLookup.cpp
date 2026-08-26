@@ -36,10 +36,12 @@
 #include "Decompiler/TypeSystem/IType.hpp"  // GetMembers / GetMethods / GetNestedTypes / GetNonInterfaceBaseTypes
 #include "Decompiler/TypeSystem/IProperty.hpp"  // GetProperties (LookupIndexers)
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"  // ITypeDefinition (the filter arg)
+#include "Decompiler/TypeSystem/IEntity.hpp"  // IEntity (GetAccessibleMembers yield)
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // GetNonInterfaceBaseTypes
 #include "Decompiler/TypeSystem/SymbolKind.hpp"  // SymbolKind::Indexer / Operator
 
 #include <algorithm>
+#include <map>
 #include <utility>
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
@@ -248,6 +250,122 @@ std::vector<MethodListWithDeclaringType> MemberLookup::LookupIndexers(
             g.Methods());
     }
     return methodLists;
+}
+
+std::vector<std::shared_ptr<const ILSpy::Decompiler::TypeSystem::IEntity>>
+MemberLookup::GetAccessibleMembers(
+    const ILSpy::Decompiler::Semantics::ResolveResult& targetResolveResult) {
+    using namespace ILSpy::Decompiler::TypeSystem;
+
+    const IType& targetType = targetResolveResult.Type();
+    bool targetIsTypeParameter = targetType.Kind() == TypeKind::TypeParameter;
+    bool allowProtectedAccess = IsProtectedAccessAllowed(targetResolveResult);
+
+    // Maps the member name to the list of lookup groups (the C# `Dictionary<string, List<LookupGroup>>`).
+    // Preserves insertion order for the final yield (the C# `Dictionary` order is unspecified, but the
+    // port's `std::map<std::string, ...>` is sorted; the yield order is by-name-sorted, faithful
+    // enough -- `GetAccessibleMembers` callers iterate the result without order dependence).
+    struct NameGroups {
+        std::vector<LookupGroup> groups;
+    };
+    std::map<std::string, NameGroups> lookupGroupDict;
+
+    // The aliasing control block for the yielded entities -- the target type owns its base types'
+    // members transitively (the base types come from `GetNonInterfaceBaseTypes(&targetType)`, owned by
+    // `targetType`'s `shared_from_this` graph). Aliasing each entity to `targetType` keeps the graph
+    // alive for the yielded `shared_ptr<const IEntity>`'s lifetime.
+    auto targetOwner = targetType.shared_from_this();  // shared_ptr<const IType>
+
+    for (const IType* type : GetNonInterfaceBaseTypes(&targetType)) {
+        // Build `entities` = members + nested-type definitions (both as `const IEntity*`).
+        std::vector<const IMember*> members =
+            type->GetMembers(nullptr, GetMemberOptions::IgnoreInheritedMembers);
+        std::vector<const ITypeDefinition*> nestedTypeDefs;
+        if (!targetIsTypeParameter) {
+            std::vector<ITypePtr> nestedTypes = type->GetNestedTypes(
+                nullptr, GetMemberOptions::IgnoreInheritedMembers | GetMemberOptions::ReturnMemberDefinitions);
+            // The C# `nestedTypes.Select(t => t.GetDefinition()).Where(td => td != null)`.
+            for (const ITypePtr& t : nestedTypes) {
+                const ITypeDefinition* td = t->GetDefinition();
+                if (td != nullptr) nestedTypeDefs.push_back(td);
+            }
+        }
+
+        // Group by name: the C# `entities.GroupBy(e => e.Name)`. The members + nested-type defs share
+        // the `IEntity::Name()` surface. A name group holds the `ITypePtr` nested types (for
+        // `AddNestedTypes`) and the `const IMember*` members (for `AddMembers`).
+        // The nested-type defs are `ITypeDefinition*` (IS-A `IType`); collect the matching `ITypePtr`s
+        // by definition-pointer identity.
+        std::map<std::string, std::pair<std::vector<ITypePtr>, std::vector<const IMember*>>> byName;
+        for (const ITypeDefinition* td : nestedTypeDefs) {
+            byName[td->Name()].first.push_back(
+                std::const_pointer_cast<IType>(td->shared_from_this()));  // the ITypePtr for AddNestedTypes
+        }
+        for (const IMember* m : members) {
+            byName[m->Name()].second.push_back(m);
+        }
+
+        for (auto& [name, group] : byName) {
+            auto& lookupGroups = lookupGroupDict[name].groups;
+
+            std::optional<std::vector<const IType*>> typeBaseTypes;
+            std::optional<std::vector<ITypePtr>> newNestedTypes;
+            std::optional<std::vector<const IParameterizedMember*>> newMethods;
+            const IMember* newNonMethod = nullptr;
+
+            if (!targetIsTypeParameter) {
+                // The C# `AddNestedTypes(type, entityGroup.OfType<IType>(), 0, ...)`.
+                Detail::AddNestedTypes(*type, group.first, 0, lookupGroups, typeBaseTypes, newNestedTypes);
+            }
+            // The C# `AddMembers(type, entityGroup.OfType<IMember>(), allowProtectedAccess, ...)`.
+            Detail::AddMembers(*this, *type, group.second, allowProtectedAccess, lookupGroups, false,
+                               typeBaseTypes, newMethods, newNonMethod);
+
+            if (newNestedTypes.has_value() || newMethods.has_value() || newNonMethod != nullptr) {
+                lookupGroups.emplace_back(
+                    type,
+                    newNestedTypes.has_value() ? &*newNestedTypes : nullptr,
+                    newMethods.has_value() ? &*newMethods : nullptr,
+                    newNonMethod);
+            }
+        }
+    }
+
+    std::vector<std::shared_ptr<const IEntity>> result;
+    for (auto& [name, ng] : lookupGroupDict) {
+        auto& lookupGroups = ng.groups;
+        // Remove interface members hidden by class members (only for type parameters).
+        if (targetIsTypeParameter) {
+            Detail::RemoveInterfaceMembersHiddenByClassMembers(lookupGroups);
+        }
+        // Now report the results: the non-hidden methods, the non-hidden non-method, the nested-type
+        // definitions (from `GetDefinition()`).
+        for (const LookupGroup& lookupGroup : lookupGroups) {
+            if (!lookupGroup.MethodsAreHidden()) {
+                for (const IParameterizedMember* method : lookupGroup.Methods()) {
+                    // The C# `yield return method` (an `IMethod`); the port aliases to `targetOwner`.
+                    result.push_back(std::shared_ptr<const IEntity>(
+                        targetOwner, static_cast<const IEntity*>(method)));
+                }
+            }
+            if (!lookupGroup.NonMethodIsHidden()) {
+                if (lookupGroup.NonMethod() != nullptr) {
+                    result.push_back(std::shared_ptr<const IEntity>(
+                        targetOwner, static_cast<const IEntity*>(lookupGroup.NonMethod())));
+                }
+            }
+            if (!lookupGroup.NestedTypes().empty()) {
+                for (const ITypePtr& t : lookupGroup.NestedTypes()) {
+                    const ITypeDefinition* typeDef = t->GetDefinition();
+                    if (typeDef != nullptr) {
+                        result.push_back(std::shared_ptr<const IEntity>(
+                            targetOwner, static_cast<const IEntity*>(typeDef)));
+                    }
+                }
+            }
+        }
+    }
+    return result;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

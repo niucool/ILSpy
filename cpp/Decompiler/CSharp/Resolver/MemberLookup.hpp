@@ -232,6 +232,14 @@ public:
     std::vector<MethodListWithDeclaringType> LookupIndexers(
         const ILSpy::Decompiler::Semantics::ResolveResult& targetResolveResult);
 
+    // The C# `public IEnumerable<IEntity> GetAccessibleMembers(ResolveResult targetResolveResult)` --
+    // all accessible, non-hidden members + nested type definitions (NOT extension methods). Defined
+    // out-of-line in `MemberLookup.cpp`. Returns an owning `std::vector<std::shared_ptr<const IEntity>>`
+    // (the C# `IEnumerable<IEntity>` of GC-owned entities). Each yielded entity is aliased to the
+    // target type's `shared_from_this` (the target type owns its base types' members transitively).
+    std::vector<std::shared_ptr<const ILSpy::Decompiler::TypeSystem::IEntity>> GetAccessibleMembers(
+        const ILSpy::Decompiler::Semantics::ResolveResult& targetResolveResult);
+
 private:
     // The C# `bool IsInternalAccessible(IModule module)`.
     bool IsInternalAccessible(const ILSpy::Decompiler::TypeSystem::IModule* module) const
