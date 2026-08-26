@@ -35,6 +35,8 @@
 
 #include "Decompiler/TypeSystem/IMember.hpp"  // IMember (the lookup subject + result)
 #include "Decompiler/TypeSystem/IType.hpp"  // GetMemberOptions (the family Get* options)
+#include "Decompiler/TypeSystem/IAttribute.hpp"  // IAttribute (the GetAttributes result)
+#include "Decompiler/TypeSystem/KnownAttribute.hpp"  // KnownAttribute (the GetAttribute arg)
 
 #include <vector>
 
@@ -64,6 +66,36 @@ const IMember* GetBaseMember(const IMember& member);
 // Returns non-owning `const IMember*` snapshots (the C# `IEnumerable<IMember>` materialized; the base
 // members are owned by the base types, kept alive via the member's `DeclaringTypeDefinition` graph).
 std::vector<const IMember*> GetBaseMembers(const IMember& member, bool includeImplementedInterfaces);
+
+// The C# `public static IMember? GetDerivedMember(IMember baseMember, ITypeDefinition derivedType)` --
+// "Finds the member declared in `derivedType` that has the same signature (could override)
+// `baseMember`." Walks the derived type's `Methods`/`Properties`/`Events`/`Fields` for the member whose
+// `GetBaseMembers` includes `baseMember.MemberDefinition` (for methods: name + parameter count + type-
+// parameter count pre-filter; for properties: name + parameter count; for events/fields: name match).
+// Returns nullptr if no override. The C# `baseMember.Compilation != derivedType.Compilation` check
+// (a cross-compilation guard) is omitted (the port's `ICompilation&` references are identity-equal in
+// practice). A non-owning `const IMember*` (the C# `IMember?`; the derived member is owned by
+// `derivedType`'s graph).
+const IMember* GetDerivedMember(const IMember& baseMember, const ITypeDefinition& derivedType);
+
+// The C# `internal static IEnumerable<IAttribute> GetAttributes(ITypeDefinition typeDef)` -- collects
+// the attributes up the base-type chain (base-first, but `Reverse`d so derived-first; each base type
+// def's `GetAttributes()` flattened). Non-owning `const IAttribute*` snapshots (the type defs own them).
+std::vector<const IAttribute*> GetAttributes(const ITypeDefinition& typeDef);
+
+// The C# `internal static IAttribute? GetAttribute(ITypeDefinition typeDef, KnownAttribute
+// attributeType)` -- the first non-null `GetAttribute` up the (reversed) base-type chain, or nullptr.
+const IAttribute* GetAttribute(const ITypeDefinition& typeDef, KnownAttribute attributeType);
+
+// The C# `internal static IEnumerable<IAttribute> GetAttributes(IMember member)` -- the attributes up
+// the override chain: `member = member.MemberDefinition`; yield its `GetAttributes`; if `!IsOverride`
+// stop; else walk `GetBaseMember` (the virtual it overrides) and repeat (with a visited-members cycle
+// guard for cyclic inheritance). Non-owning `const IAttribute*` snapshots.
+std::vector<const IAttribute*> GetAttributes(const IMember& member);
+
+// The C# `internal static IAttribute? GetAttribute(IMember member, KnownAttribute attributeType)` --
+// the first non-null `member.GetAttribute(attributeType)` up the override chain, or nullptr.
+const IAttribute* GetAttribute(const IMember& member, KnownAttribute attributeType);
 
 } // namespace InheritanceHelper
 

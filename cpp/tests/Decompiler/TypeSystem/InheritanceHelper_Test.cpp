@@ -41,6 +41,8 @@
 
 #include "Decompiler/TypeSystem/InheritanceHelper.hpp"
 #include "Decompiler/TypeSystem/FullTypeName.hpp"
+#include "Decompiler/TypeSystem/IEvent.hpp"
+#include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
@@ -50,6 +52,7 @@
 #include "Decompiler/TypeSystem/TypeParameterSubstitution.hpp"
 #include "Decompiler/TypeSystem/TypeVisitor.hpp"
 #include "Decompiler/TypeSystem/Accessibility.hpp"
+#include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
 #include "Decompiler/TypeSystem/MethodSemanticsAttributes.hpp"
 
@@ -69,9 +72,12 @@ using ILSpy::Decompiler::TypeSystem::FullTypeName;
 using ILSpy::Decompiler::TypeSystem::IAttribute;
 using ILSpy::Decompiler::TypeSystem::ICompilation;
 using ILSpy::Decompiler::TypeSystem::IEntity;
+using ILSpy::Decompiler::TypeSystem::IEvent;
+using ILSpy::Decompiler::TypeSystem::IField;
 using ILSpy::Decompiler::TypeSystem::IMember;
 using ILSpy::Decompiler::TypeSystem::IMethod;
 using ILSpy::Decompiler::TypeSystem::IModule;
+using ILSpy::Decompiler::TypeSystem::IProperty;
 using ILSpy::Decompiler::TypeSystem::IType;
 using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
 using ILSpy::Decompiler::TypeSystem::ITypePtr;
@@ -105,9 +111,13 @@ ITypePtr Object() { return std::make_shared<KnownType>(KnownTypeCode::Object); }
 class TestMember : public IMember {
 public:
     TestMember(std::string name, ::ILSpy::Decompiler::TypeSystem::SymbolKind kind,
-               const ITypeDefinition* declaringTypeDef, const ICompilation& compilation)
+               const ITypeDefinition* declaringTypeDef, const ICompilation& compilation,
+               bool isOverride = false,
+               std::vector<const IAttribute*> attributes = {},
+               const IAttribute* attributeFor = nullptr)
         : name_(std::move(name)), kind_(kind), declaringTypeDef_(declaringTypeDef),
-          compilation_(compilation) {}
+          compilation_(compilation), isOverride_(isOverride), attributes_(std::move(attributes)),
+          attributeFor_(attributeFor) {}
 
     ::ILSpy::Decompiler::TypeSystem::SymbolKind SymbolKind() const override { return kind_; }
     std::string Name() const override { return name_; }
@@ -119,11 +129,14 @@ public:
     const ITypeDefinition* DeclaringTypeDefinition() const override { return declaringTypeDef_; }
     ITypePtr DeclaringType() const override { return {}; }
     const IModule* ParentModule() const override { return nullptr; }
-    std::vector<const IAttribute*> GetAttributes() const override { return {}; }
-    bool HasAttribute(ILSpy::Decompiler::TypeSystem::KnownAttribute) const override { return false; }
+    std::vector<const IAttribute*> GetAttributes() const override { return attributes_; }
+    bool HasAttribute(ILSpy::Decompiler::TypeSystem::KnownAttribute ka) const override
+    {
+        return attributeFor_ != nullptr;
+    }
     const IAttribute* GetAttribute(ILSpy::Decompiler::TypeSystem::KnownAttribute) const override
     {
-        return nullptr;
+        return attributeFor_;
     }
     ::ILSpy::Decompiler::TypeSystem::Accessibility Accessibility() const override
     {
@@ -137,7 +150,7 @@ public:
     std::vector<const IMember*> ExplicitlyImplementedInterfaceMembers() const override { return {}; }
     bool IsExplicitInterfaceImplementation() const override { return false; }
     bool IsVirtual() const override { return false; }
-    bool IsOverride() const override { return false; }
+    bool IsOverride() const override { return isOverride_; }
     bool IsOverridable() const override { return false; }
     const TypeParameterSubstitution* Substitution() const override { return &identitySubst_; }
     const IMember* Specialize(const TypeParameterSubstitution*) const override { return this; }
@@ -148,6 +161,9 @@ private:
     ::ILSpy::Decompiler::TypeSystem::SymbolKind kind_;
     const ITypeDefinition* declaringTypeDef_;
     const ICompilation& compilation_;
+    bool isOverride_;
+    std::vector<const IAttribute*> attributes_;
+    const IAttribute* attributeFor_;
     mutable TypeParameterSubstitution identitySubst_{std::nullopt, std::nullopt};
 };
 
@@ -155,13 +171,19 @@ private:
 // base-member-matching: the base type's `GetMembers` returns the matching member).
 class TestTypeDefinition : public LookupTypeDefinition {
 public:
-    TestTypeDefinition(std::string name, const ICompilation& compilation)
+    TestTypeDefinition(std::string name, const ICompilation& compilation,
+                       std::vector<const IAttribute*> attributes = {},
+                       const IAttribute* attributeFor = nullptr)
         : LookupTypeDefinition(std::move(name), "",
               ::ILSpy::Decompiler::TypeSystem::FullTypeName(
                   ::ILSpy::Decompiler::TypeSystem::TopLevelTypeName("", name, 0)),
-              TypeKind::Class, Accessibility::Public, compilation, nullptr) {}
+              TypeKind::Class, Accessibility::Public, compilation, nullptr),
+          attributes_(std::move(attributes)), attributeFor_(attributeFor) {}
 
     void SetMembers(std::vector<const IMember*> m) { members_ = std::move(m); }
+    void SetMethods(std::vector<const IMethod*> m) { methods_ = std::move(m); }
+    void SetEvents(std::vector<const IEvent*> e) { events_ = std::move(e); }
+    void SetFields(std::vector<const IField*> f) { fields_ = std::move(f); }
 
     std::vector<const IMember*> GetMembers(
         std::function<bool(const IMember*)> filter,
@@ -174,8 +196,24 @@ public:
         return out;
     }
 
+    std::vector<const IMethod*> Methods() const override { return methods_; }
+    std::vector<const IEvent*> Events() const override { return events_; }
+    std::vector<const IField*> Fields() const override { return fields_; }
+    std::vector<const IAttribute*> GetAttributes() const override { return attributes_; }
+    const IAttribute* GetAttribute(
+        ::ILSpy::Decompiler::TypeSystem::KnownAttribute) const override { return attributeFor_; }
+    bool HasAttribute(::ILSpy::Decompiler::TypeSystem::KnownAttribute) const override
+    {
+        return attributeFor_ != nullptr;
+    }
+
 private:
     std::vector<const IMember*> members_;
+    std::vector<const IMethod*> methods_;
+    std::vector<const IEvent*> events_;
+    std::vector<const IField*> fields_;
+    std::vector<const IAttribute*> attributes_;
+    const IAttribute* attributeFor_;
 };
 
 } // namespace
@@ -236,6 +274,121 @@ TEST(InheritanceHelperGetBaseMemberTest, PrivateBaseMemberFiltered) {
     auto derivedM = std::make_shared<TestMember>("M", SymbolKind::Method, derived.get(), Compilation());
     auto result = ILSpy::Decompiler::TypeSystem::InheritanceHelper::GetBaseMembers(*derivedM, false);
     EXPECT_TRUE(result.empty());  // the "Other" base member has a different name -> no match
+}
+
+// ---------------------------------------------------------------------------
+// GetDerivedMember: a base method "M" and a derived type with a same-signature method "M" (whose
+// GetBaseMembers includes the base method) -> the derived method is returned.
+// ---------------------------------------------------------------------------
+TEST(InheritanceHelperGetDerivedMemberTest, OverrideMethodFound) {
+    auto base = std::make_shared<TestTypeDefinition>("Base", Compilation());
+    auto derived = std::make_shared<TestTypeDefinition>("Derived", Compilation());
+    derived->AddDirectBaseType(base);
+
+    auto baseM = std::make_shared<LookupMethod>("M", Compilation());
+    baseM->SetDeclaringTypeDefinition(base.get());
+    base->SetMembers({baseM.get()});
+    base->SetMethods({});  // Methods() is the ITypeDefinition-own accessor; not used for the base lookup
+
+    // The derived "M" -- a LookupMethod (a full IMethod) with its DeclaringTypeDefinition wired to
+    // `derived` so GetBaseMembers(derivedM) yields baseM (same signature).
+    auto derivedM = std::make_shared<LookupMethod>("M", Compilation());
+    derivedM->SetDeclaringTypeDefinition(derived.get());
+    derived->SetMethods(std::vector<const IMethod*>{derivedM.get()});
+    auto result = ILSpy::Decompiler::TypeSystem::InheritanceHelper::GetDerivedMember(*baseM, *derived);
+    EXPECT_EQ(result, derivedM.get());
+}
+
+// ---------------------------------------------------------------------------
+// GetDerivedMember: no matching derived member -> nullptr.
+// ---------------------------------------------------------------------------
+TEST(InheritanceHelperGetDerivedMemberTest, NoOverrideYieldsNull) {
+    auto base = std::make_shared<TestTypeDefinition>("Base", Compilation());
+    auto derived = std::make_shared<TestTypeDefinition>("Derived", Compilation());
+    derived->AddDirectBaseType(base);
+    auto baseM = std::make_shared<LookupMethod>("M", Compilation());
+    baseM->SetDeclaringTypeDefinition(base.get());
+    base->SetMembers({baseM.get()});
+    // The derived type has no methods.
+    auto result = ILSpy::Decompiler::TypeSystem::InheritanceHelper::GetDerivedMember(*baseM, *derived);
+    EXPECT_EQ(result, nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// GetAttributes(ITypeDefinition): the type def's own attributes + base type def's attributes (reversed,
+// derived-first).
+// ---------------------------------------------------------------------------
+TEST(InheritanceHelperAttributesTest, GetTypeDefinitionAttributesAggregatesBase) {
+    auto attr1 = reinterpret_cast<const ILSpy::Decompiler::TypeSystem::IAttribute*>(0x100);
+    auto attr2 = reinterpret_cast<const ILSpy::Decompiler::TypeSystem::IAttribute*>(0x200);
+    auto base = std::make_shared<TestTypeDefinition>("Base", Compilation(), std::vector<const IAttribute*>{attr1});
+    auto derived = std::make_shared<TestTypeDefinition>("Derived", Compilation(), std::vector<const IAttribute*>{attr2});
+    derived->AddDirectBaseType(base);
+    auto result = ILSpy::Decompiler::TypeSystem::InheritanceHelper::GetAttributes(*derived);
+    ASSERT_EQ(result.size(), 2u);
+    // Derived-first (Reverse): attr2 (derived) then attr1 (base).
+    EXPECT_EQ(result[0], attr2);
+    EXPECT_EQ(result[1], attr1);
+}
+
+// ---------------------------------------------------------------------------
+// GetAttribute(ITypeDefinition, KnownAttribute): the first non-null up the reversed base-type chain.
+// ---------------------------------------------------------------------------
+TEST(InheritanceHelperAttributesTest, GetTypeDefinitionAttributeFirstNonNull) {
+    auto attr = reinterpret_cast<const ILSpy::Decompiler::TypeSystem::IAttribute*>(0x300);
+    auto base = std::make_shared<TestTypeDefinition>("Base", Compilation(), std::vector<const IAttribute*>{}, attr);
+    auto derived = std::make_shared<TestTypeDefinition>("Derived", Compilation());  // no attribute
+    derived->AddDirectBaseType(base);
+    auto result = ILSpy::Decompiler::TypeSystem::InheritanceHelper::GetAttribute(
+        *derived, ILSpy::Decompiler::TypeSystem::KnownAttribute::Serializable);
+    EXPECT_EQ(result, attr);  // the base type's attribute (derived has none)
+}
+
+// ---------------------------------------------------------------------------
+// GetAttribute(ITypeDefinition): no base type has the attribute -> nullptr.
+// ---------------------------------------------------------------------------
+TEST(InheritanceHelperAttributesTest, GetTypeDefinitionAttributeNotFoundYieldsNull) {
+    auto derived = std::make_shared<TestTypeDefinition>("Derived", Compilation());
+    auto result = ILSpy::Decompiler::TypeSystem::InheritanceHelper::GetAttribute(
+        *derived, ILSpy::Decompiler::TypeSystem::KnownAttribute::Serializable);
+    EXPECT_EQ(result, nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// GetAttributes(IMember): a non-override member yields its own GetAttributes only.
+// ---------------------------------------------------------------------------
+TEST(InheritanceHelperAttributesTest, MemberAttributesNonOverride) {
+    auto attr1 = reinterpret_cast<const ILSpy::Decompiler::TypeSystem::IAttribute*>(0x400);
+    auto def = std::make_shared<TestTypeDefinition>("Foo", Compilation());
+    auto m = std::make_shared<TestMember>("M", SymbolKind::Method, def.get(), Compilation(),
+                                          /*isOverride=*/false, std::vector<const IAttribute*>{attr1});
+    auto result = ILSpy::Decompiler::TypeSystem::InheritanceHelper::GetAttributes(*m);
+    ASSERT_EQ(result.size(), 1u);
+    EXPECT_EQ(result[0], attr1);  // the member's own attribute only (no override -> no base walk)
+}
+
+// ---------------------------------------------------------------------------
+// GetAttribute(IMember): the first non-null member.GetAttribute up the override chain.
+// ---------------------------------------------------------------------------
+TEST(InheritanceHelperAttributesTest, MemberAttributeFirstNonNull) {
+    auto attr = reinterpret_cast<const ILSpy::Decompiler::TypeSystem::IAttribute*>(0x500);
+    auto def = std::make_shared<TestTypeDefinition>("Foo", Compilation());
+    auto m = std::make_shared<TestMember>("M", SymbolKind::Method, def.get(), Compilation(),
+                                          /*isOverride=*/false, std::vector<const IAttribute*>{}, attr);
+    auto result = ILSpy::Decompiler::TypeSystem::InheritanceHelper::GetAttribute(
+        *m, ILSpy::Decompiler::TypeSystem::KnownAttribute::Serializable);
+    EXPECT_EQ(result, attr);
+}
+
+// ---------------------------------------------------------------------------
+// GetAttribute(IMember): no attribute -> nullptr.
+// ---------------------------------------------------------------------------
+TEST(InheritanceHelperAttributesTest, MemberAttributeNotFoundYieldsNull) {
+    auto def = std::make_shared<TestTypeDefinition>("Foo", Compilation());
+    auto m = std::make_shared<TestMember>("M", SymbolKind::Method, def.get(), Compilation());
+    auto result = ILSpy::Decompiler::TypeSystem::InheritanceHelper::GetAttribute(
+        *m, ILSpy::Decompiler::TypeSystem::KnownAttribute::Serializable);
+    EXPECT_EQ(result, nullptr);
 }
 
 // ---------------------------------------------------------------------------

@@ -2645,6 +2645,32 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   for a derived "M"); the suite went RED first (1/7 fail -- verified by stubbing `GetBaseMembers` to
   `return {}`; the `BaseMemberMatchedAndSpecialized` case expects a real base member, the stub returns empty;
   the 6 empty/null-expecting tests pass vacuously) before the implementation made it green.
+  The `InheritanceHelper.GetDerivedMember` + `GetAttributes`/`GetAttribute` helpers (D505): the
+  remaining `InheritanceHelper` methods, completing the class. `GetDerivedMember(baseMember,
+  derivedType)` walks the derived type's `Methods`/`Properties`/`Events`/`Fields` for the member whose
+  `GetBaseMembers` includes `baseMember.MemberDefinition` (methods: name + parameter count + type-parameter
+  count pre-filter; properties: name + parameter count; events/fields: name match) -- the C# `is IMethod`/
+  `is IProperty`/`is IEvent`/`is IField` arms port to `dynamic_cast`. The 4 attribute helpers:
+  `GetAttributes(ITypeDefinition)` collects the base-type defs' `GetAttributes` (reversed, derived-first);
+  `GetAttribute(ITypeDefinition, KnownAttribute)` the first non-null `GetAttribute` up the chain;
+  `GetAttributes(IMember)` the override-chain loop (member's `GetAttributes`, then `GetBaseMember` while
+  `IsOverride`, with a `visitedMembers` cycle guard for cyclic inheritance); `GetAttribute(IMember,
+  KnownAttribute)` the first non-null up the override chain. The C# `baseMember.Compilation !=
+  derivedType.Compilation` cross-compilation guard is omitted (the port's `ICompilation&` references are
+  identity-equal in practice). Returns non-owning `const IAttribute*`/`const IMember*` snapshots (the type
+  defs/members own them). The test stubs were extended: the `LookupMethod` stub gained a configurable
+  `DeclaringTypeDefinition` (a `SetDeclaringTypeDefinition` setter) so the `GetDerivedMember` test's
+  derived method's `GetBaseMembers` finds the base method (the base method is a `LookupMethod` too, since
+  `GetDerivedMember`'s `dynamic_cast<IMethod>` arm requires a real `IMethod` -- a `TestMember` is only an
+  `IMember`); the `TestMember`/`TestTypeDefinition` stubs gained `IsOverride` + attribute config. The
+  `braced-init-list`-to-`std::vector` deduction crux (the `{}` in a `make_shared`/`SetMethods` call can't
+  be deduced) is worked around with typed `std::vector<T>{...}`. The leaf is dead in the CLI path
+  (`InheritanceHelper` is not yet called by `--csharp`) and the output is byte-identical. **8** new gtest
+  cases in 2 suites pin the override-method-found, the no-override-null, the type-def attributes aggregate
+  (derived-first), the type-def attribute first-non-null + not-found-null, the member attributes non-
+  override, and the member attribute first-non-null + not-found-null; the suite went RED first (5/8 fail --
+  verified by stubbing `GetDerivedMember` + the 4 attribute helpers to no-op/empty/null; the 3 null/empty-
+  expecting tests pass vacuously) before the implementation made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2663,7 +2689,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   D499 `MemberLookup.CreateResult` helper leaf + the D500 `MemberLookup.Lookup` public method leaf + the
   D501 `MemberLookup.LookupType` public method leaf + the D502 `MemberLookup.LookupIndexers` public method
   leaf + the D503 `MemberLookup.GetAccessibleMembers` public method leaf + the D504
-  `InheritanceHelper.GetBaseMember`/`GetBaseMembers` leaf are exercised
+  `InheritanceHelper.GetBaseMember`/`GetBaseMembers` leaf + the D505 `InheritanceHelper.GetDerivedMember` +
+  `GetAttributes`/`GetAttribute` leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param

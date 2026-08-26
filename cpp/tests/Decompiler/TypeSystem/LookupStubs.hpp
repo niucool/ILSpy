@@ -399,6 +399,11 @@ public:
     LookupMethod(std::string name, const ICompilation& compilation)
         : name_(std::move(name)), compilation_(compilation) {}
 
+    // A configurable `DeclaringTypeDefinition` for the `InheritanceHelper` base-member-matching tests
+    // (the default null exercises the null-short-circuit path; a real `GetDerivedMember` test sets this
+    // so the derived method's `GetBaseMembers` finds the base method).
+    void SetDeclaringTypeDefinition(const ITypeDefinition* d) { declaringTypeDefinition_ = d; }
+
     // --- ISymbol ---
     TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Method; }
     std::string Name() const override { return name_; }
@@ -413,7 +418,7 @@ public:
 
     // --- IEntity ---
     std::uint32_t MetadataToken() const override { return 0; }
-    const ITypeDefinition* DeclaringTypeDefinition() const override { return nullptr; }
+    const ITypeDefinition* DeclaringTypeDefinition() const override { return declaringTypeDefinition_; }
     ITypePtr DeclaringType() const override { return {}; }
     const IModule* ParentModule() const override { return nullptr; }
     std::vector<const IAttribute*> GetAttributes() const override { return {}; }
@@ -467,6 +472,7 @@ private:
     std::string name_;
     const ICompilation& compilation_;
     KnownType returnType_{ KnownTypeCode::Object };
+    const ITypeDefinition* declaringTypeDefinition_ = nullptr;
 };
 
 // A minimal `IEvent` for the `member is IEvent` TRUE side of IsInvocable.

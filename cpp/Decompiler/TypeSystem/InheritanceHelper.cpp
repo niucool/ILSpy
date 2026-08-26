@@ -22,13 +22,17 @@
 #include "Decompiler/TypeSystem/InheritanceHelper.hpp"
 
 #include "Decompiler/TypeSystem/Accessibility.hpp"  // Accessibility::Private (the > Private filter)
+#include "Decompiler/TypeSystem/IEvent.hpp"  // dynamic_cast<IEvent> (GetDerivedMember)
+#include "Decompiler/TypeSystem/IField.hpp"  // dynamic_cast<IField> (GetDerivedMember)
 #include "Decompiler/TypeSystem/IMethod.hpp"  // (not needed directly, but the GetAccessors return)
+#include "Decompiler/TypeSystem/IProperty.hpp"  // dynamic_cast<IProperty> (GetDerivedMember)
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"  // ITypeDefinition (the DeclaringTypeDefinition)
 #include "Decompiler/TypeSystem/ParameterListComparer.hpp"  // SignatureComparer::Ordinal
 #include "Decompiler/TypeSystem/SymbolKind.hpp"  // SymbolKind::Accessor
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // GetNonInterfaceBaseTypes / GetAllBaseTypes
 
 #include <algorithm>
+#include <unordered_set>
 
 namespace ILSpy::Decompiler::TypeSystem::InheritanceHelper {
 
@@ -107,6 +111,112 @@ std::vector<const IMember*> GetBaseMembers(const IMember& member, bool includeIm
         }
     }
     return result;
+}
+
+const IMember* GetDerivedMember(const IMember& baseMember, const ITypeDefinition& derivedType) {
+    const IMember* baseDef = baseMember.MemberDefinition();
+    bool includeInterfaces = baseDef->DeclaringTypeDefinition() != nullptr &&
+                             baseDef->DeclaringTypeDefinition()->Kind() == TypeKind::Interface;
+    // The C# `baseMember is IMethod method` / `is IProperty property` / `is IEvent` / `is IField` arms.
+    if (const auto* method = dynamic_cast<const IMethod*>(baseDef)) {
+        for (const IMethod* derivedMethod : derivedType.Methods()) {
+            if (derivedMethod->Name() == method->Name() &&
+                derivedMethod->Parameters().size() == method->Parameters().size() &&
+                derivedMethod->TypeParameters().size() == method->TypeParameters().size()) {
+                // The method could override the base method.
+                auto derivedBases = GetBaseMembers(*derivedMethod, includeInterfaces);
+                for (const IMember* m : derivedBases) {
+                    if (m->MemberDefinition() == baseDef) return derivedMethod;
+                }
+            }
+        }
+    }
+    if (const auto* property = dynamic_cast<const IProperty*>(baseDef)) {
+        for (const IProperty* derivedProperty : derivedType.Properties()) {
+            if (derivedProperty->Name() == property->Name() &&
+                derivedProperty->Parameters().size() == property->Parameters().size()) {
+                // The property could override the base property.
+                auto derivedBases = GetBaseMembers(*derivedProperty, includeInterfaces);
+                for (const IMember* m : derivedBases) {
+                    if (m->MemberDefinition() == baseDef) return derivedProperty;
+                }
+            }
+        }
+    }
+    if (dynamic_cast<const IEvent*>(baseDef) != nullptr) {
+        for (const IEvent* derivedEvent : derivedType.Events()) {
+            if (derivedEvent->Name() == baseDef->Name()) return derivedEvent;
+        }
+    }
+    if (dynamic_cast<const IField*>(baseDef) != nullptr) {
+        for (const IField* derivedField : derivedType.Fields()) {
+            if (derivedField->Name() == baseDef->Name()) return derivedField;
+        }
+    }
+    return nullptr;
+}
+
+std::vector<const IAttribute*> GetAttributes(const ITypeDefinition& typeDef) {
+    std::vector<const IAttribute*> result;
+    auto baseTypes = GetNonInterfaceBaseTypes(&typeDef);
+    std::reverse(baseTypes.begin(), baseTypes.end());  // C# Reverse -- derived-first
+    for (const IType* baseType : baseTypes) {
+        const ITypeDefinition* baseTypeDef = baseType->GetDefinition();
+        if (baseTypeDef == nullptr) continue;
+        for (const IAttribute* attr : baseTypeDef->GetAttributes()) {
+            result.push_back(attr);
+        }
+    }
+    return result;
+}
+
+const IAttribute* GetAttribute(const ITypeDefinition& typeDef, KnownAttribute attributeType) {
+    auto baseTypes = GetNonInterfaceBaseTypes(&typeDef);
+    std::reverse(baseTypes.begin(), baseTypes.end());
+    for (const IType* baseType : baseTypes) {
+        const ITypeDefinition* baseTypeDef = baseType->GetDefinition();
+        if (baseTypeDef == nullptr) continue;
+        const IAttribute* attr = baseTypeDef->GetAttribute(attributeType);
+        if (attr != nullptr) return attr;
+    }
+    return nullptr;
+}
+
+std::vector<const IAttribute*> GetAttributes(const IMember& member) {
+    std::vector<const IAttribute*> result;
+    std::unordered_set<const IMember*> visitedMembers;
+    const IMember* m = &member;
+    while (true) {
+        m = m->MemberDefinition();  // it's sufficient to look at the definitions
+        if (!visitedMembers.insert(m).second) {
+            // Abort if we seem to be in an infinite loop (cyclic inheritance).
+            break;
+        }
+        for (const IAttribute* attr : m->GetAttributes()) {
+            result.push_back(attr);
+        }
+        if (!m->IsOverride()) break;
+        const IMember* baseMember = GetBaseMember(*m);
+        if (baseMember == nullptr) break;
+        m = baseMember;
+    }
+    return result;
+}
+
+const IAttribute* GetAttribute(const IMember& member, KnownAttribute attributeType) {
+    std::unordered_set<const IMember*> visitedMembers;
+    const IMember* m = &member;
+    while (true) {
+        m = m->MemberDefinition();
+        if (!visitedMembers.insert(m).second) break;
+        const IAttribute* attr = m->GetAttribute(attributeType);
+        if (attr != nullptr) return attr;
+        if (!m->IsOverride()) break;
+        const IMember* baseMember = GetBaseMember(*m);
+        if (baseMember == nullptr) break;
+        m = baseMember;
+    }
+    return nullptr;
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem::InheritanceHelper
