@@ -2476,6 +2476,36 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   (1/5 fail -- a test-expectation bug: the class group's nested type survives `RemoveInterfaceMembers`,
   which only clears INTERFACE groups' nested types, not the class group's; the assertion expected
   `empty()`, fixed to `size() == 1`) before the fix made it green.
+  The `MemberLookup.CreateResult` helper (D499): `CSharp/Resolver/LookupHelpers.{hpp,cpp}` -- the last
+  of the `MemberLookup` Lookup-region private helpers. The C# `CreateResult(ResolveResult
+  targetResolveResult, List<LookupGroup> lookupGroups, string name, IReadOnlyList<IType>
+  typeArguments)` takes the populated `lookupGroups` and produces a `ResolveResult`: empty (all-hidden,
+  `lookupGroups.RemoveAll(g => g.AllHidden)` -> `erase(remove_if)`) -> `UnknownMemberResolveResult`;
+  any group with visible methods -> `MethodGroupResolveResult` (the `MethodListWithDeclaringType`
+  buckets per declaring type, `push_back`-ed from `lookupGroup.Methods()`); else the most-derived group
+  with nested types -> `TypeResolveResult` (or `AmbiguousTypeResolveResult` if `NestedTypes.Count > 1 ||
+  !NonMethodIsHidden || lookupGroups.Count > 1`); else a static `NonMethod` on a `ThisResolveResult`
+  target -> retarget to a `TypeResolveResult` target (the `is ThisResolveResult` dynamic_cast); else >1
+  group -> `AmbiguousMemberResolveResult`; else (single group, a non-method) -> `MemberResolveResult`
+  (the `isInEnumMemberInitializer` arm yields a constant `MemberResolveResult` for an enum field:
+  `field.DeclaringTypeDefinition.Kind == Enum` -> the 5-arg ctor with `EnumUnderlyingType` +
+  `IsConst` + `GetConstantValue`). Uses `MemberLookup` (for `isInEnumMemberInitializer_`), so the free
+  function takes a `const MemberLookup&` (a new public `IsInEnumMemberInitializer()` accessor added to
+  `MemberLookup.hpp`, the field being private). Returns an owning `std::shared_ptr<ResolveResult>` (the
+  C# returns a GC-owned reference). The `shared_from_this()` on the `const IType*` `DeclaringType` /
+  `targetResolveResult->Type()` returns `shared_ptr<const IType>`; `const_pointer_cast<IType>` drops the
+  const (the D477/`enable_shared_from_this` convention). The `MethodListWithDeclaringType` ctor takes
+  `ITypePtr` (an `ITypePtr` value, the D271 handle); `push_back` (it inherits `std::vector<const
+  IParameterizedMember*>`, no `Add`). The leaf is dead in the CLI path (the Lookup regions are not yet
+  wired) and the output is byte-identical. **7** new gtest cases in 1 suite pin the empty-groups ->
+  `UnknownMemberResolveResult`, the visible-methods -> `MethodGroupResolveResult` (bucket over the
+  declaring type, the method pointer preserved), the single-group nested-types (1 type, non-method
+  hidden) -> `TypeResolveResult` (NOT `AmbiguousTypeResolveResult`), the nested-types-with-visible-
+  non-method -> `AmbiguousTypeResolveResult`, the multiple-groups -> `AmbiguousMemberResolveResult`, the
+  single-group non-method -> `MemberResolveResult`, and the static-member-on-`ThisResolveResult`-target
+  retarget (the non-static stub keeps the `ThisResolveResult` target, documenting the non-retarget path);
+  the suite went RED first (7/7 fail -- verified by stubbing the `CreateResult` body to `return
+  nullptr`) before the implementation made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2490,7 +2520,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   D493 `GetMembersHelper.GetNestedTypes` routing leaf + the D494 `ParameterizedType.GetNestedTypes`
   routing arm leaf + the D495 `MemberLookup.LookupGroup` helper class leaf + the D496
   `MemberLookup.AddNestedTypes` helper leaf + the D497 `MemberLookup.AddMembers` helper leaf + the D498
-  `MemberLookup.RemoveInterfaceMembersHiddenByClassMembers` + `IsInterfaceOrSystemObject` helper leaf are exercised
+  `MemberLookup.RemoveInterfaceMembersHiddenByClassMembers` + `IsInterfaceOrSystemObject` helper leaf + the
+  D499 `MemberLookup.CreateResult` helper leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param

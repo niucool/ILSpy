@@ -104,6 +104,11 @@ public:
     {
     }
 
+    // The C# `bool isInEnumMemberInitializer` readonly field (read by the deferred `CreateResult`
+    // Lookup-region helper, D499, for the enum-field constant `MemberResolveResult` arm). A public
+    // accessor (the field is private; the `Detail::CreateResult` free function reads it through this).
+    bool IsInEnumMemberInitializer() const { return isInEnumMemberInitializer_; }
+
     // -------------------------------------------------------------------
     // IsAccessible
     // -------------------------------------------------------------------

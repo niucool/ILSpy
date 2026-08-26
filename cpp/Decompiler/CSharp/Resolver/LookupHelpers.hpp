@@ -49,8 +49,14 @@
 #include "Decompiler/TypeSystem/IMember.hpp"
 #include "Decompiler/TypeSystem/IParameterizedMember.hpp"
 
+#include <memory>
 #include <optional>
 #include <vector>
+
+// Forward declarations: `CreateResult` returns an owning `std::shared_ptr<ResolveResult>` and takes
+// one; `ResolveResult` is in `Decompiler/Semantics/ResolveResult.hpp` (forward-declared here to keep
+// the include graph minimal -- the helper only references it through a `shared_ptr`).
+namespace ILSpy::Decompiler::Semantics { class ResolveResult; }
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
 
@@ -118,6 +124,23 @@ void RemoveInterfaceMembersHiddenByClassMembers(std::vector<LookupGroup>& lookup
 // The C# `static bool IsInterfaceOrSystemObject(IType type)` -- "return true if type is an interface or
 // System.Object": `type.Kind == Interface || type.GetDefinition()?.KnownTypeCode == Object`.
 bool IsInterfaceOrSystemObject(const ILSpy::Decompiler::TypeSystem::IType& type);
+
+// The C# `ResolveResult CreateResult(ResolveResult targetResolveResult, List<LookupGroup> lookupGroups,
+// string name, IReadOnlyList<IType> typeArguments)`. Takes the populated `lookupGroups` and produces a
+// `ResolveResult`: empty (all-hidden) -> `UnknownMemberResolveResult`; any group with visible methods ->
+// `MethodGroupResolveResult`; else the most-derived group with nested types -> `TypeResolveResult` (or
+// `AmbiguousTypeResolveResult` if ambiguous); else a static `NonMethod` on a `ThisResolveResult` target
+// -> retarget to a `TypeResolveResult` target; else >1 group -> `AmbiguousMemberResolveResult`; else
+// (single group, a non-method) -> `MemberResolveResult` (the enum-member-initializer arm yields a
+// constant `MemberResolveResult` for an enum field). Uses `MemberLookup` (for
+// `isInEnumMemberInitializer_`), so the free function takes a `const MemberLookup&`. Returns an owning
+// `std::shared_ptr<ResolveResult>` (the C# returns a `ResolveResult` reference the GC owns).
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> CreateResult(
+    const MemberLookup& lookup,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> targetResolveResult,
+    std::vector<LookupGroup>& lookupGroups,
+    std::string name,
+    std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> typeArguments);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
 
