@@ -2708,6 +2708,22 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `ErrorCount`; an "does not matter" error does not); the suite went RED first (2/6 fail -- verified by
   stubbing `IsApplicable` to `return true` and `AddError` to not increment; the 4 ctor/property tests pass
   vacuously) before the implementation made it green.
+  The `TypeSystemExtensions.IsKnownType`/`IsArrayInterfaceType` helpers (D507): the C#
+  `IsKnownType(this IType type, KnownTypeCode knownType)` -- "Gets whether the type is the specified known
+  type. For generic known types, true for any parameterization (and also the definition itself)." -- is
+  `type.GetDefinition()?.KnownTypeCode == knownType` (2 lines); `IsArrayInterfaceType(this IType type)` is
+  `type.TypeParameterCount == 1` and the definition's `KnownTypeCode` is one of the 5 generic collection
+  interfaces (`IEnumerableOfT`/`ICollectionOfT`/`IListOfT`/`IReadOnlyCollectionOfT`/`IReadOnlyListOfT`). Both
+  are `TypeSystemExtensions` extension methods -> free functions in the `TypeSystem` namespace. The
+  `IsKnownType` helper is the most-used type-system predicate (referenced by `NullableType`/`TaskType`/
+  `TypeInference`/`OverloadResolution.ResolveParameterTypes`); `IsArrayInterfaceType` unblocks
+  `ResolveParameterTypes`'s `params IEnumerable<T>` -> `T` unpacking. The leaf is dead in the CLI path (the
+  helpers are not yet called by `--csharp`) and the output is byte-identical. **6** new gtest cases in 2
+  suites pin `IsKnownType` (an Object/Int32 def -> true/false; a non-definition type -> false) and
+  `IsArrayInterfaceType` (a parameterized `IEnumerable<T>` -> true; a non-collection TPC-1 type -> false;
+  `Object` (TPC 0) -> false; a non-definition -> false); the suite went RED first (2/6 fail -- verified by
+  stubbing both to `return false`; the 4 false-expecting tests pass vacuously) before the implementation
+  made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2727,7 +2743,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   D501 `MemberLookup.LookupType` public method leaf + the D502 `MemberLookup.LookupIndexers` public method
   leaf + the D503 `MemberLookup.GetAccessibleMembers` public method leaf + the D504
   `InheritanceHelper.GetBaseMember`/`GetBaseMembers` leaf + the D505 `InheritanceHelper.GetDerivedMember` +
-  `GetAttributes`/`GetAttribute` leaf + the D506 `OverloadResolution.Candidate` leaf are exercised
+  `GetAttributes`/`GetAttribute` leaf + the D506 `OverloadResolution.Candidate` leaf + the D507
+  `TypeSystemExtensions.IsKnownType`/`IsArrayInterfaceType` leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param

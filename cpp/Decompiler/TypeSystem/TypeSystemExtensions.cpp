@@ -85,4 +85,27 @@ bool IsDerivedFrom(const ITypeDefinition& type, KnownTypeCode baseType)
     return IsDerivedFrom(type, type.Compilation().FindType(baseType).GetDefinition());
 }
 
+bool IsKnownType(const IType& type, KnownTypeCode knownType) {
+    const ITypeDefinition* def = type.GetDefinition();
+    return def != nullptr && def->KnownTypeCode() == knownType;
+}
+
+bool IsArrayInterfaceType(const IType& type) {
+    if (type.TypeParameterCount() != 1)
+        return false;
+    const ITypeDefinition* def = type.GetDefinition();
+    if (def == nullptr)
+        return false;
+    switch (def->KnownTypeCode()) {
+        case KnownTypeCode::IEnumerableOfT:
+        case KnownTypeCode::ICollectionOfT:
+        case KnownTypeCode::IListOfT:
+        case KnownTypeCode::IReadOnlyCollectionOfT:
+        case KnownTypeCode::IReadOnlyListOfT:
+            return true;
+        default:
+            return false;
+    }
+}
+
 } // namespace ILSpy::Decompiler::TypeSystem

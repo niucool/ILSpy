@@ -104,4 +104,17 @@ bool IsDerivedFrom(const ITypeDefinition& type, const ITypeDefinition* baseType)
 // KnownTypeCode::None returns false (the C# has no known type to look up).
 bool IsDerivedFrom(const ITypeDefinition& type, KnownTypeCode baseType);
 
+// The C# `public static bool IsKnownType(this IType type, KnownTypeCode knownType)`:
+//
+// "Gets whether the type is the specified known type. For generic known types, this returns true for any
+// parameterization of the type (and also for the definition itself)." -- `type.GetDefinition()?.KnownTypeCode
+// == knownType`. A null definition yields false.
+bool IsKnownType(const IType& type, KnownTypeCode knownType);
+
+// The C# `public static bool IsArrayInterfaceType(this IType type)` -- whether the type is one of the
+// 5 generic collection interfaces (`IEnumerable<T>`/`ICollection<T>`/`IList<T>`/`IReadOnlyCollection<T>`/
+// `IReadOnlyList<T>`) with exactly 1 type parameter. The `params`-array/Span expansion in
+// `OverloadResolution.ResolveParameterTypes` uses this to unpack a `params IEnumerable<T>` into `T`.
+bool IsArrayInterfaceType(const IType& type);
+
 } // namespace ILSpy::Decompiler::TypeSystem

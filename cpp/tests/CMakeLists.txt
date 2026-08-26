@@ -61,6 +61,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Resolver/MemberLookupGetAccessibleMembers_Test.cpp
     Decompiler/TypeSystem/InheritanceHelper_Test.cpp
     Decompiler/CSharp/Resolver/OverloadResolutionCandidate_Test.cpp
+    Decompiler/TypeSystem/IsKnownType_Test.cpp
     Decompiler/TypeSystem/Nullability_Test.cpp
     Decompiler/TypeSystem/SignatureCallingConvention_Test.cpp
     Decompiler/TypeSystem/FunctionPointerType_Test.cpp
