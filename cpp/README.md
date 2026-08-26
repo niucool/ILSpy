@@ -2671,6 +2671,43 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   override, and the member attribute first-non-null + not-found-null; the suite went RED first (5/8 fail --
   verified by stubbing `GetDerivedMember` + the 4 attribute helpers to no-op/empty/null; the 3 null/empty-
   expecting tests pass vacuously) before the implementation made it green.
+  The `OverloadResolution.Candidate` nested class (D506): `CSharp/Resolver/OverloadResolutionCandidate.hpp` --
+  the per-candidate value type the C# overload resolution (C# spec draft-v11 section 12.6.4) builds per
+  candidate method. The C# `sealed class Candidate` (nested in `OverloadResolution`) holds the candidate's
+  `Member` (readonly `IParameterizedMember`), `IsExpandedForm` (readonly bool -- the params-expanded form),
+  the sized `ParameterTypes` (owning `std::vector<ITypePtr>` -- without substitution initially; `RunTypeInference`
+  substitutes), the mutable `ArgumentToParameterMap` (`std::vector<int>`), the `Errors`/`ErrorCount`/
+  `HasUnmappedOptionalParameters` flags, the mutable `InferredTypes` (owning `std::vector<ITypePtr>`), the
+  readonly `Parameters` (the member DEFINITION's parameters -- non-owning `const IParameter*`), the readonly
+  `TypeParameters` (the method definition's type parameters, for a generic method -- non-owning
+  `const ITypeParameter*`), and the mutable `ArgumentConversions` (owning `std::vector<std::shared_ptr<
+  Conversion>>`). The computed properties `ParamsCollectionType` (the params-collection `IType` or
+  `UnknownType()`), `IsGenericMethod` (`Member as IMethod` with `TypeParameters.Count > 0`),
+  `ArgumentsPassedToParams` (the count of arguments mapped to the params parameter index, only if expanded);
+  the `AddError` method accumulates the error mask and increments `ErrorCount` if the error makes the
+  candidate inapplicable. The static `IsApplicable` (a free function, the C# `public static` method)
+  returns whether the error mask (minus the `AmbiguousMatch | MethodConstraintsNotSatisfied` flags that
+  "do not matter for applicability") is `None` -- NOT `constexpr` (the `operator|` on the `[Flags]` enum is
+  `inline`, not `constexpr`). The C# nests `Candidate` inside `OverloadResolution`; the port makes it a
+  separate class `OverloadResolutionCandidate` in the `CSharp::Resolver` namespace (the
+  C++-nested-class-in-header-only convention is awkward; the later `OverloadResolution` leaf will include
+  this header). OWNING MODEL: `Member` is a non-owning `const IParameterizedMember*` (the type system owns
+  the member; the candidate observes it); `Parameters`/`TypeParameters` are non-owning (the member
+  DEFINITION owns them -- the ctor reads `member.MemberDefinition()->Parameters()` via `dynamic_cast`, the
+  C# `(IParameterizedMember)member.MemberDefinition` cast); the `ParameterTypes`/`InferredTypes`/
+  `ArgumentConversions` are owning (built fresh during inference/applicability). The `ParamsCollectionType`
+  returns `UnknownType()` for the not-params / not-expanded arm; the params arm aliases the last
+  parameter's `Type()` via `shared_from_this` (the `const IType&` is `enable_shared_from_this`). The leaf is
+  header-only (a value type, not in the ilspy `CMakeLists.txt`; only the test links it) and dead in the CLI
+  path (the `OverloadResolution` class is not yet ported) and the output is byte-identical. **6** new gtest
+  cases in 1 suite pin the ctor (Member/IsExpandedForm/Parameters from the definition/TypeParameters empty
+  for a non-generic method/ParameterTypes sized), `IsGenericMethod` false for a non-generic method,
+  `ParamsCollectionType` `UnknownType` for a non-params/non-expanded candidate, `ArgumentsPassedToParams` 0
+  for a non-expanded candidate, `IsApplicable` (None -> true, AmbiguousMatch alone -> true, a real error ->
+  false, MethodConstraintsNotSatisfied alone -> true), and `AddError` (an inapplicable error increments
+  `ErrorCount`; an "does not matter" error does not); the suite went RED first (2/6 fail -- verified by
+  stubbing `IsApplicable` to `return true` and `AddError` to not increment; the 4 ctor/property tests pass
+  vacuously) before the implementation made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2690,7 +2727,7 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   D501 `MemberLookup.LookupType` public method leaf + the D502 `MemberLookup.LookupIndexers` public method
   leaf + the D503 `MemberLookup.GetAccessibleMembers` public method leaf + the D504
   `InheritanceHelper.GetBaseMember`/`GetBaseMembers` leaf + the D505 `InheritanceHelper.GetDerivedMember` +
-  `GetAttributes`/`GetAttribute` leaf are exercised
+  `GetAttributes`/`GetAttribute` leaf + the D506 `OverloadResolution.Candidate` leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param
