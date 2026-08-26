@@ -2562,6 +2562,28 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   (NOT a target's type), and the Object-declaring-type no-nested-types -> `UnknownMember`; the suite went
   RED first (5/5 fail -- verified by stubbing the `LookupType` body to `return nullptr`) before the
   implementation made it green.
+  The `MemberLookup.LookupIndexers` public method (D502): `CSharp/Resolver/MemberLookup.cpp` -- the third of
+  the `MemberLookup` Lookup-region public methods. The C# `LookupIndexers(ResolveResult targetResolveResult)`
+  is the indexer lookup: `filter = p.IsIndexer && !p.IsExplicitInterfaceImplementation`; for each base type,
+  `GetProperties(filter, IgnoreInheritedMembers)`, `AddMembers(..., treatAllParameterizedMembersAsMethods:
+  true, ...)` (the indexer arm treats properties as "methods"), build a `LookupGroup` per base type if any;
+  if `targetType.Kind == TypeParameter`, `RemoveInterfaceMembersHiddenByClassMembers`; remove hidden groups
+  (`MethodsAreHidden || Methods.Count == 0`); return `MethodListWithDeclaringType[]` (one per group,
+  `DeclaringType` + `Methods`). Returns an owning `std::vector<MethodListWithDeclaringType>` (the C#
+  `IReadOnlyList<MethodListWith...>` of GC-owned buckets). Each bucket owns its `DeclaringType` (`ITypePtr`)
+  but NOT its `Methods` (non-owning `const IParameterizedMember*` -- the declaring base type owns the
+  properties; the bucket's `DeclaringType` keeps it alive via `shared_from_this`). The `IProperty*` from
+  `GetProperties` is upcast to `const IMember*` for `AddMembers` (a small copy; the C# `IEnumerable<IMember>`
+  covariance is implicit). UNLIKE `Lookup` (which uses `CreateResult` for a single `ResolveResult`),
+  `LookupIndexers` returns the method-list buckets directly (no `UnknownMemberResolveResult` arm -- the C#
+  returns an empty array for no indexers). The leaf is dead in the CLI path (the `LookupIndexers` method is
+  not yet called by `--csharp`) and the output is byte-identical. **4** new gtest cases in 1 suite pin the
+  no-indexers -> empty, the indexer -> one bucket (the indexer in `Methods`, the `DeclaringType` is the base
+  type), the non-indexer property filtered out (the `IsIndexer` filter), and the
+  explicit-interface-implementation indexer filtered out (`!IsExplicitInterfaceImplementation`); the suite
+  went RED first (1/4 fail -- verified by stubbing the `LookupIndexers` body to `return {}`; the
+  `IndexerYieldsOneBucket` case expects 1 bucket, the stub returns empty) before the implementation made it
+  green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2578,7 +2600,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `MemberLookup.AddNestedTypes` helper leaf + the D497 `MemberLookup.AddMembers` helper leaf + the D498
   `MemberLookup.RemoveInterfaceMembersHiddenByClassMembers` + `IsInterfaceOrSystemObject` helper leaf + the
   D499 `MemberLookup.CreateResult` helper leaf + the D500 `MemberLookup.Lookup` public method leaf + the
-  D501 `MemberLookup.LookupType` public method leaf are exercised
+  D501 `MemberLookup.LookupType` public method leaf + the D502 `MemberLookup.LookupIndexers` public method
+  leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param

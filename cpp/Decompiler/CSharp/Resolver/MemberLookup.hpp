@@ -41,6 +41,7 @@
 
 #include "Decompiler/Semantics/ResolveResult.hpp"
 #include "Decompiler/Semantics/ThisResolveResult.hpp"
+#include "Decompiler/CSharp/Resolver/MethodGroupResolveResult.hpp"  // MethodListWithDeclaringType (LookupIndexers return)
 #include "Decompiler/TypeSystem/IEntity.hpp"
 #include "Decompiler/TypeSystem/IEvent.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
@@ -221,6 +222,15 @@ public:
         std::string name,
         std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> typeArguments,
         bool parameterizeResultType = true);
+
+    // The C# `public IReadOnlyList<MethodListWithDeclaringType> LookupIndexers(ResolveResult
+    // targetResolveResult)` -- the indexer lookup. Defined out-of-line in `MemberLookup.cpp`. Returns
+    // an owning `std::vector<MethodListWithDeclaringType>` (the C# `IReadOnlyList<MethodListWith...>` of
+    // GC-owned buckets). Each bucket owns its `DeclaringType` (`ITypePtr`) but NOT its `Methods` (non-
+    // owning `const IParameterizedMember*` -- the declaring type owns the methods; the bucket's
+    // `DeclaringType` keeps it alive).
+    std::vector<MethodListWithDeclaringType> LookupIndexers(
+        const ILSpy::Decompiler::Semantics::ResolveResult& targetResolveResult);
 
 private:
     // The C# `bool IsInternalAccessible(IModule module)`.

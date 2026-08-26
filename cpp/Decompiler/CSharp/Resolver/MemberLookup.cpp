@@ -34,6 +34,7 @@
 #include "Decompiler/Semantics/TypeResolveResult.hpp"  // TypeResolveResult (LookupType)
 #include "Decompiler/Semantics/UnknownMemberResolveResult.hpp"  // UnknownMemberResolveResult
 #include "Decompiler/TypeSystem/IType.hpp"  // GetMembers / GetMethods / GetNestedTypes / GetNonInterfaceBaseTypes
+#include "Decompiler/TypeSystem/IProperty.hpp"  // GetProperties (LookupIndexers)
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"  // ITypeDefinition (the filter arg)
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // GetNonInterfaceBaseTypes
 #include "Decompiler/TypeSystem/SymbolKind.hpp"  // SymbolKind::Indexer / Operator
@@ -188,6 +189,65 @@ std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> MemberLookup::Looku
     }
     return std::make_shared<ILSpy::Decompiler::Semantics::TypeResolveResult>(
         resultGroup.NestedTypes().front());
+}
+
+std::vector<MethodListWithDeclaringType> MemberLookup::LookupIndexers(
+    const ILSpy::Decompiler::Semantics::ResolveResult& targetResolveResult) {
+    using namespace ILSpy::Decompiler::TypeSystem;
+
+    const IType& targetType = targetResolveResult.Type();
+    bool allowProtectedAccess = IsProtectedAccessAllowed(targetResolveResult);
+    // The C# `filter`: `p.IsIndexer && !p.IsExplicitInterfaceImplementation`.
+    auto filter = [](const IProperty* p) {
+        return p != nullptr && p->IsIndexer() && !p->IsExplicitInterfaceImplementation();
+    };
+
+    std::vector<LookupGroup> lookupGroups;
+    for (const IType* type : GetNonInterfaceBaseTypes(&targetType)) {
+        std::optional<std::vector<const IType*>> typeBaseTypes;
+        std::optional<std::vector<const IParameterizedMember*>> newMethods;
+        const IMember* newNonMethod = nullptr;
+
+        std::vector<const IProperty*> properties =
+            type->GetProperties(filter, GetMemberOptions::IgnoreInheritedMembers);
+        // AddMembers takes `const IMember*` -- upcast `const IProperty*` to `const IMember*`.
+        std::vector<const IMember*> members;
+        for (const IProperty* p : properties) members.push_back(p);
+        Detail::AddMembers(*this, *type, members, allowProtectedAccess, lookupGroups,
+                           /*treatAllParameterizedMembersAsMethods=*/true, typeBaseTypes, newMethods,
+                           newNonMethod);
+
+        if (newMethods.has_value() || newNonMethod != nullptr) {
+            lookupGroups.emplace_back(
+                type,
+                nullptr,
+                newMethods.has_value() ? &*newMethods : nullptr,
+                newNonMethod);
+        }
+    }
+
+    // Remove interface members hidden by class members.
+    if (targetType.Kind() == TypeKind::TypeParameter) {
+        Detail::RemoveInterfaceMembersHiddenByClassMembers(lookupGroups);
+    }
+
+    // Remove all hidden groups (the C# `g.MethodsAreHidden || g.Methods.Count == 0`).
+    lookupGroups.erase(std::remove_if(lookupGroups.begin(), lookupGroups.end(),
+        [](const LookupGroup& g) {
+            return g.MethodsAreHidden() || g.Methods().empty();
+        }), lookupGroups.end());
+
+    std::vector<MethodListWithDeclaringType> methodLists;
+    methodLists.reserve(lookupGroups.size());
+    for (const LookupGroup& g : lookupGroups) {
+        // `MethodListWithDeclaringType(ITypePtr, const std::vector<const IParameterizedMember*>&)` --
+        // the DeclaringType aliases via `shared_from_this` (the base type owns the methods; the bucket
+        // keeps it alive).
+        methodLists.emplace_back(
+            std::const_pointer_cast<IType>(g.DeclaringType()->shared_from_this()),
+            g.Methods());
+    }
+    return methodLists;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver
