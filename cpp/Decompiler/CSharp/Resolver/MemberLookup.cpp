@@ -30,8 +30,11 @@
 
 #include "Decompiler/CSharp/Resolver/LookupGroup.hpp"  // the per-(type, name) group
 #include "Decompiler/CSharp/Resolver/LookupHelpers.hpp"  // the Detail:: helpers
+#include "Decompiler/Semantics/AmbiguousResolveResult.hpp"  // AmbiguousTypeResolveResult (LookupType)
+#include "Decompiler/Semantics/TypeResolveResult.hpp"  // TypeResolveResult (LookupType)
+#include "Decompiler/Semantics/UnknownMemberResolveResult.hpp"  // UnknownMemberResolveResult
 #include "Decompiler/TypeSystem/IType.hpp"  // GetMembers / GetMethods / GetNestedTypes / GetNonInterfaceBaseTypes
-#include "Decompiler/TypeSystem/ITypeDefinition.hpp"  // ITypeDefinition (the nestedTypeFilter arg)
+#include "Decompiler/TypeSystem/ITypeDefinition.hpp"  // ITypeDefinition (the filter arg)
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // GetNonInterfaceBaseTypes
 #include "Decompiler/TypeSystem/SymbolKind.hpp"  // SymbolKind::Indexer / Operator
 
@@ -125,6 +128,66 @@ std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> MemberLookup::Looku
         std::shared_ptr<ResolveResult>(const_cast<ResolveResult*>(&targetResolveResult),
                                        [](ResolveResult*){}),  // non-owning alias (the caller owns the target)
         lookupGroups, std::move(name), std::move(typeArguments));
+}
+
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> MemberLookup::LookupType(
+    const ILSpy::Decompiler::TypeSystem::IType& declaringType,
+    std::string name,
+    std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> typeArguments,
+    bool parameterizeResultType) {
+    using namespace ILSpy::Decompiler::TypeSystem;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+
+    int typeArgumentCount = static_cast<int>(typeArguments.size());
+    // The C# `filter`: `InnerTypeParameterCount(d) == typeArgumentCount && d.Name == name &&
+    // IsAccessible(d, true)`.
+    auto filter = [typeArgumentCount, &name, this](const ITypeDefinition* d) {
+        return d != nullptr && Detail::InnerTypeParameterCount(*d) == typeArgumentCount &&
+               d->Name() == name && IsAccessible(*d, true);
+    };
+
+    std::vector<LookupGroup> lookupGroups;
+    if (declaringType.Kind() != TypeKind::TypeParameter) {
+        for (const IType* type : GetNonInterfaceBaseTypes(&declaringType)) {
+            std::optional<std::vector<const IType*>> typeBaseTypes;
+            std::optional<std::vector<ITypePtr>> newNestedTypes;
+
+            std::vector<ITypePtr> nestedTypes;
+            if (parameterizeResultType) {
+                nestedTypes = type->GetNestedTypes(typeArguments, filter,
+                                                   GetMemberOptions::IgnoreInheritedMembers);
+            } else {
+                nestedTypes = type->GetNestedTypes(filter,
+                    GetMemberOptions::IgnoreInheritedMembers | GetMemberOptions::ReturnMemberDefinitions);
+            }
+            Detail::AddNestedTypes(*type, nestedTypes, typeArgumentCount,
+                                   lookupGroups, typeBaseTypes, newNestedTypes);
+
+            if (newNestedTypes.has_value()) {
+                lookupGroups.emplace_back(type, &*newNestedTypes, nullptr, nullptr);
+            }
+        }
+    }
+
+    // Remove all hidden groups (the C# `lookupGroups.RemoveAll(g => g.AllHidden)`).
+    lookupGroups.erase(std::remove_if(lookupGroups.begin(), lookupGroups.end(),
+        [](const LookupGroup& g) { return g.AllHidden(); }), lookupGroups.end());
+
+    if (lookupGroups.empty()) {
+        // The C# `new UnknownMemberResolveResult(declaringType, name, typeArguments)` -- the declaring
+        // type (NOT a target's type; `LookupType` has no `ResolveResult` target).
+        return std::make_shared<ILSpy::Decompiler::Semantics::UnknownMemberResolveResult>(
+            ITypePtr(const_cast<IType*>(&declaringType)->shared_from_this()),
+            std::move(name), std::move(typeArguments));
+    }
+
+    LookupGroup& resultGroup = lookupGroups.back();
+    if (resultGroup.NestedTypes().size() > 1 || lookupGroups.size() > 1) {
+        return std::make_shared<ILSpy::Decompiler::Semantics::AmbiguousTypeResolveResult>(
+            resultGroup.NestedTypes().front());
+    }
+    return std::make_shared<ILSpy::Decompiler::Semantics::TypeResolveResult>(
+        resultGroup.NestedTypes().front());
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

@@ -2538,6 +2538,30 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `GetMethods(typeArguments, ...)` arm, and the Object-target no-crash; the suite went RED first (5/5
   fail -- verified by stubbing the `Lookup` body to `return nullptr`) before the implementation made it
   green.
+  The `MemberLookup.LookupType` public method (D501): `CSharp/Resolver/MemberLookup.cpp` -- the second of
+  the `MemberLookup` Lookup-region public methods. The C# `LookupType(IType declaringType, string name,
+  IReadOnlyList<IType> typeArguments, bool parameterizeResultType = true)` is the type-name lookup: for
+  each base type (base-first via `GetNonInterfaceBaseTypes`), fetch nested types (parameterized via
+  `GetNestedTypes(typeArguments, filter, IgnoreInheritedMembers)` if `parameterizeResultType`, else
+  `GetNestedTypes(filter, IgnoreInheritedMembers | ReturnMemberDefinitions)`) + `AddNestedTypes`; remove
+  `AllHidden` groups; if empty -> `UnknownMemberResolveResult(declaringType, name, typeArguments)` (the
+  DECLARING type, NOT a target's type -- `LookupType` has no `ResolveResult` target); else the most-derived
+  group with nested types: `>1` nested type OR `>1` group -> `AmbiguousTypeResolveResult`, else
+  `TypeResolveResult`. A `TypeKind.TypeParameter` declaring type skips the loop (no nested types). The
+  `filter` (the C# `Predicate<ITypeDefinition>` delegate) ports to a lambda capturing `typeArgumentCount`,
+  `name`, `this`; it checks `InnerTypeParameterCount(d) == typeArgumentCount && d.Name == name &&
+  IsAccessible(d, true)` (the D496 `Detail::InnerTypeParameterCount`). UNLIKE `Lookup`, `LookupType` has no
+  `AddMembers` arm (it's a type lookup, not a member lookup) and no `RemoveInterfaceMembersHiddenByClass
+  Members` (that's only for the type-parameter target case in `Lookup`); the result is always
+  `UnknownMember`/`AmbiguousType`/`Type` (no `MethodGroup`/`Member`). The `UnknownMemberResolveResult` ctor
+  takes `ITypePtr` -- the declaring type aliases via `shared_from_this()` (a `const IType&` is never null,
+  the D271 handle). The leaf is dead in the CLI path (the `LookupType` method is not yet called by
+  `--csharp`) and the output is byte-identical. **5** new gtest cases in 1 suite pin the no-nested-types ->
+  `UnknownMemberResolveResult`, the `TypeKind.TypeParameter` declaring type -> `UnknownMember` (loop
+  skipped), the `parameterizeResultType=false` no-crash, the `UnknownMember` carries the declaring type
+  (NOT a target's type), and the Object-declaring-type no-nested-types -> `UnknownMember`; the suite went
+  RED first (5/5 fail -- verified by stubbing the `LookupType` body to `return nullptr`) before the
+  implementation made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2553,7 +2577,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   routing arm leaf + the D495 `MemberLookup.LookupGroup` helper class leaf + the D496
   `MemberLookup.AddNestedTypes` helper leaf + the D497 `MemberLookup.AddMembers` helper leaf + the D498
   `MemberLookup.RemoveInterfaceMembersHiddenByClassMembers` + `IsInterfaceOrSystemObject` helper leaf + the
-  D499 `MemberLookup.CreateResult` helper leaf + the D500 `MemberLookup.Lookup` public method leaf are exercised
+  D499 `MemberLookup.CreateResult` helper leaf + the D500 `MemberLookup.Lookup` public method leaf + the
+  D501 `MemberLookup.LookupType` public method leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param

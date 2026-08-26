@@ -211,6 +211,17 @@ public:
         std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> typeArguments,
         bool isInvocation);
 
+    // The C# `public ResolveResult LookupType(IType declaringType, string name, IReadOnlyList<IType>
+    // typeArguments, bool parameterizeResultType = true)`. Defined out-of-line in `MemberLookup.cpp`
+    // (composes the `Detail::` helpers). Returns an owning `std::shared_ptr<ResolveResult>`. The
+    // `declaringType` is taken by `const IType&` (references are never null, the C#
+    // `ArgumentNullException` convention); `name`/`typeArguments` by value.
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> LookupType(
+        const ILSpy::Decompiler::TypeSystem::IType& declaringType,
+        std::string name,
+        std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> typeArguments,
+        bool parameterizeResultType = true);
+
 private:
     // The C# `bool IsInternalAccessible(IModule module)`.
     bool IsInternalAccessible(const ILSpy::Decompiler::TypeSystem::IModule* module) const
