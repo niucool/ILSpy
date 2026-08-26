@@ -53,7 +53,10 @@
 #include "Decompiler/TypeSystem/TypeKind.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
+#include <memory>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
 
@@ -191,6 +194,22 @@ public:
         }
         throw std::logic_error("MemberLookup::IsAccessible: Invalid value for Accessibility");
     }
+
+    // -------------------------------------------------------------------
+    // Lookup region (D500) -- the public Lookup methods composing the `Detail::` helpers.
+    // -------------------------------------------------------------------
+
+    // The C# `public ResolveResult Lookup(ResolveResult targetResolveResult, string name,
+    // IReadOnlyList<IType> typeArguments, bool isInvocation)`. Defined out-of-line in `MemberLookup.cpp`
+    // (composes the `Detail::` helpers from `LookupHelpers.hpp`, which includes this header -- a header
+    // cycle if inline). Returns an owning `std::shared_ptr<ResolveResult>` (the C# returns a GC-owned
+    // reference). The `name`/`typeArguments` are taken by value (the C# `string`/`IReadOnlyList<IType>`,
+    // passed through to `CreateResult`).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> Lookup(
+        const ILSpy::Decompiler::Semantics::ResolveResult& targetResolveResult,
+        std::string name,
+        std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> typeArguments,
+        bool isInvocation);
 
 private:
     // The C# `bool IsInternalAccessible(IModule module)`.

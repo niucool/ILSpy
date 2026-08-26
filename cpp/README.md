@@ -2506,6 +2506,38 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   retarget (the non-static stub keeps the `ThisResolveResult` target, documenting the non-retarget path);
   the suite went RED first (7/7 fail -- verified by stubbing the `CreateResult` body to `return
   nullptr`) before the implementation made it green.
+  The `MemberLookup.Lookup` public method (D500): `CSharp/Resolver/MemberLookup.cpp` -- the first of
+  the `MemberLookup` Lookup-region PUBLIC methods. The C# `Lookup(ResolveResult targetResolveResult,
+  string name, IReadOnlyList<IType> typeArguments, bool isInvocation)` composes the `Detail::` helpers
+  (`AddNestedTypes` / `AddMembers` / `RemoveInterfaceMembersHiddenByClassMembers` / `CreateResult`) into a
+  single `ResolveResult`: for each base type (base-first via `GetNonInterfaceBaseTypes`), fetch nested
+  types (if `!isInvocation && !targetIsTypeParameter`, via `GetNestedTypes(typeArguments, nestedTypeFilter,
+  IgnoreInheritedMembers)`) + `AddNestedTypes`, fetch members (`GetMembers(memberFilter,
+  IgnoreInheritedMembers)` if `typeArguments` empty, else `GetMethods(typeArguments, memberFilter,
+  IgnoreInheritedMembers)`; if `isInvocation`, filter to `IsInvocable` as a post-filter since it must be
+  done after type substitution) + `AddMembers`, build a `LookupGroup` per base type; if
+  `targetIsTypeParameter`, `RemoveInterfaceMembersHiddenByClassMembers`; `CreateResult`. It uses
+  instance state (`IsProtectedAccessAllowed`, `IsAccessible`, `IsInvocable`, `IsInEnumMemberInitializer`
+  via `CreateResult`), so it is a `MemberLookup` method, NOT a free function (the `Detail::` helpers are
+  free; the public Lookup methods are instance methods composing them). It is OUT-OF-LINE in
+  `MemberLookup.cpp` (composes the `Detail::` helpers from `LookupHelpers.hpp`, which includes
+  `MemberLookup.hpp` -- a header cycle if inline). The `nestedTypeFilter`/`memberFilter` (the C#
+  `Predicate<ITypeDefinition>`/`Predicate<IMember>` delegates) port to lambdas capturing `name`,
+  `allowProtectedAccess`, `this`. The `ref` lazily-init `typeBaseTypes`/`newNestedTypes`/`newMethods` map
+  to `std::optional<...>` (the `Detail::` helper signatures); `newNonMethod` is a plain `const IMember*`
+  (the C# `ref IMember`). The `LookupGroup` is `emplace_back`-ed with `&*optional` (or nullptr) for the
+  nullable vectors. The `CreateResult` target is a non-owning aliasing `shared_ptr` (a no-op deleter) --
+  the caller owns the `targetResolveResult`; the `Lookup` method takes it by `const&` (references are
+  never null, the C# `ArgumentNullException` convention). The `typeArguments`-non-empty arm fetches
+  `GetMethods(typeArguments, ...)` returning `std::vector<const IMethod*>`, upcast to `const IMember*`
+  for `AddMembers` (a small copy; the C# `IEnumerable<IMember>` covariance is implicit). The leaf is dead
+  in the CLI path (the `Lookup` method is not yet called by `--csharp`) and the output is byte-identical.
+  **5** new gtest cases in 1 suite pin the no-members -> `UnknownMemberResolveResult`, the method-lookup
+  path (the stub has no methods -> `UnknownMember`, documenting the `GetMembers` arm), the
+  `isInvocation=true` post-filter (no invocable members -> `UnknownMember`), the `typeArguments`-non-empty
+  `GetMethods(typeArguments, ...)` arm, and the Object-target no-crash; the suite went RED first (5/5
+  fail -- verified by stubbing the `Lookup` body to `return nullptr`) before the implementation made it
+  green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2521,7 +2553,7 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   routing arm leaf + the D495 `MemberLookup.LookupGroup` helper class leaf + the D496
   `MemberLookup.AddNestedTypes` helper leaf + the D497 `MemberLookup.AddMembers` helper leaf + the D498
   `MemberLookup.RemoveInterfaceMembersHiddenByClassMembers` + `IsInterfaceOrSystemObject` helper leaf + the
-  D499 `MemberLookup.CreateResult` helper leaf are exercised
+  D499 `MemberLookup.CreateResult` helper leaf + the D500 `MemberLookup.Lookup` public method leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param
