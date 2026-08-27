@@ -2747,6 +2747,31 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   (Rank != 1); an expanded non-array/non-Span/non-interface last param returns false (cannot unpack);
   the suite went RED first (4/4 fail -- verified by stubbing to `return true` without writing types)
   before the implementation made it green.
+  The `OverloadResolution.MapCorrespondingParameters` helper (D509): the C#
+  `void MapCorrespondingParameters(Candidate candidate)` implements the C# spec (draft-v11 section 12.6.2.2)
+  "Corresponding parameters" (incl. the non-trailing named-argument rule from C# 7.2). It maps each argument
+  to a parameter -- by position, or by name for trailing named args -- writing
+  `candidate.ArgumentToParameterMap` (argument index -> parameter index, -1 unmapped). The C# goes backwards
+  (`i` from `arguments.Length - 1` down) so `hasPositionalArgument` detects non-trailing named args: once a
+  positional arg is seen, all earlier args are positional (a non-trailing named arg maps by position but
+  must match its parameter's name, else `NoParameterFoundForNamedArgument`). The `arguments`/`argumentNames`
+  are `OverloadResolution` ctor fields; the `Detail::` free function takes them as parameters
+  (`argumentCount` + `argumentNames`, empty-string == positional -- the C# `null` entry). The three error
+  arms: `TooManyPositionalArguments` (positional arg past `ParameterTypes` in the non-expanded form),
+  `NoParameterFoundForNamedArgument` (a non-trailing named arg whose name mismatches; a trailing named arg
+  that matches no parameter; a named arg past `ParameterTypes` in the expanded form). The expanded form
+  maps overflow args to the last parameter index (`ParameterTypes.Length - 1`). It is the second
+  `OverloadResolution` engine step (after `ResolveParameterTypes`, before `RunTypeInference`/
+  `CheckApplicability`) and is self-contained (no `TypeInference`/`CSharpConversions` deps). The leaf is
+  dead in the CLI path (the helper is not yet called by `--csharp`) and the output is byte-identical.
+  **6** new gtest cases in 1 suite pin: an all-positional count == ParameterTypes identity map (no errors);
+  too many positional args (not expanded) -> overflow -1, `TooManyPositionalArguments` set, `ErrorCount` == 2
+  (the error fires per overflow arg); the expanded form maps overflow args to the last param index; a
+  trailing named arg matching a param name -> maps to that index; a trailing named arg matching no param ->
+  -1, `NoParameterFoundForNamedArgument`; a non-trailing named arg (followed by positional) whose name
+  mismatches its positional parameter -> still maps by position but sets `NoParameterFoundForNamedArgument`;
+  the suite went RED first (6/6 fail -- verified by stubbing to a no-op that writes nothing) before the
+  implementation made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2768,7 +2793,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `InheritanceHelper.GetBaseMember`/`GetBaseMembers` leaf + the D505 `InheritanceHelper.GetDerivedMember` +
   `GetAttributes`/`GetAttribute` leaf + the D506 `OverloadResolution.Candidate` leaf + the D507
   `TypeSystemExtensions.IsKnownType`/`IsArrayInterfaceType` leaf + the D508
-  `OverloadResolution.ResolveParameterTypes` leaf are exercised
+  `OverloadResolution.ResolveParameterTypes` leaf + the D509
+  `OverloadResolution.MapCorrespondingParameters` leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param

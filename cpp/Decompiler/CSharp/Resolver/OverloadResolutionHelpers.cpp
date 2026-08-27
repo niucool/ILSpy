@@ -21,11 +21,15 @@
 
 #include "Decompiler/CSharp/Resolver/OverloadResolutionHelpers.hpp"
 
+#include "Decompiler/CSharp/Resolver/OverloadResolutionErrors.hpp"  // TooManyPositionalArguments / NoParameterFoundForNamedArgument
 #include "Decompiler/TypeSystem/IParameterizedMember.hpp"  // Member->Parameters (specialized)
 #include "Decompiler/TypeSystem/IParameter.hpp"  // IParameter::Type
 #include "Decompiler/TypeSystem/IType.hpp"  // ArrayType / ParameterizedType
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"  // SpanOfT / ReadOnlySpanOfT
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // IsKnownType / IsArrayInterfaceType
+
+#include <string>
+#include <vector>
 
 namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 
@@ -69,6 +73,52 @@ bool ResolveParameterTypes(OverloadResolutionCandidate& candidate, bool useSpeci
         parameterTypes[i] = type;
     }
     return true;
+}
+
+void MapCorrespondingParameters(OverloadResolutionCandidate& candidate,
+                                std::size_t argumentCount,
+                                const std::vector<std::string>& argumentNames) {
+    using namespace ILSpy::Decompiler::TypeSystem;
+    auto& map = candidate.ArgumentToParameterMap();
+    map.assign(argumentCount, -1);  // the C# `new int[arguments.Length]` (init -1 in the loop)
+    const auto& parameterTypes = candidate.ParameterTypes();
+    const auto parameterTypesLen = parameterTypes.size();
+    bool hasPositionalArgument = false;
+    // Go backwards, so `hasPositionalArgument` tells us whether there are non-trailing named args.
+    for (std::size_t i = argumentCount; i-- > 0;) {
+        map[i] = -1;
+        const std::string& argName = (i < argumentNames.size()) ? argumentNames[i] : std::string{};
+        if (argName.empty() || hasPositionalArgument) {
+            hasPositionalArgument = true;
+            if (i < parameterTypesLen) {
+                map[i] = static_cast<int>(i);
+                if (!argName.empty() && argName != candidate.Parameters()[i]->Name()) {
+                    // Non-trailing named argument must match name.
+                    candidate.AddError(OverloadResolutionErrors::NoParameterFoundForNamedArgument);
+                }
+            } else if (candidate.IsExpandedForm()) {
+                map[i] = static_cast<int>(parameterTypesLen - 1);
+                if (!argName.empty()) {
+                    // Can't use a non-trailing named argument here.
+                    candidate.AddError(OverloadResolutionErrors::NoParameterFoundForNamedArgument);
+                }
+            } else {
+                candidate.AddError(OverloadResolutionErrors::TooManyPositionalArguments);
+            }
+        } else {
+            // (Trailing) named argument -- scan all parameters for a name match (last match wins).
+            int matchedIndex = -1;
+            for (std::size_t j = 0; j < candidate.Parameters().size(); j++) {
+                if (argName == candidate.Parameters()[j]->Name()) {
+                    matchedIndex = static_cast<int>(j);
+                }
+            }
+            map[i] = matchedIndex;
+            if (map[i] < 0) {
+                candidate.AddError(OverloadResolutionErrors::NoParameterFoundForNamedArgument);
+            }
+        }
+    }
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

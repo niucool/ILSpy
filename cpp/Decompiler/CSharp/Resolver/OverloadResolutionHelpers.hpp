@@ -41,4 +41,16 @@ namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 // path reads the original formal parameters (`candidate.Parameters[i].Type`).
 bool ResolveParameterTypes(OverloadResolutionCandidate& candidate, bool useSpecializedParameters);
 
+// The C# `void MapCorrespondingParameters(Candidate candidate)` -- the C# spec (draft-v11 section 12.6.2.2)
+// "Corresponding parameters" (incl. the non-trailing named-argument rule from C# 7.2). Maps each argument
+// to a parameter (by position, or by name for trailing named args), writing
+// `candidate.ArgumentToParameterMap` (argument index -> parameter index, -1 unmapped). The `arguments`/
+// `argumentNames` are `OverloadResolution` ctor fields; the free function takes them as parameters:
+// `argumentCount` (the `arguments.Length`) and `argumentNames` (the per-arg name, empty-string == positional
+// -- the C# `null` entry). The C# goes backwards (`i` from `arguments.Length - 1` down) so
+// `hasPositionalArgument` detects non-trailing named args; the port mirrors that exactly.
+void MapCorrespondingParameters(OverloadResolutionCandidate& candidate,
+                                std::size_t argumentCount,
+                                const std::vector<std::string>& argumentNames);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
