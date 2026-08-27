@@ -2724,6 +2724,29 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `Object` (TPC 0) -> false; a non-definition -> false); the suite went RED first (2/6 fail -- verified by
   stubbing both to `return false`; the 4 false-expecting tests pass vacuously) before the implementation
   made it green.
+  The `OverloadResolution.ResolveParameterTypes` helper (D508): the C#
+  `bool ResolveParameterTypes(Candidate candidate, bool useSpecializedParameters)` reads each formal
+  parameter's type and -- for the expanded form's last parameter -- unpacks a single-dim array
+  (`ArrayType` with `Rank()==1` -> `Element`), a `Span<T>`/`ReadOnlySpan<T>` (`IsKnownType` ->
+  `TypeArguments[0]`), or an array-interface (`IsArrayInterfaceType` -> `TypeArguments[0]`); if the last
+  param's type is not unpackable it returns false (abort the expanded-form candidate). The C# uses
+  `type is ArrayType arrayType && arrayType.Dimensions == 1` (the port's `dynamic_cast<const ArrayType*>`
+  + `Rank()`); `type.TypeArguments[0]` on `IType` works in C# via `ParameterizedType`'s `IType`
+  implementation, but the port's `TypeArguments()` lives on `ParameterizedType` not `IType`, so the
+  `Span`/array-interface arms `dynamic_cast<const ParameterizedType*>` (with a null/empty guard) before
+  indexing. It is a `Detail::` free function over `OverloadResolutionCandidate&` in
+  `CSharp/Resolver/OverloadResolutionHelpers.{hpp,cpp}` (the C# private method lifted to a free function
+  for TDD testability). The `useSpecializedParameters=true` arm reads `candidate.Member()->Parameters()[i]`
+  (the specialized member's parameters); the common `false` arm reads `candidate.Parameters()[i]->Type()`
+  (the original formal parameter types). It is the first `OverloadResolution` engine step (before
+  `MapCorrespondingParameters`/`RunTypeInference`/`CheckApplicability`) and depends on the D507
+  `IsKnownType`/`IsArrayInterfaceType` helpers. The leaf is dead in the CLI path (the helper is not yet
+  called by `--csharp`) and the output is byte-identical. **4** new gtest cases in 1 suite pin: a
+  non-expanded candidate copies the formal parameter types verbatim (returns true); an expanded
+  single-dim array params unpacks to the element type; an expanded multi-dim array params returns false
+  (Rank != 1); an expanded non-array/non-Span/non-interface last param returns false (cannot unpack);
+  the suite went RED first (4/4 fail -- verified by stubbing to `return true` without writing types)
+  before the implementation made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2744,7 +2767,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   leaf + the D503 `MemberLookup.GetAccessibleMembers` public method leaf + the D504
   `InheritanceHelper.GetBaseMember`/`GetBaseMembers` leaf + the D505 `InheritanceHelper.GetDerivedMember` +
   `GetAttributes`/`GetAttribute` leaf + the D506 `OverloadResolution.Candidate` leaf + the D507
-  `TypeSystemExtensions.IsKnownType`/`IsArrayInterfaceType` leaf are exercised
+  `TypeSystemExtensions.IsKnownType`/`IsArrayInterfaceType` leaf + the D508
+  `OverloadResolution.ResolveParameterTypes` leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param
