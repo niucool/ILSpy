@@ -121,4 +121,32 @@ void MapCorrespondingParameters(OverloadResolutionCandidate& candidate,
     }
 }
 
+void CheckApplicabilityArgumentCounts(OverloadResolutionCandidate& candidate,
+                                      bool allowOptionalParameters) {
+    // C# 4.0 spec section 7.5.3.1 "Applicable function member" -- test whether parameters were mapped
+    // the correct number of arguments.
+    const auto& parameterTypes = candidate.ParameterTypes();
+    const std::size_t paramCount = parameterTypes.size();
+    std::vector<int> argumentCountPerParameter(paramCount, 0);
+    for (int parameterIndex : candidate.ArgumentToParameterMap()) {
+        if (parameterIndex >= 0) {
+            argumentCountPerParameter[static_cast<std::size_t>(parameterIndex)]++;
+        }
+    }
+    for (std::size_t i = 0; i < argumentCountPerParameter.size(); i++) {
+        if (candidate.IsExpandedForm() && i == argumentCountPerParameter.size() - 1) {
+            continue;  // any number of arguments is fine for the params-array
+        }
+        if (argumentCountPerParameter[i] == 0) {
+            if (allowOptionalParameters && candidate.Parameters()[i]->IsOptional()) {
+                candidate.HasUnmappedOptionalParameters() = true;
+            } else {
+                candidate.AddError(OverloadResolutionErrors::MissingArgumentForRequiredParameter);
+            }
+        } else if (argumentCountPerParameter[i] > 1) {
+            candidate.AddError(OverloadResolutionErrors::MultipleArgumentsForSingleParameter);
+        }
+    }
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

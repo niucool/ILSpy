@@ -2772,6 +2772,25 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   mismatches its positional parameter -> still maps by position but sets `NoParameterFoundForNamedArgument`;
   the suite went RED first (6/6 fail -- verified by stubbing to a no-op that writes nothing) before the
   implementation made it green.
+  The `OverloadResolution.CheckApplicability` argument-counts half (D510): the C#
+  `CheckApplicability(Candidate candidate)` (C# 4.0 spec section 7.5.3.1 "Applicable function member") has
+  two halves; this ports the self-contained first half -- the argument-count-per-parameter check. It builds
+  a per-parameter argument count from `candidate.ArgumentToParameterMap`, then for each parameter: skips
+  the expanded form's last params-array param (any count is fine); if count==0 and the param is optional and
+  `allowOptionalParameters`, sets `candidate.HasUnmappedOptionalParameters`, else
+  `MissingArgumentForRequiredParameter`; if count>1, `MultipleArgumentsForSingleParameter`.
+  `allowOptionalParameters` is the `OverloadResolution` `AllowOptionalParameters` input property (passed in
+  since the free function has no instance state). The second half (the passing-mode + conversion check) needs
+  `CSharpConversions.ImplicitConversion` and is deferred. It is a `Detail::` free function over
+  `OverloadResolutionCandidate&` (the C# private method lifted for TDD testability). The leaf is dead in the
+  CLI path (the helper is not yet called by `--csharp`) and the output is byte-identical. **6** new gtest
+  cases in 1 suite pin: every parameter gets one argument (no errors); a missing required-argument
+  (`MissingArgumentForRequiredParameter`); an optional unmapped param with `allowOptionalParameters=true`
+  (`HasUnmappedOptionalParameters`, no error); an optional unmapped param with
+  `allowOptionalParameters=false` (the error fires); two arguments to one parameter
+  (`MultipleArgumentsForSingleParameter`); the expanded form's last params-array param with many args (skipped
+  -- no error); the suite went RED first (4/6 fail -- verified by stubbing to a no-op; the 2 no-error cases
+  pass vacuously) before the implementation made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2794,7 +2813,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `GetAttributes`/`GetAttribute` leaf + the D506 `OverloadResolution.Candidate` leaf + the D507
   `TypeSystemExtensions.IsKnownType`/`IsArrayInterfaceType` leaf + the D508
   `OverloadResolution.ResolveParameterTypes` leaf + the D509
-  `OverloadResolution.MapCorrespondingParameters` leaf are exercised
+  `OverloadResolution.MapCorrespondingParameters` leaf + the D510
+  `OverloadResolution.CheckApplicability` argument-counts half leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param

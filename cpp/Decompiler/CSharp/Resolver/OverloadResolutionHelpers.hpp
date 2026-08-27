@@ -53,4 +53,15 @@ void MapCorrespondingParameters(OverloadResolutionCandidate& candidate,
                                 std::size_t argumentCount,
                                 const std::vector<std::string>& argumentNames);
 
+// The first half of the C# `CheckApplicability(Candidate candidate)` (C# 4.0 spec section 7.5.3.1
+// "Applicable function member") -- the argument-count-per-parameter check. Builds a per-parameter
+// argument count from `candidate.ArgumentToParameterMap`, then for each parameter: skips the expanded
+// form's last params-array param (any count is fine); if count==0 and the param is optional and
+// `allowOptionalParameters`, sets `HasUnmappedOptionalParameters`, else `MissingArgumentForRequiredParameter`;
+// if count>1, `MultipleArgumentsForSingleParameter`. `allowOptionalParameters` is the `OverloadResolution`
+// `AllowOptionalParameters` input property. The second half (passing-mode + conversion check) needs
+// `CSharpConversions.ImplicitConversion` and is deferred.
+void CheckApplicabilityArgumentCounts(OverloadResolutionCandidate& candidate,
+                                      bool allowOptionalParameters);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

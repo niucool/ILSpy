@@ -64,6 +64,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/IsKnownType_Test.cpp
     Decompiler/CSharp/Resolver/ResolveParameterTypes_Test.cpp
     Decompiler/CSharp/Resolver/MapCorrespondingParameters_Test.cpp
+    Decompiler/CSharp/Resolver/CheckApplicabilityArgumentCounts_Test.cpp
     Decompiler/TypeSystem/Nullability_Test.cpp
     Decompiler/TypeSystem/SignatureCallingConvention_Test.cpp
     Decompiler/TypeSystem/FunctionPointerType_Test.cpp
