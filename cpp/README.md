@@ -2855,6 +2855,28 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   stubbing `Get` to return a fresh instance each call, `TypePair::Equals` to `return false`, and
   `GetHashCode` to `return 0`; the 2 ctor-holds-compilation cases pass vacuously) before the implementation
   made it green.
+  The `ReflectionHelper.GetTypeCode` helper (D513): `TypeSystem/ReflectionHelper.{hpp,cpp}` ports the C#
+  `TypeCode GetTypeCode(this IType type)` -- the numeric-type-code lookup used by `CSharpConversions`'s
+  numeric-conversion helpers (`ImplicitNumericConversion`/`IsNumericType`/`AnyNumericConversion`) and by
+  `NormalizeTypeVisitor`'s `IntPtrToNInt` arms. It `dynamic_cast`s the `IType` to `ITypeDefinition` (the C#
+  `type as ITypeDefinition`); if the definition's `KnownTypeCode` is `<= String` and not `Void`, returns
+  `(TypeCode)knownTypeCode` (the numeric cast -- the `KnownTypeCode` values 0-17 align with `TypeCode` 0-17
+  by construction, per the `KnownTypeCode` comment "the order of type codes at the beginning must
+  correspond to those in System.TypeCode"); else `Empty`. A non-definition type (e.g. `KnownType`,
+  `ParameterizedType`, `ArrayType`) is not an `ITypeDefinition` and yields `Empty`. This leaf ports a
+  `TypeCode` enum (mirroring `System.TypeCode`: `Empty=0`/`Object`/`DBNull`/`Boolean`/`Char`/`SByte`/`Byte`/
+  `Int16`/`UInt16`/`Int32`/`UInt32`/`Int64`/`UInt64`/`Single`/`Double`/`Decimal`/`DateTime`/`String=17`) as the
+  first member of the `ReflectionHelper` namespace (the C# `public static class ReflectionHelper` -> a
+  namespace of free functions). The other `ReflectionHelper` members (`ParseReflectionName`/
+  `ResolveTypeName`/`ApplyTypeArguments`/...) are deferred. The leaf unblocks the numeric-conversion
+  helpers (the next `CSharpConversions` leaf). The leaf is dead in the CLI path (the helper is not yet
+  called by `--csharp`) and the output is byte-identical. **4** new gtest cases in 1 suite pin: a primitive
+  definition (`Int32`/`Object`/`Char`/`String`) yields its `TypeCode`; a non-primitive known definition
+  (e.g. `IEnumerableOfT`, past `String`; `Void`, past `String` and explicitly excluded) yields `Empty`; a
+  `KnownType` (a non-definition type) yields `Empty`; the full 17-value primitive range
+  (`Object`..`String`) aligns with `TypeCode` (`Object`..`String`); the suite went RED first (2/4 fail --
+  verified by stubbing the numeric-cast to `return TypeCode::Empty`; the 2 Empty-expecting tests pass
+  vacuously) before the implementation made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2880,7 +2902,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `OverloadResolution.MapCorrespondingParameters` leaf + the D510
   `OverloadResolution.CheckApplicability` argument-counts half leaf + the D511
   `OverloadResolution` class skeleton (ctor + input properties) leaf + the D512
-  `CSharpConversions` class skeleton (ctor + `Get` factory + `TypePair` cache key) leaf are exercised
+  `CSharpConversions` class skeleton (ctor + `Get` factory + `TypePair` cache key) leaf + the D513
+  `ReflectionHelper.GetTypeCode` leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param

@@ -62,6 +62,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/InheritanceHelper_Test.cpp
     Decompiler/CSharp/Resolver/OverloadResolutionCandidate_Test.cpp
     Decompiler/TypeSystem/IsKnownType_Test.cpp
+    Decompiler/TypeSystem/ReflectionHelperGetTypeCode_Test.cpp
     Decompiler/CSharp/Resolver/ResolveParameterTypes_Test.cpp
     Decompiler/CSharp/Resolver/MapCorrespondingParameters_Test.cpp
     Decompiler/CSharp/Resolver/CheckApplicabilityArgumentCounts_Test.cpp
