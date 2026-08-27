@@ -2821,6 +2821,40 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   the suite went RED first (verified by stubbing the ctor body to an empty member-init list -- the
   `argumentNames`-normalization, the throw, and the `typeArguments` guard are all gone, so `Defaults` fails
   on the `ArgumentNames().size()` check) before the implementation made it green.
+  The `CSharpConversions` class skeleton (D512): `CSharp/Resolver/CSharpConversions.{hpp,cpp}` ports the
+  conversion-controller skeleton -- the constructor (holds the `ICompilation`), the `Get(ICompilation)`
+  per-compilation singleton factory (cached on the compilation's `CacheManager`), and the `TypePair`
+  caching key struct (equality + hashing). The C# ctor `ArgumentNullException` on null `compilation` is
+  compiled out (a `const` reference cannot bind to null, the D374 convention). The `Get` factory keys on
+  `typeof(CSharpConversions)` (the port uses a function-local static's address as the stable `const void*`
+  `CacheManager` key); it builds a `shared_ptr<CSharpConversions>` and stores it via `GetOrAddShared` (the
+  cache owns the lifetime, mirroring the C# `CacheManager` holding the reference). The port's
+  `ICompilation::CacheManager()` returns `const CacheManager&` (a const-correctness over-restriction
+  relative to the C# mutable `CacheManager`), so `Get` `const_cast`s the cache reference to call the
+  `GetOrAddShared` mutator -- the established port convention for logically-const lazy-cache accessors (the
+  `TypeVisitor&`/`AcceptVisitor` `const_cast` in `const` lazy accessors), since the cache mutation is
+  logically idempotent (a repeat `Get` with the same key returns the same value whether it stored or found).
+  The `TypePair` struct: `Equals` is structural via `IType::Equals` (the `Kind() == other.Kind() &&
+  StructuralEquals` path) with a fast pointer-identity short-circuit; `GetHashCode` combines `IType::Kind()`
+  + `IType::ReflectionName()` + `IType::TypeParameterCount()` of each type (the C# uses `IType.GetHashCode`,
+  which the port's `IType` deliberately defers -- a Phase-2 leaf; this is a documented simplification: a
+  hash that collides more than `IType.GetHashCode` would, perf only, never correctness -- `Equals` is the
+  authority). The conversion methods (`IdentityConversion`/`ImplicitConversion`/`ExplicitConversion`/
+  `StandardImplicitConversion`/`BetterConversion`/the ~16 `Is*Conversion`/`*Conversion` helpers) are deferred
+  -- they need `NormalizeTypeVisitor.TypeErasure` (unported) and `ReflectionHelper.GetTypeCode` (unported).
+  The skeleton gives the `OverloadResolution` engine steps (`CheckApplicability`'s conversion half,
+  `RunTypeInference`, `BetterFunctionMember`) and `LambdaResolveResult.IsValid` a
+  forward-declared-but-now-defined `CSharpConversions` to reference. The leaf is dead in the CLI path (the
+  class is not yet instantiated by `--csharp`) and the output is byte-identical. **8** new gtest cases in 2
+  suites pin: the ctor holds the compilation; `Get` returns the same instance for the same compilation (the
+  per-compilation singleton); `Get`'s compilation is consistent; `TypePair` pointer-identity equality;
+  `TypePair` structural equality (two distinct `KnownType(Int32)` instances are equal, a swapped pair of
+  equal types is still equal, `Int32` vs `String` differ); `TypePair` null-slot handling; `TypePair` hashing
+  is consistent with `Equals` (equal pairs hash the same); `TypePair` is usable as an `unordered_map` key
+  (a structurally-equal key finds the same slot); the suite went RED first (6/8 fail -- verified by
+  stubbing `Get` to return a fresh instance each call, `TypePair::Equals` to `return false`, and
+  `GetHashCode` to `return 0`; the 2 ctor-holds-compilation cases pass vacuously) before the implementation
+  made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2845,7 +2879,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `OverloadResolution.ResolveParameterTypes` leaf + the D509
   `OverloadResolution.MapCorrespondingParameters` leaf + the D510
   `OverloadResolution.CheckApplicability` argument-counts half leaf + the D511
-  `OverloadResolution` class skeleton (ctor + input properties) leaf are exercised
+  `OverloadResolution` class skeleton (ctor + input properties) leaf + the D512
+  `CSharpConversions` class skeleton (ctor + `Get` factory + `TypePair` cache key) leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param
