@@ -2791,6 +2791,36 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   (`MultipleArgumentsForSingleParameter`); the expanded form's last params-array param with many args (skipped
   -- no error); the suite went RED first (4/6 fail -- verified by stubbing to a no-op; the 2 no-error cases
   pass vacuously) before the implementation made it green.
+  The `OverloadResolution` class skeleton (D511): `CSharp/Resolver/OverloadResolution.{hpp,cpp}` ports the
+  class skeleton -- the constructor (validation + field init + the input-property defaults) and the input
+  properties (`IsExtensionMethodInvocation`/`AllowExpandingParams`/`AllowOptionalParameters`/
+  `AllowImplicitIn`/`CheckForOverflow`/`Arguments`). The C# ctor throws `ArgumentNullException` on null
+  `compilation`/`arguments` (compiled out -- a `const` reference and an owning vector cannot be null at the
+  type level, the D374 reference-not-null convention) and `ArgumentException` on mismatched
+  `argumentNames.Length` (preserved as `std::invalid_argument`). `argumentNames == null` normalizes to an
+  all-empty vector of length `arguments.size()` (empty-string == positional, the C# `null` entry).
+  `typeArguments != null && Length > 0` sets `explicitlyGivenTypeArguments` (an empty present vector leaves
+  it `nullopt`, faithful to the `Length > 0` guard). The defaults `AllowExpandingParams = true` /
+  `AllowOptionalParameters = true` / `AllowImplicitIn = true` are in-class initializers (the C# auto-property
+  initializers); `CheckForOverflow = false`/`IsExtensionMethodInvocation = false` likewise. `CSharpConversions`
+  (unported, ~1757 lines) is forward-declared and held as a non-owning `const CSharpConversions*`; the C#
+  `?? CSharpConversions.Get(compilation)` ctor fallback is deferred (the port ctor takes a nullable pointer
+  and stores it as-is). `arguments` is owning `std::vector<std::shared_ptr<ResolveResult>>` (the `ResolveResult`
+  hierarchy is fully ported in `Semantics/`); `argumentNames` is owning `std::vector<std::string>`; the
+  `bestCandidate`/`bestCandidateAmbiguousWith`/`bestCandidateWasValidated`/`bestCandidateValidationResult`
+  fields are declared (owning `shared_ptr<OverloadResolutionCandidate>`/bool/enum) so the field layout is
+  complete, but the engine steps that set them are deferred (need `CSharpConversions`/`TypeInference`). The
+  leaf gives the `Detail::` engine-helper free functions (D508-D510) an owning `OverloadResolution` instance
+  to compose into once the engine steps land. The leaf is dead in the CLI path (the class is not yet
+  instantiated by `--csharp`) and the output is byte-identical. **6** new gtest cases in 1 suite pin: the
+  default ctor (nullopt `argumentNames`/`typeArguments`) normalizes `argumentNames` to all-empty and leaves
+  `explicitlyGivenTypeArguments` nullopt with the input-property defaults; explicit `argumentNames`
+  (matching length) stored verbatim; mismatched `argumentNames` length throws `std::invalid_argument`;
+  non-empty `typeArguments` sets `explicitlyGivenTypeArguments`, empty leaves it nullopt; the `Arguments`
+  getter returns the ctor's arguments (identity); the input properties are mutable (set + get round-trip);
+  the suite went RED first (verified by stubbing the ctor body to an empty member-init list -- the
+  `argumentNames`-normalization, the throw, and the `typeArguments` guard are all gone, so `Defaults` fails
+  on the `ArgumentNames().size()` check) before the implementation made it green.
 - **Phase 5 (seed)** -- `Decompiler/CSharp/ILAstToCSharp`: an ILAst -> C#-text
   walker that closes the IL -> ILAst -> text pipeline end-to-end ahead of the
   real back end (the comparer leaves D478 + the D479 `ParameterizedType`
@@ -2814,7 +2844,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `TypeSystemExtensions.IsKnownType`/`IsArrayInterfaceType` leaf + the D508
   `OverloadResolution.ResolveParameterTypes` leaf + the D509
   `OverloadResolution.MapCorrespondingParameters` leaf + the D510
-  `OverloadResolution.CheckApplicability` argument-counts half leaf are exercised
+  `OverloadResolution.CheckApplicability` argument-counts half leaf + the D511
+  `OverloadResolution` class skeleton (ctor + input properties) leaf are exercised
   by unit tests and stay dead in the CLI
   path -- the `--csharp` output is byte-identical to D478). It now produces
   readable C#: real parameter names (Param

@@ -13,4 +13,5 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Resolver/LookupHelpers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Resolver/MemberLookup.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Resolver/OverloadResolutionHelpers.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Resolver/OverloadResolution.cpp
 )
