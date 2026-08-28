@@ -243,20 +243,43 @@ public:
     // IdentityConversion(s, t2); if (ident1 && !ident2) return 1; if (ident2 && !ident1) return 2;
     // return BetterConversionTarget(t1, t2);` -- an identity conversion from `s` to a target
     // beats a non-identity conversion; when neither (or both) is identity, the verdict falls to
-    // `BetterConversionTarget`. The public method delegates to `Detail::IdentityConversion` and
-    // `Detail::BetterConversionTarget` (the latter threads `*compilation_` to the
-    // `ImplicitConversion` calls in the Span/core arms).
+    // `BetterConversionTarget`. The public method delegates to the `Detail::BetterConversion(IType,
+    // IType, IType)` free function (which wires `Detail::IdentityConversion` D514 and
+    // `Detail::BetterConversionTarget` D535, the latter threading the compilation to the
+    // `ImplicitConversion` calls in the Span/core arms). The Detail dispatch is shared with the
+    // ResolveResult-based `BetterConversion(ResolveResult, IType, IType)` overload below, whose
+    // recursion calls this IType overload via the same Detail free function.
     //
     // The C# `ArgumentNullException` on null args compiles out (the `IType&` references cannot bind
     // to null, the D374 convention). The `s` / `t1` / `t2` are `IType&` non-const because
     // `IdentityConversion` / `BetterConversionTarget` take non-const `IType&` for the non-const
-    // `AcceptVisitor` (D406). The ResolveResult-based `BetterConversion(ResolveResult, IType,
-    // IType)` overload (CSharpConversions.cs line 1552 -- the "better conversion from expression")
-    // is DEFERRED: it needs `IsExactlyMatching` (needs `LambdaResolveResult.GetInferredReturnType`
-    // + `UnpackExpressionTreeType` + `UnpackTask`), `IsImplicitSpanConversion`, and the
-    // expression-tree / lambda arms -- none of which are ported yet. Returns `int` (the `0`/`1`/`2`
-    // verdict).
+    // `AcceptVisitor` (D406). Returns `int` (the `0`/`1`/`2` verdict).
     int BetterConversion(ILSpy::Decompiler::TypeSystem::IType& s,
+                          ILSpy::Decompiler::TypeSystem::IType& t1,
+                          ILSpy::Decompiler::TypeSystem::IType& t2);
+
+    // The C# `public int BetterConversion(ResolveResult resolveResult, IType t1, IType t2)`
+    // (CSharpConversions.cs line 1540, C# 8.0 spec section 12.6.4.5 "better conversion from
+    // expression") -- the better conversion from an EXPRESSION `resolveResult` to two candidate
+    // target types `t1` / `t2`: `0` = neither is better, `1` = `t1` is better, `2` = `t2` is better.
+    // An expression that exactly matches a target (`IsExactlyMatching`) beats one that does not;
+    // when neither exactly matches, an implicit span conversion (`IsImplicitSpanConversion`)
+    // breaks the tie; when both (or neither) exactly match, the verdict falls to
+    // `BetterConversionTarget`; and for a lambda expression the delegate `Invoke` signatures are
+    // compared (the inferred return type's better conversion to the two delegate return types,
+    // with the `Task<T>` wrapper unpacked for async lambdas). Delegates to the
+    // `Detail::BetterConversion(const ICompilation&, const ResolveResult&, IType&, IType&)` free
+    // function (D544), which wires the already-ported `IsExactlyMatching` (D543),
+    // `IsImplicitSpanConversion` (D538), `BetterConversionTarget` (D535), the IType
+    // `Detail::BetterConversion` overload (for the recursion / the non-lambda else branch),
+    // `UnpackExpressionTreeType` (D534), `GetDelegateInvokeMethod` (D533), `UnpackTask` (D542), and
+    // the `LambdaResolveResult` surface. The C# `ArgumentNullException` on a null `resolveResult`
+    // compiles out (the `const ResolveResult&` reference cannot bind to null, the D374 convention).
+    // The `t1` / `t2` are `IType&` non-const because the Detail free function's callees take
+    // non-const `IType&` for the non-const `AcceptVisitor` (D406). Like the ResolveResult-based
+    // `ImplicitConversion` / `ExplicitConversion` entries, this overload is NOT cached (the C# caches
+    // only the IType-based `BetterConversion`). Returns `int` (the `0`/`1`/`2` verdict).
+    int BetterConversion(const ILSpy::Decompiler::Semantics::ResolveResult& resolveResult,
                           ILSpy::Decompiler::TypeSystem::IType& t1,
                           ILSpy::Decompiler::TypeSystem::IType& t2);
 

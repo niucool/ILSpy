@@ -1201,4 +1201,77 @@ bool IsImplicitSpanConversion(const ILSpy::Decompiler::TypeSystem::ICompilation&
                                ILSpy::Decompiler::TypeSystem::IType& fromType,
                                ILSpy::Decompiler::TypeSystem::IType& toType);
 
+// The C# `public int BetterConversion(IType s, IType t1, IType t2)` (CSharpConversions.cs line
+// 1620, C# 4.0 spec section 7.5.3.4 "better conversion from type"; the current standard folds it
+// into section 12.6.4.5-12.6.4.7) -- the "better conversion from type" dispatch: an identity
+// conversion from the source `s` to a target beats a non-identity conversion; when neither (or
+// both) is identity, the verdict falls to `BetterConversionTarget`. Returns `0` = neither is
+// better, `1` = `t1` is better, `2` = `t2` is better.
+//
+// The C# `public` method body is `bool ident1 = IdentityConversion(s, t1); bool ident2 =
+// IdentityConversion(s, t2); if (ident1 && !ident2) return 1; if (ident2 && !ident1) return 2;
+// return BetterConversionTarget(t1, t2);`. The port lifts that body to this `Detail::` free
+// function so the public `CSharpConversions::BetterConversion(IType, IType, IType)` method can
+// delegate to it AND the ResolveResult-based `Detail::BetterConversion(ResolveResult, IType,
+// IType)` overload (below) can call it for its recursion (the C# `BetterConversion(ResolveResult,
+// ...)` recursion calls the public IType overload `BetterConversion(inferredRet, ret1, ret2)` /
+// `BetterConversion(resolveResult.Type, t1, t2)`; the port's Detail dispatch uses the uncached
+// `Detail::` free function rather than the cached public method -- the `BetterConversionTarget`
+// precedent, the cache being an instance-level optimization that is immaterial to the result).
+//
+// Pure given a compilation (delegates only to the already-ported `IdentityConversion` D514 and
+// `BetterConversionTarget` D535, both of which take `const ICompilation&`), so it lands as a
+// `Detail::` free function with the same compilation parameter. Takes `IType&` non-const (the
+// callees take non-const `IType&` for the non-const `AcceptVisitor`, D406). Returns `int`.
+int BetterConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                     ILSpy::Decompiler::TypeSystem::IType& s,
+                     ILSpy::Decompiler::TypeSystem::IType& t1,
+                     ILSpy::Decompiler::TypeSystem::IType& t2);
+
+// The C# `public int BetterConversion(ResolveResult resolveResult, IType t1, IType t2)`
+// (CSharpConversions.cs line 1540, C# 8.0 spec section 12.6.4.5 "better conversion from
+// expression") -- the better conversion from an EXPRESSION `resolveResult` to two candidate
+// target types `t1` / `t2`: `0` = neither is better, `1` = `t1` is better, `2` = `t2` is better.
+// An expression that EXACTLY MATCHES a target (`IsExactlyMatching` D543) beats one that does not;
+// when neither exactly matches, an implicit span conversion (`IsImplicitSpanConversion` D538)
+// from the expression's type to a target breaks the tie; when both (or neither) exactly match,
+// the verdict falls to `BetterConversionTarget` (D535); and for a LAMBDA expression the delegate
+// `Invoke` signatures are compared (the inferred return type's better conversion to the two
+// delegate return types, with the `Task<T>` wrapper unpacked for async lambdas).
+//
+// The C# body: `bool t1Exact = IsExactlyMatching(resolveResult, t1); bool t2Exact =
+// IsExactlyMatching(resolveResult, t2); if (t1Exact && !t2Exact) return 1; if (t2Exact &&
+// !t1Exact) return 2; if (!t1Exact && !t2Exact) { ... IsImplicitSpanConversion(resolveResult.Type,
+// t1/t2) ... } if (t1Exact == t2Exact) { int r = BetterConversionTarget(t1, t2); if (r != 0)
+// return r; } if (resolveResult is LambdaResolveResult lambda) { ...delegate Invoke comparison,
+// async Task<T> unpack, recurse BetterConversion(inferredRet, ret1, ret2)... } else return
+// BetterConversion(resolveResult.Type, t1, t2);`. The two `BetterConversion(...)` recursion calls
+// are the IType overload (the C# `inferredRet` / `resolveResult.Type` are `IType`, not
+// `ResolveResult`), so they delegate to `Detail::BetterConversion(IType, IType, IType)` above --
+// no recursion back to this ResolveResult overload, so the dispatch terminates.
+//
+// Pure given a compilation (every callee -- `IsExactlyMatching` D543, `IsImplicitSpanConversion`
+// D538, `BetterConversionTarget` D535, the IType `BetterConversion` above, `UnpackExpressionTreeType`
+// D534, `GetDelegateInvokeMethod` D533, `LambdaResolveResult::GetInferredReturnType` /
+// `IsAnonymousMethod` / `HasParameterList` / `Parameters` / `IsAsync`, `UnpackTask` D42 -- is pure or
+// takes `const ICompilation&`; reads no `CSharpConversions` instance state beyond the compilation),
+// so it lands as a `Detail::` free function. Takes `const ResolveResult&` (every `ResolveResult`
+// member it reads -- `Type()`, the `dynamic_cast` to `LambdaResolveResult`, the lambda accessors --
+// is `const`) and `IType& t1` / `IType& t2` non-const (the callees `IsImplicitSpanConversion` /
+// `BetterConversionTarget` / the IType `BetterConversion` take non-const `IType&` for the non-const
+// `AcceptVisitor`, D406). The `resolveResult.Type()` accessor returns `const IType&`, but the
+// span-helper / recursion calls take `IType&` non-const, so the port `const_cast`s it -- the
+// underlying type-system object is mutable (the accessor's `const` is the contract), the
+// D515/D517/D528 `const_cast` precedent. The lambda arm's `t1 = UnpackExpressionTreeType(t1)` /
+// `t2 = UnpackExpressionTreeType(t2)` rebind ports to `const IType*` pointers (a C++ reference
+// cannot be rebound); `GetDelegateInvokeMethod` takes `const IType&`, so the rebound pointers
+// feed it directly. The `ret1` / `ret2` / `inferredRet` locals (reassigned to `UnpackTask` results)
+// are `ITypePtr` (the D529 `shared_from_this` + `const_pointer_cast` ownership convention for
+// the `m->ReturnType()` const references; `GetInferredReturnType` returns `ITypePtr` directly).
+// Returns `int`.
+int BetterConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                     const ILSpy::Decompiler::Semantics::ResolveResult& resolveResult,
+                     ILSpy::Decompiler::TypeSystem::IType& t1,
+                     ILSpy::Decompiler::TypeSystem::IType& t2);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

@@ -225,25 +225,34 @@ int CSharpConversions::BetterConversion(ILSpy::Decompiler::TypeSystem::IType& s,
                                         ILSpy::Decompiler::TypeSystem::IType& t2)
 {
 	// CSharpConversions.cs line 1620. The public "better conversion from type" entry point (the
-	// `IType` + `IType` + `IType` overload). The C# `bool ident1 = IdentityConversion(s, t1); bool
-	// ident2 = IdentityConversion(s, t2); if (ident1 && !ident2) return 1; if (ident2 && !ident1)
-	// return 2; return BetterConversionTarget(t1, t2);` -- an identity conversion from the source
-	// `s` to a target beats a non-identity conversion; when neither (or both) is identity, the
-	// verdict falls to `BetterConversionTarget`. The `IdentityConversion` calls are the C#
-	// `this.IdentityConversion` (the public bool helper); the port delegates to the already-ported
-	// `Detail::IdentityConversion` (D514, the `IType&` non-const signature for the non-const
-	// `AcceptVisitor`, D406). The `BetterConversionTarget` call is the `Detail::BetterConversionTarget`
-	// free function (D535), threading `*compilation_` to the `ImplicitConversion` calls in the
-	// Span/core arms. The ResolveResult-based `BetterConversion(ResolveResult, IType, IType)`
-	// overload is DEFERRED (needs `IsExactlyMatching` + the lambda/expression-tree arms -- not yet
-	// ported); only the type-based overload lands here.
-	bool ident1 = Detail::IdentityConversion(s, t1);
-	bool ident2 = Detail::IdentityConversion(s, t2);
-	if (ident1 && !ident2)
-		return 1;
-	if (ident2 && !ident1)
-		return 2;
-	return Detail::BetterConversionTarget(*compilation_, t1, t2);
+	// `IType` + `IType` + `IType` overload). Delegates to the `Detail::BetterConversion(IType, IType,
+	// IType)` free function (D544), which wires `Detail::IdentityConversion` (D514) and
+	// `Detail::BetterConversionTarget` (D535, threading `*compilation_` to the `ImplicitConversion`
+	// calls in the Span/core arms). The Detail dispatch is shared with the ResolveResult-based
+	// `BetterConversion(ResolveResult, IType, IType)` overload below, whose recursion calls this
+	// IType overload via the same Detail free function (the uncached Detail dispatch, the
+	// `BetterConversionTarget` precedent -- the cache is an instance-level optimization immaterial
+	// to the result).
+	return Detail::BetterConversion(*compilation_, s, t1, t2);
+}
+
+int CSharpConversions::BetterConversion(const ILSpy::Decompiler::Semantics::ResolveResult& resolveResult,
+                                        ILSpy::Decompiler::TypeSystem::IType& t1,
+                                        ILSpy::Decompiler::TypeSystem::IType& t2)
+{
+	// CSharpConversions.cs line 1540. The public "better conversion from expression" entry point
+	// (the `ResolveResult` + `IType` + `IType` overload). Delegates to the
+	// `Detail::BetterConversion(const ICompilation&, const ResolveResult&, IType&, IType&)` free
+	// function (D544), which wires the already-ported `IsExactlyMatching` (D543),
+	// `IsImplicitSpanConversion` (D538), `BetterConversionTarget` (D535), the IType
+	// `Detail::BetterConversion` overload (the recursion / the non-lambda else branch),
+	// `UnpackExpressionTreeType` (D534), `GetDelegateInvokeMethod` (D533), `UnpackTask` (D542), and
+	// the `LambdaResolveResult` surface, threading `*compilation_` to the helpers that need
+	// `FindType` / `IsSubtypeOf` / `TypeSystemOptions`. The C# `ArgumentNullException` on a null
+	// `resolveResult` compiles out (the `const ResolveResult&` reference cannot bind to null, the
+	// D374 convention). Like the ResolveResult-based `ImplicitConversion` / `ExplicitConversion`
+	// entries, this overload is NOT cached (the C# caches only the IType-based `BetterConversion`).
+	return Detail::BetterConversion(*compilation_, resolveResult, t1, t2);
 }
 
 bool CSharpConversions::IsConstraintConvertible(ILSpy::Decompiler::TypeSystem::IType& fromType,

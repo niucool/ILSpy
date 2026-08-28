@@ -2417,4 +2417,169 @@ bool IsImplicitSpanConversion(const ICompilation& compilation, IType& fromType, 
 	return false;
 }
 
+// The C# `public int BetterConversion(IType s, IType t1, IType t2)` (CSharpConversions.cs line
+// 1620, C# 4.0 spec section 7.5.3.4 "better conversion from type"). See the header for the rationale.
+// The body is lifted verbatim from the C# public method: an identity conversion from the source
+// `s` to a target beats a non-identity conversion; when neither (or both) is identity, the verdict
+// falls to `BetterConversionTarget`. The public `CSharpConversions::BetterConversion(IType, IType,
+// IType)` method delegates to this free function, and the ResolveResult-based `BetterConversion`
+// overload below calls it for its recursion (the C# calls the public IType overload; the port
+// uses the uncached Detail dispatch, the `BetterConversionTarget` precedent).
+int BetterConversion(const ICompilation& compilation, IType& s, IType& t1, IType& t2)
+{
+	// C# `bool ident1 = IdentityConversion(s, t1); bool ident2 = IdentityConversion(s, t2);` -- the
+	// identity checks (D514). Both `s` and the targets are non-const `IType&` (the non-const
+	// `AcceptVisitor`, D406).
+	bool ident1 = IdentityConversion(s, t1);
+	bool ident2 = IdentityConversion(s, t2);
+	// C# `if (ident1 && !ident2) return 1; if (ident2 && !ident1) return 2;` -- an identity conversion
+	// to a target beats a non-identity conversion.
+	if (ident1 && !ident2)
+		return 1;
+	if (ident2 && !ident1)
+		return 2;
+	// C# `return BetterConversionTarget(t1, t2);` -- neither (or both) is identity: the verdict
+	// falls to the better-conversion-target worker (D535), threading the compilation to its
+	// `ImplicitConversion` calls.
+	return BetterConversionTarget(compilation, t1, t2);
+}
+
+// The C# `public int BetterConversion(ResolveResult resolveResult, IType t1, IType t2)`
+// (CSharpConversions.cs line 1540, C# 8.0 spec section 12.6.4.5 "better conversion from
+// expression"). See the header for the arm-by-arm rationale and the purity/ownership conventions.
+int BetterConversion(const ICompilation& compilation, const ResolveResult& resolveResult,
+                     IType& t1, IType& t2)
+{
+	// C# `bool t1Exact = IsExactlyMatching(resolveResult, t1); bool t2Exact = IsExactlyMatching(
+	// resolveResult, t2);` -- the exactly-matching checks (D543). `IsExactlyMatching` takes
+	// `const ResolveResult&` + `const IType&`, so the non-const `t1` / `t2` bind directly.
+	bool t1Exact = IsExactlyMatching(resolveResult, t1);
+	bool t2Exact = IsExactlyMatching(resolveResult, t2);
+	// C# `if (t1Exact && !t2Exact) return 1; if (t2Exact && !t1Exact) return 2;` -- an exactly-matching
+	// target beats a non-exactly-matching one.
+	if (t1Exact && !t2Exact)
+		return 1;
+	if (t2Exact && !t1Exact)
+		return 2;
+	// C# `if (!t1Exact && !t2Exact) { bool c1ImplicitSpanConversion = IsImplicitSpanConversion(
+	// resolveResult.Type, t1); bool c2ImplicitSpanConversion = IsImplicitSpanConversion(
+	// resolveResult.Type, t2); if (c1ImplicitSpanConversion && !c2ImplicitSpanConversion) return 1;
+	// if (c2ImplicitSpanConversion && !c1ImplicitSpanConversion) return 2; }` -- the implicit-span
+	// tiebreak, fired only when NEITHER target exactly matches. `IsImplicitSpanConversion` (D538)
+	// takes `IType&` non-const (the non-const `AcceptVisitor`), but `resolveResult.Type()` returns
+	// `const IType&`, so the port `const_cast`s it (the underlying type-system object is mutable,
+	// the accessor's `const` is the contract, the D515/D517/D528 `const_cast` precedent).
+	if (!t1Exact && !t2Exact) {
+		bool c1ImplicitSpanConversion = IsImplicitSpanConversion(compilation,
+			const_cast<IType&>(resolveResult.Type()), t1);
+		bool c2ImplicitSpanConversion = IsImplicitSpanConversion(compilation,
+			const_cast<IType&>(resolveResult.Type()), t2);
+		if (c1ImplicitSpanConversion && !c2ImplicitSpanConversion)
+			return 1;
+		if (c2ImplicitSpanConversion && !c1ImplicitSpanConversion)
+			return 2;
+	}
+	// C# `if (t1Exact == t2Exact) { int r = BetterConversionTarget(t1, t2); if (r != 0) return r; }`
+	// -- when both (or neither) exactly match, the verdict falls to the better-conversion-target
+	// worker (D535); a zero verdict falls through to the lambda/non-lambda arms below.
+	if (t1Exact == t2Exact) {
+		int r = BetterConversionTarget(compilation, t1, t2);
+		if (r != 0)
+			return r;
+	}
+	// C# `LambdaResolveResult lambda = resolveResult as LambdaResolveResult; if (lambda != null)
+	// { ... } else { return BetterConversion(resolveResult.Type, t1, t2); }` -- the RTTI dispatch.
+	const LambdaResolveResult* lambda = dynamic_cast<const LambdaResolveResult*>(&resolveResult);
+	if (lambda != nullptr) {
+		// C# `if (!lambda.IsAnonymousMethod) { t1 = UnpackExpressionTreeType(t1); t2 =
+		// UnpackExpressionTreeType(t2); }` -- the expression-tree unwrap runs only for lambdas (C#
+		// 3.0+); an anonymous method (C# 2.0 `delegate { }`) cannot convert to an expression tree.
+		// A C++ reference cannot be rebound, so the port tracks the effective t1/t2 via `const IType*`
+		// pointers rebound through the unwrap. `GetDelegateInvokeMethod` (D533) takes `const IType&`,
+		// so the rebound pointers feed it directly.
+		const IType* effectiveT1 = &t1;
+		const IType* effectiveT2 = &t2;
+		if (!lambda->IsAnonymousMethod()) {
+			effectiveT1 = &UnpackExpressionTreeType(*effectiveT1);
+			effectiveT2 = &UnpackExpressionTreeType(*effectiveT2);
+		}
+		// C# `IMethod m1 = t1.GetDelegateInvokeMethod(); IMethod m2 = t2.GetDelegateInvokeMethod();
+		// if (m1 == null || m2 == null) return 0;` -- resolve the delegates' `Invoke` methods. A
+		// non-delegate target (or a delegate with no `Invoke`) yields `nullptr` -> the lambda arm
+		// returns 0 (no better target).
+		const IMethod* m1 = GetDelegateInvokeMethod(*effectiveT1);
+		const IMethod* m2 = GetDelegateInvokeMethod(*effectiveT2);
+		if (m1 == nullptr || m2 == nullptr)
+			return 0;
+		// C# `if (m1.Parameters.Count != m2.Parameters.Count) return 0;` -- the parameter-count
+		// match (the two delegates must take the same number of arguments).
+		if (m1->Parameters().size() != m2->Parameters().size())
+			return 0;
+		// C# `IType[] parameterTypes = new IType[m1.Parameters.Count]; for (...) { parameterTypes[i] =
+		// m1.Parameters[i].Type; if (!parameterTypes[i].Equals(m2.Parameters[i].Type)) return 0; }`
+		// -- the per-parameter type match. `GetInferredReturnType` takes `const vector<ITypePtr>&`,
+		// so the port builds owning `ITypePtr` handles from the const `IParameter::Type()` references
+		// via `shared_from_this()` + `const_pointer_cast` (the D529 / D534 `AnonymousFunctionConversion`
+		// precedent). The `.Equals` is `IType::Equals(const IType&)` (structural equality; a
+		// `LookupTypeDefinition` is identity-equal, so the crux tests reuse the same instance).
+		std::vector<ITypePtr> parameterTypes;
+		parameterTypes.reserve(m1->Parameters().size());
+		for (size_t i = 0; i < m1->Parameters().size(); i++) {
+			parameterTypes.push_back(std::const_pointer_cast<IType>(
+				m1->Parameters()[i]->Type().shared_from_this()));
+			if (!parameterTypes[i]->Equals(m2->Parameters()[i]->Type()))
+				return 0;
+		}
+		// C# `if (lambda.HasParameterList && parameterTypes.Length != lambda.Parameters.Count)
+		// return 0;` -- a lambda with an explicit parameter list must list the same number of
+		// parameters as the delegate's `Invoke`.
+		if (lambda->HasParameterList() && parameterTypes.size() != lambda->Parameters().size())
+			return 0;
+		// C# `IType ret1 = m1.ReturnType; IType ret2 = m2.ReturnType;` -- the delegates' return
+		// types. Held as owning `ITypePtr` (the locals are reassigned to `UnpackTask` results below;
+		// the const `IMember::ReturnType()` references are built into handles via `shared_from_this`
+		// + `const_pointer_cast`, the D529 precedent).
+		ITypePtr ret1 = std::const_pointer_cast<IType>(m1->ReturnType().shared_from_this());
+		ITypePtr ret2 = std::const_pointer_cast<IType>(m2->ReturnType().shared_from_this());
+		// C# `if (ret1.Kind == TypeKind.Void && ret2.Kind != TypeKind.Void) return 2; if (ret1.Kind !=
+		// TypeKind.Void && ret2.Kind == TypeKind.Void) return 1;` -- a void-returning delegate is
+		// worse than a non-void-returning one (the non-void target is better, since a void lambda
+		// cannot satisfy a non-void delegate and vice versa).
+		if (ret1->Kind() == TypeKind::Void && ret2->Kind() != TypeKind::Void)
+			return 2;
+		if (ret1->Kind() != TypeKind::Void && ret2->Kind() == TypeKind::Void)
+			return 1;
+		// C# `IType inferredRet = lambda.GetInferredReturnType(parameterTypes); int r =
+		// BetterConversion(inferredRet, ret1, ret2);` -- the better conversion of the lambda's
+		// inferred return type to the two delegate return types. `GetInferredReturnType` returns
+		// `ITypePtr` directly; the `*inferredRet` / `*ret1` / `*ret2` derefs yield `IType&` non-const
+		// (the `shared_ptr<IType>` deref), feeding the IType `BetterConversion` overload without a
+		// `const_cast`. The recursion is the IType overload (the C# `inferredRet` is an `IType`, not
+		// a `ResolveResult`), so it terminates (no recursion back to this ResolveResult overload).
+		ITypePtr inferredRet = lambda->GetInferredReturnType(parameterTypes);
+		int r = BetterConversion(compilation, *inferredRet, *ret1, *ret2);
+		// C# `if (r == 0 && lambda.IsAsync) { ret1 = UnpackTask(ret1); ret2 = UnpackTask(ret2);
+		// inferredRet = UnpackTask(inferredRet); if (ret1 != null && ret2 != null && inferredRet !=
+		// null) r = BetterConversion(inferredRet, ret1, ret2); }` -- for an async lambda, unpack the
+		// `Task<T>` wrapper from all three and recompute. `UnpackTask` (D542) takes `const IType&` and
+		// returns `ITypePtr`; the `*ret1` / `*ret2` / `*inferredRet` derefs feed it. A non-`Task<T>`
+		// return unpacks to null, so the null guard skips the recompute (faithfully matching the C#
+		// `if (ret1 != null && ...)`).
+		if (r == 0 && lambda->IsAsync()) {
+			ret1 = UnpackTask(*ret1);
+			ret2 = UnpackTask(*ret2);
+			inferredRet = UnpackTask(*inferredRet);
+			if (ret1 && ret2 && inferredRet)
+				r = BetterConversion(compilation, *inferredRet, *ret1, *ret2);
+		}
+		return r;
+	} else {
+		// C# `return BetterConversion(resolveResult.Type, t1, t2);` -- a non-lambda expression:
+		// the better conversion of the expression's TYPE to the two targets (the IType overload).
+		// `resolveResult.Type()` returns `const IType&`, `const_cast` to the non-const `IType&` the
+		// IType overload takes (the D515/D517/D528 `const_cast` precedent).
+		return BetterConversion(compilation, const_cast<IType&>(resolveResult.Type()), t1, t2);
+	}
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
