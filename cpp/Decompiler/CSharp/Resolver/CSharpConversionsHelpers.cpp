@@ -24,7 +24,9 @@
 #include "Decompiler/CSharp/Resolver/CSharpConversionsHelpers.hpp"
 
 #include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversions (the nullable-conversion singletons / EnumerationConversion factory)
+#include "Decompiler/Semantics/InterpolatedStringResolveResult.hpp"  // InterpolatedStringResolveResult (the interpolated-string arm RTTI check)
 #include "Decompiler/Semantics/ResolveResult.hpp"  // ResolveResult (IsCompileTimeConstant / Type / ConstantValue -- the constant-expression conversion)
+#include "Decompiler/Semantics/ThrowResolveResult.hpp"  // ThrowResolveResult (the throw-expression arm RTTI check)
 #include "Decompiler/TypeSystem/ICompilation.hpp"   // ICompilation (FindType -- the array-to-System.Array arm)
 #include "Decompiler/TypeSystem/IMethod.hpp"       // IMethod (IsStatic / IsOperator / Name / Parameters / ReturnType -- the operator scan)
 #include "Decompiler/TypeSystem/IParameter.hpp"    // IParameter (Type / ReferenceKind -- the operator's parameter type)
@@ -52,7 +54,9 @@ namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 
 using ILSpy::Decompiler::Semantics::Conversion;
 using ILSpy::Decompiler::Semantics::Conversions;
+using ILSpy::Decompiler::Semantics::InterpolatedStringResolveResult;
 using ILSpy::Decompiler::Semantics::ResolveResult;
+using ILSpy::Decompiler::Semantics::ThrowResolveResult;
 using ILSpy::Decompiler::TypeSystem::ArrayType;
 using ILSpy::Decompiler::TypeSystem::ByReferenceType;
 using ILSpy::Decompiler::TypeSystem::Create;
@@ -1561,6 +1565,106 @@ ImplicitConversion(const ICompilation& compilation, IType& fromType, IType& toTy
 	auto c = StandardImplicitConversion(compilation, fromType, toType);
 	if (c.get() == Conversions::None().get() && allowUserDefined)
 		c = UserDefinedImplicitConversion(compilation, /*fromResult*/ nullptr, fromType, toType);
+	return c;
+}
+
+std::shared_ptr<Conversion>
+ImplicitConversion(const ICompilation& compilation, const ResolveResult& resolveResult,
+                  IType& toType, bool allowUserDefined, bool allowTuple)
+{
+	// C# spec draft-v11 section 10.2 "implicit conversions". The private
+	// `ImplicitConversion(ResolveResult, IType, bool allowUserDefined, bool allowTuple)` overload
+	// (CSharpConversions.cs line 101) -- the ResolveResult-based dispatch core the public
+	// `ImplicitConversion(ResolveResult, IType)` (line 143) and `ExplicitConversion(ResolveResult,
+	// IType)` (line 281) entry points build on. The dispatch checks the already-ported helpers in
+	// spec order; the deferred arms (`AnonymousFunctionConversion` / `MethodGroupConversion` /
+	// `TupleConversion`) yield `Conversions::None()` until their machinery lands, so a
+	// non-matching `ResolveResult` falls through exactly as the C# does when those arms return
+	// `Conversion.None`.
+	std::shared_ptr<Conversion> c;
+	// C# `if (resolveResult.IsCompileTimeConstant) { c = ImplicitEnumerationConversion(...);
+	// if (c.IsValid) return c; if (ImplicitConstantExpressionConversion(...)) return ...; }` -- the
+	// compile-time-constant arms. `IsValid` is the `Conversion` virtual (false for the `None`
+	// singleton, true for any other singleton/factory); the D527 enumeration helper returns a
+	// factory (`EnumerationConversion`) when the conversion fires, else `None`.
+	if (resolveResult.IsCompileTimeConstant()) {
+		c = ImplicitEnumerationConversion(resolveResult, toType);
+		if (c->IsValid())
+			return c;
+		if (ImplicitConstantExpressionConversion(resolveResult, toType))
+			return Conversions::ImplicitConstantExpressionConversion();
+	}
+	// C# 9.0 spec section 10.2.5 -- the interpolated-string arm. The C# `resolveResult is
+	// InterpolatedStringResolveResult` ports to a `dynamic_cast` against the `ResolveResult` base
+	// (the C# `is` pattern); the `toType.IsKnownType(IFormattable) || toType.IsKnownType(FormattableString)`
+	// check ports to the already-ported `IsKnownType` free function (D-something, `TypeSystemExtensions`).
+	if (dynamic_cast<const InterpolatedStringResolveResult*>(&resolveResult) != nullptr) {
+		if (IsKnownType(toType, KnownTypeCode::IFormattable)
+		    || IsKnownType(toType, KnownTypeCode::FormattableString))
+			return Conversions::ImplicitInterpolatedStringConversion();
+	}
+	// C# `if (resolveResult.Type.Kind == TypeKind.Dynamic) return Conversion.ImplicitDynamicConversion;`
+	// -- the dynamic arm. `resolveResult.Type()` returns `const IType&`; `Kind()` is the `IType`
+	// virtual. The arm fires for any `dynamic`-typed result (a `dynamic` converts implicitly to
+	// any type, faithfully matching the C# `dynamic`-erasure semantics).
+	if (resolveResult.Type().Kind() == TypeKind::Dynamic)
+		return Conversions::ImplicitDynamicConversion();
+	// C# `c = AnonymousFunctionConversion(resolveResult, toType); if (c != Conversion.None) return c;`
+	// -- DEFERRED: the anonymous-function conversion needs `LambdaResolveResult.IsAnonymousMethod` /
+	// `HasParameterList` / `IsImplicitlyTyped` / `Parameters` / `IsValid` plus `IType.GetDelegateInvokeMethod`.
+	// Yields `None` (the `c` stays at its default-constructed `nullptr`); a non-lambda `ResolveResult`
+	// falls through exactly as the C# does when the helper returns `Conversion.None`.
+	// c = AnonymousFunctionConversion(resolveResult, toType);
+	// if (c.get() != Conversions::None().get()) return c;
+	// C# `c = MethodGroupConversion(resolveResult, toType); if (c != Conversion.None) return c;`
+	// -- DEFERRED: the method-group conversion needs `MethodGroupResolveResult.PerformOverloadResolution`
+	// plus `IsDelegateCompatible`. Yields `None`; a non-method-group `ResolveResult` falls through.
+	// c = MethodGroupConversion(resolveResult, toType);
+	// if (c.get() != Conversions::None().get()) return c;
+	// C# 9.0 spec section 10.2.16 default literal conversions -- `// TODO` in the C# source; skipped.
+	if (resolveResult.IsCompileTimeConstant()) {
+		// C# `c = StandardImplicitConversion(resolveResult.Type, toType, allowTuple);` -- the
+		// compile-time-constant fallback. `resolveResult.Type()` returns `const IType&` but
+		// `StandardImplicitConversion` takes `IType&` non-const (the non-const `AcceptVisitor`, D406),
+		// so the port `const_cast`s the const reference -- the underlying type-system object is
+		// mutable (the accessor's `const` is the contract, not a guarantee), the D515/D517 precedent.
+		// The `allowTuple` parameter is effectively ignored (the tuple arm is deferred inside
+		// `StandardImplicitConversion` D523, which has no `allowTuple` parameter).
+		IType& fromType = const_cast<IType&>(resolveResult.Type());
+		c = StandardImplicitConversion(compilation, fromType, toType);
+		if (c.get() != Conversions::None().get())
+			return c;
+		if (allowUserDefined) {
+			// C# `c = UserDefinedImplicitConversion(resolveResult, resolveResult.Type, toType);` --
+			// the user-defined fallback. `UserDefinedImplicitConversion` takes `const ResolveResult*`
+			// (the nullable pointer, D530) and `IType&` non-const; `&resolveResult` is the non-null
+			// pointer (the public entry always has a real `resolveResult`), and the `const_cast` on
+			// `resolveResult.Type()` mirrors the `StandardImplicitConversion` call above.
+			c = UserDefinedImplicitConversion(compilation, &resolveResult, fromType, toType);
+			if (c.get() != Conversions::None().get())
+				return c;
+		}
+	} else {
+		// C# `if (allowTuple && resolveResult is TupleResolveResult tupleRR) { c = TupleConversion(...);
+		// if (c != Conversion.None) return c; }` -- DEFERRED: the tuple arm needs the `TupleConversion`
+		// machinery. Yields `None` (the `c` stays `nullptr`); a non-tuple `ResolveResult` falls through.
+		// if (allowTuple) { if (auto* tupleRR = dynamic_cast<TupleResolveResult*>(&resolveResult)) {
+		//   c = TupleConversion(*tupleRR, toType, /*isExplicit*/ false); if (c.get() != None) return c; } }
+		// C# 9.0 spec section 10.2.17 -- the throw-expression arm. The C# `resolveResult is
+		// ThrowResolveResult` ports to a `dynamic_cast` against the `ResolveResult` base; a throw
+		// expression converts implicitly to any type.
+		if (dynamic_cast<const ThrowResolveResult*>(&resolveResult) != nullptr)
+			return Conversions::ThrowExpressionConversion();
+		// C# `if (allowUserDefined && allowTuple) c = ImplicitConversion(resolveResult.Type, toType);
+		// else c = ImplicitConversion(resolveResult.Type, toType, allowUserDefined, allowTuple);` --
+		// the IType-based fallback. The public-entry path (`allowUserDefined && allowTuple` true)
+		// calls the cached `ImplicitConversion(IType, IType)` in C#; the port collapses the cache
+		// into the private `ImplicitConversion(IType, IType, bool, bool)` D531 overload (the cache is
+		// an instance-level optimization on `CSharpConversions`, not on the `Detail::` free function).
+		// `resolveResult.Type()` is `const_cast` to `IType&` for the non-const `AcceptVisitor`.
+		c = ImplicitConversion(compilation, const_cast<IType&>(resolveResult.Type()), toType,
+		                      allowUserDefined, allowTuple);
+	}
 	return c;
 }
 

@@ -788,4 +788,41 @@ ImplicitConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilatio
                    bool allowUserDefined,
                    bool allowTuple);
 
+// The C# `private Conversion ImplicitConversion(ResolveResult resolveResult, IType toType,
+// bool allowUserDefined, bool allowTuple)` (CSharpConversions.cs line 101, C# spec draft-v11
+// section 10.2 "implicit conversions") -- the private ResolveResult-based implicit-conversion
+// dispatch, the core the public `ImplicitConversion(ResolveResult, IType)` entry calls with
+// `allowUserDefined: true, allowTuple: true` and the public `ExplicitConversion(ResolveResult,
+// IType)` calls with `allowUserDefined: false, allowTuple: false` (the implicit check before the
+// explicit dispatch). The dispatch checks the already-ported helpers in spec order: the
+// compile-time-constant arms (`ImplicitEnumerationConversion` D527, then
+// `ImplicitConstantExpressionConversion` D521), the interpolated-string arm (an RTTI check on
+// `InterpolatedStringResolveResult` plus `IsKnownType(IFormattable/FormattableString)`), the
+// dynamic arm (`resolveResult.Type.Kind == TypeKind.Dynamic`), the (deferred) anonymous-function
+// and method-group arms, the compile-time-constant fallback (`StandardImplicitConversion` D523 +
+// `UserDefinedImplicitConversion` D530), and the non-constant fallback (the deferred tuple arm,
+// the `ThrowResolveResult` arm, then the IType-based `ImplicitConversion` D531).
+//
+// The deferred arms (`AnonymousFunctionConversion`, `MethodGroupConversion`, `TupleConversion`)
+// yield `Conversions::None()` until their machinery (`LambdaResolveResult.IsValid` +
+// `GetDelegateInvokeMethod`; `MethodGroupResolveResult.PerformOverloadResolution`; the
+// `TupleConversion` tuple machinery) lands -- a non-matching `ResolveResult` falls through to the
+// IType-based fallback exactly as the C# does when those arms return `None`.
+//
+// `resolveResult.Type()` returns `const IType&` (the D374 non-null-reference convention), but
+// `StandardImplicitConversion` / `UserDefinedImplicitConversion` / the IType-based
+// `ImplicitConversion` take `IType&` non-const (the non-const `AcceptVisitor`, D406), so the port
+// `const_cast`s `resolveResult.Type()` to `IType&` -- the underlying type-system objects are
+// mutable (the accessor's `const` is the contract, not a guarantee), the D515 const-overload-pair
+// / D517 `const_cast` precedent. Takes `const ResolveResult&` (every `ResolveResult` member it
+// reads -- `IsCompileTimeConstant` / `Type` -- is `const`) and `IType& toType` non-const (the
+// fallback helpers take non-const `IType&`). Threads `const ICompilation&` (the D523/D530/D531
+// convention). Returns `std::shared_ptr<Conversion>`.
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+ImplicitConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                   const ILSpy::Decompiler::Semantics::ResolveResult& resolveResult,
+                   ILSpy::Decompiler::TypeSystem::IType& toType,
+                   bool allowUserDefined,
+                   bool allowTuple);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
