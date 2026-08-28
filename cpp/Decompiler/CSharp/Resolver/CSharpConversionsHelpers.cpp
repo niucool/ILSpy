@@ -24,7 +24,9 @@
 #include "Decompiler/CSharp/Resolver/CSharpConversionsHelpers.hpp"
 
 #include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversions (the nullable-conversion singletons / EnumerationConversion factory)
-#include "Decompiler/TypeSystem/IType.hpp"          // IType (Kind), ITypePtr, AcceptVisitor, Equals
+#include "Decompiler/TypeSystem/IType.hpp"          // IType (Kind), ITypePtr, AcceptVisitor, Equals, ParameterizedType
+#include "Decompiler/TypeSystem/ITypeDefinition.hpp"  // ITypeDefinition (KnownTypeCode -- the UnpackGenericArrayInterface definition arm)
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"   // KnownTypeCode (the array-interface codes UnpackGenericArrayInterface switches on)
 #include "Decompiler/TypeSystem/NormalizeTypeVisitor.hpp"  // NormalizeTypeVisitor::TypeErasure (IdentityConversion)
 #include "Decompiler/TypeSystem/NullableType.hpp"   // IsNullable, GetUnderlyingType (the nullable helpers)
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"  // GetTypeCode, TypeCode
@@ -38,10 +40,13 @@ using ILSpy::Decompiler::Semantics::Conversion;
 using ILSpy::Decompiler::Semantics::Conversions;
 using ILSpy::Decompiler::TypeSystem::GetTypeCode;
 using ILSpy::Decompiler::TypeSystem::IType;
+using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
 using ILSpy::Decompiler::TypeSystem::ITypePtr;
 using ILSpy::Decompiler::TypeSystem::IsNullable;
 using ILSpy::Decompiler::TypeSystem::GetUnderlyingType;
+using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
 using ILSpy::Decompiler::TypeSystem::NormalizeTypeVisitor;
+using ILSpy::Decompiler::TypeSystem::ParameterizedType;
 using ILSpy::Decompiler::TypeSystem::TypeCode;
 using ILSpy::Decompiler::TypeSystem::TypeKind;
 
@@ -218,6 +223,32 @@ bool NullLiteralConversion(const IType& fromType, const IType& toType)
 			|| (toType.IsReferenceType().has_value() && *toType.IsReferenceType() == true);
 	}
 	return false;
+}
+
+const IType* UnpackGenericArrayInterface(const IType& interfaceType)
+{
+	// C# `if (interfaceType is ParameterizedType pt) { switch (pt.GetDefinition()?.KnownTypeCode) {
+	// case IListOfT: ...: return pt.GetTypeArgument(0); } } return null;`. The `is ParameterizedType`
+	// ports to `dynamic_cast<const ParameterizedType*>(&interfaceType)`; the `?.` ports to a
+	// `def != nullptr` guard before `def->KnownTypeCode()` (a degenerate `ParameterizedType` whose
+	// generic has no definition yields `nullptr`, faithfully -- the C# `?.` skips the switch).
+	// `GetTypeArgument(0)` returns `ITypePtr` by value (a `shared_ptr` copy); the managed `IType`
+	// is owned by `pt`'s `typeArgs_`, so the returned raw pointer outlives the call (the caller
+	// may dereference it without keeping the temporary `shared_ptr` alive).
+	if (const ParameterizedType* pt = dynamic_cast<const ParameterizedType*>(&interfaceType)) {
+		const ITypeDefinition* def = pt->GetDefinition();
+		if (def != nullptr) {
+			switch (def->KnownTypeCode()) {
+				case KnownTypeCode::IListOfT:
+				case KnownTypeCode::ICollectionOfT:
+				case KnownTypeCode::IEnumerableOfT:
+				case KnownTypeCode::IReadOnlyListOfT:
+				case KnownTypeCode::IReadOnlyCollectionOfT:
+					return pt->GetTypeArgument(0).get();
+			}
+		}
+	}
+	return nullptr;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

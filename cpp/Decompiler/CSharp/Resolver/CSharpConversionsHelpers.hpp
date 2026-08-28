@@ -140,4 +140,17 @@ ExplicitNullableConversion(ILSpy::Decompiler::TypeSystem::IType& fromType,
 bool NullLiteralConversion(const ILSpy::Decompiler::TypeSystem::IType& fromType,
                            const ILSpy::Decompiler::TypeSystem::IType& toType);
 
+// The C# `IType UnpackGenericArrayInterface(IType interfaceType)` (CSharpConversions.cs line 586)
+// -- for `IList<T>` / `ICollection<T>` / `IEnumerable<T>` / `IReadOnlyList<T>` /
+// `IReadOnlyCollection<T>`, returns the type argument `T`; otherwise null. A pure helper (no
+// `CSharpConversions` instance state) consumed by the (deferred) `ImplicitReferenceConversion` /
+// `ExplicitReferenceConversion` arms that unpack a single-dimensional array's generic-interface base.
+// Reads only `ParameterizedType` / `GetDefinition` / `KnownTypeCode` / `GetTypeArgument` (all
+// TypeSystem primitives), so it lands as a `Detail::` free function taking `const IType&` like the
+// numeric helpers. Returns `const IType*` (nullable, non-owning -- the managed `IType` is owned by
+// the `ParameterizedType`'s `typeArgs_`, outliving the call; the C# `IType` nullable reference ports
+// to a nullable raw pointer, the `SkipModifiers` / `GetDefinition` convention).
+const ILSpy::Decompiler::TypeSystem::IType*
+UnpackGenericArrayInterface(const ILSpy::Decompiler::TypeSystem::IType& interfaceType);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
