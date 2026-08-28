@@ -913,4 +913,48 @@ bool IsEncompassingOrEncompassedBy(const ICompilation& compilation, IType& a, IT
 		|| StandardImplicitConversion(compilation, b, a)->IsValid();
 }
 
+ITypePtr FindMostEncompassedType(const ICompilation& compilation, const std::vector<ITypePtr>& candidates)
+{
+	// C# spec draft-v11 section 10.5.4 (the most-encompassed type). The C# `IType best = null;
+	// foreach (var current in candidates) { if (best == null || IsEncompassedBy(current, best))
+	// best = current; else if (!IsEncompassedBy(best, current)) return null; } return best;` --
+	// the running `best` is the most-encompassed candidate so far. For each `current`: if `best` is
+	// null (first iteration) or `current` is encompassed by `best` (`current` is "smaller"), `best`
+	// becomes `current`; else if `best` is NOT encompassed by `current` (neither encompasses the
+	// other), the set is ambiguous -> return null; otherwise (`best` is encompassed by `current`, so
+	// `current` is "bigger") `best` stays. The result is the candidate every other candidate converts
+	// to (the "smallest" in the implicit-conversion partial order). The `!best` check ports the C#
+	// `best == null` (a default-constructed `shared_ptr` is null); `return ITypePtr()` ports `return null`.
+	ITypePtr best;
+	for (const ITypePtr& current : candidates)
+	{
+		if (!best || IsEncompassedBy(compilation, *current, *best))
+			best = current;
+		else if (!IsEncompassedBy(compilation, *best, *current))
+			return ITypePtr();   // Ambiguous
+	}
+	return best;
+}
+
+ITypePtr FindMostEncompassingType(const ICompilation& compilation, const std::vector<ITypePtr>& candidates)
+{
+	// C# spec draft-v11 section 10.5.4 (the most-encompassing type). Mirrors `FindMostEncompassedType`
+	// with the direction swapped: the running `best` is the most-encompassing candidate so far. For
+	// each `current`: if `best` is null or `best` is encompassed by `current` (`current` is
+	// "bigger"), `best` becomes `current`; else if `current` is NOT encompassed by `best` (neither
+	// encompasses the other), the set is ambiguous -> return null; otherwise `best` stays. The result
+	// is the candidate every other candidate converts from (the "biggest" in the implicit-conversion
+	// partial order). The `!best` check ports the C# `best == null`; `return ITypePtr()` ports
+	// `return null`.
+	ITypePtr best;
+	for (const ITypePtr& current : candidates)
+	{
+		if (!best || IsEncompassedBy(compilation, *best, *current))
+			best = current;
+		else if (!IsEncompassedBy(compilation, *current, *best))
+			return ITypePtr();   // Ambiguous
+	}
+	return best;
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

@@ -35,6 +35,7 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 
 namespace ILSpy::Decompiler::TypeSystem { class IType; }
 namespace ILSpy::Decompiler::TypeSystem { class ICompilation; }
@@ -451,5 +452,49 @@ bool IsEncompassedBy(const ILSpy::Decompiler::TypeSystem::ICompilation& compilat
 bool IsEncompassingOrEncompassedBy(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
                                   ILSpy::Decompiler::TypeSystem::IType& a,
                                   ILSpy::Decompiler::TypeSystem::IType& b);
+
+// The C# `IType FindMostEncompassedType(IEnumerable<IType> candidates)` (CSharpConversions.cs line
+// 971, C# spec draft-v11 section 10.5.4 "most encompassed type") -- the most-encompassed type
+// among the candidates, i.e. the one that is encompassed by every other candidate (a standard
+// implicit conversion exists from it to every other candidate). Returns null (a null `ITypePtr`)
+// when the candidates are empty OR ambiguous (no single candidate is encompassed by all the others
+// -- two candidates that neither encompass nor are encompassed by each other make the set
+// ambiguous).
+//
+// The algorithm: `best` tracks the running most-encompassed candidate. For each `current`: if
+// `best` is null (first iteration) or `current` is encompassed by `best` (`current` is "smaller"
+// than `best`), `best` becomes `current`; else if `best` is NOT encompassed by `current` (neither
+// encompasses the other), the set is ambiguous -> return null; otherwise (`best` is encompassed by
+// `current`, so `current` is "bigger") `best` stays. The result is the candidate every other
+// candidate converts to (the "smallest" in the implicit-conversion partial order).
+//
+// Pure like `IsEncompassedBy` (delegates entirely to `IsEncompassedBy` D524 which threads the
+// compilation), so it lands as a `Detail::` free function taking `const ICompilation&` +
+// `const std::vector<ITypePtr>&` (the `IEnumerable<IType>` port -- the ILSpy collection convention,
+// `std::vector<ITypePtr>` as used by `DirectBaseTypes` / `TypeArguments`). Returns `ITypePtr`
+// (nullable -- a null `shared_ptr<IType>` means empty/ambiguous, faithfully matching the C# null `IType`
+// return).
+std::shared_ptr<ILSpy::Decompiler::TypeSystem::IType>
+FindMostEncompassedType(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                        const std::vector<std::shared_ptr<ILSpy::Decompiler::TypeSystem::IType>>& candidates);
+
+// The C# `IType FindMostEncompassingType(IEnumerable<IType> candidates)` (CSharpConversions.cs line
+// 982, C# spec draft-v11 section 10.5.4 "most encompassing type") -- the most-encompassing type
+// among the candidates, i.e. the one that encompasses every other candidate (a standard implicit
+// conversion exists from every other candidate to it). Returns null when the candidates are empty
+// OR ambiguous.
+//
+// The algorithm mirrors `FindMostEncompassedType` with the direction swapped: `best` tracks the
+// running most-encompassing candidate. For each `current`: if `best` is null or `best` is
+// encompassed by `current` (`current` is "bigger"), `best` becomes `current`; else if `current` is
+// NOT encompassed by `best` (neither encompasses the other), the set is ambiguous -> return null;
+// otherwise `best` stays. The result is the candidate every other candidate converts from (the
+// "biggest" in the implicit-conversion partial order).
+//
+// Pure like `FindMostEncompassedType`, so it lands as a `Detail::` free function with the same
+// signature. Returns `ITypePtr` (nullable -- empty/ambiguous).
+std::shared_ptr<ILSpy::Decompiler::TypeSystem::IType>
+FindMostEncompassingType(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                         const std::vector<std::shared_ptr<ILSpy::Decompiler::TypeSystem::IType>>& candidates);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
