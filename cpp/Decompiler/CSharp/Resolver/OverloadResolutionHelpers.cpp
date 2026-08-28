@@ -21,12 +21,18 @@
 
 #include "Decompiler/CSharp/Resolver/OverloadResolutionHelpers.hpp"
 
+#include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"  // CSharpConversions (ImplicitConversion(ResolveResult, IType))
 #include "Decompiler/CSharp/Resolver/OverloadResolutionErrors.hpp"  // TooManyPositionalArguments / NoParameterFoundForNamedArgument
+#include "Decompiler/Semantics/ByReferenceResolveResult.hpp"  // dynamic_cast<ByReferenceResolveResult>
+#include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversions::None() (the unmapped-argument conversion)
+#include "Decompiler/Semantics/OutVarResolveResult.hpp"  // dynamic_cast<OutVarResolveResult>
+#include "Decompiler/Semantics/ResolveResult.hpp"  // ResolveResult (arguments element)
 #include "Decompiler/TypeSystem/IParameterizedMember.hpp"  // Member->Parameters (specialized)
-#include "Decompiler/TypeSystem/IParameter.hpp"  // IParameter::Type
-#include "Decompiler/TypeSystem/IType.hpp"  // ArrayType / ParameterizedType
+#include "Decompiler/TypeSystem/IParameter.hpp"  // IParameter::Type / ReferenceKind
+#include "Decompiler/TypeSystem/IType.hpp"  // ArrayType / ParameterizedType / ByReferenceType / TypeKind
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"  // SpanOfT / ReadOnlySpanOfT
-#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // IsKnownType / IsArrayInterfaceType
+#include "Decompiler/TypeSystem/ReferenceKind.hpp"  // ReferenceKind
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // IsKnownType / IsArrayInterfaceType / SkipModifiers
 
 #include <string>
 #include <vector>
@@ -145,6 +151,94 @@ void CheckApplicabilityArgumentCounts(OverloadResolutionCandidate& candidate,
             }
         } else if (argumentCountPerParameter[i] > 1) {
             candidate.AddError(OverloadResolutionErrors::MultipleArgumentsForSingleParameter);
+        }
+    }
+}
+
+void CheckApplicabilityPassingModeAndConversions(
+    OverloadResolutionCandidate& candidate,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+    CSharpConversions& conversions,
+    bool allowImplicitIn,
+    bool isExtensionMethodInvocation) {
+    using namespace ILSpy::Decompiler::TypeSystem;
+    using ILSpy::Decompiler::Semantics::ByReferenceResolveResult;
+    using ILSpy::Decompiler::Semantics::Conversion;
+    using ILSpy::Decompiler::Semantics::Conversions;
+    using ILSpy::Decompiler::Semantics::OutVarResolveResult;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+
+    // The C# `candidate.ArgumentConversions = new Conversion[arguments.Length]` -- sized, null entries
+    // filled below (the unmapped-argument early-out sets `None`).
+    auto& argumentConversions = candidate.ArgumentConversions();
+    argumentConversions.assign(arguments.size(), nullptr);
+
+    for (std::size_t i = 0; i < arguments.size(); i++) {
+        const auto& argumentMap = candidate.ArgumentToParameterMap();
+        int parameterIndex = argumentMap[i];
+        if (parameterIndex < 0) {
+            argumentConversions[i] = Conversions::None();
+            continue;
+        }
+        auto paramIdx = static_cast<std::size_t>(parameterIndex);
+
+        ReferenceKind paramRefKind = candidate.Parameters()[paramIdx]->ReferenceKind();
+        const auto* brrr = dynamic_cast<const ByReferenceResolveResult*>(arguments[i].get());
+        const auto* outVar = dynamic_cast<const OutVarResolveResult*>(arguments[i].get());
+
+        if (brrr != nullptr) {
+            // The argument is a `ref`/`out`/`in` directionExpression -- its `ReferenceKind` must match
+            // the parameter's.
+            if (brrr->ReferenceKind() != paramRefKind)
+                candidate.AddError(OverloadResolutionErrors::ParameterPassingModeMismatch);
+        } else if (outVar != nullptr) {
+            // `out var decl` arguments are compatible with any `out` parameter; the conversion is NOT
+            // checked (the `out var` carries no type to convert).
+            if (paramRefKind != ReferenceKind::Out)
+                candidate.AddError(OverloadResolutionErrors::ParameterPassingModeMismatch);
+            continue;
+        } else {
+            // AllowImplicitIn: `in` parameters can be filled implicitly without `in` DirectionExpression.
+            // IsExtensionMethodInvocation: `this ref` / `this in` parameters can be filled implicitly.
+            bool inOrRefReadOnly = (paramRefKind == ReferenceKind::In || paramRefKind == ReferenceKind::RefReadOnly);
+            bool extThisRef = (isExtensionMethodInvocation && parameterIndex == 0 &&
+                               (paramRefKind == ReferenceKind::In ||
+                                paramRefKind == ReferenceKind::Ref ||
+                                paramRefKind == ReferenceKind::RefReadOnly));
+            if ((inOrRefReadOnly && allowImplicitIn) || extThisRef) {
+                // The C# `candidate.ParameterTypes[parameterIndex].SkipModifiers() is ByReferenceType brt`
+                // -- strip the modopt/modreq decorators, then unwrap a `ByReferenceType` to its element so
+                // the parameter is treated as not declared `in` for the following steps.
+                const IType* stripped = SkipModifiers(*candidate.ParameterTypes()[paramIdx]);
+                const auto* brt = dynamic_cast<const ByReferenceType*>(stripped);
+                if (brt != nullptr) {
+                    candidate.ParameterTypes()[paramIdx] = brt->Element();
+                } else if (paramRefKind != ReferenceKind::None) {
+                    candidate.AddError(OverloadResolutionErrors::ParameterPassingModeMismatch);
+                }
+            } else if (paramRefKind != ReferenceKind::None) {
+                candidate.AddError(OverloadResolutionErrors::ParameterPassingModeMismatch);
+            }
+        }
+
+        ITypePtr& parameterTypePtr = candidate.ParameterTypes()[paramIdx];
+        IType& parameterType = *parameterTypePtr;
+        std::shared_ptr<Conversion> c = conversions.ImplicitConversion(*arguments[i], parameterType);
+        argumentConversions[i] = c;
+        if (isExtensionMethodInvocation && parameterIndex == 0) {
+            // First parameter to extension method must be an identity, reference, boxing or span
+            // conversion -- pointer-identity against the four singletons (the C# reference-equality
+            // `c == Conversion.IdentityConversion || ...`).
+            if (!(c.get() == Conversions::IdentityConversion().get() ||
+                  c.get() == Conversions::ImplicitReferenceConversion().get() ||
+                  c.get() == Conversions::BoxingConversion().get() ||
+                  c.get() == Conversions::ImplicitSpanConversion().get()))
+                candidate.AddError(OverloadResolutionErrors::ArgumentTypeMismatch);
+        } else {
+            if ((!c->IsValid() && !c->IsUserDefined() && !c->IsMethodGroupConversion()) &&
+                parameterType.Kind() != TypeKind::Unknown) {
+                candidate.AddError(OverloadResolutionErrors::ArgumentTypeMismatch);
+            }
         }
     }
 }

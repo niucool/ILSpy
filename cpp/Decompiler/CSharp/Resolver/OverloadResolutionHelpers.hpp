@@ -28,6 +28,21 @@
 
 #include "Decompiler/CSharp/Resolver/OverloadResolutionCandidate.hpp"
 
+#include <memory>
+#include <vector>
+
+namespace ILSpy::Decompiler::CSharp::Resolver {
+
+// Forward-declared (now ported): the conversion controller. `CheckApplicabilityPassingModeAndConversions`
+// reads `CSharpConversions::ImplicitConversion(ResolveResult, IType)` (the D529 public entry).
+class CSharpConversions;
+
+} // namespace ILSpy::Decompiler::CSharp::Resolver
+
+// `ResolveResult` is forward-declared (the `std::vector<std::shared_ptr<ResolveResult>>` parameter
+// needs only a declaration, not the full definition; the .cpp includes the full header).
+namespace ILSpy::Decompiler::Semantics { class ResolveResult; }
+
 namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 
 // The C# `bool ResolveParameterTypes(Candidate candidate, bool useSpecializedParameters)`. Reads the
@@ -63,5 +78,31 @@ void MapCorrespondingParameters(OverloadResolutionCandidate& candidate,
 // `CSharpConversions.ImplicitConversion` and is deferred.
 void CheckApplicabilityArgumentCounts(OverloadResolutionCandidate& candidate,
                                       bool allowOptionalParameters);
+
+// The second half of the C# `CheckApplicability(Candidate candidate)` (C# 4.0 spec section
+// 7.5.3.1 "Applicable function member") -- the passing-mode + conversion check. For each argument:
+//   * unmapped (parameterIndex < 0): `ArgumentConversions[i] = None`, continue.
+//   * a `ByReferenceResolveResult`: the argument's `ReferenceKind` must match the parameter's, else
+//     `ParameterPassingModeMismatch`.
+//   * an `OutVarResolveResult`: the parameter must be `Out`, else `ParameterPassingModeMismatch`;
+//     `out var` is compatible with any `out` parameter (the conversion is NOT checked -- `continue`).
+//   * otherwise (by-value): the `AllowImplicitIn` / `IsExtensionMethodInvocation` implicit-`in` unwrap
+//     (a `ByReferenceType` parameter type stripped via `SkipModifiers` is unwrapped to its element so
+//     `in`/`ref`/`ref readonly` parameters can be filled implicitly); else a non-`None` `ReferenceKind`
+//     is a `ParameterPassingModeMismatch`.
+//   * then `conversions.ImplicitConversion(arguments[i], parameterType)` is called and stored in
+//     `ArgumentConversions[i]`; for an extension method's first parameter, the conversion must be an
+//     identity / implicit-reference / boxing / implicit-span conversion, else `ArgumentTypeMismatch`;
+//     otherwise, an invalid non-user-defined non-method-group conversion to a non-`Unknown` type is an
+//     `ArgumentTypeMismatch`.
+// `arguments` is the `OverloadResolution` ctor field; `conversions` is the instance's
+// `CSharpConversions`; `allowImplicitIn`/`isExtensionMethodInvocation` are the `AllowImplicitIn`/
+// `IsExtensionMethodInvocation` input properties.
+void CheckApplicabilityPassingModeAndConversions(
+    OverloadResolutionCandidate& candidate,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+    CSharpConversions& conversions,
+    bool allowImplicitIn,
+    bool isExtensionMethodInvocation);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
