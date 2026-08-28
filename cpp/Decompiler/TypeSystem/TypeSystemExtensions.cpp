@@ -24,6 +24,7 @@
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
 #include "Decompiler/TypeSystem/Implementation/BaseTypeCollector.hpp"
+#include "Decompiler/TypeSystem/IMethod.hpp"
 
 #include <algorithm>
 #include <stdexcept>
@@ -132,6 +133,24 @@ const IType* SkipModifiers(const IType& type)
         t = element.get();
     }
     return t;
+}
+
+const IMethod* GetDelegateInvokeMethod(const IType& type)
+{
+    // C# `if (type.Kind == TypeKind.Delegate) return type.GetMethods(m => m.Name == "Invoke",
+    // GetMemberOptions.IgnoreInheritedMembers).FirstOrDefault(); else return null;` -- only a
+    // delegate kind carries an `Invoke` method; every other kind short-circuits to null. The
+    // `GetMethods` snapshot is filtered to methods named `"Invoke"` (the delegate's single
+    // entry-point method, declared directly on the delegate -- hence `IgnoreInheritedMembers`);
+    // `.FirstOrDefault()` returns the first match or null for an empty snapshot. The returned
+    // pointer is non-owning (the method is owned by the type system / the concrete type
+    // definition whose `GetMethods` produced the snapshot).
+    if (type.Kind() != TypeKind::Delegate)
+        return nullptr;
+    auto methods = type.GetMethods(
+        [](const IMethod* m) { return m->Name() == "Invoke"; },
+        GetMemberOptions::IgnoreInheritedMembers);
+    return methods.empty() ? nullptr : methods.front();
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem

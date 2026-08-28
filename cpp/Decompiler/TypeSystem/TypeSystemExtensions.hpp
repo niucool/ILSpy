@@ -135,4 +135,18 @@ bool IsAnyPointer(TypeKind typeKind);
 // `as ParameterizedType` test).
 const IType* SkipModifiers(const IType& type);
 
+// The C# `public static IMethod GetDelegateInvokeMethod(this IType type)` (TypeSystemExtensions.cs
+// line 414) -- "Gets the invoke method for a delegate type. Returns null if the type is not a
+// delegate type; or if the invoke method could not be found." A delegate type's `Invoke` method is
+// the method-shaped entry the delegate-conversion / method-group-conversion / anonymous-function-
+// conversion helpers compare a candidate method against (the delegate's signature contract). The
+// `Kind == TypeKind.Delegate` guard returns null for non-delegate kinds, and the
+// `GetMethods(m => m.Name == "Invoke", GetMemberOptions.IgnoreInheritedMembers).FirstOrDefault()`
+// returns the first `Invoke` method or null when none is found (an empty vector yields null). The
+// C# null-check / `ArgumentNullException` compiles out (a `const IType&` reference cannot bind to
+// null). The first consumers are the deferred `CSharpConversions` arms
+// (`AnonymousFunctionConversion` / `MethodGroupConversion`) and the public
+// `IsDelegateCompatible(IMethod, IType)` overload that resolves the delegate's invoke method.
+const IMethod* GetDelegateInvokeMethod(const IType& type);
+
 } // namespace ILSpy::Decompiler::TypeSystem
