@@ -244,4 +244,15 @@ int CSharpConversions::BetterConversion(ILSpy::Decompiler::TypeSystem::IType& s,
 	return Detail::BetterConversionTarget(*compilation_, t1, t2);
 }
 
+bool CSharpConversions::IsConstraintConvertible(ILSpy::Decompiler::TypeSystem::IType& fromType,
+                                               ILSpy::Decompiler::TypeSystem::IType& toType)
+{
+	// CSharpConversions.cs line 261. The public constraint-convertibility entry point. The C# `throw
+	// new ArgumentNullException` on null `fromType`/`toType` compiles out (the `IType&` references
+	// cannot bind to null, the D374 convention). Delegates to the `Detail::IsConstraintConvertible`
+	// free function (the D517 reference-cluster convention), threading `*compilation_` to the
+	// identity/reference/boxing/type-parameter helpers that need `FindType`/`IsSubtypeOf`.
+	return Detail::IsConstraintConvertible(*compilation_, fromType, toType);
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver

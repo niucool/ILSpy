@@ -260,6 +260,20 @@ public:
                           ILSpy::Decompiler::TypeSystem::IType& t1,
                           ILSpy::Decompiler::TypeSystem::IType& t2);
 
+    // The C# `public bool IsConstraintConvertible(IType fromType, IType toType)`
+    // (CSharpConversions.cs line 261, C# spec section 8.4.5 "satisfying constraints") -- whether
+    // `fromType` is convertible to `toType` using one of the conversions allowed when satisfying type
+    // parameter constraints. The allowed conversions are a strict subset of the implicit conversions:
+    // identity, implicit reference, boxing (for a non-nullable from-type), the nullable-value-type-to-
+    // `object` special case, and implicit type-parameter conversion. Delegates to
+    // `Detail::IsConstraintConvertible(*compilation_, ...)` (the free function that wires the
+    // already-ported helpers). The C# `ArgumentNullException` on null args compiles out (the `IType&`
+    // references cannot bind to null, the D374 convention). The `fromType` / `toType` are `IType&`
+    // non-const because the `Detail::` free function takes non-const `IType&` (the non-const
+    // `AcceptVisitor`, D406). Returns `bool`.
+    bool IsConstraintConvertible(ILSpy::Decompiler::TypeSystem::IType& fromType,
+                               ILSpy::Decompiler::TypeSystem::IType& toType);
+
 private:
     const ILSpy::Decompiler::TypeSystem::ICompilation* compilation_;
 

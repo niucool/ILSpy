@@ -2021,4 +2021,45 @@ int BetterConversionTarget(const ICompilation& compilation, IType& t1, IType& t2
 	return 0;
 }
 
+// The C# `public bool IsConstraintConvertible(IType fromType, IType toType)` (CSharpConversions.cs
+// line 261, C# spec section 8.4.5 "satisfying constraints"). Delegates to the already-ported helpers
+// in spec order: identity, implicit reference, the nullable-vs-boxing branch (nullable from-type ->
+// the `object`-constraint special case; non-nullable from-type -> boxing), then implicit type-
+// parameter. The C# `throw new ArgumentNullException` on null args compiles out (the `IType&`
+// references cannot bind to null, the D374 convention). The C# `ImplicitReferenceConversion(
+// fromType, toType, 0)` is the private recursive worker at depth 0 (not the public
+// `IsImplicitReferenceConversion` which delegates to the worker at depth 0 -- both produce the
+// same result); the port calls `Detail::ImplicitReferenceConversion(compilation, ..., 0)`
+// faithfully. The `NullableType.IsNullable(fromType)` / `IsKnownType(toType, Object)` take
+// `const IType&` but a non-const `IType&` binds to `const IType&` trivially. Returns `bool`.
+bool IsConstraintConvertible(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                            ILSpy::Decompiler::TypeSystem::IType& fromType,
+                            ILSpy::Decompiler::TypeSystem::IType& toType)
+{
+	// C# `if (IdentityConversion(fromType, toType)) return true;` -- the identity conversion (D514).
+	if (IdentityConversion(fromType, toType))
+		return true;
+	// C# `if (ImplicitReferenceConversion(fromType, toType, 0)) return true;` -- the implicit reference
+	// conversion (D517, the private recursive worker at depth 0).
+	if (ImplicitReferenceConversion(compilation, fromType, toType, 0))
+		return true;
+	// C# `if (NullableType.IsNullable(fromType)) { if (toType.IsKnownType(KnownTypeCode.Object))
+	// return true; } else { if (IsBoxingConversion(fromType, toType)) return true; }` -- the nullable
+	// branch: a nullable from-type is convertible to `object` (the nullable-value-type-to-object
+	// special case the `DefaultResolvedTypeParameter.DirectBaseTypes` `object` constraint inserts);
+	// a non-nullable from-type is convertible by boxing (D519).
+	if (IsNullable(fromType)) {
+		if (IsKnownType(toType, KnownTypeCode::Object))
+			return true;
+	} else {
+		if (IsBoxingConversion(compilation, fromType, toType))
+			return true;
+	}
+	// C# `if (ImplicitTypeParameterConversion(fromType, toType)) return true; return false;` -- the
+	// implicit type-parameter conversion (D519).
+	if (ImplicitTypeParameterConversion(compilation, fromType, toType))
+		return true;
+	return false;
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

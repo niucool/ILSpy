@@ -1020,4 +1020,37 @@ int BetterConversionTarget(const ILSpy::Decompiler::TypeSystem::ICompilation& co
                            ILSpy::Decompiler::TypeSystem::IType& t1,
                            ILSpy::Decompiler::TypeSystem::IType& t2);
 
+// The C# `public bool IsConstraintConvertible(IType fromType, IType toType)`
+// (CSharpConversions.cs line 261, C# spec section 8.4.5 "satisfying constraints") -- whether
+// `fromType` is convertible to `toType` using one of the conversions allowed when satisfying type
+// parameter constraints. The allowed conversions are a strict subset of the implicit conversions:
+// identity, implicit reference, boxing (for a non-nullable from-type), the nullable-value-type-to-
+// `object` special case (an `object` constraint still allows nullable value types -- `object`
+// constraints don't exist in C# but are inserted by `DefaultResolvedTypeParameter.DirectBaseTypes`),
+// and implicit type-parameter conversion. NOT allowed: numeric, nullable-lifted, pointer, constant-
+// expression, user-defined, or tuple conversions.
+//
+// The C# body checks the already-ported helpers in order: `IdentityConversion(fromType, toType)`;
+// `ImplicitReferenceConversion(fromType, toType, 0)` (the private recursive worker at depth 0, NOT
+// the public `IsImplicitReferenceConversion` -- both produce the same result, the public delegates to
+// the worker at depth 0); the nullable branch -- `NullableType.IsNullable(fromType)` gates: if
+// nullable, `toType.IsKnownType(KnownTypeCode.Object)` (the nullable-to-object special case); else
+// `IsBoxingConversion(fromType, toType)` (the boxing arm); then `ImplicitTypeParameterConversion(
+// fromType, toType)`; else `false`.
+//
+// Pure given a compilation (delegates entirely to the already-ported `IdentityConversion` D514,
+// `ImplicitReferenceConversion` D517, `NullableType.IsNullable` D515, `IsKnownType`,
+// `IsBoxingConversion` D519, `ImplicitTypeParameterConversion` D519 -- all of which take
+// `const ICompilation&` or are pure), so it lands as a `Detail::` free function taking
+// `const ICompilation&` (the D517 reference-cluster convention). Takes `IType&` non-const (the
+// callees `IdentityConversion` / `ImplicitReferenceConversion` / `IsBoxingConversion` /
+// `ImplicitTypeParameterConversion` take non-const `IType&` for the non-const `AcceptVisitor`,
+// D406; `NullableType.IsNullable` and `IsKnownType` take `const IType&` but a non-const `IType&`
+// binds to a `const IType&` parameter trivially). The C# `throw new ArgumentNullException` on
+// null `fromType`/`toType` compiles out (the `IType&` references cannot bind to null, the D374
+// convention). Returns `bool`.
+bool IsConstraintConvertible(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                            ILSpy::Decompiler::TypeSystem::IType& fromType,
+                            ILSpy::Decompiler::TypeSystem::IType& toType);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
