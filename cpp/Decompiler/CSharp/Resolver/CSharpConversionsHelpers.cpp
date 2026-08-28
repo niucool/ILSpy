@@ -888,6 +888,29 @@ std::shared_ptr<Conversion> ExplicitConversionImpl(const ICompilation& compilati
 	return Conversions::None();
 }
 
+std::shared_ptr<Conversion>
+ExplicitConversionNotUserDefined(const ICompilation& compilation, IType& fromType, IType& toType)
+{
+	// CSharpConversions.cs line 331: `Conversion c = ImplicitConversion(fromType, toType,
+	// allowUserDefined: false, allowTuple: false); if (c != Conversion.None) return c; return
+	// ExplicitConversionImpl(fromType, toType);`. The private `ImplicitConversion(IType, IType,
+	// bool allowUserDefined, bool allowTuple)` overload (line 166) the C# calls is:
+	//   var c = StandardImplicitConversion(fromType, toType, allowTuple);
+	//   if (c == Conversion.None && allowUserDefined) c = UserDefinedImplicitConversion(null, fromType, toType);
+	//   return c;
+	// With `allowUserDefined: false` the user-defined branch is unreachable, and the tuple arm is
+	// deferred (yields None for tuple shapes until ported), so `allowTuple` is effectively `true`
+	// for the ported arms. The faithful port is the standard implicit conversion (the already-ported
+	// `Detail::StandardImplicitConversion` D523) then, if no implicit conversion exists, the standard
+	// explicit conversion (the already-ported `Detail::ExplicitConversionImpl` D524). The implicit
+	// check is FIRST: an implicit conversion is returned even though the name says "ExplicitConversion"
+	// (the crux that distinguishes this helper from `ExplicitConversionImpl`).
+	auto c = StandardImplicitConversion(compilation, fromType, toType);
+	if (c.get() != Conversions::None().get())
+		return c;
+	return ExplicitConversionImpl(compilation, fromType, toType);
+}
+
 bool IsEncompassedBy(const ICompilation& compilation, IType& a, IType& b)
 {
 	// C# spec draft-v11 section 10.5.4 (the user-defined implicit conversions encompassment helper).

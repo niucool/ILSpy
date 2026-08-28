@@ -421,6 +421,43 @@ ExplicitConversionImpl(const ILSpy::Decompiler::TypeSystem::ICompilation& compil
                         ILSpy::Decompiler::TypeSystem::IType& fromType,
                         ILSpy::Decompiler::TypeSystem::IType& toType);
 
+// The C# `Conversion ExplicitConversionNotUserDefined(IType fromType, IType toType)`
+// (CSharpConversions.cs line 331) -- the explicit conversion MINUS the user-defined-conversion
+// fallback. This is the helper the user-defined-conversion resolution (`SelectOperator` /
+// `UserDefinedImplicitConversion` / `UserDefinedExplicitConversion`) uses to compute the
+// conversion before and after the user-defined operator: it returns the standard (implicit OR
+// explicit) conversion between `fromType` and `toType`, never reaching the user-defined branch.
+//
+// The C# body is: `Conversion c = ImplicitConversion(fromType, toType, allowUserDefined: false,
+// allowTuple: false); if (c != Conversion.None) return c; return ExplicitConversionImpl(fromType,
+// toType);` -- it checks the standard implicit conversion FIRST, and only if no implicit
+// conversion exists does it fall back to the standard explicit conversion. The private
+// `ImplicitConversion(IType, IType, bool allowUserDefined, bool allowTuple)` overload (line 166)
+// it calls is `StandardImplicitConversion(fromType, toType, allowTuple)` followed by an
+// `allowUserDefined`-gated `UserDefinedImplicitConversion`; with `allowUserDefined: false` the
+// user-defined branch is skipped, and the tuple arm is deferred (yields `None` for tuple shapes
+// until ported), so `allowTuple` is effectively `true` for the ported arms. The faithful port
+// reduces to the already-ported `StandardImplicitConversion` (D523) then `ExplicitConversionImpl`
+// (D524).
+//
+// The load-bearing crux is the IMPLICIT-CHECK-FIRST ordering: an implicit conversion (e.g.
+// `int` -> `long` numeric widening, `int` -> `object` boxing, `string` -> `object` reference
+// widening, `null` -> reference-type null-literal, `int` -> `Nullable<int>` lifted identity) is
+// returned even though the name says "ExplicitConversion" -- this is what distinguishes
+// `ExplicitConversionNotUserDefined` from `ExplicitConversionImpl` (which would return the
+// explicit conversion directly, e.g. `ExplicitNumericConversion` for `int` -> `long` or
+// `ExplicitReferenceConversion` for `string` -> `object`).
+//
+// Pure given a compilation (delegates entirely to the already-ported `StandardImplicitConversion`
+// and `ExplicitConversionImpl`, both of which take `const ICompilation&`), so it lands as a
+// `Detail::` free function with the same signature: `const ICompilation&` + `IType&` non-const (the
+// helpers take non-const `IType&` for the non-const `AcceptVisitor`, D406). Returns
+// `std::shared_ptr<Conversion>` (the C# `Conversion` reference modeled as a shared handle).
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+ExplicitConversionNotUserDefined(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                                 ILSpy::Decompiler::TypeSystem::IType& fromType,
+                                 ILSpy::Decompiler::TypeSystem::IType& toType);
+
 // The C# `bool IsEncompassedBy(IType a, IType b)` (CSharpConversions.cs line 960, C# spec draft-v11
 // section 10.5.4 "user-defined implicit conversions" -- the encompassment helper) -- true iff type `a`
 // is encompassed by type `b`, i.e. there is a standard implicit conversion from `a` to `b`. This is
