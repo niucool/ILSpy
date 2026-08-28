@@ -1053,4 +1053,41 @@ bool IsConstraintConvertible(const ILSpy::Decompiler::TypeSystem::ICompilation& 
                             ILSpy::Decompiler::TypeSystem::IType& fromType,
                             ILSpy::Decompiler::TypeSystem::IType& toType);
 
+// The C# `bool IsImplicitSpanConversion(IType fromType, IType toType)` (CSharpConversions.cs line
+// 1238, the C# 14.0 first-class-span-types proposal) -- true iff an implicit span conversion
+// exists from `fromType` to `toType`. The proposal permits conversions between single-dimensional
+// arrays, `System.Span<T>`, `System.ReadOnlySpan<T>`, and `string`: a 1-D array converts to
+// `Span<T>` by element identity, and to `ReadOnlySpan<T>` by element identity OR an implicit
+// reference conversion (covariance); `Span<T>` / `ReadOnlySpan<T>` convert to `ReadOnlySpan<T>`
+// by element identity OR an implicit reference conversion; `string` converts to
+// `ReadOnlySpan<char>` by the fixed element-type match.
+//
+// The conversion is gated on `compilation.TypeSystemOptions.HasFlag(TypeSystemOptions.
+// FirstClassSpanTypes)` -- it does not exist unless the type system materializes first-class
+// spans. `TypeSystemOptions` (D376, with `FirstClassSpanTypes = 0x40000`) and the `ICompilation::
+// TypeSystemOptions()` accessor are both ported, so the flag check lands now. The helper then
+// delegates to the already-ported `IdentityConversion` (D514), `IsImplicitReferenceConversion`
+// (D517), and `IsKnownType` (TypeSystemExtensions).
+//
+// The C# pattern-match arms read `toType.TypeArguments[0]` (the C# `IType.TypeArguments` is on
+// the interface); the port's `TypeArguments()` is `ParameterizedType`-specific (not on the `IType`
+// surface), so each access `dynamic_cast`s to `ParameterizedType*` + guards (an empty/missing
+// argument yields a null pointer and the arm returns false -- faithful to the C#, where a real
+// `Span<T>` / `ReadOnlySpan<T>` always carries the argument; the guard avoids UB on a degenerate
+// stub, the D516 / BetterConversionTarget `firstTypeArg` precedent). The `ArrayType` arm reads
+// `Dimensions: 1` (the rank) -- the port checks `arr->Rank() == 1` (`ArrayType::Rank`, the
+// single-dimensional-array condition, faithful to the C# `Dimensions` property); `ElementType`
+// is `arr->Element()` whose `shared_ptr` deref yields `IType&` non-const.
+//
+// Pure given a compilation (delegates only to the already-ported helpers; reads no
+// `CSharpConversions` instance state beyond the compilation threaded to
+// `IsImplicitReferenceConversion`), so it lands as a `Detail::` free function taking
+// `const ICompilation&` (the D517 reference-cluster convention). Takes `IType&` non-const (the
+// callees `IdentityConversion` / `IsImplicitReferenceConversion` take non-const `IType&` for the
+// non-const `AcceptVisitor`, D406; `IsKnownType` takes `const IType&` but a non-const `IType&`
+// binds to a `const IType&` parameter trivially). Returns `bool`.
+bool IsImplicitSpanConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                               ILSpy::Decompiler::TypeSystem::IType& fromType,
+                               ILSpy::Decompiler::TypeSystem::IType& toType);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

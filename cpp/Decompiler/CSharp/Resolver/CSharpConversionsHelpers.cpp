@@ -90,6 +90,7 @@ using ILSpy::Decompiler::TypeSystem::PointerType;
 using ILSpy::Decompiler::TypeSystem::ReferenceKind;
 using ILSpy::Decompiler::TypeSystem::TypeCode;
 using ILSpy::Decompiler::TypeSystem::TypeKind;
+using ILSpy::Decompiler::TypeSystem::TypeSystemOptions;
 using ILSpy::Decompiler::TypeSystem::VarianceModifier;
 
 namespace {
@@ -2059,6 +2060,110 @@ bool IsConstraintConvertible(const ILSpy::Decompiler::TypeSystem::ICompilation& 
 	// implicit type-parameter conversion (D519).
 	if (ImplicitTypeParameterConversion(compilation, fromType, toType))
 		return true;
+	return false;
+}
+
+// The C# `bool IsImplicitSpanConversion(IType fromType, IType toType)` (CSharpConversions.cs line
+// 1238, the C# 14.0 first-class-span-types proposal). See the header for the arm-by-arm rationale
+// and the `TypeArguments[0]` `dynamic_cast`-plus-guard convention.
+bool IsImplicitSpanConversion(const ICompilation& compilation, IType& fromType, IType& toType)
+{
+	// C# `if (!compilation.TypeSystemOptions.HasFlag(TypeSystemOptions.FirstClassSpanTypes)) return
+	// false;` -- the first-class-span-types gate. `HasFlag` is true when all bits of the argument are
+	// set; for a single flag this is `(options & flag) == flag`. The C++ `enum class` bitwise `&` is
+	// lower precedence than `==`, so the `&` is parenthesized. Without the flag, no span conversion
+	// exists (the faithful C# behavior).
+	TypeSystemOptions options = compilation.TypeSystemOptions();
+	if ((options & TypeSystemOptions::FirstClassSpanTypes) != TypeSystemOptions::FirstClassSpanTypes)
+		return false;
+
+	// A small helper to extract the first type argument of a `Span<T>` / `ReadOnlySpan<T>` -- the
+	// C# `toType.TypeArguments[0]` where `toType` is a `ParameterizedType`. The port's
+	// `TypeArguments()` is `ParameterizedType`-specific (not on the `IType` surface), so the
+	// `dynamic_cast` + guard avoids UB on a degenerate stub (the BetterConversionTarget
+	// `firstTypeArg` precedent). Returns null when `t` is not a parameterized type or carries no
+	// type arguments; the caller guards before dereferencing.
+	auto firstTypeArg = [](IType& t) -> IType* {
+		auto* pt = dynamic_cast<ParameterizedType*>(&t);
+		if (pt == nullptr || pt->TypeArguments().empty())
+			return nullptr;
+		return pt->TypeArguments()[0].get();
+	};
+
+	// C# `switch (fromType) { ... }` -- the pattern-match arms are checked in declaration order; the
+	// first match that returns decides; a `break` falls through to the final `return false`.
+
+	// C# `case ArrayType { Dimensions: 1, ElementType: var elementType }:` -- a single-dimensional
+	// array. The C# `Dimensions: 1` pattern matches the rank (the number of dimensions); the port
+	// checks `arr->Rank() == 1` (`ArrayType::Rank`). `ElementType` is `arr->Element()` whose
+	// `shared_ptr` deref yields `IType&` non-const.
+	if (auto* arr = dynamic_cast<ArrayType*>(&fromType); arr != nullptr && arr->Rank() == 1) {
+		IType& elementType = *arr->Element();
+		// C# `if (toType.IsKnownType(KnownTypeCode.SpanOfT)) return IdentityConversion(elementType,
+		// toType.TypeArguments[0]);` -- the array-to-`Span<T>` arm (element identity).
+		if (IsKnownType(toType, KnownTypeCode::SpanOfT)) {
+			IType* toArg = firstTypeArg(toType);
+			if (toArg != nullptr && IdentityConversion(elementType, *toArg))
+				return true;
+			return false;
+		}
+		// C# `if (toType.IsKnownType(KnownTypeCode.ReadOnlySpanOfT)) return IdentityConversion(
+		// elementType, toType.TypeArguments[0]) || IsImplicitReferenceConversion(elementType,
+		// toType.TypeArguments[0]);` -- the array-to-`ReadOnlySpan<T>` arm (element identity OR an
+		// implicit reference conversion for covariance).
+		if (IsKnownType(toType, KnownTypeCode::ReadOnlySpanOfT)) {
+			IType* toArg = firstTypeArg(toType);
+			if (toArg != nullptr) {
+				if (IdentityConversion(elementType, *toArg))
+					return true;
+				if (IsImplicitReferenceConversion(compilation, elementType, *toArg))
+					return true;
+			}
+			return false;
+		}
+		// C# `break;` -- neither `Span<T>` nor `ReadOnlySpan<T>`: falls through to the final `return
+		// false` (the array-to-other-type direction is not a span conversion).
+	}
+
+	// C# `case ParameterizedType pt when pt.IsKnownType(KnownTypeCode.SpanOfT) || pt.IsKnownType(
+	// KnownTypeCode.ReadOnlySpanOfT):` -- `Span<T>` / `ReadOnlySpan<T>` to `ReadOnlySpan<T>`. The C#
+	// `pt` is already the `ParameterizedType`; the port `dynamic_cast`s once and reads `pt->
+	// TypeArguments()[0]` directly (with the empty guard). The `when` filter restricts the arm to
+	// span/readonly-span sources.
+	if (auto* pt = dynamic_cast<ParameterizedType*>(&fromType); pt != nullptr && !pt->TypeArguments().empty()
+		&& (IsKnownType(fromType, KnownTypeCode::SpanOfT) || IsKnownType(fromType, KnownTypeCode::ReadOnlySpanOfT))) {
+		IType& fromArg = *pt->TypeArguments()[0];
+		// C# `if (toType.IsKnownType(KnownTypeCode.ReadOnlySpanOfT)) return IdentityConversion(
+		// pt.TypeArguments[0], toType.TypeArguments[0]) || IsImplicitReferenceConversion(
+		// pt.TypeArguments[0], toType.TypeArguments[0]);`
+		if (IsKnownType(toType, KnownTypeCode::ReadOnlySpanOfT)) {
+			IType* toArg = firstTypeArg(toType);
+			if (toArg != nullptr) {
+				if (IdentityConversion(fromArg, *toArg))
+					return true;
+				if (IsImplicitReferenceConversion(compilation, fromArg, *toArg))
+					return true;
+			}
+			return false;
+		}
+		// C# `break;` -- a span/readonly-span source to a non-`ReadOnlySpan<T>` target: falls through
+		// to the final `return false`.
+	}
+
+	// C# `case var s when s.IsKnownType(KnownTypeCode.String): return toType.IsKnownType(
+	// KnownTypeCode.ReadOnlySpanOfT) && toType.TypeArguments[0].IsKnownType(KnownTypeCode.Char);` --
+	// the `string`-to-`ReadOnlySpan<char>` fixed-arm (the only string span conversion; the element
+	// type must be exactly `char`). The `toType.TypeArguments[0]` access uses the `firstTypeArg`
+	// helper; a missing argument yields false (a real `ReadOnlySpan<T>` always carries the
+	// argument).
+	if (IsKnownType(fromType, KnownTypeCode::String)) {
+		if (!IsKnownType(toType, KnownTypeCode::ReadOnlySpanOfT))
+			return false;
+		IType* toArg = firstTypeArg(toType);
+		return toArg != nullptr && IsKnownType(*toArg, KnownTypeCode::Char);
+	}
+
+	// C# `return false;` -- the default arm (no pattern matched) and every `break`-fallthrough.
 	return false;
 }
 
