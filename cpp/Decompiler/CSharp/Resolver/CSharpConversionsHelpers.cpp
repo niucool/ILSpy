@@ -888,4 +888,29 @@ std::shared_ptr<Conversion> ExplicitConversionImpl(const ICompilation& compilati
 	return Conversions::None();
 }
 
+bool IsEncompassedBy(const ICompilation& compilation, IType& a, IType& b)
+{
+	// C# spec draft-v11 section 10.5.4 (the user-defined implicit conversions encompassment helper).
+	// The C# `return StandardImplicitConversion(a, b).IsValid;` -- the `IsValid` fold of the
+	// `StandardImplicitConversion` dispatch return. A `None` return (the `InvalidConversion` singleton,
+	// `IsValid` false) means `a` is NOT encompassed by `b`; any other return (a `BuiltinConversion` /
+	// `NumericOrEnumerationConversion` singleton, `IsValid` inherited true) means `a` IS encompassed.
+	// The dispatch delegates to the already-ported `Detail::StandardImplicitConversion` (D523) which
+	// threads the compilation through the reference/boxing/type-parameter/pointer arms.
+	return StandardImplicitConversion(compilation, a, b)->IsValid();
+}
+
+bool IsEncompassingOrEncompassedBy(const ICompilation& compilation, IType& a, IType& b)
+{
+	// C# spec draft-v11 section 10.5.5 (the user-defined explicit conversions encompassment helper).
+	// The C# `return (StandardImplicitConversion(a, b).IsValid || StandardImplicitConversion(b, a).IsValid);`
+	// -- the `IsValid` fold of the dispatch return in BOTH directions. A standard implicit conversion in
+	// EITHER direction (`a` -> `b` OR `b` -> `a`) makes `a` encompass-or-be-encompassed-by `b`. The two
+	// `StandardImplicitConversion` calls each thread the compilation through the dispatch arms; the
+	// `||` short-circuits on the first `true` (a valid conversion in the forward direction suffices, so
+	// the reverse-direction call is skipped when the forward direction already succeeds).
+	return StandardImplicitConversion(compilation, a, b)->IsValid()
+		|| StandardImplicitConversion(compilation, b, a)->IsValid();
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

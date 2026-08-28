@@ -420,4 +420,36 @@ ExplicitConversionImpl(const ILSpy::Decompiler::TypeSystem::ICompilation& compil
                         ILSpy::Decompiler::TypeSystem::IType& fromType,
                         ILSpy::Decompiler::TypeSystem::IType& toType);
 
+// The C# `bool IsEncompassedBy(IType a, IType b)` (CSharpConversions.cs line 960, C# spec draft-v11
+// section 10.5.4 "user-defined implicit conversions" -- the encompassment helper) -- true iff type `a`
+// is encompassed by type `b`, i.e. there is a standard implicit conversion from `a` to `b`. This is
+// the `FindMostEncompassedType` / `FindMostEncompassingType` primitive (the most-encompassed type
+// is the one every other candidate converts to; the most-encompassing type is the one that converts
+// to every other candidate). Delegates to `StandardImplicitConversion(a, b).IsValid` -- a `None`
+// return (the `InvalidConversion` singleton, `IsValid` false) means `a` is NOT encompassed by `b`;
+// any other return (a `BuiltinConversion` / `NumericOrEnumerationConversion` singleton, `IsValid`
+// inherited true) means `a` IS encompassed by `b`.
+//
+// Pure like the other dispatch helpers (no `CSharpConversions` instance state -- delegates entirely
+// to the already-ported `StandardImplicitConversion` D523 which threads the compilation), so it lands
+// as a `Detail::` free function taking `const ICompilation&` + `IType&` non-const (the same signature
+// `StandardImplicitConversion` takes, the D523 precedent). Returns `bool` -- the `.IsValid` fold of the
+// `shared_ptr<Conversion>` return.
+bool IsEncompassedBy(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                     ILSpy::Decompiler::TypeSystem::IType& a,
+                     ILSpy::Decompiler::TypeSystem::IType& b);
+
+// The C# `bool IsEncompassingOrEncompassedBy(IType a, IType b)` (CSharpConversions.cs line 965) --
+// true iff type `a` encompasses or is encompassed by type `b`, i.e. there is a standard implicit
+// conversion in EITHER direction (`a` -> `b` OR `b` -> `a`). Used by `UserDefinedExplicitConversion`
+// to filter the applicable operators whose source type encompasses or is encompassed by the from-type.
+// Delegates to `StandardImplicitConversion(a, b).IsValid || StandardImplicitConversion(b, a).IsValid`.
+//
+// Pure like `IsEncompassedBy` (delegates entirely to `StandardImplicitConversion` D523), so it lands
+// as a `Detail::` free function with the same signature. Takes `const ICompilation&` + `IType&`
+// non-const (the `StandardImplicitConversion` signature). Returns `bool`.
+bool IsEncompassingOrEncompassedBy(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                                  ILSpy::Decompiler::TypeSystem::IType& a,
+                                  ILSpy::Decompiler::TypeSystem::IType& b);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
