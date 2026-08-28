@@ -24,6 +24,7 @@
 #include "Decompiler/CSharp/Resolver/CSharpConversionsHelpers.hpp"
 
 #include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversions (the nullable-conversion singletons / EnumerationConversion factory)
+#include "Decompiler/Semantics/ResolveResult.hpp"  // ResolveResult (IsCompileTimeConstant / Type / ConstantValue -- the constant-expression conversion)
 #include "Decompiler/TypeSystem/ICompilation.hpp"   // ICompilation (FindType -- the array-to-System.Array arm)
 #include "Decompiler/TypeSystem/IType.hpp"          // IType (Kind), ITypePtr, AcceptVisitor, Equals, ParameterizedType, ArrayType
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"  // ITypeDefinition (KnownTypeCode -- the UnpackGenericArrayInterface definition arm)
@@ -36,12 +37,15 @@
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // GetAllBaseTypes, IsKnownType (the IsSubtypeOf traversal)
 #include "Decompiler/TypeSystem/VarianceModifier.hpp"  // VarianceModifier (the Covariant/Contravariant/Invariant switch)
 
+#include <any>      // std::any (the ConstantValue unbox -- the D374/D424 `object?` model)
+#include <cstdint>  // std::int32_t / std::int64_t (the boxed int/long the constant-expression conversion reads)
 #include <memory>
 
 namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 
 using ILSpy::Decompiler::Semantics::Conversion;
 using ILSpy::Decompiler::Semantics::Conversions;
+using ILSpy::Decompiler::Semantics::ResolveResult;
 using ILSpy::Decompiler::TypeSystem::ArrayType;
 using ILSpy::Decompiler::TypeSystem::FunctionPointerType;
 using ILSpy::Decompiler::TypeSystem::GetAllBaseTypes;
@@ -706,6 +710,82 @@ std::shared_ptr<Conversion> ExplicitTypeParameterConversion(const ICompilation& 
 			return Conversions::BoxingConversion();
 	}
 	return Conversions::None();
+}
+
+bool ImplicitConstantExpressionConversion(const ResolveResult& rr, const IType& toType)
+{
+	// C# 9.0 spec section 10.2.11 (plus part of section 10.2.6 for the nullable-strip). The C#
+	// `if (rr == null || !rr.IsCompileTimeConstant) return false;` -- the C++ reference cannot be
+	// null (the C# null guard compiles out), so only the `IsCompileTimeConstant` check remains.
+	if (!rr.IsCompileTimeConstant())
+		return false;
+	// `TypeCode fromTypeCode = ReflectionHelper.GetTypeCode(rr.Type);` -- the C# `rr.Type` ports to
+	// `ResolveResult::Type()` (a `const` accessor returning `const IType&`); `GetTypeCode` takes
+	// `const IType&` and dynamic_casts to `ITypeDefinition` (so the constant's type must be an
+	// `ITypeDefinition` for the code to resolve -- a `KnownType` placeholder yields `TypeCode::Empty`).
+	TypeCode fromTypeCode = GetTypeCode(rr.Type());
+	// `toType = NullableType.GetUnderlyingType(toType);` -- the C# rebinds the local reference; the
+	// C++ port binds a `const IType&` local to the const `GetUnderlyingType` return (the original
+	// `toType` when not nullable, the type argument when `Nullable<T>` -- both outlive the call,
+	// owned by the `ParameterizedType` reachable through `toType` or by `toType` itself).
+	const IType& toTypeStripped = GetUnderlyingType(toType);
+	TypeCode toTypeCode = GetTypeCode(toTypeStripped);
+	if (toTypeStripped.Kind() == TypeKind::NUInt) {
+		// C# `if (toType.Kind == TypeKind.NUInt) { toTypeCode = TypeCode.UInt32; }` -- a `nuint`
+		// to-side is treated as `UInt32` (only 32 bits store safely on a 32-bit platform).
+		toTypeCode = TypeCode::UInt32;
+	}
+	if (fromTypeCode == TypeCode::Int64) {
+		// C# `long val = (long)rr.ConstantValue; return val >= 0 && toTypeCode == TypeCode.UInt64;` --
+		// unboxes the boxed `long`. The guard above ensures `rr` is a compile-time constant; a
+		// `long`-typed constant holds a boxed `long`. The pointer-form `std::any_cast` returns
+		// `nullptr` on a type mismatch (a divergent state the C# would `InvalidCastException` on);
+		// the guard returns `false` (no constant-expression conversion) as the safe faithful fallback.
+		std::any cv = rr.ConstantValue();
+		const auto* pVal = std::any_cast<std::int64_t>(&cv);
+		if (pVal == nullptr)
+			return false;
+		return *pVal >= 0 && toTypeCode == TypeCode::UInt64;
+	}
+	else if (fromTypeCode == TypeCode::Int32) {
+		// C# `object cv = rr.ConstantValue; if (cv == null) return false; int val = (int)cv;` -- the
+		// C# null check ports to `!cv.has_value()` (an empty `any` is the C# `null`); the `(int)cv`
+		// unbox ports to the pointer-form `std::any_cast<std::int32_t>` (returns `nullptr` on a type
+		// mismatch, the safe faithful fallback rather than throwing `bad_any_cast`).
+		std::any cv = rr.ConstantValue();
+		if (!cv.has_value())
+			return false;
+		const auto* pVal = std::any_cast<std::int32_t>(&cv);
+		if (pVal == nullptr)
+			return false;
+		std::int32_t val = *pVal;
+		switch (toTypeCode) {
+			// C# `case TypeCode.SByte: return val >= SByte.MinValue && val <= SByte.MaxValue;` --
+			// `SByte.MinValue`/`SByte.MaxValue` are the BCL constants -128/127 (the `sbyte` range).
+			case TypeCode::SByte:
+				return val >= -128 && val <= 127;
+			// C# `case TypeCode.Byte: return val >= Byte.MinValue && val <= Byte.MaxValue;` --
+			// `Byte.MinValue`/`Byte.MaxValue` are 0/255 (the `byte` range).
+			case TypeCode::Byte:
+				return val >= 0 && val <= 255;
+			// C# `case TypeCode.Int16: return val >= Int16.MinValue && val <= Int16.MaxValue;` --
+			// `Int16.MinValue`/`Int16.MaxValue` are -32768/32767 (the `short` range).
+			case TypeCode::Int16:
+				return val >= -32768 && val <= 32767;
+			// C# `case TypeCode.UInt16: return val >= UInt16.MinValue && val <= UInt16.MaxValue;` --
+			// `UInt16.MinValue`/`UInt16.MaxValue` are 0/65535 (the `ushort` range).
+			case TypeCode::UInt16:
+				return val >= 0 && val <= 65535;
+			// C# `case TypeCode.UInt32: case TypeCode.UInt64: return val >= 0;` -- the unsigned
+			// 32/64-bit targets accept any non-negative `int` (the value fits).
+			case TypeCode::UInt32:
+			case TypeCode::UInt64:
+				return val >= 0;
+			default:
+				break;
+		}
+	}
+	return false;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

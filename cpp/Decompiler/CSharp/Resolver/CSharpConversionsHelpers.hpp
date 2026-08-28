@@ -40,6 +40,7 @@ namespace ILSpy::Decompiler::TypeSystem { class IType; }
 namespace ILSpy::Decompiler::TypeSystem { class ICompilation; }
 
 namespace ILSpy::Decompiler::Semantics { class Conversion; }
+namespace ILSpy::Decompiler::Semantics { class ResolveResult; }
 
 namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 
@@ -350,5 +351,28 @@ std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
 ExplicitTypeParameterConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
                                  ILSpy::Decompiler::TypeSystem::IType& fromType,
                                  ILSpy::Decompiler::TypeSystem::IType& toType);
+
+// The C# `bool ImplicitConstantExpressionConversion(ResolveResult rr, IType toType)`
+// (CSharpConversions.cs line 823, C# 9.0 spec section 10.2.11) -- the implicit constant-expression
+// conversion. A compile-time constant (`rr.IsCompileTimeConstant`) of type `int` (`Int32`) or `long`
+// (`Int64`) converts implicitly to an integral type whose range contains the constant value: a
+// non-negative `long` converts to `ulong`; an `int` converts to `sbyte`/`byte`/`short`/`ushort`/
+// `uint`/`ulong` when the value fits the target's range (and is non-negative for the unsigned
+// targets). The to-side is stripped of its nullable wrapper first (`GetUnderlyingType`), and a
+// `nuint` to-side is treated as `UInt32` (only 32 bits store safely on a 32-bit platform).
+//
+// Pure like the other conversion helpers (no `CSharpConversions` instance state -- reads only
+// `ResolveResult.IsCompileTimeConstant` / `ResolveResult.Type` / `ResolveResult.ConstantValue`,
+// `ReflectionHelper.GetTypeCode`, `NullableType.GetUnderlyingType`, `IType.Kind`), so it lands as a
+// `Detail::` free function. Takes `const ResolveResult&` (every `ResolveResult` member it reads --
+// `IsCompileTimeConstant` / `Type` / `ConstantValue` -- is `const`) and `const IType&` (the const
+// `GetUnderlyingType` overload returns `const IType&`, and `GetTypeCode` takes `const IType&`) --
+// unlike the reference/boxing helpers that take non-const `IType&` for the non-const `AcceptVisitor`
+// and the non-const `GetUnderlyingType` overload. The `ConstantValue` (`std::any`, the D424/D374
+// `object?` model) unbox ports via the pointer-form `std::any_cast` (returns `nullptr` on a type
+// mismatch rather than throwing -- the safe faithful fallback for a divergent state the C# would
+// `InvalidCastException` on).
+bool ImplicitConstantExpressionConversion(const ILSpy::Decompiler::Semantics::ResolveResult& rr,
+                                          const ILSpy::Decompiler::TypeSystem::IType& toType);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
