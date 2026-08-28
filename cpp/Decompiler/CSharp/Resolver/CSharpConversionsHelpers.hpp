@@ -626,4 +626,42 @@ SelectOperator(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
 const ILSpy::Decompiler::TypeSystem::IType&
 UnderlyingTypeForConversion(const ILSpy::Decompiler::TypeSystem::IType& type);
 
+// The C# `List<OperatorInfo> GetApplicableConversionOperators(ResolveResult fromResult, IType
+// fromType, IType toType, bool isExplicit)` (CSharpConversions.cs line 1167) -- the heavy helper
+// that builds the list of applicable user-defined conversion operators. Scans the method tables
+// of `UnderlyingTypeForConversion(fromType)` and `UnderlyingTypeForConversion(toType)` for the
+// static single-parameter conversion operators (op_Implicit for implicit, op_Implicit OR
+// op_Explicit for explicit) -- the C# `.Concat(...).Distinct()` ports to a concat-then-dedup by
+// `IMethod` pointer identity (the C# default equality comparer for the reference type `IMethod`).
+// For each candidate operator, computes its `sourceType` (the parameter type, with a `ref In`
+// parameter unwrapped to its element when the from-side is not itself by-ref) and `targetType`
+// (the return type), then determines applicability:
+//   - explicit: `(IsEncompassingOrEncompassedBy(fromType, sourceType) ||
+//     ImplicitConstantExpressionConversion(fromResult, sourceType)) &&
+//     IsEncompassingOrEncompassedBy(targetType, toType)`;
+//   - implicit: `(IsEncompassedBy(fromType, sourceType) ||
+//     ImplicitConstantExpressionConversion(fromResult, sourceType)) &&
+//     IsEncompassedBy(targetType, toType)`.
+// A non-nullable value-type operator additionally gets a LIFTED form (`Nullable<T>` source and --
+// when the target is also a non-nullable value type -- `Nullable<T>` target), checked by the
+// same encompassment pair.
+//
+// Reads the `CSharpConversions` instance `compilation` (for `NullableType.Create` on the lifted
+// forms), so the port threads `const ICompilation&` (the D517 reference-cluster convention). The
+// `fromType` / `toType` feed `IsEncompassedBy` / `IsEncompassingOrEncompassedBy` which take
+// `IType&` non-const, so they are `IType&` (non-const); the operator's `sourceType` / `targetType`
+// come from the const `IParameter::Type()` / `IMember::ReturnType()` accessors, so they are held
+// as `const IType*` and `const_cast` to `IType&` when feeding the non-const encompassment helpers
+// (the underlying type-system objects are mutable -- the const is the accessor contract -- the
+// D515 const-overload-pair precedent). The `OperatorInfo`'s `SourceType` / `TargetType` are
+// owning `ITypePtr` handles, so the port obtains them from the const `IType&` via
+// `IType::shared_from_this()` + `std::const_pointer_cast` (the D529 `NullableType.Create`
+// precedent); the lifted forms are already owning `ITypePtr` from `NullableType.Create`.
+std::vector<OperatorInfo>
+GetApplicableConversionOperators(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                                 const ILSpy::Decompiler::Semantics::ResolveResult& fromResult,
+                                 ILSpy::Decompiler::TypeSystem::IType& fromType,
+                                 ILSpy::Decompiler::TypeSystem::IType& toType,
+                                 bool isExplicit);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

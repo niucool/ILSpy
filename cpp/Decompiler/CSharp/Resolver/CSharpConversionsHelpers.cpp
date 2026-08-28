@@ -26,19 +26,23 @@
 #include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversions (the nullable-conversion singletons / EnumerationConversion factory)
 #include "Decompiler/Semantics/ResolveResult.hpp"  // ResolveResult (IsCompileTimeConstant / Type / ConstantValue -- the constant-expression conversion)
 #include "Decompiler/TypeSystem/ICompilation.hpp"   // ICompilation (FindType -- the array-to-System.Array arm)
+#include "Decompiler/TypeSystem/IMethod.hpp"       // IMethod (IsStatic / IsOperator / Name / Parameters / ReturnType -- the operator scan)
+#include "Decompiler/TypeSystem/IParameter.hpp"    // IParameter (Type / ReferenceKind -- the operator's parameter type)
 #include "Decompiler/TypeSystem/IType.hpp"          // IType (Kind), ITypePtr, AcceptVisitor, Equals, ParameterizedType, ArrayType
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"  // ITypeDefinition (KnownTypeCode -- the UnpackGenericArrayInterface definition arm)
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"  // ITypeParameter (Variance -- the IdentityOrVarianceConversion variance loop)
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"   // KnownTypeCode (the array-interface codes / Array)
 #include "Decompiler/TypeSystem/NormalizeTypeVisitor.hpp"  // NormalizeTypeVisitor::TypeErasure (IdentityConversion)
-#include "Decompiler/TypeSystem/NullableType.hpp"   // IsNullable, GetUnderlyingType (the nullable helpers)
+#include "Decompiler/TypeSystem/NullableType.hpp"   // IsNullable, GetUnderlyingType, Create, IsNonNullableValueType (the nullable helpers)
+#include "Decompiler/TypeSystem/ReferenceKind.hpp"  // ReferenceKind (In -- the ref-In operator-parameter unwrap special case)
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"  // GetTypeCode, TypeCode
 #include "Decompiler/TypeSystem/TypeKind.hpp"       // TypeKind
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // GetAllBaseTypes, IsKnownType (the IsSubtypeOf traversal)
 #include "Decompiler/TypeSystem/VarianceModifier.hpp"  // VarianceModifier (the Covariant/Contravariant/Invariant switch)
 
-#include <any>      // std::any (the ConstantValue unbox -- the D374/D424 `object?` model)
-#include <cstdint>  // std::int32_t / std::int64_t (the boxed int/long the constant-expression conversion reads)
+#include <any>       // std::any (the ConstantValue unbox -- the D374/D424 `object?` model)
+#include <cstdint>   // std::int32_t / std::int64_t (the boxed int/long the constant-expression conversion reads)
+#include <functional> // std::function (the opFilter predicate)
 #include <memory>
 
 namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
@@ -48,22 +52,27 @@ using ILSpy::Decompiler::Semantics::Conversions;
 using ILSpy::Decompiler::Semantics::ResolveResult;
 using ILSpy::Decompiler::TypeSystem::ArrayType;
 using ILSpy::Decompiler::TypeSystem::ByReferenceType;
+using ILSpy::Decompiler::TypeSystem::Create;
 using ILSpy::Decompiler::TypeSystem::FunctionPointerType;
 using ILSpy::Decompiler::TypeSystem::GetAllBaseTypes;
 using ILSpy::Decompiler::TypeSystem::GetTypeCode;
 using ILSpy::Decompiler::TypeSystem::ICompilation;
+using ILSpy::Decompiler::TypeSystem::IMethod;
+using ILSpy::Decompiler::TypeSystem::IParameter;
 using ILSpy::Decompiler::TypeSystem::IType;
 using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
 using ILSpy::Decompiler::TypeSystem::ITypeParameter;
 using ILSpy::Decompiler::TypeSystem::ITypePtr;
 using ILSpy::Decompiler::TypeSystem::IsAnyPointer;
 using ILSpy::Decompiler::TypeSystem::IsKnownType;
+using ILSpy::Decompiler::TypeSystem::IsNonNullableValueType;
 using ILSpy::Decompiler::TypeSystem::IsNullable;
 using ILSpy::Decompiler::TypeSystem::GetUnderlyingType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
 using ILSpy::Decompiler::TypeSystem::NormalizeTypeVisitor;
 using ILSpy::Decompiler::TypeSystem::ParameterizedType;
 using ILSpy::Decompiler::TypeSystem::PointerType;
+using ILSpy::Decompiler::TypeSystem::ReferenceKind;
 using ILSpy::Decompiler::TypeSystem::TypeCode;
 using ILSpy::Decompiler::TypeSystem::TypeKind;
 using ILSpy::Decompiler::TypeSystem::VarianceModifier;
@@ -1082,6 +1091,154 @@ const IType& UnderlyingTypeForConversion(const IType& type)
 	// `ParameterizedType`'s `typeArgs_` reachable through `type`, or the overload returns `type`
 	// itself in the else branch).
 	return GetUnderlyingType(type);
+}
+
+std::vector<OperatorInfo>
+GetApplicableConversionOperators(const ICompilation& compilation, const ResolveResult& fromResult,
+                                 IType& fromType, IType& toType, bool isExplicit)
+{
+	// CSharpConversions.cs line 1167. The C# `Predicate<IMethod> opFilter` -- the static
+	// single-parameter conversion-operator filter. For explicit: `op_Explicit` OR `op_Implicit`
+	// (an explicit conversion may use an implicit operator); for implicit: `op_Implicit` only.
+	// The `m.Parameters.Count == 1` guard ports to `m->Parameters().size() == 1` (the `IList.Count`
+	// -> `std::vector::size()`, the D510 argument-count precedent). The filter is applied by
+	// `IType::GetMethods` (the faithful `GetMethodsImpl` runs it over the method table), so the
+	// caller passes it through; the stub `GetMethods` applies it faithfully too.
+	auto opFilter = [isExplicit](const IMethod* m) -> bool {
+		bool nameOk = isExplicit
+			? (m->Name() == "op_Explicit" || m->Name() == "op_Implicit")
+			: (m->Name() == "op_Implicit");
+		return m->IsStatic() && m->IsOperator() && nameOk && m->Parameters().size() == 1;
+	};
+
+	// C# `var operators = UnderlyingTypeForConversion(fromType).GetMethods(opFilter)
+	// .Concat(UnderlyingTypeForConversion(toType).GetMethods(opFilter)).Distinct();` -- the
+	// candidate operators from both types' method tables, concatenated and deduplicated. The C#
+	// `.Distinct()` uses the default equality comparer for the reference type `IMethod` -- reference
+	// equality -- which ports to a dedup by `const IMethod*` pointer identity (the two method-table
+	// scans can return the SAME operator when fromType and toType share a base type declaring it).
+	// `UnderlyingTypeForConversion` returns `const IType&` and `GetMethods` is a const method, so
+	// the scans are const-only (no `AcceptVisitor`).
+	std::vector<const IMethod*> operators;
+	auto fromMethods = UnderlyingTypeForConversion(fromType).GetMethods(opFilter);
+	for (const IMethod* m : fromMethods)
+		operators.push_back(m);
+	auto toMethods = UnderlyingTypeForConversion(toType).GetMethods(opFilter);
+	for (const IMethod* m : toMethods)
+	{
+		bool dup = false;
+		for (const IMethod* existing : operators)
+		{
+			if (existing == m) { dup = true; break; }
+		}
+		if (!dup)
+			operators.push_back(m);
+	}
+
+	// C# `List<OperatorInfo> result = new List<OperatorInfo>(); foreach (IMethod op in operators)
+	// { ... }` -- the per-operator applicability check. The operator's `sourceType` is its single
+	// parameter's type; a `ref In` parameter unwraps to its element type when the from-side is not
+	// itself by-ref (the operator takes the value by `in` ref but converts the underlying value).
+	// The `targetType` is the return type. Both come from the const `IParameter::Type()` /
+	// `IMember::ReturnType()` accessors, so they are held as `const IType*` and `const_cast` to
+	// `IType&` for the non-const `IsEncompassedBy` / `IsEncompassingOrEncompassedBy` callers (the
+	// underlying type-system objects are mutable -- the D515 const-overload-pair precedent).
+	std::vector<OperatorInfo> result;
+	for (const IMethod* op : operators)
+	{
+		const IType* sourceType = &op->Parameters()[0]->Type();
+		// C# `if (sourceType.Kind == TypeKind.ByReference && op.Parameters[0].ReferenceKind ==
+		// ReferenceKind.In && fromType.Kind != TypeKind.ByReference) sourceType =
+		// ((ByReferenceType)sourceType).ElementType;` -- the `ref In` unwrap. A degenerate
+		// `ByReferenceType` with a null element falls through (keeps the by-ref type) as the safe
+		// faithful fallback (the D516 null-guard-before-deref precedent; the C# would NRE).
+		if (sourceType->Kind() == TypeKind::ByReference
+			&& op->Parameters()[0]->ReferenceKind() == ReferenceKind::In
+			&& fromType.Kind() != TypeKind::ByReference)
+		{
+			const ByReferenceType& byRef = dynamic_cast<const ByReferenceType&>(*sourceType);
+			const ITypePtr& element = byRef.Element();
+			if (element)
+				sourceType = element.get();
+		}
+		const IType* targetType = &op->ReturnType();
+
+		// C# `bool isApplicable;` -- the applicability check. The `const_cast` feeds the const
+		// accessor results to the non-const `IType&` encompassment helpers (the underlying objects
+		// are mutable -- the accessor const is the contract, not the object's mutability).
+		IType& srcRef = const_cast<IType&>(*sourceType);
+		IType& tgtRef = const_cast<IType&>(*targetType);
+		bool isApplicable;
+		if (isExplicit)
+		{
+			// C# `isApplicable = (IsEncompassingOrEncompassedBy(fromType, sourceType) ||
+			// ImplicitConstantExpressionConversion(fromResult, sourceType)) &&
+			// IsEncompassingOrEncompassedBy(targetType, toType);`
+			isApplicable = (IsEncompassingOrEncompassedBy(compilation, fromType, srcRef)
+				|| ImplicitConstantExpressionConversion(fromResult, *sourceType))
+				&& IsEncompassingOrEncompassedBy(compilation, tgtRef, toType);
+		}
+		else
+		{
+			// C# `isApplicable = (IsEncompassedBy(fromType, sourceType) ||
+			// ImplicitConstantExpressionConversion(fromResult, sourceType)) &&
+			// IsEncompassedBy(targetType, toType);`
+			isApplicable = (IsEncompassedBy(compilation, fromType, srcRef)
+				|| ImplicitConstantExpressionConversion(fromResult, *sourceType))
+				&& IsEncompassedBy(compilation, tgtRef, toType);
+		}
+		// C# `if (isApplicable) result.Add(new OperatorInfo(op, sourceType, targetType, false));` --
+		// the non-lifted form. The `OperatorInfo` holds owning `ITypePtr` handles, so the port
+		// obtains them from the const `IType&` via `shared_from_this()` + `const_pointer_cast` (the
+		// D529 `NullableType.Create` precedent -- the underlying objects are shared-managed by the
+		// type system / the test stubs' `make_shared`).
+		if (isApplicable)
+		{
+			result.emplace_back(op,
+				std::const_pointer_cast<IType>(sourceType->shared_from_this()),
+				std::const_pointer_cast<IType>(targetType->shared_from_this()),
+				/*isLifted*/ false);
+		}
+		// C# `if (NullableType.IsNonNullableValueType(sourceType))` -- the lifted form. A
+		// non-nullable value-type operator is lifted so its source (and, when the target is also
+		// a non-nullable value type, its target) becomes `Nullable<T>`. The lifted target keeps
+		// the original target type when it is not a non-nullable value type (e.g. a reference type
+		// or a nullable). The lifted source/target are owning `ITypePtr` from `NullableType.Create`
+		// (a freshly-allocated `ParameterizedType`) or -- for the non-lifted target -- from
+		// `shared_from_this()` of the const accessor result.
+		if (IsNonNullableValueType(*sourceType))
+		{
+			ITypePtr liftedSourceType = Create(compilation, *sourceType);
+			ITypePtr liftedTargetType = IsNonNullableValueType(*targetType)
+				? Create(compilation, *targetType)
+				: std::const_pointer_cast<IType>(targetType->shared_from_this());
+			IType& liftedSrcRef = *liftedSourceType;
+			IType& liftedTgtRef = *liftedTargetType;
+			if (isExplicit)
+			{
+				// C# `isApplicable = IsEncompassingOrEncompassedBy(fromType, liftedSourceType) &&
+				// IsEncompassingOrEncompassedBy(liftedTargetType, toType);`
+				isApplicable = IsEncompassingOrEncompassedBy(compilation, fromType, liftedSrcRef)
+					&& IsEncompassingOrEncompassedBy(compilation, liftedTgtRef, toType);
+			}
+			else
+			{
+				// C# `isApplicable = IsEncompassedBy(fromType, liftedSourceType) &&
+				// IsEncompassedBy(liftedTargetType, toType);`
+				isApplicable = IsEncompassedBy(compilation, fromType, liftedSrcRef)
+					&& IsEncompassedBy(compilation, liftedTgtRef, toType);
+			}
+			// C# `if (isApplicable) result.Add(new OperatorInfo(op, liftedSourceType,
+			// liftedTargetType, true));` -- the lifted form. An operator can be applicable in BOTH
+			// lifted and non-lifted forms (the explicit case); both are added.
+			if (isApplicable)
+			{
+				result.emplace_back(op, std::move(liftedSourceType),
+					std::move(liftedTargetType), /*isLifted*/ true);
+			}
+		}
+	}
+	return result;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

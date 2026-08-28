@@ -409,6 +409,15 @@ public:
     // (the default null exercises the null-short-circuit path; a real `GetDerivedMember` test sets this
     // so the derived method's `GetBaseMembers` finds the base method).
     void SetDeclaringTypeDefinition(const ITypeDefinition* d) { declaringTypeDefinition_ = d; }
+    // Configurable `IsStatic` / `IsOperator` / `ReturnType` / `Parameters` for the user-defined
+    // conversion-operator scan (the `GetApplicableConversionOperators` tests). The defaults
+    // preserve the original hardcoded behavior (`IsStatic` false, `IsOperator` false, `ReturnType`
+    // the `KnownType(Object)` member, `Parameters` empty), so existing tests that do not call the
+    // setters are unaffected (the additive-setter convention).
+    void SetStatic(bool v) { isStatic_ = v; }
+    void SetIsOperator(bool v) { isOperator_ = v; }
+    void SetReturnType(ITypePtr rt) { returnTypeOverride_ = std::move(rt); }
+    void SetParameters(std::vector<const IParameter*> p) { parameters_ = std::move(p); }
 
     // --- ISymbol ---
     TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Method; }
@@ -431,13 +440,22 @@ public:
     bool HasAttribute(KnownAttribute) const override { return false; }
     const IAttribute* GetAttribute(KnownAttribute) const override { return nullptr; }
     TS::Accessibility Accessibility() const override { return TS::Accessibility::Public; }
-    bool IsStatic() const override { return false; }
+    bool IsStatic() const override { return isStatic_; }
     bool IsAbstract() const override { return false; }
     bool IsSealed() const override { return false; }
 
     // --- IMember ---
     const IMember* MemberDefinition() const override { return this; }
-    const IType& ReturnType() const override { return returnType_; }
+    // The override (set via `SetReturnType`) wins; otherwise the default `KnownType(Object)`
+    // member (the original behavior). An if/else (NOT a ternary) avoids slicing the `KnownType`
+    // member to a temporary `IType` (the two branches have different types `IType&` vs
+    // `KnownType&`, so a ternary would form a temporary `IType` by conversion).
+    const IType& ReturnType() const override
+    {
+        if (returnTypeOverride_)
+            return *returnTypeOverride_;
+        return returnType_;
+    }
     std::vector<const IMember*> ExplicitlyImplementedInterfaceMembers() const override
     {
         return {};
@@ -450,7 +468,7 @@ public:
     bool Equals(const IMember* obj, const TypeVisitor*) const override { return obj == this; }
 
     // --- IParameterizedMember ---
-    std::vector<const IParameter*> Parameters() const override { return {}; }
+    std::vector<const IParameter*> Parameters() const override { return parameters_; }
 
     // --- IMethod ---
     std::vector<const IAttribute*> GetReturnTypeAttributes() const override { return {}; }
@@ -463,7 +481,7 @@ public:
     bool IsLocalFunction() const override { return false; }
     bool IsConstructor() const override { return false; }
     bool IsDestructor() const override { return false; }
-    bool IsOperator() const override { return false; }
+    bool IsOperator() const override { return isOperator_; }
     bool HasBody() const override { return false; }
     bool IsAccessor() const override { return false; }
     const IMember* AccessorOwner() const override { return nullptr; }
@@ -479,6 +497,10 @@ private:
     const ICompilation& compilation_;
     KnownType returnType_{ KnownTypeCode::Object };
     const ITypeDefinition* declaringTypeDefinition_ = nullptr;
+    bool isStatic_ = false;
+    bool isOperator_ = false;
+    ITypePtr returnTypeOverride_;
+    std::vector<const IParameter*> parameters_;
 };
 
 // A minimal `IEvent` for the `member is IEvent` TRUE side of IsInvocable.
