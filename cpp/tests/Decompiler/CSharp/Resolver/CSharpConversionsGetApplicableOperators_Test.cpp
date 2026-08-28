@@ -273,7 +273,7 @@ TEST(CSharpConversionsGetApplicableOperatorsTest, EmptyWhenNoOperators) {
 	auto fromType = MakeHost(KnownTypeCode::Int32);
 	auto toType = Def(KnownTypeCode::Int64);
 	auto rr = NonConstResult(Def(KnownTypeCode::Int32));
-	auto result = GetApplicableConversionOperators(Compilation(), *rr, *fromType, *toType, /*isExplicit*/ false);
+	auto result = GetApplicableConversionOperators(Compilation(), rr.get(), *fromType, *toType, /*isExplicit*/ false);
 	EXPECT_TRUE(result.empty());
 }
 
@@ -285,7 +285,7 @@ TEST(CSharpConversionsGetApplicableOperatorsTest, ReturnsSingleNonLiftedImplicit
 	const IMethod* op = MakeOperator("op_Implicit", fromType, toType, &keepParams);
 	fromType->SetMethods({op});
 	auto rr = NonConstResult(Def(KnownTypeCode::Int32));
-	auto result = GetApplicableConversionOperators(Compilation(), *rr, *fromType, *toType, /*isExplicit*/ false);
+	auto result = GetApplicableConversionOperators(Compilation(), rr.get(), *fromType, *toType, /*isExplicit*/ false);
 	ASSERT_EQ(result.size(), 1u);
 	EXPECT_EQ(result[0].Method, op);
 	EXPECT_FALSE(result[0].IsLifted);
@@ -301,7 +301,7 @@ TEST(CSharpConversionsGetApplicableOperatorsTest, ReturnsSingleNonLiftedExplicit
 	const IMethod* op = MakeOperator("op_Explicit", fromType, toType, &keepParams);
 	fromType->SetMethods({op});
 	auto rr = NonConstResult(Def(KnownTypeCode::Int32));
-	auto result = GetApplicableConversionOperators(Compilation(), *rr, *fromType, *toType, /*isExplicit*/ true);
+	auto result = GetApplicableConversionOperators(Compilation(), rr.get(), *fromType, *toType, /*isExplicit*/ true);
 	ASSERT_EQ(result.size(), 1u);
 	EXPECT_EQ(result[0].Method, op);
 	EXPECT_FALSE(result[0].IsLifted);
@@ -315,7 +315,7 @@ TEST(CSharpConversionsGetApplicableOperatorsTest, ImplicitFilterRejectsOpExplici
 	const IMethod* op = MakeOperator("op_Explicit", fromType, toType, &keepParams);
 	fromType->SetMethods({op});
 	auto rr = NonConstResult(Def(KnownTypeCode::Int32));
-	auto result = GetApplicableConversionOperators(Compilation(), *rr, *fromType, *toType, /*isExplicit*/ false);
+	auto result = GetApplicableConversionOperators(Compilation(), rr.get(), *fromType, *toType, /*isExplicit*/ false);
 	EXPECT_TRUE(result.empty());
 }
 
@@ -329,7 +329,7 @@ TEST(CSharpConversionsGetApplicableOperatorsTest, ExplicitFilterAcceptsBothOpImp
 	const IMethod* opExp = MakeOperator("op_Explicit", fromType, toType, &keepParams);
 	fromType->SetMethods({opImp, opExp});
 	auto rr = NonConstResult(Def(KnownTypeCode::Int32));
-	auto result = GetApplicableConversionOperators(Compilation(), *rr, *fromType, *toType, /*isExplicit*/ true);
+	auto result = GetApplicableConversionOperators(Compilation(), rr.get(), *fromType, *toType, /*isExplicit*/ true);
 	ASSERT_EQ(result.size(), 2u);
 	EXPECT_EQ(result[0].Method, opImp);
 	EXPECT_EQ(result[1].Method, opExp);
@@ -345,7 +345,7 @@ TEST(CSharpConversionsGetApplicableOperatorsTest, DeduplicatesOperatorAppearingO
 	fromType->SetMethods({op});
 	toType->SetMethods({op});   // the SAME method on the to-side too
 	auto rr = NonConstResult(Def(KnownTypeCode::Int32));
-	auto result = GetApplicableConversionOperators(Compilation(), *rr, *fromType, *toType, /*isExplicit*/ false);
+	auto result = GetApplicableConversionOperators(Compilation(), rr.get(), *fromType, *toType, /*isExplicit*/ false);
 	ASSERT_EQ(result.size(), 1u);
 	EXPECT_EQ(result[0].Method, op);
 }
@@ -360,7 +360,7 @@ TEST(CSharpConversionsGetApplicableOperatorsTest, RefInParameterUnwrappedToEleme
 	const IMethod* op = MakeOperator("op_Implicit", byRefSource, toType, &keepParams, ReferenceKind::In);
 	fromType->SetMethods({op});
 	auto rr = NonConstResult(Def(KnownTypeCode::Int32));
-	auto result = GetApplicableConversionOperators(Compilation(), *rr, *fromType, *toType, /*isExplicit*/ false);
+	auto result = GetApplicableConversionOperators(Compilation(), rr.get(), *fromType, *toType, /*isExplicit*/ false);
 	ASSERT_EQ(result.size(), 1u);
 	EXPECT_EQ(result[0].Method, op);
 	EXPECT_FALSE(result[0].IsLifted);
@@ -381,7 +381,7 @@ TEST(CSharpConversionsGetApplicableOperatorsTest, ConstantExpressionFallbackMake
 	fromType->SetMethods({op});
 	// A compile-time constant `int` 5 -- converts to `byte` via the constant-expression conversion.
 	auto rr = std::make_shared<ConstantResolveResult>(Def(KnownTypeCode::Int32), std::any(std::int32_t(5)));
-	auto result = GetApplicableConversionOperators(Compilation(), *rr, *fromType, *toType, /*isExplicit*/ false);
+	auto result = GetApplicableConversionOperators(Compilation(), rr.get(), *fromType, *toType, /*isExplicit*/ false);
 	ASSERT_EQ(result.size(), 1u);
 	EXPECT_EQ(result[0].Method, op);
 	EXPECT_FALSE(result[0].IsLifted);
@@ -400,7 +400,7 @@ TEST(CSharpConversionsGetApplicableOperatorsTest, LiftedFormForNonNullableValueT
 	auto fromType = NullableOf(host);    // Nullable<int>
 	auto toType = NullableOf(target);     // Nullable<long>
 	auto rr = NonConstResult(NullableOf(host));
-	auto result = GetApplicableConversionOperators(Compilation(), *rr, *fromType, *toType, /*isExplicit*/ false);
+	auto result = GetApplicableConversionOperators(Compilation(), rr.get(), *fromType, *toType, /*isExplicit*/ false);
 	ASSERT_EQ(result.size(), 1u);
 	EXPECT_EQ(result[0].Method, op);
 	EXPECT_TRUE(result[0].IsLifted);
@@ -424,7 +424,7 @@ TEST(CSharpConversionsGetApplicableOperatorsTest, LiftedFormKeepsNonValueTypeTar
 	auto fromType = NullableOf(host);    // Nullable<int>
 	auto toType = target;                // string
 	auto rr = NonConstResult(NullableOf(host));
-	auto result = GetApplicableConversionOperators(Compilation(), *rr, *fromType, *toType, /*isExplicit*/ false);
+	auto result = GetApplicableConversionOperators(Compilation(), rr.get(), *fromType, *toType, /*isExplicit*/ false);
 	ASSERT_EQ(result.size(), 1u);
 	EXPECT_EQ(result[0].Method, op);
 	EXPECT_TRUE(result[0].IsLifted);

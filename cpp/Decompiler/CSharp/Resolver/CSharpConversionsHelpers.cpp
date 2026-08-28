@@ -40,6 +40,7 @@
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // GetAllBaseTypes, IsKnownType (the IsSubtypeOf traversal)
 #include "Decompiler/TypeSystem/VarianceModifier.hpp"  // VarianceModifier (the Covariant/Contravariant/Invariant switch)
 
+#include <algorithm>  // std::any_of (the UserDefinedImplicit/Explicit operator-source/target reduction)
 #include <any>       // std::any (the ConstantValue unbox -- the D374/D424 `object?` model)
 #include <cstdint>   // std::int32_t / std::int64_t (the boxed int/long the constant-expression conversion reads)
 #include <functional> // std::function (the opFilter predicate)
@@ -1094,7 +1095,7 @@ const IType& UnderlyingTypeForConversion(const IType& type)
 }
 
 std::vector<OperatorInfo>
-GetApplicableConversionOperators(const ICompilation& compilation, const ResolveResult& fromResult,
+GetApplicableConversionOperators(const ICompilation& compilation, const ResolveResult* fromResult,
                                  IType& fromType, IType& toType, bool isExplicit)
 {
 	// CSharpConversions.cs line 1167. The C# `Predicate<IMethod> opFilter` -- the static
@@ -1173,18 +1174,25 @@ GetApplicableConversionOperators(const ICompilation& compilation, const ResolveR
 		{
 			// C# `isApplicable = (IsEncompassingOrEncompassedBy(fromType, sourceType) ||
 			// ImplicitConstantExpressionConversion(fromResult, sourceType)) &&
-			// IsEncompassingOrEncompassedBy(targetType, toType);`
+			// IsEncompassingOrEncompassedBy(targetType, toType);`. The `fromResult` is a
+			// nullable pointer (the C# nullable `ResolveResult` reference): a null `fromResult`
+			// makes the constant-expression fallback false (the safe faithful port of the C# `||`
+			// short-circuit -- the C# would NRE on `ImplicitConstantExpressionConversion(null, ...)`
+			// if reached, but the `||` short-circuits whenever `IsEncompassingOrEncompassedBy` is
+			// true, which is the only path the null-`fromResult` recursions reach in practice; the
+			// guard avoids UB).
 			isApplicable = (IsEncompassingOrEncompassedBy(compilation, fromType, srcRef)
-				|| ImplicitConstantExpressionConversion(fromResult, *sourceType))
+				|| (fromResult != nullptr && ImplicitConstantExpressionConversion(*fromResult, *sourceType)))
 				&& IsEncompassingOrEncompassedBy(compilation, tgtRef, toType);
 		}
 		else
 		{
 			// C# `isApplicable = (IsEncompassedBy(fromType, sourceType) ||
 			// ImplicitConstantExpressionConversion(fromResult, sourceType)) &&
-			// IsEncompassedBy(targetType, toType);`
+			// IsEncompassedBy(targetType, toType);`. The same null-`fromResult` guard as the
+			// explicit arm above (the C# `||` short-circuit / NRE-avoidance precedent).
 			isApplicable = (IsEncompassedBy(compilation, fromType, srcRef)
-				|| ImplicitConstantExpressionConversion(fromResult, *sourceType))
+				|| (fromResult != nullptr && ImplicitConstantExpressionConversion(*fromResult, *sourceType)))
 				&& IsEncompassedBy(compilation, tgtRef, toType);
 		}
 		// C# `if (isApplicable) result.Add(new OperatorInfo(op, sourceType, targetType, false));` --
@@ -1239,6 +1247,227 @@ GetApplicableConversionOperators(const ICompilation& compilation, const ResolveR
 		}
 	}
 	return result;
+}
+
+// CSharpConversions.cs line 1030 (C# spec draft-v11 section 10.5.4 "user-defined implicit
+// conversions"). See the header for the full contract. The body mirrors the C# verbatim with
+// the established C++-port conventions: `operators.Any(p)` -> `std::any_of`; `operators.Select(p)`
+// -> a hand-built `std::vector<ITypePtr>` (the ILSpy eager-collection convention); `mostSpecificSource
+// == null` -> `!mostSpecificSource` (a null `shared_ptr`); `Conversion.None` -> `Conversions::None()`;
+// `selected != Conversion.None` -> pointer-identity against the None singleton; `NullableType.IsNullable`
+// / `GetUnderlyingType` -> the `NullableType::` free functions (D515); the recursive `UserDefinedImplicitConversion`
+// call on the underlying target threads the same `fromResult` / `fromType` / `compilation`.
+std::shared_ptr<Conversion>
+UserDefinedImplicitConversion(const ICompilation& compilation, const ResolveResult* fromResult,
+                             IType& fromType, IType& toType)
+{
+	// C# `if (fromType.Kind == TypeKind.Interface || toType.Kind == TypeKind.Interface) return
+	// Conversion.None;` -- user-defined conversions are not supported with interfaces.
+	if (fromType.Kind() == TypeKind::Interface || toType.Kind() == TypeKind::Interface)
+		return Conversions::None();
+
+	auto operators = GetApplicableConversionOperators(compilation, fromResult, fromType, toType,
+	                                                   /*isExplicit*/ false);
+	if (operators.empty())
+		return Conversions::None();
+
+	// C# `var mostSpecificSource = operators.Any(op => op.SourceType.Equals(fromType)) ? fromType :
+	// FindMostEncompassedType(operators.Select(op => op.SourceType));`. The `fromType.shared_from_this()`
+	// obtains an owning `ITypePtr` handle to `fromType` (the `enable_shared_from_this<IType>` bridge,
+	// D406) so the `ITypePtr` type unifies with `FindMostEncompassedType`'s return.
+	ITypePtr mostSpecificSource;
+	if (std::any_of(operators.begin(), operators.end(),
+	                [&](const OperatorInfo& op) { return op.SourceType->Equals(fromType); }))
+		mostSpecificSource = fromType.shared_from_this();
+	else
+	{
+		std::vector<ITypePtr> sourceTypes;
+		sourceTypes.reserve(operators.size());
+		for (const auto& op : operators)
+			sourceTypes.push_back(op.SourceType);
+		mostSpecificSource = FindMostEncompassedType(compilation, sourceTypes);
+	}
+	// C# `if (mostSpecificSource == null) return Conversion.UserDefinedConversion(operators[0].Method,
+	// isImplicit: true, isLifted: operators[0].IsLifted, isAmbiguous: true, ...Conversion.None...);`.
+	if (!mostSpecificSource)
+		return Conversions::UserDefinedConversion(operators[0].Method, /*isImplicit*/ true,
+			Conversions::None(), Conversions::None(), operators[0].IsLifted, /*isAmbiguous*/ true);
+
+	// C# `var mostSpecificTarget = operators.Any(op => op.TargetType.Equals(toType)) ? toType :
+	// FindMostEncompassingType(operators.Select(op => op.TargetType));`.
+	ITypePtr mostSpecificTarget;
+	if (std::any_of(operators.begin(), operators.end(),
+	                [&](const OperatorInfo& op) { return op.TargetType->Equals(toType); }))
+		mostSpecificTarget = toType.shared_from_this();
+	else
+	{
+		std::vector<ITypePtr> targetTypes;
+		targetTypes.reserve(operators.size());
+		for (const auto& op : operators)
+			targetTypes.push_back(op.TargetType);
+		mostSpecificTarget = FindMostEncompassingType(compilation, targetTypes);
+	}
+	if (!mostSpecificTarget)
+	{
+		// C# `if (NullableType.IsNullable(toType)) return UserDefinedImplicitConversion(fromResult,
+		// fromType, NullableType.GetUnderlyingType(toType)); else return Conversion.UserDefinedConversion(...);`.
+		if (IsNullable(toType))
+			return UserDefinedImplicitConversion(compilation, fromResult, fromType,
+			                                       GetUnderlyingType(toType));
+		return Conversions::UserDefinedConversion(operators[0].Method, /*isImplicit*/ true,
+			Conversions::None(), Conversions::None(), operators[0].IsLifted, /*isAmbiguous*/ true);
+	}
+
+	// C# `var selected = SelectOperator(mostSpecificSource, mostSpecificTarget, operators, true,
+	// fromType, toType);` -- both `mostSpecificSource` / `mostSpecificTarget` are non-null here (the
+	// null checks above returned), so the derefs are safe.
+	auto selected = SelectOperator(compilation, *mostSpecificSource, *mostSpecificTarget,
+	                               operators, /*isImplicit*/ true, fromType, toType);
+	// C# `if (selected != Conversion.None)` -- pointer-identity against the None singleton.
+	if (selected.get() != Conversions::None().get())
+	{
+		if (selected->IsLifted() && IsNullable(toType))
+		{
+			// C# `// Prefer A -> B -> B? over A -> A? -> B?` -- recurse on the underlying target;
+			// if THAT resolves, prefer it.
+			auto other = UserDefinedImplicitConversion(compilation, fromResult, fromType,
+			                                           GetUnderlyingType(toType));
+			if (other.get() != Conversions::None().get())
+				return other;
+		}
+		return selected;
+	}
+	else if (IsNullable(toType))
+		return UserDefinedImplicitConversion(compilation, fromResult, fromType,
+		                                       GetUnderlyingType(toType));
+	else
+		return Conversions::None();
+}
+
+// CSharpConversions.cs line 1079 (C# spec draft-v11 section 10.5.5 "user-defined explicit
+// conversions"). See the header for the full contract. The body mirrors the C# verbatim with
+// the same conventions as `UserDefinedImplicitConversion` (above) plus the two explicit-only
+// divergences: (1) the most-specific-source else-arm filters by `IsEncompassedBy(fromType,
+// op.SourceType) || ImplicitConstantExpressionConversion(...)` (the latter guarded by `fromResult
+// != nullptr`) then `FindMostEncompassedType`, falling back to `FindMostEncompassingType` over
+// all sources; (2) the most-specific-target middle arm filters by `IsEncompassedBy(op.TargetType,
+// toType)` then `FindMostEncompassingType`, falling back to `FindMostEncompassedType` over all
+// targets. The `A? -> A -> B` tail recursion passes `nullptr` for `fromResult`.
+std::shared_ptr<Conversion>
+UserDefinedExplicitConversion(const ICompilation& compilation, const ResolveResult* fromResult,
+                             IType& fromType, IType& toType)
+{
+	// C# `if (fromType.Kind == TypeKind.Interface || toType.Kind == TypeKind.Interface) return
+	// Conversion.None;`.
+	if (fromType.Kind() == TypeKind::Interface || toType.Kind() == TypeKind::Interface)
+		return Conversions::None();
+
+	auto operators = GetApplicableConversionOperators(compilation, fromResult, fromType, toType,
+	                                                   /*isExplicit*/ true);
+	if (operators.empty())
+		return Conversions::None();
+
+	// C# most-specific-source reduction. The first arm (`operators.Any(op => op.SourceType.Equals
+	// (fromType))`) takes `fromType` directly; the else-arm filters by `IsEncompassedBy(fromType,
+	// op.SourceType) || ImplicitConstantExpressionConversion(fromResult, GetUnderlyingType(op.SourceType))`
+	// (the latter guarded by `fromResult != nullptr` -- a null `fromResult` makes the
+	// constant-expression fallback false, the safe faithful port of the C# `||` short-circuit /
+	// NRE-avoidance), then `FindMostEncompassedType` over the filtered set; when the filtered set
+	// is empty, falls back to `FindMostEncompassingType` over ALL sources.
+	ITypePtr mostSpecificSource;
+	if (std::any_of(operators.begin(), operators.end(),
+	                [&](const OperatorInfo& op) { return op.SourceType->Equals(fromType); }))
+	{
+		mostSpecificSource = fromType.shared_from_this();
+	}
+	else
+	{
+		std::vector<ITypePtr> sourceTypesEncompassingFrom;
+		for (const auto& op : operators)
+		{
+			if (IsEncompassedBy(compilation, fromType, *op.SourceType)
+				|| (fromResult != nullptr
+					&& ImplicitConstantExpressionConversion(*fromResult, GetUnderlyingType(*op.SourceType))))
+				sourceTypesEncompassingFrom.push_back(op.SourceType);
+		}
+		if (!sourceTypesEncompassingFrom.empty())
+			mostSpecificSource = FindMostEncompassedType(compilation, sourceTypesEncompassingFrom);
+		else
+		{
+			std::vector<ITypePtr> allSourceTypes;
+			allSourceTypes.reserve(operators.size());
+			for (const auto& op : operators)
+				allSourceTypes.push_back(op.SourceType);
+			mostSpecificSource = FindMostEncompassingType(compilation, allSourceTypes);
+		}
+	}
+	if (!mostSpecificSource)
+		return Conversions::UserDefinedConversion(operators[0].Method, /*isImplicit*/ false,
+			Conversions::None(), Conversions::None(), operators[0].IsLifted, /*isAmbiguous*/ true);
+
+	// C# most-specific-target reduction. The first arm takes `toType` directly; the middle arm
+	// filters by `IsEncompassedBy(op.TargetType, toType)` then `FindMostEncompassingType`; the
+	// else-arm `FindMostEncompassedType` over all targets.
+	ITypePtr mostSpecificTarget;
+	if (std::any_of(operators.begin(), operators.end(),
+	                [&](const OperatorInfo& op) { return op.TargetType->Equals(toType); }))
+	{
+		mostSpecificTarget = toType.shared_from_this();
+	}
+	else
+	{
+		std::vector<ITypePtr> targetTypesEncompassedByTo;
+		for (const auto& op : operators)
+		{
+			if (IsEncompassedBy(compilation, *op.TargetType, toType))
+				targetTypesEncompassedByTo.push_back(op.TargetType);
+		}
+		if (!targetTypesEncompassedByTo.empty())
+			mostSpecificTarget = FindMostEncompassingType(compilation, targetTypesEncompassedByTo);
+		else
+		{
+			std::vector<ITypePtr> allTargetTypes;
+			allTargetTypes.reserve(operators.size());
+			for (const auto& op : operators)
+				allTargetTypes.push_back(op.TargetType);
+			mostSpecificTarget = FindMostEncompassedType(compilation, allTargetTypes);
+		}
+	}
+	if (!mostSpecificTarget)
+	{
+		if (IsNullable(toType))
+			return UserDefinedExplicitConversion(compilation, fromResult, fromType,
+			                                     GetUnderlyingType(toType));
+		return Conversions::UserDefinedConversion(operators[0].Method, /*isImplicit*/ false,
+			Conversions::None(), Conversions::None(), operators[0].IsLifted, /*isAmbiguous*/ true);
+	}
+
+	auto selected = SelectOperator(compilation, *mostSpecificSource, *mostSpecificTarget,
+	                               operators, /*isImplicit*/ false, fromType, toType);
+	if (selected.get() != Conversions::None().get())
+	{
+		if (selected->IsLifted() && IsNullable(toType))
+		{
+			// C# `// Prefer A -> B -> B? over A -> A? -> B?` -- recurse via the IMPLICIT resolution
+			// on the underlying target; if THAT resolves, prefer it.
+			auto other = UserDefinedImplicitConversion(compilation, fromResult, fromType,
+			                                           GetUnderlyingType(toType));
+			if (other.get() != Conversions::None().get())
+				return other;
+		}
+		return selected;
+	}
+	else if (IsNullable(toType))
+		return UserDefinedExplicitConversion(compilation, fromResult, fromType,
+		                                     GetUnderlyingType(toType));
+	else if (IsNullable(fromType))
+		// C# `return UserDefinedExplicitConversion(null, NullableType.GetUnderlyingType(fromType),
+		// toType);   // A? -> A -> B` -- the `A? -> A -> B` recursion unwraps the from-type and
+		// passes a NULL `fromResult` (no `ResolveResult` context for the underlying value).
+		return UserDefinedExplicitConversion(compilation, /*fromResult*/ nullptr,
+		                                     GetUnderlyingType(fromType), toType);
+	else
+		return Conversions::None();
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

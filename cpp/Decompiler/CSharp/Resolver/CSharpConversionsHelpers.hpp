@@ -659,9 +659,81 @@ UnderlyingTypeForConversion(const ILSpy::Decompiler::TypeSystem::IType& type);
 // precedent); the lifted forms are already owning `ITypePtr` from `NullableType.Create`.
 std::vector<OperatorInfo>
 GetApplicableConversionOperators(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
-                                 const ILSpy::Decompiler::Semantics::ResolveResult& fromResult,
+                                 const ILSpy::Decompiler::Semantics::ResolveResult* fromResult,
                                  ILSpy::Decompiler::TypeSystem::IType& fromType,
                                  ILSpy::Decompiler::TypeSystem::IType& toType,
                                  bool isExplicit);
+
+// The C# `Conversion UserDefinedImplicitConversion(ResolveResult fromResult, IType fromType,
+// IType toType)` (CSharpConversions.cs line 1030, C# spec draft-v11 section 10.5.4 "user-defined
+// implicit conversions") -- the user-defined implicit conversion resolution. User-defined
+// conversions are not supported with interfaces (the `Kind == Interface` guard on both sides).
+// Scans the applicable operators (`GetApplicableConversionOperators(..., isExplicit: false)`),
+// then reduces them to the most-specific source/target (`FindMostEncompassedType` /
+// `FindMostEncompassingType`) and selects the operator (`SelectOperator`). When the selected
+// operator is lifted and the target is `Nullable<T>`, prefers the `A -> B -> B?` path over
+// `A -> A? -> B?` by recursing on the underlying target. When no operator matches and the
+// target is `Nullable<T>`, recurses on the underlying target. Returns `None` when no applicable
+// operator resolves.
+//
+// The C# `fromResult` is a nullable reference -- the public `ImplicitConversion(IType, IType)`
+// entry (no `ResolveResult` context) passes `null`, and the `A? -> A -> B` recursion in
+// `UserDefinedExplicitConversion` passes `null` too -- so the port takes `const ResolveResult*`
+// (nullable pointer) faithfully. The null `fromResult` flows only to
+// `GetApplicableConversionOperators` (which guards its `ImplicitConstantExpressionConversion`
+// call); `UserDefinedImplicitConversion` itself never dereferences `fromResult` directly, so
+// no additional null guard is needed here.
+//
+// Delegates to the already-ported `GetApplicableConversionOperators` (D529) /
+// `FindMostEncompassedType` (D526) / `FindMostEncompassingType` (D526) / `SelectOperator`
+// (D525) / `NullableType.IsNullable` + `GetUnderlyingType` (D515), all of which take
+// `const ICompilation&`, so it lands as a `Detail::` free function with the same compilation
+// parameter. Takes `IType&` (non-const) because `SelectOperator` takes `IType&` (the non-const
+// `AcceptVisitor`, D406) and `GetUnderlyingType`'s non-const overload returns `IType&` for the
+// recursive calls. Returns `std::shared_ptr<Conversion>` -- the selected `UserDefinedConversion`
+// (a fresh per-call instance) or `Conversions::None()`.
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+UserDefinedImplicitConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                             const ILSpy::Decompiler::Semantics::ResolveResult* fromResult,
+                             ILSpy::Decompiler::TypeSystem::IType& fromType,
+                             ILSpy::Decompiler::TypeSystem::IType& toType);
+
+// The C# `Conversion UserDefinedExplicitConversion(ResolveResult fromResult, IType fromType,
+// IType toType)` (CSharpConversions.cs line 1079, C# spec draft-v11 section 10.5.5 "user-defined
+// explicit conversions") -- the user-defined explicit conversion resolution. Mirrors
+// `UserDefinedImplicitConversion` (the interface guard, the operator scan, the most-specific
+// reduction, the lifted-nullable preference) with two divergences: (1) the most-specific SOURCE
+// reduction's first else-arm filters the operators whose source type encompasses or is
+// encompassed by the from-type (`IsEncompassedBy(fromType, op.SourceType)` or the
+// constant-expression fallback `ImplicitConstantExpressionConversion(fromResult,
+// GetUnderlyingType(op.SourceType))`), then `FindMostEncompassedType` over the filtered set;
+// when no operator's source encompasses the from-type, falls back to `FindMostEncompassingType`
+// over ALL operators' sources; (2) the most-specific TARGET reduction's middle arm filters the
+// operators whose target type is encompassed by the to-type (`IsEncompassedBy(op.TargetType,
+// toType)`), then `FindMostEncompassingType` over the filtered set. The `A? -> A -> B`
+// recursion (no operator matches, `fromType` is `Nullable<T>`) recurses with a `null` fromResult
+// on the underlying from-type.
+//
+// The C# `fromResult` is a nullable reference (see `UserDefinedImplicitConversion`), so the
+// port takes `const ResolveResult*` (nullable pointer). Unlike `UserDefinedImplicitConversion`,
+// this helper calls `ImplicitConstantExpressionConversion(*fromResult, ...)` DIRECTLY (in the
+// source-encompassing filter), so the port guards that call with `fromResult != nullptr` -- a
+// null `fromResult` makes the constant-expression fallback false (the safe faithful port of the
+// C# `||` short-circuit: the C# would NRE on `ImplicitConstantExpressionConversion(null, ...)`
+// if reached, but the `||` short-circuits whenever `IsEncompassedBy` is true, which is the only
+// path the null-fromResult recursions reach in practice; the guard avoids UB by returning
+// false).
+//
+// Delegates to `GetApplicableConversionOperators` (D529) / `FindMostEncompassedType` (D526) /
+// `FindMostEncompassingType` (D526) / `SelectOperator` (D525) / `IsEncompassedBy` (D524) /
+// `ImplicitConstantExpressionConversion` (D521) / `NullableType` (D515) and recurses on itself
+// and `UserDefinedImplicitConversion` (the lifted-nullable preference). Takes `IType&`
+// (non-const) for the same reasons as `UserDefinedImplicitConversion`. Returns
+// `std::shared_ptr<Conversion>`.
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+UserDefinedExplicitConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                             const ILSpy::Decompiler::Semantics::ResolveResult* fromResult,
+                             ILSpy::Decompiler::TypeSystem::IType& fromType,
+                             ILSpy::Decompiler::TypeSystem::IType& toType);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
