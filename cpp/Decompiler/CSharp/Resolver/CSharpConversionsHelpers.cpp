@@ -47,6 +47,7 @@ using ILSpy::Decompiler::Semantics::Conversion;
 using ILSpy::Decompiler::Semantics::Conversions;
 using ILSpy::Decompiler::Semantics::ResolveResult;
 using ILSpy::Decompiler::TypeSystem::ArrayType;
+using ILSpy::Decompiler::TypeSystem::ByReferenceType;
 using ILSpy::Decompiler::TypeSystem::FunctionPointerType;
 using ILSpy::Decompiler::TypeSystem::GetAllBaseTypes;
 using ILSpy::Decompiler::TypeSystem::GetTypeCode;
@@ -1051,6 +1052,36 @@ SelectOperator(const ICompilation& compilation, IType& mostSpecificSource, IType
 		ExplicitConversionNotUserDefined(compilation, source, mostSpecificSource),
 		ExplicitConversionNotUserDefined(compilation, mostSpecificTarget, target),
 		op->IsLifted, /*isAmbiguous*/ true);
+}
+
+const IType& UnderlyingTypeForConversion(const IType& type)
+{
+	// CSharpConversions.cs line 1164. The C# `if (type.Kind == TypeKind.ByReference) type =
+	// ((ByReferenceType)type).ElementType;` -- a `ref` parameter/local does not carry its own
+	// conversion operators, so unwrap to the element type first. The `ByReferenceType::Element()`
+	// accessor returns `const ITypePtr&` (a reference to the `element_` shared handle owned by the
+	// `ByReferenceType`, reachable through `type`); `*element` yields the managed `IType&`. A
+	// degenerate `ByReferenceType` with a null element would be UB to deref -- the guard falls
+	// through to `GetUnderlyingType(type)` as the safe faithful fallback (the D516 null-guard
+	// precedent; the C# would NRE, but a null element does not occur in practice).
+	if (type.Kind() == TypeKind::ByReference) {
+		const ByReferenceType& byRef = dynamic_cast<const ByReferenceType&>(type);
+		const ITypePtr& element = byRef.Element();
+		if (element) {
+			// C# `return NullableType.GetUnderlyingType(type);` on the rebound `type` (the element):
+			// the const `GetUnderlyingType` overload returns the `Nullable<T>` type argument (owned by
+			// the element's `ParameterizedType`'s `typeArgs_`, reachable through the element), or the
+			// element itself when not nullable. The returned reference outlives the call (the element
+			// is owned by the `ByReferenceType`'s `element_`, reachable through the input `type`).
+			return GetUnderlyingType(*element);
+		}
+	}
+	// C# `return NullableType.GetUnderlyingType(type);` -- the const overload returns the underlying
+	// `T` for `Nullable<T>`, otherwise the original `type` (modifiers preserved). The returned
+	// reference is valid for the lifetime of `type` (the type argument is owned by the
+	// `ParameterizedType`'s `typeArgs_` reachable through `type`, or the overload returns `type`
+	// itself in the else branch).
+	return GetUnderlyingType(type);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

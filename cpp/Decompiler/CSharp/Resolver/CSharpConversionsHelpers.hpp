@@ -603,4 +603,27 @@ SelectOperator(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
                ILSpy::Decompiler::TypeSystem::IType& source,
                ILSpy::Decompiler::TypeSystem::IType& target);
 
+// The C# `static IType UnderlyingTypeForConversion(IType type)` (CSharpConversions.cs line 1164)
+// -- the type to use for looking up user-defined conversion operators: if `type` is a
+// `ByReferenceType` (a `ref` parameter/local), unwrap to the element type first; then strip the
+// `Nullable<T>` wrapper (`NullableType.GetUnderlyingType`). The result is the type whose method
+// table `GetApplicableConversionOperators` scans for `op_Implicit` / `op_Explicit` operators --
+// a `ref` parameter does not carry its own operators, and a `Nullable<T>` does not define its own
+// conversion operators (the underlying `T` does).
+//
+// Pure (a `static` method -- reads no `CSharpConversions` instance state, only `IType.Kind`, the
+// `ByReferenceType` element, and `NullableType.GetUnderlyingType`), so it lands as a `Detail::`
+// free function taking `const IType&` (the const `Kind()` / const `GetUnderlyingType` overload --
+// the consumer `GetApplicableConversionOperators` calls the const `GetMethods` on the result).
+// Returns `const IType&` -- the returned reference is valid for the lifetime of the input `type`:
+// the `ByReferenceType` element is owned by the `ByReferenceType`'s `element_` (reachable through
+// `type`), and the `GetUnderlyingType` return (either the `Nullable<T>` type argument owned by the
+// `ParameterizedType`'s `typeArgs_`, or the original `type` itself) is likewise reachable through
+// the input `type`. A degenerate `ByReferenceType` with a null element falls through to
+// `GetUnderlyingType(type)` as the safe faithful fallback (the D516 null-guard-before-deref
+// precedent -- the C# would deref the null element and NRE, but a null element does not occur in
+// practice and the guard avoids UB).
+const ILSpy::Decompiler::TypeSystem::IType&
+UnderlyingTypeForConversion(const ILSpy::Decompiler::TypeSystem::IType& type);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

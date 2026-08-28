@@ -85,6 +85,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Resolver/CSharpConversionsFindMostEncompass_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsExplicitNotUserDefined_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsSelectOperator_Test.cpp
+    Decompiler/CSharp/Resolver/CSharpConversionsUnderlyingTypeForConversion_Test.cpp
     Decompiler/TypeSystem/Nullability_Test.cpp
     Decompiler/TypeSystem/NullableType_Test.cpp
     Decompiler/TypeSystem/SignatureCallingConvention_Test.cpp
