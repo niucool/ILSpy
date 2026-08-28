@@ -54,7 +54,7 @@
 
 #include "Decompiler/Semantics/Conversion.hpp"  // Conversion (forward-declared; unported full surface)
 #include "Decompiler/TypeSystem/ICompilation.hpp"  // ICompilation (compilation) + CacheManager (Get factory)
-#include "Decompiler/TypeSystem/IType.hpp"  // IType (TypePair)
+#include "Decompiler/TypeSystem/IType.hpp"  // IType (TypePair) -- also pulls in TypeKind.hpp
 
 #include <cstddef>
 #include <functional>  // std::hash
@@ -62,6 +62,8 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+
+namespace ILSpy::Decompiler::Semantics { class ResolveResult; }  // the ResolveResult-based public entries (forward-declared; the .cpp includes the full header for Type()/Kind())
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
 
@@ -168,6 +170,51 @@ public:
     // null args compiles out (the `IType&` references cannot bind to null, the D374 convention).
     std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
     ExplicitConversion(ILSpy::Decompiler::TypeSystem::IType& fromType,
+                      ILSpy::Decompiler::TypeSystem::IType& toType);
+
+    // The C# `public Conversion ImplicitConversion(ResolveResult resolveResult, IType toType)`
+    // (CSharpConversions.cs line 143, C# spec draft-v11 section 10.2) -- the public implicit
+    // conversion entry point (the ResolveResult overload). Delegates to the private
+    // `ImplicitConversion(resolveResult, toType, allowUserDefined: true, allowTuple: true)`
+    // overload (the `Detail::ImplicitConversion` ResolveResult-based free function, D528) -- a
+    // thin wrapper that threads the instance's compilation and the public-entry flag pair
+    // (`true, true`). The C# `ArgumentNullException` on a null `resolveResult` compiles out (the
+    // `const ResolveResult&` reference cannot bind to null, the D374 convention). The `toType` is
+    // `IType&` non-const because the dispatch's fallback helpers (`StandardImplicitConversion` /
+    // `UserDefinedImplicitConversion` / the IType-based `ImplicitConversion`) take non-const
+    // `IType&` for the non-const `AcceptVisitor` (D406). Unlike the IType-based overload (line
+    // 151), this entry is NOT cached -- the C# caches only the IType-based overload (the
+    // ResolveResult context makes a cache key impractical), and the port faithfully does not
+    // cache it either. Returns `std::shared_ptr<Conversion>` (the C# `Conversion` reference
+    // modeled as a shared handle).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+    ImplicitConversion(const ILSpy::Decompiler::Semantics::ResolveResult& resolveResult,
+                      ILSpy::Decompiler::TypeSystem::IType& toType);
+
+    // The C# `public Conversion ExplicitConversion(ResolveResult resolveResult, IType toType)`
+    // (CSharpConversions.cs line 281, C# spec draft-v11 section 10.3) -- the public explicit
+    // conversion entry point (the ResolveResult overload). Checks (in order): the dynamic arm
+    // (`resolveResult.Type.Kind == TypeKind.Dynamic` -> `Conversion.ExplicitDynamicConversion` --
+    // an explicit conversion from `dynamic` always succeeds), the implicit check first
+    // (`ImplicitConversion(resolveResult, toType, allowUserDefined: false, allowTuple: false)` --
+    // the `Detail::ImplicitConversion` ResolveResult-based free function, D528; an implicit
+    // conversion subsumes the explicit one), the (deferred) tuple arm (`resolveResult is
+    // TupleResolveResult` -> `TupleConversion(isExplicit: true)` -- the `TupleConversion` machinery
+    // is not yet ported, so it yields `None` and falls through), the standard explicit dispatch
+    // (`ExplicitConversionImpl(resolveResult.Type, toType)` -- the `Detail::ExplicitConversionImpl`
+    // free function, D524), and the user-defined explicit fallback
+    // (`UserDefinedExplicitConversion(resolveResult, resolveResult.Type, toType)` -- the
+    // `Detail::UserDefinedExplicitConversion` free function, D530). The C# `ArgumentNullException`
+    // on null args compiles out (the references cannot bind to null, the D374 convention). Like
+    // the IType-based `ExplicitConversion` (line 298), this entry is NOT cached. The
+    // `resolveResult.Type()` accessor returns `const IType&` (the D374 non-null-reference
+    // convention), but `ExplicitConversionImpl` / `UserDefinedExplicitConversion` take `IType&`
+    // non-const (the non-const `AcceptVisitor`, D406), so the port `const_cast`s the const
+    // reference -- the underlying type-system object is mutable (the accessor's `const` is the
+    // contract, not a guarantee), the D515/D517/D528 `const_cast` precedent. Returns
+    // `std::shared_ptr<Conversion>`.
+    std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+    ExplicitConversion(const ILSpy::Decompiler::Semantics::ResolveResult& resolveResult,
                       ILSpy::Decompiler::TypeSystem::IType& toType);
 
 private:

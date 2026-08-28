@@ -22,8 +22,10 @@
 
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
 
-#include "Decompiler/CSharp/Resolver/CSharpConversionsHelpers.hpp"  // Detail::StandardImplicitConversion (the dispatch entry point)
+#include "Decompiler/CSharp/Resolver/CSharpConversionsHelpers.hpp"  // Detail::StandardImplicitConversion / Detail::ImplicitConversion (the dispatch entry points)
 #include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversion / Conversions (the dispatch return singletons)
+#include "Decompiler/Semantics/ResolveResult.hpp"  // ResolveResult (the ResolveResult-based public entries)
+#include "Decompiler/TypeSystem/TypeKind.hpp"  // TypeKind (the dynamic arm)
 #include "Decompiler/Util/CacheManager.hpp"  // CacheManager (Get factory)
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
@@ -112,6 +114,78 @@ CSharpConversions::ExplicitConversion(ILSpy::Decompiler::TypeSystem::IType& from
 		return c;
 	return Detail::UserDefinedExplicitConversion(*compilation_, /*fromResult*/ nullptr,
 	                                              fromType, toType);
+}
+
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+CSharpConversions::ImplicitConversion(const ILSpy::Decompiler::Semantics::ResolveResult& resolveResult,
+                                      ILSpy::Decompiler::TypeSystem::IType& toType)
+{
+	// CSharpConversions.cs line 143. The public implicit entry point (the ResolveResult overload,
+	// NOT cached -- the C# caches only the IType-based overload at line 151; the ResolveResult
+	// context makes a cache key impractical). Delegates to the private
+	// `ImplicitConversion(resolveResult, toType, allowUserDefined: true, allowTuple: true)`
+	// overload -- the `Detail::ImplicitConversion` ResolveResult-based free function (D528). The
+	// C# `if (resolveResult == null) throw new ArgumentNullException(...)` compiles out (the
+	// `const ResolveResult&` reference cannot bind to null, the D374 convention).
+	return Detail::ImplicitConversion(*compilation_, resolveResult, toType,
+	                                  /*allowUserDefined*/ true, /*allowTuple*/ true);
+}
+
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+CSharpConversions::ExplicitConversion(const ILSpy::Decompiler::Semantics::ResolveResult& resolveResult,
+                                      ILSpy::Decompiler::TypeSystem::IType& toType)
+{
+	// CSharpConversions.cs line 281. The public explicit entry point (the ResolveResult overload,
+	// NOT cached). Checks (in order): the dynamic arm, the implicit check first, the (deferred)
+	// tuple arm, the standard explicit dispatch, the user-defined explicit fallback. The C#
+	// `ArgumentNullException` on null args compiles out (the references cannot bind to null, the
+	// D374 convention). The C# `c != Conversion.None` checks port to pointer-identity against the
+	// `None` singleton.
+
+	// C# `if (resolveResult.Type.Kind == TypeKind.Dynamic) return Conversion.ExplicitDynamicConversion;`
+	// -- the dynamic arm. `resolveResult.Type()` returns `const IType&`; `Kind()` is the `IType`
+	// virtual (the D374 non-null-reference convention; `IType.hpp` pulls in `TypeKind.hpp`). An
+	// explicit conversion from `dynamic` always succeeds (the C# `dynamic`-erasure semantics).
+	if (resolveResult.Type().Kind() == ILSpy::Decompiler::TypeSystem::TypeKind::Dynamic)
+		return Conversions::ExplicitDynamicConversion();
+
+	// C# `Conversion c = ImplicitConversion(resolveResult, toType, allowUserDefined: false,
+	// allowTuple: false);` -- the implicit check first (an implicit conversion subsumes the explicit
+	// one). The `Detail::ImplicitConversion` ResolveResult-based free function (D528).
+	auto c = Detail::ImplicitConversion(*compilation_, resolveResult, toType,
+	                                      /*allowUserDefined*/ false, /*allowTuple*/ false);
+	if (c.get() != Conversions::None().get())
+		return c;
+
+	// C# `if (resolveResult is TupleResolveResult tupleRR) { c = TupleConversion(tupleRR, toType,
+	// isExplicit: true); if (c != Conversion.None) return c; }` -- DEFERRED: the tuple arm needs the
+	// `TupleConversion` machinery (the `TupleResolveResult` RTTI + the per-element conversion
+	// recursion), which is not yet ported. A non-tuple `ResolveResult` falls through exactly as the
+	// C# does when the helper returns `Conversion.None`; a tuple `ResolveResult` also falls through
+	// (the deferred arm yields `None`) -- faithful to the C# structure once `TupleConversion` lands.
+	// if (auto* tupleRR = dynamic_cast<TupleResolveResult*>(&resolveResult)) {
+	//   c = TupleConversion(*tupleRR, toType, /*isExplicit*/ true);
+	//   if (c.get() != Conversions::None().get()) return c;
+	// }
+
+	// C# `c = ExplicitConversionImpl(resolveResult.Type, toType);` -- the standard explicit
+	// dispatch. `resolveResult.Type()` returns `const IType&` but `Detail::ExplicitConversionImpl`
+	// takes `IType&` non-const (the non-const `AcceptVisitor`, D406), so the port `const_cast`s the
+	// const reference -- the underlying type-system object is mutable (the accessor's `const` is
+	// the contract, not a guarantee), the D515/D517/D528 `const_cast` precedent.
+	c = Detail::ExplicitConversionImpl(*compilation_,
+	                                   const_cast<ILSpy::Decompiler::TypeSystem::IType&>(resolveResult.Type()),
+	                                   toType);
+	if (c.get() != Conversions::None().get())
+		return c;
+
+	// C# `return UserDefinedExplicitConversion(resolveResult, resolveResult.Type, toType);` -- the
+	// user-defined explicit fallback. `Detail::UserDefinedExplicitConversion` takes the
+	// `ResolveResult*` (the nullable pointer, D530) -- `&resolveResult` is the non-null pointer
+	// (the public entry always has a real `resolveResult`) -- and `IType&` non-const (the same
+	// `const_cast` as the `ExplicitConversionImpl` call above).
+	return Detail::UserDefinedExplicitConversion(*compilation_, &resolveResult,
+	    const_cast<ILSpy::Decompiler::TypeSystem::IType&>(resolveResult.Type()), toType);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver
