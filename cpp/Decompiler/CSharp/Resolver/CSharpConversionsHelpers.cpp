@@ -402,4 +402,137 @@ bool IdentityOrVarianceConversion(const ICompilation& compilation, IType& s, ITy
 	}
 }
 
+bool IsSealedReferenceType(const IType& type)
+{
+	// C# `TypeKind kind = type.Kind; return kind == TypeKind.Class && type.GetDefinition().IsSealed
+	// || kind == TypeKind.Delegate;`. The C# short-circuits the `GetDefinition().IsSealed` deref behind
+	// the `kind == Class` test (a delegate returns true without ever calling `GetDefinition`). The port
+	// adds a `def != nullptr` guard before `def->IsSealed()` for the class arm: a class-kind type whose
+	// definition is unresolved (e.g. a `KnownType` placeholder) would NRE in the C#, but in C++ a null
+	// deref is UB, so the guard returns false (not-sealed) -- the safe faithful fallback. The C# `||` is
+	// the last evaluated, so the precedence mirrors the C#: `(Class && IsSealed) || Delegate`.
+	TypeKind kind = type.Kind();
+	const ITypeDefinition* def = type.GetDefinition();
+	return (kind == TypeKind::Class && def != nullptr && def->IsSealed())
+		|| kind == TypeKind::Delegate;
+}
+
+bool ExplicitReferenceConversion(const ICompilation& compilation, IType& fromType, IType& toType)
+{
+	// C# spec (draft-v11) section 10.3.5 explicit reference conversions. The C# `toType.IsReferenceType != true`
+	// / `fromType.IsReferenceType != true` guards are the `bool? != true` check, true UNLESS `IsReferenceType`
+	// holds `true` (a `bool? != true` yields `null` [falsy] when the operand is `null`, and `false` when it is
+	// `true`), so an indeterminate `IsReferenceType` (std::nullopt) fails the guard. The negation: the guard
+	// returns false unless the operand holds `true`.
+	auto toRef = toType.IsReferenceType();
+	if (!(toRef.has_value() && *toRef == true))
+		return false;
+	auto fromRef = fromType.IsReferenceType();
+	if (!(fromRef.has_value() && *fromRef == true)) {
+		// Special case: converting from `F` to `T` is a reference conversion where `T : class, F` (because
+		// `F` actually must be a reference type as well, even though C# doesn't treat it as one). The C#
+		// `IsSubtypeOf(toType, fromType, 0)` -- note the SWAPPED order (`toType` is the subtype candidate
+		// against `fromType`); the depth starts at 0 (the depth guard lives inside `IsSubtypeOf`).
+		if (fromType.Kind() == TypeKind::TypeParameter)
+			return IsSubtypeOf(compilation, toType, fromType, 0);
+		return false;
+	}
+
+	if (toType.Kind() == TypeKind::Array) {
+		// The C# `(ArrayType)toType` ports to `dynamic_cast` (non-const, the element feeds the non-const
+		// recursion); the cast cannot fail (the `Kind == Array` guard), but a `dynamic_cast` is the faithful
+		// shape and cheap.
+		ArrayType* toArray = dynamic_cast<ArrayType*>(&toType);
+		if (fromType.Kind() == TypeKind::Array) {
+			// Array covariance: same dimensions + a recursive explicit reference conversion on the elements.
+			ArrayType* fromArray = dynamic_cast<ArrayType*>(&fromType);
+			if (fromArray->Rank() != toArray->Rank())
+				return false;
+			return ExplicitReferenceConversion(compilation, *fromArray->Element(), *toArray->Element());
+		}
+		// The C# `IType fromTypeArgument = UnpackGenericArrayInterface(fromType);` -- the non-owning `const IType*`
+		// (owned by the `ParameterizedType`'s `typeArgs_`); the `const_cast` feeds it to the non-const
+		// recursion (the D515 `GetUnderlyingType` non-const-overload precedent -- the underlying object is
+		// the mutable, type-system-owned `IType`).
+		const IType* fromTypeArgument = UnpackGenericArrayInterface(fromType);
+		if (fromTypeArgument != nullptr && toArray->Rank() == 1) {
+			IType& fromArg = const_cast<IType&>(*fromTypeArgument);
+			return ExplicitReferenceConversion(compilation, fromArg, *toArray->Element())
+				|| IdentityConversion(fromArg, *toArray->Element());
+		}
+		// Otherwise treat the array like a sealed class -- require an implicit conversion in the OPPOSITE
+		// direction (the C# `IsImplicitReferenceConversion(toType, fromType)` -- swapped order).
+		return IsImplicitReferenceConversion(compilation, toType, fromType);
+	}
+	else if (fromType.Kind() == TypeKind::Array) {
+		ArrayType* fromArray = dynamic_cast<ArrayType*>(&fromType);
+		const IType* toTypeArgument = UnpackGenericArrayInterface(toType);
+		if (toTypeArgument != nullptr && fromArray->Rank() == 1) {
+			IType& toArg = const_cast<IType&>(*toTypeArgument);
+			return ExplicitReferenceConversion(compilation, *fromArray->Element(), toArg);
+		}
+		// Otherwise treat the array like a sealed class.
+		return IsImplicitReferenceConversion(compilation, fromType, toType);
+	}
+	else if (fromType.Kind() == TypeKind::Delegate && toType.Kind() == TypeKind::Delegate) {
+		// The C# `ITypeDefinition def = fromType.GetDefinition(); if (def == null || !def.Equals(toType.GetDefinition()))
+		// return false;`. The `def->Equals(*tDef)` is the structural `IType::Equals`; `tDef` may be null, and the
+		// C# `def.Equals(null)` returns false, so the guard `tDef != nullptr && def->Equals(*tDef)` is the
+		// D516 null-guarded form.
+		const ITypeDefinition* def = fromType.GetDefinition();
+		const ITypeDefinition* tDef = toType.GetDefinition();
+		if (def == nullptr || !(tDef != nullptr && def->Equals(*tDef)))
+				return false;
+		ParameterizedType* ps = dynamic_cast<ParameterizedType*>(&fromType);
+		ParameterizedType* pt = dynamic_cast<ParameterizedType*>(&toType);
+		if (ps == nullptr || pt == nullptr) {
+			// Non-generic delegate -- return true for the identity conversion (both sides non-parameterized).
+			return ps == nullptr && pt == nullptr;
+		}
+		// The C# loop indexes `def.TypeParameters[i]` and `ps.GetTypeArgument(i)` by the SAME position `i`
+		// (the loop counter, NOT `xi.Index`); the port mirrors that with an indexed loop (the D517 precedent).
+		std::vector<const ITypeParameter*> typeParams = def->TypeParameters();
+		for (std::size_t i = 0; i < typeParams.size(); i++) {
+			const ITypeParameter* xi = typeParams[i];
+			IType& si = *ps->GetTypeArgument(static_cast<int>(i));
+			IType& ti = *pt->GetTypeArgument(static_cast<int>(i));
+			if (IdentityConversion(si, ti))
+				continue;
+			switch (xi->Variance()) {
+				case VarianceModifier::Covariant:
+					if (!ExplicitReferenceConversion(compilation, si, ti))
+						return false;
+					break;
+				case VarianceModifier::Contravariant:
+					// The C# `!(si.IsReferenceType == true && ti.IsReferenceType == true)` -- both `bool? == true`
+					// checks (true ONLY when the operand holds `true`); an indeterminate on either side fails.
+					if (!(si.IsReferenceType().has_value() && *si.IsReferenceType() == true
+					      && ti.IsReferenceType().has_value() && *ti.IsReferenceType() == true))
+						return false;
+					break;
+				default: // `Invariant` -- no variance conversion is possible
+					return false;
+			}
+		}
+		return true;
+	}
+	else if (IsSealedReferenceType(fromType)) {
+		// If the source type is sealed, explicit conversions can't do anything more than implicit ones.
+		return IsImplicitReferenceConversion(compilation, fromType, toType);
+	}
+	else if (IsSealedReferenceType(toType)) {
+		// If the target type is sealed, there must be an implicit conversion in the OPPOSITE direction.
+		return IsImplicitReferenceConversion(compilation, toType, fromType);
+	}
+	else {
+		// Unsealed on both sides: an interface on either side is always explicitly convertible; otherwise
+		// an implicit reference conversion in EITHER direction suffices.
+		if (fromType.Kind() == TypeKind::Interface || toType.Kind() == TypeKind::Interface)
+			return true;
+		else
+			return IsImplicitReferenceConversion(compilation, toType, fromType)
+				|| IsImplicitReferenceConversion(compilation, fromType, toType);
+	}
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

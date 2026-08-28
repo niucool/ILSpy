@@ -203,4 +203,37 @@ bool IdentityOrVarianceConversion(const ILSpy::Decompiler::TypeSystem::ICompilat
                                   ILSpy::Decompiler::TypeSystem::IType& t,
                                   int subtypeCheckNestingDepth);
 
+// The C# `bool IsSealedReferenceType(IType type)` (CSharpConversions.cs line 784) -- true if `type` is
+// a sealed class or any delegate (delegates are implicitly sealed). A pure helper (reads only
+// `IType.Kind` + `GetDefinition()->IsSealed`, no `CSharpConversions` instance state), so it lands as
+// a `Detail::` free function taking `const IType&` like the numeric helpers. The C# short-circuits the
+// `GetDefinition().IsSealed` deref behind `kind == TypeKind.Class` (so a delegate returns true without a
+// definition); the port adds a `def != nullptr` guard before `def->IsSealed()` for the class arm (a
+// class-kind type whose definition is unresolved, e.g. a `KnownType` placeholder, would NRE in the C# --
+// the guard returns false, the safe faithful fallback, the D516 `def != nullptr` precedent).
+bool IsSealedReferenceType(const ILSpy::Decompiler::TypeSystem::IType& type);
+
+// The C# `bool ExplicitReferenceConversion(IType fromType, IType toType)` (CSharpConversions.cs line
+// 669, C# spec draft-v11 section 10.3.5) -- the explicit reference conversion. Both operands must be
+// reference types (the `IsReferenceType == true` guard on both sides), with a type-parameter special
+// case on the from-side (converting from `F` to `T` where `T : class, F` recurses `IsSubtypeOf(toType,
+// fromType, 0)`). Then: array-to-array covariance (same dimensions + a recursive explicit reference
+// conversion on the elements), array<->generic-interface unpacking, delegate variance (same definition
+// + a per-type-argument identity-or-explicit-reference/contravariant-reference check), sealed-source /
+// sealed-target fallbacks to the implicit reference conversion, and the unsealed-unsealed arm (an
+// interface on either side is always convertible; otherwise an implicit reference conversion in either
+// direction suffices).
+//
+// Pure given a compilation (reads no `CSharpConversions` instance state beyond the compilation, which
+// the `IsSubtypeOf` / `IsImplicitReferenceConversion` calls thread through), so it lands as a `Detail::`
+// free function taking `const ICompilation&` like the implicit-reference cluster. Recurses on itself
+// (the array/delegate arms) WITHOUT a nesting-depth parameter (the C# recurses at the top level; the
+// depth guard lives only inside `IsSubtypeOf`), so the signature mirrors `IsImplicitReferenceConversion`
+// minus the depth. Takes `IType&` (non-const) like the implicit cluster because it feeds element/
+// argument types to `IdentityConversion(IType&, IType&)` (the non-const `AcceptVisitor`) and to the
+// non-const `IsSubtypeOf` / `IsImplicitReferenceConversion` recursion.
+bool ExplicitReferenceConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                                 ILSpy::Decompiler::TypeSystem::IType& fromType,
+                                 ILSpy::Decompiler::TypeSystem::IType& toType);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
