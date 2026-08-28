@@ -980,4 +980,77 @@ ITypePtr FindMostEncompassingType(const ICompilation& compilation, const std::ve
 	return best;
 }
 
+std::shared_ptr<Conversion>
+SelectOperator(const ICompilation& compilation, IType& mostSpecificSource, IType& mostSpecificTarget,
+              const std::vector<OperatorInfo>& operators, bool isImplicit, IType& source, IType& target)
+{
+	// CSharpConversions.cs line 993. Filter the applicable operators to those whose `SourceType`
+	// equals `mostSpecificSource` AND whose `TargetType` equals `mostSpecificTarget` (the most-specific
+	// source/target the user-defined-conversion resolution computed). The C# `operators.Where(op =>
+	// op.SourceType.Equals(mostSpecificSource) && op.TargetType.Equals(mostSpecificTarget)).ToList()`
+	// ports to a loop collecting non-owning pointers into the filtered `selected` vector (the
+	// `OperatorInfo` entries are owned by the `operators` argument and outlive this call).
+	std::vector<const OperatorInfo*> selected;
+	for (const OperatorInfo& op : operators)
+	{
+		if (op.SourceType->Equals(mostSpecificSource) && op.TargetType->Equals(mostSpecificTarget))
+			selected.push_back(&op);
+	}
+
+	// The C# `if (selected.Count == 0) return Conversion.None;` -- no operator matches the most-specific
+	// source/target pair.
+	if (selected.empty())
+		return Conversions::None();
+
+	// The C# `if (selected.Count == 1) return Conversion.UserDefinedConversion(selected[0].Method,
+	// isLifted: selected[0].IsLifted, isImplicit: isImplicit, conversionBeforeUserDefinedOperator:
+	// ExplicitConversionNotUserDefined(source, mostSpecificSource), conversionAfterUserDefinedOperator:
+	// ExplicitConversionNotUserDefined(mostSpecificTarget, target));` -- the unambiguous single match.
+	// The before/after conversions come from the already-ported `Detail::ExplicitConversionNotUserDefined`
+	// (D525): the conversion from the original `source` to the operator's `mostSpecificSource`, and
+	// from the operator's `mostSpecificTarget` to the original `target`.
+	if (selected.size() == 1)
+	{
+		const OperatorInfo* op = selected[0];
+		return Conversions::UserDefinedConversion(op->Method, isImplicit,
+			ExplicitConversionNotUserDefined(compilation, source, mostSpecificSource),
+			ExplicitConversionNotUserDefined(compilation, mostSpecificTarget, target),
+			op->IsLifted);
+	}
+
+	// More than one operator matches. The C# `int nNonLifted = selected.Count(s => !s.IsLifted);
+	// if (nNonLifted == 1) { var op = selected.First(s => !s.IsLifted); return ...; }` -- if exactly one
+	// of the matches is non-lifted, prefer it over the lifted forms.
+	int nNonLifted = 0;
+	const OperatorInfo* nonLifted = nullptr;
+	for (const OperatorInfo* op : selected)
+	{
+		if (!op->IsLifted)
+		{
+			++nNonLifted;
+			nonLifted = op;
+		}
+	}
+	if (nNonLifted == 1)
+	{
+		return Conversions::UserDefinedConversion(nonLifted->Method, isImplicit,
+			ExplicitConversionNotUserDefined(compilation, source, mostSpecificSource),
+			ExplicitConversionNotUserDefined(compilation, mostSpecificTarget, target),
+			nonLifted->IsLifted);
+	}
+
+	// The C# ambiguous fallback: `return Conversion.UserDefinedConversion(selected[0].Method,
+	// isLifted: selected[0].IsLifted, isImplicit: isImplicit, isAmbiguous: true,
+	// conversionBeforeUserDefinedOperator: ExplicitConversionNotUserDefined(source, mostSpecificSource),
+	// conversionAfterUserDefinedOperator: ExplicitConversionNotUserDefined(mostSpecificTarget, target));`
+	// -- zero non-lifted (all matches are lifted) OR more than one non-lifted. The `isAmbiguous: true`
+	// flag makes the returned conversion `IsValid == false` (the `UserDefinedConv` ctor computes
+	// `isValid = !isAmbiguous`). Uses `selected[0]` (the first match) as the representative method.
+	const OperatorInfo* op = selected[0];
+	return Conversions::UserDefinedConversion(op->Method, isImplicit,
+		ExplicitConversionNotUserDefined(compilation, source, mostSpecificSource),
+		ExplicitConversionNotUserDefined(compilation, mostSpecificTarget, target),
+		op->IsLifted, /*isAmbiguous*/ true);
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

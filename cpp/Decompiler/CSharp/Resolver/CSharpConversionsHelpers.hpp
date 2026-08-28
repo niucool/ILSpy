@@ -39,6 +39,7 @@
 
 namespace ILSpy::Decompiler::TypeSystem { class IType; }
 namespace ILSpy::Decompiler::TypeSystem { class ICompilation; }
+namespace ILSpy::Decompiler::TypeSystem { class IMethod; }
 
 namespace ILSpy::Decompiler::Semantics { class Conversion; }
 namespace ILSpy::Decompiler::Semantics { class ResolveResult; }
@@ -533,5 +534,73 @@ FindMostEncompassedType(const ILSpy::Decompiler::TypeSystem::ICompilation& compi
 std::shared_ptr<ILSpy::Decompiler::TypeSystem::IType>
 FindMostEncompassingType(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
                          const std::vector<std::shared_ptr<ILSpy::Decompiler::TypeSystem::IType>>& candidates);
+
+// The C# private nested `class OperatorInfo` (CSharpConversions.cs lines 1131-1148) -- a pure data
+// holder for the user-defined-conversion resolution. Each entry captures one applicable conversion
+// operator: the `IMethod Method` handle (non-owning; the method is owned by the type system, the
+// `Conversions::UserDefinedConversion` `const IMethod*` convention), the `SourceType` / `TargetType`
+// (the operator's parameter type / return type, possibly lifted to `Nullable<T>`), and the `IsLifted`
+// flag (true when the operator applies in its lifted form -- a non-nullable value-type operator
+// lifted so its source/target are `Nullable<T>`). Built by `GetApplicableConversionOperators`
+// (deferred -- needs `IType.GetMethods` + the operator filter) and consumed by `SelectOperator`.
+//
+// The C# `readonly IType` reference fields port to `ITypePtr` (owning shared handles -- the D526/D527
+// `FindMostEncompassedType`/`FindMostEncompassingType` `std::vector<ITypePtr>` convention); this keeps
+// the stub types alive in tests where the `OperatorInfo` is constructed by hand from `shared_ptr` stubs.
+// The `IMethod` ports to a non-owning `const IMethod*` raw pointer (the type system owns the method;
+// the `Conversions::UserDefinedConversion` factory takes the same `const IMethod*`).
+struct OperatorInfo {
+    const ILSpy::Decompiler::TypeSystem::IMethod* Method;
+    std::shared_ptr<ILSpy::Decompiler::TypeSystem::IType> SourceType;
+    std::shared_ptr<ILSpy::Decompiler::TypeSystem::IType> TargetType;
+    bool IsLifted;
+
+    OperatorInfo(const ILSpy::Decompiler::TypeSystem::IMethod* method,
+                 std::shared_ptr<ILSpy::Decompiler::TypeSystem::IType> sourceType,
+                 std::shared_ptr<ILSpy::Decompiler::TypeSystem::IType> targetType,
+                 bool isLifted)
+        : Method(method),
+          SourceType(std::move(sourceType)),
+          TargetType(std::move(targetType)),
+          IsLifted(isLifted) {}
+};
+
+// The C# `Conversion SelectOperator(IType mostSpecificSource, IType mostSpecificTarget,
+// IList<OperatorInfo> operators, bool isImplicit, IType source, IType target)`
+// (CSharpConversions.cs line 993) -- the user-defined-conversion operator selection. From the
+// applicable operators (the `operators` list built by `GetApplicableConversionOperators`), selects
+// the ones whose `SourceType` equals `mostSpecificSource` AND whose `TargetType` equals
+// `mostSpecificTarget` (the most-specific source/target the user-defined-conversion resolution
+// computed via `FindMostEncompassedType`/`FindMostEncompassingType`). If none match, returns `None`.
+// If exactly one matches, returns a `UserDefinedConversion` over that operator. If more than one
+// matches and exactly one is non-lifted, returns the non-lifted one (a non-lifted operator is
+// preferred over the lifted forms). Otherwise (ambiguous -- multiple matches with zero or
+// more-than-one non-lifted), returns a `UserDefinedConversion` over `selected[0]` flagged
+// `isAmbiguous`.
+//
+// The `conversionBeforeUserDefinedOperator` / `conversionAfterUserDefinedOperator` the
+// `UserDefinedConversion` carries are the standard (implicit-or-explicit) conversions before and
+// after the user-defined operator: `ExplicitConversionNotUserDefined(source, mostSpecificSource)`
+// (the conversion from the original source to the operator's source) and
+// `ExplicitConversionNotUserDefined(mostSpecificTarget, target)` (the conversion from the operator's
+// target to the original target). Both come from the already-ported
+// `Detail::ExplicitConversionNotUserDefined` (D525), so `SelectOperator` threads the compilation
+// through to it.
+//
+// Pure given a compilation (delegates to `IType::Equals` and `Detail::ExplicitConversionNotUserDefined`,
+// both of which read no `CSharpConversions` instance state beyond the compilation), so it lands as a
+// `Detail::` free function. Takes `const ICompilation&` (threaded to `ExplicitConversionNotUserDefined`)
+// and `IType&` non-const (the `mostSpecificSource`/`mostSpecificTarget`/`source`/`target` feed
+// `ExplicitConversionNotUserDefined`'s non-const `IType&` parameters, the non-const `AcceptVisitor`,
+// D406). The C# `IList<OperatorInfo>` ports to `const std::vector<OperatorInfo>&` (the ILSpy
+// collection convention). Returns `std::shared_ptr<Conversion>`.
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+SelectOperator(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+               ILSpy::Decompiler::TypeSystem::IType& mostSpecificSource,
+               ILSpy::Decompiler::TypeSystem::IType& mostSpecificTarget,
+               const std::vector<OperatorInfo>& operators,
+               bool isImplicit,
+               ILSpy::Decompiler::TypeSystem::IType& source,
+               ILSpy::Decompiler::TypeSystem::IType& target);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
