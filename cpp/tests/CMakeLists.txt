@@ -131,6 +131,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/NullabilityAnnotatedType_Test.cpp
     Decompiler/TypeSystem/TupleType_Test.cpp
     Decompiler/TypeSystem/GetTupleElementTypes_Test.cpp
+    Decompiler/TypeSystem/TaskType_Test.cpp
     Decompiler/TypeSystem/TypeVisitor_Test.cpp
     Decompiler/TypeSystem/TypeParameterSubstitution_Test.cpp
     Decompiler/TypeSystem/ITypeReference_Test.cpp
