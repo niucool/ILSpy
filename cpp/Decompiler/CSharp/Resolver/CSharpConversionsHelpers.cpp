@@ -23,7 +23,8 @@
 
 #include "Decompiler/CSharp/Resolver/CSharpConversionsHelpers.hpp"
 
-#include "Decompiler/TypeSystem/IType.hpp"          // IType (Kind)
+#include "Decompiler/TypeSystem/IType.hpp"          // IType (Kind), ITypePtr, AcceptVisitor, Equals
+#include "Decompiler/TypeSystem/NormalizeTypeVisitor.hpp"  // NormalizeTypeVisitor::TypeErasure (IdentityConversion)
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"  // GetTypeCode, TypeCode
 #include "Decompiler/TypeSystem/TypeKind.hpp"       // TypeKind
 
@@ -31,6 +32,8 @@ namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 
 using ILSpy::Decompiler::TypeSystem::GetTypeCode;
 using ILSpy::Decompiler::TypeSystem::IType;
+using ILSpy::Decompiler::TypeSystem::ITypePtr;
+using ILSpy::Decompiler::TypeSystem::NormalizeTypeVisitor;
 using ILSpy::Decompiler::TypeSystem::TypeCode;
 using ILSpy::Decompiler::TypeSystem::TypeKind;
 
@@ -128,6 +131,20 @@ bool ImplicitNumericConversion(const IType& fromType, const IType& toType)
 		&& toI >= static_cast<int>(TypeCode::Int16) && toI <= static_cast<int>(TypeCode::UInt64)
 		&& implicitNumericConversionLookup[fromI - static_cast<int>(TypeCode::Char)]
 		                                  [toI - static_cast<int>(TypeCode::Int16)];
+}
+
+bool IdentityConversion(IType& fromType, IType& toType)
+{
+	// C# spec (draft-v11): section 10.2.2 identity conversion. Erase both types through the
+	// `NormalizeTypeVisitor.TypeErasure` singleton (folds object<->dynamic, IntPtr/UIntPtr<->nint/nuint,
+	// nullability, custom modifiers, tuple-vs-ValueTuple -- but NOT type parameters), then compare.
+	// The C# `fromType.AcceptVisitor(...)` / `toType.Equals(...)` reference semantics port to
+	// `IType::AcceptVisitor` (non-const, the D406 convention) and `IType::Equals` (structural,
+	// `Kind() == other.Kind() && StructuralEquals`).
+	NormalizeTypeVisitor& erasure = NormalizeTypeVisitor::TypeErasure();
+	ITypePtr from = fromType.AcceptVisitor(erasure);
+	ITypePtr to = toType.AcceptVisitor(erasure);
+	return from->Equals(*to);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

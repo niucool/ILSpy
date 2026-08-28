@@ -62,4 +62,21 @@ bool AnyNumericConversion(const ILSpy::Decompiler::TypeSystem::IType& fromType,
 bool ImplicitNumericConversion(const ILSpy::Decompiler::TypeSystem::IType& fromType,
                                const ILSpy::Decompiler::TypeSystem::IType& toType);
 
+// The C# `public bool IdentityConversion(IType fromType, IType toType)` (CSharpConversions.cs line 367,
+// C# spec draft-v11 section 10.2.2 "identity conversion") -- true if `fromType` and `toType` are the
+// same type after type erasure. Erasure (the `NormalizeTypeVisitor.TypeErasure` singleton) folds the
+// differences that must not distinguish identity: object<->dynamic, IntPtr/UIntPtr<->nint/nuint,
+// nullability annotations, custom modifiers, and tuple-vs-underlying-`ValueTuple`. Type parameters are
+// NOT replaced (the `TypeErasure` configuration leaves `ReplaceClassTypeParametersWithDummy` /
+// `ReplaceMethodTypeParametersWithDummy` false), so a `T` stays a `T` (the C# spec: a type parameter
+// has an identity conversion only to itself).
+//
+// Lifted to a `Detail::` free function like the numeric helpers (the D508 precedent): `IdentityConversion`
+// is pure -- it reads no `CSharpConversions` instance state (no compilation, no conversion cache), only
+// the `TypeErasure` static singleton and its `IType` arguments. The signature takes `IType&` (non-const,
+// unlike the numeric helpers' `const IType&`) because `IType::AcceptVisitor` is non-const (the D406
+// convention -- a visitor may reconstruct the type), mirroring `NormalizeTypeVisitor::EquivalentTypes`.
+bool IdentityConversion(ILSpy::Decompiler::TypeSystem::IType& fromType,
+                        ILSpy::Decompiler::TypeSystem::IType& toType);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
