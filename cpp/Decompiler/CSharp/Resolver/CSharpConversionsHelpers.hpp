@@ -46,6 +46,14 @@ namespace ILSpy::Decompiler::TypeSystem { enum class TypeCode : std::uint8_t; }
 namespace ILSpy::Decompiler::Semantics { class Conversion; }
 namespace ILSpy::Decompiler::Semantics { class ResolveResult; }
 
+// `CSharpConversions` (the conversion controller the anonymous-function conversion threads to
+// `LambdaResolveResult::IsValid`) and `LambdaResolveResult` (the RTTI target the anonymous-function
+// arm dynamic_casts the resolve result to) are both defined in this directory; forward-declared
+// here so the new helpers' signatures can reference them without pulling in the full headers
+// (keeping the include graph minimal -- the .cpp includes the full headers for the bodies).
+namespace ILSpy::Decompiler::CSharp::Resolver { class CSharpConversions; }
+namespace ILSpy::Decompiler::CSharp::Resolver { class LambdaResolveResult; }
+
 namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 
 // The C# `bool IsNumericType(IType type)` (CSharpConversions.cs line 439) -- true if the type is a
@@ -832,16 +840,17 @@ ImplicitConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilatio
 // compile-time-constant arms (`ImplicitEnumerationConversion` D527, then
 // `ImplicitConstantExpressionConversion` D521), the interpolated-string arm (an RTTI check on
 // `InterpolatedStringResolveResult` plus `IsKnownType(IFormattable/FormattableString)`), the
-// dynamic arm (`resolveResult.Type.Kind == TypeKind.Dynamic`), the (deferred) anonymous-function
-// and method-group arms, the compile-time-constant fallback (`StandardImplicitConversion` D523 +
-// `UserDefinedImplicitConversion` D530), and the non-constant fallback (the deferred tuple arm,
-// the `ThrowResolveResult` arm, then the IType-based `ImplicitConversion` D531).
+// dynamic arm (`resolveResult.Type.Kind == TypeKind.Dynamic`), the anonymous-function arm
+// (`AnonymousFunctionConversion`, an RTTI check on `LambdaResolveResult` -- the dispatch owns the
+// RTTI, the helper owns the body), the (deferred) method-group arm, the compile-time-constant
+// fallback (`StandardImplicitConversion` D523 + `UserDefinedImplicitConversion` D530), and the
+// non-constant fallback (the deferred tuple arm, the `ThrowResolveResult` arm, then the IType-
+// based `ImplicitConversion` D531).
 //
-// The deferred arms (`AnonymousFunctionConversion`, `MethodGroupConversion`, `TupleConversion`)
-// yield `Conversions::None()` until their machinery (`LambdaResolveResult.IsValid` +
-// `GetDelegateInvokeMethod`; `MethodGroupResolveResult.PerformOverloadResolution`; the
-// `TupleConversion` tuple machinery) lands -- a non-matching `ResolveResult` falls through to the
-// IType-based fallback exactly as the C# does when those arms return `None`.
+// The still-deferred arms (`MethodGroupConversion`, `TupleConversion`) yield
+// `Conversions::None()` until their machinery (`MethodGroupResolveResult.PerformOverloadResolution`;
+// the `TupleConversion` tuple machinery) lands -- a non-matching `ResolveResult` falls through
+// to the IType-based fallback exactly as the C# does when those arms return `None`.
 //
 // `resolveResult.Type()` returns `const IType&` (the D374 non-null-reference convention), but
 // `StandardImplicitConversion` / `UserDefinedImplicitConversion` / the IType-based
@@ -858,6 +867,66 @@ ImplicitConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilatio
                    ILSpy::Decompiler::TypeSystem::IType& toType,
                    bool allowUserDefined,
                    bool allowTuple);
+
+// The C# `static IType UnpackExpressionTreeType(IType type)` (CSharpConversions.cs line 1348) --
+// the helper the anonymous-function conversion strips the `Expression<T>` wrapper with: a
+// `ParameterizedType` over the `System.Linq.Expressions.Expression`1` generic definition (arity
+// 1) unpacks to its single type argument; any other type passes through unchanged. The C# is a
+// `static` method (no `CSharpConversions` instance state), so it lands as a `Detail::` free
+// function taking `const IType&` and returning `const IType&` (both the unpacked type argument --
+// owned by the `ParameterizedType`'s `typeArgs_` reachable through the input `type`, outliving the
+// call -- and the passthrough -- the input `type` itself, owned by the caller -- outlive the call;
+// the D516/D529 non-owning-reference-return precedent).
+//
+// The C# `pt.Name == "Expression"` reads the generic definition's `Name` (the `ParameterizedType`
+// delegates `Name` to `genericType.Name`); the C# `pt.Namespace == "System.Linq.Expressions"`
+// reads the generic definition's `Namespace`. The port's `IType` interface does NOT carry
+// `Namespace()` (only `Name()` / `ReflectionName()` / `TypeParameterCount()`); `Namespace()` lives
+// on `ITypeDefinition` (via `IEntity` -> `INamedElement`). The faithful port reads the namespace
+// via `pt->GetDefinition()` (the `ParameterizedType::GetDefinition()` delegates to
+// `genericType->GetDefinition()`, which for the real `Expression`1` definition is the definition
+// itself), with a `nullptr` guard -- a `ParameterizedType` over a non-definition generic (a
+// degenerate shape that does not occur for `Expression<T>`) yields `nullptr`, so the namespace
+// check fails and the type passes through, faithfully matching the C# (the generic's `Namespace`
+// would be empty for a non-definition, not `"System.Linq.Expressions"`). `pt->Name()` is available
+// on the `IType` interface directly (`ParameterizedType::Name()` delegates to `genericType->Name()`).
+const ILSpy::Decompiler::TypeSystem::IType&
+UnpackExpressionTreeType(const ILSpy::Decompiler::TypeSystem::IType& type);
+
+// The C# `Conversion AnonymousFunctionConversion(ResolveResult resolveResult, IType toType)`
+// (CSharpConversions.cs line 1280, C# 9.0 spec section 10.7 "anonymous function conversions") --
+// the anonymous-function (lambda / anonymous-method) -> delegate-type conversion. Resolves the
+// delegate's `Invoke` method (`GetDelegateInvokeMethod` D533), builds the delegate's parameter
+// types / return type, checks the parameter-list compatibility (the `HasParameterList` /
+// `IsImplicitlyTyped` / explicit-typed `ReferenceKind` + identity guards, or the no-parameter-list
+// `out` rejection), then delegates the body-validity verdict to `LambdaResolveResult.IsValid`
+// (the abstract `IsValid` the lambda subclass implements). The C# method is private; the port
+// lifts it to a `Detail::` free function (the D508 precedent).
+//
+// The C# takes `ResolveResult` and does the `resolveResult as LambdaResolveResult` + null check
+// internally; the port takes the already-verified `const LambdaResolveResult& f` (the dispatch
+// does the `dynamic_cast` and only calls this helper for an actual lambda -- the D528 interpolated-
+// string / throw-arm precedent, where the dispatch owns the RTTI and the helper owns the body;
+// the C# `as` + null check is a private method called once, so moving its RTTI to the single
+// caller is a faithful reorganization). The `!f.IsAnonymousMethod` expression-tree unwrap
+// (`UnpackExpressionTreeType`) runs only for lambdas (C# 3.0+); anonymous methods (C# 2.0
+// `delegate { }`) cannot convert to expression trees, so the toType is left as-is for them.
+//
+// The `CSharpConversions& conversions` parameter threads the conversion controller to
+// `f.IsValid(...)` (the C# passes `this`; the port's `IsValid` signature takes `CSharpConversions&`,
+// the D473 abstract-base port). The delegate's parameter/return `Type()` accessors return `const
+// IType&`, but `IsValid` takes `const std::vector<ITypePtr>&` / `const ITypePtr&`, so the port
+// builds owning `ITypePtr` handles from the const references via `shared_from_this()` +
+// `const_pointer_cast` (the D529 precedent -- the underlying type-system objects are shared-
+// managed; the `const` is the accessor contract, not a guarantee). The explicit-typed-parameter
+// identity check `IdentityConversion(dParamTypes[i], pF.Type)` takes `IType&` non-const (the
+// non-const `AcceptVisitor`, D406), so the `pF->Type()` `const IType&` is `const_cast` to `IType&`
+// (the D515/D517 precedent). Returns `std::shared_ptr<Conversion>` (the `LambdaConversion` the
+// `IsValid` returns on success, or `Conversions::None()` on any guard failure).
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+AnonymousFunctionConversion(ILSpy::Decompiler::CSharp::Resolver::CSharpConversions& conversions,
+                            const ILSpy::Decompiler::CSharp::Resolver::LambdaResolveResult& f,
+                            const ILSpy::Decompiler::TypeSystem::IType& toType);
 
 // The C# `bool IsBetterIntegralType(TypeCode t1, TypeCode t2)` (CSharpConversions.cs line 1697,
 // C# 9.0 spec section 12.6.4.7 "better conversion target" -- the integral-type tiebreak) -- true

@@ -23,6 +23,8 @@
 
 #include "Decompiler/CSharp/Resolver/CSharpConversionsHelpers.hpp"
 
+#include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"  // CSharpConversions (Get -- the anonymous-function arm threads the per-compilation controller to LambdaResolveResult::IsValid)
+#include "Decompiler/CSharp/Resolver/LambdaResolveResult.hpp"  // LambdaResolveResult (the anonymous-function arm RTTI target) + LambdaConversion (the IsValid success result)
 #include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversions (the nullable-conversion singletons / EnumerationConversion factory)
 #include "Decompiler/Semantics/InterpolatedStringResolveResult.hpp"  // InterpolatedStringResolveResult (the interpolated-string arm RTTI check)
 #include "Decompiler/Semantics/ResolveResult.hpp"  // ResolveResult (IsCompileTimeConstant / Type / ConstantValue -- the constant-expression conversion)
@@ -52,6 +54,9 @@
 
 namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 
+using ILSpy::Decompiler::CSharp::Resolver::CSharpConversions;
+using ILSpy::Decompiler::CSharp::Resolver::LambdaConversion;
+using ILSpy::Decompiler::CSharp::Resolver::LambdaResolveResult;
 using ILSpy::Decompiler::Semantics::Conversion;
 using ILSpy::Decompiler::Semantics::Conversions;
 using ILSpy::Decompiler::Semantics::InterpolatedStringResolveResult;
@@ -62,6 +67,7 @@ using ILSpy::Decompiler::TypeSystem::ByReferenceType;
 using ILSpy::Decompiler::TypeSystem::Create;
 using ILSpy::Decompiler::TypeSystem::FunctionPointerType;
 using ILSpy::Decompiler::TypeSystem::GetAllBaseTypes;
+using ILSpy::Decompiler::TypeSystem::GetDelegateInvokeMethod;
 using ILSpy::Decompiler::TypeSystem::GetTypeCode;
 using ILSpy::Decompiler::TypeSystem::ICompilation;
 using ILSpy::Decompiler::TypeSystem::IMethod;
@@ -1568,6 +1574,110 @@ ImplicitConversion(const ICompilation& compilation, IType& fromType, IType& toTy
 	return c;
 }
 
+// The C# `static IType UnpackExpressionTreeType(IType type)` (CSharpConversions.cs line 1348) --
+// the `Expression<T>` wrapper stripper the anonymous-function conversion uses. A
+// `ParameterizedType` over the `System.Linq.Expressions.Expression`1` generic definition (arity 1)
+// unpacks to its single type argument; any other type passes through unchanged. The C#
+// `pt.Name == "Expression"` reads the generic's `Name` (the `ParameterizedType::Name()` delegates
+// to `genericType->Name()`); the C# `pt.Namespace == "System.Linq.Expressions"` reads the
+// generic's `Namespace`, which the port's `IType` interface does not carry -- the faithful port
+// reads it via `pt->GetDefinition()` (the `ParameterizedType::GetDefinition()` delegates to
+// `genericType->GetDefinition()`, which is the definition itself for a real `Expression`1`
+// generic), with a `nullptr` guard (a `ParameterizedType` over a non-definition generic -- a
+// degenerate shape that does not occur for `Expression<T>` -- yields `nullptr`, so the namespace
+// check fails and the type passes through, faithfully matching the C# where the generic's
+// `Namespace` would be empty). Both the unpacked type argument (owned by the `ParameterizedType`'s
+// `typeArgs_` reachable through the input `type`) and the passthrough (the input `type` itself,
+// owned by the caller) outlive the call, so the return is a non-owning `const IType&` (the
+// D516/D529 non-owning-reference-return precedent).
+const IType& UnpackExpressionTreeType(const IType& type)
+{
+	auto* pt = dynamic_cast<const ParameterizedType*>(&type);
+	if (pt != nullptr && pt->TypeParameterCount() == 1 && pt->Name() == "Expression") {
+		const ITypeDefinition* def = pt->GetDefinition();
+		if (def != nullptr && def->Namespace() == "System.Linq.Expressions") {
+			return *pt->GetTypeArgument(0);
+		}
+	}
+	return type;
+}
+
+// The C# `Conversion AnonymousFunctionConversion(ResolveResult resolveResult, IType toType)`
+// (CSharpConversions.cs line 1280, C# 9.0 spec section 10.7 "anonymous function conversions") --
+// the anonymous-function (lambda / anonymous-method) -> delegate-type conversion. The dispatch
+// has already verified the resolve result is a `LambdaResolveResult` (the `dynamic_cast`); this
+// helper owns the body. See the header doc for the C#-vs-port RTTI split and the
+// `CSharpConversions&` threading.
+std::shared_ptr<Conversion>
+AnonymousFunctionConversion(CSharpConversions& conversions, const LambdaResolveResult& f,
+                           const IType& toType)
+{
+	// C# `if (!f.IsAnonymousMethod) toType = UnpackExpressionTreeType(toType);` -- the expression-tree
+	// unpack runs only for lambdas (C# 3.0+); an anonymous method (C# 2.0 `delegate { }`) cannot
+	// convert to an expression tree, so the toType is left as-is.
+	const IType& effectiveToType = f.IsAnonymousMethod() ? toType : UnpackExpressionTreeType(toType);
+	// C# `IMethod d = toType.GetDelegateInvokeMethod(); if (d == null) return Conversion.None;` --
+	// the delegate's `Invoke` method (a non-delegate toType, or a delegate with no `Invoke`, yields
+	// `nullptr`). `GetDelegateInvokeMethod` is the TypeSystemExtensions free function (D533).
+	const IMethod* d = GetDelegateInvokeMethod(effectiveToType);
+	if (d == nullptr)
+		return Conversions::None();
+	// C# `IType[] dParamTypes = new IType[d.Parameters.Count]; for (...) dParamTypes[i] =
+	// d.Parameters[i].Type;` -- the delegate's parameter types. `IsValid` takes
+	// `const std::vector<ITypePtr>&`, so the port builds owning `ITypePtr` handles from the const
+	// `IParameter::Type()` references via `shared_from_this()` + `const_pointer_cast` (the D529
+	// precedent -- the type-system objects are shared-managed; the `const` is the accessor
+	// contract, not a guarantee). `d->ReturnType()` likewise builds the `dReturnType` handle.
+	auto dParams = d->Parameters();
+	std::vector<ITypePtr> dParamTypes;
+	dParamTypes.reserve(dParams.size());
+	for (const IParameter* p : dParams)
+		dParamTypes.push_back(std::const_pointer_cast<IType>(p->Type().shared_from_this()));
+	ITypePtr dReturnType = std::const_pointer_cast<IType>(d->ReturnType().shared_from_this());
+	// C# `if (f.HasParameterList) { ... } else { ... }` -- the parameter-list compatibility.
+	if (f.HasParameterList()) {
+		// C# `if (d.Parameters.Count != f.Parameters.Count) return Conversion.None;` -- the parameter-
+		// count guard (D and F have the same number of parameters when F has a signature).
+		auto fParams = f.Parameters();
+		if (dParams.size() != fParams.size())
+			return Conversions::None();
+		if (f.IsImplicitlyTyped()) {
+			// C# `if (f.IsImplicitlyTyped) { foreach (IParameter p in d.Parameters) if
+			// (p.ReferenceKind != ReferenceKind.None) return Conversion.None; }` -- an implicitly-typed
+			// lambda may not convert to a delegate with ref/out/in parameters.
+			for (const IParameter* p : dParams)
+				if (p->ReferenceKind() != ReferenceKind::None)
+					return Conversions::None();
+		} else {
+			// C# `for (int i = 0; i < f.Parameters.Count; i++) { ... }` -- an explicitly-typed lambda:
+			// each delegate parameter has the same `ReferenceKind` and an identity-convertible type
+			// as the corresponding lambda parameter. `IdentityConversion` takes `IType&` non-const
+			// (the non-const `AcceptVisitor`, D406), so the `pF->Type()` const reference is
+			// `const_cast` to `IType&` (the D515/D517 precedent). `*dParamTypes[i]` is `IType&` directly
+			// (the `ITypePtr` was built via `const_pointer_cast`, so dereferencing yields a non-const
+			// view of the shared-managed type).
+			for (size_t i = 0; i < fParams.size(); i++) {
+				const IParameter* pD = dParams[i];
+				const IParameter* pF = fParams[i];
+				if (pD->ReferenceKind() != pF->ReferenceKind())
+					return Conversions::None();
+				if (!IdentityConversion(*dParamTypes[i], const_cast<IType&>(pF->Type())))
+					return Conversions::None();
+			}
+		}
+	} else {
+		// C# `foreach (IParameter p in d.Parameters) if (p.ReferenceKind == ReferenceKind.Out)
+		// return Conversion.None;` -- a parameter-list-less anonymous method accepts any parameter
+		// list, as long as no delegate parameter is `out`.
+		for (const IParameter* p : dParams)
+			if (p->ReferenceKind() == ReferenceKind::Out)
+				return Conversions::None();
+	}
+	// C# `return f.IsValid(dParamTypes, dReturnType, this);` -- the body-validity verdict. The
+	// C# `this` ports to the `conversions` parameter (the D473 abstract-base `IsValid` signature).
+	return f.IsValid(dParamTypes, dReturnType, conversions);
+}
+
 std::shared_ptr<Conversion>
 ImplicitConversion(const ICompilation& compilation, const ResolveResult& resolveResult,
                   IType& toType, bool allowUserDefined, bool allowTuple)
@@ -1577,10 +1687,9 @@ ImplicitConversion(const ICompilation& compilation, const ResolveResult& resolve
 	// (CSharpConversions.cs line 101) -- the ResolveResult-based dispatch core the public
 	// `ImplicitConversion(ResolveResult, IType)` (line 143) and `ExplicitConversion(ResolveResult,
 	// IType)` (line 281) entry points build on. The dispatch checks the already-ported helpers in
-	// spec order; the deferred arms (`AnonymousFunctionConversion` / `MethodGroupConversion` /
-	// `TupleConversion`) yield `Conversions::None()` until their machinery lands, so a
-	// non-matching `ResolveResult` falls through exactly as the C# does when those arms return
-	// `Conversion.None`.
+	// spec order; the still-deferred arms (`MethodGroupConversion` / `TupleConversion`) yield
+	// `Conversions::None()` until their machinery lands, so a non-matching `ResolveResult` falls
+	// through exactly as the C# does when those arms return `Conversion.None`.
 	std::shared_ptr<Conversion> c;
 	// C# `if (resolveResult.IsCompileTimeConstant) { c = ImplicitEnumerationConversion(...);
 	// if (c.IsValid) return c; if (ImplicitConstantExpressionConversion(...)) return ...; }` -- the
@@ -1610,12 +1719,23 @@ ImplicitConversion(const ICompilation& compilation, const ResolveResult& resolve
 	if (resolveResult.Type().Kind() == TypeKind::Dynamic)
 		return Conversions::ImplicitDynamicConversion();
 	// C# `c = AnonymousFunctionConversion(resolveResult, toType); if (c != Conversion.None) return c;`
-	// -- DEFERRED: the anonymous-function conversion needs `LambdaResolveResult.IsAnonymousMethod` /
-	// `HasParameterList` / `IsImplicitlyTyped` / `Parameters` / `IsValid` plus `IType.GetDelegateInvokeMethod`.
-	// Yields `None` (the `c` stays at its default-constructed `nullptr`); a non-lambda `ResolveResult`
-	// falls through exactly as the C# does when the helper returns `Conversion.None`.
-	// c = AnonymousFunctionConversion(resolveResult, toType);
-	// if (c.get() != Conversions::None().get()) return c;
+	// -- the anonymous-function (lambda / anonymous-method) -> delegate-type conversion (C# 9.0
+	// spec section 10.7). The dispatch owns the RTTI (the `dynamic_cast` to `LambdaResolveResult`,
+	// the D528 interpolated-string / throw-arm precedent); the helper owns the body. The C# `this`
+	// (the `CSharpConversions` the public method was called on) ports to
+	// `CSharpConversions::Get(compilation)` -- the per-compilation cached singleton (the real
+	// `CSharpResolver` path obtains `CSharpConversions` via `Get`, so the dispatch's `Get` returns
+	// the SAME instance; a test-constructed instance diverges, but `CSharpConversions` is
+	// stateless beyond the compilation + the unused conversion cache, so the divergence is
+	// functionally immaterial). `Get` is called only for an actual lambda (the `dynamic_cast`
+	// guard), so the non-lambda dispatch paths (the existing constant / interpolated / dynamic /
+	// throw / plain-`ResolveResult` arms) never reach it. `toType` is `IType&` non-const in the
+	// dispatch signature but binds to the helper's `const IType&` parameter (implicit).
+	if (auto* lambdaRR = dynamic_cast<const LambdaResolveResult*>(&resolveResult)) {
+		c = AnonymousFunctionConversion(CSharpConversions::Get(compilation), *lambdaRR, toType);
+		if (c.get() != Conversions::None().get())
+			return c;
+	}
 	// C# `c = MethodGroupConversion(resolveResult, toType); if (c != Conversion.None) return c;`
 	// -- DEFERRED: the method-group conversion needs `MethodGroupResolveResult.PerformOverloadResolution`
 	// plus `IsDelegateCompatible`. Yields `None`; a non-method-group `ResolveResult` falls through.
