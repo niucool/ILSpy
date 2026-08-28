@@ -34,7 +34,11 @@
 
 #pragma once
 
+#include <memory>
+
 namespace ILSpy::Decompiler::TypeSystem { class IType; }
+
+namespace ILSpy::Decompiler::Semantics { class Conversion; }
 
 namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 
@@ -89,5 +93,51 @@ bool ExplicitEnumerationConversion(const ILSpy::Decompiler::TypeSystem::IType& f
 // convention -- a visitor may reconstruct the type), mirroring `NormalizeTypeVisitor::EquivalentTypes`.
 bool IdentityConversion(ILSpy::Decompiler::TypeSystem::IType& fromType,
                         ILSpy::Decompiler::TypeSystem::IType& toType);
+
+// The C# `Conversion ImplicitNullableConversion(IType fromType, IType toType)` (CSharpConversions.cs
+// line 490, C# 9.0 spec section 10.2.6) -- the implicit (lifted) nullable conversion. Acts ONLY when
+// `toType` is `Nullable<T>`: it strips both types to their underlying types (`GetUnderlyingType`),
+// then an identity conversion on the underlying types yields `Conversion.ImplicitNullableConversion`
+// (the lifted identity), and an implicit numeric conversion on the underlying types yields
+// `Conversion.ImplicitLiftedNumericConversion`. Otherwise `Conversion.None`. (Note `toType` must be
+// nullable -- there is no implicit nullable conversion TO a non-nullable type.)
+//
+// Pure like the other conversion helpers (no `CSharpConversions` instance state), so it lands as a
+// `Detail::` free function. Returns `std::shared_ptr<Conversion>` (the C# `Conversion` reference
+// modeled as a shared handle; the two singleton returns come from `Conversions::ImplicitNullableConversion`
+// / `Conversions::ImplicitLiftedNumericConversion`, the `None` from `Conversions::None`). The
+// signature takes `IType&` (non-const) like `IdentityConversion` because it feeds the underlying
+// types to `IdentityConversion(IType&, IType&)` (the non-const `AcceptVisitor`); it calls the
+// already-ported `NullableType::IsNullable` / `NullableType::GetUnderlyingType` (D515),
+// `IdentityConversion` (D514) and `ImplicitNumericConversion` (D514).
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+ImplicitNullableConversion(ILSpy::Decompiler::TypeSystem::IType& fromType,
+                           ILSpy::Decompiler::TypeSystem::IType& toType);
+
+// The C# `Conversion ExplicitNullableConversion(IType fromType, IType toType)` (CSharpConversions.cs
+// line 505, C# spec draft-v11 section 10.3.4) -- the explicit (lifted) nullable conversion. Acts when
+// EITHER operand is `Nullable<T>`: it strips both types to their underlying types, then an identity
+// conversion yields `Conversion.ExplicitNullableConversion`, an any-numeric conversion yields
+// `Conversion.ExplicitLiftedNumericConversion`, and an explicit enumeration conversion yields
+// `Conversion.EnumerationConversion(false, true)` (explicit, lifted). Otherwise `Conversion.None`.
+//
+// Pure like the other conversion helpers, so it lands as a `Detail::` free function. Returns
+// `std::shared_ptr<Conversion>`; the three singleton returns come from `Conversions::ExplicitNullableConversion`
+// / `Conversions::ExplicitLiftedNumericConversion` / `Conversions::None`, the enumeration return from
+// the `Conversions::EnumerationConversion(false, true)` FACTORY (a fresh per-call instance). Takes
+// `IType&` (non-const) like `ImplicitNullableConversion` (feeds `IdentityConversion`); calls the
+// already-ported `NullableType` helpers (D515), `IdentityConversion` (D514), `AnyNumericConversion`
+// (D514) and `ExplicitEnumerationConversion` (D514).
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+ExplicitNullableConversion(ILSpy::Decompiler::TypeSystem::IType& fromType,
+                           ILSpy::Decompiler::TypeSystem::IType& toType);
+
+// The C# `bool NullLiteralConversion(IType fromType, IType toType)` (CSharpConversions.cs line 524,
+// C# 9.0 spec section 10.2.7) -- true iff the null literal (`TypeKind.Null`) converts to `toType`:
+// `Nullable<T>` (any nullable) or any reference type (`IsReferenceType == true`). A non-nullable
+// value type (e.g. `int`) does NOT accept the null literal. Reads only `IType.Kind` / `IType.IsReferenceType`
+// / `NullableType.IsNullable` (all const), so it takes `const IType&` like the numeric helpers.
+bool NullLiteralConversion(const ILSpy::Decompiler::TypeSystem::IType& fromType,
+                           const ILSpy::Decompiler::TypeSystem::IType& toType);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

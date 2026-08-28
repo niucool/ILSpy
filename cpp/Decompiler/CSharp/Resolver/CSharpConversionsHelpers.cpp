@@ -23,16 +23,24 @@
 
 #include "Decompiler/CSharp/Resolver/CSharpConversionsHelpers.hpp"
 
+#include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversions (the nullable-conversion singletons / EnumerationConversion factory)
 #include "Decompiler/TypeSystem/IType.hpp"          // IType (Kind), ITypePtr, AcceptVisitor, Equals
 #include "Decompiler/TypeSystem/NormalizeTypeVisitor.hpp"  // NormalizeTypeVisitor::TypeErasure (IdentityConversion)
+#include "Decompiler/TypeSystem/NullableType.hpp"   // IsNullable, GetUnderlyingType (the nullable helpers)
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"  // GetTypeCode, TypeCode
 #include "Decompiler/TypeSystem/TypeKind.hpp"       // TypeKind
 
+#include <memory>
+
 namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 
+using ILSpy::Decompiler::Semantics::Conversion;
+using ILSpy::Decompiler::Semantics::Conversions;
 using ILSpy::Decompiler::TypeSystem::GetTypeCode;
 using ILSpy::Decompiler::TypeSystem::IType;
 using ILSpy::Decompiler::TypeSystem::ITypePtr;
+using ILSpy::Decompiler::TypeSystem::IsNullable;
+using ILSpy::Decompiler::TypeSystem::GetUnderlyingType;
 using ILSpy::Decompiler::TypeSystem::NormalizeTypeVisitor;
 using ILSpy::Decompiler::TypeSystem::TypeCode;
 using ILSpy::Decompiler::TypeSystem::TypeKind;
@@ -158,6 +166,58 @@ bool IdentityConversion(IType& fromType, IType& toType)
 	ITypePtr from = fromType.AcceptVisitor(erasure);
 	ITypePtr to = toType.AcceptVisitor(erasure);
 	return from->Equals(*to);
+}
+
+std::shared_ptr<Conversion> ImplicitNullableConversion(IType& fromType, IType& toType)
+{
+	// C# 9.0 spec section 10.2.6. Acts ONLY when `toType` is nullable (there is no implicit nullable
+	// conversion TO a non-nullable type). Strip both types to their underlying types -- `s` may or
+	// may not be nullable (the C# comment) -- then an identity conversion on the underlying types is
+	// the lifted identity, an implicit numeric conversion is the lifted numeric. The non-const
+	// `GetUnderlyingType` overload returns `IType&` so the underlying types can feed the non-const
+	// `IdentityConversion(IType&, IType&)`.
+	if (IsNullable(toType)) {
+		IType& t = GetUnderlyingType(toType);
+		IType& s = GetUnderlyingType(fromType);
+		if (IdentityConversion(s, t))
+			return Conversions::ImplicitNullableConversion();
+		if (ImplicitNumericConversion(s, t))
+			return Conversions::ImplicitLiftedNumericConversion();
+	}
+	return Conversions::None();
+}
+
+std::shared_ptr<Conversion> ExplicitNullableConversion(IType& fromType, IType& toType)
+{
+	// C# spec (draft-v11) section 10.3.4. Acts when EITHER operand is nullable (unlike the implicit
+	// variant, which requires the to-side). Strip both, then identity / any-numeric / explicit-
+	// enumeration on the underlying types pick the lifted variant. The enumeration return is the
+	// `Conversions::EnumerationConversion(false, true)` FACTORY (a fresh per-call instance, NOT a
+	// singleton) -- explicit + lifted + enumeration.
+	if (IsNullable(toType) || IsNullable(fromType)) {
+		IType& t = GetUnderlyingType(toType);
+		IType& s = GetUnderlyingType(fromType);
+		if (IdentityConversion(s, t))
+			return Conversions::ExplicitNullableConversion();
+		if (AnyNumericConversion(s, t))
+			return Conversions::ExplicitLiftedNumericConversion();
+		if (ExplicitEnumerationConversion(s, t))
+			return Conversions::EnumerationConversion(false, true);
+	}
+	return Conversions::None();
+}
+
+bool NullLiteralConversion(const IType& fromType, const IType& toType)
+{
+	// C# 9.0 spec section 10.2.7. The null literal (`TypeKind.Null`) converts to any nullable type
+	// or any reference type. The C# `toType.IsReferenceType == true` is the `bool? == true` check,
+	// true ONLY when `IsReferenceType` holds `true` (not `std::nullopt`, not `false`), so an
+	// indeterminate reference-ness does NOT accept the null literal.
+	if (fromType.Kind() == TypeKind::Null) {
+		return IsNullable(toType)
+			|| (toType.IsReferenceType().has_value() && *toType.IsReferenceType() == true);
+	}
+	return false;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

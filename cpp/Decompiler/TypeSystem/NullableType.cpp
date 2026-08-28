@@ -73,4 +73,13 @@ const IType& GetUnderlyingType(const IType& type)
 	return type;
 }
 
+IType& GetUnderlyingType(IType& type)
+{
+	// Non-const overload -- delegate to the const overload and cast away the added const. Safe
+	// because `type` was non-const at the call site, so the object the const overload returns
+	// (either the underlying element owned by the `ParameterizedType`'s shared handle, or the
+	// caller's own non-const `type`) is not actually const-qualified. See the header comment.
+	return const_cast<IType&>(GetUnderlyingType(static_cast<const IType&>(type)));
+}
+
 } // namespace ILSpy::Decompiler::TypeSystem

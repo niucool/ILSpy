@@ -60,4 +60,15 @@ bool IsNonNullableValueType(const IType& type);
 // it outlives the call. The C# `ArgumentNullException` on null compiles out.
 const IType& GetUnderlyingType(const IType& type);
 
+// The non-const overload -- the C# has no `const`, so a caller holding a mutable `IType&` (e.g.
+// the `CSharpConversions` nullable-conversion helpers, which feed the result to
+// `IdentityConversion(IType&, IType&)` -- a NON-const signature because `IType::AcceptVisitor` is
+// non-const, the D406 convention) needs a non-const reference back. The underlying object IS
+// mutable (the type argument is owned by the `ParameterizedType`'s `typeArgs_` shared handle, or
+// the overload returns the caller's own non-const input), so the `const_cast` delegating to the
+// const overload is safe (the object was not const-qualified at the call site). The textbook
+// const-overload-pair: non-const input prefers this overload; const input falls back to the
+// const overload above.
+IType& GetUnderlyingType(IType& type);
+
 } // namespace ILSpy::Decompiler::TypeSystem
