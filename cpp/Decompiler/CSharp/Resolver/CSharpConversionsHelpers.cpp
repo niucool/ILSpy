@@ -685,4 +685,27 @@ bool ExplicitPointerConversion(const IType& fromType, const IType& toType)
 	return IsAnyPointer(toType.Kind()) && IsIntegerType(fromType);
 }
 
+std::shared_ptr<Conversion> ExplicitTypeParameterConversion(const ICompilation& compilation,
+                                                               IType& fromType, IType& toType)
+{
+	// C# spec (draft-v11) section 10.3.6. Explicit conversions involving a type parameter.
+	// When the to-side is a type parameter: an explicit conversion from an interface OR from a type the
+	// type parameter is a subtype of is considered an unboxing conversion (the C# comment: "explicit
+	// type parameter conversions that aren't also reference conversions are considered to be unboxing
+	// conversions"). The `IsSubtypeOf(toType, fromType, 0)` call -- note the SWAPPED order (the type
+	// parameter `toType` is the subtype candidate against `fromType`) -- short-circuits to true when
+	// `fromType` carries `KnownTypeCode::Object` (the `IsKnownType(t, Object)` check in `IsSubtypeOf`).
+	// When the to-side is NOT a type parameter: a conversion from a type parameter to an interface is a
+	// boxing conversion. Otherwise `None`.
+	if (toType.Kind() == TypeKind::TypeParameter) {
+		if (fromType.Kind() == TypeKind::Interface || IsSubtypeOf(compilation, toType, fromType, 0))
+			return Conversions::UnboxingConversion();
+	}
+	else {
+		if (fromType.Kind() == TypeKind::TypeParameter && toType.Kind() == TypeKind::Interface)
+			return Conversions::BoxingConversion();
+	}
+	return Conversions::None();
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

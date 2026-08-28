@@ -333,4 +333,22 @@ bool ImplicitPointerConversion(const ILSpy::Decompiler::TypeSystem::ICompilation
 bool ExplicitPointerConversion(const ILSpy::Decompiler::TypeSystem::IType& fromType,
                                const ILSpy::Decompiler::TypeSystem::IType& toType);
 
+// The C# `Conversion ExplicitTypeParameterConversion(IType fromType, IType toType)` (CSharpConversions.cs
+// line 880, C# spec draft-v11 section 10.3.6) -- the explicit conversion involving a type parameter.
+// When the TO-side is a type parameter: an explicit conversion from an interface OR from a type the
+// type parameter is a subtype of (`IsSubtypeOf(toType, fromType, 0)`) is an unboxing conversion; otherwise
+// `None`. When the to-side is NOT a type parameter: a conversion from a type parameter to an interface is
+// a boxing conversion; otherwise `None`.
+//
+// Pure given a compilation (the `IsSubtypeOf` call threads it through), so it lands as a `Detail::`
+// free function taking `const ICompilation&` like the boxing helpers. Takes `IType&` (non-const)
+// because `IsSubtypeOf` takes `IType&` (the non-const `AcceptVisitor`, D406). Returns
+// `std::shared_ptr<Conversion>` (the C# `Conversion` reference modeled as a shared handle; the
+// `UnboxingConversion` / `BoxingConversion` singleton returns come from `Conversions::UnboxingConversion`
+// / `Conversions::BoxingConversion`, the `None` from `Conversions::None`).
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+ExplicitTypeParameterConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                                 ILSpy::Decompiler::TypeSystem::IType& fromType,
+                                 ILSpy::Decompiler::TypeSystem::IType& toType);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
