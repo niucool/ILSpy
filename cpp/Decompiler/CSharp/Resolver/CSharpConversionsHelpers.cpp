@@ -1668,4 +1668,61 @@ ImplicitConversion(const ICompilation& compilation, const ResolveResult& resolve
 	return c;
 }
 
+// The C# `bool IsDelegateCompatible(IMethod m, IMethod d, bool isExtensionMethodInvocation)`
+// (CSharpConversions.cs line 1457, C# spec draft-v11 section 21.4 "delegate compatibility").
+// Tests a method `m` against a delegate invoke method `d`: the parameter count must match
+// (skipping `m`'s first parameter when `isExtensionMethodInvocation` -- the `this` the extension
+// syntax supplies), each corresponding parameter's `ReferenceKind` must match, a ref/out/in
+// parameter must have an identity conversion on the types (Roslyn relaxes the spec's same-type
+// requirement to identity), a by-value parameter must have an identity OR implicit reference
+// conversion from `d`'s parameter type to `m`'s, the `ReturnTypeIsRefReadOnly` flags must
+// match, and the return type must have an identity OR implicit reference conversion from `m`'s
+// to `d`'s. Returns `bool` (the C# `bool`, not a `Conversion`).
+//
+// The C# `throw new ArgumentNullException` for a null `m`/`d` is N/A: C++ references are non-null
+// by contract. The parameter/return `Type()` accessors return `const IType&`, but
+// `IdentityConversion` and `IsImplicitReferenceConversion` take `IType&` non-const (the
+// non-const `AcceptVisitor`, D406), so the port `const_cast`s the const references -- the
+// underlying type-system objects are mutable (the accessor's `const` is the contract, not a
+// guarantee), the D515/D517 `const_cast` precedent. Delegates only to the already-ported
+// `IdentityConversion` (D514) and `IsImplicitReferenceConversion` (D517), so it is pure given a
+// compilation and lands as a `Detail::` free function.
+bool IsDelegateCompatible(const ICompilation& compilation, const IMethod& m,
+                           const IMethod& d, bool isExtensionMethodInvocation)
+{
+	int firstParameterInM = isExtensionMethodInvocation ? 1 : 0;
+	auto mParams = m.Parameters();
+	auto dParams = d.Parameters();
+	if (static_cast<int>(mParams.size()) - firstParameterInM != static_cast<int>(dParams.size()))
+		return false;
+	for (int i = 0; i < static_cast<int>(dParams.size()); i++) {
+		const IParameter* pm = mParams[firstParameterInM + i];
+		const IParameter* pd = dParams[i];
+		// ret/out/in must match
+		if (pm->ReferenceKind() != pd->ReferenceKind())
+			return false;
+		if (pm->ReferenceKind() != ReferenceKind::None) {
+			// ref/out/in parameters must have identity conversions on the types (Roslyn relaxes
+			// the spec's same-type requirement to identity).
+			if (!IdentityConversion(const_cast<IType&>(pd->Type()),
+			                        const_cast<IType&>(pm->Type())))
+				return false;
+		} else {
+			// non-ref/out parameters must have an identity or reference conversion from pd to pm.
+			IType& pdType = const_cast<IType&>(pd->Type());
+			IType& pmType = const_cast<IType&>(pm->Type());
+			if (!IdentityConversion(pdType, pmType)
+			    && !IsImplicitReferenceConversion(compilation, pdType, pmType))
+				return false;
+		}
+	}
+	if (m.ReturnTypeIsRefReadOnly() != d.ReturnTypeIsRefReadOnly())
+		return false;
+	// check return type compatibility: an identity or implicit reference conversion from m's
+	// return type to d's.
+	IType& mRet = const_cast<IType&>(m.ReturnType());
+	IType& dRet = const_cast<IType&>(d.ReturnType());
+	return IdentityConversion(mRet, dRet) || IsImplicitReferenceConversion(compilation, mRet, dRet);
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

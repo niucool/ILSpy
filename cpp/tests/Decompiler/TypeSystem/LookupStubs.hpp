@@ -418,6 +418,11 @@ public:
     void SetIsOperator(bool v) { isOperator_ = v; }
     void SetReturnType(ITypePtr rt) { returnTypeOverride_ = std::move(rt); }
     void SetParameters(std::vector<const IParameter*> p) { parameters_ = std::move(p); }
+    // Configurable `ReturnTypeIsRefReadOnly` for the delegate-compatibility tests (the
+    // `m.ReturnTypeIsRefReadOnly != d.ReturnTypeIsRefReadOnly` mismatch crux). The default
+    // `false` preserves the original behavior so existing tests that do not call the setter
+    // are unaffected (the additive-setter convention).
+    void SetReturnTypeIsRefReadOnly(bool v) { returnTypeIsRefReadOnly_ = v; }
 
     // --- ISymbol ---
     TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Method; }
@@ -472,7 +477,7 @@ public:
 
     // --- IMethod ---
     std::vector<const IAttribute*> GetReturnTypeAttributes() const override { return {}; }
-    bool ReturnTypeIsRefReadOnly() const override { return false; }
+    bool ReturnTypeIsRefReadOnly() const override { return returnTypeIsRefReadOnly_; }
     bool IsInitOnly() const override { return false; }
     bool ThisIsRefReadOnly() const override { return false; }
     std::vector<const ITypeParameter*> TypeParameters() const override { return {}; }
@@ -499,6 +504,7 @@ private:
     const ITypeDefinition* declaringTypeDefinition_ = nullptr;
     bool isStatic_ = false;
     bool isOperator_ = false;
+    bool returnTypeIsRefReadOnly_ = false;
     ITypePtr returnTypeOverride_;
     std::vector<const IParameter*> parameters_;
 };

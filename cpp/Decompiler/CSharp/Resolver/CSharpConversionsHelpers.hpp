@@ -760,6 +760,38 @@ UserDefinedExplicitConversion(const ILSpy::Decompiler::TypeSystem::ICompilation&
                              ILSpy::Decompiler::TypeSystem::IType& fromType,
                              ILSpy::Decompiler::TypeSystem::IType& toType);
 
+// The C# `bool IsDelegateCompatible(IMethod m, IMethod d, bool isExtensionMethodInvocation)`
+// (CSharpConversions.cs line 1457, C# spec draft-v11 section 21.4 "delegate compatibility") --
+// whether the method `m` is compatible with the delegate whose invoke method is `d`. The
+// private 3-arg overload the public `IsDelegateCompatible(IMethod, IType)` (which resolves the
+// delegate's invoke method via `IType.GetDelegateInvokeMethod`, not yet ported) and the
+// `MethodGroupConversion` helper both call. Tests a method against a delegate invoke method:
+// the parameter count must match (skipping `m`'s first parameter when `isExtensionMethodInvocation`
+// -- the `this` the extension syntax supplies), each corresponding parameter's `ReferenceKind` must
+// match, a ref/out/in parameter must have an identity conversion on the types (Roslyn relaxes the
+// spec's same-type requirement to identity), a by-value parameter must have an identity OR implicit
+// reference conversion from `d`'s parameter type to `m`'s, the `ReturnTypeIsRefReadOnly` flags must
+// match, and the return type must have an identity OR implicit reference conversion from `m`'s to
+// `d`'s. Returns `bool` (the C# `bool`, not a `Conversion`).
+//
+// Pure given a compilation (delegates only to the already-ported `IdentityConversion` D514 and
+// `IsImplicitReferenceConversion` D517, both of which take `const ICompilation&`; reads no
+// `CSharpConversions` instance state), so it lands as a `Detail::` free function (the D508
+// precedent). Takes `const IMethod&` for `m` and `d` (every `IMethod`/`IParameter` member it reads
+// -- `Parameters` / `ReturnType` / `ReturnTypeIsRefReadOnly` / `ReferenceKind` / `Type` -- is `const`).
+// The parameter/return `Type()` accessors return `const IType&`, but `IdentityConversion` and
+// `IsImplicitReferenceConversion` take `IType&` non-const (the non-const `AcceptVisitor`, D406), so
+// the port `const_cast`s the const references -- the underlying type-system objects are mutable
+// (the accessor's `const` is the contract, not a guarantee), the D515/D517 `const_cast` precedent.
+// The C# `throw new ArgumentNullException` for a null `m`/`d` is N/A: C++ references are non-null by
+// contract. This is a tested-but-not-yet-wired foundation (the D63/D66/D68/D70/D74 precedent): no
+// `CSharpConversions` caller invokes it yet (the public `IsDelegateCompatible(IMethod, IType)`
+// and `MethodGroupConversion` are still deferred), so it is dead in the CLI call graph.
+bool IsDelegateCompatible(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                           const ILSpy::Decompiler::TypeSystem::IMethod& m,
+                           const ILSpy::Decompiler::TypeSystem::IMethod& d,
+                           bool isExtensionMethodInvocation);
+
 // The C# `private Conversion ImplicitConversion(IType fromType, IType toType, bool allowUserDefined,
 // bool allowTuple)` (CSharpConversions.cs line 166, C# spec draft-v11 section 10.2 "implicit
 // conversions") -- the private IType-based implicit-conversion dispatch. The standard implicit
