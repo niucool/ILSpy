@@ -28,6 +28,8 @@
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
 
+using ILSpy::Decompiler::Semantics::Conversions;
+
 CSharpConversions& CSharpConversions::Get(
     const ILSpy::Decompiler::TypeSystem::ICompilation& compilation)
 {
@@ -65,6 +67,51 @@ CSharpConversions::StandardImplicitConversion(ILSpy::Decompiler::TypeSystem::ITy
 	// always true for the ported arms). The `*compilation_` threads the instance's compilation to the
 	// reference/boxing/type-parameter/pointer helpers that need `FindType`/`IsSubtypeOf`.
 	return Detail::StandardImplicitConversion(*compilation_, fromType, toType);
+}
+
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+CSharpConversions::ImplicitConversion(ILSpy::Decompiler::TypeSystem::IType& fromType,
+                                      ILSpy::Decompiler::TypeSystem::IType& toType)
+{
+	// CSharpConversions.cs line 151. The public cached entry point: checks the
+	// `implicitConversionCache` first; on a miss, delegates to the private
+	// `ImplicitConversion(fromType, toType, allowUserDefined: true, allowTuple: true)` overload
+	// (the `Detail::ImplicitConversion` free function) and caches the result. The C#
+	// `TypePair pair = new TypePair(fromType, toType); if (implicitConversionCache.TryGetValue(pair,
+	// out Conversion c)) return c;` ports to an `unordered_map::find` on a `TypePair` keyed by the
+	// two `const IType*` (the D512 `TypePair` cache key). The cached value is an owning
+	// `shared_ptr<Conversion>` (`Conversion` is polymorphic; a plain value would slice).
+	TypePair pair(&fromType, &toType);
+	auto it = implicitConversionCache_.find(pair);
+	if (it != implicitConversionCache_.end())
+		return it->second;
+	auto c = Detail::ImplicitConversion(*compilation_, fromType, toType,
+	                                      /*allowUserDefined*/ true, /*allowTuple*/ true);
+		implicitConversionCache_[pair] = c;
+	return c;
+}
+
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+CSharpConversions::ExplicitConversion(ILSpy::Decompiler::TypeSystem::IType& fromType,
+                                      ILSpy::Decompiler::TypeSystem::IType& toType)
+{
+	// CSharpConversions.cs line 298. The public explicit entry point (NOT cached -- only
+	// `ImplicitConversion` caches). Checks the implicit conversion first
+	// (`ImplicitConversion(fromType, toType, allowUserDefined: false, allowTuple: false)` -- the
+	// `Detail::ImplicitConversion` free function); if an implicit conversion exists, returns it
+	// (an explicit conversion subsumes any implicit conversion). Then checks the standard explicit
+	// conversion (`Detail::ExplicitConversionImpl`); if one exists, returns it. Otherwise falls back
+	// to the user-defined explicit conversion (`Detail::UserDefinedExplicitConversion(null, ...)`).
+	// The C# `c != Conversion.None` checks port to pointer-identity against the `None` singleton.
+	auto c = Detail::ImplicitConversion(*compilation_, fromType, toType,
+	                                      /*allowUserDefined*/ false, /*allowTuple*/ false);
+	if (c.get() != Conversions::None().get())
+		return c;
+	c = Detail::ExplicitConversionImpl(*compilation_, fromType, toType);
+	if (c.get() != Conversions::None().get())
+		return c;
+	return Detail::UserDefinedExplicitConversion(*compilation_, /*fromResult*/ nullptr,
+	                                              fromType, toType);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

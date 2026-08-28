@@ -1470,4 +1470,28 @@ UserDefinedExplicitConversion(const ICompilation& compilation, const ResolveResu
 		return Conversions::None();
 }
 
+std::shared_ptr<Conversion>
+ImplicitConversion(const ICompilation& compilation, IType& fromType, IType& toType,
+                  bool allowUserDefined, bool allowTuple)
+{
+	// C# spec draft-v11 section 10.2. The private `ImplicitConversion(IType, IType, bool
+	// allowUserDefined, bool allowTuple)` overload (CSharpConversions.cs line 166): the standard
+	// implicit conversion first (`StandardImplicitConversion(fromType, toType, allowTuple)`),
+	// then -- only when no standard implicit conversion exists (`c == Conversion.None`) AND
+	// `allowUserDefined` is true -- the user-defined implicit conversion
+	// (`UserDefinedImplicitConversion(null, fromType, toType)`).
+	//
+	// The `allowTuple` parameter threads to `StandardImplicitConversion`'s tuple arm, which is
+	// deferred (yields `None` for tuple shapes until the `TupleConversion` machinery lands), so it
+	// is effectively ignored for the ported arms -- the faithful port does not thread it to the
+	// already-ported `Detail::StandardImplicitConversion` (D523, which has no `allowTuple`
+	// parameter; the tuple arm is deferred inside it). The C# `c == Conversion.None` check ports
+	// to pointer-identity against the `None` singleton.
+	(void)allowTuple;  // the tuple arm is deferred; effectively ignored for the ported arms
+	auto c = StandardImplicitConversion(compilation, fromType, toType);
+	if (c.get() == Conversions::None().get() && allowUserDefined)
+		c = UserDefinedImplicitConversion(compilation, /*fromResult*/ nullptr, fromType, toType);
+	return c;
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

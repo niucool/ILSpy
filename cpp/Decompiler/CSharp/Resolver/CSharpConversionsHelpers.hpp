@@ -736,4 +736,32 @@ UserDefinedExplicitConversion(const ILSpy::Decompiler::TypeSystem::ICompilation&
                              ILSpy::Decompiler::TypeSystem::IType& fromType,
                              ILSpy::Decompiler::TypeSystem::IType& toType);
 
+// The C# `private Conversion ImplicitConversion(IType fromType, IType toType, bool allowUserDefined,
+// bool allowTuple)` (CSharpConversions.cs line 166, C# spec draft-v11 section 10.2 "implicit
+// conversions") -- the private IType-based implicit-conversion dispatch. The standard implicit
+// conversion first (`StandardImplicitConversion(fromType, toType, allowTuple)`), then -- only when
+// no standard implicit conversion exists (`c == Conversion.None`) AND `allowUserDefined` is true --
+// the user-defined implicit conversion (`UserDefinedImplicitConversion(null, fromType, toType)`).
+// The public `ImplicitConversion(IType, IType)` entry (the cached overload) calls this with
+// `allowUserDefined: true, allowTuple: true`; the public `ExplicitConversion(IType, IType)` calls
+// this with `allowUserDefined: false, allowTuple: false` (the implicit check before the explicit
+// dispatch). `ExplicitConversionNotUserDefined` (D525) inlines this same logic with
+// `allowUserDefined: false` (the standard implicit then `ExplicitConversionImpl`).
+//
+// The `allowTuple` parameter threads to `StandardImplicitConversion`'s tuple arm, which is
+// deferred (yields `None` for tuple shapes until the `TupleConversion` machinery lands), so it is
+// effectively ignored for the ported arms -- the faithful port does not thread it to the
+// already-ported `Detail::StandardImplicitConversion` (D523, which has no `allowTuple` parameter;
+// the tuple arm is deferred inside it). Pure given a compilation (delegates entirely to the
+// already-ported `StandardImplicitConversion` D523 + `UserDefinedImplicitConversion` D530, both
+// of which take `const ICompilation&`), so it lands as a `Detail::` free function with the same
+// compilation parameter. Takes `IType&` non-const (the helpers take non-const `IType&` for the
+// non-const `AcceptVisitor`, D406). Returns `std::shared_ptr<Conversion>`.
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+ImplicitConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                   ILSpy::Decompiler::TypeSystem::IType& fromType,
+                   ILSpy::Decompiler::TypeSystem::IType& toType,
+                   bool allowUserDefined,
+                   bool allowTuple);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

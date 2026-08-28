@@ -144,6 +144,32 @@ public:
     StandardImplicitConversion(ILSpy::Decompiler::TypeSystem::IType& fromType,
                               ILSpy::Decompiler::TypeSystem::IType& toType);
 
+    // The C# `public Conversion ImplicitConversion(IType fromType, IType toType)`
+    // (CSharpConversions.cs line 151, C# spec draft-v11 section 10.2) -- the public implicit
+    // conversion entry point (the cached overload). Checks the `implicitConversionCache` first; on
+    // a miss, delegates to the private `ImplicitConversion(fromType, toType, allowUserDefined: true,
+    // allowTuple: true)` overload (the `Detail::ImplicitConversion` free function) and caches the
+    // result. The C# `ArgumentNullException` on null args compiles out (the `IType&` references
+    // cannot bind to null, the D374 convention). Returns `std::shared_ptr<Conversion>` (the cached
+    // value is an owning `shared_ptr` because `Conversion` is polymorphic).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+    ImplicitConversion(ILSpy::Decompiler::TypeSystem::IType& fromType,
+                      ILSpy::Decompiler::TypeSystem::IType& toType);
+
+    // The C# `public Conversion ExplicitConversion(IType fromType, IType toType)`
+    // (CSharpConversions.cs line 298, C# spec draft-v11 section 10.3) -- the public explicit
+    // conversion entry point (the IType overload, NOT cached -- only `ImplicitConversion` caches).
+    // Checks the implicit conversion first (`ImplicitConversion(fromType, toType,`allowUserDefined:
+    // false, allowTuple: false)` -- the `Detail::ImplicitConversion` free function); if an implicit
+    // conversion exists, returns it (an explicit conversion subsumes any implicit conversion). Then
+    // checks the standard explicit conversion (`ExplicitConversionImpl`); if one exists, returns
+    // it. Otherwise falls back to the user-defined explicit conversion
+    // (`UserDefinedExplicitConversion(null, fromType, toType)`). The C# `ArgumentNullException` on
+    // null args compiles out (the `IType&` references cannot bind to null, the D374 convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+    ExplicitConversion(ILSpy::Decompiler::TypeSystem::IType& fromType,
+                      ILSpy::Decompiler::TypeSystem::IType& toType);
+
 private:
     const ILSpy::Decompiler::TypeSystem::ICompilation* compilation_;
 
