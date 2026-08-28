@@ -42,9 +42,11 @@
 
 #include <algorithm>  // std::any_of (the UserDefinedImplicit/Explicit operator-source/target reduction)
 #include <any>       // std::any (the ConstantValue unbox -- the D374/D424 `object?` model)
+#include <cassert>  // assert (the Debug.Assert rr.IsCompileTimeConstant)
 #include <cstdint>   // std::int32_t / std::int64_t (the boxed int/long the constant-expression conversion reads)
 #include <functional> // std::function (the opFilter predicate)
 #include <memory>
+#include <optional>  // std::optional<double> (the ConvertToDouble faithful-fallback return)
 
 namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 
@@ -797,6 +799,74 @@ bool ImplicitConstantExpressionConversion(const ResolveResult& rr, const IType& 
 		}
 	}
 	return false;
+}
+
+// The C# `Convert.ToDouble(rr.ConstantValue)` (the `ImplicitEnumerationConversion` zero-value check) --
+// converts a boxed numeric constant to `double`. The guard in `ImplicitEnumerationConversion` ensures
+// `rr.Type`'s `TypeCode` is in [SByte, Decimal] (the numeric primitives: sbyte/byte/short/ushort/int/
+// uint/long/ulong/float/double/decimal), so the constant holds a boxed numeric value of one of those
+// types. The pointer-form `std::any_cast` returns `nullptr` on a type mismatch (a divergent state the C#
+// would `InvalidCastException` on); the guard returns `nullopt` as the safe faithful fallback (the caller
+// treats `nullopt` as not-zero -> no conversion). The C# `decimal` has no standard C++ type; the helper
+// does not handle it (a `decimal`-typed constant is not constructible in the port's test stubs, and the
+// guard's `TypeCode` range check admits it only on the type side, not the value side -- a mismatched
+// value returns `nullopt`, faithfully returning `None`).
+static std::optional<double> ConvertToDouble(const std::any& cv) {
+	if (const auto* p = std::any_cast<std::int8_t>(&cv))  return static_cast<double>(*p);
+	if (const auto* p = std::any_cast<std::uint8_t>(&cv)) return static_cast<double>(*p);
+	if (const auto* p = std::any_cast<std::int16_t>(&cv)) return static_cast<double>(*p);
+	if (const auto* p = std::any_cast<std::uint16_t>(&cv)) return static_cast<double>(*p);
+	if (const auto* p = std::any_cast<std::int32_t>(&cv)) return static_cast<double>(*p);
+	if (const auto* p = std::any_cast<std::uint32_t>(&cv)) return static_cast<double>(*p);
+	if (const auto* p = std::any_cast<std::int64_t>(&cv)) return static_cast<double>(*p);
+	if (const auto* p = std::any_cast<std::uint64_t>(&cv)) return static_cast<double>(*p);
+	if (const auto* p = std::any_cast<float>(&cv))       return static_cast<double>(*p);
+	if (const auto* p = std::any_cast<double>(&cv))      return *p;
+	return std::nullopt;
+}
+
+std::shared_ptr<Conversion>
+ImplicitEnumerationConversion(const ResolveResult& rr, const IType& toType)
+{
+	// C# 9.0 spec section 10.2.4 + the enum part of section 10.2.6 (Nullable conversions). The C#
+	// `Debug.Assert(rr.IsCompileTimeConstant)` -- the public `ImplicitConversion(ResolveResult, IType)`
+	// dispatch only calls this when `rr.IsCompileTimeConstant` is true (CSharpConversions.cs line 104),
+	// so the assert is a debug-only invariant check; the port asserts it faithfully (a release C# build
+	// would proceed past a failed assert, but the guard below handles a non-constant's type correctly --
+	// a non-numeric `TypeCode` fails the range check -> `None`).
+	assert(rr.IsCompileTimeConstant());
+	// `TypeCode constantType = ReflectionHelper.GetTypeCode(rr.Type);` -- the C# `rr.Type` ports to
+	// `ResolveResult::Type()` (a `const` accessor returning `const IType&`); `GetTypeCode` takes
+	// `const IType&` and dynamic_casts to `ITypeDefinition` (so the constant's type must be an
+	// `ITypeDefinition` for the code to resolve -- a `KnownType` placeholder yields `TypeCode::Empty`).
+	TypeCode constantType = GetTypeCode(rr.Type());
+	// C# `if (constantType >= TypeCode.SByte && constantType <= TypeCode.Decimal &&
+	// Convert.ToDouble(rr.ConstantValue) == 0)` -- the `TypeCode` relational comparisons have no
+	// C++ enum-class counterpart (the D514 precedent), so the port casts via `static_cast<int>` for
+	// the ordinal range check [SByte(5), Decimal(15)]. The `Convert.ToDouble(ConstantValue) == 0`
+	// ports to the `ConvertToDouble` helper returning `std::optional<double>`; a `nullopt` (a type
+	// mismatch) is treated as not-zero (the `&&` short-circuits to false -> `None`, the safe faithful
+	// fallback). The `== 0` comparison: a zero-valued numeric converts to `0.0`, and `0.0 == 0` is
+	// true (the C# `==` promotes the `int` literal `0` to `0.0`); `-0.0 == 0.0` is also true (IEEE 754).
+	if (static_cast<int>(constantType) >= static_cast<int>(TypeCode::SByte)
+	    && static_cast<int>(constantType) <= static_cast<int>(TypeCode::Decimal)) {
+		auto d = ConvertToDouble(rr.ConstantValue());
+		if (d.has_value() && *d == 0.0) {
+			// C# `if (NullableType.GetUnderlyingType(toType).Kind == TypeKind.Enum)` -- the to-side is
+			// stripped of its nullable wrapper first (`GetUnderlyingType` returns the type itself when
+			// not nullable, the type argument when `Nullable<T>`), then `Kind` is checked for `Enum`.
+			// The `GetUnderlyingType` const-overload returns `const IType&` (the underlying object is
+			// owned by the `ParameterizedType` reachable through `toType`, outliving the call).
+			if (GetUnderlyingType(toType).Kind() == TypeKind::Enum) {
+				// C# `return Conversion.EnumerationConversion(true, NullableType.IsNullable(toType));`
+				// -- the `EnumerationConversion` FACTORY (a fresh per-call `NumericOrEnumerationConversion`
+				// instance, NOT a singleton): `isImplicit=true`, `isLifted=IsNullable(toType)` (the lifted
+				// form for `0 -> E?`, the non-lifted form for `0 -> E`).
+				return Conversions::EnumerationConversion(true, IsNullable(toType));
+			}
+		}
+	}
+	return Conversions::None();
 }
 
 std::shared_ptr<Conversion> StandardImplicitConversion(const ICompilation& compilation,

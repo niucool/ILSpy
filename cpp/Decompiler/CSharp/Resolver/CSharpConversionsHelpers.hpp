@@ -81,6 +81,30 @@ bool ImplicitNumericConversion(const ILSpy::Decompiler::TypeSystem::IType& fromT
 bool ExplicitEnumerationConversion(const ILSpy::Decompiler::TypeSystem::IType& fromType,
                                    const ILSpy::Decompiler::TypeSystem::IType& toType);
 
+// The C# `Conversion ImplicitEnumerationConversion(ResolveResult rr, IType toType)`
+// (CSharpConversions.cs line 459, C# 9.0 spec section 10.2.4 "implicit enumeration conversions"
+// + the enum part of section 10.2.6) -- the constant-0-to-enum implicit enumeration conversion.
+// A compile-time constant whose type is a numeric primitive (`TypeCode` in [SByte, Decimal]) and
+// whose value is zero (`Convert.ToDouble(ConstantValue) == 0`) converts implicitly to any enum
+// type (the to-side is stripped of its nullable wrapper first, so `0 -> E?` is the lifted form).
+// Returns `EnumerationConversion(true, IsNullable(toType))` (a factory -- a fresh per-call
+// `NumericOrEnumerationConversion`) when the conversion fires, else `Conversions::None()`.
+//
+// Pure like the other conversion helpers (no `CSharpConversions` instance state -- reads only
+// `ResolveResult.IsCompileTimeConstant` / `ResolveResult.Type` / `ResolveResult.ConstantValue`,
+// `ReflectionHelper.GetTypeCode`, `NullableType.GetUnderlyingType` / `IsNullable`, `IType.Kind`),
+// so it lands as a `Detail::` free function. Takes `const ResolveResult&` (every `ResolveResult`
+// member it reads is `const`) and `const IType&` (the const `GetUnderlyingType` overload returns
+// `const IType&`, and `GetTypeCode` takes `const IType&`) -- like `ImplicitConstantExpressionConversion`
+// (D521), unlike the reference/boxing helpers that take non-const `IType&`. The
+// `Convert.ToDouble(ConstantValue)` ports to a file-local `ConvertToDouble` helper that unboxes the
+// `std::any` constant via the pointer-form `std::any_cast` (returns `nullopt` on a type mismatch --
+// the safe faithful fallback for a divergent state the C# would `InvalidCastException` on; the guard
+// returns `None` when the value cannot be read as a `double`).
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+ImplicitEnumerationConversion(const ILSpy::Decompiler::Semantics::ResolveResult& rr,
+                              const ILSpy::Decompiler::TypeSystem::IType& toType);
+
 // The C# `public bool IdentityConversion(IType fromType, IType toType)` (CSharpConversions.cs line 367,
 // C# spec draft-v11 section 10.2.2 "identity conversion") -- true if `fromType` and `toType` are the
 // same type after type erasure. Erasure (the `NormalizeTypeVisitor.TypeErasure` singleton) folds the
