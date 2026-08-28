@@ -108,6 +108,18 @@ bool IsArrayInterfaceType(const IType& type) {
     }
 }
 
+bool IsAnyPointer(TypeKind typeKind)
+{
+    // C# `typeKind switch { TypeKind.Pointer => true, TypeKind.FunctionPointer => true, _ => false }`.
+    switch (typeKind) {
+        case TypeKind::Pointer:
+        case TypeKind::FunctionPointer:
+            return true;
+        default:
+            return false;
+    }
+}
+
 const IType* SkipModifiers(const IType& type)
 {
     // C# `while (ty is ModifiedType mt) ty = mt.ElementType; return ty;` -- the `ModifiedType` (a

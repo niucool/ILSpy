@@ -43,6 +43,7 @@ namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 using ILSpy::Decompiler::Semantics::Conversion;
 using ILSpy::Decompiler::Semantics::Conversions;
 using ILSpy::Decompiler::TypeSystem::ArrayType;
+using ILSpy::Decompiler::TypeSystem::FunctionPointerType;
 using ILSpy::Decompiler::TypeSystem::GetAllBaseTypes;
 using ILSpy::Decompiler::TypeSystem::GetTypeCode;
 using ILSpy::Decompiler::TypeSystem::ICompilation;
@@ -50,12 +51,14 @@ using ILSpy::Decompiler::TypeSystem::IType;
 using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
 using ILSpy::Decompiler::TypeSystem::ITypeParameter;
 using ILSpy::Decompiler::TypeSystem::ITypePtr;
+using ILSpy::Decompiler::TypeSystem::IsAnyPointer;
 using ILSpy::Decompiler::TypeSystem::IsKnownType;
 using ILSpy::Decompiler::TypeSystem::IsNullable;
 using ILSpy::Decompiler::TypeSystem::GetUnderlyingType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
 using ILSpy::Decompiler::TypeSystem::NormalizeTypeVisitor;
 using ILSpy::Decompiler::TypeSystem::ParameterizedType;
+using ILSpy::Decompiler::TypeSystem::PointerType;
 using ILSpy::Decompiler::TypeSystem::TypeCode;
 using ILSpy::Decompiler::TypeSystem::TypeKind;
 using ILSpy::Decompiler::TypeSystem::VarianceModifier;
@@ -592,6 +595,94 @@ bool IsBoxingConversionOrInvolvingTypeParameter(const ICompilation& compilation,
 	// parameter that could be a value type).
 	return IsBoxingConversion(compilation, fromType, toType)
 		|| ImplicitTypeParameterConversion(compilation, fromType, toType);
+}
+
+bool IsIntegerType(const IType& type)
+{
+	// C# `switch (type.Kind) { case TypeKind.NInt: case TypeKind.NUInt: return true; }` -- the native
+	// integers have no `KnownTypeCode` (synthetic `TypeKind.NInt`/`NUInt`, not `ITypeDefinition`s),
+	// so they are recognized via `Kind` before the `GetTypeCode` range check (the `IsNumericType`
+	// precedent). The `enum class` has no implicit `bool`, so the `switch` ports verbatim.
+	switch (type.Kind()) {
+		case TypeKind::NInt:
+		case TypeKind::NUInt:
+			return true;
+		default:
+			break;
+	}
+	// C# `TypeCode c = ReflectionHelper.GetTypeCode(type); return c >= TypeCode.SByte && c <= TypeCode.UInt64;`
+	// -- the `enum class` has no relational operators, so the ordinal comparison ports via
+	// `static_cast<int>` (the `IsNumericType` range-check precedent).
+	TypeCode c = GetTypeCode(type);
+	return static_cast<int>(c) >= static_cast<int>(TypeCode::SByte)
+		&& static_cast<int>(c) <= static_cast<int>(TypeCode::UInt64);
+}
+
+bool ImplicitPointerConversion(const ICompilation& compilation, IType& fromType, IType& toType)
+{
+	// C# spec (draft-v11) section 24.5. The C# `fromType.Kind.IsAnyPointer()` is the free
+	// `IsAnyPointer(TypeKind)` helper (the TypeSystemExtensions prerequisite); `toType is PointerType`
+	// ports to `dynamic_cast<PointerType*>(&toType)`; `toType.ReflectionName == "System.Void*"`
+	// ports to `toType.ReflectionName() == "System.Void*"` (a `PointerType` over `System.Void` --
+	// `PointerType::ReflectionName` is `element->ReflectionName() + "*"`, and `KnownType(Void)`
+	// renders `"System.Void"`). Any pointer kind (Pointer or FunctionPointer) on the from-side converts.
+	if (IsAnyPointer(fromType.Kind()) && dynamic_cast<PointerType*>(&toType) != nullptr
+		&& toType.ReflectionName() == "System.Void*")
+		return true;
+	// The C# `fromType.Kind == TypeKind.Null && toType.Kind.IsAnyPointer()` -- the null literal converts
+	// to any pointer kind. The `IsAnyPointer(toType.Kind())` helper covers both `Pointer` and `FunctionPointer`.
+	if (fromType.Kind() == TypeKind::Null && IsAnyPointer(toType.Kind()))
+		return true;
+	// The C# `fromType is FunctionPointerType fromFnPtr && toType is FunctionPointerType toFnPtr &&
+	// fromFnPtr.CallingConvention == toFnPtr.CallingConvention && fromFnPtr.ParameterTypes.Length ==
+	// toFnPtr.ParameterTypes.Length`. The `is FunctionPointerType` ports to `dynamic_cast`; the
+	// `CallingConvention` and `ParameterTypes().size()` are the faithful accessors.
+	FunctionPointerType* fromFnPtr = dynamic_cast<FunctionPointerType*>(&fromType);
+	FunctionPointerType* toFnPtr = dynamic_cast<FunctionPointerType*>(&toType);
+	if (fromFnPtr != nullptr && toFnPtr != nullptr
+		&& fromFnPtr->CallingConvention() == toFnPtr->CallingConvention()
+		&& fromFnPtr->ParameterTypes().size() == toFnPtr->ParameterTypes().size())
+	{
+		// Variance applies to function pointer types. The C# `const int nestingDepth = 0;` -- the depth
+		// starts at 0 (the depth guard lives inside `IsSubtypeOf`). The return type must be convertible
+		// by identity or implicit reference conversion. `ReturnType()` returns `const ITypePtr&`; `*ptr`
+		// is `IType&` (the `shared_ptr<IType>` `operator*` returns a non-const reference to the managed
+		// `IType`), so the extracted types feed the non-const `IdentityConversion` / `ImplicitReferenceConversion`.
+		const int nestingDepth = 0;
+		IType& fromReturn = *fromFnPtr->ReturnType();
+		IType& toReturn = *toFnPtr->ReturnType();
+		if (!(IdentityConversion(fromReturn, toReturn)
+			|| ImplicitReferenceConversion(compilation, fromReturn, toReturn, nestingDepth)))
+			return false;
+		// The C# `foreach (var (fromPT, toPT) in fromFnPtr.ParameterTypes.Zip(toFnPtr.ParameterTypes))`
+		// -- the `Zip` pairs elements by position; the length-equality guard above ensures both vectors
+		// have the same length. NOTE the SWAPPED order in the body: `IdentityConversion(toPT, fromPT)` and
+		// `ImplicitReferenceConversion(toPT, fromPT)` -- function-pointer parameter variance is
+		// CONTRAVARIANT (the target's parameter must accept the source's argument, so the conversion
+		// direction is reversed for parameters).
+		const std::vector<ITypePtr>& fromParams = fromFnPtr->ParameterTypes();
+		const std::vector<ITypePtr>& toParams = toFnPtr->ParameterTypes();
+		for (std::size_t i = 0; i < fromParams.size(); i++) {
+			IType& fromPT = *fromParams[i];
+			IType& toPT = *toParams[i];
+			if (!(IdentityConversion(toPT, fromPT)
+				|| ImplicitReferenceConversion(compilation, toPT, fromPT, nestingDepth)))
+				return false;
+		}
+		return true;
+	}
+	return false;
+}
+
+bool ExplicitPointerConversion(const IType& fromType, const IType& toType)
+{
+	// C# spec (draft-v11) section 24.5. The C# `fromType.Kind.IsAnyPointer()` is the free
+	// `IsAnyPointer(TypeKind)` helper. A pointer (any kind) converts to any other pointer or to any
+	// integer type; conversely any integer type converts to a pointer. Pure (reads only `Kind` +
+	// `IsIntegerType`), so the parameters are `const IType&`.
+	if (IsAnyPointer(fromType.Kind()))
+		return IsAnyPointer(toType.Kind()) || IsIntegerType(toType);
+	return IsAnyPointer(toType.Kind()) && IsIntegerType(fromType);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

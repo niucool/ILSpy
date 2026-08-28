@@ -298,4 +298,39 @@ bool IsBoxingConversionOrInvolvingTypeParameter(const ILSpy::Decompiler::TypeSys
                                                 ILSpy::Decompiler::TypeSystem::IType& fromType,
                                                 ILSpy::Decompiler::TypeSystem::IType& toType);
 
+// The C# `bool IsIntegerType(IType type)` (CSharpConversions.cs line 927) -- true for the native
+// integers (`nint`/`nuint`, recognized via `Kind`) and the integral primitives (`sbyte`..`ulong`,
+// the `[SByte..UInt64]` range in the `TypeCode` domain). A pure helper (reads only `IType.Kind` +
+// `ReflectionHelper.GetTypeCode`, no `CSharpConversions` instance state), so it lands as a `Detail::`
+// free function taking `const IType&` like the numeric helpers. Consumed by `ExplicitPointerConversion`.
+bool IsIntegerType(const ILSpy::Decompiler::TypeSystem::IType& type);
+
+// The C# `bool ImplicitPointerConversion(IType fromType, IType toType)` (CSharpConversions.cs line
+// 898, C# spec draft-v11 section 24.5) -- the implicit pointer conversion. Any pointer (`PointerType`
+// or `FunctionPointer` -- `IsAnyPointer(Kind)`) converts to `void*` (a `PointerType` whose `ReflectionName`
+// is `"System.Void*"`); the null literal (`TypeKind.Null`) converts to any pointer; and a function pointer
+// converts to a function pointer with the same calling convention, the same parameter count, a return
+// type convertible by identity or implicit reference conversion, and (contravariantly) parameter types
+// convertible by identity or implicit reference conversion in the REVERSE direction (the body's
+// `IdentityConversion(toPT, fromPT)` / `ImplicitReferenceConversion(toPT, fromPT)` -- swapped order).
+//
+// Pure given a compilation (the function-pointer variance arm calls `ImplicitReferenceConversion` which
+// threads the compilation), so it lands as a `Detail::` free function taking `const ICompilation&` like
+// the reference cluster. Takes `IType&` (non-const) like the reference cluster because the function-pointer
+// return/parameter types (extracted via `ReturnType()` / `ParameterTypes()`, which return `IType&` through
+// the `shared_ptr<IType>` deref) feed `IdentityConversion(IType&, IType&)` (the non-const `AcceptVisitor`,
+// D406) and the non-const `ImplicitReferenceConversion`.
+bool ImplicitPointerConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                               ILSpy::Decompiler::TypeSystem::IType& fromType,
+                               ILSpy::Decompiler::TypeSystem::IType& toType);
+
+// The C# `bool ExplicitPointerConversion(IType fromType, IType toType)` (CSharpConversions.cs line
+// 917, C# spec draft-v11 section 24.5) -- the explicit pointer conversion. A pointer (any kind,
+// `IsAnyPointer(Kind)`) converts to any other pointer or to any integer type; conversely any integer
+// type converts to a pointer. Pure (reads only `IType.Kind` via `IsAnyPointer` + `IsIntegerType`, no
+// `CSharpConversions` instance state), so it lands as a `Detail::` free function taking `const IType&`
+// like the numeric helpers.
+bool ExplicitPointerConversion(const ILSpy::Decompiler::TypeSystem::IType& fromType,
+                               const ILSpy::Decompiler::TypeSystem::IType& toType);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

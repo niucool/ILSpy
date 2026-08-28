@@ -117,6 +117,13 @@ bool IsKnownType(const IType& type, KnownTypeCode knownType);
 // `OverloadResolution.ResolveParameterTypes` uses this to unpack a `params IEnumerable<T>` into `T`.
 bool IsArrayInterfaceType(const IType& type);
 
+// The C# `public static bool IsAnyPointer(this TypeKind typeKind)` (TypeSystemExtensions.cs line 448) --
+// true for `TypeKind.Pointer` or `TypeKind.FunctionPointer` (both are pointer-shaped kinds; the
+// C# `switch` expression returns `true` for those two, `false` for every other kind). The first
+// consumers are the `CSharpConversions` pointer-conversion helpers (`ImplicitPointerConversion` /
+// `ExplicitPointerConversion`); the `Kind`-only check is a pure value test on the enum.
+bool IsAnyPointer(TypeKind typeKind);
+
 // The C# `public static IType SkipModifiers(this IType ty)` (TypeSystemExtensions.cs line 425) --
 // unwraps `ModifiedType` (modopt/modreq custom-modifier) decorators, returning the underlying element
 // type. Loops while the type is a `ModifiedType` (modifiers may nest). Returns the type itself when it
