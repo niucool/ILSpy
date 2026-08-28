@@ -397,4 +397,27 @@ StandardImplicitConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& co
                           ILSpy::Decompiler::TypeSystem::IType& fromType,
                           ILSpy::Decompiler::TypeSystem::IType& toType);
 
+// The C# `Conversion ExplicitConversionImpl(IType fromType, IType toType)` (CSharpConversions.cs
+// line 308, C# spec draft-v11 section 10.4.3) -- the standard explicit conversion dispatch entry
+// point. Called by the public `ExplicitConversion` methods AFTER the implicit conversions have
+// been checked, so any remaining conversion must be explicit. Checks the already-ported helpers in
+// spec order: `AnyNumericConversion` -> `ExplicitNumericConversion`, `ExplicitEnumerationConversion`
+// -> `EnumerationConversion(false, false)` (explicit, not lifted), `ExplicitNullableConversion` (returns
+// a Conversion, checked via pointer-identity against `Conversions::None()`), `ExplicitReferenceConversion`
+// -> `ExplicitReferenceConversion`, `UnboxingConversion` -> `UnboxingConversion`,
+// `ExplicitTypeParameterConversion` (returns a Conversion, checked against None), `ExplicitPointerConversion`
+// -> `ExplicitPointerConversion`; the tuple arm (`TupleConversion(isExplicit: true)`) is deferred (needs
+// `TupleResolveResult` machinery) and yields `None` until ported. Returns the first matching Conversion
+// singleton, else `Conversions::None()`.
+//
+// The C# `ExplicitConversionImpl` is a private instance method that reads `this.compilation` (threaded to
+// `ExplicitReferenceConversion` / `UnboxingConversion` / `ExplicitTypeParameterConversion` which need
+// `IsSubtypeOf` / `FindType`). The port lifts it to a `Detail::` free function taking `const ICompilation&`
+// (the D508 precedent) like `StandardImplicitConversion`. Takes `IType&` non-const (the helpers take
+// non-const `IType&` for the non-const `AcceptVisitor`, D406). Returns `std::shared_ptr<Conversion>`.
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+ExplicitConversionImpl(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                        ILSpy::Decompiler::TypeSystem::IType& fromType,
+                        ILSpy::Decompiler::TypeSystem::IType& toType);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

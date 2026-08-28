@@ -837,4 +837,55 @@ std::shared_ptr<Conversion> StandardImplicitConversion(const ICompilation& compi
 	return Conversions::None();
 }
 
+std::shared_ptr<Conversion> ExplicitConversionImpl(const ICompilation& compilation,
+                                                       IType& fromType, IType& toType)
+{
+	// C# spec draft-v11 section 10.4.3. The standard explicit conversion dispatch entry point:
+	// called by the public `ExplicitConversion` methods AFTER the implicit conversions have been
+	// checked, so any remaining conversion must be explicit. Checks the already-ported helpers in
+	// spec order, returning the first matching Conversion singleton. The dispatch ORDER matters and
+	// is spec-mandated: numeric before enumeration (both could match an enum<->numeric pair, but
+	// AnyNumericConversion requires both sides numeric -- an enum is NOT numeric, so only the
+	// enumeration arm fires for an enum<->numeric pair; the numeric arm fires for a numeric<->numeric
+	// pair), enumeration before nullable (an enum<->Nullable<enum> pair could match both, but
+	// ExplicitEnumerationConversion fires first for the non-lifted case), nullable before reference
+	// (the lifted-nullable arm is inside ExplicitNullableConversion), reference before unboxing (a
+	// reference-to-reference is not an unboxing), unboxing before type-parameter (an unboxing is a
+	// type-parameter conversion but the unboxing arm is the more specific case), type-parameter
+	// before pointer, pointer last among the ported arms. The tuple arm is deferred (needs
+	// TupleResolveResult machinery) and yields None until ported.
+	if (AnyNumericConversion(fromType, toType))
+		return Conversions::ExplicitNumericConversion();
+	if (ExplicitEnumerationConversion(fromType, toType))
+		// The C# `Conversion.EnumerationConversion(false, false)` -- explicit (isImplicit=false),
+		// not lifted (isLifted=false). A FACTORY method (a fresh per-call instance), NOT a singleton --
+		// the `Conversions::EnumerationConversion(false, false)` builds a new
+		// `NumericOrEnumerationConversion(false, false, true)` each call. The test asserts flags,
+		// not pointer-identity.
+		return Conversions::EnumerationConversion(false, false);
+	// The C# `Conversion c = ExplicitNullableConversion(fromType, toType); if (c != Conversion.None)`
+	// return c;` -- the `c != Conversion.None` check ports to pointer-identity against the `None`
+	// singleton. ExplicitNullableConversion may return ExplicitNullableConversion /
+	// ExplicitLiftedNumericConversion / EnumerationConversion(false, true) (all non-None) or None.
+	std::shared_ptr<Conversion> c = ExplicitNullableConversion(fromType, toType);
+	if (c.get() != Conversions::None().get())
+		return c;
+	if (ExplicitReferenceConversion(compilation, fromType, toType))
+		return Conversions::ExplicitReferenceConversion();
+	if (UnboxingConversion(compilation, fromType, toType))
+		return Conversions::UnboxingConversion();
+	// The C# `c = ExplicitTypeParameterConversion(fromType, toType); if (c != Conversion.None)` return c;`
+	// -- the same pointer-identity-against-None check as the nullable arm. ExplicitTypeParameterConversion
+	// may return UnboxingConversion / BoxingConversion (both non-None singletons) or None.
+	c = ExplicitTypeParameterConversion(compilation, fromType, toType);
+	if (c.get() != Conversions::None().get())
+		return c;
+	if (ExplicitPointerConversion(fromType, toType))
+		return Conversions::ExplicitPointerConversion();
+	// The tuple arm (`TupleConversion(fromType, toType, isExplicit: true)`) is deferred (needs
+	// TupleResolveResult machinery). Until it lands, non-tuple shapes yield None -- the faithful
+	// fallback for a shape the ported arms do not yet handle.
+	return Conversions::None();
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
