@@ -32,6 +32,7 @@
 #include "Decompiler/Semantics/ThrowResolveResult.hpp"  // ThrowResolveResult (the throw-expression arm RTTI check)
 #include "Decompiler/Semantics/TupleResolveResult.hpp"  // TupleResolveResult (the tuple-conversion ResolveResult overload RTTI target + Elements)
 #include "Decompiler/TypeSystem/TupleType.hpp"  // GetTupleElementTypes (D539 -- the tuple-conversion element flattening)
+#include "Decompiler/TypeSystem/TaskType.hpp"        // IsTask, IsCustomTask (the CSharpConversions.UnpackTask prerequisites)
 #include "Decompiler/TypeSystem/ICompilation.hpp"   // ICompilation (FindType -- the array-to-System.Array arm)
 #include "Decompiler/TypeSystem/IMethod.hpp"       // IMethod (IsStatic / IsOperator / Name / Parameters / ReturnType -- the operator scan)
 #include "Decompiler/TypeSystem/IParameter.hpp"    // IParameter (Type / ReferenceKind -- the operator's parameter type)
@@ -91,6 +92,8 @@ using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
 using ILSpy::Decompiler::TypeSystem::NormalizeTypeVisitor;
 using ILSpy::Decompiler::TypeSystem::ParameterizedType;
 using ILSpy::Decompiler::TypeSystem::PointerType;
+using ILSpy::Decompiler::TypeSystem::IsTask;
+using ILSpy::Decompiler::TypeSystem::IsCustomTask;
 using ILSpy::Decompiler::TypeSystem::ReferenceKind;
 using ILSpy::Decompiler::TypeSystem::TypeCode;
 using ILSpy::Decompiler::TypeSystem::TypeKind;
@@ -2063,12 +2066,37 @@ bool IsBetterIntegralType(TypeCode t1, TypeCode t2)
 	}
 }
 
+// The C# `static IType UnpackTask(IType type)` (CSharpConversions.cs line 1654) -- the
+// `Task<T>` unpacker the `BetterConversionTarget` recursion uses. Returns `type.TypeArguments[0]`
+// when `type` is a generic task-like (`IsTask(type) || IsCustomTask(type, out _)`) with exactly
+// one type parameter, else a null `ITypePtr`. See the header for the rationale and the
+// `ParameterizedType`/`GetTypeArgument(0)` ownership convention.
+ITypePtr UnpackTask(const IType& type)
+{
+	// C# `(TaskType.IsTask(type) || TaskType.IsCustomTask(type, out _)) && type.TypeParameterCount
+	// == 1` -- the task-like + 1-type-param guard. `IsTask` / `IsCustomTask` take `const IType&`;
+	// `TypeParameterCount()` is a const `IType` virtual. The `IsCustomTask` call discards the
+	// builder type via a local `ITypePtr` (the C# `out _`).
+	ITypePtr discardedBuilder; // the C# `out _` discards the builder type.
+	bool isTaskLike = IsTask(type) || IsCustomTask(type, discardedBuilder);
+	if (!(isTaskLike && type.TypeParameterCount() == 1))
+		return ITypePtr(); // null -- non-task or non-generic task.
+	// C# `? type.TypeArguments[0] : null` -- `TypeArguments[0]` is `ParameterizedType`-specific
+	// (not on the `IType` surface), so the port `dynamic_cast`s + guards before `GetTypeArgument(0)`
+	// (a 1-type-param task-like is always parameterized in practice; the guard is the defensive
+	// null-check convention, the D516 precedent). `GetTypeArgument(0)` returns a co-owning
+	// `ITypePtr` copy from the `ParameterizedType`'s `typeArgs_`.
+	const ParameterizedType* pt = dynamic_cast<const ParameterizedType*>(&type);
+	if (pt != nullptr)
+		return pt->GetTypeArgument(0);
+	return ITypePtr(); // null -- degenerate non-parameterized 1-type-param task-like (does not occur).
+}
+
 // The C# `int BetterConversionTarget(IType t1, IType t2)` (CSharpConversions.cs line 1660, C# 9.0
 // spec section 12.6.4.7 "better conversion target"). Returns 0 (neither), 1 (t1), or 2 (t2). The
-// `ReadOnlySpan`/`Span` tiebreak arms, the core implicit-convertibility check, the (deferred)
-// `UnpackTask` recursion, and the integral-type tiebreak are checked in order; the first verdict
-// wins. See the header for the deferred-`UnpackTask` rationale and the `TypeArguments[0]`
-// `dynamic_cast` guard.
+// `ReadOnlySpan`/`Span` tiebreak arms, the core implicit-convertibility check, the `UnpackTask`
+// recursion, and the integral-type tiebreak are checked in order; the first verdict wins. See
+// the header for the `UnpackTask` rationale and the `TypeArguments[0]` `dynamic_cast` guard.
 int BetterConversionTarget(const ICompilation& compilation, IType& t1, IType& t2)
 {
 	// A small helper to extract the first type argument of a `ReadOnlySpan<T>` / `Span<T>` --
@@ -2140,14 +2168,14 @@ int BetterConversionTarget(const ICompilation& compilation, IType& t1, IType& t2
 			return 2;
 	}
 	// C# `var s1 = UnpackTask(t1); var s2 = UnpackTask(t2); if (s1 != null && s2 != null) return
-	// BetterConversionTarget(s1, s2);` -- DEFERRED: `UnpackTask` needs `TaskType.IsTask` /
-	// `TaskType.IsCustomTask` (not yet ported). The deferred `UnpackTask` yields a null `ITypePtr`
-	// for both targets, so the `s1 != null && s2 != null` guard is false and the recursion is
-	// skipped -- the faithful fallback for non-`Task` targets (the C# `UnpackTask` also returns null
-	// for a non-`Task` type, so the C# skips the recursion too). The divergence is only for
-	// `Task<T>` targets (the deferred shape).
-	// ITypePtr s1 = UnpackTask(t1); ITypePtr s2 = UnpackTask(t2);
-	// if (s1 && s2) return BetterConversionTarget(compilation, *s1, *s2);
+	// BetterConversionTarget(s1, s2);` -- the `Task<T>` recursion: when BOTH targets unpack to a
+	// non-null inner type (both are `Task<T>`-shaped), recurse on the inner types. A non-`Task`
+	// target (or a non-generic `Task`) unpacks to null, so the guard skips the recursion and the
+	// dispatch falls to the integral-type tiebreak (the faithful fallback for the common case).
+	ITypePtr s1 = UnpackTask(t1);
+	ITypePtr s2 = UnpackTask(t2);
+	if (s1 && s2)
+		return BetterConversionTarget(compilation, *s1, *s2);
 	// C# `TypeCode t1Code = ReflectionHelper.GetTypeCode(t1); TypeCode t2Code =
 	// ReflectionHelper.GetTypeCode(t2); if (IsBetterIntegralType(t1Code, t2Code)) return 1; if
 	// (IsBetterIntegralType(t2Code, t1Code)) return 2; return 0;` -- the integral-type tiebreak.
