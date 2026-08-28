@@ -788,4 +788,53 @@ bool ImplicitConstantExpressionConversion(const ResolveResult& rr, const IType& 
 	return false;
 }
 
+std::shared_ptr<Conversion> StandardImplicitConversion(const ICompilation& compilation,
+                                                         IType& fromType, IType& toType)
+{
+	// C# 9.0 spec section 10.4.2. The standard implicit conversion dispatch entry point: checks the
+	// already-ported conversion helpers in spec order, returning the first matching Conversion
+	// singleton. The dispatch ORDER matters and is spec-mandated: identity before numeric (int->int
+	// same instance is identity, not numeric), numeric before nullable (the lifted-numeric arm is
+	// inside the nullable helper), nullable before null-literal (Nullable<T> accepts the null literal
+	// but the identity/nullable arms fire first for a non-null source), reference before boxing (a
+	// reference-to-reference is not a boxing), boxing before type-parameter (the type-parameter arm
+	// yields a boxing conversion when it isn't also a reference conversion), pointer last among the
+	// ported arms. The tuple/inline-array/span arms are deferred (need TupleResolveResult /
+	// IsInlineArrayType / Span machinery) and yield None for those shapes until ported.
+	if (IdentityConversion(fromType, toType))
+		return Conversions::IdentityConversion();
+	if (ImplicitNumericConversion(fromType, toType))
+		return Conversions::ImplicitNumericConversion();
+	// The C# `Conversion c = ImplicitNullableConversion(fromType, toType); if (c != Conversion.None)
+	// return c;` -- the `c != Conversion.None` check ports to pointer-identity against the `None`
+	// singleton (`c.get() != Conversions::None().get()`). A nullable conversion returning a singleton
+	// (ImplicitNullableConversion / ImplicitLiftedNumericConversion) is not None; the `None` return
+	// falls through to the next arm.
+	std::shared_ptr<Conversion> c = ImplicitNullableConversion(fromType, toType);
+	if (c.get() != Conversions::None().get())
+		return c;
+	if (NullLiteralConversion(fromType, toType))
+		return Conversions::NullLiteralConversion();
+	// The C# `ImplicitReferenceConversion(fromType, toType, 0)` -- the depth starts at 0 (the depth
+	// guard lives inside `IsSubtypeOf`). The Detail helper takes the threaded compilation + the depth.
+	if (ImplicitReferenceConversion(compilation, fromType, toType, 0))
+		return Conversions::ImplicitReferenceConversion();
+	if (IsBoxingConversion(compilation, fromType, toType))
+		return Conversions::BoxingConversion();
+	if (ImplicitTypeParameterConversion(compilation, fromType, toType))
+	{
+		// Implicit type parameter conversions that aren't also reference conversions are considered
+		// to be boxing conversions (the C# comment at line 224). The type-parameter arm fires only
+		// when the reference/boxing guards have already failed (an unconstrained type parameter
+		// whose IsReferenceType is indeterminate), so the dispatch returns a boxing conversion.
+		return Conversions::BoxingConversion();
+	}
+	if (ImplicitPointerConversion(compilation, fromType, toType))
+		return Conversions::ImplicitPointerConversion();
+	// The tuple / inline-array / span arms are deferred (need TupleResolveResult / IsInlineArrayType /
+	// Span machinery). Until they land, those shapes yield None -- the faithful fallback for a shape
+	// the ported arms do not yet handle.
+	return Conversions::None();
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

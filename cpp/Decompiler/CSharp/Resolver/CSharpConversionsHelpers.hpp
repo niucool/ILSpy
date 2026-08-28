@@ -375,4 +375,26 @@ ExplicitTypeParameterConversion(const ILSpy::Decompiler::TypeSystem::ICompilatio
 bool ImplicitConstantExpressionConversion(const ILSpy::Decompiler::Semantics::ResolveResult& rr,
                                           const ILSpy::Decompiler::TypeSystem::IType& toType);
 
+// The C# `public Conversion StandardImplicitConversion(IType fromType, IType toType)`
+// (CSharpConversions.cs line 201, C# 9.0 spec section 10.4.2) -- the standard implicit conversion
+// dispatch entry point. Checks the already-ported conversion helpers in spec order: identity,
+// numeric, nullable (returns a Conversion, checked via pointer-identity against
+// `Conversions::None()`), null-literal, reference, boxing, type-parameter (yields a boxing
+// conversion when not also a reference conversion), pointer; the tuple/inline-array/span arms are
+// deferred (need TupleResolveResult/IsInlineArrayType/Span machinery) and yield `None` for those
+// shapes until ported. Returns the first matching Conversion singleton, else `Conversions::None()`.
+//
+// The C# `StandardImplicitConversion(fromType, toType)` calls the private
+// `StandardImplicitConversion(fromType, toType, allowTupleConversion: true)` overload; the port
+// collapses the overload into this Detail function (the tuple arm is deferred, so
+// `allowTupleConversion` is effectively always true for the ported arms). Takes `const ICompilation&`
+// (threaded to the reference/boxing/type-parameter/pointer helpers that need `FindType`/
+// `IsSubtypeOf`) and `IType&` non-const (the helpers take non-const `IType&` for the non-const
+// `AcceptVisitor`, D406). Returns `std::shared_ptr<Conversion>` -- the first matching singleton,
+// else `Conversions::None()`.
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+StandardImplicitConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                          ILSpy::Decompiler::TypeSystem::IType& fromType,
+                          ILSpy::Decompiler::TypeSystem::IType& toType);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

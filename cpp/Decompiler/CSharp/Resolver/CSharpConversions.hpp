@@ -132,6 +132,18 @@ public:
     // read it; exposed for the deferred engine steps).
     const ILSpy::Decompiler::TypeSystem::ICompilation& Compilation() const { return *compilation_; }
 
+    // The C# `public Conversion StandardImplicitConversion(IType fromType, IType toType)`
+    // (CSharpConversions.cs line 201, C# 9.0 spec section 10.4.2) -- the standard implicit conversion
+    // dispatch entry point. Delegates to `Detail::StandardImplicitConversion(*compilation_, ...)`.
+    // The C# `ArgumentNullException` on null args compiles out (the `IType&` references cannot bind to
+    // null, the D374 convention). The C# calls the private `StandardImplicitConversion(fromType,
+    // toType, allowTupleConversion: true)` overload; the port collapses the overload into the Detail
+    // function (the tuple arm is deferred, so `allowTupleConversion` is effectively always true for
+    // the ported arms).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+    StandardImplicitConversion(ILSpy::Decompiler::TypeSystem::IType& fromType,
+                              ILSpy::Decompiler::TypeSystem::IType& toType);
+
 private:
     const ILSpy::Decompiler::TypeSystem::ICompilation* compilation_;
 

@@ -22,6 +22,8 @@
 
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
 
+#include "Decompiler/CSharp/Resolver/CSharpConversionsHelpers.hpp"  // Detail::StandardImplicitConversion (the dispatch entry point)
+#include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversion / Conversions (the dispatch return singletons)
 #include "Decompiler/Util/CacheManager.hpp"  // CacheManager (Get factory)
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
@@ -51,6 +53,18 @@ CSharpConversions& CSharpConversions::Get(
     // return by reference (the cache keeps the `shared_ptr` alive for the compilation's lifetime).
     auto stored = std::any_cast<std::shared_ptr<CSharpConversions>>(cached);
     return *stored;
+}
+
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+CSharpConversions::StandardImplicitConversion(ILSpy::Decompiler::TypeSystem::IType& fromType,
+                                                ILSpy::Decompiler::TypeSystem::IType& toType)
+{
+	// The C# `return StandardImplicitConversion(fromType, toType, allowTupleConversion: true);` --
+	// the public method delegates to the private overload. The port collapses the overload into the
+	// `Detail::` free function (the tuple arm is deferred, so `allowTupleConversion` is effectively
+	// always true for the ported arms). The `*compilation_` threads the instance's compilation to the
+	// reference/boxing/type-parameter/pointer helpers that need `FindType`/`IsSubtypeOf`.
+	return Detail::StandardImplicitConversion(*compilation_, fromType, toType);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver
