@@ -30,4 +30,5 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Implementation/GetMembersHelper.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/InheritanceHelper.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ReflectionHelper.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/NullableType.cpp
 )

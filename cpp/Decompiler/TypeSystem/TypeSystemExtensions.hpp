@@ -117,4 +117,15 @@ bool IsKnownType(const IType& type, KnownTypeCode knownType);
 // `OverloadResolution.ResolveParameterTypes` uses this to unpack a `params IEnumerable<T>` into `T`.
 bool IsArrayInterfaceType(const IType& type);
 
+// The C# `public static IType SkipModifiers(this IType ty)` (TypeSystemExtensions.cs line 425) --
+// unwraps `ModifiedType` (modopt/modreq custom-modifier) decorators, returning the underlying element
+// type. Loops while the type is a `ModifiedType` (modifiers may nest). Returns the type itself when it
+// carries no custom modifiers. The C# `this IType` extension throws `ArgumentNullException` on null;
+// the `const IType&` port compiles that out (a reference cannot bind to null). A degenerate
+// `ModifiedType` whose `Element()` is a null `shared_ptr` yields a null return (the C# would return null
+// too); callers observe the result and guard for null before use. The first consumers are the
+// `NullableType.IsNullable` / `GetUnderlyingType` helpers (which `SkipModifiers()` before the
+// `as ParameterizedType` test).
+const IType* SkipModifiers(const IType& type);
+
 } // namespace ILSpy::Decompiler::TypeSystem

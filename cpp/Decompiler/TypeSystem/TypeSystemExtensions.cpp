@@ -108,4 +108,18 @@ bool IsArrayInterfaceType(const IType& type) {
     }
 }
 
+const IType* SkipModifiers(const IType& type)
+{
+    // C# `while (ty is ModifiedType mt) ty = mt.ElementType; return ty;` -- the `ModifiedType` (a
+    // TypeWithElementType decorator) carries its element as a `shared_ptr<IType>` member; the loop
+    // follows the `Element()` handle until a non-modifier type is reached (or a degenerate null element
+    // short-circuits the walk to null, matching the C# null return).
+    const IType* t = &type;
+    while (const ModifiedType* mt = dynamic_cast<const ModifiedType*>(t)) {
+        const ITypePtr& element = mt->Element();
+        t = element.get();
+    }
+    return t;
+}
+
 } // namespace ILSpy::Decompiler::TypeSystem
