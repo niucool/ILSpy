@@ -26,6 +26,7 @@
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"  // CSharpConversions (Get -- the anonymous-function arm threads the per-compilation controller to LambdaResolveResult::IsValid)
 #include "Decompiler/CSharp/Resolver/LambdaResolveResult.hpp"  // LambdaResolveResult (the anonymous-function arm RTTI target) + LambdaConversion (the IsValid success result)
 #include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversions (the nullable-conversion singletons / EnumerationConversion factory)
+#include "Decompiler/Semantics/ByReferenceResolveResult.hpp"  // ByReferenceResolveResult (the method-group args ref/out/in arm)
 #include "Decompiler/Semantics/InterpolatedStringResolveResult.hpp"  // InterpolatedStringResolveResult (the interpolated-string arm RTTI check)
 #include "Decompiler/Semantics/ResolveResult.hpp"  // ResolveResult (IsCompileTimeConstant / Type / ConstantValue -- the constant-expression conversion)
 #include "Decompiler/Semantics/ThrowResolveResult.hpp"  // ThrowResolveResult (the throw-expression arm RTTI check)
@@ -57,6 +58,7 @@ namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 using ILSpy::Decompiler::CSharp::Resolver::CSharpConversions;
 using ILSpy::Decompiler::CSharp::Resolver::LambdaConversion;
 using ILSpy::Decompiler::CSharp::Resolver::LambdaResolveResult;
+using ILSpy::Decompiler::Semantics::ByReferenceResolveResult;
 using ILSpy::Decompiler::Semantics::Conversion;
 using ILSpy::Decompiler::Semantics::Conversions;
 using ILSpy::Decompiler::Semantics::InterpolatedStringResolveResult;
@@ -1676,6 +1678,59 @@ AnonymousFunctionConversion(CSharpConversions& conversions, const LambdaResolveR
 	// C# `return f.IsValid(dParamTypes, dReturnType, this);` -- the body-validity verdict. The
 	// C# `this` ports to the `conversions` parameter (the D473 abstract-base `IsValid` signature).
 	return f.IsValid(dParamTypes, dReturnType, conversions);
+}
+
+// The C# synthetic-arguments construction for the method-group conversion (CSharpConversions.cs
+// line 1362, the local `args` construction inside `MethodGroupConversion`). See the header doc for
+// the three branches (the ref/out/in `ByReferenceResolveResult`, the `dynamic`->`object` plain
+// `ResolveResult`, the plain `ResolveResult(parameterType)`). The `args` are the synthetic
+// arguments fed to the (deferred) `MethodGroupResolveResult.PerformOverloadResolution`; this
+// helper lands ahead of that engine as a tested-but-not-yet-wired foundation.
+std::vector<std::shared_ptr<ResolveResult>>
+MethodGroupConversionArguments(const ICompilation& compilation, const IMethod& invoke)
+{
+	auto params = invoke.Parameters();
+	std::vector<std::shared_ptr<ResolveResult>> args;
+	args.reserve(params.size());
+	for (const IParameter* param : params) {
+		// C# `IType parameterType = param.Type;` -- the parameter's type. `IParameter::Type()`
+		// returns `const IType&` (the IVariable accessor).
+		const IType& parameterType = param->Type();
+		// C# `if (param.ReferenceKind != ReferenceKind.None && parameterType.Kind == TypeKind.ByReference)`
+		// -- the ref/out/in + ByReference-type arm. Both conditions must hold (the conjunction); a
+		// ref parameter whose type is NOT a `ByReferenceType`, or a by-value parameter whose type
+		// IS a `ByReferenceType`, falls through to the dynamic / plain arms. The `Kind == ByReference`
+		// guard guarantees `parameterType` IS a `ByReferenceType` (the only `IType` subclass with that
+		// kind), so the `static_cast` is safe (mirrors the C# `(ByReferenceType)parameterType` cast).
+		if (param->ReferenceKind() != ReferenceKind::None
+		    && parameterType.Kind() == TypeKind::ByReference) {
+			// C# `parameterType = ((ByReferenceType)parameterType).ElementType;` -- unwrap the element.
+			// `ByReferenceType::Element()` returns `const ITypePtr&` (the shared handle the `ByReferenceType`
+			// owns), so a copy is the owning handle to the element directly (no `shared_from_this`).
+			ITypePtr elementPtr = static_cast<const ByReferenceType&>(parameterType).Element();
+			// C# `args[i] = new ByReferenceResolveResult(parameterType, param.ReferenceKind);` -- the
+			// `internal ByReferenceResolveResult(IType, ReferenceKind)` ctor builds the base
+			// `ResolveResult` from a fresh `ByReferenceType(elementType)`, faithfully.
+			args.push_back(std::make_shared<ByReferenceResolveResult>(
+				std::move(elementPtr), param->ReferenceKind()));
+		} else if (param->Type().Kind() == TypeKind::Dynamic) {
+			// C# `else if (param.Type.Kind == TypeKind.Dynamic) args[i] = new
+			// ResolveResult(compilation.FindType(KnownTypeCode.Object));` -- the dynamic erasure: a
+			// `dynamic`-typed delegate parameter erases to `object` for the method-group lookup.
+			// `compilation.FindType(Object)` returns `const IType&`; the owning `ITypePtr` is obtained via
+			// `shared_from_this()` + `const_pointer_cast` (the D529 precedent).
+			const IType& objectType = compilation.FindType(KnownTypeCode::Object);
+			args.push_back(std::make_shared<ResolveResult>(
+				std::const_pointer_cast<IType>(objectType.shared_from_this())));
+		} else {
+			// C# `else args[i] = new ResolveResult(parameterType);` -- the plain arm. The owning
+			// `ITypePtr` is obtained from the `const IType&` via `shared_from_this()` +
+			// `const_pointer_cast` (the D529 precedent).
+			args.push_back(std::make_shared<ResolveResult>(
+				std::const_pointer_cast<IType>(parameterType.shared_from_this())));
+		}
+	}
+	return args;
 }
 
 std::shared_ptr<Conversion>

@@ -928,6 +928,43 @@ AnonymousFunctionConversion(ILSpy::Decompiler::CSharp::Resolver::CSharpConversio
                             const ILSpy::Decompiler::CSharp::Resolver::LambdaResolveResult& f,
                             const ILSpy::Decompiler::TypeSystem::IType& toType);
 
+// The synthetic-arguments construction for the method-group conversion (CSharpConversions.cs
+// line 1362, the local `args` construction inside `MethodGroupConversion`). The method-group
+// conversion resolves the delegate's `Invoke` method (`GetDelegateInvokeMethod` D533) and then
+// builds one synthetic `ResolveResult` per `Invoke` parameter -- the arguments fed to
+// `MethodGroupResolveResult.PerformOverloadResolution` (deferred -- needs the `OverloadResolution`
+// engine) to select the matching method in the group. Each parameter maps to:
+//   * a `ByReferenceResolveResult(elementType, param.ReferenceKind)` when the parameter is a
+//     ref/out/in parameter (`ReferenceKind != None`) AND its type is a `ByReferenceType` -- the
+//     element type is unwrapped (`((ByReferenceType)parameterType).ElementType`) so the overload
+//     resolver sees the underlying ref-able type; the `ByReferenceResolveResult` ctor builds the
+//     base `ResolveResult` from a fresh `ByReferenceType(elementType)` (faithful to the C#
+//     `internal ByReferenceResolveResult(IType, ReferenceKind)` ctor).
+//   * a plain `ResolveResult(compilation.FindType(KnownTypeCode.Object))` when the parameter's
+//     type is `dynamic` (the dynamic-erasure arm -- `dynamic` erases to `object` for the method
+//     group lookup; the C# `param.Type.Kind == TypeKind.Dynamic` check).
+//   * a plain `ResolveResult(parameterType)` otherwise.
+//
+// Pure given a compilation (the only `CSharpConversions` instance state the body reads is
+// `compilation` -- for `FindType(Object)` in the dynamic arm; the C# `MethodGroupConversion` is
+// an instance method on `CSharpConversions` reading `this.compilation`), so it lands as a
+// `Detail::` free function taking `const ICompilation&` + `const IMethod& invoke` (every
+// `IMethod`/`IParameter` member the body reads -- `Parameters`, each parameter's `Type` /
+// `ReferenceKind` -- is `const`). A tested-but-not-yet-wired foundation ahead of the
+// `MethodGroupConversion` body (which needs `PerformOverloadResolution`); `MethodGroupConversion`
+// will call this helper then feed the result to the (deferred) overload-resolution engine.
+//
+// The owning `std::shared_ptr<ResolveResult>` handles the returned vector carries model the C#
+// `ResolveResult[]` (the C# GC-shared array; the port's shared handles keep the constructed
+// `ByReferenceResolveResult` / `ResolveResult` instances alive). The `ByReferenceType`'s element
+// is obtained directly via `Element()` (the `ByReferenceType` already owns its element as an
+// `ITypePtr`); the plain/dynamic-`object` types are obtained from the `const IType&` accessors
+// via `shared_from_this()` + `const_pointer_cast` (the D529 precedent -- the type-system objects
+// are shared-managed; the `const` is the accessor contract, not a guarantee).
+std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>
+MethodGroupConversionArguments(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                               const ILSpy::Decompiler::TypeSystem::IMethod& invoke);
+
 // The C# `bool IsBetterIntegralType(TypeCode t1, TypeCode t2)` (CSharpConversions.cs line 1697,
 // C# 9.0 spec section 12.6.4.7 "better conversion target" -- the integral-type tiebreak) -- true
 // iff a signed integral type `t1` is a better conversion target than the unsigned integral type
