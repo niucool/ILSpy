@@ -235,6 +235,31 @@ public:
     bool IsDelegateCompatible(const ILSpy::Decompiler::TypeSystem::IMethod& method,
                               const ILSpy::Decompiler::TypeSystem::IType& delegateType);
 
+    // The C# `public int BetterConversion(IType s, IType t1, IType t2)` (CSharpConversions.cs line
+    // 1620, C# 4.0 spec section 7.5.3.4 "better conversion from type"; the current standard folds
+    // it into section 12.6.4.5-12.6.4.7) -- the better conversion from a SOURCE type `s` to two
+    // candidate target types `t1` / `t2`: `0` = neither is better, `1` = `t1` is better, `2` = `t2`
+    // is better. The C# body: `bool ident1 = IdentityConversion(s, t1); bool ident2 =
+    // IdentityConversion(s, t2); if (ident1 && !ident2) return 1; if (ident2 && !ident1) return 2;
+    // return BetterConversionTarget(t1, t2);` -- an identity conversion from `s` to a target
+    // beats a non-identity conversion; when neither (or both) is identity, the verdict falls to
+    // `BetterConversionTarget`. The public method delegates to `Detail::IdentityConversion` and
+    // `Detail::BetterConversionTarget` (the latter threads `*compilation_` to the
+    // `ImplicitConversion` calls in the Span/core arms).
+    //
+    // The C# `ArgumentNullException` on null args compiles out (the `IType&` references cannot bind
+    // to null, the D374 convention). The `s` / `t1` / `t2` are `IType&` non-const because
+    // `IdentityConversion` / `BetterConversionTarget` take non-const `IType&` for the non-const
+    // `AcceptVisitor` (D406). The ResolveResult-based `BetterConversion(ResolveResult, IType,
+    // IType)` overload (CSharpConversions.cs line 1552 -- the "better conversion from expression")
+    // is DEFERRED: it needs `IsExactlyMatching` (needs `LambdaResolveResult.GetInferredReturnType`
+    // + `UnpackExpressionTreeType` + `UnpackTask`), `IsImplicitSpanConversion`, and the
+    // expression-tree / lambda arms -- none of which are ported yet. Returns `int` (the `0`/`1`/`2`
+    // verdict).
+    int BetterConversion(ILSpy::Decompiler::TypeSystem::IType& s,
+                          ILSpy::Decompiler::TypeSystem::IType& t1,
+                          ILSpy::Decompiler::TypeSystem::IType& t2);
+
 private:
     const ILSpy::Decompiler::TypeSystem::ICompilation* compilation_;
 

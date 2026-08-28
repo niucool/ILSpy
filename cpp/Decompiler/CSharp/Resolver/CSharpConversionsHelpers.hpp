@@ -34,12 +34,14 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 
 namespace ILSpy::Decompiler::TypeSystem { class IType; }
 namespace ILSpy::Decompiler::TypeSystem { class ICompilation; }
 namespace ILSpy::Decompiler::TypeSystem { class IMethod; }
+namespace ILSpy::Decompiler::TypeSystem { enum class TypeCode : std::uint8_t; }
 
 namespace ILSpy::Decompiler::Semantics { class Conversion; }
 namespace ILSpy::Decompiler::Semantics { class ResolveResult; }
@@ -856,5 +858,60 @@ ImplicitConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilatio
                    ILSpy::Decompiler::TypeSystem::IType& toType,
                    bool allowUserDefined,
                    bool allowTuple);
+
+// The C# `bool IsBetterIntegralType(TypeCode t1, TypeCode t2)` (CSharpConversions.cs line 1697,
+// C# 9.0 spec section 12.6.4.7 "better conversion target" -- the integral-type tiebreak) -- true
+// iff a signed integral type `t1` is a better conversion target than the unsigned integral type
+// `t2`: `SByte` beats `Byte`/`UInt16`/`UInt32`/`UInt64`; `Int16` beats `UInt16`/`UInt32`/`UInt64`;
+// `Int32` beats `UInt32`/`UInt64`; `Int64` beats `UInt64`. The C# spec rule: signed types are
+// better than unsigned types when the smaller-range signed type's range fully overlaps the
+// unsigned type's. A pure helper (reads only the two `TypeCode` values, no `CSharpConversions`
+// instance state, no `IType`), so it lands as a `Detail::` free function. Consumed by
+// `BetterConversionTarget`'s tail (the integral-type tiebreak after the implicit-convertibility
+// and Task checks) and a tested-but-not-yet-wired foundation ahead of the full
+// `BetterConversionTarget` / `BetterConversion` resolution.
+bool IsBetterIntegralType(ILSpy::Decompiler::TypeSystem::TypeCode t1,
+                          ILSpy::Decompiler::TypeSystem::TypeCode t2);
+
+// The C# `int BetterConversionTarget(IType t1, IType t2)` (CSharpConversions.cs line 1660, C# 9.0
+// spec section 12.6.4.7 "better conversion target") -- which of two target types `t1` / `t2` is
+// the better conversion target: `0` = neither is better, `1` = `t1` is better, `2` = `t2` is
+// better. The C# `if (t1.IsKnownType(ReadOnlySpanOfT)) { ... } if (t2.IsKnownType(ReadOnlySpanOfT))
+// { ... }` ReadOnlySpan/Span tiebreak arms (the C# 9 `ref struct` preference: a `ReadOnlySpan<T>`
+// is preferred over a `Span<T>` when the element types match by identity, and a `ReadOnlySpan<T>`
+// is preferred over another `ReadOnlySpan<U>` when `T` converts implicitly to `U` but not back);
+// the core implicit-convertibility check (`ImplicitConversion(t1, t2).IsValid &&
+// !ImplicitConversion(t2, t1).IsValid` -> `t1` is better, and the mirror); the `UnpackTask`
+// recursion (when both targets are `Task<T>`, recurse on the inner types); and the integral-type
+// tiebreak (`IsBetterIntegralType`).
+//
+// The `UnpackTask` recursion is DEFERRED: `TaskType.IsTask` / `TaskType.IsCustomTask` (the
+// `UnpackTask` prerequisites) are not yet ported, so the `UnpackTask` returns a null `ITypePtr`
+// for both targets -- the `s1 != null && s2 != null` guard is false, the recursion is skipped, and
+// the dispatch falls to the integral-type tiebreak. This is the faithful fallback for non-`Task`
+// targets (the C# `UnpackTask` also returns null for a non-`Task` type, so the C# skips the
+// recursion too); the divergence is only for `Task<T>` targets (the deferred shape), which the
+// port resolves by the integral tiebreak instead of the recursive call -- a faithful deferred
+// state for the non-`Task` common case.
+//
+// The `ReadOnlySpan`/`Span` tiebreak arms read `t1.TypeArguments[0]` / `t2.TypeArguments[0]` --
+// the C# `IType.TypeArguments` is on the `IType` interface; the port's `TypeArguments()` is
+// `ParameterizedType`-specific (not on the `IType` surface), so the port `dynamic_cast`s to
+// `ParameterizedType` and guards before reading `TypeArguments()[0]` (a non-`ParameterizedType`
+// with `IsKnownType(ReadOnlySpanOfT)` true does not occur in practice -- a `ReadOnlySpan<T>` is a
+// parameterized type -- but the guard avoids UB on a degenerate stub, the D516 null-guard
+// precedent). The element types feed `IdentityConversion` / `Detail::ImplicitConversion` which
+// take `IType&` non-const (the non-const `AcceptVisitor`, D406); the `TypeArguments()[0]`
+// `ITypePtr` dereferences to `IType&` (the shared `IType` is mutable).
+//
+// The `ImplicitConversion(t1, t2)` calls are the C# cached public `ImplicitConversion(IType,
+// IType)`; the port uses `Detail::ImplicitConversion(*compilation, t1, t2, true, true)` (the
+// uncached IType-based dispatch, D531 -- the cache is an instance-level optimization on
+// `CSharpConversions`, not on the `Detail::` free function; the result is identical). Threads
+// `const ICompilation&` (the D523/D531 convention) and takes `IType&` non-const (the helpers take
+// non-const `IType&`). Returns `int` (the `0`/`1`/`2` verdict).
+int BetterConversionTarget(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                           ILSpy::Decompiler::TypeSystem::IType& t1,
+                           ILSpy::Decompiler::TypeSystem::IType& t2);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

@@ -1725,4 +1725,125 @@ bool IsDelegateCompatible(const ICompilation& compilation, const IMethod& m,
 	return IdentityConversion(mRet, dRet) || IsImplicitReferenceConversion(compilation, mRet, dRet);
 }
 
+// The C# `bool IsBetterIntegralType(TypeCode t1, TypeCode t2)` (CSharpConversions.cs line 1697,
+// C# 9.0 spec section 12.6.4.7 "better conversion target" -- the integral-type tiebreak). The C#
+// rule: signed integral types are better conversion targets than unsigned integral types when
+// the signed type's range fully overlaps the unsigned type's. The `switch (t1)` ports to a C++
+// `switch` on the scoped `TypeCode` enum; the `t2 == TypeCode.X` comparisons port to `==` on the
+// scoped enum. Pure (reads only the two `TypeCode` values), so it lands as a `Detail::` free
+// function taking `TypeCode` by value.
+bool IsBetterIntegralType(TypeCode t1, TypeCode t2)
+{
+	// signed types are better than unsigned types
+	switch (t1) {
+		case TypeCode::SByte:
+			return t2 == TypeCode::Byte || t2 == TypeCode::UInt16 || t2 == TypeCode::UInt32 || t2 == TypeCode::UInt64;
+		case TypeCode::Int16:
+			return t2 == TypeCode::UInt16 || t2 == TypeCode::UInt32 || t2 == TypeCode::UInt64;
+		case TypeCode::Int32:
+			return t2 == TypeCode::UInt32 || t2 == TypeCode::UInt64;
+		case TypeCode::Int64:
+			return t2 == TypeCode::UInt64;
+		default:
+			return false;
+	}
+}
+
+// The C# `int BetterConversionTarget(IType t1, IType t2)` (CSharpConversions.cs line 1660, C# 9.0
+// spec section 12.6.4.7 "better conversion target"). Returns 0 (neither), 1 (t1), or 2 (t2). The
+// `ReadOnlySpan`/`Span` tiebreak arms, the core implicit-convertibility check, the (deferred)
+// `UnpackTask` recursion, and the integral-type tiebreak are checked in order; the first verdict
+// wins. See the header for the deferred-`UnpackTask` rationale and the `TypeArguments[0]`
+// `dynamic_cast` guard.
+int BetterConversionTarget(const ICompilation& compilation, IType& t1, IType& t2)
+{
+	// A small helper to extract the first type argument of a `ReadOnlySpan<T>` / `Span<T>` --
+	// the C# `t.TypeArguments[0]` where `t` is a `ParameterizedType`. The port's `TypeArguments()`
+	// is `ParameterizedType`-specific (not on the `IType` surface), so the `dynamic_cast` + guard
+	// avoids UB on a degenerate stub. Returns null when `t` is not a parameterized type or carries
+	// no type arguments; the caller guards before dereferencing.
+	auto firstTypeArg = [](IType& t) -> IType* {
+		auto* pt = dynamic_cast<ParameterizedType*>(&t);
+		if (pt == nullptr || pt->TypeArguments().empty())
+			return nullptr;
+		return pt->TypeArguments()[0].get();
+	};
+
+	// C# `if (t1.IsKnownType(KnownTypeCode.ReadOnlySpanOfT)) { if (t2.IsKnownType(SpanOfT)) { if
+	// (IdentityConversion(t1.TypeArguments[0], t2.TypeArguments[0])) return 1; } if (t2.IsKnownType(
+	// ReadOnlySpanOfT)) { ... if (t1To2 && !t2To1) return 1; } }` -- the ReadOnlySpan-vs-Span identity
+	// arm and the ReadOnlySpan-vs-ReadOnlySpan implicit-convertibility arm (t1 is better).
+	if (IsKnownType(t1, KnownTypeCode::ReadOnlySpanOfT)) {
+		if (IsKnownType(t2, KnownTypeCode::SpanOfT)) {
+			IType* a1 = firstTypeArg(t1);
+			IType* a2 = firstTypeArg(t2);
+			if (a1 != nullptr && a2 != nullptr && IdentityConversion(*a1, *a2))
+				return 1;
+		}
+		if (IsKnownType(t2, KnownTypeCode::ReadOnlySpanOfT)) {
+			IType* a1 = firstTypeArg(t1);
+			IType* a2 = firstTypeArg(t2);
+			if (a1 != nullptr && a2 != nullptr) {
+				bool t1To2 = ImplicitConversion(compilation, *a1, *a2, true, true)->IsValid();
+				bool t2To1 = ImplicitConversion(compilation, *a2, *a1, true, true)->IsValid();
+				if (t1To2 && !t2To1)
+					return 1;
+			}
+		}
+	}
+	// C# `if (t2.IsKnownType(KnownTypeCode.ReadOnlySpanOfT)) { if (t1.IsKnownType(SpanOfT)) { if
+	// (IdentityConversion(t2.TypeArguments[0], t1.TypeArguments[0])) return 2; } if (t1.IsKnownType(
+	// ReadOnlySpanOfT)) { ... if (t2To1 && !t1To2) return 2; } }` -- the mirror arms (t2 is better).
+	if (IsKnownType(t2, KnownTypeCode::ReadOnlySpanOfT)) {
+		if (IsKnownType(t1, KnownTypeCode::SpanOfT)) {
+			IType* a1 = firstTypeArg(t1);
+			IType* a2 = firstTypeArg(t2);
+			if (a1 != nullptr && a2 != nullptr && IdentityConversion(*a2, *a1))
+				return 2;
+		}
+		if (IsKnownType(t1, KnownTypeCode::ReadOnlySpanOfT)) {
+			IType* a1 = firstTypeArg(t1);
+			IType* a2 = firstTypeArg(t2);
+			if (a1 != nullptr && a2 != nullptr) {
+				bool t1To2 = ImplicitConversion(compilation, *a1, *a2, true, true)->IsValid();
+				bool t2To1 = ImplicitConversion(compilation, *a2, *a1, true, true)->IsValid();
+				if (t2To1 && !t1To2)
+					return 2;
+			}
+		}
+	}
+	// C# `{ bool t1To2 = ImplicitConversion(t1, t2).IsValid; bool t2To1 = ImplicitConversion(t2,
+	// t1).IsValid; if (t1To2 && !t2To1) return 1; if (t2To1 && !t1To2) return 2; }` -- the core
+	// implicit-convertibility check. The `ImplicitConversion(t1, t2)` is the C# cached public
+	// overload; the port uses `Detail::ImplicitConversion(*compilation, ..., true, true)` (the
+	// uncached IType-based dispatch, D531; the result is identical to the cached path).
+	{
+		bool t1To2 = ImplicitConversion(compilation, t1, t2, true, true)->IsValid();
+		bool t2To1 = ImplicitConversion(compilation, t2, t1, true, true)->IsValid();
+		if (t1To2 && !t2To1)
+			return 1;
+		if (t2To1 && !t1To2)
+			return 2;
+	}
+	// C# `var s1 = UnpackTask(t1); var s2 = UnpackTask(t2); if (s1 != null && s2 != null) return
+	// BetterConversionTarget(s1, s2);` -- DEFERRED: `UnpackTask` needs `TaskType.IsTask` /
+	// `TaskType.IsCustomTask` (not yet ported). The deferred `UnpackTask` yields a null `ITypePtr`
+	// for both targets, so the `s1 != null && s2 != null` guard is false and the recursion is
+	// skipped -- the faithful fallback for non-`Task` targets (the C# `UnpackTask` also returns null
+	// for a non-`Task` type, so the C# skips the recursion too). The divergence is only for
+	// `Task<T>` targets (the deferred shape).
+	// ITypePtr s1 = UnpackTask(t1); ITypePtr s2 = UnpackTask(t2);
+	// if (s1 && s2) return BetterConversionTarget(compilation, *s1, *s2);
+	// C# `TypeCode t1Code = ReflectionHelper.GetTypeCode(t1); TypeCode t2Code =
+	// ReflectionHelper.GetTypeCode(t2); if (IsBetterIntegralType(t1Code, t2Code)) return 1; if
+	// (IsBetterIntegralType(t2Code, t1Code)) return 2; return 0;` -- the integral-type tiebreak.
+	TypeCode t1Code = GetTypeCode(t1);
+	TypeCode t2Code = GetTypeCode(t2);
+	if (IsBetterIntegralType(t1Code, t2Code))
+		return 1;
+	if (IsBetterIntegralType(t2Code, t1Code))
+		return 2;
+	return 0;
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

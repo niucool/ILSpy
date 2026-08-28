@@ -218,4 +218,30 @@ bool CSharpConversions::IsDelegateCompatible(const ILSpy::Decompiler::TypeSystem
 	                                     /*isExtensionMethodInvocation*/ false);
 }
 
+int CSharpConversions::BetterConversion(ILSpy::Decompiler::TypeSystem::IType& s,
+                                        ILSpy::Decompiler::TypeSystem::IType& t1,
+                                        ILSpy::Decompiler::TypeSystem::IType& t2)
+{
+	// CSharpConversions.cs line 1620. The public "better conversion from type" entry point (the
+	// `IType` + `IType` + `IType` overload). The C# `bool ident1 = IdentityConversion(s, t1); bool
+	// ident2 = IdentityConversion(s, t2); if (ident1 && !ident2) return 1; if (ident2 && !ident1)
+	// return 2; return BetterConversionTarget(t1, t2);` -- an identity conversion from the source
+	// `s` to a target beats a non-identity conversion; when neither (or both) is identity, the
+	// verdict falls to `BetterConversionTarget`. The `IdentityConversion` calls are the C#
+	// `this.IdentityConversion` (the public bool helper); the port delegates to the already-ported
+	// `Detail::IdentityConversion` (D514, the `IType&` non-const signature for the non-const
+	// `AcceptVisitor`, D406). The `BetterConversionTarget` call is the `Detail::BetterConversionTarget`
+	// free function (D535), threading `*compilation_` to the `ImplicitConversion` calls in the
+	// Span/core arms. The ResolveResult-based `BetterConversion(ResolveResult, IType, IType)`
+	// overload is DEFERRED (needs `IsExactlyMatching` + the lambda/expression-tree arms -- not yet
+	// ported); only the type-based overload lands here.
+	bool ident1 = Detail::IdentityConversion(s, t1);
+	bool ident2 = Detail::IdentityConversion(s, t2);
+	if (ident1 && !ident2)
+		return 1;
+	if (ident2 && !ident1)
+		return 2;
+	return Detail::BetterConversionTarget(*compilation_, t1, t2);
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver
