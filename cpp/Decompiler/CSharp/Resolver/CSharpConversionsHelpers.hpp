@@ -45,6 +45,7 @@ namespace ILSpy::Decompiler::TypeSystem { enum class TypeCode : std::uint8_t; }
 
 namespace ILSpy::Decompiler::Semantics { class Conversion; }
 namespace ILSpy::Decompiler::Semantics { class ResolveResult; }
+namespace ILSpy::Decompiler::Semantics { class TupleResolveResult; }
 
 // `CSharpConversions` (the conversion controller the anonymous-function conversion threads to
 // `LambdaResolveResult::IsValid`) and `LambdaResolveResult` (the RTTI target the anonymous-function
@@ -964,6 +965,63 @@ AnonymousFunctionConversion(ILSpy::Decompiler::CSharp::Resolver::CSharpConversio
 std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>
 MethodGroupConversionArguments(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
                                const ILSpy::Decompiler::TypeSystem::IMethod& invoke);
+
+// The C# `Conversion TupleConversion(TupleResolveResult fromRR, IType toType, bool isExplicit)`
+// (CSharpConversions.cs line 1480, C# 9.0 spec sections 10.2.13 + 10.3.6) -- the tuple-literal
+// (a `TupleResolveResult`) -> tuple-type conversion. Flattens the source via `fromRR.Elements()`
+// (the per-element `ResolveResult`s) and the target via `TupleType.GetTupleElementTypes(toType)`
+// (the now-ported D539 prerequisite); if the target is not a tuple (`IsDefault`) or the element
+// counts differ, returns `None`. Otherwise converts each element pair via the public
+// `ImplicitConversion(IType, IType)` (isExplicit false) or `ExplicitConversion(IType, IType)`
+// (isExplicit true) -- the C# `this.ImplicitConversion` / `this.ExplicitConversion` -- and returns
+// `Conversion.TupleConversion(elementConversions)` only when every element conversion is valid;
+// any invalid element conversion short-circuits to `None`.
+//
+// The C# is a private instance method reading `this.compilation` (threaded via the per-element
+// `ImplicitConversion` / `ExplicitConversion` calls), so the port threads `const ICompilation&`.
+// The per-element dispatch uses the UNCACHED `Detail::` free-function equivalents (`ImplicitConversion`,
+// `ExplicitConversionImpl`, `UserDefinedExplicitConversion`) rather than the cached
+// `CSharpConversions::Get(compilation).ImplicitConversion(...)` public method -- the cache's
+// `TypePair` keys are non-owning `const IType*` that would dangle across test-local types (the
+// `CSharpConversions.hpp` `TypePair` convention), and the uncached dispatch is functionally
+// identical for the result (the D531 `BetterConversionTarget` precedent). `fromRR.Elements()`
+// yields `shared_ptr<ResolveResult>` whose `Type()` returns `const IType&`, but the per-element
+// dispatch takes `IType&` non-const (the non-const `AcceptVisitor`, D406), so the port `const_cast`s
+// the const reference -- the underlying type-system objects are mutable (the accessor's `const` is
+// the contract), the D515/D517/D528 `const_cast` precedent. `toType` is `IType&` non-const for the
+// same reason. Returns `std::shared_ptr<Conversion>`.
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+TupleConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                const ILSpy::Decompiler::Semantics::TupleResolveResult& fromRR,
+                ILSpy::Decompiler::TypeSystem::IType& toType,
+                bool isExplicit);
+
+// The C# `Conversion TupleConversion(IType fromType, IType toType, bool isExplicit)`
+// (CSharpConversions.cs line 1506, C# 9.0 spec sections 10.2.13 + 10.3.6) -- the tuple-type ->
+// tuple-type conversion (the IType overload, consumed by `StandardImplicitConversion`'s tuple
+// arm, `ExplicitConversionImpl`'s tail, and the public `ExplicitConversion(IType, IType)` via
+// `ExplicitConversionImpl`). Flattens both sides via `TupleType.GetTupleElementTypes` (D539);
+// if the source is not a tuple (`IsDefaultOrEmpty`) or the target is not a tuple (`IsDefault`) or
+// the element counts differ, returns `None`. Otherwise converts each element pair via the public
+// `ImplicitConversion` / `ExplicitConversion` (the C# `this.ImplicitConversion` /
+// `this.ExplicitConversion`) and returns `Conversion.TupleConversion(elementConversions)` only
+// when every element conversion is valid; any invalid element conversion short-circuits to
+// `None`. Mirrors the `TupleResolveResult` overload with the source flattened via
+// `GetTupleElementTypes(fromType)` instead of `fromRR.Elements()`.
+//
+// The C# `IsDefaultOrEmpty` / `IsDefault` checks port to `!has_value() || value.empty()` /
+// `!has_value()` (the D539 `std::optional<std::vector<ITypePtr>>` convention). The per-element
+// `GetTupleElementTypes` results are `ITypePtr` whose deref yields `IType&` non-const directly
+// (no `const_cast` needed, unlike the `TupleResolveResult` overload whose `Elements()` yields
+// `const IType&`). Threads `const ICompilation&` (the per-element conversion calls) and takes
+// `IType&` non-const (the `GetTupleElementTypes` const-overload returns `const IType&`, but the
+// per-element `ImplicitConversion` / `ExplicitConversion` take `IType&` non-const -- the element
+// `ITypePtr` deref already yields non-const `IType&`). Returns `std::shared_ptr<Conversion>`.
+std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
+TupleConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                ILSpy::Decompiler::TypeSystem::IType& fromType,
+                ILSpy::Decompiler::TypeSystem::IType& toType,
+                bool isExplicit);
 
 // The C# `bool IsBetterIntegralType(TypeCode t1, TypeCode t2)` (CSharpConversions.cs line 1697,
 // C# 9.0 spec section 12.6.4.7 "better conversion target" -- the integral-type tiebreak) -- true

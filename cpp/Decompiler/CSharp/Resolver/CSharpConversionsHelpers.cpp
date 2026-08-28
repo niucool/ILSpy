@@ -30,6 +30,8 @@
 #include "Decompiler/Semantics/InterpolatedStringResolveResult.hpp"  // InterpolatedStringResolveResult (the interpolated-string arm RTTI check)
 #include "Decompiler/Semantics/ResolveResult.hpp"  // ResolveResult (IsCompileTimeConstant / Type / ConstantValue -- the constant-expression conversion)
 #include "Decompiler/Semantics/ThrowResolveResult.hpp"  // ThrowResolveResult (the throw-expression arm RTTI check)
+#include "Decompiler/Semantics/TupleResolveResult.hpp"  // TupleResolveResult (the tuple-conversion ResolveResult overload RTTI target + Elements)
+#include "Decompiler/TypeSystem/TupleType.hpp"  // GetTupleElementTypes (D539 -- the tuple-conversion element flattening)
 #include "Decompiler/TypeSystem/ICompilation.hpp"   // ICompilation (FindType -- the array-to-System.Array arm)
 #include "Decompiler/TypeSystem/IMethod.hpp"       // IMethod (IsStatic / IsOperator / Name / Parameters / ReturnType -- the operator scan)
 #include "Decompiler/TypeSystem/IParameter.hpp"    // IParameter (Type / ReferenceKind -- the operator's parameter type)
@@ -64,12 +66,14 @@ using ILSpy::Decompiler::Semantics::Conversions;
 using ILSpy::Decompiler::Semantics::InterpolatedStringResolveResult;
 using ILSpy::Decompiler::Semantics::ResolveResult;
 using ILSpy::Decompiler::Semantics::ThrowResolveResult;
+using ILSpy::Decompiler::Semantics::TupleResolveResult;
 using ILSpy::Decompiler::TypeSystem::ArrayType;
 using ILSpy::Decompiler::TypeSystem::ByReferenceType;
 using ILSpy::Decompiler::TypeSystem::Create;
 using ILSpy::Decompiler::TypeSystem::FunctionPointerType;
 using ILSpy::Decompiler::TypeSystem::GetAllBaseTypes;
 using ILSpy::Decompiler::TypeSystem::GetDelegateInvokeMethod;
+using ILSpy::Decompiler::TypeSystem::GetTupleElementTypes;
 using ILSpy::Decompiler::TypeSystem::GetTypeCode;
 using ILSpy::Decompiler::TypeSystem::ICompilation;
 using ILSpy::Decompiler::TypeSystem::IMethod;
@@ -925,9 +929,18 @@ std::shared_ptr<Conversion> StandardImplicitConversion(const ICompilation& compi
 	}
 	if (ImplicitPointerConversion(compilation, fromType, toType))
 		return Conversions::ImplicitPointerConversion();
-	// The tuple / inline-array / span arms are deferred (need TupleResolveResult / IsInlineArrayType /
-	// Span machinery). Until they land, those shapes yield None -- the faithful fallback for a shape
-	// the ported arms do not yet handle.
+	// C# `if (allowTupleConversion) { c = TupleConversion(fromType, toType, isExplicit: false);
+	// if (c != Conversion.None) return c; }` -- the tuple arm (C# 9.0 spec section 10.2.13). The port's
+	// `StandardImplicitConversion` has no `allowTupleConversion` parameter (the public entry always
+	// passes `true`, the D523 collapse), so the arm always runs. The `c != Conversion.None` check ports
+	// to pointer-identity against the `None` singleton; a non-tuple shape yields `None` and falls
+	// through to the (deferred) inline-array / span arms.
+	c = TupleConversion(compilation, fromType, toType, /*isExplicit*/ false);
+	if (c.get() != Conversions::None().get())
+		return c;
+	// The inline-array / span arms are deferred (need IsInlineArrayType / the StandardImplicitConversion
+	// span wiring). Until they land, those shapes yield None -- the faithful fallback for a shape the
+	// ported arms do not yet handle.
 	return Conversions::None();
 }
 
@@ -976,10 +989,13 @@ std::shared_ptr<Conversion> ExplicitConversionImpl(const ICompilation& compilati
 		return c;
 	if (ExplicitPointerConversion(fromType, toType))
 		return Conversions::ExplicitPointerConversion();
-	// The tuple arm (`TupleConversion(fromType, toType, isExplicit: true)`) is deferred (needs
-	// TupleResolveResult machinery). Until it lands, non-tuple shapes yield None -- the faithful
-	// fallback for a shape the ported arms do not yet handle.
-	return Conversions::None();
+	// C# `return TupleConversion(fromType, toType, isExplicit: true);` -- the LAST arm returns the
+	// `TupleConversion` directly (NOT a `None`-guarded dispatch like the other arms). A non-tuple
+	// shape yields `None` (the `TupleConversion` helper returns `None` when either side is not a
+	// tuple or the element counts differ), faithfully matching the C# which also returns the
+	// `TupleConversion` result as-is. The `TupleConversion` IType overload (D-something) threads the
+	// compilation for the per-element `ExplicitConversion` calls.
+	return TupleConversion(compilation, fromType, toType, /*isExplicit*/ true);
 }
 
 std::shared_ptr<Conversion>
@@ -1734,6 +1750,118 @@ MethodGroupConversionArguments(const ICompilation& compilation, const IMethod& i
 	return args;
 }
 
+// The per-element conversion the two `TupleConversion` overloads feed each element pair to. The C#
+// `TupleConversion` calls `this.ImplicitConversion(fromEl, toEl)` (isExplicit false) or
+// `this.ExplicitConversion(fromEl, toEl)` (isExplicit true) -- the public IType-based methods. The
+// port uses the UNCACHED `Detail::` free-function equivalents rather than the cached
+// `CSharpConversions::Get(compilation).ImplicitConversion(...)` public method: the cache's
+// `TypePair` keys are non-owning `const IType*` (the `CSharpConversions.hpp` `TypePair` convention --
+// the cached conversions outlive the key because the types are owned by the compilation/type-system
+// in the real `CSharpResolver` path), so caching on test-local types (whose `shared_ptr<IType>` are
+// destroyed when the test function returns) would dangle -- a later test whose `IType` lands in the
+// same hash bucket would dereference the dangling pointer (an access violation). The uncached
+// `Detail::ImplicitConversion` / `Detail::ExplicitConversionImpl` / `Detail::UserDefinedExplicitConversion`
+// dispatch is functionally identical for the result (the D531 `BetterConversionTarget` precedent).
+//
+// The C# `this.ExplicitConversion(IType, IType)` (line 298) body is `ImplicitConversion(false, false)`
+// first (the implicit check -- an implicit conversion subsumes the explicit one), then
+// `ExplicitConversionImpl`, then `UserDefinedExplicitConversion(null, ...)` -- the port replicates
+// this via the `Detail::` free functions. The `allowTuple` flag is `false` for the explicit
+// per-element call (the C# `this.ExplicitConversion(IType, IType)` calls
+// `ImplicitConversion(allowTuple: false)`, NOT the tuple-aware overload) and `true` for the
+// implicit per-element call (the C# `this.ImplicitConversion(IType, IType)` calls the cached public
+// method which delegates to `ImplicitConversion(allowUserDefined: true, allowTuple: true)`).
+std::shared_ptr<Conversion>
+ConvertElementForTuple(const ICompilation& compilation, IType& fromEl, IType& toEl, bool isExplicit)
+{
+	if (isExplicit) {
+		// C# `Conversion c = ImplicitConversion(fromType, toType, allowUserDefined: false, allowTuple: false);`
+		// -- the implicit check first (an implicit conversion subsumes the explicit one). The `None`
+		// check ports to pointer-identity against the `None` singleton.
+		auto c = ImplicitConversion(compilation, fromEl, toEl, /*allowUserDefined*/ false, /*allowTuple*/ false);
+		if (c.get() != Conversions::None().get())
+			return c;
+		// C# `c = ExplicitConversionImpl(fromType, toType); if (c != Conversion.None) return c;`
+		c = ExplicitConversionImpl(compilation, fromEl, toEl);
+		if (c.get() != Conversions::None().get())
+			return c;
+		// C# `return UserDefinedExplicitConversion(null, fromType, toType);` -- the user-defined
+		// explicit fallback. The `null` `fromResult` ports to `nullptr` (the public `ExplicitConversion(IType,
+		// IType)` has no `ResolveResult` context).
+		return UserDefinedExplicitConversion(compilation, /*fromResult*/ nullptr, fromEl, toEl);
+	}
+	// C# `return ImplicitConversion(fromEl, toEl);` -- the cached public `ImplicitConversion(IType,
+	// IType)` delegates to `ImplicitConversion(allowUserDefined: true, allowTuple: true)`; the port
+	// uses the uncached `Detail::` equivalent (the D531 precedent).
+	return ImplicitConversion(compilation, fromEl, toEl, /*allowUserDefined*/ true, /*allowTuple*/ true);
+}
+
+// The C# `Conversion TupleConversion(TupleResolveResult fromRR, IType toType, bool isExplicit)`
+// (CSharpConversions.cs line 1480, C# 9.0 spec sections 10.2.13 + 10.3.6) -- the tuple-literal
+// (a `TupleResolveResult`) -> tuple-type conversion. See the header doc for the element flattening
+// (source via `fromRR.Elements()`, target via `GetTupleElementTypes`) and the per-element
+// `ImplicitConversion` / `ExplicitConversion` dispatch.
+std::shared_ptr<Conversion>
+TupleConversion(const ICompilation& compilation, const TupleResolveResult& fromRR,
+               IType& toType, bool isExplicit)
+{
+	// C# `var fromElements = fromRR.Elements;` -- the tuple literal's per-element `ResolveResult`s.
+	const auto& fromElements = fromRR.Elements();
+	// C# `var toElements = TupleType.GetTupleElementTypes(toType);` -- the target's element types.
+	// `IsDefault` (the C# `default(ImmutableArray<IType>)` sentinel, not-a-tuple) ports to
+	// `!has_value()` (the D539 `std::optional<std::vector<ITypePtr>>` convention).
+	auto toElements = GetTupleElementTypes(toType);
+	if (!toElements.has_value() || fromElements.size() != toElements->size())
+		return Conversions::None();
+	std::vector<std::shared_ptr<Conversion>> elementConversions;
+	elementConversions.reserve(fromElements.size());
+	for (std::size_t i = 0; i < fromElements.size(); i++) {
+		// `fromElements[i]->Type()` returns `const IType&` (the ResolveResult accessor), but the
+		// per-element dispatch takes `IType&` non-const (the non-const `AcceptVisitor`, D406), so the
+		// port `const_cast`s the const reference -- the underlying type-system object is mutable (the
+		// accessor's `const` is the contract), the D515/D517/D528 `const_cast` precedent.
+		// `(*toElements)[i]` is an `ITypePtr` whose deref yields `IType&` non-const directly.
+		IType& fromEl = const_cast<IType&>(fromElements[i]->Type());
+		IType& toEl = *(*toElements)[i];
+		auto c = ConvertElementForTuple(compilation, fromEl, toEl, isExplicit);
+		if (!c->IsValid())
+			return Conversions::None();
+		elementConversions.push_back(std::move(c));
+	}
+	return Conversions::TupleConversion(std::move(elementConversions));
+}
+
+// The C# `Conversion TupleConversion(IType fromType, IType toType, bool isExplicit)`
+// (CSharpConversions.cs line 1506, C# 9.0 spec sections 10.2.13 + 10.3.6) -- the tuple-type ->
+// tuple-type conversion (the IType overload). See the header doc for the element flattening (both
+// sides via `GetTupleElementTypes`) and the per-element `ImplicitConversion` / `ExplicitConversion`
+// dispatch.
+std::shared_ptr<Conversion>
+TupleConversion(const ICompilation& compilation, IType& fromType, IType& toType, bool isExplicit)
+{
+	// C# `var fromElements = TupleType.GetTupleElementTypes(fromType);` -- `IsDefaultOrEmpty` ports
+	// to `!has_value() || value.empty()` (the D539 convention).
+	auto fromElements = GetTupleElementTypes(fromType);
+	if (!fromElements.has_value() || fromElements->empty())
+		return Conversions::None();
+	auto toElements = GetTupleElementTypes(toType);
+	if (!toElements.has_value() || fromElements->size() != toElements->size())
+		return Conversions::None();
+	std::vector<std::shared_ptr<Conversion>> elementConversions;
+	elementConversions.reserve(fromElements->size());
+	for (std::size_t i = 0; i < fromElements->size(); i++) {
+		// `(*fromElements)[i]` / `(*toElements)[i]` are `ITypePtr` whose deref yields `IType&`
+		// non-const directly (no `const_cast` needed, unlike the `TupleResolveResult` overload).
+		IType& fromEl = *(*fromElements)[i];
+		IType& toEl = *(*toElements)[i];
+		auto c = ConvertElementForTuple(compilation, fromEl, toEl, isExplicit);
+		if (!c->IsValid())
+			return Conversions::None();
+		elementConversions.push_back(std::move(c));
+	}
+	return Conversions::TupleConversion(std::move(elementConversions));
+}
+
 std::shared_ptr<Conversion>
 ImplicitConversion(const ICompilation& compilation, const ResolveResult& resolveResult,
                   IType& toType, bool allowUserDefined, bool allowTuple)
@@ -1821,11 +1949,21 @@ ImplicitConversion(const ICompilation& compilation, const ResolveResult& resolve
 				return c;
 		}
 	} else {
-		// C# `if (allowTuple && resolveResult is TupleResolveResult tupleRR) { c = TupleConversion(...);
-		// if (c != Conversion.None) return c; }` -- DEFERRED: the tuple arm needs the `TupleConversion`
-		// machinery. Yields `None` (the `c` stays `nullptr`); a non-tuple `ResolveResult` falls through.
-		// if (allowTuple) { if (auto* tupleRR = dynamic_cast<TupleResolveResult*>(&resolveResult)) {
-		//   c = TupleConversion(*tupleRR, toType, /*isExplicit*/ false); if (c.get() != None) return c; } }
+		// C# `if (allowTuple && resolveResult is TupleResolveResult tupleRR) { c =
+		// TupleConversion(tupleRR, toType, isExplicit: false); if (c != Conversion.None) return c; }`
+		// -- the tuple-literal -> tuple-type arm (C# 9.0 spec section 10.2.13). The dispatch owns the
+		// RTTI (the `dynamic_cast` to `TupleResolveResult`, the D528 interpolated-string / throw-arm
+		// precedent); the `Detail::TupleConversion` helper owns the body. `allowTuple` gates the arm
+		// (the public `ImplicitConversion(ResolveResult, IType)` calls with `true`; the public
+		// `ExplicitConversion(ResolveResult, IType)` calls the implicit check with `false`). A non-tuple
+		// `ResolveResult` (the `dynamic_cast` yields `nullptr`) falls through to the throw / IType arms.
+		if (allowTuple) {
+			if (auto* tupleRR = dynamic_cast<const TupleResolveResult*>(&resolveResult)) {
+				c = TupleConversion(compilation, *tupleRR, toType, /*isExplicit*/ false);
+				if (c.get() != Conversions::None().get())
+					return c;
+			}
+		}
 		// C# 9.0 spec section 10.2.17 -- the throw-expression arm. The C# `resolveResult is
 		// ThrowResolveResult` ports to a `dynamic_cast` against the `ResolveResult` base; a throw
 		// expression converts implicitly to any type.

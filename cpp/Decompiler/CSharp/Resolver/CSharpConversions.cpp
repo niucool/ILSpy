@@ -25,6 +25,7 @@
 #include "Decompiler/CSharp/Resolver/CSharpConversionsHelpers.hpp"  // Detail::StandardImplicitConversion / Detail::ImplicitConversion / Detail::IsDelegateCompatible (the dispatch entry points)
 #include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversion / Conversions (the dispatch return singletons)
 #include "Decompiler/Semantics/ResolveResult.hpp"  // ResolveResult (the ResolveResult-based public entries)
+#include "Decompiler/Semantics/TupleResolveResult.hpp"  // TupleResolveResult (the ExplicitConversion(ResolveResult) tuple-arm RTTI)
 #include "Decompiler/TypeSystem/IMethod.hpp"  // IMethod (the IsDelegateCompatible(IMethod, IType) entry)
 #include "Decompiler/TypeSystem/TypeKind.hpp"  // TypeKind (the dynamic arm)
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // GetDelegateInvokeMethod (the IsDelegateCompatible(IMethod, IType) entry)
@@ -160,15 +161,16 @@ CSharpConversions::ExplicitConversion(const ILSpy::Decompiler::Semantics::Resolv
 		return c;
 
 	// C# `if (resolveResult is TupleResolveResult tupleRR) { c = TupleConversion(tupleRR, toType,
-	// isExplicit: true); if (c != Conversion.None) return c; }` -- DEFERRED: the tuple arm needs the
-	// `TupleConversion` machinery (the `TupleResolveResult` RTTI + the per-element conversion
-	// recursion), which is not yet ported. A non-tuple `ResolveResult` falls through exactly as the
-	// C# does when the helper returns `Conversion.None`; a tuple `ResolveResult` also falls through
-	// (the deferred arm yields `None`) -- faithful to the C# structure once `TupleConversion` lands.
-	// if (auto* tupleRR = dynamic_cast<TupleResolveResult*>(&resolveResult)) {
-	//   c = TupleConversion(*tupleRR, toType, /*isExplicit*/ true);
-	//   if (c.get() != Conversions::None().get()) return c;
-	// }
+	// isExplicit: true); if (c != Conversion.None) return c; }` -- the tuple-literal -> tuple-type arm
+	// (C# 9.0 spec section 10.3.6). The dispatch owns the RTTI (the `dynamic_cast` to
+	// `TupleResolveResult`, the D528 precedent); the `Detail::TupleConversion` helper owns the body.
+	// A non-tuple `ResolveResult` (the `dynamic_cast` yields `nullptr`) falls through to the
+	// `ExplicitConversionImpl` / user-defined arms.
+	if (auto* tupleRR = dynamic_cast<const ILSpy::Decompiler::Semantics::TupleResolveResult*>(&resolveResult)) {
+		c = Detail::TupleConversion(*compilation_, *tupleRR, toType, /*isExplicit*/ true);
+		if (c.get() != Conversions::None().get())
+			return c;
+	}
 
 	// C# `c = ExplicitConversionImpl(resolveResult.Type, toType);` -- the standard explicit
 	// dispatch. `resolveResult.Type()` returns `const IType&` but `Detail::ExplicitConversionImpl`
