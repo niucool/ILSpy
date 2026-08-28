@@ -75,9 +75,11 @@
 //      the `IType` empty defaults (DEFERRED -- the routed versions land with `GetMembersHelper`
 //      / `FakeMethod`, the blocker this leaf advances toward). `GetDefinitionOrUnknown` /
 //      `IType.GetSubstitution` (interface-level) / `IType.TypeArguments` (interface-level) /
-//      `IType.IsByRefLike` / `IType.DeclaringType` are NOT on the ported `IType` surface (omitted;
-//      the port's `IType` does not declare them -- the `DummyTypeParameter` no-such-member
-//      precedent). `INamedElement.FullName` / `Namespace` are NOT on `ITypeParameter` (the
+//      `IType.DeclaringType` is NOT on the ported `IType` surface (omitted; the port's `IType`
+//      does not declare it -- the `DummyTypeParameter` no-such-member precedent). `IType.IsByRefLike`
+//      IS on the ported `IType` surface (virtual-WITH-DEFAULT `false`, the `AbstractType.IsByRefLike
+//      => false` default -- added for the `IsBoxingConversion` guard that excludes ref structs).
+//      `INamedElement.FullName` / `Namespace` are NOT on `ITypeParameter` (the
 //      port's `ITypeParameter : IType, ISymbol` does not inherit `INamedElement`; omitted).
 //  (e) `AcceptVisitor` / `ChangeNullability` are OUT-OF-LINE in the .cpp (they need
 //      `TypeVisitor` / `NullabilityAnnotatedTypeParameter` complete). `ChangeNullability`

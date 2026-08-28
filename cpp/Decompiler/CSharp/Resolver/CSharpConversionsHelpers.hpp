@@ -236,4 +236,66 @@ bool ExplicitReferenceConversion(const ILSpy::Decompiler::TypeSystem::ICompilati
                                  ILSpy::Decompiler::TypeSystem::IType& fromType,
                                  ILSpy::Decompiler::TypeSystem::IType& toType);
 
+// The C# `bool IsBoxingConversion(IType fromType, IType toType)` (CSharpConversions.cs line 791,
+// C# 9.0 spec section 10.2.9) -- true if the conversion from `fromType` to `toType` is a boxing
+// conversion. Strips the nullable wrapper from the from-side first (a `Nullable<T>` boxes as its
+// underlying `T`), then requires: the from-side is a non-nullable value type
+// (`IsReferenceType == false`), the from-side is not by-ref-like (ref structs cannot be boxed),
+// and the to-side is a reference type (`IsReferenceType == true`); with the guard satisfied, the
+// boxing conversion is a subtype relation (`IsSubtypeOf(fromType, toType, 0)` -- the value type
+// is a subtype of the reference type it implements, e.g. `int` -> `object`).
+//
+// Pure given a compilation (reads no `CSharpConversions` instance state beyond the compilation,
+// which the `IsSubtypeOf` call threads through), so it lands as a `Detail::` free function taking
+// `const ICompilation&` (the D517 reference-cluster precedent). Takes `IType&` (non-const) like
+// the reference cluster because `GetUnderlyingType` returns `IType&` (the D515 non-const overload)
+// and `IsSubtypeOf` takes `IType&` (the non-const `AcceptVisitor`, D406).
+bool IsBoxingConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                        ILSpy::Decompiler::TypeSystem::IType& fromType,
+                        ILSpy::Decompiler::TypeSystem::IType& toType);
+
+// The C# `bool UnboxingConversion(IType fromType, IType toType)` (CSharpConversions.cs line 812,
+// C# spec draft-v11 section 10.3.7) -- true if the conversion from `fromType` to `toType` is an
+// unboxing conversion. Strips the nullable wrapper from the TO-side first (unboxing to a
+// `Nullable<T>` unboxes the underlying `T`), then requires: the from-side is a reference type
+// (`IsReferenceType == true`) and the to-side (after the nullable strip) is a value type
+// (`IsReferenceType == false`); with the guard satisfied, the unboxing conversion is a subtype
+// relation with the arguments SWAPPED (`IsSubtypeOf(toType, fromType, 0)` -- the value type is a
+// subtype of the boxed reference type it was boxed from).
+//
+// Pure given a compilation (the `IsSubtypeOf` call), so it lands as a `Detail::` free function
+// taking `const ICompilation&` like `IsBoxingConversion`. Takes `IType&` (non-const) for the same
+// reason (`GetUnderlyingType` non-const overload + `IsSubtypeOf` non-const).
+bool UnboxingConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                        ILSpy::Decompiler::TypeSystem::IType& fromType,
+                        ILSpy::Decompiler::TypeSystem::IType& toType);
+
+// The C# `bool ImplicitTypeParameterConversion(IType fromType, IType toType)` (CSharpConversions.cs
+// line 870, C# 9.0 spec section 10.2.12) -- the implicit conversion involving a type parameter.
+// Only a type parameter (`Kind == TypeParameter`) reaches the `IsSubtypeOf` arm; a type parameter
+// whose `IsReferenceType` has a definite value (`true` or `false`) is already handled by
+// `ImplicitReferenceConversion` / `IsBoxingConversion`, so only an INDETERMINATE (`std::nullopt`)
+// type parameter proceeds to `IsSubtypeOf(fromType, toType, 0)`.
+//
+// Pure given a compilation (the `IsSubtypeOf` call), so it lands as a `Detail::` free function
+// taking `const ICompilation&` like the boxing helpers. Takes `IType&` (non-const) because
+// `IsSubtypeOf` takes `IType&`. Consumed by `IsBoxingConversionOrInvolvingTypeParameter` (the
+// public boxing entry point) and the (deferred) `StandardImplicitConversion`.
+bool ImplicitTypeParameterConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                                     ILSpy::Decompiler::TypeSystem::IType& fromType,
+                                     ILSpy::Decompiler::TypeSystem::IType& toType);
+
+// The C# `public bool IsBoxingConversionOrInvolvingTypeParameter(IType fromType, IType toType)`
+// (CSharpConversions.cs line 806) -- true if the conversion is a boxing conversion OR an implicit
+// conversion involving a type parameter that might be a boxing conversion when instantiated with
+// a value type. The public entry point; delegates to `IsBoxingConversion` /
+// `ImplicitTypeParameterConversion`.
+//
+// Pure given a compilation (both callees thread it through), so it lands as a `Detail::` free
+// function taking `const ICompilation&` like its callees. Takes `IType&` (non-const) for the same
+// reason.
+bool IsBoxingConversionOrInvolvingTypeParameter(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                                                ILSpy::Decompiler::TypeSystem::IType& fromType,
+                                                ILSpy::Decompiler::TypeSystem::IType& toType);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

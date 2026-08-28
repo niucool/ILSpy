@@ -535,4 +535,63 @@ bool ExplicitReferenceConversion(const ICompilation& compilation, IType& fromTyp
 	}
 }
 
+bool IsBoxingConversion(const ICompilation& compilation, IType& fromType, IType& toType)
+{
+	// C# 9.0 spec section 10.2.9. Strip the nullable wrapper from the from-side first (a `Nullable<T>`
+	// boxes as its underlying `T`). The C# `fromType.IsReferenceType == false` is the `bool? == false`
+	// check (true ONLY when `IsReferenceType` holds `false`, not `std::nullopt`); the `toType.IsReferenceType
+	// == true` is the `bool? == true` check (true ONLY when `IsReferenceType` holds `true`); the
+	// `!fromType.IsByRefLike` excludes by-ref-like types (ref structs cannot be boxed). With the guard
+	// satisfied, the boxing conversion is a subtype relation: the value type is a subtype of the
+	// reference type it implements (e.g. `int` -> `object`). The non-const `GetUnderlyingType` overload
+	// returns `IType&` so the stripped type can feed the non-const `IsSubtypeOf`.
+	IType& from = GetUnderlyingType(fromType);
+	auto fromRef = from.IsReferenceType();
+	auto toRef = toType.IsReferenceType();
+	if (fromRef.has_value() && *fromRef == false && !from.IsByRefLike()
+		&& toRef.has_value() && *toRef == true)
+		return IsSubtypeOf(compilation, from, toType, 0);
+	return false;
+}
+
+bool UnboxingConversion(const ICompilation& compilation, IType& fromType, IType& toType)
+{
+	// C# spec (draft-v11) section 10.3.7. Strip the nullable wrapper from the TO-side first (unboxing
+	// to a `Nullable<T>` unboxes the underlying `T`). The C# `fromType.IsReferenceType == true` is the
+	// `bool? == true` check; the `toType.IsReferenceType == false` is the `bool? == false` check. With
+	// the guard satisfied, the unboxing conversion is a subtype relation with the arguments SWAPPED
+	// (`IsSubtypeOf(toType, fromType, 0)` -- the value type is a subtype of the boxed reference type).
+	IType& to = GetUnderlyingType(toType);
+	auto fromRef = fromType.IsReferenceType();
+	auto toRef = to.IsReferenceType();
+	if (fromRef.has_value() && *fromRef == true && toRef.has_value() && *toRef == false)
+		return IsSubtypeOf(compilation, to, fromType, 0);
+	return false;
+}
+
+bool ImplicitTypeParameterConversion(const ICompilation& compilation, IType& fromType, IType& toType)
+{
+	// C# 9.0 spec section 10.2.12. Only a type parameter (`Kind == TypeParameter`) reaches the
+	// `IsSubtypeOf` arm; a type parameter whose `IsReferenceType` has a definite value (`true` or
+	// `false`) is already handled by `ImplicitReferenceConversion` / `IsBoxingConversion`, so only an
+	// INDETERMINATE (`std::nullopt`) type parameter proceeds. The C# `fromType.IsReferenceType.HasValue`
+	// is the `bool?.HasValue` check (`std::optional::has_value()`).
+	if (fromType.Kind() != TypeKind::TypeParameter)
+		return false;
+	if (fromType.IsReferenceType().has_value())
+		return false;
+	return IsSubtypeOf(compilation, fromType, toType, 0);
+}
+
+bool IsBoxingConversionOrInvolvingTypeParameter(const ICompilation& compilation, IType& fromType, IType& toType)
+{
+	// The C# `return IsBoxingConversion(fromType, toType) || ImplicitTypeParameterConversion(fromType, toType);`
+	// -- a boxing conversion OR an implicit conversion involving a type parameter that might be a
+	// boxing conversion when instantiated with a value type (the `IsBoxingConversion` arm handles a
+	// concrete value type; the `ImplicitTypeParameterConversion` arm handles an unconstrained type
+	// parameter that could be a value type).
+	return IsBoxingConversion(compilation, fromType, toType)
+		|| ImplicitTypeParameterConversion(compilation, fromType, toType);
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

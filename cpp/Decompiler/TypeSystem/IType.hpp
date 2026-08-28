@@ -140,6 +140,19 @@ public:
     // inherit the `std::nullopt` default, faithful to the C# `return null`.
     virtual std::optional<bool> IsReferenceType() const { return std::nullopt; }
 
+    // Whether the type is a by-ref-like type (faithful port of IType.cs `bool IsByRefLike`):
+    // a `ref struct` (Span<T>, ReadOnlySpan<T>, ...) or a ByReferenceType. By-ref-like types
+    // cannot be boxed (the `IsBoxingConversion` guard) and are excluded from some conversions.
+    // The C# interface declares this `abstract` (no AbstractType default); the minimal port makes
+    // it virtual-WITH-DEFAULT `false` (the D406 flattened-AbstractType convention -- the C#
+    // `AbstractType.IsByRefLike => false`) so the un-overridden IType subclasses and test stubs
+    // faithfully report "not a ref struct" (the minimal type system carries no [IsByRefLike]
+    // attribute resolution). The concrete types with a clear C# value override it:
+    // ByReferenceType -> true; the delegating decorators ModifiedType / ParameterizedType forward
+    // to their element/generic type (a `Span<int>` is by-ref-like via its generic definition).
+    // Every other type inherits the `false` default.
+    virtual bool IsByRefLike() const { return false; }
+
     // The C# `Nullability Nullability { get; }` -- the nullability annotation carried by
     // the type itself (`Oblivious` when the type carries no annotation). The C# interface
     // declares it `abstract` and `AbstractType` supplies the `Nullability.Oblivious`
@@ -401,6 +414,11 @@ public:
     std::optional<bool> IsReferenceType() const override {
         return genericType_ ? genericType_->IsReferenceType() : std::nullopt;
     }
+    // Faithful port of ParameterizedType.cs `bool IsByRefLike => genericType.IsByRefLike`
+    // (delegates to the generic definition -- a `Span<int>` is by-ref-like via `Span`).
+    bool IsByRefLike() const override {
+        return genericType_ ? genericType_->IsByRefLike() : false;
+    }
     // Faithful port of ParameterizedType.cs `ITypeDefinition GetDefinition() => genericType.GetDefinition()`
     // (delegates to the generic definition; a type-argument substitution carries no definition
     // of its own -- `List<int>.GetDefinition()` is the `List` definition).
@@ -609,6 +627,10 @@ public:
     std::string ReflectionName() const override;
     int TypeParameterCount() const override { return element_ ? element_->TypeParameterCount() : 0; }
     const ITypePtr& Element() const noexcept { return element_; }
+    // Faithful port of ByReferenceType.cs `bool IsByRefLike => true` (a `ref` parameter/local IS a
+    // by-ref-like type -- the only concrete type in the minimal port that overrides `IsByRefLike`
+    // to `true`).
+    bool IsByRefLike() const override { return true; }
     // Faithful port of ByReferenceType.cs VisitChildren.
     ITypePtr AcceptVisitor(TypeVisitor& visitor) override;
     ITypePtr VisitChildren(TypeVisitor& visitor) override;
@@ -719,6 +741,11 @@ public:
     // (delegates to the decorated element type).
     std::optional<bool> IsReferenceType() const override {
         return element_ ? element_->IsReferenceType() : std::nullopt;
+    }
+    // Faithful port of ModifiedType.cs `override bool IsByRefLike => elementType.IsByRefLike`
+    // (delegates to the decorated element type -- a custom modifier does not change by-ref-like-ness).
+    bool IsByRefLike() const override {
+        return element_ ? element_->IsByRefLike() : false;
     }
     // Faithful port of ModifiedType.cs `ITypeDefinition GetDefinition() => elementType.GetDefinition()`
     // (delegates to the decorated element type; a custom modifier carries no definition).
