@@ -198,6 +198,10 @@ public:
     void AddDirectBaseType(ITypePtr base) { directBaseTypes_.push_back(std::move(base)); }
     void SetDeclaringTypeDefinition(const ITypeDefinition* d) { declaringTypeDefinition_ = d; }
     void SetStatic(bool v) { isStatic_ = v; }
+    // The variance-conversion tests need a definition that declares its own type parameters with a
+    // configurable `Variance`; the default `IType::TypeParameters()` returns `{}`. The stored
+    // pointers are non-owning (the caller keeps the `ITypeParameter` stubs alive).
+    void SetTypeParameters(std::vector<const ITypeParameter*> tps) { typeParameters_ = std::move(tps); }
 
     // --- IType ---
     TypeKind Kind() const override { return kind_; }
@@ -208,6 +212,7 @@ public:
     int TypeParameterCount() const override { return fullTypeName_.TypeParameterCount(); }
     const ITypeDefinition* GetDefinition() const override { return this; }
     std::vector<ITypePtr> DirectBaseTypes() const override { return directBaseTypes_; }
+    std::vector<const ITypeParameter*> TypeParameters() const override { return typeParameters_; }
 
     // --- ITypeDefinitionOrUnknown ---
     const TS::FullTypeName& FullTypeName() const override { return fullTypeName_; }
@@ -271,6 +276,7 @@ private:
     bool isStatic_ = false;
     const ITypeDefinition* declaringTypeDefinition_ = nullptr;
     std::vector<ITypePtr> directBaseTypes_;
+    std::vector<const ITypeParameter*> typeParameters_;
 };
 
 // A plain `IEntity` stub (NOT an IMember) -- the smallest concrete entity for
@@ -542,7 +548,8 @@ private:
 // than the C#'s would-be NRE).
 class LookupTypeParameter : public ITypeParameter {
 public:
-    explicit LookupTypeParameter(std::string name) : name_(std::move(name)) {}
+    explicit LookupTypeParameter(std::string name, VarianceModifier variance = VarianceModifier::Invariant)
+        : name_(std::move(name)), variance_(variance) {}
 
     void SetEffectiveBaseClass(ITypePtr t) { effectiveBaseClass_ = std::move(t); }
 
@@ -562,7 +569,7 @@ public:
     const IEntity* Owner() const override { return nullptr; }
     int Index() const override { return 0; }
     std::vector<const IAttribute*> GetAttributes() const override { return {}; }
-    VarianceModifier Variance() const override { return VarianceModifier::Invariant; }
+    VarianceModifier Variance() const override { return variance_; }
     ITypePtr EffectiveBaseClass() const override { return effectiveBaseClass_; }
     std::vector<ITypePtr> EffectiveInterfaceSet() const override { return {}; }
     bool HasDefaultConstructorConstraint() const override { return false; }
@@ -581,6 +588,7 @@ protected:
 
 private:
     std::string name_;
+    VarianceModifier variance_;
     ITypePtr effectiveBaseClass_;
 };
 

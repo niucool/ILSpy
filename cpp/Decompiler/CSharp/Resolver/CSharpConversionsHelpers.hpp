@@ -37,6 +37,7 @@
 #include <memory>
 
 namespace ILSpy::Decompiler::TypeSystem { class IType; }
+namespace ILSpy::Decompiler::TypeSystem { class ICompilation; }
 
 namespace ILSpy::Decompiler::Semantics { class Conversion; }
 
@@ -152,5 +153,54 @@ bool NullLiteralConversion(const ILSpy::Decompiler::TypeSystem::IType& fromType,
 // to a nullable raw pointer, the `SkipModifiers` / `GetDefinition` convention).
 const ILSpy::Decompiler::TypeSystem::IType*
 UnpackGenericArrayInterface(const ILSpy::Decompiler::TypeSystem::IType& interfaceType);
+
+// The C# `public bool IsImplicitReferenceConversion(IType fromType, IType toType)` (CSharpConversions.cs
+// line 534, C# 9.0 spec section 10.2.8) -- true if there is an implicit reference conversion from
+// `fromType` to `toType`. The public entry; delegates to `ImplicitReferenceConversion(fromType, toType, 0)`.
+// Pure given a compilation (reads no `CSharpConversions` instance state beyond the compilation, which the
+// recursion threads through for `compilation.FindType(KnownTypeCode.Array)`), so it lands as a `Detail::`
+// free function taking `const ICompilation&` (the D508 precedent) like the other conversion helpers.
+// Takes `IType&` (non-const) like `IdentityConversion` because the recursion feeds element/argument types
+// to `IdentityConversion(IType&, IType&)` (the non-const `AcceptVisitor`, the D406 convention).
+bool IsImplicitReferenceConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                                    ILSpy::Decompiler::TypeSystem::IType& fromType,
+                                    ILSpy::Decompiler::TypeSystem::IType& toType);
+
+// The C# `bool ImplicitReferenceConversion(IType fromType, IType toType, int subtypeCheckNestingDepth)`
+// (CSharpConversions.cs line 540, C# 9.0 spec section 10.2.8) -- the recursive worker behind
+// `IsImplicitReferenceConversion`. Reference conversions are possible only when both types are known
+// reference types (the `IsReferenceType == true` guard); then: array-to-array covariance (same dimensions
+// + a recursive reference conversion on the element types), single-dimensional array to `IList<T>` /
+// `ICollection<T>` / `IEnumerable<T>` / `IReadOnlyList<T>` / `IReadOnlyCollection<T>` (an identity or
+// recursive reference conversion on the element vs the unpacked type argument), any array to
+// `System.Array` (`compilation.FindType(KnownTypeCode.Array)` + recursion), or the inheritance-chain
+// `IsSubtypeOf` arm. The `subtypeCheckNestingDepth` bounds the variance recursion (C# subtyping is
+// undecidable, see Kennedy & Pierce; a depth > 10 short-circuits to false in `IsSubtypeOf`).
+bool ImplicitReferenceConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                                 ILSpy::Decompiler::TypeSystem::IType& fromType,
+                                 ILSpy::Decompiler::TypeSystem::IType& toType,
+                                 int subtypeCheckNestingDepth);
+
+// The C# `bool IsSubtypeOf(IType s, IType t, int subtypeCheckNestingDepth)` (CSharpConversions.cs line
+// 607) -- whether `s` is a subtype of `t`, used by `ImplicitReferenceConversion`, `BoxingConversion` and
+// `ImplicitTypeParameterConversion`. A conversion to `dynamic` or `object` is always possible; otherwise
+// the depth guard bounds the (undecidable) variance recursion, and `GetAllBaseTypes(s)` is traversed:
+// if any base type has an `IdentityOrVarianceConversion` to `t`, `s` is a subtype of `t`.
+bool IsSubtypeOf(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                 ILSpy::Decompiler::TypeSystem::IType& s,
+                 ILSpy::Decompiler::TypeSystem::IType& t,
+                 int subtypeCheckNestingDepth);
+
+// The C# `bool IdentityOrVarianceConversion(IType s, IType t, int subtypeCheckNestingDepth)`
+// (CSharpConversions.cs line 635) -- the per-base-type check `IsSubtypeOf` applies. When `s` has a
+// definition: it must be the same definition as `t`, and (if both are parameterized) the type arguments
+// must match by identity or by a variance-direction reference conversion (`Covariant` ->
+// `ImplicitReferenceConversion(si, ti)`, `Contravariant` -> `ImplicitReferenceConversion(ti, si)`;
+// an `Invariant` parameter or a count mismatch yields false). When `s` has no definition: a structural
+// `s.Equals(t)` (e.g. two equal type parameters).
+bool IdentityOrVarianceConversion(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                                  ILSpy::Decompiler::TypeSystem::IType& s,
+                                  ILSpy::Decompiler::TypeSystem::IType& t,
+                                  int subtypeCheckNestingDepth);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
