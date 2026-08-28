@@ -22,10 +22,12 @@
 
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
 
-#include "Decompiler/CSharp/Resolver/CSharpConversionsHelpers.hpp"  // Detail::StandardImplicitConversion / Detail::ImplicitConversion (the dispatch entry points)
+#include "Decompiler/CSharp/Resolver/CSharpConversionsHelpers.hpp"  // Detail::StandardImplicitConversion / Detail::ImplicitConversion / Detail::IsDelegateCompatible (the dispatch entry points)
 #include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversion / Conversions (the dispatch return singletons)
 #include "Decompiler/Semantics/ResolveResult.hpp"  // ResolveResult (the ResolveResult-based public entries)
+#include "Decompiler/TypeSystem/IMethod.hpp"  // IMethod (the IsDelegateCompatible(IMethod, IType) entry)
 #include "Decompiler/TypeSystem/TypeKind.hpp"  // TypeKind (the dynamic arm)
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // GetDelegateInvokeMethod (the IsDelegateCompatible(IMethod, IType) entry)
 #include "Decompiler/Util/CacheManager.hpp"  // CacheManager (Get factory)
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
@@ -186,6 +188,34 @@ CSharpConversions::ExplicitConversion(const ILSpy::Decompiler::Semantics::Resolv
 	// `const_cast` as the `ExplicitConversionImpl` call above).
 	return Detail::UserDefinedExplicitConversion(*compilation_, &resolveResult,
 	    const_cast<ILSpy::Decompiler::TypeSystem::IType&>(resolveResult.Type()), toType);
+}
+
+bool CSharpConversions::IsDelegateCompatible(const ILSpy::Decompiler::TypeSystem::IMethod& method,
+                                             const ILSpy::Decompiler::TypeSystem::IType& delegateType)
+{
+	// CSharpConversions.cs line 1421. The public delegate-compatibility entry point (the
+	// `IMethod` + `IType` overload). The C# `if (method == null) throw new ArgumentNullException(...)`
+	// / `if (delegateType == null) throw new ArgumentNullException(...)` compile out (the `const
+	// IMethod&` / `const IType&` references cannot bind to null, the D374 convention). Resolves the
+	// delegate type's `Invoke` method via `GetDelegateInvokeMethod` (the TypeSystemExtensions free
+	// function, D533 -- the C# `delegateType.GetDelegateInvokeMethod()` extension method). A
+	// non-delegate kind, or a delegate with an empty/invoke-less method table, yields null -> return
+	// `false` (a non-delegate type is never delegate-compatible with any method). Otherwise delegates
+	// to the private 3-arg `IsDelegateCompatible(method, invoke, false)` overload (the
+	// `Detail::IsDelegateCompatible` free function, D531) with `isExtensionMethodInvocation: false`
+	// (the public entry is not an extension-method invocation). The `Detail::IsDelegateCompatible`
+	// signature takes `const IMethod&` for both `m` and `d` (every `IMethod`/`IParameter` member it
+	// reads is `const`), so the resolved `const IMethod* invoke` dereferences directly to `const IMethod&`
+	// -- no `const_cast` needed here (unlike the reference/boxing helpers that `const_cast` the const
+	// `IType&` accessors to the non-const `IType&` the helpers take). The `invoke` is guaranteed
+	// non-null by the `invoke == nullptr` guard (a faithful port of the C# `if (invoke == null)
+	// return false;`).
+	const ILSpy::Decompiler::TypeSystem::IMethod* invoke =
+		ILSpy::Decompiler::TypeSystem::GetDelegateInvokeMethod(delegateType);
+	if (invoke == nullptr)
+		return false;
+	return Detail::IsDelegateCompatible(*compilation_, method, *invoke,
+	                                     /*isExtensionMethodInvocation*/ false);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

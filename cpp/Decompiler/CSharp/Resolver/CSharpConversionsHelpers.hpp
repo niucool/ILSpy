@@ -764,8 +764,8 @@ UserDefinedExplicitConversion(const ILSpy::Decompiler::TypeSystem::ICompilation&
 // (CSharpConversions.cs line 1457, C# spec draft-v11 section 21.4 "delegate compatibility") --
 // whether the method `m` is compatible with the delegate whose invoke method is `d`. The
 // private 3-arg overload the public `IsDelegateCompatible(IMethod, IType)` (which resolves the
-// delegate's invoke method via `IType.GetDelegateInvokeMethod`, not yet ported) and the
-// `MethodGroupConversion` helper both call. Tests a method against a delegate invoke method:
+// delegate's invoke method via `GetDelegateInvokeMethod`, the TypeSystemExtensions free function
+// D533) and the `MethodGroupConversion` helper both call. Tests a method against a delegate invoke method:
 // the parameter count must match (skipping `m`'s first parameter when `isExtensionMethodInvocation`
 // -- the `this` the extension syntax supplies), each corresponding parameter's `ReferenceKind` must
 // match, a ref/out/in parameter must have an identity conversion on the types (Roslyn relaxes the

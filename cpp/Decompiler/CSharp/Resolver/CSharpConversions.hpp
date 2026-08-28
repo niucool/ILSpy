@@ -64,6 +64,7 @@
 #include <utility>
 
 namespace ILSpy::Decompiler::Semantics { class ResolveResult; }  // the ResolveResult-based public entries (forward-declared; the .cpp includes the full header for Type()/Kind())
+namespace ILSpy::Decompiler::TypeSystem { class IMethod; }  // the IsDelegateCompatible(IMethod, IType) entry (forward-declared; the .cpp includes the full header)
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
 
@@ -216,6 +217,23 @@ public:
     std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>
     ExplicitConversion(const ILSpy::Decompiler::Semantics::ResolveResult& resolveResult,
                       ILSpy::Decompiler::TypeSystem::IType& toType);
+
+    // The C# `public bool IsDelegateCompatible(IMethod method, IType delegateType)`
+    // (CSharpConversions.cs line 1421, C# spec draft-v11 section 21.4 "delegate compatibility")
+    // -- the public delegate-compatibility entry point (the `IMethod` + `IType` overload).
+    // Resolves the delegate type's `Invoke` method via `GetDelegateInvokeMethod` (the
+    // TypeSystemExtensions free function, D533), returns `false` when the delegate type carries
+    // no `Invoke` method (a non-delegate kind, or a delegate with an empty/invoke-less method
+    // table), and otherwise delegates to the private 3-arg `IsDelegateCompatible(method, invoke,
+    // false)` overload (the `Detail::IsDelegateCompatible` free function, D531) with
+    // `isExtensionMethodInvocation: false` (the public entry is not an extension-method
+    // invocation). The C# `throw new ArgumentNullException` on a null `method`/`delegateType`
+    // compiles out (the `const IMethod&` / `const IType&` references cannot bind to null, the
+    // D374 convention). The `delegateType` is `const IType&` (the public entry reads only
+    // `delegateType.Kind()` via `GetDelegateInvokeMethod`, all const); the `method` is `const
+    // IMethod&` (the 3-arg helper reads only const `IMethod`/`IParameter` members). Returns `bool`.
+    bool IsDelegateCompatible(const ILSpy::Decompiler::TypeSystem::IMethod& method,
+                              const ILSpy::Decompiler::TypeSystem::IType& delegateType);
 
 private:
     const ILSpy::Decompiler::TypeSystem::ICompilation* compilation_;
