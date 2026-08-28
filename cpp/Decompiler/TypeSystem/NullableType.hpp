@@ -27,17 +27,22 @@
 //   - IsNullable            (NullableType.cs line 30)
 //   - IsNonNullableValueType (NullableType.cs line 40)
 //   - GetUnderlyingType     (NullableType.cs line 46)
+//   - Create(ICompilation, IType) (NullableType.cs line 56) -- the `Nullable<T>` constructor
+//     the user-defined-conversion lifted-operator forms build (`GetApplicableConversionOperators`
+//     calls it to lift a non-nullable-value-type operator source/target into `Nullable<T>`).
 //
-// The two `Create` overloads (line 56 + 68) build a `Nullable<T>` from an element type
-// and need an `ICompilation.FindType` / an `ITypeReference`; no in-scope consumer
-// constructs a nullable here yet, so they land with the type-system construction
-// surface that uses them.
+// The `Create(ITypeReference)` overload (line 68) builds a nullable type REFERENCE and needs the
+// `ITypeReference` / `ParameterizedTypeReference` construction surface (not yet ported); no
+// in-scope consumer constructs a nullable reference here yet, so it stays deferred with that
+// surface.
 
 #pragma once
 
 #include "Decompiler/TypeSystem/IType.hpp"
 
 namespace ILSpy::Decompiler::TypeSystem {
+
+class ICompilation;
 
 // The C# `public static bool NullableType.IsNullable(IType type)` (line 30) -- true iff
 // `type` is `Nullable<T>`: a `ParameterizedType` with exactly 1 type argument whose generic
@@ -70,5 +75,25 @@ const IType& GetUnderlyingType(const IType& type);
 // const-overload-pair: non-const input prefers this overload; const input falls back to the
 // const overload above.
 IType& GetUnderlyingType(IType& type);
+
+// The C# `public static IType NullableType.Create(ICompilation compilation, IType elementType)`
+// (NullableType.cs line 56) -- builds a `Nullable<T>` over `elementType`: resolves the known
+// `Nullable`1` definition via `compilation.FindType(KnownTypeCode.NullableOfT)`, and if that
+// resolves to a definition (the normal case), returns `new ParameterizedType(nullableTypeDef,
+// { elementType })`; if the definition cannot be resolved (`GetDefinition() == null`), returns the
+// `FindType` result itself (the un-parameterized nullable type, a defensive fallback for a type
+// system without `System.Nullable`1`).
+//
+// Returns `ITypePtr` (an OWNING shared handle): the constructed `ParameterizedType` is freshly
+// allocated, so the caller must hold the returned handle to keep it alive (the C# returns an
+// `IType` reference owned by the GC; the C++ port models that ownership as a `shared_ptr`). The
+// `ParameterizedType` constructor takes owning `ITypePtr` constituents, so the port obtains owning
+// handles to both the generic type (the resolved definition) and the element via
+// `IType::shared_from_this()` (the `enable_shared_from_this<IType>` bridge, D406): both objects are
+// shared-managed in the real type system (the definition is owned by the compilation, the element
+// by its declaring parameter/return slot), so `shared_from_this` yields a co-owning handle without
+// copying. The `else` branch likewise returns `nullableType.shared_from_this()` (the same `FindType`
+// result, viewed as an owning handle).
+ITypePtr Create(const ICompilation& compilation, const IType& elementType);
 
 } // namespace ILSpy::Decompiler::TypeSystem

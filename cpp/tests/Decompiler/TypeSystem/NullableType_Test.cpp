@@ -46,6 +46,7 @@
 namespace {
 
 using ILSpy::Decompiler::TypeSystem::Accessibility;
+using ILSpy::Decompiler::TypeSystem::Create;
 using ILSpy::Decompiler::TypeSystem::FullTypeName;
 using ILSpy::Decompiler::TypeSystem::GetUnderlyingType;
 using ILSpy::Decompiler::TypeSystem::ICompilation;
@@ -110,6 +111,30 @@ ITypePtr IsConstModifier() {
 
 ITypePtr Int32() { return std::make_shared<KnownType>(KnownTypeCode::Int32); }
 ITypePtr String() { return std::make_shared<KnownType>(KnownTypeCode::String); }
+
+// A `LookupCompilation` with the `System.Nullable`1` definition registered for `FindType`,
+// paired with the owning `shared_ptr` to that definition. The `Create` helper resolves the
+// nullable definition through `compilation.FindType(KnownTypeCode.NullableOfT)`, so the
+// `Create` tests need a compilation with the definition registered (the shared `Compilation()`
+// used by the IsNullable/GetUnderlyingType tests is not registered).
+//
+// `LookupCompilation` is non-copyable and non-movable (its `LookupModule` member holds a
+// `const ICompilation&` reference to `*this`), so the struct is HEAP-ALLOCATED via
+// `make_unique` and returned by `unique_ptr`: the pointee is never moved, so the `mainModule_`
+// reference stays valid for the test's scope.
+struct RegisteredNullable {
+	LookupCompilation compilation;
+	std::shared_ptr<LookupTypeDefinition> def;
+};
+std::unique_ptr<RegisteredNullable> MakeRegisteredNullable() {
+	auto r = std::make_unique<RegisteredNullable>();
+	r->def = std::make_shared<LookupTypeDefinition>("Nullable`1", "System",
+		FullTypeName(TopLevelTypeName("System", "Nullable`1", 1)),
+		TypeKind::Struct, Accessibility::Public, r->compilation, nullptr,
+		KnownTypeCode::NullableOfT);
+	r->compilation.RegisterKnownType(KnownTypeCode::NullableOfT, r->def.get());
+	return r;
+}
 
 } // namespace
 
@@ -209,4 +234,85 @@ TEST(NullableTypeTest, IsNonNullableValueTypeFalseForNullableValueType) {
 TEST(NullableTypeTest, IsNonNullableValueTypeFalseForIndeterminateType) {
     // UnknownType: IsReferenceType == nullopt (indeterminate), so `== false` is false.
     EXPECT_FALSE(IsNonNullableValueType(*UnknownType()));
+}
+
+// ---------------------------------------------------------------------------
+// Create -- builds a `Nullable<T>` over the element type via the compilation's
+// `Nullable`1` definition (the defensive `else` branch returns the `FindType` result
+// itself when the definition cannot be resolved).
+// ---------------------------------------------------------------------------
+
+TEST(NullableTypeTest, CreateReturnsParameterizedTypeOverNullableDef) {
+    auto r = MakeRegisteredNullable();
+    ITypePtr result = Create(r->compilation, *Int32());
+    ASSERT_NE(result, nullptr);
+    // The `Nullable`1` definition is a struct, so the parameterized type is a struct with 1 arg.
+    EXPECT_EQ(result->Kind(), TypeKind::Struct);
+    EXPECT_EQ(result->TypeParameterCount(), 1);
+    // GetDefinition() delegates to the generic type -> the registered `Nullable`1` definition.
+    EXPECT_EQ(result->GetDefinition(), r->def.get());
+}
+
+TEST(NullableTypeTest, CreateStoresElementAsTypeArgument) {
+    auto r = MakeRegisteredNullable();
+    ITypePtr element = Int32();
+    ITypePtr result = Create(r->compilation, *element);
+    ASSERT_NE(result, nullptr);
+    // `GetTypeArgument` is a `ParameterizedType` member (not on `IType`), so down-cast.
+    auto* pt = dynamic_cast<ParameterizedType*>(result.get());
+    ASSERT_NE(pt, nullptr);
+    // The element is stored via `shared_from_this` (a co-owning handle), so the type argument is
+    // the SAME instance as the element (no copy).
+    EXPECT_EQ(pt->GetTypeArgument(0).get(), element.get());
+}
+
+TEST(NullableTypeTest, CreateResultIsNullable) {
+    auto r = MakeRegisteredNullable();
+    ITypePtr result = Create(r->compilation, *Int32());
+    ASSERT_NE(result, nullptr);
+    // Round-trip: the constructed type is recognized as `Nullable<T>` by `IsNullable`.
+    EXPECT_TRUE(IsNullable(*result));
+}
+
+TEST(NullableTypeTest, CreateResultGetUnderlyingTypeReturnsElement) {
+    auto r = MakeRegisteredNullable();
+    ITypePtr element = Int32();
+    ITypePtr result = Create(r->compilation, *element);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(&GetUnderlyingType(*result), element.get());
+}
+
+TEST(NullableTypeTest, CreateReturnsFreshInstancePerCall) {
+    auto r = MakeRegisteredNullable();
+    ITypePtr element = Int32();
+    ITypePtr a = Create(r->compilation, *element);
+    ITypePtr b = Create(r->compilation, *element);
+    ASSERT_NE(a, nullptr);
+    ASSERT_NE(b, nullptr);
+    auto* pa = dynamic_cast<ParameterizedType*>(a.get());
+    auto* pb = dynamic_cast<ParameterizedType*>(b.get());
+    ASSERT_NE(pa, nullptr);
+    ASSERT_NE(pb, nullptr);
+    // Each call allocates a fresh `ParameterizedType` (the C# `new ParameterizedType(...)`).
+    EXPECT_NE(a.get(), b.get());
+    // Both wrap the same element and are nullable.
+    EXPECT_EQ(pa->GetTypeArgument(0).get(), element.get());
+    EXPECT_EQ(pb->GetTypeArgument(0).get(), element.get());
+    EXPECT_TRUE(IsNullable(*a));
+    EXPECT_TRUE(IsNullable(*b));
+}
+
+TEST(NullableTypeTest, CreateReturnsFindTypeResultWhenDefinitionIsNull) {
+    // The defensive `else` branch: `FindType` returns a non-definition (a `KnownType` placeholder,
+    // NOT an `ITypeDefinition` -- `GetDefinition() == null`), so `Create` returns the `FindType`
+    // result itself rather than building a `ParameterizedType`. The local compilation is not
+    // moved (a stack object used in place), so its `mainModule_` reference stays valid.
+    LookupCompilation comp;
+    auto nonDef = std::make_shared<KnownType>(KnownTypeCode::NullableOfT);
+    comp.RegisterKnownType(KnownTypeCode::NullableOfT, nonDef.get());
+    ITypePtr result = Create(comp, *Int32());
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result.get(), nonDef.get());
+    // The `KnownType` placeholder is not a `ParameterizedType`, so `IsNullable` is false.
+    EXPECT_FALSE(IsNullable(*result));
 }

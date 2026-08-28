@@ -21,10 +21,14 @@
 
 #include "Decompiler/TypeSystem/NullableType.hpp"
 
+#include "Decompiler/TypeSystem/ICompilation.hpp"
+#include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp" // IsKnownType, SkipModifiers
 
 #include <optional>
+#include <utility>
+#include <vector>
 
 namespace ILSpy::Decompiler::TypeSystem {
 
@@ -80,6 +84,36 @@ IType& GetUnderlyingType(IType& type)
 	// (either the underlying element owned by the `ParameterizedType`'s shared handle, or the
 	// caller's own non-const `type`) is not actually const-qualified. See the header comment.
 	return const_cast<IType&>(GetUnderlyingType(static_cast<const IType&>(type)));
+}
+
+ITypePtr Create(const ICompilation& compilation, const IType& elementType)
+{
+	// C# NullableType.Create: resolve `System.Nullable`1` via the compilation, and if the
+	// result has a definition (the normal case), build `new ParameterizedType(nullableTypeDef,
+	// { elementType })`; otherwise return the `FindType` result itself (the defensive fallback
+	// for a type system that cannot resolve `Nullable`1`).
+	const IType& nullableType = compilation.FindType(KnownTypeCode::NullableOfT);
+	const ITypeDefinition* nullableTypeDef = nullableType.GetDefinition();
+	if (nullableTypeDef != nullptr) {
+		// `nullableTypeDef` IS-an `IType` (via `ITypeDefinitionOrUnknown` -> `IType`); the
+		// `ParameterizedType` ctor takes an owning `ITypePtr` for the generic type, so obtain a
+		// co-owning handle via `shared_from_this` (the `enable_shared_from_this<IType>` bridge).
+		// `FindType` / `GetDefinition` return `const` references (the accessor contract), so the
+		// const `shared_from_this` overload yields `shared_ptr<const IType>`; the underlying
+		// type-system object is mutable (the compilation-owned definition), so
+		// `const_pointer_cast` to `ITypePtr` is safe (the D515 const-overload-pair precedent).
+		ITypePtr genericType = std::const_pointer_cast<IType>(nullableTypeDef->shared_from_this());
+		// Likewise the element is shared-managed by its declaring slot; the const `shared_from_this`
+		// yields `shared_ptr<const IType>`, cast back to a co-owning `ITypePtr` (the underlying
+		// `IType` is mutable).
+		ITypePtr element = std::const_pointer_cast<IType>(elementType.shared_from_this());
+		return std::make_shared<ParameterizedType>(std::move(genericType),
+			std::vector<ITypePtr>{ std::move(element) });
+	}
+	// `GetDefinition() == null` (e.g. a `KnownType` placeholder that is not an `ITypeDefinition`):
+	// return the `FindType` result itself, viewed as an owning handle (the object is
+	// shared-managed by the compilation; `const_pointer_cast` for the same const-accessor reason).
+	return std::const_pointer_cast<IType>(nullableType.shared_from_this());
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem
