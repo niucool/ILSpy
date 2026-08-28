@@ -133,6 +133,19 @@ bool ImplicitNumericConversion(const IType& fromType, const IType& toType)
 		                                  [toI - static_cast<int>(TypeCode::Int16)];
 }
 
+bool ExplicitEnumerationConversion(const IType& fromType, const IType& toType)
+{
+	// C# spec (draft-v11): section 10.3.3 explicit enumeration conversions. The C# `type.Kind`
+	// ports to `IType::Kind()` (the `enum class` has no implicit `bool`); the `IsNumericType` calls
+	// dispatch to the sibling helper (Detail:: scope, same TU).
+	if (fromType.Kind() == TypeKind::Enum) {
+		return toType.Kind() == TypeKind::Enum || IsNumericType(toType);
+	} else if (IsNumericType(fromType)) {
+		return toType.Kind() == TypeKind::Enum;
+	}
+	return false;
+}
+
 bool IdentityConversion(IType& fromType, IType& toType)
 {
 	// C# spec (draft-v11): section 10.2.2 identity conversion. Erase both types through the

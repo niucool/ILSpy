@@ -62,6 +62,17 @@ bool AnyNumericConversion(const ILSpy::Decompiler::TypeSystem::IType& fromType,
 bool ImplicitNumericConversion(const ILSpy::Decompiler::TypeSystem::IType& fromType,
                                const ILSpy::Decompiler::TypeSystem::IType& toType);
 
+// The C# `bool ExplicitEnumerationConversion(IType fromType, IType toType)` (CSharpConversions.cs
+// line 474, C# spec draft-v11 section 10.3.3 "explicit enumeration conversions") -- true iff an
+// explicit enumeration conversion exists from `fromType` to `toType`: enum<->enum, enum<->any
+// numeric primitive. A type with `Kind == Enum` converts to any other enum or to any numeric type;
+// a numeric type converts to any enum. (The literal-0-to-enum *implicit* enumeration conversion is
+// the separate `ImplicitEnumerationConversion(ResolveResult, IType)`, deferred with `ResolveResult`.)
+// Pure like the numeric helpers -- reads only `IType.Kind` and `IsNumericType` (no `CSharpConversions`
+// instance state) -- so it lands as a `Detail::` free function taking `const IType&`.
+bool ExplicitEnumerationConversion(const ILSpy::Decompiler::TypeSystem::IType& fromType,
+                                   const ILSpy::Decompiler::TypeSystem::IType& toType);
+
 // The C# `public bool IdentityConversion(IType fromType, IType toType)` (CSharpConversions.cs line 367,
 // C# spec draft-v11 section 10.2.2 "identity conversion") -- true if `fromType` and `toType` are the
 // same type after type erasure. Erasure (the `NormalizeTypeVisitor.TypeErasure` singleton) folds the
