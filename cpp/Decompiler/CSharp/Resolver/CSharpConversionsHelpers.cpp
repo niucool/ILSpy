@@ -2188,6 +2188,90 @@ int BetterConversionTarget(const ICompilation& compilation, IType& t1, IType& t2
 	return 0;
 }
 
+// The C# `bool IsExactlyMatching(ResolveResult e, IType t)` (CSharpConversions.cs line 1615, C# 8.0
+// spec section 12.6.4.6 "exactly matching expression"). See the header doc for the C# body and the
+// purity rationale. The lambda arm builds the delegate invoke's parameter types as owning
+// `ITypePtr` handles (the `GetInferredReturnType` signature) and the delegate return type as an
+// owning `ITypePtr`, both via `shared_from_this()` + `const_pointer_cast` (the D529 / D534
+// `AnonymousFunctionConversion` precedent -- the type-system objects are shared-managed; the
+// `const` is the accessor contract, not a guarantee).
+bool IsExactlyMatching(const ResolveResult& e, const IType& t)
+{
+	// C# `var s = e.Type; if (IdentityConversion(s, t)) return true;` -- the identity check on the
+	// resolve result's type. `e.Type()` returns `const IType&`; `IdentityConversion` takes `IType&`
+	// non-const (the non-const `AcceptVisitor`, D406), so the port `const_cast`s both sides (the
+	// underlying type-system objects are mutable; the accessor's `const` is the contract, the
+	// D515/D517 `const_cast` precedent). For a `LambdaResolveResult` the type is `NoType` (the
+	// lambda has no type), so this is false for a lambda unless `t` is also `NoType`.
+	const IType& s = e.Type();
+	if (IdentityConversion(const_cast<IType&>(s), const_cast<IType&>(t)))
+		return true;
+	// C# `if (e is LambdaResolveResult lambda) { ... } else return false;` -- the lambda arm. A
+	// non-lambda resolve result whose type is not identity-convertible to `t` does not exactly
+	// match.
+	const LambdaResolveResult* lambda = dynamic_cast<const LambdaResolveResult*>(&e);
+	if (lambda == nullptr)
+		return false;
+	// C# `if (!lambda.IsAnonymousMethod) t = UnpackExpressionTreeType(t);` -- the expression-tree
+	// unwrap runs only for lambdas (C# 3.0+); an anonymous method (C# 2.0 `delegate { }`) cannot
+	// convert to an expression tree, so the toType is left as-is. A C++ reference cannot be
+	// rebound, so the port tracks the effective toType via a `const IType*` pointer that is
+	// rebound through the unwrap.
+	const IType* effectiveT = &t;
+	if (!lambda->IsAnonymousMethod())
+		effectiveT = &UnpackExpressionTreeType(*effectiveT);
+	// C# `IMethod m = t.GetDelegateInvokeMethod(); if (m == null) return false;` -- the delegate's
+	// `Invoke` method (a non-delegate toType, or a delegate with no `Invoke`, yields `nullptr`).
+	// `GetDelegateInvokeMethod` is the TypeSystemExtensions free function (D533).
+	const IMethod* m = GetDelegateInvokeMethod(*effectiveT);
+	if (m == nullptr)
+		return false;
+	// C# `IType[] parameterTypes = new IType[m.Parameters.Count]; for (...) parameterTypes[i] =
+	// m.Parameters[i].Type;` -- the delegate invoke's parameter types, fed to `GetInferredReturnType`.
+	// `GetInferredReturnType` takes `const std::vector<ITypePtr>&`, so the port builds owning
+	// `ITypePtr` handles from the const `IParameter::Type()` references via `shared_from_this()` +
+	// `const_pointer_cast` (the D529 / D534 `AnonymousFunctionConversion` precedent).
+	auto params = m->Parameters();
+	std::vector<ITypePtr> parameterTypes;
+	parameterTypes.reserve(params.size());
+	for (const IParameter* p : params)
+		parameterTypes.push_back(std::const_pointer_cast<IType>(p->Type().shared_from_this()));
+	// C# `var x = lambda.GetInferredReturnType(parameterTypes); var y = m.ReturnType;` -- the
+	// inferred return type and the delegate invoke's return type. Both held as owning `ITypePtr`
+	// (`x` directly from `GetInferredReturnType`; `y` built from the const `m->ReturnType()`
+	// reference via `shared_from_this` + `const_pointer_cast`).
+	ITypePtr x = lambda->GetInferredReturnType(parameterTypes);
+	ITypePtr y = std::const_pointer_cast<IType>(m->ReturnType().shared_from_this());
+	// C# `if (IdentityConversion(x, y)) return true;` -- `x` / `y` are non-null in practice (the
+	// real `GetInferredReturnType` / `IMember::ReturnType` never return null); the guard avoids UB
+	// on a degenerate stub returning null (the safe faithful fallback -- the C# would NRE on a
+	// null, which never occurs in practice; skipping the check falls through to the async arm).
+	if (x && y && IdentityConversion(*x, *y))
+		return true;
+	// C# `if (lambda.IsAsync) { x = UnpackTask(x); y = UnpackTask(y); }` -- for an async lambda,
+	// unpack the `Task<T>` wrapper from both the inferred return and the delegate return.
+	// `UnpackTask(null)` returns null (the C# `IsTask(null)` is false), so a null input stays null;
+	// the port guards the deref to avoid UB (a null `x` / `y` stays null, faithfully matching the
+	// C# `UnpackTask(null) == null`).
+	if (lambda->IsAsync()) {
+		if (x)
+			x = UnpackTask(*x);
+		if (y)
+			y = UnpackTask(*y);
+	}
+	// C# `if (x != null && y != null) return IsExactlyMatching(new ResolveResult(x), y); return
+	// false;` -- the recursion: re-wrap the (possibly unpacked) inferred return type in a fresh
+	// `ResolveResult` and check whether it exactly matches the (possibly unpacked) delegate
+	// return type. A null `x` or `y` (e.g. an async return that did not unpack to a `Task<T>`)
+	// yields false. The fresh `ResolveResult` is a plain (non-lambda) resolve result, so the
+	// recursion reduces to the `IdentityConversion(s, t)` check on the unpacked types.
+	if (x && y) {
+		auto rr = std::make_shared<ResolveResult>(x);
+		return IsExactlyMatching(*rr, *y);
+	}
+	return false;
+}
+
 // The C# `public bool IsConstraintConvertible(IType fromType, IType toType)` (CSharpConversions.cs
 // line 261, C# spec section 8.4.5 "satisfying constraints"). Delegates to the already-ported helpers
 // in spec order: identity, implicit reference, the nullable-vs-boxing branch (nullable from-type ->

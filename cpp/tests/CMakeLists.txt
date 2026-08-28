@@ -98,6 +98,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Resolver/CSharpConversionsDelegateCompatibleIType_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsBetterConversion_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsUnpackTask_Test.cpp
+    Decompiler/CSharp/Resolver/CSharpConversionsIsExactlyMatching_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsAnonymousFunction_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsMethodGroupArgs_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsConstraintConvertible_Test.cpp

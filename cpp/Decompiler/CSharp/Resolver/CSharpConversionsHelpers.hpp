@@ -1100,6 +1100,37 @@ int BetterConversionTarget(const ILSpy::Decompiler::TypeSystem::ICompilation& co
                            ILSpy::Decompiler::TypeSystem::IType& t1,
                            ILSpy::Decompiler::TypeSystem::IType& t2);
 
+// The C# `bool IsExactlyMatching(ResolveResult e, IType t)` (CSharpConversions.cs line 1615,
+// C# 8.0 spec section 12.6.4.6 "exactly matching expression") -- whether the expression `e`
+// exactly matches the type `t`. An expression exactly matches a type when there is an identity
+// conversion from the expression's type to `t`; a lambda expression additionally exactly matches
+// a delegate type when, after unpacking the `Expression<T>` wrapper (for non-anonymous-method
+// lambdas) and resolving the delegate's `Invoke` method, the lambda's inferred return type
+// exactly matches the delegate's return type (recursively, with the `Task<T>` wrapper unpacked
+// for async lambdas).
+//
+// The C# body: `var s = e.Type; if (IdentityConversion(s, t)) return true; if (e is
+// LambdaResolveResult lambda) { ... } else return false;`. The lambda arm unpacks the
+// expression-tree wrapper (`UnpackExpressionTreeType` D534), resolves the delegate `Invoke`
+// (`GetDelegateInvokeMethod` D533), builds the delegate's parameter types (fed to
+// `GetInferredReturnType`), then checks `IdentityConversion(x, y)` (the inferred return vs the
+// delegate return); for an async lambda, unpacks the `Task<T>` wrapper from both (`UnpackTask`
+// D542) and recurses on the unpacked types (`IsExactlyMatching(new ResolveResult(x), y)`).
+//
+// Pure (every callee -- `IdentityConversion` D514, `UnpackExpressionTreeType` D534,
+// `GetDelegateInvokeMethod` D533, `LambdaResolveResult::GetInferredReturnType`, `UnpackTask` D542 --
+// is pure; reads no `CSharpConversions` instance state, no compilation), so it lands as a
+// `Detail::` free function taking `const ResolveResult&` (every `ResolveResult` member it reads
+// -- `Type()`, the `dynamic_cast` to `LambdaResolveResult`, `IsAnonymousMethod` / `IsAsync` /
+// `GetInferredReturnType` -- is `const`) and `const IType&` (the first `IdentityConversion` call
+// `const_cast`s both sides to `IType&` non-const -- the underlying type-system objects are
+// mutable, the accessor's `const` is the contract, the D515/D517 `const_cast` precedent; the
+// lambda arm's `GetDelegateInvokeMethod` / `UnpackExpressionTreeType` take `const IType&`). The
+// C# `t = UnpackExpressionTreeType(t)` rebind ports to a `const IType*` pointer rebound through
+// the unwrap (a C++ reference cannot be rebound). Recurses on itself. Returns `bool`.
+bool IsExactlyMatching(const ILSpy::Decompiler::Semantics::ResolveResult& e,
+                        const ILSpy::Decompiler::TypeSystem::IType& t);
+
 // The C# `public bool IsConstraintConvertible(IType fromType, IType toType)`
 // (CSharpConversions.cs line 261, C# spec section 8.4.5 "satisfying constraints") -- whether
 // `fromType` is convertible to `toType` using one of the conversions allowed when satisfying type
