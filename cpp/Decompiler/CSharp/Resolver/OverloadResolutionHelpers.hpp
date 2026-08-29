@@ -43,6 +43,10 @@ class CSharpConversions;
 // needs only a declaration, not the full definition; the .cpp includes the full header).
 namespace ILSpy::Decompiler::Semantics { class ResolveResult; }
 
+// `IType` is forward-declared (the `const IType&`/`const IType*&` parameters need only a
+// declaration, not the full definition; the .cpp includes the full header).
+namespace ILSpy::Decompiler::TypeSystem { class IType; }
+
 namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 
 // The C# `bool ResolveParameterTypes(Candidate candidate, bool useSpecializedParameters)`. Reads the
@@ -104,5 +108,30 @@ void CheckApplicabilityPassingModeAndConversions(
     CSharpConversions& conversions,
     bool allowImplicitIn,
     bool isExtensionMethodInvocation);
+
+// The C# `bool IsArrayOrArrayInterfaceType(IType type, out IType elementType)` (OverloadResolution.cs,
+// the private helper the expanded-form `BetterParamsCollectionType` tiebreak calls). Returns true and
+// sets `elementType` when `type` is an `ArrayType` (the element is the array's element type) or an
+// array-interface type (`IEnumerable<T>`/`ICollection<T>`/`IList<T>`/`IReadOnlyCollection<T>`/
+// `IReadOnlyList<T>` -- the element is the single type argument, via `IsArrayInterfaceType`). Pure
+// (reads only the type's kind / `Element()` / `TypeArguments`); no `OverloadResolution` instance state.
+bool IsArrayOrArrayInterfaceType(const ILSpy::Decompiler::TypeSystem::IType& type,
+                                 const ILSpy::Decompiler::TypeSystem::IType*& elementType);
+
+// The C# `static int MoreSpecificFormalParameter(IType t1, IType t2)` (OverloadResolution.cs) -- the
+// recursive "more specific formal parameter" tiebreak (C# spec section 7.5.3.3 / draft-v11 12.6.4.4):
+// returns 1 if `t1` is more specific, 2 if `t2` is, 0 if neither. A type parameter is less specific
+// than a non-type-parameter; two `ParameterizedType`s of equal arity recurse on the type arguments;
+// two `TypeWithElementType` types (Array/ByReference/Pointer/ModOpt/ModReq -- PinnedType is not
+// ported) recurse on the element types. Pure and recursive; no `OverloadResolution` instance state.
+int MoreSpecificFormalParameter(const ILSpy::Decompiler::TypeSystem::IType& t1,
+                                const ILSpy::Decompiler::TypeSystem::IType& t2);
+
+// The C# `static int MoreSpecificFormalParameters(IEnumerable<IType> t1, IEnumerable<IType> t2)`
+// (OverloadResolution.cs) -- zips the two type sequences (stopping at the shorter, the C# `Zip`
+// semantics) and reduces the per-pair `MoreSpecificFormalParameter` verdicts: 1 if every decisive pair
+// favours `t1`, 2 if every decisive pair favours `t2`, 0 otherwise (mixed or no decisive pairs). Pure.
+int MoreSpecificFormalParameters(const std::vector<const ILSpy::Decompiler::TypeSystem::IType*>& t1,
+                                 const std::vector<const ILSpy::Decompiler::TypeSystem::IType*>& t2);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

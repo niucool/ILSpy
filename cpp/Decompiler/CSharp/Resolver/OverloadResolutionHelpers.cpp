@@ -34,6 +34,7 @@
 #include "Decompiler/TypeSystem/ReferenceKind.hpp"  // ReferenceKind
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // IsKnownType / IsArrayInterfaceType / SkipModifiers
 
+#include <algorithm>  // std::min (the MoreSpecificFormalParameters Zip-stops-at-shorter)
 #include <string>
 #include <vector>
 
@@ -241,6 +242,129 @@ void CheckApplicabilityPassingModeAndConversions(
             }
         }
     }
+}
+
+// The C# `TypeWithElementType` abstract base (Array/ByReference/Pointer/ModOpt/ModReq -- PinnedType
+// is not ported) is flattened in the minimal port: each concrete leaf carries its own `Element()`.
+// This dispatches on `Kind()` and returns the element type for the TypeWithElementType leaves, else
+// `nullptr` -- the faithful C# `t as TypeWithElementType` + `.ElementType` (a non-`TypeWithElementType`
+// kind, or a degenerate leaf with a null element, yields `nullptr`, matching the C# `as` returning
+// `null` and avoiding a UB deref of a null element the real type system never produces).
+static const ILSpy::Decompiler::TypeSystem::IType* ElementTypeOf(
+    const ILSpy::Decompiler::TypeSystem::IType& type) {
+    using namespace ILSpy::Decompiler::TypeSystem;
+    switch (type.Kind()) {
+        case TypeKind::Array:
+            if (const auto* a = dynamic_cast<const ArrayType*>(&type)) {
+                const ITypePtr& e = a->Element();
+                return e ? e.get() : nullptr;
+            }
+            return nullptr;
+        case TypeKind::ByReference:
+            if (const auto* b = dynamic_cast<const ByReferenceType*>(&type)) {
+                const ITypePtr& e = b->Element();
+                return e ? e.get() : nullptr;
+            }
+            return nullptr;
+        case TypeKind::Pointer:
+            if (const auto* p = dynamic_cast<const PointerType*>(&type)) {
+                const ITypePtr& e = p->Element();
+                return e ? e.get() : nullptr;
+            }
+            return nullptr;
+        case TypeKind::ModOpt:
+        case TypeKind::ModReq:
+            if (const auto* m = dynamic_cast<const ModifiedType*>(&type)) {
+                const ITypePtr& e = m->Element();
+                return e ? e.get() : nullptr;
+            }
+            return nullptr;
+        default:
+            return nullptr;
+    }
+}
+
+bool IsArrayOrArrayInterfaceType(const ILSpy::Decompiler::TypeSystem::IType& type,
+                                 const ILSpy::Decompiler::TypeSystem::IType*& elementType) {
+    using namespace ILSpy::Decompiler::TypeSystem;
+    elementType = nullptr;
+    // C# `if (type is ArrayType arrayType) { elementType = arrayType.ElementType; return true; }`.
+    if (const auto* arrayType = dynamic_cast<const ArrayType*>(&type)) {
+        elementType = arrayType->Element().get();
+        return true;
+    }
+    // C# `if (type.IsArrayInterfaceType()) { elementType = type.TypeArguments[0]; return true; }`.
+    // `TypeArguments` is `ParameterizedType`-specific in the port (not on the `IType` surface), so
+    // dynamic-cast + guard. `IsArrayInterfaceType` requires `TypeParameterCount == 1`, so a real
+    // array-interface always has exactly one type argument; the guard defends a degenerate stub.
+    if (IsArrayInterfaceType(type)) {
+        const auto* pt = dynamic_cast<const ParameterizedType*>(&type);
+        if (pt != nullptr && !pt->TypeArguments().empty()) {
+            elementType = pt->TypeArguments()[0].get();
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+int MoreSpecificFormalParameter(const ILSpy::Decompiler::TypeSystem::IType& t1,
+                                const ILSpy::Decompiler::TypeSystem::IType& t2) {
+    using namespace ILSpy::Decompiler::TypeSystem;
+    // C# `if ((t1 is ITypeParameter) && !(t2 is ITypeParameter)) return 2;` -- a type parameter is
+    // LESS specific than a non-type-parameter, so the NON-type-parameter side (t2) wins (return 2).
+    if (t1.Kind() == TypeKind::TypeParameter && t2.Kind() != TypeKind::TypeParameter)
+        return 2;
+    // C# `if ((t2 is ITypeParameter) && !(t1 is ITypeParameter)) return 1;`
+    if (t2.Kind() == TypeKind::TypeParameter && t1.Kind() != TypeKind::TypeParameter)
+        return 1;
+
+    // C# `ParameterizedType p1 = t1 as ParameterizedType; ParameterizedType p2 = t2 as ParameterizedType;`
+    const auto* p1 = dynamic_cast<const ParameterizedType*>(&t1);
+    const auto* p2 = dynamic_cast<const ParameterizedType*>(&t2);
+    if (p1 != nullptr && p2 != nullptr && p1->TypeParameterCount() == p2->TypeParameterCount()) {
+        // C# `int r = MoreSpecificFormalParameters(p1.TypeArguments, p2.TypeArguments); if (r > 0) return r;`
+        // -- falls through to the TypeWithElementType check when `r == 0` (a ParameterizedType is not a
+        // TypeWithElementType, so the fall-through is harmless).
+        const auto& ta1 = p1->TypeArguments();
+        const auto& ta2 = p2->TypeArguments();
+        std::vector<const IType*> v1;
+        std::vector<const IType*> v2;
+        v1.reserve(ta1.size());
+        v2.reserve(ta2.size());
+        for (const auto& a : ta1) v1.push_back(a.get());
+        for (const auto& b : ta2) v2.push_back(b.get());
+        int r = MoreSpecificFormalParameters(v1, v2);
+        if (r > 0)
+            return r;
+    }
+    // C# `TypeWithElementType tew1 = t1 as TypeWithElementType; ... if (tew1 != null && tew2 != null)
+    // return MoreSpecificFormalParameter(tew1.ElementType, tew2.ElementType);`
+    const IType* e1 = ElementTypeOf(t1);
+    const IType* e2 = ElementTypeOf(t2);
+    if (e1 != nullptr && e2 != nullptr) {
+        return MoreSpecificFormalParameter(*e1, *e2);
+    }
+    return 0;
+}
+
+int MoreSpecificFormalParameters(const std::vector<const ILSpy::Decompiler::TypeSystem::IType*>& t1,
+                                 const std::vector<const ILSpy::Decompiler::TypeSystem::IType*>& t2) {
+    // C# `t1.Zip(t2, ...)` stops at the shorter sequence (an `IEnumerable` `Zip` yields
+    // `min(count1, count2)` pairs).
+    bool c1IsBetter = false;
+    bool c2IsBetter = false;
+    const std::size_t n = std::min(t1.size(), t2.size());
+    for (std::size_t i = 0; i < n; i++) {
+        switch (MoreSpecificFormalParameter(*t1[i], *t2[i])) {
+            case 1: c1IsBetter = true; break;
+            case 2: c2IsBetter = true; break;
+            default: break;
+        }
+    }
+    if (c1IsBetter && !c2IsBetter) return 1;
+    if (!c1IsBetter && c2IsBetter) return 2;
+    return 0;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

@@ -68,6 +68,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Resolver/MapCorrespondingParameters_Test.cpp
     Decompiler/CSharp/Resolver/CheckApplicabilityArgumentCounts_Test.cpp
     Decompiler/CSharp/Resolver/CheckApplicabilityPassingModeAndConversions_Test.cpp
+    Decompiler/CSharp/Resolver/MoreSpecificFormalParameter_Test.cpp
     Decompiler/CSharp/Resolver/OverloadResolutionCtor_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsSkeleton_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsNumeric_Test.cpp
