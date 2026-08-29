@@ -195,4 +195,28 @@ int BetterFunctionMember(CSharpConversions& conversions,
                         const OverloadResolutionCandidate& c1,
                         const OverloadResolutionCandidate& c2);
 
+// The C# `void ConsiderIfNewCandidateIsBest(Candidate candidate)` (OverloadResolution.cs line 978) --
+// the engine step that folds a freshly-calculated candidate into the running best-candidate state.
+// It is an `OverloadResolution` instance method that reads/writes the `bestCandidate`/
+// `bestCandidateWasValidated`/`bestCandidateAmbiguousWith` fields; the port lifts it to a `Detail::`
+// free function taking those fields by reference (the D536 `CheckApplicabilityPassingModeAndConversions`
+// precedent -- the instance fields are threaded as parameters since the free function has no instance
+// state), so it is individually unit-testable. The decision: if `bestCandidate` is null, the candidate
+// becomes the new best (and `bestCandidateWasValidated` resets to false); otherwise `BetterFunctionMember(
+// candidate, bestCandidate)` decides -- 0 (neither better) overwrites `bestCandidateAmbiguousWith` with
+// the candidate (so API users can track the set of ambiguous methods after each step), 1 (the new
+// candidate is better) promotes it to best (resetting `bestCandidateWasValidated` and clearing
+// `bestCandidateAmbiguousWith`), 2 (the existing best stays best) changes nothing. `conversions` and
+// `arguments` are the `OverloadResolution` instance fields the `BetterFunctionMember` call needs (the
+// D549 precedent); the candidate and the best state are shared handles (`std::shared_ptr<
+// OverloadResolutionCandidate>`) -- the C# `bestCandidate = candidate` reference assignment ports to a
+// shared_ptr copy (the candidate is shared, not moved).
+void ConsiderIfNewCandidateIsBest(
+    CSharpConversions& conversions,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+    std::shared_ptr<OverloadResolutionCandidate>& bestCandidate,
+    bool& bestCandidateWasValidated,
+    std::shared_ptr<OverloadResolutionCandidate>& bestCandidateAmbiguousWith,
+    const std::shared_ptr<OverloadResolutionCandidate>& candidate);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

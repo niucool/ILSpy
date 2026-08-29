@@ -646,4 +646,43 @@ int BetterFunctionMember(CSharpConversions& conversions,
     return 0;
 }
 
+void ConsiderIfNewCandidateIsBest(
+    CSharpConversions& conversions,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+    std::shared_ptr<OverloadResolutionCandidate>& bestCandidate,
+    bool& bestCandidateWasValidated,
+    std::shared_ptr<OverloadResolutionCandidate>& bestCandidateAmbiguousWith,
+    const std::shared_ptr<OverloadResolutionCandidate>& candidate) {
+    // C# `if (bestCandidate == null) { bestCandidate = candidate; bestCandidateWasValidated = false; }`
+    // -- the first candidate becomes the best. A default-constructed `std::shared_ptr` is empty (the
+    // C# `null`); the shared_ptr copy ports the C# reference assignment (the candidate is shared).
+    if (!bestCandidate) {
+        bestCandidate = candidate;
+        bestCandidateWasValidated = false;
+        return;
+    }
+    // C# `switch (BetterFunctionMember(candidate, bestCandidate))` -- the NEW candidate is `c1`, the
+    // existing best is `c2` (note the argument order: `candidate` first, `bestCandidate` second). Both
+    // are non-null here (the `!bestCandidate` guard above and the caller's non-null candidate), so the
+    // derefs are safe.
+    switch (BetterFunctionMember(conversions, arguments, *candidate, *bestCandidate)) {
+        case 0:
+            // C# `// Overwrite 'bestCandidateAmbiguousWith' so that API users can detect the set of all
+            // ambiguous methods if they look at bestCandidateAmbiguousWith after each step.` -- the
+            // candidate is recorded as ambiguous WITH the current best (the best itself stays).
+            bestCandidateAmbiguousWith = candidate;
+            break;
+        case 1:
+            // The new candidate is better -> promote it to best, reset the validation flag, and clear
+            // any previously-recorded ambiguous partner.
+            bestCandidate = candidate;
+            bestCandidateWasValidated = false;
+            bestCandidateAmbiguousWith.reset();
+            break;
+        // C# `// case 2: best candidate stays best` -- no state change.
+        default:
+            break;
+    }
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
