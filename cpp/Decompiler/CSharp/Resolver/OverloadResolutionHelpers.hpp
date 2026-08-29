@@ -134,4 +134,22 @@ int MoreSpecificFormalParameter(const ILSpy::Decompiler::TypeSystem::IType& t1,
 int MoreSpecificFormalParameters(const std::vector<const ILSpy::Decompiler::TypeSystem::IType*>& t1,
                                  const std::vector<const ILSpy::Decompiler::TypeSystem::IType*>& t2);
 
+// The C# `int BetterParamsCollectionType(IType paramsCollectionType1, IType paramsCollectionType2)`
+// (OverloadResolution.cs, the C# 13.0 params-collection "better function member" tiebreak -- see
+// https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/proposals/csharp-13.0/params-collections#better-function-member).
+// Returns 1 if `paramsCollectionType1` is the better params-collection type, 2 if
+// `paramsCollectionType2` is, 0 if neither. The two types are the candidates' `ParamsCollectionType`
+// (the expanded form's last parameter type). The non-span arm prefers the type that implicitly
+// converts to the other but not vice versa (`conversions.ImplicitConversion(IType, IType).IsValid`);
+// the span arms prefer `ReadOnlySpan<T>` over `Span<T>` and a `Span<T>`/`ReadOnlySpan<T>` over an
+// array/array-interface when the element types identity-match. `conversions.IdentityConversion`
+// (C# public) ports to the `Detail::IdentityConversion` free function (the port has no public
+// `IdentityConversion` method); `conversions.ImplicitConversion` is the cached public entry (threaded
+// via `CSharpConversions&`, the `OverloadResolution.conversions` field). Takes `IType&` non-const
+// (the implicit-conversion dispatch and `IdentityConversion` take non-const `IType&`, the non-const
+// `AcceptVisitor`, D406).
+int BetterParamsCollectionType(CSharpConversions& conversions,
+                               ILSpy::Decompiler::TypeSystem::IType& paramsCollectionType1,
+                               ILSpy::Decompiler::TypeSystem::IType& paramsCollectionType2);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

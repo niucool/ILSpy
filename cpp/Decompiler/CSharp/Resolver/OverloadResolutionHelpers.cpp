@@ -22,6 +22,7 @@
 #include "Decompiler/CSharp/Resolver/OverloadResolutionHelpers.hpp"
 
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"  // CSharpConversions (ImplicitConversion(ResolveResult, IType))
+#include "Decompiler/CSharp/Resolver/CSharpConversionsHelpers.hpp"  // Detail::IdentityConversion (the BetterParamsCollectionType span arms)
 #include "Decompiler/CSharp/Resolver/OverloadResolutionErrors.hpp"  // TooManyPositionalArguments / NoParameterFoundForNamedArgument
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"  // dynamic_cast<ByReferenceResolveResult>
 #include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversions::None() (the unmapped-argument conversion)
@@ -364,6 +365,86 @@ int MoreSpecificFormalParameters(const std::vector<const ILSpy::Decompiler::Type
     }
     if (c1IsBetter && !c2IsBetter) return 1;
     if (!c1IsBetter && c2IsBetter) return 2;
+    return 0;
+}
+
+int BetterParamsCollectionType(CSharpConversions& conversions,
+                               ILSpy::Decompiler::TypeSystem::IType& paramsCollectionType1,
+                               ILSpy::Decompiler::TypeSystem::IType& paramsCollectionType2) {
+    using namespace ILSpy::Decompiler::TypeSystem;
+    using ILSpy::Decompiler::CSharp::Resolver::Detail::IdentityConversion;
+
+    // C# `bool isSpan1 = ...IsKnownType(SpanOfT) || ...IsKnownType(ReadOnlySpanOfT);` etc. -- the free
+    // `IsKnownType` reads the type's own `GetDefinition()?.KnownTypeCode` (no `FindType`).
+    bool isSpan1 = IsKnownType(paramsCollectionType1, KnownTypeCode::SpanOfT) ||
+                  IsKnownType(paramsCollectionType1, KnownTypeCode::ReadOnlySpanOfT);
+    bool isSpan2 = IsKnownType(paramsCollectionType2, KnownTypeCode::SpanOfT) ||
+                  IsKnownType(paramsCollectionType2, KnownTypeCode::ReadOnlySpanOfT);
+
+    // A small helper to extract the first type argument of a `Span<T>`/`ReadOnlySpan<T>` -- the C#
+    // `t.TypeArguments[0]` where `t` is a `ParameterizedType`. The port's `TypeArguments()` is
+    // `ParameterizedType`-specific (not on the `IType` surface), so the `dynamic_cast` + guard avoids
+    // UB on a degenerate stub (the D516 null-guard precedent). Returns null when `t` is not a
+    // parameterized type or carries no type arguments; the caller guards before dereferencing.
+    auto firstTypeArg = [](IType& t) -> IType* {
+        auto* pt = dynamic_cast<ParameterizedType*>(&t);
+        if (pt == nullptr || pt->TypeArguments().empty())
+            return nullptr;
+        return pt->TypeArguments()[0].get();
+    };
+
+    // The C# `out var elementType2`/`out var elementType1` locals, declared before the `else if`
+    // chain (C++ `else if` conditions cannot declare inline like C# `out var`).
+    // `IsArrayOrArrayInterfaceType` resets the out param to `nullptr` at the top, so reusing the
+    // locals across the chain is safe (no stale value).
+    const IType* elementType2 = nullptr;
+    const IType* elementType1 = nullptr;
+
+    if (!isSpan1 && !isSpan2) {
+        // C# `conversions.ImplicitConversion(p1, p2).IsValid` -- the cached public entry. The cache
+        // is local to the `CSharpConversions` instance (the `OverloadResolution.conversions` field);
+        // a test-constructed instance's cache dies with the instance (no cross-test dangling, unlike
+        // `CSharpConversions::Get`, the D528/D540 caveat).
+        bool implicitConversion1to2 = conversions.ImplicitConversion(
+            paramsCollectionType1, paramsCollectionType2)->IsValid();
+        bool implicitConversion2to1 = conversions.ImplicitConversion(
+            paramsCollectionType2, paramsCollectionType1)->IsValid();
+        if (implicitConversion1to2 && !implicitConversion2to1)
+            return 1;
+        if (!implicitConversion1to2 && implicitConversion2to1)
+            return 2;
+    }
+    else if (IsKnownType(paramsCollectionType1, KnownTypeCode::ReadOnlySpanOfT) &&
+             IsKnownType(paramsCollectionType2, KnownTypeCode::SpanOfT)) {
+        // ReadOnlySpan<T> is better than Span<T> if the element types identity-match.
+        IType* a1 = firstTypeArg(paramsCollectionType1);
+        IType* a2 = firstTypeArg(paramsCollectionType2);
+        if (a1 != nullptr && a2 != nullptr && IdentityConversion(*a1, *a2))
+            return 1;
+    }
+    else if (IsKnownType(paramsCollectionType2, KnownTypeCode::ReadOnlySpanOfT) &&
+             IsKnownType(paramsCollectionType1, KnownTypeCode::SpanOfT)) {
+        // The mirror: Span<T> vs ReadOnlySpan<T> -> ReadOnlySpan<T> (the second arg) is better.
+        IType* a1 = firstTypeArg(paramsCollectionType1);
+        IType* a2 = firstTypeArg(paramsCollectionType2);
+        if (a1 != nullptr && a2 != nullptr && IdentityConversion(*a2, *a1))
+            return 2;
+    }
+    else if (isSpan1 && IsArrayOrArrayInterfaceType(paramsCollectionType2, elementType2)) {
+        // Span<T>/ReadOnlySpan<T> is better than an array/array-interface if the element types
+        // identity-match.
+        IType* a1 = firstTypeArg(paramsCollectionType1);
+        if (a1 != nullptr && elementType2 != nullptr &&
+            IdentityConversion(*a1, const_cast<IType&>(*elementType2)))
+            return 1;
+    }
+    else if (isSpan2 && IsArrayOrArrayInterfaceType(paramsCollectionType1, elementType1)) {
+        // The mirror: the array is the first arg, the span is the second -> the span wins (return 2).
+        IType* a2 = firstTypeArg(paramsCollectionType2);
+        if (a2 != nullptr && elementType1 != nullptr &&
+            IdentityConversion(*a2, const_cast<IType&>(*elementType1)))
+            return 2;
+    }
     return 0;
 }
 
