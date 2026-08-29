@@ -368,6 +368,56 @@ int MoreSpecificFormalParameters(const std::vector<const ILSpy::Decompiler::Type
     return 0;
 }
 
+int MoreSpecificFormalParameters(const OverloadResolutionCandidate& c1,
+                                 const OverloadResolutionCandidate& c2) {
+    using namespace ILSpy::Decompiler::TypeSystem;
+    // C# `int r = c1.Parameters.Count.CompareTo(c2.Parameters.Count);` -- prefer the member with MORE
+    // formal parameters (in case both have different numbers of optional parameters).
+    const auto& params1 = c1.Parameters();
+    const auto& params2 = c2.Parameters();
+    if (params1.size() > params2.size())
+        return 1;
+    if (params1.size() < params2.size())
+        return 2;
+    // C# `c1.Parameters.Select(p => p.Type)` -- build the two type sequences (non-owning `const IType*`
+    // per parameter, the `MoreSpecificFormalParameters(IEnumerable<IType>)` overload convention) and
+    // delegate to the type-sequence tiebreak.
+    std::vector<const IType*> t1;
+    std::vector<const IType*> t2;
+    t1.reserve(params1.size());
+    t2.reserve(params2.size());
+    for (const auto* p : params1) t1.push_back(&p->Type());
+    for (const auto* p : params2) t2.push_back(&p->Type());
+    return MoreSpecificFormalParameters(t1, t2);
+}
+
+int BetterParameterPassingChoice(const OverloadResolutionCandidate& c1,
+                                 const OverloadResolutionCandidate& c2) {
+    using namespace ILSpy::Decompiler::TypeSystem;
+    // C# `Debug.Assert(c1.Parameters.Count == c2.Parameters.Count, ...)` -- the port assumes the equal
+    // count (the caller `BetterFunctionMember` reaches this only after the formal-parameter tiebreaks
+    // established equal arity); the loop bounds at the smaller count to avoid an out-of-range read if a
+    // degenerate stub violates the invariant (the C# `Debug.Assert` is a debug-only precondition).
+    bool c1IsBetter = false;
+    bool c2IsBetter = false;
+    const auto& params1 = c1.Parameters();
+    const auto& params2 = c2.Parameters();
+    const std::size_t n = std::min(params1.size(), params2.size());
+    for (std::size_t i = 0; i < n; i++) {
+        ReferenceKind refKind1 = params1[i]->ReferenceKind();
+        ReferenceKind refKind2 = params2[i]->ReferenceKind();
+        // by-value (`None`) is better than `in`; the two `if`s (NOT `else if`) mirror the C# so a
+        // position where c1 is by-value/in (c2 in/by-value) sets BOTH flags (a mixed verdict).
+        if (refKind1 == ReferenceKind::None && refKind2 == ReferenceKind::In)
+            c1IsBetter = true;
+        if (refKind1 == ReferenceKind::In && refKind2 == ReferenceKind::None)
+            c2IsBetter = true;
+    }
+    if (c1IsBetter && !c2IsBetter) return 1;
+    if (!c1IsBetter && c2IsBetter) return 2;
+    return 0;
+}
+
 int BetterParamsCollectionType(CSharpConversions& conversions,
                                ILSpy::Decompiler::TypeSystem::IType& paramsCollectionType1,
                                ILSpy::Decompiler::TypeSystem::IType& paramsCollectionType2) {

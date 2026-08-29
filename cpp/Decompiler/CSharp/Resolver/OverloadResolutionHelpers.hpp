@@ -134,6 +134,24 @@ int MoreSpecificFormalParameter(const ILSpy::Decompiler::TypeSystem::IType& t1,
 int MoreSpecificFormalParameters(const std::vector<const ILSpy::Decompiler::TypeSystem::IType*>& t1,
                                  const std::vector<const ILSpy::Decompiler::TypeSystem::IType*>& t2);
 
+// The C# `int MoreSpecificFormalParameters(Candidate c1, Candidate c2)` (OverloadResolution.cs) -- the
+// Candidate-taking entry the `BetterFunctionMember` tiebreak calls. It first prefers the member with
+// MORE formal parameters (in case both have different numbers of optional parameters), then falls back
+// to the type-sequence overload over the two candidates' parameter types (`c.Parameters.Select(p => p.Type)`).
+// Pure (reads only the candidates' `Parameters()`); no `OverloadResolution` instance state.
+int MoreSpecificFormalParameters(const OverloadResolutionCandidate& c1,
+                                 const OverloadResolutionCandidate& c2);
+
+// The C# `int BetterParameterPassingChoice(Candidate c1, Candidate c2)` (OverloadResolution.cs) -- the
+// C# 7.2 "prefer by-value parameters over in-parameters" tiebreak (`BetterFunctionMember` calls it after
+// the lifted-operator tiebreak). For each parameter position (the two candidates have the same parameter
+// count), a by-value (`ReferenceKind::None`) parameter beats an `in` (`ReferenceKind::In`) parameter; the
+// direction-exclusive reduction (`c1IsBetter && !c2IsBetter` -> 1, the mirror -> 2, else 0) follows the
+// `MoreSpecificFormalParameters` convention. Pure (reads only the candidates' `Parameters()`); no
+// `OverloadResolution` instance state.
+int BetterParameterPassingChoice(const OverloadResolutionCandidate& c1,
+                                 const OverloadResolutionCandidate& c2);
+
 // The C# `int BetterParamsCollectionType(IType paramsCollectionType1, IType paramsCollectionType2)`
 // (OverloadResolution.cs, the C# 13.0 params-collection "better function member" tiebreak -- see
 // https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/proposals/csharp-13.0/params-collections#better-function-member).
