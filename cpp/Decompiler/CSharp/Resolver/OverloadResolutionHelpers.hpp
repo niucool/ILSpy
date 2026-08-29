@@ -170,4 +170,29 @@ int BetterParamsCollectionType(CSharpConversions& conversions,
                                ILSpy::Decompiler::TypeSystem::IType& paramsCollectionType1,
                                ILSpy::Decompiler::TypeSystem::IType& paramsCollectionType2);
 
+// The C# `int BetterFunctionMember(Candidate c1, Candidate c2)` (OverloadResolution.cs line 730,
+// C# spec draft-v11 section 12.6.4.3 "better function member") -- returns 1 if `c1` is the better
+// function member, 2 if `c2` is, 0 if neither. The full decision: prefer the applicable candidate
+// (the `ErrorCount==0` heuristic), then the per-argument better-conversion loop (the argument-to-
+// parameter map + `conversions.IdentityConversion` over the formal parameter types +
+// `conversions.BetterConversion` of each argument to the two target parameter types -- the
+// direction-exclusive `c1IsBetter`/`c2IsBetter` reduction), then the less-errors heuristic, then the
+// tie-breaking rules (only when neither is better AND the parameter types are all equal): non-
+// generic beats generic, non-expanded beats expanded, fewer arguments-to-params, no-unmapped-
+// optional-parameters, `MoreSpecificFormalParameters`, non-lifted operators (a `dynamic_cast` to
+// `ILiftedOperator` -- the C# `Member as ILiftedOperator`), `BetterParameterPassingChoice`, and
+// `BetterParamsCollectionType` (when both are expanded). `conversions.IdentityConversion` (C#
+// public) ports to `Detail::IdentityConversion` (the port has no public `IdentityConversion`
+// method, the D547 precedent); `conversions.BetterConversion` is the public `BetterConversion(
+// ResolveResult, IType, IType)` entry (D544). The `arguments` and `conversions` are the
+// `OverloadResolution` instance fields (the free function takes them as parameters, the
+// D536 `CheckApplicabilityPassingModeAndConversions` precedent); the two candidates are passed by
+// const ref (every candidate accessor read is const). The `Member()` accessor returns a
+// `const IParameterizedMember*`; the lifted-operator check is a `dynamic_cast<const
+// ILiftedOperator*>` cross-cast (the standalone `ILiftedOperator` base, the D549 interface).
+int BetterFunctionMember(CSharpConversions& conversions,
+                        const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+                        const OverloadResolutionCandidate& c1,
+                        const OverloadResolutionCandidate& c2);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

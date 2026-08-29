@@ -23,6 +23,7 @@
 
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"  // CSharpConversions (ImplicitConversion(ResolveResult, IType))
 #include "Decompiler/CSharp/Resolver/CSharpConversionsHelpers.hpp"  // Detail::IdentityConversion (the BetterParamsCollectionType span arms)
+#include "Decompiler/CSharp/Resolver/ILiftedOperator.hpp"  // ILiftedOperator (the BetterFunctionMember non-lifted-operator tiebreak)
 #include "Decompiler/CSharp/Resolver/OverloadResolutionErrors.hpp"  // TooManyPositionalArguments / NoParameterFoundForNamedArgument
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"  // dynamic_cast<ByReferenceResolveResult>
 #include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversions::None() (the unmapped-argument conversion)
@@ -494,6 +495,153 @@ int BetterParamsCollectionType(CSharpConversions& conversions,
         if (a2 != nullptr && elementType1 != nullptr &&
             IdentityConversion(*a2, const_cast<IType&>(*elementType1)))
             return 2;
+    }
+    return 0;
+}
+
+int BetterFunctionMember(CSharpConversions& conversions,
+                        const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+                        const OverloadResolutionCandidate& c1,
+                        const OverloadResolutionCandidate& c2) {
+    using namespace ILSpy::Decompiler::TypeSystem;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+
+    // C# `if (c1.ErrorCount == 0 && c2.ErrorCount > 0) return 1;` etc. -- the "prefer applicable
+    // members" heuristic (produces a best candidate even if none is applicable).
+    if (c1.ErrorCount() == 0 && c2.ErrorCount() > 0)
+        return 1;
+    if (c1.ErrorCount() > 0 && c2.ErrorCount() == 0)
+        return 2;
+
+    // C# 4.0 spec section 7.5.3.2 "Better function member" -- the per-argument better-conversion
+    // loop. `c1IsBetter`/`c2IsBetter` are the direction-exclusive flags; `parameterTypesEqual`
+    // tracks whether every mapped-argument pair has identity-convertible formal parameter types
+    // (the gate for the tie-breaking rules below).
+    bool c1IsBetter = false;
+    bool c2IsBetter = false;
+    bool parameterTypesEqual = true;
+    const auto& map1 = c1.ArgumentToParameterMap();
+    const auto& map2 = c2.ArgumentToParameterMap();
+    const auto& paramTypes1 = c1.ParameterTypes();
+    const auto& paramTypes2 = c2.ParameterTypes();
+    for (std::size_t i = 0; i < arguments.size(); i++) {
+        // C# `int p1 = c1.ArgumentToParameterMap[i]; int p2 = c2.ArgumentToParameterMap[i];`.
+        int p1 = (i < map1.size()) ? map1[i] : -1;
+        int p2 = (i < map2.size()) ? map2[i] : -1;
+        if (p1 >= 0 && p2 < 0) {
+            // c1 maps the argument, c2 does not -> c1 is better for this argument.
+            c1IsBetter = true;
+        } else if (p1 < 0 && p2 >= 0) {
+            // The mirror.
+            c2IsBetter = true;
+        } else if (p1 >= 0 && p2 >= 0) {
+            // Both map the argument -- compare the formal parameter types and the argument's
+            // better conversion to the two target types. `ParameterTypes[p]` is sized by the
+            // candidate and filled by `ResolveParameterTypes`/`RunTypeInference` before
+            // `BetterFunctionMember` runs (after `CheckApplicability`); a defensive null-guard
+            // skips the comparison for a degenerate null entry (the C# would NRE on a null
+            // `ParameterTypes[p]`, which the real pipeline never produces -- the D516 null-guard
+            // precedent), avoiding UB and leaving `parameterTypesEqual`/the better flags unchanged
+            // for this argument.
+            auto idx1 = static_cast<std::size_t>(p1);
+            auto idx2 = static_cast<std::size_t>(p2);
+            const ITypePtr& t1 = (idx1 < paramTypes1.size()) ? paramTypes1[idx1] : nullptr;
+            const ITypePtr& t2 = (idx2 < paramTypes2.size()) ? paramTypes2[idx2] : nullptr;
+            if (t1 && t2) {
+                // C# `if (!conversions.IdentityConversion(c1.ParameterTypes[p1], c2.ParameterTypes[p2]))
+                // parameterTypesEqual = false;` -- the C# public `IdentityConversion` ports to the
+                // `Detail::IdentityConversion` free function (the port has no public method, the
+                // D547 precedent). The `ITypePtr` derefs yield non-const `IType&` (the shared_ptr
+                // owns a mutable `IType`, the accessor's const is the contract) for `IdentityConversion`'s
+                // non-const `IType&` (the non-const `AcceptVisitor`, D406).
+                if (!IdentityConversion(*t1, *t2))
+                    parameterTypesEqual = false;
+                // C# `switch (conversions.BetterConversion(arguments[i], c1.ParameterTypes[p1],
+                // c2.ParameterTypes[p2]))` -- the public `BetterConversion(ResolveResult, IType, IType)`
+                // entry (D544). `*arguments[i]` is a `ResolveResult&` (the public method takes a const
+                // ref); the derefs feed the non-const `IType&` targets.
+                switch (conversions.BetterConversion(*arguments[i], *t1, *t2)) {
+                    case 1: c1IsBetter = true; break;
+                    case 2: c2IsBetter = true; break;
+                    default: break;
+                }
+            } else {
+                // A null `ParameterTypes` entry -- the degenerate state; treat the types as not
+                // equal so the tie-breaking rules do not fire on incomparable types.
+                parameterTypesEqual = false;
+            }
+        }
+    }
+    if (c1IsBetter && !c2IsBetter)
+        return 1;
+    if (!c1IsBetter && c2IsBetter)
+        return 2;
+
+    // C# `if (c1.ErrorCount < c2.ErrorCount) return 1;` etc. -- the "prefer members with less
+    // errors" heuristic.
+    if (c1.ErrorCount() < c2.ErrorCount())
+        return 1;
+    if (c1.ErrorCount() > c2.ErrorCount())
+        return 2;
+
+    if (!c1IsBetter && !c2IsBetter && parameterTypesEqual) {
+        // C# `// we need the tie-breaking rules`.
+
+        // Non-generic methods are better.
+        if (!c1.IsGenericMethod() && c2.IsGenericMethod())
+            return 1;
+        else if (c1.IsGenericMethod() && !c2.IsGenericMethod())
+            return 2;
+
+        // Non-expanded members are better.
+        if (!c1.IsExpandedForm() && c2.IsExpandedForm())
+            return 1;
+        else if (c1.IsExpandedForm() && !c2.IsExpandedForm())
+            return 2;
+
+        // C# `int r = c1.ArgumentsPassedToParams.CompareTo(c2.ArgumentsPassedToParams);` -- prefer
+        // the member with FEWER arguments mapped to the params-collection.
+        int aptp1 = c1.ArgumentsPassedToParams();
+        int aptp2 = c2.ArgumentsPassedToParams();
+        if (aptp1 < aptp2)
+            return 1;
+        else if (aptp1 > aptp2)
+            return 2;
+
+        // Prefer the member where no default values need to be substituted.
+        if (!c1.HasUnmappedOptionalParameters() && c2.HasUnmappedOptionalParameters())
+            return 1;
+        else if (c1.HasUnmappedOptionalParameters() && !c2.HasUnmappedOptionalParameters())
+            return 2;
+
+        // Compare the formal parameters.
+        int r = MoreSpecificFormalParameters(c1, c2);
+        if (r != 0)
+            return r;
+
+        // C# `ILiftedOperator lift1 = c1.Member as ILiftedOperator;` -- prefer non-lifted operators.
+        // The `Member()` accessor returns a `const IParameterizedMember*`; the `dynamic_cast` cross-
+        // casts to the standalone `ILiftedOperator` base (the C# `as ILiftedOperator`, the D549
+        // interface). A non-lifted member (no `ILiftedOperator` base) yields nullptr.
+        const ILiftedOperator* lift1 = dynamic_cast<const ILiftedOperator*>(c1.Member());
+        const ILiftedOperator* lift2 = dynamic_cast<const ILiftedOperator*>(c2.Member());
+        if (lift1 == nullptr && lift2 != nullptr)
+            return 1;
+        if (lift1 != nullptr && lift2 == nullptr)
+            return 2;
+
+        // Prefer by-value parameters over in-parameters.
+        r = BetterParameterPassingChoice(c1, c2);
+        if (r != 0)
+            return r;
+
+        if (c1.IsExpandedForm()) {
+            // C# `Debug.Assert(c2.IsExpandedForm);` -- not asserted in the port (a degenerate
+            // mismatched pair skips the tiebreak rather than aborting).
+            r = BetterParamsCollectionType(conversions, *c1.ParamsCollectionType(), *c2.ParamsCollectionType());
+            if (r != 0)
+                return r;
+        }
     }
     return 0;
 }
