@@ -1415,4 +1415,339 @@ ITypePtr GetBestCommonType(
     return typeParameters[0].FixedTo ? typeParameters[0].FixedTo : UnknownType();
 }
 
+// ===========================================================================
+// The InferTypeArguments region (TypeInference.cs lines 116-170 + 179-208 + 277-380) --
+// the main entry and the two private phases it drives (the region overview is in the
+// header).
+// ===========================================================================
+
+// The C# `void PhaseOne()` (TypeInference.cs lines 277-311, C# 4.0 spec section 7.5.2.1
+// "The first phase").
+void PhaseOne(const ICompilation& compilation, std::vector<TP>& typeParameters,
+              const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+              const std::vector<ITypePtr>& parameterTypes,
+              const std::optional<std::vector<ITypePtr>>& classTypeArguments)
+{
+    // The C# iterates the instance `arguments` array (already the common-min size, no
+    // nulls); the lift iterates to the common min of the two threaded vectors and skips a
+    // null entry (the `CalculateDependencyMatrix` convention -- the main entry has
+    // already soft-failed on nulls, so the skip covers only a degenerate direct call).
+    const std::size_t n = std::min(arguments.size(), parameterTypes.size());
+    for (std::size_t i = 0; i < n; i++) {
+        if (!arguments[i] || !parameterTypes[i])
+            continue;
+        // C# `ResolveResult Ei = arguments[i]; IType Ti = parameterTypes[i];`
+        const ILSpy::Decompiler::Semantics::ResolveResult& Ei = *arguments[i];
+        IType& Ti = *parameterTypes[i];
+
+        // C# `LambdaResolveResult lrr = Ei as LambdaResolveResult;` -- the RTTI test the
+        // dispatch owns (the `dynamic_cast`).
+        const LambdaResolveResult* lrr = dynamic_cast<const LambdaResolveResult*>(&Ei);
+        // C# `if (lrr != null) { MakeExplicitParameterTypeInference(lrr, Ti); }`
+        if (lrr != nullptr) {
+            MakeExplicitParameterTypeInference(compilation, typeParameters, *lrr, Ti);
+        }
+        // C# `if (lrr != null || Ei is MethodGroupResolveResult) {
+        //         if (OutputTypeContainsUnfixed(Ei, Ti) && !InputTypesContainsUnfixed(Ei, Ti))
+        //             MakeOutputTypeInference(Ei, Ti); }` -- the C# source comment
+        // "this is not in the spec???" -- an argument whose output types mention an
+        // unfixed parameter while its input types do not contributes an output-type
+        // inference up front (the implicitly-typed lambda whose return type closes over a
+        // type parameter of the same inference).
+        if (lrr != nullptr || dynamic_cast<const MethodGroupResolveResult*>(&Ei) != nullptr) {
+            if (OutputTypeContainsUnfixed(typeParameters, Ei, Ti)
+                && !InputTypesContainsUnfixed(typeParameters, Ei, Ti)) {
+                MakeOutputTypeInference(compilation, typeParameters, classTypeArguments, Ei, Ti);
+            }
+        }
+
+        // C# `if (IsValidType(Ei.Type)) {
+        //         if (Ti is ByReferenceType) MakeExactInference(Ei.Type, Ti);
+        //         else MakeLowerBoundInference(Ei.Type, Ti); }` -- a plain expression's
+        // own type bounds the parameter type (EXACT against a by-ref parameter shape,
+        // LOWER otherwise). `Ei.Type()` returns `const IType&` while the two workers take
+        // non-const `IType&` (the non-const `ChangeNullability`, D406), so the
+        // `const_cast` is the established safe pattern (the D515/D517 convention).
+        if (IsValidType(Ei.Type())) {
+            if (dynamic_cast<const ByReferenceType*>(&Ti) != nullptr) {
+                MakeExactInference(compilation, typeParameters,
+                                   const_cast<IType&>(Ei.Type()), Ti);
+            } else {
+                MakeLowerBoundInference(compilation, typeParameters,
+                                        const_cast<IType&>(Ei.Type()), Ti);
+            }
+        }
+    }
+}
+
+// The C# `bool PhaseTwo()` (TypeInference.cs lines 321-380, spec draft-v11 section
+// 12.6.3.3 "The second phase").
+bool PhaseTwo(const ICompilation& compilation, CSharpConversions& conversions,
+              std::vector<TP>& typeParameters,
+              const std::vector<std::vector<bool>>& dependencyMatrix,
+              const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+              const std::vector<ITypePtr>& parameterTypes,
+              const std::optional<std::vector<ITypePtr>>& classTypeArguments,
+              TypeInferenceAlgorithm algorithm)
+{
+    // C# `List<TP> typeParametersToFix = new List<TP>();
+    //     foreach (TP Xi in typeParameters) {
+    //         if (Xi.IsFixed == false) {
+    //             if (!typeParameters.Any((TP Xj) => !Xj.IsFixed && DependsOn(Xi, Xj)))
+    //                 typeParametersToFix.Add(Xi); } }`
+    // -- "All unfixed type variables Xi which do not depend on any Xj are fixed": the
+    // `Any` over the unfixed partners is the early-out loop below.
+    std::vector<TP*> typeParametersToFix;
+    for (TP& Xi : typeParameters) {
+        if (Xi.IsFixed())
+            continue;
+        bool dependsOnUnfixed = false;
+        for (const TP& Xj : typeParameters) {
+            if (!Xj.IsFixed() && DependsOn(dependencyMatrix, Xi, Xj)) {
+                dependsOnUnfixed = true;
+                break;
+            }
+        }
+        if (!dependsOnUnfixed)
+            typeParametersToFix.push_back(&Xi);
+    }
+    // C# `if (typeParametersToFix.Count == 0) { foreach (TP Xi in typeParameters) {
+    //         if (!Xi.IsFixed && Xi.HasBounds) {
+    //             if (typeParameters.Any((TP Xj) => DependsOn(Xj, Xi)))
+    //                 typeParametersToFix.Add(Xi); } } }`
+    // -- "If no such type variables exist, all unfixed type variables Xi are fixed for
+    // which all of the following hold: Xi has a non-empty set of bounds, and there is at
+    // least one type variable Xj that depends on Xi" -- the cycle-breaking fallback
+    // (a dependency cycle leaves no parameter depending on nothing, so the bounded
+    // members of a cycle get fixed to break it).
+    if (typeParametersToFix.empty()) {
+        for (TP& Xi : typeParameters) {
+            if (Xi.IsFixed() || !Xi.HasBounds())
+                continue;
+            bool anyDependsOnXi = false;
+            for (const TP& Xj : typeParameters) {
+                if (DependsOn(dependencyMatrix, Xj, Xi)) {
+                    anyDependsOnXi = true;
+                    break;
+                }
+            }
+            if (anyDependsOnXi)
+                typeParametersToFix.push_back(&Xi);
+        }
+    }
+    // C# `bool errorDuringFix = false; foreach (TP tp in typeParametersToFix) {
+    //         if (!Fix(tp)) errorDuringFix = true; }
+    //     if (errorDuringFix) return false;` -- every candidate is fixed (no early
+    // exit); a single failing fix fails the phase. The nesting level is 0: `PhaseTwo`
+    // only ever runs on a fresh top-level instance (a nested instance exists only inside
+    // `Fix`/`FindTypesInBounds`, which never re-enter the phases).
+    bool errorDuringFix = false;
+    for (TP* tp : typeParametersToFix) {
+        if (!Fix(conversions, *tp, algorithm, /*nestingLevel*/ 0))
+            errorDuringFix = true;
+    }
+    if (errorDuringFix)
+        return false;
+    // C# `bool unfixedTypeVariablesExist = typeParameters.Any((TP X) => X.IsFixed == false);`
+    bool unfixedTypeVariablesExist = false;
+    for (const TP& X : typeParameters) {
+        if (!X.IsFixed()) {
+            unfixedTypeVariablesExist = true;
+            break;
+        }
+    }
+    // C# `if (typeParametersToFix.Count == 0 && unfixedTypeVariablesExist) {
+    //         Log.WriteLine("Type inference fails: there are still unfixed TPs remaining");
+    //         return false; }` -- nothing was fixable but unfixed parameters remain: the
+    // inference fails.
+    if (typeParametersToFix.empty() && unfixedTypeVariablesExist)
+        return false;
+    // C# `else if (!unfixedTypeVariablesExist) { return true; }` -- everything is fixed.
+    if (!unfixedTypeVariablesExist)
+        return true;
+    // C# `else { for (int i = 0; i < arguments.Length; i++) { ResolveResult Ei =
+    //         arguments[i]; IType Ti = parameterTypes[i];
+    //         if (OutputTypeContainsUnfixed(Ei, Ti) && !InputTypesContainsUnfixed(Ei, Ti))
+    //             MakeOutputTypeInference(Ei, Ti); }
+    //     return PhaseTwo(); }` -- the output-type-inference loop over the remaining
+    // arguments (the newly-fixed parameters may have unblocked an argument whose output
+    // types were previously entangled), then the phase REPEATS. The common-min bound and
+    // the null-entry skip are the `PhaseOne` lift convention (the main entry has already
+    // rejected nulls).
+    const std::size_t n = std::min(arguments.size(), parameterTypes.size());
+    for (std::size_t i = 0; i < n; i++) {
+        if (!arguments[i] || !parameterTypes[i])
+            continue;
+        const ILSpy::Decompiler::Semantics::ResolveResult& Ei = *arguments[i];
+        IType& Ti = *parameterTypes[i];
+        if (OutputTypeContainsUnfixed(typeParameters, Ei, Ti)
+            && !InputTypesContainsUnfixed(typeParameters, Ei, Ti)) {
+            MakeOutputTypeInference(compilation, typeParameters, classTypeArguments, Ei, Ti);
+        }
+    }
+    return PhaseTwo(compilation, conversions, typeParameters, dependencyMatrix, arguments,
+                    parameterTypes, classTypeArguments, algorithm);
+}
+
+// The C# `public IType[] InferTypeArguments(IReadOnlyList<ITypeParameter> typeParameters,
+// IReadOnlyList<ResolveResult> arguments, IReadOnlyList<IType> parameterTypes, out bool
+// success, IReadOnlyList<IType> classTypeArguments = null)` (TypeInference.cs lines
+// 116-170).
+std::vector<ITypePtr> InferTypeArguments(
+    const ICompilation& compilation, CSharpConversions& conversions,
+    const std::vector<const ILSpy::Decompiler::TypeSystem::ITypeParameter*>& typeParameters,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+    const std::vector<ITypePtr>& parameterTypes, bool& success,
+    const std::optional<std::vector<ITypePtr>>& classTypeArguments,
+    TypeInferenceAlgorithm algorithm)
+{
+    // C# `if (typeParameters == null) throw new ArgumentNullException(...)` (and the
+    // `arguments`/`parameterTypes` twins) -- the D374 non-null-reference convention: the
+    // C++ references and vectors cannot be null.
+    //
+    // C# `this.typeParameters = new TP[typeParameters.Count];
+    //     for (int i = 0; i < this.typeParameters.Length; i++) {
+    //         if (i != typeParameters[i].Index)
+    //             throw new ArgumentException("Type parameter has wrong index");
+    //         if (typeParameters[i].OwnerType != SymbolKind.Method)
+    //             throw new ArgumentException("Type parameter must be owned by a method");
+    //         this.typeParameters[i] = new TP(typeParameters[i]); }`
+    // -- the contract checks take the documented SOFT FAILURE (the region overview in the
+    // header): `success = false` and the all-`UnknownType` result (the C# aborts with an
+    // exception the port cannot throw; the violations are unreachable through the real
+    // `IMethod::TypeParameters()` surface, whose entries always carry `Index == i` and
+    // `OwnerType == Method`).
+    std::vector<TP> state;
+    state.reserve(typeParameters.size());
+    // The helper producing the failed-inference shape: every position reports the
+    // `SpecialType.UnknownType` null object (the C# `tp.FixedTo ??
+    // SpecialType.UnknownType` report of an unfixed parameter).
+    auto reportUnfixedAll = [&typeParameters]() {
+        std::vector<ITypePtr> result;
+        result.reserve(typeParameters.size());
+        for (std::size_t i = 0; i < typeParameters.size(); i++)
+            result.push_back(UnknownType());
+        return result;
+    };
+    for (std::size_t i = 0; i < typeParameters.size(); i++) {
+        if (typeParameters[i] == nullptr
+            || typeParameters[i]->Index() != static_cast<int>(i)
+            || typeParameters[i]->OwnerType() != ILSpy::Decompiler::TypeSystem::SymbolKind::Method) {
+            success = false;
+            return reportUnfixedAll();
+        }
+        state.emplace_back(*typeParameters[i]);
+    }
+    // C# `this.parameterTypes = new IType[Math.Min(arguments.Count, parameterTypes.Count)];
+    //     this.arguments = new ResolveResult[this.parameterTypes.Length];
+    //     for (int i = 0; i < this.parameterTypes.Length; i++) {
+    //         if (arguments[i] == null || parameterTypes[i] == null)
+    //             throw new ArgumentNullException();
+    //         this.arguments[i] = arguments[i]; this.parameterTypes[i] = parameterTypes[i]; }`
+    // -- the common-min arrays; a null entry takes the soft failure (the C# throw).
+    const std::size_t count = std::min(arguments.size(), parameterTypes.size());
+    std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> args;
+    std::vector<ITypePtr> paramTypes;
+    args.reserve(count);
+    paramTypes.reserve(count);
+    for (std::size_t i = 0; i < count; i++) {
+        if (!arguments[i] || !parameterTypes[i]) {
+            success = false;
+            return reportUnfixedAll();
+        }
+        args.push_back(arguments[i]);
+        paramTypes.push_back(parameterTypes[i]);
+    }
+    // C# `this.classTypeArguments = classTypeArguments;` -- the threaded optional (the C#
+    // null list ports to `std::nullopt`).
+    //
+    // C# `PhaseOne(); success = PhaseTwo();`
+    PhaseOne(compilation, state, args, paramTypes, classTypeArguments);
+    // The C# `DependsOn` lazily computes the dependency matrix on the first call (inside
+    // `PhaseTwo`) and memoizes it for the whole inference; the lift computes it ONCE here
+    // and threads it into both `PhaseTwo` recursions (the matrix inputs never change
+    // during the phases -- behavior-identical, the `CalculateDependencyMatrix` lift).
+    const std::vector<std::vector<bool>> dependencyMatrix =
+        CalculateDependencyMatrix(state, args, paramTypes);
+    success = PhaseTwo(compilation, conversions, state, dependencyMatrix, args, paramTypes,
+                       classTypeArguments, algorithm);
+    // C# `return this.typeParameters.Select(tp => tp.FixedTo ??
+    //         SpecialType.UnknownType).ToArray();` -- the inferred type arguments; an
+    // unfixed parameter reports the null object. The `Reset()` cleanup is moot in the
+    // lift (the local state dies at return; the result holds owning handles).
+    std::vector<ITypePtr> result;
+    result.reserve(state.size());
+    for (const TP& tp : state)
+        result.push_back(tp.FixedTo ? tp.FixedTo : UnknownType());
+    return result;
+}
+
+// The C# `public IType[] InferTypeArgumentsFromBounds(IReadOnlyList<ITypeParameter>
+// typeParameters, IType targetType, IEnumerable<IType> lowerBounds, IEnumerable<IType>
+// upperBounds, out bool success)` (TypeInference.cs lines 179-208).
+std::vector<ITypePtr> InferTypeArgumentsFromBounds(
+    const ICompilation& compilation, CSharpConversions& conversions,
+    const std::vector<const ILSpy::Decompiler::TypeSystem::ITypeParameter*>& typeParameters,
+    IType& targetType, const std::vector<ITypePtr>& lowerBounds,
+    const std::vector<ITypePtr>& upperBounds, bool& success,
+    TypeInferenceAlgorithm algorithm)
+{
+    // C# `if (typeParameters == null) throw new ArgumentNullException(...)` (and the
+    // `targetType`/`lowerBounds`/`upperBounds` twins) -- the D374 non-null-reference
+    // convention.
+    //
+    // C# `this.typeParameters = new TP[typeParameters.Count];
+    //     for (int i = 0; i < this.typeParameters.Length; i++) {
+    //         if (i != typeParameters[i].Index)
+    //             throw new ArgumentException("Type parameter has wrong index");
+    //         this.typeParameters[i] = new TP(typeParameters[i]); }`
+    // -- NO `OwnerType` check here (only the index validation); the violation takes the
+    // documented soft failure (the region overview in the header).
+    std::vector<TP> state;
+    state.reserve(typeParameters.size());
+    for (std::size_t i = 0; i < typeParameters.size(); i++) {
+        if (typeParameters[i] == nullptr
+            || typeParameters[i]->Index() != static_cast<int>(i)) {
+            success = false;
+            std::vector<ITypePtr> result;
+            result.reserve(typeParameters.size());
+            for (std::size_t j = 0; j < typeParameters.size(); j++)
+                result.push_back(UnknownType());
+            return result;
+        }
+        state.emplace_back(*typeParameters[i]);
+    }
+    // C# `foreach (IType b in lowerBounds) { MakeLowerBoundInference(b, targetType); }` --
+    // every lower bound lower-bound-infers against the target type. A degenerate null
+    // bound entry would NRE in the C# and is skipped (the D516 convention -- the Improved
+    // `FindTypesInBounds` refinement passes its own candidate lists, never null).
+    for (const ITypePtr& b : lowerBounds) {
+        if (b)
+            MakeLowerBoundInference(compilation, state, *b, targetType);
+    }
+    // C# `foreach (IType b in upperBounds) { MakeUpperBoundInference(b, targetType); }`
+    for (const ITypePtr& b : upperBounds) {
+        if (b)
+            MakeUpperBoundInference(compilation, state, *b, targetType);
+    }
+    // C# `IType[] result = new IType[this.typeParameters.Length];
+    //     success = true;
+    //     for (int i = 0; i < result.Length; i++) {
+    //         success &= Fix(this.typeParameters[i]);
+    //         result[i] = this.typeParameters[i].FixedTo ?? SpecialType.UnknownType; }`
+    // -- the C# `&=` is NON-short-circuit: `Fix` runs for EVERY parameter even after a
+    // failure, and `success` accumulates all the results. The fresh-instance nesting
+    // level is 0.
+    std::vector<ITypePtr> result;
+    result.reserve(state.size());
+    success = true;
+    for (TP& tp : state) {
+        const bool fixedOk = Fix(conversions, tp, algorithm, /*nestingLevel*/ 0);
+        success = success && fixedOk;
+        result.push_back(tp.FixedTo ? tp.FixedTo : UnknownType());
+    }
+    // C# `Reset(); return result;` -- the cleanup is moot in the lift.
+    return result;
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

@@ -21,7 +21,7 @@
 // engine (ICSharpCode.Decompiler/CSharp/Resolver/TypeInference.cs, the ~1188-line long-pole
 // blocker for the `OverloadResolution` `RunTypeInference` engine step and therefore for
 // `CalculateCandidate`/`AddCandidate`/`AddMethodLists` and the deferred `MethodGroupConversion`
-// arm). FIVE regions are landed, all lifted to `Detail::` free functions ahead of the
+// arm). SIX regions are landed, all lifted to `Detail::` free functions ahead of the
 // `TypeInference` class skeleton (the `CSharpConversionsHelpers` / `OverloadResolutionHelpers`
 // lift-to-free-functions precedent): the Input/Output Types region (C# spec draft-v11
 // sections 12.6.3.4 + 12.6.3.5), the ContainsUnfixed region (the `TP` per-type-parameter
@@ -33,7 +33,7 @@
 // the `MakeExplicitParameterTypeInference` phase-one entry) -- the instance state
 // (`typeParameters`, and the `compilation` the span arms read `TypeSystemOptions` through)
 // threads as parameters (the `CalculateDependencyMatrix` lift demonstrates the convention)
-// -- and the MakeOutputTypeInference region (C# 4.0 spec section 7.5.2.6: the fourth
+// -- the MakeOutputTypeInference region (C# 4.0 spec section 7.5.2.6: the fourth
 // worker over the LAMBDA argument shape plus the plain-expression arm, with the
 // `GetSubstitutionForFixedTPs` fixed-TP substitution and the `IsValidType` gate; its
 // METHOD-GROUP arm stays deferred on `PerformOverloadResolution`) -- and the Fixing /
@@ -42,9 +42,15 @@
 // algorithm, the `FindTypeInBounds` public entry, and the `GetBestCommonType`
 // dummy-TP pipeline over `MakeOutputTypeInference`; their IMPROVED-algorithm refinements
 // -- the `FindTypesInBounds` base-type-definition intersection and the `IntersectionType`
-// all-results report -- stay deferred, documented at their sites below). The remaining
-// regions (`InferTypeArguments`, the Inference Phases) need further instance state
-// (`arguments`/`parameterTypes`) and land in later increments.
+// all-results report -- stay deferred, documented at their sites below) -- and the
+// InferTypeArguments region (the `PhaseOne`/`PhaseTwo` private phases, the
+// `InferTypeArguments` main entry, and the `InferTypeArgumentsFromBounds` bounds entry,
+// composing every landed region into the engine's public output). The ported surface is
+// now the whole `TypeInference` class modulo the deferred arms (the
+// `MakeOutputTypeInference` method-group arm and the Improved/`IntersectionType`
+// refinements), so the remaining work is the `OverloadResolution` engine itself
+// (`RunTypeInference`/`CalculateCandidate`/`AddCandidate`/`AddMethodLists`), which
+// consumes `InferTypeArguments`.
 //
 // RETURN CONVENTION: the C# `IType[]` returns fresh arrays of GC-owned references; the port
 // returns `std::vector<const IType*>` non-owning raw-pointer snapshots (the `GetMethods` /
@@ -514,6 +520,103 @@ ILSpy::Decompiler::TypeSystem::ITypePtr GetBestCommonType(
     const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
     CSharpConversions& conversions,
     const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& expressions,
+    bool& success,
+    TypeInferenceAlgorithm algorithm);
+
+// ===========================================================================
+// The InferTypeArguments region (TypeInference.cs lines 116-170 + 179-208 + 277-380) --
+// the MAIN ENTRY of the type-inference engine and the two private phases it drives:
+// `PhaseOne` (C# 4.0 spec section 7.5.2.1 "The first phase" -- the per-argument bound
+// accumulation: the explicitly-typed-lambda exact inferences, the output-type inference
+// for a lambda/method-group argument whose output types mention unfixed parameters while
+// its input types do not, and the exact/lower-bound inference of a plain expression's own
+// type), `PhaseTwo` (spec draft-v11 section 12.6.3.3 "The second phase" -- the fix
+// rounds: the parameters that depend on no unfixed parameter are fixed first, the
+// cycle-breaking bounds-based fallback, and the output-type-inference-then-repeat loop),
+// `InferTypeArguments` (the public main entry composing both), and
+// `InferTypeArgumentsFromBounds` (the public bounds-based entry -- the one the DEFERRED
+// Improved `FindTypesInBounds` refinement recurses through). The C# instance fields these
+// read (`typeParameters`, `arguments`, `parameterTypes`, `classTypeArguments`, and the
+// lazily memoized `dependencyMatrix`) thread as parameters; the matrix computes ONCE at
+// the `InferTypeArguments` call site and threads into both `PhaseTwo` recursions (the C#
+// `DependsOn` computes it on the first call and memoizes it for the rest of the inference
+// -- the matrix inputs never change during the phases, so compute-once-up-front is
+// behavior-identical, the `CalculateDependencyMatrix` lift).
+//
+// The C# `throw new ArgumentException("Type parameter has wrong index")` /
+// `("Type parameter must be owned by a method")` / `throw new ArgumentNullException()`
+// setup-loop checks abort the whole inference; the port cannot throw (no exception
+// convention on this surface), so a contract violation takes the documented SOFT FAILURE:
+// `success = false` and the all-`UnknownType` result vector (the shape the C# produces for
+// a failed inference). The violations are caller programming errors unreachable through
+// the real `IMethod::TypeParameters()` surface (every method type parameter carries
+// `Index == i` and `OwnerType == SymbolKind.Method`), so no real caller can tell the
+// difference (the D63/D64 exception-to-soft-fallback convention).
+// ===========================================================================
+
+// The C# `void PhaseOne()` (TypeInference.cs lines 277-311) -- the first phase: the
+// per-argument bound accumulation (no fixing happens here). The lifted private worker
+// iterates to the common min of the two threaded vectors and SKIPS a null entry (the
+// `CalculateDependencyMatrix` convention -- the main entry has already rejected nulls, so
+// the skip is the degenerate direct-call shape only).
+void PhaseOne(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+              std::vector<TP>& typeParameters,
+              const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+              const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& parameterTypes,
+              const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& classTypeArguments);
+
+// The C# `bool PhaseTwo()` (TypeInference.cs lines 321-380) -- the second phase: the fix
+// rounds over the accumulated bounds. Takes the precomputed dependency matrix (the C# lazy
+// `DependsOn` memoization becomes the compute-once-then-thread convention) and recurses on
+// itself after the output-type-inference loop. The `Fix` calls thread nesting level 0: the
+// C# `PhaseTwo` only ever runs on a fresh top-level instance (a nested instance exists only
+// inside `Fix`/`FindTypesInBounds`, which never re-enter the phases).
+bool PhaseTwo(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+              CSharpConversions& conversions,
+              std::vector<TP>& typeParameters,
+              const std::vector<std::vector<bool>>& dependencyMatrix,
+              const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+              const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& parameterTypes,
+              const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& classTypeArguments,
+              TypeInferenceAlgorithm algorithm);
+
+// The C# `public IType[] InferTypeArguments(IReadOnlyList<ITypeParameter> typeParameters,
+// IReadOnlyList<ResolveResult> arguments, IReadOnlyList<IType> parameterTypes, out bool
+// success, IReadOnlyList<IType> classTypeArguments = null)` (TypeInference.cs lines
+// 116-170) -- the MAIN ENTRY: builds the `TP` state over the method type parameters
+// (validating `Index == i` and `OwnerType == Method`, the soft failure above on
+// violation), sizes the argument/parameter-type arrays to the common min, runs `PhaseOne`,
+// then `PhaseTwo` decides `success`. Returns the inferred type arguments (`FixedTo ??
+// SpecialType.UnknownType` per parameter -- an unfixed parameter reports the null object).
+// The C# `IType[]` return ports to `std::vector<ITypePtr>` (the
+// `OverloadResolutionCandidate.InferredTypes` convention); the C# `Reset()` cleanup is moot
+// in the lift (the local state dies at return).
+std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> InferTypeArguments(
+    const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+    CSharpConversions& conversions,
+    const std::vector<const ILSpy::Decompiler::TypeSystem::ITypeParameter*>& typeParameters,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+    const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& parameterTypes,
+    bool& success,
+    const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& classTypeArguments,
+    TypeInferenceAlgorithm algorithm);
+
+// The C# `public IType[] InferTypeArgumentsFromBounds(IReadOnlyList<ITypeParameter>
+// typeParameters, IType targetType, IEnumerable<IType> lowerBounds, IEnumerable<IType>
+// upperBounds, out bool success)` (TypeInference.cs lines 179-208) -- the bounds-based
+// entry: every lower bound lower-bound-infers against the target type, every upper bound
+// upper-bound-infers, then every parameter is fixed (the `success &=` accumulates ALL the
+// fix results -- `Fix` runs for every parameter even after a failure, the C# non-
+// short-circuit `&=`). No `OwnerType` check here (only the `Index == i` validation, the
+// soft failure above on violation). `targetType` is NON-CONST: it feeds the two bound
+// workers as the V side (the non-const `ChangeNullability`, D406).
+std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> InferTypeArgumentsFromBounds(
+    const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+    CSharpConversions& conversions,
+    const std::vector<const ILSpy::Decompiler::TypeSystem::ITypeParameter*>& typeParameters,
+    ILSpy::Decompiler::TypeSystem::IType& targetType,
+    const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& lowerBounds,
+    const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& upperBounds,
     bool& success,
     TypeInferenceAlgorithm algorithm);
 
