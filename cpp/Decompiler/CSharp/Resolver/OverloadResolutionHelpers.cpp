@@ -1038,4 +1038,48 @@ void RunTypeInference(OverloadResolutionCandidate& candidate,
         candidate.AddError(OverloadResolutionErrors::ConstructedTypeDoesNotSatisfyConstraint);
 }
 
+bool CalculateCandidate(
+    const std::shared_ptr<OverloadResolutionCandidate>& candidate,
+    const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+    CSharpConversions& conversions,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+    const std::vector<std::string>& argumentNames,
+    const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& explicitlyGivenTypeArguments,
+    bool allowOptionalParameters,
+    bool allowImplicitIn,
+    bool isExtensionMethodInvocation,
+    std::shared_ptr<OverloadResolutionCandidate>& bestCandidate,
+    bool& bestCandidateWasValidated,
+    std::shared_ptr<OverloadResolutionCandidate>& bestCandidateAmbiguousWith) {
+    // C# `if (!ResolveParameterTypes(candidate, false)) return false;` -- a candidate whose
+    // params-collection cannot be unpacked (the expanded form's last parameter is not an
+    // array/Span/array-interface) is removed WITHOUT reporting an error; every later step,
+    // including the best-candidate folding, is skipped. The C# `AddCandidate` caller discards
+    // the candidate on this early return.
+    if (!ResolveParameterTypes(*candidate, false))
+        return false;
+    // C# `MapCorrespondingParameters(candidate);` -- the `arguments`/`argumentNames` are the
+    // `OverloadResolution` ctor fields, threaded as parameters (the D509 lift).
+    MapCorrespondingParameters(*candidate, arguments.size(), argumentNames);
+    // C# `RunTypeInference(candidate);` -- the `compilation`/`conversions`/`arguments`/
+    // `explicitlyGivenTypeArguments` threaded as parameters (the D573 lift).
+    RunTypeInference(*candidate, compilation, conversions, arguments, explicitlyGivenTypeArguments);
+    // C# `CheckApplicability(candidate);` -- the single C# method (C# 4.0 spec section 7.5.3.1)
+    // split into the two ported halves: the argument-count-per-parameter check, then the
+    // passing-mode + conversion check. The `AllowOptionalParameters`/`AllowImplicitIn`/
+    // `IsExtensionMethodInvocation` input properties are threaded as parameters.
+    CheckApplicabilityArgumentCounts(*candidate, allowOptionalParameters);
+    CheckApplicabilityPassingModeAndConversions(*candidate, arguments, conversions,
+                                                 allowImplicitIn, isExtensionMethodInvocation);
+    // C# `ConsiderIfNewCandidateIsBest(candidate);` -- the best-candidate state threaded by
+    // reference (the D550 lift); the shared handle is forwarded so the folding's
+    // `bestCandidate = candidate` reference assignment is a `shared_ptr` copy.
+    ConsiderIfNewCandidateIsBest(conversions, arguments, bestCandidate, bestCandidateWasValidated,
+                                  bestCandidateAmbiguousWith, candidate);
+    // C# `return true;` -- the calculation ran; the candidate stays in the resolution
+    // regardless of applicability (the errors are reported later through
+    // `BestCandidateErrors`).
+    return true;
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

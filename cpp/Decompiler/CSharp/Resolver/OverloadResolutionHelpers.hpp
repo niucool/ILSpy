@@ -22,10 +22,11 @@
 // `CSharp::Resolver::Detail` free functions so they are individually unit-testable (TDD): the
 // parameter-type/applicability steps (`ResolveParameterTypes`/`MapCorrespondingParameters`/
 // `CheckApplicabilityArgumentCounts`/`CheckApplicabilityPassingModeAndConversions`), the better-
-// function-member tiebreaks, the best-candidate folding, and the constraint-validation region
+// function-member tiebreaks, the best-candidate folding, the constraint-validation region
 // (the public 3-arg `ValidateConstraints` overload, `GetSubstitution`, and
-// `ValidateMethodConstraints`). The `RunTypeInference` engine step will land as it becomes
-// feasible.
+// `ValidateMethodConstraints`), the `RunTypeInference` engine step, and the `CalculateCandidate`
+// composition that wires the steps together in the C# order (the `AddCandidate`/`AddMethodLists`
+// entries that call it are the next increments).
 
 #pragma once
 
@@ -33,6 +34,7 @@
 #include "Decompiler/TypeSystem/TypeParameterSubstitution.hpp"  // TypeParameterSubstitution (GetSubstitution's by-value return)
 
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
@@ -439,5 +441,48 @@ void RunTypeInference(OverloadResolutionCandidate& candidate,
                       CSharpConversions& conversions,
                       const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
                       const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& explicitlyGivenTypeArguments);
+
+// The C# `bool CalculateCandidate(Candidate candidate)` (OverloadResolution.cs line 278) -- the
+// engine step that composes the whole ported pipeline in the C# order:
+//   1. `ResolveParameterTypes(candidate, false)` -- a candidate whose params-collection cannot
+//      be unpacked (the expanded form's last parameter is not an array/Span/array-interface)
+//      aborts with `return false` (the candidate is removed WITHOUT reporting an error; every
+//      later step, including the best-candidate folding, is skipped);
+//   2. `MapCorrespondingParameters` -- the argument-to-parameter map (the `arguments`/
+//      `argumentNames` ctor fields threaded as parameters);
+//   3. `RunTypeInference` -- the inferred method type arguments + the substituted formal
+//      parameter types (the `explicitlyGivenTypeArguments` ctor field threaded);
+//   4. `CheckApplicability` -- the single C# method split into the two ported halves (the
+//      argument-count check, then the passing-mode + conversion check; the
+//      `AllowOptionalParameters`/`AllowImplicitIn`/`IsExtensionMethodInvocation` input
+//      properties threaded);
+//   5. `ConsiderIfNewCandidateIsBest` -- the best-candidate folding (the `bestCandidate`/
+//      `bestCandidateWasValidated`/`bestCandidateAmbiguousWith` instance fields threaded by
+//      reference, the D550 state-threading convention).
+// Returns true when the calculation ran (the candidate stays in the resolution regardless of
+// applicability -- the errors are reported later through `BestCandidateErrors`).
+//
+// The C# is a private instance method reading the `OverloadResolution` ctor fields and input
+// properties; the port lifts it to a `Detail::` free function taking those as parameters (the
+// D536 `CheckApplicabilityPassingModeAndConversions` state-threading convention), individually
+// unit-testable ahead of the `AddCandidate` entry that calls it. `candidate` is a shared handle
+// (the C# `AddCandidate` allocates the candidate and hands the SAME instance to the folding
+// step, which stores it in `bestCandidate`/`bestCandidateAmbiguousWith`; the port mirrors the
+// shared ownership so the folding's `bestCandidate = candidate` reference assignment is a
+// `shared_ptr` copy). The steps mutate the candidate, so the shared handle is passed by const
+// reference and dereferenced non-const through it (the object is shared, not const).
+bool CalculateCandidate(
+    const std::shared_ptr<OverloadResolutionCandidate>& candidate,
+    const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+    CSharpConversions& conversions,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+    const std::vector<std::string>& argumentNames,
+    const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& explicitlyGivenTypeArguments,
+    bool allowOptionalParameters,
+    bool allowImplicitIn,
+    bool isExtensionMethodInvocation,
+    std::shared_ptr<OverloadResolutionCandidate>& bestCandidate,
+    bool& bestCandidateWasValidated,
+    std::shared_ptr<OverloadResolutionCandidate>& bestCandidateAmbiguousWith);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
