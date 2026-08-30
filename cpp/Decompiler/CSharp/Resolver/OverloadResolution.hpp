@@ -21,11 +21,13 @@
 // (C# spec draft-v11 section 12.6.4). This header ports the class SKELETON: the constructor (validation
 // + field init + the `AllowExpandingParams`/`AllowOptionalParameters` defaults), the input properties
 // (`IsExtensionMethodInvocation`/`AllowExpandingParams`/`AllowOptionalParameters`/`AllowImplicitIn`/
-// `CheckForOverflow`/`Arguments`), the member fields, and the `AddCandidate` engine entry (the normal
-// + expanded-form pair delegating to `Detail::AddCandidate`). The remaining engine steps
-// (`AddMethodLists`/the output properties `BestCandidate`/`CreateResolveResult`/
-// `GetArgumentsWithConversions`/etc.) are deferred -- they need the unported `MethodListWithDeclaringType`
-// and the `CSharpResolver` composition.
+// `CheckForOverflow`/`Arguments`), the member fields, the `AddCandidate` engine entry (the normal
+// + expanded-form pair delegating to `Detail::AddCandidate`), the `AddMethodLists` engine entry (the
+// derived-type-hides-base-methods walk delegating to `Detail::AddMethodLists`), and the first output
+// properties (`BestCandidate`/`BestCandidateAmbiguousWith`/`FoundApplicableCandidate`/`IsAmbiguous`).
+// The remaining engine steps and output properties (`BestCandidateErrors` -- the lazy
+// `ValidateMethodConstraints` memoization -- `CreateResolveResult`/`GetArgumentsWithConversions`/etc.)
+// are deferred -- they need the `CSharpResolver` composition.
 //
 // The C# `Candidate` nested class is ported as the separate `OverloadResolutionCandidate` (D506); the
 // pure-transform engine steps that do NOT need `CSharpConversions`/`TypeInference` are ported as
@@ -72,6 +74,11 @@ namespace ILSpy::Decompiler::CSharp::Resolver {
 // Forward-declared (unported): the conversion controller. The C# ctor default
 // `conversions ?? CSharpConversions.Get(compilation)` is deferred.
 class CSharpConversions;
+
+// Forward-declared (now ported, in MethodGroupResolveResult.hpp): the method-list bucket type
+// `AddMethodLists` takes (`const std::vector<MethodListWithDeclaringType>&` needs only a
+// declaration; the .cpp includes the full header).
+class MethodListWithDeclaringType;
 
 class OverloadResolution {
 public:
@@ -170,6 +177,52 @@ public:
     OverloadResolutionErrors AddCandidate(
         const ILSpy::Decompiler::TypeSystem::IParameterizedMember& member,
         OverloadResolutionErrors additionalErrors);
+
+    // --- The `AddMethodLists` region (C# lines 330-377) ---
+
+    // The C# `public void AddMethodLists(IReadOnlyList<MethodListWithDeclaringType> methodLists)` --
+    // "Adds all candidates from the method lists. This method implements the logic that causes
+    // applicable methods in derived types to hide all methods in base types." Base types come
+    // FIRST in the list; the walk goes BACKWARDS (derived types first), adding every candidate of
+    // each list through `AddCandidate` (additionalErrors None), and once a list produced an
+    // APPLICABLE candidate, every earlier (more-base) list whose `DeclaringType` is a base type of
+    // the current list's declaring type (the `GetAllBaseTypes` closure) is marked hidden and
+    // skipped. See `Detail::AddMethodLists` (OverloadResolutionHelpers.hpp) for the full contract.
+    //
+    // The C# instance method reads the ctor fields and input properties plus mutates the
+    // `bestCandidate` state through `AddCandidate`; the port delegates to the `Detail::` free
+    // function with the instance fields threaded (the D575 `AddCandidate` convention), resolving
+    // the conversions lazily at the first engine call exactly like `AddCandidate` (the deferred
+    // C# ctor default `conversions ?? CSharpConversions.Get(compilation)`).
+    void AddMethodLists(const std::vector<MethodListWithDeclaringType>& methodLists);
+
+    // --- Output Properties (C# lines 1002-1046; the first, trivially state-derived ones) ---
+
+    // The C# `public IParameterizedMember BestCandidate` -- the best candidate's member, or null
+    // when no candidate was added yet. A nullable non-owning pointer (the candidate holds the
+    // member by non-owning pointer back to the type system, which outlives the resolution).
+    const ILSpy::Decompiler::TypeSystem::IParameterizedMember* BestCandidate() const {
+        return bestCandidate_ != nullptr ? bestCandidate_->Member() : nullptr;
+    }
+
+    // The C# `public IParameterizedMember BestCandidateAmbiguousWith` -- the member the best
+    // candidate is ambiguous with (overwritten on every ambiguous fold so API users can detect
+    // the set of all ambiguous methods by looking after each step), or null.
+    const ILSpy::Decompiler::TypeSystem::IParameterizedMember* BestCandidateAmbiguousWith() const {
+        return bestCandidateAmbiguousWith_ != nullptr ? bestCandidateAmbiguousWith_->Member() : nullptr;
+    }
+
+    // The C# `public bool FoundApplicableCandidate` -- `bestCandidate != null &&
+    // IsApplicable(bestCandidate.Errors)` (the free `IsApplicable` masks out the
+    // `AmbiguousMatch`/`MethodConstraintsNotSatisfied` overall errors).
+    bool FoundApplicableCandidate() const {
+        return bestCandidate_ != nullptr && IsApplicable(bestCandidate_->Errors());
+    }
+
+    // The C# `public bool IsAmbiguous` -- `bestCandidateAmbiguousWith != null`.
+    bool IsAmbiguous() const {
+        return bestCandidateAmbiguousWith_ != nullptr;
+    }
 
 private:
     const ILSpy::Decompiler::TypeSystem::ICompilation* compilation_;

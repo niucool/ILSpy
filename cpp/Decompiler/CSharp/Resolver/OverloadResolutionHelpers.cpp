@@ -24,6 +24,8 @@
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"  // CSharpConversions (ImplicitConversion(ResolveResult, IType) / IsConstraintConvertible)
 #include "Decompiler/CSharp/Resolver/CSharpConversionsHelpers.hpp"  // Detail::IdentityConversion (the BetterParamsCollectionType span arms)
 #include "Decompiler/CSharp/Resolver/ILiftedOperator.hpp"  // ILiftedOperator (the BetterFunctionMember non-lifted-operator tiebreak)
+#include "Decompiler/CSharp/Resolver/Log.hpp"  // Log::WriteLine / Indent / Unindent (the AddMethodLists debug trail)
+#include "Decompiler/CSharp/Resolver/MethodGroupResolveResult.hpp"  // MethodListWithDeclaringType (AddMethodLists' buckets)
 #include "Decompiler/CSharp/Resolver/OverloadResolutionErrors.hpp"  // TooManyPositionalArguments / NoParameterFoundForNamedArgument
 #include "Decompiler/CSharp/Resolver/TypeInferenceHelpers.hpp"  // InferTypeArguments + TypeInferenceAlgorithm (RunTypeInference)
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"  // dynamic_cast<ByReferenceResolveResult>
@@ -45,6 +47,7 @@
 
 #include <algorithm>  // std::min (the MoreSpecificFormalParameters Zip-stops-at-shorter)
 #include <string>
+#include <utility>  // std::pair (the ErrorsToString flag table)
 #include <vector>
 
 namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
@@ -1144,6 +1147,164 @@ OverloadResolutionErrors AddCandidate(
     }
     // C# `return c.Errors;` -- the normal form's errors.
     return c->Errors();
+}
+
+// The C# `errors.ToString()` on the `[Flags]` `OverloadResolutionErrors` (a logging-only
+// rendering inside `LogCandidateAddingResult`): .NET renders the comma-joined names of the
+// set bits in declaration order, appending the numeric value of any unrecognized bits; a value
+// with no recognized bits renders as its number. The port has no reflection over the enum, so
+// the flag table is written out.
+static std::string ErrorsToString(OverloadResolutionErrors errors) {
+    using E = OverloadResolutionErrors;
+    static const std::pair<E, const char*> flagNames[] = {
+        {E::TooManyPositionalArguments, "TooManyPositionalArguments"},
+        {E::NoParameterFoundForNamedArgument, "NoParameterFoundForNamedArgument"},
+        {E::TypeInferenceFailed, "TypeInferenceFailed"},
+        {E::WrongNumberOfTypeArguments, "WrongNumberOfTypeArguments"},
+        {E::ConstructedTypeDoesNotSatisfyConstraint, "ConstructedTypeDoesNotSatisfyConstraint"},
+        {E::MissingArgumentForRequiredParameter, "MissingArgumentForRequiredParameter"},
+        {E::MultipleArgumentsForSingleParameter, "MultipleArgumentsForSingleParameter"},
+        {E::ParameterPassingModeMismatch, "ParameterPassingModeMismatch"},
+        {E::ArgumentTypeMismatch, "ArgumentTypeMismatch"},
+        {E::AmbiguousMatch, "AmbiguousMatch"},
+        {E::Inaccessible, "Inaccessible"},
+        {E::MethodConstraintsNotSatisfied, "MethodConstraintsNotSatisfied"},
+        {E::OutVarTypeMismatch, "OutVarTypeMismatch"},
+    };
+    std::string result;
+    std::int32_t remaining = static_cast<std::int32_t>(errors);
+    for (const auto& [flag, name] : flagNames) {
+        if ((errors & flag) == flag) {
+            if (!result.empty())
+                result += ", ";
+            result += name;
+            remaining &= ~static_cast<std::int32_t>(flag);
+        }
+    }
+    // The unrecognized bits (none through the enum's own values): the .NET flags rendering
+    // appends the numeric remainder after the recognized names.
+    if (remaining != 0 || result.empty()) {
+        if (!result.empty())
+            result += ", ";
+        result += std::to_string(remaining);
+    }
+    return result;
+}
+
+void LogCandidateAddingResult(
+    const char* text,
+    const ILSpy::Decompiler::TypeSystem::IParameterizedMember& method,
+    OverloadResolutionErrors errors,
+    const std::shared_ptr<OverloadResolutionCandidate>& bestCandidate,
+    const std::shared_ptr<OverloadResolutionCandidate>& bestCandidateAmbiguousWith) {
+    // C# `string.Format("{0} {1} = {2}{3}", text, method,
+    // errors == OverloadResolutionErrors.None ? "Success" : errors.ToString(),
+    // this.BestCandidate == method ? " (best candidate so far)" :
+    // this.BestCandidateAmbiguousWith == method ? " (ambiguous)" : "")`. The reference
+    // equality against the instance's best/ambiguous candidates ports to pointer equality on
+    // the candidates' `Member()` (the `OverloadResolutionCandidate` holds the member by
+    // non-owning pointer). The formatted single-string `Log.WriteLine` call ports to the
+    // format-args `Log::WriteLine` (the same formatted line; a no-op while
+    // `Log::IsEnabled == false`).
+    std::string errorText = errors == OverloadResolutionErrors::None
+        ? std::string("Success") : ErrorsToString(errors);
+    std::string suffix;
+    if (bestCandidate != nullptr && bestCandidate->Member() == &method) {
+        suffix = " (best candidate so far)";
+    } else if (bestCandidateAmbiguousWith != nullptr && bestCandidateAmbiguousWith->Member() == &method) {
+        suffix = " (ambiguous)";
+    }
+    Log::WriteLine("{0} {1} = {2}{3}", std::string(text), method.Name(), errorText, suffix);
+}
+
+void AddMethodLists(
+    const std::vector<MethodListWithDeclaringType>& methodLists,
+    const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+    CSharpConversions& conversions,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+    const std::vector<std::string>& argumentNames,
+    const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& explicitlyGivenTypeArguments,
+    bool allowExpandingParams,
+    bool allowOptionalParameters,
+    bool allowImplicitIn,
+    bool isExtensionMethodInvocation,
+    std::shared_ptr<OverloadResolutionCandidate>& bestCandidate,
+    bool& bestCandidateWasValidated,
+    std::shared_ptr<OverloadResolutionCandidate>& bestCandidateAmbiguousWith) {
+    using namespace ILSpy::Decompiler::TypeSystem;
+
+    // C# `if (methodLists == null) throw new ArgumentNullException(nameof(methodLists))` --
+    // compiles out (the reference is non-null by construction, the D374 convention).
+    //
+    // "Base types come first, so go through the list backwards (derived types first)" -- the
+    // `isHiddenByDerivedType` marking array is allocated only when more than one list is
+    // given (the C# keeps it null otherwise); the null case is modeled by the empty vector
+    // plus the `size() > 1` guards below, which are exactly the C# `!= null` checks. Every
+    // `isHidden[j]` read happens on a live array: the hiding block requires `i > 0`, which
+    // implies at least two lists, and the skip check's `size() > 1` mirrors the C# null test.
+    std::vector<bool> isHiddenByDerivedType;
+    if (methodLists.size() > 1)
+        isHiddenByDerivedType.assign(methodLists.size(), false);
+    for (int i = static_cast<int>(methodLists.size()) - 1; i >= 0; i--) {
+        const std::size_t index = static_cast<std::size_t>(i);
+        if (methodLists.size() > 1 && isHiddenByDerivedType[index]) {
+            // C# `Log.WriteLine("  Skipping methods in {0} because they are hidden by an
+            // applicable method in a derived type", methodLists[i].DeclaringType)`. The C#
+            // renders the `IType` object; the port renders its `ReflectionName()` (the ported
+            // `IType` has no `ToString`, the logging-only divergence).
+            Log::WriteLine(
+                "  Skipping methods in {0} because they are hidden by an applicable method in a derived type",
+                methodLists[index].DeclaringType().ReflectionName());
+            continue;
+        }
+
+        const MethodListWithDeclaringType& methodList = methodLists[index];
+        bool foundApplicableCandidateInCurrentList = false;
+
+        for (const IParameterizedMember* method : methodList) {
+            // SAFE FALLBACK: the C# `AddCandidate(method)` throws `ArgumentNullException` on
+            // a null list entry; a null entry is impossible through the real member-lookup
+            // construction of the lists, and the port's free function must not dereference it
+            // -- the null method contributes nothing (skipped), the D516 convention.
+            if (method == nullptr)
+                continue;
+            Log::Indent();
+            // C# `OverloadResolutionErrors errors = AddCandidate(method)` -- the 1-arg
+            // overload (`additionalErrors: None`), threaded with the same instance fields
+            // the public `OverloadResolution::AddCandidate` threads.
+            OverloadResolutionErrors errors = AddCandidate(
+                *method, OverloadResolutionErrors::None, compilation, conversions, arguments,
+                argumentNames, explicitlyGivenTypeArguments, allowExpandingParams,
+                allowOptionalParameters, allowImplicitIn, isExtensionMethodInvocation,
+                bestCandidate, bestCandidateWasValidated, bestCandidateAmbiguousWith);
+            Log::Unindent();
+            LogCandidateAddingResult("  Candidate", *method, errors, bestCandidate,
+                                     bestCandidateAmbiguousWith);
+
+            foundApplicableCandidateInCurrentList |= IsApplicable(errors);
+        }
+
+        if (foundApplicableCandidateInCurrentList && i > 0) {
+            // C# `foreach (IType baseType in methodList.DeclaringType.GetAllBaseTypes())` --
+            // the reflexive-transitive closure of `DirectBaseTypes` (base types before derived
+            // types, the declaring type itself last), so a list whose declaring type is the
+            // current list's own, a direct, or a transitive base is hidden. SAFE FALLBACK: a
+            // null base-type entry (impossible through the collector) is skipped rather than
+            // dereferenced, the D516 convention. `baseType.Equals(...)` is the `IType::Equals`
+            // structural equality (the stubs' identity equality requires the SAME definition
+            // instance in the base-type graph and the list's `DeclaringType`).
+            for (const IType* baseType : GetAllBaseTypes(methodList.DeclaringType())) {
+                if (baseType == nullptr)
+                    continue;
+                for (int j = 0; j < i; j++) {
+                    const std::size_t hiddenIndex = static_cast<std::size_t>(j);
+                    if (!isHiddenByDerivedType[hiddenIndex]
+                        && baseType->Equals(methodLists[hiddenIndex].DeclaringType()))
+                        isHiddenByDerivedType[hiddenIndex] = true;
+                }
+            }
+        }
+    }
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

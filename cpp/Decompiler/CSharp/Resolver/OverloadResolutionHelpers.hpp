@@ -26,7 +26,8 @@
 // (the public 3-arg `ValidateConstraints` overload, `GetSubstitution`, and
 // `ValidateMethodConstraints`), the `RunTypeInference` engine step, the `CalculateCandidate`
 // composition that wires the steps together in the C# order, and the `AddCandidate` entry that
-// calls it (the `AddMethodLists` scan is the next increment).
+// calls it plus the `AddMethodLists` scan that feeds it (the derived-type-hides-base-methods
+// walk) with the `LogCandidateAddingResult` debug-log helper.
 
 #pragma once
 
@@ -42,6 +43,11 @@ namespace ILSpy::Decompiler::CSharp::Resolver {
 // Forward-declared (now ported): the conversion controller. `CheckApplicabilityPassingModeAndConversions`
 // reads `CSharpConversions::ImplicitConversion(ResolveResult, IType)` (the D529 public entry).
 class CSharpConversions;
+
+// Forward-declared (now ported, in MethodGroupResolveResult.hpp): the method-list bucket type
+// `AddMethodLists` takes (`const std::vector<MethodListWithDeclaringType>&` needs only a
+// declaration; the .cpp includes the full header).
+class MethodListWithDeclaringType;
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver
 
@@ -514,6 +520,71 @@ bool CalculateCandidate(
 OverloadResolutionErrors AddCandidate(
     const ILSpy::Decompiler::TypeSystem::IParameterizedMember& member,
     OverloadResolutionErrors additionalErrors,
+    const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+    CSharpConversions& conversions,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+    const std::vector<std::string>& argumentNames,
+    const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& explicitlyGivenTypeArguments,
+    bool allowExpandingParams,
+    bool allowOptionalParameters,
+    bool allowImplicitIn,
+    bool isExtensionMethodInvocation,
+    std::shared_ptr<OverloadResolutionCandidate>& bestCandidate,
+    bool& bestCandidateWasValidated,
+    std::shared_ptr<OverloadResolutionCandidate>& bestCandidateAmbiguousWith);
+
+// The C# `internal void LogCandidateAddingResult(string text, IParameterizedMember method,
+// OverloadResolutionErrors errors)` (OverloadResolution.cs line 377) -- the per-candidate debug
+// log line: `"{text} {method} = {Success|errors}{ (best candidate so far)| (ambiguous)}"`.
+// The C# is `[Conditional("DEBUG")]` (the CALL is elided in release builds); the port keeps
+// every call site compiled and relies on `Log::IsEnabled == false` making the body a no-op
+// (the Log.hpp [Conditional]-analogue convention -- the message pieces are still rendered
+// before the discarded write, the documented arguments-still-evaluated divergence).
+// The C# is an instance method reading `this.BestCandidate`/`this.BestCandidateAmbiguousWith`
+// (reference equality against `method`); the port threads the best-candidate state so BOTH
+// the `Detail::AddMethodLists` free function below AND the later `CallBuilder` /
+// `MethodGroupResolveResult.PerformOverloadResolution` call sites (CallBuilder.cs line 1585,
+// MethodGroupResolveResult.cs line 299 -- they hold an `OverloadResolution` instance and will
+// pass its state) can use the one implementation. DIVERGENCE (logging-only, output is compiled
+// out): the C# `{1}` placeholder renders `IParameterizedMember.ToString()` (the full member
+// signature); the ported type system has no `ToString` on members, so the member NAME is
+// rendered instead.
+void LogCandidateAddingResult(
+    const char* text,
+    const ILSpy::Decompiler::TypeSystem::IParameterizedMember& method,
+    OverloadResolutionErrors errors,
+    const std::shared_ptr<OverloadResolutionCandidate>& bestCandidate,
+    const std::shared_ptr<OverloadResolutionCandidate>& bestCandidateAmbiguousWith);
+
+// The C# `public void AddMethodLists(IReadOnlyList<MethodListWithDeclaringType> methodLists)`
+// (OverloadResolution.cs line 330) -- "Adds all candidates from the method lists. This method
+// implements the logic that causes applicable methods in derived types to hide all methods in
+// base types." Base types come FIRST in the list, so the list is walked BACKWARDS (derived
+// types first); every candidate of each non-hidden list is added through `AddCandidate`
+// (additionalErrors None), and once a list produced an APPLICABLE candidate, every earlier
+// (more-base) list `j < i` whose `DeclaringType` equals a base type of the current list's
+// declaring type (the `GetAllBaseTypes` reflexive-transitive closure -- the declaring type
+// itself, its direct bases, and their bases) is marked hidden and skipped entirely.
+//
+// The C# `ArgumentNullException` on a null `methodLists` compiles out (the reference is
+// non-null by construction, the D374 convention). The `isHiddenByDerivedType` array is only
+// allocated for more than one list (the C# keeps it null otherwise); the port models the null
+// with an empty vector plus a `methodLists.size() > 1` guard -- exactly the C# `!= null` check,
+// and every `isHidden[j]` read happens on a live array because the hiding block requires
+// `i > 0`, which implies at least two lists. SAFE FALLBACKS for the degenerate shapes the C#
+// would throw on / NRE on (both impossible through the real member-lookup construction of the
+// lists): a null method entry is skipped (the C# `AddCandidate` throws `ArgumentNullException`
+// on it -- the D516 convention), and a null `GetAllBaseTypes` entry is skipped rather than
+// dereferenced. The `MethodListWithDeclaringType` buckets' `DeclaringType()` is a non-null
+// reference contract (the D374 convention; a null `ITypePtr` ctor arg is UB-by-contract).
+//
+// The C# is a public instance method reading the ctor fields and input properties plus
+// mutating the `bestCandidate` state through `AddCandidate`; the port lifts it to a `Detail::`
+// free function taking those as parameters (the D574/D575 state-threading convention),
+// individually unit-testable. `AllowExpandingParams` and the other input properties are
+// threaded the same way `Detail::AddCandidate` threads them.
+void AddMethodLists(
+    const std::vector<MethodListWithDeclaringType>& methodLists,
     const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
     CSharpConversions& conversions,
     const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,

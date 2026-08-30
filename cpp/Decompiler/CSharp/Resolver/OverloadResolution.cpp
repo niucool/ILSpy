@@ -24,7 +24,8 @@
 #include "Decompiler/CSharp/Resolver/OverloadResolution.hpp"
 
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"  // CSharpConversions::Get (the lazy ctor-default resolution)
-#include "Decompiler/CSharp/Resolver/OverloadResolutionHelpers.hpp"  // Detail::AddCandidate
+#include "Decompiler/CSharp/Resolver/MethodGroupResolveResult.hpp"  // MethodListWithDeclaringType (AddMethodLists' buckets)
+#include "Decompiler/CSharp/Resolver/OverloadResolutionHelpers.hpp"  // Detail::AddCandidate / Detail::AddMethodLists
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
 
@@ -77,6 +78,20 @@ OverloadResolutionErrors OverloadResolution::AddCandidate(
                                 allowOptionalParameters_, allowImplicitIn_,
                                 isExtensionMethodInvocation_, bestCandidate_,
                                 bestCandidateWasValidated_, bestCandidateAmbiguousWith_);
+}
+
+void OverloadResolution::AddMethodLists(
+    const std::vector<MethodListWithDeclaringType>& methodLists) {
+    // The C# walks the list calling `this.AddCandidate(method)` per bucket member; the port
+    // delegates to the `Detail::` free function with the instance fields threaded (the lazy
+    // `conversions ?? CSharpConversions.Get(compilation)` resolution exactly like `AddCandidate`).
+    CSharpConversions& conversions = conversions_ != nullptr
+        ? const_cast<CSharpConversions&>(*conversions_)
+        : CSharpConversions::Get(*compilation_);
+    Detail::AddMethodLists(methodLists, *compilation_, conversions, arguments_, argumentNames_,
+                            explicitlyGivenTypeArguments_, allowExpandingParams_,
+                            allowOptionalParameters_, allowImplicitIn_, isExtensionMethodInvocation_,
+                            bestCandidate_, bestCandidateWasValidated_, bestCandidateAmbiguousWith_);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver
