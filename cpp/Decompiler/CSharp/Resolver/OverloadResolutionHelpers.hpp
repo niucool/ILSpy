@@ -47,6 +47,14 @@ namespace ILSpy::Decompiler::Semantics { class ResolveResult; }
 // declaration, not the full definition; the .cpp includes the full header).
 namespace ILSpy::Decompiler::TypeSystem { class IType; }
 
+// `ITypeParameter` is forward-declared (the `const ITypeParameter&` parameter needs only a
+// declaration; the .cpp includes the full header).
+namespace ILSpy::Decompiler::TypeSystem { class ITypeParameter; }
+
+// `TypeVisitor` is forward-declared (the nullable `TypeVisitor*` parameter needs only a
+// declaration; the .cpp includes the full header).
+namespace ILSpy::Decompiler::TypeSystem { class TypeVisitor; }
+
 namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 
 // The C# `bool ResolveParameterTypes(Candidate candidate, bool useSpecializedParameters)`. Reads the
@@ -218,5 +226,32 @@ void ConsiderIfNewCandidateIsBest(
     bool& bestCandidateWasValidated,
     std::shared_ptr<OverloadResolutionCandidate>& bestCandidateAmbiguousWith,
     const std::shared_ptr<OverloadResolutionCandidate>& candidate);
+
+// The C# `internal static bool ValidateConstraints(ITypeParameter typeParameter, IType typeArgument,
+// TypeVisitor substitution, CSharpConversions conversions)` (OverloadResolution.cs line 585, the
+// "Validate Constraints" region) -- whether the type argument satisfies the type parameter's
+// constraints. It is the C# spec section 4.4.4 "satisfying constraints" check: `void`/`null`/pointer
+// type arguments are rejected outright; the `class` constraint needs a definite
+// `IsReferenceType == true` (an indeterminate optional FAILS, not passes); the `struct`/`unmanaged`
+// constraint needs a non-nullable value type (`NullableType.IsNonNullableValueType`); the `new()`
+// constraint rejects an abstract definition and requires a public parameterless constructor
+// (`GetConstructors` with `IgnoreInheritedMembers | ReturnMemberDefinitions`); and every direct base
+// type (the declared `where T : Base` constraints) must be constraint-convertible from the type
+// argument, after applying the optional `substitution` (the `TypeVisitor` that replaces type
+// parameters with type arguments -- the constraint may itself reference another type parameter).
+// It is a static method with no `OverloadResolution` instance state, so it lifts to a `Detail::`
+// free function (the established convention). `typeParameter` is `const&` (every constraint-flag /
+// `DirectBaseTypes` read is const); `typeArgument` is non-const `IType&` because
+// `CSharpConversions::IsConstraintConvertible` takes non-const `IType&` (the non-const
+// `AcceptVisitor`, D406); `substitution` is a nullable raw pointer (the C# `null` = no
+// substitution); `conversions` is a non-const reference (the public `IsConstraintConvertible` is
+// non-const). The callers: the public static `ValidateConstraints(ITypeParameter, IType,
+// TypeVisitor)` overload (which fetches the conversions via `CSharpConversions.Get`), the private
+// `ValidateMethodConstraints(Candidate)` engine step, and the `ConstraintValidatingSubstitution`
+// inside `RunTypeInference` (both deferred until the engine steps land).
+bool ValidateConstraints(const ILSpy::Decompiler::TypeSystem::ITypeParameter& typeParameter,
+                         ILSpy::Decompiler::TypeSystem::IType& typeArgument,
+                         ILSpy::Decompiler::TypeSystem::TypeVisitor* substitution,
+                         CSharpConversions& conversions);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

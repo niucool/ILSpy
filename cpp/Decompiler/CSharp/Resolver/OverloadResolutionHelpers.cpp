@@ -21,7 +21,7 @@
 
 #include "Decompiler/CSharp/Resolver/OverloadResolutionHelpers.hpp"
 
-#include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"  // CSharpConversions (ImplicitConversion(ResolveResult, IType))
+#include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"  // CSharpConversions (ImplicitConversion(ResolveResult, IType) / IsConstraintConvertible)
 #include "Decompiler/CSharp/Resolver/CSharpConversionsHelpers.hpp"  // Detail::IdentityConversion (the BetterParamsCollectionType span arms)
 #include "Decompiler/CSharp/Resolver/ILiftedOperator.hpp"  // ILiftedOperator (the BetterFunctionMember non-lifted-operator tiebreak)
 #include "Decompiler/CSharp/Resolver/OverloadResolutionErrors.hpp"  // TooManyPositionalArguments / NoParameterFoundForNamedArgument
@@ -29,12 +29,18 @@
 #include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversions::None() (the unmapped-argument conversion)
 #include "Decompiler/Semantics/OutVarResolveResult.hpp"  // dynamic_cast<OutVarResolveResult>
 #include "Decompiler/Semantics/ResolveResult.hpp"  // ResolveResult (arguments element)
+#include "Decompiler/TypeSystem/Accessibility.hpp"  // Accessibility::Public (the ctor filter)
 #include "Decompiler/TypeSystem/IParameterizedMember.hpp"  // Member->Parameters (specialized)
 #include "Decompiler/TypeSystem/IParameter.hpp"  // IParameter::Type / ReferenceKind
-#include "Decompiler/TypeSystem/IType.hpp"  // ArrayType / ParameterizedType / ByReferenceType / TypeKind
+#include "Decompiler/TypeSystem/IType.hpp"  // ArrayType / ParameterizedType / ByReferenceType / TypeKind / GetMemberOptions
+#include "Decompiler/TypeSystem/ITypeDefinition.hpp"  // ITypeDefinition::IsAbstract (the new() constraint)
+#include "Decompiler/TypeSystem/ITypeParameter.hpp"  // ITypeParameter (the constraint flags / DirectBaseTypes)
+#include "Decompiler/TypeSystem/IMethod.hpp"  // IMethod::Parameters / Accessibility (the ctor filter)
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"  // SpanOfT / ReadOnlySpanOfT
+#include "Decompiler/TypeSystem/NullableType.hpp"  // IsNonNullableValueType (the struct constraint)
 #include "Decompiler/TypeSystem/ReferenceKind.hpp"  // ReferenceKind
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // IsKnownType / IsArrayInterfaceType / SkipModifiers
+#include "Decompiler/TypeSystem/TypeVisitor.hpp"  // TypeVisitor (the substitution)
 
 #include <algorithm>  // std::min (the MoreSpecificFormalParameters Zip-stops-at-shorter)
 #include <string>
@@ -683,6 +689,88 @@ void ConsiderIfNewCandidateIsBest(
         default:
             break;
     }
+}
+
+bool ValidateConstraints(const ILSpy::Decompiler::TypeSystem::ITypeParameter& typeParameter,
+                         ILSpy::Decompiler::TypeSystem::IType& typeArgument,
+                         ILSpy::Decompiler::TypeSystem::TypeVisitor* substitution,
+                         CSharpConversions& conversions)
+{
+    using ILSpy::Decompiler::TypeSystem::Accessibility;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::IsNonNullableValueType;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+
+    // C# `switch (typeArgument.Kind) { // void, null, and pointers cannot be used as type arguments
+    // case TypeKind.Void: case TypeKind.Null: case TypeKind.Pointer: return false; }` -- the
+    // outright rejections before any constraint flag is consulted.
+    switch (typeArgument.Kind()) {
+        case TypeKind::Void:
+        case TypeKind::Null:
+        case TypeKind::Pointer:
+            return false;
+        default:
+            break;
+    }
+    // C# `if (typeParameter.HasReferenceTypeConstraint) { if (typeArgument.IsReferenceType != true)
+    // return false; }` -- the `bool? != true` check is false ONLY for a definite `true` (a lifted
+    // `!=` yields true when the optional holds `false` OR is empty, the D517 `bool?` relational
+    // semantics), so an indeterminate `IsReferenceType` FAILS the `class` constraint.
+    if (typeParameter.HasReferenceTypeConstraint()) {
+        auto isReferenceType = typeArgument.IsReferenceType();
+        if (!(isReferenceType.has_value() && *isReferenceType == true))
+            return false;
+    }
+    // C# `if (typeParameter.HasValueTypeConstraint) { if (!NullableType.IsNonNullableValueType(
+    // typeArgument)) return false; }` -- the `struct`/`unmanaged` constraint needs a non-nullable
+    // value type (a `Nullable<T>` is a value type but nullable, so it FAILS).
+    if (typeParameter.HasValueTypeConstraint()) {
+        if (!IsNonNullableValueType(typeArgument))
+            return false;
+    }
+    // C# `if (typeParameter.HasDefaultConstructorConstraint) { ITypeDefinition def =
+    // typeArgument.GetDefinition(); if (def != null && def.IsAbstract) return false; var ctors =
+    // typeArgument.GetConstructors(m => m.Parameters.Count == 0 && m.Accessibility ==
+    // Accessibility.Public, IgnoreInheritedMembers | ReturnMemberDefinitions); if (!ctors.Any())
+    // return false; }` -- the `new()` constraint: an abstract type has no creatable parameterless
+    // instances, and the type must declare its OWN public parameterless constructor (the
+    // IgnoreInheritedMembers option; ReturnMemberDefinitions skips member specialization).
+    if (typeParameter.HasDefaultConstructorConstraint()) {
+        const ILSpy::Decompiler::TypeSystem::ITypeDefinition* definition = typeArgument.GetDefinition();
+        if (definition != nullptr && definition->IsAbstract())
+            return false;
+        auto constructors = typeArgument.GetConstructors(
+            [](const ILSpy::Decompiler::TypeSystem::IMethod* m) {
+                return m->Parameters().size() == 0 &&
+                       m->Accessibility() == Accessibility::Public;
+            },
+            ILSpy::Decompiler::TypeSystem::GetMemberOptions::IgnoreInheritedMembers |
+                ILSpy::Decompiler::TypeSystem::GetMemberOptions::ReturnMemberDefinitions);
+        if (constructors.empty())
+            return false;
+    }
+    // C# `foreach (IType constraintType in typeParameter.DirectBaseTypes) { IType c =
+    // constraintType; if (substitution != null) c = c.AcceptVisitor(substitution); if
+    // (!conversions.IsConstraintConvertible(typeArgument, c)) return false; }` -- each declared
+    // base-type constraint (`where T : Base`), after the optional substitution replaces type
+    // parameters inside the constraint (a constraint may reference another type parameter, or
+    // recursively the same one). The `c` handle is null-guarded before the deref: the C# visitor
+    // contract never returns null, but the port's `ITypePtr` return could be empty for a
+    // degenerate visitor, and the guard yields false as the safe faithful fallback (the D543
+    // IsExactlyMatching null-guard precedent) instead of dereferencing an empty handle.
+    for (const ITypePtr& constraintType : typeParameter.DirectBaseTypes()) {
+        ITypePtr c = constraintType;
+        if (!c)
+            return false;
+        if (substitution != nullptr) {
+            c = c->AcceptVisitor(*substitution);
+            if (!c)
+                return false;
+        }
+        if (!conversions.IsConstraintConvertible(typeArgument, *c))
+            return false;
+    }
+    return true;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

@@ -423,6 +423,11 @@ public:
     // `false` preserves the original behavior so existing tests that do not call the setter
     // are unaffected (the additive-setter convention).
     void SetReturnTypeIsRefReadOnly(bool v) { returnTypeIsRefReadOnly_ = v; }
+    // Configurable `Accessibility` for the constraint-validation ctor filter
+    // (`ValidateConstraints`'s `m.Accessibility == Accessibility.Public` check). The default
+    // `Public` preserves the original behavior so existing tests that do not call the setter
+    // are unaffected (the additive-setter convention).
+    void SetAccessibility(TS::Accessibility a) { accessibility_ = a; }
 
     // --- ISymbol ---
     TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Method; }
@@ -444,7 +449,7 @@ public:
     std::vector<const IAttribute*> GetAttributes() const override { return {}; }
     bool HasAttribute(KnownAttribute) const override { return false; }
     const IAttribute* GetAttribute(KnownAttribute) const override { return nullptr; }
-    TS::Accessibility Accessibility() const override { return TS::Accessibility::Public; }
+    TS::Accessibility Accessibility() const override { return accessibility_; }
     bool IsStatic() const override { return isStatic_; }
     bool IsAbstract() const override { return false; }
     bool IsSealed() const override { return false; }
@@ -505,6 +510,7 @@ private:
     bool isStatic_ = false;
     bool isOperator_ = false;
     bool returnTypeIsRefReadOnly_ = false;
+    TS::Accessibility accessibility_ = TS::Accessibility::Public;
     ITypePtr returnTypeOverride_;
     std::vector<const IParameter*> parameters_;
 };
@@ -580,6 +586,15 @@ public:
         : name_(std::move(name)), variance_(variance) {}
 
     void SetEffectiveBaseClass(ITypePtr t) { effectiveBaseClass_ = std::move(t); }
+    // Configurable constraint flags / direct base types for the constraint-validation tests
+    // (`Detail::ValidateConstraints` -- the `where T : class` / `where T : struct` / `where T : new()`
+    // / `where T : Base` checks). The defaults preserve the original behavior (all flags false,
+    // `DirectBaseTypes()` empty -- the inherited `IType` default), so existing tests that do not
+    // call the setters are unaffected (the additive-setter convention).
+    void SetHasReferenceTypeConstraint(bool v) { hasReferenceTypeConstraint_ = v; }
+    void SetHasValueTypeConstraint(bool v) { hasValueTypeConstraint_ = v; }
+    void SetHasDefaultConstructorConstraint(bool v) { hasDefaultConstructorConstraint_ = v; }
+    void SetDirectBaseTypes(std::vector<ITypePtr> bases) { directBaseTypes_ = std::move(bases); }
 
     // --- IType ---
     TypeKind Kind() const override { return TypeKind::TypeParameter; }
@@ -600,13 +615,17 @@ public:
     VarianceModifier Variance() const override { return variance_; }
     ITypePtr EffectiveBaseClass() const override { return effectiveBaseClass_; }
     std::vector<ITypePtr> EffectiveInterfaceSet() const override { return {}; }
-    bool HasDefaultConstructorConstraint() const override { return false; }
-    bool HasReferenceTypeConstraint() const override { return false; }
-    bool HasValueTypeConstraint() const override { return false; }
+    bool HasDefaultConstructorConstraint() const override { return hasDefaultConstructorConstraint_; }
+    bool HasReferenceTypeConstraint() const override { return hasReferenceTypeConstraint_; }
+    bool HasValueTypeConstraint() const override { return hasValueTypeConstraint_; }
     bool HasUnmanagedConstraint() const override { return false; }
     bool AllowsRefLikeType() const override { return false; }
     ::ILSpy::Decompiler::TypeSystem::Nullability NullabilityConstraint() const override { return ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious; }
     std::vector<TypeConstraint> TypeConstraints() const override { return {}; }
+    // The declared base-type constraints (`where T : Base`); the `IType` default returns empty,
+    // the setter supplies the hand-wired list (the `LookupTypeDefinition::AddDirectBaseType`
+    // convention). Returns the hand-wired shared_ptr list so the entries stay alive.
+    std::vector<ITypePtr> DirectBaseTypes() const override { return directBaseTypes_; }
 
 protected:
     bool StructuralEquals(const IType& other) const override
@@ -618,6 +637,10 @@ private:
     std::string name_;
     VarianceModifier variance_;
     ITypePtr effectiveBaseClass_;
+    bool hasDefaultConstructorConstraint_ = false;
+    bool hasReferenceTypeConstraint_ = false;
+    bool hasValueTypeConstraint_ = false;
+    std::vector<ITypePtr> directBaseTypes_;
 };
 
 } // namespace ILSpy::Decompiler::TypeSystem::TestSupport
