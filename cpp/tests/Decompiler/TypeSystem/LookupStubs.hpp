@@ -586,6 +586,11 @@ public:
         : name_(std::move(name)), variance_(variance) {}
 
     void SetEffectiveBaseClass(ITypePtr t) { effectiveBaseClass_ = std::move(t); }
+    // Configurable index for the TypeInference region tests (the `Detail::OccursInVisitor`
+    // indexes the `TP` state vector by the visited type parameter's `Index` -- the real
+    // `InferTypeArguments` contract is `typeParameters[i].Index == i`). The default 0
+    // preserves the original behavior (the additive-setter convention).
+    void SetIndex(int index) { index_ = index; }
     // Configurable constraint flags / direct base types for the constraint-validation tests
     // (`Detail::ValidateConstraints` -- the `where T : class` / `where T : struct` / `where T : new()`
     // / `where T : Base` checks). The defaults preserve the original behavior (all flags false,
@@ -610,7 +615,7 @@ public:
     // --- ITypeParameter ---
     TS::SymbolKind OwnerType() const override { return TS::SymbolKind::Method; }
     const IEntity* Owner() const override { return nullptr; }
-    int Index() const override { return 0; }
+    int Index() const override { return index_; }
     std::vector<const IAttribute*> GetAttributes() const override { return {}; }
     VarianceModifier Variance() const override { return variance_; }
     ITypePtr EffectiveBaseClass() const override { return effectiveBaseClass_; }
@@ -637,6 +642,7 @@ private:
     std::string name_;
     VarianceModifier variance_;
     ITypePtr effectiveBaseClass_;
+    int index_ = 0;
     bool hasDefaultConstructorConstraint_ = false;
     bool hasReferenceTypeConstraint_ = false;
     bool hasValueTypeConstraint_ = false;

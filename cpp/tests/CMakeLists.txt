@@ -78,6 +78,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Resolver/ValidateMethodConstraints_Test.cpp
     Decompiler/CSharp/Resolver/GetBestCandidateWithSubstitutedTypeArguments_Test.cpp
     Decompiler/CSharp/Resolver/TypeInferenceInputOutputTypes_Test.cpp
+    Decompiler/CSharp/Resolver/TypeInferenceContainsUnfixed_Test.cpp
     Decompiler/CSharp/Resolver/OverloadResolutionCtor_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsSkeleton_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsNumeric_Test.cpp

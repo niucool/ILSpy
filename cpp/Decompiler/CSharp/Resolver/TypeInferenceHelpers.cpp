@@ -27,6 +27,7 @@
 #include "Decompiler/TypeSystem/IMethod.hpp"  // IMethod (Parameters() / ReturnType())
 #include "Decompiler/TypeSystem/IType.hpp"  // IType / ParameterizedType (the unwrap)
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"  // ITypeDefinition (Namespace via GetDefinition)
+#include "Decompiler/TypeSystem/ITypeParameter.hpp"  // ITypeParameter (the OccursInVisitor Index read)
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // GetDelegateInvokeMethod (the D533 free function)
 
 namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
@@ -38,6 +39,7 @@ using ILSpy::Decompiler::TypeSystem::IType;
 using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
 using ILSpy::Decompiler::TypeSystem::ITypePtr;
 using ILSpy::Decompiler::TypeSystem::ParameterizedType;
+using ILSpy::Decompiler::TypeSystem::TypeVisitor;
 
 // The C# `static IMethod GetDelegateOrExpressionTreeSignature(IType t)` (TypeInference.cs,
 // the Input Types / Output Types region) -- the `Expression<T>` unwrap followed by the
@@ -132,6 +134,120 @@ std::vector<const IType*> OutputTypes(const ILSpy::Decompiler::Semantics::Resolv
     }
     // C# `return Empty<IType>.Array;`
     return {};
+}
+
+// ===========================================================================
+// The ContainsUnfixed region (TypeInference.cs lines 217-271 + 442-465).
+// ===========================================================================
+
+// The C# `void AddExactBound(IType type)` (TypeInference.cs lines 240-248).
+void TP::AddExactBound(ITypePtr type)
+{
+    // C# `if (ExactBound == null) { ExactBound = type; }`
+    if (!ExactBound) {
+        ExactBound = std::move(type);
+        return;
+    }
+    // C# `else if (!ExactBound.Equals(type)) MultipleDifferentExactBounds = true;` -- the
+    // null-`type` degenerate shape (never passed by a real caller) makes the C#
+    // `Equals(null)` return false and take the `true` branch, so the port guards the deref
+    // and does the same (the D516 safe-faithful-fallback convention).
+    if (!type || !ExactBound->Equals(*type))
+        MultipleDifferentExactBounds = true;
+}
+
+// The `tp.LowerBounds.Add(U)` call site (TypeInference.cs line 750, the
+// `MakeLowerBoundInference` region) -- the `HashSet<IType>.Add` idempotence under
+// `IType.Equals` (structural equality for the concrete types; `KnownType` compares the code,
+// `ParameterizedType` the generic + the type arguments). A `HashSet<IType>` would also
+// store a null; no real caller passes one, and the dedup compare needs both sides non-null.
+void TP::AddLowerBound(ITypePtr type)
+{
+    for (const ITypePtr& b : LowerBounds) {
+        if (b && type && b->Equals(*type))
+            return; // already present -- the HashSet.Add no-op
+    }
+    LowerBounds.push_back(std::move(type));
+}
+
+// The `tp.UpperBounds.Add(U)` call site (TypeInference.cs line 879, the
+// `MakeUpperBoundInference` region) -- the same `HashSet<IType>.Add` idempotence.
+void TP::AddUpperBound(ITypePtr type)
+{
+    for (const ITypePtr& b : UpperBounds) {
+        if (b && type && b->Equals(*type))
+            return;
+    }
+    UpperBounds.push_back(std::move(type));
+}
+
+// The C# `public override IType VisitTypeParameter(ITypeParameter type)` (TypeInference.cs
+// lines 262-270).
+ITypePtr OccursInVisitor::VisitTypeParameter(
+    ILSpy::Decompiler::TypeSystem::ITypeParameter& type)
+{
+    // C# `int index = type.Index; if (index < tp.Length && tp[index].TypeParameter == type)
+    //     Occurs[index] = true;`
+    //
+    // The `tp[index].TypeParameter == type` is the C# reference-equality check -- a raw
+    // pointer comparison: a DIFFERENT `ITypeParameter` instance that happens to carry the
+    // same index does NOT count as occurring (the real inference's type parameters are the
+    // very instances the method declares). The `index >= 0` guard is the defensive addition
+    // (a negative index would throw in the C#; the port skips it, the D516 convention).
+    const int index = type.Index();
+    if (index >= 0 && static_cast<std::size_t>(index) < tp_.size()
+        && tp_[static_cast<std::size_t>(index)].TypeParameter == &type) {
+        occurs_[static_cast<std::size_t>(index)] = true;
+    }
+    // C# `return base.VisitTypeParameter(type);` -- the base default recurses through the
+    // children (a type parameter has none) and returns the type itself.
+    return TypeVisitor::VisitTypeParameter(type);
+}
+
+// The C# `bool AnyTypeContainsUnfixedParameter(IEnumerable<IType> types)` (TypeInference.cs
+// line 453).
+bool AnyTypeContainsUnfixedParameter(const std::vector<TP>& typeParameters,
+                                     const std::vector<const IType*>& types)
+{
+    // C# `OccursInVisitor o = new OccursInVisitor(this); foreach (var type in types) {
+    //     type.AcceptVisitor(o); }` -- `AcceptVisitor` is non-const (D406), so the non-owning
+    // `const IType*` snapshots take the `const_cast` (the D517 convention; the underlying
+    // type-system objects are mutable). A null entry would NRE in the C#; the port skips it
+    // (the D516 degenerate-shape fallback).
+    OccursInVisitor o(typeParameters);
+    for (const IType* type : types) {
+        if (type == nullptr)
+            continue;
+        const_cast<IType*>(type)->AcceptVisitor(o);
+    }
+    // C# `for (int i = 0; i < typeParameters.Length; i++) {
+    //     if (!typeParameters[i].IsFixed && o.Occurs[i]) return true; }
+    // return false;`
+    for (std::size_t i = 0; i < typeParameters.size(); i++) {
+        if (!typeParameters[i].IsFixed() && o.Occurs()[i])
+            return true;
+    }
+    return false;
+}
+
+// The C# `bool InputTypesContainsUnfixed(ResolveResult argument, IType parameterType)`
+// (TypeInference.cs line 442).
+bool InputTypesContainsUnfixed(const std::vector<TP>& typeParameters,
+                               const ILSpy::Decompiler::Semantics::ResolveResult& argument,
+                               const IType& parameterType)
+{
+    // C# `return AnyTypeContainsUnfixedParameter(InputTypes(argument, parameterType));`
+    return AnyTypeContainsUnfixedParameter(typeParameters, InputTypes(argument, parameterType));
+}
+
+// The C# `bool OutputTypeContainsUnfixed(ResolveResult argument, IType parameterType)`
+// (TypeInference.cs line 447).
+bool OutputTypeContainsUnfixed(const std::vector<TP>& typeParameters,
+                              const ILSpy::Decompiler::Semantics::ResolveResult& argument,
+                              const IType& parameterType)
+{
+    // C# `return AnyTypeContainsUnfixedParameter(OutputTypes(argument, parameterType));`
+    return AnyTypeContainsUnfixedParameter(typeParameters, OutputTypes(argument, parameterType));
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
