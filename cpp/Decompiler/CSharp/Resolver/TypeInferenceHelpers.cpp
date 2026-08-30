@@ -1152,10 +1152,10 @@ void MakeOutputTypeInference(const ICompilation& compilation, std::vector<TP>& t
     // (the parameter types with the fixed-TP substitution applied, a ref/in parameter
     // unwrapped to its element type) feed `mgrr.PerformOverloadResolution`, and the
     // resolved method's return type lower-bounds the delegate return type. DEFERRED:
-    // `MethodGroupResolveResult.PerformOverloadResolution` needs the `OverloadResolution`
+    // `MethodGroupResolveResult.PerformOverloadResolution` -- the `OverloadResolution`
     // engine (`AddMethodLists` -> `AddCandidate` -> `CalculateCandidate` ->
-    // `RunTypeInference` -- the very engine this TypeInference port feeds; the C# engine
-    // is mutually recursive with this arm). Until the engine lands, a method-group
+    // `RunTypeInference`) it composes is now fully ported, so the arm is UNBLOCKED and lands
+    // in a follow-up iteration. Until it lands, a method-group
     // argument makes NO output-type inference -- faithful to the C# whenever the overload
     // resolution finds no unambiguous applicable candidate (the
     // `or.FoundApplicableCandidate && or.BestCandidateAmbiguousWith == null` guard

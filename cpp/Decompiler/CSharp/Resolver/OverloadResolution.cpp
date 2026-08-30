@@ -100,6 +100,26 @@ void OverloadResolution::AddMethodLists(
                             bestCandidate_, bestCandidateWasValidated_, bestCandidateAmbiguousWith_);
 }
 
+void OverloadResolution::LogCandidateAddingResult(
+    const char* text,
+    const ILSpy::Decompiler::TypeSystem::IParameterizedMember& method,
+    OverloadResolutionErrors errors) const {
+    // The C# `#if DEBUG` body reads `this.BestCandidate`/`this.BestCandidateAmbiguousWith` for
+    // the " (best candidate so far)"/" (ambiguous)" suffixes; the port delegates to the `Detail::`
+    // free function with the instance fields threaded (the reference equality against the
+    // candidates' `Member()` ports to pointer equality inside it).
+    Detail::LogCandidateAddingResult(text, method, errors, bestCandidate_,
+                                      bestCandidateAmbiguousWith_);
+}
+
+const ILSpy::Decompiler::TypeSystem::IParameterizedMember*
+OverloadResolution::GetBestCandidateWithSubstitutedTypeArguments() const {
+    // The C# reads only the `bestCandidate` field; the port threads it into the `Detail::`
+    // free function (the re-specialization of a generic best candidate through its member
+    // definition with the merged substitution -- see the `Detail::` doc for the full contract).
+    return Detail::GetBestCandidateWithSubstitutedTypeArguments(bestCandidate_);
+}
+
 OverloadResolutionErrors OverloadResolution::BestCandidateErrors() {
     // The C# property getter delegates to the lazily-memoized constraint validation; the port
     // threads the memoization state (the `ConsiderIfNewCandidateIsBest` state-threading

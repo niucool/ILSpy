@@ -68,16 +68,16 @@
 //         format, NOT the inherited bracket form).
 //       - `override IEnumerable<ResolveResult> GetChildResults()` => `{ targetResult }`
 //         when present, empty otherwise.
-//   * DEFERRED (method members, not classes): the extension-method machinery
-//     (`GetExtensionMethods`, `GetEligibleExtensionMethods`, plus the internal
-//     `extensionMethods`/`resolver` fields) and `PerformOverloadResolution`. These compose
-//     the unported `OverloadResolution` (~1200 lines), `TypeInference` (~1188 lines),
-//     `CSharpResolver.IsEligibleExtensionMethod`, `SpecializedMethod`, and
-//     `TypeParameterSubstitution` -- none of which land until the resolver controller is
-//     ported. `GetExtensionMethods()` is ported in its resolver-less state (returns empty
-//     when no resolver is attached); `GetEligibleExtensionMethods` and
-//     `PerformOverloadResolution` are NOT declared (they unblock with
-//     `OverloadResolution`/`TypeInference`).
+//   * DEFERRED (method members, not classes): the extension-method machinery that needs the
+//     unported `CSharpResolver` controller (`GetEligibleExtensionMethods` plus the internal
+//     `extensionMethods`/`resolver` fields and the resolver-attached `GetExtensionMethods` fetch).
+//     `GetExtensionMethods()` is ported in its resolver-less state (returns empty when no
+//     resolver is attached; the `PerformOverloadResolution` extension-method arm is
+//     correspondingly inert while `GetExtensionMethods()` yields empty -- it goes live when
+//     the resolver lands). `PerformOverloadResolution` is PORTED (implemented in the new
+//     `MethodGroupResolveResult.cpp`): it composes the now-ported `OverloadResolution` engine
+//     (the ctor + the input properties + `AddMethodLists` + `AddCandidate` + the output
+//     properties + `GetBestCandidateWithSubstitutedTypeArguments`).
 //
 // All other deps are already ported: `ResolveResult` (D424, the base), `SpecialType.NoType`
 // / `SpecialType.UnknownType` (the D433 `IType.hpp` conveniences), `IType`/`ITypePtr`
@@ -161,11 +161,21 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
+
+// Forward-declared (now ported): the overload-resolution engine `PerformOverloadResolution`
+// builds and returns (the `unique_ptr` return type needs only a declaration; the .cpp
+// includes the full header).
+class OverloadResolution;
+
+// Forward-declared (now ported): the conversion controller threaded through
+// `PerformOverloadResolution` (a pointer parameter needs only a declaration).
+class CSharpConversions;
 
 // The C# `public class MethodListWithDeclaringType : List<IParameterizedMember>` -- a
 // method list that belongs to a declaring type. Ports to a value type deriving from
@@ -210,9 +220,9 @@ private:
 // The C# `public class MethodGroupResolveResult : ResolveResult` (NOT `sealed`) ports to a
 // C++ subclass (NOT `final`) of `Semantics::ResolveResult`. The result has NO type (the
 // base is `SpecialType.NoType`); to retrieve the chosen overload / delegate type, look at
-// the method-group conversion. The extension-method machinery and
-// `PerformOverloadResolution` are DEFERRED (they need `OverloadResolution` / `TypeInference`
-// / `CSharpConversions`, unported); a resolver-less `GetExtensionMethods()` returns empty.
+// the method-group conversion. The extension-method machinery remains DEFERRED (it needs
+// the unported `CSharpResolver` controller); a resolver-less `GetExtensionMethods()` returns
+// empty. `PerformOverloadResolution` is ported (see its declaration below).
 class MethodGroupResolveResult : public ILSpy::Decompiler::Semantics::ResolveResult {
 public:
     // The C# `MethodGroupResolveResult(ResolveResult targetResult, string methodName,
@@ -328,6 +338,38 @@ public:
     {
         return {};
     }
+
+    // The C# `public OverloadResolution PerformOverloadResolution(ICompilation compilation,
+    // ResolveResult[] arguments, string[] argumentNames = null, bool allowExtensionMethods =
+    // true, bool allowExpandingParams = true, bool allowOptionalParameters = true, bool
+    // allowImplicitIn = true, bool checkForOverflow = false, CSharpConversions conversions =
+    // null)` (lines 248-307) -- performs overload resolution on this method group: builds an
+    // `OverloadResolution` over the given arguments (with this group's explicitly provided
+    // `TypeArguments` as the given type arguments), sets the four input properties, adds the
+    // group's own method lists, and -- when `allowExtensionMethods` and no applicable
+    // candidate was found -- retries with the extension methods (the receiver prepended as
+    // the first argument, `IsExtensionMethodInvocation` set). The C# returns the live
+    // `OverloadResolution` reference; the port returns an owning `unique_ptr` (a factory --
+    // the single ownership transfers to the caller).
+    //
+    // The extension-method arm is structurally complete but currently INERT: with no resolver
+    // attached, `GetExtensionMethods()` yields empty, so the `extensionMethods.Any()` guard
+    // skips the whole block (the documented resolver-less state; the arm goes live when the
+    // resolver-attached `GetExtensionMethods` lands).
+    //
+    // The C# `argumentNames` null default ports to `std::nullopt`; the `conversions` null
+    // default to a nullable pointer (the `OverloadResolution` ctor's lazy
+    // `CSharpConversions::Get` fallback resolves it at the first engine call).
+    std::unique_ptr<OverloadResolution> PerformOverloadResolution(
+        const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+        const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+        const std::optional<std::vector<std::string>>& argumentNames = std::nullopt,
+        bool allowExtensionMethods = true,
+        bool allowExpandingParams = true,
+        bool allowOptionalParameters = true,
+        bool allowImplicitIn = true,
+        bool checkForOverflow = false,
+        const CSharpConversions* conversions = nullptr) const;
 
     // The C# `ShallowClone` (inherited `MemberwiseClone`) preserves the runtime type and
     // shallow-copies the fields. The C++ override reproduces this via the default copy

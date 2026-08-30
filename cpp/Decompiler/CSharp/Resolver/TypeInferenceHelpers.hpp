@@ -36,7 +36,8 @@
 // -- the MakeOutputTypeInference region (C# 4.0 spec section 7.5.2.6: the fourth
 // worker over the LAMBDA argument shape plus the plain-expression arm, with the
 // `GetSubstitutionForFixedTPs` fixed-TP substitution and the `IsValidType` gate; its
-// METHOD-GROUP arm stays deferred on `PerformOverloadResolution`) -- and the Fixing /
+// METHOD-GROUP arm stays deferred until a follow-up iteration -- `PerformOverloadResolution`
+// is now ported, so the arm is unblocked) -- and the Fixing /
 // FindTypeInBounds / GetBestCommonType regions (spec draft-v11 sections 12.6.3.13 +
 // 12.6.3.17: the `Fix` fixing decision, the `FindTypesInBounds` spec candidate-types
 // algorithm, the `FindTypeInBounds` public entry, and the `GetBestCommonType`
@@ -402,7 +403,8 @@ void MakeUpperBoundInference(const ILSpy::Decompiler::TypeSystem::ICompilation& 
 // type (the implicitly-typed arm threads the fixed-TP-substituted delegate parameter
 // types into `LambdaResolveResult.GetInferredReturnType`; the explicitly-typed arm
 // passes none), a METHOD GROUP its resolved overload's return type (DEFERRED -- the
-// `PerformOverloadResolution` engine long pole), and a plain expression its own type
+// `PerformOverloadResolution` engine it calls is now ported, so the arm is unblocked and
+// lands in a follow-up iteration), and a plain expression its own type
 // (gated on `IsValidType`). The C# reads the `typeParameters` / `classTypeArguments`
 // instance fields; the lift threads both as parameters (the established convention).
 // ===========================================================================

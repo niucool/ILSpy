@@ -952,8 +952,9 @@ AnonymousFunctionConversion(ILSpy::Decompiler::CSharp::Resolver::CSharpConversio
 // `Detail::` free function taking `const ICompilation&` + `const IMethod& invoke` (every
 // `IMethod`/`IParameter` member the body reads -- `Parameters`, each parameter's `Type` /
 // `ReferenceKind` -- is `const`). A tested-but-not-yet-wired foundation ahead of the
-// `MethodGroupConversion` body (which needs `PerformOverloadResolution`); `MethodGroupConversion`
-// will call this helper then feed the result to the (deferred) overload-resolution engine.
+// `MethodGroupConversion` body (which needs `PerformOverloadResolution`, now ported as a
+// `MethodGroupResolveResult` member); `MethodGroupConversion`
+// will call this helper then feed the result to the overload-resolution engine.
 //
 // The owning `std::shared_ptr<ResolveResult>` handles the returned vector carries model the C#
 // `ResolveResult[]` (the C# GC-shared array; the port's shared handles keep the constructed

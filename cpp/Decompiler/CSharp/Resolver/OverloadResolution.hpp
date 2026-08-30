@@ -27,10 +27,12 @@
 // properties (`BestCandidate`/`BestCandidateAmbiguousWith`/`FoundApplicableCandidate`/`IsAmbiguous`/
 // `BestCandidateErrors` -- the lazy `ValidateMethodConstraints` memoization -- /
 // `BestCandidateIsExpandedForm`/`InferredTypeArguments`/`ArgumentConversions`/
-// `GetArgumentToParameterMap`), and the output wrappers (`GetArgumentsWithConversions`/
-// `GetArgumentsWithConversionsAndNames`/`CreateResolveResult` -- the argument-conversion wrapping
-// and the `CSharpInvocationResolveResult` composition, delegating to
-// `Detail::GetArgumentsWithConversions`). The only deferred piece is the constant-folding arm of the
+// `GetArgumentToParameterMap`), the `LogCandidateAddingResult` debug-log helper, and the output
+// wrappers (`GetArgumentsWithConversions`/`GetArgumentsWithConversionsAndNames`/
+// `GetBestCandidateWithSubstitutedTypeArguments`/`CreateResolveResult` -- the argument-conversion
+// wrapping, the best-candidate re-specialization, and the `CSharpInvocationResolveResult`
+// composition, delegating to `Detail::GetArgumentsWithConversions` and
+// `Detail::GetBestCandidateWithSubstitutedTypeArguments`). The only deferred piece is the constant-folding arm of the
 // wrapping core (it needs `CSharpResolver.ResolveCast`; see the `Detail::GetArgumentsWithConversions`
 // doc).
 //
@@ -205,6 +207,17 @@ public:
     // C# ctor default `conversions ?? CSharpConversions.Get(compilation)`).
     void AddMethodLists(const std::vector<MethodListWithDeclaringType>& methodLists);
 
+    // The C# `internal void LogCandidateAddingResult(string text, IParameterizedMember method,
+    // OverloadResolutionErrors errors)` (line 377, `#if DEBUG`-gated) -- logs the per-candidate
+    // adding result ("<text> <method> = Success|<errors> (best candidate so far|ambiguous)") with
+    // THIS resolution's best-candidate state. The port delegates to `Detail::LogCandidateAddingResult`
+    // with the instance fields threaded (the C# body is compiled out entirely in release builds via
+    // `#if DEBUG`; the port's `Log::IsEnabled == false` keeps the body a discarded branch -- the
+    // state reads are the only live part, and they are side-effect-free).
+    void LogCandidateAddingResult(const char* text,
+                                  const ILSpy::Decompiler::TypeSystem::IParameterizedMember& method,
+                                  OverloadResolutionErrors errors) const;
+
     // --- Output Properties (C# lines 1002-1085) ---
 
     // The C# `public IParameterizedMember BestCandidate` -- the best candidate's member, or null
@@ -306,6 +319,19 @@ public:
     // re-specialized with the inferred type arguments,
     // `GetBestCandidateWithSubstitutedTypeArguments()`).
     std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> GetArgumentsWithConversionsAndNames();
+
+    // The C# `public IParameterizedMember GetBestCandidateWithSubstitutedTypeArguments()`
+    // (line 1153) -- "the best candidate with the inferred type arguments substituted into
+    // its generic method definition": null with no best candidate; a non-generic member
+    // (or a non-method parameterized member such as an indexer) returned as-is; a GENERIC
+    // method re-specialized through its member definition with the merged `GetSubstitution`
+    // substitution (the member's own class type arguments + the candidate's inferred method
+    // type arguments -- the merge-not-compose contract). The port delegates to
+    // `Detail::GetBestCandidateWithSubstitutedTypeArguments` with the `bestCandidate_` state
+    // threaded (the state-threading convention). The return is a non-owning nullable pointer
+    // (the candidate owns the member; the `Specialize` result is owned by the type system,
+    // the `IMember::Specialize` contract).
+    const ILSpy::Decompiler::TypeSystem::IParameterizedMember* GetBestCandidateWithSubstitutedTypeArguments() const;
 
     // The C# `public CSharpInvocationResolveResult CreateResolveResult(ResolveResult
     // targetResolveResult, IList<ResolveResult> initializerStatements = null, IType

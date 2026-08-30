@@ -1704,8 +1704,8 @@ AnonymousFunctionConversion(CSharpConversions& conversions, const LambdaResolveR
 // line 1362, the local `args` construction inside `MethodGroupConversion`). See the header doc for
 // the three branches (the ref/out/in `ByReferenceResolveResult`, the `dynamic`->`object` plain
 // `ResolveResult`, the plain `ResolveResult(parameterType)`). The `args` are the synthetic
-// arguments fed to the (deferred) `MethodGroupResolveResult.PerformOverloadResolution`; this
-// helper lands ahead of that engine as a tested-but-not-yet-wired foundation.
+// arguments fed to `MethodGroupResolveResult.PerformOverloadResolution` (now ported); this
+// helper is a tested-but-not-yet-wired foundation ahead of the `MethodGroupConversion` body.
 std::vector<std::shared_ptr<ResolveResult>>
 MethodGroupConversionArguments(const ICompilation& compilation, const IMethod& invoke)
 {
@@ -1925,7 +1925,9 @@ ImplicitConversion(const ICompilation& compilation, const ResolveResult& resolve
 	}
 	// C# `c = MethodGroupConversion(resolveResult, toType); if (c != Conversion.None) return c;`
 	// -- DEFERRED: the method-group conversion needs `MethodGroupResolveResult.PerformOverloadResolution`
-	// plus `IsDelegateCompatible`. Yields `None`; a non-method-group `ResolveResult` falls through.
+	// (now ported) plus `IsDelegateCompatible` (ported as the 3-arg helper and the public entry).
+	// The body itself lands in a follow-up iteration; a non-method-group `ResolveResult` falls through.
+	// Yields `None` until then.
 	// c = MethodGroupConversion(resolveResult, toType);
 	// if (c.get() != Conversions::None().get()) return c;
 	// C# 9.0 spec section 10.2.16 default literal conversions -- `// TODO` in the C# source; skipped.
