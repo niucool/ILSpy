@@ -905,8 +905,9 @@ std::shared_ptr<Conversion> StandardImplicitConversion(const ICompilation& compi
 	// but the identity/nullable arms fire first for a non-null source), reference before boxing (a
 	// reference-to-reference is not a boxing), boxing before type-parameter (the type-parameter arm
 	// yields a boxing conversion when it isn't also a reference conversion), pointer last among the
-	// ported arms. The tuple/inline-array/span arms are deferred (need TupleResolveResult /
-	// IsInlineArrayType / Span machinery) and yield None for those shapes until ported.
+	// ported arms. The tuple arm (D540) and the inline-array / span arms (the C# 12
+	// inline-array-to-span arm and the C# 14 first-class-span-types arm, over IsInlineArrayType /
+	// GetInlineArrayElementType / IsImplicitSpanConversion D538) are all live below.
 	if (IdentityConversion(fromType, toType))
 		return Conversions::IdentityConversion();
 	if (ImplicitNumericConversion(fromType, toType))
@@ -942,13 +943,37 @@ std::shared_ptr<Conversion> StandardImplicitConversion(const ICompilation& compi
 	// `StandardImplicitConversion` has no `allowTupleConversion` parameter (the public entry always
 	// passes `true`, the D523 collapse), so the arm always runs. The `c != Conversion.None` check ports
 	// to pointer-identity against the `None` singleton; a non-tuple shape yields `None` and falls
-	// through to the (deferred) inline-array / span arms.
+	// through to the inline-array / span arms.
 	c = TupleConversion(compilation, fromType, toType, /*isExplicit*/ false);
 	if (c.get() != Conversions::None().get())
 		return c;
-	// The inline-array / span arms are deferred (need IsInlineArrayType / the StandardImplicitConversion
-	// span wiring). Until they land, those shapes yield None -- the faithful fallback for a shape the
-	// ported arms do not yet handle.
+	// C# `if ((toType.IsKnownType(KnownTypeCode.SpanOfT) || toType.IsKnownType(KnownTypeCode.ReadOnlySpanOfT))
+	// && fromType.IsInlineArrayType()) { var elementType = fromType.GetInlineArrayElementType();
+	// var spanElementType = toType.TypeArguments[0]; if (IdentityConversion(elementType,
+	// spanElementType)) return Conversion.InlineArrayConversion; }` -- the inline-array-to-span arm
+	// (C# 12 inline arrays: an inline-array struct converts to Span<T>/ReadOnlySpan<T> over an
+	// identity-equal element type). `IsKnownType` reads the type's own `GetDefinition()->
+	// KnownTypeCode`; `IsInlineArrayType` is the Kind==Struct + [InlineArray]-attribute guard; the
+	// `toType.TypeArguments[0]` is ParameterizedType-specific in the port, so the `dynamic_cast`
+	// + guard avoids UB on a degenerate non-parameterized span-shaped stub (the D516 convention;
+	// a real Span<T>/ReadOnlySpan<T> IS a ParameterizedType); `GetInlineArrayElementType` returns
+	// an owning ITypePtr (the UnknownType fallback inside it -- which never identity-matches a
+	// real span element, so the no-instance-field shape falls through to the span arm below).
+	if ((IsKnownType(toType, KnownTypeCode::SpanOfT) || IsKnownType(toType, KnownTypeCode::ReadOnlySpanOfT))
+		&& IsInlineArrayType(fromType)) {
+		ITypePtr elementType = GetInlineArrayElementType(fromType);
+		const ParameterizedType* spanPt = dynamic_cast<const ParameterizedType*>(&toType);
+		if (spanPt != nullptr && !spanPt->TypeArguments().empty()) {
+			const ITypePtr& spanElementType = spanPt->TypeArguments()[0];
+			if (IdentityConversion(*elementType, *spanElementType))
+				return Conversions::InlineArrayConversion();
+		}
+	}
+	// C# `if (IsImplicitSpanConversion(fromType, toType)) return Conversion.ImplicitSpanConversion;`
+	// -- the C# 14 first-class-span-types arm (IsImplicitSpanConversion D538, gated on the
+	// compilation's FirstClassSpanTypes type-system option).
+	if (IsImplicitSpanConversion(compilation, fromType, toType))
+		return Conversions::ImplicitSpanConversion();
 	return Conversions::None();
 }
 
@@ -967,8 +992,9 @@ std::shared_ptr<Conversion> ExplicitConversionImpl(const ICompilation& compilati
 	// (the lifted-nullable arm is inside ExplicitNullableConversion), reference before unboxing (a
 	// reference-to-reference is not an unboxing), unboxing before type-parameter (an unboxing is a
 	// type-parameter conversion but the unboxing arm is the more specific case), type-parameter
-	// before pointer, pointer last among the ported arms. The tuple arm is deferred (needs
-	// TupleResolveResult machinery) and yields None until ported.
+	// before pointer. The tuple arm (D540) is the LAST arm, returning `TupleConversion(fromType,
+	// toType, isExplicit: true)` directly (not a None-guarded dispatch like the other arms); a
+	// non-tuple shape yields None via the helper's guards.
 	if (AnyNumericConversion(fromType, toType))
 		return Conversions::ExplicitNumericConversion();
 	if (ExplicitEnumerationConversion(fromType, toType))
@@ -1016,9 +1042,9 @@ ExplicitConversionNotUserDefined(const ICompilation& compilation, IType& fromTyp
 	//   var c = StandardImplicitConversion(fromType, toType, allowTuple);
 	//   if (c == Conversion.None && allowUserDefined) c = UserDefinedImplicitConversion(null, fromType, toType);
 	//   return c;
-	// With `allowUserDefined: false` the user-defined branch is unreachable, and the tuple arm is
-	// deferred (yields None for tuple shapes until ported), so `allowTuple` is effectively `true`
-	// for the ported arms. The faithful port is the standard implicit conversion (the already-ported
+	// With `allowUserDefined: false` the user-defined branch is unreachable, and the tuple arm
+	// (D540) is live in the collapsed no-`allowTuple` dispatch, so `allowTuple` is effectively
+	// `true` (the C# call site). The faithful port is the standard implicit conversion (the already-ported
 	// `Detail::StandardImplicitConversion` D523) then, if no implicit conversion exists, the standard
 	// explicit conversion (the already-ported `Detail::ExplicitConversionImpl` D524). The implicit
 	// check is FIRST: an implicit conversion is returned even though the name says "ExplicitConversion"
@@ -1588,13 +1614,15 @@ ImplicitConversion(const ICompilation& compilation, IType& fromType, IType& toTy
 	// `allowUserDefined` is true -- the user-defined implicit conversion
 	// (`UserDefinedImplicitConversion(null, fromType, toType)`).
 	//
-	// The `allowTuple` parameter threads to `StandardImplicitConversion`'s tuple arm, which is
-	// deferred (yields `None` for tuple shapes until the `TupleConversion` machinery lands), so it
-	// is effectively ignored for the ported arms -- the faithful port does not thread it to the
-	// already-ported `Detail::StandardImplicitConversion` (D523, which has no `allowTuple`
-	// parameter; the tuple arm is deferred inside it). The C# `c == Conversion.None` check ports
+	// The `allowTuple` parameter threads to the C# private overload's tuple-arm gate; the port's
+	// collapsed `Detail::StandardImplicitConversion` (D523) has no `allowTuple` parameter and
+	// always runs the tuple arm (D540) -- the public entries collapse the C# overload with
+	// `allowTupleConversion: true`, and the two `false` call sites (`ExplicitConversionImpl`
+	// fallbacks) also route through the always-true collapsed dispatch (a divergence only for
+	// tuple shapes under the explicit fallbacks, noted at the call sites). The C# `c ==
+	// Conversion.None` check ports
 	// to pointer-identity against the `None` singleton.
-	(void)allowTuple;  // the tuple arm is deferred; effectively ignored for the ported arms
+	(void)allowTuple;  // not threaded: the collapsed dispatch always runs the tuple arm
 	auto c = StandardImplicitConversion(compilation, fromType, toType);
 	if (c.get() == Conversions::None().get() && allowUserDefined)
 		c = UserDefinedImplicitConversion(compilation, /*fromResult*/ nullptr, fromType, toType);
@@ -2037,8 +2065,8 @@ ImplicitConversion(const ICompilation& compilation, const ResolveResult& resolve
 		// `StandardImplicitConversion` takes `IType&` non-const (the non-const `AcceptVisitor`, D406),
 		// so the port `const_cast`s the const reference -- the underlying type-system object is
 		// mutable (the accessor's `const` is the contract, not a guarantee), the D515/D517 precedent.
-		// The `allowTuple` parameter is effectively ignored (the tuple arm is deferred inside
-		// `StandardImplicitConversion` D523, which has no `allowTuple` parameter).
+		// The `allowTuple` parameter is not threaded (the collapsed `StandardImplicitConversion`
+		// D523 has no `allowTuple` parameter and always runs the tuple arm D540).
 		IType& fromType = const_cast<IType&>(resolveResult.Type());
 		c = StandardImplicitConversion(compilation, fromType, toType);
 		if (c.get() != Conversions::None().get())

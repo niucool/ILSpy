@@ -24,9 +24,12 @@
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
 #include "Decompiler/TypeSystem/Implementation/BaseTypeCollector.hpp"
+#include "Decompiler/TypeSystem/IAttribute.hpp"
+#include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
 
 #include <algorithm>
+#include <any>
 #include <stdexcept>
 
 namespace ILSpy::Decompiler::TypeSystem {
@@ -158,6 +161,90 @@ const IMethod* GetDelegateInvokeMethod(const IType& type)
 ITypePtr WithoutNullability(IType& type)
 {
     return type.ChangeNullability(Nullability::Oblivious);
+}
+
+bool IsInlineArrayType(const IType& type)
+{
+    // C# `if (type.Kind != TypeKind.Struct) return false; var td = type.GetDefinition();
+    // if (td == null) return false; return td.HasAttribute(KnownAttribute.InlineArray);` -- the
+    // kind guard short-circuits before the definition lookup, and a definitionless type (a
+    // `KnownType` placeholder, `GetDefinition() == nullptr`) returns false even for a struct
+    // kind. `HasAttribute` on the definition is the [InlineArray] presence check.
+    if (type.Kind() != TypeKind::Struct)
+        return false;
+    const ITypeDefinition* td = type.GetDefinition();
+    if (td == nullptr)
+        return false;
+    return td->HasAttribute(KnownAttribute::InlineArray);
+}
+
+std::optional<int> GetInlineArrayLength(const IType& type)
+{
+    // C# `if (type.Kind != TypeKind.Struct) return null; var td = type.GetDefinition();
+    // if (td == null) return null; var attr = td.GetAttribute(KnownAttribute.InlineArray);
+    // return attr?.FixedArguments.FirstOrDefault().Value as int?;` -- the same kind + definition
+    // guards as `IsInlineArrayType`, then the attribute's FIRST fixed argument (the positional
+    // `[InlineArray(N)]` length) unboxed as an int.
+    if (type.Kind() != TypeKind::Struct)
+        return std::nullopt;
+    const ITypeDefinition* td = type.GetDefinition();
+    if (td == nullptr)
+        return std::nullopt;
+    const IAttribute* attr = td->GetAttribute(KnownAttribute::InlineArray);
+    if (attr == nullptr)
+        return std::nullopt;
+    std::vector<CustomAttributeTypedArgument> fixedArgs = attr->FixedArguments();
+    // C# `.FirstOrDefault()` on an empty list yields the default (null), whose `.Value` would
+    // NRE -- but the C# `?.` chain makes a null `FirstOrDefault()` result skip the `.Value` and
+    // the whole `as int?` yields null. The port short-circuits to nullopt for the empty list.
+    if (fixedArgs.empty())
+        return std::nullopt;
+    // `Value()` returns the `std::any` BY VALUE; bind it to a local so the pointer-form
+    // `any_cast` points into a live object (a temporary would dangle at the end of the
+    // full expression).
+    std::any value = fixedArgs.front().Value();
+    // C# `.Value as int?` -- null when the boxed value is not an int. The pointer-form
+    // `std::any_cast<int>` returns null on a type mismatch (the safe faithful fallback; the C#
+    // would instead NRE-skip via the `?.` or throw InvalidCastException for a non-null
+    // non-int value -- both unreachable for a decoded `[InlineArray(N)]` argument, which the
+    // real decoder always boxes as int).
+    const int* length = std::any_cast<int>(&value);
+    if (length == nullptr)
+        return std::nullopt;
+    return *length;
+}
+
+ITypePtr GetInlineArrayElementType(const IType& arrayType)
+{
+    // C# `arrayType?.GetFields(f => !f.IsStatic).SingleOrDefault()?.Type ??
+    // SpecialType.UnknownType` -- the instance fields (the `!f.IsStatic` filter) reduced with
+    // `SingleOrDefault`: exactly one instance field yields its type, none yields the
+    // `SpecialType.UnknownType` null object, and more than one throws. The filter is applied
+    // by `IType::GetFields` itself (the port passes the same predicate); the reduction runs
+    // over the returned snapshot. The C# receiver `?.` is unrepresentable with a `const IType&`
+    // (a reference cannot bind to null; the callers always pass a live type).
+    std::vector<const IField*> fields = arrayType.GetFields(
+        [](const IField* f) { return !f->IsStatic(); });
+    if (fields.size() > 1) {
+        // C# `SingleOrDefault()` throws `InvalidOperationException` ("Sequence contains more
+        // than one matching element") when the filtered list has more than one element; the
+        // port throws the `std::runtime_error` analog (the `SimpleCompilation` /
+        // `CreateResolveResult` InvalidOperationException convention). A real inline-array
+        // struct carries exactly one instance field, so the throw guards the same metadata
+        // invariant the C# does.
+        throw std::runtime_error("Sequence contains more than one matching element");
+    }
+    if (fields.empty()) {
+        // No instance field: the C# `?.Type` chain yields null and the `??` coalesces to
+        // `SpecialType.UnknownType`; the port returns the `UnknownType()` null object.
+        return UnknownType();
+    }
+    // The single instance field's type: an owning handle from the const `Type()` accessor via
+    // `shared_from_this()` + `std::const_pointer_cast` (the field's type is a shared-managed
+    // type-system object; the accessor's `const` is the contract, the `NullableType.Create`
+    // precedent).
+    const IType& fieldType = fields.front()->Type();
+    return std::const_pointer_cast<IType>(fieldType.shared_from_this());
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem

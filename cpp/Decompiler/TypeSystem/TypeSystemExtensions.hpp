@@ -40,6 +40,7 @@
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
 #include <stdexcept>
+#include <optional>
 #include <vector>
 
 namespace ILSpy::Decompiler::TypeSystem {
@@ -162,5 +163,35 @@ ILSpy::Decompiler::TypeSystem::ITypePtr WithoutNullability(ILSpy::Decompiler::Ty
 // (`AnonymousFunctionConversion` / `MethodGroupConversion`) and the public
 // `IsDelegateCompatible(IMethod, IType)` overload that resolves the delegate's invoke method.
 const IMethod* GetDelegateInvokeMethod(const IType& type);
+
+// The C# `public static bool IsInlineArrayType(this IType type)` (TypeSystemExtensions.cs
+// line 340) -- true for a struct-kind type whose definition carries the `[InlineArray]`
+// attribute (a C# 12 inline array; the compiler-enforced shape is a single instance field).
+// The C# extension-method null-check / `ArgumentNullException` compiles out (a `const IType&`
+// reference cannot bind to null). Pure (reads only `Kind` / `GetDefinition` /
+// `HasAttribute`), so it takes `const IType&` like `IsKnownType`.
+bool IsInlineArrayType(const IType& type);
+
+// The C# `public static int? GetInlineArrayLength(this IType type)` (TypeSystemExtensions.cs
+// line 352) -- the `[InlineArray(N)]` attribute's first fixed argument as a nullable int.
+// Null (std::nullopt) for a non-struct kind, a definitionless type, a missing attribute, an
+// empty fixed-argument list (`FirstOrDefault()` on empty yields null), or a first argument
+// whose boxed value is not an int (the C# `as int?` yields null; the port's pointer-form
+// `std::any_cast` returns null on a type mismatch -- the safe faithful fallback).
+std::optional<int> GetInlineArrayLength(const IType& type);
+
+// The C# `public static IType GetInlineArrayElementType(this IType arrayType)`
+// (TypeSystemExtensions.cs line 361) -- the type of the SINGLE instance field
+// (`arrayType?.GetFields(f => !f.IsStatic).SingleOrDefault()?.Type ?? SpecialType.UnknownType`).
+// Returns an OWNING `ITypePtr`: the field's `Type()` is obtained via `shared_from_this()` +
+// `std::const_pointer_cast` (the type-system objects are shared-managed; the accessor's
+// `const` is the contract -- the `NullableType.Create` precedent), and the no-instance-field
+// fallback is a fresh `UnknownType()` (the `SpecialType.UnknownType` null object).
+//
+// `SingleOrDefault()` throws `InvalidOperationException` on MORE than one match; the port
+// throws `std::runtime_error` there (the `SimpleCompilation` / `CreateResolveResult`
+// InvalidOperationException-analog convention) -- a real inline-array struct has exactly one
+// instance field, so the throw guards the same metadata invariant the C# does.
+ITypePtr GetInlineArrayElementType(const IType& arrayType);
 
 } // namespace ILSpy::Decompiler::TypeSystem

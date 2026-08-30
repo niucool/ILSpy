@@ -63,6 +63,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Resolver/OverloadResolutionCandidate_Test.cpp
     Decompiler/TypeSystem/IsKnownType_Test.cpp
     Decompiler/TypeSystem/GetDelegateInvokeMethod_Test.cpp
+    Decompiler/TypeSystem/InlineArrayHelpers_Test.cpp
     Decompiler/TypeSystem/ReflectionHelperGetTypeCode_Test.cpp
     Decompiler/CSharp/Resolver/ResolveParameterTypes_Test.cpp
     Decompiler/CSharp/Resolver/MapCorrespondingParameters_Test.cpp
@@ -105,6 +106,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Resolver/CSharpConversionsTypeParameter_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsConstantExpression_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsStandardImplicit_Test.cpp
+    Decompiler/CSharp/Resolver/CSharpConversionsStandardImplicitInlineArraySpan_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsExplicit_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsEncompassment_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsFindMostEncompass_Test.cpp

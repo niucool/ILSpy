@@ -418,14 +418,15 @@ bool ImplicitConstantExpressionConversion(const ILSpy::Decompiler::Semantics::Re
 // dispatch entry point. Checks the already-ported conversion helpers in spec order: identity,
 // numeric, nullable (returns a Conversion, checked via pointer-identity against
 // `Conversions::None()`), null-literal, reference, boxing, type-parameter (yields a boxing
-// conversion when not also a reference conversion), pointer; the tuple/inline-array/span arms are
-// deferred (need TupleResolveResult/IsInlineArrayType/Span machinery) and yield `None` for those
-// shapes until ported. Returns the first matching Conversion singleton, else `Conversions::None()`.
+// conversion when not also a reference conversion), pointer, tuple (D540), inline-array-to-span
+// (over `IsInlineArrayType` / `GetInlineArrayElementType`), and first-class-span
+// (`IsImplicitSpanConversion` D538). Returns the first matching Conversion singleton, else
+// `Conversions::None()`.
 //
 // The C# `StandardImplicitConversion(fromType, toType)` calls the private
 // `StandardImplicitConversion(fromType, toType, allowTupleConversion: true)` overload; the port
-// collapses the overload into this Detail function (the tuple arm is deferred, so
-// `allowTupleConversion` is effectively always true for the ported arms). Takes `const ICompilation&`
+// collapses the overload into this Detail function (the tuple arm always runs, so
+// `allowTupleConversion` is effectively always true). Takes `const ICompilation&`
 // (threaded to the reference/boxing/type-parameter/pointer helpers that need `FindType`/
 // `IsSubtypeOf`) and `IType&` non-const (the helpers take non-const `IType&` for the non-const
 // `AcceptVisitor`, D406). Returns `std::shared_ptr<Conversion>` -- the first matching singleton,
