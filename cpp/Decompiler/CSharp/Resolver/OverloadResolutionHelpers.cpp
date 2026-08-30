@@ -773,4 +773,103 @@ bool ValidateConstraints(const ILSpy::Decompiler::TypeSystem::ITypeParameter& ty
     return true;
 }
 
+bool ValidateConstraints(const ILSpy::Decompiler::TypeSystem::ITypeParameter& typeParameter,
+                         ILSpy::Decompiler::TypeSystem::IType& typeArgument,
+                         ILSpy::Decompiler::TypeSystem::TypeVisitor* substitution)
+{
+    using ILSpy::Decompiler::TypeSystem::IEntity;
+    // C# `return ValidateConstraints(typeParameter, typeArgument, substitution,
+    // CSharpConversions.Get(typeParameter.Owner.Compilation));` -- the public overload resolves
+    // the conversions from the TYPE PARAMETER'S OWN compilation (the owner entity's compilation,
+    // not the caller's). The C# `ArgumentNullException` guards for null `typeParameter` /
+    // `typeArgument` compile out (the C++ references are non-null by construction, the D374
+    // convention).
+    const IEntity* owner = typeParameter.Owner();
+    if (owner == nullptr) {
+        // SAFE FALLBACK: the C# dereferences `typeParameter.Owner` unconditionally (an NRE for the
+        // dummy type parameters, whose `Owner` contract is nullable); a type parameter without an
+        // owning entity has no compilation to resolve the conversions from, so the constraints
+        // cannot be validated. Return `false` (not satisfied) -- the soft direction in both real
+        // callers (`ValidateMethodConstraints` records the masked-out `MethodConstraintsNotSatisfied`
+        // soft error; the `CSharpResolver` call site behaves likewise). The D516
+        // guard-instead-of-crash precedent.
+        return false;
+    }
+    return ValidateConstraints(typeParameter, typeArgument, substitution,
+                               CSharpConversions::Get(owner->Compilation()));
+}
+
+ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution GetSubstitution(const OverloadResolutionCandidate& candidate)
+{
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution;
+    // C# `// Do not compose the substitutions, but merge them.` / `// This is required for
+    // InvocationTests.SubstituteClassAndMethodTypeParametersAtOnce` / `return new
+    // TypeParameterSubstitution(candidate.Member.Substitution.ClassTypeArguments,
+    // candidate.InferredTypes);` -- the class type arguments come from the member's own
+    // substitution, the method type arguments from the inference result. The member's METHOD type
+    // arguments are deliberately DISCARDED (composing would double-substitute the class
+    // parameters); only the class list is merged in.
+    const TypeParameterSubstitution* memberSubstitution = candidate.Member()->Substitution();
+    if (memberSubstitution == nullptr) {
+        // SAFE FALLBACK: the C# `IMember.Substitution` contract is "never null" ("Returns
+        // `Identity` for not specialized"), but the shared test stub returns nullptr; the Identity
+        // singleton's `ClassTypeArguments` is `nullopt` ("keep the class type parameters
+        // unmodified") -- the documented faithful counterpart of the not-specialized contract.
+        memberSubstitution = &TypeParameterSubstitution::Identity();
+    }
+    // `candidate.InferredTypes` (the C# `IType[]`, null before inference runs) -- the port's
+    // candidate carries a never-null `std::vector<ITypePtr>`, so the method list is always
+    // present (an empty vector substitutes every index out of range, per the
+    // `TypeParameterSubstitution` semantics); the copy realizes the C# reference pass-through.
+    return TypeParameterSubstitution(memberSubstitution->ClassTypeArguments(),
+                                      std::optional<std::vector<ITypePtr>>(candidate.InferredTypes()));
+}
+
+ILSpy::Decompiler::CSharp::Resolver::OverloadResolutionErrors
+ValidateMethodConstraints(const OverloadResolutionCandidate& candidate)
+{
+    using Errors = ILSpy::Decompiler::CSharp::Resolver::OverloadResolutionErrors;
+    using ILSpy::Decompiler::TypeSystem::ITypeParameter;
+    using ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution;
+    // C# `// If type inference already failed, we won't check the constraints:` / `if
+    // ((candidate.Errors & OverloadResolutionErrors.TypeInferenceFailed) != 0) return
+    // OverloadResolutionErrors.None;` -- the inferred types are unusable after a failed
+    // inference, so the constraints are skipped entirely (the soft `None`, NOT an error).
+    if ((candidate.Errors() & Errors::TypeInferenceFailed) != Errors::None)
+        return Errors::None;
+    // C# `if (candidate.TypeParameters == null || candidate.TypeParameters.Count == 0) return
+    // OverloadResolutionErrors.None; // the method isn't generic` -- the port's `TypeParameters()`
+    // vector is never null (the C# `== null` half is N/A), so only the emptiness check remains.
+    const std::vector<const ITypeParameter*>& typeParameters = candidate.TypeParameters();
+    if (typeParameters.empty())
+        return Errors::None; // the method isn't generic
+    // C# `var substitution = GetSubstitution(candidate);` -- the merged substitution supplies both
+    // the per-parameter type arguments (`MethodTypeArguments[i]`, the candidate's inferred types)
+    // and the visitor applied to constraints that reference type parameters.
+    TypeParameterSubstitution substitution = GetSubstitution(candidate);
+    // C# `for (int i = 0; i < candidate.TypeParameters.Count; i++) { if (!ValidateConstraints(
+    // candidate.TypeParameters[i], substitution.MethodTypeArguments[i], substitution)) return
+    // OverloadResolutionErrors.MethodConstraintsNotSatisfied; }` -- the PUBLIC 3-arg overload
+    // (the conversions resolved from each type parameter's own compilation inside it).
+    const auto& methodTypeArguments = substitution.MethodTypeArguments();
+    for (std::size_t i = 0; i < typeParameters.size(); i++) {
+        // SAFE FALLBACK: the C# indexes `substitution.MethodTypeArguments[i]` (the candidate's
+        // `InferredTypes` array) unconditionally, which throws for a null/short array -- the
+        // degenerate pre-inference candidate state, unreachable in the real engine flow (this step
+        // only runs after `RunTypeInference` populated the array, and the `TypeInferenceFailed`
+        // guard above covers the failed case). The port treats an out-of-range index or a null
+        // entry as the unverifiable soft verdict `MethodConstraintsNotSatisfied` (masked out by
+        // `IsApplicable`, so the candidate stays applicable) instead of the UB.
+        if (!methodTypeArguments.has_value() || i >= methodTypeArguments->size())
+            return Errors::MethodConstraintsNotSatisfied;
+        const ILSpy::Decompiler::TypeSystem::ITypePtr& typeArgument = (*methodTypeArguments)[i];
+        if (!typeArgument)
+            return Errors::MethodConstraintsNotSatisfied;
+        if (!ValidateConstraints(*typeParameters[i], *typeArgument, &substitution))
+            return Errors::MethodConstraintsNotSatisfied;
+    }
+    return Errors::None;
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

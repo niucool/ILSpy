@@ -75,6 +75,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Resolver/BetterFunctionMember_Test.cpp
     Decompiler/CSharp/Resolver/ConsiderIfNewCandidateIsBest_Test.cpp
     Decompiler/CSharp/Resolver/ValidateConstraints_Test.cpp
+    Decompiler/CSharp/Resolver/ValidateMethodConstraints_Test.cpp
     Decompiler/CSharp/Resolver/OverloadResolutionCtor_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsSkeleton_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsNumeric_Test.cpp

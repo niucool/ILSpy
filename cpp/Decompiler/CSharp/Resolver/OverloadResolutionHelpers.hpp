@@ -19,14 +19,18 @@
 
 // Port of the `OverloadResolution` private helpers that operate on a `Candidate` but are pure
 // transformations (no `OverloadResolution` instance state) -- the C# private methods lifted to
-// `CSharp::Resolver::Detail` free functions so they are individually unit-testable (TDD). The first is
-// `ResolveParameterTypes` (ICSharpCode.Decompiler/CSharp/Resolver/OverloadResolution.cs); the later
-// `MapCorrespondingParameters`/`RunTypeInference`/`CheckApplicability`/`ConsiderIfNewCandidateIsBest`
-// helpers will land as they become feasible.
+// `CSharp::Resolver::Detail` free functions so they are individually unit-testable (TDD): the
+// parameter-type/applicability steps (`ResolveParameterTypes`/`MapCorrespondingParameters`/
+// `CheckApplicabilityArgumentCounts`/`CheckApplicabilityPassingModeAndConversions`), the better-
+// function-member tiebreaks, the best-candidate folding, and the constraint-validation region
+// (the public 3-arg `ValidateConstraints` overload, `GetSubstitution`, and
+// `ValidateMethodConstraints`). The `RunTypeInference` engine step will land as it becomes
+// feasible.
 
 #pragma once
 
 #include "Decompiler/CSharp/Resolver/OverloadResolutionCandidate.hpp"
+#include "Decompiler/TypeSystem/TypeParameterSubstitution.hpp"  // TypeParameterSubstitution (GetSubstitution's by-value return)
 
 #include <memory>
 #include <vector>
@@ -246,12 +250,75 @@ void ConsiderIfNewCandidateIsBest(
 // `AcceptVisitor`, D406); `substitution` is a nullable raw pointer (the C# `null` = no
 // substitution); `conversions` is a non-const reference (the public `IsConstraintConvertible` is
 // non-const). The callers: the public static `ValidateConstraints(ITypeParameter, IType,
-// TypeVisitor)` overload (which fetches the conversions via `CSharpConversions.Get`), the private
-// `ValidateMethodConstraints(Candidate)` engine step, and the `ConstraintValidatingSubstitution`
-// inside `RunTypeInference` (both deferred until the engine steps land).
+// TypeVisitor)` overload below (which fetches the conversions via `CSharpConversions.Get`), the
+// `ValidateMethodConstraints` engine step below, and the `ConstraintValidatingSubstitution`
+// inside `RunTypeInference` (deferred until the engine step lands).
 bool ValidateConstraints(const ILSpy::Decompiler::TypeSystem::ITypeParameter& typeParameter,
                          ILSpy::Decompiler::TypeSystem::IType& typeArgument,
                          ILSpy::Decompiler::TypeSystem::TypeVisitor* substitution,
                          CSharpConversions& conversions);
+
+// The C# `public static bool ValidateConstraints(ITypeParameter typeParameter, IType typeArgument,
+// TypeVisitor substitution = null)` (OverloadResolution.cs line 576, the "Validate Constraints"
+// region) -- the public 3-arg overload of the internal static above (the 4-arg
+// `Detail::ValidateConstraints`). It is the entry point the `ValidateMethodConstraints` engine
+// step and the `CSharpResolver` (CSharpResolver.cs line 2161) call: it resolves the
+// `CSharpConversions` from the type parameter's own compilation -- `CSharpConversions.Get(
+// typeParameter.Owner.Compilation)` -- and delegates to the internal static. The C#
+// `ArgumentNullException` guards compile out (the C++ references are non-null by construction,
+// the D374 convention); the caller passes the substitution explicitly (no C++ default argument
+// -- the C# `= null` default is a call-site convenience, not behavior). SAFE FALLBACK: the C#
+// dereferences `typeParameter.Owner` unconditionally, which NREs for the dummy type parameters
+// (the `ITypeParameter.Owner` contract is nullable -- "null for the dummy type parameters");
+// the port returns `false` (constraints not satisfied) instead of crashing -- a type parameter
+// without an owning entity has no compilation to resolve conversions from, so the constraints
+// cannot be validated. The `false` verdict is the soft direction in both real callers
+// (`ValidateMethodConstraints` records the `MethodConstraintsNotSatisfied` soft error, which
+// `IsApplicable` masks out so the candidate stays applicable).
+bool ValidateConstraints(const ILSpy::Decompiler::TypeSystem::ITypeParameter& typeParameter,
+                         ILSpy::Decompiler::TypeSystem::IType& typeArgument,
+                         ILSpy::Decompiler::TypeSystem::TypeVisitor* substitution);
+
+// The C# `TypeParameterSubstitution GetSubstitution(Candidate candidate)` (OverloadResolution.cs
+// line 1168) -- the merged substitution for a candidate: the member's CLASS type arguments (from
+// `candidate.Member.Substitution.ClassTypeArguments`) combined with the candidate's INFERRED
+// METHOD type arguments (`candidate.InferredTypes`). The C# comment "Do not compose the
+// substitutions, but merge them. / This is required for InvocationTests.
+// SubstituteClassAndMethodTypeParametersAtOnce": composing the member's own substitution with
+// the inferred one would double-substitute the class type parameters, so only the class arguments
+// are taken from the member and the method arguments from the inference result. It is a private
+// `OverloadResolution` instance method, but it reads only candidate state (`Member.Substitution` /
+// `InferredTypes` -- no instance fields), so it lifts to a pure `Detail::` free function taking
+// the candidate by const ref (the established convention). The C# heap allocation is realized as
+// a by-value return (the `TypeParameterSubstitution::Compose` convention). SAFE FALLBACK: the C#
+// `IMember.Substitution` contract is "never null" ("Returns `Identity` for not specialized"), but
+// the shared test stub returns nullptr; the port falls back to the `Identity` singleton (whose
+// `ClassTypeArguments` is `nullopt` -- "keep the class type parameters unmodified"), the
+// documented faithful counterpart of the not-specialized contract.
+ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution GetSubstitution(const OverloadResolutionCandidate& candidate);
+
+// The C# `OverloadResolutionErrors ValidateMethodConstraints(Candidate candidate)`
+// (OverloadResolution.cs line 548, the "Validate Constraints" region) -- validates the generic
+// method candidate's type-argument constraints after type inference. If type inference already
+// failed, the constraints are NOT checked (the `TypeInferenceFailed` mask bit short-circuits to
+// `None` -- the inferred types are unusable); a non-generic candidate (no method type parameters)
+// short-circuits to `None` as well. Otherwise every method type parameter is validated against
+// the corresponding inferred type argument (the `GetSubstitution` merge supplies both the
+// arguments and the substitution visitor applied to constraints that reference type parameters)
+// via the public 3-arg `ValidateConstraints` overload above; the first violation yields
+// `MethodConstraintsNotSatisfied` (a soft error -- `IsApplicable` masks it out, so the candidate
+// stays applicable; it still shows up in the final `BestCandidateErrors` and makes the created
+// `CSharpInvocationResolveResult` an error). It is a private `OverloadResolution` instance method,
+// but it reads only candidate state (`Errors` / `TypeParameters` / `Member` / `InferredTypes` --
+// the conversions are resolved inside the 3-arg overload from the type parameter's own
+// compilation, not from the instance), so it lifts to a pure `Detail::` free function taking the
+// candidate by const ref (the established convention). SAFE FALLBACKS for the degenerate
+// pre-inference candidate (the C# indexes `substitution.MethodTypeArguments[i]` unconditionally,
+// which throws for a null/short `InferredTypes` array -- unreachable in the real engine flow,
+// where `ValidateMethodConstraints` only runs after `RunTypeInference` populated the array): an
+// out-of-range index or a null inferred-type entry yields `MethodConstraintsNotSatisfied` (the
+// soft unverifiable verdict, the same masked-out direction as a genuine constraint violation).
+ILSpy::Decompiler::CSharp::Resolver::OverloadResolutionErrors
+ValidateMethodConstraints(const OverloadResolutionCandidate& candidate);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
