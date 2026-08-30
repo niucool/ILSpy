@@ -59,6 +59,11 @@ namespace ILSpy::Decompiler::TypeSystem { class ITypeParameter; }
 // declaration; the .cpp includes the full header).
 namespace ILSpy::Decompiler::TypeSystem { class TypeVisitor; }
 
+// `IParameterizedMember` is forward-declared (the `GetBestCandidateWithSubstitutedTypeArguments`
+// return type is a nullable non-owning pointer -- a complete pointer type with the class
+// incomplete; the .cpp includes the full header).
+namespace ILSpy::Decompiler::TypeSystem { class IParameterizedMember; }
+
 namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 
 // The C# `bool ResolveParameterTypes(Candidate candidate, bool useSpecializedParameters)`. Reads the
@@ -320,5 +325,28 @@ ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution GetSubstitution(const O
 // soft unverifiable verdict, the same masked-out direction as a genuine constraint violation).
 ILSpy::Decompiler::CSharp::Resolver::OverloadResolutionErrors
 ValidateMethodConstraints(const OverloadResolutionCandidate& candidate);
+
+// The C# `public IParameterizedMember GetBestCandidateWithSubstitutedTypeArguments()`
+// (OverloadResolution.cs line 1153) -- the best candidate with the inferred type arguments
+// substituted into its generic method definition: a null best candidate yields null; a member
+// that is not a generic `IMethod` (a non-method parameterized member such as an indexer, or a
+// method with no type parameters) is returned as-is; a GENERIC method is re-specialized through
+// its MEMBER DEFINITION -- `((IMethod)method.MemberDefinition).Specialize(GetSubstitution(
+// bestCandidate))` -- so the returned member carries the merged substitution (the member's own
+// class type arguments + the candidate's inferred method type arguments, the `GetSubstitution`
+// merge-not-compose contract; the definition is re-specialized, NOT the already-specialized
+// member, so the inferred arguments replace the member's own method arguments). It is a public
+// `OverloadResolution` instance method reading only the `bestCandidate` field, so the port lifts
+// it to a `Detail::` free function taking that state by const reference (the
+// `ConsiderIfNewCandidateIsBest` state-threading convention; nullable -- a null `shared_ptr` is
+// the C# `bestCandidate == null`; the thin member method lands when the engine wires). The
+// return is a non-owning nullable `const IParameterizedMember*` (the candidate owns the member;
+// the `Specialize` result is owned by the type system, the `IMember::Specialize` contract).
+// SAFE FALLBACK for the degenerate shapes the C# hard cast `((IMethod)method.MemberDefinition)`
+// would throw `InvalidCastException` on (a definition that is not an `IMethod`, or a null
+// definition -- a real method's definition is always a method, "Returns `this` if this is not a
+// specialized member"): the member is returned as-is (the D516 safe-fallback convention).
+const ILSpy::Decompiler::TypeSystem::IParameterizedMember* GetBestCandidateWithSubstitutedTypeArguments(
+    const std::shared_ptr<OverloadResolutionCandidate>& bestCandidate);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

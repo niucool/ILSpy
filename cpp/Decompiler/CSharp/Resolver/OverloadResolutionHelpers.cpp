@@ -872,4 +872,34 @@ ValidateMethodConstraints(const OverloadResolutionCandidate& candidate)
     return Errors::None;
 }
 
+// The C# `public IParameterizedMember GetBestCandidateWithSubstitutedTypeArguments()`
+// (OverloadResolution.cs line 1153). See the header comment for the port conventions.
+const ILSpy::Decompiler::TypeSystem::IParameterizedMember* GetBestCandidateWithSubstitutedTypeArguments(
+    const std::shared_ptr<OverloadResolutionCandidate>& bestCandidate)
+{
+    using namespace ILSpy::Decompiler::TypeSystem;
+    // C# `if (bestCandidate == null) return null;` -- a null `shared_ptr` is the C# `null`.
+    if (!bestCandidate)
+        return nullptr;
+    // C# `IMethod method = bestCandidate.Member as IMethod;`
+    const IParameterizedMember* member = bestCandidate->Member();
+    const IMethod* method = dynamic_cast<const IMethod*>(member);
+    // C# `if (method != null && method.TypeParameters.Count > 0)`.
+    if (method != nullptr && !method->TypeParameters().empty()) {
+        // C# `return ((IMethod)method.MemberDefinition).Specialize(GetSubstitution(bestCandidate));`
+        // -- the MEMBER DEFINITION (not the already-specialized member) is re-specialized with
+        // the merged substitution. The C# hard cast is a `dynamic_cast` + safe fallback: a
+        // definition that is not an `IMethod` (or a null definition) cannot occur for a real
+        // method; the member is returned as-is instead of the C# `InvalidCastException` (the
+        // D516 safe-fallback convention).
+        const IMethod* methodDefinition = dynamic_cast<const IMethod*>(method->MemberDefinition());
+        if (methodDefinition != nullptr) {
+            TypeParameterSubstitution substitution = GetSubstitution(*bestCandidate);
+            return methodDefinition->Specialize(&substitution);
+        }
+    }
+    // C# `else { return bestCandidate.Member; }` (also the safe-fallback arm above).
+    return member;
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
