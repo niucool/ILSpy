@@ -16,4 +16,5 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Resolver/OverloadResolution.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Resolver/CSharpConversions.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Resolver/CSharpConversionsHelpers.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Resolver/TypeInferenceHelpers.cpp
 )
