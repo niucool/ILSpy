@@ -18,9 +18,13 @@
 // DEALINGS IN THE SOFTWARE.
 
 // Port of the `OverloadResolution` constructor (the validation + field init + the input-property
-// defaults). See the header for the deferred engine steps and output properties.
+// defaults) and the `AddCandidate` engine entry. See the header for the deferred engine steps and
+// output properties.
 
 #include "Decompiler/CSharp/Resolver/OverloadResolution.hpp"
+
+#include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"  // CSharpConversions::Get (the lazy ctor-default resolution)
+#include "Decompiler/CSharp/Resolver/OverloadResolutionHelpers.hpp"  // Detail::AddCandidate
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
 
@@ -57,6 +61,22 @@ OverloadResolution::OverloadResolution(
     }
     // `AllowExpandingParams = true` / `AllowOptionalParameters = true` are the in-class initializers
     // (the C# auto-property defaults set in the ctor body); `AllowImplicitIn = true` likewise.
+}
+
+OverloadResolutionErrors OverloadResolution::AddCandidate(
+    const ILSpy::Decompiler::TypeSystem::IParameterizedMember& member,
+    OverloadResolutionErrors additionalErrors) {
+    // The C# ctor default `conversions ?? CSharpConversions.Get(compilation)` resolved lazily at
+    // the first engine call (the ctor stores the nullable pointer as-is; `Get` is the
+    // per-compilation cached factory, so repeated resolutions return the same instance).
+    CSharpConversions& conversions = conversions_ != nullptr
+        ? const_cast<CSharpConversions&>(*conversions_)
+        : CSharpConversions::Get(*compilation_);
+    return Detail::AddCandidate(member, additionalErrors, *compilation_, conversions, arguments_,
+                                argumentNames_, explicitlyGivenTypeArguments_, allowExpandingParams_,
+                                allowOptionalParameters_, allowImplicitIn_,
+                                isExtensionMethodInvocation_, bestCandidate_,
+                                bestCandidateWasValidated_, bestCandidateAmbiguousWith_);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

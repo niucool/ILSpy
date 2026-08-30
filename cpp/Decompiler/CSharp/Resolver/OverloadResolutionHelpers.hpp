@@ -24,9 +24,9 @@
 // `CheckApplicabilityArgumentCounts`/`CheckApplicabilityPassingModeAndConversions`), the better-
 // function-member tiebreaks, the best-candidate folding, the constraint-validation region
 // (the public 3-arg `ValidateConstraints` overload, `GetSubstitution`, and
-// `ValidateMethodConstraints`), the `RunTypeInference` engine step, and the `CalculateCandidate`
-// composition that wires the steps together in the C# order (the `AddCandidate`/`AddMethodLists`
-// entries that call it are the next increments).
+// `ValidateMethodConstraints`), the `RunTypeInference` engine step, the `CalculateCandidate`
+// composition that wires the steps together in the C# order, and the `AddCandidate` entry that
+// calls it (the `AddMethodLists` scan is the next increment).
 
 #pragma once
 
@@ -478,6 +478,48 @@ bool CalculateCandidate(
     const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
     const std::vector<std::string>& argumentNames,
     const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& explicitlyGivenTypeArguments,
+    bool allowOptionalParameters,
+    bool allowImplicitIn,
+    bool isExtensionMethodInvocation,
+    std::shared_ptr<OverloadResolutionCandidate>& bestCandidate,
+    bool& bestCandidateWasValidated,
+    std::shared_ptr<OverloadResolutionCandidate>& bestCandidateAmbiguousWith);
+
+// The C# `public OverloadResolutionErrors AddCandidate(IParameterizedMember member,
+// OverloadResolutionErrors additionalErrors)` (OverloadResolution.cs line 231) -- the engine
+// entry that adds a candidate member to the resolution: it allocates the NORMAL-form candidate
+// (`new Candidate(member, false)`), applies the `additionalErrors` (the errors that apply to the
+// candidate from the member lookup, e.g. `Inaccessible`), and calculates it (the `CalculateCandidate`
+// composition above -- the candidate is folded into the best-candidate state regardless of
+// applicability); then, when `AllowExpandingParams` is set and the member's LAST parameter is a
+// `params` parameter, it allocates and calculates the EXPANDED-form candidate (`new Candidate(
+// member, true)` -- the params collection unpacked so each argument fills the element type), and
+// when the expanded form ran (not aborted) and has a strictly LOWER `ErrorCount` than the normal
+// form, its errors are returned instead. Otherwise the normal form's errors are returned.
+// "Note: this method does not return errors that do not affect applicability" -- the returned mask
+// is the winning form's accumulated mask (the `AmbiguousMatch`/`MethodConstraintsNotSatisfied`
+// soft bits may be present; the `AddMethodLists` caller filters with `IsApplicable`).
+//
+// The C# `ArgumentNullException` on a null member compiles out (the C++ reference is non-null by
+// construction, the D374 convention). The C# is a public instance method reading the ctor fields
+// and input properties plus mutating the `bestCandidate` state; the port lifts it to a `Detail::`
+// free function taking those as parameters (the D574 `CalculateCandidate` state-threading
+// convention), individually unit-testable. `allowExpandingParams` is the `AllowExpandingParams`
+// input property (default true). The member's OWN parameter list is read for the `params` check
+// (`member.Parameters` -- the possibly-specialized member, NOT the definition's parameters the
+// candidate ctor reads). SAFE FALLBACK: the C# indexes `member.Parameters[Count - 1]` without a
+// null-entry guard (a null parameter entry is impossible through the real type system); the
+// port treats a null last parameter as not-params (the expanded form is skipped), the D516
+// convention for the degenerate shape.
+OverloadResolutionErrors AddCandidate(
+    const ILSpy::Decompiler::TypeSystem::IParameterizedMember& member,
+    OverloadResolutionErrors additionalErrors,
+    const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+    CSharpConversions& conversions,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+    const std::vector<std::string>& argumentNames,
+    const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& explicitlyGivenTypeArguments,
+    bool allowExpandingParams,
     bool allowOptionalParameters,
     bool allowImplicitIn,
     bool isExtensionMethodInvocation,

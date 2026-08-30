@@ -1082,4 +1082,68 @@ bool CalculateCandidate(
     return true;
 }
 
+OverloadResolutionErrors AddCandidate(
+    const ILSpy::Decompiler::TypeSystem::IParameterizedMember& member,
+    OverloadResolutionErrors additionalErrors,
+    const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+    CSharpConversions& conversions,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+    const std::vector<std::string>& argumentNames,
+    const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& explicitlyGivenTypeArguments,
+    bool allowExpandingParams,
+    bool allowOptionalParameters,
+    bool allowImplicitIn,
+    bool isExtensionMethodInvocation,
+    std::shared_ptr<OverloadResolutionCandidate>& bestCandidate,
+    bool& bestCandidateWasValidated,
+    std::shared_ptr<OverloadResolutionCandidate>& bestCandidateAmbiguousWith) {
+    // C# `Candidate c = new Candidate(member, false); c.AddError(additionalErrors);` -- the
+    // NORMAL form (the params collection NOT unpacked); the shared handle mirrors the C# class
+    // instance the folding keeps a reference to. The C# `ArgumentNullException` on a null
+    // member compiles out (the reference is non-null by construction, D374).
+    auto c = std::make_shared<OverloadResolutionCandidate>(&member, /*isExpanded*/false);
+    c->AddError(additionalErrors);
+    // C# `if (CalculateCandidate(c)) { //candidates.Add(c); }` -- the normal form never
+    // aborts (only the expanded form's params unpack can abort), but the C# guards the
+    // (commented-out) list add either way; the calculation also FOLDS the candidate into the
+    // best-candidate state.
+    if (CalculateCandidate(c, compilation, conversions, arguments, argumentNames,
+                           explicitlyGivenTypeArguments, allowOptionalParameters, allowImplicitIn,
+                           isExtensionMethodInvocation, bestCandidate, bestCandidateWasValidated,
+                           bestCandidateAmbiguousWith)) {
+        // The C# keeps a `candidates` list (commented out in the source); nothing to do.
+    }
+    // C# `if (this.AllowExpandingParams && member.Parameters.Count > 0 &&
+    // member.Parameters[member.Parameters.Count - 1].IsParams)` -- the member's OWN parameter
+    // list (the possibly-specialized member). SAFE FALLBACK: a null last parameter entry
+    // (impossible through the real type system) counts as not-params, the D516 convention.
+    const std::vector<const ILSpy::Decompiler::TypeSystem::IParameter*>& memberParameters =
+        member.Parameters();
+    const ILSpy::Decompiler::TypeSystem::IParameter* lastParameter =
+        memberParameters.empty() ? nullptr : memberParameters.back();
+    if (allowExpandingParams && lastParameter != nullptr && lastParameter->IsParams()) {
+        // C# `Candidate expandedCandidate = new Candidate(member, true);
+        // expandedCandidate.AddError(additionalErrors);` -- the EXPANDED form (the params
+        // collection unpacked so each argument fills the element type).
+        auto expandedCandidate =
+            std::make_shared<OverloadResolutionCandidate>(&member, /*isExpanded*/true);
+        expandedCandidate->AddError(additionalErrors);
+        // C# comment: "consider expanded form only if it isn't obviously wrong" -- an
+        // unpackable params-collection type aborts the calculation (the candidate is removed
+        // WITHOUT reporting an error; it is not folded into the best-candidate state either).
+        if (CalculateCandidate(expandedCandidate, compilation, conversions, arguments,
+                               argumentNames, explicitlyGivenTypeArguments, allowOptionalParameters,
+                               allowImplicitIn, isExtensionMethodInvocation, bestCandidate,
+                               bestCandidateWasValidated, bestCandidateAmbiguousWith)) {
+            // C# `if (expandedCandidate.ErrorCount < c.ErrorCount) return expandedCandidate.Errors;`
+            // -- the expanded form's errors win only when it is strictly better (a lower count of
+            // inapplicability-making errors).
+            if (expandedCandidate->ErrorCount() < c->ErrorCount())
+                return expandedCandidate->Errors();
+        }
+    }
+    // C# `return c.Errors;` -- the normal form's errors.
+    return c->Errors();
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

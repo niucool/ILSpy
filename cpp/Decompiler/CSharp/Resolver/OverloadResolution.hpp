@@ -21,12 +21,11 @@
 // (C# spec draft-v11 section 12.6.4). This header ports the class SKELETON: the constructor (validation
 // + field init + the `AllowExpandingParams`/`AllowOptionalParameters` defaults), the input properties
 // (`IsExtensionMethodInvocation`/`AllowExpandingParams`/`AllowOptionalParameters`/`AllowImplicitIn`/
-// `CheckForOverflow`/`Arguments`), and the member fields. The engine steps (`AddCandidate`/
-// `AddMethodLists`/`CalculateCandidate`/`RunTypeInference`/`CheckApplicability`/
-// `ConsiderIfNewCandidateIsBest`/`BetterFunctionMember`) and the output properties (`BestCandidate`/
-// `CreateResolveResult`/`GetArgumentsWithConversions`/etc.) are deferred -- they need the unported
-// `CSharpConversions` (~1757 lines) and `TypeInference` (~1188 lines), and the `ResolveResult`/
-// `CSharpResolver` composition.
+// `CheckForOverflow`/`Arguments`), the member fields, and the `AddCandidate` engine entry (the normal
+// + expanded-form pair delegating to `Detail::AddCandidate`). The remaining engine steps
+// (`AddMethodLists`/the output properties `BestCandidate`/`CreateResolveResult`/
+// `GetArgumentsWithConversions`/etc.) are deferred -- they need the unported `MethodListWithDeclaringType`
+// and the `CSharpResolver` composition.
 //
 // The C# `Candidate` nested class is ported as the separate `OverloadResolutionCandidate` (D506); the
 // pure-transform engine steps that do NOT need `CSharpConversions`/`TypeInference` are ported as
@@ -139,6 +138,38 @@ public:
     const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& ExplicitlyGivenTypeArguments() const {
         return explicitlyGivenTypeArguments_;
     }
+
+    // --- The `AddCandidate` region (C# lines 231-263) ---
+
+    // The C# `public OverloadResolutionErrors AddCandidate(IParameterizedMember member)` -- the
+    // engine entry adding a candidate member to the resolution with no additional errors (the
+    // overload delegates with `OverloadResolutionErrors.None`). See the 2-arg overload below.
+    OverloadResolutionErrors AddCandidate(
+        const ILSpy::Decompiler::TypeSystem::IParameterizedMember& member) {
+        return AddCandidate(member, OverloadResolutionErrors::None);
+    }
+
+    // The C# `public OverloadResolutionErrors AddCandidate(IParameterizedMember member,
+    // OverloadResolutionErrors additionalErrors)` -- the engine entry: the NORMAL-form candidate
+    // plus (when `AllowExpandingParams` and the member's last parameter is `params`) the
+    // EXPANDED-form candidate, each calculated through the ported pipeline (`Detail::
+    // CalculateCandidate`) and folded into the best-candidate state; the expanded form's errors
+    // are returned when its `ErrorCount` is strictly lower than the normal form's. See
+    // `Detail::AddCandidate` (OverloadResolutionHelpers.hpp) for the full contract.
+    //
+    // The C# instance method reads the ctor fields and input properties plus mutates the
+    // `bestCandidate` state; the port delegates to the `Detail::` free function with the instance
+    // fields threaded (the D574 `Detail::CalculateCandidate` convention). The C# ctor eagerly
+    // resolves `conversions ?? CSharpConversions.Get(compilation)`; the port's ctor stores the
+    // nullable pointer as-is (the fallback is documented as deferred there), so THIS method
+    // resolves it lazily at the first engine call -- `CSharpConversions::Get` is the per-compilation
+    // cached factory, so repeated lazy resolutions return the same instance and the behavior is
+    // identical to the eager ctor resolution. The `const_cast` is safe (the underlying
+    // `CSharpConversions` is a mutable type-system object; the ctor parameter's `const` is the
+    // caller-side contract, the D515/D517 const_cast precedent).
+    OverloadResolutionErrors AddCandidate(
+        const ILSpy::Decompiler::TypeSystem::IParameterizedMember& member,
+        OverloadResolutionErrors additionalErrors);
 
 private:
     const ILSpy::Decompiler::TypeSystem::ICompilation* compilation_;
