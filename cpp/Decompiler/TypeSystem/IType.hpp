@@ -409,6 +409,14 @@ public:
     int TypeParameterCount() const override { return static_cast<int>(typeArgs_.size()); }
     const ITypePtr& GenericType() const noexcept { return genericType_; }
     const std::vector<ITypePtr>& TypeArguments() const noexcept { return typeArgs_; }
+    // Faithful port of ParameterizedType.cs line 172 `public IReadOnlyList<ITypeParameter>
+    // TypeParameters => genericType.TypeParameters;` -- the declared type parameters of the
+    // GENERIC DEFINITION (the `out T`/`in T` variance the TypeInference bound-inference
+    // workers read at `pV.TypeParameters[i]`), NOT this type's type arguments. A degenerate
+    // null generic type yields the empty default (the C# would NRE).
+    std::vector<const ITypeParameter*> TypeParameters() const override {
+        return genericType_ ? genericType_->TypeParameters() : std::vector<const ITypeParameter*>{};
+    }
     // Faithful port of ParameterizedType.cs `bool? IsReferenceType => genericType.IsReferenceType`
     // (delegates to the generic definition).
     std::optional<bool> IsReferenceType() const override {

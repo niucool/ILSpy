@@ -29,13 +29,35 @@
 #include "Decompiler/TypeSystem/IMethod.hpp"  // IMethod (Parameters() / ReturnType())
 #include "Decompiler/TypeSystem/IType.hpp"  // IType / ParameterizedType (the unwrap)
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"  // ITypeDefinition (Namespace via GetDefinition)
-#include "Decompiler/TypeSystem/ITypeParameter.hpp"  // ITypeParameter (the OccursInVisitor Index read)
-#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // GetDelegateInvokeMethod (the D533 free function)
+#include "Decompiler/TypeSystem/ITypeParameter.hpp"  // ITypeParameter / NullabilityAnnotatedTypeParameter (the OccursInVisitor Index read; the GetTPForType unwrap)
+#include "Decompiler/TypeSystem/ICompilation.hpp"  // ICompilation (the TypeSystemOptions span gate)
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"  // KnownTypeCode (SpanOfT / ReadOnlySpanOfT)
+#include "Decompiler/TypeSystem/NullableType.hpp"  // IsNullable / GetUnderlyingType (the nullable-covariance arm)
+#include "Decompiler/TypeSystem/TupleType.hpp"  // TupleUnderlyingTypeOrSelf (the tuple-unwrap rebind)
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // GetDelegateInvokeMethod (the D533 free function); IsKnownType / IsArrayInterfaceType / GetAllBaseTypes / WithoutNullability (the MakeInference region)
+#include "Decompiler/TypeSystem/VarianceModifier.hpp"  // VarianceModifier (the parameterized variance walk)
 
 namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 
+using ILSpy::Decompiler::TypeSystem::ArrayType;
+using ILSpy::Decompiler::TypeSystem::ByReferenceType;
+using ILSpy::Decompiler::TypeSystem::FunctionPointerType;
+using ILSpy::Decompiler::TypeSystem::GetAllBaseTypes;
 using ILSpy::Decompiler::TypeSystem::GetDelegateInvokeMethod;
+using ILSpy::Decompiler::TypeSystem::GetUnderlyingType;
+using ILSpy::Decompiler::TypeSystem::ICompilation;
 using ILSpy::Decompiler::TypeSystem::IMethod;
+using ILSpy::Decompiler::TypeSystem::IsArrayInterfaceType;
+using ILSpy::Decompiler::TypeSystem::IsKnownType;
+using ILSpy::Decompiler::TypeSystem::IsNullable;
+using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+using ILSpy::Decompiler::TypeSystem::NullabilityAnnotatedTypeParameter;
+using ILSpy::Decompiler::TypeSystem::PointerType;
+using ILSpy::Decompiler::TypeSystem::TupleType;
+using ILSpy::Decompiler::TypeSystem::TupleUnderlyingTypeOrSelf;
+using ILSpy::Decompiler::TypeSystem::TypeSystemOptions;
+using ILSpy::Decompiler::TypeSystem::VarianceModifier;
+using ILSpy::Decompiler::TypeSystem::WithoutNullability;
 using ILSpy::Decompiler::TypeSystem::IParameter;
 using ILSpy::Decompiler::TypeSystem::IType;
 using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
@@ -352,6 +374,667 @@ bool DependsOn(const std::vector<std::vector<bool>>& dependencyMatrix, const TP&
         || static_cast<std::size_t>(yi) >= dependencyMatrix[static_cast<std::size_t>(xi)].size())
         return false;
     return dependencyMatrix[static_cast<std::size_t>(xi)][static_cast<std::size_t>(yi)];
+}
+
+
+// ===========================================================================
+// The MakeInference region (TypeInference.cs lines 613-962 + 717-729) -- the
+// bound-inference core. See TypeInferenceHelpers.hpp for the region overview.
+// ===========================================================================
+
+namespace {
+
+// The C# `object.Equals(a, b)` over two `IType`s (the `object.Equals(pU.GenericType,
+// pV.GenericType)` comparisons of the parameterized arms) -- reference equality OR both
+// operands non-null and `a.Equals(b)`: `object.Equals` returns true when the two references
+// are the same (including the degenerate both-null shape) and delegates to the first
+// operand's `Equals` for two non-null operands (exactly one null yields false). The `Equals`
+// is the `IType.Equals` -> `StructuralEquals` dispatch (value-based for the concrete leaves,
+// identity for the test definitions).
+bool ObjectEqualsType(const IType* a, const IType* b)
+{
+    if (a == b)
+        return true;
+    return a != nullptr && b != nullptr && a->Equals(*b);
+}
+
+// A `ParameterizedType`'s first type argument (the C# `TypeArguments[0]` of the span arms).
+// The port's `GetTypeArgument` has no bounds check (`typeArgs_[index]`), so the
+// empty-arguments guard comes first; the degenerate shape (a `Span<T>`-shaped parameterized
+// type with no type arguments -- impossible for a faithfully-constructed type) would throw
+// `IndexOutOfRangeException` in the C#, and the null return lets the arm skip its recursion
+// while keeping the `return` (the D516 safe-faithful-fallback convention). The managed
+// `IType` is owned by the parameterized type's `typeArgs_`, so the raw pointer outlives the
+// call.
+IType* FirstTypeArg(const ParameterizedType& pt)
+{
+    if (pt.TypeArguments().empty())
+        return nullptr;
+    return pt.GetTypeArgument(0).get();
+}
+
+// The shared nullability-strip preamble of the three bound-inference workers:
+// C# `if (U.Nullability == V.Nullability) { U = U.WithoutNullability(); V =
+// V.WithoutNullability(); }` -- when both sides carry the SAME annotation, erase it and
+// continue with the un-annotated types (the annotation never takes part in the inference
+// shapes themselves). The C# rebinds the two local parameters; the port keeps rebindable
+// `IType*` locals (a C++ reference cannot be rebound). `WithoutNullability` in turn calls
+// the NON-CONST `ChangeNullability` (which may return `shared_from_this()`, D406), which is
+// why the workers take `IType&` non-const and why the types must be shared-managed; the
+// returned handle differs only when an annotation was actually present, so the identity of
+// an un-annotated pair is preserved through the strip.
+void StripMatchingNullability(IType*& u, IType*& v)
+{
+    if (u->Nullability() == v->Nullability()) {
+        if (ITypePtr stripped = WithoutNullability(*u))
+            u = stripped.get();
+        if (ITypePtr stripped = WithoutNullability(*v))
+            v = stripped.get();
+    }
+}
+
+} // namespace
+
+// The C# `TP GetTPForType(IType v)` (TypeInference.cs lines 717-729).
+TP* GetTPForType(std::vector<TP>& typeParameters, const IType& v)
+{
+    // C# `if (v is NullabilityAnnotatedTypeParameter natp) { v = natp.OriginalTypeParameter; }`
+    // -- the annotated wrapper delegates to the wrapped parameter (the annotation does not
+    // change the parameter's identity). A degenerate null `OriginalTypeParameter` leaves
+    // `current` null, and the `is ITypeParameter` test below then fails (matching the C#
+    // `null is ITypeParameter` -> false).
+    const IType* current = &v;
+    if (const NullabilityAnnotatedTypeParameter* natp =
+            dynamic_cast<const NullabilityAnnotatedTypeParameter*>(current)) {
+        current = natp->OriginalTypeParameter().get();
+    }
+    // C# `if (v is ITypeParameter p) { int index = p.Index;
+    //     if (index < typeParameters.Length && typeParameters[index].TypeParameter == p)
+    //         return typeParameters[index]; } return null;`
+    //
+    // The `tp[index].TypeParameter == p` is the C# reference-equality check -- a raw
+    // pointer comparison (the OccursInVisitor precedent): a DIFFERENT parameter instance
+    // carrying the same index does not resolve. The `index >= 0` half of the bounds guard
+    // is the defensive addition (the C# `index < typeParameters.Length` admits a negative
+    // index and then throws `IndexOutOfRangeException`; the port skips it, the D516
+    // convention).
+    if (const ILSpy::Decompiler::TypeSystem::ITypeParameter* p =
+            dynamic_cast<const ILSpy::Decompiler::TypeSystem::ITypeParameter*>(current)) {
+        const int index = p->Index();
+        if (index >= 0 && static_cast<std::size_t>(index) < typeParameters.size()
+            && typeParameters[static_cast<std::size_t>(index)].TypeParameter == p) {
+            return &typeParameters[static_cast<std::size_t>(index)];
+        }
+    }
+    // C# `return null;`
+    return nullptr;
+}
+
+// The C# `void MakeExactInference(IType U, IType V)` (TypeInference.cs lines 635-728, C# 4.0
+// spec section 7.5.2.8 "Exact inferences").
+void MakeExactInference(const ICompilation& compilation, std::vector<TP>& typeParameters,
+                        IType& u, IType& v)
+{
+    // The nullability strip (see the file-local helper above).
+    IType* U = &u;
+    IType* V = &v;
+    StripMatchingNullability(U, V);
+
+    // C# `TP tp = GetTPForType(V); if (tp != null && tp.IsFixed == false) { tp.AddExactBound(U);
+    // return; }` -- an unfixed V-side type parameter takes U as its EXACT bound. The
+    // `shared_from_this()` obtains the owning handle the `TP` bound containers store (the
+    // D529 convention; the types must be shared-managed).
+    if (TP* tp = GetTPForType(typeParameters, *V)) {
+        if (!tp->IsFixed()) {
+            tp->AddExactBound(U->shared_from_this());
+            return;
+        }
+    }
+    // C# `ByReferenceType brU = U as ByReferenceType; ByReferenceType brV = V as ByReferenceType;
+    // if (brU != null && brV != null) { MakeExactInference(brU.ElementType, brV.ElementType);
+    // return; }` -- two by-reference shapes match exactly on their elements (a degenerate
+    // null element would NRE in the C#; the port skips the recursion but stays in the arm,
+    // the D516 convention).
+    const ByReferenceType* brU = dynamic_cast<const ByReferenceType*>(U);
+    const ByReferenceType* brV = dynamic_cast<const ByReferenceType*>(V);
+    if (brU != nullptr && brV != nullptr) {
+        if (brU->Element() && brV->Element())
+            MakeExactInference(compilation, typeParameters, *brU->Element(), *brV->Element());
+        return;
+    }
+    // C# `U = U.TupleUnderlyingTypeOrSelf(); V = V.TupleUnderlyingTypeOrSelf();` -- BOTH
+    // sides are tuple-unwrapped here (unlike the lower/upper-bound workers, which unwrap
+    // only one side).
+    if (ITypePtr unwrapped = TupleUnderlyingTypeOrSelf(*U))
+        U = unwrapped.get();
+    if (ITypePtr unwrapped = TupleUnderlyingTypeOrSelf(*V))
+        V = unwrapped.get();
+    // C# `switch ((U, V)) { ... }` -- the array and first-class-span pattern arms, in the
+    // C# case order. The `Dimensions` property is the port's `ArrayType::Rank()` (the
+    // number of dimensions, D538); the span arms are all gated on the
+    // `FirstClassSpanTypes` option (the D538 HasFlag convention -- the `&` parenthesized
+    // because C++ `enum class` `&` binds looser than `==`); a pair that matches no arm
+    // falls through the whole switch to the parameterized/pointer checks below (so e.g.
+    // an `(int[], Span<int>)` pair WITHOUT the flag makes no inference at all).
+    const ArrayType* arrU = dynamic_cast<const ArrayType*>(U);
+    const ArrayType* arrV = dynamic_cast<const ArrayType*>(V);
+    const ParameterizedType* ptU = dynamic_cast<const ParameterizedType*>(U);
+    const ParameterizedType* ptV = dynamic_cast<const ParameterizedType*>(V);
+    const TypeSystemOptions options = compilation.TypeSystemOptions();
+    const bool spanTypes =
+        (options & TypeSystemOptions::FirstClassSpanTypes) == TypeSystemOptions::FirstClassSpanTypes;
+    // C# `case (ArrayType arrU, ArrayType arrV) when arrU.Dimensions == arrV.Dimensions):`
+    if (arrU != nullptr && arrV != nullptr && arrU->Rank() == arrV->Rank()) {
+        if (arrU->Element() && arrV->Element())
+            MakeExactInference(compilation, typeParameters, *arrU->Element(), *arrV->Element());
+        return;
+    }
+    // C# `case (ArrayType arrU, ParameterizedType spanV) when ...spanV.IsKnownType(SpanOfT):`
+    if (arrU != nullptr && ptV != nullptr && spanTypes
+        && IsKnownType(*ptV, KnownTypeCode::SpanOfT)) {
+        if (arrU->Element()) {
+            if (IType* argV = FirstTypeArg(*ptV))
+                MakeExactInference(compilation, typeParameters, *arrU->Element(), *argV);
+        }
+        return;
+    }
+    // C# `case (ParameterizedType spanU, ParameterizedType spanV) when ...SpanOfT...SpanOfT:`
+    if (ptU != nullptr && ptV != nullptr && spanTypes
+        && IsKnownType(*ptU, KnownTypeCode::SpanOfT) && IsKnownType(*ptV, KnownTypeCode::SpanOfT)) {
+        if (IType* argU = FirstTypeArg(*ptU)) {
+            if (IType* argV = FirstTypeArg(*ptV))
+                MakeExactInference(compilation, typeParameters, *argU, *argV);
+        }
+        return;
+    }
+    // C# `case (ArrayType arrU, ParameterizedType rosV) when ...ReadOnlySpanOfT:`
+    if (arrU != nullptr && ptV != nullptr && spanTypes
+        && IsKnownType(*ptV, KnownTypeCode::ReadOnlySpanOfT)) {
+        if (arrU->Element()) {
+            if (IType* argV = FirstTypeArg(*ptV))
+                MakeExactInference(compilation, typeParameters, *arrU->Element(), *argV);
+        }
+        return;
+    }
+    // C# `case (ParameterizedType spanU, ParameterizedType rosV) when ...SpanOfT...
+    // ReadOnlySpanOfT:`
+    if (ptU != nullptr && ptV != nullptr && spanTypes
+        && IsKnownType(*ptU, KnownTypeCode::SpanOfT)
+        && IsKnownType(*ptV, KnownTypeCode::ReadOnlySpanOfT)) {
+        if (IType* argU = FirstTypeArg(*ptU)) {
+            if (IType* argV = FirstTypeArg(*ptV))
+                MakeExactInference(compilation, typeParameters, *argU, *argV);
+        }
+        return;
+    }
+    // C# `case (ParameterizedType rosU, ParameterizedType rosV) when ...ReadOnlySpanOfT...
+    // ReadOnlySpanOfT:`
+    if (ptU != nullptr && ptV != nullptr && spanTypes
+        && IsKnownType(*ptU, KnownTypeCode::ReadOnlySpanOfT)
+        && IsKnownType(*ptV, KnownTypeCode::ReadOnlySpanOfT)) {
+        if (IType* argU = FirstTypeArg(*ptU)) {
+            if (IType* argV = FirstTypeArg(*ptV))
+                MakeExactInference(compilation, typeParameters, *argU, *argV);
+        }
+        return;
+    }
+    // C# `if (U is ParameterizedType pU && V is ParameterizedType pV
+    //     && object.Equals(pU.GenericType, pV.GenericType)
+    //     && pU.TypeParameterCount == pV.TypeParameterCount) { for (...) MakeExactInference(
+    //     pU.GetTypeArgument(i), pV.GetTypeArgument(i)); return; }` -- two parameterizations
+    // of the SAME generic type with the SAME arity match argument-for-argument (the
+    // `object.Equals` is the file-local reference-or-structural helper above; a degenerate
+    // null type argument would NRE in the C# and is skipped, the D516 convention).
+    if (ptU != nullptr && ptV != nullptr
+        && ObjectEqualsType(ptU->GenericType().get(), ptV->GenericType().get())
+        && ptU->TypeParameterCount() == ptV->TypeParameterCount()) {
+        for (int i = 0; i < ptU->TypeParameterCount(); i++) {
+            ITypePtr argU = ptU->GetTypeArgument(i);
+            ITypePtr argV = ptV->GetTypeArgument(i);
+            if (argU && argV)
+                MakeExactInference(compilation, typeParameters, *argU, *argV);
+        }
+        return;
+    }
+    // C# `if (U is PointerType ptrU && V is PointerType ptrV) {
+    //     MakeExactInference(ptrU.ElementType, ptrV.ElementType); return; }`
+    const PointerType* ptrU = dynamic_cast<const PointerType*>(U);
+    const PointerType* ptrV = dynamic_cast<const PointerType*>(V);
+    if (ptrU != nullptr && ptrV != nullptr) {
+        if (ptrU->Element() && ptrV->Element())
+            MakeExactInference(compilation, typeParameters, *ptrU->Element(), *ptrV->Element());
+        return;
+    }
+    // C# `if (U is FunctionPointerType fnPtrU && V is FunctionPointerType fnPtrV) {
+    //     MakeExactInference(fnPtrU.ReturnType, fnPtrV.ReturnType);
+    //     foreach (var (ptU, ptV) in fnPtrU.ParameterTypes.Zip(fnPtrV.ParameterTypes))
+    //         MakeExactInference(ptU, ptV); return; }` -- the `Zip` stops at the shorter
+    // list (the `std::min` loop bound, the D46 convention).
+    const FunctionPointerType* fnU = dynamic_cast<const FunctionPointerType*>(U);
+    const FunctionPointerType* fnV = dynamic_cast<const FunctionPointerType*>(V);
+    if (fnU != nullptr && fnV != nullptr) {
+        if (fnU->ReturnType() && fnV->ReturnType())
+            MakeExactInference(compilation, typeParameters, *fnU->ReturnType(), *fnV->ReturnType());
+        const std::size_t n = std::min(fnU->ParameterTypes().size(),
+                                       fnV->ParameterTypes().size());
+        for (std::size_t i = 0; i < n; i++) {
+            if (fnU->ParameterTypes()[i] && fnV->ParameterTypes()[i])
+                MakeExactInference(compilation, typeParameters, *fnU->ParameterTypes()[i],
+                                   *fnV->ParameterTypes()[i]);
+        }
+        return;
+    }
+}
+
+// The C# `void MakeLowerBoundInference(IType U, IType V)` (TypeInference.cs lines 736-857,
+// spec draft-v11 section 12.6.3.11 "Lower-bound inferences").
+void MakeLowerBoundInference(const ICompilation& compilation, std::vector<TP>& typeParameters,
+                             IType& u, IType& v)
+{
+    // The nullability strip (the shared preamble).
+    IType* U = &u;
+    IType* V = &v;
+    StripMatchingNullability(U, V);
+
+    // C# `TP tp = GetTPForType(V); if (tp != null && tp.IsFixed == false) {
+    // tp.LowerBounds.Add(U); return; }` -- an unfixed V-side type parameter takes U as a
+    // LOWER bound (the C# `HashSet<IType>.Add` idempotence lives in `TP::AddLowerBound`).
+    if (TP* tp = GetTPForType(typeParameters, *V)) {
+        if (!tp->IsFixed()) {
+            tp->AddLowerBound(U->shared_from_this());
+            return;
+        }
+    }
+    // C# `if (NullableType.IsNullable(U) && NullableType.IsNullable(V)) {
+    //     MakeLowerBoundInference(NullableType.GetUnderlyingType(U),
+    //                              NullableType.GetUnderlyingType(V)); return; }` -- the
+    // nullable-covariance recursion: two `Nullable<...>` wrappers reduce to their
+    // underlying types. The non-const `GetUnderlyingType` overload (the D515 pair) hands the
+    // mutable underlying types straight to the recursion.
+    if (IsNullable(*U) && IsNullable(*V)) {
+        MakeLowerBoundInference(compilation, typeParameters, GetUnderlyingType(*U),
+                                GetUnderlyingType(*V));
+        return;
+    }
+    // C# by-reference arm -- NOTE: it recurses EXACT (two by-reference shapes match
+    // exactly on their elements), not lower-bound.
+    const ByReferenceType* brU = dynamic_cast<const ByReferenceType*>(U);
+    const ByReferenceType* brV = dynamic_cast<const ByReferenceType*>(V);
+    if (brU != nullptr && brV != nullptr) {
+        if (brU->Element() && brV->Element())
+            MakeExactInference(compilation, typeParameters, *brU->Element(), *brV->Element());
+        return;
+    }
+    // C# `V = V.TupleUnderlyingTypeOrSelf();` -- ONLY the V side is tuple-unwrapped here
+    // (the switch's U-side patterns read the ORIGINAL U; the asymmetry is the C# source's).
+    if (ITypePtr unwrapped = TupleUnderlyingTypeOrSelf(*V))
+        V = unwrapped.get();
+    // C# `switch ((U, V)) { ... }` -- the array / span / array-interface arms in the C#
+    // case order. The span arms gate on `FirstClassSpanTypes`; the array-interface arm (the
+    // LAST case) does NOT -- so an `(U[], IEnumerable<U>)` pair fires it whether or not the
+    // span option is set (a `Span<T>`/`ReadOnlySpan<T>` never matches it: different known
+    // type codes than the five array-interface ones).
+    const ArrayType* arrU = dynamic_cast<const ArrayType*>(U);
+    const ArrayType* arrV = dynamic_cast<const ArrayType*>(V);
+    const ParameterizedType* ptU = dynamic_cast<const ParameterizedType*>(U);
+    const ParameterizedType* ptV = dynamic_cast<const ParameterizedType*>(V);
+    const TypeSystemOptions options = compilation.TypeSystemOptions();
+    const bool spanTypes =
+        (options & TypeSystemOptions::FirstClassSpanTypes) == TypeSystemOptions::FirstClassSpanTypes;
+    // C# `case (ArrayType arrU, ArrayType arrV) when arrU.Dimensions == arrV.Dimensions):`
+    if (arrU != nullptr && arrV != nullptr && arrU->Rank() == arrV->Rank()) {
+        if (arrU->Element() && arrV->Element())
+            MakeLowerBoundInference(compilation, typeParameters, *arrU->Element(),
+                                    *arrV->Element());
+        return;
+    }
+    // C# `case (ArrayType arrU, ParameterizedType spanV) when ...SpanOfT:`
+    if (arrU != nullptr && ptV != nullptr && spanTypes
+        && IsKnownType(*ptV, KnownTypeCode::SpanOfT)) {
+        if (arrU->Element()) {
+            if (IType* argV = FirstTypeArg(*ptV))
+                MakeLowerBoundInference(compilation, typeParameters, *arrU->Element(), *argV);
+        }
+        return;
+    }
+    // C# `case (ParameterizedType spanU, ParameterizedType spanV) when ...SpanOfT...SpanOfT:`
+    if (ptU != nullptr && ptV != nullptr && spanTypes
+        && IsKnownType(*ptU, KnownTypeCode::SpanOfT) && IsKnownType(*ptV, KnownTypeCode::SpanOfT)) {
+        if (IType* argU = FirstTypeArg(*ptU)) {
+            if (IType* argV = FirstTypeArg(*ptV))
+                MakeLowerBoundInference(compilation, typeParameters, *argU, *argV);
+        }
+        return;
+    }
+    // C# `case (ArrayType arrU, ParameterizedType rosV) when ...ReadOnlySpanOfT:`
+    if (arrU != nullptr && ptV != nullptr && spanTypes
+        && IsKnownType(*ptV, KnownTypeCode::ReadOnlySpanOfT)) {
+        if (arrU->Element()) {
+            if (IType* argV = FirstTypeArg(*ptV))
+                MakeLowerBoundInference(compilation, typeParameters, *arrU->Element(), *argV);
+        }
+        return;
+    }
+    // C# `case (ParameterizedType spanU, ParameterizedType rosV) when ...SpanOfT...
+    // ReadOnlySpanOfT:`
+    if (ptU != nullptr && ptV != nullptr && spanTypes
+        && IsKnownType(*ptU, KnownTypeCode::SpanOfT)
+        && IsKnownType(*ptV, KnownTypeCode::ReadOnlySpanOfT)) {
+        if (IType* argU = FirstTypeArg(*ptU)) {
+            if (IType* argV = FirstTypeArg(*ptV))
+                MakeLowerBoundInference(compilation, typeParameters, *argU, *argV);
+        }
+        return;
+    }
+    // C# `case (ParameterizedType rosU, ParameterizedType rosV) when ...ReadOnlySpanOfT...
+    // ReadOnlySpanOfT:`
+    if (ptU != nullptr && ptV != nullptr && spanTypes
+        && IsKnownType(*ptU, KnownTypeCode::ReadOnlySpanOfT)
+        && IsKnownType(*ptV, KnownTypeCode::ReadOnlySpanOfT)) {
+        if (IType* argU = FirstTypeArg(*ptU)) {
+            if (IType* argV = FirstTypeArg(*ptV))
+                MakeLowerBoundInference(compilation, typeParameters, *argU, *argV);
+        }
+        return;
+    }
+    // C# `case (ArrayType arrU, ParameterizedType arrIntfV) when arrIntfV.IsArrayInterfaceType()
+    // && arrU.Dimensions == 1):` -- a one-dimensional array lower-bounds the array interface's
+    // element type (an `IEnumerable<T>`/`IList<T>`/... parameter).
+    if (arrU != nullptr && ptV != nullptr && IsArrayInterfaceType(*ptV) && arrU->Rank() == 1) {
+        if (arrU->Element()) {
+            if (IType* argV = FirstTypeArg(*ptV))
+                MakeLowerBoundInference(compilation, typeParameters, *arrU->Element(), *argV);
+        }
+        return;
+    }
+    // C# `if (V is ParameterizedType pV) { ... }` -- the unique-base-type variance walk: find
+    // the UNIQUE `ParameterizedType` among U's base types that shares V's generic type and
+    // arity (a second match aborts the whole inference -- "it's not unique"), then reduce
+    // argument-by-argument following the generic's VARIANCE: covariant arguments recurse
+    // LOWER-bound, contravariant UPPER-bound, invariant EXACT. The variance comes from
+    // `pV.TypeParameters[i]` -- the port's `ParameterizedType::TypeParameters()` override
+    // (the generic definition's declared parameters); an out-of-range variance index (a
+    // degenerate arity-mismatched stub) falls to the invariant exact recursion (the D516
+    // convention).
+    if (ptV != nullptr) {
+        const ParameterizedType* uniqueBaseType = nullptr;
+        for (const IType* baseU : GetAllBaseTypes(*U)) {
+            if (baseU == nullptr)
+                continue; // the D516 degenerate-shape skip
+            // C# `ParameterizedType pU = baseU.TupleUnderlyingTypeOrSelf() as ParameterizedType;`
+            // -- the `const_cast` feeds the non-const `TupleUnderlyingTypeOrSelf` (the
+            // underlying type-system objects are mutable; the accessor's const is the
+            // contract -- the D517 convention).
+            const IType* unwrappedBase = baseU;
+            if (ITypePtr unwrapped = TupleUnderlyingTypeOrSelf(*const_cast<IType*>(baseU)))
+                unwrappedBase = unwrapped.get();
+            const ParameterizedType* pU = dynamic_cast<const ParameterizedType*>(unwrappedBase);
+            if (pU != nullptr
+                && ObjectEqualsType(pU->GenericType().get(), ptV->GenericType().get())
+                && pU->TypeParameterCount() == ptV->TypeParameterCount()) {
+                if (uniqueBaseType == nullptr)
+                    uniqueBaseType = pU;
+                else
+                    return; // cannot make an inference because it's not unique
+            }
+        }
+        if (uniqueBaseType != nullptr) {
+            // C# `ITypeParameter Xi = pV.TypeParameters[i]` -- read the list once (the port
+            // accessor returns the vector by value).
+            const std::vector<const ILSpy::Decompiler::TypeSystem::ITypeParameter*> xiList =
+                ptV->TypeParameters();
+            for (int i = 0; i < uniqueBaseType->TypeParameterCount(); i++) {
+                // C# `IType Ui = uniqueBaseType.GetTypeArgument(i); IType Vi =
+                // pV.GetTypeArgument(i);`
+                ITypePtr argU = uniqueBaseType->GetTypeArgument(i);
+                ITypePtr argV = ptV->GetTypeArgument(i);
+                if (!argU || !argV)
+                    continue; // the D516 degenerate-shape skip
+                // C# `if (Ui.IsReferenceType == true) { ... } else { MakeExactInference(Ui, Vi); }`
+                // -- the `bool? == true` is true only for a DEFINITE true (an indeterminate
+                // type reports `std::nullopt` and takes the exact arm).
+                const std::optional<bool> argURef = argU->IsReferenceType();
+                const ILSpy::Decompiler::TypeSystem::ITypeParameter* xi =
+                    static_cast<std::size_t>(i) < xiList.size()
+                        ? xiList[static_cast<std::size_t>(i)]
+                        : nullptr;
+                if (argURef.has_value() && *argURef == true && xi != nullptr) {
+                    // C# `switch (Xi.Variance) { case Covariant: MakeLowerBoundInference(Ui, Vi);
+                    // case Contravariant: MakeUpperBoundInference(Ui, Vi); default:
+                    // MakeExactInference(Ui, Vi); }`
+                    switch (xi->Variance()) {
+                        case VarianceModifier::Covariant:
+                            MakeLowerBoundInference(compilation, typeParameters, *argU, *argV);
+                            break;
+                        case VarianceModifier::Contravariant:
+                            MakeUpperBoundInference(compilation, typeParameters, *argU, *argV);
+                            break;
+                        default: // invariant
+                            MakeExactInference(compilation, typeParameters, *argU, *argV);
+                            break;
+                    }
+                } else {
+                    // not known to be a reference type (or no variance entry -- the degenerate
+                    // stub): the invariant exact recursion.
+                    MakeExactInference(compilation, typeParameters, *argU, *argV);
+                }
+            }
+        }
+        return;
+    }
+    // C# `if (U is PointerType ptrU && V is PointerType ptrV) { MakeExactInference(...);
+    // return; }` -- pointer shapes match exactly.
+    const PointerType* ptrU = dynamic_cast<const PointerType*>(U);
+    const PointerType* ptrV = dynamic_cast<const PointerType*>(V);
+    if (ptrU != nullptr && ptrV != nullptr) {
+        if (ptrU->Element() && ptrV->Element())
+            MakeExactInference(compilation, typeParameters, *ptrU->Element(), *ptrV->Element());
+        return;
+    }
+    // C# `if (U is FunctionPointerType fnPtrU && V is FunctionPointerType fnPtrV) {
+    //     MakeLowerBoundInference(fnPtrU.ReturnType, fnPtrV.ReturnType);
+    //     foreach (var (ptU, ptV) in fnPtrU.ParameterTypes.Zip(fnPtrV.ParameterTypes))
+    //         MakeUpperBoundInference(ptU, ptV); return; }` -- the function-pointer arm
+    // SWAPS: the return recurses lower-bound, the parameters UPPER-bound (the mirror of
+    // the upper-bound worker below).
+    const FunctionPointerType* fnU = dynamic_cast<const FunctionPointerType*>(U);
+    const FunctionPointerType* fnV = dynamic_cast<const FunctionPointerType*>(V);
+    if (fnU != nullptr && fnV != nullptr) {
+        if (fnU->ReturnType() && fnV->ReturnType())
+            MakeLowerBoundInference(compilation, typeParameters, *fnU->ReturnType(),
+                                     *fnV->ReturnType());
+        const std::size_t n = std::min(fnU->ParameterTypes().size(),
+                                       fnV->ParameterTypes().size());
+        for (std::size_t i = 0; i < n; i++) {
+            if (fnU->ParameterTypes()[i] && fnV->ParameterTypes()[i])
+                MakeUpperBoundInference(compilation, typeParameters, *fnU->ParameterTypes()[i],
+                                        *fnV->ParameterTypes()[i]);
+        }
+        return;
+    }
+}
+
+// The C# `void MakeUpperBoundInference(IType U, IType V)` (TypeInference.cs lines 865-961,
+// C# 4.0 spec section 7.5.2.10 "Upper-bound inferences").
+void MakeUpperBoundInference(const ICompilation& compilation, std::vector<TP>& typeParameters,
+                             IType& u, IType& v)
+{
+    // The nullability strip (the shared preamble).
+    IType* U = &u;
+    IType* V = &v;
+    StripMatchingNullability(U, V);
+
+    // C# `TP tp = GetTPForType(V); if (tp != null && tp.IsFixed == false) {
+    // tp.UpperBounds.Add(U); return; }` -- an unfixed V-side type parameter takes U as an
+    // UPPER bound.
+    if (TP* tp = GetTPForType(typeParameters, *V)) {
+        if (!tp->IsFixed()) {
+            tp->AddUpperBound(U->shared_from_this());
+            return;
+        }
+    }
+    // C# `ArrayType arrU = U as ArrayType; ArrayType arrV = V as ArrayType;
+    // ParameterizedType pU = U.TupleUnderlyingTypeOrSelf() as ParameterizedType;` -- NEITHER
+    // side is rebound here (only the local `pU` reads through the tuple unwrap; `arrU` /
+    // `arrV` read the ORIGINAL U / V).
+    const ArrayType* arrU = dynamic_cast<const ArrayType*>(U);
+    const ArrayType* arrV = dynamic_cast<const ArrayType*>(V);
+    const ParameterizedType* pU = nullptr;
+    if (ITypePtr unwrapped = TupleUnderlyingTypeOrSelf(*U))
+        pU = dynamic_cast<const ParameterizedType*>(unwrapped.get());
+    // C# `if (arrV != null && arrU != null && arrU.Dimensions == arrV.Dimensions) { ... }` --
+    // two same-rank arrays match element-wise upper-bound.
+    if (arrV != nullptr && arrU != nullptr && arrU->Rank() == arrV->Rank()) {
+        if (arrU->Element() && arrV->Element())
+            MakeUpperBoundInference(compilation, typeParameters, *arrU->Element(),
+                                    *arrV->Element());
+        return;
+    }
+    // C# `else if (arrV != null && pU.IsArrayInterfaceType() && arrV.Dimensions == 1) {
+    // MakeUpperBoundInference(pU.GetTypeArgument(0), arrV.ElementType); return; }` -- an
+    // array-interface U upper-bounds the V-side array's element: `IEnumerable<U>` is a
+    // plausible upper bound for a `T[]` parameter's element. The C# extension call on a
+    // null `pU` returns FALSE (the extension body's leading `type == null` check), so the
+    // port's `pU != nullptr &&` guard is the faithful translation.
+    if (arrV != nullptr && pU != nullptr && IsArrayInterfaceType(*pU) && arrV->Rank() == 1) {
+        // `IsArrayInterfaceType` requires `TypeParameterCount == 1`, so the type-argument
+        // index is in bounds; the element guards remain the D516 convention.
+        if (pU->GetTypeArgument(0) && arrV->Element()) {
+            ITypePtr argU = pU->GetTypeArgument(0);
+            MakeUpperBoundInference(compilation, typeParameters, *argU, *arrV->Element());
+        }
+        return;
+    }
+    // C# `if (pU != null) { ... }` -- the unique-base-type variance walk (the mirror of the
+    // lower-bound worker's): find the UNIQUE `ParameterizedType` among V's BASE types that
+    // shares pU's generic type and arity, then reduce argument-by-argument -- the variance
+    // comes from `pU.TypeParameters[i]` (the U side here, the V side in the lower-bound
+    // worker), covariant recursing UPPER-bound, contravariant LOWER-bound, invariant exact.
+    if (pU != nullptr) {
+        const ParameterizedType* uniqueBaseType = nullptr;
+        for (const IType* baseV : GetAllBaseTypes(*V)) {
+            if (baseV == nullptr)
+                continue; // the D516 degenerate-shape skip
+            // C# `ParameterizedType pV = baseV.TupleUnderlyingTypeOrSelf() as ParameterizedType;`
+            const IType* unwrappedBase = baseV;
+            if (ITypePtr unwrapped = TupleUnderlyingTypeOrSelf(*const_cast<IType*>(baseV)))
+                unwrappedBase = unwrapped.get();
+            const ParameterizedType* pV = dynamic_cast<const ParameterizedType*>(unwrappedBase);
+            if (pV != nullptr
+                && ObjectEqualsType(pU->GenericType().get(), pV->GenericType().get())
+                && pU->TypeParameterCount() == pV->TypeParameterCount()) {
+                if (uniqueBaseType == nullptr)
+                    uniqueBaseType = pV;
+                else
+                    return; // cannot make an inference because it's not unique
+            }
+        }
+        if (uniqueBaseType != nullptr) {
+            // C# `ITypeParameter Xi = pU.TypeParameters[i]` -- read the list once.
+            const std::vector<const ILSpy::Decompiler::TypeSystem::ITypeParameter*> xiList =
+                pU->TypeParameters();
+            for (int i = 0; i < uniqueBaseType->TypeParameterCount(); i++) {
+                // C# `IType Ui = pU.GetTypeArgument(i); IType Vi =
+                // uniqueBaseType.GetTypeArgument(i);`
+                ITypePtr argU = pU->GetTypeArgument(i);
+                ITypePtr argV = uniqueBaseType->GetTypeArgument(i);
+                if (!argU || !argV)
+                    continue; // the D516 degenerate-shape skip
+                const std::optional<bool> argURef = argU->IsReferenceType();
+                const ILSpy::Decompiler::TypeSystem::ITypeParameter* xi =
+                    static_cast<std::size_t>(i) < xiList.size()
+                        ? xiList[static_cast<std::size_t>(i)]
+                        : nullptr;
+                if (argURef.has_value() && *argURef == true && xi != nullptr) {
+                    // C# `switch (Xi.Variance) { case Covariant: MakeUpperBoundInference(Ui, Vi);
+                    // case Contravariant: MakeLowerBoundInference(Ui, Vi); default:
+                    // MakeExactInference(Ui, Vi); }`
+                    switch (xi->Variance()) {
+                        case VarianceModifier::Covariant:
+                            MakeUpperBoundInference(compilation, typeParameters, *argU, *argV);
+                            break;
+                        case VarianceModifier::Contravariant:
+                            MakeLowerBoundInference(compilation, typeParameters, *argU, *argV);
+                            break;
+                        default: // invariant
+                            MakeExactInference(compilation, typeParameters, *argU, *argV);
+                            break;
+                    }
+                } else {
+                    // not known to be a reference type (or no variance entry -- the degenerate
+                    // stub): the invariant exact recursion.
+                    MakeExactInference(compilation, typeParameters, *argU, *argV);
+                }
+            }
+        }
+        return;
+    }
+    // C# `if (U is PointerType ptrU && V is PointerType ptrV) { MakeExactInference(...);
+    // return; }` -- pointer shapes match exactly.
+    const PointerType* ptrU = dynamic_cast<const PointerType*>(U);
+    const PointerType* ptrV = dynamic_cast<const PointerType*>(V);
+    if (ptrU != nullptr && ptrV != nullptr) {
+        if (ptrU->Element() && ptrV->Element())
+            MakeExactInference(compilation, typeParameters, *ptrU->Element(), *ptrV->Element());
+        return;
+    }
+    // C# `if (U is FunctionPointerType fnPtrU && V is FunctionPointerType fnPtrV) {
+    //     MakeUpperBoundInference(fnPtrU.ReturnType, fnPtrV.ReturnType);
+    //     foreach (var (ptU, ptV) in fnPtrU.ParameterTypes.Zip(fnPtrV.ParameterTypes))
+    //         MakeLowerBoundInference(ptU, ptV); return; }` -- the opposite swap of the
+    // lower-bound worker: the return recurses upper-bound, the parameters LOWER-bound.
+    const FunctionPointerType* fnU = dynamic_cast<const FunctionPointerType*>(U);
+    const FunctionPointerType* fnV = dynamic_cast<const FunctionPointerType*>(V);
+    if (fnU != nullptr && fnV != nullptr) {
+        if (fnU->ReturnType() && fnV->ReturnType())
+            MakeUpperBoundInference(compilation, typeParameters, *fnU->ReturnType(),
+                                    *fnV->ReturnType());
+        const std::size_t n = std::min(fnU->ParameterTypes().size(),
+                                       fnV->ParameterTypes().size());
+        for (std::size_t i = 0; i < n; i++) {
+            if (fnU->ParameterTypes()[i] && fnV->ParameterTypes()[i])
+                MakeLowerBoundInference(compilation, typeParameters, *fnU->ParameterTypes()[i],
+                                        *fnV->ParameterTypes()[i]);
+        }
+        return;
+    }
+}
+
+// The C# `void MakeExplicitParameterTypeInference(LambdaResolveResult e, IType t)`
+// (TypeInference.cs lines 614-627, spec draft-v11 section 12.6.3.9 "Explicit parameter type
+// inferences").
+void MakeExplicitParameterTypeInference(const ICompilation& compilation,
+                                        std::vector<TP>& typeParameters,
+                                        const LambdaResolveResult& e, const IType& t)
+{
+    // C# `if (e.IsImplicitlyTyped || !e.HasParameterList) return;` -- only an EXPLICITLY-typed
+    // lambda with a parameter list contributes: its declared parameter types are the
+    // exactly-matching side of the inference (the implicitly-typed lambda's parameter types
+    // are what inference produces, so there is nothing to match).
+    if (e.IsImplicitlyTyped() || !e.HasParameterList())
+        return;
+    // C# `IMethod m = GetDelegateOrExpressionTreeSignature(t); if (m == null) return;` -- the
+    // delegate / expression-tree signature (the D533 landing in this file).
+    const IMethod* m = GetDelegateOrExpressionTreeSignature(t);
+    if (m == nullptr)
+        return;
+    // C# `for (int i = 0; i < e.Parameters.Count && i < m.Parameters.Count; i++)
+    //     MakeExactInference(e.Parameters[i].Type, m.Parameters[i].Type);` -- zip to the
+    // shorter list. The parameter-type accessors return `const IType&` while
+    // `MakeExactInference` takes non-const `IType&` (the non-const `ChangeNullability`,
+    // D406), so the `const_cast` is the established safe pattern (the type-system objects
+    // are mutable; the accessor's const is the contract -- the D515/D517 convention). A
+    // degenerate null parameter entry would NRE in the C# and is skipped (the D516
+    // convention).
+    const std::vector<const IParameter*> eParams = e.Parameters();
+    const std::vector<const IParameter*> mParams = m->Parameters();
+    const std::size_t n = std::min(eParams.size(), mParams.size());
+    for (std::size_t i = 0; i < n; i++) {
+        if (eParams[i] == nullptr || mParams[i] == nullptr)
+            continue;
+        MakeExactInference(compilation, typeParameters, const_cast<IType&>(eParams[i]->Type()),
+                           const_cast<IType&>(mParams[i]->Type()));
+    }
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

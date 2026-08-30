@@ -21,20 +21,23 @@
 // engine (ICSharpCode.Decompiler/CSharp/Resolver/TypeInference.cs, the ~1188-line long-pole
 // blocker for the `OverloadResolution` `RunTypeInference` engine step and therefore for
 // `CalculateCandidate`/`AddCandidate`/`AddMethodLists` and the deferred `MethodGroupConversion`
-// arm). Two regions are landed: the Input/Output Types region (C# spec draft-v11 sections
-// 12.6.3.4 + 12.6.3.5) and the ContainsUnfixed region (the `TP` per-type-parameter state
-// holder, the `OccursInVisitor`, `AnyTypeContainsUnfixedParameter`, and the
-// `InputTypesContainsUnfixed`/`OutputTypeContainsUnfixed` wrappers) -- both are PURE (they
-// read only the argument `ResolveResult`'s runtime type, the delegate-or-expression-tree
-// signature resolved from the parameter type, and the `TP` state threaded as a parameter),
-// so they lift to `Detail::` free functions ahead of the `TypeInference` class skeleton (the
-// `CSharpConversionsHelpers` / `OverloadResolutionHelpers` lift-to-free-functions precedent).
-// The remaining regions (`InferTypeArguments`, the Inference Phases, `MakeOutputTypeInference`/
-// `MakeExactInference`/`MakeLowerBoundInference`/`MakeUpperBoundInference`, `Fixing`,
-// `GetBestCommonType`, `FindTypeInBounds`) need the remaining
-// `TypeInference` instance state (`arguments`/`parameterTypes` -- now threadable as
-// parameters, as the `CalculateDependencyMatrix` lift below demonstrates) and land with the
-// class skeleton in later increments.
+// arm). FOUR regions are landed, all lifted to `Detail::` free functions ahead of the
+// `TypeInference` class skeleton (the `CSharpConversionsHelpers` / `OverloadResolutionHelpers`
+// lift-to-free-functions precedent): the Input/Output Types region (C# spec draft-v11
+// sections 12.6.3.4 + 12.6.3.5), the ContainsUnfixed region (the `TP` per-type-parameter
+// state holder, the `OccursInVisitor`, `AnyTypeContainsUnfixedParameter`, and the
+// `InputTypesContainsUnfixed`/`OutputTypeContainsUnfixed` wrappers), the DependsOn region
+// (section 12.6.3.6: the dependency matrix and its Warshall closure), and the MakeInference
+// bound-inference core (the `GetTPForType` lookup, the three mutually recursive spec
+// workers `MakeExactInference`/`MakeLowerBoundInference`/`MakeUpperBoundInference`, and
+// the `MakeExplicitParameterTypeInference` phase-one entry) -- the instance state
+// (`typeParameters`, and the `compilation` the span arms read `TypeSystemOptions` through)
+// threads as parameters (the `CalculateDependencyMatrix` lift demonstrates the convention).
+// The remaining regions (`InferTypeArguments`, the Inference Phases,
+// `MakeOutputTypeInference` -- the fourth worker, over the LAMBDA/METHOD-GROUP argument
+// shapes, blocked on `GetSubstitutionForFixedTPs` and `PerformOverloadResolution` -- plus
+// `Fixing`, `GetBestCommonType`, `FindTypeInBounds`) need further instance state
+// (`arguments`/`parameterTypes`/`classTypeArguments`) and land in later increments.
 //
 // RETURN CONVENTION: the C# `IType[]` returns fresh arrays of GC-owned references; the port
 // returns `std::vector<const IType*>` non-owning raw-pointer snapshots (the `GetMethods` /
@@ -65,6 +68,13 @@
 // pointer -- a complete pointer type with the class incomplete; the .cpp includes the full
 // header for `Parameters()`/`ReturnType()`).
 namespace ILSpy::Decompiler::TypeSystem { class IMethod; }
+
+// `ICompilation` is forward-declared (the `const ICompilation&` parameter of the MakeInference
+// region below -- the span arms of the three bound-inference workers read
+// `compilation.TypeSystemOptions().HasFlag(TypeSystemOptions.FirstClassSpanTypes)`, the
+// D538 `IsImplicitSpanConversion` gate; the .cpp includes the full header for the
+// `TypeSystemOptions()` virtual).
+namespace ILSpy::Decompiler::TypeSystem { class ICompilation; }
 
 // `ITypeParameter` is forward-declared (the `TP` state holder stores a non-owning pointer and
 // `OccursInVisitor::VisitTypeParameter` takes a reference; `TypeVisitor.hpp` declares it too
@@ -257,5 +267,87 @@ std::vector<std::vector<bool>> CalculateDependencyMatrix(
 // out-of-range index would throw `IndexOutOfRangeException` in the C# and returns false
 // here (the D516 convention).
 bool DependsOn(const std::vector<std::vector<bool>>& dependencyMatrix, const TP& x, const TP& y);
+
+// ===========================================================================
+// The MakeInference region (TypeInference.cs lines 613-962 + 717-729) -- the
+// bound-inference CORE of the type-inference engine: the per-type-parameter lookup
+// (`GetTPForType`), the three mutually recursive spec workers
+// (`MakeExactInference` C# 4.0 spec section 7.5.2.8, `MakeLowerBoundInference` spec
+// draft-v11 section 12.6.3.11, `MakeUpperBoundInference` C# 4.0 spec section 7.5.2.10),
+// and the phase-one explicitly-typed-lambda entry (`MakeExplicitParameterTypeInference`,
+// spec draft-v11 section 12.6.3.9). These are the workers BOTH public entries consume:
+// `InferTypeArguments` (via `PhaseOne`/`PhaseTwo`) and `InferTypeArgumentsFromBounds` (which
+// feeds its lower/upper bounds straight into the two bound workers). `MakeOutputTypeInference`
+// (lines 521-611) -- the fourth entry, over the LAMBDA/METHOD-GROUP argument shapes -- stays
+// deferred: its lambda arm needs `GetSubstitutionForFixedTPs` (the `TypeParameterSubstitution`
+// over the fixed TPs plus `classTypeArguments`) and its method-group arm needs
+// `MethodGroupResolveResult.PerformOverloadResolution` (the `OverloadResolution` engine long
+// pole); it lands with the phase wiring.
+//
+// The C# workers are instance methods reading the `typeParameters` field and the
+// `compilation` field; the lift threads both as parameters (the established convention --
+// the `TP` state MUTATES through the bound adds, so it threads as `std::vector<TP>&`).
+// ===========================================================================
+
+// The C# `TP GetTPForType(IType v)` (TypeInference.cs lines 717-729) -- the inference state
+// entry for a type: a nullability-annotated type parameter delegates to its ORIGINAL
+// (un-annotated) parameter, and a type parameter whose `Index` selects a `TP` entry tracking
+// THAT VERY PARAMETER resolves to it (the reference-equality `typeParameters[index]
+// .TypeParameter == p` -- a different parameter instance with the same index does not
+// resolve). Returns a MUTABLE pointer into the threaded vector (the callers add bounds
+// through it) or null.
+TP* GetTPForType(std::vector<TP>& typeParameters,
+                const ILSpy::Decompiler::TypeSystem::IType& v);
+
+// The C# `void MakeExplicitParameterTypeInference(LambdaResolveResult e, IType t)` (TypeInference.cs
+// lines 614-627, spec draft-v11 section 12.6.3.9 "Explicit parameter type inferences") -- the
+// phase-one entry for an EXPLICITLY-typed lambda against a delegate/expression-tree target:
+// an exact inference from each explicitly-declared lambda parameter type to the corresponding
+// delegate-signature parameter type. The implicitly-typed / no-parameter-list lambdas return
+// without inferring (their parameter types are what inference produces). The port takes the
+// verified `const LambdaResolveResult&` (the D534 convention: the dispatch owns the RTTI -- the
+// phase-one caller dynamic_casts before calling).
+void MakeExplicitParameterTypeInference(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                                        std::vector<TP>& typeParameters,
+                                        const LambdaResolveResult& e,
+                                        const ILSpy::Decompiler::TypeSystem::IType& t);
+
+// The C# `void MakeExactInference(IType U, IType V)` (TypeInference.cs lines 635-728, C# 4.0
+// spec section 7.5.2.8 "Exact inferences") -- U must match V EXACTLY: an unfixed V-side type
+// parameter takes U as an exact bound; by-reference/array/span/parameterized/pointer/
+// function-pointer pairs recurse element-wise (the span arms gate on
+// `FirstClassSpanTypes`; the parameterized arm requires the same generic type and arity).
+// `U`/`V` are NON-CONST: the nullability strip calls `WithoutNullability` (`ChangeNullability`
+// is non-const, the `shared_from_this` D406 convention) and the bound adds need owning handles
+// (`shared_from_this`, the D529 convention).
+void MakeExactInference(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                        std::vector<TP>& typeParameters,
+                        ILSpy::Decompiler::TypeSystem::IType& u,
+                        ILSpy::Decompiler::TypeSystem::IType& v);
+
+// The C# `void MakeLowerBoundInference(IType U, IType V)` (TypeInference.cs lines 736-857,
+// spec draft-v11 section 12.6.3.11 "Lower-bound inferences") -- U is at most V: an unfixed
+// V-side type parameter takes U as a LOWER bound; the nullable covariance recursion, the
+// array/span/array-interface element recursions, and the unique-base-type parameterized
+// variance walk (covariant arguments recurse lower-bound, contravariant upper-bound, invariant
+// exact) reduce U into V's shape. Note the by-ref and pointer arms recurse EXACT
+// (reference shapes match exactly), and the function-pointer arm SWAPS: the return recurses
+// lower-bound, the parameters upper-bound.
+void MakeLowerBoundInference(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                             std::vector<TP>& typeParameters,
+                             ILSpy::Decompiler::TypeSystem::IType& u,
+                             ILSpy::Decompiler::TypeSystem::IType& v);
+
+// The C# `void MakeUpperBoundInference(IType U, IType V)` (TypeInference.cs lines 865-961,
+// C# 4.0 spec section 7.5.2.10 "Upper-bound inferences") -- U is at least V: an unfixed
+// V-side type parameter takes U as an UPPER bound; the array-to-array-interface
+// element recursion (an `IEnumerable<U>` upper-bounds a `U[]` parameter), and the
+// unique-base-type parameterized variance walk (the mirror of the lower-bound one:
+// covariant upper, contravariant lower). The function-pointer arm swaps in the opposite
+// direction: the return recurses upper-bound, the parameters lower-bound.
+void MakeUpperBoundInference(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                             std::vector<TP>& typeParameters,
+                             ILSpy::Decompiler::TypeSystem::IType& u,
+                             ILSpy::Decompiler::TypeSystem::IType& v);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

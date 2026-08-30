@@ -21,6 +21,7 @@
 #include "Decompiler/TypeSystem/TupleType.hpp"
 
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // WithoutNullability (the .WithoutNullability() tail)
 
 #include <vector>
 
@@ -144,6 +145,23 @@ std::optional<std::vector<ITypePtr>> GetTupleElementTypes(const IType& tupleType
 		return output;
 	}
 	return std::nullopt;
+}
+
+// The C# `public static IType TupleUnderlyingTypeOrSelf(this IType type)` (TupleType.cs line
+// 381, the `TupleTypeExtensions` static class).
+ITypePtr TupleUnderlyingTypeOrSelf(IType& type)
+{
+	// C# `var t = (type as TupleType)?.UnderlyingType ?? type;` -- a tuple delegates to its
+	// underlying `ValueTuple<...>`; a degenerate `TupleType` with a null underlying falls back
+	// to the tuple itself (the `??` catches both the non-tuple and the null-underlying
+	// shapes; a non-null input never yields a null return).
+	IType* t = &type;
+	if (const TupleType* tuple = dynamic_cast<const TupleType*>(&type)) {
+		if (const ITypePtr& underlying = tuple->UnderlyingType())
+			t = underlying.get();
+	}
+	// C# `return t.WithoutNullability();`
+	return WithoutNullability(*t);
 }
 
 }  // namespace ILSpy::Decompiler::TypeSystem

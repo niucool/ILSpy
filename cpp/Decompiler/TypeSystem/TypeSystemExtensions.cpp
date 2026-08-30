@@ -153,4 +153,11 @@ const IMethod* GetDelegateInvokeMethod(const IType& type)
     return methods.empty() ? nullptr : methods.front();
 }
 
+// The C# `public static IType WithoutNullability(this IType type)` (TypeSystemExtensions.cs
+// line 799) -- `type.ChangeNullability(Nullability.Oblivious)`.
+ITypePtr WithoutNullability(IType& type)
+{
+    return type.ChangeNullability(Nullability::Oblivious);
+}
+
 } // namespace ILSpy::Decompiler::TypeSystem

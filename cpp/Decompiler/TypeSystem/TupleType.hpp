@@ -64,4 +64,18 @@ namespace ILSpy::Decompiler::TypeSystem {
 // call regardless of the input's lifetime.
 std::optional<std::vector<ITypePtr>> GetTupleElementTypes(const IType& tupleType);
 
+// The C# `public static IType TupleUnderlyingTypeOrSelf(this IType type)` (TupleType.cs line
+// 381, the `TupleTypeExtensions` static class) -- the tuple-unwrap the `TypeInference`
+// bound-inference workers apply before their array/parameterized pattern matches (a
+// `TypeKind::Tuple` type delegates to its underlying `System.ValueTuple<...>` parameterized
+// type, so e.g. a tuple-to-`ValueTuple` comparison reaches the parameterized-type arms):
+// `var t = (type as TupleType)?.UnderlyingType ?? type; return t.WithoutNullability();`.
+// The `?. ??` combination falls back to the ORIGINAL type both when the input is not a tuple
+// and when a degenerate `TupleType` carries a null underlying type (the C# `??` catches both
+// shapes -- the port keeps the tuple itself for the degenerate one, never returning null for
+// a non-null input). The `WithoutNullability()` tail (TypeSystemExtensions.cs line 799) is
+// why the parameter is NON-CONST: `ChangeNullability` is non-const (the `shared_from_this`
+// D406 convention), so every caller must pass a shared-managed type.
+ITypePtr TupleUnderlyingTypeOrSelf(IType& type);
+
 }  // namespace ILSpy::Decompiler::TypeSystem

@@ -135,6 +135,20 @@ bool IsAnyPointer(TypeKind typeKind);
 // `as ParameterizedType` test).
 const IType* SkipModifiers(const IType& type);
 
+// The C# `public static IType WithoutNullability(this IType type)` (TypeSystemExtensions.cs
+// line 799) -- `type.ChangeNullability(Nullability.Oblivious)`: the same type with the
+// nullability annotation erased (the pre-C#-8 default annotation). The C# extension's
+// null-check / ArgumentNullException compiles out under the `IType&` reference convention;
+// the parameter is NON-CONST because `IType::ChangeNullability` is non-const (it may return
+// `shared_from_this()`, the C# `return this` reference identity, D406). The returned handle
+// shares ownership: for an already-Oblivious type it is the same managed object (every
+// concrete port's `ChangeNullability` returns `shared_from_this()` when nothing changes),
+// and for an annotated type it is the unwrapped base (`NullabilityAnnotatedType` forwards to
+// the wrapped type's `ChangeNullability`). The first consumers are the `TypeInference`
+// bound-inference workers (the `if (U.Nullability == V.Nullability) { U =
+// U.WithoutNullability(); ... }` strip) and `TupleUnderlyingTypeOrSelf`.
+ILSpy::Decompiler::TypeSystem::ITypePtr WithoutNullability(ILSpy::Decompiler::TypeSystem::IType& type);
+
 // The C# `public static IMethod GetDelegateInvokeMethod(this IType type)` (TypeSystemExtensions.cs
 // line 414) -- "Gets the invoke method for a delegate type. Returns null if the type is not a
 // delegate type; or if the invoke method could not be found." A delegate type's `Invoke` method is
