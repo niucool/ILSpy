@@ -27,8 +27,9 @@
 // `ValidateMethodConstraints`), the `RunTypeInference` engine step, the `CalculateCandidate`
 // composition that wires the steps together in the C# order, and the `AddCandidate` entry that
 // calls it plus the `AddMethodLists` scan that feeds it (the derived-type-hides-base-methods
-// walk) with the `LogCandidateAddingResult` debug-log helper, and the `BestCandidateErrors`
-// output property (the lazy `ValidateMethodConstraints` memoization).
+// walk) with the `LogCandidateAddingResult` debug-log helper, the `BestCandidateErrors`
+// output property (the lazy `ValidateMethodConstraints` memoization), and the
+// `GetArgumentsWithConversions` output-wrapper core (the conversion/named argument wrapping).
 
 #pragma once
 
@@ -55,6 +56,10 @@ class MethodListWithDeclaringType;
 // `ResolveResult` is forward-declared (the `std::vector<std::shared_ptr<ResolveResult>>` parameter
 // needs only a declaration, not the full definition; the .cpp includes the full header).
 namespace ILSpy::Decompiler::Semantics { class ResolveResult; }
+
+// `Conversion` is forward-declared (the `std::vector<std::shared_ptr<Conversion>>` parameter needs
+// only a declaration; the .cpp includes the full header).
+namespace ILSpy::Decompiler::Semantics { class Conversion; }
 
 // `IType` is forward-declared (the `const IType&`/`const IType*&` parameters need only a
 // declaration, not the full definition; the .cpp includes the full header).
@@ -622,5 +627,53 @@ OverloadResolutionErrors BestCandidateErrors(
     bool& bestCandidateWasValidated,
     OverloadResolutionErrors& bestCandidateValidationResult,
     const std::shared_ptr<OverloadResolutionCandidate>& bestCandidateAmbiguousWith);
+
+// The C# `IList<ResolveResult> GetArgumentsWithConversions(ResolveResult targetResolveResult,
+// IParameterizedMember bestCandidateForNamedArguments)` (OverloadResolution.cs line 1110) --
+// the PRIVATE core the public output wrappers build on: "Returns the arguments for the method
+// call in the order they were provided (not in the order of the parameters). Arguments are
+// wrapped in a `ConversionResolveResult` if an implicit conversion is being applied to them
+// when calling the method", and -- when `bestCandidateForNamedArguments` is non-null and the
+// argument was passed with an explicit name -- in a `NamedArgumentResolveResult` (composed
+// AROUND the conversion wrap). The C# instance method reads the `IsExtensionMethodInvocation`/
+// `CheckForOverflow` input properties and the `arguments`/`argumentNames`/`bestCandidate` ctor
+// fields plus the `ArgumentConversions` property; the port threads them as parameters (the
+// `CalculateCandidate`/`BestCandidateErrors` state-threading convention) -- `conversions` is
+// the `ArgumentConversions` snapshot the CALLER takes (the public methods pass
+// `OverloadResolution::ArgumentConversions()`; the C# reads `this.ArgumentConversions`).
+//
+// The per-argument steps, in the C# order:
+//  1. the extension-method receiver swap: `IsExtensionMethodInvocation && i == 0 &&
+//     targetResolveResult != null` replaces the first argument with the target (the resolved
+//     receiver; only the first argument, and only when a target was given);
+//  2. the conversion wrap: a MAPPED argument (`ArgumentToParameterMap[i] >= 0`) under a
+//     NON-identity conversion is wrapped in a `ConversionResolveResult` carrying the best
+//     candidate's (substituted) parameter type, the original argument, the applied
+//     conversion, and the `CheckForOverflow` flag -- but NOT when the parameter type is
+//     `TypeKind.Unknown` (the unresolved shape stays unwrapped). The identity-conversion
+//     check is POINTER IDENTITY against the `IdentityConversion` singleton (the C#
+//     `!= Conversion.IdentityConversion` reference comparison, the `CheckApplicability`
+//     convention). DEFERRED: the C# constant arm (`arguments[i].IsCompileTimeConstant &&
+//     conversions[i].IsValid && !conversions[i].IsUserDefined` ->
+//     `new CSharpResolver(compilation).WithCheckForOverflow(CheckForOverflow).ResolveCast(...)`
+//     -- re-resolving a compile-time constant through the target type) needs the unported
+//     `CSharpResolver.ResolveCast`; the faithful fallback wraps the constant in the
+//     `ConversionResolveResult` too (the C# else branch), preserving the wrapper structure
+//     (target type + applied conversion) -- only the constant is not re-folded;
+//  3. the named wrap: when `bestCandidateForNamedArguments` is non-null and the argument was
+//     passed with an explicit name (the C# `argumentNames[i] != null`; the port normalizes
+//     the null entry to the empty string), the argument is wrapped in a
+//     `NamedArgumentResolveResult` -- carrying the parameter AND the member when the argument
+//     is mapped (`bestCandidateForNamedArguments.Parameters[parameterIndex]`), or the name
+//     only when unmapped.
+std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> GetArgumentsWithConversions(
+    const std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& targetResolveResult,
+    const ILSpy::Decompiler::TypeSystem::IParameterizedMember* bestCandidateForNamedArguments,
+    bool isExtensionMethodInvocation,
+    bool checkForOverflow,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+    const std::vector<std::string>& argumentNames,
+    const std::shared_ptr<OverloadResolutionCandidate>& bestCandidate,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>>& conversions);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

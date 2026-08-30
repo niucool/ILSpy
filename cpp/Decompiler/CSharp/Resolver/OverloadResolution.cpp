@@ -18,15 +18,20 @@
 // DEALINGS IN THE SOFTWARE.
 
 // Port of the `OverloadResolution` constructor (the validation + field init + the input-property
-// defaults) and the `AddCandidate` engine entry. See the header for the deferred engine steps and
-// output properties.
+// defaults), the `AddCandidate`/`AddMethodLists` engine entries, the `BestCandidateErrors` /
+// `ArgumentConversions` output properties, and the `GetArgumentsWithConversions` /
+// `GetArgumentsWithConversionsAndNames` / `CreateResolveResult` output wrappers. See the header
+// for the full class contract.
 
 #include "Decompiler/CSharp/Resolver/OverloadResolution.hpp"
 
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"  // CSharpConversions::Get (the lazy ctor-default resolution)
+#include "Decompiler/CSharp/Resolver/CSharpInvocationResolveResult.hpp"  // CSharpInvocationResolveResult (CreateResolveResult)
 #include "Decompiler/CSharp/Resolver/MethodGroupResolveResult.hpp"  // MethodListWithDeclaringType (AddMethodLists' buckets)
-#include "Decompiler/CSharp/Resolver/OverloadResolutionHelpers.hpp"  // Detail::AddCandidate / Detail::AddMethodLists / Detail::BestCandidateErrors
+#include "Decompiler/CSharp/Resolver/OverloadResolutionHelpers.hpp"  // Detail::AddCandidate / Detail::AddMethodLists / Detail::BestCandidateErrors / Detail::GetArgumentsWithConversions / Detail::GetBestCandidateWithSubstitutedTypeArguments
 #include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversions::None (the ArgumentConversions fallback entries)
+#include "Decompiler/Semantics/TypeResolveResult.hpp"  // TypeResolveResult (the extension-method target)
+#include "Decompiler/TypeSystem/IParameterizedMember.hpp"  // IParameterizedMember::DeclaringType (the extension-method target)
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
 
@@ -119,6 +124,90 @@ OverloadResolution::ArgumentConversions() const {
     std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>> result;
     result.assign(arguments_.size(), ILSpy::Decompiler::Semantics::Conversions::None());
     return result;
+}
+
+std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>
+OverloadResolution::GetArgumentsWithConversions()
+{
+    // C# `if (bestCandidate == null) return arguments; else return
+    // GetArgumentsWithConversions(null, null);` -- the returned copy shares the argument
+    // handles (the `ResolveResult` pointer identity is preserved), faithfully matching the
+    // C# live array's element identity.
+    if (bestCandidate_ == nullptr)
+        return arguments_;
+    return Detail::GetArgumentsWithConversions(
+        /*targetResolveResult*/ nullptr, /*bestCandidateForNamedArguments*/ nullptr,
+        isExtensionMethodInvocation_, checkForOverflow_, arguments_, argumentNames_,
+        bestCandidate_, ArgumentConversions());
+}
+
+std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>
+OverloadResolution::GetArgumentsWithConversionsAndNames()
+{
+    // C# `if (bestCandidate == null) return arguments; else return
+    // GetArgumentsWithConversions(null, GetBestCandidateWithSubstitutedTypeArguments());` --
+    // the named wrap carries the parameter/member from the best candidate re-specialized
+    // with the inferred type arguments (the generic method shape), or the member as-is
+    // (the non-generic shape).
+    if (bestCandidate_ == nullptr)
+        return arguments_;
+    return Detail::GetArgumentsWithConversions(
+        /*targetResolveResult*/ nullptr,
+        Detail::GetBestCandidateWithSubstitutedTypeArguments(bestCandidate_),
+        isExtensionMethodInvocation_, checkForOverflow_, arguments_, argumentNames_,
+        bestCandidate_, ArgumentConversions());
+}
+
+std::shared_ptr<CSharpInvocationResolveResult> OverloadResolution::CreateResolveResult(
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> targetResolveResult,
+    std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> initializerStatements,
+    ILSpy::Decompiler::TypeSystem::ITypePtr returnTypeOverride)
+{
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::Semantics::TypeResolveResult;
+    using ILSpy::Decompiler::TypeSystem::UnknownType;
+
+    // C# `IParameterizedMember member = GetBestCandidateWithSubstitutedTypeArguments();
+    // if (member == null) throw new InvalidOperationException();`
+    const ILSpy::Decompiler::TypeSystem::IParameterizedMember* member =
+        Detail::GetBestCandidateWithSubstitutedTypeArguments(bestCandidate_);
+    if (member == nullptr)
+        throw std::runtime_error(
+            "OverloadResolution.CreateResolveResult: no candidate was added to the resolution");
+
+    // C# `GetArgumentsWithConversions(targetResolveResult, member)` -- the wrapped arguments
+    // must be built BEFORE the target is moved below: the core reads `targetResolveResult`
+    // for the extension-method receiver swap.
+    std::vector<std::shared_ptr<ResolveResult>> argumentsWithConversions =
+        Detail::GetArgumentsWithConversions(
+            targetResolveResult, member, isExtensionMethodInvocation_, checkForOverflow_,
+            arguments_, argumentNames_, bestCandidate_, ArgumentConversions());
+
+    // C# `this.IsExtensionMethodInvocation ? new TypeResolveResult(member.DeclaringType ??
+    // SpecialType.UnknownType) : targetResolveResult` -- the extension-method shape's target
+    // is the DECLARING TYPE (not the passed receiver; the receiver appears as the first
+    // ARGUMENT via the swap above).
+    std::shared_ptr<ResolveResult> target;
+    if (isExtensionMethodInvocation_) {
+        ILSpy::Decompiler::TypeSystem::ITypePtr declaringType = member->DeclaringType();
+        target = std::make_shared<TypeResolveResult>(
+            declaringType != nullptr ? declaringType : UnknownType());
+    } else {
+        target = std::move(targetResolveResult);
+    }
+
+    // C# `new CSharpInvocationResolveResult(target, member, GetArgumentsWithConversions(...),
+    // this.BestCandidateErrors, this.IsExtensionMethodInvocation,
+    // this.BestCandidateIsExpandedForm, isDelegateInvocation: false,
+    // argumentToParameterMap: this.GetArgumentToParameterMap(), initializerStatements,
+    // returnTypeOverride)`. `BestCandidateErrors()` runs the lazy constraint validation
+    // (the public method mutates the memoization state, faithfully matching the C# property
+    // read).
+    return std::make_shared<CSharpInvocationResolveResult>(
+        std::move(target), member, std::move(argumentsWithConversions), BestCandidateErrors(),
+        isExtensionMethodInvocation_, BestCandidateIsExpandedForm(),
+        /*isDelegateInvocation*/ false, GetArgumentToParameterMap(),
+        std::move(initializerStatements), std::move(returnTypeOverride));
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

@@ -23,13 +23,16 @@
 // (`IsExtensionMethodInvocation`/`AllowExpandingParams`/`AllowOptionalParameters`/`AllowImplicitIn`/
 // `CheckForOverflow`/`Arguments`), the member fields, the `AddCandidate` engine entry (the normal
 // + expanded-form pair delegating to `Detail::AddCandidate`), the `AddMethodLists` engine entry (the
-// derived-type-hides-base-methods walk delegating to `Detail::AddMethodLists`), and the output
+// derived-type-hides-base-methods walk delegating to `Detail::AddMethodLists`), the output
 // properties (`BestCandidate`/`BestCandidateAmbiguousWith`/`FoundApplicableCandidate`/`IsAmbiguous`/
 // `BestCandidateErrors` -- the lazy `ValidateMethodConstraints` memoization -- /
 // `BestCandidateIsExpandedForm`/`InferredTypeArguments`/`ArgumentConversions`/
-// `GetArgumentToParameterMap`). The remaining engine steps and output wrappers
-// (`CreateResolveResult`/`GetArgumentsWithConversions`) are deferred -- they need the
-// `CSharpResolver` composition.
+// `GetArgumentToParameterMap`), and the output wrappers (`GetArgumentsWithConversions`/
+// `GetArgumentsWithConversionsAndNames`/`CreateResolveResult` -- the argument-conversion wrapping
+// and the `CSharpInvocationResolveResult` composition, delegating to
+// `Detail::GetArgumentsWithConversions`). The only deferred piece is the constant-folding arm of the
+// wrapping core (it needs `CSharpResolver.ResolveCast`; see the `Detail::GetArgumentsWithConversions`
+// doc).
 //
 // The C# `Candidate` nested class is ported as the separate `OverloadResolutionCandidate` (D506); the
 // pure-transform engine steps that do NOT need `CSharpConversions`/`TypeInference` are ported as
@@ -81,6 +84,10 @@ class CSharpConversions;
 // `AddMethodLists` takes (`const std::vector<MethodListWithDeclaringType>&` needs only a
 // declaration; the .cpp includes the full header).
 class MethodListWithDeclaringType;
+
+// Forward-declared (now ported, D472): the invocation result `CreateResolveResult` builds
+// (a pointer return needs only a declaration; the .cpp includes the full header).
+class CSharpInvocationResolveResult;
 
 class OverloadResolution {
 public:
@@ -279,6 +286,43 @@ public:
             return bestCandidate_->ArgumentToParameterMap();
         return std::nullopt;
     }
+
+    // --- Output Wrappers (C# lines 1087-1208) ---
+
+    // The C# `public IList<ResolveResult> GetArgumentsWithConversions()` (line 1087) --
+    // "Returns the arguments for the method call in the order they were provided (not in
+    // the order of the parameters). Arguments are wrapped in a `ConversionResolveResult`
+    // if an implicit conversion is being applied to them when calling the method."
+    // With no best candidate the C# returns the live `arguments` array; the port returns
+    // a copy BY VALUE (the two branches must share one return type; the entries are
+    // shared handles, so the argument `ResolveResult` pointer identity is preserved
+    // either way). See `Detail::GetArgumentsWithConversions` for the wrap contract.
+    std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> GetArgumentsWithConversions();
+
+    // The C# `public IList<ResolveResult> GetArgumentsWithConversionsAndNames()` (line 1102)
+    // -- like `GetArgumentsWithConversions()`, but "for arguments where an explicit argument
+    // name was provided, the argument will be wrapped in a `NamedArgumentResolveResult`"
+    // (the parameter/member the named wrap carries comes from the best candidate
+    // re-specialized with the inferred type arguments,
+    // `GetBestCandidateWithSubstitutedTypeArguments()`).
+    std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> GetArgumentsWithConversionsAndNames();
+
+    // The C# `public CSharpInvocationResolveResult CreateResolveResult(ResolveResult
+    // targetResolveResult, IList<ResolveResult> initializerStatements = null, IType
+    // returnTypeOverride = null)` (line 1188) -- "Creates a ResolveResult representing the
+    // result of overload resolution." Throws `runtime_error` when there is no best
+    // candidate (the C# `InvalidOperationException`). The target is a `TypeResolveResult`
+    // over the member's declaring type (`UnknownType` when it has none) when
+    // `IsExtensionMethodInvocation`, else the given `targetResolveResult` (null for
+    // static methods/constructors); the arguments come back wrapped in their implicit
+    // conversions and named-argument wrappers; the error mask is `BestCandidateErrors()`
+    // (the lazy constraint validation runs here); the expanded-form flag, the
+    // argument->parameter map, the initializer statements, and the return-type override
+    // (which replaces the member's return type as the result type) pass through.
+    std::shared_ptr<CSharpInvocationResolveResult> CreateResolveResult(
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> targetResolveResult = nullptr,
+        std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> initializerStatements = {},
+        ILSpy::Decompiler::TypeSystem::ITypePtr returnTypeOverride = nullptr);
 
 private:
     const ILSpy::Decompiler::TypeSystem::ICompilation* compilation_;

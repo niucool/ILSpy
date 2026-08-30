@@ -29,7 +29,9 @@
 #include "Decompiler/CSharp/Resolver/OverloadResolutionErrors.hpp"  // TooManyPositionalArguments / NoParameterFoundForNamedArgument
 #include "Decompiler/CSharp/Resolver/TypeInferenceHelpers.hpp"  // InferTypeArguments + TypeInferenceAlgorithm (RunTypeInference)
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"  // dynamic_cast<ByReferenceResolveResult>
-#include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversions::None() (the unmapped-argument conversion)
+#include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversions::None() (the unmapped-argument conversion) / IdentityConversion (the wrap guard)
+#include "Decompiler/Semantics/ConversionResolveResult.hpp"  // ConversionResolveResult (the GetArgumentsWithConversions wrap)
+#include "Decompiler/Semantics/NamedArgumentResolveResult.hpp"  // NamedArgumentResolveResult (the named-argument wrap)
 #include "Decompiler/Semantics/OutVarResolveResult.hpp"  // dynamic_cast<OutVarResolveResult>
 #include "Decompiler/Semantics/ResolveResult.hpp"  // ResolveResult (arguments element)
 #include "Decompiler/TypeSystem/Accessibility.hpp"  // Accessibility::Public (the ctor filter)
@@ -1335,6 +1337,79 @@ OverloadResolutionErrors BestCandidateErrors(
     if (bestCandidateAmbiguousWith != nullptr)
         err = err | OverloadResolutionErrors::AmbiguousMatch;
     return err;
+}
+
+std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> GetArgumentsWithConversions(
+    const std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& targetResolveResult,
+    const ILSpy::Decompiler::TypeSystem::IParameterizedMember* bestCandidateForNamedArguments,
+    bool isExtensionMethodInvocation,
+    bool checkForOverflow,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+    const std::vector<std::string>& argumentNames,
+    const std::shared_ptr<OverloadResolutionCandidate>& bestCandidate,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>>& conversions)
+{
+    using ILSpy::Decompiler::Semantics::ConversionResolveResult;
+    using ILSpy::Decompiler::Semantics::NamedArgumentResolveResult;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+
+    // C# `ResolveResult[] args = new ResolveResult[arguments.Length];` -- the output is in the
+    // ORDER THE ARGUMENTS WERE PROVIDED (not the parameter order).
+    std::vector<std::shared_ptr<ResolveResult>> args(arguments.size());
+    for (std::size_t i = 0; i < args.size(); i++) {
+        std::shared_ptr<ResolveResult> argument = arguments[i];
+        // C# `if (this.IsExtensionMethodInvocation && i == 0 && targetResolveResult != null)
+        // argument = targetResolveResult;` -- the extension-method receiver replaces the first
+        // argument in the output (the applicability check ran against the original first
+        // argument; the wrapper output carries the resolved receiver instead).
+        if (isExtensionMethodInvocation && i == 0 && targetResolveResult != nullptr)
+            argument = targetResolveResult;
+        // C# `int parameterIndex = bestCandidate.ArgumentToParameterMap[i];`
+        int parameterIndex = bestCandidate->ArgumentToParameterMap()[i];
+        // C# `if (parameterIndex >= 0 && conversions[i] != Conversion.IdentityConversion)` --
+        // the singleton comparison is POINTER IDENTITY (the C# reference comparison; the
+        // `IsIdentityConversion` flag is NOT consulted, matching the C# `!=`).
+        if (parameterIndex >= 0
+            && conversions[i].get()
+                != ILSpy::Decompiler::Semantics::Conversions::IdentityConversion().get()) {
+            // C# comment: "Wrap argument in ConversionResolveResult"
+            const ILSpy::Decompiler::TypeSystem::ITypePtr& parameterType =
+                bestCandidate->ParameterTypes()[static_cast<std::size_t>(parameterIndex)];
+            if (parameterType->Kind() != TypeKind::Unknown) {
+                // C# `if (arguments[i].IsCompileTimeConstant && conversions[i].IsValid &&
+                // !conversions[i].IsUserDefined) argument = new CSharpResolver(compilation)
+                // .WithCheckForOverflow(CheckForOverflow).ResolveCast(parameterType, argument);`
+                // -- the constant-folding refinement (re-resolving a compile-time constant
+                // through the target type, e.g. an int literal widened to a long constant).
+                // DEFERRED: `CSharpResolver.ResolveCast` is not yet ported; the faithful
+                // fallback wraps the constant in the `ConversionResolveResult` too (the C#
+                // else branch) -- the wrapper structure (target type + the applied conversion)
+                // is preserved, only the constant is not re-folded. The arm lands with the
+                // `CSharpResolver` port; the core consequently needs no compilation parameter
+                // (that arm is its only would-be consumer).
+                argument = std::make_shared<ConversionResolveResult>(
+                    parameterType, argument, conversions[i], checkForOverflow);
+            }
+        }
+        // C# `if (bestCandidateForNamedArguments != null && argumentNames[i] != null)` -- the
+        // C# `null` string entry is normalized to the EMPTY STRING by the port ctor
+        // (positional == empty).
+        if (bestCandidateForNamedArguments != nullptr && !argumentNames[i].empty()) {
+            // C# comment: "Wrap argument in NamedArgumentResolveResult" -- composed AROUND the
+            // conversion wrap above (the C# reassigns `argument` in order).
+            if (parameterIndex >= 0) {
+                argument = std::make_shared<NamedArgumentResolveResult>(
+                    bestCandidateForNamedArguments->Parameters()[static_cast<std::size_t>(parameterIndex)],
+                    argument, bestCandidateForNamedArguments);
+            } else {
+                argument = std::make_shared<NamedArgumentResolveResult>(
+                    argumentNames[i], argument);
+            }
+        }
+        args[i] = argument;
+    }
+    return args;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

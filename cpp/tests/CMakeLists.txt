@@ -82,6 +82,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Resolver/AddCandidate_Test.cpp
     Decompiler/CSharp/Resolver/AddMethodLists_Test.cpp
     Decompiler/CSharp/Resolver/OutputProperties_Test.cpp
+    Decompiler/CSharp/Resolver/OutputWrappers_Test.cpp
     Decompiler/CSharp/Resolver/TypeInferenceInputOutputTypes_Test.cpp
     Decompiler/CSharp/Resolver/TypeInferenceContainsUnfixed_Test.cpp
     Decompiler/CSharp/Resolver/TypeInferenceDependsOn_Test.cpp
