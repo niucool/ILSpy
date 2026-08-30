@@ -24,6 +24,7 @@
 
 #include <algorithm>  // std::min (the CalculateDependencyMatrix common-min bound)
 
+#include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"  // CSharpConversions (the cached public ImplicitConversion the Fixing region calls)
 #include "Decompiler/Semantics/ResolveResult.hpp"  // ResolveResult (the RTTI base)
 #include "Decompiler/TypeSystem/IParameter.hpp"  // IParameter (the delegate-invoke parameter types)
 #include "Decompiler/TypeSystem/IMethod.hpp"  // IMethod (Parameters() / ReturnType())
@@ -31,12 +32,15 @@
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"  // ITypeDefinition (Namespace via GetDefinition)
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"  // ITypeParameter / NullabilityAnnotatedTypeParameter (the OccursInVisitor Index read; the GetTPForType unwrap)
 #include "Decompiler/TypeSystem/ICompilation.hpp"  // ICompilation (the TypeSystemOptions span gate)
+#include "Decompiler/TypeSystem/Implementation/DummyTypeParameter.hpp"  // DummyTypeParameter (the GetBestCommonType dummy)
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"  // KnownTypeCode (SpanOfT / ReadOnlySpanOfT)
 #include "Decompiler/TypeSystem/NullableType.hpp"  // IsNullable / GetUnderlyingType (the nullable-covariance arm)
 #include "Decompiler/TypeSystem/TupleType.hpp"  // TupleUnderlyingTypeOrSelf (the tuple-unwrap rebind)
 #include "Decompiler/TypeSystem/TypeParameterSubstitution.hpp"  // TypeParameterSubstitution (the GetSubstitutionForFixedTPs return)
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // GetDelegateInvokeMethod (the D533 free function); IsKnownType / IsArrayInterfaceType / GetAllBaseTypes / WithoutNullability (the MakeInference region)
 #include "Decompiler/TypeSystem/VarianceModifier.hpp"  // VarianceModifier (the parameterized variance walk)
+
+#include <cassert>  // assert (the Fix Debug.Assert)
 
 namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 
@@ -1171,6 +1175,244 @@ void MakeOutputTypeInference(const ICompilation& compilation, std::vector<TP>& t
     if (IsValidType(e.Type()))
         MakeLowerBoundInference(compilation, typeParameters,
                                 const_cast<IType&>(e.Type()), t);
+}
+
+// ===========================================================================
+// The Fixing / FindTypeInBounds / GetBestCommonType regions (TypeInference.cs lines
+// 964-1186).
+// ===========================================================================
+
+// The C# `static IType GetFirstTypePreferNonInterfaces(IReadOnlyList<IType> result)`
+// (TypeInference.cs lines 1055-1058).
+ITypePtr GetFirstTypePreferNonInterfaces(const std::vector<ITypePtr>& result)
+{
+    // C# `result.FirstOrDefault(c => c.Kind != TypeKind.Interface) ??
+    //     result.FirstOrDefault() ?? SpecialType.UnknownType;` -- the first NON-INTERFACE
+    // candidate wins over an earlier interface candidate; an all-interface (or all-null)
+    // list takes the first entry; an empty list takes the `UnknownType` null object. A
+    // null entry cannot occur in the C# (the bounds are real types) and is skipped by the
+    // non-interface scan (the D516 degenerate-shape convention).
+    for (const ITypePtr& c : result) {
+        if (c && c->Kind() != TypeKind::Interface)
+            return c;
+    }
+    if (!result.empty())
+        return result.front();
+    return UnknownType();
+}
+
+// The C# `IReadOnlyList<IType> FindTypesInBounds(IReadOnlyList<IType> lowerBounds,
+// IReadOnlyList<IType> upperBounds)` (TypeInference.cs lines 1059-1186).
+std::vector<ITypePtr> FindTypesInBounds(CSharpConversions& conversions,
+                                        const std::vector<ITypePtr>& lowerBounds,
+                                        const std::vector<ITypePtr>& upperBounds,
+                                        TypeInferenceAlgorithm algorithm, int nestingLevel)
+{
+    // C# `if (lowerBounds.Count == 0 && upperBounds.Count <= 1) return upperBounds;` and
+    // the mirror -- if there's only a single type, return that single type; if both
+    // inputs are empty, return the empty list. The returned vector is a copy of the input
+    // handles (the C# returns the input list itself; the elements are the same types).
+    if (lowerBounds.empty() && upperBounds.size() <= 1)
+        return upperBounds;
+    if (upperBounds.empty() && lowerBounds.size() <= 1)
+        return lowerBounds;
+    // C# `if (nestingLevel > maxNestingLevel) return EmptyList<IType>.Instance;` -- the
+    // `maxNestingLevel` const is 5 (the guard against the infinite generic-recursion of
+    // the Improved mode's `InferTypeArgumentsFromBounds` candidate construction).
+    if (nestingLevel > 5)
+        return {};
+
+    // C# `List<IType> candidateTypes = lowerBounds.Union(upperBounds) ...` -- the Union
+    // with the default equality comparer dedups under `IType.Equals`; the port keeps the
+    // insertion order with a linear dedup scan (the `TP::AddLowerBound` convention -- no
+    // hash or ordering is on the `IType` surface, and the bound lists are tiny).
+    std::vector<ITypePtr> unioned;
+    auto addUnique = [&unioned](const ITypePtr& t) {
+        if (!t)
+            return;
+        for (const ITypePtr& e : unioned) {
+            if (e->Equals(*t))
+                return;
+        }
+        unioned.push_back(t);
+    };
+    for (const ITypePtr& b : lowerBounds)
+        addUnique(b);
+    for (const ITypePtr& b : upperBounds)
+        addUnique(b);
+
+    // C# `.Where(c => lowerBounds.All(b => conversions.ImplicitConversion(b, c).IsValid))
+    //      .Where(c => upperBounds.All(b => conversions.ImplicitConversion(c, b).IsValid))`
+    // -- a candidate must be convertible FROM every lower bound and TO every upper bound.
+    // The cached public `ImplicitConversion(IType, IType)` entry (the C#
+    // `conversions.ImplicitConversion` call site).
+    std::vector<ITypePtr> candidateTypes;
+    for (const ITypePtr& c : unioned) {
+        bool keep = true;
+        for (const ITypePtr& b : lowerBounds) {
+            if (!conversions.ImplicitConversion(*b, *c)->IsValid()) {
+                keep = false;
+                break;
+            }
+        }
+        if (!keep)
+            continue;
+        for (const ITypePtr& b : upperBounds) {
+            if (!conversions.ImplicitConversion(*c, *b)->IsValid()) {
+                keep = false;
+                break;
+            }
+        }
+        if (!keep)
+            continue;
+        candidateTypes.push_back(c);
+    }
+
+    // C# `candidateTypes = candidateTypes.Where(c => candidateTypes.All(o =>
+    //     conversions.ImplicitConversion(o, c).IsValid)).ToList();` -- spec draft-v11
+    // 12.6.3.13: the result is the unique candidate type to which there is an implicit
+    // conversion from all the OTHER candidate types (a candidate always converts to
+    // itself, so the self-pairing is a no-op).
+    std::vector<ITypePtr> uniqueCandidates;
+    for (const ITypePtr& c : candidateTypes) {
+        bool keep = true;
+        for (const ITypePtr& o : candidateTypes) {
+            if (!conversions.ImplicitConversion(*o, *c)->IsValid()) {
+                keep = false;
+                break;
+            }
+        }
+        if (keep)
+            uniqueCandidates.push_back(c);
+    }
+    candidateTypes = std::move(uniqueCandidates);
+
+    // C# `if (candidateTypes.Count == 1 || !(algorithm == Improved || algorithm ==
+    //     ImprovedReturnAllResults)) return candidateTypes;` -- for the CSharp4 default
+    // (and any single-candidate result) this IS the return.
+    if (candidateTypes.size() == 1
+        || !(algorithm == TypeInferenceAlgorithm::Improved
+             || algorithm == TypeInferenceAlgorithm::ImprovedReturnAllResults)) {
+        return candidateTypes;
+    }
+
+    // DEFERRED: the improved algorithm's refinement (the lower bounds'
+    // base-type-definition intersection, the compilation-wide candidate scan when there
+    // are no lower bounds, the upper-bound `IsDerivedFrom` filtering, and the
+    // `InferTypeArgumentsFromBounds` recursion constructing generic candidates) needs
+    // `ICompilation.GetAllTypeDefinitions` and the `InferTypeArgumentsFromBounds` engine
+    // step, neither ported yet. Until it lands, the pre-refinement spec candidates
+    // return for the improved algorithms too (a documented deviation -- the CSharp4
+    // default is exact because the early return above already covered it).
+    return candidateTypes;
+}
+
+// The C# `public IType FindTypeInBounds(IReadOnlyList<IType> lowerBounds,
+// IReadOnlyList<IType> upperBounds)` (TypeInference.cs lines 1033-1053).
+ITypePtr FindTypeInBounds(CSharpConversions& conversions,
+                          const std::vector<ITypePtr>& lowerBounds,
+                          const std::vector<ITypePtr>& upperBounds,
+                          TypeInferenceAlgorithm algorithm)
+{
+    // C# `var result = FindTypesInBounds(lowerBounds, upperBounds);` -- the fresh-instance
+    // nesting level (0).
+    std::vector<ITypePtr> result =
+        FindTypesInBounds(conversions, lowerBounds, upperBounds, algorithm,
+                          /*nestingLevel*/ 0);
+    // C# `if (algorithm == TypeInferenceAlgorithm.ImprovedReturnAllResults)
+    //         return IntersectionType.Create(result);` -- DEFERRED (`IntersectionType` is
+    // not yet ported); the documented fallback is the picker below, which is exact for 0
+    // and 1 candidates (`IntersectionType.Create` maps an empty list to
+    // `SpecialType.UnknownType` and a singleton to the single type itself). Only a
+    // multi-candidate ambiguous result diverges.
+    // C# `else return GetFirstTypePreferNonInterfaces(result);`
+    return GetFirstTypePreferNonInterfaces(result);
+}
+
+// The C# `bool Fix(TP tp)` (TypeInference.cs lines 967-994, spec draft-v11 section
+// 12.6.3.13 "Fixing").
+bool Fix(CSharpConversions& conversions, TP& tp, TypeInferenceAlgorithm algorithm,
+         int nestingLevel)
+{
+    // C# `Debug.Assert(!tp.IsFixed);` (debug-only).
+    assert(!tp.IsFixed());
+    // C# `if (tp.ExactBound != null) {` -- the exact bound will always be the result.
+    if (tp.ExactBound != nullptr) {
+        // C# `tp.FixedTo = tp.ExactBound;`
+        tp.FixedTo = tp.ExactBound;
+        // C# `if (tp.MultipleDifferentExactBounds) return false;`
+        if (tp.MultipleDifferentExactBounds)
+            return false;
+        // C# `return tp.LowerBounds.All(b => conversions.ImplicitConversion(b,
+        //         tp.FixedTo).IsValid) && tp.UpperBounds.All(b =>
+        //         conversions.ImplicitConversion(tp.FixedTo, b).IsValid);` -- every lower
+        // bound must still convert TO the fixed type and the fixed type to every upper
+        // bound. `*b` / `*tp.FixedTo` are `IType&` (the `shared_ptr<IType>` deref feeds the
+        // cached public entry's non-const parameters directly).
+        for (const ITypePtr& b : tp.LowerBounds) {
+            if (!conversions.ImplicitConversion(*b, *tp.FixedTo)->IsValid())
+                return false;
+        }
+        for (const ITypePtr& b : tp.UpperBounds) {
+            if (!conversions.ImplicitConversion(*tp.FixedTo, *b)->IsValid())
+                return false;
+        }
+        return true;
+    }
+    // C# `var types = CreateNestedInstance().FindTypesInBounds(tp.LowerBounds.ToArray(),
+    //         tp.UpperBounds.ToArray());` -- the nested instance bumps the nesting level
+    // by one (the C# `CreateNestedInstance`), so the call threads `nestingLevel + 1`.
+    std::vector<ITypePtr> types = FindTypesInBounds(conversions, tp.LowerBounds,
+                                                    tp.UpperBounds, algorithm,
+                                                    nestingLevel + 1);
+    // C# `if (algorithm == TypeInferenceAlgorithm.ImprovedReturnAllResults) {
+    //         tp.FixedTo = IntersectionType.Create(types);
+    //         return types.Count >= 1; }` -- DEFERRED (`IntersectionType` is not yet
+    // ported); the documented fallback below is exact for 0 and 1 candidates.
+    // C# `else { tp.FixedTo = GetFirstTypePreferNonInterfaces(types);
+    //          return types.Count == 1; }`
+    tp.FixedTo = GetFirstTypePreferNonInterfaces(types);
+    return types.size() == 1;
+}
+
+// The C# `public IType GetBestCommonType(IList<ResolveResult> expressions, out bool
+// success)` (TypeInference.cs lines 1001-1026, spec draft-v11 section 12.6.3.17).
+ITypePtr GetBestCommonType(
+    const ICompilation& compilation, CSharpConversions& conversions,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& expressions,
+    bool& success, TypeInferenceAlgorithm algorithm)
+{
+    // C# `if (expressions.Count == 1) { success = IsValidType(expressions[0].Type);
+    //         return expressions[0].Type; }` -- a single expression needs no inference;
+    // its own type IS the best common type (valid or not).
+    if (expressions.size() == 1) {
+        success = IsValidType(expressions[0]->Type());
+        return expressions[0]->TypePtr();
+    }
+    // C# `ITypeParameter tp = DummyTypeParameter.GetMethodTypeParameter(0);
+    //     this.typeParameters = new TP[1] { new TP(tp) };` -- a one-entry inference over
+    // the cached dummy METHOD type parameter 0 (Index 0, OwnerType Method -- the
+    // `GetTPForType` index contract: the lower bounds the inference accumulates land on
+    // this very dummy).
+    std::shared_ptr<ILSpy::Decompiler::TypeSystem::ITypeParameter> tp =
+        ILSpy::Decompiler::TypeSystem::Implementation::DummyTypeParameter::GetMethodTypeParameter(0);
+    std::vector<TP> typeParameters;
+    typeParameters.emplace_back(*tp);
+    // C# `foreach (ResolveResult r in expressions) MakeOutputTypeInference(r, tp);` --
+    // every expression's output type lower-bounds the dummy (a lambda contributes its
+    // inferred return only against a delegate target -- the dummy is not one, so a
+    // lambda's NoType fails the `IsValidType` gate and contributes nothing; a plain
+    // expression contributes its own type). The C# instance's `classTypeArguments` is
+    // always null here (a fresh/reset instance -- `InferTypeArguments` nulls it in its
+    // `finally`), so the call threads `std::nullopt`.
+    for (const std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& r : expressions) {
+        MakeOutputTypeInference(compilation, typeParameters, std::nullopt, *r, *tp);
+    }
+    // C# `success = Fix(typeParameters[0]); return typeParameters[0].FixedTo ??
+    //         SpecialType.UnknownType;` -- the fix decides the success; an unfixed TP
+    // reports the `UnknownType` null object.
+    success = Fix(conversions, typeParameters[0], algorithm, /*nestingLevel*/ 0);
+    return typeParameters[0].FixedTo ? typeParameters[0].FixedTo : UnknownType();
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

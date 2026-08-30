@@ -36,10 +36,15 @@
 // -- and the MakeOutputTypeInference region (C# 4.0 spec section 7.5.2.6: the fourth
 // worker over the LAMBDA argument shape plus the plain-expression arm, with the
 // `GetSubstitutionForFixedTPs` fixed-TP substitution and the `IsValidType` gate; its
-// METHOD-GROUP arm stays deferred on `PerformOverloadResolution`). The remaining regions
-// (`InferTypeArguments`, the Inference Phases, `Fixing`, `GetBestCommonType`,
-// `FindTypeInBounds`) need further instance state (`arguments`/`parameterTypes`) and land
-// in later increments.
+// METHOD-GROUP arm stays deferred on `PerformOverloadResolution`) -- and the Fixing /
+// FindTypeInBounds / GetBestCommonType regions (spec draft-v11 sections 12.6.3.13 +
+// 12.6.3.17: the `Fix` fixing decision, the `FindTypesInBounds` spec candidate-types
+// algorithm, the `FindTypeInBounds` public entry, and the `GetBestCommonType`
+// dummy-TP pipeline over `MakeOutputTypeInference`; their IMPROVED-algorithm refinements
+// -- the `FindTypesInBounds` base-type-definition intersection and the `IntersectionType`
+// all-results report -- stay deferred, documented at their sites below). The remaining
+// regions (`InferTypeArguments`, the Inference Phases) need further instance state
+// (`arguments`/`parameterTypes`) and land in later increments.
 //
 // RETURN CONVENTION: the C# `IType[]` returns fresh arrays of GC-owned references; the port
 // returns `std::vector<const IType*>` non-owning raw-pointer snapshots (the `GetMethods` /
@@ -66,6 +71,32 @@
 
 // `IType` is included transitively by the ResolveResult hierarchy (the base `ResolveResult`
 // holds an `ITypePtr`), so the `const IType&` parameter needs no extra include.
+
+// `CSharpConversions` is forward-declared (the `CSharpConversions&` parameters of the
+// Fixing / FindTypeInBounds / GetBestCommonType regions below -- the cached public
+// `ImplicitConversion(IType, IType)` entry they call; the .cpp includes the full header),
+// and the `TypeInferenceAlgorithm` enum is co-located with it at namespace scope.
+namespace ILSpy::Decompiler::CSharp::Resolver {
+class CSharpConversions;
+
+// The C# `public enum TypeInferenceAlgorithm` (TypeInference.cs lines 32-45) -- the
+// algorithm selector a `TypeInference` instance carries (the C# default field initializer
+// is `CSharp4`). Declared at namespace scope in the same file as the `TypeInference`
+// class, so the port co-locates it with the helpers (the `DynamicInvocationType`
+// co-location precedent). Declaration order: `CSharp4` = 0, `Improved` = 1,
+// `ImprovedReturnAllResults` = 2.
+enum class TypeInferenceAlgorithm {
+    // The C# 4.0 type inference algorithm (the specification's fixing).
+    CSharp4,
+    // Improved algorithm (not part of any specification) using `FindTypeInBounds` for
+    // fixing.
+    Improved,
+    // Improved algorithm using `FindTypeInBounds` for fixing; uses `IntersectionType` to
+    // report all results (in case of ambiguities).
+    ImprovedReturnAllResults
+};
+
+} // namespace ILSpy::Decompiler::CSharp::Resolver
 
 // `IMethod` is forward-declared (the `const IMethod*` return type is a nullable non-owning
 // pointer -- a complete pointer type with the class incomplete; the .cpp includes the full
@@ -400,5 +431,90 @@ void MakeOutputTypeInference(const ILSpy::Decompiler::TypeSystem::ICompilation& 
                              const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& classTypeArguments,
                              const ILSpy::Decompiler::Semantics::ResolveResult& e,
                              ILSpy::Decompiler::TypeSystem::IType& t);
+
+// ===========================================================================
+// The Fixing / FindTypeInBounds / GetBestCommonType regions (TypeInference.cs lines
+// 964-1186, C# spec draft-v11 sections 12.6.3.13 + 12.6.3.17) -- the fixing decision that
+// ends every inference: `Fix` reduces one type parameter's accumulated bounds to its
+// fixed type (the exact-bound fast path, else the `FindTypesInBounds` candidate-types
+// algorithm), `FindTypeInBounds` is the public bounds-to-type entry, and
+// `GetBestCommonType` is the public best-common-type-of-expressions entry (a one-entry
+// dummy-TP inference over `MakeOutputTypeInference`). The C# instance members these read
+// (`conversions`, `algorithm`, `nestingLevel`) thread as parameters (the established
+// convention); the `CreateNestedInstance()` recursion becomes the threaded nesting level
+// (the C# nested instance bumps it by one).
+// ===========================================================================
+
+// The C# `static IType GetFirstTypePreferNonInterfaces(IReadOnlyList<IType> result)`
+// (TypeInference.cs lines 1055-1058) -- the candidate picker `FindTypeInBounds` and the
+// non-`ImprovedReturnAllResults` arm of `Fix` reduce the found types with: the FIRST
+// non-interface candidate, else the first candidate, else the `SpecialType.UnknownType`
+// null object.
+ILSpy::Decompiler::TypeSystem::ITypePtr GetFirstTypePreferNonInterfaces(
+    const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& result);
+
+// The C# `IReadOnlyList<IType> FindTypesInBounds(IReadOnlyList<IType> lowerBounds,
+// IReadOnlyList<IType> upperBounds)` (TypeInference.cs lines 1059-1186) -- finds the types
+// X with "LB <: X <: UB" among the bounds' own types: the C# spec (draft-v11) 12.6.3.13
+// candidate-types algorithm (the union of the bounds, filtered to the candidates every
+// lower bound converts to and that convert to every upper bound, then to the unique
+// candidate all the other candidates convert to). For the `CSharp4` algorithm this IS the
+// whole function (the `count == 1 || !(Improved || ImprovedReturnAllResults)` early
+// return); the IMPROVED refinement after it (the lower bounds' base-type-definition
+// intersection, the compilation-wide type scan, and the `InferTypeArgumentsFromBounds`
+// recursion for generic candidates) stays DEFERRED (`ICompilation.GetAllTypeDefinitions`
+// is not yet ported) -- the improved algorithms with a non-single candidate list return
+// the pre-refinement candidates (a documented deviation; the `CSharp4` default is
+// exact). The C# `nestingLevel > maxNestingLevel` guard (`maxNestingLevel` == 5) threads
+// as the nestingLevel parameter (the caller bumps it at the `Fix` recursion point, the
+// C# `CreateNestedInstance`).
+std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> FindTypesInBounds(
+    CSharpConversions& conversions,
+    const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& lowerBounds,
+    const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& upperBounds,
+    TypeInferenceAlgorithm algorithm,
+    int nestingLevel);
+
+// The C# `public IType FindTypeInBounds(IReadOnlyList<IType> lowerBounds,
+// IReadOnlyList<IType> upperBounds)` (TypeInference.cs lines 1033-1053) -- the public
+// entry reducing the found types to ONE type. The `ImprovedReturnAllResults` arm
+// (`IntersectionType.Create(result)`) is DEFERRED (`IntersectionType` is not yet
+// ported); the documented fallback is the `GetFirstTypePreferNonInterfaces` picker,
+// which is exact for 0 and 1 candidates (`IntersectionType.Create` maps an empty list to
+// `SpecialType.UnknownType` and a singleton to the single type itself) -- only a
+// multi-candidate ambiguous result diverges. The fresh-instance nesting level is 0.
+ILSpy::Decompiler::TypeSystem::ITypePtr FindTypeInBounds(
+    CSharpConversions& conversions,
+    const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& lowerBounds,
+    const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& upperBounds,
+    TypeInferenceAlgorithm algorithm);
+
+// The C# `bool Fix(TP tp)` (TypeInference.cs lines 967-994, spec draft-v11 section
+// 12.6.3.13 "Fixing") -- fixes one type parameter to its result type: an EXACT bound
+// always wins (the `MultipleDifferentExactBounds` abort; the lower/upper bounds must
+// still convert to/from the fixed type), else the `FindTypesInBounds` candidates pick
+// the fixed type (the single-candidate success of the non-`ImprovedReturnAllResults`
+// algorithms). The `ImprovedReturnAllResults` arm (`IntersectionType.Create(types)`,
+// success `types.Count >= 1`) is DEFERRED with the same documented fallback (exact for 0
+// and 1 candidates). The C# `CreateNestedInstance()` recursion threads as nestingLevel
+// (bumped by one at the `FindTypesInBounds` call).
+bool Fix(CSharpConversions& conversions, TP& tp, TypeInferenceAlgorithm algorithm,
+        int nestingLevel);
+
+// The C# `public IType GetBestCommonType(IList<ResolveResult> expressions, out bool
+// success)` (TypeInference.cs lines 1001-1026, spec draft-v11 section 12.6.3.17) -- the
+// best common type of a set of expressions: a single expression short-circuits to its
+// own type (gated on `IsValidType`), else a one-entry dummy-TP inference over
+// `DummyTypeParameter.GetMethodTypeParameter(0)` -- every expression's OUTPUT type
+// lower-bounds the dummy (`MakeOutputTypeInference`), then `Fix` decides. The C#
+// `classTypeArguments` instance field is always null here (a fresh/reset instance --
+// `InferTypeArguments` nulls it in its `finally`), so the `MakeOutputTypeInference`
+// call threads `std::nullopt`. Returns `FixedTo ?? SpecialType.UnknownType`.
+ILSpy::Decompiler::TypeSystem::ITypePtr GetBestCommonType(
+    const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+    CSharpConversions& conversions,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& expressions,
+    bool& success,
+    TypeInferenceAlgorithm algorithm);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
