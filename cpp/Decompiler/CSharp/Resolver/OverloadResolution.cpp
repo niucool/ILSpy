@@ -25,7 +25,8 @@
 
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"  // CSharpConversions::Get (the lazy ctor-default resolution)
 #include "Decompiler/CSharp/Resolver/MethodGroupResolveResult.hpp"  // MethodListWithDeclaringType (AddMethodLists' buckets)
-#include "Decompiler/CSharp/Resolver/OverloadResolutionHelpers.hpp"  // Detail::AddCandidate / Detail::AddMethodLists
+#include "Decompiler/CSharp/Resolver/OverloadResolutionHelpers.hpp"  // Detail::AddCandidate / Detail::AddMethodLists / Detail::BestCandidateErrors
+#include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversions::None (the ArgumentConversions fallback entries)
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
 
@@ -92,6 +93,32 @@ void OverloadResolution::AddMethodLists(
                             explicitlyGivenTypeArguments_, allowExpandingParams_,
                             allowOptionalParameters_, allowImplicitIn_, isExtensionMethodInvocation_,
                             bestCandidate_, bestCandidateWasValidated_, bestCandidateAmbiguousWith_);
+}
+
+OverloadResolutionErrors OverloadResolution::BestCandidateErrors() {
+    // The C# property getter delegates to the lazily-memoized constraint validation; the port
+    // threads the memoization state (the `ConsiderIfNewCandidateIsBest` state-threading
+    // convention) into the `Detail::` free function. Non-const: the memoization fields are
+    // mutated through the call.
+    return Detail::BestCandidateErrors(bestCandidate_, bestCandidateWasValidated_,
+                                        bestCandidateValidationResult_, bestCandidateAmbiguousWith_);
+}
+
+std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>>
+OverloadResolution::ArgumentConversions() const {
+    // The C# `if (bestCandidate != null && bestCandidate.ArgumentConversions != null) return
+    // bestCandidate.ArgumentConversions` -- the port's vector is never null, so the C# non-null
+    // array (sized `arguments.Length` by the `CheckApplicability` step) is the non-empty vector;
+    // the empty vector is the never-built state (no best candidate, or a candidate that was
+    // never calculated). A resolution with ZERO arguments makes both branches an empty vector of
+    // the same length, so the two states are observationally identical there.
+    if (bestCandidate_ != nullptr && !bestCandidate_->ArgumentConversions().empty())
+        return bestCandidate_->ArgumentConversions();
+    // The C# `Enumerable.Repeat(Conversion.None, arguments.Length).ToList()` -- a fresh list of
+    // the `None` singleton repeated once per argument.
+    std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>> result;
+    result.assign(arguments_.size(), ILSpy::Decompiler::Semantics::Conversions::None());
+    return result;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

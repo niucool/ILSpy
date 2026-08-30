@@ -1307,4 +1307,34 @@ void AddMethodLists(
     }
 }
 
+OverloadResolutionErrors BestCandidateErrors(
+    const std::shared_ptr<OverloadResolutionCandidate>& bestCandidate,
+    bool& bestCandidateWasValidated,
+    OverloadResolutionErrors& bestCandidateValidationResult,
+    const std::shared_ptr<OverloadResolutionCandidate>& bestCandidateAmbiguousWith)
+{
+    // C# `if (bestCandidate == null) return OverloadResolutionErrors.None;` -- the early return
+    // BEFORE the memoization state is touched (both fields keep their prior values; a flag set
+    // here would wrongly skip the validation of a later, actually-added best candidate).
+    if (bestCandidate == nullptr)
+        return OverloadResolutionErrors::None;
+
+    // C# `if (!bestCandidateWasValidated) { bestCandidateValidationResult =
+    // ValidateMethodConstraints(bestCandidate); bestCandidateWasValidated = true; }` -- the lazy
+    // memoization. `ConsiderIfNewCandidateIsBest` resets the flag when a new best is promoted, so
+    // the next read re-validates the NEW best; a losing candidate (the stays-best case) leaves
+    // the flag alone, so the memo survives.
+    if (!bestCandidateWasValidated) {
+        bestCandidateValidationResult = ValidateMethodConstraints(*bestCandidate);
+        bestCandidateWasValidated = true;
+    }
+
+    // C# `OverloadResolutionErrors err = bestCandidate.Errors | bestCandidateValidationResult;`
+    OverloadResolutionErrors err = bestCandidate->Errors() | bestCandidateValidationResult;
+    // C# `if (bestCandidateAmbiguousWith != null) err |= OverloadResolutionErrors.AmbiguousMatch;`
+    if (bestCandidateAmbiguousWith != nullptr)
+        err = err | OverloadResolutionErrors::AmbiguousMatch;
+    return err;
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

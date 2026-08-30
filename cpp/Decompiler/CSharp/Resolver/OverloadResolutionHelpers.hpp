@@ -27,7 +27,8 @@
 // `ValidateMethodConstraints`), the `RunTypeInference` engine step, the `CalculateCandidate`
 // composition that wires the steps together in the C# order, and the `AddCandidate` entry that
 // calls it plus the `AddMethodLists` scan that feeds it (the derived-type-hides-base-methods
-// walk) with the `LogCandidateAddingResult` debug-log helper.
+// walk) with the `LogCandidateAddingResult` debug-log helper, and the `BestCandidateErrors`
+// output property (the lazy `ValidateMethodConstraints` memoization).
 
 #pragma once
 
@@ -597,5 +598,29 @@ void AddMethodLists(
     std::shared_ptr<OverloadResolutionCandidate>& bestCandidate,
     bool& bestCandidateWasValidated,
     std::shared_ptr<OverloadResolutionCandidate>& bestCandidateAmbiguousWith);
+
+// The C# `public OverloadResolutionErrors BestCandidateErrors` getter (OverloadResolution.cs
+// line 1015) -- "the errors that apply to the best candidate. This includes additional
+// errors that do not affect applicability (e.g. AmbiguousMatch, MethodConstraintsNotSatisfied)".
+// The lazy `ValidateMethodConstraints` memoization: when `bestCandidateWasValidated` is false
+// (the initial state, and the state `ConsiderIfNewCandidateIsBest` restores whenever a new best
+// is promoted), the constraint check runs and its result is memoized into
+// `bestCandidateValidationResult` with the flag set; a repeat read reuses the memoized result
+// without re-running the check. The returned mask is `bestCandidate.Errors |
+// bestCandidateValidationResult`, plus `AmbiguousMatch` when `bestCandidateAmbiguousWith` is
+// non-null. A null best candidate short-circuits to `None` BEFORE the memoization state is
+// touched (the C# early return leaves both fields as-is -- load-bearing: had the flag been set
+// on this path, a later read after a best IS added would skip validation with a stale result).
+//
+// The C# property getter MUTATES the two memoization fields, so the port lifts it to a
+// `Detail::` free function taking them by reference (the `ConsiderIfNewCandidateIsBest`
+// state-threading convention); the public `OverloadResolution::BestCandidateErrors()` method
+// (non-const -- it mutates the instance state through this call) delegates with the instance
+// fields threaded.
+OverloadResolutionErrors BestCandidateErrors(
+    const std::shared_ptr<OverloadResolutionCandidate>& bestCandidate,
+    bool& bestCandidateWasValidated,
+    OverloadResolutionErrors& bestCandidateValidationResult,
+    const std::shared_ptr<OverloadResolutionCandidate>& bestCandidateAmbiguousWith);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
