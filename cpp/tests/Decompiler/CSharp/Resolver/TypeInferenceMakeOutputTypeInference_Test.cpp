@@ -36,8 +36,13 @@
 //  (d) the plain-expression arm lower-bounds `e.Type` into `t`'s unfixed TP, gated on
 //      `IsValidType` (the Unknown / null-literal / NoType null-object kinds make no
 //      inference);
-//  (e) a method-group argument makes NO inference (the deferred `PerformOverloadResolution`
-//      arm) and never falls through to the plain-expression arm.
+//  (e) the method-group arm runs the group's overload resolution over the synthetic
+//      delegate-signature arguments (the parameter types with the fixed-TP substitution
+//      applied; a ref/out/in parameter unwrapped to its element and wrapped in a
+//      `ByReferenceResolveResult`) and the resolved method's return type lower-bounds
+//      the delegate return type -- an inapplicable or ambiguous resolution, a
+//      non-delegate target, or an empty group makes no inference, and a method group
+//      never falls through to the plain-expression arm.
 //
 // The stubs mirror the TypeInferenceMakeInference_Test conventions (`Def`, `MakeState`,
 // `MethodHostType`/`MakeMethod`/`ConfigureMethod`, `TestParameter`, `MakeHost`) plus the
@@ -256,6 +261,29 @@ std::shared_ptr<MethodHostType> MakeDelegate(const std::vector<ITypePtr>& paramT
     ConfigureMethod(invoke, params, std::move(returnType));
     host->SetMethods({invoke});
     return host;
+}
+
+// A delegate type whose `Invoke` takes the supplied PRE-BUILT parameters and returns the
+// supplied return type (the ref/out/in `ReferenceKind` shapes the plain `MakeDelegate`
+// cannot express).
+std::shared_ptr<MethodHostType> MakeDelegateFromParams(
+    const std::vector<std::shared_ptr<TestParameter>>& params, ITypePtr returnType) {
+    auto host = MakeHost("D");
+    const IMethod* invoke = MakeMethod("Invoke");
+    ConfigureMethod(invoke, params, std::move(returnType));
+    host->SetMethods({invoke});
+    return host;
+}
+
+// A single declaring-type bucket over the given methods (the `MakeMethod` instances are
+// kept alive in its static vector, so the bucket's raw pointers stay valid; a plain
+// class definition is the declaring type -- the derived-type hiding only fires across
+// multiple buckets).
+Res::MethodListWithDeclaringType Bucket(std::initializer_list<const IMethod*> methods) {
+    auto declaring = MakeDef(KnownTypeCode::None, TypeKind::Class);
+    std::vector<const ILSpy::Decompiler::TypeSystem::IParameterizedMember*> members(
+        methods.begin(), methods.end());
+    return Res::MethodListWithDeclaringType(declaring, members);
 }
 
 // A concrete `LambdaResolveResult` stub whose `GetInferredReturnType` RECORDS the received
@@ -552,9 +580,10 @@ TEST(TypeInferenceMakeOutputTypeInferenceTest, LambdaWithNonDelegateTargetMakesN
     EXPECT_FALSE(state[0].HasBounds());
 }
 
-// A method-group argument makes NO inference (the deferred `PerformOverloadResolution`
-// arm) and never falls through to the plain-expression arm (the C# unconditional
-// `return` inside the `mgrr` block).
+// A method-group argument over an EMPTY group (no method lists): the overload resolution
+// finds no applicable candidate, so no bound is added -- and a method group never falls
+// through to the plain-expression arm (the C# unconditional `return` inside the `mgrr`
+// block).
 TEST(TypeInferenceMakeOutputTypeInferenceTest, MethodGroupArgumentMakesNoInference)
 {
     auto t0 = std::make_shared<VisitableTypeParameter>("T");
@@ -563,5 +592,157 @@ TEST(TypeInferenceMakeOutputTypeInferenceTest, MethodGroupArgumentMakesNoInferen
     auto delegateType = MakeDelegate({t0}, t0);
     Res::MethodGroupResolveResult mgrr(nullptr, "M", {}, {});
     MakeOutputTypeInference(Compilation(), state, std::nullopt, mgrr, *delegateType);
+    EXPECT_FALSE(state[0].HasBounds());
+}
+
+// ===========================================================================
+// The method-group arm (TypeInference.cs lines 561-590, spec section 7.5.2.6's second
+// bullet): the synthetic delegate-signature arguments (the parameter types with the
+// fixed-TP substitution applied; a ref/out/in parameter unwrapped to its element) feed
+// `MethodGroupResolveResult.PerformOverloadResolution`, and the resolved method's return
+// type lower-bounds the delegate signature's return type. The group's methods are kept
+// NON-GENERIC throughout: only a generic method's type-inference `Fix` path calls the
+// CACHED `CSharpConversions::ImplicitConversion(IType, IType)`, which the lazy
+// `CSharpConversions::Get` fallback resolves to the per-compilation singleton -- caching
+// test-local types in it dangles when the test's `shared_ptr<IType>` die (the D540
+// caveat), so the shapes here stay non-generic.
+// ===========================================================================
+
+// The crux: a single applicable method `M(int)` returning `long` against the delegate
+// `T Invoke(int p)` -- the resolved method's return type (`long`) lower-bounds the
+// delegate return type's unfixed TP.
+TEST(TypeInferenceMakeOutputTypeInferenceTest, MethodGroupResolvedReturnTypeLowerBoundsTheDelegateReturnType)
+{
+    auto t0 = std::make_shared<VisitableTypeParameter>("T");
+    t0->SetIndex(0);
+    std::vector<TP> state = MakeState({t0});
+    auto intT = Def(KnownTypeCode::Int32);
+    auto longT = Def(KnownTypeCode::Int64);
+    auto delegateType = MakeDelegate({intT}, t0);
+    const IMethod* m = MakeMethod("M");
+    ConfigureMethod(m, {MakeParam(intT)}, longT);
+    Res::MethodGroupResolveResult mgrr(nullptr, "M", {Bucket({m})}, {});
+    MakeOutputTypeInference(Compilation(), state, std::nullopt, mgrr, *delegateType);
+    ASSERT_EQ(state[0].LowerBounds.size(), 1u);
+    EXPECT_EQ(state[0].LowerBounds[0].get(), longT.get());
+}
+
+// The fixed-TP substitution crux: the delegate `T Invoke(T1 p)` over a FIXED tracked
+// parameter (`T1` -> `long`) -- the synthetic argument is built from the SUBSTITUTED
+// parameter type (`long`), so the group's `M(long)` is applicable and its return type
+// (`string`) lower-bounds the unfixed `T`. Without the substitution the argument would be
+// the type parameter itself (not implicitly convertible to `long`), the resolution would
+// find no applicable candidate, and no bound would be added.
+TEST(TypeInferenceMakeOutputTypeInferenceTest, MethodGroupAppliesFixedTypeParameterSubstitutionToSyntheticArguments)
+{
+    auto t0 = std::make_shared<VisitableTypeParameter>("T0");
+    t0->SetIndex(0);
+    auto t1 = std::make_shared<VisitableTypeParameter>("T1");
+    t1->SetIndex(1);
+    std::vector<TP> state = MakeState({t0, t1});
+    auto longT = Def(KnownTypeCode::Int64);
+    auto stringT = Def(KnownTypeCode::String, TypeKind::Class);
+    state[1].FixedTo = longT;
+    auto delegateType = MakeDelegate({t1}, t0);
+    const IMethod* m = MakeMethod("M");
+    ConfigureMethod(m, {MakeParam(longT)}, stringT);
+    Res::MethodGroupResolveResult mgrr(nullptr, "M", {Bucket({m})}, {});
+    MakeOutputTypeInference(Compilation(), state, std::nullopt, mgrr, *delegateType);
+    ASSERT_EQ(state[0].LowerBounds.size(), 1u);
+    EXPECT_EQ(state[0].LowerBounds[0].get(), stringT.get());
+    // The fixed parameter takes no bound (only the delegate's return-type parameter does).
+    EXPECT_TRUE(state[1].LowerBounds.empty());
+}
+
+// The ref/out/in arm crux: the delegate `T Invoke(ref T1 p)` over a FIXED tracked
+// parameter (`T1` -> `long`) -- the substituted parameter type is the by-reference `ref
+// long`, which the arm UNWRAPS to its element and wraps in a `ByReferenceResolveResult`,
+// so the group's `M(ref long)` (not the by-value `M(long)`) is the applicable candidate and
+// ITS return type is the bound. A plain `ResolveResult` over the element would instead
+// make the by-value overload applicable (its return type would be the bound).
+TEST(TypeInferenceMakeOutputTypeInferenceTest, MethodGroupRefParameterBuildsByReferenceArgumentOverTheUnwrappedElement)
+{
+    auto t0 = std::make_shared<VisitableTypeParameter>("T0");
+    t0->SetIndex(0);
+    auto t1 = std::make_shared<VisitableTypeParameter>("T1");
+    t1->SetIndex(1);
+    std::vector<TP> state = MakeState({t0, t1});
+    auto longT = Def(KnownTypeCode::Int64);
+    auto intT = Def(KnownTypeCode::Int32);
+    auto stringT = Def(KnownTypeCode::String, TypeKind::Class);
+    state[1].FixedTo = longT;
+    // The delegate `T Invoke(ref T1 p)` (a ref parameter over the tracked T1).
+    auto refParam = MakeParam(std::make_shared<TS::ByReferenceType>(t1),
+                              ::ILSpy::Decompiler::TypeSystem::ReferenceKind::Ref);
+    auto delegateType = MakeDelegateFromParams({refParam}, t0);
+    // The group: `M(ref long)` (applicable for the by-reference argument) and `M(long)`
+    // (a passing-mode mismatch for it). Both parameter types share the ONE `long`
+    // instance `T1` is fixed to (the identity conversions are structural).
+    const IMethod* refMethod = MakeMethod("M");
+    ConfigureMethod(refMethod,
+                    {MakeParam(std::make_shared<TS::ByReferenceType>(longT),
+                               ::ILSpy::Decompiler::TypeSystem::ReferenceKind::Ref)},
+                    intT);
+    const IMethod* valueMethod = MakeMethod("M");
+    ConfigureMethod(valueMethod, {MakeParam(longT)}, stringT);
+    Res::MethodGroupResolveResult mgrr(nullptr, "M", {Bucket({refMethod, valueMethod})}, {});
+    MakeOutputTypeInference(Compilation(), state, std::nullopt, mgrr, *delegateType);
+    ASSERT_EQ(state[0].LowerBounds.size(), 1u);
+    // The ref overload's return type -- the by-reference argument routed the resolution to
+    // `M(ref long)` (a plain argument over the element would have picked `M(long)`).
+    EXPECT_EQ(state[0].LowerBounds[0].get(), intT.get());
+}
+
+// A resolution with NO applicable candidate makes no inference: the group's `M(string)`
+// is inapplicable for the synthetic `int` argument (no implicit int->string conversion).
+TEST(TypeInferenceMakeOutputTypeInferenceTest, MethodGroupWithNoApplicableCandidateMakesNoInference)
+{
+    auto t0 = std::make_shared<VisitableTypeParameter>("T");
+    t0->SetIndex(0);
+    std::vector<TP> state = MakeState({t0});
+    auto intT = Def(KnownTypeCode::Int32);
+    auto stringT = Def(KnownTypeCode::String, TypeKind::Class);
+    auto delegateType = MakeDelegate({intT}, t0);
+    const IMethod* m = MakeMethod("M");
+    ConfigureMethod(m, {MakeParam(stringT)}, intT);
+    Res::MethodGroupResolveResult mgrr(nullptr, "M", {Bucket({m})}, {});
+    MakeOutputTypeInference(Compilation(), state, std::nullopt, mgrr, *delegateType);
+    EXPECT_FALSE(state[0].HasBounds());
+}
+
+// An AMBIGUOUS resolution makes no inference: two identical-signature overloads
+// (sharing the ONE int instance, the type-cache model) tie every tiebreak, so
+// `BestCandidateAmbiguousWith` is set and the applicability+unambiguity gate fails.
+TEST(TypeInferenceMakeOutputTypeInferenceTest, MethodGroupAmbiguousResolutionMakesNoInference)
+{
+    auto t0 = std::make_shared<VisitableTypeParameter>("T");
+    t0->SetIndex(0);
+    std::vector<TP> state = MakeState({t0});
+    auto intT = Def(KnownTypeCode::Int32);
+    auto longT = Def(KnownTypeCode::Int64);
+    auto delegateType = MakeDelegate({intT}, t0);
+    const IMethod* m1 = MakeMethod("M");
+    ConfigureMethod(m1, {MakeParam(intT)}, longT);
+    const IMethod* m2 = MakeMethod("M");
+    ConfigureMethod(m2, {MakeParam(intT)}, longT);
+    Res::MethodGroupResolveResult mgrr(nullptr, "M", {Bucket({m1, m2})}, {});
+    MakeOutputTypeInference(Compilation(), state, std::nullopt, mgrr, *delegateType);
+    EXPECT_FALSE(state[0].HasBounds());
+}
+
+// A method group against a NON-delegate target: the delegate signature never resolves,
+// so the arm runs no overload resolution at all (and never falls through to the
+// plain-expression arm -- the C# unconditional `return`).
+TEST(TypeInferenceMakeOutputTypeInferenceTest, MethodGroupWithNonDelegateTargetMakesNoInference)
+{
+    auto t0 = std::make_shared<VisitableTypeParameter>("T");
+    t0->SetIndex(0);
+    std::vector<TP> state = MakeState({t0});
+    auto intT = Def(KnownTypeCode::Int32);
+    auto classType = MakeHost("C", TypeKind::Class);
+    const IMethod* m = MakeMethod("M");
+    ConfigureMethod(m, {MakeParam(intT)}, intT);
+    Res::MethodGroupResolveResult mgrr(nullptr, "M", {Bucket({m})}, {});
+    MakeOutputTypeInference(Compilation(), state, std::nullopt, mgrr, *classType);
     EXPECT_FALSE(state[0].HasBounds());
 }

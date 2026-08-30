@@ -25,6 +25,8 @@
 #include <algorithm>  // std::min (the CalculateDependencyMatrix common-min bound)
 
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"  // CSharpConversions (the cached public ImplicitConversion the Fixing region calls)
+#include "Decompiler/CSharp/Resolver/OverloadResolution.hpp"  // OverloadResolution (the method-group arm's PerformOverloadResolution result)
+#include "Decompiler/Semantics/ByReferenceResolveResult.hpp"  // ByReferenceResolveResult (the method-group arm's ref/out/in argument)
 #include "Decompiler/Semantics/ResolveResult.hpp"  // ResolveResult (the RTTI base)
 #include "Decompiler/TypeSystem/IParameter.hpp"  // IParameter (the delegate-invoke parameter types)
 #include "Decompiler/TypeSystem/IMethod.hpp"  // IMethod (Parameters() / ReturnType())
@@ -58,6 +60,7 @@ using ILSpy::Decompiler::TypeSystem::IsNullable;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
 using ILSpy::Decompiler::TypeSystem::NullabilityAnnotatedTypeParameter;
 using ILSpy::Decompiler::TypeSystem::PointerType;
+using ILSpy::Decompiler::TypeSystem::ReferenceKind;
 using ILSpy::Decompiler::TypeSystem::TupleType;
 using ILSpy::Decompiler::TypeSystem::TupleUnderlyingTypeOrSelf;
 using ILSpy::Decompiler::TypeSystem::TypeKind;
@@ -72,6 +75,8 @@ using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
 using ILSpy::Decompiler::TypeSystem::ITypePtr;
 using ILSpy::Decompiler::TypeSystem::ParameterizedType;
 using ILSpy::Decompiler::TypeSystem::TypeVisitor;
+using ILSpy::Decompiler::Semantics::ByReferenceResolveResult;
+using ILSpy::Decompiler::Semantics::ResolveResult;
 
 // The C# `static IMethod GetDelegateOrExpressionTreeSignature(IType t)` (TypeInference.cs,
 // the Input Types / Output Types region) -- the `Expression<T>` unwrap followed by the
@@ -1148,22 +1153,115 @@ void MakeOutputTypeInference(const ICompilation& compilation, std::vector<TP>& t
     }
     // C# `MethodGroupResolveResult mgrr = e as MethodGroupResolveResult; if (mgrr != null) {
     //     IMethod m = GetDelegateOrExpressionTreeSignature(t); if (m != null) { ... }
-    //     return; }` -- the method-group arm: the synthetic delegate-signature arguments
-    // (the parameter types with the fixed-TP substitution applied, a ref/in parameter
-    // unwrapped to its element type) feed `mgrr.PerformOverloadResolution`, and the
-    // resolved method's return type lower-bounds the delegate return type. DEFERRED:
-    // `MethodGroupResolveResult.PerformOverloadResolution` -- the `OverloadResolution`
-    // engine (`AddMethodLists` -> `AddCandidate` -> `CalculateCandidate` ->
-    // `RunTypeInference`) it composes is now fully ported, so the arm is UNBLOCKED and lands
-    // in a follow-up iteration. Until it lands, a method-group
-    // argument makes NO output-type inference -- faithful to the C# whenever the overload
-    // resolution finds no unambiguous applicable candidate (the
-    // `or.FoundApplicableCandidate && or.BestCandidateAmbiguousWith == null` guard
-    // failing). The unconditional `return` (inside the C# `mgrr` block, taken whether or
-    // not the delegate signature resolves) keeps a method group from falling through to
-    // the plain-expression arm below; its own type (`NoType`) would fail the `IsValidType`
+    //     return; }` -- the method-group arm (spec section 7.5.2.6's second bullet): the
+    // synthetic delegate-signature arguments (one per parameter, the parameter type with
+    // the fixed-TP substitution APPLIED; a ref/out/in parameter unwrapped to its element
+    // type and wrapped in a `ByReferenceResolveResult`) feed
+    // `mgrr.PerformOverloadResolution`, and the resolved method's return type lower-bounds
+    // the delegate signature's return type. The unconditional `return` (inside the C#
+    // `mgrr` block, taken whether or not the delegate signature resolves or the
+    // resolution succeeds) keeps a method group from falling through to the
+    // plain-expression arm below; its own type (`NoType`) would fail the `IsValidType`
     // gate anyway.
-    if (dynamic_cast<const MethodGroupResolveResult*>(&e) != nullptr) {
+    if (const MethodGroupResolveResult* mgrr = dynamic_cast<const MethodGroupResolveResult*>(&e)) {
+        const IMethod* m = GetDelegateOrExpressionTreeSignature(t);
+        if (m != nullptr) {
+            // C# `ResolveResult[] args = new ResolveResult[m.Parameters.Count];` -- one
+            // synthetic argument per delegate-invoke parameter. A degenerate null entry
+            // would NRE in the C# and is skipped (the `MakeExplicitParameterTypeInference`
+            // convention).
+            std::vector<std::shared_ptr<ResolveResult>> args;
+            args.reserve(m->Parameters().size());
+            // C# `TypeParameterSubstitution substitution = GetSubstitutionForFixedTPs();`
+            // -- the same fixed-TP substitution the lambda arm above threads into the
+            // nested lambda (a FIXED tracked parameter substitutes to its `FixedTo`; an
+            // unfixed one to `SpecialType.UnknownType`). Unlike the lambda arm, the
+            // substitution is applied UNCONDITIONALLY (before the per-argument arms), so
+            // the SYNTHETIC ARGUMENT types carry the already-fixed decisions.
+            TypeParameterSubstitution substitution =
+                GetSubstitutionForFixedTPs(typeParameters, classTypeArguments);
+            for (const IParameter* param : m->Parameters()) {
+                if (param == nullptr)
+                    continue;
+                // C# `IType parameterType = param.Type.AcceptVisitor(substitution);` --
+                // the substituted type is an OWNING `ITypePtr` (the visitor rebuilds the
+                // changed shapes), so the plain arm below needs no `shared_from_this` (the
+                // contrast with the D535 `MethodGroupConversionArguments`, whose
+                // un-substituted types come from the const `IParameter::Type()` accessor
+                // and need `shared_from_this` + `const_pointer_cast`). The `const_cast`
+                // feeds the non-const `AcceptVisitor` (D406; the D515/D517 convention).
+                ITypePtr parameterType =
+                    const_cast<IType&>(param->Type()).AcceptVisitor(substitution);
+                // C# `if ((param.ReferenceKind != ReferenceKind.None) && parameterType.Kind
+                // == TypeKind.ByReference)` -- the ref/out/in + ByReference-type arm. The
+                // `Kind == ByReference` guard guarantees the substituted type IS a
+                // `ByReferenceType` (the only `IType` subclass with that kind), so the
+                // `static_cast` is safe (mirrors the C# `((ByReferenceType)parameterType)`
+                // cast); `Element()` returns the shared handle the `ByReferenceType` owns,
+                // so the rebind copies the owning handle.
+                if (param->ReferenceKind() != ReferenceKind::None
+                    && parameterType->Kind() == TypeKind::ByReference) {
+                    parameterType =
+                        static_cast<const ByReferenceType*>(parameterType.get())->Element();
+                    // C# `args[i] = new ByReferenceResolveResult(parameterType,
+                    // param.ReferenceKind);` -- the internal ctor builds the base
+                    // `ResolveResult` from a fresh `ByReferenceType(elementType)`.
+                    args.push_back(std::make_shared<ByReferenceResolveResult>(
+                        parameterType, param->ReferenceKind()));
+                } else {
+                    // C# `args[i] = new ResolveResult(parameterType);` -- the plain arm
+                    // (NOTE: no `dynamic`->`object` erasure here, unlike the D535 method-
+                    // group-conversion arguments -- the C# output-type-inference arm has
+                    // no such branch).
+                    args.push_back(std::make_shared<ResolveResult>(parameterType));
+                }
+            }
+            // C# `var or = mgrr.PerformOverloadResolution(compilation, args,
+            // allowExpandingParams: false, allowOptionalParameters: false,
+            // allowImplicitIn: false);` -- the method group's overload resolution over the
+            // synthetic arguments, with the three flags PINNED false (an output-type
+            // inference does not expand params collections, does not fill optional
+            // parameters, and does not implicitly convert arguments to `in` parameters --
+            // the same pinned trio as the method-group conversion, D581). The remaining
+            // flags keep their C# defaults (`argumentNames` null, `allowExtensionMethods`
+            // true, `checkForOverflow` false, `conversions` null -- the ctor lazily
+            // resolves a null via the per-compilation `CSharpConversions::Get`).
+            auto resolution = mgrr->PerformOverloadResolution(
+                compilation, args,
+                /*argumentNames*/ std::nullopt,
+                /*allowExtensionMethods*/ true,
+                /*allowExpandingParams*/ false,
+                /*allowOptionalParameters*/ false,
+                /*allowImplicitIn*/ false,
+                /*checkForOverflow*/ false,
+                /*conversions*/ nullptr);
+            // C# `if (or.FoundApplicableCandidate && or.BestCandidateAmbiguousWith == null)`
+            // -- the applicability + unambiguity gate: an ambiguous or inapplicable
+            // resolution makes no inference.
+            if (resolution->FoundApplicableCandidate()
+                && resolution->BestCandidateAmbiguousWith() == nullptr) {
+                // C# `IType returnType =
+                // or.GetBestCandidateWithSubstitutedTypeArguments().ReturnType;` -- the
+                // resolved member's return type (re-specialized with the inferred type
+                // arguments for a generic method, the member as-is otherwise). The null
+                // guard is the safe faithful fallback (the applicability gate guarantees a
+                // best candidate exists, so a null member cannot occur for a real method
+                // group; the D516 convention).
+                const ILSpy::Decompiler::TypeSystem::IParameterizedMember* member =
+                    resolution->GetBestCandidateWithSubstitutedTypeArguments();
+                if (member != nullptr) {
+                    // C# `MakeLowerBoundInference(returnType, m.ReturnType);` -- the
+                    // resolved method's return type lower-bounds the delegate signature's
+                    // return type. Both `const IType&` accessors feed the non-const
+                    // `MakeLowerBoundInference` via `const_cast` (the D515/D517
+                    // convention).
+                    MakeLowerBoundInference(
+                        compilation, typeParameters,
+                        const_cast<IType&>(member->ReturnType()),
+                        const_cast<IType&>(m->ReturnType()));
+                }
+            }
+        }
         return;
     }
     // C# `if (IsValidType(e.Type)) MakeLowerBoundInference(e.Type, t);` -- the

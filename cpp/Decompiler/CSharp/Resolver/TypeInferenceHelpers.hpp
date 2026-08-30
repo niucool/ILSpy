@@ -35,10 +35,10 @@
 // (`typeParameters`, and the `compilation` the span arms read `TypeSystemOptions` through)
 // threads as parameters (the `CalculateDependencyMatrix` lift demonstrates the convention)
 // -- the MakeOutputTypeInference region (C# 4.0 spec section 7.5.2.6: the fourth
-// worker over the LAMBDA argument shape plus the plain-expression arm, with the
+// worker over the LAMBDA, METHOD-GROUP, and plain-expression argument shapes, with the
 // `GetSubstitutionForFixedTPs` fixed-TP substitution and the `IsValidType` gate; its
-// METHOD-GROUP arm stays deferred until a follow-up iteration -- `PerformOverloadResolution`
-// is now ported, so the arm is unblocked) -- and the Fixing /
+// method-group arm composes `MethodGroupResolveResult.PerformOverloadResolution` over
+// the synthetic substituted-parameter-type arguments) -- and the Fixing /
 // FindTypeInBounds / GetBestCommonType regions (spec draft-v11 sections 12.6.3.13 +
 // 12.6.3.17: the `Fix` fixing decision, the `FindTypesInBounds` spec candidate-types
 // algorithm, the `FindTypeInBounds` public entry, and the `GetBestCommonType`
@@ -48,11 +48,9 @@
 // InferTypeArguments region (the `PhaseOne`/`PhaseTwo` private phases, the
 // `InferTypeArguments` main entry, and the `InferTypeArgumentsFromBounds` bounds entry,
 // composing every landed region into the engine's public output). The ported surface is
-// now the whole `TypeInference` class modulo the deferred arms (the
-// `MakeOutputTypeInference` method-group arm and the Improved/`IntersectionType`
-// refinements), so the remaining work is the `OverloadResolution` engine itself
-// (`RunTypeInference`/`CalculateCandidate`/`AddCandidate`/`AddMethodLists`), which
-// consumes `InferTypeArguments`.
+// now the whole `TypeInference` class modulo the deferred Improved/`IntersectionType`
+// refinements; the `OverloadResolution` engine it feeds (`RunTypeInference`/
+// `CalculateCandidate`/`AddCandidate`/`AddMethodLists`) is ported too.
 //
 // RETURN CONVENTION: the C# `IType[]` returns fresh arrays of GC-owned references; the port
 // returns `std::vector<const IType*>` non-owning raw-pointer snapshots (the `GetMethods` /
@@ -325,11 +323,12 @@ bool DependsOn(const std::vector<std::vector<bool>>& dependencyMatrix, const TP&
 // spec draft-v11 section 12.6.3.9). These are the workers BOTH public entries consume:
 // `InferTypeArguments` (via `PhaseOne`/`PhaseTwo`) and `InferTypeArgumentsFromBounds` (which
 // feeds its lower/upper bounds straight into the two bound workers). `MakeOutputTypeInference`
-// (lines 522-611) -- the fourth entry, over the LAMBDA/METHOD-GROUP argument shapes -- is
-// the NEXT region below: its lambda arm needs the now-landed `GetSubstitutionForFixedTPs`
-// (the `TypeParameterSubstitution` over the fixed TPs plus `classTypeArguments`); only its
-// method-group arm needs `MethodGroupResolveResult.PerformOverloadResolution` (the
-// `OverloadResolution` engine long pole) and stays deferred there.
+// (lines 522-611) -- the fourth entry, over the LAMBDA/METHOD-GROUP/plain-expression
+// argument shapes -- is the NEXT region below: its lambda and method-group arms need the
+// now-landed `GetSubstitutionForFixedTPs` (the `TypeParameterSubstitution` over the fixed
+// TPs plus `classTypeArguments`), and its method-group arm composes the now-landed
+// `MethodGroupResolveResult.PerformOverloadResolution` over the synthetic
+// substituted-parameter-type arguments.
 //
 // The C# workers are instance methods reading the `typeParameters` field and the
 // `compilation` field; the lift threads both as parameters (the established convention --
@@ -431,10 +430,14 @@ ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution GetSubstitutionForFixed
 // The C# `void MakeOutputTypeInference(ResolveResult e, IType t)` (TypeInference.cs lines
 // 522-600) -- the fourth bound-inference entry (the plain-expression counterpart of the
 // three workers above): a lower-bound inference from the argument's output type to the
-// parameter type. `t` is NON-CONST: the plain arm feeds it to `MakeLowerBoundInference` as
+// parameter type, over the lambda shape (the inferred return type via
+// `GetSubstitutionForFixedTPs`), the method-group shape (`PerformOverloadResolution` over
+// the synthetic substituted delegate-signature arguments; the resolved method's return
+// type), and the plain-expression shape (the argument's own type, gated on `IsValidType`).
+// `t` is NON-CONST: the plain arm feeds it to `MakeLowerBoundInference` as
 // the V side (the non-const `ChangeNullability`, D406); `e` is const (every member the
-// live arms read -- `IsImplicitlyTyped` / `Parameters` / `GetInferredReturnType` / `Type`
-// -- is const).
+// arms read -- `IsImplicitlyTyped` / `Parameters` / `GetInferredReturnType` / `Type` -- is
+// const; the method-group arm's `PerformOverloadResolution` is a const member).
 void MakeOutputTypeInference(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
                              std::vector<TP>& typeParameters,
                              const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& classTypeArguments,
