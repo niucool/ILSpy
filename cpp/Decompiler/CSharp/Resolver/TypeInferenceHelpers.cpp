@@ -22,6 +22,8 @@
 
 #include "Decompiler/CSharp/Resolver/TypeInferenceHelpers.hpp"
 
+#include <algorithm>  // std::min (the CalculateDependencyMatrix common-min bound)
+
 #include "Decompiler/Semantics/ResolveResult.hpp"  // ResolveResult (the RTTI base)
 #include "Decompiler/TypeSystem/IParameter.hpp"  // IParameter (the delegate-invoke parameter types)
 #include "Decompiler/TypeSystem/IMethod.hpp"  // IMethod (Parameters() / ReturnType())
@@ -248,6 +250,108 @@ bool OutputTypeContainsUnfixed(const std::vector<TP>& typeParameters,
 {
     // C# `return AnyTypeContainsUnfixedParameter(OutputTypes(argument, parameterType));`
     return AnyTypeContainsUnfixedParameter(typeParameters, OutputTypes(argument, parameterType));
+}
+
+// ===========================================================================
+// The DependsOn region (TypeInference.cs lines 468-521).
+// ===========================================================================
+
+// The C# `void CalculateDependencyMatrix()` (TypeInference.cs lines 471-510) -- the
+// occurrence accumulation over the arguments followed by the Warshall transitive closure.
+std::vector<std::vector<bool>> CalculateDependencyMatrix(
+    const std::vector<TP>& typeParameters,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+    const std::vector<ITypePtr>& parameterTypes)
+{
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    // C# `int n = typeParameters.Length; dependencyMatrix = new bool[n, n];` -- the n x n
+    // false-initialized matrix (a row vector per row, the C# 2-D `bool[,]` array).
+    const std::size_t n = typeParameters.size();
+    std::vector<std::vector<bool>> dependencyMatrix(n, std::vector<bool>(n, false));
+    // C# `for (int k = 0; k < arguments.Length; k++)` -- the `InferTypeArguments` ctor sized
+    // the instance `arguments`/`parameterTypes` arrays to the common min of the caller's
+    // lists, so `arguments.Length` IS that min here; the lift threads the caller's vectors
+    // and takes the min itself (the faithful bound). A null entry was rejected by the C# ctor
+    // (`ArgumentNullException`); the port skips one (the D516 degenerate-shape convention).
+    const std::size_t argumentCount = std::min(arguments.size(), parameterTypes.size());
+    for (std::size_t k = 0; k < argumentCount; k++)
+    {
+        // C# `OccursInVisitor input = new OccursInVisitor(this);
+        //      OccursInVisitor output = new OccursInVisitor(this);` -- a FRESH pair of
+        // occurrence recorders per argument (the C# ctor reads the instance
+        // `typeParameters`; the lift threads the `TP` vector, the established convention).
+        OccursInVisitor input(typeParameters);
+        OccursInVisitor output(typeParameters);
+        // C# `foreach (var type in InputTypes(arguments[k], parameterTypes[k]))
+        //          type.AcceptVisitor(input);` -- the non-owning `const IType*` snapshots
+        // take the `const_cast` for the non-const `AcceptVisitor` (D406; the D517 convention;
+        // a null entry would NRE in the C# and is skipped, the D516 convention).
+        if (arguments[k] && parameterTypes[k]) {
+            for (const IType* type : InputTypes(*arguments[k], *parameterTypes[k])) {
+                if (type != nullptr)
+                    const_cast<IType*>(type)->AcceptVisitor(input);
+            }
+            // C# `foreach (var type in OutputTypes(arguments[k], parameterTypes[k]))
+            //          type.AcceptVisitor(output);`
+            for (const IType* type : OutputTypes(*arguments[k], *parameterTypes[k])) {
+                if (type != nullptr)
+                    const_cast<IType*>(type)->AcceptVisitor(output);
+            }
+        }
+        // C# `for (int i = 0; i < n; i++) { for (int j = 0; j < n; j++) {
+        //          dependencyMatrix[i, j] |= input.Occurs[j] && output.Occurs[i]; } }` --
+        // "`Xi` depends on `Xj`": the argument's INPUT types contain `Xj` and its OUTPUT
+        // types contain `Xi` (the spec's directly-depends-on relation; only the implicitly-
+        // typed-lambda / method-group delegate signatures contribute input/output types, so
+        // a plain expression argument never produces a dependence however much its formal
+        // parameter type mentions the type parameters).
+        for (std::size_t i = 0; i < n; i++)
+        {
+            for (std::size_t j = 0; j < n; j++)
+            {
+                if (input.Occurs()[j] && output.Occurs()[i])
+                    dependencyMatrix[i][j] = true;
+            }
+        }
+    }
+    // C# "calculate transitive closure using Warshall's algorithm:" -- dependence composes
+    // (`Xi` depends on `Xj` and `Xj` depends on `Xk` implies `Xi` depends on `Xk`); the
+    // in-place update inside the loop is what makes it the closure (later reads see the
+    // earlier writes).
+    for (std::size_t i = 0; i < n; i++)
+    {
+        for (std::size_t j = 0; j < n; j++)
+        {
+            if (dependencyMatrix[i][j])
+            {
+                for (std::size_t k = 0; k < n; k++)
+                {
+                    if (dependencyMatrix[j][k])
+                        dependencyMatrix[i][k] = true;
+                }
+            }
+        }
+    }
+    return dependencyMatrix;
+}
+
+// The C# `bool DependsOn(TP x, TP y)` (TypeInference.cs lines 512-518) -- the matrix lookup
+// ("x depends on y"). The C# lazy `if (dependencyMatrix == null) CalculateDependencyMatrix();`
+// memoization becomes the compute-once-then-thread convention (see the header).
+bool DependsOn(const std::vector<std::vector<bool>>& dependencyMatrix, const TP& x, const TP& y)
+{
+    // C# `return dependencyMatrix[x.TypeParameter.Index, y.TypeParameter.Index];` -- the
+    // bounds guard is the defensive addition (the C# would throw
+    // `IndexOutOfRangeException` on an out-of-range index; `InferTypeArguments` guarantees
+    // `typeParameters[i].Index == i`, so the real indexes are always in bounds -- the D516
+    // convention).
+    const int xi = x.TypeParameter->Index();
+    const int yi = y.TypeParameter->Index();
+    if (xi < 0 || yi < 0
+        || static_cast<std::size_t>(xi) >= dependencyMatrix.size()
+        || static_cast<std::size_t>(yi) >= dependencyMatrix[static_cast<std::size_t>(xi)].size())
+        return false;
+    return dependencyMatrix[static_cast<std::size_t>(xi)][static_cast<std::size_t>(yi)];
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

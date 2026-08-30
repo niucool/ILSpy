@@ -31,9 +31,9 @@
 // `CSharpConversionsHelpers` / `OverloadResolutionHelpers` lift-to-free-functions precedent).
 // The remaining regions (`InferTypeArguments`, the Inference Phases, `MakeOutputTypeInference`/
 // `MakeExactInference`/`MakeLowerBoundInference`/`MakeUpperBoundInference`, `Fixing`,
-// `GetBestCommonType`, `FindTypeInBounds`, `CalculateDependencyMatrix`) need the remaining
-// `TypeInference` instance state (`arguments`/`parameterTypes`/`dependencyMatrix` -- the
-// `typeParameters` state now lives in the `TP` vector the callers thread) and land with the
+// `GetBestCommonType`, `FindTypeInBounds`) need the remaining
+// `TypeInference` instance state (`arguments`/`parameterTypes` -- now threadable as
+// parameters, as the `CalculateDependencyMatrix` lift below demonstrates) and land with the
 // class skeleton in later increments.
 //
 // RETURN CONVENTION: the C# `IType[]` returns fresh arrays of GC-owned references; the port
@@ -52,6 +52,7 @@
 #include "Decompiler/TypeSystem/TypeVisitor.hpp"  // TypeVisitor (the OccursInVisitor base class)
 
 #include <cstddef>  // std::size_t (the visitor's index arithmetic)
+#include <memory>  // std::shared_ptr (the `CalculateDependencyMatrix` arguments parameter)
 #include <vector>
 
 // `ResolveResult` is included transitively by the two ResolveResult subclass headers above
@@ -214,5 +215,47 @@ bool OutputTypeContainsUnfixed(
     const std::vector<TP>& typeParameters,
     const ILSpy::Decompiler::Semantics::ResolveResult& argument,
     const ILSpy::Decompiler::TypeSystem::IType& parameterType);
+
+// ===========================================================================
+// The DependsOn region (TypeInference.cs lines 468-521) -- the dependence relation of
+// C# spec draft-v11 section 12.6.3.6 "Dependence": `Xi` depends on `Xj` if for some
+// argument `Ek`, `Xj` occurs in an INPUT type of `Ek` and `Xi` occurs in an OUTPUT type of
+// `Ek` (`dependencyMatrix[i, j] |= input.Occurs[j] && output.Occurs[i]`), closed transitively
+// with Warshall's algorithm. Both inference phases consult the relation (the first
+// `PhaseTwo` fix-round fixes the type parameters that depend on nothing unfixed).
+// ===========================================================================
+
+// The C# `void CalculateDependencyMatrix()` (TypeInference.cs lines 471-510) -- the
+// per-argument occurrence accumulation followed by the Warshall transitive closure. The
+// C# `bool[,] dependencyMatrix` instance field becomes the RETURNED `n x n` matrix (a row
+// vector per row -- the C# 2-D `bool[,]` array; row index = the DEPENDING type parameter's
+// `Index`, column index = the depended-on one), because the C# `DependsOn` lazily computes
+// the matrix on the first call and memoizes it in the instance field for the rest of the
+// inference, while the lift computes it ONCE at the call site and threads it into
+// `DependsOn` (the instance-state-threading convention, the `ConsiderIfNewCandidateIsBest`
+// precedent) -- behavior-identical for the inference phases, which only ever read the
+// completed matrix.
+//
+// The C# reads the `arguments`/`parameterTypes` INSTANCE fields, which the
+// `InferTypeArguments` constructor sized to the COMMON MINIMUM of the caller's lists
+// (`this.parameterTypes = new IType[Math.Min(arguments.Count, parameterTypes.Count)]`) with
+// a null entry rejected outright (`ArgumentNullException`); so the lift threads them as
+// parameters and iterates to the common min (the faithful bound -- the C#
+// `arguments.Length == parameterTypes.Length` always holds inside the class), and a null
+// entry (never passed by a real caller) is SKIPPED (the D516 degenerate-shape convention).
+std::vector<std::vector<bool>> CalculateDependencyMatrix(
+    const std::vector<TP>& typeParameters,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+    const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& parameterTypes);
+
+// The C# `bool DependsOn(TP x, TP y)` (TypeInference.cs lines 512-518) -- the matrix lookup:
+// "x depends on y" (`dependencyMatrix[x.TypeParameter.Index, y.TypeParameter.Index]`; the
+// C# lazy `if (dependencyMatrix == null) CalculateDependencyMatrix();` memoization becomes
+// the compute-once-then-thread convention above). The bounds guard is the defensive
+// addition: the C# indexes unconditionally and `InferTypeArguments` guarantees
+// `typeParameters[i].Index == i`, so the real indexes are always in bounds; a degenerate
+// out-of-range index would throw `IndexOutOfRangeException` in the C# and returns false
+// here (the D516 convention).
+bool DependsOn(const std::vector<std::vector<bool>>& dependencyMatrix, const TP& x, const TP& y);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
