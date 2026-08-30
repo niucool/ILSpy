@@ -34,6 +34,7 @@
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"  // KnownTypeCode (SpanOfT / ReadOnlySpanOfT)
 #include "Decompiler/TypeSystem/NullableType.hpp"  // IsNullable / GetUnderlyingType (the nullable-covariance arm)
 #include "Decompiler/TypeSystem/TupleType.hpp"  // TupleUnderlyingTypeOrSelf (the tuple-unwrap rebind)
+#include "Decompiler/TypeSystem/TypeParameterSubstitution.hpp"  // TypeParameterSubstitution (the GetSubstitutionForFixedTPs return)
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // GetDelegateInvokeMethod (the D533 free function); IsKnownType / IsArrayInterfaceType / GetAllBaseTypes / WithoutNullability (the MakeInference region)
 #include "Decompiler/TypeSystem/VarianceModifier.hpp"  // VarianceModifier (the parameterized variance walk)
 
@@ -55,7 +56,10 @@ using ILSpy::Decompiler::TypeSystem::NullabilityAnnotatedTypeParameter;
 using ILSpy::Decompiler::TypeSystem::PointerType;
 using ILSpy::Decompiler::TypeSystem::TupleType;
 using ILSpy::Decompiler::TypeSystem::TupleUnderlyingTypeOrSelf;
+using ILSpy::Decompiler::TypeSystem::TypeKind;
+using ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution;
 using ILSpy::Decompiler::TypeSystem::TypeSystemOptions;
+using ILSpy::Decompiler::TypeSystem::UnknownType;
 using ILSpy::Decompiler::TypeSystem::VarianceModifier;
 using ILSpy::Decompiler::TypeSystem::WithoutNullability;
 using ILSpy::Decompiler::TypeSystem::IParameter;
@@ -1035,6 +1039,138 @@ void MakeExplicitParameterTypeInference(const ICompilation& compilation,
         MakeExactInference(compilation, typeParameters, const_cast<IType&>(eParams[i]->Type()),
                            const_cast<IType&>(mParams[i]->Type()));
     }
+}
+
+// The C# `static bool IsValidType(IType type)` (TypeInference.cs lines 314-317).
+bool IsValidType(const IType& type)
+{
+    // C# `return type.Kind != TypeKind.Unknown && type.Kind != TypeKind.Null &&
+    //         type.Kind != TypeKind.None;` -- the three null-object kinds an expression's
+    // type must NOT be for the type to participate in the inference (the error
+    // `UnknownType`, the `null` literal, and `NoType`).
+    return type.Kind() != TypeKind::Unknown && type.Kind() != TypeKind::Null
+        && type.Kind() != TypeKind::None;
+}
+
+// The C# `TypeParameterSubstitution GetSubstitutionForFixedTPs()` (TypeInference.cs lines
+// 602-611).
+TypeParameterSubstitution GetSubstitutionForFixedTPs(
+    const std::vector<TP>& typeParameters,
+    const std::optional<std::vector<ITypePtr>>& classTypeArguments)
+{
+    // C# `IType[] fixedTypes = new IType[typeParameters.Length];
+    //     for (int i = 0; i < fixedTypes.Length; i++)
+    //         fixedTypes[i] = typeParameters[i].FixedTo ?? SpecialType.UnknownType;` -- the
+    // fixed types form the METHOD type-argument list of the substitution (indexed by the
+    // type parameter's `Index`; the `InferTypeArguments` contract `typeParameters[i].Index
+    // == i` makes position i the parameter's own entry). An unfixed parameter substitutes
+    // to `SpecialType.UnknownType` (the C# `??` fallback), so a nested lambda's parameter
+    // types carry the OUTER inference's fixed decisions and mark the still-unresolved
+    // positions.
+    std::vector<ITypePtr> fixedTypes;
+    fixedTypes.reserve(typeParameters.size());
+    for (const TP& tp : typeParameters) {
+        fixedTypes.push_back(tp.FixedTo ? tp.FixedTo : UnknownType());
+    }
+    // C# `return new TypeParameterSubstitution(classTypeArguments, fixedTypes);` -- the C#
+    // heap allocation realized as a by-value return (the `Compose` convention). The
+    // `fixedTypes` list is always PRESENT (it substitutes every method type parameter of
+    // the inference); an ABSENT `classTypeArguments` (the C# `null`) keeps the class type
+    // parameters unmodified.
+    return TypeParameterSubstitution(classTypeArguments, std::move(fixedTypes));
+}
+
+// The C# `void MakeOutputTypeInference(ResolveResult e, IType t)` (TypeInference.cs lines
+// 522-600, C# 4.0 spec section 7.5.2.6 "Output type inferences").
+void MakeOutputTypeInference(const ICompilation& compilation, std::vector<TP>& typeParameters,
+                             const std::optional<std::vector<ITypePtr>>& classTypeArguments,
+                             const ILSpy::Decompiler::Semantics::ResolveResult& e, IType& t)
+{
+    // C# `LambdaResolveResult lrr = e as LambdaResolveResult; if (lrr != null) {
+    //     IMethod m = GetDelegateOrExpressionTreeSignature(t); if (m != null) { ... return; }
+    // }` -- the lambda arm: a lower-bound inference from the lambda's INFERRED RETURN TYPE
+    // to the delegate signature's return type. When the target is not a delegate (or an
+    // expression tree over one), the lambda falls THROUGH to the plain-expression arm
+    // below (its own type is `NoType`, which fails the `IsValidType` gate).
+    const LambdaResolveResult* lrr = dynamic_cast<const LambdaResolveResult*>(&e);
+    if (lrr != nullptr) {
+        const IMethod* m = GetDelegateOrExpressionTreeSignature(t);
+        if (m != nullptr) {
+            ITypePtr inferredReturnType;
+            if (lrr->IsImplicitlyTyped()) {
+                // C# `if (m.Parameters.Count != lrr.Parameters.Count) return;` -- cannot
+                // infer due to mismatched parameter lists.
+                if (m->Parameters().size() != lrr->Parameters().size())
+                    return;
+                // C# `TypeParameterSubstitution substitution = GetSubstitutionForFixedTPs();
+                //     IType[] inferredParameterTypes = new IType[m.Parameters.Count];
+                //     for (...) inferredParameterTypes[i] =
+                //         m.Parameters[i].Type.AcceptVisitor(substitution);` -- the delegate
+                // signature's parameter types with the fixed-TP substitution applied, fed
+                // to the lambda's return-type inference. The substitution is a non-const
+                // `TypeVisitor` (`AcceptVisitor` takes a non-const reference, D406), so the
+                // const `IParameter::Type()` accessor `const_cast`s (the D515/D517
+                // convention -- the underlying type-system objects are mutable; the
+                // accessor's const is the contract). A degenerate null parameter entry
+                // would NRE in the C# and is skipped (the
+                // `MakeExplicitParameterTypeInference` convention).
+                TypeParameterSubstitution substitution =
+                    GetSubstitutionForFixedTPs(typeParameters, classTypeArguments);
+                std::vector<ITypePtr> inferredParameterTypes;
+                inferredParameterTypes.reserve(m->Parameters().size());
+                for (const IParameter* param : m->Parameters()) {
+                    if (param == nullptr)
+                        continue;
+                    inferredParameterTypes.push_back(
+                        const_cast<IType&>(param->Type()).AcceptVisitor(substitution));
+                }
+                inferredReturnType = lrr->GetInferredReturnType(inferredParameterTypes);
+            } else {
+                // C# `inferredReturnType = lrr.GetInferredReturnType(null);` -- the null
+                // array ports to the empty vector (an explicitly-typed lambda already
+                // knows its parameter types, so none are threaded).
+                inferredReturnType = lrr->GetInferredReturnType({});
+            }
+            // C# `MakeLowerBoundInference(inferredReturnType, m.ReturnType); return;` --
+            // the inferred return type lower-bounds the delegate return type. The null
+            // guard is the safe faithful fallback (a real `GetInferredReturnType` never
+            // returns null; the C# would NRE, which never occurs in practice).
+            if (inferredReturnType) {
+                MakeLowerBoundInference(compilation, typeParameters, *inferredReturnType,
+                                        const_cast<IType&>(m->ReturnType()));
+            }
+            return;
+        }
+    }
+    // C# `MethodGroupResolveResult mgrr = e as MethodGroupResolveResult; if (mgrr != null) {
+    //     IMethod m = GetDelegateOrExpressionTreeSignature(t); if (m != null) { ... }
+    //     return; }` -- the method-group arm: the synthetic delegate-signature arguments
+    // (the parameter types with the fixed-TP substitution applied, a ref/in parameter
+    // unwrapped to its element type) feed `mgrr.PerformOverloadResolution`, and the
+    // resolved method's return type lower-bounds the delegate return type. DEFERRED:
+    // `MethodGroupResolveResult.PerformOverloadResolution` needs the `OverloadResolution`
+    // engine (`AddMethodLists` -> `AddCandidate` -> `CalculateCandidate` ->
+    // `RunTypeInference` -- the very engine this TypeInference port feeds; the C# engine
+    // is mutually recursive with this arm). Until the engine lands, a method-group
+    // argument makes NO output-type inference -- faithful to the C# whenever the overload
+    // resolution finds no unambiguous applicable candidate (the
+    // `or.FoundApplicableCandidate && or.BestCandidateAmbiguousWith == null` guard
+    // failing). The unconditional `return` (inside the C# `mgrr` block, taken whether or
+    // not the delegate signature resolves) keeps a method group from falling through to
+    // the plain-expression arm below; its own type (`NoType`) would fail the `IsValidType`
+    // gate anyway.
+    if (dynamic_cast<const MethodGroupResolveResult*>(&e) != nullptr) {
+        return;
+    }
+    // C# `if (IsValidType(e.Type)) MakeLowerBoundInference(e.Type, t);` -- the
+    // plain-expression arm: a lower-bound inference from the expression's own type to the
+    // parameter type. `ResolveResult::Type()` returns `const IType&` while
+    // `MakeLowerBoundInference` takes non-const `IType&` (the non-const
+    // `ChangeNullability`, D406), so the `const_cast` is the established safe pattern (the
+    // D515/D517 convention).
+    if (IsValidType(e.Type()))
+        MakeLowerBoundInference(compilation, typeParameters,
+                                const_cast<IType&>(e.Type()), t);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

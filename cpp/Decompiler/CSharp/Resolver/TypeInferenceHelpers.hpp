@@ -21,23 +21,25 @@
 // engine (ICSharpCode.Decompiler/CSharp/Resolver/TypeInference.cs, the ~1188-line long-pole
 // blocker for the `OverloadResolution` `RunTypeInference` engine step and therefore for
 // `CalculateCandidate`/`AddCandidate`/`AddMethodLists` and the deferred `MethodGroupConversion`
-// arm). FOUR regions are landed, all lifted to `Detail::` free functions ahead of the
+// arm). FIVE regions are landed, all lifted to `Detail::` free functions ahead of the
 // `TypeInference` class skeleton (the `CSharpConversionsHelpers` / `OverloadResolutionHelpers`
 // lift-to-free-functions precedent): the Input/Output Types region (C# spec draft-v11
 // sections 12.6.3.4 + 12.6.3.5), the ContainsUnfixed region (the `TP` per-type-parameter
 // state holder, the `OccursInVisitor`, `AnyTypeContainsUnfixedParameter`, and the
 // `InputTypesContainsUnfixed`/`OutputTypeContainsUnfixed` wrappers), the DependsOn region
-// (section 12.6.3.6: the dependency matrix and its Warshall closure), and the MakeInference
+// (section 12.6.3.6: the dependency matrix and its Warshall closure), the MakeInference
 // bound-inference core (the `GetTPForType` lookup, the three mutually recursive spec
 // workers `MakeExactInference`/`MakeLowerBoundInference`/`MakeUpperBoundInference`, and
 // the `MakeExplicitParameterTypeInference` phase-one entry) -- the instance state
 // (`typeParameters`, and the `compilation` the span arms read `TypeSystemOptions` through)
-// threads as parameters (the `CalculateDependencyMatrix` lift demonstrates the convention).
-// The remaining regions (`InferTypeArguments`, the Inference Phases,
-// `MakeOutputTypeInference` -- the fourth worker, over the LAMBDA/METHOD-GROUP argument
-// shapes, blocked on `GetSubstitutionForFixedTPs` and `PerformOverloadResolution` -- plus
-// `Fixing`, `GetBestCommonType`, `FindTypeInBounds`) need further instance state
-// (`arguments`/`parameterTypes`/`classTypeArguments`) and land in later increments.
+// threads as parameters (the `CalculateDependencyMatrix` lift demonstrates the convention)
+// -- and the MakeOutputTypeInference region (C# 4.0 spec section 7.5.2.6: the fourth
+// worker over the LAMBDA argument shape plus the plain-expression arm, with the
+// `GetSubstitutionForFixedTPs` fixed-TP substitution and the `IsValidType` gate; its
+// METHOD-GROUP arm stays deferred on `PerformOverloadResolution`). The remaining regions
+// (`InferTypeArguments`, the Inference Phases, `Fixing`, `GetBestCommonType`,
+// `FindTypeInBounds`) need further instance state (`arguments`/`parameterTypes`) and land
+// in later increments.
 //
 // RETURN CONVENTION: the C# `IType[]` returns fresh arrays of GC-owned references; the port
 // returns `std::vector<const IType*>` non-owning raw-pointer snapshots (the `GetMethods` /
@@ -56,6 +58,7 @@
 
 #include <cstddef>  // std::size_t (the visitor's index arithmetic)
 #include <memory>  // std::shared_ptr (the `CalculateDependencyMatrix` arguments parameter)
+#include <optional>  // std::optional (the `GetSubstitutionForFixedTPs` classTypeArguments)
 #include <vector>
 
 // `ResolveResult` is included transitively by the two ResolveResult subclass headers above
@@ -81,6 +84,11 @@ namespace ILSpy::Decompiler::TypeSystem { class ICompilation; }
 // -- kept here so the header is self-contained). The call sites hold complete type
 // parameters (the compilation owns the real ones, the tests own the stubs).
 namespace ILSpy::Decompiler::TypeSystem { class ITypeParameter; }
+
+// `TypeParameterSubstitution` is forward-declared (the by-value return of the
+// `GetSubstitutionForFixedTPs` declaration below needs only an incomplete type; the .cpp
+// and the call sites include the full `TypeParameterSubstitution.hpp`).
+namespace ILSpy::Decompiler::TypeSystem { class TypeParameterSubstitution; }
 
 namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 
@@ -278,11 +286,11 @@ bool DependsOn(const std::vector<std::vector<bool>>& dependencyMatrix, const TP&
 // spec draft-v11 section 12.6.3.9). These are the workers BOTH public entries consume:
 // `InferTypeArguments` (via `PhaseOne`/`PhaseTwo`) and `InferTypeArgumentsFromBounds` (which
 // feeds its lower/upper bounds straight into the two bound workers). `MakeOutputTypeInference`
-// (lines 521-611) -- the fourth entry, over the LAMBDA/METHOD-GROUP argument shapes -- stays
-// deferred: its lambda arm needs `GetSubstitutionForFixedTPs` (the `TypeParameterSubstitution`
-// over the fixed TPs plus `classTypeArguments`) and its method-group arm needs
-// `MethodGroupResolveResult.PerformOverloadResolution` (the `OverloadResolution` engine long
-// pole); it lands with the phase wiring.
+// (lines 522-611) -- the fourth entry, over the LAMBDA/METHOD-GROUP argument shapes -- is
+// the NEXT region below: its lambda arm needs the now-landed `GetSubstitutionForFixedTPs`
+// (the `TypeParameterSubstitution` over the fixed TPs plus `classTypeArguments`); only its
+// method-group arm needs `MethodGroupResolveResult.PerformOverloadResolution` (the
+// `OverloadResolution` engine long pole) and stays deferred there.
 //
 // The C# workers are instance methods reading the `typeParameters` field and the
 // `compilation` field; the lift threads both as parameters (the established convention --
@@ -349,5 +357,48 @@ void MakeUpperBoundInference(const ILSpy::Decompiler::TypeSystem::ICompilation& 
                              std::vector<TP>& typeParameters,
                              ILSpy::Decompiler::TypeSystem::IType& u,
                              ILSpy::Decompiler::TypeSystem::IType& v);
+
+// ===========================================================================
+// The MakeOutputTypeInference region (TypeInference.cs lines 314-317 + 522-611, C# 4.0
+// spec section 7.5.2.6 "Output type inferences") -- a lower-bound inference from an
+// argument's OUTPUT type to the parameter type: a LAMBDA contributes its inferred return
+// type (the implicitly-typed arm threads the fixed-TP-substituted delegate parameter
+// types into `LambdaResolveResult.GetInferredReturnType`; the explicitly-typed arm
+// passes none), a METHOD GROUP its resolved overload's return type (DEFERRED -- the
+// `PerformOverloadResolution` engine long pole), and a plain expression its own type
+// (gated on `IsValidType`). The C# reads the `typeParameters` / `classTypeArguments`
+// instance fields; the lift threads both as parameters (the established convention).
+// ===========================================================================
+
+// The C# `static bool IsValidType(IType type)` (TypeInference.cs lines 314-317) -- a type
+// is valid for inference when it is none of the three null-object kinds (the error
+// `Unknown`, the `null` literal, and `NoType`). `PhaseOne`, `MakeOutputTypeInference`, and
+// `GetBestCommonType` all gate an expression's type on it before feeding it to the bound
+// workers.
+bool IsValidType(const ILSpy::Decompiler::TypeSystem::IType& type);
+
+// The C# `TypeParameterSubstitution GetSubstitutionForFixedTPs()` (TypeInference.cs lines
+// 602-611) -- the substitution threading the inference's FIXED decisions into the
+// delegate-signature parameter types a nested lambda's `GetInferredReturnType` receives:
+// every METHOD type parameter of the inference substitutes to its `FixedTo` (an UNFIXED
+// parameter substitutes to `SpecialType.UnknownType`), while the CLASS type arguments
+// thread from the `InferTypeArguments` caller. The C# heap allocation ports to a by-value
+// return (the `TypeParameterSubstitution.Compose` convention).
+ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution GetSubstitutionForFixedTPs(
+    const std::vector<TP>& typeParameters,
+    const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& classTypeArguments);
+
+// The C# `void MakeOutputTypeInference(ResolveResult e, IType t)` (TypeInference.cs lines
+// 522-600) -- the fourth bound-inference entry (the plain-expression counterpart of the
+// three workers above): a lower-bound inference from the argument's output type to the
+// parameter type. `t` is NON-CONST: the plain arm feeds it to `MakeLowerBoundInference` as
+// the V side (the non-const `ChangeNullability`, D406); `e` is const (every member the
+// live arms read -- `IsImplicitlyTyped` / `Parameters` / `GetInferredReturnType` / `Type`
+// -- is const).
+void MakeOutputTypeInference(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                             std::vector<TP>& typeParameters,
+                             const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& classTypeArguments,
+                             const ILSpy::Decompiler::Semantics::ResolveResult& e,
+                             ILSpy::Decompiler::TypeSystem::IType& t);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
