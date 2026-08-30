@@ -349,4 +349,95 @@ ValidateMethodConstraints(const OverloadResolutionCandidate& candidate);
 const ILSpy::Decompiler::TypeSystem::IParameterizedMember* GetBestCandidateWithSubstitutedTypeArguments(
     const std::shared_ptr<OverloadResolutionCandidate>& bestCandidate);
 
+// The C# `sealed class ConstraintValidatingSubstitution : TypeParameterSubstitution` (Overload-
+// Resolution.cs lines 503-521, nested in the `RunTypeInference` region) -- the substitution
+// `RunTypeInference` applies to the formal parameter types after type inference, which additionally
+// VALIDATES the constructed generic types: whenever `VisitParameterizedType` produces a changed
+// parameterized type (some type argument was substituted), every type argument is checked against
+// the corresponding declared type parameter's constraints (C# 4.0 spec section 4.4.4 "Satisfying
+// constraints") through the already-ported internal static `ValidateConstraints` above, with the
+// CONSTRUCTED type's own `GetSubstitution()` applied to constraints that reference type parameters;
+// the first violation flips `ConstraintsValid` to false (`RunTypeInference` then adds
+// `ConstructedTypeDoesNotSatisfyConstraint` to the candidate).
+//
+// The C# `base.VisitParameterizedType(type)` resolves to the `TypeVisitor` default
+// (`type.VisitChildren(this)`, visiting the generic type and the type arguments through THIS
+// substitution) because `TypeParameterSubstitution` does not override `VisitParameterizedType` --
+// neither in the C# nor in the port; the port's qualified `TypeVisitor::VisitParameterizedType`
+// call mirrors that resolution exactly. `ConstraintsValid` is a public mutable FIELD in the C#
+// (`public bool ConstraintsValid = true;`), so the port keeps it a public data member (the `TP`
+// struct precedent) rather than an accessor pair. SAFE FALLBACKS for the degenerate shapes the C#
+// would throw on (`typeArguments[index]` indexes without a bounds check; a constructed stub could
+// carry fewer type arguments than declared type parameters, or a null entry): the loop is bounded
+// to the constructed type's actual type-argument count and a null type argument counts as a
+// VIOLATION (constraints cannot be satisfied by a missing argument), the D516 convention for
+// shapes unreachable through the real type system.
+class ConstraintValidatingSubstitution : public ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution {
+public:
+    // The C# `ConstraintValidatingSubstitution(IReadOnlyList<IType> classTypeArguments,
+    // IReadOnlyList<IType> methodTypeArguments, OverloadResolution overloadResolution)` -- the
+    // C# reads the conversions out of the `OverloadResolution` instance; the port threads them
+    // as a parameter (the instance-state-threading convention).
+    ConstraintValidatingSubstitution(
+        std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>> classTypeArguments,
+        std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>> methodTypeArguments,
+        CSharpConversions& conversions)
+        : TypeParameterSubstitution(std::move(classTypeArguments), std::move(methodTypeArguments)),
+          conversions_(conversions) {}
+
+    // The C# `public bool ConstraintsValid = true;` -- the public mutable field the outer
+    // `RunTypeInference` reads after the visitor ran.
+    bool ConstraintsValid = true;
+
+    // The C# `public override IType VisitParameterizedType(ParameterizedType type)` --
+    // out-of-line (the body calls `ValidateConstraints`, whose full `CSharpConversions&`
+    // parameter needs the .cpp's include; the header keeps only the forward declaration).
+    ILSpy::Decompiler::TypeSystem::ITypePtr VisitParameterizedType(
+        ILSpy::Decompiler::TypeSystem::ParameterizedType& type) override;
+
+private:
+    CSharpConversions& conversions_;
+};
+
+// The C# `void RunTypeInference(Candidate candidate)` (OverloadResolution.cs lines 438-486, the
+// "RunTypeInference" region) -- the type-inference engine step of `CalculateCandidate`: resolves
+// the candidate's method type arguments (either the explicitly given type arguments, or the
+// `TypeInference` engine over the argument/parameter-type pairs built from
+// `ArgumentToParameterMap`), then substitutes them into the formal parameter types through the
+// `ConstraintValidatingSubstitution` (which additionally flags `ConstructedTypeDoesNotSatisfy`
+// `Constraint` when a constructed generic type violates its type-parameter constraints).
+//
+// The decision tree:
+//   * a NON-GENERIC candidate (`candidate.TypeParameters == null` in the C#, the empty vector in
+//     the port) with explicitly given type arguments adds `WrongNumberOfTypeArguments` (the method
+//     does not expect type arguments, but was given some); either way it re-grabs the parameter
+//     types from the SPECIALIZED member (`ResolveParameterTypes(candidate, true)`) and returns.
+//   * a generic candidate: the member's declaring type contributes the class type arguments when
+//     it is a `ParameterizedType` (the `C<int>` in `c.M<U>(...)`); explicit type arguments of the
+//     matching count become the inferred types as-is, a mismatched count adds
+//     `WrongNumberOfTypeArguments` and truncates/pads the list to the type-parameter count (the
+//     pad entries are `UnknownType`); with NO explicit type arguments, the ported `Detail::
+//     InferTypeArguments` engine runs over the projected parameter types (`ArgumentToParameterMap`
+//     entry -> the mapped `ParameterTypes` entry, `UnknownType` for an unmapped argument -- the C#
+//     `SelectReadOnlyArray` projection), adding `TypeInferenceFailed` when it reports failure.
+//   * finally the merged substitution (class + inferred method type arguments) is applied to every
+//     formal parameter type, and a `ConstraintsValid == false` adds
+//     `ConstructedTypeDoesNotSatisfyConstraint`.
+//
+// The C# is a private instance method reading `compilation`/`conversions`/`arguments`/
+// `explicitlyGivenTypeArguments`; the port lifts it to a `Detail::` free function taking those as
+// parameters (the D536 `CheckApplicabilityPassingModeAndConversions` state-threading convention),
+// individually unit-testable ahead of the `CalculateCandidate`/`AddCandidate` composition steps
+// that call it. `candidate` is non-const (the inference + substitution MUTATE the candidate's
+// `InferredTypes`/`ParameterTypes`/`Errors`); `conversions` is a non-const reference (the
+// `TypeInference` engine's `Fix`/`FindTypesInBounds` and the `ValidateConstraints` constraint
+// check call the non-const public conversion entries). SAFE FALLBACK: a never-filled `Parameter
+// Types` entry (null -- the C# would NRE on `AcceptVisitor`) is skipped, the D516 convention for
+// the degenerate pre-`ResolveParameterTypes` shape unreachable through the real engine flow.
+void RunTypeInference(OverloadResolutionCandidate& candidate,
+                      const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                      CSharpConversions& conversions,
+                      const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+                      const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& explicitlyGivenTypeArguments);
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

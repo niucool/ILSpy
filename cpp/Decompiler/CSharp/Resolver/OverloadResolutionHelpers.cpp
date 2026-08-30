@@ -25,6 +25,7 @@
 #include "Decompiler/CSharp/Resolver/CSharpConversionsHelpers.hpp"  // Detail::IdentityConversion (the BetterParamsCollectionType span arms)
 #include "Decompiler/CSharp/Resolver/ILiftedOperator.hpp"  // ILiftedOperator (the BetterFunctionMember non-lifted-operator tiebreak)
 #include "Decompiler/CSharp/Resolver/OverloadResolutionErrors.hpp"  // TooManyPositionalArguments / NoParameterFoundForNamedArgument
+#include "Decompiler/CSharp/Resolver/TypeInferenceHelpers.hpp"  // InferTypeArguments + TypeInferenceAlgorithm (RunTypeInference)
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"  // dynamic_cast<ByReferenceResolveResult>
 #include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversions::None() (the unmapped-argument conversion)
 #include "Decompiler/Semantics/OutVarResolveResult.hpp"  // dynamic_cast<OutVarResolveResult>
@@ -900,6 +901,141 @@ const ILSpy::Decompiler::TypeSystem::IParameterizedMember* GetBestCandidateWithS
     }
     // C# `else { return bestCandidate.Member; }` (also the safe-fallback arm above).
     return member;
+}
+
+ILSpy::Decompiler::TypeSystem::ITypePtr
+ConstraintValidatingSubstitution::VisitParameterizedType(
+    ILSpy::Decompiler::TypeSystem::ParameterizedType& type) {
+    using namespace ILSpy::Decompiler::TypeSystem;
+    // C# `IType newType = base.VisitParameterizedType(type);` -- the base chain resolves to the
+    // `TypeVisitor` default (`type.VisitChildren(this)`), visiting the generic type and the type
+    // arguments through THIS substitution (`TypeParameterSubstitution` does not override the
+    // method; the qualified `TypeVisitor::` call mirrors the C# `base.` resolution).
+    ITypePtr newType = TypeVisitor::VisitParameterizedType(type);
+    // C# `if (newType != type && ConstraintsValid)` -- the C# reference comparison.
+    if (newType.get() != &type && ConstraintsValid) {
+        // Something was changed, so we need to validate the constraints.
+        const auto* newParameterizedType = dynamic_cast<const ParameterizedType*>(newType.get());
+        if (newParameterizedType != nullptr) {
+            // C# 4.0 spec section 4.4.4 "Satisfying constraints".
+            const auto& typeParameters = newParameterizedType->TypeParameters();
+            // C# `var substitution = newParameterizedType.GetSubstitution();` -- the constructed
+            // type's own substitution (its class type arguments; applied to constraints that
+            // themselves reference type parameters).
+            TypeParameterSubstitution substitution = newParameterizedType->GetSubstitution();
+            // SAFE FALLBACK: the C# `newParameterizedType.GetTypeArgument(i)` indexes the type
+            // arguments without a bounds check -- a degenerate constructed stub could carry fewer
+            // type arguments than declared type parameters (or a null entry), which the C# would
+            // throw on; the loop is bounded to the actual argument count and a null entry counts
+            // as a violation (the D516 convention).
+            const std::size_t argumentCount = newParameterizedType->TypeArguments().size();
+            for (std::size_t i = 0; i < typeParameters.size() && i < argumentCount; i++) {
+                if (typeParameters[i] == nullptr) {
+                    ConstraintsValid = false;
+                    break;
+                }
+                ITypePtr typeArgument = newParameterizedType->GetTypeArgument(static_cast<int>(i));
+                if (!typeArgument) {
+                    ConstraintsValid = false;
+                    break;
+                }
+                if (!ValidateConstraints(*typeParameters[i], *typeArgument, &substitution,
+                                         conversions_)) {
+                    ConstraintsValid = false;
+                    break;
+                }
+            }
+        }
+    }
+    return newType;
+}
+
+void RunTypeInference(OverloadResolutionCandidate& candidate,
+                      const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                      CSharpConversions& conversions,
+                      const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+                      const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& explicitlyGivenTypeArguments) {
+    using namespace ILSpy::Decompiler::TypeSystem;
+    // C# `if (candidate.TypeParameters == null)` -- the C# null marker for a non-generic member;
+    // the port's `TypeParameters()` vector is EMPTY for a non-generic member (the candidate ctor
+    // only fills it for a method definition with type parameters).
+    if (candidate.TypeParameters().empty()) {
+        if (explicitlyGivenTypeArguments.has_value()) {
+            // Method does not expect type arguments, but was given some.
+            candidate.AddError(OverloadResolutionErrors::WrongNumberOfTypeArguments);
+        }
+        // Grab new parameter types (from the specialized non-generic method or indexer):
+        ResolveParameterTypes(candidate, true);
+        return;
+    }
+    // C# `ParameterizedType parameterizedDeclaringType = candidate.Member.DeclaringType as
+    // ParameterizedType;` -- the member's declaring type contributes the class type arguments when
+    // it is a parameterized type (the `C<int>` in `c.M<U>(...)`).
+    ITypePtr declaringType = candidate.Member()->DeclaringType();
+    const auto* parameterizedDeclaringType = dynamic_cast<const ParameterizedType*>(declaringType.get());
+    std::optional<std::vector<ITypePtr>> classTypeArguments;
+    if (parameterizedDeclaringType != nullptr) {
+        classTypeArguments = parameterizedDeclaringType->TypeArguments();
+    }
+    // The method is generic:
+    if (explicitlyGivenTypeArguments.has_value()) {
+        if (explicitlyGivenTypeArguments->size() == candidate.TypeParameters().size()) {
+            // C# `candidate.InferredTypes = explicitlyGivenTypeArguments;` -- the array reference
+            // assignment; the port copies the handles.
+            candidate.InferredTypes() = *explicitlyGivenTypeArguments;
+        } else {
+            candidate.AddError(OverloadResolutionErrors::WrongNumberOfTypeArguments);
+            // Wrong number of type arguments given, so truncate the list or pad with UnknownType.
+            candidate.InferredTypes().assign(candidate.TypeParameters().size(), ITypePtr());
+            for (std::size_t i = 0; i < candidate.InferredTypes().size(); i++) {
+                if (i < explicitlyGivenTypeArguments->size())
+                    candidate.InferredTypes()[i] = (*explicitlyGivenTypeArguments)[i];
+                else
+                    candidate.InferredTypes()[i] = UnknownType();
+            }
+        }
+    } else {
+        // C# `TypeInference ti = new TypeInference(compilation, conversions);` -- the ported
+        // `Detail::InferTypeArguments` free function (the class lift). The algorithm is the C#
+        // `TypeInference` field initializer default (`TypeInferenceAlgorithm.CSharp4`); the
+        // OverloadResolution call site passes no algorithm.
+        //
+        // C# `IType[] parameterTypes = candidate.ArgumentToParameterMap.SelectReadOnlyArray(
+        // parameterIndex => parameterIndex >= 0 ? candidate.ParameterTypes[parameterIndex] :
+        // SpecialType.UnknownType);` -- the projection maps each argument to the parameter type it
+        // was mapped to (`UnknownType` for an unmapped argument).
+        std::vector<ITypePtr> parameterTypes;
+        parameterTypes.reserve(candidate.ArgumentToParameterMap().size());
+        for (int parameterIndex : candidate.ArgumentToParameterMap()) {
+            if (parameterIndex >= 0)
+                parameterTypes.push_back(
+                    candidate.ParameterTypes()[static_cast<std::size_t>(parameterIndex)]);
+            else
+                parameterTypes.push_back(UnknownType());
+        }
+        bool success = false;
+        candidate.InferredTypes() = InferTypeArguments(
+            compilation, conversions, candidate.TypeParameters(), arguments, parameterTypes,
+            success, classTypeArguments, TypeInferenceAlgorithm::CSharp4);
+        if (!success)
+            candidate.AddError(OverloadResolutionErrors::TypeInferenceFailed);
+    }
+    // Now substitute in the formal parameters:
+    // C# `var substitution = new ConstraintValidatingSubstitution(classTypeArguments,
+    // candidate.InferredTypes, this);` -- the C# reads the conversions from the instance; the port
+    // threads them.
+    ConstraintValidatingSubstitution substitution(classTypeArguments, candidate.InferredTypes(),
+                                                  conversions);
+    auto& parameterTypes = candidate.ParameterTypes();
+    for (std::size_t i = 0; i < parameterTypes.size(); i++) {
+        // SAFE FALLBACK: a never-filled entry (null -- the C# would NRE on `AcceptVisitor`); the
+        // real engine flow always fills the types first (`ResolveParameterTypes`).
+        if (!parameterTypes[i])
+            continue;
+        parameterTypes[i] = parameterTypes[i]->AcceptVisitor(substitution);
+    }
+    if (!substitution.ConstraintsValid)
+        candidate.AddError(OverloadResolutionErrors::ConstructedTypeDoesNotSatisfyConstraint);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail
