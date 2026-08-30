@@ -25,10 +25,13 @@
 
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"  // CSharpConversions (Get -- the anonymous-function arm threads the per-compilation controller to LambdaResolveResult::IsValid)
 #include "Decompiler/CSharp/Resolver/LambdaResolveResult.hpp"  // LambdaResolveResult (the anonymous-function arm RTTI target) + LambdaConversion (the IsValid success result)
+#include "Decompiler/CSharp/Resolver/MethodGroupResolveResult.hpp"  // MethodGroupResolveResult (the method-group arm RTTI target + PerformOverloadResolution)
+#include "Decompiler/CSharp/Resolver/OverloadResolution.hpp"  // OverloadResolution (the returned resolution's FoundApplicableCandidate/IsAmbiguous/IsExtensionMethodInvocation/GetBestCandidateWithSubstitutedTypeArguments)
 #include "Decompiler/Semantics/ConversionFactories.hpp"  // Conversions (the nullable-conversion singletons / EnumerationConversion factory)
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"  // ByReferenceResolveResult (the method-group args ref/out/in arm)
 #include "Decompiler/Semantics/InterpolatedStringResolveResult.hpp"  // InterpolatedStringResolveResult (the interpolated-string arm RTTI check)
 #include "Decompiler/Semantics/ResolveResult.hpp"  // ResolveResult (IsCompileTimeConstant / Type / ConstantValue -- the constant-expression conversion)
+#include "Decompiler/Semantics/ThisResolveResult.hpp"  // ThisResolveResult (the method-group isVirtual target-result property pattern)
 #include "Decompiler/Semantics/ThrowResolveResult.hpp"  // ThrowResolveResult (the throw-expression arm RTTI check)
 #include "Decompiler/Semantics/TupleResolveResult.hpp"  // TupleResolveResult (the tuple-conversion ResolveResult overload RTTI target + Elements)
 #include "Decompiler/TypeSystem/TupleType.hpp"  // GetTupleElementTypes (D539 -- the tuple-conversion element flattening)
@@ -61,11 +64,13 @@ namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 using ILSpy::Decompiler::CSharp::Resolver::CSharpConversions;
 using ILSpy::Decompiler::CSharp::Resolver::LambdaConversion;
 using ILSpy::Decompiler::CSharp::Resolver::LambdaResolveResult;
+using ILSpy::Decompiler::CSharp::Resolver::MethodGroupResolveResult;
 using ILSpy::Decompiler::Semantics::ByReferenceResolveResult;
 using ILSpy::Decompiler::Semantics::Conversion;
 using ILSpy::Decompiler::Semantics::Conversions;
 using ILSpy::Decompiler::Semantics::InterpolatedStringResolveResult;
 using ILSpy::Decompiler::Semantics::ResolveResult;
+using ILSpy::Decompiler::Semantics::ThisResolveResult;
 using ILSpy::Decompiler::Semantics::ThrowResolveResult;
 using ILSpy::Decompiler::Semantics::TupleResolveResult;
 using ILSpy::Decompiler::TypeSystem::ArrayType;
@@ -1704,8 +1709,8 @@ AnonymousFunctionConversion(CSharpConversions& conversions, const LambdaResolveR
 // line 1362, the local `args` construction inside `MethodGroupConversion`). See the header doc for
 // the three branches (the ref/out/in `ByReferenceResolveResult`, the `dynamic`->`object` plain
 // `ResolveResult`, the plain `ResolveResult(parameterType)`). The `args` are the synthetic
-// arguments fed to `MethodGroupResolveResult.PerformOverloadResolution` (now ported); this
-// helper is a tested-but-not-yet-wired foundation ahead of the `MethodGroupConversion` body.
+// arguments fed to `MethodGroupResolveResult.PerformOverloadResolution`; the `Detail::MethodGroupConversion`
+// helper directly below calls this one with the delegate's resolved Invoke method.
 std::vector<std::shared_ptr<ResolveResult>>
 MethodGroupConversionArguments(const ICompilation& compilation, const IMethod& invoke)
 {
@@ -1751,6 +1756,93 @@ MethodGroupConversionArguments(const ICompilation& compilation, const IMethod& i
 		}
 	}
 	return args;
+}
+
+// The C# `Conversion MethodGroupConversion(ResolveResult resolveResult, IType toType)`
+// (CSharpConversions.cs line 1363, C# 9.0 spec section 10.8 "Method group conversions"). See the
+// header doc for the full description. The dispatch owns the RTTI (the D534 reorganization); this
+// body takes the verified method group.
+std::shared_ptr<Conversion>
+MethodGroupConversion(const ICompilation& compilation, const CSharpConversions* conversions,
+                      const MethodGroupResolveResult& rr, const IType& toType)
+{
+	// C# `IMethod invoke = toType.GetDelegateInvokeMethod(); if (invoke == null) return
+	// Conversion.None;` -- the delegate's `Invoke` method (`GetDelegateInvokeMethod` D533; the
+	// `Kind == Delegate` guard + the `m.Name == "Invoke"` filter). A non-delegate target resolves
+	// no invoke method -> `None`.
+	const IMethod* invoke = GetDelegateInvokeMethod(toType);
+	if (invoke == nullptr)
+		return Conversions::None();
+
+	// C# `ResolveResult[] args = new ResolveResult[invoke.Parameters.Count]; for (int i = 0;
+	// i < args.Length; i++) { ... }` -- the synthetic delegate-invoke arguments. The C# inline
+	// local construction is the already-ported `MethodGroupConversionArguments` helper (D535,
+	// extracted ahead of this body); the port calls it (the extracted-helper re-wiring).
+	auto args = MethodGroupConversionArguments(compilation, *invoke);
+
+	// C# `var or = rr.PerformOverloadResolution(compilation, args, allowExpandingParams: false,
+	// allowOptionalParameters: false, allowImplicitIn: false, conversions: this);` -- the method
+	// group's overload resolution over the synthetic arguments, with the three flags pinned false
+	// (a delegate conversion does not expand params collections, does not fill optional parameters,
+	// and does not implicitly convert arguments to `in` parameters). The remaining flags keep their
+	// C# defaults (`argumentNames` null, `allowExtensionMethods` true, `checkForOverflow` false).
+	// The C# `conversions: this` ports to the nullable pointer threaded from the dispatch (the
+	// per-compilation `CSharpConversions::Get` singleton there; the `OverloadResolution` ctor lazily
+	// resolves a null via `Get` itself).
+	auto or = rr.PerformOverloadResolution(
+		compilation, args,
+		/*argumentNames*/ std::nullopt,
+		/*allowExtensionMethods*/ true,
+		/*allowExpandingParams*/ false,
+		/*allowOptionalParameters*/ false,
+		/*allowImplicitIn*/ false,
+		/*checkForOverflow*/ false,
+		conversions);
+
+	// C# `if (or.FoundApplicableCandidate) { ... } else { return Conversion.None; }` -- the
+	// applicability gate: a resolution with no applicable candidate yields no conversion.
+	if (!or->FoundApplicableCandidate())
+		return Conversions::None();
+
+	// C# `IMethod method = (IMethod)or.GetBestCandidateWithSubstitutedTypeArguments();` -- the chosen
+	// method re-specialized with the inferred type arguments (a non-generic method returns the
+	// member as-is, D565). The C# hard cast ports to a `dynamic_cast`: a non-IMethod best candidate
+	// is impossible for a real method group (the method lists hold methods), so a null result is
+	// the degenerate-stub shape whose documented safe fallback is `None` (the D516 convention).
+	const IMethod* method =
+		dynamic_cast<const IMethod*>(or->GetBestCandidateWithSubstitutedTypeArguments());
+	if (method == nullptr)
+		return Conversions::None();
+
+	// C# `bool isVirtual = method.IsOverridable && !(rr.TargetResult is ThisResolveResult {
+	// CausesNonVirtualInvocation: true });` -- the virtual-lookup flag. The C# property pattern
+	// ports to the `dynamic_cast` + the plain bool getter: a `base.M()`-style target (a
+	// `ThisResolveResult` with `CausesNonVirtualInvocation`) forces the non-virtual lookup even for
+	// an overridable method.
+	const ThisResolveResult* thisRR = dynamic_cast<const ThisResolveResult*>(rr.TargetResult());
+	bool isVirtual = method->IsOverridable()
+	    && !(thisRR != nullptr && thisRR->CausesNonVirtualInvocation());
+
+	// C# `bool isValid = !or.IsAmbiguous && IsDelegateCompatible(method, invoke,
+	// or.IsExtensionMethodInvocation);` -- the validity conjunction: an ambiguous resolution is
+	// reported as the INVALID conversion carrying the chosen method, and so is a resolution whose
+	// chosen method is not delegate-compatible (the 3-arg private overload D531; the
+	// extension-method flag skips the chosen method's first `this` parameter).
+	bool isValid = !or->IsAmbiguous()
+	    && IsDelegateCompatible(compilation, *method, *invoke, or->IsExtensionMethodInvocation());
+
+	// C# `bool delegateCapturesFirstArgument = or.IsExtensionMethodInvocation || !method.IsStatic;`
+	// -- the delegate-capture flag: an extension-method invocation captures the receiver as the
+	// delegate's first argument, and so does an instance method.
+	bool delegateCapturesFirstArgument = or->IsExtensionMethodInvocation() || !method->IsStatic();
+
+	// C# `if (isValid) return Conversion.MethodGroupConversion(method, isVirtual,
+	// delegateCapturesFirstArgument); else return Conversion.InvalidMethodGroupConversion(method,
+	// isVirtual, delegateCapturesFirstArgument);` -- the two `MethodGroupConv` factories (the
+	// `isValid` twin pair; both carry the chosen method).
+	if (isValid)
+		return Conversions::MethodGroupConversion(method, isVirtual, delegateCapturesFirstArgument);
+	return Conversions::InvalidMethodGroupConversion(method, isVirtual, delegateCapturesFirstArgument);
 }
 
 // The per-element conversion the two `TupleConversion` overloads feed each element pair to. The C#
@@ -1874,9 +1966,9 @@ ImplicitConversion(const ICompilation& compilation, const ResolveResult& resolve
 	// (CSharpConversions.cs line 101) -- the ResolveResult-based dispatch core the public
 	// `ImplicitConversion(ResolveResult, IType)` (line 143) and `ExplicitConversion(ResolveResult,
 	// IType)` (line 281) entry points build on. The dispatch checks the already-ported helpers in
-	// spec order; the still-deferred arms (`MethodGroupConversion` / `TupleConversion`) yield
-	// `Conversions::None()` until their machinery lands, so a non-matching `ResolveResult` falls
-	// through exactly as the C# does when those arms return `Conversion.None`.
+	// spec order; a non-matching `ResolveResult` (or a matching arm that yields `None`, e.g. a
+	// method group against a non-delegate target) falls through to the later arms exactly as the
+	// C# does when those helpers return `Conversion.None`.
 	std::shared_ptr<Conversion> c;
 	// C# `if (resolveResult.IsCompileTimeConstant) { c = ImplicitEnumerationConversion(...);
 	// if (c.IsValid) return c; if (ImplicitConstantExpressionConversion(...)) return ...; }` -- the
@@ -1924,12 +2016,20 @@ ImplicitConversion(const ICompilation& compilation, const ResolveResult& resolve
 			return c;
 	}
 	// C# `c = MethodGroupConversion(resolveResult, toType); if (c != Conversion.None) return c;`
-	// -- DEFERRED: the method-group conversion needs `MethodGroupResolveResult.PerformOverloadResolution`
-	// (now ported) plus `IsDelegateCompatible` (ported as the 3-arg helper and the public entry).
-	// The body itself lands in a follow-up iteration; a non-method-group `ResolveResult` falls through.
-	// Yields `None` until then.
-	// c = MethodGroupConversion(resolveResult, toType);
-	// if (c.get() != Conversions::None().get()) return c;
+	// -- the method-group -> delegate-type conversion (C# 9.0 spec section 10.8). The dispatch
+	// owns the RTTI (the `dynamic_cast` to `MethodGroupResolveResult`, the D528 interpolated-string /
+	// throw-arm precedent); the `Detail::MethodGroupConversion` helper owns the body (the D534
+	// `AnonymousFunctionConversion` reorganization of a private method called once). The C# `this`
+	// (the `CSharpConversions` the conversion is computed on) ports to
+	// `CSharpConversions::Get(compilation)` -- the per-compilation cached singleton (the real
+	// `CSharpResolver` path obtains `CSharpConversions` via `Get`, so the arm's `Get` returns the
+	// SAME instance; the D534 anonymous-function-arm convention).
+	if (auto* methodGroupRR = dynamic_cast<const MethodGroupResolveResult*>(&resolveResult)) {
+		c = MethodGroupConversion(compilation, &CSharpConversions::Get(compilation),
+		                          *methodGroupRR, toType);
+		if (c.get() != Conversions::None().get())
+			return c;
+	}
 	// C# 9.0 spec section 10.2.16 default literal conversions -- `// TODO` in the C# source; skipped.
 	if (resolveResult.IsCompileTimeConstant()) {
 		// C# `c = StandardImplicitConversion(resolveResult.Type, toType, allowTuple);` -- the

@@ -125,6 +125,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Resolver/CSharpConversionsIsExactlyMatching_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsAnonymousFunction_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsMethodGroupArgs_Test.cpp
+    Decompiler/CSharp/Resolver/CSharpConversionsMethodGroupConversion_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsConstraintConvertible_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsSpanConversion_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsTuple_Test.cpp

@@ -428,6 +428,11 @@ public:
     // `Public` preserves the original behavior so existing tests that do not call the setter
     // are unaffected (the additive-setter convention).
     void SetAccessibility(TS::Accessibility a) { accessibility_ = a; }
+    // Configurable `IsOverridable` for the method-group-conversion `isVirtual` flag tests
+    // (`MethodGroupConversion`'s `method.IsOverridable && ...` virtual-lookup conjunction).
+    // The default `false` preserves the original behavior so existing tests that do not call
+    // the setter are unaffected (the additive-setter convention).
+    void SetIsOverridable(bool v) { isOverridable_ = v; }
 
     // --- ISymbol ---
     TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Method; }
@@ -473,7 +478,7 @@ public:
     bool IsExplicitInterfaceImplementation() const override { return false; }
     bool IsVirtual() const override { return false; }
     bool IsOverride() const override { return false; }
-    bool IsOverridable() const override { return false; }
+    bool IsOverridable() const override { return isOverridable_; }
     const TypeParameterSubstitution* Substitution() const override { return nullptr; }
     bool Equals(const IMember* obj, const TypeVisitor*) const override { return obj == this; }
 
@@ -510,6 +515,7 @@ private:
     bool isStatic_ = false;
     bool isOperator_ = false;
     bool returnTypeIsRefReadOnly_ = false;
+    bool isOverridable_ = false;
     TS::Accessibility accessibility_ = TS::Accessibility::Public;
     ITypePtr returnTypeOverride_;
     std::vector<const IParameter*> parameters_;

@@ -20,8 +20,9 @@
 // Port of the `TypeInference` PURE LEAF HELPERS -- the landed slices of the C# type-inference
 // engine (ICSharpCode.Decompiler/CSharp/Resolver/TypeInference.cs, the ~1188-line long-pole
 // blocker for the `OverloadResolution` `RunTypeInference` engine step and therefore for
-// `CalculateCandidate`/`AddCandidate`/`AddMethodLists` and the deferred `MethodGroupConversion`
-// arm). SIX regions are landed, all lifted to `Detail::` free functions ahead of the
+// `CalculateCandidate`/`AddCandidate`/`AddMethodLists` and the formerly-deferred
+// `MethodGroupConversion` arm, since landed in `CSharpConversionsHelpers`). SIX regions are
+// landed, all lifted to `Detail::` free functions ahead of the
 // `TypeInference` class skeleton (the `CSharpConversionsHelpers` / `OverloadResolutionHelpers`
 // lift-to-free-functions precedent): the Input/Output Types region (C# spec draft-v11
 // sections 12.6.3.4 + 12.6.3.5), the ContainsUnfixed region (the `TP` per-type-parameter
