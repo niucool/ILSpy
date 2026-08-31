@@ -32,6 +32,7 @@
 #include "Decompiler/TypeSystem/IParameter.hpp"
 #include "Decompiler/TypeSystem/IParameterizedMember.hpp"
 #include "Decompiler/TypeSystem/IProperty.hpp"
+#include "Decompiler/TypeSystem/ITypeParameter.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
 
 #include <algorithm>
@@ -547,6 +548,33 @@ bool HasReadonlyModifier(const IMethod& accessor)
     const ITypeDefinition* declaringTypeDefinition = accessor.DeclaringTypeDefinition();
     return accessor.ThisIsRefReadOnly() && declaringTypeDefinition != nullptr
         && !declaringTypeDefinition->IsReadOnly();
+}
+
+// The C# `public static IType AsParameterizedType(this ITypeDefinition td)`
+// (TypeSystemExtensions.cs line 864) -- the self-parameterized type of a
+// generic type definition (the type of `this` within the type definition),
+// or the definition itself when non-generic.
+ITypePtr AsParameterizedType(const ITypeDefinition& td)
+{
+    if (td.TypeParameterCount() == 0) {
+        // The C# `return td;` -- the definition unchanged; the owning handle
+        // through the D529 shared_from_this + const_pointer_cast convention.
+        return std::const_pointer_cast<IType>(td.shared_from_this());
+    }
+    // The C# `new ParameterizedType(td, td.TypeArguments)` -- the definition's
+    // own type parameters as the type arguments (the C#
+    // `ITypeDefinition.TypeArguments => TypeParameters`).
+    std::vector<ITypePtr> typeArguments;
+    const std::vector<const ITypeParameter*> typeParameters = td.TypeParameters();
+    typeArguments.reserve(typeParameters.size());
+    for (const ITypeParameter* tp : typeParameters) {
+        if (tp == nullptr)
+            continue; // the D516 null-entry guard
+        typeArguments.push_back(std::const_pointer_cast<IType>(tp->shared_from_this()));
+    }
+    return std::make_shared<ParameterizedType>(
+        std::const_pointer_cast<IType>(td.shared_from_this()),
+        std::move(typeArguments));
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem

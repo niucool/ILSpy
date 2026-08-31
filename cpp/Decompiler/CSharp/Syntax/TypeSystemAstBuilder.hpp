@@ -54,10 +54,14 @@
 // destructor renderers composing GetMemberModifiers / the return-attribute
 // sections / ConvertTypeParameter / ConvertParameter / the extension-method
 // `this` modifier / the nullability-disambiguation-vs-constraint split /
-// GenerateBodyBlock / GetExplicitInterfaceType) are landed; the remaining
-// `Convert*` instance methods (the ConvertTypeDefinition / ConvertDelegate
-// renderers plus the ConvertSymbol / ConvertEntity / ConvertExtension entries)
-// follow in later slices, consuming the members below as they grow.
+// GenerateBodyBlock / GetExplicitInterfaceType) are landed, and the
+// type-definition renderer trio (the base-list nameability check
+// BaseTypeAccessibleFrom + TypeDefinitionNameableInBaseList, the delegate
+// renderer ConvertDelegate, and the type-definition renderer
+// ConvertTypeDefinition, C# lines 1900-2141) is landed; the remaining
+// `Convert*` instance methods (the ConvertSymbol / ConvertEntity /
+// ConvertExtension dispatch entries plus ConvertNamespaceDeclaration) follow
+// in later slices, consuming the members below as they grow.
 //
 // ModifierFromAccessibility (TypeSystemAstBuilder.cs line 2497) is the first such
 // helper: a pure switch on Accessibility (the D373 leaf) that maps a symbol's
@@ -130,10 +134,12 @@ class AttributeSection;
 class BlockStatement;
 class Constraint;
 class ConstructorDeclaration;
+class DelegateDeclaration;
 class DestructorDeclaration;
 class MethodDeclaration;
 class OperatorDeclaration;
 class ParameterDeclaration;
+class TypeDeclaration;
 class TypeParameterDeclaration;
 class VariableDeclarationStatement;
 } // namespace ILSpy::Decompiler::CSharp::Syntax
@@ -143,6 +149,7 @@ class VariableDeclarationStatement;
 // enough for the template-id (a forward declaration suffices; the .cpp includes
 // the full ResolveResult.hpp for the member access).
 namespace ILSpy::Decompiler::Semantics { class ResolveResult; }
+namespace ILSpy::Decompiler::CSharp::Resolver { class MemberLookup; }
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -1681,6 +1688,75 @@ public:
     // modifiers -- the `NeedsAccessibility` destructor case), NO parameters, and
     // NO explicit-interface type.
     DestructorDeclaration* ConvertDestructor(const TS::IMethod& dtor) const;
+
+    // -- The "Convert Entity" type-definition renderers (C# lines 1900-2141) --
+    //
+    // The type-definition renderer trio the private `ConvertEntity` dispatch
+    // calls for `SymbolKind.TypeDefinition`, plus the base-list nameability
+    // check. `ConvertTypeDefinition` and `ConvertDelegate` are `private` in the
+    // C#; `BaseTypeAccessibleFrom` / `TypeDefinitionNameableInBaseList` are its
+    // file-private helpers; all four are widened to public for direct TDD ahead
+    // of that dispatch (the `ConvertMethod` convention). The returned nodes are
+    // raw `new`-ed pointers (the D223 non-owning model; the caller owns them).
+
+    // The C# `static bool TypeDefinitionNameableInBaseList(ITypeDefinition? td,
+    // ITypeDefinition currentType, MemberLookup lookup)` (line 2072) -- whether
+    // a base-list reference can NAME `td` from within `currentType`: a type may
+    // name its own nested types (and those of its enclosing types) regardless of
+    // accessibility; everything else must be `lookup.IsAccessible(td, false)`
+    // AND, recursively, its own declaring type must be nameable (naming `A.I`
+    // also requires `A`). The nullable C# parameter ports to a nullable pointer
+    // (null is nameable -- the recursion's base case).
+    static bool TypeDefinitionNameableInBaseList(
+        const TS::ITypeDefinition* td,
+        const TS::ITypeDefinition& currentType,
+        const ::ILSpy::Decompiler::CSharp::Resolver::MemberLookup& lookup);
+
+    // The C# `bool BaseTypeAccessibleFrom(IType baseType, ITypeDefinition
+    // currentType, MemberLookup lookup)` (line 2053) -- whether every type the
+    // base-list reference NAMES (including nested type arguments, via the
+    // `BaseListNameabilityVisitor` traversal) is nameable from `currentType`.
+    // Takes `TS::IType&` non-const (the `AcceptVisitor` call, the D406
+    // convention); the visitor is file-local in the .cpp (the private nested
+    // class, composed only through this member).
+    bool BaseTypeAccessibleFrom(
+        TS::IType& baseType,
+        const TS::ITypeDefinition& currentType,
+        const ::ILSpy::Decompiler::CSharp::Resolver::MemberLookup& lookup) const;
+
+    // The C# `DelegateDeclaration ConvertDelegate(IMethod invokeMethod, Modifiers
+    // modifiers)` (line 2094) -- the delegate renderer over the delegate's `Invoke`
+    // method: the caller-computed modifiers with the `Sealed` bit cleared (a
+    // delegate is never rendered `sealed`), the own + `[return: ...]` attribute
+    // sections (the delegate's own attributes come from the DEFINITION, the
+    // return attributes from the invoke method), the `TypeResolveResult`
+    // annotation, the return type with the `ref readonly` promotion, the name
+    // from the declaring type definition, the outer-count type-parameter skip,
+    // the invoke's parameters, and the constraint clauses.
+    DelegateDeclaration* ConvertDelegate(const TS::IMethod& invokeMethod,
+                                         Modifiers modifiers) const;
+
+    // The C# `EntityDeclaration ConvertTypeDefinition(ITypeDefinition typeDefinition)`
+    // (line 1900) -- the type-definition renderer: the accessibility bit under
+    // `ShowAccessibility`, the `static`/`abstract`/`sealed` bits under
+    // `ShowModifiers` (static wins over the other two, an if/else-if chain), the
+    // kind dispatch (`Struct`/`Void` clear `Sealed` and add `Readonly`/`Ref` for
+    // readonly / by-ref-like structs; `Enum` clears `Sealed`; `Interface` clears
+    // `Abstract`; `Delegate` delegates to `ConvertDelegate` when an `Invoke`
+    // method resolves, else falls through to the `Class` default; the record
+    // shapes under `SupportRecordStructs`/`SupportRecordClasses`), the attribute
+    // sections, the `TypeResolveResult` annotation, the `_` -> `@_` name escape,
+    // the outer-count type-parameter skip, the base-list loop (an INTERFACE base
+    // that is not nameable in the base list is dropped -- interfaces enter the
+    // interface-impl metadata transitively; a base class was always written
+    // explicitly and stays; an enum's `System.Enum` base renders the enum's
+    // underlying type unless it is `int`; a struct's `System.ValueType` and every
+    // `System.Object` base are skipped; a record's `IEquatable<R>` base is
+    // omitted), and the constraint clauses. The return is the `EntityDeclaration`
+    // base because the delegate and the non-delegate arms produce distinct
+    // concrete node types.
+    EntityDeclaration* ConvertTypeDefinition(
+        const TS::ITypeDefinition& typeDefinition) const;
 
 private:
     // The C# `private void AddTypeAnnotation(AstType astType, IType type)` (line 278)

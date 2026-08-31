@@ -65,13 +65,16 @@
 #include "Comment.hpp"
 #include "ConstructorDeclaration.hpp"
 #include "CustomEventDeclaration.hpp"
+#include "DelegateDeclaration.hpp"
 #include "DestructorDeclaration.hpp"
 #include "EventDeclaration.hpp"
 #include "FieldDeclaration.hpp"
 #include "IndexerDeclaration.hpp"
 #include "OperatorDeclaration.hpp"
 #include "PropertyDeclaration.hpp"
+#include "TypeDeclaration.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
+#include "Decompiler/CSharp/Resolver/MemberLookup.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
 #include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
@@ -166,12 +169,17 @@ const TS::IType* DeclaringTypeOf(const TS::IType& type) {
 // The C# `IType.Namespace` (IType.cs -- via `IType : INamedElement`; the
 // AbstractType default is the empty string) for the shapes the region reaches:
 // an `IEntity`-carrying type (an ITypeDefinition) reports `INamedElement::
-// Namespace()`; an `UnknownType` reports its stored full type name's namespace
-// (the C# `UnknownType.Namespace => fullTypeName.TopLevelTypeName.Namespace`);
+// Namespace()`; a `ParameterizedType` delegates to its generic (the C#
+// `ParameterizedType.Namespace => genericType.Namespace` -- the record-
+// IEquatable base-list omission reads `IEquatable<R>`'s namespace, which
+// resolves through the generic); an `UnknownType` reports its stored full type
+// name's namespace (the C# `UnknownType.Namespace => fullTypeName.TopLevelTypeName.Namespace`);
 // anything else is the empty default.
 std::string NamespaceOf(const TS::IType& type) {
     if (const auto* entity = dynamic_cast<const TS::IEntity*>(&type))
         return entity->Namespace();
+    if (const auto* pt = dynamic_cast<const TS::ParameterizedType*>(&type))
+        return pt->GenericType() ? NamespaceOf(*pt->GenericType()) : std::string();
     if (const auto* unknown = dynamic_cast<const class UnknownType*>(&type))
         return unknown->FullTypeName().Namespace();
     return std::string();
@@ -2744,6 +2752,359 @@ DestructorDeclaration* TypeSystemAstBuilder::ConvertDestructor(
     // The C# `decl.Body = GenerateBodyBlock();` -- unconditional (the
     // ConvertMethod convention).
     decl->Body(GenerateBodyBlock());
+    return decl;
+}
+
+namespace {
+
+// The C# `sealed class BaseListNameabilityVisitor(ITypeDefinition currentType,
+// MemberLookup lookup) : TypeVisitor` (TypeSystemAstBuilder.cs lines 2061-2069)
+// -- the private nested visitor `BaseTypeAccessibleFrom` drives over the
+// base-list reference: every `ITypeDefinition` the traversal reaches (the named
+// type itself and, through the children walk the base `VisitTypeDefinition`
+// performs, every nested type argument) must be nameable. The `AllNameable`
+// field starts true and is AND-ed (non-short-circuit, the C# `&=`) with each
+// visited definition's nameability. File-local (its only consumer is
+// `BaseTypeAccessibleFrom`; the composed member is the testable surface).
+class BaseListNameabilityVisitor final : public TS::TypeVisitor {
+public:
+    // The C# `public bool AllNameable = true;`.
+    bool AllNameable = true;
+
+    BaseListNameabilityVisitor(const TS::ITypeDefinition& currentType,
+                               const Resolver::MemberLookup& lookup)
+        : currentType_(&currentType), lookup_(&lookup) {}
+
+    TS::ITypePtr VisitTypeDefinition(TS::ITypeDefinition& type) override {
+        AllNameable = AllNameable
+            & TypeSystemAstBuilder::TypeDefinitionNameableInBaseList(
+                &type, *currentType_, *lookup_);
+        // The C# `return base.VisitTypeDefinition(type);` -- the TypeVisitor
+        // default visits the children (a ParameterizedType's generic and type
+        // arguments, so `IWrap<F.IFoo>` reaches the nested `F.IFoo`).
+        return TS::TypeVisitor::VisitTypeDefinition(type);
+    }
+
+private:
+    const TS::ITypeDefinition* currentType_;
+    const Resolver::MemberLookup* lookup_;
+};
+
+// The C# `baseType.TypeArguments.Count == 1 &&
+// baseType.TypeArguments[0].Equals(typeDefinition.AsParameterizedType())` -- the
+// record-IEquatable omission's type-arguments conjunction. The C#
+// `IType.TypeArguments` is ParameterizedType-specific on the port's minimal
+// surface (the iteration-82 convention): a non-parameterized base type does not
+// take the omission (for the bare `IEquatable`1` definition the C# reads its own
+// type parameters, count 1, and the comparison against the record type still
+// fails -- the same observable outcome through the port's guard).
+bool RecordIEquatableOmitted(const TS::IType& baseType,
+                             const TS::ITypeDefinition& typeDefinition) {
+    const auto* pt = dynamic_cast<const TS::ParameterizedType*>(&baseType);
+    if (pt == nullptr || pt->TypeArguments().size() != 1)
+        return false;
+    const TS::ITypePtr selfParameterized = AsParameterizedType(typeDefinition);
+    return pt->TypeArguments()[0]->Equals(*selfParameterized);
+}
+
+} // namespace
+
+// The C# `static bool TypeDefinitionNameableInBaseList(ITypeDefinition? td,
+// ITypeDefinition currentType, MemberLookup lookup)` (line 2072) -- see the
+// header declaration for the full contract.
+bool TypeSystemAstBuilder::TypeDefinitionNameableInBaseList(
+    const TS::ITypeDefinition* td,
+    const TS::ITypeDefinition& currentType,
+    const Resolver::MemberLookup& lookup) {
+    if (td == nullptr)
+        return true;
+    // The C# `for (var t = currentType; t != null; t = t.DeclaringTypeDefinition)
+    // { if (td.DeclaringTypeDefinition?.Equals(t) == true) return true; }` -- a
+    // type may name its own nested types (and those of its enclosing types) in
+    // its base list regardless of accessibility, e.g. 'class F : F.IFoo'.
+    for (const TS::ITypeDefinition* t = &currentType; t != nullptr;
+         t = t->DeclaringTypeDefinition()) {
+        const TS::ITypeDefinition* tdDeclaring = td->DeclaringTypeDefinition();
+        // The C# `?.Equals(t) == true` -- a null declaring type definition is
+        // not a match (the lifted == over null yields false).
+        if (tdDeclaring != nullptr && tdDeclaring->Equals(*t))
+            return true;
+    }
+    // The C# `if (!lookup.IsAccessible(td, false)) return false;` -- everything
+    // else resolves in the enclosing scope: 'class SubF : F, F.IFoo' is CS0122
+    // even though F.IFoo is accessible inside SubF's body.
+    if (!lookup.IsAccessible(*td, /*allowProtectedAccess:*/ false))
+        return false;
+    // The C# recursion -- naming 'A.I' also requires 'A' to be nameable.
+    return TypeDefinitionNameableInBaseList(td->DeclaringTypeDefinition(),
+                                            currentType, lookup);
+}
+
+// The C# `bool BaseTypeAccessibleFrom(IType baseType, ITypeDefinition
+// currentType, MemberLookup lookup)` (line 2053) -- see the header declaration
+// for the full contract.
+bool TypeSystemAstBuilder::BaseTypeAccessibleFrom(
+    TS::IType& baseType,
+    const TS::ITypeDefinition& currentType,
+    const Resolver::MemberLookup& lookup) const {
+    BaseListNameabilityVisitor visitor(currentType, lookup);
+    baseType.AcceptVisitor(visitor);
+    return visitor.AllNameable;
+}
+
+// The C# `DelegateDeclaration ConvertDelegate(IMethod invokeMethod, Modifiers
+// modifiers)` (line 2094) -- see the header declaration for the full contract.
+DelegateDeclaration* TypeSystemAstBuilder::ConvertDelegate(
+    const TS::IMethod& invokeMethod, Modifiers modifiers) const {
+    // The C# `ITypeDefinition d = invokeMethod.DeclaringTypeDefinition!;` -- the
+    // hard non-null assertion (a real delegate's invoke method always carries
+    // its declaring type definition). The port guards the degenerate stub shape
+    // (a null definition skips the d-reading arms, the D516 safe-fallback
+    // convention).
+    const TS::ITypeDefinition* d = invokeMethod.DeclaringTypeDefinition();
+    auto* decl = new DelegateDeclaration();
+    // The C# `decl.Modifiers = modifiers & ~Modifiers.Sealed;` -- a delegate is
+    // never rendered `sealed`.
+    decl->Modifiers(modifiers & ~Modifiers::Sealed);
+    if (d != nullptr && ShowAttributes()) {
+        // The delegate's OWN attribute sections come from the DEFINITION; the
+        // `[return: ...]` sections from the invoke method's return-type
+        // attributes (the `target: "return"` overload, the ConvertMethod
+        // precedent).
+        for (AttributeSection* section : ConvertAttributes(d->GetAttributes()))
+            decl->Attributes().Add(section);
+        for (AttributeSection* section : ConvertAttributes(
+                 invokeMethod.GetReturnTypeAttributes(), "return"))
+            decl->Attributes().Add(section);
+    }
+    if (d != nullptr && AddResolveResultAnnotations()) {
+        decl->AddAnnotation(std::make_shared<Sem::TypeResolveResult>(
+            std::const_pointer_cast<TS::IType>(d->shared_from_this())));
+    }
+    // `ConvertType` takes `TS::IType&` non-const (the D529 annotation path); the
+    // accessor's const is the contract (the D515/D517 const_cast precedent, the
+    // ConvertMethod precedent).
+    decl->ReturnType(ConvertType(const_cast<TS::IType&>(invokeMethod.ReturnType())));
+    // The C# `if (invokeMethod.ReturnTypeIsRefReadOnly && decl.ReturnType is
+    // ComposedType ct && ct.HasRefSpecifier) ct.HasReadOnlySpecifier = true;`
+    // -- the node-first order (the ConvertField mirror).
+    if (invokeMethod.ReturnTypeIsRefReadOnly()) {
+        if (auto* ct = dynamic_cast<ComposedType*>(decl->ReturnType());
+            ct != nullptr && ct->HasRefSpecifier()) {
+            ct->HasReadOnlySpecifier(true);
+        }
+    }
+    if (d != nullptr)
+        decl->Name(d->Name());
+
+    const int outerTypeParameterCount =
+        d == nullptr || d->DeclaringTypeDefinition() == nullptr
+            ? 0
+            : d->DeclaringTypeDefinition()->TypeParameterCount();
+
+    if (d != nullptr && ShowTypeParameters()) {
+        // The C# `d.TypeParameters.Skip(outerTypeParameterCount)` -- the outer
+        // type's parameters are not redeclared (the nested-type convention); the
+        // skip is an index loop (a start beyond the end yields nothing, the C#
+        // Skip semantics).
+        const std::vector<const TS::ITypeParameter*> typeParameters =
+            d->TypeParameters();
+        for (size_t i = static_cast<size_t>(outerTypeParameterCount);
+             i < typeParameters.size(); i++) {
+            if (typeParameters[i] == nullptr)
+                continue; // the D516 null-entry guard
+            decl->TypeParameters().Add(ConvertTypeParameter(*typeParameters[i]));
+        }
+    }
+    for (const TS::IParameter* p : invokeMethod.Parameters()) {
+        if (p == nullptr)
+            continue; // the D516 null-entry guard
+        decl->Parameters().Add(ConvertParameter(*p));
+    }
+    if (d != nullptr && ShowTypeParameters() && ShowTypeParameterConstraints()) {
+        const std::vector<const TS::ITypeParameter*> typeParameters =
+            d->TypeParameters();
+        for (size_t i = static_cast<size_t>(outerTypeParameterCount);
+             i < typeParameters.size(); i++) {
+            if (typeParameters[i] == nullptr)
+                continue; // the D516 null-entry guard
+            Constraint* constraint = ConvertTypeParameterConstraint(*typeParameters[i]);
+            if (constraint != nullptr)
+                decl->Constraints().Add(constraint);
+        }
+    }
+    return decl;
+}
+
+// The C# `EntityDeclaration ConvertTypeDefinition(ITypeDefinition typeDefinition)`
+// (line 1900) -- see the header declaration for the full contract.
+EntityDeclaration* TypeSystemAstBuilder::ConvertTypeDefinition(
+    const TS::ITypeDefinition& typeDefinition) const {
+    Modifiers modifiers = Modifiers::None;
+    if (ShowAccessibility()) {
+        modifiers = modifiers | ModifierFromAccessibility(
+            typeDefinition.Accessibility(), UsePrivateProtectedAccessibility());
+    }
+    if (ShowModifiers()) {
+        // The C# if/else-if chain -- `static` wins over `abstract`, which wins
+        // over `sealed`.
+        if (typeDefinition.IsStatic()) {
+            modifiers = modifiers | Modifiers::Static;
+        } else if (typeDefinition.IsAbstract()) {
+            modifiers = modifiers | Modifiers::Abstract;
+        } else if (typeDefinition.IsSealed()) {
+            modifiers = modifiers | Modifiers::Sealed;
+        }
+    }
+
+    ClassType classType;
+    switch (typeDefinition.Kind()) {
+        case TS::TypeKind::Struct:
+        case TS::TypeKind::Void:
+            classType = ClassType::Struct;
+            // The C# `modifiers &= ~Modifiers.Sealed;` -- a struct is never
+            // rendered `sealed` (it is implicitly sealed).
+            modifiers = modifiers & ~Modifiers::Sealed;
+            if (ShowModifiers()) {
+                if (typeDefinition.IsReadOnly())
+                    modifiers = modifiers | Modifiers::Readonly;
+                if (typeDefinition.IsByRefLike())
+                    modifiers = modifiers | Modifiers::Ref;
+            }
+            if (SupportRecordStructs() && typeDefinition.IsRecord())
+                classType = ClassType::RecordStruct;
+            break;
+        case TS::TypeKind::Enum:
+            classType = ClassType::Enum;
+            modifiers = modifiers & ~Modifiers::Sealed;
+            break;
+        case TS::TypeKind::Interface:
+            classType = ClassType::Interface;
+            // The C# `modifiers &= ~Modifiers.Abstract;` -- an interface is
+            // never rendered `abstract` (it is implicitly abstract).
+            modifiers = modifiers & ~Modifiers::Abstract;
+            break;
+        case TS::TypeKind::Delegate: {
+            const TS::IMethod* invoke = GetDelegateInvokeMethod(typeDefinition);
+            if (invoke != nullptr)
+                return ConvertDelegate(*invoke, modifiers);
+            // The C# `goto default;` (a delegate-kind definition whose Invoke
+            // did not resolve) -- C++ has no `goto default`, so the default
+            // arm's body repeats inline (the goto-case-Plus fallthrough
+            // convention).
+            classType = ClassType::Class;
+            if (SupportRecordClasses() && typeDefinition.IsRecord())
+                classType = ClassType::RecordClass;
+            break;
+        }
+        default:
+            classType = ClassType::Class;
+            if (SupportRecordClasses() && typeDefinition.IsRecord())
+                classType = ClassType::RecordClass;
+            break;
+    }
+
+    auto* decl = new TypeDeclaration();
+    decl->ClassType(classType);
+    decl->Modifiers(modifiers);
+    if (ShowAttributes()) {
+        for (AttributeSection* section : ConvertAttributes(typeDefinition.GetAttributes()))
+            decl->Attributes().Add(section);
+    }
+    if (AddResolveResultAnnotations()) {
+        decl->AddAnnotation(std::make_shared<Sem::TypeResolveResult>(
+            std::const_pointer_cast<TS::IType>(typeDefinition.shared_from_this())));
+    }
+    // The C# `decl.Name = typeDefinition.Name == "_" ? "@_" :
+    // typeDefinition.Name;` -- the `_` discard identifier renders escaped; the
+    // `Name` setter routes through `Identifier::Create`, which strips the `@`
+    // into the token's verbatim flag.
+    decl->Name(typeDefinition.Name() == "_" ? "@_" : typeDefinition.Name());
+
+    const int outerTypeParameterCount =
+        typeDefinition.DeclaringTypeDefinition() == nullptr
+            ? 0
+            : typeDefinition.DeclaringTypeDefinition()->TypeParameterCount();
+
+    if (ShowTypeParameters()) {
+        // The C# `typeDefinition.TypeParameters.Skip(outerTypeParameterCount)`
+        // -- the outer type's parameters are not redeclared.
+        const std::vector<const TS::ITypeParameter*> typeParameters =
+            typeDefinition.TypeParameters();
+        for (size_t i = static_cast<size_t>(outerTypeParameterCount);
+             i < typeParameters.size(); i++) {
+            if (typeParameters[i] == nullptr)
+                continue; // the D516 null-entry guard
+            decl->TypeParameters().Add(ConvertTypeParameter(*typeParameters[i]));
+        }
+    }
+
+    if (ShowBaseTypes()) {
+        // The C# `MemberLookup baseListLookup = new MemberLookup(
+        // typeDefinition.DeclaringTypeDefinition, typeDefinition.ParentModule);`.
+        Resolver::MemberLookup baseListLookup(typeDefinition.DeclaringTypeDefinition(),
+                                              typeDefinition.ParentModule());
+        // `DirectBaseTypes()` returns the vector BY VALUE; bind the snapshot
+        // before the loop (the by-value-accessor hazard).
+        const std::vector<TS::ITypePtr> baseTypes = typeDefinition.DirectBaseTypes();
+        for (const TS::ITypePtr& baseType : baseTypes) {
+            if (!baseType)
+                continue; // the D516 null-entry guard
+            // Interfaces enter the interface-impl metadata transitively, so
+            // entries the base list cannot name can be dropped; a base class
+            // was always written explicitly and stays even if C# could not
+            // name it (the C# comment).
+            if (baseType->Kind() == TS::TypeKind::Interface
+                && !BaseTypeAccessibleFrom(*baseType, typeDefinition,
+                                           baseListLookup)) {
+                continue;
+            }
+            if (typeDefinition.Kind() == TS::TypeKind::Enum
+                && IsKnownType(*baseType, TS::KnownTypeCode::Enum)) {
+                // If the declared type is an enum, replace all references to
+                // System.Enum with the enum-underlying type (the default int
+                // underlying renders nothing).
+                const TS::ITypePtr& underlying = typeDefinition.EnumUnderlyingType();
+                // The C# derefs the non-null-asserted `EnumUnderlyingType` on
+                // the enum shape; the port guards the degenerate stub (a null
+                // underlying renders nothing, the D516 safe-fallback
+                // convention).
+                if (underlying && !IsKnownType(*underlying,
+                                               TS::KnownTypeCode::Int32)) {
+                    decl->BaseTypes().Add(ConvertType(*underlying));
+                }
+            } else if ((typeDefinition.Kind() == TS::TypeKind::Struct
+                        || typeDefinition.Kind() == TS::TypeKind::Void)
+                       && IsKnownType(*baseType, TS::KnownTypeCode::ValueType)) {
+                // If the declared type is a struct, ignore System.ValueType.
+                continue;
+            } else if (IsKnownType(*baseType, TS::KnownTypeCode::Object)) {
+                // Always ignore System.Object.
+                continue;
+            } else if (SupportRecordClasses() && typeDefinition.IsRecord()
+                       && baseType->Name() == "IEquatable"
+                       && NamespaceOf(*baseType) == "System"
+                       && RecordIEquatableOmitted(*baseType, typeDefinition)) {
+                // Omit "IEquatable<R>" in records.
+                continue;
+            } else {
+                decl->BaseTypes().Add(ConvertType(*baseType));
+            }
+        }
+    }
+
+    if (ShowTypeParameters() && ShowTypeParameterConstraints()) {
+        const std::vector<const TS::ITypeParameter*> typeParameters =
+            typeDefinition.TypeParameters();
+        for (size_t i = static_cast<size_t>(outerTypeParameterCount);
+             i < typeParameters.size(); i++) {
+            if (typeParameters[i] == nullptr)
+                continue; // the D516 null-entry guard
+            Constraint* constraint = ConvertTypeParameterConstraint(*typeParameters[i]);
+            if (constraint != nullptr)
+                decl->Constraints().Add(constraint);
+        }
+    }
     return decl;
 }
 

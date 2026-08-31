@@ -232,6 +232,20 @@ ILSpy::Decompiler::TypeSystem::ITypePtr WithoutNullability(ILSpy::Decompiler::Ty
 // `IsDelegateCompatible(IMethod, IType)` overload that resolves the delegate's invoke method.
 const IMethod* GetDelegateInvokeMethod(const IType& type);
 
+// The C# `public static IType AsParameterizedType(this ITypeDefinition td)`
+// (TypeSystemExtensions.cs line 864) -- "When given a generic type definition,
+// returns the self-parameterized type (i.e. the type of `this` within the type
+// definition). When given a non-generic type definition, returns that
+// definition unchanged." The generic arm builds a `ParameterizedType` over the
+// definition with its OWN type parameters as the type arguments (the C#
+// `ITypeDefinition.TypeArguments => TypeParameters`); the port recovers the
+// owning handles through `shared_from_this` + `const_pointer_cast` (the D529
+// convention -- every definition and type parameter in the handle model is
+// shared-managed). The first consumer is the TypeSystemAstBuilder record-
+// IEquatable base-list omission (`baseType.TypeArguments[0].Equals(
+// typeDefinition.AsParameterized())`).
+ITypePtr AsParameterizedType(const ITypeDefinition& td);
+
 // The C# `public static bool IsInlineArrayType(this IType type)` (TypeSystemExtensions.cs
 // line 340) -- true for a struct-kind type whose definition carries the `[InlineArray]`
 // attribute (a C# 12 inline array; the compiler-enforced shape is a single instance field).

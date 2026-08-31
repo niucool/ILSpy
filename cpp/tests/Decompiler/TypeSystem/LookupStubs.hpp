@@ -259,6 +259,26 @@ public:
     // `EnumUnderlyingType`; the default (an empty `ITypePtr`) preserves the
     // prior always-null behavior.
     void SetEnumUnderlyingType(ITypePtr underlying) { enumUnderlyingType_ = std::move(underlying); }
+    // Configurable `IsAbstract` / `IsSealed` / `IsReadOnly` / `IsRecord` for the
+    // TypeSystemAstBuilder type-definition renderer tests (the `static`/
+    // `abstract`/`sealed` modifier chain, the struct/enum/interface bit clears,
+    // and the record-class/record-struct shapes). The defaults (all false)
+    // preserve the original hardcoded behavior so existing tests that do not
+    // call the setters are unaffected (the additive-setter convention).
+    void SetIsAbstract(bool v) { isAbstract_ = v; }
+    void SetIsSealed(bool v) { isSealed_ = v; }
+    void SetIsReadOnly(bool v) { isReadOnly_ = v; }
+    void SetIsRecord(bool v) { isRecord_ = v; }
+    // Configurable `IsByRefLike` (the `IType` virtual with the false default)
+    // for the `readonly ref struct` modifier pair the struct kind renders.
+    void SetIsByRefLike(bool v) { isByRefLike_ = v; }
+    // Configurable `GetAttributes` for the attribute-section tests (the
+    // delegate/typedef renderers wrap each attribute in its own section). The
+    // default (empty) preserves the prior always-empty behavior; the stored
+    // pointers are non-owning (the caller keeps the `IAttribute` stubs alive).
+    void SetAttributes(std::vector<const IAttribute*> attributes) {
+        attributes_ = std::move(attributes);
+    }
 
     // --- IType ---
     TypeKind Kind() const override { return kind_; }
@@ -292,13 +312,13 @@ public:
     }
     ITypePtr DeclaringType() const override { return {}; }
     const IModule* ParentModule() const override { return parentModule_; }
-    std::vector<const IAttribute*> GetAttributes() const override { return {}; }
+    std::vector<const IAttribute*> GetAttributes() const override { return attributes_; }
     bool HasAttribute(KnownAttribute) const override { return false; }
     const IAttribute* GetAttribute(KnownAttribute) const override { return nullptr; }
     TS::Accessibility Accessibility() const override { return accessibility_; }
     bool IsStatic() const override { return isStatic_; }
-    bool IsAbstract() const override { return false; }
-    bool IsSealed() const override { return false; }
+    bool IsAbstract() const override { return isAbstract_; }
+    bool IsSealed() const override { return isSealed_; }
 
     // --- ITypeDefinition-own ---
     std::vector<const ITypeDefinition*> NestedTypes() const override { return {}; }
@@ -309,12 +329,15 @@ public:
     std::vector<const IEvent*> Events() const override { return {}; }
     TS::KnownTypeCode KnownTypeCode() const override { return knownTypeCode_; }
     ITypePtr EnumUnderlyingType() const override { return enumUnderlyingType_; }
-    bool IsReadOnly() const override { return false; }
+    bool IsReadOnly() const override { return isReadOnly_; }
     std::string MetadataName() const override { return fullTypeName_.Name(); }
     bool HasExtensions() const override { return hasExtensions_; }
     const TS::ExtensionInfo* ExtensionInfo() const override { return nullptr; }
     ::ILSpy::Decompiler::TypeSystem::Nullability NullableContext() const override { return ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious; }
-    bool IsRecord() const override { return false; }
+    bool IsRecord() const override { return isRecord_; }
+    // The `IType::IsByRefLike` virtual (the false default) made configurable
+    // (the `SetIsByRefLike` additive-setter arm).
+    bool IsByRefLike() const override { return isByRefLike_; }
 
 protected:
     bool StructuralEquals(const IType& other) const override
@@ -337,6 +360,12 @@ private:
     ITypePtr enumUnderlyingType_;
     std::vector<const IMethod*> methods_;
     bool hasExtensions_ = false;
+    bool isAbstract_ = false;
+    bool isSealed_ = false;
+    bool isReadOnly_ = false;
+    bool isRecord_ = false;
+    bool isByRefLike_ = false;
+    std::vector<const IAttribute*> attributes_;
 };
 
 // A plain `IEntity` stub (NOT an IMember) -- the smallest concrete entity for
@@ -516,6 +545,14 @@ public:
     // the original behavior so existing tests that do not call the setter are
     // unaffected (the additive-setter convention).
     void SetThisIsRefReadOnly(bool v) { thisIsRefReadOnly_ = v; }
+    // Configurable `GetReturnTypeAttributes` for the TypeSystemAstBuilder
+    // delegate renderer's `[return: ...]` attribute sections. The default
+    // (empty) preserves the prior always-empty behavior (the additive-setter
+    // convention); the stored pointers are non-owning (the caller keeps the
+    // `IAttribute` stubs alive).
+    void SetReturnTypeAttributes(std::vector<const IAttribute*> a) {
+        returnTypeAttributes_ = std::move(a);
+    }
 
     // --- ISymbol ---
     TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Method; }
@@ -569,7 +606,9 @@ public:
     std::vector<const IParameter*> Parameters() const override { return parameters_; }
 
     // --- IMethod ---
-    std::vector<const IAttribute*> GetReturnTypeAttributes() const override { return {}; }
+    std::vector<const IAttribute*> GetReturnTypeAttributes() const override {
+        return returnTypeAttributes_;
+    }
     bool ReturnTypeIsRefReadOnly() const override { return returnTypeIsRefReadOnly_; }
     bool IsInitOnly() const override { return false; }
     bool ThisIsRefReadOnly() const override { return thisIsRefReadOnly_; }
@@ -606,6 +645,7 @@ private:
     std::vector<ITypePtr> typeArguments_;
     bool thisIsRefReadOnly_ = false;
     bool isExtensionMethod_ = false;
+    std::vector<const IAttribute*> returnTypeAttributes_;
 };
 
 // A minimal `IEvent` for the `member is IEvent` TRUE side of IsInvocable.
