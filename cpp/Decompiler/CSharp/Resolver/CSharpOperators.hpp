@@ -66,9 +66,20 @@
 //     `SubtractionOperators` / `ShiftLeftOperators` / `ShiftRightOperators` /
 //     `UnsignedShiftRightOperators` -- the C# 4.0 spec sections 7.8.1-7.8.5).
 //
-// The remaining derived operator-method families (the equality / relational / bitwise
-// regions, lines 697-1168) and the lazy operator-table properties built on them are
-// DEFERRED to later slices.
+//   * PORTED: the equality operator region (CSharpOperators.cs lines 700-786 + 789-862): the
+//     `EqualityOperatorMethod` (a built-in `==`/`!=` operator over one TypeCode's operands
+//     -- both parameters the TypeCode's shared normal-table instances, the return type
+//     always Boolean, the `Type`/`Negate` fields, the `CanEvaluateAtCompileTime =>
+//     Type != TypeCode.Object` flag, and the `Lift` guard that keeps the reference-typed
+//     Object/String forms unlifted), the `LiftedEqualityOperatorMethod` (the `Nullable<T>`
+//     form: BOTH parameters lifted but the return type STAYS the base's plain Boolean, the
+//     same shared nullable parameter instance added twice), and the four lazy equality
+//     operator-table properties (`ValueEqualityOperators` / `ValueInequalityOperators` /
+//     `ReferenceEqualityOperators` / `ReferenceInequalityOperators`).
+//
+// The remaining derived operator-method families (the relational / bitwise /
+// user-defined regions, lines 865-1168) and the lazy operator-table properties built on
+// them are DEFERRED to later slices.
 //
 // KEY PORT CONVENTIONS:
 //  (a) The C# nested classes (`OperatorMethod` and, later, the *OperatorMethod families)
@@ -498,6 +509,28 @@ public:
     // lifted forms.
     const std::vector<std::shared_ptr<OperatorMethod>>& UnsignedShiftRightOperators() const;
 
+    // --- The C# lazy equality operator-table properties (lines 789-862, convention (m)) ---
+
+    // The C# `OperatorMethod[] ValueEqualityOperators` (the C# 4.0 spec 7.10 value
+    // equality operator `==`): the eight value-type originals (int, uint, long, ulong,
+    // float, double, decimal, bool -- `valueEqualityOperatorsFor`, negate=false), followed
+    // by their lifted `Nullable<T>` forms via `Lift`.
+    const std::vector<std::shared_ptr<OperatorMethod>>& ValueEqualityOperators() const;
+
+    // The C# `OperatorMethod[] ValueInequalityOperators` (the C# 4.0 spec 7.10 value
+    // inequality operator `!=`): the same eight originals with negate=true, followed by
+    // their lifted forms.
+    const std::vector<std::shared_ptr<OperatorMethod>>& ValueInequalityOperators() const;
+
+    // The C# `OperatorMethod[] ReferenceEqualityOperators` (the C# 4.0 spec 7.10
+    // reference equality operator `==`): the Object and String originals (negate=false) --
+    // reference-typed operands do not lift, so no lifted forms are appended.
+    const std::vector<std::shared_ptr<OperatorMethod>>& ReferenceEqualityOperators() const;
+
+    // The C# `OperatorMethod[] ReferenceInequalityOperators`: the Object and String
+    // originals with negate=true, no lifted forms.
+    const std::vector<std::shared_ptr<OperatorMethod>>& ReferenceInequalityOperators() const;
+
 private:
     // The C# `private CSharpOperators(ICompilation compilation)` -- private; `Get`
     // (a static member, which has private access) builds the instance. NOTE:
@@ -542,6 +575,13 @@ private:
     mutable std::vector<std::shared_ptr<OperatorMethod>> shiftLeftOperators_;
     mutable std::vector<std::shared_ptr<OperatorMethod>> shiftRightOperators_;
     mutable std::vector<std::shared_ptr<OperatorMethod>> unsignedShiftRightOperators_;
+
+    // The C# `OperatorMethod[]? valueEqualityOperators` (and the three siblings) -- the
+    // equality lazy memo fields (convention (m)).
+    mutable std::vector<std::shared_ptr<OperatorMethod>> valueEqualityOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> valueInequalityOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> referenceEqualityOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> referenceInequalityOperators_;
 };
 
 // ---------------------------------------------------------------------------
@@ -1051,6 +1091,124 @@ public:
 private:
     // The C# `bool canEvaluateAtCompileTime`.
     bool canEvaluateAtCompileTime_;
+};
+
+// ---------------------------------------------------------------------------
+// The equality operator region (CSharpOperators.cs lines 700-786)
+// ---------------------------------------------------------------------------
+
+// Forward-declared (the LiftedEqualityOperatorMethod ctor parameter and back-pointer
+// member need only declarations, not the full definition; the ctor is out-of-line).
+class EqualityOperatorMethod;
+
+// The C# `sealed class LiftedEqualityOperatorMethod : BinaryOperatorMethod,
+// ILiftedOperator` (lines 753-786) -- the `Nullable<T>` form of a value equality/
+// inequality operator: BOTH parameters are lifted to their shared `Nullable<T>`
+// counterparts (the SAME instance added twice), but the return type STAYS the base's
+// plain Boolean (a lifted comparison of possibly-null operands still produces a definite
+// bool -- `null == null` is true, not null). Declared BEFORE EqualityOperatorMethod (the
+// LiftedUnaryOperatorMethod / LiftedBinaryOperatorMethod reorder precedent): the base's
+// inline `Lift` body constructs this class through `std::make_shared`, which needs the
+// complete type. `final` (the C# sealed).
+class LiftedEqualityOperatorMethod final : public BinaryOperatorMethod, public ILiftedOperator {
+public:
+    // The C# `public LiftedEqualityOperatorMethod(CSharpOperators operators,
+    // EqualityOperatorMethod baseMethod) : base(operators.compilation)` -- out-of-line in
+    // the .cpp (convention (a): the body reads the CSharpOperators parameter tables). The
+    // parameter is `const&`: the only caller, the base's `Lift` override, is const (the
+    // base `Lift` contract).
+    LiftedEqualityOperatorMethod(const CSharpOperators& operators,
+                                 const EqualityOperatorMethod& baseMethod);
+
+    // The C# `public override bool CanEvaluateAtCompileTime =>
+    // baseMethod.CanEvaluateAtCompileTime` -- delegates to the base method's flag
+    // (out-of-line: the body dereferences the baseMethod_ back-pointer).
+    bool CanEvaluateAtCompileTime() const override;
+
+    // --- ILiftedOperator ---
+
+    // The C# `IReadOnlyList<IParameter> NonLiftedParameters => baseMethod.Parameters` --
+    // a by-value snapshot of non-owning pointers (the ILiftedOperator convention (b)).
+    std::vector<const ILSpy::Decompiler::TypeSystem::IParameter*> NonLiftedParameters()
+        const override;
+
+    // The C# `IType NonLiftedReturnType => baseMethod.ReturnType`.
+    const ILSpy::Decompiler::TypeSystem::IType& NonLiftedReturnType() const override;
+
+private:
+    // The C# `EqualityOperatorMethod baseMethod` reference field -- the non-owning back-
+    // pointer, convention (n).
+    const EqualityOperatorMethod* baseMethod_;
+};
+
+// The C# `sealed class EqualityOperatorMethod : BinaryOperatorMethod` (lines 701-751) --
+// a built-in `==` / `!=` operator over one TypeCode's operands: both parameters are the
+// TypeCode's shared normal-table instances (the diagonal `T == T` shape -- the SAME
+// instance added twice) and the return type is always Boolean. The `Type`/`Negate` fields
+// distinguish the value tables (`==` negate=false / `!=` negate=true) and drive the
+// deferred `Invoke` and the `Lift` guard. The C# `object Invoke(CSharpResolver resolver,
+// object? lhs, object? rhs)` (the null-operand short-circuits, the `CSharpPrimitiveCast`
+// conversions, and the Single/Double/object.Equals comparison) is deferred as a whole
+// (convention (j): the resolver is the parameter type, the only caller, and the only
+// dependency). `final` (the C# sealed).
+class EqualityOperatorMethod final : public BinaryOperatorMethod {
+public:
+    // The C# `public EqualityOperatorMethod(CSharpOperators operators, TypeCode type, bool
+    // negate) : base(operators.compilation)`: `this.Negate = negate; this.Type = type;
+    // this.ReturnType = operators.compilation.FindType(KnownTypeCode.Boolean);
+    // parameters.Add(operators.MakeParameter(type)); parameters.Add(
+    // operators.MakeParameter(type));` -- the SAME shared parameter instance is added
+    // twice. The TypeCode is fully qualified: the sibling TypeSystem namespace is not
+    // searched from inside the class body (the iteration-64 learning); the owning return-
+    // type handle is recovered through `shared_from_this()` + `const_pointer_cast` (the
+    // D529 convention).
+    EqualityOperatorMethod(const CSharpOperators& operators,
+                           ILSpy::Decompiler::TypeSystem::TypeCode type, bool negate)
+        : BinaryOperatorMethod(operators.Compilation()), type_(type), negate_(negate)
+    {
+        const ILSpy::Decompiler::TypeSystem::IType& booleanType =
+            operators.Compilation().FindType(
+                ILSpy::Decompiler::TypeSystem::KnownTypeCode::Boolean);
+        returnType_ = std::const_pointer_cast<ILSpy::Decompiler::TypeSystem::IType>(
+            booleanType.shared_from_this());
+        parameters_.push_back(operators.MakeParameter(type));
+        parameters_.push_back(operators.MakeParameter(type));
+    }
+
+    // The C# `public readonly TypeCode Type` -- the operand type the operator compares.
+    // (No name clash: the OperatorMethod hierarchy carries no `Type` member -- only
+    // `IVariable::Type()`, which IParameter -- not these members -- derives.)
+    ILSpy::Decompiler::TypeSystem::TypeCode Type() const { return type_; }
+
+    // The C# `public readonly bool Negate` -- true for the `!=` operators.
+    bool Negate() const { return negate_; }
+
+    // The C# `public override bool CanEvaluateAtCompileTime => Type != TypeCode.Object` --
+    // only the Object form is not constant-evaluable (a reference comparison is not
+    // foldable; even the String form folds).
+    bool CanEvaluateAtCompileTime() const override
+    {
+        return type_ != ILSpy::Decompiler::TypeSystem::TypeCode::Object;
+    }
+
+    // The C# `public override OperatorMethod? Lift(CSharpOperators operators)`: the Object
+    // and String forms have reference-typed operands -- they do not lift (a lifted
+    // operator needs `Nullable<T>` value-type operands); every other TypeCode builds the
+    // LiftedEqualityOperatorMethod.
+    std::shared_ptr<OperatorMethod> Lift(const CSharpOperators& operators) const override
+    {
+        if (type_ == ILSpy::Decompiler::TypeSystem::TypeCode::Object
+            || type_ == ILSpy::Decompiler::TypeSystem::TypeCode::String)
+        {
+            return nullptr;
+        }
+        return std::make_shared<LiftedEqualityOperatorMethod>(operators, *this);
+    }
+
+private:
+    // The C# `public readonly TypeCode Type` / `public readonly bool Negate`.
+    const ILSpy::Decompiler::TypeSystem::TypeCode type_;
+    const bool negate_;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

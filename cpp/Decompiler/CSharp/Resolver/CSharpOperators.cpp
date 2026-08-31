@@ -1202,4 +1202,145 @@ CSharpOperators::UnsignedShiftRightOperators() const
     return unsignedShiftRightOperators_;
 }
 
+// ---------------------------------------------------------------------------
+// The equality operator region (CSharpOperators.cs lines 753-786): the out-of-line
+// LiftedEqualityOperatorMethod members
+// ---------------------------------------------------------------------------
+
+// The C# `public LiftedEqualityOperatorMethod(CSharpOperators operators,
+// EqualityOperatorMethod baseMethod) : base(operators.compilation)`: `this.baseMethod =
+// baseMethod; this.ReturnType = baseMethod.ReturnType; IParameter p =
+// operators.MakeNullableParameter(baseMethod.Parameters[0]); parameters.Add(p);
+// parameters.Add(p);` -- the return type STAYS the base's plain Boolean (a lifted
+// comparison still produces a definite bool), and the SAME shared nullable parameter
+// instance is added for both operands (the C# `p` local added twice). The owning
+// return-type handle is recovered from the base's accessor through `shared_from_this()` +
+// `const_pointer_cast` (the D529 convention -- the base ctor always assigns the registered
+// Boolean).
+LiftedEqualityOperatorMethod::LiftedEqualityOperatorMethod(
+    const CSharpOperators& operators, const EqualityOperatorMethod& baseMethod)
+    : BinaryOperatorMethod(operators.Compilation()), baseMethod_(&baseMethod)
+{
+    const ILSpy::Decompiler::TypeSystem::IType& returnType = baseMethod.ReturnType();
+    returnType_ = std::const_pointer_cast<ILSpy::Decompiler::TypeSystem::IType>(
+        returnType.shared_from_this());
+    std::vector<const ILSpy::Decompiler::TypeSystem::IParameter*> baseParameters =
+        baseMethod.Parameters();
+    // The C# `baseMethod.Parameters[0]` throws IndexOutOfRangeException on an empty list;
+    // the port throws std::out_of_range (the LiftedUnaryOperatorMethod bounds contract --
+    // every real equality operator method has exactly two parameters, so the throw
+    // guards only degenerate constructions).
+    if (baseParameters.empty())
+        throw std::out_of_range("LiftedEqualityOperatorMethod: the base method has no parameters");
+    std::shared_ptr<const ILSpy::Decompiler::TypeSystem::IParameter> p =
+        operators.MakeNullableParameter(*baseParameters[0]);
+    parameters_.push_back(p);
+    parameters_.push_back(p);
+}
+
+// The C# `public override bool CanEvaluateAtCompileTime =>
+// baseMethod.CanEvaluateAtCompileTime` -- the delegation (virtual dispatch on the base
+// method's concrete type).
+bool LiftedEqualityOperatorMethod::CanEvaluateAtCompileTime() const
+{
+    return baseMethod_->CanEvaluateAtCompileTime();
+}
+
+// The C# `IReadOnlyList<IParameter> NonLiftedParameters => baseMethod.Parameters` -- the
+// by-value snapshot of the pre-lifting parameter list (the ILiftedOperator convention).
+std::vector<const ILSpy::Decompiler::TypeSystem::IParameter*>
+LiftedEqualityOperatorMethod::NonLiftedParameters() const
+{
+    return baseMethod_->Parameters();
+}
+
+// The C# `IType NonLiftedReturnType => baseMethod.ReturnType`.
+const ILSpy::Decompiler::TypeSystem::IType& LiftedEqualityOperatorMethod::NonLiftedReturnType()
+    const
+{
+    return baseMethod_->ReturnType();
+}
+
+// ---------------------------------------------------------------------------
+// The lazy equality operator-table properties (CSharpOperators.cs lines 769-862)
+// ---------------------------------------------------------------------------
+
+// The C# `static readonly TypeCode[] valueEqualityOperatorsFor` (lines 769-775) -- the
+// TypeCodes the value equality/inequality tables instantiate (the C# 4.0 spec 7.10 value
+// equality set: the numeric primitives + Boolean). The C# declares it as a private static
+// member; the port keeps it file-local here (the two value tables in this .cpp are its
+// only consumers).
+const TypeCode valueEqualityOperatorsFor[] = {
+    TypeCode::Int32, TypeCode::UInt32,
+    TypeCode::Int64, TypeCode::UInt64,
+    TypeCode::Single, TypeCode::Double,
+    TypeCode::Decimal,
+    TypeCode::Boolean
+};
+
+// The C# `public OperatorMethod[] ValueEqualityOperators` (the C# 4.0 spec 7.10 value
+// equality operator `==`): the eight value-type originals (negate=false), then their
+// lifted `Nullable<T>` forms via `Lift` (convention (m): compute on first call -- the
+// empty vector is the not-yet-built sentinel).
+const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::ValueEqualityOperators()
+    const
+{
+    if (valueEqualityOperators_.empty())
+    {
+        std::vector<std::shared_ptr<OperatorMethod>> originals;
+        for (TypeCode code : valueEqualityOperatorsFor)
+            originals.push_back(std::make_shared<EqualityOperatorMethod>(*this, code, false));
+        valueEqualityOperators_ = Lift(originals);
+    }
+    return valueEqualityOperators_;
+}
+
+// The C# `public OperatorMethod[] ValueInequalityOperators` (the C# 4.0 spec 7.10 value
+// inequality operator `!=`): the same eight originals with negate=true, then their
+// lifted forms.
+const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::ValueInequalityOperators()
+    const
+{
+    if (valueInequalityOperators_.empty())
+    {
+        std::vector<std::shared_ptr<OperatorMethod>> originals;
+        for (TypeCode code : valueEqualityOperatorsFor)
+            originals.push_back(std::make_shared<EqualityOperatorMethod>(*this, code, true));
+        valueInequalityOperators_ = Lift(originals);
+    }
+    return valueInequalityOperators_;
+}
+
+// The C# `public OperatorMethod[] ReferenceEqualityOperators` (the C# 4.0 spec 7.10
+// reference equality operator `==`): the Object and String originals (negate=false).
+// Neither lifts (the `Lift` guard returns null for the reference-typed Object/String
+// operands), so the table is exactly the two originals.
+const std::vector<std::shared_ptr<OperatorMethod>>&
+CSharpOperators::ReferenceEqualityOperators() const
+{
+    if (referenceEqualityOperators_.empty())
+    {
+        referenceEqualityOperators_ = Lift({
+            std::make_shared<EqualityOperatorMethod>(*this, TypeCode::Object, false),
+            std::make_shared<EqualityOperatorMethod>(*this, TypeCode::String, false),
+        });
+    }
+    return referenceEqualityOperators_;
+}
+
+// The C# `public OperatorMethod[] ReferenceInequalityOperators`: the Object and String
+// originals with negate=true, no lifted forms.
+const std::vector<std::shared_ptr<OperatorMethod>>&
+CSharpOperators::ReferenceInequalityOperators() const
+{
+    if (referenceInequalityOperators_.empty())
+    {
+        referenceInequalityOperators_ = Lift({
+            std::make_shared<EqualityOperatorMethod>(*this, TypeCode::Object, true),
+            std::make_shared<EqualityOperatorMethod>(*this, TypeCode::String, true),
+        });
+    }
+    return referenceInequalityOperators_;
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver
