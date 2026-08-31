@@ -132,6 +132,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Resolver/CSharpConversionsConstraintConvertible_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsSpanConversion_Test.cpp
     Decompiler/CSharp/Resolver/CSharpConversionsTuple_Test.cpp
+    Decompiler/CSharp/Resolver/CSharpOperators_Test.cpp
     Decompiler/TypeSystem/Nullability_Test.cpp
     Decompiler/TypeSystem/NullableType_Test.cpp
     Decompiler/TypeSystem/SignatureCallingConvention_Test.cpp

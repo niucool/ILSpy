@@ -17,10 +17,12 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-// Port of `ReflectionHelper.GetTypeCode` -- see the header.
+// Port of `ReflectionHelper.GetTypeCode` + `ReflectionHelper.FindType(ICompilation, TypeCode)`
+// -- see the header.
 
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
 
+#include "Decompiler/TypeSystem/ICompilation.hpp"  // ICompilation (FindType's compilation)
 #include "Decompiler/TypeSystem/IType.hpp"  // IType
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"  // ITypeDefinition (KnownTypeCode)
 
@@ -38,6 +40,15 @@ TypeCode GetTypeCode(const IType& type) {
         return TypeCode::Empty;
     }
     return TypeCode::Empty;
+}
+
+// The C# `public static IType FindType(this ICompilation compilation, TypeCode typeCode)`
+// (ReflectionHelper.cs line 106): `return compilation.FindType((KnownTypeCode)typeCode);` -- a
+// straight numeric cast forwarded to the interface lookup. The `KnownTypeCode` values 0-17
+// align with `TypeCode` 0-17 by construction (`None` <-> `Empty`, the rest identity), so the
+// cast is faithful for every `TypeCode` value.
+const IType& FindType(const ICompilation& compilation, TypeCode typeCode) {
+    return compilation.FindType(static_cast<KnownTypeCode>(typeCode));
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem

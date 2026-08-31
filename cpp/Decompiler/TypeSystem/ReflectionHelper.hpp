@@ -17,12 +17,14 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-// Port of `ICSharpCode.Decompiler.TypeSystem.ReflectionHelper` (the `GetTypeCode` leaf, D513). The C#
+// Port of `ICSharpCode.Decompiler.TypeSystem.ReflectionHelper` (the `GetTypeCode` + `FindType` leaves, D513). The C#
 // `public static class ReflectionHelper` is a namespace of extension methods on `IType`/`ITypeDefinition`;
-// this leaf ports ONLY `TypeCode GetTypeCode(this IType type)` -- the numeric-type-code lookup used by
+// this leaf ports `TypeCode GetTypeCode(this IType type)` -- the numeric-type-code lookup used by
 // `CSharpConversions`'s numeric-conversion helpers (`ImplicitNumericConversion`/`IsNumericType`/
-// `AnyNumericConversion`) and by `NormalizeTypeVisitor`'s `IntPtrToNInt` arms. The other `ReflectionHelper`
-// members (`ParseReflectionName`/`ResolveTypeName`/`ApplyTypeArguments`/...) are deferred.
+// `AnyNumericConversion`) and by `NormalizeTypeVisitor`'s `IntPtrToNInt` arms -- and
+// `IType FindType(this ICompilation compilation, TypeCode typeCode)` -- the built-in-type lookup the
+// `CSharpOperators` parameter tables are built through. The other `ReflectionHelper` members
+// (`ParseReflectionName`/`ResolveTypeName`/`ApplyTypeArguments`/...) are deferred.
 
 #pragma once
 
@@ -31,6 +33,10 @@
 #include <cstdint>
 
 namespace ILSpy::Decompiler::TypeSystem {
+
+// Forward-declared (the FindType declaration below takes a reference; the .cpp includes
+// the full header).
+class ICompilation;
 
 // The C# `enum TypeCode` -- `System.TypeCode`, the BCL enum the decompiler mirrors. The order of
 // `KnownTypeCode`'s first 18 values (None/Object/DBNull/Boolean/Char/SByte/Byte/Int16/UInt16/Int32/UInt32/
@@ -67,5 +73,13 @@ class IType;
 // is `<= String` and not `Void`, returns `(TypeCode)knownTypeCode` (the numeric cast -- the `KnownTypeCode`
 // values 0-17 align with `TypeCode` 0-17); else `Empty`.
 TypeCode GetTypeCode(const IType& type);
+
+// The C# `public static IType FindType(this ICompilation compilation, TypeCode typeCode)`
+// (ReflectionHelper.cs line 106) -- the built-in-type lookup by `System.TypeCode`: a faithful
+// `static_cast<KnownTypeCode>` (the `KnownTypeCode` values 0-17 align with `TypeCode` 0-17,
+// `None` <-> `Empty`) forwarded to `ICompilation.FindType(KnownTypeCode)`. The CSharpOperators
+// parameter tables (`InitParameterArrays`) are built through this lookup. A NON-NULL
+// reference return (the `ICompilation::FindType` contract, mirrored by the delegation).
+const IType& FindType(const ICompilation& compilation, TypeCode typeCode);
 
 } // namespace ILSpy::Decompiler::TypeSystem

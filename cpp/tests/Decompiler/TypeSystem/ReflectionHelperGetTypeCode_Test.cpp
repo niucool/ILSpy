@@ -17,11 +17,15 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-// Tests for `ReflectionHelper.GetTypeCode` (D513) -- the numeric-type-code lookup. The C#
+// Tests for `ReflectionHelper.GetTypeCode` (D513) -- the numeric-type-code lookup -- and
+// `ReflectionHelper.FindType(ICompilation, TypeCode)` -- the built-in-type lookup the
+// `CSharpOperators` parameter tables are built through. The C#
 // `TypeCode GetTypeCode(this IType type)`: `dynamic_cast` to `ITypeDefinition`; if `KnownTypeCode <=
 // String && != Void`, return `(TypeCode)knownTypeCode` (numeric cast); else `Empty`. A non-definition
 // type (e.g. `KnownType`) is not an `ITypeDefinition` and yields `Empty`. The `KnownTypeCode` values
-// 0-17 align with `TypeCode` 0-17 (None<->Empty, rest identity).
+// 0-17 align with `TypeCode` 0-17 (None<->Empty, rest identity). The C#
+// `IType FindType(this ICompilation compilation, TypeCode typeCode)` delegates to
+// `ICompilation.FindType((KnownTypeCode)typeCode)` with the same numeric cast.
 
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
 #include "Decompiler/TypeSystem/Accessibility.hpp"
@@ -42,6 +46,7 @@
 namespace {
 
 using ILSpy::Decompiler::TypeSystem::Accessibility;
+using ILSpy::Decompiler::TypeSystem::FindType;
 using ILSpy::Decompiler::TypeSystem::FullTypeName;
 using ILSpy::Decompiler::TypeSystem::GetTypeCode;
 using ILSpy::Decompiler::TypeSystem::ICompilation;
@@ -128,4 +133,36 @@ TEST(ReflectionHelperGetTypeCodeTest, FullPrimitiveRangeAlignment) {
         auto def = MakeDef("T" + std::to_string(i++), p.ktc);
         EXPECT_EQ(GetTypeCode(*def), p.tc) << "pair " << i;
     }
+}
+
+// ---------------------------------------------------------------------------
+// FindType delegates to the KnownTypeCode lookup with the same numeric cast: the
+// pointer returned for a TypeCode is the pointer FindType(KnownTypeCode) returns.
+// ---------------------------------------------------------------------------
+TEST(ReflectionHelperGetTypeCodeTest, FindTypeDelegatesToTheKnownTypeCodeLookup) {
+    // The full range including the Empty<->None alignment at 0 and the boundary at 17.
+    const TypeCode codes[] = {
+        TypeCode::Empty, TypeCode::Object, TypeCode::DBNull, TypeCode::Boolean,
+        TypeCode::Char, TypeCode::SByte, TypeCode::Byte, TypeCode::Int16,
+        TypeCode::UInt16, TypeCode::Int32, TypeCode::UInt32, TypeCode::Int64,
+        TypeCode::UInt64, TypeCode::Single, TypeCode::Double, TypeCode::Decimal,
+        TypeCode::DateTime, TypeCode::String,
+    };
+    for (TypeCode code : codes) {
+        EXPECT_EQ(&FindType(Compilation(), code),
+                  &Compilation().FindType(static_cast<KnownTypeCode>(code)))
+            << "TypeCode " << static_cast<int>(code);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FindType returns the REGISTERED type for the code (a fresh compilation with one
+// registration -- the shared Compilation() is unregistered and would yield the
+// compilation's fallback for every code).
+// ---------------------------------------------------------------------------
+TEST(ReflectionHelperGetTypeCodeTest, FindTypeReturnsTheRegisteredType) {
+    LookupCompilation compilation;
+    auto def = MakeDef("Int32", KnownTypeCode::Int32);
+    compilation.RegisterKnownType(KnownTypeCode::Int32, def.get());
+    EXPECT_EQ(&FindType(compilation, TypeCode::Int32), static_cast<const IType*>(def.get()));
 }
