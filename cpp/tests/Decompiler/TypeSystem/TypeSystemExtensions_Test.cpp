@@ -284,3 +284,79 @@ TEST(TypeSystemExtensionsTest, IsDerivedFromKnownTypeNotDerivedIsFalse)
     EXPECT_FALSE(TS::IsDerivedFrom(*string, TS::KnownTypeCode::Exception));
     EXPECT_TRUE(TS::IsDerivedFrom(*exception, TS::KnownTypeCode::Object));
 }
+
+// ---------------------------------------------------------------------------
+// GetAllTypeDefinitions / GetTopLevelTypeDefinitions (TypeSystemExtensions.cs
+// lines 462-478) -- the Modules.SelectMany over each module's type table.
+// ---------------------------------------------------------------------------
+
+// An unconfigured compilation yields the empty scan (no registered type tables).
+TEST(TypeSystemExtensionsTest, GetAllTypeDefinitionsEmptyCompilationYieldsEmpty)
+{
+    LookupCompilation compilation;
+    EXPECT_TRUE(TS::GetAllTypeDefinitions(compilation).empty());
+    EXPECT_TRUE(TS::GetTopLevelTypeDefinitions(compilation).empty());
+}
+
+// The SelectMany concatenates the MAIN module's table first, then the extra
+// (referenced) modules', in module-list order; the entries are the registered
+// instances (pointer identity).
+TEST(TypeSystemExtensionsTest, GetAllTypeDefinitionsConcatenatesModuleTypeTables)
+{
+    LookupCompilation compilation;
+    auto mainType = MakeDefinition(compilation, "MainType", "N");
+    compilation.AddTypeDefinition(mainType.get());
+    auto extraModule = std::make_unique<TS::TestSupport::LookupModule>(compilation, "Extra");
+    auto extraType1 = MakeDefinition(compilation, "ExtraType1", "N");
+    auto extraType2 = MakeDefinition(compilation, "ExtraType2", "N");
+    extraModule->AddTypeDefinition(extraType1.get());
+    extraModule->AddTypeDefinition(extraType2.get());
+    compilation.AddModule(extraModule.get());
+
+    std::vector<const TS::ITypeDefinition*> all = TS::GetAllTypeDefinitions(compilation);
+    ASSERT_EQ(all.size(), 3u);
+    EXPECT_EQ(all[0], mainType.get());
+    EXPECT_EQ(all[1], extraType1.get());
+    EXPECT_EQ(all[2], extraType2.get());
+}
+
+// The TopLevelTypeDefinitions SelectMany mirrors the concatenation over the
+// module-level top-level tables.
+TEST(TypeSystemExtensionsTest, GetTopLevelTypeDefinitionsConcatenatesModuleTables)
+{
+    LookupCompilation compilation;
+    auto mainType = MakeDefinition(compilation, "MainType", "N");
+    compilation.AddTopLevelTypeDefinition(mainType.get());
+    auto extraModule = std::make_unique<TS::TestSupport::LookupModule>(compilation, "Extra");
+    auto extraType = MakeDefinition(compilation, "ExtraType", "N");
+    extraModule->AddTopLevelTypeDefinition(extraType.get());
+    compilation.AddModule(extraModule.get());
+
+    std::vector<const TS::ITypeDefinition*> topLevel = TS::GetTopLevelTypeDefinitions(compilation);
+    ASSERT_EQ(topLevel.size(), 2u);
+    EXPECT_EQ(topLevel[0], mainType.get());
+    EXPECT_EQ(topLevel[1], extraType.get());
+}
+
+// The two scans read DIFFERENT module tables: `TypeDefinitions` includes the
+// nested types while `TopLevelTypeDefinitions` carries only the non-nested ones
+// (a module registering [Top, Nested] to TypeDefinitions but only [Top] to
+// TopLevelTypeDefinitions yields both from GetAll and just Top from
+// GetTopLevel -- the divergence crux).
+TEST(TypeSystemExtensionsTest, GetTopLevelTypeDefinitionsExcludesNestedTypes)
+{
+    LookupCompilation compilation;
+    auto top = MakeDefinition(compilation, "Top", "N");
+    auto nested = MakeDefinition(compilation, "Nested", "N");
+    compilation.AddTypeDefinition(top.get());
+    compilation.AddTypeDefinition(nested.get());
+    compilation.AddTopLevelTypeDefinition(top.get());
+
+    std::vector<const TS::ITypeDefinition*> all = TS::GetAllTypeDefinitions(compilation);
+    std::vector<const TS::ITypeDefinition*> topLevel = TS::GetTopLevelTypeDefinitions(compilation);
+    ASSERT_EQ(all.size(), 2u);
+    EXPECT_EQ(all[0], top.get());
+    EXPECT_EQ(all[1], nested.get());
+    ASSERT_EQ(topLevel.size(), 1u);
+    EXPECT_EQ(topLevel[0], top.get());
+}

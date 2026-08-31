@@ -87,6 +87,17 @@ public:
           rootNamespace_(compilation) {}
 
     void AddFriendAssembly(std::string name) { friendAssemblies_.push_back(std::move(name)); }
+    // Configurable type tables for the compilation-level scans (the TypeSystemExtensions
+    // `GetAllTypeDefinitions` / `GetTopLevelTypeDefinitions` SelectMany, and the TypeInference
+    // Improved `FindTypesInBounds` refinement's compilation-wide candidate scan). The
+    // defaults preserve the original behavior (empty tables -- the additive-setter
+    // convention); the stored pointers are non-owning (the caller keeps the
+    // `ITypeDefinition` stubs alive).
+    void AddTypeDefinition(const ITypeDefinition* d) { typeDefinitions_.push_back(d); }
+    void AddTopLevelTypeDefinition(const ITypeDefinition* d)
+    {
+        topLevelTypeDefinitions_.push_back(d);
+    }
 
     // --- ISymbol ---
     TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Module; }
@@ -118,13 +129,21 @@ public:
     {
         return nullptr;
     }
-    std::vector<const ITypeDefinition*> TopLevelTypeDefinitions() const override { return {}; }
-    std::vector<const ITypeDefinition*> TypeDefinitions() const override { return {}; }
+    std::vector<const ITypeDefinition*> TopLevelTypeDefinitions() const override
+    {
+        return topLevelTypeDefinitions_;
+    }
+    std::vector<const ITypeDefinition*> TypeDefinitions() const override
+    {
+        return typeDefinitions_;
+    }
 
 private:
     const ICompilation& compilation_;
     std::string assemblyName_;
     std::vector<std::string> friendAssemblies_;
+    std::vector<const ITypeDefinition*> typeDefinitions_;
+    std::vector<const ITypeDefinition*> topLevelTypeDefinitions_;
     TestNamespace rootNamespace_;
 };
 
@@ -139,10 +158,29 @@ public:
     LookupCompilation() : mainModule_(*this, "LookupTests") {}
 
     void RegisterKnownType(KnownTypeCode code, const IType* type) { knownTypes_[code] = type; }
+    // Forwarding registrations into the MAIN module's type tables (the multi-module
+    // `Modules()` list keeps the main module first; these configure the tables the
+    // TypeSystemExtensions `GetAllTypeDefinitions` / `GetTopLevelTypeDefinitions`
+    // SelectMany reads). Defaults preserve the original behavior (empty tables).
+    void AddTypeDefinition(const ITypeDefinition* d) { mainModule_.AddTypeDefinition(d); }
+    void AddTopLevelTypeDefinition(const ITypeDefinition* d)
+    {
+        mainModule_.AddTopLevelTypeDefinition(d);
+    }
+    // An extra (referenced) module appended AFTER the main module (the C#
+    // `IReadOnlyList<IModule> Modules` lists the main module first). The caller keeps
+    // the module alive (the type system owns the entities -- the compilation stores
+    // non-owning pointers).
+    void AddModule(const IModule* module) { extraModules_.push_back(module); }
 
     // --- ICompilation ---
     const IModule& MainModule() const override { return mainModule_; }
-    std::vector<const IModule*> Modules() const override { return { &mainModule_ }; }
+    std::vector<const IModule*> Modules() const override
+    {
+        std::vector<const IModule*> modules{ &mainModule_ };
+        modules.insert(modules.end(), extraModules_.begin(), extraModules_.end());
+        return modules;
+    }
     std::vector<const IModule*> ReferencedModules() const override { return {}; }
     const INamespace& RootNamespace() const override { return mainModule_.RootNamespace(); }
     const INamespace* GetNamespaceForExternAlias(const std::string&) const override
@@ -165,6 +203,7 @@ public:
 
 private:
     LookupModule mainModule_;
+    std::vector<const IModule*> extraModules_;
     SpecialType unknownType_{ TypeKind::Unknown };
     ILSpy::Decompiler::Util::CacheManager cacheManager_;
     std::map<KnownTypeCode, const IType*> knownTypes_;

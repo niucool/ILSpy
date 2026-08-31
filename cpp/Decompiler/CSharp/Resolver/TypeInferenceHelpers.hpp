@@ -41,18 +41,20 @@
 // the synthetic substituted-parameter-type arguments) -- and the Fixing /
 // FindTypeInBounds / GetBestCommonType regions (spec draft-v11 sections 12.6.3.13 +
 // 12.6.3.17: the `Fix` fixing decision, the `FindTypesInBounds` spec candidate-types
-// algorithm, the `FindTypeInBounds` public entry, and the `GetBestCommonType`
-// dummy-TP pipeline over `MakeOutputTypeInference`; their IMPROVED-algorithm refinement
-// -- the `FindTypesInBounds` base-type-definition intersection -- stays deferred,
-// documented at its site below, while the `ImprovedReturnAllResults` arms (the
-// `IntersectionType.Create` all-results reports in `Fix` / `FindTypeInBounds`) are
-// wired (TypeSystem/IntersectionType.{hpp,cpp})) -- and the
+// algorithm plus its IMPROVED-algorithm refinement (the lower bounds'
+// base-type-definition intersection, the compilation-wide scan over
+// `ICompilation.GetAllTypeDefinitions` -- the TypeSystemExtensions SelectMany now
+// ported -- the upper-bound `IsDerivedFrom` filter, and the generic candidates'
+// `InferTypeArgumentsFromBounds` construction with the most-specific/least-specific
+// redundancy reduction), the `FindTypeInBounds` public entry, and the `GetBestCommonType`
+// dummy-TP pipeline over `MakeOutputTypeInference`; the `ImprovedReturnAllResults` arms
+// (the `IntersectionType.Create` all-results reports in `Fix` / `FindTypeInBounds`) are
+// wired too (TypeSystem/IntersectionType.{hpp,cpp})) -- and the
 // InferTypeArguments region (the `PhaseOne`/`PhaseTwo` private phases, the
 // `InferTypeArguments` main entry, and the `InferTypeArgumentsFromBounds` bounds entry,
 // composing every landed region into the engine's public output). The ported surface is
-// now the whole `TypeInference` class modulo the deferred Improved-algorithm refinement
-// in `FindTypesInBounds` (the `ICompilation.GetAllTypeDefinitions` scan);
-// the `OverloadResolution` engine it feeds (`RunTypeInference`/
+// the whole `TypeInference` class; the
+// `OverloadResolution` engine it feeds (`RunTypeInference`/
 // `CalculateCandidate`/`AddCandidate`/`AddMethodLists`) is ported too.
 //
 // RETURN CONVENTION: the C# `IType[]` returns fresh arrays of GC-owned references; the port
@@ -475,14 +477,16 @@ ILSpy::Decompiler::TypeSystem::ITypePtr GetFirstTypePreferNonInterfaces(
 // lower bound converts to and that convert to every upper bound, then to the unique
 // candidate all the other candidates convert to). For the `CSharp4` algorithm this IS the
 // whole function (the `count == 1 || !(Improved || ImprovedReturnAllResults)` early
-// return); the IMPROVED refinement after it (the lower bounds' base-type-definition
-// intersection, the compilation-wide type scan, and the `InferTypeArgumentsFromBounds`
-// recursion for generic candidates) stays DEFERRED (`ICompilation.GetAllTypeDefinitions`
-// is not yet ported) -- the improved algorithms with a non-single candidate list return
-// the pre-refinement candidates (a documented deviation; the `CSharp4` default is
-// exact). The C# `nestingLevel > maxNestingLevel` guard (`maxNestingLevel` == 5) threads
-// as the nestingLevel parameter (the caller bumps it at the `Fix` recursion point, the
-// C# `CreateNestedInstance`).
+// return); the IMPROVED refinement after it rebuilds the candidate list from the type
+// DEFINITIONS -- the lower bounds' base-type-definition intersection (or the
+// compilation-wide scan over `ICompilation.GetAllTypeDefinitions` when there are no
+// lower bounds), the upper-bound `IsDerivedFrom` filter, the generic candidates'
+// `InferTypeArgumentsFromBounds` construction, and the most-specific/least-specific
+// redundancy reduction. The C# `nestingLevel > maxNestingLevel` guard (`maxNestingLevel`
+// == 5) threads as the nestingLevel parameter (the caller bumps it at the `Fix`
+// recursion point, the C# `CreateNestedInstance`; the refinement threads the CURRENT
+// level into its own `InferTypeArgumentsFromBounds` call so the guard bounds the
+// generic-candidate recursion too).
 std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> FindTypesInBounds(
     CSharpConversions& conversions,
     const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& lowerBounds,
@@ -542,8 +546,9 @@ ILSpy::Decompiler::TypeSystem::ITypePtr GetBestCommonType(
 // rounds: the parameters that depend on no unfixed parameter are fixed first, the
 // cycle-breaking bounds-based fallback, and the output-type-inference-then-repeat loop),
 // `InferTypeArguments` (the public main entry composing both), and
-// `InferTypeArgumentsFromBounds` (the public bounds-based entry -- the one the DEFERRED
-// Improved `FindTypesInBounds` refinement recurses through). The C# instance fields these
+// `InferTypeArgumentsFromBounds` (the public bounds-based entry -- the one the Improved
+// `FindTypesInBounds` refinement recurses through, threading its current nesting level
+// so the `Fix` -> `CreateNestedInstance` recursion keeps the `maxNestingLevel` guard). The C# instance fields these
 // read (`typeParameters`, `arguments`, `parameterTypes`, `classTypeArguments`, and the
 // lazily memoized `dependencyMatrix`) thread as parameters; the matrix computes ONCE at
 // the `InferTypeArguments` call site and threads into both `PhaseTwo` recursions (the C#
@@ -617,7 +622,11 @@ std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> InferTypeArguments(
 // fix results -- `Fix` runs for every parameter even after a failure, the C# non-
 // short-circuit `&=`). No `OwnerType` check here (only the `Index == i` validation, the
 // soft failure above on violation). `targetType` is NON-CONST: it feeds the two bound
-// workers as the V side (the non-const `ChangeNullability`, D406).
+// workers as the V side (the non-const `ChangeNullability`, D406). The C# instance
+// state `nestingLevel` threads as the final parameter: a fresh instance's level is 0
+// (the public-entry call sites), while the Improved `FindTypesInBounds` refinement
+// passes its own current level so the `Fix` -> `CreateNestedInstance` recursion keeps
+// the `maxNestingLevel` guard effective across the generic-candidate construction.
 std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> InferTypeArgumentsFromBounds(
     const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
     CSharpConversions& conversions,
@@ -626,6 +635,7 @@ std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> InferTypeArgumentsFromBound
     const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& lowerBounds,
     const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& upperBounds,
     bool& success,
-    TypeInferenceAlgorithm algorithm);
+    TypeInferenceAlgorithm algorithm,
+    int nestingLevel);
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver::Detail

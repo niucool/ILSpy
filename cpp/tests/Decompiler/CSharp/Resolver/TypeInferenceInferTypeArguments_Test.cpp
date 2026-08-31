@@ -664,7 +664,7 @@ TEST(TypeInferenceInferTypeArgumentsTest, FromBoundsLowerBoundFixes)
     bool success = true;
     std::vector<ITypePtr> result = InferTypeArgumentsFromBounds(
         Compilation(), conversions, RawParams({t0}), *t0, {int32}, {}, success,
-        kCSharp4);
+        kCSharp4, /*nestingLevel*/ 0);
     EXPECT_TRUE(success);
     ASSERT_EQ(result.size(), 1u);
     EXPECT_EQ(result[0].get(), int32.get());
@@ -680,7 +680,7 @@ TEST(TypeInferenceInferTypeArgumentsTest, FromBoundsUpperBoundFixes)
     bool success = true;
     std::vector<ITypePtr> result = InferTypeArgumentsFromBounds(
         Compilation(), conversions, RawParams({t0}), *t0, {}, {str}, success,
-        kCSharp4);
+        kCSharp4, /*nestingLevel*/ 0);
     EXPECT_TRUE(success);
     ASSERT_EQ(result.size(), 1u);
     EXPECT_EQ(result[0].get(), str.get());
@@ -695,7 +695,7 @@ TEST(TypeInferenceInferTypeArgumentsTest, FromBoundsNoBoundsFails)
     bool success = true;
     std::vector<ITypePtr> result = InferTypeArgumentsFromBounds(
         Compilation(), conversions, RawParams({t0}), *t0, {}, {}, success,
-        kCSharp4);
+        kCSharp4, /*nestingLevel*/ 0);
     EXPECT_FALSE(success);
     ASSERT_EQ(result.size(), 1u);
     EXPECT_EQ(result[0]->Kind(), TypeKind::Unknown);
@@ -714,7 +714,7 @@ TEST(TypeInferenceInferTypeArgumentsTest, FromBoundsAccumulatesAcrossParameters)
     bool success = true;
     std::vector<ITypePtr> result = InferTypeArgumentsFromBounds(
         Compilation(), conversions, RawParams({t0, t1}), *t0, {int32}, {}, success,
-        kCSharp4);
+        kCSharp4, /*nestingLevel*/ 0);
     EXPECT_FALSE(success);
     ASSERT_EQ(result.size(), 2u);
     EXPECT_EQ(result[0].get(), int32.get());
@@ -731,7 +731,7 @@ TEST(TypeInferenceInferTypeArgumentsTest, FromBoundsIndexViolationSoftFails)
     bool success = true;
     std::vector<ITypePtr> result = InferTypeArgumentsFromBounds(
         Compilation(), conversions, RawParams({t0}), *t0, {int32}, {}, success,
-        kCSharp4);
+        kCSharp4, /*nestingLevel*/ 0);
     EXPECT_FALSE(success);
     ASSERT_EQ(result.size(), 1u);
     EXPECT_EQ(result[0]->Kind(), TypeKind::Unknown);

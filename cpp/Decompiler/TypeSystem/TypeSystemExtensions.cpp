@@ -27,6 +27,7 @@
 #include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
+#include "Decompiler/TypeSystem/IModule.hpp"
 
 #include <algorithm>
 #include <any>
@@ -87,6 +88,36 @@ bool IsDerivedFrom(const ITypeDefinition& type, KnownTypeCode baseType)
         return false;
     // The C# `IsDerivedFrom(type, type.Compilation.FindType(baseType).GetDefinition())`.
     return IsDerivedFrom(type, type.Compilation().FindType(baseType).GetDefinition());
+}
+
+std::vector<const ITypeDefinition*> GetAllTypeDefinitions(const ICompilation& compilation)
+{
+    // C# `compilation.Modules.SelectMany(a => a.TypeDefinitions)` -- the concatenation of
+    // every module's `TypeDefinitions()` snapshot, in module-list order (the main module
+    // first, then the referenced modules; the C# deferred SelectMany materializes in the
+    // same order).
+    std::vector<const ITypeDefinition*> result;
+    for (const IModule* module : compilation.Modules()) {
+        if (module == nullptr) // degenerate null module entry (the D516 convention)
+            continue;
+        for (const ITypeDefinition* def : module->TypeDefinitions())
+            result.push_back(def);
+    }
+    return result;
+}
+
+std::vector<const ITypeDefinition*> GetTopLevelTypeDefinitions(const ICompilation& compilation)
+{
+    // C# `compilation.Modules.SelectMany(a => a.TopLevelTypeDefinitions)` -- the same
+    // concatenation over the NON-NESTED types.
+    std::vector<const ITypeDefinition*> result;
+    for (const IModule* module : compilation.Modules()) {
+        if (module == nullptr) // degenerate null module entry (the D516 convention)
+            continue;
+        for (const ITypeDefinition* def : module->TopLevelTypeDefinitions())
+            result.push_back(def);
+    }
+    return result;
 }
 
 bool IsKnownType(const IType& type, KnownTypeCode knownType) {

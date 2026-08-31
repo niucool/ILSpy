@@ -20,7 +20,11 @@
 // Tests for the `TypeInference` Fixing / FindTypeInBounds / GetBestCommonType regions
 // (the sixth slice of the TypeInference long pole): `Detail::GetFirstTypePreferNonInterfaces`
 // (TypeInference.cs lines 1055-1058), `Detail::FindTypesInBounds` (lines 1059-1186, the
-// C# spec draft-v11 12.6.3.13 candidate-types algorithm), `Detail::FindTypeInBounds`
+// C# spec draft-v11 12.6.3.13 candidate-types algorithm PLUS the IMPROVED refinement
+// of lines 1101-1176 -- the lower bounds' base-type-definition intersection, the
+// compilation-wide `GetAllTypeDefinitions` scan, the upper-bound `IsDerivedFrom` filter,
+// the generic candidates' `InferTypeArgumentsFromBounds` construction, and the
+// most-specific/least-specific redundancy reduction), `Detail::FindTypeInBounds`
 // (lines 1033-1053), `Detail::Fix` (lines 967-994, section 12.6.3.13 "Fixing"), and
 // `Detail::GetBestCommonType` (lines 1001-1026, section 12.6.3.17).
 //
@@ -140,6 +144,21 @@ std::shared_ptr<RefDef> MakeRef(KnownTypeCode ktc, const std::string& name) {
         name, "",
         FullTypeName(TopLevelTypeName("", name, 0)),
         TypeKind::Class, Accessibility::Public, Compilation(), nullptr, ktc);
+}
+
+// A `RefDef` bound to a CALLER-SUPPLIED compilation (the improved-refinement tests
+// need a fresh per-test compilation -- the module type tables must not leak across
+// tests, and `IsDerivedFrom`'s same-compilation check requires the candidates to be
+// bound to the very compilation the local conversions carry). The optional arity wires
+// the `FullTypeName` type-parameter count the generic-candidate arm reads through
+// `IType::TypeParameterCount()`.
+std::shared_ptr<RefDef> MakeLocalRef(LookupCompilation& compilation, const std::string& name,
+                                    TypeKind kind = TypeKind::Class, int typeParameterCount = 0)
+{
+    return std::make_shared<RefDef>(
+        name, "",
+        FullTypeName(TopLevelTypeName("", name, typeParameterCount)),
+        kind, Accessibility::Public, compilation, nullptr);
 }
 
 // A one-entry `TP` state over the cached dummy METHOD type parameter 0 (the very dummy
@@ -380,27 +399,40 @@ TEST(TypeInferenceFixingBestCommonTypeTest, FindTypeInBoundsNoCandidateYieldsUnk
 }
 
 // The ImprovedReturnAllResults arm: a MULTI-candidate result returns the INTERSECTION
-// of all candidates. Two DISTINCT int instances do not dedup under the identity-equality
-// `StructuralEquals` and each converts to the other (the int->int table entry), so the
-// candidate list keeps both -- the shape where the arm diverges from the picker.
+// of all candidates. With the Improved refinement live, the multi-candidate list comes
+// from the REFINED candidates: two derived classes sharing TWO UNRELATED interfaces
+// (I1, I2) -- the chains' intersection [I1, I2] survives the most-specific reduction
+// because neither interface is derived from the other. (The pre-refinement
+// two-distinct-int-instance shape no longer reaches this arm: the refinement rebuilds
+// that candidate list from the int chains.)
 TEST(TypeInferenceFixingBestCommonTypeTest, FindTypeInBoundsImprovedReturnAllResultsYieldsIntersection)
 {
-    CSharpConversions conversions(Compilation());
-    ITypePtr int32a = Def(KnownTypeCode::Int32);
-    ITypePtr int32b = Def(KnownTypeCode::Int32);
-    ITypePtr result = FindTypeInBounds(conversions, {int32a, int32b}, {},
+    LookupCompilation compilation;
+    CSharpConversions conversions(compilation);
+    auto i1 = MakeLocalRef(compilation, "I1", TypeKind::Interface);
+    auto i2 = MakeLocalRef(compilation, "I2", TypeKind::Interface);
+    auto derived1 = MakeLocalRef(compilation, "Derived1");
+    auto derived2 = MakeLocalRef(compilation, "Derived2");
+    derived1->AddDirectBaseType(i1);
+    derived1->AddDirectBaseType(i2);
+    derived2->AddDirectBaseType(i1);
+    derived2->AddDirectBaseType(i2);
+
+    ITypePtr result = FindTypeInBounds(conversions, { derived1, derived2 }, {},
                                        Res::TypeInferenceAlgorithm::ImprovedReturnAllResults);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result->Kind(), TypeKind::Intersection);
     auto* intersection = dynamic_cast<IntersectionType*>(result.get());
     ASSERT_NE(intersection, nullptr);
     ASSERT_EQ(intersection->Types().size(), 2u);
-    EXPECT_EQ(intersection->Types()[0].get(), int32a.get());
-    EXPECT_EQ(intersection->Types()[1].get(), int32b.get());
+    EXPECT_EQ(intersection->Types()[0].get(), i1.get());
+    EXPECT_EQ(intersection->Types()[1].get(), i2.get());
 }
 
 // The CSharp4 twin over the same bounds: the picker reduces the two candidates to the
-// FIRST non-interface type -- the else arm the intersection arm diverges from.
+// FIRST non-interface type -- the else arm the intersection arm diverges from. CSharp4
+// never refines, so the two-distinct-int-instance shape still yields the multi-candidate
+// SPEC list here (the improved algorithms reduce that shape through the refinement).
 TEST(TypeInferenceFixingBestCommonTypeTest, FindTypeInBoundsCSharp4MultiCandidateYieldsFirstNonInterface)
 {
     CSharpConversions conversions(Compilation());
@@ -602,16 +634,25 @@ TEST(TypeInferenceFixingBestCommonTypeTest, ImprovedReturnAllResultsNoCandidates
 
 // The ImprovedReturnAllResults arm: a MULTI-candidate fix does not reduce to a single
 // type -- the INTERSECTION of all candidates becomes the fixed type and any non-empty
-// candidate list SUCCEEDS (`types.Count >= 1`). The same two-distinct-int-instance
-// bound set as the FindTypeInBounds intersection test.
+// candidate list SUCCEEDS (`types.Count >= 1`). With the Improved refinement live the
+// multi-candidate list comes from the REFINED candidates (the same two-derived-classes-
+// sharing-two-unrelated-interfaces shape as the FindTypeInBounds intersection test --
+// the chains' intersection [I1, I2] survives the most-specific reduction).
 TEST(TypeInferenceFixingBestCommonTypeTest, ImprovedReturnAllResultsMultiCandidateFixesToIntersection)
 {
-    CSharpConversions conversions(Compilation());
+    LookupCompilation compilation;
+    CSharpConversions conversions(compilation);
     std::vector<TP> state = MakeState();
-    ITypePtr int32a = Def(KnownTypeCode::Int32);
-    ITypePtr int32b = Def(KnownTypeCode::Int32);
-    state[0].AddLowerBound(int32a);
-    state[0].AddLowerBound(int32b);
+    auto i1 = MakeLocalRef(compilation, "I1", TypeKind::Interface);
+    auto i2 = MakeLocalRef(compilation, "I2", TypeKind::Interface);
+    auto derived1 = MakeLocalRef(compilation, "Derived1");
+    auto derived2 = MakeLocalRef(compilation, "Derived2");
+    derived1->AddDirectBaseType(i1);
+    derived1->AddDirectBaseType(i2);
+    derived2->AddDirectBaseType(i1);
+    derived2->AddDirectBaseType(i2);
+    state[0].AddLowerBound(derived1);
+    state[0].AddLowerBound(derived2);
     EXPECT_TRUE(Fix(conversions, state[0], Res::TypeInferenceAlgorithm::ImprovedReturnAllResults,
                     /*nestingLevel*/ 0));
     ASSERT_NE(state[0].FixedTo, nullptr);
@@ -619,13 +660,14 @@ TEST(TypeInferenceFixingBestCommonTypeTest, ImprovedReturnAllResultsMultiCandida
     auto* intersection = dynamic_cast<IntersectionType*>(state[0].FixedTo.get());
     ASSERT_NE(intersection, nullptr);
     ASSERT_EQ(intersection->Types().size(), 2u);
-    EXPECT_EQ(intersection->Types()[0].get(), int32a.get());
-    EXPECT_EQ(intersection->Types()[1].get(), int32b.get());
+    EXPECT_EQ(intersection->Types()[0].get(), i1.get());
+    EXPECT_EQ(intersection->Types()[1].get(), i2.get());
 }
 
 // The CSharp4 twin over the same bounds: the multi-candidate fix picks the FIRST
 // non-interface candidate and FAILS (`types.Count == 1`) -- the else arm the
-// intersection arm diverges from.
+// intersection arm diverges from. CSharp4 never refines, so the two-distinct-int
+// shape still yields the multi-candidate SPEC list here.
 TEST(TypeInferenceFixingBestCommonTypeTest, CSharp4MultiCandidateFixesToFirstAndFails)
 {
     CSharpConversions conversions(Compilation());
@@ -769,4 +811,192 @@ TEST(TypeInferenceFixingBestCommonTypeTest, EmptyExpressionsFailWithUnknownType)
     EXPECT_FALSE(success);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result->Kind(), TypeKind::Unknown);
+}
+
+// ===========================================================================
+// FindTypesInBounds -- the IMPROVED refinement (TypeInference.cs lines 1101-1176).
+// The Improved algorithms run a second pass when the spec candidate-types algorithm
+// yields no single candidate: the lower bounds' base-type-definition intersection (or
+// the compilation-wide type scan when there are no lower bounds), the upper-bound
+// IsDerivedFrom filter, the generic candidates' InferTypeArgumentsFromBounds
+// construction, and the most-specific/least-specific redundancy reduction. Each test
+// builds a FRESH local LookupCompilation (the scan tables must not leak across tests,
+// and the candidates must be bound to the very compilation the local conversions
+// carry -- the IsDerivedFrom same-compilation check).
+// ===========================================================================
+
+// The lower bounds' base-type-definition intersection finds the common base the spec
+// algorithm misses: two derived classes share Base, but neither converts to the
+// other, so the spec candidates are empty and the intersection supplies Base.
+TEST(TypeInferenceFixingBestCommonTypeTest, ImprovedFindsCommonBaseViaLowerBoundsIntersection)
+{
+    LookupCompilation compilation;
+    CSharpConversions conversions(compilation);
+    auto base = MakeLocalRef(compilation, "Base");
+    auto derived1 = MakeLocalRef(compilation, "Derived1");
+    auto derived2 = MakeLocalRef(compilation, "Derived2");
+    derived1->AddDirectBaseType(base);
+    derived2->AddDirectBaseType(base);
+
+    std::vector<ITypePtr> result = FindTypesInBounds(
+        conversions, { derived1, derived2 }, {}, Res::TypeInferenceAlgorithm::Improved, 0);
+    ASSERT_EQ(result.size(), 1u);
+    EXPECT_EQ(result[0].get(), base.get());
+}
+
+// The most-specific reduction (upper bounds absent): a candidate made redundant by a
+// more specific candidate is REMOVED -- the intersection [object, Base] reduces to
+// [Base] because Base is derived from object (object was added first but does not
+// survive Base's redundancy sweep).
+TEST(TypeInferenceFixingBestCommonTypeTest, ImprovedMostSpecificRemovesRedundantBaseCandidate)
+{
+    LookupCompilation compilation;
+    CSharpConversions conversions(compilation);
+    auto object = MakeLocalRef(compilation, "Object");
+    auto base = MakeLocalRef(compilation, "Base");
+    auto derived1 = MakeLocalRef(compilation, "Derived1");
+    auto derived2 = MakeLocalRef(compilation, "Derived2");
+    base->AddDirectBaseType(object);
+    derived1->AddDirectBaseType(base);
+    derived2->AddDirectBaseType(base);
+
+    std::vector<ITypePtr> result = FindTypesInBounds(
+        conversions, { derived1, derived2 }, {}, Res::TypeInferenceAlgorithm::Improved, 0);
+    ASSERT_EQ(result.size(), 1u);
+    EXPECT_EQ(result[0].get(), base.get());
+}
+
+// The default CSharp4 algorithm does NOT run the refinement: the same shape returns
+// the (empty) spec candidate list (the refinement is Improved-only -- the mode
+// divergence pin).
+TEST(TypeInferenceFixingBestCommonTypeTest, CSharp4DoesNotRunTheImprovedRefinement)
+{
+    LookupCompilation compilation;
+    CSharpConversions conversions(compilation);
+    auto base = MakeLocalRef(compilation, "Base");
+    auto derived1 = MakeLocalRef(compilation, "Derived1");
+    auto derived2 = MakeLocalRef(compilation, "Derived2");
+    derived1->AddDirectBaseType(base);
+    derived2->AddDirectBaseType(base);
+
+    std::vector<ITypePtr> result = FindTypesInBounds(
+        conversions, { derived1, derived2 }, {}, Res::TypeInferenceAlgorithm::CSharp4, 0);
+    EXPECT_TRUE(result.empty());
+}
+
+// A GENERIC candidate constructs its closed form through InferTypeArgumentsFromBounds:
+// the lower bounds G<Derived1>/G<Derived2> put G itself in the intersection (a
+// parameterized type's own definition); G's covariant T accumulates [Derived1,
+// Derived2] as lower bounds, the NESTED improved refinement fixes T to the shared
+// Base, and the candidate list becomes [G<Base>] (GenericType and the inferred
+// argument asserted by pointer identity).
+TEST(TypeInferenceFixingBestCommonTypeTest, ImprovedGenericCandidateInfersTypeArguments)
+{
+    LookupCompilation compilation;
+    CSharpConversions conversions(compilation);
+    auto base = MakeLocalRef(compilation, "Base");
+    auto derived1 = MakeLocalRef(compilation, "Derived1");
+    auto derived2 = MakeLocalRef(compilation, "Derived2");
+    derived1->AddDirectBaseType(base);
+    derived2->AddDirectBaseType(base);
+    auto t0 = std::make_shared<TS::TestSupport::LookupTypeParameter>(
+        "T", TS::VarianceModifier::Covariant);
+    t0->SetIndex(0);
+    auto g = MakeLocalRef(compilation, "G", TypeKind::Class, /*typeParameterCount*/ 1);
+    g->SetTypeParameters({ t0.get() });
+    auto gOfDerived1 = std::make_shared<TS::ParameterizedType>(
+        g, std::vector<ITypePtr>{ derived1 });
+    auto gOfDerived2 = std::make_shared<TS::ParameterizedType>(
+        g, std::vector<ITypePtr>{ derived2 });
+
+    std::vector<ITypePtr> result = FindTypesInBounds(
+        conversions, { gOfDerived1, gOfDerived2 }, {}, Res::TypeInferenceAlgorithm::Improved,
+        0);
+    ASSERT_EQ(result.size(), 1u);
+    auto* parameterized = dynamic_cast<TS::ParameterizedType*>(result[0].get());
+    ASSERT_NE(parameterized, nullptr);
+    EXPECT_EQ(parameterized->GenericType().get(), g.get());
+    ASSERT_EQ(parameterized->TypeArguments().size(), 1u);
+    EXPECT_EQ(parameterized->TypeArguments()[0].get(), base.get());
+}
+
+// No lower bounds: the candidates come from the COMPILATION-WIDE scan (the modules'
+// type tables), filtered by the upper bounds' IsDerivedFrom -- a class implementing
+// both interfaces survives, an unrelated registered type is filtered out.
+TEST(TypeInferenceFixingBestCommonTypeTest, ImprovedCompilationWideScanWithoutLowerBounds)
+{
+    LookupCompilation compilation;
+    CSharpConversions conversions(compilation);
+    auto i1 = MakeLocalRef(compilation, "I1", TypeKind::Interface);
+    auto i2 = MakeLocalRef(compilation, "I2", TypeKind::Interface);
+    auto c1 = MakeLocalRef(compilation, "C1");
+    c1->AddDirectBaseType(i1);
+    c1->AddDirectBaseType(i2);
+    auto unrelated = MakeLocalRef(compilation, "Unrelated");
+    compilation.AddTypeDefinition(c1.get());
+    compilation.AddTypeDefinition(unrelated.get());
+
+    std::vector<ITypePtr> result = FindTypesInBounds(
+        conversions, {}, { i1, i2 }, Res::TypeInferenceAlgorithm::Improved, 0);
+    ASSERT_EQ(result.size(), 1u);
+    EXPECT_EQ(result[0].get(), c1.get());
+}
+
+// The LEAST-specific reduction (upper bounds present): a candidate made redundant by
+// a LESS specific candidate is removed -- registering [Sub, Middle] (Sub : Middle :
+// I1, I2) ends with [Middle] because Middle replaces the more specific Sub in the
+// redundancy sweep.
+TEST(TypeInferenceFixingBestCommonTypeTest, ImprovedLeastSpecificRemovesRedundantDerivedCandidate)
+{
+    LookupCompilation compilation;
+    CSharpConversions conversions(compilation);
+    auto i1 = MakeLocalRef(compilation, "I1", TypeKind::Interface);
+    auto i2 = MakeLocalRef(compilation, "I2", TypeKind::Interface);
+    auto middle = MakeLocalRef(compilation, "Middle");
+    middle->AddDirectBaseType(i1);
+    middle->AddDirectBaseType(i2);
+    auto sub = MakeLocalRef(compilation, "Sub");
+    sub->AddDirectBaseType(middle);
+    compilation.AddTypeDefinition(sub.get());
+    compilation.AddTypeDefinition(middle.get());
+
+    std::vector<ITypePtr> result = FindTypesInBounds(
+        conversions, {}, { i1, i2 }, Res::TypeInferenceAlgorithm::Improved, 0);
+    ASSERT_EQ(result.size(), 1u);
+    EXPECT_EQ(result[0].get(), middle.get());
+}
+
+// Two lower bounds sharing NO base type: the intersection is empty and even the
+// improved refinement finds no candidate (the no-crash sentinel).
+TEST(TypeInferenceFixingBestCommonTypeTest, ImprovedEmptyIntersectionYieldsEmpty)
+{
+    LookupCompilation compilation;
+    CSharpConversions conversions(compilation);
+    auto a = MakeLocalRef(compilation, "A");
+    auto b = MakeLocalRef(compilation, "B");
+
+    std::vector<ITypePtr> result = FindTypesInBounds(
+        conversions, { a, b }, {}, Res::TypeInferenceAlgorithm::Improved, 0);
+    EXPECT_TRUE(result.empty());
+}
+
+// The refinement fires for ImprovedReturnAllResults too (the early return admits BOTH
+// improved algorithms); the candidate list is the same [Base] (the IntersectionType
+// wrap of the multi-candidate result is FindTypeInBounds's concern, not this
+// function's).
+TEST(TypeInferenceFixingBestCommonTypeTest, ImprovedReturnAllResultsRunsTheRefinement)
+{
+    LookupCompilation compilation;
+    CSharpConversions conversions(compilation);
+    auto base = MakeLocalRef(compilation, "Base");
+    auto derived1 = MakeLocalRef(compilation, "Derived1");
+    auto derived2 = MakeLocalRef(compilation, "Derived2");
+    derived1->AddDirectBaseType(base);
+    derived2->AddDirectBaseType(base);
+
+    std::vector<ITypePtr> result = FindTypesInBounds(
+        conversions, { derived1, derived2 }, {},
+        Res::TypeInferenceAlgorithm::ImprovedReturnAllResults, 0);
+    ASSERT_EQ(result.size(), 1u);
+    EXPECT_EQ(result[0].get(), base.get());
 }

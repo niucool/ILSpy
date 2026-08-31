@@ -105,6 +105,26 @@ bool IsDerivedFrom(const ITypeDefinition& type, const ITypeDefinition* baseType)
 // KnownTypeCode::None returns false (the C# has no known type to look up).
 bool IsDerivedFrom(const ITypeDefinition& type, KnownTypeCode baseType);
 
+// The C# `public static IEnumerable<ITypeDefinition> GetAllTypeDefinitions(this ICompilation
+// compilation)` (TypeSystemExtensions.cs line 462, the `#region GetType/Member`):
+//
+// "Gets all type definitions in the compilation. This may include types from referenced
+// assemblies that are not accessible in the main assembly."
+//
+// The C# `compilation.Modules.SelectMany(a => a.TypeDefinitions)` ports to the
+// concatenation of every module's `TypeDefinitions()` snapshot, in module-list order
+// (the main module first). The entries are non-owning `const ITypeDefinition*` snapshots
+// (the type system owns the entities; the caller keeps the compilation alive). The
+// first consumer is the TypeInference Improved `FindTypesInBounds` refinement's
+// compilation-wide candidate scan.
+std::vector<const ITypeDefinition*> GetAllTypeDefinitions(const ICompilation& compilation);
+
+// The C# `public static IEnumerable<ITypeDefinition> GetTopLevelTypeDefinitions(
+// this ICompilation compilation)` (TypeSystemExtensions.cs line 472) -- the same
+// SelectMany over `TopLevelTypeDefinitions()` (all NON-NESTED types in each assembly,
+// in module-list order). `GetAllTypeDefinitions` additionally includes the nested types.
+std::vector<const ITypeDefinition*> GetTopLevelTypeDefinitions(const ICompilation& compilation);
+
 // The C# `public static bool IsKnownType(this IType type, KnownTypeCode knownType)`:
 //
 // "Gets whether the type is the specified known type. For generic known types, this returns true for any

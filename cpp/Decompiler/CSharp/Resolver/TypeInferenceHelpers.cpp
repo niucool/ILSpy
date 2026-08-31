@@ -50,14 +50,18 @@ namespace ILSpy::Decompiler::CSharp::Resolver::Detail {
 using ILSpy::Decompiler::TypeSystem::ArrayType;
 using ILSpy::Decompiler::TypeSystem::ByReferenceType;
 using ILSpy::Decompiler::TypeSystem::FunctionPointerType;
+using ILSpy::Decompiler::TypeSystem::GetAllBaseTypeDefinitions;
 using ILSpy::Decompiler::TypeSystem::GetAllBaseTypes;
+using ILSpy::Decompiler::TypeSystem::GetAllTypeDefinitions;
 using ILSpy::Decompiler::TypeSystem::GetDelegateInvokeMethod;
 using ILSpy::Decompiler::TypeSystem::GetUnderlyingType;
 using ILSpy::Decompiler::TypeSystem::ICompilation;
 using ILSpy::Decompiler::TypeSystem::IMethod;
 using ILSpy::Decompiler::TypeSystem::IsArrayInterfaceType;
+using ILSpy::Decompiler::TypeSystem::IsDerivedFrom;
 using ILSpy::Decompiler::TypeSystem::IsKnownType;
 using ILSpy::Decompiler::TypeSystem::IsNullable;
+using ILSpy::Decompiler::TypeSystem::ITypeParameter;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
 using ILSpy::Decompiler::TypeSystem::IntersectionType;
 using ILSpy::Decompiler::TypeSystem::NullabilityAnnotatedTypeParameter;
@@ -1396,14 +1400,172 @@ std::vector<ITypePtr> FindTypesInBounds(CSharpConversions& conversions,
         return candidateTypes;
     }
 
-    // DEFERRED: the improved algorithm's refinement (the lower bounds'
-    // base-type-definition intersection, the compilation-wide candidate scan when there
-    // are no lower bounds, the upper-bound `IsDerivedFrom` filtering, and the
-    // `InferTypeArgumentsFromBounds` recursion constructing generic candidates) needs
-    // `ICompilation.GetAllTypeDefinitions` and the `InferTypeArgumentsFromBounds` engine
-    // step, neither ported yet. Until it lands, the pre-refinement spec candidates
-    // return for the improved algorithms too (a documented deviation -- the CSharp4
-    // default is exact because the early return above already covered it).
+    // C# `candidateTypes.Clear();` -- the spec candidates are discarded; the improved
+    // algorithm rebuilds the candidate list from the type definitions.
+    candidateTypes.clear();
+
+    // C# `List<ITypeDefinition> candidateTypeDefinitions;` -- the candidate DEFINITIONS:
+    // with lower bounds, the intersection of the lower bounds' base-type-definition
+    // chains (C# `var hashSet = new HashSet<ITypeDefinition>(
+    //     lowerBounds[0].GetAllBaseTypeDefinitions());
+    //     for (int i = 1; i < lowerBounds.Count; i++)
+    //         hashSet.IntersectWith(lowerBounds[i].GetAllBaseTypeDefinitions());
+    //     candidateTypeDefinitions = hashSet.ToList();`); without, the compilation-wide
+    // scan over all modules' type tables (C# `compilation.GetAllTypeDefinitions()` --
+    // the TypeSystemExtensions SelectMany; the C# reads the TypeInference instance's
+    // `compilation` field, which the lift threads through the caller's
+    // `CSharpConversions::Compilation()` -- the deferred-engine-steps accessor).
+    // The C# HashSet preserves the insertion order of the surviving entries, so the
+    // port seeds with the first bound's chain (base types before the bound itself, the
+    // GetAllBaseTypeDefinitions order) and filters by pointer identity against each
+    // subsequent chain (type definitions do not override Equals -- reference equality).
+    // A degenerate NULL bound entry (impossible through the real TP bound containers)
+    // would NRE in the C#; the port skips it (the D516 convention), seeding with the
+    // first NON-NULL bound -- an unreachable-shape divergence. When every lower bound is
+    // null (or there are none) the compilation-wide arm runs.
+    std::vector<const ITypeDefinition*> candidateTypeDefinitions;
+    bool haveLowerBounds = false;
+    for (const ITypePtr& b : lowerBounds) {
+        if (!b)
+            continue;
+        if (!haveLowerBounds) {
+            candidateTypeDefinitions = GetAllBaseTypeDefinitions(b.get());
+            haveLowerBounds = true;
+        } else {
+            std::vector<const ITypeDefinition*> next = GetAllBaseTypeDefinitions(b.get());
+            std::vector<const ITypeDefinition*> kept;
+            for (const ITypeDefinition* d : candidateTypeDefinitions) {
+                if (std::find(next.begin(), next.end(), d) != next.end())
+                    kept.push_back(d);
+            }
+            candidateTypeDefinitions = std::move(kept);
+        }
+    }
+    if (!haveLowerBounds) {
+        candidateTypeDefinitions = GetAllTypeDefinitions(conversions.Compilation());
+    }
+
+    // C# `foreach (IType ub in upperBounds) { ITypeDefinition ubDef = ub.GetDefinition();
+    //     if (ubDef != null)
+    //         candidateTypeDefinitions.RemoveAll(c => !c.IsDerivedFrom(ubDef)); }` --
+    // every upper bound's definition filters out the candidates NOT derived from it. A
+    // definition-less upper bound (the C# `ubDef != null` guard) filters nothing.
+    for (const ITypePtr& ub : upperBounds) {
+        if (!ub)
+            continue;
+        const ITypeDefinition* ubDef = ub->GetDefinition();
+        if (ubDef == nullptr)
+            continue;
+        candidateTypeDefinitions.erase(
+            std::remove_if(candidateTypeDefinitions.begin(), candidateTypeDefinitions.end(),
+                           [&](const ITypeDefinition* c) {
+                               return !IsDerivedFrom(*c, ubDef);
+                           }),
+            candidateTypeDefinitions.end());
+    }
+
+    // C# `foreach (ITypeDefinition candidateDef in candidateTypeDefinitions) { ... }` --
+    // each candidate definition becomes a closed candidate type: a NON-GENERIC
+    // definition is its own candidate; a GENERIC one infers its type arguments from the
+    // bounds through the bounds-based entry -- the target `new ParameterizedType(
+    // candidateDef, candidateDef.TypeParameters)` with the DECLARED type parameters as
+    // the open arguments -- and is SKIPPED when the inference fails (C#
+    // `Log.WriteLine("Inference failed; ignoring candidate"); continue;`). The owning
+    // handles for the definition and the type parameters come from `shared_from_this()`
+    // + `std::const_pointer_cast` (the shared-managed type-system objects; the
+    // accessor's const is the contract, the NullableType.Create precedent).
+    for (const ITypeDefinition* candidateDef : candidateTypeDefinitions) {
+        ITypePtr candidateDefPtr = std::const_pointer_cast<IType>(
+            candidateDef->shared_from_this());
+        ITypePtr candidate;
+        if (candidateDef->TypeParameterCount() == 0) {
+            // C# `candidate = candidateDef;`
+            candidate = candidateDefPtr;
+        } else {
+            std::vector<const ILSpy::Decompiler::TypeSystem::ITypeParameter*> typeParameters =
+                candidateDef->TypeParameters();
+            std::vector<ITypePtr> openArgs;
+            openArgs.reserve(typeParameters.size());
+            for (const ILSpy::Decompiler::TypeSystem::ITypeParameter* tp : typeParameters) {
+                if (tp == nullptr) // degenerate null entry (the D516 convention)
+                    continue;
+                openArgs.push_back(
+                    std::const_pointer_cast<IType>(tp->shared_from_this()));
+            }
+            auto openTarget = std::make_shared<ParameterizedType>(candidateDefPtr,
+                                                                  std::move(openArgs));
+            bool inferSuccess = false;
+            std::vector<ITypePtr> inferred = InferTypeArgumentsFromBounds(
+                conversions.Compilation(), conversions, typeParameters, *openTarget,
+                lowerBounds, upperBounds, inferSuccess, algorithm, nestingLevel);
+            if (!inferSuccess) {
+                continue;
+            }
+            // C# `candidate = new ParameterizedType(candidateDef, result);`
+            candidate = std::make_shared<ParameterizedType>(candidateDefPtr,
+                                                             std::move(inferred));
+        }
+
+        if (upperBounds.empty()) {
+            // C# `if (upperBounds.Count == 0) {` -- with only lower bounds we aim for
+            // the MOST SPECIFIC candidate. The new candidate is skipped when an
+            // EXISTING candidate is derived from it (C# `!candidateTypes.Any(
+            //     c => c.GetDefinition().IsDerivedFrom(candidateDef))` -- an existing,
+            // more specific candidate makes this one redundant); otherwise the existing
+            // candidates the new one is derived from are removed (C#
+            // `candidateTypes.RemoveAll(c => candidateDef.IsDerivedFrom(
+            //     c.GetDefinition()))`), and the new candidate is added. A degenerate null
+            // `GetDefinition()` entry (the candidates are definitions or parameterized
+            // types over them, never null in practice) is skipped by both scans (the
+            // D516 convention).
+            bool redundant = false;
+            for (const ITypePtr& c : candidateTypes) {
+                const ITypeDefinition* cDef = c->GetDefinition();
+                if (cDef != nullptr && IsDerivedFrom(*cDef, candidateDef)) {
+                    redundant = true;
+                    break;
+                }
+            }
+            if (!redundant) {
+                candidateTypes.erase(
+                    std::remove_if(candidateTypes.begin(), candidateTypes.end(),
+                                   [&](const ITypePtr& c) {
+                                       const ITypeDefinition* cDef = c->GetDefinition();
+                                       return cDef != nullptr
+                                           && IsDerivedFrom(*candidateDef, cDef);
+                                   }),
+                    candidateTypes.end());
+                candidateTypes.push_back(candidate);
+            }
+        } else {
+            // C# `else {` -- with upper bounds we aim for the LEAST SPECIFIC candidate.
+            // The new candidate is skipped when it is derived from an EXISTING one (C#
+            // `!candidateTypes.Any(c => candidateDef.IsDerivedFrom(c.GetDefinition()))`
+            // -- an existing, less specific candidate makes this one redundant);
+            // otherwise the existing candidates derived from the new one are removed
+            // (C# `candidateTypes.RemoveAll(c => c.GetDefinition().IsDerivedFrom(
+            //     candidateDef))`), and the new candidate is added.
+            bool redundant = false;
+            for (const ITypePtr& c : candidateTypes) {
+                const ITypeDefinition* cDef = c->GetDefinition();
+                if (cDef != nullptr && IsDerivedFrom(*candidateDef, cDef)) {
+                    redundant = true;
+                    break;
+                }
+            }
+            if (!redundant) {
+                candidateTypes.erase(
+                    std::remove_if(candidateTypes.begin(), candidateTypes.end(),
+                                   [&](const ITypePtr& c) {
+                                       const ITypeDefinition* cDef = c->GetDefinition();
+                                       return cDef != nullptr
+                                           && IsDerivedFrom(*cDef, candidateDef);
+                                   }),
+                    candidateTypes.end());
+                candidateTypes.push_back(candidate);
+            }
+        }
+    }
     return candidateTypes;
 }
 
@@ -1797,7 +1959,7 @@ std::vector<ITypePtr> InferTypeArgumentsFromBounds(
     const std::vector<const ILSpy::Decompiler::TypeSystem::ITypeParameter*>& typeParameters,
     IType& targetType, const std::vector<ITypePtr>& lowerBounds,
     const std::vector<ITypePtr>& upperBounds, bool& success,
-    TypeInferenceAlgorithm algorithm)
+    TypeInferenceAlgorithm algorithm, int nestingLevel)
 {
     // C# `if (typeParameters == null) throw new ArgumentNullException(...)` (and the
     // `targetType`/`lowerBounds`/`upperBounds` twins) -- the D374 non-null-reference
@@ -1843,13 +2005,15 @@ std::vector<ITypePtr> InferTypeArgumentsFromBounds(
     //         success &= Fix(this.typeParameters[i]);
     //         result[i] = this.typeParameters[i].FixedTo ?? SpecialType.UnknownType; }`
     // -- the C# `&=` is NON-short-circuit: `Fix` runs for EVERY parameter even after a
-    // failure, and `success` accumulates all the results. The fresh-instance nesting
-    // level is 0.
+    // failure, and `success` accumulates all the results. The C# `Fix` runs on the SAME
+    // instance (`this`), so its `CreateNestedInstance` bumps THIS nesting level by one;
+    // the lift threads the caller-supplied level (a fresh instance = 0 -- the
+    // Improved `FindTypesInBounds` refinement passes its own current level).
     std::vector<ITypePtr> result;
     result.reserve(state.size());
     success = true;
     for (TP& tp : state) {
-        const bool fixedOk = Fix(conversions, tp, algorithm, /*nestingLevel*/ 0);
+        const bool fixedOk = Fix(conversions, tp, algorithm, nestingLevel);
         success = success && fixedOk;
         result.push_back(tp.FixedTo ? tp.FixedTo : UnknownType());
     }
