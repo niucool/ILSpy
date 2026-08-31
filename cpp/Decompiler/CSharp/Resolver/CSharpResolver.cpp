@@ -45,6 +45,7 @@
 #include "Decompiler/Semantics/ConversionFactories.hpp"
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/ErrorResolveResult.hpp"
+#include "Decompiler/Semantics/ForEachResolveResult.hpp"
 #include "Decompiler/Semantics/LocalResolveResult.hpp"
 #include "Decompiler/Semantics/MemberResolveResult.hpp"
 #include "Decompiler/Semantics/NamedArgumentResolveResult.hpp"
@@ -61,6 +62,7 @@
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
+#include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
 #include "Decompiler/TypeSystem/NullableType.hpp"
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
@@ -4158,6 +4160,220 @@ CSharpResolver::ResolveAssignment(
         std::move(lhsType), linqOp, opResult->UserDefinedOperatorMethod(),
         opResult->IsLiftedOperator(),
         std::vector<std::shared_ptr<ResolveResult>>{ lhs, opResult->Operands()[1] });
+}
+
+// ---- ResolveForeach region (CSharpResolver.cs lines 1913-2018) --------------------------------
+
+// The C# `public ForEachResolveResult ResolveForeach(ResolveResult expression)`
+// (line 1914) -- see CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ForEachResolveResult>
+CSharpResolver::ResolveForeach(
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> expression) const
+{
+    using ILSpy::Decompiler::CSharp::Resolver::MethodGroupResolveResult;
+    using ILSpy::Decompiler::CSharp::Resolver::OverloadResolution;
+    using ILSpy::Decompiler::Semantics::ForEachResolveResult;
+    using ILSpy::Decompiler::Semantics::MemberResolveResult;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::TypeSystem::ArrayType;
+    using ILSpy::Decompiler::TypeSystem::IParameterizedMember;
+    using ILSpy::Decompiler::TypeSystem::IMethod;
+    using ILSpy::Decompiler::TypeSystem::IProperty;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+    using ILSpy::Decompiler::TypeSystem::SpecialType;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+    using ILSpy::Decompiler::TypeSystem::UnknownType;
+
+    // C# 4.0 spec: section 8.8.4 The foreach statement
+    MemberLookup memberLookup = CreateMemberLookup();
+
+    ITypePtr collectionType, enumeratorType, elementType;
+    std::shared_ptr<ResolveResult> getEnumeratorInvocation;
+    std::shared_ptr<ResolveResult> currentRR;
+    // The C# `new ResolveResult(enumeratorType)` targets of the `Current` / `MoveNext`
+    // lookups: `MemberLookup::Lookup`'s results hold a NON-OWNING alias to the target
+    // (the caller owns the target, the MemberLookup.cpp convention), so each target must
+    // outlive every use of the result it fed -- they are declared at FUNCTION scope
+    // (the Current target outlives the `currentProperty` extraction near the end).
+    std::shared_ptr<ResolveResult> currentTargetRR, moveNextTargetRR;
+
+    if (expression->Type().Kind() == TypeKind::Array
+        || expression->Type().Kind() == TypeKind::Dynamic) {
+        // The C# `collectionType = compilation.FindType(KnownTypeCode.IEnumerable)` --
+        // the owning handle recovered from the const `FindType` reference via
+        // `shared_from_this()` + `const_pointer_cast` (the D529 convention; the
+        // registered known types are shared-managed).
+        collectionType = std::const_pointer_cast<IType>(
+            compilation_.FindType(KnownTypeCode::IEnumerable).shared_from_this());
+        enumeratorType = std::const_pointer_cast<IType>(
+            compilation_.FindType(KnownTypeCode::IEnumerator).shared_from_this());
+        if (expression->Type().Kind() == TypeKind::Array) {
+            // The C# `((ArrayType)expression.Type).ElementType` hard cast; the port's
+            // dynamic_cast keeps the degenerate kind-Array-but-not-ArrayType stub shape
+            // from reinterpreting unrelated storage (the D565 safe-fallback convention
+            // -- the C# would throw InvalidCastException; the port falls to the
+            // UnknownType null object).
+            const ArrayType* arrayType = dynamic_cast<const ArrayType*>(&expression->Type());
+            elementType = arrayType != nullptr ? arrayType->Element() : UnknownType();
+        } else {
+            // The C# `SpecialType.Dynamic` singleton ports to the fresh shared-managed
+            // instance (the D469 DynamicMemberResolveResult precedent).
+            elementType = std::make_shared<SpecialType>(TypeKind::Dynamic, true);
+        }
+        // The `GetEnumerator` chain over the non-generic IEnumerable: ResolveCast ->
+        // ResolveMemberAccess (InvocationTarget) -> ResolveInvocation (no arguments).
+        getEnumeratorInvocation = ResolveCast(
+            const_cast<IType&>(*collectionType), expression);
+        getEnumeratorInvocation = ResolveMemberAccess(
+            std::move(getEnumeratorInvocation), "GetEnumerator", {},
+            NameLookupMode::InvocationTarget);
+        getEnumeratorInvocation = ResolveInvocation(std::move(getEnumeratorInvocation), {});
+    } else {
+        // The C# `memberLookup.Lookup(expression, "GetEnumerator", EmptyList<IType>.
+        // Instance, true) as MethodGroupResolveResult`.
+        std::shared_ptr<MethodGroupResolveResult> getEnumeratorMethodGroup =
+            std::dynamic_pointer_cast<MethodGroupResolveResult>(
+                memberLookup.Lookup(*expression, "GetEnumerator", {}, /*isInvocation*/ true));
+        if (getEnumeratorMethodGroup) {
+            std::unique_ptr<OverloadResolution> or_ = getEnumeratorMethodGroup
+                                                             ->PerformOverloadResolution(
+                                                                 compilation_, {},
+                                                                 std::nullopt,
+                                                                 /*allowExtensionMethods*/ false,
+                                                                 /*allowExpandingParams*/ false,
+                                                                 /*allowOptionalParameters*/ false);
+            const IParameterizedMember* best = or_->BestCandidate();
+            // The C# `or.FoundApplicableCandidate && !or.IsAmbiguous &&
+            // !or.BestCandidate.IsStatic && or.BestCandidate.Accessibility ==
+            // Accessibility.Public` -- the short-circuit guarantees a non-null
+            // BestCandidate after FoundApplicableCandidate; the port adds the null
+            // guard for the degenerate shape anyway (the D516 convention).
+            if (or_->FoundApplicableCandidate() && !or_->IsAmbiguous() && best != nullptr
+                && !best->IsStatic()
+                && best->Accessibility()
+                       == ILSpy::Decompiler::TypeSystem::Accessibility::Public) {
+                collectionType = std::const_pointer_cast<IType>(
+                    expression->Type().shared_from_this());
+                getEnumeratorInvocation = or_->CreateResolveResult(expression);
+                enumeratorType = std::const_pointer_cast<IType>(
+                    getEnumeratorInvocation->Type().shared_from_this());
+                currentTargetRR = std::make_shared<ResolveResult>(enumeratorType);
+                currentRR = memberLookup.Lookup(*currentTargetRR, "Current", {},
+                                                 /*isInvocation*/ false);
+                elementType = std::const_pointer_cast<IType>(
+                    currentRR->Type().shared_from_this());
+            } else {
+                CheckForEnumerableInterface(expression, collectionType, enumeratorType,
+                                            elementType, getEnumeratorInvocation);
+            }
+        } else {
+            CheckForEnumerableInterface(expression, collectionType, enumeratorType,
+                                        elementType, getEnumeratorInvocation);
+        }
+    }
+
+    const IMethod* moveNextMethod = nullptr;
+    moveNextTargetRR = std::make_shared<ResolveResult>(enumeratorType);
+    std::shared_ptr<MethodGroupResolveResult> moveNextMethodGroup =
+        std::dynamic_pointer_cast<MethodGroupResolveResult>(
+            memberLookup.Lookup(*moveNextTargetRR, "MoveNext", {}, /*isInvocation*/ false));
+    if (moveNextMethodGroup) {
+        std::unique_ptr<OverloadResolution> or_ = moveNextMethodGroup
+                                                         ->PerformOverloadResolution(
+                                                             compilation_, {},
+                                                             std::nullopt,
+                                                             /*allowExtensionMethods*/ false,
+                                                             /*allowExpandingParams*/ false,
+                                                             /*allowOptionalParameters*/ false);
+        // The C# `or.GetBestCandidateWithSubstitutedTypeArguments() as IMethod` -- null
+        // when no best candidate exists (the empty method group cannot occur here; the
+        // group exists but resolution found nothing applicable still yields a best
+        // candidate, faithfully matching the C# which does not gate on applicability).
+        moveNextMethod = dynamic_cast<const IMethod*>(
+            or_->GetBestCandidateWithSubstitutedTypeArguments());
+    }
+
+    if (!currentRR) {
+        currentTargetRR = std::make_shared<ResolveResult>(enumeratorType);
+        currentRR = memberLookup.Lookup(*currentTargetRR, "Current", {}, /*isInvocation*/ false);
+    }
+    const IProperty* currentProperty = nullptr;
+    if (dynamic_cast<const MemberResolveResult*>(currentRR.get()) != nullptr)
+        currentProperty = dynamic_cast<const IProperty*>(
+            static_cast<const MemberResolveResult*>(currentRR.get())->Member());
+
+    ITypePtr voidType = std::const_pointer_cast<IType>(
+        compilation_.FindType(KnownTypeCode::Void).shared_from_this());
+    return std::make_shared<ForEachResolveResult>(
+        std::move(getEnumeratorInvocation), std::move(collectionType),
+        std::move(enumeratorType), std::move(elementType), currentProperty, moveNextMethod,
+        std::move(voidType));
+}
+
+// The C# `void CheckForEnumerableInterface(ResolveResult expression, out IType
+// collectionType, out IType enumeratorType, out IType elementType, out ResolveResult
+// getEnumeratorInvocation)` (line 1991) -- see CSharpResolver.hpp for the port
+// conventions.
+void CSharpResolver::CheckForEnumerableInterface(
+    const std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& expression,
+    ILSpy::Decompiler::TypeSystem::ITypePtr& collectionType,
+    ILSpy::Decompiler::TypeSystem::ITypePtr& enumeratorType,
+    ILSpy::Decompiler::TypeSystem::ITypePtr& elementType,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& getEnumeratorInvocation) const
+{
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::TypeSystem::GetElementTypeFromIEnumerable;
+    using ILSpy::Decompiler::TypeSystem::ParameterizedType;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+    using ILSpy::Decompiler::TypeSystem::UnknownType;
+
+    // The C# `out bool? isGeneric` local of the extension call.
+    std::optional<bool> isGeneric;
+    elementType = GetElementTypeFromIEnumerable(expression->Type(), compilation_,
+                                                 /*allowIEnumerator*/ false, isGeneric);
+    // The C# `isGeneric == true` / `== false` on a nullable bool are DEFINITE checks
+    // (null compares false against both literals; the iteration-103 corrected semantics).
+    if (isGeneric.has_value() && *isGeneric) {
+        // The C# `compilation.FindType(KnownTypeCode.IEnumerableOfT).GetDefinition()`;
+        // the open-generic definition is shared-managed, so the owning handle for the
+        // ParameterizedType ctor comes from `shared_from_this()` + `const_pointer_cast`
+        // (the D529 convention).
+        const ITypeDefinition* enumerableOfT =
+            compilation_.FindType(KnownTypeCode::IEnumerableOfT).GetDefinition();
+        if (enumerableOfT != nullptr)
+            collectionType = std::make_shared<ParameterizedType>(
+                std::const_pointer_cast<IType>(enumerableOfT->shared_from_this()),
+                std::vector<ITypePtr>{ elementType });
+        else
+            collectionType = UnknownType();
+
+        const ITypeDefinition* enumeratorOfT =
+            compilation_.FindType(KnownTypeCode::IEnumeratorOfT).GetDefinition();
+        if (enumeratorOfT != nullptr)
+            enumeratorType = std::make_shared<ParameterizedType>(
+                std::const_pointer_cast<IType>(enumeratorOfT->shared_from_this()),
+                std::vector<ITypePtr>{ elementType });
+        else
+            enumeratorType = UnknownType();
+    } else if (isGeneric.has_value() && !*isGeneric) {
+        collectionType = std::const_pointer_cast<IType>(
+            compilation_.FindType(KnownTypeCode::IEnumerable).shared_from_this());
+        enumeratorType = std::const_pointer_cast<IType>(
+            compilation_.FindType(KnownTypeCode::IEnumerator).shared_from_this());
+    } else {
+        collectionType = UnknownType();
+        enumeratorType = UnknownType();
+    }
+    getEnumeratorInvocation = ResolveCast(const_cast<IType&>(*collectionType), expression);
+    getEnumeratorInvocation = ResolveMemberAccess(
+        std::move(getEnumeratorInvocation), "GetEnumerator", {},
+        NameLookupMode::InvocationTarget);
+    getEnumeratorInvocation = ResolveInvocation(std::move(getEnumeratorInvocation), {});
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

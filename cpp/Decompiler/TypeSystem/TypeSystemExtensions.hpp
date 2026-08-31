@@ -214,4 +214,33 @@ std::optional<int> GetInlineArrayLength(const IType& type);
 // instance field, so the throw guards the same metadata invariant the C# does.
 ITypePtr GetInlineArrayElementType(const IType& arrayType);
 
+// The C# `public static IType GetElementTypeFromIEnumerable(this IType collectionType,
+// ICompilation compilation, bool allowIEnumerator, out bool? isGeneric)`
+// (TypeSystemExtensions.cs line 757) -- the element type of a collection type: the type
+// argument of the first `IEnumerable<T>` / (with `allowIEnumerator`) `IEnumerator<T>` in
+// the type's base-type closure; the `Object` element type when only the non-generic
+// `System.Collections.IEnumerable` / (with `allowIEnumerator`) `IEnumerator` is found
+// (the C# comment: "System.Collections.IEnumerable found in type hierarchy -> Object is
+// element type"); the `SpecialType.UnknownType` null object with `isGeneric = null` when
+// neither is. Returns an OWNING `ITypePtr`: the parameterized-type arm returns the type
+// argument's own handle (`GetTypeArgument(0)` returns the stored `ITypePtr` by value), the
+// non-generic arm recovers the registered `FindType(KnownTypeCode.Object)` handle via
+// `shared_from_this()` + `std::const_pointer_cast` (the registered known types must be
+// shared-managed, the `NullableType.Create` precedent), and the null-object arm returns a
+// fresh `UnknownType()` (the `GetInlineArrayElementType` precedent). The C# `out bool?
+// isGeneric` ports to a `std::optional<bool>&` out-parameter assigned before every return
+// (the C# `out` contract: `true` = a generic interface was found, `false` = only the
+// non-generic one, `nullopt` = neither). A base type whose DEFINITION carries
+// `IEnumerableOfT` but which is not itself a `ParameterizedType` (the bare open-generic
+// definition) does not match -- the C# `pt != null` guard continues the walk; a degenerate
+// `ParameterizedType` with no type arguments (the C# `GetTypeArgument(0)` would throw
+// `ArgumentOutOfRangeException`, unreachable for real metadata) also continues under the
+// D516 safe-fallback convention (the non-empty-`TypeArguments` guard, the TypeInference
+// span-arms precedent). The first consumer is `CSharpResolver.CheckForEnumerableInterface`
+// (the `ResolveForeach` region).
+ITypePtr GetElementTypeFromIEnumerable(const IType& collectionType,
+                                       const ICompilation& compilation,
+                                       bool allowIEnumerator,
+                                       std::optional<bool>& isGeneric);
+
 } // namespace ILSpy::Decompiler::TypeSystem

@@ -37,9 +37,9 @@
 // (`ResolveUnaryOperator` and `ResolveBinaryOperator` + the enum-handler trio, the
 // Convert/ResolveCast region, the sizeof/this/base/typeof tail, the
 // condition/primitive/default-value/assignment quartet, the simple-name lookup
-// cluster, the extension-methods region, the member-access region, and the
-// invocation region have landed; ResolveForeach, ResolveIndexer,
-// ResolveObjectCreation, ... follow).
+// cluster, the extension-methods region, the member-access region, the
+// invocation region, and the ResolveForeach region have landed;
+// ResolveIndexer, ResolveObjectCreation, ... follow).
 //
 // KEY PORT CONVENTIONS:
 //  (a) The C# `With*` clone factories return a `CSharpResolver` REFERENCE -- the C#
@@ -154,6 +154,7 @@ enum class AssignmentOperatorType;
 // CSharpConversionsHelpers.hpp precedent).
 namespace ILSpy::Decompiler::Semantics {
 class Conversion;
+class ForEachResolveResult;
 class NamespaceResolveResult;
 class TypeResolveResult;
 }
@@ -1528,6 +1529,63 @@ public:
         ILSpy::Decompiler::CSharp::Syntax::AssignmentOperatorType op,
         std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> lhs,
         std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rhs) const;
+
+    // ---- ResolveForeach ------------------------------------------------------------------------
+    // (The `ResolveForeach` region, CSharpResolver.cs lines 1913-2018, C# 4.0 spec
+    // section 8.8.4 "The foreach statement": the public `ResolveForeach` entry (line
+    // 1914) + the private `CheckForEnumerableInterface` helper (line 1991). Every
+    // prerequisite is already ported: `CreateMemberLookup` (the simple-name region),
+    // `MemberLookup::Lookup` (D500), `MethodGroupResolveResult::
+    // PerformOverloadResolution` (iteration 79), the `OverloadResolution` output
+    // properties + `CreateResolveResult` + `GetBestCandidateWithSubstitutedTypeArguments`
+    // (the output-properties/wrappers regions), `ResolveCast` / `ResolveMemberAccess` /
+    // `ResolveInvocation` (the convert/member-access/invocation regions), and the
+    // `GetElementTypeFromIEnumerable` TypeSystemExtensions leaf (the direct
+    // prerequisite this region ports alongside).)
+
+    // The C# `public ForEachResolveResult ResolveForeach(ResolveResult expression)`
+    // (line 1914) -- resolves the foreach pattern over the collection expression:
+    // the ARRAY / DYNAMIC arm casts the collection to the non-generic
+    // `System.Collections.IEnumerable` (the element type is the array's element /
+    // dynamic) and resolves `GetEnumerator` through the cast chain
+    // (ResolveCast -> ResolveMemberAccess -> ResolveInvocation over the registered
+    // IEnumerable); otherwise the ENUMERATOR PATTERN first (`GetEnumerator` looked up
+    // on the collection, overload-resolved with the three allow-flags pinned false,
+    // kept only when an applicable, unambiguous, PUBLIC INSTANCE method was found --
+    // the `Current` property then supplies the element type), falling back to
+    // `CheckForEnumerableInterface` (the `IEnumerable<T>` / `IEnumerable` interface
+    // pattern) when the lookup finds no method group or the guard rejects it. The
+    // `MoveNext` method is resolved on the enumerator type through its own method
+    // group + `GetBestCandidateWithSubstitutedTypeArguments`, and the `Current`
+    // property (re-looked-up when the enumerator-pattern arm did not supply it)
+    // contributes the `IProperty`. The method is `const` (it reads the resolver's
+    // compilation and clones nothing). The C# `ResolveResult` parameter ports to an
+    // owning `std::shared_ptr` (the C# GC reference; the enumerator-pattern arm passes
+    // it to `CreateResolveResult`, which co-owns it via the aliasing-shared_ptr
+    // convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ForEachResolveResult> ResolveForeach(
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> expression) const;
+
+    // The C# `void CheckForEnumerableInterface(ResolveResult expression, out IType
+    // collectionType, out IType enumeratorType, out IType elementType, out ResolveResult
+    // getEnumeratorInvocation)` (line 1991) -- the interface-pattern fallback: the
+    // element type comes from `GetElementTypeFromIEnumerable` (generic `true` builds the
+    // `IEnumerable<T>` / `IEnumerator<T>` PARAMETERIZED types over the registered
+    // open-generic definitions, generic `false` uses the registered non-generic
+    // interfaces, neither yields the `UnknownType` null object), then the same
+    // ResolveCast -> ResolveMemberAccess -> ResolveInvocation `GetEnumerator` chain
+    // runs over the synthesized collection type. Private in the C#; PUBLIC in the port
+    // for direct TDD (the TryConvert widening convention). The four C# `out` parameters
+    // port to reference out-params; the three `IType` outs are OWNING `ITypePtr`s (the
+    // C# GC references) and the invocation out is an owning `shared_ptr<ResolveResult>`.
+    // The `expression` parameter is a CONST reference (the C# passes the caller's
+    // reference through to `ResolveCast` unchanged, and `ResolveCast` copies it).
+    void CheckForEnumerableInterface(
+        const std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& expression,
+        ILSpy::Decompiler::TypeSystem::ITypePtr& collectionType,
+        ILSpy::Decompiler::TypeSystem::ITypePtr& enumeratorType,
+        ILSpy::Decompiler::TypeSystem::ITypePtr& elementType,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& getEnumeratorInvocation) const;
 
 private:
     // The C# private nested `sealed class ObjectInitializerContext` -- the linked stack

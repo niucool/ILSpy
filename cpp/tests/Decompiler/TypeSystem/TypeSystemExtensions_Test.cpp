@@ -360,3 +360,155 @@ TEST(TypeSystemExtensionsTest, GetTopLevelTypeDefinitionsExcludesNestedTypes)
     ASSERT_EQ(topLevel.size(), 1u);
     EXPECT_EQ(topLevel[0], top.get());
 }
+
+// ---------------------------------------------------------------------------
+// GetElementTypeFromIEnumerable (TypeSystemExtensions.cs line 757) -- the
+// foreach element-type extraction: the first IEnumerable<T> / IEnumerator<T>
+// (with allowIEnumerator) in the base-type closure, the Object element for the
+// non-generic interfaces, the UnknownType null object with isGeneric == null
+// for neither.
+// ---------------------------------------------------------------------------
+
+// The first generic IEnumerable<T> in the base-type closure yields its type
+// argument (pointer identity) and isGeneric = true. A ParameterizedType over
+// the open-generic definition is itself in its own closure (the collector's
+// self-entry; GetDefinition delegates to the generic).
+TEST(TypeSystemExtensionsTest, GetElementTypeFromIEnumerableGenericYieldsTypeArgument)
+{
+    LookupCompilation compilation;
+    auto int32 = MakeDefinition(compilation, "Int32", "System", TS::TypeKind::Struct,
+                                nullptr, TS::KnownTypeCode::Int32);
+    auto enumerableOfT = MakeDefinition(compilation, "IEnumerable", "System.Collections.Generic",
+                                       TS::TypeKind::Interface, nullptr,
+                                       TS::KnownTypeCode::IEnumerableOfT);
+    auto collection = std::make_shared<TS::ParameterizedType>(
+        enumerableOfT, std::vector<TS::ITypePtr>{ int32 });
+
+    std::optional<bool> isGeneric;
+    TS::ITypePtr element = TS::GetElementTypeFromIEnumerable(*collection, compilation,
+                                                              /*allowIEnumerator*/ false,
+                                                              isGeneric);
+    EXPECT_EQ(element.get(), int32.get());
+    ASSERT_TRUE(isGeneric.has_value());
+    EXPECT_TRUE(*isGeneric);
+}
+
+// The IEnumerator<T> shape fires ONLY with allowIEnumerator = true.
+TEST(TypeSystemExtensionsTest, GetElementTypeFromIEnumerableIEnumeratorOfTRequiresAllowIEnumerator)
+{
+    LookupCompilation compilation;
+    auto int32 = MakeDefinition(compilation, "Int32", "System", TS::TypeKind::Struct,
+                                nullptr, TS::KnownTypeCode::Int32);
+    auto enumeratorOfT = MakeDefinition(compilation, "IEnumerator", "System.Collections.Generic",
+                                        TS::TypeKind::Interface, nullptr,
+                                        TS::KnownTypeCode::IEnumeratorOfT);
+    auto collection = std::make_shared<TS::ParameterizedType>(
+        enumeratorOfT, std::vector<TS::ITypePtr>{ int32 });
+
+    std::optional<bool> isGeneric;
+    TS::ITypePtr element = TS::GetElementTypeFromIEnumerable(*collection, compilation,
+                                                              /*allowIEnumerator*/ true,
+                                                              isGeneric);
+    EXPECT_EQ(element.get(), int32.get());
+    ASSERT_TRUE(isGeneric.has_value());
+    EXPECT_TRUE(*isGeneric);
+
+    // Without the flag the IEnumerator<T> base matches neither arm: neither
+    // generic (gated) nor non-generic (the code is IEnumeratorOfT, not
+    // IEnumerator), so the walk finds nothing.
+    std::optional<bool> isGeneric2;
+    TS::ITypePtr element2 = TS::GetElementTypeFromIEnumerable(*collection, compilation,
+                                                               /*allowIEnumerator*/ false,
+                                                               isGeneric2);
+    EXPECT_EQ(element2->Kind(), TS::TypeKind::Unknown);
+    EXPECT_FALSE(isGeneric2.has_value());
+}
+
+// The non-generic System.Collections.IEnumerable in the base-type closure
+// yields the FindType(Object) registered instance and isGeneric = false.
+TEST(TypeSystemExtensionsTest, GetElementTypeFromIEnumerableNonGenericYieldsObject)
+{
+    LookupCompilation compilation;
+    auto objectDef = MakeDefinition(compilation, "Object", "System", TS::TypeKind::Class,
+                                    nullptr, TS::KnownTypeCode::Object);
+    compilation.RegisterKnownType(TS::KnownTypeCode::Object, objectDef.get());
+    auto ienumerable = MakeDefinition(compilation, "IEnumerable", "System.Collections",
+                                       TS::TypeKind::Interface, nullptr,
+                                       TS::KnownTypeCode::IEnumerable);
+    auto collection = MakeDefinition(compilation, "Collection", "N");
+    collection->AddDirectBaseType(ienumerable);
+
+    std::optional<bool> isGeneric;
+    TS::ITypePtr element = TS::GetElementTypeFromIEnumerable(*collection, compilation,
+                                                              /*allowIEnumerator*/ false,
+                                                              isGeneric);
+    EXPECT_EQ(element.get(), objectDef.get());
+    ASSERT_TRUE(isGeneric.has_value());
+    EXPECT_FALSE(*isGeneric);
+}
+
+// The non-generic IEnumerator base fires the foundNonGenericIEnumerable fold
+// only with allowIEnumerator = true.
+TEST(TypeSystemExtensionsTest, GetElementTypeFromIEnumerableNonGenericIEnumeratorRequiresAllowIEnumerator)
+{
+    LookupCompilation compilation;
+    auto objectDef = MakeDefinition(compilation, "Object", "System", TS::TypeKind::Class,
+                                    nullptr, TS::KnownTypeCode::Object);
+    compilation.RegisterKnownType(TS::KnownTypeCode::Object, objectDef.get());
+    auto ienumerator = MakeDefinition(compilation, "IEnumerator", "System.Collections",
+                                       TS::TypeKind::Interface, nullptr,
+                                       TS::KnownTypeCode::IEnumerator);
+    auto collection = MakeDefinition(compilation, "Collection", "N");
+    collection->AddDirectBaseType(ienumerator);
+
+    std::optional<bool> isGeneric;
+    TS::ITypePtr element = TS::GetElementTypeFromIEnumerable(*collection, compilation,
+                                                              /*allowIEnumerator*/ true,
+                                                              isGeneric);
+    EXPECT_EQ(element.get(), objectDef.get());
+    ASSERT_TRUE(isGeneric.has_value());
+    EXPECT_FALSE(*isGeneric);
+
+    // Without the flag the non-generic IEnumerator base is invisible too.
+    std::optional<bool> isGeneric2;
+    TS::ITypePtr element2 = TS::GetElementTypeFromIEnumerable(*collection, compilation,
+                                                               /*allowIEnumerator*/ false,
+                                                               isGeneric2);
+    EXPECT_EQ(element2->Kind(), TS::TypeKind::Unknown);
+    EXPECT_FALSE(isGeneric2.has_value());
+}
+
+// A base type whose DEFINITION carries IEnumerableOfT but which is not itself
+// a ParameterizedType (the bare open-generic definition) does not match: the C#
+// `pt != null` guard continues the walk and neither arm fires.
+TEST(TypeSystemExtensionsTest, GetElementTypeFromIEnumerableBareDefinitionDoesNotYieldGeneric)
+{
+    LookupCompilation compilation;
+    auto enumerableOfT = MakeDefinition(compilation, "IEnumerable", "System.Collections.Generic",
+                                       TS::TypeKind::Interface, nullptr,
+                                       TS::KnownTypeCode::IEnumerableOfT);
+    auto collection = MakeDefinition(compilation, "Collection", "N");
+    collection->AddDirectBaseType(enumerableOfT);
+
+    std::optional<bool> isGeneric;
+    TS::ITypePtr element = TS::GetElementTypeFromIEnumerable(*collection, compilation,
+                                                              /*allowIEnumerator*/ false,
+                                                              isGeneric);
+    EXPECT_EQ(element->Kind(), TS::TypeKind::Unknown);
+    EXPECT_FALSE(isGeneric.has_value());
+}
+
+// A type with no IEnumerable / IEnumerator base of either arity yields the
+// UnknownType null object with isGeneric = null.
+TEST(TypeSystemExtensionsTest, GetElementTypeFromIEnumerableNoEnumerableBaseYieldsUnknown)
+{
+    LookupCompilation compilation;
+    auto collection = MakeDefinition(compilation, "Collection", "N");
+
+    std::optional<bool> isGeneric;
+    TS::ITypePtr element = TS::GetElementTypeFromIEnumerable(*collection, compilation,
+                                                              /*allowIEnumerator*/ false,
+                                                              isGeneric);
+    EXPECT_EQ(element->Kind(), TS::TypeKind::Unknown);
+    EXPECT_FALSE(isGeneric.has_value());
+}

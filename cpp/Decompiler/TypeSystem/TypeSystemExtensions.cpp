@@ -278,4 +278,48 @@ ITypePtr GetInlineArrayElementType(const IType& arrayType)
     return std::const_pointer_cast<IType>(fieldType.shared_from_this());
 }
 
+ITypePtr GetElementTypeFromIEnumerable(const IType& collectionType,
+                                       const ICompilation& compilation,
+                                       bool allowIEnumerator,
+                                       std::optional<bool>& isGeneric)
+{
+    bool foundNonGenericIEnumerable = false;
+    for (const IType* baseType : GetAllBaseTypes(collectionType)) {
+        // The port's base-type snapshot may carry null entries for a degenerate
+        // DirectBaseTypes graph; the C# would NRE on `baseType.GetDefinition()` -- the
+        // D516 null-guard convention.
+        if (baseType == nullptr)
+            continue;
+        const ITypeDefinition* baseTypeDef = baseType->GetDefinition();
+        if (baseTypeDef != nullptr) {
+            KnownTypeCode typeCode = baseTypeDef->KnownTypeCode();
+            if (typeCode == KnownTypeCode::IEnumerableOfT
+                || (allowIEnumerator && typeCode == KnownTypeCode::IEnumeratorOfT)) {
+                // C# `ParameterizedType pt = baseType as ParameterizedType; if (pt != null)
+                // { isGeneric = true; return pt.GetTypeArgument(0); }`. The bare
+                // open-generic definition (not a ParameterizedType) falls through and
+                // continues the walk; the non-empty-TypeArguments guard keeps the
+                // GetTypeArgument(0) index in bounds for a degenerate zero-argument
+                // ParameterizedType (the D516 safe-fallback convention).
+                const ParameterizedType* pt = dynamic_cast<const ParameterizedType*>(baseType);
+                if (pt != nullptr && !pt->TypeArguments().empty()) {
+                    isGeneric = std::optional<bool>(true);
+                    return pt->GetTypeArgument(0);
+                }
+            }
+            if (typeCode == KnownTypeCode::IEnumerable
+                || (allowIEnumerator && typeCode == KnownTypeCode::IEnumerator))
+                foundNonGenericIEnumerable = true;
+        }
+    }
+    // System.Collections.IEnumerable found in type hierarchy -> Object is element type.
+    if (foundNonGenericIEnumerable) {
+        isGeneric = std::optional<bool>(false);
+        const IType& objectType = compilation.FindType(KnownTypeCode::Object);
+        return std::const_pointer_cast<IType>(objectType.shared_from_this());
+    }
+    isGeneric = std::nullopt;
+    return UnknownType();
+}
+
 } // namespace ILSpy::Decompiler::TypeSystem
