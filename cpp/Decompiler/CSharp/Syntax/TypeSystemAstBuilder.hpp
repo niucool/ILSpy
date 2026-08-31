@@ -42,14 +42,17 @@
 // lines 2683-2734, consumed only by the deferred ConvertEntity), the "Convert
 // Modifiers" region (NeedsAccessibility + GetMemberModifiers, C# lines 2518-2596,
 // consuming the ModifierFromAccessibility free function and the LocalFunctionMethod
-// wrapper), and the "Convert Entity" accessor-support cluster (GenerateBodyBlock +
+// wrapper), the "Convert Entity" accessor-support cluster (GenerateBodyBlock +
 // ConvertAccessor + MergeReadOnlyModifiers + GetExplicitInterfaceType, C# lines
-// 2188-2297 + 2771-2782, the shared prerequisites of the member renderers) are
-// landed; the remaining `Convert*` instance methods (the ConvertProperty /
-// ConvertIndexer / ConvertEvent / ConvertMethod / ConvertOperator /
-// ConvertTypeDefinition renderers plus the ConvertSymbol / ConvertEntity /
-// ConvertExtension entries) follow in later slices, consuming the members below
-// as they grow.
+// 2188-2297 + 2771-2782, the shared prerequisites of the member renderers), and
+// the "Convert Entity" member renderers (ConvertField + ConvertProperty +
+// ConvertIndexer + ConvertEvent, C# lines 2143-2186 + 2252-2275 + 2294-2320 +
+// 2322-2360, composing that cluster with the already-landed attribute /
+// parameter / constant-value / modifier helpers) are landed; the remaining
+// `Convert*` instance methods (the ConvertMethod / ConvertOperator /
+// ConvertConstructor / ConvertDestructor / ConvertTypeDefinition / ConvertDelegate
+// renderers plus the ConvertSymbol / ConvertEntity / ConvertExtension entries)
+// follow in later slices, consuming the members below as they grow.
 //
 // ModifierFromAccessibility (TypeSystemAstBuilder.cs line 2497) is the first such
 // helper: a pure switch on Accessibility (the D373 leaf) that maps a symbol's
@@ -62,9 +65,14 @@
 #pragma once
 
 #include "Accessor.hpp"
+#include "CustomEventDeclaration.hpp"
 #include "EntityDeclaration.hpp"
+#include "EventDeclaration.hpp"
+#include "FieldDeclaration.hpp"
+#include "IndexerDeclaration.hpp"
 #include "MemberType.hpp"
 #include "Modifiers.hpp"
+#include "PropertyDeclaration.hpp"
 #include "SimpleType.hpp"
 
 #include "Decompiler/CSharp/Resolver/NameLookupMode.hpp"
@@ -1552,6 +1560,57 @@ public:
     // direct TDD ahead of the consumer slices (the `ConvertTypeParameter`
     // convention).
     AstType* GetExplicitInterfaceType(const TS::IMember& member) const;
+
+    // -- The "Convert Entity" member renderers (C# lines 2143-2186 + 2252-2275
+    // + 2294-2320 + 2322-2360) --
+    //
+    // The four per-member renderers that compose the accessor-support cluster
+    // with the already-landed attribute / parameter / constant-value / modifier
+    // helpers. All four are `internal` in the C# (the private `ConvertEntity`
+    // dispatch calls them); widened to public for direct TDD ahead of that
+    // dispatch (the `ConvertAccessor` convention). The returned nodes are raw
+    // `new`-ed pointers (the D223 non-owning model; the caller owns them).
+
+    // The C# `FieldDeclaration ConvertField(IField field)` (line 2143) -- the
+    // field renderer: the modifiers (the `IsConst` const bit REPLACES the
+    // `static` bit -- a C# constant is never rendered `static const`; else the
+    // `IsReadOnly` readonly bit; else the `IsVolatile` volatile bit, an
+    // if/else-if chain so only one of the three can fire), the attribute
+    // sections, the `MemberResolveResult` annotation, the return type, the
+    // `ref readonly` trailing-readonly promotion on the rendered `ComposedType`,
+    // and the constant initializer under `IsConst && ShowConstantValues` (a
+    // `BadImageFormatException` from the metadata decode renders an
+    // `ErrorExpression`). The initializer's type argument is the field's own
+    // `IVariable::Type` (NOT `ReturnType` -- faithful to the C# call site).
+    FieldDeclaration* ConvertField(const TS::IField& field) const;
+
+    // The C# `PropertyDeclaration ConvertProperty(IProperty property)` (line
+    // 2252) -- the property renderer: the modifiers, the attribute sections,
+    // the `MemberResolveResult` annotation, the return type with the
+    // `ref readonly` trailing-readonly promotion, the name, the getter/setter
+    // through `ConvertAccessor` (the setter arm `addParameterAttribute: true`
+    // -- only the SETTER renders the `[param: ...]` section of its `value`
+    // parameter), the explicit-interface type, and the
+    // `MergeReadOnlyModifiers` hoist over both accessors.
+    PropertyDeclaration* ConvertProperty(const TS::IProperty& property) const;
+
+    // The C# `IndexerDeclaration ConvertIndexer(IProperty indexer)` (line 2294)
+    // -- the indexer renderer: the `ConvertProperty` shape with a parameter
+    // list loop in place of the name assignment (an indexer names itself
+    // `this[...]`, so no identifier is rendered). The parameters are rendered
+    // through the already-landed `ConvertParameter`.
+    IndexerDeclaration* ConvertIndexer(const TS::IProperty& indexer) const;
+
+    // The C# `EntityDeclaration ConvertEvent(IEvent ev)` (line 2322) -- the
+    // event renderer: the `UseCustomEvents` flag selects between the
+    // `CustomEventDeclaration` (the `event E Name { add; remove; }` shape with
+    // the add/remove accessors through `ConvertAccessor`, the
+    // explicit-interface type, and the `MergeReadOnlyModifiers` hoist) and the
+    // plain `EventDeclaration` (the field-like `event E Name;` shape whose
+    // name lives in a `VariableInitializer` and which carries NO accessors).
+    // The return is the `EntityDeclaration` base because the two arms produce
+    // distinct concrete node types (the C# `EntityDeclaration` return).
+    EntityDeclaration* ConvertEvent(const TS::IEvent& ev) const;
 
 private:
     // The C# `private void AddTypeAnnotation(AstType astType, IType type)` (line 278)

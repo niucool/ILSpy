@@ -63,6 +63,11 @@
 #include "TupleTypeElement.hpp"
 
 #include "Comment.hpp"
+#include "CustomEventDeclaration.hpp"
+#include "EventDeclaration.hpp"
+#include "FieldDeclaration.hpp"
+#include "IndexerDeclaration.hpp"
+#include "PropertyDeclaration.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
 #include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
@@ -76,6 +81,8 @@
 #include "Decompiler/TypeSystem/CustomAttributeTypedArgument.hpp"
 #include "Decompiler/TypeSystem/FullTypeName.hpp"
 #include "Decompiler/TypeSystem/IField.hpp"
+#include "Decompiler/TypeSystem/IEvent.hpp"
+#include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/TypeSystem/IParameter.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
@@ -2310,6 +2317,213 @@ AstType* TypeSystemAstBuilder::GetExplicitInterfaceType(
         }
     }
     return nullptr;
+}
+
+// -- The "Convert Entity" member renderers (C# lines 2143-2186 + 2252-2275 +
+// 2294-2320 + 2322-2360) --
+
+// The C# `FieldDeclaration ConvertField(IField field)` (line 2143) -- see the
+// header declaration for the full contract.
+FieldDeclaration* TypeSystemAstBuilder::ConvertField(
+    const TS::IField& field) const {
+    auto* decl = new FieldDeclaration();
+    if (ShowModifiers()) {
+        Modifiers m = GetMemberModifiers(field);
+        if (field.IsConst()) {
+            // The C# `m &= ~Modifiers.Static; m |= Modifiers.Const;` -- a C#
+            // constant is never rendered `static const` (a `static const` field
+            // in metadata is a C# `const`), so the static bit is REPLACED by the
+            // const bit.
+            m = m & ~Modifiers::Static;
+            m = m | Modifiers::Const;
+        } else if (field.IsReadOnly()) {
+            m = m | Modifiers::Readonly;
+        } else if (field.IsVolatile()) {
+            m = m | Modifiers::Volatile;
+        }
+        decl->Modifiers(m);
+    }
+    if (ShowAttributes()) {
+        // The C# `decl.Attributes.AddRange(ConvertAttributes(...))` -- the
+        // AddRange convenience ports to element-wise Add (the D222 convention,
+        // the ConvertParameter precedent).
+        for (AttributeSection* section : ConvertAttributes(field.GetAttributes()))
+            decl->Attributes().Add(section);
+    }
+    if (AddResolveResultAnnotations()) {
+        // The C# `new MemberResolveResult(null, field)` -- the null target is
+        // the empty shared_ptr (the ConvertAccessor annotation precedent);
+        // `ComputeType` reads the field's return type (which must be
+        // shared-managed, the D271/D406 model) and `InitConstantFromField`
+        // reads the field's own `IsConst` / `GetConstantValue`.
+        decl->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+            std::shared_ptr<Sem::ResolveResult>(), &field));
+    }
+    // `ConvertType` takes `TS::IType&` non-const (the `shared_from_this`-based
+    // annotation path, the D529 convention); the member's type accessor is
+    // const, so the cast (the D515/D517 precedent, the ConvertVariable
+    // precedent).
+    decl->ReturnType(ConvertType(const_cast<TS::IType&>(field.ReturnType())));
+    // The C# `if (decl.ReturnType is ComposedType ct && ct.HasRefSpecifier &&
+    // field.ReturnTypeIsRefReadOnly) ct.HasReadOnlySpecifier = true;` -- a
+    // `ref readonly` field renders `ref readonly` (the ref comes from the
+    // ByReferenceType unwrap inside ConvertType; the readonly is promoted
+    // here onto the rendered ComposedType).
+    if (auto* ct = dynamic_cast<ComposedType*>(decl->ReturnType());
+        ct != nullptr && ct->HasRefSpecifier() && field.ReturnTypeIsRefReadOnly()) {
+        ct->HasReadOnlySpecifier(true);
+    }
+    Expression* initializer = nullptr;
+    if (field.IsConst() && ShowConstantValues()) {
+        // The C# `catch (BadImageFormatException ex)` guards the metadata
+        // decoder inside `GetConstantValue(throwOnInvalidMetadata: true)`; the
+        // port catches `std::exception` (the ConvertParameter / ConvertVariable
+        // catch-arm convention -- no port-side `GetConstantValue` throws today,
+        // the arm keeps the structure for a future metadata-backed `IField`)
+        // and renders the message as an `ErrorExpression`'s trailing comment.
+        try {
+            // The C# initializer call passes `field.Type` (the `IVariable`
+            // surface), NOT `field.ReturnType` -- faithful to the call site.
+            initializer = ConvertConstantValue(
+                const_cast<TS::IType&>(field.Type()),
+                field.GetConstantValue(/*throwOnInvalidMetadata:*/ true));
+        } catch (const std::exception& ex) {
+            initializer = new ErrorExpression(ex.what());
+        }
+    }
+    decl->Variables().Add(new VariableInitializer(field.Name(), initializer));
+    return decl;
+}
+
+// The C# `PropertyDeclaration ConvertProperty(IProperty property)` (line
+// 2252) -- see the header declaration for the full contract.
+PropertyDeclaration* TypeSystemAstBuilder::ConvertProperty(
+    const TS::IProperty& property) const {
+    auto* decl = new PropertyDeclaration();
+    decl->Modifiers(GetMemberModifiers(property));
+    if (ShowAttributes()) {
+        for (AttributeSection* section : ConvertAttributes(property.GetAttributes()))
+            decl->Attributes().Add(section);
+    }
+    if (AddResolveResultAnnotations()) {
+        decl->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+            std::shared_ptr<Sem::ResolveResult>(), &property));
+    }
+    decl->ReturnType(ConvertType(const_cast<TS::IType&>(property.ReturnType())));
+    // The C# `if (property.ReturnTypeIsRefReadOnly && decl.ReturnType is
+    // ComposedType ct && ct.HasRefSpecifier) ct.HasReadOnlySpecifier = true;`
+    // -- note the FLAG check comes first here (the mirror of ConvertField's
+    // node-first order; both are the same conjunction).
+    if (property.ReturnTypeIsRefReadOnly()) {
+        if (auto* ct = dynamic_cast<ComposedType*>(decl->ReturnType());
+            ct != nullptr && ct->HasRefSpecifier()) {
+            ct->HasReadOnlySpecifier(true);
+        }
+    }
+    decl->Name(property.Name());
+    // The C# `decl.Getter = ConvertAccessor(property.Getter, Getter,
+    // property.Accessibility, false); decl.Setter = ConvertAccessor(
+    // property.Setter, Setter, property.Accessibility, true);` -- only the
+    // SETTER arm passes `addParameterAttribute: true` (the `[param: ...]`
+    // section belongs to the setter's `value` parameter).
+    decl->Getter(ConvertAccessor(property.Getter(),
+                                  TS::MethodSemanticsAttributes::Getter,
+                                  property.Accessibility(), false));
+    decl->Setter(ConvertAccessor(property.Setter(),
+                                 TS::MethodSemanticsAttributes::Setter,
+                                 property.Accessibility(), true));
+    decl->PrivateImplementationType(GetExplicitInterfaceType(property));
+    MergeReadOnlyModifiers(*decl, decl->Getter(), decl->Setter());
+    return decl;
+}
+
+// The C# `IndexerDeclaration ConvertIndexer(IProperty indexer)` (line 2294) --
+// see the header declaration for the full contract.
+IndexerDeclaration* TypeSystemAstBuilder::ConvertIndexer(
+    const TS::IProperty& indexer) const {
+    auto* decl = new IndexerDeclaration();
+    decl->Modifiers(GetMemberModifiers(indexer));
+    if (ShowAttributes()) {
+        for (AttributeSection* section : ConvertAttributes(indexer.GetAttributes()))
+            decl->Attributes().Add(section);
+    }
+    if (AddResolveResultAnnotations()) {
+        decl->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+            std::shared_ptr<Sem::ResolveResult>(), &indexer));
+    }
+    decl->ReturnType(ConvertType(const_cast<TS::IType&>(indexer.ReturnType())));
+    if (indexer.ReturnTypeIsRefReadOnly()) {
+        if (auto* ct = dynamic_cast<ComposedType*>(decl->ReturnType());
+            ct != nullptr && ct->HasRefSpecifier()) {
+            ct->HasReadOnlySpecifier(true);
+        }
+    }
+    // The C# `foreach (IParameter p in indexer.Parameters) decl.Parameters.Add(
+    // ConvertParameter(p));` -- the parameter loop in place of the property's
+    // name assignment (an indexer names itself `this[...]`; the node's `Name`
+    // setter deliberately throws).
+    for (const TS::IParameter* p : indexer.Parameters()) {
+        if (p == nullptr)
+            continue; // the D516 null-entry guard
+        decl->Parameters().Add(ConvertParameter(*p));
+    }
+    decl->Getter(ConvertAccessor(indexer.Getter(),
+                                  TS::MethodSemanticsAttributes::Getter,
+                                  indexer.Accessibility(), false));
+    decl->Setter(ConvertAccessor(indexer.Setter(),
+                                 TS::MethodSemanticsAttributes::Setter,
+                                 indexer.Accessibility(), true));
+    decl->PrivateImplementationType(GetExplicitInterfaceType(indexer));
+    MergeReadOnlyModifiers(*decl, decl->Getter(), decl->Setter());
+    return decl;
+}
+
+// The C# `EntityDeclaration ConvertEvent(IEvent ev)` (line 2322) -- see the
+// header declaration for the full contract.
+EntityDeclaration* TypeSystemAstBuilder::ConvertEvent(const TS::IEvent& ev) const {
+    if (UseCustomEvents()) {
+        auto* decl = new CustomEventDeclaration();
+        decl->Modifiers(GetMemberModifiers(ev));
+        if (ShowAttributes()) {
+            for (AttributeSection* section : ConvertAttributes(ev.GetAttributes()))
+                decl->Attributes().Add(section);
+        }
+        if (AddResolveResultAnnotations()) {
+            decl->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+                std::shared_ptr<Sem::ResolveResult>(), &ev));
+        }
+        decl->ReturnType(ConvertType(const_cast<TS::IType&>(ev.ReturnType())));
+        decl->Name(ev.Name());
+        // The C# passes `addParameterAttribute: true` for BOTH event accessors
+        // (an add/remove accessor's `[param: ...]` section belongs to its
+        // `value` parameter).
+        decl->AddAccessor(ConvertAccessor(ev.AddAccessor(),
+                                           TS::MethodSemanticsAttributes::Adder,
+                                           ev.Accessibility(), true));
+        decl->RemoveAccessor(ConvertAccessor(ev.RemoveAccessor(),
+                                              TS::MethodSemanticsAttributes::Remover,
+                                              ev.Accessibility(), true));
+        decl->PrivateImplementationType(GetExplicitInterfaceType(ev));
+        MergeReadOnlyModifiers(*decl, decl->AddAccessor(), decl->RemoveAccessor());
+        return decl;
+    } else {
+        auto* decl = new EventDeclaration();
+        decl->Modifiers(GetMemberModifiers(ev));
+        if (ShowAttributes()) {
+            for (AttributeSection* section : ConvertAttributes(ev.GetAttributes()))
+                decl->Attributes().Add(section);
+        }
+        if (AddResolveResultAnnotations()) {
+            decl->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+                std::shared_ptr<Sem::ResolveResult>(), &ev));
+        }
+        decl->ReturnType(ConvertType(const_cast<TS::IType&>(ev.ReturnType())));
+        // The field-like event shape: the name lives in the sole
+        // `VariableInitializer` and there are NO accessors (the C#
+        // `decl.Variables.Add(new VariableInitializer(ev.Name))`).
+        decl->Variables().Add(new VariableInitializer(ev.Name()));
+        return decl;
+    }
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
