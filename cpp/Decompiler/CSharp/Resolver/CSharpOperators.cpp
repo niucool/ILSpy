@@ -1457,4 +1457,124 @@ CSharpOperators::GreaterThanOrEqualOperators() const
     return greaterThanOrEqualOperators_;
 }
 
+// ---------------------------------------------------------------------------
+// The bitwise operator region (CSharpOperators.cs lines 996-1101)
+// ---------------------------------------------------------------------------
+
+// The C# `public OperatorMethod[] LogicalAndOperators` (the C# 4.0 spec 7.11 logical
+// AND `&`): the single bool original -- `a & b` on bools is the C# NON-SHORT-CIRCUIT
+// logical AND (both operands are always evaluated; the value equals `a && b` for the
+// two bools the stored func receives, but the C# source spells `&`, so the port does
+// too -- `static_cast<bool>` because C++ `operator&` promotes the bools to int). The
+// table is NOT wrapped in `Lift`: it holds the original alone.
+const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::LogicalAndOperators()
+    const
+{
+    if (logicalAndOperators_.empty())
+    {
+        logicalAndOperators_ = {
+            std::make_shared<LambdaBinaryOperatorMethod<bool, bool>>(
+                *this, [](bool a, bool b) { return static_cast<bool>(a & b); }),
+        };
+    }
+    return logicalAndOperators_;
+}
+
+// The C# `public OperatorMethod[] BitwiseAndOperators` (the C# 4.0 spec 7.11 bitwise `&`
+// on integral operands): the four integer originals, then the SHARED
+// `LogicalAndOperators[0]` bool original (the C# passes the logical table's instance, so
+// `BitwiseAndOperators[4]` and `LogicalAndOperators[0]` are the same object), then their
+// five lifted `Nullable<T>` forms via `Lift` (the arithmetic-style lift: the lifted
+// return type IS `Nullable<T>`, unlike the relational reset).
+const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::BitwiseAndOperators()
+    const
+{
+    if (bitwiseAndOperators_.empty())
+    {
+        bitwiseAndOperators_ = Lift({
+            std::make_shared<LambdaBinaryOperatorMethod<std::int32_t, std::int32_t>>(
+                *this, [](std::int32_t a, std::int32_t b) { return a & b; }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint32_t, std::uint32_t>>(
+                *this, [](std::uint32_t a, std::uint32_t b) { return a & b; }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::int64_t, std::int64_t>>(
+                *this, [](std::int64_t a, std::int64_t b) { return a & b; }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint64_t, std::uint64_t>>(
+                *this, [](std::uint64_t a, std::uint64_t b) { return a & b; }),
+            // The C# `this.LogicalAndOperators[0]` -- the shared instance (memoizing the
+            // logical table as a side effect, exactly as the C# accessor does).
+            LogicalAndOperators()[0],
+        });
+    }
+    return bitwiseAndOperators_;
+}
+
+// The C# `public OperatorMethod[] LogicalOrOperators` (the C# 4.0 spec 7.11 logical OR
+// `|`): the single bool original, not lifted within the table.
+const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::LogicalOrOperators()
+    const
+{
+    if (logicalOrOperators_.empty())
+    {
+        logicalOrOperators_ = {
+            std::make_shared<LambdaBinaryOperatorMethod<bool, bool>>(
+                *this, [](bool a, bool b) { return static_cast<bool>(a | b); }),
+        };
+    }
+    return logicalOrOperators_;
+}
+
+// The C# `public OperatorMethod[] BitwiseOrOperators` (the C# 4.0 spec 7.11 bitwise `|`
+// on integral operands): the four integer originals, then the SHARED
+// `LogicalOrOperators[0]` bool original, then their five lifted forms.
+const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::BitwiseOrOperators()
+    const
+{
+    if (bitwiseOrOperators_.empty())
+    {
+        bitwiseOrOperators_ = Lift({
+            std::make_shared<LambdaBinaryOperatorMethod<std::int32_t, std::int32_t>>(
+                *this, [](std::int32_t a, std::int32_t b) { return a | b; }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint32_t, std::uint32_t>>(
+                *this, [](std::uint32_t a, std::uint32_t b) { return a | b; }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::int64_t, std::int64_t>>(
+                *this, [](std::int64_t a, std::int64_t b) { return a | b; }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint64_t, std::uint64_t>>(
+                *this, [](std::uint64_t a, std::uint64_t b) { return a | b; }),
+            // The C# `this.LogicalOrOperators[0]` -- the shared instance.
+            LogicalOrOperators()[0],
+        });
+    }
+    return bitwiseOrOperators_;
+}
+
+// The C# `public OperatorMethod[] BitwiseXorOperators` (the C# 4.0 spec 7.11 bitwise
+// `^`): the four integer originals, then a FRESH bool original (there is no logical-xor
+// table to share the entry with), then their five lifted forms.
+//
+// The C# note above the table, kept verbatim in spirit: "Note: the logic for the lifted
+// bool? bitwise operators is wrong; we produce `true | null` = `null` when it should be
+// true. However, this is irrelevant because bool? cannot be a compile-time type." The
+// divergence lives in the deferred `Invoke` bodies (the null-propagation semantics of a
+// lifted `|`/`^` on `bool?`), not in the type shape the tables carry.
+const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::BitwiseXorOperators()
+    const
+{
+    if (bitwiseXorOperators_.empty())
+    {
+        bitwiseXorOperators_ = Lift({
+            std::make_shared<LambdaBinaryOperatorMethod<std::int32_t, std::int32_t>>(
+                *this, [](std::int32_t a, std::int32_t b) { return a ^ b; }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint32_t, std::uint32_t>>(
+                *this, [](std::uint32_t a, std::uint32_t b) { return a ^ b; }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::int64_t, std::int64_t>>(
+                *this, [](std::int64_t a, std::int64_t b) { return a ^ b; }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint64_t, std::uint64_t>>(
+                *this, [](std::uint64_t a, std::uint64_t b) { return a ^ b; }),
+            std::make_shared<LambdaBinaryOperatorMethod<bool, bool>>(
+                *this, [](bool a, bool b) { return static_cast<bool>(a ^ b); }),
+        });
+    }
+    return bitwiseXorOperators_;
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver

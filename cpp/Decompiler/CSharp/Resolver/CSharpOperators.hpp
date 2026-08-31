@@ -84,10 +84,22 @@
 //     Boolean -- "don't lift the return type for relational operators"), plus the four
 //     lazy comparison operator-table properties (`LessThanOperators` /
 //     `LessThanOrEqualOperators` / `GreaterThanOperators` / `GreaterThanOrEqualOperators`).
+//   * PORTED: the bitwise operator region (CSharpOperators.cs lines 996-1101): the five
+//     lazy logical/bitwise operator-table properties (`LogicalAndOperators` /
+//     `BitwiseAndOperators` / `LogicalOrOperators` / `BitwiseOrOperators` /
+//     `BitwiseXorOperators` -- the C# 4.0 spec 7.11 logical operators), built entirely
+//     on the already-landed binary-region pieces: the single-bool logical tables (the
+//     non-short-circuit `&`/`|` on bools, not lifted within their own tables), and the
+//     bitwise tables lifting the four integer originals plus the SHARED logical-table
+//     bool entry (the C# `this.LogicalAndOperators[0]` / `this.LogicalOrOperators[0]`
+//     references, so the logical and bitwise tables hold pointer-identical entries) or a
+//     fresh bool original for `^` (no logical-xor table exists).
 //
-// The remaining derived operator-method families (the bitwise / user-defined
-// regions, lines 992-1168) and the lazy operator-table properties built on
-// them are DEFERRED to later slices.
+// The remaining derived operator-method families (the user-defined operator region,
+// lines 1104-1168: `LiftUserDefinedOperator` / `IsComparisonOperator` /
+// `LiftedUserDefinedOperator` -- gated on `SpecializedMethod::CreateParameters` and the
+// `OperatorDeclaration.GetOperatorType` lookup) and the lazy operator-table properties
+// built on them are DEFERRED to later slices.
 //
 // KEY PORT CONVENTIONS:
 //  (a) The C# nested classes (`OperatorMethod` and, later, the *OperatorMethod families)
@@ -575,6 +587,34 @@ public:
     // the `a >= b` bodies, then their lifted forms.
     const std::vector<std::shared_ptr<OperatorMethod>>& GreaterThanOrEqualOperators() const;
 
+    // --- The C# lazy bitwise operator-table properties (lines 996-1101, convention (m)) ---
+
+    // The C# `OperatorMethod[] LogicalAndOperators` (the C# 4.0 spec 7.11 logical AND
+    // `&`): the single bool original (`a & b` -- the non-short-circuit logical AND on
+    // bools), NOT wrapped in `Lift` (the table holds the original alone).
+    const std::vector<std::shared_ptr<OperatorMethod>>& LogicalAndOperators() const;
+
+    // The C# `OperatorMethod[] BitwiseAndOperators` (the C# 4.0 spec 7.11 bitwise `&` on
+    // integral operands): the four integer originals (int, uint, long, ulong -- each
+    // `a & b`), then the SHARED `LogicalAndOperators[0]` bool original (the C# passes the
+    // logical table's instance, so the two tables hold pointer-identical entries), then
+    // their five lifted `Nullable<T>` forms via `Lift`.
+    const std::vector<std::shared_ptr<OperatorMethod>>& BitwiseAndOperators() const;
+
+    // The C# `OperatorMethod[] LogicalOrOperators` (the C# 4.0 spec 7.11 logical OR
+    // `|`): the single bool original (`a | b`), not lifted within the table.
+    const std::vector<std::shared_ptr<OperatorMethod>>& LogicalOrOperators() const;
+
+    // The C# `OperatorMethod[] BitwiseOrOperators` (the C# 4.0 spec 7.11 bitwise `|` on
+    // integral operands): the four integer originals, then the SHARED
+    // `LogicalOrOperators[0]` bool original, then their five lifted forms.
+    const std::vector<std::shared_ptr<OperatorMethod>>& BitwiseOrOperators() const;
+
+    // The C# `OperatorMethod[] BitwiseXorOperators` (the C# 4.0 spec 7.11 bitwise `^`):
+    // the four integer originals, then a FRESH bool original (there is no logical-xor
+    // table to share with), then their five lifted forms.
+    const std::vector<std::shared_ptr<OperatorMethod>>& BitwiseXorOperators() const;
+
 private:
     // The C# `private CSharpOperators(ICompilation compilation)` -- private; `Get`
     // (a static member, which has private access) builds the instance. NOTE:
@@ -633,6 +673,14 @@ private:
     mutable std::vector<std::shared_ptr<OperatorMethod>> lessThanOrEqualOperators_;
     mutable std::vector<std::shared_ptr<OperatorMethod>> greaterThanOperators_;
     mutable std::vector<std::shared_ptr<OperatorMethod>> greaterThanOrEqualOperators_;
+
+    // The C# `OperatorMethod[]? logicalAndOperators` (and the four siblings) -- the
+    // bitwise lazy memo fields (convention (m)).
+    mutable std::vector<std::shared_ptr<OperatorMethod>> logicalAndOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> bitwiseAndOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> logicalOrOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> bitwiseOrOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> bitwiseXorOperators_;
 };
 
 // ---------------------------------------------------------------------------
