@@ -110,6 +110,7 @@
 
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
+#include "Decompiler/TypeSystem/ExpressionType.hpp"
 #include "Decompiler/TypeSystem/IVariable.hpp"
 #include "Decompiler/Util/ImmutableStack.hpp"
 
@@ -119,6 +120,20 @@
 #include <utility>
 #include <vector>
 
+// Forward-declared at GLOBAL scope (the iteration-94 MSVC namespace-reopening learning:
+// a qualified namespace-definition written inside the enclosing namespace below would
+// resolve against the enclosing namespace's own members): the two AST operator enums the
+// resolver's operator-resolution regions consume. They are defined in the Syntax
+// expression headers (the C# `CSharpResolver.cs` itself `using`s
+// `ICSharpCode.Decompiler.CSharp.Syntax` for exactly these enums); a scoped-enum forward
+// declaration needs only the (implicit `int`) underlying type, keeping the AST headers
+// out of the resolver's include graph -- the .cpp includes the full headers for the
+// switch bodies.
+namespace ILSpy::Decompiler::CSharp::Syntax {
+enum class UnaryOperatorType;
+enum class BinaryOperatorType;
+}
+
 namespace ILSpy::Decompiler::CSharp::Resolver {
 
 // Forward-declared (same namespace, in CSharpConversions.hpp): the conversion
@@ -126,6 +141,13 @@ namespace ILSpy::Decompiler::CSharp::Resolver {
 // exposes through `Conversions()`. A reference return/member needs only a declaration;
 // the .cpp includes the full header for the `Get` call.
 class CSharpConversions;
+
+// Forward-declared (same namespace, in OverloadResolution.hpp): the overload-resolution
+// engine `CreateResolveResultForUserDefinedOperator` reads the best-candidate state of.
+// A reference parameter needs only a declaration; the .cpp includes the full header for
+// the `BestCandidateErrors` / `CreateResolveResult` / `BestCandidate` /
+// `GetArgumentsWithConversions` calls.
+class OverloadResolution;
 
 // The C# `Dictionary<string, IVariable>` -- one block's local variables / lambda
 // parameters keyed by name. The values are owning handles; the resolver's clones share
@@ -271,6 +293,85 @@ public:
         return CurrentObjectInitializer().Type();
     }
 
+    // ---- User-Defined Operator Candidates ---------------------------------------------------
+    // (The `Get user-defined operator candidates` region, CSharpResolver.cs lines
+    // 1278-1322, plus the two `GetOverloadableOperatorName` statics at lines 566-583 /
+    // 1207-1241 -- the shared prerequisite machinery the `ResolveUnaryOperator` and
+    // `ResolveBinaryOperator` regions consume; those regions land in later slices.)
+
+    // The C# `static string GetOverloadableOperatorName(UnaryOperatorType op)` (line 567)
+    // -- the metadata method name of the overloadable unary operator (`op_Increment` /
+    // `op_Decrement` for the pre- AND post-forms), or the C# `null` for the
+    // non-overloadable kinds (Any / Dereference / AddressOf / Await / the
+    // null-conditional family / the pattern kinds). Private static in the C#; PUBLIC
+    // static in the port for direct TDD (the port has no assembly-internal visibility
+    // level -- the same widening applied to the CSharpOperators `internal` members).
+    // The C# nullable string return ports to a `const char*` where `nullptr` is the C#
+    // `null` (the fixed literal table, the `BinaryOperatorExpression::GetOperatorToken`
+    // convention); the future `ResolveUnaryOperator` region's
+    // `overloadableOperatorName == null` check ports to `name == nullptr`.
+    static const char* GetOverloadableOperatorName(
+        ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType op);
+
+    // The C# `static string GetOverloadableOperatorName(BinaryOperatorType op)` (line
+    // 1208) -- the metadata method name of the overloadable binary operator (the 16
+    // arithmetic / bitwise / shift / comparison names), or the C# `null` for the
+    // non-overloadable kinds (Any / ConditionalAnd / ConditionalOr / NullCoalescing /
+    // Range / IsPattern). Private static in the C#; PUBLIC static in the port (the unary
+    // overload above).
+    static const char* GetOverloadableOperatorName(
+        ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType op);
+
+    // The C# `public IEnumerable<IParameterizedMember> GetUserDefinedOperatorCandidates(
+    // IType type, string operatorName)` (line 1280) -- the candidate user-defined
+    // operators (C# spec draft-v11 section 12.4.6) for the given operand type and
+    // metadata operator name: the type's own `IsOperator` methods with the matching name,
+    // each liftable one followed by its lifted `Nullable<T>` form (the originals all come
+    // first, then the lifted forms in the same order). The primitive operand types are
+    // EXCLUDED (the `TypeCode` [Boolean..Decimal] gate) even when the .NET framework
+    // exposes built-in operators with those metadata names -- "we must not use those as
+    // user-defined operators (we would skip numeric promotion)". The C# declared element
+    // type is `IParameterizedMember` but every element is an `IMethod` (the early outs
+    // return the `EmptyList<IMethod>.Instance` and the list is a `List<IMethod>`), so the
+    // port returns `std::shared_ptr<IMethod>` elements directly.
+    //
+    // The C# `List<IMethod>` holds GC references with no ownership distinction -- the
+    // originals are owned by the type system while the appended lifted forms are freshly
+    // allocated `LiftedUserDefinedOperator` instances the list must keep alive. The
+    // port's vector unifies the two: the originals are stored as NON-OWNING aliases (a
+    // no-op deleter -- the type system owns them for the compilation's lifetime, the
+    // `KnownTypeCache::SearchType` non-owning-alias convention; the `const_cast`
+    // reconciles the `GetMethods` const-return contract, the D515 convention), while
+    // the lifted forms are the OWNING handles `CSharpOperators::LiftUserDefinedOperator`
+    // returns. A caller feeding the entries to `OverloadResolution::AddCandidate` must
+    // hold the vector (and, per the engine's raw-pointer convention, the compilation) for
+    // as long as the resolution state is read -- the same discipline every
+    // `OverloadResolutionCandidate` caller already follows.
+    //
+    // The C# nullable `string operatorName` parameter ports to a `const char*` (nullptr
+    // is the C# `null`; the empty-list early out). Reads no resolver instance state (only
+    // `ReflectionHelper.GetTypeCode`, `IType::GetMethods`, and the static
+    // `CSharpOperators::LiftUserDefinedOperator`), so the method is `const`.
+    std::vector<std::shared_ptr<ILSpy::Decompiler::TypeSystem::IMethod>>
+    GetUserDefinedOperatorCandidates(
+        const ILSpy::Decompiler::TypeSystem::IType& type, const char* operatorName) const;
+
+    // The C# `ResolveResult CreateResolveResultForUserDefinedOperator(OverloadResolution
+    // r, ExpressionType operatorType)` (line 1309) -- the resolve result for an operator
+    // resolved to a USER-DEFINED operator method: the error path delegates to
+    // `r.CreateResolveResult(null)` (the invocation result carrying the applicability
+    // errors), the success path builds an `OperatorResolveResult` over the best
+    // candidate's method (the `ILiftedOperator` cross-cast marking the lifted forms),
+    // with the conversion-wrapped operands. Private instance method in the C#; PUBLIC
+    // STATIC in the port -- it reads no resolver instance state (only the
+    // `OverloadResolution` public surface), and the widening makes the region directly
+    // testable ahead of the `ResolveUnaryOperator` / `ResolveBinaryOperator` consumers
+    // (the CSharpOperators `internal`-widening convention).
+    static std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+    CreateResolveResultForUserDefinedOperator(
+        ILSpy::Decompiler::CSharp::Resolver::OverloadResolution& r,
+        ILSpy::Decompiler::TypeSystem::ExpressionType operatorType);
+
 private:
     // The C# private nested `sealed class ObjectInitializerContext` -- the linked stack
     // of objects being initialized (`prev` is the enclosing initializer; nullable).
@@ -331,6 +432,18 @@ private:
     // helper `PushObjectInitializer` / `PopObjectInitializer` call.
     std::shared_ptr<CSharpResolver> WithObjectInitializerStack(
         std::shared_ptr<ObjectInitializerContext> stack) const;
+
+    // The C# private `void LiftUserDefinedOperators(List<IMethod> operators)` (line
+    // 1296) -- appends the lifted `Nullable<T>` form of every operator in the list,
+    // capturing the ORIGINAL count as the loop bound first so the freshly-appended
+    // lifted forms are themselves not lifted again (a lifted operator's parameters are
+    // `Nullable<T>`, so a second lift would find nothing liftable -- the fixed bound
+    // makes that structural, never even calling the lift). Mutates only the caller's
+    // vector; reads no resolver instance state (only the static `CSharpOperators::
+    // LiftUserDefinedOperator`), so the method is `const`. Private like the C#; tested
+    // transitively through the public `GetUserDefinedOperatorCandidates`.
+    void LiftUserDefinedOperators(
+        std::vector<std::shared_ptr<ILSpy::Decompiler::TypeSystem::IMethod>>& operators) const;
 
     // The `enable_shared_from_this` bridge for the two C# `return this` early-outs
     // (header convention (a)).

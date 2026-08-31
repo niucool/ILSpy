@@ -1,0 +1,52 @@
+Running main() from C:\Projects\github\vcpkg\buildtrees\gtest\src\v1.17.0-e243b8ee0f.clean\googletest\src\gtest_main.cc
+Note: Google Test filter = CSharpResolverUserDefinedOperatorsTest.*
+[==========] Running 21 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 21 tests from CSharpResolverUserDefinedOperatorsTest
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.UnaryNamesForNotBitNotMinusPlus
+[       OK ] CSharpResolverUserDefinedOperatorsTest.UnaryNamesForNotBitNotMinusPlus (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.UnaryIncrementVariantsShareOpIncrement
+[       OK ] CSharpResolverUserDefinedOperatorsTest.UnaryIncrementVariantsShareOpIncrement (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.UnaryDecrementVariantsShareOpDecrement
+[       OK ] CSharpResolverUserDefinedOperatorsTest.UnaryDecrementVariantsShareOpDecrement (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.UnaryNonOverloadableKindsHaveNoName
+[       OK ] CSharpResolverUserDefinedOperatorsTest.UnaryNonOverloadableKindsHaveNoName (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.BinaryArithmeticNames
+[       OK ] CSharpResolverUserDefinedOperatorsTest.BinaryArithmeticNames (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.BinaryBitwiseAndShiftNames
+[       OK ] CSharpResolverUserDefinedOperatorsTest.BinaryBitwiseAndShiftNames (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.BinaryComparisonNames
+[       OK ] CSharpResolverUserDefinedOperatorsTest.BinaryComparisonNames (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.BinaryNonOverloadableKindsHaveNoName
+[       OK ] CSharpResolverUserDefinedOperatorsTest.BinaryNonOverloadableKindsHaveNoName (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.NullOperatorNameYieldsNoCandidates
+[       OK ] CSharpResolverUserDefinedOperatorsTest.NullOperatorNameYieldsNoCandidates (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.PrimitiveOperandTypeIsExcludedWithoutScanning
+[       OK ] CSharpResolverUserDefinedOperatorsTest.PrimitiveOperandTypeIsExcludedWithoutScanning (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.PrimitiveGateExcludesBooleanAndDecimal
+[       OK ] CSharpResolverUserDefinedOperatorsTest.PrimitiveGateExcludesBooleanAndDecimal (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.DateTimeAndStringLieOutsideThePrimitiveGate
+[       OK ] CSharpResolverUserDefinedOperatorsTest.DateTimeAndStringLieOutsideThePrimitiveGate (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.ScanAppliesTheIsOperatorAndNameFilter
+[       OK ] CSharpResolverUserDefinedOperatorsTest.ScanAppliesTheIsOperatorAndNameFilter (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.NoMatchingOperatorYieldsNoCandidates
+[       OK ] CSharpResolverUserDefinedOperatorsTest.NoMatchingOperatorYieldsNoCandidates (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.LiftableOperatorsGetLiftedFormsAppended
+[       OK ] CSharpResolverUserDefinedOperatorsTest.LiftableOperatorsGetLiftedFormsAppended (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.NonLiftableOperatorsAreNotLifted
+[       OK ] CSharpResolverUserDefinedOperatorsTest.NonLiftableOperatorsAreNotLifted (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.LiftedFormsAppendAfterAllOriginalsInOrder
+[       OK ] CSharpResolverUserDefinedOperatorsTest.LiftedFormsAppendAfterAllOriginalsInOrder (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.ErrorBestCandidateYieldsTheInvocationResult
+[       OK ] CSharpResolverUserDefinedOperatorsTest.ErrorBestCandidateYieldsTheInvocationResult (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.ValidBestCandidateYieldsTheOperatorResult
+[       OK ] CSharpResolverUserDefinedOperatorsTest.ValidBestCandidateYieldsTheOperatorResult (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.LiftedBestCandidateMarksIsLiftedOperator
+[       OK ] CSharpResolverUserDefinedOperatorsTest.LiftedBestCandidateMarksIsLiftedOperator (0 ms)
+[ RUN      ] CSharpResolverUserDefinedOperatorsTest.OperandsCarryTheArgumentConversions
+[       OK ] CSharpResolverUserDefinedOperatorsTest.OperandsCarryTheArgumentConversions (0 ms)
+[----------] 21 tests from CSharpResolverUserDefinedOperatorsTest (2 ms total)
+
+[----------] Global test environment tear-down
+[==========] 21 tests from 1 test suite ran. (4 ms total)
+[  PASSED  ] 21 tests.

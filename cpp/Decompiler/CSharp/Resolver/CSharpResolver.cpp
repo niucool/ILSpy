@@ -25,8 +25,15 @@
 #include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
 
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
+#include "Decompiler/CSharp/Resolver/CSharpOperators.hpp"
+#include "Decompiler/CSharp/Resolver/CSharpInvocationResolveResult.hpp"
+#include "Decompiler/CSharp/Resolver/OverloadResolution.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/Semantics/ErrorResolveResult.hpp"
+#include "Decompiler/Semantics/OperatorResolveResult.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
+#include "Decompiler/TypeSystem/IMethod.hpp"
 
 #include <stdexcept>
 #include <utility>
@@ -276,6 +283,181 @@ const ILSpy::Decompiler::Semantics::ResolveResult& CSharpResolver::CurrentObject
     if (objectInitializerStack_ != nullptr)
         return *objectInitializerStack_->initializedObject;
     return ILSpy::Decompiler::Semantics::ErrorResolveResult::UnknownError();
+}
+
+// ---- The user-defined operator candidate region (CSharpResolver.cs lines 566-583 /
+// 1207-1241 / 1278-1322) ------------------------------------------------------------
+
+// The C# `static string GetOverloadableOperatorName(UnaryOperatorType op)` (line 567) --
+// the metadata method name of the overloadable unary operator, or `nullptr` (the C#
+// `return null`) for the non-overloadable kinds. The pre- and post-increment forms share
+// `op_Increment`; the pre- and post-decrement forms share `op_Decrement`.
+const char* CSharpResolver::GetOverloadableOperatorName(
+    ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType op)
+{
+    using ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType;
+    switch (op) {
+        case UnaryOperatorType::Not:
+            return "op_LogicalNot";
+        case UnaryOperatorType::BitNot:
+            return "op_OnesComplement";
+        case UnaryOperatorType::Minus:
+            return "op_UnaryNegation";
+        case UnaryOperatorType::Plus:
+            return "op_UnaryPlus";
+        case UnaryOperatorType::Increment:
+        case UnaryOperatorType::PostIncrement:
+            return "op_Increment";
+        case UnaryOperatorType::Decrement:
+        case UnaryOperatorType::PostDecrement:
+            return "op_Decrement";
+        default:
+            return nullptr; // the C# `return null`
+    }
+}
+
+// The C# `static string GetOverloadableOperatorName(BinaryOperatorType op)` (line 1208)
+// -- the metadata method name of the overloadable binary operator, or `nullptr` (the
+// C# `return null`) for the non-overloadable kinds (the conditional && / || never have
+// metadata operators of their own -- a user-defined `|` implies the conditional form).
+const char* CSharpResolver::GetOverloadableOperatorName(
+    ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType op)
+{
+    using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType;
+    switch (op) {
+        case BinaryOperatorType::Add:
+            return "op_Addition";
+        case BinaryOperatorType::Subtract:
+            return "op_Subtraction";
+        case BinaryOperatorType::Multiply:
+            return "op_Multiply";
+        case BinaryOperatorType::Divide:
+            return "op_Division";
+        case BinaryOperatorType::Modulus:
+            return "op_Modulus";
+        case BinaryOperatorType::BitwiseAnd:
+            return "op_BitwiseAnd";
+        case BinaryOperatorType::BitwiseOr:
+            return "op_BitwiseOr";
+        case BinaryOperatorType::ExclusiveOr:
+            return "op_ExclusiveOr";
+        case BinaryOperatorType::ShiftLeft:
+            return "op_LeftShift";
+        case BinaryOperatorType::ShiftRight:
+            return "op_RightShift";
+        case BinaryOperatorType::UnsignedShiftRight:
+            return "op_UnsignedRightShift";
+        case BinaryOperatorType::Equality:
+            return "op_Equality";
+        case BinaryOperatorType::InEquality:
+            return "op_Inequality";
+        case BinaryOperatorType::GreaterThan:
+            return "op_GreaterThan";
+        case BinaryOperatorType::LessThan:
+            return "op_LessThan";
+        case BinaryOperatorType::GreaterThanOrEqual:
+            return "op_GreaterThanOrEqual";
+        case BinaryOperatorType::LessThanOrEqual:
+            return "op_LessThanOrEqual";
+        default:
+            return nullptr; // the C# `return null`
+    }
+}
+
+// The C# `public IEnumerable<IParameterizedMember> GetUserDefinedOperatorCandidates(
+// IType type, string operatorName)` (line 1280).
+std::vector<std::shared_ptr<ILSpy::Decompiler::TypeSystem::IMethod>>
+CSharpResolver::GetUserDefinedOperatorCandidates(
+    const ILSpy::Decompiler::TypeSystem::IType& type, const char* operatorName) const
+{
+    using ILSpy::Decompiler::TypeSystem::GetTypeCode;
+    using ILSpy::Decompiler::TypeSystem::IMethod;
+    using ILSpy::Decompiler::TypeSystem::TypeCode;
+
+    std::vector<std::shared_ptr<IMethod>> result;
+    // The C# `if (operatorName == null) return EmptyList<IMethod>.Instance;`
+    if (operatorName == nullptr)
+        return result;
+
+    // The C# `TypeCode.Boolean <= c && c <= TypeCode.Decimal` -- the enum-class relational
+    // comparison has no C++ counterpart, so the faithful port casts both sides via
+    // `static_cast<int>` (the D514 implicitNumericConversionLookup precedent). The
+    // .NET framework contains some of C#'s built-in operators as user-defined
+    // operators; however, we must not use those as user-defined operators (we would
+    // skip numeric promotion).
+    TypeCode c = GetTypeCode(type);
+    int code = static_cast<int>(c);
+    if (code >= static_cast<int>(TypeCode::Boolean) && code <= static_cast<int>(TypeCode::Decimal))
+        return result;
+
+    // C# spec (draft-v11): section 12.4.6 Candidate user-defined operators
+    std::vector<std::shared_ptr<IMethod>> operators;
+    for (const IMethod* m : type.GetMethods(
+             [operatorName](const IMethod* m) {
+                 return m->IsOperator() && m->Name() == operatorName;
+             })) {
+        // A non-owning alias (the header comment): the no-op deleter borrows the
+        // type-system-owned method; the `const_cast` reconciles the `GetMethods`
+        // const-return contract (the D515 convention -- the underlying type-system
+        // objects are mutable).
+        operators.push_back(std::shared_ptr<IMethod>(
+            const_cast<IMethod*>(m), [](IMethod*) {}));
+    }
+    LiftUserDefinedOperators(operators);
+    return operators;
+}
+
+// The C# `void LiftUserDefinedOperators(List<IMethod> operators)` (line 1296) -- the
+// ORIGINAL count is captured as the loop bound before any appending, so the freshly
+// appended lifted forms are not themselves lifted again.
+void CSharpResolver::LiftUserDefinedOperators(
+    std::vector<std::shared_ptr<ILSpy::Decompiler::TypeSystem::IMethod>>& operators) const
+{
+    using ILSpy::Decompiler::TypeSystem::IMethod;
+    std::size_t nonLiftedMethodCount = operators.size();
+    // Construct lifted operators
+    for (std::size_t i = 0; i < nonLiftedMethodCount; i++) {
+        std::shared_ptr<IMethod> liftedMethod =
+            CSharpOperators::LiftUserDefinedOperator(operators[i]);
+        if (liftedMethod != nullptr)
+            operators.push_back(std::move(liftedMethod));
+    }
+}
+
+// The C# `ResolveResult CreateResolveResultForUserDefinedOperator(OverloadResolution r,
+// ExpressionType operatorType)` (line 1309).
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::CreateResolveResultForUserDefinedOperator(
+    ILSpy::Decompiler::CSharp::Resolver::OverloadResolution& r,
+    ILSpy::Decompiler::TypeSystem::ExpressionType operatorType)
+{
+    using ILSpy::Decompiler::TypeSystem::IMethod;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+
+    if (r.BestCandidateErrors() != OverloadResolutionErrors::None)
+        return r.CreateResolveResult(nullptr);
+    // The C# hard cast `(IMethod)r.BestCandidate` would throw `InvalidCastException` for
+    // a non-IMethod best candidate (impossible through the operator-resolution call
+    // sites, which only feed `IMethod` candidates; `BestCandidate` is non-null whenever
+    // `BestCandidateErrors` was `None` because the error-free state implies an applicable
+    // candidate was folded into the best state). The safe fallback returns the same
+    // invocation error result as the error path above (the D565 documented-safe-fallback
+    // convention).
+    const IMethod* method = dynamic_cast<const IMethod*>(r.BestCandidate());
+    if (method == nullptr)
+        return r.CreateResolveResult(nullptr);
+    // The owning result-type handle for the `OperatorResolveResult` ctor: the
+    // `shared_from_this` + `const_pointer_cast` pair (the D529 convention -- the const is
+    // the `ReturnType` accessor's contract, the underlying type-system object is
+    // shared-managed; a non-shared-managed return type would throw `bad_weak_ptr`, the
+    // documented D578 stub discipline).
+    ITypePtr returnType = std::const_pointer_cast<IType>(
+        const_cast<IType&>(method->ReturnType()).shared_from_this());
+    return std::make_shared<ILSpy::Decompiler::Semantics::OperatorResolveResult>(
+        std::move(returnType), operatorType, method,
+        /*isLiftedOperator=*/dynamic_cast<const ILiftedOperator*>(method) != nullptr,
+        r.GetArgumentsWithConversions());
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver
