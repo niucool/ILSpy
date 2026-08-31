@@ -27,11 +27,14 @@
 //     (CSharpOperators.cs line 1124), which recognizes a user-defined comparison
 //     operator by its metadata name and keeps the lifted form's `bool` return type
 //     un-lifted (CSharpOperators.cs line 1142).
+//   - Detach<T>(T*) (SyntaxExtensions.cs line 75) -- consumed by the ambience's
+//     parameter-list rendering (`CSharpAmbience.ConvertSymbol` strips a parameter's
+//     default expression when `ShowParameterDefaultValues` is off).
 //
 // The remaining methods are DEFERRED until their consumers port: `IsBitwise`
 // (BinaryOperatorType -- the unported CSharpResolver/OutputVisitor binary-operator
 // tiebreaks), `GetNextStatement` (Statement -- the unported statement-flow stages),
-// `IsArgList` / `AddNamedArgument` / `Detach` / `UnwrapInDirectionExpression`
+// `IsArgList` / `AddNamedArgument` / `UnwrapInDirectionExpression`
 // (the unported CSharpResolver/TypeSystemAstBuilder stages).
 
 #pragma once
@@ -52,6 +55,20 @@ inline bool IsComparisonOperator(OperatorType operatorType) {
         || operatorType == OperatorType::LessThan
         || operatorType == OperatorType::GreaterThanOrEqual
         || operatorType == OperatorType::LessThanOrEqual;
+}
+
+// The C# `public static T Detach<T>(this T node) where T : AstNode` (SyntaxExtensions.cs
+// line 75) -- remove the node from its parent and return it (`node.Remove(); return
+// node;`). The C# generic-constrained-to-AstNode ports as a template over the node
+// pointer type (the return is the same node, for chaining call sites); the template body
+// resolves `Remove()` at the point of instantiation, so a forward-declared node type
+// suffices here and the caller includes the full node header. First consumed by the
+// ambience's parameter-list rendering (`CSharpAmbience.ConvertSymbol`: the
+// `param.DefaultExpression?.Detach()` strip when `ShowParameterDefaultValues` is off).
+template <class T>
+T* Detach(T* node) {
+    node->Remove();
+    return node;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

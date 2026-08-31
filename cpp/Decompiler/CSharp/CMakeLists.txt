@@ -11,6 +11,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/TypeSystemAstBuilder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/OutputVisitor/TokenWriter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/OutputVisitor/CSharpOutputVisitor.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/OutputVisitor/CSharpAmbience.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/OutputVisitor/InsertParenthesesVisitor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/OutputVisitor/GenericGrammarAmbiguityVisitor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Resolver/LookupHelpers.cpp

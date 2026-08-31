@@ -1,0 +1,391 @@
+Running main() from C:\Projects\github\vcpkg\buildtrees\gtest\src\v1.17.0-e243b8ee0f.clean\googletest\src\gtest_main.cc
+Note: Google Test filter = CSharpAmbience*.*
+[==========] Running 51 tests from 10 test suites.
+[----------] Global test environment set-up.
+[----------] 3 tests from CSharpAmbienceConversionFlagsTest
+[ RUN      ] CSharpAmbienceConversionFlagsTest.DefaultsToNone
+[       OK ] CSharpAmbienceConversionFlagsTest.DefaultsToNone (0 ms)
+[ RUN      ] CSharpAmbienceConversionFlagsTest.SetAndGetRoundTrip
+[       OK ] CSharpAmbienceConversionFlagsTest.SetAndGetRoundTrip (0 ms)
+[ RUN      ] CSharpAmbienceConversionFlagsTest.DispatchesThroughTheIAmbienceBase
+[       OK ] CSharpAmbienceConversionFlagsTest.DispatchesThroughTheIAmbienceBase (0 ms)
+[----------] 3 tests from CSharpAmbienceConversionFlagsTest (0 ms total)
+
+[----------] 3 tests from CSharpAmbienceIsExtensionTest
+[ RUN      ] CSharpAmbienceIsExtensionTest.FalseWithoutTheSupportExtensionDeclarationsFlag
+[       OK ] CSharpAmbienceIsExtensionTest.FalseWithoutTheSupportExtensionDeclarationsFlag (0 ms)
+[ RUN      ] CSharpAmbienceIsExtensionTest.FalseForNullTypeDefinition
+[       OK ] CSharpAmbienceIsExtensionTest.FalseForNullTypeDefinition (0 ms)
+[ RUN      ] CSharpAmbienceIsExtensionTest.FalseForEveryPortedTypeDefinition
+[       OK ] CSharpAmbienceIsExtensionTest.FalseForEveryPortedTypeDefinition (0 ms)
+[----------] 3 tests from CSharpAmbienceIsExtensionTest (0 ms total)
+
+[----------] 7 tests from CSharpAmbienceShowParameterListTest
+[ RUN      ] CSharpAmbienceShowParameterListTest.MethodReturnsTheFlag
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(464): error: Value of: ambienceOn.ShowParameterList(*method)
+  Actual: false
+Expected: true
+
+[  FAILED  ] CSharpAmbienceShowParameterListTest.MethodReturnsTheFlag (0 ms)
+[ RUN      ] CSharpAmbienceShowParameterListTest.IndexerOperatorConstructorDestructorReturnTheFlag
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(476): error: Value of: ambience.ShowParameterList(*indexer)
+  Actual: false
+Expected: true
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(482): error: Value of: ambience.ShowParameterList(*method)
+  Actual: false
+Expected: true
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(482): error: Value of: ambience.ShowParameterList(*method)
+  Actual: false
+Expected: true
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(482): error: Value of: ambience.ShowParameterList(*method)
+  Actual: false
+Expected: true
+
+[  FAILED  ] CSharpAmbienceShowParameterListTest.IndexerOperatorConstructorDestructorReturnTheFlag (0 ms)
+[ RUN      ] CSharpAmbienceShowParameterListTest.DelegateTypeDefinitionReturnsTheFlag
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(493): error: Value of: ambienceOn.ShowParameterList(*host)
+  Actual: false
+Expected: true
+
+[  FAILED  ] CSharpAmbienceShowParameterListTest.DelegateTypeDefinitionReturnsTheFlag (0 ms)
+[ RUN      ] CSharpAmbienceShowParameterListTest.NonDelegateTypeDefinitionReturnsFalse
+[       OK ] CSharpAmbienceShowParameterListTest.NonDelegateTypeDefinitionReturnsFalse (0 ms)
+[ RUN      ] CSharpAmbienceShowParameterListTest.ParameterizedPropertyReturnsTheFlag
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(516): error: Value of: ambience.ShowParameterList(*property)
+  Actual: false
+Expected: true
+
+[  FAILED  ] CSharpAmbienceShowParameterListTest.ParameterizedPropertyReturnsTheFlag (0 ms)
+[ RUN      ] CSharpAmbienceShowParameterListTest.ParameterlessPropertyReturnsFalse
+[       OK ] CSharpAmbienceShowParameterListTest.ParameterlessPropertyReturnsFalse (0 ms)
+[ RUN      ] CSharpAmbienceShowParameterListTest.VariableReturnsFalse
+[       OK ] CSharpAmbienceShowParameterListTest.VariableReturnsFalse (0 ms)
+[----------] 7 tests from CSharpAmbienceShowParameterListTest (1 ms total)
+
+[----------] 27 tests from CSharpAmbienceConvertSymbolTest
+[ RUN      ] CSharpAmbienceConvertSymbolTest.MethodWithStandardFlagsRendersSignature
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(557): error: Expected equality of these values:
+  ambience.ConvertSymbol(*method)
+    Which is: ""
+  "public int M(int a);"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.MethodWithStandardFlagsRendersSignature (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.MethodWithoutFlagsRendersOnlyTheName
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(566): error: Expected equality of these values:
+  ambience.ConvertSymbol(*method)
+    Which is: ""
+  "M"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.MethodWithoutFlagsRendersOnlyTheName (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.DefinitionKeywordForClass
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(575): error: Expected equality of these values:
+  ambience.ConvertSymbol(*typeDef)
+    Which is: ""
+  "class C"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.DefinitionKeywordForClass (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.DefinitionKeywordForRecordStruct
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(588): error: Expected equality of these values:
+  ambience.ConvertSymbol(*typeDef)
+    Which is: ""
+  "record struct RS"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.DefinitionKeywordForRecordStruct (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.DefinitionKeywordForDelegateRendersInvokeSignature
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(611): error: Expected equality of these values:
+  ambience.ConvertSymbol(*host)
+    Which is: ""
+  "delegate int D(int a)"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.DefinitionKeywordForDelegateRendersInvokeSignature (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.DefinitionKeywordForNamespace
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(649): error: Expected equality of these values:
+  ambience.ConvertSymbol(ns)
+    Which is: ""
+  "namespace A.B.C"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.DefinitionKeywordForNamespace (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.ReturnTypeAfterParameterList
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(663): error: Expected equality of these values:
+  ambience.ConvertSymbol(*method)
+    Which is: ""
+  "M(int a) : int;"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.ReturnTypeAfterParameterList (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.IndexerRendersThisKeywordAndBrackets
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(676): error: Expected equality of these values:
+  ambience.ConvertSymbol(*indexer)
+    Which is: ""
+  "int this[int index]"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.IndexerRendersThisKeywordAndBrackets (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.ParameterModifiersKeptAndStrippedUnderTheFlag
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(696): error: Expected equality of these values:
+  kept.ConvertSymbol(*methodKept)
+    Which is: ""
+  "M(ref int a)"
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(697): error: Expected equality of these values:
+  stripped.ConvertSymbol(*methodStripped)
+    Which is: ""
+  "M(int a)"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.ParameterModifiersKeptAndStrippedUnderTheFlag (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.ParameterDefaultStrippedUnderTheFlag
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(723): error: Expected equality of these values:
+  rendered.ConvertSymbol(*methodRendered)
+    Which is: ""
+  "M(int a=5)"
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(724): error: Expected equality of these values:
+  stripped.ConvertSymbol(*methodStripped)
+    Which is: ""
+  "M(int a)"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.ParameterDefaultStrippedUnderTheFlag (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.PropertyBodyRendersGetSet
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(737): error: Expected equality of these values:
+  ambience.ConvertSymbol(*property)
+    Which is: ""
+  "P { get; set; }"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.PropertyBodyRendersGetSet (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.InitOnlySetterUpgradesUnderTheFlag
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(759): error: Expected equality of these values:
+  withFlag.ConvertSymbol(*propertyA)
+    Which is: ""
+  "P { get; init; }"
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(760): error: Expected equality of these values:
+  withoutFlag.ConvertSymbol(*propertyB)
+    Which is: ""
+  "P { get; set; }"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.InitOnlySetterUpgradesUnderTheFlag (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.ConstructorRendersDeclaringTypeName
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(773): error: Expected equality of these values:
+  ambience.ConvertSymbol(*ctor)
+    Which is: ""
+  "C(int a)"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.ConstructorRendersDeclaringTypeName (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.DestructorRendersTildeAndDeclaringTypeName
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(783): error: Expected equality of these values:
+  ambience.ConvertSymbol(*dtor)
+    Which is: ""
+  "~C"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.DestructorRendersTildeAndDeclaringTypeName (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.ImplicitOperatorRendersKeywordAndReturnType
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(792): error: Expected equality of these values:
+  ambience.ConvertSymbol(*op)
+    Which is: ""
+  "implicit operator int"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.ImplicitOperatorRendersKeywordAndReturnType (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.ExplicitAndCheckedExplicitOperators
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(800): error: Expected equality of these values:
+  ambience.ConvertSymbol(*opExplicit)
+    Which is: ""
+  "explicit operator int"
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(808): error: Expected equality of these values:
+  ambience.ConvertSymbol(*opCheckedExplicit)
+    Which is: ""
+  "explicit operator checked int"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.ExplicitAndCheckedExplicitOperators (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.OperatorTokenRendersTheToken
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(820): error: Expected equality of these values:
+  ambience.ConvertSymbol(*op)
+    Which is: ""
+  "operator +(int a, int b)"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.OperatorTokenRendersTheToken (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.CheckedOperatorWithoutTheFlagFallsBackToTheNameToken
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(833): error: Expected equality of these values:
+  ambience.ConvertSymbol(*op)
+    Which is: ""
+  "operator op_CheckedAddition"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.CheckedOperatorWithoutTheFlagFallsBackToTheNameToken (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.CheckedOperatorWithTheFlagRendersTheCheckedToken
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(843): error: Expected equality of these values:
+  ambience.ConvertSymbol(*op)
+    Which is: ""
+  "operator checked +"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.CheckedOperatorWithTheFlagRendersTheCheckedToken (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.ShowDeclaringTypePrefixesTheMember
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(853): error: Expected equality of these values:
+  ambience.ConvertSymbol(*method)
+    Which is: ""
+  "C.M"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.ShowDeclaringTypePrefixesTheMember (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.LocalFunctionExcludedFromTheDeclaringTypePrefix
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(870): error: Expected equality of these values:
+  ambience.ConvertSymbol(localFunction)
+    Which is: ""
+  "Local"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.LocalFunctionExcludedFromTheDeclaringTypePrefix (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.NestedTypeShowDeclaringTypePrefixes
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(883): error: Expected equality of these values:
+  ambience.ConvertSymbol(*inner)
+    Which is: ""
+  "Outer.Inner"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.NestedTypeShowDeclaringTypePrefixes (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.FullyQualifiedEntityNamesPrefixTheNamespace
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(892): error: Expected equality of these values:
+  ambience.ConvertSymbol(*typeDef)
+    Which is: ""
+  "Ns.C"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.FullyQualifiedEntityNamesPrefixTheNamespace (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.GenericMethodRendersTypeParameterList
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(906): error: Expected equality of these values:
+  ambience.ConvertSymbol(*method)
+    Which is: ""
+  "M<T>(int a)"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.GenericMethodRendersTypeParameterList (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.VarianceModifierStrippedWithoutTheFlag
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(930): error: Expected equality of these values:
+  stripped.ConvertSymbol(*interfaceA)
+    Which is: ""
+  "I<T>"
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(931): error: Expected equality of these values:
+  kept.ConvertSymbol(*interfaceB)
+    Which is: ""
+  "I<out T>"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.VarianceModifierStrippedWithoutTheFlag (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.ParameterizedPropertyTakesParametersFromTheSymbol
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(945): error: Expected equality of these values:
+  ambience.ConvertSymbol(*property)
+    Which is: ""
+  "P(int a)"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.ParameterizedPropertyTakesParametersFromTheSymbol (0 ms)
+[ RUN      ] CSharpAmbienceConvertSymbolTest.WriterOverloadDrivesTheGivenWriter
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(962): error: Expected equality of these values:
+  text.str()
+    Which is: ""
+  "int M(int a)"
+
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.WriterOverloadDrivesTheGivenWriter (0 ms)
+[----------] 27 tests from CSharpAmbienceConvertSymbolTest (2 ms total)
+
+[----------] 2 tests from CSharpAmbienceConvertVariableTest
+[ RUN      ] CSharpAmbienceConvertVariableTest.RendersTheDeclaration
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(975): error: Expected equality of these values:
+  ambience.ConvertVariable(variable)
+    Which is: ""
+  "int x"
+
+[  FAILED  ] CSharpAmbienceConvertVariableTest.RendersTheDeclaration (0 ms)
+[ RUN      ] CSharpAmbienceConvertVariableTest.RendersConstDeclarationWithInitializer
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(991): error: Expected equality of these values:
+  ambience.ConvertVariable(variable)
+    Which is: ""
+  "const int Max = 5"
+
+[  FAILED  ] CSharpAmbienceConvertVariableTest.RendersConstDeclarationWithInitializer (0 ms)
+[----------] 2 tests from CSharpAmbienceConvertVariableTest (0 ms total)
+
+[----------] 3 tests from CSharpAmbienceConvertTypeTest
+[ RUN      ] CSharpAmbienceConvertTypeTest.RendersTheShortName
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(1002): error: Expected equality of these values:
+  ambience.ConvertType(*MakeIntDef())
+    Which is: ""
+  "int"
+
+[  FAILED  ] CSharpAmbienceConvertTypeTest.RendersTheShortName (0 ms)
+[ RUN      ] CSharpAmbienceConvertTypeTest.FullyQualifiedWhenTheEntityFlagIsOn
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(1010): error: Expected equality of these values:
+  ambience.ConvertType(*MakeClassDef("C", "Ns"))
+    Which is: ""
+  "Ns.C"
+
+[  FAILED  ] CSharpAmbienceConvertTypeTest.FullyQualifiedWhenTheEntityFlagIsOn (0 ms)
+[ RUN      ] CSharpAmbienceConvertTypeTest.UsesTheEntityNamesFlagNotTheTypeNamesFlag
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\OutputVisitor\CSharpAmbience_Test.cpp(1021): error: Expected equality of these values:
+  ambience.ConvertType(*MakeClassDef("C", "Ns"))
+    Which is: ""
+  "C"
+
+[  FAILED  ] CSharpAmbienceConvertTypeTest.UsesTheEntityNamesFlagNotTheTypeNamesFlag (0 ms)
+[----------] 3 tests from CSharpAmbienceConvertTypeTest (0 ms total)
+
+[----------] 2 tests from CSharpAmbienceConvertConstantValueTest
+[ RUN      ] CSharpAmbienceConvertConstantValueTest.RendersIntegralValue
+[       OK ] CSharpAmbienceConvertConstantValueTest.RendersIntegralValue (0 ms)
+[ RUN      ] CSharpAmbienceConvertConstantValueTest.RendersStringValue
+[       OK ] CSharpAmbienceConvertConstantValueTest.RendersStringValue (0 ms)
+[----------] 2 tests from CSharpAmbienceConvertConstantValueTest (0 ms total)
+
+[----------] 1 test from CSharpAmbienceWrapCommentTest
+[ RUN      ] CSharpAmbienceWrapCommentTest.PrependsTheSlashPrefix
+[       OK ] CSharpAmbienceWrapCommentTest.PrependsTheSlashPrefix (0 ms)
+[----------] 1 test from CSharpAmbienceWrapCommentTest (0 ms total)
+
+[----------] 2 tests from CSharpAmbienceGetExplicitInterfaceTypeTest
+[ RUN      ] CSharpAmbienceGetExplicitInterfaceTypeTest.ReturnsTheInterfaceMemberDeclaringType
+[       OK ] CSharpAmbienceGetExplicitInterfaceTypeTest.ReturnsTheInterfaceMemberDeclaringType (0 ms)
+[ RUN      ] CSharpAmbienceGetExplicitInterfaceTypeTest.NullForNonExplicitAndEmptyMembers
+[       OK ] CSharpAmbienceGetExplicitInterfaceTypeTest.NullForNonExplicitAndEmptyMembers (0 ms)
+[----------] 2 tests from CSharpAmbienceGetExplicitInterfaceTypeTest (0 ms total)
+
+[----------] 1 test from CSharpAmbienceWriteQualifiedNameTest
+[ RUN      ] CSharpAmbienceWriteQualifiedNameTest.RendersTheDottedChain
+[       OK ] CSharpAmbienceWriteQualifiedNameTest.RendersTheDottedChain (0 ms)
+[----------] 1 test from CSharpAmbienceWriteQualifiedNameTest (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 51 tests from 10 test suites ran. (7 ms total)
+[  PASSED  ] 15 tests.
+[  FAILED  ] 36 tests, listed below:
+[  FAILED  ] CSharpAmbienceShowParameterListTest.MethodReturnsTheFlag
+[  FAILED  ] CSharpAmbienceShowParameterListTest.IndexerOperatorConstructorDestructorReturnTheFlag
+[  FAILED  ] CSharpAmbienceShowParameterListTest.DelegateTypeDefinitionReturnsTheFlag
+[  FAILED  ] CSharpAmbienceShowParameterListTest.ParameterizedPropertyReturnsTheFlag
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.MethodWithStandardFlagsRendersSignature
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.MethodWithoutFlagsRendersOnlyTheName
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.DefinitionKeywordForClass
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.DefinitionKeywordForRecordStruct
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.DefinitionKeywordForDelegateRendersInvokeSignature
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.DefinitionKeywordForNamespace
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.ReturnTypeAfterParameterList
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.IndexerRendersThisKeywordAndBrackets
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.ParameterModifiersKeptAndStrippedUnderTheFlag
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.ParameterDefaultStrippedUnderTheFlag
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.PropertyBodyRendersGetSet
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.InitOnlySetterUpgradesUnderTheFlag
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.ConstructorRendersDeclaringTypeName
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.DestructorRendersTildeAndDeclaringTypeName
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.ImplicitOperatorRendersKeywordAndReturnType
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.ExplicitAndCheckedExplicitOperators
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.OperatorTokenRendersTheToken
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.CheckedOperatorWithoutTheFlagFallsBackToTheNameToken
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.CheckedOperatorWithTheFlagRendersTheCheckedToken
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.ShowDeclaringTypePrefixesTheMember
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.LocalFunctionExcludedFromTheDeclaringTypePrefix
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.NestedTypeShowDeclaringTypePrefixes
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.FullyQualifiedEntityNamesPrefixTheNamespace
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.GenericMethodRendersTypeParameterList
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.VarianceModifierStrippedWithoutTheFlag
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.ParameterizedPropertyTakesParametersFromTheSymbol
+[  FAILED  ] CSharpAmbienceConvertSymbolTest.WriterOverloadDrivesTheGivenWriter
+[  FAILED  ] CSharpAmbienceConvertVariableTest.RendersTheDeclaration
+[  FAILED  ] CSharpAmbienceConvertVariableTest.RendersConstDeclarationWithInitializer
+[  FAILED  ] CSharpAmbienceConvertTypeTest.RendersTheShortName
+[  FAILED  ] CSharpAmbienceConvertTypeTest.FullyQualifiedWhenTheEntityFlagIsOn
+[  FAILED  ] CSharpAmbienceConvertTypeTest.UsesTheEntityNamesFlagNotTheTypeNamesFlag
+
+36 FAILED TESTS
