@@ -25,11 +25,18 @@
 // field, the two ctors, InitProperties, and the full configuration property surface)
 // and the "Convert Type" region (ConvertType / ConvertTypeHelper / TypeMatches /
 // TypeDefMatches / AddTypeArguments / ConvertNamespace / IsValidNamespace, C# lines
-// 266-768, implemented in TypeSystemAstBuilder.cpp) are landed; the remaining
-// `Convert*` instance methods (ConvertAttribute / ConvertConstantValue /
-// ConvertEnumValue / ConvertParameter / ConvertSymbol / ConvertEntity /
-// ConvertExtension / ConvertVariable) follow in later slices, consuming the free
-// functions below as they grow.
+// 266-768, implemented in TypeSystemAstBuilder.cpp) are landed; the "Convert Constant
+// Value" SUPPORT helpers (IsSpecialConstant + ConvertFloatingPointLiteral +
+// MakeConstant, C# lines 1168-1249 + 1496-1582 -- the recognition/rendering halves the
+// ConvertConstantValue dispatch consumes) land as the tested-but-not-yet-wired
+// foundation ahead of the mutually-recursive ConvertConstantValue / ConvertEnumValue
+// core (they must land together: ConvertConstantValue calls ConvertEnumValue for
+// enum-typed constants and ConvertEnumValue's numeric fallback calls
+// ConvertConstantValue back); the remaining `Convert*` instance methods
+// (ConvertConstantValue itself / ConvertEnumValue / ConvertAttribute /
+// ConvertParameter / ConvertSymbol / ConvertEntity / ConvertExtension /
+// ConvertVariable) follow in later slices, consuming the free functions below as
+// they grow.
 //
 // ModifierFromAccessibility (TypeSystemAstBuilder.cs line 2497) is the first such
 // helper: a pure switch on Accessibility (the D373 leaf) that maps a symbol's
@@ -86,6 +93,11 @@ namespace ILSpy::Decompiler::TypeSystem { class FullTypeName; }
 namespace ILSpy::Decompiler::Semantics { class NamespaceResolveResult; }
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
+
+// Forward-declared for the member declarations below (the `Convert Constant
+// Value` support methods return / produce `Expression*`; the .cpp includes the
+// full expression headers). `Expression` is a Syntax-namespace type.
+class Expression;
 
 // Namespace-scope aliases shared by the free functions and the
 // TypeSystemAstBuilder class below (the class body references both namespaces in
@@ -1039,6 +1051,61 @@ public:
     // without a resolver every namespace is assumed valid.
     bool IsValidNamespace(const std::string& firstNamespacePart,
                           std::shared_ptr<Sem::NamespaceResolveResult>& nrr) const;
+
+    // -- The "Convert Constant Value" SUPPORT region (C# lines 1168-1249 +
+    // 1496-1582) --
+    //
+    // The tested-but-not-yet-wired foundation ahead of the mutually-recursive
+    // `ConvertConstantValue` / `ConvertEnumValue` core: the 3-arg
+    // `ConvertConstantValue` dispatch calls `IsSpecialConstant` (before the
+    // floating-point arm) and `ConvertFloatingPointLiteral` (for double/single
+    // constants), and both the floating-point fraction arm and the deferred
+    // Math.PI/E extraction call `MakeConstant` -- none of the three calls back
+    // into `ConvertConstantValue`, so they land first and the core consumes them
+    // when it lands. The C# private members are widened to public for direct TDD
+    // (the TryConvert convention); every method is `const` (they read only the
+    // configuration properties, the resolver, and ConvertType).
+    //
+    // The C# `out Expression? expression` ports to `Expression*&` (the rebindable
+    // caller variable, reset to nullptr at the top, the IsVariableReferenceWithSameType
+    // convention); the C# `object constant` ports to `const std::any&` (the D374
+    // boxed-value convention); the returned/produced `Expression` ports to a raw
+    // `new`-ed pointer (the D223 non-owning leak model, the ConvertType precedent).
+
+    // The C# `bool IsSpecialConstant(IType expectedType, object constant,
+    // [NotNullWhen(true)] out Expression? expression)` (line 1168) -- whether the
+    // boxed constant is one of the BCL's named static fields (int.MaxValue,
+    // double.NaN, ...; the `specialConstants` table, ported as the
+    // `TryGetSpecialConstant` free function) and should render as a member
+    // reference (`TypeReferenceExpression.MemberName`) instead of a literal. When
+    // the field cannot be resolved and the constant is one of the three
+    // non-encodable floating-point values (+Infty / -Infty / NaN), an equivalent
+    // arithmetic expression (`-1.0 / 0.0` &c.) is produced instead.
+    bool IsSpecialConstant(TS::IType& expectedType, const std::any& constant,
+                           Expression*& expression) const;
+
+    // The C# `Expression ConvertFloatingPointLiteral(IType type, object
+    // constantValue)` (line 1499) -- renders a double/single constant: a whole
+    // value or a short-decimal form as a plain `PrimitiveExpression`, a
+    // long-decimal form as the exact fraction `num / den` (the
+    // `FractionApprox` / `IsValidFraction` / `IsEqual` free functions) when one
+    // exists within the max-denominator bound, else the plain
+    // `PrimitiveExpression` fallback. The leading `CSharpPrimitiveCast.Cast`
+    // coercion handles compilers that embed `0` (and possibly other values) as
+    // `int` into constant value signatures even when the expected type is
+    // float/double. The `UseSpecialConstants` Math.PI / MathE extraction
+    // (`TryExtractExpression`, C# lines 1559-1723) is DEFERRED (see the
+    // implementation) -- the C# itself falls through to the plain
+    // `PrimitiveExpression` when the extraction yields null, so the deferral is
+    // observationally identical for every value except a PI/E rational multiple
+    // with a long decimal form.
+    Expression* ConvertFloatingPointLiteral(TS::IType& type, const std::any& constantValue) const;
+
+    // The C# `Expression MakeConstant(IType type, long c)` (line 1578) -- the
+    // fraction-arm literal builder: the integral numerator/denominator boxed as
+    // `long` and cast through the type's TypeCode with overflow CHECKING (an
+    // out-of-range fraction term throws, the C# OverflowException).
+    Expression* MakeConstant(TS::IType& type, std::int64_t c) const;
 
 private:
     // The C# `private void AddTypeAnnotation(AstType astType, IType type)` (line 278)

@@ -37,6 +37,10 @@
 #include "TypeSystemAstBuilder.hpp"
 
 #include "ComposedType.hpp"
+#include "Expressions/BinaryOperatorExpression.hpp"
+#include "Expressions/MemberReferenceExpression.hpp"
+#include "Expressions/PrimitiveExpression.hpp"
+#include "Expressions/TypeReferenceExpression.hpp"
 #include "FunctionPointerAstType.hpp"
 #include "ParameterDeclaration.hpp"
 #include "PrimitiveType.hpp"
@@ -47,16 +51,27 @@
 #include "Comment.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
+#include "Decompiler/Semantics/ConstantResolveResult.hpp"
+#include "Decompiler/Semantics/MemberResolveResult.hpp"
 #include "Decompiler/Semantics/NamespaceResolveResult.hpp"
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/TypeSystem/FullTypeName.hpp"
+#include "Decompiler/TypeSystem/IField.hpp"
+#include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/IEntity.hpp"
 #include "Decompiler/TypeSystem/IModule.hpp"
 #include "Decompiler/TypeSystem/INamespace.hpp"
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
 #include "Decompiler/TypeSystem/KnownTypeReference.hpp"
+#include "Decompiler/TypeSystem/ReflectionHelper.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
+#include "Decompiler/Util/CSharpPrimitiveCast.hpp"
+#include "Decompiler/Util/Decimal.hpp"
 
+#include <any>
+#include <charconv>
+#include <cmath>
+#include <typeinfo>
 #include <algorithm>
 #include <cassert>
 #include <string>
@@ -126,6 +141,100 @@ std::vector<TS::ITypePtr> TypeArgumentsOf(const TS::IType& type) {
     }
     return result;
 }
+
+// The std::any -> PrimitiveValue "boxing bridge": the C# `object constantValue`
+// fed to `new PrimitiveExpression(...)` ports as a std::any over the BCL
+// primitives (the D374 convention), while `PrimitiveExpression::Value` is the
+// PrimitiveValue variant (the D227 object-Value design). The bridge converts a
+// boxed primitive to the matching variant alternative:
+//   * the exact-alternative primitives (bool / char / string / float / double /
+//     int / uint / long / ulong) map directly;
+//   * the SMALL integers (sbyte / byte / short / ushort) WIDEN to the int / uint
+//     alternatives -- PrimitiveValue carries no narrow-integer alternatives
+//     (the C# engine boxes small integers as int/uint before they reach a
+//     PrimitiveExpression; the port's `Util::Cast` returns the narrow types, so
+//     the bridge widens -- a documented deviation: `Value` reads int32 5 where
+//     the C# would hold a boxed sbyte 5, observationally identical for the
+//     rendering the output visitor performs);
+//   * the `Util::Decimal` stand-in maps onto the faithful 96-bit `DecimalValue`
+//     (the 64-bit stand-in mantissa fills lo/mid, hi stays 0 -- every value the
+//     stand-in can hold);
+//   * an EMPTY any is the C# `null` (std::monostate);
+//   * any other held type has no PrimitiveValue alternative -- the C# could box
+//     it, the port cannot, so the bridge throws (the degenerate shape never
+//     occurs through the constant-value region: the coercing `Util::Cast` at
+//     each entry point guarantees a primitive).
+PrimitiveValue ToPrimitiveValue(const std::any& value) {
+    if (!value.has_value())
+        return PrimitiveValue(std::monostate{});
+    const auto& t = value.type();
+    if (t == typeid(bool))
+        return PrimitiveValue(std::any_cast<bool>(value));
+    if (t == typeid(char16_t))
+        return PrimitiveValue(std::any_cast<char16_t>(value));
+    if (t == typeid(std::string))
+        return PrimitiveValue(std::any_cast<std::string>(value));
+    if (t == typeid(float))
+        return PrimitiveValue(std::any_cast<float>(value));
+    if (t == typeid(double))
+        return PrimitiveValue(std::any_cast<double>(value));
+    if (t == typeid(std::int32_t))
+        return PrimitiveValue(std::any_cast<std::int32_t>(value));
+    if (t == typeid(std::uint32_t))
+        return PrimitiveValue(std::any_cast<std::uint32_t>(value));
+    if (t == typeid(std::int64_t))
+        return PrimitiveValue(std::any_cast<std::int64_t>(value));
+    if (t == typeid(std::uint64_t))
+        return PrimitiveValue(std::any_cast<std::uint64_t>(value));
+    if (t == typeid(std::int8_t))
+        return PrimitiveValue(static_cast<std::int32_t>(std::any_cast<std::int8_t>(value)));
+    if (t == typeid(std::uint8_t))
+        return PrimitiveValue(static_cast<std::uint32_t>(std::any_cast<std::uint8_t>(value)));
+    if (t == typeid(std::int16_t))
+        return PrimitiveValue(static_cast<std::int32_t>(std::any_cast<std::int16_t>(value)));
+    if (t == typeid(std::uint16_t))
+        return PrimitiveValue(static_cast<std::uint32_t>(std::any_cast<std::uint16_t>(value)));
+    if (t == typeid(ILSpy::Decompiler::Util::Decimal)) {
+        const auto d = std::any_cast<ILSpy::Decompiler::Util::Decimal>(value);
+        // NormalizeDecimal's invariant: a non-negative magnitude + the authoritative
+        // sign flag, so the lo/mid decomposition below is sign-free.
+        DecimalValue dv;
+        const auto magnitude = static_cast<std::uint64_t>(d.mantissa);
+        dv.lo = static_cast<std::uint32_t>(magnitude & 0xFFFFFFFFu);
+        dv.mid = static_cast<std::uint32_t>((magnitude >> 32) & 0xFFFFFFFFu);
+        dv.hi = 0;
+        dv.isNegative = d.isNegative;
+        dv.scale = d.scale;
+        return PrimitiveValue(dv);
+    }
+    throw std::runtime_error(
+        "PrimitiveExpression cannot hold the boxed constant value type");
+}
+
+// The C# `((double)constantValue).ToString("r")` (and the float twin) -- the
+// shortest round-trip floating-point form. .NET Core 3.0+ `"r"` IS the
+// shortest round-trip representation, which is exactly what C++ `std::to_chars`
+// (the general format, no format char) produces: the shortest string that
+// parses back to the same value (the DefaultParameter::ToString to_chars
+// precedent).
+std::string ShortestRoundTrip(double value) {
+    char buffer[64];
+    const auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
+    return std::string(buffer, result.ptr);
+}
+
+std::string ShortestRoundTrip(float value) {
+    char buffer[64];
+    const auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
+    return std::string(buffer, result.ptr);
+}
+
+// The C# `const int MAX_DENOMINATOR_DOUBLE = 1000` / `MAX_DENOMINATOR_FLOAT =
+// 360` (TypeSystemAstBuilder.cs lines 1496-1497) -- the fraction-search bounds
+// `ConvertFloatingPointLiteral` (and the deferred `TryExtractExpression` PI/E
+// extraction) pass to `FractionApprox`.
+constexpr int kMaxDenominatorDouble = 1000;
+constexpr int kMaxDenominatorFloat = 360;
 
 } // namespace
 
@@ -694,6 +803,259 @@ MemberType* TypeSystemAstBuilder::MakeMemberType(AstType* target, std::string_vi
     if (name == "_")
         return new MemberType(target, "@_");
     return new MemberType(target, std::string(name));
+}
+
+// ---------------------------------------------------------------------------
+// The "Convert Constant Value" SUPPORT region (C# lines 1168-1249 + 1496-1582)
+// ---------------------------------------------------------------------------
+
+// The C# `bool IsSpecialConstant(IType expectedType, object constant,
+// [NotNullWhen(true)] out Expression? expression)` (line 1168).
+bool TypeSystemAstBuilder::IsSpecialConstant(TS::IType& expectedType, const std::any& constant,
+                                            Expression*& expression) const {
+    expression = nullptr;
+    const auto info = TryGetSpecialConstant(constant);
+    if (!info.has_value())
+        return false;
+    // find IType of constant in compilation.
+    TS::IType* constantType = &expectedType;
+    if (!IsKnownType(expectedType, info->first)) {
+        const TS::ICompilation* compilation = nullptr;
+        if (resolver_)
+            compilation = &resolver_->Compilation();
+        else if (const TS::ITypeDefinition* definition = expectedType.GetDefinition())
+            compilation = &definition->Compilation();
+        if (compilation == nullptr)
+            return false;
+        // The C# rebinds the local to the FindType result; the port rebinds a
+        // non-const pointer (the FindType const-reference accessor feeding the
+        // non-const ConvertType / shared_from_this surface, the D515/D517
+        // const_cast convention).
+        constantType = const_cast<TS::IType*>(&compilation->FindType(info->first));
+    }
+    // if the field definition cannot be found, do not generate a reference to the field.
+    const TS::IField* field = nullptr;
+    {
+        const std::string& memberName = info->second;
+        const auto fields = constantType->GetFields(
+            [&memberName](const TS::IField* f) { return f->Name() == memberName; });
+        // The C# `.SingleOrDefault()` throws InvalidOperationException when more
+        // than one field matches; the port throws std::runtime_error (the
+        // GetInlineArrayElementType SingleOrDefault-throw precedent).
+        if (fields.size() > 1)
+            throw std::runtime_error("IsSpecialConstant: more than one field named '" +
+                                     memberName + "' (SingleOrDefault)");
+        if (!fields.empty())
+            field = fields.front();
+    }
+    if (!UseSpecialConstants() || field == nullptr) {
+        // +Infty, -Infty and NaN, cannot be represented in their encoded form.
+        // Use an equivalent arithmetic expression instead.
+        // The C# `switch ((double)constant)` over the three table keys ports to the
+        // isnan/isinf value comparisons (the TryGetSpecialConstant dispatch
+        // convention); the other table keys (MinValue/MaxValue/Epsilon) fall out of
+        // the switch and reach the `return false`, faithfully.
+        if (info->first == TS::KnownTypeCode::Double) {
+            const double v = std::any_cast<double>(constant);
+            if (std::isinf(v) && v < 0) {
+                // (-1.0 / 0.0)
+                auto* left = new PrimitiveExpression(-1.0);
+                left->AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+                    constantType->shared_from_this(), -1.0));
+                auto* right = new PrimitiveExpression(0.0);
+                right->AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+                    constantType->shared_from_this(), 0.0));
+                expression = new BinaryOperatorExpression(left, BinaryOperatorType::Divide, right);
+                expression->AddAnnotation(
+                    std::make_shared<Sem::ConstantResolveResult>(
+                        constantType->shared_from_this(),
+                        -std::numeric_limits<double>::infinity()));
+                return true;
+            }
+            if (std::isinf(v) && v > 0) {
+                // (1.0 / 0.0)
+                auto* left = new PrimitiveExpression(1.0);
+                left->AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+                    constantType->shared_from_this(), 1.0));
+                auto* right = new PrimitiveExpression(0.0);
+                right->AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+                    constantType->shared_from_this(), 0.0));
+                expression = new BinaryOperatorExpression(left, BinaryOperatorType::Divide, right);
+                expression->AddAnnotation(
+                    std::make_shared<Sem::ConstantResolveResult>(
+                        constantType->shared_from_this(),
+                        std::numeric_limits<double>::infinity()));
+                return true;
+            }
+            if (std::isnan(v)) {
+                // (0.0 / 0.0)
+                auto* left = new PrimitiveExpression(0.0);
+                left->AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+                    constantType->shared_from_this(), 0.0));
+                auto* right = new PrimitiveExpression(0.0);
+                right->AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+                    constantType->shared_from_this(), 0.0));
+                expression = new BinaryOperatorExpression(left, BinaryOperatorType::Divide, right);
+                expression->AddAnnotation(
+                    std::make_shared<Sem::ConstantResolveResult>(
+                        constantType->shared_from_this(),
+                        std::numeric_limits<double>::quiet_NaN()));
+                return true;
+            }
+        }
+        if (info->first == TS::KnownTypeCode::Single) {
+            const float v = std::any_cast<float>(constant);
+            if (std::isinf(v) && v < 0) {
+                // (-1.0f / 0.0f)
+                auto* left = new PrimitiveExpression(-1.0f);
+                left->AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+                    constantType->shared_from_this(), -1.0f));
+                auto* right = new PrimitiveExpression(0.0f);
+                right->AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+                    constantType->shared_from_this(), 0.0f));
+                expression = new BinaryOperatorExpression(left, BinaryOperatorType::Divide, right);
+                expression->AddAnnotation(
+                    std::make_shared<Sem::ConstantResolveResult>(
+                        constantType->shared_from_this(),
+                        -std::numeric_limits<float>::infinity()));
+                return true;
+            }
+            if (std::isinf(v) && v > 0) {
+                // (1.0f / 0.0f)
+                auto* left = new PrimitiveExpression(1.0f);
+                left->AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+                    constantType->shared_from_this(), 1.0f));
+                auto* right = new PrimitiveExpression(0.0f);
+                right->AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+                    constantType->shared_from_this(), 0.0f));
+                expression = new BinaryOperatorExpression(left, BinaryOperatorType::Divide, right);
+                expression->AddAnnotation(
+                    std::make_shared<Sem::ConstantResolveResult>(
+                        constantType->shared_from_this(),
+                        std::numeric_limits<float>::infinity()));
+                return true;
+            }
+            if (std::isnan(v)) {
+                // (0.0f / 0.0f)
+                auto* left = new PrimitiveExpression(0.0f);
+                left->AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+                    constantType->shared_from_this(), 0.0f));
+                auto* right = new PrimitiveExpression(0.0f);
+                right->AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+                    constantType->shared_from_this(), 0.0f));
+                expression = new BinaryOperatorExpression(left, BinaryOperatorType::Divide, right);
+                expression->AddAnnotation(
+                    std::make_shared<Sem::ConstantResolveResult>(
+                        constantType->shared_from_this(),
+                        std::numeric_limits<float>::quiet_NaN()));
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // `TypeReferenceExpression.ConvertType(constantType) . info.Member` -- the
+    // member reference the caller emits in place of the literal.
+    auto* typeReference = new TypeReferenceExpression(ConvertType(*constantType));
+    if (AddResolveResultAnnotations())
+        typeReference->AddAnnotation(std::make_shared<Sem::TypeResolveResult>(
+            constantType->shared_from_this()));
+    // The C# `WithoutILInstruction()` is the IL-layer fluent wrapper with NO AST
+    // effect (the wrapper type is not modeled); `WithRR(rr)` is the
+    // `AddAnnotation(rr)` side effect it carries.
+    auto* memberReference = new MemberReferenceExpression(typeReference, info->second);
+    if (AddResolveResultAnnotations())
+        memberReference->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+            std::make_shared<Sem::TypeResolveResult>(constantType->shared_from_this()), field));
+    expression = memberReference;
+    return true;
+}
+
+// The C# `Expression ConvertFloatingPointLiteral(IType type, object constantValue)`
+// (line 1499).
+Expression* TypeSystemAstBuilder::ConvertFloatingPointLiteral(TS::IType& type,
+                                                              const std::any& constantValue) const {
+    // Coerce constantValue to either float or double:
+    // There are compilers that embed 0 (and possible other values) as int into constant value
+    // signatures, even if the expected type is float or double.
+    std::any coerced =
+        ILSpy::Decompiler::Util::Cast(TS::GetTypeCode(type), constantValue, /*checkForOverflow*/ false);
+    const bool isDouble = IsKnownType(type, TS::KnownTypeCode::Double);
+    // The C# `ICompilation compilation = type.GetDefinition()!.Compilation;` -- the
+    // null-forgiving deref NREs for a definitionless type; the compilation is
+    // consumed only by the DEFERRED Math.PI/E extraction arm below, so the port
+    // guards the read and lets the fraction/primitive arms proceed (the D516
+    // safe-fallback convention -- a definitionless float/double type is a degenerate
+    // stub shape the real type system never produces).
+    const TS::ICompilation* compilation = nullptr;
+    if (const TS::ITypeDefinition* definition = type.GetDefinition())
+        compilation = &definition->Compilation();
+    (void)compilation; // the sole consumer is the deferred arm
+
+    Expression* expr = nullptr;
+
+    std::string str;
+    if (isDouble) {
+        const double v = std::any_cast<double>(coerced);
+        if (std::floor(v) == v)
+            expr = new PrimitiveExpression(ToPrimitiveValue(coerced));
+        str = ShortestRoundTrip(v);
+    } else {
+        const float v = std::any_cast<float>(coerced);
+        if (std::floor(v) == v)
+            expr = new PrimitiveExpression(ToPrimitiveValue(coerced));
+        str = ShortestRoundTrip(v);
+    }
+
+    const bool useFraction = static_cast<std::ptrdiff_t>(str.size())
+        - (!str.empty() && str[0] == '-' ? 2 : 1) > 5;
+
+    if (useFraction && expr == nullptr) {
+        // For fractions not involving PI, use a smaller MAX_DENOMINATOR
+        // to avoid coincidences such as (1f/MathF.PI) == (113f/355f)
+        const auto [num, den] = isDouble
+            ? FractionApprox(std::any_cast<double>(coerced), kMaxDenominatorDouble)
+            : FractionApprox(static_cast<double>(std::any_cast<float>(coerced)), 200);
+        if (IsValidFraction(num, den) && IsEqual(num, den, coerced, isDouble)
+            && std::llabs(den) != 1) {
+            auto* left = MakeConstant(type, num);
+            auto* right = MakeConstant(type, den);
+            expr = new BinaryOperatorExpression(left, BinaryOperatorType::Divide, right);
+        }
+    }
+
+    // DEFERRED: the `useFraction && expr == nullptr && UseSpecialConstants` arm
+    // (C# lines 1542-1557) -- the System.Math / System.MathF PI / E extraction
+    // (`TryExtractExpression`, C# lines 1559-1723). Its dependencies are not yet
+    // portable: `compilation.FindType(typeof(Math))` resolves through
+    // `ParseReflectionName` (the reflection-name parsing machinery),
+    // `compilation.FindType(new TopLevelTypeName("System", "MathF"))` through the
+    // unported `FindType(ICompilation, FullTypeName)` extension, and the MathF
+    // eligibility check through the unported `IsDirectImportOf(IModule)` (the
+    // assembly-reference walk). The C# itself falls through to the plain
+    // PrimitiveExpression when `TryExtractExpression` yields null, so the
+    // deferral is observationally identical for every value except a PI/E
+    // rational multiple with a long decimal form (e.g. `Math.PI` itself), a
+    // documented divergence pinned by the PiRendersAsPlainPrimitiveExpression
+    // test.
+
+    if (expr == nullptr)
+        expr = new PrimitiveExpression(ToPrimitiveValue(coerced));
+
+    if (AddResolveResultAnnotations())
+        expr->AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+            type.shared_from_this(), coerced));
+
+    return expr;
+}
+
+// The C# `Expression MakeConstant(IType type, long c)` (line 1578).
+Expression* TypeSystemAstBuilder::MakeConstant(TS::IType& type, std::int64_t c) const {
+    // The C# boxes the `long` argument and casts it through the type's TypeCode with
+    // overflow CHECKING (a fraction term outside the target's range throws, the C#
+    // OverflowException -> Util::OverflowException).
+    return new PrimitiveExpression(ToPrimitiveValue(
+        ILSpy::Decompiler::Util::Cast(TS::GetTypeCode(type), std::any(c), /*checkForOverflow*/ true)));
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

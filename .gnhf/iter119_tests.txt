@@ -1,0 +1,55 @@
+Running main() from C:\Projects\github\vcpkg\buildtrees\gtest\src\v1.17.0-e243b8ee0f.clean\googletest\src\gtest_main.cc
+Note: Google Test filter = IsSpecialConstantTest.*:ConvertFloatingPointTest.*
+[==========] Running 21 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 10 tests from IsSpecialConstantTest
+[ RUN      ] IsSpecialConstantTest.NonSpecialConstantReturnsFalse
+[       OK ] IsSpecialConstantTest.NonSpecialConstantReturnsFalse (0 ms)
+[ RUN      ] IsSpecialConstantTest.SpecialConstantWithFieldRendersMemberReference
+[       OK ] IsSpecialConstantTest.SpecialConstantWithFieldRendersMemberReference (0 ms)
+[ RUN      ] IsSpecialConstantTest.MemberReferenceAnnotationGatedOnFlag
+[       OK ] IsSpecialConstantTest.MemberReferenceAnnotationGatedOnFlag (0 ms)
+[ RUN      ] IsSpecialConstantTest.ResolvesConstantTypeThroughCompilation
+[       OK ] IsSpecialConstantTest.ResolvesConstantTypeThroughCompilation (0 ms)
+[ RUN      ] IsSpecialConstantTest.DefinitionlessExpectedTypeWithoutCompilationReturnsFalse
+[       OK ] IsSpecialConstantTest.DefinitionlessExpectedTypeWithoutCompilationReturnsFalse (0 ms)
+[ RUN      ] IsSpecialConstantTest.DoubleInfinitiesAndNaNWithoutFieldRenderArithmeticExpressions
+[       OK ] IsSpecialConstantTest.DoubleInfinitiesAndNaNWithoutFieldRenderArithmeticExpressions (0 ms)
+[ RUN      ] IsSpecialConstantTest.SingleInfinitiesAndNaNWithoutFieldRenderArithmeticExpressions
+[       OK ] IsSpecialConstantTest.SingleInfinitiesAndNaNWithoutFieldRenderArithmeticExpressions (0 ms)
+[ RUN      ] IsSpecialConstantTest.MinValueWithoutFieldIsNotSpecial
+[       OK ] IsSpecialConstantTest.MinValueWithoutFieldIsNotSpecial (0 ms)
+[ RUN      ] IsSpecialConstantTest.UseSpecialConstantsDisabledSkipsMemberReferenceOnly
+[       OK ] IsSpecialConstantTest.UseSpecialConstantsDisabledSkipsMemberReferenceOnly (0 ms)
+[ RUN      ] IsSpecialConstantTest.AmbiguousFieldsThrow
+[       OK ] IsSpecialConstantTest.AmbiguousFieldsThrow (0 ms)
+[----------] 10 tests from IsSpecialConstantTest (1 ms total)
+
+[----------] 11 tests from ConvertFloatingPointTest
+[ RUN      ] ConvertFloatingPointTest.WholeDoubleRendersPrimitiveExpression
+[       OK ] ConvertFloatingPointTest.WholeDoubleRendersPrimitiveExpression (0 ms)
+[ RUN      ] ConvertFloatingPointTest.WholeFloatRendersPrimitiveExpression
+[       OK ] ConvertFloatingPointTest.WholeFloatRendersPrimitiveExpression (0 ms)
+[ RUN      ] ConvertFloatingPointTest.ShortDecimalRendersPrimitiveExpression
+[       OK ] ConvertFloatingPointTest.ShortDecimalRendersPrimitiveExpression (0 ms)
+[ RUN      ] ConvertFloatingPointTest.LongDecimalDoubleRendersFraction
+[       OK ] ConvertFloatingPointTest.LongDecimalDoubleRendersFraction (0 ms)
+[ RUN      ] ConvertFloatingPointTest.LongDecimalFloatRendersFraction
+[       OK ] ConvertFloatingPointTest.LongDecimalFloatRendersFraction (0 ms)
+[ RUN      ] ConvertFloatingPointTest.PiRendersAsPlainPrimitiveExpression
+[       OK ] ConvertFloatingPointTest.PiRendersAsPlainPrimitiveExpression (0 ms)
+[ RUN      ] ConvertFloatingPointTest.IntConstantCoercedToDouble
+[       OK ] ConvertFloatingPointTest.IntConstantCoercedToDouble (0 ms)
+[ RUN      ] ConvertFloatingPointTest.AnnotationGatedOnFlag
+[       OK ] ConvertFloatingPointTest.AnnotationGatedOnFlag (0 ms)
+[ RUN      ] ConvertFloatingPointTest.MakeConstantCastsThroughTypeCode
+[       OK ] ConvertFloatingPointTest.MakeConstantCastsThroughTypeCode (0 ms)
+[ RUN      ] ConvertFloatingPointTest.MakeConstantChecksForOverflow
+[       OK ] ConvertFloatingPointTest.MakeConstantChecksForOverflow (0 ms)
+[ RUN      ] ConvertFloatingPointTest.MakeConstantWidensSmallIntegers
+[       OK ] ConvertFloatingPointTest.MakeConstantWidensSmallIntegers (0 ms)
+[----------] 11 tests from ConvertFloatingPointTest (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 21 tests from 2 test suites ran. (3 ms total)
+[  PASSED  ] 21 tests.
