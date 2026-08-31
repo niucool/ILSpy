@@ -44,12 +44,16 @@
 // algorithm, the `FindTypeInBounds` public entry, and the `GetBestCommonType`
 // dummy-TP pipeline over `MakeOutputTypeInference`; their IMPROVED-algorithm refinements
 // -- the `FindTypesInBounds` base-type-definition intersection and the `IntersectionType`
-// all-results report -- stay deferred, documented at their sites below) -- and the
+// all-results report -- stay deferred, documented at their sites below; the
+// `IntersectionType` class itself is now ported (TypeSystem/IntersectionType.{hpp,cpp}),
+// so wiring the `ImprovedReturnAllResults` arms into `Fix` / `FindTypeInBounds` is a
+// landable follow-up) -- and the
 // InferTypeArguments region (the `PhaseOne`/`PhaseTwo` private phases, the
 // `InferTypeArguments` main entry, and the `InferTypeArgumentsFromBounds` bounds entry,
 // composing every landed region into the engine's public output). The ported surface is
-// now the whole `TypeInference` class modulo the deferred Improved/`IntersectionType`
-// refinements; the `OverloadResolution` engine it feeds (`RunTypeInference`/
+// now the whole `TypeInference` class modulo the deferred Improved-algorithm
+// refinements (the `IntersectionType` class itself is ported);
+// the `OverloadResolution` engine it feeds (`RunTypeInference`/
 // `CalculateCandidate`/`AddCandidate`/`AddMethodLists`) is ported too.
 //
 // RETURN CONVENTION: the C# `IType[]` returns fresh arrays of GC-owned references; the port
@@ -490,8 +494,9 @@ std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> FindTypesInBounds(
 // The C# `public IType FindTypeInBounds(IReadOnlyList<IType> lowerBounds,
 // IReadOnlyList<IType> upperBounds)` (TypeInference.cs lines 1033-1053) -- the public
 // entry reducing the found types to ONE type. The `ImprovedReturnAllResults` arm
-// (`IntersectionType.Create(result)`) is DEFERRED (`IntersectionType` is not yet
-// ported); the documented fallback is the `GetFirstTypePreferNonInterfaces` picker,
+// (`IntersectionType.Create(result)`) is DEFERRED (a landable follow-up now that the
+// `IntersectionType` class is ported); the documented fallback is the
+// `GetFirstTypePreferNonInterfaces` picker,
 // which is exact for 0 and 1 candidates (`IntersectionType.Create` maps an empty list to
 // `SpecialType.UnknownType` and a singleton to the single type itself) -- only a
 // multi-candidate ambiguous result diverges. The fresh-instance nesting level is 0.
@@ -507,8 +512,9 @@ ILSpy::Decompiler::TypeSystem::ITypePtr FindTypeInBounds(
 // still convert to/from the fixed type), else the `FindTypesInBounds` candidates pick
 // the fixed type (the single-candidate success of the non-`ImprovedReturnAllResults`
 // algorithms). The `ImprovedReturnAllResults` arm (`IntersectionType.Create(types)`,
-// success `types.Count >= 1`) is DEFERRED with the same documented fallback (exact for 0
-// and 1 candidates). The C# `CreateNestedInstance()` recursion threads as nestingLevel
+// success `types.Count >= 1`) is DEFERRED with the same documented fallback (exact for
+// 0 and 1 candidates; a landable follow-up now that the `IntersectionType` class is
+// ported). The C# `CreateNestedInstance()` recursion threads as nestingLevel
 // (bumped by one at the `FindTypesInBounds` call).
 bool Fix(CSharpConversions& conversions, TP& tp, TypeInferenceAlgorithm algorithm,
         int nestingLevel);

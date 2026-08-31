@@ -1418,9 +1418,10 @@ ITypePtr FindTypeInBounds(CSharpConversions& conversions,
         FindTypesInBounds(conversions, lowerBounds, upperBounds, algorithm,
                           /*nestingLevel*/ 0);
     // C# `if (algorithm == TypeInferenceAlgorithm.ImprovedReturnAllResults)
-    //         return IntersectionType.Create(result);` -- DEFERRED (`IntersectionType` is
-    // not yet ported); the documented fallback is the picker below, which is exact for 0
-    // and 1 candidates (`IntersectionType.Create` maps an empty list to
+    //         return IntersectionType.Create(result);` -- DEFERRED (a landable follow-up
+    // now that the `IntersectionType` class is ported); the documented fallback is the
+    // picker below, which is exact for 0 and 1 candidates (`IntersectionType.Create`
+    // maps an empty list to
     // `SpecialType.UnknownType` and a singleton to the single type itself). Only a
     // multi-candidate ambiguous result diverges.
     // C# `else return GetFirstTypePreferNonInterfaces(result);`
@@ -1465,8 +1466,9 @@ bool Fix(CSharpConversions& conversions, TP& tp, TypeInferenceAlgorithm algorith
                                                     nestingLevel + 1);
     // C# `if (algorithm == TypeInferenceAlgorithm.ImprovedReturnAllResults) {
     //         tp.FixedTo = IntersectionType.Create(types);
-    //         return types.Count >= 1; }` -- DEFERRED (`IntersectionType` is not yet
-    // ported); the documented fallback below is exact for 0 and 1 candidates.
+    //         return types.Count >= 1; }` -- DEFERRED (a landable follow-up now that the
+    // `IntersectionType` class is ported); the documented fallback below is exact for 0
+    // and 1 candidates.
     // C# `else { tp.FixedTo = GetFirstTypePreferNonInterfaces(types);
     //          return types.Count == 1; }`
     tp.FixedTo = GetFirstTypePreferNonInterfaces(types);
