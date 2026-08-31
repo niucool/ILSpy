@@ -34,8 +34,10 @@
 // ::Get` (the per-compilation cached factory), `Util::ImmutableStack` (the IL-reader
 // evaluation-stack spine), and `ErrorResolveResult::UnknownError` (the null
 // object-initializer sentinel). The `Resolve*` arms land in later slices
-// (`ResolveUnaryOperator` and `ResolveBinaryOperator` + the enum-handler trio have
-// landed; ResolveSimpleName, ResolveMemberAccess, ... follow).
+// (`ResolveUnaryOperator` and `ResolveBinaryOperator` + the enum-handler trio, the
+// Convert/ResolveCast region, the sizeof/this/base/typeof tail, the
+// condition/primitive/default-value/assignment quartet, and the simple-name lookup
+// cluster have landed; ResolveMemberAccess, ResolveInvocation, ... follow).
 //
 // KEY PORT CONVENTIONS:
 //  (a) The C# `With*` clone factories return a `CSharpResolver` REFERENCE -- the C#
@@ -90,7 +92,7 @@
 //      std::shared_ptr<ResolveResult>>` where an empty handle is the C# null. The
 //      resolver holds the cache via `shared_ptr` (nullable -- null when there is no
 //      current type definition) and clones SHARE the same cache instance (the C#
-//      reference field), so the future `ResolveSimpleName` arms' cache population is
+//      reference field), so the `LookupSimpleNameOrTypeName` arms' cache population is
 //      visible across every clone sharing the cache.
 //  (f) The C# `Throw` guards port per the established convention: `ArgumentNullException`
 //      -> `std::invalid_argument` (the `IntersectionType::Create` precedent);
@@ -110,6 +112,8 @@
 #pragma once
 
 #include "Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext.hpp"
+#include "Decompiler/CSharp/Resolver/MemberLookup.hpp"
+#include "Decompiler/CSharp/Resolver/NameLookupMode.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
 #include "Decompiler/TypeSystem/ExpressionType.hpp"
 #include "Decompiler/TypeSystem/IVariable.hpp"
@@ -148,6 +152,7 @@ enum class AssignmentOperatorType;
 // CSharpConversionsHelpers.hpp precedent).
 namespace ILSpy::Decompiler::Semantics {
 class Conversion;
+class TypeResolveResult;
 }
 namespace ILSpy::Decompiler::TypeSystem { enum class TypeCode : std::uint8_t; }
 
@@ -515,6 +520,164 @@ public:
     // fresh instance per call, so the singleton must be materialized once here).
     const ILSpy::Decompiler::TypeSystem::IType* GetEnumUnderlyingType(
         const ILSpy::Decompiler::TypeSystem::IType& enumType) const;
+
+    // ---- Simple-name lookup -------------------------------------------------------------------
+    // (The `ResolveSimpleName` region, CSharpResolver.cs lines 1462-1790: the
+    // simple-name / type-name lookup cluster -- `ResolveSimpleName` +
+    // `LookupSimpleNameOrTypeName` + `IsVariableReferenceWithSameType` + the private
+    // `LookInCurrentType` / `LookInCurrentUsingScope` / `LookInUsingScopeNamespace` /
+    // `TopLevelTypeDefinitionIsAccessible` / `ResolveExternAlias` helpers -- plus the
+    // two `CreateMemberLookup` factories from the `ResolveMemberAccess` region (lines
+    // 1887-1910) that `LookInCurrentType` consumes. Every prerequisite is already
+    // ported: the local-variable stack and the `TypeDefinitionCache` (the skeleton),
+    // `ResolveThisReference` (the sizeof/this/base/typeof region), `MemberLookup::
+    // Lookup` / `LookupType` (D500), the `UsingScope` surface incl. the `ResolveCache`
+    // (the iteration-94 pair), `INamespace::GetChildNamespace` / `GetTypeDefinition`,
+    // `ICompilation::RootNamespace` / `GetNamespaceForExternAlias`, `IModule::
+    // InternalsVisibleTo`, and the `LocalResolveResult` / `TypeResolveResult` /
+    // `NamespaceResolveResult` / `AmbiguousTypeResolveResult` /
+    // `UnknownIdentifierResolveResult` / `UnknownMemberResolveResult` result classes.)
+
+    // The C# `public ResolveResult ResolveSimpleName(string identifier,
+    // IReadOnlyList<IType> typeArguments, bool isInvocationTarget = false)` (line 1463,
+    // C# 4.0 spec section 7.6.2 Simple Names) -- the expression-entry convenience
+    // delegating to `LookupSimpleNameOrTypeName` with the `Expression` /
+    // `InvocationTarget` mode. The C# `string` / `IReadOnlyList<IType>` parameters port
+    // to a `std::string` value and a `std::vector<ITypePtr>` value (the C# null guards
+    // are structurally unreachable through the value types, the D374 convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveSimpleName(
+        std::string identifier,
+        std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> typeArguments,
+        bool isInvocationTarget = false) const;
+
+    // The C# `public ResolveResult LookupSimpleNameOrTypeName(string identifier,
+    // IReadOnlyList<IType> typeArguments, NameLookupMode lookupMode)` (line 1473, C#
+    // 4.0 spec sections 3.8 + 7.6.2) -- the full simple-name/type-name lookup: the
+    // local variables and current-member parameters (Expression/InvocationTarget modes,
+    // no type arguments), the current method's type parameters, the per-current-type-
+    // definition cache (the three `TypeDefinitionCache` dictionaries, storing NULLABLE
+    // results -- an empty handle is the C# known-negative `null` entry), the current
+    // type and its declaring types (`LookInCurrentType`), the using-scope chain
+    // (`LookInCurrentUsingScope`, with the per-scope `ResolveCache` memoization for the
+    // no-type-arguments non-using-declaration shapes), the global namespace when no
+    // scope is set, the `dynamic` keyword, and the `UnknownIdentifierResolveResult`
+    // fallback. The C# `lock (cache)` guards around the `TypeDefinitionCache`
+    // dictionaries are elided (a thread-safety measure with no single-threaded
+    // behavioral effect; the `UsingScope::ResolveCacheMap` keeps its mutex because the
+    // C# `ConcurrentDictionary` contract is its own surface). The `ShallowClone` on
+    // every cache hit ports to the `unique_ptr`-to-`shared_ptr` conversion (the clone
+    // preserves the runtime type, the D424 convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> LookupSimpleNameOrTypeName(
+        std::string identifier,
+        std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> typeArguments,
+        NameLookupMode lookupMode) const;
+
+    // The C# `public bool IsVariableReferenceWithSameType(ResolveResult rr, string
+    // identifier, out TypeResolveResult trr)` (line 1604) -- whether `rr` (a member or
+    // local-variable result) has the same type as the TYPE the identifier resolves to
+    // (the `Type`-mode lookup): the C# pattern the CSharpResolver uses to decide
+    // whether an identifier in an expression position refers to a type or a variable
+    // of the same name. The C# `out TypeResolveResult trr` ports to a `shared_ptr&`
+    // out-param reset to null at the top (the `TaskType::IsCustomTask` out-param
+    // convention); the C# `as TypeResolveResult` ports to `dynamic_pointer_cast`.
+    bool IsVariableReferenceWithSameType(
+        const ILSpy::Decompiler::Semantics::ResolveResult& rr,
+        const std::string& identifier,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::TypeResolveResult>& trr) const;
+
+    // The C# `public MemberLookup CreateMemberLookup()` (line 1887, the
+    // `ResolveMemberAccess` region) -- the member-lookup factory over the resolver's
+    // current settings: the current type definition, the compilation's main module,
+    // and the enum-member-initializer flag (a field member inside an enum type).
+    // `MemberLookup` is a copyable value object, so the factory returns it BY VALUE
+    // (the C# heap allocation is an implementation detail). Landed with this region
+    // because `LookInCurrentType` consumes it.
+    MemberLookup CreateMemberLookup() const;
+
+    // The C# `public MemberLookup CreateMemberLookup(NameLookupMode lookupMode)` (line
+    // 1899) -- the mode-aware factory: a `BaseTypeReference` lookup treats the resolver
+    // as being OUTSIDE the current type definition for accessibility purposes (the
+    // C# remark: this avoids a stack overflow when referencing a protected class
+    // nested inside the base class of a parent class --
+    // NameLookupTests.InnerClassInheritingFromProtectedBaseInnerClassShouldNotCauseStackOverflow).
+    MemberLookup CreateMemberLookup(NameLookupMode lookupMode) const;
+
+    // The C# `public ResolveResult ResolveAlias(string identifier)` (line 1760) --
+    // looks up an alias (the identifier in front of a `::` operator): the `global`
+    // keyword yields the compilation's root namespace, then the using-scope chain's
+    // extern aliases and using aliases. The port's `UsingScope` tracks no aliases (the
+    // always-empty `ExternAliases` / `UsingAliases` surface), so only the `global` arm
+    // and the `ErrorResult` fallback are reachable -- the loop is kept faithful for the
+    // day the alias tracking lands.
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveAlias(
+        const std::string& identifier) const;
+
+    // The C# `ResolveResult LookInCurrentType(string identifier, IReadOnlyList<IType>
+    // typeArguments, NameLookupMode lookupMode, bool parameterizeResultType)` (line
+    // 1621) -- the current type definition and its declaring types: the declared type
+    // parameters (including those copied from outer classes, so the version with the
+    // correct owner wins), then the member lookup (`Lookup` against a `this` /
+    // type-reference target for the expression modes, `LookupType` for the type
+    // modes), skipping the current type itself for a `BaseTypeReference` lookup, and
+    // skipping past `UnknownMemberResolveResult` (but returning
+    // `AmbiguousMemberResolveResult`). Private in the C#; PUBLIC in the port for direct
+    // TDD (the TryConvert widening convention). Returns a NULLABLE handle (the empty
+    // `shared_ptr` is the C# `null` not-found).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> LookInCurrentType(
+        const std::string& identifier,
+        const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& typeArguments,
+        NameLookupMode lookupMode,
+        bool parameterizeResultType) const;
+
+    // The C# `ResolveResult LookInCurrentUsingScope(string identifier,
+    // IReadOnlyList<IType> typeArguments, bool isInUsingDeclaration, bool
+    // parameterizeResultType)` (line 1668) -- the using-scope chain, innermost first:
+    // the scope's own namespace (`LookInUsingScopeNamespace`), the extern/using aliases
+    // (no type arguments; the using declaration's own scope skips its own aliases),
+    // then the imported namespaces' types (the first accessible result wins; a SECOND
+    // accessible type in a different imported namespace is an `AmbiguousTypeResolveResult`).
+    // Private in the C#; PUBLIC in the port for direct TDD (the TryConvert widening
+    // convention). Returns a nullable handle.
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> LookInCurrentUsingScope(
+        const std::string& identifier,
+        const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& typeArguments,
+        bool isInUsingDeclaration,
+        bool parameterizeResultType) const;
+
+    // The C# `ResolveResult LookInUsingScopeNamespace(UsingScope usingScope,
+    // INamespace n, string identifier, IReadOnlyList<IType> typeArguments, bool
+    // parameterizeResultType)` (line 1707) -- one namespace: the child namespace (no
+    // type arguments; an alias of the same name makes it ambiguous), then the type
+    // definition (accessibility-gated; parameterized when requested and type arguments
+    // are present; an alias of the same name makes it ambiguous). Both C# parameters
+    // are nullable, so the port takes nullable pointers. Private in the C#; PUBLIC in
+    // the port for direct TDD (the TryConvert widening convention). Returns a nullable
+    // handle.
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> LookInUsingScopeNamespace(
+        const ILSpy::Decompiler::CSharp::TypeSystem::UsingScope* usingScope,
+        const ILSpy::Decompiler::TypeSystem::INamespace* n,
+        const std::string& identifier,
+        const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& typeArguments,
+        bool parameterizeResultType) const;
+
+    // The C# `bool TopLevelTypeDefinitionIsAccessible(ITypeDefinition typeDef)` (line
+    // 1748) -- an `Internal` type is accessible only when its parent module grants
+    // internals to the compilation's main module (`InternalsVisibleTo`); every other
+    // accessibility is accessible. The C# parameter is a non-null reference, but the
+    // `LookInCurrentUsingScope` call sites pass `GetDefinition()` results that are
+    // null for degenerate definitionless types (where the C# would NRE), so the port
+    // takes the nullable pointer with the documented not-accessible safe fallback (the
+    // D516 convention). Private in the C#; PUBLIC in the port for direct TDD (the
+    // TryConvert widening convention).
+    bool TopLevelTypeDefinitionIsAccessible(
+        const ILSpy::Decompiler::TypeSystem::ITypeDefinition* typeDef) const;
+
+    // The C# `ResolveResult ResolveExternAlias(string alias)` (line 1784) -- resolves
+    // an extern alias to its namespace through `ICompilation.GetNamespaceForExternAlias`,
+    // falling back to `ErrorResult`. Private in the C#; PUBLIC in the port for direct
+    // TDD (the TryConvert widening convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveExternAlias(
+        const std::string& alias) const;
 
     // ---- Numeric promotion -------------------------------------------------------------------
     // (The unary/binary numeric-promotion region -- CSharpResolver.cs lines 536-561
@@ -1100,7 +1263,8 @@ private:
     };
 
     // The C# private nested `sealed class TypeDefinitionCache` -- the per-current-type-
-    // definition lookup caches the future `ResolveSimpleName` arms populate. The three
+    // definition lookup caches the `LookupSimpleNameOrTypeName` arms populate (the
+    // simple-name lookup region). The three
     // dictionaries store NULLABLE results (an empty `shared_ptr` is the C# stored-null
     // known-negative entry, header convention (e)).
     class TypeDefinitionCache {

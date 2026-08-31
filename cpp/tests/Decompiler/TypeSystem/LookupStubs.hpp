@@ -462,6 +462,11 @@ public:
     void SetIsOperator(bool v) { isOperator_ = v; }
     void SetReturnType(ITypePtr rt) { returnTypeOverride_ = std::move(rt); }
     void SetParameters(std::vector<const IParameter*> p) { parameters_ = std::move(p); }
+    // Configurable `TypeParameters` for the CSharpResolver simple-name-lookup tests (the
+    // `LookupSimpleNameOrTypeName` method-type-parameter arm reads `m.TypeParameters`). The
+    // default empty preserves the original behavior (the additive-setter convention); the
+    // stored pointers are non-owning (the caller keeps the `ITypeParameter` stubs alive).
+    void SetTypeParameters(std::vector<const ITypeParameter*> tps) { typeParameters_ = std::move(tps); }
     // Configurable `ReturnTypeIsRefReadOnly` for the delegate-compatibility tests (the
     // `m.ReturnTypeIsRefReadOnly != d.ReturnTypeIsRefReadOnly` mismatch crux). The default
     // `false` preserves the original behavior so existing tests that do not call the setter
@@ -534,7 +539,7 @@ public:
     bool ReturnTypeIsRefReadOnly() const override { return returnTypeIsRefReadOnly_; }
     bool IsInitOnly() const override { return false; }
     bool ThisIsRefReadOnly() const override { return false; }
-    std::vector<const ITypeParameter*> TypeParameters() const override { return {}; }
+    std::vector<const ITypeParameter*> TypeParameters() const override { return typeParameters_; }
     std::vector<ITypePtr> TypeArguments() const override { return {}; }
     bool IsExtensionMethod() const override { return false; }
     bool IsLocalFunction() const override { return false; }
@@ -563,6 +568,7 @@ private:
     TS::Accessibility accessibility_ = TS::Accessibility::Public;
     ITypePtr returnTypeOverride_;
     std::vector<const IParameter*> parameters_;
+    std::vector<const ITypeParameter*> typeParameters_;
 };
 
 // A minimal `IEvent` for the `member is IEvent` TRUE side of IsInvocable.

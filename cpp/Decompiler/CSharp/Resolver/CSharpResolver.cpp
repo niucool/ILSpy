@@ -35,16 +35,26 @@
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
+#include "Decompiler/Semantics/AmbiguousResolveResult.hpp"
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
 #include "Decompiler/Semantics/ConversionFactories.hpp"
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/ErrorResolveResult.hpp"
+#include "Decompiler/Semantics/LocalResolveResult.hpp"
+#include "Decompiler/Semantics/MemberResolveResult.hpp"
+#include "Decompiler/Semantics/NamespaceResolveResult.hpp"
 #include "Decompiler/Semantics/OperatorResolveResult.hpp"
 #include "Decompiler/Semantics/SizeOfResolveResult.hpp"
 #include "Decompiler/Semantics/ThisResolveResult.hpp"
 #include "Decompiler/Semantics/TypeOfResolveResult.hpp"
+#include "Decompiler/Semantics/TypeResolveResult.hpp"
+#include "Decompiler/Semantics/UnknownMemberResolveResult.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
+#include "Decompiler/TypeSystem/INamespace.hpp"
+#include "Decompiler/TypeSystem/IParameterizedMember.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
+#include "Decompiler/TypeSystem/ITypeParameter.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
 #include "Decompiler/TypeSystem/NullableType.hpp"
@@ -54,6 +64,7 @@
 #include "Decompiler/Util/CSharpPrimitiveCast.hpp"
 #include "Decompiler/Util/Decimal.hpp"
 
+#include <algorithm>
 #include <any>
 #include <cstdint>
 #include <optional>
@@ -738,6 +749,514 @@ CSharpResolver::GetEnumUnderlyingType(
     return unknownType.get();
 }
 
+// ---- Simple-name lookup region (CSharpResolver.cs lines 1462-1790) -------------------------
+
+// The C# `static readonly ResolveResult ErrorResult = ErrorResolveResult.UnknownError`
+// (line 42) -- the singleton the non-overloadable arms return. A NON-OWNING aliasing
+// handle (the empty-owner aliasing constructor: no deleter ever runs, so the
+// program-lifetime singleton is never destroyed; the C# returns the same instance from
+// every call). The `const_cast` is safe (the underlying singleton object is mutable; the
+// accessor's const is the contract, the D515 convention).
+namespace {
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ErrorResultSingleton()
+{
+    return std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>(
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>(),
+        const_cast<ILSpy::Decompiler::Semantics::ErrorResolveResult*>(
+            &ILSpy::Decompiler::Semantics::ErrorResolveResult::UnknownError()));
+}
+} // namespace
+
+// The C# `public ResolveResult ResolveSimpleName(string identifier, IReadOnlyList<IType>
+// typeArguments, bool isInvocationTarget = false)` (line 1463) -- see CSharpResolver.hpp
+// for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveSimpleName(std::string identifier,
+                                  std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> typeArguments,
+                                  bool isInvocationTarget) const
+{
+    // C# 4.0 spec: section 7.6.2 Simple Names
+
+    return LookupSimpleNameOrTypeName(
+        std::move(identifier), std::move(typeArguments),
+        isInvocationTarget ? NameLookupMode::InvocationTarget : NameLookupMode::Expression);
+}
+
+// The C# `public ResolveResult LookupSimpleNameOrTypeName(string identifier,
+// IReadOnlyList<IType> typeArguments, NameLookupMode lookupMode)` (line 1473) -- see
+// CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::LookupSimpleNameOrTypeName(
+    std::string identifier,
+    std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> typeArguments,
+    NameLookupMode lookupMode) const
+{
+    using ILSpy::Decompiler::CSharp::TypeSystem::UsingScope;
+    using ILSpy::Decompiler::Semantics::LocalResolveResult;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::Semantics::TypeResolveResult;
+    using ILSpy::Decompiler::Semantics::UnknownIdentifierResolveResult;
+    using ILSpy::Decompiler::TypeSystem::IMethod;
+    using ILSpy::Decompiler::TypeSystem::IParameter;
+    using ILSpy::Decompiler::TypeSystem::IParameterizedMember;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypeParameter;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::SpecialType;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+
+    // C# 4.0 spec: sections 3.8 Namespace and type names; 7.6.2 Simple Names
+
+    // The C# null guards (`identifier` / `typeArguments`) are structurally unreachable
+    // through the `std::string` / `std::vector` value parameters (the D374 convention).
+
+    const int k = static_cast<int>(typeArguments.size());
+
+    if (k == 0) {
+        if (lookupMode == NameLookupMode::Expression
+            || lookupMode == NameLookupMode::InvocationTarget) {
+            // Look in local variables (the `ImmutableStack` enumerates LIFO, so the
+            // innermost block's dictionary is consulted first -- the `LocalVariables`
+            // flattening convention).
+            for (auto stack = localVariableStack_; !stack.empty(); stack = stack.pop()) {
+                auto it = stack.top()->find(identifier);
+                if (it != stack.top()->end()) {
+                    return std::make_shared<LocalResolveResult>(it->second.get());
+                }
+            }
+            // Look in parameters of current method
+            if (const IParameterizedMember* parameterizedMember =
+                    dynamic_cast<const IParameterizedMember*>(CurrentMember())) {
+                for (const IParameter* p : parameterizedMember->Parameters()) {
+                    if (p->Name() == identifier) {
+                        return std::make_shared<LocalResolveResult>(p);
+                    }
+                }
+            }
+        }
+
+        // look in type parameters of current method
+        if (const IMethod* m = dynamic_cast<const IMethod*>(CurrentMember())) {
+            for (const ITypeParameter* tp : m->TypeParameters()) {
+                if (tp->Name() == identifier)
+                    return std::make_shared<TypeResolveResult>(
+                        std::const_pointer_cast<IType>(tp->shared_from_this()));
+            }
+        }
+    }
+
+    bool parameterizeResultType =
+        !(k != 0 && std::all_of(typeArguments.begin(), typeArguments.end(),
+                                [](const ITypePtr& t) {
+                                    return t->Kind() == TypeKind::UnboundTypeArgument;
+                                }));
+
+    std::shared_ptr<ResolveResult> r;
+    if (currentTypeDefinitionCache_ != nullptr) {
+        std::unordered_map<std::string, std::shared_ptr<ResolveResult>>* cache = nullptr;
+        bool foundInCache = false;
+        if (k == 0) {
+            switch (lookupMode) {
+                case NameLookupMode::Expression:
+                    cache = &currentTypeDefinitionCache_->SimpleNameLookupCacheExpression;
+                    break;
+                case NameLookupMode::InvocationTarget:
+                    cache = &currentTypeDefinitionCache_->SimpleNameLookupCacheInvocationTarget;
+                    break;
+                case NameLookupMode::Type:
+                    cache = &currentTypeDefinitionCache_->SimpleTypeLookupCache;
+                    break;
+                default:
+                    break;
+            }
+            if (cache != nullptr) {
+                // The C# `lock (cache)` is elided (a thread-safety measure with no
+                // single-threaded behavioral effect -- the header convention).
+                auto it = cache->find(identifier);
+                foundInCache = it != cache->end();
+                if (foundInCache) {
+                    // The stored value may be the EMPTY handle (the C# known-negative
+                    // `null` entry -- the cache also stores missing members).
+                    r = it->second;
+                }
+            }
+        }
+        if (foundInCache) {
+            r = (r != nullptr ? std::shared_ptr<ResolveResult>(r->ShallowClone())
+                              : std::shared_ptr<ResolveResult>());
+        } else {
+            r = LookInCurrentType(identifier, typeArguments, lookupMode,
+                                  parameterizeResultType);
+            if (cache != nullptr) {
+                // also cache missing members (r==null)
+                (*cache)[identifier] = r;
+            }
+        }
+        if (r != nullptr)
+            return r;
+    }
+
+    if (CurrentUsingScope() == nullptr) {
+        // If no using scope was specified, we still need to look in the global namespace:
+        r = LookInUsingScopeNamespace(nullptr, &compilation_.RootNamespace(), identifier,
+                                      typeArguments, parameterizeResultType);
+    } else {
+        if (k == 0 && lookupMode != NameLookupMode::TypeInUsingDeclaration) {
+            std::shared_ptr<ResolveResult> cached;
+            if (CurrentUsingScope()->ResolveCache.TryGetValue(identifier, cached)) {
+                r = (cached != nullptr
+                         ? std::shared_ptr<ResolveResult>(cached->ShallowClone())
+                         : std::shared_ptr<ResolveResult>());
+            } else {
+                r = LookInCurrentUsingScope(identifier, typeArguments, false, false);
+                CurrentUsingScope()->ResolveCache.TryAdd(identifier, r);
+            }
+        } else {
+            r = LookInCurrentUsingScope(
+                identifier, typeArguments,
+                lookupMode == NameLookupMode::TypeInUsingDeclaration,
+                parameterizeResultType);
+        }
+    }
+    if (r != nullptr)
+        return r;
+
+    if (typeArguments.empty() && identifier == "dynamic") {
+        return std::make_shared<TypeResolveResult>(
+            std::make_shared<SpecialType>(TypeKind::Dynamic, /*isReferenceType=*/true));
+    } else {
+        return std::make_shared<UnknownIdentifierResolveResult>(
+            std::move(identifier), static_cast<int>(typeArguments.size()));
+    }
+}
+
+// The C# `public bool IsVariableReferenceWithSameType(ResolveResult rr, string identifier,
+// out TypeResolveResult trr)` (line 1604) -- see CSharpResolver.hpp for the port
+// conventions.
+bool CSharpResolver::IsVariableReferenceWithSameType(
+    const ILSpy::Decompiler::Semantics::ResolveResult& rr,
+    const std::string& identifier,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::TypeResolveResult>& trr) const
+{
+    using ILSpy::Decompiler::Semantics::LocalResolveResult;
+    using ILSpy::Decompiler::Semantics::MemberResolveResult;
+    using ILSpy::Decompiler::Semantics::TypeResolveResult;
+
+    if (dynamic_cast<const MemberResolveResult*>(&rr) == nullptr
+        && dynamic_cast<const LocalResolveResult*>(&rr) == nullptr) {
+        trr = nullptr;
+        return false;
+    }
+    trr = std::dynamic_pointer_cast<TypeResolveResult>(
+        LookupSimpleNameOrTypeName(identifier, {}, NameLookupMode::Type));
+    return trr != nullptr && trr->Type().Equals(rr.Type());
+}
+
+// The C# `public MemberLookup CreateMemberLookup()` (line 1887) -- see
+// CSharpResolver.hpp for the port conventions.
+MemberLookup CSharpResolver::CreateMemberLookup() const
+{
+    using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
+    using ILSpy::Decompiler::TypeSystem::SymbolKind;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+
+    const ITypeDefinition* currentTypeDefinition = CurrentTypeDefinition();
+    bool isInEnumMemberInitializer =
+        CurrentMember() != nullptr && CurrentMember()->SymbolKind() == SymbolKind::Field
+        && currentTypeDefinition != nullptr
+        && currentTypeDefinition->Kind() == TypeKind::Enum;
+    return MemberLookup(currentTypeDefinition, &compilation_.MainModule(),
+                        isInEnumMemberInitializer);
+}
+
+// The C# `public MemberLookup CreateMemberLookup(NameLookupMode lookupMode)` (line 1899)
+// -- see CSharpResolver.hpp for the port conventions.
+MemberLookup CSharpResolver::CreateMemberLookup(NameLookupMode lookupMode) const
+{
+    using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
+
+    if (lookupMode == NameLookupMode::BaseTypeReference && CurrentTypeDefinition() != nullptr) {
+        // When looking up a base type reference, treat us as being outside the current
+        // type definition for accessibility purposes.
+        // This avoids a stack overflow when referencing a protected class nested inside
+        // the base class of a parent class.
+        // (NameLookupTests.InnerClassInheritingFromProtectedBaseInnerClassShouldNotCauseStackOverflow)
+        return MemberLookup(CurrentTypeDefinition()->DeclaringTypeDefinition(),
+                            &compilation_.MainModule(), false);
+    } else {
+        return CreateMemberLookup();
+    }
+}
+
+// The C# `ResolveResult LookInCurrentType(string identifier, IReadOnlyList<IType>
+// typeArguments, NameLookupMode lookupMode, bool parameterizeResultType)` (line 1621) --
+// see CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::LookInCurrentType(
+    const std::string& identifier,
+    const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& typeArguments,
+    NameLookupMode lookupMode,
+    bool parameterizeResultType) const
+{
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::Semantics::TypeResolveResult;
+    using ILSpy::Decompiler::Semantics::UnknownMemberResolveResult;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
+    using ILSpy::Decompiler::TypeSystem::ITypeParameter;
+
+    const int k = static_cast<int>(typeArguments.size());
+    MemberLookup lookup = CreateMemberLookup(lookupMode);
+    // look in current type definitions
+    for (const ITypeDefinition* t = CurrentTypeDefinition(); t != nullptr;
+         t = t->DeclaringTypeDefinition()) {
+        if (k == 0) {
+            // Look for type parameter with that name
+            // Look at all type parameters, including those copied from outer classes,
+            // so that we can fetch the version with the correct owner.
+            for (const ITypeParameter* tp : t->TypeParameters()) {
+                if (tp->Name() == identifier)
+                    return std::make_shared<TypeResolveResult>(
+                        std::const_pointer_cast<IType>(tp->shared_from_this()));
+            }
+        }
+
+        if (lookupMode == NameLookupMode::BaseTypeReference && t == CurrentTypeDefinition()) {
+            // don't look in current type when resolving a base type reference
+            continue;
+        }
+
+        std::shared_ptr<ResolveResult> r;
+        if (lookupMode == NameLookupMode::Expression
+            || lookupMode == NameLookupMode::InvocationTarget) {
+            std::shared_ptr<ResolveResult> targetResolveResult =
+                (t == CurrentTypeDefinition()
+                     ? ResolveThisReference()
+                     : std::make_shared<TypeResolveResult>(
+                           std::const_pointer_cast<IType>(t->shared_from_this())));
+            r = lookup.Lookup(*targetResolveResult, identifier, typeArguments,
+                              lookupMode == NameLookupMode::InvocationTarget);
+        } else {
+            r = lookup.LookupType(*t, identifier, typeArguments, parameterizeResultType);
+        }
+        if (dynamic_cast<const UnknownMemberResolveResult*>(r.get()) == nullptr) {
+            // but do return AmbiguousMemberResolveResult
+            return r;
+        }
+    }
+    return nullptr;
+}
+
+// The C# `ResolveResult LookInCurrentUsingScope(string identifier, IReadOnlyList<IType>
+// typeArguments, bool isInUsingDeclaration, bool parameterizeResultType)` (line 1668) --
+// see CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::LookInCurrentUsingScope(
+    const std::string& identifier,
+    const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& typeArguments,
+    bool isInUsingDeclaration,
+    bool parameterizeResultType) const
+{
+    using ILSpy::Decompiler::CSharp::TypeSystem::UsingScope;
+    using ILSpy::Decompiler::Semantics::AmbiguousTypeResolveResult;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::Semantics::TypeResolveResult;
+    using ILSpy::Decompiler::TypeSystem::INamespace;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::ParameterizedType;
+
+    // look in current namespace definitions
+    std::shared_ptr<UsingScope> currentUsingScope = CurrentUsingScope();
+    for (std::shared_ptr<UsingScope> u = currentUsingScope; u != nullptr; u = u->Parent()) {
+        auto resultInNamespace =
+            LookInUsingScopeNamespace(u.get(), &u->Namespace(), identifier, typeArguments,
+                                      parameterizeResultType);
+        if (resultInNamespace != nullptr)
+            return resultInNamespace;
+        // then look for aliases:
+        if (typeArguments.empty()) {
+            // The port's `ExternAliases` is always empty (the C# expression-bodied
+            // `=> [];`), so this arm never fires -- kept faithful for the day the alias
+            // tracking lands.
+            for (const std::string& externAlias : u->ExternAliases()) {
+                if (externAlias == identifier) {
+                    return ResolveExternAlias(identifier);
+                }
+            }
+            if (!(isInUsingDeclaration && u == currentUsingScope)) {
+                for (const auto& pair : u->UsingAliases()) {
+                    if (pair.first == identifier) {
+                        // The null guard is the D516 safe fallback (the C# would NRE on
+                        // a null alias value; the arm is unreachable in the port's
+                        // always-empty `UsingAliases`).
+                        return pair.second != nullptr
+                                   ? std::shared_ptr<ResolveResult>(pair.second->ShallowClone())
+                                   : nullptr;
+                    }
+                }
+            }
+        }
+        // finally, look in the imported namespaces:
+        if (!(isInUsingDeclaration && u == currentUsingScope)) {
+            ITypePtr firstResult;
+            for (const INamespace* importedNamespace : u->Usings()) {
+                const ITypeDefinition* def = importedNamespace->GetTypeDefinition(
+                    identifier, static_cast<int>(typeArguments.size()));
+                if (def != nullptr) {
+                    ITypePtr resultType;
+                    if (parameterizeResultType && !typeArguments.empty())
+                        resultType = std::make_shared<ParameterizedType>(
+                            std::const_pointer_cast<IType>(def->shared_from_this()),
+                            typeArguments);
+                    else
+                        resultType = std::const_pointer_cast<IType>(def->shared_from_this());
+
+                    if (firstResult == nullptr
+                        || !TopLevelTypeDefinitionIsAccessible(firstResult->GetDefinition())) {
+                        if (TopLevelTypeDefinitionIsAccessible(resultType->GetDefinition()))
+                            firstResult = resultType;
+                    } else if (TopLevelTypeDefinitionIsAccessible(def)) {
+                        return std::make_shared<AmbiguousTypeResolveResult>(firstResult);
+                    }
+                }
+            }
+            if (firstResult != nullptr)
+                return std::make_shared<TypeResolveResult>(firstResult);
+        }
+        // if we didn't find anything: repeat lookup with parent namespace
+    }
+    return nullptr;
+}
+
+// The C# `ResolveResult LookInUsingScopeNamespace(UsingScope usingScope, INamespace n,
+// string identifier, IReadOnlyList<IType> typeArguments, bool parameterizeResultType)`
+// (line 1707) -- see CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::LookInUsingScopeNamespace(
+    const ILSpy::Decompiler::CSharp::TypeSystem::UsingScope* usingScope,
+    const ILSpy::Decompiler::TypeSystem::INamespace* n,
+    const std::string& identifier,
+    const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& typeArguments,
+    bool parameterizeResultType) const
+{
+    using ILSpy::Decompiler::Semantics::AmbiguousTypeResolveResult;
+    using ILSpy::Decompiler::Semantics::NamespaceResolveResult;
+    using ILSpy::Decompiler::Semantics::TypeResolveResult;
+    using ILSpy::Decompiler::TypeSystem::INamespace;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::ParameterizedType;
+    using ILSpy::Decompiler::TypeSystem::UnknownType;
+
+    if (n == nullptr)
+        return nullptr;
+    // first look for a namespace
+    const int k = static_cast<int>(typeArguments.size());
+    if (k == 0) {
+        const INamespace* childNamespace = n->GetChildNamespace(identifier);
+        if (childNamespace != nullptr) {
+            if (usingScope != nullptr && usingScope->HasAlias(identifier))
+                // The elaborated-type-specifier (`class UnknownType`) targets the CLASS
+                // (the `make_shared<UnknownType>`-resolves-to-the-function MSVC quirk,
+                // D417; the NestedTypeReference fallback precedent).
+                return std::make_shared<AmbiguousTypeResolveResult>(
+                    ITypePtr(new class UnknownType(std::nullopt, identifier, 0)));
+            return std::make_shared<NamespaceResolveResult>(childNamespace);
+        }
+    }
+    // then look for a type
+    const ITypeDefinition* def = n->GetTypeDefinition(identifier, k);
+    if (def != nullptr && TopLevelTypeDefinitionIsAccessible(def)) {
+        ITypePtr result = std::const_pointer_cast<IType>(def->shared_from_this());
+        if (parameterizeResultType && k > 0) {
+            result = std::make_shared<ParameterizedType>(
+                std::const_pointer_cast<IType>(def->shared_from_this()), typeArguments);
+        }
+        if (usingScope != nullptr && usingScope->HasAlias(identifier))
+            return std::make_shared<AmbiguousTypeResolveResult>(std::move(result));
+        else
+            return std::make_shared<TypeResolveResult>(std::move(result));
+    }
+    return nullptr;
+}
+
+// The C# `bool TopLevelTypeDefinitionIsAccessible(ITypeDefinition typeDef)` (line 1748)
+// -- see CSharpResolver.hpp for the port conventions.
+bool CSharpResolver::TopLevelTypeDefinitionIsAccessible(
+    const ILSpy::Decompiler::TypeSystem::ITypeDefinition* typeDef) const
+{
+    using ILSpy::Decompiler::TypeSystem::Accessibility;
+    using ILSpy::Decompiler::TypeSystem::IModule;
+
+    // The null guard is the D516 safe fallback (the C# would NRE; the not-accessible
+    // direction keeps the lookup scanning).
+    if (typeDef == nullptr)
+        return false;
+    if (typeDef->Accessibility() == Accessibility::Internal) {
+        const IModule* parentModule = typeDef->ParentModule();
+        // The null guard is the D516 safe fallback (a type definition always carries a
+        // parent module in the real metadata).
+        if (parentModule == nullptr)
+            return false;
+        return parentModule->InternalsVisibleTo(compilation_.MainModule());
+    }
+    return true;
+}
+
+// The C# `public ResolveResult ResolveAlias(string identifier)` (line 1760) -- see
+// CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveAlias(const std::string& identifier) const
+{
+    using ILSpy::Decompiler::CSharp::TypeSystem::UsingScope;
+    using ILSpy::Decompiler::Semantics::NamespaceResolveResult;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+
+    if (identifier == "global")
+        return std::make_shared<NamespaceResolveResult>(&compilation_.RootNamespace());
+
+    for (std::shared_ptr<UsingScope> n = CurrentUsingScope(); n != nullptr; n = n->Parent()) {
+        // The port's `ExternAliases` is always empty (the arm never fires; kept
+        // faithful).
+        for (const std::string& externAlias : n->ExternAliases()) {
+            if (externAlias == identifier) {
+                return ResolveExternAlias(identifier);
+            }
+        }
+        for (const auto& pair : n->UsingAliases()) {
+            if (pair.first == identifier) {
+                // `(pair.Value as NamespaceResolveResult) ?? ErrorResult` -- the C#
+                // returns the SAME instance (no ShallowClone here, unlike
+                // LookInCurrentUsingScope); a null value or a non-namespace alias
+                // yields the ErrorResult singleton (a null `pair.second` fails the
+                // dynamic_cast, faithfully matching the C# `as` on null).
+                if (dynamic_cast<const NamespaceResolveResult*>(pair.second.get()) != nullptr)
+                    return pair.second;
+                return ErrorResultSingleton();
+            }
+        }
+    }
+    return ErrorResultSingleton();
+}
+
+// The C# `ResolveResult ResolveExternAlias(string alias)` (line 1784) -- see
+// CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveExternAlias(const std::string& alias) const
+{
+    using ILSpy::Decompiler::Semantics::NamespaceResolveResult;
+    using ILSpy::Decompiler::TypeSystem::INamespace;
+
+    const INamespace* ns = compilation_.GetNamespaceForExternAlias(alias);
+    if (ns != nullptr)
+        return std::make_shared<NamespaceResolveResult>(ns);
+    else
+        return ErrorResultSingleton();
+}
+
 // ---- Numeric promotion region (CSharpResolver.cs lines 536-561 + 1055-1230) ----------------
 
 // The C# private `IType MakeNullable(IType type, bool isNullable)` (line 1055).
@@ -1225,22 +1744,6 @@ std::unique_ptr<OverloadResolution> CSharpResolver::CreateOverloadResolution(
 }
 
 // ---- ResolveUnaryOperator region (CSharpResolver.cs lines 326-530) ------------------------
-
-// The C# `static readonly ResolveResult ErrorResult = ErrorResolveResult.UnknownError`
-// (line 42) -- the singleton the non-overloadable arms return. A NON-OWNING aliasing
-// handle (the empty-owner aliasing constructor: no deleter ever runs, so the
-// program-lifetime singleton is never destroyed; the C# returns the same instance from
-// every call). The `const_cast` is safe (the underlying singleton object is mutable; the
-// accessor's const is the contract, the D515 convention).
-namespace {
-std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ErrorResultSingleton()
-{
-    return std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>(
-        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>(),
-        const_cast<ILSpy::Decompiler::Semantics::ErrorResolveResult*>(
-            &ILSpy::Decompiler::Semantics::ErrorResolveResult::UnknownError()));
-}
-} // namespace
 
 // The C# `public ResolveResult ResolveUnaryOperator(UnaryOperatorType op, ResolveResult
 // expression)` (line 326, C# spec draft-v11 section 12.4.4 "Unary operator overload
