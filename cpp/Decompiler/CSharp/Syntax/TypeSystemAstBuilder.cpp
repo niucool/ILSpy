@@ -76,6 +76,9 @@
 #include "Decompiler/TypeSystem/IModule.hpp"
 #include "Decompiler/TypeSystem/INamespace.hpp"
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
+#include "Decompiler/TypeSystem/IVariable.hpp"
+#include "Decompiler/TypeSystem/Nullability.hpp"
+#include "Decompiler/TypeSystem/TypeConstraint.hpp"
 #include "Decompiler/TypeSystem/KnownTypeReference.hpp"
 #include "Decompiler/TypeSystem/NullableType.hpp"
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
@@ -85,6 +88,10 @@
 #include "Decompiler/Util/Decimal.hpp"
 #include "Attribute.hpp"
 #include "AttributeSection.hpp"
+#include "Constraint.hpp"
+#include "TypeParameterDeclaration.hpp"
+#include "VariableInitializer.hpp"
+#include "Statements/VariableDeclarationStatement.hpp"
 #include "Expressions/NamedExpression.hpp"
 #include "Decompiler/Semantics/InitializedObjectResolveResult.hpp"
 #include "Decompiler/Semantics/UnknownMemberResolveResult.hpp"
@@ -1879,6 +1886,121 @@ ParameterDeclaration* TypeSystemAstBuilder::ConvertParameter(
             decl->DefaultExpression(new ErrorExpression(ex.what()));
         }
     }
+    return decl;
+}
+
+// The C# `internal TypeParameterDeclaration ConvertTypeParameter(ITypeParameter tp)`
+// (line 2602).
+TypeParameterDeclaration* TypeSystemAstBuilder::ConvertTypeParameter(
+    const TS::ITypeParameter& tp) const {
+    auto* decl = new TypeParameterDeclaration();
+    decl->Variance(tp.Variance());
+    decl->Name(tp.Name());
+    if (ShowAttributes()) {
+        // The C# `decl.Attributes.AddRange(ConvertAttributes(tp.GetAttributes()))`
+        // -- the `AddRange` convenience ports to element-wise `Add` (the D222
+        // convention, the ConvertParameter precedent).
+        for (AttributeSection* section : ConvertAttributes(tp.GetAttributes()))
+            decl->Attributes().Add(section);
+    }
+    return decl;
+}
+
+// The C# `internal Constraint? ConvertTypeParameterConstraint(ITypeParameter tp)`
+// (line 2612).
+Constraint* TypeSystemAstBuilder::ConvertTypeParameterConstraint(
+    const TS::ITypeParameter& tp) const {
+    // The C# no-constraint early out: every flag false, the nullability not
+    // `NotNullable`, and every direct base type an object/valuetype (the
+    // `DirectBaseTypes.All(IsObjectOrValueType)` LINQ quantifier ports to
+    // `std::all_of` over the shared_ptr entries -- the vector accessor returns
+    // BY VALUE, so a local binds the one snapshot both iterators range over;
+    // two chained calls would hand `all_of` iterators from different
+    // containers).
+    const std::vector<TS::ITypePtr> directBaseTypes = tp.DirectBaseTypes();
+    if (!tp.HasDefaultConstructorConstraint() && !tp.HasReferenceTypeConstraint()
+        && !tp.HasValueTypeConstraint() && !tp.AllowsRefLikeType()
+        && tp.NullabilityConstraint() != TS::Nullability::NotNullable
+        && std::all_of(directBaseTypes.begin(), directBaseTypes.end(),
+                       [](const TS::ITypePtr& t) { return IsObjectOrValueType(*t); })) {
+        return nullptr;
+    }
+    auto* c = new Constraint();
+    c->TypeParameter(MakeSimpleType(tp.Name()));
+    if (tp.HasReferenceTypeConstraint()) {
+        if (tp.NullabilityConstraint() == TS::Nullability::Nullable) {
+            // `where T : class?` -- the `class` keyword wrapped in a trailing `?`
+            // (the `MakeNullableType` non-virtual wrap, the D223 leak model).
+            c->BaseTypes().Add((new PrimitiveType("class"))->MakeNullableType());
+        } else {
+            c->BaseTypes().Add(new PrimitiveType("class"));
+        }
+    } else if (tp.HasValueTypeConstraint()) {
+        if (tp.HasUnmanagedConstraint()) {
+            c->BaseTypes().Add(new PrimitiveType("unmanaged"));
+        } else {
+            c->BaseTypes().Add(new PrimitiveType("struct"));
+        }
+    } else if (tp.NullabilityConstraint() == TS::Nullability::NotNullable) {
+        c->BaseTypes().Add(new PrimitiveType("notnull"));
+    }
+    for (const TS::TypeConstraint& t : tp.TypeConstraints()) {
+        // The C# `t.Type` is non-null (the `TypeConstraint` ctor throws on null;
+        // the port asserts), so the deref needs no guard.
+        if (!IsObjectOrValueType(*t.Type()) || !t.Attributes().empty()) {
+            AstType* astType = ConvertType(*t.Type());
+            if (!t.Attributes().empty()) {
+                // A constraint carrying attributes (the C# 8.5 `[Attr] Base` form)
+                // wraps the rendered type in a `ComposedType` holding the
+                // attribute section (the object-initializer collection-add ports
+                // to `Add`, the D222 convention).
+                auto* attrSection = new AttributeSection();
+                for (const TS::IAttribute* attribute : t.Attributes())
+                    attrSection->Attributes().Add(ConvertAttribute(*attribute));
+                auto* composed = new ComposedType();
+                composed->Attributes().Add(attrSection);
+                composed->BaseType(astType);
+                astType = composed;
+            }
+            c->BaseTypes().Add(astType);
+        }
+    }
+    if (tp.HasDefaultConstructorConstraint() && !tp.HasValueTypeConstraint()) {
+        c->BaseTypes().Add(new PrimitiveType("new"));
+    }
+    if (tp.AllowsRefLikeType()) {
+        c->BaseTypes().Add(new PrimitiveType("allows ref struct"));
+    }
+    return c;
+}
+
+// The C# `public VariableDeclarationStatement ConvertVariable(IVariable v)`
+// (line 2744).
+VariableDeclarationStatement* TypeSystemAstBuilder::ConvertVariable(
+    const TS::IVariable& v) const {
+    auto* decl = new VariableDeclarationStatement();
+    decl->Modifiers(v.IsConst() ? Modifiers::Const : Modifiers::None);
+    // `ConvertType` takes `TS::IType&` non-const (the `shared_from_this`-based
+    // annotation path, the D529 convention); the variable's type accessor is
+    // const, so the cast (the D515/D517 precedent, the ConvertParameter
+    // precedent).
+    decl->Type(ConvertType(const_cast<TS::IType&>(v.Type())));
+    Expression* initializer = nullptr;
+    if (v.IsConst()) {
+        // The C# `catch (BadImageFormatException ex)` guards the metadata
+        // decoder inside `GetConstantValue(throwOnInvalidMetadata: true)`; the
+        // port catches `std::exception` (the ConvertParameter catch-arm
+        // convention -- no port-side `GetConstantValue` throws today, the arm
+        // keeps the structure for a future metadata-backed `IVariable`).
+        try {
+            initializer = ConvertConstantValue(
+                const_cast<TS::IType&>(v.Type()),
+                v.GetConstantValue(/*throwOnInvalidMetadata:*/ true));
+        } catch (const std::exception& ex) {
+            initializer = new ErrorExpression(ex.what());
+        }
+    }
+    decl->Variables().Add(new VariableInitializer(v.Name(), initializer));
     return decl;
 }
 

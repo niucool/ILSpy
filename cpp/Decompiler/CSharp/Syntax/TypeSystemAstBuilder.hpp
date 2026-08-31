@@ -29,14 +29,16 @@
 // "Convert Attribute Type" regions (ConvertAttribute / ConvertAttributes /
 // ConvertAttributeType / ApplyShortAttributeNameIfPossible / IsAttributeType, C#
 // lines 770-988), the "Convert Constant Value" SUPPORT helpers (IsSpecialConstant +
-// ConvertFloatingPointLiteral + MakeConstant, C# lines 1168-1249 + 1496-1582), and the
+// ConvertFloatingPointLiteral + MakeConstant, C# lines 1168-1249 + 1496-1582), the
 // mutually-recursive "Convert Constant Value" CORE (the three ConvertConstantValue
-// overloads + ConvertEnumValue, C# lines 998-1078 + 1306-1480), and the "Convert
+// overloads + ConvertEnumValue, C# lines 998-1078 + 1306-1480), the "Convert
 // Parameter" region (ConvertParameter, C# lines 1786-1826, consuming the
-// IsDefaultValueAssignmentAllowed prerequisite landed in TypeSystemExtensions)
-// are landed; the remaining `Convert*` instance methods (ConvertSymbol /
-// ConvertEntity / ConvertExtension / ConvertVariable) follow in later slices,
-// consuming the free functions below as they grow.
+// IsDefaultValueAssignmentAllowed prerequisite landed in TypeSystemExtensions),
+// and the "Convert Type Parameter" + "Convert Variable" regions
+// (ConvertTypeParameter / ConvertTypeParameterConstraint, C# lines 2601-2741,
+// and ConvertVariable, C# lines 2743-2761) are landed; the remaining `Convert*`
+// instance methods (ConvertSymbol / ConvertEntity / ConvertExtension) follow in
+// later slices, consuming the free functions below as they grow.
 //
 // ModifierFromAccessibility (TypeSystemAstBuilder.cs line 2497) is the first such
 // helper: a pure switch on Accessibility (the D373 leaf) that maps a symbol's
@@ -92,11 +94,16 @@ namespace ILSpy::Decompiler::CSharp::Resolver { class CSharpResolver; }
 // shadow chain on MSVC (the iteration-94 UsingScope trap).
 namespace ILSpy::Decompiler::TypeSystem { class FullTypeName; }
 namespace ILSpy::Decompiler::TypeSystem { class IParameter; }
+namespace ILSpy::Decompiler::TypeSystem { class ITypeParameter; }
+namespace ILSpy::Decompiler::TypeSystem { class IVariable; }
 namespace ILSpy::Decompiler::Semantics { class NamespaceResolveResult; }
 namespace ILSpy::Decompiler::CSharp::Syntax {
 class Attribute;
 class AttributeSection;
+class Constraint;
 class ParameterDeclaration;
+class TypeParameterDeclaration;
+class VariableDeclarationStatement;
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 // The ResolveResult-based ConvertConstantValue overload passes the result by
 // value (the C# parameter the body rebinds through the ConversionResolveResult
@@ -1298,6 +1305,45 @@ public:
     // returned node is a raw `new`-ed pointer (the D223 non-owning leak model,
     // the ConvertType precedent).
     ParameterDeclaration* ConvertParameter(const TS::IParameter& parameter) const;
+
+    // The C# `internal TypeParameterDeclaration ConvertTypeParameter(ITypeParameter tp)`
+    // (line 2602) -- the type-parameter declaration renderer: the variance into the
+    // `Variance` scalar, the name, and the `ShowAttributes`-gated attribute sections
+    // over `tp.GetAttributes()`. Widened to public for direct TDD ahead of the
+    // `ConvertSymbol` / `ConvertExtension` / `ConvertEntity` consumer slices (the
+    // `ConvertEnumValue` widening convention). The parameter is
+    // `const TS::ITypeParameter&` because every member read is const (the
+    // ConvertParameter convention); the returned node is a raw `new`-ed pointer
+    // (the D223 non-owning leak model).
+    TypeParameterDeclaration* ConvertTypeParameter(const TS::ITypeParameter& tp) const;
+
+    // The C# `internal Constraint? ConvertTypeParameterConstraint(ITypeParameter tp)`
+    // (line 2612) -- the `where T : ...` clause renderer: the no-constraint early
+    // out (every flag false, no `notnull` nullability, and every direct base type
+    // an object/valuetype -- yields nullptr, the C# null), then the `class` /
+    // `class?` / `struct` / `unmanaged` / `notnull` keyword arms, the `TypeConstraints`
+    // loop (a non-object/valuetype base type -- or one carrying attributes --
+    // renders through `ConvertType`, the attributes wrapping the rendered type in a
+    // `ComposedType`), the `new()` arm (skipped when a value-type constraint already
+    // implies it), and the C# 11 `allows ref struct` arm. The object/valuetype
+    // filter is the already-ported namespace-scope `IsObjectOrValueType` free
+    // function (the gnhf-112 D460 landing at the top of this header -- the C#
+    // private static re-homed as a free function ahead of this region). Widened
+    // to public for direct TDD (the ConvertTypeParameter convention); the nullable
+    // C# return ports to a nullable raw pointer (nullptr is the C# null).
+    Constraint* ConvertTypeParameterConstraint(const TS::ITypeParameter& tp) const;
+
+    // The C# `public VariableDeclarationStatement ConvertVariable(IVariable v)`
+    // (line 2744) -- the local-variable/const-field renderer: the `IsConst` flag
+    // into `Modifiers.Const`, the type through `ConvertType`, and the
+    // const-gated initializer through the 2-arg `ConvertConstantValue` over
+    // `GetConstantValue(throwOnInvalidMetadata: true)` (the C# catch of the
+    // metadata decoder's `BadImageFormatException` ports to a `std::exception`
+    // catch rendering an `ErrorExpression` over the message -- the ConvertParameter
+    // catch-arm convention). The parameter is `const TS::IVariable&` because every
+    // member read is const; the returned node is a raw `new`-ed pointer (the D223
+    // non-owning leak model).
+    VariableDeclarationStatement* ConvertVariable(const TS::IVariable& v) const;
 
 private:
     // The C# `private void AddTypeAnnotation(AstType astType, IType type)` (line 278)

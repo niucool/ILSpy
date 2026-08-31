@@ -686,6 +686,23 @@ public:
     void SetHasValueTypeConstraint(bool v) { hasValueTypeConstraint_ = v; }
     void SetHasDefaultConstructorConstraint(bool v) { hasDefaultConstructorConstraint_ = v; }
     void SetDirectBaseTypes(std::vector<ITypePtr> bases) { directBaseTypes_ = std::move(bases); }
+    // Configurable unmanaged / allows-ref-struct flags, nullability constraint, type
+    // constraints, and declared attributes for the TypeSystemAstBuilder Convert Type
+    // Parameter region tests (`ConvertTypeParameterConstraint` reads every flag plus
+    // `NullabilityConstraint` / `TypeConstraints`, and `ConvertTypeParameter` reads
+    // `GetAttributes` under `ShowAttributes`). The defaults preserve the original
+    // behavior (false / Oblivious / empty / empty -- the additive-setter convention).
+    void SetHasUnmanagedConstraint(bool v) { hasUnmanagedConstraint_ = v; }
+    void SetAllowsRefLikeType(bool v) { allowsRefLikeType_ = v; }
+    void SetNullabilityConstraint(::ILSpy::Decompiler::TypeSystem::Nullability v) {
+        nullabilityConstraint_ = v;
+    }
+    void SetTypeConstraints(std::vector<TypeConstraint> constraints) {
+        typeConstraints_ = std::move(constraints);
+    }
+    void SetAttributes(std::vector<const IAttribute*> attributes) {
+        attributes_ = std::move(attributes);
+    }
 
     // --- IType ---
     TypeKind Kind() const override { return TypeKind::TypeParameter; }
@@ -702,17 +719,17 @@ public:
     TS::SymbolKind OwnerType() const override { return TS::SymbolKind::Method; }
     const IEntity* Owner() const override { return nullptr; }
     int Index() const override { return index_; }
-    std::vector<const IAttribute*> GetAttributes() const override { return {}; }
+    std::vector<const IAttribute*> GetAttributes() const override { return attributes_; }
     VarianceModifier Variance() const override { return variance_; }
     ITypePtr EffectiveBaseClass() const override { return effectiveBaseClass_; }
     std::vector<ITypePtr> EffectiveInterfaceSet() const override { return {}; }
     bool HasDefaultConstructorConstraint() const override { return hasDefaultConstructorConstraint_; }
     bool HasReferenceTypeConstraint() const override { return hasReferenceTypeConstraint_; }
     bool HasValueTypeConstraint() const override { return hasValueTypeConstraint_; }
-    bool HasUnmanagedConstraint() const override { return false; }
-    bool AllowsRefLikeType() const override { return false; }
-    ::ILSpy::Decompiler::TypeSystem::Nullability NullabilityConstraint() const override { return ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious; }
-    std::vector<TypeConstraint> TypeConstraints() const override { return {}; }
+    bool HasUnmanagedConstraint() const override { return hasUnmanagedConstraint_; }
+    bool AllowsRefLikeType() const override { return allowsRefLikeType_; }
+    ::ILSpy::Decompiler::TypeSystem::Nullability NullabilityConstraint() const override { return nullabilityConstraint_; }
+    std::vector<TypeConstraint> TypeConstraints() const override { return typeConstraints_; }
     // The declared base-type constraints (`where T : Base`); the `IType` default returns empty,
     // the setter supplies the hand-wired list (the `LookupTypeDefinition::AddDirectBaseType`
     // convention). Returns the hand-wired shared_ptr list so the entries stay alive.
@@ -732,6 +749,12 @@ private:
     bool hasDefaultConstructorConstraint_ = false;
     bool hasReferenceTypeConstraint_ = false;
     bool hasValueTypeConstraint_ = false;
+    bool hasUnmanagedConstraint_ = false;
+    bool allowsRefLikeType_ = false;
+    ::ILSpy::Decompiler::TypeSystem::Nullability nullabilityConstraint_ =
+        ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious;
+    std::vector<TypeConstraint> typeConstraints_;
+    std::vector<const IAttribute*> attributes_;
     std::vector<ITypePtr> directBaseTypes_;
 };
 
