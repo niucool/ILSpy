@@ -441,10 +441,10 @@ public:
     // `MatchString` term), so it ports now. The parameter type is the fully-qualified
     // `::ILSpy::...::OperatorType` (a qualified name is looked up in the named namespace, NOT
     // class scope, so it ignores the `OperatorType()` member-function shadowing; the leading space
-    // after `<` dodges the `<:` digraph edge case). DEFERRED: `GetOperatorType` (the reverse
-    // lookup by method name) -- consumed only by the unported resolver stage. `IsChecked` (the
-    // `checked`-operator predicate) and `GetToken` (the operator token like `"+"`) are now ported
-    // (consumed by `CSharpOutputVisitor.VisitOperatorDeclaration`).
+    // after `<` dodges the `<:` digraph edge case). `IsChecked` (the
+    // `checked`-operator predicate) and `GetToken` (the operator token like `"+"`) are ported
+    // (consumed by `CSharpOutputVisitor.VisitOperatorDeclaration`); `GetOperatorType` (the reverse
+    // lookup by method name, below) is consumed by the resolver's `CSharpOperators.IsComparisonOperator`.
     static std::optional<std::string> GetName(std::optional< ::ILSpy::Decompiler::CSharp::Syntax::OperatorType > type) {
         if (!type.has_value())
             return std::nullopt;
@@ -493,6 +493,28 @@ public:
         if (idx < 0 || idx >= kCount)
             return std::nullopt;
         return std::string(kMethodNames[idx]);
+    }
+
+    // ---- The `GetOperatorType` static helper (the reverse method-name lookup) --------------
+    // The C# `public static OperatorType? GetOperatorType(string methodName)` (the
+    // hand-written partial, line 169) -- the operator type from the metadata method name, or
+    // null if the method does not represent one of the known operator types. The C# scans the
+    // `names` table's method-name column (`names[i][1] == methodName`); the port scans the
+    // same column through `GetName` (the `kMethodNames` array lives inside `GetName`): a
+    // value-by-value scan of the same 35 entries, first match wins -- the identical lookup
+    // order and result. Consumed by the resolver's `CSharpOperators.IsComparisonOperator(IMethod)`
+    // (CSharpOperators.cs line 1124), which recognizes a user-defined comparison operator by
+    // its `op_LessThan`-style name. The parameter type is the fully-qualified
+    // `::ILSpy::...::OperatorType` (the `GetName`/`IsChecked` shadowing-dodging precedent).
+    static std::optional< ::ILSpy::Decompiler::CSharp::Syntax::OperatorType > GetOperatorType(
+        const std::string& methodName) {
+        for (int i = 0; i <= static_cast<int>(::ILSpy::Decompiler::CSharp::Syntax::OperatorType::CheckedExplicit);
+             ++i) {
+            auto name = GetName(static_cast< ::ILSpy::Decompiler::CSharp::Syntax::OperatorType >(i));
+            if (name.has_value() && *name == methodName)
+                return static_cast< ::ILSpy::Decompiler::CSharp::Syntax::OperatorType >(i);
+        }
+        return std::nullopt;
     }
 
     // ---- The `IsChecked` static helper (the C# 11 `checked`-operator predicate) -------------

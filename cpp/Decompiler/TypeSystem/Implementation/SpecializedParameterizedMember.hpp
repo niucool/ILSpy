@@ -79,9 +79,10 @@
 //  (e) OUT-OF-LINE: `Parameters()` / `CreateParameters` are in the `.cpp` (they need
 //      `TypeParameterSubstitution` / `SpecializedParameter` / `IParameterizedMember`
 //      complete); the class is added to the ilspy `CMakeLists.txt` (it has a `.cpp`).
-//  (f) DEFERRED from the C# file: the `protected set` of `Parameters` (used for
-//      `LiftedUserDefinedOperator`, a special case not a normal substitution -- lands with
-//      that leaf); `ToString()` (the C# `DeclaringType.ReflectionName` / `ReturnType.
+//  (f) The C# `protected set` of `Parameters` (used for `LiftedUserDefinedOperator`, a special
+//      case not a normal substitution -- the C# setter's own comment) ports to the protected
+//      `SetParameters` member: assigns the owning cache directly, bypassing the lazy
+//      computation. `ToString()` is DEFERRED (the C# `DeclaringType.ReflectionName` / `ReturnType.
 //      ReflectionName` / `Parameters[i].ToString()` -- needs `IType::ReflectionName`, which
 //      IS ported, but the shared `IParameter::ToString` is not, the `SpecializedParameter::
 //      ToString` deferral precedent).
@@ -112,6 +113,15 @@ protected:
     // `memberDefinition` is upcast to `shared_ptr<IMember>` for the `SpecializedMember` base.
     explicit SpecializedParameterizedMember(std::shared_ptr<IParameterizedMember> memberDefinition)
         : SpecializedMember(memberDefinition) {}
+
+    // The C# `protected set` of `Parameters` (the C# property's setter) -- used for
+    // `LiftedUserDefinedOperator`, a special case not a normal substitution. Assigns the
+    // owning cache directly, bypassing the lazy `CreateParameters` computation (the C#
+    // setter's own comment: used only during construction before the member is published).
+    void SetParameters(
+        std::shared_ptr<std::vector<std::shared_ptr<IParameter>>> parameters) {
+        parameters_ = std::move(parameters);
+    }
 
     // The C# `protected IParameter[] CreateParameters(Func<IType, IType> substitution)` --
     // builds the owning substituted parameter list. Each base parameter is wrapped in a

@@ -256,6 +256,13 @@ protected:
     // (the C# `Debug.Assert(declaringType == null)`). Out-of-line (Compose).
     void AddSubstitution(TypeParameterSubstitution newSubstitution);
 
+    // The C# `protected set` of `ReturnType` (the C# property's setter) -- used for
+    // `LiftedUserDefinedOperator`, a special case of specialized member (not a normal type
+    // parameter substitution). Assigns the cached return type directly, bypassing the lazy
+    // computation (the C# setter's own comment: used only during construction before the
+    // member is published).
+    void SetReturnType(ITypePtr returnType) { returnType_ = std::move(returnType); }
+
     // The wrapped base member (owning). `protected` so the derived concrete leaves can
     // read it (e.g. `SpecializedMethod` reads `methodDefinition.ReturnTypeIsRefReadOnly`).
     std::shared_ptr<IMember> baseMember_;

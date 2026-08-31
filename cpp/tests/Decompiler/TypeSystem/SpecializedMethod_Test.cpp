@@ -646,7 +646,11 @@ TEST(SpecializedMethodTest, ClassShape) {
     static_assert(std::is_base_of_v<IParameterizedMember, SpecializedMethod>);
     static_assert(std::is_base_of_v<IMember, SpecializedMethod>);
     static_assert(std::is_base_of_v<SpecializedMember, SpecializedMethod>);
-    static_assert(std::is_final_v<SpecializedMethod>);
+    // NOT final: the C# `SpecializedMethod` is unsealed, and the C# `sealed class
+    // LiftedUserDefinedOperator : SpecializedMethod, ILiftedOperator` (CSharpOperators.cs line
+    // 1129) derives from it -- the port's `LiftedUserDefinedOperator` (CSharpOperators.hpp)
+    // subclasses it the same way.
+    static_assert(!std::is_final_v<SpecializedMethod>);
     static_assert(std::is_base_of_v<AbstractTypeParameter, SpecializedTypeParameter>);
     static_assert(std::is_final_v<SpecializedTypeParameter>);
 }

@@ -1,0 +1,71 @@
+Running main() from C:\Projects\github\vcpkg\buildtrees\gtest\src\v1.17.0-e243b8ee0f.clean\googletest\src\gtest_main.cc
+Note: Google Test filter = CSharpOperatorsUserDefinedTest.*:CSharp_OperatorDeclaration.GetOperatorType*:CSharp_OperatorDeclaration.IsComparisonOperator*
+[==========] Running 29 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 24 tests from CSharpOperatorsUserDefinedTest
+[ RUN      ] CSharpOperatorsUserDefinedTest.RecognizesALessThanOperatorByMetadataName
+[       OK ] CSharpOperatorsUserDefinedTest.RecognizesALessThanOperatorByMetadataName (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.RecognizesTheEqualityOperator
+[       OK ] CSharpOperatorsUserDefinedTest.RecognizesTheEqualityOperator (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.RecognizesGreaterThanOrEqual
+[       OK ] CSharpOperatorsUserDefinedTest.RecognizesGreaterThanOrEqual (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.RequiresTheIsOperatorFlag
+[       OK ] CSharpOperatorsUserDefinedTest.RequiresTheIsOperatorFlag (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.RequiresExactlyTwoParameters
+[       OK ] CSharpOperatorsUserDefinedTest.RequiresExactlyTwoParameters (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.NonComparisonOperatorNameIsRejected
+[       OK ] CSharpOperatorsUserDefinedTest.NonComparisonOperatorNameIsRejected (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.NonOperatorMethodNameIsRejected
+[       OK ] CSharpOperatorsUserDefinedTest.NonOperatorMethodNameIsRejected (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.LiftsAValueOperatorIntoNullableParameters
+[       OK ] CSharpOperatorsUserDefinedTest.LiftsAValueOperatorIntoNullableParameters (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.ComparisonOperatorLiftKeepsPlainBoolReturn
+[       OK ] CSharpOperatorsUserDefinedTest.ComparisonOperatorLiftKeepsPlainBoolReturn (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.ComparisonOperatorWithNonBoolReturnIsRejected
+[       OK ] CSharpOperatorsUserDefinedTest.ComparisonOperatorWithNonBoolReturnIsRejected (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.NonComparisonOperatorWithReferenceReturnIsRejected
+[       OK ] CSharpOperatorsUserDefinedTest.NonComparisonOperatorWithReferenceReturnIsRejected (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.NonComparisonOperatorWithNullableReturnIsRejected
+[       OK ] CSharpOperatorsUserDefinedTest.NonComparisonOperatorWithNullableReturnIsRejected (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.ReferenceTypedParameterIsRejected
+[       OK ] CSharpOperatorsUserDefinedTest.ReferenceTypedParameterIsRejected (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.NullableParameterIsRejected
+[       OK ] CSharpOperatorsUserDefinedTest.NullableParameterIsRejected (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.NullHandleIsRejected
+[       OK ] CSharpOperatorsUserDefinedTest.NullHandleIsRejected (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.NotAnOperatorMethodStillLifts
+[       OK ] CSharpOperatorsUserDefinedTest.NotAnOperatorMethodStillLifts (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.IsAnIMethodAndAnILiftedOperator
+[       OK ] CSharpOperatorsUserDefinedTest.IsAnIMethodAndAnILiftedOperator (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.NonLiftedSurfaceExposesTheOriginals
+[       OK ] CSharpOperatorsUserDefinedTest.NonLiftedSurfaceExposesTheOriginals (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.MemberDefinitionIsTheOriginalMethod
+[       OK ] CSharpOperatorsUserDefinedTest.MemberDefinitionIsTheOriginalMethod (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.DirectConstructionLiftsParametersAndReturn
+[       OK ] CSharpOperatorsUserDefinedTest.DirectConstructionLiftsParametersAndReturn (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.DirectConstructionKeepsTheComparisonReturn
+[       OK ] CSharpOperatorsUserDefinedTest.DirectConstructionKeepsTheComparisonReturn (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.EqualsComparesTheNonLiftedOperators
+[       OK ] CSharpOperatorsUserDefinedTest.EqualsComparesTheNonLiftedOperators (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.GetHashCodeIsStableForTheSameMethod
+[       OK ] CSharpOperatorsUserDefinedTest.GetHashCodeIsStableForTheSameMethod (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.LiftedParametersAreSpecializedOverTheOriginals
+[       OK ] CSharpOperatorsUserDefinedTest.LiftedParametersAreSpecializedOverTheOriginals (0 ms)
+[----------] 24 tests from CSharpOperatorsUserDefinedTest (2 ms total)
+
+[----------] 5 tests from CSharp_OperatorDeclaration
+[ RUN      ] CSharp_OperatorDeclaration.GetOperatorTypeRoundTripsEveryName
+[       OK ] CSharp_OperatorDeclaration.GetOperatorTypeRoundTripsEveryName (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.GetOperatorTypeResolvesRepresentativeNames
+[       OK ] CSharp_OperatorDeclaration.GetOperatorTypeResolvesRepresentativeNames (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.GetOperatorTypeReturnsNulloptForUnknownNames
+[       OK ] CSharp_OperatorDeclaration.GetOperatorTypeReturnsNulloptForUnknownNames (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.IsComparisonOperatorTrueForTheSixComparisonKinds
+[       OK ] CSharp_OperatorDeclaration.IsComparisonOperatorTrueForTheSixComparisonKinds (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.IsComparisonOperatorFalseForNonComparisonKinds
+[       OK ] CSharp_OperatorDeclaration.IsComparisonOperatorFalseForNonComparisonKinds (0 ms)
+[----------] 5 tests from CSharp_OperatorDeclaration (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 29 tests from 2 test suites ran. (3 ms total)
+[  PASSED  ] 29 tests.

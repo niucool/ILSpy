@@ -1,0 +1,132 @@
+**********************************************************************
+** Visual Studio 2026 Developer Command Prompt v18.10.0-insiders
+** Copyright (c) 2026 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+MSBuild version 18.10.0-1.26379.9+c88db8eb0 for .NET Framework
+
+  CSharpOperators.cpp
+  ilspy.vcxproj -> C:\Projects\github\ILSpy\cpp\build\windows-vs2026\Debug\ilspy.lib
+  SpecializedMember_Test.cpp
+  SpecializedField_Test.cpp
+  SpecializedParameterizedMember_Test.cpp
+  SpecializedEvent_Test.cpp
+  SpecializedProperty_Test.cpp
+  SpecializedMethod_Test.cpp
+  ParameterizedTypeReturnDefs_Test.cpp
+  GetMembersHelper_Test.cpp
+  ParameterizedTypeRouting_Test.cpp
+  CSharpOperators_Test.cpp
+  CSharpOperatorsUnary_Test.cpp
+  CSharpOperatorsBinary_Test.cpp
+  CSharpOperatorsEquality_Test.cpp
+  CSharpOperatorsRelational_Test.cpp
+  CSharpOperatorsBitwise_Test.cpp
+  CSharpOperatorsUserDefined_Test.cpp
+  IAstVisitor_Test.cpp
+  DepthFirstAstVisitorBool_Test.cpp
+  Identifier_Test.cpp
+  Expression_Test.cpp
+  Generating Code...
+  Compiling...
+  PrimitiveExpression_Test.cpp
+  BinaryOperatorExpression_Test.cpp
+  AssignmentExpression_Test.cpp
+  UnaryOperatorExpression_Test.cpp
+  ConditionalExpression_Test.cpp
+  ParenthesizedExpression_Test.cpp
+  CheckedUncheckedExpression_Test.cpp
+  DirectionThrowExpression_Test.cpp
+  PrimitiveType_Test.cpp
+  SimpleType_Test.cpp
+  MemberType_Test.cpp
+  ArraySpecifier_Test.cpp
+  Attribute_Test.cpp
+  AttributeSection_Test.cpp
+  ComposedType_Test.cpp
+  CastExpression_Test.cpp
+  AsIsExpression_Test.cpp
+  TypeReferenceExpression_Test.cpp
+  IdentifierExpression_Test.cpp
+  MemberReferenceExpression_Test.cpp
+  Generating Code...
+  Compiling...
+  PointerReferenceExpression_Test.cpp
+  InvocationExpression_Test.cpp
+  IndexerExpression_Test.cpp
+  ArrayInitializerExpression_Test.cpp
+  ObjectCreateExpression_Test.cpp
+  ArrayCreateExpression_Test.cpp
+  TupleExpression_Test.cpp
+  NamedArgumentExpression_Test.cpp
+  ErrorExpression_Test.cpp
+  OutVarDeclarationExpression_Test.cpp
+  WithInitializerExpression_Test.cpp
+  UndocumentedExpression_Test.cpp
+  StackAllocExpression_Test.cpp
+  DeclarationExpression_Test.cpp
+  AnonymousTypeCreateExpression_Test.cpp
+  LambdaExpression_Test.cpp
+  AnonymousMethodExpression_Test.cpp
+  SwitchExpression_Test.cpp
+  RecursivePatternExpression_Test.cpp
+  Statement_Test.cpp
+  Generating Code...
+  Compiling...
+  ReturnThrowExpressionStatement_Test.cpp
+  BlockStatement_Test.cpp
+  GotoStatement_Test.cpp
+  IfElseWhileDoWhileStatement_Test.cpp
+  YieldReturnEmptyLabelStatement_Test.cpp
+  CheckedUncheckedUnsafeStatement_Test.cpp
+  LockStatement_Test.cpp
+  UsingStatement_Test.cpp
+  ForStatement_Test.cpp
+  ForeachStatement_Test.cpp
+  FixedStatement_Test.cpp
+  SwitchStatement_Test.cpp
+  TryCatchStatement_Test.cpp
+  VariableDeclarationStatement_Test.cpp
+  LocalFunctionDeclarationStatement_Test.cpp
+  VariableDesignation_Test.cpp
+  VariableInitializer_Test.cpp
+  EntityDeclaration_Test.cpp
+  FieldDeclaration_Test.cpp
+  Accessor_Test.cpp
+  Generating Code...
+  Compiling...
+  EnumMemberDeclaration_Test.cpp
+  PropertyDeclaration_Test.cpp
+  EventDeclaration_Test.cpp
+  ParameterDeclaration_Test.cpp
+  IndexerDeclaration_Test.cpp
+  OperatorDeclaration_Test.cpp
+  ConstructorDeclaration_Test.cpp
+  TypeParameterDeclaration_Test.cpp
+  Constraint_Test.cpp
+  MethodDeclaration_Test.cpp
+  ExtensionDeclaration_Test.cpp
+  FixedFieldDeclaration_Test.cpp
+  Comment_Test.cpp
+  NamespaceDirective_Test.cpp
+  TupleAstType_Test.cpp
+  InvocationAstType_Test.cpp
+  FunctionPointerAstType_Test.cpp
+  DelegateDeclaration_Test.cpp
+  TypeDeclaration_Test.cpp
+  NamespaceDeclaration_Test.cpp
+  Generating Code...
+  Compiling...
+  PreProcessorDirective_Test.cpp
+  SyntaxTree_Test.cpp
+  DocumentationReference_Test.cpp
+  InterpolatedString_Test.cpp
+  QueryExpression_Test.cpp
+  QueryClauses_Test.cpp
+  QueryJoinClause_Test.cpp
+  CSharpOutputVisitor_Test.cpp
+  InsertParenthesesVisitor_Test.cpp
+  GenericGrammarAmbiguityVisitor_Test.cpp
+  Generating Code...
+  ilspy_tests.vcxproj -> C:\Projects\github\ILSpy\cpp\build\windows-vs2026\tests\Debug\ilspy_tests.exe
+BUILD_OK

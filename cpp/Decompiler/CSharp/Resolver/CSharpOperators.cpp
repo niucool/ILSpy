@@ -25,10 +25,13 @@
 
 #include "Decompiler/CSharp/Resolver/CSharpOperators.hpp"
 
+#include "Decompiler/CSharp/Syntax/OperatorDeclaration.hpp"  // OperatorDeclaration::GetOperatorType
+#include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"  // IsComparisonOperator(OperatorType)
 #include "Decompiler/TypeSystem/ICompilation.hpp"  // ICompilation (FindType/MainModule/CacheManager)
 #include "Decompiler/TypeSystem/IParameter.hpp"  // IParameter (the parameter table element)
 #include "Decompiler/TypeSystem/NullableType.hpp"  // NullableType::Create (the nullable table)
 #include "Decompiler/TypeSystem/TypeParameterSubstitution.hpp"  // TypeParameterSubstitution (Identity/Specialize)
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // IsKnownType (the comparison-operator return check)
 #include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"  // DefaultParameter (the table entries)
 #include "Decompiler/Util/CacheManager.hpp"  // CacheManager (Get factory)
 
@@ -46,6 +49,11 @@ using ILSpy::Decompiler::TypeSystem::Create;
 // The TypeCode of the operator-table entries (the .cpp tables reference it repeatedly;
 // the sibling TypeSystem namespace is not searched from inside this namespace).
 using ILSpy::Decompiler::TypeSystem::TypeCode;
+// The comparison-operator return check (`m.ReturnType.IsKnownType(KnownTypeCode.Boolean)`)
+// and the non-nullable-value-type checks (`NullableType.IsNonNullableValueType`) of the
+// user-defined operator region (the sibling-namespace using convention).
+using ILSpy::Decompiler::TypeSystem::IsKnownType;
+using ILSpy::Decompiler::TypeSystem::IsNonNullableValueType;
 
 namespace {
 
@@ -1575,6 +1583,169 @@ const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::BitwiseXorO
         });
     }
     return bitwiseXorOperators_;
+}
+
+// ---------------------------------------------------------------------------
+// The user-defined operator region (CSharpOperators.cs lines 1104-1168)
+// ---------------------------------------------------------------------------
+
+// The C# `internal static bool IsComparisonOperator(IMethod m)` (line 1124):
+// `m.IsOperator && m.Parameters.Count == 2 &&
+// (OperatorDeclaration.GetOperatorType(m.Name)?.IsComparisonOperator() ?? false)`.
+bool CSharpOperators::IsComparisonOperator(
+    const ILSpy::Decompiler::TypeSystem::IMethod& m)
+{
+    if (!m.IsOperator() || m.Parameters().size() != 2)
+        return false;
+    // The C# `OperatorDeclaration.GetOperatorType(m.Name)?.IsComparisonOperator() ?? false`
+    // -- the reverse metadata-name lookup, then the six-comparison-kinds extension method
+    // (SyntaxExtensions.cs line 30). The `?.` + `?? false` ports to the optional check.
+    auto operatorType = ILSpy::Decompiler::CSharp::Syntax::OperatorDeclaration::GetOperatorType(
+        m.Name());
+    return operatorType.has_value()
+        && ILSpy::Decompiler::CSharp::Syntax::IsComparisonOperator(*operatorType);
+}
+
+// The C# `public static IMethod? LiftUserDefinedOperator(IMethod m)` (line 1105) -- the
+// lifted `Nullable<T>` form of a USER-DEFINED operator method: null ("cannot lift this
+// operator") when the return type fails the shape check, or when any parameter is not a
+// non-nullable value type.
+std::shared_ptr<ILSpy::Decompiler::TypeSystem::IMethod>
+CSharpOperators::LiftUserDefinedOperator(
+    const std::shared_ptr<ILSpy::Decompiler::TypeSystem::IMethod>& m)
+{
+    // A null handle is the degenerate shape the C# NREs on (`m.ReturnType`); the port's
+    // documented safe fallback (the D516 convention) is the same "cannot lift" null.
+    if (!m)
+        return {};
+    if (IsComparisonOperator(*m)) {
+        // The C# `if (!m.ReturnType.IsKnownType(KnownTypeCode.Boolean)) return null` -- a
+        // comparison operator lifts only over a `bool` return type (the lifted form keeps
+        // the definite-bool semantics).
+        if (!IsKnownType(m->ReturnType(), ILSpy::Decompiler::TypeSystem::KnownTypeCode::Boolean))
+            return {};
+    } else {
+        // The C# `if (!NullableType.IsNonNullableValueType(m.ReturnType)) return null` -- a
+        // non-comparison operator lifts only over a non-nullable value-type return (the
+        // lifted form's return is the `Nullable<T>` of it).
+        if (!IsNonNullableValueType(m->ReturnType()))
+            return {};
+    }
+    // The C# `for (int i = 0; i < m.Parameters.Count; i++) { if (!NullableType.
+    // IsNonNullableValueType(m.Parameters[i].Type)) return null; }` -- every parameter must
+    // be a non-nullable value type (each lifts to `Nullable<T>`). A null parameter entry
+    // (never null in the C#) gets the same "cannot lift" safe fallback.
+    for (const ILSpy::Decompiler::TypeSystem::IParameter* p : m->Parameters()) {
+        if (p == nullptr || !IsNonNullableValueType(p->Type()))
+            return {};
+    }
+    // The C# `return new LiftedUserDefinedOperator(m)`.
+    return std::make_shared<LiftedUserDefinedOperator>(m);
+}
+
+namespace {
+
+// The C# base-ctor argument `(IMethod)nonLiftedMethod.MemberDefinition` -- the hard cast
+// resolves the non-lifted method's DEFINITION (an unspecialized method is its own
+// definition; a specialized method's `MemberDefinition` unwraps to the ultimate
+// unspecialized member, so the `SpecializedMember` ctor's not-specialized-definition
+// guard never fires). The port's `MemberDefinition()` returns a non-owning `const
+// IMember*`; the `dynamic_cast` + the D565 safe fallback (the member as-is for the
+// degenerate non-IMethod/null definition, impossible for a real method) resolve the
+// definition pointer, and the ALIASING shared_ptr co-owns `nonLiftedMethod`'s control
+// block while pointing at the definition object -- the handle keeps the definition alive
+// exactly as the C# GC reference does (a specialized method owns its definition through
+// its own base member; an unspecialized method IS its definition, and the alias then
+// points at the co-owned method itself).
+std::shared_ptr<ILSpy::Decompiler::TypeSystem::IMethod> MethodDefinitionHandle(
+    const std::shared_ptr<ILSpy::Decompiler::TypeSystem::IMethod>& nonLiftedMethod)
+{
+    const ILSpy::Decompiler::TypeSystem::IMethod* methodDefinition =
+        dynamic_cast<const ILSpy::Decompiler::TypeSystem::IMethod*>(
+            nonLiftedMethod->MemberDefinition());
+    if (methodDefinition == nullptr) {
+        methodDefinition = nonLiftedMethod.get();
+    }
+    return std::shared_ptr<ILSpy::Decompiler::TypeSystem::IMethod>(
+        nonLiftedMethod,
+        const_cast<ILSpy::Decompiler::TypeSystem::IMethod*>(methodDefinition));
+}
+
+// The C# base-ctor argument `nonLiftedMethod.Substitution` -- the never-null C# contract
+// (`TypeParameterSubstitution.Identity` for a not-specialized member); the test stubs
+// return null, so the port falls back to the Identity singleton (the D563 `GetSubstitution`
+// precedent).
+ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution SubstitutionOf(
+    const std::shared_ptr<ILSpy::Decompiler::TypeSystem::IMethod>& nonLiftedMethod)
+{
+    const ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution* substitution =
+        nonLiftedMethod->Substitution();
+    if (substitution != nullptr)
+        return *substitution;
+    return ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution::Identity();
+}
+
+} // namespace
+
+// The C# `public LiftedUserDefinedOperator(IMethod nonLiftedMethod)` (lines 1131-1150):
+// `: base((IMethod)nonLiftedMethod.MemberDefinition, nonLiftedMethod.Substitution)`, then
+// `this.nonLiftedOperator = nonLiftedMethod; var compilation = nonLiftedMethod.
+// Compilation; var substitution = nonLiftedMethod.Substitution; this.Parameters = base.
+// CreateParameters(type => NullableType.Create(compilation, type.AcceptVisitor(
+// substitution)))`, then the return-type assignment (the comparison-operator branch keeps
+// the plain `bool`; the else branch wraps in `Nullable<T>`).
+LiftedUserDefinedOperator::LiftedUserDefinedOperator(
+    std::shared_ptr<ILSpy::Decompiler::TypeSystem::IMethod> nonLiftedMethod)
+    : ILSpy::Decompiler::TypeSystem::Implementation::SpecializedMethod(
+          MethodDefinitionHandle(nonLiftedMethod),
+          SubstitutionOf(nonLiftedMethod)),
+      nonLiftedOperator_(nonLiftedMethod)
+{
+    // The C# `var compilation = nonLiftedMethod.Compilation` (read through the stored
+    // handle -- the C# field is already assigned, and the port's member initialized
+    // before the body).
+    const ILSpy::Decompiler::TypeSystem::ICompilation& compilation =
+        nonLiftedMethod->Compilation();
+    // The C# `var substitution = nonLiftedMethod.Substitution` -- a by-value local (the
+    // C# local aliases the method's substitution object; the port copies, and the local
+    // stays alive through the `CreateParameters`/return-type uses below).
+    ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution substitution =
+        SubstitutionOf(nonLiftedMethod);
+
+    // The C# `this.Parameters = base.CreateParameters(type => NullableType.Create(
+    // compilation, type.AcceptVisitor(substitution)))` -- each base parameter's type is
+    // run through the substitution, then wrapped in `Nullable<T>`. The protected
+    // `SetParameters` (the C# property's `protected set`) assigns the built owning list
+    // directly, bypassing the lazy `CreateParameters(t => t.AcceptVisitor(this.
+    // Substitution))` computation. The lambda captures the locals by reference (the
+    // `std::function` is consumed within this ctor); the `const_cast` feeds the non-const
+    // `AcceptVisitor` (the D406/D482 convention -- a substitution does not mutate in an
+    // `AcceptVisitor` read, and the type-system objects are mutable).
+    SetParameters(CreateParameters(
+        [&compilation, &substitution](const ILSpy::Decompiler::TypeSystem::IType& type)
+            -> ILSpy::Decompiler::TypeSystem::ITypePtr {
+            return Create(
+                compilation,
+                *const_cast<ILSpy::Decompiler::TypeSystem::IType&>(type).AcceptVisitor(
+                    substitution));
+        }));
+
+    // The C# `if (IsComparisonOperator(nonLiftedMethod)) this.ReturnType = nonLiftedMethod.
+    // ReturnType; else this.ReturnType = NullableType.Create(compilation, nonLiftedMethod.
+    // ReturnType.AcceptVisitor(substitution));` -- the comparison branch keeps the PLAIN
+    // `bool` return type (the C# comment: "Comparison operators keep the 'bool' return type
+    // even when lifted"), the else branch wraps in `Nullable<T>`. The protected
+    // `SetReturnType` (the C# property's `protected set`) assigns the cached return type
+    // directly, bypassing the lazy substituted computation.
+    if (CSharpOperators::IsComparisonOperator(*nonLiftedMethod)) {
+        SetReturnType(std::const_pointer_cast<ILSpy::Decompiler::TypeSystem::IType>(
+            nonLiftedMethod->ReturnType().shared_from_this()));
+    } else {
+        SetReturnType(Create(
+            compilation,
+            *const_cast<ILSpy::Decompiler::TypeSystem::IType&>(nonLiftedMethod->ReturnType())
+                 .AcceptVisitor(substitution)));
+    }
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

@@ -95,11 +95,20 @@
 //     references, so the logical and bitwise tables hold pointer-identical entries) or a
 //     fresh bool original for `^` (no logical-xor table exists).
 //
-// The remaining derived operator-method families (the user-defined operator region,
-// lines 1104-1168: `LiftUserDefinedOperator` / `IsComparisonOperator` /
-// `LiftedUserDefinedOperator` -- gated on `SpecializedMethod::CreateParameters` and the
-// `OperatorDeclaration.GetOperatorType` lookup) and the lazy operator-table properties
-// built on them are DEFERRED to later slices.
+// The user-defined operator region (CSharpOperators.cs lines 1104-1168, the LAST derived
+// operator-method family -- the class ends at line 1165, followed only by the already-ported
+// `ILiftedOperator` interface) is also PORTED: the public `LiftUserDefinedOperator(IMethod)`
+// static, the internal `IsComparisonOperator(IMethod)` static, and the sealed
+// `LiftedUserDefinedOperator : SpecializedMethod, ILiftedOperator` nested class (lifted to
+// namespace scope, convention (a)) -- the lifted form of a USER-DEFINED `operator`
+// method, built on `SpecializedMethod` (whose `SpecializedMethod` port therefore becomes
+// NON-final: the C# class is unsealed precisely so this subclass can derive it).
+// The `OperatorType` lookup the region consumes (`OperatorDeclaration.GetOperatorType` --
+// the reverse method-name lookup -- plus the `SyntaxExtensions.IsComparisonOperator`
+// extension in Syntax/SyntaxExtensions.hpp) lands alongside it in the Syntax directory.
+// With this region the CSharpOperators class port is COMPLETE: every region of the C#
+// class is live (the only class-level deferrals left are the `Invoke(CSharpResolver, ...)`
+// constant-evaluation virtuals, convention (j) -- gated on the CSharpResolver long pole).
 //
 // KEY PORT CONVENTIONS:
 //  (a) The C# nested classes (`OperatorMethod` and, later, the *OperatorMethod families)
@@ -185,6 +194,7 @@
 #include "Decompiler/TypeSystem/ICompilation.hpp"  // ICompilation (MainModule -- the ParentModule inline body)
 #include "Decompiler/TypeSystem/IParameterizedMember.hpp"  // OperatorMethod's base (brings IType.hpp/IEntity.hpp)
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"  // TypeCode (MakeParameter's parameter type)
+#include "Decompiler/TypeSystem/Implementation/SpecializedMethod.hpp"  // LiftedUserDefinedOperator's first base
 
 #include <cstdint>
 #include <functional>
@@ -475,6 +485,30 @@ public:
     {
         return compilation_;
     }
+
+    // --- The C# user-defined operator region (lines 1104-1168) --------------------------
+
+    // The C# `public static IMethod? LiftUserDefinedOperator(IMethod m)` (line 1105) -- the
+    // lifted `Nullable<T>` form of a USER-DEFINED operator method: null ("cannot lift this
+    // operator") when the return type fails the comparison-operator/non-comparison shape
+    // (a comparison operator must return `bool`; any other operator must return a non-
+    // nullable value type), or when any parameter is not a non-nullable value type. Takes
+    // the method as an OWNING handle (the lifted operator stores a reference to it -- the
+    // C# GC reference; the port's `ISymbol` carries no `shared_from_this`, so the caller
+    // hands over the shared ownership) and returns `std::shared_ptr<IMethod>` (a null
+    // handle is the C# `IMethod?` null). Implemented out-of-line in the .cpp.
+    static std::shared_ptr<ILSpy::Decompiler::TypeSystem::IMethod> LiftUserDefinedOperator(
+        const std::shared_ptr<ILSpy::Decompiler::TypeSystem::IMethod>& m);
+
+    // The C# `internal static bool IsComparisonOperator(IMethod m)` (line 1124) -- whether
+    // the method is a user-defined BINARY comparison operator: `IsOperator`, exactly 2
+    // parameters, and a metadata name (`op_LessThan` & co.) whose `OperatorDeclaration.
+    // GetOperatorType` lookup resolves to one of the six comparison kinds (the
+    // `SyntaxExtensions.IsComparisonOperator` extension). Widened to public (the C#
+    // `internal`; convention (a) -- the tests exercise it directly). The return-type shape
+    // it drives: a comparison operator's lifted form KEEPS the `bool` return type (the
+    // `LiftedUserDefinedOperator` ctor below). Implemented out-of-line in the .cpp.
+    static bool IsComparisonOperator(const ILSpy::Decompiler::TypeSystem::IMethod& m);
 
     // --- The C# lazy unary operator-table properties (lines 300-409, convention (m)) ---
 
@@ -1402,6 +1436,90 @@ private:
     // (convention (j)); the four comparison tables pass the C# `<`/`<=`/`>`/`>=` bodies
     // (the Decimal stand-in's comparison operators below).
     std::function<bool(T1, T2)> func_;
+};
+
+// ---------------------------------------------------------------------------
+// The user-defined operator region (CSharpOperators.cs lines 1129-1165)
+// ---------------------------------------------------------------------------
+
+// The C# `sealed class LiftedUserDefinedOperator : SpecializedMethod, ILiftedOperator`
+// (nested in `CSharpOperators`, lines 1129-1165; lifted to namespace scope, convention
+// (a)) -- the lifted `Nullable<T>` form of a USER-DEFINED operator method: a specialized
+// method over the non-lifted method's DEFINITION with the non-lifted method's
+// substitution, whose parameter types (and, for a non-comparison operator, the return
+// type) are wrapped in `Nullable<T>`. A comparison operator's lifted form KEEPS the
+// plain `bool` return type (the C# comment at line 1141: "Comparison operators keep the
+// 'bool' return type even when lifted" -- the same shape as the built-in
+// `LiftedEqualityOperatorMethod`/`RelationalOperatorMethod.Lift` reset).
+// `final` (the C# `sealed`). Deriving `SpecializedMethod` is why that port is NOT `final`
+// (the C# class is unsealed precisely so this subclass can derive it). The base name is
+// fully qualified: `SpecializedMethod` lives in the SIBLING namespace
+// `TypeSystem::Implementation`, which unqualified lookup from `CSharp::Resolver` does
+// not search (the iteration-64 sibling-namespace learning).
+class LiftedUserDefinedOperator final
+    : public ILSpy::Decompiler::TypeSystem::Implementation::SpecializedMethod,
+      public ILiftedOperator {
+public:
+    // The C# `public LiftedUserDefinedOperator(IMethod nonLiftedMethod)` (line 1132):
+    // `base((IMethod)nonLiftedMethod.MemberDefinition, nonLiftedMethod.Substitution)`, then
+    // `this.Parameters = base.CreateParameters(type => NullableType.Create(compilation,
+    // type.AcceptVisitor(substitution)))`, then the return-type assignment. The port takes
+    // the method as an OWNING handle (the C# GC reference: the port's `ISymbol` carries no
+    // `shared_from_this`, so the caller hands over shared ownership -- the ctor both stores
+    // it and derives the base-ctor handles from it). Out-of-line in the .cpp (the
+    // method-definition/substitution resolution + the `Nullable<T>` wrapping).
+    explicit LiftedUserDefinedOperator(
+        std::shared_ptr<ILSpy::Decompiler::TypeSystem::IMethod> nonLiftedMethod);
+
+    // --- ILiftedOperator (the marker the overload-resolution tiebreak reads) ---
+
+    // The C# `IReadOnlyList<IParameter> NonLiftedParameters => nonLiftedOperator.Parameters`.
+    std::vector<const ILSpy::Decompiler::TypeSystem::IParameter*> NonLiftedParameters()
+        const override
+    {
+        return nonLiftedOperator_->Parameters();
+    }
+
+    // The C# `IType NonLiftedReturnType => nonLiftedOperator.ReturnType`.
+    const ILSpy::Decompiler::TypeSystem::IType& NonLiftedReturnType() const override
+    {
+        return nonLiftedOperator_->ReturnType();
+    }
+
+    // The C# `public override bool Equals(object? obj)` -- the `object.Equals` analog ports
+    // as a standalone typed overload (the `SpecializedMember::Equals(const
+    // SpecializedMember*)` precedent): `op != null && this.nonLiftedOperator.Equals(
+    // op.nonLiftedOperator)` -- the non-lifted operators compare through the member
+    // `Equals` with no normalization. The `using` keeps the inherited `IMember::Equals`
+    // overload visible (C# overloading; a C++ same-name member would hide it). Fully
+    // qualified (the sibling-namespace base).
+    using ILSpy::Decompiler::TypeSystem::Implementation::SpecializedMethod::Equals;
+    bool Equals(const LiftedUserDefinedOperator* other) const
+    {
+        if (other == nullptr)
+            return false;
+        return nonLiftedOperator_->Equals(other->nonLiftedOperator_.get(), nullptr);
+    }
+
+    // The C# `public override int GetHashCode() => nonLiftedOperator.GetHashCode() ^
+    // 0x7191254` -- a plain hiding member (the `SpecializedMethod::GetHashCode`
+    // plain-member precedent). `nonLiftedOperator.GetHashCode()` is the C# `object.GetHashCode`
+    // identity hash (no `IMember` override) -> pointer identity (the
+    // `SpecializedMember::GetHashCode` pointer-identity precedent).
+    int GetHashCode() const
+    {
+        return static_cast<int>(static_cast<unsigned int>(
+                   reinterpret_cast<std::uintptr_t>(nonLiftedOperator_.get())) ^ 0x7191254u);
+    }
+
+private:
+    // The C# `internal readonly IParameterizedMember nonLiftedOperator` (line 1130) -- the
+    // non-lifted method this was lifted from. The port stores an OWNING handle (the C# GC
+    // reference: the lifted operator keeps the non-lifted method alive). Typed `const
+    // IParameterizedMember` like the C# field -- every read (`Parameters` / `ReturnType` /
+    // `Equals`) is base-surface.
+    std::shared_ptr<const ILSpy::Decompiler::TypeSystem::IParameterizedMember>
+        nonLiftedOperator_;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

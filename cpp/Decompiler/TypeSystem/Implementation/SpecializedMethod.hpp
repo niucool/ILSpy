@@ -206,8 +206,10 @@ private:
 // A specialized method (see the header comment). Derives `SpecializedParameterizedMember, IMethod`;
 // the three-`IMember`-subobject diamond is resolved by one override per method name delegating
 // to the `SpecializedMember::` qualified call (sub A's override). The complex members are
-// out-of-line in the .cpp.
-class SpecializedMethod final : public SpecializedParameterizedMember, public IMethod {
+// out-of-line in the .cpp. NOT `final`: the C# class is unsealed (`public class SpecializedMethod`),
+// and `CSharpOperators.LiftedUserDefinedOperator` (CSharp/Resolver/CSharpOperators.hpp) derives
+// from it -- the C# `sealed class LiftedUserDefinedOperator : SpecializedMethod, ILiftedOperator`.
+class SpecializedMethod : public SpecializedParameterizedMember, public IMethod {
 public:
     // The C# `SpecializedMethod(IMethod methodDefinition, TypeParameterSubstitution substitution)`.
     // `methodDefinition` is shared with the `SpecializedParameterizedMember` base (its

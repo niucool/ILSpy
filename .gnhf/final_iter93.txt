@@ -1,0 +1,527 @@
+Running main() from C:\Projects\github\vcpkg\buildtrees\gtest\src\v1.17.0-e243b8ee0f.clean\googletest\src\gtest_main.cc
+Note: Google Test filter = CSharpOperatorsUserDefinedTest.*:CSharp_OperatorDeclaration.*:SpecializedMethodTest.*:SpecializedParameterizedMemberTest.*:SpecializedParameterTest.*:CSharpOperatorsTest.*:CSharpOperatorsUnaryTest.*:CSharpOperatorsBinaryTest.*:CSharpOperatorsEqualityTest.*:CSharpOperatorsRelationalTest.*:CSharpOperatorsBitwiseTest.*
+[==========] Running 243 tests from 11 test suites.
+[----------] Global test environment set-up.
+[----------] 15 tests from SpecializedParameterTest
+[ RUN      ] SpecializedParameterTest.TypeReturnsNewType
+[       OK ] SpecializedParameterTest.TypeReturnsNewType (0 ms)
+[ RUN      ] SpecializedParameterTest.TypeReturnsSameInstancePassedIn
+[       OK ] SpecializedParameterTest.TypeReturnsSameInstancePassedIn (0 ms)
+[ RUN      ] SpecializedParameterTest.NameDelegatesToBase
+[       OK ] SpecializedParameterTest.NameDelegatesToBase (0 ms)
+[ RUN      ] SpecializedParameterTest.SymbolKindIsParameter
+[       OK ] SpecializedParameterTest.SymbolKindIsParameter (0 ms)
+[ RUN      ] SpecializedParameterTest.ReferenceKindDelegatesToBase
+[       OK ] SpecializedParameterTest.ReferenceKindDelegatesToBase (0 ms)
+[ RUN      ] SpecializedParameterTest.LifetimeDelegatesToBase
+[       OK ] SpecializedParameterTest.LifetimeDelegatesToBase (0 ms)
+[ RUN      ] SpecializedParameterTest.IsParamsDelegatesToBase
+[       OK ] SpecializedParameterTest.IsParamsDelegatesToBase (0 ms)
+[ RUN      ] SpecializedParameterTest.IsOptionalDelegatesToBase
+[       OK ] SpecializedParameterTest.IsOptionalDelegatesToBase (0 ms)
+[ RUN      ] SpecializedParameterTest.HasConstantValueInSignatureDelegatesToBase
+[       OK ] SpecializedParameterTest.HasConstantValueInSignatureDelegatesToBase (0 ms)
+[ RUN      ] SpecializedParameterTest.GetAttributesDelegatesToBase
+[       OK ] SpecializedParameterTest.GetAttributesDelegatesToBase (0 ms)
+[ RUN      ] SpecializedParameterTest.IsConstDelegatesToBase
+[       OK ] SpecializedParameterTest.IsConstDelegatesToBase (0 ms)
+[ RUN      ] SpecializedParameterTest.GetConstantValueDelegatesToBase
+[       OK ] SpecializedParameterTest.GetConstantValueDelegatesToBase (0 ms)
+[ RUN      ] SpecializedParameterTest.OwnerReturnsNewOwner
+[       OK ] SpecializedParameterTest.OwnerReturnsNewOwner (0 ms)
+[ RUN      ] SpecializedParameterTest.OwnerIsNullableWhenConstructedWithNull
+[       OK ] SpecializedParameterTest.OwnerIsNullableWhenConstructedWithNull (0 ms)
+[ RUN      ] SpecializedParameterTest.IsAnIParameterAndFinal
+[       OK ] SpecializedParameterTest.IsAnIParameterAndFinal (0 ms)
+[----------] 15 tests from SpecializedParameterTest (0 ms total)
+
+[----------] 8 tests from SpecializedParameterizedMemberTest
+[ RUN      ] SpecializedParameterizedMemberTest.ParametersEmptyWhenBaseHasNone
+[       OK ] SpecializedParameterizedMemberTest.ParametersEmptyWhenBaseHasNone (0 ms)
+[ RUN      ] SpecializedParameterizedMemberTest.ParametersReturnsSpecializedList
+[       OK ] SpecializedParameterizedMemberTest.ParametersReturnsSpecializedList (0 ms)
+[ RUN      ] SpecializedParameterizedMemberTest.ParameterVariableTypeIsSubstituted
+[       OK ] SpecializedParameterizedMemberTest.ParameterVariableTypeIsSubstituted (0 ms)
+[ RUN      ] SpecializedParameterizedMemberTest.ParametersIsCached
+[       OK ] SpecializedParameterizedMemberTest.ParametersIsCached (0 ms)
+[ RUN      ] SpecializedParameterizedMemberTest.ParameterOwnerIsTheSpecializedMember
+[       OK ] SpecializedParameterizedMemberTest.ParameterOwnerIsTheSpecializedMember (0 ms)
+[ RUN      ] SpecializedParameterizedMemberTest.CreateParametersAppliesCustomSubstitution
+[       OK ] SpecializedParameterizedMemberTest.CreateParametersAppliesCustomSubstitution (0 ms)
+[ RUN      ] SpecializedParameterizedMemberTest.ParameterDelegatesBaseMemberSurface
+[       OK ] SpecializedParameterizedMemberTest.ParameterDelegatesBaseMemberSurface (0 ms)
+[ RUN      ] SpecializedParameterizedMemberTest.ClassShape
+[       OK ] SpecializedParameterizedMemberTest.ClassShape (0 ms)
+[----------] 8 tests from SpecializedParameterizedMemberTest (0 ms total)
+
+[----------] 16 tests from SpecializedMethodTest
+[ RUN      ] SpecializedMethodTest.CtorWiresSubstitution
+[       OK ] SpecializedMethodTest.CtorWiresSubstitution (0 ms)
+[ RUN      ] SpecializedMethodTest.NameSymbolKindMemberDefinitionDelegate
+[       OK ] SpecializedMethodTest.NameSymbolKindMemberDefinitionDelegate (0 ms)
+[ RUN      ] SpecializedMethodTest.TrivialEntitySurfaceDelegates
+[       OK ] SpecializedMethodTest.TrivialEntitySurfaceDelegates (0 ms)
+[ RUN      ] SpecializedMethodTest.ReturnTypeAppliesSubstitution
+[       OK ] SpecializedMethodTest.ReturnTypeAppliesSubstitution (0 ms)
+[ RUN      ] SpecializedMethodTest.DeclaringTypeAppliesSubstitution
+[       OK ] SpecializedMethodTest.DeclaringTypeAppliesSubstitution (0 ms)
+[ RUN      ] SpecializedMethodTest.ParametersAreSubstituted
+[       OK ] SpecializedMethodTest.ParametersAreSubstituted (0 ms)
+[ RUN      ] SpecializedMethodTest.IMethodBoolsDelegate
+[       OK ] SpecializedMethodTest.IMethodBoolsDelegate (0 ms)
+[ RUN      ] SpecializedMethodTest.TypeParametersAreSpecializedForGenericMethod
+[       OK ] SpecializedMethodTest.TypeParametersAreSpecializedForGenericMethod (0 ms)
+[ RUN      ] SpecializedMethodTest.TypeParametersEmptyForNonGenericMethod
+[       OK ] SpecializedMethodTest.TypeParametersEmptyForNonGenericMethod (0 ms)
+[ RUN      ] SpecializedMethodTest.TypeArgumentsFromSubstitution
+[       OK ] SpecializedMethodTest.TypeArgumentsFromSubstitution (0 ms)
+[ RUN      ] SpecializedMethodTest.SpecializedTypeParameterConstraintsSubstituted
+[       OK ] SpecializedMethodTest.SpecializedTypeParameterConstraintsSubstituted (0 ms)
+[ RUN      ] SpecializedMethodTest.ReducedFromAndAccessorOwner
+[       OK ] SpecializedMethodTest.ReducedFromAndAccessorOwner (0 ms)
+[ RUN      ] SpecializedMethodTest.SpecializeDelegates
+[       OK ] SpecializedMethodTest.SpecializeDelegates (0 ms)
+[ RUN      ] SpecializedMethodTest.EqualsAndHash
+[       OK ] SpecializedMethodTest.EqualsAndHash (0 ms)
+[ RUN      ] SpecializedMethodTest.DiamondDispatchThroughAllBases
+[       OK ] SpecializedMethodTest.DiamondDispatchThroughAllBases (0 ms)
+[ RUN      ] SpecializedMethodTest.ClassShape
+[       OK ] SpecializedMethodTest.ClassShape (0 ms)
+[----------] 16 tests from SpecializedMethodTest (0 ms total)
+
+[----------] 23 tests from CSharpOperatorsTest
+[ RUN      ] CSharpOperatorsTest.GetCachesTheInstancePerCompilation
+[       OK ] CSharpOperatorsTest.GetCachesTheInstancePerCompilation (0 ms)
+[ RUN      ] CSharpOperatorsTest.GetReturnsDistinctInstancesPerCompilation
+[       OK ] CSharpOperatorsTest.GetReturnsDistinctInstancesPerCompilation (0 ms)
+[ RUN      ] CSharpOperatorsTest.MakeParameterReturnsDefaultParameterWithRegisteredTypeAndEmptyName
+[       OK ] CSharpOperatorsTest.MakeParameterReturnsDefaultParameterWithRegisteredTypeAndEmptyName (0 ms)
+[ RUN      ] CSharpOperatorsTest.MakeParameterCoversTheFullNormalRange
+[       OK ] CSharpOperatorsTest.MakeParameterCoversTheFullNormalRange (0 ms)
+[ RUN      ] CSharpOperatorsTest.MakeNullableParameterLiftsEveryNumericParameter
+[       OK ] CSharpOperatorsTest.MakeNullableParameterLiftsEveryNumericParameter (0 ms)
+[ RUN      ] CSharpOperatorsTest.MakeNullableParameterReturnsTheSharedInstancePerCode
+[       OK ] CSharpOperatorsTest.MakeNullableParameterReturnsTheSharedInstancePerCode (0 ms)
+[ RUN      ] CSharpOperatorsTest.MakeNullableParameterThrowsForForeignParameter
+[       OK ] CSharpOperatorsTest.MakeNullableParameterThrowsForForeignParameter (0 ms)
+[ RUN      ] CSharpOperatorsTest.LiftWithoutLiftedFormsReturnsTheOriginalsInOrder
+[       OK ] CSharpOperatorsTest.LiftWithoutLiftedFormsReturnsTheOriginalsInOrder (0 ms)
+[ RUN      ] CSharpOperatorsTest.LiftAppendsLiftedFormsAfterAllOriginals
+[       OK ] CSharpOperatorsTest.LiftAppendsLiftedFormsAfterAllOriginals (0 ms)
+[ RUN      ] CSharpOperatorsTest.LiftSkipsNullLiftedForms
+[       OK ] CSharpOperatorsTest.LiftSkipsNullLiftedForms (0 ms)
+[ RUN      ] CSharpOperatorsTest.OperatorMethodNamesAreTheOperatorLiterals
+[       OK ] CSharpOperatorsTest.OperatorMethodNamesAreTheOperatorLiterals (0 ms)
+[ RUN      ] CSharpOperatorsTest.OperatorMethodEntityDefaults
+[       OK ] CSharpOperatorsTest.OperatorMethodEntityDefaults (0 ms)
+[ RUN      ] CSharpOperatorsTest.OperatorMethodDeclaringTypeIsUnknownType
+[       OK ] CSharpOperatorsTest.OperatorMethodDeclaringTypeIsUnknownType (0 ms)
+[ RUN      ] CSharpOperatorsTest.OperatorMethodMemberDefinitionIsSelf
+[       OK ] CSharpOperatorsTest.OperatorMethodMemberDefinitionIsSelf (0 ms)
+[ RUN      ] CSharpOperatorsTest.OperatorMethodSubstitutionIsTheIdentitySingleton
+[       OK ] CSharpOperatorsTest.OperatorMethodSubstitutionIsTheIdentitySingleton (0 ms)
+[ RUN      ] CSharpOperatorsTest.OperatorMethodSpecializeWithIdentityReturnsSelf
+[       OK ] CSharpOperatorsTest.OperatorMethodSpecializeWithIdentityReturnsSelf (0 ms)
+[ RUN      ] CSharpOperatorsTest.OperatorMethodSpecializeWithOtherThrows
+[       OK ] CSharpOperatorsTest.OperatorMethodSpecializeWithOtherThrows (0 ms)
+[ RUN      ] CSharpOperatorsTest.OperatorMethodEqualsIsReferenceEquality
+[       OK ] CSharpOperatorsTest.OperatorMethodEqualsIsReferenceEquality (0 ms)
+[ RUN      ] CSharpOperatorsTest.OperatorMethodParametersSnapshotMatchesAddedParameters
+[       OK ] CSharpOperatorsTest.OperatorMethodParametersSnapshotMatchesAddedParameters (0 ms)
+[ RUN      ] CSharpOperatorsTest.OperatorMethodReturnTypeIsSettable
+[       OK ] CSharpOperatorsTest.OperatorMethodReturnTypeIsSettable (0 ms)
+[ RUN      ] CSharpOperatorsTest.OperatorMethodCompilationIsTheCtorCompilation
+[       OK ] CSharpOperatorsTest.OperatorMethodCompilationIsTheCtorCompilation (0 ms)
+[ RUN      ] CSharpOperatorsTest.OperatorMethodToStringRendersTheSignature
+[       OK ] CSharpOperatorsTest.OperatorMethodToStringRendersTheSignature (0 ms)
+[ RUN      ] CSharpOperatorsTest.OperatorMethodLiftDefaultsToNull
+[       OK ] CSharpOperatorsTest.OperatorMethodLiftDefaultsToNull (0 ms)
+[----------] 23 tests from CSharpOperatorsTest (2 ms total)
+
+[----------] 22 tests from CSharpOperatorsUnaryTest
+[ RUN      ] CSharpOperatorsUnaryTest.UnaryOperatorMethodCanEvaluateAtCompileTimeDefaultsToFalse
+[       OK ] CSharpOperatorsUnaryTest.UnaryOperatorMethodCanEvaluateAtCompileTimeDefaultsToFalse (0 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.LambdaUnaryOperatorMethodCanEvaluateAtCompileTimeIsTrue
+[       OK ] CSharpOperatorsUnaryTest.LambdaUnaryOperatorMethodCanEvaluateAtCompileTimeIsTrue (0 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.LambdaUnaryOperatorMethodParameterIsTheSharedTableInstance
+[       OK ] CSharpOperatorsUnaryTest.LambdaUnaryOperatorMethodParameterIsTheSharedTableInstance (0 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.LambdaUnaryOperatorMethodReturnTypeIsTheFindTypeResult
+[       OK ] CSharpOperatorsUnaryTest.LambdaUnaryOperatorMethodReturnTypeIsTheFindTypeResult (0 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.LambdaUnaryOperatorMethodForBoolResolvesTheBooleanCode
+[       OK ] CSharpOperatorsUnaryTest.LambdaUnaryOperatorMethodForBoolResolvesTheBooleanCode (0 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.LambdaUnaryOperatorMethodForDecimalResolvesTheDecimalCode
+[       OK ] CSharpOperatorsUnaryTest.LambdaUnaryOperatorMethodForDecimalResolvesTheDecimalCode (0 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.LambdaUnaryOperatorMethodToStringRendersTheSignature
+[       OK ] CSharpOperatorsUnaryTest.LambdaUnaryOperatorMethodToStringRendersTheSignature (0 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.LambdaUnaryOperatorMethodLiftProducesLiftedUnaryOperatorMethod
+[       OK ] CSharpOperatorsUnaryTest.LambdaUnaryOperatorMethodLiftProducesLiftedUnaryOperatorMethod (0 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.LiftedUnaryOperatorMethodReturnTypeIsNullableOfTheBaseReturn
+[       OK ] CSharpOperatorsUnaryTest.LiftedUnaryOperatorMethodReturnTypeIsNullableOfTheBaseReturn (0 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.LiftedUnaryOperatorMethodParameterIsTheSharedNullableInstance
+[       OK ] CSharpOperatorsUnaryTest.LiftedUnaryOperatorMethodParameterIsTheSharedNullableInstance (0 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.LiftedUnaryOperatorMethodNonLiftedAccessorsExposeTheBaseMethod
+[       OK ] CSharpOperatorsUnaryTest.LiftedUnaryOperatorMethodNonLiftedAccessorsExposeTheBaseMethod (0 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.LiftedUnaryOperatorMethodIsAnILiftedOperatorCrossCast
+[       OK ] CSharpOperatorsUnaryTest.LiftedUnaryOperatorMethodIsAnILiftedOperatorCrossCast (0 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.LiftedUnaryOperatorMethodIsNotLiftedAgain
+[       OK ] CSharpOperatorsUnaryTest.LiftedUnaryOperatorMethodIsNotLiftedAgain (0 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.LiftedUnaryOperatorMethodCanEvaluateAtCompileTimeIsInheritedFalse
+[       OK ] CSharpOperatorsUnaryTest.LiftedUnaryOperatorMethodCanEvaluateAtCompileTimeIsInheritedFalse (0 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.LiftedUnaryOperatorMethodOnEmptyBaseParameterListThrows
+[       OK ] CSharpOperatorsUnaryTest.LiftedUnaryOperatorMethodOnEmptyBaseParameterListThrows (0 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.UnaryPlusOperatorsTableHasSevenOriginalsThenLiftedForms
+[       OK ] CSharpOperatorsUnaryTest.UnaryPlusOperatorsTableHasSevenOriginalsThenLiftedForms (1 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.UncheckedUnaryMinusOperatorsTableHasFiveOriginalsAndLifts
+[       OK ] CSharpOperatorsUnaryTest.UncheckedUnaryMinusOperatorsTableHasFiveOriginalsAndLifts (1 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.CheckedUnaryMinusOperatorsTableHasFiveOriginalsAndLifts
+[       OK ] CSharpOperatorsUnaryTest.CheckedUnaryMinusOperatorsTableHasFiveOriginalsAndLifts (1 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.LogicalNegationOperatorsTableHasBoolPlusLiftedBool
+[       OK ] CSharpOperatorsUnaryTest.LogicalNegationOperatorsTableHasBoolPlusLiftedBool (0 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.BitwiseComplementOperatorsTableHasFourOriginalsAndLifts
+[       OK ] CSharpOperatorsUnaryTest.BitwiseComplementOperatorsTableHasFourOriginalsAndLifts (1 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.UnaryOperatorTablesMemoizeTheBuiltLists
+[       OK ] CSharpOperatorsUnaryTest.UnaryOperatorTablesMemoizeTheBuiltLists (0 ms)
+[ RUN      ] CSharpOperatorsUnaryTest.TableLiftedFormsCrossCastToILiftedOperatorAndOriginalsDoNot
+[       OK ] CSharpOperatorsUnaryTest.TableLiftedFormsCrossCastToILiftedOperatorAndOriginalsDoNot (0 ms)
+[----------] 22 tests from CSharpOperatorsUnaryTest (8 ms total)
+
+[----------] 29 tests from CSharpOperatorsBinaryTest
+[ RUN      ] CSharpOperatorsBinaryTest.BinaryOperatorMethodCanEvaluateAtCompileTimeDefaultsToFalse
+[       OK ] CSharpOperatorsBinaryTest.BinaryOperatorMethodCanEvaluateAtCompileTimeDefaultsToFalse (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.LambdaBinaryOperatorMethodCanEvaluateAtCompileTimeIsTrue
+[       OK ] CSharpOperatorsBinaryTest.LambdaBinaryOperatorMethodCanEvaluateAtCompileTimeIsTrue (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.LambdaBinaryOperatorMethodParametersAreTheSharedTableInstances
+[       OK ] CSharpOperatorsBinaryTest.LambdaBinaryOperatorMethodParametersAreTheSharedTableInstances (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.LambdaBinaryOperatorMethodReturnTypeIsTheFindTypeResult
+[       OK ] CSharpOperatorsBinaryTest.LambdaBinaryOperatorMethodReturnTypeIsTheFindTypeResult (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.LambdaBinaryOperatorMethodForMixedTypesResolvesBothCodes
+[       OK ] CSharpOperatorsBinaryTest.LambdaBinaryOperatorMethodForMixedTypesResolvesBothCodes (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.LambdaBinaryOperatorMethodForDecimalResolvesTheDecimalCode
+[       OK ] CSharpOperatorsBinaryTest.LambdaBinaryOperatorMethodForDecimalResolvesTheDecimalCode (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.LambdaBinaryOperatorMethodSingleFuncCtorBuildsTheSameSignature
+[       OK ] CSharpOperatorsBinaryTest.LambdaBinaryOperatorMethodSingleFuncCtorBuildsTheSameSignature (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.LambdaBinaryOperatorMethodLiftProducesLiftedBinaryOperatorMethod
+[       OK ] CSharpOperatorsBinaryTest.LambdaBinaryOperatorMethodLiftProducesLiftedBinaryOperatorMethod (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.LambdaBinaryOperatorMethodToStringRendersTheSignature
+[       OK ] CSharpOperatorsBinaryTest.LambdaBinaryOperatorMethodToStringRendersTheSignature (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.LiftedBinaryOperatorMethodReturnTypeIsNullableOfTheBaseReturn
+[       OK ] CSharpOperatorsBinaryTest.LiftedBinaryOperatorMethodReturnTypeIsNullableOfTheBaseReturn (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.LiftedBinaryOperatorMethodParametersAreTheSharedNullableInstances
+[       OK ] CSharpOperatorsBinaryTest.LiftedBinaryOperatorMethodParametersAreTheSharedNullableInstances (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.LiftedBinaryOperatorMethodNonLiftedAccessorsExposeTheBaseMethod
+[       OK ] CSharpOperatorsBinaryTest.LiftedBinaryOperatorMethodNonLiftedAccessorsExposeTheBaseMethod (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.LiftedBinaryOperatorMethodIsAnILiftedOperatorCrossCast
+[       OK ] CSharpOperatorsBinaryTest.LiftedBinaryOperatorMethodIsAnILiftedOperatorCrossCast (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.LiftedBinaryOperatorMethodIsNotLiftedAgain
+[       OK ] CSharpOperatorsBinaryTest.LiftedBinaryOperatorMethodIsNotLiftedAgain (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.LiftedBinaryOperatorMethodCanEvaluateAtCompileTimeIsInheritedFalse
+[       OK ] CSharpOperatorsBinaryTest.LiftedBinaryOperatorMethodCanEvaluateAtCompileTimeIsInheritedFalse (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.LiftedBinaryOperatorMethodOnShortBaseParameterListThrows
+[       OK ] CSharpOperatorsBinaryTest.LiftedBinaryOperatorMethodOnShortBaseParameterListThrows (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.StringConcatenationCanEvaluateOnlyForStringString
+[       OK ] CSharpOperatorsBinaryTest.StringConcatenationCanEvaluateOnlyForStringString (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.StringConcatenationReturnTypeIsStringAndParametersMatch
+[       OK ] CSharpOperatorsBinaryTest.StringConcatenationReturnTypeIsStringAndParametersMatch (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.StringConcatenationIsNotLifted
+[       OK ] CSharpOperatorsBinaryTest.StringConcatenationIsNotLifted (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.MultiplicationOperatorsTableHasSevenOriginalsThenLiftedForms
+[       OK ] CSharpOperatorsBinaryTest.MultiplicationOperatorsTableHasSevenOriginalsThenLiftedForms (1 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.DivisionOperatorsTableHasSevenOriginalsThenLiftedForms
+[       OK ] CSharpOperatorsBinaryTest.DivisionOperatorsTableHasSevenOriginalsThenLiftedForms (1 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.RemainderOperatorsTableHasSevenOriginalsThenLiftedForms
+[       OK ] CSharpOperatorsBinaryTest.RemainderOperatorsTableHasSevenOriginalsThenLiftedForms (1 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.AdditionOperatorsTableHasNumericThenStringConcatThenLifts
+[       OK ] CSharpOperatorsBinaryTest.AdditionOperatorsTableHasNumericThenStringConcatThenLifts (1 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.SubtractionOperatorsTableHasSevenOriginalsThenLiftedForms
+[       OK ] CSharpOperatorsBinaryTest.SubtractionOperatorsTableHasSevenOriginalsThenLiftedForms (1 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.ShiftLeftOperatorsTableHasFourOriginalsThenLiftedForms
+[       OK ] CSharpOperatorsBinaryTest.ShiftLeftOperatorsTableHasFourOriginalsThenLiftedForms (1 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.ShiftRightOperatorsTableHasFourOriginalsThenLiftedForms
+[       OK ] CSharpOperatorsBinaryTest.ShiftRightOperatorsTableHasFourOriginalsThenLiftedForms (1 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.UnsignedShiftRightTableHasFourOriginalsThenLiftedForms
+[       OK ] CSharpOperatorsBinaryTest.UnsignedShiftRightTableHasFourOriginalsThenLiftedForms (1 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.BinaryOperatorTablesMemoizeTheBuiltLists
+[       OK ] CSharpOperatorsBinaryTest.BinaryOperatorTablesMemoizeTheBuiltLists (0 ms)
+[ RUN      ] CSharpOperatorsBinaryTest.BinaryTableLiftedFormsCrossCastAndOriginalsDoNot
+[       OK ] CSharpOperatorsBinaryTest.BinaryTableLiftedFormsCrossCastAndOriginalsDoNot (0 ms)
+[----------] 29 tests from CSharpOperatorsBinaryTest (19 ms total)
+
+[----------] 15 tests from CSharpOperatorsEqualityTest
+[ RUN      ] CSharpOperatorsEqualityTest.CtorResolvesBooleanReturnTypeAndSharedParameters
+[       OK ] CSharpOperatorsEqualityTest.CtorResolvesBooleanReturnTypeAndSharedParameters (0 ms)
+[ RUN      ] CSharpOperatorsEqualityTest.TypeAndNegateFieldsExposeTheCtorArguments
+[       OK ] CSharpOperatorsEqualityTest.TypeAndNegateFieldsExposeTheCtorArguments (0 ms)
+[ RUN      ] CSharpOperatorsEqualityTest.CanEvaluateAtCompileTimeExcludesObjectOnly
+[       OK ] CSharpOperatorsEqualityTest.CanEvaluateAtCompileTimeExcludesObjectOnly (0 ms)
+[ RUN      ] CSharpOperatorsEqualityTest.LiftReturnsNullForObjectAndString
+[       OK ] CSharpOperatorsEqualityTest.LiftReturnsNullForObjectAndString (0 ms)
+[ RUN      ] CSharpOperatorsEqualityTest.LiftBuildsTheLiftedEqualityForm
+[       OK ] CSharpOperatorsEqualityTest.LiftBuildsTheLiftedEqualityForm (0 ms)
+[ RUN      ] CSharpOperatorsEqualityTest.LiftedEqualityKeepsThePlainBooleanReturnType
+[       OK ] CSharpOperatorsEqualityTest.LiftedEqualityKeepsThePlainBooleanReturnType (0 ms)
+[ RUN      ] CSharpOperatorsEqualityTest.LiftedEqualityParametersAreTheSameSharedInstance
+[       OK ] CSharpOperatorsEqualityTest.LiftedEqualityParametersAreTheSameSharedInstance (0 ms)
+[ RUN      ] CSharpOperatorsEqualityTest.LiftedEqualityCanEvaluateDelegatesToBase
+[       OK ] CSharpOperatorsEqualityTest.LiftedEqualityCanEvaluateDelegatesToBase (0 ms)
+[ RUN      ] CSharpOperatorsEqualityTest.LiftedEqualityOverNonLiftableBaseThrows
+[       OK ] CSharpOperatorsEqualityTest.LiftedEqualityOverNonLiftableBaseThrows (0 ms)
+[ RUN      ] CSharpOperatorsEqualityTest.ValueEqualityOperatorsTableHasOriginalsThenLifts
+[       OK ] CSharpOperatorsEqualityTest.ValueEqualityOperatorsTableHasOriginalsThenLifts (2 ms)
+[ RUN      ] CSharpOperatorsEqualityTest.ValueInequalityOperatorsTableHasOriginalsThenLifts
+[       OK ] CSharpOperatorsEqualityTest.ValueInequalityOperatorsTableHasOriginalsThenLifts (0 ms)
+[ RUN      ] CSharpOperatorsEqualityTest.ReferenceEqualityOperatorsTableHasObjectAndStringOnly
+[       OK ] CSharpOperatorsEqualityTest.ReferenceEqualityOperatorsTableHasObjectAndStringOnly (0 ms)
+[ RUN      ] CSharpOperatorsEqualityTest.ReferenceInequalityOperatorsTableHasObjectAndStringOnly
+[       OK ] CSharpOperatorsEqualityTest.ReferenceInequalityOperatorsTableHasObjectAndStringOnly (0 ms)
+[ RUN      ] CSharpOperatorsEqualityTest.EqualityOperatorTablesMemoizeTheBuiltLists
+[       OK ] CSharpOperatorsEqualityTest.EqualityOperatorTablesMemoizeTheBuiltLists (0 ms)
+[ RUN      ] CSharpOperatorsEqualityTest.EqualityTableLiftedFormsCrossCastAndOriginalsDoNot
+[       OK ] CSharpOperatorsEqualityTest.EqualityTableLiftedFormsCrossCastAndOriginalsDoNot (0 ms)
+[----------] 15 tests from CSharpOperatorsEqualityTest (6 ms total)
+
+[----------] 16 tests from CSharpOperatorsRelationalTest
+[ RUN      ] CSharpOperatorsRelationalTest.CtorResolvesBooleanReturnTypeAndSharedParameters
+[       OK ] CSharpOperatorsRelationalTest.CtorResolvesBooleanReturnTypeAndSharedParameters (0 ms)
+[ RUN      ] CSharpOperatorsRelationalTest.CtorResolvesTheDistinctTypeParameters
+[       OK ] CSharpOperatorsRelationalTest.CtorResolvesTheDistinctTypeParameters (0 ms)
+[ RUN      ] CSharpOperatorsRelationalTest.CanEvaluateAtCompileTimeIsAlwaysTrue
+[       OK ] CSharpOperatorsRelationalTest.CanEvaluateAtCompileTimeIsAlwaysTrue (0 ms)
+[ RUN      ] CSharpOperatorsRelationalTest.LiftBuildsTheLiftedBinaryFormKeepingThePlainBoolean
+[       OK ] CSharpOperatorsRelationalTest.LiftBuildsTheLiftedBinaryFormKeepingThePlainBoolean (0 ms)
+[ RUN      ] CSharpOperatorsRelationalTest.LiftDiffersFromTheArithmeticLiftedReturnTypes
+[       OK ] CSharpOperatorsRelationalTest.LiftDiffersFromTheArithmeticLiftedReturnTypes (0 ms)
+[ RUN      ] CSharpOperatorsRelationalTest.LiftedRelationalExposesTheNonLiftedSurface
+[       OK ] CSharpOperatorsRelationalTest.LiftedRelationalExposesTheNonLiftedSurface (0 ms)
+[ RUN      ] CSharpOperatorsRelationalTest.LiftedRelationalIsNotLiftedAgain
+[       OK ] CSharpOperatorsRelationalTest.LiftedRelationalIsNotLiftedAgain (0 ms)
+[ RUN      ] CSharpOperatorsRelationalTest.DecimalComparisonsOrderBySignThenMagnitude
+[       OK ] CSharpOperatorsRelationalTest.DecimalComparisonsOrderBySignThenMagnitude (0 ms)
+[ RUN      ] CSharpOperatorsRelationalTest.DecimalComparisonsInvertForNegatives
+[       OK ] CSharpOperatorsRelationalTest.DecimalComparisonsInvertForNegatives (0 ms)
+[ RUN      ] CSharpOperatorsRelationalTest.DecimalComparisonsAlignScales
+[       OK ] CSharpOperatorsRelationalTest.DecimalComparisonsAlignScales (0 ms)
+[ RUN      ] CSharpOperatorsRelationalTest.LessThanOperatorsTableHasOriginalsThenLifts
+[       OK ] CSharpOperatorsRelationalTest.LessThanOperatorsTableHasOriginalsThenLifts (2 ms)
+[ RUN      ] CSharpOperatorsRelationalTest.LessThanOrEqualOperatorsTableHasOriginalsThenLifts
+[       OK ] CSharpOperatorsRelationalTest.LessThanOrEqualOperatorsTableHasOriginalsThenLifts (0 ms)
+[ RUN      ] CSharpOperatorsRelationalTest.GreaterThanOperatorsTableHasOriginalsThenLifts
+[       OK ] CSharpOperatorsRelationalTest.GreaterThanOperatorsTableHasOriginalsThenLifts (0 ms)
+[ RUN      ] CSharpOperatorsRelationalTest.GreaterThanOrEqualOperatorsTableHasOriginalsThenLifts
+[       OK ] CSharpOperatorsRelationalTest.GreaterThanOrEqualOperatorsTableHasOriginalsThenLifts (0 ms)
+[ RUN      ] CSharpOperatorsRelationalTest.RelationalOperatorTablesMemoizeTheBuiltLists
+[       OK ] CSharpOperatorsRelationalTest.RelationalOperatorTablesMemoizeTheBuiltLists (0 ms)
+[ RUN      ] CSharpOperatorsRelationalTest.RelationalTableLiftedFormsCrossCastAndOriginalsDoNot
+[       OK ] CSharpOperatorsRelationalTest.RelationalTableLiftedFormsCrossCastAndOriginalsDoNot (0 ms)
+[----------] 16 tests from CSharpOperatorsRelationalTest (7 ms total)
+
+[----------] 13 tests from CSharpOperatorsBitwiseTest
+[ RUN      ] CSharpOperatorsBitwiseTest.CtorResolvesTheIntegerOperandAndReturnTypes
+[       OK ] CSharpOperatorsBitwiseTest.CtorResolvesTheIntegerOperandAndReturnTypes (0 ms)
+[ RUN      ] CSharpOperatorsBitwiseTest.BoolBitwiseCtorResolvesBoolean
+[       OK ] CSharpOperatorsBitwiseTest.BoolBitwiseCtorResolvesBoolean (0 ms)
+[ RUN      ] CSharpOperatorsBitwiseTest.LogicalAndOperatorsTableHasTheSingleBoolOriginal
+[       OK ] CSharpOperatorsBitwiseTest.LogicalAndOperatorsTableHasTheSingleBoolOriginal (0 ms)
+[ RUN      ] CSharpOperatorsBitwiseTest.LogicalOrOperatorsTableHasTheSingleBoolOriginal
+[       OK ] CSharpOperatorsBitwiseTest.LogicalOrOperatorsTableHasTheSingleBoolOriginal (0 ms)
+[ RUN      ] CSharpOperatorsBitwiseTest.BitwiseAndOperatorsTableHasOriginalsThenLifts
+[       OK ] CSharpOperatorsBitwiseTest.BitwiseAndOperatorsTableHasOriginalsThenLifts (1 ms)
+[ RUN      ] CSharpOperatorsBitwiseTest.BitwiseAndSharesTheLogicalAndInstance
+[       OK ] CSharpOperatorsBitwiseTest.BitwiseAndSharesTheLogicalAndInstance (0 ms)
+[ RUN      ] CSharpOperatorsBitwiseTest.BitwiseOrOperatorsTableHasOriginalsThenLifts
+[       OK ] CSharpOperatorsBitwiseTest.BitwiseOrOperatorsTableHasOriginalsThenLifts (1 ms)
+[ RUN      ] CSharpOperatorsBitwiseTest.BitwiseOrSharesTheLogicalOrInstance
+[       OK ] CSharpOperatorsBitwiseTest.BitwiseOrSharesTheLogicalOrInstance (0 ms)
+[ RUN      ] CSharpOperatorsBitwiseTest.BitwiseXorOperatorsTableHasOriginalsThenLifts
+[       OK ] CSharpOperatorsBitwiseTest.BitwiseXorOperatorsTableHasOriginalsThenLifts (1 ms)
+[ RUN      ] CSharpOperatorsBitwiseTest.BitwiseXorBoolEntryIsFreshNotSharedWithTheLogicalTables
+[       OK ] CSharpOperatorsBitwiseTest.BitwiseXorBoolEntryIsFreshNotSharedWithTheLogicalTables (0 ms)
+[ RUN      ] CSharpOperatorsBitwiseTest.BitwiseLiftedFormsLiftTheReturnType
+[       OK ] CSharpOperatorsBitwiseTest.BitwiseLiftedFormsLiftTheReturnType (0 ms)
+[ RUN      ] CSharpOperatorsBitwiseTest.BitwiseOperatorTablesMemoizeTheBuiltLists
+[       OK ] CSharpOperatorsBitwiseTest.BitwiseOperatorTablesMemoizeTheBuiltLists (0 ms)
+[ RUN      ] CSharpOperatorsBitwiseTest.BitwiseTableLiftedFormsCrossCastAndOriginalsDoNot
+[       OK ] CSharpOperatorsBitwiseTest.BitwiseTableLiftedFormsCrossCastAndOriginalsDoNot (0 ms)
+[----------] 13 tests from CSharpOperatorsBitwiseTest (6 ms total)
+
+[----------] 24 tests from CSharpOperatorsUserDefinedTest
+[ RUN      ] CSharpOperatorsUserDefinedTest.RecognizesALessThanOperatorByMetadataName
+[       OK ] CSharpOperatorsUserDefinedTest.RecognizesALessThanOperatorByMetadataName (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.RecognizesTheEqualityOperator
+[       OK ] CSharpOperatorsUserDefinedTest.RecognizesTheEqualityOperator (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.RecognizesGreaterThanOrEqual
+[       OK ] CSharpOperatorsUserDefinedTest.RecognizesGreaterThanOrEqual (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.RequiresTheIsOperatorFlag
+[       OK ] CSharpOperatorsUserDefinedTest.RequiresTheIsOperatorFlag (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.RequiresExactlyTwoParameters
+[       OK ] CSharpOperatorsUserDefinedTest.RequiresExactlyTwoParameters (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.NonComparisonOperatorNameIsRejected
+[       OK ] CSharpOperatorsUserDefinedTest.NonComparisonOperatorNameIsRejected (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.NonOperatorMethodNameIsRejected
+[       OK ] CSharpOperatorsUserDefinedTest.NonOperatorMethodNameIsRejected (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.LiftsAValueOperatorIntoNullableParameters
+[       OK ] CSharpOperatorsUserDefinedTest.LiftsAValueOperatorIntoNullableParameters (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.ComparisonOperatorLiftKeepsPlainBoolReturn
+[       OK ] CSharpOperatorsUserDefinedTest.ComparisonOperatorLiftKeepsPlainBoolReturn (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.ComparisonOperatorWithNonBoolReturnIsRejected
+[       OK ] CSharpOperatorsUserDefinedTest.ComparisonOperatorWithNonBoolReturnIsRejected (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.NonComparisonOperatorWithReferenceReturnIsRejected
+[       OK ] CSharpOperatorsUserDefinedTest.NonComparisonOperatorWithReferenceReturnIsRejected (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.NonComparisonOperatorWithNullableReturnIsRejected
+[       OK ] CSharpOperatorsUserDefinedTest.NonComparisonOperatorWithNullableReturnIsRejected (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.ReferenceTypedParameterIsRejected
+[       OK ] CSharpOperatorsUserDefinedTest.ReferenceTypedParameterIsRejected (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.NullableParameterIsRejected
+[       OK ] CSharpOperatorsUserDefinedTest.NullableParameterIsRejected (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.NullHandleIsRejected
+[       OK ] CSharpOperatorsUserDefinedTest.NullHandleIsRejected (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.NotAnOperatorMethodStillLifts
+[       OK ] CSharpOperatorsUserDefinedTest.NotAnOperatorMethodStillLifts (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.IsAnIMethodAndAnILiftedOperator
+[       OK ] CSharpOperatorsUserDefinedTest.IsAnIMethodAndAnILiftedOperator (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.NonLiftedSurfaceExposesTheOriginals
+[       OK ] CSharpOperatorsUserDefinedTest.NonLiftedSurfaceExposesTheOriginals (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.MemberDefinitionIsTheOriginalMethod
+[       OK ] CSharpOperatorsUserDefinedTest.MemberDefinitionIsTheOriginalMethod (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.DirectConstructionLiftsParametersAndReturn
+[       OK ] CSharpOperatorsUserDefinedTest.DirectConstructionLiftsParametersAndReturn (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.DirectConstructionKeepsTheComparisonReturn
+[       OK ] CSharpOperatorsUserDefinedTest.DirectConstructionKeepsTheComparisonReturn (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.EqualsComparesTheNonLiftedOperators
+[       OK ] CSharpOperatorsUserDefinedTest.EqualsComparesTheNonLiftedOperators (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.GetHashCodeIsStableForTheSameMethod
+[       OK ] CSharpOperatorsUserDefinedTest.GetHashCodeIsStableForTheSameMethod (0 ms)
+[ RUN      ] CSharpOperatorsUserDefinedTest.LiftedParametersAreSpecializedOverTheOriginals
+[       OK ] CSharpOperatorsUserDefinedTest.LiftedParametersAreSpecializedOverTheOriginals (0 ms)
+[----------] 24 tests from CSharpOperatorsUserDefinedTest (1 ms total)
+
+[----------] 62 tests from CSharp_OperatorDeclaration
+[ RUN      ] CSharp_OperatorDeclaration.IsConcreteAndFinal
+[       OK ] CSharp_OperatorDeclaration.IsConcreteAndFinal (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.IsEntityDeclarationAndAstNode
+[       OK ] CSharp_OperatorDeclaration.IsEntityDeclarationAndAstNode (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.ConstKeywordTokens
+[       OK ] CSharp_OperatorDeclaration.ConstKeywordTokens (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.EmptyCtor
+[       OK ] CSharp_OperatorDeclaration.EmptyCtor (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.SymbolKindOverrideReturnsOperator
+[       OK ] CSharp_OperatorDeclaration.SymbolKindOverrideReturnsOperator (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.ModifiersDefaultsToNoneAndRoundTrips
+[       OK ] CSharp_OperatorDeclaration.ModifiersDefaultsToNoneAndRoundTrips (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.HasModifierIsBitmaskTest
+[       OK ] CSharp_OperatorDeclaration.HasModifierIsBitmaskTest (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.OperatorTypeDefaultsToLogicalNotAndRoundTrips
+[       OK ] CSharp_OperatorDeclaration.OperatorTypeDefaultsToLogicalNotAndRoundTrips (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.OperatorTypeValuesAreDistinctAndOrdered
+[       OK ] CSharp_OperatorDeclaration.OperatorTypeValuesAreDistinctAndOrdered (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.GetNameReturnsMethodNameForEachOperatorType
+[       OK ] CSharp_OperatorDeclaration.GetNameReturnsMethodNameForEachOperatorType (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.GetNameReturnsNulloptForNullInput
+[       OK ] CSharp_OperatorDeclaration.GetNameReturnsNulloptForNullInput (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.GetOperatorTypeRoundTripsEveryName
+[       OK ] CSharp_OperatorDeclaration.GetOperatorTypeRoundTripsEveryName (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.GetOperatorTypeResolvesRepresentativeNames
+[       OK ] CSharp_OperatorDeclaration.GetOperatorTypeResolvesRepresentativeNames (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.GetOperatorTypeReturnsNulloptForUnknownNames
+[       OK ] CSharp_OperatorDeclaration.GetOperatorTypeReturnsNulloptForUnknownNames (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.IsComparisonOperatorTrueForTheSixComparisonKinds
+[       OK ] CSharp_OperatorDeclaration.IsComparisonOperatorTrueForTheSixComparisonKinds (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.IsComparisonOperatorFalseForNonComparisonKinds
+[       OK ] CSharp_OperatorDeclaration.IsComparisonOperatorFalseForNonComparisonKinds (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.NameReturnsMethodNameForDefaultOperatorType
+[       OK ] CSharp_OperatorDeclaration.NameReturnsMethodNameForDefaultOperatorType (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.NameReflectsOperatorType
+[       OK ] CSharp_OperatorDeclaration.NameReflectsOperatorType (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.NameSetterThrows
+[       OK ] CSharp_OperatorDeclaration.NameSetterThrows (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.NameTokenReturnsNull
+[       OK ] CSharp_OperatorDeclaration.NameTokenReturnsNull (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.NameTokenSetterThrows
+[       OK ] CSharp_OperatorDeclaration.NameTokenSetterThrows (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.ReturnTypeSetterReparentsAndReindexes
+[       OK ] CSharp_OperatorDeclaration.ReturnTypeSetterReparentsAndReindexes (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.ReturnTypeSetterDetachesAndClears
+[       OK ] CSharp_OperatorDeclaration.ReturnTypeSetterDetachesAndClears (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.PrivateImplementationTypeSetterReparentsAndDetaches
+[       OK ] CSharp_OperatorDeclaration.PrivateImplementationTypeSetterReparentsAndDetaches (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.BodySetterReparentsAndDetaches
+[       OK ] CSharp_OperatorDeclaration.BodySetterReparentsAndDetaches (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.ParametersCollectionAddReparents
+[       OK ] CSharp_OperatorDeclaration.ParametersCollectionAddReparents (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.ParametersCollectionAddReindexesDynamically
+[       OK ] CSharp_OperatorDeclaration.ParametersCollectionAddReindexesDynamically (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.AttributesCollectionAddReparents
+[       OK ] CSharp_OperatorDeclaration.AttributesCollectionAddReparents (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.GetChildWalksSlots
+[       OK ] CSharp_OperatorDeclaration.GetChildWalksSlots (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.GetChildSlotInfoWalksSlots
+[       OK ] CSharp_OperatorDeclaration.GetChildSlotInfoWalksSlots (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.GetCollectionByKindReturnsAttributesAndParameters
+[       OK ] CSharp_OperatorDeclaration.GetCollectionByKindReturnsAttributesAndParameters (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.SetChildReplacesReturnType
+[       OK ] CSharp_OperatorDeclaration.SetChildReplacesReturnType (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.SetChildReplacesParameter
+[       OK ] CSharp_OperatorDeclaration.SetChildReplacesParameter (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.SlotStaticsPointAtSharedKinds
+[       OK ] CSharp_OperatorDeclaration.SlotStaticsPointAtSharedKinds (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.SlotStaticsAreDistinct
+[       OK ] CSharp_OperatorDeclaration.SlotStaticsAreDistinct (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.AcceptVisitorDispatches
+[       OK ] CSharp_OperatorDeclaration.AcceptVisitorDispatches (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.AcceptVisitorVirtualThroughBase
+[       OK ] CSharp_OperatorDeclaration.AcceptVisitorVirtualThroughBase (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.AcceptVisitorVirtualThroughEntityDeclaration
+[       OK ] CSharp_OperatorDeclaration.AcceptVisitorVirtualThroughEntityDeclaration (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.DepthFirstWalk
+[       OK ] CSharp_OperatorDeclaration.DepthFirstWalk (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.DepthFirstWalkWithAttribute
+[       OK ] CSharp_OperatorDeclaration.DepthFirstWalkWithAttribute (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.DepthFirstWalkFull
+[       OK ] CSharp_OperatorDeclaration.DepthFirstWalkFull (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.DoMatchSameNode
+[       OK ] CSharp_OperatorDeclaration.DoMatchSameNode (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.DoMatchModifiersMismatchRejects
+[       OK ] CSharp_OperatorDeclaration.DoMatchModifiersMismatchRejects (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.DoMatchModifiersAnyWildcard
+[       OK ] CSharp_OperatorDeclaration.DoMatchModifiersAnyWildcard (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.DoMatchNameMismatchViaDifferentOperatorTypeRejects
+[       OK ] CSharp_OperatorDeclaration.DoMatchNameMismatchViaDifferentOperatorTypeRejects (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.DoMatchSameOperatorTypeMatchesOnNameAndOperatorType
+[       OK ] CSharp_OperatorDeclaration.DoMatchSameOperatorTypeMatchesOnNameAndOperatorType (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.DoMatchReturnTypeMismatchRejects
+[       OK ] CSharp_OperatorDeclaration.DoMatchReturnTypeMismatchRejects (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.DoMatchPrivateImplementationTypeAsymmetryRejects
+[       OK ] CSharp_OperatorDeclaration.DoMatchPrivateImplementationTypeAsymmetryRejects (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.DoMatchParametersMismatchRejects
+[       OK ] CSharp_OperatorDeclaration.DoMatchParametersMismatchRejects (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.DoMatchSameParametersMatch
+[       OK ] CSharp_OperatorDeclaration.DoMatchSameParametersMatch (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.DoMatchBodyAsymmetryRejects
+[       OK ] CSharp_OperatorDeclaration.DoMatchBodyAsymmetryRejects (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.DoMatchRejectsNonOperatorEntityDeclaration
+[       OK ] CSharp_OperatorDeclaration.DoMatchRejectsNonOperatorEntityDeclaration (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.DoMatchRejectsNonEntityDeclaration
+[       OK ] CSharp_OperatorDeclaration.DoMatchRejectsNonEntityDeclaration (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.DoMatchRejectsNull
+[       OK ] CSharp_OperatorDeclaration.DoMatchRejectsNull (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.CloneDeepCopies
+[       OK ] CSharp_OperatorDeclaration.CloneDeepCopies (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.CloneVirtualAndCovariant
+[       OK ] CSharp_OperatorDeclaration.CloneVirtualAndCovariant (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.CloneCopiesAttributes
+[       OK ] CSharp_OperatorDeclaration.CloneCopiesAttributes (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.CloneSkipsAbsentNullableSlots
+[       OK ] CSharp_OperatorDeclaration.CloneSkipsAbsentNullableSlots (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.CloneCopiesParameters
+[       OK ] CSharp_OperatorDeclaration.CloneCopiesParameters (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.CheckInvariantPassesOnFilled
+[       OK ] CSharp_OperatorDeclaration.CheckInvariantPassesOnFilled (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.CheckInvariantPassesOnFull
+[       OK ] CSharp_OperatorDeclaration.CheckInvariantPassesOnFull (0 ms)
+[ RUN      ] CSharp_OperatorDeclaration.CheckInvariantRejectsEmpty
+Running main() from C:\Projects\github\vcpkg\buildtrees\gtest\src\v1.17.0-e243b8ee0f.clean\googletest\src\gtest_main.cc
+[       OK ] CSharp_OperatorDeclaration.CheckInvariantRejectsEmpty (93 ms)
+[----------] 62 tests from CSharp_OperatorDeclaration (96 ms total)
+
+[----------] Global test environment tear-down
+[==========] 243 tests from 11 test suites ran. (153 ms total)
+[  PASSED  ] 243 tests.

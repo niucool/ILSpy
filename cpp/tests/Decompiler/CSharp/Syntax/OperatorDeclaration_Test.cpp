@@ -50,6 +50,7 @@
 #include "Decompiler/CSharp/Syntax/PatternMatching/Pattern.hpp"
 #include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/Slots.hpp"
+#include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"  // IsComparisonOperator(OperatorType)
 #include "Decompiler/CSharp/Syntax/Statements/BlockStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/ReturnStatement.hpp"
 #include "Decompiler/CSharp/Syntax/Statements/Statement.hpp"
@@ -344,6 +345,71 @@ TEST(CSharp_OperatorDeclaration, GetNameReturnsMethodNameForEachOperatorType) {
 // type).
 TEST(CSharp_OperatorDeclaration, GetNameReturnsNulloptForNullInput) {
     EXPECT_FALSE(OperatorDeclaration::GetName(std::optional<OperatorType>()).has_value());
+}
+
+// ---- The GetOperatorType static helper (the reverse method-name lookup) + IsComparisonOperator ----
+
+// `GetOperatorType` round-trips every `OperatorType` value: `GetOperatorType(GetName(i))`
+// recovers `i` (the C# scans the `names` table's method-name column `names[i][1] ==
+// methodName`, first match wins). This is the resolver's entry into the operator-kind
+// classification (CSharpOperators.IsComparisonOperator reads it).
+TEST(CSharp_OperatorDeclaration, GetOperatorTypeRoundTripsEveryName) {
+    for (int i = 0; i <= static_cast<int>(OperatorType::CheckedExplicit); ++i) {
+        auto name = OperatorDeclaration::GetName(static_cast<OperatorType>(i));
+        ASSERT_TRUE(name.has_value()) << "i=" << i;
+        auto resolved = OperatorDeclaration::GetOperatorType(*name);
+        ASSERT_TRUE(resolved.has_value()) << "i=" << i << " name=" << *name;
+        EXPECT_EQ(static_cast<int>(*resolved), i) << "i=" << i << " name=" << *name;
+    }
+}
+
+// `GetOperatorType` resolves representative metadata names, including the C# 11
+// `checked` variants and the `>>>` operator.
+TEST(CSharp_OperatorDeclaration, GetOperatorTypeResolvesRepresentativeNames) {
+    EXPECT_EQ(OperatorDeclaration::GetOperatorType("op_LessThan"), OperatorType::LessThan);
+    EXPECT_EQ(OperatorDeclaration::GetOperatorType("op_Implicit"), OperatorType::Implicit);
+    EXPECT_EQ(OperatorDeclaration::GetOperatorType("op_Explicit"), OperatorType::Explicit);
+    EXPECT_EQ(OperatorDeclaration::GetOperatorType("op_CheckedExplicit"),
+              OperatorType::CheckedExplicit);
+    EXPECT_EQ(OperatorDeclaration::GetOperatorType("op_UnsignedRightShift"),
+              OperatorType::UnsignedRightShift);
+    EXPECT_EQ(OperatorDeclaration::GetOperatorType("op_LogicalNot"),
+              OperatorType::LogicalNot);
+}
+
+// `GetOperatorType` returns `nullopt` for a method name that is not one of the 35 known
+// operator metadata names (the C# returns null).
+TEST(CSharp_OperatorDeclaration, GetOperatorTypeReturnsNulloptForUnknownNames) {
+    EXPECT_FALSE(OperatorDeclaration::GetOperatorType("M").has_value());
+    EXPECT_FALSE(OperatorDeclaration::GetOperatorType("op_Foo").has_value());
+    EXPECT_FALSE(OperatorDeclaration::GetOperatorType("").has_value());
+}
+
+// The `SyntaxExtensions.IsComparisonOperator` extension (SyntaxExtensions.cs line 30) is
+// true for exactly the six comparison kinds.
+TEST(CSharp_OperatorDeclaration, IsComparisonOperatorTrueForTheSixComparisonKinds) {
+    EXPECT_TRUE(IsComparisonOperator(OperatorType::Equality));
+    EXPECT_TRUE(IsComparisonOperator(OperatorType::Inequality));
+    EXPECT_TRUE(IsComparisonOperator(OperatorType::GreaterThan));
+    EXPECT_TRUE(IsComparisonOperator(OperatorType::LessThan));
+    EXPECT_TRUE(IsComparisonOperator(OperatorType::GreaterThanOrEqual));
+    EXPECT_TRUE(IsComparisonOperator(OperatorType::LessThanOrEqual));
+}
+
+// ... and false for the arithmetic / bitwise / logical / conversion / `true`/`false`
+// kinds (the C# `default` arm).
+TEST(CSharp_OperatorDeclaration, IsComparisonOperatorFalseForNonComparisonKinds) {
+    EXPECT_FALSE(IsComparisonOperator(OperatorType::Addition));
+    EXPECT_FALSE(IsComparisonOperator(OperatorType::CheckedAddition));
+    EXPECT_FALSE(IsComparisonOperator(OperatorType::BitwiseAnd));
+    EXPECT_FALSE(IsComparisonOperator(OperatorType::BitwiseOr));
+    EXPECT_FALSE(IsComparisonOperator(OperatorType::ExclusiveOr));
+    EXPECT_FALSE(IsComparisonOperator(OperatorType::Implicit));
+    EXPECT_FALSE(IsComparisonOperator(OperatorType::Explicit));
+    EXPECT_FALSE(IsComparisonOperator(OperatorType::True));
+    EXPECT_FALSE(IsComparisonOperator(OperatorType::False));
+    EXPECT_FALSE(IsComparisonOperator(OperatorType::LogicalNot));
+    EXPECT_FALSE(IsComparisonOperator(OperatorType::LeftShift));
 }
 
 // ---- The Name/NameToken overrides (an operator has no name token) ---------
