@@ -76,9 +76,17 @@
 //     same shared nullable parameter instance added twice), and the four lazy equality
 //     operator-table properties (`ValueEqualityOperators` / `ValueInequalityOperators` /
 //     `ReferenceEqualityOperators` / `ReferenceInequalityOperators`).
+//   * PORTED: the relational operator region (CSharpOperators.cs lines 865-898 + 901-990):
+//     the `RelationalOperatorMethod<T1,T2>` (the lambda-backed built-in comparison: the
+//     Boolean return type, the T1/T2 TypeCode parameters, the stored comparison func, the
+//     `CanEvaluateAtCompileTime => true` flag, and the `Lift` override that builds the
+//     `LiftedBinaryOperatorMethod` then RESETS its return type to the base's plain
+//     Boolean -- "don't lift the return type for relational operators"), plus the four
+//     lazy comparison operator-table properties (`LessThanOperators` /
+//     `LessThanOrEqualOperators` / `GreaterThanOperators` / `GreaterThanOrEqualOperators`).
 //
-// The remaining derived operator-method families (the relational / bitwise /
-// user-defined regions, lines 865-1168) and the lazy operator-table properties built on
+// The remaining derived operator-method families (the bitwise / user-defined
+// regions, lines 992-1168) and the lazy operator-table properties built on
 // them are DEFERRED to later slices.
 //
 // KEY PORT CONVENTIONS:
@@ -230,6 +238,22 @@ public:
     // a derived ctor assigned it in the C#; the port's `returnType_` starts empty and the
     // accessor returns the `UnknownType()` null object until then (convention (e)).
     const ILSpy::Decompiler::TypeSystem::IType& ReturnType() const override;
+
+    // The `internal set` accessor of the C# `ReturnType` property -- the assembly-visible
+    // write the relational operators' `Lift` override performs on the LIFTED form after
+    // construction (`lifted.ReturnType = this.ReturnType;` -- the C# writes the SIBLING
+    // object's property, "don't lift the return type for relational operators"). The
+    // port's `returnType_` is protected (convention (e)) and C++ protected access through
+    // a sibling object is ill-formed, so the internal setter ports as a public member
+    // (convention (a): the C# assembly-internal visibility maps to port-public with
+    // documentation). The owning handle is recovered through `shared_from_this()` +
+    // `const_pointer_cast` (the D529 convention -- the relational `Lift` passes the base's
+    // registered Boolean).
+    void SetReturnType(const ILSpy::Decompiler::TypeSystem::IType& type)
+    {
+        returnType_ = std::const_pointer_cast<ILSpy::Decompiler::TypeSystem::IType>(
+            type.shared_from_this());
+    }
 
     // The C# `IMember IMember.MemberDefinition => this`.
     const ILSpy::Decompiler::TypeSystem::IMember* MemberDefinition() const override
@@ -531,6 +555,26 @@ public:
     // originals with negate=true, no lifted forms.
     const std::vector<std::shared_ptr<OperatorMethod>>& ReferenceInequalityOperators() const;
 
+    // --- The C# lazy relational operator-table properties (lines 901-990, convention (m)) ---
+
+    // The C# `OperatorMethod[] LessThanOperators` (the C# 4.0 spec 7.10 relational
+    // operator `<`): the seven numeric originals (int, uint, long, ulong, float, double,
+    // decimal -- each `a < b`), followed by their lifted `Nullable<T>` forms (whose
+    // return type the `RelationalOperatorMethod.Lift` reset keeps the PLAIN Boolean).
+    const std::vector<std::shared_ptr<OperatorMethod>>& LessThanOperators() const;
+
+    // The C# `OperatorMethod[] LessThanOrEqualOperators`: the same seven originals with
+    // the `a <= b` bodies, then their lifted forms.
+    const std::vector<std::shared_ptr<OperatorMethod>>& LessThanOrEqualOperators() const;
+
+    // The C# `OperatorMethod[] GreaterThanOperators`: the same seven originals with the
+    // `a > b` bodies, then their lifted forms.
+    const std::vector<std::shared_ptr<OperatorMethod>>& GreaterThanOperators() const;
+
+    // The C# `OperatorMethod[] GreaterThanOrEqualOperators`: the same seven originals with
+    // the `a >= b` bodies, then their lifted forms.
+    const std::vector<std::shared_ptr<OperatorMethod>>& GreaterThanOrEqualOperators() const;
+
 private:
     // The C# `private CSharpOperators(ICompilation compilation)` -- private; `Get`
     // (a static member, which has private access) builds the instance. NOTE:
@@ -582,6 +626,13 @@ private:
     mutable std::vector<std::shared_ptr<OperatorMethod>> valueInequalityOperators_;
     mutable std::vector<std::shared_ptr<OperatorMethod>> referenceEqualityOperators_;
     mutable std::vector<std::shared_ptr<OperatorMethod>> referenceInequalityOperators_;
+
+    // The C# `OperatorMethod[]? lessThanOperators` (and the three siblings) -- the
+    // relational lazy memo fields (convention (m)).
+    mutable std::vector<std::shared_ptr<OperatorMethod>> lessThanOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> lessThanOrEqualOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> greaterThanOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> greaterThanOrEqualOperators_;
 };
 
 // ---------------------------------------------------------------------------
@@ -755,6 +806,33 @@ inline Decimal operator-(Decimal a, Decimal b)
     b.isNegative = !b.isNegative;
     return a + b;
 }
+
+// The C# relational `a < b` / `a <= b` / `a > b` / `a >= b` bodies the comparison operator
+// tables below store (convention (l)): both magnitudes scaled to the larger scale (the
+// addition alignment), then compared by sign and magnitude -- a negative value is less
+// than a non-negative one; same-sign values compare by their aligned magnitudes with the
+// negative direction inverted.
+inline int CompareDecimal(Decimal a, Decimal b)
+{
+    a = NormalizeDecimal(a);
+    b = NormalizeDecimal(b);
+    if (a.isNegative != b.isNegative)
+        return a.isNegative ? -1 : 1;
+    const std::uint8_t scale = a.scale > b.scale ? a.scale : b.scale;
+    std::uint64_t ma = static_cast<std::uint64_t>(a.mantissa);
+    std::uint64_t mb = static_cast<std::uint64_t>(b.mantissa);
+    if (a.scale < scale)
+        ma *= DecimalPow10(static_cast<std::uint8_t>(scale - a.scale));
+    if (b.scale < scale)
+        mb *= DecimalPow10(static_cast<std::uint8_t>(scale - b.scale));
+    const int result = ma < mb ? -1 : (ma > mb ? 1 : 0);
+    return a.isNegative ? -result : result;
+}
+
+inline bool operator<(Decimal a, Decimal b) { return CompareDecimal(a, b) < 0; }
+inline bool operator<=(Decimal a, Decimal b) { return CompareDecimal(a, b) <= 0; }
+inline bool operator>(Decimal a, Decimal b) { return CompareDecimal(a, b) > 0; }
+inline bool operator>=(Decimal a, Decimal b) { return CompareDecimal(a, b) >= 0; }
 
 // The C# `Type.GetTypeCode(typeof(T))` -- convention (k): the compile-time `TypeCode` of
 // the primitive types the operator tables instantiate. The C# resolves the parameter and
@@ -1209,6 +1287,73 @@ private:
     // The C# `public readonly TypeCode Type` / `public readonly bool Negate`.
     const ILSpy::Decompiler::TypeSystem::TypeCode type_;
     const bool negate_;
+};
+
+// ---------------------------------------------------------------------------
+// The relational operator region (CSharpOperators.cs lines 865-898)
+// ---------------------------------------------------------------------------
+
+// The C# `sealed class RelationalOperatorMethod<T1, T2> : BinaryOperatorMethod` (lines
+// 866-898) -- the lambda-backed built-in comparison (`<` / `<=` / `>` / `>=`): the return
+// type is always Boolean, the two parameters come from the T1/T2 TypeCodes (a DIAGONAL
+// table entry adds the SAME shared parameter instance twice), and `CanEvaluateAtCompileTime`
+// is true. The `Lift` override is the region's crux: it builds the LiftedBinaryOperatorMethod
+// (whose ctor lifts the return type to `Nullable<bool>`) and then RESETS the lifted form's
+// return type to the base's PLAIN Boolean (the C# comment: "don't lift the return type
+// for relational operators" -- a lifted comparison of possibly-null operands still
+// produces a definite bool; the same shape as the LiftedEqualityOperatorMethod). The C#
+// `object? Invoke(CSharpResolver resolver, object? lhs, object? rhs)` (the null-operand
+// short-circuit and the `CSharpPrimitiveCast` casts before the func application) is
+// deferred as a whole (convention (j): the resolver is the parameter type, the only
+// caller, and the only dependency). `final` (the C# sealed).
+template <typename T1, typename T2>
+class RelationalOperatorMethod final : public BinaryOperatorMethod {
+public:
+    // The C# `public RelationalOperatorMethod(CSharpOperators operators, Func<T1,T2,bool>
+    // func) : base(operators.compilation)`: `this.ReturnType =
+    // operators.compilation.FindType(KnownTypeCode.Boolean); parameters.Add(
+    // operators.MakeParameter(Type.GetTypeCode(typeof(T1)))); parameters.Add(
+    // operators.MakeParameter(Type.GetTypeCode(typeof(T2)))); this.func = func;` -- the
+    // two parameters come from the `TypeCodeFor` trait (convention (k)); the owning
+    // Boolean handle is recovered through `shared_from_this()` + `const_pointer_cast`
+    // (the D529 convention).
+    RelationalOperatorMethod(const CSharpOperators& operators,
+                             std::function<bool(T1, T2)> func)
+        : BinaryOperatorMethod(operators.Compilation())
+    {
+        const ILSpy::Decompiler::TypeSystem::IType& booleanType =
+            operators.Compilation().FindType(
+                ILSpy::Decompiler::TypeSystem::KnownTypeCode::Boolean);
+        returnType_ = std::const_pointer_cast<ILSpy::Decompiler::TypeSystem::IType>(
+            booleanType.shared_from_this());
+        parameters_.push_back(operators.MakeParameter(TypeCodeFor<T1>::value));
+        parameters_.push_back(operators.MakeParameter(TypeCodeFor<T2>::value));
+        func_ = std::move(func);
+    }
+
+    // The C# `public override bool CanEvaluateAtCompileTime => true` -- the lambda-backed
+    // comparison is compile-time evaluable (the deferred `Invoke` applies the stored
+    // func).
+    bool CanEvaluateAtCompileTime() const override { return true; }
+
+    // The C# `public override OperatorMethod Lift(CSharpOperators operators)`: `var
+    // lifted = new LiftedBinaryOperatorMethod(operators, this); lifted.ReturnType =
+    // this.ReturnType; return lifted;` -- the LiftedBinaryOperatorMethod ctor lifted the
+    // return type to `Nullable<bool>`; the reset (through the C# internal setter's port,
+    // `SetReturnType` above) keeps the base's PLAIN Boolean. The parameters stay the
+    // lifted `Nullable<T>` instances the LiftedBinaryOperatorMethod ctor built.
+    std::shared_ptr<OperatorMethod> Lift(const CSharpOperators& operators) const override
+    {
+        auto lifted = std::make_shared<LiftedBinaryOperatorMethod>(operators, *this);
+        lifted->SetReturnType(ReturnType());
+        return lifted;
+    }
+
+private:
+    // The C# `readonly Func<T1,T2,bool> func` -- stored for the deferred `Invoke`
+    // (convention (j)); the four comparison tables pass the C# `<`/`<=`/`>`/`>=` bodies
+    // (the Decimal stand-in's comparison operators below).
+    std::function<bool(T1, T2)> func_;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

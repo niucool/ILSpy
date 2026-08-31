@@ -1343,4 +1343,118 @@ CSharpOperators::ReferenceInequalityOperators() const
     return referenceInequalityOperators_;
 }
 
+// ---------------------------------------------------------------------------
+// The lazy relational operator-table properties (CSharpOperators.cs lines 901-990)
+// ---------------------------------------------------------------------------
+
+// The C# `public OperatorMethod[] LessThanOperators` (the C# 4.0 spec 7.10 relational
+// operator `<`): the seven numeric originals (int, uint, long, ulong, float, double,
+// decimal -- each `a < b`), then their lifted `Nullable<T>` forms (whose return type the
+// `RelationalOperatorMethod::Lift` reset keeps the PLAIN Boolean, convention (m)).
+const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::LessThanOperators()
+    const
+{
+    if (lessThanOperators_.empty())
+    {
+        lessThanOperators_ = Lift({
+            std::make_shared<RelationalOperatorMethod<std::int32_t, std::int32_t>>(
+                *this, [](std::int32_t a, std::int32_t b) { return a < b; }),
+            std::make_shared<RelationalOperatorMethod<std::uint32_t, std::uint32_t>>(
+                *this, [](std::uint32_t a, std::uint32_t b) { return a < b; }),
+            std::make_shared<RelationalOperatorMethod<std::int64_t, std::int64_t>>(
+                *this, [](std::int64_t a, std::int64_t b) { return a < b; }),
+            std::make_shared<RelationalOperatorMethod<std::uint64_t, std::uint64_t>>(
+                *this, [](std::uint64_t a, std::uint64_t b) { return a < b; }),
+            std::make_shared<RelationalOperatorMethod<float, float>>(
+                *this, [](float a, float b) { return a < b; }),
+            std::make_shared<RelationalOperatorMethod<double, double>>(
+                *this, [](double a, double b) { return a < b; }),
+            std::make_shared<RelationalOperatorMethod<Decimal, Decimal>>(
+                *this, [](Decimal a, Decimal b) { return a < b; }),
+        });
+    }
+    return lessThanOperators_;
+}
+
+// The C# `public OperatorMethod[] LessThanOrEqualOperators`: the same seven originals
+// with the `a <= b` bodies, then their lifted forms.
+const std::vector<std::shared_ptr<OperatorMethod>>&
+CSharpOperators::LessThanOrEqualOperators() const
+{
+    if (lessThanOrEqualOperators_.empty())
+    {
+        lessThanOrEqualOperators_ = Lift({
+            std::make_shared<RelationalOperatorMethod<std::int32_t, std::int32_t>>(
+                *this, [](std::int32_t a, std::int32_t b) { return a <= b; }),
+            std::make_shared<RelationalOperatorMethod<std::uint32_t, std::uint32_t>>(
+                *this, [](std::uint32_t a, std::uint32_t b) { return a <= b; }),
+            std::make_shared<RelationalOperatorMethod<std::int64_t, std::int64_t>>(
+                *this, [](std::int64_t a, std::int64_t b) { return a <= b; }),
+            std::make_shared<RelationalOperatorMethod<std::uint64_t, std::uint64_t>>(
+                *this, [](std::uint64_t a, std::uint64_t b) { return a <= b; }),
+            std::make_shared<RelationalOperatorMethod<float, float>>(
+                *this, [](float a, float b) { return a <= b; }),
+            std::make_shared<RelationalOperatorMethod<double, double>>(
+                *this, [](double a, double b) { return a <= b; }),
+            std::make_shared<RelationalOperatorMethod<Decimal, Decimal>>(
+                *this, [](Decimal a, Decimal b) { return a <= b; }),
+        });
+    }
+    return lessThanOrEqualOperators_;
+}
+
+// The C# `public OperatorMethod[] GreaterThanOperators`: the same seven originals with
+// the `a > b` bodies, then their lifted forms.
+const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::GreaterThanOperators()
+    const
+{
+    if (greaterThanOperators_.empty())
+    {
+        greaterThanOperators_ = Lift({
+            std::make_shared<RelationalOperatorMethod<std::int32_t, std::int32_t>>(
+                *this, [](std::int32_t a, std::int32_t b) { return a > b; }),
+            std::make_shared<RelationalOperatorMethod<std::uint32_t, std::uint32_t>>(
+                *this, [](std::uint32_t a, std::uint32_t b) { return a > b; }),
+            std::make_shared<RelationalOperatorMethod<std::int64_t, std::int64_t>>(
+                *this, [](std::int64_t a, std::int64_t b) { return a > b; }),
+            std::make_shared<RelationalOperatorMethod<std::uint64_t, std::uint64_t>>(
+                *this, [](std::uint64_t a, std::uint64_t b) { return a > b; }),
+            std::make_shared<RelationalOperatorMethod<float, float>>(
+                *this, [](float a, float b) { return a > b; }),
+            std::make_shared<RelationalOperatorMethod<double, double>>(
+                *this, [](double a, double b) { return a > b; }),
+            std::make_shared<RelationalOperatorMethod<Decimal, Decimal>>(
+                *this, [](Decimal a, Decimal b) { return a > b; }),
+        });
+    }
+    return greaterThanOperators_;
+}
+
+// The C# `public OperatorMethod[] GreaterThanOrEqualOperators`: the same seven originals
+// with the `a >= b` bodies, then their lifted forms.
+const std::vector<std::shared_ptr<OperatorMethod>>&
+CSharpOperators::GreaterThanOrEqualOperators() const
+{
+    if (greaterThanOrEqualOperators_.empty())
+    {
+        greaterThanOrEqualOperators_ = Lift({
+            std::make_shared<RelationalOperatorMethod<std::int32_t, std::int32_t>>(
+                *this, [](std::int32_t a, std::int32_t b) { return a >= b; }),
+            std::make_shared<RelationalOperatorMethod<std::uint32_t, std::uint32_t>>(
+                *this, [](std::uint32_t a, std::uint32_t b) { return a >= b; }),
+            std::make_shared<RelationalOperatorMethod<std::int64_t, std::int64_t>>(
+                *this, [](std::int64_t a, std::int64_t b) { return a >= b; }),
+            std::make_shared<RelationalOperatorMethod<std::uint64_t, std::uint64_t>>(
+                *this, [](std::uint64_t a, std::uint64_t b) { return a >= b; }),
+            std::make_shared<RelationalOperatorMethod<float, float>>(
+                *this, [](float a, float b) { return a >= b; }),
+            std::make_shared<RelationalOperatorMethod<double, double>>(
+                *this, [](double a, double b) { return a >= b; }),
+            std::make_shared<RelationalOperatorMethod<Decimal, Decimal>>(
+                *this, [](Decimal a, Decimal b) { return a >= b; }),
+        });
+    }
+    return greaterThanOrEqualOperators_;
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver
