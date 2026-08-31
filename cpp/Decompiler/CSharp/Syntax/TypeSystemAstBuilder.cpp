@@ -37,6 +37,7 @@
 #include "TypeSystemAstBuilder.hpp"
 
 #include "ComposedType.hpp"
+#include "Constraint.hpp"
 #include "Expressions/ArrayCreateExpression.hpp"
 #include "Expressions/ArrayInitializerExpression.hpp"
 #include "Expressions/BinaryOperatorExpression.hpp"
@@ -51,6 +52,7 @@
 #include "Expressions/TypeReferenceExpression.hpp"
 #include "Expressions/UnaryOperatorExpression.hpp"
 #include "FunctionPointerAstType.hpp"
+#include "MethodDeclaration.hpp"
 #include "ParameterDeclaration.hpp"
 #include "PrimitiveType.hpp"
 #include "Slots.hpp"
@@ -71,6 +73,8 @@
 #include "Decompiler/TypeSystem/CustomAttributeTypedArgument.hpp"
 #include "Decompiler/TypeSystem/FullTypeName.hpp"
 #include "Decompiler/TypeSystem/IField.hpp"
+#include "Decompiler/TypeSystem/IMethod.hpp"
+#include "Decompiler/TypeSystem/IParameter.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/IEntity.hpp"
 #include "Decompiler/TypeSystem/IModule.hpp"
@@ -2002,6 +2006,50 @@ VariableDeclarationStatement* TypeSystemAstBuilder::ConvertVariable(
     }
     decl->Variables().Add(new VariableInitializer(v.Name(), initializer));
     return decl;
+}
+
+// The C# `void AddNullabilityDisambiguatingConstraints(MethodDeclaration decl,
+// IMethod method)` (line 2686) -- see the header declaration for the full
+// contract. A disambiguator is required only where the type parameter itself
+// carries a nullable annotation (`T?`) in the signature: without it the compiler
+// reads `T?` as `Nullable<T>` (the C# comment block above the method).
+void TypeSystemAstBuilder::AddNullabilityDisambiguatingConstraints(
+    MethodDeclaration& decl, const TS::IMethod& method) const {
+    if (method.TypeParameters().empty())
+        return;
+    NullableTypeParameterCollector collector(method.TypeParameters());
+    // `AcceptVisitor` is non-const (the D406 contract): the const accessors'
+    // results are const_cast for the visits (the D515/D517 convention -- the
+    // underlying type-system objects are mutable, the accessor's const is the
+    // contract).
+    const_cast<TS::IType&>(method.ReturnType()).AcceptVisitor(collector);
+    for (const TS::IParameter* p : method.Parameters()) {
+        if (p == nullptr)
+            continue;
+        const_cast<TS::IType&>(p->Type()).AcceptVisitor(collector);
+    }
+    if (collector.NullableTypeParameters.empty())
+        return;
+    for (const TS::ITypeParameter* tp : method.TypeParameters()) {
+        if (tp == nullptr)
+            continue;
+        // The C# `!collector.NullableTypeParameters.Contains(tp) ||
+        // GetNullabilityDisambiguator(tp) is not string keyword` -- the recorded
+        // set is scanned by pointer identity (the C# HashSet reference equality)
+        // and the disambiguator is the already-ported free function above.
+        if (std::find(collector.NullableTypeParameters.begin(),
+                      collector.NullableTypeParameters.end(),
+                      tp) == collector.NullableTypeParameters.end()) {
+            continue;
+        }
+        std::optional<std::string> keyword = GetNullabilityDisambiguator(*tp);
+        if (!keyword.has_value())
+            continue;
+        auto* c = new Constraint();
+        c->TypeParameter(MakeSimpleType(tp->Name()));
+        c->BaseTypes().Add(new PrimitiveType(*keyword));
+        decl.Constraints().Add(c);
+    }
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

@@ -36,7 +36,11 @@
 // IsDefaultValueAssignmentAllowed prerequisite landed in TypeSystemExtensions),
 // and the "Convert Type Parameter" + "Convert Variable" regions
 // (ConvertTypeParameter / ConvertTypeParameterConstraint, C# lines 2601-2741,
-// and ConvertVariable, C# lines 2743-2761) are landed; the remaining `Convert*`
+// and ConvertVariable, C# lines 2743-2761), plus the nullability-disambiguation
+// tail of the Convert Type Parameter region (AddNullabilityDisambiguatingConstraints
+// + the NullableTypeParameterCollector visitor + GetNullabilityDisambiguator, C#
+// lines 2683-2734, consumed only by the deferred ConvertEntity) are landed; the
+// remaining `Convert*`
 // instance methods (ConvertSymbol / ConvertEntity / ConvertExtension) follow in
 // later slices, consuming the free functions below as they grow.
 //
@@ -64,7 +68,9 @@
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/TypeVisitor.hpp"
 
+#include <algorithm>
 #include <any>
 #include <cmath>
 #include <cstdint>
@@ -101,6 +107,7 @@ namespace ILSpy::Decompiler::CSharp::Syntax {
 class Attribute;
 class AttributeSection;
 class Constraint;
+class MethodDeclaration;
 class ParameterDeclaration;
 class TypeParameterDeclaration;
 class VariableDeclarationStatement;
@@ -304,6 +311,74 @@ inline std::optional<std::string> GetNullabilityDisambiguator(
     }
     return std::optional<std::string>("default");
 }
+
+// ---------------------------------------------------------------------------
+// NullableTypeParameterCollector (TypeSystemAstBuilder.cs lines 2717-2731, the
+// `sealed class NullableTypeParameterCollector(IReadOnlyList<ITypeParameter>
+// typeParameters) : TypeVisitor` nested in the builder). Collects the type
+// parameters of one method that appear with a nullable annotation (`T?`)
+// anywhere in a visited type, including nested positions such as `List<T?>` or
+// `T?[]`. Type parameters of any other owner are ignored: a specialized
+// signature can substitute a foreign type parameter that happens to share an
+// index with one of this method's own.
+//
+// The C# `sealed` ports to `final`; the C# private nested class is lifted to
+// namespace scope for direct TDD ahead of its only consumer
+// (`AddNullabilityDisambiguatingConstraints` below -- the ILiftedOperator lift
+// precedent). The C# `HashSet<ITypeParameter>` field (the default reference-
+// equality comparer -- `ITypeParameter` declares no `Equals` override, so the
+// set is an identity set) ports to an insertion-ordered
+// `std::vector<const ITypeParameter*>` with pointer-identity dedup (the
+// iteration-67 TP-bounds convention); the C# `IReadOnlyList<ITypeParameter>`
+// ctor parameter ports to the by-value `std::vector<const ITypeParameter*>`
+// (the `IMethod::TypeParameters()` return shape). The C# pattern match
+// `type is NullabilityAnnotatedTypeParameter { Nullability: Nullability.Nullable }
+// natp && typeParameters.Contains(natp.OriginalTypeParameter)` ports to the
+// `dynamic_cast` + `Nullability()` check + pointer-scan conjunction, and the C#
+// `base.VisitNullabilityAnnotatedType(type)` (continue into the children so the
+// nested positions record too) ports to the `TypeVisitor` base default -- the
+// `NullabilityAnnotatedTypeParameter::VisitChildren` override keeps that walk
+// off the diamond's `bad_weak_ptr` arms.
+// ---------------------------------------------------------------------------
+class NullableTypeParameterCollector final : public TS::TypeVisitor {
+public:
+    explicit NullableTypeParameterCollector(
+        std::vector<const TS::ITypeParameter*> typeParameters)
+        : typeParameters_(std::move(typeParameters)) {}
+
+    // The C# `public readonly HashSet<ITypeParameter> NullableTypeParameters = [];`
+    // (the recorded set; `Contains` over it is how
+    // `AddNullabilityDisambiguatingConstraints` gates the per-parameter clause).
+    std::vector<const TS::ITypeParameter*> NullableTypeParameters;
+
+    TS::ITypePtr VisitNullabilityAnnotatedType(TS::NullabilityAnnotatedType& type) override {
+        if (auto* natp = dynamic_cast<TS::NullabilityAnnotatedTypeParameter*>(&type)) {
+            if (natp->Nullability() == TS::Nullability::Nullable &&
+                ContainsTypeParameter(natp->OriginalTypeParameter().get())) {
+                AddNullable(natp->OriginalTypeParameter().get());
+            }
+        }
+        return TS::TypeVisitor::VisitNullabilityAnnotatedType(type);
+    }
+
+private:
+    // The C# `typeParameters.Contains(...)` (LINQ over the ctor-captured list;
+    // the default equality comparer is reference equality).
+    bool ContainsTypeParameter(const TS::ITypeParameter* tp) const {
+        return std::find(typeParameters_.begin(), typeParameters_.end(), tp) !=
+               typeParameters_.end();
+    }
+    // The C# `NullableTypeParameters.Add(...)` (HashSet idempotence under
+    // reference equality).
+    void AddNullable(const TS::ITypeParameter* tp) {
+        if (std::find(NullableTypeParameters.begin(), NullableTypeParameters.end(), tp) ==
+            NullableTypeParameters.end()) {
+            NullableTypeParameters.push_back(tp);
+        }
+    }
+
+    std::vector<const TS::ITypeParameter*> typeParameters_;
+};
 
 // ---------------------------------------------------------------------------
 // IsObjectOrValueType (TypeSystemAstBuilder.cs line 2736). Returns true when
@@ -1332,6 +1407,29 @@ public:
     // to public for direct TDD (the ConvertTypeParameter convention); the nullable
     // C# return ports to a nullable raw pointer (nullptr is the C# null).
     Constraint* ConvertTypeParameterConstraint(const TS::ITypeParameter& tp) const;
+
+    // The C# `void AddNullabilityDisambiguatingConstraints(MethodDeclaration decl,
+    // IMethod method)` (line 2686) -- the C# 8 nullability disambiguation for
+    // overrides and explicit interface implementations: a `T?` in the re-emitted
+    // signature means a nullable annotation (not `Nullable<T>`) only where the
+    // type parameter carries a `class` / `default` constraint, so the method's
+    // return type and every parameter type are visited for nullable-annotated
+    // occurrences of the method's own type parameters (the
+    // `NullableTypeParameterCollector` above), and each such parameter with a
+    // disambiguator (the `GetNullabilityDisambiguator` free function at the top
+    // of this header) gets a `where T : class` / `where T : default` clause
+    // appended to `decl.Constraints`. The clause is built here rather than
+    // through `ConvertTypeParameterConstraint` (which also prints `allows ref
+    // struct` from the byreflike flag -- restating it is CS0460). Widened to
+    // public for direct TDD ahead of the `ConvertEntity` consumer slice (the
+    // `ConvertTypeParameter` convention); `decl` is non-const because the
+    // constraints collection is mutated, and `method` is `const` because every
+    // member read is const (the ConvertParameter convention). AcceptVisitor is
+    // non-const (the D406 contract), so the const `ReturnType()`/`Type()`
+    // accessors' results are const_cast for the visits (the D515/D517
+    // convention).
+    void AddNullabilityDisambiguatingConstraints(MethodDeclaration& decl,
+                                                  const TS::IMethod& method) const;
 
     // The C# `public VariableDeclarationStatement ConvertVariable(IVariable v)`
     // (line 2744) -- the local-variable/const-field renderer: the `IsConst` flag

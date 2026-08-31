@@ -86,6 +86,7 @@
 #include "Decompiler/TypeSystem/Nullability.hpp"
 #include "Decompiler/TypeSystem/SymbolKind.hpp"
 #include "Decompiler/TypeSystem/TypeConstraint.hpp"
+#include "Decompiler/TypeSystem/TypeVisitor.hpp"
 #include "Decompiler/TypeSystem/VarianceModifier.hpp"
 
 #include <memory>
@@ -239,13 +240,66 @@ public:
         return NullabilityAnnotatedType::Nullability();
     }
 
-    // NOTE: `shared_from_this()`-based paths (the base `ChangeNullability` /
-    // `VisitChildren` no-change arms) must not be exercised on an instance of this
-    // class: the two `IType` subobjects leave `enable_shared_from_this`'s weak
-    // back-reference unbound (ambiguous in the shared_ptr ctor), so they would
-    // throw `bad_weak_ptr`. The C# single-object identity model has no such
-    // hazard; the normalizers reach an annotated parameter only through the
-    // `VisitTypeParameter` / `VisitNullabilityAnnotatedType` unwrap arms.
+    // NOTE: `shared_from_this()`-based paths must not be exercised on an instance
+    // of this class: the two `IType` subobjects leave `enable_shared_from_this`'s
+    // weak back-reference unbound (ambiguous in the shared_ptr ctor), so the
+    // inherited no-change arms would throw `bad_weak_ptr`. The `AcceptVisitor` /
+    // `VisitChildren` overrides below replace those arms, so a plain visitor can
+    // visit an annotated parameter through either `IType` view (the C# single-object
+    // identity model); the normalizers' direct `VisitTypeParameter` / unwrap arms
+    // are unaffected.
+
+    // --- The visitor dispatch (final overriders for BOTH IType subobjects) ----
+    // The C# inherits `NullabilityAnnotatedType.AcceptVisitor`
+    // (`visitor.VisitNullabilityAnnotatedType(this)`), so EVERY view of an
+    // annotated parameter routes to `VisitNullabilityAnnotatedType`. Without this
+    // override the port's two `IType` subobjects would dispatch differently: the
+    // `NullabilityAnnotatedType` path reaches the override while the
+    // `ITypeParameter` path (how `ChangeNullability` returns the wrapper --
+    // `static_pointer_cast<ITypeParameter>`) falls to the `IType` default
+    // (`VisitOtherType`), losing annotated parameters that flow through
+    // `ITypeParameter`-typed slots. A single declaration here is the final
+    // overrider for both subobjects' vtables, restoring the C# view-independent
+    // dispatch.
+    ITypePtr AcceptVisitor(TypeVisitor& visitor) override {
+        return visitor.VisitNullabilityAnnotatedType(*this);
+    }
+
+    // The C# inherits `NullabilityAnnotatedType.VisitChildren` (visit the wrapped
+    // base type; unchanged children yield `this`, changed children rebuild the
+    // wrapper). The inherited no-change arm calls `shared_from_this()`, which
+    // throws `bad_weak_ptr` here (the diamond hazard above), so this override
+    // replaces it. The C# `return this` reference identity has no port equivalent
+    // for this class: `enable_shared_from_this` cannot be bound to it at all
+    // (adding a third `enable_shared_from_this<NullabilityAnnotatedTypeParameter>`
+    // base is inert -- MSVC's `make_shared` hook SFINAE-declines a class whose
+    // inherited `_Esft_type` alias is ambiguous across three bases), so BOTH arms
+    // return a fresh equivalent wrapper instead. The only visitor consumers today
+    // are pure recorders that discard the result (`NullableTypeParameterCollector`);
+    // the deferred `TypeParameterSubstitution.VisitNullabilityAnnotatedType`
+    // override intercepts annotated parameters itself before any base call (the
+    // C# TypeParameterSubstitution.cs pattern-match arm).
+    ITypePtr VisitChildren(TypeVisitor& visitor) override {
+        // The NATP -> ITypePtr up-cast is ambiguous (the two IType subobjects), so
+        // the rebuilt wrapper binds through the primary NullabilityAnnotatedType
+        // base (the ChangeNullability static_pointer_cast convention).
+        if (!typeParameter_)
+            return ITypePtr(std::static_pointer_cast<NullabilityAnnotatedType>(
+                std::make_shared<NullabilityAnnotatedTypeParameter>(
+                    typeParameter_, NullabilityAnnotatedType::Nullability())));
+        ITypePtr newBase = typeParameter_->AcceptVisitor(visitor);
+        auto newParameter = std::dynamic_pointer_cast<ITypeParameter>(newBase);
+        if (newParameter)
+            return ITypePtr(std::static_pointer_cast<NullabilityAnnotatedType>(
+                std::make_shared<NullabilityAnnotatedTypeParameter>(
+                    std::move(newParameter), NullabilityAnnotatedType::Nullability())));
+        // A substituted non-parameter base re-wraps as a plain annotated type
+        // (the minimal-port collapse of the C# `ChangeNullability` edge cases; the
+        // plain `NullabilityAnnotatedType::VisitChildren` deferral).
+        return std::make_shared<NullabilityAnnotatedType>(
+            std::move(newBase), NullabilityAnnotatedType::Nullability());
+    }
+
 
     // --- IType (final overriders for BOTH IType subobjects; all delegate to the
     //     wrapped parameter, faithful to the inherited NullabilityAnnotatedType
