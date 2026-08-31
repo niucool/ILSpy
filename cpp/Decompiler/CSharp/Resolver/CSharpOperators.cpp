@@ -36,6 +36,7 @@
 #include "Decompiler/Util/CacheManager.hpp"  // CacheManager (Get factory)
 
 #include <any>
+#include <charconv>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -60,7 +61,8 @@ namespace {
 // ---------------------------------------------------------------------------
 // The checked/unchecked arithmetic bodies the binary operator tables store (the C#
 // `(a, b) => checked(a * b)` / `(a, b) => unchecked(a * b)` lambda bodies, convention
-// (j): stored by the ctors, consumed by the deferred `Invoke`). The C# `checked`
+// (j): stored by the ctors, consumed by the `Invoke` constant-evaluation entry).
+// The C# `checked`
 // context throws OverflowException when the true result leaves the result type's
 // range; the `unchecked` context wraps (two's complement for the signed integrals).
 // Integer division/remainder by zero throws DivideByZeroException in BOTH contexts
@@ -768,8 +770,8 @@ const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::UnaryPlusOp
 // the five signed-and-floating originals, each `i => unchecked(-i)`. The port's unchecked
 // integer negation goes through the unsigned subtraction -- the two's-complement wrap the
 // C# `unchecked` context defines (only INT32_MIN/INT64_MIN negate to themselves), without
-// the C++ signed-overflow UB. The stored funcs are consumed by the deferred `Invoke`
-// (convention (j)).
+// the C++ signed-overflow UB. The stored funcs are consumed by the `Invoke`
+// constant-evaluation entry (convention (j)).
 const std::vector<std::shared_ptr<OperatorMethod>>&
 CSharpOperators::UncheckedUnaryMinusOperators() const
 {
@@ -1562,7 +1564,7 @@ const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::BitwiseOrOp
 // The C# note above the table, kept verbatim in spirit: "Note: the logic for the lifted
 // bool? bitwise operators is wrong; we produce `true | null` = `null` when it should be
 // true. However, this is irrelevant because bool? cannot be a compile-time type." The
-// divergence lives in the deferred `Invoke` bodies (the null-propagation semantics of a
+// divergence lives in the `Invoke` bodies (the null-propagation semantics of a
 // lifted `|`/`^` on `bool?`), not in the type shape the tables carry.
 const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::BitwiseXorOperators()
     const
@@ -1746,6 +1748,166 @@ LiftedUserDefinedOperator::LiftedUserDefinedOperator(
             *const_cast<ILSpy::Decompiler::TypeSystem::IType&>(nonLiftedMethod->ReturnType())
                  .AcceptVisitor(substitution)));
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// The Invoke constant-evaluation members (convention (j)) -- the non-template
+// out-of-line overrides (the lambda-backed unary/binary and relational template
+// overrides live inline in the header next to their stored funcs).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The port's stand-in for the C# `object.ToString()` virtual dispatch on a boxed
+// operand of `string.Concat(object, object)` -- the primitive spellings with the
+// type-name fallback (the DefaultParameter convention (m) stand-in for the same
+// rendering problem; the shortest round-trip `std::to_chars` is the .NET Core 3.0+
+// float/double ToString behavior). Only the `string` shape is reachable through the
+// resolver -- `CanEvaluateAtCompileTime` is true only for the string+string form --
+// but the C# body happily renders any boxed value.
+std::string ConcatOperandToString(const std::any& value)
+{
+    if (const bool* v = std::any_cast<bool>(&value))
+        return *v ? "True" : "False";
+    if (const std::int8_t* v = std::any_cast<std::int8_t>(&value))
+        return std::to_string(static_cast<int>(*v));
+    if (const std::uint8_t* v = std::any_cast<std::uint8_t>(&value))
+        return std::to_string(static_cast<unsigned int>(*v));
+    if (const std::int16_t* v = std::any_cast<std::int16_t>(&value))
+        return std::to_string(static_cast<int>(*v));
+    if (const std::uint16_t* v = std::any_cast<std::uint16_t>(&value))
+        return std::to_string(static_cast<unsigned int>(*v));
+    if (const std::int32_t* v = std::any_cast<std::int32_t>(&value))
+        return std::to_string(*v);
+    if (const std::uint32_t* v = std::any_cast<std::uint32_t>(&value))
+        return std::to_string(*v);
+    if (const std::int64_t* v = std::any_cast<std::int64_t>(&value))
+        return std::to_string(*v);
+    if (const std::uint64_t* v = std::any_cast<std::uint64_t>(&value))
+        return std::to_string(*v);
+    if (const float* v = std::any_cast<float>(&value)) {
+        char buffer[64];
+        const std::to_chars_result result =
+            std::to_chars(buffer, buffer + sizeof(buffer), *v);
+        if (result.ec != std::errc{})
+            return std::string();
+        return std::string(buffer, result.ptr);
+    }
+    if (const double* v = std::any_cast<double>(&value)) {
+        char buffer[64];
+        const std::to_chars_result result =
+            std::to_chars(buffer, buffer + sizeof(buffer), *v);
+        if (result.ec != std::errc{})
+            return std::string();
+        return std::string(buffer, result.ptr);
+    }
+    if (const std::string* v = std::any_cast<std::string>(&value))
+        return *v;
+    // The C# `object.ToString` default returns the runtime type's name.
+    return value.type().name();
+}
+
+// The C# `object.Equals(lhs, rhs)` over two boxed operands (the EqualityOperatorMethod
+// comparison arm): a runtime-type mismatch yields false (`int.Equals(object)` is
+// `obj is int && m_value == (int)obj`), the same-type boxed values compare by value,
+// and the `Decimal` stand-in compares numerically through CompareDecimal (the
+// System.Decimal value equality -- the scale-aligned comparison, so `50` equals `5.0`).
+// The empty-any (C# null) shapes never reach this helper: the equality Invoke handles
+// them before the operand casts.
+bool EqualsBoxedValues(const std::any& lhs, const std::any& rhs)
+{
+    if (lhs.type() != rhs.type())
+        return false;
+    if (const bool* v = std::any_cast<bool>(&lhs))
+        return *v == std::any_cast<bool>(rhs);
+    if (const char16_t* v = std::any_cast<char16_t>(&lhs))
+        return *v == std::any_cast<char16_t>(rhs);
+    if (const std::int8_t* v = std::any_cast<std::int8_t>(&lhs))
+        return *v == std::any_cast<std::int8_t>(rhs);
+    if (const std::uint8_t* v = std::any_cast<std::uint8_t>(&lhs))
+        return *v == std::any_cast<std::uint8_t>(rhs);
+    if (const std::int16_t* v = std::any_cast<std::int16_t>(&lhs))
+        return *v == std::any_cast<std::int16_t>(rhs);
+    if (const std::uint16_t* v = std::any_cast<std::uint16_t>(&lhs))
+        return *v == std::any_cast<std::uint16_t>(rhs);
+    if (const std::int32_t* v = std::any_cast<std::int32_t>(&lhs))
+        return *v == std::any_cast<std::int32_t>(rhs);
+    if (const std::uint32_t* v = std::any_cast<std::uint32_t>(&lhs))
+        return *v == std::any_cast<std::uint32_t>(rhs);
+    if (const std::int64_t* v = std::any_cast<std::int64_t>(&lhs))
+        return *v == std::any_cast<std::int64_t>(rhs);
+    if (const std::uint64_t* v = std::any_cast<std::uint64_t>(&lhs))
+        return *v == std::any_cast<std::uint64_t>(rhs);
+    if (const float* v = std::any_cast<float>(&lhs))
+        return *v == std::any_cast<float>(rhs);
+    if (const double* v = std::any_cast<double>(&lhs))
+        return *v == std::any_cast<double>(rhs);
+    if (const Decimal* v = std::any_cast<Decimal>(&lhs))
+        return ILSpy::Decompiler::Util::CompareDecimal(*v, std::any_cast<Decimal>(rhs))
+            == 0;
+    if (const std::string* v = std::any_cast<std::string>(&lhs))
+        return *v == std::any_cast<std::string>(rhs);
+    return false;
+}
+
+} // namespace
+
+// The C# `public override object? Invoke(CSharpResolver? resolver, object? lhs,
+// object? rhs)` (line 604): `return string.Concat(lhs, rhs);` -- string.Concat(object,
+// object) renders each operand through `ToString() ?? string.Empty` and concatenates the
+// two renderings. The `resolver` parameter is unused (the C# signature is nullable for
+// exactly this reason).
+std::any StringConcatenation::Invoke(const CSharpResolver& resolver, const std::any& lhs,
+                                     const std::any& rhs) const
+{
+    (void)resolver;
+    std::string result;
+    if (lhs.has_value())
+        result += ConcatOperandToString(lhs);
+    if (rhs.has_value())
+        result += ConcatOperandToString(rhs);
+    return std::any(std::move(result));
+}
+
+// The C# `public override object Invoke(CSharpResolver resolver, object? lhs, object?
+// rhs)` (line 720): the both-null `!Negate` fold (`==`: true; `!=`: false), the one-null
+// `Negate` fold (`==`: false; `!=`: true), the `CSharpPrimitiveCast` conversions of both
+// operands to the operator's TypeCode, and the comparison -- the Single/Double arms use
+// the raw `==` on the unboxed float/double (NaN != NaN), every other type the
+// `object.Equals` value comparison. The `equal ^ Negate` bool XOR ports to `!=`.
+std::any EqualityOperatorMethod::Invoke(const CSharpResolver& resolver, const std::any& lhs,
+                                        const std::any& rhs) const
+{
+    if (!lhs.has_value() && !rhs.has_value())
+        return std::any(!negate_);
+    if (!lhs.has_value() || !rhs.has_value())
+        return std::any(negate_);
+    // The C# rebinds the `lhs`/`rhs` locals through the casts; the port keeps the
+    // converted values in locals (a reference cannot rebind).
+    const std::any convertedLhs = resolver.CSharpPrimitiveCast(type_, lhs);
+    const std::any convertedRhs = resolver.CSharpPrimitiveCast(type_, rhs);
+    bool equal;
+    if (type_ == TypeCode::Single) {
+        equal = std::any_cast<float>(convertedLhs) == std::any_cast<float>(convertedRhs);
+    } else if (type_ == TypeCode::Double) {
+        equal =
+            std::any_cast<double>(convertedLhs) == std::any_cast<double>(convertedRhs);
+    } else {
+        equal = EqualsBoxedValues(convertedLhs, convertedRhs);
+    }
+    return std::any(equal != negate_);
+}
+
+// The C# `public override object Invoke(CSharpResolver resolver, object? lhs, object?
+// rhs)` (line 771): `return baseMethod.Invoke(resolver, lhs, rhs);` -- the lifted
+// equality delegates the whole constant evaluation to the non-lifted base (the
+// null-operand handling and the comparison are the base's).
+std::any LiftedEqualityOperatorMethod::Invoke(const CSharpResolver& resolver,
+                                              const std::any& lhs,
+                                              const std::any& rhs) const
+{
+    return baseMethod_->Invoke(resolver, lhs, rhs);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

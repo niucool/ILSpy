@@ -398,7 +398,7 @@ TEST(CSharpOperatorsUnaryTest, CheckedUnaryMinusOperatorsTableHasFiveOriginalsAn
     const std::vector<std::shared_ptr<OperatorMethod>>& table =
         Operators().CheckedUnaryMinusOperators();
     // The same five originals as the unchecked table (the checked/unchecked bodies differ
-    // only in the stored funcs, which the deferred Invoke consumes), then their lifts.
+    // only in the stored funcs, which the Invoke entry consumes), then their lifts.
     ASSERT_EQ(table.size(), 10u);
     ExpectOriginalAt(table, 0, TypeCode::Int32);
     ExpectOriginalAt(table, 1, TypeCode::Int64);

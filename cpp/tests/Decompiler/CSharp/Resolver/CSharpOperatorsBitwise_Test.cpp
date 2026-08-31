@@ -381,7 +381,7 @@ TEST(CSharpOperatorsBitwiseTest, BitwiseLiftedFormsLiftTheReturnType) {
     // to the comparison operators). The lifted bool entry carries `Nullable<bool>` --
     // the C# note: the lifted bool? bitwise logic ("true | null" = null) is wrong but
     // irrelevant because bool? cannot be a compile-time type; the divergence lives in
-    // the deferred Invoke bodies, not the type shape.
+    // the Invoke bodies, not the type shape.
     const std::vector<std::shared_ptr<OperatorMethod>>& table =
         Operators().BitwiseAndOperators();
     ASSERT_EQ(table.size(), 10u);

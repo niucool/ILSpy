@@ -106,9 +106,10 @@
 // The `OperatorType` lookup the region consumes (`OperatorDeclaration.GetOperatorType` --
 // the reverse method-name lookup -- plus the `SyntaxExtensions.IsComparisonOperator`
 // extension in Syntax/SyntaxExtensions.hpp) lands alongside it in the Syntax directory.
-// With this region the CSharpOperators class port is COMPLETE: every region of the C#
-// class is live (the only class-level deferrals left are the `Invoke(CSharpResolver, ...)`
-// constant-evaluation virtuals, convention (j) -- gated on the CSharpResolver long pole).
+// With this region the CSharpOperators class port is COMPLETE: every region and every
+// member of the C# class is live, including the `Invoke(CSharpResolver, ...)`
+// constant-evaluation virtuals (convention (j), landed with the CSharpResolver
+// parameter type and its `CSharpPrimitiveCast` wrapper).
 //
 // KEY PORT CONVENTIONS:
 //  (a) The C# nested classes (`OperatorMethod` and, later, the *OperatorMethod families)
@@ -157,14 +158,20 @@
 //      enum name (`SymbolKind`/`Accessibility`) are globally qualified per the D372
 //      name-hiding crux.
 //  (j) The C# `object? Invoke(CSharpResolver resolver, object? input)` virtual pair (the
-//      constant-evaluation entry on `UnaryOperatorMethod`/`LambdaUnaryOperatorMethod<T>`)
-//      is DEFERRED until `CSharpResolver` ports: the resolver is the parameter type and
-//      the only caller (CSharpResolver.cs lines 511/931, wrapped in `catch (ArithmeticException)`);
-//      the `CSharpPrimitiveCast` the lambda body casts through is ported (Util/CSharpPrimitiveCast).
-//      `CanEvaluateAtCompileTime` (type-independent) lands now; the `Func<T,T>` is STORED
-//      by the ctor (the C# field) and consumed once `Invoke` lands.
+//      constant-evaluation entry on `UnaryOperatorMethod`/`BinaryOperatorMethod` and
+//      the derived overrides) is LANDED: the resolver is the parameter type and the only
+//      caller (CSharpResolver.cs lines 511/931, wrapped in `catch (ArithmeticException)` --
+//      the port's future resolver slice will settle the catch arm). The C# boxed `object?`
+//      ports to `const std::any&` (the D374/D424 boxed-constant convention; an empty any
+//      is the C# `null`), the return `object?` to `std::any` (empty = null). The operand
+//      casts go through the resolver's `CSharpPrimitiveCast` member (threading its
+//      `CheckForOverflow`); the unbox is the throwing `std::any_cast<T>` (the C# unbox
+//      throws InvalidCastException on a type mismatch -- the converted operand always
+//      holds exactly `T`, so the throw guards only degenerate inputs). The `resolver`
+//      parameter is `const&`: every Invoke body reads only the flag and the const
+//      cast wrapper.
 //  (k) The C# `Type.GetTypeCode(typeof(T))` (the ctor's parameter/return-type resolution,
-//      and the deferred `Invoke`'s cast target) ports to the `TypeCodeFor<T>` compile-time
+//      and the `Invoke` cast target) ports to the `TypeCodeFor<T>` compile-time
 //      trait below -- the BCL `TypeCode` mapping of the primitive types the operator tables
 //      instantiate (the C# `int`/`uint`/`long`/`ulong`/`float`/`double`/`decimal`/`bool`
 //      spell the port's `std::int32_t`/`std::uint32_t`/`std::int64_t`/`std::uint64_t`/
@@ -172,8 +179,9 @@
 //  (l) The C# `decimal` language alias (System.Decimal) ports to the minimal `Decimal`
 //      stand-in below: the unary operator tables need the TYPE (`TypeCode::Decimal` ->
 //      `FindType` -> `MakeParameter`) and the unary `+`/`-` lambda bodies; the full 96-bit
-//      scaled-decimal arithmetic fidelity arrives with the deferred constant-evaluation
-//      path (the funcs are stored, not yet invoked). The stand-in keeps the scaled-decimal
+//      scaled-decimal arithmetic fidelity stays deferred (the landed `Invoke` path
+//      applies the stand-in's operators where the real System.Decimal would use its
+//      96-bit arithmetic). The stand-in keeps the scaled-decimal
 //      SHAPE (a mantissa + a scale + a separate sign bit), so unary negation is the sign
 //      flip -- the faithful System.Decimal negation.
 //  (m) The C# `LazyInit.VolatileRead`/`LazyInit.GetOrSet` lazy table properties port to
@@ -190,6 +198,7 @@
 
 #pragma once
 
+#include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"  // CSharpResolver (the Invoke parameter type -- the bodies read CheckForOverflow/CSharpPrimitiveCast)
 #include "Decompiler/CSharp/Resolver/ILiftedOperator.hpp"  // LiftedUnaryOperatorMethod's second base
 #include "Decompiler/TypeSystem/ICompilation.hpp"  // ICompilation (MainModule -- the ParentModule inline body)
 #include "Decompiler/TypeSystem/IParameterizedMember.hpp"  // OperatorMethod's base (brings IType.hpp/IEntity.hpp)
@@ -197,6 +206,7 @@
 #include "Decompiler/TypeSystem/Implementation/SpecializedMethod.hpp"  // LiftedUserDefinedOperator's first base
 #include "Decompiler/Util/Decimal.hpp"  // Decimal (the System.Decimal stand-in the tables' lambda bodies use)
 
+#include <any>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -800,9 +810,9 @@ struct TypeCodeFor<Decimal> {
 // The C# `internal class UnaryOperatorMethod : OperatorMethod` (lines 237-250) -- the base
 // of every unary built-in operator method: the constant-evaluation contract. The C#
 // `object? Invoke(CSharpResolver resolver, object? input)` virtual throws
-// NotSupportedException here and is overridden by the lambda-backed operators; the port
-// defers the whole `Invoke` member (convention (j)) and lands the type-independent
-// `CanEvaluateAtCompileTime` flag. Unsealed (the Lambda/Lifted classes derive it).
+// NotSupportedException here and is overridden by the lambda-backed operators; the
+// port throws `std::logic_error` (the OperatorMethod::Specialize NotSupportedException
+// convention). Unsealed (the Lambda/Lifted classes derive it).
 class UnaryOperatorMethod : public OperatorMethod {
 public:
     // The C# `public UnaryOperatorMethod(ICompilation compilation) : base(compilation)`.
@@ -816,6 +826,16 @@ public:
     // override it to true; the resolver consults it before invoking -- CSharpResolver.cs
     // line 506/926).
     virtual bool CanEvaluateAtCompileTime() const { return false; }
+
+    // The C# `public virtual object? Invoke(CSharpResolver resolver, object? input)`
+    // (line 242) -- the constant-evaluation entry: the base throws
+    // NotSupportedException (overridden by the lambda-backed operators). Convention (j).
+    virtual std::any Invoke(const CSharpResolver& resolver, const std::any& input) const
+    {
+        (void)resolver;
+        (void)input;
+        throw std::logic_error("NotSupportedException: UnaryOperatorMethod.Invoke");
+    }
 };
 
 // The C# `sealed class LiftedUnaryOperatorMethod : UnaryOperatorMethod, ILiftedOperator`
@@ -851,8 +871,8 @@ private:
 };
 
 // The C# `sealed class LambdaUnaryOperatorMethod<T> : UnaryOperatorMethod` (lines 252-282)
-// -- the lambda-backed unary operator: `Func<T,T>` (stored for the deferred `Invoke`,
-// convention (j)), the parameter and return types resolved from
+// -- the lambda-backed unary operator: `Func<T,T>` (stored for the `Invoke` constant-
+// evaluation entry, convention (j)), the parameter and return types resolved from
 // `Type.GetTypeCode(typeof(T))` (the `TypeCodeFor<T>` trait, convention (k)) through
 // `operators.compilation.FindType(typeCode)` + `operators.MakeParameter(typeCode)`,
 // `CanEvaluateAtCompileTime => true`, and the `Lift` override building the `Nullable<T>`
@@ -882,8 +902,21 @@ public:
     }
 
     // The C# `public override bool CanEvaluateAtCompileTime => true` -- the lambda-backed
-    // operator is compile-time evaluable (the deferred `Invoke` applies the func).
+    // operator is compile-time evaluable (the `Invoke` below applies the func).
     bool CanEvaluateAtCompileTime() const override { return true; }
+
+    // The C# `public override object? Invoke(CSharpResolver resolver, object? input)`
+    // (line 269): `if (input == null) return null; return func((T)resolver.
+    // CSharpPrimitiveCast(Type.GetTypeCode(typeof(T)), input));` -- the null passthrough,
+    // the operand cast through the resolver's wrapper (threading its CheckForOverflow),
+    // and the stored func application (convention (j)).
+    std::any Invoke(const CSharpResolver& resolver, const std::any& input) const override
+    {
+        if (!input.has_value())
+            return std::any{};
+        return std::any(func_(std::any_cast<T>(
+            resolver.CSharpPrimitiveCast(TypeCodeFor<T>::value, input))));
+    }
 
     // The C# `public override OperatorMethod Lift(CSharpOperators operators) => new
     // LiftedUnaryOperatorMethod(operators, this)`.
@@ -893,9 +926,9 @@ public:
     }
 
 private:
-    // The C# `readonly Func<T,T> func` -- stored for the deferred `Invoke` (convention
-    // (j)); the operator tables pass the C# lambda bodies (`+i`, `unchecked(-i)`,
-    // `checked(-i)`, `!b`, `~i`) through this member.
+    // The C# `readonly Func<T,T> func` -- stored for the `Invoke` constant-evaluation
+    // entry (convention (j)); the operator tables pass the C# lambda bodies (`+i`,
+    // `unchecked(-i)`, `checked(-i)`, `!b`, `~i`) through this member.
     std::function<T(T)> func_;
 };
 
@@ -906,9 +939,8 @@ private:
 // The C# `internal class BinaryOperatorMethod : OperatorMethod` (lines 412-421) -- the
 // base of every binary built-in operator method: the constant-evaluation contract, the
 // mirror of `UnaryOperatorMethod`. The C# `object? Invoke(CSharpResolver resolver,
-// object? lhs, object? rhs)` virtual pair (throwing NotSupportedException here,
-// overridden by the lambda-backed operators) is deferred as a whole (convention (j): the
-// resolver is the parameter type, the only caller, and the only dependency).
+// object? lhs, object? rhs)` virtual throws NotSupportedException here and is
+// overridden by the lambda-backed/equality operators (convention (j)).
 // Unsealed (the Lambda/Lifted/StringConcatenation classes derive it).
 class BinaryOperatorMethod : public OperatorMethod {
 public:
@@ -921,6 +953,18 @@ public:
     // The C# `public virtual bool CanEvaluateAtCompileTime => false` -- the base default
     // (the lambda-backed operators override it to true).
     virtual bool CanEvaluateAtCompileTime() const { return false; }
+
+    // The C# `public virtual object? Invoke(CSharpResolver resolver, object? lhs,
+    // object? rhs)` (line 415) -- the constant-evaluation entry: the base throws
+    // NotSupportedException (overridden by the lambda-backed/equality operators).
+    virtual std::any Invoke(const CSharpResolver& resolver, const std::any& lhs,
+                            const std::any& rhs) const
+    {
+        (void)resolver;
+        (void)lhs;
+        (void)rhs;
+        throw std::logic_error("NotSupportedException: BinaryOperatorMethod.Invoke");
+    }
 };
 
 // The C# `sealed class LiftedBinaryOperatorMethod : BinaryOperatorMethod, ILiftedOperator`
@@ -960,7 +1004,8 @@ private:
 
 // The C# `sealed class LambdaBinaryOperatorMethod<T1, T2> : BinaryOperatorMethod` (lines
 // 423-461) -- the lambda-backed binary operator: the CHECKED/UNCHECKED func PAIR (the C#
-// `Func<T1,T2,T1>` fields, stored for the deferred `Invoke`, convention (j) -- the funcs
+// `Func<T1,T2,T1>` fields, stored for the `Invoke` constant-evaluation entry,
+// convention (j) -- the funcs
 // encode the C# `checked`/`unchecked` arithmetic semantics the resolver's
 // `CheckForOverflow` selects between), the return type and the FIRST parameter resolved
 // from `Type.GetTypeCode(typeof(T1))` and the second parameter from
@@ -1006,9 +1051,28 @@ public:
     }
 
     // The C# `public override bool CanEvaluateAtCompileTime => true` -- the lambda-backed
-    // operator is compile-time evaluable (the deferred `Invoke` applies the
+    // operator is compile-time evaluable (the `Invoke` below applies the
     // checked/unchecked func the resolver's CheckForOverflow selects).
     bool CanEvaluateAtCompileTime() const override { return true; }
+
+    // The C# `public override object? Invoke(CSharpResolver resolver, object? lhs,
+    // object? rhs)` (line 448): the null passthrough on either operand, the
+    // checked/unchecked func selection by the resolver's CheckForOverflow, the operand
+    // casts through the resolver's wrapper, and the selected func application
+    // (convention (j)).
+    std::any Invoke(const CSharpResolver& resolver, const std::any& lhs,
+                    const std::any& rhs) const override
+    {
+        if (!lhs.has_value() || !rhs.has_value())
+            return std::any{};
+        // The C# `Func<T1,T2,T1> func = resolver.CheckForOverflow ? checkedFunc :
+        // uncheckedFunc;` -- the local holds the selected func object.
+        const std::function<T1(T1, T2)>& func =
+            resolver.CheckForOverflow() ? checkedFunc_ : uncheckedFunc_;
+        return std::any(func(
+            std::any_cast<T1>(resolver.CSharpPrimitiveCast(TypeCodeFor<T1>::value, lhs)),
+            std::any_cast<T2>(resolver.CSharpPrimitiveCast(TypeCodeFor<T2>::value, rhs))));
+    }
 
     // The C# `public override OperatorMethod Lift(CSharpOperators operators) => new
     // LiftedBinaryOperatorMethod(operators, this)`.
@@ -1019,8 +1083,9 @@ public:
 
 private:
     // The C# `readonly Func<T1,T2,T1> checkedFunc` / `uncheckedFunc` -- stored for the
-    // deferred `Invoke` (convention (j)); the operator tables pass the C# lambda bodies
-    // (the checked/unchecked arithmetic pairs, the shift bodies) through these members.
+    // `Invoke` constant-evaluation entry (convention (j)); the operator tables pass the
+    // C# lambda bodies (the checked/unchecked arithmetic pairs, the shift bodies)
+    // through these members.
     std::function<T1(T1, T2)> checkedFunc_;
     std::function<T1(T1, T2)> uncheckedFunc_;
 };
@@ -1032,7 +1097,8 @@ private:
 // `canEvaluateAtCompileTime = p1 == TypeCode.String && p2 == TypeCode.String` -- a
 // `string + object` may invoke ToString at run time). NOT lifted (the inherited `Lift`
 // returns null): the addition table's lifted forms come from the numeric lambdas only.
-// The C# `Invoke` (`string.Concat(lhs, rhs)`) is deferred (convention (j)).
+// The C# `Invoke` (`string.Concat(lhs, rhs)`) lands out-of-line in the .cpp
+// (convention (j): it renders each operand through the object.ToString stand-in).
 class StringConcatenation final : public BinaryOperatorMethod {
 public:
     // The C# `public StringConcatenation(CSharpOperators operators, TypeCode p1,
@@ -1059,6 +1125,13 @@ public:
 
     // The C# `public override bool CanEvaluateAtCompileTime => canEvaluateAtCompileTime`.
     bool CanEvaluateAtCompileTime() const override { return canEvaluateAtCompileTime_; }
+
+    // The C# `public override object? Invoke(CSharpResolver? resolver, object? lhs,
+    // object? rhs)` (line 604): `return string.Concat(lhs, rhs);` -- out-of-line in the
+    // .cpp (convention (j); the body renders the operands through the file-local
+    // object.ToString stand-in).
+    std::any Invoke(const CSharpResolver& resolver, const std::any& lhs,
+                    const std::any& rhs) const override;
 
 private:
     // The C# `bool canEvaluateAtCompileTime`.
@@ -1097,6 +1170,14 @@ public:
     // (out-of-line: the body dereferences the baseMethod_ back-pointer).
     bool CanEvaluateAtCompileTime() const override;
 
+    // The C# `public override object Invoke(CSharpResolver resolver, object? lhs,
+    // object? rhs)` (line 771): `return baseMethod.Invoke(resolver, lhs, rhs);` -- the
+    // lifted equality delegates the whole constant evaluation to the non-lifted base
+    // (the null-operand handling and the comparison are the base's). Out-of-line in the
+    // .cpp (convention (j)).
+    std::any Invoke(const CSharpResolver& resolver, const std::any& lhs,
+                    const std::any& rhs) const override;
+
     // --- ILiftedOperator ---
 
     // The C# `IReadOnlyList<IParameter> NonLiftedParameters => baseMethod.Parameters` --
@@ -1118,11 +1199,10 @@ private:
 // TypeCode's shared normal-table instances (the diagonal `T == T` shape -- the SAME
 // instance added twice) and the return type is always Boolean. The `Type`/`Negate` fields
 // distinguish the value tables (`==` negate=false / `!=` negate=true) and drive the
-// deferred `Invoke` and the `Lift` guard. The C# `object Invoke(CSharpResolver resolver,
+// `Invoke` override and the `Lift` guard. The C# `object Invoke(CSharpResolver resolver,
 // object? lhs, object? rhs)` (the null-operand short-circuits, the `CSharpPrimitiveCast`
-// conversions, and the Single/Double/object.Equals comparison) is deferred as a whole
-// (convention (j): the resolver is the parameter type, the only caller, and the only
-// dependency). `final` (the C# sealed).
+// conversions, and the Single/Double/object.Equals comparison) lands out-of-line in the
+// .cpp (convention (j)). `final` (the C# sealed).
 class EqualityOperatorMethod final : public BinaryOperatorMethod {
 public:
     // The C# `public EqualityOperatorMethod(CSharpOperators operators, TypeCode type, bool
@@ -1177,6 +1257,14 @@ public:
         return std::make_shared<LiftedEqualityOperatorMethod>(operators, *this);
     }
 
+    // The C# `public override object Invoke(CSharpResolver resolver, object? lhs,
+    // object? rhs)` (line 720): the both-null `!Negate` fold, the one-null `Negate`
+    // fold, the `CSharpPrimitiveCast` conversions of both operands, and the
+    // Single/Double-special vs object.Equals comparison -- out-of-line in the .cpp
+    // (convention (j)).
+    std::any Invoke(const CSharpResolver& resolver, const std::any& lhs,
+                    const std::any& rhs) const override;
+
 private:
     // The C# `public readonly TypeCode Type` / `public readonly bool Negate`.
     const ILSpy::Decompiler::TypeSystem::TypeCode type_;
@@ -1198,8 +1286,7 @@ private:
 // produces a definite bool; the same shape as the LiftedEqualityOperatorMethod). The C#
 // `object? Invoke(CSharpResolver resolver, object? lhs, object? rhs)` (the null-operand
 // short-circuit and the `CSharpPrimitiveCast` casts before the func application) is
-// deferred as a whole (convention (j): the resolver is the parameter type, the only
-// caller, and the only dependency). `final` (the C# sealed).
+// the inline template body below (convention (j)). `final` (the C# sealed).
 template <typename T1, typename T2>
 class RelationalOperatorMethod final : public BinaryOperatorMethod {
 public:
@@ -1226,9 +1313,24 @@ public:
     }
 
     // The C# `public override bool CanEvaluateAtCompileTime => true` -- the lambda-backed
-    // comparison is compile-time evaluable (the deferred `Invoke` applies the stored
+    // comparison is compile-time evaluable (the `Invoke` below applies the stored
     // func).
     bool CanEvaluateAtCompileTime() const override { return true; }
+
+    // The C# `public override object? Invoke(CSharpResolver resolver, object? lhs,
+    // object? rhs)` (line 882): `if (lhs == null || rhs == null) return null; return
+    // func((T1)resolver.CSharpPrimitiveCast(...), (T2)resolver.CSharpPrimitiveCast(...));`
+    // -- the null passthrough, the operand casts, and the stored comparison func
+    // (convention (j)).
+    std::any Invoke(const CSharpResolver& resolver, const std::any& lhs,
+                    const std::any& rhs) const override
+    {
+        if (!lhs.has_value() || !rhs.has_value())
+            return std::any{};
+        return std::any(func_(
+            std::any_cast<T1>(resolver.CSharpPrimitiveCast(TypeCodeFor<T1>::value, lhs)),
+            std::any_cast<T2>(resolver.CSharpPrimitiveCast(TypeCodeFor<T2>::value, rhs))));
+    }
 
     // The C# `public override OperatorMethod Lift(CSharpOperators operators)`: `var
     // lifted = new LiftedBinaryOperatorMethod(operators, this); lifted.ReturnType =
@@ -1244,9 +1346,9 @@ public:
     }
 
 private:
-    // The C# `readonly Func<T1,T2,bool> func` -- stored for the deferred `Invoke`
-    // (convention (j)); the four comparison tables pass the C# `<`/`<=`/`>`/`>=` bodies
-    // (the Decimal stand-in's comparison operators below).
+    // The C# `readonly Func<T1,T2,bool> func` -- stored for the `Invoke` constant-
+    // evaluation entry (convention (j)); the four comparison tables pass the C#
+    // `<`/`<=`/`>`/`>=` bodies (the Decimal stand-in's comparison operators below).
     std::function<bool(T1, T2)> func_;
 };
 
