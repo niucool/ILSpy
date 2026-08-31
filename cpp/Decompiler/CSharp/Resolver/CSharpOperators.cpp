@@ -33,6 +33,7 @@
 #include "Decompiler/Util/CacheManager.hpp"  // CacheManager (Get factory)
 
 #include <any>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -269,6 +270,183 @@ std::vector<std::shared_ptr<OperatorMethod>> CSharpOperators::Lift(
             result.push_back(std::move(lifted));
     }
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// LiftedUnaryOperatorMethod (the out-of-line members)
+// ---------------------------------------------------------------------------
+
+// The C# `public LiftedUnaryOperatorMethod(CSharpOperators operators, UnaryOperatorMethod
+// baseMethod) : base(operators.compilation)`: `this.baseMethod = baseMethod; this.ReturnType
+// = NullableType.Create(baseMethod.Compilation, baseMethod.ReturnType); parameters.Add(
+// operators.MakeNullableParameter(baseMethod.Parameters[0]));` -- the return type and the
+// single parameter are both lifted to `Nullable<T>` (the shared nullable parameter-table
+// instance, the MakeNullableParameter reference-equality lookup).
+LiftedUnaryOperatorMethod::LiftedUnaryOperatorMethod(
+    const CSharpOperators& operators, const UnaryOperatorMethod& baseMethod)
+    : UnaryOperatorMethod(operators.Compilation()), baseMethod_(&baseMethod)
+{
+    // `NullableType.Create` is the TypeSystem free function (`using ...TypeSystem::Create`
+    // above -- the C# static-class label is not a namespace, the iteration-37 convention).
+    returnType_ = Create(baseMethod.Compilation(), baseMethod.ReturnType());
+    std::vector<const ILSpy::Decompiler::TypeSystem::IParameter*> baseParameters =
+        baseMethod.Parameters();
+    // The C# `baseMethod.Parameters[0]` throws IndexOutOfRangeException on an empty list;
+    // the port throws std::out_of_range (the same bounds contract -- every real unary
+    // operator method has exactly one parameter, so the throw guards only degenerate
+    // constructions).
+    if (baseParameters.empty())
+        throw std::out_of_range("LiftedUnaryOperatorMethod: the base method has no parameters");
+    parameters_.push_back(operators.MakeNullableParameter(*baseParameters[0]));
+}
+
+// The C# `IReadOnlyList<IParameter> NonLiftedParameters => baseMethod.Parameters` -- the
+// by-value snapshot of the pre-lifting parameter list (the ILiftedOperator convention).
+std::vector<const ILSpy::Decompiler::TypeSystem::IParameter*>
+LiftedUnaryOperatorMethod::NonLiftedParameters() const
+{
+    return baseMethod_->Parameters();
+}
+
+// The C# `IType NonLiftedReturnType => baseMethod.ReturnType`.
+const ILSpy::Decompiler::TypeSystem::IType& LiftedUnaryOperatorMethod::NonLiftedReturnType()
+    const
+{
+    return baseMethod_->ReturnType();
+}
+
+// ---------------------------------------------------------------------------
+// The lazy unary operator-table properties (CSharpOperators.cs lines 300-409)
+// ---------------------------------------------------------------------------
+
+// The C# `public OperatorMethod[] UnaryPlusOperators` (the C# 4.0 spec 7.7.1): the seven
+// numeric originals (each `i => +i`), then their lifted forms via `Lift` (convention (m):
+// compute on first call -- the empty vector is the not-yet-built sentinel).
+const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::UnaryPlusOperators()
+    const
+{
+    if (unaryPlusOperators_.empty())
+    {
+        unaryPlusOperators_ = Lift({
+            std::make_shared<LambdaUnaryOperatorMethod<std::int32_t>>(
+                *this, [](std::int32_t i) { return +i; }),
+            std::make_shared<LambdaUnaryOperatorMethod<std::uint32_t>>(
+                *this, [](std::uint32_t i) { return +i; }),
+            std::make_shared<LambdaUnaryOperatorMethod<std::int64_t>>(
+                *this, [](std::int64_t i) { return +i; }),
+            std::make_shared<LambdaUnaryOperatorMethod<std::uint64_t>>(
+                *this, [](std::uint64_t i) { return +i; }),
+            std::make_shared<LambdaUnaryOperatorMethod<float>>(
+                *this, [](float i) { return +i; }),
+            std::make_shared<LambdaUnaryOperatorMethod<double>>(
+                *this, [](double i) { return +i; }),
+            std::make_shared<LambdaUnaryOperatorMethod<Decimal>>(
+                *this, [](Decimal i) { return +i; }),
+        });
+    }
+    return unaryPlusOperators_;
+}
+
+// The C# `public OperatorMethod[] UncheckedUnaryMinusOperators` (the C# 4.0 spec 7.7.2):
+// the five signed-and-floating originals, each `i => unchecked(-i)`. The port's unchecked
+// integer negation goes through the unsigned subtraction -- the two's-complement wrap the
+// C# `unchecked` context defines (only INT32_MIN/INT64_MIN negate to themselves), without
+// the C++ signed-overflow UB. The stored funcs are consumed by the deferred `Invoke`
+// (convention (j)).
+const std::vector<std::shared_ptr<OperatorMethod>>&
+CSharpOperators::UncheckedUnaryMinusOperators() const
+{
+    if (uncheckedUnaryMinusOperators_.empty())
+    {
+        uncheckedUnaryMinusOperators_ = Lift({
+            std::make_shared<LambdaUnaryOperatorMethod<std::int32_t>>(
+                *this, [](std::int32_t i) {
+                    return static_cast<std::int32_t>(0u - static_cast<std::uint32_t>(i));
+                }),
+            std::make_shared<LambdaUnaryOperatorMethod<std::int64_t>>(
+                *this, [](std::int64_t i) {
+                    return static_cast<std::int64_t>(0ull - static_cast<std::uint64_t>(i));
+                }),
+            std::make_shared<LambdaUnaryOperatorMethod<float>>(
+                *this, [](float i) { return -i; }),
+            std::make_shared<LambdaUnaryOperatorMethod<double>>(
+                *this, [](double i) { return -i; }),
+            std::make_shared<LambdaUnaryOperatorMethod<Decimal>>(
+                *this, [](Decimal i) { return -i; }),
+        });
+    }
+    return uncheckedUnaryMinusOperators_;
+}
+
+// The C# `public OperatorMethod[] CheckedUnaryMinusOperators`: the same five originals,
+// each `checked(-i)`. The C# `checked` context throws OverflowException when the negation
+// overflows (only INT32_MIN/INT64_MIN, whose negation does not fit the type); the port's
+// boundary throw is std::runtime_error (the runtime-exception convention -- the future
+// CSharpResolver call site wraps `Invoke` in `catch (ArithmeticException)`, the port-side
+// exception the resolver slice will settle). The floating/decimal negations never overflow.
+const std::vector<std::shared_ptr<OperatorMethod>>&
+CSharpOperators::CheckedUnaryMinusOperators() const
+{
+    if (checkedUnaryMinusOperators_.empty())
+    {
+        checkedUnaryMinusOperators_ = Lift({
+            std::make_shared<LambdaUnaryOperatorMethod<std::int32_t>>(
+                *this, [](std::int32_t i) {
+                    if (i == std::numeric_limits<std::int32_t>::min())
+                        throw std::runtime_error("OverflowException");
+                    return -i;
+                }),
+            std::make_shared<LambdaUnaryOperatorMethod<std::int64_t>>(
+                *this, [](std::int64_t i) {
+                    if (i == std::numeric_limits<std::int64_t>::min())
+                        throw std::runtime_error("OverflowException");
+                    return -i;
+                }),
+            std::make_shared<LambdaUnaryOperatorMethod<float>>(
+                *this, [](float i) { return -i; }),
+            std::make_shared<LambdaUnaryOperatorMethod<double>>(
+                *this, [](double i) { return -i; }),
+            std::make_shared<LambdaUnaryOperatorMethod<Decimal>>(
+                *this, [](Decimal i) { return -i; }),
+        });
+    }
+    return checkedUnaryMinusOperators_;
+}
+
+// The C# `public OperatorMethod[] LogicalNegationOperators` (the C# spec draft-v11 12.9.4):
+// the single bool original (`b => !b`), then its lifted `Nullable<bool>` form.
+const std::vector<std::shared_ptr<OperatorMethod>>&
+CSharpOperators::LogicalNegationOperators() const
+{
+    if (logicalNegationOperators_.empty())
+    {
+        logicalNegationOperators_ = Lift({
+            std::make_shared<LambdaUnaryOperatorMethod<bool>>(
+                *this, [](bool b) { return !b; }),
+        });
+    }
+    return logicalNegationOperators_;
+}
+
+// The C# `public OperatorMethod[] BitwiseComplementOperators` (the C# 4.0 spec 7.7.4): the
+// four integer originals (each `i => ~i`), then their lifted forms.
+const std::vector<std::shared_ptr<OperatorMethod>>&
+CSharpOperators::BitwiseComplementOperators() const
+{
+    if (bitwiseComplementOperators_.empty())
+    {
+        bitwiseComplementOperators_ = Lift({
+            std::make_shared<LambdaUnaryOperatorMethod<std::int32_t>>(
+                *this, [](std::int32_t i) { return ~i; }),
+            std::make_shared<LambdaUnaryOperatorMethod<std::uint32_t>>(
+                *this, [](std::uint32_t i) { return ~i; }),
+            std::make_shared<LambdaUnaryOperatorMethod<std::int64_t>>(
+                *this, [](std::int64_t i) { return ~i; }),
+            std::make_shared<LambdaUnaryOperatorMethod<std::uint64_t>>(
+                *this, [](std::uint64_t i) { return ~i; }),
+        });
+    }
+    return bitwiseComplementOperators_;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

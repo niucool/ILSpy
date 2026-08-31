@@ -45,9 +45,19 @@
 //     `parameters`/`ReturnType` initialization surface the derived operator-method
 //     ctors write through.
 //
-// The derived operator-method classes (`UnaryOperatorMethod` / `LambdaUnaryOperatorMethod<T>`
-// / `LiftedUnaryOperatorMethod`, the binary/equality/relational families, ...) and the lazy
-// operator-table properties built on them (lines 237-1101) are DEFERRED to later slices.
+//   * PORTED: the unary operator region (CSharpOperators.cs lines 237-299 + 300-409): the
+//     `UnaryOperatorMethod` base (the `CanEvaluateAtCompileTime` constant-evaluation flag),
+//     `LambdaUnaryOperatorMethod<T>` (the lambda-backed compile-time-evaluable operator:
+//     the parameter and return types resolved from `Type.GetTypeCode(typeof(T))` through
+//     `FindType` + `MakeParameter`, the `Lift` override), `LiftedUnaryOperatorMethod` (the
+//     `Nullable<T>` lifted form implementing `ILiftedOperator`), and the five lazy
+//     operator-table properties (`UnaryPlusOperators` / `UncheckedUnaryMinusOperators` /
+//     `CheckedUnaryMinusOperators` / `LogicalNegationOperators` / `BitwiseComplementOperators`
+//     -- each the originals followed by their lifted forms via `Lift`).
+//
+// The remaining derived operator-method families (the binary / equality / relational
+// regions, lines 411-1101) and the lazy operator-table properties built on them are
+// DEFERRED to later slices.
 //
 // KEY PORT CONVENTIONS:
 //  (a) The C# nested classes (`OperatorMethod` and, later, the *OperatorMethod families)
@@ -95,13 +105,47 @@
 //      the same fixed values; the inherited member names that share a namespace-scope
 //      enum name (`SymbolKind`/`Accessibility`) are globally qualified per the D372
 //      name-hiding crux.
+//  (j) The C# `object? Invoke(CSharpResolver resolver, object? input)` virtual pair (the
+//      constant-evaluation entry on `UnaryOperatorMethod`/`LambdaUnaryOperatorMethod<T>`)
+//      is DEFERRED until `CSharpResolver` ports: the resolver is the parameter type, the
+//      only caller (CSharpResolver.cs lines 511/931, wrapped in `catch (ArithmeticException)`),
+//      and the only dependency (the `CSharpPrimitiveCast` the lambda body casts through).
+//      `CanEvaluateAtCompileTime` (type-independent) lands now; the `Func<T,T>` is STORED
+//      by the ctor (the C# field) and consumed once `Invoke` lands.
+//  (k) The C# `Type.GetTypeCode(typeof(T))` (the ctor's parameter/return-type resolution,
+//      and the deferred `Invoke`'s cast target) ports to the `TypeCodeFor<T>` compile-time
+//      trait below -- the BCL `TypeCode` mapping of the primitive types the operator tables
+//      instantiate (the C# `int`/`uint`/`long`/`ulong`/`float`/`double`/`decimal`/`bool`
+//      spell the port's `std::int32_t`/`std::uint32_t`/`std::int64_t`/`std::uint64_t`/
+//      `float`/`double`/`Decimal`/`bool`).
+//  (l) The C# `decimal` language alias (System.Decimal) ports to the minimal `Decimal`
+//      stand-in below: the unary operator tables need the TYPE (`TypeCode::Decimal` ->
+//      `FindType` -> `MakeParameter`) and the unary `+`/`-` lambda bodies; the full 96-bit
+//      scaled-decimal arithmetic fidelity arrives with the deferred constant-evaluation
+//      path (the funcs are stored, not yet invoked). The stand-in keeps the scaled-decimal
+//      SHAPE (a mantissa + a scale + a separate sign bit), so unary negation is the sign
+//      flip -- the faithful System.Decimal negation.
+//  (m) The C# `LazyInit.VolatileRead`/`LazyInit.GetOrSet` lazy table properties port to
+//      compute-on-first-call memoization: `mutable` members + const getters (the port is
+//      single-threaded; the empty vector is the not-yet-built sentinel, sound because
+//      every built table holds at least its non-empty originals).
+//  (n) The C# `LiftedUnaryOperatorMethod`'s `UnaryOperatorMethod baseMethod` reference
+//      field ports to a non-owning `const UnaryOperatorMethod*`: the original is owned by
+//      the same operator-table list that owns the lifted form (`CSharpOperators::Lift`
+//      copies the originals into the result list alongside the lifted forms), so both
+//      share the list's lifetime -- the C# GC-reference semantics. A caller invoking a
+//      method's `Lift` directly (not through `Lift(...)`) must keep the original alive
+//      itself (the owning handle stays in the caller's scope).
 
 #pragma once
 
+#include "Decompiler/CSharp/Resolver/ILiftedOperator.hpp"  // LiftedUnaryOperatorMethod's second base
 #include "Decompiler/TypeSystem/ICompilation.hpp"  // ICompilation (MainModule -- the ParentModule inline body)
 #include "Decompiler/TypeSystem/IParameterizedMember.hpp"  // OperatorMethod's base (brings IType.hpp/IEntity.hpp)
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"  // TypeCode (MakeParameter's parameter type)
 
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -373,6 +417,32 @@ public:
         return compilation_;
     }
 
+    // --- The C# lazy unary operator-table properties (lines 300-409, convention (m)) ---
+
+    // The C# `OperatorMethod[] UnaryPlusOperators` (the C# 4.0 spec 7.7.1 unary plus
+    // operator): the seven numeric originals (int, uint, long, ulong, float, double,
+    // decimal -- each `i => +i`), followed by their lifted `Nullable<T>` forms.
+    const std::vector<std::shared_ptr<OperatorMethod>>& UnaryPlusOperators() const;
+
+    // The C# `OperatorMethod[] UncheckedUnaryMinusOperators` (the C# 4.0 spec 7.7.2 unary
+    // minus operator): the five signed-and-floating originals (int, long, float, double,
+    // decimal -- each `i => unchecked(-i)`), followed by their lifted forms.
+    const std::vector<std::shared_ptr<OperatorMethod>>& UncheckedUnaryMinusOperators() const;
+
+    // The C# `OperatorMethod[] CheckedUnaryMinusOperators`: the same five originals with
+    // the `checked(-i)` bodies, followed by their lifted forms.
+    const std::vector<std::shared_ptr<OperatorMethod>>& CheckedUnaryMinusOperators() const;
+
+    // The C# `OperatorMethod[] LogicalNegationOperators` (the C# spec draft-v11 12.9.4
+    // logical negation operator): the single bool original (`b => !b`), followed by its
+    // lifted `Nullable<bool>` form.
+    const std::vector<std::shared_ptr<OperatorMethod>>& LogicalNegationOperators() const;
+
+    // The C# `OperatorMethod[] BitwiseComplementOperators` (the C# 4.0 spec 7.7.4 bitwise
+    // complement operator): the four integer originals (int, uint, long, ulong -- each
+    // `i => ~i`), followed by their lifted forms.
+    const std::vector<std::shared_ptr<OperatorMethod>>& BitwiseComplementOperators() const;
+
 private:
     // The C# `private CSharpOperators(ICompilation compilation)` -- private; `Get`
     // (a static member, which has private access) builds the instance. NOTE:
@@ -397,6 +467,217 @@ private:
         normalParameters_;
     std::vector<std::shared_ptr<const ILSpy::Decompiler::TypeSystem::IParameter>>
         nullableParameters_;
+
+    // The C# `OperatorMethod[]? unaryPlusOperators` (and the four siblings) -- the lazy
+    // memo fields (convention (m)): `mutable` + const getters, the empty vector being the
+    // not-yet-built sentinel.
+    mutable std::vector<std::shared_ptr<OperatorMethod>> unaryPlusOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> uncheckedUnaryMinusOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> checkedUnaryMinusOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> logicalNegationOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> bitwiseComplementOperators_;
+};
+
+// ---------------------------------------------------------------------------
+// The unary operator region (CSharpOperators.cs lines 237-299)
+// ---------------------------------------------------------------------------
+
+// The C# `decimal` language alias (System.Decimal) -- the minimal stand-in, convention
+// (l). A real System.Decimal is a 96-bit mantissa + a scale (0..28) + a separate sign
+// bit; the stand-in keeps that SHAPE (with the mantissa truncated to its low 64 bits) so
+// the unary +/- lambda bodies compile faithfully -- negation is the sign flip, the
+// System.Decimal negation semantics. The full arithmetic fidelity arrives with the
+// deferred constant-evaluation path (convention (j)): the operator tables consume only
+// the TYPE (`TypeCodeFor<Decimal>` -> `TypeCode::Decimal`), never a stored value.
+struct Decimal {
+    std::int64_t mantissa = 0;
+    std::uint8_t scale = 0;
+    bool isNegative = false;
+};
+
+// The C# unary `+d` -- the identity (System.Decimal defines unary plus as the identity).
+inline Decimal operator+(Decimal value)
+{
+    return value;
+}
+
+// The C# unary `-d` -- the sign flip (System.Decimal negation never touches the
+// mantissa/scale, so no signed-overflow edge exists).
+inline Decimal operator-(Decimal value)
+{
+    value.isNegative = !value.isNegative;
+    return value;
+}
+
+// The C# `Type.GetTypeCode(typeof(T))` -- convention (k): the compile-time `TypeCode` of
+// the primitive types the operator tables instantiate. The C# resolves the parameter and
+// return types through this mapping (`operators.compilation.FindType(typeCode)`); the
+// specializations cover the BCL primitives `Type.GetTypeCode` distinguishes (a `T` without
+// a specialization is a compile error -- the operator tables only instantiate these).
+template <typename T>
+struct TypeCodeFor;
+
+template <>
+struct TypeCodeFor<bool> {
+    static constexpr ILSpy::Decompiler::TypeSystem::TypeCode value =
+        ILSpy::Decompiler::TypeSystem::TypeCode::Boolean;
+};
+template <>
+struct TypeCodeFor<std::int8_t> {
+    static constexpr ILSpy::Decompiler::TypeSystem::TypeCode value =
+        ILSpy::Decompiler::TypeSystem::TypeCode::SByte;
+};
+template <>
+struct TypeCodeFor<std::uint8_t> {
+    static constexpr ILSpy::Decompiler::TypeSystem::TypeCode value =
+        ILSpy::Decompiler::TypeSystem::TypeCode::Byte;
+};
+template <>
+struct TypeCodeFor<std::int16_t> {
+    static constexpr ILSpy::Decompiler::TypeSystem::TypeCode value =
+        ILSpy::Decompiler::TypeSystem::TypeCode::Int16;
+};
+template <>
+struct TypeCodeFor<std::uint16_t> {
+    static constexpr ILSpy::Decompiler::TypeSystem::TypeCode value =
+        ILSpy::Decompiler::TypeSystem::TypeCode::UInt16;
+};
+template <>
+struct TypeCodeFor<std::int32_t> {
+    static constexpr ILSpy::Decompiler::TypeSystem::TypeCode value =
+        ILSpy::Decompiler::TypeSystem::TypeCode::Int32;
+};
+template <>
+struct TypeCodeFor<std::uint32_t> {
+    static constexpr ILSpy::Decompiler::TypeSystem::TypeCode value =
+        ILSpy::Decompiler::TypeSystem::TypeCode::UInt32;
+};
+template <>
+struct TypeCodeFor<std::int64_t> {
+    static constexpr ILSpy::Decompiler::TypeSystem::TypeCode value =
+        ILSpy::Decompiler::TypeSystem::TypeCode::Int64;
+};
+template <>
+struct TypeCodeFor<std::uint64_t> {
+    static constexpr ILSpy::Decompiler::TypeSystem::TypeCode value =
+        ILSpy::Decompiler::TypeSystem::TypeCode::UInt64;
+};
+template <>
+struct TypeCodeFor<float> {
+    static constexpr ILSpy::Decompiler::TypeSystem::TypeCode value =
+        ILSpy::Decompiler::TypeSystem::TypeCode::Single;
+};
+template <>
+struct TypeCodeFor<double> {
+    static constexpr ILSpy::Decompiler::TypeSystem::TypeCode value =
+        ILSpy::Decompiler::TypeSystem::TypeCode::Double;
+};
+template <>
+struct TypeCodeFor<Decimal> {
+    static constexpr ILSpy::Decompiler::TypeSystem::TypeCode value =
+        ILSpy::Decompiler::TypeSystem::TypeCode::Decimal;
+};
+
+// The C# `internal class UnaryOperatorMethod : OperatorMethod` (lines 237-250) -- the base
+// of every unary built-in operator method: the constant-evaluation contract. The C#
+// `object? Invoke(CSharpResolver resolver, object? input)` virtual throws
+// NotSupportedException here and is overridden by the lambda-backed operators; the port
+// defers the whole `Invoke` member (convention (j)) and lands the type-independent
+// `CanEvaluateAtCompileTime` flag. Unsealed (the Lambda/Lifted classes derive it).
+class UnaryOperatorMethod : public OperatorMethod {
+public:
+    // The C# `public UnaryOperatorMethod(ICompilation compilation) : base(compilation)`.
+    explicit UnaryOperatorMethod(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation)
+        : OperatorMethod(compilation)
+    {
+    }
+
+    // The C# `public virtual bool CanEvaluateAtCompileTime => false` -- the base default:
+    // a built-in operator that cannot be constant-folded (the lambda-backed operators
+    // override it to true; the resolver consults it before invoking -- CSharpResolver.cs
+    // line 506/926).
+    virtual bool CanEvaluateAtCompileTime() const { return false; }
+};
+
+// The C# `sealed class LiftedUnaryOperatorMethod : UnaryOperatorMethod, ILiftedOperator`
+// (lines 284-296) -- the `Nullable<T>` form of a unary operator: the return type and the
+// single parameter are both lifted to `Nullable<T>`, and the `ILiftedOperator` surface
+// (the D549 standalone base) exposes the pre-lifting signature. `final` (the C# sealed).
+// The `Lift`/`Invoke` inherited defaults are faithful: a lifted operator is not lifted
+// again (the OperatorMethod default returns null) and is not itself constant-evaluable.
+class LiftedUnaryOperatorMethod final : public UnaryOperatorMethod, public ILiftedOperator {
+public:
+    // The C# `public LiftedUnaryOperatorMethod(CSharpOperators operators, UnaryOperatorMethod
+    // baseMethod) : base(operators.compilation)` -- implemented out-of-line in the .cpp
+    // (convention (a): the body reads the CSharpOperators parameter tables). The parameter
+    // is `const&`: the only caller, the lambda's `Lift` override, is const (the base
+    // `Lift` contract).
+    LiftedUnaryOperatorMethod(const CSharpOperators& operators,
+                              const UnaryOperatorMethod& baseMethod);
+
+    // --- ILiftedOperator ---
+
+    // The C# `IReadOnlyList<IParameter> NonLiftedParameters => baseMethod.Parameters` --
+    // a by-value snapshot of non-owning pointers (the ILiftedOperator convention (b)).
+    std::vector<const ILSpy::Decompiler::TypeSystem::IParameter*> NonLiftedParameters()
+        const override;
+
+    // The C# `IType NonLiftedReturnType => baseMethod.ReturnType`.
+    const ILSpy::Decompiler::TypeSystem::IType& NonLiftedReturnType() const override;
+
+private:
+    // The C# `UnaryOperatorMethod baseMethod` reference field -- the non-owning back-
+    // pointer, convention (n).
+    const UnaryOperatorMethod* baseMethod_;
+};
+
+// The C# `sealed class LambdaUnaryOperatorMethod<T> : UnaryOperatorMethod` (lines 252-282)
+// -- the lambda-backed unary operator: `Func<T,T>` (stored for the deferred `Invoke`,
+// convention (j)), the parameter and return types resolved from
+// `Type.GetTypeCode(typeof(T))` (the `TypeCodeFor<T>` trait, convention (k)) through
+// `operators.compilation.FindType(typeCode)` + `operators.MakeParameter(typeCode)`,
+// `CanEvaluateAtCompileTime => true`, and the `Lift` override building the `Nullable<T>`
+// form. `final` (the C# sealed).
+template <typename T>
+class LambdaUnaryOperatorMethod final : public UnaryOperatorMethod {
+public:
+    // The C# `public LambdaUnaryOperatorMethod(CSharpOperators operators, Func<T,T> func)`:
+    // `TypeCode typeCode = Type.GetTypeCode(typeof(T)); this.ReturnType =
+    // operators.compilation.FindType(typeCode); parameters.Add(operators.MakeParameter(
+    // typeCode)); this.func = func;`.
+    LambdaUnaryOperatorMethod(const CSharpOperators& operators, std::function<T(T)> func)
+        : UnaryOperatorMethod(operators.Compilation())
+    {
+        const ILSpy::Decompiler::TypeSystem::TypeCode typeCode = TypeCodeFor<T>::value;
+        // The C# `operators.compilation.FindType(typeCode)` -- the ReflectionHelper TypeCode
+        // lookup (the fully-qualified call: the sibling TypeSystem namespace is not
+        // searched from inside the class body, the iteration-64 learning). The owning
+        // handle is recovered through `shared_from_this()` + `const_pointer_cast` (the
+        // D529 convention: the registered types are shared-managed).
+        const ILSpy::Decompiler::TypeSystem::IType& type =
+            ILSpy::Decompiler::TypeSystem::FindType(operators.Compilation(), typeCode);
+        returnType_ = std::const_pointer_cast<ILSpy::Decompiler::TypeSystem::IType>(
+            type.shared_from_this());
+        parameters_.push_back(operators.MakeParameter(typeCode));
+        func_ = std::move(func);
+    }
+
+    // The C# `public override bool CanEvaluateAtCompileTime => true` -- the lambda-backed
+    // operator is compile-time evaluable (the deferred `Invoke` applies the func).
+    bool CanEvaluateAtCompileTime() const override { return true; }
+
+    // The C# `public override OperatorMethod Lift(CSharpOperators operators) => new
+    // LiftedUnaryOperatorMethod(operators, this)`.
+    std::shared_ptr<OperatorMethod> Lift(const CSharpOperators& operators) const override
+    {
+        return std::make_shared<LiftedUnaryOperatorMethod>(operators, *this);
+    }
+
+private:
+    // The C# `readonly Func<T,T> func` -- stored for the deferred `Invoke` (convention
+    // (j)); the operator tables pass the C# lambda bodies (`+i`, `unchecked(-i)`,
+    // `checked(-i)`, `!b`, `~i`) through this member.
+    std::function<T(T)> func_;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver
