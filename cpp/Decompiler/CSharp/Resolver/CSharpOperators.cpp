@@ -33,6 +33,7 @@
 #include "Decompiler/Util/CacheManager.hpp"  // CacheManager (Get factory)
 
 #include <any>
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -42,6 +43,414 @@ namespace ILSpy::Decompiler::CSharp::Resolver {
 // The C# `NullableType.Create` free function lives directly in the TypeSystem namespace
 // (the C# static class is a label, not a namespace -- the iteration-37 convention).
 using ILSpy::Decompiler::TypeSystem::Create;
+// The TypeCode of the operator-table entries (the .cpp tables reference it repeatedly;
+// the sibling TypeSystem namespace is not searched from inside this namespace).
+using ILSpy::Decompiler::TypeSystem::TypeCode;
+
+namespace {
+
+// ---------------------------------------------------------------------------
+// The checked/unchecked arithmetic bodies the binary operator tables store (the C#
+// `(a, b) => checked(a * b)` / `(a, b) => unchecked(a * b)` lambda bodies, convention
+// (j): stored by the ctors, consumed by the deferred `Invoke`). The C# `checked`
+// context throws OverflowException when the true result leaves the result type's
+// range; the `unchecked` context wraps (two's complement for the signed integrals).
+// Integer division/remainder by zero throws DivideByZeroException in BOTH contexts
+// (only the MinValue / -1 edge differs: an OverflowException checked, the wrap
+// unchecked). The floating-point arithmetic is unaffected by the context (the two
+// bodies coincide); the unsigned integrals promote exactly as C++ defines, so only
+// the checked halves need explicit overflow tests. Every wrap goes through unsigned
+// arithmetic -- the well-defined two's-complement wrap without the C++ signed-overflow
+// UB (the uint64 -> int64 narrowing of a wrapped product is implementation-defined
+// before C++20; MSVC defines the two's-complement wrap -- the C# unchecked result).
+// ---------------------------------------------------------------------------
+
+[[noreturn]] void ThrowOverflow()
+{
+    throw std::runtime_error("OverflowException");
+}
+
+[[noreturn]] void ThrowDivideByZero()
+{
+    throw std::runtime_error("DivideByZeroException");
+}
+
+// --- Multiplication (the C# 4.0 spec 7.8.1) ---
+
+// checked(a * b) for int32: the true product always fits int64 -- throw when it leaves
+// the int32 range.
+std::int32_t CheckedMultiply(std::int32_t a, std::int32_t b)
+{
+    const std::int64_t product = static_cast<std::int64_t>(a) * static_cast<std::int64_t>(b);
+    if (product < std::numeric_limits<std::int32_t>::min()
+        || product > std::numeric_limits<std::int32_t>::max())
+        ThrowOverflow();
+    return static_cast<std::int32_t>(product);
+}
+
+// unchecked(a * b) for int32: the two's-complement wrap.
+std::int32_t UncheckedMultiply(std::int32_t a, std::int32_t b)
+{
+    return static_cast<std::int32_t>(static_cast<std::uint32_t>(a)
+                                     * static_cast<std::uint32_t>(b));
+}
+
+// checked(a * b) for uint32: the true product always fits uint64.
+std::uint32_t CheckedMultiply(std::uint32_t a, std::uint32_t b)
+{
+    const std::uint64_t product = static_cast<std::uint64_t>(a) * static_cast<std::uint64_t>(b);
+    if (product > std::numeric_limits<std::uint32_t>::max())
+        ThrowOverflow();
+    return static_cast<std::uint32_t>(product);
+}
+
+// unchecked(a * b) for uint32: the C++ unsigned wrap IS the C# unchecked wrap.
+std::uint32_t UncheckedMultiply(std::uint32_t a, std::uint32_t b)
+{
+    return a * b;
+}
+
+// checked(a * b) for int64: the exact division-based overflow test (the true product
+// needs 128 bits; every division below is safe -- INT64_MIN is only ever divided by a
+// positive operand, INT64_MAX by any). a * b overflows int64 iff:
+//   a > 0 && b > 0: a > INT64_MAX / b
+//   a > 0 && b < 0: b < INT64_MIN / a
+//   a < 0 && b > 0: a < INT64_MIN / b
+//   a < 0 && b < 0: a < INT64_MAX / b
+// (the C++ divisions truncate toward zero and the comparisons stay exact: no integer
+// falls strictly between the real quotient and its truncation, so each test detects
+// exactly the overflowing products).
+std::int64_t CheckedMultiply(std::int64_t a, std::int64_t b)
+{
+    if (a != 0 && b != 0)
+    {
+        if (a > 0)
+        {
+            if (b > 0)
+            {
+                if (a > std::numeric_limits<std::int64_t>::max() / b)
+                    ThrowOverflow();
+            }
+            else if (b < std::numeric_limits<std::int64_t>::min() / a)
+                ThrowOverflow();
+        }
+        else
+        {
+            if (b > 0)
+            {
+                if (a < std::numeric_limits<std::int64_t>::min() / b)
+                    ThrowOverflow();
+            }
+            else if (a < std::numeric_limits<std::int64_t>::max() / b)
+                ThrowOverflow();
+        }
+    }
+    return a * b;  // no overflow: the product is representable
+}
+
+// unchecked(a * b) for int64: the two's-complement wrap.
+std::int64_t UncheckedMultiply(std::int64_t a, std::int64_t b)
+{
+    return static_cast<std::int64_t>(static_cast<std::uint64_t>(a)
+                                     * static_cast<std::uint64_t>(b));
+}
+
+// checked(a * b) for uint64: the truncated product divides back exactly unless it
+// wrapped (b != 0).
+std::uint64_t CheckedMultiply(std::uint64_t a, std::uint64_t b)
+{
+    const std::uint64_t product = a * b;
+    if (b != 0 && product / b != a)
+        ThrowOverflow();
+    return product;
+}
+
+std::uint64_t UncheckedMultiply(std::uint64_t a, std::uint64_t b)
+{
+    return a * b;
+}
+
+// --- Division (the C# 4.0 spec 7.8.2) ---
+
+// checked(a / b) for int32: divide-by-zero always throws (both contexts); the
+// INT32_MIN / -1 edge throws OverflowException checked.
+std::int32_t CheckedDivide(std::int32_t a, std::int32_t b)
+{
+    if (b == 0)
+        ThrowDivideByZero();
+    if (a == std::numeric_limits<std::int32_t>::min() && b == -1)
+        ThrowOverflow();
+    return a / b;
+}
+
+// unchecked(a / b) for int32: the INT32_MIN / -1 edge wraps back to INT32_MIN (the
+// 2^31 quotient truncated to 32 bits -- the C++ `a / b` would be UB there, so the edge
+// is special-cased before the division).
+std::int32_t UncheckedDivide(std::int32_t a, std::int32_t b)
+{
+    if (b == 0)
+        ThrowDivideByZero();
+    if (a == std::numeric_limits<std::int32_t>::min() && b == -1)
+        return std::numeric_limits<std::int32_t>::min();
+    return a / b;
+}
+
+// a / b for uint32 (no checked/unchecked distinction: unsigned division cannot
+// overflow, and divide-by-zero throws in both contexts).
+std::uint32_t Divide(std::uint32_t a, std::uint32_t b)
+{
+    if (b == 0)
+        ThrowDivideByZero();
+    return a / b;
+}
+
+// checked(a / b) for int64 (the INT64_MIN / -1 edge mirrors the int32 pair).
+std::int64_t CheckedDivide(std::int64_t a, std::int64_t b)
+{
+    if (b == 0)
+        ThrowDivideByZero();
+    if (a == std::numeric_limits<std::int64_t>::min() && b == -1)
+        ThrowOverflow();
+    return a / b;
+}
+
+std::int64_t UncheckedDivide(std::int64_t a, std::int64_t b)
+{
+    if (b == 0)
+        ThrowDivideByZero();
+    if (a == std::numeric_limits<std::int64_t>::min() && b == -1)
+        return std::numeric_limits<std::int64_t>::min();
+    return a / b;
+}
+
+std::uint64_t Divide(std::uint64_t a, std::uint64_t b)
+{
+    if (b == 0)
+        ThrowDivideByZero();
+    return a / b;
+}
+
+// --- Remainder (the C# 4.0 spec 7.8.3) ---
+
+// a % b (no checked/unchecked distinction: the remainder never overflows and
+// divide-by-zero throws in both contexts). The MinValue % -1 == 0 edge is special-cased
+// because the C++ `a % b` would be UB there (the quotient overflows).
+std::int32_t Remainder(std::int32_t a, std::int32_t b)
+{
+    if (b == 0)
+        ThrowDivideByZero();
+    if (a == std::numeric_limits<std::int32_t>::min() && b == -1)
+        return 0;
+    return a % b;
+}
+
+std::uint32_t Remainder(std::uint32_t a, std::uint32_t b)
+{
+    if (b == 0)
+        ThrowDivideByZero();
+    return a % b;
+}
+
+std::int64_t Remainder(std::int64_t a, std::int64_t b)
+{
+    if (b == 0)
+        ThrowDivideByZero();
+    if (a == std::numeric_limits<std::int64_t>::min() && b == -1)
+        return 0;
+    return a % b;
+}
+
+std::uint64_t Remainder(std::uint64_t a, std::uint64_t b)
+{
+    if (b == 0)
+        ThrowDivideByZero();
+    return a % b;
+}
+
+// --- Addition (the C# 4.0 spec 7.8.3) ---
+
+std::int32_t CheckedAdd(std::int32_t a, std::int32_t b)
+{
+    const std::int64_t sum = static_cast<std::int64_t>(a) + static_cast<std::int64_t>(b);
+    if (sum < std::numeric_limits<std::int32_t>::min()
+        || sum > std::numeric_limits<std::int32_t>::max())
+        ThrowOverflow();
+    return static_cast<std::int32_t>(sum);
+}
+
+std::int32_t UncheckedAdd(std::int32_t a, std::int32_t b)
+{
+    return static_cast<std::int32_t>(static_cast<std::uint32_t>(a)
+                                    + static_cast<std::uint32_t>(b));
+}
+
+std::uint32_t CheckedAdd(std::uint32_t a, std::uint32_t b)
+{
+    if (a > std::numeric_limits<std::uint32_t>::max() - b)
+        ThrowOverflow();
+    return a + b;
+}
+
+std::uint32_t UncheckedAdd(std::uint32_t a, std::uint32_t b)
+{
+    return a + b;
+}
+
+std::int64_t CheckedAdd(std::int64_t a, std::int64_t b)
+{
+    if ((b > 0 && a > std::numeric_limits<std::int64_t>::max() - b)
+        || (b < 0 && a < std::numeric_limits<std::int64_t>::min() - b))
+        ThrowOverflow();
+    return a + b;
+}
+
+std::int64_t UncheckedAdd(std::int64_t a, std::int64_t b)
+{
+    return static_cast<std::int64_t>(static_cast<std::uint64_t>(a)
+                                    + static_cast<std::uint64_t>(b));
+}
+
+std::uint64_t CheckedAdd(std::uint64_t a, std::uint64_t b)
+{
+    if (a > std::numeric_limits<std::uint64_t>::max() - b)
+        ThrowOverflow();
+    return a + b;
+}
+
+std::uint64_t UncheckedAdd(std::uint64_t a, std::uint64_t b)
+{
+    return a + b;
+}
+
+// --- Subtraction (the C# 4.0 spec 7.8.4) ---
+
+std::int32_t CheckedSubtract(std::int32_t a, std::int32_t b)
+{
+    const std::int64_t difference = static_cast<std::int64_t>(a) - static_cast<std::int64_t>(b);
+    if (difference < std::numeric_limits<std::int32_t>::min()
+        || difference > std::numeric_limits<std::int32_t>::max())
+        ThrowOverflow();
+    return static_cast<std::int32_t>(difference);
+}
+
+std::int32_t UncheckedSubtract(std::int32_t a, std::int32_t b)
+{
+    return static_cast<std::int32_t>(static_cast<std::uint32_t>(a)
+                                    - static_cast<std::uint32_t>(b));
+}
+
+std::uint32_t CheckedSubtract(std::uint32_t a, std::uint32_t b)
+{
+    if (a < b)
+        ThrowOverflow();
+    return a - b;
+}
+
+std::uint32_t UncheckedSubtract(std::uint32_t a, std::uint32_t b)
+{
+    return a - b;
+}
+
+std::int64_t CheckedSubtract(std::int64_t a, std::int64_t b)
+{
+    if ((b > 0 && a < std::numeric_limits<std::int64_t>::min() + b)
+        || (b < 0 && a > std::numeric_limits<std::int64_t>::max() + b))
+        ThrowOverflow();
+    return a - b;
+}
+
+std::int64_t UncheckedSubtract(std::int64_t a, std::int64_t b)
+{
+    return static_cast<std::int64_t>(static_cast<std::uint64_t>(a)
+                                    - static_cast<std::uint64_t>(b));
+}
+
+std::uint64_t CheckedSubtract(std::uint64_t a, std::uint64_t b)
+{
+    if (a < b)
+        ThrowOverflow();
+    return a - b;
+}
+
+std::uint64_t UncheckedSubtract(std::uint64_t a, std::uint64_t b)
+{
+    return a - b;
+}
+
+// --- Shifts (the C# 4.0 spec 7.8.5) ---
+
+// The C# shift operators mask the shift count (& 31 for the 32-bit types, & 63 for the
+// 64-bit ones -- any count is valid, negative counts included, the same two's-complement
+// masking C++ `&` performs); a shift never overflows (the tables use the single-func
+// ctor). The signed LEFT shifts go through the unsigned pattern -- the C# `a << b`
+// discards the high bits of the 32/64-bit pattern -- and the signed RIGHT shifts are
+// the arithmetic shifts (implementation-defined before C++20; MSVC defines the
+// arithmetic/sign-extending shift, the C# `>>` for the signed integrals).
+
+std::int32_t ShiftLeft(std::int32_t a, std::int32_t b)
+{
+    return static_cast<std::int32_t>(static_cast<std::uint32_t>(a) << (b & 31));
+}
+
+std::uint32_t ShiftLeft(std::uint32_t a, std::int32_t b)
+{
+    return a << (b & 31);
+}
+
+std::int64_t ShiftLeft(std::int64_t a, std::int32_t b)
+{
+    return static_cast<std::int64_t>(static_cast<std::uint64_t>(a) << (b & 63));
+}
+
+std::uint64_t ShiftLeft(std::uint64_t a, std::int32_t b)
+{
+    return a << (b & 63);
+}
+
+std::int32_t ShiftRight(std::int32_t a, std::int32_t b)
+{
+    return a >> (b & 31);
+}
+
+std::uint32_t ShiftRight(std::uint32_t a, std::int32_t b)
+{
+    return a >> (b & 31);
+}
+
+std::int64_t ShiftRight(std::int64_t a, std::int32_t b)
+{
+    return a >> (b & 63);
+}
+
+std::uint64_t ShiftRight(std::uint64_t a, std::int32_t b)
+{
+    return a >> (b & 63);
+}
+
+// The C# 11 `>>>` operator: the logical (zero-filling) right shift for the signed types
+// (identical to the ordinary right shift for the unsigned ones).
+
+std::int32_t UnsignedShiftRight(std::int32_t a, std::int32_t b)
+{
+    return static_cast<std::int32_t>(static_cast<std::uint32_t>(a) >> (b & 31));
+}
+
+std::uint32_t UnsignedShiftRight(std::uint32_t a, std::int32_t b)
+{
+    return a >> (b & 31);
+}
+
+std::int64_t UnsignedShiftRight(std::int64_t a, std::int32_t b)
+{
+    return static_cast<std::int64_t>(static_cast<std::uint64_t>(a) >> (b & 63));
+}
+
+std::uint64_t UnsignedShiftRight(std::uint64_t a, std::int32_t b)
+{
+    return a >> (b & 63);
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // OperatorMethod (the out-of-line members)
@@ -447,6 +856,350 @@ CSharpOperators::BitwiseComplementOperators() const
         });
     }
     return bitwiseComplementOperators_;
+}
+
+// ---------------------------------------------------------------------------
+// LiftedBinaryOperatorMethod (the out-of-line members)
+// ---------------------------------------------------------------------------
+
+// The C# `public LiftedBinaryOperatorMethod(CSharpOperators operators, BinaryOperatorMethod
+// baseMethod) : base(operators.compilation)`: `this.baseMethod = baseMethod;
+// this.ReturnType = NullableType.Create(operators.compilation, baseMethod.ReturnType);
+// parameters.Add(operators.MakeNullableParameter(baseMethod.Parameters[0]));
+// parameters.Add(operators.MakeNullableParameter(baseMethod.Parameters[1]));` -- the return
+// type and both parameters lifted to their `Nullable<T>` counterparts (the shared
+// nullable parameter-table instances, the MakeNullableParameter reference-equality
+// lookup).
+LiftedBinaryOperatorMethod::LiftedBinaryOperatorMethod(
+    const CSharpOperators& operators, const BinaryOperatorMethod& baseMethod)
+    : BinaryOperatorMethod(operators.Compilation()), baseMethod_(&baseMethod)
+{
+    // `NullableType.Create` is the TypeSystem free function (the `using ...TypeSystem::Create`
+    // above -- the C# static-class label is not a namespace, the iteration-37 convention).
+    returnType_ = Create(operators.Compilation(), baseMethod.ReturnType());
+    std::vector<const ILSpy::Decompiler::TypeSystem::IParameter*> baseParameters =
+        baseMethod.Parameters();
+    // The C# `baseMethod.Parameters[0]` / `Parameters[1]` throw IndexOutOfRangeException on
+    // a short list; the port throws std::out_of_range (the LiftedUnaryOperatorMethod
+    // bounds contract -- every real binary operator method has exactly two parameters, so
+    // the throw guards only degenerate constructions).
+    if (baseParameters.size() < 2)
+        throw std::out_of_range(
+            "LiftedBinaryOperatorMethod: the base method has fewer than two parameters");
+    parameters_.push_back(operators.MakeNullableParameter(*baseParameters[0]));
+    parameters_.push_back(operators.MakeNullableParameter(*baseParameters[1]));
+}
+
+// The C# `IReadOnlyList<IParameter> NonLiftedParameters => baseMethod.Parameters` -- the
+// by-value snapshot of the pre-lifting parameter list (the ILiftedOperator convention).
+std::vector<const ILSpy::Decompiler::TypeSystem::IParameter*>
+LiftedBinaryOperatorMethod::NonLiftedParameters() const
+{
+    return baseMethod_->Parameters();
+}
+
+// The C# `IType NonLiftedReturnType => baseMethod.ReturnType`.
+const ILSpy::Decompiler::TypeSystem::IType& LiftedBinaryOperatorMethod::NonLiftedReturnType()
+    const
+{
+    return baseMethod_->ReturnType();
+}
+
+// ---------------------------------------------------------------------------
+// The lazy binary operator-table properties (CSharpOperators.cs lines 484-695)
+// ---------------------------------------------------------------------------
+
+// The C# `public OperatorMethod[] MultiplicationOperators` (the C# 4.0 spec 7.8.1): the
+// seven numeric originals (int, uint, long, ulong, float, double, decimal -- each the
+// checked/unchecked multiply pair), then their lifted forms via `Lift` (convention (m):
+// compute on first call -- the empty vector is the not-yet-built sentinel). The
+// floating-point bodies coincide in both contexts (the C# `checked` context does not
+// apply to floating-point arithmetic).
+const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::MultiplicationOperators()
+    const
+{
+    if (multiplicationOperators_.empty())
+    {
+        multiplicationOperators_ = Lift({
+            std::make_shared<LambdaBinaryOperatorMethod<std::int32_t, std::int32_t>>(
+                *this,
+                [](std::int32_t a, std::int32_t b) { return CheckedMultiply(a, b); },
+                [](std::int32_t a, std::int32_t b) { return UncheckedMultiply(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint32_t, std::uint32_t>>(
+                *this,
+                [](std::uint32_t a, std::uint32_t b) { return CheckedMultiply(a, b); },
+                [](std::uint32_t a, std::uint32_t b) { return UncheckedMultiply(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::int64_t, std::int64_t>>(
+                *this,
+                [](std::int64_t a, std::int64_t b) { return CheckedMultiply(a, b); },
+                [](std::int64_t a, std::int64_t b) { return UncheckedMultiply(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint64_t, std::uint64_t>>(
+                *this,
+                [](std::uint64_t a, std::uint64_t b) { return CheckedMultiply(a, b); },
+                [](std::uint64_t a, std::uint64_t b) { return UncheckedMultiply(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<float, float>>(
+                *this,
+                [](float a, float b) { return a * b; },
+                [](float a, float b) { return a * b; }),
+            std::make_shared<LambdaBinaryOperatorMethod<double, double>>(
+                *this,
+                [](double a, double b) { return a * b; },
+                [](double a, double b) { return a * b; }),
+            std::make_shared<LambdaBinaryOperatorMethod<Decimal, Decimal>>(
+                *this,
+                [](Decimal a, Decimal b) { return a * b; },
+                [](Decimal a, Decimal b) { return a * b; }),
+        });
+    }
+    return multiplicationOperators_;
+}
+
+// The C# `public OperatorMethod[] DivisionOperators` (the C# 4.0 spec 7.8.2): the same
+// seven originals with the division bodies (divide-by-zero throws in both contexts; the
+// floating-point division by zero yields the IEEE infinity/NaN, no throw -- the C#
+// floating-point semantics), then their lifted forms.
+const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::DivisionOperators()
+    const
+{
+    if (divisionOperators_.empty())
+    {
+        divisionOperators_ = Lift({
+            std::make_shared<LambdaBinaryOperatorMethod<std::int32_t, std::int32_t>>(
+                *this,
+                [](std::int32_t a, std::int32_t b) { return CheckedDivide(a, b); },
+                [](std::int32_t a, std::int32_t b) { return UncheckedDivide(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint32_t, std::uint32_t>>(
+                *this,
+                [](std::uint32_t a, std::uint32_t b) { return Divide(a, b); },
+                [](std::uint32_t a, std::uint32_t b) { return Divide(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::int64_t, std::int64_t>>(
+                *this,
+                [](std::int64_t a, std::int64_t b) { return CheckedDivide(a, b); },
+                [](std::int64_t a, std::int64_t b) { return UncheckedDivide(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint64_t, std::uint64_t>>(
+                *this,
+                [](std::uint64_t a, std::uint64_t b) { return Divide(a, b); },
+                [](std::uint64_t a, std::uint64_t b) { return Divide(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<float, float>>(
+                *this,
+                [](float a, float b) { return a / b; },
+                [](float a, float b) { return a / b; }),
+            std::make_shared<LambdaBinaryOperatorMethod<double, double>>(
+                *this,
+                [](double a, double b) { return a / b; },
+                [](double a, double b) { return a / b; }),
+            std::make_shared<LambdaBinaryOperatorMethod<Decimal, Decimal>>(
+                *this,
+                [](Decimal a, Decimal b) { return a / b; },
+                [](Decimal a, Decimal b) { return a / b; }),
+        });
+    }
+    return divisionOperators_;
+}
+
+// The C# `public OperatorMethod[] RemainderOperators` (the C# 4.0 spec 7.8.3): the same
+// seven originals with the remainder bodies (the integer remainder never overflows, so
+// the checked/unchecked bodies coincide; the floating-point remainder is the C# `%`
+// semantics -- x - y * trunc(x / y), the std::fmod operation), then their lifted forms.
+const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::RemainderOperators()
+    const
+{
+    if (remainderOperators_.empty())
+    {
+        remainderOperators_ = Lift({
+            std::make_shared<LambdaBinaryOperatorMethod<std::int32_t, std::int32_t>>(
+                *this,
+                [](std::int32_t a, std::int32_t b) { return Remainder(a, b); },
+                [](std::int32_t a, std::int32_t b) { return Remainder(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint32_t, std::uint32_t>>(
+                *this,
+                [](std::uint32_t a, std::uint32_t b) { return Remainder(a, b); },
+                [](std::uint32_t a, std::uint32_t b) { return Remainder(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::int64_t, std::int64_t>>(
+                *this,
+                [](std::int64_t a, std::int64_t b) { return Remainder(a, b); },
+                [](std::int64_t a, std::int64_t b) { return Remainder(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint64_t, std::uint64_t>>(
+                *this,
+                [](std::uint64_t a, std::uint64_t b) { return Remainder(a, b); },
+                [](std::uint64_t a, std::uint64_t b) { return Remainder(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<float, float>>(
+                *this,
+                [](float a, float b) { return std::fmod(a, b); },
+                [](float a, float b) { return std::fmod(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<double, double>>(
+                *this,
+                [](double a, double b) { return std::fmod(a, b); },
+                [](double a, double b) { return std::fmod(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<Decimal, Decimal>>(
+                *this,
+                [](Decimal a, Decimal b) { return a % b; },
+                [](Decimal a, Decimal b) { return a % b; }),
+        });
+    }
+    return remainderOperators_;
+}
+
+// The C# `public OperatorMethod[] AdditionOperators` (the C# 4.0 spec 7.8.3): the seven
+// numeric originals, then the three built-in string concatenations (`string + string`,
+// `string + object`, `object + string`), then the seven lifted numeric forms (the
+// StringConcatenation entries are NOT lifted -- the inherited `Lift` returns null and
+// `CSharpOperators::Lift` skips the null lifted forms).
+const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::AdditionOperators()
+    const
+{
+    if (additionOperators_.empty())
+    {
+        additionOperators_ = Lift({
+            std::make_shared<LambdaBinaryOperatorMethod<std::int32_t, std::int32_t>>(
+                *this,
+                [](std::int32_t a, std::int32_t b) { return CheckedAdd(a, b); },
+                [](std::int32_t a, std::int32_t b) { return UncheckedAdd(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint32_t, std::uint32_t>>(
+                *this,
+                [](std::uint32_t a, std::uint32_t b) { return CheckedAdd(a, b); },
+                [](std::uint32_t a, std::uint32_t b) { return UncheckedAdd(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::int64_t, std::int64_t>>(
+                *this,
+                [](std::int64_t a, std::int64_t b) { return CheckedAdd(a, b); },
+                [](std::int64_t a, std::int64_t b) { return UncheckedAdd(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint64_t, std::uint64_t>>(
+                *this,
+                [](std::uint64_t a, std::uint64_t b) { return CheckedAdd(a, b); },
+                [](std::uint64_t a, std::uint64_t b) { return UncheckedAdd(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<float, float>>(
+                *this,
+                [](float a, float b) { return a + b; },
+                [](float a, float b) { return a + b; }),
+            std::make_shared<LambdaBinaryOperatorMethod<double, double>>(
+                *this,
+                [](double a, double b) { return a + b; },
+                [](double a, double b) { return a + b; }),
+            std::make_shared<LambdaBinaryOperatorMethod<Decimal, Decimal>>(
+                *this,
+                [](Decimal a, Decimal b) { return a + b; },
+                [](Decimal a, Decimal b) { return a + b; }),
+            std::make_shared<StringConcatenation>(
+                *this, TypeCode::String, TypeCode::String),
+            std::make_shared<StringConcatenation>(
+                *this, TypeCode::String, TypeCode::Object),
+            std::make_shared<StringConcatenation>(
+                *this, TypeCode::Object, TypeCode::String),
+        });
+    }
+    return additionOperators_;
+}
+
+// The C# `public OperatorMethod[] SubtractionOperators` (the C# 4.0 spec 7.8.4): the
+// seven numeric originals with the subtraction bodies, then their lifted forms.
+const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::SubtractionOperators()
+    const
+{
+    if (subtractionOperators_.empty())
+    {
+        subtractionOperators_ = Lift({
+            std::make_shared<LambdaBinaryOperatorMethod<std::int32_t, std::int32_t>>(
+                *this,
+                [](std::int32_t a, std::int32_t b) { return CheckedSubtract(a, b); },
+                [](std::int32_t a, std::int32_t b) { return UncheckedSubtract(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint32_t, std::uint32_t>>(
+                *this,
+                [](std::uint32_t a, std::uint32_t b) { return CheckedSubtract(a, b); },
+                [](std::uint32_t a, std::uint32_t b) { return UncheckedSubtract(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::int64_t, std::int64_t>>(
+                *this,
+                [](std::int64_t a, std::int64_t b) { return CheckedSubtract(a, b); },
+                [](std::int64_t a, std::int64_t b) { return UncheckedSubtract(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint64_t, std::uint64_t>>(
+                *this,
+                [](std::uint64_t a, std::uint64_t b) { return CheckedSubtract(a, b); },
+                [](std::uint64_t a, std::uint64_t b) { return UncheckedSubtract(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<float, float>>(
+                *this,
+                [](float a, float b) { return a - b; },
+                [](float a, float b) { return a - b; }),
+            std::make_shared<LambdaBinaryOperatorMethod<double, double>>(
+                *this,
+                [](double a, double b) { return a - b; },
+                [](double a, double b) { return a - b; }),
+            std::make_shared<LambdaBinaryOperatorMethod<Decimal, Decimal>>(
+                *this,
+                [](Decimal a, Decimal b) { return a - b; },
+                [](Decimal a, Decimal b) { return a - b; }),
+        });
+    }
+    return subtractionOperators_;
+}
+
+// The C# `public OperatorMethod[] ShiftLeftOperators` (the C# 4.0 spec 7.8.5): the four
+// originals (int, uint, long, ulong -- each shifting by an int count, the SINGLE-FUNC
+// ctor: a shift never overflows, so there is no checked/unchecked distinction), then
+// their lifted forms.
+const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::ShiftLeftOperators()
+    const
+{
+    if (shiftLeftOperators_.empty())
+    {
+        shiftLeftOperators_ = Lift({
+            std::make_shared<LambdaBinaryOperatorMethod<std::int32_t, std::int32_t>>(
+                *this, [](std::int32_t a, std::int32_t b) { return ShiftLeft(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint32_t, std::int32_t>>(
+                *this, [](std::uint32_t a, std::int32_t b) { return ShiftLeft(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::int64_t, std::int32_t>>(
+                *this, [](std::int64_t a, std::int32_t b) { return ShiftLeft(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint64_t, std::int32_t>>(
+                *this, [](std::uint64_t a, std::int32_t b) { return ShiftLeft(a, b); }),
+        });
+    }
+    return shiftLeftOperators_;
+}
+
+// The C# `public OperatorMethod[] ShiftRightOperators`: the same four originals with the
+// right-shift bodies, then their lifted forms.
+const std::vector<std::shared_ptr<OperatorMethod>>& CSharpOperators::ShiftRightOperators()
+    const
+{
+    if (shiftRightOperators_.empty())
+    {
+        shiftRightOperators_ = Lift({
+            std::make_shared<LambdaBinaryOperatorMethod<std::int32_t, std::int32_t>>(
+                *this, [](std::int32_t a, std::int32_t b) { return ShiftRight(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint32_t, std::int32_t>>(
+                *this, [](std::uint32_t a, std::int32_t b) { return ShiftRight(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::int64_t, std::int32_t>>(
+                *this, [](std::int64_t a, std::int32_t b) { return ShiftRight(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint64_t, std::int32_t>>(
+                *this, [](std::uint64_t a, std::int32_t b) { return ShiftRight(a, b); }),
+        });
+    }
+    return shiftRightOperators_;
+}
+
+// The C# `public OperatorMethod[] UnsignedShiftRightOperators` (the C# 11 `>>>`
+// operator): the same four originals with the zero-filling right-shift bodies (the
+// signed types reinterpret their pattern unsigned first -- `(int)((uint)a >> b)` and
+// the 64-bit mirror), then their lifted forms.
+const std::vector<std::shared_ptr<OperatorMethod>>&
+CSharpOperators::UnsignedShiftRightOperators() const
+{
+    if (unsignedShiftRightOperators_.empty())
+    {
+        unsignedShiftRightOperators_ = Lift({
+            std::make_shared<LambdaBinaryOperatorMethod<std::int32_t, std::int32_t>>(
+                *this,
+                [](std::int32_t a, std::int32_t b) { return UnsignedShiftRight(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint32_t, std::int32_t>>(
+                *this,
+                [](std::uint32_t a, std::int32_t b) { return UnsignedShiftRight(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::int64_t, std::int32_t>>(
+                *this,
+                [](std::int64_t a, std::int32_t b) { return UnsignedShiftRight(a, b); }),
+            std::make_shared<LambdaBinaryOperatorMethod<std::uint64_t, std::int32_t>>(
+                *this,
+                [](std::uint64_t a, std::int32_t b) { return UnsignedShiftRight(a, b); }),
+        });
+    }
+    return unsignedShiftRightOperators_;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

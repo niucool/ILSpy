@@ -54,9 +54,20 @@
 //     operator-table properties (`UnaryPlusOperators` / `UncheckedUnaryMinusOperators` /
 //     `CheckedUnaryMinusOperators` / `LogicalNegationOperators` / `BitwiseComplementOperators`
 //     -- each the originals followed by their lifted forms via `Lift`).
+//   * PORTED: the binary operator region (CSharpOperators.cs lines 411-481 + 622-655): the
+//     `BinaryOperatorMethod` base, `LambdaBinaryOperatorMethod<T1,T2>` (the CHECKED/UNCHECKED
+//     func PAIR -- the C# `checked`/`unchecked` arithmetic semantics the resolver's
+//     `CheckForOverflow` selects between -- with the types resolved from
+//     `Type.GetTypeCode(typeof(T1))`/`(T2)`), `LiftedBinaryOperatorMethod` (the `Nullable<T>`
+//     lifted form implementing `ILiftedOperator`), `StringConcatenation` (the built-in
+//     `string + string` / `string + object` / `object + string` operators), and the eight
+//     lazy arithmetic operator-table properties (`MultiplicationOperators` /
+//     `DivisionOperators` / `RemainderOperators` / `AdditionOperators` /
+//     `SubtractionOperators` / `ShiftLeftOperators` / `ShiftRightOperators` /
+//     `UnsignedShiftRightOperators` -- the C# 4.0 spec sections 7.8.1-7.8.5).
 //
-// The remaining derived operator-method families (the binary / equality / relational
-// regions, lines 411-1101) and the lazy operator-table properties built on them are
+// The remaining derived operator-method families (the equality / relational / bitwise
+// regions, lines 697-1168) and the lazy operator-table properties built on them are
 // DEFERRED to later slices.
 //
 // KEY PORT CONVENTIONS:
@@ -147,6 +158,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -443,6 +455,49 @@ public:
     // `i => ~i`), followed by their lifted forms.
     const std::vector<std::shared_ptr<OperatorMethod>>& BitwiseComplementOperators() const;
 
+    // --- The C# lazy binary operator-table properties (lines 484-695, convention (m)) ---
+
+    // The C# `OperatorMethod[] MultiplicationOperators` (the C# 4.0 spec 7.8.1
+    // multiplication operator): the seven numeric originals (int, uint, long, ulong,
+    // float, double, decimal -- each the checked/unchecked multiply pair), followed by
+    // their lifted `Nullable<T>` forms.
+    const std::vector<std::shared_ptr<OperatorMethod>>& MultiplicationOperators() const;
+
+    // The C# `OperatorMethod[] DivisionOperators` (the C# 4.0 spec 7.8.2 division
+    // operator): the same seven originals with the division bodies, then their lifted
+    // forms.
+    const std::vector<std::shared_ptr<OperatorMethod>>& DivisionOperators() const;
+
+    // The C# `OperatorMethod[] RemainderOperators` (the C# 4.0 spec 7.8.3 remainder
+    // operator): the same seven originals with the remainder bodies, then their lifted
+    // forms.
+    const std::vector<std::shared_ptr<OperatorMethod>>& RemainderOperators() const;
+
+    // The C# `OperatorMethod[] AdditionOperators` (the C# 4.0 spec 7.8.3 addition
+    // operator): the seven numeric originals, then the three built-in string
+    // concatenations (`string + string`, `string + object`, `object + string` -- the
+    // StringConcatenation class, NOT lifted), then the seven lifted numeric forms.
+    const std::vector<std::shared_ptr<OperatorMethod>>& AdditionOperators() const;
+
+    // The C# `OperatorMethod[] SubtractionOperators` (the C# 4.0 spec 7.8.4 subtraction
+    // operator): the seven numeric originals, then their lifted forms.
+    const std::vector<std::shared_ptr<OperatorMethod>>& SubtractionOperators() const;
+
+    // The C# `OperatorMethod[] ShiftLeftOperators` (the C# 4.0 spec 7.8.5 shift
+    // operators): the four originals (int, uint, long, ulong -- each shifting by an int
+    // count, the single-func ctor: a shift never overflows, so there is no
+    // checked/unchecked distinction), followed by their lifted forms.
+    const std::vector<std::shared_ptr<OperatorMethod>>& ShiftLeftOperators() const;
+
+    // The C# `OperatorMethod[] ShiftRightOperators`: the same four originals with the
+    // right-shift bodies, then their lifted forms.
+    const std::vector<std::shared_ptr<OperatorMethod>>& ShiftRightOperators() const;
+
+    // The C# `OperatorMethod[] UnsignedShiftRightOperators` (the C# 11 `>>>` operator):
+    // the same four originals with the zero-filling right-shift bodies, then their
+    // lifted forms.
+    const std::vector<std::shared_ptr<OperatorMethod>>& UnsignedShiftRightOperators() const;
+
 private:
     // The C# `private CSharpOperators(ICompilation compilation)` -- private; `Get`
     // (a static member, which has private access) builds the instance. NOTE:
@@ -476,6 +531,17 @@ private:
     mutable std::vector<std::shared_ptr<OperatorMethod>> checkedUnaryMinusOperators_;
     mutable std::vector<std::shared_ptr<OperatorMethod>> logicalNegationOperators_;
     mutable std::vector<std::shared_ptr<OperatorMethod>> bitwiseComplementOperators_;
+
+    // The C# `OperatorMethod[]? multiplicationOperators` (and the seven siblings) -- the
+    // binary lazy memo fields (convention (m)).
+    mutable std::vector<std::shared_ptr<OperatorMethod>> multiplicationOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> divisionOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> remainderOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> additionOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> subtractionOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> shiftLeftOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> shiftRightOperators_;
+    mutable std::vector<std::shared_ptr<OperatorMethod>> unsignedShiftRightOperators_;
 };
 
 // ---------------------------------------------------------------------------
@@ -507,6 +573,147 @@ inline Decimal operator-(Decimal value)
 {
     value.isNegative = !value.isNegative;
     return value;
+}
+
+// The binary `decimal` stand-in operators (the * / / / % / + / - bodies the arithmetic
+// operator tables below store, convention (l)): the System.Decimal SHAPE is a scaled
+// magnitude with a separate sign, so the multiplicative operators combine the
+// magnitudes/scales/signs and the additive operators align the scales first (the
+// smaller-scale operand scaled up by 10^diff -- the System.Decimal addition alignment).
+// The 64-bit stand-in magnitude wraps where the real 96-bit one would not (the
+// uint64 -> int64 narrowing of a wrapped magnitude is implementation-defined before
+// C++20; MSVC defines the two's-complement wrap), and the division scale handling is the
+// direct approximation (the real System.Decimal raises the quotient scale to keep the
+// precision); the full arithmetic fidelity arrives with the deferred constant-evaluation
+// path (convention (j)). Division/remainder by a zero divisor throws -- the C# decimal
+// DivideByZeroException in BOTH the checked and unchecked contexts.
+
+// Normalizes a stand-in value to the (non-negative magnitude, authoritative sign flag)
+// pair the binary operators combine: the flag is the sign the unary operators flip, and a
+// negative mantissa (never produced in intended use -- the default is 0) folds into the
+// flag so the magnitude stays non-negative.
+inline Decimal NormalizeDecimal(Decimal value)
+{
+    if (value.mantissa < 0)
+    {
+        value.mantissa = static_cast<std::int64_t>(
+            0ull - static_cast<std::uint64_t>(value.mantissa));
+        value.isNegative = !value.isNegative;
+    }
+    return value;
+}
+
+// 10^power (unsigned wrap past 10^19 -- the stand-in's 64-bit magnitude standing in for
+// the real 96-bit one).
+inline std::uint64_t DecimalPow10(std::uint8_t power)
+{
+    std::uint64_t result = 1;
+    for (std::uint8_t i = 0; i < power; i++)
+        result *= 10ull;
+    return result;
+}
+
+// The C# binary `a * b` (the same body for the checked/unchecked pair -- the stand-in
+// wraps where the real System.Decimal would throw OverflowException).
+inline Decimal operator*(Decimal a, Decimal b)
+{
+    a = NormalizeDecimal(a);
+    b = NormalizeDecimal(b);
+    Decimal result;
+    result.mantissa = static_cast<std::int64_t>(static_cast<std::uint64_t>(a.mantissa)
+                                                * static_cast<std::uint64_t>(b.mantissa));
+    result.scale = static_cast<std::uint8_t>(a.scale + b.scale);
+    result.isNegative = a.isNegative != b.isNegative;
+    return result;
+}
+
+// The C# binary `a / b`.
+inline Decimal operator/(Decimal a, Decimal b)
+{
+    a = NormalizeDecimal(a);
+    b = NormalizeDecimal(b);
+    if (b.mantissa == 0)
+        throw std::runtime_error("DivideByZeroException");
+    Decimal result;
+    result.mantissa = static_cast<std::int64_t>(static_cast<std::uint64_t>(a.mantissa)
+                                                / static_cast<std::uint64_t>(b.mantissa));
+    // The stand-in approximates the result scale with the operand scale difference
+    // (floored at 0); the real System.Decimal raises the scale to keep the quotient's
+    // precision (the deferred constant-evaluation fidelity).
+    result.scale = a.scale > b.scale ? static_cast<std::uint8_t>(a.scale - b.scale) : 0;
+    result.isNegative = a.isNegative != b.isNegative;
+    return result;
+}
+
+// The C# binary `a % b`: both operands aligned to the larger scale, the remainder taking
+// the dividend's sign.
+inline Decimal operator%(Decimal a, Decimal b)
+{
+    a = NormalizeDecimal(a);
+    b = NormalizeDecimal(b);
+    if (b.mantissa == 0)
+        throw std::runtime_error("DivideByZeroException");
+    const std::uint8_t scale = a.scale > b.scale ? a.scale : b.scale;
+    std::uint64_t ma = static_cast<std::uint64_t>(a.mantissa);
+    std::uint64_t mb = static_cast<std::uint64_t>(b.mantissa);
+    if (a.scale < scale)
+        ma *= DecimalPow10(static_cast<std::uint8_t>(scale - a.scale));
+    if (b.scale < scale)
+        mb *= DecimalPow10(static_cast<std::uint8_t>(scale - b.scale));
+    Decimal result;
+    const std::uint64_t remainder = ma % mb;
+    result.mantissa = static_cast<std::int64_t>(remainder);
+    result.scale = scale;
+    result.isNegative = a.isNegative && remainder != 0;
+    return result;
+}
+
+// The C# binary `a + b`: both magnitudes scaled to the larger scale, then combined by
+// sign (the larger magnitude wins a sign mismatch; equal magnitudes cancel to +0).
+inline Decimal operator+(Decimal a, Decimal b)
+{
+    a = NormalizeDecimal(a);
+    b = NormalizeDecimal(b);
+    const std::uint8_t scale = a.scale > b.scale ? a.scale : b.scale;
+    std::uint64_t ma = static_cast<std::uint64_t>(a.mantissa);
+    std::uint64_t mb = static_cast<std::uint64_t>(b.mantissa);
+    if (a.scale < scale)
+        ma *= DecimalPow10(static_cast<std::uint8_t>(scale - a.scale));
+    if (b.scale < scale)
+        mb *= DecimalPow10(static_cast<std::uint8_t>(scale - b.scale));
+    Decimal result;
+    std::uint64_t sum;
+    bool negative;
+    if (a.isNegative == b.isNegative)
+    {
+        sum = ma + mb;  // unsigned wrap
+        negative = a.isNegative;
+    }
+    else
+    {
+        if (ma >= mb)
+        {
+            sum = ma - mb;
+            negative = a.isNegative;
+        }
+        else
+        {
+            sum = mb - ma;
+            negative = b.isNegative;
+        }
+    }
+    result.mantissa = static_cast<std::int64_t>(sum);
+    result.scale = scale;
+    result.isNegative = negative && sum != 0;  // zero is sign-neutral
+    return result;
+}
+
+// The C# binary `a - b` -- the addition of the negated subtrahend (the unary sign flip;
+// a zero subtrahend's flipped sign cancels back out through the sum != 0 guard).
+inline Decimal operator-(Decimal a, Decimal b)
+{
+    b.isNegative = !b.isNegative;
+    return a + b;
 }
 
 // The C# `Type.GetTypeCode(typeof(T))` -- convention (k): the compile-time `TypeCode` of
@@ -678,6 +885,172 @@ private:
     // (j)); the operator tables pass the C# lambda bodies (`+i`, `unchecked(-i)`,
     // `checked(-i)`, `!b`, `~i`) through this member.
     std::function<T(T)> func_;
+};
+
+// ---------------------------------------------------------------------------
+// The binary operator region (CSharpOperators.cs lines 411-481 + 622-655)
+// ---------------------------------------------------------------------------
+
+// The C# `internal class BinaryOperatorMethod : OperatorMethod` (lines 412-421) -- the
+// base of every binary built-in operator method: the constant-evaluation contract, the
+// mirror of `UnaryOperatorMethod`. The C# `object? Invoke(CSharpResolver resolver,
+// object? lhs, object? rhs)` virtual pair (throwing NotSupportedException here,
+// overridden by the lambda-backed operators) is deferred as a whole (convention (j): the
+// resolver is the parameter type, the only caller, and the only dependency).
+// Unsealed (the Lambda/Lifted/StringConcatenation classes derive it).
+class BinaryOperatorMethod : public OperatorMethod {
+public:
+    // The C# `public BinaryOperatorMethod(ICompilation compilation) : base(compilation)`.
+    explicit BinaryOperatorMethod(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation)
+        : OperatorMethod(compilation)
+    {
+    }
+
+    // The C# `public virtual bool CanEvaluateAtCompileTime => false` -- the base default
+    // (the lambda-backed operators override it to true).
+    virtual bool CanEvaluateAtCompileTime() const { return false; }
+};
+
+// The C# `sealed class LiftedBinaryOperatorMethod : BinaryOperatorMethod, ILiftedOperator`
+// (lines 463-481) -- the `Nullable<T>` form of a binary operator: the return type and
+// both parameters lifted to their `Nullable<T>` counterparts (the shared nullable
+// parameter-table instances), the `ILiftedOperator` surface (the D549 standalone base)
+// exposing the pre-lifting signature. `final` (the C# sealed). The `Lift`/
+// `CanEvaluateAtCompileTime` inherited defaults are faithful: a lifted operator is not
+// lifted again (the OperatorMethod default returns null) and is not itself
+// constant-evaluable (the C# does not override the flag -- the resolver lifts null
+// operands itself; only the non-lifted lambda operators carry the flag).
+class LiftedBinaryOperatorMethod final : public BinaryOperatorMethod, public ILiftedOperator {
+public:
+    // The C# `public LiftedBinaryOperatorMethod(CSharpOperators operators,
+    // BinaryOperatorMethod baseMethod) : base(operators.compilation)` -- out-of-line in the
+    // .cpp (convention (a): the body reads the CSharpOperators parameter tables). The
+    // parameter is `const&`: the only callers (the `Lift` overrides) are const (the base
+    // `Lift` contract).
+    LiftedBinaryOperatorMethod(const CSharpOperators& operators,
+                               const BinaryOperatorMethod& baseMethod);
+
+    // --- ILiftedOperator ---
+
+    // The C# `IReadOnlyList<IParameter> NonLiftedParameters => baseMethod.Parameters` --
+    // a by-value snapshot of non-owning pointers (the ILiftedOperator convention (b)).
+    std::vector<const ILSpy::Decompiler::TypeSystem::IParameter*> NonLiftedParameters()
+        const override;
+
+    // The C# `IType NonLiftedReturnType => baseMethod.ReturnType`.
+    const ILSpy::Decompiler::TypeSystem::IType& NonLiftedReturnType() const override;
+
+private:
+    // The C# `BinaryOperatorMethod baseMethod` reference field -- the non-owning back-
+    // pointer, convention (n).
+    const BinaryOperatorMethod* baseMethod_;
+};
+
+// The C# `sealed class LambdaBinaryOperatorMethod<T1, T2> : BinaryOperatorMethod` (lines
+// 423-461) -- the lambda-backed binary operator: the CHECKED/UNCHECKED func PAIR (the C#
+// `Func<T1,T2,T1>` fields, stored for the deferred `Invoke`, convention (j) -- the funcs
+// encode the C# `checked`/`unchecked` arithmetic semantics the resolver's
+// `CheckForOverflow` selects between), the return type and the FIRST parameter resolved
+// from `Type.GetTypeCode(typeof(T1))` and the second parameter from
+// `Type.GetTypeCode(typeof(T2))` (the `TypeCodeFor<T>` trait, convention (k)),
+// `CanEvaluateAtCompileTime => true`, and the `Lift` override building the `Nullable<T1>`
+// form. `final` (the C# sealed).
+template <typename T1, typename T2>
+class LambdaBinaryOperatorMethod final : public BinaryOperatorMethod {
+public:
+    // The C# `public LambdaBinaryOperatorMethod(CSharpOperators operators, Func<T1,T2,T1>
+    // func) : this(operators, func, func)` -- the single-func ctor (the shift tables: a
+    // shift never overflows, so there is no checked/unchecked distinction).
+    LambdaBinaryOperatorMethod(const CSharpOperators& operators, std::function<T1(T1, T2)> func)
+        : LambdaBinaryOperatorMethod(operators, func, func)
+    {
+    }
+
+    // The C# `public LambdaBinaryOperatorMethod(CSharpOperators operators,
+    // Func<T1,T2,T1> checkedFunc, Func<T1,T2,T1> uncheckedFunc)`: `TypeCode t1 =
+    // Type.GetTypeCode(typeof(T1)); this.ReturnType = operators.compilation.FindType(t1);
+    // parameters.Add(operators.MakeParameter(t1)); parameters.Add(
+    // operators.MakeParameter(Type.GetTypeCode(typeof(T2)))); this.checkedFunc =
+    // checkedFunc; this.uncheckedFunc = uncheckedFunc;`.
+    LambdaBinaryOperatorMethod(const CSharpOperators& operators,
+                               std::function<T1(T1, T2)> checkedFunc,
+                               std::function<T1(T1, T2)> uncheckedFunc)
+        : BinaryOperatorMethod(operators.Compilation())
+    {
+        const ILSpy::Decompiler::TypeSystem::TypeCode t1 = TypeCodeFor<T1>::value;
+        // The C# `operators.compilation.FindType(t1)` -- the ReflectionHelper TypeCode
+        // lookup (the fully-qualified call: the sibling TypeSystem namespace is not
+        // searched from inside the class body, the iteration-64 learning). The owning
+        // handle is recovered through `shared_from_this()` + `const_pointer_cast` (the
+        // D529 convention).
+        const ILSpy::Decompiler::TypeSystem::IType& type =
+            ILSpy::Decompiler::TypeSystem::FindType(operators.Compilation(), t1);
+        returnType_ = std::const_pointer_cast<ILSpy::Decompiler::TypeSystem::IType>(
+            type.shared_from_this());
+        parameters_.push_back(operators.MakeParameter(t1));
+        parameters_.push_back(operators.MakeParameter(TypeCodeFor<T2>::value));
+        checkedFunc_ = std::move(checkedFunc);
+        uncheckedFunc_ = std::move(uncheckedFunc);
+    }
+
+    // The C# `public override bool CanEvaluateAtCompileTime => true` -- the lambda-backed
+    // operator is compile-time evaluable (the deferred `Invoke` applies the
+    // checked/unchecked func the resolver's CheckForOverflow selects).
+    bool CanEvaluateAtCompileTime() const override { return true; }
+
+    // The C# `public override OperatorMethod Lift(CSharpOperators operators) => new
+    // LiftedBinaryOperatorMethod(operators, this)`.
+    std::shared_ptr<OperatorMethod> Lift(const CSharpOperators& operators) const override
+    {
+        return std::make_shared<LiftedBinaryOperatorMethod>(operators, *this);
+    }
+
+private:
+    // The C# `readonly Func<T1,T2,T1> checkedFunc` / `uncheckedFunc` -- stored for the
+    // deferred `Invoke` (convention (j)); the operator tables pass the C# lambda bodies
+    // (the checked/unchecked arithmetic pairs, the shift bodies) through these members.
+    std::function<T1(T1, T2)> checkedFunc_;
+    std::function<T1(T1, T2)> uncheckedFunc_;
+};
+
+// The C# `sealed class StringConcatenation : BinaryOperatorMethod` (lines 622-655) -- the
+// built-in `string + string` / `string + object` / `object + string` operators of the
+// addition table: the return type is String, the parameters come from the two TypeCodes,
+// and ONLY the `string + string` form is constant-evaluable (the C#
+// `canEvaluateAtCompileTime = p1 == TypeCode.String && p2 == TypeCode.String` -- a
+// `string + object` may invoke ToString at run time). NOT lifted (the inherited `Lift`
+// returns null): the addition table's lifted forms come from the numeric lambdas only.
+// The C# `Invoke` (`string.Concat(lhs, rhs)`) is deferred (convention (j)).
+class StringConcatenation final : public BinaryOperatorMethod {
+public:
+    // The C# `public StringConcatenation(CSharpOperators operators, TypeCode p1,
+    // TypeCode p2)`: `this.canEvaluateAtCompileTime = p1 == TypeCode.String &&
+    // p2 == TypeCode.String; this.ReturnType = operators.compilation.FindType(
+    // KnownTypeCode.String); parameters.Add(operators.MakeParameter(p1));
+    // parameters.Add(operators.MakeParameter(p2));`.
+    StringConcatenation(const CSharpOperators& operators,
+                        ILSpy::Decompiler::TypeSystem::TypeCode p1,
+                        ILSpy::Decompiler::TypeSystem::TypeCode p2)
+        : BinaryOperatorMethod(operators.Compilation()),
+          canEvaluateAtCompileTime_(
+              p1 == ILSpy::Decompiler::TypeSystem::TypeCode::String
+              && p2 == ILSpy::Decompiler::TypeSystem::TypeCode::String)
+    {
+        const ILSpy::Decompiler::TypeSystem::IType& stringType =
+            operators.Compilation().FindType(
+                ILSpy::Decompiler::TypeSystem::KnownTypeCode::String);
+        returnType_ = std::const_pointer_cast<ILSpy::Decompiler::TypeSystem::IType>(
+            stringType.shared_from_this());
+        parameters_.push_back(operators.MakeParameter(p1));
+        parameters_.push_back(operators.MakeParameter(p2));
+    }
+
+    // The C# `public override bool CanEvaluateAtCompileTime => canEvaluateAtCompileTime`.
+    bool CanEvaluateAtCompileTime() const override { return canEvaluateAtCompileTime_; }
+
+private:
+    // The C# `bool canEvaluateAtCompileTime`.
+    bool canEvaluateAtCompileTime_;
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver
