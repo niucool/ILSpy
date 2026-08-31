@@ -83,6 +83,16 @@
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
 #include "Decompiler/Util/CSharpPrimitiveCast.hpp"
 #include "Decompiler/Util/Decimal.hpp"
+#include "Attribute.hpp"
+#include "AttributeSection.hpp"
+#include "Expressions/NamedExpression.hpp"
+#include "Decompiler/Semantics/InitializedObjectResolveResult.hpp"
+#include "Decompiler/Semantics/UnknownMemberResolveResult.hpp"
+#include "Decompiler/TypeSystem/CustomAttributeNamedArgument.hpp"
+#include "Decompiler/TypeSystem/IMember.hpp"
+#include "Decompiler/TypeSystem/INamespace.hpp"
+#include "Decompiler/TypeSystem/IParameter.hpp"
+#include "Decompiler/TypeSystem/IProperty.hpp"
 
 #include <any>
 #include <charconv>
@@ -1101,6 +1111,49 @@ std::shared_ptr<Sem::ResolveResult> UnknownErrorSingleton() {
         const_cast<Sem::ErrorResolveResult*>(&Sem::ErrorResolveResult::UnknownError()));
 }
 
+// The C# `internal static IMember MemberForNamedArgument(IType attributeType,
+// CustomAttributeNamedArgument<IType> namedArgument)` (CustomAttribute.cs line 113)
+// -- the named-argument member lookup: the kind dispatches to the attribute
+// type's fields or properties filtered by name, keeping the LAST match (the C#
+// `LastOrDefault`, the last-declaration-wins convention). The class the C#
+// helper lives on (`CustomAttribute`, the attribute-blob decoder) is otherwise
+// unported, so the helper lands file-local next to its only consumer
+// (`ConvertAttribute`, the MetadataTokens.GetRowNumber precedent). The return
+// is a non-owning pointer (the type system owns the member).
+const TS::IMember* MemberForNamedArgument(
+    const TS::IType& attributeType, const TS::CustomAttributeNamedArgument& namedArgument) {
+    switch (namedArgument.Kind()) {
+    case TS::CustomAttributeNamedArgumentKind::Field: {
+        const std::string& name = namedArgument.Name();
+        std::vector<const TS::IField*> fields = attributeType.GetFields(
+            [&name](const TS::IField* field) { return field->Name() == name; });
+        return fields.empty() ? nullptr : fields.back();
+    }
+    case TS::CustomAttributeNamedArgumentKind::Property: {
+        const std::string& name = namedArgument.Name();
+        std::vector<const TS::IProperty*> properties = attributeType.GetProperties(
+            [&name](const TS::IProperty* property) { return property->Name() == name; });
+        return properties.empty() ? nullptr : properties.back();
+    }
+    default:
+        return nullptr;
+    }
+}
+
+// The C# `public static ResolveResult GetResolveResult(this AstNode node)`
+// (Annotations.cs line 153) -- the resolve-result annotation lookup with the
+// `ErrorResolveResult.UnknownError` singleton fallback (the
+// `node.Annotation<ResolveResult>() ?? ErrorResolveResult.UnknownError` shape).
+// Only the `ApplyShortAttributeNameIfPossible` namespace-target read needs the
+// extension here (the Annotations.cs file itself is unported), so it lands
+// file-local (the MemberForNamedArgument convention); the fallback keeps the
+// fallback's non-NamespaceResolveResult behavior (the singleton is not a
+// NamespaceResolveResult, so the namespace arm simply does not fire).
+const Sem::ResolveResult* GetResolveResultOf(const AstNode& node) {
+    const Sem::ResolveResult* rr = node.Annotation<Sem::ResolveResult>();
+    return rr != nullptr ? rr : UnknownErrorSingleton().get();
+}
+
 } // namespace
 
 // The C# `public Expression ConvertConstantValue(ResolveResult rr)` (line 998).
@@ -1532,6 +1585,238 @@ Expression* TypeSystemAstBuilder::ConvertEnumValue(TS::IType& type, std::int64_t
         return numericExpression;
     }
     return new CastExpression(ConvertType(type), numericExpression);
+}
+
+// ---------------------------------------------------------------------------
+// The "Convert Attribute" + "Convert Attribute Type" regions (C# lines 770-988)
+// ---------------------------------------------------------------------------
+
+// The C# `public Attribute ConvertAttribute(IAttribute attribute)` (line 771).
+Attribute* TypeSystemAstBuilder::ConvertAttribute(const TS::IAttribute& attribute) const {
+    auto* attr = new Attribute();
+    // The C# `ConvertAttributeType(attribute.AttributeType)` receives the
+    // non-const `IType&` the region's `shared_from_this`-based annotation path
+    // needs; the attribute's type is the type-system-owned mutable object behind
+    // the interface's const reference (the established const_cast convention).
+    auto& attributeType = const_cast<TS::IType&>(attribute.AttributeType());
+    attr->Type(ConvertAttributeType(attributeType));
+
+    // The C# `switch (attr.Type)` over the rendered type: the trailing
+    // "Attribute" suffix is stripped off the identifier (the C# `id is { } id`
+    // non-null pattern ports to `has_value()`; the suffix check implies the
+    // length is at least 9, so `Substring(0, Length - 9)` never underflows).
+    if (auto* st = dynamic_cast<SimpleType*>(attr->Type())) {
+        const std::optional<std::string> id = st->Identifier();
+        if (id.has_value() && id->size() >= 9
+            && id->compare(id->size() - 9, 9, "Attribute") == 0) {
+            st->Identifier(id->substr(0, id->size() - 9));
+        }
+    } else if (auto* mt = dynamic_cast<MemberType*>(attr->Type())) {
+        const std::string memberName = mt->MemberName();
+        if (memberName.size() >= 9
+            && memberName.compare(memberName.size() - 9, 9, "Attribute") == 0) {
+            mt->MemberName(memberName.substr(0, memberName.size() - 9));
+        }
+    }
+
+    if (AddResolveResultAnnotations() && attribute.Constructor() != nullptr) {
+        attr->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+            std::shared_ptr<Sem::ResolveResult>(), attribute.Constructor()));
+    }
+
+    // The C# `attribute.Constructor?.Parameters ?? EmptyList<IParameter>.Instance`.
+    const TS::IMethod* constructor = attribute.Constructor();
+    const std::vector<const TS::IParameter*> parameters =
+        constructor != nullptr ? constructor->Parameters()
+                               : std::vector<const TS::IParameter*>{};
+    const std::vector<TS::CustomAttributeTypedArgument> fixedArguments =
+        attribute.FixedArguments();
+    for (std::size_t i = 0; i < fixedArguments.size(); i++) {
+        const TS::CustomAttributeTypedArgument& arg = fixedArguments[i];
+        const TS::IParameter* p = i < parameters.size() ? parameters[i] : nullptr;
+        // The C# `p?.Type ?? arg.Type`: the constructor parameter's type when the
+        // position has one, else the argument's own type. Both feeds are non-const
+        // `IType&` through the established const_cast convention; `arg.Type` is
+        // non-null by the decoder contract (the D354 unguarded-deref convention).
+        TS::IType& expectedType = p != nullptr ? const_cast<TS::IType&>(p->Type())
+                                               : *arg.Type();
+        attr->Arguments().Add(ConvertConstantValue(expectedType, *arg.Type(), arg.Value()));
+    }
+
+    const std::vector<TS::CustomAttributeNamedArgument> namedArguments =
+        attribute.NamedArguments();
+    if (!namedArguments.empty()) {
+        auto targetResult = std::make_shared<Sem::InitializedObjectResolveResult>(
+            attributeType.shared_from_this());
+        for (const TS::CustomAttributeNamedArgument& namedArg : namedArguments) {
+            auto* namedArgument = new NamedExpression(
+                namedArg.Name(), ConvertConstantValue(*namedArg.Type(), namedArg.Value()));
+            if (AddResolveResultAnnotations()) {
+                const TS::IMember* member = MemberForNamedArgument(attributeType, namedArg);
+                if (member != nullptr) {
+                    namedArgument->AddAnnotation(
+                        std::make_shared<Sem::MemberResolveResult>(targetResult, member));
+                }
+            }
+            attr->Arguments().Add(namedArgument);
+        }
+    }
+
+    if (attribute.HasDecodeErrors()) {
+        attr->HasArgumentList(true);
+        // An ErrorExpression renders purely as its comment, so it appears inside the
+        // parentheses without an explicit closing-paren token to anchor a comment child.
+        attr->Arguments().Add(new ErrorExpression("Could not decode attribute arguments."));
+    }
+    return attr;
+}
+
+// The C# `internal IEnumerable<AttributeSection> ConvertAttributes(
+// IEnumerable<IAttribute> attributes, string? target = null)` (line 824).
+std::vector<AttributeSection*> TypeSystemAstBuilder::ConvertAttributes(
+    const std::vector<const TS::IAttribute*>& attributes,
+    const std::optional<std::string>& target) const {
+    std::vector<const TS::IAttribute*> ordered = attributes;
+    if (SortAttributes()) {
+        // The C# `OrderBy(a => a, new DelegateComparer<IAttribute>((a, b) =>
+        // CompareAttribute(a, b)))` is a STABLE sort over the pre-staged
+        // `CompareAttribute` free function (TypeSystemAstBuilder.cs line 835, the
+        // CompareType / CompareAny statics): `std::stable_sort` preserves the
+        // input order for equal keys exactly as `OrderBy` does.
+        std::stable_sort(ordered.begin(), ordered.end(),
+                         [](const TS::IAttribute* a, const TS::IAttribute* b) {
+                             return CompareAttribute(*a, *b) < 0;
+                         });
+    }
+    std::vector<AttributeSection*> result;
+    result.reserve(ordered.size());
+    for (const TS::IAttribute* attribute : ordered) {
+        auto* section = new AttributeSection(ConvertAttribute(*attribute));
+        if (target.has_value())
+            section->AttributeTarget(*target);
+        result.push_back(section);
+    }
+    return result;
+}
+
+// The C# `public AstType ConvertAttributeType(IType type)` (line 894).
+AstType* TypeSystemAstBuilder::ConvertAttributeType(TS::IType& type) const {
+    // The C# `if (type == null) throw new ArgumentNullException` is structurally
+    // unreachable through the reference parameter (the D374 convention).
+    AstType* astType = ConvertTypeHelper(type);
+
+    std::optional<std::string> shortName;
+    const std::string name = type.Name();
+    if (name.size() > 9 && name.compare(name.size() - 9, 9, "Attribute") == 0) {
+        shortName = name.substr(0, name.size() - 9);
+    }
+    if (AlwaysUseShortTypeNames()) {
+        if (auto* st = dynamic_cast<SimpleType*>(astType)) {
+            // The C# `st.Identifier = shortName` assigns a possibly-null short name;
+            // `Identifier.CreateIfNotEmpty(null)` clears the token, so the port
+            // maps the null to the empty string (the setter's clearing path).
+            st->Identifier(shortName.value_or(""));
+        } else if (auto* mt = dynamic_cast<MemberType*>(astType)) {
+            // The C# `mt.MemberName = shortName!`: the null-forgiving operator lies
+            // for a suffix-less qualified name; `MemberName`'s setter always creates
+            // a token (an empty name yields an empty-Name token), so the port maps
+            // the null to the empty string (the nearest reachable edge).
+            mt->MemberName(shortName.value_or(""));
+        }
+    } else if (resolver_ != nullptr) {
+        ApplyShortAttributeNameIfPossible(type, *astType, shortName);
+    }
+    AddTypeAnnotation(*astType, type);
+
+    return astType;
+}
+
+// The C# `private void ApplyShortAttributeNameIfPossible(IType type, AstType
+// astType, string? shortName)` (line 926).
+void TypeSystemAstBuilder::ApplyShortAttributeNameIfPossible(
+    TS::IType& type, AstType& astType, const std::optional<std::string>& shortName) const {
+    if (auto* st = dynamic_cast<SimpleType*>(&astType)) {
+        std::shared_ptr<Sem::ResolveResult> shortRR;
+        // The C# `resolver!` deref: the method is reached only through
+        // ConvertAttributeType's `resolver != null` arm.
+        std::shared_ptr<Sem::ResolveResult> withExtraAttrSuffix =
+            resolver_->LookupSimpleNameOrTypeName(type.Name() + "Attribute",
+                                                  std::vector<TS::ITypePtr>{}, NLM::Type);
+        if (shortName.has_value()) {
+            shortRR = resolver_->LookupSimpleNameOrTypeName(*shortName,
+                                                            std::vector<TS::ITypePtr>{},
+                                                            NLM::Type);
+        }
+        // short type is either unknown or not an attribute type -> we can use the short name.
+        if (shortRR != nullptr
+            && (dynamic_cast<const Sem::UnknownIdentifierResolveResult*>(shortRR.get()) != nullptr
+                || !IsAttributeType(*shortRR))) {
+            st->Identifier(*shortName);
+        } else if (IsAttributeType(*withExtraAttrSuffix)) {
+            // typeName + "Attribute" is an attribute type -> we cannot use long type name,
+            // add '@' to disable implicit "Attribute" suffix. The C# `'@' + st.Identifier`
+            // over a null identifier yields just "@" (the null maps to the empty string).
+            st->Identifier("@" + st->Identifier().value_or(""));
+        }
+    } else if (auto* mt = dynamic_cast<MemberType*>(&astType)) {
+        const TS::IType* declaringType = DeclaringTypeOf(type);
+        if (declaringType != nullptr) {
+            const TS::ITypeDefinition* declaringTypeDef = declaringType->GetDefinition();
+            if (declaringTypeDef != nullptr) {
+                // The C# `declaringTypeDef.GetNestedTypes(t => t.TypeParameterCount == 0
+                // && t.Name == X).Any(IsAttributeType)` -- the same shapeless filter
+                // over the two names the two arms read.
+                auto anyNestedTypeIsAttributeType = [&](const std::string& nestedName) {
+                    const std::vector<TS::ITypePtr> nestedTypes =
+                        declaringTypeDef->GetNestedTypes([&nestedName](
+                                                             const TS::ITypeDefinition* t) {
+                            return t->TypeParameterCount() == 0 && t->Name() == nestedName;
+                        });
+                    for (const TS::ITypePtr& nestedType : nestedTypes) {
+                        if (IsAttributeType(nestedType.get()))
+                            return true;
+                    }
+                    return false;
+                };
+                if (shortName.has_value()
+                    && !anyNestedTypeIsAttributeType(*shortName)) {
+                    mt->MemberName(*shortName);
+                } else if (anyNestedTypeIsAttributeType(type.Name() + "Attribute")) {
+                    mt->MemberName("@" + mt->MemberName());
+                }
+            }
+        } else if (const auto* nrr = dynamic_cast<const Sem::NamespaceResolveResult*>(
+                       GetResolveResultOf(*mt->Target()))) {
+            // The C# `mt.Target.GetResolveResult()` reads the target's
+            // resolve-result annotation with the UnknownError fallback (the
+            // GetResolveResultOf file-local helper); the MemberType target is
+            // non-null by construction (the unguarded deref, the D354 convention).
+            if (shortName.has_value()
+                && !IsAttributeType(nrr->Namespace()->GetTypeDefinition(*shortName, 0))) {
+                mt->MemberName(*shortName);
+            } else if (IsAttributeType(
+                           nrr->Namespace()->GetTypeDefinition(type.Name() + "Attribute", 0))) {
+                mt->MemberName("@" + mt->MemberName());
+            }
+        }
+    }
+}
+
+// The C# `private bool IsAttributeType(IType? type)` (line 979).
+bool TypeSystemAstBuilder::IsAttributeType(const TS::IType* type) const {
+    if (type == nullptr)
+        return false;
+    for (const TS::IType* baseType : TS::GetNonInterfaceBaseTypes(*type)) {
+        if (TS::IsKnownType(*baseType, TS::KnownTypeCode::Attribute))
+            return true;
+    }
+    return false;
+}
+
+// The C# `private bool IsAttributeType(ResolveResult rr)` (line 984).
+bool TypeSystemAstBuilder::IsAttributeType(const Sem::ResolveResult& rr) const {
+    const auto* trr = dynamic_cast<const Sem::TypeResolveResult*>(&rr);
+    return trr != nullptr && IsAttributeType(&trr->Type());
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

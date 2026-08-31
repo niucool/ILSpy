@@ -22,17 +22,19 @@
 // TypeSystemAstBuilder class itself (the long-pole CSharpAmbience blocker, 2782 C#
 // lines) is ported incrementally. The class holds a CSharpResolver field and threads
 // the full IType / IMember / ITypeDefinition surface: the class skeleton (the resolver
-// field, the two ctors, InitProperties, and the full configuration property surface)
-// and the "Convert Type" region (ConvertType / ConvertTypeHelper / TypeMatches /
+// field, the two ctors, InitProperties, and the full configuration property surface),
+// the "Convert Type" region (ConvertType / ConvertTypeHelper / TypeMatches /
 // TypeDefMatches / AddTypeArguments / ConvertNamespace / IsValidNamespace, C# lines
-// 266-768, implemented in TypeSystemAstBuilder.cpp), the "Convert Constant Value"
-// SUPPORT helpers (IsSpecialConstant + ConvertFloatingPointLiteral + MakeConstant,
-// C# lines 1168-1249 + 1496-1582), and the mutually-recursive "Convert Constant
-// Value" CORE (the three ConvertConstantValue overloads + ConvertEnumValue, C# lines
-// 998-1078 + 1306-1480) are landed; the remaining `Convert*` instance methods
-// (ConvertAttribute / ConvertParameter / ConvertSymbol / ConvertEntity /
-// ConvertExtension / ConvertVariable) follow in later slices, consuming the free
-// functions below as they grow.
+// 266-768, implemented in TypeSystemAstBuilder.cpp), the "Convert Attribute" +
+// "Convert Attribute Type" regions (ConvertAttribute / ConvertAttributes /
+// ConvertAttributeType / ApplyShortAttributeNameIfPossible / IsAttributeType, C#
+// lines 770-988), the "Convert Constant Value" SUPPORT helpers (IsSpecialConstant +
+// ConvertFloatingPointLiteral + MakeConstant, C# lines 1168-1249 + 1496-1582), and the
+// mutually-recursive "Convert Constant Value" CORE (the three ConvertConstantValue
+// overloads + ConvertEnumValue, C# lines 998-1078 + 1306-1480) are landed; the
+// remaining `Convert*` instance methods (ConvertParameter / ConvertSymbol /
+// ConvertEntity / ConvertExtension / ConvertVariable) follow in later slices,
+// consuming the free functions below as they grow.
 //
 // ModifierFromAccessibility (TypeSystemAstBuilder.cs line 2497) is the first such
 // helper: a pure switch on Accessibility (the D373 leaf) that maps a symbol's
@@ -81,12 +83,17 @@ namespace ILSpy::Decompiler::CSharp::Resolver { class CSharpResolver; }
 
 // Forward declarations for the parameter types the TypeSystemAstBuilder class
 // declares over incomplete types (the .cpp includes the full headers):
-// `FullTypeName` (a const& parameter) and the Semantics `NamespaceResolveResult`
-// (the shared_ptr out-parameter). Written at GLOBAL scope -- a qualified
-// namespace-definition inside another namespace declares a fresh shadow chain on
-// MSVC (the iteration-94 UsingScope trap).
+// `FullTypeName` (a const& parameter), the Semantics `NamespaceResolveResult`
+// (the shared_ptr out-parameter), and the Syntax `Attribute` / `AttributeSection`
+// nodes (the Convert Attribute region's return types). Written at GLOBAL scope --
+// a qualified namespace-definition inside another namespace declares a fresh
+// shadow chain on MSVC (the iteration-94 UsingScope trap).
 namespace ILSpy::Decompiler::TypeSystem { class FullTypeName; }
 namespace ILSpy::Decompiler::Semantics { class NamespaceResolveResult; }
+namespace ILSpy::Decompiler::CSharp::Syntax {
+class Attribute;
+class AttributeSection;
+} // namespace ILSpy::Decompiler::CSharp::Syntax
 // The ResolveResult-based ConvertConstantValue overload passes the result by
 // value (the C# parameter the body rebinds through the ConversionResolveResult
 // unwrap), so the class declaration needs the shared_ptr element type complete
@@ -1182,6 +1189,93 @@ public:
     // `MetadataTokens.GetRowNumber`, the D381 raw-token convention).
     Expression* ConvertEnumValue(TS::IType& type, std::int64_t val,
                                  const TS::IField* declaringEnumMember = nullptr) const;
+
+    // -- The "Convert Attribute" + "Convert Attribute Type" regions (C# lines
+    // 770-988) --
+    //
+    // The attribute renderer, the next `Convert*` regions in C# source order and
+    // the prerequisite the future `ConvertParameter` / `ConvertEntity` slices
+    // consume (`decl.Attributes.AddRange(ConvertAttributes(...))`):
+    // `ConvertAttributes` wraps every `ConvertAttribute` result in an
+    // `AttributeSection` (with the optional target), `ConvertAttribute` renders
+    // the `[...]` node (the attribute type through `ConvertAttributeType`, the
+    // fixed and named arguments through the already-landed 3-arg
+    // `ConvertConstantValue`), `ConvertAttributeType` strips the trailing
+    // "Attribute" suffix when the short name is safe, and the two
+    // `IsAttributeType` predicates test the `KnownTypeCode.Attribute`
+    // derivation. The C# private members (`ApplyShortAttributeNameIfPossible` /
+    // `IsAttributeType`) are widened to public for direct TDD (the TryConvert
+    // convention); every method is `const` (they read only the configuration
+    // properties, the resolver, and the already-landed Convert* surface).
+
+    // The C# `public Attribute ConvertAttribute(IAttribute attribute)` (line 771)
+    // -- creates the attribute node: the type through `ConvertAttributeType`
+    // (with the trailing "Attribute" suffix stripped off the rendered
+    // `SimpleType`/`MemberType` name), a `MemberResolveResult` annotation over the
+    // attribute's constructor when `AddResolveResultAnnotations` is set, the
+    // positional `FixedArguments` converted through the 3-arg `ConvertConstantValue`
+    // (each argument's expected type threaded from the constructor's parameter
+    // when the position has one, else the argument's own type), the
+    // `NamedArguments` as `NamedExpression`s (with the
+    // `MemberForNamedArgument`-resolved member annotated), and -- when the
+    // decoder failed -- the `HasArgumentList` flag plus the trailing
+    // "Could not decode attribute arguments." `ErrorExpression`. The C# `IType
+    // AttributeType` (non-null) ports to `const TS::IAttribute&` (the reference
+    // convention); the returned node ports to a raw `new`-ed pointer (the D223
+    // non-owning leak model, the ConvertType precedent).
+    Attribute* ConvertAttribute(const TS::IAttribute& attribute) const;
+
+    // The C# `internal IEnumerable<AttributeSection> ConvertAttributes(
+    // IEnumerable<IAttribute> attributes, string? target = null)` (line 824) --
+    // renders each attribute into its own `AttributeSection` (with the target
+    // written into the section's `AttributeTarget`), sorting the list through
+    // `CompareAttribute` when `SortAttributes` is set (the C# lazy `IEnumerable`
+    // ports to an eager vector, the GetAllBaseTypes convention; the C# `OrderBy`
+    // is a stable sort, `std::stable_sort`). The C# nullable `string? target`
+    // ports to `std::optional<std::string>` (the GetExtensionMethods convention);
+    // the attribute list ports to non-owning pointers (the type system owns the
+    // attributes, the caller holds raw handles).
+    std::vector<AttributeSection*> ConvertAttributes(
+        const std::vector<const TS::IAttribute*>& attributes,
+        const std::optional<std::string>& target = std::nullopt) const;
+
+    // The C# `public AstType ConvertAttributeType(IType type)` (line 894) -- the
+    // attribute-type renderer: `ConvertTypeHelper` plus the short-name handling
+    // (the trailing "Attribute" suffix removed when the name is longer than the
+    // suffix). Under `AlwaysUseShortTypeNames` the short name replaces the
+    // rendered identifier unconditionally (a null short name CLEARS the
+    // `SimpleType` identifier, the C# `Identifier.CreateIfNotEmpty(null)` shape);
+    // with a resolver, `ApplyShortAttributeNameIfPossible` decides per the
+    // resolved environment. The C# `ArgumentNullException` on a null type is
+    // structurally unreachable through the reference parameter (the D374
+    // convention); the parameter is non-const `TS::IType&` because
+    // `AddTypeAnnotation` recovers the owning handle through the non-const
+    // `shared_from_this()` (the D529 convention).
+    AstType* ConvertAttributeType(TS::IType& type) const;
+
+    // The C# `private void ApplyShortAttributeNameIfPossible(IType type, AstType
+    // astType, string? shortName)` (line 926) -- the resolver-driven short-name
+    // decision: for a `SimpleType`, the short name is used when the short name is
+    // unknown or resolves to a non-attribute type; a `@` verbatim prefix is added
+    // when `name + "Attribute"` resolves to an attribute type (disabling the
+    // implicit "Attribute" suffix). For a `MemberType`, the same decision over
+    // the declaring type's nested types (a nested type reference) or over the
+    // annotated namespace target (a namespace-qualified reference). The `string?`
+    // ports to `std::optional<std::string>` (the GetExtensionMethods convention);
+    // the C# `resolver!` deref is a caller contract (the method is reached only
+    // through `ConvertAttributeType`'s `resolver != null` arm).
+    void ApplyShortAttributeNameIfPossible(TS::IType& type, AstType& astType,
+                                           const std::optional<std::string>& shortName) const;
+
+    // The C# `private bool IsAttributeType(IType? type)` (line 979) -- whether the
+    // type derives (through non-interface base types) from `System.Attribute`.
+    // The C# nullable parameter ports to a nullable pointer.
+    bool IsAttributeType(const TS::IType* type) const;
+
+    // The C# `private bool IsAttributeType(ResolveResult rr)` (line 984) -- a
+    // `TypeResolveResult` over an attribute type (the resolver lookup's result
+    // shape).
+    bool IsAttributeType(const Sem::ResolveResult& rr) const;
 
 private:
     // The C# `private void AddTypeAnnotation(AstType astType, IType type)` (line 278)
