@@ -37,10 +37,19 @@
 #include "TypeSystemAstBuilder.hpp"
 
 #include "ComposedType.hpp"
+#include "Expressions/ArrayCreateExpression.hpp"
+#include "Expressions/ArrayInitializerExpression.hpp"
 #include "Expressions/BinaryOperatorExpression.hpp"
+#include "Expressions/CastExpression.hpp"
+#include "Expressions/DefaultValueExpression.hpp"
+#include "Expressions/ErrorExpression.hpp"
+#include "Expressions/IdentifierExpression.hpp"
 #include "Expressions/MemberReferenceExpression.hpp"
+#include "Expressions/NullReferenceExpression.hpp"
 #include "Expressions/PrimitiveExpression.hpp"
+#include "Expressions/TypeOfExpression.hpp"
 #include "Expressions/TypeReferenceExpression.hpp"
+#include "Expressions/UnaryOperatorExpression.hpp"
 #include "FunctionPointerAstType.hpp"
 #include "ParameterDeclaration.hpp"
 #include "PrimitiveType.hpp"
@@ -51,10 +60,15 @@
 #include "Comment.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
+#include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
+#include "Decompiler/Semantics/ConversionResolveResult.hpp"
+#include "Decompiler/Semantics/ErrorResolveResult.hpp"
 #include "Decompiler/Semantics/MemberResolveResult.hpp"
 #include "Decompiler/Semantics/NamespaceResolveResult.hpp"
+#include "Decompiler/Semantics/TypeOfResolveResult.hpp"
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
+#include "Decompiler/TypeSystem/CustomAttributeTypedArgument.hpp"
 #include "Decompiler/TypeSystem/FullTypeName.hpp"
 #include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
@@ -63,8 +77,10 @@
 #include "Decompiler/TypeSystem/INamespace.hpp"
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
 #include "Decompiler/TypeSystem/KnownTypeReference.hpp"
+#include "Decompiler/TypeSystem/NullableType.hpp"
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
+#include "Decompiler/TypeSystem/TypeUtils.hpp"
 #include "Decompiler/Util/CSharpPrimitiveCast.hpp"
 #include "Decompiler/Util/Decimal.hpp"
 
@@ -1056,6 +1072,466 @@ Expression* TypeSystemAstBuilder::MakeConstant(TS::IType& type, std::int64_t c) 
     // OverflowException -> Util::OverflowException).
     return new PrimitiveExpression(ToPrimitiveValue(
         ILSpy::Decompiler::Util::Cast(TS::GetTypeCode(type), std::any(c), /*checkForOverflow*/ true)));
+}
+
+
+// ---------------------------------------------------------------------------
+// The "Convert Constant Value" CORE region (C# lines 998-1078 + 1306-1480)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The C# `MetadataTokens.GetRowNumber(entity.MetadataToken)` -- the
+// System.Reflection.Metadata helper over the `EntityHandle` the C# reads off
+// `IEntity.MetadataToken`: the row number is the LOW 24 BITS of the raw
+// metadata token (the high byte carries the metadata-table id; the D381
+// raw-token convention IEntity.MetadataToken documents). A sort key only --
+// ConvertEnumValue compares row numbers for the declaration order.
+constexpr int GetMetadataRowNumber(std::uint32_t metadataToken) {
+    return static_cast<int>(metadataToken & 0x00FFFFFFu);
+}
+
+// The C# `ErrorResolveResult.UnknownError` as an owning handle for the
+// MakeEnumMemberReference target (the empty-owner aliasing shared_ptr over the
+// program-lifetime singleton -- the CSharpResolver ErrorResultSingleton
+// convention; no deleter runs so the static is never destroyed).
+std::shared_ptr<Sem::ResolveResult> UnknownErrorSingleton() {
+    return std::shared_ptr<Sem::ResolveResult>(
+        std::shared_ptr<Sem::ResolveResult>(),
+        const_cast<Sem::ErrorResolveResult*>(&Sem::ErrorResolveResult::UnknownError()));
+}
+
+} // namespace
+
+// The C# `public Expression ConvertConstantValue(ResolveResult rr)` (line 998).
+Expression* TypeSystemAstBuilder::ConvertConstantValue(
+    std::shared_ptr<Sem::ResolveResult> rr) const {
+    using ILSpy::Decompiler::TypeSystem::IsCSharpNativeIntegerType;
+    using ILSpy::Decompiler::TypeSystem::IsCSharpSmallIntegerType;
+    if (!rr)
+        throw std::invalid_argument("TypeSystemAstBuilder::ConvertConstantValue: rr is null");
+    bool isBoxing = false;
+    if (auto* crr = dynamic_cast<Sem::ConversionResolveResult*>(rr.get())) {
+        // unpack ConversionResolveResult if necessary
+        // (e.g. a boxing conversion or string->object reference conversion)
+        rr = crr->InputShared();
+        isBoxing = crr->ConversionProperty() != nullptr
+            && crr->ConversionProperty()->IsBoxingConversion();
+    }
+
+    if (dynamic_cast<Sem::TypeOfResolveResult*>(rr.get()) != nullptr) {
+        auto& torr = static_cast<Sem::TypeOfResolveResult&>(*rr);
+        auto* expr =
+            new TypeOfExpression(ConvertType(const_cast<TS::IType&>(torr.ReferencedType())));
+        if (AddResolveResultAnnotations())
+            expr->AddAnnotation(std::move(rr));
+        return expr;
+    }
+    if (auto* acrr = dynamic_cast<Sem::ArrayCreateResolveResult*>(rr.get())) {
+        auto* ace = new ArrayCreateExpression();
+        ace->Type(ConvertType(const_cast<TS::IType&>(acrr->Type())));
+        if (auto* composedType = dynamic_cast<ComposedType*>(ace->Type())) {
+            composedType->ArraySpecifiers().MoveTo(ace->AdditionalArraySpecifiers());
+            if (!composedType->HasNullableSpecifier() && composedType->PointerRank() == 0)
+                ace->Type(composedType->BaseType());
+        }
+
+        // The C# `acrr.SizeArguments != null` is provably satisfied (the
+        // ArrayCreateResolveResult ctor throws on a null list; the port's vector
+        // is non-null by construction), so the port runs the arm on the
+        // InitializerElements-absent side alone.
+        if (!acrr->InitializerElements().has_value()) {
+            if (ArraySpecifier* first = ace->AdditionalArraySpecifiers().FirstOrNull())
+                first->Remove();
+            std::vector<Expression*> sizeArguments;
+            sizeArguments.reserve(acrr->SizeArguments().size());
+            for (const auto& sizeArgument : acrr->SizeArguments())
+                sizeArguments.push_back(ConvertConstantValue(sizeArgument));
+            ace->Arguments().AddRange(sizeArguments);
+        }
+        if (acrr->InitializerElements().has_value()) {
+            std::vector<Expression*> elements;
+            elements.reserve(acrr->InitializerElements()->size());
+            for (const auto& element : *acrr->InitializerElements())
+                elements.push_back(ConvertConstantValue(element));
+            auto* initializer = new ArrayInitializerExpression();
+            initializer->Elements().AddRange(elements);
+            ace->Initializer(initializer);
+        }
+        if (AddResolveResultAnnotations())
+            ace->AddAnnotation(std::move(rr));
+        return ace;
+    }
+    if (rr->IsCompileTimeConstant()) {
+        Expression* expr =
+            ConvertConstantValue(const_cast<TS::IType&>(rr->Type()), rr->ConstantValue());
+        if (isBoxing
+            && (IsCSharpSmallIntegerType(&rr->Type())
+                || IsCSharpNativeIntegerType(&rr->Type()))) {
+            // C# does not have small integer literal types.
+            // We need to add a cast so that the integer literal gets boxed as the correct type.
+            expr = new CastExpression(ConvertType(const_cast<TS::IType&>(rr->Type())), expr);
+            if (AddResolveResultAnnotations())
+                expr->AddAnnotation(std::move(rr));
+        }
+        return expr;
+    } else {
+        return new ErrorExpression();
+    }
+}
+
+// The C# `public Expression ConvertConstantValue(IType type, object? constantValue)`
+// (line 1073).
+Expression* TypeSystemAstBuilder::ConvertConstantValue(TS::IType& type,
+                                                       const std::any& constantValue) const {
+    return ConvertConstantValue(type, type, constantValue);
+}
+
+// The C# `public Expression ConvertConstantValue(IType expectedType, IType type,
+// object? constantValue)` (line 1081).
+Expression* TypeSystemAstBuilder::ConvertConstantValue(TS::IType& expectedType, TS::IType& type,
+                                                       const std::any& constantValue) const {
+    using ILSpy::Decompiler::TypeSystem::IsCSharpNativeIntegerType;
+    using ILSpy::Decompiler::TypeSystem::IsCSharpPrimitiveIntegerType;
+    using ILSpy::Decompiler::TypeSystem::IsCSharpSmallIntegerType;
+    // The C# `throw new ArgumentNullException(nameof(type))` is N/A (a reference
+    // cannot be null, the D374 convention).
+    if (!constantValue.has_value()) {
+        // The C# `type.IsReferenceType == true` is the definite check (a lifted
+        // `bool? == true` is falsy for an indeterminate null).
+        const std::optional<bool> isReferenceType = type.IsReferenceType();
+        if ((isReferenceType.has_value() && *isReferenceType)
+            || IsKnownType(type, TS::KnownTypeCode::NullableOfT)
+            || IsAnyPointer(type.Kind())) {
+            auto* expr = new NullReferenceExpression();
+            if (AddResolveResultAnnotations())
+                expr->AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+                    std::make_shared<TS::SpecialType>(TS::TypeKind::Null, true),
+                    std::any{}));
+            return expr;
+        } else {
+            auto* expr = new DefaultValueExpression(ConvertType(type));
+            if (AddResolveResultAnnotations())
+                expr->AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+                    type.shared_from_this(), std::any{}));
+            return expr;
+        }
+    } else if (const auto* typeofType = std::any_cast<TS::ITypePtr>(&constantValue)) {
+        auto* expr = new TypeOfExpression(ConvertType(const_cast<TS::IType&>(**typeofType)));
+        if (AddResolveResultAnnotations())
+            expr->AddAnnotation(std::make_shared<Sem::TypeOfResolveResult>(
+                type.shared_from_this(), *typeofType));
+        return expr;
+    } else if (const auto* arr =
+                   std::any_cast<std::vector<TS::CustomAttributeTypedArgument>>(&constantValue)) {
+        // The C# `ImmutableArray<CustomAttributeTypedArgument<IType>>` (a params-array
+        // fixed argument of a custom attribute) ports to the any-held
+        // `std::vector<CustomAttributeTypedArgument>` (the CustomAttributeTypedArgument.hpp
+        // array-case convention).
+        const TS::IType* elementType = nullptr;
+        TS::ITypePtr unknownElementType;
+        if (const auto* arrayType = dynamic_cast<const TS::ArrayType*>(&type)) {
+            if (arrayType->Element())
+                elementType = arrayType->Element().get();
+        }
+        if (elementType == nullptr) {
+            // The C# `?? SpecialType.UnknownType` null object. Held by the local
+            // handle (the UnknownType() convenience allocates per call).
+            unknownElementType = TS::UnknownType();
+            elementType = unknownElementType.get();
+        }
+        auto* expr = new ArrayCreateExpression();
+        expr->Type(ConvertType(type));
+        if (auto* composedType = dynamic_cast<ComposedType*>(expr->Type())) {
+            composedType->ArraySpecifiers().MoveTo(expr->AdditionalArraySpecifiers());
+            if (!composedType->HasNullableSpecifier() && composedType->PointerRank() == 0)
+                expr->Type(composedType->BaseType());
+        }
+        std::vector<Expression*> elements;
+        elements.reserve(arr->size());
+        for (const TS::CustomAttributeTypedArgument& e : *arr) {
+            // The C# passes `e.Type` into the 3-arg entry whose null check throws
+            // ArgumentNullException; the port guards the nullable handle at the
+            // call site with the same throw (the D424 convention).
+            if (!e.Type())
+                throw std::invalid_argument(
+                    "TypeSystemAstBuilder::ConvertConstantValue: a typed argument has no "
+                    "type");
+            // The C# threads the array's element type as the EXPECTED type of
+            // each element conversion (the 3-arg argument order: elementType,
+            // e.Type, e.Value).
+            elements.push_back(ConvertConstantValue(const_cast<TS::IType&>(*elementType),
+                                                    const_cast<TS::IType&>(*e.Type()),
+                                                    e.Value()));
+        }
+        auto* initializer = new ArrayInitializerExpression();
+        initializer->Elements().AddRange(elements);
+        expr->Initializer(initializer);
+        return expr;
+    } else {
+        // The C# rebinds the `constantValue` parameter through the small/native-integer
+        // remap below; the port keeps a rebindable local copy (the parameter is a const
+        // reference and cannot be rebound).
+        std::any boxedValue = constantValue;
+        const TS::IType& underlyingType = TS::GetUnderlyingType(type);
+        if (underlyingType.Kind() == TS::TypeKind::Enum) {
+            return ConvertEnumValue(
+                const_cast<TS::IType&>(underlyingType),
+                std::any_cast<std::int64_t>(ILSpy::Decompiler::Util::Cast(
+                    TS::TypeCode::Int64, boxedValue, /*checkForOverflow*/ false)));
+        } else {
+            Expression* expr = nullptr;
+            if (!(PrintIntegralValuesAsHex() && IsCSharpPrimitiveIntegerType(&underlyingType))
+                && IsSpecialConstant(const_cast<TS::IType&>(underlyingType), boxedValue,
+                                     expr)) {
+                return expr;
+            }
+            if (IsKnownType(underlyingType, TS::KnownTypeCode::Double)
+                || IsKnownType(underlyingType, TS::KnownTypeCode::Single))
+                return ConvertFloatingPointLiteral(const_cast<TS::IType&>(underlyingType),
+                                                   boxedValue);
+            // The C# `IType? literalType = underlyingType` is a lazy reference copy;
+            // the port keeps the non-owning pointer and materializes the owning
+            // handle only at the annotation site (a stack-local SpecialType would
+            // throw bad_weak_ptr on an eager shared_from_this).
+            const TS::IType* literalType = &underlyingType;
+            const bool integerTypeMismatch = IsCSharpSmallIntegerType(&underlyingType)
+                || IsCSharpNativeIntegerType(&underlyingType);
+            if (integerTypeMismatch) {
+                // C# does not have integer literals of small integer types,
+                // use `int` literal instead.
+                // It also doesn't have native integer literals, those also use `int`
+                // (or `uint` for `nuint`).
+                // The C# local is named `unsigned` (a C# keyword-free identifier);
+                // the port renames it (`unsigned` is a C++ type keyword).
+                const bool isUnsigned = underlyingType.Kind() == TS::TypeKind::NUInt;
+                boxedValue = ILSpy::Decompiler::Util::Cast(
+                    isUnsigned ? TS::TypeCode::UInt32 : TS::TypeCode::Int32, boxedValue,
+                    /*checkForOverflow*/ false);
+                const TS::ICompilation* compilation = nullptr;
+                if (resolver_)
+                    compilation = &resolver_->Compilation();
+                else if (const TS::ITypeDefinition* definition = expectedType.GetDefinition())
+                    compilation = &definition->Compilation();
+                literalType = compilation != nullptr
+                    ? &compilation->FindType(
+                          isUnsigned ? TS::KnownTypeCode::UInt32 : TS::KnownTypeCode::Int32)
+                    : nullptr;
+            }
+            LiteralFormat format = LiteralFormat::None;
+            if (PrintIntegralValuesAsHex()) {
+                format = LiteralFormat::HexadecimalNumber;
+            }
+            expr = new PrimitiveExpression(ToPrimitiveValue(boxedValue), format);
+            if (AddResolveResultAnnotations() && literalType != nullptr)
+                expr->AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+                    const_cast<TS::IType*>(literalType)->shared_from_this(), boxedValue));
+            // The C# precedence: `(integerTypeMismatch && !type.Equals(expectedType))
+            // || underlyingType.Kind == TypeKind.Unknown`.
+            if ((integerTypeMismatch && !type.Equals(expectedType))
+                || underlyingType.Kind() == TS::TypeKind::Unknown) {
+                expr = new CastExpression(ConvertType(type), expr);
+            }
+            return expr;
+        }
+    }
+}
+
+// The C# `internal Expression ConvertEnumValue(IType type, long val,
+// IField? declaringEnumMember = null)` (line 1306).
+Expression* TypeSystemAstBuilder::ConvertEnumValue(TS::IType& type, std::int64_t val,
+                                                   const TS::IField* declaringEnumMember) const {
+    const TS::ITypeDefinition* enumDefinition = type.GetDefinition();
+    const TS::ITypePtr underlyingType =
+        enumDefinition != nullptr ? enumDefinition->EnumUnderlyingType() : nullptr;
+    if (enumDefinition == nullptr || !underlyingType) {
+        // The C# `type.GetDefinition()!` / `enumDefinition.EnumUnderlyingType!`
+        // null-forgiving derefs NRE for a definitionless enum-kind type or an enum
+        // definition without its underlying primitive (degenerate stub shapes; real
+        // metadata always carries both). The port's documented safe fallback (the
+        // EnumUnderlyingOrUnknown convention) renders the plain numeric cast directly
+        // over the raw value -- the C# tail's `new CastExpression(ConvertType(type),
+        // numericExpression)` shape with the unconverted value (the C#
+        // unreachable-for-real-metadata path).
+        return new CastExpression(ConvertType(type),
+                                  new PrimitiveExpression(ToPrimitiveValue(std::any(val))));
+    }
+    const TS::TypeCode enumBaseTypeCode = TS::GetTypeCode(*underlyingType);
+    const bool isFlags = IsFlagsEnum(*enumDefinition);
+
+    // The C# local function `(long value, IField field, int weight)? PrepareConstant(IField)`:
+    // the (value, field, weight) triple for every const field with a constant value, in
+    // declaration order (a non-const field or a null constant value yields null and is
+    // dropped). The Hamming weight is inlined (the C# local function
+    // CalculateHammingWeight, see https://en.wikipedia.org/wiki/Hamming_weight).
+    struct PreparedConstant {
+        std::int64_t value;
+        const TS::IField* field;
+        int weight;
+    };
+    std::vector<PreparedConstant> fields;
+    for (const TS::IField* field : enumDefinition->Fields()) {
+        if (!field->IsConst())
+            continue;
+        const std::any constantValue = field->GetConstantValue();
+        if (!constantValue.has_value())
+            continue;
+        const std::int64_t value = std::any_cast<std::int64_t>(ILSpy::Decompiler::Util::Cast(
+            TS::TypeCode::Int64, constantValue, /*checkForOverflow*/ false));
+        std::uint64_t x = static_cast<std::uint64_t>(value);
+        x = x - ((x >> 1) & 0x5555555555555555ull);   // put count of each 2 bits into those 2 bits
+        x = (x & 0x3333333333333333ull) + ((x >> 2) & 0x3333333333333333ull);
+        x = (x + (x >> 4)) & 0x0f0f0f0f0f0f0f0full;   // put count of each 8 bits into those 8 bits
+        const int weight = static_cast<int>((x * 0x0101010101010101ull) >> 56);
+        fields.push_back({value, field, weight});
+    }
+
+    // The C# local function `Expression MakeEnumMemberReference(IField field)` -- the
+    // qualified `EnumType.Member` outside an enum member initializer, the unqualified
+    // `Member` inside one.
+    auto makeEnumMemberReference = [&](const TS::IField* field) -> Expression* {
+        if (declaringEnumMember == nullptr) {
+            auto* mre = new MemberReferenceExpression(
+                new TypeReferenceExpression(ConvertType(type)), field->Name());
+            if (AddResolveResultAnnotations())
+                // The C# `mre.Target.GetResolveResult()` reads the (un-annotated)
+                // target's resolve-result annotation with the UnknownError fallback
+                // (Annotations.cs GetResolveResult) -- the fresh TypeReferenceExpression
+                // carries no annotation on this path.
+                mre->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+                    UnknownErrorSingleton(), field));
+            return mre;
+        } else {
+            auto* ie = new IdentifierExpression(field->Name());
+            if (AddResolveResultAnnotations())
+                ie->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+                    std::shared_ptr<Sem::ResolveResult>(), field));
+            return ie;
+        }
+    };
+
+    const int declaringTokenRowNumber =
+        declaringEnumMember == nullptr
+            ? std::numeric_limits<int>::max()
+            : GetMetadataRowNumber(declaringEnumMember->MetadataToken());
+    for (const PreparedConstant& prepared : fields) {
+        // In a [Flags] enum declaration, only reference single-bit members directly:
+        // combined values are built from their flag components below (so that
+        // e.g. All = Item1 | Item2 | Item3), and zero members stay numeric, because
+        // mask-style enums routinely contain several unrelated zero members
+        // (e.g. MethodAttributes.PrivateScope/ReuseSlot).
+        if (prepared.value == val
+            && (declaringEnumMember == nullptr || !isFlags || prepared.weight == 1)) {
+            if (prepared.field == declaringEnumMember
+                || declaringTokenRowNumber
+                       < GetMetadataRowNumber(prepared.field->MetadataToken())) {
+                return ConvertConstantValue(const_cast<TS::IType&>(*underlyingType),
+                                             ILSpy::Decompiler::Util::Cast(
+                                                 enumBaseTypeCode, std::any(val),
+                                                 /*checkForOverflow*/ false));
+            }
+            return makeEnumMemberReference(prepared.field);
+        }
+    }
+    if (isFlags) {
+        // The complement of a byte- or ushort-based enum member is computed in int and
+        // therefore negative, which an enum member initializer cannot implicitly convert
+        // back to the underlying type -- the ~X form would not compile there.
+        const bool complementCompiles =
+            declaringEnumMember == nullptr
+            || (enumBaseTypeCode != TS::TypeCode::Byte
+                && enumBaseTypeCode != TS::TypeCode::UInt16);
+        std::int64_t enumValue = val;
+        Expression* expr = nullptr;
+        std::int64_t negatedEnumValue = ~val;
+        // limit negatedEnumValue to the appropriate range
+        switch (enumBaseTypeCode) {
+            case TS::TypeCode::Byte:
+            case TS::TypeCode::SByte:
+                negatedEnumValue &= static_cast<std::int64_t>(0xFFull);
+                break;
+            case TS::TypeCode::Int16:
+            case TS::TypeCode::UInt16:
+                negatedEnumValue &= static_cast<std::int64_t>(0xFFFFull);
+                break;
+            case TS::TypeCode::Int32:
+            case TS::TypeCode::UInt32:
+                negatedEnumValue &= static_cast<std::int64_t>(0xFFFFFFFFull);
+                break;
+            default:
+                break;
+        }
+        Expression* negatedExpr = nullptr;
+        // The C# `fields.OrderByDescending(f => f.weight)` -- LINQ OrderBy is STABLE,
+        // so equal weights keep their declaration order (the stable_sort with the
+        // descending comparator).
+        std::vector<const PreparedConstant*> ordered;
+        ordered.reserve(fields.size());
+        for (const PreparedConstant& f : fields)
+            ordered.push_back(&f);
+        std::stable_sort(ordered.begin(), ordered.end(),
+                         [](const PreparedConstant* a, const PreparedConstant* b) {
+                             return a->weight > b->weight;
+                         });
+        for (const PreparedConstant* entry : ordered) {
+            const std::int64_t fieldValue = entry->value;
+            const TS::IField* field = entry->field;
+            if (fieldValue == 0 || field == declaringEnumMember)
+                continue;   // skip None enum value
+
+            if (declaringTokenRowNumber < GetMetadataRowNumber(field->MetadataToken()))
+                continue;
+
+            if ((fieldValue & enumValue) == fieldValue) {
+                Expression* fieldExpression = makeEnumMemberReference(field);
+                if (expr == nullptr)
+                    expr = fieldExpression;
+                else
+                    expr = new BinaryOperatorExpression(
+                        expr, BinaryOperatorType::BitwiseOr, fieldExpression);
+
+                enumValue &= ~fieldValue;
+            }
+            if (complementCompiles && (fieldValue & negatedEnumValue) == fieldValue) {
+                Expression* fieldExpression = makeEnumMemberReference(field);
+                if (negatedExpr == nullptr)
+                    negatedExpr = fieldExpression;
+                else
+                    negatedExpr = new BinaryOperatorExpression(
+                        negatedExpr, BinaryOperatorType::BitwiseOr, fieldExpression);
+
+                negatedEnumValue &= ~fieldValue;
+            }
+        }
+        // A multi-bit value that lies entirely within a larger, previously declared member
+        // is usually a field encoding inside that mask (e.g. TypeAttributes.NestedPrivate
+        // within VisibilityMask), not a union of independent flags; keep it numeric.
+        const bool isEncodedInEarlierMask =
+            declaringEnumMember != nullptr
+            && std::any_of(fields.begin(), fields.end(), [&](const PreparedConstant& f) {
+                   return f.field != declaringEnumMember
+                       && GetMetadataRowNumber(f.field->MetadataToken()) < declaringTokenRowNumber
+                       && (f.value & val) == val && f.value != val;
+               });
+        if (enumValue == 0 && expr != nullptr && !isEncodedInEarlierMask) {
+            if (!(negatedEnumValue == 0 && negatedExpr != nullptr
+                  && negatedExpr->Descendants().size() < expr->Descendants().size())) {
+                return expr;
+            }
+        }
+        if (complementCompiles && negatedEnumValue == 0 && negatedExpr != nullptr) {
+            return new UnaryOperatorExpression(negatedExpr, UnaryOperatorType::BitNot);
+        }
+    }
+
+    Expression* numericExpression = ConvertConstantValue(
+        const_cast<TS::IType&>(*underlyingType),
+        ILSpy::Decompiler::Util::Cast(enumBaseTypeCode, std::any(val),
+                                      /*checkForOverflow*/ false));
+    if (declaringEnumMember != nullptr) {
+        return numericExpression;
+    }
+    return new CastExpression(ConvertType(type), numericExpression);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

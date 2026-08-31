@@ -364,6 +364,34 @@ inline bool IsCSharpNativeIntegerType(const IType* type) {
     }
 }
 
+// Port of TypeUtils.IsCSharpPrimitiveIntegerType(IType) (TypeUtils.cs line 164):
+// whether the type is a C# primitive integer type -- byte, sbyte, short, ushort,
+// int, uint, long or ulong (the `switch (type.GetDefinition()?.KnownTypeCode)`
+// over the eight codes with `false` for everything else). Unlike the ILAst, C#
+// does not consider bool, enums, pointers or IntPtr to be integers. A null input
+// or a definitionless type yields false (the C# null-conditional `?.` maps the
+// missing definition to the switch default; the file's nullable-pointer
+// convention). The TypeSystemAstBuilder ConvertConstantValue literal path consults
+// this for the PrintIntegralValuesAsHex hexadecimal-literal gate.
+inline bool IsCSharpPrimitiveIntegerType(const IType* type) {
+    const ITypeDefinition* definition = type != nullptr ? type->GetDefinition() : nullptr;
+    if (definition == nullptr)
+        return false;
+    switch (definition->KnownTypeCode()) {
+        case KnownTypeCode::Byte:
+        case KnownTypeCode::SByte:
+        case KnownTypeCode::Int16:
+        case KnownTypeCode::UInt16:
+        case KnownTypeCode::Int32:
+        case KnownTypeCode::UInt32:
+        case KnownTypeCode::Int64:
+        case KnownTypeCode::UInt64:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Port of TransformAssignment.SwapSign: the type with the opposite sign for a
 // primitive integer type (I1<->U1, I2<->U2, I4<->U4, I8<->U8, I<->U). Returns a
 // fresh KnownType for the opposite-sign KnownTypeCode, or nullptr for a type

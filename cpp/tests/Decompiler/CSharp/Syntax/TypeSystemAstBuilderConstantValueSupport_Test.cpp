@@ -20,9 +20,9 @@
 // Tests for the TypeSystemAstBuilder "Convert Constant Value" SUPPORT region
 // (cpp/Decompiler/CSharp/Syntax/TypeSystemAstBuilder.{hpp,cpp}, the port of
 // TypeSystemAstBuilder.cs lines 1168-1249 + 1496-1582: IsSpecialConstant +
-// ConvertFloatingPointLiteral + MakeConstant) -- the tested-but-not-yet-wired
-// foundation ahead of the mutually-recursive ConvertConstantValue /
-// ConvertEnumValue core (which lands as a later slice consuming these three).
+// ConvertFloatingPointLiteral + MakeConstant) -- the support helpers
+// the mutually-recursive ConvertConstantValue / ConvertEnumValue core
+// consumes (landed in TypeSystemAstBuilderConvertConstantValue_Test.cpp).
 //
 // The load-bearing cruxes:
 //  (a) IsSpecialConstant: a table value (int.MaxValue, double.NaN, ...) with a

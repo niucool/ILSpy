@@ -50,9 +50,10 @@
 // virtuals (`AddNode`/`InsertNodeBefore`/`InsertNodeAfter`/`RemoveNode`). Deferred to
 // later Phase-5 slices: the mutation-tolerant `Enumerator`/`GetEnumerator` (the
 // per-collection `foreach` the transforms use; the `Children`/`ChildEnumerator` already
-// covers the cross-collection walk), the convenience mutators `AddRange`/`ReplaceWith`/
-// `MoveTo`/`Detach`/`FirstOrNull`/`LastOrNull` (land as the transforms that use them
-// arrive), `Equals`/`GetHashCode` (identity), and the `IAstVisitor` `AcceptVisitor` (lands
+// covers the cross-collection walk), the remaining convenience mutators
+// `ReplaceWith`/`Detach`/`LastOrNull` (land as the transforms that use them arrive;
+// `AddRange`/`MoveTo`/`FirstOrNull` are landed -- the TypeSystemAstBuilder
+// ConvertConstantValue array arms consume them), `Equals`/`GetHashCode` (identity), and the`IAstVisitor` `AcceptVisitor` (lands
 // with the visitor). The pattern-matcher surface (`NodeCount`/`NodeAt`/`AsNodeList`/`DoMatch`
 // -- the generated nodes' `DoMatch` calls `Pattern.DoMatchCollection` over the
 // collection's node-list view) lands with the first generated node that has a collection
@@ -272,6 +273,47 @@ public:
         else
             parent_->InvalidateChildIndices();
         return true;
+    }
+
+    // The C# `void AddRange(IEnumerable<T> nodes)` / `void AddRange(T[] nodes)` --
+    // append each element in order, evaluating the input eagerly first (the C#
+    // materializes a lazy `nodes` into a `List<T>` before adding, since the input
+    // may be this very collection; a pre-built `std::vector` snapshot is already
+    // materialized, so the port appends directly). A null element in the snapshot
+    // is skipped by `Add`'s null guard (the C# `Add` throws on null; the lazy
+    // sequences never yield null elements).
+    void AddRange(const std::vector<T*>& nodes) {
+        for (T* node : nodes)
+            Add(node);
+    }
+
+    // The C# `T? FirstOrNull(Func<T, bool>? predicate = null)` -- the first element
+    // for which the predicate returns true (or the first element when the
+    // predicate is omitted), or null when no element matches / the collection is
+    // empty. The port's predicate takes the element by pointer (the C# by value
+    // reference); a default-constructed empty `std::function` is the omitted
+    // predicate.
+    T* FirstOrNull(const std::function<bool(const T*)>& predicate = nullptr) const {
+        for (T* item : list_) {
+            if (!predicate || predicate(item))
+                return item;
+        }
+        return nullptr;
+    }
+
+    // The C# `void MoveTo(ICollection<T> targetCollection)` -- move every element
+    // (in order) out of this collection and into the target, removing each from
+    // this one first (the snapshot mirrors the C# `list?.ToArray()`: the `Remove()`
+    // below shrinks `list_` while the walk iterates the pre-built copy). The C#
+    // throws `ArgumentNullException` on a null target; a reference cannot be null
+    // (the D374 convention). The target must be a collection of the same element
+    // type (the C# `ICollection<T>` type parameter).
+    void MoveTo(AstNodeCollectionT<T>& targetCollection) {
+        std::vector<T*> snapshot = list_;
+        for (T* node : snapshot) {
+            node->Remove();
+            targetCollection.Add(node);
+        }
     }
 
     // The C# `void Clear()` -- detach every element and invalidate the parent's indices.

@@ -25,18 +25,14 @@
 // field, the two ctors, InitProperties, and the full configuration property surface)
 // and the "Convert Type" region (ConvertType / ConvertTypeHelper / TypeMatches /
 // TypeDefMatches / AddTypeArguments / ConvertNamespace / IsValidNamespace, C# lines
-// 266-768, implemented in TypeSystemAstBuilder.cpp) are landed; the "Convert Constant
-// Value" SUPPORT helpers (IsSpecialConstant + ConvertFloatingPointLiteral +
-// MakeConstant, C# lines 1168-1249 + 1496-1582 -- the recognition/rendering halves the
-// ConvertConstantValue dispatch consumes) land as the tested-but-not-yet-wired
-// foundation ahead of the mutually-recursive ConvertConstantValue / ConvertEnumValue
-// core (they must land together: ConvertConstantValue calls ConvertEnumValue for
-// enum-typed constants and ConvertEnumValue's numeric fallback calls
-// ConvertConstantValue back); the remaining `Convert*` instance methods
-// (ConvertConstantValue itself / ConvertEnumValue / ConvertAttribute /
-// ConvertParameter / ConvertSymbol / ConvertEntity / ConvertExtension /
-// ConvertVariable) follow in later slices, consuming the free functions below as
-// they grow.
+// 266-768, implemented in TypeSystemAstBuilder.cpp), the "Convert Constant Value"
+// SUPPORT helpers (IsSpecialConstant + ConvertFloatingPointLiteral + MakeConstant,
+// C# lines 1168-1249 + 1496-1582), and the mutually-recursive "Convert Constant
+// Value" CORE (the three ConvertConstantValue overloads + ConvertEnumValue, C# lines
+// 998-1078 + 1306-1480) are landed; the remaining `Convert*` instance methods
+// (ConvertAttribute / ConvertParameter / ConvertSymbol / ConvertEntity /
+// ConvertExtension / ConvertVariable) follow in later slices, consuming the free
+// functions below as they grow.
 //
 // ModifierFromAccessibility (TypeSystemAstBuilder.cs line 2497) is the first such
 // helper: a pure switch on Accessibility (the D373 leaf) that maps a symbol's
@@ -91,6 +87,12 @@ namespace ILSpy::Decompiler::CSharp::Resolver { class CSharpResolver; }
 // MSVC (the iteration-94 UsingScope trap).
 namespace ILSpy::Decompiler::TypeSystem { class FullTypeName; }
 namespace ILSpy::Decompiler::Semantics { class NamespaceResolveResult; }
+// The ResolveResult-based ConvertConstantValue overload passes the result by
+// value (the C# parameter the body rebinds through the ConversionResolveResult
+// unwrap), so the class declaration needs the shared_ptr element type complete
+// enough for the template-id (a forward declaration suffices; the .cpp includes
+// the full ResolveResult.hpp for the member access).
+namespace ILSpy::Decompiler::Semantics { class ResolveResult; }
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -1055,16 +1057,15 @@ public:
     // -- The "Convert Constant Value" SUPPORT region (C# lines 1168-1249 +
     // 1496-1582) --
     //
-    // The tested-but-not-yet-wired foundation ahead of the mutually-recursive
-    // `ConvertConstantValue` / `ConvertEnumValue` core: the 3-arg
+    // The support helpers the mutually-recursive `ConvertConstantValue` /
+    // `ConvertEnumValue` core (the CORE region below) consumes: the 3-arg
     // `ConvertConstantValue` dispatch calls `IsSpecialConstant` (before the
     // floating-point arm) and `ConvertFloatingPointLiteral` (for double/single
     // constants), and both the floating-point fraction arm and the deferred
-    // Math.PI/E extraction call `MakeConstant` -- none of the three calls back
-    // into `ConvertConstantValue`, so they land first and the core consumes them
-    // when it lands. The C# private members are widened to public for direct TDD
-    // (the TryConvert convention); every method is `const` (they read only the
-    // configuration properties, the resolver, and ConvertType).
+    // Math.PI/E extraction call `MakeConstant`. The C# private members are
+    // widened to public for direct TDD (the TryConvert convention); every
+    // method is `const` (they read only the configuration properties, the
+    // resolver, and ConvertType).
     //
     // The C# `out Expression? expression` ports to `Expression*&` (the rebindable
     // caller variable, reset to nullptr at the top, the IsVariableReferenceWithSameType
@@ -1106,6 +1107,81 @@ public:
     // `long` and cast through the type's TypeCode with overflow CHECKING (an
     // out-of-range fraction term throws, the C# OverflowException).
     Expression* MakeConstant(TS::IType& type, std::int64_t c) const;
+
+    // -- The "Convert Constant Value" CORE region (C# lines 998-1078 + 1306-1480)
+    // --
+    //
+    // The mutually-recursive pair the support region above was landed ahead of:
+    // the 3-arg `ConvertConstantValue` dispatch calls `IsSpecialConstant` (before
+    // the floating-point arm) and `ConvertFloatingPointLiteral` (for double/single
+    // constants) and routes enum-typed constants into `ConvertEnumValue`, whose
+    // numeric fallback calls `ConvertConstantValue` back. The C# private
+    // `ConvertEnumValue` is widened to public for direct TDD (the TryConvert
+    // convention); every method is `const` (they read only the configuration
+    // properties, the resolver, and the already-landed ConvertType/IsSpecialConstant/
+    // ConvertFloatingPointLiteral surface).
+    //
+    // Port conventions: the C# `object?` constant value ports to `const std::any&`
+    // (the D374 boxed-value convention; an empty `std::any` is the C# null); the
+    // `ImmutableArray<CustomAttributeTypedArgument<IType>>` shape (a params-array
+    // fixed argument of a custom attribute) ports to a `std::any` holding a
+    // `std::vector<CustomAttributeTypedArgument>` (the CustomAttributeTypedArgument.hpp
+    // array-case convention); every `Expression` ports to a raw `new`-ed pointer (the
+    // D223 non-owning leak model, the ConvertType precedent); and every `IType`
+    // parameter is non-const `TS::IType&` (the ConvertType/IsSpecialConstant
+    // convention -- the callers const_cast the `NullableType.GetUnderlyingType`
+    // const-reference results).
+
+    // The C# `public Expression ConvertConstantValue(ResolveResult rr)` (line 998)
+    // -- creates an Expression for the given resolve result: unpacks a
+    // `ConversionResolveResult` (the boxing flag drives the small/native-integer
+    // cast wrap), a `TypeOfResolveResult` (a `TypeOfExpression`), an
+    // `ArrayCreateResolveResult` (an `ArrayCreateExpression` with the size
+    // arguments and/or the initializer elements converted recursively), a
+    // compile-time constant (delegating to the 2-arg overload, wrapping a boxed
+    // small/native-integer literal in a cast), else the `ErrorExpression`. The C#
+    // parameter is by value (a reference copy the body REBINDS through the
+    // conversion unwrap), so the port takes the owning handle by value and rebinds
+    // it locally. The C# `ArgumentNullException` on a null rr ports to
+    // `std::invalid_argument` (the D424 convention).
+    Expression* ConvertConstantValue(std::shared_ptr<Sem::ResolveResult> rr) const;
+
+    // The C# `public Expression ConvertConstantValue(IType type, object? constantValue)`
+    // (line 1073) -- the 2-arg convenience overload delegating to the 3-arg core with
+    // `expectedType == type` (see the 3-arg doc).
+    Expression* ConvertConstantValue(TS::IType& type, const std::any& constantValue) const;
+
+    // The C# `public Expression ConvertConstantValue(IType expectedType, IType type,
+    // object? constantValue)` (line 1081) -- the core constant renderer: a null
+    // constant renders as a `NullReferenceExpression` (a reference/nullable/pointer
+    // target) or a `DefaultValueExpression` (a value-type target); an `IType`-boxed
+    // constant renders as a `TypeOfExpression`; a params-array
+    // `CustomAttributeTypedArgument` vector renders as an `ArrayCreateExpression` with
+    // the element types threaded; an enum-typed constant routes into
+    // `ConvertEnumValue`; a double/single constant into `ConvertFloatingPointLiteral`;
+    // a small/native-integer constant re-boxes through int32/uint32 (C# has no
+    // small/native integer literals) with the literal type resolved through the
+    // resolver-else-definition compilation; else the `PrimitiveExpression` (hex when
+    // `PrintIntegralValuesAsHex`), wrapped in a `CastExpression` when the literal type
+    // mismatches the expected type or the underlying kind is Unknown. The returned
+    // expression is always implicitly convertible to `type` (the C# doc contract),
+    // though not necessarily OF that type.
+    Expression* ConvertConstantValue(TS::IType& expectedType, TS::IType& type,
+                                     const std::any& constantValue) const;
+
+    // The C# `internal Expression ConvertEnumValue(IType type, long val,
+    // IField? declaringEnumMember = null)` (line 1306) -- converts a numeric enum
+    // value into its enum member representation, if possible: an exact match renders
+    // as the member reference (`E.Member`, or the unqualified `Member` inside an enum
+    // member initializer -- the `declaringEnumMember` shape); a `[Flags]` enum's
+    // combined values render as a bitwise-OR of their single-bit components (with
+    // the complement `~X` form when it is smaller), the declared-later members
+    // skipped (the metadata row-number ordering); else `(EnumType)value` (the plain
+    // numeric value inside an enum member initializer). The metadata row number is
+    // the low 24 bits of the raw `IEntity.MetadataToken` (the C#
+    // `MetadataTokens.GetRowNumber`, the D381 raw-token convention).
+    Expression* ConvertEnumValue(TS::IType& type, std::int64_t val,
+                                 const TS::IField* declaringEnumMember = nullptr) const;
 
 private:
     // The C# `private void AddTypeAnnotation(AstType astType, IType type)` (line 278)
