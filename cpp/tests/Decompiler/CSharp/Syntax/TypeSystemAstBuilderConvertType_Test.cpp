@@ -55,6 +55,7 @@
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
+#include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Syntax/FunctionPointerAstType.hpp"
 #include "Decompiler/CSharp/Syntax/MemberType.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
@@ -76,6 +77,8 @@
 #include <vector>
 
 using ILSpy::Decompiler::CSharp::Syntax::AstType;
+using ILSpy::Decompiler::CSharp::Syntax::Comment;
+using ILSpy::Decompiler::CSharp::Syntax::CommentType;
 using ILSpy::Decompiler::CSharp::Syntax::ComposedType;
 using ILSpy::Decompiler::CSharp::Syntax::FunctionPointerAstType;
 using ILSpy::Decompiler::CSharp::Syntax::MemberType;
@@ -595,6 +598,16 @@ TEST(TypeSystemAstBuilderConvertTypeTest, FunctionPointerTreatedAsRendersDefinit
     auto* typeRef = dynamic_cast<MemberType*>(result);
     ASSERT_NE(typeRef, nullptr);
     EXPECT_EQ(typeRef->MemberName(), "UIntPtr");
+
+    // The trailing Comment carries the FUNCTION-POINTER AST's rendering (the C#
+    // `astType.ToString()` over the fully-built function-pointer node, NOT the
+    // treated-as `result`'s rendering): the parameter and return types resolve through
+    // the builtin keywords, so the content is the full `delegate*` signature.
+    ASSERT_EQ(typeRef->TrailingTrivia().size(), 1u);
+    auto* comment = dynamic_cast<Comment*>(typeRef->TrailingTrivia()[0]);
+    ASSERT_NE(comment, nullptr);
+    EXPECT_EQ(comment->CommentType(), CommentType::MultiLine);
+    EXPECT_EQ(comment->Content(), "delegate*<void, int>");
 }
 
 // ---------------------------------------------------------------------------

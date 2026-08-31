@@ -91,6 +91,27 @@ public:
     int Dimensions() const { return dimensions_; }
     void Dimensions(int value) { dimensions_ = value; }
 
+    // The C# `public override string ToString(CSharpFormattingOptions? formattingOptions)`
+    // (ComposedType.cs line 150 -- the `ArraySpecifier` partial co-located in that file) --
+    // the plain-text rendering of the rank specifier: `[` + (Dimensions - 1) commas + `]`.
+    // A fast path that ignores the formatting options entirely (the C# never consults the
+    // parameter) and bypasses the output visitor (the `ComposedType`/`PrimitiveType`
+    // overrides are the same pattern). The `using AstNode::ToString;` re-exposes the base's
+    // no-arg overload past this override declaration (a derived-class member hides every
+    // same-named base member without it).
+    using AstNode::ToString;
+    std::string ToString(OutputVisitor::CSharpFormattingOptions* formattingOptions) override {
+        (void)formattingOptions;  // the C# fast path ignores the formatting options
+        std::string result = "[";
+        // A rank specifier always has at least one dimension ('[]' is rank 1), verified by
+        // CheckInvariant; the guard keeps a degenerate zero-dimension node from computing a
+        // huge unsigned comma count (the C# `new string(',', -1)` would throw instead).
+        if (Dimensions() > 1)
+            result.append(static_cast<std::size_t>(Dimensions() - 1), ',');
+        result += ']';
+        return result;
+    }
+
     // The C# `public override void AcceptVisitor(IAstVisitor visitor)` -- the dispatch
     // entry: routes back to `VisitArraySpecifier`.
     void AcceptVisitor(IAstVisitor& visitor) override {

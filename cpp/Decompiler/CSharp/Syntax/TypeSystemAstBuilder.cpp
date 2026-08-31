@@ -485,14 +485,16 @@ AstType* TypeSystemAstBuilder::ConvertTypeHelper(TS::IType& type) const {
         // GetDefinition default (the module-dependent Kind/GetDefinition gate is a
         // documented Phase-2 deferral in IType.hpp), so the arm is unreachable
         // through the ported class -- kept faithful for a stub that overrides
-        // GetDefinition. The Comment content deviation: the C#
-        // `astType.ToString()` (the output-visitor rendering) is deferred with the
-        // CSharpOutputVisitor, so the port attaches an empty comment.
+        // GetDefinition. The trailing Comment carries the FUNCTION-POINTER AST's
+        // rendering (`astType.ToString()`, the fully-built `astType` above -- NOT the
+        // treated-as `result`), the C# shape exactly (the AstNode ToString
+        // output-visitor rendering, now landed).
         const TS::ITypeDefinition* treatedAs = functionPointerType->GetDefinition();
         if (treatedAs != nullptr) {
             AstType* result = ConvertTypeHelper(
                 *const_cast<TS::IType*>(static_cast<const TS::IType*>(treatedAs)));
-            result->AddTrailingTrivia(new Comment(std::string(), CommentType::MultiLine));
+            result->AddTrailingTrivia(
+                new Comment(astType->ToString(), CommentType::MultiLine));
             return result;
         }
         return astType;

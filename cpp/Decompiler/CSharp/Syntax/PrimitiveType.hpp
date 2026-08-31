@@ -94,6 +94,19 @@ public:
     const std::string& Keyword() const { return keyword_; }
     void Keyword(std::string value) { keyword_ = std::move(value); }
 
+    // The C# `public override string ToString(CSharpFormattingOptions? formattingOptions)`
+    // (PrimitiveType.cs line 83) -- the plain-text rendering of a built-in-type reference:
+    // just the keyword (`int`, `string`, ...). A fast path that ignores the formatting
+    // options entirely (the C# never consults the parameter) and bypasses the output
+    // visitor (the `ComposedType`/`ArraySpecifier` overrides are the same pattern). The
+    // `using AstNode::ToString;` re-exposes the base's no-arg overload past this override
+    // declaration (a derived-class member hides every same-named base member without it).
+    using AstNode::ToString;
+    std::string ToString(OutputVisitor::CSharpFormattingOptions* formattingOptions) override {
+        (void)formattingOptions;  // the C# fast path ignores the formatting options
+        return Keyword();
+    }
+
     // The C# `public override TextLocation EndLocation` -- spans `Keyword.Length` columns
     // from `StartLocation` (the keyword's lexical width). `StartLocation` is inherited from
     // the base (stored at print time; only the end is derived -- see the file header).

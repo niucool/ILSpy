@@ -52,8 +52,7 @@
 // `AstNode` derives from `AbstractAnnotatable` (cpp/.../AbstractAnnotatable.hpp), and the
 // trivia node type + holder live in `Trivia.hpp` (included by `AstNode.cpp`, which defines
 // the trivia mutation path out-of-line -- the holder needs the complete `Trivia` type).
-// Deferred to later Phase-5 slices: the `IAstVisitor`/`AcceptVisitor` dispatch, the
-// `ToString`/`CSharpOutputVisitor` rendering, the `GetNextNode`/`GetPrevNode`/
+// Deferred to later Phase-5 slices: the `GetNextNode`/`GetPrevNode`/
 // `GetNextSibling`/`GetPrevSibling` predicate overloads, and the sibling/slot/remove
 // navigation trivia branches (the C# `this is Trivia { triviaSiblings: ... }` tests in
 // `NextSibling`/`PrevSibling`/`Slot`/`Remove`/`GetNextNode`/`GetPrevNode`/
@@ -90,7 +89,17 @@
 
 #include <functional>
 #include <stdexcept>
+#include <string>
 #include <vector>
+
+// Forward declaration of the formatting-options type the `ToString(CSharpFormattingOptions*)`
+// rendering consumes. At GLOBAL scope: a qualified namespace-definition written inside
+// another namespace declares a fresh shadow chain on MSVC, shadowing the global `::ILSpy`
+// for every later qualified reference in the file (the TypeSystemAstBuilder.hpp precedent).
+// The `CSharpOutputVisitor` this header must never include (the visitor's per-node `Visit`
+// methods take `Syntax` node pointers, so the include direction runs the other way) is
+// reached only from `AstNode.cpp`, which includes the full output-visitor headers.
+namespace ILSpy::Decompiler::CSharp::OutputVisitor { class CSharpFormattingOptions; }
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -509,6 +518,29 @@ public:
     // reference parameter needs only a forward declaration), so this header does not include
     // `IAstVisitorBool.hpp`.
     virtual bool AcceptVisitorBool(IAstVisitorBool& visitor) = 0;
+
+    // ---- Formatted output ---------------------------------------------------------------
+    // The C# `public virtual string ToString(CSharpFormattingOptions? formattingOptions)`
+    // (AstNode.cs line 1006) -- the node as formatted C# output: accepts a
+    // `CSharpOutputVisitor` over a string sink and returns the rendered text. The C#
+    // nullable parameter ports to a POINTER (null takes the
+    // `FormattingOptionsFactory.CreateMono()` defaults, the C# `??`). The parameter type is
+    // forward-declared above (a pointer parameter needs only a forward declaration); the
+    // body lives in `AstNode.cpp`, which includes the output visitor this header cannot
+    // (the visitor's per-node `Visit` methods take `Syntax` node pointers, so the include
+    // direction runs the other way).
+    virtual std::string ToString(OutputVisitor::CSharpFormattingOptions* formattingOptions);
+
+    // The C# `public sealed override string ToString()` (AstNode.cs line 1016) -- the
+    // no-arg rendering with the Mono defaults. NOT virtual (the C# `sealed`); it delegates
+    // to the VIRTUAL 1-arg form, so the call dispatches to the plain-text fast-path
+    // overrides the derived nodes declare (`ComposedType`/`ArraySpecifier`/`PrimitiveType`).
+    // Deliberately NO default argument on the 1-arg form above: a default would make a
+    // call `ToString()` ambiguous between the two overloads (both viable for an empty
+    // argument list).
+    std::string ToString() {
+        return ToString(static_cast<OutputVisitor::CSharpFormattingOptions*>(nullptr));
+    }
 
     // ---- Mutation API ----------------------------------------------------
     // The C# `public void AddChild<T>(T, CSharpSlotInfo)` -- add a child into the slot

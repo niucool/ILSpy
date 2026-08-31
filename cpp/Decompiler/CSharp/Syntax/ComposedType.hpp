@@ -253,6 +253,47 @@ public:
         return this;
     }
 
+    // ---- The `ToString` plain-text fast path (ComposedType.cs line 79) ----------------
+    // The C# `public override string ToString(CSharpFormattingOptions? formattingOptions)`
+    // -- the plain-text rendering of a composed type: the leading `ref `/`readonly `
+    // prefixes, the base type's own `ToString()`, then the trailing `?`, the `*` pointer
+    // run, and the array rank specifiers. A FAST PATH that ignores the formatting options
+    // entirely (the C# never consults the parameter) and bypasses the output visitor: it
+    // builds the text directly (the `ArraySpecifier`/`PrimitiveType` overrides are the same
+    // pattern). The `using AstNode::ToString;` re-exposes the base's no-arg overload past
+    // this override declaration (a derived-class member hides every same-named base member
+    // without it).
+    using AstNode::ToString;
+    std::string ToString(OutputVisitor::CSharpFormattingOptions* formattingOptions) override {
+        (void)formattingOptions;  // the C# fast path ignores the formatting options
+        std::string b;
+        if (HasRefSpecifier())
+            b += "ref ";
+        if (HasReadOnlySpecifier())
+            b += "readonly ";
+        // The C# `this.BaseType.ToString()` NREs on a null base; the BaseType slot is
+        // required (CheckInvariant asserts it filled), so the guard is the safe fallback
+        // for a degenerate detached node (the D516 convention).
+        if (AstType* baseType = BaseType())
+            b += baseType->ToString();
+        if (HasNullableSpecifier())
+            b += '?';
+        // `PointerRank` non-negativity is verified by CheckInvariant (the C# comment on
+        // the property); a zero run appends nothing.
+        b.append(static_cast<std::size_t>(PointerRank()), '*');
+        for (int i = 0; i < ArraySpecifiers().Count(); i++) {
+            b += '[';
+            // A rank specifier always has at least one dimension ('[]' is rank 1), verified
+            // by ArraySpecifier.CheckInvariant; the guard keeps a degenerate
+            // zero-dimension node from computing a huge unsigned comma count (the C#
+            // `new string(',', -1)` would throw instead).
+            if (ArraySpecifiers().At(i)->Dimensions() > 1)
+                b.append(static_cast<std::size_t>(ArraySpecifiers().At(i)->Dimensions() - 1), ',');
+            b += ']';
+        }
+        return b;
+    }
+
     // ---- The per-node slot statics (pointing at the shared `Slots` kinds) -------------
     // The `AttributesSlot` (a `CSharpSlotInfoT<AttributeSection>` pointing at
     // `Slots.AttributeSection`, collection); the `BaseTypeSlot` (a `CSharpSlotInfoT<AstType>`

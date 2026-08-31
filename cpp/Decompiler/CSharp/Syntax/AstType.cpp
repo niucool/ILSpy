@@ -31,6 +31,12 @@
 #include "Decompiler/CSharp/Syntax/AstType.hpp"
 
 #include "Decompiler/CSharp/Syntax/ComposedType.hpp"
+#include "Decompiler/CSharp/Syntax/MemberType.hpp"
+#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
+
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -77,6 +83,33 @@ AstType* AstType::MakeRefType() {
     composed->BaseType(this);
     composed->HasRefSpecifier(true);
     return composed;
+}
+
+// The C# `public static AstType Create(string dottedName)` (AstType.cs line 131): the
+// dotted-name chain builder. The split reproduces the C# `string.Split('.')` semantics
+// with no options (an empty input yields the single empty part; a trailing dot yields a
+// trailing empty part) -- the same split loop the `NamespaceDeclaration(string)` ctor uses
+// for the `Name` setter's split. The head is `SimpleType(parts[0])`; every further part
+// wraps the chain-so-far in a `MemberType` carrying the part as the member name (the
+// iteration order builds the chain OUTSIDE-IN, so the LAST part is the OUTERMOST
+// `MemberType`). The returned node follows the D223 non-owning leak model.
+AstType* AstType::Create(const std::string& dottedName) {
+    std::vector<std::string> parts;
+    std::string part;
+    for (const char c : dottedName) {
+        if (c == '.') {
+            parts.push_back(std::move(part));
+            part.clear();
+        } else {
+            part.push_back(c);
+        }
+    }
+    parts.push_back(std::move(part));
+    AstType* type = new SimpleType(parts[0]);
+    for (std::size_t i = 1; i < parts.size(); i++) {
+        type = new MemberType(type, parts[i]);
+    }
+    return type;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

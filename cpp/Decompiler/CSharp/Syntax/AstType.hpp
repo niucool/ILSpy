@@ -139,6 +139,18 @@ public:
     // true`. On a `ComposedType` receiver the override sets the flag IN PLACE and
     // returns the same node.
     virtual AstType* MakeRefType();
+
+    // The C# `public static AstType Create(string dottedName)` (AstType.cs line 131): creates
+    // a simple `AstType` from a dotted name -- a `SimpleType` head with each further part
+    // wrapping the chain in a `MemberType` (`A.B.C` -> `MemberType(MemberType(SimpleType(A),
+    // B), C)`). Does NOT support generics, arrays, etc. -- just simple dotted names (e.g.
+    // namespace names). The C# `string.Split('.')` semantics: an empty string yields the
+    // single empty part (`SimpleType("")`); a trailing dot yields a trailing empty part.
+    // Like the `Make*` builders, the body is defined out-of-line in `AstType.cpp` (which
+    // includes `SimpleType.hpp`/`MemberType.hpp`; this header cannot include them back --
+    // both derive `AstType`), and the returned node follows the D223 non-owning leak model
+    // (a raw `new`-ed pointer the caller attaches through a slot setter).
+    static AstType* Create(const std::string& dottedName);
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

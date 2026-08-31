@@ -276,6 +276,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/AttributeSection_Test.cpp
     Decompiler/CSharp/Syntax/ComposedType_Test.cpp
     Decompiler/CSharp/Syntax/AstTypeMakeBuilders_Test.cpp
+    Decompiler/CSharp/Syntax/AstNodeToString_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/CastExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/AsIsExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression_Test.cpp

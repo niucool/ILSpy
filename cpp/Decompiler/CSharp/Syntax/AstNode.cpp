@@ -37,12 +37,16 @@
 // header and defined here, where `Trivia.hpp` is visible.
 
 #include "Decompiler/CSharp/Syntax/AstNode.hpp"
+
+#include "Decompiler/CSharp/OutputVisitor/CSharpOutputVisitor.hpp"
+#include "Decompiler/CSharp/OutputVisitor/FormattingOptionsFactory.hpp"
 #include "Decompiler/CSharp/Syntax/AstNodeCollection.hpp"
 #include "Decompiler/CSharp/Syntax/CSharpSlotInfo.hpp"
 #include "Decompiler/CSharp/Syntax/Trivia.hpp"
 
 #include <cassert>
 #include <cstddef>
+#include <sstream>
 #include <utility>
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
@@ -260,6 +264,29 @@ void AstNode::CheckInvariant() {
         CheckTriviaInvariant(this, trivia->Trailing);
     }
 #endif
+}
+
+// ---- Formatted output -----------------------------------------------------------------
+
+// The C# `public virtual string ToString(CSharpFormattingOptions? formattingOptions)`
+// (AstNode.cs line 1006): renders this node as formatted C# output -- a fresh string
+// sink, a `CSharpOutputVisitor` over it (a null policy takes the Mono defaults, the C#
+// `formattingOptions ?? FormattingOptionsFactory.CreateMono()`), and the visitor walk
+// starting from this node. Defined in this .cpp (not the header) because the output
+// visitor's per-node `Visit` methods take `Syntax` node pointers, so its header includes
+// this header's dependents: the include direction runs .cpp -> visitor, never
+// header -> visitor. `AcceptVisitor` dispatches virtually, so the derived nodes that
+// override the 1-arg `ToString` (`ComposedType`/`ArraySpecifier`/`PrimitiveType`, whose
+// plain-text fast paths IGNORE the visitor) never reach this body.
+std::string AstNode::ToString(OutputVisitor::CSharpFormattingOptions* formattingOptions) {
+    std::ostringstream writer;
+    OutputVisitor::CSharpOutputVisitor visitor(
+        &writer,
+        formattingOptions != nullptr
+            ? *formattingOptions
+            : OutputVisitor::FormattingOptionsFactory::CreateMono());
+    AcceptVisitor(visitor);
+    return writer.str();
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
