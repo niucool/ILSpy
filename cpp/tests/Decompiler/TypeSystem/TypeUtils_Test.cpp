@@ -23,17 +23,25 @@
 // helper. These mirror ICSharpCode.Decompiler/IL/ILTypeExtensions.cs
 // (GetSize/IsSmallIntegerType/GetSign on PrimitiveType) and TypeUtils.cs
 // (kNativeIntSize/GetSize/IsSmallIntegerType/IsCSharpSmallIntegerType on IType)
-// and TransformAssignment.SwapSign. The compound-assignment validation
+// and TransformAssignment.SwapSign, plus the GetEnumUnderlyingType leaf
+// (TypeUtils.cs line 323) that resolves an enum to its underlying type -- the
+// prerequisite the CSharpResolver Convert region and the enum-aware
+// TypeUtils call sites consume. The compound-assignment validation
 // (ValidateCompoundAssign / NumericCompoundAssign.IsBinaryCompatibleWithType)
 // and the post-inc/dec sign-mismatch fixup consult these; the BNI Sign /
 // input-type reconciliation is a separate deferred slice, so the helpers are
 // ported here as a tested-but-not-yet-wired foundation ahead of the transform.
 
 #include "Decompiler/IL/PrimitiveType.hpp"
+#include "Decompiler/TypeSystem/Accessibility.hpp"
+#include "Decompiler/TypeSystem/FullTypeName.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/Sign.hpp"
+#include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
+#include "Decompiler/TypeSystem/TypeKind.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
+#include "Decompiler/TypeSystem/LookupStubs.hpp"
 
 #include <gtest/gtest.h>
 
@@ -44,18 +52,65 @@ using ILSpy::Decompiler::IL::GetSign;
 using ILSpy::Decompiler::IL::IsSmallIntegerType;
 using ILSpy::Decompiler::IL::PrimitiveType;
 namespace TS = ILSpy::Decompiler::TypeSystem;
+using TS::Accessibility;
+using TS::FullTypeName;
+using TS::IType;
+using TS::ITypeDefinition;
 using TS::ITypePtr;
 using TS::kNativeIntSize;
 using TS::KnownType;
 using TS::KnownTypeCode;
+using TS::ModifiedType;
 using TS::Sign;
+using TS::SimpleType;
 using TS::SwapSign;
+using TS::TopLevelTypeName;
+using TS::TypeKind;
+using TS::TestSupport::LookupCompilation;
+using TS::TestSupport::LookupTypeDefinition;
 
 namespace {
 
 ITypePtr KT(KnownTypeCode code) {
     return std::make_shared<KnownType>(code);
 }
+
+// The compilation every `LookupTypeDefinition` below binds to (the definition
+// ctor requires an `ICompilation&`; no known types are registered because
+// `GetEnumUnderlyingType` never consults `FindType`).
+LookupCompilation& TestCompilation() {
+    static LookupCompilation c;
+    return c;
+}
+
+// A `LookupTypeDefinition` of the requested kind (`GetDefinition() == this`,
+// the `EnumUnderlyingType` configurable via `SetEnumUnderlyingType`).
+std::shared_ptr<LookupTypeDefinition> MakeDef(TypeKind kind) {
+    return std::make_shared<LookupTypeDefinition>(
+        "E", "Test", FullTypeName(TopLevelTypeName("Test", "E")), kind,
+        Accessibility::Public, TestCompilation(), nullptr);
+}
+
+// A typical custom modifier: `System.Runtime.CompilerServices.IsConst`.
+ITypePtr IsConstModifier() {
+    return std::make_shared<SimpleType>(
+        TopLevelTypeName("System.Runtime.CompilerServices", "IsConst"));
+}
+
+// `modopt(<modifier>)<element>` -- a custom-modifier-decorated type.
+ITypePtr ModOptOf(ITypePtr modifier, ITypePtr element) {
+    return std::make_shared<ModifiedType>(std::move(modifier), std::move(element),
+                                          /*isRequired=*/false);
+}
+
+// A `LookupTypeDefinition` whose `GetDefinition()` is null -- the degenerate
+// Enum-kind shape where the C# `type.GetDefinition().EnumUnderlyingType`
+// deref would NRE.
+class DefinitionlessEnum : public LookupTypeDefinition {
+public:
+    using LookupTypeDefinition::LookupTypeDefinition;
+    const ITypeDefinition* GetDefinition() const override { return nullptr; }
+};
 
 } // namespace
 
@@ -231,4 +286,101 @@ TEST(SwapSignTest, ReturnsNullForNonIntegerTypes)
     EXPECT_EQ(SwapSign(KT(KnownTypeCode::Boolean).get()), nullptr);
     EXPECT_EQ(SwapSign(KT(KnownTypeCode::Object).get()), nullptr);
     EXPECT_EQ(SwapSign(nullptr), nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// GetEnumUnderlyingType(IType*) -- faithful port of TypeUtils.GetEnumUnderlyingType:
+// an enum resolves to its definition's underlying type; every other type passes
+// through the SkipModifiers-unwrapped input unchanged.
+// ---------------------------------------------------------------------------
+TEST(GetEnumUnderlyingTypeTest, ReturnsNullForNullInput)
+{
+    // The C# extension method would NRE on a null receiver; the port's
+    // nullable-IType convention yields null.
+    EXPECT_EQ(TS::GetEnumUnderlyingType(nullptr), nullptr);
+}
+
+TEST(GetEnumUnderlyingTypeTest, ReturnsInputForNonEnumTypes)
+{
+    auto i32 = KT(KnownTypeCode::Int32);
+    auto str = KT(KnownTypeCode::String);
+    auto cls = MakeDef(TypeKind::Class);
+    auto st = MakeDef(TypeKind::Struct);
+    EXPECT_EQ(TS::GetEnumUnderlyingType(i32.get()), i32.get());
+    EXPECT_EQ(TS::GetEnumUnderlyingType(str.get()), str.get());
+    EXPECT_EQ(TS::GetEnumUnderlyingType(cls.get()), cls.get());
+    EXPECT_EQ(TS::GetEnumUnderlyingType(st.get()), st.get());
+}
+
+TEST(GetEnumUnderlyingTypeTest, ReturnsUnderlyingTypeForEnum)
+{
+    auto underlying = KT(KnownTypeCode::Int32);
+    auto def = MakeDef(TypeKind::Enum);
+    def->SetEnumUnderlyingType(underlying);
+    EXPECT_EQ(TS::GetEnumUnderlyingType(def.get()), underlying.get());
+    // Not the enum itself: the underlying type replaces the enum.
+    EXPECT_NE(TS::GetEnumUnderlyingType(def.get()), def.get());
+}
+
+TEST(GetEnumUnderlyingTypeTest, EnumWithoutConfiguredUnderlyingYieldsNull)
+{
+    // A definition whose EnumUnderlyingType is null yields null -- the faithful
+    // C# result for a definition that reports no underlying type (a real enum
+    // always carries one; this pins the port's null contract for the stub shape).
+    auto def = MakeDef(TypeKind::Enum);
+    EXPECT_EQ(TS::GetEnumUnderlyingType(def.get()), nullptr);
+}
+
+TEST(GetEnumUnderlyingTypeTest, UnwrapsModifiersBeforeTheEnumCheck)
+{
+    // modopt(IsConst) over an enum: the C# rebinds through SkipModifiers()
+    // BEFORE the Kind check, so the decorated enum still resolves to its
+    // underlying type.
+    auto underlying = KT(KnownTypeCode::UInt32);
+    auto def = MakeDef(TypeKind::Enum);
+    def->SetEnumUnderlyingType(underlying);
+    auto modopt = ModOptOf(IsConstModifier(), def);
+    EXPECT_EQ(TS::GetEnumUnderlyingType(modopt.get()), underlying.get());
+}
+
+TEST(GetEnumUnderlyingTypeTest, PassthroughUnwrapsModifiersForNonEnum)
+{
+    // The C# `type = type.SkipModifiers()` rebind means a decorated NON-enum
+    // passes through as the UNWRAPPED element, not the ModifiedType.
+    auto i32 = KT(KnownTypeCode::Int32);
+    auto modopt = ModOptOf(IsConstModifier(), i32);
+    const IType* result = TS::GetEnumUnderlyingType(modopt.get());
+    EXPECT_EQ(result, i32.get());
+    EXPECT_NE(result, modopt.get());
+}
+
+TEST(GetEnumUnderlyingTypeTest, UnwrapsNestedModifiersOverEnum)
+{
+    // modopt over modopt over an enum: the SkipModifiers loop unwraps the
+    // whole decorator chain before the Kind check.
+    auto underlying = KT(KnownTypeCode::Int64);
+    auto def = MakeDef(TypeKind::Enum);
+    def->SetEnumUnderlyingType(underlying);
+    auto inner = ModOptOf(IsConstModifier(), def);
+    auto outer = ModOptOf(IsConstModifier(), inner);
+    EXPECT_EQ(TS::GetEnumUnderlyingType(outer.get()), underlying.get());
+}
+
+TEST(GetEnumUnderlyingTypeTest, ReturnsNullForDegenerateNullElementModifier)
+{
+    // A ModifiedType with a null element: SkipModifiers yields null, where the
+    // C# `type.Kind` deref would NRE; the port's safe fallback is null.
+    auto modopt = ModOptOf(IsConstModifier(), nullptr);
+    EXPECT_EQ(TS::GetEnumUnderlyingType(modopt.get()), nullptr);
+}
+
+TEST(GetEnumUnderlyingTypeTest, EnumWithoutDefinitionYieldsNull)
+{
+    // An Enum kind whose GetDefinition() is null: the C#
+    // `type.GetDefinition().EnumUnderlyingType` deref would NRE; the port's
+    // safe fallback is null.
+    DefinitionlessEnum def("E", "Test", FullTypeName(TopLevelTypeName("Test", "E")),
+                            TypeKind::Enum, Accessibility::Public, TestCompilation(),
+                            nullptr);
+    EXPECT_EQ(TS::GetEnumUnderlyingType(&def), nullptr);
 }

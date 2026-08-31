@@ -241,6 +241,10 @@ public:
     // configurable `Variance`; the default `IType::TypeParameters()` returns `{}`. The stored
     // pointers are non-owning (the caller keeps the `ITypeParameter` stubs alive).
     void SetTypeParameters(std::vector<const ITypeParameter*> tps) { typeParameters_ = std::move(tps); }
+    // The GetEnumUnderlyingType tests need a definition with a configurable
+    // `EnumUnderlyingType`; the default (an empty `ITypePtr`) preserves the
+    // prior always-null behavior.
+    void SetEnumUnderlyingType(ITypePtr underlying) { enumUnderlyingType_ = std::move(underlying); }
 
     // --- IType ---
     TypeKind Kind() const override { return kind_; }
@@ -290,7 +294,7 @@ public:
     std::vector<const IProperty*> Properties() const override { return {}; }
     std::vector<const IEvent*> Events() const override { return {}; }
     TS::KnownTypeCode KnownTypeCode() const override { return knownTypeCode_; }
-    ITypePtr EnumUnderlyingType() const override { return {}; }
+    ITypePtr EnumUnderlyingType() const override { return enumUnderlyingType_; }
     bool IsReadOnly() const override { return false; }
     std::string MetadataName() const override { return fullTypeName_.Name(); }
     bool HasExtensions() const override { return false; }
@@ -316,6 +320,7 @@ private:
     const ITypeDefinition* declaringTypeDefinition_ = nullptr;
     std::vector<ITypePtr> directBaseTypes_;
     std::vector<const ITypeParameter*> typeParameters_;
+    ITypePtr enumUnderlyingType_;
 };
 
 // A plain `IEntity` stub (NOT an IMember) -- the smallest concrete entity for

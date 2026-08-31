@@ -36,6 +36,7 @@
 #pragma once
 
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/Sign.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
@@ -45,6 +46,41 @@
 #include <optional>
 
 namespace ILSpy::Decompiler::TypeSystem {
+
+// Declared in TypeSystemExtensions.hpp, defined in TypeSystemExtensions.cpp;
+// re-declared here so the GetEnumUnderlyingType leaf below can call it without
+// pulling the full TypeSystemExtensions.hpp (and its ICompilation.hpp) into
+// every TypeUtils.hpp consumer.
+const IType* SkipModifiers(const IType& type);
+
+// Port of TypeUtils.GetEnumUnderlyingType(IType) (TypeUtils.cs line 323): if
+// `type` is an enumeration type, returns the underlying type; otherwise,
+// returns `type` unmodified. The C# rebinds through `SkipModifiers()` first,
+// so a custom-modifier-decorated input is unwrapped BEFORE the Kind check --
+// for a non-enum the passthrough is the UNWRAPPED element, not the
+// ModifiedType. The port takes the nullable `const IType*` (the file
+// convention: the C# never sees a null IType, but the port's readers can hand
+// back a null resolution); a null input, a degenerate ModifiedType with a
+// null element (where the C# `type.Kind` deref would NRE), and an Enum kind
+// whose definition does not resolve (where the C#
+// `type.GetDefinition().EnumUnderlyingType` deref would NRE) all yield nullptr
+// (the D516 safe-fallback convention). An enum whose `EnumUnderlyingType` is
+// null yields nullptr too (the faithful C# result for a definition that
+// reports no underlying type). The returned pointer is non-owning: the
+// passthrough is the input or its SkipModifiers-unwrapped element (both
+// reachable through the input), and the enum arm is the definition's
+// `EnumUnderlyingType` handle (owned by the definition, which is reachable
+// through `type`).
+inline const IType* GetEnumUnderlyingType(const IType* type)
+{
+    if (!type) return nullptr;
+    const IType* t = SkipModifiers(*type);
+    if (!t) return nullptr;
+    if (t->Kind() != TypeKind::Enum) return t;
+    const ITypeDefinition* def = t->GetDefinition();
+    if (!def) return nullptr;
+    return def->EnumUnderlyingType().get();
+}
 
 // `bool? IType.IsReferenceType` for the minimal port. Returns true for the
 // reference-type kinds, false for the value-type kinds, and nullopt when the
@@ -96,10 +132,10 @@ inline std::optional<bool> IsReferenceType(const IType* t) {
 // decimal; Unsigned for the unsigned primitives + char + bool + pointer /
 // native-uint / function-pointer; Signed for native-int. A non-known type
 // (TypeParameter / ByReference / Unknown / ...) yields None. The C# also
-// unwraps SkipModifiers + GetEnumUnderlyingType; this minimal port models neither
-// (no ModifiedType, no per-enum underlying type), so a KnownType is used directly
-// and an Enum KnownType falls through to None (the conv.nop.lifted case only
-// deals with primitive underlying types).
+// unwraps SkipModifiers + GetEnumUnderlyingType before the definition lookup;
+// this port reads the KnownType code directly instead, so an Enum type yields
+// None (the conv.nop.lifted call site only deals with primitive underlying
+// types).
 inline Sign GetSign(const IType* type) {
     if (!type) return Sign::None;
     switch (type->Kind()) {
@@ -167,8 +203,8 @@ inline ILSpy::Decompiler::IL::PrimitiveType ToPrimitiveType(KnownTypeCode code) 
 // type. Unknown -> PrimitiveType::Unknown; ByReference -> Ref; NInt /
 // FunctionPointer -> I; NUInt -> U; otherwise the KnownTypeCode's ToPrimitiveType
 // (None for a non-primitive / non-known type). The C# unwraps
-// GetEnumUnderlyingType().GetDefinition(); this minimal port has no per-enum
-// underlying type, so an Enum KnownType yields None (the conv.nop.lifted case
+// GetEnumUnderlyingType().GetDefinition(); this port reads the KnownType code
+// directly instead, so an Enum type yields None (the conv.nop.lifted case
 // only deals with primitive underlying types).
 inline ILSpy::Decompiler::IL::PrimitiveType ToPrimitiveType(const IType* type) {
     using ILSpy::Decompiler::IL::PrimitiveType;
@@ -227,12 +263,12 @@ inline constexpr int kNativeIntSize = 6;
 
 // Port of TypeUtils.GetSize(IType): the size in bytes of a type. Pointer-sized
 // kinds (Pointer/ByReference/Class/NInt/NUInt) report kNativeIntSize; an Enum
-// defers to its underlying type (this minimal port has no per-enum underlying
-// type, so an Enum KnownType falls through to the kind switch and reports
-// kNativeIntSize via the Enum kind not being in the pointer-size list -- the
-// C# unwraps GetEnumUnderlyingType first, which this port does not model, so a
-// KnownType Enum reports 0 unless it is one of the primitive KnownTypeCodes);
-// a KnownType reports its primitive size by KnownTypeCode (1 for Boolean/SByte/
+// defers to its underlying type in the C# (the GetEnumUnderlyingType-unwrapped
+// definition's size); this GetSize reduction does not unwrap there, so an
+// Enum type falls through to the KnownTypeCode lookup and reports 0 (the
+// compound-assignment call sites that consult GetSize for small integers only
+// deal with the primitive KnownTypes); a KnownType reports its primitive size
+// by KnownTypeCode (1 for Boolean/SByte/
 // Byte, 2 for Char/Int16/UInt16, 4 for Int32/UInt32/Single, kNativeIntSize for
 // IntPtr/UIntPtr, 8 for Int64/UInt64/Double); 0 otherwise (O/F/Void/Unknown).
 inline int GetSize(const IType* type) {
@@ -246,11 +282,10 @@ inline int GetSize(const IType* type) {
             return kNativeIntSize;
         case TypeKind::Enum:
             // The C# unwraps GetEnumUnderlyingType().GetDefinition() and reports
-            // its size; this minimal port has no per-enum underlying type, so an
-            // Enum KnownType falls through to the KnownTypeCode switch below
-            // (which yields 0 for a bare Enum kind). The compound-assignment
-            // validation only consults IsCSharpSmallIntegerType (the KnownTypeCode
-            // switch), so this is the faithful best-effort.
+            // its size; this reduction does not unwrap (the call sites that
+            // consult GetSize for small integers only deal with the primitive
+            // KnownTypes), so an Enum type falls through to the KnownTypeCode
+            // lookup below and reports 0.
             break;
         default:
             break;
