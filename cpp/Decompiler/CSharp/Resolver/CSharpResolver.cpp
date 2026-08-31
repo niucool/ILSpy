@@ -31,6 +31,7 @@
 #include "Decompiler/CSharp/Resolver/CSharpInvocationResolveResult.hpp"
 #include "Decompiler/CSharp/Resolver/DynamicInvocationResolveResult.hpp"
 #include "Decompiler/CSharp/Resolver/DynamicMemberResolveResult.hpp"
+#include "Decompiler/CSharp/Resolver/LambdaResolveResult.hpp"
 #include "Decompiler/CSharp/Resolver/MethodGroupResolveResult.hpp"
 #include "Decompiler/CSharp/Resolver/OverloadResolution.hpp"
 #include "Decompiler/CSharp/Resolver/OverloadResolutionHelpers.hpp"
@@ -4611,6 +4612,122 @@ CSharpResolver::ResolveObjectCreation(
         // creation type (NOT the `UnknownError` singleton).
         return std::make_shared<ErrorResolveResult>(type.shared_from_this());
     }
+}
+
+// ---- CanTransformToExtensionMethodCall region (CSharpResolver.cs lines 2958-2983) ------------
+
+// The C# `public bool CanTransformToExtensionMethodCall(IMethod method, IReadOnlyList<IType>
+// typeArguments, ResolveResult target, ResolveResult[] arguments, string[] argumentNames)`
+// (line 2959) -- see CSharpResolver.hpp for the port conventions.
+bool CSharpResolver::CanTransformToExtensionMethodCall(
+    const ILSpy::Decompiler::TypeSystem::IMethod& method,
+    std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> typeArguments,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> target,
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+    const std::optional<std::vector<std::string>>& argumentNames) const
+{
+    using ILSpy::Decompiler::CSharp::Resolver::LambdaResolveResult;
+    using ILSpy::Decompiler::CSharp::Resolver::MethodGroupResolveResult;
+    using ILSpy::Decompiler::CSharp::Resolver::OverloadResolution;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::TypeSystem::IParameterizedMember;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+
+    // The C# `if (target is LambdaResolveResult) return false;` -- a member access on a
+    // lambda yields no method group (the anonymous-function conversion supplies the
+    // delegate type; there is no member to transform).
+    if (dynamic_cast<const LambdaResolveResult*>(target.get()) != nullptr)
+        return false;
+    // The C# `ResolveMemberAccess(target, method.Name, typeArguments,
+    // NameLookupMode.InvocationTarget) as MethodGroupResolveResult` -- the `target` handle
+    // is copied (the by-value parameter convention; the later `target.Type` read stays
+    // valid through the caller's own handle).
+    std::shared_ptr<ResolveResult> rr = ResolveMemberAccess(
+        target, method.Name(), std::move(typeArguments), NameLookupMode::InvocationTarget);
+    std::shared_ptr<MethodGroupResolveResult> mgrr =
+        std::dynamic_pointer_cast<MethodGroupResolveResult>(rr);
+    if (!mgrr)
+        return false;
+    // The C# `rr.PerformOverloadResolution(CurrentTypeResolveContext.Compilation,
+    // arguments, argumentNames, allowExtensionMethods: true)` -- the context's compilation
+    // IS the resolver's own compilation (the context is built over the compilation's main
+    // module).
+    std::unique_ptr<OverloadResolution> orr = mgrr->PerformOverloadResolution(
+        compilation_, arguments, argumentNames, /*allowExtensionMethods*/ true);
+    // The C# `if (or == null || or.IsAmbiguous) return false;` -- the null guard is
+    // defensive (the factory never returns null); the port keeps it (the D516 convention).
+    if (!orr || orr->IsAmbiguous())
+        return false;
+    // The C# `method.Equals(or.GetBestCandidateWithSubstitutedTypeArguments())` -- the C#
+    // `object.Equals` virtual dispatch on the receiver ports to the member `Equals` with
+    // NO normalization (the `SpecializedMember::Equals` precedent); a null best candidate
+    // (no candidate at all) compares false, faithfully matching the C# `Equals(null)`.
+    const IParameterizedMember* best = orr->GetBestCandidateWithSubstitutedTypeArguments();
+    if (!method.Equals(best, nullptr))
+        return false;
+    // The C# `CSharpResolver.IsEligibleExtensionMethod(target.Type, method,
+    // useTypeInference: false, out _)` -- the discarded out parameter is a local (the
+    // C# `out _` discard).
+    std::optional<std::vector<ITypePtr>> discardedInferredTypes;
+    return IsEligibleExtensionMethod(&target->Type(), method,
+                                     /*useTypeInference*/ false, discardedInferredTypes);
+}
+
+// The C# `public bool CanTransformToExtensionMethodCall(IMethod method, bool
+// ignoreTypeArguments = false, bool ignoreArgumentNames = true)` (line 2974) -- see
+// CSharpResolver.hpp for the port conventions.
+bool CSharpResolver::CanTransformToExtensionMethodCall(
+    const ILSpy::Decompiler::TypeSystem::IMethod& method,
+    bool ignoreTypeArguments,
+    bool ignoreArgumentNames) const
+{
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::TypeSystem::IParameter;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+
+    // The C# `if (method.Parameters.Count == 0) return false;` -- an extension method needs
+    // at least the `this` parameter.
+    std::vector<const IParameter*> parameters = method.Parameters();
+    if (parameters.empty())
+        return false;
+    // The C# `var targetType = method.Parameters.Select(p => new ResolveResult(p.Type)).
+    // First();` -- the FIRST parameter's type is the target expression (the `this`
+    // receiver). The owning `ITypePtr` the base `ResolveResult` ctor takes is recovered
+    // from the const accessor contract (the D529 `shared_from_this` + `const_pointer_cast`
+    // convention; every real IType is shared-managed).
+    std::shared_ptr<ResolveResult> targetType = std::make_shared<ResolveResult>(
+        std::const_pointer_cast<IType>(parameters[0]->Type().shared_from_this()));
+    // The C# `var paramTypes = method.Parameters.Skip(1).Select(p => new ResolveResult(
+    // p.Type)).ToArray();` -- the remaining parameters' types are the arguments.
+    std::vector<std::shared_ptr<ResolveResult>> paramTypes;
+    paramTypes.reserve(parameters.size() - 1);
+    for (std::size_t i = 1; i < parameters.size(); i++) {
+        paramTypes.push_back(std::make_shared<ResolveResult>(
+            std::const_pointer_cast<IType>(parameters[i]->Type().shared_from_this())));
+    }
+    // The C# `var paramNames = ignoreArgumentNames ? null : method.Parameters.
+    // SelectReadOnlyArray(p => p.Name);` -- ALL the parameter names (the receiver's
+    // included), one MORE entry than the synthesized arguments (which skip the receiver):
+    // the length mismatch the `OverloadResolution` ctor then rejects is the documented C#
+    // quirk (the names array looks like it was meant to `Skip(1)` the receiver; no C#
+    // caller passes `ignoreArgumentNames: false`).
+    std::optional<std::vector<std::string>> paramNames;
+    if (!ignoreArgumentNames) {
+        paramNames.emplace();
+        paramNames->reserve(parameters.size());
+        for (const IParameter* p : parameters)
+            paramNames->push_back(p->Name());
+    }
+    // The C# `var typeArgs = ignoreTypeArguments ? Empty<IType>.Array : method.TypeArguments.
+    // ToArray();` -- the method's own type arguments (the generic-method shape), empty when
+    // ignored.
+    std::vector<ITypePtr> typeArgs;
+    if (!ignoreTypeArguments)
+        typeArgs = method.TypeArguments();
+    return CanTransformToExtensionMethodCall(method, std::move(typeArgs), std::move(targetType),
+                                             paramTypes, paramNames);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

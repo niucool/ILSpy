@@ -503,6 +503,13 @@ public:
     // `false` preserves the original behavior so existing tests that do not call the
     // setter are unaffected (the additive-setter convention).
     void SetIsExtensionMethod(bool v) { isExtensionMethod_ = v; }
+    // Configurable `TypeArguments` for the `CanTransformToExtensionMethodCall` tests
+    // (the convenience overload's `ignoreTypeArguments: false` arm reads
+    // `method.TypeArguments` -- a SPECIALIZED generic method carries the substituted
+    // arguments there, while an unspecialized method's list is empty). The default empty
+    // preserves the original behavior so existing tests that do not call the setter are
+    // unaffected (the additive-setter convention).
+    void SetTypeArguments(std::vector<ITypePtr> ta) { typeArguments_ = std::move(ta); }
 
     // --- ISymbol ---
     TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Method; }
@@ -561,7 +568,7 @@ public:
     bool IsInitOnly() const override { return false; }
     bool ThisIsRefReadOnly() const override { return false; }
     std::vector<const ITypeParameter*> TypeParameters() const override { return typeParameters_; }
-    std::vector<ITypePtr> TypeArguments() const override { return {}; }
+    std::vector<ITypePtr> TypeArguments() const override { return typeArguments_; }
     bool IsExtensionMethod() const override { return isExtensionMethod_; }
     bool IsLocalFunction() const override { return false; }
     bool IsConstructor() const override { return false; }
@@ -590,6 +597,7 @@ private:
     ITypePtr returnTypeOverride_;
     std::vector<const IParameter*> parameters_;
     std::vector<const ITypeParameter*> typeParameters_;
+    std::vector<ITypePtr> typeArguments_;
     bool isExtensionMethod_ = false;
 };
 

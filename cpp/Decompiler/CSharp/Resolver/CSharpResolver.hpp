@@ -38,9 +38,9 @@
 // Convert/ResolveCast region, the sizeof/this/base/typeof tail, the
 // condition/primitive/default-value/assignment quartet, the simple-name lookup
 // cluster, the extension-methods region, the member-access region, the
-// invocation region, the ResolveForeach region, the ResolveIndexer region, and
-// the ResolveObjectCreation region have landed; CanTransformToExtensionMethodCall
-// ... follows).
+// invocation region, the ResolveForeach region, the ResolveIndexer region, the
+// ResolveObjectCreation region, and the CanTransformToExtensionMethodCall region
+// have landed -- the CSharpResolver class port is COMPLETE).
 //
 // KEY PORT CONVENTIONS:
 //  (a) The C# `With*` clone factories return a `CSharpResolver` REFERENCE -- the C#
@@ -1705,6 +1705,69 @@ public:
         bool allowProtectedAccess = false,
         std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>
             initializerStatements = {}) const;
+
+    // ---- CanTransformToExtensionMethodCall --------------------------------------------------
+    // (The `CanTransformToExtensionMethodCall` region, CSharpResolver.cs lines 2958-2983
+    // -- the LAST CSharpResolver region: the two public overloads deciding whether a
+    // static extension-method call `C.M(x, args)` can be re-rendered as the extension
+    // form `x.M(args)` (the IntroduceExtensionMethods / NullPropagationTransform /
+    // TransformCollectionAndObjectInitializers / StatementBuilder consumers). Every
+    // prerequisite is already ported: `ResolveMemberAccess` (the member-access region,
+    // whose `UnknownMemberResolveResult` fallback installs the extension-method groups),
+    // `MethodGroupResolveResult::PerformOverloadResolution` with the LIVE extension-method
+    // arm (the receiver prepended as the first argument), `OverloadResolution::IsAmbiguous`
+    // / `GetBestCandidateWithSubstitutedTypeArguments`, the member `Equals` (the C#
+    // `object.Equals` virtual dispatch ports to the null-normalization `Equals` call, the
+    // `SpecializedMember::Equals` precedent), and the public static
+    // `IsEligibleExtensionMethod` (the extension-methods region).)
+
+    // The C# `public bool CanTransformToExtensionMethodCall(IMethod method, IReadOnlyList<IType>
+    // typeArguments, ResolveResult target, ResolveResult[] arguments, string[] argumentNames)`
+    // (line 2959) -- the full five-argument decision: a LAMBDA target never transforms (a
+    // member access on a lambda yields no method group); the `ResolveMemberAccess(target,
+    // method.Name, typeArguments, NameLookupMode.InvocationTarget)` lookup must yield a
+    // method group (the target type's own instance methods first, then the extension-method
+    // fallback over the current using scope); the overload resolution over the arguments
+    // (extension methods allowed -- the receiver is the group's target) must be UNAMBIGUOUS;
+    // the best candidate must BE the given method (the member `Equals` with no
+    // normalization); and the method must be an ELIGIBLE extension method for the target's
+    // type (no type inference -- the full invocation already fixed the arguments).
+    //
+    // PORT CONVENTIONS for this member:
+    //  * The C# `ResolveResult target` reference ports to a by-value `shared_ptr` (the
+    //    `ResolveMemberAccess` convention): the C# reuses the same reference for the member
+    //    access AND the later `target.Type` eligibility read; the by-value handle copy keeps
+    //    the caller's `target` valid for both (the member access takes its own copy).
+    //  * The C# `ResolveResult[] arguments` / `string[] argumentNames` port to a const-ref
+    //    vector and a const-ref `std::optional` vector (the `PerformOverloadResolution`
+    //    parameter convention; the C# null array is `nullopt`).
+    //  * The C# `CurrentTypeResolveContext.Compilation` is the resolver's own `compilation_`
+    //    (the context is built over the compilation's main module; `Compilation()` is the
+    //    same reference).
+    bool CanTransformToExtensionMethodCall(
+        const ILSpy::Decompiler::TypeSystem::IMethod& method,
+        std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> typeArguments,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> target,
+        const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+        const std::optional<std::vector<std::string>>& argumentNames = std::nullopt) const;
+
+    // The C# `public bool CanTransformToExtensionMethodCall(IMethod method, bool
+    // ignoreTypeArguments = false, bool ignoreArgumentNames = true)` (line 2974) -- the
+    // convenience overload synthesizing the five arguments from the method's own shape: the
+    // FIRST parameter's type becomes the target expression (the `this` receiver), the
+    // REMAINING parameters' types the arguments, ALL the parameter names the argument names
+    // (unless ignored), and the method's own type arguments the type arguments (unless
+    // ignored). A zero-parameter method never transforms. NOTE the C# QUIRK the
+    // `ignoreArgumentNames: false` shape carries: the names array covers EVERY parameter
+    // (the receiver's included) while the arguments skip the receiver, so the synthesized
+    // arrays have DIFFERENT lengths and the `OverloadResolution` ctor rejects the mismatch
+    // with the `ArgumentException` analog -- the names array looks like it was meant to
+    // `Skip(1)` the receiver; no C# caller passes `false` (every caller keeps the
+    // `ignoreArgumentNames: true` default), so the quirk is unreachable in practice.
+    bool CanTransformToExtensionMethodCall(
+        const ILSpy::Decompiler::TypeSystem::IMethod& method,
+        bool ignoreTypeArguments = false,
+        bool ignoreArgumentNames = true) const;
 
 private:
     // The C# private nested `sealed class ObjectInitializerContext` -- the linked stack
