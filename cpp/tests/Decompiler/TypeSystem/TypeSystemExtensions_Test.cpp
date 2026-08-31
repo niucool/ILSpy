@@ -35,9 +35,11 @@
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/IParameter.hpp"
+#include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/LookupStubs.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
+#include "Decompiler/TypeSystem/TypeParameterSubstitution.hpp"
 
 #include <gtest/gtest.h>
 
@@ -1019,4 +1021,165 @@ TEST(TypeSystemExtensionsTest, DefaultValueAssignmentSubsequentUnrelatedClosureB
     fx.owner->SetParameters({&target, &closureParam});
 
     EXPECT_FALSE(TS::IsDefaultValueAssignmentAllowed(target));
+}
+
+// ---------------------------------------------------------------------------
+// IsParameterizedProperty / HasReadonlyModifier (TypeSystemExtensions.cs
+// lines 180 and 443 -- the TypeSystemAstBuilder "Convert Entity"
+// accessor-support cluster's TypeSystemExtensions prerequisites).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A `readonly struct` declaring type (the IsReadOnly == true side of the
+// HasReadonlyModifier gate; LookupTypeDefinition hardcodes false).
+class ReadOnlyStructDef : public LookupTypeDefinition {
+public:
+    using LookupTypeDefinition::LookupTypeDefinition;
+
+    bool IsReadOnly() const override { return true; }
+};
+
+// A configurable `IProperty` stub (the CSharpResolverIndexer TestProperty
+// pattern): the SymbolKind (Property vs Indexer) and the parameter table are
+// configurable so IsParameterizedProperty's two-term conjunction is testable
+// in isolation.
+class ParamProperty : public TS::IProperty {
+public:
+    ParamProperty(std::string name, const TS::ICompilation& compilation)
+        : name_(std::move(name)), compilation_(compilation) {}
+
+    void SetSymbolKind(TS::SymbolKind k) { kind_ = k; }
+    void SetParameters(std::vector<const TS::IParameter*> p) { parameters_ = std::move(p); }
+
+    // --- ISymbol ---
+    TS::SymbolKind SymbolKind() const override { return kind_; }
+    std::string Name() const override { return name_; }
+
+    // --- INamedElement ---
+    std::string FullName() const override { return name_; }
+    std::string ReflectionName() const override { return name_; }
+    std::string Namespace() const override { return {}; }
+
+    // --- ICompilationProvider ---
+    const TS::ICompilation& Compilation() const override { return compilation_; }
+
+    // --- IEntity ---
+    std::uint32_t MetadataToken() const override { return 0; }
+    const TS::ITypeDefinition* DeclaringTypeDefinition() const override { return nullptr; }
+    TS::ITypePtr DeclaringType() const override { return {}; }
+    const TS::IModule* ParentModule() const override { return nullptr; }
+    std::vector<const TS::IAttribute*> GetAttributes() const override { return {}; }
+    bool HasAttribute(TS::KnownAttribute) const override { return false; }
+    const TS::IAttribute* GetAttribute(TS::KnownAttribute) const override { return nullptr; }
+    TS::Accessibility Accessibility() const override { return TS::Accessibility::Public; }
+    bool IsStatic() const override { return false; }
+    bool IsAbstract() const override { return false; }
+    bool IsSealed() const override { return false; }
+
+    // --- IMember ---
+    const TS::IMember* MemberDefinition() const override { return this; }
+    const TS::IType& ReturnType() const override { return returnType_; }
+    std::vector<const TS::IMember*> ExplicitlyImplementedInterfaceMembers() const override {
+        return {};
+    }
+    bool IsExplicitInterfaceImplementation() const override { return false; }
+    bool IsVirtual() const override { return false; }
+    bool IsOverride() const override { return false; }
+    bool IsOverridable() const override { return false; }
+    const TS::TypeParameterSubstitution* Substitution() const override {
+        return &identitySubst_;
+    }
+    const TS::IMember* Specialize(const TS::TypeParameterSubstitution*) const override {
+        return this;
+    }
+    bool Equals(const TS::IMember* obj, const TS::TypeVisitor*) const override {
+        return obj == this;
+    }
+
+    // --- IParameterizedMember ---
+    std::vector<const TS::IParameter*> Parameters() const override { return parameters_; }
+
+    // --- IProperty ---
+    bool CanGet() const override { return true; }
+    bool CanSet() const override { return false; }
+    bool IsIndexer() const override { return false; }
+    bool ReturnTypeIsRefReadOnly() const override { return false; }
+    const TS::IMethod* Getter() const override { return nullptr; }
+    const TS::IMethod* Setter() const override { return nullptr; }
+
+private:
+    std::string name_;
+    const TS::ICompilation& compilation_;
+    TS::KnownType returnType_{ TS::KnownTypeCode::Object };
+    TS::SymbolKind kind_ = TS::SymbolKind::Property;
+    std::vector<const TS::IParameter*> parameters_;
+    mutable TS::TypeParameterSubstitution identitySubst_{ std::nullopt, std::nullopt };
+};
+
+} // namespace
+
+TEST(TypeSystemExtensionsTest, IsParameterizedPropertyPlainPropertyWithoutParametersIsFalse) {
+    LookupCompilation compilation;
+    ParamProperty property("Value", compilation);
+    EXPECT_FALSE(TS::IsParameterizedProperty(property));
+}
+
+TEST(TypeSystemExtensionsTest, IsParameterizedPropertyNamedPropertyWithParametersIsTrue) {
+    LookupCompilation compilation;
+    ParamProperty property("Value", compilation);
+    auto parameterType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto parameter = std::make_shared<DefaultTestParameter>(parameterType, "index");
+    property.SetParameters({parameter.get()});
+    EXPECT_TRUE(TS::IsParameterizedProperty(property));
+}
+
+TEST(TypeSystemExtensionsTest, IsParameterizedPropertyIndexerWithParametersIsFalse) {
+    LookupCompilation compilation;
+    ParamProperty property("Item", compilation);
+    auto parameterType = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32);
+    auto parameter = std::make_shared<DefaultTestParameter>(parameterType, "index");
+    property.SetParameters({parameter.get()});
+    // The SymbolKind gate excludes indexers even though they carry parameters.
+    property.SetSymbolKind(TS::SymbolKind::Indexer);
+    EXPECT_FALSE(TS::IsParameterizedProperty(property));
+}
+
+TEST(TypeSystemExtensionsTest, HasReadonlyModifierRefReadOnlyOnNonReadOnlyStructIsTrue) {
+    LookupCompilation compilation;
+    auto declaringType = MakeDefinition(compilation, "S", "Ns",
+                                         TS::TypeKind::Struct);
+    LookupMethod method("get_X", compilation);
+    method.SetDeclaringTypeDefinition(declaringType.get());
+    method.SetThisIsRefReadOnly(true);
+    EXPECT_TRUE(TS::HasReadonlyModifier(method));
+}
+
+TEST(TypeSystemExtensionsTest, HasReadonlyModifierRefReadOnlyOnReadOnlyStructIsFalse) {
+    LookupCompilation compilation;
+    auto declaringType = std::make_shared<ReadOnlyStructDef>(
+        "S", "Ns", TS::FullTypeName("Ns.S"), TS::TypeKind::Struct, TS::Accessibility::Public,
+        compilation, nullptr, TS::KnownTypeCode::None);
+    LookupMethod method("get_X", compilation);
+    method.SetDeclaringTypeDefinition(declaringType.get());
+    method.SetThisIsRefReadOnly(true);
+    EXPECT_FALSE(TS::HasReadonlyModifier(method));
+}
+
+TEST(TypeSystemExtensionsTest, HasReadonlyModifierNullDeclaringTypeDefinitionIsFalse) {
+    LookupCompilation compilation;
+    LookupMethod method("get_X", compilation);
+    method.SetThisIsRefReadOnly(true);
+    // The C# `?.IsReadOnly == false` lifted-bool comparison: a null declaring
+    // type definition fails it (not a definite false).
+    EXPECT_FALSE(TS::HasReadonlyModifier(method));
+}
+
+TEST(TypeSystemExtensionsTest, HasReadonlyModifierNonRefReadOnlyIsFalse) {
+    LookupCompilation compilation;
+    auto declaringType = MakeDefinition(compilation, "S", "Ns",
+                                         TS::TypeKind::Struct);
+    LookupMethod method("get_X", compilation);
+    method.SetDeclaringTypeDefinition(declaringType.get());
+    EXPECT_FALSE(TS::HasReadonlyModifier(method));
 }

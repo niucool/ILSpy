@@ -39,12 +39,17 @@
 // and ConvertVariable, C# lines 2743-2761), plus the nullability-disambiguation
 // tail of the Convert Type Parameter region (AddNullabilityDisambiguatingConstraints
 // + the NullableTypeParameterCollector visitor + GetNullabilityDisambiguator, C#
-// lines 2683-2734, consumed only by the deferred ConvertEntity), and the "Convert
+// lines 2683-2734, consumed only by the deferred ConvertEntity), the "Convert
 // Modifiers" region (NeedsAccessibility + GetMemberModifiers, C# lines 2518-2596,
 // consuming the ModifierFromAccessibility free function and the LocalFunctionMethod
-// wrapper) are landed; the remaining `Convert*`
-// instance methods (ConvertSymbol / ConvertEntity / ConvertExtension) follow in
-// later slices, consuming the free functions below as they grow.
+// wrapper), and the "Convert Entity" accessor-support cluster (GenerateBodyBlock +
+// ConvertAccessor + MergeReadOnlyModifiers + GetExplicitInterfaceType, C# lines
+// 2188-2297 + 2771-2782, the shared prerequisites of the member renderers) are
+// landed; the remaining `Convert*` instance methods (the ConvertProperty /
+// ConvertIndexer / ConvertEvent / ConvertMethod / ConvertOperator /
+// ConvertTypeDefinition renderers plus the ConvertSymbol / ConvertEntity /
+// ConvertExtension entries) follow in later slices, consuming the members below
+// as they grow.
 //
 // ModifierFromAccessibility (TypeSystemAstBuilder.cs line 2497) is the first such
 // helper: a pure switch on Accessibility (the D373 leaf) that maps a symbol's
@@ -70,6 +75,7 @@
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/MethodSemanticsAttributes.hpp"
 #include "Decompiler/TypeSystem/TypeVisitor.hpp"
 
 #include <algorithm>
@@ -108,6 +114,7 @@ namespace ILSpy::Decompiler::Semantics { class NamespaceResolveResult; }
 namespace ILSpy::Decompiler::CSharp::Syntax {
 class Attribute;
 class AttributeSection;
+class BlockStatement;
 class Constraint;
 class MethodDeclaration;
 class ParameterDeclaration;
@@ -1481,6 +1488,70 @@ public:
     // safe-fallback convention). Widened to public for direct TDD (the
     // `NeedsAccessibility` convention).
     Modifiers GetMemberModifiers(const TS::IMember& member) const;
+
+    // -- The "Convert Entity" accessor-support cluster (C# lines 2188-2297 +
+    // 2771-2782) --
+    //
+    // The shared prerequisites of the "Convert Entity" region's member
+    // renderers (the ConvertProperty / ConvertIndexer / ConvertEvent /
+    // ConvertMethod / ConvertOperator / ConvertTypeDefinition slices that
+    // follow): the body generator, the accessor renderer, the readonly-bit
+    // hoist, and the explicit-interface-type helper.
+
+    // The C# `BlockStatement? GenerateBodyBlock()` (line 2188) -- the
+    // `throw new NotImplementedException();` body every `GenerateBody`-gated
+    // renderer attaches (a single `ThrowStatement` over an
+    // `ObjectCreateExpression` of `System.NotImplementedException`, the type
+    // rendered through the `FullTypeName` overload with no resolver needed);
+    // null when `GenerateBody` is false. Widened to public for direct TDD
+    // ahead of the consumer slices (the `ConvertTypeParameter` convention).
+    BlockStatement* GenerateBodyBlock() const;
+
+    // The C# `Accessor? ConvertAccessor(IMethod? accessor,
+    // MethodSemanticsAttributes kind, Accessibility ownerAccessibility, bool
+    // addParameterAttribute)` (line 2206) -- the property / indexer / event
+    // accessor renderer: the attribute sections (the accessor's own, its
+    // return-type `[return: ...]`, and -- under `addParameterAttribute` -- the
+    // last parameter's `[param: ...]`), the accessibility modifier only when
+    // it differs from the owner's, the `readonly` modifier for
+    // ref-readonly-this accessors on non-readonly declaring types, the
+    // `MethodSemanticsAttributes` -> `AccessorKind` mapping (with the init
+    // accessor upgrade under `SupportInitAccessors`), the trailing `/* init */`
+    // comment for an init-only accessor that did NOT become an `init`
+    // accessor, the `MemberResolveResult` annotation, and the generated body.
+    // Null when `accessor` is null (the C# nullable parameter). The parameters
+    // are a nullable non-owning `const TS::IMethod*` (the type system owns the
+    // accessor method, the caller holds the raw handle) and pass-through
+    // values; widened to public for direct TDD (the `ConvertTypeParameter`
+    // convention).
+    Accessor* ConvertAccessor(const TS::IMethod* accessor,
+                               TS::MethodSemanticsAttributes kind,
+                               TS::Accessibility ownerAccessibility,
+                               bool addParameterAttribute) const;
+
+    // The C# `static void MergeReadOnlyModifiers(EntityDeclaration decl,
+    // Accessor? accessor1, Accessor? accessor2)` (line 2286) -- hoists the
+    // `readonly` bit onto the declaration when it is carried by accessor1
+    // alone (accessor2 is null) or by BOTH accessors (a single-sided bit stays
+    // on the accessor: only an unambiguous both-sided `readonly` is a property
+    // of the declared member). A null accessor1 returns immediately (nothing
+    // to hoist); a null accessor2 with a non-readonly accessor1 also does
+    // nothing. Static in the C# too (reads no instance state); widened to
+    // public for direct TDD (the `NeedsAccessibility` convention).
+    static void MergeReadOnlyModifiers(EntityDeclaration& decl,
+                                        Accessor* accessor1,
+                                        Accessor* accessor2);
+
+    // The C# `AstType? GetExplicitInterfaceType(IMember member)` (line 2771) --
+    // the `PrivateImplementationType` helper: for an explicit interface
+    // implementation, the FIRST explicitly-implemented interface member's
+    // declaring type rendered through `ConvertType`; null for an implicit
+    // implementation or an implementation list with no entries (the C#
+    // `FirstOrDefault` on the empty list). The returned node is a raw
+    // `new`-ed pointer (the D223 non-owning model); widened to public for
+    // direct TDD ahead of the consumer slices (the `ConvertTypeParameter`
+    // convention).
+    AstType* GetExplicitInterfaceType(const TS::IMember& member) const;
 
 private:
     // The C# `private void AddTypeAnnotation(AstType astType, IType type)` (line 278)

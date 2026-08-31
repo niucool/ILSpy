@@ -510,6 +510,12 @@ public:
     // preserves the original behavior so existing tests that do not call the setter are
     // unaffected (the additive-setter convention).
     void SetTypeArguments(std::vector<ITypePtr> ta) { typeArguments_ = std::move(ta); }
+    // Configurable `ThisIsRefReadOnly` for the readonly-modifier tests
+    // (`TypeSystemAstBuilder::ConvertAccessor`'s `HasReadonlyModifier` gate reads
+    // it through the TypeSystemExtensions helper). The default `false` preserves
+    // the original behavior so existing tests that do not call the setter are
+    // unaffected (the additive-setter convention).
+    void SetThisIsRefReadOnly(bool v) { thisIsRefReadOnly_ = v; }
 
     // --- ISymbol ---
     TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Method; }
@@ -566,7 +572,7 @@ public:
     std::vector<const IAttribute*> GetReturnTypeAttributes() const override { return {}; }
     bool ReturnTypeIsRefReadOnly() const override { return returnTypeIsRefReadOnly_; }
     bool IsInitOnly() const override { return false; }
-    bool ThisIsRefReadOnly() const override { return false; }
+    bool ThisIsRefReadOnly() const override { return thisIsRefReadOnly_; }
     std::vector<const ITypeParameter*> TypeParameters() const override { return typeParameters_; }
     std::vector<ITypePtr> TypeArguments() const override { return typeArguments_; }
     bool IsExtensionMethod() const override { return isExtensionMethod_; }
@@ -598,6 +604,7 @@ private:
     std::vector<const IParameter*> parameters_;
     std::vector<const ITypeParameter*> typeParameters_;
     std::vector<ITypePtr> typeArguments_;
+    bool thisIsRefReadOnly_ = false;
     bool isExtensionMethod_ = false;
 };
 

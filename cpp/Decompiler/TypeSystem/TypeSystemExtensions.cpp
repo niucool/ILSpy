@@ -31,6 +31,7 @@
 #include "Decompiler/TypeSystem/IModule.hpp"
 #include "Decompiler/TypeSystem/IParameter.hpp"
 #include "Decompiler/TypeSystem/IParameterizedMember.hpp"
+#include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
 
 #include <algorithm>
@@ -527,6 +528,25 @@ bool IsDefaultValueAssignmentAllowed(const IParameter& parameter)
         return false;
     }
     return true;
+}
+
+// The C# `IsParameterizedProperty` (TypeSystemExtensions.cs line 180).
+bool IsParameterizedProperty(const IProperty& property)
+{
+    return property.SymbolKind() == SymbolKind::Property
+        && !property.Parameters().empty();
+}
+
+// The C# `HasReadonlyModifier` (TypeSystemExtensions.cs line 443).
+bool HasReadonlyModifier(const IMethod& accessor)
+{
+    // The C# `accessor.DeclaringTypeDefinition?.IsReadOnly == false` is the
+    // lifted-bool `==` (true only for a definite false): a null declaring type
+    // definition fails the comparison, so the port is the null check plus the
+    // negation (a `readonly struct` definition also yields false).
+    const ITypeDefinition* declaringTypeDefinition = accessor.DeclaringTypeDefinition();
+    return accessor.ThisIsRefReadOnly() && declaringTypeDefinition != nullptr
+        && !declaringTypeDefinition->IsReadOnly();
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem

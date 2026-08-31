@@ -49,7 +49,9 @@
 // `IEntity` / `IParameter` are not among the `IType.hpp` forward declarations).
 namespace ILSpy::Decompiler::TypeSystem {
 class IEntity;
+class IMethod;
 class IParameter;
+class IProperty;
 } // namespace ILSpy::Decompiler::TypeSystem
 
 namespace ILSpy::Decompiler::TypeSystem {
@@ -366,5 +368,28 @@ bool IsClosureParameter(const IParameter* parameter,
 // declaring type skips the closure check, falling through to the individual / params
 // tests -- the D516 safe-fallback convention).
 bool IsDefaultValueAssignmentAllowed(const IParameter& parameter);
+
+// The C# `public static bool IsParameterizedProperty(this IProperty property)`
+// (TypeSystemExtensions.cs line 180, the property region before `IsOpen`) --
+// whether the property is a parameterized property that is NOT an indexer,
+// i.e. a named property with parameters (a VB.NET parameterized property or a
+// C++/CLI indexed property). C# has no syntax for declaring or using such a
+// property; only its accessor methods can be represented. The `SymbolKind ==
+// SymbolKind.Property` gate is what excludes indexers (an indexer carries
+// `SymbolKind.Indexer` even though it also has parameters) and every other
+// member kind; the parameter count is read through the `IParameterizedMember`
+// base (a plain C# property has zero parameters).
+bool IsParameterizedProperty(const IProperty& property);
+
+// The C# `public static bool HasReadonlyModifier(this IMethod accessor)`
+// (TypeSystemExtensions.cs line 443, the `IsAnyPointer` region) -- whether the
+// accessor method renders with a `readonly` modifier: the 'this' reference is
+// ref-readonly AND the declaring-type definition is definitively NOT a
+// `readonly struct`. The C# `accessor.DeclaringTypeDefinition?.IsReadOnly ==
+// false` is the lifted-bool `==` (true only for a definite false -- a null
+// declaring type definition or a readonly definition yields false), so the
+// port is the null check plus the negation (the iteration-103 corrected
+// nullable-equality semantics).
+bool HasReadonlyModifier(const IMethod& accessor);
 
 } // namespace ILSpy::Decompiler::TypeSystem

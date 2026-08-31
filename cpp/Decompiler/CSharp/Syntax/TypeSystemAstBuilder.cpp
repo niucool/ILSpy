@@ -47,6 +47,7 @@
 #include "Expressions/IdentifierExpression.hpp"
 #include "Expressions/MemberReferenceExpression.hpp"
 #include "Expressions/NullReferenceExpression.hpp"
+#include "Expressions/ObjectCreateExpression.hpp"
 #include "Expressions/PrimitiveExpression.hpp"
 #include "Expressions/TypeOfExpression.hpp"
 #include "Expressions/TypeReferenceExpression.hpp"
@@ -56,6 +57,8 @@
 #include "ParameterDeclaration.hpp"
 #include "PrimitiveType.hpp"
 #include "Slots.hpp"
+#include "Statements/BlockStatement.hpp"
+#include "Statements/ThrowStatement.hpp"
 #include "TupleAstType.hpp"
 #include "TupleTypeElement.hpp"
 
@@ -2153,6 +2156,160 @@ Modifiers TypeSystemAstBuilder::GetMemberModifiers(const TS::IMember& member) co
         }
     }
     return m;
+}
+
+// -- The "Convert Entity" accessor-support cluster (C# lines 2188-2297 +
+// 2771-2782) --
+
+// The C# `BlockStatement? GenerateBodyBlock()` (line 2188) -- see the header.
+BlockStatement* TypeSystemAstBuilder::GenerateBodyBlock() const {
+    if (GenerateBody()) {
+        // The C# object initializer `new BlockStatement {
+        // new ThrowStatement(new ObjectCreateExpression(ConvertType(
+        // new TopLevelTypeName("System", "NotImplementedException", 0)))) }` --
+        // the statement element ports to a `Statements().Add` (the
+        // object-collection-initializer convention). `TopLevelTypeName`
+        // converts implicitly to `FullTypeName` in C#; the port spells the
+        // conversion (the explicit `FullTypeName` ctor).
+        auto* block = new BlockStatement();
+        block->Statements().Add(new ThrowStatement(new ObjectCreateExpression(
+            ConvertType(TS::FullTypeName(
+                TS::TopLevelTypeName("System", "NotImplementedException", 0))))));
+        return block;
+    }
+    return nullptr;
+}
+
+// The C# `Accessor? ConvertAccessor(IMethod? accessor,
+// MethodSemanticsAttributes kind, Accessibility ownerAccessibility, bool
+// addParameterAttribute)` (line 2206) -- see the header.
+Accessor* TypeSystemAstBuilder::ConvertAccessor(
+    const TS::IMethod* accessor, TS::MethodSemanticsAttributes kind,
+    TS::Accessibility ownerAccessibility, bool addParameterAttribute) const {
+    // The C# `if (accessor == null) return null` -- the nullable method
+    // parameter (the caller-owned accessor method is absent).
+    if (accessor == nullptr)
+        return nullptr;
+
+    auto* decl = new Accessor();
+    if (ShowAttributes()) {
+        // The C# `decl.Attributes.AddRange(ConvertAttributes(...))` -- the
+        // AddRange convenience ports to element-wise Add (the D222 convention,
+        // the ConvertParameter precedent).
+        for (AttributeSection* section : ConvertAttributes(accessor->GetAttributes()))
+            decl->Attributes().Add(section);
+        for (AttributeSection* section : ConvertAttributes(
+                 accessor->GetReturnTypeAttributes(), "return"))
+            decl->Attributes().Add(section);
+        // The C# `accessor.Parameters.Last()` -- the port's parameter snapshot
+        // is a vector, so `.back()` (the empty list cannot reach here: the
+        // `Parameters.Count > 0` gate guards it).
+        if (addParameterAttribute && !accessor->Parameters().empty()) {
+            for (AttributeSection* section : ConvertAttributes(
+                     accessor->Parameters().back()->GetAttributes(), "param"))
+                decl->Attributes().Add(section);
+        }
+    }
+    // The C# `accessor.Accessibility != ownerAccessibility` -- the accessibility
+    // modifier renders only when the accessor's differs from the property's
+    // (an accessor inheriting its owner's accessibility carries no modifier).
+    if (ShowAccessibility() && accessor->Accessibility() != ownerAccessibility)
+        decl->Modifiers(
+            ModifierFromAccessibility(accessor->Accessibility(),
+                                      UsePrivateProtectedAccessibility()));
+    if (ShowModifiers() && TS::HasReadonlyModifier(*accessor))
+        decl->Modifiers(decl->Modifiers() | Modifiers::Readonly);
+
+    // The C# switch expression `kind switch { Getter => ..., Setter => ...,
+    // Adder => ..., Remover => ..., _ => AccessorKind.Any }` -- a plain switch
+    // (the C# `_` arm folds every other / combined value to Any).
+    AccessorKind accessorKind;
+    switch (kind) {
+        case TS::MethodSemanticsAttributes::Getter:
+            accessorKind = AccessorKind::Getter;
+            break;
+        case TS::MethodSemanticsAttributes::Setter:
+            accessorKind = AccessorKind::Setter;
+            break;
+        case TS::MethodSemanticsAttributes::Adder:
+            accessorKind = AccessorKind::Adder;
+            break;
+        case TS::MethodSemanticsAttributes::Remover:
+            accessorKind = AccessorKind::Remover;
+            break;
+        default:
+            accessorKind = AccessorKind::Any;
+            break;
+    }
+    // The C# `kind == MethodSemanticsAttributes.Setter && SupportInitAccessors
+    // && accessor.IsInitOnly` -- only a SETTER upgrades to the init accessor.
+    if (kind == TS::MethodSemanticsAttributes::Setter && SupportInitAccessors()
+        && accessor->IsInitOnly()) {
+        accessorKind = AccessorKind::Init;
+    }
+    decl->Kind(accessorKind);
+    // The C# `accessor.IsInitOnly && accessorKind != AccessorKind.Init` -- an
+    // init-only accessor that did NOT become an init accessor (the flag off,
+    // or a non-setter kind) keeps the init-ness as a trailing `/* init */`
+    // comment (the fallback for output without init accessors).
+    if (accessor->IsInitOnly() && accessorKind != AccessorKind::Init) {
+        decl->AddTrailingTrivia(new Comment("init", CommentType::MultiLine));
+    }
+    if (AddResolveResultAnnotations()) {
+        // The C# `new MemberResolveResult(null, accessor)` -- the null target
+        // is the empty shared_ptr (the ConvertAttribute annotation precedent);
+        // `ComputeType` reads the accessor's return type (which must be
+        // shared-managed, the D271/D406 model).
+        decl->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+            std::shared_ptr<Sem::ResolveResult>(), accessor));
+    }
+    if (GenerateBody()) {
+        decl->Body(GenerateBodyBlock());
+    }
+    return decl;
+}
+
+// The C# `static void MergeReadOnlyModifiers(EntityDeclaration decl, Accessor?
+// accessor1, Accessor? accessor2)` (line 2286) -- see the header.
+void TypeSystemAstBuilder::MergeReadOnlyModifiers(EntityDeclaration& decl,
+                                                   Accessor* accessor1,
+                                                   Accessor* accessor2) {
+    if (accessor1 == nullptr)
+        return;
+    if (accessor1->HasModifier(Modifiers::Readonly) && accessor2 == nullptr) {
+        accessor1->Modifiers(accessor1->Modifiers() & ~Modifiers::Readonly);
+        decl.Modifiers(decl.Modifiers() | Modifiers::Readonly);
+    } else if (accessor1->HasModifier(Modifiers::Readonly)
+               && accessor2->HasModifier(Modifiers::Readonly)) {
+        accessor1->Modifiers(accessor1->Modifiers() & ~Modifiers::Readonly);
+        accessor2->Modifiers(accessor2->Modifiers() & ~Modifiers::Readonly);
+        decl.Modifiers(decl.Modifiers() | Modifiers::Readonly);
+    }
+}
+
+// The C# `AstType? GetExplicitInterfaceType(IMember member)` (line 2771) --
+// see the header.
+AstType* TypeSystemAstBuilder::GetExplicitInterfaceType(
+    const TS::IMember& member) const {
+    if (member.IsExplicitInterfaceImplementation()) {
+        // The C# `member.ExplicitlyImplementedInterfaceMembers
+        // .FirstOrDefault()` -- an empty list yields null (the C# default
+        // of a nullable reference), so the empty vector takes the fallback.
+        std::vector<const TS::IMember*> baseMembers =
+            member.ExplicitlyImplementedInterfaceMembers();
+        if (!baseMembers.empty()) {
+            const TS::IMember* baseMember = baseMembers.front();
+            // The C# `baseMember.DeclaringType` (an `IType?` -- null for a
+            // top-level entity, which cannot be an interface member's declaring
+            // type in practice); the port guards the degenerate null handle
+            // (the D516 safe-fallback convention: the C# would pass null on
+            // to `ConvertType(null)` and throw).
+            TS::ITypePtr declaringType = baseMember->DeclaringType();
+            if (declaringType)
+                return ConvertType(*declaringType);
+        }
+    }
+    return nullptr;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
