@@ -77,12 +77,16 @@ namespace {
 
 [[noreturn]] void ThrowOverflow()
 {
-    throw std::runtime_error("OverflowException");
+    // The typed exception (Util::OverflowException, a member of the ArithmeticException
+    // family) so the CSharpResolver constant-evaluation catch arm (`catch
+    // (ArithmeticException)` around `m.Invoke(...)`) swallows the overflow -- the family
+    // base settled with the resolver's operator-resolution slice.
+    throw ILSpy::Decompiler::Util::OverflowException();
 }
 
 [[noreturn]] void ThrowDivideByZero()
 {
-    throw std::runtime_error("DivideByZeroException");
+    throw ILSpy::Decompiler::Util::DivideByZeroException();
 }
 
 // --- Multiplication (the C# 4.0 spec 7.8.1) ---
@@ -800,9 +804,9 @@ CSharpOperators::UncheckedUnaryMinusOperators() const
 // The C# `public OperatorMethod[] CheckedUnaryMinusOperators`: the same five originals,
 // each `checked(-i)`. The C# `checked` context throws OverflowException when the negation
 // overflows (only INT32_MIN/INT64_MIN, whose negation does not fit the type); the port's
-// boundary throw is std::runtime_error (the runtime-exception convention -- the future
-// CSharpResolver call site wraps `Invoke` in `catch (ArithmeticException)`, the port-side
-// exception the resolver slice will settle). The floating/decimal negations never overflow.
+// boundary throw is the typed Util::OverflowException (a member of the ArithmeticException
+// family the resolver's constant-evaluation catch arm catches; a plain std::runtime_error
+// would NOT be swallowed by it). The floating/decimal negations never overflow.
 const std::vector<std::shared_ptr<OperatorMethod>>&
 CSharpOperators::CheckedUnaryMinusOperators() const
 {
@@ -812,13 +816,13 @@ CSharpOperators::CheckedUnaryMinusOperators() const
             std::make_shared<LambdaUnaryOperatorMethod<std::int32_t>>(
                 *this, [](std::int32_t i) {
                     if (i == std::numeric_limits<std::int32_t>::min())
-                        throw std::runtime_error("OverflowException");
+                        throw ILSpy::Decompiler::Util::OverflowException();
                     return -i;
                 }),
             std::make_shared<LambdaUnaryOperatorMethod<std::int64_t>>(
                 *this, [](std::int64_t i) {
                     if (i == std::numeric_limits<std::int64_t>::min())
-                        throw std::runtime_error("OverflowException");
+                        throw ILSpy::Decompiler::Util::OverflowException();
                     return -i;
                 }),
             std::make_shared<LambdaUnaryOperatorMethod<float>>(

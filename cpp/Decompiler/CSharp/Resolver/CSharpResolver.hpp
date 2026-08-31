@@ -33,8 +33,9 @@
 // `CSharpTypeResolveContext` / `UsingScope` (the iteration-94 pair), `CSharpConversions
 // ::Get` (the per-compilation cached factory), `Util::ImmutableStack` (the IL-reader
 // evaluation-stack spine), and `ErrorResolveResult::UnknownError` (the null
-// object-initializer sentinel). The `Resolve*` arms (ResolveSimpleName,
-// ResolveMemberAccess, ResolveUnaryOperator, ...) land in later slices.
+// object-initializer sentinel). The `Resolve*` arms land in later slices
+// (`ResolveUnaryOperator` has landed; ResolveSimpleName, ResolveMemberAccess,
+// `ResolveBinaryOperator`, ... follow).
 //
 // KEY PORT CONVENTIONS:
 //  (a) The C# `With*` clone factories return a `CSharpResolver` REFERENCE -- the C#
@@ -609,13 +610,14 @@ public:
         bool allowNullableConstants) const;
 
     // ---- Operator-resolution helpers ----------------------------------------------------------
-    // (The non-recursive helper region the future `ResolveUnaryOperator` (line 326) /
-    // `ResolveBinaryOperator` (line 594) slices consume -- CSharpResolver.cs lines 525/
-    // 962-985/981-989/1253-1275/2435-2441: the two `OperatorResolveResult` factories, the
-    // pointer-arithmetic operator factory, the null-coalescing handler, the nullable-or-
-    // non-value-type test, and the `OverloadResolution` construction helper. The mutually
+    // (The non-recursive helper region the `ResolveUnaryOperator` (line 326, landed) /
+    // `ResolveBinaryOperator` (line 594, a later slice) regions consume -- CSharpResolver.cs
+    // lines 525/ 962-985/981-989/1253-1275/2435-2441: the two `OperatorResolveResult`
+    // factories, the pointer-arithmetic operator factory, the null-coalescing handler, the
+    // nullable-or- non-value-type test, and the `OverloadResolution` construction helper. The
+    // mutually
     // recursive enum handlers (`HandleEnumComparison` / `HandleEnumSubtraction` /
-    // `HandleEnumOperator`) and the two big `Resolve*Operator` methods themselves land in
+    // `HandleEnumOperator`) and the `ResolveBinaryOperator` method itself land in
     // later slices -- this region is everything they call that is NOT self-recursive.)
 
     // The C# private `bool IsNullableTypeOrNonValueType(IType type)` (line 981) -- the
@@ -718,6 +720,74 @@ public:
         std::optional<std::vector<std::string>> argumentNames = std::nullopt,
         std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>> typeArguments =
             std::nullopt) const;
+
+    // ---- ResolveUnaryOperator ----------------------------------------------------------------
+    // (The `ResolveUnaryOperator` region, CSharpResolver.cs lines 326-530, C# spec
+    // draft-v11 section 12.4.4 "Unary operator overload resolution" -- the first of
+    // the two big operator-resolution entry points. Every non-recursive helper it
+    // consumes is already ported: the two `GetOverloadableOperatorName` statics, the
+    // user-defined candidate scan + lift, `CreateResolveResultForUserDefinedOperator`,
+    // `CreateOverloadResolution`, `UnaryNumericPromotion`, the `CSharpOperators`
+    // operator tables + their `Invoke` constant-evaluation virtuals, the two
+    // `OperatorResolveResult` factories, `Convert`/`ResolveCast`, `MakeNullable`, and
+    // the `TypeUtils.IsCSharpNativeIntegerType` leaf.)
+
+    // The C# `public ResolveResult ResolveUnaryOperator(UnaryOperatorType op,
+    // ResolveResult expression)` (line 326) -- the unary-operator resolution: the
+    // dynamic-operand arm (an `await` of a dynamic expression builds the dynamic
+    // `AwaitResolveResult` shape; every other operator over a dynamic operand is the
+    // dynamic `OperatorResolveResult`), the non-overloadable arms (`*` dereferences a
+    // pointer to its element type; `&` addresses to a fresh `PointerType`; the
+    // non-dynamic `await` throws (the documented deferral below); anything else is the
+    // `UnknownError` singleton), then the overloadable path: the user-defined operator
+    // overload resolution first (an applicable user-defined operator wins), the unary
+    // numeric promotion, the per-operator built-in table resolution, and the result
+    // composition -- constant-folding a compile-time constant operand through the
+    // operator's `Invoke` (an `ArithmeticException` downgrades to an
+    // `ErrorResolveResult`), else wrapping the operand through `Convert` into the
+    // predefined `OperatorResolveResult` (marking the lifted forms).
+    //
+    // PORT CONVENTIONS for this member:
+    //  * The C# `IType type = NullableType.GetUnderlyingType(expression.Type)` LOCAL is
+    //    rebound by `UnaryNumericPromotion(op, ref type, ...)` -- the port threads it as a
+    //    local `const IType*` (a C++ reference cannot rebind; the `UnaryNumericPromotion`
+    //    `const IType*&` signature takes the pointer by reference). Every read below
+    //    dereferences the local pointer.
+    //  * The C# `catch (ArithmeticException)` around `m.Invoke(this, expression
+    //    .ConstantValue)` (line 510) ports to `catch (const Util::ArithmeticException&)`:
+    //    the operand cast inside `Invoke` throws `Util::OverflowException` /
+    //    `Util::InvalidCastException` and the table bodies throw the typed
+    //    `Util::OverflowException` / `Util::DivideByZeroException` -- the family base
+    //    swallows exactly the C# `ArithmeticException` family, and `InvalidCastException`
+    //    (deliberately NOT a family member) propagates out, faithfully.
+    //  * The C# `compilation.FindType(expression.ConstantValue.GetType())` in the `BitNot`
+    //    enum constant-folding arm (line 451) ports to the TypeCode-based `FindType`
+    //    over `Util::TypeCodeOfBoxedValue` (an enum constant holds its UNDERLYING
+    //    primitive value, so the boxed value's runtime type is that primitive's
+    //    `TypeCode`).
+    //  * The C# hard cast `(CSharpOperators.UnaryOperatorMethod)builtinOperatorOR
+    //    .BestCandidate` ports to `dynamic_cast<const UnaryOperatorMethod*>` with the
+    //    documented safe fallback (an empty/foreign best candidate is impossible through
+    //    the builtin-table call site -- every table entry IS a `UnaryOperatorMethod` and
+    //    the first `AddCandidate` always folds a best; the fallback returns the
+    //    `ErrorResolveResult` over the operand's type, the D516 convention).
+    //  * The C# `static readonly ResolveResult ErrorResult = ErrorResolveResult
+    //    .UnknownError` returns of the non-overloadable arms port to a NON-OWNING
+    //    aliasing `shared_ptr` over the program-lifetime singleton (the empty-owner
+    //    aliasing constructor -- no deleter ever runs; the singleton is never destroyed).
+    //  * The C# non-dynamic `await` arm (lines 353-389) computes a chain of
+    //    `ResolveMemberAccess` / `ResolveInvocation` / `CreateMemberLookup` results that
+    //    the arm then DISCARDS -- the C# unconditionally ends in `throw new
+    //    NotImplementedException()` (the C# comment: "I believe this is dead code for
+    //    ILSpy anyways"). The port documents that pre-throw work as DEFERRED and throws
+    //    `std::logic_error` directly at the arm entry (the `NotImplementedException`
+    //    convention; observationally identical -- the dead values are discarded and the
+    //    C# member lookups have no side effects). The port lands with the
+    //    `ResolveMemberAccess` / `ResolveInvocation` regions still unported; wiring the
+    //    arm's machinery would change nothing observable.
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveUnaryOperator(
+        ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType op,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> expression) const;
 
 private:
     // The C# private nested `sealed class ObjectInitializerContext` -- the linked stack

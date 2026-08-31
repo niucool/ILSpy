@@ -24,9 +24,12 @@
 
 #include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
 
+#include "Decompiler/CSharp/Resolver/AwaitResolveResult.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpOperators.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpInvocationResolveResult.hpp"
+#include "Decompiler/CSharp/Resolver/DynamicInvocationResolveResult.hpp"
+#include "Decompiler/CSharp/Resolver/DynamicMemberResolveResult.hpp"
 #include "Decompiler/CSharp/Resolver/OverloadResolution.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
@@ -1210,6 +1213,333 @@ std::unique_ptr<OverloadResolution> CSharpResolver::CreateOverloadResolution(
     // The C# `or.CheckForOverflow = checkForOverflow`.
     or->CheckForOverflow() = checkForOverflow_;
     return or;
+}
+
+// ---- ResolveUnaryOperator region (CSharpResolver.cs lines 326-530) ------------------------
+
+// The C# `static readonly ResolveResult ErrorResult = ErrorResolveResult.UnknownError`
+// (line 42) -- the singleton the non-overloadable arms return. A NON-OWNING aliasing
+// handle (the empty-owner aliasing constructor: no deleter ever runs, so the
+// program-lifetime singleton is never destroyed; the C# returns the same instance from
+// every call). The `const_cast` is safe (the underlying singleton object is mutable; the
+// accessor's const is the contract, the D515 convention).
+namespace {
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ErrorResultSingleton()
+{
+    return std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>(
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>(),
+        const_cast<ILSpy::Decompiler::Semantics::ErrorResolveResult*>(
+            &ILSpy::Decompiler::Semantics::ErrorResolveResult::UnknownError()));
+}
+} // namespace
+
+// The C# `public ResolveResult ResolveUnaryOperator(UnaryOperatorType op, ResolveResult
+// expression)` (line 326, C# spec draft-v11 section 12.4.4 "Unary operator overload
+// resolution") -- see CSharpResolver.hpp for the full port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveUnaryOperator(
+    ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType op,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> expression) const
+{
+    using ILSpy::Decompiler::CSharp::Resolver::AwaitResolveResult;
+    using ILSpy::Decompiler::CSharp::Resolver::DynamicInvocationResolveResult;
+    using ILSpy::Decompiler::CSharp::Resolver::DynamicInvocationType;
+    using ILSpy::Decompiler::CSharp::Resolver::DynamicMemberResolveResult;
+    using ILSpy::Decompiler::CSharp::Resolver::UnaryOperatorMethod;
+    using ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorExpression;
+    using ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType;
+    using ILSpy::Decompiler::Semantics::ConstantResolveResult;
+    using ILSpy::Decompiler::Semantics::Conversion;
+    using ILSpy::Decompiler::Semantics::ErrorResolveResult;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::TypeSystem::FindType;
+    using ILSpy::Decompiler::TypeSystem::GetTypeCode;
+    using ILSpy::Decompiler::TypeSystem::GetUnderlyingType;
+    using ILSpy::Decompiler::TypeSystem::IsCSharpNativeIntegerType;
+    using ILSpy::Decompiler::TypeSystem::IsNullable;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::PointerType;
+    using ILSpy::Decompiler::TypeSystem::SpecialType;
+    using ILSpy::Decompiler::TypeSystem::TypeCode;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+    using ILSpy::Decompiler::Util::ArithmeticException;
+    using ILSpy::Decompiler::Util::TypeCodeOfBoxedValue;
+
+    if (expression->Type().Kind() == TypeKind::Dynamic)
+    {
+        if (op == UnaryOperatorType::Await)
+        {
+            // The C# builds the dynamic `await` shape entirely from dynamic placeholders:
+            // `GetAwaiter` as a `DynamicMemberResolveResult`, its invocation as a
+            // `DynamicInvocationResolveResult`, and every awaiter-pattern member null (a
+            // dynamic await skips the member-presence check, the `AwaitResolveResult
+            // .IsError` dynamic short-circuit).
+            return std::make_shared<AwaitResolveResult>(
+                std::make_shared<SpecialType>(TypeKind::Dynamic, true),
+                std::make_shared<DynamicInvocationResolveResult>(
+                    std::make_shared<DynamicMemberResolveResult>(std::move(expression),
+                                                                 "GetAwaiter"),
+                    DynamicInvocationType::Invocation),
+                std::make_shared<SpecialType>(TypeKind::Dynamic, true),
+                /*isCompletedProperty=*/nullptr,
+                /*onCompletedMethod=*/nullptr,
+                /*getResultMethod=*/nullptr);
+        }
+        else
+        {
+            return UnaryOperatorResolveResult(
+                *std::make_shared<SpecialType>(TypeKind::Dynamic, true), op,
+                std::move(expression));
+        }
+    }
+
+    // C# spec (draft-v11): section 12.4.4 Unary operator overload resolution
+    const char* overloadableOperatorName = GetOverloadableOperatorName(op);
+    if (overloadableOperatorName == nullptr)
+    {
+        switch (op)
+        {
+            case UnaryOperatorType::Dereference:
+            {
+                // The C# `expression.Type as PointerType`; the null-element guard is the
+                // documented safe fallback for the degenerate shape (a real metadata
+                // `PointerType` always carries its element -- the C# NREs on
+                // `p.ElementType` there).
+                const PointerType* p = dynamic_cast<const PointerType*>(&expression->Type());
+                if (p != nullptr && p->Element() != nullptr)
+                    return UnaryOperatorResolveResult(*p->Element(), op, std::move(expression));
+                else
+                    return ErrorResultSingleton();
+            }
+            case UnaryOperatorType::AddressOf:
+            {
+                // The C# `new PointerType(expression.Type)` -- a FRESH shared-managed
+                // instance (the result factory's `shared_from_this` needs the shared
+                // ownership; the operand handle is recovered via the D529 convention).
+                ITypePtr operandType = std::const_pointer_cast<IType>(
+                    const_cast<IType&>(expression->Type()).shared_from_this());
+                ITypePtr addressType = std::make_shared<PointerType>(std::move(operandType));
+                return UnaryOperatorResolveResult(*addressType, op, std::move(expression));
+            }
+            case UnaryOperatorType::Await:
+                // The C# arm (lines 353-389) computes a chain of `ResolveMemberAccess` /
+                // `ResolveInvocation` / `CreateMemberLookup` results and then
+                // UNCONDITIONALLY throws `NotImplementedException` (line 396) -- the
+                // computed values are discarded and the lookups have no side effects, so
+                // the port defers the dead pre-throw work and throws directly (the
+                // C# comment calls the arm "dead code for ILSpy anyways").
+                throw std::logic_error(
+                    "NotImplementedException: CSharpResolver.ResolveUnaryOperator(await)");
+            default:
+                // The C# `return ErrorResolveResult.UnknownError`.
+                return ErrorResultSingleton();
+        }
+    }
+
+    // If the type is nullable, get the underlying type:
+    // (A LOCAL, rebound by `UnaryNumericPromotion(op, ref type, ...)` -- threaded as a
+    // rebindable pointer, the `UnaryNumericPromotion` `const IType*&` signature.)
+    const IType* type = &GetUnderlyingType(expression->Type());
+    bool isNullable = IsNullable(expression->Type());
+
+    // the operator is overloadable:
+    std::unique_ptr<OverloadResolution> userDefinedOperatorOR =
+        CreateOverloadResolution({expression});
+    for (const auto& candidate :
+         GetUserDefinedOperatorCandidates(*type, overloadableOperatorName))
+    {
+        userDefinedOperatorOR->AddCandidate(*candidate);
+    }
+    if (userDefinedOperatorOR->FoundApplicableCandidate())
+    {
+        return CreateResolveResultForUserDefinedOperator(
+            *userDefinedOperatorOR,
+            UnaryOperatorExpression::GetLinqNodeType(op, checkForOverflow_));
+    }
+
+    // (The result-type reference is bound BEFORE the operand move: the C# reads
+    // `expression.Type` at the call, but the port's unspecified argument-evaluation order
+    // may construct the moved `shared_ptr` parameter first -- dereferencing an
+    // already-moved-out null handle; the pre-bind avoids that (the moved handle transfers
+    // ownership without destroying the pointee, so the pre-bound reference stays valid).)
+    expression = UnaryNumericPromotion(op, type, isNullable, std::move(expression));
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::CSharp::Resolver::OperatorMethod>>*
+        methodGroup;
+    ILSpy::Decompiler::CSharp::Resolver::CSharpOperators& operators =
+        CSharpOperators::Get(compilation_);
+    switch (op)
+    {
+        case UnaryOperatorType::Increment:
+        case UnaryOperatorType::Decrement:
+        case UnaryOperatorType::PostIncrement:
+        case UnaryOperatorType::PostDecrement:
+        {
+            // C# spec (draft-v11): section 12.8.16 Postfix increment and decrement
+            // operators; section 12.9.7 Prefix increment and decrement operators.
+            TypeCode code = GetTypeCode(*type);
+            // The C# enum relational comparisons port through static_cast<int> (the D514
+            // convention -- the closed [Char..Decimal] range of the incrementable operand
+            // codes).
+            if ((static_cast<int>(code) >= static_cast<int>(TypeCode::Char)
+                 && static_cast<int>(code) <= static_cast<int>(TypeCode::Decimal))
+                || type->Kind() == TypeKind::Enum
+                || type->Kind() == TypeKind::Pointer
+                || IsCSharpNativeIntegerType(type))
+            {
+                const IType& expressionType = expression->Type();
+                return UnaryOperatorResolveResult(expressionType, op, std::move(expression),
+                                                 isNullable);
+            }
+            else
+            {
+                const IType& expressionType = expression->Type();
+                return std::make_shared<ErrorResolveResult>(
+                    std::const_pointer_cast<IType>(expressionType.shared_from_this()));
+            }
+        }
+        case UnaryOperatorType::Plus:
+            if (IsCSharpNativeIntegerType(type))
+            {
+                const IType& expressionType = expression->Type();
+                return UnaryOperatorResolveResult(expressionType, op, std::move(expression),
+                                                 isNullable);
+            }
+            methodGroup = &operators.UnaryPlusOperators();
+            break;
+        case UnaryOperatorType::Minus:
+            if (IsCSharpNativeIntegerType(type))
+            {
+                const IType& expressionType = expression->Type();
+                return UnaryOperatorResolveResult(expressionType, op, std::move(expression),
+                                                 isNullable);
+            }
+            // The C# `CheckForOverflow ? CheckedUnaryMinusOperators
+            // : UncheckedUnaryMinusOperators` -- the checked/unchecked table selection.
+            methodGroup = checkForOverflow_ ? &operators.CheckedUnaryMinusOperators()
+                                           : &operators.UncheckedUnaryMinusOperators();
+            break;
+        case UnaryOperatorType::Not:
+            methodGroup = &operators.LogicalNegationOperators();
+            break;
+        case UnaryOperatorType::BitNot:
+            if (type->Kind() == TypeKind::Enum)
+            {
+                std::any constantValue = expression->ConstantValue();
+                if (expression->IsCompileTimeConstant() && !isNullable
+                    && constantValue.has_value())
+                {
+                    // evaluate as (E)(~(U)x);
+                    // The C# `compilation.FindType(expression.ConstantValue.GetType())`:
+                    // an enum constant holds its UNDERLYING primitive value, so the boxed
+                    // value's runtime type resolves through its `TypeCode` (the
+                    // TypeCode-based `FindType`, ReflectionHelper.cs line 106).
+                    const IType& U =
+                        FindType(compilation_, TypeCodeOfBoxedValue(constantValue));
+                    auto unpackedEnum = std::make_shared<ConstantResolveResult>(
+                        std::const_pointer_cast<IType>(U.shared_from_this()), constantValue);
+                    auto rr = ResolveUnaryOperator(op, std::move(unpackedEnum));
+                    // The C# `WithCheckForOverflow(false).ResolveCast(type, rr)` -- the
+                    // `const_cast` feeds the const `type` local to the non-const
+                    // `ResolveCast` parameter (the D515 convention).
+                    rr = WithCheckForOverflow(false)->ResolveCast(
+                        const_cast<IType&>(*type), std::move(rr));
+                    if (rr->IsCompileTimeConstant())
+                        return rr;
+                }
+                const IType& expressionType = expression->Type();
+                return UnaryOperatorResolveResult(expressionType, op, std::move(expression),
+                                                 isNullable);
+            }
+            else if (IsCSharpNativeIntegerType(type))
+            {
+                const IType& expressionType = expression->Type();
+                return UnaryOperatorResolveResult(expressionType, op, std::move(expression),
+                                                 isNullable);
+            }
+            else
+            {
+                methodGroup = &operators.BitwiseComplementOperators();
+                break;
+            }
+        default:
+            // The C# `throw new InvalidOperationException()` -- unreachable through the
+            // overloadable-name gate (the name covers exactly these operator kinds), the
+            // runtime-exception convention.
+            throw std::runtime_error(
+                "InvalidOperationException: ResolveUnaryOperator");
+    }
+    std::unique_ptr<OverloadResolution> builtinOperatorOR =
+        CreateOverloadResolution({expression});
+    for (const auto& candidate : *methodGroup)
+    {
+        builtinOperatorOR->AddCandidate(*candidate);
+    }
+    // The C# hard cast `(CSharpOperators.UnaryOperatorMethod)builtinOperatorOR
+    // .BestCandidate` -- every builtin-table entry IS a `UnaryOperatorMethod` and the
+    // first `AddCandidate` always folds a best, so the cast cannot fail through this
+    // call site; the null fallback is the documented safe fallback (the C# NREs on
+    // `m.ReturnType` for the impossible shape).
+    const UnaryOperatorMethod* m =
+        dynamic_cast<const UnaryOperatorMethod*>(builtinOperatorOR->BestCandidate());
+    if (m == nullptr)
+    {
+        const IType& expressionType = expression->Type();
+        return std::make_shared<ErrorResolveResult>(
+            std::const_pointer_cast<IType>(expressionType.shared_from_this()));
+    }
+    const IType& resultType = m->ReturnType();
+    if (builtinOperatorOR->BestCandidateErrors() != OverloadResolutionErrors::None)
+    {
+        if (userDefinedOperatorOR->BestCandidate() != nullptr)
+        {
+            // If there are any user-defined operators, prefer those over the built-in
+            // operators. It'll be a more informative error.
+            return CreateResolveResultForUserDefinedOperator(
+                *userDefinedOperatorOR,
+                UnaryOperatorExpression::GetLinqNodeType(op, checkForOverflow_));
+        }
+        else if (builtinOperatorOR->BestCandidateAmbiguousWith() != nullptr)
+        {
+            // If the best candidate is ambiguous, just use the input type instead
+            // of picking one of the ambiguous overloads.
+            const IType& expressionType = expression->Type();
+            return std::make_shared<ErrorResolveResult>(
+                std::const_pointer_cast<IType>(expressionType.shared_from_this()));
+        }
+        else
+        {
+            return std::make_shared<ErrorResolveResult>(
+                std::const_pointer_cast<IType>(resultType.shared_from_this()));
+        }
+    }
+    else if (expression->IsCompileTimeConstant() && m->CanEvaluateAtCompileTime())
+    {
+        std::any val;
+        try
+        {
+            val = m->Invoke(*this, expression->ConstantValue());
+        }
+        catch (const ArithmeticException&)
+        {
+            return std::make_shared<ErrorResolveResult>(
+                std::const_pointer_cast<IType>(resultType.shared_from_this()));
+        }
+        return std::make_shared<ConstantResolveResult>(
+            std::const_pointer_cast<IType>(resultType.shared_from_this()), std::move(val));
+    }
+    else
+    {
+        expression = Convert(
+            std::move(expression), const_cast<IType&>(m->Parameters()[0]->Type()),
+            builtinOperatorOR->ArgumentConversions()[0]);
+        // The C# `builtinOperatorOR.BestCandidate is ILiftedOperator` -- the cross-cast
+        // marks the lifted form (the D549 standalone-base cross-cast).
+        return UnaryOperatorResolveResult(
+            resultType, op, std::move(expression),
+            dynamic_cast<const ILiftedOperator*>(builtinOperatorOR->BestCandidate())
+                != nullptr);
+    }
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

@@ -1,0 +1,70 @@
+Running main() from C:\Projects\github\vcpkg\buildtrees\gtest\src\v1.17.0-e243b8ee0f.clean\googletest\src\gtest_main.cc
+Note: Google Test filter = ResolveUnaryOperatorTest.*
+[==========] Running 27 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 27 tests from ResolveUnaryOperatorTest
+[ RUN      ] ResolveUnaryOperatorTest.DynamicOperandNonAwaitYieldsOperatorResultOverDynamic
+[       OK ] ResolveUnaryOperatorTest.DynamicOperandNonAwaitYieldsOperatorResultOverDynamic (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.DynamicOperandAwaitBuildsTheDynamicAwaitShape
+[       OK ] ResolveUnaryOperatorTest.DynamicOperandAwaitBuildsTheDynamicAwaitShape (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.DereferenceOnPointerYieldsTheElementResultType
+[       OK ] ResolveUnaryOperatorTest.DereferenceOnPointerYieldsTheElementResultType (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.DereferenceOnNonPointerYieldsTheUnknownErrorSingleton
+[       OK ] ResolveUnaryOperatorTest.DereferenceOnNonPointerYieldsTheUnknownErrorSingleton (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.AddressOfYieldsAPointerToTheOperandType
+[       OK ] ResolveUnaryOperatorTest.AddressOfYieldsAPointerToTheOperandType (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.AwaitOnNonDynamicThrowsNotImplemented
+[       OK ] ResolveUnaryOperatorTest.AwaitOnNonDynamicThrowsNotImplemented (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.PatternWildcardOperatorYieldsTheUnknownErrorSingleton
+[       OK ] ResolveUnaryOperatorTest.PatternWildcardOperatorYieldsTheUnknownErrorSingleton (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.ApplicableUserDefinedOperatorWinsOverTheBuiltinTables
+[       OK ] ResolveUnaryOperatorTest.ApplicableUserDefinedOperatorWinsOverTheBuiltinTables (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.PrimitiveOperandGateSkipsTheUserDefinedScan
+[       OK ] ResolveUnaryOperatorTest.PrimitiveOperandGateSkipsTheUserDefinedScan (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.UnaryPlusOnCharPromotesToIntAndWrapsTheOperand
+[       OK ] ResolveUnaryOperatorTest.UnaryPlusOnCharPromotesToIntAndWrapsTheOperand (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.MinusOnUintPromotesToLong
+[       OK ] ResolveUnaryOperatorTest.MinusOnUintPromotesToLong (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.IncrementOnIntYieldsOperatorOverTheOperandType
+[       OK ] ResolveUnaryOperatorTest.IncrementOnIntYieldsOperatorOverTheOperandType (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.IncrementOnStringYieldsErrorOverTheStringType
+[       OK ] ResolveUnaryOperatorTest.IncrementOnStringYieldsErrorOverTheStringType (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.IncrementOnEnumYieldsOperatorOverTheEnumType
+[       OK ] ResolveUnaryOperatorTest.IncrementOnEnumYieldsOperatorOverTheEnumType (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.IncrementOnPointerYieldsOperatorOverThePointerType
+[       OK ] ResolveUnaryOperatorTest.IncrementOnPointerYieldsOperatorOverThePointerType (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.IncrementOnNativeIntYieldsOperatorOverTheNativeIntType
+[       OK ] ResolveUnaryOperatorTest.IncrementOnNativeIntYieldsOperatorOverTheNativeIntType (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.MinusOnNativeIntShortCircuitsBeforeTheTables
+[       OK ] ResolveUnaryOperatorTest.MinusOnNativeIntShortCircuitsBeforeTheTables (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.UncheckedMinusConstantFoldsThroughTheOperatorInvoke
+[       OK ] ResolveUnaryOperatorTest.UncheckedMinusConstantFoldsThroughTheOperatorInvoke (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.CheckedMinusOnIntMinConstantYieldsErrorOverTheResultType
+unknown file: error: C++ exception with description "OverflowException" thrown in the test body.
+
+[  FAILED  ] ResolveUnaryOperatorTest.CheckedMinusOnIntMinConstantYieldsErrorOverTheResultType (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.UncheckedMinusOnIntMinConstantWraps
+[       OK ] ResolveUnaryOperatorTest.UncheckedMinusOnIntMinConstantWraps (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.NotOnBoolConstantFolds
+[       OK ] ResolveUnaryOperatorTest.NotOnBoolConstantFolds (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.BitNotOnEnumConstantFoldsThroughTheUnderlyingRecursion
+[       OK ] ResolveUnaryOperatorTest.BitNotOnEnumConstantFoldsThroughTheUnderlyingRecursion (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.BitNotOnEnumNonConstantYieldsOperatorOverTheEnumType
+[       OK ] ResolveUnaryOperatorTest.BitNotOnEnumNonConstantYieldsOperatorOverTheEnumType (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.BitNotOnIntNonConstantYieldsOperatorWithIdentityOperand
+[       OK ] ResolveUnaryOperatorTest.BitNotOnIntNonConstantYieldsOperatorWithIdentityOperand (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.BitNotOnNullableIntResolvesTheLiftedOperator
+[       OK ] ResolveUnaryOperatorTest.BitNotOnNullableIntResolvesTheLiftedOperator (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.NotOnIntYieldsErrorOverTheBooleanResultType
+[       OK ] ResolveUnaryOperatorTest.NotOnIntYieldsErrorOverTheBooleanResultType (0 ms)
+[ RUN      ] ResolveUnaryOperatorTest.InapplicableUserDefinedOperatorPreferredOverBuiltinError
+[       OK ] ResolveUnaryOperatorTest.InapplicableUserDefinedOperatorPreferredOverBuiltinError (0 ms)
+[----------] 27 tests from ResolveUnaryOperatorTest (6 ms total)
+
+[----------] Global test environment tear-down
+[==========] 27 tests from 1 test suite ran. (7 ms total)
+[  PASSED  ] 26 tests.
+[  FAILED  ] 1 test, listed below:
+[  FAILED  ] ResolveUnaryOperatorTest.CheckedMinusOnIntMinConstantYieldsErrorOverTheResultType
+
+ 1 FAILED TEST

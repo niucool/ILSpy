@@ -161,7 +161,11 @@
 //      constant-evaluation entry on `UnaryOperatorMethod`/`BinaryOperatorMethod` and
 //      the derived overrides) is LANDED: the resolver is the parameter type and the only
 //      caller (CSharpResolver.cs lines 511/931, wrapped in `catch (ArithmeticException)` --
-//      the port's future resolver slice will settle the catch arm). The C# boxed `object?`
+//      the catch arm catches the port's `Util::ArithmeticException` family: the operand
+//      cast throws `Util::OverflowException` / `Util::InvalidCastException` and the table
+//      bodies throw the typed `Util::OverflowException` / `Util::DivideByZeroException`,
+//      so the family base settles the catch; `InvalidCastException` is deliberately
+//      NOT a family member and propagates, faithfully). The C# boxed `object?`
 //      ports to `const std::any&` (the D374/D424 boxed-constant convention; an empty any
 //      is the C# `null`), the return `object?` to `std::any` (empty = null). The operand
 //      casts go through the resolver's `CSharpPrimitiveCast` member (threading its

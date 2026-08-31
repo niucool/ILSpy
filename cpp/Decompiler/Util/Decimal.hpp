@@ -29,6 +29,8 @@
 
 #pragma once
 
+#include "Decompiler/Util/CSharpPrimitiveCast.hpp"  // DivideByZeroException (the System-exception home, the iteration-98 placement; no include cycle -- CSharpPrimitiveCast.hpp does not include this header)
+
 #include <cstdint>
 #include <stdexcept>
 
@@ -112,7 +114,7 @@ inline Decimal operator/(Decimal a, Decimal b)
     a = NormalizeDecimal(a);
     b = NormalizeDecimal(b);
     if (b.mantissa == 0)
-        throw std::runtime_error("DivideByZeroException");
+        throw DivideByZeroException();
     Decimal result;
     result.mantissa = static_cast<std::int64_t>(static_cast<std::uint64_t>(a.mantissa)
                                                 / static_cast<std::uint64_t>(b.mantissa));
@@ -131,7 +133,7 @@ inline Decimal operator%(Decimal a, Decimal b)
     a = NormalizeDecimal(a);
     b = NormalizeDecimal(b);
     if (b.mantissa == 0)
-        throw std::runtime_error("DivideByZeroException");
+        throw DivideByZeroException();
     const std::uint8_t scale = a.scale > b.scale ? a.scale : b.scale;
     std::uint64_t ma = static_cast<std::uint64_t>(a.mantissa);
     std::uint64_t mb = static_cast<std::uint64_t>(b.mantissa);

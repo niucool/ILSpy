@@ -43,15 +43,42 @@
 
 namespace ILSpy::Decompiler::Util {
 
+// The C# `System.ArithmeticException` -- the common base of `OverflowException` and
+// `DivideByZeroException`. The CSharpResolver operator-resolution regions wrap the
+// constant-evaluation `m.Invoke(...)` call in `catch (ArithmeticException)` (CSharpResolver
+// .cs lines 509-514 / 1004-1010) -- the catch must swallow exactly this family and NOT
+// `InvalidCastException` (the operand-cast failure the C# lets propagate), so the family
+// needs a distinct common base the catch arm can name. The base's ctor is protected
+// (the C# never throws a bare `ArithmeticException`; only the family members are
+// thrown, each carrying its own exception-kind message).
+struct ArithmeticException : std::runtime_error {
+protected:
+    explicit ArithmeticException(const char* message)
+        : std::runtime_error(message) {}
+};
+
 // The C# `System.OverflowException` -- thrown by a checked-context conversion whose true
 // result leaves the target type's range (and by the decimal conversions in BOTH
 // contexts: System.Decimal's op_Explicit operators throw regardless of the caller's
-// checked/unchecked context). A distinct type (deriving std::runtime_error) so the
-// ResolveCast catch arms can discriminate it from InvalidCastException -- the C#
-// nint/nuint cast path maps the two exceptions to DIFFERENT fallbacks.
-struct OverflowException : std::runtime_error {
+// checked/unchecked context), and by the operator-table bodies at the overflow boundaries
+// (the checked unary negation of INT32_MIN/INT64_MIN, the checked binary arithmetic).
+// Distinct types (deriving ArithmeticException / std::runtime_error) so the resolver's
+// catch arms can discriminate them from InvalidCastException -- the C# nint/nuint cast
+// path maps the two exception kinds to DIFFERENT fallbacks.
+struct OverflowException : ArithmeticException {
     OverflowException()
-        : std::runtime_error("OverflowException")
+        : ArithmeticException("OverflowException")
+    {
+    }
+};
+
+// The C# `System.DivideByZeroException` -- thrown by the binary operator bodies on an
+// integer or decimal zero divisor (in BOTH checked and unchecked contexts). A member of
+// the ArithmeticException family (the C# inheritance), so the resolver's constant-
+// evaluation catch arm swallows it.
+struct DivideByZeroException : ArithmeticException {
+    DivideByZeroException()
+        : ArithmeticException("DivideByZeroException")
     {
     }
 };
@@ -78,5 +105,15 @@ struct InvalidCastException : std::runtime_error {
 // an integer.</exception>
 std::any Cast(ILSpy::Decompiler::TypeSystem::TypeCode targetType, const std::any& input,
               bool checkForOverflow);
+
+// The C# `Type.GetTypeCode(input.GetType())` over the port's boxed constant-value types
+// (the C# boxed object becomes the std::any holding the C++ counterpart of each C#
+// primitive). A held type without a primitive counterpart maps to Object -- the C#
+// GetTypeCode fallback. The internal Cast source-type mapping, exposed for the
+// CSharpResolver's enum-operator constant-folding arm (`compilation.FindType(expression
+// .ConstantValue.GetType())`, CSharpResolver.cs line 451 -- an enum constant holds its
+// UNDERLYING primitive value, so the runtime type resolves through its TypeCode via the
+// TypeCode-based FindType, ReflectionHelper.cs line 106).
+ILSpy::Decompiler::TypeSystem::TypeCode TypeCodeOfBoxedValue(const std::any& value);
 
 } // namespace ILSpy::Decompiler::Util

@@ -55,17 +55,16 @@
 
 namespace ILSpy::Decompiler::Util {
 
-namespace {
-
-using TypeCode = ILSpy::Decompiler::TypeSystem::TypeCode;
-
 // The C# `Type.GetTypeCode(input.GetType())` over the port's boxed constant-value types
 // (the C# boxed object becomes the std::any holding the C++ counterpart of each C#
 // primitive). A held type without a primitive counterpart maps to Object -- the C#
 // GetTypeCode fallback -- so any such operand falls through to the default
-// InvalidCastException arm.
-TypeCode TypeCodeOfHeld(const std::any& value)
+// InvalidCastException arm. Exposed for the CSharpResolver's enum-operator
+// constant-folding arm (see the header declaration).
+ILSpy::Decompiler::TypeSystem::TypeCode TypeCodeOfBoxedValue(const std::any& value)
 {
+    using TypeCode = ILSpy::Decompiler::TypeSystem::TypeCode;
+
     const std::type_info& type = value.type();
     if (type == typeid(bool))
         return TypeCode::Boolean;
@@ -98,6 +97,9 @@ TypeCode TypeCodeOfHeld(const std::any& value)
     return TypeCode::Object;
 }
 
+namespace {
+
+using TypeCode = ILSpy::Decompiler::TypeSystem::TypeCode;
 [[noreturn]] void ThrowInvalidCast(TypeCode sourceType, TypeCode targetType)
 {
     // The C# `throw new InvalidCastException("Cast from " + sourceType + " to " +
@@ -140,7 +142,7 @@ IntegralSource UnwrapIntegral(TypeCode sourceType, const std::any& input)
         case TypeCode::UInt64:
             return {std::any_cast<std::uint64_t>(input), false};
         default:
-            // Unreachable: the caller switches on an integral TypeCodeOfHeld result.
+            // Unreachable: the caller switches on an integral TypeCodeOfBoxedValue result.
             return {0, false};
     }
 }
@@ -415,7 +417,7 @@ Decimal IntegralOrFloatingToDecimal(TypeCode sourceType, const std::any& input)
 // correspondence note); the Boolean source arm every target carries is handled here.
 std::any PrimitiveCast(TypeCode targetType, const std::any& input, bool isChecked)
 {
-    const TypeCode sourceType = TypeCodeOfHeld(input);
+    const TypeCode sourceType = TypeCodeOfBoxedValue(input);
 
     // The C# `if (sourceType == targetType) return input;`
     if (sourceType == targetType)
