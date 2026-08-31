@@ -1,0 +1,81 @@
+Running main() from C:\Projects\github\vcpkg\buildtrees\gtest\src\v1.17.0-e243b8ee0f.clean\googletest\src\gtest_main.cc
+Note: Google Test filter = OpCodeInfoTest.*:PlainTextOutputTest.*
+[==========] Running 34 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 13 tests from OpCodeInfoTest
+[ RUN      ] OpCodeInfoTest.CtorStoresCodeAndName
+[       OK ] OpCodeInfoTest.CtorStoresCodeAndName (0 ms)
+[ RUN      ] OpCodeInfoTest.CtorAcceptsEmptyName
+[       OK ] OpCodeInfoTest.CtorAcceptsEmptyName (0 ms)
+[ RUN      ] OpCodeInfoTest.DefaultCtorIsNopWithEmptyName
+[       OK ] OpCodeInfoTest.DefaultCtorIsNopWithEmptyName (0 ms)
+[ RUN      ] OpCodeInfoTest.EqualsComparesCodeAndName
+[       OK ] OpCodeInfoTest.EqualsComparesCodeAndName (0 ms)
+[ RUN      ] OpCodeInfoTest.OperatorEqualsAndNotEquals
+[       OK ] OpCodeInfoTest.OperatorEqualsAndNotEquals (0 ms)
+[ RUN      ] OpCodeInfoTest.GetHashCodeEqualForEqualValuesAndDistinctForDistinctValues
+[       OK ] OpCodeInfoTest.GetHashCodeEqualForEqualValuesAndDistinctForDistinctValues (0 ms)
+[ RUN      ] OpCodeInfoTest.EncodedNamePrefixSpecialCases
+[       OK ] OpCodeInfoTest.EncodedNamePrefixSpecialCases (0 ms)
+[ RUN      ] OpCodeInfoTest.EncodedNameReadonlyTypoIsPortedVerbatim
+[       OK ] OpCodeInfoTest.EncodedNameReadonlyTypoIsPortedVerbatim (0 ms)
+[ RUN      ] OpCodeInfoTest.EncodedNameConvertsDotsAndUpperCasesSegments
+[       OK ] OpCodeInfoTest.EncodedNameConvertsDotsAndUpperCasesSegments (0 ms)
+[ RUN      ] OpCodeInfoTest.EncodedNameIsCachedOnFirstRead
+[       OK ] OpCodeInfoTest.EncodedNameIsCachedOnFirstRead (0 ms)
+[ RUN      ] OpCodeInfoTest.LinkLowercasesTheEncodedName
+[       OK ] OpCodeInfoTest.LinkLowercasesTheEncodedName (0 ms)
+[ RUN      ] OpCodeInfoTest.LinkUsesThePrefixSpecialCaseSpelling
+[       OK ] OpCodeInfoTest.LinkUsesThePrefixSpecialCaseSpelling (0 ms)
+[ RUN      ] OpCodeInfoTest.LinkForReadonlyCarriesTheTypo
+[       OK ] OpCodeInfoTest.LinkForReadonlyCarriesTheTypo (0 ms)
+[----------] 13 tests from OpCodeInfoTest (0 ms total)
+
+[----------] 21 tests from PlainTextOutputTest
+[ RUN      ] PlainTextOutputTest.DefaultCtorAccumulatesWritesInToString
+[       OK ] PlainTextOutputTest.DefaultCtorAccumulatesWritesInToString (0 ms)
+[ RUN      ] PlainTextOutputTest.ExternalWriterReceivesTheWrites
+[       OK ] PlainTextOutputTest.ExternalWriterReceivesTheWrites (0 ms)
+[ RUN      ] PlainTextOutputTest.IndentationStringDefaultsToTabAndIsSettable
+[       OK ] PlainTextOutputTest.IndentationStringDefaultsToTabAndIsSettable (0 ms)
+[ RUN      ] PlainTextOutputTest.IndentAppliesOnlyAfterAWriteLine
+[       OK ] PlainTextOutputTest.IndentAppliesOnlyAfterAWriteLine (0 ms)
+[ RUN      ] PlainTextOutputTest.UnindentReducesThePendingIndentation
+[       OK ] PlainTextOutputTest.UnindentReducesThePendingIndentation (0 ms)
+[ RUN      ] PlainTextOutputTest.CustomIndentationStringIsUsedForTheIndentRun
+[       OK ] PlainTextOutputTest.CustomIndentationStringIsUsedForTheIndentRun (0 ms)
+[ RUN      ] PlainTextOutputTest.MultipleIndentLevelsRepeatTheIndentationString
+[       OK ] PlainTextOutputTest.MultipleIndentLevelsRepeatTheIndentationString (0 ms)
+[ RUN      ] PlainTextOutputTest.WriteLineWritesCarriageReturnLineFeed
+[       OK ] PlainTextOutputTest.WriteLineWritesCarriageReturnLineFeed (0 ms)
+[ RUN      ] PlainTextOutputTest.LocationTracksLineAndColumn
+[       OK ] PlainTextOutputTest.LocationTracksLineAndColumn (0 ms)
+[ RUN      ] PlainTextOutputTest.LocationIncludesThePendingIndentation
+[       OK ] PlainTextOutputTest.LocationIncludesThePendingIndentation (0 ms)
+[ RUN      ] PlainTextOutputTest.WriteReferenceOpCodeWritesTheFullName
+[       OK ] PlainTextOutputTest.WriteReferenceOpCodeWritesTheFullName (0 ms)
+[ RUN      ] PlainTextOutputTest.WriteReferenceOpCodeOmitSuffixStopsAtTheLastDot
+[       OK ] PlainTextOutputTest.WriteReferenceOpCodeOmitSuffixStopsAtTheLastDot (0 ms)
+[ RUN      ] PlainTextOutputTest.WriteReferenceOpCodeOmitSuffixOnDotlessNameWritesNothing
+[       OK ] PlainTextOutputTest.WriteReferenceOpCodeOmitSuffixOnDotlessNameWritesNothing (0 ms)
+[ RUN      ] PlainTextOutputTest.WriteReferenceOpCodeOmitSuffixOnTrailingDotNameIsUnchanged
+[       OK ] PlainTextOutputTest.WriteReferenceOpCodeOmitSuffixOnTrailingDotNameIsUnchanged (0 ms)
+[ RUN      ] PlainTextOutputTest.WriteReferenceMetadataWritesOnlyTheText
+[       OK ] PlainTextOutputTest.WriteReferenceMetadataWritesOnlyTheText (0 ms)
+[ RUN      ] PlainTextOutputTest.WriteReferenceTypeAndMemberWriteOnlyTheText
+[       OK ] PlainTextOutputTest.WriteReferenceTypeAndMemberWriteOnlyTheText (0 ms)
+[ RUN      ] PlainTextOutputTest.WriteLocalReferenceWritesOnlyTheText
+[       OK ] PlainTextOutputTest.WriteLocalReferenceWritesOnlyTheText (0 ms)
+[ RUN      ] PlainTextOutputTest.FoldMarkersAreNoOps
+[       OK ] PlainTextOutputTest.FoldMarkersAreNoOps (0 ms)
+[ RUN      ] PlainTextOutputTest.WriteLineExtensionWritesTextThenLineBreak
+[       OK ] PlainTextOutputTest.WriteLineExtensionWritesTextThenLineBreak (0 ms)
+[ RUN      ] PlainTextOutputTest.DispatchesThroughTheITextOutputInterfaceView
+[       OK ] PlainTextOutputTest.DispatchesThroughTheITextOutputInterfaceView (0 ms)
+[ RUN      ] PlainTextOutputTest.TwoOutputsDoNotShareState
+[       OK ] PlainTextOutputTest.TwoOutputsDoNotShareState (0 ms)
+[----------] 21 tests from PlainTextOutputTest (1 ms total)
+
+[----------] Global test environment tear-down
+[==========] 34 tests from 2 test suites ran. (2 ms total)
+[  PASSED  ] 34 tests.

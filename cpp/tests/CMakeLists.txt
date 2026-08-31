@@ -17,6 +17,7 @@ add_executable(ilspy_tests
     Decompiler/Metadata/CustomAttributes_Test.cpp
     Decompiler/Metadata/CompilerGeneratedField_Test.cpp
     Decompiler/Metadata/ILTextEmitter_Test.cpp
+    Decompiler/Disassembler/OpCodeInfo_Test.cpp
     Decompiler/TypeSystem/TypeName_Test.cpp
     Decompiler/TypeSystem/SignatureDecoder_Test.cpp
     Decompiler/TypeSystem/TypeKindDerivation_Test.cpp
@@ -239,6 +240,7 @@ add_executable(ilspy_tests
     Decompiler/Semantics/ConversionResolveResult_Test.cpp
     Decompiler/Semantics/ConversionFactories_Test.cpp
     Decompiler/Output/IAmbience_Test.cpp
+    Decompiler/Output/PlainTextOutput_Test.cpp
     Decompiler/IL/ILAst_Test.cpp
     Decompiler/IL/ILAstInstructions_Test.cpp
     Decompiler/IL/ILReader_Test.cpp
