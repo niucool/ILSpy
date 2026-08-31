@@ -117,7 +117,9 @@ namespace ILSpy::Decompiler::TypeSystem {
 class ITypeParameter;
 
 // A method, constructor, destructor, or operator. A concrete method (a `MetadataMethod` /
-// `SpecializedMethod` / `LocalFunctionMethod` -- the implementations land later) subclasses
+// `SpecializedMethod` / `LocalFunctionMethod` -- of which `SpecializedMethod` and
+// `LocalFunctionMethod` are ported; `MetadataMethod` lands with the metadata layer)
+// subclasses
 // `IMethod` and overrides every `IParameterizedMember` / `IMember` / `IEntity` / ...
 // accessor plus the `IMethod`-own accessors added here. `IMethod` single-inherits
 // `IParameterizedMember` (no diamond), so `Name()` / `SymbolKind()` are inherited unchanged
