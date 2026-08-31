@@ -146,6 +146,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Resolver/CSharpResolverConvert_Test.cpp
     Decompiler/CSharp/Resolver/CSharpResolverExtensionMethods_Test.cpp
     Decompiler/CSharp/Resolver/CSharpResolverForeach_Test.cpp
+    Decompiler/CSharp/Resolver/CSharpResolverIndexer_Test.cpp
     Decompiler/CSharp/Resolver/CSharpResolverInvocation_Test.cpp
     Decompiler/CSharp/Resolver/CSharpResolverMemberAccess_Test.cpp
     Decompiler/CSharp/Resolver/CSharpResolverNumericPromotion_Test.cpp

@@ -40,6 +40,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
 #include "Decompiler/Semantics/AmbiguousResolveResult.hpp"
+#include "Decompiler/Semantics/ArrayAccessResolveResult.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
 #include "Decompiler/Semantics/ConversionFactories.hpp"
@@ -4374,6 +4375,135 @@ void CSharpResolver::CheckForEnumerableInterface(
         std::move(getEnumeratorInvocation), "GetEnumerator", {},
         NameLookupMode::InvocationTarget);
     getEnumeratorInvocation = ResolveInvocation(std::move(getEnumeratorInvocation), {});
+}
+
+// ---- ResolveIndexer region (CSharpResolver.cs lines 2456-2522) ----------------------------
+
+// The C# `void AdjustArrayAccessArguments(ResolveResult[] arguments)` (line 2513) --
+// see CSharpResolver.hpp for the port conventions.
+void CSharpResolver::AdjustArrayAccessArguments(
+    std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments) const
+{
+    using ILSpy::Decompiler::Semantics::Conversions;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+
+    for (std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& argument : arguments) {
+        // The C# `TryConvert(ref arguments[i], compilation.FindType(...)) || ...` -- the
+        // short-circuiting chain rebinds the caller's argument through the first
+        // applicable conversion. `TryConvert` takes a non-const `IType&`; the `FindType`
+        // const accessor's contract is cast away (the D515/D517 const_cast convention:
+        // the underlying type-system object is mutable).
+        if (!(TryConvert(argument, const_cast<IType&>(compilation_.FindType(KnownTypeCode::Int32)))
+              || TryConvert(argument, const_cast<IType&>(compilation_.FindType(KnownTypeCode::UInt32)))
+              || TryConvert(argument, const_cast<IType&>(compilation_.FindType(KnownTypeCode::Int64)))
+              || TryConvert(argument, const_cast<IType&>(compilation_.FindType(KnownTypeCode::UInt64))))) {
+            // conversion failed
+            argument = Convert(argument,
+                              const_cast<IType&>(compilation_.FindType(KnownTypeCode::Int32)),
+                              Conversions::None());
+        }
+    }
+}
+
+// The C# `public ResolveResult ResolveIndexer(ResolveResult target, ResolveResult[]
+// arguments, string[] argumentNames = null)` (line 2456) -- see CSharpResolver.hpp for
+// the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveIndexer(
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> target,
+    std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> arguments,
+    std::optional<std::vector<std::string>> argumentNames) const
+{
+    using ILSpy::Decompiler::CSharp::Resolver::DynamicInvocationResolveResult;
+    using ILSpy::Decompiler::CSharp::Resolver::DynamicInvocationType;
+    using ILSpy::Decompiler::CSharp::Resolver::IsApplicable;
+    using ILSpy::Decompiler::CSharp::Resolver::MethodListWithDeclaringType;
+    using ILSpy::Decompiler::CSharp::Resolver::OverloadResolution;
+    using ILSpy::Decompiler::Semantics::ArrayAccessResolveResult;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::TypeSystem::ArrayType;
+    using ILSpy::Decompiler::TypeSystem::IParameterizedMember;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::PointerType;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+    using ILSpy::Decompiler::TypeSystem::UnknownType;
+
+    // C# 4.0 spec: the arms on the TARGET's kind.
+    switch (target->Type().Kind()) {
+        case TypeKind::Dynamic:
+            // The C# `new DynamicInvocationResolveResult(target, DynamicInvocationType.
+            // Indexing, AddArgumentNamesIfNecessary(arguments, argumentNames))`.
+            return std::make_shared<DynamicInvocationResolveResult>(
+                std::move(target), DynamicInvocationType::Indexing,
+                AddArgumentNamesIfNecessary(arguments, argumentNames));
+        case TypeKind::Array:
+        case TypeKind::Pointer: {
+            // C# 4.0 spec: section 7.6.6.1 Array access / section 18.5.3 Pointer
+            // element access.
+            AdjustArrayAccessArguments(arguments);
+            const IType& targetType = target->Type();
+            ITypePtr elementType;
+            if (const auto* arrayType = dynamic_cast<const ArrayType*>(&targetType))
+                elementType = arrayType->Element();
+            else if (const auto* pointerType = dynamic_cast<const PointerType*>(&targetType))
+                elementType = pointerType->Element();
+            if (!elementType)
+                elementType = UnknownType();
+            return std::make_shared<ArrayAccessResolveResult>(
+                std::move(elementType), std::move(target), std::move(arguments));
+        }
+        default:
+            break;
+    }
+
+    // C# 4.0 spec: section 7.6.6.2 Indexer access.
+
+    MemberLookup lookup = CreateMemberLookup();
+    std::vector<MethodListWithDeclaringType> indexers = lookup.LookupIndexers(*target);
+
+    // The C# `arguments.Any(a => a.Type.Kind == TypeKind.Dynamic)`.
+    bool isDynamic = std::any_of(arguments.begin(), arguments.end(),
+                                 [](const std::shared_ptr<ResolveResult>& a) {
+                                     return a->Type().Kind() == TypeKind::Dynamic;
+                                 });
+    if (isDynamic) {
+        // If we have dynamic arguments, we need to represent the invocation as a
+        // dynamic invocation if there is more than one applicable indexer.
+        //
+        // The C# `CreateOverloadResolution(arguments, argumentNames, null)` -- the
+        // THROWAWAY resolution: the `AddCandidate` calls mutate its best-candidate
+        // state as a side effect, but only the returned error masks are consumed (the
+        // ResolveInvocation dynamic sub-arm convention).
+        std::unique_ptr<OverloadResolution> or2 =
+            CreateOverloadResolution(arguments, argumentNames, std::nullopt);
+        // The C# `indexers.SelectMany(x => x).Where(m => OverloadResolution.
+        // IsApplicable(or2.AddCandidate(m))).ToList()` -- the flattened members filtered
+        // by applicability; the COUNT decides the dynamic arm (the full list is
+        // materialized, no early exit at two).
+        std::size_t applicableIndexers = 0;
+        for (const MethodListWithDeclaringType& list : indexers) {
+            for (const IParameterizedMember* m : list) {
+                if (IsApplicable(or2->AddCandidate(*m)))
+                    applicableIndexers++;
+            }
+        }
+
+        if (applicableIndexers > 1) {
+            return std::make_shared<DynamicInvocationResolveResult>(
+                std::move(target), DynamicInvocationType::Indexing,
+                AddArgumentNamesIfNecessary(arguments, argumentNames));
+        }
+    }
+
+    std::unique_ptr<OverloadResolution> orr = CreateOverloadResolution(arguments, argumentNames);
+    orr->AddMethodLists(indexers);
+    if (orr->BestCandidate() != nullptr) {
+        return orr->CreateResolveResult(std::move(target));
+    } else {
+        return ErrorResultSingleton();
+    }
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

@@ -38,8 +38,8 @@
 // Convert/ResolveCast region, the sizeof/this/base/typeof tail, the
 // condition/primitive/default-value/assignment quartet, the simple-name lookup
 // cluster, the extension-methods region, the member-access region, the
-// invocation region, and the ResolveForeach region have landed;
-// ResolveIndexer, ResolveObjectCreation, ... follow).
+// invocation region, the ResolveForeach region, and the ResolveIndexer region
+// have landed; ResolveObjectCreation, CanTransformToExtensionMethodCall, ... follow).
 //
 // KEY PORT CONVENTIONS:
 //  (a) The C# `With*` clone factories return a `CSharpResolver` REFERENCE -- the C#
@@ -1586,6 +1586,64 @@ public:
         ILSpy::Decompiler::TypeSystem::ITypePtr& enumeratorType,
         ILSpy::Decompiler::TypeSystem::ITypePtr& elementType,
         std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& getEnumeratorInvocation) const;
+
+    // ---- ResolveIndexer ------------------------------------------------------------------------
+    // (The `ResolveIndexer` region, CSharpResolver.cs lines 2456-2522, C# 4.0 spec
+    // sections 7.6.6.1 (array access) / 18.5.3 (pointer element access) / 7.6.6.2
+    // (indexer access): the public `ResolveIndexer` entry (line 2456) + the private
+    // `AdjustArrayAccessArguments` helper (line 2513). Every prerequisite is already
+    // ported: `AddArgumentNamesIfNecessary` (the invocation region), the free
+    // `IsApplicable(OverloadResolutionErrors)`, `CreateMemberLookup` + `MemberLookup::
+    // LookupIndexers` (the simple-name region / D-something), `CreateOverloadResolution`
+    // + `OverloadResolution::AddMethodLists` + `CreateResolveResult` (the
+    // operator-helpers region / the OverloadResolution engine), `TryConvert` / `Convert`
+    // (the convert region), `ArrayAccessResolveResult` (Semantics), and
+    // `DynamicInvocationResolveResult` with `DynamicInvocationType::Indexing` (D469).)
+
+    // The C# `public ResolveResult ResolveIndexer(ResolveResult target,
+    // ResolveResult[] arguments, string[] argumentNames = null)` (line 2456) -- the
+    // indexer-access resolution. The arms on the TARGET's kind: a DYNAMIC target is a
+    // `DynamicInvocationResolveResult` with `DynamicInvocationType::Indexing` over the
+    // named-wrapped arguments; an ARRAY / POINTER target is an `ArrayAccessResolveResult`
+    // over the element type (the arguments first adjusted to int/uint/long/ulong); else
+    // the INDEXER ACCESS -- `MemberLookup::LookupIndexers` supplies the candidate lists
+    // (a DYNAMIC argument makes the invocation dynamic when more than one indexer is
+    // applicable -- the throwaway resolution counts the applicable candidates),
+    // `AddMethodLists` folds them into the best-candidate state, and the best candidate
+    // composes through `CreateResolveResult` with the target; no best candidate yields
+    // the `ErrorResult` singleton. The method is `const` (it reads the resolver's
+    // compilation / conversions and clones nothing).
+    //
+    // PORT CONVENTIONS for this member:
+    //  * The C# `ResolveResult[] arguments` array the resolver "may mutate ... to wrap
+    //    elements in `ConversionResolveResult`s" ports to a by-value `std::vector`;
+    //    the array arm's adjustment and the indexer arm's conversion wraps are observed
+    //    through the RESULT (the `ArrayAccessResolveResult::Indexes` / the
+    //    `CreateResolveResult` argument list), not through array mutation (the
+    //    ResolveInvocation convention).
+    //  * The C# `((TypeWithElementType)target.Type).ElementType` is the flattened
+    //    TypeWithElementType dispatch (the `ElementTypeOf` convention): the Kind guard
+    //    guarantees Array or Pointer, so the `dynamic_cast` resolves the concrete leaf;
+    //    a degenerate leaf with a null element (never produced by the real type system)
+    //    falls back to the `UnknownType` null object (the D516 convention -- the
+    //    `ResolveResult` base ctor asserts the element type non-null).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveIndexer(
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> target,
+        std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> arguments,
+        std::optional<std::vector<std::string>> argumentNames = std::nullopt) const;
+
+    // The C# `void AdjustArrayAccessArguments(ResolveResult[] arguments)` (line 2513)
+    // -- "Converts all arguments to int, uint, long or ulong": the first `TryConvert`
+    // that succeeds rebinds the caller's argument in place (the short-circuiting
+    // int32/uint32/int64/uint64 chain); when none applies the argument is `Convert`ed to
+    // the registered Int32 under `Conversion.None` (the error-preserving wrap; a
+    // compile-time constant re-folds through the target). Private in the C#; PUBLIC in
+    // the port for direct TDD (the TryConvert widening convention). The C# array
+    // mutation ports to the by-reference vector (the helper's observable IS the mutated
+    // list -- unlike `ResolveIndexer`, which observes through its result). The method is
+    // `const` (it reads only the compilation / conversions).
+    void AdjustArrayAccessArguments(
+        std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments) const;
 
 private:
     // The C# private nested `sealed class ObjectInitializerContext` -- the linked stack

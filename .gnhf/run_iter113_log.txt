@@ -1,0 +1,38 @@
+Running main() from C:\Projects\github\vcpkg\buildtrees\gtest\src\v1.17.0-e243b8ee0f.clean\googletest\src\gtest_main.cc
+Note: Google Test filter = CSharpResolverIndexerTest.*
+[==========] Running 14 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 14 tests from CSharpResolverIndexerTest
+[ RUN      ] CSharpResolverIndexerTest.DynamicTargetYieldsIndexingWithNamedArgumentWrap
+[       OK ] CSharpResolverIndexerTest.DynamicTargetYieldsIndexingWithNamedArgumentWrap (0 ms)
+[ RUN      ] CSharpResolverIndexerTest.ArrayTargetYieldsArrayAccessWithElementIdentity
+[       OK ] CSharpResolverIndexerTest.ArrayTargetYieldsArrayAccessWithElementIdentity (0 ms)
+[ RUN      ] CSharpResolverIndexerTest.PointerTargetYieldsArrayAccess
+[       OK ] CSharpResolverIndexerTest.PointerTargetYieldsArrayAccess (0 ms)
+[ RUN      ] CSharpResolverIndexerTest.ArrayTargetAdjustsWideningIndexArgument
+[       OK ] CSharpResolverIndexerTest.ArrayTargetAdjustsWideningIndexArgument (0 ms)
+[ RUN      ] CSharpResolverIndexerTest.ArrayTargetInconvertibleIndexFallsBackToInt32
+[       OK ] CSharpResolverIndexerTest.ArrayTargetInconvertibleIndexFallsBackToInt32 (0 ms)
+[ RUN      ] CSharpResolverIndexerTest.IndexerAccessComposesInvocationOverLookedUpIndexer
+[       OK ] CSharpResolverIndexerTest.IndexerAccessComposesInvocationOverLookedUpIndexer (0 ms)
+[ RUN      ] CSharpResolverIndexerTest.IndexerAccessSelectsApplicableIndexer
+[       OK ] CSharpResolverIndexerTest.IndexerAccessSelectsApplicableIndexer (0 ms)
+[ RUN      ] CSharpResolverIndexerTest.IndexerAccessWithoutIndexersYieldsErrorResult
+[       OK ] CSharpResolverIndexerTest.IndexerAccessWithoutIndexersYieldsErrorResult (0 ms)
+[ RUN      ] CSharpResolverIndexerTest.DynamicArgumentWithMultipleApplicableIndexersIsDynamic
+[       OK ] CSharpResolverIndexerTest.DynamicArgumentWithMultipleApplicableIndexersIsDynamic (0 ms)
+[ RUN      ] CSharpResolverIndexerTest.DynamicArgumentWithSingleApplicableIndexerComposes
+[       OK ] CSharpResolverIndexerTest.DynamicArgumentWithSingleApplicableIndexerComposes (0 ms)
+[ RUN      ] CSharpResolverIndexerTest.AdjustArrayAccessArgumentsIdentityStays
+[       OK ] CSharpResolverIndexerTest.AdjustArrayAccessArgumentsIdentityStays (0 ms)
+[ RUN      ] CSharpResolverIndexerTest.AdjustArrayAccessArgumentsWideningRebinds
+[       OK ] CSharpResolverIndexerTest.AdjustArrayAccessArgumentsWideningRebinds (0 ms)
+[ RUN      ] CSharpResolverIndexerTest.AdjustArrayAccessArgumentsInconvertibleFallsBackToInt32
+[       OK ] CSharpResolverIndexerTest.AdjustArrayAccessArgumentsInconvertibleFallsBackToInt32 (0 ms)
+[ RUN      ] CSharpResolverIndexerTest.AdjustArrayAccessArgumentsConstantFolds
+[       OK ] CSharpResolverIndexerTest.AdjustArrayAccessArgumentsConstantFolds (0 ms)
+[----------] 14 tests from CSharpResolverIndexerTest (2 ms total)
+
+[----------] Global test environment tear-down
+[==========] 14 tests from 1 test suite ran. (4 ms total)
+[  PASSED  ] 14 tests.
