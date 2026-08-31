@@ -1,0 +1,425 @@
+Running main() from C:\Projects\github\vcpkg\buildtrees\gtest\src\v1.17.0-e243b8ee0f.clean\googletest\src\gtest_main.cc
+Note: Google Test filter = FieldAttributesTest.*:MethodAttributesTest.*:MethodImplAttributesTest.*:PropertyAttributesTest.*:EventAttributesTest.*:TypeAttributesTest.*
+[==========] Running 42 tests from 6 test suites.
+[----------] Global test environment set-up.
+[----------] 7 tests from FieldAttributesTest
+[ RUN      ] FieldAttributesTest.ValuesMatchBclLiterals
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(59): error: Expected equality of these values:
+  static_cast<std::int32_t>(FieldAttributes::Public)
+    Which is: 39321
+  0x0006
+    Which is: 6
+
+[  FAILED  ] FieldAttributesTest.ValuesMatchBclLiterals (1 ms)
+[ RUN      ] FieldAttributesTest.UnderlyingTypeIsInt32
+[       OK ] FieldAttributesTest.UnderlyingTypeIsInt32 (0 ms)
+[ RUN      ] FieldAttributesTest.MembersAreDistinct
+[       OK ] FieldAttributesTest.MembersAreDistinct (0 ms)
+[ RUN      ] FieldAttributesTest.FieldAccessMaskSplitMatchesWriteEnumWriteFlags
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(119): error: Expected equality of these values:
+  attrs & ~(FieldAttributes::FieldAccessMask | hasXAttributes)
+    Which is: 4-byte object <99-99 00-00>
+  FieldAttributes::Static | FieldAttributes::InitOnly
+    Which is: 4-byte object <10-00 00-00>
+
+[  FAILED  ] FieldAttributesTest.FieldAccessMaskSplitMatchesWriteEnumWriteFlags (0 ms)
+[ RUN      ] FieldAttributesTest.BitwiseOrAndAnd
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(125): error: Expected equality of these values:
+  static_cast<std::int32_t>(combined)
+    Which is: 39321
+  0x0016
+    Which is: 22
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(127): error: Expected equality of these values:
+  combined & FieldAttributes::Static
+    Which is: 4-byte object <99-99 00-00>
+  FieldAttributes::Static
+    Which is: 4-byte object <10-00 00-00>
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(128): error: Expected equality of these values:
+  combined & FieldAttributes::Literal
+    Which is: 4-byte object <99-99 00-00>
+  FieldAttributes::PrivateScope
+    Which is: 4-byte object <00-00 00-00>
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(132): error: Expected equality of these values:
+  a & b
+    Which is: 4-byte object <99-99 00-00>
+  FieldAttributes::Literal
+    Which is: 4-byte object <40-00 00-00>
+
+[  FAILED  ] FieldAttributesTest.BitwiseOrAndAnd (0 ms)
+[ RUN      ] FieldAttributesTest.BitwiseXorAndNot
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(142): error: Expected equality of these values:
+  (~FieldAttributes::PrivateScope) & FieldAttributes::Static
+    Which is: 4-byte object <00-00 00-00>
+  FieldAttributes::Static
+    Which is: 4-byte object <10-00 00-00>
+
+[  FAILED  ] FieldAttributesTest.BitwiseXorAndNot (0 ms)
+[ RUN      ] FieldAttributesTest.FlagTestIdiomMatchesDisassemblerUsage
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(153): error: Value of: (attrs & FieldAttributes::Static) == FieldAttributes::Static
+  Actual: false
+Expected: true
+
+[  FAILED  ] FieldAttributesTest.FlagTestIdiomMatchesDisassemblerUsage (0 ms)
+[----------] 7 tests from FieldAttributesTest (1 ms total)
+
+[----------] 7 tests from MethodAttributesTest
+[ RUN      ] MethodAttributesTest.ValuesMatchBclLiterals
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(182): error: Expected equality of these values:
+  static_cast<std::int32_t>(MethodAttributes::RTSpecialName)
+    Which is: 34952
+  0x1000
+    Which is: 4096
+
+[  FAILED  ] MethodAttributesTest.ValuesMatchBclLiterals (0 ms)
+[ RUN      ] MethodAttributesTest.UnderlyingTypeIsInt32
+[       OK ] MethodAttributesTest.UnderlyingTypeIsInt32 (0 ms)
+[ RUN      ] MethodAttributesTest.MembersAreDistinct
+[       OK ] MethodAttributesTest.MembersAreDistinct (0 ms)
+[ RUN      ] MethodAttributesTest.MemberAccessMaskSplitMatchesWriteEnumWriteFlags
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(224): error: Expected equality of these values:
+  attrs & ~MethodAttributes::MemberAccessMask
+    Which is: 4-byte object <05-00 00-00>
+  MethodAttributes::Virtual | MethodAttributes::HideBySig | MethodAttributes::Abstract | MethodAttributes::NewSlot
+    Which is: 4-byte object <40-00 00-00>
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(228): error: Value of: (MethodAttributes::Static & MethodAttributes::MemberAccessMask) == MethodAttributes::PrivateScope
+  Actual: false
+Expected: true
+
+[  FAILED  ] MethodAttributesTest.MemberAccessMaskSplitMatchesWriteEnumWriteFlags (0 ms)
+[ RUN      ] MethodAttributesTest.BitwiseOrAndAnd
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(235): error: Expected equality of these values:
+  static_cast<std::int32_t>(combined)
+    Which is: 6
+  0x0056
+    Which is: 86
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(236): error: Expected equality of these values:
+  combined & MethodAttributes::Virtual
+    Which is: 4-byte object <06-00 00-00>
+  MethodAttributes::Virtual
+    Which is: 4-byte object <40-00 00-00>
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(237): error: Expected equality of these values:
+  combined & MethodAttributes::Abstract
+    Which is: 4-byte object <06-00 00-00>
+  MethodAttributes::PrivateScope
+    Which is: 4-byte object <00-00 00-00>
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(240): error: Expected equality of these values:
+  a & b
+    Which is: 4-byte object <20-00 00-00>
+  MethodAttributes::Virtual
+    Which is: 4-byte object <40-00 00-00>
+
+[  FAILED  ] MethodAttributesTest.BitwiseOrAndAnd (0 ms)
+[ RUN      ] MethodAttributesTest.BitwiseXorAndNot
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(249): error: Expected equality of these values:
+  (~MethodAttributes::PrivateScope) & MethodAttributes::Abstract
+    Which is: 4-byte object <00-00 00-00>
+  MethodAttributes::Abstract
+    Which is: 4-byte object <00-04 00-00>
+
+[  FAILED  ] MethodAttributesTest.BitwiseXorAndNot (0 ms)
+[ RUN      ] MethodAttributesTest.FlagTestIdiomMatchesDisassemblerUsage
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(259): error: Value of: (pinvoke & MethodAttributes::PinvokeImpl) == MethodAttributes::PinvokeImpl
+  Actual: false
+Expected: true
+
+[  FAILED  ] MethodAttributesTest.FlagTestIdiomMatchesDisassemblerUsage (0 ms)
+[----------] 7 tests from MethodAttributesTest (0 ms total)
+
+[----------] 7 tests from MethodImplAttributesTest
+[ RUN      ] MethodImplAttributesTest.ValuesMatchBclLiterals
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(284): error: Expected equality of these values:
+  static_cast<std::int32_t>(MethodImplAttributes::InternalCall)
+    Which is: 30583
+  0x1000
+    Which is: 4096
+
+[  FAILED  ] MethodImplAttributesTest.ValuesMatchBclLiterals (0 ms)
+[ RUN      ] MethodImplAttributesTest.UnderlyingTypeIsInt32
+[       OK ] MethodImplAttributesTest.UnderlyingTypeIsInt32 (0 ms)
+[ RUN      ] MethodImplAttributesTest.MembersAreDistinct
+[       OK ] MethodImplAttributesTest.MembersAreDistinct (0 ms)
+[ RUN      ] MethodImplAttributesTest.CodeTypeMaskSplitMatchesWriteEnumWriteFlags
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(324): error: Expected equality of these values:
+  impl & ~(MethodImplAttributes::CodeTypeMask | MethodImplAttributes::ManagedMask)
+    Which is: 4-byte object <03-00 00-00>
+  MethodImplAttributes::Synchronized | MethodImplAttributes::InternalCall
+    Which is: 4-byte object <20-00 00-00>
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(329): error: Expected equality of these values:
+  unmanaged & MethodImplAttributes::ManagedMask
+    Which is: 4-byte object <01-00 00-00>
+  MethodImplAttributes::Unmanaged
+    Which is: 4-byte object <04-00 00-00>
+
+[  FAILED  ] MethodImplAttributesTest.CodeTypeMaskSplitMatchesWriteEnumWriteFlags (0 ms)
+[ RUN      ] MethodImplAttributesTest.BitwiseOrAndAnd
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(335): error: Expected equality of these values:
+  static_cast<std::int32_t>(combined)
+    Which is: 8
+  0x0088
+    Which is: 136
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(336): error: Expected equality of these values:
+  combined & MethodImplAttributes::PreserveSig
+    Which is: 4-byte object <08-00 00-00>
+  MethodImplAttributes::PreserveSig
+    Which is: 4-byte object <80-00 00-00>
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(337): error: Expected equality of these values:
+  combined & MethodImplAttributes::Synchronized
+    Which is: 4-byte object <08-00 00-00>
+  MethodImplAttributes::IL
+    Which is: 4-byte object <00-00 00-00>
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(340): error: Expected equality of these values:
+  a & b
+    Which is: 4-byte object <01-00 00-00>
+  MethodImplAttributes::Synchronized
+    Which is: 4-byte object <20-00 00-00>
+
+[  FAILED  ] MethodImplAttributesTest.BitwiseOrAndAnd (0 ms)
+[ RUN      ] MethodImplAttributesTest.BitwiseXorAndNot
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(349): error: Expected equality of these values:
+  (~MethodImplAttributes::IL) & MethodImplAttributes::InternalCall
+    Which is: 4-byte object <00-00 00-00>
+  MethodImplAttributes::InternalCall
+    Which is: 4-byte object <77-77 00-00>
+
+[  FAILED  ] MethodImplAttributesTest.BitwiseXorAndNot (0 ms)
+[ RUN      ] MethodImplAttributesTest.FlagTestIdiomMatchesDisassemblerUsage
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(357): error: Value of: (impl & MethodImplAttributes::PreserveSig) == MethodImplAttributes::PreserveSig
+  Actual: false
+Expected: true
+
+[  FAILED  ] MethodImplAttributesTest.FlagTestIdiomMatchesDisassemblerUsage (0 ms)
+[----------] 7 tests from MethodImplAttributesTest (0 ms total)
+
+[----------] 7 tests from PropertyAttributesTest
+[ RUN      ] PropertyAttributesTest.ValuesMatchBclLiterals
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(370): error: Expected equality of these values:
+  static_cast<std::int32_t>(PropertyAttributes::HasDefault)
+    Which is: 26214
+  0x1000
+    Which is: 4096
+
+[  FAILED  ] PropertyAttributesTest.ValuesMatchBclLiterals (0 ms)
+[ RUN      ] PropertyAttributesTest.UnderlyingTypeIsInt32
+[       OK ] PropertyAttributesTest.UnderlyingTypeIsInt32 (0 ms)
+[ RUN      ] PropertyAttributesTest.MembersAreDistinct
+[       OK ] PropertyAttributesTest.MembersAreDistinct (0 ms)
+[ RUN      ] PropertyAttributesTest.WholeValueFeedsWriteFlags
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(404): error: Expected equality of these values:
+  static_cast<std::int32_t>(attrs)
+    Which is: 512
+  0x0600
+    Which is: 1536
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(409): error: Expected equality of these values:
+  attrs & PropertyAttributes::ReservedMask
+    Which is: 4-byte object <00-02 00-00>
+  PropertyAttributes::RTSpecialName
+    Which is: 4-byte object <00-04 00-00>
+
+[  FAILED  ] PropertyAttributesTest.WholeValueFeedsWriteFlags (0 ms)
+[ RUN      ] PropertyAttributesTest.BitwiseOrAndAnd
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(415): error: Expected equality of these values:
+  static_cast<std::int32_t>(combined)
+    Which is: 512
+  0x1200
+    Which is: 4608
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(416): error: Expected equality of these values:
+  combined & PropertyAttributes::HasDefault
+    Which is: 4-byte object <00-02 00-00>
+  PropertyAttributes::HasDefault
+    Which is: 4-byte object <66-66 00-00>
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(417): error: Expected equality of these values:
+  combined & PropertyAttributes::RTSpecialName
+    Which is: 4-byte object <00-02 00-00>
+  PropertyAttributes::None
+    Which is: 4-byte object <00-00 00-00>
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(420): error: Expected equality of these values:
+  a & b
+    Which is: 4-byte object <00-02 00-00>
+  PropertyAttributes::HasDefault
+    Which is: 4-byte object <66-66 00-00>
+
+[  FAILED  ] PropertyAttributesTest.BitwiseOrAndAnd (0 ms)
+[ RUN      ] PropertyAttributesTest.BitwiseXorAndNot
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(429): error: Expected equality of these values:
+  (~PropertyAttributes::None) & PropertyAttributes::Reserved4
+    Which is: 4-byte object <00-00 00-00>
+  PropertyAttributes::Reserved4
+    Which is: 4-byte object <00-80 00-00>
+
+[  FAILED  ] PropertyAttributesTest.BitwiseXorAndNot (0 ms)
+[ RUN      ] PropertyAttributesTest.FlagTestIdiomMatchesDisassemblerUsage
+[       OK ] PropertyAttributesTest.FlagTestIdiomMatchesDisassemblerUsage (0 ms)
+[----------] 7 tests from PropertyAttributesTest (0 ms total)
+
+[----------] 7 tests from EventAttributesTest
+[ RUN      ] EventAttributesTest.ValuesMatchBclLiterals
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(448): error: Expected equality of these values:
+  static_cast<std::int32_t>(EventAttributes::SpecialName)
+    Which is: 21845
+  0x0200
+    Which is: 512
+
+[  FAILED  ] EventAttributesTest.ValuesMatchBclLiterals (0 ms)
+[ RUN      ] EventAttributesTest.UnderlyingTypeIsInt32
+[       OK ] EventAttributesTest.UnderlyingTypeIsInt32 (0 ms)
+[ RUN      ] EventAttributesTest.ReservedMaskAliasesRTSpecialName
+[       OK ] EventAttributesTest.ReservedMaskAliasesRTSpecialName (0 ms)
+[ RUN      ] EventAttributesTest.WholeValueFeedsWriteFlags
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(473): error: Expected equality of these values:
+  static_cast<std::int32_t>(attrs)
+    Which is: 21845
+  0x0600
+    Which is: 1536
+
+[  FAILED  ] EventAttributesTest.WholeValueFeedsWriteFlags (0 ms)
+[ RUN      ] EventAttributesTest.BitwiseOrAndAnd
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(479): error: Expected equality of these values:
+  static_cast<std::int32_t>(combined)
+    Which is: 21845
+  0x0600
+    Which is: 1536
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(481): error: Expected equality of these values:
+  combined & EventAttributes::None
+    Which is: 4-byte object <55-55 00-00>
+  EventAttributes::None
+    Which is: 4-byte object <00-00 00-00>
+
+[  FAILED  ] EventAttributesTest.BitwiseOrAndAnd (0 ms)
+[ RUN      ] EventAttributesTest.BitwiseXorAndNot
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(488): error: Expected equality of these values:
+  toggled
+    Which is: 4-byte object <55-55 00-00>
+  EventAttributes::RTSpecialName
+    Which is: 4-byte object <00-04 00-00>
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(490): error: Expected equality of these values:
+  (~EventAttributes::None) & EventAttributes::SpecialName
+    Which is: 4-byte object <00-00 00-00>
+  EventAttributes::SpecialName
+    Which is: 4-byte object <55-55 00-00>
+
+[  FAILED  ] EventAttributesTest.BitwiseXorAndNot (0 ms)
+[ RUN      ] EventAttributesTest.FlagTestIdiomMatchesDisassemblerUsage
+[       OK ] EventAttributesTest.FlagTestIdiomMatchesDisassemblerUsage (0 ms)
+[----------] 7 tests from EventAttributesTest (0 ms total)
+
+[----------] 7 tests from TypeAttributesTest
+[ RUN      ] TypeAttributesTest.ValuesMatchBclLiterals
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(539): error: Expected equality of these values:
+  static_cast<std::int32_t>(TypeAttributes::BeforeFieldInit)
+    Which is: 279620
+  0x100000
+    Which is: 1048576
+
+[  FAILED  ] TypeAttributesTest.ValuesMatchBclLiterals (0 ms)
+[ RUN      ] TypeAttributesTest.UnderlyingTypeIsInt32
+[       OK ] TypeAttributesTest.UnderlyingTypeIsInt32 (0 ms)
+[ RUN      ] TypeAttributesTest.MembersAreDistinct
+[       OK ] TypeAttributesTest.MembersAreDistinct (0 ms)
+[ RUN      ] TypeAttributesTest.FourMaskSplitMatchesWriteEnumWriteFlags
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(580): error: Expected equality of these values:
+  attrs & TypeAttributes::LayoutMask
+    Which is: 4-byte object <02-00 00-00>
+  TypeAttributes::SequentialLayout
+    Which is: 4-byte object <08-00 00-00>
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(581): error: Expected equality of these values:
+  attrs & TypeAttributes::StringFormatMask
+    Which is: 4-byte object <02-00 00-00>
+  TypeAttributes::UnicodeClass
+    Which is: 4-byte object <00-00 01-00>
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(585): error: Expected equality of these values:
+  attrs & ~masks
+    Which is: 4-byte object <02-00 00-00>
+  TypeAttributes::Abstract | TypeAttributes::BeforeFieldInit
+    Which is: 4-byte object <80-00 00-00>
+
+[  FAILED  ] TypeAttributesTest.FourMaskSplitMatchesWriteEnumWriteFlags (0 ms)
+[ RUN      ] TypeAttributesTest.HasFlagInterfaceIdiom
+[       OK ] TypeAttributesTest.HasFlagInterfaceIdiom (0 ms)
+[ RUN      ] TypeAttributesTest.BitwiseOrAndAnd
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(601): error: Expected equality of these values:
+  static_cast<std::int32_t>(combined)
+    Which is: 1
+  0x0181
+    Which is: 385
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(602): error: Expected equality of these values:
+  combined & TypeAttributes::Sealed
+    Which is: 4-byte object <01-00 00-00>
+  TypeAttributes::Sealed
+    Which is: 4-byte object <00-01 00-00>
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(603): error: Expected equality of these values:
+  combined & TypeAttributes::Interface
+    Which is: 4-byte object <01-00 00-00>
+  TypeAttributes::NotPublic
+    Which is: 4-byte object <00-00 00-00>
+
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(606): error: Expected equality of these values:
+  a & b
+    Which is: 4-byte object <80-00 00-00>
+  TypeAttributes::Sealed
+    Which is: 4-byte object <00-01 00-00>
+
+[  FAILED  ] TypeAttributesTest.BitwiseOrAndAnd (0 ms)
+[ RUN      ] TypeAttributesTest.BitwiseXorAndNot
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\Disassembler\ReflectionAttributes_Test.cpp(615): error: Expected equality of these values:
+  (~TypeAttributes::NotPublic) & TypeAttributes::BeforeFieldInit
+    Which is: 4-byte object <00-00 00-00>
+  TypeAttributes::BeforeFieldInit
+    Which is: 4-byte object <44-44 04-00>
+
+[  FAILED  ] TypeAttributesTest.BitwiseXorAndNot (0 ms)
+[----------] 7 tests from TypeAttributesTest (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 42 tests from 6 test suites ran. (6 ms total)
+[  PASSED  ] 15 tests.
+[  FAILED  ] 27 tests, listed below:
+[  FAILED  ] FieldAttributesTest.ValuesMatchBclLiterals
+[  FAILED  ] FieldAttributesTest.FieldAccessMaskSplitMatchesWriteEnumWriteFlags
+[  FAILED  ] FieldAttributesTest.BitwiseOrAndAnd
+[  FAILED  ] FieldAttributesTest.BitwiseXorAndNot
+[  FAILED  ] FieldAttributesTest.FlagTestIdiomMatchesDisassemblerUsage
+[  FAILED  ] MethodAttributesTest.ValuesMatchBclLiterals
+[  FAILED  ] MethodAttributesTest.MemberAccessMaskSplitMatchesWriteEnumWriteFlags
+[  FAILED  ] MethodAttributesTest.BitwiseOrAndAnd
+[  FAILED  ] MethodAttributesTest.BitwiseXorAndNot
+[  FAILED  ] MethodAttributesTest.FlagTestIdiomMatchesDisassemblerUsage
+[  FAILED  ] MethodImplAttributesTest.ValuesMatchBclLiterals
+[  FAILED  ] MethodImplAttributesTest.CodeTypeMaskSplitMatchesWriteEnumWriteFlags
+[  FAILED  ] MethodImplAttributesTest.BitwiseOrAndAnd
+[  FAILED  ] MethodImplAttributesTest.BitwiseXorAndNot
+[  FAILED  ] MethodImplAttributesTest.FlagTestIdiomMatchesDisassemblerUsage
+[  FAILED  ] PropertyAttributesTest.ValuesMatchBclLiterals
+[  FAILED  ] PropertyAttributesTest.WholeValueFeedsWriteFlags
+[  FAILED  ] PropertyAttributesTest.BitwiseOrAndAnd
+[  FAILED  ] PropertyAttributesTest.BitwiseXorAndNot
+[  FAILED  ] EventAttributesTest.ValuesMatchBclLiterals
+[  FAILED  ] EventAttributesTest.WholeValueFeedsWriteFlags
+[  FAILED  ] EventAttributesTest.BitwiseOrAndAnd
+[  FAILED  ] EventAttributesTest.BitwiseXorAndNot
+[  FAILED  ] TypeAttributesTest.ValuesMatchBclLiterals
+[  FAILED  ] TypeAttributesTest.FourMaskSplitMatchesWriteEnumWriteFlags
+[  FAILED  ] TypeAttributesTest.BitwiseOrAndAnd
+[  FAILED  ] TypeAttributesTest.BitwiseXorAndNot
+
+27 FAILED TESTS

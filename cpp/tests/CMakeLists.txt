@@ -18,6 +18,7 @@ add_executable(ilspy_tests
     Decompiler/Metadata/CompilerGeneratedField_Test.cpp
     Decompiler/Metadata/ILTextEmitter_Test.cpp
     Decompiler/Disassembler/OpCodeInfo_Test.cpp
+    Decompiler/Disassembler/ReflectionAttributes_Test.cpp
     Decompiler/TypeSystem/TypeName_Test.cpp
     Decompiler/TypeSystem/SignatureDecoder_Test.cpp
     Decompiler/TypeSystem/TypeKindDerivation_Test.cpp

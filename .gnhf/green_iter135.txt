@@ -1,0 +1,109 @@
+Running main() from C:\Projects\github\vcpkg\buildtrees\gtest\src\v1.17.0-e243b8ee0f.clean\googletest\src\gtest_main.cc
+Note: Google Test filter = FieldAttributesTest.*:MethodAttributesTest.*:MethodImplAttributesTest.*:PropertyAttributesTest.*:EventAttributesTest.*:TypeAttributesTest.*
+[==========] Running 42 tests from 6 test suites.
+[----------] Global test environment set-up.
+[----------] 7 tests from FieldAttributesTest
+[ RUN      ] FieldAttributesTest.ValuesMatchBclLiterals
+[       OK ] FieldAttributesTest.ValuesMatchBclLiterals (0 ms)
+[ RUN      ] FieldAttributesTest.UnderlyingTypeIsInt32
+[       OK ] FieldAttributesTest.UnderlyingTypeIsInt32 (0 ms)
+[ RUN      ] FieldAttributesTest.MembersAreDistinct
+[       OK ] FieldAttributesTest.MembersAreDistinct (0 ms)
+[ RUN      ] FieldAttributesTest.FieldAccessMaskSplitMatchesWriteEnumWriteFlags
+[       OK ] FieldAttributesTest.FieldAccessMaskSplitMatchesWriteEnumWriteFlags (0 ms)
+[ RUN      ] FieldAttributesTest.BitwiseOrAndAnd
+[       OK ] FieldAttributesTest.BitwiseOrAndAnd (0 ms)
+[ RUN      ] FieldAttributesTest.BitwiseXorAndNot
+[       OK ] FieldAttributesTest.BitwiseXorAndNot (0 ms)
+[ RUN      ] FieldAttributesTest.FlagTestIdiomMatchesDisassemblerUsage
+[       OK ] FieldAttributesTest.FlagTestIdiomMatchesDisassemblerUsage (0 ms)
+[----------] 7 tests from FieldAttributesTest (0 ms total)
+
+[----------] 7 tests from MethodAttributesTest
+[ RUN      ] MethodAttributesTest.ValuesMatchBclLiterals
+[       OK ] MethodAttributesTest.ValuesMatchBclLiterals (0 ms)
+[ RUN      ] MethodAttributesTest.UnderlyingTypeIsInt32
+[       OK ] MethodAttributesTest.UnderlyingTypeIsInt32 (0 ms)
+[ RUN      ] MethodAttributesTest.MembersAreDistinct
+[       OK ] MethodAttributesTest.MembersAreDistinct (0 ms)
+[ RUN      ] MethodAttributesTest.MemberAccessMaskSplitMatchesWriteEnumWriteFlags
+[       OK ] MethodAttributesTest.MemberAccessMaskSplitMatchesWriteEnumWriteFlags (0 ms)
+[ RUN      ] MethodAttributesTest.BitwiseOrAndAnd
+[       OK ] MethodAttributesTest.BitwiseOrAndAnd (0 ms)
+[ RUN      ] MethodAttributesTest.BitwiseXorAndNot
+[       OK ] MethodAttributesTest.BitwiseXorAndNot (0 ms)
+[ RUN      ] MethodAttributesTest.FlagTestIdiomMatchesDisassemblerUsage
+[       OK ] MethodAttributesTest.FlagTestIdiomMatchesDisassemblerUsage (0 ms)
+[----------] 7 tests from MethodAttributesTest (0 ms total)
+
+[----------] 7 tests from MethodImplAttributesTest
+[ RUN      ] MethodImplAttributesTest.ValuesMatchBclLiterals
+[       OK ] MethodImplAttributesTest.ValuesMatchBclLiterals (0 ms)
+[ RUN      ] MethodImplAttributesTest.UnderlyingTypeIsInt32
+[       OK ] MethodImplAttributesTest.UnderlyingTypeIsInt32 (0 ms)
+[ RUN      ] MethodImplAttributesTest.MembersAreDistinct
+[       OK ] MethodImplAttributesTest.MembersAreDistinct (0 ms)
+[ RUN      ] MethodImplAttributesTest.CodeTypeMaskSplitMatchesWriteEnumWriteFlags
+[       OK ] MethodImplAttributesTest.CodeTypeMaskSplitMatchesWriteEnumWriteFlags (0 ms)
+[ RUN      ] MethodImplAttributesTest.BitwiseOrAndAnd
+[       OK ] MethodImplAttributesTest.BitwiseOrAndAnd (0 ms)
+[ RUN      ] MethodImplAttributesTest.BitwiseXorAndNot
+[       OK ] MethodImplAttributesTest.BitwiseXorAndNot (0 ms)
+[ RUN      ] MethodImplAttributesTest.FlagTestIdiomMatchesDisassemblerUsage
+[       OK ] MethodImplAttributesTest.FlagTestIdiomMatchesDisassemblerUsage (0 ms)
+[----------] 7 tests from MethodImplAttributesTest (0 ms total)
+
+[----------] 7 tests from PropertyAttributesTest
+[ RUN      ] PropertyAttributesTest.ValuesMatchBclLiterals
+[       OK ] PropertyAttributesTest.ValuesMatchBclLiterals (0 ms)
+[ RUN      ] PropertyAttributesTest.UnderlyingTypeIsInt32
+[       OK ] PropertyAttributesTest.UnderlyingTypeIsInt32 (0 ms)
+[ RUN      ] PropertyAttributesTest.MembersAreDistinct
+[       OK ] PropertyAttributesTest.MembersAreDistinct (0 ms)
+[ RUN      ] PropertyAttributesTest.WholeValueFeedsWriteFlags
+[       OK ] PropertyAttributesTest.WholeValueFeedsWriteFlags (0 ms)
+[ RUN      ] PropertyAttributesTest.BitwiseOrAndAnd
+[       OK ] PropertyAttributesTest.BitwiseOrAndAnd (0 ms)
+[ RUN      ] PropertyAttributesTest.BitwiseXorAndNot
+[       OK ] PropertyAttributesTest.BitwiseXorAndNot (0 ms)
+[ RUN      ] PropertyAttributesTest.FlagTestIdiomMatchesDisassemblerUsage
+[       OK ] PropertyAttributesTest.FlagTestIdiomMatchesDisassemblerUsage (0 ms)
+[----------] 7 tests from PropertyAttributesTest (0 ms total)
+
+[----------] 7 tests from EventAttributesTest
+[ RUN      ] EventAttributesTest.ValuesMatchBclLiterals
+[       OK ] EventAttributesTest.ValuesMatchBclLiterals (0 ms)
+[ RUN      ] EventAttributesTest.UnderlyingTypeIsInt32
+[       OK ] EventAttributesTest.UnderlyingTypeIsInt32 (0 ms)
+[ RUN      ] EventAttributesTest.ReservedMaskAliasesRTSpecialName
+[       OK ] EventAttributesTest.ReservedMaskAliasesRTSpecialName (0 ms)
+[ RUN      ] EventAttributesTest.WholeValueFeedsWriteFlags
+[       OK ] EventAttributesTest.WholeValueFeedsWriteFlags (0 ms)
+[ RUN      ] EventAttributesTest.BitwiseOrAndAnd
+[       OK ] EventAttributesTest.BitwiseOrAndAnd (0 ms)
+[ RUN      ] EventAttributesTest.BitwiseXorAndNot
+[       OK ] EventAttributesTest.BitwiseXorAndNot (0 ms)
+[ RUN      ] EventAttributesTest.FlagTestIdiomMatchesDisassemblerUsage
+[       OK ] EventAttributesTest.FlagTestIdiomMatchesDisassemblerUsage (0 ms)
+[----------] 7 tests from EventAttributesTest (0 ms total)
+
+[----------] 7 tests from TypeAttributesTest
+[ RUN      ] TypeAttributesTest.ValuesMatchBclLiterals
+[       OK ] TypeAttributesTest.ValuesMatchBclLiterals (0 ms)
+[ RUN      ] TypeAttributesTest.UnderlyingTypeIsInt32
+[       OK ] TypeAttributesTest.UnderlyingTypeIsInt32 (0 ms)
+[ RUN      ] TypeAttributesTest.MembersAreDistinct
+[       OK ] TypeAttributesTest.MembersAreDistinct (0 ms)
+[ RUN      ] TypeAttributesTest.FourMaskSplitMatchesWriteEnumWriteFlags
+[       OK ] TypeAttributesTest.FourMaskSplitMatchesWriteEnumWriteFlags (0 ms)
+[ RUN      ] TypeAttributesTest.HasFlagInterfaceIdiom
+[       OK ] TypeAttributesTest.HasFlagInterfaceIdiom (0 ms)
+[ RUN      ] TypeAttributesTest.BitwiseOrAndAnd
+[       OK ] TypeAttributesTest.BitwiseOrAndAnd (0 ms)
+[ RUN      ] TypeAttributesTest.BitwiseXorAndNot
+[       OK ] TypeAttributesTest.BitwiseXorAndNot (0 ms)
+[----------] 7 tests from TypeAttributesTest (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 42 tests from 6 test suites ran. (2 ms total)
+[  PASSED  ] 42 tests.
