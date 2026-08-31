@@ -46,8 +46,10 @@
 // The hand-written `GetOperatorToken` static helper, the `IsPostfixOperator` predicate, and
 // the token-string constants (`NotToken`, `MinusToken`, ...) are now ported (the D326 output-
 // visitor slice that implements `VisitUnaryOperatorExpression`); `GetLinqNodeType` (maps to
-// `System.Linq.Expressions.ExpressionType`, a BCL enum) stays deferred until the resolver
-// consumes it.
+// `System.Linq.Expressions.ExpressionType`, a BCL enum) is now ported as well -- the operator-
+// kind mapping the resolver's `ResolveUnaryOperator` region consumes (it threads the operator
+// kind into the `OperatorResolveResult` it builds for both the user-defined and the built-in
+// operator resolutions, CSharpResolver.cs lines 417/493/530).
 //
 // C++ name-shadowing crux: the C# property is `Expression` of type `Expression` (a property
 // named the same as its type -- legal in C#, which keeps property and type names in separate
@@ -73,6 +75,7 @@
 #include "Decompiler/CSharp/Syntax/TextLocation.hpp"
 
 #include "Decompiler/CSharp/Syntax/PatternMatching/Match.hpp"
+#include "Decompiler/TypeSystem/ExpressionType.hpp"
 
 #include <optional>
 #include <stdexcept>
@@ -258,6 +261,47 @@ public:
             || op == UnaryOperatorType::PostDecrement
             || op == UnaryOperatorType::NullConditional
             || op == UnaryOperatorType::SuppressNullableWarning;
+    }
+
+    // The C# `public static ExpressionType GetLinqNodeType(UnaryOperatorType op, bool
+    // checkForOverflow)` -- maps the operator to the BCL `System.Linq.Expressions
+    // .ExpressionType` node kind. The checked/unchecked distinction exists only for `Minus`
+    // (`NegateChecked` vs `Negate`); the pointer, await, and pattern operators have no LINQ
+    // expression-tree node and map to `Extension`. The `default` case throws
+    // `NotSupportedException` (an invalid enum value: `Any`, `NullConditional`,
+    // `NullConditionalRewrap`, `IsTrue`), which ports to `std::out_of_range` (the
+    // `GetOperatorToken` precedent in this file).
+    //
+    // Namespace note: the return type is fully qualified because from this namespace
+    // (`ILSpy::Decompiler::CSharp::Syntax`) an unqualified `TypeSystem::` would resolve
+    // against the SIBLING `ILSpy::Decompiler::CSharp::TypeSystem` (the iteration-94
+    // namespace-reopening learning).
+    static ILSpy::Decompiler::TypeSystem::ExpressionType GetLinqNodeType(
+        UnaryOperatorType op, bool checkForOverflow) {
+        using ILSpy::Decompiler::TypeSystem::ExpressionType;
+        switch (op) {
+            case UnaryOperatorType::Not: return ExpressionType::Not;
+            case UnaryOperatorType::BitNot: return ExpressionType::OnesComplement;
+            case UnaryOperatorType::Minus:
+                return checkForOverflow ? ExpressionType::NegateChecked : ExpressionType::Negate;
+            case UnaryOperatorType::Plus: return ExpressionType::UnaryPlus;
+            case UnaryOperatorType::Increment: return ExpressionType::PreIncrementAssign;
+            case UnaryOperatorType::Decrement: return ExpressionType::PreDecrementAssign;
+            case UnaryOperatorType::PostIncrement: return ExpressionType::PostIncrementAssign;
+            case UnaryOperatorType::PostDecrement: return ExpressionType::PostDecrementAssign;
+            case UnaryOperatorType::Dereference:
+            case UnaryOperatorType::AddressOf:
+            case UnaryOperatorType::Await:
+            case UnaryOperatorType::SuppressNullableWarning:
+            case UnaryOperatorType::IndexFromEnd:
+            case UnaryOperatorType::PatternNot:
+            case UnaryOperatorType::PatternRelationalLessThan:
+            case UnaryOperatorType::PatternRelationalLessThanOrEqual:
+            case UnaryOperatorType::PatternRelationalGreaterThan:
+            case UnaryOperatorType::PatternRelationalGreaterThanOrEqual:
+                return ExpressionType::Extension;
+            default: throw std::out_of_range("Invalid value for UnaryOperatorType");
+        }
     }
 
     // The generated slot static (per-node), pointing at the shared `Slots` kind. The

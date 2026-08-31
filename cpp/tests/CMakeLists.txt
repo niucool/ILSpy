@@ -244,6 +244,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/AssignmentExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression_Test.cpp
+    Decompiler/CSharp/Syntax/Expressions/GetLinqNodeType_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/ConditionalExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/ParenthesizedExpression_Test.cpp
     Decompiler/CSharp/Syntax/Expressions/CheckedUncheckedExpression_Test.cpp

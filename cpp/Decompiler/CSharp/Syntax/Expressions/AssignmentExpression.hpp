@@ -49,19 +49,24 @@
 // (`AssignToken`, `AddToken`, ...) are now ported (the D326 output-visitor slice that
 // implements `VisitAssignmentExpression`); `GetCorrespondingBinaryOperator`/
 // `GetLinqNodeType`/`GetAssignmentOperatorTypeFromExpressionType` (map to `System.Linq.
-// Expressions.ExpressionType`, a BCL enum) stay deferred until the resolver consumes them.
+// Expressions.ExpressionType`, a BCL enum) are now ported as well -- the operator-kind
+// mappings the resolver's `ResolveAssignment` region consumes (CSharpResolver.cs lines
+// 2943-2944) alongside the `GetLinqNodeType` twins on the unary/binary operator nodes.
 
 #ifndef ILSPY_DECOMPILER_CSHARP_SYNTAX_EXPRESSIONS_ASSIGNMENTEXPRESSION_HPP
 #define ILSPY_DECOMPILER_CSHARP_SYNTAX_EXPRESSIONS_ASSIGNMENTEXPRESSION_HPP
 
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/IAstVisitor.hpp"
 #include "Decompiler/CSharp/Syntax/IAstVisitorBool.hpp"
 #include "Decompiler/CSharp/Syntax/Slots.hpp"
 #include "Decompiler/CSharp/Syntax/TextLocation.hpp"
 
 #include "Decompiler/CSharp/Syntax/PatternMatching/Match.hpp"
+#include "Decompiler/TypeSystem/ExpressionType.hpp"
 
+#include <optional>
 #include <stdexcept>
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
@@ -131,6 +136,101 @@ public:
             case AssignmentOperatorType::BitwiseOr: return BitwiseOrToken;
             case AssignmentOperatorType::ExclusiveOr: return ExclusiveOrToken;
             default: throw std::out_of_range("Invalid value for AssignmentOperatorType");
+        }
+    }
+
+    // The C# `public static BinaryOperatorType? GetCorrespondingBinaryOperator(
+    // AssignmentOperatorType op)` -- the binary operator for the specified compound assignment
+    // operator; null if `op` is not a compound assignment (the plain `Assign`). Consumed by the
+    // resolver's `ResolveAssignment` region (CSharpResolver.cs line 2944) to resolve the
+    // underlying binary operation of a compound assignment. The `default` case throws
+    // `NotSupportedException` (an invalid enum value: `Any`), which ports to
+    // `std::out_of_range` (the `GetOperatorToken` precedent in this file). The C# nullable
+    // `BinaryOperatorType?` return ports to `std::optional` (`std::nullopt` is the C# null).
+    static std::optional<BinaryOperatorType> GetCorrespondingBinaryOperator(
+        AssignmentOperatorType op) {
+        switch (op) {
+            case AssignmentOperatorType::Assign: return std::nullopt;
+            case AssignmentOperatorType::Add: return BinaryOperatorType::Add;
+            case AssignmentOperatorType::Subtract: return BinaryOperatorType::Subtract;
+            case AssignmentOperatorType::Multiply: return BinaryOperatorType::Multiply;
+            case AssignmentOperatorType::Divide: return BinaryOperatorType::Divide;
+            case AssignmentOperatorType::Modulus: return BinaryOperatorType::Modulus;
+            case AssignmentOperatorType::ShiftLeft: return BinaryOperatorType::ShiftLeft;
+            case AssignmentOperatorType::ShiftRight: return BinaryOperatorType::ShiftRight;
+            case AssignmentOperatorType::UnsignedShiftRight: return BinaryOperatorType::UnsignedShiftRight;
+            case AssignmentOperatorType::BitwiseAnd: return BinaryOperatorType::BitwiseAnd;
+            case AssignmentOperatorType::BitwiseOr: return BinaryOperatorType::BitwiseOr;
+            case AssignmentOperatorType::ExclusiveOr: return BinaryOperatorType::ExclusiveOr;
+            default: throw std::out_of_range("Invalid value for AssignmentOperatorType");
+        }
+    }
+
+    // The C# `public static ExpressionType GetLinqNodeType(AssignmentOperatorType op, bool
+    // checkForOverflow)` -- maps the operator to the BCL `System.Linq.Expressions
+    // .ExpressionType` node kind. The checked/unchecked distinction exists only for the
+    // arithmetic compound assignments that can overflow (`Add`/`Subtract`/`Multiply`);
+    // `UnsignedShiftRight` has no LINQ expression-tree node and maps to `Extension`. The
+    // `default` case throws `NotSupportedException` (an invalid enum value: `Any`), which
+    // ports to `std::out_of_range` (the `GetOperatorToken` precedent in this file).
+    //
+    // Namespace note: the return type is fully qualified because from this namespace
+    // (`ILSpy::Decompiler::CSharp::Syntax`) an unqualified `TypeSystem::` would resolve
+    // against the SIBLING `ILSpy::Decompiler::CSharp::TypeSystem` (the iteration-94
+    // namespace-reopening learning).
+    static ILSpy::Decompiler::TypeSystem::ExpressionType GetLinqNodeType(
+        AssignmentOperatorType op, bool checkForOverflow) {
+        using ILSpy::Decompiler::TypeSystem::ExpressionType;
+        switch (op) {
+            case AssignmentOperatorType::Assign: return ExpressionType::Assign;
+            case AssignmentOperatorType::Add:
+                return checkForOverflow ? ExpressionType::AddAssignChecked : ExpressionType::AddAssign;
+            case AssignmentOperatorType::Subtract:
+                return checkForOverflow ? ExpressionType::SubtractAssignChecked
+                                        : ExpressionType::SubtractAssign;
+            case AssignmentOperatorType::Multiply:
+                return checkForOverflow ? ExpressionType::MultiplyAssignChecked
+                                        : ExpressionType::MultiplyAssign;
+            case AssignmentOperatorType::Divide: return ExpressionType::DivideAssign;
+            case AssignmentOperatorType::Modulus: return ExpressionType::ModuloAssign;
+            case AssignmentOperatorType::ShiftLeft: return ExpressionType::LeftShiftAssign;
+            case AssignmentOperatorType::ShiftRight: return ExpressionType::RightShiftAssign;
+            case AssignmentOperatorType::UnsignedShiftRight: return ExpressionType::Extension;
+            case AssignmentOperatorType::BitwiseAnd: return ExpressionType::AndAssign;
+            case AssignmentOperatorType::BitwiseOr: return ExpressionType::OrAssign;
+            case AssignmentOperatorType::ExclusiveOr: return ExpressionType::ExclusiveOrAssign;
+            default: throw std::out_of_range("Invalid value for AssignmentOperatorType");
+        }
+    }
+
+    // The C# `public static AssignmentOperatorType?
+    // GetAssignmentOperatorTypeFromExpressionType(ExpressionType expressionType)` -- the
+    // REVERSE mapping (a LINQ expression-tree node kind back to the compound-assignment
+    // operator). The checked variants (`AddAssignChecked`/`SubtractAssignChecked`/
+    // `MultiplyAssignChecked`) fold back onto the SAME operator as their unchecked twins
+    // (the assignment operator does not record the checked context -- that lives in the
+    // resolver's `CheckForOverflow` flag); every other node kind returns null (NOT an
+    // exception -- `default: return null`), including `ExpressionType.Assign` itself (the
+    // plain assignment has no case in the switch, so it falls to the default). The C#
+    // nullable `AssignmentOperatorType?` return ports to `std::optional`.
+    static std::optional<AssignmentOperatorType> GetAssignmentOperatorTypeFromExpressionType(
+        ILSpy::Decompiler::TypeSystem::ExpressionType expressionType) {
+        using ILSpy::Decompiler::TypeSystem::ExpressionType;
+        switch (expressionType) {
+            case ExpressionType::AddAssign:
+            case ExpressionType::AddAssignChecked: return AssignmentOperatorType::Add;
+            case ExpressionType::AndAssign: return AssignmentOperatorType::BitwiseAnd;
+            case ExpressionType::DivideAssign: return AssignmentOperatorType::Divide;
+            case ExpressionType::ExclusiveOrAssign: return AssignmentOperatorType::ExclusiveOr;
+            case ExpressionType::LeftShiftAssign: return AssignmentOperatorType::ShiftLeft;
+            case ExpressionType::ModuloAssign: return AssignmentOperatorType::Modulus;
+            case ExpressionType::MultiplyAssign:
+            case ExpressionType::MultiplyAssignChecked: return AssignmentOperatorType::Multiply;
+            case ExpressionType::OrAssign: return AssignmentOperatorType::BitwiseOr;
+            case ExpressionType::RightShiftAssign: return AssignmentOperatorType::ShiftRight;
+            case ExpressionType::SubtractAssign:
+            case ExpressionType::SubtractAssignChecked: return AssignmentOperatorType::Subtract;
+            default: return std::nullopt;
         }
     }
 

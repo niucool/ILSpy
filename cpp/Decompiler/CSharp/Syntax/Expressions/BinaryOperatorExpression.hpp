@@ -45,7 +45,8 @@
 // The hand-written `GetOperatorToken` static helper and the token-string constants
 // (`BitwiseAndToken`, ...) are now ported (the D326 output-visitor slice that implements
 // `VisitBinaryOperatorExpression`); `GetLinqNodeType` (maps to `System.Linq.Expressions.
-// ExpressionType`, a BCL enum) stays deferred until the resolver consumes it.
+// ExpressionType`, a BCL enum) is now ported as well -- the operator-kind mapping the
+// resolver's `ResolveBinaryOperator` region consumes (CSharpResolver.cs lines 647/922/956).
 
 #ifndef ILSPY_DECOMPILER_CSHARP_SYNTAX_EXPRESSIONS_BINARYOPERATOREXPRESSION_HPP
 #define ILSPY_DECOMPILER_CSHARP_SYNTAX_EXPRESSIONS_BINARYOPERATOREXPRESSION_HPP
@@ -57,6 +58,7 @@
 #include "Decompiler/CSharp/Syntax/TextLocation.hpp"
 
 #include "Decompiler/CSharp/Syntax/PatternMatching/Match.hpp"
+#include "Decompiler/TypeSystem/ExpressionType.hpp"
 
 #include <stdexcept>
 
@@ -159,6 +161,53 @@ public:
             case BinaryOperatorType::NullCoalescing: return NullCoalescingToken;
             case BinaryOperatorType::Range: return RangeToken;
             case BinaryOperatorType::IsPattern: return IsKeyword;
+            default: throw std::out_of_range("Invalid value for BinaryOperatorType");
+        }
+    }
+
+    // The C# `public static ExpressionType GetLinqNodeType(BinaryOperatorType op, bool
+    // checkForOverflow)` -- maps the operator to the BCL `System.Linq.Expressions
+    // .ExpressionType` node kind. The checked/unchecked distinction exists only for the
+    // arithmetic operators that can overflow (`Add`/`Subtract`/`Multiply`); `Range` and
+    // `UnsignedShiftRight` have no LINQ expression-tree node and map to `Extension`. The
+    // `default` case throws `NotSupportedException` (an invalid enum value: `Any` and
+    // `IsPattern` -- an `is` pattern is not a binary operation and has no expression-tree
+    // node), which ports to `std::out_of_range` (the `GetOperatorToken` precedent in this
+    // file).
+    //
+    // Namespace note: the return type is fully qualified because from this namespace
+    // (`ILSpy::Decompiler::CSharp::Syntax`) an unqualified `TypeSystem::` would resolve
+    // against the SIBLING `ILSpy::Decompiler::CSharp::TypeSystem` (the iteration-94
+    // namespace-reopening learning).
+    static ILSpy::Decompiler::TypeSystem::ExpressionType GetLinqNodeType(
+        BinaryOperatorType op, bool checkForOverflow) {
+        using ILSpy::Decompiler::TypeSystem::ExpressionType;
+        switch (op) {
+            case BinaryOperatorType::BitwiseAnd: return ExpressionType::And;
+            case BinaryOperatorType::BitwiseOr: return ExpressionType::Or;
+            case BinaryOperatorType::ConditionalAnd: return ExpressionType::AndAlso;
+            case BinaryOperatorType::ConditionalOr: return ExpressionType::OrElse;
+            case BinaryOperatorType::ExclusiveOr: return ExpressionType::ExclusiveOr;
+            case BinaryOperatorType::GreaterThan: return ExpressionType::GreaterThan;
+            case BinaryOperatorType::GreaterThanOrEqual: return ExpressionType::GreaterThanOrEqual;
+            case BinaryOperatorType::Equality: return ExpressionType::Equal;
+            case BinaryOperatorType::InEquality: return ExpressionType::NotEqual;
+            case BinaryOperatorType::LessThan: return ExpressionType::LessThan;
+            case BinaryOperatorType::LessThanOrEqual: return ExpressionType::LessThanOrEqual;
+            case BinaryOperatorType::Add:
+                return checkForOverflow ? ExpressionType::AddChecked : ExpressionType::Add;
+            case BinaryOperatorType::Subtract:
+                return checkForOverflow ? ExpressionType::SubtractChecked : ExpressionType::Subtract;
+            case BinaryOperatorType::Multiply:
+                return checkForOverflow ? ExpressionType::MultiplyChecked : ExpressionType::Multiply;
+            case BinaryOperatorType::Divide: return ExpressionType::Divide;
+            case BinaryOperatorType::Modulus: return ExpressionType::Modulo;
+            case BinaryOperatorType::ShiftLeft: return ExpressionType::LeftShift;
+            case BinaryOperatorType::ShiftRight: return ExpressionType::RightShift;
+            case BinaryOperatorType::NullCoalescing: return ExpressionType::Coalesce;
+            case BinaryOperatorType::Range:
+            case BinaryOperatorType::UnsignedShiftRight:
+                return ExpressionType::Extension;
             default: throw std::out_of_range("Invalid value for BinaryOperatorType");
         }
     }
