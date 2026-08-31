@@ -249,6 +249,91 @@ std::vector<PropertyInfo> MetadataFile::GetProperties(std::uint32_t typeToken) c
     return result;
 }
 
+std::vector<EventInfo> MetadataFile::GetEvents(std::uint32_t typeToken) const {
+    std::vector<EventInfo> result;
+    if (!IsValid()) return result;
+    std::uint32_t row = typeToken & 0x00FFFFFFu;
+    if (row == 0 || row > impl_->db->TypeDef.size()) return result;
+    auto t = impl_->db->TypeDef[row - 1];
+    auto range = t.EventList();
+    for (auto it = range.first; it != range.second; ++it) {
+        EventInfo e;
+        e.Name = std::string{ (*it).Name() };
+        // Event tokens are table 0x14; rows are 1-based (the GetMethods
+        // convention).
+        std::uint32_t eventRow = static_cast<std::uint32_t>((*it).index()) + 1;
+        e.Token = (0x14u << 24) | (eventRow & 0x00FFFFFFu);
+        result.push_back(std::move(e));
+    }
+    return result;
+}
+
+std::uint32_t MetadataFile::GetTypeDefAttributes(std::uint32_t typeToken) const {
+    if (!IsValid()) return 0;
+    std::uint32_t table = typeToken >> 24;
+    std::uint32_t row = typeToken & 0x00FFFFFFu;
+    if (table != 0x02 || row == 0 || row > impl_->db->TypeDef.size()) return 0;
+    try {
+        // TypeDef flags are a 4-byte column (II.23.1.15).
+        return impl_->db->TypeDef[row - 1].Flags().value;
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
+std::uint32_t MetadataFile::GetFieldAttributes(std::uint32_t fieldToken) const {
+    if (!IsValid()) return 0;
+    std::uint32_t table = fieldToken >> 24;
+    std::uint32_t row = fieldToken & 0x00FFFFFFu;
+    if (table != 0x04 || row == 0 || row > impl_->db->Field.size()) return 0;
+    try {
+        // Field flags are a 2-byte column (II.23.1.5), widened to uint32 (the
+        // BCL enum reading a row widens to int).
+        return impl_->db->Field[row - 1].Flags().value;
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
+std::uint32_t MetadataFile::GetMethodAttributes(std::uint32_t methodToken) const {
+    if (!IsValid()) return 0;
+    std::uint32_t table = methodToken >> 24;
+    std::uint32_t row = methodToken & 0x00FFFFFFu;
+    if (table != 0x06 || row == 0 || row > impl_->db->MethodDef.size()) return 0;
+    try {
+        // MethodDef flags are a 2-byte column (II.23.1.10), widened to uint32.
+        return impl_->db->MethodDef[row - 1].Flags().value;
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
+std::uint32_t MetadataFile::GetPropertyAttributes(std::uint32_t propertyToken) const {
+    if (!IsValid()) return 0;
+    std::uint32_t table = propertyToken >> 24;
+    std::uint32_t row = propertyToken & 0x00FFFFFFu;
+    if (table != 0x17 || row == 0 || row > impl_->db->Property.size()) return 0;
+    try {
+        // Property flags are a 2-byte II.23.1 column, widened to uint32.
+        return impl_->db->Property[row - 1].Flags().value;
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
+std::uint32_t MetadataFile::GetEventAttributes(std::uint32_t eventToken) const {
+    if (!IsValid()) return 0;
+    std::uint32_t table = eventToken >> 24;
+    std::uint32_t row = eventToken & 0x00FFFFFFu;
+    if (table != 0x14 || row == 0 || row > impl_->db->Event.size()) return 0;
+    try {
+        // Event flags are a 2-byte II.23.1 column, widened to uint32.
+        return impl_->db->Event[row - 1].EventFlags().value;
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
 ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::GetFieldSignature(std::uint32_t fieldToken) const {
     if (!IsValid()) return nullptr;
     std::uint32_t row = fieldToken & 0x00FFFFFFu;

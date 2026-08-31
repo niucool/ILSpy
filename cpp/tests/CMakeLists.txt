@@ -11,6 +11,7 @@ add_executable(ilspy_tests
     Util/LazyInit_Test.cpp
     Util/CSharpPrimitiveCast_Test.cpp
     Decompiler/Metadata/Metadata_Test.cpp
+    Decompiler/Metadata/MetadataAttributes_Test.cpp
     Decompiler/Metadata/MethodBody_Test.cpp
     Decompiler/Metadata/ILDisassembler_Test.cpp
     Decompiler/Metadata/EntitySurface_Test.cpp

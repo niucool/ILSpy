@@ -104,6 +104,11 @@ struct PropertyInfo {
     std::uint32_t Token;   // table 0x17
 };
 
+struct EventInfo {
+    std::string Name;
+    std::uint32_t Token;   // table 0x14
+};
+
 // A custom attribute applied to an entity: the attribute type's namespace and
 // name (e.g. "System", "SerializableAttribute"). Constructor/named-argument
 // decoding is deferred to a later phase; the name is enough for the type
@@ -139,11 +144,12 @@ public:
     // All TypeDef rows in table order, with resolved base types.
     std::vector<TypeDefInfo> TypeDefs() const;
 
-    // Members of a TypeDef (by token): methods, fields, and properties, in row
-    // order. Empty vectors for an invalid/out-of-range token.
+    // Members of a TypeDef (by token): methods, fields, properties, and
+    // events, in row order. Empty vectors for an invalid/out-of-range token.
     std::vector<MethodInfo> GetMethods(std::uint32_t typeToken) const;
     std::vector<FieldInfo> GetFields(std::uint32_t typeToken) const;
     std::vector<PropertyInfo> GetProperties(std::uint32_t typeToken) const;
+    std::vector<EventInfo> GetEvents(std::uint32_t typeToken) const;
 
     // Parameter names from the Param table for a MethodDef token (table 0x06).
     // Index 0 is the first declared parameter (after any implicit `this`); the
@@ -171,6 +177,23 @@ public:
     // Decode the field type of a Field row (by token). Returns nullptr if the
     // token is out of range or the signature is malformed; never throws.
     ILSpy::Decompiler::TypeSystem::ITypePtr GetFieldSignature(std::uint32_t fieldToken) const;
+
+    // The raw II.23.1 attribute-flags column of a metadata row, by token:
+    // the value the C# MetadataReader surfaces as the System.Reflection
+    // attribute enum (GetFieldDefinition(token).Attributes &c.). The caller
+    // masks it with the ECMA-335 flag values -- the Disassembler attribute
+    // enums carry exactly them (FieldAttributes II.23.1.5, MethodAttributes
+    // II.23.1.10, TypeAttributes II.23.1.15, plus the unnumbered II.23.1
+    // property/event flag families). The 2-byte member columns are widened
+    // to uint32 (the BCL enum reading a row widens to int). Returns 0 for an
+    // invalid file, an out-of-range row, or a token from the wrong table;
+    // never throws. The direct ILAmbience prerequisite: the flag-driven
+    // .field/.method/.property/.event/.class prefixes the ambience renders.
+    std::uint32_t GetTypeDefAttributes(std::uint32_t typeToken) const;
+    std::uint32_t GetFieldAttributes(std::uint32_t fieldToken) const;
+    std::uint32_t GetMethodAttributes(std::uint32_t methodToken) const;
+    std::uint32_t GetPropertyAttributes(std::uint32_t propertyToken) const;
+    std::uint32_t GetEventAttributes(std::uint32_t eventToken) const;
 
     // Custom attributes applied to an entity (TypeDef/MethodDef/Field/Property
     // token). Returns the attribute type namespace+name for each; never throws.
