@@ -4506,4 +4506,111 @@ CSharpResolver::ResolveIndexer(
     }
 }
 
+// ---- ResolveObjectCreation region (CSharpResolver.cs lines 2539-2585) ---------------------
+
+// The C# `public ResolveResult ResolveObjectCreation(IType type, ResolveResult[] arguments,
+// string[] argumentNames = null, bool allowProtectedAccess = false, IList<ResolveResult>
+// initializerStatements = null)` (line 2539) -- see CSharpResolver.hpp for the port
+// conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveObjectCreation(
+    ILSpy::Decompiler::TypeSystem::IType& type,
+    std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> arguments,
+    std::optional<std::vector<std::string>> argumentNames,
+    bool allowProtectedAccess,
+    std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> initializerStatements) const
+{
+    using ILSpy::Decompiler::CSharp::Resolver::DynamicInvocationResolveResult;
+    using ILSpy::Decompiler::CSharp::Resolver::DynamicInvocationType;
+    using ILSpy::Decompiler::CSharp::Resolver::IsApplicable;
+    using ILSpy::Decompiler::CSharp::Resolver::MethodGroupResolveResult;
+    using ILSpy::Decompiler::CSharp::Resolver::MethodListWithDeclaringType;
+    using ILSpy::Decompiler::CSharp::Resolver::OverloadResolution;
+    using ILSpy::Decompiler::CSharp::Resolver::OverloadResolutionErrors;
+    using ILSpy::Decompiler::Semantics::ErrorResolveResult;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::TypeSystem::GetDelegateInvokeMethod;
+    using ILSpy::Decompiler::TypeSystem::IMethod;
+    using ILSpy::Decompiler::TypeSystem::IParameterizedMember;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+
+    if (type.Kind() == TypeKind::Delegate && arguments.size() == 1) {
+        std::shared_ptr<ResolveResult> input = arguments[0];
+        const IMethod* invoke = GetDelegateInvokeMethod(input->Type());
+        if (invoke != nullptr) {
+            // The C# object initializer reads `input.Type` (the OLD input -- the
+            // assignment completes only after the right-hand side is fully evaluated);
+            // the owning handle for the `MethodListWithDeclaringType` is recovered via
+            // `shared_from_this` + `const_pointer_cast` (the D529 convention).
+            ITypePtr inputType =
+                std::const_pointer_cast<IType>(input->Type().shared_from_this());
+            input = std::make_shared<MethodGroupResolveResult>(
+                std::move(input), invoke->Name(),
+                std::vector<MethodListWithDeclaringType>{ MethodListWithDeclaringType(
+                    std::move(inputType),
+                    std::initializer_list<const IParameterizedMember*>{ invoke }) },
+                std::vector<ITypePtr>{});
+        }
+        return Convert(std::move(input), type);
+    }
+
+    std::unique_ptr<OverloadResolution> orr =
+        CreateOverloadResolution(arguments, argumentNames);
+    MemberLookup lookup = CreateMemberLookup();
+    // The C# `arguments.Any(a => a.Type.Kind == TypeKind.Dynamic) ? new List<IMethod>()
+    // : null` -- the applicable-constructor collector exists only when a dynamic
+    // argument is present (the `has_value()` guards model the C# `!= null` checks).
+    std::optional<std::vector<const IMethod*>> allApplicable;
+    if (std::any_of(arguments.begin(), arguments.end(),
+                    [](const std::shared_ptr<ResolveResult>& a) {
+                        return a->Type().Kind() == TypeKind::Dynamic;
+                    })) {
+        allApplicable.emplace();
+    }
+    for (const IMethod* ctor : type.GetConstructors()) {
+        if (ctor == nullptr)
+            continue; // the D516 null-entry guard
+        if (lookup.IsAccessible(*ctor, allowProtectedAccess)) {
+            OverloadResolutionErrors orErrors = orr->AddCandidate(*ctor);
+            if (allApplicable.has_value() && IsApplicable(orErrors))
+                allApplicable->push_back(ctor);
+        } else {
+            orr->AddCandidate(*ctor, OverloadResolutionErrors::Inaccessible);
+        }
+    }
+
+    if (allApplicable.has_value() && allApplicable->size() > 1) {
+        // If we have dynamic arguments, we need to represent the invocation as a
+        // dynamic invocation if there is more than one applicable constructor.
+        //
+        // The C# `new MethodListWithDeclaringType(type, allApplicable)` -- the
+        // `std::vector<const IMethod*>` converts element-wise into the bucket's
+        // `std::vector<const IParameterizedMember*>` (vector invariance; the
+        // ResolveInvocation MakeGroup convention).
+        std::vector<const IParameterizedMember*> applicableMembers(
+            allApplicable->begin(), allApplicable->end());
+        return std::make_shared<DynamicInvocationResolveResult>(
+            std::make_shared<MethodGroupResolveResult>(
+                /*targetResult*/ nullptr, (*allApplicable)[0]->Name(),
+                std::vector<MethodListWithDeclaringType>{ MethodListWithDeclaringType(
+                    type.shared_from_this(), std::move(applicableMembers)) },
+                std::vector<ITypePtr>{}),
+            DynamicInvocationType::ObjectCreation,
+            AddArgumentNamesIfNecessary(arguments, argumentNames),
+            std::move(initializerStatements));
+    }
+
+    if (orr->BestCandidate() != nullptr) {
+        // The C# `or.CreateResolveResult(null, initializerStatements)` -- a NULL
+        // target (constructors have no target result).
+        return orr->CreateResolveResult(nullptr, std::move(initializerStatements));
+    } else {
+        // The C# `new ErrorResolveResult(type)` -- a FRESH error result over the
+        // creation type (NOT the `UnknownError` singleton).
+        return std::make_shared<ErrorResolveResult>(type.shared_from_this());
+    }
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver

@@ -38,8 +38,9 @@
 // Convert/ResolveCast region, the sizeof/this/base/typeof tail, the
 // condition/primitive/default-value/assignment quartet, the simple-name lookup
 // cluster, the extension-methods region, the member-access region, the
-// invocation region, the ResolveForeach region, and the ResolveIndexer region
-// have landed; ResolveObjectCreation, CanTransformToExtensionMethodCall, ... follow).
+// invocation region, the ResolveForeach region, the ResolveIndexer region, and
+// the ResolveObjectCreation region have landed; CanTransformToExtensionMethodCall
+// ... follows).
 //
 // KEY PORT CONVENTIONS:
 //  (a) The C# `With*` clone factories return a `CSharpResolver` REFERENCE -- the C#
@@ -1644,6 +1645,66 @@ public:
     // `const` (it reads only the compilation / conversions).
     void AdjustArrayAccessArguments(
         std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments) const;
+
+    // ---- ResolveObjectCreation ----------------------------------------------------------------
+    // (The `ResolveObjectCreation` region, CSharpResolver.cs lines 2539-2585: the
+    // public `ResolveObjectCreation` entry (line 2539). Every prerequisite is already
+    // ported: the free `GetDelegateInvokeMethod` (TypeSystemExtensions),
+    // `MethodGroupResolveResult` + `MethodListWithDeclaringType` (with the
+    // extension-method machinery), `Convert` (the convert region),
+    // `CreateOverloadResolution` + both `OverloadResolution::AddCandidate` overloads +
+    // `CreateResolveResult` (the operator-helpers region / the OverloadResolution
+    // engine), `CreateMemberLookup` + `MemberLookup::IsAccessible` (the simple-name
+    // region), the free `IsApplicable(OverloadResolutionErrors)`, and
+    // `AddArgumentNamesIfNecessary` (the invocation region), `IType::GetConstructors`
+    // (the member-enumeration surface), and `DynamicInvocationResolveResult` with
+    // `DynamicInvocationType::ObjectCreation` (D469).)
+
+    // The C# `public ResolveResult ResolveObjectCreation(IType type, ResolveResult[]
+    // arguments, string[] argumentNames = null, bool allowProtectedAccess = false,
+    // IList<ResolveResult> initializerStatements = null)` (line 2539) -- the
+    // object-creation resolution. The DELEGATE arm (a Delegate-kind target with
+    // exactly one argument): the argument's type resolves its `Invoke` method through
+    // `GetDelegateInvokeMethod` and the argument is re-wrapped as a
+    // `MethodGroupResolveResult` over that invoke (a delegate-to-delegate conversion
+    // routes through the method-group conversion machinery), then `Convert`ed to the
+    // target; an argument whose type resolves no invoke method converts as-is. The
+    // CONSTRUCTOR scan: every constructor `type.GetConstructors()` yields is added
+    // through `AddCandidate` -- the accessible ones plainly, the inaccessible ones with
+    // the `Inaccessible` additional error (the `allowProtectedAccess` flag threads into
+    // `MemberLookup::IsAccessible`; the C# doc: "This should be false except when
+    // resolving constructor initializers"). A DYNAMIC argument makes the creation a
+    // `DynamicInvocationResolveResult` with `DynamicInvocationType::ObjectCreation`
+    // when MORE THAN ONE constructor is applicable (the method group over the
+    // applicable constructors named after the first, the named-wrapped arguments, and
+    // the initializer statements). The best candidate composes through
+    // `CreateResolveResult` with a NULL target (constructors have no target result)
+    // carrying the initializer statements; no best candidate yields a FRESH
+    // `ErrorResolveResult` over the type (NOT the `UnknownError` singleton -- the error
+    // carries the creation type). The method is `const` (it reads the resolver's
+    // compilation / conversions and clones nothing).
+    //
+    // PORT CONVENTIONS for this member:
+    //  * The C# `ResolveResult[] arguments` array (which the C# doc says the resolver
+    //    "may mutate ... to wrap elements in `ConversionResolveResult`s") ports to a
+    //    by-value `std::vector` (the ResolveInvocation convention -- this body does not
+    //    mutate the array; the conversion wraps are observed through the RESULT).
+    //  * The C# `string[] argumentNames = null` ports to `std::optional<std::vector<
+    //    std::string>>` (the null-array normalization); the C# `IList<ResolveResult>
+    //    initializerStatements = null` ports to a by-value `std::vector` (the
+    //    `DynamicInvocationResolveResult` ctor convention; the C# null list and the
+    //    empty list are observationally identical through the result).
+    //  * The C# `IType type` reference parameter ports to a non-const `IType&` (the
+    //    `Convert`/`ResolveCast` convention); the owning `ITypePtr` handles the
+    //    `MethodListWithDeclaringType` / `ErrorResolveResult` constructions need are
+    //    recovered through `shared_from_this` (the D529 convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveObjectCreation(
+        ILSpy::Decompiler::TypeSystem::IType& type,
+        std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> arguments,
+        std::optional<std::vector<std::string>> argumentNames = std::nullopt,
+        bool allowProtectedAccess = false,
+        std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>
+            initializerStatements = {}) const;
 
 private:
     // The C# private nested `sealed class ObjectInitializerContext` -- the linked stack
