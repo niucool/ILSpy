@@ -26,6 +26,8 @@
 
 #include "Decompiler/CSharp/Resolver/MethodGroupResolveResult.hpp"
 
+#include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"  // CSharpResolver (the GetExtensionMethods fetch back-pointer)
+
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"  // CSharpConversions (the threaded conversions parameter)
 #include "Decompiler/CSharp/Resolver/Log.hpp"  // Log::WriteLine / WriteCollection / Indent / Unindent (the debug trail)
 #include "Decompiler/CSharp/Resolver/OverloadResolution.hpp"  // OverloadResolution (the built resolution)
@@ -39,6 +41,37 @@
 #include <vector>
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
+
+// The C# `public IEnumerable<IEnumerable<IMethod>> GetExtensionMethods()` (lines 181-197)
+// -- see MethodGroupResolveResult.hpp for the port conventions. The out-of-line definition
+// needs the full `CSharpResolver` type for the fetch call (the header can only
+// forward-declare it, the CSharpResolver.hpp -> MemberLookup.hpp -> MethodGroupResolveResult.hpp
+// header cycle).
+std::vector<std::vector<const ILSpy::Decompiler::TypeSystem::IMethod*>>
+MethodGroupResolveResult::GetExtensionMethods() const
+{
+    if (resolver_ != nullptr) {
+        // C# `Debug.Assert(extensionMethods == null);` -- a resolver-attached group has
+        // not yet fetched (the `ResolveMemberAccess` arm sets `extensionMethods`
+        // directly and never attaches a resolver).
+        assert(!extensionMethods_.has_value());
+        // C# `try { extensionMethods = resolver.GetExtensionMethods(methodName,
+        // typeArguments); } finally { resolver = null; }` -- the finally detaches the
+        // resolver even when the fetch throws; the faithful C++ port re-raises after the
+        // detach (a `catch (...)` + rethrow).
+        try {
+            extensionMethods_ = resolver_->GetExtensionMethods(methodName_, typeArguments_);
+        } catch (...) {
+            resolver_ = nullptr;
+            throw;
+        }
+        resolver_ = nullptr;
+    }
+    // C# `return extensionMethods ?? Enumerable.Empty<IEnumerable<IMethod>>();`
+    if (extensionMethods_.has_value())
+        return *extensionMethods_;
+    return {};
+}
 
 std::unique_ptr<OverloadResolution> MethodGroupResolveResult::PerformOverloadResolution(
     const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
@@ -83,11 +116,12 @@ std::unique_ptr<OverloadResolution> MethodGroupResolveResult::PerformOverloadRes
     // (base types first, the derived-type-hides-base-methods scan inside).
     resolution->AddMethodLists(methodLists_);
 
-    // C# `if (allowExtensionMethods && !or.FoundApplicableCandidate) { ... }` -- with no
-    // resolver attached, `GetExtensionMethods()` yields empty (the resolver-less state
-    // documented on the accessor), so the `extensionMethods.Any()` guard keeps the whole
-    // extension-method block inert; the block is ported in full so it goes live when the
-    // resolver-attached `GetExtensionMethods` lands.
+    // C# `if (allowExtensionMethods && !or.FoundApplicableCandidate) { ... }` -- with
+    // no resolver attached and no directly-set `extensionMethods`, `GetExtensionMethods()`
+    // yields empty (the resolver-less state), so the `extensionMethods.Any()` guard
+    // keeps the whole extension-method block inert; with a resolver attached (the
+    // `CSharpResolver::ResolveMemberAccess` arm) or a directly-set list (its fallback
+    // construction), the block is LIVE.
     if (allowExtensionMethods && !resolution->FoundApplicableCandidate()) {
         // No applicable match found, so let's try extension methods.
         auto extensionMethods = GetExtensionMethods();

@@ -68,16 +68,16 @@
 //         format, NOT the inherited bracket form).
 //       - `override IEnumerable<ResolveResult> GetChildResults()` => `{ targetResult }`
 //         when present, empty otherwise.
-//   * DEFERRED (method members, not classes): the extension-method machinery that needs the
-//     unported `CSharpResolver` controller (`GetEligibleExtensionMethods` plus the internal
-//     `extensionMethods`/`resolver` fields and the resolver-attached `GetExtensionMethods` fetch).
-//     `GetExtensionMethods()` is ported in its resolver-less state (returns empty when no
-//     resolver is attached; the `PerformOverloadResolution` extension-method arm is
-//     correspondingly inert while `GetExtensionMethods()` yields empty -- it goes live when
-//     the resolver lands). `PerformOverloadResolution` is PORTED (implemented in the new
-//     `MethodGroupResolveResult.cpp`): it composes the now-ported `OverloadResolution` engine
-//     (the ctor + the input properties + `AddMethodLists` + `AddCandidate` + the output
-//     properties + `GetBestCandidateWithSubstitutedTypeArguments`).
+//   * PORTED (wired with the CSharpResolver member-access region): the extension-method
+//     machinery -- the internal `extensionMethods`/`resolver` fields and the
+//     resolver-attached `GetExtensionMethods()` fetch (the `CSharpResolver::
+//     ResolveMemberAccess` arm that sets them both). `PerformOverloadResolution`'s
+//     extension-method arm is correspondingly LIVE: with a resolver attached (or the
+//     `extensionMethods` set directly by the `ResolveMemberAccess` fallback),
+//     `GetExtensionMethods()` yields the groups and the retry-with-extension-methods
+//     block runs. `PerformOverloadResolution` composes the ported `OverloadResolution`
+//     engine (the ctor + the input properties + `AddMethodLists` + `AddCandidate` + the
+//     output properties + `GetBestCandidateWithSubstitutedTypeArguments`).
 //
 // All other deps are already ported: `ResolveResult` (D424, the base), `SpecialType.NoType`
 // / `SpecialType.UnknownType` (the D433 `IType.hpp` conveniences), `IType`/`ITypePtr`
@@ -173,6 +173,11 @@ namespace ILSpy::Decompiler::CSharp::Resolver {
 // includes the full header).
 class OverloadResolution;
 
+// Forward declaration: the `CSharpResolver` back-pointer the resolver-attached
+// `GetExtensionMethods()` fetch needs (defined out-of-line in the .cpp to avoid the header
+// cycle CSharpResolver.hpp -> MemberLookup.hpp -> this header).
+class CSharpResolver;
+
 // Forward-declared (now ported): the conversion controller threaded through
 // `PerformOverloadResolution` (a pointer parameter needs only a declaration).
 class CSharpConversions;
@@ -220,16 +225,19 @@ private:
 // The C# `public class MethodGroupResolveResult : ResolveResult` (NOT `sealed`) ports to a
 // C++ subclass (NOT `final`) of `Semantics::ResolveResult`. The result has NO type (the
 // base is `SpecialType.NoType`); to retrieve the chosen overload / delegate type, look at
-// the method-group conversion. The extension-method machinery remains DEFERRED (it needs
-// the unported `CSharpResolver` controller); a resolver-less `GetExtensionMethods()` returns
-// empty. `PerformOverloadResolution` is ported (see its declaration below).
+// the method-group conversion. The extension-method machinery is WIRED (the
+// `extensionMethods`/`resolver` fields and the resolver-attached `GetExtensionMethods()`
+// fetch; see the setters below). `PerformOverloadResolution` is ported (see its
+// declaration below).
 class MethodGroupResolveResult : public ILSpy::Decompiler::Semantics::ResolveResult {
 public:
     // The C# `MethodGroupResolveResult(ResolveResult targetResult, string methodName,
     // IReadOnlyList<MethodListWithDeclaringType> methods, IReadOnlyList<IType>
     // typeArguments) : base(SpecialType.NoType)` -- forwards `NoType()` (a method group has
     // NO type, distinct from `UnknownType()`) and stores the fields (`typeArguments`
-    // defaults to empty for the C# `?? EmptyList<IType>.Instance`).
+    // defaults to empty for the C# `?? EmptyList<IType>.Instance`). The extension-method
+    // machinery (`extensionMethods`/`resolver`) is wired: see `SetExtensionMethods` /
+    // `SetResolver` / `GetExtensionMethods` below.
     MethodGroupResolveResult(
         std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> targetResult,
         std::string methodName,
@@ -328,16 +336,41 @@ public:
         return {};
     }
 
-    // The C# `IEnumerable<IEnumerable<IMethod>> GetExtensionMethods()` in its resolver-less
-    // state. The C# fetches candidate extension methods from the attached `resolver` on
-    // first call (caching them in `extensionMethods`); with no resolver it yields
-    // `Enumerable.Empty<IEnumerable<IMethod>>()`. The resolver fields and the on-demand
-    // `CSharpResolver.GetExtensionMethods` fetch are DEFERRED (they need the unported
-    // `CSharpResolver` controller); with no resolver attached the result is empty.
-    std::vector<std::vector<const ILSpy::Decompiler::TypeSystem::IMethod*>> GetExtensionMethods() const
+    // The C# `IEnumerable<IEnumerable<IMethod>> GetExtensionMethods()`. The C# fetches
+    // candidate extension methods from the attached `resolver` on first call (caching
+    // them in `extensionMethods` and detaching the resolver in a `finally`); with no
+    // resolver and no directly-set `extensionMethods` it yields `Enumerable.Empty`.
+    // Defined OUT-OF-LINE in `MethodGroupResolveResult.cpp` (the fetch needs the full
+    // `CSharpResolver` type, which this header can only forward-declare -- the header
+    // cycle CSharpResolver.hpp -> MemberLookup.hpp -> this header). The fields are
+    // `mutable` so the lazily-caching body stays `const` (the `unknownType_` lazy-cache
+    // convention; the C# mutates them in a non-const method, but the port's
+    // `PerformOverloadResolution` consumer is const, so the lazy mutation is modeled as
+    // a cache write).
+    std::vector<std::vector<const ILSpy::Decompiler::TypeSystem::IMethod*>> GetExtensionMethods() const;
+
+    // The C# internal `List<List<IMethod>> extensionMethods` field (the direct-set
+    // assignment `extensionMethods = extensionMethods` in `CSharpResolver::
+    // ResolveMemberAccess`'s fallback construction; internal in the C#, public-setter in
+    // the port -- the TryConvert widening convention). A null C# state ports to the
+    // empty `std::optional` (not yet fetched/set).
+    void SetExtensionMethods(std::vector<std::vector<const ILSpy::Decompiler::TypeSystem::IMethod*>> extensionMethods)
     {
-        return {};
+        extensionMethods_ = std::move(extensionMethods);
     }
+
+    // Whether the `extensionMethods` field is set (the C# `extensionMethods == null`
+    // check -- the `Debug.Assert` in `CSharpResolver::ResolveMemberAccess` and the
+    // `?? Enumerable.Empty` fallback both read it). Internal in the C#; public in the
+    // port for the same direct-TDD reasons.
+    bool HasExtensionMethods() const { return extensionMethods_.has_value(); }
+
+    // The C# internal `CSharpResolver resolver` field (the `mgrr.resolver = this`
+    // assignment in `CSharpResolver::ResolveMemberAccess`, detached after the on-demand
+    // fetch). Internal in the C#; public-setter in the port. A NON-OWNING back-pointer:
+    // the resolver outlives the result in every C# usage (the result is produced BY the
+    // resolver's lookup call); the port mirrors the GC reference.
+    void SetResolver(const CSharpResolver* resolver) { resolver_ = resolver; }
 
     // The C# `public OverloadResolution PerformOverloadResolution(ICompilation compilation,
     // ResolveResult[] arguments, string[] argumentNames = null, bool allowExtensionMethods =
@@ -352,10 +385,10 @@ public:
     // `OverloadResolution` reference; the port returns an owning `unique_ptr` (a factory --
     // the single ownership transfers to the caller).
     //
-    // The extension-method arm is structurally complete but currently INERT: with no resolver
-    // attached, `GetExtensionMethods()` yields empty, so the `extensionMethods.Any()` guard
-    // skips the whole block (the documented resolver-less state; the arm goes live when the
-    // resolver-attached `GetExtensionMethods` lands).
+    // The extension-method arm is LIVE: `GetExtensionMethods()` yields the groups once a
+    // resolver is attached (or the `extensionMethods` set directly by the
+    // `CSharpResolver::ResolveMemberAccess` fallback); with neither, the empty yield keeps
+    // the `extensionMethods.Any()` guard skipping the block (the resolver-less state).
     //
     // The C# `argumentNames` null default ports to `std::nullopt`; the `conversions` null
     // default to a nullable pointer (the `OverloadResolution` ctor's lazy
@@ -393,6 +426,14 @@ private:
     std::vector<MethodListWithDeclaringType> methodLists_;
     std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> typeArguments_;
     const ILSpy::Decompiler::TypeSystem::IMethod* chosenMethod_ = nullptr;
+    // The C# internal `List<List<IMethod>> extensionMethods` -- the cached extension-
+    // method groups (set directly by `CSharpResolver::ResolveMemberAccess`'s fallback or
+    // lazily by the on-demand `GetExtensionMethods()` fetch). The empty `optional` is
+    // the C# `null`. `mutable` for the lazy const fetch (the lazy-cache convention).
+    mutable std::optional<std::vector<std::vector<const ILSpy::Decompiler::TypeSystem::IMethod*>>> extensionMethods_;
+    // The C# internal `CSharpResolver resolver` -- the on-demand-fetch back-pointer,
+    // detached (nulled) once the fetch ran. `mutable` for the lazy const fetch.
+    mutable const CSharpResolver* resolver_ = nullptr;
     // The lazily-built null-target `SpecialType.UnknownType` (mutable so the const
     // `TargetType()` can cache it). Holds the `SpecialType UnknownType` alive for the
     // reference return.

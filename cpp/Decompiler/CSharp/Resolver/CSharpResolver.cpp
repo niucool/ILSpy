@@ -31,6 +31,7 @@
 #include "Decompiler/CSharp/Resolver/CSharpInvocationResolveResult.hpp"
 #include "Decompiler/CSharp/Resolver/DynamicInvocationResolveResult.hpp"
 #include "Decompiler/CSharp/Resolver/DynamicMemberResolveResult.hpp"
+#include "Decompiler/CSharp/Resolver/MethodGroupResolveResult.hpp"
 #include "Decompiler/CSharp/Resolver/OverloadResolution.hpp"
 #include "Decompiler/CSharp/Resolver/OverloadResolutionHelpers.hpp"
 #include "Decompiler/CSharp/Resolver/TypeInferenceHelpers.hpp"
@@ -69,6 +70,7 @@
 
 #include <algorithm>
 #include <any>
+#include <cassert>
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
@@ -1601,6 +1603,160 @@ bool CSharpResolver::IsEligibleExtensionMethod(
     return c->IsValid() && (c->IsIdentityConversion() || c->IsReferenceConversion()
                             || c->IsBoxingConversion()
                             || c->IsImplicitSpanConversion());
+}
+
+// ---- Member-access region (CSharpResolver.cs lines 1795-1912) --------------------------------
+
+// The C# `public ResolveResult ResolveMemberAccess(ResolveResult target, string
+// identifier, IReadOnlyList<IType> typeArguments, NameLookupMode lookupMode =
+// NameLookupMode.Expression)` (line 1795) -- see CSharpResolver.hpp for the port
+// conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveMemberAccess(
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> target,
+    std::string identifier,
+    std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> typeArguments,
+    NameLookupMode lookupMode) const
+{
+    using ILSpy::Decompiler::CSharp::Resolver::DynamicMemberResolveResult;
+    using ILSpy::Decompiler::CSharp::Resolver::MethodGroupResolveResult;
+    using ILSpy::Decompiler::Semantics::NamespaceResolveResult;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::Semantics::UnknownMemberResolveResult;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+
+    // C# 4.0 spec: section 7.6.4
+
+    // The C# `bool parameterizeResultType = !(typeArguments.Count != 0 &&
+    // typeArguments.All(t => t.Kind == TypeKind.UnboundTypeArgument));` -- a list of ALL
+    // unbound-type-argument placeholders (the `List<>` in `typeof(List<>)`) suppresses
+    // the parameterization; anything else (including the empty list) parameterizes.
+    bool parameterizeResultType = !(!typeArguments.empty()
+                                    && std::all_of(typeArguments.begin(), typeArguments.end(),
+                                                   [](const ITypePtr& t) {
+                                                       return t->Kind() == TypeKind::UnboundTypeArgument;
+                                                   }));
+    // The C# `NamespaceResolveResult nrr = target as NamespaceResolveResult;`
+    std::shared_ptr<NamespaceResolveResult> nrr =
+        std::dynamic_pointer_cast<NamespaceResolveResult>(target);
+    if (nrr) {
+        return ResolveMemberAccessOnNamespace(*nrr, identifier, typeArguments,
+                                               parameterizeResultType);
+    }
+
+    if (target->Type().Kind() == TypeKind::Dynamic)
+        return std::make_shared<DynamicMemberResolveResult>(std::move(target),
+                                                             std::move(identifier));
+
+    MemberLookup lookup = CreateMemberLookup(lookupMode);
+    std::shared_ptr<ResolveResult> result;
+    switch (lookupMode) {
+        case NameLookupMode::Expression:
+            // The C# `lookup.Lookup(target, identifier, typeArguments, isInvocation:
+            // false)`.
+            result = lookup.Lookup(*target, identifier, typeArguments, /*isInvocation*/ false);
+            break;
+        case NameLookupMode::InvocationTarget:
+            // The C# `lookup.Lookup(target, identifier, typeArguments, isInvocation:
+            // true)`.
+            result = lookup.Lookup(*target, identifier, typeArguments, /*isInvocation*/ true);
+            break;
+        case NameLookupMode::Type:
+        case NameLookupMode::TypeInUsingDeclaration:
+        case NameLookupMode::BaseTypeReference:
+            // Don't do the UnknownMemberResolveResult/MethodGroupResolveResult processing,
+            // it's only relevant for expressions.
+            return lookup.LookupType(target->Type(), identifier, typeArguments,
+                                     parameterizeResultType);
+        default:
+            // The C# `throw new NotSupportedException(...)`.
+            throw std::logic_error(
+                "CSharpResolver::ResolveMemberAccess: Invalid value for NameLookupMode");
+    }
+    if (dynamic_cast<const UnknownMemberResolveResult*>(result.get()) != nullptr) {
+        // We intentionally use all extension methods here, not just the eligible ones.
+        // Proper eligibility checking is only possible for the full invocation
+        // (after we know the remaining arguments).
+        // The eligibility check in GetExtensionMethods is only intended for code completion.
+        std::vector<std::vector<const ILSpy::Decompiler::TypeSystem::IMethod*>> extensionMethods =
+            GetExtensionMethods(identifier, typeArguments);
+        if (!extensionMethods.empty()) {
+            // The C# `new MethodGroupResolveResult(target, identifier,
+            // EmptyList<MethodListWithDeclaringType>.Instance, typeArguments) {
+            // extensionMethods = extensionMethods }` -- the object-initializer field
+            // assignment ports to the `SetExtensionMethods` call.
+            auto mgrr = std::make_shared<MethodGroupResolveResult>(
+                std::move(target), std::move(identifier),
+                std::vector<MethodListWithDeclaringType>{}, std::move(typeArguments));
+            mgrr->SetExtensionMethods(std::move(extensionMethods));
+            return mgrr;
+        }
+    } else {
+        std::shared_ptr<MethodGroupResolveResult> mgrr =
+            std::dynamic_pointer_cast<MethodGroupResolveResult>(result);
+        if (mgrr) {
+            // The C# `Debug.Assert(mgrr.extensionMethods == null)` -- a fresh lookup
+            // result has not yet fetched its extension methods.
+            assert(!mgrr->HasExtensionMethods());
+            // set the values that are necessary to make
+            // MethodGroupResolveResult.GetExtensionMethods() work
+            mgrr->SetResolver(this);
+        }
+    }
+    return result;
+}
+
+// The C# `ResolveResult ResolveMemberAccessOnNamespace(NamespaceResolveResult nrr,
+// string identifier, IReadOnlyList<IType> typeArguments, bool parameterizeResultType)`
+// (line 1877) -- see CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveMemberAccessOnNamespace(
+    const ILSpy::Decompiler::Semantics::NamespaceResolveResult& nrr,
+    const std::string& identifier,
+    const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& typeArguments,
+    bool parameterizeResultType) const
+{
+    using ILSpy::Decompiler::Semantics::NamespaceResolveResult;
+    using ILSpy::Decompiler::Semantics::TypeResolveResult;
+    using ILSpy::Decompiler::TypeSystem::INamespace;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::ParameterizedType;
+
+    if (typeArguments.empty()) {
+        const INamespace* childNamespace = nrr.Namespace()->GetChildNamespace(identifier);
+        if (childNamespace != nullptr)
+            return std::make_shared<NamespaceResolveResult>(childNamespace);
+    }
+    const ITypeDefinition* def =
+        nrr.Namespace()->GetTypeDefinition(identifier, static_cast<int>(typeArguments.size()));
+    if (def != nullptr) {
+        if (parameterizeResultType && !typeArguments.empty()) {
+            // The owning handle for the generic is recovered via `shared_from_this` +
+            // `const_pointer_cast` (the D529 convention; the LookInUsingScopeNamespace
+            // precedent for this exact shape).
+            return std::make_shared<TypeResolveResult>(std::make_shared<ParameterizedType>(
+                std::const_pointer_cast<IType>(def->shared_from_this()), typeArguments));
+        } else {
+            return std::make_shared<TypeResolveResult>(
+                std::const_pointer_cast<IType>(def->shared_from_this()));
+        }
+    }
+    return ErrorResultSingleton();
+}
+
+// The C# `public ResolveResult ResolveIdentifierInObjectInitializer(string identifier)`
+// (line 1906) -- see CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveIdentifierInObjectInitializer(std::string identifier) const
+{
+    MemberLookup memberLookup = CreateMemberLookup();
+    return memberLookup.Lookup(CurrentObjectInitializer(), identifier,
+                               std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>{},
+                               /*isInvocation*/ false);
 }
 
 // ---- Numeric promotion region (CSharpResolver.cs lines 536-561 + 1055-1230) ----------------

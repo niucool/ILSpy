@@ -145,6 +145,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Resolver/CSharpResolverConditionPrimitiveDefaultAssignment_Test.cpp
     Decompiler/CSharp/Resolver/CSharpResolverConvert_Test.cpp
     Decompiler/CSharp/Resolver/CSharpResolverExtensionMethods_Test.cpp
+    Decompiler/CSharp/Resolver/CSharpResolverMemberAccess_Test.cpp
     Decompiler/CSharp/Resolver/CSharpResolverNumericPromotion_Test.cpp
     Decompiler/CSharp/Resolver/CSharpResolverOperatorHelpers_Test.cpp
     Decompiler/CSharp/Resolver/CSharpResolverSimpleName_Test.cpp

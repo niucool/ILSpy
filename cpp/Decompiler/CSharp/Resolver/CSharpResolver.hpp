@@ -36,8 +36,9 @@
 // object-initializer sentinel). The `Resolve*` arms land in later slices
 // (`ResolveUnaryOperator` and `ResolveBinaryOperator` + the enum-handler trio, the
 // Convert/ResolveCast region, the sizeof/this/base/typeof tail, the
-// condition/primitive/default-value/assignment quartet, and the simple-name lookup
-// cluster have landed; ResolveMemberAccess, ResolveInvocation, ... follow).
+// condition/primitive/default-value/assignment quartet, the simple-name lookup
+// cluster, the extension-methods region, and the member-access region have landed;
+// ResolveForeach, ResolveInvocation, ... follow).
 //
 // KEY PORT CONVENTIONS:
 //  (a) The C# `With*` clone factories return a `CSharpResolver` REFERENCE -- the C#
@@ -152,6 +153,7 @@ enum class AssignmentOperatorType;
 // CSharpConversionsHelpers.hpp precedent).
 namespace ILSpy::Decompiler::Semantics {
 class Conversion;
+class NamespaceResolveResult;
 class TypeResolveResult;
 }
 namespace ILSpy::Decompiler::TypeSystem { enum class TypeCode : std::uint8_t; }
@@ -685,9 +687,9 @@ public:
     // `IsEligibleExtensionMethod` eligibility checks (lines 2123/2133), the private
     // `GetAllExtensionMethods` scope-chain walk (the `UsingScope.AllExtensionMethods`
     // LazyInit memoization field the iteration-94 pair landed), and the private
-    // `GetExtensionMethods(MemberLookup, INamespace)` namespace scan. The region is
-    // the direct prerequisite for the deferred `ResolveMemberAccess` arm (line 1834:
-    // the `UnknownMemberResolveResult` extension-method fallback) and the
+    // `GetExtensionMethods(MemberLookup, INamespace)` namespace scan. The region feeds
+    // the `ResolveMemberAccess` arm (line 1834: the `UnknownMemberResolveResult`
+    // extension-method fallback, landed with the member-access region) and the
     // `ResolveInvocation` region's extension-method resolution. Every dependency is
     // already ported: `CreateMemberLookup` (this region above), `MemberLookup::
     // IsAccessible`, `ITypeDefinition::IsStatic`/`HasExtensions`/`Methods`, `IMethod::
@@ -788,6 +790,61 @@ public:
     std::vector<const ILSpy::Decompiler::TypeSystem::IMethod*> GetExtensionMethods(
         const MemberLookup& lookup,
         const ILSpy::Decompiler::TypeSystem::INamespace& ns) const;
+
+    // ---- Member access ------------------------------------------------------------------------
+    // (The `ResolveMemberAccess` region, CSharpResolver.cs lines 1795-1912: the
+    // `ResolveMemberAccess` entry (line 1795, C# 4.0 spec section 7.6.4) + the private
+    // `ResolveMemberAccessOnNamespace` helper (line 1877) + `ResolveIdentifierInObject
+    // Initializer` (line 1906). Every prerequisite is already ported: the two
+    // `CreateMemberLookup` factories (the simple-name region), `MemberLookup::Lookup` /
+    // `LookupType` (D500), `NamespaceResolveResult` + `INamespace::GetChildNamespace` /
+    // `GetTypeDefinition`, `DynamicMemberResolveResult`, the `GetExtensionMethods`
+    // filter entry (this region above), `MethodGroupResolveResult` with the WIRED
+    // `extensionMethods`/`resolver` fields, and `TypeResolveResult` /
+    // `ParameterizedType`.)
+
+    // The C# `public ResolveResult ResolveMemberAccess(ResolveResult target, string
+    // identifier, IReadOnlyList<IType> typeArguments, NameLookupMode lookupMode =
+    // NameLookupMode.Expression)` (line 1795, C# 4.0 spec section 7.6.4 -- member
+    // access). The namespace-target delegation, the dynamic-target short-circuit, the
+    // mode-switched member lookup (`Lookup` for the expression modes, `LookupType` for
+    // the type modes, which skip the `UnknownMemberResolveResult`/
+    // `MethodGroupResolveResult` processing that is only relevant for expressions), the
+    // `UnknownMemberResolveResult` extension-method fallback (a fresh
+    // `MethodGroupResolveResult` over the target with the `extensionMethods` set -- the
+    // C# comment: ALL extension methods, not just the eligible ones, since proper
+    // eligibility checking is only possible for the full invocation), and the
+    // `MethodGroupResolveResult` resolver attachment (`mgrr.resolver = this`, making
+    // `MethodGroupResolveResult.GetExtensionMethods()` work on demand). The C#
+    // `ResolveResult`/`string`/`IReadOnlyList<IType>` parameters port to a `shared_ptr`
+    // value, a `std::string` value, and a `std::vector<ITypePtr>` value (taken by value:
+    // the fallback construction moves them into the fresh method group). The method is
+    // `const` (it mutates the RESULT -- attaching the resolver -- never the resolver
+    // itself; the `dynamic_pointer_cast` yields a mutable handle to the shared result).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveMemberAccess(
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> target,
+        std::string identifier,
+        std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> typeArguments,
+        NameLookupMode lookupMode = NameLookupMode::Expression) const;
+
+    // The C# `ResolveResult ResolveMemberAccessOnNamespace(NamespaceResolveResult nrr,
+    // string identifier, IReadOnlyList<IType> typeArguments, bool parameterizeResultType)`
+    // (line 1877) -- the namespace-target member access: the child namespace (no type
+    // arguments), then the type definition (parameterized with the given type arguments
+    // when `parameterizeResultType` and any are present), else the `ErrorResult`. Private
+    // in the C#; PUBLIC in the port for direct TDD (the TryConvert widening convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveMemberAccessOnNamespace(
+        const ILSpy::Decompiler::Semantics::NamespaceResolveResult& nrr,
+        const std::string& identifier,
+        const std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>& typeArguments,
+        bool parameterizeResultType) const;
+
+    // The C# `public ResolveResult ResolveIdentifierInObjectInitializer(string
+    // identifier)` (line 1906) -- the identifier lookup against the current object
+    // initializer target (`memberLookup.Lookup(this.CurrentObjectInitializer, identifier,
+    // EmptyList<IType>.Instance, false)`). The C# `string` ports to a `std::string` value.
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveIdentifierInObjectInitializer(
+        std::string identifier) const;
 
     // ---- Numeric promotion -------------------------------------------------------------------
     // (The unary/binary numeric-promotion region -- CSharpResolver.cs lines 536-561
