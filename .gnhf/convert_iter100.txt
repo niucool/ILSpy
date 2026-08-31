@@ -1,0 +1,81 @@
+Running main() from C:\Projects\github\vcpkg\buildtrees\gtest\src\v1.17.0-e243b8ee0f.clean\googletest\src\gtest_main.cc
+Note: Google Test filter = CSharpResolverConvertTest.*
+[==========] Running 27 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 27 tests from CSharpResolverConvertTest
+[ RUN      ] CSharpResolverConvertTest.TryConvertAppliesImplicitConversionToConstant
+[       OK ] CSharpResolverConvertTest.TryConvertAppliesImplicitConversionToConstant (0 ms)
+[ RUN      ] CSharpResolverConvertTest.TryConvertWrapsNonConstantResult
+[       OK ] CSharpResolverConvertTest.TryConvertWrapsNonConstantResult (0 ms)
+[ RUN      ] CSharpResolverConvertTest.TryConvertIdentityReturnsSameResult
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\Resolver\CSharpResolverConvert_Test.cpp(269): error: Expected equality of these values:
+  rr.get()
+    Which is: 000002246F1034A0
+  original
+    Which is: 000002246F185D40
+
+[  FAILED  ] CSharpResolverConvertTest.TryConvertIdentityReturnsSameResult (0 ms)
+[ RUN      ] CSharpResolverConvertTest.TryConvertFalseLeavesResultUnchanged
+[       OK ] CSharpResolverConvertTest.TryConvertFalseLeavesResultUnchanged (0 ms)
+[ RUN      ] CSharpResolverConvertTest.TryConvertEnumNonNullableConstantZeroConverts
+[       OK ] CSharpResolverConvertTest.TryConvertEnumNonNullableConstantZeroConverts (0 ms)
+[ RUN      ] CSharpResolverConvertTest.TryConvertEnumDisallowedConstantZeroReturnsFalse
+[       OK ] CSharpResolverConvertTest.TryConvertEnumDisallowedConstantZeroReturnsFalse (0 ms)
+[ RUN      ] CSharpResolverConvertTest.TryConvertEnumNullableArmWrapsEnumOperand
+[       OK ] CSharpResolverConvertTest.TryConvertEnumNullableArmWrapsEnumOperand (0 ms)
+[ RUN      ] CSharpResolverConvertTest.TryConvertEnumNullableArmKeepsNullableEnumOperand
+[       OK ] CSharpResolverConvertTest.TryConvertEnumNullableArmKeepsNullableEnumOperand (0 ms)
+[ RUN      ] CSharpResolverConvertTest.TryConvertEnumNoConversionReturnsFalse
+[       OK ] CSharpResolverConvertTest.TryConvertEnumNoConversionReturnsFalse (0 ms)
+[ RUN      ] CSharpResolverConvertTest.ConvertIdentityReturnsInputUnchanged
+C:\Projects\github\ILSpy\cpp\tests\Decompiler\CSharp\Resolver\CSharpResolverConvert_Test.cpp(390): error: Expected equality of these values:
+  result.get()
+    Which is: 000002246F1039B0
+  rr.get()
+    Which is: 000002246F185D40
+
+[  FAILED  ] CSharpResolverConvertTest.ConvertIdentityReturnsInputUnchanged (0 ms)
+[ RUN      ] CSharpResolverConvertTest.ConvertConstantNonIdentityFoldsThroughResolveCast
+[       OK ] CSharpResolverConvertTest.ConvertConstantNonIdentityFoldsThroughResolveCast (0 ms)
+[ RUN      ] CSharpResolverConvertTest.ConvertWrapsNonConstantWithResolverFlag
+[       OK ] CSharpResolverConvertTest.ConvertWrapsNonConstantWithResolverFlag (0 ms)
+[ RUN      ] CSharpResolverConvertTest.ConvertConstantUnderUserDefinedConversionDoesNotFold
+[       OK ] CSharpResolverConvertTest.ConvertConstantUnderUserDefinedConversionDoesNotFold (0 ms)
+[ RUN      ] CSharpResolverConvertTest.ConvertTwoArgResolvesImplicitConversionFirst
+[       OK ] CSharpResolverConvertTest.ConvertTwoArgResolvesImplicitConversionFirst (0 ms)
+[ RUN      ] CSharpResolverConvertTest.ResolveCastFoldsConstantToNumericTarget
+[       OK ] CSharpResolverConvertTest.ResolveCastFoldsConstantToNumericTarget (0 ms)
+[ RUN      ] CSharpResolverConvertTest.ResolveCastFoldsConstantToEnumThroughUnderlying
+[       OK ] CSharpResolverConvertTest.ResolveCastFoldsConstantToEnumThroughUnderlying (0 ms)
+[ RUN      ] CSharpResolverConvertTest.ResolveCastUncheckedConstantWraps
+[       OK ] CSharpResolverConvertTest.ResolveCastUncheckedConstantWraps (0 ms)
+[ RUN      ] CSharpResolverConvertTest.ResolveCastCheckedOverflowYieldsError
+[       OK ] CSharpResolverConvertTest.ResolveCastCheckedOverflowYieldsError (0 ms)
+[ RUN      ] CSharpResolverConvertTest.ResolveCastStringConstantToNonStringTargetIsError
+[       OK ] CSharpResolverConvertTest.ResolveCastStringConstantToNonStringTargetIsError (0 ms)
+[ RUN      ] CSharpResolverConvertTest.ResolveCastStringTargetPassthrough
+[       OK ] CSharpResolverConvertTest.ResolveCastStringTargetPassthrough (0 ms)
+[ RUN      ] CSharpResolverConvertTest.ResolveCastNIntFoldsThrough32BitCode
+[       OK ] CSharpResolverConvertTest.ResolveCastNIntFoldsThrough32BitCode (0 ms)
+[ RUN      ] CSharpResolverConvertTest.ResolveCastNIntOverflowFallsBackToConversionResult
+[       OK ] CSharpResolverConvertTest.ResolveCastNIntOverflowFallsBackToConversionResult (0 ms)
+[ RUN      ] CSharpResolverConvertTest.ResolveCastNonConstantWrapsWithExplicitConversion
+[       OK ] CSharpResolverConvertTest.ResolveCastNonConstantWrapsWithExplicitConversion (0 ms)
+[ RUN      ] CSharpResolverConvertTest.WrapperThreadsCheckForOverflowFlag
+[       OK ] CSharpResolverConvertTest.WrapperThreadsCheckForOverflowFlag (0 ms)
+[ RUN      ] CSharpResolverConvertTest.GetEnumUnderlyingTypeMemberResolvesUnderlying
+[       OK ] CSharpResolverConvertTest.GetEnumUnderlyingTypeMemberResolvesUnderlying (0 ms)
+[ RUN      ] CSharpResolverConvertTest.GetEnumUnderlyingTypeMemberDefinitionlessYieldsUnknownType
+[       OK ] CSharpResolverConvertTest.GetEnumUnderlyingTypeMemberDefinitionlessYieldsUnknownType (0 ms)
+[ RUN      ] CSharpResolverConvertTest.GetEnumUnderlyingTypeMemberNonEnumDefinitionYieldsNull
+[       OK ] CSharpResolverConvertTest.GetEnumUnderlyingTypeMemberNonEnumDefinitionYieldsNull (0 ms)
+[----------] 27 tests from CSharpResolverConvertTest (2 ms total)
+
+[----------] Global test environment tear-down
+[==========] 27 tests from 1 test suite ran. (3 ms total)
+[  PASSED  ] 25 tests.
+[  FAILED  ] 2 tests, listed below:
+[  FAILED  ] CSharpResolverConvertTest.TryConvertIdentityReturnsSameResult
+[  FAILED  ] CSharpResolverConvertTest.ConvertIdentityReturnsInputUnchanged
+
+ 2 FAILED TESTS

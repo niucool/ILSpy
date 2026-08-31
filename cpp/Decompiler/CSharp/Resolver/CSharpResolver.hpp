@@ -114,6 +114,8 @@
 #include "Decompiler/TypeSystem/IVariable.hpp"
 #include "Decompiler/Util/ImmutableStack.hpp"
 
+#include <any>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -133,6 +135,18 @@ namespace ILSpy::Decompiler::CSharp::Syntax {
 enum class UnaryOperatorType;
 enum class BinaryOperatorType;
 }
+
+// Forward-declared at GLOBAL scope (the same iteration-94 convention): the conversion
+// description the `Convert` / `TryConvert` members take by shared handle (the C#
+// `Conversion` class reference; the shared_ptr declaration needs only a forward
+// declaration -- the .cpp includes the full header for the flag reads) and the BCL
+// `TypeCode` the `CSharpPrimitiveCast` wrapper takes (defined in ReflectionHelper.hpp;
+// a scoped-enum forward declaration needs the underlying type, the
+// CSharpConversionsHelpers.hpp precedent).
+namespace ILSpy::Decompiler::Semantics {
+class Conversion;
+}
+namespace ILSpy::Decompiler::TypeSystem { enum class TypeCode : std::uint8_t; }
 
 namespace ILSpy::Decompiler::CSharp::Resolver {
 
@@ -371,6 +385,127 @@ public:
     CreateResolveResultForUserDefinedOperator(
         ILSpy::Decompiler::CSharp::Resolver::OverloadResolution& r,
         ILSpy::Decompiler::TypeSystem::ExpressionType operatorType);
+
+    // ---- Convert / ResolveCast ----------------------------------------------------------------
+    // (The `ResolveCast` region, CSharpResolver.cs lines 1319-1470, plus the private
+    // `GetEnumUnderlyingType` member from the "Enum helper methods" region at line 985 --
+    // the conversion-application machinery the operator-resolution slices consume:
+    // `TryConvert` / `TryConvertEnum` rebind an operand through an implicit conversion in
+    // place, `Convert` wraps or constant-folds, `ResolveCast` is the public
+    // cast-expression entry (the future `ResolveCastExpression` arm delegates to it),
+    // and the `CSharpPrimitiveCast` wrapper threads the resolver's `CheckForOverflow`
+    // flag into the `Util` constant converter.)
+
+    // The C# `bool TryConvert(ref ResolveResult rr, IType targetType)` (line 1320) -- if
+    // an implicit conversion of `rr` to `targetType` exists, applies it to `rr` and
+    // returns true; otherwise returns false and leaves `rr` unmodified. Private instance
+    // method in the C#; PUBLIC in the port for direct TDD ahead of the
+    // `ResolveUnaryOperator` / `ResolveBinaryOperator` slices that consume it (the
+    // CSharpOperators internal-widening convention -- the port has no visibility level
+    // between the public surface and the untestable private one). The C# `ref ResolveResult
+    // rr` ports to `std::shared_ptr<ResolveResult>&` -- the caller's rebindable variable
+    // (the C# reassigns the caller's variable through the `ref`; the `rr = Convert(...)`
+    // rebind is the port's shared_ptr assignment). Reads only `conversions_`, so the
+    // method is `const`.
+    bool TryConvert(std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& rr,
+                    ILSpy::Decompiler::TypeSystem::IType& targetType) const;
+
+    // The C# `bool TryConvertEnum(ref ResolveResult rr, IType targetType, ref bool
+    // isNullable, ref ResolveResult enumRR, bool allowConversionFromConstantZero = true)`
+    // (line 1341) -- the enum-aware TryConvert: tries the non-nullable target first
+    // (skipped when `isNullable` is already true), then rebinds the TARGET to its
+    // `Nullable<T>` form (a LOCAL rebind -- the C# parameter is by-value, so the caller's
+    // `targetType` is untouched; a C++ reference cannot rebind, so the port threads the
+    // rebound target through a local `IType*`) and retries; on the nullable success also
+    // wraps `enumRR` in the `ImplicitNullableConversion` unless it is already nullable,
+    // and sets `isNullable = true`. The `allowConversionFromConstantZero` gate (default
+    // true) rejects ENUMERATION conversions -- the implicit constant-0-to-enum conversion
+    // -- when false (the user-defined-operator comparison context where the C# compiler
+    // does not apply the constant-zero rule). Private in the C#; PUBLIC in the port for
+    // direct TDD (the TryConvert widening convention). `rr` / `isNullable` / `enumRR` are
+    // the C# `ref` parameters (the callers' rebindable variables); on failure all three
+    // are left unmodified.
+    bool TryConvertEnum(std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& rr,
+                        ILSpy::Decompiler::TypeSystem::IType& targetType,
+                        bool& isNullable,
+                        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& enumRR,
+                        bool allowConversionFromConstantZero = true) const;
+
+    // The C# `ResolveResult Convert(ResolveResult rr, IType targetType)` (line 1381) --
+    // the convenience overload resolving the implicit conversion first, then delegating
+    // to the 3-arg `Convert`. Private in the C#; PUBLIC in the port for direct TDD (the
+    // TryConvert widening convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> Convert(
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rr,
+        ILSpy::Decompiler::TypeSystem::IType& targetType) const;
+
+    // The C# `ResolveResult Convert(ResolveResult rr, IType targetType, Conversion c)`
+    // (line 1386) -- the conversion application: an IDENTITY conversion returns `rr`
+    // unwrapped (pointer identity -- the C# `c == Conversion.IdentityConversion`
+    // reference comparison ports to singleton pointer identity, the D536 convention); a
+    // COMPILE-TIME CONSTANT under a non-None non-user-defined conversion is
+    // CONSTANT-FOLDED through `ResolveCast` (the constant re-resolves through the target
+    // type); everything else wraps in a `ConversionResolveResult` carrying the resolver's
+    // `checkForOverflow` flag. Private in the C#; PUBLIC in the port for direct TDD (the
+    // TryConvert widening convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> Convert(
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rr,
+        ILSpy::Decompiler::TypeSystem::IType& targetType,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion> c) const;
+
+    // The C# `public ResolveResult ResolveCast(IType targetType, ResolveResult
+    // expression)` (line 1396, C# spec draft-v11 section 12.9.8 Cast expressions) -- the
+    // cast-expression entry: resolves the EXPLICIT conversion first, then constant-folds
+    // a compile-time constant under a non-user-defined conversion -- through the target's
+    // enum-underlying `TypeCode` via `CSharpPrimitiveCast` (an `OverflowException` /
+    // `InvalidCastException` downgrades to an `ErrorResolveResult`), with the
+    // `string`-target passthrough (a null or string constant stays a constant; any other
+    // constant to `string` is an error) and the native-integer arm (an `nint` / `nuint`
+    // target casts the constant through the 32-bit code with `checkForOverflow: true` --
+    // a C# HARDCODED flag, NOT the resolver's own -- and an overflow falls back to the
+    // non-constant `ConversionResolveResult` because "the conversion is not a compile-time
+    // constant"). A USER-DEFINED conversion or a non-constant expression skips the
+    // folding entirely and wraps. `expression` is an owning handle (the C# reference the
+    // GC owns; every fold path re-derives the folded constant from it, every wrap path
+    // stores it as the `ConversionResolveResult` input).
+    //
+    // NOTE: the `targetType.GetEnumUnderlyingType()` call (line 1403) resolves to the
+    // TypeUtils EXTENSION method (the receiver is the `IType` -- the resolver's own
+    // same-name member below never applies to an `IType` receiver), so the port calls the
+    // TypeUtils free function (iteration 99), NOT the member. The distinction is
+    // observable: for a non-enum target the extension returns the target itself (the
+    // folding reads the target's own `TypeCode`), while the member would return null (a
+    // definition's `EnumUnderlyingType` is null for non-enums).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveCast(
+        ILSpy::Decompiler::TypeSystem::IType& targetType,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> expression) const;
+
+    // The C# `internal object CSharpPrimitiveCast(TypeCode targetType, object input)`
+    // (line 1467) -- the wrapper threading the resolver's `CheckForOverflow` flag into
+    // the `Util` constant converter. Internal in the C#; PUBLIC in the port (the
+    // assembly-internal widening convention). The C# `object` ports to `std::any` (the
+    // D424 boxed-constant convention).
+    std::any CSharpPrimitiveCast(ILSpy::Decompiler::TypeSystem::TypeCode targetType,
+                                 const std::any& input) const;
+
+    // The C# private `IType GetEnumUnderlyingType(IType enumType)` (line 985, the "Enum
+    // helper methods" region) -- the resolver MEMBER variant: the definition's
+    // `EnumUnderlyingType` when the definition resolves, else the `SpecialType.UnknownType`
+    // null object. NOT the TypeUtils extension -- C# member lookup finds the private
+    // member for the UNQUALIFIED `GetEnumUnderlyingType(enumType)` calls inside the class
+    // (the enum-comparison handlers and the binary numeric promotions, later slices),
+    // shadowing the extension; the extension applies only where the call is QUALIFIED on
+    // an `IType` receiver, as in `ResolveCast` above. Unlike the extension, the member
+    // does NOT unwrap custom modifiers and does NOT pass a non-enum through: a
+    // definition-bearing NON-enum reports a NULL `EnumUnderlyingType` (the faithful C#
+    // `ITypeDefinition.EnumUnderlyingType` for non-enums), a definitionless type reports
+    // `UnknownType`. Private in the C#; PUBLIC in the port for direct TDD (the
+    // TryConvert widening convention). The return is non-owning (the definition owns the
+    // underlying handle, reachable through `enumType`; the `UnknownType` fallback is a
+    // program-lifetime static singleton -- the minimal port's `UnknownType()` allocates a
+    // fresh instance per call, so the singleton must be materialized once here).
+    const ILSpy::Decompiler::TypeSystem::IType* GetEnumUnderlyingType(
+        const ILSpy::Decompiler::TypeSystem::IType& enumType) const;
 
 private:
     // The C# private nested `sealed class ObjectInitializerContext` -- the linked stack

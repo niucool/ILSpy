@@ -30,10 +30,19 @@
 #include "Decompiler/CSharp/Resolver/OverloadResolution.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/Semantics/ConstantResolveResult.hpp"
+#include "Decompiler/Semantics/ConversionFactories.hpp"
+#include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/ErrorResolveResult.hpp"
 #include "Decompiler/Semantics/OperatorResolveResult.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
+#include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
+#include "Decompiler/TypeSystem/NullableType.hpp"
+#include "Decompiler/TypeSystem/ReflectionHelper.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
+#include "Decompiler/TypeSystem/TypeUtils.hpp"
+#include "Decompiler/Util/CSharpPrimitiveCast.hpp"
 
 #include <stdexcept>
 #include <utility>
@@ -458,6 +467,262 @@ CSharpResolver::CreateResolveResultForUserDefinedOperator(
         std::move(returnType), operatorType, method,
         /*isLiftedOperator=*/dynamic_cast<const ILiftedOperator*>(method) != nullptr,
         r.GetArgumentsWithConversions());
+}
+
+// ---- Convert / ResolveCast region (CSharpResolver.cs lines 1319-1470) ---------------------
+
+// The C# `bool TryConvert(ref ResolveResult rr, IType targetType)` (line 1320).
+bool CSharpResolver::TryConvert(
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& rr,
+    ILSpy::Decompiler::TypeSystem::IType& targetType) const
+{
+    using ILSpy::Decompiler::Semantics::Conversion;
+
+    std::shared_ptr<Conversion> c = conversions_.ImplicitConversion(*rr, targetType);
+    if (c->IsValid())
+    {
+        rr = Convert(rr, targetType, std::move(c));
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+}
+
+// The C# `bool TryConvertEnum(ref ResolveResult rr, IType targetType, ref bool isNullable,
+// ref ResolveResult enumRR, bool allowConversionFromConstantZero = true)` (line 1341).
+bool CSharpResolver::TryConvertEnum(
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& rr,
+    ILSpy::Decompiler::TypeSystem::IType& targetType,
+    bool& isNullable,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& enumRR,
+    bool allowConversionFromConstantZero) const
+{
+    using ILSpy::Decompiler::Semantics::Conversion;
+    using ILSpy::Decompiler::Semantics::ConversionResolveResult;
+    using ILSpy::Decompiler::Semantics::Conversions;
+    using ILSpy::Decompiler::TypeSystem::Create;
+    using ILSpy::Decompiler::TypeSystem::IsKnownType;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+
+    std::shared_ptr<Conversion> c;
+    if (!isNullable)
+    {
+        // Try non-nullable
+        c = conversions_.ImplicitConversion(*rr, targetType);
+        if (c->IsValid() && (allowConversionFromConstantZero || !c->IsEnumerationConversion()))
+        {
+            rr = Convert(rr, targetType, std::move(c));
+            return true;
+        }
+    }
+    // make targetType nullable if it isn't already (a LOCAL rebind -- the C# `targetType`
+    // parameter is by-value, so the caller's reference is untouched; a C++ reference
+    // cannot rebind, so the rebound target threads through a local pointer).
+    ITypePtr nullableTarget;
+    IType* currentTarget = &targetType;
+    if (!IsKnownType(targetType, KnownTypeCode::NullableOfT))
+    {
+        nullableTarget = Create(compilation_, targetType);
+        currentTarget = nullableTarget.get();
+    }
+
+    c = conversions_.ImplicitConversion(*rr, *currentTarget);
+    if (c->IsValid() && (allowConversionFromConstantZero || !c->IsEnumerationConversion()))
+    {
+        rr = Convert(rr, *currentTarget, std::move(c));
+        isNullable = true;
+        // Also convert the enum-typed RR to nullable, if it isn't already
+        if (!IsKnownType(enumRR->Type(), KnownTypeCode::NullableOfT))
+        {
+            ITypePtr nullableType = Create(compilation_, enumRR->Type());
+            enumRR = std::make_shared<ConversionResolveResult>(
+                std::move(nullableType), enumRR, Conversions::ImplicitNullableConversion());
+        }
+        return true;
+    }
+    return false;
+}
+
+// The C# `ResolveResult Convert(ResolveResult rr, IType targetType)` (line 1381).
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::Convert(
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rr,
+    ILSpy::Decompiler::TypeSystem::IType& targetType) const
+{
+    using ILSpy::Decompiler::Semantics::Conversion;
+
+    std::shared_ptr<Conversion> c = conversions_.ImplicitConversion(*rr, targetType);
+    return Convert(std::move(rr), targetType, std::move(c));
+}
+
+// The C# `ResolveResult Convert(ResolveResult rr, IType targetType, Conversion c)` (line 1386).
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::Convert(
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rr,
+    ILSpy::Decompiler::TypeSystem::IType& targetType,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion> c) const
+{
+    using ILSpy::Decompiler::Semantics::ConversionResolveResult;
+    using ILSpy::Decompiler::Semantics::Conversions;
+    using ILSpy::Decompiler::TypeSystem::IType;
+
+    // The C# `c == Conversion.IdentityConversion` -- reference equality with the
+    // singleton, ported as pointer identity (the D536 convention).
+    if (c.get() == Conversions::IdentityConversion().get())
+        return rr;
+    else if (rr->IsCompileTimeConstant() && c.get() != Conversions::None().get()
+             && !c->IsUserDefined())
+        return ResolveCast(targetType, std::move(rr));
+    else
+        return std::make_shared<ConversionResolveResult>(
+            targetType.shared_from_this(), std::move(rr), std::move(c), checkForOverflow_);
+}
+
+// The C# `public ResolveResult ResolveCast(IType targetType, ResolveResult expression)`
+// (line 1396, C# spec draft-v11 section 12.9.8 Cast expressions).
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveCast(
+    ILSpy::Decompiler::TypeSystem::IType& targetType,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> expression) const
+{
+    using ILSpy::Decompiler::Semantics::ConstantResolveResult;
+    using ILSpy::Decompiler::Semantics::ConversionResolveResult;
+    using ILSpy::Decompiler::Semantics::ErrorResolveResult;
+    using ILSpy::Decompiler::TypeSystem::GetTypeCode;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::TypeCode;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+    using ILSpy::Decompiler::Util::Cast;
+    using ILSpy::Decompiler::Util::InvalidCastException;
+    using ILSpy::Decompiler::Util::OverflowException;
+
+    // C# spec (draft-v11): section 12.9.8 Cast expressions
+    std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion> c =
+        conversions_.ExplicitConversion(*expression, targetType);
+    if (expression->IsCompileTimeConstant() && !c->IsUserDefined())
+    {
+        // The TypeUtils EXTENSION (`targetType.GetEnumUnderlyingType()` -- qualified on the
+        // `IType` receiver, so the resolver's same-name member does NOT apply; the fully
+        // qualified call is required here because the member name would otherwise hide
+        // the namespace-scope function inside the class). A non-enum target passes through
+        // as itself (the folding reads the target's own TypeCode); an enum target reports
+        // its underlying. The port's nullptr is the documented safe fallback for the C#
+        // NRE shapes (a definitionless enum) -- every folding arm below falls through to
+        // the final wrap for the null shape.
+        const IType* underlyingType =
+            ILSpy::Decompiler::TypeSystem::GetEnumUnderlyingType(&targetType);
+        TypeCode code = underlyingType != nullptr
+            ? GetTypeCode(*underlyingType)
+            : TypeCode::Empty;
+        // The C# enum relational comparisons port through static_cast<int> (the D514
+        // convention -- the closed [Boolean..Decimal] range of the primitive targets).
+        if (static_cast<int>(code) >= static_cast<int>(TypeCode::Boolean)
+            && static_cast<int>(code) <= static_cast<int>(TypeCode::Decimal)
+            && expression->ConstantValue().has_value())
+        {
+            // The C# `expression.ConstantValue is string` -- the port's boxed string
+            // constant is std::string (the Util::Cast held-type convention).
+            if (expression->ConstantValue().type() == typeid(std::string))
+            {
+                return std::make_shared<ErrorResolveResult>(targetType.shared_from_this());
+            }
+            try
+            {
+                return std::make_shared<ConstantResolveResult>(
+                    targetType.shared_from_this(),
+                    CSharpPrimitiveCast(code, expression->ConstantValue()));
+            }
+            catch (const OverflowException&)
+            {
+                return std::make_shared<ErrorResolveResult>(targetType.shared_from_this());
+            }
+            catch (const InvalidCastException&)
+            {
+                return std::make_shared<ErrorResolveResult>(targetType.shared_from_this());
+            }
+        }
+        else if (code == TypeCode::String)
+        {
+            std::any constantValue = expression->ConstantValue();
+            // The C# `expression.ConstantValue == null || expression.ConstantValue is
+            // string` -- the empty `std::any` is the C# null literal.
+            if (!constantValue.has_value() || constantValue.type() == typeid(std::string))
+                return std::make_shared<ConstantResolveResult>(
+                    targetType.shared_from_this(), std::move(constantValue));
+            else
+                return std::make_shared<ErrorResolveResult>(targetType.shared_from_this());
+        }
+        else if (underlyingType != nullptr
+                 && (underlyingType->Kind() == TypeKind::NInt
+                     || underlyingType->Kind() == TypeKind::NUInt)
+                 && expression->ConstantValue().has_value())
+        {
+            if (expression->ConstantValue().type() == typeid(std::string))
+            {
+                return std::make_shared<ErrorResolveResult>(targetType.shared_from_this());
+            }
+            code = (underlyingType->Kind() == TypeKind::NInt ? TypeCode::Int32
+                                                              : TypeCode::UInt32);
+            try
+            {
+                // The C# hardcodes `checkForOverflow: true` here (NOT
+                // this.CheckForOverflow) -- the native-integer constant always probes
+                // the 32-bit range.
+                return std::make_shared<ConstantResolveResult>(
+                    targetType.shared_from_this(),
+                    Cast(code, expression->ConstantValue(), /*checkForOverflow=*/ true));
+            }
+            catch (const OverflowException&)
+            {
+                // If constant value doesn't fit into 32-bits, the conversion is not a
+                // compile-time constant
+                return std::make_shared<ConversionResolveResult>(
+                    targetType.shared_from_this(), expression, std::move(c), checkForOverflow_);
+            }
+            catch (const InvalidCastException&)
+            {
+                return std::make_shared<ErrorResolveResult>(targetType.shared_from_this());
+            }
+        }
+    }
+    return std::make_shared<ConversionResolveResult>(
+        targetType.shared_from_this(), std::move(expression), std::move(c), checkForOverflow_);
+}
+
+// The C# `internal object CSharpPrimitiveCast(TypeCode targetType, object input)`
+// (line 1467).
+std::any CSharpResolver::CSharpPrimitiveCast(
+    ILSpy::Decompiler::TypeSystem::TypeCode targetType, const std::any& input) const
+{
+    using ILSpy::Decompiler::Util::Cast;
+
+    return Cast(targetType, input, checkForOverflow_);
+}
+
+// The C# private `IType GetEnumUnderlyingType(IType enumType)` (line 985, the "Enum
+// helper methods" region).
+const ILSpy::Decompiler::TypeSystem::IType*
+CSharpResolver::GetEnumUnderlyingType(
+    const ILSpy::Decompiler::TypeSystem::IType& enumType) const
+{
+    using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::UnknownType;
+
+    const ITypeDefinition* def = enumType.GetDefinition();
+    if (def != nullptr)
+        return def->EnumUnderlyingType().get();
+    // The C# `SpecialType.UnknownType` singleton: the minimal port's `UnknownType()`
+    // factory allocates a fresh instance per call, so the singleton is materialized ONCE
+    // as a program-lifetime static handle (the non-owning return stays valid for the
+    // caller).
+    static const ITypePtr unknownType = UnknownType();
+    return unknownType.get();
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver
