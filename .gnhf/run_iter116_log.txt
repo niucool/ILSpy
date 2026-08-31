@@ -1,0 +1,24 @@
+Running main() from C:\Projects\github\vcpkg\buildtrees\gtest\src\v1.17.0-e243b8ee0f.clean\googletest\src\gtest_main.cc
+Note: Google Test filter = TypeSystemAstBuilderClassTest.*
+[==========] Running 7 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 7 tests from TypeSystemAstBuilderClassTest
+[ RUN      ] TypeSystemAstBuilderClassTest.CtorWithResolverFlipsTheTwelveInitPropertiesTrue
+[       OK ] TypeSystemAstBuilderClassTest.CtorWithResolverFlipsTheTwelveInitPropertiesTrue (0 ms)
+[ RUN      ] TypeSystemAstBuilderClassTest.ResolverLessCtorFlipsTheTwelveInitPropertiesTrue
+[       OK ] TypeSystemAstBuilderClassTest.ResolverLessCtorFlipsTheTwelveInitPropertiesTrue (0 ms)
+[ RUN      ] TypeSystemAstBuilderClassTest.CtorWithNullResolverThrowsInvalidArgument
+[       OK ] TypeSystemAstBuilderClassTest.CtorWithNullResolverThrowsInvalidArgument (0 ms)
+[ RUN      ] TypeSystemAstBuilderClassTest.NonInitPropertiesDefaultFalse
+[       OK ] TypeSystemAstBuilderClassTest.NonInitPropertiesDefaultFalse (0 ms)
+[ RUN      ] TypeSystemAstBuilderClassTest.NameLookupModeDefaultsToExpression
+[       OK ] TypeSystemAstBuilderClassTest.NameLookupModeDefaultsToExpression (0 ms)
+[ RUN      ] TypeSystemAstBuilderClassTest.EveryPropertyRoundTripsThroughItsSetter
+[       OK ] TypeSystemAstBuilderClassTest.EveryPropertyRoundTripsThroughItsSetter (0 ms)
+[ RUN      ] TypeSystemAstBuilderClassTest.SettingOnePropertyLeavesTheOthersAtTheirDefaults
+[       OK ] TypeSystemAstBuilderClassTest.SettingOnePropertyLeavesTheOthersAtTheirDefaults (0 ms)
+[----------] 7 tests from TypeSystemAstBuilderClassTest (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 7 tests from 1 test suite ran. (1 ms total)
+[  PASSED  ] 7 tests.

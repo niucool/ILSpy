@@ -17,13 +17,17 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 // SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-// Port of the static helpers on ICSharpCode.Decompiler/CSharp/Syntax/TypeSystemAstBuilder.cs
-// that depend only on already-ported TypeSystem / Syntax leaves. The full
-// TypeSystemAstBuilder class (the long-pole CSharpAmbience blocker, 2782 C# lines)
-// derives from CSharpResolver and threads the full IType / IMember / ITypeDefinition
-// surface, so it is ported incrementally: each self-contained static helper lands as a
-// free function in this namespace ahead of the instance methods, which are deferred
-// until the CSharpResolver dependency chain is ported.
+// Port of ICSharpCode.Decompiler/CSharp/Syntax/TypeSystemAstBuilder.cs: the
+// self-contained static helpers land as free functions in this namespace, and the
+// TypeSystemAstBuilder class itself (the long-pole CSharpAmbience blocker, 2782 C#
+// lines) is ported incrementally. The class holds a CSharpResolver field and threads
+// the full IType / IMember / ITypeDefinition surface: the class skeleton (the resolver
+// field, the two ctors, InitProperties, and the full configuration property surface)
+// lands now that the CSharpResolver dependency chain is complete, and the `Convert*`
+// instance methods (ConvertType / ConvertAttribute / ConvertConstantValue /
+// ConvertEnumValue / ConvertParameter / ConvertSymbol / ConvertEntity / ConvertExtension
+// / ConvertVariable) follow in later slices, consuming the free functions below as they
+// grow.
 //
 // ModifierFromAccessibility (TypeSystemAstBuilder.cs line 2497) is the first such
 // helper: a pure switch on Accessibility (the D373 leaf) that maps a symbol's
@@ -41,6 +45,7 @@
 #include "Modifiers.hpp"
 #include "SimpleType.hpp"
 
+#include "Decompiler/CSharp/Resolver/NameLookupMode.hpp"
 #include "Decompiler/TypeSystem/Accessibility.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -53,10 +58,20 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <typeinfo>
 #include <utility>
+
+// The CSharpResolver is forward-declared at global scope (a qualified
+// namespace-definition written inside another namespace declares a fresh shadow
+// chain on MSVC, shadowing the global ::ILSpy for every later qualified reference
+// in the file): the TypeSystemAstBuilder class below holds the resolver as a
+// shared_ptr over the incomplete type, which the skeleton's stores and moves
+// support without the full definition.
+namespace ILSpy::Decompiler::CSharp::Resolver { class CSharpResolver; }
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -665,5 +680,297 @@ TryGetSpecialConstant(const std::any& constant) {
 inline bool IsFlagsEnum(const ::ILSpy::Decompiler::TypeSystem::ITypeDefinition& type) {
     return type.HasAttribute(::ILSpy::Decompiler::TypeSystem::KnownAttribute::Flags);
 }
+
+// ---------------------------------------------------------------------------
+// The TypeSystemAstBuilder CLASS skeleton (TypeSystemAstBuilder.cs lines 43-265):
+// the `readonly CSharpResolver? resolver` field, the two public ctors, the private
+// InitProperties, and the full `{ get; set; }` configuration property surface. This
+// is the first slice of the class itself: every `Convert*` instance method reads
+// these properties, so the configuration surface lands ahead of them, now that the
+// CSharpResolver dependency chain is complete (the CSharpResolver class port
+// finished with its CanTransformToExtensionMethodCall region).
+//
+// KEY PORT CONVENTIONS:
+//  (a) The C# `readonly CSharpResolver? resolver` field (a nullable reference the
+//      resolver-less ctor leaves null) ports to an owning
+//      `std::shared_ptr<const CSharpResolver>` (the C# GC-reference convention: the
+//      builder must keep the resolver alive for its own lifetime). Every
+//      CSharpResolver member the `Convert*` methods consume -- Compilation,
+//      CurrentUsingScope, LookupSimpleNameOrTypeName, IsVariableReferenceWithSameType,
+//      ResolveSimpleName -- is a const member, so the const-qualified handle supports
+//      the full future consumer surface. CSharpResolver is only forward-declared (a
+//      shared_ptr member over an incomplete type supports the skeleton's stores and
+//      moves); the `Convert*` slices will include the full resolver header when they
+//      first deref it.
+//  (b) The C# `throw new ArgumentNullException(nameof(resolver))` ports to
+//      `throw std::invalid_argument(...)` (the D424 base-ctor convention). The check
+//      runs in the ctor body after the member-init-list move -- observationally
+//      identical to the C# check-before-assign: a throw during construction never
+//      completes the object in either language, and the moved-from handle is
+//      destroyed as the exception unwinds.
+//  (c) Each C# `{ get; set; }` auto-property ports to the const-getter +
+//      mutable-lvalue-reference pair (the OverloadResolution input-property
+//      convention): `bool X() const` reads, `bool& X()` assigns (the two overloads
+//      share one doc comment). The `NameLookupMode` property's member function shares
+//      the enum type's name (the D472 property-name-shares-enum-type collision: a
+//      member function and an enclosing-namespace enum type cannot share a name in
+//      the class body, since the function name hides the type), so the accessors and
+//      the backing member use the NLM alias declared at the top of the class (which
+//      the member function name does not hide).
+//  (d) The C# class is unsealed (no C# subclass exists; CSharpAmbience /
+//      CSharpDecompiler / ExpressionBuilder / IntroduceUsingDeclarations /
+//      CSharpLanguage construct it), so the port is not final (pinned by a
+//      static_assert in the test).
+// ---------------------------------------------------------------------------
+class TypeSystemAstBuilder {
+public:
+    // A type alias for the `NameLookupMode` enum -- the member function
+    // `NameLookupMode()` (below) shadows the enum type name in the class scope
+    // (the D472 property-name-shares-enum-type collision). This alias provides an
+    // unshadowed reference for the property accessor declarations and the backing
+    // member. The alias IS the fully-qualified enum type.
+    using NLM = ::ILSpy::Decompiler::CSharp::Resolver::NameLookupMode;
+
+    // The C# `public TypeSystemAstBuilder(CSharpResolver resolver)` (line 54) --
+    // "a resolver initialized for the position where the type will be inserted".
+    explicit TypeSystemAstBuilder(
+        std::shared_ptr<const ::ILSpy::Decompiler::CSharp::Resolver::CSharpResolver> resolver)
+        : resolver_(std::move(resolver))
+    {
+        if (!resolver_)
+            throw std::invalid_argument("resolver");
+        InitProperties();
+    }
+
+    // The C# `public TypeSystemAstBuilder()` (line 65) -- the resolver-less
+    // construction: the name-disambiguation paths (ConvertType(FullTypeName) /
+    // ConvertNamespace, which consult the resolver's using scopes and name
+    // lookups) are skipped when the resolver is null; the plain `Convert*` paths
+    // work without one.
+    TypeSystemAstBuilder() { InitProperties(); }
+
+    // -- The configuration property surface (C# lines 92-263) --
+
+    // The C# `public bool AddTypeReferenceAnnotations { get; set; }` (line 92):
+    // whether the ast builder should add annotations to type references (false).
+    bool AddTypeReferenceAnnotations() const { return addTypeReferenceAnnotations_; }
+    bool& AddTypeReferenceAnnotations() { return addTypeReferenceAnnotations_; }
+
+    // The C# `public bool AddResolveResultAnnotations { get; set; }` (line 98):
+    // whether the ast builder should add ResolveResult annotations to AST nodes
+    // (false).
+    bool AddResolveResultAnnotations() const { return addResolveResultAnnotations_; }
+    bool& AddResolveResultAnnotations() { return addResolveResultAnnotations_; }
+
+    // The C# `public bool ShowAccessibility { get; set; }` (line 104): whether
+    // accessibility modifiers are shown (true).
+    bool ShowAccessibility() const { return showAccessibility_; }
+    bool& ShowAccessibility() { return showAccessibility_; }
+
+    // The C# `public bool UsePrivateProtectedAccessibility { get; set; }` (line
+    // 110): whether "private protected" accessibility modifiers are shown (true).
+    bool UsePrivateProtectedAccessibility() const { return usePrivateProtectedAccessibility_; }
+    bool& UsePrivateProtectedAccessibility() { return usePrivateProtectedAccessibility_; }
+
+    // The C# `public bool ShowModifiers { get; set; }` (line 116): whether
+    // non-accessibility modifiers are shown (true).
+    bool ShowModifiers() const { return showModifiers_; }
+    bool& ShowModifiers() { return showModifiers_; }
+
+    // The C# `public bool ShowBaseTypes { get; set; }` (line 122): whether base
+    // type references are shown (true).
+    bool ShowBaseTypes() const { return showBaseTypes_; }
+    bool& ShowBaseTypes() { return showBaseTypes_; }
+
+    // The C# `public bool ShowTypeParameters { get; set; }` (line 128): whether
+    // type parameter declarations are shown (true).
+    bool ShowTypeParameters() const { return showTypeParameters_; }
+    bool& ShowTypeParameters() { return showTypeParameters_; }
+
+    // The C# `public bool ShowTypeParametersForUnboundTypes { get; set; }` (line
+    // 134): whether type parameter names are shown for unbound types (false).
+    bool ShowTypeParametersForUnboundTypes() const { return showTypeParametersForUnboundTypes_; }
+    bool& ShowTypeParametersForUnboundTypes() { return showTypeParametersForUnboundTypes_; }
+
+    // The C# `public bool ShowTypeParameterConstraints { get; set; }` (line 141):
+    // whether constraints on type parameter declarations are shown; has no effect
+    // if ShowTypeParameters is false (true).
+    bool ShowTypeParameterConstraints() const { return showTypeParameterConstraints_; }
+    bool& ShowTypeParameterConstraints() { return showTypeParameterConstraints_; }
+
+    // The C# `public bool ShowParameterNames { get; set; }` (line 147): whether
+    // the names of parameters are shown (true).
+    bool ShowParameterNames() const { return showParameterNames_; }
+    bool& ShowParameterNames() { return showParameterNames_; }
+
+    // The C# `public bool ShowConstantValues { get; set; }` (line 153): whether
+    // to show default values of optional parameters, and the values of constant
+    // fields (true).
+    bool ShowConstantValues() const { return showConstantValues_; }
+    bool& ShowConstantValues() { return showConstantValues_; }
+
+    // The C# `public bool ShowAttributes { get; set; }` (line 159): whether to
+    // show attributes (false).
+    bool ShowAttributes() const { return showAttributes_; }
+    bool& ShowAttributes() { return showAttributes_; }
+
+    // The C# `public bool SortAttributes { get; set; }` (line 165): whether to
+    // sort attributes; if false, attributes are shown in metadata order (false).
+    bool SortAttributes() const { return sortAttributes_; }
+    bool& SortAttributes() { return sortAttributes_; }
+
+    // The C# `public bool AlwaysUseShortTypeNames { get; set; }` (line 171):
+    // whether to use fully-qualified type names or short type names (false).
+    bool AlwaysUseShortTypeNames() const { return alwaysUseShortTypeNames_; }
+    bool& AlwaysUseShortTypeNames() { return alwaysUseShortTypeNames_; }
+
+    // The C# `public bool UseKeywordsForBuiltinTypes { get; set; }` (line 177):
+    // whether to use keywords for builtin types (true).
+    bool UseKeywordsForBuiltinTypes() const { return useKeywordsForBuiltinTypes_; }
+    bool& UseKeywordsForBuiltinTypes() { return useKeywordsForBuiltinTypes_; }
+
+    // The C# `public bool UseNullableSpecifierForValueTypes { get; set; }` (line
+    // 183): whether to use `T?` or `Nullable<T>` for nullable value types (true).
+    bool UseNullableSpecifierForValueTypes() const { return useNullableSpecifierForValueTypes_; }
+    bool& UseNullableSpecifierForValueTypes() { return useNullableSpecifierForValueTypes_; }
+
+    // The C# `public NameLookupMode NameLookupMode { get; set; }` (line 191): the
+    // name lookup mode for converting a type name -- the default
+    // `NameLookupMode.Expression` disambiguates the name for use in expression
+    // context.
+    NLM NameLookupMode() const { return nameLookupMode_; }
+    NLM& NameLookupMode() { return nameLookupMode_; }
+
+    // The C# `public bool GenerateBody { get; set; }` (line 197): whether to
+    // generate a body that throws a System.NotImplementedException (false).
+    bool GenerateBody() const { return generateBody_; }
+    bool& GenerateBody() { return generateBody_; }
+
+    // The C# `public bool UseCustomEvents { get; set; }` (line 203): whether to
+    // generate custom events (false).
+    bool UseCustomEvents() const { return useCustomEvents_; }
+    bool& UseCustomEvents() { return useCustomEvents_; }
+
+    // The C# `public bool ConvertUnboundTypeArguments { get; set; }` (line 209):
+    // whether unbound type argument names are inserted in the ast or not
+    // (false).
+    bool ConvertUnboundTypeArguments() const { return convertUnboundTypeArguments_; }
+    bool& ConvertUnboundTypeArguments() { return convertUnboundTypeArguments_; }
+
+    // The C# `public bool UseAliases { get; set; }` (line 215): whether aliases
+    // should be used inside the type name or not (true).
+    bool UseAliases() const { return useAliases_; }
+    bool& UseAliases() { return useAliases_; }
+
+    // The C# `public bool UseSpecialConstants { get; set; }` (line 221): whether
+    // constants like `int.MaxValue` are converted to a MemberReferenceExpression
+    // or a PrimitiveExpression (true).
+    bool UseSpecialConstants() const { return useSpecialConstants_; }
+    bool& UseSpecialConstants() { return useSpecialConstants_; }
+
+    // The C# `public bool PrintIntegralValuesAsHex { get; set; }` (line 227):
+    // whether integral constants should be printed in hexadecimal format
+    // (false).
+    bool PrintIntegralValuesAsHex() const { return printIntegralValuesAsHex_; }
+    bool& PrintIntegralValuesAsHex() { return printIntegralValuesAsHex_; }
+
+    // The C# `public bool SupportInitAccessors { get; set; }` (line 233): whether
+    // C# 9 "init;" accessors are supported; if disabled, emits "set /*init*/;"
+    // instead (false).
+    bool SupportInitAccessors() const { return supportInitAccessors_; }
+    bool& SupportInitAccessors() { return supportInitAccessors_; }
+
+    // The C# `public bool SupportRecordClasses { get; set; }` (line 238): whether
+    // C# 9 "record" class types are supported (false).
+    bool SupportRecordClasses() const { return supportRecordClasses_; }
+    bool& SupportRecordClasses() { return supportRecordClasses_; }
+
+    // The C# `public bool SupportRecordStructs { get; set; }` (line 243): whether
+    // C# 10 "record" struct types are supported (false).
+    bool SupportRecordStructs() const { return supportRecordStructs_; }
+    bool& SupportRecordStructs() { return supportRecordStructs_; }
+
+    // The C# `public bool SupportUnsignedRightShift { get; set; }` (line 248):
+    // whether C# 11 "operator >>>" is supported (false).
+    bool SupportUnsignedRightShift() const { return supportUnsignedRightShift_; }
+    bool& SupportUnsignedRightShift() { return supportUnsignedRightShift_; }
+
+    // The C# `public bool SupportOperatorChecked { get; set; }` (line 253):
+    // whether C# 11 "operator checked" is supported (false).
+    bool SupportOperatorChecked() const { return supportOperatorChecked_; }
+    bool& SupportOperatorChecked() { return supportOperatorChecked_; }
+
+    // The C# `public bool AlwaysUseGlobal { get; set; }` (line 258): whether all
+    // fully qualified type names should be prefixed with "global::" (false).
+    bool AlwaysUseGlobal() const { return alwaysUseGlobal_; }
+    bool& AlwaysUseGlobal() { return alwaysUseGlobal_; }
+
+    // The C# `public bool SupportExtensionDeclarations { get; set; }` (line 263):
+    // whether C# 14 "extension" declarations are supported (false).
+    bool SupportExtensionDeclarations() const { return supportExtensionDeclarations_; }
+    bool& SupportExtensionDeclarations() { return supportExtensionDeclarations_; }
+
+private:
+    // The C# `void InitProperties()` (line 79) -- the non-false defaults every ctor
+    // shares. Everything not assigned here keeps its `= false` backing initializer
+    // (the C# bool field default), and `nameLookupMode_` keeps its `Expression`
+    // initializer (the C# enum default 0).
+    void InitProperties() {
+        UseKeywordsForBuiltinTypes() = true;
+        UseNullableSpecifierForValueTypes() = true;
+        ShowAccessibility() = true;
+        UsePrivateProtectedAccessibility() = true;
+        ShowModifiers() = true;
+        ShowBaseTypes() = true;
+        ShowTypeParameters() = true;
+        ShowTypeParameterConstraints() = true;
+        ShowParameterNames() = true;
+        ShowConstantValues() = true;
+        UseAliases() = true;
+        UseSpecialConstants() = true;
+    }
+
+    // The C# `readonly CSharpResolver? resolver` -- an owning handle (the C# GC
+    // reference; the builder keeps the resolver alive for its lifetime). Null for
+    // the resolver-less ctor. The CSharpResolver is an incomplete type here
+    // (forward-declared above the namespace); a shared_ptr member supports stores
+    // and moves over the incomplete type, and the `Convert*` slices will include the
+    // full header when they first deref it.
+    std::shared_ptr<const ::ILSpy::Decompiler::CSharp::Resolver::CSharpResolver> resolver_;
+
+    // The C# auto-property backing fields (declaration order mirrors the C#
+    // property order; every bool defaults to false, the C# bool field default --
+    // InitProperties flips the twelve non-false defaults).
+    bool addTypeReferenceAnnotations_ = false;
+    bool addResolveResultAnnotations_ = false;
+    bool showAccessibility_ = false;
+    bool usePrivateProtectedAccessibility_ = false;
+    bool showModifiers_ = false;
+    bool showBaseTypes_ = false;
+    bool showTypeParameters_ = false;
+    bool showTypeParametersForUnboundTypes_ = false;
+    bool showTypeParameterConstraints_ = false;
+    bool showParameterNames_ = false;
+    bool showConstantValues_ = false;
+    bool showAttributes_ = false;
+    bool sortAttributes_ = false;
+    bool alwaysUseShortTypeNames_ = false;
+    bool useKeywordsForBuiltinTypes_ = false;
+    bool useNullableSpecifierForValueTypes_ = false;
+    NLM nameLookupMode_ = NLM::Expression;
+    bool generateBody_ = false;
+    bool useCustomEvents_ = false;
+    bool convertUnboundTypeArguments_ = false;
+    bool useAliases_ = false;
+    bool useSpecialConstants_ = false;
+    bool printIntegralValuesAsHex_ = false;
+    bool supportInitAccessors_ = false;
+    bool supportRecordClasses_ = false;
+    bool supportRecordStructs_ = false;
+    bool supportUnsignedRightShift_ = false;
+    bool supportOperatorChecked_ = false;
+    bool alwaysUseGlobal_ = false;
+    bool supportExtensionDeclarations_ = false;
+};
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
