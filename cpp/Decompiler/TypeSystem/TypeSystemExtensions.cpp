@@ -25,9 +25,13 @@
 
 #include "Decompiler/TypeSystem/Implementation/BaseTypeCollector.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
+#include "Decompiler/TypeSystem/IEntity.hpp"
 #include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/TypeSystem/IModule.hpp"
+#include "Decompiler/TypeSystem/IParameter.hpp"
+#include "Decompiler/TypeSystem/IParameterizedMember.hpp"
+#include "Decompiler/TypeSystem/KnownAttribute.hpp"
 
 #include <algorithm>
 #include <any>
@@ -369,6 +373,160 @@ const ITypeDefinition* GetTypeDefinition(const IModule& module, const FullTypeNa
             break;
     }
     return typeDef;
+}
+
+// The C# `IsCompilerGeneratedOrIsInCompilerGeneratedClass` (NRExtensions.cs lines
+// 26-46): the entity's own `[CompilerGenerated]`, else (recursively up the nesting
+// chain) its declaring type definition's.
+bool IsCompilerGeneratedOrIsInCompilerGeneratedClass(const IEntity* entity)
+{
+    if (entity == nullptr)
+        return false;
+    // The C# private `IsCompilerGenerated` sub-extension: `HasAttribute(CompilerGenerated)`.
+    if (entity->HasAttribute(KnownAttribute::CompilerGenerated))
+        return true;
+    return IsCompilerGeneratedOrIsInCompilerGeneratedClass(entity->DeclaringTypeDefinition());
+}
+
+// The C# `IsPotentialClosure` (TransformDisplayClassUsage.cs): the display-class
+// shape + compiler-generated + same-nesting-tree checks.
+bool IsPotentialClosure(const ITypeDefinition* decompiledTypeDefinition,
+                        const ITypeDefinition* potentialDisplayClass,
+                        bool allowTypeImplementingInterfaces)
+{
+    if (potentialDisplayClass == nullptr
+        || !IsCompilerGeneratedOrIsInCompilerGeneratedClass(potentialDisplayClass))
+        return false;
+    switch (potentialDisplayClass->Kind()) {
+        case TypeKind::Struct:
+            break;
+        case TypeKind::Class:
+            if (!allowTypeImplementingInterfaces) {
+                // The C# `!potentialDisplayClass.DirectBaseTypes.All(t =>
+                // t.IsKnownType(KnownTypeCode.Object))` -- a display class extends
+                // nothing but `object`. A null base-type entry is not `object`, so the
+                // unguarded `IsKnownType` read is safe (the `&*` of a null entry would
+                // be UB; the D516 null-guard convention keeps the linear scan skip
+                // instead).
+                for (const ITypePtr& base : potentialDisplayClass->DirectBaseTypes()) {
+                    if (!base || !IsKnownType(*base, KnownTypeCode::Object))
+                        return false;
+                }
+            }
+            break;
+        default:
+            return false;
+    }
+
+    // C# comment: "Make sure that potentialDisplayClass and decompiledTypeDefinition
+    // are part of the same type tree. Either decompiledTypeDefinition is an ancestor
+    // type of potentialDisplayClass or both have at least one common ancestor."
+    // The C# collects the display class's STRICT ancestors into a
+    // `HashSet<ITypeDefinition>` (reference equality), then walks
+    // `decompiledTypeDefinition` and its ancestors looking for a set member -- the
+    // walk INCLUDES `decompiledTypeDefinition` itself.
+    std::vector<const ITypeDefinition*> potentialDisplayClassAncestors;
+    const ITypeDefinition* potentialDisplayClassParent =
+        potentialDisplayClass->DeclaringTypeDefinition();
+    while (potentialDisplayClassParent != nullptr) {
+        // The `HashSet.Add` dedup (reference equality) -- the linear scan is the
+        // vector `Contains` (the chains are nesting-depth sized).
+        if (std::find(potentialDisplayClassAncestors.begin(),
+                      potentialDisplayClassAncestors.end(),
+                      potentialDisplayClassParent)
+            == potentialDisplayClassAncestors.end())
+            potentialDisplayClassAncestors.push_back(potentialDisplayClassParent);
+        potentialDisplayClassParent = potentialDisplayClassParent->DeclaringTypeDefinition();
+    }
+
+    const ITypeDefinition* decompiledTypeDefinitionOrAncestor = decompiledTypeDefinition;
+    while (decompiledTypeDefinitionOrAncestor != nullptr) {
+        if (std::find(potentialDisplayClassAncestors.begin(),
+                      potentialDisplayClassAncestors.end(),
+                      decompiledTypeDefinitionOrAncestor)
+            != potentialDisplayClassAncestors.end())
+            return true;
+        decompiledTypeDefinitionOrAncestor =
+            decompiledTypeDefinitionOrAncestor->DeclaringTypeDefinition();
+    }
+    return false;
+}
+
+// The C# `IsClosureParameter` (LocalFunctionDecompiler.cs line 575): a by-reference
+// parameter whose element type resolves to a Struct-kind potential closure of the
+// current type.
+bool IsClosureParameter(const IParameter* parameter,
+                        const ITypeDefinition* currentTypeDefinition)
+{
+    // The C# `parameter.Type is not ByReferenceType brt` -- a plain RTTI test (no
+    // modifier unwrap).
+    const ByReferenceType* brt = dynamic_cast<const ByReferenceType*>(&parameter->Type());
+    if (brt == nullptr)
+        return false;
+    // The C# `brt.ElementType.GetDefinition()` -- a null element (a degenerate
+    // ByReferenceType that does not occur in practice) would NRE in the C#; the
+    // guard yields a null definition and the null check below returns false (the
+    // D516 convention).
+    const ITypeDefinition* type =
+        brt->Element() ? brt->Element()->GetDefinition() : nullptr;
+    return type != nullptr
+        && type->Kind() == TypeKind::Struct
+        && IsPotentialClosure(currentTypeDefinition, type);
+}
+
+namespace {
+
+// The C# local function `DefaultValueAssignmentAllowedIndividual`
+// (TypeSystemExtensions.cs lines 695-698): optional + constant-in-signature + a
+// by-value / `in` / `ref readonly` reference kind.
+bool DefaultValueAssignmentAllowedIndividual(const IParameter& parameter)
+{
+    return parameter.IsOptional() && parameter.HasConstantValueInSignature()
+        && (parameter.ReferenceKind() == ReferenceKind::None
+            || parameter.ReferenceKind() == ReferenceKind::In
+            || parameter.ReferenceKind() == ReferenceKind::RefReadOnly);
+}
+
+} // namespace
+
+// The C# `IsDefaultValueAssignmentAllowed` (TypeSystemExtensions.cs line 681).
+bool IsDefaultValueAssignmentAllowed(const IParameter& parameter)
+{
+    if (!DefaultValueAssignmentAllowedIndividual(parameter))
+        return false;
+
+    const IParameterizedMember* owner = parameter.Owner();
+    if (owner == nullptr)
+        return true; // Shouldn't happen, but we need to check for it.
+
+    const std::vector<const IParameter*> parameters = owner->Parameters();
+    for (int i = static_cast<int>(parameters.size()) - 1; i >= 0; i--) {
+        const IParameter* otherParameter = parameters[i];
+        // Reached the parameter itself -- every subsequent (later-position)
+        // parameter has been checked.
+        if (otherParameter == &parameter)
+            break;
+
+        // The C# `LocalFunctionDecompiler.IsClosureParameter(otherParameter,
+        // otherParameter.Owner.DeclaringTypeDefinition)` derefs the subsequent
+        // parameter's owner unconditionally (the parameter comes from the owner's
+        // own list, so the owner is non-null in practice); the port guards the
+        // degenerate stub shape (a null owner or declaring type skips the closure
+        // check and falls through to the individual / params tests -- the D516
+        // convention).
+        if (otherParameter->Owner() != nullptr
+            && otherParameter->Owner()->DeclaringTypeDefinition() != nullptr
+            && IsClosureParameter(otherParameter,
+                                  otherParameter->Owner()->DeclaringTypeDefinition()))
+            continue;
+
+        if (DefaultValueAssignmentAllowedIndividual(*otherParameter)
+            || otherParameter->IsParams())
+            continue;
+
+        return false;
+    }
+    return true;
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem

@@ -44,6 +44,14 @@
 #include <optional>
 #include <vector>
 
+// Forward declarations for the new closure/default-value region's parameter types
+// (pointer / reference declarations only -- the .cpp includes the full headers;
+// `IEntity` / `IParameter` are not among the `IType.hpp` forward declarations).
+namespace ILSpy::Decompiler::TypeSystem {
+class IEntity;
+class IParameter;
+} // namespace ILSpy::Decompiler::TypeSystem
+
 namespace ILSpy::Decompiler::TypeSystem {
 
 // The C# `IEnumerable<IType> GetAllBaseTypes(this IType type)`:
@@ -280,5 +288,83 @@ ITypePtr GetElementTypeFromIEnumerable(const IType& collectionType,
                                        const ICompilation& compilation,
                                        bool allowIEnumerator,
                                        std::optional<bool>& isGeneric);
+
+// The C# `public static bool IsCompilerGeneratedOrIsInCompilerGeneratedClass(
+// this IEntity entity)` (NRExtensions.cs lines 26-46, namespace ICSharpCode.Decompiler
+// root) -- whether the entity itself or any type in its nesting chain (transitively
+// through `DeclaringTypeDefinition`) carries `[CompilerGenerated]`. The C# home is
+// NRExtensions.cs; the port keeps no translation units at the `ILSpy::Decompiler`
+// root (only the per-area subdirectories), so the pure IEntity leaf lands here in
+// TypeSystemExtensions next to its only ported consumer chain (the
+// `IsDefaultValueAssignmentAllowed` region below) -- the land-a-leaf-where-its-
+// dependencies-live convention (the IsAnyPointer precedent). The C# private
+// `IsCompilerGenerated` sub-extension is inlined (`HasAttribute(CompilerGenerated)`,
+// the `IEntity::HasAttribute` classified lookup); the C# null-accepting extension
+// contract (`entity != null`) ports to a nullable pointer (null returns false). The
+// recursion walks the nesting chain exactly like the C# (the chain is acyclic for
+// real metadata; a malformed cyclic NestedClass table would infinitely recurse in
+// the C# too, so no depth guard is added -- unlike the metadata-level
+// `MetadataFile::IsFieldCompilerGeneratedOrInCompilerGeneratedClass` twin, which
+// guards because it reads raw metadata rows).
+bool IsCompilerGeneratedOrIsInCompilerGeneratedClass(const IEntity* entity);
+
+// The C# `internal static bool IsPotentialClosure(ITypeDefinition
+// decompiledTypeDefinition, ITypeDefinition potentialDisplayClass, bool
+// allowTypeImplementingInterfaces = false)` (TransformDisplayClassUsage.cs) --
+// whether the type is a compiler-generated display class (closure) belonging to
+// the decompiled type's own nesting tree: `[CompilerGenerated]` on the type or its
+// nesting chain, a Struct kind (or a Class kind whose direct base types are all
+// `object`, unless `allowTypeImplementingInterfaces`), and the decompiled type or
+// one of its ancestors being an ancestor of the display class (the C# comment:
+// "Either decompiledTypeDefinition is an ancestor type of potentialDisplayClass or
+// both have at least one common ancestor"). The C# home is the
+// `TransformDisplayClassUsage` IL transform (not ported); the static is a pure
+// type-system function whose only ported consumer is the closure-parameter check
+// below, so it lands here with the same land-a-leaf convention. Both parameters are
+// nullable (the C# null checks: a null display class is false; a null decompiled
+// type walks zero ancestors and is false). The C# `HashSet<ITypeDefinition>` of
+// the display class's ancestors uses reference equality (the default comparer for
+// the reference type), so the port collects the strict ancestors into a
+// pointer-keyed vector with a linear `Contains` (the chains are nesting-depth
+// sized; the dedup-by-pointer-identity convention).
+bool IsPotentialClosure(const ITypeDefinition* decompiledTypeDefinition,
+                        const ITypeDefinition* potentialDisplayClass,
+                        bool allowTypeImplementingInterfaces = false);
+
+// The C# `internal static bool IsClosureParameter(IParameter parameter, ITypeDefinition
+// currentTypeDefinition)` (LocalFunctionDecompiler.cs line 575, the ITypeDefinition
+// overload -- the `ITypeResolveContext` overload adapts this one and is not needed by
+// the ported consumer chain) -- whether the parameter is a hoisted closure variable
+// passed to a local function: a by-reference parameter whose element type resolves to
+// a Struct-kind definition that is a potential closure of the current type. The C#
+// home is the `LocalFunctionDecompiler` IL transform (not ported); the static is a
+// pure type-system function whose only ported consumer is
+// `IsDefaultValueAssignmentAllowed` below, so it lands here with the same
+// land-a-leaf convention. The C# `parameter.Type is not ByReferenceType brt` is a
+// plain RTTI test (no modifier unwrap); the C# `brt.ElementType.GetDefinition()` may
+// be null (a type without a definition). The `IsPotentialClosure` current-type
+// argument is `otherParameter.Owner.DeclaringTypeDefinition` in the consumer -- the
+// owner's declaring type definition, nullable.
+bool IsClosureParameter(const IParameter* parameter,
+                        const ITypeDefinition* currentTypeDefinition);
+
+// The C# `public static bool IsDefaultValueAssignmentAllowed(this IParameter parameter)`
+// (TypeSystemExtensions.cs line 681, the IParameter region) -- whether the parameter
+// may carry a default value in decompiled output: the parameter itself must be
+// optional, carry the constant value in its signature, and use a by-value / `in` /
+// `ref readonly` reference kind (the C# local function
+// `DefaultValueAssignmentAllowedIndividual`); and every SUBSEQUENT parameter (a later
+// position in the owner's parameter list -- C# requires every parameter after an
+// optional one to be optional, a `params` array, or one of the closure parameters the
+// local-function transform removes) must individually allow a default, be a `params`
+// array, or be a closure parameter (`IsClosureParameter` against the owner's declaring
+// type definition). A parameter without an owner returns true after the individual
+// check (the C# comment: "Shouldn't happen, but we need to check for it."). The C#
+// `otherParameter.Owner.DeclaringTypeDefinition` derefs the subsequent parameter's
+// owner unconditionally (the parameter comes from the owner's own list, so the owner
+// is non-null in practice); the port guards the degenerate stub shape (a null owner or
+// declaring type skips the closure check, falling through to the individual / params
+// tests -- the D516 safe-fallback convention).
+bool IsDefaultValueAssignmentAllowed(const IParameter& parameter);
 
 } // namespace ILSpy::Decompiler::TypeSystem

@@ -31,8 +31,10 @@
 // lines 770-988), the "Convert Constant Value" SUPPORT helpers (IsSpecialConstant +
 // ConvertFloatingPointLiteral + MakeConstant, C# lines 1168-1249 + 1496-1582), and the
 // mutually-recursive "Convert Constant Value" CORE (the three ConvertConstantValue
-// overloads + ConvertEnumValue, C# lines 998-1078 + 1306-1480) are landed; the
-// remaining `Convert*` instance methods (ConvertParameter / ConvertSymbol /
+// overloads + ConvertEnumValue, C# lines 998-1078 + 1306-1480), and the "Convert
+// Parameter" region (ConvertParameter, C# lines 1786-1826, consuming the
+// IsDefaultValueAssignmentAllowed prerequisite landed in TypeSystemExtensions)
+// are landed; the remaining `Convert*` instance methods (ConvertSymbol /
 // ConvertEntity / ConvertExtension / ConvertVariable) follow in later slices,
 // consuming the free functions below as they grow.
 //
@@ -89,10 +91,12 @@ namespace ILSpy::Decompiler::CSharp::Resolver { class CSharpResolver; }
 // a qualified namespace-definition inside another namespace declares a fresh
 // shadow chain on MSVC (the iteration-94 UsingScope trap).
 namespace ILSpy::Decompiler::TypeSystem { class FullTypeName; }
+namespace ILSpy::Decompiler::TypeSystem { class IParameter; }
 namespace ILSpy::Decompiler::Semantics { class NamespaceResolveResult; }
 namespace ILSpy::Decompiler::CSharp::Syntax {
 class Attribute;
 class AttributeSection;
+class ParameterDeclaration;
 } // namespace ILSpy::Decompiler::CSharp::Syntax
 // The ResolveResult-based ConvertConstantValue overload passes the result by
 // value (the C# parameter the body rebinds through the ConversionResolveResult
@@ -1276,6 +1280,24 @@ public:
     // `TypeResolveResult` over an attribute type (the resolver lookup's result
     // shape).
     bool IsAttributeType(const Sem::ResolveResult& rr) const;
+
+    // The C# `public ParameterDeclaration ConvertParameter(IParameter parameter)`
+    // (line 1786) -- the parameter renderer: the reference kind into
+    // `ParameterModifier`, the `IsParams` / `IsScopedRef` (the
+    // `Lifetime().ScopedRef()` C# 11 annotation) flags, the `ShowAttributes`-gated
+    // attribute sections, the declared type through `ConvertType` (a
+    // by-reference parameter type unwrapped to its element first -- the C#
+    // comment "avoid 'out ref'"), the `ShowParameterNames`-gated name, and the
+    // `IsDefaultValueAssignmentAllowed` + `ShowConstantValues`-gated default
+    // expression through the 2-arg `ConvertConstantValue` (the C# catch of the
+    // metadata decoder's `BadImageFormatException` ports to a `std::exception`
+    // catch with the `what()` message -- see the .cpp). The C#
+    // `ArgumentNullException` on a null parameter is N/A (a reference cannot be
+    // null, the D374 convention); the parameter is `const TS::IParameter&`
+    // because every member read is const (the ConvertAttribute convention); the
+    // returned node is a raw `new`-ed pointer (the D223 non-owning leak model,
+    // the ConvertType precedent).
+    ParameterDeclaration* ConvertParameter(const TS::IParameter& parameter) const;
 
 private:
     // The C# `private void AddTypeAnnotation(AstType astType, IType type)` (line 278)

@@ -34,12 +34,14 @@
 
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/IParameter.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/LookupStubs.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
 
 #include <gtest/gtest.h>
 
+#include <any>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -47,6 +49,7 @@
 
 namespace TS = ILSpy::Decompiler::TypeSystem;
 using TS::TestSupport::LookupCompilation;
+using TS::TestSupport::LookupMethod;
 using TS::TestSupport::LookupTypeDefinition;
 
 namespace {
@@ -511,4 +514,509 @@ TEST(TypeSystemExtensionsTest, GetElementTypeFromIEnumerableNoEnumerableBaseYiel
                                                               isGeneric);
     EXPECT_EQ(element->Kind(), TS::TypeKind::Unknown);
     EXPECT_FALSE(isGeneric.has_value());
+}
+
+// ---------------------------------------------------------------------------
+// IsCompilerGeneratedOrIsInCompilerGeneratedClass / IsPotentialClosure /
+// IsClosureParameter / IsDefaultValueAssignmentAllowed (the closure-parameter
+// and default-value-assignment region: NRExtensions.cs lines 26-46,
+// TransformDisplayClassUsage.cs IsPotentialClosure, LocalFunctionDecompiler.cs
+// line 575 IsClosureParameter, TypeSystemExtensions.cs line 681).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A `LookupTypeDefinition` subclass with a configurable `[CompilerGenerated]`
+// (the TaskType_Test CustomTaskDef pattern: the base stub hardcodes
+// `HasAttribute` to false, so the closure tests override the attribute
+// accessors).
+class CompilerGeneratedDef : public LookupTypeDefinition {
+public:
+    using LookupTypeDefinition::LookupTypeDefinition;
+
+    void SetCompilerGenerated(bool value) { compilerGenerated_ = value; }
+
+    bool HasAttribute(TS::KnownAttribute attribute) const override {
+        return compilerGenerated_ && attribute == TS::KnownAttribute::CompilerGenerated;
+    }
+    std::vector<const TS::IAttribute*> GetAttributes() const override { return {}; }
+
+private:
+    bool compilerGenerated_ = false;
+};
+
+// A fully configurable `IParameter` stub (the CalculateCandidate_Test
+// TestParameter pattern extended with the fields the default-value region
+// reads: reference kind, constant-in-signature, owner, lifetime, constant
+// value).
+class DefaultTestParameter : public TS::IParameter {
+public:
+    explicit DefaultTestParameter(TS::ITypePtr type, std::string name = "p")
+        : name_(std::move(name)), type_(std::move(type)) {}
+
+    void SetOwner(const TS::IParameterizedMember* owner) { owner_ = owner; }
+    void SetReferenceKind(TS::ReferenceKind rk) { referenceKind_ = rk; }
+    void SetIsParams(bool v) { isParams_ = v; }
+    void SetIsOptional(bool v) { isOptional_ = v; }
+    void SetHasConstantValueInSignature(bool v) { hasConstantValueInSignature_ = v; }
+    void SetLifetimeScopedRef(bool v) { lifetime_.ScopedRef(v); }
+    void SetConstantValue(std::any v) { constantValue_ = std::move(v); }
+
+    TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Parameter; }
+    std::string Name() const override { return name_; }
+    const TS::IType& Type() const override { return *type_; }
+    bool IsConst() const override { return false; }
+    std::any GetConstantValue(bool) const override { return constantValue_; }
+    std::vector<const TS::IAttribute*> GetAttributes() const override { return {}; }
+    TS::ReferenceKind ReferenceKind() const override { return referenceKind_; }
+    bool IsParams() const override { return isParams_; }
+    bool IsOptional() const override { return isOptional_; }
+    bool HasConstantValueInSignature() const override { return hasConstantValueInSignature_; }
+    const TS::IParameterizedMember* Owner() const override { return owner_; }
+    TS::LifetimeAnnotation Lifetime() const override { return lifetime_; }
+
+private:
+    std::string name_;
+    TS::ITypePtr type_;
+    const TS::IParameterizedMember* owner_ = nullptr;
+    TS::ReferenceKind referenceKind_ = TS::ReferenceKind::None;
+    bool isParams_ = false;
+    bool isOptional_ = false;
+    bool hasConstantValueInSignature_ = false;
+    TS::LifetimeAnnotation lifetime_;
+    std::any constantValue_;
+};
+
+// A helper building an owner method over a registered Outer type + Int32
+// definition, for the subsequent-parameter walk tests (each parameter's
+// Owner is wired to the same method).
+struct OwnerFixture {
+    LookupCompilation compilation;
+    std::shared_ptr<LookupTypeDefinition> outer;
+    std::shared_ptr<LookupTypeDefinition> int32;
+    std::shared_ptr<LookupMethod> owner;
+
+    OwnerFixture()
+        : outer(MakeDefinition(compilation, "Outer", "N")),
+          int32(MakeDefinition(compilation, "Int32", "System", TS::TypeKind::Struct,
+                               nullptr, TS::KnownTypeCode::Int32)),
+          owner(std::make_shared<LookupMethod>("M", compilation))
+    {
+        owner->SetDeclaringTypeDefinition(outer.get());
+    }
+};
+
+} // namespace
+
+// A null entity is not compiler-generated (the C# null-accepting extension).
+TEST(TypeSystemExtensionsTest, IsCompilerGeneratedNullEntityReturnsFalse)
+{
+    EXPECT_FALSE(TS::IsCompilerGeneratedOrIsInCompilerGeneratedClass(nullptr));
+}
+
+// An entity without the attribute (and without a declaring chain carrying it)
+// is not compiler-generated.
+TEST(TypeSystemExtensionsTest, IsCompilerGeneratedPlainEntityReturnsFalse)
+{
+    LookupCompilation compilation;
+    auto plain = MakeDefinition(compilation, "Plain", "N");
+    EXPECT_FALSE(TS::IsCompilerGeneratedOrIsInCompilerGeneratedClass(plain.get()));
+}
+
+// The entity's own [CompilerGenerated] satisfies the check.
+TEST(TypeSystemExtensionsTest, IsCompilerGeneratedOwnAttributeReturnsTrue)
+{
+    LookupCompilation compilation;
+    auto generated = std::make_shared<CompilerGeneratedDef>(
+        "N.Gen", "N", TS::FullTypeName("N.Gen"), TS::TypeKind::Class,
+        TS::Accessibility::Public, compilation, nullptr, TS::KnownTypeCode::None);
+    generated->SetCompilerGenerated(true);
+    EXPECT_TRUE(TS::IsCompilerGeneratedOrIsInCompilerGeneratedClass(generated.get()));
+}
+
+// A [CompilerGenerated] on any type in the entity's nesting chain (here one
+// level up) satisfies the check.
+TEST(TypeSystemExtensionsTest, IsCompilerGeneratedDeclaringChainAttributeReturnsTrue)
+{
+    LookupCompilation compilation;
+    auto generatedOuter = std::make_shared<CompilerGeneratedDef>(
+        "N.Outer", "N", TS::FullTypeName("N.Outer"), TS::TypeKind::Class,
+        TS::Accessibility::Public, compilation, nullptr, TS::KnownTypeCode::None);
+    generatedOuter->SetCompilerGenerated(true);
+    LookupTypeDefinition inner("N.Inner", "N", TS::FullTypeName("N.Inner"),
+                               TS::TypeKind::Class, TS::Accessibility::Public,
+                               compilation, nullptr, TS::KnownTypeCode::None);
+    inner.SetDeclaringTypeDefinition(generatedOuter.get());
+    EXPECT_TRUE(TS::IsCompilerGeneratedOrIsInCompilerGeneratedClass(&inner));
+}
+
+// A null display class is not a potential closure.
+TEST(TypeSystemExtensionsTest, IsPotentialClosureNullDisplayClassReturnsFalse)
+{
+    LookupCompilation compilation;
+    auto outer = MakeDefinition(compilation, "Outer", "N");
+    EXPECT_FALSE(TS::IsPotentialClosure(outer.get(), nullptr));
+}
+
+// A non-compiler-generated struct in the same tree is not a potential closure.
+TEST(TypeSystemExtensionsTest, IsPotentialClosureNonGeneratedReturnsFalse)
+{
+    LookupCompilation compilation;
+    auto outer = MakeDefinition(compilation, "Outer", "N");
+    auto plainStruct = MakeDefinition(compilation, "S", "N", TS::TypeKind::Struct);
+    plainStruct->SetDeclaringTypeDefinition(outer.get());
+    EXPECT_FALSE(TS::IsPotentialClosure(outer.get(), plainStruct.get()));
+}
+
+// A non-Struct/non-Class kind (an interface) is rejected by the Kind switch.
+TEST(TypeSystemExtensionsTest, IsPotentialClosureInterfaceKindReturnsFalse)
+{
+    LookupCompilation compilation;
+    auto outer = MakeDefinition(compilation, "Outer", "N");
+    auto generatedInterface = std::make_shared<CompilerGeneratedDef>(
+        "N.IFace", "N", TS::FullTypeName("N.IFace"), TS::TypeKind::Interface,
+        TS::Accessibility::Public, compilation, nullptr, TS::KnownTypeCode::None);
+    generatedInterface->SetCompilerGenerated(true);
+    generatedInterface->SetDeclaringTypeDefinition(outer.get());
+    EXPECT_FALSE(TS::IsPotentialClosure(outer.get(), generatedInterface.get()));
+}
+
+// A compiler-generated struct declared inside the decompiled type is a
+// potential closure.
+TEST(TypeSystemExtensionsTest, IsPotentialClosureGeneratedStructInSameTreeReturnsTrue)
+{
+    LookupCompilation compilation;
+    auto outer = MakeDefinition(compilation, "Outer", "N");
+    auto displayClass = std::make_shared<CompilerGeneratedDef>(
+        "N.Outer.Display", "N", TS::FullTypeName("N.Outer.Display"), TS::TypeKind::Struct,
+        TS::Accessibility::Public, compilation, nullptr, TS::KnownTypeCode::None);
+    displayClass->SetCompilerGenerated(true);
+    displayClass->SetDeclaringTypeDefinition(outer.get());
+    EXPECT_TRUE(TS::IsPotentialClosure(outer.get(), displayClass.get()));
+}
+
+// A compiler-generated class whose only direct base is object is a potential
+// closure; one implementing an interface is not (unless the flag allows it).
+TEST(TypeSystemExtensionsTest, IsPotentialClosureClassBaseTypeGate)
+{
+    LookupCompilation compilation;
+    auto object = MakeDefinition(compilation, "Object", "System", TS::TypeKind::Class,
+                                 nullptr, TS::KnownTypeCode::Object);
+    auto outer = MakeDefinition(compilation, "Outer", "N");
+    auto displayClass = std::make_shared<CompilerGeneratedDef>(
+        "N.Outer.Display", "N", TS::FullTypeName("N.Outer.Display"), TS::TypeKind::Class,
+        TS::Accessibility::Public, compilation, nullptr, TS::KnownTypeCode::None);
+    displayClass->SetCompilerGenerated(true);
+    displayClass->SetDeclaringTypeDefinition(outer.get());
+
+    displayClass->AddDirectBaseType(object);
+    EXPECT_TRUE(TS::IsPotentialClosure(outer.get(), displayClass.get()));
+
+    auto iface = MakeDefinition(compilation, "IFace", "N", TS::TypeKind::Interface);
+    auto implementing = std::make_shared<CompilerGeneratedDef>(
+        "N.Outer.Impl", "N", TS::FullTypeName("N.Outer.Impl"), TS::TypeKind::Class,
+        TS::Accessibility::Public, compilation, nullptr, TS::KnownTypeCode::None);
+    implementing->SetCompilerGenerated(true);
+    implementing->SetDeclaringTypeDefinition(outer.get());
+    implementing->AddDirectBaseType(iface);
+    EXPECT_FALSE(TS::IsPotentialClosure(outer.get(), implementing.get()));
+    EXPECT_TRUE(TS::IsPotentialClosure(outer.get(), implementing.get(),
+                                       /*allowTypeImplementingInterfaces*/ true));
+}
+
+// A compiler-generated struct in an unrelated nesting tree is not a potential
+// closure.
+TEST(TypeSystemExtensionsTest, IsPotentialClosureUnrelatedTreeReturnsFalse)
+{
+    LookupCompilation compilation;
+    auto outer = MakeDefinition(compilation, "Outer", "N");
+    auto otherOuter = MakeDefinition(compilation, "OtherOuter", "N");
+    auto displayClass = std::make_shared<CompilerGeneratedDef>(
+        "N.OtherOuter.Display", "N", TS::FullTypeName("N.OtherOuter.Display"),
+        TS::TypeKind::Struct, TS::Accessibility::Public, compilation, nullptr,
+        TS::KnownTypeCode::None);
+    displayClass->SetCompilerGenerated(true);
+    displayClass->SetDeclaringTypeDefinition(otherOuter.get());
+    EXPECT_FALSE(TS::IsPotentialClosure(outer.get(), displayClass.get()));
+}
+
+// Both types sharing a common ancestor satisfies the tree check (the
+// display class nested under a sibling of the decompiled type).
+TEST(TypeSystemExtensionsTest, IsPotentialClosureCommonAncestorSatisfiesTreeCheck)
+{
+    LookupCompilation compilation;
+    auto common = MakeDefinition(compilation, "Common", "N");
+    auto outer = MakeDefinition(compilation, "Outer", "N");
+    outer->SetDeclaringTypeDefinition(common.get());
+    auto sibling = MakeDefinition(compilation, "Sibling", "N");
+    sibling->SetDeclaringTypeDefinition(common.get());
+    auto displayClass = std::make_shared<CompilerGeneratedDef>(
+        "N.Sibling.Display", "N", TS::FullTypeName("N.Sibling.Display"),
+        TS::TypeKind::Struct, TS::Accessibility::Public, compilation, nullptr,
+        TS::KnownTypeCode::None);
+    displayClass->SetCompilerGenerated(true);
+    displayClass->SetDeclaringTypeDefinition(sibling.get());
+    EXPECT_TRUE(TS::IsPotentialClosure(outer.get(), displayClass.get()));
+}
+
+// A null decompiled type walks zero ancestors and yields false (the C#
+// `while (decompiledTypeDefinitionOrAncestor != null)` loop body never runs).
+TEST(TypeSystemExtensionsTest, IsPotentialClosureNullDecompiledTypeReturnsFalse)
+{
+    LookupCompilation compilation;
+    auto displayClass = std::make_shared<CompilerGeneratedDef>(
+        "N.Display", "N", TS::FullTypeName("N.Display"), TS::TypeKind::Struct,
+        TS::Accessibility::Public, compilation, nullptr, TS::KnownTypeCode::None);
+    displayClass->SetCompilerGenerated(true);
+    EXPECT_FALSE(TS::IsPotentialClosure(nullptr, displayClass.get()));
+}
+
+// A by-ref parameter whose element is not a closure shape is not a closure
+// parameter; a definitionless element (a KnownType placeholder) is not
+// either; a compiler-generated class display class with only-object bases
+// is.
+TEST(TypeSystemExtensionsTest, IsClosureParameterNonClosureShapesReturnFalse)
+{
+    LookupCompilation compilation;
+    auto outer = MakeDefinition(compilation, "Outer", "N");
+    auto displayClass = std::make_shared<CompilerGeneratedDef>(
+        "N.Outer.Display", "N", TS::FullTypeName("N.Outer.Display"), TS::TypeKind::Struct,
+        TS::Accessibility::Public, compilation, nullptr, TS::KnownTypeCode::None);
+    displayClass->SetCompilerGenerated(true);
+    displayClass->SetDeclaringTypeDefinition(outer.get());
+
+    // A plain (non-by-ref) parameter.
+    DefaultTestParameter plainParam(displayClass);
+    EXPECT_FALSE(TS::IsClosureParameter(&plainParam, outer.get()));
+
+    // A by-ref parameter over a definitionless element.
+    DefaultTestParameter definitionless(
+        std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int32));
+    EXPECT_FALSE(TS::IsClosureParameter(&definitionless, outer.get()));
+
+    // A by-ref parameter over a non-compiler-generated struct.
+    auto plainStruct = MakeDefinition(compilation, "S", "N", TS::TypeKind::Struct);
+    plainStruct->SetDeclaringTypeDefinition(outer.get());
+    DefaultTestParameter plainStructParam(
+        std::make_shared<TS::ByReferenceType>(plainStruct));
+    EXPECT_FALSE(TS::IsClosureParameter(&plainStructParam, outer.get()));
+
+    // A by-ref parameter over a compiler-generated CLASS display class: the
+    // `type.Kind == TypeKind.Struct` check rejects a Class kind even when the
+    // display-class shape would pass `IsPotentialClosure` (the C# closure
+    // parameters are the hoisted struct display classes).
+    auto classDisplay = std::make_shared<CompilerGeneratedDef>(
+        "N.Outer.ClassDisplay", "N", TS::FullTypeName("N.Outer.ClassDisplay"),
+        TS::TypeKind::Class, TS::Accessibility::Public, compilation, nullptr,
+        TS::KnownTypeCode::None);
+    classDisplay->SetCompilerGenerated(true);
+    classDisplay->SetDeclaringTypeDefinition(outer.get());
+    DefaultTestParameter classDisplayParam(
+        std::make_shared<TS::ByReferenceType>(classDisplay));
+    EXPECT_FALSE(TS::IsClosureParameter(&classDisplayParam, outer.get()));
+}
+
+// A by-ref parameter over a compiler-generated struct declared inside the
+// current type is a closure parameter.
+TEST(TypeSystemExtensionsTest, IsClosureParameterClosureStructReturnsTrue)
+{
+    LookupCompilation compilation;
+    auto outer = MakeDefinition(compilation, "Outer", "N");
+    auto displayClass = std::make_shared<CompilerGeneratedDef>(
+        "N.Outer.Display", "N", TS::FullTypeName("N.Outer.Display"), TS::TypeKind::Struct,
+        TS::Accessibility::Public, compilation, nullptr, TS::KnownTypeCode::None);
+    displayClass->SetCompilerGenerated(true);
+    displayClass->SetDeclaringTypeDefinition(outer.get());
+    DefaultTestParameter closureParam(
+        std::make_shared<TS::ByReferenceType>(displayClass));
+    EXPECT_TRUE(TS::IsClosureParameter(&closureParam, outer.get()));
+}
+
+// The individual check rejects a non-optional parameter.
+TEST(TypeSystemExtensionsTest, DefaultValueAssignmentNonOptionalReturnsFalse)
+{
+    LookupCompilation compilation;
+    auto int32 = MakeDefinition(compilation, "Int32", "System", TS::TypeKind::Struct,
+                                nullptr, TS::KnownTypeCode::Int32);
+    DefaultTestParameter param(int32);
+    param.SetIsOptional(false);
+    param.SetHasConstantValueInSignature(true);
+    EXPECT_FALSE(TS::IsDefaultValueAssignmentAllowed(param));
+}
+
+// The individual check rejects a parameter without the constant in its
+// signature.
+TEST(TypeSystemExtensionsTest, DefaultValueAssignmentConstantNotInSignatureReturnsFalse)
+{
+    LookupCompilation compilation;
+    auto int32 = MakeDefinition(compilation, "Int32", "System", TS::TypeKind::Struct,
+                                nullptr, TS::KnownTypeCode::Int32);
+    DefaultTestParameter param(int32);
+    param.SetIsOptional(true);
+    param.SetHasConstantValueInSignature(false);
+    EXPECT_FALSE(TS::IsDefaultValueAssignmentAllowed(param));
+}
+
+// The individual check rejects `ref` and `out` parameters, but accepts `in`
+// and `ref readonly` ones.
+TEST(TypeSystemExtensionsTest, DefaultValueAssignmentReferenceKindGate)
+{
+    LookupCompilation compilation;
+    auto int32 = MakeDefinition(compilation, "Int32", "System", TS::TypeKind::Struct,
+                                nullptr, TS::KnownTypeCode::Int32);
+    DefaultTestParameter refParam(int32);
+    refParam.SetIsOptional(true);
+    refParam.SetHasConstantValueInSignature(true);
+    refParam.SetReferenceKind(TS::ReferenceKind::Ref);
+    EXPECT_FALSE(TS::IsDefaultValueAssignmentAllowed(refParam));
+
+    DefaultTestParameter outParam(int32);
+    outParam.SetIsOptional(true);
+    outParam.SetHasConstantValueInSignature(true);
+    outParam.SetReferenceKind(TS::ReferenceKind::Out);
+    EXPECT_FALSE(TS::IsDefaultValueAssignmentAllowed(outParam));
+
+    DefaultTestParameter inParam(int32);
+    inParam.SetIsOptional(true);
+    inParam.SetHasConstantValueInSignature(true);
+    inParam.SetReferenceKind(TS::ReferenceKind::In);
+    EXPECT_TRUE(TS::IsDefaultValueAssignmentAllowed(inParam));
+
+    DefaultTestParameter refReadOnlyParam(int32);
+    refReadOnlyParam.SetIsOptional(true);
+    refReadOnlyParam.SetHasConstantValueInSignature(true);
+    refReadOnlyParam.SetReferenceKind(TS::ReferenceKind::RefReadOnly);
+    EXPECT_TRUE(TS::IsDefaultValueAssignmentAllowed(refReadOnlyParam));
+}
+
+// A parameter that individually passes but has no owner returns true (the
+// C# "Shouldn't happen, but we need to check for it" arm).
+TEST(TypeSystemExtensionsTest, DefaultValueAssignmentOwnerLessParameterReturnsTrue)
+{
+    LookupCompilation compilation;
+    auto int32 = MakeDefinition(compilation, "Int32", "System", TS::TypeKind::Struct,
+                                nullptr, TS::KnownTypeCode::Int32);
+    DefaultTestParameter param(int32);
+    param.SetIsOptional(true);
+    param.SetHasConstantValueInSignature(true);
+    param.SetConstantValue(std::any(std::int32_t(5)));
+    EXPECT_TRUE(TS::IsDefaultValueAssignmentAllowed(param));
+}
+
+// The target being the LAST parameter passes the walk trivially (the backward
+// walk reaches it before checking any other parameter).
+TEST(TypeSystemExtensionsTest, DefaultValueAssignmentLastParameterReturnsTrue)
+{
+    OwnerFixture fx;
+    DefaultTestParameter required(fx.int32, "b");
+    required.SetOwner(fx.owner.get());
+    DefaultTestParameter target(fx.int32, "a");
+    target.SetIsOptional(true);
+    target.SetHasConstantValueInSignature(true);
+    target.SetOwner(fx.owner.get());
+    fx.owner->SetParameters({&required, &target});
+
+    EXPECT_TRUE(TS::IsDefaultValueAssignmentAllowed(target));
+}
+
+// A subsequent (later-position) optional parameter does not block the target's
+// default.
+TEST(TypeSystemExtensionsTest, DefaultValueAssignmentSubsequentOptionalAllowsDefault)
+{
+    OwnerFixture fx;
+    DefaultTestParameter target(fx.int32, "a");
+    target.SetIsOptional(true);
+    target.SetHasConstantValueInSignature(true);
+    target.SetOwner(fx.owner.get());
+    DefaultTestParameter laterOptional(fx.int32, "b");
+    laterOptional.SetIsOptional(true);
+    laterOptional.SetHasConstantValueInSignature(true);
+    laterOptional.SetOwner(fx.owner.get());
+    fx.owner->SetParameters({&target, &laterOptional});
+
+    EXPECT_TRUE(TS::IsDefaultValueAssignmentAllowed(target));
+}
+
+// A subsequent required by-value parameter blocks the target's default (C#
+// requires every parameter after an optional one to have a default too).
+TEST(TypeSystemExtensionsTest, DefaultValueAssignmentSubsequentRequiredBlocksDefault)
+{
+    OwnerFixture fx;
+    DefaultTestParameter target(fx.int32, "a");
+    target.SetIsOptional(true);
+    target.SetHasConstantValueInSignature(true);
+    target.SetOwner(fx.owner.get());
+    DefaultTestParameter laterRequired(fx.int32, "b");
+    laterRequired.SetOwner(fx.owner.get());
+    fx.owner->SetParameters({&target, &laterRequired});
+
+    EXPECT_FALSE(TS::IsDefaultValueAssignmentAllowed(target));
+}
+
+// A subsequent params array does not block the target's default.
+TEST(TypeSystemExtensionsTest, DefaultValueAssignmentSubsequentParamsAllowsDefault)
+{
+    OwnerFixture fx;
+    DefaultTestParameter target(fx.int32, "a");
+    target.SetIsOptional(true);
+    target.SetHasConstantValueInSignature(true);
+    target.SetOwner(fx.owner.get());
+    DefaultTestParameter laterParams(fx.int32, "b");
+    laterParams.SetIsParams(true);
+    laterParams.SetOwner(fx.owner.get());
+    fx.owner->SetParameters({&target, &laterParams});
+
+    EXPECT_TRUE(TS::IsDefaultValueAssignmentAllowed(target));
+}
+
+// A subsequent closure parameter (a by-ref over a compiler-generated struct
+// in the owner's declaring-type tree) is skipped and does not block the
+// target's default.
+TEST(TypeSystemExtensionsTest, DefaultValueAssignmentSubsequentClosureParameterIsSkipped)
+{
+    OwnerFixture fx;
+    auto displayClass = std::make_shared<CompilerGeneratedDef>(
+        "N.Outer.Display", "N", TS::FullTypeName("N.Outer.Display"), TS::TypeKind::Struct,
+        TS::Accessibility::Public, fx.compilation, nullptr, TS::KnownTypeCode::None);
+    displayClass->SetCompilerGenerated(true);
+    displayClass->SetDeclaringTypeDefinition(fx.outer.get());
+
+    DefaultTestParameter target(fx.int32, "a");
+    target.SetIsOptional(true);
+    target.SetHasConstantValueInSignature(true);
+    target.SetOwner(fx.owner.get());
+    DefaultTestParameter closureParam(
+        std::make_shared<TS::ByReferenceType>(displayClass), "closure");
+    closureParam.SetReferenceKind(TS::ReferenceKind::Ref);
+    closureParam.SetOwner(fx.owner.get());
+    fx.owner->SetParameters({&target, &closureParam});
+
+    EXPECT_TRUE(TS::IsDefaultValueAssignmentAllowed(target));
+}
+
+// The closure skip requires the display class to be in the owner's
+// declaring-type tree: a same-shaped closure parameter under an unrelated
+// outer type does not get skipped and blocks the default.
+TEST(TypeSystemExtensionsTest, DefaultValueAssignmentSubsequentUnrelatedClosureBlocksDefault)
+{
+    OwnerFixture fx;
+    auto otherOuter = MakeDefinition(fx.compilation, "OtherOuter", "N");
+    auto displayClass = std::make_shared<CompilerGeneratedDef>(
+        "N.OtherOuter.Display", "N", TS::FullTypeName("N.OtherOuter.Display"),
+        TS::TypeKind::Struct, TS::Accessibility::Public, fx.compilation, nullptr,
+        TS::KnownTypeCode::None);
+    displayClass->SetCompilerGenerated(true);
+    displayClass->SetDeclaringTypeDefinition(otherOuter.get());
+
+    DefaultTestParameter target(fx.int32, "a");
+    target.SetIsOptional(true);
+    target.SetHasConstantValueInSignature(true);
+    target.SetOwner(fx.owner.get());
+    DefaultTestParameter closureParam(
+        std::make_shared<TS::ByReferenceType>(displayClass), "closure");
+    closureParam.SetReferenceKind(TS::ReferenceKind::Ref);
+    closureParam.SetOwner(fx.owner.get());
+    fx.owner->SetParameters({&target, &closureParam});
+
+    EXPECT_FALSE(TS::IsDefaultValueAssignmentAllowed(target));
 }

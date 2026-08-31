@@ -1819,4 +1819,67 @@ bool TypeSystemAstBuilder::IsAttributeType(const Sem::ResolveResult& rr) const {
     return trr != nullptr && IsAttributeType(&trr->Type());
 }
 
+// The C# `public ParameterDeclaration ConvertParameter(IParameter parameter)`
+// (line 1786).
+ParameterDeclaration* TypeSystemAstBuilder::ConvertParameter(
+    const TS::IParameter& parameter) const {
+    // The C# `throw new ArgumentNullException(nameof(parameter))` is N/A (a
+    // reference cannot be null, the D374 convention).
+    auto* decl = new ParameterDeclaration();
+    decl->ParameterModifier(parameter.ReferenceKind());
+    decl->IsParams(parameter.IsParams());
+    decl->IsScopedRef(parameter.Lifetime().ScopedRef());
+    if (ShowAttributes()) {
+        // The C# `decl.Attributes.AddRange(ConvertAttributes(parameter.GetAttributes()))`
+        // -- the `AddRange` convenience ports to element-wise `Add` (the D222
+        // convention).
+        for (AttributeSection* section : ConvertAttributes(parameter.GetAttributes()))
+            decl->Attributes().Add(section);
+    }
+    // The C# rebinds the local `parameterType`: a by-reference parameter type is
+    // unwrapped to its element first ("avoid 'out ref'" -- `out ref int x` is not
+    // valid C#, the modifier already carries the ref-ness). The C# hard cast
+    // `(ByReferenceType)parameter.Type` (after the `Kind == TypeKind.ByReference`
+    // gate) ports to the `dynamic_cast<const TS::ByReferenceType&>` -- a
+    // Kind-mismatched type would throw `std::bad_cast` exactly like the C#
+    // `InvalidCastException` (the UnderlyingTypeForConversion precedent). A
+    // degenerate null element (does not occur in practice) keeps the parameter's
+    // own type as the safe fallback (the D516 convention; the C# would pass null
+    // on to `ConvertType(null)` and throw).
+    const TS::IType* parameterType = &parameter.Type();
+    if (parameter.Type().Kind() == TS::TypeKind::ByReference) {
+        const TS::ByReferenceType& byRef =
+            dynamic_cast<const TS::ByReferenceType&>(parameter.Type());
+        if (byRef.Element())
+            parameterType = byRef.Element().get();
+    }
+    // `ConvertType` takes `TS::IType&` non-const (the `shared_from_this`-based
+    // annotation path, the D529 convention); the parameter's type accessor is
+    // const, so the cast (the D515/D517 precedent).
+    decl->Type(ConvertType(const_cast<TS::IType&>(*parameterType)));
+    if (ShowParameterNames()) {
+        decl->Name(parameter.Name());
+    }
+    if (TS::IsDefaultValueAssignmentAllowed(parameter) && ShowConstantValues()) {
+        // The C# `catch (BadImageFormatException ex)` guards the metadata
+        // decoder inside `GetConstantValue(throwOnInvalidMetadata: true)` (the
+        // `MetadataParameter` blob decode); the port has no
+        // `BadImageFormatException` analog and no port-side `GetConstantValue`
+        // throws (the `DefaultParameter`/`SpecializedParameter` shapes return the
+        // boxed value verbatim), so the arm catches `std::exception` -- the
+        // closest message-carrying base -- keeping the structure in place for a
+        // future metadata-backed `IParameter` whose `GetConstantValue` throws on
+        // invalid metadata (`ErrorExpression(ex.what())` is the `ex.Message`
+        // shape).
+        try {
+            decl->DefaultExpression(ConvertConstantValue(
+                const_cast<TS::IType&>(*parameterType),
+                parameter.GetConstantValue(/*throwOnInvalidMetadata:*/ true)));
+        } catch (const std::exception& ex) {
+            decl->DefaultExpression(new ErrorExpression(ex.what()));
+        }
+    }
+    return decl;
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Syntax
