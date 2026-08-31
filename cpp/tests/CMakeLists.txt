@@ -353,6 +353,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Syntax/TypeSystemAstBuilderConvertParameter_Test.cpp
     Decompiler/CSharp/Syntax/TypeSystemAstBuilderConvertTypeParameterVariable_Test.cpp
     Decompiler/CSharp/Syntax/TypeSystemAstBuilderNullabilityDisambig_Test.cpp
+    Decompiler/CSharp/Syntax/TypeSystemAstBuilderConvertModifiers_Test.cpp
     Decompiler/CSharp/Resolver/AliasResolveResult_Test.cpp
     Decompiler/CSharp/Resolver/NameLookupAndOverloadResolutionErrors_Test.cpp
     Decompiler/CSharp/Resolver/DynamicMemberResolveResult_Test.cpp

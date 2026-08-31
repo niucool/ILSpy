@@ -1,0 +1,87 @@
+Running main() from C:\Projects\github\vcpkg\buildtrees\gtest\src\v1.17.0-e243b8ee0f.clean\googletest\src\gtest_main.cc
+Note: Google Test filter = NeedsAccessibilityTest.*:GetMemberModifiersTest.*
+[==========] Running 37 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 11 tests from NeedsAccessibilityTest
+[ RUN      ] NeedsAccessibilityTest.ExplicitInterfaceImplementationReturnsFalse
+[       OK ] NeedsAccessibilityTest.ExplicitInterfaceImplementationReturnsFalse (0 ms)
+[ RUN      ] NeedsAccessibilityTest.InstanceConstructorNeedsAccessibility
+[       OK ] NeedsAccessibilityTest.InstanceConstructorNeedsAccessibility (0 ms)
+[ RUN      ] NeedsAccessibilityTest.StaticConstructorDoesNotNeedAccessibility
+[       OK ] NeedsAccessibilityTest.StaticConstructorDoesNotNeedAccessibility (0 ms)
+[ RUN      ] NeedsAccessibilityTest.DestructorNeverNeedsAccessibility
+[       OK ] NeedsAccessibilityTest.DestructorNeverNeedsAccessibility (0 ms)
+[ RUN      ] NeedsAccessibilityTest.InterfacePublicMemberDoesNotNeedAccessibility
+[       OK ] NeedsAccessibilityTest.InterfacePublicMemberDoesNotNeedAccessibility (0 ms)
+[ RUN      ] NeedsAccessibilityTest.InterfaceNonPublicMemberNeedsAccessibility
+[       OK ] NeedsAccessibilityTest.InterfaceNonPublicMemberNeedsAccessibility (0 ms)
+[ RUN      ] NeedsAccessibilityTest.NonMethodMemberNeedsAccessibility
+[       OK ] NeedsAccessibilityTest.NonMethodMemberNeedsAccessibility (0 ms)
+[ RUN      ] NeedsAccessibilityTest.LocalFunctionMethodDoesNotNeedAccessibility
+[       OK ] NeedsAccessibilityTest.LocalFunctionMethodDoesNotNeedAccessibility (0 ms)
+[ RUN      ] NeedsAccessibilityTest.PlainMethodNeedsAccessibility
+[       OK ] NeedsAccessibilityTest.PlainMethodNeedsAccessibility (0 ms)
+[ RUN      ] NeedsAccessibilityTest.NullDeclaringTypeFallsToDefaultArm
+[       OK ] NeedsAccessibilityTest.NullDeclaringTypeFallsToDefaultArm (0 ms)
+[ RUN      ] NeedsAccessibilityTest.LocalFunctionWrapperDoesNotNeedAccessibility
+[       OK ] NeedsAccessibilityTest.LocalFunctionWrapperDoesNotNeedAccessibility (0 ms)
+[----------] 11 tests from NeedsAccessibilityTest (1 ms total)
+
+[----------] 26 tests from GetMemberModifiersTest
+[ RUN      ] GetMemberModifiersTest.PublicClassMethodYieldsPublic
+[       OK ] GetMemberModifiersTest.PublicClassMethodYieldsPublic (0 ms)
+[ RUN      ] GetMemberModifiersTest.PrivateClassMethodYieldsPrivate
+[       OK ] GetMemberModifiersTest.PrivateClassMethodYieldsPrivate (0 ms)
+[ RUN      ] GetMemberModifiersTest.ProtectedAndInternalWithFlagYieldsPrivateProtected
+[       OK ] GetMemberModifiersTest.ProtectedAndInternalWithFlagYieldsPrivateProtected (0 ms)
+[ RUN      ] GetMemberModifiersTest.ProtectedAndInternalWithoutFlagYieldsProtected
+[       OK ] GetMemberModifiersTest.ProtectedAndInternalWithoutFlagYieldsProtected (0 ms)
+[ RUN      ] GetMemberModifiersTest.ShowAccessibilityFalseSuppressesAccessibilityBits
+[       OK ] GetMemberModifiersTest.ShowAccessibilityFalseSuppressesAccessibilityBits (0 ms)
+[ RUN      ] GetMemberModifiersTest.DestructorYieldsNoBits
+[       OK ] GetMemberModifiersTest.DestructorYieldsNoBits (0 ms)
+[ RUN      ] GetMemberModifiersTest.StaticMethodYieldsStatic
+[       OK ] GetMemberModifiersTest.StaticMethodYieldsStatic (0 ms)
+[ RUN      ] GetMemberModifiersTest.StaticLocalFunctionYieldsStaticOnly
+[       OK ] GetMemberModifiersTest.StaticLocalFunctionYieldsStaticOnly (0 ms)
+[ RUN      ] GetMemberModifiersTest.NonStaticLocalFunctionYieldsNoStaticBit
+[       OK ] GetMemberModifiersTest.NonStaticLocalFunctionYieldsNoStaticBit (0 ms)
+[ RUN      ] GetMemberModifiersTest.ThisIsRefReadOnlyYieldsReadonly
+[       OK ] GetMemberModifiersTest.ThisIsRefReadOnlyYieldsReadonly (0 ms)
+[ RUN      ] GetMemberModifiersTest.ThisIsRefReadOnlyOnReadOnlyDeclaringTypeYieldsNoReadonly
+[       OK ] GetMemberModifiersTest.ThisIsRefReadOnlyOnReadOnlyDeclaringTypeYieldsNoReadonly (0 ms)
+[ RUN      ] GetMemberModifiersTest.ThisIsRefReadOnlyWithNullDeclaringTypeYieldsNoReadonly
+[       OK ] GetMemberModifiersTest.ThisIsRefReadOnlyWithNullDeclaringTypeYieldsNoReadonly (0 ms)
+[ RUN      ] GetMemberModifiersTest.InterfaceDefaultImplementationMethodYieldsSealed
+[       OK ] GetMemberModifiersTest.InterfaceDefaultImplementationMethodYieldsSealed (0 ms)
+[ RUN      ] GetMemberModifiersTest.InterfaceNonMethodMemberDoesNotGetSealed
+[       OK ] GetMemberModifiersTest.InterfaceNonMethodMemberDoesNotGetSealed (0 ms)
+[ RUN      ] GetMemberModifiersTest.InterfacePrivateMethodYieldsPrivateNotSealed
+[       OK ] GetMemberModifiersTest.InterfacePrivateMethodYieldsPrivateNotSealed (0 ms)
+[ RUN      ] GetMemberModifiersTest.InterfaceMethodWithoutBodyDoesNotGetSealed
+[       OK ] GetMemberModifiersTest.InterfaceMethodWithoutBodyDoesNotGetSealed (0 ms)
+[ RUN      ] GetMemberModifiersTest.InterfaceStaticAbstractMethodYieldsStaticAbstract
+[       OK ] GetMemberModifiersTest.InterfaceStaticAbstractMethodYieldsStaticAbstract (0 ms)
+[ RUN      ] GetMemberModifiersTest.InterfaceStaticVirtualMethodYieldsStaticVirtual
+[       OK ] GetMemberModifiersTest.InterfaceStaticVirtualMethodYieldsStaticVirtual (0 ms)
+[ RUN      ] GetMemberModifiersTest.InterfaceStaticVirtualOverrideYieldsOnlyStatic
+[       OK ] GetMemberModifiersTest.InterfaceStaticVirtualOverrideYieldsOnlyStatic (0 ms)
+[ RUN      ] GetMemberModifiersTest.ClassAbstractMethodYieldsAbstract
+[       OK ] GetMemberModifiersTest.ClassAbstractMethodYieldsAbstract (0 ms)
+[ RUN      ] GetMemberModifiersTest.ClassVirtualMethodYieldsVirtual
+[       OK ] GetMemberModifiersTest.ClassVirtualMethodYieldsVirtual (0 ms)
+[ RUN      ] GetMemberModifiersTest.ClassVirtualOverrideYieldsOverrideOnly
+[       OK ] GetMemberModifiersTest.ClassVirtualOverrideYieldsOverrideOnly (0 ms)
+[ RUN      ] GetMemberModifiersTest.ClassSealedMethodYieldsSealed
+[       OK ] GetMemberModifiersTest.ClassSealedMethodYieldsSealed (0 ms)
+[ RUN      ] GetMemberModifiersTest.ExplicitInterfaceImplementationSuppressesOverrideAndSealed
+[       OK ] GetMemberModifiersTest.ExplicitInterfaceImplementationSuppressesOverrideAndSealed (0 ms)
+[ RUN      ] GetMemberModifiersTest.ShowModifiersFalseSuppressesModifierBits
+[       OK ] GetMemberModifiersTest.ShowModifiersFalseSuppressesModifierBits (0 ms)
+[ RUN      ] GetMemberModifiersTest.AbstractWinsOverVirtual
+[       OK ] GetMemberModifiersTest.AbstractWinsOverVirtual (0 ms)
+[----------] 26 tests from GetMemberModifiersTest (1 ms total)
+
+[----------] Global test environment tear-down
+[==========] 37 tests from 2 test suites ran. (3 ms total)
+[  PASSED  ] 37 tests.

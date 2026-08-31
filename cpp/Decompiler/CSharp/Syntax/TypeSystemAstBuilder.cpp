@@ -101,6 +101,7 @@
 #include "Decompiler/Semantics/UnknownMemberResolveResult.hpp"
 #include "Decompiler/TypeSystem/CustomAttributeNamedArgument.hpp"
 #include "Decompiler/TypeSystem/IMember.hpp"
+#include "Decompiler/TypeSystem/Implementation/LocalFunctionMethod.hpp"
 #include "Decompiler/TypeSystem/INamespace.hpp"
 #include "Decompiler/TypeSystem/IParameter.hpp"
 #include "Decompiler/TypeSystem/IProperty.hpp"
@@ -2050,6 +2051,108 @@ void TypeSystemAstBuilder::AddNullabilityDisambiguatingConstraints(
         c->BaseTypes().Add(new PrimitiveType(*keyword));
         decl.Constraints().Add(c);
     }
+}
+
+// The C# `bool NeedsAccessibility(IMember member)` (line 2518) -- see the
+// header declaration for the full contract.
+bool TypeSystemAstBuilder::NeedsAccessibility(const TS::IMember& member) const {
+    TS::ITypePtr declaringType = member.DeclaringType();
+    if (member.IsExplicitInterfaceImplementation())
+        return false;
+    switch (member.SymbolKind()) {
+        case TS::SymbolKind::Constructor:
+            return !member.IsStatic();
+        case TS::SymbolKind::Destructor:
+            return false;
+        default:
+            // The C# `declaringType?.Kind == TypeKind.Interface` -- the
+            // null-conditional reads a null declaring type as not-an-interface
+            // (a top-level member stub shape).
+            if (declaringType && declaringType->Kind() == TS::TypeKind::Interface) {
+                return member.Accessibility() != TS::Accessibility::Public;
+            }
+            // The C# `member is not IMethod method || !method.IsLocalFunction`:
+            // a non-method member needs accessibility; a method does unless it
+            // is a local function.
+            return dynamic_cast<const TS::IMethod*>(&member) == nullptr
+                || !static_cast<const TS::IMethod&>(member).IsLocalFunction();
+    }
+}
+
+// The C# `Modifiers GetMemberModifiers(IMember member)` (line 2538) -- see the
+// header declaration for the full contract.
+Modifiers TypeSystemAstBuilder::GetMemberModifiers(const TS::IMember& member) const {
+    Modifiers m = Modifiers::None;
+    if (ShowAccessibility() && NeedsAccessibility(member)) {
+        m = m | ModifierFromAccessibility(member.Accessibility(),
+                                          UsePrivateProtectedAccessibility());
+    }
+    if (ShowModifiers()) {
+        // The C# `member is LocalFunctionMethod localFunction` -- the pattern
+        // match against the concrete wrapper class (the RTTI test the port
+        // dynamic_casts; only the wrapper, not every IMethod).
+        if (const auto* localFunction =
+                dynamic_cast<const TS::Implementation::LocalFunctionMethod*>(&member)) {
+            // Only the source-level flag decides; the wrapper's unconditionally
+            // true `IsStatic` is deliberately NOT read (a non-static local
+            // function carries no `static` modifier even though the wrapper
+            // reports `IsStatic == true`).
+            if (localFunction->IsStaticLocalFunction()) {
+                m = m | Modifiers::Static;
+            }
+        } else {
+            if (member.IsStatic()) {
+                m = m | Modifiers::Static;
+            }
+            const auto* method = dynamic_cast<const TS::IMethod*>(&member);
+            if (method != nullptr && method->ThisIsRefReadOnly()) {
+                // The C# `method.DeclaringTypeDefinition?.IsReadOnly == false`:
+                // the lifted `==` over the nullable bool is true ONLY for a
+                // definite false, so a null definition (or a readonly one)
+                // yields no bit.
+                const TS::ITypeDefinition* declaringTypeDef =
+                    method->DeclaringTypeDefinition();
+                if (declaringTypeDef != nullptr && !declaringTypeDef->IsReadOnly()) {
+                    m = m | Modifiers::Readonly;
+                }
+            }
+
+            TS::ITypePtr declaringType = member.DeclaringType();
+            // The C# derefs `declaringType.Kind` unconditionally (a real member
+            // always has a declaring type); the port guards the degenerate
+            // null-declaring-type stub shape, reading it as not-an-interface
+            // (the D516 safe-fallback convention).
+            if (declaringType && declaringType->Kind() == TS::TypeKind::Interface) {
+                if (!member.IsStatic() && !member.IsVirtual() && !member.IsAbstract()
+                    && !member.IsOverride()
+                    && member.Accessibility() != TS::Accessibility::Private
+                    && method != nullptr && method->HasBody()) {
+                    m = m | Modifiers::Sealed;
+                }
+                if (member.IsStatic()) {
+                    // Modifiers of static members in interfaces:
+                    if (member.IsAbstract()) {
+                        m = m | Modifiers::Abstract;
+                    } else if (member.IsVirtual() && !member.IsOverride()) {
+                        m = m | Modifiers::Virtual;
+                    }
+                }
+            } else {
+                if (member.IsAbstract()) {
+                    m = m | Modifiers::Abstract;
+                } else if (member.IsVirtual() && !member.IsOverride()) {
+                    m = m | Modifiers::Virtual;
+                }
+                if (member.IsOverride() && !member.IsExplicitInterfaceImplementation()) {
+                    m = m | Modifiers::Override;
+                }
+                if (member.IsSealed() && !member.IsExplicitInterfaceImplementation()) {
+                    m = m | Modifiers::Sealed;
+                }
+            }
+        }
+    }
+    return m;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

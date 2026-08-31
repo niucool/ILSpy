@@ -39,8 +39,10 @@
 // and ConvertVariable, C# lines 2743-2761), plus the nullability-disambiguation
 // tail of the Convert Type Parameter region (AddNullabilityDisambiguatingConstraints
 // + the NullableTypeParameterCollector visitor + GetNullabilityDisambiguator, C#
-// lines 2683-2734, consumed only by the deferred ConvertEntity) are landed; the
-// remaining `Convert*`
+// lines 2683-2734, consumed only by the deferred ConvertEntity), and the "Convert
+// Modifiers" region (NeedsAccessibility + GetMemberModifiers, C# lines 2518-2596,
+// consuming the ModifierFromAccessibility free function and the LocalFunctionMethod
+// wrapper) are landed; the remaining `Convert*`
 // instance methods (ConvertSymbol / ConvertEntity / ConvertExtension) follow in
 // later slices, consuming the free functions below as they grow.
 //
@@ -1442,6 +1444,43 @@ public:
     // member read is const; the returned node is a raw `new`-ed pointer (the D223
     // non-owning leak model).
     VariableDeclarationStatement* ConvertVariable(const TS::IVariable& v) const;
+
+    // The C# `bool NeedsAccessibility(IMember member)` (line 2518) -- whether the
+    // member's accessibility modifier should be rendered: explicit interface
+    // implementations never carry one, static constructors don't, destructors
+    // don't, interface-declared members only when not public, and local functions
+    // don't (the CSharpDecompiler re-renders local functions with their own
+    // accessibility). Reads no instance state (the C# private instance method
+    // lifted unchanged, the `IsNullableTypeOrNonValueType` resolver precedent);
+    // widened to public for direct TDD ahead of the `ConvertSymbol` /
+    // `ConvertEntity` consumer slices (the `ConvertTypeParameter` convention).
+    // The C# `declaringType?.Kind == TypeKind.Interface` null-conditional ports to
+    // a null check on the `ITypePtr` (a null declaring type reads as
+    // not-an-interface); the C# `member is not IMethod method ||
+    // !method.IsLocalFunction` ports to a dynamic_cast + negated
+    // `IsLocalFunction()`.
+    bool NeedsAccessibility(const TS::IMember& member) const;
+
+    // The C# `Modifiers GetMemberModifiers(IMember member)` (line 2538) -- the
+    // member's modifier bits: the accessibility bits under
+    // `ShowAccessibility && NeedsAccessibility` (the already-ported
+    // `ModifierFromAccessibility` free function, gated by
+    // `UsePrivateProtectedAccessibility`), then under `ShowModifiers` either the
+    // local-function branch (the concrete `LocalFunctionMethod` RTTI match --
+    // only `IsStaticLocalFunction` decides, the wrapper's unconditionally-true
+    // `IsStatic` is deliberately NOT read) or the general branch (Static, the
+    // Readonly bit for `ThisIsRefReadOnly` methods whose declaring-type
+    // definition is NOT readonly, and the interface-vs-class spread of
+    // Abstract / Virtual / Override / Sealed). The C#
+    // `method.DeclaringTypeDefinition?.IsReadOnly == false` is the lifted-bool
+    // `==` (true only for a definite false -- a null definition or a readonly
+    // definition yields no bit). The second `declaringType.Kind ==
+    // TypeKind.Interface` read derefs unconditionally in the C# (a real member
+    // always has a declaring type); the port guards the degenerate
+    // null-declaring-type stub shape, reading it as not-an-interface (the D516
+    // safe-fallback convention). Widened to public for direct TDD (the
+    // `NeedsAccessibility` convention).
+    Modifiers GetMemberModifiers(const TS::IMember& member) const;
 
 private:
     // The C# `private void AddTypeAnnotation(AstType astType, IType type)` (line 278)
