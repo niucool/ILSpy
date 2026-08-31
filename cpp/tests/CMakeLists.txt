@@ -139,6 +139,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Resolver/CSharpOperatorsRelational_Test.cpp
     Decompiler/CSharp/Resolver/CSharpOperatorsBitwise_Test.cpp
     Decompiler/CSharp/Resolver/CSharpOperatorsUserDefined_Test.cpp
+    Decompiler/CSharp/Resolver/CSharpResolverSkeleton_Test.cpp
     Decompiler/TypeSystem/Nullability_Test.cpp
     Decompiler/TypeSystem/NullableType_Test.cpp
     Decompiler/TypeSystem/SignatureCallingConvention_Test.cpp
@@ -174,6 +175,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/TypeParameterSubstitution_Test.cpp
     Decompiler/TypeSystem/ITypeReference_Test.cpp
     Decompiler/TypeSystem/ITypeResolveContext_Test.cpp
+    Decompiler/TypeSystem/ICodeContext_Test.cpp
     Decompiler/TypeSystem/SimpleTypeResolveContext_Test.cpp
     Decompiler/TypeSystem/KnownTypeReference_Test.cpp
     Decompiler/TypeSystem/ISupportsInterning_Test.cpp
