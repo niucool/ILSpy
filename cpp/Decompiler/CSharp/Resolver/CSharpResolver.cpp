@@ -39,6 +39,9 @@
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/ErrorResolveResult.hpp"
 #include "Decompiler/Semantics/OperatorResolveResult.hpp"
+#include "Decompiler/Semantics/SizeOfResolveResult.hpp"
+#include "Decompiler/Semantics/ThisResolveResult.hpp"
+#include "Decompiler/Semantics/TypeOfResolveResult.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
@@ -2248,6 +2251,153 @@ CSharpResolver::HandleEnumOperator(
     ITypePtr resultType = MakeNullable(enumType, isNullable);
     return BinaryOperatorResolveResult(*resultType, std::move(lhs), op, std::move(rhs),
                                        isNullable);
+}
+
+// ---- sizeof / this / base / typeof regions (CSharpResolver.cs lines 2591-2667 + 2935) -------
+
+// The C# `public ResolveResult ResolveSizeOf(IType type)` (line 2591) -- see
+// CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveSizeOf(ILSpy::Decompiler::TypeSystem::IType& type) const
+{
+    using ILSpy::Decompiler::Semantics::SizeOfResolveResult;
+    using ILSpy::Decompiler::TypeSystem::GetTypeCode;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+    using ILSpy::Decompiler::TypeSystem::TypeCode;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+
+    // The C# `IType int32 = compilation.FindType(KnownTypeCode.Int32)` -- the `sizeof`
+    // expression's own type. The registered known types are shared-managed, so the
+    // `const_pointer_cast` recovers the owning handle (the D517 convention).
+    ITypePtr int32 = std::const_pointer_cast<IType>(
+        compilation_.FindType(KnownTypeCode::Int32).shared_from_this());
+    std::optional<int> size;
+    // The C# `var typeForConstant = (type.Kind == TypeKind.Enum)
+    // ? type.GetDefinition().EnumUnderlyingType : type` -- an enum reads its size
+    // through its underlying primitive. (The C# `GetDefinition().EnumUnderlyingType`
+    // NREs for an enum-kind type whose definition does not resolve or whose
+    // underlying is not configured; the port's safe fallback treats the enum arm as
+    // not firing, reading the type's own TypeCode -- the D516 convention.)
+    const IType* typeForConstant = &type;
+    if (type.Kind() == TypeKind::Enum) {
+        const ITypeDefinition* def = type.GetDefinition();
+        if (def != nullptr) {
+            ITypePtr underlying = def->EnumUnderlyingType();
+            if (underlying)
+                typeForConstant = underlying.get();
+        }
+    }
+    switch (GetTypeCode(*typeForConstant)) {
+        case TypeCode::Boolean:
+        case TypeCode::SByte:
+        case TypeCode::Byte:
+            size = 1;
+            break;
+        case TypeCode::Char:
+        case TypeCode::Int16:
+        case TypeCode::UInt16:
+            size = 2;
+            break;
+        case TypeCode::Int32:
+        case TypeCode::UInt32:
+        case TypeCode::Single:
+            size = 4;
+            break;
+        case TypeCode::Int64:
+        case TypeCode::UInt64:
+        case TypeCode::Double:
+            size = 8;
+            break;
+        default:
+            break;
+    }
+    return std::make_shared<SizeOfResolveResult>(std::move(int32),
+                                                 type.shared_from_this(),
+                                                 std::move(size));
+}
+
+// The C# `public ResolveResult ResolveThisReference()` (line 2628) -- see
+// CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveThisReference() const
+{
+    using ILSpy::Decompiler::Semantics::ThisResolveResult;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
+    using ILSpy::Decompiler::TypeSystem::ITypeParameter;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::ParameterizedType;
+
+    const ITypeDefinition* t = CurrentTypeDefinition();
+    if (t != nullptr) {
+        // The `t` definition and every declared type parameter are shared-managed
+        // (the D271 handle model), so the handles recovered through `shared_from_this`
+        // + `const_pointer_cast` share ownership with the holders the caller kept
+        // them alive in (the SpecializedMember `DeclaringType` arm 2 documented the
+        // conversion gap; here the self-parameterization needs it).
+        ITypePtr tHandle = std::const_pointer_cast<IType>(t->shared_from_this());
+        if (t->TypeParameterCount() != 0) {
+            // Self-parameterize the type: `new ParameterizedType(t, t.TypeParameters)`
+            // -- `this` inside `C<T,U>` has type `C<T,U>`.
+            std::vector<ITypePtr> typeArgs;
+            typeArgs.reserve(t->TypeParameters().size());
+            for (const ITypeParameter* tp : t->TypeParameters()) {
+                typeArgs.push_back(
+                    std::const_pointer_cast<IType>(tp->shared_from_this()));
+            }
+            return std::make_shared<ThisResolveResult>(
+                std::make_shared<ParameterizedType>(std::move(tHandle),
+                                                    std::move(typeArgs)));
+        } else {
+            return std::make_shared<ThisResolveResult>(std::move(tHandle));
+        }
+    }
+    return ErrorResultSingleton();
+}
+
+// The C# `public ResolveResult ResolveBaseReference()` (line 2649) -- see
+// CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveBaseReference() const
+{
+    using ILSpy::Decompiler::Semantics::ThisResolveResult;
+    using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+
+    const ITypeDefinition* t = CurrentTypeDefinition();
+    if (t != nullptr) {
+        for (const ITypePtr& baseType : t->DirectBaseTypes()) {
+            TypeKind kind = baseType->Kind();
+            if (kind != TypeKind::Unknown && kind != TypeKind::Interface) {
+                return std::make_shared<ThisResolveResult>(
+                    baseType, /*causesNonVirtualInvocation=*/true);
+            }
+        }
+    }
+    return ErrorResultSingleton();
+}
+
+// The C# `public ResolveResult ResolveTypeOf(IType referencedType)` (line 2935) -- see
+// CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveTypeOf(ILSpy::Decompiler::TypeSystem::IType& referencedType) const
+{
+    using ILSpy::Decompiler::Semantics::TypeOfResolveResult;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+
+    // The C# `compilation.FindType(KnownTypeCode.Type)` -- the `typeof` expression's
+    // own type (`System.Type`); the registered instance is shared-managed (the D517
+    // convention).
+    ITypePtr systemType = std::const_pointer_cast<IType>(
+        compilation_.FindType(KnownTypeCode::Type).shared_from_this());
+    return std::make_shared<TypeOfResolveResult>(std::move(systemType),
+                                                 referencedType.shared_from_this());
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

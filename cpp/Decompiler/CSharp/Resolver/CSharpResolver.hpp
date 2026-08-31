@@ -907,6 +907,70 @@ public:
         std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> lhs,
         std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rhs) const;
 
+    // ---- sizeof / this / base / typeof --------------------------------------------------------
+    // (The expression-resolution tail regions of CSharpResolver.cs: "ResolveSizeOf"
+    // lines 2591-2626, "Resolve This/Base Reference" lines 2628-2667, and
+    // `ResolveTypeOf` lines 2935-2937 -- four self-contained resolver entry points
+    // every prerequisite of which is already ported: `SizeOfResolveResult` (D427),
+    // `ThisResolveResult` (D426), `TypeOfResolveResult` (D427),
+    // `ReflectionHelper.GetTypeCode` (D513), the `ICompilation.FindType(KnownTypeCode)`
+    // member, `ParameterizedType`, and the `CurrentTypeDefinition` context slot.)
+
+    // The C# `public ResolveResult ResolveSizeOf(IType type)` (line 2591) -- the
+    // `sizeof` resolution: the result type is the registered `System.Int32`, and the
+    // compile-time-known size comes from the primitive `TypeCode` table
+    // (bool/sbyte/byte -> 1, char/int16/uint16 -> 2, int32/uint32/single -> 4,
+    // int64/uint64/double -> 8; everything else -- `decimal`, `DateTime`, pointers,
+    // structs without a primitive code -- has NO constant size). An ENUM reads its
+    // size through its UNDERLYING type (the `type.Kind == TypeKind.Enum` ternary). The
+    // `IsError` of the returned `SizeOfResolveResult` reports a `sizeof` of a
+    // reference type (or a type of indeterminate reference-ness).
+    //
+    // PORT CONVENTIONS: the C# `type.GetDefinition().EnumUnderlyingType` would NRE
+    // for an enum-kind type whose definition does not resolve or whose underlying is
+    // not configured -- the port's documented safe fallback treats the enum arm as NOT
+    // firing and reads the type's own `TypeCode` instead (the D516 null-guard
+    // convention). The `IType` parameter is non-const (the `shared_from_this`
+    // result-handle convention) and the `int32` handle is recovered from the `FindType`
+    // reference through `const_pointer_cast` (the registered known types are
+    // shared-managed, the D517 convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveSizeOf(
+        ILSpy::Decompiler::TypeSystem::IType& type) const;
+
+    // The C# `public ResolveResult ResolveThisReference()` (line 2628) -- the `this`
+    // reference: a current type definition WITH type parameters self-parameterizes
+    // (`new ThisResolveResult(new ParameterizedType(t, t.TypeParameters))` -- `this`
+    // inside a generic `C<T,U>` has type `C<T,U>` with the DECLARED type parameters as
+    // the type arguments); a non-generic current type definition yields
+    // `ThisResolveResult(t)` directly; no current type definition is the `ErrorResult`
+    // singleton (pointer-identical to `ErrorResolveResult::UnknownError`).
+    //
+    // PORT CONVENTIONS: the C# `new ParameterizedType(t, t.TypeParameters)` passes the
+    // declared type parameters as the type arguments, but the port's
+    // `IType::TypeParameters()` yields NON-OWNING `const ITypeParameter*` while the
+    // `ParameterizedType` ctor takes owning `ITypePtr` handles -- the port recovers
+    // each handle through `shared_from_this` + `const_pointer_cast` (every type
+    // parameter is shared-managed in the D271 handle model; the
+    // `SpecializedMember::DeclaringType` arm 2 documented this same conversion gap and
+    // fell back, here the self-parameterization is the entire point and must happen).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveThisReference() const;
+
+    // The C# `public ResolveResult ResolveBaseReference()` (line 2649) -- the `base`
+    // reference: the FIRST direct base type whose kind is neither `Unknown` nor
+    // `Interface` (the runtime base class), as a `ThisResolveResult` marking
+    // `causesNonVirtualInvocation: true` (member invocations through `base` are
+    // non-virtual); no current type definition -- or a current type definition whose
+    // direct bases are all unknown/interfaces -- is the `ErrorResult` singleton.
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveBaseReference() const;
+
+    // The C# `public ResolveResult ResolveTypeOf(IType referencedType)` (line 2935) --
+    // the `typeof` resolution: a `TypeOfResolveResult` whose own type is the
+    // registered `System.Type` and whose `ReferencedType` is the named type. The
+    // `IType` parameter is non-const (the `shared_from_this` result-handle
+    // convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveTypeOf(
+        ILSpy::Decompiler::TypeSystem::IType& referencedType) const;
+
 private:
     // The C# private nested `sealed class ObjectInitializerContext` -- the linked stack
     // of objects being initialized (`prev` is the enclosing initializer; nullable).
