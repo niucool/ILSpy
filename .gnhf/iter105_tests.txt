@@ -1,0 +1,74 @@
+Running main() from C:\Projects\github\vcpkg\buildtrees\gtest\src\v1.17.0-e243b8ee0f.clean\googletest\src\gtest_main.cc
+Note: Google Test filter = ResolveBinaryOperatorTest.*
+[==========] Running 32 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 32 tests from ResolveBinaryOperatorTest
+[ RUN      ] ResolveBinaryOperatorTest.DynamicBothOperandsYieldOperatorResultOverDynamic
+[       OK ] ResolveBinaryOperatorTest.DynamicBothOperandsYieldOperatorResultOverDynamic (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.DynamicLhsConvertsTheIntRhsToDynamic
+[       OK ] ResolveBinaryOperatorTest.DynamicLhsConvertsTheIntRhsToDynamic (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.NullCoalescingDelegatesToTheNullCoalescingHandler
+[       OK ] ResolveBinaryOperatorTest.NullCoalescingDelegatesToTheNullCoalescingHandler (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.ConditionalAndFallsThroughToTheLogicalAndTable
+[       OK ] ResolveBinaryOperatorTest.ConditionalAndFallsThroughToTheLogicalAndTable (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.RangeOperatorYieldsTheUnknownErrorSingleton
+[       OK ] ResolveBinaryOperatorTest.RangeOperatorYieldsTheUnknownErrorSingleton (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.ApplicableUserDefinedOperatorWinsOverTheBuiltinTables
+[       OK ] ResolveBinaryOperatorTest.ApplicableUserDefinedOperatorWinsOverTheBuiltinTables (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.InapplicableUserDefinedOperatorIsPreferredOverTheBuiltinError
+[       OK ] ResolveBinaryOperatorTest.InapplicableUserDefinedOperatorIsPreferredOverTheBuiltinError (1 ms)
+[ RUN      ] ResolveBinaryOperatorTest.IntegerAdditionResolvesThroughTheBuiltinTable
+[       OK ] ResolveBinaryOperatorTest.IntegerAdditionResolvesThroughTheBuiltinTable (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.ConstantPairFoldsThroughInvoke
+[       OK ] ResolveBinaryOperatorTest.ConstantPairFoldsThroughInvoke (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.CheckedOverflowFoldDowngradesToError
+[       OK ] ResolveBinaryOperatorTest.CheckedOverflowFoldDowngradesToError (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.DivideByZeroFoldDowngradesToError
+[       OK ] ResolveBinaryOperatorTest.DivideByZeroFoldDowngradesToError (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.NumericWideningResolvesTheLongEntry
+[       OK ] ResolveBinaryOperatorTest.NumericWideningResolvesTheLongEntry (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.NullableLhsLiftsTheBuiltinEntry
+[       OK ] ResolveBinaryOperatorTest.NullableLhsLiftsTheBuiltinEntry (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.NullNullShiftProducesNullableInt
+[       OK ] ResolveBinaryOperatorTest.NullNullShiftProducesNullableInt (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.CharShiftPromotesTheLhsIndependently
+[       OK ] ResolveBinaryOperatorTest.CharShiftPromotesTheLhsIndependently (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.EnumAdditionConstantFoldsThroughTheUnderlyingType
+[       OK ] ResolveBinaryOperatorTest.EnumAdditionConstantFoldsThroughTheUnderlyingType (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.EnumSubtractionConstantFoldsToTheUnderlyingType
+[       OK ] ResolveBinaryOperatorTest.EnumSubtractionConstantFoldsToTheUnderlyingType (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.EnumComparisonConstantFoldsToBoolean
+[       OK ] ResolveBinaryOperatorTest.EnumComparisonConstantFoldsToBoolean (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.EnumSubtractionNonConstantYieldsTheUnderlyingResultType
+[       OK ] ResolveBinaryOperatorTest.EnumSubtractionNonConstantYieldsTheUnderlyingResultType (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.EnumBitwiseOrNonConstantKeepsTheEnumResultType
+[       OK ] ResolveBinaryOperatorTest.EnumBitwiseOrNonConstantKeepsTheEnumResultType (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.EnumAdditionNonConstantKeepsTheEnumResultType
+[       OK ] ResolveBinaryOperatorTest.EnumAdditionNonConstantKeepsTheEnumResultType (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.NullableEnumComparisonPropagatesIsLifted
+[       OK ] ResolveBinaryOperatorTest.NullableEnumComparisonPropagatesIsLifted (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.DelegateCombinationYieldsTheDelegateType
+[       OK ] ResolveBinaryOperatorTest.DelegateCombinationYieldsTheDelegateType (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.PointerComparisonYieldsBooleanUnwrapped
+[       OK ] ResolveBinaryOperatorTest.PointerComparisonYieldsBooleanUnwrapped (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.ReferenceComparisonConvertsTheStringOperandToObject
+[       OK ] ResolveBinaryOperatorTest.ReferenceComparisonConvertsTheStringOperandToObject (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.NullLiteralComparisonKeepsTheOperands
+[       OK ] ResolveBinaryOperatorTest.NullLiteralComparisonKeepsTheOperands (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.NativeIntegerEqualityYieldsBoolean
+[       OK ] ResolveBinaryOperatorTest.NativeIntegerEqualityYieldsBoolean (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.MixingNativeIntegersIsABindingError
+[       OK ] ResolveBinaryOperatorTest.MixingNativeIntegersIsABindingError (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.InapplicableBuiltinYieldsTheBestCandidateResultType
+[       OK ] ResolveBinaryOperatorTest.InapplicableBuiltinYieldsTheBestCandidateResultType (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.HandleEnumComparisonDirectNonConstant
+[       OK ] ResolveBinaryOperatorTest.HandleEnumComparisonDirectNonConstant (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.HandleEnumSubtractionDirectNullable
+[       OK ] ResolveBinaryOperatorTest.HandleEnumSubtractionDirectNullable (0 ms)
+[ RUN      ] ResolveBinaryOperatorTest.HandleEnumOperatorDirectConstantFold
+[       OK ] ResolveBinaryOperatorTest.HandleEnumOperatorDirectConstantFold (0 ms)
+[----------] 32 tests from ResolveBinaryOperatorTest (9 ms total)
+
+[----------] Global test environment tear-down
+[==========] 32 tests from 1 test suite ran. (10 ms total)
+[  PASSED  ] 32 tests.

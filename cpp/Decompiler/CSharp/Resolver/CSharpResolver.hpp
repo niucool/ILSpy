@@ -34,8 +34,8 @@
 // ::Get` (the per-compilation cached factory), `Util::ImmutableStack` (the IL-reader
 // evaluation-stack spine), and `ErrorResolveResult::UnknownError` (the null
 // object-initializer sentinel). The `Resolve*` arms land in later slices
-// (`ResolveUnaryOperator` has landed; ResolveSimpleName, ResolveMemberAccess,
-// `ResolveBinaryOperator`, ... follow).
+// (`ResolveUnaryOperator` and `ResolveBinaryOperator` + the enum-handler trio have
+// landed; ResolveSimpleName, ResolveMemberAccess, ... follow).
 //
 // KEY PORT CONVENTIONS:
 //  (a) The C# `With*` clone factories return a `CSharpResolver` REFERENCE -- the C#
@@ -615,10 +615,9 @@ public:
     // lines 525/ 962-985/981-989/1253-1275/2435-2441: the two `OperatorResolveResult`
     // factories, the pointer-arithmetic operator factory, the null-coalescing handler, the
     // nullable-or- non-value-type test, and the `OverloadResolution` construction helper. The
-    // mutually
-    // recursive enum handlers (`HandleEnumComparison` / `HandleEnumSubtraction` /
-    // `HandleEnumOperator`) and the `ResolveBinaryOperator` method itself land in
-    // later slices -- this region is everything they call that is NOT self-recursive.)
+    // mutually recursive enum handlers (`HandleEnumComparison` / `HandleEnumSubtraction` /
+    // `HandleEnumOperator`) land below with `ResolveBinaryOperator` itself -- this region
+    // is everything they call that is NOT self-recursive.)
 
     // The C# private `bool IsNullableTypeOrNonValueType(IType type)` (line 981) -- the
     // null-literal comparison guard: a nullable type OR a non-value type (a reference
@@ -788,6 +787,125 @@ public:
     std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveUnaryOperator(
         ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType op,
         std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> expression) const;
+
+    // ---- ResolveBinaryOperator + enum handlers -----------------------------------------------
+    // (The `ResolveBinaryOperator` region, CSharpResolver.cs lines 594-948, C# 4.0 spec
+    // section 7.3.4 "Binary operator overload resolution", plus the mutually recursive
+    // enum-handler trio from the "Enum helper methods" region at lines 995-1053 -- each
+    // handler calls `ResolveBinaryOperator` back on the enum's underlying operands, so
+    // the four members land together. Every non-recursive helper the region consumes is
+    // already ported: the two `GetOverloadableOperatorName` statics, the user-defined
+    // candidate scan + lift, `CreateResolveResultForUserDefinedOperator`,
+    // `CreateOverloadResolution`, `UnaryNumericPromotion`, `BinaryNumericPromotion`,
+    // `MakeNullable`, `TryConvert` / `TryConvertEnum`, the member `GetEnumUnderlyingType`,
+    // `ResolveNullCoalescingOperator`, `IsNullableTypeOrNonValueType`, the `CSharpOperators`
+    // operator tables + their `Invoke` constant-evaluation virtuals, the
+    // `BinaryOperatorResolveResult` factory, `Convert`/`ResolveCast`, and the
+    // `TypeUtils.IsCSharpNativeIntegerType` leaf.)
+
+    // The C# `public ResolveResult ResolveBinaryOperator(BinaryOperatorType op,
+    // ResolveResult lhs, ResolveResult rhs)` (line 594) -- the binary-operator
+    // resolution: the dynamic arm (either operand dynamic converts BOTH to dynamic and
+    // yields the dynamic `OperatorResolveResult`), the overloadable-name gate
+    // (`ConditionalAnd`/`ConditionalOr` fall through to their bitwise names; the
+    // null-coalescing operator delegates to `ResolveNullCoalescingOperator`; anything
+    // else without a name is the `UnknownError` singleton), then the overloadable path:
+    // the nullable strip (a nullable operand contributes its UNDERLYING type; the
+    // null-literal-vs-value-type pair forces `isNullable`), the user-defined operator
+    // overload resolution FIRST (an applicable user-defined operator wins; the scan runs
+    // over BOTH operands' types, deduplicated by member identity -- the C# `HashSet`
+    // reference-equality `UnionWith`), the shift special case (each operand independently
+    // unary-promoted; `null << null` produces `int?`), the binary numeric promotion
+    // (with the equality/inequality `allowNullableConstants` gate; a binding error is an
+    // `ErrorResolveResult` over the lhs's type), the per-operator built-in table
+    // selection with the inline enum/delegate/null-literal arms (`E + U`, `E - E`, `E -
+    // U`, `E & E`, enum comparisons, delegate combination/separation, the reference
+    // comparison and null-literal comparison special cases), the native-integer arms
+    // (equal native integers keep the type, mixing them is an error), and the result
+    // composition -- constant-folding both compile-time-constant operands through the
+    // operator's `Invoke` (an `ArithmeticException` downgrades to an `ErrorResolveResult`),
+    // else wrapping both operands through `Convert` into the predefined
+    // `OperatorResolveResult` (marking the lifted forms).
+    //
+    // PORT CONVENTIONS for this member:
+    //  * The C# `IType lhsType` / `rhsType` LOCALS are rebound by the shift arm's
+    //    `UnaryNumericPromotion(UnaryOperatorType.Plus, ref lhsType, ...)` and re-read
+    //    after the promotion -- the port threads them as local `const IType*` pointers
+    //    (a C++ reference cannot rebind; the `UnaryNumericPromotion` `const IType*&`
+    //    signature takes the pointer by reference). Every read below dereferences the
+    //    local pointer.
+    //  * The C# `HashSet<IParameterizedMember> userOperatorCandidates` + `UnionWith`
+    //    dedups by the default reference equality -- the port collects into a
+    //    `std::vector<const IParameterizedMember*>` filtered by POINTER identity (the
+    //    `GetApplicableConversionOperators` dedup convention).
+    //  * The C# `lhsType.IsReferenceType == false` null-vs-value-type check is a
+    //    DEFINITE-false check (the nullable equality never propagates null -- the
+    //    iteration-103 corrected semantics), so the port is `opt.has_value() && !*opt`.
+    //  * The C# `conversions.IdentityConversion(lhsType, rhsType)` has no public method
+    //    on the port's `CSharpConversions` -- the port calls the `Detail::IdentityConversion`
+    //    free function (the iteration-47 convention). The `conversions.ExplicitConversion
+    //    (lhsType, rhsType).IsReferenceConversion` calls the public (uncached)
+    //    `ExplicitConversion(IType, IType)` method.
+    //  * The C# hard cast `(CSharpOperators.BinaryOperatorMethod)builtinOperatorOR
+    //    .BestCandidate` ports to `dynamic_cast<const BinaryOperatorMethod*>` with the
+    //    documented safe fallback (an empty/foreign best candidate is impossible through
+    //    the builtin-table call site -- every table entry IS a `BinaryOperatorMethod` and
+    //    the first `AddCandidate` always folds a best; the fallback returns the
+    //    `ErrorResolveResult` over the lhs's type, the D516 convention).
+    //  * The enum arms' `GetEnumUnderlyingType` member result can be null for a
+    //    degenerate enum-definition stub without a configured underlying (the C# NREs on
+    //    the subsequent deref); the port's documented safe fallback treats the enum arm
+    //    as not firing (the null-member convention).
+    //  * The C# `catch (ArithmeticException)` around `m.Invoke(this, lhs.ConstantValue,
+    //    rhs.ConstantValue)` ports to `catch (const Util::ArithmeticException&)` (the
+    //    `ResolveUnaryOperator` family-catch convention: the operand casts throw
+    //    `Util::OverflowException`/`Util::InvalidCastException`, the table bodies throw
+    //    the typed family members, and `InvalidCastException` -- deliberately NOT a
+    //    family member -- propagates out, faithfully).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveBinaryOperator(
+        ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType op,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> lhs,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rhs) const;
+
+    // The C# private `ResolveResult HandleEnumComparison(BinaryOperatorType op, IType
+    // enumType, bool isNullable, ResolveResult lhs, ResolveResult rhs)` (line 995) --
+    // "bool operator op(E x, E y)" evaluated as `((U)x op (U)y`: a both-constant,
+    // non-nullable, non-enum-underlying pair re-resolves through the underlying type and
+    // keeps the folded constant when it stays one; everything else is the predefined
+    // `OperatorResolveResult` over `bool` marking `isNullable`. Private in the C#;
+    // PUBLIC in the port for direct TDD (the TryConvert widening convention). The
+    // operands are owning handles (the C# value-copy references the GC owns).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> HandleEnumComparison(
+        ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType op,
+        const ILSpy::Decompiler::TypeSystem::IType& enumType, bool isNullable,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> lhs,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rhs) const;
+
+    // The C# private `ResolveResult HandleEnumSubtraction(bool isNullable, IType
+    // enumType, ResolveResult lhs, ResolveResult rhs)` (line 1013) -- "U operator
+    // -(E x, E y)" evaluated as `(U)((U)x - (U)y)`: the both-constant fold re-resolves
+    // through the underlying type and re-casts UNCHECKED back into the UNDERLYING (not
+    // the enum); everything else is the predefined `OperatorResolveResult` over the
+    // (nullable) underlying type. Private in the C#; PUBLIC in the port for direct TDD
+    // (the TryConvert widening convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> HandleEnumSubtraction(
+        bool isNullable, const ILSpy::Decompiler::TypeSystem::IType& enumType,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> lhs,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rhs) const;
+
+    // The C# private `ResolveResult HandleEnumOperator(bool isNullable, IType enumType,
+    // BinaryOperatorType op, ResolveResult lhs, ResolveResult rhs)` (line 1037) -- "E
+    // operator +(E x, U y)" / "E operator +(U x, E y)" / "E operator -(E x, U y)" / the
+    // enum bitwise operators, evaluated as `(E)((U)x op (U)y)`: the both-constant fold
+    // re-resolves through the underlying type and re-casts UNCHECKED back into the ENUM;
+    // everything else is the predefined `OperatorResolveResult` over the (nullable) enum
+    // type. Private in the C#; PUBLIC in the port for direct TDD (the TryConvert
+    // widening convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> HandleEnumOperator(
+        bool isNullable, const ILSpy::Decompiler::TypeSystem::IType& enumType,
+        ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType op,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> lhs,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rhs) const;
 
 private:
     // The C# private nested `sealed class ObjectInitializerContext` -- the linked stack

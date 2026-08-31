@@ -26,6 +26,7 @@
 
 #include "Decompiler/CSharp/Resolver/AwaitResolveResult.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpConversions.hpp"
+#include "Decompiler/CSharp/Resolver/CSharpConversionsHelpers.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpOperators.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpInvocationResolveResult.hpp"
 #include "Decompiler/CSharp/Resolver/DynamicInvocationResolveResult.hpp"
@@ -1540,6 +1541,713 @@ CSharpResolver::ResolveUnaryOperator(
             dynamic_cast<const ILiftedOperator*>(builtinOperatorOR->BestCandidate())
                 != nullptr);
     }
+}
+
+// ---- ResolveBinaryOperator + enum handlers (CSharpResolver.cs lines 594-948 + 995-1053) ----
+
+namespace {
+// The member `GetEnumUnderlyingType` result guarded for the degenerate
+// definition-bearing-enum-without-underlying shape (a stub whose `EnumUnderlyingType` is
+// unset; the C# NREs on the subsequent `elementType.Kind` deref there -- impossible for
+// real metadata, where every enum definition carries its underlying primitive). The
+// port's documented safe fallback substitutes the `UnknownType` null object (the
+// member's own definitionless-type fallback).
+const ILSpy::Decompiler::TypeSystem::IType* EnumUnderlyingOrUnknown(
+    const ILSpy::Decompiler::TypeSystem::IType* underlying)
+{
+    if (underlying != nullptr)
+        return underlying;
+    static const ILSpy::Decompiler::TypeSystem::ITypePtr unknownType =
+        ILSpy::Decompiler::TypeSystem::UnknownType();
+    return unknownType.get();
+}
+} // namespace
+
+// The C# `public ResolveResult ResolveBinaryOperator(BinaryOperatorType op, ResolveResult
+// lhs, ResolveResult rhs)` (line 594, C# 4.0 spec section 7.3.4 "Binary operator overload
+// resolution") -- see CSharpResolver.hpp for the full port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveBinaryOperator(
+    ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType op,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> lhs,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rhs) const
+{
+    using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorExpression;
+    using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType;
+    using ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType;
+    using ILSpy::Decompiler::CSharp::Resolver::BinaryOperatorMethod;
+    using ILSpy::Decompiler::CSharp::Resolver::CSharpOperators;
+    using ILSpy::Decompiler::CSharp::Resolver::OperatorMethod;
+    using ILSpy::Decompiler::Semantics::ConstantResolveResult;
+    using ILSpy::Decompiler::Semantics::ErrorResolveResult;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::TypeSystem::Create;
+    using ILSpy::Decompiler::TypeSystem::FindType;
+    using ILSpy::Decompiler::TypeSystem::GetUnderlyingType;
+    using ILSpy::Decompiler::TypeSystem::IParameterizedMember;
+    using ILSpy::Decompiler::TypeSystem::IsCSharpNativeIntegerType;
+    using ILSpy::Decompiler::TypeSystem::IsNullable;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+    using ILSpy::Decompiler::TypeSystem::PointerType;
+    using ILSpy::Decompiler::TypeSystem::SpecialType;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+    using ILSpy::Decompiler::Util::ArithmeticException;
+
+    if (lhs->Type().Kind() == TypeKind::Dynamic || rhs->Type().Kind() == TypeKind::Dynamic)
+    {
+        // The C# `SpecialType.Dynamic` -- a shared-managed instance (the factory's
+        // `shared_from_this` recovers the owning handle). The local handle keeps the
+        // instance alive through both `Convert` calls and the result factory call.
+        ITypePtr dynamicType = std::make_shared<SpecialType>(TypeKind::Dynamic, true);
+        lhs = Convert(std::move(lhs), *dynamicType);
+        rhs = Convert(std::move(rhs), *dynamicType);
+        return BinaryOperatorResolveResult(*dynamicType, std::move(lhs), op,
+                                           std::move(rhs));
+    }
+
+    // C# 4.0 spec: section 7.3.4 Binary operator overload resolution
+    const char* overloadableOperatorName = GetOverloadableOperatorName(op);
+    if (overloadableOperatorName == nullptr)
+    {
+        // Handle logical and/or exactly as bitwise and/or:
+        // - If the user overloads a bitwise operator, that implicitly creates the
+        //   corresponding logical operator.
+        // - If both inputs are compile-time constants, it doesn't matter that we don't
+        //   short-circuit.
+        // - If inputs aren't compile-time constants, we don't evaluate anything, so again
+        //   it doesn't matter that we don't short-circuit
+        if (op == BinaryOperatorType::ConditionalAnd)
+        {
+            overloadableOperatorName =
+                GetOverloadableOperatorName(BinaryOperatorType::BitwiseAnd);
+        }
+        else if (op == BinaryOperatorType::ConditionalOr)
+        {
+            overloadableOperatorName =
+                GetOverloadableOperatorName(BinaryOperatorType::BitwiseOr);
+        }
+        else if (op == BinaryOperatorType::NullCoalescing)
+        {
+            // null coalescing operator is not overloadable and needs to be handled
+            // separately
+            return ResolveNullCoalescingOperator(std::move(lhs), std::move(rhs));
+        }
+        else
+        {
+            return ErrorResultSingleton();
+        }
+    }
+
+    // If the type is nullable, get the underlying type:
+    // (LOCAL rebindable pointers -- the shift arm's `UnaryNumericPromotion(..., ref
+    // lhsType, ...)` and the post-promotion re-read rebind them, the
+    // `UnaryNumericPromotion` `const IType*&` signature.)
+    bool isNullable = IsNullable(lhs->Type()) || IsNullable(rhs->Type());
+    const IType* lhsType = &GetUnderlyingType(lhs->Type());
+    const IType* rhsType = &GetUnderlyingType(rhs->Type());
+
+    // the operator is overloadable:
+    // (The C# `HashSet<IParameterizedMember>` + `UnionWith` dedups by the default
+    // REFERENCE equality -- the port collects into a pointer vector filtered by
+    // pointer identity, the `GetApplicableConversionOperators` dedup convention. Both
+    // operand types are scanned: a pair of same-typed operands would otherwise add
+    // every candidate twice.)
+    std::unique_ptr<OverloadResolution> userDefinedOperatorOR =
+        CreateOverloadResolution({lhs, rhs});
+    std::vector<const IParameterizedMember*> userOperatorCandidates;
+    auto unionWithCandidates = [&](const IType& type) {
+        for (const auto& candidate :
+             GetUserDefinedOperatorCandidates(type, overloadableOperatorName))
+        {
+            const IParameterizedMember* member = candidate.get();
+            bool found = false;
+            for (const IParameterizedMember* existing : userOperatorCandidates)
+            {
+                if (existing == member)
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                userOperatorCandidates.push_back(member);
+        }
+    };
+    unionWithCandidates(*lhsType);
+    unionWithCandidates(*rhsType);
+    for (const IParameterizedMember* candidate : userOperatorCandidates)
+    {
+        userDefinedOperatorOR->AddCandidate(*candidate);
+    }
+    if (userDefinedOperatorOR->FoundApplicableCandidate())
+    {
+        return CreateResolveResultForUserDefinedOperator(
+            *userDefinedOperatorOR,
+            BinaryOperatorExpression::GetLinqNodeType(op, checkForOverflow_));
+    }
+
+    // The C# `rhsType.IsReferenceType == false` / `lhsType.IsReferenceType == false` --
+    // DEFINITE-false checks (the nullable equality never propagates null: `null ==
+    // false` is false, the iteration-103 corrected semantics).
+    auto isDefinitelyFalse = [](const IType* type) {
+        const std::optional<bool> opt = type->IsReferenceType();
+        return opt.has_value() && !*opt;
+    };
+    if ((lhsType->Kind() == TypeKind::Null && isDefinitelyFalse(rhsType))
+        || (isDefinitelyFalse(lhsType) && rhsType->Kind() == TypeKind::Null))
+    {
+        isNullable = true;
+    }
+    if (op == BinaryOperatorType::ShiftLeft || op == BinaryOperatorType::ShiftRight
+        || op == BinaryOperatorType::UnsignedShiftRight)
+    {
+        // special case: the shift operators allow "var x = null << null", producing int?.
+        if (lhsType->Kind() == TypeKind::Null && rhsType->Kind() == TypeKind::Null)
+            isNullable = true;
+        // for shift operators, do unary promotion independently on both arguments
+        lhs = UnaryNumericPromotion(UnaryOperatorType::Plus, lhsType, isNullable,
+                                    std::move(lhs));
+        rhs = UnaryNumericPromotion(UnaryOperatorType::Plus, rhsType, isNullable,
+                                    std::move(rhs));
+    }
+    else
+    {
+        bool allowNullableConstants =
+            op == BinaryOperatorType::Equality || op == BinaryOperatorType::InEquality;
+        if (!BinaryNumericPromotion(isNullable, lhs, rhs, allowNullableConstants))
+        {
+            const IType& lhsResultType = lhs->Type();
+            return std::make_shared<ErrorResolveResult>(
+                std::const_pointer_cast<IType>(lhsResultType.shared_from_this()));
+        }
+    }
+    // re-read underlying types after numeric promotion
+    lhsType = &GetUnderlyingType(lhs->Type());
+    rhsType = &GetUnderlyingType(rhs->Type());
+
+    const std::vector<std::shared_ptr<OperatorMethod>>* methodGroup = nullptr;
+    CSharpOperators& operators = CSharpOperators::Get(compilation_);
+    switch (op)
+    {
+        case BinaryOperatorType::Multiply:
+            methodGroup = &operators.MultiplicationOperators();
+            break;
+        case BinaryOperatorType::Divide:
+            methodGroup = &operators.DivisionOperators();
+            break;
+        case BinaryOperatorType::Modulus:
+            methodGroup = &operators.RemainderOperators();
+            break;
+        case BinaryOperatorType::Add:
+        {
+            methodGroup = &operators.AdditionOperators();
+            if (lhsType->Kind() == TypeKind::Enum)
+            {
+                // E operator +(E x, U y);
+                const IType* enumUnderlying = GetEnumUnderlyingType(*lhsType);
+                if (enumUnderlying != nullptr)
+                {
+                    ITypePtr underlyingType = MakeNullable(*enumUnderlying, isNullable);
+                    if (TryConvertEnum(rhs, *underlyingType, isNullable, lhs))
+                    {
+                        return HandleEnumOperator(isNullable, *lhsType, op,
+                                                   std::move(lhs), std::move(rhs));
+                    }
+                }
+            }
+            if (rhsType->Kind() == TypeKind::Enum)
+            {
+                // E operator +(U x, E y);
+                const IType* enumUnderlying = GetEnumUnderlyingType(*rhsType);
+                if (enumUnderlying != nullptr)
+                {
+                    ITypePtr underlyingType = MakeNullable(*enumUnderlying, isNullable);
+                    if (TryConvertEnum(lhs, *underlyingType, isNullable, rhs))
+                    {
+                        return HandleEnumOperator(isNullable, *rhsType, op,
+                                                   std::move(lhs), std::move(rhs));
+                    }
+                }
+            }
+
+            if (lhsType->Kind() == TypeKind::Delegate
+                && TryConvert(rhs, const_cast<IType&>(*lhsType)))
+            {
+                return BinaryOperatorResolveResult(*lhsType, std::move(lhs), op,
+                                                   std::move(rhs));
+            }
+            else if (rhsType->Kind() == TypeKind::Delegate
+                     && TryConvert(lhs, const_cast<IType&>(*rhsType)))
+            {
+                return BinaryOperatorResolveResult(*rhsType, std::move(lhs), op,
+                                                   std::move(rhs));
+            }
+
+            if (lhsType->Kind() == TypeKind::Null && rhsType->Kind() == TypeKind::Null)
+            {
+                // The C# `new ErrorResolveResult(SpecialType.NullType)` -- the
+                // shared-managed `SpecialType(TypeKind::Null, isReferenceType: true)`
+                // singleton shape.
+                return std::make_shared<ErrorResolveResult>(
+                    std::make_shared<SpecialType>(TypeKind::Null, true));
+            }
+            break;
+        }
+        case BinaryOperatorType::Subtract:
+        {
+            methodGroup = &operators.SubtractionOperators();
+            if (lhsType->Kind() == TypeKind::Enum)
+            {
+                // U operator -(E x, E y);
+                // (The target is the ORIGINAL `lhs.Type`, not the stripped `lhsType` --
+                // a `Nullable<E>` lhs targets its enum form; the constant-0-to-enum
+                // conversion is REJECTED here (`allowConversionFromConstantZero:
+                // false`, the user-defined-operator comparison context).)
+                if (TryConvertEnum(rhs, const_cast<IType&>(lhs->Type()), isNullable, lhs,
+                                   /*allowConversionFromConstantZero=*/false))
+                {
+                    return HandleEnumSubtraction(isNullable, *lhsType, std::move(lhs),
+                                                 std::move(rhs));
+                }
+
+                // E operator -(E x, U y);
+                const IType* enumUnderlying = GetEnumUnderlyingType(*lhsType);
+                if (enumUnderlying != nullptr)
+                {
+                    ITypePtr underlyingType = MakeNullable(*enumUnderlying, isNullable);
+                    if (TryConvertEnum(rhs, *underlyingType, isNullable, lhs))
+                    {
+                        return HandleEnumOperator(isNullable, *lhsType, op,
+                                                   std::move(lhs), std::move(rhs));
+                    }
+                }
+            }
+            if (rhsType->Kind() == TypeKind::Enum)
+            {
+                // U operator -(E x, E y);
+                if (TryConvertEnum(lhs, const_cast<IType&>(rhs->Type()), isNullable, rhs,
+                                   /*allowConversionFromConstantZero=*/false))
+                {
+                    return HandleEnumSubtraction(isNullable, *rhsType, std::move(lhs),
+                                                 std::move(rhs));
+                }
+
+                // E operator -(U x, E y);
+                const IType* enumUnderlying = GetEnumUnderlyingType(*rhsType);
+                if (enumUnderlying != nullptr)
+                {
+                    ITypePtr underlyingType = MakeNullable(*enumUnderlying, isNullable);
+                    if (TryConvertEnum(lhs, *underlyingType, isNullable, rhs))
+                    {
+                        return HandleEnumOperator(isNullable, *rhsType, op,
+                                                   std::move(lhs), std::move(rhs));
+                    }
+                }
+            }
+
+            if (lhsType->Kind() == TypeKind::Delegate
+                && TryConvert(rhs, const_cast<IType&>(*lhsType)))
+            {
+                return BinaryOperatorResolveResult(*lhsType, std::move(lhs), op,
+                                                   std::move(rhs));
+            }
+            else if (rhsType->Kind() == TypeKind::Delegate
+                     && TryConvert(lhs, const_cast<IType&>(*rhsType)))
+            {
+                return BinaryOperatorResolveResult(*rhsType, std::move(lhs), op,
+                                                   std::move(rhs));
+            }
+
+            if (lhsType->Kind() == TypeKind::Null && rhsType->Kind() == TypeKind::Null)
+            {
+                return std::make_shared<ErrorResolveResult>(
+                    std::make_shared<SpecialType>(TypeKind::Null, true));
+            }
+            break;
+        }
+        case BinaryOperatorType::ShiftLeft:
+            methodGroup = &operators.ShiftLeftOperators();
+            break;
+        case BinaryOperatorType::ShiftRight:
+            methodGroup = &operators.ShiftRightOperators();
+            break;
+        case BinaryOperatorType::UnsignedShiftRight:
+            methodGroup = &operators.UnsignedShiftRightOperators();
+            break;
+        case BinaryOperatorType::Equality:
+        case BinaryOperatorType::InEquality:
+        case BinaryOperatorType::LessThan:
+        case BinaryOperatorType::GreaterThan:
+        case BinaryOperatorType::LessThanOrEqual:
+        case BinaryOperatorType::GreaterThanOrEqual:
+        {
+            if (lhsType->Kind() == TypeKind::Enum
+                && TryConvert(rhs, const_cast<IType&>(lhs->Type())))
+            {
+                // bool operator op(E x, E y);
+                return HandleEnumComparison(op, *lhsType, isNullable, std::move(lhs),
+                                            std::move(rhs));
+            }
+            else if (rhsType->Kind() == TypeKind::Enum
+                     && TryConvert(lhs, const_cast<IType&>(rhs->Type())))
+            {
+                // bool operator op(E x, E y);
+                return HandleEnumComparison(op, *rhsType, isNullable, std::move(lhs),
+                                            std::move(rhs));
+            }
+            else if (dynamic_cast<const PointerType*>(lhsType) != nullptr
+                     && dynamic_cast<const PointerType*>(rhsType) != nullptr)
+            {
+                return BinaryOperatorResolveResult(
+                    compilation_.FindType(KnownTypeCode::Boolean), std::move(lhs),
+                    op, std::move(rhs));
+            }
+            else if (IsCSharpNativeIntegerType(lhsType)
+                     || IsCSharpNativeIntegerType(rhsType))
+            {
+                if (lhsType->Equals(*rhsType))
+                    return BinaryOperatorResolveResult(
+                        compilation_.FindType(KnownTypeCode::Boolean), std::move(lhs),
+                        op, std::move(rhs), /*isLifted=*/isNullable);
+                else
+                    return std::make_shared<ErrorResolveResult>(
+                        std::const_pointer_cast<IType>(
+                            compilation_.FindType(KnownTypeCode::Boolean)
+                                .shared_from_this()));
+            }
+            if (op == BinaryOperatorType::Equality
+                || op == BinaryOperatorType::InEquality)
+            {
+                // The C# `lhsType.IsReferenceType == true && rhsType.IsReferenceType ==
+                // true` -- DEFINITE-true checks on both sides, and the non-null kinds
+                // (a null literal never participates in the reference comparison).
+                auto isDefinitelyTrue = [](const IType* type) {
+                    const std::optional<bool> opt = type->IsReferenceType();
+                    return opt.has_value() && *opt;
+                };
+                if (isDefinitelyTrue(lhsType) && isDefinitelyTrue(rhsType)
+                    && lhsType->Kind() != TypeKind::Null
+                    && rhsType->Kind() != TypeKind::Null
+                    && (Detail::IdentityConversion(const_cast<IType&>(*lhsType),
+                                                   const_cast<IType&>(*rhsType))
+                        || conversions_.ExplicitConversion(
+                               const_cast<IType&>(*lhsType),
+                               const_cast<IType&>(*rhsType))->IsReferenceConversion()
+                        || conversions_.ExplicitConversion(
+                               const_cast<IType&>(*rhsType),
+                               const_cast<IType&>(*lhsType))->IsReferenceConversion()))
+                {
+                    // If it's a reference comparison
+                    // (The `break` binds to the OUTER switch -- the inner switch below
+                    // is not yet entered at this lexical point, mirroring the C#.)
+                    if (op == BinaryOperatorType::Equality)
+                        methodGroup = &operators.ReferenceEqualityOperators();
+                    else
+                        methodGroup = &operators.ReferenceInequalityOperators();
+                    break;
+                }
+                else if ((lhsType->Kind() == TypeKind::Null
+                          && IsNullableTypeOrNonValueType(rhs->Type()))
+                         || (IsNullableTypeOrNonValueType(lhs->Type())
+                             && rhsType->Kind() == TypeKind::Null))
+                {
+                    // compare type parameter or nullable type with the null literal
+                    return BinaryOperatorResolveResult(
+                        compilation_.FindType(KnownTypeCode::Boolean), std::move(lhs),
+                        op, std::move(rhs));
+                }
+            }
+            switch (op)
+            {
+                case BinaryOperatorType::Equality:
+                    methodGroup = &operators.ValueEqualityOperators();
+                    break;
+                case BinaryOperatorType::InEquality:
+                    methodGroup = &operators.ValueInequalityOperators();
+                    break;
+                case BinaryOperatorType::LessThan:
+                    methodGroup = &operators.LessThanOperators();
+                    break;
+                case BinaryOperatorType::GreaterThan:
+                    methodGroup = &operators.GreaterThanOperators();
+                    break;
+                case BinaryOperatorType::LessThanOrEqual:
+                    methodGroup = &operators.LessThanOrEqualOperators();
+                    break;
+                case BinaryOperatorType::GreaterThanOrEqual:
+                    methodGroup = &operators.GreaterThanOrEqualOperators();
+                    break;
+                default:
+                    // The C# `throw new InvalidOperationException()` -- unreachable
+                    // (the outer case labels cover exactly these six kinds).
+                    throw std::runtime_error(
+                        "InvalidOperationException: ResolveBinaryOperator comparison arm");
+            }
+            break;
+        }
+        case BinaryOperatorType::BitwiseAnd:
+        case BinaryOperatorType::BitwiseOr:
+        case BinaryOperatorType::ExclusiveOr:
+        {
+            if (lhsType->Kind() == TypeKind::Enum)
+            {
+                // bool operator op(E x, E y);
+                if (TryConvertEnum(rhs, const_cast<IType&>(lhs->Type()), isNullable, lhs))
+                {
+                    return HandleEnumOperator(isNullable, *lhsType, op, std::move(lhs),
+                                             std::move(rhs));
+                }
+            }
+
+            if (rhsType->Kind() == TypeKind::Enum)
+            {
+                // bool operator op(E x, E y);
+                if (TryConvertEnum(lhs, const_cast<IType&>(rhs->Type()), isNullable, rhs))
+                {
+                    return HandleEnumOperator(isNullable, *rhsType, op, std::move(lhs),
+                                             std::move(rhs));
+                }
+            }
+
+            switch (op)
+            {
+                case BinaryOperatorType::BitwiseAnd:
+                    methodGroup = &operators.BitwiseAndOperators();
+                    break;
+                case BinaryOperatorType::BitwiseOr:
+                    methodGroup = &operators.BitwiseOrOperators();
+                    break;
+                case BinaryOperatorType::ExclusiveOr:
+                    methodGroup = &operators.BitwiseXorOperators();
+                    break;
+                default:
+                    throw std::runtime_error(
+                        "InvalidOperationException: ResolveBinaryOperator bitwise arm");
+            }
+            break;
+        }
+        case BinaryOperatorType::ConditionalAnd:
+            methodGroup = &operators.LogicalAndOperators();
+            break;
+        case BinaryOperatorType::ConditionalOr:
+            methodGroup = &operators.LogicalOrOperators();
+            break;
+        default:
+            // The C# `throw new InvalidOperationException()` -- unreachable through the
+            // overloadable-name gate (the name covers exactly these operator kinds),
+            // the runtime-exception convention.
+            throw std::runtime_error(
+                "InvalidOperationException: ResolveBinaryOperator");
+    }
+    if (IsCSharpNativeIntegerType(lhsType) || IsCSharpNativeIntegerType(rhsType))
+    {
+        if (lhsType->Equals(*rhsType))
+        {
+            // (The pre-bind discipline: the `Create` handle keeps the nullable form
+            // alive through the factory call; `*lhsType` is valid for the passthrough.)
+            const ITypePtr resultTypeHandle =
+                isNullable ? Create(compilation_, *lhsType)
+                           : std::const_pointer_cast<IType>(
+                                 const_cast<IType&>(*lhsType).shared_from_this());
+            return BinaryOperatorResolveResult(*resultTypeHandle, std::move(lhs), op,
+                                               std::move(rhs), /*isLifted=*/isNullable);
+        }
+        // mixing nint/nuint is not allowed
+        return std::make_shared<ErrorResolveResult>(
+            std::const_pointer_cast<IType>(
+                const_cast<IType&>(*lhsType).shared_from_this()));
+    }
+    std::unique_ptr<OverloadResolution> builtinOperatorOR =
+        CreateOverloadResolution({lhs, rhs});
+    for (const auto& candidate : *methodGroup)
+    {
+        builtinOperatorOR->AddCandidate(*candidate);
+    }
+    // The C# hard cast `(CSharpOperators.BinaryOperatorMethod)builtinOperatorOR
+    // .BestCandidate` -- every builtin-table entry IS a `BinaryOperatorMethod` and the
+    // first `AddCandidate` always folds a best, so the cast cannot fail through this
+    // call site; the null fallback is the documented safe fallback (the C# NREs on
+    // `m.ReturnType` for the impossible shape).
+    const BinaryOperatorMethod* m =
+        dynamic_cast<const BinaryOperatorMethod*>(builtinOperatorOR->BestCandidate());
+    if (m == nullptr)
+    {
+        const IType& lhsResultType = lhs->Type();
+        return std::make_shared<ErrorResolveResult>(
+            std::const_pointer_cast<IType>(lhsResultType.shared_from_this()));
+    }
+    const IType& resultType = m->ReturnType();
+    if (builtinOperatorOR->BestCandidateErrors() != OverloadResolutionErrors::None)
+    {
+        // If there are any user-defined operators, prefer those over the built-in
+        // operators. It'll be a more informative error.
+        if (userDefinedOperatorOR->BestCandidate() != nullptr)
+        {
+            return CreateResolveResultForUserDefinedOperator(
+                *userDefinedOperatorOR,
+                BinaryOperatorExpression::GetLinqNodeType(op, checkForOverflow_));
+        }
+        else
+        {
+            return std::make_shared<ErrorResolveResult>(
+                std::const_pointer_cast<IType>(resultType.shared_from_this()));
+        }
+    }
+    else if (lhs->IsCompileTimeConstant() && rhs->IsCompileTimeConstant()
+             && m->CanEvaluateAtCompileTime())
+    {
+        std::any val;
+        try
+        {
+            val = m->Invoke(*this, lhs->ConstantValue(), rhs->ConstantValue());
+        }
+        catch (const ArithmeticException&)
+        {
+            return std::make_shared<ErrorResolveResult>(
+                std::const_pointer_cast<IType>(resultType.shared_from_this()));
+        }
+        return std::make_shared<ConstantResolveResult>(
+            std::const_pointer_cast<IType>(resultType.shared_from_this()), std::move(val));
+    }
+    else
+    {
+        lhs = Convert(
+            std::move(lhs), const_cast<IType&>(m->Parameters()[0]->Type()),
+            builtinOperatorOR->ArgumentConversions()[0]);
+        rhs = Convert(
+            std::move(rhs), const_cast<IType&>(m->Parameters()[1]->Type()),
+            builtinOperatorOR->ArgumentConversions()[1]);
+        // The C# `builtinOperatorOR.BestCandidate is ILiftedOperator` -- the cross-cast
+        // marks the lifted form (the D549 standalone-base cross-cast).
+        return BinaryOperatorResolveResult(
+            resultType, std::move(lhs), op, std::move(rhs),
+            dynamic_cast<const ILiftedOperator*>(builtinOperatorOR->BestCandidate())
+                != nullptr);
+    }
+}
+
+// The C# private `ResolveResult HandleEnumComparison(BinaryOperatorType op, IType
+// enumType, bool isNullable, ResolveResult lhs, ResolveResult rhs)` (line 995) -- "bool
+// operator op(E x, E y)", evaluated as `((U)x op (U)y`. See CSharpResolver.hpp for the
+// full port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::HandleEnumComparison(
+    ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType op,
+    const ILSpy::Decompiler::TypeSystem::IType& enumType, bool isNullable,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> lhs,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rhs) const
+{
+    using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType;
+    using ILSpy::Decompiler::TypeSystem::FindType;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+
+    // evaluate as ((U)x op (U)y)
+    // (The `ResolveCast` calls take COPIES of the operand handles -- the C# passes the
+    // parameters by value and keeps using the originals on the non-folded path; moving
+    // here would leave null handles for the fallback `BinaryOperatorResolveResult`.)
+    const IType* elementType = EnumUnderlyingOrUnknown(GetEnumUnderlyingType(enumType));
+    if (lhs->IsCompileTimeConstant() && rhs->IsCompileTimeConstant() && !isNullable
+        && elementType->Kind() != TypeKind::Enum)
+    {
+        auto rr = ResolveBinaryOperator(
+            op,
+            ResolveCast(const_cast<IType&>(*elementType), lhs),
+            ResolveCast(const_cast<IType&>(*elementType), rhs));
+        if (rr->IsCompileTimeConstant())
+            return rr;
+    }
+    const IType& resultType = compilation_.FindType(KnownTypeCode::Boolean);
+    return BinaryOperatorResolveResult(resultType, std::move(lhs), op, std::move(rhs),
+                                       isNullable);
+}
+
+// The C# private `ResolveResult HandleEnumSubtraction(bool isNullable, IType enumType,
+// ResolveResult lhs, ResolveResult rhs)` (line 1013) -- "U operator -(E x, E y)",
+// evaluated as `(U)((U)x - (U)y)`. See CSharpResolver.hpp for the full port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::HandleEnumSubtraction(
+    bool isNullable, const ILSpy::Decompiler::TypeSystem::IType& enumType,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> lhs,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rhs) const
+{
+    using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+
+    // evaluate as (U)((U)x - (U)y)
+    // (The `ResolveCast` calls take COPIES of the operand handles -- see
+    // `HandleEnumComparison`.)
+    const IType* elementType = EnumUnderlyingOrUnknown(GetEnumUnderlyingType(enumType));
+    if (lhs->IsCompileTimeConstant() && rhs->IsCompileTimeConstant() && !isNullable
+        && elementType->Kind() != TypeKind::Enum)
+    {
+        auto rr = ResolveBinaryOperator(
+            BinaryOperatorType::Subtract,
+            ResolveCast(const_cast<IType&>(*elementType), lhs),
+            ResolveCast(const_cast<IType&>(*elementType), rhs));
+        rr = WithCheckForOverflow(false)->ResolveCast(
+            const_cast<IType&>(*elementType), std::move(rr));
+        if (rr->IsCompileTimeConstant())
+            return rr;
+    }
+    // (The pre-bind discipline: the `MakeNullable` handle keeps the (nullable)
+    // underlying type alive through the factory call.)
+    ITypePtr resultType = MakeNullable(*elementType, isNullable);
+    return BinaryOperatorResolveResult(*resultType, std::move(lhs),
+                                       BinaryOperatorType::Subtract, std::move(rhs),
+                                       isNullable);
+}
+
+// The C# private `ResolveResult HandleEnumOperator(bool isNullable, IType enumType,
+// BinaryOperatorType op, ResolveResult lhs, ResolveResult rhs)` (line 1037) -- "E
+// operator +(E x, U y)" / "E operator +(U x, E y)" / "E operator -(E x, U y)" / the enum
+// bitwise operators, evaluated as `(E)((U)x op (U)y)`. See CSharpResolver.hpp for the
+// full port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::HandleEnumOperator(
+    bool isNullable, const ILSpy::Decompiler::TypeSystem::IType& enumType,
+    ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType op,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> lhs,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rhs) const
+{
+    using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+
+    // evaluate as (E)((U)x op (U)y)
+    // (The `ResolveCast` calls take COPIES of the operand handles -- see
+    // `HandleEnumComparison`.)
+    if (lhs->IsCompileTimeConstant() && rhs->IsCompileTimeConstant() && !isNullable)
+    {
+        const IType* elementType = EnumUnderlyingOrUnknown(
+            GetEnumUnderlyingType(enumType));
+        if (elementType->Kind() != TypeKind::Enum)
+        {
+            auto rr = ResolveBinaryOperator(
+                op,
+                ResolveCast(const_cast<IType&>(*elementType), lhs),
+                ResolveCast(const_cast<IType&>(*elementType), rhs));
+            rr = WithCheckForOverflow(false)->ResolveCast(
+                const_cast<IType&>(enumType), std::move(rr));
+            if (rr->IsCompileTimeConstant())
+            {
+                // only report result if it's a constant; use the regular
+                // OperatorResolveResult codepath otherwise
+                return rr;
+            }
+        }
+    }
+    // (The pre-bind discipline: the `MakeNullable` handle keeps the (nullable) enum
+    // type alive through the factory call.)
+    ITypePtr resultType = MakeNullable(enumType, isNullable);
+    return BinaryOperatorResolveResult(*resultType, std::move(lhs), op, std::move(rhs),
+                                       isNullable);
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver
