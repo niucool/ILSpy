@@ -136,6 +136,7 @@
 namespace ILSpy::Decompiler::CSharp::Syntax {
 enum class UnaryOperatorType;
 enum class BinaryOperatorType;
+enum class AssignmentOperatorType;
 }
 
 // Forward-declared at GLOBAL scope (the same iteration-94 convention): the conversion
@@ -970,6 +971,120 @@ public:
     // convention).
     std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveTypeOf(
         ILSpy::Decompiler::TypeSystem::IType& referencedType) const;
+
+    // ---- condition / primitive / default value / assignment ---------------------------------
+    // (The condition / primitive / default-value / assignment quartet of
+    // CSharpResolver.cs: "ResolveConditional" lines 2671-2795 (with the private
+    // `IsBetterConditionalConversion` / `HasType` helpers), "ResolvePrimitive" lines
+    // 2798-2810, "ResolveDefaultValue" lines 2814-2878 (the `GetDefaultValue` static
+    // included), and "ResolveAssignment" lines 2941-2960 -- every prerequisite of
+    // which is already ported: the ResolveResult-based `ImplicitConversion` (D529),
+    // `Convert` / `TryConvert` (the Convert region), `ResolveUnaryOperator` /
+    // `ResolveBinaryOperator` (the operator regions),
+    // `AssignmentExpression.GetLinqNodeType` / `GetCorrespondingBinaryOperator`
+    // (the mapping layer), `Util::TypeCodeOfBoxedValue` + the TypeCode-based `FindType`
+    // (the primitive-cast / ReflectionHelper leaves), and the `OperatorResolveResult` /
+    // `ConstantResolveResult` / `ErrorResolveResult` factories.)
+
+    // The C# `public ResolveResult ResolveCondition(ResolveResult input)` (line 2671)
+    // -- converts the input to `bool` using the rules for boolean expressions: a
+    // regular implicit conversion to `bool` if one exists, else the type's
+    // `operator true` (an `op_True`-named operator method found in the type's method
+    // table) wrapped in a user-defined conversion with NO before/after conversions,
+    // applied through `Convert`. The C# `ArgumentNullException` on a null input ports
+    // to `std::invalid_argument` (the context-ctor convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveCondition(
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> input) const;
+
+    // The C# `public ResolveResult ResolveConditionFalse(ResolveResult input)` (line
+    // 2693) -- converts the NEGATED input to `bool`: `!(bool)input` via
+    // `ResolveUnaryOperator(Not, Convert(...))` if the implicit cast to `bool` is
+    // valid; otherwise the type's `operator false` (an `op_False`-named operator
+    // method) applied directly through `Convert`. The C# `ArgumentNullException` on
+    // a null input ports to `std::invalid_argument` (the context-ctor convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveConditionFalse(
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> input) const;
+
+    // The C# `public ResolveResult ResolveConditional(ResolveResult condition,
+    // ResolveResult trueExpression, ResolveResult falseExpression)` (line 2711, C#
+    // 4.0 spec section 7.14) -- the ternary conditional operator: the dynamic arm
+    // (either branch dynamic makes the result dynamic, both branches TryConvert-ed
+    // with the C# NON-SHORT-CIRCUIT `&` so both convert), the both-typed arm (the
+    // better-conditional-conversion tiebreak in each direction; a tie keeps the
+    // true-branch's type with validity by type equivalence), the one-sided arms (the
+    // typed branch's type with the other branch TryConvert-ed), the neither-typed
+    // early `ErrorResult`, then the result composition over the
+    // `ResolveCondition`-converted condition: a constant condition with both constant
+    // branches folds to the selected branch, else the predefined
+    // `OperatorResolveResult` over `ExpressionType.Conditional` with the three
+    // operands; invalid yields the `ErrorResolveResult` over the result type. The C#
+    // rebinds of `condition` / `trueExpression` / `falseExpression` are all LOCAL (the
+    // parameters are value copies of the caller's references), so the port's by-value
+    // handles rebind freely. Private helper predicates `IsBetterConditionalConversion`
+    // and `HasType` land below as public statics for direct TDD.
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveConditional(
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> condition,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> trueExpression,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> falseExpression) const;
+
+    // The C# private `bool IsBetterConditionalConversion(Conversion c1, Conversion c2)`
+    // (line 2786) -- the conditional tiebreak: "Valid is better than
+    // ImplicitConstantExpressionConversion is better than invalid". The C# reference
+    // comparisons against the `ImplicitConstantExpressionConversion` singleton port
+    // to POINTER identity (the D536 singleton convention). Private in the C#; PUBLIC
+    // static in the port for direct TDD (the TryConvert widening convention).
+    static bool IsBetterConditionalConversion(
+        const std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>& c1,
+        const std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>& c2);
+
+    // The C# private `bool HasType(ResolveResult r)` (line 2791) -- whether the result
+    // carries a usable type (neither the None nor the Null null-object kind). Private
+    // in the C#; PUBLIC static in the port for direct TDD (the TryConvert widening
+    // convention).
+    static bool HasType(const ILSpy::Decompiler::Semantics::ResolveResult& r);
+
+    // The C# `public ResolveResult ResolvePrimitive(object value)` (line 2798) -- the
+    // primitive-literal resolution: `null` is a plain `ResolveResult` over the
+    // null-literal type (`SpecialType.NullType`); any other boxed value resolves
+    // through its runtime `TypeCode` (the `Util::TypeCodeOfBoxedValue` mapping) to the
+    // registered known type and yields a `ConstantResolveResult` carrying the value.
+    // The C# `object value` ports to `const std::any&` (an EMPTY any is the C# null).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolvePrimitive(
+        const std::any& value) const;
+
+    // The C# `public ResolveResult ResolveDefaultValue(IType type)` (line 2814) -- the
+    // `default(T)` resolution: a `ConstantResolveResult` over the type carrying the
+    // type's default value (a null `ConstantValue` for types without a primitive
+    // default). The `IType` parameter is non-const (the `shared_from_this`
+    // result-handle convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveDefaultValue(
+        ILSpy::Decompiler::TypeSystem::IType& type) const;
+
+    // The C# `public static object GetDefaultValue(IType type)` (line 2819) -- the
+    // default value of the type: the DEFINITION's per-known-type-code zero (false /
+    // '\0' / the integral and floating zeros / the decimal zero), an ENUM reading its
+    // default through its UNDERLYING type's definition; null for a type without a
+    // resolvable definition or without a primitive default. The C# `object` return
+    // ports to `std::any` (an empty any is the C# null). The C#
+    // `typeDef.EnumUnderlyingType.GetDefinition()` NREs for a degenerate enum without
+    // an underlying; the port's null check returns the null default (the D516
+    // safe-fallback convention).
+    static std::any GetDefaultValue(const ILSpy::Decompiler::TypeSystem::IType& type);
+
+    // The C# `public ResolveResult ResolveAssignment(AssignmentOperatorType op,
+    // ResolveResult lhs, ResolveResult rhs)` (line 2941) -- the assignment resolution:
+    // the plain assignment is a two-operand `OperatorResolveResult` over the lhs's
+    // type with the rhs converted to it; a COMPOUND assignment resolves the underlying
+    // binary operation through `ResolveBinaryOperator` and, when that yields a
+    // two-operand `OperatorResolveResult`, re-shapes it into the assignment form over
+    // the lhs's type (carrying the binary result's user-defined method and lifted
+    // flag, with the lhs and the binary result's SECOND operand as the operands);
+    // anything else (an error result, a constant fold, a delegate combination ...) is
+    // returned as-is.
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveAssignment(
+        ILSpy::Decompiler::CSharp::Syntax::AssignmentOperatorType op,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> lhs,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rhs) const;
 
 private:
     // The C# private nested `sealed class ObjectInitializerContext` -- the linked stack

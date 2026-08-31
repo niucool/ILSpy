@@ -32,6 +32,7 @@
 #include "Decompiler/CSharp/Resolver/DynamicInvocationResolveResult.hpp"
 #include "Decompiler/CSharp/Resolver/DynamicMemberResolveResult.hpp"
 #include "Decompiler/CSharp/Resolver/OverloadResolution.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
@@ -51,7 +52,11 @@
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
 #include "Decompiler/Util/CSharpPrimitiveCast.hpp"
+#include "Decompiler/Util/Decimal.hpp"
 
+#include <any>
+#include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -2398,6 +2403,376 @@ CSharpResolver::ResolveTypeOf(ILSpy::Decompiler::TypeSystem::IType& referencedTy
         compilation_.FindType(KnownTypeCode::Type).shared_from_this());
     return std::make_shared<TypeOfResolveResult>(std::move(systemType),
                                                  referencedType.shared_from_this());
+}
+
+// ---- condition / primitive / default value / assignment regions (CSharpResolver.cs
+// ------ lines 2671-2795 + 2798-2810 + 2814-2878 + 2941-2960) ------------------------------
+
+// The C# `public ResolveResult ResolveCondition(ResolveResult input)` (line 2671) --
+// see CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveCondition(
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> input) const
+{
+    using ILSpy::Decompiler::Semantics::Conversion;
+    using ILSpy::Decompiler::Semantics::Conversions;
+    using ILSpy::Decompiler::TypeSystem::IMethod;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+
+    // The C# `if (input == null) throw new ArgumentNullException(nameof(input))`.
+    if (!input)
+        throw std::invalid_argument("input");
+    // The C# `IType boolean = compilation.FindType(KnownTypeCode.Boolean)`. The
+    // `ImplicitConversion` / `Convert` entries take non-const `IType&`, so the port
+    // const_casts the const `FindType` reference (the D515/D517 convention).
+    IType& boolean = const_cast<IType&>(compilation_.FindType(KnownTypeCode::Boolean));
+    std::shared_ptr<Conversion> c = conversions_.ImplicitConversion(*input, boolean);
+    if (!c->IsValid())
+    {
+        // The C# `.FirstOrDefault()` over the filtered snapshot -- an empty vector
+        // yields null (the GetDelegateInvokeMethod convention).
+        std::vector<const IMethod*> opTrueMethods = input->Type().GetMethods(
+            [](const IMethod* m) { return m->IsOperator() && m->Name() == "op_True"; });
+        const IMethod* opTrue =
+            opTrueMethods.empty() ? nullptr : opTrueMethods.front();
+        if (opTrue != nullptr)
+        {
+            // The C# `Conversion.UserDefinedConversion(opTrue, isImplicit: true,
+            // conversionBeforeUserDefinedOperator: Conversion.None,
+            // conversionAfterUserDefinedOperator: Conversion.None)`.
+            c = Conversions::UserDefinedConversion(
+                opTrue, /*isImplicit=*/true, Conversions::None(), Conversions::None());
+        }
+    }
+    return Convert(std::move(input), boolean, std::move(c));
+}
+
+// The C# `public ResolveResult ResolveConditionFalse(ResolveResult input)` (line
+// 2693) -- see CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveConditionFalse(
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> input) const
+{
+    using ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType;
+    using ILSpy::Decompiler::Semantics::Conversion;
+    using ILSpy::Decompiler::Semantics::Conversions;
+    using ILSpy::Decompiler::TypeSystem::IMethod;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+
+    if (!input)
+        throw std::invalid_argument("input");
+
+    IType& boolean = const_cast<IType&>(compilation_.FindType(KnownTypeCode::Boolean));
+    std::shared_ptr<Conversion> c = conversions_.ImplicitConversion(*input, boolean);
+    if (!c->IsValid())
+    {
+        std::vector<const IMethod*> opFalseMethods = input->Type().GetMethods(
+            [](const IMethod* m) { return m->IsOperator() && m->Name() == "op_False"; });
+        const IMethod* opFalse =
+            opFalseMethods.empty() ? nullptr : opFalseMethods.front();
+        if (opFalse != nullptr)
+        {
+            // `input.operator false()` applies DIRECTLY (no negation on top).
+            c = Conversions::UserDefinedConversion(
+                opFalse, /*isImplicit=*/true, Conversions::None(), Conversions::None());
+            return Convert(std::move(input), boolean, std::move(c));
+        }
+    }
+    // `!(bool)input` -- the negation of the converted input.
+    return ResolveUnaryOperator(
+        UnaryOperatorType::Not, Convert(std::move(input), boolean, std::move(c)));
+}
+
+// The C# `public ResolveResult ResolveConditional(ResolveResult condition,
+// ResolveResult trueExpression, ResolveResult falseExpression)` (line 2711, C# 4.0
+// spec section 7.14) -- see CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveConditional(
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> condition,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> trueExpression,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> falseExpression) const
+{
+    using ILSpy::Decompiler::Semantics::Conversion;
+    using ILSpy::Decompiler::Semantics::ErrorResolveResult;
+    using ILSpy::Decompiler::Semantics::OperatorResolveResult;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::TypeSystem::ExpressionType;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::SpecialType;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+
+    bool isValid;
+    ITypePtr resultType;
+    if (trueExpression->Type().Kind() == TypeKind::Dynamic
+        || falseExpression->Type().Kind() == TypeKind::Dynamic)
+    {
+        // The C# `SpecialType.Dynamic` -- a shared-managed instance (the
+        // ResolveBinaryOperator dynamic-arm convention).
+        resultType = std::make_shared<SpecialType>(TypeKind::Dynamic, true);
+        // The C# `TryConvert(ref trueExpression, resultType) & TryConvert(ref
+        // falseExpression, resultType)` -- the NON-SHORT-CIRCUIT `&` runs BOTH
+        // conversions; evaluating them into locals first makes both-run structural
+        // (the C++ `&` over bools is also non-short-circuit, but the locals pin the
+        // order the operand rebinds observe). The rebinds stay local (the parameters
+        // are value copies of the caller's references).
+        bool trueConverted = TryConvert(trueExpression, *resultType);
+        bool falseConverted = TryConvert(falseExpression, *resultType);
+        isValid = trueConverted & falseConverted;
+    }
+    else if (HasType(*trueExpression) && HasType(*falseExpression))
+    {
+        // The C# rebinds its local operand references through `Convert` -- the
+        // rebinds stay local (the parameters are value copies of the caller's
+        // references). The `Type()` accessors return `const IType&` while
+        // `ImplicitConversion` / `Convert` take non-const `IType&`, so the port
+        // const_casts (the D515/D517 convention).
+        std::shared_ptr<Conversion> t2f = conversions_.ImplicitConversion(
+            *trueExpression, const_cast<IType&>(falseExpression->Type()));
+        std::shared_ptr<Conversion> f2t = conversions_.ImplicitConversion(
+            *falseExpression, const_cast<IType&>(trueExpression->Type()));
+        // The operator is valid:
+        // a) if there's a conversion in one direction but not the other
+        // b) if there are conversions in both directions, and the types are equivalent
+        if (IsBetterConditionalConversion(t2f, f2t))
+        {
+            resultType = std::const_pointer_cast<IType>(
+                falseExpression->Type().shared_from_this());
+            isValid = true;
+            trueExpression = Convert(std::move(trueExpression), *resultType, std::move(t2f));
+        }
+        else if (IsBetterConditionalConversion(f2t, t2f))
+        {
+            resultType = std::const_pointer_cast<IType>(
+                trueExpression->Type().shared_from_this());
+            isValid = true;
+            falseExpression = Convert(std::move(falseExpression), *resultType, std::move(f2t));
+        }
+        else
+        {
+            resultType = std::const_pointer_cast<IType>(
+                trueExpression->Type().shared_from_this());
+            isValid = trueExpression->Type().Equals(falseExpression->Type());
+        }
+    }
+    else if (HasType(*trueExpression))
+    {
+        resultType =
+            std::const_pointer_cast<IType>(trueExpression->Type().shared_from_this());
+        isValid = TryConvert(falseExpression, *resultType);
+    }
+    else if (HasType(*falseExpression))
+    {
+        resultType =
+            std::const_pointer_cast<IType>(falseExpression->Type().shared_from_this());
+        isValid = TryConvert(trueExpression, *resultType);
+    }
+    else
+    {
+        return ErrorResultSingleton();
+    }
+    condition = ResolveCondition(std::move(condition));
+    if (isValid)
+    {
+        if (condition->IsCompileTimeConstant() && trueExpression->IsCompileTimeConstant()
+            && falseExpression->IsCompileTimeConstant())
+        {
+            // The C# `bool? val = condition.ConstantValue as bool?` -- the pointer-form
+            // `any_cast` yields null for an empty any or a non-bool held type (the C#
+            // `as` yields null), so neither branch fires.
+            const bool* val = std::any_cast<bool>(&condition->ConstantValue());
+            if (val != nullptr && *val)
+                return trueExpression;
+            else if (val != nullptr && !*val)
+                return falseExpression;
+        }
+        return std::make_shared<OperatorResolveResult>(
+            std::move(resultType), ExpressionType::Conditional,
+            std::vector<std::shared_ptr<ResolveResult>>{
+                std::move(condition), std::move(trueExpression), std::move(falseExpression)});
+    }
+    else
+    {
+        return std::make_shared<ErrorResolveResult>(std::move(resultType));
+    }
+}
+
+// The C# private `bool IsBetterConditionalConversion(Conversion c1, Conversion c2)`
+// (line 2786) -- see CSharpResolver.hpp for the port conventions.
+bool CSharpResolver::IsBetterConditionalConversion(
+    const std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>& c1,
+    const std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion>& c2)
+{
+    using ILSpy::Decompiler::Semantics::Conversions;
+
+    // Valid is better than ImplicitConstantExpressionConversion is better than invalid
+    if (!c1->IsValid())
+        return false;
+    // The C# `c1 != Conversion.ImplicitConstantExpressionConversion && c2 ==
+    // Conversion.ImplicitConstantExpressionConversion` -- reference comparisons
+    // against the singleton, ported as pointer identity (the D536 convention).
+    if (c1.get() != Conversions::ImplicitConstantExpressionConversion().get()
+        && c2.get() == Conversions::ImplicitConstantExpressionConversion().get())
+        return true;
+    return !c2->IsValid();
+}
+
+// The C# private `bool HasType(ResolveResult r)` (line 2791).
+bool CSharpResolver::HasType(const ILSpy::Decompiler::Semantics::ResolveResult& r)
+{
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+
+    return r.Type().Kind() != TypeKind::None && r.Type().Kind() != TypeKind::Null;
+}
+
+// The C# `public ResolveResult ResolvePrimitive(object value)` (line 2798) -- see
+// CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolvePrimitive(const std::any& value) const
+{
+    using ILSpy::Decompiler::Semantics::ConstantResolveResult;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::TypeSystem::FindType;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::SpecialType;
+    using ILSpy::Decompiler::TypeSystem::TypeCode;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+    using ILSpy::Decompiler::Util::TypeCodeOfBoxedValue;
+
+    if (!value.has_value())
+    {
+        // The C# `new ResolveResult(SpecialType.NullType)` -- the null-literal type
+        // (a shared-managed `SpecialType(TypeKind::Null, true)`).
+        return std::make_shared<ResolveResult>(
+            std::make_shared<SpecialType>(TypeKind::Null, std::optional<bool>(true)));
+    }
+    // The C# `Type.GetTypeCode(value.GetType())` over the port's boxed constant-value
+    // types, then `compilation.FindType(typeCode)` through the TypeCode-based free
+    // `FindType` (the ReflectionHelper leaf).
+    TypeCode typeCode = TypeCodeOfBoxedValue(value);
+    const IType& type = FindType(compilation_, typeCode);
+    return std::make_shared<ConstantResolveResult>(
+        std::const_pointer_cast<IType>(type.shared_from_this()), value);
+}
+
+// The C# `public ResolveResult ResolveDefaultValue(IType type)` (line 2814) -- see
+// CSharpResolver.hpp for the port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveDefaultValue(
+    ILSpy::Decompiler::TypeSystem::IType& type) const
+{
+    using ILSpy::Decompiler::Semantics::ConstantResolveResult;
+
+    return std::make_shared<ConstantResolveResult>(type.shared_from_this(),
+                                                    GetDefaultValue(type));
+}
+
+// The C# `public static object GetDefaultValue(IType type)` (line 2819) -- see
+// CSharpResolver.hpp for the port conventions.
+std::any CSharpResolver::GetDefaultValue(const ILSpy::Decompiler::TypeSystem::IType& type)
+{
+    using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+    using ILSpy::Decompiler::Util::Decimal;
+
+    const ITypeDefinition* typeDef = type.GetDefinition();
+    if (typeDef == nullptr)
+        return std::any();
+    if (typeDef->Kind() == TypeKind::Enum)
+    {
+        // The C# `typeDef.EnumUnderlyingType.GetDefinition()` -- the first deref NREs
+        // for a degenerate enum without a configured underlying; the port's null
+        // check returns the null default (the D516 safe-fallback convention).
+        ITypePtr underlying = typeDef->EnumUnderlyingType();
+        if (!underlying)
+            return std::any();
+        typeDef = underlying->GetDefinition();
+        if (typeDef == nullptr)
+            return std::any();
+    }
+    switch (typeDef->KnownTypeCode()) {
+        case KnownTypeCode::Boolean:
+            return std::any(false);
+        case KnownTypeCode::Char:
+            return std::any(char16_t(0));
+        case KnownTypeCode::SByte:
+            return std::any(std::int8_t(0));
+        case KnownTypeCode::Byte:
+            return std::any(std::uint8_t(0));
+        case KnownTypeCode::Int16:
+            return std::any(std::int16_t(0));
+        case KnownTypeCode::UInt16:
+            return std::any(std::uint16_t(0));
+        case KnownTypeCode::Int32:
+            return std::any(std::int32_t(0));
+        case KnownTypeCode::UInt32:
+            return std::any(std::uint32_t(0));
+        case KnownTypeCode::Int64:
+            return std::any(std::int64_t(0));
+        case KnownTypeCode::UInt64:
+            return std::any(std::uint64_t(0));
+        case KnownTypeCode::Single:
+            return std::any(0.0f);
+        case KnownTypeCode::Double:
+            return std::any(0.0);
+        case KnownTypeCode::Decimal:
+            // The C# `0m` -- the default-initialized scaled-decimal zero.
+            return std::any(Decimal{});
+        default:
+            return std::any();
+    }
+}
+
+// The C# `public ResolveResult ResolveAssignment(AssignmentOperatorType op,
+// ResolveResult lhs, ResolveResult rhs)` (line 2941) -- see CSharpResolver.hpp for the
+// port conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveAssignment(
+    ILSpy::Decompiler::CSharp::Syntax::AssignmentOperatorType op,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> lhs,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rhs) const
+{
+    using ILSpy::Decompiler::CSharp::Syntax::AssignmentExpression;
+    using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType;
+    using ILSpy::Decompiler::Semantics::OperatorResolveResult;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::TypeSystem::ExpressionType;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+
+    ExpressionType linqOp = AssignmentExpression::GetLinqNodeType(op, checkForOverflow_);
+    std::optional<BinaryOperatorType> bop =
+        AssignmentExpression::GetCorrespondingBinaryOperator(op);
+    if (!bop.has_value())
+    {
+        // The C# `new OperatorResolveResult(lhs.Type, linqOp, lhs, this.Convert(rhs,
+        // lhs.Type))` -- the result-type handle is bound before the `std::move` of the
+        // operands (the argument-evaluation-order hazard: the pointee object is not
+        // destroyed by the move, so the pre-bound handle stays valid).
+        ITypePtr lhsType = std::const_pointer_cast<IType>(lhs->Type().shared_from_this());
+        return std::make_shared<OperatorResolveResult>(
+            std::move(lhsType), linqOp,
+            std::vector<std::shared_ptr<ResolveResult>>{
+                lhs, Convert(std::move(rhs), const_cast<IType&>(lhs->Type()))});
+    }
+    // The operands are passed as COPIES (not moves) -- the final composition below
+    // still reads `lhs` and the C# keeps using its operand references after the
+    // binary resolution (the iteration-105 move-hazard learning).
+    std::shared_ptr<ResolveResult> bopResult = ResolveBinaryOperator(*bop, lhs, rhs);
+    // The C# `bopResult as OperatorResolveResult`.
+    const OperatorResolveResult* opResult =
+        dynamic_cast<const OperatorResolveResult*>(bopResult.get());
+    if (opResult == nullptr || opResult->Operands().size() != 2)
+        return bopResult;
+    ITypePtr lhsType = std::const_pointer_cast<IType>(lhs->Type().shared_from_this());
+    return std::make_shared<OperatorResolveResult>(
+        std::move(lhsType), linqOp, opResult->UserDefinedOperatorMethod(),
+        opResult->IsLiftedOperator(),
+        std::vector<std::shared_ptr<ResolveResult>>{ lhs, opResult->Operands()[1] });
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

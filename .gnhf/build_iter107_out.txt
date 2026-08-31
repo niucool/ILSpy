@@ -1,0 +1,31 @@
+**********************************************************************
+** Visual Studio 2026 Developer Command Prompt v18.10.0-insiders
+** Copyright (c) 2026 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+MSBuild version 18.10.0-1.26379.9+c88db8eb0 for .NET Framework
+
+  CSharpOperators.cpp
+  CSharpResolver.cpp
+  Generating Code...
+  ilspy.vcxproj -> C:\Projects\github\ILSpy\cpp\build\windows-vs2026\Debug\ilspy.lib
+  CSharpOperatorsBinary_Test.cpp
+  CSharpOperatorsBitwise_Test.cpp
+  CSharpOperatorsEquality_Test.cpp
+  CSharpOperatorsInvoke_Test.cpp
+  CSharpOperatorsRelational_Test.cpp
+  CSharpOperatorsUnary_Test.cpp
+  CSharpOperatorsUserDefined_Test.cpp
+  CSharpOperators_Test.cpp
+  CSharpResolverBinaryOperator_Test.cpp
+  CSharpResolverConditionPrimitiveDefaultAssignment_Test.cpp
+  CSharpResolverConvert_Test.cpp
+  CSharpResolverNumericPromotion_Test.cpp
+  CSharpResolverOperatorHelpers_Test.cpp
+  CSharpResolverSkeleton_Test.cpp
+  CSharpResolverThisBaseSizeOfTypeOf_Test.cpp
+  CSharpResolverUnaryOperator_Test.cpp
+  CSharpResolverUserDefinedOperators_Test.cpp
+  Generating Code...
+  ilspy_tests.vcxproj -> C:\Projects\github\ILSpy\cpp\build\windows-vs2026\tests\Debug\ilspy_tests.exe
+BUILD_OK
