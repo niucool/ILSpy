@@ -48,9 +48,14 @@
 // the "Convert Entity" member renderers (ConvertField + ConvertProperty +
 // ConvertIndexer + ConvertEvent, C# lines 2143-2186 + 2252-2275 + 2294-2320 +
 // 2322-2360, composing that cluster with the already-landed attribute /
-// parameter / constant-value / modifier helpers) are landed; the remaining
-// `Convert*` instance methods (the ConvertMethod / ConvertOperator /
-// ConvertConstructor / ConvertDestructor / ConvertTypeDefinition / ConvertDelegate
+// parameter / constant-value / modifier helpers), and the method-renderer
+// quartet (ConvertMethod + ConvertOperator + ConvertConstructor +
+// ConvertDestructor, C# lines 2362-2500 -- the method/operator/constructor/
+// destructor renderers composing GetMemberModifiers / the return-attribute
+// sections / ConvertTypeParameter / ConvertParameter / the extension-method
+// `this` modifier / the nullability-disambiguation-vs-constraint split /
+// GenerateBodyBlock / GetExplicitInterfaceType) are landed; the remaining
+// `Convert*` instance methods (the ConvertTypeDefinition / ConvertDelegate
 // renderers plus the ConvertSymbol / ConvertEntity / ConvertExtension entries)
 // follow in later slices, consuming the members below as they grow.
 //
@@ -124,7 +129,10 @@ class Attribute;
 class AttributeSection;
 class BlockStatement;
 class Constraint;
+class ConstructorDeclaration;
+class DestructorDeclaration;
 class MethodDeclaration;
+class OperatorDeclaration;
 class ParameterDeclaration;
 class TypeParameterDeclaration;
 class VariableDeclarationStatement;
@@ -1611,6 +1619,68 @@ public:
     // The return is the `EntityDeclaration` base because the two arms produce
     // distinct concrete node types (the C# `EntityDeclaration` return).
     EntityDeclaration* ConvertEvent(const TS::IEvent& ev) const;
+
+    // -- The "Convert Entity" method renderers (C# lines 2362-2500) --
+    //
+    // The method/operator/constructor/destructor renderers. All four are
+    // `internal` in the C# (the private `ConvertEntity` dispatch calls them);
+    // widened to public for direct TDD ahead of that dispatch (the
+    // `ConvertAccessor` convention). The returned nodes are raw `new`-ed
+    // pointers (the D223 non-owning model; the caller owns them).
+
+    // The C# `MethodDeclaration ConvertMethod(IMethod method)` (line 2362) --
+    // the method renderer: the modifiers, the own + `[return: ...]` attribute
+    // sections, the `MemberResolveResult` annotation, the return type with the
+    // `ref readonly` trailing-readonly promotion, the name, the
+    // `ShowTypeParameters`-gated type-parameter loop through
+    // `ConvertTypeParameter`, the parameter loop through `ConvertParameter`, the
+    // extension-method `this` modifier on the FIRST parameter (gated on
+    // `IsExtensionMethod && ReducedFrom == null && Parameters.Any()` -- a reduced
+    // extension method's receiver parameter is already gone, so no `this`
+    // modifier), the `ShowTypeParameters && ShowTypeParameterConstraints`-gated
+    // constraint split (an override or explicit interface implementation calls
+    // `AddNullabilityDisambiguatingConstraints` -- C# inherits the constraints
+    // from the base member and forbids restating them, with the `class` /
+    // `struct` / `default` nullability-disambiguator exception; every other
+    // method renders each type parameter's full clause through
+    // `ConvertTypeParameterConstraint`), the body, and the explicit-interface
+    // type. `decl.Body = GenerateBodyBlock()` is UNCONDITIONAL here (unlike the
+    // `ConvertAccessor` `if (GenerateBody)` guard): the null body is the default
+    // state of the slot.
+    MethodDeclaration* ConvertMethod(const TS::IMethod& method) const;
+
+    // The C# `EntityDeclaration ConvertOperator(IMethod op)` (line 2405) -- the
+    // operator renderer with its three `ConvertMethod` fallbacks: the operator
+    // token is looked up from the method-name tail after the LAST '.'
+    // (`LastIndexOf` finding nothing yields the whole name, dot + 1 == 0), a
+    // non-operator name (no `OperatorType` for the tail) falls back to
+    // `ConvertMethod`, an `UnsignedRightShift` falls back when
+    // `SupportUnsignedRightShift` is off, and a checked operator
+    // (`OperatorDeclaration.IsChecked`) falls back when
+    // `SupportOperatorChecked` is off. The `OperatorDeclaration` arm renders the
+    // `OperatorType` scalar (whose `Name` derives), the modifiers, the return
+    // type with the `ref readonly` promotion, the parameters, the own + `[return:
+    // ...]` attributes, the annotation, the body, and the explicit-interface
+    // type. The return is the `EntityDeclaration` base because the fallback and
+    // the operator arms produce distinct concrete node types.
+    EntityDeclaration* ConvertOperator(const TS::IMethod& op) const;
+
+    // The C# `ConstructorDeclaration ConvertConstructor(IMethod ctor)` (line
+    // 2443) -- the constructor renderer: the modifiers, the own attribute
+    // sections (a constructor carries NO `[return: ...]` sections and NO
+    // explicit-interface type), the name set from the declaring type
+    // definition's name (the inherited `EntityDeclaration::Name` setter -- a
+    // constructor's name IS its declaring type name; absent when the definition
+    // is null), the parameter loop, the annotation, and the body.
+    ConstructorDeclaration* ConvertConstructor(const TS::IMethod& ctor) const;
+
+    // The C# `DestructorDeclaration ConvertDestructor(IMethod dtor)` (line
+    // 2460) -- the destructor renderer: the own attribute sections, the name
+    // from the declaring type definition's name, the annotation, and the body.
+    // NO modifiers (a destructor is never rendered with accessibility or static
+    // modifiers -- the `NeedsAccessibility` destructor case), NO parameters, and
+    // NO explicit-interface type.
+    DestructorDeclaration* ConvertDestructor(const TS::IMethod& dtor) const;
 
 private:
     // The C# `private void AddTypeAnnotation(AstType astType, IType type)` (line 278)

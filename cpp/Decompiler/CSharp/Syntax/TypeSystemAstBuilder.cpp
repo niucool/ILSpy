@@ -63,10 +63,13 @@
 #include "TupleTypeElement.hpp"
 
 #include "Comment.hpp"
+#include "ConstructorDeclaration.hpp"
 #include "CustomEventDeclaration.hpp"
+#include "DestructorDeclaration.hpp"
 #include "EventDeclaration.hpp"
 #include "FieldDeclaration.hpp"
 #include "IndexerDeclaration.hpp"
+#include "OperatorDeclaration.hpp"
 #include "PropertyDeclaration.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
@@ -2524,6 +2527,224 @@ EntityDeclaration* TypeSystemAstBuilder::ConvertEvent(const TS::IEvent& ev) cons
         decl->Variables().Add(new VariableInitializer(ev.Name()));
         return decl;
     }
+}
+
+// -- The "Convert Entity" method renderers (C# lines 2362-2500) --
+
+// The C# `MethodDeclaration ConvertMethod(IMethod method)` (line 2362) -- see
+// the header declaration for the full contract.
+MethodDeclaration* TypeSystemAstBuilder::ConvertMethod(
+    const TS::IMethod& method) const {
+    auto* decl = new MethodDeclaration();
+    decl->Modifiers(GetMemberModifiers(method));
+    if (ShowAttributes()) {
+        // The C# `decl.Attributes.AddRange(ConvertAttributes(method.GetAttributes()));
+        // decl.Attributes.AddRange(ConvertAttributes(method.GetReturnTypeAttributes(),
+        // "return"));` -- the method renders BOTH its own attribute sections and
+        // the `[return: ...]` sections over the return-type attributes (the
+        // AddRange convenience ports to element-wise Add, the D222 convention).
+        for (AttributeSection* section : ConvertAttributes(method.GetAttributes()))
+            decl->Attributes().Add(section);
+        for (AttributeSection* section : ConvertAttributes(
+                 method.GetReturnTypeAttributes(), "return"))
+            decl->Attributes().Add(section);
+    }
+    if (AddResolveResultAnnotations()) {
+        // The C# `new MemberResolveResult(null, method)` -- the null target is
+        // the empty shared_ptr (the ConvertAccessor annotation precedent);
+        // `ComputeType` reads the method's return type (which must be
+        // shared-managed, the D271/D406 model).
+        decl->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+            std::shared_ptr<Sem::ResolveResult>(), &method));
+    }
+    // `ConvertType` takes `TS::IType&` non-const (the `shared_from_this`-based
+    // annotation path, the D529 convention); the accessor's const is the
+    // contract (the D515/D517 const_cast precedent).
+    decl->ReturnType(ConvertType(const_cast<TS::IType&>(method.ReturnType())));
+    // The C# `if (method.ReturnTypeIsRefReadOnly && decl.ReturnType is
+    // ComposedType ct && ct.HasRefSpecifier) ct.HasReadOnlySpecifier = true;`
+    // -- the flag-check-first order (the ConvertProperty mirror; the C#
+    // `is`-pattern has no short-circuit-visible ordering).
+    if (method.ReturnTypeIsRefReadOnly()) {
+        if (auto* ct = dynamic_cast<ComposedType*>(decl->ReturnType());
+            ct != nullptr && ct->HasRefSpecifier()) {
+            ct->HasReadOnlySpecifier(true);
+        }
+    }
+    decl->Name(method.Name());
+    if (ShowTypeParameters()) {
+        for (const TS::ITypeParameter* tp : method.TypeParameters()) {
+            if (tp == nullptr)
+                continue; // the D516 null-entry guard
+            decl->TypeParameters().Add(ConvertTypeParameter(*tp));
+        }
+    }
+    for (const TS::IParameter* p : method.Parameters()) {
+        if (p == nullptr)
+            continue; // the D516 null-entry guard
+        decl->Parameters().Add(ConvertParameter(*p));
+    }
+    // The C# `if (method.IsExtensionMethod && method.ReducedFrom == null &&
+    // decl.Parameters.Any()) decl.Parameters.First().HasThisModifier = true;`
+    // -- the `this` modifier goes on the FIRST parameter of a NON-reduced
+    // extension method (a reduced method's receiver parameter is already
+    // gone, so re-adding `this` would point at a wrong parameter). The C#
+    // `Any()` ports to `Count() > 0` (the FirstOrNull null-check convention).
+    if (method.IsExtensionMethod() && method.ReducedFrom() == nullptr
+        && decl->Parameters().Count() > 0) {
+        decl->Parameters()[0]->HasThisModifier(true);
+    }
+    if (ShowTypeParameters() && ShowTypeParameterConstraints()) {
+        // The C# override / explicit-interface split: C# inherits the
+        // constraints of an override or explicit interface implementation from
+        // the base member and forbids restating them, with a single exception --
+        // a `class`, `struct`, or `default` constraint may be given to
+        // disambiguate whether `T?` denotes a nullable annotation or
+        // `Nullable<T>` (the C# comment at line 2403).
+        if (method.IsOverride() || method.IsExplicitInterfaceImplementation()) {
+            AddNullabilityDisambiguatingConstraints(*decl, method);
+        } else {
+            for (const TS::ITypeParameter* tp : method.TypeParameters()) {
+                if (tp == nullptr)
+                    continue; // the D516 null-entry guard
+                Constraint* constraint = ConvertTypeParameterConstraint(*tp);
+                if (constraint != nullptr)
+                    decl->Constraints().Add(constraint);
+            }
+        }
+    }
+    // The C# `decl.Body = GenerateBodyBlock();` -- UNCONDITIONAL (unlike the
+    // `ConvertAccessor` `if (GenerateBody)` guard): a null body is the slot's
+    // default state, so assigning it is a no-op.
+    decl->Body(GenerateBodyBlock());
+    decl->PrivateImplementationType(GetExplicitInterfaceType(method));
+    return decl;
+}
+
+// The C# `EntityDeclaration ConvertOperator(IMethod op)` (line 2405) -- see
+// the header declaration for the full contract.
+EntityDeclaration* TypeSystemAstBuilder::ConvertOperator(
+    const TS::IMethod& op) const {
+    // The C# `int dot = op.Name.LastIndexOf('.'); string name =
+    // op.Name.Substring(dot + 1);` -- an explicit-interface operator name is
+    // `Namespace.Iface.op_Addition`, so the operator token is looked up from
+    // the tail after the LAST '.'. The C# `LastIndexOf` returns -1 when no dot
+    // exists (so `Substring(dot + 1)` yields the whole name); the port's
+    // `rfind` returns `npos`, mapped back to the whole-name start offset 0.
+    const std::string& opName = op.Name();
+    std::string::size_type dot = opName.rfind('.');
+    std::string name = opName.substr(dot == std::string::npos ? 0 : dot + 1);
+    std::optional<OperatorType> opType = OperatorDeclaration::GetOperatorType(name);
+    if (!opType.has_value())
+        return ConvertMethod(op);
+    // The C# `if (opType == OperatorType.UnsignedRightShift &&
+    // !SupportUnsignedRightShift) return ConvertMethod(op);` -- the C# 11
+    // `>>>` operator falls back to the method syntax when the output language
+    // level does not support it.
+    if (*opType == OperatorType::UnsignedRightShift && !SupportUnsignedRightShift())
+        return ConvertMethod(op);
+    // The C# `if (!SupportOperatorChecked && OperatorDeclaration.IsChecked(
+    // opType.Value)) return ConvertMethod(op);` -- the C# 11 `checked` operators
+    // fall back to the method syntax when unsupported.
+    if (!SupportOperatorChecked() && OperatorDeclaration::IsChecked(*opType))
+        return ConvertMethod(op);
+
+    auto* decl = new OperatorDeclaration();
+    decl->Modifiers(GetMemberModifiers(op));
+    // The C# `decl.OperatorType = opType.Value;` -- the operator's `Name` is
+    // DERIVED from this scalar (the `GetName(this.OperatorType)` override), so
+    // no name is rendered here.
+    decl->OperatorType(*opType);
+    decl->ReturnType(ConvertType(const_cast<TS::IType&>(op.ReturnType())));
+    // The C# `if (op.ReturnTypeIsRefReadOnly && decl.ReturnType is ComposedType ct
+    // && ct.HasRefSpecifier) ct.HasReadOnlySpecifier = true;` -- the
+    // flag-check-first order (the ConvertMethod mirror).
+    if (op.ReturnTypeIsRefReadOnly()) {
+        if (auto* ct = dynamic_cast<ComposedType*>(decl->ReturnType());
+            ct != nullptr && ct->HasRefSpecifier()) {
+            ct->HasReadOnlySpecifier(true);
+        }
+    }
+    for (const TS::IParameter* p : op.Parameters()) {
+        if (p == nullptr)
+            continue; // the D516 null-entry guard
+        decl->Parameters().Add(ConvertParameter(*p));
+    }
+    if (ShowAttributes()) {
+        for (AttributeSection* section : ConvertAttributes(op.GetAttributes()))
+            decl->Attributes().Add(section);
+        for (AttributeSection* section : ConvertAttributes(
+                 op.GetReturnTypeAttributes(), "return"))
+            decl->Attributes().Add(section);
+    }
+    if (AddResolveResultAnnotations()) {
+        decl->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+            std::shared_ptr<Sem::ResolveResult>(), &op));
+    }
+    // The C# `decl.Body = GenerateBodyBlock();` -- unconditional (the
+    // ConvertMethod convention).
+    decl->Body(GenerateBodyBlock());
+    decl->PrivateImplementationType(GetExplicitInterfaceType(op));
+    return decl;
+}
+
+// The C# `ConstructorDeclaration ConvertConstructor(IMethod ctor)` (line
+// 2443) -- see the header declaration for the full contract.
+ConstructorDeclaration* TypeSystemAstBuilder::ConvertConstructor(
+    const TS::IMethod& ctor) const {
+    auto* decl = new ConstructorDeclaration();
+    decl->Modifiers(GetMemberModifiers(ctor));
+    if (ShowAttributes()) {
+        // The C# renders ONLY the constructor's own attribute sections -- no
+        // `[return: ...]` (a constructor has no return type).
+        for (AttributeSection* section : ConvertAttributes(ctor.GetAttributes()))
+            decl->Attributes().Add(section);
+    }
+    // The C# `if (ctor.DeclaringTypeDefinition != null) decl.Name =
+    // ctor.DeclaringTypeDefinition.Name;` -- a constructor's name IS its
+    // declaring type's name, rendered through the inherited
+    // `EntityDeclaration::Name(std::string_view)` setter (SetChildByKind finds
+    // the node's own `NameToken` slot, the iteration-128 property precedent).
+    if (ctor.DeclaringTypeDefinition() != nullptr)
+        decl->Name(ctor.DeclaringTypeDefinition()->Name());
+    for (const TS::IParameter* p : ctor.Parameters()) {
+        if (p == nullptr)
+            continue; // the D516 null-entry guard
+        decl->Parameters().Add(ConvertParameter(*p));
+    }
+    if (AddResolveResultAnnotations()) {
+        decl->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+            std::shared_ptr<Sem::ResolveResult>(), &ctor));
+    }
+    // The C# `decl.Body = GenerateBodyBlock();` -- unconditional (the
+    // ConvertMethod convention).
+    decl->Body(GenerateBodyBlock());
+    return decl;
+}
+
+// The C# `DestructorDeclaration ConvertDestructor(IMethod dtor)` (line 2460)
+// -- see the header declaration for the full contract.
+DestructorDeclaration* TypeSystemAstBuilder::ConvertDestructor(
+    const TS::IMethod& dtor) const {
+    auto* decl = new DestructorDeclaration();
+    // The C# renders NO modifiers for a destructor (never accessibility or
+    // static -- the `NeedsAccessibility` destructor case), NO parameters, and
+    // NO explicit-interface type: only the attributes, the name, the
+    // annotation, and the body.
+    if (ShowAttributes()) {
+        for (AttributeSection* section : ConvertAttributes(dtor.GetAttributes()))
+            decl->Attributes().Add(section);
+    }
+    if (dtor.DeclaringTypeDefinition() != nullptr)
+        decl->Name(dtor.DeclaringTypeDefinition()->Name());
+    if (AddResolveResultAnnotations()) {
+        decl->AddAnnotation(std::make_shared<Sem::MemberResolveResult>(
+            std::shared_ptr<Sem::ResolveResult>(), &dtor));
+    }
+    // The C# `decl.Body = GenerateBodyBlock();` -- unconditional (the
+    // ConvertMethod convention).
+    decl->Body(GenerateBodyBlock());
+    return decl;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax
