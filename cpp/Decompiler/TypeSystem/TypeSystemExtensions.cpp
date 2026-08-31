@@ -322,4 +322,53 @@ ITypePtr GetElementTypeFromIEnumerable(const IType& collectionType,
     return UnknownType();
 }
 
+bool IsUnbound(const IType& type)
+{
+    // The C# `(type is ITypeDefinition || type is UnknownType) && type.TypeParameterCount > 0`.
+    // An `UnknownType` is NOT an `ITypeDefinition`, so both casts are needed; the
+    // port's `SpecialType(TypeKind::Unknown)` null object matches neither cast, but
+    // its `TypeParameterCount()` is 0 so the conjunction is false either way.
+    const bool isDefinitionOrUnknown =
+        dynamic_cast<const ITypeDefinition*>(&type) != nullptr
+        || dynamic_cast<const class UnknownType*>(&type) != nullptr;
+    return isDefinitionOrUnknown && type.TypeParameterCount() > 0;
+}
+
+namespace {
+
+// The C# `static ITypeDefinition FindNestedType(ITypeDefinition typeDef, string name,
+// int typeParameterCount)` (TypeSystemExtensions.cs line 536) -- the first nested
+// type whose name AND type-parameter count match.
+const ITypeDefinition* FindNestedType(const ITypeDefinition& typeDef,
+                                      const std::string& name,
+                                      int typeParameterCount)
+{
+    for (const ITypeDefinition* nestedType : typeDef.NestedTypes()) {
+        if (nestedType != nullptr && nestedType->Name() == name
+            && nestedType->TypeParameterCount() == typeParameterCount) {
+            return nestedType;
+        }
+    }
+    return nullptr;
+}
+
+} // namespace
+
+const ITypeDefinition* GetTypeDefinition(const IModule& module, const FullTypeName& fullTypeName)
+{
+    const TopLevelTypeName& topLevelTypeName = fullTypeName.GetTopLevelTypeName();
+    const ITypeDefinition* typeDef = module.GetTypeDefinition(topLevelTypeName);
+    if (typeDef == nullptr)
+        return nullptr;
+    int typeParameterCount = topLevelTypeName.TypeParameterCount();
+    for (int i = 0; i < fullTypeName.NestingLevel(); i++) {
+        const std::string name = fullTypeName.GetNestedTypeName(i);
+        typeParameterCount += fullTypeName.GetNestedTypeAdditionalTypeParameterCount(i);
+        typeDef = FindNestedType(*typeDef, name, typeParameterCount);
+        if (typeDef == nullptr)
+            break;
+    }
+    return typeDef;
+}
+
 } // namespace ILSpy::Decompiler::TypeSystem

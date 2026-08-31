@@ -34,6 +34,7 @@
 
 #pragma once
 
+#include "Decompiler/TypeSystem/FullTypeName.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
@@ -124,6 +125,43 @@ std::vector<const ITypeDefinition*> GetAllTypeDefinitions(const ICompilation& co
 // SelectMany over `TopLevelTypeDefinitions()` (all NON-NESTED types in each assembly,
 // in module-list order). `GetAllTypeDefinitions` additionally includes the nested types.
 std::vector<const ITypeDefinition*> GetTopLevelTypeDefinitions(const ICompilation& compilation);
+
+// The C# `public static bool IsUnbound(this IType type)` (TypeSystemExtensions.cs
+// line 230, the `IsOpen / IsUnbound / IsUnmanagedType / IsKnownType` region):
+//
+// "Gets whether the type is unbound. This is true for any type definition that has
+// type parameters, e.g. `typeof(List<>)` or `typeof(Dictionary<,>)`. Note that
+// `typeof(List<Dictionary<,>>)` is considered a bound type despite containing an
+// unbound type. This method returns false for partially parameterized types
+// (`Dictionary<string, >`)."
+//
+// The C# body is `(type is ITypeDefinition || type is UnknownType) &&
+// type.TypeParameterCount > 0` -- the two RTTI is-tests port to `dynamic_cast`s
+// (an `UnknownType` is NOT an `ITypeDefinition`, so both casts are needed). The
+// C# null-check / ArgumentNullException is structurally unreachable through the
+// reference parameter (the D374 convention). The first consumer is
+// `TypeSystemAstBuilder.ConvertTypeHelper` (the unbound-generic branch that
+// renders `List<>` either with its type-parameter names or with `UnboundTypeArgument`
+// placeholders).
+bool IsUnbound(const IType& type);
+
+// The C# `public static ITypeDefinition GetTypeDefinition(this IModule module,
+// FullTypeName fullTypeName)` (TypeSystemExtensions.cs line 519, the
+// `IAssembly.GetTypeDefinition()` region):
+//
+// "Gets the type definition for the specified unresolved type. Returns null if the
+// unresolved type does not belong to this assembly."
+//
+// Resolves the top-level name through `IModule::GetTypeDefinition(TopLevelTypeName)`,
+// then walks the nesting chain (`FullTypeName::GetNestedTypeName` per level, the
+// accumulated type-parameter count including each level's
+// `GetNestedTypeAdditionalTypeParameterCount`) through the definition's
+// `NestedTypes()` table (name + type-parameter-count match, the file-local
+// `FindNestedType` helper). A missing top-level type or a broken nesting chain
+// yields nullptr. The returned pointer is non-owning (the module's type table owns
+// the definition). The first consumer is `TypeSystemAstBuilder.ConvertType(
+// FullTypeName)` (the resolver-holding overload's per-module lookup).
+const ITypeDefinition* GetTypeDefinition(const IModule& module, const FullTypeName& fullTypeName);
 
 // The C# `public static bool IsKnownType(this IType type, KnownTypeCode knownType)`:
 //

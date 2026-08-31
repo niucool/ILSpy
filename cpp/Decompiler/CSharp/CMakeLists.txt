@@ -8,6 +8,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ILAstToCSharp.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/AstNode.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/AstType.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/TypeSystemAstBuilder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/OutputVisitor/TokenWriter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/OutputVisitor/CSharpOutputVisitor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/OutputVisitor/InsertParenthesesVisitor.cpp

@@ -23,11 +23,13 @@
 // lines) is ported incrementally. The class holds a CSharpResolver field and threads
 // the full IType / IMember / ITypeDefinition surface: the class skeleton (the resolver
 // field, the two ctors, InitProperties, and the full configuration property surface)
-// lands now that the CSharpResolver dependency chain is complete, and the `Convert*`
-// instance methods (ConvertType / ConvertAttribute / ConvertConstantValue /
-// ConvertEnumValue / ConvertParameter / ConvertSymbol / ConvertEntity / ConvertExtension
-// / ConvertVariable) follow in later slices, consuming the free functions below as they
-// grow.
+// and the "Convert Type" region (ConvertType / ConvertTypeHelper / TypeMatches /
+// TypeDefMatches / AddTypeArguments / ConvertNamespace / IsValidNamespace, C# lines
+// 266-768, implemented in TypeSystemAstBuilder.cpp) are landed; the remaining
+// `Convert*` instance methods (ConvertAttribute / ConvertConstantValue /
+// ConvertEnumValue / ConvertParameter / ConvertSymbol / ConvertEntity /
+// ConvertExtension / ConvertVariable) follow in later slices, consuming the free
+// functions below as they grow.
 //
 // ModifierFromAccessibility (TypeSystemAstBuilder.cs line 2497) is the first such
 // helper: a pure switch on Accessibility (the D373 leaf) that maps a symbol's
@@ -62,6 +64,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <typeinfo>
 #include <utility>
 
@@ -73,7 +76,22 @@
 // support without the full definition.
 namespace ILSpy::Decompiler::CSharp::Resolver { class CSharpResolver; }
 
+// Forward declarations for the parameter types the TypeSystemAstBuilder class
+// declares over incomplete types (the .cpp includes the full headers):
+// `FullTypeName` (a const& parameter) and the Semantics `NamespaceResolveResult`
+// (the shared_ptr out-parameter). Written at GLOBAL scope -- a qualified
+// namespace-definition inside another namespace declares a fresh shadow chain on
+// MSVC (the iteration-94 UsingScope trap).
+namespace ILSpy::Decompiler::TypeSystem { class FullTypeName; }
+namespace ILSpy::Decompiler::Semantics { class NamespaceResolveResult; }
+
 namespace ILSpy::Decompiler::CSharp::Syntax {
+
+// Namespace-scope aliases shared by the free functions and the
+// TypeSystemAstBuilder class below (the class body references both namespaces in
+// its member declarations; a member-local alias would not reach them all).
+namespace TS = ::ILSpy::Decompiler::TypeSystem;
+namespace Sem = ::ILSpy::Decompiler::Semantics;
 
 // TypeSystemAstBuilder.ModifierFromAccessibility (TypeSystemAstBuilder.cs line 2497).
 // Maps an Accessibility value to the corresponding Syntax Modifiers bits. The
@@ -910,7 +928,138 @@ public:
     bool SupportExtensionDeclarations() const { return supportExtensionDeclarations_; }
     bool& SupportExtensionDeclarations() { return supportExtensionDeclarations_; }
 
+    // -- The Convert Type region (C# lines 266-768) --
+    //
+    // The C# private members (`ConvertTypeHelper` / `TypeMatches` / `TypeDefMatches` /
+    // `AddTypeArguments` / `IsValidNamespace` / `AddTypeAnnotation` / the `Make*`
+    // helpers) are widened to public for direct TDD ahead of the `ConvertAttribute` /
+    // `ConvertConstantValue` / `ConvertParameter` / `ConvertEntity` consumer slices
+    // (the CSharpResolver TryConvert-widening convention). Every method is `const`:
+    // the region reads only the configuration properties and the (const) resolver.
+    //
+    // The C# `AstType` return ports to a raw `AstType*` (the D223 non-owning leak
+    // model, the `Make*` builder precedent): the caller attaches the returned node to
+    // the tree via a slot setter (which re-parents but does not take ownership).
+    //
+    // The `IType` parameters are NON-CONST references: the nullability-wrap arm calls
+    // the non-const `IType::ChangeNullability` (which may `shared_from_this()`), and
+    // `AddTypeAnnotation` recovers the owning `ITypePtr` handle via the non-const
+    // `shared_from_this()` (the D529 convention -- every type fed to the region must
+    // be shared-managed).
+
+    // The C# `public AstType ConvertType(IType type)` (line 268) -- the public
+    // type-to-syntax entry: `ConvertTypeHelper` then `AddTypeAnnotation`. The C#
+    // null-check / ArgumentNullException is structurally unreachable through the
+    // reference parameter (the D374 convention).
+    AstType* ConvertType(TS::IType& type) const;
+
+    // The C# `public AstType ConvertType(FullTypeName fullTypeName)` (line 283) -- the
+    // unresolved-name entry: with a resolver, the first module whose type table
+    // resolves the full name wins (`GetTypeDefinition(IModule, FullTypeName)`, the
+    // TypeSystemExtensions extension) and the found definition converts through the
+    // `IType` overload; without one (or when no module has the type), the name renders
+    // structurally -- the top-level name as a `SimpleType` (or a `MemberType` under
+    // its namespace), then one `MemberType` level per nesting level.
+    AstType* ConvertType(const TS::FullTypeName& fullTypeName) const;
+
+    // The C# `private AstType ConvertTypeHelper(IType type)` (line 313) -- the
+    // type-shape dispatch: the `TypeWithElementType` shapes (pointer / array /
+    // by-reference / the not-supported-in-C# modifier fallback that unwraps to the
+    // element), the `NullabilityAnnotatedType` unwrap (+ `?` when the annotation is
+    // `Nullable`), the `TupleType` element list, the `FunctionPointerType` signature
+    // (calling conventions, custom `CallConv*` modifiers, parameters, return type,
+    // and the treated-as arm), and the else-branch (the unbound-generic definition /
+    // `UnknownType` shapes, the `ParameterizedType` (with the `Nullable<T>` -> `T?`
+    // short-circuit), and the by-kind default (`dynamic`/`nint`/`nuint` as a
+    // `PrimitiveType`, anything else as a `SimpleType`), each + the trailing `?` when
+    // the type's nullability is `Nullable`).
+    AstType* ConvertTypeHelper(TS::IType& type) const;
+
+    // The C# `private AstType ConvertTypeHelper(IType genericType, IReadOnlyList<IType>
+    // typeArguments)` (line 434) -- the named-type renderer over a generic type and
+    // its type arguments: the builtin keyword short-circuit
+    // (`KnownTypeReference.GetCSharpNameByTypeCode`), the using-alias lookup, the
+    // short-name lookup through the resolver (`LookupSimpleNameOrTypeName` /
+    // `IsVariableReferenceWithSameType` + `TypeMatches`), the
+    // `AlwaysUseShortTypeNames` / definition-less top-level short-name arms, and the
+    // qualified `MemberType` composition (the nested-type recursion over the
+    // declaring type, or the namespace target via `ConvertNamespace` with the
+    // `global::` double-colon form for the global namespace).
+    AstType* ConvertTypeHelper(TS::IType& genericType,
+                               const std::vector<TS::ITypePtr>& typeArguments) const;
+
+    // The C# `private bool TypeMatches(IType type, ITypeDefinition typeDef,
+    // IReadOnlyList<IType> typeArguments)` (line 596) -- whether `type` is the same
+    // as `typeDef` parameterized with the given type arguments (the alias and
+    // short-name lookups' verification). A non-parameterized `typeDef` (0 type
+    // parameters) delegates to `TypeDefMatches`; otherwise the definition must match
+    // and either every type argument is the `UnboundTypeArgument` placeholder (an
+    // unbound generic) or the `ParameterizedType`'s arguments equal the given ones
+    // element-wise.
+    bool TypeMatches(const TS::IType& type, const TS::ITypeDefinition& typeDef,
+                     const std::vector<TS::ITypePtr>& typeArguments) const;
+
+    // The C# `private bool TypeDefMatches(ITypeDefinition typeDef, IType? type)`
+    // (line 617) -- name / namespace / type-parameter-count equality with the
+    // nesting-chain recursion (both nested or both top-level).
+    bool TypeDefMatches(const TS::ITypeDefinition& typeDef, const TS::IType* type) const;
+
+    // The C# `private void AddTypeArguments(AstType result, IReadOnlyList<ITypeParameter>
+    // typeParameters, IReadOnlyList<IType> typeArguments, int startIndex, int endIndex)`
+    // (line 636) -- appends `[start, end)` type arguments to a `SimpleType`/`MemberType`,
+    // rendering an `UnboundTypeArgument` slot as the corresponding type PARAMETER's
+    // name when `ConvertUnboundTypeArguments` is set.
+    void AddTypeArguments(AstType& result,
+                          const std::vector<const TS::ITypeParameter*>& typeParameters,
+                          const std::vector<TS::ITypePtr>& typeArguments,
+                          int startIndex, int endIndex) const;
+
+    // The C# `public AstType ConvertNamespace(string namespaceName, out
+    // NamespaceResolveResult? nrr)` (line 663) -- the namespace-reference renderer
+    // (delegating to the private overload without the global prefix). The C# `out`
+    // parameter ports to a `shared_ptr&` out-param reset to null at the top (the
+    // `IsVariableReferenceWithSameType` convention).
+    AstType* ConvertNamespace(
+        const std::string& namespaceName,
+        std::shared_ptr<Sem::NamespaceResolveResult>& nrr) const;
+
+    // The C# `private AstType ConvertNamespace(string namespaceName, out
+    // NamespaceResolveResult? nrr, bool requiresGlobalPrefix)` (line 668) -- the
+    // recursive renderer: the using-alias lookup, then the last-dot split (a valid
+    // single-part name renders as a `SimpleType` (with the `global::` prefix form
+    // when required) or a `MemberType` over the invalid-name `global::` form; a
+    // multi-part name recurses over the parent namespace).
+    AstType* ConvertNamespace(const std::string& namespaceName,
+                              std::shared_ptr<Sem::NamespaceResolveResult>& nrr,
+                              bool requiresGlobalPrefix) const;
+
+    // The C# `private bool IsValidNamespace(string firstNamespacePart, out
+    // NamespaceResolveResult? nrr)` (line 733) -- whether the single namespace part
+    // resolves (through the resolver's `ResolveSimpleName`) to that exact namespace;
+    // without a resolver every namespace is assumed valid.
+    bool IsValidNamespace(const std::string& firstNamespacePart,
+                          std::shared_ptr<Sem::NamespaceResolveResult>& nrr) const;
+
 private:
+    // The C# `private void AddTypeAnnotation(AstType astType, IType type)` (line 278)
+    // -- attaches a `TypeResolveResult` annotation when `AddResolveResultAnnotations`
+    // is set. The port recovers the owning `ITypePtr` handle via the non-const
+    // `shared_from_this()` (the D529 convention).
+    void AddTypeAnnotation(AstType& astType, TS::IType& type) const;
+
+    // The C# `private static SimpleType MakeSimpleType(string name)` (line 746) --
+    // the `_` identifier (a C# 9 discard) renders as the escaped `@_`.
+    static SimpleType* MakeSimpleType(std::string_view name);
+
+    // The C# `private SimpleType MakeGlobal()` (line 753) -- the `global` keyword
+    // node, annotated with the compilation's root namespace under
+    // `AddResolveResultAnnotations`.
+    SimpleType* MakeGlobal() const;
+
+    // The C# `private static MemberType MakeMemberType(AstType target, string name)`
+    // (line 760) -- the nested-name helper with the same `_` -> `@_` escaping.
+    static MemberType* MakeMemberType(AstType* target, std::string_view name);
+
     // The C# `void InitProperties()` (line 79) -- the non-false defaults every ctor
     // shares. Everything not assigned here keeps its `= false` backing initializer
     // (the C# bool field default), and `nameLookupMode_` keeps its `Expression`

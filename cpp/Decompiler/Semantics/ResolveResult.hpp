@@ -31,6 +31,7 @@
 #ifndef ILSPY_DECOMPILER_SEMANTICS_RESOLVERESULT_HPP
 #define ILSPY_DECOMPILER_SEMANTICS_RESOLVERESULT_HPP
 
+#include "Decompiler/CSharp/Syntax/AbstractAnnotatable.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
 #include <any>
@@ -52,6 +53,18 @@ namespace ILSpy::Decompiler::Semantics {
 //   * `override string ToString() => "[" + GetType().Name + " " + type + "]"`.
 //   * `virtual IEnumerable<ResolveResult> GetChildResults()` (default empty).
 //   * `virtual ResolveResult ShallowClone() => (ResolveResult)MemberwiseClone()`.
+//
+// The port additionally derives the `AnnotationBase` marker interface (the C#
+// annotation channel stores any `object`; the port's `AbstractAnnotatable::
+// AddAnnotation` requires the marker base): the resolver's `ResolveResult`s are the
+// annotations `TypeSystemAstBuilder` attaches to AST nodes under
+// `AddResolveResultAnnotations` (`astType.AddAnnotation(new TypeResolveResult(type))`),
+// so the whole `ResolveResult` family becomes annotatable in one derivation (the
+// `NodeTrivia` precedent -- "a one-line addition when a type becomes an annotation").
+// The `AnnotationBase::Clone` default (nullptr) stands in for the C# annotation
+// sharing (the C# `CloneAnnotations` shares the reference; the port's clone path
+// SHARES a nullptr-clone annotation rather than dropping it, which is exactly the
+// C# reference-sharing semantics for the resolver results the builder attaches).
 //
 // KEY PORT CONVENTIONS:
 //  * The C# `IType type` (a non-null reference-type field the ctor guards with
@@ -86,7 +99,7 @@ namespace ILSpy::Decompiler::Semantics {
 //    to a `ResolveResult` base, diverging from the C# `MemberwiseClone` which
 //    preserves the runtime type) -- the first subclass port (`TypeResolveResult`)
 //    will add the override.
-class ResolveResult {
+class ResolveResult : public ILSpy::Decompiler::CSharp::Syntax::AnnotationBase {
 public:
     explicit ResolveResult(ILSpy::Decompiler::TypeSystem::ITypePtr type) {
         assert(type && "ResolveResult: type must not be null");
