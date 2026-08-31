@@ -142,6 +142,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Resolver/CSharpOperatorsUserDefined_Test.cpp
     Decompiler/CSharp/Resolver/CSharpOperatorsInvoke_Test.cpp
     Decompiler/CSharp/Resolver/CSharpResolverConvert_Test.cpp
+    Decompiler/CSharp/Resolver/CSharpResolverNumericPromotion_Test.cpp
     Decompiler/CSharp/Resolver/CSharpResolverSkeleton_Test.cpp
     Decompiler/CSharp/Resolver/CSharpResolverUserDefinedOperators_Test.cpp
     Decompiler/TypeSystem/Nullability_Test.cpp

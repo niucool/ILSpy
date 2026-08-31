@@ -89,12 +89,22 @@ std::string ParameterizedType::ReflectionName() const {
     return s;
 }
 bool ParameterizedType::StructuralEquals(const IType& other) const {
-    const auto& o = static_cast<const ParameterizedType&>(other);
-    if (typeArgs_.size() != o.typeArgs_.size()) return false;
-    if (!genericType_ || !o.genericType_) return genericType_ == o.genericType_;
-    if (!genericType_->Equals(*o.genericType_)) return false;
+    // The C# `other as ParameterizedType` + null check (ParameterizedType.cs line 303:
+    // `ParameterizedType c = other as ParameterizedType; if (c == null || ...) return
+    // false;`). The RTTI check is LOAD-BEARING here, not an optimization: this class's
+    // `Kind()` DELEGATES to the generic's Kind, so the `IType::Equals` Kind guard does NOT
+    // distinguish a ParameterizedType over a Struct/Class generic from a plain
+    // Struct/Class-kind type -- an unchecked static_cast would reinterpret an unrelated
+    // same-Kind type's storage (UB). The C# `as` yields null for that shape and Equals
+    // returns false; the port mirrors exactly that.
+    const auto* o = dynamic_cast<const ParameterizedType*>(&other);
+    if (o == nullptr)
+        return false;
+    if (typeArgs_.size() != o->typeArgs_.size()) return false;
+    if (!genericType_ || !o->genericType_) return genericType_ == o->genericType_;
+    if (!genericType_->Equals(*o->genericType_)) return false;
     for (std::size_t i = 0; i < typeArgs_.size(); ++i) {
-        if (!typeArgs_[i]->Equals(*o.typeArgs_[i])) return false;
+        if (!typeArgs_[i]->Equals(*o->typeArgs_[i])) return false;
     }
     return true;
 }

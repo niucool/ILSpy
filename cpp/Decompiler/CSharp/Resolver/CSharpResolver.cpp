@@ -725,4 +725,301 @@ CSharpResolver::GetEnumUnderlyingType(
     return unknownType.get();
 }
 
+// ---- Numeric promotion region (CSharpResolver.cs lines 536-561 + 1055-1230) ----------------
+
+// The C# private `IType MakeNullable(IType type, bool isNullable)` (line 1055).
+ILSpy::Decompiler::TypeSystem::ITypePtr
+CSharpResolver::MakeNullable(
+    const ILSpy::Decompiler::TypeSystem::IType& type, bool isNullable) const
+{
+    using ILSpy::Decompiler::TypeSystem::Create;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+
+    if (isNullable)
+        return Create(compilation_, type);
+    else
+        // The passthrough arm recovers the input's own owning handle: the const
+        // `shared_from_this` returns `shared_ptr<const IType>`, so the `const_pointer_cast`
+        // yields the non-const handle (the D529 convention -- the const is the accessor's
+        // contract, the underlying type-system object is shared-managed and mutable; a
+        // non-shared-managed input would throw `bad_weak_ptr`, the documented stub
+        // discipline).
+        return std::const_pointer_cast<IType>(type.shared_from_this());
+}
+
+// The C# private `ResolveResult UnaryNumericPromotion(UnaryOperatorType op, ref IType
+// type, bool isNullable, ResolveResult expression)` (line 536, C# spec draft-v11
+// section 12.4.7.2).
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::UnaryNumericPromotion(
+    ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType op,
+    const ILSpy::Decompiler::TypeSystem::IType*& type,
+    bool isNullable,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> expression) const
+{
+    using ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType;
+    using ILSpy::Decompiler::Semantics::Conversions;
+    using ILSpy::Decompiler::TypeSystem::GetTypeCode;
+    using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+    using ILSpy::Decompiler::TypeSystem::TypeCode;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+
+    // C# spec (draft-v11): section 12.4.7.2 Unary numeric promotions
+    TypeCode code = GetTypeCode(*type);
+    if (isNullable && type->Kind() == TypeKind::Null)
+        code = TypeCode::SByte; // cause promotion of null to int32
+    switch (op)
+    {
+        case UnaryOperatorType::Minus:
+            if (code == TypeCode::UInt32)
+            {
+                type = &compilation_.FindType(KnownTypeCode::Int64);
+                return Convert(std::move(expression), *MakeNullable(*type, isNullable),
+                               isNullable ? Conversions::ImplicitNullableConversion()
+                                          : Conversions::ImplicitNumericConversion());
+            }
+            // The C# `goto case UnaryOperatorType.Plus;` -- a non-uint minus falls through
+            // to the shared small-unsigned promotion check.
+            [[fallthrough]];
+        case UnaryOperatorType::Plus:
+        case UnaryOperatorType::BitNot:
+            // The C# enum relational comparisons port through static_cast<int> (the D514
+            // convention -- the closed [Char..UInt16] range of the small unsigned types).
+            if (static_cast<int>(code) >= static_cast<int>(TypeCode::Char)
+                && static_cast<int>(code) <= static_cast<int>(TypeCode::UInt16))
+            {
+                type = &compilation_.FindType(KnownTypeCode::Int32);
+                return Convert(std::move(expression), *MakeNullable(*type, isNullable),
+                               isNullable ? Conversions::ImplicitNullableConversion()
+                                          : Conversions::ImplicitNumericConversion());
+            }
+            break;
+        default:
+            break;
+    }
+    return expression;
+}
+
+// The C# private `bool IsSigned(TypeCode code, ResolveResult rr)` (line 1190).
+bool CSharpResolver::IsSigned(
+    ILSpy::Decompiler::TypeSystem::TypeCode code,
+    const std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& rr)
+{
+    using ILSpy::Decompiler::TypeSystem::TypeCode;
+
+    // Determine whether the rr with code==ReflectionHelper.GetTypeCode(NullableType.GetUnderlyingType(rr.Type))
+    // is a signed primitive type.
+    switch (code)
+    {
+        case TypeCode::SByte:
+        case TypeCode::Int16:
+            return true;
+        case TypeCode::Int32:
+            // for int, consider implicit constant expression conversion
+            if (rr->IsCompileTimeConstant())
+            {
+                // The C# `(int)rr.ConstantValue` unbox -- the pointer-form any_cast
+                // (nullptr on a held-type mismatch or an empty box, the safe faithful
+                // fallback for a shape the C# would throw InvalidCastException on: the
+                // mismatched or null box counts as signed).
+                const std::int32_t* v = std::any_cast<std::int32_t>(&rr->ConstantValue());
+                if (v != nullptr && *v >= 0)
+                    return false;
+            }
+            return true;
+        case TypeCode::Int64:
+            // for long, consider implicit constant expression conversion
+            if (rr->IsCompileTimeConstant())
+            {
+                const std::int64_t* v = std::any_cast<std::int64_t>(&rr->ConstantValue());
+                if (v != nullptr && *v >= 0)
+                    return false;
+            }
+            return true;
+        default:
+            return false;
+    }
+}
+
+// The C# private `ResolveResult CastTo(TypeCode targetType, bool isNullable, ResolveResult
+// expression, bool allowNullableConstants)` (line 1214).
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::CastTo(
+    ILSpy::Decompiler::TypeSystem::TypeCode targetType,
+    bool isNullable,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> expression,
+    bool allowNullableConstants) const
+{
+    using ILSpy::Decompiler::TypeSystem::FindType;
+    using ILSpy::Decompiler::TypeSystem::IType;
+
+    // The C# `compilation.FindType(targetType)` resolves to the ReflectionHelper
+    // EXTENSION (`ICompilation.FindType` takes a `KnownTypeCode`, so the `TypeCode`
+    // receiver binds to the extension, iteration 87). The const_cast feeds the const
+    // FindType result to the non-const IType& overload below (the D515/D517 convention --
+    // the underlying type-system object is mutable).
+    return CastTo(const_cast<IType&>(FindType(compilation_, targetType)), isNullable,
+                  std::move(expression), allowNullableConstants);
+}
+
+// The C# private `ResolveResult CastTo(IType targetType, bool isNullable, ResolveResult
+// expression, bool allowNullableConstants)` (line 1219).
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::CastTo(
+    ILSpy::Decompiler::TypeSystem::IType& targetType,
+    bool isNullable,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> expression,
+    bool allowNullableConstants) const
+{
+    using ILSpy::Decompiler::Semantics::ConstantResolveResult;
+    using ILSpy::Decompiler::Semantics::Conversions;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+
+    ITypePtr nullableType = MakeNullable(targetType, isNullable);
+    // The C# `nullableType.Equals(expression.Type)` -- the IType structural comparison.
+    if (nullableType->Equals(expression->Type()))
+        return expression;
+    if (allowNullableConstants && expression->IsCompileTimeConstant())
+    {
+        // The C# `expression.ConstantValue == null` -- the empty `std::any` is the C#
+        // null literal (the ConstantResolveResult ctor convention).
+        if (!expression->ConstantValue().has_value())
+            return std::make_shared<ConstantResolveResult>(std::move(nullableType),
+                                                           std::any());
+        std::shared_ptr<ResolveResult> rr = ResolveCast(targetType, expression);
+        if (rr->IsError())
+            return rr;
+        if (rr->IsCompileTimeConstant())
+            return std::make_shared<ConstantResolveResult>(std::move(nullableType),
+                                                           rr->ConstantValue());
+    }
+    return Convert(std::move(expression), *nullableType,
+                   isNullable ? Conversions::ImplicitNullableConversion()
+                              : Conversions::ImplicitNumericConversion());
+}
+
+// The C# private `bool BinaryNumericPromotion(bool isNullable, ref ResolveResult lhs, ref
+// ResolveResult rhs, bool allowNullableConstants)` (line 1065, C# spec draft-v11 section
+// 12.4.7.3).
+bool CSharpResolver::BinaryNumericPromotion(
+    bool isNullable,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& lhs,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& rhs,
+    bool allowNullableConstants) const
+{
+    using ILSpy::Decompiler::TypeSystem::GetTypeCode;
+    using ILSpy::Decompiler::TypeSystem::GetUnderlyingType;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::SpecialType;
+    using ILSpy::Decompiler::TypeSystem::TypeCode;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+
+    // C# spec (draft-v11): section 12.4.7.3 Binary numeric promotions
+    const IType& lhsUType = GetUnderlyingType(lhs->Type());
+    const IType& rhsUType = GetUnderlyingType(rhs->Type());
+    TypeCode lhsCode = GetTypeCode(lhsUType);
+    TypeCode rhsCode = GetTypeCode(rhsUType);
+    // Treat C# 9 native integers as falling between int and long.
+    // However they don't have a TypeCode, so we hack around that here:
+    if (lhsUType.Kind() == TypeKind::NInt)
+    {
+        lhsCode = TypeCode::Int32;
+    }
+    else if (lhsUType.Kind() == TypeKind::NUInt)
+    {
+        lhsCode = TypeCode::UInt32;
+    }
+    if (rhsUType.Kind() == TypeKind::NInt)
+    {
+        rhsCode = TypeCode::Int32;
+    }
+    else if (rhsUType.Kind() == TypeKind::NUInt)
+    {
+        rhsCode = TypeCode::UInt32;
+    }
+    // if one of the inputs is the null literal, promote that to the type of the other
+    // operand (the C# enum relational comparisons port through static_cast<int>, the D514
+    // convention -- the closed [Boolean..Decimal] / [Char..Decimal] ranges).
+    if (isNullable && lhs->Type().Kind() == TypeKind::Null
+        && static_cast<int>(rhsCode) >= static_cast<int>(TypeCode::Boolean)
+        && static_cast<int>(rhsCode) <= static_cast<int>(TypeCode::Decimal))
+    {
+        lhs = CastTo(rhsCode, isNullable, std::move(lhs), allowNullableConstants);
+        lhsCode = rhsCode;
+    }
+    else if (isNullable && rhs->Type().Kind() == TypeKind::Null
+             && static_cast<int>(lhsCode) >= static_cast<int>(TypeCode::Boolean)
+             && static_cast<int>(lhsCode) <= static_cast<int>(TypeCode::Decimal))
+    {
+        rhs = CastTo(lhsCode, isNullable, std::move(rhs), allowNullableConstants);
+        rhsCode = lhsCode;
+    }
+    bool bindingError = false;
+    if (static_cast<int>(lhsCode) >= static_cast<int>(TypeCode::Char)
+        && static_cast<int>(lhsCode) <= static_cast<int>(TypeCode::Decimal)
+        && static_cast<int>(rhsCode) >= static_cast<int>(TypeCode::Char)
+        && static_cast<int>(rhsCode) <= static_cast<int>(TypeCode::Decimal))
+    {
+        TypeCode targetType;
+        if (lhsCode == TypeCode::Decimal || rhsCode == TypeCode::Decimal)
+        {
+            targetType = TypeCode::Decimal;
+            bindingError = (lhsCode == TypeCode::Single || lhsCode == TypeCode::Double
+                            || rhsCode == TypeCode::Single || rhsCode == TypeCode::Double);
+        }
+        else if (lhsCode == TypeCode::Double || rhsCode == TypeCode::Double)
+        {
+            targetType = TypeCode::Double;
+        }
+        else if (lhsCode == TypeCode::Single || rhsCode == TypeCode::Single)
+        {
+            targetType = TypeCode::Single;
+        }
+        else if (lhsCode == TypeCode::UInt64 || rhsCode == TypeCode::UInt64)
+        {
+            targetType = TypeCode::UInt64;
+            bindingError = IsSigned(lhsCode, lhs) || IsSigned(rhsCode, rhs);
+        }
+        else if (lhsUType.Kind() == TypeKind::NUInt || rhsUType.Kind() == TypeKind::NUInt)
+        {
+            bindingError = IsSigned(lhsCode, lhs) || IsSigned(rhsCode, rhs);
+            // The C# `SpecialType.NUInt` singleton (Kind=NUInt, isReferenceType:false);
+            // the port constructs the equivalent shape per call (SpecialType equality is
+            // kind-based, so the CastTo early-out still fires on a repeat cast).
+            ITypePtr nuintType = std::make_shared<SpecialType>(TypeKind::NUInt, false);
+            lhs = CastTo(*nuintType, isNullable, std::move(lhs), allowNullableConstants);
+            rhs = CastTo(*nuintType, isNullable, std::move(rhs), allowNullableConstants);
+            return !bindingError;
+        }
+        else if (lhsCode == TypeCode::UInt32 || rhsCode == TypeCode::UInt32)
+        {
+            targetType = (IsSigned(lhsCode, lhs) || IsSigned(rhsCode, rhs))
+                ? TypeCode::Int64
+                : TypeCode::UInt32;
+        }
+        else if (lhsCode == TypeCode::Int64 || rhsCode == TypeCode::Int64)
+        {
+            targetType = TypeCode::Int64;
+        }
+        else if (lhsUType.Kind() == TypeKind::NInt || rhsUType.Kind() == TypeKind::NInt)
+        {
+            // The C# `SpecialType.NInt` singleton (Kind=NInt, isReferenceType:false).
+            ITypePtr nintType = std::make_shared<SpecialType>(TypeKind::NInt, false);
+            lhs = CastTo(*nintType, isNullable, std::move(lhs), allowNullableConstants);
+            rhs = CastTo(*nintType, isNullable, std::move(rhs), allowNullableConstants);
+            return !bindingError;
+        }
+        else
+        {
+            targetType = TypeCode::Int32;
+        }
+        lhs = CastTo(targetType, isNullable, std::move(lhs), allowNullableConstants);
+        rhs = CastTo(targetType, isNullable, std::move(rhs), allowNullableConstants);
+    }
+    return !bindingError;
+}
+
 } // namespace ILSpy::Decompiler::CSharp::Resolver

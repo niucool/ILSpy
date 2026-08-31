@@ -507,6 +507,100 @@ public:
     const ILSpy::Decompiler::TypeSystem::IType* GetEnumUnderlyingType(
         const ILSpy::Decompiler::TypeSystem::IType& enumType) const;
 
+    // ---- Numeric promotion -------------------------------------------------------------------
+    // (The unary/binary numeric-promotion region -- CSharpResolver.cs lines 536-561
+    // (`UnaryNumericPromotion`, C# spec draft-v11 section 12.4.7.2) plus lines 1055-1230
+    // (`MakeNullable`, `BinaryNumericPromotion` section 12.4.7.3, `IsSigned`, the two
+    // `CastTo` overloads) -- the operand-shaping machinery the future `ResolveUnaryOperator`
+    // (line 420) / `ResolveBinaryOperator` (line 667) slices consume after the built-in
+    // operator overload resolution.)
+
+    // The C# private `IType MakeNullable(IType type, bool isNullable)` (line 1055) -- the
+    // `Nullable<T>` wrapper factory: the nullable form via `NullableType.Create`, the input
+    // itself otherwise. The C# `IType` return is an owning handle in the port (the
+    // `Create` arm builds a fresh `ParameterizedType` that must outlive the call; the
+    // passthrough arm recovers the input's own owning handle via `shared_from_this` +
+    // `const_pointer_cast` -- the D529 convention: the const is the accessor's contract,
+    // the underlying type-system object is shared-managed; a non-shared-managed input
+    // would throw `bad_weak_ptr`, the documented stub discipline). Private in the C#;
+    // PUBLIC in the port for direct TDD (the TryConvert widening convention).
+    ILSpy::Decompiler::TypeSystem::ITypePtr MakeNullable(
+        const ILSpy::Decompiler::TypeSystem::IType& type, bool isNullable) const;
+
+    // The C# private `ResolveResult UnaryNumericPromotion(UnaryOperatorType op, ref IType
+    // type, bool isNullable, ResolveResult expression)` (line 536, spec section 12.4.7.2
+    // -- the unary promotions: `-` on `uint` promotes to `long`; `+`/`~` on the small
+    // unsigned types [char..ushort] promotes to `int`; a nullable null literal is treated
+    // as `sbyte` so the promotion to `int32` fires for it too). The C# `ref IType type`
+    // rebinds the CALLER's type variable to the promoted type -- a C++ reference cannot
+    // rebind, so the port threads the caller's rebindable pointer (`const IType*&` -- the
+    // rebinds target `FindType` results, whose return is `const IType&`; the reads are all
+    // const). The C# enum relational comparisons port through `static_cast<int>` (the
+    // D514 convention). Private in the C#; PUBLIC in the port for direct TDD (the
+    // TryConvert widening convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> UnaryNumericPromotion(
+        ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType op,
+        const ILSpy::Decompiler::TypeSystem::IType*& type,
+        bool isNullable,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> expression) const;
+
+    // The C# private `bool IsSigned(TypeCode code, ResolveResult rr)` (line 1190) -- the
+    // signed-primitive test the `UInt64`/`UInt32` promotion arms consult, with the
+    // implicit-constant-expression-conversion exceptions: a NON-NEGATIVE `int`/`long`
+    // compile-time constant counts as unsigned (`(int)rr.ConstantValue >= 0`). STATIC in
+    // the port -- it reads no resolver instance state (the
+    // `CreateResolveResultForUserDefinedOperator` convention). The C# unbox `(int)` /
+    // `(long)` ports to the pointer-form `std::any_cast` (nullptr on a held-type mismatch,
+    // the safe faithful fallback for a shape the C# would throw `InvalidCastException` on
+    // -- the mismatched box counts as signed). Private in the C#; PUBLIC in the port for
+    // direct TDD (the TryConvert widening convention).
+    static bool IsSigned(ILSpy::Decompiler::TypeSystem::TypeCode code,
+                         const std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& rr);
+
+    // The C# private `ResolveResult CastTo(TypeCode targetType, bool isNullable,
+    // ResolveResult expression, bool allowNullableConstants)` (line 1214) -- delegates to
+    // the `IType` overload through `FindType` (the `ReflectionHelper` extension -- the
+    // `ICompilation.FindType` takes a `KnownTypeCode`, so the `TypeCode` receiver resolves
+    // to the extension, iteration 87). Private in the C#; PUBLIC in the port for direct
+    // TDD (the TryConvert widening convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> CastTo(
+        ILSpy::Decompiler::TypeSystem::TypeCode targetType,
+        bool isNullable,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> expression,
+        bool allowNullableConstants) const;
+
+    // The C# private `ResolveResult CastTo(IType targetType, bool isNullable, ResolveResult
+    // expression, bool allowNullableConstants)` (line 1219) -- the promotion conversion:
+    // an operand already in the target shape returns UNCHANGED; a compile-time constant
+    // under `allowNullableConstants` folds through `ResolveCast` (a null constant folds to
+    // a null constant over the target shape; an error or non-constant fall-through skips
+    // the fold); everything else wraps through `Convert` with the
+    // `ImplicitNullableConversion` / `ImplicitNumericConversion` singleton. `targetType`
+    // is non-const (the `ResolveCast` / `Convert` calls take non-const `IType&`, the
+    // iteration-100 signatures). Private in the C#; PUBLIC in the port for direct TDD (the
+    // TryConvert widening convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> CastTo(
+        ILSpy::Decompiler::TypeSystem::IType& targetType,
+        bool isNullable,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> expression,
+        bool allowNullableConstants) const;
+
+    // The C# private `bool BinaryNumericPromotion(bool isNullable, ref ResolveResult lhs,
+    // ref ResolveResult rhs, bool allowNullableConstants)` (line 1065, spec section
+    // 12.4.7.3 -- the binary promotions over the underlying types: the `decimal` target
+    // (with the float/double binding error), `double`, `float`, `uint64` (with the
+    // signed-operand binding error), the native-integer `nuint`/`nint` targets, the
+    // `uint`-with-signed-operand `long` promotion, `long`, and the default `int`; the null
+    // literal promotes to the OTHER operand's type code first). The C# `ref ResolveResult`
+    // ports to `std::shared_ptr<ResolveResult>&` (the caller's rebindable variables, the
+    // TryConvert convention). Returns `!bindingError`. Private in the C#; PUBLIC in the
+    // port for direct TDD (the TryConvert widening convention).
+    bool BinaryNumericPromotion(
+        bool isNullable,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& lhs,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& rhs,
+        bool allowNullableConstants) const;
+
 private:
     // The C# private nested `sealed class ObjectInitializerContext` -- the linked stack
     // of objects being initialized (`prev` is the enclosing initializer; nullable).
