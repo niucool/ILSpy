@@ -85,13 +85,15 @@
 // `VariableDeclarationStatement` D270 hand-written-ctor-using-`Add` precedent -- a convenience
 // whose dependencies are all ported).
 //
-// The computed `Name`/`FullName`/`Identifiers` reads, the `ConstructType`/`BuildQualifiedName`
-// helpers, and the hand-written `(string name)` ctor (which calls `this.Name = name`, whose setter
-// uses `ConstructType`) are DEFERRED: the `Name` getter consumes the D289-deferred
+// The computed `Name`/`FullName`/`Identifiers` reads, the `ConstructType` helper, and the
+// hand-written `(string name)` ctor (which calls `this.Name = name`, whose setter uses
+// `ConstructType`) are DEFERRED: the `Name` getter consumes the D289-deferred
 // `UsingDeclaration.ConstructNamespace` (which consumes the D236-deferred `AstType.Create`
-// factory); the helpers are output/resolver-stage behaviour. A `NamespaceDeclaration` is built
-// via the empty or `(AstType)` ctor + `IsFileScoped(...)` + `Members().Add(...)` (or `AddMember`)
-// until `ConstructType`/`ConstructNamespace`/`AddRange` land.
+// factory); they are output/resolver-stage behaviour. The `BuildQualifiedName` static has
+// LANDED (the CSharp/TypeSystem `UsingScope.DummyNamespace.FullName` consumer unblocked
+// it; a pure string join with no dependencies). A `NamespaceDeclaration` is still built
+// via the empty or `(AstType)` ctor + `IsFileScoped(...)` + `Members().Add(...)` (or
+// `AddMember`) until `ConstructType`/`ConstructNamespace`/`AddRange` land.
 //
 // Per PORT_PLAN.md section 5.2 / decision D1 the concrete node is hand-translated from the
 // generated output rather than regenerated. The generated `AcceptVisitor` calls
@@ -246,6 +248,23 @@ public:
     // hand-written-ctor-using-`Add` precedent applied to an `Add`-member convenience.
     void AddMember(AstNode* child) {
         AddChild(child, &Slots::Member);
+    }
+
+    // The hand-written `public static string BuildQualifiedName(string name1, string name2)`
+    // (NamespaceDeclaration.cs line 110) -- the qualified-name join: an empty `name1` yields
+    // `name2` (the root-namespace case: a nested scope under the nameless root keeps the bare
+    // simple name), an empty `name2` yields `name1`, and otherwise the two are joined by a
+    // single `.`. The C# `string.IsNullOrEmpty` is the C++ `empty()` (a `std::string` has no
+    // null state, so the empty check covers both the C# null and the empty cases). A pure
+    // static string helper with no node dependencies; its C# consumers are the computed
+    // `FullName` getter (still deferred) and the CSharp/TypeSystem
+    // `UsingScope.DummyNamespace.FullName` (the consumer that unblocked this landing).
+    static std::string BuildQualifiedName(const std::string& name1, const std::string& name2) {
+        if (name1.empty())
+            return name2;
+        if (name2.empty())
+            return name1;
+        return name1 + "." + name2;
     }
 
     // ---- The per-node slot statics (pointing at the shared `Slots` kinds) ------------------

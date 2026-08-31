@@ -347,6 +347,8 @@ add_executable(ilspy_tests
     Decompiler/CSharp/OutputVisitor/CSharpOutputVisitor_Test.cpp
     Decompiler/CSharp/OutputVisitor/InsertParenthesesVisitor_Test.cpp
     Decompiler/CSharp/OutputVisitor/GenericGrammarAmbiguityVisitor_Test.cpp
+    Decompiler/CSharp/TypeSystem/UsingScope_Test.cpp
+    Decompiler/CSharp/TypeSystem/CSharpTypeResolveContext_Test.cpp
     Decompiler/IL/ControlFlowSimplification_Test.cpp
     Decompiler/IL/ControlFlowGraph_Test.cpp
     Decompiler/FlowAnalysis/Dominance_Test.cpp

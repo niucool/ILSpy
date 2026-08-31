@@ -485,4 +485,28 @@ TEST(CSharp_NamespaceDeclaration, CheckInvariantRejectsEmpty) {
 }
 #endif
 
+// ---- BuildQualifiedName ---------------------------------------------------
+
+// The hand-written static (NamespaceDeclaration.cs line 110): the qualified-name join the
+// computed `FullName` getter and the CSharp/TypeSystem `UsingScope.DummyNamespace.FullName`
+// consume. An empty LEFT side yields the right (the root-namespace case); an empty RIGHT
+// side yields the left; otherwise a single `.` joins them.
+TEST(CSharp_NamespaceDeclaration, BuildQualifiedNameJoinsWithASingleDot) {
+    EXPECT_EQ(NamespaceDeclaration::BuildQualifiedName("System", "Text"), "System.Text");
+}
+
+TEST(CSharp_NamespaceDeclaration, BuildQualifiedNameEmptyLeftYieldsRight) {
+    // The root namespace has an empty full name, so a nested scope under it keeps the
+    // bare simple name.
+    EXPECT_EQ(NamespaceDeclaration::BuildQualifiedName("", "Text"), "Text");
+}
+
+TEST(CSharp_NamespaceDeclaration, BuildQualifiedNameEmptyRightYieldsLeft) {
+    EXPECT_EQ(NamespaceDeclaration::BuildQualifiedName("System", ""), "System");
+}
+
+TEST(CSharp_NamespaceDeclaration, BuildQualifiedNameBothEmptyYieldsEmpty) {
+    EXPECT_EQ(NamespaceDeclaration::BuildQualifiedName("", ""), "");
+}
+
 } // namespace
