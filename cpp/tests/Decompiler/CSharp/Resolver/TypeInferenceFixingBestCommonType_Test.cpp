@@ -39,10 +39,13 @@
 //      DummyTypeParameter.GetMethodTypeParameter(0) through MakeOutputTypeInference, and
 //      a lambda contributes NOTHING against the dummy (the dummy is not a delegate, so
 //      the lambda falls through to the plain arm whose NoType fails the IsValidType gate);
-//  (e) the DEFERRED ImprovedReturnAllResults arms are exact for 0 and 1 candidates
-//      (IntersectionType.Create maps those to UnknownType / the single type), pinned by
-//      the two ImprovedReturnAllResults tests over single-candidate and empty-candidate
-//      bound sets.
+//  (e) the `ImprovedReturnAllResults` arms -- the multi-candidate fix/lookup reduces to
+//      the INTERSECTION of all candidates (an `IntersectionType`, success
+//      `types.Count >= 1`) while the other algorithms pick the first non-interface
+//      candidate and fail (`types.Count == 1`); for the 0- and 1-candidate shapes the
+//      arms coincide with the fallback (`IntersectionType.Create` maps an empty list to
+//      `SpecialType.UnknownType` and a singleton to the single type itself), pinned by
+//      the single-candidate and empty-candidate `ImprovedReturnAllResults` tests.
 //
 // The stubs mirror the TypeInferenceMakeOutputTypeInference_Test conventions (`Def` for
 // the GetTypeCode-resolving LookupTypeDefinition stubs, `RefDef` for the definite
@@ -56,6 +59,7 @@
 #include "Decompiler/TypeSystem/Accessibility.hpp"
 #include "Decompiler/TypeSystem/FullTypeName.hpp"
 #include "Decompiler/TypeSystem/Implementation/DummyTypeParameter.hpp"
+#include "Decompiler/TypeSystem/IntersectionType.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/LookupStubs.hpp"
@@ -91,6 +95,7 @@ using ILSpy::Decompiler::TypeSystem::IType;
 using ILSpy::Decompiler::TypeSystem::ITypeParameter;
 using ILSpy::Decompiler::TypeSystem::ITypePtr;
 using ILSpy::Decompiler::TypeSystem::Implementation::DummyTypeParameter;
+using ILSpy::Decompiler::TypeSystem::IntersectionType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
 using ILSpy::Decompiler::TypeSystem::TestSupport::LookupCompilation;
 using ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition;
@@ -374,6 +379,61 @@ TEST(TypeInferenceFixingBestCommonTypeTest, FindTypeInBoundsNoCandidateYieldsUnk
     EXPECT_EQ(result->Kind(), TypeKind::Unknown);
 }
 
+// The ImprovedReturnAllResults arm: a MULTI-candidate result returns the INTERSECTION
+// of all candidates. Two DISTINCT int instances do not dedup under the identity-equality
+// `StructuralEquals` and each converts to the other (the int->int table entry), so the
+// candidate list keeps both -- the shape where the arm diverges from the picker.
+TEST(TypeInferenceFixingBestCommonTypeTest, FindTypeInBoundsImprovedReturnAllResultsYieldsIntersection)
+{
+    CSharpConversions conversions(Compilation());
+    ITypePtr int32a = Def(KnownTypeCode::Int32);
+    ITypePtr int32b = Def(KnownTypeCode::Int32);
+    ITypePtr result = FindTypeInBounds(conversions, {int32a, int32b}, {},
+                                       Res::TypeInferenceAlgorithm::ImprovedReturnAllResults);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Kind(), TypeKind::Intersection);
+    auto* intersection = dynamic_cast<IntersectionType*>(result.get());
+    ASSERT_NE(intersection, nullptr);
+    ASSERT_EQ(intersection->Types().size(), 2u);
+    EXPECT_EQ(intersection->Types()[0].get(), int32a.get());
+    EXPECT_EQ(intersection->Types()[1].get(), int32b.get());
+}
+
+// The CSharp4 twin over the same bounds: the picker reduces the two candidates to the
+// FIRST non-interface type -- the else arm the intersection arm diverges from.
+TEST(TypeInferenceFixingBestCommonTypeTest, FindTypeInBoundsCSharp4MultiCandidateYieldsFirstNonInterface)
+{
+    CSharpConversions conversions(Compilation());
+    ITypePtr int32a = Def(KnownTypeCode::Int32);
+    ITypePtr int32b = Def(KnownTypeCode::Int32);
+    ITypePtr result = FindTypeInBounds(conversions, {int32a, int32b}, {},
+                                       Res::TypeInferenceAlgorithm::CSharp4);
+    EXPECT_EQ(result.get(), int32a.get());
+}
+
+// A singleton candidate list: the Create singleton mapping returns the type itself (the
+// single-lower-bound early-out feeds the one-entry list; the arm coincides with the
+// picker for this shape).
+TEST(TypeInferenceFixingBestCommonTypeTest, FindTypeInBoundsImprovedReturnAllResultsSingleCandidate)
+{
+    CSharpConversions conversions(Compilation());
+    ITypePtr int32 = Def(KnownTypeCode::Int32);
+    ITypePtr result = FindTypeInBounds(conversions, {int32}, {},
+                                       Res::TypeInferenceAlgorithm::ImprovedReturnAllResults);
+    EXPECT_EQ(result.get(), int32.get());
+}
+
+// An empty candidate list: the Create empty mapping returns the UnknownType null
+// object (the arm coincides with the picker's UnknownType fallback for this shape).
+TEST(TypeInferenceFixingBestCommonTypeTest, FindTypeInBoundsImprovedReturnAllResultsEmptyYieldsUnknownType)
+{
+    CSharpConversions conversions(Compilation());
+    ITypePtr result = FindTypeInBounds(conversions, {}, {},
+                                       Res::TypeInferenceAlgorithm::ImprovedReturnAllResults);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Kind(), TypeKind::Unknown);
+}
+
 // ===========================================================================
 // Fix (TypeInference.cs lines 967-994, spec 12.6.3.13 "Fixing").
 // ===========================================================================
@@ -538,6 +598,59 @@ TEST(TypeInferenceFixingBestCommonTypeTest, ImprovedReturnAllResultsNoCandidates
                      /*nestingLevel*/ 0));
     ASSERT_NE(state[0].FixedTo, nullptr);
     EXPECT_EQ(state[0].FixedTo->Kind(), TypeKind::Unknown);
+}
+
+// The ImprovedReturnAllResults arm: a MULTI-candidate fix does not reduce to a single
+// type -- the INTERSECTION of all candidates becomes the fixed type and any non-empty
+// candidate list SUCCEEDS (`types.Count >= 1`). The same two-distinct-int-instance
+// bound set as the FindTypeInBounds intersection test.
+TEST(TypeInferenceFixingBestCommonTypeTest, ImprovedReturnAllResultsMultiCandidateFixesToIntersection)
+{
+    CSharpConversions conversions(Compilation());
+    std::vector<TP> state = MakeState();
+    ITypePtr int32a = Def(KnownTypeCode::Int32);
+    ITypePtr int32b = Def(KnownTypeCode::Int32);
+    state[0].AddLowerBound(int32a);
+    state[0].AddLowerBound(int32b);
+    EXPECT_TRUE(Fix(conversions, state[0], Res::TypeInferenceAlgorithm::ImprovedReturnAllResults,
+                    /*nestingLevel*/ 0));
+    ASSERT_NE(state[0].FixedTo, nullptr);
+    EXPECT_EQ(state[0].FixedTo->Kind(), TypeKind::Intersection);
+    auto* intersection = dynamic_cast<IntersectionType*>(state[0].FixedTo.get());
+    ASSERT_NE(intersection, nullptr);
+    ASSERT_EQ(intersection->Types().size(), 2u);
+    EXPECT_EQ(intersection->Types()[0].get(), int32a.get());
+    EXPECT_EQ(intersection->Types()[1].get(), int32b.get());
+}
+
+// The CSharp4 twin over the same bounds: the multi-candidate fix picks the FIRST
+// non-interface candidate and FAILS (`types.Count == 1`) -- the else arm the
+// intersection arm diverges from.
+TEST(TypeInferenceFixingBestCommonTypeTest, CSharp4MultiCandidateFixesToFirstAndFails)
+{
+    CSharpConversions conversions(Compilation());
+    std::vector<TP> state = MakeState();
+    ITypePtr int32a = Def(KnownTypeCode::Int32);
+    ITypePtr int32b = Def(KnownTypeCode::Int32);
+    state[0].AddLowerBound(int32a);
+    state[0].AddLowerBound(int32b);
+    EXPECT_FALSE(Fix(conversions, state[0], Res::TypeInferenceAlgorithm::CSharp4,
+                     /*nestingLevel*/ 0));
+    EXPECT_EQ(state[0].FixedTo.get(), int32a.get());
+}
+
+// An exact bound under ImprovedReturnAllResults takes the EXACT path (the intersection
+// arm is the non-exact path only): the fixed type is the exact bound itself, not an
+// intersection.
+TEST(TypeInferenceFixingBestCommonTypeTest, ImprovedReturnAllResultsExactBoundBypassesTheIntersectionArm)
+{
+    CSharpConversions conversions(Compilation());
+    std::vector<TP> state = MakeState();
+    ITypePtr int32 = Def(KnownTypeCode::Int32);
+    state[0].AddExactBound(int32);
+    EXPECT_TRUE(Fix(conversions, state[0], Res::TypeInferenceAlgorithm::ImprovedReturnAllResults,
+                    /*nestingLevel*/ 0));
+    EXPECT_EQ(state[0].FixedTo.get(), int32.get());
 }
 
 // ===========================================================================

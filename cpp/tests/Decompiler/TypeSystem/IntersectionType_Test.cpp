@@ -18,9 +18,9 @@
 
 // Tests for `IntersectionType` (IntersectionType.cs) -- the intersection of several types
 // (the synthetic type the `TypeInference` `ImprovedReturnAllResults` fixing algorithm
-// produces). It is the prerequisite the deferred `Fix` / `FindTypesInBounds`
-// `IntersectionType.Create` arms consume (`TypeInferenceHelpers.cpp`'s two deferred
-// blocks); it lands here as a tested-but-not-yet-wired foundation (the D63 LongSet /
+// produces). It is the prerequisite the `Fix` / `FindTypeInBounds`
+// `IntersectionType.Create` arms consume (`TypeInferenceHelpers.cpp`'s two arms, now
+// wired); it landed as a tested-but-not-yet-wired foundation (the D63 LongSet /
 // D533 GetDelegateInvokeMethod precedent: port the leaf the next in-order piece needs
 // ahead of it, so the wiring iteration is separate and lower-risk).
 //

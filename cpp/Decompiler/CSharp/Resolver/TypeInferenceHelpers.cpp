@@ -35,6 +35,7 @@
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"  // ITypeParameter / NullabilityAnnotatedTypeParameter (the OccursInVisitor Index read; the GetTPForType unwrap)
 #include "Decompiler/TypeSystem/ICompilation.hpp"  // ICompilation (the TypeSystemOptions span gate)
 #include "Decompiler/TypeSystem/Implementation/DummyTypeParameter.hpp"  // DummyTypeParameter (the GetBestCommonType dummy)
+#include "Decompiler/TypeSystem/IntersectionType.hpp"  // IntersectionType (the ImprovedReturnAllResults Fix / FindTypeInBounds arms)
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"  // KnownTypeCode (SpanOfT / ReadOnlySpanOfT)
 #include "Decompiler/TypeSystem/NullableType.hpp"  // IsNullable / GetUnderlyingType (the nullable-covariance arm)
 #include "Decompiler/TypeSystem/TupleType.hpp"  // TupleUnderlyingTypeOrSelf (the tuple-unwrap rebind)
@@ -58,6 +59,7 @@ using ILSpy::Decompiler::TypeSystem::IsArrayInterfaceType;
 using ILSpy::Decompiler::TypeSystem::IsKnownType;
 using ILSpy::Decompiler::TypeSystem::IsNullable;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+using ILSpy::Decompiler::TypeSystem::IntersectionType;
 using ILSpy::Decompiler::TypeSystem::NullabilityAnnotatedTypeParameter;
 using ILSpy::Decompiler::TypeSystem::PointerType;
 using ILSpy::Decompiler::TypeSystem::ReferenceKind;
@@ -1418,12 +1420,13 @@ ITypePtr FindTypeInBounds(CSharpConversions& conversions,
         FindTypesInBounds(conversions, lowerBounds, upperBounds, algorithm,
                           /*nestingLevel*/ 0);
     // C# `if (algorithm == TypeInferenceAlgorithm.ImprovedReturnAllResults)
-    //         return IntersectionType.Create(result);` -- DEFERRED (a landable follow-up
-    // now that the `IntersectionType` class is ported); the documented fallback is the
-    // picker below, which is exact for 0 and 1 candidates (`IntersectionType.Create`
-    // maps an empty list to
-    // `SpecialType.UnknownType` and a singleton to the single type itself). Only a
-    // multi-candidate ambiguous result diverges.
+    //         return IntersectionType.Create(result);` -- the intersection of ALL
+    // candidates (an empty list maps to `SpecialType.UnknownType` and a singleton to
+    // the single type itself -- the two shapes where the arm coincides with the picker
+    // below).
+    if (algorithm == TypeInferenceAlgorithm::ImprovedReturnAllResults) {
+        return IntersectionType::Create(result);
+    }
     // C# `else return GetFirstTypePreferNonInterfaces(result);`
     return GetFirstTypePreferNonInterfaces(result);
 }
@@ -1466,9 +1469,13 @@ bool Fix(CSharpConversions& conversions, TP& tp, TypeInferenceAlgorithm algorith
                                                     nestingLevel + 1);
     // C# `if (algorithm == TypeInferenceAlgorithm.ImprovedReturnAllResults) {
     //         tp.FixedTo = IntersectionType.Create(types);
-    //         return types.Count >= 1; }` -- DEFERRED (a landable follow-up now that the
-    // `IntersectionType` class is ported); the documented fallback below is exact for 0
-    // and 1 candidates.
+    //         return types.Count >= 1; }` -- the intersection of ALL candidates becomes
+    // the fixed type and any non-empty candidate list SUCCEEDS (the multi-candidate fix
+    // the non-`ImprovedReturnAllResults` algorithms reject).
+    if (algorithm == TypeInferenceAlgorithm::ImprovedReturnAllResults) {
+        tp.FixedTo = IntersectionType::Create(types);
+        return types.size() >= 1;
+    }
     // C# `else { tp.FixedTo = GetFirstTypePreferNonInterfaces(types);
     //          return types.Count == 1; }`
     tp.FixedTo = GetFirstTypePreferNonInterfaces(types);
