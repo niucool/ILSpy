@@ -1,0 +1,115 @@
+Running main() from C:\Projects\github\vcpkg\buildtrees\gtest\src\v1.17.0-e243b8ee0f.clean\googletest\src\gtest_main.cc
+Note: Google Test filter = EnumNameCollectionTest.*:WriteFlagsTest.*:WriteEnumTest.*:FormatFlagsPlaceholderTest.*:HeaderFlagCompositionTest.*:AttributeTableContentsTest.*
+[==========] Running 45 tests from 6 test suites.
+[----------] Global test environment set-up.
+[----------] 5 tests from EnumNameCollectionTest
+[ RUN      ] EnumNameCollectionTest.DefaultCtorIsEmpty
+[       OK ] EnumNameCollectionTest.DefaultCtorIsEmpty (0 ms)
+[ RUN      ] EnumNameCollectionTest.AddAppendsInInsertionOrder
+[       OK ] EnumNameCollectionTest.AddAppendsInInsertionOrder (0 ms)
+[ RUN      ] EnumNameCollectionTest.InitializerListCtorMatchesTheAddSequence
+[       OK ] EnumNameCollectionTest.InitializerListCtorMatchesTheAddSequence (0 ms)
+[ RUN      ] EnumNameCollectionTest.ByteBackedEnumKeyZeroExtends
+[       OK ] EnumNameCollectionTest.ByteBackedEnumKeyZeroExtends (0 ms)
+[ RUN      ] EnumNameCollectionTest.Int32BackedEnumKeySignExtends
+[       OK ] EnumNameCollectionTest.Int32BackedEnumKeySignExtends (0 ms)
+[----------] 5 tests from EnumNameCollectionTest (0 ms total)
+
+[----------] 9 tests from WriteFlagsTest
+[ RUN      ] WriteFlagsTest.RendersNamesInTableOrder
+[       OK ] WriteFlagsTest.RendersNamesInTableOrder (0 ms)
+[ RUN      ] WriteFlagsTest.ComposesAllMatchingBitsInTableOrder
+[       OK ] WriteFlagsTest.ComposesAllMatchingBitsInTableOrder (0 ms)
+[ RUN      ] WriteFlagsTest.NullNamedEntriesSuppressOutputButMarkBitsTested
+[       OK ] WriteFlagsTest.NullNamedEntriesSuppressOutputButMarkBitsTested (0 ms)
+[ RUN      ] WriteFlagsTest.HasSecurityIsInvisibleToo
+[       OK ] WriteFlagsTest.HasSecurityIsInvisibleToo (0 ms)
+[ RUN      ] WriteFlagsTest.UnknownBitsRenderTheFlagsPlaceholder
+[       OK ] WriteFlagsTest.UnknownBitsRenderTheFlagsPlaceholder (0 ms)
+[ RUN      ] WriteFlagsTest.ZeroPadsTheHexToFourDigits
+[       OK ] WriteFlagsTest.ZeroPadsTheHexToFourDigits (0 ms)
+[ RUN      ] WriteFlagsTest.ZeroValueWritesNothing
+[       OK ] WriteFlagsTest.ZeroValueWritesNothing (0 ms)
+[ RUN      ] WriteFlagsTest.NegativeRemainderRendersTheFullTwoComplement
+[       OK ] WriteFlagsTest.NegativeRemainderRendersTheFullTwoComplement (0 ms)
+[ RUN      ] WriteFlagsTest.NullNamedLocalEntryMarksBitsTestedSoNoFallback
+[       OK ] WriteFlagsTest.NullNamedLocalEntryMarksBitsTestedSoNoFallback (0 ms)
+[----------] 9 tests from WriteFlagsTest (0 ms total)
+
+[----------] 8 tests from WriteEnumTest
+[ RUN      ] WriteEnumTest.RendersTheMatchingName
+[       OK ] WriteEnumTest.RendersTheMatchingName (0 ms)
+[ RUN      ] WriteEnumTest.FirstMatchingEntryWinsOverLaterDuplicate
+[       OK ] WriteEnumTest.FirstMatchingEntryWinsOverLaterDuplicate (0 ms)
+[ RUN      ] WriteEnumTest.ZeroValueWithoutAZeroEntryWritesNothing
+[       OK ] WriteEnumTest.ZeroValueWithoutAZeroEntryWritesNothing (0 ms)
+[ RUN      ] WriteEnumTest.ZeroValueMatchingAZeroEntryRenders
+[       OK ] WriteEnumTest.ZeroValueMatchingAZeroEntryRenders (0 ms)
+[ RUN      ] WriteEnumTest.NullNamedMatchWritesNothingAndReturns
+[       OK ] WriteEnumTest.NullNamedMatchWritesNothingAndReturns (0 ms)
+[ RUN      ] WriteEnumTest.NullNamedMatchSuppressesALaterDuplicate
+[       OK ] WriteEnumTest.NullNamedMatchSuppressesALaterDuplicate (0 ms)
+[ RUN      ] WriteEnumTest.UnmatchedNonZeroRendersTheFlagsPlaceholder
+[       OK ] WriteEnumTest.UnmatchedNonZeroRendersTheFlagsPlaceholder (0 ms)
+[ RUN      ] WriteEnumTest.CDeclRendersUnmanagedCdecl
+[       OK ] WriteEnumTest.CDeclRendersUnmanagedCdecl (0 ms)
+[----------] 8 tests from WriteEnumTest (0 ms total)
+
+[----------] 4 tests from FormatFlagsPlaceholderTest
+[ RUN      ] FormatFlagsPlaceholderTest.PadsShortValuesToFourDigits
+[       OK ] FormatFlagsPlaceholderTest.PadsShortValuesToFourDigits (0 ms)
+[ RUN      ] FormatFlagsPlaceholderTest.DoesNotTruncateLongerValues
+[       OK ] FormatFlagsPlaceholderTest.DoesNotTruncateLongerValues (0 ms)
+[ RUN      ] FormatFlagsPlaceholderTest.NegativeRendersTheFullTwoComplement
+[       OK ] FormatFlagsPlaceholderTest.NegativeRendersTheFullTwoComplement (0 ms)
+[ RUN      ] FormatFlagsPlaceholderTest.ZeroRendersFourZeros
+[       OK ] FormatFlagsPlaceholderTest.ZeroRendersFourZeros (0 ms)
+[----------] 4 tests from FormatFlagsPlaceholderTest (0 ms total)
+
+[----------] 6 tests from HeaderFlagCompositionTest
+[ RUN      ] HeaderFlagCompositionTest.MethodHeaderSplitsVisibilityFromFlags
+[       OK ] HeaderFlagCompositionTest.MethodHeaderSplitsVisibilityFromFlags (0 ms)
+[ RUN      ] HeaderFlagCompositionTest.FieldHeaderMasksTheHasXAttributes
+[       OK ] HeaderFlagCompositionTest.FieldHeaderMasksTheHasXAttributes (0 ms)
+[ RUN      ] HeaderFlagCompositionTest.PropertyHeaderRendersTheWholeValue
+[       OK ] HeaderFlagCompositionTest.PropertyHeaderRendersTheWholeValue (0 ms)
+[ RUN      ] HeaderFlagCompositionTest.EventHeaderRendersTheWholeValue
+[       OK ] HeaderFlagCompositionTest.EventHeaderRendersTheWholeValue (0 ms)
+[ RUN      ] HeaderFlagCompositionTest.MethodImplSplitsCodeTypeFromImpl
+[       OK ] HeaderFlagCompositionTest.MethodImplSplitsCodeTypeFromImpl (0 ms)
+[ RUN      ] HeaderFlagCompositionTest.TypeHeaderSplitsThreeEnumsFromFlags
+[       OK ] HeaderFlagCompositionTest.TypeHeaderSplitsThreeEnumsFromFlags (0 ms)
+[----------] 6 tests from HeaderFlagCompositionTest (0 ms total)
+
+[----------] 13 tests from AttributeTableContentsTest
+[ RUN      ] AttributeTableContentsTest.MethodAttributeFlagsContents
+[       OK ] AttributeTableContentsTest.MethodAttributeFlagsContents (0 ms)
+[ RUN      ] AttributeTableContentsTest.MethodVisibilityContents
+[       OK ] AttributeTableContentsTest.MethodVisibilityContents (0 ms)
+[ RUN      ] AttributeTableContentsTest.CallingConventionContents
+[       OK ] AttributeTableContentsTest.CallingConventionContents (0 ms)
+[ RUN      ] AttributeTableContentsTest.MethodCodeTypeContents
+[       OK ] AttributeTableContentsTest.MethodCodeTypeContents (0 ms)
+[ RUN      ] AttributeTableContentsTest.MethodImplContents
+[       OK ] AttributeTableContentsTest.MethodImplContents (0 ms)
+[ RUN      ] AttributeTableContentsTest.FieldVisibilityContents
+[       OK ] AttributeTableContentsTest.FieldVisibilityContents (0 ms)
+[ RUN      ] AttributeTableContentsTest.FieldAttributesContents
+[       OK ] AttributeTableContentsTest.FieldAttributesContents (0 ms)
+[ RUN      ] AttributeTableContentsTest.PropertyAttributesContents
+[       OK ] AttributeTableContentsTest.PropertyAttributesContents (0 ms)
+[ RUN      ] AttributeTableContentsTest.EventAttributesContents
+[       OK ] AttributeTableContentsTest.EventAttributesContents (0 ms)
+[ RUN      ] AttributeTableContentsTest.TypeVisibilityContents
+[       OK ] AttributeTableContentsTest.TypeVisibilityContents (0 ms)
+[ RUN      ] AttributeTableContentsTest.TypeLayoutContents
+[       OK ] AttributeTableContentsTest.TypeLayoutContents (0 ms)
+[ RUN      ] AttributeTableContentsTest.TypeStringFormatContents
+[       OK ] AttributeTableContentsTest.TypeStringFormatContents (0 ms)
+[ RUN      ] AttributeTableContentsTest.TypeAttributesContents
+[       OK ] AttributeTableContentsTest.TypeAttributesContents (0 ms)
+[----------] 13 tests from AttributeTableContentsTest (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 45 tests from 6 test suites ran. (2 ms total)
+[  PASSED  ] 45 tests.
