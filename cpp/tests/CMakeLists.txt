@@ -36,6 +36,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/ParameterListComparer_Test.cpp
     Decompiler/TypeSystem/ParameterizedTypeSubstitution_Test.cpp
     Decompiler/TypeSystem/SpecializedParameter_Test.cpp
+    Decompiler/TypeSystem/DefaultParameter_Test.cpp
     Decompiler/TypeSystem/ITypeTypeParameters_Test.cpp
     Decompiler/TypeSystem/SpecializedMember_Test.cpp
     Decompiler/TypeSystem/SpecializedField_Test.cpp

@@ -74,17 +74,19 @@
 //      shadows the namespace-scope `SymbolKind` enum in MSVC's complete-class lookup
 //      (the D372 crux; `ReferenceKind()` applies the same, via the inherited
 //      `IParameter::ReferenceKind`).
-//  (f) DEFERRED from the C# file: `ToString()` (the C# `DefaultParameter.ToString(this)`
-//      static helper is the shared formatter all `IParameter` impls delegate to; it
-//      lands with the `DefaultParameter` leaf, whose static `ToString(IParameter)` is
-//      the canonical parameter-signature renderer). The port's `IParameter` / `IVariable`
-//      / `ISymbol` carry no virtual `ToString` (the `DummyTypeParameter.ToString`
-//      plain-member precedent); the member is non-essential to the routing and omitted
-//      here to keep the leaf minimal.
+//  (f) The C# `public override string ToString() => DefaultParameter.ToString(this)`
+//      delegates to the static canonical parameter-signature renderer the
+//      `DefaultParameter` leaf carries (its `public static string ToString(IParameter)`;
+//      the member was deferred from this leaf until `DefaultParameter` landed -- it
+//      now delegates through the included `DefaultParameter.hpp`). The port's
+//      `IParameter` / `IVariable` / `ISymbol` carry no virtual `ToString` (the
+//      `DummyTypeParameter.ToString` plain-member precedent), so the member is a PLAIN
+//      member, not an override.
 
 #pragma once
 
 #include "Decompiler/TypeSystem/IParameter.hpp"
+#include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
 
 #include <memory>
 #include <utility>
@@ -186,6 +188,14 @@ public:
     // (the D372 crux).
     ::ILSpy::Decompiler::TypeSystem::SymbolKind SymbolKind() const override {
         return ::ILSpy::Decompiler::TypeSystem::SymbolKind::Parameter;
+    }
+
+    // The C# `public override string ToString() => DefaultParameter.ToString(this)` --
+    // the canonical parameter-signature renderer the `DefaultParameter` leaf carries
+    // (convention (f); a PLAIN member -- the port's symbol surface has no virtual
+    // `ToString`, the `DummyTypeParameter.ToString` plain-member precedent).
+    std::string ToString() const {
+        return DefaultParameter::ToString(*this);
     }
 
 private:
