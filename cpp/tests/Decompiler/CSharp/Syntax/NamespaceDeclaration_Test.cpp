@@ -44,6 +44,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/Syntax/IAstVisitor.hpp"
 #include "Decompiler/CSharp/Syntax/Identifier.hpp"
+#include "Decompiler/CSharp/Syntax/MemberType.hpp"
 #include "Decompiler/CSharp/Syntax/NamespaceDeclaration.hpp"
 #include "Decompiler/CSharp/Syntax/PatternMatching/INode.hpp"
 #include "Decompiler/CSharp/Syntax/PatternMatching/Match.hpp"
@@ -507,6 +508,63 @@ TEST(CSharp_NamespaceDeclaration, BuildQualifiedNameEmptyRightYieldsLeft) {
 
 TEST(CSharp_NamespaceDeclaration, BuildQualifiedNameBothEmptyYieldsEmpty) {
     EXPECT_EQ(NamespaceDeclaration::BuildQualifiedName("", ""), "");
+}
+
+// ---- The hand-written `(string name)` ctor + `ConstructType` -----------------
+// (NamespaceDeclaration.cs line ~103 + the private static `ConstructType` chain builder;
+// unblocked by the TypeSystemAstBuilder `ConvertNamespaceDeclaration` consumer.)
+
+// A single-part name builds the `SimpleType` head directly.
+TEST(CSharp_NamespaceDeclaration, StringCtorBuildsSimpleTypeForSinglePart) {
+    NamespaceDeclaration ns("System");
+    ASSERT_NE(ns.NamespaceName(), nullptr);
+    auto* simple = dynamic_cast<SimpleType*>(ns.NamespaceName());
+    ASSERT_NE(simple, nullptr);
+    EXPECT_EQ(simple->Identifier(), std::optional<std::string>("System"));
+}
+
+// A dotted name builds the `MemberType` chain: the LAST part is the outermost
+// member, the FIRST part the `SimpleType` head (the recursive `ConstructType`).
+TEST(CSharp_NamespaceDeclaration, StringCtorBuildsMemberTypeChainForDottedName) {
+    NamespaceDeclaration ns("System.Text");
+    ASSERT_NE(ns.NamespaceName(), nullptr);
+    auto* member = dynamic_cast<MemberType*>(ns.NamespaceName());
+    ASSERT_NE(member, nullptr);
+    EXPECT_EQ(member->MemberName(), "Text");
+    ASSERT_NE(member->Target(), nullptr);
+    auto* simple = dynamic_cast<SimpleType*>(member->Target());
+    ASSERT_NE(simple, nullptr);
+    EXPECT_EQ(simple->Identifier(), std::optional<std::string>("System"));
+}
+
+// The C# `"".Split('.')` yields the single empty part, so an empty name builds a
+// `SimpleType` whose empty identifier leaves the token null (`Identifier.CreateIfNotEmpty`).
+TEST(CSharp_NamespaceDeclaration, StringCtorEmptyNameYieldsSimpleTypeWithNullIdentifier) {
+    NamespaceDeclaration ns("");
+    ASSERT_NE(ns.NamespaceName(), nullptr);
+    auto* simple = dynamic_cast<SimpleType*>(ns.NamespaceName());
+    ASSERT_NE(simple, nullptr);
+    EXPECT_EQ(simple->Identifier(), std::nullopt);
+    EXPECT_EQ(simple->IdentifierToken(), nullptr);
+}
+
+// The C# `"A.".Split('.')` yields ["A", ""] -- a trailing empty member part.
+TEST(CSharp_NamespaceDeclaration, StringCtorTrailingDotYieldsEmptyMemberName) {
+    NamespaceDeclaration ns("A.");
+    ASSERT_NE(ns.NamespaceName(), nullptr);
+    auto* member = dynamic_cast<MemberType*>(ns.NamespaceName());
+    ASSERT_NE(member, nullptr);
+    EXPECT_EQ(member->MemberName(), "");
+    auto* simple = dynamic_cast<SimpleType*>(member->Target());
+    ASSERT_NE(simple, nullptr);
+    EXPECT_EQ(simple->Identifier(), std::optional<std::string>("A"));
+}
+
+// The generated `(AstType)` ctor is unaffected by the new `(string)` overload (a sentinel).
+TEST(CSharp_NamespaceDeclaration, AstTypeCtorUnaffectedByStringCtor) {
+    auto name = std::make_unique<SimpleType>("Foo");
+    NamespaceDeclaration ns(name.get());
+    EXPECT_EQ(ns.NamespaceName(), name.get());
 }
 
 } // namespace

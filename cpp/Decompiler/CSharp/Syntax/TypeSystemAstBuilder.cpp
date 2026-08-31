@@ -103,12 +103,15 @@
 #include "Decompiler/TypeSystem/NullableType.hpp"
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
+#include "Decompiler/TypeSystem/TypeParameterSubstitution.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
 #include "Decompiler/Util/CSharpPrimitiveCast.hpp"
 #include "Decompiler/Util/Decimal.hpp"
 #include "Attribute.hpp"
 #include "AttributeSection.hpp"
 #include "Constraint.hpp"
+#include "ExtensionDeclaration.hpp"
+#include "NamespaceDeclaration.hpp"
 #include "TypeParameterDeclaration.hpp"
 #include "VariableInitializer.hpp"
 #include "Statements/VariableDeclarationStatement.hpp"
@@ -3106,6 +3109,140 @@ EntityDeclaration* TypeSystemAstBuilder::ConvertTypeDefinition(
         }
     }
     return decl;
+}
+
+// ---------------------------------------------------------------------------
+// The "Convert Entity" dispatch entries (C# lines 1829-1901 + 2766-2769) --
+// see the header for the port conventions.
+// ---------------------------------------------------------------------------
+
+// The C# `public AstNode ConvertSymbol(ISymbol symbol)` (line 1829).
+AstNode* TypeSystemAstBuilder::ConvertSymbol(const TS::ISymbol& symbol) const {
+    switch (symbol.SymbolKind()) {
+        case TS::SymbolKind::Namespace:
+            // The C# `(INamespace)symbol` hard cast: the reference-form
+            // dynamic_cast throws std::bad_cast on a mismatch (the C#
+            // InvalidCastException analog; unreachable for a real symbol whose
+            // SymbolKind is authoritative).
+            return ConvertNamespaceDeclaration(dynamic_cast<const TS::INamespace&>(symbol));
+        case TS::SymbolKind::Variable:
+            return ConvertVariable(dynamic_cast<const TS::IVariable&>(symbol));
+        case TS::SymbolKind::Parameter:
+            return ConvertParameter(dynamic_cast<const TS::IParameter&>(symbol));
+        case TS::SymbolKind::TypeParameter:
+            return ConvertTypeParameter(dynamic_cast<const TS::ITypeParameter&>(symbol));
+        default: {
+            // The C# `symbol as IEntity` (null on a non-entity) ports to a
+            // pointer-form dynamic_cast.
+            const auto* entity = dynamic_cast<const TS::IEntity*>(&symbol);
+            if (entity != nullptr)
+                return ConvertEntity(*entity);
+            throw std::invalid_argument(
+                "Invalid value for SymbolKind: "
+                + std::to_string(static_cast<int>(symbol.SymbolKind())));
+        }
+    }
+}
+
+// The C# `public EntityDeclaration ConvertEntity(IEntity entity)` (line 1851).
+EntityDeclaration* TypeSystemAstBuilder::ConvertEntity(const TS::IEntity& entity) const {
+    switch (entity.SymbolKind()) {
+        case TS::SymbolKind::TypeDefinition:
+            return ConvertTypeDefinition(dynamic_cast<const TS::ITypeDefinition&>(entity));
+        case TS::SymbolKind::Field:
+            return ConvertField(dynamic_cast<const TS::IField&>(entity));
+        case TS::SymbolKind::Property:
+            return ConvertProperty(dynamic_cast<const TS::IProperty&>(entity));
+        case TS::SymbolKind::Indexer:
+            return ConvertIndexer(dynamic_cast<const TS::IProperty&>(entity));
+        case TS::SymbolKind::Event:
+            return ConvertEvent(dynamic_cast<const TS::IEvent&>(entity));
+        case TS::SymbolKind::Method:
+            return ConvertMethod(dynamic_cast<const TS::IMethod&>(entity));
+        case TS::SymbolKind::Operator:
+            return ConvertOperator(dynamic_cast<const TS::IMethod&>(entity));
+        case TS::SymbolKind::Constructor:
+            return ConvertConstructor(dynamic_cast<const TS::IMethod&>(entity));
+        case TS::SymbolKind::Destructor:
+            return ConvertDestructor(dynamic_cast<const TS::IMethod&>(entity));
+        case TS::SymbolKind::Accessor: {
+            const TS::IMethod& accessor = dynamic_cast<const TS::IMethod&>(entity);
+            // The C# `accessor.AccessorOwner is IProperty owner &&
+            // owner.IsParameterizedProperty()`: C# cannot represent the
+            // parameterized property itself, so its accessors are declared as
+            // ordinary methods.
+            const TS::IMember* owner = accessor.AccessorOwner();
+            const auto* propertyOwner = dynamic_cast<const TS::IProperty*>(owner);
+            if (propertyOwner != nullptr && TS::IsParameterizedProperty(*propertyOwner))
+                return ConvertMethod(accessor);
+            // The C# `accessor.AccessorOwner?.Accessibility ?? Accessibility.None`.
+            const TS::Accessibility ownerAccessibility =
+                owner != nullptr ? owner->Accessibility() : TS::Accessibility::None;
+            // The C# null-forgiving `!`: the accessor is non-null here, so
+            // ConvertAccessor returns a non-null node (its null return happens
+            // only for a null accessor parameter).
+            return ConvertAccessor(&accessor, accessor.AccessorKind(), ownerAccessibility, false);
+        }
+        default:
+            throw std::invalid_argument(
+                "Invalid value for SymbolKind: "
+                + std::to_string(static_cast<int>(entity.SymbolKind())));
+    }
+}
+
+// The C# `public EntityDeclaration ConvertExtension((IMethod MarkerMethod,
+// IReadOnlyList<ITypeParameter> TypeParameters) group)` (line 1890).
+EntityDeclaration* TypeSystemAstBuilder::ConvertExtension(const ExtensionGroup& group) const {
+    auto* ext = new ExtensionDeclaration();
+    // The C# `var subst = new TypeParameterSubstitution(group.TypeParameters, [])` -- the
+    // group's type parameters as the CLASS type arguments (the marker method's parameter
+    // types reference container-owned type parameters; the specialization re-points them
+    // at the group's freshly declared ones) and a PRESENT-but-EMPTY method list (every
+    // method-owned index is out of range, faithfully matching the C# empty-array
+    // `IReadOnlyList<IType>`). The owning handles for the substitution list come from the
+    // non-const shared_from_this + const_pointer_cast pair (the D529 convention -- every
+    // type parameter is shared-managed).
+    std::vector<TS::ITypePtr> classTypeArguments;
+    classTypeArguments.reserve(group.second.size());
+    for (const TS::ITypeParameter* tp : group.second) {
+        if (tp == nullptr)
+            continue; // the D516 null-entry guard
+        classTypeArguments.push_back(
+            std::const_pointer_cast<TS::IType>(tp->shared_from_this()));
+    }
+    const TS::TypeParameterSubstitution substitution(std::move(classTypeArguments),
+                                                     std::vector<TS::ITypePtr>{});
+    for (const TS::ITypeParameter* tp : group.second) {
+        if (tp == nullptr)
+            continue; // the D516 null-entry guard
+        ext->TypeParameters().Add(ConvertTypeParameter(*tp));
+    }
+    // The C# `group.MarkerMethod.Specialize(subst).Parameters.Single()` -- the
+    // `Single()` throws InvalidOperationException on anything but exactly one entry,
+    // ported as std::runtime_error (the CreateResolveResult InvalidOperationException
+    // precedent).
+    const TS::IMethod* specialized = group.first->Specialize(&substitution);
+    const std::vector<const TS::IParameter*> parameters = specialized->Parameters();
+    if (parameters.size() != 1)
+        throw std::runtime_error(
+            "ConvertExtension: the marker method must have exactly one parameter");
+    ext->ReceiverParameters().Add(ConvertParameter(*parameters[0]));
+    // The C# `.OfType<Constraint>()` over the nullable ConvertTypeParameterConstraint
+    // results: every result is a Constraint or null, so the filter is the null check.
+    for (const TS::ITypeParameter* tp : group.second) {
+        if (tp == nullptr)
+            continue; // the D516 null-entry guard
+        Constraint* constraint = ConvertTypeParameterConstraint(*tp);
+        if (constraint != nullptr)
+            ext->Constraints().Add(constraint);
+    }
+    return ext;
+}
+
+// The C# `NamespaceDeclaration ConvertNamespaceDeclaration(INamespace ns)` (line 2766).
+NamespaceDeclaration* TypeSystemAstBuilder::ConvertNamespaceDeclaration(
+    const TS::INamespace& ns) const {
+    return new NamespaceDeclaration(ns.FullName());
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

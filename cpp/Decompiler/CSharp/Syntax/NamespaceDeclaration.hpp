@@ -85,15 +85,17 @@
 // `VariableDeclarationStatement` D270 hand-written-ctor-using-`Add` precedent -- a convenience
 // whose dependencies are all ported).
 //
-// The computed `Name`/`FullName`/`Identifiers` reads, the `ConstructType` helper, and the
-// hand-written `(string name)` ctor (which calls `this.Name = name`, whose setter uses
-// `ConstructType`) are DEFERRED: the `Name` getter consumes the D289-deferred
-// `UsingDeclaration.ConstructNamespace` (which consumes the D236-deferred `AstType.Create`
-// factory); they are output/resolver-stage behaviour. The `BuildQualifiedName` static has
-// LANDED (the CSharp/TypeSystem `UsingScope.DummyNamespace.FullName` consumer unblocked
-// it; a pure string join with no dependencies). A `NamespaceDeclaration` is still built
-// via the empty or `(AstType)` ctor + `IsFileScoped(...)` + `Members().Add(...)` (or
-// `AddMember`) until `ConstructType`/`ConstructNamespace`/`AddRange` land.
+// The computed `Name`/`FullName`/`Identifiers` READS are DEFERRED: the `Name` getter consumes
+// the D289-deferred `UsingDeclaration.ConstructNamespace` (which consumes the D236-deferred
+// `AstType.Create` factory); they are output/resolver-stage behaviour. The hand-written
+// `(string name)` ctor and its private `ConstructType` chain-builder have LANDED (the
+// TypeSystemAstBuilder `ConvertNamespaceDeclaration` consumer unblocked them): the ctor assigns
+// through the C# `Name` SETTER's body (the split-on-dots `ConstructType` recursion), while the
+// getter half of the `Name` property stays deferred with `ConstructNamespace` -- so the
+// property itself is not exposed yet. The `BuildQualifiedName` static has LANDED (the
+// CSharp/TypeSystem `UsingScope.DummyNamespace.FullName` consumer unblocked it; a pure string
+// join with no dependencies). A `NamespaceDeclaration` is built via the empty, `(AstType)`, or
+// `(string)` ctor + `IsFileScoped(...)` + `Members().Add(...)` (or `AddMember`).
 //
 // Per PORT_PLAN.md section 5.2 / decision D1 the concrete node is hand-translated from the
 // generated output rather than regenerated. The generated `AcceptVisitor` calls
@@ -158,11 +160,17 @@
 #include "Decompiler/CSharp/Syntax/AstNodeCollection.hpp"
 #include "Decompiler/CSharp/Syntax/IAstVisitor.hpp"
 #include "Decompiler/CSharp/Syntax/IAstVisitorBool.hpp"
+#include "Decompiler/CSharp/Syntax/MemberType.hpp"
+#include "Decompiler/CSharp/Syntax/SimpleType.hpp"
 #include "Decompiler/CSharp/Syntax/Slots.hpp"
 
 #include "Decompiler/CSharp/Syntax/PatternMatching/Match.hpp"
 
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace ILSpy::Decompiler::CSharp::Syntax {
 
@@ -194,6 +202,32 @@ public:
     // conversion (the `Constraint` D283 precedent).
     explicit NamespaceDeclaration(AstType* namespaceName) : NamespaceDeclaration() {
         NamespaceName(namespaceName);
+    }
+
+    // The hand-written `public NamespaceDeclaration(string name)` (NamespaceDeclaration.cs line
+    // 105) -- the split-on-dots name ctor: `this.Name = name` in the C#, whose setter body IS the
+    // split + the private static `ConstructType` chain-builder below (the GETTER half of the
+    // `Name` property consumes the D289-deferred `UsingDeclaration.ConstructNamespace`, so the
+    // property itself stays unexposed and the ctor assigns through the setter's body directly --
+    // behaviorally identical, the C# ctor delegates to the same statements). The C#
+    // `value.Split('.')` semantics are reproduced exactly: the empty string yields the single
+    // empty part (a `SimpleType` with a null identifier token), and a trailing `.` yields a
+    // trailing empty part. `explicit` (a single-argument ctor is a converting ctor by default;
+    // `std::string` and `AstType*` are distinct non-convertible types, so the overload with the
+    // `(AstType)` ctor is unambiguous).
+    explicit NamespaceDeclaration(std::string_view name) : NamespaceDeclaration() {
+        std::vector<std::string> parts;
+        std::string part;
+        for (const char c : name) {
+            if (c == '.') {
+                parts.push_back(std::move(part));
+                part.clear();
+            } else {
+                part.push_back(c);
+            }
+        }
+        parts.push_back(std::move(part));
+        NamespaceName(ConstructType(parts, static_cast<int>(parts.size()) - 1));
     }
 
     // ---- The `IsFileScoped` bool scalar (a plain property, not a `[Slot]`) -----------------
@@ -401,6 +435,26 @@ public:
     }
 
 private:
+    // The C# `static AstType ConstructType(string[] arr, int i)` (NamespaceDeclaration.cs line 61)
+    // -- the recursive dotted-name chain builder the `Name` setter (and therefore the
+    // `(string)` ctor above) uses: index 0 yields the `SimpleType` head; a positive index wraps
+    // the predecessor chain in a `MemberType` carrying `arr[i]` as the member name. The C#
+    // `ArgumentOutOfRangeException` on an out-of-range `i` ports to `std::out_of_range` (the
+    // `GetChild` precedent); the C# reference-type `AstType` return ports to a raw `new`-ed
+    // pointer (the D223 non-owning model -- the caller attaches the node through the
+    // `NamespaceName` slot setter, which re-parents it). The split array arrives by const
+    // reference (the C# `string[]`); the recursion is tail-shaped but kept verbatim for
+    // faithfulness. NOT a `Name`-setter member: the C# declares it as a separate private static
+    // on the class, so the port does too.
+    static AstType* ConstructType(const std::vector<std::string>& arr, int i) {
+        if (i < 0 || i >= static_cast<int>(arr.size()))
+            throw std::out_of_range("NamespaceDeclaration::ConstructType");
+        if (i == 0)
+            return new SimpleType(arr[static_cast<std::size_t>(i)]);
+        return new MemberType(ConstructType(arr, i - 1),
+                              arr[static_cast<std::size_t>(i)]);
+    }
+
     // The backing fields. `isFileScoped_` is the plain bool scalar (default false -- the block-scoped
     // form); `namespaceName_` is null until the name is set (a required slot -- `CheckInvariant`
     // asserts it is filled); `members_` is the always-present collection member (empty until the

@@ -58,10 +58,18 @@
 // type-definition renderer trio (the base-list nameability check
 // BaseTypeAccessibleFrom + TypeDefinitionNameableInBaseList, the delegate
 // renderer ConvertDelegate, and the type-definition renderer
-// ConvertTypeDefinition, C# lines 1900-2141) is landed; the remaining
-// `Convert*` instance methods (the ConvertSymbol / ConvertEntity /
-// ConvertExtension dispatch entries plus ConvertNamespaceDeclaration) follow
-// in later slices, consuming the members below as they grow.
+// ConvertTypeDefinition, C# lines 1900-2141) is landed, and the dispatch entries
+// (ConvertSymbol + ConvertEntity + ConvertExtension plus the private
+// ConvertNamespaceDeclaration, C# lines 1829-1901 + 2766-2769 -- the public
+// whole-symbol / per-entity / C#-14-extension-block entries composing every
+// renderer above, with the NamespaceDeclaration split-on-dots `(string)` ctor
+// the namespace arm constructs through) are landed. With them the class
+// surface is COMPLETE except the deferred TryExtractExpression arm of
+// ConvertFloatingPointLiteral (the Math.PI / Math.E rational-multiple
+// extraction, gated on unported FindType(typeof Math) dependencies -- the C#
+// falls through to the plain literal when the extraction yields null, so the
+// deferral is observationally identical except for PI/E multiples with long
+// decimal forms).
 //
 // ModifierFromAccessibility (TypeSystemAstBuilder.cs line 2497) is the first such
 // helper: a pure switch on Accessibility (the D373 leaf) that maps a symbol's
@@ -124,6 +132,7 @@ namespace ILSpy::Decompiler::CSharp::Resolver { class CSharpResolver; }
 // a qualified namespace-definition inside another namespace declares a fresh
 // shadow chain on MSVC (the iteration-94 UsingScope trap).
 namespace ILSpy::Decompiler::TypeSystem { class FullTypeName; }
+namespace ILSpy::Decompiler::TypeSystem { class INamespace; }
 namespace ILSpy::Decompiler::TypeSystem { class IParameter; }
 namespace ILSpy::Decompiler::TypeSystem { class ITypeParameter; }
 namespace ILSpy::Decompiler::TypeSystem { class IVariable; }
@@ -136,7 +145,9 @@ class Constraint;
 class ConstructorDeclaration;
 class DelegateDeclaration;
 class DestructorDeclaration;
+class ExtensionDeclaration;
 class MethodDeclaration;
+class NamespaceDeclaration;
 class OperatorDeclaration;
 class ParameterDeclaration;
 class TypeDeclaration;
@@ -1757,6 +1768,75 @@ public:
     // concrete node types.
     EntityDeclaration* ConvertTypeDefinition(
         const TS::ITypeDefinition& typeDefinition) const;
+
+    // -- The "Convert Entity" dispatch entries (C# lines 1829-1901 + 2766-2769) --
+    //
+    // The three public entries every consumer (CSharpDecompiler for the whole
+    // symbol surface, CSharpAmbience for a single member) reaches the renderers
+    // through, plus the private namespace helper `ConvertSymbol`'s `Namespace`
+    // arm calls. `ConvertEntity` is public in the C#; `ConvertSymbol` /
+    // `ConvertExtension` are public too; `ConvertNamespaceDeclaration` is
+    // private -- widened to public for direct TDD (the `ConvertTypeDefinition`
+    // convention, its only caller landing in the same slice). Every method is
+    // `const` (they read only the configuration properties and dispatch to the
+    // already-landed renderers). The returned nodes are raw `new`-ed pointers
+    // (the D223 non-owning model; the caller owns them).
+
+    // The C# `public AstNode ConvertSymbol(ISymbol symbol)` (line 1829) -- the
+    // whole-symbol dispatch: a Namespace renders as a `NamespaceDeclaration`,
+    // a Variable / Parameter / TypeParameter through the corresponding landed
+    // renderer, an `IEntity` through `ConvertEntity` (the RTTI `symbol as IEntity`
+    // ports to a `dynamic_cast`), and anything else throws `ArgumentException`
+    // (ported as `std::invalid_argument`). The per-arm C# hard casts
+    // (`(INamespace)symbol` &c.) port to the REFERENCE-form `dynamic_cast`
+    // (throws `std::bad_cast` on a mismatch -- the C# `InvalidCastException`
+    // analog; a mismatch is impossible for a real symbol whose `SymbolKind` is
+    // authoritative, so only a degenerate stub can reach it). The C# `ArgumentNullException`
+    // is structurally unreachable through the reference parameter (the D374
+    // convention).
+    AstNode* ConvertSymbol(const TS::ISymbol& symbol) const;
+
+    // The C# `public EntityDeclaration ConvertEntity(IEntity entity)` (line 1851)
+    // -- the per-`SymbolKind` entity dispatch over the landed renderers, with the
+    // Accessor special case: an accessor of a PARAMETERIZED property renders as
+    // an ordinary method (C# cannot represent the parameterized property itself),
+    // every other accessor through `ConvertAccessor` with the owner's
+    // accessibility (`Accessibility.None` when the `AccessorOwner` is null --
+    // the C# `?.` + `??` chain). The invalid default arm throws `ArgumentException`
+    // (ported as `std::invalid_argument`); the per-arm hard casts port to the
+    // reference-form `dynamic_cast` (`std::bad_cast`, the ConvertSymbol
+    // convention).
+    EntityDeclaration* ConvertEntity(const TS::IEntity& entity) const;
+
+    // The C# element type of the `ConvertExtension` tuple parameter: the marker
+    // method plus the extension's declared type parameters. The C# ValueTuple
+    // `(IMethod MarkerMethod, IReadOnlyList<ITypeParameter> TypeParameters)` ports
+    // to a `std::pair` (the `TryGetSpecialConstant` tuple convention; `first` = the
+    // non-owning `MarkerMethod`, `second` = the non-owning type-parameter list in
+    // the `IMethod::TypeParameters()` snapshot shape).
+    using ExtensionGroup = std::pair<const TS::IMethod*, std::vector<const TS::ITypeParameter*>>;
+
+    // The C# `public EntityDeclaration ConvertExtension((IMethod MarkerMethod,
+    // IReadOnlyList<ITypeParameter> TypeParameters) group)` (line 1890) -- the C# 14
+    // `extension` declaration renderer: the group's type parameters as the
+    // `TypeParameters` collection (through `ConvertTypeParameter`), the marker
+    // method's SINGLE specialized parameter as the `ReceiverParameters` entry
+    // (specialized through `new TypeParameterSubstitution(group.TypeParameters, [])`
+    // -- the group's type parameters as the CLASS type arguments, an empty METHOD
+    // list: the marker method's parameter types reference container-owned type
+    // parameters, and the specialization re-points them at the group's freshly
+    // declared ones; `.Single()` throws on anything but exactly one entry, ported
+    // as `std::runtime_error` -- the `CreateResolveResult` InvalidOperationException
+    // precedent), and each type parameter's `ConvertTypeParameterConstraint`
+    // result (nulls filtered, the C# `.OfType<Constraint>()`) into `Constraints`.
+    EntityDeclaration* ConvertExtension(const ExtensionGroup& group) const;
+
+    // The C# `NamespaceDeclaration ConvertNamespaceDeclaration(INamespace ns)` (line
+    // 2766) -- the namespace arm of `ConvertSymbol`: a fresh `NamespaceDeclaration(ns.FullName)`
+    // (the split-on-dots `(string)` ctor on the node, the C# `Name` setter's chain
+    // construction). Widened to public for direct TDD (the ConvertTypeDefinition
+    // convention; the `ConvertSymbol` caller lands in the same slice).
+    NamespaceDeclaration* ConvertNamespaceDeclaration(const TS::INamespace& ns) const;
 
 private:
     // The C# `private void AddTypeAnnotation(AstType astType, IType type)` (line 278)
