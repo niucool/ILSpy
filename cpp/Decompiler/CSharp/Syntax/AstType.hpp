@@ -43,14 +43,18 @@
 // re-declares it `virtual AstType* Clone() const override = 0` so a call through an `AstType*`
 // returns an `AstType*` (the typed return the C# `new AstType Clone()` gives), and a concrete
 // type node MUST override it (the redeclaration makes it pure, so the base throwing body is
-// unreachable through the type hierarchy). The convenience builders/queries are deferred:
-// `IsVar`/`GetNameLookupMode` reference not-yet-ported nodes (`SimpleType`,
-// `UsingDeclaration`/`UsingAliasDeclaration`/`TypeDeclaration`/`Constraint`) and the
-// `NameLookupMode` enum; `MakePointerType`/`MakeArrayType`/`MakeNullableType`/`MakeRefType`/
-// `MemberType`/`Create` construct `ComposedType`/`MemberType`/`SimpleType` (not yet ported).
-// They are consumed only by the resolver/output stage (`TypeSystemAstBuilder` and friends, the
-// unported section 5.3 long pole), so they land with that stage -- the D229-D235
-// behavior-consumed-by-the-unported-stage deferral.
+// unreachable through the type hierarchy). The convenience builders/queries were deferred with
+// the D229-D235 stage (the resolver/output stage that consumes them was unported); with the
+// CSharpResolver chain complete (the `TypeSystemAstBuilder` skeleton landed, its `ConvertType`
+// path now consuming the builders), the `Make*` builders land here:
+// `MakePointerType`/`MakeArrayType`/`MakeNullableType`/`MakeRefType` (AstType.cs lines 75-105)
+// construct `ComposedType` wrappers, so their bodies are out-of-line in `AstType.cpp` (a
+// `ComposedType.hpp` include from this header would be circular: `ComposedType` derives
+// `AstType`). `IsVar`/`GetNameLookupMode` remain deferred (they reference not-yet-ported
+// nodes -- `UsingDeclaration`/`UsingAliasDeclaration`/`TypeDeclaration`/`Constraint` -- and
+// the `NameLookupMode`-consuming name-lookup stage), as does `MemberType` (the
+// type-argument-collection convenience ctor, an `AddRange` consumer) and the pattern
+// placeholder.
 
 #ifndef ILSPY_DECOMPILER_CSHARP_SYNTAX_ASTTYPE_HPP
 #define ILSPY_DECOMPILER_CSHARP_SYNTAX_ASTTYPE_HPP
@@ -80,6 +84,61 @@ public:
     // concrete `AstType` overrides the virtual `Clone`). Covariant: `AstType*` derives from
     // `AstNode*`, so this is a valid override of `AstNode::Clone()`.
     AstType* Clone() const override = 0;
+
+    // -----------------------------------------------------------------------
+    // The `Make*` builders (the hand-written `AstType` partial, AstType.cs lines 75-105) --
+    // the type-reference composition API the `TypeSystemAstBuilder.ConvertType` path
+    // consumes to wrap a type reference in a pointer/array/nullable/ref `ComposedType`.
+    // Each builder wraps `*this` in a fresh `ComposedType` (`BaseType = this`) and applies
+    // the modifier; the `ComposedType` overrides (ComposedType.cs lines 99-123) then
+    // EXTEND an existing composed node in place instead of re-wrapping (the
+    // `T*` + `*` -> `T**` / `T[]` + `ref` cases). Virtual so that in-place extension
+    // dispatches through an `AstType*` static type; `MakeNullableType` is NON-virtual
+    // in the C# (no `ComposedType` override exists for it: a `?` always re-wraps).
+    //
+    // The C# `AstType` reference return (a GC-owned node) ports to a raw `new`-ed
+    // pointer (the D223 non-owning leak model, the `Identifier::Create` factory
+    // precedent): the caller attaches the returned node to the tree via a slot setter
+    // (which re-parents but does not take ownership). Non-const: the `ComposedType`
+    // overrides mutate `this` in place (`PointerRank++`, `HasRefSpecifier = true`, the
+    // `ArraySpecifiers` insert), faithfully mirroring the C# instance methods.
+    //
+    // The bodies are defined out-of-line in `AstType.cpp` (which includes
+    // `ComposedType.hpp`): this header is included by `ComposedType.hpp` (the derivation),
+    // so it cannot include it back.
+    // -----------------------------------------------------------------------
+
+    // The C# `public virtual AstType MakePointerType()` (AstType.cs line 75): creates a
+    // pointer type by nesting this type in a fresh `ComposedType` and dispatching to the
+    // (virtual) `ComposedType.MakePointerType`, which extends the fresh wrapper's
+    // `PointerRank` to 1. On a `ComposedType` receiver without array specifiers the
+    // override extends the existing pointer run IN PLACE (`T*` + `*` -> the same node,
+    // `PointerRank` 2); with array specifiers the override falls back to this base
+    // (`T[]` + `*` -> a fresh wrapper around the array type).
+    virtual AstType* MakePointerType();
+
+    // The C# `public virtual AstType MakeArrayType(int rank = 1)` (AstType.cs line 85):
+    // creates an array type by nesting this type in a fresh `ComposedType` and
+    // dispatching to the (virtual) `ComposedType.MakeArrayType`, which inserts one rank
+    // specifier of the given rank. On a `ComposedType` receiver the override inserts the
+    // new specifier BEFORE the first existing one, so `T[].MakeArrayType(2)` renders
+    // `T[,][]` (the new rank is the innermost). The default rank is 1 (the C# `int rank
+    // = 1` default argument, declared here on the base only -- a default on the override
+    // would re-define it).
+    virtual AstType* MakeArrayType(int rank = 1);
+
+    // The C# `public AstType MakeNullableType()` (AstType.cs line 93): creates a
+    // nullable type by nesting this type in a fresh `ComposedType` with
+    // `HasNullableSpecifier = true`. NON-virtual in the C# (no `ComposedType` override
+    // exists): a `?` always re-wraps, never extends in place -- `T*` + `?` is a fresh
+    // outer node around the pointer node.
+    AstType* MakeNullableType();
+
+    // The C# `public virtual AstType MakeRefType()` (AstType.cs line 101): creates a C# 7
+    // ref type by nesting this type in a fresh `ComposedType` with `HasRefSpecifier =
+    // true`. On a `ComposedType` receiver the override sets the flag IN PLACE and
+    // returns the same node.
+    virtual AstType* MakeRefType();
 };
 
 } // namespace ILSpy::Decompiler::CSharp::Syntax

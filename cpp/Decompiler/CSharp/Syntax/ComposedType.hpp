@@ -93,11 +93,14 @@
 // empty ctor is the only portable ctor; a node is built via the empty ctor + `Attributes().Add`
 // / `BaseType(...)` / `ArraySpecifiers().Add`. `ComposedType.cs` declares NO hand-written ctors.
 //
-// `ToString(CSharpFormattingOptions)` and the `Make*` builders (`MakePointerType`/
-// `MakeArrayType`/`MakeRefType`) are DEFERRED (output/resolver stage; the ported `AstType` base
-// does not declare them, so there is nothing to override). The hand-written `CheckInvariant`
-// override (asserts `PointerRank >= 0` after the inherited base check) is PORTED -- the second
-// ported scalar-invariant override (the `ArraySpecifier.Dimensions >= 1` precedent).
+// `ToString(CSharpFormattingOptions)` remains DEFERRED (output stage). The `Make*` builder
+// overrides (`MakePointerType`/`MakeArrayType`/`MakeRefType`, ComposedType.cs lines 99-123)
+// ARE PORTED (in the class body, after the `ArraySpecifiers` accessor): they extend a
+// composed node IN PLACE (the base builders in `AstType.hpp`/`AstType.cpp` wrap a
+// non-composed receiver), and the `TypeSystemAstBuilder.ConvertType` path consumes them.
+// The hand-written `CheckInvariant` override (asserts `PointerRank >= 0` after the inherited
+// base check) is PORTED -- the second ported scalar-invariant override (the
+// `ArraySpecifier.Dimensions >= 1` precedent).
 
 #ifndef ILSPY_DECOMPILER_CSHARP_SYNTAX_COMPOSEDTYPE_HPP
 #define ILSPY_DECOMPILER_CSHARP_SYNTAX_COMPOSEDTYPE_HPP
@@ -207,6 +210,48 @@ public:
     // off).
     AstNodeCollectionT<ArraySpecifier>& ArraySpecifiers() { return arraySpecifiers_; }
     const AstNodeCollectionT<ArraySpecifier>& ArraySpecifiers() const { return arraySpecifiers_; }
+
+    // ---- The `Make*` builder overrides (ComposedType.cs lines 99-123) ------------------
+    // The in-place variants of the `AstType` `Make*` builders (declared in `AstType.hpp`,
+    // defined in `AstType.cpp`): a composed receiver EXTENDS itself rather than being
+    // re-wrapped. Each override corresponds to a C# `override` on the hand-written
+    // `ComposedType` partial; there is NO `MakeNullableType` override (the C# declares it
+    // non-virtual on `AstType`, so a `?` always re-wraps).
+
+    // The C# `public override AstType MakePointerType()` (ComposedType.cs line 99): when
+    // this composed type carries NO array specifiers the pointer run extends IN PLACE
+    // (`PointerRank++`, returning `this`: `T*` + `*` -> the same node with `PointerRank` 2);
+    // when it DOES carry array specifiers the base path runs instead (a fresh wrapper around
+    // the array type: `T[]` + `*` -> `ComposedType { BaseType = T[], PointerRank = 1 }`) -- a
+    // pointer to an array is never rendered as one node with both a `*` and rank specifiers.
+    AstType* MakePointerType() override {
+        if (arraySpecifiers_.Count() > 0) {
+            return AstType::MakePointerType();
+        }
+        PointerRank(pointerRank_ + 1);
+        return this;
+    }
+
+    // The C# `public override AstType MakeArrayType(int dimensions)` (ComposedType.cs line
+    // 112): inserts a new rank specifier BEFORE the first existing one (a null
+    // `FirstOrDefault` appends: the C# `InsertChildBefore(FirstOrDefault(), ...)`, whose
+    // null-sibling case is an append), so `T[].MakeArrayType(2)` renders `T[,][]` -- the new
+    // rank is the innermost. Returns `this` (the insert mutates the specifier collection in
+    // place).
+    AstType* MakeArrayType(int dimensions) override {
+        arraySpecifiers_.InsertBefore(
+            arraySpecifiers_.Count() > 0 ? arraySpecifiers_.At(0) : nullptr,
+            new ArraySpecifier(dimensions));
+        return this;
+    }
+
+    // The C# `public override AstType MakeRefType()` (ComposedType.cs line 118): sets the
+    // `ref` specifier IN PLACE on this composed node and returns `this` (the base builder
+    // would wrap a non-composed receiver in a fresh node).
+    AstType* MakeRefType() override {
+        HasRefSpecifier(true);
+        return this;
+    }
 
     // ---- The per-node slot statics (pointing at the shared `Slots` kinds) -------------
     // The `AttributesSlot` (a `CSharpSlotInfoT<AttributeSection>` pointing at
