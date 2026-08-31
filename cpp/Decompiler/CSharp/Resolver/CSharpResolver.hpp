@@ -679,6 +679,116 @@ public:
     std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveExternAlias(
         const std::string& alias) const;
 
+    // ---- Extension methods --------------------------------------------------------------------
+    // (The `GetExtensionMethods` region, CSharpResolver.cs lines 2018-2243: the two
+    // public `GetExtensionMethods` filter entries (lines 2036/2065), the two static
+    // `IsEligibleExtensionMethod` eligibility checks (lines 2123/2133), the private
+    // `GetAllExtensionMethods` scope-chain walk (the `UsingScope.AllExtensionMethods`
+    // LazyInit memoization field the iteration-94 pair landed), and the private
+    // `GetExtensionMethods(MemberLookup, INamespace)` namespace scan. The region is
+    // the direct prerequisite for the deferred `ResolveMemberAccess` arm (line 1834:
+    // the `UnknownMemberResolveResult` extension-method fallback) and the
+    // `ResolveInvocation` region's extension-method resolution. Every dependency is
+    // already ported: `CreateMemberLookup` (this region above), `MemberLookup::
+    // IsAccessible`, `ITypeDefinition::IsStatic`/`HasExtensions`/`Methods`, `IMethod::
+    // IsExtensionMethod`, `IMember::Specialize`, `Detail::InferTypeArguments` (the
+    // TypeInference engine), `Detail::ValidateConstraints`, the cached public
+    // `CSharpConversions::ImplicitConversion(IType, IType)`, and the `Conversion`
+    // flag surface.)
+
+    // The C# `public List<List<IMethod>> GetExtensionMethods(string name = null,
+    // IReadOnlyList<IType> typeArguments = null)` (line 2036) -- the no-target thin
+    // delegate ("all extension methods in the current context", eligibility-free since
+    // `IsEligibleExtensionMethod` returns true for a null target). The C# nullable
+    // `name`/`typeArguments` default-arguments port to `std::optional` parameters
+    // (`nullopt` is the C# `null`, a present value is the non-null argument); the C#
+    // `List<List<IMethod>>` ports to a `std::vector` of groups of NON-OWNING method
+    // pointers (the `UsingScope::AllExtensionMethods` element convention -- the
+    // compilation owns the methods, the caller holds raw handles).
+    std::vector<std::vector<const ILSpy::Decompiler::TypeSystem::IMethod*>>
+    GetExtensionMethods(
+        const std::optional<std::string>& name = std::nullopt,
+        const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& typeArguments
+        = std::nullopt) const;
+
+    // The C# `public List<List<IMethod>> GetExtensionMethods(IType targetType, string
+    // name = null, IReadOnlyList<IType> typeArguments = null, bool
+    // substituteInferredTypes = false)` (line 2065) -- the extension-method filter:
+    // every group from `GetAllExtensionMethods` (grouped by using scope, innermost
+    // first), filtered per method by name, accessibility, and `IsEligibleExtensionMethod`
+    // (against the `this`-argument target type). A NON-EMPTY `typeArguments` list
+    // re-specializes every arity-matching method with the explicit arguments and checks
+    // the eligibility of the SPECIALIZED form (no inference); the empty/null shape runs
+    // inference (`useTypeInference: true`) and, with `substituteInferredTypes`, stores
+    // the method specialized over the INFERRED arguments. The C# nullable `targetType`
+    // ports to a nullable pointer (a null target is eligible for every method).
+    std::vector<std::vector<const ILSpy::Decompiler::TypeSystem::IMethod*>>
+    GetExtensionMethods(
+        const ILSpy::Decompiler::TypeSystem::IType* targetType,
+        const std::optional<std::string>& name,
+        const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& typeArguments,
+        bool substituteInferredTypes) const;
+
+    // The C# `public static bool IsEligibleExtensionMethod(IType targetType, IMethod
+    // method, bool useTypeInference, out IType[] outInferredTypes)` (line 2123) -- the
+    // public static entry: resolves the compilation from the METHOD's own compilation
+    // and the `CSharpConversions` via `CSharpConversions::Get`. The C# `out IType[]
+    // outInferredTypes` (null unless at least one type argument was inferred) ports to
+    // an `std::optional<std::vector<ITypePtr>>&` out-param reset to `nullopt` at the top
+    // (the TaskType::IsCustomTask out-param convention). The two C# `ArgumentNullException`
+    // guards compile out (the `IMethod&` reference cannot bind to null, the D374
+    // convention; the null `targetType` is a documented ELIGIBLE shape, not an error).
+    static bool IsEligibleExtensionMethod(
+        const ILSpy::Decompiler::TypeSystem::IType* targetType,
+        const ILSpy::Decompiler::TypeSystem::IMethod& method,
+        bool useTypeInference,
+        std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& outInferredTypes);
+
+    // The C# `static bool IsEligibleExtensionMethod(ICompilation compilation,
+    // CSharpConversions conversions, IType targetType, IMethod method, bool
+    // useTypeInference, out IType[] outInferredTypes)` (line 2133) -- the eligibility
+    // body: the `this`-parameter type (with the `this in`/`this ref` ByReference
+    // unwrap), the generic-method type inference over the single target-type argument
+    // (a fresh `TypeInference` with the CSharp4 default algorithm, the inferred types
+    // substituting the method type parameters in the final `ImplicitConversion`), the
+    // per-inferred-argument constraint validation, and the conversion verdict (valid AND
+    // identity/reference/boxing/implicit-span). Private in the C#; PUBLIC in the port
+    // for direct TDD (the TryConvert widening convention). The C# `inferredTypes[i] =
+    // method.TypeParameters[i]` fix-up leaves the UNINFERRED positions as the method's
+    // own type parameters (the substitution keeps them intact); the C# substitution
+    // aliases the `inferredTypes` ARRAY (the fix-ups are visible to every later use), so
+    // the port re-constructs the substitution at each use from the vector's CURRENT
+    // state -- reproducing the aliasing exactly.
+    static bool IsEligibleExtensionMethod(
+        const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+        CSharpConversions& conversions,
+        const ILSpy::Decompiler::TypeSystem::IType* targetType,
+        const ILSpy::Decompiler::TypeSystem::IMethod& method,
+        bool useTypeInference,
+        std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& outInferredTypes);
+
+    // The C# `IList<List<IMethod>> GetAllExtensionMethods(MemberLookup lookup)` (line
+    // 2188) -- ALL extension methods available in the current using scope (grouped by
+    // scope, innermost first, INCLUDING inaccessible methods): the memoized
+    // `UsingScope.AllExtensionMethods` LazyInit field when already computed, else the
+    // scope-chain walk (the scope's own namespace, then its DISTINCT imported
+    // namespaces) stored back into the field (the `LazyInit.GetOrSet` first-writer-wins
+    // contract). A resolver with NO current using scope yields the shared empty list.
+    // The C# `IList<List<IMethod>>` return ports to the field's own shared-handle type
+    // (the memoized handle IS the returned value).
+    std::shared_ptr<std::vector<std::vector<const ILSpy::Decompiler::TypeSystem::IMethod*>>>
+    GetAllExtensionMethods(const MemberLookup& lookup) const;
+
+    // The C# `IEnumerable<IMethod> GetExtensionMethods(MemberLookup lookup, INamespace
+    // ns)` (line 2213) -- the per-namespace scan: the namespace's types filtered by
+    // `IsStatic && HasExtensions && TypeParameters.Count == 0 && IsAccessible`, then
+    // their `IsExtensionMethod` methods. Private in the C#; PUBLIC in the port for
+    // direct TDD (the TryConvert widening convention). The C# `IEnumerable<IMethod>`
+    // ports to a non-owning pointer snapshot (the `INamespace::Types` convention).
+    std::vector<const ILSpy::Decompiler::TypeSystem::IMethod*> GetExtensionMethods(
+        const MemberLookup& lookup,
+        const ILSpy::Decompiler::TypeSystem::INamespace& ns) const;
+
     // ---- Numeric promotion -------------------------------------------------------------------
     // (The unary/binary numeric-promotion region -- CSharpResolver.cs lines 536-561
     // (`UnaryNumericPromotion`, C# spec draft-v11 section 12.4.7.2) plus lines 1055-1230

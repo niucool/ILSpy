@@ -32,6 +32,8 @@
 #include "Decompiler/CSharp/Resolver/DynamicInvocationResolveResult.hpp"
 #include "Decompiler/CSharp/Resolver/DynamicMemberResolveResult.hpp"
 #include "Decompiler/CSharp/Resolver/OverloadResolution.hpp"
+#include "Decompiler/CSharp/Resolver/OverloadResolutionHelpers.hpp"
+#include "Decompiler/CSharp/Resolver/TypeInferenceHelpers.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
@@ -59,6 +61,7 @@
 #include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
 #include "Decompiler/TypeSystem/NullableType.hpp"
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
+#include "Decompiler/TypeSystem/TypeParameterSubstitution.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
 #include "Decompiler/Util/CSharpPrimitiveCast.hpp"
@@ -1255,6 +1258,349 @@ CSharpResolver::ResolveExternAlias(const std::string& alias) const
         return std::make_shared<NamespaceResolveResult>(ns);
     else
         return ErrorResultSingleton();
+}
+
+// ---- Extension methods region (CSharpResolver.cs lines 2018-2243) --------------------------
+
+// The C# `IEnumerable<IMethod> GetExtensionMethods(MemberLookup lookup, INamespace ns)`
+// (line 2213) -- see CSharpResolver.hpp for the port conventions.
+std::vector<const ILSpy::Decompiler::TypeSystem::IMethod*>
+CSharpResolver::GetExtensionMethods(
+    const MemberLookup& lookup,
+    const ILSpy::Decompiler::TypeSystem::INamespace& ns) const
+{
+    using ILSpy::Decompiler::TypeSystem::IMethod;
+    using ILSpy::Decompiler::TypeSystem::ITypeDefinition;
+
+    std::vector<const IMethod*> result;
+    for (const ITypeDefinition* c : ns.Types())
+    {
+        // The non-owning `Types()` snapshot has no null entries in practice; the
+        // degenerate entry is skipped rather than dereferenced (the D516 convention;
+        // the C# would NRE).
+        if (c == nullptr)
+            continue;
+        // The C# `c.IsStatic && c.HasExtensions && c.TypeParameters.Count == 0 &&
+        // lookup.IsAccessible(c, false)`.
+        if (!(c->IsStatic() && c->HasExtensions() && c->TypeParameters().empty()
+              && lookup.IsAccessible(*c, /*allowProtectedAccess*/ false)))
+        {
+            continue;
+        }
+        for (const IMethod* m : c->Methods())
+        {
+            if (m == nullptr) // the D516 convention (a real Methods() has no nulls)
+                continue;
+            if (m->IsExtensionMethod())
+                result.push_back(m);
+        }
+    }
+    return result;
+}
+
+// The C# `IList<List<IMethod>> GetAllExtensionMethods(MemberLookup lookup)` (line 2188)
+// -- see CSharpResolver.hpp for the port conventions.
+std::shared_ptr<std::vector<std::vector<const ILSpy::Decompiler::TypeSystem::IMethod*>>>
+CSharpResolver::GetAllExtensionMethods(const MemberLookup& lookup) const
+{
+    using ILSpy::Decompiler::CSharp::TypeSystem::UsingScope;
+    using ILSpy::Decompiler::TypeSystem::IMethod;
+    using ILSpy::Decompiler::TypeSystem::INamespace;
+
+    std::shared_ptr<UsingScope> currentUsingScope = context_->CurrentUsingScope();
+    if (!currentUsingScope)
+    {
+        // The C# `EmptyList<List<IMethod>>.Instance` -- a shared EMPTY list (the
+        // non-null return contract every caller iterates; an empty group vector means
+        // no groups, faithfully matching the empty singleton).
+        return std::make_shared<std::vector<std::vector<const IMethod*>>>();
+    }
+    // The C# `LazyInit.VolatileRead(ref currentUsingScope.AllExtensionMethods)` -- the
+    // plain shared_ptr read is the single-threaded VolatileRead (the field is only
+    // mutated through this memoization).
+    std::shared_ptr<std::vector<std::vector<const IMethod*>>> cached =
+        currentUsingScope->AllExtensionMethods;
+    if (cached)
+        return cached;
+
+    std::vector<std::vector<const IMethod*>> extensionMethodGroups;
+    // The C# `for (UsingScope scope = currentUsingScope; scope != null; scope =
+    // scope.Parent)` -- innermost (most nested) scope first.
+    for (std::shared_ptr<UsingScope> scope = currentUsingScope; scope != nullptr;
+         scope = scope->Parent())
+    {
+        // The scope's own namespace is non-null by the `UsingScope` ctor contract (the
+        // C# `if (ns != null)` guard is structurally unreachable, the D374 convention).
+        std::vector<const IMethod*> m = GetExtensionMethods(lookup, scope->Namespace());
+        if (!m.empty())
+            extensionMethodGroups.push_back(std::move(m));
+
+        // The C# `scope.Usings.Distinct()` -- the default reference-equality comparer is
+        // POINTER identity for the namespace references, deduplicated before the
+        // `SelectMany` concatenation.
+        std::vector<const INamespace*> distinctUsings;
+        for (const INamespace* importedNamespace : scope->Usings())
+        {
+            if (std::find(distinctUsings.begin(), distinctUsings.end(), importedNamespace)
+                == distinctUsings.end())
+            {
+                distinctUsings.push_back(importedNamespace);
+            }
+        }
+        std::vector<const IMethod*> imported;
+        for (const INamespace* importedNamespace : distinctUsings)
+        {
+            std::vector<const IMethod*> inNamespace =
+                GetExtensionMethods(lookup, *importedNamespace);
+            imported.insert(imported.end(), inNamespace.begin(), inNamespace.end());
+        }
+        if (!imported.empty())
+            extensionMethodGroups.push_back(std::move(imported));
+    }
+    // The C# `LazyInit.GetOrSet(ref currentUsingScope.AllExtensionMethods,
+    // extensionMethodGroups)` -- the first-writer-wins store: a concurrent winner's
+    // value is returned, the single-threaded port's field is still null here (this
+    // method is the field's only writer and the early return above means it was null
+    // when the walk started), so the store wins and the computed list is returned.
+    auto computed = std::make_shared<std::vector<std::vector<const IMethod*>>>(
+        std::move(extensionMethodGroups));
+    if (!currentUsingScope->AllExtensionMethods)
+    {
+        currentUsingScope->AllExtensionMethods = computed;
+        return computed;
+    }
+    return currentUsingScope->AllExtensionMethods;
+}
+
+// The C# `public List<List<IMethod>> GetExtensionMethods(IType targetType, string name =
+// null, IReadOnlyList<IType> typeArguments = null, bool substituteInferredTypes =
+// false)` (line 2065) -- see CSharpResolver.hpp for the port conventions.
+std::vector<std::vector<const ILSpy::Decompiler::TypeSystem::IMethod*>>
+CSharpResolver::GetExtensionMethods(
+    const ILSpy::Decompiler::TypeSystem::IType* targetType,
+    const std::optional<std::string>& name,
+    const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& typeArguments,
+    bool substituteInferredTypes) const
+{
+    using ILSpy::Decompiler::TypeSystem::IMethod;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution;
+
+    MemberLookup lookup = CreateMemberLookup();
+    std::vector<std::vector<const IMethod*>> extensionMethodGroups;
+    std::shared_ptr<std::vector<std::vector<const IMethod*>>> allMethods =
+        GetAllExtensionMethods(lookup);
+    for (const std::vector<const IMethod*>& inputGroup : *allMethods)
+    {
+        std::vector<const IMethod*> outputGroup;
+        for (const IMethod* method : inputGroup)
+        {
+            // The non-owning snapshot has no nulls in practice; the degenerate entry
+            // is skipped rather than dereferenced (the D516 convention).
+            if (method == nullptr)
+                continue;
+            if (name.has_value() && method->Name() != *name)
+                continue;
+            if (!lookup.IsAccessible(*method, /*allowProtectedAccess*/ false))
+                continue;
+            std::optional<std::vector<ITypePtr>> inferredTypes;
+            if (typeArguments.has_value() && !typeArguments->empty())
+            {
+                // The C# `if (method.TypeParameters.Count != typeArguments.Count)
+                // continue;` -- only arity-matching generic methods are specialized.
+                if (method->TypeParameters().size() != typeArguments->size())
+                    continue;
+                // The C# `var sm = method.Specialize(new TypeParameterSubstitution(null,
+                // typeArguments));` -- the explicit type-arguments specialization, then
+                // the eligibility of the SPECIALIZED form (no inference: `false`).
+                TypeParameterSubstitution substitution(std::nullopt, *typeArguments);
+                const IMethod* sm = method->Specialize(&substitution);
+                if (IsEligibleExtensionMethod(compilation_, conversions_, targetType, *sm,
+                                              /*useTypeInference*/ false, inferredTypes))
+                    outputGroup.push_back(sm);
+            }
+            else
+            {
+                if (IsEligibleExtensionMethod(compilation_, conversions_, targetType, *method,
+                                              /*useTypeInference*/ true, inferredTypes))
+                {
+                    if (substituteInferredTypes && inferredTypes.has_value())
+                    {
+                        // The C# `method.Specialize(new TypeParameterSubstitution(null,
+                        // inferredTypes))` -- the inferred-arguments specialization.
+                        TypeParameterSubstitution substitution(std::nullopt, *inferredTypes);
+                        outputGroup.push_back(method->Specialize(&substitution));
+                    }
+                    else
+                    {
+                        outputGroup.push_back(method);
+                    }
+                }
+            }
+        }
+        if (!outputGroup.empty())
+            extensionMethodGroups.push_back(std::move(outputGroup));
+    }
+    return extensionMethodGroups;
+}
+
+// The C# `public List<List<IMethod>> GetExtensionMethods(string name = null,
+// IReadOnlyList<IType> typeArguments = null)` (line 2036) -- the no-target thin delegate
+// (`GetExtensionMethods(null, name, typeArguments)`).
+std::vector<std::vector<const ILSpy::Decompiler::TypeSystem::IMethod*>>
+CSharpResolver::GetExtensionMethods(
+    const std::optional<std::string>& name,
+    const std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& typeArguments) const
+{
+    return GetExtensionMethods(nullptr, name, typeArguments, /*substituteInferredTypes*/ false);
+}
+
+// The C# `public static bool IsEligibleExtensionMethod(IType targetType, IMethod method,
+// bool useTypeInference, out IType[] outInferredTypes)` (line 2123) -- see
+// CSharpResolver.hpp for the port conventions.
+bool CSharpResolver::IsEligibleExtensionMethod(
+    const ILSpy::Decompiler::TypeSystem::IType* targetType,
+    const ILSpy::Decompiler::TypeSystem::IMethod& method,
+    bool useTypeInference,
+    std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& outInferredTypes)
+{
+    // The C# `var compilation = method.Compilation;` (the two `ArgumentNullException`
+    // guards compile out -- the reference parameter cannot bind to null, the D374
+    // convention; the null `targetType` is a documented ELIGIBLE shape, not an error).
+    const ILSpy::Decompiler::TypeSystem::ICompilation& compilation = method.Compilation();
+    CSharpConversions& conversions = CSharpConversions::Get(compilation);
+    return IsEligibleExtensionMethod(compilation, conversions, targetType, method,
+                                      useTypeInference, outInferredTypes);
+}
+
+// The C# `static bool IsEligibleExtensionMethod(ICompilation compilation,
+// CSharpConversions conversions, IType targetType, IMethod method, bool useTypeInference,
+// out IType[] outInferredTypes)` (line 2133) -- see CSharpResolver.hpp for the port
+// conventions.
+bool CSharpResolver::IsEligibleExtensionMethod(
+    const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+    CSharpConversions& conversions,
+    const ILSpy::Decompiler::TypeSystem::IType* targetType,
+    const ILSpy::Decompiler::TypeSystem::IMethod& method,
+    bool useTypeInference,
+    std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>>& outInferredTypes)
+{
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::TypeSystem::ByReferenceType;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+    using ILSpy::Decompiler::TypeSystem::TypeParameterSubstitution;
+
+    outInferredTypes = std::nullopt;
+    // The C# `if (targetType == null) return true;` -- a missing target type is
+    // eligible for every extension method (the code-completion shape).
+    if (targetType == nullptr)
+        return true;
+    if (method.Parameters().empty())
+        return false;
+
+    // The C# `IType thisParameterType = method.Parameters[0].Type;` -- a REBINDABLE
+    // local (the ByReference unwrap and the inference substitution below rebind it),
+    // so the port uses a pointer (a C++ reference cannot rebind).
+    const IType* thisParameterType = &method.Parameters()[0]->Type();
+    if (thisParameterType->Kind() == TypeKind::ByReference)
+    {
+        // Extension method with `this in` or `this ref` -- the C# hard cast
+        // `((ByReferenceType)thisParameterType).ElementType`; a degenerate same-kind
+        // non-ByReferenceType or null-element shape (never produced by a real type
+        // system) keeps the un-unwrapped parameter type (the D516 safe-fallback
+        // convention) instead of the C# InvalidCastException / NRE.
+        const ByReferenceType* brt = dynamic_cast<const ByReferenceType*>(thisParameterType);
+        if (brt != nullptr && brt->Element())
+            thisParameterType = brt->Element().get();
+    }
+
+    std::vector<ITypePtr> inferredTypes;
+    if (useTypeInference && !method.TypeParameters().empty())
+    {
+        // The C# `TypeInference ti = new TypeInference(compilation, conversions);` --
+        // the internal ctor threading the resolver's conversions; the class's default
+        // `TypeInferenceAlgorithm.CSharp4` field is the algorithm the fresh instance
+        // carries (the C# field initializer, not a parameter).
+        std::vector<std::shared_ptr<ResolveResult>> arguments;
+        // The C# `new ResolveResult(targetType)` -- the owning handle recovered from
+        // the const accessor contract (the D529 `shared_from_this` +
+        // `const_pointer_cast` convention; every real IType is shared-managed).
+        arguments.push_back(std::make_shared<ResolveResult>(
+            std::const_pointer_cast<IType>(targetType->shared_from_this())));
+        std::vector<ITypePtr> parameterTypes;
+        parameterTypes.push_back(
+            std::const_pointer_cast<IType>(thisParameterType->shared_from_this()));
+        bool success = false; // the C# discards the out `success` (`out _`)
+        inferredTypes = Detail::InferTypeArguments(
+            compilation, conversions, method.TypeParameters(), arguments, parameterTypes,
+            success, /*classTypeArguments*/ std::nullopt, TypeInferenceAlgorithm::CSharp4);
+
+        // The C# `new TypeParameterSubstitution(null, inferredTypes)` ALIASES the
+        // inferredTypes ARRAY (a C# array is a reference type, so the fix-ups below
+        // are visible to every later use of the substitution); the port re-constructs
+        // the substitution at each use from the vector's CURRENT state, reproducing
+        // the aliasing exactly (positions fixed so far read back the fix-up).
+        auto makeSubstitution = [&inferredTypes]() {
+            return TypeParameterSubstitution(
+                std::nullopt, std::optional<std::vector<ITypePtr>>(inferredTypes));
+        };
+
+        bool hasInferredTypes = false;
+        for (std::size_t i = 0; i < inferredTypes.size(); i++)
+        {
+            if (inferredTypes[i]->Kind() != TypeKind::Unknown
+                && inferredTypes[i]->Kind() != TypeKind::UnboundTypeArgument)
+            {
+                hasInferredTypes = true;
+                // The C# `OverloadResolution.ValidateConstraints(method.TypeParameters[i],
+                // inferredTypes[i], substitution, conversions)` -- the internal 4-arg
+                // static (the `Detail::ValidateConstraints` free function; the
+                // `IType&` parameter is non-const because the substitution visitor may
+                // rebind it).
+                TypeParameterSubstitution substitution = makeSubstitution();
+                if (!Detail::ValidateConstraints(
+                        *method.TypeParameters()[i], *inferredTypes[i], &substitution,
+                        conversions))
+                    return false;
+            }
+            else
+            {
+                // The C# `inferredTypes[i] = method.TypeParameters[i];` -- do not
+                // substitute types that could not be inferred (the owning handle of
+                // the type parameter via the D529 convention).
+                inferredTypes[i] = std::const_pointer_cast<IType>(
+                    method.TypeParameters()[i]->shared_from_this());
+            }
+        }
+        if (hasInferredTypes)
+            outInferredTypes = inferredTypes;
+
+        // The C# `thisParameterType = thisParameterType.AcceptVisitor(substitution);` --
+        // the FINAL substitution (after ALL the fix-ups) applied to the parameter
+        // type. `AcceptVisitor` is non-const (the D406 TypeVisitor convention), so the
+        // const accessor result is cast (the underlying type-system objects are
+        // mutable, the D515/D517 `const_cast` precedent).
+        TypeParameterSubstitution finalSubstitution = makeSubstitution();
+        ITypePtr substituted =
+            const_cast<IType*>(thisParameterType)->AcceptVisitor(finalSubstitution);
+        if (substituted)
+            thisParameterType = substituted.get();
+    }
+
+    // The C# `Conversion c = conversions.ImplicitConversion(targetType,
+    // thisParameterType);` -- the CACHED public entry; the non-const `IType&`
+    // parameters take the cast accessor results (the D515/D517 convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::Conversion> c = conversions.ImplicitConversion(
+        const_cast<IType&>(*targetType), const_cast<IType&>(*thisParameterType));
+    // The C# `c.IsValid && (c.IsIdentityConversion || c.IsReferenceConversion ||
+    // c.IsBoxingConversion || c.IsImplicitSpanConversion)` -- a VALID conversion that
+    // is none of the four kinds (e.g. a NUMERIC widening) does NOT make the method
+    // eligible.
+    return c->IsValid() && (c->IsIdentityConversion() || c->IsReferenceConversion()
+                            || c->IsBoxingConversion()
+                            || c->IsImplicitSpanConversion());
 }
 
 // ---- Numeric promotion region (CSharpResolver.cs lines 536-561 + 1055-1230) ----------------

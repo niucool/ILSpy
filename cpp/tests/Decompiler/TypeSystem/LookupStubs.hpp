@@ -237,6 +237,20 @@ public:
     void AddDirectBaseType(ITypePtr base) { directBaseTypes_.push_back(std::move(base)); }
     void SetDeclaringTypeDefinition(const ITypeDefinition* d) { declaringTypeDefinition_ = d; }
     void SetStatic(bool v) { isStatic_ = v; }
+    // Configurable `Methods` / `HasExtensions` for the extension-method scan tests
+    // (the resolver's `GetExtensionMethods(lookup, ns)` namespace scan reads both plus
+    // `IsStatic` and `TypeParameters`). The defaults preserve the original hardcoded
+    // behavior (empty `Methods`, `HasExtensions` false), so existing tests that do not
+    // call the setters are unaffected (the additive-setter convention). The stored
+    // `Methods` pointers are non-owning (the caller keeps the `IMethod` stubs alive).
+    void SetMethods(std::vector<const IMethod*> methods) { methods_ = std::move(methods); }
+    void SetHasExtensions(bool v) { hasExtensions_ = v; }
+    // Configurable `Accessibility` for the extension-method scan tests (the namespace
+    // scan's `lookup.IsAccessible(c, false)` host filter). The default (the ctor's
+    // accessibility) preserves the original behavior so existing tests that do not call
+    // the setter are unaffected (the additive-setter convention, the LookupMethod
+    // `SetAccessibility` precedent).
+    void SetAccessibility(TS::Accessibility a) { accessibility_ = a; }
     // The variance-conversion tests need a definition that declares its own type parameters with a
     // configurable `Variance`; the default `IType::TypeParameters()` returns `{}`. The stored
     // pointers are non-owning (the caller keeps the `ITypeParameter` stubs alive).
@@ -290,14 +304,14 @@ public:
     std::vector<const ITypeDefinition*> NestedTypes() const override { return {}; }
     std::vector<const IMember*> Members() const override { return {}; }
     std::vector<const IField*> Fields() const override { return {}; }
-    std::vector<const IMethod*> Methods() const override { return {}; }
+    std::vector<const IMethod*> Methods() const override { return methods_; }
     std::vector<const IProperty*> Properties() const override { return {}; }
     std::vector<const IEvent*> Events() const override { return {}; }
     TS::KnownTypeCode KnownTypeCode() const override { return knownTypeCode_; }
     ITypePtr EnumUnderlyingType() const override { return enumUnderlyingType_; }
     bool IsReadOnly() const override { return false; }
     std::string MetadataName() const override { return fullTypeName_.Name(); }
-    bool HasExtensions() const override { return false; }
+    bool HasExtensions() const override { return hasExtensions_; }
     const TS::ExtensionInfo* ExtensionInfo() const override { return nullptr; }
     ::ILSpy::Decompiler::TypeSystem::Nullability NullableContext() const override { return ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious; }
     bool IsRecord() const override { return false; }
@@ -321,6 +335,8 @@ private:
     std::vector<ITypePtr> directBaseTypes_;
     std::vector<const ITypeParameter*> typeParameters_;
     ITypePtr enumUnderlyingType_;
+    std::vector<const IMethod*> methods_;
+    bool hasExtensions_ = false;
 };
 
 // A plain `IEntity` stub (NOT an IMember) -- the smallest concrete entity for
@@ -482,6 +498,11 @@ public:
     // The default `false` preserves the original behavior so existing tests that do not call
     // the setter are unaffected (the additive-setter convention).
     void SetIsOverridable(bool v) { isOverridable_ = v; }
+    // Configurable `IsExtensionMethod` for the extension-method eligibility tests (the
+    // resolver's `GetExtensionMethods` scans filter `m.IsExtensionMethod`). The default
+    // `false` preserves the original behavior so existing tests that do not call the
+    // setter are unaffected (the additive-setter convention).
+    void SetIsExtensionMethod(bool v) { isExtensionMethod_ = v; }
 
     // --- ISymbol ---
     TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Method; }
@@ -541,7 +562,7 @@ public:
     bool ThisIsRefReadOnly() const override { return false; }
     std::vector<const ITypeParameter*> TypeParameters() const override { return typeParameters_; }
     std::vector<ITypePtr> TypeArguments() const override { return {}; }
-    bool IsExtensionMethod() const override { return false; }
+    bool IsExtensionMethod() const override { return isExtensionMethod_; }
     bool IsLocalFunction() const override { return false; }
     bool IsConstructor() const override { return false; }
     bool IsDestructor() const override { return false; }
@@ -569,6 +590,7 @@ private:
     ITypePtr returnTypeOverride_;
     std::vector<const IParameter*> parameters_;
     std::vector<const ITypeParameter*> typeParameters_;
+    bool isExtensionMethod_ = false;
 };
 
 // A minimal `IEvent` for the `member is IEvent` TRUE side of IsInvocable.
