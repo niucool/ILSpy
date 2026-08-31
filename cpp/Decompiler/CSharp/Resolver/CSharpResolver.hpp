@@ -117,6 +117,7 @@
 #include <any>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -162,6 +163,12 @@ class CSharpConversions;
 // the `BestCandidateErrors` / `CreateResolveResult` / `BestCandidate` /
 // `GetArgumentsWithConversions` calls.
 class OverloadResolution;
+
+// Forward-declared (same namespace, in CSharpOperators.hpp): the operator-method class
+// the `PointerArithmeticOperator` factory below builds and returns by shared handle (the
+// C# `CSharpOperators.BinaryOperatorMethod`). A shared_ptr return type needs only a
+// declaration; the .cpp includes the full header for the construction.
+class BinaryOperatorMethod;
 
 // The C# `Dictionary<string, IVariable>` -- one block's local variables / lambda
 // parameters keyed by name. The values are owning handles; the resolver's clones share
@@ -600,6 +607,117 @@ public:
         std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& lhs,
         std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>& rhs,
         bool allowNullableConstants) const;
+
+    // ---- Operator-resolution helpers ----------------------------------------------------------
+    // (The non-recursive helper region the future `ResolveUnaryOperator` (line 326) /
+    // `ResolveBinaryOperator` (line 594) slices consume -- CSharpResolver.cs lines 525/
+    // 962-985/981-989/1253-1275/2435-2441: the two `OperatorResolveResult` factories, the
+    // pointer-arithmetic operator factory, the null-coalescing handler, the nullable-or-
+    // non-value-type test, and the `OverloadResolution` construction helper. The mutually
+    // recursive enum handlers (`HandleEnumComparison` / `HandleEnumSubtraction` /
+    // `HandleEnumOperator`) and the two big `Resolve*Operator` methods themselves land in
+    // later slices -- this region is everything they call that is NOT self-recursive.)
+
+    // The C# private `bool IsNullableTypeOrNonValueType(IType type)` (line 981) -- the
+    // null-literal comparison guard: a nullable type OR a non-value type (a reference
+    // type OR an INDETERMINATE one) compares against the null literal. The C#
+    // `type.IsReferenceType != false` is true for BOTH a definite true and an
+    // INDETERMINATE `null` (the lifted `bool? != false` yields null [falsy] only for a
+    // definite false), so the port is `IsNullable(type) || !(opt.has_value() && !*opt)`.
+    // STATIC in the port -- reads no resolver instance state (the `IsSigned` convention).
+    // Private in the C#; PUBLIC in the port for direct TDD (the TryConvert widening
+    // convention).
+    static bool IsNullableTypeOrNonValueType(
+        const ILSpy::Decompiler::TypeSystem::IType& type);
+
+    // The C# private `OperatorResolveResult UnaryOperatorResolveResult(IType resultType,
+    // UnaryOperatorType op, ResolveResult expression, bool isLifted = false)` (line 525)
+    // -- the predefined unary-operator result factory: an `OperatorResolveResult` over
+    // the mapped BCL `ExpressionType` (`UnaryOperatorExpression.GetLinqNodeType(op,
+    // this.CheckForOverflow)` -- the checked/unchecked distinction threads the resolver's
+    // own flag), NO user-defined method, the `isLifted` flag, and the SINGLE operand. The
+    // C# `IType` reference becomes an owning handle via `shared_from_this()` (the D529
+    // convention; the input is a type-system-owned `IType&`). Private in the C#; PUBLIC in
+    // the port for direct TDD (the TryConvert widening convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> UnaryOperatorResolveResult(
+        const ILSpy::Decompiler::TypeSystem::IType& resultType,
+        ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType op,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> expression,
+        bool isLifted = false) const;
+
+    // The C# private `ResolveResult BinaryOperatorResolveResult(IType resultType,
+    // ResolveResult lhs, BinaryOperatorType op, ResolveResult rhs, bool isLifted = false)`
+    // (line 983) -- the predefined binary-operator result factory: the mirror of the
+    // unary factory with TWO operands (the C# `new[] { lhs, rhs }` order). Private in the
+    // C#; PUBLIC in the port for direct TDD (the TryConvert widening convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> BinaryOperatorResolveResult(
+        const ILSpy::Decompiler::TypeSystem::IType& resultType,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> lhs,
+        ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType op,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rhs,
+        bool isLifted = false) const;
+
+    // The C# private `CSharpOperators.BinaryOperatorMethod PointerArithmeticOperator(IType
+    // resultType, IType inputType1, KnownTypeCode inputType2)` (line 962) -- the two Known-
+    // TypeCode-carrying conveniences delegating through `compilation.FindType` (the
+    // pointer-arithmetic operands `byte`/`sbyte`/... resolve to the registered known
+    // types). Private in the C#; PUBLIC in the port for direct TDD (the TryConvert
+    // widening convention).
+    std::shared_ptr<BinaryOperatorMethod> PointerArithmeticOperator(
+        const ILSpy::Decompiler::TypeSystem::IType& resultType,
+        const ILSpy::Decompiler::TypeSystem::IType& inputType1,
+        ILSpy::Decompiler::TypeSystem::KnownTypeCode inputType2) const;
+
+    // The C# private `CSharpOperators.BinaryOperatorMethod PointerArithmeticOperator(IType
+    // resultType, KnownTypeCode inputType1, IType inputType2)` (line 967) -- the mirror
+    // convenience (the FIRST operand's code).
+    std::shared_ptr<BinaryOperatorMethod> PointerArithmeticOperator(
+        const ILSpy::Decompiler::TypeSystem::IType& resultType,
+        ILSpy::Decompiler::TypeSystem::KnownTypeCode inputType1,
+        const ILSpy::Decompiler::TypeSystem::IType& inputType2) const;
+
+    // The C# private `CSharpOperators.BinaryOperatorMethod PointerArithmeticOperator(IType
+    // resultType, IType inputType1, IType inputType2)` (line 972) -- builds the plain
+    // built-in operator method over the resolver's compilation with the given return type
+    // and the two unnamed `DefaultParameter`s (`string.Empty` names; the C# object-
+    // initializer collection-add over the internal `parameters` list ports to the
+    // `OperatorMethod::AddParameter` member, the `SetReturnType` internal-setter
+    // convention). The parameter type handles are recovered via `shared_from_this()` +
+    // `const_pointer_cast` (the D529 convention). Private in the C#; PUBLIC in the port
+    // for direct TDD (the TryConvert widening convention).
+    std::shared_ptr<BinaryOperatorMethod> PointerArithmeticOperator(
+        const ILSpy::Decompiler::TypeSystem::IType& resultType,
+        const ILSpy::Decompiler::TypeSystem::IType& inputType1,
+        const ILSpy::Decompiler::TypeSystem::IType& inputType2) const;
+
+    // The C# private `ResolveResult ResolveNullCoalescingOperator(ResolveResult lhs,
+    // ResolveResult rhs)` (line 1253, spec section 12.13) -- the `??` handler: a NULLABLE
+    // lhs first tries the rhs against the UNDERLYING type (the result type is the
+    // underlying); then the rhs against the lhs's own type; then the lhs against the rhs's
+    // type; else an `ErrorResolveResult` over the lhs's type. Every `TryConvert` rebind
+    // mutates only the LOCAL parameter copy (the C# parameters are value copies of the
+    // caller's references -- the `ref` rebinds do not escape), so the port takes the
+    // handles by value. Private in the C#; PUBLIC in the port for direct TDD (the
+    // TryConvert widening convention).
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveNullCoalescingOperator(
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> lhs,
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rhs) const;
+
+    // The C# private `OverloadResolution CreateOverloadResolution(ResolveResult[] arguments,
+    // string[] argumentNames = null, IType[] typeArguments = null)` (line 2435) -- the
+    // resolver's own `OverloadResolution` construction helper threading the instance's
+    // compilation, conversions, and `CheckForOverflow` flag (every operator-resolution /
+    // invocation region builds its resolution through it). The C# returns a class
+    // instance; the port returns an owning `unique_ptr` (the
+    // `MethodGroupResolveResult::PerformOverloadResolution` convention). The C# argument
+    // arrays port to a `std::vector` / `std::optional<std::vector>` pair (the ctor's
+    // null-default normalization). Private in the C#; PUBLIC in the port for direct TDD
+    // (the TryConvert widening convention).
+    std::unique_ptr<OverloadResolution> CreateOverloadResolution(
+        std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> arguments,
+        std::optional<std::vector<std::string>> argumentNames = std::nullopt,
+        std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>> typeArguments =
+            std::nullopt) const;
 
 private:
     // The C# private nested `sealed class ObjectInitializerContext` -- the linked stack

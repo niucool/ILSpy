@@ -38,6 +38,7 @@
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
+#include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
 #include "Decompiler/TypeSystem/NullableType.hpp"
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
@@ -1020,6 +1021,195 @@ bool CSharpResolver::BinaryNumericPromotion(
         rhs = CastTo(targetType, isNullable, std::move(rhs), allowNullableConstants);
     }
     return !bindingError;
+}
+
+// ---- Operator-resolution helpers (CSharpResolver.cs lines 525 / 962-985 / 981-989 /
+// 1253-1275 / 2435-2441) ---------------------------------------------------------------
+
+// The C# private `bool IsNullableTypeOrNonValueType(IType type)` (line 981).
+bool CSharpResolver::IsNullableTypeOrNonValueType(
+    const ILSpy::Decompiler::TypeSystem::IType& type)
+{
+    using ILSpy::Decompiler::TypeSystem::IsNullable;
+
+    // The C# `NullableType.IsNullable(type) || type.IsReferenceType != false` -- the
+    // lifted `bool? != false` is falsy ONLY for a definite false, so an INDETERMINATE
+    // reference-ness (std::nullopt) still counts as a non-value type here (a null
+    // literal compares against unknowns too).
+    return IsNullable(type) || !(type.IsReferenceType().has_value()
+                                  && !*type.IsReferenceType());
+}
+
+// The C# private `OperatorResolveResult UnaryOperatorResolveResult(IType resultType,
+// UnaryOperatorType op, ResolveResult expression, bool isLifted = false)` (line 525).
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::UnaryOperatorResolveResult(
+    const ILSpy::Decompiler::TypeSystem::IType& resultType,
+    ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorType op,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> expression,
+    bool isLifted) const
+{
+    using ILSpy::Decompiler::CSharp::Syntax::UnaryOperatorExpression;
+    using ILSpy::Decompiler::Semantics::OperatorResolveResult;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+
+    // The C# `new OperatorResolveResult(resultType, GetLinqNodeType(op,
+    // this.CheckForOverflow), null, isLifted, new[] { expression })` -- the predefined-
+    // operator ctor shape (no user-defined method; the single operand).
+    return std::make_shared<OperatorResolveResult>(
+        std::const_pointer_cast<ILSpy::Decompiler::TypeSystem::IType>(
+            resultType.shared_from_this()),
+        UnaryOperatorExpression::GetLinqNodeType(op, checkForOverflow_),
+        /*userDefinedOperatorMethod=*/ nullptr,
+        isLifted,
+        std::vector<std::shared_ptr<ResolveResult>>{std::move(expression)});
+}
+
+// The C# private `ResolveResult BinaryOperatorResolveResult(IType resultType,
+// ResolveResult lhs, BinaryOperatorType op, ResolveResult rhs, bool isLifted = false)`
+// (line 983).
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::BinaryOperatorResolveResult(
+    const ILSpy::Decompiler::TypeSystem::IType& resultType,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> lhs,
+    ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType op,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rhs,
+    bool isLifted) const
+{
+    using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorExpression;
+    using ILSpy::Decompiler::Semantics::OperatorResolveResult;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+
+    return std::make_shared<OperatorResolveResult>(
+        std::const_pointer_cast<ILSpy::Decompiler::TypeSystem::IType>(
+            resultType.shared_from_this()),
+        BinaryOperatorExpression::GetLinqNodeType(op, checkForOverflow_),
+        /*userDefinedOperatorMethod=*/ nullptr,
+        isLifted,
+        std::vector<std::shared_ptr<ResolveResult>>{std::move(lhs), std::move(rhs)});
+}
+
+// The C# private `CSharpOperators.BinaryOperatorMethod PointerArithmeticOperator(IType
+// resultType, IType inputType1, KnownTypeCode inputType2)` (line 962).
+std::shared_ptr<BinaryOperatorMethod> CSharpResolver::PointerArithmeticOperator(
+    const ILSpy::Decompiler::TypeSystem::IType& resultType,
+    const ILSpy::Decompiler::TypeSystem::IType& inputType1,
+    ILSpy::Decompiler::TypeSystem::KnownTypeCode inputType2) const
+{
+    return PointerArithmeticOperator(resultType, inputType1,
+                                     compilation_.FindType(inputType2));
+}
+
+// The C# private `CSharpOperators.BinaryOperatorMethod PointerArithmeticOperator(IType
+// resultType, KnownTypeCode inputType1, IType inputType2)` (line 967).
+std::shared_ptr<BinaryOperatorMethod> CSharpResolver::PointerArithmeticOperator(
+    const ILSpy::Decompiler::TypeSystem::IType& resultType,
+    ILSpy::Decompiler::TypeSystem::KnownTypeCode inputType1,
+    const ILSpy::Decompiler::TypeSystem::IType& inputType2) const
+{
+    return PointerArithmeticOperator(resultType, compilation_.FindType(inputType1),
+                                     inputType2);
+}
+
+// The C# private `CSharpOperators.BinaryOperatorMethod PointerArithmeticOperator(IType
+// resultType, IType inputType1, IType inputType2)` (line 972).
+std::shared_ptr<BinaryOperatorMethod> CSharpResolver::PointerArithmeticOperator(
+    const ILSpy::Decompiler::TypeSystem::IType& resultType,
+    const ILSpy::Decompiler::TypeSystem::IType& inputType1,
+    const ILSpy::Decompiler::TypeSystem::IType& inputType2) const
+{
+    using ILSpy::Decompiler::TypeSystem::IParameter;
+    using ILSpy::Decompiler::TypeSystem::Implementation::DefaultParameter;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+
+    // The C# object initializer -- `new BinaryOperatorMethod(compilation) {
+    // ReturnType = resultType, parameters = { new DefaultParameter(inputType1, ""),
+    // new DefaultParameter(inputType2, "") } }`. The owning parameter type handles are
+    // recovered from the const references via shared_from_this + const_pointer_cast (the
+    // D529 convention -- the type-system objects are shared-managed).
+    auto method = std::make_shared<BinaryOperatorMethod>(compilation_);
+    method->SetReturnType(resultType);
+    method->AddParameter(std::make_shared<DefaultParameter>(
+        std::const_pointer_cast<IType>(inputType1.shared_from_this()), std::string()));
+    method->AddParameter(std::make_shared<DefaultParameter>(
+        std::const_pointer_cast<IType>(inputType2.shared_from_this()), std::string()));
+    return method;
+}
+
+// The C# private `ResolveResult ResolveNullCoalescingOperator(ResolveResult lhs,
+// ResolveResult rhs)` (line 1253).
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveNullCoalescingOperator(
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> lhs,
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> rhs) const
+{
+    using ILSpy::Decompiler::CSharp::Syntax::BinaryOperatorType;
+    using ILSpy::Decompiler::Semantics::ErrorResolveResult;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::TypeSystem::GetUnderlyingType;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::IsNullable;
+
+    if (IsNullable(lhs->Type()))
+    {
+        // The C# rebinds its local `rhs` copy through `TryConvert(ref rhs, a0)` -- the
+        // rebind stays local (the parameter is a value copy of the caller's reference).
+        // The const `GetUnderlyingType`/`Type()` accessors return `const IType&` while
+        // `TryConvert` takes non-const `IType&`, so the port const_casts (the D515/D517
+        // convention: the underlying type-system objects are mutable).
+        const IType& a0 = GetUnderlyingType(lhs->Type());
+        if (TryConvert(rhs, const_cast<IType&>(a0)))
+        {
+            return BinaryOperatorResolveResult(a0, std::move(lhs),
+                                                BinaryOperatorType::NullCoalescing,
+                                                std::move(rhs));
+        }
+    }
+    // The result-type reference is bound BEFORE the `std::move` of the owning handle:
+    // the argument evaluation order is unspecified, so reading `lhs->Type()` inside the
+    // call's argument list alongside `std::move(lhs)` could deref an already-moved-out
+    // handle. The binding stays valid -- the move transfers ownership to the callee's
+    // parameter, the pointee object is not destroyed.
+    if (TryConvert(rhs, const_cast<IType&>(lhs->Type())))
+    {
+        const IType& resultType = lhs->Type();
+        return BinaryOperatorResolveResult(resultType, std::move(lhs),
+                                            BinaryOperatorType::NullCoalescing,
+                                            std::move(rhs));
+    }
+    if (TryConvert(lhs, const_cast<IType&>(rhs->Type())))
+    {
+        const IType& resultType = rhs->Type();
+        return BinaryOperatorResolveResult(resultType, std::move(lhs),
+                                            BinaryOperatorType::NullCoalescing,
+                                            std::move(rhs));
+    }
+    else
+    {
+        return std::make_shared<ErrorResolveResult>(
+            std::const_pointer_cast<ILSpy::Decompiler::TypeSystem::IType>(
+                lhs->Type().shared_from_this()));
+    }
+}
+
+// The C# private `OverloadResolution CreateOverloadResolution(ResolveResult[] arguments,
+// string[] argumentNames = null, IType[] typeArguments = null)` (line 2435).
+std::unique_ptr<OverloadResolution> CSharpResolver::CreateOverloadResolution(
+    std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> arguments,
+    std::optional<std::vector<std::string>> argumentNames,
+    std::optional<std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>> typeArguments) const
+{
+    // The C# `new OverloadResolution(compilation, arguments, argumentNames, typeArguments,
+    // conversions)` -- the resolver's `conversions` field is never null (both ctors
+    // resolve it through `CSharpConversions::Get`), so the port passes the instance's
+    // reference directly (no `?? Get(compilation)` fallback needed here).
+    auto or = std::make_unique<OverloadResolution>(
+        compilation_, std::move(arguments), std::move(argumentNames),
+        std::move(typeArguments), &conversions_);
+    // The C# `or.CheckForOverflow = checkForOverflow`.
+    or->CheckForOverflow() = checkForOverflow_;
+    return or;
 }
 
 } // namespace ILSpy::Decompiler::CSharp::Resolver

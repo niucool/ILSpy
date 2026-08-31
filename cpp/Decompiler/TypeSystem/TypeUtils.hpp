@@ -347,6 +347,23 @@ inline bool IsCSharpSmallIntegerType(const IType* type) {
     return false;
 }
 
+// Port of TypeUtils.IsCSharpNativeIntegerType(IType) (TypeUtils.cs line 147):
+// whether the type is a C# 9 native integer type -- nint or nuint (the synthetic
+// TypeKind values; the C# `switch (type.Kind)` over the two kinds with `false` for
+// everything else). Returns false for (U)IntPtr (the managed wrappers are Struct
+// kinds, not NInt/NUInt) -- the doc comment's explicit distinction. A null input
+// yields false (the file's nullable-pointer convention).
+inline bool IsCSharpNativeIntegerType(const IType* type) {
+    if (!type) return false;
+    switch (type->Kind()) {
+        case TypeKind::NInt:
+        case TypeKind::NUInt:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Port of TransformAssignment.SwapSign: the type with the opposite sign for a
 // primitive integer type (I1<->U1, I2<->U2, I4<->U4, I8<->U8, I<->U). Returns a
 // fresh KnownType for the opposite-sign KnownTypeCode, or nullptr for a type

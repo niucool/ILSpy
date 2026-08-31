@@ -288,6 +288,21 @@ public:
             type.shared_from_this());
     }
 
+    // The C# `internal readonly List<IParameter> parameters` COLLECTION initializer
+    // mutation from OUTSIDE the class -- `CSharpResolver.PointerArithmeticOperator`
+    // (CSharpResolver.cs line 972) builds a plain `BinaryOperatorMethod` with
+    // `parameters = { new DefaultParameter(...), new DefaultParameter(...) }` (the
+    // collection-add syntax appends to the SAME internal list the derived operator
+    // ctors populate). The assembly-internal cross-class mutation ports as a public
+    // member (convention (a), the `SetReturnType` precedent above): the derived ctors
+    // write `parameters_` directly, and this member is the external-write surface the
+    // pointer-arithmetic operator tables need.
+    void AddParameter(
+        std::shared_ptr<const ILSpy::Decompiler::TypeSystem::IParameter> parameter)
+    {
+        parameters_.push_back(std::move(parameter));
+    }
+
     // The C# `IMember IMember.MemberDefinition => this`.
     const ILSpy::Decompiler::TypeSystem::IMember* MemberDefinition() const override
     {
