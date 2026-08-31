@@ -346,10 +346,13 @@ TEST(UnknownMethodResolveResultTest, ParametersReturnsConfiguredSnapshot)
 TEST(UnknownMethodResolveResultTest, ParametersIsEmptyByDefault)
 {
     // An empty parameter list is a faithful `ReadOnlyCollection` snapshot (the C#
-    // `parameters.ToArray()` yields an empty array).
+    // `parameters.ToArray()` yields an empty array). The empty vector is spelled
+    // with the raw-pointer type: an untyped `{}` is ambiguous between the two
+    // parameter ctors (the raw-pointer and the owning-handle overload).
     auto targetType = MakeObjectType();
     ILSpy::Decompiler::Semantics::UnknownMethodResolveResult umrr(
-        targetType, "Foo", {}, {});
+        targetType, "Foo", {},
+        std::vector<const ILSpy::Decompiler::TypeSystem::IParameter*>{});
     EXPECT_TRUE(umrr.Parameters().empty());
 }
 

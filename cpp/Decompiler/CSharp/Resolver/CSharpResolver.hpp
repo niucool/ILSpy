@@ -37,8 +37,9 @@
 // (`ResolveUnaryOperator` and `ResolveBinaryOperator` + the enum-handler trio, the
 // Convert/ResolveCast region, the sizeof/this/base/typeof tail, the
 // condition/primitive/default-value/assignment quartet, the simple-name lookup
-// cluster, the extension-methods region, and the member-access region have landed;
-// ResolveForeach, ResolveInvocation, ... follow).
+// cluster, the extension-methods region, the member-access region, and the
+// invocation region have landed; ResolveForeach, ResolveIndexer,
+// ResolveObjectCreation, ... follow).
 //
 // KEY PORT CONVENTIONS:
 //  (a) The C# `With*` clone factories return a `CSharpResolver` REFERENCE -- the C#
@@ -845,6 +846,118 @@ public:
     // EmptyList<IType>.Instance, false)`). The C# `string` ports to a `std::string` value.
     std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveIdentifierInObjectInitializer(
         std::string identifier) const;
+
+    // ---- Invocation ---------------------------------------------------------------------------
+    // (The `ResolveInvocation` region, CSharpResolver.cs lines 2227-2443: the private
+    // `AddArgumentNamesIfNecessary` helper (line 2227), the private 4-arg
+    // `ResolveInvocation` core (line 2244, C# 4.0 spec section 7.6.5) + the public
+    // 3-arg entry (line 2336, delegating with `allowOptionalParameters: true`), and
+    // the `CreateParameters` (line 2348) + static `GuessParameterName` (line 2398) +
+    // static `MakeParameterName` (line 2426) helper trio. Every prerequisite is
+    // already ported: `CreateOverloadResolution` (the operator-helpers region),
+    // `MethodGroupResolveResult::PerformOverloadResolution` with the wired
+    // extension-method machinery, `OverloadResolution::AddCandidate` /
+    // `BestCandidate` / `IsExtensionMethodInvocation` / `CreateResolveResult` /
+    // `GetArgumentsWithConversionsAndNames` / `BestCandidateErrors` /
+    // `BestCandidateIsExpandedForm` / `GetArgumentToParameterMap`, the free
+    // `IsApplicable(OverloadResolutionErrors)`, `DynamicInvocationResolveResult` (with
+    // its `DynamicInvocationType` enum), `UnknownMethodResolveResult` (with the
+    // owning-parameters ctor for the synthesized `CreateParameters` results),
+    // `UnknownMemberResolveResult` / `UnknownIdentifierResolveResult`,
+    // `TypeResolveResult`, `NamedArgumentResolveResult`, `CSharpInvocationResolveResult`,
+    // `GetDelegateInvokeMethod`, and `DefaultParameter`.)
+
+    // The C# `IList<ResolveResult> AddArgumentNamesIfNecessary(ResolveResult[]
+    // arguments, string[] argumentNames)` (line 2227) -- wraps the arguments whose
+    // `argumentNames` entry is non-null in `NamedArgumentResolveResult`s (the dynamic
+    // invocation's argument list); a null `argumentNames` ARRAY returns the arguments
+    // as-is. Private in the C#; PUBLIC in the port for direct TDD (the TryConvert
+    // widening convention). The C# `string[]` null array ports to `std::nullopt` and a
+    // null ENTRY to the empty string (the GetArgumentsWithConversions normalization);
+    // an out-of-range entry (a mismatched-length `argumentNames` the C# would throw
+    // `IndexOutOfRangeException` on) is treated as positional (the D516 safe-fallback
+    // convention).
+    std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>
+    AddArgumentNamesIfNecessary(
+        const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+        const std::optional<std::vector<std::string>>& argumentNames) const;
+
+    // The C# `private ResolveResult ResolveInvocation(ResolveResult target,
+    // ResolveResult[] arguments, string[] argumentNames, bool allowOptionalParameters)`
+    // (line 2244, C# 4.0 spec section 7.6.5) + the public 3-arg overload (line 2336,
+    // delegating with `allowOptionalParameters: true`) -- collapsed into ONE public
+    // method with the default argument (the StandardImplicitConversion
+    // allowTuple-collapse convention; the C# public entry is the only caller of the
+    // private core). The invocation resolution: the dynamic-target arm (a
+    // `DynamicInvocationResolveResult` over the named-wrapped arguments), the method
+    // group arm (the dynamic-arguments sub-arm building a dynamic invocation when MORE
+    // THAN ONE method is applicable -- the static-methods-with-value-target re-target
+    // to a `TypeResolveResult` over the group's target type; then
+    // `PerformOverloadResolution` with the resolver's `checkForOverflow`/`conversions`
+    // and the given `allowOptionalParameters`, re-targeting a static non-extension
+    // invocation over a value target to the `TypeResolveResult`, else the
+    // `CreateResolveResult` composition with the dynamic return-type override; an
+    // EMPTY method group yields the `UnknownMethodResolveResult` with the synthesized
+    // parameters), the `UnknownMemberResolveResult` / `UnknownIdentifierResolveResult`
+    // fallbacks (the `UnknownMethodResolveResult` over the target type / the current
+    // type definition), the delegate-invoke arm (the target type's `Invoke` method
+    // through a fresh `OverloadResolution`, composed into the
+    // `CSharpInvocationResolveResult` marking `isDelegateInvocation`), else the
+    // `ErrorResult` singleton.
+    //
+    // PORT CONVENTIONS for this member:
+    //  * The C# `ResolveResult[] arguments` array the resolver "may mutate ... to wrap
+    //    elements in `ConversionResolveResult`s" ports to a by-value `std::vector`
+    //    (the port's `OverloadResolution` ctor takes the arguments by value and the
+    //    wrapped arguments come back through `GetArgumentsWithConversionsAndNames` /
+    //    `CreateResolveResult` -- the caller observes the wrapping through the RESULT,
+    //    not through array mutation; a documented divergence of the port's engine).
+    //  * The C# `mgrr.TargetResult` reference passed to `CreateResolveResult` ports to
+    //    the ALIASING `shared_ptr` (co-owning the method group while pointing at the
+    //    target result -- the `LiftedUserDefinedOperator` convention); the C#
+    //    `new TypeResolveResult(mgrr.TargetType)` recovers the owning handle via
+    //    `shared_from_this` + `const_pointer_cast` (the D529 convention).
+    //  * The C# `returnTypeOverride: isDynamic ? SpecialType.Dynamic : null` ports to
+    //    `std::make_shared<SpecialType>(TypeKind::Dynamic, true)` (the D469
+    //    DynamicMemberResolveResult precedent) or the null handle.
+    //  * The C# `l[l.Count - 1].DeclaringType != m.DeclaringType` bucket-boundary check
+    //    is a REFERENCE comparison -- the port compares the addresses.
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> ResolveInvocation(
+        std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> target,
+        std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> arguments,
+        std::optional<std::vector<std::string>> argumentNames = std::nullopt,
+        bool allowOptionalParameters = true) const;
+
+    // The C# `List<IParameter> CreateParameters(ResolveResult[] arguments, string[]
+    // argumentNames)` (line 2348) -- invents a parameter per argument for the
+    // `UnknownMethodResolveResult` shape: the name is the given `argumentNames` entry
+    // or the GUESSED name (disambiguated with a numeric suffix when the guessed name
+    // already occurs in the list), and the type is the argument's type (a
+    // by-reference argument keeps its `ReferenceKind`; a null-literal/none-typed
+    // argument becomes `object`). Private in the C#; PUBLIC in the port for direct
+    // TDD. The C# `List<IParameter>` of freshly-created parameters ports to OWNING
+    // handles (the synthesized-parameter convention) so the parameters outlive the
+    // call (the C# GC owns them); the `UnknownMethodResolveResult` owning-parameters
+    // ctor keeps them alive for the result's lifetime. The C# `ArgumentException` on
+    // a mismatched-length `argumentNames` ports to `std::invalid_argument`.
+    std::vector<std::shared_ptr<const ILSpy::Decompiler::TypeSystem::IParameter>>
+    CreateParameters(
+        const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+        const std::optional<std::vector<std::string>>& argumentNames) const;
+
+    // The C# `static string GuessParameterName(ResolveResult rr)` (line 2398) -- the
+    // guessed parameter name: the member's / unknown member's / method group's name,
+    // the local variable's name (normalized), the type's name (normalized), or
+    // "parameter". Private static in the C#; PUBLIC static in the port for direct TDD
+    // (the TryConvert widening convention).
+    static std::string GuessParameterName(
+        const ILSpy::Decompiler::Semantics::ResolveResult& rr);
+
+    // The C# `static string MakeParameterName(string variableName)` (line 2426) -- the
+    // camelCase normalization: empty -> "parameter"; a leading '_' on a multi-char
+    // name stripped; the first letter lower-cased. Private static in the C#; PUBLIC
+    // static in the port for direct TDD.
+    static std::string MakeParameterName(const std::string& variableName);
 
     // ---- Numeric promotion -------------------------------------------------------------------
     // (The unary/binary numeric-promotion region -- CSharpResolver.cs lines 536-561

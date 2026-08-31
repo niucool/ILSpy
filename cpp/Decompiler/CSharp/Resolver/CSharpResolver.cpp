@@ -40,12 +40,14 @@
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/TypeSystem/UsingScope.hpp"
 #include "Decompiler/Semantics/AmbiguousResolveResult.hpp"
+#include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
 #include "Decompiler/Semantics/ConversionFactories.hpp"
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/ErrorResolveResult.hpp"
 #include "Decompiler/Semantics/LocalResolveResult.hpp"
 #include "Decompiler/Semantics/MemberResolveResult.hpp"
+#include "Decompiler/Semantics/NamedArgumentResolveResult.hpp"
 #include "Decompiler/Semantics/NamespaceResolveResult.hpp"
 #include "Decompiler/Semantics/OperatorResolveResult.hpp"
 #include "Decompiler/Semantics/SizeOfResolveResult.hpp"
@@ -71,6 +73,7 @@
 #include <algorithm>
 #include <any>
 #include <cassert>
+#include <cctype>
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
@@ -1757,6 +1760,383 @@ CSharpResolver::ResolveIdentifierInObjectInitializer(std::string identifier) con
     return memberLookup.Lookup(CurrentObjectInitializer(), identifier,
                                std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr>{},
                                /*isInvocation*/ false);
+}
+
+// ---- Invocation region (CSharpResolver.cs lines 2227-2443) ---------------------------------
+
+// The C# `IList<ResolveResult> AddArgumentNamesIfNecessary(ResolveResult[] arguments,
+// string[] argumentNames)` (line 2227) -- see CSharpResolver.hpp for the port
+// conventions.
+std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>
+CSharpResolver::AddArgumentNamesIfNecessary(
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+    const std::optional<std::vector<std::string>>& argumentNames) const
+{
+    using ILSpy::Decompiler::Semantics::NamedArgumentResolveResult;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+
+    // The C# `if (argumentNames == null) return arguments;` -- the null ARRAY ports to
+    // the empty optional (the arguments are returned as-is, sharing the handles).
+    if (!argumentNames.has_value())
+        return arguments;
+    // The C# `result[i] = (argumentNames[i] != null ? new NamedArgumentResolveResult(
+    // argumentNames[i], arguments[i]) : arguments[i])` -- a null ENTRY ports to the
+    // empty string (the GetArgumentsWithConversions normalization); an out-of-range
+    // entry is treated as positional (the D516 safe-fallback convention; the C# would
+    // throw IndexOutOfRangeException on a mismatched-length array).
+    std::vector<std::shared_ptr<ResolveResult>> result;
+    result.reserve(arguments.size());
+    for (size_t i = 0; i < arguments.size(); i++) {
+        if (i < argumentNames->size() && !(*argumentNames)[i].empty())
+            result.push_back(std::make_shared<NamedArgumentResolveResult>(
+                (*argumentNames)[i], arguments[i]));
+        else
+            result.push_back(arguments[i]);
+    }
+    return result;
+}
+
+// The C# `private ResolveResult ResolveInvocation(ResolveResult target, ResolveResult[]
+// arguments, string[] argumentNames, bool allowOptionalParameters)` (line 2244) + the
+// public 3-arg overload (line 2336) -- see CSharpResolver.hpp for the port
+// conventions.
+std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>
+CSharpResolver::ResolveInvocation(
+    std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult> target,
+    std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>> arguments,
+    std::optional<std::vector<std::string>> argumentNames,
+    bool allowOptionalParameters) const
+{
+    using ILSpy::Decompiler::CSharp::Resolver::CSharpInvocationResolveResult;
+    using ILSpy::Decompiler::CSharp::Resolver::DynamicInvocationResolveResult;
+    using ILSpy::Decompiler::CSharp::Resolver::DynamicInvocationType;
+    using ILSpy::Decompiler::CSharp::Resolver::IsApplicable;
+    using ILSpy::Decompiler::CSharp::Resolver::MethodGroupResolveResult;
+    using ILSpy::Decompiler::CSharp::Resolver::MethodListWithDeclaringType;
+    using ILSpy::Decompiler::CSharp::Resolver::OverloadResolution;
+    using ILSpy::Decompiler::Semantics::ResolveResult;
+    using ILSpy::Decompiler::Semantics::TypeResolveResult;
+    using ILSpy::Decompiler::Semantics::UnknownIdentifierResolveResult;
+    using ILSpy::Decompiler::Semantics::UnknownMemberResolveResult;
+    using ILSpy::Decompiler::Semantics::UnknownMethodResolveResult;
+    using ILSpy::Decompiler::TypeSystem::GetDelegateInvokeMethod;
+    using ILSpy::Decompiler::TypeSystem::IMethod;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::SpecialType;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+
+    // C# 4.0 spec: section 7.6.5
+
+    if (target->Type().Kind() == TypeKind::Dynamic) {
+        return std::make_shared<DynamicInvocationResolveResult>(
+            std::move(target), DynamicInvocationType::Invocation,
+            AddArgumentNamesIfNecessary(arguments, argumentNames));
+    }
+
+    // The C# `arguments.Any(a => a.Type.Kind == TypeKind.Dynamic)`.
+    bool isDynamic = std::any_of(arguments.begin(), arguments.end(),
+                                 [](const std::shared_ptr<ResolveResult>& a) {
+                                     return a->Type().Kind() == TypeKind::Dynamic;
+                                 });
+    std::shared_ptr<MethodGroupResolveResult> mgrr =
+        std::dynamic_pointer_cast<MethodGroupResolveResult>(target);
+    if (mgrr) {
+        if (isDynamic) {
+            // If we have dynamic arguments, we need to represent the invocation as a
+            // dynamic invocation if there is more than one applicable method.
+            std::unique_ptr<OverloadResolution> or2 = CreateOverloadResolution(
+                arguments, argumentNames, mgrr->TypeArguments());
+            // The C# `mgrr.MethodsGroupedByDeclaringType.SelectMany(m => m, (x, m) =>
+            // new { x.DeclaringType, Method = m }).Where(x => OverloadResolution.
+            // IsApplicable(or2.AddCandidate(x.Method))).ToList()` -- the flattened
+            // (declaringType, method) pairs filtered by applicability. The C#
+            // `or2.AddCandidate(x.Method)` mutates or2's best-candidate state as a side
+            // effect; only the returned error mask is consumed (the throwaway
+            // resolution is faithful -- the C# discards or2 the same way).
+            struct ApplicableMethod {
+                const IType* declaringType;
+                const IMethod* method;
+            };
+            std::vector<ApplicableMethod> applicableMethods;
+            for (const MethodListWithDeclaringType& list :
+                 mgrr->MethodsGroupedByDeclaringType()) {
+                for (const auto* member : list) {
+                    const IMethod* method = static_cast<const IMethod*>(member);
+                    if (IsApplicable(or2->AddCandidate(*method)))
+                        applicableMethods.push_back({ &list.DeclaringType(), method });
+                }
+            }
+
+            if (applicableMethods.size() > 1) {
+                // The C# `applicableMethods.All(x => x.Method.IsStatic) && !(mgrr.
+                // TargetResult is TypeResolveResult)`.
+                bool allStatic = std::all_of(
+                    applicableMethods.begin(), applicableMethods.end(),
+                    [](const ApplicableMethod& x) { return x.method->IsStatic(); });
+                std::shared_ptr<ResolveResult> actualTarget;
+                if (allStatic
+                    && dynamic_cast<const TypeResolveResult*>(mgrr->TargetResult())
+                           == nullptr) {
+                    actualTarget = std::make_shared<TypeResolveResult>(
+                        std::const_pointer_cast<IType>(
+                            mgrr->TargetType().shared_from_this()));
+                } else {
+                    // The C# `actualTarget = mgrr.TargetResult` -- the aliasing handle
+                    // co-owns the method group (keeping the target result alive),
+                    // pointing at the target result (the LiftedUserDefinedOperator
+                    // convention).
+                    actualTarget =
+                        std::shared_ptr<ResolveResult>(mgrr, mgrr->TargetResult());
+                }
+
+                std::vector<MethodListWithDeclaringType> l;
+                for (const ApplicableMethod& m : applicableMethods) {
+                    // The C# `l[l.Count - 1].DeclaringType != m.DeclaringType` is a
+                    // REFERENCE comparison -- the port compares the addresses.
+                    if (l.empty() || &l.back().DeclaringType() != m.declaringType)
+                        l.emplace_back(
+                            std::const_pointer_cast<IType>(
+                                m.declaringType->shared_from_this()));
+                    l.back().push_back(m.method);
+                }
+                return std::make_shared<DynamicInvocationResolveResult>(
+                    std::make_shared<MethodGroupResolveResult>(
+                        std::move(actualTarget), mgrr->MethodName(), std::move(l),
+                        mgrr->TypeArguments()),
+                    DynamicInvocationType::Invocation,
+                    AddArgumentNamesIfNecessary(arguments, argumentNames));
+            }
+        }
+
+        // The C# `mgrr.PerformOverloadResolution(compilation, arguments, argumentNames,
+        // checkForOverflow: checkForOverflow, conversions: conversions,
+        // allowOptionalParameters: allowOptionalParameters)` -- the other flags keep
+        // their C# defaults (allowExtensionMethods/allowExpandingParams/allowImplicitIn
+        // all true).
+        std::unique_ptr<OverloadResolution> orr = mgrr->PerformOverloadResolution(
+            compilation_, arguments, argumentNames,
+            /*allowExtensionMethods*/ true, /*allowExpandingParams*/ true,
+            allowOptionalParameters, /*allowImplicitIn*/ true, CheckForOverflow(),
+            &Conversions());
+        if (orr->BestCandidate() != nullptr) {
+            // The C# `returnTypeOverride: isDynamic ? SpecialType.Dynamic : null` (the
+            // D469 DynamicMemberResolveResult precedent for the SpecialType.Dynamic
+            // construction).
+            ITypePtr returnTypeOverride =
+                isDynamic
+                    ? std::make_shared<SpecialType>(TypeKind::Dynamic, /*isReferenceType*/ true)
+                    : nullptr;
+            // The C# `or.BestCandidate.IsStatic && !or.IsExtensionMethodInvocation &&
+            // !(mgrr.TargetResult is TypeResolveResult)` -- a static non-extension
+            // invocation over a VALUE target re-targets to the type itself.
+            if (orr->BestCandidate()->IsStatic() && !orr->IsExtensionMethodInvocation()
+                && dynamic_cast<const TypeResolveResult*>(mgrr->TargetResult()) == nullptr) {
+                return orr->CreateResolveResult(
+                    std::make_shared<TypeResolveResult>(
+                        std::const_pointer_cast<IType>(
+                            mgrr->TargetType().shared_from_this())),
+                    /*initializerStatements*/ {}, std::move(returnTypeOverride));
+            } else {
+                // The C# `or.CreateResolveResult(mgrr.TargetResult, ...)` -- the aliasing
+                // handle co-owns the method group (the LiftedUserDefinedOperator
+                // convention).
+                return orr->CreateResolveResult(
+                    std::shared_ptr<ResolveResult>(mgrr, mgrr->TargetResult()),
+                    /*initializerStatements*/ {}, std::move(returnTypeOverride));
+            }
+        } else {
+            // No candidate found at all (not even an inapplicable one).
+            // This can happen with empty method groups (as sometimes used with
+            // extension methods)
+            return std::make_shared<UnknownMethodResolveResult>(
+                std::const_pointer_cast<IType>(mgrr->TargetType().shared_from_this()),
+                mgrr->MethodName(), mgrr->TypeArguments(),
+                CreateParameters(arguments, argumentNames));
+        }
+    }
+    const UnknownMemberResolveResult* umrr =
+        dynamic_cast<const UnknownMemberResolveResult*>(target.get());
+    if (umrr != nullptr) {
+        return std::make_shared<UnknownMethodResolveResult>(
+            std::const_pointer_cast<IType>(umrr->TargetType().shared_from_this()),
+            umrr->MemberName(), umrr->TypeArguments(),
+            CreateParameters(arguments, argumentNames));
+    }
+    const UnknownIdentifierResolveResult* uirr =
+        dynamic_cast<const UnknownIdentifierResolveResult*>(target.get());
+    if (uirr != nullptr && CurrentTypeDefinition() != nullptr) {
+        // The C# `new UnknownMethodResolveResult(CurrentTypeDefinition, uirr.Identifier,
+        // EmptyList<IType>.Instance, ...)` -- the definition's owning handle is
+        // recovered via `shared_from_this` + `const_pointer_cast` (the D529
+        // convention; the upcast to `ITypePtr` is implicit).
+        return std::make_shared<UnknownMethodResolveResult>(
+            std::const_pointer_cast<IType>(CurrentTypeDefinition()->shared_from_this()),
+            uirr->Identifier(), std::vector<ITypePtr>{},
+            CreateParameters(arguments, argumentNames));
+    }
+    const IMethod* invokeMethod = GetDelegateInvokeMethod(target->Type());
+    if (invokeMethod != nullptr) {
+        std::unique_ptr<OverloadResolution> orr =
+            CreateOverloadResolution(arguments, argumentNames);
+        orr->AddCandidate(*invokeMethod);
+        // The C# named-argument construction `new CSharpInvocationResolveResult(target,
+        // invokeMethod, or.GetArgumentsWithConversionsAndNames(), or.
+        // BestCandidateErrors, isExpandedForm: or.BestCandidateIsExpandedForm,
+        // isDelegateInvocation: true, argumentToParameterMap: or.
+        // GetArgumentToParameterMap(), returnTypeOverride: isDynamic ? SpecialType.
+        // Dynamic : null)` -- the unnamed C#-default parameters (isExtensionMethod
+        // Invocation: false, initializerStatements: null) stay at the port ctor's
+        // defaults.
+        return std::make_shared<CSharpInvocationResolveResult>(
+            std::move(target), invokeMethod, orr->GetArgumentsWithConversionsAndNames(),
+            orr->BestCandidateErrors(),
+            /*isExtensionMethodInvocation*/ false,
+            /*isExpandedForm*/ orr->BestCandidateIsExpandedForm(),
+            /*isDelegateInvocation*/ true, orr->GetArgumentToParameterMap(),
+            /*initializerStatements*/ std::vector<std::shared_ptr<
+                ILSpy::Decompiler::Semantics::ResolveResult>>{},
+            isDynamic
+                ? std::make_shared<SpecialType>(TypeKind::Dynamic, /*isReferenceType*/ true)
+                : nullptr);
+    }
+    return ErrorResultSingleton();
+}
+
+// The C# `List<IParameter> CreateParameters(ResolveResult[] arguments, string[]
+// argumentNames)` (line 2348) -- see CSharpResolver.hpp for the port conventions.
+std::vector<std::shared_ptr<const ILSpy::Decompiler::TypeSystem::IParameter>>
+CSharpResolver::CreateParameters(
+    const std::vector<std::shared_ptr<ILSpy::Decompiler::Semantics::ResolveResult>>& arguments,
+    const std::optional<std::vector<std::string>>& argumentNames) const
+{
+    using ILSpy::Decompiler::Semantics::ByReferenceResolveResult;
+    using ILSpy::Decompiler::TypeSystem::Implementation::DefaultParameter;
+    using ILSpy::Decompiler::TypeSystem::IParameter;
+    using ILSpy::Decompiler::TypeSystem::IType;
+    using ILSpy::Decompiler::TypeSystem::ITypePtr;
+    using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+
+    std::vector<std::shared_ptr<const IParameter>> list;
+    // The C# mutates a LOCAL copy of argumentNames (null -> a fresh all-null array;
+    // non-null -> a clone): the port normalizes into a local vector where a null ENTRY
+    // is the empty string (the GetArgumentsWithConversions normalization).
+    std::vector<std::string> names;
+    if (!argumentNames.has_value()) {
+        names.assign(arguments.size(), std::string{});
+    } else {
+        // The C# `if (argumentNames.Length != arguments.Length) throw new
+        // ArgumentException()`.
+        if (argumentNames->size() != arguments.size())
+            throw std::invalid_argument(
+                "CSharpResolver::CreateParameters: argumentNames length mismatch");
+        names = *argumentNames;
+    }
+    for (size_t i = 0; i < arguments.size(); i++) {
+        // invent argument names where necessary:
+        if (names[i].empty()) {
+            std::string newArgumentName = GuessParameterName(*arguments[i]);
+            // The C# `argumentNames.Contains(newArgumentName)` (the local copy -- the
+            // already-invented names and the given entries alike).
+            if (std::find(names.begin(), names.end(), newArgumentName) != names.end()) {
+                // disambiguate argument name (e.g. add a number)
+                int num = 1;
+                std::string newName;
+                do {
+                    newName = newArgumentName + std::to_string(num);
+                    num++;
+                } while (std::find(names.begin(), names.end(), newName) != names.end());
+                newArgumentName = newName;
+            }
+            names[i] = newArgumentName;
+        }
+
+        // create the parameter:
+        const ByReferenceResolveResult* brrr =
+            dynamic_cast<const ByReferenceResolveResult*>(arguments[i].get());
+        if (brrr != nullptr) {
+            // The C# `new DefaultParameter(arguments[i].Type, argumentNames[i],
+            // referenceKind: brrr.ReferenceKind)`.
+            list.push_back(std::make_shared<DefaultParameter>(
+                arguments[i]->TypePtr(), names[i], /*owner*/ nullptr,
+                /*attributes*/ std::vector<const ILSpy::Decompiler::TypeSystem::IAttribute*>{},
+                brrr->ReferenceKind()));
+        } else {
+            // argument might be a lambda or delegate type, so we have to try to guess
+            // the delegate type
+            const IType& type = arguments[i]->Type();
+            if (type.Kind() == TypeKind::Null || type.Kind() == TypeKind::None) {
+                // The C# `new DefaultParameter(compilation.FindType(KnownTypeCode.
+                // Object), argumentNames[i])` -- the owning handle is recovered via
+                // `shared_from_this` + `const_pointer_cast` (the D529 convention; the
+                // registered known types are shared-managed).
+                list.push_back(std::make_shared<DefaultParameter>(
+                    std::const_pointer_cast<IType>(
+                        compilation_.FindType(KnownTypeCode::Object).shared_from_this()),
+                    names[i]));
+            } else {
+                list.push_back(std::make_shared<DefaultParameter>(arguments[i]->TypePtr(),
+                                                                   names[i]));
+            }
+        }
+    }
+    return list;
+}
+
+// The C# `static string GuessParameterName(ResolveResult rr)` (line 2398) -- see
+// CSharpResolver.hpp for the port conventions.
+std::string CSharpResolver::GuessParameterName(
+    const ILSpy::Decompiler::Semantics::ResolveResult& rr)
+{
+    using ILSpy::Decompiler::CSharp::Resolver::MethodGroupResolveResult;
+    using ILSpy::Decompiler::Semantics::LocalResolveResult;
+    using ILSpy::Decompiler::Semantics::MemberResolveResult;
+    using ILSpy::Decompiler::Semantics::UnknownMemberResolveResult;
+    using ILSpy::Decompiler::TypeSystem::TypeKind;
+
+    const MemberResolveResult* mrr = dynamic_cast<const MemberResolveResult*>(&rr);
+    if (mrr != nullptr)
+        return mrr->Member()->Name();
+
+    const UnknownMemberResolveResult* umrr =
+        dynamic_cast<const UnknownMemberResolveResult*>(&rr);
+    if (umrr != nullptr)
+        return umrr->MemberName();
+
+    const MethodGroupResolveResult* mgrr =
+        dynamic_cast<const MethodGroupResolveResult*>(&rr);
+    if (mgrr != nullptr)
+        return mgrr->MethodName();
+
+    const LocalResolveResult* vrr = dynamic_cast<const LocalResolveResult*>(&rr);
+    if (vrr != nullptr)
+        return MakeParameterName(vrr->Variable()->Name());
+
+    // The C# `rr.Type.Kind != TypeKind.Unknown && !string.IsNullOrEmpty(rr.Type.Name)`.
+    if (rr.Type().Kind() != TypeKind::Unknown && !rr.Type().Name().empty()) {
+        return MakeParameterName(rr.Type().Name());
+    } else {
+        return "parameter";
+    }
+}
+
+// The C# `static string MakeParameterName(string variableName)` (line 2426) -- see
+// CSharpResolver.hpp for the port conventions.
+std::string CSharpResolver::MakeParameterName(const std::string& variableName)
+{
+    // The C# `if (string.IsNullOrEmpty(variableName)) return "parameter";`.
+    if (variableName.empty())
+        return "parameter";
+    std::string result = variableName;
+    // The C# `if (variableName.Length > 1 && variableName[0] == '_') variableName =
+    // variableName.Substring(1);`.
+    if (result.size() > 1 && result[0] == '_')
+        result = result.substr(1);
+    // The C# `char.ToLower(variableName[0])` -- the invariant ASCII lower-casing (the
+    // en-US convention).
+    result[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(result[0])));
+    return result;
 }
 
 // ---- Numeric promotion region (CSharpResolver.cs lines 536-561 + 1055-1230) ----------------

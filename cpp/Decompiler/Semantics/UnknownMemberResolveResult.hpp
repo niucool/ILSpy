@@ -228,6 +228,29 @@ public:
           parameters_(std::move(parameters)) {
     }
 
+    // The same ctor shape for SYNTHESIZED parameters (the `CSharpResolver
+    // .CreateParameters` call sites): the C# `ReadOnlyCollection` snapshot keeps
+    // the freshly-created parameters alive (the GC owns them), while the raw-pointer
+    // ctor above models the type-system-owned shape where the caller guarantees the
+    // lifetime. This overload takes OWNING handles (the synthesized-parameter
+    // convention -- `CSharpOperators::MakeParameter` / `OperatorMethod::AddParameter`)
+    // and keeps them alive for the result's lifetime, exposing the same `Parameters()`
+    // view over the raw pointers. Additive: the raw-pointer ctor above is untouched
+    // (the additive-setter convention); the default copy ctor (used by `ShallowClone`)
+    // copies BOTH members, so a clone keeps the synthesized parameters alive too.
+    UnknownMethodResolveResult(ILSpy::Decompiler::TypeSystem::ITypePtr targetType,
+                               std::string methodName,
+                               std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> typeArguments,
+                               std::vector<std::shared_ptr<const ILSpy::Decompiler::TypeSystem::IParameter>> ownedParameters)
+        : UnknownMemberResolveResult(std::move(targetType), std::move(methodName),
+                                     std::move(typeArguments))
+    {
+        ownedParameters_ = std::move(ownedParameters);
+        parameters_.reserve(ownedParameters_.size());
+        for (const auto& p : ownedParameters_)
+            parameters_.push_back(p.get());
+    }
+
     // The C# `ReadOnlyCollection<IParameter> Parameters` (a snapshot of the
     // ctor's `IEnumerable<IParameter>`) ports to `const std::vector<const
     // IParameter*>&` (the D438 list-to-pointer-vector convention); the snapshot
@@ -260,6 +283,9 @@ public:
 
 private:
     std::vector<const ILSpy::Decompiler::TypeSystem::IParameter*> parameters_;
+    // The owning handles behind `parameters_` for the synthesized-parameter ctor
+    // (empty for the raw-pointer ctor -- the caller owns the parameters there).
+    std::vector<std::shared_ptr<const ILSpy::Decompiler::TypeSystem::IParameter>> ownedParameters_;
 };
 
 // The C# `public class UnknownIdentifierResolveResult : ResolveResult` (NOT
