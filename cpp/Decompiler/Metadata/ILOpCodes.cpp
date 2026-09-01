@@ -24,6 +24,8 @@
 #include "Decompiler/Metadata/ILOpCodes.hpp"
 
 #include <cstddef>
+#include <string>
+#include <unordered_set>
 
 namespace ILSpy::Decompiler::Metadata {
 
@@ -128,6 +130,55 @@ bool IsBranch(ILOpCode opCode) {
         default:
             return false;
     }
+}
+
+// ---------------------------------------------------------------------------
+// ILKeywords (OperandType.cs lines 67-105 -- the ILOpCodeExtensions static
+// ctor's BuildKeywordList): the explicit ILAsm keyword list plus every
+// non-empty opcode display name. Built once on first use (the C# static
+// readonly field initializer; the function-local static is the compute-once
+// convention).
+// ---------------------------------------------------------------------------
+const std::unordered_set<std::string>& ILKeywords() {
+    static const std::unordered_set<std::string> keywords = [] {
+        std::unordered_set<std::string> s{
+            "abstract", "algorithm", "alignment", "ansi", "any", "arglist",
+            "array", "as", "assembly", "assert", "at", "auto", "autochar", "beforefieldinit",
+            "blob", "blob_object", "bool", "brnull", "brnull.s", "brzero", "brzero.s", "bstr",
+            "bytearray", "byvalstr", "callmostderived", "carray", "catch", "cdecl", "cf",
+            "char", "cil", "class", "clsid", "const", "currency", "custom", "date", "decimal",
+            "default", "demand", "deny", "endmac", "enum", "error", "explicit", "extends", "extern",
+            "false", "famandassem", "family", "famorassem", "fastcall", "fault", "field", "filetime",
+            "filter", "final", "finally", "fixed", "float", "float32", "float64", "forwardref",
+            "fromunmanaged", "handler", "hidebysig", "hresult", "idispatch", "il", "illegal",
+            "implements", "implicitcom", "implicitres", "import", "in", "inheritcheck", "init",
+            "initonly", "instance", "int", "int16", "int32", "int64", "int8", "interface", "internalcall",
+            "iunknown", "lasterr", "lcid", "linkcheck", "literal", "localloc", "lpstr", "lpstruct", "lptstr",
+            "lpvoid", "lpwstr", "managed", "marshal", "method", "modopt", "modreq", "native", "nested",
+            "newslot", "noappdomain", "noinlining", "nomachine", "nomangle", "nometadata", "noncasdemand",
+            "noncasinheritance", "noncaslinkdemand", "noprocess", "not", "not_in_gc_heap", "notremotable",
+            "notserialized", "null", "nullref", "object", "objectref", "opt", "optil", "out",
+            "permitonly", "pinned", "pinvokeimpl", "prefix1", "prefix2", "prefix3", "prefix4", "prefix5", "prefix6",
+            "prefix7", "prefixref", "prejitdeny", "prejitgrant", "preservesig", "private", "privatescope", "protected",
+            "public", "record", "refany", "reqmin", "reqopt", "reqrefuse", "reqsecobj", "request", "retval",
+            "rtspecialname", "runtime", "safearray", "sealed", "sequential", "serializable", "special", "specialname",
+            "static", "stdcall", "storage", "stored_object", "stream", "streamed_object", "string", "struct",
+            "synchronized", "syschar", "sysstring", "tbstr", "thiscall", "tls", "to", "true", "typedref",
+            "unicode", "unmanaged", "unmanagedexp", "unsigned", "unused", "userdefined", "value", "valuetype",
+            "vararg", "variant", "vector", "virtual", "void", "wchar", "winapi", "with", "wrapper",
+            // These are not listed as keywords in spec, but ILAsm treats them as such
+            "property", "type", "flags", "codelabel", "callconv", "strict",
+            // ILDasm uses these keywords for unsigned integers
+            "uint8", "uint16", "uint32", "uint64",
+        };
+        // BuildKeywordList: every non-empty opcode display name is also a keyword.
+        for (const char* name : kOperandNames) {
+            if (name != nullptr && *name != '\0')
+                s.emplace(name);
+        }
+        return s;
+    }();
+    return keywords;
 }
 
 bool IsConditionalBranch(ILOpCode opCode) {

@@ -1,0 +1,537 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+// Tests for `DisassemblerHelpers` (cpp/Decompiler/Disassembler/DisassemblerHelpers.hpp --
+// the port of the Phase-6 static helper class MethodBodyDisassembler and
+// ReflectionDisassembler consume): the IL_xxxx offset labels, the identifier
+// escape rules over the ILKeywords set, the operand writers (the ILDasm
+// literal spellings), the string escaper, the primitive type-name table, and
+// the parameter/variable references. The WriteParameterReference tests pin the
+// Static-flag sequence mapping against a real mscorlib fixture (the
+// MetadataAttributes_Test conventions): String.Copy(String str) is static
+// (IL index 0 == "str"), String.Substring(int startIndex) is an instance
+// method (IL index 0 is the implicit this, IL index 1 == "startIndex").
+
+#include "Decompiler/Disassembler/DisassemblerHelpers.hpp"
+#include "Decompiler/Metadata/ILOpCodes.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/Output/PlainTextOutput.hpp"
+
+#include <gtest/gtest.h>
+
+#include <any>
+#include <cstdint>
+#include <filesystem>
+#include <limits>
+#include <string>
+#include <string_view>
+
+using namespace ILSpy::Decompiler::Disassembler;
+namespace MD = ILSpy::Decompiler::Metadata;
+namespace OUT = ILSpy::Decompiler::Output;
+
+namespace {
+
+const char* FixturePath() {
+#if defined(_WIN32)
+    return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll";
+#else
+    return "/usr/lib/mono/4.5/mscorlib.dll";
+#endif
+}
+
+std::uint32_t FindType(MD::MetadataFile& f, std::string_view ns, std::string_view name) {
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == ns && t.Name == name) return t.Token;
+    }
+    return 0;
+}
+
+std::uint32_t FindMethodToken(MD::MetadataFile& f, std::uint32_t typeToken, std::string_view name) {
+    for (const auto& m : f.GetMethods(typeToken)) {
+        if (m.Name == name) return m.Token;
+    }
+    return 0;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// OffsetToString / WriteOffsetReference / WriteVariableReference
+// ---------------------------------------------------------------------------
+
+TEST(DisassemblerHelpersTest, OffsetToStringFormatsLowercaseHexPaddedToFour) {
+	EXPECT_EQ(OffsetToString(0), "IL_0000");
+	EXPECT_EQ(OffsetToString(0x1234), "IL_1234");
+	EXPECT_EQ(OffsetToString(0xFFFF), "IL_ffff");
+}
+
+TEST(DisassemblerHelpersTest, OffsetToStringDoesNotTruncatePastFourDigits) {
+	// The C# "{0:x4}" is a minimum width, not a limit.
+	EXPECT_EQ(OffsetToString(0x10000), "IL_10000");
+	EXPECT_EQ(OffsetToString(0x123456), "IL_123456");
+}
+
+TEST(DisassemblerHelpersTest, OffsetToStringLongOverloadMatches) {
+	EXPECT_EQ(OffsetToString(std::int64_t(0)), "IL_0000");
+	EXPECT_EQ(OffsetToString(std::int64_t(0x1234)), "IL_1234");
+	EXPECT_EQ(OffsetToString(std::int64_t(0x123456789ABLL)), "IL_123456789ab");
+}
+
+TEST(DisassemblerHelpersTest, WriteOffsetReferenceNullWritesNull) {
+	OUT::PlainTextOutput output;
+	WriteOffsetReference(output, std::nullopt);
+	EXPECT_EQ(output.ToString(), "null");
+}
+
+TEST(DisassemblerHelpersTest, WriteOffsetReferenceWritesTheLabel) {
+	OUT::PlainTextOutput output;
+	WriteOffsetReference(output, 8);
+	EXPECT_EQ(output.ToString(), "IL_0008");
+
+	OUT::PlainTextOutput output2;
+	WriteOffsetReference(output2, 0x1234);
+	EXPECT_EQ(output2.ToString(), "IL_1234");
+}
+
+TEST(DisassemblerHelpersTest, WriteVariableReferenceWritesTheBareIndex) {
+	OUT::PlainTextOutput output;
+	WriteVariableReference(output, 3);
+	EXPECT_EQ(output.ToString(), "3");
+
+	OUT::PlainTextOutput output2;
+	WriteVariableReference(output2, 17);
+	EXPECT_EQ(output2.ToString(), "17");
+}
+
+// ---------------------------------------------------------------------------
+// ILKeywords + IsValidIdentifier + Escape
+// ---------------------------------------------------------------------------
+
+TEST(DisassemblerHelpersEscapeTest, ILKeywordsContainTheILAsmKeywords) {
+	const auto& keywords = MD::ILKeywords();
+	EXPECT_GT(keywords.count("class"), 0u);
+	EXPECT_GT(keywords.count("int32"), 0u);
+	EXPECT_GT(keywords.count("static"), 0u);
+	EXPECT_GT(keywords.count("catch"), 0u);
+	EXPECT_GT(keywords.count("native"), 0u);
+	EXPECT_GT(keywords.count("uint8"), 0u);
+	// The not-in-spec-but-ILAsm-treats-as-such tail of the C# list.
+	EXPECT_GT(keywords.count("property"), 0u);
+	EXPECT_GT(keywords.count("codelabel"), 0u);
+	EXPECT_GT(keywords.count("strict"), 0u);
+}
+
+TEST(DisassemblerHelpersEscapeTest, ILKeywordsContainTheOpcodeDisplayNames) {
+	// BuildKeywordList adds every non-empty opcode display name.
+	const auto& keywords = MD::ILKeywords();
+	EXPECT_GT(keywords.count("nop"), 0u);
+	EXPECT_GT(keywords.count("ldarg.0"), 0u);
+	EXPECT_GT(keywords.count("ret"), 0u);
+	EXPECT_GT(keywords.count("ldftn"), 0u);
+	// The prefix opcode names keep their trailing dot.
+	EXPECT_GT(keywords.count("unaligned."), 0u);
+	EXPECT_GT(keywords.count("volatile."), 0u);
+	EXPECT_GT(keywords.count("readonly."), 0u);
+}
+
+TEST(DisassemblerHelpersEscapeTest, ILKeywordsDoNotContainOrdinaryIdentifiers) {
+	const auto& keywords = MD::ILKeywords();
+	EXPECT_EQ(keywords.count("Main"), 0u);
+	EXPECT_EQ(keywords.count("notakeyword"), 0u);
+	EXPECT_EQ(keywords.count("System"), 0u);
+	EXPECT_EQ(keywords.count(""), 0u);
+}
+
+TEST(DisassemblerHelpersEscapeTest, IsValidIdentifierAcceptsOrdinaryNames) {
+	EXPECT_TRUE(IsValidIdentifier("Main"));
+	EXPECT_TRUE(IsValidIdentifier("_x"));
+	EXPECT_TRUE(IsValidIdentifier("a$b"));
+	EXPECT_TRUE(IsValidIdentifier("x@y"));
+	EXPECT_TRUE(IsValidIdentifier("q?r"));
+	EXPECT_TRUE(IsValidIdentifier("t`u"));
+	EXPECT_TRUE(IsValidIdentifier("v.w"));
+	EXPECT_TRUE(IsValidIdentifier("M\xc3\xa9thodo"));  // UTF-8 "Méthodo": letters
+}
+
+TEST(DisassemblerHelpersEscapeTest, IsValidIdentifierRejectsTheEmptyString) {
+	EXPECT_FALSE(IsValidIdentifier(""));
+}
+
+TEST(DisassemblerHelpersEscapeTest, IsValidIdentifierRejectsDigitStarts) {
+	EXPECT_FALSE(IsValidIdentifier("1abc"));
+	EXPECT_FALSE(IsValidIdentifier("0"));
+}
+
+TEST(DisassemblerHelpersEscapeTest, IsValidIdentifierAcceptsOnlyCtorAndCctorDotForms) {
+	EXPECT_TRUE(IsValidIdentifier(".ctor"));
+	EXPECT_TRUE(IsValidIdentifier(".cctor"));
+	EXPECT_FALSE(IsValidIdentifier(".foo"));
+	EXPECT_FALSE(IsValidIdentifier("."));
+}
+
+TEST(DisassemblerHelpersEscapeTest, IsValidIdentifierRejectsDoubleDots) {
+	EXPECT_FALSE(IsValidIdentifier("a..b"));
+}
+
+TEST(DisassemblerHelpersEscapeTest, IsValidIdentifierRejectsILKeywords) {
+	EXPECT_FALSE(IsValidIdentifier("int"));
+	EXPECT_FALSE(IsValidIdentifier("class"));
+	EXPECT_FALSE(IsValidIdentifier("ldarg.0"));
+	EXPECT_FALSE(IsValidIdentifier("unaligned."));
+	EXPECT_FALSE(IsValidIdentifier("uint32"));
+}
+
+TEST(DisassemblerHelpersEscapeTest, IsValidIdentifierRejectsInvalidCharacters) {
+	EXPECT_FALSE(IsValidIdentifier("a b"));   // space is not an identifier char
+	EXPECT_FALSE(IsValidIdentifier("a;b"));
+	EXPECT_FALSE(IsValidIdentifier("a(b)"));
+}
+
+TEST(DisassemblerHelpersEscapeTest, EscapePassesValidIdentifiersThrough) {
+	EXPECT_EQ(Escape("Main"), "Main");
+	EXPECT_EQ(Escape(".ctor"), ".ctor");
+	EXPECT_EQ(Escape("a$b"), "a$b");
+}
+
+TEST(DisassemblerHelpersEscapeTest, EscapeQuotesKeywords) {
+	EXPECT_EQ(Escape("int"), "'int'");
+	EXPECT_EQ(Escape("class"), "'class'");
+	EXPECT_EQ(Escape("ldarg.0"), "'ldarg.0'");
+}
+
+TEST(DisassemblerHelpersEscapeTest, EscapeQuotesInvalidShapes) {
+	EXPECT_EQ(Escape(".foo"), "'.foo'");
+	EXPECT_EQ(Escape("a..b"), "'a..b'");
+	EXPECT_EQ(Escape("1abc"), "'1abc'");
+	EXPECT_EQ(Escape("a b"), "'a b'");
+	EXPECT_EQ(Escape(""), "''");
+}
+
+TEST(DisassemblerHelpersEscapeTest, EscapeQuotesSingleQuotesWithBackslash) {
+	// The ECMA octal escape is deliberately not used (the C# comment: ILDasm
+	// uses \').
+	EXPECT_EQ(Escape("a'b"), "'a\\'b'");
+}
+
+// ---------------------------------------------------------------------------
+// EscapeString
+// ---------------------------------------------------------------------------
+
+TEST(DisassemblerHelpersEscapeTest, EscapeStringLeavesPlainAsciiUnchanged) {
+	EXPECT_EQ(EscapeString("abc"), "abc");
+	EXPECT_EQ(EscapeString("a b"), "a b");  // the plain space is NOT escaped
+}
+
+TEST(DisassemblerHelpersEscapeTest, EscapeStringUsesTheNamedEscapes) {
+	EXPECT_EQ(EscapeString("a\"b"), "a\\\"b");
+	EXPECT_EQ(EscapeString("a\\b"), "a\\\\b");
+	// The full control-char set: \0 \a \b \f \n \r \t \v.
+	const std::string input{std::string("\0\a\b\f\n\r\t\v", 8)};
+	EXPECT_EQ(EscapeString(input), "\\0\\a\\b\\f\\n\\r\\t\\v");
+}
+
+TEST(DisassemblerHelpersEscapeTest, EscapeStringEscapesControlCharsAsUnicode) {
+	EXPECT_EQ(EscapeString("\x01"), "\\u0001");
+	EXPECT_EQ(EscapeString("\x7f"), "\\u007f");
+	// 0x85 (NEL) is inside the control set 0x7F-0x9F.
+	EXPECT_EQ(EscapeString("\xc2\x85"), "\\u0085");
+}
+
+TEST(DisassemblerHelpersEscapeTest, EscapeStringEscapesNonSpaceWhitespace) {
+	// U+00A0 (no-break space) as UTF-8.
+	EXPECT_EQ(EscapeString("\xc2\xa0"), "\\u00a0");
+	// U+2028 (line separator) as UTF-8.
+	EXPECT_EQ(EscapeString("\xe2\x80\xa8"), "\\u2028");
+}
+
+TEST(DisassemblerHelpersEscapeTest, EscapeStringEmitsSurrogateHalvesForNonBmp) {
+	// U+1F600 (GRINNING FACE) as UTF-8: the C# iterates the two UTF-16
+	// surrogate halves, each IsSurrogate half escaping separately.
+	EXPECT_EQ(EscapeString("\xf0\x9f\x98\x80"), "\\ud83d\\ude00");
+}
+
+TEST(DisassemblerHelpersEscapeTest, EscapeStringPassesNonAsciiLettersThrough) {
+	// "é" as UTF-8: a letter, not control/whitespace/surrogate.
+	EXPECT_EQ(EscapeString("\xc3\xa9"), "\xc3\xa9");
+}
+
+// ---------------------------------------------------------------------------
+// WriteOperand
+// ---------------------------------------------------------------------------
+
+TEST(DisassemblerHelpersTest, WriteOperandLongWritesInvariantDigits) {
+	OUT::PlainTextOutput output;
+	WriteOperand(output, std::int64_t(123));
+	EXPECT_EQ(output.ToString(), "123");
+
+	OUT::PlainTextOutput output2;
+	WriteOperand(output2, std::int64_t(-45));
+	EXPECT_EQ(output2.ToString(), "-45");
+}
+
+TEST(DisassemblerHelpersTest, WriteOperandFloatZeroAndNegativeZero) {
+	OUT::PlainTextOutput output;
+	WriteOperand(output, 0.0f);
+	EXPECT_EQ(output.ToString(), "0.0");
+
+	OUT::PlainTextOutput output2;
+	WriteOperand(output2, -0.0f);
+	EXPECT_EQ(output2.ToString(), "-0.0");
+}
+
+TEST(DisassemblerHelpersTest, WriteOperandFloatRoundTripFormat) {
+	OUT::PlainTextOutput output;
+	WriteOperand(output, 1.5f);
+	EXPECT_EQ(output.ToString(), "1.5");
+
+	OUT::PlainTextOutput output2;
+	WriteOperand(output2, 2.0f);
+	EXPECT_EQ(output2.ToString(), "2");
+
+	OUT::PlainTextOutput output3;
+	WriteOperand(output3, 1e-30f);
+	// The C# "R" format uses the uppercase exponent marker.
+	EXPECT_EQ(output3.ToString(), "1E-30");
+}
+
+TEST(DisassemblerHelpersTest, WriteOperandFloatDumpsInfinityAndNaNBytes) {
+	OUT::PlainTextOutput output;
+	WriteOperand(output, std::numeric_limits<float>::infinity());
+	EXPECT_EQ(output.ToString(), "(00 00 80 7F)");
+
+	OUT::PlainTextOutput output2;
+	WriteOperand(output2, -std::numeric_limits<float>::infinity());
+	EXPECT_EQ(output2.ToString(), "(00 00 80 FF)");
+
+	OUT::PlainTextOutput output3;
+	WriteOperand(output3, std::numeric_limits<float>::quiet_NaN());
+	EXPECT_EQ(output3.ToString(), "(00 00 C0 7F)");
+}
+
+TEST(DisassemblerHelpersTest, WriteOperandDoubleZeroAndNegativeZero) {
+	OUT::PlainTextOutput output;
+	WriteOperand(output, 0.0);
+	EXPECT_EQ(output.ToString(), "0.0");
+
+	OUT::PlainTextOutput output2;
+	WriteOperand(output2, -0.0);
+	EXPECT_EQ(output2.ToString(), "-0.0");
+}
+
+TEST(DisassemblerHelpersTest, WriteOperandDoubleRoundTripFormat) {
+	OUT::PlainTextOutput output;
+	WriteOperand(output, 1.5);
+	EXPECT_EQ(output.ToString(), "1.5");
+
+	OUT::PlainTextOutput output2;
+	WriteOperand(output2, 1.0);
+	EXPECT_EQ(output2.ToString(), "1");
+
+	OUT::PlainTextOutput output3;
+	WriteOperand(output3, 1e-300);
+	EXPECT_EQ(output3.ToString(), "1E-300");
+}
+
+TEST(DisassemblerHelpersTest, WriteOperandDoubleDumpsInfinityAndNaNBytes) {
+	OUT::PlainTextOutput output;
+	WriteOperand(output, std::numeric_limits<double>::infinity());
+	EXPECT_EQ(output.ToString(), "(00 00 00 00 00 00 F0 7F)");
+
+	OUT::PlainTextOutput output2;
+	WriteOperand(output2, std::numeric_limits<double>::quiet_NaN());
+	EXPECT_EQ(output2.ToString(), "(00 00 00 00 00 00 F8 7F)");
+}
+
+TEST(DisassemblerHelpersTest, WriteOperandStringWritesQuotedEscapedLiteral) {
+	OUT::PlainTextOutput output;
+	WriteOperand(output, std::string_view("abc"));
+	EXPECT_EQ(output.ToString(), "\"abc\"");
+
+	OUT::PlainTextOutput output2;
+	WriteOperand(output2, std::string_view("a\"b"));
+	EXPECT_EQ(output2.ToString(), "\"a\\\"b\"");
+
+	OUT::PlainTextOutput output3;
+	WriteOperand(output3, std::string_view("a\nb"));
+	EXPECT_EQ(output3.ToString(), "\"a\\nb\"");
+}
+
+TEST(DisassemblerHelpersTest, WriteOperandObjectDispatchesOnTheHeldType) {
+	OUT::PlainTextOutput output;
+	WriteOperand(output, std::any(std::string("abc")));
+	EXPECT_EQ(output.ToString(), "\"abc\"");  // delegates to the string overload
+
+	OUT::PlainTextOutput output2;
+	WriteOperand(output2, std::any(char16_t('A')));
+	EXPECT_EQ(output2.ToString(), "65");  // the char's code unit as a decimal
+
+	OUT::PlainTextOutput output3;
+	WriteOperand(output3, std::any(static_cast<char16_t>(0x263A)));
+	EXPECT_EQ(output3.ToString(), "9786");
+
+	OUT::PlainTextOutput output4;
+	WriteOperand(output4, std::any(1.5f));
+	EXPECT_EQ(output4.ToString(), "1.5");  // delegates to the float overload
+
+	OUT::PlainTextOutput output5;
+	WriteOperand(output5, std::any(2.5));
+	EXPECT_EQ(output5.ToString(), "2.5");  // delegates to the double overload
+
+	OUT::PlainTextOutput output6;
+	WriteOperand(output6, std::any(true));
+	EXPECT_EQ(output6.ToString(), "true");
+
+	OUT::PlainTextOutput output7;
+	WriteOperand(output7, std::any(false));
+	EXPECT_EQ(output7.ToString(), "false");
+}
+
+TEST(DisassemblerHelpersTest, WriteOperandObjectWritesIntegralDigits) {
+	OUT::PlainTextOutput o1;
+	WriteOperand(o1, std::any(static_cast<std::int8_t>(-5)));
+	EXPECT_EQ(o1.ToString(), "-5");
+
+	OUT::PlainTextOutput o2;
+	WriteOperand(o2, std::any(static_cast<std::uint8_t>(200)));
+	EXPECT_EQ(o2.ToString(), "200");
+
+	OUT::PlainTextOutput o3;
+	WriteOperand(o3, std::any(static_cast<std::int16_t>(-1000)));
+	EXPECT_EQ(o3.ToString(), "-1000");
+
+	OUT::PlainTextOutput o4;
+	WriteOperand(o4, std::any(static_cast<std::uint16_t>(60000)));
+	EXPECT_EQ(o4.ToString(), "60000");
+
+	OUT::PlainTextOutput o5;
+	WriteOperand(o5, std::any(static_cast<std::int32_t>(-42)));
+	EXPECT_EQ(o5.ToString(), "-42");
+
+	OUT::PlainTextOutput o6;
+	WriteOperand(o6, std::any(static_cast<std::uint32_t>(4000000000u)));
+	EXPECT_EQ(o6.ToString(), "4000000000");
+
+	OUT::PlainTextOutput o7;
+	WriteOperand(o7, std::any(static_cast<std::int64_t>(-9000000000LL)));
+	EXPECT_EQ(o7.ToString(), "-9000000000");
+
+	OUT::PlainTextOutput o8;
+	WriteOperand(o8, std::any(static_cast<std::uint64_t>(18000000000000000000ULL)));
+	EXPECT_EQ(o8.ToString(), "18000000000000000000");
+}
+
+TEST(DisassemblerHelpersTest, WriteOperandObjectThrowsOnNull) {
+	OUT::PlainTextOutput output;
+	EXPECT_THROW(WriteOperand(output, std::any()), std::invalid_argument);
+}
+
+// ---------------------------------------------------------------------------
+// PrimitiveTypeName
+// ---------------------------------------------------------------------------
+
+TEST(DisassemblerHelpersTest, PrimitiveTypeNameMapsTheBclPrimitives) {
+	EXPECT_STREQ(PrimitiveTypeName("System.SByte"), "int8");
+	EXPECT_STREQ(PrimitiveTypeName("System.Int16"), "int16");
+	EXPECT_STREQ(PrimitiveTypeName("System.Int32"), "int32");
+	EXPECT_STREQ(PrimitiveTypeName("System.Int64"), "int64");
+	EXPECT_STREQ(PrimitiveTypeName("System.Byte"), "uint8");
+	EXPECT_STREQ(PrimitiveTypeName("System.UInt16"), "uint16");
+	EXPECT_STREQ(PrimitiveTypeName("System.UInt32"), "uint32");
+	EXPECT_STREQ(PrimitiveTypeName("System.UInt64"), "uint64");
+	EXPECT_STREQ(PrimitiveTypeName("System.Single"), "float32");
+	EXPECT_STREQ(PrimitiveTypeName("System.Double"), "float64");
+	EXPECT_STREQ(PrimitiveTypeName("System.Void"), "void");
+	EXPECT_STREQ(PrimitiveTypeName("System.Boolean"), "bool");
+	EXPECT_STREQ(PrimitiveTypeName("System.String"), "string");
+	EXPECT_STREQ(PrimitiveTypeName("System.Char"), "char");
+	EXPECT_STREQ(PrimitiveTypeName("System.Object"), "object");
+	// The multi-word IL spelling for IntPtr.
+	EXPECT_STREQ(PrimitiveTypeName("System.IntPtr"), "native int");
+}
+
+TEST(DisassemblerHelpersTest, PrimitiveTypeNameReturnsNullOutsideTheTable) {
+	// The C# table has no UIntPtr entry (System.UIntPtr renders by full name).
+	EXPECT_EQ(PrimitiveTypeName("System.UIntPtr"), nullptr);
+	EXPECT_EQ(PrimitiveTypeName("System.Decimal"), nullptr);
+	EXPECT_EQ(PrimitiveTypeName("My.Ns.Type"), nullptr);
+	EXPECT_EQ(PrimitiveTypeName(""), nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// WriteParameterReference (over the real mscorlib fixture)
+// ---------------------------------------------------------------------------
+
+TEST(DisassemblerHelpersParameterTest, StaticMethodParameterNameResolves) {
+	const char* path = FixturePath();
+	if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+	MD::MetadataFile f(path);
+	ASSERT_TRUE(f.IsValid());
+
+	auto stringTok = FindType(f, "System", "String");
+	ASSERT_NE(stringTok, 0u);
+	auto copyTok = FindMethodToken(f, stringTok, "Copy");
+	ASSERT_NE(copyTok, 0u);
+
+	// String.Copy(String str) is static: IL index 0 is the first declared
+	// parameter, named "str".
+	OUT::PlainTextOutput output;
+	WriteParameterReference(output, f, copyTok, 0);
+	EXPECT_EQ(output.ToString(), "str");
+
+	// An index past the parameter count falls back to the bare index.
+	OUT::PlainTextOutput output2;
+	WriteParameterReference(output2, f, copyTok, 4);
+	EXPECT_EQ(output2.ToString(), "4");
+}
+
+TEST(DisassemblerHelpersParameterTest, InstanceMethodSkipsTheImplicitThis) {
+	const char* path = FixturePath();
+	if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+	MD::MetadataFile f(path);
+	ASSERT_TRUE(f.IsValid());
+
+	auto stringTok = FindType(f, "System", "String");
+	ASSERT_NE(stringTok, 0u);
+	auto substringTok = FindMethodToken(f, stringTok, "Substring");
+	ASSERT_NE(substringTok, 0u);
+
+	// String.Substring(int startIndex) is an instance method: IL index 0 is
+	// the implicit `this` (no Param row -- the bare-index fallback), IL index
+	// 1 is the first declared parameter, named "startIndex".
+	OUT::PlainTextOutput output;
+	WriteParameterReference(output, f, substringTok, 0);
+	EXPECT_EQ(output.ToString(), "0");
+
+	OUT::PlainTextOutput output2;
+	WriteParameterReference(output2, f, substringTok, 1);
+	EXPECT_EQ(output2.ToString(), "startIndex");
+}
+
+TEST(DisassemblerHelpersParameterTest, InvalidMethodTokenFallsBackToTheIndex) {
+	const char* path = FixturePath();
+	if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+	MD::MetadataFile f(path);
+	ASSERT_TRUE(f.IsValid());
+
+	// A token from the wrong table (or 0) never throws; the fallback writes the
+	// bare index.
+	OUT::PlainTextOutput output;
+	WriteParameterReference(output, f, 0, 2);
+	EXPECT_EQ(output.ToString(), "2");
+}

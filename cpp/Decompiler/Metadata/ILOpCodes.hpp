@@ -27,7 +27,9 @@
 #include "Decompiler/Metadata/OperandType.hpp"
 
 #include <cstdint>
+#include <string>
 #include <string_view>
+#include <unordered_set>
 
 namespace ILSpy::Decompiler::Metadata {
 
@@ -100,5 +102,12 @@ bool IsDefined(ILOpCode opCode);
 // True for branch opcodes (BrTarget/ShortBrTarget/Switch operands).
 bool IsBranch(ILOpCode opCode);
 bool IsConditionalBranch(ILOpCode opCode);
+
+// The C# `public static readonly HashSet<string> ILOpCodeExtensions.ILKeywords`
+// (OperandType.cs): the ILAsm keyword set -- the explicit keyword list from the
+// C# static ctor plus every non-empty opcode display name (BuildKeywordList).
+// DisassemblerHelpers.IsValidIdentifier rejects identifiers that are IL
+// keywords (an identifier colliding with a keyword must be quoted).
+const std::unordered_set<std::string>& ILKeywords();
 
 } // namespace ILSpy::Decompiler::Metadata

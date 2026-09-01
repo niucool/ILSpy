@@ -1,0 +1,9 @@
+MSBuild version 18.10.0-1.26379.9+c88db8eb0 for .NET Framework
+
+  DisassemblerHelpers.cpp
+  ILOpCodes.cpp
+  Generating Code...
+  ilspy.vcxproj -> C:\Projects\github\ILSpy\cpp\build\windows-vs2026\Debug\ilspy.lib
+  DisassemblerHelpers_Test.cpp
+  LINK : C:\Projects\github\ILSpy\cpp\build\windows-vs2026\tests\Debug\ilspy_tests.exe not found or not built by the last incremental link; performing full link
+  ilspy_tests.vcxproj -> C:\Projects\github\ILSpy\cpp\build\windows-vs2026\tests\Debug\ilspy_tests.exe
