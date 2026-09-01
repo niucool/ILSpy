@@ -103,6 +103,13 @@ bool IsDefined(ILOpCode opCode);
 bool IsBranch(ILOpCode opCode);
 bool IsConditionalBranch(ILOpCode opCode);
 
+// The SRM `ILOpCodeExtensions.GetBranchOperandSize` (an extension of
+// System.Reflection.Metadata, not of this repo): 1 for a ShortBrTarget
+// operand, 4 otherwise. ILParser.DecodeBranchTarget consumes it.
+inline int GetBranchOperandSize(ILOpCode opCode) {
+	return GetOperandType(opCode) == OperandType::ShortBrTarget ? 1 : 4;
+}
+
 // The C# `public static readonly HashSet<string> ILOpCodeExtensions.ILKeywords`
 // (OperandType.cs): the ILAsm keyword set -- the explicit keyword list from the
 // C# static ctor plus every non-empty opcode display name (BuildKeywordList).
