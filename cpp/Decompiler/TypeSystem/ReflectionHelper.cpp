@@ -25,6 +25,7 @@
 #include "Decompiler/TypeSystem/ICompilation.hpp"  // ICompilation (FindType's compilation)
 #include "Decompiler/TypeSystem/IType.hpp"  // IType
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"  // ITypeDefinition (KnownTypeCode)
+#include "Decompiler/TypeSystem/TopLevelTypeName.hpp"  // TopLevelTypeName (SplitTypeParameterCount)
 
 namespace ILSpy::Decompiler::TypeSystem {
 
@@ -49,6 +50,25 @@ TypeCode GetTypeCode(const IType& type) {
 // cast is faithful for every `TypeCode` value.
 const IType& FindType(const ICompilation& compilation, TypeCode typeCode) {
     return compilation.FindType(static_cast<KnownTypeCode>(typeCode));
+}
+
+// The C# `public static string SplitTypeParameterCountFromReflectionName(string)`
+// (ReflectionHelper.cs line 66): the position of the LAST '`'; no backtick -> the name
+// as-is; else the prefix before it. Unlike the 2-arg overload this strip is
+// UNCONDITIONAL -- the digits after the backtick are never checked.
+std::string SplitTypeParameterCountFromReflectionName(std::string_view reflectionName) {
+    auto pos = reflectionName.rfind('`');
+    if (pos == std::string_view::npos) return std::string(reflectionName);
+    return std::string(reflectionName.substr(0, pos));
+}
+
+// The C# `public static string SplitTypeParameterCountFromReflectionName(string, out int)`
+// (ReflectionHelper.cs line 83): delegate to the existing
+// TopLevelTypeName::SplitTypeParameterCount (the same strip-only-when-the-tail-parses
+// semantics, already mirrored for TopLevelTypeName's reflection-name ctor).
+std::string SplitTypeParameterCountFromReflectionName(std::string_view reflectionName,
+                                                       int& typeParameterCount) {
+    return TopLevelTypeName::SplitTypeParameterCount(reflectionName, typeParameterCount);
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem

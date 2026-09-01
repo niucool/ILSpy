@@ -31,6 +31,8 @@
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"  // KnownTypeCode (the GetTypeCode source domain)
 
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 namespace ILSpy::Decompiler::TypeSystem {
 
@@ -81,5 +83,20 @@ TypeCode GetTypeCode(const IType& type);
 // parameter tables (`InitParameterArrays`) are built through this lookup. A NON-NULL
 // reference return (the `ICompilation::FindType` contract, mirrored by the delegation).
 const IType& FindType(const ICompilation& compilation, TypeCode typeCode);
+
+// The C# `public static string SplitTypeParameterCountFromReflectionName(string reflectionName)`
+// (ReflectionHelper.cs line 66) -- strip everything from the LAST '`' onward, unconditionally
+// (no digits check: "A`1`B" -> "A`1", "Foo`bar" -> "Foo").
+std::string SplitTypeParameterCountFromReflectionName(std::string_view reflectionName);
+
+// The C# `public static string SplitTypeParameterCountFromReflectionName(string reflectionName,
+// out int typeParameterCount)` (ReflectionHelper.cs line 83) -- strip the trailing "`N"
+// ONLY when the text after the last '`' parses as an integer (then the count is that
+// integer, possibly negative); otherwise the name is returned whole and the count is 0
+// (the C# int.TryParse sets the out parameter to 0 on failure). Delegates to the existing
+// TopLevelTypeName::SplitTypeParameterCount (the same semantics, mirrored for the
+// reflection-name ctor); "A`1`B" -> whole + 0 (the tail "B" does not parse).
+std::string SplitTypeParameterCountFromReflectionName(std::string_view reflectionName,
+                                                       int& typeParameterCount);
 
 } // namespace ILSpy::Decompiler::TypeSystem

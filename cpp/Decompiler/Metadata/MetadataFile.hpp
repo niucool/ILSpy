@@ -120,6 +120,26 @@ struct GenericParameterInfo {
     std::string Name;
 };
 
+// A TypeDef row's (table 0x02) name data: the authored Name/Namespace
+// strings and the declaring TypeDef's token (0 for a top-level type -- the
+// SRM TypeDefinition.GetDeclaringType() NestedClass-table walk). Consumed by
+// the SRMExtensions GetFullTypeName readers.
+struct TypeDefNameInfo {
+    std::string Name;
+    std::string Namespace;
+    std::uint32_t DeclaringTypeToken = 0;   // 0 when top-level
+};
+
+// A TypeRef row's (table 0x01) name data: the authored TypeName/TypeNamespace
+// strings and the declaring TypeRef's token (0 when the resolution scope is
+// not a TypeRef -- the SRMExtensions GetDeclaringType(this in TypeReference)
+// resolution-scope walk). Consumed by the SRMExtensions GetFullTypeName readers.
+struct TypeRefNameInfo {
+    std::string Name;
+    std::string Namespace;
+    std::uint32_t DeclaringTypeRefToken = 0; // 0 when top-level
+};
+
 // A custom attribute applied to an entity: the attribute type's namespace and
 // name (e.g. "System", "SerializableAttribute"). Constructor/named-argument
 // decoding is deferred to a later phase; the name is enough for the type
@@ -144,6 +164,10 @@ public:
 
     // Row count of the TypeDef table.
     std::uint32_t TypeDefCount() const noexcept;
+
+    // Row count of the TypeRef table (0x01) -- the scan bound for callers
+    // that locate TypeRef rows by name. 0 for an invalid file; never throws.
+    std::uint32_t TypeRefCount() const noexcept;
 
     // Up to `n` TypeDef type names (the short name, e.g. "Object"), in table
     // order. Returns fewer than `n` if the table is smaller.
@@ -221,6 +245,26 @@ public:
     // for an invalid file, an out-of-range row, a nil row, or a non-MethodDef
     // token; never throws.
     std::uint32_t GetMethodDeclaringTypeToken(std::uint32_t methodToken) const;
+
+    // A TypeDef row's (table 0x02) authored Name/Namespace strings plus the
+    // declaring TypeDef's token -- the per-row reads the SRMExtensions
+    // GetFullTypeName(TypeDefinitionHandle) reader composes (the SRM
+    // TypeDefinition.Name/Namespace columns and the GetDeclaringType()
+    // NestedClass-table walk). The namespace column of a nested type is
+    // empty (ECMA-335 requires nested types to carry an empty Namespace).
+    // Returns nullopt for an invalid file, an out-of-range row, a nil row, or
+    // a non-TypeDef token; never throws.
+    std::optional<TypeDefNameInfo> GetTypeDefNameInfo(std::uint32_t typeToken) const;
+
+    // A TypeRef row's (table 0x01) authored TypeName/TypeNamespace strings plus
+    // the declaring TypeRef's token -- the per-row reads the SRMExtensions
+    // GetFullTypeName(TypeReferenceHandle) reader composes (the SRM
+    // TypeReference.Name/Namespace columns and the GetDeclaringType()
+    // resolution-scope walk: a TypeRef-scoped row nests inside that TypeRef,
+    // any other scope -- Module/ModuleRef/AssemblyRef -- is top-level).
+    // Returns nullopt for an invalid file, an out-of-range row, a nil row, or
+    // a non-TypeRef token; never throws.
+    std::optional<TypeRefNameInfo> GetTypeRefNameInfo(std::uint32_t typeRefToken) const;
 
     // Custom attributes applied to an entity (TypeDef/MethodDef/Field/Property
     // token). Returns the attribute type namespace+name for each; never throws.

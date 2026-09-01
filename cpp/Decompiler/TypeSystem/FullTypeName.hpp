@@ -89,6 +89,18 @@ public:
         return result;
     }
 
+    // The C# `public FullTypeName NestedType(string name, int
+    // additionalTypeParameterCount)` (FullTypeName.cs line 241): a copy of this
+    // name with one more nesting level appended. The C# doc example:
+    // new FullTypeName("NS.A+B").NestedType("C", 1) == new FullTypeName("NS.A+B+C`1").
+    FullTypeName NestedType(std::string_view name, int additionalTypeParameterCount) const {
+        FullTypeName result;
+        result.topLevel_ = topLevel_;
+        result.nested_ = nested_;
+        result.nested_.push_back(Nested{ std::string(name), additionalTypeParameterCount });
+        return result;
+    }
+
     bool operator==(const FullTypeName& o) const noexcept {
         return topLevel_ == o.topLevel_ && nested_ == o.nested_;
     }

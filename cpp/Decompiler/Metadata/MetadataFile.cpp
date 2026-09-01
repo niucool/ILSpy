@@ -120,6 +120,10 @@ std::uint32_t MetadataFile::TypeDefCount() const noexcept {
     return IsValid() ? impl_->db->TypeDef.size() : 0;
 }
 
+std::uint32_t MetadataFile::TypeRefCount() const noexcept {
+    return IsValid() ? impl_->db->TypeRef.size() : 0;
+}
+
 std::vector<std::string> MetadataFile::TopTypeNames(std::size_t n) const {
     std::vector<std::string> result;
     if (!IsValid()) return result;
@@ -382,6 +386,58 @@ std::uint32_t MetadataFile::GetMethodDeclaringTypeToken(std::uint32_t methodToke
         return (0x02u << 24) | ((static_cast<std::uint32_t>(t.index()) + 1) & 0x00FFFFFFu);
     } catch (const std::exception&) {
         return 0;
+    }
+}
+
+// A TypeDef row's Name/Namespace columns and its declaring TypeDef's token
+// (the NestedClass-table walk -- the SRM TypeDefinition.GetDeclaringType()
+// analog). See the header for the full contract.
+std::optional<TypeDefNameInfo> MetadataFile::GetTypeDefNameInfo(std::uint32_t typeToken) const {
+    if (!IsValid()) return std::nullopt;
+    std::uint32_t table = typeToken >> 24;
+    std::uint32_t row = typeToken & 0x00FFFFFFu;
+    if (table != 0x02 || row == 0 || row > impl_->db->TypeDef.size()) return std::nullopt;
+    try {
+        auto t = impl_->db->TypeDef[row - 1];
+        TypeDefNameInfo info;
+        info.Name = std::string{ t.TypeName() };
+        info.Namespace = std::string{ t.TypeNamespace() };
+        auto enclosing = t.EnclosingType();
+        if (enclosing) {
+            info.DeclaringTypeToken =
+                (0x02u << 24) | ((static_cast<std::uint32_t>(enclosing.index()) + 1) & 0x00FFFFFFu);
+        }
+        return info;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// A TypeRef row's TypeName/TypeNamespace columns and its declaring TypeRef's
+// token (the resolution-scope walk -- the SRMExtensions
+// GetDeclaringType(this in TypeReference) analog: only a TypeRef-scoped row
+// nests; Module/ModuleRef/AssemblyRef scopes are top-level). See the header
+// for the full contract.
+std::optional<TypeRefNameInfo> MetadataFile::GetTypeRefNameInfo(std::uint32_t typeRefToken) const {
+    if (!IsValid()) return std::nullopt;
+    std::uint32_t table = typeRefToken >> 24;
+    std::uint32_t row = typeRefToken & 0x00FFFFFFu;
+    if (table != 0x01 || row == 0 || row > impl_->db->TypeRef.size()) return std::nullopt;
+    try {
+        auto r = impl_->db->TypeRef[row - 1];
+        TypeRefNameInfo info;
+        info.Name = std::string{ r.TypeName() };
+        info.Namespace = std::string{ r.TypeNamespace() };
+        auto scope = r.ResolutionScope();
+        using RS = winmd::reader::ResolutionScope;
+        if (scope && scope.type() == RS::TypeRef) {
+            auto declaring = scope.TypeRef();
+            info.DeclaringTypeRefToken =
+                (0x01u << 24) | ((static_cast<std::uint32_t>(declaring.index()) + 1) & 0x00FFFFFFu);
+        }
+        return info;
+    } catch (const std::exception&) {
+        return std::nullopt;
     }
 }
 
