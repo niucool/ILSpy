@@ -535,3 +535,174 @@ TEST(DisassemblerHelpersParameterTest, InvalidMethodTokenFallsBackToTheIndex) {
 	WriteParameterReference(output, f, 0, 2);
 	EXPECT_EQ(output.ToString(), "2");
 }
+
+// ---------------------------------------------------------------------------
+// The C# `WriteTo(this ExceptionRegion, MetadataFile, MetadataGenericContext,
+// ITextOutput)` extension (DisassemblerHelpers.cs line 72) -- the
+// exception-region-to-text writer the MethodBodyDisassembler's
+// WriteExceptionHandlers consumes (the gnhf-139..142 deferral, now unblocked
+// by the gnhf-143 EntityHandle.WriteTo). The C++ model is the
+// Metadata::ExceptionHandlerClause the method-body decoder produces; the C#
+// FilterOffset == -1 sentinel ports to the Kind == Filter discriminant, and
+// the C# CatchType.IsNil guard ports to a zero catch token.
+// ---------------------------------------------------------------------------
+
+namespace {
+MD::ExceptionHandlerClause MakeClause(MD::ExceptionHandlerKind kind,
+    std::uint32_t tryOffset, std::uint32_t tryLength,
+    std::uint32_t handlerOffset, std::uint32_t handlerLength,
+    std::uint32_t catchTokenOrFilterOffset = 0) {
+    MD::ExceptionHandlerClause clause;
+    clause.Kind = kind;
+    clause.TryOffset = tryOffset;
+    clause.TryLength = tryLength;
+    clause.HandlerOffset = handlerOffset;
+    clause.HandlerLength = handlerLength;
+    clause.ClassTokenOrFilterOffset = catchTokenOrFilterOffset;
+    return clause;
+}
+
+MD::MetadataGenericContext NullContext() { return MD::MetadataGenericContext{}; }
+} // namespace
+
+TEST(DisassemblerHelpersExceptionRegionTest, CatchClauseRendersTryKindTypeAndHandler) {
+	const char* path = FixturePath();
+	if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+	MD::MetadataFile f(path);
+	ASSERT_TRUE(f.IsValid());
+	std::uint32_t objectToken = FindType(f, "System", "Object");
+	ASSERT_NE(objectToken, 0u);
+
+	OUT::PlainTextOutput output;
+	WriteTo(MakeClause(MD::ExceptionHandlerKind::Catch, 0x0000, 0x0008, 0x0008, 0x0008,
+	            objectToken),
+	    f, NullContext(), output);
+	EXPECT_EQ(output.ToString(),
+		".try IL_0000-IL_0008 catch System.Object IL_0008-IL_0010");
+}
+
+TEST(DisassemblerHelpersExceptionRegionTest, CatchTypeRefRendersAssemblyQualifiedType) {
+	const char* sysPath =
+#if defined(_WIN32)
+	    "C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\System\\"
+	    "v4.0_4.0.0.0__b77a5c561934e089\\System.dll";
+#else
+	    "/usr/lib/mono/4.5/System.dll";
+#endif
+	if (!std::filesystem::exists(sysPath)) GTEST_SKIP() << "fixture not present";
+	MD::MetadataFile f(sysPath);
+	ASSERT_TRUE(f.IsValid());
+	// System.dll's TypeRef to System.String carries an AssemblyRef scope, so
+	// the catch-type rendering is the classic `[mscorlib]System.String`.
+	std::uint32_t stringRef = 0;
+	for (std::uint32_t row = 1;; row++) {
+		std::uint32_t token = (0x01u << 24) | row;
+		auto info = f.GetTypeRefNameInfo(token);
+		if (!info) break;
+		if (info->Namespace == "System" && info->Name == "String") {
+			stringRef = token;
+			break;
+		}
+	}
+	ASSERT_NE(stringRef, 0u) << "System.dll must carry a System.String TypeRef";
+
+	OUT::PlainTextOutput output;
+	WriteTo(MakeClause(MD::ExceptionHandlerKind::Catch, 0x0000, 0x0004, 0x0004, 0x0004,
+	            stringRef),
+	    f, NullContext(), output);
+	EXPECT_EQ(output.ToString(),
+		".try IL_0000-IL_0004 catch [mscorlib]System.String IL_0004-IL_0008");
+}
+
+TEST(DisassemblerHelpersExceptionRegionTest, FilterClauseRendersFilterAndHandlerMarker) {
+	const char* path = FixturePath();
+	if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+	MD::MetadataFile f(path);
+	ASSERT_TRUE(f.IsValid());
+
+	OUT::PlainTextOutput output;
+	WriteTo(MakeClause(MD::ExceptionHandlerKind::Filter, 0x0000, 0x0004, 0x0006, 0x000A,
+	            0x0004),
+	    f, NullContext(), output);
+	// The C# body writes " handler " (with its trailing space) and then the
+	// unconditional ' ' before the handler range -- the doubled space is the
+	// C# verbatim shape.
+	EXPECT_EQ(output.ToString(),
+		".try IL_0000-IL_0004 filter IL_0004 handler  IL_0006-IL_0010");
+}
+
+TEST(DisassemblerHelpersExceptionRegionTest, FinallyClauseRendersNoType) {
+	const char* path = FixturePath();
+	if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+	MD::MetadataFile f(path);
+	ASSERT_TRUE(f.IsValid());
+
+	OUT::PlainTextOutput output;
+	WriteTo(MakeClause(MD::ExceptionHandlerKind::Finally, 0x0000, 0x0004, 0x0004, 0x0004),
+	    f, NullContext(), output);
+	// Neither the filter nor the catch-type arm fires, so the unconditional
+	// pre-handler space is the only one (the C# verbatim shape).
+	EXPECT_EQ(output.ToString(),
+		".try IL_0000-IL_0004 finally IL_0004-IL_0008");
+}
+
+TEST(DisassemblerHelpersExceptionRegionTest, FaultClauseRendersNoType) {
+	const char* path = FixturePath();
+	if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+	MD::MetadataFile f(path);
+	ASSERT_TRUE(f.IsValid());
+
+	OUT::PlainTextOutput output;
+	WriteTo(MakeClause(MD::ExceptionHandlerKind::Fault, 0x0000, 0x0004, 0x0004, 0x0004),
+	    f, NullContext(), output);
+	EXPECT_EQ(output.ToString(),
+		".try IL_0000-IL_0004 fault IL_0004-IL_0008");
+}
+
+TEST(DisassemblerHelpersExceptionRegionTest, CatchClauseWithNilTypeRendersNoType) {
+	const char* path = FixturePath();
+	if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+	MD::MetadataFile f(path);
+	ASSERT_TRUE(f.IsValid());
+	// The C# `if (!exceptionHandler.CatchType.IsNil)` guard: a nil catch type
+	// (corrupt metadata) skips the space + type, leaving the unconditional
+	// handler-range space only.
+	OUT::PlainTextOutput output;
+	WriteTo(MakeClause(MD::ExceptionHandlerKind::Catch, 0x0000, 0x0004, 0x0004, 0x0004, 0),
+	    f, NullContext(), output);
+	EXPECT_EQ(output.ToString(),
+		".try IL_0000-IL_0004 catch IL_0004-IL_0008");
+}
+
+TEST(DisassemblerHelpersExceptionRegionTest, RealMethodBodiesRenderTheirRegions) {
+	const char* path = FixturePath();
+	if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+	MD::MetadataFile f(path);
+	ASSERT_TRUE(f.IsValid());
+	// A real EH-bearing method body: every region renders the ".try " prefix
+	// and the handler-range suffix consistent with the decoded clause.
+	bool sawRegion = false;
+	for (const auto& t : f.TypeDefs()) {
+		for (const auto& m : f.GetMethods(t.Token)) {
+			if (m.RVA == 0) continue;
+			auto body = f.GetMethodBody(m.RVA);
+			if (!body.IsValid() || body.Handlers().empty()) continue;
+			for (const auto& clause : body.Handlers()) {
+				OUT::PlainTextOutput output;
+				WriteTo(clause, f, NullContext(), output);
+				std::string text = output.ToString();
+				EXPECT_TRUE(text.rfind(".try ", 0) == 0) << text;
+				// "handler" only appears in the filter arm of the C# body.
+				if (clause.Kind == MD::ExceptionHandlerKind::Filter) {
+					EXPECT_NE(text.find(" handler "), std::string::npos) << text;
+				} else {
+					EXPECT_EQ(text.find(" handler "), std::string::npos) << text;
+				}
+				sawRegion = true;
+			}
+			if (sawRegion) break;
+		}
+		if (sawRegion) break;
+	}
+	ASSERT_TRUE(sawRegion) << "mscorlib must carry EH-bearing method bodies";
+}

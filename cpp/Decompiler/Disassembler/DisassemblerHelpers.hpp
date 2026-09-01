@@ -80,6 +80,9 @@
 #include <string>
 #include <string_view>
 
+#include "Decompiler/Metadata/MethodBody.hpp"          // ExceptionHandlerClause
+#include "Decompiler/Metadata/MetadataGenericContext.hpp"
+
 namespace ILSpy::Decompiler::Output {
 class ITextOutput;
 }
@@ -128,6 +131,21 @@ void WriteOffsetReference(Output::ITextOutput& writer, std::optional<int> offset
 // single quotes with ' escaped as \' (ILDasm's convention, not the ECMA octal
 // escape -- see the C# comment).
 std::string Escape(std::string_view identifier);
+
+// The C# `public static void WriteTo(this ExceptionRegion exceptionHandler,
+// MetadataFile module, MetadataGenericContext context, ITextOutput writer)`
+// (DisassemblerHelpers.cs line 72) -- the exception-region-to-text writer the
+// MethodBodyDisassembler's WriteExceptionHandlers consumes:
+// ".try <try> <kind> [<filter> handler ][<catch-type> ]<handler>" where the
+// catch type renders through the IL InstructionOutputExtensions EntityHandle.
+// WriteTo and the filter/handler spacing is the C# verbatim shape (the
+// filter arm's " handler " plus the unconditional pre-handler space doubles
+// for filter clauses, and finally/fault carry the doubled space too). The C#
+// FilterOffset == -1 sentinel ports to the clause's Kind == Filter
+// discriminant, and the C# CatchType.IsNil guard ports to a zero catch token.
+void WriteTo(const Metadata::ExceptionHandlerClause& exceptionHandler,
+    const Metadata::MetadataFile& module, const Metadata::MetadataGenericContext& context,
+    Output::ITextOutput& writer);
 
 // The C# private `static bool IsValidIdentifier(string identifier)` -- widened to
 // public for direct TDD per the file's convention. The ILAsm identifier rules:

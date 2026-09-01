@@ -22,6 +22,7 @@
 #include "Decompiler/Disassembler/DisassemblerHelpers.hpp"
 
 #include "Decompiler/Disassembler/ReflectionAttributes.hpp"
+#include "Decompiler/IL/InstructionOutputExtensions.hpp"
 #include "Decompiler/Metadata/ILOpCodes.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Output/ITextOutput.hpp"
@@ -164,6 +165,46 @@ void WriteOffsetReference(Output::ITextOutput& writer, std::optional<int> offset
 			reinterpret_cast<const void*>(static_cast<std::uintptr_t>(
 				static_cast<unsigned int>(*offset))));
 	}
+}
+
+// ---------------------------------------------------------------------------
+// WriteTo(this ExceptionRegion, ...) (DisassemblerHelpers.cs lines 72-95).
+// ---------------------------------------------------------------------------
+void WriteTo(const Metadata::ExceptionHandlerClause& exceptionHandler,
+	const Metadata::MetadataFile& module, const Metadata::MetadataGenericContext& context,
+	Output::ITextOutput& writer)
+{
+	writer.Write(".try ");
+	WriteOffsetReference(writer, exceptionHandler.TryOffset);
+	writer.Write('-');
+	WriteOffsetReference(writer, exceptionHandler.TryOffset + exceptionHandler.TryLength);
+	writer.Write(' ');
+	// The C# `exceptionHandler.Kind.ToString().ToLowerInvariant()` -- the
+	// four ExceptionRegionKind names lower-cased.
+	switch (exceptionHandler.Kind) {
+		case Metadata::ExceptionHandlerKind::Catch: writer.Write("catch"); break;
+		case Metadata::ExceptionHandlerKind::Filter: writer.Write("filter"); break;
+		case Metadata::ExceptionHandlerKind::Finally: writer.Write("finally"); break;
+		case Metadata::ExceptionHandlerKind::Fault: writer.Write("fault"); break;
+	}
+	if (exceptionHandler.Kind == Metadata::ExceptionHandlerKind::Filter) {
+		// The C# `if (exceptionHandler.FilterOffset != -1)` arm -- the port's
+		// Kind == Filter discriminant stands in for the -1 sentinel.
+		writer.Write(' ');
+		WriteOffsetReference(writer, exceptionHandler.ClassTokenOrFilterOffset);
+		writer.Write(" handler ");
+	}
+	if (exceptionHandler.Kind == Metadata::ExceptionHandlerKind::Catch
+	    && exceptionHandler.ClassTokenOrFilterOffset != 0) {
+		// The C# `if (!exceptionHandler.CatchType.IsNil)` arm; the zero
+		// catch token is the port's nil handle.
+		writer.Write(' ');
+		IL::WriteTo(module, writer, context, exceptionHandler.ClassTokenOrFilterOffset);
+	}
+	writer.Write(' ');
+	WriteOffsetReference(writer, exceptionHandler.HandlerOffset);
+	writer.Write('-');
+	WriteOffsetReference(writer, exceptionHandler.HandlerOffset + exceptionHandler.HandlerLength);
 }
 
 // ---------------------------------------------------------------------------
