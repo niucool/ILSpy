@@ -20,15 +20,15 @@
 // Port of ICSharpCode.Decompiler/Output/IAmbience.cs -- the `[Flags] ConversionFlags`
 // enum and the `IAmbience` interface. Ambiences convert type-system symbols and types to
 // display text (editor tooltips, member overviews, ...); the two C# implementations are
-// `CSharpAmbience` (the C#-syntax rendering, the next in-order output-stage file) and
-// `ILAmbience` (the IL view, Phase 6). The interface is a leaf `Output`-namespace
-// dependency of `CSharpAmbience` (which `: IAmbience` and exposes `ConversionFlags`), the
-// next in-order output-stage file after the D322-D371 `CSharpOutputVisitor` /
-// `InsertParenthesesVisitor` / `DepthFirstAstVisitorBool` / `GenericGrammarAmbiguityVisitor`
-// set; the concrete `CSharpAmbience` is LANDED (CSharp/OutputVisitor/CSharpAmbience.hpp,
-// implementing this interface once the full `TypeSystemAstBuilder`/resolver chain
-// unblocked it). `ILAmbience` (the IL view, Phase 6) remains the future second
-// implementation.
+// `CSharpAmbience` (the C#-syntax rendering) and `ILAmbience` (the IL view). The
+// interface is a leaf `Output`-namespace dependency of `CSharpAmbience` (which
+// `: IAmbience` and exposes `ConversionFlags`), the next in-order output-stage file
+// after the D322-D371 `CSharpOutputVisitor` / `InsertParenthesesVisitor` /
+// `DepthFirstAstVisitorBool` / `GenericGrammarAmbiguityVisitor` set; both concrete
+// implementations are LANDED: `CSharpAmbience` (CSharp/OutputVisitor/CSharpAmbience.hpp,
+// over the full `TypeSystemAstBuilder`/resolver chain) and `ILAmbience`
+// (IL/ILAmbience.hpp, the metadata-driven IL view over the Disassembler attribute-name
+// tables and the `MetadataFile` per-row flag reads).
 //
 // C#-to-C++ porting decisions:
 //  * `[Flags] public enum ConversionFlags` -> a `std::uint32_t`-backed `enum class` (the

@@ -87,6 +87,16 @@ public:
           rootNamespace_(compilation) {}
 
     void AddFriendAssembly(std::string name) { friendAssemblies_.push_back(std::move(name)); }
+    // Configurable `MetadataFile` for the ILAmbience `ConvertSymbol` tests (the
+    // metadata-driven flag prefixes read `entity.ParentModule.MetadataFile`'s
+    // per-row attribute flags; a real mscorlib `MetadataFile` supplies the rows).
+    // The default nullptr preserves the prior behavior (the stale-entity
+    // fallback), so existing tests that do not call the setter are unaffected
+    // (the additive-setter convention); the pointer is non-owning (the caller
+    // keeps the `MetadataFile` alive).
+    void SetMetadataFile(const ILSpy::Decompiler::Metadata::MetadataFile* f) {
+        metadataFile_ = f;
+    }
     // Configurable type tables for the compilation-level scans (the TypeSystemExtensions
     // `GetAllTypeDefinitions` / `GetTopLevelTypeDefinitions` SelectMany, and the TypeInference
     // Improved `FindTypesInBounds` refinement's compilation-wide candidate scan). The
@@ -109,7 +119,7 @@ public:
     // --- IModule ---
     const ILSpy::Decompiler::Metadata::MetadataFile* MetadataFile() const override
     {
-        return nullptr;
+        return metadataFile_;
     }
     bool IsMainModule() const override { return true; }
     std::string AssemblyName() const override { return assemblyName_; }
@@ -142,6 +152,7 @@ private:
     const ICompilation& compilation_;
     std::string assemblyName_;
     std::vector<std::string> friendAssemblies_;
+    const ILSpy::Decompiler::Metadata::MetadataFile* metadataFile_ = nullptr;
     std::vector<const ITypeDefinition*> typeDefinitions_;
     std::vector<const ITypeDefinition*> topLevelTypeDefinitions_;
     TestNamespace rootNamespace_;
@@ -236,6 +247,11 @@ public:
 
     void AddDirectBaseType(ITypePtr base) { directBaseTypes_.push_back(std::move(base)); }
     void SetDeclaringTypeDefinition(const ITypeDefinition* d) { declaringTypeDefinition_ = d; }
+    // Configurable `MetadataToken` for the ILAmbience `ConvertSymbol` tests (the
+    // metadata-driven flag prefixes read the entity's row by token). The default 0
+    // preserves the prior hardcoded behavior so existing tests that do not call
+    // the setter are unaffected (the additive-setter convention).
+    void SetMetadataToken(std::uint32_t t) { metadataToken_ = t; }
     void SetStatic(bool v) { isStatic_ = v; }
     // Configurable `Methods` / `HasExtensions` for the extension-method scan tests
     // (the resolver's `GetExtensionMethods(lookup, ns)` namespace scan reads both plus
@@ -305,7 +321,7 @@ public:
     const ICompilation& Compilation() const override { return compilation_; }
 
     // --- IEntity ---
-    std::uint32_t MetadataToken() const override { return 0; }
+    std::uint32_t MetadataToken() const override { return metadataToken_; }
     const ITypeDefinition* DeclaringTypeDefinition() const override
     {
         return declaringTypeDefinition_;
@@ -353,6 +369,7 @@ private:
     const ICompilation& compilation_;
     const IModule* parentModule_;
     TS::KnownTypeCode knownTypeCode_;
+    std::uint32_t metadataToken_ = 0;
     bool isStatic_ = false;
     const ITypeDefinition* declaringTypeDefinition_ = nullptr;
     std::vector<ITypePtr> directBaseTypes_;
@@ -553,6 +570,14 @@ public:
     void SetReturnTypeAttributes(std::vector<const IAttribute*> a) {
         returnTypeAttributes_ = std::move(a);
     }
+    // Configurable `MetadataToken` / `ParentModule` for the ILAmbience
+    // `ConvertSymbol` tests (the metadata-driven `.method` flag prefixes read the
+    // method's row by token through its module's MetadataFile). The defaults
+    // (0 / nullptr) preserve the prior hardcoded behavior so existing tests that do
+    // not call the setters are unaffected (the additive-setter convention); the
+    // module pointer is non-owning (the caller keeps the `IModule` alive).
+    void SetMetadataToken(std::uint32_t t) { metadataToken_ = t; }
+    void SetParentModule(const IModule* m) { parentModule_ = m; }
 
     // --- ISymbol ---
     TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Method; }
@@ -567,10 +592,10 @@ public:
     const ICompilation& Compilation() const override { return compilation_; }
 
     // --- IEntity ---
-    std::uint32_t MetadataToken() const override { return 0; }
+    std::uint32_t MetadataToken() const override { return metadataToken_; }
     const ITypeDefinition* DeclaringTypeDefinition() const override { return declaringTypeDefinition_; }
     ITypePtr DeclaringType() const override { return {}; }
-    const IModule* ParentModule() const override { return nullptr; }
+    const IModule* ParentModule() const override { return parentModule_; }
     std::vector<const IAttribute*> GetAttributes() const override { return {}; }
     bool HasAttribute(KnownAttribute) const override { return false; }
     const IAttribute* GetAttribute(KnownAttribute) const override { return nullptr; }
@@ -632,6 +657,8 @@ public:
 private:
     std::string name_;
     const ICompilation& compilation_;
+    std::uint32_t metadataToken_ = 0;
+    const IModule* parentModule_ = nullptr;
     KnownType returnType_{ KnownTypeCode::Object };
     const ITypeDefinition* declaringTypeDefinition_ = nullptr;
     bool isStatic_ = false;
@@ -655,6 +682,15 @@ public:
         : name_(std::move(name)), handlerType_(std::move(handlerType)),
           compilation_(compilation) {}
 
+    // Configurable `MetadataToken` / `ParentModule` for the ILAmbience
+    // `ConvertSymbol` tests (the metadata-driven `.event` flag prefixes read the
+    // event's row by token through its module's MetadataFile). The defaults
+    // (0 / nullptr) preserve the prior hardcoded behavior so existing tests that do
+    // not call the setters are unaffected (the additive-setter convention); the
+    // module pointer is non-owning (the caller keeps the `IModule` alive).
+    void SetMetadataToken(std::uint32_t t) { metadataToken_ = t; }
+    void SetParentModule(const IModule* m) { parentModule_ = m; }
+
     // --- ISymbol ---
     TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Event; }
     std::string Name() const override { return name_; }
@@ -668,10 +704,10 @@ public:
     const ICompilation& Compilation() const override { return compilation_; }
 
     // --- IEntity ---
-    std::uint32_t MetadataToken() const override { return 0; }
+    std::uint32_t MetadataToken() const override { return metadataToken_; }
     const ITypeDefinition* DeclaringTypeDefinition() const override { return nullptr; }
     ITypePtr DeclaringType() const override { return {}; }
-    const IModule* ParentModule() const override { return nullptr; }
+    const IModule* ParentModule() const override { return parentModule_; }
     std::vector<const IAttribute*> GetAttributes() const override { return {}; }
     bool HasAttribute(KnownAttribute) const override { return false; }
     const IAttribute* GetAttribute(KnownAttribute) const override { return nullptr; }
@@ -707,6 +743,8 @@ private:
     std::string name_;
     ITypePtr handlerType_;
     const ICompilation& compilation_;
+    std::uint32_t metadataToken_ = 0;
+    const IModule* parentModule_ = nullptr;
 };
 
 // A minimal `ITypeParameter` for the IsProtectedAccessAllowed type-parameter

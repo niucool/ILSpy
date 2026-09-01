@@ -37,6 +37,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 namespace ILSpy::Decompiler::TypeSystem {
 
@@ -58,5 +59,40 @@ enum class SignatureCallingConvention : std::uint8_t {
     // custom `CallConv*` modifiers enumerated in CustomCallingConventions).
     Unmanaged = 6,
 };
+
+// Port of the SRMExtensions.cs `ToILSyntax` extension method (SRMExtensions.cs line
+// 783) -- the IL-syntax spelling of a calling convention, as written before a
+// function-pointer signature's return type (the `unmanaged cdecl` of
+// `delegate* unmanagedcdecl<int>`). Its two C# consumers are ILAmbience.cs line 400
+// (the `TypeToStringVisitor.VisitFunctionPointerType` prefix) and
+// InstructionOutputExtensions.cs line 350 (the instruction-level signature
+// rendering); both land against this free function (the land-a-leaf-where-its-
+// dependencies-live convention -- the enum it extends lives here, and the port
+// carries no SRMExtensions translation unit).
+//
+// The C# `_ => callConv.ToString().ToLowerInvariant()` default arm: an unnamed
+// enum value's `ToString()` is its numeric string (e.g. "7"), which lowercasing
+// leaves unchanged -- `std::to_string` of the underlying value is the faithful
+// equivalent. Every named member is listed above, so the arm is reachable only
+// through a mis-decoded signature header.
+inline std::string ToILSyntax(SignatureCallingConvention callConv) {
+    switch (callConv) {
+    case SignatureCallingConvention::Default:
+        return "default";
+    case SignatureCallingConvention::CDecl:
+        return "unmanaged cdecl";
+    case SignatureCallingConvention::StdCall:
+        return "unmanaged stdcall";
+    case SignatureCallingConvention::ThisCall:
+        return "unmanaged thiscall";
+    case SignatureCallingConvention::FastCall:
+        return "unmanaged fastcall";
+    case SignatureCallingConvention::VarArgs:
+        return "vararg";
+    case SignatureCallingConvention::Unmanaged:
+        return "unmanaged";
+    }
+    return std::to_string(static_cast<int>(callConv));
+}
 
 }  // namespace ILSpy::Decompiler::TypeSystem
