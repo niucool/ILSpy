@@ -1,0 +1,51 @@
+Running main() from C:\Projects\github\vcpkg\buildtrees\gtest\src\v1.17.0-e243b8ee0f.clean\googletest\src\gtest_main.cc
+Note: Google Test filter = FullTypeNameGetDeclaringTypeTest.*:MetadataExtensionsToILNameStringTest.*
+[==========] Running 19 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 5 tests from FullTypeNameGetDeclaringTypeTest
+[ RUN      ] FullTypeNameGetDeclaringTypeTest.ThrowsForTopLevelName
+[       OK ] FullTypeNameGetDeclaringTypeTest.ThrowsForTopLevelName (0 ms)
+[ RUN      ] FullTypeNameGetDeclaringTypeTest.SingleLevelYieldsTheTopLevelName
+[       OK ] FullTypeNameGetDeclaringTypeTest.SingleLevelYieldsTheTopLevelName (0 ms)
+[ RUN      ] FullTypeNameGetDeclaringTypeTest.TwoLevelsYieldAOneLevelChain
+[       OK ] FullTypeNameGetDeclaringTypeTest.TwoLevelsYieldAOneLevelChain (0 ms)
+[ RUN      ] FullTypeNameGetDeclaringTypeTest.OriginalIsUnchangedAfterTheCall
+[       OK ] FullTypeNameGetDeclaringTypeTest.OriginalIsUnchangedAfterTheCall (0 ms)
+[ RUN      ] FullTypeNameGetDeclaringTypeTest.DeclaringTypeRoundTripsThroughReflectionName
+[       OK ] FullTypeNameGetDeclaringTypeTest.DeclaringTypeRoundTripsThroughReflectionName (0 ms)
+[----------] 5 tests from FullTypeNameGetDeclaringTypeTest (0 ms total)
+
+[----------] 14 tests from MetadataExtensionsToILNameStringTest
+[ RUN      ] MetadataExtensionsToILNameStringTest.TopLevelWithNamespaceRendersDottedName
+[       OK ] MetadataExtensionsToILNameStringTest.TopLevelWithNamespaceRendersDottedName (0 ms)
+[ RUN      ] MetadataExtensionsToILNameStringTest.TopLevelWithArityAppendsBacktickCount
+[       OK ] MetadataExtensionsToILNameStringTest.TopLevelWithArityAppendsBacktickCount (0 ms)
+[ RUN      ] MetadataExtensionsToILNameStringTest.TopLevelWithoutNamespaceRendersBareName
+[       OK ] MetadataExtensionsToILNameStringTest.TopLevelWithoutNamespaceRendersBareName (0 ms)
+[ RUN      ] MetadataExtensionsToILNameStringTest.TopLevelWithoutNamespaceWithArity
+[       OK ] MetadataExtensionsToILNameStringTest.TopLevelWithoutNamespaceWithArity (0 ms)
+[ RUN      ] MetadataExtensionsToILNameStringTest.OmitGenericsDropsTheTopLevelArity
+[       OK ] MetadataExtensionsToILNameStringTest.OmitGenericsDropsTheTopLevelArity (0 ms)
+[ RUN      ] MetadataExtensionsToILNameStringTest.TopLevelNoNamespaceILAsmKeywordNameIsQuoted
+[       OK ] MetadataExtensionsToILNameStringTest.TopLevelNoNamespaceILAsmKeywordNameIsQuoted (0 ms)
+[ RUN      ] MetadataExtensionsToILNameStringTest.NestedRendersSlashSeparatedChain
+[       OK ] MetadataExtensionsToILNameStringTest.NestedRendersSlashSeparatedChain (0 ms)
+[ RUN      ] MetadataExtensionsToILNameStringTest.NestedInnermostSegmentCarriesItsOwnArity
+[       OK ] MetadataExtensionsToILNameStringTest.NestedInnermostSegmentCarriesItsOwnArity (0 ms)
+[ RUN      ] MetadataExtensionsToILNameStringTest.NestedZeroAdditionalCountAppendsNoArity
+[       OK ] MetadataExtensionsToILNameStringTest.NestedZeroAdditionalCountAppendsNoArity (0 ms)
+[ RUN      ] MetadataExtensionsToILNameStringTest.DeeperNestingRendersEverySegment
+[       OK ] MetadataExtensionsToILNameStringTest.DeeperNestingRendersEverySegment (0 ms)
+[ RUN      ] MetadataExtensionsToILNameStringTest.NestedOmitGenericsDropsEveryArity
+[       OK ] MetadataExtensionsToILNameStringTest.NestedOmitGenericsDropsEveryArity (0 ms)
+[ RUN      ] MetadataExtensionsToILNameStringTest.NestedILAsmKeywordNameIsQuoted
+[       OK ] MetadataExtensionsToILNameStringTest.NestedILAsmKeywordNameIsQuoted (0 ms)
+[ RUN      ] MetadataExtensionsToILNameStringTest.NestedInvalidIdentifierNameIsQuoted
+[       OK ] MetadataExtensionsToILNameStringTest.NestedInvalidIdentifierNameIsQuoted (0 ms)
+[ RUN      ] MetadataExtensionsToILNameStringTest.DiffersFromTheReflectionNameSeparator
+[       OK ] MetadataExtensionsToILNameStringTest.DiffersFromTheReflectionNameSeparator (0 ms)
+[----------] 14 tests from MetadataExtensionsToILNameStringTest (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 19 tests from 2 test suites ran. (2 ms total)
+[  PASSED  ] 19 tests.

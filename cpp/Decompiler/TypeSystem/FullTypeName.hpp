@@ -76,6 +76,19 @@ public:
         return nested_[nestingLevel].AdditionalTypeParameterCount;
     }
 
+    // The declaring type of a nested type (the C# `GetDeclaringType`): the
+    // chain minus the innermost segment (so a single nesting level yields the
+    // top-level name). Throws for a top-level name, mirroring the C#
+    // `InvalidOperationException` (the GetNestedTypeName convention).
+    FullTypeName GetDeclaringType() const {
+        if (nested_.empty())
+            throw std::logic_error("FullTypeName::GetDeclaringType: not a nested type");
+        FullTypeName result;
+        result.topLevel_ = topLevel_;
+        result.nested_.assign(nested_.begin(), nested_.end() - 1);
+        return result;
+    }
+
     bool operator==(const FullTypeName& o) const noexcept {
         return topLevel_ == o.topLevel_ && nested_ == o.nested_;
     }
