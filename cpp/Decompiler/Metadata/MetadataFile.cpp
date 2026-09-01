@@ -334,6 +334,57 @@ std::uint32_t MetadataFile::GetEventAttributes(std::uint32_t eventToken) const {
     }
 }
 
+std::vector<GenericParameterInfo> MetadataFile::GetGenericParameters(std::uint32_t ownerToken) const {
+    std::vector<GenericParameterInfo> result;
+    if (!IsValid()) return result;
+    std::uint32_t table = ownerToken >> 24;
+    std::uint32_t row = ownerToken & 0x00FFFFFFu;
+    if (row == 0) return result;
+    try {
+        if (table == 0x02) {
+            if (row > impl_->db->TypeDef.size()) return result;
+            auto range = impl_->db->TypeDef[row - 1].GenericParam();
+            for (auto it = range.first; it != range.second; ++it) {
+                GenericParameterInfo gp;
+                // GenericParam tokens are table 0x2A; winmd's row_base::index()
+                // is 0-based, so the 1-based token RID is index()+1.
+                gp.Token = (0x2Au << 24) | ((static_cast<std::uint32_t>((*it).index()) + 1) & 0x00FFFFFFu);
+                gp.Number = (*it).Number();
+                gp.Name = std::string{ (*it).Name() };
+                result.push_back(std::move(gp));
+            }
+        } else if (table == 0x06) {
+            if (row > impl_->db->MethodDef.size()) return result;
+            auto range = impl_->db->MethodDef[row - 1].GenericParam();
+            for (auto it = range.first; it != range.second; ++it) {
+                GenericParameterInfo gp;
+                gp.Token = (0x2Au << 24) | ((static_cast<std::uint32_t>((*it).index()) + 1) & 0x00FFFFFFu);
+                gp.Number = (*it).Number();
+                gp.Name = std::string{ (*it).Name() };
+                result.push_back(std::move(gp));
+            }
+        }
+    } catch (const std::exception&) {
+        // A malformed table walk degrades to the empty result (never throws).
+        result.clear();
+    }
+    return result;
+}
+
+std::uint32_t MetadataFile::GetMethodDeclaringTypeToken(std::uint32_t methodToken) const {
+    if (!IsValid()) return 0;
+    std::uint32_t table = methodToken >> 24;
+    std::uint32_t row = methodToken & 0x00FFFFFFu;
+    if (table != 0x06 || row == 0 || row > impl_->db->MethodDef.size()) return 0;
+    try {
+        auto t = impl_->db->MethodDef[row - 1].Parent();
+        if (!t) return 0;
+        return (0x02u << 24) | ((static_cast<std::uint32_t>(t.index()) + 1) & 0x00FFFFFFu);
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
 ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::GetFieldSignature(std::uint32_t fieldToken) const {
     if (!IsValid()) return nullptr;
     std::uint32_t row = fieldToken & 0x00FFFFFFu;

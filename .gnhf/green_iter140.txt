@@ -1,0 +1,52 @@
+Running main() from C:\Projects\github\vcpkg\buildtrees\gtest\src\v1.17.0-e243b8ee0f.clean\googletest\src\gtest_main.cc
+Note: Google Test filter = MetadataFileGenericParameters.*:MetadataFileDeclaringType.*:MetadataGenericContextTest.*
+[==========] Running 18 tests from 3 test suites.
+[----------] Global test environment set-up.
+[----------] 6 tests from MetadataFileGenericParameters
+[ RUN      ] MetadataFileGenericParameters.TypeOwnedRowsForSingleParameterType
+[       OK ] MetadataFileGenericParameters.TypeOwnedRowsForSingleParameterType (32 ms)
+[ RUN      ] MetadataFileGenericParameters.TypeOwnedRowsInTableOrderForTwoParameters
+[       OK ] MetadataFileGenericParameters.TypeOwnedRowsInTableOrderForTwoParameters (25 ms)
+[ RUN      ] MetadataFileGenericParameters.MethodOwnedRows
+[       OK ] MetadataFileGenericParameters.MethodOwnedRows (27 ms)
+[ RUN      ] MetadataFileGenericParameters.NonGenericTypeAndMethodHaveNoRows
+[       OK ] MetadataFileGenericParameters.NonGenericTypeAndMethodHaveNoRows (25 ms)
+[ RUN      ] MetadataFileGenericParameters.WrongTableOrOutOfRangeYieldEmpty
+[       OK ] MetadataFileGenericParameters.WrongTableOrOutOfRangeYieldEmpty (24 ms)
+[ RUN      ] MetadataFileGenericParameters.InvalidFileYieldsEmpty
+[       OK ] MetadataFileGenericParameters.InvalidFileYieldsEmpty (0 ms)
+[----------] 6 tests from MetadataFileGenericParameters (136 ms total)
+
+[----------] 2 tests from MetadataFileDeclaringType
+[ RUN      ] MetadataFileDeclaringType.ResolvesDeclaringTypeOfMethod
+[       OK ] MetadataFileDeclaringType.ResolvesDeclaringTypeOfMethod (43 ms)
+[ RUN      ] MetadataFileDeclaringType.WrongTableOrOutOfRangeYieldZero
+[       OK ] MetadataFileDeclaringType.WrongTableOrOutOfRangeYieldZero (24 ms)
+[----------] 2 tests from MetadataFileDeclaringType (68 ms total)
+
+[----------] 10 tests from MetadataGenericContextTest
+[ RUN      ] MetadataGenericContextTest.TypeContextResolvesTypeParameterName
+[       OK ] MetadataGenericContextTest.TypeContextResolvesTypeParameterName (24 ms)
+[ RUN      ] MetadataGenericContextTest.TypeContextOutOfRangeAndNegativeIndices
+[       OK ] MetadataGenericContextTest.TypeContextOutOfRangeAndNegativeIndices (25 ms)
+[ RUN      ] MetadataGenericContextTest.TypeContextMethodQueriesTakeNilFallback
+[       OK ] MetadataGenericContextTest.TypeContextMethodQueriesTakeNilFallback (24 ms)
+[ RUN      ] MetadataGenericContextTest.DictionaryTwoParameters
+[       OK ] MetadataGenericContextTest.DictionaryTwoParameters (24 ms)
+[ RUN      ] MetadataGenericContextTest.MethodContextResolvesDeclaringTypeParameters
+[       OK ] MetadataGenericContextTest.MethodContextResolvesDeclaringTypeParameters (24 ms)
+[ RUN      ] MetadataGenericContextTest.MethodContextResolvesOwnMethodParameters
+[       OK ] MetadataGenericContextTest.MethodContextResolvesOwnMethodParameters (24 ms)
+[ RUN      ] MetadataGenericContextTest.NonGenericMethodOnNonGenericType
+[       OK ] MetadataGenericContextTest.NonGenericMethodOnNonGenericType (24 ms)
+[ RUN      ] MetadataGenericContextTest.DefaultConstructedContextTakesNilFallbacks
+[       OK ] MetadataGenericContextTest.DefaultConstructedContextTakesNilFallbacks (0 ms)
+[ RUN      ] MetadataGenericContextTest.InvalidTokensYieldNilContext
+[       OK ] MetadataGenericContextTest.InvalidTokensYieldNilContext (7 ms)
+[ RUN      ] MetadataGenericContextTest.InvalidFileYieldsNilFallbacks
+[       OK ] MetadataGenericContextTest.InvalidFileYieldsNilFallbacks (0 ms)
+[----------] 10 tests from MetadataGenericContextTest (180 ms total)
+
+[----------] Global test environment tear-down
+[==========] 18 tests from 3 test suites ran. (386 ms total)
+[  PASSED  ] 18 tests.

@@ -66,9 +66,10 @@
 //    consults the Unicode category database, which the port does not carry;
 //    for the ASCII identifiers real metadata uses the two agree).
 //  * The ExceptionRegion `WriteTo` extension is DEFERRED: it needs the
-//    ExceptionRegion model (unported), MetadataGenericContext (unported), and
-//    the ReflectionDisassembler catch-type writer (unported); it lands with the
-//    ReflectionDisassembler method-body disassembly region.
+//    ExceptionRegion model (unported), MetadataGenericContext (now ported --
+//    Metadata/MetadataGenericContext.hpp), and the ReflectionDisassembler
+//    catch-type writer (unported); it lands with the ReflectionDisassembler
+//    method-body disassembly region.
 
 #pragma once
 

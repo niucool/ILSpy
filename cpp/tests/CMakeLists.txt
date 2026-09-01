@@ -18,6 +18,7 @@ add_executable(ilspy_tests
     Decompiler/Metadata/CustomAttributes_Test.cpp
     Decompiler/Metadata/CompilerGeneratedField_Test.cpp
     Decompiler/Metadata/ILTextEmitter_Test.cpp
+    Decompiler/Metadata/MetadataGenericContext_Test.cpp
     Decompiler/Disassembler/OpCodeInfo_Test.cpp
     Decompiler/Disassembler/ReflectionAttributes_Test.cpp
     Decompiler/Disassembler/EnumNameCollection_Test.cpp

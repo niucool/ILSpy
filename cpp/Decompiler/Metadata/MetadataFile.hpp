@@ -109,6 +109,17 @@ struct EventInfo {
     std::uint32_t Token;   // table 0x14
 };
 
+// A GenericParam row (table 0x2A): its metadata token, the ECMA Number column
+// (the parameter's authored zero-based position -- SRM's GenericParameter.Index,
+// which the disassembler's WriteTypeParameter nil-name fallback reads), and the
+// authored Name ("" when the row's Name column is nil -- SRM GetString(nil) is
+// the empty string). The direct prerequisite MetadataGenericContext consumes.
+struct GenericParameterInfo {
+    std::uint32_t Token;    // 0x2A000000 | row (1-based)
+    std::uint16_t Number;   // the Number column
+    std::string Name;
+};
+
 // A custom attribute applied to an entity: the attribute type's namespace and
 // name (e.g. "System", "SerializableAttribute"). Constructor/named-argument
 // decoding is deferred to a later phase; the name is enough for the type
@@ -194,6 +205,22 @@ public:
     std::uint32_t GetMethodAttributes(std::uint32_t methodToken) const;
     std::uint32_t GetPropertyAttributes(std::uint32_t propertyToken) const;
     std::uint32_t GetEventAttributes(std::uint32_t eventToken) const;
+
+    // The GenericParam rows (table 0x2A) owned by a TypeDef (0x02) or MethodDef
+    // (0x06) token, in table order -- the port's analog of the SRM row methods
+    // TypeDefinition.GetGenericParameters() / MethodDefinition.GetGenericParameters()
+    // (SRM returns the same owner-contiguous, positionally-indexed collection;
+    // ECMA-335 sorts the GenericParam table by Owner). Returns an empty vector
+    // for an invalid file, an out-of-range row, a nil row, or a token from any
+    // other table; never throws.
+    std::vector<GenericParameterInfo> GetGenericParameters(std::uint32_t ownerToken) const;
+
+    // The declaring TypeDef token (table 0x02) of a MethodDef (0x06) token --
+    // the analog of the SRM MethodDefinition.GetDeclaringType() row read that
+    // MetadataGenericContext's method-context construction resolves. Returns 0
+    // for an invalid file, an out-of-range row, a nil row, or a non-MethodDef
+    // token; never throws.
+    std::uint32_t GetMethodDeclaringTypeToken(std::uint32_t methodToken) const;
 
     // Custom attributes applied to an entity (TypeDef/MethodDef/Field/Property
     // token). Returns the attribute type namespace+name for each; never throws.
