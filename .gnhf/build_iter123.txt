@@ -1,5 +1,0 @@
-MSBuild version 18.10.0-1.26379.9+c88db8eb0 for .NET Framework
-
-  ilspy.vcxproj -> C:\Projects\github\ILSpy\cpp\build\windows-vs2026\Debug\ilspy.lib
-  TypeSystemAstBuilderConvertTypeParameterVariable_Test.cpp
-  ilspy_tests.vcxproj -> C:\Projects\github\ILSpy\cpp\build\windows-vs2026\tests\Debug\ilspy_tests.exe

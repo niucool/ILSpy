@@ -1,3 +1,0 @@
-Comparing files .GNHF\mscorlib_iter138.cs and .GNHF\MSCORLIB_NEW.CS
-FC: no differences encountered
-
