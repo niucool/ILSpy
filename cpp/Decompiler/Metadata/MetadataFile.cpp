@@ -441,6 +441,99 @@ std::optional<TypeRefNameInfo> MetadataFile::GetTypeRefNameInfo(std::uint32_t ty
     }
 }
 
+// A TypeRef row's ResolutionScope coded index: the scope kind plus the
+// scope row's name string / raw token. See the header for the full contract.
+std::optional<TypeRefScopeInfo> MetadataFile::GetTypeRefScopeInfo(std::uint32_t typeRefToken) const {
+    if (!IsValid()) return std::nullopt;
+    std::uint32_t table = typeRefToken >> 24;
+    std::uint32_t row = typeRefToken & 0x00FFFFFFu;
+    if (table != 0x01 || row == 0 || row > impl_->db->TypeRef.size()) return std::nullopt;
+    try {
+        auto r = impl_->db->TypeRef[row - 1];
+        auto scope = r.ResolutionScope();
+        using RS = winmd::reader::ResolutionScope;
+        TypeRefScopeInfo info;
+        if (!scope) {
+            info.Scope = TypeRefScopeInfo::Kind::None;
+            return info;
+        }
+        switch (scope.type()) {
+            case RS::Module: {
+                auto m = scope.Module();
+                info.Scope = TypeRefScopeInfo::Kind::Module;
+                info.ScopeToken = 0x00u << 24;
+                info.Name = std::string{ m.Name() };
+                break;
+            }
+            case RS::ModuleRef: {
+                auto mr = scope.ModuleRef();
+                info.Scope = TypeRefScopeInfo::Kind::ModuleRef;
+                info.ScopeToken = (0x1Au << 24) |
+                    ((static_cast<std::uint32_t>(mr.index()) + 1) & 0x00FFFFFFu);
+                // The winmd ModuleRef row carries only the name column with no
+                // public accessor; the C# WriteTo renders nothing for a
+                // ModuleReference scope, so the empty name is faithful.
+                break;
+            }
+            case RS::AssemblyRef: {
+                auto ar = scope.AssemblyRef();
+                info.Scope = TypeRefScopeInfo::Kind::AssemblyRef;
+                info.ScopeToken = (0x23u << 24) |
+                    ((static_cast<std::uint32_t>(ar.index()) + 1) & 0x00FFFFFFu);
+                info.Name = std::string{ ar.Name() };
+                break;
+            }
+            case RS::TypeRef: {
+                auto tr = scope.TypeRef();
+                info.Scope = TypeRefScopeInfo::Kind::TypeRef;
+                info.ScopeToken = (0x01u << 24) |
+                    ((static_cast<std::uint32_t>(tr.index()) + 1) & 0x00FFFFFFu);
+                break;
+            }
+        }
+        return info;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// A GenericParam row (table 0x2A) by raw token: Token/Number/Name. See the
+// header for the full contract.
+std::optional<GenericParameterInfo> MetadataFile::GetGenericParameterByToken(
+        std::uint32_t genericParamToken) const {
+    if (!IsValid()) return std::nullopt;
+    std::uint32_t table = genericParamToken >> 24;
+    std::uint32_t row = genericParamToken & 0x00FFFFFFu;
+    if (table != 0x2A || row == 0 || row > impl_->db->GenericParam.size()) return std::nullopt;
+    try {
+        auto gp = impl_->db->GenericParam[row - 1];
+        GenericParameterInfo info;
+        info.Token = genericParamToken;
+        info.Number = gp.Number();
+        info.Name = std::string{ gp.Name() };
+        return info;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// A TypeSpec row's (table 0x1B) raw signature blob (column 0). See the
+// header for the full contract.
+std::optional<std::vector<std::uint8_t>> MetadataFile::GetTypeSpecSignatureBlob(
+        std::uint32_t typeSpecToken) const {
+    if (!IsValid()) return std::nullopt;
+    std::uint32_t table = typeSpecToken >> 24;
+    std::uint32_t row = typeSpecToken & 0x00FFFFFFu;
+    if (table != 0x1B || row == 0 || row > impl_->db->TypeSpec.size()) return std::nullopt;
+    try {
+        std::uint32_t blobIndex = impl_->db->TypeSpec.get_value<std::uint32_t>(row - 1, 0);
+        auto view = impl_->db->get_blob(blobIndex);
+        return std::vector<std::uint8_t>(view.begin(), view.end());
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
 ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::GetFieldSignature(std::uint32_t fieldToken) const {
     if (!IsValid()) return nullptr;
     std::uint32_t row = fieldToken & 0x00FFFFFFu;

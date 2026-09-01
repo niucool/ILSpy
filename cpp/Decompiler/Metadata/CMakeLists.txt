@@ -15,6 +15,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/MetadataGenericContext.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/MetadataExtensions.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/SRMExtensions.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/SignatureTypeProvider.cpp
 )
 
 # winmd headers use #include "impl/base.h" relative to their own src/ directory;

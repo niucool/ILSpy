@@ -21,6 +21,7 @@ add_executable(ilspy_tests
     Decompiler/Metadata/MetadataGenericContext_Test.cpp
     Decompiler/Metadata/MetadataExtensions_Test.cpp
     Decompiler/Metadata/SRMExtensions_Test.cpp
+    Decompiler/Disassembler/DisassemblerSignatureTypeProvider_Test.cpp
     Decompiler/Disassembler/OpCodeInfo_Test.cpp
     Decompiler/Disassembler/ReflectionAttributes_Test.cpp
     Decompiler/Disassembler/EnumNameCollection_Test.cpp

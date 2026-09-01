@@ -140,6 +140,24 @@ struct TypeRefNameInfo {
     std::uint32_t DeclaringTypeRefToken = 0; // 0 when top-level
 };
 
+// A TypeRef row's (table 0x01) resolution scope: the coded-index kind and,
+// where applicable, the scope row's name string and raw token. Consumed by
+// the IL InstructionOutputExtensions WriteTo's TypeReference `[assembly]`
+// prefix walk (the outermost TypeRef's scope names the referenced module or
+// assembly; a TypeRef scope means the row is nested and keeps walking).
+struct TypeRefScopeInfo {
+    enum class Kind : std::uint8_t {
+        None = 0,        // nil scope (the .NET type-in-this-module case)
+        Module,          // scope row = the Module table (own module)
+        ModuleRef,       // scope row = a ModuleRef (a netmodule reference)
+        AssemblyRef,     // scope row = an AssemblyRef
+        TypeRef,         // scope row = a nested declaring TypeRef
+    };
+    Kind Scope = Kind::None;
+    std::string Name;             // Module/ModuleRef/AssemblyRef scope name
+    std::uint32_t ScopeToken = 0; // the scope row's raw token (0x00/0x1A/0x23/0x01)
+};
+
 // A custom attribute applied to an entity: the attribute type's namespace and
 // name (e.g. "System", "SerializableAttribute"). Constructor/named-argument
 // decoding is deferred to a later phase; the name is enough for the type
@@ -265,6 +283,32 @@ public:
     // Returns nullopt for an invalid file, an out-of-range row, a nil row, or
     // a non-TypeRef token; never throws.
     std::optional<TypeRefNameInfo> GetTypeRefNameInfo(std::uint32_t typeRefToken) const;
+
+    // A TypeRef row's (table 0x01) resolution scope: the coded-index kind
+    // (None/Module/ModuleRef/AssemblyRef/TypeRef), the scope row's name
+    // string for the Module/ModuleRef/AssemblyRef kinds, and the scope row's
+    // raw token -- the per-row read the IL InstructionOutputExtensions
+    // WriteTo's TypeReference `[assembly]` prefix walk composes (the C#
+    // tr.ResolutionScope then the outermost-TypeRef switch). Returns nullopt
+    // for an invalid file, an out-of-range row, a nil row, or a non-TypeRef
+    // token; never throws.
+    std::optional<TypeRefScopeInfo> GetTypeRefScopeInfo(std::uint32_t typeRefToken) const;
+
+    // A GenericParam row's (table 0x2A) data by raw token -- the single-row
+    // read the DisassemblerSignatureTypeProvider's WriteTypeParameter composes
+    // (the C# metadata.GetGenericParameter(paramRef) then Name/Index). Returns
+    // nullopt for an invalid file, an out-of-range row, a nil row, or a
+    // non-GenericParam token; never throws.
+    std::optional<GenericParameterInfo> GetGenericParameterByToken(
+        std::uint32_t genericParamToken) const;
+
+    // A TypeSpec row's (table 0x1B) raw signature-blob bytes -- the single-row
+    // read the provider-driven SignatureTypeProviderDecoder recurses through
+    // for nested/inner TypeSpecs (the pimpl constraint keeps the winmd
+    // database inside this file). Returns nullopt for an invalid file, an
+    // out-of-range row, a nil row, or a non-TypeSpec token; never throws.
+    std::optional<std::vector<std::uint8_t>> GetTypeSpecSignatureBlob(
+        std::uint32_t typeSpecToken) const;
 
     // Custom attributes applied to an entity (TypeDef/MethodDef/Field/Property
     // token). Returns the attribute type namespace+name for each; never throws.

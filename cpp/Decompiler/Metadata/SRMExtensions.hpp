@@ -39,6 +39,9 @@
 #include "Decompiler/TypeSystem/FullTypeName.hpp"
 
 #include <cstdint>
+#include <string>
+
+#include "Decompiler/Metadata/SignatureTypeProvider.hpp"  // SignatureCallingConvention
 
 namespace ILSpy::Decompiler::Metadata {
 
@@ -71,5 +74,14 @@ TypeSystem::FullTypeName GetFullTypeNameFromDefinition(const MetadataFile& metad
 // throws std::logic_error; any other kind throws std::out_of_range (the C#
 // ArgumentOutOfRangeException). A nil token throws std::invalid_argument.
 TypeSystem::FullTypeName GetFullTypeName(const MetadataFile& metadata, std::uint32_t entityToken);
+
+// The C# `public static string ToILSyntax(this SignatureCallingConvention
+// callConv)` (SRMExtensions.cs line 783) -- the ILAsm calling-convention
+// spelling the SignatureHeader.WriteTo writer (IL/InstructionOutputExtensions)
+// and ILAmbience consume: "default" / "unmanaged cdecl" / "unmanaged stdcall"
+// / "unmanaged thiscall" / "unmanaged fastcall" / "vararg" / "unmanaged";
+// any other convention renders its enum name lower-cased (the C# `ToString().
+// ToLowerInvariant()` fallback, unreachable for the 7 ported members).
+std::string ToILSyntax(SignatureCallingConvention callConv);
 
 } // namespace ILSpy::Decompiler::Metadata

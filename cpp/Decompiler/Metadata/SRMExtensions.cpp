@@ -85,6 +85,28 @@ FullTypeName GetFullTypeNameFromDefinitionImpl(const MetadataFile& metadata,
 
 } // namespace
 
+std::string ToILSyntax(SignatureCallingConvention callConv) {
+    switch (callConv) {
+        case SignatureCallingConvention::Default:
+            return "default";
+        case SignatureCallingConvention::CDecl:
+            return "unmanaged cdecl";
+        case SignatureCallingConvention::StdCall:
+            return "unmanaged stdcall";
+        case SignatureCallingConvention::ThisCall:
+            return "unmanaged thiscall";
+        case SignatureCallingConvention::FastCall:
+            return "unmanaged fastcall";
+        case SignatureCallingConvention::VarArgs:
+            return "vararg";
+        case SignatureCallingConvention::Unmanaged:
+            return "unmanaged";
+    }
+    // Unreachable for the seven ported members (a fresh convention byte maps
+    // to one of them in the header decode); kept as the C# fallback arm.
+    return "default";
+}
+
 FullTypeName GetFullTypeNameFromReference(const MetadataFile& metadata,
                                           std::uint32_t typeRefToken) {
     // The C# `if (handle.IsNil) throw new ArgumentNullException` -- the nil
