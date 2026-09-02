@@ -1,0 +1,91 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+// Port of ICSharpCode.Decompiler/Disassembler/MethodBodyDisassembler.cs (in
+// progress -- the flat-path chain lands across iterations): the option flags
+// and the opcode/token/raw-bytes writers the WriteInstruction operand switch
+// and the Disassemble scaffolding consume. The C# private members WriteOpCode
+// and WriteRVA and the WriteMetadataToken wrapper are the port's public
+// members so the tests can drive them before Disassemble itself exists.
+//
+// The C# DebugInfo / sequence-point machinery (ShowSequencePoints +
+// IDebugInfoProvider) is deferred with the provider type -- the flag exists,
+// the sequence-point rendering comes with DebugInfo.
+
+#pragma once
+
+#include "Decompiler/Metadata/ILOpCodes.hpp"
+#include "Decompiler/Output/ITextOutput.hpp"
+
+#include <cstdint>
+
+namespace ILSpy::Decompiler::Metadata {
+class MetadataFile;
+}
+
+namespace ILSpy::Decompiler::Disassembler {
+
+class MethodBodyDisassembler {
+public:
+    explicit MethodBodyDisassembler(Output::ITextOutput& output);
+
+    // The C# `public bool DetectControlStructure { get; set; } = true`:
+    // show .try/finally as blocks in IL code; indent loops.
+    bool DetectControlStructure = true;
+
+    // The C# `public bool ShowSequencePoints { get; set; }`.
+    bool ShowSequencePoints = false;
+
+    // The C# `public bool ShowMetadataTokens { get; set; }`: show metadata
+    // tokens for instructions with token operands.
+    bool ShowMetadataTokens = false;
+
+    // The C# `public bool ShowMetadataTokensInBase10 { get; set; }`.
+    bool ShowMetadataTokensInBase10 = false;
+
+    // The C# `public bool ShowRawRVAOffsetAndBytes { get; set; }`: show the
+    // raw RVA offset and bytes before each instruction.
+    bool ShowRawRVAOffsetAndBytes = false;
+
+    // The C# `private void WriteOpCode(ILOpCode opCode)`: the display-name
+    // reference, with the ldarg.0-3 / ldloc.0-3 / stloc.0-3 shorthand forms
+    // writing their suffix as a local reference (param_N / loc_N).
+    void WriteOpCode(Metadata::ILOpCode opCode);
+
+    // The C# `private void WriteRVA(BlobReader blob, int offset, ILOpCode
+    // opCode)`: the ShowRawRVAOffsetAndBytes `/* 0xNNNNNNNN <opcode hex>
+    // <operand bytes> */ ` prefix. The C# BlobReader is a value type, so the
+    // read cursor is local to the comment (the caller's position is
+    // untouched); a switch operand shows the count dword only -- the target
+    // bytes live in the operand arm.
+    void WriteRVA(const std::uint8_t* base, std::size_t size, std::size_t pos,
+        std::uint32_t offset, Metadata::ILOpCode opCode);
+
+    // The C# `private void WriteMetadataToken(Handle? handle, int
+    // metadataToken, bool spaceBefore)` wrapper: calls the ReflectionDisassembler
+    // static with spaceAfter=false and the ShowMetadataTokens flags. The
+    // handle ports as the raw metadata token -- 0 is the C# null (the comment
+    // prints even without ShowMetadataTokens in that error case).
+    void WriteMetadataToken(const Metadata::MetadataFile& module,
+        std::uint32_t entityToken, bool spaceBefore);
+
+private:
+    Output::ITextOutput& output_;
+};
+
+}  // namespace ILSpy::Decompiler::Disassembler
