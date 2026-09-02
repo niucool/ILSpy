@@ -216,6 +216,13 @@ public:
     // The C# `DecodeMethodSignature(ref BlobReader, TGenericContext)` entry.
     MethodSignatureT DecodeMethodSignature(const std::uint8_t* data, std::size_t size,
         const MetadataGenericContext& genericContext);
+    // The SRM `MethodSpecification.DecodeSignature` shape: a compressed
+    // type-argument count followed by that many full types (the MethodSpec
+    // Instantiation blob). Trailing bytes throw std::logic_error (the same
+    // strict-blob convention as the other entries).
+    std::vector<SignatureTypeWriter> DecodeMethodSpecSignature(
+        const std::uint8_t* data, std::size_t size,
+        const MetadataGenericContext& genericContext);
 
 private:
     ISignatureTypeProvider& provider_;

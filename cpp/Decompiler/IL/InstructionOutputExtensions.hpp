@@ -64,6 +64,13 @@ void WriteTo(const Metadata::SignatureHeader& header, Output::ITextOutput& outpu
 void WriteParameterList(Output::ITextOutput& output,
     const Metadata::MethodSignatureT& methodSignature);
 
+// The C# `static void WriteTypeParameterList(ITextOutput output,
+// ILNameSyntax syntax, ImmutableArray<Action<ILNameSyntax>> substitution)`:
+// the MethodSpec's instantiating type arguments at the caller's syntax.
+void WriteTypeParameterList(Output::ITextOutput& output,
+    Disassembler::ILNameSyntax syntax,
+    const std::vector<Metadata::SignatureTypeWriter>& substitution);
+
 // The C# `public static void WriteTo(this EntityHandle entity, MetadataFile
 // module, ITextOutput output, MetadataGenericContext genericContext,
 // ILNameSyntax syntax = ILNameSyntax.Signature)`. The handle ports as the raw

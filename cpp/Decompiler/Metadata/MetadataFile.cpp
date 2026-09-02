@@ -637,6 +637,166 @@ std::string MetadataFile::GetFieldName(std::uint32_t fieldToken) const {
     }
 }
 
+// A MemberRef row's Name + MemberRefParent coded index. See the header for
+// the full contract.
+std::optional<MetadataFile::MemberRefInfo> MetadataFile::GetMemberReference(
+        std::uint32_t token) const {
+    if (!IsValid()) return std::nullopt;
+    std::uint32_t table = token >> 24;
+    std::uint32_t row = token & 0x00FFFFFFu;
+    if (table != 0x0A || row == 0 || row > impl_->db->MemberRef.size())
+        return std::nullopt;
+    try {
+        MemberRefInfo info;
+        info.Token = token;
+        info.Name = std::string{ impl_->db->MemberRef[row - 1].Name() };
+        // The MemberRefParent coded index (3-bit tag): 0=TypeDef, 1=TypeRef,
+        // 2=ModuleRef, 3=MethodDef, 4=TypeSpec.
+        std::uint32_t v = impl_->db->MemberRef.get_value<std::uint32_t>(row - 1, 0);
+        static constexpr std::uint8_t kParentTables[5] = {0x02, 0x01, 0x1A, 0x06, 0x1B};
+        if (v != 0) {
+            std::uint32_t tag = v & 0x7u;
+            std::uint32_t rid = v >> 3;
+            if (rid != 0 && tag < 5)
+                info.ParentToken = (static_cast<std::uint32_t>(kParentTables[tag]) << 24) | rid;
+        }
+        return info;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// A MethodSpec row's MethodDefOrRef target. See the header for the full
+// contract.
+std::optional<MetadataFile::MethodSpecInfo> MetadataFile::GetMethodSpecification(
+        std::uint32_t methodSpecToken) const {
+    if (!IsValid()) return std::nullopt;
+    std::uint32_t table = methodSpecToken >> 24;
+    std::uint32_t row = methodSpecToken & 0x00FFFFFFu;
+    if (table != 0x2B || row == 0 || row > impl_->db->MethodSpec.size())
+        return std::nullopt;
+    try {
+        // The MethodSpec row has no public column accessors; the raw
+        // MethodDefOrRef coded index: bit 0 is the tag (0=MethodDef,
+        // 1=MemberRef), the rest the 1-based row (the established read).
+        MethodSpecInfo info;
+        info.Token = methodSpecToken;
+        std::uint32_t v = impl_->db->MethodSpec.get_value<std::uint32_t>(row - 1, 0);
+        if (v == 0) return info;  // a nil target; Token still set
+        info.MethodToken = ((v & 1) ? 0x0A000000u : 0x06000000u) | (v >> 1);
+        return info;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// A MethodSpec row's raw instantiation blob (column 1). See the header for
+// the full contract.
+std::optional<std::vector<std::uint8_t>> MetadataFile::GetMethodSpecificationInstantiationBlob(
+        std::uint32_t methodSpecToken) const {
+    if (!IsValid()) return std::nullopt;
+    std::uint32_t table = methodSpecToken >> 24;
+    std::uint32_t row = methodSpecToken & 0x00FFFFFFu;
+    if (table != 0x2B || row == 0 || row > impl_->db->MethodSpec.size())
+        return std::nullopt;
+    try {
+        std::uint32_t blobIndex =
+            impl_->db->MethodSpec.get_value<std::uint32_t>(row - 1, 1);
+        auto view = impl_->db->get_blob(blobIndex);
+        return std::vector<std::uint8_t>(view.begin(), view.end());
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// A StandaloneSig row's raw signature blob (column 0). See the header for
+// the full contract.
+std::optional<std::vector<std::uint8_t>> MetadataFile::GetStandaloneSignatureBlob(
+        std::uint32_t token) const {
+    if (!IsValid()) return std::nullopt;
+    std::uint32_t table = token >> 24;
+    std::uint32_t row = token & 0x00FFFFFFu;
+    if (table != 0x11 || row == 0 || row > impl_->db->StandAloneSig.size())
+        return std::nullopt;
+    try {
+        std::uint32_t blobIndex =
+            impl_->db->StandAloneSig.get_value<std::uint32_t>(row - 1, 0);
+        auto view = impl_->db->get_blob(blobIndex);
+        return std::vector<std::uint8_t>(view.begin(), view.end());
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// A ModuleRef row's authored Name. See the header for the full contract.
+std::optional<std::string> MetadataFile::GetModuleReferenceName(std::uint32_t token) const {
+    if (!IsValid()) return std::nullopt;
+    std::uint32_t table = token >> 24;
+    std::uint32_t row = token & 0x00FFFFFFu;
+    if (table != 0x1A || row == 0 || row > impl_->db->ModuleRef.size())
+        return std::nullopt;
+    try {
+        return std::string{
+            impl_->db->get_string(impl_->db->ModuleRef.get_value<std::uint32_t>(row - 1, 0))
+        };
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// The whole-table enumerations. See the header for the full contract.
+std::vector<MetadataFile::MemberRefInfo> MetadataFile::MemberRefs() const {
+    std::vector<MemberRefInfo> result;
+    if (!IsValid()) return result;
+    try {
+        for (std::uint32_t row = 1; row <= impl_->db->MemberRef.size(); row++) {
+            MemberRefInfo info;
+            info.Token = (0x0Au << 24) | row;
+            info.Name = std::string{ impl_->db->MemberRef[row - 1].Name() };
+            std::uint32_t v = impl_->db->MemberRef.get_value<std::uint32_t>(row - 1, 0);
+            static constexpr std::uint8_t kParentTables[5] = {0x02, 0x01, 0x1A, 0x06, 0x1B};
+            if (v != 0) {
+                std::uint32_t tag = v & 0x7u;
+                std::uint32_t rid = v >> 3;
+                if (rid != 0 && tag < 5)
+                    info.ParentToken =
+                        (static_cast<std::uint32_t>(kParentTables[tag]) << 24) | rid;
+            }
+            result.push_back(std::move(info));
+        }
+    } catch (const std::exception&) {
+        result.clear();
+    }
+    return result;
+}
+
+std::vector<MetadataFile::MethodSpecInfo> MetadataFile::MethodSpecs() const {
+    std::vector<MethodSpecInfo> result;
+    if (!IsValid()) return result;
+    try {
+        for (std::uint32_t row = 1; row <= impl_->db->MethodSpec.size(); row++) {
+            MethodSpecInfo info;
+            info.Token = (0x2Bu << 24) | row;
+            std::uint32_t v = impl_->db->MethodSpec.get_value<std::uint32_t>(row - 1, 0);
+            if (v != 0)
+                info.MethodToken = ((v & 1) ? 0x0A000000u : 0x06000000u) | (v >> 1);
+            result.push_back(std::move(info));
+        }
+    } catch (const std::exception&) {
+        result.clear();
+    }
+    return result;
+}
+
+std::vector<std::uint32_t> MetadataFile::StandaloneSignatureTokens() const {
+    std::vector<std::uint32_t> result;
+    if (!IsValid()) return result;
+    for (std::uint32_t row = 1; row <= impl_->db->StandAloneSig.size(); row++) {
+        result.push_back((0x11u << 24) | row);
+    }
+    return result;
+}
+
 ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::GetFieldSignature(std::uint32_t fieldToken) const {
     if (!IsValid()) return nullptr;
     std::uint32_t row = fieldToken & 0x00FFFFFFu;

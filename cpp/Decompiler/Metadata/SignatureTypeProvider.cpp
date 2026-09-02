@@ -320,4 +320,25 @@ MethodSignatureT SignatureTypeProviderDecoder::DecodeMethodSignature(
     return sig;
 }
 
+// The SRM `MethodSpecification.DecodeSignature` shape: the leading 0x0A
+// GENERICINST marker (ECMA-335 II.23.2.15), the compressed type-argument
+// count, then that many full types.
+std::vector<SignatureTypeWriter> SignatureTypeProviderDecoder::DecodeMethodSpecSignature(
+        const std::uint8_t* data, std::size_t size,
+        const MetadataGenericContext& genericContext) {
+    cur_ = data;
+    end_ = data + size;
+    context_ = &genericContext;
+    if (Byte() != 0x0A) Fail("bad method specification marker");
+    std::uint32_t count = CompressedUnsigned();
+    std::vector<SignatureTypeWriter> result;
+    result.reserve(count);
+    for (std::uint32_t i = 0; i < count; i++) {
+        result.push_back(DecodeTypeWithPrefixes());
+    }
+    if (cur_ != end_) Fail("trailing bytes after the method specification");
+    context_ = nullptr;
+    return result;
+}
+
 } // namespace ILSpy::Decompiler::Metadata

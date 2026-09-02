@@ -29,6 +29,7 @@
 
 #include <cstdio>
 #include <stdexcept>
+#include <vector>
 
 namespace ILSpy::Decompiler::IL {
 
@@ -48,6 +49,16 @@ void WriteTo(const Metadata::SignatureHeader& header, ITextOutput& output) {
     }
 }
 
+void WriteTypeParameterList(ITextOutput& output, Disassembler::ILNameSyntax syntax,
+    const std::vector<Metadata::SignatureTypeWriter>& substitution) {
+    output.Write('<');
+    for (std::size_t i = 0; i < substitution.size(); i++) {
+        if (i > 0) output.Write(", ");
+        substitution[i](syntax);
+    }
+    output.Write('>');
+}
+
 void WriteParameterList(ITextOutput& output, const Metadata::MethodSignatureT& methodSignature) {
     output.Write("(");
     for (std::size_t i = 0; i < methodSignature.ParameterTypes.size(); ++i) {
@@ -58,6 +69,37 @@ void WriteParameterList(ITextOutput& output, const Metadata::MethodSignatureT& m
         methodSignature.ParameterTypes[i](Disassembler::ILNameSyntax::SignatureNoNamedTypeParameters);
     }
     output.Write(")");
+}
+
+// The C# `static void WriteParent(ITextOutput output, MetadataFile
+// metadataFile, EntityHandle parentHandle, MetadataGenericContext
+// genericContext, ILNameSyntax syntax)`: a MemberRef's parent entity. A
+// MethodDefinition parent renders its DECLARING type (the nested-type
+// member-reference case); a ModuleReference parent the unescaped "[name]";
+// the type handles recurse through WriteTo; anything else writes nothing.
+void WriteParent(ITextOutput& output, const MetadataFile& module,
+    std::uint32_t parentToken, const MetadataGenericContext& genericContext,
+    Disassembler::ILNameSyntax syntax) {
+    switch (parentToken >> 24) {
+        case 0x06:  // HandleKind.MethodDefinition
+        {
+            std::uint32_t declaringType = module.GetMethodDeclaringTypeToken(parentToken);
+            WriteTo(module, output, genericContext, declaringType, syntax);
+            break;
+        }
+        case 0x1A:  // HandleKind.ModuleReference
+        {
+            output.Write('[');
+            output.Write(module.GetModuleReferenceName(parentToken).value_or(""));
+            output.Write(']');
+            break;
+        }
+        case 0x02:  // HandleKind.TypeDefinition
+        case 0x01:  // HandleKind.TypeReference
+        case 0x1B:  // HandleKind.TypeSpecification
+            WriteTo(module, output, genericContext, parentToken, syntax);
+            break;
+    }
 }
 
 void WriteTo(const MetadataFile& module, ITextOutput& output,
@@ -247,6 +289,140 @@ void WriteTo(const MetadataFile& module, ITextOutput& output,
                 output.Write('>');
             }
             WriteParameterList(output, methodSignature);
+            break;
+        }
+        case 0x0A:  // HandleKind.MemberReference
+        {
+            // The C# `mr.GetKind()` splits on the signature-blob kind nibble:
+            // Method (0) takes the method-signature arm with the parent
+            // rendered through WriteParent; anything else is the field arm
+            // (a bare type decode, no parameter list).
+            auto blob = module.GetSignatureBlob(entityToken);
+            if (!blob || blob->empty())
+                throw std::logic_error("member signature");
+            std::string memberName = module.GetMemberReference(entityToken)->Name;
+            if (((*blob)[0] & 0x0F) == 0x00) {  // method kind
+                Metadata::MetadataGenericContext outerContext(genericContext);
+                Disassembler::DisassemblerSignatureTypeProvider provider(module, output);
+                Metadata::SignatureTypeProviderDecoder decoder(provider, module);
+                Metadata::MethodSignatureT methodSignature =
+                    decoder.DecodeMethodSignature(blob->data(), blob->size(), outerContext);
+                WriteTo(methodSignature.Header, output);
+                methodSignature.ReturnType(
+                    Disassembler::ILNameSyntax::SignatureNoNamedTypeParameters);
+                output.Write(' ');
+                std::uint32_t parent = module.GetMemberReference(entityToken)->ParentToken;
+                WriteParent(output, module, parent, genericContext, syntax);
+                output.Write("::");
+                output.WriteReference(module, entityToken, Disassembler::Escape(memberName));
+                WriteParameterList(output, methodSignature);
+            } else {  // the C# `case MemberReferenceKind.Field`
+                if (((*blob)[0] & 0x0F) != 0x06)
+                    throw std::logic_error("field signature");
+                Disassembler::DisassemblerSignatureTypeProvider provider(module, output);
+                Metadata::SignatureTypeProviderDecoder decoder(provider, module);
+                Metadata::SignatureTypeWriter fieldSignature = decoder.DecodeType(
+                    blob->data() + 1, blob->size() - 1, genericContext);
+                fieldSignature(Disassembler::ILNameSyntax::SignatureNoNamedTypeParameters);
+                output.Write(' ');
+                std::uint32_t parent = module.GetMemberReference(entityToken)->ParentToken;
+                WriteParent(output, module, parent, genericContext, syntax);
+                output.Write("::");
+                output.WriteReference(module, entityToken, Disassembler::Escape(memberName));
+            }
+            break;
+        }
+        case 0x2B:  // HandleKind.MethodSpecification
+        {
+            // The C# `ms.DecodeSignature(...)` substitution plus the target's
+            // own method rendering: a MethodDef target writes the escaped
+            // (compiler-controlled-aware) name, a MemberRef target the
+            // WriteParent::name shape -- both followed by the substitution
+            // block and the target's parameter list.
+            auto blob = module.GetMethodSpecificationInstantiationBlob(entityToken);
+            if (!blob)
+                throw std::logic_error("method specification");
+            Disassembler::DisassemblerSignatureTypeProvider provider(module, output);
+            Metadata::SignatureTypeProviderDecoder decoder(provider, module);
+            std::vector<Metadata::SignatureTypeWriter> substitution =
+                decoder.DecodeMethodSpecSignature(blob->data(), blob->size(), genericContext);
+            std::uint32_t methodToken = module.GetMethodSpecification(entityToken)->MethodToken;
+            auto blobMethod = module.GetSignatureBlob(methodToken);
+            if (!blobMethod)
+                throw std::logic_error("method signature");
+            Metadata::MethodSignatureT methodSignature =
+                decoder.DecodeMethodSignature(blobMethod->data(), blobMethod->size(),
+                    genericContext);
+            WriteTo(methodSignature.Header, output);
+            methodSignature.ReturnType(Disassembler::ILNameSyntax::SignatureNoNamedTypeParameters);
+            output.Write(' ');
+            if ((methodToken >> 24) == 0x06) {  // the C# `case HandleKind.MethodDefinition`
+                std::string methodName = module.GetMethodName(methodToken);
+                std::uint32_t declaringType = module.GetMethodDeclaringTypeToken(methodToken);
+                if (declaringType != 0) {
+                    WriteTo(module, output, genericContext, declaringType,
+                        Disassembler::ILNameSyntax::TypeName);
+                    output.Write("::");
+                }
+                bool isCompilerControlled =
+                    (module.GetMethodAttributes(methodToken) & 0x0007u) == 0x0000u;
+                if (isCompilerControlled) {
+                    char buf[16];
+                    std::snprintf(buf, sizeof(buf), "$PST%08X",
+                        static_cast<unsigned>(methodToken));
+                    output.Write(Disassembler::Escape(methodName + buf));
+                } else {
+                    output.Write(Disassembler::Escape(methodName));
+                }
+            } else {  // the C# `case HandleKind.MemberReference`
+                auto mr = module.GetMemberReference(methodToken);
+                if (!mr)
+                    throw std::logic_error("member reference");
+                std::string memberName = mr->Name;
+                WriteParent(output, module, mr->ParentToken, genericContext, syntax);
+                output.Write("::");
+                output.Write(Disassembler::Escape(memberName));
+            }
+            WriteTypeParameterList(output, syntax, substitution);
+            WriteParameterList(output, methodSignature);
+            break;
+        }
+        case 0x11:  // HandleKind.StandaloneSignature
+        {
+            // The C# `header.Kind == SignatureKind.Method` decode; every other
+            // kind falls into the `@token /* signature <Kind> */` spelling.
+            auto blob = module.GetStandaloneSignatureBlob(entityToken);
+            if (!blob || blob->empty())
+                throw std::logic_error("standalone signature");
+            std::uint8_t rawKind = (*blob)[0] & 0x0F;
+            if (rawKind == 0x00) {  // SignatureKind.Method
+                Disassembler::DisassemblerSignatureTypeProvider provider(module, output);
+                Metadata::SignatureTypeProviderDecoder decoder(provider, module);
+                Metadata::MethodSignatureT methodSignature =
+                    decoder.DecodeMethodSignature(blob->data(), blob->size(), genericContext);
+                WriteTo(methodSignature.Header, output);
+                methodSignature.ReturnType(
+                    Disassembler::ILNameSyntax::SignatureNoNamedTypeParameters);
+                WriteParameterList(output, methodSignature);
+            } else {
+                const char* kindName;
+                switch (rawKind) {
+                    case 0x06: kindName = "Field"; break;
+                    case 0x07: kindName = "LocalVariables"; break;
+                    case 0x08: kindName = "Property"; break;
+                    case 0x0A: kindName = "FunctionPointer"; break;
+                    default: kindName = nullptr; break;
+                }
+                char buf[48];
+                if (kindName) {
+                    std::snprintf(buf, sizeof(buf), "@%08X /* signature %s */",
+                        static_cast<unsigned>(entityToken), kindName);
+                } else {
+                    std::snprintf(buf, sizeof(buf), "@%08X /* signature %u */",
+                        static_cast<unsigned>(entityToken), static_cast<unsigned>(rawKind));
+                }
+                output.Write(buf);
+            }
             break;
         }
         default:

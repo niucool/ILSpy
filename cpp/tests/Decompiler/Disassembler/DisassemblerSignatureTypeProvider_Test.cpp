@@ -758,3 +758,184 @@ TEST(InstructionOutputExtensionsTest, FieldDefinitionArmRendersValueTypePrefix) 
     });
     EXPECT_EQ(text, "valuetype System.DateTime System.DateTime::MinValue");
 }
+
+// ---------------------------------------------------------------------------
+// The reference-side member arms of IL::WriteTo (InstructionOutputExtensions.cs
+// EntityHandle.WriteTo): the MemberReference (method/field kinds), the
+// MethodSpecification (MethodDef/MemberRef targets + the WriteTypeParameterList
+// substitution block), and the StandaloneSignature (method-kind decode /
+// the @token /* signature <kind> */ default) arms, over real mscorlib rows.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The MemberRefParent coded index (3-bit tag: 0=TypeDef, 1=TypeRef,
+// 2=ModuleRef, 3=MethodDef, 4=TypeSpec) as a raw entity token; 0 for nil.
+bool MemberRefParentResolves(const MetadataFile& f, std::uint32_t parentToken) {
+    switch (parentToken >> 24) {
+        case 0x02: case 0x01: case 0x1B:
+            return true;
+        case 0x06:
+            return f.GetMethodDeclaringTypeToken(parentToken) != 0;
+        case 0x1A:
+            return f.GetModuleReferenceName(parentToken).has_value();
+        default:
+            return false;
+    }
+}
+
+}  // namespace
+
+TEST(InstructionOutputExtensionsTest, MemberReferenceArmRendersMethod) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // The first resolvable method-kind MemberRef: pin the full chain shape
+    // (header/return-type prefix, the WriteParent'd type, the "::"-escaped
+    // name, the parameter list). The MethodDef arms above pin the exact
+    // spellings of the shared pieces.
+    bool found = false;
+    for (const auto& mr : f.MemberRefs()) {
+        auto blob = f.GetSignatureBlob(mr.Token);
+        if (!blob || blob->empty() || (((*blob)[0] & 0x0F) != 0x00)) continue;
+        if (!MemberRefParentResolves(f, mr.ParentToken)) continue;
+        found = true;
+        std::string text = Render([&](Output::ITextOutput& out) {
+            IL::WriteTo(f, out, MetadataGenericContext{}, mr.Token);
+        });
+        EXPECT_NE(text.find("::" + Disassembler::Escape(mr.Name)), std::string::npos)
+            << text;
+        auto params = text.find('(');
+        auto namePos = text.find("::" + Disassembler::Escape(mr.Name));
+        ASSERT_NE(params, std::string::npos) << text;
+        ASSERT_NE(namePos, std::string::npos) << text;
+        EXPECT_TRUE(params > namePos) << text;
+        break;
+    }
+    ASSERT_TRUE(found) << "no resolvable method-kind MemberRef found";
+}
+
+TEST(InstructionOutputExtensionsTest, MemberReferenceArmRendersField) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // The first resolvable field-kind MemberRef: the field arm has no
+    // parameter list, so the text ends at the member name after "::".
+    bool found = false;
+    for (const auto& mr : f.MemberRefs()) {
+        auto blob = f.GetSignatureBlob(mr.Token);
+        if (!blob || blob->empty()) continue;
+        if (((*blob)[0] & 0x0F) == 0x00) continue;  // method kind
+        if (!MemberRefParentResolves(f, mr.ParentToken)) continue;
+        found = true;
+        std::string text = Render([&](Output::ITextOutput& out) {
+            IL::WriteTo(f, out, MetadataGenericContext{}, mr.Token);
+        });
+        EXPECT_NE(text.find("::" + Disassembler::Escape(mr.Name)), std::string::npos)
+            << text;
+        EXPECT_EQ(text.find('('), std::string::npos) << text;
+        break;
+    }
+    ASSERT_TRUE(found) << "no resolvable field-kind MemberRef found";
+}
+
+TEST(InstructionOutputExtensionsTest, MethodSpecificationArmRendersMethodDefinitionTarget) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // The System.Array::Empty<T> generic-instantiation call sites in
+    // mscorlib are MethodSpecs over a MethodDef target.
+    bool found = false;
+    for (const auto& ms : f.MethodSpecs()) {
+        if ((ms.MethodToken >> 24) != 0x06) continue;
+        if (f.GetMethodName(ms.MethodToken) != "Empty") continue;
+        if (f.GetMethodDeclaringTypeToken(ms.MethodToken) !=
+            FindTypeDefToken(f, "System", "Array")) continue;
+        found = true;
+        std::string text = Render([&](Output::ITextOutput& out) {
+            IL::WriteTo(f, out, MetadataGenericContext{}, ms.Token);
+        });
+        // The C# MethodSpec arm writes the (non-reference) name and the
+        // substitution block, then the definition's parameter list.
+        EXPECT_NE(text.find("::Empty<"), std::string::npos) << text;
+        EXPECT_NE(text.rfind(">()"), std::string::npos) << text;
+        break;
+    }
+    ASSERT_TRUE(found) << "no Array::Empty MethodSpec found";
+}
+
+TEST(InstructionOutputExtensionsTest, MethodSpecificationArmRendersMemberReferenceTarget) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    bool found = false;
+    for (const auto& ms : f.MethodSpecs()) {
+        if ((ms.MethodToken >> 24) != 0x0A) continue;
+        auto mr = f.GetMemberReference(ms.MethodToken);
+        ASSERT_TRUE(mr.has_value());
+        found = true;
+        std::string text = Render([&](Output::ITextOutput& out) {
+            IL::WriteTo(f, out, MetadataGenericContext{}, ms.Token);
+        });
+        EXPECT_NE(text.find("::" + Disassembler::Escape(mr->Name)), std::string::npos)
+            << text;
+        EXPECT_NE(text.find('('), std::string::npos) << text;
+        break;
+    }
+    ASSERT_TRUE(found) << "no MemberRef-targeted MethodSpec found";
+}
+
+TEST(InstructionOutputExtensionsTest, StandaloneSignatureArmRendersMethodKind) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    bool found = false;
+    for (auto token : f.StandaloneSignatureTokens()) {
+        auto blob = f.GetStandaloneSignatureBlob(token);
+        if (!blob || blob->empty()) continue;
+        if (((*blob)[0] & 0x0F) != 0x00) continue;  // SignatureKind.Method
+        found = true;
+        std::string text = Render([&](Output::ITextOutput& out) {
+            IL::WriteTo(f, out, MetadataGenericContext{}, token);
+        });
+        // The C# Method-kind arm writes the return type and then the
+        // parameter list with NO separating space (a faithful C# quirk).
+        EXPECT_NE(text.find('('), std::string::npos) << text;
+        EXPECT_EQ(text.find(" ("), std::string::npos) << text;
+        break;
+    }
+    if (!found) GTEST_SKIP() << "no method-kind StandaloneSig in this fixture";
+}
+
+TEST(InstructionOutputExtensionsTest, StandaloneSignatureArmRendersOtherKindsAtToken) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    bool found = false;
+    for (auto token : f.StandaloneSignatureTokens()) {
+        auto blob = f.GetStandaloneSignatureBlob(token);
+        if (!blob || blob->empty()) continue;
+        if (((*blob)[0] & 0x0F) != 0x07) continue;  // SignatureKind.LocalVariables
+        found = true;
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), "@%08X /* signature LocalVariables */",
+            static_cast<unsigned>(token));
+        EXPECT_EQ(Render([&](Output::ITextOutput& out) {
+                      IL::WriteTo(f, out, MetadataGenericContext{}, token);
+                  }),
+            std::string(buf));
+        break;
+    }
+    ASSERT_TRUE(found) << "no LocalVariables-kind StandaloneSig found";
+}
+
+TEST(SignatureTypeProviderDecoderTest, MethodSpecSignatureDecodesTypeList) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // GENERICINST marker, count=2, then two int32 element types.
+    const std::uint8_t blob[] = {0x0A, 0x02, 0x08, 0x08};
+    std::ostringstream stream;
+    PlainTextOutput output(stream);
+    DisassemblerSignatureTypeProvider provider(f, output);
+    Metadata::SignatureTypeProviderDecoder decoder(provider, f);
+    auto args = decoder.DecodeMethodSpecSignature(blob, sizeof(blob), MetadataGenericContext{});
+    ASSERT_EQ(args.size(), 2u);
+    stream.str("");
+    stream.clear();
+    args[0](ILNameSyntax::Signature);
+    EXPECT_EQ(stream.str(), "int32");
+}

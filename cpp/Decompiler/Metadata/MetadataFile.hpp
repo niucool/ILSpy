@@ -347,6 +347,51 @@ public:
     // row, a nil row, or a non-Field token; never throws.
     std::string GetFieldName(std::uint32_t fieldToken) const;
 
+    // A MemberRef row (table 0x0A): the authored Name column and the
+    // MemberRefParent coded index as a raw entity token (tag 0=TypeDef 0x02,
+    // 1=TypeRef 0x01, 2=ModuleRef 0x1A, 3=MethodDef 0x06, 4=TypeSpec 0x1B;
+    // 0 for a nil row). The signature blob goes through GetSignatureBlob.
+    struct MemberRefInfo {
+        std::string Name;
+        std::uint32_t ParentToken = 0;
+        std::uint32_t Token = 0;  // the 0x0A row's own token
+    };
+    std::optional<MemberRefInfo> GetMemberReference(std::uint32_t token) const;
+
+    // A MethodSpec row (table 0x2B): the MethodDefOrRef coded index as a raw
+    // MethodDef (0x06) or MemberRef (0x0A) token. The instantiation blob goes
+    // through GetMethodSpecificationInstantiationBlob.
+    struct MethodSpecInfo {
+        std::uint32_t Token = 0;        // the 0x2B row's own token
+        std::uint32_t MethodToken = 0;  // the MethodDefOrRef target; 0 = nil
+    };
+    std::optional<MethodSpecInfo> GetMethodSpecification(
+        std::uint32_t methodSpecToken) const;
+
+    // A MethodSpec row's (table 0x2B) raw instantiation blob -- the
+    // SignatureTypeProviderDecoder::DecodeMethodSpecSignature entry consumes
+    // it (a compressed count followed by that many type elements).
+    std::optional<std::vector<std::uint8_t>> GetMethodSpecificationInstantiationBlob(
+        std::uint32_t methodSpecToken) const;
+
+    // A StandaloneSig row's (table 0x11) raw signature blob -- the
+    // InstructionOutputExtensions' StandaloneSignature arm kind-switches on
+    // the header byte the caller reads itself.
+    std::optional<std::vector<std::uint8_t>> GetStandaloneSignatureBlob(
+        std::uint32_t token) const;
+
+    // A ModuleRef row's (table 0x1A) authored Name -- the WriteParent
+    // ModuleReference arm's "[name]" spelling. nullopt for an invalid file,
+    // an out-of-range row, or a non-ModuleRef token; never throws.
+    std::optional<std::string> GetModuleReferenceName(std::uint32_t token) const;
+
+    // Whole-table enumerations for the disassembler paths and the tests:
+    // every MemberRef row, every MethodSpec row, and every StandaloneSig row's
+    // 0x11 token. Never throws.
+    std::vector<MemberRefInfo> MemberRefs() const;
+    std::vector<MethodSpecInfo> MethodSpecs() const;
+    std::vector<std::uint32_t> StandaloneSignatureTokens() const;
+
     // Custom attributes applied to an entity (TypeDef/MethodDef/Field/Property
     // token). Returns the attribute type namespace+name for each; never throws.
     std::vector<CustomAttributeInfo> GetCustomAttributes(std::uint32_t entityToken) const;
