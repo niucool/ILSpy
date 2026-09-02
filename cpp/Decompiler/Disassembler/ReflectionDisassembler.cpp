@@ -31,13 +31,14 @@ namespace ILSpy::Decompiler::Disassembler {
 // WriteMetadataToken (ReflectionDisassembler.cs -- the internal static).
 // ---------------------------------------------------------------------------
 void ReflectionDisassembler::WriteMetadataToken(Output::ITextOutput& output,
-    const Metadata::MetadataFile& module, std::uint32_t entityToken,
-    bool spaceAfter, bool spaceBefore, bool showMetadataTokens, bool base10)
+    const Metadata::MetadataFile& module, std::uint32_t handleToken,
+    std::uint32_t metadataToken, bool spaceAfter, bool spaceBefore,
+    bool showMetadataTokens, bool base10)
 {
     // The C# `handle can be null in case of errors, if that's the case, we
-    // always want to print a comment, with the metadataToken`: token 0 is the
-    // C# null handle.
-    if (showMetadataTokens || entityToken == 0) {
+    // always want to print a comment, with the metadataToken`: handleToken 0
+    // is the C# null handle.
+    if (showMetadataTokens || handleToken == 0) {
         if (spaceBefore) {
             output.Write(' ');
         }
@@ -46,19 +47,19 @@ void ReflectionDisassembler::WriteMetadataToken(Output::ITextOutput& output,
         if (base10) {
             // The C# `metadataToken.ToString(null)` -- plain decimal. The raw
             // metadata tokens reaching this path are non-negative int32s.
-            std::snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(entityToken));
+            std::snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(metadataToken));
         } else {
-            std::snprintf(buf, sizeof(buf), "%08X", static_cast<unsigned>(entityToken));
+            std::snprintf(buf, sizeof(buf), "%08X", static_cast<unsigned>(metadataToken));
         }
         // The C# `if (handle == null || !handle.Value.IsEntityHandle())
         // output.Write(token) else output.WriteReference(module, handle,
         // token, "metadata")` -- the port's entity tables are every table id
         // the disassembler sees except the 0x70 UserString heap (and the null
-        // token itself).
-        if (entityToken == 0 || (entityToken >> 24) == 0x70) {
+        // handle itself).
+        if (handleToken == 0 || (handleToken >> 24) == 0x70) {
             output.Write(buf);
         } else {
-            output.WriteReference(module, entityToken, buf, "metadata");
+            output.WriteReference(module, handleToken, buf, "metadata");
         }
         output.Write(" */");
         if (spaceAfter) {

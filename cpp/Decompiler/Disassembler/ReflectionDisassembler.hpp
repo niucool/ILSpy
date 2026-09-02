@@ -42,12 +42,15 @@ public:
     // spaces, shown when showMetadataTokens is set OR the handle is null (the
     // C# error path -- a failed decode must always print its token comment).
     // The token formats as 8-digit uppercase hex, or plain decimal for base10.
-    // An entity token renders through WriteReference(module, handle, text,
-    // "metadata"); every other token (the 0x70 UserString heap) writes
-    // plainly. The handle ports as the raw metadata token -- 0 is the C# null.
+    // An entity handle renders through WriteReference(module, handle, text,
+    // "metadata"); every other handle (the 0x70 UserString heap) writes
+    // plainly. The handle ports as the raw metadata token -- handleToken 0 is
+    // the C# null; metadataToken is the token the comment prints (it is
+    // non-zero even for a null handle).
     static void WriteMetadataToken(Output::ITextOutput& output,
-        const Metadata::MetadataFile& module, std::uint32_t entityToken,
-        bool spaceAfter, bool spaceBefore, bool showMetadataTokens, bool base10);
+        const Metadata::MetadataFile& module, std::uint32_t handleToken,
+        std::uint32_t metadataToken, bool spaceAfter, bool spaceBefore,
+        bool showMetadataTokens, bool base10);
 };
 
 }  // namespace ILSpy::Decompiler::Disassembler

@@ -31,6 +31,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace ILSpy::Decompiler::Metadata {
@@ -135,6 +136,37 @@ public:
         out.reserve(charBytes / 2);
         for (std::size_t i = 0; i + 1 < charBytes; i += 2)
             out.push_back(static_cast<char>(chars[i]));  // drop high byte (ASCII subset)
+        return out;
+    }
+
+    // The C# `MetadataReader.GetUserString(UserStringHandle)` returns null for
+    // an out-of-range handle (the WriteInstruction String arm renders nothing
+    // and prints the null-handle token comment); GetUserString's graceful {}
+    // cannot distinguish that from a VALID empty #US row (len == 1). The Try
+    // variant carries the distinction: nullopt for the invalid cases (no
+    // sections, out-of-bounds offset, a truncated/short row), the string
+    // (possibly empty) otherwise. Same no-throw convention.
+    std::optional<std::string> TryGetUserString(std::uint32_t token) const noexcept {
+        if (!sections_) return std::nullopt;
+        std::uint32_t off = token & 0x00FFFFFFu;
+        const std::uint8_t* base = UsBase();
+        const std::uint8_t* end = UsEnd();
+        if (!base || off >= static_cast<std::size_t>(end - base)) return std::nullopt;
+        const std::uint8_t* p = base + off;
+        std::uint32_t len = 0;
+        std::uint8_t b0 = p[0];
+        std::size_t lenBytes = 0;
+        if ((b0 & 0x80) == 0) { len = b0; lenBytes = 1; }
+        else if ((b0 & 0xC0) == 0x80) { len = ((b0 & 0x3F) << 8) | p[1]; lenBytes = 2; }
+        else { len = ((b0 & 0x1F) << 24) | (p[1] << 16) | (p[2] << 8) | p[3]; lenBytes = 4; }
+        if (off + lenBytes + len > static_cast<std::size_t>(end - base) || len < 1)
+            return std::nullopt;
+        const std::uint8_t* chars = p + lenBytes;
+        std::size_t charBytes = len - 1;
+        std::string out;
+        out.reserve(charBytes / 2);
+        for (std::size_t i = 0; i + 1 < charBytes; i += 2)
+            out.push_back(static_cast<char>(chars[i]));
         return out;
     }
 
@@ -285,6 +317,10 @@ public:
     // empty string if the #US heap is absent or the offset is out of range).
     std::string GetUserString(std::uint32_t token) const noexcept {
         return pe_.GetUserString(token);
+    }
+
+    std::optional<std::string> TryGetUserString(std::uint32_t token) const noexcept {
+        return pe_.TryGetUserString(token);
     }
 
     // Decode the method body at `rva`. Returns an invalid MethodBody if the RVA

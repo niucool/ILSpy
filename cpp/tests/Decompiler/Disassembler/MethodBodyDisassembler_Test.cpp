@@ -26,6 +26,7 @@
 #include "Decompiler/Disassembler/MethodBodyDisassembler.hpp"
 #include "Decompiler/Disassembler/ReflectionDisassembler.hpp"
 #include "Decompiler/Metadata/ILOpCodes.hpp"
+#include "Decompiler/Metadata/ILDisassembler.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Output/PlainTextOutput.hpp"
 
@@ -154,14 +155,14 @@ TEST(MethodBodyDisassemblerTest, WriteMetadataTokenWrapperMatrix) {
     // wrapper always passes spaceAfter=false, so not even a space).
     EXPECT_EQ(Render([&](OUT::ITextOutput& out) {
         MethodBodyDisassembler d(out);
-        d.WriteMetadataToken(f, 0x06000001u, /*spaceBefore=*/true);
+        d.WriteMetadataToken(f, 0x06000001u, 0x06000001u, /*spaceBefore=*/true);
     }), "");
 
     // With the show flag on: the comment with the leading space.
     EXPECT_EQ(Render([&](OUT::ITextOutput& out) {
         MethodBodyDisassembler d(out);
         d.ShowMetadataTokens = true;
-        d.WriteMetadataToken(f, 0x06000001u, true);
+        d.WriteMetadataToken(f, 0x06000001u, 0x06000001u, true);
     }), " /* 06000001 */");
 
     // Base10 formatting.
@@ -169,14 +170,15 @@ TEST(MethodBodyDisassemblerTest, WriteMetadataTokenWrapperMatrix) {
         MethodBodyDisassembler d(out);
         d.ShowMetadataTokens = true;
         d.ShowMetadataTokensInBase10 = true;
-        d.WriteMetadataToken(f, 0x06000001u, true);
+        d.WriteMetadataToken(f, 0x06000001u, 0x06000001u, true);
     }), " /* 100663297 */");
 
-    // The null-token error path prints the comment even without the flag.
+    // The null-handle error path prints the comment even without the flag --
+    // and prints the metadataToken itself.
     EXPECT_EQ(Render([&](OUT::ITextOutput& out) {
         MethodBodyDisassembler d(out);
-        d.WriteMetadataToken(f, 0u, true);
-    }), " /* 00000000 */");
+        d.WriteMetadataToken(f, 0u, 0x70000001u, true);
+    }), " /* 70000001 */");
 }
 
 TEST(MethodBodyDisassemblerTest, WriteMetadataTokenStaticMatrix) {
@@ -185,25 +187,159 @@ TEST(MethodBodyDisassemblerTest, WriteMetadataTokenStaticMatrix) {
 
     // Both spaces (the direct static's full shape).
     EXPECT_EQ(Render([&](OUT::ITextOutput& out) {
-        ReflectionDisassembler::WriteMetadataToken(out, f, 0x01000001u,
+        ReflectionDisassembler::WriteMetadataToken(out, f, 0x01000001u, 0x01000001u,
             /*spaceAfter=*/true, /*spaceBefore=*/true, /*showMetadataTokens=*/true,
             /*base10=*/false);
     }), " /* 01000001 */ ");
 
     // A UserString token (0x70 -- not an entity handle) writes plainly.
     EXPECT_EQ(Render([&](OUT::ITextOutput& out) {
-        ReflectionDisassembler::WriteMetadataToken(out, f, 0x70000001u,
+        ReflectionDisassembler::WriteMetadataToken(out, f, 0x70000001u, 0x70000001u,
             false, true, true, false);
     }), " /* 70000001 */");
 
     // Without the flags and without a null handle: only the both-spaces case
     // writes a single space.
     EXPECT_EQ(Render([&](OUT::ITextOutput& out) {
-        ReflectionDisassembler::WriteMetadataToken(out, f, 0x01000001u,
+        ReflectionDisassembler::WriteMetadataToken(out, f, 0x01000001u, 0x01000001u,
             true, true, false, false);
     }), " ");
     EXPECT_EQ(Render([&](OUT::ITextOutput& out) {
-        ReflectionDisassembler::WriteMetadataToken(out, f, 0x01000001u,
+        ReflectionDisassembler::WriteMetadataToken(out, f, 0x01000001u, 0x01000001u,
             false, true, false, false);
     }), "");
+}
+
+// ---------------------------------------------------------------------------
+// WriteInstruction (MethodBodyDisassembler.cs lines 327-567) -- synthetic
+// streams over the real writers, plus a real-body smoke.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::string RenderInstruction(MD::MetadataFile& f, std::uint32_t methodToken,
+    const std::uint8_t* base, std::size_t size, std::uint32_t rva = 0) {
+    std::ostringstream stream;
+    OUT::PlainTextOutput output(stream);
+    MethodBodyDisassembler d(output);
+    std::size_t pos = 0;
+    d.WriteInstruction(f, methodToken, base, size, pos, rva);
+    return stream.str();
+}
+
+}  // namespace
+
+TEST(MethodBodyDisassemblerTest, WriteInstructionRet) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    const std::uint8_t body[] = {0x2A};
+    EXPECT_EQ(RenderInstruction(f, 0x06000001u, body, sizeof(body)), "IL_0000: ret\r\n");
+}
+
+TEST(MethodBodyDisassemblerTest, WriteInstructionBranchTarget) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    const std::uint8_t body[] = {0x2B, 0x00};  // br.s +0
+    EXPECT_EQ(RenderInstruction(f, 0x06000001u, body, sizeof(body)),
+        "IL_0000: br.s IL_0002\r\n");
+}
+
+TEST(MethodBodyDisassemblerTest, WriteInstructionCallWithTokenArm) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == "System" && t.Name == "String") {
+            stringType = t.Token;
+            break;
+        }
+    }
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t copy = 0;
+    for (const auto& m : f.GetMethods(stringType)) {
+        if (m.Name == "Copy") {
+            copy = m.Token;
+            break;
+        }
+    }
+    ASSERT_NE(copy, 0u);
+    const std::uint8_t body[] = {0x28,
+        static_cast<std::uint8_t>(copy), static_cast<std::uint8_t>(copy >> 8),
+        static_cast<std::uint8_t>(copy >> 16), static_cast<std::uint8_t>(copy >> 24)};
+    EXPECT_EQ(RenderInstruction(f, 0x06000001u, body, sizeof(body)),
+        "IL_0000: call string System.String::Copy(string)\r\n");
+}
+
+TEST(MethodBodyDisassemblerTest, WriteInstructionShortIntegerArm) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    const std::uint8_t body[] = {0x15};  // ldc.i4.m1
+    EXPECT_EQ(RenderInstruction(f, 0x06000001u, body, sizeof(body)),
+        "IL_0000: ldc.i4.m1\r\n");
+    const std::uint8_t ldarg[] = {0x0E, 0x03};  // ldarg.s 3
+    EXPECT_EQ(RenderInstruction(f, 0x06000001u, ldarg, sizeof(ldarg)),
+        "IL_0000: ldarg.s 3\r\n");
+}
+
+TEST(MethodBodyDisassemblerTest, WriteInstructionLdstrWithRealToken) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // Take a real ldstr operand from a real mscorlib body and render it
+    // against the same #US row.
+    for (const auto& t : f.TypeDefs()) {
+        for (const auto& m : f.GetMethods(t.Token)) {
+            if (m.RVA == 0) continue;
+            auto mb = f.GetMethodBody(m.RVA);
+            if (!mb.IsValid() || mb.IL().empty()) continue;
+            auto il = mb.IL();
+            auto dis = MD::DisassembleIL(il);
+            if (!dis.WalkedClean) continue;
+            for (const auto& instr : dis.Instructions) {
+                if (instr.OpCode != MD::ILOpCode::Ldstr) continue;
+                std::size_t operandPos = instr.Offset + instr.Length - 4;
+                std::uint32_t token = static_cast<std::uint32_t>(il[operandPos])
+                    | (static_cast<std::uint32_t>(il[operandPos + 1]) << 8)
+                    | (static_cast<std::uint32_t>(il[operandPos + 2]) << 16)
+                    | (static_cast<std::uint32_t>(il[operandPos + 3]) << 24);
+                auto text = f.TryGetUserString(token);
+                ASSERT_TRUE(text.has_value()) << std::hex << token;
+                const std::uint8_t body[] = {0x72,
+                    static_cast<std::uint8_t>(token), static_cast<std::uint8_t>(token >> 8),
+                    static_cast<std::uint8_t>(token >> 16), static_cast<std::uint8_t>(token >> 24)};
+                EXPECT_EQ(RenderInstruction(f, 0x06000001u, body, sizeof(body)),
+                    "IL_0000: ldstr \"" + *text + "\"\r\n");
+                return;
+            }
+        }
+    }
+    FAIL() << "no ldstr instruction found";
+}
+
+TEST(MethodBodyDisassemblerTest, WriteInstructionInvalidTokenRendersComment) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // A UserString token on the call arm is not an entity handle: the handle
+    // is null, the comment always prints (the C# error-path comment), and the
+    // WriteTo call is skipped.
+    const std::uint8_t body[] = {0x28, 0x01, 0x00, 0x00, 0x70};
+    EXPECT_EQ(RenderInstruction(f, 0x06000001u, body, sizeof(body)),
+        "IL_0000: call  /* 70000001 */\r\n");
+}
+
+TEST(MethodBodyDisassemblerTest, WriteInstructionSwitchTargetList) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // switch(1 target, delta 0 -> target 9); one filler byte.
+    const std::uint8_t body[] = {0x45, 0x01, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x2A};
+    EXPECT_EQ(RenderInstruction(f, 0x06000001u, body, sizeof(body)),
+        "IL_0000: switch (IL_0009)\r\n");
+}
+
+TEST(MethodBodyDisassemblerTest, WriteInstructionUndefinedOpcodeFallsBackToEmitbyte) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    const std::uint8_t body[] = {0x24};  // not a one-byte opcode
+    EXPECT_EQ(RenderInstruction(f, 0x06000001u, body, sizeof(body)),
+        "IL_0000: .emitbyte 0x24\r\n");
 }

@@ -79,10 +79,27 @@ public:
     // The C# `private void WriteMetadataToken(Handle? handle, int
     // metadataToken, bool spaceBefore)` wrapper: calls the ReflectionDisassembler
     // static with spaceAfter=false and the ShowMetadataTokens flags. The
-    // handle ports as the raw metadata token -- 0 is the C# null (the comment
-    // prints even without ShowMetadataTokens in that error case).
+    // handle ports as the raw metadata token -- handleToken 0 is the C# null
+    // (the comment prints even without ShowMetadataTokens in that error case,
+    // and prints the metadataToken itself, which may be non-zero).
     void WriteMetadataToken(const Metadata::MetadataFile& module,
-        std::uint32_t entityToken, bool spaceBefore);
+        std::uint32_t handleToken, std::uint32_t metadataToken, bool spaceBefore);
+
+    // The C# `protected virtual void WriteInstruction(ITextOutput output,
+    // MetadataFile metadataFile, MethodDefinitionHandle methodHandle, ref
+    // BlobReader blob, int methodRva)` -- the full operand switch (branch
+    // targets, the Field/Method/Sig/Type/Tok entity-token arms, the numeric
+    // literal arms, the String arm, the switch-target list, and the
+    // variable/short-variable arms), the `.emitbyte` fallback for an
+    // undefined opcode or a truncated operand, and the terminating newline.
+    // The C# output field ports as the constructor-bound member; the generic
+    // context is the method context the C# Disassemble builds; the handle
+    // ports as the raw method token. The reader is the (base, size, pos)
+    // cursor -- pos mutates in place. Public so the tests can drive it
+    // before Disassemble itself exists (the C# member is protected).
+    void WriteInstruction(Metadata::MetadataFile& module, std::uint32_t methodToken,
+        const std::uint8_t* base, std::size_t size, std::size_t& pos,
+        std::uint32_t methodRva);
 
 private:
     Output::ITextOutput& output_;

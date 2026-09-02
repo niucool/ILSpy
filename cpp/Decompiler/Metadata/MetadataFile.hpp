@@ -215,6 +215,14 @@ public:
     // Returns an empty string if the heap is absent or the offset is bad.
     std::string GetUserString(std::uint32_t token) const;
 
+    // The C# `MetadataReader.GetUserString(UserStringHandle)` null-vs-valid-
+    // empty distinction the WriteInstruction String arm needs (a null handle
+    // renders NO operand and the always-on token comment; a valid empty #US
+    // row renders the empty "" operand). nullopt for an invalid file, no #US
+    // heap, an out-of-range offset, or a truncated/short row; the string
+    // (possibly empty) otherwise. Never throws.
+    std::optional<std::string> TryGetUserString(std::uint32_t token) const;
+
     // Decode the local-variable signature referenced by a method body's
     // LocalVarSigToken (a StandAloneSig token, table 0x11). Returns the local
     // types in index order; an empty vector if the token is 0/invalid/malformed.

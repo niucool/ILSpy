@@ -1326,4 +1326,10 @@ std::string MetadataFile::GetUserString(std::uint32_t token) const {
     return impl_->bodyReader->GetUserString(token);
 }
 
+// The null-vs-valid-empty distinction. See the header for the full contract.
+std::optional<std::string> MetadataFile::TryGetUserString(std::uint32_t token) const {
+    if (!IsValid() || !impl_->bodyReader) return std::nullopt;
+    return impl_->bodyReader->TryGetUserString(token);
+}
+
 } // namespace ILSpy::Decompiler::Metadata
