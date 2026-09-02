@@ -478,15 +478,15 @@ TEST(InstructionOutputExtensionsTest, UnknownHandleKindRendersAtToken) {
     // (the member arms are deferred with the MethodBodyDisassembler region).
     std::uint32_t objectToken = FindTypeDefToken(f, "System", "Object");
     ASSERT_NE(objectToken, 0u);
-    auto methods = f.GetMethods(objectToken);
-    ASSERT_FALSE(methods.empty());
-    std::uint32_t methodToken = methods.front().Token;
+    // An AssemblyRef row (table 0x23) has no WriteTo arm in the C# either --
+    // the default `@{token:X8}` spelling. (MethodDef now has its arm.)
+    std::uint32_t assemblyRefToken = 0x23000001u;
     EXPECT_EQ(Render([&](Output::ITextOutput& out) {
-                  IL::WriteTo(f, out, MetadataGenericContext{}, methodToken);
+                  IL::WriteTo(f, out, MetadataGenericContext{}, assemblyRefToken);
               }),
         "@" + [&] {
             char buf[16];
-            std::snprintf(buf, sizeof(buf), "%08X", static_cast<unsigned>(methodToken));
+            std::snprintf(buf, sizeof(buf), "%08X", static_cast<unsigned>(assemblyRefToken));
             return std::string(buf);
         }());
 }
@@ -621,4 +621,140 @@ TEST(SignatureTypeProviderDecoderTest, TruncatedBlobThrows) {
     Metadata::SignatureTypeProviderDecoder decoder(provider, f);
     EXPECT_THROW((void)decoder.DecodeType(blob, sizeof(blob), MetadataGenericContext{}),
         std::logic_error);
+}
+
+// ---------------------------------------------------------------------------
+// The member-table arms of IL::WriteTo (InstructionOutputExtensions.cs
+// EntityHandle.WriteTo): the MethodDefinition and FieldDefinition arms -- the
+// signature-rendered header/return-type prefix, the declaring-type::name
+// body, the generic-parameter block (constraint flags and rows), and the
+// $PST compiler-controlled spelling. The TypeDef/TypeRef/TypeSpec arms and
+// the earlier InstructionOutputExtensionsTest cases live above.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::uint32_t FindMethodByName(const MetadataFile& f, std::uint32_t typeToken,
+    std::string_view name, std::size_t minGenericParams = 0) {
+    for (const auto& m : f.GetMethods(typeToken)) {
+        if (m.Name != name) continue;
+        if (minGenericParams > 0 && f.GetGenericParameters(m.Token).size() < minGenericParams)
+            continue;
+        return m.Token;
+    }
+    return 0;
+}
+
+std::uint32_t FindFieldByName(const MetadataFile& f, std::uint32_t typeToken,
+    std::string_view name) {
+    for (const auto& fd : f.GetFields(typeToken)) {
+        if (fd.Name == name) return fd.Token;
+    }
+    return 0;
+}
+
+}  // namespace
+
+TEST(InstructionOutputExtensionsTest, MethodDefinitionArmRendersInstanceMethod) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefToken(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t copy = FindMethodByName(f, stringType, "Copy");
+    ASSERT_NE(copy, 0u);
+    std::string text = Render([&](Output::ITextOutput& out) {
+        IL::WriteTo(f, out, MetadataGenericContext{}, copy);
+    });
+    EXPECT_EQ(text, "string System.String::Copy(string)");
+}
+
+TEST(InstructionOutputExtensionsTest, MethodDefinitionArmRendersStaticMethod) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefToken(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t isNullOrEmpty = FindMethodByName(f, stringType, "IsNullOrEmpty");
+    ASSERT_NE(isNullOrEmpty, 0u);
+    std::string text = Render([&](Output::ITextOutput& out) {
+        IL::WriteTo(f, out, MetadataGenericContext{}, isNullOrEmpty);
+    });
+    EXPECT_EQ(text, "bool System.String::IsNullOrEmpty(string)");
+}
+
+TEST(InstructionOutputExtensionsTest, MethodDefinitionArmRendersGenericParameterBlock) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t activator = FindTypeDefToken(f, "System", "Activator");
+    ASSERT_NE(activator, 0u);
+    std::uint32_t createInstance = FindMethodByName(f, activator, "CreateInstance", 1);
+    ASSERT_NE(createInstance, 0u);
+    std::string text = Render([&](Output::ITextOutput& out) {
+        IL::WriteTo(f, out, MetadataGenericContext{}, createInstance);
+    });
+    // The mscorlib 4.8 T carries no special-constraint flags, so the block is
+    // the bare name; the return type renders at the index syntax (!!0).
+    EXPECT_EQ(text, "!!0 System.Activator::CreateInstance<T>()");
+}
+
+TEST(InstructionOutputExtensionsTest, MethodDefinitionArmRendersGenericConstraintRows) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // Find some method whose generic parameter carries constraint rows and
+    // pin the '(<TypeName>) ' constraint block the C# renders.
+    bool found = false;
+    for (const auto& t : f.TypeDefs()) {
+        for (const auto& m : f.GetMethods(t.Token)) {
+            auto gps = f.GetGenericParameters(m.Token);
+            bool hasConstraints = false;
+            for (const auto& gp : gps) {
+                if (!f.GetGenericParameterConstraintTokens(gp.Token).empty())
+                    hasConstraints = true;
+            }
+            if (!hasConstraints) continue;
+            std::string text = Render([&](Output::ITextOutput& out) {
+                IL::WriteTo(f, out, MetadataGenericContext{}, m.Token);
+            });
+            // The generic-parameter block is the '<...>' after the '::' -- the
+            // return/parameter types carry their own '<...>' instantiations.
+            auto scope = text.find("::");
+            ASSERT_NE(scope, std::string::npos) << text;
+            auto lt = text.find('<', scope);
+            auto gt = text.find('>', lt == std::string::npos ? 0 : lt);
+            ASSERT_NE(lt, std::string::npos) << text;
+            ASSERT_NE(gt, std::string::npos) << text;
+            std::string block = text.substr(lt, gt - lt);
+            EXPECT_NE(block.find('('), std::string::npos) << text;
+            EXPECT_NE(block.find(')'), std::string::npos) << text;
+            found = true;
+            break;
+        }
+        if (found) break;
+    }
+    ASSERT_TRUE(found) << "no generic-parameter constraint rows found";
+}
+
+TEST(InstructionOutputExtensionsTest, FieldDefinitionArmRendersTypeAndName) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefToken(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t empty = FindFieldByName(f, stringType, "Empty");
+    ASSERT_NE(empty, 0u);
+    std::string text = Render([&](Output::ITextOutput& out) {
+        IL::WriteTo(f, out, MetadataGenericContext{}, empty);
+    });
+    EXPECT_EQ(text, "string System.String::Empty");
+}
+
+TEST(InstructionOutputExtensionsTest, FieldDefinitionArmRendersValueTypePrefix) {
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t dateTime = FindTypeDefToken(f, "System", "DateTime");
+    ASSERT_NE(dateTime, 0u);
+    std::uint32_t minValue = FindFieldByName(f, dateTime, "MinValue");
+    ASSERT_NE(minValue, 0u);
+    std::string text = Render([&](Output::ITextOutput& out) {
+        IL::WriteTo(f, out, MetadataGenericContext{}, minValue);
+    });
+    EXPECT_EQ(text, "valuetype System.DateTime System.DateTime::MinValue");
 }

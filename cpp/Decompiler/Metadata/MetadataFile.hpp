@@ -117,6 +117,7 @@ struct EventInfo {
 struct GenericParameterInfo {
     std::uint32_t Token;    // 0x2A000000 | row (1-based)
     std::uint16_t Number;   // the Number column
+    std::uint16_t Flags = 0;  // the raw GenericParam Attributes column (II.23.1.7)
     std::string Name;
 };
 
@@ -309,6 +310,42 @@ public:
     // out-of-range row, a nil row, or a non-TypeSpec token; never throws.
     std::optional<std::vector<std::uint8_t>> GetTypeSpecSignatureBlob(
         std::uint32_t typeSpecToken) const;
+
+    // A MethodDef (0x06, Signature column), Field (0x04, Signature column), or
+    // MemberRef (0x0A, Signature column) row's raw signature-blob bytes -- the
+    // provider-driven decode entries the IL InstructionOutputExtensions'
+    // member arms drive (the C# fd.DecodeSignature / md.DecodeSignature /
+    // mr.DecodeMethodSignature / mr.DecodeFieldSignature family). The blob is
+    // returned raw (header byte included); the caller owns the kind checks.
+    // Returns nullopt for an invalid file, an out-of-range row, a nil row, or
+    // an unsupported token table; never throws.
+    std::optional<std::vector<std::uint8_t>> GetSignatureBlob(
+        std::uint32_t entityToken) const;
+
+    // A Field row's (table 0x04) declaring TypeDef's token (0x02) -- the C#
+    // FieldDefinition.GetDeclaringType() the member arms render as the
+    // `<type>::<name>` prefix. 0 for an invalid file, an out-of-range row, a
+    // nil row, or a non-Field token; never throws.
+    std::uint32_t GetFieldDeclaringTypeToken(std::uint32_t fieldToken) const;
+
+    // A GenericParam row's (table 0x2A) constraint types from the
+    // GenericParamConstraint table (0x1C) -- the raw TypeDefOrRef tokens
+    // (0x02/0x01/0x1B) the MethodDefinition arm's constraint block renders.
+    // Empty for an invalid file, an unknown token, or a row without
+    // constraints; never throws.
+    std::vector<std::uint32_t> GetGenericParameterConstraintTokens(
+        std::uint32_t genericParamToken) const;
+
+    // A MethodDef row's (table 0x06) authored Name column -- the identifier
+    // the IL InstructionOutputExtensions' MethodDefinition arm escapes. ""
+    // for an invalid file, an out-of-range row, a nil row, or a non-MethodDef
+    // token; never throws.
+    std::string GetMethodName(std::uint32_t methodToken) const;
+
+    // A Field row's (table 0x04) authored Name column -- the identifier the
+    // FieldDefinition arm escapes. "" for an invalid file, an out-of-range
+    // row, a nil row, or a non-Field token; never throws.
+    std::string GetFieldName(std::uint32_t fieldToken) const;
 
     // Custom attributes applied to an entity (TypeDef/MethodDef/Field/Property
     // token). Returns the attribute type namespace+name for each; never throws.

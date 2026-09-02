@@ -133,6 +133,122 @@ void WriteTo(const MetadataFile& module, ITextOutput& output,
             signature(syntax);
             break;
         }
+        case 0x04:  // HandleKind.FieldDefinition
+        {
+            // The C# `fd.DecodeSignature(new DisassemblerSignatureTypeProvider(
+            // module, output), new MetadataGenericContext(fd.GetDeclaringType(),
+            // metadata))`: the field sig's kind nibble must be Field (0x6) --
+            // the SRM DecodeFieldSignature header check -- then one full type
+            // decode; the VAR (!N) context scopes to the declaring TypeDef.
+            auto blob = module.GetSignatureBlob(entityToken);
+            if (!blob || blob->empty() || ((*blob)[0] & 0x0F) != 0x06)
+                throw std::logic_error("field signature");
+            std::uint32_t declaringType = module.GetFieldDeclaringTypeToken(entityToken);
+            Disassembler::DisassemblerSignatureTypeProvider provider(module, output);
+            Metadata::SignatureTypeProviderDecoder decoder(provider, module);
+            Metadata::SignatureTypeWriter signature = decoder.DecodeType(
+                blob->data() + 1, blob->size() - 1,
+                Metadata::MetadataGenericContext::ForType(declaringType, module));
+            signature(Disassembler::ILNameSyntax::SignatureNoNamedTypeParameters);
+            output.Write(' ');
+            WriteTo(module, output, Metadata::MetadataGenericContext{}, declaringType,
+                Disassembler::ILNameSyntax::TypeName);
+            output.Write("::");
+            output.WriteReference(module, entityToken,
+                Disassembler::Escape(module.GetFieldName(entityToken)));
+            break;
+        }
+        case 0x06:  // HandleKind.MethodDefinition
+        {
+            // The C# `md.DecodeSignature(new DisassemblerSignatureTypeProvider(
+            // module, output), new MetadataGenericContext((MethodDefinitionHandle)
+            // entity, metadata))`, then the header/return-type prefix, the
+            // declaring-type::name body (compiler-controlled names carry the
+            // $PST token suffix), the generic-parameter block, and the
+            // parameter list.
+            auto blob = module.GetSignatureBlob(entityToken);
+            if (!blob)
+                throw std::logic_error("method signature");
+            Metadata::MetadataGenericContext methodContext =
+                Metadata::MetadataGenericContext::ForMethod(entityToken, module);
+            Disassembler::DisassemblerSignatureTypeProvider provider(module, output);
+            Metadata::SignatureTypeProviderDecoder decoder(provider, module);
+            Metadata::MethodSignatureT methodSignature =
+                decoder.DecodeMethodSignature(blob->data(), blob->size(), methodContext);
+            WriteTo(methodSignature.Header, output);
+            methodSignature.ReturnType(Disassembler::ILNameSyntax::SignatureNoNamedTypeParameters);
+            output.Write(' ');
+            std::uint32_t declaringType = module.GetMethodDeclaringTypeToken(entityToken);
+            if (declaringType != 0) {
+                WriteTo(module, output, genericContext, declaringType,
+                    Disassembler::ILNameSyntax::TypeName);
+                output.Write("::");
+            }
+            // The C# `bool isCompilerControlled =
+            // (md.Attributes & MethodAttributes.MemberAccessMask) ==
+            // MethodAttributes.PrivateScope`.
+            bool isCompilerControlled =
+                (module.GetMethodAttributes(entityToken) & 0x0007u) == 0x0000u;
+            std::string name = module.GetMethodName(entityToken);
+            if (isCompilerControlled) {
+                char buf[16];
+                std::snprintf(buf, sizeof(buf), "$PST%08X",
+                    static_cast<unsigned>(entityToken));
+                output.WriteReference(module, entityToken,
+                    Disassembler::Escape(name + buf));
+            } else {
+                output.WriteReference(module, entityToken, Disassembler::Escape(name));
+            }
+            auto genericParameters = module.GetGenericParameters(entityToken);
+            if (!genericParameters.empty()) {
+                output.Write('<');
+                for (std::size_t i = 0; i < genericParameters.size(); i++) {
+                    if (i > 0) output.Write(", ");
+                    const auto& gp = genericParameters[i];
+                    // The C# GenericParameterAttributes flag spellings:
+                    // ReferenceTypeConstraint (0x0004) / NotNullableValueType-
+                    // Constraint (0x0008) mutually exclusive, then the
+                    // DefaultConstructorConstraint (0x0010) prefix.
+                    constexpr std::uint16_t kReferenceTypeConstraint = 0x0004;
+                    constexpr std::uint16_t kNotNullableValueTypeConstraint = 0x0008;
+                    constexpr std::uint16_t kDefaultConstructorConstraint = 0x0010;
+                    constexpr std::uint16_t kContravariant = 0x0001;
+                    constexpr std::uint16_t kCovariant = 0x0002;
+                    if ((gp.Flags & kReferenceTypeConstraint) == kReferenceTypeConstraint) {
+                        output.Write("class ");
+                    } else if ((gp.Flags & kNotNullableValueTypeConstraint)
+                        == kNotNullableValueTypeConstraint) {
+                        output.Write("valuetype ");
+                    }
+                    if ((gp.Flags & kDefaultConstructorConstraint)
+                        == kDefaultConstructorConstraint) {
+                        output.Write(".ctor ");
+                    }
+                    auto constraints = module.GetGenericParameterConstraintTokens(gp.Token);
+                    if (!constraints.empty()) {
+                        output.Write('(');
+                        for (std::size_t j = 0; j < constraints.size(); j++) {
+                            if (j > 0) output.Write(", ");
+                            // The C# `constraint.Type.WriteTo(module, output,
+                            // new MetadataGenericContext((MethodDefinitionHandle)
+                            // entity, metadata), ILNameSyntax.TypeName)`.
+                            WriteTo(module, output, methodContext, constraints[j],
+                                Disassembler::ILNameSyntax::TypeName);
+                        }
+                        output.Write(") ");
+                    }
+                    if ((gp.Flags & kContravariant) == kContravariant) {
+                        output.Write('-');
+                    } else if ((gp.Flags & kCovariant) == kCovariant) {
+                        output.Write('+');
+                    }
+                    output.Write(Disassembler::Escape(gp.Name));
+                }
+                output.Write('>');
+            }
+            WriteParameterList(output, methodSignature);
+            break;
+        }
         default:
             // The C# `output.Write($"@{MetadataTokens.GetToken(entity):X8}")`
             // default arm; the member-table arms the full C# switch carries

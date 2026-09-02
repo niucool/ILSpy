@@ -354,6 +354,7 @@ std::vector<GenericParameterInfo> MetadataFile::GetGenericParameters(std::uint32
                 // is 0-based, so the 1-based token RID is index()+1.
                 gp.Token = (0x2Au << 24) | ((static_cast<std::uint32_t>((*it).index()) + 1) & 0x00FFFFFFu);
                 gp.Number = (*it).Number();
+                gp.Flags = (*it).Flags().value;
                 gp.Name = std::string{ (*it).Name() };
                 result.push_back(std::move(gp));
             }
@@ -364,6 +365,7 @@ std::vector<GenericParameterInfo> MetadataFile::GetGenericParameters(std::uint32
                 GenericParameterInfo gp;
                 gp.Token = (0x2Au << 24) | ((static_cast<std::uint32_t>((*it).index()) + 1) & 0x00FFFFFFu);
                 gp.Number = (*it).Number();
+                gp.Flags = (*it).Flags().value;
                 gp.Name = std::string{ (*it).Name() };
                 result.push_back(std::move(gp));
             }
@@ -510,6 +512,7 @@ std::optional<GenericParameterInfo> MetadataFile::GetGenericParameterByToken(
         GenericParameterInfo info;
         info.Token = genericParamToken;
         info.Number = gp.Number();
+        info.Flags = gp.Flags().value;
         info.Name = std::string{ gp.Name() };
         return info;
     } catch (const std::exception&) {
@@ -531,6 +534,106 @@ std::optional<std::vector<std::uint8_t>> MetadataFile::GetTypeSpecSignatureBlob(
         return std::vector<std::uint8_t>(view.begin(), view.end());
     } catch (const std::exception&) {
         return std::nullopt;
+    }
+}
+
+// A MethodDef (column 4), Field (column 2), or MemberRef (column 2) row's raw
+// signature blob. See the header for the full contract.
+std::optional<std::vector<std::uint8_t>> MetadataFile::GetSignatureBlob(
+        std::uint32_t entityToken) const {
+    if (!IsValid()) return std::nullopt;
+    std::uint32_t table = entityToken >> 24;
+    std::uint32_t row = entityToken & 0x00FFFFFFu;
+    if (row == 0) return std::nullopt;
+    try {
+        std::uint32_t blobColumn;
+        if (table == 0x06 && row <= impl_->db->MethodDef.size()) {
+            blobColumn = impl_->db->MethodDef.get_value<std::uint32_t>(row - 1, 4);
+        } else if (table == 0x04 && row <= impl_->db->Field.size()) {
+            blobColumn = impl_->db->Field.get_value<std::uint32_t>(row - 1, 2);
+        } else if (table == 0x0A && row <= impl_->db->MemberRef.size()) {
+            blobColumn = impl_->db->MemberRef.get_value<std::uint32_t>(row - 1, 2);
+        } else {
+            return std::nullopt;
+        }
+        auto view = impl_->db->get_blob(blobColumn);
+        return std::vector<std::uint8_t>(view.begin(), view.end());
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// A Field row's declaring TypeDef (the C# FieldDefinition.GetDeclaringType()).
+// See the header for the full contract.
+std::uint32_t MetadataFile::GetFieldDeclaringTypeToken(std::uint32_t fieldToken) const {
+    if (!IsValid()) return 0;
+    std::uint32_t table = fieldToken >> 24;
+    std::uint32_t row = fieldToken & 0x00FFFFFFu;
+    if (table != 0x04 || row == 0 || row > impl_->db->Field.size()) return 0;
+    try {
+        auto t = impl_->db->Field[row - 1].Parent();
+        if (!t) return 0;
+        return (0x02u << 24) | ((static_cast<std::uint32_t>(t.index()) + 1) & 0x00FFFFFFu);
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
+// A GenericParam row's constraint types from the GenericParamConstraint table
+// (0x1C): column 0 is the owning GenericParam's 1-based row, column 1 the
+// TypeDefOrRef coded index (2-bit tag: 0=TypeDef, 1=TypeRef, 2=TypeSpec).
+// See the header for the full contract.
+std::vector<std::uint32_t> MetadataFile::GetGenericParameterConstraintTokens(
+        std::uint32_t genericParamToken) const {
+    std::vector<std::uint32_t> result;
+    if (!IsValid()) return result;
+    std::uint32_t table = genericParamToken >> 24;
+    std::uint32_t row = genericParamToken & 0x00FFFFFFu;
+    if (table != 0x2A || row == 0) return result;
+    try {
+        for (std::uint32_t i = 0; i < impl_->db->GenericParamConstraint.size(); i++) {
+            if (impl_->db->GenericParamConstraint.get_value<std::uint32_t>(i, 0) != row)
+                continue;
+            std::uint32_t v = impl_->db->GenericParamConstraint.get_value<std::uint32_t>(i, 1);
+            if (v == 0) continue;
+            std::uint32_t tag = v & 0x3u;
+            std::uint32_t rid = v >> 2;
+            if (rid == 0) continue;
+            switch (tag) {
+                case 0: result.push_back((0x02u << 24) | rid); break;
+                case 1: result.push_back((0x01u << 24) | rid); break;
+                case 2: result.push_back((0x1Bu << 24) | rid); break;
+            }
+        }
+    } catch (const std::exception&) {
+        // A malformed table walk degrades to the partial result (never throws).
+    }
+    return result;
+}
+
+// A MethodDef row's authored Name. See the header for the full contract.
+std::string MetadataFile::GetMethodName(std::uint32_t methodToken) const {
+    if (!IsValid()) return {};
+    std::uint32_t table = methodToken >> 24;
+    std::uint32_t row = methodToken & 0x00FFFFFFu;
+    if (table != 0x06 || row == 0 || row > impl_->db->MethodDef.size()) return {};
+    try {
+        return std::string{ impl_->db->MethodDef[row - 1].Name() };
+    } catch (const std::exception&) {
+        return {};
+    }
+}
+
+// A Field row's authored Name. See the header for the full contract.
+std::string MetadataFile::GetFieldName(std::uint32_t fieldToken) const {
+    if (!IsValid()) return {};
+    std::uint32_t table = fieldToken >> 24;
+    std::uint32_t row = fieldToken & 0x00FFFFFFu;
+    if (table != 0x04 || row == 0 || row > impl_->db->Field.size()) return {};
+    try {
+        return std::string{ impl_->db->Field[row - 1].Name() };
+    } catch (const std::exception&) {
+        return {};
     }
 }
 
