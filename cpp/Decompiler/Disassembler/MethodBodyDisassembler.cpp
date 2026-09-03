@@ -22,11 +22,14 @@
 #include "Decompiler/Disassembler/MethodBodyDisassembler.hpp"
 
 #include "Decompiler/Disassembler/DisassemblerHelpers.hpp"
+#include "Decompiler/Disassembler/DisassemblerSignatureTypeProvider.hpp"
 #include "Decompiler/IL/InstructionOutputExtensions.hpp"
 #include "Decompiler/Disassembler/ILParser.hpp"
 #include "Decompiler/Disassembler/OpCodeInfo.hpp"
 #include "Decompiler/Disassembler/ReflectionDisassembler.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/Metadata/MethodBody.hpp"
+#include "Decompiler/Metadata/SignatureTypeProvider.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -445,6 +448,127 @@ void MethodBodyDisassembler::WriteInstruction(Metadata::MetadataFile& module,
         }
     }
     output_.WriteLine();
+}
+
+// ---------------------------------------------------------------------------
+// WriteExceptionHandlers (MethodBodyDisassembler.cs lines 198-212).
+// ---------------------------------------------------------------------------
+void MethodBodyDisassembler::WriteExceptionHandlers(const Metadata::MetadataFile& module,
+    std::uint32_t methodToken, const Metadata::MethodBody& body)
+{
+    if (body.Handlers().empty()) return;
+    output_.WriteLine();
+    auto genericContext = Metadata::MetadataGenericContext::ForMethod(methodToken, module);
+    for (const auto& eh : body.Handlers()) {
+        Disassembler::WriteTo(eh, module, genericContext, output_);
+        output_.WriteLine();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DisassembleLocalsBlock (MethodBodyDisassembler.cs lines 158-196).
+// ---------------------------------------------------------------------------
+void MethodBodyDisassembler::DisassembleLocalsBlock(const Metadata::MetadataFile& module,
+    std::uint32_t methodToken, const Metadata::MethodBody& body)
+{
+    if (body.LocalVarSigToken() == 0) return;
+    output_.Write(".locals");
+    WriteMetadataToken(module, body.LocalVarSigToken(), body.LocalVarSigToken(),
+        /*spaceBefore=*/true);
+    if (body.InitLocals()) output_.Write(" init");
+    auto blob = module.GetStandaloneSignatureBlob(body.LocalVarSigToken());
+    std::vector<Metadata::SignatureTypeWriter> signature;
+    bool decodeOk = false;
+    if (blob) {
+        // The C# `blob.GetKind() == StandaloneSignatureKind.LocalVariables`
+        // else the " /* wrong signature kind */" comment; the decode's
+        // BadImageFormatException catch degrades to a message comment.
+        if (((*blob)[0] & 0x0F) == 0x07) {
+            try {
+                Disassembler::DisassemblerSignatureTypeProvider provider(module, output_);
+                Metadata::SignatureTypeProviderDecoder decoder(provider, module);
+                signature = decoder.DecodeLocalSignature(blob->data(), blob->size(),
+                    Metadata::MetadataGenericContext::ForMethod(methodToken, module));
+                decodeOk = true;
+            } catch (const std::logic_error& ex) {
+                output_.Write(std::string(" /* ") + ex.what() + " */");
+            }
+        } else {
+            output_.Write(" /* wrong signature kind */");
+        }
+    }
+    output_.Write(' ');
+    Output::WriteLine(output_, "(");
+    output_.Indent();
+    for (std::size_t index = 0; index < signature.size(); index++) {
+        output_.WriteLocalReference("[" + std::to_string(index) + "]",
+            reinterpret_cast<const void*>(static_cast<std::uintptr_t>(index)),
+            /*isDefinition=*/true);
+        output_.Write(' ');
+        signature[index](Disassembler::ILNameSyntax::TypeName);
+        // The C# DebugInfo.TryGetName name suffix defers with the provider.
+        if (index + 1 < signature.size()) output_.Write(',');
+        output_.WriteLine();
+    }
+    output_.Unindent();
+    Output::WriteLine(output_, ")");
+}
+
+// ---------------------------------------------------------------------------
+// Disassemble (MethodBodyDisassembler.cs lines 111-157) -- the flat path.
+// ---------------------------------------------------------------------------
+void MethodBodyDisassembler::Disassemble(Metadata::MetadataFile& module,
+    std::uint32_t methodToken)
+{
+    std::uint32_t rva = module.GetMethodRVA(methodToken);
+    char buf[64];
+    // The C# `output.WriteLine("// Method begins at RVA 0x{0:x4}", rva)`.
+    std::snprintf(buf, sizeof(buf), "// Method begins at RVA 0x%x", rva);
+    Output::WriteLine(output_, buf);
+    if (rva == 0) {
+        Output::WriteLine(output_, "// Header size: 0");
+        Output::WriteLine(output_, "// Code size: 0 (0x0)");
+        Output::WriteLine(output_, ".maxstack 0");
+        output_.WriteLine();
+        return;
+    }
+    auto body = module.GetMethodBody(rva);
+    if (!body.IsValid()) {
+        // The C# `catch (BadImageFormatException ex) { output.WriteLine("// {0}",
+        // ex.Message); }` -- the port's graceful reader cannot recover the
+        // exception text, so the comment names the outcome.
+        Output::WriteLine(output_, "// Invalid method body");
+        return;
+    }
+    std::uint32_t codeSize = body.CodeSize();
+    std::snprintf(buf, sizeof(buf), "// Header size: %u", body.HeaderSize());
+    Output::WriteLine(output_, buf);
+    std::snprintf(buf, sizeof(buf), "// Code size: %u (0x%x)", codeSize, codeSize);
+    Output::WriteLine(output_, buf);
+    std::snprintf(buf, sizeof(buf), ".maxstack %u", body.MaxStack());
+    Output::WriteLine(output_, buf);
+
+    if (methodToken == module.GetEntryPointToken()) {
+        Output::WriteLine(output_, ".entrypoint");
+    }
+
+    DisassembleLocalsBlock(module, methodToken, body);
+    output_.WriteLine();
+
+    // The C# sequence-point assignment defers with the DebugInfo provider.
+    if (DetectControlStructure) {
+        // The C# ILStructure-based structured branch (WriteStructureHeader/
+        // Body/Footer over ILStructure.cs) is not yet ported -- loud rather
+        // than wrong.
+        throw std::logic_error("structured output is not yet ported");
+    }
+    auto il = body.IL();
+    std::size_t pos = 0;
+    while (pos < il.size()) {
+        WriteInstruction(module, methodToken, il.data(), il.size(), pos, rva);
+    }
+    WriteExceptionHandlers(module, methodToken, body);
+    // The C# `sequencePoints = null`.
 }
 
 }  // namespace ILSpy::Decompiler::Disassembler

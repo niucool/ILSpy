@@ -180,6 +180,14 @@ private:
     mutable const std::uint8_t* usEnd_ = nullptr;
     mutable bool usLocated_ = false;
 
+public:
+    // The cor20 header's EntryPointTokenOrRelativeVirtualAddress, or 0 when
+    // the image has no COM header (the C# `module.CorHeader?... ?? 0`). The
+    // token is captured during the cor-header parse (a const loader path, so
+    // the field is mutable).
+    mutable std::uint32_t entryPointToken_ = 0;
+    std::uint32_t EntryPointToken() const { return entryPointToken_; }
+
     const std::uint8_t* UsBase() const {
         if (!usLocated_) LocateUsHeap();
         return usBase_;
@@ -211,6 +219,7 @@ private:
         if (comRva == 0) return;
         const auto* cor = reinterpret_cast<const image_cor20_header*>(RvaToPtr(comRva));
         if (!cor) return;
+        entryPointToken_ = cor->dummyunionname.EntryPointToken;
         std::uint32_t mdRva = cor->MetaData.VirtualAddress;
         const std::uint8_t* root = RvaToPtr(mdRva);
         if (!root) return;
@@ -323,6 +332,10 @@ public:
         return pe_.TryGetUserString(token);
     }
 
+    // The cor20 header's EntryPointTokenOrRelativeVirtualAddress (0 when the
+    // image has no COM header -- the C# `module.CorHeader?... ?? 0`).
+    std::uint32_t EntryPointToken() const { return pe_.EntryPointToken(); }
+
     // Decode the method body at `rva`. Returns an invalid MethodBody if the RVA
     // is 0 (abstract/extern) or the header is malformed -- graceful degradation
     // rather than throwing, matching the decompiler's robustness tenet.
@@ -339,11 +352,14 @@ public:
         std::uint32_t maxStack = 8;        // tiny bodies assume 8
         std::uint32_t localVarSigTok = 0;
         bool moreSects = false;
+        std::uint32_t headerSize = 0;
+        bool initLocals = false;
 
         if (!isFat) {
             // Tiny: (codeSize << 2) | 0x02. Single-byte header.
             codeSize = header0 >> 2;
             ilBase = p + 1;
+            headerSize = 1;
         } else {
             // Fat: 12-byte header. Bytes 0-1 = Flags(12) | Size(4); Size is the
             // header length in 4-byte units (3 -> 12 bytes).
@@ -353,10 +369,12 @@ public:
             std::uint32_t hdrBytes = hdrWords * 4;
             if (hdrBytes < 12) return body;
             moreSects = (first16 & 0x8) != 0;
+            initLocals = (first16 & 0x10) != 0;
             maxStack = ReadLe<2>(p + 2);
             codeSize = ReadLe<4>(p + 4);
             localVarSigTok = ReadLe<4>(p + 8);
             ilBase = p + hdrBytes;
+            headerSize = hdrBytes;
         }
 
         if (ilBase + codeSize > pe_.Data() + pe_.Size()) return body;
@@ -376,7 +394,8 @@ public:
 
         body.Adopt(image_, handlers,
                    Util::Span<const std::uint8_t>(ilBase, codeSize),
-                   maxStack, codeSize, localVarSigTok, isFat);
+                   maxStack, codeSize, localVarSigTok, isFat,
+                   headerSize, initLocals);
         return body;
     }
 

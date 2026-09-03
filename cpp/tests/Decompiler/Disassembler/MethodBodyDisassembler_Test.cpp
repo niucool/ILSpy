@@ -343,3 +343,181 @@ TEST(MethodBodyDisassemblerTest, WriteInstructionUndefinedOpcodeFallsBackToEmitb
     EXPECT_EQ(RenderInstruction(f, 0x06000001u, body, sizeof(body)),
         "IL_0000: .emitbyte 0x24\r\n");
 }
+
+// ---------------------------------------------------------------------------
+// Disassemble / DisassembleLocalsBlock / WriteExceptionHandlers
+// (MethodBodyDisassembler.cs lines 111-157, 158-196, 198-212) -- the flat
+// path over real mscorlib bodies.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::uint32_t FindTypeDefTokenIn(const MD::MetadataFile& f, std::string_view ns,
+    std::string_view name) {
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == ns && t.Name == name) return t.Token;
+    }
+    return 0;
+}
+
+std::uint32_t FindMethodIn(const MD::MetadataFile& f, std::uint32_t typeToken,
+    std::string_view name) {
+    for (const auto& m : f.GetMethods(typeToken)) {
+        if (m.Name == name) return m.Token;
+    }
+    return 0;
+}
+
+std::string DisassembleFlat(MD::MetadataFile& f,
+    std::uint32_t token) {
+    std::ostringstream stream;
+    OUT::PlainTextOutput out(stream);
+    MethodBodyDisassembler d(out);
+    d.DetectControlStructure = false;
+    d.Disassemble(f, token);
+    return stream.str();
+}
+
+}  // namespace
+
+TEST(MethodBodyDisassemblerTest, DisassembleZeroRvaEarlyOut) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // An abstract method (RVA 0) -- e.g. String's CompareTo overloads? Any
+    // RVA-0 method shows the early-out block verbatim.
+    std::uint32_t zeroRva = 0;
+    for (const auto& t : f.TypeDefs()) {
+        for (const auto& m : f.GetMethods(t.Token)) {
+            if (m.RVA == 0) {
+                zeroRva = m.Token;
+                break;
+            }
+        }
+        if (zeroRva != 0) break;
+    }
+    ASSERT_NE(zeroRva, 0u);
+    std::ostringstream stream;
+    OUT::PlainTextOutput out(stream);
+    MethodBodyDisassembler d(out);
+    d.DetectControlStructure = false;
+    d.Disassemble(f, zeroRva);
+    EXPECT_EQ(stream.str(),
+        "// Method begins at RVA 0x0\r\n"
+        "// Header size: 0\r\n"
+        "// Code size: 0 (0x0)\r\n"
+        ".maxstack 0\r\n"
+        "\r\n");
+}
+
+TEST(MethodBodyDisassemblerTest, DisassembleFlatRendersPassThroughMethod) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t copy = FindMethodIn(f, stringType, "Copy");
+    ASSERT_NE(copy, 0u);
+    std::uint32_t rva = f.GetMethodRVA(copy);
+    ASSERT_NE(rva, 0u);
+    // The .NET 4.8 String.Copy body is argument-checked (not a bare
+    // pass-through), so the header block is built from the decoded body model
+    // and the instruction spelling is pinned by the structural head/tail.
+    auto body = f.GetMethodBody(rva);
+    ASSERT_TRUE(body.IsValid());
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "// Method begins at RVA 0x%x\r\n// Header size: %u\r\n",
+        rva, body.HeaderSize());
+    std::string expected(buf);
+    std::snprintf(buf, sizeof(buf), "// Code size: %u (0x%x)\r\n.maxstack %u\r\n",
+        body.CodeSize(), body.CodeSize(), body.MaxStack());
+    expected += buf;
+    std::string text = DisassembleFlat(f, copy);
+    EXPECT_TRUE(text.rfind(expected, 0) == 0) << text;
+    EXPECT_NE(text.find("\r\nIL_0000: ldarg.0"), std::string::npos) << text;
+    EXPECT_TRUE(text.size() > 4 && text.substr(text.size() - 5) == "ret\r\n")
+        << text;
+
+}
+
+TEST(MethodBodyDisassemblerTest, DisassembleLocalsBlockRendersLocalTypes) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    bool found = false;
+    for (const auto& t : f.TypeDefs()) {
+        for (const auto& m : f.GetMethods(t.Token)) {
+            if (m.RVA == 0) continue;
+            auto mb = f.GetMethodBody(m.RVA);
+            if (!mb.IsValid() || mb.LocalVarSigToken() == 0) continue;
+            found = true;
+            std::string text = DisassembleFlat(f, m.Token);
+            auto localsAt = text.find(".locals");
+            ASSERT_NE(localsAt, std::string::npos) << text;
+            // The ShowMetadataTokens-off spelling: ".locals" (+ the init flag).
+            EXPECT_TRUE(text.find(".locals") != std::string::npos) << text;
+            auto parens = text.find('(', localsAt);
+            auto close = text.find(')', parens);
+            ASSERT_NE(parens, std::string::npos) << text;
+            ASSERT_NE(close, std::string::npos) << text;
+            std::string block = text.substr(localsAt, close - localsAt);
+            // One "[N] <type>" line per local; the [0] definition is present.
+            EXPECT_NE(block.find("[0]"), std::string::npos) << text;
+            return;
+        }
+    }
+    FAIL() << "no method with locals found";
+}
+
+TEST(MethodBodyDisassemblerTest, DisassembleRendersExceptionHandlers) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    bool found = false;
+    for (const auto& t : f.TypeDefs()) {
+        for (const auto& m : f.GetMethods(t.Token)) {
+            if (m.RVA == 0) continue;
+            auto mb = f.GetMethodBody(m.RVA);
+            if (!mb.IsValid() || mb.Handlers().empty()) continue;
+            found = true;
+            std::string text = DisassembleFlat(f, m.Token);
+            // The blank line then the .try clause lines (one per handler).
+            EXPECT_NE(text.find("\r\n.try "), std::string::npos) << text;
+            for (std::size_t i = 0; i < mb.Handlers().size(); i++) {
+                auto next = text.find(".try ", text.find(".try ") + 1);
+                if (i + 1 == mb.Handlers().size()) break;
+                EXPECT_NE(next, std::string::npos) << text;
+            }
+            return;
+        }
+    }
+    FAIL() << "no method with exception handlers found";
+}
+
+TEST(MethodBodyDisassemblerTest, DisassembleStructuredPathThrows) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t copy = FindMethodIn(f, stringType, "Copy");
+    ASSERT_NE(copy, 0u);
+    std::ostringstream stream;
+    OUT::PlainTextOutput out(stream);
+    MethodBodyDisassembler d(out);
+    EXPECT_THROW(d.Disassemble(f, copy), std::logic_error);
+}
+
+TEST(MethodBodyDisassemblerTest, DisassembleSmokeOverManyMethods) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    int disassembled = 0;
+    for (const auto& t : f.TypeDefs()) {
+        for (const auto& m : f.GetMethods(t.Token)) {
+            if (m.RVA == 0) continue;
+            auto mb = f.GetMethodBody(m.RVA);
+            if (!mb.IsValid() || mb.IL().empty()) continue;
+            std::string text = DisassembleFlat(f, m.Token);
+            EXPECT_TRUE(text.rfind("// Method begins at RVA 0x", 0) == 0) << text;
+            EXPECT_NE(text.find("// Code size:"), std::string::npos) << text;
+            EXPECT_NE(text.find(".maxstack"), std::string::npos) << text;
+            if (++disassembled >= 500) return;
+        }
+    }
+    ASSERT_GT(disassembled, 0) << "no method bodies disassembled";
+}

@@ -223,6 +223,12 @@ public:
     // (possibly empty) otherwise. Never throws.
     std::optional<std::string> TryGetUserString(std::uint32_t token) const;
 
+    // The cor20 header's EntryPointTokenOrRelativeVirtualAddress -- the .NET
+    // entrypoint's MethodDef token for .exes (0 for libraries and images
+    // without a COM header, the C# `module.CorHeader?... ?? 0` shape). Never
+    // throws.
+    std::uint32_t GetEntryPointToken() const;
+
     // Decode the local-variable signature referenced by a method body's
     // LocalVarSigToken (a StandAloneSig token, table 0x11). Returns the local
     // types in index order; an empty vector if the token is 0/invalid/malformed.
@@ -349,6 +355,13 @@ public:
     // for an invalid file, an out-of-range row, a nil row, or a non-MethodDef
     // token; never throws.
     std::string GetMethodName(std::uint32_t methodToken) const;
+
+    // A MethodDef row's (table 0x06) RelativeVirtualAddress column -- the C#
+    // MethodDefinition.RelativeVirtualAddress the Disassemble header comments
+    // print (0 for abstract/extern/pinvoke-only methods). 0 for an invalid
+    // file, an out-of-range row, a nil row, or a non-MethodDef token; never
+    // throws.
+    std::uint32_t GetMethodRVA(std::uint32_t methodToken) const;
 
     // A Field row's (table 0x04) authored Name column -- the identifier the
     // FieldDefinition arm escapes. "" for an invalid file, an out-of-range

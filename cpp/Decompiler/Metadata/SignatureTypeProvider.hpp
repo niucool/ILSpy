@@ -223,6 +223,13 @@ public:
     std::vector<SignatureTypeWriter> DecodeMethodSpecSignature(
         const std::uint8_t* data, std::size_t size,
         const MetadataGenericContext& genericContext);
+    // The SRM `StandaloneSignature.DecodeLocalSignature` shape: the Local-
+    // Variables signature-kind nibble (0x7), then the compressed local count,
+    // then that many full types (the C# caller checks GetKind first and
+    // renders the " /* wrong signature kind */" comment itself).
+    std::vector<SignatureTypeWriter> DecodeLocalSignature(
+        const std::uint8_t* data, std::size_t size,
+        const MetadataGenericContext& genericContext);
 
 private:
     ISignatureTypeProvider& provider_;

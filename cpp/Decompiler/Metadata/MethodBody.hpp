@@ -68,6 +68,10 @@ public:
     std::uint32_t CodeSize() const noexcept { return codeSize_; }
     // StandAloneSig token of the local-variable signature, or 0 if none.
     std::uint32_t LocalVarSigToken() const noexcept { return localVarSigTok_; }
+    // The method-body header size in bytes (1 for tiny, hdrBytes for fat).
+    std::uint32_t HeaderSize() const noexcept { return headerSize_; }
+    // The fat header's init-locals flag (the C# body.LocalVariablesInitialized).
+    bool InitLocals() const noexcept { return initLocals_; }
 
     // The IL instruction bytes (length == CodeSize()).
     Util::Span<const std::uint8_t> IL() const noexcept { return il_; }
@@ -86,6 +90,8 @@ private:
     std::uint32_t maxStack_ = 0;
     std::uint32_t codeSize_ = 0;
     std::uint32_t localVarSigTok_ = 0;
+    std::uint32_t headerSize_ = 0;
+    bool initLocals_ = false;
     bool isFat_ = false;
 
     friend class MethodBodyReader;
@@ -94,7 +100,8 @@ private:
                std::shared_ptr<std::vector<ExceptionHandlerClause>> handlers,
                Util::Span<const std::uint8_t> il,
                std::uint32_t maxStack, std::uint32_t codeSize,
-               std::uint32_t localVarSigTok, bool isFat);
+               std::uint32_t localVarSigTok, bool isFat,
+               std::uint32_t headerSize, bool initLocals);
 };
 
 } // namespace ILSpy::Decompiler::Metadata

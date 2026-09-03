@@ -30,7 +30,8 @@ void MethodBody::Adopt(std::shared_ptr<const std::vector<std::uint8_t>> image,
                        std::shared_ptr<std::vector<ExceptionHandlerClause>> handlers,
                        Util::Span<const std::uint8_t> il,
                        std::uint32_t maxStack, std::uint32_t codeSize,
-                       std::uint32_t localVarSigTok, bool isFat) {
+                       std::uint32_t localVarSigTok, bool isFat,
+                       std::uint32_t headerSize, bool initLocals) {
     held_ = std::move(image);
     handlerStorage_ = std::move(handlers);
     il_ = il;
@@ -42,6 +43,8 @@ void MethodBody::Adopt(std::shared_ptr<const std::vector<std::uint8_t>> image,
     codeSize_ = codeSize;
     localVarSigTok_ = localVarSigTok;
     isFat_ = isFat;
+    headerSize_ = headerSize;
+    initLocals_ = initLocals;
 }
 
 } // namespace ILSpy::Decompiler::Metadata

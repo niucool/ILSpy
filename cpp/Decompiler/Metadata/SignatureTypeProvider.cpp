@@ -341,4 +341,26 @@ std::vector<SignatureTypeWriter> SignatureTypeProviderDecoder::DecodeMethodSpecS
     return result;
 }
 
+// The SRM `StandaloneSignature.DecodeLocalSignature` shape: the
+// LocalVariables kind nibble, the compressed local count, then that many
+// full types.
+std::vector<SignatureTypeWriter> SignatureTypeProviderDecoder::DecodeLocalSignature(
+        const std::uint8_t* data, std::size_t size,
+        const MetadataGenericContext& genericContext) {
+    cur_ = data;
+    end_ = data + size;
+    context_ = &genericContext;
+    std::uint8_t header = Byte();
+    if ((header & 0x0F) != 0x07) Fail("bad local signature kind");
+    std::uint32_t count = CompressedUnsigned();
+    std::vector<SignatureTypeWriter> result;
+    result.reserve(count);
+    for (std::uint32_t i = 0; i < count; i++) {
+        result.push_back(DecodeTypeWithPrefixes());
+    }
+    if (cur_ != end_) Fail("trailing bytes after the local signature");
+    context_ = nullptr;
+    return result;
+}
+
 } // namespace ILSpy::Decompiler::Metadata

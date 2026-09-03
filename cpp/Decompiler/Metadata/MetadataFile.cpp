@@ -624,6 +624,19 @@ std::string MetadataFile::GetMethodName(std::uint32_t methodToken) const {
     }
 }
 
+// A MethodDef row's RVA column. See the header for the full contract.
+std::uint32_t MetadataFile::GetMethodRVA(std::uint32_t methodToken) const {
+    if (!IsValid()) return 0;
+    std::uint32_t table = methodToken >> 24;
+    std::uint32_t row = methodToken & 0x00FFFFFFu;
+    if (table != 0x06 || row == 0 || row > impl_->db->MethodDef.size()) return 0;
+    try {
+        return impl_->db->MethodDef[row - 1].RVA();
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
 // A Field row's authored Name. See the header for the full contract.
 std::string MetadataFile::GetFieldName(std::uint32_t fieldToken) const {
     if (!IsValid()) return {};
@@ -1330,6 +1343,12 @@ std::string MetadataFile::GetUserString(std::uint32_t token) const {
 std::optional<std::string> MetadataFile::TryGetUserString(std::uint32_t token) const {
     if (!IsValid() || !impl_->bodyReader) return std::nullopt;
     return impl_->bodyReader->TryGetUserString(token);
+}
+
+// The cor20 entrypoint token. See the header for the full contract.
+std::uint32_t MetadataFile::GetEntryPointToken() const {
+    if (!IsValid() || !impl_->bodyReader) return 0;
+    return impl_->bodyReader->EntryPointToken();
 }
 
 } // namespace ILSpy::Decompiler::Metadata

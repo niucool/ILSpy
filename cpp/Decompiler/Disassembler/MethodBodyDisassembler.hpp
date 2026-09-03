@@ -36,6 +36,7 @@
 
 namespace ILSpy::Decompiler::Metadata {
 class MetadataFile;
+class MethodBody;
 }
 
 namespace ILSpy::Decompiler::Disassembler {
@@ -100,6 +101,32 @@ public:
     void WriteInstruction(Metadata::MetadataFile& module, std::uint32_t methodToken,
         const std::uint8_t* base, std::size_t size, std::size_t& pos,
         std::uint32_t methodRva);
+
+    // The C# `public virtual void Disassemble(MetadataFile module,
+    // MethodDefinitionHandle handle)` -- the flat-path assembly: the RVA
+    // header comments, the zero-RVA early-out, the .maxstack/.entrypoint
+    // lines, the locals block, the flat instruction loop, and the exception
+    // handlers. The handle ports as the raw method token. The C#
+    // DetectControlStructure structured branch (the ILStructure-based
+    // WriteStructureHeader/Body/Footer recursion) is not yet ported and
+    // throws std::logic_error when the flag is set -- loud rather than wrong;
+    // the flat path runs when the flag is false.
+    void Disassemble(Metadata::MetadataFile& module, std::uint32_t methodToken);
+
+    // The C# `void DisassembleLocalsBlock(MethodDefinitionHandle method,
+    // MethodBodyBlock body)` (private): the `.locals <token> [init] (...)`
+    // block over the body's local-variable signature, one `[_N] <type>`
+    // line per local (the DebugInfo name suffix defers with the provider).
+    // The method token scopes the signature's MVAR (!!N) names.
+    void DisassembleLocalsBlock(const Metadata::MetadataFile& module,
+        std::uint32_t methodToken, const Metadata::MethodBody& body);
+
+    // The C# `internal void WriteExceptionHandlers(MetadataFile module,
+    // MethodDefinitionHandle handle, MethodBodyBlock body)`: a blank line,
+    // then one `eh.WriteTo(module, genericContext, output)` + newline per
+    // clause. The method token scopes the generic context.
+    void WriteExceptionHandlers(const Metadata::MetadataFile& module,
+        std::uint32_t methodToken, const Metadata::MethodBody& body);
 
 private:
     Output::ITextOutput& output_;
