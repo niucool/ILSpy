@@ -29,6 +29,7 @@ add_executable(ilspy_tests
     Decompiler/Disassembler/ILParser_Test.cpp
     Decompiler/Disassembler/ILStructure_Test.cpp
     Decompiler/Disassembler/MethodBodyDisassembler_Test.cpp
+    Decompiler/Disassembler/ReflectionDisassembler_Test.cpp
     Decompiler/TypeSystem/TypeName_Test.cpp
     Decompiler/TypeSystem/SignatureDecoder_Test.cpp
     Decompiler/TypeSystem/TypeKindDerivation_Test.cpp
