@@ -39,6 +39,7 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -77,6 +78,23 @@ std::wstring Utf8ToWide(const std::string& s) {
             wide.data(), len);
     }
     return wide;
+}
+
+// UTF-16 to UTF-8 (the inverse of Utf8ToWide): the CLI's paths carry the
+// UTF-8 std::string convention (wmain converted the command line up
+// front), so a resolved path must come back as UTF-8 -- fs::path::string()
+// would go through the ANSI code page, mangling non-ASCII names or
+// throwing "No mapping for the Unicode character exists in the target
+// multi-byte code page" when the page cannot represent them.
+std::string WideToUtf8(const std::wstring& s) {
+    int len = WideCharToMultiByte(CP_UTF8, 0, s.data(),
+        static_cast<int>(s.size()), nullptr, 0, nullptr, nullptr);
+    std::string utf8(static_cast<std::size_t>(len > 0 ? len : 0), '\0');
+    if (len > 0) {
+        WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+            utf8.data(), len, nullptr, nullptr);
+    }
+    return utf8;
 }
 
 fs::path ToFsPath(const std::string& utf8) {
@@ -584,7 +602,89 @@ std::optional<std::string> ResolveOutputDirectory(const std::string& outputDirec
     // fs::absolute + lexically_normal pair (no '~' expansion -- GetFullPath
     // has none on Windows either).
     fs::path resolved = fs::absolute(ToFsPath(outputDirectory)).lexically_normal();
+    // The UTF-8 std::string convention: on Windows the resolved path is
+    // wide and .string() would transcode through the ANSI code page
+    // (mangling non-ASCII names, or throwing when the page cannot
+    // represent them); the explicit UTF-8 conversion keeps the -o value
+    // usable by the output-file composition below (whose ToFsPath write
+    // converts back).
+#if defined(_WIN32)
+    return WideToUtf8(resolved.native());
+#else
     return resolved.string();
+#endif
+}
+
+std::filesystem::path ToNativePath(const std::string& utf8) {
+    // The OS-boundary translation for the CLI's UTF-8 paths: the C#
+    // composes Unicode paths end to end (System.IO), so a non-ASCII -o
+    // directory or output name must survive -- on Windows the fs::path
+    // narrow ctor would transcode through the ANSI code page instead.
+    return ToFsPath(utf8);
+}
+
+// The C# `Path.GetFileNameWithoutExtension(path)` (the -o writer
+// branches' output-name source): the file-name component (after the last
+// separator, both separators) minus everything from its LAST '.' -- a
+// trailing dot drops the dot ("foo." -> "foo"), a leading dot yields the
+// empty name (".dll" -> ""), a component with no dot keeps its whole
+// self. The same helper exists file-locally in DebugInfoUtils.cpp (the
+// adjacent-PDB name); the -o composition is a second, independent
+// consumer.
+std::string FileNameWithoutExtensionOf(const std::string& path) {
+    std::size_t sep = path.find_last_of("\\/");
+    std::string name = sep == std::string::npos ? path : path.substr(sep + 1);
+    std::size_t dot = name.find_last_of('.');
+    return dot == std::string::npos ? name : name.substr(0, dot);
+}
+
+// The C# `Path.Combine(dir, name)` (the probed .NET shape): an empty name
+// yields the directory itself, an empty dir the name; a dir ending in a
+// directory separator concatenates directly (a bare drive like "C:" does
+// NOT terminate -- .NET inserts the separator); anything else inserts
+// the platform's own separator.
+std::string CombinePaths(const std::string& dir, const std::string& name) {
+    if (name.empty()) return dir;
+    if (dir.empty()) return name;
+    char last = dir[dir.size() - 1];
+    if (last == '\\' || last == '/') return dir + name;
+#if defined(_WIN32)
+    constexpr const char* kSeparator = "\\";
+#else
+    constexpr const char* kSeparator = "/";
+#endif
+    return dir + kSeparator + name;
+}
+
+std::string OutputFilePath(const std::string& outputDirectory,
+    const std::string& assemblyFileName, const std::string& extension) {
+    // The C# `Path.Combine(outputDirectory, outputName) + extension` with
+    // `outputName = Path.GetFileNameWithoutExtension(fileName)`: the
+    // input's base name joined under the -o directory, the extension
+    // string-concatenated onto the combined result (an empty outputName
+    // makes the combine return the directory itself).
+    return CombinePaths(outputDirectory,
+        FileNameWithoutExtensionOf(assemblyFileName)) + extension;
+}
+
+void WriteOutputFile(const std::string& path, const std::string& contents) {
+    // The C# `File.CreateText(path)`: create/truncate and a UTF-8-no-BOM
+    // StreamWriter (the rendered text already carries its CRLFs, so the
+    // bytes go out verbatim); the finally `output.Close()` flushes -- the
+    // port writes the finished buffer at once instead. The write goes
+    // through the UTF-16 path so a non-ASCII output directory resolves
+    // correctly on Windows (the ToFsPath convention).
+    std::ofstream fileStream(ToFsPath(path),
+        std::ios::binary | std::ios::trunc);
+    if (!fileStream) {
+        // The C# File.CreateText IOException escaping to the global catch
+        // (EX_SOFTWARE): the port renders the message only.
+        throw std::runtime_error("Cannot create the output file '" + path + "'.");
+    }
+    if (!contents.empty()) {
+        fileStream.write(contents.data(),
+            static_cast<std::streamsize>(contents.size()));
+    }
 }
 
 int DumpPackage(const std::string& packageFileName,

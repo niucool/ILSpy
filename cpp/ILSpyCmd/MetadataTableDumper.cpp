@@ -36,6 +36,55 @@ using namespace ILSpy::Decompiler::Metadata;
 
 namespace ILSpy::ILSpyCmd {
 
+// The table's enum name ("Module", "TypeDef", ...) -- the C#
+// `table.ToString()` (the supported ids all carry named members), also
+// the -o file-name component of the --dump-table output file
+// (`<name>.<table>.txt` / `.json`).
+const char* TableName(CorTableIndex table) {
+    switch (table) {
+        case CorTableIndex::Module: return "Module";
+        case CorTableIndex::TypeRef: return "TypeRef";
+        case CorTableIndex::TypeDef: return "TypeDef";
+        case CorTableIndex::FieldPtr: return "FieldPtr";
+        case CorTableIndex::Field: return "Field";
+        case CorTableIndex::MethodPtr: return "MethodPtr";
+        case CorTableIndex::MethodDef: return "MethodDef";
+        case CorTableIndex::ParamPtr: return "ParamPtr";
+        case CorTableIndex::Param: return "Param";
+        case CorTableIndex::InterfaceImpl: return "InterfaceImpl";
+        case CorTableIndex::MemberRef: return "MemberRef";
+        case CorTableIndex::Constant: return "Constant";
+        case CorTableIndex::CustomAttribute: return "CustomAttribute";
+        case CorTableIndex::FieldMarshal: return "FieldMarshal";
+        case CorTableIndex::DeclSecurity: return "DeclSecurity";
+        case CorTableIndex::ClassLayout: return "ClassLayout";
+        case CorTableIndex::FieldLayout: return "FieldLayout";
+        case CorTableIndex::StandAloneSig: return "StandAloneSig";
+        case CorTableIndex::EventMap: return "EventMap";
+        case CorTableIndex::EventPtr: return "EventPtr";
+        case CorTableIndex::Event: return "Event";
+        case CorTableIndex::PropertyMap: return "PropertyMap";
+        case CorTableIndex::PropertyPtr: return "PropertyPtr";
+        case CorTableIndex::Property: return "Property";
+        case CorTableIndex::MethodSemantics: return "MethodSemantics";
+        case CorTableIndex::MethodImpl: return "MethodImpl";
+        case CorTableIndex::ModuleRef: return "ModuleRef";
+        case CorTableIndex::TypeSpec: return "TypeSpec";
+        case CorTableIndex::ImplMap: return "ImplMap";
+        case CorTableIndex::FieldRva: return "FieldRva";
+        case CorTableIndex::Assembly: return "Assembly";
+        case CorTableIndex::AssemblyRef: return "AssemblyRef";
+        case CorTableIndex::File: return "File";
+        case CorTableIndex::ExportedType: return "ExportedType";
+        case CorTableIndex::ManifestResource: return "ManifestResource";
+        case CorTableIndex::NestedClass: return "NestedClass";
+        case CorTableIndex::GenericParam: return "GenericParam";
+        case CorTableIndex::MethodSpec: return "MethodSpec";
+        case CorTableIndex::GenericParamConstraint: return "GenericParamConstraint";
+        default: throw std::logic_error("the table carries no name");
+    }
+}
+
 namespace {
 
 // ---------------------------------------------------------------------------
@@ -1168,53 +1217,6 @@ std::string JsonEscape(const std::string& s) {
 
 std::string JsonString(const std::string& s) {
     return "\"" + JsonEscape(s) + "\"";
-}
-
-// The table's enum name ("Module", "TypeDef", ...) -- the C#
-// `table.ToString()` (the supported ids all carry named members).
-const char* TableName(CorTableIndex table) {
-    switch (table) {
-        case CorTableIndex::Module: return "Module";
-        case CorTableIndex::TypeRef: return "TypeRef";
-        case CorTableIndex::TypeDef: return "TypeDef";
-        case CorTableIndex::FieldPtr: return "FieldPtr";
-        case CorTableIndex::Field: return "Field";
-        case CorTableIndex::MethodPtr: return "MethodPtr";
-        case CorTableIndex::MethodDef: return "MethodDef";
-        case CorTableIndex::ParamPtr: return "ParamPtr";
-        case CorTableIndex::Param: return "Param";
-        case CorTableIndex::InterfaceImpl: return "InterfaceImpl";
-        case CorTableIndex::MemberRef: return "MemberRef";
-        case CorTableIndex::Constant: return "Constant";
-        case CorTableIndex::CustomAttribute: return "CustomAttribute";
-        case CorTableIndex::FieldMarshal: return "FieldMarshal";
-        case CorTableIndex::DeclSecurity: return "DeclSecurity";
-        case CorTableIndex::ClassLayout: return "ClassLayout";
-        case CorTableIndex::FieldLayout: return "FieldLayout";
-        case CorTableIndex::StandAloneSig: return "StandAloneSig";
-        case CorTableIndex::EventMap: return "EventMap";
-        case CorTableIndex::EventPtr: return "EventPtr";
-        case CorTableIndex::Event: return "Event";
-        case CorTableIndex::PropertyMap: return "PropertyMap";
-        case CorTableIndex::PropertyPtr: return "PropertyPtr";
-        case CorTableIndex::Property: return "Property";
-        case CorTableIndex::MethodSemantics: return "MethodSemantics";
-        case CorTableIndex::MethodImpl: return "MethodImpl";
-        case CorTableIndex::ModuleRef: return "ModuleRef";
-        case CorTableIndex::TypeSpec: return "TypeSpec";
-        case CorTableIndex::ImplMap: return "ImplMap";
-        case CorTableIndex::FieldRva: return "FieldRva";
-        case CorTableIndex::Assembly: return "Assembly";
-        case CorTableIndex::AssemblyRef: return "AssemblyRef";
-        case CorTableIndex::File: return "File";
-        case CorTableIndex::ExportedType: return "ExportedType";
-        case CorTableIndex::ManifestResource: return "ManifestResource";
-        case CorTableIndex::NestedClass: return "NestedClass";
-        case CorTableIndex::GenericParam: return "GenericParam";
-        case CorTableIndex::MethodSpec: return "MethodSpec";
-        case CorTableIndex::GenericParamConstraint: return "GenericParamConstraint";
-        default: throw std::logic_error("the table carries no name");
-    }
 }
 
 void WriteJson(std::ostream& output, const std::string& assemblyFileName,

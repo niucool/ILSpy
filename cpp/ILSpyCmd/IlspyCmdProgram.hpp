@@ -54,6 +54,7 @@
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
 
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <set>
@@ -97,8 +98,8 @@ int ShowIL(const std::string& assemblyFileName, std::ostringstream& output,
 // name (Enum.ToString) and the SRMExtensions GetFullTypeName declaring-chain
 // reflection name (the `n arity suffix and the '+' nesting separators).
 // Returns 0 (the C# return value; a kinds set that selects nothing prints
-// nothing). The -o writer branch (the <name>.list.txt file) is deferred with
-// the project output paths.
+// nothing). The -o writer branch goes through OutputFilePath (".list.txt")
+// + WriteOutputFile in the caller.
 int ListContent(const std::string& assemblyFileName, std::ostringstream& output,
     const std::set<ILSpy::Decompiler::TypeSystem::TypeKind>& kinds);
 
@@ -109,8 +110,8 @@ int ListContent(const std::string& assemblyFileName, std::ostringstream& output,
 // ResourceExtensions.hpp). WriteLine uses Environment.NewLine -- the
 // port's kNewLine "\r\n" convention (PlainTextOutput hardcodes the
 // Windows value). Returns 0 (the C# return value; an assembly with no
-// embedded resources prints nothing). The -o writer branch (the
-// <name>.resources.txt file) is deferred with the project output paths.
+// embedded resources prints nothing). The -o writer branch goes through
+// OutputFilePath (".resources.txt") + WriteOutputFile in the caller.
 int ListResources(const std::string& assemblyFileName, std::ostringstream& output);
 
 // The C# `int ExtractResource(string assemblyFileName, string resourceName,
@@ -124,7 +125,9 @@ int ListResources(const std::string& assemblyFileName, std::ostringstream& outpu
 // binary mode), and any other value written as its text (the C# ToString()
 // -- the port's invariant-culture render, matching the real tool whose
 // runtimeconfig sets System.Globalization.Invariant). The -o
-// outputDirectory branches are deferred with the project output paths.
+// outputDirectory branches (the SanitizeFileName-named extraction files
+// and the .baml arm's XAML save) are deferred with the
+// WholeProjectDecompiler.SanitizeFileName port.
 // The .baml arm (isBaml && a byte[] value -> DecompileBaml) is deferred with
 // the Phase-9 BamlDecompiler: the port prints a not-yet-supported line to
 // errorOutput and returns EX_SOFTWARE (70) -- the same exit code the real
@@ -142,6 +145,37 @@ int ExtractResource(const std::string& assemblyFileName,
 // absolute + lexically_normal pair (no '~' expansion -- Path.GetFullPath
 // has none either on Windows).
 std::optional<std::string> ResolveOutputDirectory(const std::string& outputDirectory);
+
+// The OS-boundary translation for the CLI's UTF-8 path strings (the C#
+// composes Unicode paths end to end through System.IO): the platform's
+// native fs::path. On Windows the fs::path narrow constructor would
+// transcode through the ANSI code page, mangling non-ASCII names -- the
+// explicit UTF-8 -> UTF-16 conversion preserves them.
+std::filesystem::path ToNativePath(const std::string& utf8);
+
+// The C# `string outputName = Path.GetFileNameWithoutExtension(fileName);
+// output = File.CreateText(Path.Combine(outputDirectory, outputName) + extension)`
+// (IlspyCmdProgram.cs PerformPerFileAction, the -o writer branches): the
+// per-action output file path. GetFileNameWithoutExtension takes the
+// file-name component (after the last separator) minus everything from
+// its LAST '.' -- a trailing dot drops the dot ("foo." -> "foo"), a
+// leading dot yields the empty name (".dll" -> "") -- and Path.Combine
+// joins under the -o directory (an empty name makes it return the
+// directory itself, so the extension lands directly on it).
+std::string OutputFilePath(const std::string& outputDirectory,
+    const std::string& assemblyFileName, const std::string& extension);
+
+// The C# `File.CreateText(path)` + the finally `output.Close()` pair
+// behind every -o writer branch: create/truncate the file and write the
+// whole block (the port renders to a buffer first and writes it at once;
+// the shared C# writer is closed only at the end of the run, which is
+// lossless for the port's single-assembly CLI). File.CreateText encodes
+// UTF-8 WITHOUT a BOM, and the rendered text already carries the CRLF
+// TextWriter convention, so the bytes go out verbatim. A file that cannot
+// be created throws (the C# IOException escaping to the OnExecuteAsync
+// global catch with EX_SOFTWARE; the port renders the message only, no
+// managed stack trace -- the caller exits 70).
+void WriteOutputFile(const std::string& path, const std::string& contents);
 
 // The C# `int DumpPackageAssemblies(string packageFileName, string
 // outputDirectory, CommandLineApplication app)` (IlspyCmdProgram.cs): the

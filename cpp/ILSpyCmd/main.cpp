@@ -207,13 +207,20 @@ int RunMain(int argc, char** argv) {
     // The C# `string outputDirectory = ResolveOutputDirectory(OutputDirectory)`
     // (IlspyCmdProgram.cs OnExecuteAsync): resolved BEFORE any action
     // dispatch, and created when set (Directory.CreateDirectory) -- the
-    // side effect happens whatever action the other flags select.
+    // side effect happens whatever action the other flags select. The C#
+    // calls Directory.CreateDirectory OUTSIDE its try block, so a path that
+    // cannot be created (an existing file, an unwritable parent) is an
+    // UNHANDLED IOException that crashes the tool; the port's throwing
+    // std::filesystem::create_directories call reproduces the same
+    // uncaught-crash shape (a terminate instead of a managed stack trace
+    // -- the observable exit code differs, 0xC0000409 vs 0xE0434352).
     std::optional<std::string> outputDirectory;
     if (parsed.count("outputdir") != 0) {
         outputDirectory = ILSpy::ILSpyCmd::ResolveOutputDirectory(
             parsed["outputdir"].as<std::string>());
         if (outputDirectory.has_value())
-            std::filesystem::create_directories(*outputDirectory);
+            std::filesystem::create_directories(
+                ILSpy::ILSpyCmd::ToNativePath(*outputDirectory));
     }
     // The C# `if (JsonOutputFlag && DumpTableName == null)` usage check
     // (IlspyCmdProgram.cs): --json alone is rejected before any file opens.
@@ -221,6 +228,27 @@ int RunMain(int argc, char** argv) {
         std::cerr << "The --json option is currently only supported together with --dump-table.\n";
         return 64;  // ProgramExitCodes.EX_USAGE
     }
+
+    // The C# -o writer branches' file arm (the `output = File.CreateText(
+    // Path.Combine(outputDirectory, outputName) + extension)` assignments
+    // in PerformPerFileAction): the finished render goes to the per-action
+    // output file (File.CreateText + the finally `output.Close()` flush),
+    // nothing to stdout. A create failure is the C# IOException escaping to
+    // the OnExecuteAsync global catch -- the message to stderr and
+    // EX_SOFTWARE (the port renders no managed stack trace). Note the C#
+    // replaces the shared writer per input file and closes it only at the
+    // end of the run (a multi-assembly tail-loss quirk); the port CLI takes
+    // a single assembly, so the at-once buffer write is lossless.
+    auto WriteActionOutput = [](const std::string& path,
+                                 const std::string& contents) -> bool {
+        try {
+            ILSpy::ILSpyCmd::WriteOutputFile(path, contents);
+        } catch (const std::exception& ex) {
+            std::cerr << ex.what() << '\n';
+            return false;
+        }
+        return true;
+    };
 
     if (!wantIl && !wantIlSequencePoints && !wantIlAst && !wantIlAstAll && !wantCSharp && listValues.empty() && !wantListResources && dumpTable.empty() && resourceName.empty() && !wantDumpPackage) {
         std::cout << "ilspycmd: see --help for available options (--il, --il-sequence-points, --ilast, --ilast-all, --csharp, --list, --list-resources, --resource, --dump-table, -d).\n";
@@ -289,15 +317,28 @@ int RunMain(int argc, char** argv) {
     // kinds selection, then the ListContent render -- every type definition
     // in the TypeDef table's row order (<Module> included) whose kind is
     // selected, as `{Kind} {ReflectionName}` lines. The -t type filter is
-    // NOT applied here (the C# ListContent ignores TypeName); the -o writer
-    // branch (the <name>.list.txt file) is deferred with the project output
-    // paths. The per-kind scaffold this replaces matched single characters
-    // anywhere in the value and printed bare Namespace.Name forms.
+    // NOT applied here (the C# ListContent ignores TypeName). The per-kind
+    // scaffold this replaces matched single characters anywhere in the
+    // value and printed bare Namespace.Name forms.
     if (!listValues.empty()) {
         std::set<ILSpy::Decompiler::TypeSystem::TypeKind> kinds =
             ILSpy::ILSpyCmd::ParseSelection(ILSpy::ILSpyCmd::SplitEntityTypeValues(listValues));
         std::ostringstream buffer;
         int rc = ILSpy::ILSpyCmd::ListContent(asmPath, buffer, kinds);
+        // The C# -o branch (`if (outputDirectory != null) output =
+        // File.CreateText(Path.Combine(outputDirectory, outputName) +
+        // ".list.txt")`): the render goes to the per-action output file,
+        // nothing to stdout. The buffer carries the final CRLF text (the
+        // TextWriter.WriteLine Environment.NewLine convention -- the same
+        // bytes the C# file receives; File.CreateText encodes UTF-8 without
+        // a BOM, so the port writes the buffer verbatim).
+        if (outputDirectory.has_value()) {
+            if (!WriteActionOutput(
+                    ILSpy::ILSpyCmd::OutputFilePath(*outputDirectory, asmPath, ".list.txt"),
+                    buffer.str()))
+                return 70;  // ProgramExitCodes.EX_SOFTWARE
+            return rc;
+        }
         // The buffer carries the final CRLF text (the TextWriter.WriteLine
         // Environment.NewLine convention -- the same bytes the C# Console.Out
         // writes); the block is written in binary mode (the ShowIL pattern).
@@ -323,6 +364,16 @@ int RunMain(int argc, char** argv) {
     if (wantIl || wantIlSequencePoints) {
         std::ostringstream buffer;
         int rc = ILSpy::ILSpyCmd::ShowIL(asmPath, buffer, wantIlSequencePoints, pdbFile);
+        // The C# -o branch (`output = File.CreateText(Path.Combine(
+        // outputDirectory, outputName) + ".il")`): the render goes to the
+        // per-action output file, nothing to stdout.
+        if (outputDirectory.has_value()) {
+            if (!WriteActionOutput(
+                    ILSpy::ILSpyCmd::OutputFilePath(*outputDirectory, asmPath, ".il"),
+                    buffer.str()))
+                return 70;  // ProgramExitCodes.EX_SOFTWARE
+            return rc;
+        }
         // The buffer carries the final CRLF text (PlainTextOutput's kNewLine
         // convention -- the same bytes the C# Console.Out writes). stdout's
         // default text mode would translate every \n again (\r\n -> \r\r\n),
@@ -348,12 +399,21 @@ int RunMain(int argc, char** argv) {
     // naming several of those flags runs the earlier action): one line per
     // embedded manifest resource, with .resources containers expanded to
     // their '<container>/<entry>' entries (the ResourceExtensions port's
-    // EnumerateResourcePaths). The -o per-file writer branch is deferred
-    // with the project output paths (the port CLI has no --outputdir yet;
-    // the C# writes <name>.resources.txt there).
+    // EnumerateResourcePaths).
     if (wantListResources) {
         std::ostringstream buffer;
         int rc = ILSpy::ILSpyCmd::ListResources(asmPath, buffer);
+        // The C# -o branch (`output = File.CreateText(Path.Combine(
+        // outputDirectory, outputName) + ".resources.txt")`): the render
+        // goes to the per-action output file, nothing to stdout.
+        if (outputDirectory.has_value()) {
+            if (!WriteActionOutput(
+                    ILSpy::ILSpyCmd::OutputFilePath(
+                        *outputDirectory, asmPath, ".resources.txt"),
+                    buffer.str()))
+                return 70;  // ProgramExitCodes.EX_SOFTWARE
+            return rc;
+        }
         // The buffer carries the final CRLF text (the same TextWriter
         // convention ShowIL/ListContent render); stdout's default text
         // mode would translate every \n again, so the block is written in
@@ -387,8 +447,12 @@ int RunMain(int argc, char** argv) {
     // return EX_SOFTWARE; }` around PerformPerFileAction) covers the value
     // decode's BadImageFormatException for a malformed container entry --
     // the port renders the message only (no managed stack trace), same
-    // exit code. The -o outputDirectory branches are deferred with the
-    // project output paths.
+    // exit code. The -o outputDirectory branches (the SanitizeFileName-
+    // named extraction files: the byte[] value to <dir>/<sanitized name>,
+    // the text value likewise, the .baml arm's XAML) are deferred with the
+    // WholeProjectDecompiler.SanitizeFileName port -- with -o set the
+    // port still writes the value to stdout (a documented divergence until
+    // that lands).
     if (!resourceName.empty()) {
         std::ostringstream buffer;
         std::ostringstream errorBuffer;
@@ -433,16 +497,14 @@ int RunMain(int argc, char** argv) {
 
     if (!dumpTable.empty()) {
         // The C# DumpTableName arm (IlspyCmdProgram.cs PerformPerFileAction,
-        // the `else if (DumpTableName != null)` branch -- it sits AFTER the
+        // `else if (DumpTableName != null)` branch -- it sits AFTER the
         // EntityTypes, ShowIL, CreateDebugInfo, DumpPackage, ListResources and
         // ResourceName arms, so a command line naming several of those flags
         // runs the earlier action, not the table dump): the table-name parse
         // (an unknown name is a usage error -- the two stderr lines and
         // EX_USAGE, the ProgramExitCodes port) then the whole-table dump
         // through the MetadataTableDumper port (the aligned console table,
-        // or the JSON document with --json). The -o per-file writer branch
-        // is deferred with the project output paths (the port CLI has no
-        // --outputdir yet; the C# writes <name>.<table>.txt/.json there).
+        // or the JSON document with --json).
         ILSpy::Decompiler::Metadata::CorTableIndex table;
         if (!ILSpy::ILSpyCmd::TryParseTableName(dumpTable, table)) {
             std::cerr << "Unknown metadata table '" << dumpTable << "'.\n";
@@ -452,6 +514,25 @@ int RunMain(int argc, char** argv) {
         }
         std::ostringstream buffer;
         int rc = ILSpy::ILSpyCmd::DumpTable(asmPath, buffer, table, wantJson);
+        // The C# -o branch (the per-file `using var tableOutput =
+        // File.CreateText(Path.Combine(outputDirectory, outputName) +
+        // $".{table}.{(JsonOutputFlag ? \"json\" : \"txt\")}")`: the
+        // table-name parse runs first, so an unknown table creates no file;
+        // the name comes from the TableIndex enum's ToString ("TypeDef"),
+        // not the input spelling -- `--dump-table typedef` and `--dump-table
+        // 0x02` both write <name>.TypeDef.txt/.json). The render goes to the
+        // per-action output file, nothing to stdout.
+        if (outputDirectory.has_value()) {
+            std::string extension = std::string(".")
+                + ILSpy::ILSpyCmd::TableName(table)
+                + (wantJson ? ".json" : ".txt");
+            if (!WriteActionOutput(
+                    ILSpy::ILSpyCmd::OutputFilePath(
+                        *outputDirectory, asmPath, extension),
+                    buffer.str()))
+                return 70;  // ProgramExitCodes.EX_SOFTWARE
+            return rc;
+        }
         // The buffer carries the final CRLF text (the same TextWriter
         // convention ShowIL renders); stdout's default text mode would
         // translate every \n again, so the block is written in binary mode
@@ -469,6 +550,13 @@ int RunMain(int argc, char** argv) {
         return rc;
     }
 
+    // The C# default branch's -o writer (`output = File.CreateText(
+    // Path.Combine(outputDirectory, outputName) + ".decompiled.cs")`, or
+    // the -t TypeName-based name) is deferred with the real decompiler back
+    // end: the port's --ilast/--csharp paths are the Phase-5 seed scaffold
+    // (not the C# engine's output), so with -o set they still write to
+    // stdout (a documented divergence until the -t/-m decompile paths
+    // land).
     auto typeMatch = [&](const std::string& ns, const std::string& name) {
         if (typeFilter.empty()) return true;
         return (ns.empty() ? name : ns + "." + name) == typeFilter;

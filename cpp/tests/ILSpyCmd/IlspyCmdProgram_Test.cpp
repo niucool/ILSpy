@@ -37,8 +37,10 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -61,6 +63,23 @@ std::string MscorlibPath() {
 #else
     return "/usr/lib/mono/4.5/mscorlib.dll";
 #endif
+}
+
+// The -o writer tests' temp directory (the DumpPackage_Test convention).
+fs::path TempDir(const std::string& name) {
+    fs::path dir = fs::temp_directory_path() / ("ilspy_ilspycmdprogram_" + name);
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    return dir;
+}
+
+// The whole file as raw bytes (the read-back side of the -o writer
+// round trips).
+std::string ReadFileBytes(const fs::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(f),
+        std::istreambuf_iterator<char>());
 }
 
 // The dynamic cast the TryLoadPDB tests inspect the provider through
@@ -635,4 +654,149 @@ TEST(IlspyCmdProgramTest, ExtractResourceMscorlib)
     EXPECT_EQ(Cmd::ExtractResource(MscorlibPath(),
         "mscorlib.resources/Interop.COM_TypeMismatch", output, errorOutput), 0);
     EXPECT_EQ(output.str(), "Type mismatch between source and destination types.");
+}
+
+// ---- the -o writer branches: OutputFilePath + WriteOutputFile ----
+
+// The `Path.GetFileNameWithoutExtension(fileName)` + `Path.Combine(
+// outputDirectory, outputName) + extension` composition (the C#
+// IlspyCmdProgram.cs PerformPerFileAction -o branches) over the .NET
+// edge cases probed directly: the file-name component after the last
+// separator (both separators strip), minus everything from its LAST dot
+// (a trailing dot drops the dot, a leading dot yields the empty name,
+// inner dots stay), and Path.Combine's separator rules (a trailing
+// separator or a volume separator joins without inserting another).
+TEST(IlspyCmdProgramTest, OutputFilePathComposition)
+{
+#if defined(_WIN32)
+    constexpr const char* kSep = "\\";
+#else
+    constexpr const char* kSep = "/";
+#endif
+    std::string dir = (TempDir("outputpath") / "out").string();
+    EXPECT_EQ(Cmd::OutputFilePath(dir, "mscorlib.dll", ".list.txt"),
+        dir + kSep + "mscorlib.list.txt");
+    // No extension in the input name.
+    EXPECT_EQ(Cmd::OutputFilePath(dir, "tiny", ".il"),
+        dir + kSep + "tiny.il");
+    // Inner dots stay; only the last dot's tail is dropped.
+    EXPECT_EQ(Cmd::OutputFilePath(dir, "a.b.c.dll", ".il"),
+        dir + kSep + "a.b.c.il");
+    // A trailing dot IS the extension separator ("foo." -> "foo").
+    EXPECT_EQ(Cmd::OutputFilePath(dir, "foo.", ".il"),
+        dir + kSep + "foo.il");
+    // A leading dot is the LAST dot too (".dll" -> "") -- and an empty
+    // name makes Path.Combine return the directory itself, so the
+    // extension lands directly on it.
+    EXPECT_EQ(Cmd::OutputFilePath(dir, ".dll", ".list.txt"),
+        dir + ".list.txt");
+    // The directory parts of the input path are stripped (both
+    // separators, the input as given).
+    EXPECT_EQ(Cmd::OutputFilePath(dir,
+        "C:\\build\\dir\\tiny.netmodule", ".list.txt"),
+        dir + kSep + "tiny.list.txt");
+    EXPECT_EQ(Cmd::OutputFilePath(dir, "../../out/tiny.exe", ".resources.txt"),
+        dir + kSep + "tiny.resources.txt");
+    // A directory already ending in a separator joins without another.
+    EXPECT_EQ(Cmd::OutputFilePath(dir + kSep, "mscorlib.dll", ".il"),
+        dir + kSep + "mscorlib.il");
+    // A bare drive is not a terminating separator (Path.Combine("C:",
+    // "x") is "C:\\x" -- .NET inserts the separator).
+    EXPECT_EQ(Cmd::OutputFilePath("C:", "mscorlib.dll", ".il"),
+        std::string("C:") + kSep + "mscorlib.il");
+}
+
+// File.CreateText + the finally output.Close(): the file receives the
+// rendered bytes verbatim -- UTF-8 WITHOUT a BOM (the first byte is the
+// content's own), the CRLF text intact, and an existing file is
+// truncated by the create (File.CreateText truncates).
+TEST(IlspyCmdProgramTest, WriteOutputFileWritesBytesVerbatim)
+{
+    fs::path dir = TempDir("writeoutput");
+    fs::path file = dir / "tiny.list.txt";
+    // Pre-existing longer content: the create must truncate it.
+    {
+        std::ofstream f(file, std::ios::binary | std::ios::trunc);
+        f << "OLD CONTENT THAT MUST GO AWAY - LONGER THAN THE NEW WRITE";
+    }
+    Cmd::WriteOutputFile(file.string(), "Class <Module>\r\nClass Tiny\r\n");
+    std::string read = ReadFileBytes(file);
+    EXPECT_EQ(read, "Class <Module>\r\nClass Tiny\r\n");
+    EXPECT_EQ(read.size(), 28);  // no BOM, no added newline
+    // A second write truncates again (CreateText, not AppendText).
+    Cmd::WriteOutputFile(file.string(), "x");
+    EXPECT_EQ(ReadFileBytes(file), "x");
+}
+
+// The File.CreateText failure arm: a path whose directory does not exist
+// throws (the C# IOException escaping to the OnExecuteAsync global catch
+// with EX_SOFTWARE; the port renders the message, no stack trace).
+TEST(IlspyCmdProgramTest, WriteOutputFileMissingDirectoryThrows)
+{
+    fs::path dir = TempDir("writefail");
+    fs::path nowhere = dir / "no" / "such" / "dir" / "tiny.il";
+    EXPECT_THROW(
+        Cmd::WriteOutputFile(nowhere.string(), "data"),
+        std::runtime_error);
+}
+
+// The whole -l -o flow over the tiny.netmodule fixture: the render into
+// the buffer, the output-file path composed from the input path, the
+// write, and the read-back equals the byte-exact gold render (the same
+// bytes the real tool writes to <dir>\tiny.list.txt).
+TEST(IlspyCmdProgramTest, ListContentOutputFileRoundTrip)
+{
+    std::string tiny = ::WriteTinyNetModule();
+    ASSERT_FALSE(tiny.empty());
+    std::ostringstream output;
+    EXPECT_EQ(Cmd::ListContent(tiny, output, {TypeKind::Class}), 0);
+    fs::path dir = TempDir("roundtrip");
+    std::string path = Cmd::OutputFilePath(dir.string(), tiny, ".list.txt");
+    Cmd::WriteOutputFile(path, output.str());
+    // The composed name takes the fixture's base name
+    // (ilspy_tiny_test.netmodule).
+    EXPECT_EQ(fs::path(path).filename().string(), "ilspy_tiny_test.list.txt");
+    EXPECT_EQ(ReadFileBytes(path), "Class <Module>\r\nClass Tiny\r\n");
+}
+
+// A non-ASCII -o value: ResolveOutputDirectory must keep the UTF-8
+// spelling -- fs::path::string() transcodes through the ANSI code page,
+// which mangles the name on some systems and THROWS "No mapping for the
+// Unicode character exists in the target multi-byte code page" when the
+// page cannot represent it (the crash this pins the fix for). The C#
+// composes Unicode paths end to end through System.IO, so the resolved
+// value converted back to the native form is exactly the direct
+// composition.
+TEST(IlspyCmdProgramTest, ResolveOutputDirectoryPreservesNonAsciiNames)
+{
+    // "中文输出" as UTF-8 bytes.
+    std::string name = "\xe4\xb8\xad\xe6\x96\x87\xe8\xbe\x93\xe5\x87\xba";
+    auto resolved = Cmd::ResolveOutputDirectory(name);
+    ASSERT_TRUE(resolved.has_value());
+    fs::path native = Cmd::ToNativePath(*resolved);
+    fs::path expected = (fs::current_path() / Cmd::ToNativePath(name))
+                            .lexically_normal();
+    EXPECT_EQ(native, expected);
+}
+
+// The output-file write into a non-ASCII output directory: the composed
+// UTF-8 path opens the file at the correct (Unicode) name, the bytes
+// verbatim.
+TEST(IlspyCmdProgramTest, WriteOutputFileHandlesNonAsciiDirectory)
+{
+    std::string name = "\xe4\xb8\xad\xe6\x96\x87\xe8\xbe\x93\xe5\x87\xba";  // "中文输出"
+    fs::path base = TempDir("nonascii");
+    fs::path nonAscii = base / Cmd::ToNativePath(name);
+    std::error_code ec;
+    fs::create_directories(nonAscii, ec);
+    ASSERT_FALSE(ec);
+#if defined(_WIN32)
+    const std::string sep = "\\";
+#else
+    const std::string sep = "/";
+#endif
+    std::string utf8Dir = base.string() + sep + name;
+    std::string path = Cmd::OutputFilePath(utf8Dir, "tiny.netmodule", ".list.txt");
+    Cmd::WriteOutputFile(path, "data\r\n");
+    EXPECT_EQ(ReadFileBytes(nonAscii / "tiny.list.txt"), "data\r\n");
 }

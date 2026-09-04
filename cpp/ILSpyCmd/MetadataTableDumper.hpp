@@ -87,6 +87,12 @@ std::string SupportedTableNames();
 // over the supported set. False for anything else.
 bool TryParseTableName(const std::string& name, Metadata::CorTableIndex& table);
 
+// The table's enum name ("Module", "TypeDef", ...) -- the C#
+// `table.ToString()` (the supported ids all carry named members). The CLI's
+// -o branch composes the output file name from it: `<name>.<table>.txt` /
+// `.json` (the C# `$".{table}.{...}"` interpolation).
+const char* TableName(Metadata::CorTableIndex table);
+
 // The C# `DumpTable(string assemblyFileName, TextWriter output, TableIndex
 // table, bool asJson)`: the row loads plus the aligned console table
 // (asJson false) or the JSON document (asJson true), returning 0. An invalid

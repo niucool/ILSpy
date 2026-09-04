@@ -35,6 +35,7 @@
 
 #include <array>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 
 namespace {
@@ -389,4 +390,34 @@ TEST(MetadataTableDumperTest, DumpTableInvalidFileDegrades) {
         CorTableIndex::TypeDef, false);
     EXPECT_EQ(rc, 0);
     EXPECT_EQ(buffer.str(), "0 rows\r\n");
+}
+
+// TableName: the `table.ToString()` spelling the -o file name composes
+// from (`<name>.{table}.{txt|json}`) -- the ECMA member names, case-
+// sensitive, and the throw for an id with no named member (the C#
+// ToString of an undefined enum value would render the decimal; every
+// supported parse maps onto a named member, so the port's load-bearing
+// surface is the named spellings).
+TEST(MetadataTableDumperTest, TableNameSpellsTheTableIndexToString) {
+    EXPECT_STREQ(Cmd::TableName(CorTableIndex::Module), "Module");
+    EXPECT_STREQ(Cmd::TableName(CorTableIndex::TypeDef), "TypeDef");
+    EXPECT_STREQ(Cmd::TableName(CorTableIndex::MethodSemantics), "MethodSemantics");
+    EXPECT_STREQ(Cmd::TableName(CorTableIndex::ManifestResource), "ManifestResource");
+    EXPECT_STREQ(Cmd::TableName(CorTableIndex::GenericParamConstraint),
+        "GenericParamConstraint");
+    // An alias parse resolves to the member's own spelling (the enum value,
+    // not the input text, names the file).
+    CorTableIndex table;
+    ASSERT_TRUE(Cmd::TryParseTableName("typedef", table));
+    EXPECT_STREQ(Cmd::TableName(table), "TypeDef");
+    ASSERT_TRUE(Cmd::TryParseTableName("0x02", table));
+    EXPECT_STREQ(Cmd::TableName(table), "TypeDef");
+    // The -o file-name composition the CLI's dump-table branch builds.
+    EXPECT_EQ(std::string(".") + Cmd::TableName(table) + ".txt", ".TypeDef.txt");
+    EXPECT_EQ(std::string(".") + Cmd::TableName(table) + ".json", ".TypeDef.json");
+    // An id with no named member throws (unreachable through the CLI's
+    // TryParseTableName gate).
+    EXPECT_THROW(
+        Cmd::TableName(static_cast<CorTableIndex>(0x1E)),
+        std::logic_error);
 }
