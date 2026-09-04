@@ -24,6 +24,7 @@ add_executable(ilspy_tests
     Decompiler/Metadata/MetadataGenericContext_Test.cpp
     Decompiler/Metadata/MetadataExtensions_Test.cpp
     Decompiler/Metadata/SRMExtensions_Test.cpp
+    Decompiler/Metadata/AssemblyNameReference_Test.cpp
     Decompiler/Metadata/PortablePdb_Test.cpp
     Decompiler/Metadata/DebugDirectory_Test.cpp
     Decompiler/Metadata/AssociatedPortablePdb_Test.cpp
@@ -52,6 +53,7 @@ add_executable(ilspy_tests
     BamlDecompiler/XamlPathDeserializer_Test.cpp
     BamlDecompiler/XamlUtils_Test.cpp
     Decompiler/TypeSystem/TypeName_Test.cpp
+    Decompiler/TypeSystem/Version_Test.cpp
     Decompiler/TypeSystem/SignatureDecoder_Test.cpp
     Decompiler/TypeSystem/TypeKindDerivation_Test.cpp
     Decompiler/TypeSystem/TypeUtils_Test.cpp

@@ -26,11 +26,21 @@
 // per-arity constructors, the field-wise equality, and the `ToString` shape that
 // mirrors `System.Version.ToString` ("Major.Minor" with ".Build"/".Revision"
 // appended when each is specified).
+//
+// The `VersionStringCtor` / `VersionToStringFieldCount` suites below cover the
+// two members `Metadata::AssemblyNameReference` consumes (the `Version.cpp`
+// pair): the `System.Version(String)` ctor -- two to four `.`-separated
+// components, each parsed with the .NET number-parser `NumberStyles.Integer`
+// shape (leading/trailing whitespace and an optional sign), with the exact
+// exception messages -- and the `ToString(int fieldCount)` render with its
+// bounds checks. Every expectation was dumped from the real .NET 10 runtime
+// (the C:\temp-probe\AnrProbe matrix).
 
 #include "Decompiler/TypeSystem/Version.hpp"
 
 #include <gtest/gtest.h>
 
+#include <stdexcept>
 #include <string>
 
 namespace TS = ILSpy::Decompiler::TypeSystem;
@@ -139,4 +149,190 @@ TEST(VersionTest, ToStringIncludesBuildAndRevisionWhenBothSpecified)
 {
     EXPECT_EQ(TS::Version(1, 2, 3, 4).ToString(), "1.2.3.4");
     EXPECT_EQ(TS::Version(2, 0, 1, 9).ToString(), "2.0.1.9");
+}
+
+// ---------------------------------------------------------------------------
+// `Version(String)` parses "major.minor[.build[.revision]]" -- two to four
+// `.`-separated components.
+// ---------------------------------------------------------------------------
+TEST(VersionStringCtor, ParsesTwoToFourComponents)
+{
+    EXPECT_EQ(TS::Version("4.0.0.0"), TS::Version(4, 0, 0, 0));
+    EXPECT_EQ(TS::Version("1.2"), TS::Version(1, 2));
+    EXPECT_EQ(TS::Version("1.2.3"), TS::Version(1, 2, 3));
+    EXPECT_EQ(TS::Version("1.2.3.4"), TS::Version(1, 2, 3, 4));
+    // Unspecified components are -1.
+    EXPECT_EQ(TS::Version("1.2").Build, -1);
+    EXPECT_EQ(TS::Version("1.2").Revision, -1);
+    EXPECT_EQ(TS::Version("1.2.3").Revision, -1);
+}
+
+// ---------------------------------------------------------------------------
+// Each component is parsed with the .NET number-parser `NumberStyles.Integer`
+// shape: leading/trailing whitespace and an optional sign per component (a
+// negative zero parses as 0 and passes the non-negative check).
+// ---------------------------------------------------------------------------
+TEST(VersionStringCtor, ToleratesWhitespaceAndSignsPerComponent)
+{
+    EXPECT_EQ(TS::Version(" 1.0"), TS::Version(1, 0));
+    EXPECT_EQ(TS::Version("1.0 "), TS::Version(1, 0));
+    EXPECT_EQ(TS::Version("1 .0"), TS::Version(1, 0));
+    EXPECT_EQ(TS::Version("1. +0"), TS::Version(1, 0));
+    EXPECT_EQ(TS::Version("+1.0.0.0"), TS::Version(1, 0, 0, 0));
+    EXPECT_EQ(TS::Version("-0.1"), TS::Version(0, 1));
+    // Leading zeros fold away.
+    EXPECT_EQ(TS::Version("01.02.03.04"), TS::Version(1, 2, 3, 4));
+}
+
+// ---------------------------------------------------------------------------
+// Fewer than two or more than four components is the "too short or too long"
+// ArgumentException -- including a single non-numeric token, which splits to
+// one component before any digit is examined.
+// ---------------------------------------------------------------------------
+TEST(VersionStringCtor, RejectsWrongComponentCounts)
+{
+    try {
+        TS::Version("1");
+        FAIL() << "expected throw";
+    } catch (const std::invalid_argument& ex) {
+        EXPECT_STREQ(ex.what(),
+            "Version string portion was too short or too long. (Parameter 'input')");
+    }
+    try {
+        TS::Version("1.2.3.4.5");
+        FAIL() << "expected throw";
+    } catch (const std::invalid_argument& ex) {
+        EXPECT_STREQ(ex.what(),
+            "Version string portion was too short or too long. (Parameter 'input')");
+    }
+    try {
+        TS::Version("abc");
+        FAIL() << "expected throw";
+    } catch (const std::invalid_argument& ex) {
+        EXPECT_STREQ(ex.what(),
+            "Version string portion was too short or too long. (Parameter 'input')");
+    }
+    try {
+        TS::Version(std::string{});
+        FAIL() << "expected throw";
+    } catch (const std::invalid_argument& ex) {
+        EXPECT_STREQ(ex.what(),
+            "Version string portion was too short or too long. (Parameter 'input')");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A non-numeric component quotes the RAW component in the FormatException
+// message; a component above int32 is the OverflowException; a negative
+// component is the ThrowIfNegative ArgumentOutOfRangeException naming the
+// component ("input" for major/minor, "build", "revision") and appending the
+// actual value on a second line.
+// ---------------------------------------------------------------------------
+TEST(VersionStringCtor, RejectsBadComponents)
+{
+    try {
+        TS::Version("1..2");
+        FAIL() << "expected throw";
+    } catch (const std::invalid_argument& ex) {
+        EXPECT_STREQ(ex.what(), "The input string '' was not in a correct format.");
+    }
+    try {
+        TS::Version("1.x.3");
+        FAIL() << "expected throw";
+    } catch (const std::invalid_argument& ex) {
+        EXPECT_STREQ(ex.what(), "The input string 'x' was not in a correct format.");
+    }
+    try {
+        TS::Version("2147483648.0");
+        FAIL() << "expected throw";
+    } catch (const std::out_of_range& ex) {
+        EXPECT_STREQ(ex.what(), "Value was either too large or too small for an Int32.");
+    }
+    try {
+        TS::Version("-1.0");
+        FAIL() << "expected throw";
+    } catch (const std::out_of_range& ex) {
+        EXPECT_STREQ(ex.what(),
+            "input ('-1') must be a non-negative value. (Parameter 'input')\n"
+            "Actual value was -1.");
+    }
+    try {
+        TS::Version("1.0.-2");
+        FAIL() << "expected throw";
+    } catch (const std::out_of_range& ex) {
+        EXPECT_STREQ(ex.what(),
+            "build ('-2') must be a non-negative value. (Parameter 'build')\n"
+            "Actual value was -2.");
+    }
+    try {
+        TS::Version("1.0.0.-3");
+        FAIL() << "expected throw";
+    } catch (const std::out_of_range& ex) {
+        EXPECT_STREQ(ex.what(),
+            "revision ('-3') must be a non-negative value. (Parameter 'revision')\n"
+            "Actual value was -3.");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `ToString(fieldCount)` renders exactly that many components joined with '.'.
+// ---------------------------------------------------------------------------
+TEST(VersionToStringFieldCount, RendersTheRequestedComponentCount)
+{
+    TS::Version v(0, 0, 0, 0);
+    EXPECT_EQ(v.ToString(0), "");
+    EXPECT_EQ(v.ToString(1), "0");
+    EXPECT_EQ(v.ToString(2), "0.0");
+    EXPECT_EQ(v.ToString(3), "0.0.0");
+    EXPECT_EQ(v.ToString(4), "0.0.0.0");
+}
+
+// ---------------------------------------------------------------------------
+// `ToString(fieldCount)` bounds: outside [0, 4] throws "between 0 and 4"; a
+// count beyond the specified components throws with the specified bound (2
+// when Build is unspecified, 3 when Revision is).
+// ---------------------------------------------------------------------------
+TEST(VersionToStringFieldCount, BoundsChecks)
+{
+    TS::Version v(0, 0, 0, 0);
+    try {
+        v.ToString(-1);
+        FAIL() << "expected throw";
+    } catch (const std::invalid_argument& ex) {
+        EXPECT_STREQ(ex.what(), "Argument must be between 0 and 4. (Parameter 'fieldCount')");
+    }
+    try {
+        v.ToString(5);
+        FAIL() << "expected throw";
+    } catch (const std::invalid_argument& ex) {
+        EXPECT_STREQ(ex.what(), "Argument must be between 0 and 4. (Parameter 'fieldCount')");
+    }
+    try {
+        TS::Version(1, 2).ToString(3);
+        FAIL() << "expected throw";
+    } catch (const std::invalid_argument& ex) {
+        EXPECT_STREQ(ex.what(), "Argument must be between 0 and 2. (Parameter 'fieldCount')");
+    }
+    try {
+        TS::Version(1, 2).ToString(4);
+        FAIL() << "expected throw";
+    } catch (const std::invalid_argument& ex) {
+        EXPECT_STREQ(ex.what(), "Argument must be between 0 and 2. (Parameter 'fieldCount')");
+    }
+    try {
+        TS::Version(1, 2, 3).ToString(4);
+        FAIL() << "expected throw";
+    } catch (const std::invalid_argument& ex) {
+        EXPECT_STREQ(ex.what(), "Argument must be between 0 and 3. (Parameter 'fieldCount')");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The parameterless `ToString()` keeps its DefaultFormatFieldCount form.
+// ---------------------------------------------------------------------------
+TEST(VersionToStringFieldCount, DefaultToStringUnchanged)
+{
+    EXPECT_EQ(TS::Version(1, 2).ToString(), "1.2");
+    EXPECT_EQ(TS::Version(1, 2, 3).ToString(), "1.2.3");
+    EXPECT_EQ(TS::Version(1, 2, 3, 4).ToString(), "1.2.3.4");
 }

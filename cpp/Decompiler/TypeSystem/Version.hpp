@@ -27,6 +27,13 @@
 // ".Revision" appended when each is specified). The decompiler's one consumer of
 // the string form is `MetadataModule` formatting `assembly.Version.ToString()`
 // into an `[AssemblyVersion]` attribute.
+//
+// The string ctor (`System.Version(String)`) and the `ToString(int fieldCount)`
+// render land for `Metadata::AssemblyNameReference` (the Parse/FullName pair over
+// assembly full names): the ctor parses the `"Version=..."` component and
+// `FullName` renders `ToString(fieldCount: 4)`. Both are implemented in
+// `Version.cpp` with the exact `System.Version` semantics (decompiled from the
+// .NET 10 runtime: `ParseVersion`/`TryParseComponent`/`TryFormatCore`).
 
 #pragma once
 
@@ -45,6 +52,21 @@ struct Version {
     Version(int major, int minor, int build) : Major(major), Minor(minor), Build(build) {}
     Version(int major, int minor, int build, int revision)
         : Major(major), Minor(minor), Build(build), Revision(revision) {}
+
+    // The `System.Version(String)` ctor: parses "major.minor[.build[.revision]]" --
+    // two to four `.`-separated components, each with the .NET 10 number-parser
+    // `NumberStyles.Integer` shape (leading/trailing whitespace and an optional
+    // `+`/`-` sign per component). The exact exception contract (decompiled from
+    // `System.Version.ParseVersion`):
+    //   * fewer than two or more than four components -> `ArgumentException`
+    //     ("Version string portion was too short or too long. (Parameter 'input')")
+    //   * a non-numeric component -> `FormatException`
+    //     ("The input string '<component>' was not in a correct format.")
+    //   * a component outside int32 -> `OverflowException`
+    //   * a negative component -> `ArgumentOutOfRangeException`
+    // (ported to the `std::invalid_argument` / `std::out_of_range` family with
+    // the exact messages; see `Version.cpp`).
+    explicit Version(const std::string& version);
 
     bool operator==(const Version& o) const noexcept {
         return Major == o.Major && Minor == o.Minor &&
@@ -70,6 +92,15 @@ struct Version {
         }
         return r;
     }
+
+    // The `System.Version.ToString(int fieldCount)` render: exactly `fieldCount`
+    // components joined with '.'. `fieldCount` outside [0, 4], or beyond the
+    // components this instance specifies (`Build`/`Revision` == -1), throws the
+    // `ArgumentException` the .NET `TryFormatCore` does --
+    // "Argument must be between 0 and 4/3/2. (Parameter 'fieldCount')" -- which
+    // `AssemblyNameReference.FullName` surfaces for a parsed name carrying a
+    // partial version (see `Version.cpp`).
+    std::string ToString(int fieldCount) const;
 };
 
 } // namespace ILSpy::Decompiler::TypeSystem

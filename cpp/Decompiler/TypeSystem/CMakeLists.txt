@@ -6,6 +6,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/KnownTypeCode.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/TopLevelTypeName.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/FullTypeName.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Version.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/IType.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/TypeKindDerivation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/TypeVisitor.cpp
