@@ -1279,6 +1279,80 @@ std::vector<std::string> MetadataFile::GetParameterNames(std::uint32_t methodTok
     return result;
 }
 
+std::vector<ParameterInfo> MetadataFile::GetParameters(std::uint32_t methodToken) const {
+    std::vector<ParameterInfo> result;
+    if (!IsValid()) return result;
+    std::uint32_t table = methodToken >> 24;
+    std::uint32_t row = methodToken & 0x00FFFFFFu;
+    if (table != 0x06 || row == 0 || row > impl_->db->MethodDef.size()) return result;
+    try {
+        auto& db = *impl_->db;
+        auto m = db.MethodDef[row - 1];
+        auto range = m.ParamList();
+        for (auto it = range.first; it != range.second; ++it) {
+            ParameterInfo info;
+            unsigned paramRow = (unsigned)it.index() + 1;  // 1-based
+            info.Token = 0x08000000u | paramRow;
+            info.SequenceNumber = db.Param.get_value<std::uint16_t>(paramRow - 1, 1);
+            // The 2-byte Flags column widened to uint32 (the BCL enum read).
+            info.Attributes = db.Param.get_value<std::uint16_t>(paramRow - 1, 0);
+            info.Name = std::string(db.Param[paramRow - 1].Name());
+            // The marshalling descriptor: the FieldMarshal row whose
+            // HasFieldMarshal coded index (Field tag 0, Param tag 1 --
+            // 1 tag bit) points at this row. The C# p.GetMarshallingDescriptor()
+            // IsNil test ports to the row's absence.
+            std::uint32_t want = (paramRow << 1) | 1;
+            for (unsigned j = 0; j < db.FieldMarshal.size(); ++j) {
+                if (db.FieldMarshal.get_value<std::uint32_t>(j, 0) == want) {
+                    auto blob = db.get_blob(
+                        db.FieldMarshal.get_value<std::uint32_t>(j, 1));
+                    info.MarshallingDescriptor = std::vector<std::uint8_t>(
+                        blob.begin(), blob.end());
+                    break;
+                }
+            }
+            result.push_back(std::move(info));
+        }
+    } catch (const std::exception&) {
+        // Best-effort: a malformed row leaves the result short.
+    }
+    return result;
+}
+
+std::optional<ConstantInfo> MetadataFile::GetConstant(std::uint32_t parentToken) const {
+    if (!IsValid()) return std::nullopt;
+    std::uint32_t table = parentToken >> 24;
+    std::uint32_t row = parentToken & 0x00FFFFFFu;
+    std::uint32_t tag;
+    switch (table) {
+        case 0x04: tag = 0; break;  // Field
+        case 0x08: tag = 1; break;  // Param
+        case 0x17: tag = 2; break;  // Property
+        default: return std::nullopt;
+    }
+    if (row == 0) return std::nullopt;
+    try {
+        auto& db = *impl_->db;
+        // The HasConstant coded index: 2 tag bits, 1-based row.
+        std::uint32_t want = (row << 2) | tag;
+        for (std::uint32_t i = 0; i < db.Constant.size(); ++i) {
+            if (db.Constant.get_value<std::uint32_t>(i, 1) != want) continue;
+            ConstantInfo info;
+            info.Token = 0x0B000000u | (i + 1);
+            // The Type column is physically 2 bytes; SRM's TypeCode reads
+            // the byte at offset 0 (the low byte).
+            info.TypeCode = static_cast<std::uint8_t>(
+                db.Constant.get_value<std::uint16_t>(i, 0) & 0xFFu);
+            auto blob = db.get_blob(db.Constant.get_value<std::uint32_t>(i, 2));
+            info.Value.assign(blob.begin(), blob.end());
+            return info;
+        }
+    } catch (const std::exception&) {
+        // Malformed image: report no constant.
+    }
+    return std::nullopt;
+}
+
 std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> MetadataFile::GetLocalTypes(std::uint32_t localVarSigToken,
                                                                                  std::uint32_t ownerMethodToken) const {
     std::vector<ILSpy::Decompiler::TypeSystem::ITypePtr> result;

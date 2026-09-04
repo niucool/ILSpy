@@ -109,6 +109,42 @@ struct EventInfo {
     std::uint32_t Token;   // table 0x14
 };
 
+// A Param table row (table 0x08) as the disassembler's WriteParameters
+// consumes it (ReflectionDisassembler.cs lines 1107-1160): the row's own
+// token (the WriteParameterAttributes `.param` coded parent and the
+// local-reference identity), the Sequence column (0 = the return-value
+// row, 1.. the declared parameters -- the C# writeParameters skip), the raw
+// Flags column (the System.Reflection ParameterAttributes bits: In 0x1,
+// Out 0x2, Optional 0x10, HasDefault 0x1000, HasFieldMarshal 0x2000), the
+// authored Name ("" for a nil Name column -- SRM GetString(nil) is the
+// empty string), and the row's FieldMarshal NativeType blob (nullopt when
+// the param has no marshalling descriptor -- the C# p.GetMarshallingDescriptor()
+// IsNil test).
+struct ParameterInfo {
+    std::uint32_t Token = 0;           // 0x08000000 | row (1-based)
+    std::uint16_t SequenceNumber = 0; // the Sequence column
+    std::uint32_t Attributes = 0;     // the Flags column (ParameterAttributes)
+    std::string Name;                 // "" when the Name column is nil
+    std::optional<std::vector<std::uint8_t>> MarshallingDescriptor;
+};
+
+// A Constant table row (table 0x0B): the II.23.2 constant a Field (0x04),
+// Param (0x08), or Property (0x17) row's DefaultValue resolves to. The C#
+// reads it as `metadata.GetConstant(row.GetDefaultValue())`; the port
+// fuses the HasConstant coded-index lookup into the read, keyed by the
+// parent row's token. TypeCode is the LOW byte of the Type column (the
+// SRM ConstantTableReader.GetType PeekByte at the column's offset 0; the
+// column is physically 2 bytes wide -- see Ecma335/winmd's
+// Constant.set_columns(2, ...)). The repo's pinned SRM (10.0.10) spells
+// ConstantTypeCode.NullReference at the ELEMENT_TYPE_CLASS slot 0x12
+// (ECMA's null-constant encoding), so a raw 0x12 constant renders as
+// "nullref" and the old 0x18/0x1C spellings are invalid codes.
+struct ConstantInfo {
+    std::uint32_t Token = 0;         // 0x0B000000 | row (1-based)
+    std::uint8_t TypeCode = 0;       // the Type column's low byte
+    std::vector<std::uint8_t> Value; // the raw value-blob bytes
+};
+
 // A GenericParam row (table 0x2A): its metadata token, the ECMA Number column
 // (the parameter's authored zero-based position -- SRM's GenericParameter.Index,
 // which the disassembler's WriteTypeParameter nil-name fallback reads), and the
@@ -210,6 +246,23 @@ public:
     // vector may be shorter than the parameter count or hold empty strings for
     // parameters that have no Param row.
     std::vector<std::string> GetParameterNames(std::uint32_t methodToken) const;
+
+    // The Param table rows (table 0x08) of a MethodDef (0x06) token, in table
+    // order (the MethodDef.ParamList range; the sequence-0 return-value row
+    // included -- the WriteParameters skip owns that rule). Empty for an
+    // invalid file, an out-of-range row, a nil row, or a non-MethodDef token;
+    // never throws.
+    std::vector<ParameterInfo> GetParameters(std::uint32_t methodToken) const;
+
+    // The Constant table row (table 0x0B) a Field (0x04), Param (0x08), or
+    // Property (0x17) token's DefaultValue resolves to -- the C#
+    // metadata.GetConstant(row.GetDefaultValue()) pair fused into one read
+    // (the HasConstant coded-index scan of the Constant table's Parent
+    // column; mscorlib keeps the table sorted by Parent but the scan does
+    // not rely on it). nullopt for an invalid file, a nil/out-of-range row, a
+    // token from any other table, or a parent without a constant row; never
+    // throws.
+    std::optional<ConstantInfo> GetConstant(std::uint32_t parentToken) const;
 
     // Decode a user-string token (table 0x70, the #US heap) to its text.
     // Returns an empty string if the heap is absent or the offset is bad.

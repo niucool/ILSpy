@@ -241,6 +241,40 @@ inline PropertyAttributes operator~(PropertyAttributes a) {
 }
 
 // ---------------------------------------------------------------------------
+// ParameterAttributes (the System.Reflection flags over the Param table's
+// Flags column, ECMA-335 II.23.1 "Flags for params"). The C#
+// ReflectionDisassembler.WriteParameters reads the In/Out/Optional bits for
+// the "[in] "/"[out] "/"[opt] " prefixes (the (p.Attributes & X) == X
+// single-bit tests -- the port masks the raw column value, so these members
+// are documentation here; WriteParameterAttributes reads HasDefault the
+// same way). The BCL declares Default as an alias of HasDefault and both
+// spellings of the unused tail.
+// ---------------------------------------------------------------------------
+enum class ParameterAttributes : std::int32_t {
+	None = 0x0000,
+	In = 0x0001,         // "[in] "
+	Out = 0x0002,        // "[out] "
+	Optional = 0x0010,   // "[opt] "
+	Default = 0x1000,    // the BCL alias
+	HasDefault = 0x1000,
+	HasFieldMarshal = 0x2000,
+	Unused = 0xcfe0,
+};
+
+inline ParameterAttributes operator|(ParameterAttributes a, ParameterAttributes b) {
+	return static_cast<ParameterAttributes>(static_cast<std::int32_t>(a) | static_cast<std::int32_t>(b));
+}
+inline ParameterAttributes operator&(ParameterAttributes a, ParameterAttributes b) {
+	return static_cast<ParameterAttributes>(static_cast<std::int32_t>(a) & static_cast<std::int32_t>(b));
+}
+inline ParameterAttributes operator^(ParameterAttributes a, ParameterAttributes b) {
+	return static_cast<ParameterAttributes>(static_cast<std::int32_t>(a) ^ static_cast<std::int32_t>(b));
+}
+inline ParameterAttributes operator~(ParameterAttributes a) {
+	return static_cast<ParameterAttributes>(~static_cast<std::int32_t>(a));
+}
+
+// ---------------------------------------------------------------------------
 // EventAttributes (ECMA-335 II.23.1 "Flags for events"). The whole value feeds
 // the eventAttributes table (WriteFlags, no mask split). The BCL declares
 // ReservedMask ahead of RTSpecialName (both 0x0400 -- the only aliased pair).

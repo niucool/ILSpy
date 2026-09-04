@@ -22,12 +22,20 @@
 #include "Decompiler/Disassembler/ReflectionDisassembler.hpp"
 
 #include "Decompiler/Disassembler/DisassemblerHelpers.hpp"
+#include "Decompiler/Disassembler/ReflectionAttributes.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Output/ITextOutput.hpp"
+#include "Decompiler/Util/Utf.hpp"
 
+#include <any>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace ILSpy::Decompiler::Disassembler {
 
@@ -124,6 +132,155 @@ std::string ReadSerializedString(const std::uint8_t* base, std::size_t size,
 }
 
 constexpr const char* kGuidEmpty = "00000000-0000-0000-0000-000000000000";
+
+// The C# `object.GetType().FullName` over a constant value the
+// DisassemblerHelpers.PrimitiveTypeName input reads -- the BCL type name of
+// the value SRM's ReadConstant handed back (System.Int32 &c.). The empty
+// any is the C# null the WriteConstant value-is-string test then crashes on
+// (the NullReferenceException path -- unreachable through WriteConstant,
+// whose NullReference arm returns before reading a value); the port keeps
+// it loud, a std::runtime_error.
+std::string_view ValueFullName(const std::any& value)
+{
+    if (std::any_cast<bool>(&value)) return "System.Boolean";
+    if (std::any_cast<char16_t>(&value)) return "System.Char";
+    if (std::any_cast<std::int8_t>(&value)) return "System.SByte";
+    if (std::any_cast<std::uint8_t>(&value)) return "System.Byte";
+    if (std::any_cast<std::int16_t>(&value)) return "System.Int16";
+    if (std::any_cast<std::uint16_t>(&value)) return "System.UInt16";
+    if (std::any_cast<std::int32_t>(&value)) return "System.Int32";
+    if (std::any_cast<std::uint32_t>(&value)) return "System.UInt32";
+    if (std::any_cast<std::int64_t>(&value)) return "System.Int64";
+    if (std::any_cast<std::uint64_t>(&value)) return "System.UInt64";
+    if (std::any_cast<float>(&value)) return "System.Single";
+    if (std::any_cast<double>(&value)) return "System.Double";
+    throw std::runtime_error("constant value is null");
+}
+
+// The SRM `BlobReader.ReadConstant(ConstantTypeCode)` over the constant's
+// value blob (the .NET 10 System.Reflection.Metadata the repo pins):
+// the little-endian numeric reads, the Boolean's nonzero test, the whole
+// remaining blob as UTF-16 for String (an odd trailing byte drops --
+// ReadUTF16 takes byteCount/2 chars), and the uint32-zero check for the
+// NullReference code (a nonzero payload is the C# BadImageFormatException;
+// unreachable through WriteConstant, which never passes 0x12 here -- kept
+// distinct from the out-of-range throws so the caller's catch does not
+// swallow it). Unknown codes and reads past the end of the blob throw
+// std::out_of_range (the C# ArgumentOutOfRangeException).
+std::any ReadConstantValue(std::uint8_t typeCode, const std::uint8_t* base,
+    std::size_t size)
+{
+    auto need = [&](std::size_t n) {
+        if (n > size) {
+            throw std::out_of_range("constant blob read past end");
+        }
+    };
+    switch (typeCode) {
+        case 0x02: {  // Boolean
+            need(1);
+            return std::any{static_cast<bool>(base[0] != 0)};
+        }
+        case 0x03: {  // Char
+            need(2);
+            return std::any{static_cast<char16_t>(
+                static_cast<std::uint16_t>(base[0])
+                | (static_cast<std::uint16_t>(base[1]) << 8))};
+        }
+        case 0x04: {  // SByte
+            need(1);
+            return std::any{static_cast<std::int8_t>(base[0])};
+        }
+        case 0x05: {  // Byte
+            need(1);
+            return std::any{static_cast<std::uint8_t>(base[0])};
+        }
+        case 0x06: {  // Int16
+            need(2);
+            return std::any{static_cast<std::int16_t>(
+                static_cast<std::uint16_t>(base[0])
+                | (static_cast<std::uint16_t>(base[1]) << 8))};
+        }
+        case 0x07: {  // UInt16
+            need(2);
+            return std::any{static_cast<std::uint16_t>(
+                static_cast<std::uint16_t>(base[0])
+                | (static_cast<std::uint16_t>(base[1]) << 8))};
+        }
+        case 0x08: {  // Int32
+            need(4);
+            std::uint32_t v = static_cast<std::uint32_t>(base[0])
+                | (static_cast<std::uint32_t>(base[1]) << 8)
+                | (static_cast<std::uint32_t>(base[2]) << 16)
+                | (static_cast<std::uint32_t>(base[3]) << 24);
+            return std::any{static_cast<std::int32_t>(v)};
+        }
+        case 0x09: {  // UInt32
+            need(4);
+            return std::any{static_cast<std::uint32_t>(base[0])
+                | (static_cast<std::uint32_t>(base[1]) << 8)
+                | (static_cast<std::uint32_t>(base[2]) << 16)
+                | (static_cast<std::uint32_t>(base[3]) << 24)};
+        }
+        case 0x0A: {  // Int64
+            need(8);
+            std::uint64_t v = 0;
+            for (int i = 7; i >= 0; --i)
+                v = (v << 8) | static_cast<std::uint64_t>(base[i]);
+            return std::any{static_cast<std::int64_t>(v)};
+        }
+        case 0x0B: {  // UInt64
+            need(8);
+            std::uint64_t v = 0;
+            for (int i = 7; i >= 0; --i)
+                v = (v << 8) | static_cast<std::uint64_t>(base[i]);
+            return std::any{v};
+        }
+        case 0x0C: {  // Single
+            need(4);
+            std::uint32_t bits = static_cast<std::uint32_t>(base[0])
+                | (static_cast<std::uint32_t>(base[1]) << 8)
+                | (static_cast<std::uint32_t>(base[2]) << 16)
+                | (static_cast<std::uint32_t>(base[3]) << 24);
+            float f;
+            std::memcpy(&f, &bits, sizeof(f));
+            return std::any{f};
+        }
+        case 0x0D: {  // Double
+            need(8);
+            std::uint64_t bits = 0;
+            for (int i = 7; i >= 0; --i)
+                bits = (bits << 8) | static_cast<std::uint64_t>(base[i]);
+            double d;
+            std::memcpy(&d, &bits, sizeof(d));
+            return std::any{d};
+        }
+        case 0x0E: {  // String: the remaining blob as UTF-16.
+            std::size_t chars = size / 2;
+            std::u16string utf16(chars, u'\0');
+            for (std::size_t i = 0; i < chars; ++i) {
+                utf16[i] = static_cast<char16_t>(
+                    static_cast<std::uint16_t>(base[2 * i])
+                    | (static_cast<std::uint16_t>(base[2 * i + 1]) << 8));
+            }
+            return std::any{Util::Utf16ToUtf8(utf16)};
+        }
+        case 0x12: {  // NullReference (the ELEMENT_TYPE_CLASS slot)
+            need(4);
+            std::uint32_t v = static_cast<std::uint32_t>(base[0])
+                | (static_cast<std::uint32_t>(base[1]) << 8)
+                | (static_cast<std::uint32_t>(base[2]) << 16)
+                | (static_cast<std::uint32_t>(base[3]) << 24);
+            if (v != 0) {
+                // The C# BadImageFormatException -- NOT the
+                // ArgumentOutOfRangeException the WriteConstant catch takes.
+                throw std::runtime_error("invalid constant value");
+            }
+            return std::any{};  // the C# null
+        }
+        default:
+            throw std::out_of_range("invalid constant type code");
+    }
+}
 
 // The C# `new Guid(string)` + `guid.ToString()` pair over the custom
 // marshaler's GUID string: parse the N/D/B/P forms (leading and trailing
@@ -598,6 +755,166 @@ void ReflectionDisassembler::WriteNativeType(const std::uint8_t* base,
             output_.Write(std::to_string(type));
             break;
     }
+}
+
+// The C# `void WriteConstant(MetadataReader metadata, Constant constant)`
+// (ReflectionDisassembler.cs lines 1220-1268). See the header.
+void ReflectionDisassembler::WriteConstant(const Metadata::ConstantInfo& constant)
+{
+    switch (constant.TypeCode) {
+        case 0x12:  // ConstantTypeCode.NullReference (the raw ELEMENT_TYPE_CLASS
+                    // slot -- the C# arm writes the spelling without reading
+                    // the blob)
+            output_.Write("nullref");
+            break;
+        default: {
+            std::any value;
+            try {
+                value = ReadConstantValue(constant.TypeCode,
+                    constant.Value.data(), constant.Value.size());
+            } catch (const std::out_of_range&) {
+                // The C# ArgumentOutOfRangeException catch: the unknown code
+                // and the too-short blob render the same comment (the C# catch
+                // conflates them; the raw value is the enum's ToString of an
+                // unnamed member -- the decimal number).
+                char buf[64];
+                std::snprintf(buf, sizeof(buf),
+                    "/* Constant with invalid typecode: %u */",
+                    static_cast<unsigned>(constant.TypeCode));
+                output_.Write(buf);
+                return;
+            }
+            if (const auto* s = std::any_cast<std::string>(&value)) {
+                // The C# `value is string`: the quoted escaped literal, no
+                // type wrapper.
+                WriteOperand(output_, std::string_view(*s));
+                break;
+            }
+            // The C# `PrimitiveTypeName(value.GetType().FullName)` (a null
+            // result writes nothing -- the C# ITextOutput.Write(null) no-op;
+            // unreachable for the ReadConstant value set).
+            const char* typeName = PrimitiveTypeName(ValueFullName(value));
+            if (typeName != nullptr) {
+                output_.Write(typeName);
+            }
+            output_.Write('(');
+            if (const auto* cf = std::any_cast<float>(&value)) {
+                // The C# `float.IsNaN || float.IsInfinity` bit-pattern render.
+                if (std::isnan(*cf) || std::isinf(*cf)) {
+                    std::uint32_t bits;
+                    std::memcpy(&bits, cf, sizeof(bits));
+                    char buf[16];
+                    std::snprintf(buf, sizeof(buf), "0x%08x", bits);
+                    output_.Write(buf);
+                } else {
+                    WriteOperand(output_, *cf);
+                }
+            } else if (const auto* cd = std::any_cast<double>(&value)) {
+                // The C# `double.IsNaN || double.IsInfinity` bit-pattern render.
+                if (std::isnan(*cd) || std::isinf(*cd)) {
+                    std::uint64_t bits;
+                    std::memcpy(&bits, cd, sizeof(bits));
+                    char buf[24];
+                    std::snprintf(buf, sizeof(buf), "0x%016llx",
+                        static_cast<unsigned long long>(bits));
+                    output_.Write(buf);
+                } else {
+                    WriteOperand(output_, *cd);
+                }
+            } else {
+                WriteOperand(output_, value);
+            }
+            output_.Write(')');
+            break;
+        }
+    }
+}
+
+// The C# "param_" + index local-reference token (the fresh string object the
+// C# passes as the WriteLocalReference identity) -- the port's reinterpret of
+// the integer (the WriteParameterReference convention).
+const void* ParamReferenceToken(std::size_t index)
+{
+    return reinterpret_cast<const void*>(index);
+}
+
+// The C# `void WriteParameters(MetadataReader metadata,
+// IEnumerable<ParameterHandle> parameters,
+// MethodSignature<Action<ILNameSyntax>> signature)`// (ReflectionDisassembler.cs lines 1107-1160). See the header.
+void ReflectionDisassembler::WriteParameters(
+    const std::vector<Metadata::ParameterInfo>& parameters,
+    const Metadata::MethodSignatureT& signature)
+{
+    // The C# `int i` / `int offset`: the declared-parameter cursor and the
+    // implicit-`this` shift of the "param_N" references (IL index 0 is this).
+    std::size_t i = 0;
+    std::size_t offset = signature.Header.IsInstance() ? 1 : 0;
+
+    for (const auto& p : parameters) {
+        // skip return type parameter handle
+        if (p.SequenceNumber == 0)
+            continue;
+
+        // fill gaps in parameter list
+        while (i + 1 < p.SequenceNumber) {
+            if (i > 0) {
+                output_.Write(',');
+                output_.WriteLine();
+            }
+            signature.ParameterTypes.at(i)(ILNameSyntax::Signature);
+            output_.Write(' ');
+            output_.WriteLocalReference("''", ParamReferenceToken(i + offset),
+                /*isDefinition=*/true);
+            i++;
+        }
+
+        // separator
+        if (i > 0) {
+            output_.Write(',');
+            output_.WriteLine();
+        }
+
+        // print parameter
+        if ((p.Attributes
+                & static_cast<std::uint32_t>(ParameterAttributes::In))
+            == static_cast<std::uint32_t>(ParameterAttributes::In)) {
+            output_.Write("[in] ");
+        }
+        if ((p.Attributes
+                & static_cast<std::uint32_t>(ParameterAttributes::Out))
+            == static_cast<std::uint32_t>(ParameterAttributes::Out)) {
+            output_.Write("[out] ");
+        }
+        if ((p.Attributes
+                & static_cast<std::uint32_t>(ParameterAttributes::Optional))
+            == static_cast<std::uint32_t>(ParameterAttributes::Optional)) {
+            output_.Write("[opt] ");
+        }
+        signature.ParameterTypes.at(i)(ILNameSyntax::Signature);
+        output_.Write(' ');
+        if (p.MarshallingDescriptor.has_value()) {
+            WriteMarshalInfo(p.MarshallingDescriptor->data(),
+                p.MarshallingDescriptor->size());
+        }
+        output_.WriteLocalReference(Escape(p.Name),
+            ParamReferenceToken(i + offset), /*isDefinition=*/true);
+        i++;
+    }
+
+    // add remaining parameter types as unnamed parameters
+    while (i < signature.RequiredParameterCount) {
+        if (i > 0) {
+            output_.Write(',');
+            output_.WriteLine();
+        }
+        signature.ParameterTypes.at(i)(ILNameSyntax::Signature);
+        output_.Write(' ');
+        output_.WriteLocalReference("''", ParamReferenceToken(i + offset),
+            /*isDefinition=*/true);
+        i++;
+    }
+
+    output_.WriteLine();
 }
 
 }  // namespace ILSpy::Decompiler::Disassembler

@@ -27,21 +27,38 @@
 // fixed-array/custom-marshaler shapes over synthetic blobs).
 
 #include "Decompiler/Disassembler/MethodBodyDisassembler.hpp"
+#include "Decompiler/Disassembler/DisassemblerSignatureTypeProvider.hpp"
 #include "Decompiler/Disassembler/ReflectionDisassembler.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/Metadata/MetadataGenericContext.hpp"
+#include "Decompiler/Metadata/SignatureTypeProvider.hpp"
 #include "Decompiler/Output/PlainTextOutput.hpp"
 
 #include <gtest/gtest.h>
 
 #include <cstdint>
 #include <cstring>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace DA = ILSpy::Decompiler::Disassembler;
+namespace MD = ILSpy::Decompiler::Metadata;
 namespace OUT = ILSpy::Decompiler::Output;
 
 namespace {
+
+#if defined(_WIN32)
+const char* MscorlibPath() { return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorlib.dll"; }
+#else
+const char* MscorlibPath() { return "/usr/lib/mono/4.5/mscorlib.dll"; }
+#endif
+
+// Render through a fresh ReflectionDisassembler over a string stream.
 
 // A SerString (the II.23.3 compressed-length-prefixed string form the
 // CustomMarshaler arm reads): the length byte plus the ASCII bytes.
@@ -80,6 +97,87 @@ std::vector<std::uint8_t> Range(int from, int to) {
     std::vector<std::uint8_t> v;
     for (int i = from; i <= to; ++i) v.push_back(static_cast<std::uint8_t>(i));
     return v;
+}
+
+std::string Render(const std::function<void(OUT::ITextOutput&)>& body) {
+    std::ostringstream stream;
+    OUT::PlainTextOutput output(stream);
+    body(output);
+    return stream.str();
+}
+
+std::string RenderWithDisassembler(
+    const std::function<void(DA::ReflectionDisassembler&)>& body) {
+    std::ostringstream stream;
+    OUT::PlainTextOutput output(stream);
+    DA::ReflectionDisassembler rd(output);
+    body(rd);
+    return stream.str();
+}
+
+std::uint32_t FindTypeDefTokenIn(const MD::MetadataFile& f, std::string_view ns,
+    std::string_view name) {
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == ns && t.Name == name) return t.Token;
+    }
+    return 0;
+}
+
+std::uint32_t FindMethodIn(const MD::MetadataFile& f, std::uint32_t typeToken,
+    std::string_view name) {
+    for (const auto& m : f.GetMethods(typeToken)) {
+        if (m.Name == name) return m.Token;
+    }
+    return 0;
+}
+
+std::uint32_t FindFieldIn(const MD::MetadataFile& f, std::uint32_t typeToken,
+    std::string_view name) {
+    for (const auto& fd : f.GetFields(typeToken)) {
+        if (fd.Name == name) return fd.Token;
+    }
+    return 0;
+}
+
+// The MethodSignatureT of a real method (the DisassemblerSignatureTypeProvider
+// decode the C# DisassembleMethodHeader runs). The holder keeps the provider
+// alive: the signature's deferred writers capture it (the provider-must-
+// outlive-the-writers liveness contract).
+struct MethodSignatureHolder {
+    std::unique_ptr<DA::DisassemblerSignatureTypeProvider> provider;
+    std::unique_ptr<MD::SignatureTypeProviderDecoder> decoder;
+    MD::MethodSignatureT sig;
+};
+
+MethodSignatureHolder MethodSignatureOf(const MD::MetadataFile& f,
+    std::uint32_t methodToken, OUT::ITextOutput& output) {
+    auto blob = f.GetSignatureBlob(methodToken);
+    MethodSignatureHolder holder;
+    holder.provider = std::make_unique<DA::DisassemblerSignatureTypeProvider>(
+        f, output);
+    holder.decoder = std::make_unique<MD::SignatureTypeProviderDecoder>(
+        *holder.provider, f);
+    holder.sig = holder.decoder->DecodeMethodSignature(blob->data(), blob->size(),
+        MD::MetadataGenericContext::ForMethod(methodToken, f));
+    return holder;
+}
+
+// A synthetic ConstantInfo (the WriteConstant drive).
+MD::ConstantInfo Constant(std::uint8_t typeCode, std::vector<std::uint8_t> value) {
+    MD::ConstantInfo info;
+    info.TypeCode = typeCode;
+    info.Value = std::move(value);
+    return info;
+}
+
+// A synthetic ParameterInfo row (the WriteParameters drive).
+MD::ParameterInfo Param(std::uint16_t sequence, std::uint32_t attributes,
+    const char* name) {
+    MD::ParameterInfo info;
+    info.SequenceNumber = sequence;
+    info.Attributes = attributes;
+    info.Name = name;
+    return info;
 }
 
 }  // namespace
@@ -444,4 +542,472 @@ TEST(ReflectionDisassemblerTest, WriteMarshalInfoEmptyBlobThrows) {
     OUT::PlainTextOutput output;
     DA::ReflectionDisassembler rd(output);
     EXPECT_THROW(rd.WriteMarshalInfo(nullptr, 0), std::out_of_range);
+}
+
+// ---------------------------------------------------------------------------
+// MetadataFile::GetConstant (the Constant table read behind the C#
+// `metadata.GetConstant(row.GetDefaultValue())` pair): a Field/Param/Property
+// token resolves to its II.23.2 constant row (Type column + value blob).
+// ---------------------------------------------------------------------------
+TEST(ReflectionDisassemblerTest, GetConstantFieldParent) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t int32Type = FindTypeDefTokenIn(f, "System", "Int32");
+    ASSERT_NE(int32Type, 0u);
+    std::uint32_t maxValue = FindFieldIn(f, int32Type, "MaxValue");
+    ASSERT_NE(maxValue, 0u);
+    auto constant = f.GetConstant(maxValue);
+    ASSERT_TRUE(constant.has_value());
+    EXPECT_EQ(constant->TypeCode, 0x08);  // ConstantTypeCode.Int32
+    EXPECT_EQ(constant->Value,
+        (std::vector<std::uint8_t>{0xff, 0xff, 0xff, 0x7f}));
+    EXPECT_NE(constant->Token, 0u);
+    EXPECT_EQ(constant->Token >> 24, 0x0Bu);
+    // A field without a constant has no row.
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    std::uint32_t emptyField = FindFieldIn(f, stringType, "Empty");
+    ASSERT_NE(emptyField, 0u);
+    EXPECT_FALSE(f.GetConstant(emptyField).has_value());
+    // Bogus parents: a non-HasConstant table token and a nil row.
+    EXPECT_FALSE(f.GetConstant(0x06000001).has_value());
+    EXPECT_FALSE(f.GetConstant(0x04000000).has_value());
+    EXPECT_FALSE(f.GetConstant(0x04000000u | 0x00FFFFFFu).has_value());
+}
+
+TEST(ReflectionDisassemblerTest, GetConstantParamParent) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // Every mscorlib constant is field- or param-parented; one EventSource
+    // ctor's optional `traits` parameter carries the null default (the raw
+    // 0x12 Type column the C# reads as ConstantTypeCode.NullReference).
+    std::uint32_t eventSourceType =
+        FindTypeDefTokenIn(f, "System.Diagnostics.Tracing", "EventSource");
+    ASSERT_NE(eventSourceType, 0u);
+    const MD::ParameterInfo* traits = nullptr;
+    MD::ParameterInfo traitsCopy;
+    for (const auto& m : f.GetMethods(eventSourceType)) {
+        for (const auto& p : f.GetParameters(m.Token)) {
+            // Several EventSource methods carry a `traits` parameter; the
+            // optional one (HasDefault) is the null-default carrier.
+            if (p.Name == "traits"
+                && (p.Attributes & 0x1000u) == 0x1000u) {
+                traits = &p;
+                traitsCopy = p;
+            }
+        }
+    }
+    ASSERT_NE(traits, nullptr);
+    EXPECT_EQ(traitsCopy.SequenceNumber, 4);
+    EXPECT_EQ(traitsCopy.Attributes, 0x1010u);  // Optional | HasDefault
+    auto constant = f.GetConstant(traitsCopy.Token);
+    ASSERT_TRUE(constant.has_value());
+    EXPECT_EQ(constant->TypeCode, 0x12);  // NullReference (ELEMENT_TYPE_CLASS)
+    EXPECT_EQ(constant->Value, (std::vector<std::uint8_t>{0, 0, 0, 0}));
+    // A parameter without a default has no row.
+    bool sawPlainParam = false;
+    for (const auto& m : f.GetMethods(eventSourceType)) {
+        for (const auto& p : f.GetParameters(m.Token)) {
+            if (p.Name != "traits" && !f.GetConstant(p.Token).has_value()) {
+                sawPlainParam = true;
+            }
+        }
+    }
+    EXPECT_TRUE(sawPlainParam);
+    // mscorlib carries no property-parented constants; a Property token
+    // resolves to nothing (the tag still decodes).
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    std::uint32_t lengthProp = 0;
+    for (const auto& pr : f.GetProperties(stringType)) {
+        if (pr.Name == "Length") lengthProp = pr.Token;
+    }
+    ASSERT_NE(lengthProp, 0u);
+    EXPECT_FALSE(f.GetConstant(lengthProp).has_value());
+}
+
+// ---------------------------------------------------------------------------
+// MetadataFile::GetParameters (the Param table read behind the C#
+// `methodDefinition.GetParameters()`): the MethodDef.ParamList rows with
+// their Sequence/Flags/Name columns and the FieldMarshal blob.
+// ---------------------------------------------------------------------------
+TEST(ReflectionDisassemblerTest, GetParametersBasics) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t copy = FindMethodIn(f, stringType, "Copy");
+    ASSERT_NE(copy, 0u);
+    auto params = f.GetParameters(copy);
+    ASSERT_EQ(params.size(), 1u);
+    EXPECT_EQ(params[0].SequenceNumber, 1);
+    EXPECT_EQ(params[0].Attributes, 0u);
+    EXPECT_EQ(params[0].Name, "str");
+    EXPECT_FALSE(params[0].MarshallingDescriptor.has_value());
+    EXPECT_EQ(params[0].Token >> 24, 0x08u);
+    EXPECT_NE(params[0].Token, 0u);
+
+    // Int32.TryParse(String s, out Int32 result): the out parameter carries
+    // the Out flag.
+    std::uint32_t int32Type = FindTypeDefTokenIn(f, "System", "Int32");
+    std::uint32_t tryParse = FindMethodIn(f, int32Type, "TryParse");
+    ASSERT_NE(tryParse, 0u);
+    params = f.GetParameters(tryParse);
+    ASSERT_EQ(params.size(), 2u);
+    EXPECT_EQ(params[0].Name, "s");
+    EXPECT_EQ(params[0].Attributes, 0u);
+    EXPECT_EQ(params[1].Name, "result");
+    EXPECT_EQ(params[1].Attributes, 0x02u);  // ParameterAttributes.Out
+    EXPECT_EQ(params[1].SequenceNumber, 2);
+
+    // A marshalled parameter: some mscorlib method carries a FieldMarshal
+    // NativeType blob on a Param row (826 FieldMarshal rows exist). Scan a
+    // bounded slice of methods for one.
+    bool foundMarshal = false;
+    std::uint32_t scanned = 0;
+    for (const auto& t : f.TypeDefs()) {
+        for (const auto& m : f.GetMethods(t.Token)) {
+            if (++scanned > 4000) break;
+            for (const auto& p : f.GetParameters(m.Token)) {
+                if (p.MarshallingDescriptor.has_value()) {
+                    foundMarshal = true;
+                    EXPECT_FALSE(p.MarshallingDescriptor->empty());
+                }
+            }
+        }
+        if (foundMarshal || scanned > 4000) break;
+    }
+    EXPECT_TRUE(foundMarshal);
+
+    // Non-MethodDef tokens yield nothing.
+    EXPECT_TRUE(f.GetParameters(stringType).empty());
+    EXPECT_TRUE(f.GetParameters(0x06000000).empty());
+}
+
+// ---------------------------------------------------------------------------
+// WriteConstant (ReflectionDisassembler.cs lines 1220-1268): the II.23.2
+// constant value render -- "nullref" for the NullReference code, the quoted
+// string for String, and <il-type>(<value>) for the numeric codes with the
+// NaN/infinity float/double bit patterns, and the invalid-typecode comment.
+// ---------------------------------------------------------------------------
+TEST(ReflectionDisassemblerTest, WriteConstantNumericMatrix) {
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x02, {0x01}));
+    }), "bool(true)");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x02, {0x00}));
+    }), "bool(false)");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x03, {0x41, 0x00}));
+    }), "char(65)");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x04, {0x80}));
+    }), "int8(-128)");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x05, {0xff}));
+    }), "uint8(255)");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x06, {0xff, 0x7f}));
+    }), "int16(32767)");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x07, {0xff, 0xff}));
+    }), "uint16(65535)");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x08, {0xff, 0xff, 0xff, 0x7f}));
+    }), "int32(2147483647)");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x08, {0x00, 0x00, 0x00, 0x80}));
+    }), "int32(-2147483648)");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x09, {0xff, 0xff, 0xff, 0xff}));
+    }), "uint32(4294967295)");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x0a,
+            {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f}));
+    }), "int64(9223372036854775807)");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x0b,
+            {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}));
+    }), "uint64(18446744073709551615)");
+}
+
+TEST(ReflectionDisassemblerTest, WriteConstantFloatDoubleSpecials) {
+    // NaN / infinities render the IEEE bit pattern; finite values the
+    // round-trip format; negative zero keeps the WriteOperand '-0.0'.
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x0c, {0x00, 0x00, 0xc0, 0xff}));
+    }), "float32(0xffc00000)");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x0c, {0x00, 0x00, 0x80, 0x7f}));
+    }), "float32(0x7f800000)");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x0c, {0x00, 0x00, 0x00, 0x00}));
+    }), "float32(0.0)");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x0c, {0xff, 0xff, 0x7f, 0x7f}));
+    }), "float32(3.4028235E+38)");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x0d,
+            {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8, 0xff}));
+    }), "float64(0xfff8000000000000)");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x0d,
+            {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x7f}));
+    }), "float64(0x7ff0000000000000)");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x0d,
+            {0x18, 0x2d, 0x44, 0x54, 0xfb, 0x21, 0x09, 0x40}));
+    }), "float64(3.141592653589793)");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x0d,
+            {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80}));
+    }), "float64(-0.0)");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x0d,
+            {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xef, 0x7f}));
+    }), "float64(1.7976931348623157E+308)");
+}
+
+TEST(ReflectionDisassemblerTest, WriteConstantStringNullrefAndInvalid) {
+    // The String arm renders the quoted escaped literal (no type wrapper).
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x0e,
+            {'4', 0, '.', 0, '0', 0, '.', 0, '0', 0, '.', 0, '0', 0}));
+    }), "\"4.0.0.0\"");
+    // An odd trailing byte is dropped (ReadUTF16 takes byteCount/2 chars).
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x0e, {'h', 0, 'i', 0, 0x99}));
+    }), "\"hi\"");
+    // The NullReference code (the raw 0x12 slot) renders without touching
+    // the blob.
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x12, {0x99, 0x99, 0x99, 0x99}));
+    }), "nullref");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x12, {}));
+    }), "nullref");
+    // Unknown codes render the invalid-typecode comment with the raw value
+    // (the C# enum ToString of an unnamed member).
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x00, {}));
+    }), "/* Constant with invalid typecode: 0 */");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x18, {0, 0, 0, 0}));
+    }), "/* Constant with invalid typecode: 24 */");
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x1c, {0, 0, 0, 0}));
+    }), "/* Constant with invalid typecode: 28 */");
+    // A truncated numeric blob fails inside ReadConstant and lands in the
+    // same comment (the C# catch conflates the two).
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x08, {0x01, 0x02}));
+    }), "/* Constant with invalid typecode: 8 */");
+    // A truncated Boolean constant too.
+    EXPECT_EQ(RenderWithDisassembler([](DA::ReflectionDisassembler& rd) {
+        rd.WriteConstant(Constant(0x02, {}));
+    }), "/* Constant with invalid typecode: 2 */");
+}
+
+TEST(ReflectionDisassemblerTest, WriteConstantRealMscorlibFields) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    auto render = [&](std::string_view ns, std::string_view typeName,
+                     std::string_view fieldName) {
+        std::uint32_t type = FindTypeDefTokenIn(f, ns, typeName);
+        EXPECT_NE(type, 0u);
+        std::uint32_t field = FindFieldIn(f, type, fieldName);
+        EXPECT_NE(field, 0u);
+        auto constant = f.GetConstant(field);
+        EXPECT_TRUE(constant.has_value());
+        return RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+            rd.WriteConstant(*constant);
+        });
+    };
+    EXPECT_EQ(render("System", "Int32", "MaxValue"), "int32(2147483647)");
+    EXPECT_EQ(render("System", "Char", "MaxValue"), "char(65535)");
+    EXPECT_EQ(render("System", "Char", "MinValue"), "char(0)");
+    EXPECT_EQ(render("System", "Byte", "MaxValue"), "uint8(255)");
+    EXPECT_EQ(render("System", "SByte", "MinValue"), "int8(-128)");
+    EXPECT_EQ(render("System", "Int16", "MaxValue"), "int16(32767)");
+    EXPECT_EQ(render("System", "UInt16", "MaxValue"), "uint16(65535)");
+    EXPECT_EQ(render("System", "UInt64", "MaxValue"),
+        "uint64(18446744073709551615)");
+    EXPECT_EQ(render("System", "Single", "NaN"), "float32(0xffc00000)");
+    EXPECT_EQ(render("System", "Single", "PositiveInfinity"),
+        "float32(0x7f800000)");
+    EXPECT_EQ(render("System", "Single", "MaxValue"), "float32(3.4028235E+38)");
+    EXPECT_EQ(render("System", "Double", "NaN"),
+        "float64(0xfff8000000000000)");
+    EXPECT_EQ(render("System", "Double", "PositiveInfinity"),
+        "float64(0x7ff0000000000000)");
+    EXPECT_EQ(render("System", "Double", "MaxValue"),
+        "float64(1.7976931348623157E+308)");
+    EXPECT_EQ(render("", "ThisAssembly", "Version"), "\"4.0.0.0\"");
+    EXPECT_EQ(render("System.Security", "SecurityRuntime", "StackContinue"),
+        "bool(true)");
+    EXPECT_EQ(render("System.Security", "SecurityRuntime", "StackHalt"),
+        "bool(false)");
+}
+
+// Every field constant in mscorlib renders one of the legal shapes (the
+// full-fixture invariant sweep).
+TEST(ReflectionDisassemblerTest, WriteConstantMscorlibInvariantSweep) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::size_t rendered = 0;
+    std::ostringstream stream;
+    OUT::PlainTextOutput output(stream);
+    DA::ReflectionDisassembler rd(output);
+    for (const auto& t : f.TypeDefs()) {
+        for (const auto& fd : f.GetFields(t.Token)) {
+            auto constant = f.GetConstant(fd.Token);
+            if (!constant.has_value()) continue;
+            stream.str("");
+            stream.clear();
+            rd.WriteConstant(*constant);
+            std::string rendered2 = stream.str();
+            ASSERT_FALSE(rendered2.empty());
+            bool nullref = rendered2 == "nullref";
+            bool comment = rendered2.rfind(
+                "/* Constant with invalid typecode: ", 0) == 0;
+            bool quoted = !rendered2.empty() && rendered2[0] == '"' &&
+                rendered2[rendered2.size() - 1] == '"';
+            bool typed = rendered2.find('(') != std::string::npos &&
+                rendered2[rendered2.size() - 1] == ')';
+            // Exactly one shape; none is a mix.
+            int shapes = (nullref ? 1 : 0) + (comment ? 1 : 0) +
+                (quoted ? 1 : 0) + (typed ? 1 : 0);
+            ASSERT_EQ(shapes, 1);
+            ++rendered;
+        }
+    }
+    // The whole-table count from the raw Constant table probe: every
+    // field-parented row is reachable through its Field token.
+    EXPECT_EQ(rendered, 6245u);
+}
+
+// ---------------------------------------------------------------------------
+// WriteParameters (ReflectionDisassembler.cs lines 1107-1160): the
+// '( params )' list -- the sequence-driven walk with gap filling, the
+// [in]/[out]/[opt] prefixes, the marshalling descriptor, and the unnamed
+// param references.
+// ---------------------------------------------------------------------------
+TEST(ReflectionDisassemblerTest, WriteParametersSyntheticShapes) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // (int32, string), instance: the signature every drive below reuses. The
+    // provider stays alive for the whole test -- the signature's deferred
+    // writers capture it.
+    std::ostringstream stream;
+    OUT::PlainTextOutput output(stream);
+    DA::DisassemblerSignatureTypeProvider provider(f, output);
+    MD::SignatureTypeProviderDecoder decoder(provider, f);
+    const std::uint8_t twoParam[] = {0x20, 0x02, 0x08, 0x08, 0x0e};
+    MD::MethodSignatureT sig = decoder.DecodeMethodSignature(
+        twoParam, sizeof(twoParam), MD::MetadataGenericContext{});
+    ASSERT_EQ(sig.ParameterTypes.size(), 2u);
+    ASSERT_EQ(sig.RequiredParameterCount, 2u);
+    ASSERT_TRUE(sig.Header.IsInstance());
+    // (int32, string, bool) for the gap case.
+    const std::uint8_t threeParam[] = {0x20, 0x03, 0x08, 0x08, 0x0e, 0x02};
+    MD::MethodSignatureT threeSig = decoder.DecodeMethodSignature(
+        threeParam, sizeof(threeParam), MD::MetadataGenericContext{});
+    ASSERT_EQ(threeSig.ParameterTypes.size(), 3u);
+
+    auto write = [&](const std::vector<MD::ParameterInfo>& params,
+                     const MD::MethodSignatureT& signature) {
+        stream.str("");
+        stream.clear();
+        DA::ReflectionDisassembler rd(output);
+        rd.WriteParameters(params, signature);
+        return stream.str();
+    };
+    auto write2 = [&](const std::vector<MD::ParameterInfo>& params) {
+        return write(params, sig);
+    };
+
+    // Two named parameters (PlainTextOutput writes the TextWriter CRLF).
+    EXPECT_EQ(write2({Param(1, 0, "a"), Param(2, 0, "b")}),
+        "int32 a,\r\nstring b\r\n");
+    // The [in]/[out]/[opt] attribute prefixes.
+    EXPECT_EQ(write2({Param(1, 0x1, "a"), Param(2, 0x2, "b")}),
+        "[in] int32 a,\r\n[out] string b\r\n");
+    // [opt] on the first row leaves the second unnamed tail.
+    EXPECT_EQ(write2({Param(1, 0x10, "a")}),
+        "[opt] int32 a,\r\nstring ''\r\n");
+    // An unnamed parameter renders the '' reference (and the remaining
+    // signature slots follow as unnamed parameters).
+    EXPECT_EQ(write2({Param(1, 0, "")}), "int32 '',\r\nstring ''\r\n");
+    // A gap in the sequence fills the missing slot with the '' reference
+    // (over the 3-param signature: the middle slot fills, the row renders
+    // at its own slot).
+    EXPECT_EQ(write({Param(1, 0, "a"), Param(3, 0, "c")}, threeSig),
+        "int32 a,\r\nstring '',\r\nbool c\r\n");
+    // A missing leading row fills from slot 0.
+    EXPECT_EQ(write2({Param(2, 0, "b")}),
+        "int32 '',\r\nstring b\r\n");
+    // The sequence-0 return row is skipped.
+    EXPECT_EQ(write2({Param(0, 0, ""), Param(1, 0, "a"), Param(2, 0, "b")}),
+        "int32 a,\r\nstring b\r\n");
+    // A signature shorter than the rows is the C# IndexOutOfRange crash;
+    // the port throws std::out_of_range (loud rather than wrong).
+    {
+        DA::ReflectionDisassembler rd(output);
+        EXPECT_THROW(
+            rd.WriteParameters({Param(1, 0, "a"), Param(2, 0, "b"),
+                Param(3, 0, "c")}, sig),
+            std::out_of_range);
+    }
+    // Unnamed tail parameters: the remaining-signature loop.
+    const std::uint8_t oneParam[] = {0x20, 0x01, 0x08, 0x08};
+    MD::MethodSignatureT oneSig = decoder.DecodeMethodSignature(
+        oneParam, sizeof(oneParam), MD::MetadataGenericContext{});
+    EXPECT_EQ(write({Param(1, 0, "a")}, oneSig), "int32 a\r\n");
+    EXPECT_EQ(write({}, oneSig), "int32 ''\r\n");
+    // A marshalling descriptor renders between the type and the name.
+    MD::ParameterInfo marshalled = Param(1, 0, "p");
+    marshalled.MarshallingDescriptor = std::vector<std::uint8_t>{0x15};
+    EXPECT_EQ(write({marshalled}, oneSig), "int32 marshal(lpwstr) p\r\n");
+}
+
+TEST(ReflectionDisassemblerTest, WriteParametersRealMscorlibMethods) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::ostringstream stream;
+    OUT::PlainTextOutput output(stream);
+
+    auto render = [&](std::uint32_t methodToken) {
+        stream.str("");
+        stream.clear();
+        MethodSignatureHolder holder = MethodSignatureOf(f, methodToken, output);
+        DA::ReflectionDisassembler rd(output);
+        rd.WriteParameters(f.GetParameters(methodToken), holder.sig);
+        return stream.str();
+    };
+
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t copy = FindMethodIn(f, stringType, "Copy");
+    ASSERT_NE(copy, 0u);
+    EXPECT_EQ(render(copy), "string str\r\n");
+
+    std::uint32_t int32Type = FindTypeDefTokenIn(f, "System", "Int32");
+    std::uint32_t tryParse = FindMethodIn(f, int32Type, "TryParse");
+    ASSERT_NE(tryParse, 0u);
+    // The out parameter is byref: "int32&" at signature syntax.
+    EXPECT_EQ(render(tryParse), "string s,\r\n[out] int32& result\r\n");
+
+    // Every method over every type renders without throwing (bounded sweep).
+    std::size_t rendered = 0;
+    for (const auto& t : f.TypeDefs()) {
+        for (const auto& m : f.GetMethods(t.Token)) {
+            if (m.RVA == 0) continue;
+            stream.str("");
+            stream.clear();
+            MethodSignatureHolder holder =
+                MethodSignatureOf(f, m.Token, output);
+            DA::ReflectionDisassembler rd(output);
+            rd.WriteParameters(f.GetParameters(m.Token), holder.sig);
+            ++rendered;
+        }
+    }
+    EXPECT_GT(rendered, 5000u);
 }

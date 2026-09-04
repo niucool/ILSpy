@@ -19,10 +19,11 @@
 // Port of ICSharpCode.Decompiler/Disassembler/ReflectionDisassembler.cs: the
 // disassembler class that renders whole modules/types/members as IL text
 // (the ilspycmd --il path). This slice carries the instance skeleton and
-// the output-shaping helpers every member renderer consumes; the member
-// renderers themselves (DisassembleMethod/Field/Property/Event/Type,
-// WriteAttributes, the module headers) land with their metadata reads in
-// later slices.
+// the output-shaping helpers every member renderer consumes, plus the
+// constant and parameter renderers the field/method headers embed
+// (WriteConstant, WriteParameters); the member renderers themselves
+// (DisassembleMethod/Field/Property/Event/Type, WriteAttributes, the
+// module headers) land with their metadata reads in later slices.
 //
 // C#-to-C++ porting decisions:
 //  * The C# field pair `output`/`cancellationToken`/`isInType`/
@@ -64,14 +65,13 @@
 #pragma once
 
 #include "Decompiler/Disassembler/MethodBodyDisassembler.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/Metadata/SignatureTypeProvider.hpp"
 #include "Decompiler/Output/ITextOutput.hpp"
 
 #include <cstdint>
 #include <memory>
-
-namespace ILSpy::Decompiler::Metadata {
-class MetadataFile;
-}
+#include <vector>
 
 namespace ILSpy::Decompiler::Disassembler {
 
@@ -154,6 +154,33 @@ public:
     // share it); reading past the end throws std::out_of_range.
     void WriteNativeType(const std::uint8_t* base, std::size_t size,
         std::size_t& pos);
+
+    // The C# `void WriteConstant(MetadataReader metadata, Constant constant)`
+    // (ReflectionDisassembler.cs lines 1220-1268): the II.23.2 constant value
+    // render -- "nullref" for the NullReference code (the raw 0x12 slot --
+    // the blob is not read), the double-quoted escaped literal for String
+    // (no type wrapper), and `<il-type>(<value>)` for the numeric codes with
+    // the NaN/infinity float/double IEEE bit patterns, the invalid-typecode
+    // comment for everything else (and for a blob too short for its code).
+    // The C# MetadataReader argument drops away: the port's ConstantInfo
+    // carries the materialized value blob (the blob-reader-at-a-handle
+    // convention).
+    void WriteConstant(const Metadata::ConstantInfo& constant);
+
+    // The C# `void WriteParameters(MetadataReader metadata,
+    // IEnumerable<ParameterHandle> parameters,
+    // MethodSignature<Action<ILNameSyntax>> signature)`
+    // (ReflectionDisassembler.cs lines 1107-1160): the "( params )" list --
+    // the Sequence-column walk that skips the return row, fills sequence gaps
+    // with the unnamed "''" reference, renders the [in]/[out]/[opt] prefixes,
+    // the type at ILNameSyntax.Signature, the marshalling descriptor, and the
+    // escaped-name local reference ("param_N" with the instance `this` offset),
+    // and appends the unnamed remaining-signature parameters. A signature
+    // shorter than the Param rows throws std::out_of_range (the C# IndexOutOfRange
+    // on ParameterTypes[i] -- loud rather than wrong). The parameter collection
+    // ports as the GetParameters row vector (the vararg callers slice it).
+    void WriteParameters(const std::vector<Metadata::ParameterInfo>& parameters,
+        const Metadata::MethodSignatureT& signature);
 
 private:
     Output::ITextOutput& output_;
