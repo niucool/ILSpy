@@ -50,11 +50,14 @@
 //    path), and an unknown held type renders its type name -- the analog of the
 //    C# `value.ToString()` default (which returns the runtime type's name; the
 //    realistic operand set never reaches it).
-//  * `float`/`double.ToString("R", Invariant)` -> std::to_chars (the shortest
-//    round-trip) with the exponent marker upper-cased to 'E' (the
-//    TextWriterTokenWriter FormatFloatRoundTrip convention); the 0.0/-0.0 and
-//    infinity/NaN special cases (the "(XX XX XX XX)" byte dumps) are ported
-//    verbatim over the little-endian byte order.
+//  * `float`/`double.ToString("R", Invariant)` -> the .NET FormatGeneral rule
+//    over std::to_chars' scientific form (the Ryu shortest round-trip digits --
+//    the same digits .NET's Grisu3/Dragon4 path produces): fixed notation
+//    while the decimal scale stays within [-3, MaxRoundTripDigits] (17 for
+//    double, 9 for float), scientific otherwise, the exponent spelled 'E', a
+//    sign, and a minimum of two digits; the 0.0/-0.0 and infinity/NaN special
+//    cases (the "(XX XX XX XX)" byte dumps) are ported verbatim over the
+//    little-endian byte order.
 //  * `EscapeString`/`IsValidIdentifier` iterate the C# UTF-16 `char` loop; the
 //    port decodes the UTF-8 text to code points (the ILAmbience EscapeName
 //    convention): the named escapes fire on the exact code points, a non-BMP

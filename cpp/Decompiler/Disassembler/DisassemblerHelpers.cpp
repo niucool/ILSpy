@@ -31,6 +31,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -361,10 +362,32 @@ void WriteOperand(Output::ITextOutput& writer, std::int64_t val)
 	writer.Write(IntegralToString(static_cast<long long>(val)));
 }
 
+// The .NET round-trip digit budget: TNumber.MaxRoundTripDigits (17 for
+// double, 9 for float) -- the maximum significant digits that always round
+// trip through the type, and the FormatGeneral nMaxDigits the "R" format
+// renders with.
+template <typename T>
+struct RoundTripDigitBudget;
+
+template <>
+struct RoundTripDigitBudget<float> {
+	static constexpr int value = 9;
+};
+
+template <>
+struct RoundTripDigitBudget<double> {
+	static constexpr int value = 17;
+};
+
 // The shared float/double rendering: the zero/negative-zero special case, the
-// infinity/NaN byte dump, and the round-trip format (the TextWriterTokenWriter
-// FormatFloatRoundTrip convention: std::to_chars with 'e' upper-cased to 'E',
-// matching the C# "R" format).
+// infinity/NaN byte dump, and the "R" round-trip format -- the .NET
+// System.Number.FormatFloat rule (the 'R' specifier routes to FormatGeneral
+// over the Grisu3/Dragon4 shortest round-trip digits with nMaxDigits =
+// MaxRoundTripDigits): FIXED notation while the decimal scale (the leading
+// digit's exponent plus one) stays within [-3, nMaxDigits], SCIENTIFIC
+// otherwise, the exponent spelled 'E', a sign, and a minimum of two digits.
+// std::to_chars' scientific form carries the same shortest round-trip digits
+// (Ryu), so the rule renders from its parsed digits and scale.
 template <typename T>
 void WriteFloatingOperand(Output::ITextOutput& writer, T val) {
 	if (val == 0) {
@@ -386,10 +409,53 @@ void WriteFloatingOperand(Output::ITextOutput& writer, T val) {
 		}
 		writer.Write(')');
 	} else {
-		char buf[64];
-		auto res = std::to_chars(buf, buf + sizeof(buf), val);
-		std::string s(buf, res.ptr);
-		for (char& c : s) if (c == 'e') c = 'E';
+		// Ryu's shortest digits in scientific form: "-1.23456789e+16".
+		char sci[64];
+		auto res = std::to_chars(sci, sci + sizeof(sci), val,
+			std::chars_format::scientific);
+		*res.ptr = '\0';
+		char* e = std::strchr(sci, 'e');
+		// The decimal exponent of the leading digit; the scale counts it as
+		// the digit before the decimal point (the value is 0.<digits> x 10^scale).
+		const int scale = std::atoi(e + 1) + 1;
+
+		const bool negative = (*sci == '-');
+		std::string digits;
+		for (char* p = sci + (negative ? 1 : 0); p != e; p++) {
+			if (*p != '.')
+				digits.push_back(*p);
+		}
+
+		std::string s;
+		if (scale > RoundTripDigitBudget<T>::value || scale < -3) {
+			// Scientific: the first digit, '.' plus the rest, then the
+			// exponent (a sign and a minimum of two digits).
+			s.push_back(digits[0]);
+			if (digits.size() > 1) {
+				s.push_back('.');
+				s.append(digits, 1, std::string::npos);
+			}
+			char expBuf[8];
+			std::snprintf(expBuf, sizeof(expBuf), "E%+03d", scale - 1);
+			s += expBuf;
+		} else if (scale > 0) {
+			// Fixed with the point right of `scale` digits: the digits consumed
+			// in order, zero-padded past their end, then '.' plus the tail.
+			for (int i = 0; i < scale; i++) {
+				s.push_back((std::size_t)i < digits.size() ? digits[i] : '0');
+			}
+			if ((std::size_t)scale < digits.size()) {
+				s.push_back('.');
+				s.append(digits, (std::size_t)scale, std::string::npos);
+			}
+		} else {
+			// Fixed below one: '0', '.', the -scale zeros, then the digits.
+			s += "0.";
+			s.append((std::size_t)(-scale), '0');
+			s += digits;
+		}
+		if (negative)
+			writer.Write('-');
 		writer.Write(s);
 	}
 }

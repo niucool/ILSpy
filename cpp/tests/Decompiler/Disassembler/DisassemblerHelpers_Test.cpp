@@ -348,6 +348,207 @@ TEST(DisassemblerHelpersTest, WriteOperandDoubleRoundTripFormat) {
 	EXPECT_EQ(output3.ToString(), "1E-300");
 }
 
+// ---------------------------------------------------------------------------
+// WriteOperand float/double round-trip NOTATION -- the .NET
+// `ToString("R")` FormatGeneral rule (probed against the real .NET 10
+// System.Number.FormatFloat: 'R' routes to FormatGeneral over the
+// Grisu3/Dragon4 shortest round-trip digits with nMaxDigits = the type's
+// MaxRoundTripDigits): FIXED notation while the decimal scale (the leading
+// digit's exponent plus one) stays within [-3, 17] for double / [-3, 9] for
+// float, SCIENTIFIC otherwise, the exponent spelled 'E', a sign, and a
+// minimum of two digits. Every expectation below is the real .NET output
+// for the same literal (C:/temp-probe/RFormatProbe/rmatrix.txt).
+// ---------------------------------------------------------------------------
+
+TEST(DisassemblerHelpersTest, WriteOperandDoubleRoundTripNotationBoundaries) {
+	// Fixed while the scale <= 17: the digits consumed in order, zero-padded
+	// past their end, no decimal point when they are exhausted.
+	OUT::PlainTextOutput o1;
+	WriteOperand(o1, 1e16);
+	EXPECT_EQ(o1.ToString(), "10000000000000000");
+
+	OUT::PlainTextOutput o2;
+	WriteOperand(o2, 1.5e16);
+	EXPECT_EQ(o2.ToString(), "15000000000000000");
+
+	// Seventeen digits exactly at the boundary still render fixed.
+	OUT::PlainTextOutput o3;
+	WriteOperand(o3, 12345678901234568.0);
+	EXPECT_EQ(o3.ToString(), "12345678901234568");
+
+	OUT::PlainTextOutput o4;
+	WriteOperand(o4, 1.25e16);
+	EXPECT_EQ(o4.ToString(), "12500000000000000");
+
+	OUT::PlainTextOutput o5;
+	WriteOperand(o5, 864000000000.0);
+	EXPECT_EQ(o5.ToString(), "864000000000");
+
+	OUT::PlainTextOutput o6;
+	WriteOperand(o6, 10000000.0);
+	EXPECT_EQ(o6.ToString(), "10000000");
+
+	// The scale-18 side flips scientific (the exponent two digits minimum).
+	OUT::PlainTextOutput o7;
+	WriteOperand(o7, 1e17);
+	EXPECT_EQ(o7.ToString(), "1E+17");
+
+	OUT::PlainTextOutput o8;
+	WriteOperand(o8, 1.5e17);
+	EXPECT_EQ(o8.ToString(), "1.5E+17");
+
+	OUT::PlainTextOutput o9;
+	WriteOperand(o9, 1.25e17);
+	EXPECT_EQ(o9.ToString(), "1.25E+17");
+
+	OUT::PlainTextOutput o10;
+	WriteOperand(o10, 123456789012345678.0);
+	EXPECT_EQ(o10.ToString(), "1.2345678901234568E+17");
+}
+
+TEST(DisassemblerHelpersTest, WriteOperandDoubleRoundTripSmallValueBoundaries) {
+	// Fixed while the scale >= -3: '0', '.', the -scale zeros, the digits.
+	OUT::PlainTextOutput o1;
+	WriteOperand(o1, 0.0001);
+	EXPECT_EQ(o1.ToString(), "0.0001");
+
+	OUT::PlainTextOutput o2;
+	WriteOperand(o2, 1.25e-4);
+	EXPECT_EQ(o2.ToString(), "0.000125");
+
+	OUT::PlainTextOutput o3;
+	WriteOperand(o3, 0.000123456789012345);
+	EXPECT_EQ(o3.ToString(), "0.000123456789012345");
+
+	// The scale -4 side flips scientific.
+	OUT::PlainTextOutput o4;
+	WriteOperand(o4, 1e-5);
+	EXPECT_EQ(o4.ToString(), "1E-05");
+
+	OUT::PlainTextOutput o5;
+	WriteOperand(o5, 1.5e-5);
+	EXPECT_EQ(o5.ToString(), "1.5E-05");
+
+	// Subnormals take the same scientific path (double.Epsilon).
+	OUT::PlainTextOutput o6;
+	WriteOperand(o6, 4.9406564584124654e-324);
+	EXPECT_EQ(o6.ToString(), "5E-324");
+}
+
+TEST(DisassemblerHelpersTest, WriteOperandDoubleRoundTripExtremesAndNegatives) {
+	OUT::PlainTextOutput o1;
+	WriteOperand(o1, 1.7976931348623157e308);
+	EXPECT_EQ(o1.ToString(), "1.7976931348623157E+308");
+
+	OUT::PlainTextOutput o2;
+	WriteOperand(o2, -1.7976931348623157e308);
+	EXPECT_EQ(o2.ToString(), "-1.7976931348623157E+308");
+
+	OUT::PlainTextOutput o3;
+	WriteOperand(o3, 2.2250738585072014e-308);
+	EXPECT_EQ(o3.ToString(), "2.2250738585072014E-308");
+
+	OUT::PlainTextOutput o4;
+	WriteOperand(o4, -1.5e16);
+	EXPECT_EQ(o4.ToString(), "-15000000000000000");
+
+	OUT::PlainTextOutput o5;
+	WriteOperand(o5, -12345678901234568.0);
+	EXPECT_EQ(o5.ToString(), "-12345678901234568");
+
+	OUT::PlainTextOutput o6;
+	WriteOperand(o6, 123.456);
+	EXPECT_EQ(o6.ToString(), "123.456");
+
+	OUT::PlainTextOutput o7;
+	WriteOperand(o7, 0.1);
+	EXPECT_EQ(o7.ToString(), "0.1");
+
+	OUT::PlainTextOutput o8;
+	WriteOperand(o8, -4.9406564584124654e-324);
+	EXPECT_EQ(o8.ToString(), "-5E-324");
+}
+
+TEST(DisassemblerHelpersTest, WriteOperandFloatRoundTripNotationBoundaries) {
+	// Float keeps fixed notation only while the scale <= 9 (the float
+	// round-trip budget), so 1e8 stays fixed where the double rule would.
+	OUT::PlainTextOutput o1;
+	WriteOperand(o1, 1e8f);
+	EXPECT_EQ(o1.ToString(), "100000000");
+
+	OUT::PlainTextOutput o2;
+	WriteOperand(o2, 1.5e8f);
+	EXPECT_EQ(o2.ToString(), "150000000");
+
+	// The shortest round-trip digits zero-pad past their end: the float
+	// nearest 123456789 is 123456792, but its shortest round-trip digits are
+	// 12345679, so both literals render "123456790".
+	OUT::PlainTextOutput o3;
+	WriteOperand(o3, 123456789.0f);
+	EXPECT_EQ(o3.ToString(), "123456790");
+
+	OUT::PlainTextOutput o4;
+	WriteOperand(o4, 123456792.0f);
+	EXPECT_EQ(o4.ToString(), "123456790");
+
+	// The scale-10 side flips scientific.
+	OUT::PlainTextOutput o5;
+	WriteOperand(o5, 1e9f);
+	EXPECT_EQ(o5.ToString(), "1E+09");
+
+	OUT::PlainTextOutput o6;
+	WriteOperand(o6, 1.5e9f);
+	EXPECT_EQ(o6.ToString(), "1.5E+09");
+
+	OUT::PlainTextOutput o7;
+	WriteOperand(o7, 1e16f);
+	EXPECT_EQ(o7.ToString(), "1E+16");
+
+	OUT::PlainTextOutput o8;
+	WriteOperand(o8, 1.5e16f);
+	EXPECT_EQ(o8.ToString(), "1.5E+16");
+
+	OUT::PlainTextOutput o9;
+	WriteOperand(o9, 1.2345678e10f);
+	EXPECT_EQ(o9.ToString(), "1.2345678E+10");
+}
+
+TEST(DisassemblerHelpersTest, WriteOperandFloatRoundTripSmallValuesAndExtremes) {
+	OUT::PlainTextOutput o1;
+	WriteOperand(o1, 0.0001f);
+	EXPECT_EQ(o1.ToString(), "0.0001");
+
+	// Float digits stop at nine: 0.000123456789 renders 0.00012345679.
+	OUT::PlainTextOutput o2;
+	WriteOperand(o2, 0.000123456789f);
+	EXPECT_EQ(o2.ToString(), "0.00012345679");
+
+	OUT::PlainTextOutput o3;
+	WriteOperand(o3, 1e-5f);
+	EXPECT_EQ(o3.ToString(), "1E-05");
+
+	OUT::PlainTextOutput o4;
+	WriteOperand(o4, 1.5e-5f);
+	EXPECT_EQ(o4.ToString(), "1.5E-05");
+
+	OUT::PlainTextOutput o5;
+	WriteOperand(o5, 1234567.9f);
+	EXPECT_EQ(o5.ToString(), "1234567.9");
+
+	// float.Epsilon: the subnormal takes the scientific path.
+	OUT::PlainTextOutput o6;
+	WriteOperand(o6, 1.401298464324817e-45f);
+	EXPECT_EQ(o6.ToString(), "1E-45");
+
+	OUT::PlainTextOutput o7;
+	WriteOperand(o7, 3.4028235e38f);
+	EXPECT_EQ(o7.ToString(), "3.4028235E+38");
+
+	OUT::PlainTextOutput o8;
+	WriteOperand(o8, -3.4028235e38f);
+	EXPECT_EQ(o8.ToString(), "-3.4028235E+38");
+}
+
 TEST(DisassemblerHelpersTest, WriteOperandDoubleDumpsInfinityAndNaNBytes) {
 	OUT::PlainTextOutput output;
 	WriteOperand(output, std::numeric_limits<double>::infinity());
