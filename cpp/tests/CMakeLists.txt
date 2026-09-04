@@ -44,6 +44,8 @@ add_executable(ilspy_tests
     ILSpyCmd/ResourceExtensions_Test.cpp
     ILSpyCmd/MetadataTableDumper_Test.cpp
     ILSpyCmd/TypesParser_Test.cpp
+    ILSpyCmd/DumpPackage_Test.cpp
+    Decompiler/SingleFileBundle_Test.cpp
     Decompiler/TypeSystem/TypeName_Test.cpp
     Decompiler/TypeSystem/SignatureDecoder_Test.cpp
     Decompiler/TypeSystem/TypeKindDerivation_Test.cpp

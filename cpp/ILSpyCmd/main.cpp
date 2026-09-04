@@ -89,7 +89,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cctype>
+#include <filesystem>
 #include <iostream>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -128,7 +130,11 @@ int RunMain(int argc, char** argv) {
         ("il-sequence-points", "Show IL with sequence points. Implies -il.",
             cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("usepdb,use-varnames-from-pdb", "Use variable names from PDB. With a value (--usepdb=<file>), the PDB file to use; without, the PDB is discovered from the assembly's debug directory.",
-            cxxopts::value<std::string>()->implicit_value(""));
+            cxxopts::value<std::string>()->implicit_value(""))
+        ("o,outputdir", "The output directory, if omitted decompiler output is written to standard out.",
+            cxxopts::value<std::string>())
+        ("d,dump-package", "Dump package assemblies into a folder. This requires the output directory option.",
+            cxxopts::value<bool>()->default_value("false")->implicit_value("true"));
     options.parse_positional({ "assembly" });
 
     // A malformed option form must not crash the tool: cxxopts throws
@@ -196,6 +202,19 @@ int RunMain(int argc, char** argv) {
     std::string resourceName = parsed.count("resource") != 0
         ? parsed["resource"].as<std::string>() : "";
     bool wantJson = parsed.count("json") != 0 && parsed["json"].as<bool>();
+    bool wantDumpPackage = parsed.count("dump-package") != 0
+        && parsed["dump-package"].as<bool>();
+    // The C# `string outputDirectory = ResolveOutputDirectory(OutputDirectory)`
+    // (IlspyCmdProgram.cs OnExecuteAsync): resolved BEFORE any action
+    // dispatch, and created when set (Directory.CreateDirectory) -- the
+    // side effect happens whatever action the other flags select.
+    std::optional<std::string> outputDirectory;
+    if (parsed.count("outputdir") != 0) {
+        outputDirectory = ILSpy::ILSpyCmd::ResolveOutputDirectory(
+            parsed["outputdir"].as<std::string>());
+        if (outputDirectory.has_value())
+            std::filesystem::create_directories(*outputDirectory);
+    }
     // The C# `if (JsonOutputFlag && DumpTableName == null)` usage check
     // (IlspyCmdProgram.cs): --json alone is rejected before any file opens.
     if (wantJson && dumpTable.empty()) {
@@ -203,9 +222,59 @@ int RunMain(int argc, char** argv) {
         return 64;  // ProgramExitCodes.EX_USAGE
     }
 
-    if (!wantIl && !wantIlSequencePoints && !wantIlAst && !wantIlAstAll && !wantCSharp && listValues.empty() && !wantListResources && dumpTable.empty() && resourceName.empty()) {
-        std::cout << "ilspycmd: see --help for available options (--il, --il-sequence-points, --ilast, --ilast-all, --csharp, --list, --list-resources, --resource, --dump-table).\n";
+    if (!wantIl && !wantIlSequencePoints && !wantIlAst && !wantIlAstAll && !wantCSharp && listValues.empty() && !wantListResources && dumpTable.empty() && resourceName.empty() && !wantDumpPackage) {
+        std::cout << "ilspycmd: see --help for available options (--il, --il-sequence-points, --ilast, --ilast-all, --csharp, --list, --list-resources, --resource, --dump-table, -d).\n";
         return 0;
+    }
+
+    // The C# DumpPackage arm (IlspyCmdProgram.cs PerformPerFileAction, the
+    // `else if (DumpPackageFlag)` branch -- it sits AFTER the EntityTypes,
+    // ShowIL and CreateDebugInfo arms and BEFORE the ListResources,
+    // ResourceName and DumpTableName arms, so the C# runs it only when none
+    // of those later-ordered flags is set; -genpdb is unported, and the
+    // operative condition below encodes the same precedence). The port must
+    // also run it BEFORE the MetadataFile open below: a single-file bundle
+    // is not a CLI metadata image, and the C# opens it as raw bytes
+    // (MemoryMappedFile), never as a PEFile.
+    if (wantDumpPackage && listValues.empty() && !wantIl && !wantIlSequencePoints
+        && !wantListResources && resourceName.empty() && dumpTable.empty()) {
+        // The C# [FilesExist] validation over the assembly argument (the
+        // McMaster option attribute on InputAssemblyNames): a missing input
+        // file is rejected before any action runs, with the validation
+        // message and exit code -- the port's other actions keep their own
+        // MetadataFile gate (rc 1 with the could-not-open line).
+        if (!std::filesystem::exists(asmPath)) {
+            std::cerr << "File '" << asmPath << "' does not exist!\n"
+                         "Specify --help for a list of available options and commands.\n";
+            return 1;
+        }
+        std::ostringstream errorBuffer;
+        int rc;
+        try {
+            rc = ILSpy::ILSpyCmd::DumpPackage(asmPath, outputDirectory, errorBuffer);
+        } catch (const std::exception& ex) {
+            // The C# global catch (`catch (Exception ex) { app.Error.WriteLine(ex.ToString());
+            // return EX_SOFTWARE; }` around the OnExecuteAsync action
+            // dispatch): the manifest validations and the Path.Combine null
+            // argument escape here. The port renders the message (no managed
+            // stack trace) with the same exit code.
+            std::cerr << ex.what() << '\n';
+            return 70;  // ProgramExitCodes.EX_SOFTWARE
+        }
+        // The error lines carry the CRLF TextWriter convention; stderr's
+        // default text mode would translate every \n again (the same
+        // \r\r\n doubling the --resource path fixed).
+#if defined(_WIN32)
+        int stderrFd = _fileno(stderr);
+        int oldStderrMode = _setmode(stderrFd, _O_BINARY);
+        std::cerr << errorBuffer.str();
+        std::cerr.flush();
+        if (oldStderrMode != -1)
+            _setmode(stderrFd, oldStderrMode);
+#else
+        std::cerr << errorBuffer.str();
+#endif
+        return rc;
     }
 
     ILSpy::Decompiler::Metadata::MetadataFile file(asmPath);

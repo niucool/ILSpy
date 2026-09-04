@@ -24,18 +24,165 @@
 #include "Decompiler/Disassembler/DisassemblerHelpers.hpp"
 #include "Decompiler/Metadata/SRMExtensions.hpp"
 #include "Decompiler/Output/PlainTextOutput.hpp"
+#include "Decompiler/SingleFileBundle.hpp"
 #include "Decompiler/Util/ResourcesFile.hpp"
 #include "Decompiler/Util/Utf.hpp"
 #include "ILSpyX/PdbProvider/DebugInfoUtils.hpp"
 #include "ILSpyCmd/ResourceExtensions.hpp"
 
+#include <miniz/miniz_tinfl.h>
+
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string>
+#include <vector>
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 namespace ILSpy::ILSpyCmd {
+namespace {
+
+namespace fs = std::filesystem;
+namespace Sfb = ILSpy::Decompiler::SingleFileBundle;
+
+// The C# `Path.IsPathRooted(string)` over an entry RelativePath (the Windows
+// semantics): a leading directory separator or a drive-letter prefix roots
+// the path ("C:foo" is rooted even though it is drive-relative).
+bool IsPathRooted(const std::string& p) {
+    if (p.empty())
+        return false;
+    if (p[0] == '\\' || p[0] == '/')
+        return true;
+    return p.size() >= 2 && p[1] == ':';
+}
+
+#ifdef _WIN32
+// UTF-8 to UTF-16: the C# writes extracted files through System.IO's
+// Unicode paths, so a non-ASCII entry RelativePath must survive the
+// conversion (the std::string-to-fs::path conversion would go through the
+// ANSI code page instead).
+std::wstring Utf8ToWide(const std::string& s) {
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.data(),
+        static_cast<int>(s.size()), nullptr, 0);
+    std::wstring wide(static_cast<std::size_t>(len), L'\0');
+    if (len > 0) {
+        MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+            wide.data(), len);
+    }
+    return wide;
+}
+
+fs::path ToFsPath(const std::string& utf8) {
+    return fs::path(Utf8ToWide(utf8));
+}
+#else
+fs::path ToFsPath(const std::string& utf8) {
+    return fs::path(utf8);
+}
+#endif
+
+// Raw-deflate inflate with the C# DeflateStream semantics the compressed
+// bundle entries need: decompress up to the final block (trailing bytes
+// after it are ignored -- DeflateStream stops reading input there), yield
+// the PARTIAL production when the input runs out mid-stream (DeflateStream
+// returns what it decoded; the caller's declared-size check fires on the
+// count), and throw for a corrupt stream (the C# DeflateStream
+// InvalidDataException escaping DumpPackageAssemblies to its global
+// catch). The growing-buffer strategy: the C# pre-sizes its MemoryStream to
+// the declared size and grows on demand; the port starts there and re-runs
+// with a doubled buffer when the stream produces more (only corrupt streams
+// ever do, so the re-run cost stays bounded by the actual production).
+std::vector<std::uint8_t> InflateRawDeflate(const std::uint8_t* src,
+    std::size_t srcSize, long long declaredSize) {
+    // The C# `new MemoryStream((int)entry.Size)` pre-size: an int cast, so
+    // the port mirrors the wrap before the negativity check.
+    std::int32_t preSize = static_cast<std::int32_t>(
+        static_cast<std::uint32_t>(static_cast<std::uint64_t>(declaredSize)));
+    if (preSize < 0)
+        throw std::out_of_range("Negative MemoryStream capacity.");
+    std::size_t capacity = preSize > 0 ? static_cast<std::size_t>(preSize) : 1;
+    for (;;) {
+        std::vector<std::uint8_t> out(capacity);
+        size_t inSize = srcSize;
+        size_t outSize = capacity;
+        tinfl_decompressor decomp;
+        tinfl_init(&decomp);
+        tinfl_status status = tinfl_decompress(
+            &decomp, src, &inSize, out.data(), out.data(), &outSize,
+            TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
+        if (status == TINFL_STATUS_DONE) {
+            out.resize(outSize);
+            return out;
+        }
+        if (status == TINFL_STATUS_HAS_MORE_OUTPUT) {
+            // The stream produces more than the buffer holds: grow and
+            // re-run (the C# MemoryStream grows transparently).
+            capacity *= 2;
+            continue;
+        }
+        if (status == TINFL_STATUS_FAILED_CANNOT_MAKE_PROGRESS) {
+            // The input ran out mid-stream: the truncated input the probed
+            // DeflateStream partially decodes -- yield what was produced so
+            // the caller's size check fires.
+            out.resize(outSize);
+            return out;
+        }
+        // A genuinely corrupt deflate stream: the C# DeflateStream throws
+        // (probed: InvalidDataException "The archive entry was compressed
+        // using an unsupported compression method." for a bad stored-block
+        // NLEN); the port's exact message for other corruption shapes may
+        // differ (the exit code the caller renders is the same).
+        throw std::out_of_range(
+            "The archive entry was compressed using an unsupported compression method.");
+    }
+}
+
+// The whole package image as one buffer (the C# memory-maps the file; the
+// port's whole-file read is the established convention). A missing or
+// unreadable file throws -- the C# MemoryMappedFile.CreateFromFile
+// FileNotFoundException / IOException escaping to the global catch.
+std::vector<std::uint8_t> ReadPackageImage(const std::string& path) {
+    std::ifstream f(ToFsPath(path), std::ios::binary);
+    if (!f)
+        throw std::runtime_error("Unable to find the specified file.");
+    std::vector<std::uint8_t> bytes;
+    f.seekg(0, std::ios::end);
+    auto sz = f.tellg();
+    if (sz < 0)
+        throw std::runtime_error("Unable to find the specified file.");
+    bytes.resize(static_cast<std::size_t>(sz));
+    f.seekg(0);
+    if (!bytes.empty()) {
+        f.read(reinterpret_cast<char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+        if (f.gcount() != static_cast<std::streamsize>(bytes.size()))
+            throw std::runtime_error("Unable to read the package file.");
+    }
+    return bytes;
+}
+
+// The C# UnmanagedMemoryStream over the mapped view does NOT validate an
+// entry's extent against the file (a slightly out-of-bounds entry reads
+// whatever the last mapped page holds -- undefined bytes; a far-out one
+// access-violates). The port's plain buffer cannot replicate that, and
+// writing undefined bytes is worse than refusing: an entry outside the
+// image throws. A documented divergence (the C# is undefined here, the port
+// is deterministic).
+void CheckEntryExtent(const Sfb::Entry& entry, long long extentSize, long long imageSize) {
+    if (entry.Offset < 0 || extentSize < 0 || entry.Offset + extentSize > imageSize) {
+        throw std::out_of_range("Bundle entry '" + entry.RelativePath
+            + "' lies outside the package image.");
+    }
+}
+
+}  // namespace
 
 // The C# `IDebugInfoProvider TryLoadPDB(PEFile module)` (IlspyCmdProgram.cs):
 // the InputPDBFile dispatch -- the bare form's PDB discovery, the valued
@@ -417,6 +564,108 @@ int ExtractResource(const std::string& assemblyFileName,
     // The C# `string text = value as string ?? value?.ToString() ??
     // string.Empty; output.Write(text)` -- no trailing newline.
     output << ResourceValueToText(*value);
+    return 0;
+}
+
+std::optional<std::string> ResolveOutputDirectory(const std::string& outputDirectory) {
+    // The C# `string.IsNullOrWhiteSpace(outputDirectory)` arm: no value
+    // means the actions write to standard out.
+    bool whitespace = true;
+    for (char c : outputDirectory) {
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '\v' && c != '\f') {
+            whitespace = false;
+            break;
+        }
+    }
+    if (whitespace)
+        return std::nullopt;
+    // The .NET Path.GetFullPath shape: resolve against the current
+    // directory and normalize the '.'/'..' components. The port's
+    // fs::absolute + lexically_normal pair (no '~' expansion -- GetFullPath
+    // has none on Windows either).
+    fs::path resolved = fs::absolute(ToFsPath(outputDirectory)).lexically_normal();
+    return resolved.string();
+}
+
+int DumpPackage(const std::string& packageFileName,
+    const std::optional<std::string>& outputDirectory,
+    std::ostringstream& errorOutput) {
+    std::vector<std::uint8_t> image = ReadPackageImage(packageFileName);
+    const long long imageSize = static_cast<long long>(image.size());
+
+    long long bundleHeaderOffset = 0;
+    if (!Sfb::IsBundle(image.data(), imageSize, bundleHeaderOffset)) {
+        // The exact C# line, including the "assembiles" misspelling of the
+        // real source (IlspyCmdProgram.cs DumpPackageAssemblies).
+        errorOutput << "Cannot dump assembiles for " << packageFileName
+                    << ", because it is not a single file bundle.\r\n";
+        return 65;  // ProgramExitCodes.EX_DATAERR
+    }
+
+    Sfb::Header manifest = Sfb::ReadManifest(image.data(), imageSize, bundleHeaderOffset);
+    for (const Sfb::Entry& entry : manifest.Entries) {
+        // The C# traversal guard: a "../" component after the
+        // backslash-to-slash normalization, or a rooted RelativePath.
+        std::string normalized = entry.RelativePath;
+        for (char& c : normalized) {
+            if (c == '\\')
+                c = '/';
+        }
+        if (normalized.find("../") != std::string::npos || IsPathRooted(entry.RelativePath)) {
+            errorOutput << "Skipping single-file entry '" << entry.RelativePath
+                        << "' because it might refer to a location outside of"
+                        " the bundle output directory.\r\n";
+            continue;
+        }
+
+        std::vector<std::uint8_t> contents;
+        if (entry.CompressedSize == 0) {
+            CheckEntryExtent(entry, entry.Size, imageSize);
+            contents.assign(image.begin() + entry.Offset,
+                image.begin() + entry.Offset + entry.Size);
+        } else {
+            CheckEntryExtent(entry, entry.CompressedSize, imageSize);
+            contents = InflateRawDeflate(image.data() + entry.Offset,
+                static_cast<std::size_t>(entry.CompressedSize), entry.Size);
+            if (static_cast<long long>(contents.size()) != entry.Size) {
+                errorOutput << "Corrupted single-file entry '" << entry.RelativePath
+                            << "'. Declared decompressed size '" << entry.Size
+                            << "' is not the same as actual decompressed size '"
+                            << contents.size() << "'.\r\n";
+                return 65;  // ProgramExitCodes.EX_DATAERR
+            }
+        }
+
+        // The C# `Path.Combine(outputDirectory, entry.RelativePath)` -- with
+        // no -o value this is the ArgumentNullException escaping to the
+        // global catch (rendered with EX_SOFTWARE there).
+        if (!outputDirectory.has_value())
+            throw std::invalid_argument("Value cannot be null. (Parameter 'path1')");
+        fs::path target = ToFsPath(*outputDirectory) / ToFsPath(entry.RelativePath);
+
+        // The C# `Directory.CreateDirectory(Path.GetDirectoryName(target))`
+        // -- every intermediate directory up to the entry's own.
+        std::error_code ec;
+        fs::create_directories(target.parent_path(), ec);
+        if (ec) {
+            throw std::runtime_error("Cannot create the output directory for '"
+                + entry.RelativePath + "': " + ec.message());
+        }
+        std::ofstream fileStream(target, std::ios::binary | std::ios::trunc);
+        if (!fileStream) {
+            // The C# File.Create failure (an IOException for a locked path,
+            // a trailing ".." pair resolving onto a directory, ...) escapes
+            // to the global catch with EX_SOFTWARE; the port renders the
+            // message with the same code.
+            throw std::runtime_error("Cannot create the output file '"
+                + entry.RelativePath + "'.");
+        }
+        if (!contents.empty()) {
+            fileStream.write(reinterpret_cast<const char*>(contents.data()),
+                static_cast<std::streamsize>(contents.size()));
+        }
+    }
+
     return 0;
 }
 

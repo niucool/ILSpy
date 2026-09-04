@@ -133,4 +133,40 @@ int ExtractResource(const std::string& assemblyFileName,
     const std::string& resourceName, std::ostringstream& output,
     std::ostringstream& errorOutput);
 
+// The C# `static string ResolveOutputDirectory(string outputDirectory)`
+// (IlspyCmdProgram.cs): the -o/--outputdir value resolved BEFORE any action
+// dispatch -- nullopt for an unset/whitespace value (the C# null, which the
+// actions read as "write to standard out"), otherwise the .NET
+// Path.GetFullPath shape: resolved against the current directory and
+// normalized for '.'/'..' components. The port uses std::filesystem's
+// absolute + lexically_normal pair (no '~' expansion -- Path.GetFullPath
+// has none either on Windows).
+std::optional<std::string> ResolveOutputDirectory(const std::string& outputDirectory);
+
+// The C# `int DumpPackageAssemblies(string packageFileName, string
+// outputDirectory, CommandLineApplication app)` (IlspyCmdProgram.cs): the
+// -d/--dump-package action -- the whole file read into memory (the C#
+// memory-maps it; the port's whole-buffer read is the established file
+// convention), the SingleFileBundle.IsBundle check (the exact "Cannot dump
+// assembiles for ..." stderr line -- the C# misspelling preserved -- plus
+// EX_DATAERR), the manifest read, then one output file per entry: entries
+// whose RelativePath escapes the output directory (a "../" component after
+// the backslash-to-slash normalization, or a rooted path) are skipped with
+// the "Skipping single-file entry ..." stderr line, uncompressed entries
+// copy their bundle bytes, compressed entries inflate through the raw
+// deflate decoder (the miniz tinfl machinery behind the embedded-PDB
+// decode) with the produced-length check -- a mismatch renders the
+// "Corrupted single-file entry ..." stderr line and EX_DATAERR, a corrupt
+// deflate stream throws (the C# DeflateStream InvalidDataException
+// escaping to the global catch: the caller renders the message and returns
+// EX_SOFTWARE). A missing outputDirectory throws the C# ArgumentNullException
+// shape (Path.Combine(null, ...) -- the global catch renders it with
+// EX_SOFTWARE). The stdout convention does not apply: every diagnostic goes
+// to errorOutput for the caller to flush, and files are written through
+// UTF-16 paths so non-ASCII RelativePaths resolve correctly on Windows
+// (the C# writes through System.IO's Unicode paths).
+int DumpPackage(const std::string& packageFileName,
+    const std::optional<std::string>& outputDirectory,
+    std::ostringstream& errorOutput);
+
 }  // namespace ILSpy::ILSpyCmd
