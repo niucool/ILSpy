@@ -52,6 +52,7 @@ add_executable(ilspy_tests
     BamlDecompiler/XmlnsDictionary_Test.cpp
     BamlDecompiler/XamlPathDeserializer_Test.cpp
     BamlDecompiler/XamlUtils_Test.cpp
+    BamlDecompiler/KnownThingsEnums_Test.cpp
     Decompiler/TypeSystem/TypeName_Test.cpp
     Decompiler/TypeSystem/Version_Test.cpp
     Decompiler/TypeSystem/SignatureDecoder_Test.cpp

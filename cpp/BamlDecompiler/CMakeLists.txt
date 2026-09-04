@@ -6,8 +6,11 @@
 # type-system-free Xaml-layer leaves: NamespaceMap (Xaml/), the scoped xmlns
 # bookkeeping (XmlnsDictionary/XmlnsScope), and the self-contained XamlUtils
 # members plus the binary path decoder (Xaml/XamlUtils, Xaml/XamlPathDeserializer
-# -- the PropertyCustomHandler serializer slice). The KnownThings tables and
-# the Handlers/Rewrite/Xaml layers follow in later slices.
+# -- the PropertyCustomHandler serializer slice) -- plus the KnownThings id
+# enums (KnownTypes/KnownMembers: the BAML wire-format value tables WPF's
+# schema context fixes). The KnownThings tables (the assembly/type/member/
+# string/resource rows over the type system) and the Handlers/Rewrite/Xaml
+# layers follow in later slices.
 
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlBinaryReader.cpp
