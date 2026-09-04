@@ -28,9 +28,10 @@
 // DisassembleField with the data-block arm; DisassembleProperty and
 // DisassembleEvent with the accessor lines; DisassembleType with the
 // implements list, the layout lines, the .interfaceimpl blocks, and the
-// member sections); the remaining pieces (DisassembleNamespace, the
-// module/assembly headers) land with their metadata reads in later
-// slices.
+// member sections; DisassembleNamespace with the .namespace wrapper block;
+// WriteAssemblyHeader and WriteAssemblyReferences with the manifest
+// blocks); the remaining pieces (WriteModuleHeader and WriteModuleContents,
+// the module-level chain) land with their metadata reads in later slices.
 //
 // C#-to-C++ porting decisions:
 //  * The C# field pair `output`/`cancellationToken`/`isInType`/
@@ -49,7 +50,8 @@
 //    with the Process passthrough (SortByNameProcessor is the ported
 //    implementation). The `CancellationToken` defers
 //    with the type -- the C# ThrowIfCancellationRequested calls live in the
-//    DisassembleType/DisassembleNamespace loops (not yet ported).
+//    DisassembleType/DisassembleNamespace loops (the member renders are
+//    ported; only the cancellation itself defers).
 //  * `ExpandMemberDefinitions`/`DecodeCustomAttributeBlobs` are plain
 //    auto-properties -- public bool fields.
 //  * `WriteBlob(BlobReader)` ports over a byte span (the C# blob reader over
@@ -484,6 +486,40 @@ public:
         std::uint32_t typeToken,
         const Metadata::MetadataGenericContext& genericContext);
 
+    // The C# `public void DisassembleNamespace(string nameSpace, MetadataFile
+    // module, IEnumerable<TypeDefinitionHandle> types)`
+    // (ReflectionDisassembler.cs lines 2034-2054): the ".namespace <name>"
+    // wrapper block around the type renders (the ILSpy app's per-namespace
+    // view -- the CLI's WriteModuleContents path never wraps). An empty/null
+    // namespace string renders the types bare at top level. isInType flips
+    // true for the walk and restores only in the non-empty-namespace arm (the
+    // C# restores inside the same `if` -- an empty-namespace call LEAVES
+    // isInType set; preserved faithfully). The type collection ports as the
+    // raw TypeDef token vector (the caller's namespace grouping; the
+    // cancellationToken call defers with the token type). Each type render is
+    // followed by a blank line (the loop's WriteLine), including the last.
+    void DisassembleNamespace(const std::string& nameSpace,
+        Metadata::MetadataFile& module,
+        const std::vector<std::uint32_t>& typeTokens);
+
+    // The C# `public void WriteAssemblyHeader(MetadataFile module)` (lines
+    // 2056-2091): the ".assembly <name>" manifest block -- the optional
+    // "windowsruntime " prefix (the AssemblyAttributes WindowsRuntime bit),
+    // the assembly's own custom attributes and security declarations, the
+    // ".publickey = (...)" blob for a non-nil PublicKey column, the
+    // ".hash algorithm 0x..." line with the SHA1 comment, and the
+    // ".ver major:minor:build:revision" line. A no-op for a file that is not
+    // an assembly (the C# `!metadata.IsAssembly` early return -- a netmodule).
+    void WriteAssemblyHeader(Metadata::MetadataFile& module);
+
+    // The C# `public void WriteAssemblyReferences(MetadataReader metadata)`
+    // (lines 2093-2120): the ".module extern <name>" line per ModuleRef row,
+    // then the ".assembly extern <name>" block per AssemblyRef row (the
+    // optional "windowsruntime " prefix, the ".publickeytoken = (...)" blob
+    // for a non-nil column, and the ".ver" line). The C# MetadataReader
+    // parameter ports as the MetadataFile (the reader is the file's metadata).
+    void WriteAssemblyReferences(const Metadata::MetadataFile& module);
+
 private:
     Output::ITextOutput& output_;
 
@@ -501,8 +537,7 @@ private:
 
     // The C# `bool isInType` -- whether we are currently disassembling a
     // whole type (drives the defaultCollapsed folding of member blocks).
-    // Private: only the DisassembleType walk flips it
-    // (DisassembleNamespace follows in a later slice).
+    // Private: the DisassembleType and DisassembleNamespace walks flip it.
     bool isInType_ = false;
 };
 

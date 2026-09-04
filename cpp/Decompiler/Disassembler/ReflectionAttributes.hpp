@@ -20,7 +20,8 @@
 // The BCL `System.Reflection` attribute-flag enums, as port stand-ins -- the raw
 // ECMA-335 II.23.1 metadata flag values carried by the Field/Method/MethodImpl/
 // Property/Event/Type table rows (plus the GenericParam Flags and ImplMap
-// MappingFlags columns -- II.23.1.7 and II.23.1.11).
+// MappingFlags columns -- II.23.1.7 and II.23.1.11, and the Assembly/
+// AssemblyRef Flags columns with the HashAlgId -- II.23.1.2).
 //
 // The C# ILSpy consumes these directly from the BCL (`using System.Reflection;`):
 // ReflectionDisassembler.cs builds its attribute-name tables over them
@@ -446,5 +447,41 @@ inline TypeAttributes operator^(TypeAttributes a, TypeAttributes b) {
 inline TypeAttributes operator~(TypeAttributes a) {
 	return static_cast<TypeAttributes>(~static_cast<std::int32_t>(a));
 }
+
+// ---------------------------------------------------------------------------
+// AssemblyAttributes (ECMA-335 II.23.1.2 "Flags for assemblies") -- the BCL
+// `System.Reflection.Metadata.AssemblyFlags` the C# WriteAssemblyHeader/
+// WriteAssemblyReferences test for the WindowsRuntime bit. The Assembly and
+// AssemblyRef Flags columns are 4 bytes.
+// ---------------------------------------------------------------------------
+enum class AssemblyAttributes : std::int32_t {
+	None = 0x0000,
+	PublicKey = 0x0001,          // the reference holds the full (unhashed) public key
+	Retargetable = 0x0100,
+	WindowsRuntime = 0x0200,      // the content is a Windows Runtime component
+	DisableJITcompileOptimizer = 0x4000,
+	EnableJITcompileTracking = 0x8000,
+};
+
+inline AssemblyAttributes operator|(AssemblyAttributes a, AssemblyAttributes b) {
+	return static_cast<AssemblyAttributes>(static_cast<std::int32_t>(a) | static_cast<std::int32_t>(b));
+}
+inline AssemblyAttributes operator&(AssemblyAttributes a, AssemblyAttributes b) {
+	return static_cast<AssemblyAttributes>(static_cast<std::int32_t>(a) & static_cast<std::int32_t>(b));
+}
+inline AssemblyAttributes operator~(AssemblyAttributes a) {
+	return static_cast<AssemblyAttributes>(~static_cast<std::int32_t>(a));
+}
+
+// ---------------------------------------------------------------------------
+// AssemblyHashAlgorithm (the Assembly table's HashAlgId column) -- the BCL
+// `System.Reflection.Metadata.AssemblyHashAlgorithm` the WriteAssemblyHeader
+// hash-algorithm line spells (only SHA1 carries a comment).
+// ---------------------------------------------------------------------------
+enum class AssemblyHashAlgorithm : std::uint32_t {
+	None = 0x0000,
+	MD5 = 0x8003,
+	Sha1 = 0x8004,
+};
 
 } // namespace ILSpy::Decompiler::Disassembler

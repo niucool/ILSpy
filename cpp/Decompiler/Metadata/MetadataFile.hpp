@@ -799,6 +799,55 @@ public:
     // hoisted-constructor-argument null-guard fold consults.
     MethodDefKindInfo GetMethodDefKindInfo(std::uint32_t methodToken) const;
 
+    // The Assembly table's (table 0x20) single row -- the C# `metadata.IsAssembly`
+    // plus `metadata.GetAssemblyDefinition()` (the row every assembly manifest
+    // carries; row 1 is THE row -- ECMA allows exactly one). nullopt when the file
+    // is not an assembly (an empty Assembly table -- a netmodule); never throws.
+    // The PublicKey blob is materialized (empty for a nil column -- the C#
+    // `asm.PublicKey.IsNil`); the Flags column carries the raw II.23.1.2
+    // AssemblyAttributes (the WindowsRuntime bit is 0x0200), and HashAlgorithm
+    // the raw HashAlgId (0x8004 = SHA1). Token is the 0x20000001 assembly
+    // parent token the CustomAttribute/DeclSecurity reads take.
+    struct AssemblyDefinitionInfo {
+        std::uint32_t Token = 0;
+        std::string Name;
+        std::uint32_t Flags = 0;
+        std::vector<std::uint8_t> PublicKey;  // empty = nil
+        std::uint32_t HashAlgorithm = 0;
+        std::uint16_t MajorVersion = 0;
+        std::uint16_t MinorVersion = 0;
+        std::uint16_t BuildNumber = 0;
+        std::uint16_t RevisionNumber = 0;
+    };
+    std::optional<AssemblyDefinitionInfo> GetAssemblyDefinition() const;
+
+    // The AssemblyRef rows (table 0x23) in table order -- the C#
+    // `metadata.AssemblyReferences` collection. Same column contract as
+    // AssemblyDefinitionInfo (the Flags column is the raw AssemblyAttributes,
+    // the PublicKeyOrToken blob is materialized with empty = nil). Empty for
+    // an invalid file; never throws.
+    struct AssemblyReferenceInfo {
+        std::uint32_t Token = 0;  // 0x23000000 | row (1-based)
+        std::string Name;
+        std::uint32_t Flags = 0;
+        std::vector<std::uint8_t> PublicKeyOrToken;  // empty = nil
+        std::uint16_t MajorVersion = 0;
+        std::uint16_t MinorVersion = 0;
+        std::uint16_t BuildNumber = 0;
+        std::uint16_t RevisionNumber = 0;
+    };
+    std::vector<AssemblyReferenceInfo> GetAssemblyReferences() const;
+
+    // The ModuleRef rows (table 0x1A) in table order -- the C# ILSpy
+    // `metadata.GetModuleReferences()` extension (the whole-table walk the
+    // WriteAssemblyReferences `.module extern` lines render). Empty for an
+    // invalid file; never throws.
+    struct ModuleReferenceInfo {
+        std::uint32_t Token = 0;  // 0x1A000000 | row (1-based)
+        std::string Name;
+    };
+    std::vector<ModuleReferenceInfo> GetModuleReferences() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

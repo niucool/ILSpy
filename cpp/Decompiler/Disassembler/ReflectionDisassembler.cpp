@@ -2109,4 +2109,114 @@ void ReflectionDisassembler::DisassembleTypeHeaderInternal(
     }
 }
 
+// ---------------------------------------------------------------------------
+// DisassembleNamespace (ReflectionDisassembler.cs lines 2034-2054).
+// ---------------------------------------------------------------------------
+void ReflectionDisassembler::DisassembleNamespace(const std::string& nameSpace,
+    Metadata::MetadataFile& module,
+    const std::vector<std::uint32_t>& typeTokens)
+{
+    // The C# `string.IsNullOrEmpty` -- an empty namespace renders the types
+    // bare with no wrapper block (and, faithfully, leaves isInType set --
+    // the C# restores it only inside the non-empty arm).
+    bool hasNamespace = !nameSpace.empty();
+    if (hasNamespace) {
+        output_.Write(".namespace " + Escape(nameSpace));
+        OpenBlock(false);
+    }
+    bool oldIsInType = isInType_;
+    isInType_ = true;
+    for (std::uint32_t td : typeTokens) {
+        // The C# `cancellationToken.ThrowIfCancellationRequested()` defers
+        // with the cancellation-token type (the CLI never cancels a render).
+        DisassembleType(module, td);
+        output_.WriteLine();
+    }
+    if (hasNamespace) {
+        CloseBlock();
+        isInType_ = oldIsInType;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WriteAssemblyHeader (ReflectionDisassembler.cs lines 2056-2091).
+// ---------------------------------------------------------------------------
+void ReflectionDisassembler::WriteAssemblyHeader(Metadata::MetadataFile& module)
+{
+    // The C# `if (!metadata.IsAssembly) return;` -- an empty Assembly table
+    // (a netmodule) renders nothing.
+    auto asmDef = module.GetAssemblyDefinition();
+    if (!asmDef.has_value())
+        return;
+    output_.Write(".assembly ");
+    if ((asmDef->Flags & static_cast<std::uint32_t>(
+            AssemblyAttributes::WindowsRuntime)) != 0) {
+        output_.Write("windowsruntime ");
+    }
+    output_.Write(Escape(asmDef->Name));
+    OpenBlock(false);
+    // The C# `asm.GetCustomAttributes()` / `asm.GetDeclarativeSecurity
+    // Attributes()` -- the assembly-manifest parent is the 0x20000001 row
+    // token.
+    WriteAttributes(module, module.GetCustomAttributeTokens(asmDef->Token));
+    WriteSecurityDeclarations(module,
+        module.GetDeclarativeSecurityAttributes(asmDef->Token));
+    if (!asmDef->PublicKey.empty()) {
+        output_.Write(".publickey = ");
+        WriteBlob(asmDef->PublicKey.data(), asmDef->PublicKey.size());
+        output_.WriteLine();
+    }
+    if (asmDef->HashAlgorithm != static_cast<std::uint32_t>(
+            AssemblyHashAlgorithm::None)) {
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "0x%08x", asmDef->HashAlgorithm);
+        output_.Write(".hash algorithm " + std::string(buf));
+        if (asmDef->HashAlgorithm == static_cast<std::uint32_t>(
+                AssemblyHashAlgorithm::Sha1)) {
+            output_.Write(" // SHA1");
+        }
+        output_.WriteLine();
+    }
+    // The C# `Version v = asm.Version` is never null over the SRM row (the
+    // four 2-byte columns are always there) -- the null check never fires.
+    Output::WriteLine(output_, ".ver " + std::to_string(asmDef->MajorVersion)
+        + ":" + std::to_string(asmDef->MinorVersion)
+        + ":" + std::to_string(asmDef->BuildNumber)
+        + ":" + std::to_string(asmDef->RevisionNumber));
+    CloseBlock();
+}
+
+// ---------------------------------------------------------------------------
+// WriteAssemblyReferences (ReflectionDisassembler.cs lines 2093-2120).
+// ---------------------------------------------------------------------------
+void ReflectionDisassembler::WriteAssemblyReferences(
+    const Metadata::MetadataFile& module)
+{
+    for (const auto& mref : module.GetModuleReferences()) {
+        Output::WriteLine(output_,
+            ".module extern " + Escape(mref.Name));
+    }
+    for (const auto& aref : module.GetAssemblyReferences()) {
+        output_.Write(".assembly extern ");
+        if ((aref.Flags & static_cast<std::uint32_t>(
+                AssemblyAttributes::WindowsRuntime)) != 0) {
+            output_.Write("windowsruntime ");
+        }
+        output_.Write(Escape(aref.Name));
+        OpenBlock(false);
+        if (!aref.PublicKeyOrToken.empty()) {
+            output_.Write(".publickeytoken = ");
+            WriteBlob(aref.PublicKeyOrToken.data(),
+                aref.PublicKeyOrToken.size());
+            output_.WriteLine();
+        }
+        // Same never-null Version contract as WriteAssemblyHeader.
+        Output::WriteLine(output_, ".ver " + std::to_string(aref.MajorVersion)
+            + ":" + std::to_string(aref.MinorVersion)
+            + ":" + std::to_string(aref.BuildNumber)
+            + ":" + std::to_string(aref.RevisionNumber));
+        CloseBlock();
+    }
+}
+
 }  // namespace ILSpy::Decompiler::Disassembler

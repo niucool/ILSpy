@@ -2149,4 +2149,92 @@ std::uint32_t MetadataFile::GetEntryPointToken() const {
     return impl_->bodyReader->EntryPointToken();
 }
 
+// The Assembly table's single row (row 1 -- ECMA allows exactly one
+// assembly-manifest row). See the header for the full contract.
+std::optional<MetadataFile::AssemblyDefinitionInfo>
+MetadataFile::GetAssemblyDefinition() const {
+    if (!IsValid() || impl_->db->Assembly.size() == 0)
+        return std::nullopt;
+    try {
+        AssemblyDefinitionInfo info;
+        info.Token = (0x20u << 24) | 1u;
+        info.Name = std::string{impl_->db->Assembly[0].Name()};
+        info.Flags = impl_->db->Assembly[0].Flags().value;
+        info.HashAlgorithm =
+            static_cast<std::uint32_t>(impl_->db->Assembly[0].HashAlgId());
+        auto version = impl_->db->Assembly[0].Version();
+        info.MajorVersion = version.MajorVersion;
+        info.MinorVersion = version.MinorVersion;
+        info.BuildNumber = version.BuildNumber;
+        info.RevisionNumber = version.RevisionNumber;
+        // A raw column value of 0 is the nil blob handle (the C#
+        // `asm.PublicKey.IsNil`); anything else materializes the bytes.
+        std::uint32_t publicKeyOffset =
+            impl_->db->Assembly.get_value<std::uint32_t>(0, 3);
+        if (publicKeyOffset != 0) {
+            auto blob = impl_->db->get_blob(publicKeyOffset);
+            info.PublicKey =
+                std::vector<std::uint8_t>(blob.begin(), blob.end());
+        }
+        return info;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// The AssemblyRef rows in table order. See the header for the full contract.
+std::vector<MetadataFile::AssemblyReferenceInfo>
+MetadataFile::GetAssemblyReferences() const {
+    std::vector<AssemblyReferenceInfo> result;
+    if (!IsValid()) return result;
+    try {
+        for (std::uint32_t row = 1;
+             row <= impl_->db->AssemblyRef.size(); row++) {
+            AssemblyReferenceInfo info;
+            info.Token = (0x23u << 24) | row;
+            info.Name = std::string{impl_->db->AssemblyRef[row - 1].Name()};
+            info.Flags = impl_->db->AssemblyRef[row - 1].Flags().value;
+            auto version = impl_->db->AssemblyRef[row - 1].Version();
+            info.MajorVersion = version.MajorVersion;
+            info.MinorVersion = version.MinorVersion;
+            info.BuildNumber = version.BuildNumber;
+            info.RevisionNumber = version.RevisionNumber;
+            std::uint32_t publicKeyOffset =
+                impl_->db->AssemblyRef.get_value<std::uint32_t>(row - 1, 2);
+            if (publicKeyOffset != 0) {
+                auto blob = impl_->db->get_blob(publicKeyOffset);
+                info.PublicKeyOrToken =
+                    std::vector<std::uint8_t>(blob.begin(), blob.end());
+            }
+            result.push_back(std::move(info));
+        }
+    } catch (const std::exception&) {
+        result.clear();
+    }
+    return result;
+}
+
+// The ModuleRef rows in table order. See the header for the full contract.
+std::vector<MetadataFile::ModuleReferenceInfo>
+MetadataFile::GetModuleReferences() const {
+    std::vector<ModuleReferenceInfo> result;
+    if (!IsValid()) return result;
+    try {
+        for (std::uint32_t row = 1;
+             row <= impl_->db->ModuleRef.size(); row++) {
+            ModuleReferenceInfo info;
+            info.Token = (0x1Au << 24) | row;
+            // The ModuleRef row exposes no Name() accessor in the winmd
+            // reader -- the raw string column read (the GetModuleReferenceName
+            // convention).
+            info.Name = std::string{impl_->db->get_string(
+                impl_->db->ModuleRef.get_value<std::uint32_t>(row - 1, 0))};
+            result.push_back(std::move(info));
+        }
+    } catch (const std::exception&) {
+        result.clear();
+    }
+    return result;
+}
+
 } // namespace ILSpy::Decompiler::Metadata

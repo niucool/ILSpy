@@ -42,6 +42,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -2929,4 +2930,445 @@ TEST(ReflectionDisassemblerTest, DisassembleTypeStructuralSweep)
         ++rendered;
     }
     EXPECT_EQ(rendered, 5);
+}
+
+// ---------------------------------------------------------------------------
+// DisassembleNamespace / WriteAssemblyHeader / WriteAssemblyReferences (the
+// ReflectionDisassembler.cs lines 2034-2120 port) with the underlying
+// MetadataFile reads (GetAssemblyDefinition, GetAssemblyReferences,
+// GetModuleReferences). The exact renders are pinned against the real C#
+// output: the installed ilspycmd 11.0 tool ships ICSharpCode.Decompiler.dll,
+// which a standalone probe project calls directly (the same
+// ReflectionDisassembler/PlainTextOutput pair) to dump the gold over the
+// same local fixtures.
+// ---------------------------------------------------------------------------
+
+TEST(ReflectionDisassemblerTest, AssemblyAndReferenceMetadataReads)
+{
+    MD::MetadataFile mscorlib(MscorlibPath());
+    ASSERT_TRUE(mscorlib.IsValid());
+
+    // The mscorlib manifest row: name, the PublicKey flag (0x1) without
+    // WindowsRuntime, SHA1, 4:0:0:0, and the 16-byte public key blob.
+    auto def = mscorlib.GetAssemblyDefinition();
+    ASSERT_TRUE(def.has_value());
+    EXPECT_EQ(def->Token, 0x20000001u);
+    EXPECT_EQ(def->Name, "mscorlib");
+    EXPECT_EQ(def->Flags, 0x00000001u);
+    EXPECT_EQ(def->HashAlgorithm, 0x00008004u);
+    EXPECT_EQ(def->MajorVersion, 4);
+    EXPECT_EQ(def->MinorVersion, 0);
+    EXPECT_EQ(def->BuildNumber, 0);
+    EXPECT_EQ(def->RevisionNumber, 0);
+    const std::uint8_t expectedKey[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    EXPECT_EQ(def->PublicKey,
+        std::vector<std::uint8_t>(std::begin(expectedKey), std::end(expectedKey)));
+
+    // mscorlib references nothing (self-contained) but declares 17 module
+    // refs; the two api-ms-* names are not valid ILAsm identifiers and
+    // render quoted (the Escape contract).
+    EXPECT_TRUE(mscorlib.GetAssemblyReferences().empty());
+    auto moduleRefs = mscorlib.GetModuleReferences();
+    ASSERT_EQ(moduleRefs.size(), 17u);
+    EXPECT_EQ(moduleRefs.front().Token, 0x1A000001u);
+    EXPECT_EQ(moduleRefs.front().Name, "kernel32.dll");
+    EXPECT_EQ(moduleRefs[10].Name, "combase.dll");
+    EXPECT_EQ(moduleRefs[11].Name, "QCall");
+    EXPECT_EQ(moduleRefs[15].Name, "api-ms-win-core-winrt-error-l1-1-1.dll");
+    EXPECT_EQ(moduleRefs[16].Name, "api-ms-win-core-winrt-string-l1-1-0.dll");
+
+    MD::MetadataFile systemDll(SystemDllPath());
+    ASSERT_TRUE(systemDll.IsValid());
+    auto systemDef = systemDll.GetAssemblyDefinition();
+    ASSERT_TRUE(systemDef.has_value());
+    EXPECT_EQ(systemDef->Name, "System");
+    EXPECT_EQ(systemDef->MajorVersion, 4);
+    EXPECT_EQ(systemDef->HashAlgorithm, 0x00008004u);
+
+    // System.dll's three extern refs with their public key tokens and
+    // versions (row order).
+    auto refs = systemDll.GetAssemblyReferences();
+    ASSERT_EQ(refs.size(), 3u);
+    EXPECT_EQ(refs[0].Token, 0x23000001u);
+    EXPECT_EQ(refs[0].Name, "mscorlib");
+    EXPECT_EQ(refs[0].Flags, 0u);
+    const std::uint8_t mscorlibToken[] = {0xb7, 0x7a, 0x5c, 0x56, 0x19, 0x34,
+        0xe0, 0x89};
+    EXPECT_EQ(refs[0].PublicKeyOrToken,
+        std::vector<std::uint8_t>(std::begin(mscorlibToken),
+            std::end(mscorlibToken)));
+    EXPECT_EQ(refs[1].Name, "System.Configuration");
+    const std::uint8_t configToken[] = {0xb0, 0x3f, 0x5f, 0x7f, 0x11, 0xd5,
+        0x0a, 0x3a};
+    EXPECT_EQ(refs[1].PublicKeyOrToken,
+        std::vector<std::uint8_t>(std::begin(configToken),
+            std::end(configToken)));
+    EXPECT_EQ(refs[2].Name, "System.Xml");
+    for (const auto& r : refs) {
+        EXPECT_EQ(r.MajorVersion, 4);
+        EXPECT_EQ(r.MinorVersion, 0);
+        EXPECT_EQ(r.BuildNumber, 0);
+        EXPECT_EQ(r.RevisionNumber, 0);
+    }
+}
+
+TEST(ReflectionDisassemblerTest, WriteAssemblyReferencesSystemDllExact)
+{
+    MD::MetadataFile f(SystemDllPath());
+    ASSERT_TRUE(f.IsValid());
+
+    // The exact gold: 25 ".module extern" lines, then the three
+    // ".assembly extern" blocks with publickeytoken and .ver lines.
+    std::string actual = RenderWithDisassembler(
+        [&](DA::ReflectionDisassembler& rd) { rd.WriteAssemblyReferences(f); });
+    std::string expected =
+        ".module extern kernel32.dll\r\n"
+        ".module extern advapi32.dll\r\n"
+        ".module extern user32.dll\r\n"
+        ".module extern psapi.dll\r\n"
+        ".module extern shell32.dll\r\n"
+        ".module extern ntdll.dll\r\n"
+        ".module extern gdi32.dll\r\n"
+        ".module extern perfcounter.dll\r\n"
+        ".module extern wldp.dll\r\n"
+        ".module extern wtsapi32.dll\r\n"
+        ".module extern version.dll\r\n"
+        ".module extern ole32.dll\r\n"
+        ".module extern crypt32.dll\r\n"
+        ".module extern rasapi32.dll\r\n"
+        ".module extern secur32.dll\r\n"
+        ".module extern ws2_32.dll\r\n"
+        ".module extern httpapi.dll\r\n"
+        ".module extern wininet.dll\r\n"
+        ".module extern mswsock.dll\r\n"
+        ".module extern winhttp.dll\r\n"
+        ".module extern tokenbinding.dll\r\n"
+        ".module extern websocket.dll\r\n"
+        ".module extern iphlpapi.dll\r\n"
+        ".module extern winmm.dll\r\n"
+        ".assembly extern mscorlib\r\n"
+        "{\r\n"
+        "\t.publickeytoken = (\r\n"
+        "\t\tb7 7a 5c 56 19 34 e0 89\r\n"
+        "\t)\r\n"
+        "\t.ver 4:0:0:0\r\n"
+        "}\r\n"
+        ".assembly extern System.Configuration\r\n"
+        "{\r\n"
+        "\t.publickeytoken = (\r\n"
+        "\t\tb0 3f 5f 7f 11 d5 0a 3a\r\n"
+        "\t)\r\n"
+        "\t.ver 4:0:0:0\r\n"
+        "}\r\n"
+        ".assembly extern System.Xml\r\n"
+        "{\r\n"
+        "\t.publickeytoken = (\r\n"
+        "\t\tb7 7a 5c 56 19 34 e0 89\r\n"
+        "\t)\r\n"
+        "\t.ver 4:0:0:0\r\n"
+        "}\r\n";
+    EXPECT_EQ(actual, expected);
+}
+
+TEST(ReflectionDisassemblerTest, WriteAssemblyReferencesMscorlibModuleRefsOnly)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+
+    // mscorlib declares no assembly refs: the 17 module extern lines only,
+    // with the two api-ms-* names escaped in single quotes.
+    std::string actual = RenderWithDisassembler(
+        [&](DA::ReflectionDisassembler& rd) { rd.WriteAssemblyReferences(f); });
+    std::string expected =
+        ".module extern kernel32.dll\r\n"
+        ".module extern oleaut32.dll\r\n"
+        ".module extern advapi32.dll\r\n"
+        ".module extern ole32.dll\r\n"
+        ".module extern user32.dll\r\n"
+        ".module extern shell32.dll\r\n"
+        ".module extern secur32.dll\r\n"
+        ".module extern bcrypt.dll\r\n"
+        ".module extern clr.dll\r\n"
+        ".module extern ntdll.dll\r\n"
+        ".module extern combase.dll\r\n"
+        ".module extern QCall\r\n"
+        ".module extern advapi32\r\n"
+        ".module extern crypt32\r\n"
+        ".module extern mscoree.dll\r\n"
+        ".module extern 'api-ms-win-core-winrt-error-l1-1-1.dll'\r\n"
+        ".module extern 'api-ms-win-core-winrt-string-l1-1-0.dll'\r\n";
+    EXPECT_EQ(actual, expected);
+}
+
+TEST(ReflectionDisassemblerTest, WriteAssemblyHeaderMscorlibExactShape)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+
+    std::string actual = RenderWithDisassembler(
+        [&](DA::ReflectionDisassembler& rd) { rd.WriteAssemblyHeader(f); });
+
+    // The block opens with the manifest name (no blank line -- the
+    // OpenBlock's first WriteLine terminates the mid-line ".assembly" name)
+    // and the first attribute is the extension attribute.
+    EXPECT_EQ(actual.rfind(
+        ".assembly mscorlib\r\n"
+        "{\r\n"
+        "\t.custom instance void System.Runtime.CompilerServices."
+        "ExtensionAttribute::.ctor() = (\r\n"
+        "\t\t01 00 00 00\r\n"
+        "\t)\r\n", 0), 0u);
+
+    // 36 assembly-level custom attributes and the one assembly-level
+    // security declaration (RequestMinimum -- "reqmin").
+    int customLines = 0, permissionsets = 0;
+    for (std::size_t p = 0; (p = actual.find("\t.custom ", p)) !=
+        std::string::npos; p += 1) customLines++;
+    for (std::size_t p = 0; (p = actual.find(".permissionset ", p)) !=
+        std::string::npos; p += 1) permissionsets++;
+    EXPECT_EQ(customLines, 36);
+    EXPECT_EQ(permissionsets, 1);
+    EXPECT_NE(actual.find("\t.permissionset reqmin = (\r\n"
+        "\t\t2e 01 80 84 53 79 73 74 65 6d 2e 53 65 63 75 72\r\n"),
+        std::string::npos);
+
+    // The exact tail: public key, hash algorithm with the SHA1 comment,
+    // version, close brace.
+    std::string tail =
+        "\t.publickey = (\r\n"
+        "\t\t00 00 00 00 00 00 00 00 04 00 00 00 00 00 00 00\r\n"
+        "\t)\r\n"
+        "\t.hash algorithm 0x00008004 // SHA1\r\n"
+        "\t.ver 4:0:0:0\r\n"
+        "}\r\n";
+    EXPECT_EQ(actual.substr(actual.size() - tail.size()), tail);
+}
+
+TEST(ReflectionDisassemblerTest, WriteAssemblyHeaderCoreLibNoPermissionset)
+{
+    std::string path = CoreLibPath();
+    if (path.empty()) {
+        GTEST_SKIP() << "no .NET shared runtime System.Private.CoreLib.dll";
+    }
+    MD::MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    std::string actual = RenderWithDisassembler(
+        [&](DA::ReflectionDisassembler& rd) { rd.WriteAssemblyHeader(f); });
+
+    // CoreLib has no assembly-level security declarations (the
+    // WriteSecurityDeclarations early-out) and a 160-byte public key that
+    // spans 10 blob lines.
+    EXPECT_EQ(actual.rfind(".assembly System.Private.CoreLib\r\n{\r\n", 0), 0u);
+    EXPECT_EQ(actual.find(".permissionset"), std::string::npos);
+    int customLines = 0;
+    for (std::size_t p = 0; (p = actual.find("\t.custom ", p)) !=
+        std::string::npos; p += 1) customLines++;
+    EXPECT_EQ(customLines, 22);
+    std::string tail =
+        "\t.publickey = (\r\n"
+        "\t\t00 24 00 00 04 80 00 00 94 00 00 00 06 02 00 00\r\n"
+        "\t\t00 24 00 00 52 53 41 31 00 04 00 00 01 00 01 00\r\n"
+        "\t\t8d 56 c7 6f 9e 86 49 38 30 49 f3 83 c4 4b e0 ec\r\n"
+        "\t\t20 41 81 82 2a 6c 31 cf 5e b7 ef 48 69 44 d0 32\r\n"
+        "\t\t18 8e a1 d3 92 07 63 71 2c cb 12 d7 5f b7 7e 98\r\n"
+        "\t\t11 14 9e 61 48 e5 d3 2f ba ab 37 61 1c 18 78 dd\r\n"
+        "\t\tc1 9e 20 ef 13 5d 0c b2 cf f2 bf ec 3d 11 58 10\r\n"
+        "\t\tc3 d9 06 96 38 fe 4b e2 15 db f7 95 86 19 20 e5\r\n"
+        "\t\tab 6f 7d b2 e2 ce ef 13 6a c2 3d 5d d2 bf 03 17\r\n"
+        "\t\t00 ae c2 32 f6 c6 b1 c7 85 b4 30 5c 12 3b 37 ab\r\n"
+        "\t)\r\n"
+        "\t.hash algorithm 0x00008004 // SHA1\r\n"
+        "\t.ver 10:0:0:0\r\n"
+        "}\r\n";
+    EXPECT_EQ(actual.substr(actual.size() - tail.size()), tail);
+}
+
+// The tiny.netmodule fixture: a 2 KB PE without an Assembly table (a
+// netmodule), assembled with the framework ilasm from a two-type .il
+// source (a <Module> class, the Tiny type with one static method, and
+// the autodetected mscorlib extern reference). The bytes are embedded so
+// the not-an-assembly arms have a local fixture (every installed DLL
+// carries an assembly manifest).
+const char* kTinyNetModuleHex =
+    "4d5a90000300000004000000ffff0000b8000000000000004000000000000000"
+    "0000000000000000000000000000000000000000000000000000000080000000"
+    "0e1fba0e00b409cd21b8014ccd21546869732070726f6772616d2063616e6e6f"
+    "742062652072756e20696e20444f53206d6f64652e0d0d0a2400000000000000"
+    "504500004c0102001c8c9a6a0000000000000000e00002210b010b0000040000"
+    "00020000000000000e2200000020000000400000000040000020000000020000"
+    "0400000000000000040000000000000000600000000200000000000003004085"
+    "0000100000100000000010000010000000000000100000000000000000000000"
+    "b421000057000000000000000000000000000000000000000000000000000000"
+    "004000000c000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000020000008000000"
+    "0000000000000000082000004800000000000000000000002e74657874000000"
+    "1402000000200000000400000002000000000000000000000000000020000060"
+    "2e72656c6f6300000c0000000040000000020000000600000000000000000000"
+    "0000000040000042000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "f021000000000000480000000200050060200000540100000100000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "000000000000000000000000000000001330020004000000000000000203582a"
+    "42534a4201000100000000000c00000076342e302e3330333139000000000500"
+    "6c0000008c000000237e0000f80000003400000023537472696e677300000000"
+    "2c01000008000000235553003401000010000000234755494400000044010000"
+    "1000000023426c6f620000000000000002000001470100000800000000fa2533"
+    "0016000001000000010000000200000001000000020000000100000000001800"
+    "010000000000060011000a000000000001000000000001000100010000002600"
+    "000005000100010050200000000096002b000a000100000001002f0000000200"
+    "310004000000000000000000000001001d00000000000000003c4d6f64756c65"
+    "3e0053797374656d004f626a6563740074696e79006d73636f726c6962005469"
+    "6e79004164640061006200000003200000000000d4ef3c169a80444682fd23d0"
+    "eb508d600008b77a5c561934e089050002080808dc2100000000000000000000"
+    "fe210000002000000000000000000000000000000000000000000000f0210000"
+    "0000000000000000000000000000000000005f436f72446c6c4d61696e006d73"
+    "636f7265652e646c6c0000000000ff2500204000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "002000000c000000103200000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
+// Writes the embedded netmodule bytes to a temp file and returns the
+// path (MetadataFile needs a real file).
+std::string WriteTinyNetModule() {
+    std::string bytes;
+    bytes.reserve(std::strlen(kTinyNetModuleHex) / 2);
+    for (const char* p = kTinyNetModuleHex; p[0] && p[1]; p += 2) {
+        int hi = p[0] <= '9' ? p[0] - '0' : (p[0] | 32) - 'a' + 10;
+        int lo = p[1] <= '9' ? p[1] - '0' : (p[1] | 32) - 'a' + 10;
+        bytes.push_back(static_cast<char>(hi * 16 + lo));
+    }
+    namespace fs = std::filesystem;
+    fs::path path = fs::temp_directory_path() / "ilspy_tiny_test.netmodule";
+    std::FILE* out = std::fopen(path.string().c_str(), "wb");
+    if (out == nullptr) return "";
+    std::fwrite(bytes.data(), 1, bytes.size(), out);
+    std::fclose(out);
+    return path.string();
+}
+TEST(ReflectionDisassemblerTest, WriteAssemblyHeaderNetModuleRendersNothing)
+{
+    std::string path = WriteTinyNetModule();
+    ASSERT_FALSE(path.empty());
+
+    // A netmodule (an empty Assembly table) is not an assembly: the read is
+    // nullopt and the manifest header renders nothing at all.
+    MD::MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    EXPECT_FALSE(f.GetAssemblyDefinition().has_value());
+    std::string actual = RenderWithDisassembler(
+        [&](DA::ReflectionDisassembler& rd) { rd.WriteAssemblyHeader(f); });
+    EXPECT_TRUE(actual.empty());
+
+    // The netmodule still declares its autodetected mscorlib extern (with
+    // the resolved public key token), rendered by WriteAssemblyReferences.
+    std::string refs = RenderWithDisassembler(
+        [&](DA::ReflectionDisassembler& rd) { rd.WriteAssemblyReferences(f); });
+    EXPECT_EQ(refs,
+        ".assembly extern mscorlib\r\n"
+        "{\r\n"
+        "\t.publickeytoken = (\r\n"
+        "\t\tb7 7a 5c 56 19 34 e0 89\r\n"
+        "\t)\r\n"
+        "\t.ver 4:0:0:0\r\n"
+        "}\r\n");
+    std::remove(path.c_str());
+}
+
+TEST(ReflectionDisassemblerTest, DisassembleNamespaceRendersNamespaceBlock)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+
+    // The first two Microsoft.Runtime.Hosting types in table order
+    // (StrongNameHelpers, IClrStrongNameUsingIntPtr -- the same pair the
+    // gold render pinned).
+    std::uint32_t strongNameHelpers =
+        FindTypeDefTokenIn(f, "Microsoft.Runtime.Hosting", "StrongNameHelpers");
+    std::uint32_t usingIntPtr =
+        FindTypeDefTokenIn(f, "Microsoft.Runtime.Hosting", "IClrStrongNameUsingIntPtr");
+    ASSERT_NE(strongNameHelpers, 0u);
+    ASSERT_NE(usingIntPtr, 0u);
+
+    std::string actual = RenderWithDisassembler(
+        [&](DA::ReflectionDisassembler& rd) {
+            rd.DisassembleNamespace("Microsoft.Runtime.Hosting", f,
+                {strongNameHelpers, usingIntPtr});
+        });
+
+    // The wrapper block opens with the escaped namespace name (no blank
+    // line -- OpenBlock's first WriteLine terminates the mid-line header)
+    // and the type renders land at one indent level.
+    EXPECT_EQ(actual.rfind(
+        ".namespace Microsoft.Runtime.Hosting\r\n"
+        "{\r\n"
+        "\t.class private auto ansi abstract sealed beforefieldinit "
+        "Microsoft.Runtime.Hosting.StrongNameHelpers\r\n"
+        "\t\textends System.Object\r\n"
+        "\t{\r\n", 0), 0u);
+
+    // The two type renders are separated by exactly one blank line (the
+    // loop's WriteLine after each type).
+    EXPECT_NE(actual.find(
+        "\t} // end of class Microsoft.Runtime.Hosting.StrongNameHelpers\r\n"
+        "\r\n"
+        "\t.class "), std::string::npos);
+
+    // The block closes after the last type's trailing blank line.
+    std::string tail =
+        "\t} // end of class Microsoft.Runtime.Hosting.IClrStrongNameUsingIntPtr\r\n"
+        "\r\n"
+        "}\r\n";
+    EXPECT_EQ(actual.substr(actual.size() - tail.size()), tail);
+}
+
+TEST(ReflectionDisassemblerTest, DisassembleNamespaceEmptyRendersBareTypes)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+
+    // An empty namespace string renders no wrapper: the types land at top
+    // level, each followed by one blank line (the ILSpy app's global
+    // namespace grouping).
+    std::uint32_t clrStrongName =
+        FindTypeDefTokenIn(f, "Microsoft.Runtime.Hosting", "IClrStrongName");
+    ASSERT_NE(clrStrongName, 0u);
+
+    std::string typeRender = RenderWithDisassembler(
+        [&](DA::ReflectionDisassembler& rd) { rd.DisassembleType(f, clrStrongName); });
+    std::string actual = RenderWithDisassembler(
+        [&](DA::ReflectionDisassembler& rd) {
+            rd.DisassembleNamespace("", f, {clrStrongName});
+        });
+    EXPECT_EQ(actual, typeRender + "\r\n");
+    EXPECT_EQ(actual.find(".namespace"), std::string::npos);
 }
