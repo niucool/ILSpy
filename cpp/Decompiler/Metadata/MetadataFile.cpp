@@ -275,10 +275,11 @@ std::vector<EventInfo> MetadataFile::GetEvents(std::uint32_t typeToken) const {
     return result;
 }
 
-// An InterfaceImpl row's Interface column (a TypeDefOrRef coded index, 2 tag
-// bits) as a raw token: TypeDef tag 0 -> 0x02, TypeRef tag 1 -> 0x01,
-// TypeSpec tag 2 -> 0x1B; a raw 0 column is the nil handle.
-static std::uint32_t InterfaceColumnToToken(std::uint32_t raw) {
+// An InterfaceImpl row's Interface column and a TypeDef row's Extends
+// column (both TypeDefOrRef coded indexes, 2 tag bits) as a raw token:
+// TypeDef tag 0 -> 0x02, TypeRef tag 1 -> 0x01, TypeSpec tag 2 -> 0x1B;
+// a raw 0 column is the nil handle.
+static std::uint32_t TypeDefOrRefColumnToToken(std::uint32_t raw) {
     if (raw == 0) return 0;
     std::uint32_t rid = raw >> 2;
     switch (raw & 0x3u) {
@@ -305,7 +306,7 @@ MetadataFile::GetInterfaceImplementations(std::uint32_t typeDefToken) const {
             info.Token = (0x09u << 24)
                 | ((static_cast<std::uint32_t>((*it).index()) + 1) & 0x00FFFFFFu);
             info.InterfaceToken =
-                InterfaceColumnToToken((*it).get_value<std::uint32_t>(1));
+                TypeDefOrRefColumnToToken((*it).get_value<std::uint32_t>(1));
             result.push_back(info);
         }
     } catch (const std::exception&) {
@@ -325,7 +326,7 @@ MetadataFile::GetInterfaceImplementation(std::uint32_t implToken) const {
         InterfaceImplementationInfo info;
         info.Token = implToken;
         info.InterfaceToken =
-            InterfaceColumnToToken(
+            TypeDefOrRefColumnToToken(
                 impl_->db->InterfaceImpl.get_value<std::uint32_t>(row - 1, 1));
         return info;
     } catch (const std::exception&) {
@@ -529,6 +530,50 @@ std::optional<TypeRefNameInfo> MetadataFile::GetTypeRefNameInfo(std::uint32_t ty
     } catch (const std::exception&) {
         return std::nullopt;
     }
+}
+
+// A TypeDef row's Extends column as a raw token (the C# ILSpy
+// SRMExtensions `TypeDefinition.GetBaseTypeOrNil()`). See the header for
+// the full contract.
+std::uint32_t MetadataFile::GetBaseTypeToken(std::uint32_t typeToken) const {
+    if (!IsValid()) return 0;
+    std::uint32_t table = typeToken >> 24;
+    std::uint32_t row = typeToken & 0x00FFFFFFu;
+    if (table != 0x02 || row == 0 || row > impl_->db->TypeDef.size()) return 0;
+    try {
+        // The Extends column is a TypeDefOrRef coded index (2 tag bits).
+        return TypeDefOrRefColumnToToken(
+            impl_->db->TypeDef[row - 1].get_value<std::uint32_t>(3));
+    } catch (const std::exception&) {
+        // Malformed image: report the nil base.
+        return 0;
+    }
+}
+
+// The nested TypeDef tokens of a TypeDef (the C#
+// `TypeDefinition.GetNestedTypes()`). See the header for the full contract.
+std::vector<std::uint32_t> MetadataFile::GetNestedTypes(
+    std::uint32_t typeToken) const {
+    std::vector<std::uint32_t> result;
+    if (!IsValid()) return result;
+    std::uint32_t table = typeToken >> 24;
+    std::uint32_t row = typeToken & 0x00FFFFFFu;
+    if (table != 0x02 || row == 0 || row > impl_->db->TypeDef.size()) return result;
+    try {
+        // The NestedClass table in row order: each row's EnclosingClass
+        // names the parent, its NestedClass the nested TypeDef (the same
+        // rows the SRM GetNestedTypes collection walks).
+        for (auto&& nc : impl_->db->NestedClass) {
+            if (static_cast<std::uint32_t>(nc.EnclosingType().index()) + 1 != row)
+                continue;
+            std::uint32_t nestedRow =
+                static_cast<std::uint32_t>(nc.NestedType().index()) + 1;
+            result.push_back((0x02u << 24) | (nestedRow & 0x00FFFFFFu));
+        }
+    } catch (const std::exception&) {
+        // Malformed image: report no nested types.
+    }
+    return result;
 }
 
 // A TypeRef row's ResolutionScope coded index: the scope kind plus the
@@ -865,6 +910,32 @@ std::uint32_t MetadataFile::GetTypeLayoutSize(std::uint32_t typeDefToken) const 
         // Malformed image: report no layout size.
     }
     return 0;
+}
+
+// A TypeDef row's layout (the C# `TypeDefinition.GetLayout()` over its
+// ClassLayout row). See the header for the full contract.
+MetadataFile::TypeLayoutInfo MetadataFile::GetTypeLayout(
+    std::uint32_t typeDefToken) const {
+    TypeLayoutInfo result;
+    if (!IsValid()) return result;
+    std::uint32_t table = typeDefToken >> 24;
+    std::uint32_t row = typeDefToken & 0x00FFFFFFu;
+    if (table != 0x02 || row == 0 || row > impl_->db->TypeDef.size()) return result;
+    try {
+        auto& db = *impl_->db;
+        // The Parent column is a plain 1-based TypeDef row index; column 0
+        // is PackingSize (uint16), column 1 ClassSize (uint32).
+        for (std::uint32_t i = 0; i < db.ClassLayout.size(); i++) {
+            if (db.ClassLayout.get_value<std::uint32_t>(i, 2) != row) continue;
+            result.PackingSize =
+                db.ClassLayout.get_value<std::uint16_t>(i, 0);
+            result.ClassSize = db.ClassLayout.get_value<std::uint32_t>(i, 1);
+            break;
+        }
+    } catch (const std::exception&) {
+        // Malformed image: report no layout.
+    }
+    return result;
 }
 
 // The PE-section reads (PeImage passthroughs through the body reader).

@@ -26,9 +26,11 @@
 // and the member renderers (DisassembleMethod with the header, the body
 // block, the security declarations, and the generic-parameter list;
 // DisassembleField with the data-block arm; DisassembleProperty and
-// DisassembleEvent with the accessor lines); the remaining pieces
-// (DisassembleType/Namespace, the module/assembly headers) land with their
-// metadata reads in later slices.
+// DisassembleEvent with the accessor lines; DisassembleType with the
+// implements list, the layout lines, the .interfaceimpl blocks, and the
+// member sections); the remaining pieces (DisassembleNamespace, the
+// module/assembly headers) land with their metadata reads in later
+// slices.
 //
 // C#-to-C++ porting decisions:
 //  * The C# field pair `output`/`cancellationToken`/`isInType`/
@@ -442,6 +444,46 @@ public:
         std::uint32_t eventToken,
         const Metadata::MetadataFile::EventAccessorsInfo& accessors);
 
+    // The C# `public void DisassembleType(MetadataFile module,
+    // TypeDefinitionHandle type)` (ReflectionDisassembler.cs lines
+    // 1598-1717): the whole type render -- the header, the `implements`
+    // list over the processed InterfaceImpl rows, the `{` block with the
+    // type's own attributes, security declarations, generic-parameter
+    // attribute blocks, the `.pack`/`.size` layout lines, the
+    // `.interfaceimpl` blocks for attributed interface rows, then the
+    // "// Nested Types"/"// Fields"/"// Methods"/"// Events"/"//
+    // Properties" sections (each routed through the EntityProcessor)
+    // and the "end of class <name>" close comment (the escaped short
+    // name for a nested type, the reflection full name for a top-level
+    // one). isInType flips true for the body (the member blocks fold); a
+    // nested type recurses through here with the OUTER isInType still
+    // set. The handle ports as the raw TypeDef token (table 0x02). The C#
+    // `cancellationToken.ThrowIfCancellationRequested()` calls in the
+    // member loops defer with the cancellation-token type (the CLI never
+    // cancels a single-type render).
+    void DisassembleType(Metadata::MetadataFile& module, std::uint32_t typeToken);
+
+    // The C# `public void DisassembleTypeHeader(MetadataFile module,
+    // TypeDefinitionHandle type)` (lines 1719-1724): the header only, no
+    // body.
+    void DisassembleTypeHeader(Metadata::MetadataFile& module,
+        std::uint32_t typeToken);
+
+    // The C# `private void DisassembleTypeHeaderInternal(MetadataFile
+    // module, TypeDefinitionHandle handle, TypeDefinition typeDefinition,
+    // MetadataGenericContext genericContext)` (lines 1726-1753): the
+    // ".class" reference + token comment, the "interface " prefix over
+    // the ClassSemanticsMask bit, the visibility/layout/string-format
+    // WriteEnum splits, the remaining-flags WriteFlags, the type name
+    // (the full IL name for a top-level type, the escaped short name for
+    // a nested one) with the generic-parameter list, the fold start, and
+    // the indented `extends <base>` line (nothing for a nil base). The
+    // C# typeDefinition parameter (row data the caller already had)
+    // drops away -- the port reads the row by token.
+    void DisassembleTypeHeaderInternal(Metadata::MetadataFile& module,
+        std::uint32_t typeToken,
+        const Metadata::MetadataGenericContext& genericContext);
+
 private:
     Output::ITextOutput& output_;
 
@@ -459,8 +501,8 @@ private:
 
     // The C# `bool isInType` -- whether we are currently disassembling a
     // whole type (drives the defaultCollapsed folding of member blocks).
-    // Private: only the DisassembleType/DisassembleNamespace walks (later
-    // slices) flip it.
+    // Private: only the DisassembleType walk flips it
+    // (DisassembleNamespace follows in a later slice).
     bool isInType_ = false;
 };
 

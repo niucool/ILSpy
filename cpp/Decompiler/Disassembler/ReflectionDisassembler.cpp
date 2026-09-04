@@ -26,7 +26,9 @@
 #include "Decompiler/Disassembler/EnumNameCollection.hpp"
 #include "Decompiler/Disassembler/ReflectionAttributes.hpp"
 #include "Decompiler/IL/InstructionOutputExtensions.hpp"
+#include "Decompiler/Metadata/MetadataExtensions.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/Metadata/SRMExtensions.hpp"
 #include "Decompiler/Metadata/SignatureTypeProvider.hpp"
 #include "Decompiler/Output/ITextOutput.hpp"
 #include "Decompiler/Util/Utf.hpp"
@@ -1204,17 +1206,21 @@ void ReflectionDisassembler::DisassembleMethodHeaderInternal(
     // here and never reads it -- the block's close comment re-reads the
     // declaring type itself.
     std::optional<Metadata::MethodSignatureT> signature;
+    // The C# `new DisassemblerSignatureTypeProvider(module, output)` is a
+    // HEAP object whose delegates stay live past the try block -- the
+    // signature's deferred parameter-type writers run in WriteParameters
+    // BELOW it. The port must heap-allocate the provider for the same
+    // reason: a stack local scoped to the try block would dangle (the
+    // provider-outlives-writers contract; the writers die with the
+    // signature at function exit, so the unique_ptr suffices).
+    auto provider = std::make_unique<DisassemblerSignatureTypeProvider>(
+        module, output_);
     try {
-        // The C# `new DisassemblerSignatureTypeProvider(module, output)` and
-        // `methodDefinition.DecodeSignature(signatureProvider,
-        // genericContext)` -- the provider is a local and the deferred
-        // type writers run entirely within this scope (the
-        // provider-outlives-writers contract).
         auto blob = module.GetSignatureBlob(methodToken);
         if (!blob.has_value())
             throw std::logic_error("missing method signature blob");
-        DisassemblerSignatureTypeProvider provider(module, output_);
-        Metadata::SignatureTypeProviderDecoder decoder(provider, module);
+        DisassemblerSignatureTypeProvider& providerRef = *provider;
+        Metadata::SignatureTypeProviderDecoder decoder(providerRef, module);
         signature = decoder.DecodeMethodSignature(blob->data(), blob->size(),
             genericContext);
         if (signature->Header.HasExplicitThis) {
@@ -1895,6 +1901,212 @@ void ReflectionDisassembler::DisassembleEventHeaderInternal(
     signature(ILNameSyntax::TypeName);
     output_.Write(' ');
     output_.Write(Escape(module.GetEventName(eventToken)));
+}
+
+// The C# `public void DisassembleType(MetadataFile module,
+// TypeDefinitionHandle type)`. See the header for the porting decisions.
+void ReflectionDisassembler::DisassembleType(Metadata::MetadataFile& module,
+    std::uint32_t typeToken)
+{
+    auto genericContext = Metadata::MetadataGenericContext::ForType(
+        typeToken, module);
+
+    DisassembleTypeHeaderInternal(module, typeToken, genericContext);
+
+    // The C# `Process(module, typeDefinition.GetInterfaceImplementations())`
+    // -- the InterfaceImpl ROW tokens (the .interfaceimpl blocks below
+    // re-read each row).
+    std::vector<std::uint32_t> interfaces;
+    for (const auto& impl : module.GetInterfaceImplementations(typeToken))
+        interfaces.push_back(impl.Token);
+    interfaces = Process(module, interfaces,
+        ProcessedEntityKind::InterfaceImplementation);
+    if (!interfaces.empty()) {
+        output_.Indent();
+        bool first = true;
+        for (std::uint32_t i : interfaces) {
+            if (!first)
+                Output::WriteLine(output_, ",");
+            if (first)
+                output_.Write("implements ");
+            else
+                output_.Write("           ");
+            first = false;
+            auto iface = module.GetInterfaceImplementation(i);
+            // The C# `iface.Interface.WriteTo(module, output,
+            // genericContext, ILNameSyntax.TypeName)`.
+            IL::WriteTo(module, output_, genericContext, iface->InterfaceToken,
+                ILNameSyntax::TypeName);
+        }
+        output_.WriteLine();
+        output_.Unindent();
+    }
+
+    Output::WriteLine(output_, "{");
+    output_.Indent();
+    bool oldIsInType = isInType_;
+    isInType_ = true;
+    WriteAttributes(module, module.GetCustomAttributeTokens(typeToken));
+    WriteSecurityDeclarations(module,
+        module.GetDeclarativeSecurityAttributes(typeToken));
+    for (const auto& tp : module.GetGenericParameters(typeToken)) {
+        WriteGenericParametersAndAttributes(module, genericContext, tp.Token);
+    }
+    auto layout = module.GetTypeLayout(typeToken);
+    if (!layout.IsDefault()) {
+        Output::WriteLine(output_,
+            ".pack " + std::to_string(layout.PackingSize));
+        Output::WriteLine(output_,
+            ".size " + std::to_string(layout.ClassSize));
+        output_.WriteLine();
+    }
+    for (std::uint32_t ifaceHandle : interfaces) {
+        auto iface = module.GetInterfaceImplementation(ifaceHandle);
+        auto customAttributes = module.GetCustomAttributeTokens(
+            iface->Token);
+        if (!customAttributes.empty()) {
+            output_.Write(".interfaceimpl type ");
+            IL::WriteTo(module, output_, genericContext,
+                iface->InterfaceToken, ILNameSyntax::TypeName);
+            output_.WriteLine();
+            output_.Indent();
+            WriteAttributes(module, customAttributes);
+            output_.Unindent();
+            output_.WriteLine();
+        }
+    }
+    auto nestedTypes = Process(module, module.GetNestedTypes(typeToken),
+        ProcessedEntityKind::TypeDefinition);
+    if (!nestedTypes.empty()) {
+        Output::WriteLine(output_, "// Nested Types");
+        for (std::uint32_t nestedType : nestedTypes) {
+            DisassembleType(module, nestedType);
+            output_.WriteLine();
+        }
+        output_.WriteLine();
+    }
+    std::vector<std::uint32_t> fields;
+    for (const auto& fd : module.GetFields(typeToken))
+        fields.push_back(fd.Token);
+    fields = Process(module, fields, ProcessedEntityKind::FieldDefinition);
+    if (!fields.empty()) {
+        Output::WriteLine(output_, "// Fields");
+        for (std::uint32_t field : fields) {
+            DisassembleField(module, field);
+        }
+        output_.WriteLine();
+    }
+    std::vector<std::uint32_t> methods;
+    for (const auto& m : module.GetMethods(typeToken))
+        methods.push_back(m.Token);
+    methods = Process(module, methods, ProcessedEntityKind::MethodDefinition);
+    if (!methods.empty()) {
+        Output::WriteLine(output_, "// Methods");
+        for (std::uint32_t m : methods) {
+            DisassembleMethod(module, m);
+            output_.WriteLine();
+        }
+    }
+    std::vector<std::uint32_t> events;
+    for (const auto& ev : module.GetEvents(typeToken))
+        events.push_back(ev.Token);
+    events = Process(module, events, ProcessedEntityKind::EventDefinition);
+    if (!events.empty()) {
+        Output::WriteLine(output_, "// Events");
+        for (std::uint32_t ev : events) {
+            DisassembleEvent(module, ev);
+            output_.WriteLine();
+        }
+        output_.WriteLine();
+    }
+    std::vector<std::uint32_t> properties;
+    for (const auto& prop : module.GetProperties(typeToken))
+        properties.push_back(prop.Token);
+    properties = Process(module, properties,
+        ProcessedEntityKind::PropertyDefinition);
+    if (!properties.empty()) {
+        Output::WriteLine(output_, "// Properties");
+        for (std::uint32_t prop : properties) {
+            DisassembleProperty(module, prop);
+        }
+        output_.WriteLine();
+    }
+    // The C# close comment: the nested type's short NAME, else the full
+    // type name (the FullTypeName.ToString == ReflectionName).
+    std::string name;
+    auto nameInfo = module.GetTypeDefNameInfo(typeToken);
+    if (nameInfo && nameInfo->DeclaringTypeToken != 0)
+        name = nameInfo->Name;
+    else
+        name = Metadata::GetFullTypeNameFromDefinition(module, typeToken)
+                   .ReflectionName();
+    CloseBlock(("end of class " + name).c_str());
+    isInType_ = oldIsInType;
+}
+
+// The C# `public void DisassembleTypeHeader(MetadataFile module,
+// TypeDefinitionHandle type)`.
+void ReflectionDisassembler::DisassembleTypeHeader(
+    Metadata::MetadataFile& module, std::uint32_t typeToken)
+{
+    DisassembleTypeHeaderInternal(module, typeToken,
+        Metadata::MetadataGenericContext::ForType(typeToken, module));
+}
+
+// The C# `private void DisassembleTypeHeaderInternal(...)`. See the
+// header for the porting decisions.
+void ReflectionDisassembler::DisassembleTypeHeaderInternal(
+    Metadata::MetadataFile& module, std::uint32_t typeToken,
+    const Metadata::MetadataGenericContext& genericContext)
+{
+    output_.WriteReference(module, typeToken, ".class", "decompile",
+        /*isDefinition=*/true);
+    WriteMetadataToken(output_, module, typeToken, typeToken,
+        /*spaceAfter=*/true, /*spaceBefore=*/true, ShowMetadataTokens(),
+        ShowMetadataTokensInBase10());
+    std::uint32_t attributes = module.GetTypeDefAttributes(typeToken);
+    auto typeAttributesValue = static_cast<TypeAttributes>(attributes);
+    // The C# `(typeDefinition.Attributes & TypeAttributes.ClassSemanticsMask)
+    // == TypeAttributes.Interface`.
+    if ((typeAttributesValue & TypeAttributes::ClassSemanticsMask)
+        == TypeAttributes::Interface)
+        output_.Write("interface ");
+    WriteEnum(typeAttributesValue & TypeAttributes::VisibilityMask,
+        typeVisibility, output_);
+    WriteEnum(typeAttributesValue & TypeAttributes::LayoutMask, typeLayout,
+        output_);
+    WriteEnum(typeAttributesValue & TypeAttributes::StringFormatMask,
+        typeStringFormat, output_);
+    const auto masks = TypeAttributes::ClassSemanticsMask
+        | TypeAttributes::VisibilityMask | TypeAttributes::LayoutMask
+        | TypeAttributes::StringFormatMask;
+    WriteFlags(typeAttributesValue & ~masks, typeAttributes, output_);
+
+    // The C# name: the full IL name for a top-level type, the escaped
+    // short name for a nested one (the header's nested render carries no
+    // declaring chain).
+    auto nameInfo = module.GetTypeDefNameInfo(typeToken);
+    if (nameInfo && nameInfo->DeclaringTypeToken != 0)
+        output_.Write(Escape(nameInfo->Name));
+    else
+        output_.Write(Metadata::ToILNameString(
+            Metadata::GetFullTypeNameFromDefinition(module, typeToken)));
+    WriteTypeParameters(output_, module, genericContext,
+        module.GetGenericParameters(typeToken));
+    output_.MarkFoldStart("...", /*defaultCollapsed=*/
+        !ExpandMemberDefinitions && isInType_,
+        /*isDefinition=*/isInType_);
+    output_.WriteLine();
+
+    std::uint32_t baseType = module.GetBaseTypeToken(typeToken);
+    if (baseType != 0) {
+        output_.Indent();
+        output_.Write("extends ");
+        IL::WriteTo(module, output_, genericContext, baseType,
+            ILNameSyntax::TypeName);
+        output_.WriteLine();
+        output_.Unindent();
+    }
 }
 
 }  // namespace ILSpy::Decompiler::Disassembler

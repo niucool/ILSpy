@@ -145,6 +145,18 @@ std::uint32_t FindFieldIn(const MD::MetadataFile& f, std::uint32_t typeToken,
     return 0;
 }
 
+// A nested TypeDef by name (the GetNestedTypes walk the type renderer
+// itself drives; the TypeDefs() table scan cannot pick nested rows apart
+// by name when siblings collide).
+std::uint32_t FindNestedTypeIn(const MD::MetadataFile& f,
+    std::uint32_t enclosingToken, std::string_view name) {
+    for (std::uint32_t t : f.GetNestedTypes(enclosingToken)) {
+        auto info = f.GetTypeDefNameInfo(t);
+        if (info && info->Name == name) return t;
+    }
+    return 0;
+}
+
 // The MethodSignatureT of a real method (the DisassemblerSignatureTypeProvider
 // decode the C# DisassembleMethodHeader runs). The holder keeps the provider
 // alive: the signature's deferred writers capture it (the provider-must-
@@ -2565,4 +2577,356 @@ TEST(ReflectionDisassemblerTest, PropertyEventRenderSweep) {
     EXPECT_GT(properties, 40u);
     EXPECT_GT(indexerProperties, 3u);
     EXPECT_GT(events, 8u);
+}
+
+// ---------------------------------------------------------------------------
+// The type member renderer (ReflectionDisassembler.cs lines 1598-1753):
+// DisassembleTypeHeader/Internal's flag splits and name forms, and the full
+// DisassembleType render -- the implements list, the layout lines, the
+// .interfaceimpl blocks, the member sections, and the end-of-class comment.
+// The exact renders are the gold ilspycmd 11.0 -il output (mscorlib 4.8 and
+// the .NET 10 CoreLib) de-indented one level.
+// ---------------------------------------------------------------------------
+
+TEST(ReflectionDisassemblerTest, GetTypeLayoutPackingAndSize)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t win32Native = FindTypeDefTokenIn(f, "Microsoft.Win32", "Win32Native");
+    ASSERT_NE(win32Native, 0u);
+    std::uint32_t findData = FindNestedTypeIn(f, win32Native, "WIN32_FIND_DATA");
+    ASSERT_NE(findData, 0u);
+    std::uint32_t fixedBuffer = FindNestedTypeIn(f, findData, "<_cFileName>e__FixedBuffer");
+    ASSERT_NE(fixedBuffer, 0u);
+    std::uint32_t alternateBuffer = FindNestedTypeIn(f, findData, "<_cAlternateFileName>e__FixedBuffer");
+    ASSERT_NE(alternateBuffer, 0u);
+
+    // The fixed buffers' ClassLayout rows: .pack 0 / .size 520 and 28.
+    auto big = f.GetTypeLayout(fixedBuffer);
+    EXPECT_EQ(big.PackingSize, 0);
+    EXPECT_EQ(big.ClassSize, 520);
+    EXPECT_FALSE(big.IsDefault());
+    auto small = f.GetTypeLayout(alternateBuffer);
+    EXPECT_EQ(small.PackingSize, 0);
+    EXPECT_EQ(small.ClassSize, 28);
+
+    // A type without a ClassLayout row reads the default (the sequential
+    // MEMORY_BASIC_INFORMATION flag carries no row -- the runtime packs it).
+    std::uint32_t memoryBasic = FindNestedTypeIn(f, win32Native, "MEMORY_BASIC_INFORMATION");
+    ASSERT_NE(memoryBasic, 0u);
+    auto none = f.GetTypeLayout(memoryBasic);
+    EXPECT_EQ(none.PackingSize, 0);
+    EXPECT_EQ(none.ClassSize, 0);
+    EXPECT_TRUE(none.IsDefault());
+
+    // A non-TypeDef / out-of-range token reads the default; never throws.
+    auto invalid = f.GetTypeLayout(0x06000001);
+    EXPECT_TRUE(invalid.IsDefault());
+}
+
+TEST(ReflectionDisassemblerTest, GetNestedTypesEnclosingWalk)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+
+    // Microsoft.Win32.Win32Native: 53 nested types in table order, the
+    // WIN32_FIND_DATA row among them, and that row's own two fixed buffers.
+    std::uint32_t win32Native = FindTypeDefTokenIn(f, "Microsoft.Win32", "Win32Native");
+    ASSERT_NE(win32Native, 0u);
+    auto nested = f.GetNestedTypes(win32Native);
+    EXPECT_EQ(nested.size(), 53u);
+    EXPECT_NE(FindNestedTypeIn(f, win32Native, "WIN32_FIND_DATA"), 0u);
+    std::uint32_t findData = FindNestedTypeIn(f, win32Native, "WIN32_FIND_DATA");
+    auto fixedBuffers = f.GetNestedTypes(findData);
+    ASSERT_EQ(fixedBuffers.size(), 2u);
+    auto firstName = f.GetTypeDefNameInfo(fixedBuffers[0]);
+    ASSERT_TRUE(firstName.has_value());
+    EXPECT_EQ(firstName->Name, "<_cFileName>e__FixedBuffer");
+
+    // A top-level type with no nested rows reads empty; a non-TypeDef
+    // token reads empty too.
+    std::uint32_t resolveArgs = FindTypeDefTokenIn(f, "System", "ResolveEventArgs");
+    ASSERT_NE(resolveArgs, 0u);
+    EXPECT_TRUE(f.GetNestedTypes(resolveArgs).empty());
+    EXPECT_TRUE(f.GetNestedTypes(0x06000001).empty());
+}
+
+TEST(ReflectionDisassemblerTest, GetBaseTypeTokenExtendsColumn)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+
+    // The same-module TypeDef bases mscorlib 4.8 carries (ResolveEventArgs
+    // extends the System.EventArgs TypeDef, String the System.Object one).
+    std::uint32_t resolveArgs = FindTypeDefTokenIn(f, "System", "ResolveEventArgs");
+    ASSERT_NE(resolveArgs, 0u);
+    std::uint32_t eventArgsBase = f.GetBaseTypeToken(resolveArgs);
+    ASSERT_NE(eventArgsBase, 0u);
+    EXPECT_EQ(eventArgsBase >> 24, 0x02u);
+    auto baseName = f.GetTypeDefNameInfo(eventArgsBase);
+    ASSERT_TRUE(baseName.has_value());
+    EXPECT_EQ(baseName->Namespace, "System");
+    EXPECT_EQ(baseName->Name, "EventArgs");
+
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t objectBase = f.GetBaseTypeToken(stringType);
+    ASSERT_NE(objectBase, 0u);
+    EXPECT_EQ(objectBase >> 24, 0x02u);
+    auto objectName = f.GetTypeDefNameInfo(objectBase);
+    ASSERT_TRUE(objectName.has_value());
+    EXPECT_EQ(objectName->Name, "Object");
+
+    // An interface with no base reads the nil token.
+    std::uint32_t iasm = FindTypeDefTokenIn(f, "Microsoft.Win32", "IAssemblyEnum");
+    ASSERT_NE(iasm, 0u);
+    EXPECT_EQ(f.GetBaseTypeToken(iasm), 0u);
+    // A non-TypeDef token reads nil; never throws.
+    EXPECT_EQ(f.GetBaseTypeToken(0x06000001), 0u);
+}
+
+TEST(ReflectionDisassemblerTest, DisassembleTypeHeaderShapes)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+
+    // A plain public class: the visibility/layout/string-format enums, the
+    // beforefieldinit flag, and the indented extends line.
+    std::uint32_t resolveArgs = FindTypeDefTokenIn(f, "System", "ResolveEventArgs");
+    ASSERT_NE(resolveArgs, 0u);
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleTypeHeader(f, resolveArgs);
+    }),
+        ".class public auto ansi beforefieldinit System.ResolveEventArgs\r\n"
+        "\textends System.EventArgs\r\n");
+
+    // An interface: the "interface " prefix replaces the class default, the
+    // abstract + import flags render, and the nil base writes no extends.
+    std::uint32_t iasm = FindTypeDefTokenIn(f, "Microsoft.Win32", "IAssemblyEnum");
+    ASSERT_NE(iasm, 0u);
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleTypeHeader(f, iasm);
+    }),
+        ".class interface private auto ansi abstract import Microsoft.Win32.IAssemblyEnum\r\n");
+
+    // A generic type: the arity in the name and the WriteTypeParameters
+    // variance list, plus a delegate base.
+    std::uint32_t predicate = FindTypeDefTokenIn(f, "System", "Predicate`1");
+    ASSERT_NE(predicate, 0u);
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleTypeHeader(f, predicate);
+    }),
+        ".class public auto ansi sealed System.Predicate`1<-T>\r\n"
+        "\textends System.MulticastDelegate\r\n");
+
+    // A nested type: the nested-visibility enum, the sequential/unicode
+    // masks, and the escaped short name.
+    std::uint32_t win32Native = FindTypeDefTokenIn(f, "Microsoft.Win32", "Win32Native");
+    ASSERT_NE(win32Native, 0u);
+    std::uint32_t findData = FindNestedTypeIn(f, win32Native, "WIN32_FIND_DATA");
+    ASSERT_NE(findData, 0u);
+    std::uint32_t fixedBuffer = FindNestedTypeIn(f, findData, "<_cFileName>e__FixedBuffer");
+    ASSERT_NE(fixedBuffer, 0u);
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleTypeHeader(f, fixedBuffer);
+    }),
+        ".class nested public sequential unicode sealed beforefieldinit '<_cFileName>e__FixedBuffer'\r\n"
+        "\textends System.ValueType\r\n");
+
+    // The ShowMetadataTokens token comment after the ".class" reference.
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.ShowMetadataTokens(true);
+        rd.DisassembleTypeHeader(f, resolveArgs);
+    }),
+        ".class /* 02000091 */ public auto ansi beforefieldinit System.ResolveEventArgs\r\n"
+        "\textends System.EventArgs\r\n");
+}
+
+TEST(ReflectionDisassemblerTest, DisassembleTypeFullRenderFixedBuffer)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t win32Native = FindTypeDefTokenIn(f, "Microsoft.Win32", "Win32Native");
+    ASSERT_NE(win32Native, 0u);
+    std::uint32_t findData = FindNestedTypeIn(f, win32Native, "WIN32_FIND_DATA");
+    ASSERT_NE(findData, 0u);
+    std::uint32_t fixedBuffer = FindNestedTypeIn(f, findData, "<_cFileName>e__FixedBuffer");
+    ASSERT_NE(fixedBuffer, 0u);
+
+    // The gold -il render de-indented one level: the two .custom lines,
+    // the .pack/.size pair with its blank, the // Fields section, and the
+    // short-name end-of-class comment.
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleType(f, fixedBuffer);
+    }),
+        ".class nested public sequential unicode sealed beforefieldinit '<_cFileName>e__FixedBuffer'\r\n"
+        "\textends System.ValueType\r\n"
+        "{\r\n"
+        "\t.custom instance void System.Runtime.CompilerServices.CompilerGeneratedAttribute::.ctor() = (\r\n"
+        "\t\t01 00 00 00\r\n"
+        "\t)\r\n"
+        "\t.custom instance void System.Runtime.CompilerServices.UnsafeValueTypeAttribute::.ctor() = (\r\n"
+        "\t\t01 00 00 00\r\n"
+        "\t)\r\n"
+        "\t.pack 0\r\n"
+        "\t.size 520\r\n"
+        "\r\n"
+        "\t// Fields\r\n"
+        "\t.field public char FixedElementField\r\n"
+        "\r\n"
+        "} // end of class <_cFileName>e__FixedBuffer\r\n");
+}
+
+TEST(ReflectionDisassemblerTest, DisassembleTypeFullRenderCoreLibInterface)
+{
+    std::string path = CoreLibPath();
+    if (path.empty()) {
+        GTEST_SKIP() << "no .NET shared runtime System.Private.CoreLib.dll";
+    }
+    MD::MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t readOnlyCollection =
+        FindTypeDefTokenIn(f, "System.Collections.Generic", "IReadOnlyCollection`1");
+    ASSERT_NE(readOnlyCollection, 0u);
+
+    // The gold -il render: the generic interface header with the two-line
+    // implements list (the comma ends the first line, eleven spaces start
+    // the second), the .param type block, the .interfaceimpl block with the
+    // row's own attributes, the method/property sections, and the arity in
+    // the end-of-class reflection name.
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleType(f, readOnlyCollection);
+    }),
+        ".class interface public auto ansi abstract beforefieldinit System.Collections.Generic.IReadOnlyCollection`1<+T>\r\n"
+        "\timplements class System.Collections.Generic.IEnumerable`1<!T>,\r\n"
+        "\t           System.Collections.IEnumerable\r\n"
+        "{\r\n"
+        "\t.param type T\r\n"
+        "\t\t.custom instance void System.Runtime.CompilerServices.NullableAttribute::.ctor(uint8) = (\r\n"
+        "\t\t\t01 00 02 00 00\r\n"
+        "\t\t)\r\n"
+        "\t.interfaceimpl type class System.Collections.Generic.IEnumerable`1<!T>\r\n"
+        "\t\t.custom instance void System.Runtime.CompilerServices.NullableAttribute::.ctor(uint8[]) = (\r\n"
+        "\t\t\t01 00 02 00 00 00 00 01 00 00\r\n"
+        "\t\t)\r\n"
+        "\r\n"
+        "\t// Methods\r\n"
+        "\t.method public hidebysig specialname newslot abstract virtual \r\n"
+        "\t\tinstance int32 get_Count () cil managed \r\n"
+        "\t{\r\n"
+        "\t} // end of method IReadOnlyCollection`1::get_Count\r\n"
+        "\r\n"
+        "\t// Properties\r\n"
+        "\t.property instance int32 Count()\r\n"
+        "\t{\r\n"
+        "\t\t.get instance int32 System.Collections.Generic.IReadOnlyCollection`1::get_Count()\r\n"
+        "\t}\r\n"
+        "\r\n"
+        "} // end of class System.Collections.Generic.IReadOnlyCollection`1\r\n");
+}
+
+TEST(ReflectionDisassemblerTest, DisassembleTypeEntityProcessorRoutesMembers)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t resolveArgs = FindTypeDefTokenIn(f, "System", "ResolveEventArgs");
+    ASSERT_NE(resolveArgs, 0u);
+
+    // The reversing processor flips every member section: the fields render
+    // _RequestingAssembly first (row order is _Name, _RequestingAssembly)
+    // and the .custom-less property order flips too.
+    ReversingEntityProcessor processor;
+    std::string actual = RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.EntityProcessor(&processor);
+        rd.DisassembleType(f, resolveArgs);
+    });
+    EXPECT_NE(actual.find(
+                  "\t// Fields\r\n"
+                  "\t.field private class System.Reflection.Assembly _RequestingAssembly\r\n"
+                  "\t.field private string _Name\r\n"),
+        std::string::npos);
+    // The properties flip (Name renders after RequestingAssembly), the
+    // method order reverses, and the close comment is unchanged.
+    EXPECT_LT(actual.find("RequestingAssembly()"), actual.find("Name()\r"));
+    EXPECT_NE(actual.rfind("} // end of class System.ResolveEventArgs\r\n"),
+        std::string::npos);
+}
+
+TEST(ReflectionDisassemblerTest, DisassembleTypeStructuralSweep)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+
+    // Microsoft.Win32.RegistryKey: the implements line, the // Nested Types
+    // section with the nested enum's full render, and the section order.
+    std::uint32_t registryKey = FindTypeDefTokenIn(f, "Microsoft.Win32", "RegistryKey");
+    ASSERT_NE(registryKey, 0u);
+    std::string actual = RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleType(f, registryKey);
+    });
+    EXPECT_EQ(actual.rfind(
+        ".class public auto ansi sealed beforefieldinit Microsoft.Win32.RegistryKey\r\n"
+        "\textends System.MarshalByRefObject\r\n"
+        "\timplements System.IDisposable\r\n"
+        "{\r\n", 0),
+        0u);
+    EXPECT_NE(actual.find("\t// Nested Types\r\n"), std::string::npos);
+    EXPECT_NE(actual.find(
+                  ".class nested private auto ansi sealed RegistryInternalCheck\r\n"
+                  "\t\textends System.Enum\r\n"),
+        std::string::npos);
+    EXPECT_NE(actual.find("} // end of class RegistryInternalCheck\r\n"), std::string::npos);
+    EXPECT_NE(actual.find("\t// Fields\r\n"), std::string::npos);
+    EXPECT_NE(actual.find("\t// Methods\r\n"), std::string::npos);
+    std::string registryKeyTail = "} // end of class Microsoft.Win32.RegistryKey\r\n";
+    EXPECT_EQ(actual.substr(actual.size() - registryKeyTail.size()),
+        registryKeyTail);
+
+    // The sections render in the C# order: nested, fields, methods,
+    // events, properties.
+    auto nestedPos = actual.find("\t// Nested Types\r\n");
+    auto fieldsPos = actual.find("\t// Fields\r\n");
+    auto methodsPos = actual.find("\t// Methods\r\n");
+    auto propsPos = actual.find("\t// Properties\r\n");
+    EXPECT_LT(nestedPos, fieldsPos);
+    EXPECT_LT(fieldsPos, methodsPos);
+    EXPECT_LT(methodsPos, propsPos);
+
+    // System.Array: the multi-line implements list with the 11-space
+    // continuation lines, six interfaces.
+    std::uint32_t arrayType = FindTypeDefTokenIn(f, "System", "Array");
+    ASSERT_NE(arrayType, 0u);
+    std::string arrayText = RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleType(f, arrayType);
+    });
+    EXPECT_EQ(arrayText.rfind(
+        ".class public auto ansi abstract serializable beforefieldinit System.Array\r\n"
+        "\textends System.Object\r\n"
+        "\timplements System.ICloneable,\r\n"
+        "\t           System.Collections.IList,\r\n"
+        "\t           System.Collections.ICollection,\r\n"
+        "\t           System.Collections.IEnumerable,\r\n"
+        "\t           System.Collections.IStructuralComparable,\r\n"
+        "\t           System.Collections.IStructuralEquatable\r\n"
+        "{\r\n", 0),
+        0u);
+
+    // A no-throw render sweep over a spread of mscorlib types: every render
+    // opens with the ".class" reference and closes with the end-of-class
+    // comment line.
+    int rendered = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Name != "String" && t.Name != "Enum" && t.Name != "ArraySegment`1"
+            && t.Name != "Type" && t.Name != "BitConverter")
+            continue;
+        std::ostringstream stream;
+        OUT::PlainTextOutput output(stream);
+        DA::ReflectionDisassembler rd(output);
+        rd.DisassembleType(f, t.Token);
+        std::string text = stream.str();
+        EXPECT_EQ(text.rfind(".class ", 0), 0u) << t.Name;
+        EXPECT_NE(text.rfind("\r\n} // end of class "), std::string::npos) << t.Name;
+        ++rendered;
+    }
+    EXPECT_EQ(rendered, 5);
 }

@@ -480,18 +480,24 @@ void MethodBodyDisassembler::DisassembleLocalsBlock(const Metadata::MetadataFile
     if (body.InitLocals()) output_.Write(" init");
     auto blob = module.GetStandaloneSignatureBlob(body.LocalVarSigToken());
     std::vector<Metadata::SignatureTypeWriter> signature;
-    bool decodeOk = false;
+    // The C# `signatureDecoder` field: assigned at the top of Disassemble
+    // and alive through the whole render. The port heap-allocates the
+    // provider for the same reason -- the local-type deferred writers run
+    // in the loop BELOW, past the decode's try scope, so a stack local
+    // scoped to the try block would dangle (the provider-outlives-writers
+    // contract; the writers die with the signature vector at function
+    // exit, so the unique_ptr suffices).
+    auto provider = std::make_unique<Disassembler::DisassemblerSignatureTypeProvider>(
+        module, output_);
     if (blob) {
         // The C# `blob.GetKind() == StandaloneSignatureKind.LocalVariables`
         // else the " /* wrong signature kind */" comment; the decode's
         // BadImageFormatException catch degrades to a message comment.
         if (((*blob)[0] & 0x0F) == 0x07) {
             try {
-                Disassembler::DisassemblerSignatureTypeProvider provider(module, output_);
-                Metadata::SignatureTypeProviderDecoder decoder(provider, module);
+                Metadata::SignatureTypeProviderDecoder decoder(*provider, module);
                 signature = decoder.DecodeLocalSignature(blob->data(), blob->size(),
                     Metadata::MetadataGenericContext::ForMethod(methodToken, module));
-                decodeOk = true;
             } catch (const std::logic_error& ex) {
                 output_.Write(std::string(" /* ") + ex.what() + " */");
             }

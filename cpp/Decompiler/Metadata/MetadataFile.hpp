@@ -390,6 +390,22 @@ public:
     // a non-TypeDef token; never throws.
     std::optional<TypeDefNameInfo> GetTypeDefNameInfo(std::uint32_t typeToken) const;
 
+    // A TypeDef row's (table 0x02) Extends column -- the C# ILSpy
+    // SRMExtensions `TypeDefinition.GetBaseTypeOrNil()`: the raw
+    // TypeDefOrRef coded index as a TypeDef (0x02) / TypeRef (0x01) /
+    // TypeSpec (0x1B) token; 0 for a nil column (interfaces with no base)
+    // and for an invalid file, an out-of-range row, a nil row, or a
+    // non-TypeDef token; never throws.
+    std::uint32_t GetBaseTypeToken(std::uint32_t typeToken) const;
+
+    // The nested TypeDef tokens (table 0x02) of a TypeDef -- the C#
+    // `TypeDefinition.GetNestedTypes()`: the NestedClass-table (table
+    // 0x29) rows whose EnclosingClass is this row, in table order (the
+    // same rows the SRM collection walks).
+    // Empty for an invalid file, an out-of-range row, a nil row, or a
+    // non-TypeDef token; never throws.
+    std::vector<std::uint32_t> GetNestedTypes(std::uint32_t typeToken) const;
+
     // A TypeRef row's (table 0x01) authored TypeName/TypeNamespace strings plus
     // the declaring TypeRef's token -- the per-row reads the SRMExtensions
     // GetFullTypeName(TypeReferenceHandle) reader composes (the SRM
@@ -512,6 +528,19 @@ public:
     // file, an out-of-range row, a nil row, or a non-TypeDef token; never
     // throws.
     std::uint32_t GetTypeLayoutSize(std::uint32_t typeDefToken) const;
+
+    // A TypeDef row's layout -- the C# `TypeDefinition.GetLayout()` (the
+    // System.Reflection.Metadata TypeLayout): the ClassLayout table row
+    // (table 0x11) whose Parent is this row, its PackingSize (column 0,
+    // widened from uint16) and ClassSize (column 1) columns. The default
+    // (both zero -- no ClassLayout row) is the C# `default(TypeLayout)`
+    // whose `IsDefault` suppresses the .pack/.size lines; never throws.
+    struct TypeLayoutInfo {
+        std::int32_t PackingSize = 0;
+        std::int32_t ClassSize = 0;
+        bool IsDefault() const noexcept { return PackingSize == 0 && ClassSize == 0; }
+    };
+    TypeLayoutInfo GetTypeLayout(std::uint32_t typeDefToken) const;
 
     // The PE-section reads the field renderer drives (PeImage passthroughs
     // through the MethodBodyReader): the containing-section index (the C#
