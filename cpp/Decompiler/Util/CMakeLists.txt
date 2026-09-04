@@ -7,4 +7,5 @@
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Utf.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CSharpPrimitiveCast.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/StringComparers.cpp
 )

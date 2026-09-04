@@ -12,4 +12,5 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ILStructure.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/MethodBodyDisassembler.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ReflectionDisassembler.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/SortByNameProcessor.cpp
 )

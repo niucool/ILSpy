@@ -917,4 +917,24 @@ void ReflectionDisassembler::WriteParameters(
     output_.WriteLine();
 }
 
+// The C# `public IEntityProcessor EntityProcessor { get; set; }` -- the
+// port's pointer getter/setter over the caller-owned processor.
+IEntityProcessor* ReflectionDisassembler::EntityProcessor() const {
+    return entityProcessor_;
+}
+
+void ReflectionDisassembler::EntityProcessor(IEntityProcessor* value) {
+    entityProcessor_ = value;
+}
+
+// The C# private `Process` overloads (`EntityProcessor?.Process(module,
+// items) ?? items`): the unprocessed collection when no processor is set.
+std::vector<std::uint32_t> ReflectionDisassembler::Process(
+    const Metadata::MetadataFile& module,
+    const std::vector<std::uint32_t>& items,
+    ProcessedEntityKind kind) const {
+    if (entityProcessor_ == nullptr) return items;
+    return entityProcessor_->Process(module, items, kind);
+}
+
 }  // namespace ILSpy::Decompiler::Disassembler

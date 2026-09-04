@@ -70,10 +70,41 @@ TypeSystem::FullTypeName GetFullTypeNameFromDefinition(const MetadataFile& metad
 // The C# `public static FullTypeName GetFullTypeName(this EntityHandle handle,
 // MetadataReader reader)` (SRMExtensions.cs): dispatch on the token's table --
 // TypeDef (0x02) and TypeRef (0x01) delegate to the readers above; TypeSpec
-// (0x1B) is deferred on FullTypeNameSignatureDecoder (not yet ported) and
-// throws std::logic_error; any other kind throws std::out_of_range (the C#
-// ArgumentOutOfRangeException). A nil token throws std::invalid_argument.
+// (0x1B) delegates to GetFullTypeNameFromSpecification below; any other kind
+// throws std::out_of_range (the C# ArgumentOutOfRangeException). A nil token
+// throws std::invalid_argument.
 TypeSystem::FullTypeName GetFullTypeName(const MetadataFile& metadata, std::uint32_t entityToken);
+
+// The C# `public static FullTypeName GetFullTypeName(this
+// TypeSpecificationHandle handle, MetadataReader reader)` (SRMExtensions.cs):
+// the TypeSpec row's signature blob decoded through the
+// FullTypeNameSignatureDecoder -- the shrinking provider whose
+// GetGenericInstantiation returns only the generic head, whose
+// array/pointer/byref/pinned/cmod arms strip to the element type, and whose
+// TypeDef/TypeRef arms reuse the name readers above. The blob is passed
+// directly (the GetTypeSpecSignatureBlob read) so the walk can be driven over
+// synthetic bytes in the tests. VAR/MVAR/FNPTR positions decode to the empty
+// FullTypeName (the C# default(FullTypeName)); a malformed blob throws
+// std::out_of_range (the C# BadImageFormatException), an unrecognized element
+// type std::logic_error (the C# throws on the undecodable byte).
+TypeSystem::FullTypeName GetFullTypeNameFromSpecification(
+    const MetadataFile& metadata, const std::uint8_t* data, std::size_t size);
+
+// The C# `public static EntityHandle GetDeclaringType(this EntityHandle
+// entity, MetadataReader metadata)` (SRMExtensions.cs): the declaring type
+// of a member entity, as a raw token (0 = the nil handle -- a top-level
+// TypeDef/TypeRef). The ported arms: TypeDefinition (the NestedClass walk),
+// TypeReference (the resolution-scope walk), FieldDefinition,
+// MethodDefinition, MemberReference (mr.Parent), and MethodSpecification
+// (recursing into the underlying method). The TypeSpecification
+// (GetGenericType's blob-head parse), Event, and Property (the MethodSemantics
+// accessor walk) arms defer -- no ported consumer reaches them (a
+// CustomAttribute's constructor is always a MethodDef or MemberRef, the only
+// caller's domain), so they land in the default throw. A nil token throws
+// std::invalid_argument (the C# ArgumentNullException); an unsupported kind
+// throws std::out_of_range (the C# ArgumentOutOfRangeException).
+std::uint32_t GetDeclaringType(const MetadataFile& metadata,
+                               std::uint32_t entityToken);
 
 // The C# `public static string ToILSyntax(this SignatureCallingConvention
 // callConv)` (SRMExtensions.cs line 783) -- the ILAsm calling-convention

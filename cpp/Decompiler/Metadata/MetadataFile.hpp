@@ -204,6 +204,18 @@ struct CustomAttributeInfo {
     std::string Name;
 };
 
+// A raw CustomAttribute table row (0x0C) for the disassembler paths: the
+// constructor (the CustomAttributeType coded index, always a MethodDef 0x06
+// or MemberRef 0x0A row) and the value blob (the C# CustomAttribute.Value;
+// nullopt is the nil blob handle). The SortByNameProcessor attribute sort
+// key composes the constructor's declaring type; WriteAttributes renders
+// the constructor and the blob.
+struct CustomAttributeRowInfo {
+    std::uint32_t Token = 0;             // 0x0C000000 | row (1-based)
+    std::uint32_t ConstructorToken = 0;  // the CustomAttributeType target
+    std::optional<std::vector<std::uint8_t>> ValueBlob;  // nullopt = nil
+};
+
 class MetadataFile {
 public:
     explicit MetadataFile(std::string_view path);
@@ -240,6 +252,33 @@ public:
     std::vector<FieldInfo> GetFields(std::uint32_t typeToken) const;
     std::vector<PropertyInfo> GetProperties(std::uint32_t typeToken) const;
     std::vector<EventInfo> GetEvents(std::uint32_t typeToken) const;
+
+    // An InterfaceImpl row (table 0x09) of a TypeDef: the row's own token
+    // and the Interface column (a TypeDef/TypeRef/TypeSpec coded index
+    // resolved to a raw token; 0 when the column is nil). The C#
+    // TypeDefinition.GetInterfaceImplementations() collection and the
+    // SortByNameProcessor interface sort key consume the pair.
+    struct InterfaceImplementationInfo {
+        std::uint32_t Token = 0;           // 0x09000000 | row (1-based)
+        std::uint32_t InterfaceToken = 0;  // 0x02/0x01/0x1B target token
+    };
+    // The InterfaceImpl rows a TypeDef (0x02) declares, in table order;
+    // empty for an invalid file or an out-of-range/non-TypeDef token; never
+    // throws.
+    std::vector<InterfaceImplementationInfo> GetInterfaceImplementations(
+        std::uint32_t typeDefToken) const;
+    // One InterfaceImpl row by its own token; nullopt for a nil row, an
+    // out-of-range row, or a non-InterfaceImpl token; never throws.
+    std::optional<InterfaceImplementationInfo> GetInterfaceImplementation(
+        std::uint32_t implToken) const;
+
+    // A Property (0x17) row's Name by its own token ("" for an invalid or
+    // non-Property token; the SortByNameProcessor property sort key). Never
+    // throws.
+    std::string GetPropertyName(std::uint32_t propertyToken) const;
+    // An Event (0x14) row's Name by its own token (same contract as
+    // GetPropertyName; the event sort key). Never throws.
+    std::string GetEventName(std::uint32_t eventToken) const;
 
     // Parameter names from the Param table for a MethodDef token (table 0x06).
     // Index 0 is the first declared parameter (after any implicit `this`); the
@@ -469,6 +508,23 @@ public:
     // Custom attributes applied to an entity (TypeDef/MethodDef/Field/Property
     // token). Returns the attribute type namespace+name for each; never throws.
     std::vector<CustomAttributeInfo> GetCustomAttributes(std::uint32_t entityToken) const;
+
+    // The CustomAttribute row tokens (table 0x0C, in table order) applied to
+    // an entity -- the C# `entity.GetCustomAttributes()` collection over any
+    // HasCustomAttribute parent (TypeDef, MethodDef, Field, Param,
+    // InterfaceImpl, MemberRef, Module, Property, Event, StandAloneSig,
+    // ModuleRef, TypeSpec, Assembly, AssemblyRef, File, ExportedType,
+    // ManifestResource, GenericParam, GenericParamConstraint, MethodSpec).
+    // Empty for an invalid file or a token no row points at; never throws.
+    std::vector<std::uint32_t> GetCustomAttributeTokens(
+        std::uint32_t entityToken) const;
+
+    // One raw CustomAttribute row by its own token (the C#
+    // metadata.GetCustomAttribute(handle)): the constructor token and the
+    // value blob. Nullopt for a nil row, an out-of-range row, or a
+    // non-CustomAttribute token; never throws.
+    std::optional<CustomAttributeRowInfo> GetCustomAttribute(
+        std::uint32_t attributeToken) const;
 
     // Resolve a metadata token to a display string for the IL disassembler and
     // the IL reader's operand resolution. TypeDef/TypeRef -> "Namespace.Type";

@@ -7,6 +7,7 @@ add_executable(ilspy_tests
     Util/Util_Test.cpp
     Util/LongSet_Test.cpp
     Util/BitSet_Test.cpp
+    Util/StringComparers_Test.cpp
     Util/CacheManager_Test.cpp
     Util/LazyInit_Test.cpp
     Util/CSharpPrimitiveCast_Test.cpp
@@ -30,6 +31,7 @@ add_executable(ilspy_tests
     Decompiler/Disassembler/ILStructure_Test.cpp
     Decompiler/Disassembler/MethodBodyDisassembler_Test.cpp
     Decompiler/Disassembler/ReflectionDisassembler_Test.cpp
+    Decompiler/Disassembler/SortByNameProcessor_Test.cpp
     Decompiler/TypeSystem/TypeName_Test.cpp
     Decompiler/TypeSystem/SignatureDecoder_Test.cpp
     Decompiler/TypeSystem/TypeKindDerivation_Test.cpp

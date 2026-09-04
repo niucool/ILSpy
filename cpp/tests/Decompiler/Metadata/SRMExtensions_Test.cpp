@@ -34,6 +34,7 @@
 //     "System.Collections.Generic.Dictionary`2/Enumerator".
 
 #include "Decompiler/Metadata/SRMExtensions.hpp"
+#include "Decompiler/Metadata/MetadataExtensions.hpp"
 #include "Decompiler/TypeSystem/FullTypeName.hpp"
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
 #include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
@@ -49,6 +50,7 @@ using ILSpy::Decompiler::Metadata::GetFullTypeName;
 using ILSpy::Decompiler::Metadata::GetFullTypeNameFromDefinition;
 using ILSpy::Decompiler::Metadata::GetFullTypeNameFromReference;
 using ILSpy::Decompiler::Metadata::MetadataFile;
+using ILSpy::Decompiler::Metadata::ToILNameString;
 using ILSpy::Decompiler::TypeSystem::FullTypeName;
 using ILSpy::Decompiler::TypeSystem::SplitTypeParameterCountFromReflectionName;
 using ILSpy::Decompiler::TypeSystem::TopLevelTypeName;
@@ -449,12 +451,37 @@ TEST(GetFullTypeNameTest, DispatchWrongKindTokenThrows)
     EXPECT_THROW(GetFullTypeName(f, methods[0].Token), std::out_of_range);
 }
 
-TEST(GetFullTypeNameTest, DispatchTypeSpecTokenThrows)
+TEST(GetFullTypeNameTest, DispatchTypeSpecTokenDecodesTheSignatureBlob)
 {
-    // The TypeSpec arm is deferred on FullTypeNameSignatureDecoder; the
-    // dispatch checks the table byte before touching rows, so any 0x1B
-    // token reaches the deferred arm.
+    // The TypeSpec arm decodes the row's signature blob through the
+    // FullTypeNameSignatureDecoder semantics (a generic instantiation
+    // shrinks to its generic head): System.String implements
+    // IComparable<string> through a TypeSpec row, so the token resolves to
+    // the System.IComparable`1 definition name.
     MetadataFile f(MscorlibPath());
     ASSERT_TRUE(f.IsValid());
-    EXPECT_THROW(GetFullTypeName(f, 0x1B000001u), std::logic_error);
+    std::uint32_t stringType = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == "System" && t.Name == "String") {
+            stringType = t.Token;
+            break;
+        }
+    }
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t typeSpec = 0;
+    for (const auto& impl : f.GetInterfaceImplementations(stringType)) {
+        if ((impl.InterfaceToken >> 24) == 0x1B) {
+            typeSpec = impl.InterfaceToken;
+            break;
+        }
+    }
+    ASSERT_NE(typeSpec, 0u) << "String must implement an interface via TypeSpec";
+    auto name = GetFullTypeName(f, typeSpec);
+    // The instantiation's argument count must not double the arity (a bad
+    // decode renders "System.IComparable`1`1").
+    EXPECT_EQ(ToILNameString(name).find("`1`1"), std::string::npos);
+    EXPECT_TRUE(ToILNameString(name) == "System.IComparable`1"
+        || ToILNameString(name) == "System.Collections.Generic.IEnumerable`1"
+        || ToILNameString(name) == "System.IEquatable`1")
+        << "unexpected interface: " << ToILNameString(name);
 }

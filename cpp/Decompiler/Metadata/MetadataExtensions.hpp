@@ -27,7 +27,9 @@
 
 #pragma once
 
+#include "Decompiler/Metadata/SignatureTypeProvider.hpp"
 #include "Decompiler/TypeSystem/FullTypeName.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
 #include <string>
 
@@ -45,5 +47,11 @@ namespace ILSpy::Decompiler::Metadata {
 //   * the composed top-level name and each nested name pass through
 //     DisassemblerHelpers.Escape (an ILAsm-keyword name renders quoted).
 std::string ToILNameString(const TypeSystem::FullTypeName& typeName, bool omitGenerics = false);
+
+// The C# `public static KnownTypeCode ToKnownTypeCode(this PrimitiveTypeCode
+// typeCode)` (MetadataExtensions.cs): the known-type code a signature blob's
+// primitive element type resolves to, None for the codes with no known-type
+// equivalent. The FullTypeNameSignatureDecoder's primitive arm consumes it.
+TypeSystem::KnownTypeCode ToKnownTypeCode(PrimitiveTypeCode typeCode);
 
 } // namespace ILSpy::Decompiler::Metadata

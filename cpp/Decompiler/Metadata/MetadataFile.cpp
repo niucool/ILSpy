@@ -272,6 +272,91 @@ std::vector<EventInfo> MetadataFile::GetEvents(std::uint32_t typeToken) const {
     return result;
 }
 
+// An InterfaceImpl row's Interface column (a TypeDefOrRef coded index, 2 tag
+// bits) as a raw token: TypeDef tag 0 -> 0x02, TypeRef tag 1 -> 0x01,
+// TypeSpec tag 2 -> 0x1B; a raw 0 column is the nil handle.
+static std::uint32_t InterfaceColumnToToken(std::uint32_t raw) {
+    if (raw == 0) return 0;
+    std::uint32_t rid = raw >> 2;
+    switch (raw & 0x3u) {
+        case 0: return (0x02u << 24) | rid;
+        case 1: return (0x01u << 24) | rid;
+        case 2: return (0x1Bu << 24) | rid;
+        default: return 0;
+    }
+}
+
+std::vector<MetadataFile::InterfaceImplementationInfo>
+MetadataFile::GetInterfaceImplementations(std::uint32_t typeDefToken) const {
+    std::vector<InterfaceImplementationInfo> result;
+    if (!IsValid()) return result;
+    std::uint32_t table = typeDefToken >> 24;
+    std::uint32_t row = typeDefToken & 0x00FFFFFFu;
+    if (table != 0x02 || row == 0 || row > impl_->db->TypeDef.size())
+        return result;
+    try {
+        auto t = impl_->db->TypeDef[row - 1];
+        auto range = t.InterfaceImpl();
+        for (auto it = range.first; it != range.second; ++it) {
+            InterfaceImplementationInfo info;
+            info.Token = (0x09u << 24)
+                | ((static_cast<std::uint32_t>((*it).index()) + 1) & 0x00FFFFFFu);
+            info.InterfaceToken =
+                InterfaceColumnToToken((*it).get_value<std::uint32_t>(1));
+            result.push_back(info);
+        }
+    } catch (const std::exception&) {
+        // Best-effort: a malformed table walk degrades to the partial result.
+    }
+    return result;
+}
+
+std::optional<MetadataFile::InterfaceImplementationInfo>
+MetadataFile::GetInterfaceImplementation(std::uint32_t implToken) const {
+    if (!IsValid()) return std::nullopt;
+    std::uint32_t table = implToken >> 24;
+    std::uint32_t row = implToken & 0x00FFFFFFu;
+    if (table != 0x09 || row == 0 || row > impl_->db->InterfaceImpl.size())
+        return std::nullopt;
+    try {
+        InterfaceImplementationInfo info;
+        info.Token = implToken;
+        info.InterfaceToken =
+            InterfaceColumnToToken(
+                impl_->db->InterfaceImpl.get_value<std::uint32_t>(row - 1, 1));
+        return info;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// A Property row's Name (the GetProperties row read, by the row's own
+// token). See the header for the contract.
+std::string MetadataFile::GetPropertyName(std::uint32_t propertyToken) const {
+    if (!IsValid()) return {};
+    std::uint32_t table = propertyToken >> 24;
+    std::uint32_t row = propertyToken & 0x00FFFFFFu;
+    if (table != 0x17 || row == 0 || row > impl_->db->Property.size()) return {};
+    try {
+        return std::string(impl_->db->Property[row - 1].Name());
+    } catch (const std::exception&) {
+        return {};
+    }
+}
+
+// An Event row's Name (same shape as GetPropertyName).
+std::string MetadataFile::GetEventName(std::uint32_t eventToken) const {
+    if (!IsValid()) return {};
+    std::uint32_t table = eventToken >> 24;
+    std::uint32_t row = eventToken & 0x00FFFFFFu;
+    if (table != 0x14 || row == 0 || row > impl_->db->Event.size()) return {};
+    try {
+        return std::string(impl_->db->Event[row - 1].Name());
+    } catch (const std::exception&) {
+        return {};
+    }
+}
+
 std::uint32_t MetadataFile::GetTypeDefAttributes(std::uint32_t typeToken) const {
     if (!IsValid()) return 0;
     std::uint32_t table = typeToken >> 24;
@@ -871,6 +956,106 @@ std::vector<CustomAttributeInfo> MetadataFile::GetCustomAttributes(std::uint32_t
         // Malformed image: return whatever was collected so far.
     }
     return result;
+}
+
+// The CustomAttribute row tokens of an entity (the HasCustomAttribute scan) --
+// see the header for the full contract. The raw Parent column is
+// ((row 1-based) << 5) | tag over the 22 HasCustomAttribute parent kinds.
+std::vector<std::uint32_t> MetadataFile::GetCustomAttributeTokens(
+    std::uint32_t entityToken) const {
+    std::vector<std::uint32_t> result;
+    if (!IsValid()) return result;
+    std::uint32_t row = entityToken & 0x00FFFFFFu;
+    if (row == 0) return result;
+    // The HasCustomAttribute tag of the parent's table (II.24.2.6): the
+    // composite index order MethodDef, Field, TypeRef, TypeDef, Param,
+    // InterfaceImpl, MemberRef, Module, DeclSecurity, Property, Event,
+    // StandAloneSig, ModuleRef, TypeSpec, Assembly, AssemblyRef, File,
+    // ExportedType, ManifestResource, GenericParam, GenericParamConstraint,
+    // MethodSpec.
+    std::uint32_t tag;
+    switch (entityToken >> 24) {
+        case 0x06: tag = 0; break;   // MethodDef
+        case 0x04: tag = 1; break;   // Field
+        case 0x01: tag = 2; break;   // TypeRef
+        case 0x02: tag = 3; break;   // TypeDef
+        case 0x08: tag = 4; break;   // Param
+        case 0x09: tag = 5; break;   // InterfaceImpl
+        case 0x0A: tag = 6; break;   // MemberRef
+        case 0x00: tag = 7; break;   // Module
+        case 0x0D: tag = 8; break;  // DeclSecurity (Permission)
+        case 0x17: tag = 9; break;  // Property
+        case 0x14: tag = 10; break;  // Event
+        case 0x11: tag = 11; break;  // StandAloneSig
+        case 0x1A: tag = 12; break;  // ModuleRef
+        case 0x1B: tag = 13; break;  // TypeSpec
+        case 0x20: tag = 14; break;  // Assembly
+        case 0x23: tag = 15; break;  // AssemblyRef
+        case 0x26: tag = 16; break;  // File
+        case 0x27: tag = 17; break;  // ExportedType
+        case 0x28: tag = 18; break;  // ManifestResource
+        case 0x2A: tag = 19; break;  // GenericParam
+        case 0x2C: tag = 20; break;  // GenericParamConstraint
+        case 0x2B: tag = 21; break;  // MethodSpec
+        default: return result;
+    }
+    std::uint32_t want = (row << 5) | tag;
+    try {
+        std::uint32_t count = static_cast<std::uint32_t>(
+            impl_->db->CustomAttribute.size());
+        for (std::uint32_t i = 0; i < count; i++) {
+            if (impl_->db->CustomAttribute.get_value<std::uint32_t>(i, 0)
+                != want)
+                continue;
+            result.push_back((0x0Cu << 24) | ((i + 1) & 0x00FFFFFFu));
+        }
+    } catch (const std::exception&) {
+        // Best-effort: a malformed table walk degrades to the partial result.
+    }
+    return result;
+}
+
+// One raw CustomAttribute row (the C# metadata.GetCustomAttribute(handle)).
+// The Type column is a CustomAttributeType coded index with 3 tag bits and
+// the unusual tag values 2 (MethodDef) and 3 (MemberRef) -- 0 and 1 are
+// reserved so the value cannot be confused with a TypeDefOrRef/MethodDefOrRef
+// (II.24.2.6). An invalid tag reads as a nil constructor token (the
+// never-throw read contract; the C# throws BadImageFormatException on the
+// corrupt row instead -- a documented divergence confined to bad metadata).
+std::optional<CustomAttributeRowInfo>
+MetadataFile::GetCustomAttribute(std::uint32_t attributeToken) const {
+    if (!IsValid()) return std::nullopt;
+    std::uint32_t table = attributeToken >> 24;
+    std::uint32_t row = attributeToken & 0x00FFFFFFu;
+    if (table != 0x0C || row == 0
+        || row > impl_->db->CustomAttribute.size())
+        return std::nullopt;
+    try {
+        CustomAttributeRowInfo info;
+        info.Token = attributeToken;
+        std::uint32_t ctorRaw =
+            impl_->db->CustomAttribute.get_value<std::uint32_t>(row - 1, 1);
+        std::uint32_t ctorRid = ctorRaw >> 3;
+        switch (ctorRaw & 0x7u) {
+            case 2:  // MethodDef
+                if (ctorRid != 0) info.ConstructorToken = (0x06u << 24) | ctorRid;
+                break;
+            case 3:  // MemberRef
+                if (ctorRid != 0) info.ConstructorToken = (0x0Au << 24) | ctorRid;
+                break;
+            default:
+                break;
+        }
+        std::uint32_t blobOffset =
+            impl_->db->CustomAttribute.get_value<std::uint32_t>(row - 1, 2);
+        if (blobOffset != 0) {
+            auto blob = impl_->db->get_blob(blobOffset);
+            info.ValueBlob = std::vector<std::uint8_t>(blob.begin(), blob.end());
+        }
+        return info;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
 }
 
 MethodBody MetadataFile::GetMethodBody(std::uint32_t rva) const {

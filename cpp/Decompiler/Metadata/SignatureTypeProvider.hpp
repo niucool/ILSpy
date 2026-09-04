@@ -145,12 +145,16 @@ using SignatureTypeWriter = std::function<void(Disassembler::ILNameSyntax)>;
 // The C# `System.Reflection.Metadata.MethodSignature<TType>` instantiated at
 // TType = SignatureTypeWriter. The parameter list and return type hold the
 // deferred writers; `RequiredParameterCount` distinguishes the vararg
-// prefix (the Sentinel byte position, or the full count for non-vararg).
+// prefix (the Sentinel byte position, or the full count for non-vararg);
+// `GenericParameterCount` carries the arity the header's GENERIC flag
+// prefixes (the compressed count between the header byte and the parameter
+// count -- the SortByNameProcessor method sort key renders it as `N).
 struct MethodSignatureT {
     SignatureHeader Header;
     SignatureTypeWriter ReturnType;
     std::vector<SignatureTypeWriter> ParameterTypes;
     std::uint32_t RequiredParameterCount = 0;
+    std::uint32_t GenericParameterCount = 0;
 };
 
 // The C# `System.Reflection.Metadata.ISignatureTypeProvider<TType,

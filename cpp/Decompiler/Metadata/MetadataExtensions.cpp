@@ -19,11 +19,38 @@
 #include "Decompiler/Metadata/MetadataExtensions.hpp"
 
 #include "Decompiler/Disassembler/DisassemblerHelpers.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
 namespace ILSpy::Decompiler::Metadata {
 
 using Disassembler::Escape;
 using TypeSystem::FullTypeName;
+using TypeSystem::KnownTypeCode;
+
+KnownTypeCode ToKnownTypeCode(PrimitiveTypeCode typeCode)
+{
+    switch (typeCode) {
+        case PrimitiveTypeCode::Boolean: return KnownTypeCode::Boolean;
+        case PrimitiveTypeCode::Byte: return KnownTypeCode::Byte;
+        case PrimitiveTypeCode::SByte: return KnownTypeCode::SByte;
+        case PrimitiveTypeCode::Char: return KnownTypeCode::Char;
+        case PrimitiveTypeCode::Int16: return KnownTypeCode::Int16;
+        case PrimitiveTypeCode::UInt16: return KnownTypeCode::UInt16;
+        case PrimitiveTypeCode::Int32: return KnownTypeCode::Int32;
+        case PrimitiveTypeCode::UInt32: return KnownTypeCode::UInt32;
+        case PrimitiveTypeCode::Int64: return KnownTypeCode::Int64;
+        case PrimitiveTypeCode::UInt64: return KnownTypeCode::UInt64;
+        case PrimitiveTypeCode::Single: return KnownTypeCode::Single;
+        case PrimitiveTypeCode::Double: return KnownTypeCode::Double;
+        case PrimitiveTypeCode::IntPtr: return KnownTypeCode::IntPtr;
+        case PrimitiveTypeCode::UIntPtr: return KnownTypeCode::UIntPtr;
+        case PrimitiveTypeCode::Object: return KnownTypeCode::Object;
+        case PrimitiveTypeCode::String: return KnownTypeCode::String;
+        case PrimitiveTypeCode::TypedReference: return KnownTypeCode::TypedReference;
+        case PrimitiveTypeCode::Void: return KnownTypeCode::Void;
+        default: return KnownTypeCode::None;
+    }
+}
 
 std::string ToILNameString(const FullTypeName& typeName, bool omitGenerics)
 {

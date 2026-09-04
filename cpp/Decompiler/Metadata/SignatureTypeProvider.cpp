@@ -281,7 +281,7 @@ MethodSignatureT SignatureTypeProviderDecoder::DecodeMethodSignatureBody() {
     MethodSignatureT sig;
     sig.Header = SignatureHeader::Decode(Byte());
     if (sig.Header.IsGeneric)
-        (void)CompressedUnsigned();  // generic parameter count (not consumed here)
+        sig.GenericParameterCount = CompressedUnsigned();
     std::uint32_t paramCount = CompressedUnsigned();
     sig.ReturnType = DecodeTypeOrByRef();
     sig.RequiredParameterCount = paramCount;

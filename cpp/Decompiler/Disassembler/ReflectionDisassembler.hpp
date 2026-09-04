@@ -38,8 +38,9 @@
 //    port as get/set member pairs reading/writing the MethodBodyDisassembler
 //    flags. `DebugInfo` (IDebugInfoProvider) defers with the provider type;
 //    `AssemblyResolver` defers with WriteSecurityDeclarations;
-//    `EntityProcessor` defers with the Process overloads (IEntityProcessor/
-//    SortByNameProcessor, the next slice). The `CancellationToken` defers
+//    `EntityProcessor` ports as the caller-owned IEntityProcessor pointer
+//    with the Process passthrough (SortByNameProcessor is the ported
+//    implementation). The `CancellationToken` defers
 //    with the type -- the C# ThrowIfCancellationRequested calls live in the
 //    DisassembleType/DisassembleNamespace loops (not yet ported).
 //  * `ExpandMemberDefinitions`/`DecodeCustomAttributeBlobs` are plain
@@ -65,6 +66,7 @@
 #pragma once
 
 #include "Decompiler/Disassembler/MethodBodyDisassembler.hpp"
+#include "Decompiler/Disassembler/IEntityProcessor.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/SignatureTypeProvider.hpp"
 #include "Decompiler/Output/ITextOutput.hpp"
@@ -115,6 +117,25 @@ public:
     // (roughly the ildasm /CAVERBAL switch): decode custom attribute blobs
     // instead of dumping them as raw bytes.
     bool DecodeCustomAttributeBlobs = false;
+
+    // The C# `public IEntityProcessor EntityProcessor { get; set; }`: the
+    // reordering hook every member/attribute collection is routed through
+    // (the test harness plugs in SortByNameProcessor). The processor is
+    // caller-owned (the C# reference property over a heap object; the port's
+    // raw pointer) and must outlive this object; null (the default) disables
+    // reordering -- the Process passthrough below.
+    IEntityProcessor* EntityProcessor() const;
+    void EntityProcessor(IEntityProcessor* value);
+
+    // The C# private `Process(MetadataFile module,
+    // IReadOnlyCollection<THandle> items)` overloads -- seven in C#, typed by
+    // the handle kind; the port's raw-token collections collapse them into
+    // one tagged method: `EntityProcessor?.Process(module, items) ?? items`.
+    // (The port keeps the private members public so the tests can drive them
+    // directly.)
+    std::vector<std::uint32_t> Process(const Metadata::MetadataFile& module,
+        const std::vector<std::uint32_t>& items,
+        ProcessedEntityKind kind) const;
 
     // The C# `internal static void WriteMetadataToken(ITextOutput output,
     // MetadataFile module, Handle? handle, int metadataToken, bool spaceAfter,
@@ -184,6 +205,10 @@ public:
 
 private:
     Output::ITextOutput& output_;
+
+    // The C# `IEntityProcessor EntityProcessor` auto-property backing field
+    // (null until set -- never dereferenced by this class).
+    IEntityProcessor* entityProcessor_ = nullptr;
 
     // The fresh MethodBodyDisassembler the chaining constructor owns (null
     // when the caller supplied one).

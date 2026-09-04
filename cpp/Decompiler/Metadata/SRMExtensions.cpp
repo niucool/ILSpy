@@ -18,11 +18,16 @@
 
 #include "Decompiler/Metadata/SRMExtensions.hpp"
 
+#include "Decompiler/Metadata/MetadataExtensions.hpp"
+#include "Decompiler/TypeSystem/KnownTypeReference.hpp"
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
 #include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
 
+#include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace ILSpy::Decompiler::Metadata {
 
@@ -85,6 +90,155 @@ FullTypeName GetFullTypeNameFromDefinitionImpl(const MetadataFile& metadata,
 
 } // namespace
 
+// The TypeSpec blob walker (the FullTypeNameSignatureDecoder shrinking
+// semantics over the II.23.2 element-type grammar -- see the header).
+namespace {
+
+// A one-byte-at-a-time cursor over the TypeSpec row's signature blob (the
+// ILParser/BlobReader cursor convention). Reads past the end throw
+// std::out_of_range (the C# BlobReader overflow the SignatureDecoder throws
+// as BadImageFormatException).
+class TypeNameBlobCursor {
+public:
+    TypeNameBlobCursor(const std::uint8_t* data, std::size_t size)
+        : data_(data), size_(size) {}
+
+    std::uint32_t Byte() {
+        if (pos_ >= size_)
+            throw std::out_of_range("TypeSpec blob: truncated");
+        return data_[pos_++];
+    }
+
+    // The C# BlobReader.ReadCompressedInteger (II.23.2 unsigned compressed
+    // integers: 1 byte for 0x00-0x7F, 2 for 0x80-0x3FFF, 4 for the 0xC0 form).
+    std::uint32_t CompressedUnsigned() {
+        std::uint32_t first = Byte();
+        if ((first & 0x80) == 0) return first;
+        if ((first & 0xC0) == 0x80)
+            return ((first & 0x3Fu) << 8) | Byte();
+        if ((first & 0xE0) == 0xC0)
+            return ((first & 0x1Fu) << 24) | (Byte() << 16) | (Byte() << 8)
+                | Byte();
+        throw std::out_of_range("TypeSpec blob: invalid compressed integer");
+    }
+
+private:
+    const std::uint8_t* data_;
+    std::size_t size_;
+    std::size_t pos_ = 0;
+};
+
+// The C# SignatureDecoder.ReadTypeHandle: a compressed TypeDefOrRefEncoded
+// index -- 2 tag bits (TypeDef 0 / TypeRef 1 / TypeSpec 2), the rest the
+// 1-based row. Returns 0 for the nil coding.
+std::uint32_t ReadTypeDefOrRefEncoded(TypeNameBlobCursor& cursor) {
+    std::uint32_t raw = cursor.CompressedUnsigned();
+    std::uint32_t rid = raw >> 2;
+    if (rid == 0) return 0;
+    switch (raw & 0x3u) {
+        case 0: return (0x02u << 24) | rid;
+        case 1: return (0x01u << 24) | rid;
+        case 2: return (0x1Bu << 24) | rid;
+        default: return 0;
+    }
+}
+
+FullTypeName DecodeTypeNameBlob(const MetadataFile& metadata,
+                                 TypeNameBlobCursor& cursor);
+
+// One element-type step of the shrinking walk: the cmod/pinned wrappers and
+// the array/pointer/byref/szarray wrappers strip to their element type, a
+// generic instantiation keeps only its generic head (the type arguments are
+// decoded and discarded by the C# -- nothing follows them in a TypeSpec blob,
+// so the result is identical), VAR/MVAR/FNPTR decode to the empty
+// FullTypeName, and the primitives resolve through the known-type table.
+FullTypeName DecodeTypeNameBlob(const MetadataFile& metadata,
+                                 TypeNameBlobCursor& cursor) {
+    std::uint8_t elementType = static_cast<std::uint8_t>(cursor.Byte());
+    switch (elementType) {
+        case 0x1F:  // ELEMENT_TYPE_CMOD_REQD
+        case 0x20:  // ELEMENT_TYPE_CMOD_OPT
+            // GetModifiedType returns the unmodified type; the modifier's
+            // TypeDefOrRefEncoded index is consumed.
+            (void)ReadTypeDefOrRefEncoded(cursor);
+            return DecodeTypeNameBlob(metadata, cursor);
+        case 0x45:  // ELEMENT_TYPE_PINNED (GetPinnedType)
+            return DecodeTypeNameBlob(metadata, cursor);
+        case 0x0F:  // ELEMENT_TYPE_PTR (GetPointerType -> element)
+        case 0x10:  // ELEMENT_TYPE_BYREF (GetByReferenceType -> element)
+        case 0x1D:  // ELEMENT_TYPE_SZARRAY (GetSZArrayType -> element)
+            return DecodeTypeNameBlob(metadata, cursor);
+        case 0x14: {  // ELEMENT_TYPE_ARRAY: element, then the shape (consumed
+                      // and discarded -- GetArrayType returns the element)
+            FullTypeName element = DecodeTypeNameBlob(metadata, cursor);
+            std::uint32_t rank = cursor.CompressedUnsigned();
+            (void)rank;
+            std::uint32_t numSizes = cursor.CompressedUnsigned();
+            for (std::uint32_t i = 0; i < numSizes; i++)
+                (void)cursor.CompressedUnsigned();
+            std::uint32_t numLoBounds = cursor.CompressedUnsigned();
+            for (std::uint32_t i = 0; i < numLoBounds; i++)
+                (void)cursor.CompressedUnsigned();
+            return element;
+        }
+        case 0x15: {  // ELEMENT_TYPE_GENERICINST: the raw kind byte, the
+                      // generic head, the argument count -- GetGeneric-
+                      // Instantiation returns the genericType only
+            (void)cursor.Byte();  // rawTypeKind: 0x11 valuetype / 0x12 class
+            std::uint32_t generic = ReadTypeDefOrRefEncoded(cursor);
+            std::uint32_t argumentCount = cursor.CompressedUnsigned();
+            (void)argumentCount;  // the arguments are decoded and discarded
+            return GetFullTypeName(metadata, generic);
+        }
+        case 0x11:  // ELEMENT_TYPE_VALUETYPE
+        case 0x12:  // ELEMENT_TYPE_CLASS
+            return GetFullTypeName(metadata, ReadTypeDefOrRefEncoded(cursor));
+        case 0x13:  // ELEMENT_TYPE_VAR (GetGenericTypeParameter: default)
+        case 0x1E:  // ELEMENT_TYPE_MVAR (GetGenericMethodParameter: default)
+        case 0x1B:  // ELEMENT_TYPE_FNPTR (GetFunctionPointerType: default)
+            return FullTypeName{};
+        default: {
+            // The primitive element types (0x01-0x0E, 0x16, 0x18, 0x19, 0x1C):
+            // FullTypeNameSignatureDecoder.GetPrimitiveType resolves the code
+            // through KnownTypeReference.Get(typeCode.ToKnownTypeCode()) and
+            // an unknown code decodes to the default (an empty name).
+            auto code = static_cast<PrimitiveTypeCode>(elementType);
+            switch (code) {
+                case PrimitiveTypeCode::Void:
+                case PrimitiveTypeCode::Boolean:
+                case PrimitiveTypeCode::Char:
+                case PrimitiveTypeCode::SByte:
+                case PrimitiveTypeCode::Byte:
+                case PrimitiveTypeCode::Int16:
+                case PrimitiveTypeCode::UInt16:
+                case PrimitiveTypeCode::Int32:
+                case PrimitiveTypeCode::UInt32:
+                case PrimitiveTypeCode::Int64:
+                case PrimitiveTypeCode::UInt64:
+                case PrimitiveTypeCode::Single:
+                case PrimitiveTypeCode::Double:
+                case PrimitiveTypeCode::String:
+                case PrimitiveTypeCode::TypedReference:
+                case PrimitiveTypeCode::IntPtr:
+                case PrimitiveTypeCode::UIntPtr:
+                case PrimitiveTypeCode::Object: {
+                    const auto* ktr = TypeSystem::KnownTypeReference::Get(
+                        ToKnownTypeCode(code));
+                    if (ktr == nullptr) return FullTypeName{};
+                    return FullTypeName(TopLevelTypeName(
+                        std::string(ktr->Namespace()), std::string(ktr->Name()),
+                        ktr->TypeParameterCount()));
+                }
+                default:
+                    throw std::logic_error(
+                        "TypeSpec blob: unrecognized ELEMENT_TYPE");
+            }
+        }
+    }
+}
+
+} // namespace
+
 std::string ToILSyntax(SignatureCallingConvention callConv) {
     switch (callConv) {
         case SignatureCallingConvention::Default:
@@ -131,16 +285,70 @@ FullTypeName GetFullTypeName(const MetadataFile& metadata, std::uint32_t entityT
             return GetFullTypeNameFromDefinition(metadata, entityToken);
         case 0x01:  // HandleKind.TypeReference
             return GetFullTypeNameFromReference(metadata, entityToken);
-        case 0x1B:  // HandleKind.TypeSpecification
-            // The C# decodes the TypeSpec signature blob through
-            // FullTypeNameSignatureDecoder (not yet ported); the arm throws
-            // rather than returning a wrong name -- the TypeDef/TypeRef arms
-            // already cover every catch-clause and member-name type except
-            // instantiated generics.
-            throw std::logic_error("GetFullTypeName: the TypeSpec arm is not yet ported");
+        case 0x1B: {  // HandleKind.TypeSpecification: the row's signature
+            // blob through the shrinking decoder below.
+            auto blob = metadata.GetTypeSpecSignatureBlob(entityToken);
+            if (!blob)
+                throw std::out_of_range(
+                    "GetFullTypeName: invalid TypeSpec token");
+            return GetFullTypeNameFromSpecification(
+                metadata, blob->data(), blob->size());
+        }
         default:
             // The C# `throw new ArgumentOutOfRangeException()`.
             throw std::out_of_range("GetFullTypeName: unsupported handle kind");
+    }
+}
+
+FullTypeName GetFullTypeNameFromSpecification(const MetadataFile& metadata,
+    const std::uint8_t* data, std::size_t size) {
+    TypeNameBlobCursor cursor(data, size);
+    return DecodeTypeNameBlob(metadata, cursor);
+}
+
+std::uint32_t GetDeclaringType(const MetadataFile& metadata,
+    std::uint32_t entityToken) {
+    if (entityToken == 0)
+        throw std::invalid_argument("GetDeclaringType: nil token");
+    switch (entityToken >> 24) {
+        case 0x02: {  // TypeDefinition: the NestedClass-table declaring type
+            auto info = metadata.GetTypeDefNameInfo(entityToken);
+            if (!info)
+                throw std::out_of_range(
+                    "GetDeclaringType: invalid TypeDef token");
+            return info->DeclaringTypeToken;  // 0 = top-level (the nil handle)
+        }
+        case 0x01: {  // TypeReference: the resolution-scope walk (a TypeRef
+            // scope is the declaring TypeRef; every other scope is nil)
+            auto info = metadata.GetTypeRefNameInfo(entityToken);
+            if (!info)
+                throw std::out_of_range(
+                    "GetDeclaringType: invalid TypeRef token");
+            return info->DeclaringTypeRefToken;  // 0 = top-level
+        }
+        case 0x04:  // FieldDefinition
+            return metadata.GetFieldDeclaringTypeToken(entityToken);
+        case 0x06:  // MethodDefinition
+            return metadata.GetMethodDeclaringTypeToken(entityToken);
+        case 0x0A: {  // MemberReference: mr.Parent
+            auto mr = metadata.GetMemberReference(entityToken);
+            if (!mr)
+                throw std::out_of_range(
+                    "GetDeclaringType: invalid MemberRef token");
+            return mr->ParentToken;
+        }
+        case 0x2B: {  // MethodSpecification: recurse into the method
+            auto ms = metadata.GetMethodSpecification(entityToken);
+            if (!ms || ms->MethodToken == 0)
+                throw std::out_of_range(
+                    "GetDeclaringType: invalid MethodSpec token");
+            return GetDeclaringType(metadata, ms->MethodToken);
+        }
+        default:
+            // The C# default arm (ArgumentOutOfRangeException); the deferred
+            // TypeSpec/Event/Property arms land here too (see the header).
+            throw std::out_of_range(
+                "GetDeclaringType: unsupported handle kind");
     }
 }
 
