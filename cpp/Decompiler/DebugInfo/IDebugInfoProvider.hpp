@@ -36,6 +36,7 @@
 #include "Decompiler/DebugInfo/SequencePoint.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -52,10 +53,20 @@ struct Variable {
 };
 
 // The C# `public struct PdbExtraTypeInfo` -- the dynamic/tuple names
-// Roslyn records in CustomDebugInformation.
+// Roslyn records in CustomDebugInformation. The C# fields are nullable
+// arrays: the provider sets them only for the CustomDebugInformation kinds
+// it recognises, and its TryGetExtraTypeInfo return value is exactly
+// "either field was set" -- so the fields port as optionals. An engaged
+// optional may hold an EMPTY vector (a TupleElementNames blob with no
+// strings, or a zero-length dynamic-flags blob), which is a found result,
+// distinct from the disengaged not-found state. The C# `string?` entries of
+// TupleElementNames (Roslyn writes null for the unnamed tuple elements, the
+// `IsNullOrWhiteSpace` rule of the decode) port as empty strings: the decode
+// maps every whitespace-or-empty part to the empty string, and a real name
+// is never empty.
 struct PdbExtraTypeInfo {
-    std::vector<std::string> TupleElementNames;
-    std::vector<bool> DynamicFlags;
+    std::optional<std::vector<std::string>> TupleElementNames;
+    std::optional<std::vector<bool>> DynamicFlags;
 };
 
 // The C# `public interface IDebugInfoProvider`.

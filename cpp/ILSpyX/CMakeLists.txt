@@ -1,3 +1,9 @@
 # ICSharpCode.ILSpyX core subset (FileLoaders, PdbProvider, Abstractions, ...).
-# Phase 8 of PORT_PLAN.md. No sources yet; this placeholder keeps the mirror
-# directory present in the build graph.
+# Phase 8 of PORT_PLAN.md. The PdbProvider port begins with the
+# PortableDebugInfoProvider -- the IDebugInfoProvider implementation over the
+# Phase-1 portable-PDB debug-table reader (the Cecil bridge the plan drops).
+# FileLoaders/Abstractions follow in later phases.
+
+target_sources(ilspy PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/PdbProvider/PortableDebugInfoProvider.cpp
+)

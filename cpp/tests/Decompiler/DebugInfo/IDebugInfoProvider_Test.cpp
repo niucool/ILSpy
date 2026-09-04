@@ -68,11 +68,21 @@ TEST(VariableTest, CarriesIndexAndName) {
 
 TEST(PdbExtraTypeInfoTest, DefaultsEmpty) {
     DI::PdbExtraTypeInfo info;
-    EXPECT_TRUE(info.TupleElementNames.empty());
-    EXPECT_TRUE(info.DynamicFlags.empty());
-    info.TupleElementNames = {"Item1", "Item2"};
-    info.DynamicFlags = {true, false, true};
-    EXPECT_EQ(info.TupleElementNames.size(), 2u);
-    EXPECT_EQ(info.DynamicFlags.size(), 3u);
-    EXPECT_TRUE(info.DynamicFlags[2]);
+    EXPECT_FALSE(info.TupleElementNames.has_value());
+    EXPECT_FALSE(info.DynamicFlags.has_value());
+    info.TupleElementNames = std::vector<std::string>{ "Item1", "Item2" };
+    info.DynamicFlags = std::vector<bool>{ true, false, true };
+    EXPECT_EQ(info.TupleElementNames->size(), 2u);
+    EXPECT_EQ(info.DynamicFlags->size(), 3u);
+    EXPECT_TRUE((*info.DynamicFlags)[2]);
+    // The C# fields are nullable arrays: an engaged optional holding an
+    // empty vector is a found result (a decode that produced nothing),
+    // distinct from the disengaged not-found state.
+    DI::PdbExtraTypeInfo found;
+    found.TupleElementNames = std::vector<std::string>{};
+    found.DynamicFlags = std::vector<bool>{};
+    EXPECT_TRUE(found.TupleElementNames.has_value());
+    EXPECT_TRUE(found.TupleElementNames->empty());
+    EXPECT_TRUE(found.DynamicFlags.has_value());
+    EXPECT_TRUE(found.DynamicFlags->empty());
 }
