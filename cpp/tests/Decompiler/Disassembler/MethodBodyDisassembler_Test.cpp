@@ -43,8 +43,10 @@
 #include <cstdio>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace ILSpy::Decompiler::Disassembler;
@@ -52,6 +54,7 @@ namespace MD = ILSpy::Decompiler::Metadata;
 namespace OUT = ILSpy::Decompiler::Output;
 namespace ILD = ILSpy::Decompiler::IL;
 namespace Util = ILSpy::Decompiler::Util;
+namespace DebugInfo = ILSpy::Decompiler::DebugInfo;
 
 namespace {
 
@@ -833,4 +836,342 @@ TEST(MethodBodyDisassemblerTest, DisassembleSmokeOverManyMethods) {
         }
     }
     ASSERT_GT(disassembled, 0) << "no method bodies disassembled";
+}
+
+// ---------------------------------------------------------------------------
+// The DebugInfo provider wiring (MethodBodyDisassembler.cs lines 129-130,
+// 185, 331-349): the sequence-point state assignment in Disassemble, the
+// ShowSequencePoints `// sequence point:` lines in WriteInstruction (the
+// mid-instruction `!! at IL_xxxx !!` marker, the 0xfeefee hidden form), and
+// the TryGetName debug-name suffix in DisassembleLocalsBlock. The exact
+// renders are pinned against the real C# MethodBodyDisassembler driven by
+// the same fake provider over the same mscorlib fixture (the SDK-10 probe
+// referencing the ilspycmd 11.0 ICSharpCode.Decompiler.dll).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+class FakeDebugInfoProvider final : public DebugInfo::IDebugInfoProvider {
+public:
+    std::vector<DebugInfo::SequencePoint> Points;
+    std::map<int, std::string> Names;
+    // Call records (the const interface cannot write plain members).
+    mutable std::vector<std::uint32_t> SequencePointCalls;
+    mutable std::vector<std::pair<std::uint32_t, int>> NameCalls;
+
+    std::string Description() const override { return "fake provider"; }
+    std::string SourceFileName() const override { return "C:\\fake\\source.cs"; }
+    std::vector<DebugInfo::SequencePoint> GetSequencePoints(
+        std::uint32_t methodToken) const override {
+        SequencePointCalls.push_back(methodToken);
+        return Points;
+    }
+    std::vector<DebugInfo::Variable> GetVariables(
+        std::uint32_t) const override {
+        return {};
+    }
+    bool TryGetName(std::uint32_t methodToken, int index,
+        std::string& name) const override {
+        NameCalls.emplace_back(methodToken, index);
+        auto it = Names.find(index);
+        if (it == Names.end()) return false;
+        name = it->second;
+        return true;
+    }
+    bool TryGetExtraTypeInfo(std::uint32_t, int,
+        DebugInfo::PdbExtraTypeInfo&) const override {
+        return false;
+    }
+};
+
+DebugInfo::SequencePoint MakeSequencePoint(int offset, int startLine,
+    int startColumn, int endLine, int endColumn) {
+    DebugInfo::SequencePoint sp;
+    sp.Offset = offset;
+    sp.StartLine = startLine;
+    sp.StartColumn = startColumn;
+    sp.EndLine = endLine;
+    sp.EndColumn = endColumn;
+    sp.DocumentUrl = "C:\\fake\\String.cs";
+    return sp;
+}
+
+DebugInfo::SequencePoint MakeHiddenSequencePoint(int offset) {
+    DebugInfo::SequencePoint sp;
+    sp.Offset = offset;
+    sp.DocumentUrl = "C:\\fake\\String.cs";
+    sp.SetHidden();
+    return sp;
+}
+
+// The probe's fake sequence-point list: a boundary point, a mid-instruction
+// point (renders at the next instruction with the !! marker), two hidden
+// points (one mid-instruction, one at an instruction boundary), a second
+// boundary point, and a point beyond the code size (never renders).
+FakeDebugInfoProvider MakeSequencePointFake() {
+    FakeDebugInfoProvider fake;
+    fake.Points = {
+        MakeSequencePoint(0, 340, 5, 340, 30),
+        MakeSequencePoint(2, 341, 9, 341, 20),
+        MakeHiddenSequencePoint(4),
+        MakeHiddenSequencePoint(8),
+        MakeHiddenSequencePoint(0x0e),
+        MakeSequencePoint(0x14, 342, 13, 342, 40),
+        MakeSequencePoint(0x100, 999, 1, 999, 2),
+    };
+    return fake;
+}
+
+std::string DisassembleWith(MD::MetadataFile& f, std::uint32_t token,
+    bool detectControlStructure,
+    const std::function<void(MethodBodyDisassembler&)>& setup) {
+    std::ostringstream stream;
+    OUT::PlainTextOutput out(stream);
+    MethodBodyDisassembler d(out);
+    d.DetectControlStructure = detectControlStructure;
+    setup(d);
+    d.Disassemble(f, token);
+    return stream.str();
+}
+
+std::vector<std::string> SplitLines(const std::string& text) {
+    std::vector<std::string> lines;
+    std::istringstream stream(text);
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        lines.push_back(line);
+    }
+    return lines;
+}
+
+std::size_t LineIndexWithPrefix(const std::vector<std::string>& lines,
+    const std::string& prefix) {
+    for (std::size_t i = 0; i < lines.size(); i++) {
+        if (lines[i].rfind(prefix, 0) == 0) return i;
+    }
+    return lines.size();
+}
+
+}  // namespace
+
+TEST(MethodBodyDisassemblerTest, DisassembleRendersSequencePointsAndDebugNames) {
+    // The full gold render (sequence points + debug local names together),
+    // byte-exact against the real C# output over mscorlib's String.Copy:
+    // every sequence-point shape renders exactly once at the instruction
+    // that consumes it, and the local-name suffixes append to the .locals
+    // lines (with Escape wrapping the hyphenated name in single quotes).
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t copy = FindMethodIn(f, stringType, "Copy");
+    ASSERT_NE(copy, 0u);
+    std::uint32_t rva = f.GetMethodRVA(copy);
+    auto body = f.GetMethodBody(rva);
+    ASSERT_TRUE(body.IsValid());
+
+    auto points = MakeSequencePointFake();
+    points.Names[0] = "length";
+    points.Names[3] = "pinned-ptr";
+    std::string text = DisassembleWith(f, copy, /*detectControlStructure=*/false,
+        [&](MethodBodyDisassembler& d) {
+            d.ShowSequencePoints = true;
+            d.DebugInfo = &points;
+        });
+
+    // The fixture-derived header lines build dynamically (the existing
+    // convention); everything from .maxstack on is the byte-exact gold.
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "// Method begins at RVA 0x%x\r\n", rva);
+    std::string expected(buf);
+    std::snprintf(buf, sizeof(buf), "// Header size: %u\r\n", body.HeaderSize());
+    expected += buf;
+    std::snprintf(buf, sizeof(buf), "// Code size: %u (0x%x)\r\n",
+        body.CodeSize(), body.CodeSize());
+    expected += buf;
+    expected +=
+        ".maxstack 3\r\n"
+        ".locals init (\r\n"
+        "\t[0] int32 length,\r\n"
+        "\t[1] string,\r\n"
+        "\t[2] char*,\r\n"
+        "\t[3] char& pinned 'pinned-ptr',\r\n"
+        "\t[4] char*,\r\n"
+        "\t[5] char& pinned\r\n"
+        ")\r\n"
+        "\r\n"
+        "// sequence point: (line 340, col 5) to (line 340, col 30) in C:\\fake\\String.cs\r\n"
+        "IL_0000: ldarg.0\r\n"
+        "IL_0001: brtrue.s IL_000e\r\n"
+        "// sequence point: !! at IL_0002 !!(line 341, col 9) to (line 341, col 20) in C:\\fake\\String.cs\r\n"
+        "IL_0003: ldstr \"str\"\r\n"
+        "// sequence point: !! at IL_0004 !!hidden\r\n"
+        "IL_0008: newobj instance void System.ArgumentNullException::.ctor(string)\r\n"
+        "// sequence point: !! at IL_0008 !!hidden\r\n"
+        "IL_000d: throw\r\n"
+        "// sequence point: hidden\r\n"
+        "IL_000e: ldarg.0\r\n"
+        "IL_000f: callvirt instance int32 System.String::get_Length()\r\n"
+        "// sequence point: (line 342, col 13) to (line 342, col 40) in C:\\fake\\String.cs\r\n"
+        "IL_0014: stloc.0\r\n"
+        "IL_0015: ldloc.0\r\n"
+        "IL_0016: call string System.String::FastAllocateString(int32)\r\n"
+        "IL_001b: stloc.1\r\n"
+        "IL_001c: ldloc.1\r\n"
+        "IL_001d: ldflda char System.String::m_firstChar\r\n"
+        "IL_0022: stloc.3\r\n"
+        "IL_0023: ldloc.3\r\n"
+        "IL_0024: conv.u\r\n"
+        "IL_0025: stloc.2\r\n"
+        "IL_0026: ldarg.0\r\n"
+        "IL_0027: ldflda char System.String::m_firstChar\r\n"
+        "IL_002c: stloc.s 5\r\n"
+        "IL_002e: ldloc.s 5\r\n"
+        "IL_0030: conv.u\r\n"
+        "IL_0031: stloc.s 4\r\n"
+        "IL_0033: ldloc.2\r\n"
+        "IL_0034: ldloc.s 4\r\n"
+        "IL_0036: ldloc.0\r\n"
+        "IL_0037: call void System.String::wstrcpy(char*, char*, int32)\r\n"
+        "IL_003c: ldc.i4.0\r\n"
+        "IL_003d: conv.u\r\n"
+        "IL_003e: stloc.s 5\r\n"
+        "IL_0040: ldc.i4.0\r\n"
+        "IL_0041: conv.u\r\n"
+        "IL_0042: stloc.3\r\n"
+        "IL_0043: ldloc.1\r\n"
+        "IL_0044: ret\r\n";
+    EXPECT_EQ(text, expected);
+
+    // The provider is asked once per Disassemble with the disassembled
+    // method's own token, and for every local index in declaration order.
+    ASSERT_EQ(points.SequencePointCalls.size(), 1u) << points.SequencePointCalls.size();
+    EXPECT_EQ(points.SequencePointCalls[0], copy);
+    ASSERT_EQ(points.NameCalls.size(), 6u) << points.NameCalls.size();
+    for (int i = 0; i < 6; i++) {
+        EXPECT_EQ(points.NameCalls[i].first, copy);
+        EXPECT_EQ(points.NameCalls[i].second, i);
+    }
+}
+
+TEST(MethodBodyDisassemblerTest, DebugNamesAppendWithoutShowSequencePoints) {
+    // DebugInfo drives both the sequence-point lines AND the local names;
+    // with ShowSequencePoints off, the names still append (the C# calls
+    // DebugInfo.TryGetName from DisassembleLocalsBlock regardless of the
+    // flag) and no sequence-point line renders.
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t copy = FindMethodIn(f, stringType, "Copy");
+    ASSERT_NE(copy, 0u);
+
+    FakeDebugInfoProvider fake;
+    fake.Names[0] = "length";
+    fake.Names[3] = "pinned-ptr";
+    std::string baseline = DisassembleFlat(f, copy);
+    std::string text = DisassembleWith(f, copy, /*detectControlStructure=*/false,
+        [&](MethodBodyDisassembler& d) { d.DebugInfo = &fake; });
+
+    std::string expected = baseline;
+    auto substitute = [&expected](std::string_view from, std::string_view to) {
+        auto at = expected.find(from);
+        ASSERT_NE(at, std::string::npos) << expected;
+        expected.replace(at, from.size(), to);
+    };
+    substitute("[0] int32,\r\n", "[0] int32 length,\r\n");
+    substitute("[3] char& pinned,\r\n", "[3] char& pinned 'pinned-ptr',\r\n");
+    EXPECT_EQ(text, expected);
+    // GetSequencePoints is still called (the C# assigns the state before the
+    // flag-gated render).
+    EXPECT_EQ(fake.SequencePointCalls.size(), 1u);
+}
+
+TEST(MethodBodyDisassemblerTest, ShowSequencePointsWithoutProviderMatchesBaseline) {
+    // ShowSequencePoints without a DebugInfo provider: the C#
+    // `DebugInfo?.GetSequencePoints(handle) ?? EmptyList` -- no sequence
+    // points exist, so nothing renders.
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t copy = FindMethodIn(f, stringType, "Copy");
+    ASSERT_NE(copy, 0u);
+
+    std::string baseline = DisassembleFlat(f, copy);
+    std::string text = DisassembleWith(f, copy, /*detectControlStructure=*/false,
+        [&](MethodBodyDisassembler& d) { d.ShowSequencePoints = true; });
+    EXPECT_EQ(text, baseline);
+}
+
+TEST(MethodBodyDisassemblerTest, ProviderWithoutShowSequencePointsMatchesBaseline) {
+    // A provider with sequence points but the flag off: the points are
+    // fetched (the C# assigns the state unconditionally) but no line
+    // renders, so the output matches the no-provider baseline exactly.
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t copy = FindMethodIn(f, stringType, "Copy");
+    ASSERT_NE(copy, 0u);
+
+    auto fake = MakeSequencePointFake();
+    std::string baseline = DisassembleFlat(f, copy);
+    std::string text = DisassembleWith(f, copy, /*detectControlStructure=*/false,
+        [&](MethodBodyDisassembler& d) { d.DebugInfo = &fake; });
+    EXPECT_EQ(text, baseline);
+    EXPECT_EQ(fake.SequencePointCalls.size(), 1u);
+}
+
+TEST(MethodBodyDisassemblerTest, StructuredPathRendersSequencePoints) {
+    // The DetectControlStructure tree walk renders through the same
+    // WriteInstruction, so the sequence-point lines appear there too --
+    // after the branch-target blank line and immediately before the
+    // consuming instruction.
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t copy = FindMethodIn(f, stringType, "Copy");
+    ASSERT_NE(copy, 0u);
+
+    auto fake = MakeSequencePointFake();
+    std::string text = DisassembleWith(f, copy, /*detectControlStructure=*/true,
+        [&](MethodBodyDisassembler& d) {
+            d.ShowSequencePoints = true;
+            d.DebugInfo = &fake;
+        });
+
+    auto lines = SplitLines(text);
+    auto expectPrevious = [&](const std::string& instructionPrefix,
+        const std::string& expectedLine, bool blankBefore) {
+        auto i = LineIndexWithPrefix(lines, instructionPrefix);
+        ASSERT_LT(i, lines.size()) << instructionPrefix << " not found";
+        ASSERT_GE(i, 1u + (blankBefore ? 1u : 0u)) << instructionPrefix;
+        EXPECT_EQ(lines[i - 1], expectedLine) << instructionPrefix;
+        if (blankBefore) EXPECT_EQ(lines[i - 2], "") << instructionPrefix;
+    };
+    expectPrevious("IL_0000: ",
+        "// sequence point: (line 340, col 5) to (line 340, col 30) in C:\\fake\\String.cs",
+        /*blankBefore=*/false);
+    expectPrevious("IL_0003: ",
+        "// sequence point: !! at IL_0002 !!(line 341, col 9) to (line 341, col 20) in C:\\fake\\String.cs",
+        /*blankBefore=*/true);
+    expectPrevious("IL_0008: ",
+        "// sequence point: !! at IL_0004 !!hidden", /*blankBefore=*/false);
+    expectPrevious("IL_000d: ",
+        "// sequence point: !! at IL_0008 !!hidden", /*blankBefore=*/false);
+    expectPrevious("IL_000e: ",
+        "// sequence point: hidden", /*blankBefore=*/true);
+    expectPrevious("IL_0014: ",
+        "// sequence point: (line 342, col 13) to (line 342, col 40) in C:\\fake\\String.cs",
+        /*blankBefore=*/false);
+    // The point beyond the code size never renders, and no sequence-point
+    // line precedes any other instruction.
+    std::size_t sequencePointLines = 0;
+    for (const auto& line : lines) {
+        if (line.rfind("// sequence point: ", 0) == 0) sequencePointLines++;
+    }
+    EXPECT_EQ(sequencePointLines, 6u);
 }

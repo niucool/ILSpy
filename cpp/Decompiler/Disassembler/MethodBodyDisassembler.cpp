@@ -186,6 +186,36 @@ void MethodBodyDisassembler::WriteInstruction(Metadata::MetadataFile& module,
     std::size_t& pos, std::uint32_t methodRva)
 {
     std::size_t offset = pos;
+    // The C# ShowSequencePoints block (MethodBodyDisassembler.cs lines
+    // 331-349): the current sequence point renders once the instruction
+    // offset reaches it -- at most one per instruction, the index advancing
+    // only when a point rendered (a point at a mid-instruction offset
+    // renders at the next instruction with the `!! at IL_xxxx !!` marker).
+    // The `sequencePoints?.Count` null check ports as hasSequencePoints_
+    // (false outside a Disassemble call -- the C# field is null then).
+    if (ShowSequencePoints && hasSequencePoints_
+        && nextSequencePointIndex_
+            < static_cast<int>(sequencePoints_.size())) {
+        const DebugInfo::SequencePoint& sp =
+            sequencePoints_[static_cast<std::size_t>(nextSequencePointIndex_)];
+        if (sp.Offset <= static_cast<int>(offset)) {
+            output_.Write("// sequence point: ");
+            if (sp.Offset != static_cast<int>(offset)) {
+                output_.Write("!! at " + OffsetToString(sp.Offset) + " !!");
+            }
+            if (sp.IsHidden()) {
+                Output::WriteLine(output_, "hidden");
+            } else {
+                Output::WriteLine(output_,
+                    "(line " + std::to_string(sp.StartLine)
+                    + ", col " + std::to_string(sp.StartColumn)
+                    + ") to (line " + std::to_string(sp.EndLine)
+                    + ", col " + std::to_string(sp.EndColumn)
+                    + ") in " + sp.DocumentUrl);
+            }
+            nextSequencePointIndex_++;
+        }
+    }
     Metadata::ILOpCode opCode = Metadata::DecodeOpCode(base, size, pos);
     auto opType = Metadata::GetOperandType(opCode);
     auto genericContext = Metadata::MetadataGenericContext::ForMethod(methodToken, module);
@@ -514,7 +544,15 @@ void MethodBodyDisassembler::DisassembleLocalsBlock(const Metadata::MetadataFile
             /*isDefinition=*/true);
         output_.Write(' ');
         signature[index](Disassembler::ILNameSyntax::TypeName);
-        // The C# DebugInfo.TryGetName name suffix defers with the provider.
+        // The C# `if (DebugInfo != null && DebugInfo.TryGetName(method,
+        // index, out var name)) output.Write(" " + ...Escape(name))` --
+        // the PDB debug name appended after the local's type.
+        std::string debugName;
+        if (DebugInfo != nullptr
+            && DebugInfo->TryGetName(methodToken, static_cast<int>(index),
+                debugName)) {
+            output_.Write(" " + Disassembler::Escape(debugName));
+        }
         if (index + 1 < signature.size()) output_.Write(',');
         output_.WriteLine();
     }
@@ -564,7 +602,16 @@ void MethodBodyDisassembler::Disassemble(Metadata::MetadataFile& module,
     DisassembleLocalsBlock(module, methodToken, body);
     output_.WriteLine();
 
-    // The C# sequence-point assignment defers with the DebugInfo provider.
+    // The C# `sequencePoints = DebugInfo?.GetSequencePoints(handle) ??
+    // EmptyList<DebugInfo.SequencePoint>.Instance; nextSequencePointIndex
+    // = 0;` -- the null provider collapses to the empty list (no point ever
+    // renders), a real provider's list is copied in.
+    sequencePoints_.clear();
+    if (DebugInfo != nullptr) {
+        sequencePoints_ = DebugInfo->GetSequencePoints(methodToken);
+    }
+    hasSequencePoints_ = true;
+    nextSequencePointIndex_ = 0;
     auto il = body.IL();
     if (DetectControlStructure && !il.empty()) {
         // The C# structured branch: mark the branch/switch targets, then
@@ -590,7 +637,11 @@ void MethodBodyDisassembler::Disassemble(Metadata::MetadataFile& module,
         }
         WriteExceptionHandlers(module, methodToken, body);
     }
-    // The C# `sequencePoints = null`.
+    // The C# `sequencePoints = null` -- a WriteInstruction driven directly
+    // after a Disassemble renders no sequence points.
+    sequencePoints_.clear();
+    hasSequencePoints_ = false;
+    nextSequencePointIndex_ = 0;
 }
 
 // ---------------------------------------------------------------------------

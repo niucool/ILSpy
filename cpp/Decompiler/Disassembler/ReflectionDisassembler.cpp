@@ -420,6 +420,16 @@ void ReflectionDisassembler::ShowRawRVAOffsetAndBytes(bool value)
     methodBodyDisassembler_->ShowRawRVAOffsetAndBytes = value;
 }
 
+const DebugInfo::IDebugInfoProvider* ReflectionDisassembler::DebugInfo() const
+{
+    return methodBodyDisassembler_->DebugInfo;
+}
+
+void ReflectionDisassembler::DebugInfo(const DebugInfo::IDebugInfoProvider* value)
+{
+    methodBodyDisassembler_->DebugInfo = value;
+}
+
 // ---------------------------------------------------------------------------
 // WriteMetadataToken (ReflectionDisassembler.cs -- the internal static).
 // ---------------------------------------------------------------------------

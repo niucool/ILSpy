@@ -56,6 +56,7 @@
 namespace DA = ILSpy::Decompiler::Disassembler;
 namespace MD = ILSpy::Decompiler::Metadata;
 namespace OUT = ILSpy::Decompiler::Output;
+namespace DebugInfo = ILSpy::Decompiler::DebugInfo;
 
 namespace {
 
@@ -257,6 +258,30 @@ TEST(ReflectionDisassemblerTest, FlagsDelegateToMethodBodyDisassembler) {
     EXPECT_TRUE(mbd.ShowRawRVAOffsetAndBytes);
     rd.ShowRawRVAOffsetAndBytes(false);
     EXPECT_FALSE(mbd.ShowRawRVAOffsetAndBytes);
+
+    // The C# `public IDebugInfoProvider DebugInfo { get =>
+    // methodBodyDisassembler.DebugInfo; set => ... }` -- the provider pointer
+    // delegates through to the same disassembler.
+    class NullDebugInfoProvider final : public DebugInfo::IDebugInfoProvider {
+    public:
+        std::string Description() const override { return {}; }
+        std::string SourceFileName() const override { return {}; }
+        std::vector<DebugInfo::SequencePoint> GetSequencePoints(
+            std::uint32_t) const override { return {}; }
+        std::vector<DebugInfo::Variable> GetVariables(
+            std::uint32_t) const override { return {}; }
+        bool TryGetName(std::uint32_t, int, std::string&) const override { return false; }
+        bool TryGetExtraTypeInfo(std::uint32_t, int,
+            DebugInfo::PdbExtraTypeInfo&) const override { return false; }
+    };
+    EXPECT_EQ(rd.DebugInfo(), nullptr);
+    EXPECT_EQ(mbd.DebugInfo, nullptr);
+    NullDebugInfoProvider provider;
+    rd.DebugInfo(&provider);
+    EXPECT_EQ(mbd.DebugInfo, &provider);
+    EXPECT_EQ(rd.DebugInfo(), &provider);
+    rd.DebugInfo(nullptr);
+    EXPECT_EQ(mbd.DebugInfo, nullptr);
 }
 
 // ---------------------------------------------------------------------------

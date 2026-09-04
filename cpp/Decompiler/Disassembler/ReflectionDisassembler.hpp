@@ -32,10 +32,11 @@
 // WriteAssemblyHeader and WriteAssemblyReferences with the manifest
 // blocks; WriteModuleHeader and WriteModuleContents with the module-level
 // chain -- the whole file is now ported apart from the documented
-// deferrals (DebugInfo/IDebugInfoProvider, CancellationToken, the
-// AssemblyResolver-driven permission-set decode inside
-// WriteSecurityDeclarations, and the DecodeCustomAttributeBlobs/
-// WriteDecodedCustomAttributeBlob path).
+// deferrals (CancellationToken, the AssemblyResolver-driven
+// permission-set decode inside WriteSecurityDeclarations, and the
+// DecodeCustomAttributeBlobs/WriteDecodedCustomAttributeBlob path; the
+// DebugInfo provider pointer delegates through to the ported
+// MethodBodyDisassembler member).
 //
 // C#-to-C++ porting decisions:
 //  * The C# field pair `output`/`cancellationToken`/`isInType`/
@@ -46,10 +47,10 @@
 //    constructor news one up over the same output, so the port's chaining
 //    constructor owns a fresh one in the unique_ptr.
 //  * The delegating properties (DetectControlStructure, ShowSequencePoints,
-//    ShowMetadataTokens, ShowMetadataTokensInBase10, ShowRawRVAOffsetAndBytes)
-//    port as get/set member pairs reading/writing the MethodBodyDisassembler
-//    flags. `DebugInfo` (IDebugInfoProvider) defers with the provider type;
-//    `AssemblyResolver` defers with WriteSecurityDeclarations;
+//    ShowMetadataTokens, ShowMetadataTokensInBase10, ShowRawRVAOffsetAndBytes,
+//    and the DebugInfo provider pointer) port as get/set member pairs
+//    reading/writing the MethodBodyDisassembler members. `AssemblyResolver`
+//    defers with WriteSecurityDeclarations;
 //    `EntityProcessor` ports as the caller-owned IEntityProcessor pointer
 //    with the Process passthrough (SortByNameProcessor is the ported
 //    implementation). The `CancellationToken` defers
@@ -124,6 +125,13 @@ public:
     void ShowMetadataTokensInBase10(bool value);
     bool ShowRawRVAOffsetAndBytes() const;
     void ShowRawRVAOffsetAndBytes(bool value);
+
+    // The C# `public IDebugInfoProvider DebugInfo { get =>
+    // methodBodyDisassembler.DebugInfo; set => ... }`: delegate the
+    // caller-owned provider pointer to the method body disassembler (null
+    // for none).
+    const DebugInfo::IDebugInfoProvider* DebugInfo() const;
+    void DebugInfo(const DebugInfo::IDebugInfoProvider* value);
 
     // The C# `public bool ExpandMemberDefinitions { get; set; }`: show
     // method bodies expanded (not collapsed into foldings) by default.

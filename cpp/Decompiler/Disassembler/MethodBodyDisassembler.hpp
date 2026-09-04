@@ -17,23 +17,26 @@
 // DEALINGS IN THE SOFTWARE.
 
 // Port of ICSharpCode.Decompiler/Disassembler/MethodBodyDisassembler.cs:
-// the option flags, the opcode/token/raw-bytes writers, the WriteInstruction
+// the option flags, the DebugInfo provider member and the sequence-point
+// state it drives, the opcode/token/raw-bytes writers, the WriteInstruction
 // operand switch, and the Disassemble assembly with both body paths -- the
 // flat instruction loop and the DetectControlStructure structured branch
 // through the ILStructure tree (WriteStructureHeader/Body/Footer). The C#
 // private members are the port's public members so the tests can drive them
 // directly.
 //
-// The C# DebugInfo / sequence-point machinery (ShowSequencePoints +
-// IDebugInfoProvider) is deferred with the provider type -- the flag exists,
-// the sequence-point rendering comes with DebugInfo.
+// The real PDB implementation of the provider (the portable-PDB debug tables
+// behind the CLI's --il-sequence-points) is the Phase-8 PdbProvider; this
+// class carries the consumer-side contract and rendering.
 
 #pragma once
 
+#include "Decompiler/DebugInfo/IDebugInfoProvider.hpp"
 #include "Decompiler/Metadata/ILOpCodes.hpp"
 #include "Decompiler/Output/ITextOutput.hpp"
 
 #include <cstdint>
+#include <vector>
 
 namespace ILSpy::Decompiler::Metadata {
 class MetadataFile;
@@ -69,6 +72,12 @@ public:
     // The C# `public bool ShowRawRVAOffsetAndBytes { get; set; }`: show the
     // raw RVA offset and bytes before each instruction.
     bool ShowRawRVAOffsetAndBytes = false;
+
+    // The C# `public IDebugInfoProvider DebugInfo { get; set; }`: the
+    // caller-owned debug-info provider (null for none -- the C# default).
+    // Drives the ShowSequencePoints `// sequence point:` lines and the
+    // debug names appended to the .locals block.
+    const DebugInfo::IDebugInfoProvider* DebugInfo = nullptr;
 
     // The C# `private void WriteOpCode(ILOpCode opCode)`: the display-name
     // reference, with the ldarg.0-3 / ldloc.0-3 / stloc.0-3 shorthand forms
@@ -121,9 +130,10 @@ public:
 
     // The C# `void DisassembleLocalsBlock(MethodDefinitionHandle method,
     // MethodBodyBlock body)` (private): the `.locals <token> [init] (...)`
-    // block over the body's local-variable signature, one `[_N] <type>`
-    // line per local (the DebugInfo name suffix defers with the provider).
-    // The method token scopes the signature's MVAR (!!N) names.
+    // block over the body's local-variable signature, one `[_N] <type>` line
+    // per local with the DebugInfo debug-name suffix when the provider
+    // answers TryGetName. The method token scopes the signature's MVAR (!!N)
+    // names.
     void DisassembleLocalsBlock(const Metadata::MetadataFile& module,
         std::uint32_t methodToken, const Metadata::MethodBody& body);
 
@@ -169,6 +179,18 @@ public:
 
 private:
     Output::ITextOutput& output_;
+
+    // The C# `IList<DebugInfo.SequencePoint> sequencePoints` and `int
+    // nextSequencePointIndex` fields: assigned by Disassemble (the C#
+    // DebugInfo?.GetSequencePoints(handle) ?? EmptyList pair -- the null
+    // provider collapses to an empty list) and consumed one-per-instruction
+    // by the WriteInstruction sequence-point render. The C# sets the field
+    // back to null at the end of Disassemble; `hasSequencePoints_` carries
+    // that null (WriteInstruction's `sequencePoints?.Count` null check -- a
+    // directly-driven WriteInstruction renders no sequence points).
+    std::vector<DebugInfo::SequencePoint> sequencePoints_;
+    bool hasSequencePoints_ = false;
+    int nextSequencePointIndex_ = 0;
 };
 
 }  // namespace ILSpy::Decompiler::Disassembler
