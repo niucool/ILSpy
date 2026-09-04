@@ -9,6 +9,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/DisassemblerHelpers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/DisassemblerSignatureTypeProvider.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ILParser.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ILStructure.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/MethodBodyDisassembler.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ReflectionDisassembler.cpp
 )
