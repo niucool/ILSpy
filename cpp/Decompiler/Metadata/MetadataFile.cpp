@@ -2501,4 +2501,117 @@ PortablePdb MetadataFile::ReadEmbeddedPortablePdbDebugDirectoryData(
         ToInternalEntry(entry));
 }
 
+// --- The raw Cor-table row surface (the --dump-table path) ---
+
+namespace {
+// The winmd table a CorTableIndex id addresses (nullptr for the *Ptr
+// indirection tables, which winmd cannot model -- a file carrying rows
+// there fails to open -- and for ids outside the modeled set).
+const winmd::reader::table_base* CorTableLookup(
+    const winmd::reader::database& db, CorTableIndex table) {
+    switch (table) {
+        case CorTableIndex::Module: return &db.Module;
+        case CorTableIndex::TypeRef: return &db.TypeRef;
+        case CorTableIndex::TypeDef: return &db.TypeDef;
+        case CorTableIndex::Field: return &db.Field;
+        case CorTableIndex::MethodDef: return &db.MethodDef;
+        case CorTableIndex::Param: return &db.Param;
+        case CorTableIndex::InterfaceImpl: return &db.InterfaceImpl;
+        case CorTableIndex::MemberRef: return &db.MemberRef;
+        case CorTableIndex::Constant: return &db.Constant;
+        case CorTableIndex::CustomAttribute: return &db.CustomAttribute;
+        case CorTableIndex::FieldMarshal: return &db.FieldMarshal;
+        case CorTableIndex::DeclSecurity: return &db.DeclSecurity;
+        case CorTableIndex::ClassLayout: return &db.ClassLayout;
+        case CorTableIndex::FieldLayout: return &db.FieldLayout;
+        case CorTableIndex::StandAloneSig: return &db.StandAloneSig;
+        case CorTableIndex::EventMap: return &db.EventMap;
+        case CorTableIndex::Event: return &db.Event;
+        case CorTableIndex::PropertyMap: return &db.PropertyMap;
+        case CorTableIndex::Property: return &db.Property;
+        case CorTableIndex::MethodSemantics: return &db.MethodSemantics;
+        case CorTableIndex::MethodImpl: return &db.MethodImpl;
+        case CorTableIndex::ModuleRef: return &db.ModuleRef;
+        case CorTableIndex::TypeSpec: return &db.TypeSpec;
+        case CorTableIndex::ImplMap: return &db.ImplMap;
+        case CorTableIndex::FieldRva: return &db.FieldRVA;
+        case CorTableIndex::Assembly: return &db.Assembly;
+        case CorTableIndex::AssemblyRef: return &db.AssemblyRef;
+        case CorTableIndex::File: return &db.File;
+        case CorTableIndex::ExportedType: return &db.ExportedType;
+        case CorTableIndex::ManifestResource: return &db.ManifestResource;
+        case CorTableIndex::NestedClass: return &db.NestedClass;
+        case CorTableIndex::GenericParam: return &db.GenericParam;
+        case CorTableIndex::MethodSpec: return &db.MethodSpec;
+        case CorTableIndex::GenericParamConstraint: return &db.GenericParamConstraint;
+        default: return nullptr;  // the *Ptr tables and the unused ids
+    }
+}
+} // namespace
+
+std::uint32_t MetadataFile::CorTableRowCount(CorTableIndex table) const {
+    if (!IsValid()) return 0;
+    const winmd::reader::table_base* t = CorTableLookup(*impl_->db, table);
+    return t == nullptr ? 0 : t->size();
+}
+
+std::uint32_t MetadataFile::CorTableColumnValue(CorTableIndex table,
+    std::uint32_t row, std::uint32_t column) const {
+    // The winmd get_value throw for an out-of-range row is the C#
+    // BadImageFormatException arm; winmd's own check (row > size) lets a
+    // row AT size read past the table's data, so the facade tightens the
+    // bound to the table end. An unmodeled table (the *Ptr ids) reads its
+    // never-present rows as absent rather than throwing.
+    const winmd::reader::table_base* t = IsValid()
+        ? CorTableLookup(*impl_->db, table) : nullptr;
+    if (t == nullptr) {
+        if (row != 0)
+            throw std::invalid_argument("Invalid row index");
+        return 0;
+    }
+    if (row >= t->size())
+        throw std::invalid_argument("Invalid row index");
+    return t->get_value<std::uint32_t>(row, column);
+}
+
+MetadataFile::CorTableVersion MetadataFile::CorTableVersionValue(
+    CorTableIndex table, std::uint32_t row) const {
+    CorTableVersion version;
+    if (!IsValid()) return version;
+    // winmd merges the four UInt16 version fields into one 8-byte column
+    // (column 1 for Assembly, column 0 for AssemblyRef); the little-endian
+    // halves are the fields in declaration order.
+    std::uint64_t raw = 0;
+    if (table == CorTableIndex::Assembly)
+        raw = impl_->db->Assembly.get_value<std::uint64_t>(row, 1);
+    else if (table == CorTableIndex::AssemblyRef)
+        raw = impl_->db->AssemblyRef.get_value<std::uint64_t>(row, 0);
+    else
+        throw std::invalid_argument("the table carries no version column");
+    version.MajorVersion = static_cast<std::uint16_t>(raw & 0xFFFF);
+    version.MinorVersion = static_cast<std::uint16_t>((raw >> 16) & 0xFFFF);
+    version.BuildNumber = static_cast<std::uint16_t>((raw >> 32) & 0xFFFF);
+    version.RevisionNumber = static_cast<std::uint16_t>((raw >> 48) & 0xFFFF);
+    return version;
+}
+
+std::string MetadataFile::CorString(std::uint32_t heapOffset) const {
+    // The nil #Strings offset 0 is the empty string (the heap starts with
+    // the nil entry's 0x00 byte); a real offset reads through get_string,
+    // which throws for a missing terminator.
+    if (heapOffset == 0 || !IsValid()) return {};
+    return std::string{impl_->db->get_string(heapOffset)};
+}
+
+std::optional<std::array<std::uint8_t, 16>> MetadataFile::CorTryGuid(
+    std::uint32_t heapIndex) const {
+    // A nil #GUID index is the caller's nil spelling, not Guid.Empty (the
+    // MethodBodyReader TryGetGuid maps index 0 to the all-zeros array; the
+    // raw surface keeps the nil distinction the C# GuidHandle.IsNil test
+    // makes before ever calling GetGuid).
+    if (heapIndex == 0 || !IsValid() || !impl_->bodyReader)
+        return std::nullopt;
+    return impl_->bodyReader->TryGetGuid(heapIndex);
+}
+
 } // namespace ILSpy::Decompiler::Metadata

@@ -5,9 +5,11 @@
 # can exercise them directly (the ILSpyX convention); main.cpp parses the
 # options and calls them.
 
-# The IlspyCmdProgram port (ShowIL/TryLoadPDB).
+# The IlspyCmdProgram port (ShowIL/TryLoadPDB) and the MetadataTableDumper
+# port (the --dump-table mode).
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/IlspyCmdProgram.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/MetadataTableDumper.cpp
 )
 
 add_executable(ilspy_cli ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp)

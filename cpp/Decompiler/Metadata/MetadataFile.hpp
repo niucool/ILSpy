@@ -44,6 +44,60 @@
 
 namespace ILSpy::Decompiler::Metadata {
 
+// The C# `System.Reflection.Metadata.Ecma335.TableIndex` stand-in: the
+// ECMA-335 II.22 Cor-table ids (the table number a metadata token's high
+// byte carries). The raw-table row surface below (the --dump-table
+// MetadataTableDumper's reads) addresses tables by these ids; the ids the
+// GUI's metadata view and the C# dumper support stop at
+// GenericParamConstraint (the EnC and Portable-PDB debug tables are out of
+// scope there too).
+enum class CorTableIndex : std::uint32_t {
+    Module = 0x00,
+    TypeRef = 0x01,
+    TypeDef = 0x02,
+    FieldPtr = 0x03,
+    Field = 0x04,
+    MethodPtr = 0x05,
+    MethodDef = 0x06,
+    ParamPtr = 0x07,
+    Param = 0x08,
+    InterfaceImpl = 0x09,
+    MemberRef = 0x0A,
+    Constant = 0x0B,
+    CustomAttribute = 0x0C,
+    FieldMarshal = 0x0D,
+    DeclSecurity = 0x0E,
+    ClassLayout = 0x0F,
+    FieldLayout = 0x10,
+    StandAloneSig = 0x11,
+    EventMap = 0x12,
+    EventPtr = 0x13,
+    Event = 0x14,
+    PropertyMap = 0x15,
+    PropertyPtr = 0x16,
+    Property = 0x17,
+    MethodSemantics = 0x18,
+    MethodImpl = 0x19,
+    ModuleRef = 0x1A,
+    TypeSpec = 0x1B,
+    ImplMap = 0x1C,
+    FieldRva = 0x1D,
+    // 0x1E and 0x1F are unused.
+    Assembly = 0x20,
+    AssemblyProcessor = 0x21,
+    AssemblyOS = 0x22,
+    AssemblyRef = 0x23,
+    AssemblyRefProcessor = 0x24,
+    AssemblyRefOS = 0x25,
+    File = 0x26,
+    ExportedType = 0x27,
+    ManifestResource = 0x28,
+    NestedClass = 0x29,
+    GenericParam = 0x2A,
+    MethodSpec = 0x2B,
+    GenericParamConstraint = 0x2C,
+};
+
 // Minimal info for a MethodDef row, enough to drive a Phase 1 method-body test
 // and to feed the IL reader later. The full handle ergonomics land with the
 // rest of the Phase 1 metadata surface.
@@ -1008,6 +1062,72 @@ public:
     // Invalid file: throws like a valid one would for its entries.
     PortablePdb ReadEmbeddedPortablePdbDebugDirectoryData(
         const DebugDirectoryEntryInfo& entry) const;
+
+    // --- The raw Cor-table row surface (the --dump-table path) ---
+    //
+    // The C# ICSharpCode.ILSpyCmd MetadataTableDumper reads every row of a
+    // table through the .NET 10 System.Reflection.Metadata public raw
+    // surface (GetTableRowCount/GetTableMetadataOffset/GetTableRowSize plus
+    // the MetadataExtensions BlobReader walks) -- the port reaches the same
+    // raw column values through the winmd database, whose open-time column
+    // layout implements the same II.24.2.6 width rules. These reads address
+    // a table by its CorTableIndex id and a column by its ECMA-335
+    // declaration-order index; row indexes are 0-based (winmd's get_value
+    // convention).
+    //
+    // The five *Ptr indirection tables (FieldPtr 0x03, MethodPtr 0x05,
+    // ParamPtr 0x07, EventPtr 0x13, PropertyPtr 0x16) have no winmd model: a
+    // file carrying rows there fails to open (the Unknown metadata table
+    // throw), so their count can only read 0 -- every compiler-produced
+    // assembly carries empty Ptr tables, so a dump of them prints the same
+    // "0 rows" the C# does for every file this port can open.
+
+    // The row count of a table (the C#
+    // `metadata.GetTableRowCount(TableIndex)`); 0 for an absent table,
+    // an unknown id, or an invalid file.
+    std::uint32_t CorTableRowCount(CorTableIndex table) const;
+
+    // The raw stored column value widened to uint32: heap-offset columns
+    // carry the #Strings/#Blob/#GUID heap offset, simple indexes the
+    // 1-based row number, coded indexes the raw (rid << tagBits) | tag
+    // value, and the narrow numeric columns their value. 0 is the nil
+    // handle/row (a #Strings offset 0 is the empty nil string; a #Blob or
+    // #GUID offset 0 is the nil blob/GUID). Throws std::invalid_argument
+    // for a row past the table end (the winmd Invalid row index throw);
+    // a Ptr-table or other unmodeled id reads 0 rows, so it never throws.
+    // A column past the row width reads the next column's bytes, so callers
+    // pass only valid ECMA declaration-order column indexes.
+    std::uint32_t CorTableColumnValue(CorTableIndex table, std::uint32_t row,
+        std::uint32_t column) const;
+
+    // The four UInt16 version fields of the 8-byte version column winmd
+    // models for the Assembly/AssemblyRef tables (the C#
+    // `AssemblyDefinition.Version`/`AssemblyReference.Version` -- ECMA II.22.10
+    // declares the four UInt16 fields, which winmd merges into one column).
+    // Throws std::invalid_argument like CorTableColumnValue for any table
+    // but Assembly/AssemblyRef (no version column there).
+    struct CorTableVersion {
+        std::uint16_t MajorVersion = 0;
+        std::uint16_t MinorVersion = 0;
+        std::uint16_t BuildNumber = 0;
+        std::uint16_t RevisionNumber = 0;
+    };
+    CorTableVersion CorTableVersionValue(CorTableIndex table,
+        std::uint32_t row) const;
+
+    // The #Strings string at a heap offset (the C#
+    // `metadata.GetString(StringHandle)`); "" for the nil offset 0. Throws
+    // std::invalid_argument when the string misses its terminator (the
+    // winmd Missing string terminator throw).
+    std::string CorString(std::uint32_t heapOffset) const;
+
+    // The 16 raw #GUID bytes at a 1-based heap index (the C#
+    // `metadata.GetGuid(GuidHandle)` -- the canonical little-endian binary
+    // form). Nullopt for the nil index 0 (the Guid.Empty shape the callers
+    // render as their nil spelling), an absent #GUID heap, or an index
+    // past the heap end; never throws.
+    std::optional<std::array<std::uint8_t, 16>> CorTryGuid(
+        std::uint32_t heapIndex) const;
 
 private:
     struct Impl;
