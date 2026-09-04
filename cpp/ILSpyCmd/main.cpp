@@ -71,6 +71,7 @@
 #if defined(_WIN32)
 #include <fcntl.h>
 #include <io.h>
+#include <windows.h>
 #endif
 
 // cxxopts' vector options split every value on ',' by default
@@ -96,7 +97,7 @@
 
 using namespace ILSpy::Decompiler::Metadata;
 
-int main(int argc, char** argv) {
+int RunMain(int argc, char** argv) {
     cxxopts::Options options("ilspycmd",
         "C++ port of the ILSpy command-line decompiler (core + CLI)");
     options.allow_unrecognised_options();
@@ -116,6 +117,8 @@ int main(int argc, char** argv) {
             cxxopts::value<std::vector<std::string>>())
         ("list-resources", "Lists all embedded resources in the assembly. Entries inside .resources containers are listed individually as '<container>/<entry>'.",
             cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("resource", "Extract a single resource by name (as printed by --list-resources). Resources whose name ends with '.baml' are decompiled to XAML.",
+            cxxopts::value<std::string>()->default_value(""))
         ("dump-table", "Dump a metadata table: prints RID, token, names, heap offsets and coded indexes of every row. <table> is the ECMA-335 table name (e.g. TypeDef, Property, MethodSemantics; case-insensitive) or table number (decimal or 0x-prefixed hex, e.g. 0x17).",
             cxxopts::value<std::string>()->default_value(""))
         ("json", "Output as JSON. Currently only supported together with --dump-table.",
@@ -190,6 +193,8 @@ int main(int argc, char** argv) {
 
     bool wantListResources = parsed.count("list-resources") != 0
         && parsed["list-resources"].as<bool>();
+    std::string resourceName = parsed.count("resource") != 0
+        ? parsed["resource"].as<std::string>() : "";
     bool wantJson = parsed.count("json") != 0 && parsed["json"].as<bool>();
     // The C# `if (JsonOutputFlag && DumpTableName == null)` usage check
     // (IlspyCmdProgram.cs): --json alone is rejected before any file opens.
@@ -198,8 +203,8 @@ int main(int argc, char** argv) {
         return 64;  // ProgramExitCodes.EX_USAGE
     }
 
-    if (!wantIl && !wantIlSequencePoints && !wantIlAst && !wantIlAstAll && !wantCSharp && listValues.empty() && !wantListResources && dumpTable.empty()) {
-        std::cout << "ilspycmd: see --help for available options (--il, --il-sequence-points, --ilast, --ilast-all, --csharp, --list, --list-resources, --dump-table).\n";
+    if (!wantIl && !wantIlSequencePoints && !wantIlAst && !wantIlAstAll && !wantCSharp && listValues.empty() && !wantListResources && dumpTable.empty() && resourceName.empty()) {
+        std::cout << "ilspycmd: see --help for available options (--il, --il-sequence-points, --ilast, --ilast-all, --csharp, --list, --list-resources, --resource, --dump-table).\n";
         return 0;
     }
 
@@ -284,6 +289,66 @@ int main(int argc, char** argv) {
         // convention ShowIL/ListContent render); stdout's default text
         // mode would translate every \n again, so the block is written in
         // binary mode (the ShowIL pattern).
+#if defined(_WIN32)
+        int stdoutFd = _fileno(stdout);
+        int oldMode = _setmode(stdoutFd, _O_BINARY);
+        std::cout << buffer.str();
+        std::cout.flush();
+        if (oldMode != -1)
+            _setmode(stdoutFd, oldMode);
+#else
+        std::cout << buffer.str();
+#endif
+        return rc;
+    }
+
+    // The C# ResourceName arm (IlspyCmdProgram.cs PerformPerFileAction,
+    // the `else if (ResourceName != null)` branch -- it sits AFTER the
+    // EntityTypes, ShowIL, CreateDebugInfo, DumpPackage and ListResources
+    // arms and BEFORE the DumpTableName arm, so a command line naming
+    // several of those flags runs the earlier action): the resource lookup
+    // through ResourceExtensions.TryGetResource -- a byte[] value written
+    // raw to stdout (the Console.OpenStandardOutput binary write), any other
+    // value written as its ToString() text (no trailing newline), and the
+    // not-found arm rendering the available-resources listing to stderr
+    // with EX_DATAERR. The byte buffer may hold arbitrary bytes (including
+    // embedded NULs), so the block is written in binary mode; the error
+    // listing carries the CRLF TextWriter convention. The C# global catch
+    // (the `catch (Exception ex) { app.Error.WriteLine(ex.ToString());
+    // return EX_SOFTWARE; }` around PerformPerFileAction) covers the value
+    // decode's BadImageFormatException for a malformed container entry --
+    // the port renders the message only (no managed stack trace), same
+    // exit code. The -o outputDirectory branches are deferred with the
+    // project output paths.
+    if (!resourceName.empty()) {
+        std::ostringstream buffer;
+        std::ostringstream errorBuffer;
+        int rc;
+        try {
+            rc = ILSpy::ILSpyCmd::ExtractResource(
+                asmPath, resourceName, buffer, errorBuffer);
+        } catch (const std::exception& ex) {
+            // The C# global handler: the exception render and
+            // EX_SOFTWARE (the port carries no managed stack trace).
+            std::cerr << ex.what() << '\n';
+            return 70;  // ProgramExitCodes.EX_SOFTWARE
+        }
+        if (!errorBuffer.str().empty()) {
+            // The error listing carries the CRLF TextWriter convention;
+            // stderr's default text mode would translate every \n again
+            // (\r\n -> \r\r\n), so the block is written in binary mode
+            // (the stdout pattern).
+#if defined(_WIN32)
+            int stderrFd = _fileno(stderr);
+            int oldErrMode = _setmode(stderrFd, _O_BINARY);
+            std::cerr << errorBuffer.str();
+            std::cerr.flush();
+            if (oldErrMode != -1)
+                _setmode(stderrFd, oldErrMode);
+#else
+            std::cerr << errorBuffer.str();
+#endif
+        }
 #if defined(_WIN32)
         int stdoutFd = _fileno(stdout);
         int oldMode = _setmode(stdoutFd, _O_BINARY);
@@ -757,3 +822,36 @@ int main(int argc, char** argv) {
     }
     return 0;
 }
+
+#if defined(_WIN32)
+// The Windows entry point: the Unicode command line converted to UTF-8
+// before the option parse (the C runtime's narrow argv would transcode
+// through the console's ANSI code page and mangle every non-ASCII option
+// value -- a resource name like 'v2.resources/Unicode.Name.中文' must
+// reach the lookup as the UTF-8 bytes the resource names carry; the real
+// tool reads the same Unicode command line through its managed argv).
+int wmain(int argc, wchar_t** argv) {
+    std::vector<std::string> utf8Args;
+    utf8Args.reserve(static_cast<std::size_t>(argc));
+    for (int i = 0; i < argc; i++) {
+        int len = WideCharToMultiByte(CP_UTF8, 0, argv[i], -1, nullptr, 0,
+            nullptr, nullptr);
+        std::string arg;
+        if (len > 1) {
+            arg.resize(static_cast<std::size_t>(len - 1));
+            WideCharToMultiByte(CP_UTF8, 0, argv[i], -1, arg.data(), len,
+                nullptr, nullptr);
+        }
+        utf8Args.push_back(std::move(arg));
+    }
+    std::vector<char*> utf8Argv;
+    utf8Argv.reserve(utf8Args.size());
+    for (auto& a : utf8Args)
+        utf8Argv.push_back(a.data());
+    return RunMain(argc, utf8Argv.data());
+}
+#else
+int main(int argc, char** argv) {
+    return RunMain(argc, argv);
+}
+#endif

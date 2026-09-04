@@ -9,6 +9,7 @@ add_executable(ilspy_tests
     Util/BitSet_Test.cpp
     Util/StringComparers_Test.cpp
     Util/ResourcesFile_Test.cpp
+    Util/ResourcesFileValue_Test.cpp
     Util/CacheManager_Test.cpp
     Util/LazyInit_Test.cpp
     Util/CSharpPrimitiveCast_Test.cpp

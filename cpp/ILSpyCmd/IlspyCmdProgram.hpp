@@ -113,4 +113,24 @@ int ListContent(const std::string& assemblyFileName, std::ostringstream& output,
 // <name>.resources.txt file) is deferred with the project output paths.
 int ListResources(const std::string& assemblyFileName, std::ostringstream& output);
 
+// The C# `int ExtractResource(string assemblyFileName, string resourceName,
+// TextWriter output, string outputDirectory, CommandLineApplication app)`
+// (IlspyCmdProgram.cs): the --resource extraction -- the resource lookup
+// through TryGetResource with the '<name>' not-found error (the two stderr
+// lines plus the available-resources listing, rendered to errorOutput for
+// the caller to flush) and EX_DATAERR (65); a byte[] value written raw into
+// the output (the C# Console.OpenStandardOutput binary write -- the port's
+// ostringstream holds arbitrary bytes and main.cpp writes the block in
+// binary mode), and any other value written as its text (the C# ToString()
+// -- the port's invariant-culture render, matching the real tool whose
+// runtimeconfig sets System.Globalization.Invariant). The -o
+// outputDirectory branches are deferred with the project output paths.
+// The .baml arm (isBaml && a byte[] value -> DecompileBaml) is deferred with
+// the Phase-9 BamlDecompiler: the port prints a not-yet-supported line to
+// errorOutput and returns EX_SOFTWARE (70) -- the same exit code the real
+// tool's own failure over an unparseable BAML stream produces.
+int ExtractResource(const std::string& assemblyFileName,
+    const std::string& resourceName, std::ostringstream& output,
+    std::ostringstream& errorOutput);
+
 }  // namespace ILSpy::ILSpyCmd

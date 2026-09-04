@@ -27,15 +27,20 @@
 // byte-identical C# console output, CRLF line endings included.
 
 #include "ILSpyCmd/IlspyCmdProgram.hpp"
+#include "ILSpyCmd/ResourceExtensions.hpp"
 #include "ILSpyX/PdbProvider/PortableDebugInfoProvider.hpp"
 #include "TestFixtures/DiscoveryNetModule.hpp"
+#include "TestFixtures/ResourcesTestFixtures.hpp"
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -406,4 +411,228 @@ TEST(IlspyCmdProgramTest, ListContentMscorlibKindPartition) {
     // The five kind lists partition the TypeDef table: the counts plus the
     // one Void-kind row are all 3356 typedefs.
     EXPECT_EQ(total + 1, mscorlib.TypeDefs().size());
+}
+
+
+// ---- The --resource extraction (ExtractResource)
+
+// The resource renders over the value-decode manifest, byte-exact against
+// the real ilspycmd tool driven over the same fixture: every value kind's
+// ToString() text (no trailing newline -- the C# Write, not WriteLine),
+// the byte[] values written raw, and the whole-container blob.
+TEST(IlspyCmdProgramTest, ExtractResourceValueMatrix)
+{
+    std::string path = ILSpy::Tests::WriteValTestDll();
+    ASSERT_FALSE(path.empty());
+
+    // The text renders (the invariant-culture ToString forms).
+    struct TextCase {
+        const char* resource;
+        const char* expected;
+    };
+    const TextCase textCases[] = {
+        {"v2.resources/Str", "one"},
+        {"v2.resources/Int", "42"},
+        {"v2.resources/Bool", "True"},
+        {"v2.resources/BoolF", "False"},
+        {"v2.resources/Char", "\xE4\xB8\xAD"},
+        {"v2.resources/Byte", "171"},
+        {"v2.resources/SByte", "-12"},
+        {"v2.resources/Short", "-1234"},
+        {"v2.resources/UShort", "1234"},
+        {"v2.resources/UInt", "4275878552"},
+        {"v2.resources/Long", "-1234567890123456789"},
+        {"v2.resources/ULong", "18364758544493064720"},
+        {"v2.resources/Float", "1.5"},
+        {"v2.resources/FloatSci", "1E+16"},
+        {"v2.resources/FloatNegNaN", "NaN"},
+        {"v2.resources/FloatPosInf", "Infinity"},
+        {"v2.resources/Double", "2.25"},
+        {"v2.resources/DoubleSci", "10000000000000000"},
+        {"v2.resources/DoubleSmall", "0.0001"},
+        {"v2.resources/DoubleExp", "1E+17"},
+        {"v2.resources/DoubleNeg", "-0.5"},
+        {"v2.resources/Decimal", "12345.6789"},
+        {"v1.resources/V1Str", "hello v1"},
+        {"v1.resources/V1Int", "-77"},
+        {"v1.resources/V1Long", "1234605616436508552"},
+        {"v1.resources/V1Double", "2.25"},
+        {"v1.resources/V1Decimal", "12345.6789"},
+        {"v1.resources/V1Date", "02/15/2024 10:30:45"},
+        {"v1.resources/V1TS", "1.02:03:04"},
+        // The null value: the empty text (value?.ToString() ?? "").
+        {"v1.resources/V1Null", ""},
+        // The empty byte array: no bytes.
+        {"v2.resources/EmptyBytes", ""},
+        // The zero-length serialized region: no bytes.
+        {"v1.resources/V1UserEmpty", ""},
+        {"serfmt.resources/SerUserEmpty", ""},
+    };
+    for (const auto& c : textCases) {
+        std::ostringstream output;
+        std::ostringstream errorOutput;
+        EXPECT_EQ(Cmd::ExtractResource(path, c.resource, output, errorOutput), 0)
+            << c.resource;
+        EXPECT_EQ(output.str(), c.expected) << c.resource;
+        EXPECT_EQ(errorOutput.str(), "") << c.resource;
+    }
+
+    // The case-insensitive whole-path fold (the real tool's lookup).
+    {
+        std::ostringstream output;
+        std::ostringstream errorOutput;
+        EXPECT_EQ(Cmd::ExtractResource(path, "V2.RESOURCES/STR", output, errorOutput), 0);
+        EXPECT_EQ(output.str(), "one");
+    }
+}
+
+// The byte renders: the byte[] values (the entry values reduced to bytes
+// and the whole-resource blobs) written raw into the output block.
+TEST(IlspyCmdProgramTest, ExtractResourceByteMatrix)
+{
+    std::string path = ILSpy::Tests::WriteValTestDll();
+    ASSERT_FALSE(path.empty());
+    MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+
+    struct ByteCase {
+        const char* resource;
+        std::vector<std::uint8_t> expected;
+    };
+    const ByteCase byteCases[] = {
+        {"v2.resources/Bytes", {0x01, 0x02, 0x03}},
+        {"v2.resources/Stream", {0x07, 0x08, 0x09}},
+        {"v1.resources/V1UserMid", {0xAA, 0xBB, 0x07}},
+        {"v1.resources/V1User", {0xCC, 0xDD, 0xEE}},
+        {"serfmt.resources/SerUserMid", {0x99, 0x88, 0x77}},
+        {"serfmt.resources/SerUserLast", {0x55, 0x66}},
+        {"bad.resources", {0xDE, 0xAD, 0xBE, 0xEF}},
+        {"plain.nlp", {0x11, 0x22, 0x33}},
+    };
+    for (const auto& c : byteCases) {
+        std::ostringstream output;
+        std::ostringstream errorOutput;
+        EXPECT_EQ(Cmd::ExtractResource(path, c.resource, output, errorOutput), 0)
+            << c.resource;
+        std::string text = output.str();
+        ASSERT_EQ(text.size(), c.expected.size()) << c.resource;
+        for (std::size_t i = 0; i < c.expected.size(); i++)
+            EXPECT_EQ(static_cast<std::uint8_t>(text[i]), c.expected[i])
+                << c.resource << " byte " << i;
+    }
+
+    // The whole-container blob: the row's bytes after the length prefix
+    // (the real tool's raw byte-for-byte output over the same row).
+    {
+        auto data = ILSpy::Tests::ValTestResourceData(module, "v2.resources");
+        ASSERT_TRUE(data.has_value());
+        std::ostringstream output;
+        std::ostringstream errorOutput;
+        EXPECT_EQ(Cmd::ExtractResource(path, "v2.resources", output, errorOutput), 0);
+        ASSERT_EQ(output.str().size(), data->size());
+        EXPECT_EQ(0, std::memcmp(output.str().data(), data->data(), data->size()));
+    }
+}
+
+// The not-found arm: the two stderr lines plus the available-resources
+// listing (the EnumerateResourcePaths order, the two-space indent, the
+// CRLF TextWriter convention), and EX_DATAERR (65).
+TEST(IlspyCmdProgramTest, ExtractResourceNotFound)
+{
+    std::string path = ILSpy::Tests::WriteValTestDll();
+    ASSERT_FALSE(path.empty());
+    std::ostringstream output;
+    std::ostringstream errorOutput;
+    EXPECT_EQ(Cmd::ExtractResource(path, "nope", output, errorOutput), 65);
+    EXPECT_EQ(output.str(), "");
+    EXPECT_EQ(errorOutput.str(),
+        "Resource 'nope' not found.\r\n"
+        "Available resources:\r\n"
+        "  v2.resources/Double\r\n"
+        "  v2.resources/DoubleSci\r\n"
+        "  v2.resources/DoubleExp\r\n"
+        "  v2.resources/DoubleNeg\r\n"
+        "  v2.resources/UShort\r\n"
+        "  v2.resources/Stream\r\n"
+        "  v2.resources/Decimal\r\n"
+        "  v2.resources/FloatPosInf\r\n"
+        "  v2.resources/Unicode.Name.\xE4\xB8\xAD\xE6\x96\x87\r\n"
+        "  v2.resources/Int\r\n"
+        "  v2.resources/Str\r\n"
+        "  v2.resources/Float\r\n"
+        "  v2.resources/BoolF\r\n"
+        "  v2.resources/Bytes\r\n"
+        "  v2.resources/ULong\r\n"
+        "  v2.resources/Short\r\n"
+        "  v2.resources/SByte\r\n"
+        "  v2.resources/EmptyBytes\r\n"
+        "  v2.resources/DoubleSmall\r\n"
+        "  v2.resources/FloatNegNaN\r\n"
+        "  v2.resources/FloatSci\r\n"
+        "  v2.resources/Bool\r\n"
+        "  v2.resources/Byte\r\n"
+        "  v2.resources/Char\r\n"
+        "  v2.resources/Long\r\n"
+        "  v2.resources/UInt\r\n"
+        "  v1.resources/V1Str\r\n"
+        "  v1.resources/V1Int\r\n"
+        "  v1.resources/V1Long\r\n"
+        "  v1.resources/V1Double\r\n"
+        "  v1.resources/V1Decimal\r\n"
+        "  v1.resources/V1Date\r\n"
+        "  v1.resources/V1TS\r\n"
+        "  v1.resources/V1Null\r\n"
+        "  v1.resources/V1UserMid\r\n"
+        "  v1.resources/V1UserEmpty\r\n"
+        "  v1.resources/V1User\r\n"
+        "  serfmt.resources/SerUserMid\r\n"
+        "  serfmt.resources/SerStr\r\n"
+        "  serfmt.resources/SerUserEmpty\r\n"
+        "  serfmt.resources/SerUserLast\r\n"
+        "  bad.resources\r\n"
+        "  plain.nlp\r\n"
+        "  page.baml\r\n");
+}
+
+// The .baml arm: the deferred BamlDecompiler -- the port renders its
+// not-yet-supported line and EX_SOFTWARE (70, the same exit code the real
+// tool's own unparseable-BAML failure produces) instead of silently
+// writing the raw bytes.
+TEST(IlspyCmdProgramTest, ExtractResourceBamlDeferred)
+{
+    std::string path = ILSpy::Tests::WriteValTestDll();
+    ASSERT_FALSE(path.empty());
+    std::ostringstream output;
+    std::ostringstream errorOutput;
+    EXPECT_EQ(Cmd::ExtractResource(path, "page.baml", output, errorOutput), 70);
+    EXPECT_EQ(output.str(), "");
+    EXPECT_EQ(errorOutput.str(),
+        "BAML resource decompilation ('page.baml') is not supported by the "
+        "C++ port yet (the BamlDecompiler port is pending).\r\n");
+    // A .baml-suffixed path that is not found takes the not-found arm (the
+    // isBaml gate only applies to a found byte[] value).
+    {
+        std::ostringstream output2;
+        std::ostringstream error2;
+        EXPECT_EQ(Cmd::ExtractResource(path, "v2.resources/Str.baml", output2, error2), 65);
+    }
+}
+
+// The real mscorlib resources: a container string entry, byte-exact
+// against the real tool over the same row.
+TEST(IlspyCmdProgramTest, ExtractResourceMscorlib)
+{
+    MetadataFile mscorlib(MscorlibPath());
+    ASSERT_TRUE(mscorlib.IsValid());
+    {
+        auto value = Cmd::TryGetResource(
+            mscorlib, "mscorlib.resources/Interop.COM_TypeMismatch");
+        ASSERT_TRUE(value.has_value());
+        EXPECT_EQ(value->str, "Type mismatch between source and destination types.");
+    }
+    std::ostringstream output;
+    std::ostringstream errorOutput;
+    EXPECT_EQ(Cmd::ExtractResource(MscorlibPath(),
+        "mscorlib.resources/Interop.COM_TypeMismatch", output, errorOutput), 0);
+    EXPECT_EQ(output.str(), "Type mismatch between source and destination types.");
 }

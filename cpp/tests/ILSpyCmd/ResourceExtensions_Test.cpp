@@ -30,11 +30,14 @@
 #include "ILSpyCmd/IlspyCmdProgram.hpp"
 #include "ILSpyCmd/ResourceExtensions.hpp"
 
+#include "Decompiler/Util/ResourcesFile.hpp"
+
 #include "TestFixtures/ResourcesTestFixtures.hpp"
 #include "TestFixtures/TinyNetModule.hpp"
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -44,6 +47,7 @@ namespace {
 namespace Cmd = ILSpy::ILSpyCmd;
 using ILSpy::Decompiler::Metadata::MetadataFile;
 using ILSpy::Tests::WriteResTestDll;
+using ILSpy::Tests::WriteValTestDll;
 // TinyNetModule.hpp's helpers live at global scope (its documented layout);
 // ordinary lookup finds WriteTinyNetModule from inside this anonymous
 // namespace.
@@ -283,4 +287,159 @@ TEST(ResourceExtensionsTest, ListResourcesUnparseableFile)
     std::ostringstream output;
     EXPECT_EQ(Cmd::ListResources("Z:\\no\\such\\file.dll", output), 0);
     EXPECT_EQ(output.str(), "");
+}
+
+// ---- The resource lookup (TryGetResource)
+
+// The whole-path arm: an embedded resource's own name (case-insensitive)
+// yields its whole blob as a ByteArray -- the restest manifest's container
+// row and its garbage/plain rows.
+TEST(ResourceExtensionsTest, TryGetResourceWholePath)
+{
+    std::string path = WriteResTestDll();
+    ASSERT_FALSE(path.empty());
+    MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+
+    // The container row: the whole 348-byte blob (the bytes after the
+    // 4-byte length prefix).
+    {
+        auto value = Cmd::TryGetResource(module, "test.resources");
+        ASSERT_TRUE(value.has_value());
+        EXPECT_EQ(value->kind,
+            ILSpy::Decompiler::Util::ResourceValue::Kind::ByteArray);
+        EXPECT_EQ(value->bytes.size(), 348u);
+    }
+    // The case-insensitive whole-name match.
+    {
+        auto value = Cmd::TryGetResource(module, "TEST.RESOURCES");
+        ASSERT_TRUE(value.has_value());
+        EXPECT_EQ(value->bytes.size(), 348u);
+    }
+    // The garbage .resources-suffixed blob: a whole-path byte arm (the
+    // parse failure only affects the entry arm).
+    {
+        auto value = Cmd::TryGetResource(module, "bad.resources");
+        ASSERT_TRUE(value.has_value());
+        EXPECT_EQ(value->bytes,
+            (std::vector<std::uint8_t>{0xDE, 0xAD, 0xBE, 0xEF}));
+    }
+    // The plain embedded blob.
+    {
+        auto value = Cmd::TryGetResource(module, "plain.nlp");
+        ASSERT_TRUE(value.has_value());
+        EXPECT_EQ(value->bytes,
+            (std::vector<std::uint8_t>{0x11, 0x22, 0x33}));
+    }
+}
+
+// The entry arm: the "<container>/<entry>" path into a .resources
+// container (the case-insensitive first match in the container's row
+// order), with the values the real TryReadResourcesEntry logic yielded
+// over the same bytes -- the string entry as-is, the Stream values reduced
+// to their byte arrays, and the serialized user types reduced to their
+// GetBytes() regions.
+TEST(ResourceExtensionsTest, TryGetResourceEntries)
+{
+    std::string path = WriteValTestDll();
+    ASSERT_FALSE(path.empty());
+    MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+
+    {
+        auto value = Cmd::TryGetResource(module, "v2.resources/Str");
+        ASSERT_TRUE(value.has_value());
+        EXPECT_EQ(value->kind,
+            ILSpy::Decompiler::Util::ResourceValue::Kind::String);
+        EXPECT_EQ(value->str, "one");
+    }
+    // The case-insensitive entry match (the whole path folds).
+    {
+        auto value = Cmd::TryGetResource(module, "V2.RESOURCES/STR");
+        ASSERT_TRUE(value.has_value());
+        EXPECT_EQ(value->str, "one");
+    }
+    // The integral entry as its decoded value (not bytes).
+    {
+        auto value = Cmd::TryGetResource(module, "v2.resources/Int");
+        ASSERT_TRUE(value.has_value());
+        EXPECT_EQ(value->kind,
+            ILSpy::Decompiler::Util::ResourceValue::Kind::Int32);
+        EXPECT_EQ(static_cast<std::int64_t>(value->integer), 42);
+    }
+    // The Stream value: the byte-array copy.
+    {
+        auto value = Cmd::TryGetResource(module, "v2.resources/Stream");
+        ASSERT_TRUE(value.has_value());
+        EXPECT_EQ(value->kind,
+            ILSpy::Decompiler::Util::ResourceValue::Kind::ByteArray);
+        EXPECT_EQ(value->bytes, (std::vector<std::uint8_t>{7, 8, 9}));
+    }
+    // The serialized user type: the GetBytes() region as bytes.
+    {
+        auto value = Cmd::TryGetResource(module, "v1.resources/V1User");
+        ASSERT_TRUE(value.has_value());
+        EXPECT_EQ(value->kind,
+            ILSpy::Decompiler::Util::ResourceValue::Kind::ByteArray);
+        EXPECT_EQ(value->bytes,
+            (std::vector<std::uint8_t>{0xCC, 0xDD, 0xEE}));
+    }
+    {
+        auto value = Cmd::TryGetResource(module,
+            "serfmt.resources/SerUserLast");
+        ASSERT_TRUE(value.has_value());
+        EXPECT_EQ(value->bytes,
+            (std::vector<std::uint8_t>{0x55, 0x66}));
+    }
+}
+
+// The not-found shapes: an unknown whole name, an unknown entry name
+// inside a valid container, an entry path into a NON-.resources-suffixed
+// resource (the prefix arm only applies to .resources containers), the
+// entry path into the garbage container (the parse failure), and the
+// File-linked row (never listed, never found).
+TEST(ResourceExtensionsTest, TryGetResourceNotFound)
+{
+    std::string path = WriteResTestDll();
+    ASSERT_FALSE(path.empty());
+    MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+
+    EXPECT_FALSE(Cmd::TryGetResource(module, "nope").has_value());
+    EXPECT_FALSE(
+        Cmd::TryGetResource(module, "test.resources/Nope").has_value());
+    // plain.nlp does not end with .resources: its prefix never matches.
+    EXPECT_FALSE(
+        Cmd::TryGetResource(module, "plain.nlp/x").has_value());
+    // The garbage container: the parse failure falls back to not-found.
+    EXPECT_FALSE(
+        Cmd::TryGetResource(module, "bad.resources/x").has_value());
+    // The linked row is filtered out of the walk.
+    EXPECT_FALSE(Cmd::TryGetResource(module, "linked.nlp").has_value());
+}
+
+// The real mscorlib container: a string entry through the entry arm (the
+// probe-pinned value) and the whole charinfo.nlp blob through the
+// whole-path arm.
+TEST(ResourceExtensionsTest, TryGetResourceMscorlib)
+{
+    MetadataFile mscorlib(MscorlibPath());
+    ASSERT_TRUE(mscorlib.IsValid());
+    {
+        auto value = Cmd::TryGetResource(
+            mscorlib, "mscorlib.resources/Format_MissingIncompleteDate");
+        ASSERT_TRUE(value.has_value());
+        EXPECT_EQ(value->kind,
+            ILSpy::Decompiler::Util::ResourceValue::Kind::String);
+        EXPECT_EQ(value->str,
+            "There must be at least a partial date with a year present in "
+            "the input.");
+    }
+    {
+        auto value = Cmd::TryGetResource(mscorlib, "charinfo.nlp");
+        ASSERT_TRUE(value.has_value());
+        EXPECT_EQ(value->kind,
+            ILSpy::Decompiler::Util::ResourceValue::Kind::ByteArray);
+        EXPECT_EQ(value->bytes.size(), 36992u);
+    }
 }

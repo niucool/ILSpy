@@ -26,6 +26,7 @@
 #include "Decompiler/Util/Utf.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 
@@ -39,7 +40,7 @@ std::uint8_t ResourcesFile::ReadByte() {
     // The C# EndOfStreamException message of a BinaryReader read past the
     // end (SR.IO_ReadBeyondEndOfFile).
     if (pos_ >= size_)
-        throw std::out_of_range(
+        throw EndOfStreamError(
             "Unable to read beyond the end of the stream.");
     return data_[pos_++];
 }
@@ -48,13 +49,70 @@ std::int32_t ResourcesFile::ReadInt32() {
     // The C# EndOfStreamException message of a BinaryReader read past the
     // end ("Unable to read beyond the end of the stream.").
     if (size_ - pos_ < 4)
-        throw std::out_of_range("Unable to read beyond the end of the stream.");
+        throw EndOfStreamError("Unable to read beyond the end of the stream.");
     std::int32_t v = static_cast<std::int32_t>(
         static_cast<std::uint32_t>(data_[pos_])
         | (static_cast<std::uint32_t>(data_[pos_ + 1]) << 8)
         | (static_cast<std::uint32_t>(data_[pos_ + 2]) << 16)
         | (static_cast<std::uint32_t>(data_[pos_ + 3]) << 24));
     pos_ += 4;
+    return v;
+}
+
+std::int16_t ResourcesFile::ReadInt16() {
+    if (size_ - pos_ < 2)
+        throw EndOfStreamError("Unable to read beyond the end of the stream.");
+    std::int16_t v = static_cast<std::int16_t>(
+        static_cast<std::uint16_t>(data_[pos_])
+        | (static_cast<std::uint16_t>(data_[pos_ + 1]) << 8));
+    pos_ += 2;
+    return v;
+}
+
+std::uint16_t ResourcesFile::ReadUInt16() {
+    if (size_ - pos_ < 2)
+        throw EndOfStreamError("Unable to read beyond the end of the stream.");
+    std::uint16_t v = static_cast<std::uint16_t>(
+        static_cast<std::uint16_t>(data_[pos_])
+        | (static_cast<std::uint16_t>(data_[pos_ + 1]) << 8));
+    pos_ += 2;
+    return v;
+}
+
+std::uint32_t ResourcesFile::ReadUInt32() {
+    return static_cast<std::uint32_t>(ReadInt32());
+}
+
+std::int64_t ResourcesFile::ReadInt64() {
+    if (size_ - pos_ < 8)
+        throw EndOfStreamError("Unable to read beyond the end of the stream.");
+    std::uint64_t v = 0;
+    for (int i = 7; i >= 0; i--)
+        v = (v << 8) | data_[pos_ + static_cast<std::size_t>(i)];
+    pos_ += 8;
+    return static_cast<std::int64_t>(v);
+}
+
+std::uint64_t ResourcesFile::ReadUInt64() {
+    return static_cast<std::uint64_t>(ReadInt64());
+}
+
+bool ResourcesFile::ReadBoolean() {
+    // The C# BinaryReader.ReadBoolean: a nonzero byte is true.
+    return ReadByte() != 0;
+}
+
+float ResourcesFile::ReadSingle() {
+    std::uint32_t bits = ReadUInt32();
+    float v;
+    std::memcpy(&v, &bits, sizeof(v));
+    return v;
+}
+
+double ResourcesFile::ReadDouble() {
+    std::uint64_t bits = ReadUInt64();
+    double v;
+    std::memcpy(&v, &bits, sizeof(v));
     return v;
 }
 
@@ -81,7 +139,7 @@ std::string ResourcesFile::ReadString() {
     // through). A truncated string throws (the C# EndOfStreamException).
     std::int32_t len = Read7BitEncodedInt();
     if (len < 0 || static_cast<std::uint64_t>(len) > size_ - pos_)
-        throw std::out_of_range("Unable to read beyond the end of the stream.");
+        throw EndOfStreamError("Unable to read beyond the end of the stream.");
     std::string s;
     if (len > 0) {
         s.assign(reinterpret_cast<const char*>(data_ + pos_),
@@ -89,6 +147,15 @@ std::string ResourcesFile::ReadString() {
         pos_ += static_cast<std::size_t>(len);
     }
     return s;
+}
+
+std::vector<std::uint8_t> ResourcesFile::ReadBytes(std::size_t count) {
+    // The C# BinaryReader.ReadBytes: a partial read at the end of the
+    // stream returns what is available (no throw).
+    std::size_t take = std::min(count, size_ - pos_);
+    std::vector<std::uint8_t> v(data_ + pos_, data_ + pos_ + take);
+    pos_ += take;
+    return v;
 }
 
 void ResourcesFile::ReadExact(std::uint8_t* out, std::size_t n) {
@@ -273,6 +340,304 @@ std::string ResourcesFile::GetResourceName(int index, int& dataOffset) {
         result.append("\xEF\xBF\xBD");
     }
     return result;
+}
+
+std::string ResourcesFile::FindType(int typeIndex) {
+    // The C# FindType: the type-table entry with its
+    // BadImageFormatException("Type index out of bounds") arm (a plain
+    // throw -- it passes through LoadObject's EndOfStream wrap untouched).
+    if (typeIndex < 0
+        || typeIndex >= static_cast<int>(typeTable_.size()))
+        throw std::out_of_range("Type index out of bounds");
+    return typeTable_[static_cast<std::size_t>(typeIndex)];
+}
+
+ResourceValue ResourcesFile::LoadObject(int dataOffset) {
+    // The C# LoadObject: the version dispatch with the
+    // catch (EndOfStreamException) wrap -- the EndOfStream arms of the
+    // decode's reads rethrow as BadImageFormatException("Invalid resource
+    // file"); the BadImageFormatException arms (FindType, the negative
+    // lengths, the invalid type code) are a different C# type and pass
+    // through untouched (the port's plain std::out_of_range throws).
+    try {
+        if (version_ == 1)
+            return LoadObjectV1(dataOffset);
+        return LoadObjectV2(dataOffset);
+    } catch (const EndOfStreamError&) {
+        throw std::out_of_range("Invalid resource file");
+    }
+}
+
+ResourceValue ResourcesFile::LoadObjectV1(int dataOffset) {
+    // The C# LoadObjectV1: the type-table INDEX (not a ResourceTypeCode),
+    // the -1 null marker, the assembly-name strip (the first comma), and
+    // the type-name switch.
+    SeekBegin(static_cast<std::int64_t>(dataSectionPosition_) + dataOffset);
+    int typeIndex = Read7BitEncodedInt();
+    if (typeIndex == -1)
+        return ResourceValue{};  // the null marker
+    std::string typeName = FindType(typeIndex);
+    std::string localTypeName = typeName;
+    int comma = static_cast<int>(typeName.find(','));
+    if (comma > 0)
+        localTypeName = typeName.substr(0, static_cast<std::size_t>(comma));
+
+    ResourceValue v;
+    if (localTypeName == "System.String") {
+        v.kind = ResourceValue::Kind::String;
+        v.str = ReadString();
+    } else if (localTypeName == "System.Byte") {
+        v.kind = ResourceValue::Kind::Byte;
+        v.integer = ReadByte();
+    } else if (localTypeName == "System.SByte") {
+        v.kind = ResourceValue::Kind::SByte;
+        v.integer = static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(static_cast<std::int8_t>(ReadByte())));
+    } else if (localTypeName == "System.Int16") {
+        v.kind = ResourceValue::Kind::Int16;
+        v.integer = static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(ReadInt16()));
+    } else if (localTypeName == "System.UInt16") {
+        v.kind = ResourceValue::Kind::UInt16;
+        v.integer = ReadUInt16();
+    } else if (localTypeName == "System.Int32") {
+        v.kind = ResourceValue::Kind::Int32;
+        v.integer = static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(ReadInt32()));
+    } else if (localTypeName == "System.UInt32") {
+        v.kind = ResourceValue::Kind::UInt32;
+        v.integer = ReadUInt32();
+    } else if (localTypeName == "System.Int64") {
+        v.kind = ResourceValue::Kind::Int64;
+        v.integer = static_cast<std::uint64_t>(ReadInt64());
+    } else if (localTypeName == "System.UInt64") {
+        v.kind = ResourceValue::Kind::UInt64;
+        v.integer = ReadUInt64();
+    } else if (localTypeName == "System.Single") {
+        v.kind = ResourceValue::Kind::Single;
+        v.single = ReadSingle();
+    } else if (localTypeName == "System.Double") {
+        v.kind = ResourceValue::Kind::Double;
+        v.doubleValue = ReadDouble();
+    } else if (localTypeName == "System.DateTime") {
+        // The C# `new DateTime(reader.ReadInt64())`: the raw int64 with
+        // the kind bits masked off for the Ticks the render reads (the C#
+        // ctor's ArgumentOutOfRangeException for an out-of-range ticks
+        // value is an edge the fixtures do not carry).
+        v.kind = ResourceValue::Kind::DateTime;
+        std::uint64_t raw = static_cast<std::uint64_t>(ReadInt64());
+        v.ticks = static_cast<std::int64_t>(raw & 0x3FFFFFFFFFFFFFFFull);
+    } else if (localTypeName == "System.TimeSpan") {
+        v.kind = ResourceValue::Kind::TimeSpan;
+        v.ticks = ReadInt64();
+    } else if (localTypeName == "System.Decimal") {
+        // The C# `new decimal(bits)`: the four int32s in the ReadDecimal
+        // order [lo, mid, hi, flags].
+        v.kind = ResourceValue::Kind::Decimal;
+        for (int i = 0; i < 4; i++)
+            v.decimalBits[i] = ReadUInt32();
+    } else {
+        // The C# default arm: the serialized user type. The position is
+        // after the type index; the port computes the byte region eagerly
+        // (the header contract's documented divergence). FindType runs
+        // unconditionally (its bounds check is the ctor argument the C#
+        // evaluates regardless of the format); the ResourceSerializedObject
+        // ctor nulls the TypeName when the container is not a
+        // serialization-format one.
+        v.kind = ResourceValue::Kind::SerializedObject;
+        std::string typeName = FindType(typeIndex);
+        v.typeName = usesSerializationFormat_ ? std::move(typeName)
+                                               : std::string();
+        v.bytes = GetBytesForSerializedObject(
+            pos_, usesSerializationFormat_);
+    }
+    return v;
+}
+
+ResourceValue ResourcesFile::LoadObjectV2(int dataOffset) {
+    // The C# LoadObjectV2: the ResourceTypeCode switch.
+    SeekBegin(static_cast<std::int64_t>(dataSectionPosition_) + dataOffset);
+    std::int32_t raw = Read7BitEncodedInt();
+    ResourceTypeCode typeCode = static_cast<ResourceTypeCode>(raw);
+
+    ResourceValue v;
+    switch (typeCode) {
+        case ResourceTypeCode::Null:
+            return v;
+        case ResourceTypeCode::String:
+            v.kind = ResourceValue::Kind::String;
+            v.str = ReadString();
+            return v;
+        case ResourceTypeCode::Boolean:
+            v.kind = ResourceValue::Kind::Boolean;
+            v.boolean = ReadBoolean();
+            return v;
+        case ResourceTypeCode::Char:
+            v.kind = ResourceValue::Kind::Char;
+            v.character = ReadUInt16();
+            return v;
+        case ResourceTypeCode::Byte:
+            v.kind = ResourceValue::Kind::Byte;
+            v.integer = ReadByte();
+            return v;
+        case ResourceTypeCode::SByte:
+            v.kind = ResourceValue::Kind::SByte;
+            v.integer = static_cast<std::uint64_t>(
+                static_cast<std::int64_t>(static_cast<std::int8_t>(ReadByte())));
+            return v;
+        case ResourceTypeCode::Int16:
+            v.kind = ResourceValue::Kind::Int16;
+            v.integer = static_cast<std::uint64_t>(
+                static_cast<std::int64_t>(ReadInt16()));
+            return v;
+        case ResourceTypeCode::UInt16:
+            v.kind = ResourceValue::Kind::UInt16;
+            v.integer = ReadUInt16();
+            return v;
+        case ResourceTypeCode::Int32:
+            v.kind = ResourceValue::Kind::Int32;
+            v.integer = static_cast<std::uint64_t>(
+                static_cast<std::int64_t>(ReadInt32()));
+            return v;
+        case ResourceTypeCode::UInt32:
+            v.kind = ResourceValue::Kind::UInt32;
+            v.integer = ReadUInt32();
+            return v;
+        case ResourceTypeCode::Int64:
+            v.kind = ResourceValue::Kind::Int64;
+            v.integer = static_cast<std::uint64_t>(ReadInt64());
+            return v;
+        case ResourceTypeCode::UInt64:
+            v.kind = ResourceValue::Kind::UInt64;
+            v.integer = ReadUInt64();
+            return v;
+        case ResourceTypeCode::Single:
+            v.kind = ResourceValue::Kind::Single;
+            v.single = ReadSingle();
+            return v;
+        case ResourceTypeCode::Double:
+            v.kind = ResourceValue::Kind::Double;
+            v.doubleValue = ReadDouble();
+            return v;
+        case ResourceTypeCode::Decimal:
+            v.kind = ResourceValue::Kind::Decimal;
+            for (int i = 0; i < 4; i++)
+                v.decimalBits[i] = ReadUInt32();
+            return v;
+        case ResourceTypeCode::DateTime: {
+            // The C# `DateTime.FromBinary(data)`: the kind bits (the two
+            // high bits) are masked off for the ticks the render reads; the
+            // Local-kind timezone conversion and the out-of-range ticks
+            // throw are edges the fixtures do not carry.
+            v.kind = ResourceValue::Kind::DateTime;
+            std::uint64_t data = static_cast<std::uint64_t>(ReadInt64());
+            v.ticks = static_cast<std::int64_t>(data & 0x3FFFFFFFFFFFFFFFull);
+            return v;
+        }
+        case ResourceTypeCode::TimeSpan:
+            v.kind = ResourceValue::Kind::TimeSpan;
+            v.ticks = ReadInt64();
+            return v;
+        case ResourceTypeCode::ByteArray: {
+            std::int32_t len = ReadInt32();
+            if (len < 0)
+                throw std::out_of_range("Resource with negative length");
+            v.kind = ResourceValue::Kind::ByteArray;
+            v.bytes = ReadBytes(static_cast<std::size_t>(len));
+            return v;
+        }
+        case ResourceTypeCode::Stream: {
+            std::int32_t len = ReadInt32();
+            if (len < 0)
+                throw std::out_of_range("Resource with negative length");
+            v.kind = ResourceValue::Kind::Stream;
+            v.bytes = ReadBytes(static_cast<std::size_t>(len));
+            return v;
+        }
+        default:
+            if (raw < static_cast<std::int32_t>(ResourceTypeCode::StartOfUserTypes))
+                throw std::out_of_range("Invalid typeCode");
+            // The serialized user type: the position is after the type
+            // code; the port computes the byte region eagerly (the header
+            // contract's documented divergence). FindType runs
+            // unconditionally (its bounds check is the ctor argument the
+            // C# evaluates regardless of the format); the
+            // ResourceSerializedObject ctor nulls the TypeName when the
+            // container is not a serialization-format one.
+            v.kind = ResourceValue::Kind::SerializedObject;
+            {
+                std::string typeName = FindType(
+                    raw - static_cast<std::int32_t>(
+                        ResourceTypeCode::StartOfUserTypes));
+                v.typeName = usesSerializationFormat_
+                    ? std::move(typeName)
+                    : std::string();
+            }
+            v.bytes = GetBytesForSerializedObject(
+                pos_, usesSerializationFormat_);
+            return v;
+    }
+}
+
+std::vector<std::int64_t> ResourcesFile::GetStartPositions() {
+    // The C# GetStartPositions (the LazyInit cache is unobservable -- the
+    // same values every time): the sorted absolute starts of every name
+    // entry and every data entry.
+    std::vector<std::int64_t> positions;
+    positions.reserve(static_cast<std::size_t>(numResources_) * 2);
+    for (int i = 0; i < numResources_; i++) {
+        positions.push_back(
+            static_cast<std::int64_t>(nameSectionPosition_)
+            + namePositions_[static_cast<std::size_t>(i)]);
+        positions.push_back(
+            static_cast<std::int64_t>(dataSectionPosition_)
+            + GetResourceDataOffset(i));
+    }
+    std::sort(positions.begin(), positions.end());
+    return positions;
+}
+
+std::vector<std::uint8_t> ResourcesFile::GetBytesForSerializedObject(
+    std::size_t pos, bool usesSerializationFormat) {
+    std::vector<std::int64_t> positions = GetStartPositions();
+    // The C# Array.BinarySearch: an exact hit keeps the found index (the
+    // zero-length region -- endPos == pos), a miss takes the insertion
+    // index (the next position after pos); std::lower_bound gives both.
+    std::size_t i = static_cast<std::size_t>(
+        std::lower_bound(positions.begin(), positions.end(),
+            static_cast<std::int64_t>(pos))
+        - positions.begin());
+    std::int64_t endPos = (i == positions.size())
+        ? static_cast<std::int64_t>(size_)
+        : positions[i];
+    std::int64_t len = endPos - static_cast<std::int64_t>(pos);
+    SeekBegin(static_cast<std::int64_t>(pos));
+    if (usesSerializationFormat) {
+        // The [SerializationFormat kind][length] wrapper. The walk runs
+        // OUTSIDE the C# LoadObject EndOfStream wrap (the C# GetBytes is
+        // the caller's separate lazy call), so its EndOfStream arms convert
+        // to the plain type here to escape the wrap with the same message.
+        try {
+            Read7BitEncodedInt();  // the kind (a Debug.Assert in the C#)
+            len = Read7BitEncodedInt();
+        } catch (const EndOfStreamError&) {
+            throw std::out_of_range(
+                "Unable to read beyond the end of the stream.");
+        }
+    }
+    // A negative length (an overlapping region only a crafted container
+    // produces) reads as an empty region -- the C# ReadBytes would throw
+    // ArgumentOutOfRangeException; a documented divergence no
+    // well-formed container reaches.
+    if (len < 0)
+        len = 0;
+    return ReadBytes(static_cast<std::size_t>(len));
+}
+
+ResourceValue ResourcesFile::GetResourceValue(int index) {
+    int dataOffset;
+    GetResourceName(index, dataOffset);
+    return LoadObject(dataOffset);
 }
 
 }  // namespace ILSpy::Decompiler::Util
