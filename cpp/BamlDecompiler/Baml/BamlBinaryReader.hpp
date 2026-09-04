@@ -84,6 +84,12 @@ public:
     std::uint8_t ReadByte();
     std::uint16_t ReadUInt16();
     std::uint32_t ReadUInt32();
+    // The C# BinaryReader.ReadInt32: a fixed 4-byte little-endian read; a
+    // truncated payload throws the EndOfStream message.
+    std::int32_t ReadInt32();
+    // The C# BinaryReader.ReadDouble: a fixed 8-byte little-endian IEEE-754
+    // read; a truncated payload throws the EndOfStream message.
+    double ReadDouble();
     bool ReadBoolean();
 
     // The C# `ReadEncodedInt` (BinaryReader.Read7BitEncodedInt).

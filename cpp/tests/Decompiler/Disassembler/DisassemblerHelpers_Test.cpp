@@ -559,6 +559,44 @@ TEST(DisassemblerHelpersTest, WriteOperandDoubleDumpsInfinityAndNaNBytes) {
 	EXPECT_EQ(output2.ToString(), "(00 00 00 00 00 00 F8 7F)");
 }
 
+// FormatRoundTrip -- the plain ToString("R", InvariantCulture) rendering the
+// XAML path/point decoders reach (unlike the IL operand spellings above, the
+// special values are NOT re-spelled: they take .NET's symbol names).
+TEST(DisassemblerHelpersTest, FormatRoundTripSpecialValuesMatchNet) {
+	// 0 renders "0" and negative zero keeps its sign ("-0").
+	EXPECT_EQ(FormatRoundTrip(0.0), "0");
+	EXPECT_EQ(FormatRoundTrip(-0.0), "-0");
+
+	// NaN drops its sign bit; the infinities keep theirs.
+	EXPECT_EQ(FormatRoundTrip(std::numeric_limits<double>::quiet_NaN()), "NaN");
+	EXPECT_EQ(FormatRoundTrip(-std::numeric_limits<double>::quiet_NaN()), "NaN");
+	EXPECT_EQ(FormatRoundTrip(std::numeric_limits<double>::infinity()), "Infinity");
+	EXPECT_EQ(FormatRoundTrip(-std::numeric_limits<double>::infinity()), "-Infinity");
+
+	// The float overload spells the same symbol names.
+	EXPECT_EQ(FormatRoundTrip(0.0f), "0");
+	EXPECT_EQ(FormatRoundTrip(-0.0f), "-0");
+	EXPECT_EQ(FormatRoundTrip(std::numeric_limits<float>::quiet_NaN()), "NaN");
+	EXPECT_EQ(FormatRoundTrip(-std::numeric_limits<float>::infinity()), "-Infinity");
+}
+
+TEST(DisassemblerHelpersTest, FormatRoundTripMatchesTheOperandRendering) {
+	// The core is the same FormatGeneral rule the operand writer renders
+	// through (the P4 gold lines of the path probe).
+	EXPECT_EQ(FormatRoundTrip(1e16), "10000000000000000");
+	EXPECT_EQ(FormatRoundTrip(1e17), "1E+17");
+	EXPECT_EQ(FormatRoundTrip(0.1), "0.1");
+	EXPECT_EQ(FormatRoundTrip(0.0001), "0.0001");
+	EXPECT_EQ(FormatRoundTrip(1e-5), "1E-05");
+	EXPECT_EQ(FormatRoundTrip(11.700684), "11.700684");
+	EXPECT_EQ(FormatRoundTrip(10000000.0), "10000000");
+	EXPECT_EQ(FormatRoundTrip(123456789.25), "123456789.25");
+
+	// The subnormal and the float scientific boundary.
+	EXPECT_EQ(FormatRoundTrip(5e-324), "5E-324");
+	EXPECT_EQ(FormatRoundTrip(1.2345678e10f), "1.2345678E+10");
+}
+
 TEST(DisassemblerHelpersTest, WriteOperandStringWritesQuotedEscapedLiteral) {
 	OUT::PlainTextOutput output;
 	WriteOperand(output, std::string_view("abc"));

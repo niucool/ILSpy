@@ -186,6 +186,19 @@ void WriteOperand(Output::ITextOutput& writer, float val);
 // The C# `public static void WriteOperand(ITextOutput writer, double val)`.
 void WriteOperand(Output::ITextOutput& writer, double val);
 
+// The `double.ToString("R", InvariantCulture)` / `float.ToString("R", ...)`
+// rendering -- the .NET FormatGeneral rule over the shortest round-trip
+// digits (the same rule WriteFloatingOperand renders through; see the
+// WriteOperand note): FIXED notation while the decimal scale stays within
+// [-3, MaxRoundTripDigits] (17 double / 9 float), scientific otherwise.
+// Unlike the IL operand spellings, the plain "R" rendering is reachable
+// for the special values (the XAML path/point renders hit them), and .NET
+// spells them as symbols: zero renders "0" and negative zero "-0" (the
+// sign is kept), NaN renders "NaN" (its sign bit is dropped), and the
+// infinities render "Infinity" / "-Infinity".
+std::string FormatRoundTrip(double value);
+std::string FormatRoundTrip(float value);
+
 // The C# `public static void WriteOperand(ITextOutput writer, string operand)`
 // -- the double-quoted escaped-string literal.
 void WriteOperand(Output::ITextOutput& writer, std::string_view operand);

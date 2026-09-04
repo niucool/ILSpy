@@ -389,6 +389,80 @@ struct RoundTripDigitBudget<double> {
 // std::to_chars' scientific form carries the same shortest round-trip digits
 // (Ryu), so the rule renders from its parsed digits and scale.
 template <typename T>
+std::string FormatRoundTripCore(T val) {
+	// Ryu's shortest digits in scientific form: "-1.23456789e+16".
+	char sci[64];
+	auto res = std::to_chars(sci, sci + sizeof(sci), val,
+		std::chars_format::scientific);
+	*res.ptr = '\0';
+	char* e = std::strchr(sci, 'e');
+	// The decimal exponent of the leading digit; the scale counts it as
+	// the digit before the decimal point (the value is 0.<digits> x 10^scale).
+	const int scale = std::atoi(e + 1) + 1;
+
+	const bool negative = (*sci == '-');
+	std::string digits;
+	for (char* p = sci + (negative ? 1 : 0); p != e; p++) {
+		if (*p != '.')
+			digits.push_back(*p);
+	}
+
+	std::string s;
+	if (scale > RoundTripDigitBudget<T>::value || scale < -3) {
+		// Scientific: the first digit, '.' plus the rest, then the
+		// exponent (a sign and a minimum of two digits).
+		s.push_back(digits[0]);
+		if (digits.size() > 1) {
+			s.push_back('.');
+			s.append(digits, 1, std::string::npos);
+		}
+		char expBuf[8];
+		std::snprintf(expBuf, sizeof(expBuf), "E%+03d", scale - 1);
+		s += expBuf;
+	} else if (scale > 0) {
+		// Fixed with the point right of `scale` digits: the digits consumed
+		// in order, zero-padded past their end, then '.' plus the tail.
+		for (int i = 0; i < scale; i++) {
+			s.push_back((std::size_t)i < digits.size() ? digits[i] : '0');
+		}
+		if ((std::size_t)scale < digits.size()) {
+			s.push_back('.');
+			s.append(digits, (std::size_t)scale, std::string::npos);
+		}
+	} else {
+		// Fixed below one: '0', '.', the -scale zeros, then the digits.
+		s += "0.";
+		s.append((std::size_t)(-scale), '0');
+		s += digits;
+	}
+	if (negative)
+		s.insert(0, "-");
+	return s;
+}
+
+// The ToString("R", InvariantCulture) rendering (see the header note): the
+// special values spell their symbol names, everything else is the
+// FormatGeneral core. Unlike the IL operand spellings, the plain "R" form
+// is reachable for the special values (the XAML path/point renders hit
+// them): .NET keeps the sign of a negative zero ("-0"), drops NaN's sign
+// bit, and spells the infinities "Infinity"/"-Infinity".
+template <typename T>
+std::string FormatRoundTripImpl(T val) {
+	if (std::isnan(val))
+		return "NaN";
+	if (std::isinf(val))
+		return val < 0 ? "-Infinity" : "Infinity";
+	if (val == 0) {
+		if (std::signbit(val))
+			return "-0";
+		return "0";
+	}
+	return FormatRoundTripCore(val);
+}
+
+// The IL operand writer over the shared core: the WriteOperand zero
+// ("0.0") and infinity/NaN (the ILDasm byte dump) spellings wrap it.
+template <typename T>
 void WriteFloatingOperand(Output::ITextOutput& writer, T val) {
 	if (val == 0) {
 		if (1 / val == -std::numeric_limits<T>::infinity()) {
@@ -409,54 +483,7 @@ void WriteFloatingOperand(Output::ITextOutput& writer, T val) {
 		}
 		writer.Write(')');
 	} else {
-		// Ryu's shortest digits in scientific form: "-1.23456789e+16".
-		char sci[64];
-		auto res = std::to_chars(sci, sci + sizeof(sci), val,
-			std::chars_format::scientific);
-		*res.ptr = '\0';
-		char* e = std::strchr(sci, 'e');
-		// The decimal exponent of the leading digit; the scale counts it as
-		// the digit before the decimal point (the value is 0.<digits> x 10^scale).
-		const int scale = std::atoi(e + 1) + 1;
-
-		const bool negative = (*sci == '-');
-		std::string digits;
-		for (char* p = sci + (negative ? 1 : 0); p != e; p++) {
-			if (*p != '.')
-				digits.push_back(*p);
-		}
-
-		std::string s;
-		if (scale > RoundTripDigitBudget<T>::value || scale < -3) {
-			// Scientific: the first digit, '.' plus the rest, then the
-			// exponent (a sign and a minimum of two digits).
-			s.push_back(digits[0]);
-			if (digits.size() > 1) {
-				s.push_back('.');
-				s.append(digits, 1, std::string::npos);
-			}
-			char expBuf[8];
-			std::snprintf(expBuf, sizeof(expBuf), "E%+03d", scale - 1);
-			s += expBuf;
-		} else if (scale > 0) {
-			// Fixed with the point right of `scale` digits: the digits consumed
-			// in order, zero-padded past their end, then '.' plus the tail.
-			for (int i = 0; i < scale; i++) {
-				s.push_back((std::size_t)i < digits.size() ? digits[i] : '0');
-			}
-			if ((std::size_t)scale < digits.size()) {
-				s.push_back('.');
-				s.append(digits, (std::size_t)scale, std::string::npos);
-			}
-		} else {
-			// Fixed below one: '0', '.', the -scale zeros, then the digits.
-			s += "0.";
-			s.append((std::size_t)(-scale), '0');
-			s += digits;
-		}
-		if (negative)
-			writer.Write('-');
-		writer.Write(s);
+		writer.Write(FormatRoundTripCore(val));
 	}
 }
 
@@ -468,6 +495,16 @@ void WriteOperand(Output::ITextOutput& writer, float val)
 void WriteOperand(Output::ITextOutput& writer, double val)
 {
 	WriteFloatingOperand(writer, val);
+}
+
+std::string FormatRoundTrip(double value)
+{
+	return FormatRoundTripImpl(value);
+}
+
+std::string FormatRoundTrip(float value)
+{
+	return FormatRoundTripImpl(value);
 }
 
 void WriteOperand(Output::ITextOutput& writer, std::string_view operand)

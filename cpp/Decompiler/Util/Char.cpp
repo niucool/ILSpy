@@ -476,6 +476,14 @@ constexpr UnitRange kWhiteSpaceRanges[] = {
     { 0x3000, 0x3000 },
 };
 
+// The char.IsControl units over the BMP: the Unicode category Cc -- the
+// C0 controls 00-1F plus DEL and the C1 controls 7F-9F, probed
+// unit-by-unit (note NEL 85 is a control AND a whitespace unit).
+constexpr UnitRange kControlRanges[] = {
+    { 0x0000, 0x001F },  // 32 units
+    { 0x007F, 0x009F },  // 33 units
+};
+
 
 }  // namespace
 
@@ -489,6 +497,17 @@ bool IsWhiteSpace(char16_t c) {
 
 bool IsHighSurrogate(char16_t c) {
     return c >= 0xD800 && c <= 0xDBFF;
+}
+
+// The char.IsSurrogate units over the BMP: BOTH surrogate halves
+// (high D800-DBFF and low DC00-DFFF), probed unit-by-unit.
+bool IsSurrogate(char16_t c) {
+    return c >= 0xD800 && c <= 0xDFFF;
+}
+
+// The char.IsControl units (see the table note above).
+bool IsControl(char16_t c) {
+    return ContainsRange(kControlRanges, std::size(kControlRanges), c);
 }
 
 }  // namespace ILSpy::Decompiler::Util

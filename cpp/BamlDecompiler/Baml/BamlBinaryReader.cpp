@@ -27,6 +27,7 @@
 
 #include "Decompiler/Util/Utf.hpp"
 
+#include <cstring>
 #include <stdexcept>
 
 namespace ILSpy::BamlDecompiler::Baml {
@@ -65,6 +66,28 @@ std::uint32_t BamlBinaryReader::ReadUInt32() {
 
 bool BamlBinaryReader::ReadBoolean() {
     return ReadByte() != 0;
+}
+
+std::int32_t BamlBinaryReader::ReadInt32() {
+    Need(4);
+    std::int32_t value = static_cast<std::int32_t>(
+        static_cast<std::uint32_t>(data_[position_])
+        | static_cast<std::uint32_t>(data_[position_ + 1]) << 8
+        | static_cast<std::uint32_t>(data_[position_ + 2]) << 16
+        | static_cast<std::uint32_t>(data_[position_ + 3]) << 24);
+    position_ += 4;
+    return value;
+}
+
+double BamlBinaryReader::ReadDouble() {
+    Need(8);
+    std::uint64_t bits = 0;
+    for (std::size_t i = 0; i < 8; i++)
+        bits |= static_cast<std::uint64_t>(data_[position_ + i]) << (8 * i);
+    position_ += 8;
+    double value;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
 }
 
 std::int32_t BamlBinaryReader::ReadEncodedInt() {

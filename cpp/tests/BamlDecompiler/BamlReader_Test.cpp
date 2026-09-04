@@ -48,6 +48,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -116,6 +117,45 @@ TEST(BamlReaderTest, PrimitivesFixedWidthReads) {
     EXPECT_EQ(reader.ReadUInt32(), 0x06050403);
     EXPECT_TRUE(reader.ReadBoolean());
     EXPECT_EQ(reader.Position(), 8);
+}
+
+TEST(BamlReaderTest, PrimitivesInt32AndDouble) {
+    // The ReadInt32/ReadDouble primitives the Xaml layer consumes
+    // (XamlUtils::ReadXamlDouble's scaled int32 and tag-5 double forms).
+    const std::uint8_t bytes[] = {
+        0xB4, 0x00, 0xB2, 0x00,             // int32 0x00B200B4
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x40,  // double 2.5
+        0x01, 0x00, 0x00, 0xFF,             // int32 0xFF000001
+    };
+    Baml::BamlBinaryReader reader(bytes, sizeof(bytes));
+    EXPECT_EQ(reader.ReadInt32(), 0x00B200B4);
+    EXPECT_EQ(reader.ReadDouble(), 2.5);
+    EXPECT_EQ(reader.ReadInt32(), static_cast<std::int32_t>(0xFF000001u));
+    EXPECT_EQ(reader.Position(), 16);
+
+    // The negative-zero and NaN bit patterns survive the round trip.
+    const std::uint8_t zeros[] = {
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF8, 0x7F,
+    };
+    Baml::BamlBinaryReader reader2(zeros, sizeof(zeros));
+    const double negZero = reader2.ReadDouble();
+    EXPECT_EQ(negZero, 0.0);
+    EXPECT_TRUE(std::signbit(negZero));
+    EXPECT_TRUE(std::isnan(reader2.ReadDouble()));
+}
+
+TEST(BamlReaderTest, PrimitivesInt32AndDoubleTruncatedThrow) {
+    const std::uint8_t fiveBytes[] = { 0x01, 0x02, 0x03, 0x04, 0x05 };
+    {
+        Baml::BamlBinaryReader reader(fiveBytes, 5);
+        reader.ReadInt32();
+        EXPECT_THROW(reader.ReadInt32(), std::out_of_range);
+    }
+    {
+        Baml::BamlBinaryReader reader(fiveBytes, 5);
+        EXPECT_THROW(reader.ReadDouble(), std::out_of_range);
+    }
 }
 
 TEST(BamlReaderTest, PrimitivesTruncatedReadsThrow) {

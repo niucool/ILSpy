@@ -27,9 +27,10 @@
 //
 // The range tables are probed unit-by-unit from the .NET 10 runtime
 // (C:\temp-probe\CharProbe\Program.cs dumps every BMP unit whose
-// char.IsLetterOrDigit / char.IsWhiteSpace returns true); no supplementary
-// classification exists because surrogates are neither letters nor
-// whitespace.
+// char.IsLetterOrDigit / char.IsWhiteSpace returns true; the IsControl /
+// IsSurrogate ranges come from the C:\temp-probe\PathProbe\Program.cs P5
+// dump); no supplementary classification exists because surrogates are
+// neither letters nor whitespace.
 //
 // char.IsLetterOrDigit covers the Unicode categories L* (letters) and Nd
 // (decimal digits) -- U+00AA, U+00B5 and U+00BA are letters (OtherLetter),
@@ -52,5 +53,14 @@ bool IsWhiteSpace(char16_t c);
 
 // The UTF-16 high-surrogate units (U+D800..U+DBFF).
 bool IsHighSurrogate(char16_t c);
+
+// The UTF-16 surrogate units, BOTH halves (U+D800..U+DFFF) -- the
+// char.IsSurrogate set (an unpaired half inside a UTF-16 string, which
+// the escape rules render as its \uXXXX form).
+bool IsSurrogate(char16_t c);
+
+// The Unicode control units (category Cc: U+0000..U+001F and U+007F..U+009F)
+// over the BMP -- the char.IsControl set.
+bool IsControl(char16_t c);
 
 }  // namespace ILSpy::Decompiler::Util
