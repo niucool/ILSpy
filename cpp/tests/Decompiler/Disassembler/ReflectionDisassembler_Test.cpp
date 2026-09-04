@@ -2185,3 +2185,384 @@ TEST(ReflectionDisassemblerTest, DisassembleFieldHeaderMscorlibSweep)
     EXPECT_GT(rendered, 400u);
     EXPECT_GT(dataFields, 100u);
 }
+
+// ---------------------------------------------------------------------------
+// The property and event member renderers (ReflectionDisassembler.cs lines
+// 1424-1596) and the accessor reads they compose (the MethodSemantics walk).
+// The exact renders are de-indented from the gold ilspycmd -il output
+// (C:\temp-probe\mscorlib.il / System.dll.il): the property/event headers
+// carry NO flag words on every local fixture -- all .NET Framework 4.8 and
+// .NET 10 CoreLib Property/Event attribute columns are zero (probed over
+// the full tables: mscorlib 5011/33, System.dll 4089/115, CoreLib
+// 5581/32, not a single nonzero row), so the specialname/rtspecialname/
+// hasdefault WriteFlags arms are unobservable on real assemblies and the
+// exact renders pin the zero-flag shapes.
+// ---------------------------------------------------------------------------
+namespace {
+
+std::uint32_t FindPropertyIn(const MD::MetadataFile& f,
+    std::uint32_t typeToken, std::string_view name) {
+    for (const auto& p : f.GetProperties(typeToken)) {
+        if (p.Name == name) return p.Token;
+    }
+    return 0;
+}
+
+std::uint32_t FindEventIn(const MD::MetadataFile& f,
+    std::uint32_t typeToken, std::string_view name) {
+    for (const auto& e : f.GetEvents(typeToken)) {
+        if (e.Name == name) return e.Token;
+    }
+    return 0;
+}
+
+std::string SystemDllPath() {
+#if defined(_WIN32)
+    return "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\System.dll";
+#else
+    return "/usr/lib/mono/4.5/System.dll";
+#endif
+}
+
+}  // namespace
+
+TEST(ReflectionDisassemblerTest, GetPropertyAccessorsBasics) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+
+    // A getter-only indexer: System.String::Chars.
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t chars = FindPropertyIn(f, stringType, "Chars");
+    ASSERT_NE(chars, 0u);
+    auto accessors = f.GetPropertyAccessors(chars);
+    EXPECT_NE(accessors.GetterToken, 0u);
+    EXPECT_EQ(f.GetMethodName(accessors.GetterToken), "get_Chars");
+    EXPECT_EQ(accessors.SetterToken, 0u);
+    EXPECT_TRUE(accessors.OtherTokens.empty());
+    EXPECT_EQ(f.GetMethodDeclaringTypeToken(accessors.GetterToken), stringType);
+
+    // A get+set indexer: System.Array::System.Collections.IList.Item.
+    std::uint32_t arrayType = FindTypeDefTokenIn(f, "System", "Array");
+    ASSERT_NE(arrayType, 0u);
+    std::uint32_t item = FindPropertyIn(f, arrayType,
+        "System.Collections.IList.Item");
+    ASSERT_NE(item, 0u);
+    accessors = f.GetPropertyAccessors(item);
+    EXPECT_NE(accessors.GetterToken, 0u);
+    EXPECT_EQ(f.GetMethodName(accessors.GetterToken),
+        "System.Collections.IList.get_Item");
+    EXPECT_NE(accessors.SetterToken, 0u);
+    EXPECT_EQ(f.GetMethodName(accessors.SetterToken),
+        "System.Collections.IList.set_Item");
+    EXPECT_TRUE(accessors.OtherTokens.empty());
+    EXPECT_EQ(f.GetMethodDeclaringTypeToken(accessors.GetterToken), arrayType);
+
+    // A setter-only property (the GetAny()-falls-to-the-setter shape):
+    // System.IO.StreamWriter::HaveWrittenPreamble.
+    std::uint32_t writerType = FindTypeDefTokenIn(f, "System.IO",
+        "StreamWriter");
+    ASSERT_NE(writerType, 0u);
+    std::uint32_t preamble = FindPropertyIn(f, writerType,
+        "HaveWrittenPreamble");
+    ASSERT_NE(preamble, 0u);
+    accessors = f.GetPropertyAccessors(preamble);
+    EXPECT_EQ(accessors.GetterToken, 0u);
+    EXPECT_NE(accessors.SetterToken, 0u);
+    EXPECT_EQ(f.GetMethodName(accessors.SetterToken),
+        "set_HaveWrittenPreamble");
+    EXPECT_TRUE(accessors.OtherTokens.empty());
+
+    // An invalid token resolves to the all-nil set (never throws).
+    accessors = f.GetPropertyAccessors(0x17FFFFFFu);
+    EXPECT_EQ(accessors.GetterToken, 0u);
+    EXPECT_EQ(accessors.SetterToken, 0u);
+    EXPECT_TRUE(accessors.OtherTokens.empty());
+}
+
+TEST(ReflectionDisassemblerTest, GetEventAccessorsAndEventTypeBasics) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+
+    // An event with a TypeSpec delegate type (a closed generic
+    // instantiation): System.Exception::SerializeObjectState.
+    std::uint32_t exceptionType = FindTypeDefTokenIn(f, "System", "Exception");
+    ASSERT_NE(exceptionType, 0u);
+    std::uint32_t sos = FindEventIn(f, exceptionType, "SerializeObjectState");
+    ASSERT_NE(sos, 0u);
+    auto accessors = f.GetEventAccessors(sos);
+    EXPECT_NE(accessors.AdderToken, 0u);
+    EXPECT_EQ(f.GetMethodName(accessors.AdderToken),
+        "add_SerializeObjectState");
+    EXPECT_NE(accessors.RemoverToken, 0u);
+    EXPECT_EQ(f.GetMethodName(accessors.RemoverToken),
+        "remove_SerializeObjectState");
+    EXPECT_EQ(accessors.RaiserToken, 0u);
+    EXPECT_TRUE(accessors.OtherTokens.empty());
+    std::uint32_t eventType = f.GetEventTypeToken(sos);
+    EXPECT_EQ(eventType >> 24, 0x1Bu);  // TypeSpec
+    auto blob = f.GetTypeSpecSignatureBlob(eventType);
+    ASSERT_TRUE(blob.has_value());
+    ASSERT_FALSE(blob->empty());
+    EXPECT_EQ((*blob)[0], 0x15u);  // GENERICINST | CLASS
+
+    // An event with a same-assembly TypeDef delegate type:
+    // System.AppDomain::AssemblyLoad.
+    std::uint32_t appDomain = FindTypeDefTokenIn(f, "System", "AppDomain");
+    ASSERT_NE(appDomain, 0u);
+    std::uint32_t assemblyLoad = FindEventIn(f, appDomain, "AssemblyLoad");
+    ASSERT_NE(assemblyLoad, 0u);
+    accessors = f.GetEventAccessors(assemblyLoad);
+    EXPECT_EQ(f.GetMethodName(accessors.AdderToken), "add_AssemblyLoad");
+    EXPECT_EQ(f.GetMethodName(accessors.RemoverToken), "remove_AssemblyLoad");
+    EXPECT_EQ(accessors.RaiserToken, 0u);
+    EXPECT_EQ(f.GetEventTypeToken(assemblyLoad) >> 24, 0x02u);  // TypeDef
+
+    // An invalid token: all-nil accessors, nil type (never throws).
+    accessors = f.GetEventAccessors(0x14FFFFFFu);
+    EXPECT_EQ(accessors.AdderToken, 0u);
+    EXPECT_EQ(f.GetEventTypeToken(0x14FFFFFFu), 0u);
+}
+
+TEST(ReflectionDisassemblerTest, DisassemblePropertyHeaderShapes) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    std::uint32_t arrayType = FindTypeDefTokenIn(f, "System", "Array");
+    std::uint32_t segmentType = FindTypeDefTokenIn(f, "System",
+        "ArraySegment`1");
+    std::uint32_t writerType = FindTypeDefTokenIn(f, "System.IO",
+        "StreamWriter");
+    ASSERT_NE(stringType, 0u);
+    ASSERT_NE(arrayType, 0u);
+    ASSERT_NE(segmentType, 0u);
+    ASSERT_NE(writerType, 0u);
+
+    // A no-parameter property: ".property instance int32 Length()".
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassemblePropertyHeader(f,
+            FindPropertyIn(f, arrayType, "Length"));
+    }),
+        ".property instance int32 Length()");
+
+    // An indexer with a named parameter: the param block is Indent-wrapped
+    // WriteParameters lines between the '(' and the ')'.
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassemblePropertyHeader(f, FindPropertyIn(f, stringType,
+            "Chars"));
+    }),
+        ".property instance char Chars(\r\n"
+        "\tint32 index\r\n"
+        ")");
+
+    // A generic indexer: the !T context scopes to the declaring
+    // ArraySegment`1, and the dotted name keeps the quoted escape.
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassemblePropertyHeader(f, FindPropertyIn(f, segmentType,
+            "System.Collections.Generic.IList<T>.Item"));
+    }),
+        ".property instance !T 'System.Collections.Generic.IList<T>.Item'(\r\n"
+        "\tint32 index\r\n"
+        ")");
+
+    // A get+set indexer (System.Array::IList.Item): with a getter the C#
+    // takes the full Param row list.
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassemblePropertyHeader(f, FindPropertyIn(f, arrayType,
+            "System.Collections.IList.Item"));
+    }),
+        ".property instance object System.Collections.IList.Item(\r\n"
+        "\tint32 index\r\n"
+        ")");
+
+    // A setter-only property: no "instance" (static accessors) and the
+    // set_HaveWrittenPreamble shape.
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassemblePropertyHeader(f, FindPropertyIn(f, writerType,
+            "HaveWrittenPreamble"));
+    }),
+        ".property instance bool HaveWrittenPreamble()");
+
+    // The ShowMetadataTokens comment between the ".property" and the flags.
+    std::uint32_t chars = FindPropertyIn(f, stringType, "Chars");
+    ASSERT_NE(chars, 0u);
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.ShowMetadataTokens(true);
+        rd.DisassemblePropertyHeader(f, chars);
+    }),
+        ".property /* " + Hex8(chars) + " */ instance char Chars(\r\n"
+        "\tint32 index\r\n"
+        ")");
+}
+
+TEST(ReflectionDisassemblerTest, DisassemblePropertyFullRender) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+
+    // The gold -il render of System.String::Chars, de-indented: the header,
+    // the uncollapsed attribute block with the .custom line, and the .get
+    // accessor line through EntityHandle.WriteTo.
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleProperty(f, FindPropertyIn(f, stringType, "Chars"));
+    }),
+        ".property instance char Chars(\r\n"
+        "\tint32 index\r\n"
+        ")\r\n"
+        "{\r\n"
+        "\t.custom instance void __DynamicallyInvokableAttribute::.ctor() = (\r\n"
+        "\t\t01 00 00 00\r\n"
+        "\t)\r\n"
+        "\t.get instance char System.String::get_Chars(int32)\r\n"
+        "}\r\n");
+
+    // The setter-only shape: no attribute lines, the .set line only.
+    std::uint32_t writerType = FindTypeDefTokenIn(f, "System.IO",
+        "StreamWriter");
+    ASSERT_NE(writerType, 0u);
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleProperty(f, FindPropertyIn(f, writerType,
+            "HaveWrittenPreamble"));
+    }),
+        ".property instance bool HaveWrittenPreamble()\r\n"
+        "{\r\n"
+        "\t.set instance void System.IO.StreamWriter::set_HaveWrittenPreamble(bool)\r\n"
+        "}\r\n");
+
+    // A get+set indexer: the .get and .set lines in that order.
+    std::uint32_t arrayType = FindTypeDefTokenIn(f, "System", "Array");
+    ASSERT_NE(arrayType, 0u);
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleProperty(f, FindPropertyIn(f, arrayType,
+            "System.Collections.IList.Item"));
+    }),
+        ".property instance object System.Collections.IList.Item(\r\n"
+        "\tint32 index\r\n"
+        ")\r\n"
+        "{\r\n"
+        "\t.custom instance void __DynamicallyInvokableAttribute::.ctor() = (\r\n"
+        "\t\t01 00 00 00\r\n"
+        "\t)\r\n"
+        "\t.get instance object System.Array::System.Collections.IList.get_Item(int32)\r\n"
+        "\t.set instance void System.Array::System.Collections.IList.set_Item(int32, object)\r\n"
+        "}\r\n");
+}
+
+TEST(ReflectionDisassemblerTest, DisassembleEventShapes) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+
+    // The TypeSpec arm: the delegate type decoded from the signature blob
+    // (the closed generic instantiation) at the declaring type's context.
+    std::uint32_t exceptionType = FindTypeDefTokenIn(f, "System", "Exception");
+    ASSERT_NE(exceptionType, 0u);
+    std::uint32_t sos = FindEventIn(f, exceptionType, "SerializeObjectState");
+    ASSERT_NE(sos, 0u);
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleEventHeader(f, sos);
+    }),
+        ".event class System.EventHandler`1<class System.Runtime.Serialization."
+        "SafeSerializationEventArgs> SerializeObjectState");
+
+    // The TypeDef arm (the same-assembly delegate type renders unprefixed)
+    // and the full block with the .addon/.removeon lines.
+    std::uint32_t appDomain = FindTypeDefTokenIn(f, "System", "AppDomain");
+    ASSERT_NE(appDomain, 0u);
+    std::uint32_t assemblyLoad = FindEventIn(f, appDomain, "AssemblyLoad");
+    ASSERT_NE(assemblyLoad, 0u);
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleEventHeader(f, assemblyLoad);
+    }),
+        ".event System.AssemblyLoadEventHandler AssemblyLoad");
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleEvent(f, assemblyLoad);
+    }),
+        ".event System.AssemblyLoadEventHandler AssemblyLoad\r\n"
+        "{\r\n"
+        "\t.addon instance void System.AppDomain::add_AssemblyLoad(class System.AssemblyLoadEventHandler)\r\n"
+        "\t.removeon instance void System.AppDomain::remove_AssemblyLoad(class System.AssemblyLoadEventHandler)\r\n"
+        "}\r\n");
+
+    // The ShowMetadataTokens comment between the ".event" and the type.
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.ShowMetadataTokens(true);
+        rd.DisassembleEventHeader(f, assemblyLoad);
+    }),
+        ".event /* " + Hex8(assemblyLoad) + " */ System.AssemblyLoadEventHandler AssemblyLoad");
+
+    // The TypeRef arm (System.dll): the delegate type from another assembly
+    // keeps the "[mscorlib]" scope prefix; PowerModeChanged is the
+    // same-assembly TypeDef shape with static accessors.
+    MD::MetadataFile sys(SystemDllPath());
+    ASSERT_TRUE(sys.IsValid());
+    std::uint32_t systemEvents = FindTypeDefTokenIn(sys, "Microsoft.Win32",
+        "SystemEvents");
+    ASSERT_NE(systemEvents, 0u);
+    std::uint32_t palette = FindEventIn(sys, systemEvents, "PaletteChanged");
+    ASSERT_NE(palette, 0u);
+    std::uint32_t powerMode = FindEventIn(sys, systemEvents,
+        "PowerModeChanged");
+    ASSERT_NE(powerMode, 0u);
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleEventHeader(sys, palette);
+    }),
+        ".event [mscorlib]System.EventHandler PaletteChanged");
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleEvent(sys, powerMode);
+    }),
+        ".event Microsoft.Win32.PowerModeChangedEventHandler PowerModeChanged\r\n"
+        "{\r\n"
+        "\t.addon void Microsoft.Win32.SystemEvents::add_PowerModeChanged(class Microsoft.Win32.PowerModeChangedEventHandler)\r\n"
+        "\t.removeon void Microsoft.Win32.SystemEvents::remove_PowerModeChanged(class Microsoft.Win32.PowerModeChangedEventHandler)\r\n"
+        "}\r\n");
+}
+
+TEST(ReflectionDisassemblerTest, PropertyEventRenderSweep) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+
+    // Every property and event of a spread of mscorlib types renders
+    // without throwing and starts with the ".property"/".event" prefix;
+    // the accessor lines cover the shapes the gold -il output carries.
+    std::vector<std::uint32_t> types;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Name == "String" || t.Name == "Array" || t.Name == "AppDomain"
+            || t.Name == "Exception" || t.Name == "ArraySegment`1"
+            || t.Name == "StreamWriter" || t.Name == "Timer")
+            types.push_back(t.Token);
+    }
+    EXPECT_GT(types.size(), 5u);
+
+    int properties = 0;
+    int indexerProperties = 0;
+    int events = 0;
+    for (std::uint32_t typeToken : types) {
+        for (const auto& p : f.GetProperties(typeToken)) {
+            std::ostringstream stream;
+            OUT::PlainTextOutput output(stream);
+            DA::ReflectionDisassembler rd(output);
+            rd.DisassembleProperty(f, p.Token);
+            std::string text = stream.str();
+            EXPECT_NE(text.find(".property "), std::string::npos) << p.Name;
+            EXPECT_NE(text.find("\r\n{\r\n"), std::string::npos) << p.Name;
+            // An indexer: the header's '(' opens a line-broken parameter
+            // block (the \r\n\t param line), unlike the empty "()".
+            if (text.find("(\r\n\t") != std::string::npos)
+                ++indexerProperties;
+            ++properties;
+        }
+        for (const auto& e : f.GetEvents(typeToken)) {
+            std::ostringstream stream;
+            OUT::PlainTextOutput output(stream);
+            DA::ReflectionDisassembler rd(output);
+            rd.DisassembleEvent(f, e.Token);
+            std::string text = stream.str();
+            EXPECT_NE(text.find(".event "), std::string::npos) << e.Name;
+            ++events;
+        }
+    }
+    EXPECT_GT(properties, 40u);
+    EXPECT_GT(indexerProperties, 3u);
+    EXPECT_GT(events, 8u);
+}

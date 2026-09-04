@@ -302,6 +302,24 @@ enum class GenericParameterAttributes : std::int32_t {
 };
 
 // ---------------------------------------------------------------------------
+// MethodSemanticsAttributes (ECMA-335 II.23.1 "Flags for Methods").
+// The MethodSemantics row's MethodSemantics column (the System.Reflection
+// enum over the raw bits). The SRM PropertyDefinition/EventDefinition
+// GetAccessors() implementations switch on the EXACT value (an exact match,
+// not a bit test -- a row carrying combined flags matches no arm and is
+// ignored); the accessors reads (MetadataFile::GetPropertyAccessors /
+// GetEventAccessors) mirror that switch.
+// ---------------------------------------------------------------------------
+enum class MethodSemanticsAttributes : std::int32_t {
+	Setter = 0x0001,   // a property's .set
+	Getter = 0x0002,   // a property's .get
+	Other = 0x0004,     // a property's .other / an event's .other
+	AddOn = 0x0008,    // an event's .addon
+	RemoveOn = 0x0010, // an event's .removeon
+	Fire = 0x0020,     // an event's .fire
+};
+
+// ---------------------------------------------------------------------------
 // MethodImportAttributes (ECMA-335 II.23.1.11 "Flags for ImplMap
 // [PInvokeImpl]"). The ImplMap row's MappingFlags column -- again the
 // System.Reflection enum over the raw bits (MethodImportAttributes: ExactWord

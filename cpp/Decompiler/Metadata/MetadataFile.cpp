@@ -641,6 +641,8 @@ std::optional<std::vector<std::uint8_t>> MetadataFile::GetSignatureBlob(
             blobColumn = impl_->db->Field.get_value<std::uint32_t>(row - 1, 2);
         } else if (table == 0x0A && row <= impl_->db->MemberRef.size()) {
             blobColumn = impl_->db->MemberRef.get_value<std::uint32_t>(row - 1, 2);
+        } else if (table == 0x17 && row <= impl_->db->Property.size()) {
+            blobColumn = impl_->db->Property.get_value<std::uint32_t>(row - 1, 2);
         } else {
             return std::nullopt;
         }
@@ -1176,6 +1178,136 @@ MetadataFile::GetDeclarativeSecurityAttributes(std::uint32_t parentToken) const 
         // Best-effort: a malformed table walk degrades to the partial result.
     }
     return result;
+}
+
+// The MethodSemantics rows (table 0x18) whose Association is the
+// property/event -- the C# PropertyDefinition.GetAccessors() walk. The
+// Association column is a HasSemantics coded index (1 tag bit: 0=Event,
+// 1=Property); the MethodSemantics column (the ECMA II.23.1
+// MethodSemanticsAttributes bits: Setter 0x1, Getter 0x2, Other 0x4,
+// AddOn 0x8, RemoveOn 0x10, Fire 0x20 -- see ReflectionAttributes.hpp) is
+// an EXACT value match in the SRM switch (a row carrying combined flags
+// matches no arm and is ignored); the LAST matching row wins the
+// getter/setter slots (the C# switch assignment, no first-wins guard);
+// the Others keep the row order. See the header for the full contract.
+MetadataFile::PropertyAccessorsInfo MetadataFile::GetPropertyAccessors(
+    std::uint32_t propertyToken) const
+{
+    PropertyAccessorsInfo result;
+    if (!IsValid()) return result;
+    std::uint32_t table = propertyToken >> 24;
+    std::uint32_t row = propertyToken & 0x00FFFFFFu;
+    if (table != 0x17 || row == 0) return result;
+    try {
+        std::uint32_t count =
+            static_cast<std::uint32_t>(impl_->db->MethodSemantics.size());
+        for (std::uint32_t i = 0; i < count; i++) {
+            std::uint32_t association =
+                impl_->db->MethodSemantics.get_value<std::uint32_t>(i, 2);
+            if ((association & 0x1u) != 1u || (association >> 1) != row)
+                continue;
+            std::uint32_t methodRow =
+                impl_->db->MethodSemantics.get_value<std::uint32_t>(i, 1);
+            if (methodRow == 0) continue;
+            std::uint32_t semantics =
+                impl_->db->MethodSemantics.get_value<std::uint32_t>(i, 0);
+            std::uint32_t methodToken =
+                (0x06u << 24) | (methodRow & 0x00FFFFFFu);
+            switch (semantics) {
+                case 0x2:  // MethodSemanticsAttributes::Getter
+                    result.GetterToken = methodToken;
+                    break;
+                case 0x1:  // MethodSemanticsAttributes::Setter
+                    result.SetterToken = methodToken;
+                    break;
+                case 0x4:  // MethodSemanticsAttributes::Other
+                    result.OtherTokens.push_back(methodToken);
+                    break;
+                default:
+                    break;
+            }
+        }
+    } catch (const std::exception&) {
+        // Best-effort: a malformed table walk degrades to the partial result.
+    }
+    return result;
+}
+
+// The event twin of GetPropertyAccessors -- the C#
+// EventDefinition.GetAccessors() (the AddOn/RemoveOn/Fire/Other arms of the
+// same exact-value switch). See the header for the full contract.
+MetadataFile::EventAccessorsInfo MetadataFile::GetEventAccessors(
+    std::uint32_t eventToken) const
+{
+    EventAccessorsInfo result;
+    if (!IsValid()) return result;
+    std::uint32_t table = eventToken >> 24;
+    std::uint32_t row = eventToken & 0x00FFFFFFu;
+    if (table != 0x14 || row == 0) return result;
+    try {
+        std::uint32_t count =
+            static_cast<std::uint32_t>(impl_->db->MethodSemantics.size());
+        for (std::uint32_t i = 0; i < count; i++) {
+            std::uint32_t association =
+                impl_->db->MethodSemantics.get_value<std::uint32_t>(i, 2);
+            if ((association & 0x1u) != 0u || (association >> 1) != row)
+                continue;
+            std::uint32_t methodRow =
+                impl_->db->MethodSemantics.get_value<std::uint32_t>(i, 1);
+            if (methodRow == 0) continue;
+            std::uint32_t semantics =
+                impl_->db->MethodSemantics.get_value<std::uint32_t>(i, 0);
+            std::uint32_t methodToken =
+                (0x06u << 24) | (methodRow & 0x00FFFFFFu);
+            switch (semantics) {
+                case 0x8:  // MethodSemanticsAttributes::AddOn
+                    result.AdderToken = methodToken;
+                    break;
+                case 0x10:  // MethodSemanticsAttributes::RemoveOn
+                    result.RemoverToken = methodToken;
+                    break;
+                case 0x20:  // MethodSemanticsAttributes::Fire
+                    result.RaiserToken = methodToken;
+                    break;
+                case 0x4:  // MethodSemanticsAttributes::Other
+                    result.OtherTokens.push_back(methodToken);
+                    break;
+                default:
+                    break;
+            }
+        }
+    } catch (const std::exception&) {
+        // Best-effort: a malformed table walk degrades to the partial result.
+    }
+    return result;
+}
+
+// An Event row's EventType column (the TypeDefOrRef coded index). See the
+// header for the full contract.
+std::uint32_t MetadataFile::GetEventTypeToken(
+    std::uint32_t eventToken) const
+{
+    if (!IsValid()) return 0;
+    std::uint32_t table = eventToken >> 24;
+    std::uint32_t row = eventToken & 0x00FFFFFFu;
+    if (table != 0x14 || row == 0 || row > impl_->db->Event.size()) return 0;
+    try {
+        std::uint32_t v = impl_->db->Event.get_value<std::uint32_t>(row - 1, 2);
+        if (v == 0) return 0;
+        std::uint32_t rid = v >> 2;
+        if (rid == 0) return 0;
+        switch (v & 0x3u) {
+            case 0:  // TypeDef
+                return (0x02u << 24) | rid;
+            case 1:  // TypeRef
+                return (0x01u << 24) | rid;
+            case 2:  // TypeSpec
+                return (0x1Bu << 24) | rid;
+        }
+        return 0;
+    } catch (const std::exception&) {
+        return 0;
+    }
 }
 
 // The whole-table enumerations. See the header for the full contract.

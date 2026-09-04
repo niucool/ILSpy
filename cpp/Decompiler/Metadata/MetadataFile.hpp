@@ -426,11 +426,14 @@ public:
     std::optional<std::vector<std::uint8_t>> GetTypeSpecSignatureBlob(
         std::uint32_t typeSpecToken) const;
 
-    // A MethodDef (0x06, Signature column), Field (0x04, Signature column), or
-    // MemberRef (0x0A, Signature column) row's raw signature-blob bytes -- the
+    // A MethodDef (column 4), Field (column 2), MemberRef (column 2), or
+    // Property (column 2) row's raw signature-blob bytes -- the
     // provider-driven decode entries the IL InstructionOutputExtensions'
-    // member arms drive (the C# fd.DecodeSignature / md.DecodeSignature /
-    // mr.DecodeMethodSignature / mr.DecodeFieldSignature family). The blob is
+    // member arms and the property header drive (the C# fd.DecodeSignature /
+    // md.DecodeSignature / mr.DecodeMethodSignature / mr.DecodeFieldSignature /
+    // pd.DecodeSignature family; a property decodes as a METHOD signature
+    // over its 0x08-header blob -- the SRM PropertyDefinition.DecodeSignature
+    // calls DecodeMethodSignature). The blob is
     // returned raw (header byte included); the caller owns the kind checks.
     // Returns nullopt for an invalid file, an out-of-range row, a nil row, or
     // an unsupported token table; never throws.
@@ -626,6 +629,41 @@ public:
     };
     std::vector<DeclarativeSecurityInfo> GetDeclarativeSecurityAttributes(
         std::uint32_t parentToken) const;
+
+    // A property's accessor set -- the C# PropertyDefinition.GetAccessors()
+    // (the SRM PropertyAccessors struct): the MethodSemantics rows whose
+    // Association is the property. The MethodSemantics column is an EXACT
+    // value match in the SRM switch (Getter 0x2 / Setter 0x1 / Other 0x4 --
+    // not a bit test; any other value, including combined flags, is
+    // ignored), and the LAST matching row wins the getter/setter slots (the
+    // C# switch assignment). The Others keep the row order. Nil handles are
+    // 0; the accessors of an invalid token are all-nil; never throws.
+    struct PropertyAccessorsInfo {
+        std::uint32_t GetterToken = 0;   // 0x06000000 | row; 0 = nil
+        std::uint32_t SetterToken = 0;   // 0x06000000 | row; 0 = nil
+        std::vector<std::uint32_t> OtherTokens;  // 0x06 tokens, row order
+    };
+    PropertyAccessorsInfo GetPropertyAccessors(
+        std::uint32_t propertyToken) const;
+
+    // An event's accessor set -- the C# EventDefinition.GetAccessors() (the
+    // SRM EventAccessors struct): the MethodSemantics rows whose Association
+    // is the event, with the same exact-value switch (AddOn 0x8 / RemoveOn
+    // 0x10 / Fire 0x20 / Other 0x4) and last-row-wins rule. Never throws.
+    struct EventAccessorsInfo {
+        std::uint32_t AdderToken = 0;    // AddOn; 0x06000000 | row; 0 = nil
+        std::uint32_t RemoverToken = 0;  // RemoveOn; 0 = nil
+        std::uint32_t RaiserToken = 0;   // Fire; 0 = nil
+        std::vector<std::uint32_t> OtherTokens;  // 0x06 tokens, row order
+    };
+    EventAccessorsInfo GetEventAccessors(std::uint32_t eventToken) const;
+
+    // An Event row's EventType column (the TypeDefOrRef coded index, 2-bit
+    // tag: 0=TypeDef 0x02, 1=TypeRef 0x01, 2=TypeSpec 0x1B) -- the C#
+    // `eventDefinition.Type` the event header renders through the signature
+    // provider. 0 for an invalid file, an out-of-range row, a nil row, or a
+    // non-Event token; never throws.
+    std::uint32_t GetEventTypeToken(std::uint32_t eventToken) const;
 
     // Whole-table enumerations for the disassembler paths and the tests:
     // every MemberRef row, every MethodSpec row, and every StandaloneSig row's

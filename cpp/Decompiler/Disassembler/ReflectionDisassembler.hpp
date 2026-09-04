@@ -23,10 +23,12 @@
 // parameter renderers the field/method headers embed (WriteConstant,
 // WriteParameters), the attribute renderers every member header embeds
 // (WriteAttributes with the generic-parameter/parameter attribute blocks),
-// and the method member renderer (DisassembleMethod with the header, the
-// body block, the security declarations, and the generic-parameter list);
-// the remaining member renderers (DisassembleField/Property/Event/Type, the
-// module headers) land with their metadata reads in later slices.
+// and the member renderers (DisassembleMethod with the header, the body
+// block, the security declarations, and the generic-parameter list;
+// DisassembleField with the data-block arm; DisassembleProperty and
+// DisassembleEvent with the accessor lines); the remaining pieces
+// (DisassembleType/Namespace, the module/assembly headers) land with their
+// metadata reads in later slices.
 //
 // C#-to-C++ porting decisions:
 //  * The C# field pair `output`/`cancellationToken`/`isInType`/
@@ -364,6 +366,81 @@ public:
     // an RVA in no section).
     char GetRVASectionPrefix(const Metadata::MetadataFile& module,
         std::uint32_t rva);
+
+    // The C# `public void DisassembleProperty(MetadataFile module,
+    // PropertyDefinitionHandle property)` (ReflectionDisassembler.cs lines
+    // 1424-1439): the ".property" header, then the attribute/`.get`/`.set`/
+    // `.other` block (an uncollapsed OpenBlock(false) -- hard-coded false,
+    // NOT isInType) with the accessor lines rendered through
+    // EntityHandle.WriteTo. The handle ports as the raw Property token
+    // (table 0x17).
+    void DisassembleProperty(Metadata::MetadataFile& module,
+        std::uint32_t propertyToken);
+
+    // The C# `public void DisassemblePropertyHeader(MetadataFile module,
+    // PropertyDefinitionHandle property)` (lines 1441-1446): the header
+    // only, no block. The render ends mid-line after the ')'.
+    void DisassemblePropertyHeader(Metadata::MetadataFile& module,
+        std::uint32_t propertyToken);
+
+    // The C# `private PropertyAccessors
+    // DisassemblePropertyHeaderInternal(MetadataFile module,
+    // PropertyDefinitionHandle handle, ...)` (lines 1448-1479): the
+    // ".property" reference + token comment, the whole-value WriteFlags over
+    // the PropertyAttributes column, the property type decoded as a METHOD
+    // signature (the 0x08-header blob through DecodeMethodSignature -- the
+    // SRM PropertyDefinition.DecodeSignature) at the declaring type's
+    // generic context (the GetAny() accessor's declaring type -- the getter,
+    // else the setter, per the ILSpy SRMExtensions), the escaped name, and
+    // the indexer parameter block: the accessor's own Param rows sliced to
+    // `count` (`count - 1` when there is no getter -- the setter's trailing
+    // value parameter drops) through the Indent/Unindent-wrapped
+    // WriteParameters. A malformed signature blob throws (the property
+    // header has NO catch -- the C# BadImageFormatException escapes to the
+    // caller, like the field header); a negative slice throws
+    // std::out_of_range (the C# Enumerable.Take ArgumentOutOfRangeException).
+    // Returns the accessor set the block renders.
+    Metadata::MetadataFile::PropertyAccessorsInfo
+    DisassemblePropertyHeaderInternal(Metadata::MetadataFile& module,
+        std::uint32_t propertyToken);
+
+    // The C# `void WriteNestedMethod(string keyword, MetadataFile module,
+    // MethodDefinitionHandle method)` (lines 1479-1488): the `.get`/`.set`/
+    // `.other`/`.addon`/`.removeon`/`.fire` accessor line -- the keyword, a
+    // space, the method rendered through EntityHandle.WriteTo at the
+    // DEFAULT generic context, and the line break. A nil method writes
+    // nothing at all (the C# IsNil early-out).
+    void WriteNestedMethod(const char* keyword, Metadata::MetadataFile& module,
+        std::uint32_t methodToken);
+
+    // The C# `public void DisassembleEvent(MetadataFile module,
+    // EventDefinitionHandle handle)` (ReflectionDisassembler.cs lines
+    // 1497-1512): the ".event" header, then the attribute/`.addon`/
+    // `.removeon`/`.fire`/`.other` block. The handle ports as the raw Event
+    // token (table 0x14).
+    void DisassembleEvent(Metadata::MetadataFile& module,
+        std::uint32_t eventToken);
+
+    // The C# `public void DisassembleEventHeader(MetadataFile module,
+    // EventDefinitionHandle handle)` (lines 1514-1519): the header only.
+    void DisassembleEventHeader(Metadata::MetadataFile& module,
+        std::uint32_t eventToken);
+
+    // The C# `private void DisassembleEventHeaderInternal(MetadataFile
+    // module, EventDefinitionHandle handle, EventDefinition eventDefinition,
+    // EventAccessors accessors)` (lines 1521-1562): the ".event" reference +
+    // token comment, the whole-value WriteFlags over the EventAttributes
+    // column, then the event's delegate type rendered directly through the
+    // signature provider (the TypeDef/TypeRef/TypeSpec arms of the
+    // `eventDefinition.Type` switch -- the TypeSpec arm at the declaring
+    // type's generic context; anything else is the C#
+    // BadImageFormatException, ports to std::out_of_range) at TypeName
+    // syntax, and the escaped name. The declaring type comes from the
+    // adder, else the remover, else the raiser (the C# GetAny order -- it
+    // only feeds the TypeSpec context).
+    void DisassembleEventHeaderInternal(Metadata::MetadataFile& module,
+        std::uint32_t eventToken,
+        const Metadata::MetadataFile::EventAccessorsInfo& accessors);
 
 private:
     Output::ITextOutput& output_;

@@ -31,6 +31,7 @@
 #include "Decompiler/Output/ITextOutput.hpp"
 #include "Decompiler/Util/Utf.hpp"
 
+#include <algorithm>
 #include <any>
 #include <cmath>
 #include <cstdint>
@@ -1675,6 +1676,225 @@ char ReflectionDisassembler::GetRVASectionPrefix(
     if (name == ".text")
         return 'I';
     return 'D';
+}
+
+// ---------------------------------------------------------------------------
+// The property member renderer (ReflectionDisassembler.cs lines
+// 1424-1488).
+// ---------------------------------------------------------------------------
+
+// The C# `public void DisassembleProperty(MetadataFile module,
+// PropertyDefinitionHandle property)`. See the header for the porting
+// decisions.
+void ReflectionDisassembler::DisassembleProperty(
+    Metadata::MetadataFile& module, std::uint32_t propertyToken)
+{
+    auto accessors = DisassemblePropertyHeaderInternal(module, propertyToken);
+
+    // The C# `OpenBlock(false)` -- hard-coded false (a property block never
+    // collapses, unlike a method's isInType folding).
+    OpenBlock(/*defaultCollapsed=*/false);
+    WriteAttributes(module, module.GetCustomAttributeTokens(propertyToken));
+    WriteNestedMethod(".get", module, accessors.GetterToken);
+    WriteNestedMethod(".set", module, accessors.SetterToken);
+    for (std::uint32_t method : accessors.OtherTokens) {
+        WriteNestedMethod(".other", module, method);
+    }
+    CloseBlock();
+}
+
+// The C# `public void DisassemblePropertyHeader(MetadataFile module,
+// PropertyDefinitionHandle property)`.
+void ReflectionDisassembler::DisassemblePropertyHeader(
+    Metadata::MetadataFile& module, std::uint32_t propertyToken)
+{
+    DisassemblePropertyHeaderInternal(module, propertyToken);
+}
+
+// The C# `private PropertyAccessors DisassemblePropertyHeaderInternal(...)`.
+// See the header for the porting decisions.
+Metadata::MetadataFile::PropertyAccessorsInfo
+ReflectionDisassembler::DisassemblePropertyHeaderInternal(
+    Metadata::MetadataFile& module, std::uint32_t propertyToken)
+{
+    output_.WriteReference(module, propertyToken, ".property", "decompile",
+        /*isDefinition=*/true);
+    WriteMetadataToken(output_, module, propertyToken, propertyToken,
+        /*spaceAfter=*/true, /*spaceBefore=*/true, ShowMetadataTokens(),
+        ShowMetadataTokensInBase10());
+    std::uint32_t attributes = module.GetPropertyAttributes(propertyToken);
+    WriteFlags(static_cast<PropertyAttributes>(attributes),
+        propertyAttributes, output_);
+
+    auto accessors = module.GetPropertyAccessors(propertyToken);
+    // The C# `accessors.GetAny()` (the ILSpy SRMExtensions): the getter,
+    // else the setter. A property with neither (all-nil accessors) resolves
+    // its declaring type through the nil row -- the port's graceful 0 (the
+    // C# GetMethodDefinition(nil) walks the nil row and yields the nil
+    // declaring type, not an exception).
+    std::uint32_t anyToken = accessors.GetterToken != 0
+        ? accessors.GetterToken
+        : accessors.SetterToken;
+    std::uint32_t declaringTypeToken =
+        module.GetMethodDeclaringTypeToken(anyToken);
+
+    // The C# `propertyDefinition.DecodeSignature(new
+    // DisassemblerSignatureTypeProvider(module, output), new
+    // MetadataGenericContext(declaringType, module))`: the property blob
+    // decodes as a METHOD signature over its 0x08/0x28 header (the SRM
+    // PropertyDefinition.DecodeSignature calls DecodeMethodSignature -- no
+    // kind check), with the VAR context scoped to the declaring TypeDef.
+    // The provider is a local and the deferred type writers run entirely
+    // within this scope (the provider-outlives-writers contract). A
+    // malformed blob throws (the property header has no catch -- the C#
+    // BadImageFormatException escapes to the caller).
+    auto blob = module.GetSignatureBlob(propertyToken);
+    if (!blob.has_value())
+        throw std::logic_error("missing property signature blob");
+    DisassemblerSignatureTypeProvider provider(module, output_);
+    Metadata::SignatureTypeProviderDecoder decoder(provider, module);
+    auto signature = decoder.DecodeMethodSignature(blob->data(), blob->size(),
+        Metadata::MetadataGenericContext::ForType(declaringTypeToken, module));
+
+    if (signature.Header.IsInstance())
+        output_.Write("instance ");
+    signature.ReturnType(ILNameSyntax::Signature);
+    output_.Write(' ');
+    output_.Write(Escape(module.GetPropertyName(propertyToken)));
+
+    output_.Write('(');
+    if (!signature.ParameterTypes.empty()) {
+        // The C# accessor's Param rows sliced to `parametersCount`
+        // (`count - 1` when there is no getter -- the setter's trailing
+        // value parameter drops); Take(count) clamps above the row count
+        // and throws below zero (the port's std::out_of_range for the C#
+        // Enumerable.Take ArgumentOutOfRangeException).
+        auto parameters = module.GetParameters(anyToken);
+        int parametersCount = accessors.GetterToken == 0
+            ? static_cast<int>(parameters.size()) - 1
+            : static_cast<int>(parameters.size());
+        if (parametersCount < 0)
+            throw std::out_of_range("parameter count");
+        auto takeEnd = parameters.begin()
+            + std::min<std::size_t>(parametersCount, parameters.size());
+        std::vector<Metadata::ParameterInfo> sliced(parameters.begin(),
+            takeEnd);
+
+        output_.WriteLine();
+        output_.Indent();
+        WriteParameters(sliced, signature);
+        output_.Unindent();
+    }
+    output_.Write(')');
+    return accessors;
+}
+
+// The C# `void WriteNestedMethod(string keyword, MetadataFile module,
+// MethodDefinitionHandle method)`. See the header for the porting
+// decisions.
+void ReflectionDisassembler::WriteNestedMethod(const char* keyword,
+    Metadata::MetadataFile& module, std::uint32_t methodToken)
+{
+    // The C# `if (method.IsNil) return;` -- nothing at all renders.
+    if (methodToken == 0)
+        return;
+    output_.Write(keyword);
+    output_.Write(' ');
+    // The C# `((EntityHandle)method).WriteTo(module, output, default)` --
+    // the default generic context and the default Signature syntax.
+    IL::WriteTo(module, output_, Metadata::MetadataGenericContext::Nil(),
+        methodToken);
+    output_.WriteLine();
+}
+
+// ---------------------------------------------------------------------------
+// The event member renderer (ReflectionDisassembler.cs lines
+// 1497-1562).
+// ---------------------------------------------------------------------------
+
+// The C# `public void DisassembleEvent(MetadataFile module,
+// EventDefinitionHandle handle)`. See the header for the porting
+// decisions.
+void ReflectionDisassembler::DisassembleEvent(Metadata::MetadataFile& module,
+    std::uint32_t eventToken)
+{
+    auto accessors = module.GetEventAccessors(eventToken);
+    DisassembleEventHeaderInternal(module, eventToken, accessors);
+
+    // The C# `OpenBlock(false)` -- hard-coded false (like the property
+    // block; only methods take the isInType folding).
+    OpenBlock(/*defaultCollapsed=*/false);
+    WriteAttributes(module, module.GetCustomAttributeTokens(eventToken));
+    WriteNestedMethod(".addon", module, accessors.AdderToken);
+    WriteNestedMethod(".removeon", module, accessors.RemoverToken);
+    WriteNestedMethod(".fire", module, accessors.RaiserToken);
+    for (std::uint32_t method : accessors.OtherTokens) {
+        WriteNestedMethod(".other", module, method);
+    }
+    CloseBlock();
+}
+
+// The C# `public void DisassembleEventHeader(MetadataFile module,
+// EventDefinitionHandle handle)`.
+void ReflectionDisassembler::DisassembleEventHeader(
+    Metadata::MetadataFile& module, std::uint32_t eventToken)
+{
+    auto accessors = module.GetEventAccessors(eventToken);
+    DisassembleEventHeaderInternal(module, eventToken, accessors);
+}
+
+// The C# `private void DisassembleEventHeaderInternal(...)`. See the
+// header for the porting decisions.
+void ReflectionDisassembler::DisassembleEventHeaderInternal(
+    Metadata::MetadataFile& module, std::uint32_t eventToken,
+    const Metadata::MetadataFile::EventAccessorsInfo& accessors)
+{
+    // The C# declaringType: the adder's, else the remover's, else the
+    // raiser's (nil rows walk the nil row -- the graceful C# path; the
+    // value only feeds the TypeSpec arm's generic context).
+    std::uint32_t accessorForType = accessors.AdderToken != 0
+        ? accessors.AdderToken
+        : (accessors.RemoverToken != 0 ? accessors.RemoverToken
+                                       : accessors.RaiserToken);
+    std::uint32_t declaringTypeToken =
+        module.GetMethodDeclaringTypeToken(accessorForType);
+
+    output_.WriteReference(module, eventToken, ".event", "decompile",
+        /*isDefinition=*/true);
+    WriteMetadataToken(output_, module, eventToken, eventToken,
+        /*spaceAfter=*/true, /*spaceBefore=*/true, ShowMetadataTokens(),
+        ShowMetadataTokensInBase10());
+    std::uint32_t attributes = module.GetEventAttributes(eventToken);
+    WriteFlags(static_cast<EventAttributes>(attributes), eventAttributes,
+        output_);
+
+    // The C# `switch (eventDefinition.Type.Kind)`: the delegate type
+    // rendered directly through the provider -- the rawTypeKind argument
+    // is the C# 0 (no class/valuetype prefix input), and the TypeSpec arm
+    // carries the declaring type's generic context. A nil or unknown kind
+    // is the C# BadImageFormatException (the port's std::out_of_range).
+    std::uint32_t typeToken = module.GetEventTypeToken(eventToken);
+    DisassemblerSignatureTypeProvider provider(module, output_);
+    Metadata::SignatureTypeWriter signature;
+    switch (typeToken >> 24) {
+        case 0x02:  // HandleKind.TypeDefinition
+            signature = provider.GetTypeFromDefinition(typeToken, 0);
+            break;
+        case 0x01:  // HandleKind.TypeReference
+            signature = provider.GetTypeFromReference(typeToken, 0);
+            break;
+        case 0x1B:  // HandleKind.TypeSpecification
+            signature = provider.GetTypeFromSpecification(typeToken, 0,
+                Metadata::MetadataGenericContext::ForType(declaringTypeToken,
+                    module));
+            break;
+        default:
+            throw std::out_of_range(
+                "Expected a TypeDef, TypeRef or TypeSpec handle!");
+    }
+    signature(ILNameSyntax::TypeName);
+    output_.Write(' ');
+    output_.Write(Escape(module.GetEventName(eventToken)));
 }
 
 }  // namespace ILSpy::Decompiler::Disassembler
