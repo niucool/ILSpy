@@ -46,12 +46,23 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace ILSpy::Decompiler::Metadata {
+
+// The file-stream provider the associated/embedded PDB discovery takes
+// (the C# `PEReader.TryOpenAssociatedPortablePdb` Func<string, Stream?>
+// parameter): called with a PDB file path, returns the file's bytes, or null
+// when the file does not exist or should be ignored. A provider that fails
+// to read an existing file throws (the C# provider contract: IOException
+// for an unexpected IO error -- the discovery records and rethrows it at
+// the end through the error path).
+using PdbStreamProvider = std::function<
+    std::shared_ptr<const std::vector<std::uint8_t>>(const std::string&)>;
 
 // The portable-PDB debug tables (the Portable PDB spec; winmd's table set
 // stops at 0x27 and carries none of these).

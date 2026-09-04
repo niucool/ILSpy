@@ -28,12 +28,14 @@ endif()
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(plog CONFIG REQUIRED)
 find_package(lz4 CONFIG REQUIRED)
-# miniz (deflate) is optional for now: it is needed only from Phase 7/8 (Portable
-# PDB writes, --dump-package). It lives behind the `deflate` vcpkg manifest
-# feature (see vcpkg.json); the default bring-up does not pull it because the
-# miniz source download hit an environment SSL/proxy issue. Make this REQUIRED
-# when the first deflate call site lands (PORT_PLAN.md section 5.8).
-find_package(miniz CONFIG QUIET)
+# miniz (raw deflate) is the embedded-Portable-PDB decompressor (the MPDB
+# debug-directory entry blob, the PeImagePortablePdb.cpp decode of the
+# `ReadEmbeddedPortablePdbDebugDirectoryData` data) and later the
+# -genpdb/--dump-package deflate call sites (PORT_PLAN.md section 5.8). It was
+# optional during initial bring-up because the vcpkg miniz source download hit
+# an environment SSL/proxy issue; the first deflate call site has landed, so it
+# is REQUIRED now.
+find_package(miniz CONFIG REQUIRED)
 find_package(cxxopts CONFIG REQUIRED)
 find_package(GTest CONFIG REQUIRED)
 
@@ -43,8 +45,7 @@ if(TARGET miniz::miniz)
 elseif(TARGET miniz)
     set(ILSPY_MINIZ_LIB miniz)
 else()
-    set(ILSPY_MINIZ_LIB "")
-    message(STATUS "ilspy: miniz not found (optional for now); deflate features deferred to Phase 7/8.")
+    message(FATAL_ERROR "ilspy: miniz target not found after find_package succeeded")
 endif()
 
 # The single aggregate static library. Subdirectories attach sources to it.

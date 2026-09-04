@@ -91,4 +91,11 @@ inline ILSpy::Decompiler::Metadata::PortablePdb LoadSyntheticPdb() {
     return ILSpy::Decompiler::Metadata::PortablePdb(std::move(bytes));
 }
 
+// The raw fixture bytes (the associated/embedded PDB discovery tests write
+// them to a file / deflate them into an MPDB blob).
+inline std::shared_ptr<const std::vector<std::uint8_t>> SyntheticPdbBytes() {
+    return std::make_shared<std::vector<std::uint8_t>>(
+        std::begin(kSyntheticPdb), std::end(kSyntheticPdb));
+}
+
 }  // namespace ILSpy::Tests

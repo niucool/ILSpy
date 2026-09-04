@@ -2445,4 +2445,43 @@ MetadataFile::GetCodeViewDebugDirectoryData(
     return info;
 }
 
+// The internal PeImage entry a DebugDirectoryEntryInfo maps onto (the
+// field-by-field copy the two debug-directory passthroughs perform).
+static PeImage::DebugDirectoryEntry ToInternalEntry(
+    const MetadataFile::DebugDirectoryEntryInfo& entry) {
+    PeImage::DebugDirectoryEntry internal;
+    internal.Stamp = entry.Stamp;
+    internal.MajorVersion = entry.MajorVersion;
+    internal.MinorVersion = entry.MinorVersion;
+    internal.Type = static_cast<std::int32_t>(entry.Type);
+    internal.DataSize = entry.DataSize;
+    internal.DataRelativeVirtualAddress = entry.DataRelativeVirtualAddress;
+    internal.DataPointer = entry.DataPointer;
+    return internal;
+}
+
+// The associated/embedded portable-PDB discovery. See the header for the
+// full contract.
+bool MetadataFile::TryOpenAssociatedPortablePdb(const std::string& peImagePath,
+    const PdbStreamProvider& pdbFileStreamProvider,
+    PortablePdb& pdbReaderProvider, std::string& pdbPath) const {
+    if (!IsValid() || !impl_->bodyReader || !impl_->bodyReader->HasImage()) {
+        pdbReaderProvider = PortablePdb(nullptr);
+        pdbPath.clear();
+        return false;
+    }
+    return impl_->bodyReader->TryOpenAssociatedPortablePdb(
+        peImagePath, pdbFileStreamProvider, pdbReaderProvider, pdbPath);
+}
+
+// The MPDB blob an EmbeddedPortablePdb entry points at. See the header for
+// the full contract.
+PortablePdb MetadataFile::ReadEmbeddedPortablePdbDebugDirectoryData(
+    const DebugDirectoryEntryInfo& entry) const {
+    if (!IsValid() || !impl_->bodyReader || !impl_->bodyReader->HasImage())
+        throw std::invalid_argument("entry is not an EmbeddedPortablePdb entry");
+    return impl_->bodyReader->ReadEmbeddedPortablePdbDebugDirectoryData(
+        ToInternalEntry(entry));
+}
+
 } // namespace ILSpy::Decompiler::Metadata

@@ -29,6 +29,7 @@
 
 #include "Decompiler/Metadata/MethodBody.hpp"
 #include "Decompiler/Metadata/LocalTypeInfo.hpp"
+#include "Decompiler/Metadata/PortablePdb.hpp"
 #include "Decompiler/Disassembler/ReflectionAttributes.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
@@ -958,6 +959,39 @@ public:
         std::string Path;
     };
     std::optional<CodeViewDebugDirectoryDataInfo> GetCodeViewDebugDirectoryData(
+        const DebugDirectoryEntryInfo& entry) const;
+
+    // The C# `PEReader.TryOpenAssociatedPortablePdb(peImagePath,
+    // pdbFileStreamProvider, out pdbReaderProvider, out pdbPath)` -- the
+    // associated/embedded portable-PDB discovery: the portable-CodeView
+    // entry's PDB file (the entry's path resolved against the PE image's
+    // own directory, matched by the entry's CV GUID + Stamp against the
+    // PDB's #Pdb ID), falling back to the embedded MPDB blob. True when a
+    // matching PDB opened: `pdbReaderProvider` then holds the parsed reader
+    // (invalid when false) and `pdbPath` the file it came from (empty for
+    // an embedded PDB, the C# null). False when no PDB matched (a file the
+    // provider does not serve, an ID that does not match); throws
+    // std::out_of_range when a found PDB failed to parse or decode (the
+    // first recorded error the C# rethrows at the end). The provider
+    // returns the file's bytes, or null when the file does not exist or
+    // should be ignored (the C# Func<string, Stream?>).
+    // Invalid file: false without a throw.
+    bool TryOpenAssociatedPortablePdb(const std::string& peImagePath,
+        const PdbStreamProvider& pdbFileStreamProvider,
+        PortablePdb& pdbReaderProvider, std::string& pdbPath) const;
+
+    // The C# `PEReader.ReadEmbeddedPortablePdbDebugDirectoryData(entry)`:
+    // the MPDB blob an EmbeddedPortablePdb entry points at -- the "MPDB"
+    // signature, the declared uncompressed size, and the raw-deflate
+    // stream -- decoded to the parsed PDB reader. Throws
+    // std::invalid_argument for a non-embedded entry (the C#
+    // ArgumentException) and std::out_of_range for the version checks
+    // (MajorVersion < 256 / MinorVersion != 256), a truncated or
+    // out-of-file data block, a wrong signature, and a deflate stream that
+    // does not inflate to exactly the declared size consuming the whole
+    // block (the C# SizeMismatch/DataTooBig arms).
+    // Invalid file: throws like a valid one would for its entries.
+    PortablePdb ReadEmbeddedPortablePdbDebugDirectoryData(
         const DebugDirectoryEntryInfo& entry) const;
 
 private:

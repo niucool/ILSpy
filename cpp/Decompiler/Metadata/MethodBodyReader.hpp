@@ -24,6 +24,7 @@
 #pragma once
 
 #include "Decompiler/Metadata/MethodBody.hpp"
+#include "Decompiler/Metadata/PortablePdb.hpp"
 #include "Decompiler/Util/Span.hpp"
 
 #include "Decompiler/Disassembler/ReflectionAttributes.hpp"
@@ -308,6 +309,47 @@ public:
                            static_cast<std::size_t>(p - (data.base + 24)));
         return result;
     }
+
+    // The C# `PEReader.TryOpenAssociatedPortablePdb(peImagePath,
+    // pdbFileStreamProvider, out pdbReaderProvider, out pdbPath)` -- the
+    // discovery of the portable PDB associated with this PE image: the
+    // portable-CodeView entry's file (the entry's PDB path resolved against
+    // the PE image's own directory, opened through the provider and matched
+    // against the entry's BlobContentId -- the CV GUID + the entry's Stamp
+    // vs the PDB's #Pdb ID), falling back to the embedded-PDB entry (the
+    // MPDB blob). True when a matching PDB was opened: `pdbReaderProvider`
+    // then holds the parsed reader (invalid when false) and `pdbPath` the
+    // file it came from (empty for an embedded PDB, the C# null).
+    // Throws std::out_of_range at the end (the C# rethrows the first
+    // recorded BadImageFormatException/IOException through
+    // ExceptionDispatchInfo -- the port maps the BadImageFormat arms to
+    // std::out_of_range) when no PDB opened but one was found and failed
+    // to parse or decode: a garbage associated file, an invalid
+    // embedded-PDB entry (bad version, wrong signature, size mismatch). A
+    // file the provider does not serve or an ID that does not match is NOT
+    // an error (false, no throw). The C# Throw.ArgumentNull argument checks
+    // have no port analogue (the reference parameters cannot be null).
+    // The provider: the C# Func<string, Stream?> -- returns the file's
+    // bytes, or null when the file does not exist or should be ignored
+    // (the C# FileNotFoundException catch maps the not-found shape onto
+    // the same null).
+    bool TryOpenAssociatedPortablePdb(const std::string& peImagePath,
+        const PdbStreamProvider& pdbFileStreamProvider,
+        PortablePdb& pdbReaderProvider, std::string& pdbPath) const;
+
+    // The C# `PEReader.ReadEmbeddedPortablePdbDebugDirectoryData(entry)` --
+    // the MPDB blob an EmbeddedPortablePdb entry points at, deflated: the
+    // "MPDB" signature, the declared uncompressed size, and the raw-deflate
+    // stream, decoded to the parsed PDB reader. Throws
+    // std::invalid_argument when the entry is not an EmbeddedPortablePdb
+    // entry (the C# ArgumentException) and std::out_of_range for the version
+    // checks (MajorVersion < 256 / MinorVersion != 256), a truncated or
+    // out-of-file data block, a wrong signature, a bad declared size, and
+    // a deflate stream that does not inflate to exactly the declared size
+    // consuming the whole block (the C# SizeMismatch/DataTooBig
+    // BadImageFormatException arms).
+    PortablePdb ReadEmbeddedPortablePdbDebugDirectoryData(
+        const DebugDirectoryEntry& entry) const;
 
     // Resolve an RVA to a file offset, or nullptr if it falls outside every
     // section (e.g. RVA 0 for abstract/extern methods).
@@ -681,6 +723,25 @@ public:
     PeImage::CodeViewDebugDirectoryData ReadCodeViewDebugDirectoryData(
         const PeImage::DebugDirectoryEntry& entry) const {
         return pe_.ReadCodeViewDebugDirectoryData(entry);
+    }
+
+    // The associated/embedded portable-PDB discovery (the C#
+    // `PEReader.TryOpenAssociatedPortablePdb`), a straight PeImage
+    // passthrough (see MethodBodyReader.hpp's PeImage block for the full
+    // contract).
+    bool TryOpenAssociatedPortablePdb(const std::string& peImagePath,
+        const PdbStreamProvider& pdbFileStreamProvider,
+        PortablePdb& pdbReaderProvider, std::string& pdbPath) const {
+        return pe_.TryOpenAssociatedPortablePdb(
+            peImagePath, pdbFileStreamProvider, pdbReaderProvider, pdbPath);
+    }
+
+    // The MPDB blob decode (the C#
+    // `PEReader.ReadEmbeddedPortablePdbDebugDirectoryData`), a straight
+    // PeImage passthrough.
+    PortablePdb ReadEmbeddedPortablePdbDebugDirectoryData(
+        const PeImage::DebugDirectoryEntry& entry) const {
+        return pe_.ReadEmbeddedPortablePdbDebugDirectoryData(entry);
     }
 
     // Decode the method body at `rva`. Returns an invalid MethodBody if the RVA
