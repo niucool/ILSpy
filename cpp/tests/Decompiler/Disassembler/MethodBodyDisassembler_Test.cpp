@@ -19,12 +19,18 @@
 // Tests for the MethodBodyDisassembler writers (cpp/Decompiler/Disassembler/
 // MethodBodyDisassembler.{hpp,cpp} + the ReflectionDisassembler token static):
 // the WriteOpCode display-name/local-reference spellings, the
-// ShowRawRVAOffsetAndBytes `/* ... */ ` comment geometry, and the
+// ShowRawRVAOffsetAndBytes `/* ... */ ` comment geometry, the
 // WriteMetadataToken comment/space matrix (show flags, base10, the null-token
-// error path, the UserString non-entity path).
+// error path, the UserString non-entity path), the WriteInstruction operand
+// switch, and the Disassemble flat and structured paths (the header/footer/
+// blank-line shapes over synthetic streams, the .try/catch and loop structures
+// and the flat-instruction-lines invariant over real mscorlib bodies).
 
+#include "Decompiler/Disassembler/ILParser.hpp"
+#include "Decompiler/Disassembler/ILStructure.hpp"
 #include "Decompiler/Disassembler/MethodBodyDisassembler.hpp"
 #include "Decompiler/Disassembler/ReflectionDisassembler.hpp"
+#include "Decompiler/IL/InstructionOutputExtensions.hpp"
 #include "Decompiler/Metadata/ILOpCodes.hpp"
 #include "Decompiler/Metadata/ILDisassembler.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
@@ -32,14 +38,20 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
+#include <functional>
 #include <sstream>
 #include <string>
+#include <vector>
 
 using namespace ILSpy::Decompiler::Disassembler;
 namespace MD = ILSpy::Decompiler::Metadata;
 namespace OUT = ILSpy::Decompiler::Output;
+namespace ILD = ILSpy::Decompiler::IL;
+namespace Util = ILSpy::Decompiler::Util;
 
 namespace {
 
@@ -490,17 +502,318 @@ TEST(MethodBodyDisassemblerTest, DisassembleRendersExceptionHandlers) {
     FAIL() << "no method with exception handlers found";
 }
 
-TEST(MethodBodyDisassemblerTest, DisassembleStructuredPathThrows) {
+// ---------------------------------------------------------------------------
+// WriteStructureHeader / WriteStructureBody / WriteStructureFooter
+// (MethodBodyDisassembler.cs lines 216-268, 270-303, 305-325) and the
+// DetectControlStructure structured branch of Disassemble (lines 131-138):
+// synthetic IL streams pinning the exact header/footer/blank-line shapes,
+// real mscorlib bodies pinning the .try/catch and loop structures end-to-end.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::string DisassembleStructured(MD::MetadataFile& f, std::uint32_t token) {
+    std::ostringstream stream;
+    OUT::PlainTextOutput out(stream);
+    MethodBodyDisassembler d(out);
+    // DetectControlStructure defaults to true: the structured branch.
+    d.Disassemble(f, token);
+    return stream.str();
+}
+
+// The text's lines with the leading indentation stripped: the structured
+// path indents inside its blocks, the flat path renders at indent 0.
+std::vector<std::string> StrippedLines(const std::string& text) {
+    std::vector<std::string> result;
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        std::size_t end = text.find("\r\n", pos);
+        std::string line = text.substr(pos,
+            (end == std::string::npos ? text.size() : end) - pos);
+        pos = end == std::string::npos ? text.size() : end + 2;
+        std::size_t content = line.find_first_not_of('\t');
+        result.push_back(content == std::string::npos ? std::string()
+            : line.substr(content));
+    }
+    return result;
+}
+
+// The "IL_xxxx: ..." instruction lines -- the per-instruction render the
+// flat and structured paths must agree on (the structured walk emits every
+// instruction exactly once, in offset order).
+std::vector<std::string> InstructionLines(const std::string& text) {
+    std::vector<std::string> result;
+    for (const std::string& line : StrippedLines(text)) {
+        if (line.rfind("IL_", 0) == 0) result.push_back(line);
+    }
+    return result;
+}
+
+// A root structure over a synthetic IL stream (no handlers, so the tree is
+// just the loop structures the root ctor detects).
+ILStructure MakeRootOver(MD::MetadataFile& f, const std::uint8_t* il,
+    std::size_t size) {
+    return ILStructure(f, 0x06000001u,
+        MD::MetadataGenericContext::ForMethod(0x06000001u, f),
+        Util::Span<const std::uint8_t>(il, size),
+        Util::Span<const MD::ExceptionHandlerClause>());
+}
+
+}  // namespace
+
+TEST(MethodBodyDisassemblerTest, DisassembleStructuredPathRendersBody) {
+    // String.Copy with the default flags (DetectControlStructure = true): no
+    // throw, the RVA header block, and the body through the structure tree.
     MD::MetadataFile f(MscorlibPath());
     ASSERT_TRUE(f.IsValid());
     std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
     ASSERT_NE(stringType, 0u);
     std::uint32_t copy = FindMethodIn(f, stringType, "Copy");
     ASSERT_NE(copy, 0u);
+    std::uint32_t rva = f.GetMethodRVA(copy);
+    ASSERT_NE(rva, 0u);
+    auto body = f.GetMethodBody(rva);
+    ASSERT_TRUE(body.IsValid());
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "// Method begins at RVA 0x%x\r\n// Header size: %u\r\n",
+        rva, body.HeaderSize());
+    std::string expected(buf);
+    std::snprintf(buf, sizeof(buf), "// Code size: %u (0x%x)\r\n.maxstack %u\r\n",
+        body.CodeSize(), body.CodeSize(), body.MaxStack());
+    expected += buf;
+    std::string text = DisassembleStructured(f, copy);
+    EXPECT_TRUE(text.rfind(expected, 0) == 0) << text;
+    EXPECT_NE(text.find("IL_0000: "), std::string::npos) << text;
+    EXPECT_TRUE(text.size() > 4 && text.substr(text.size() - 5) == "ret\r\n") << text;
+}
+
+TEST(MethodBodyDisassemblerTest, WriteStructureHeaderMatrix) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    auto ctx = MD::MetadataGenericContext::ForMethod(0x06000001u, f);
+    std::uint32_t exceptionType = FindTypeDefTokenIn(f, "System", "Exception");
+    ASSERT_NE(exceptionType, 0u);
+
+    auto renderHandler = [&](ILStructureType type,
+        const MD::ExceptionHandlerClause& handler) {
+        std::ostringstream stream;
+        OUT::PlainTextOutput out(stream);
+        MethodBodyDisassembler d(out);
+        ILStructure s(f, 0x06000001u, ctx, type, 0, 5, handler);
+        d.WriteStructureHeader(s);
+        return stream.str();
+    };
+    auto renderLoop = [&](int loopEntryPoint) {
+        std::ostringstream stream;
+        OUT::PlainTextOutput out(stream);
+        MethodBodyDisassembler d(out);
+        ILStructure s(f, 0x06000001u, ctx, ILStructureType::Loop, 0, 5,
+            loopEntryPoint);
+        d.WriteStructureHeader(s);
+        return stream.str();
+    };
+
+    // The loop header: "// loop start" with the entry-point head when one
+    // is recorded, bare otherwise (LoopEntryPointOffset < 0).
+    EXPECT_EQ(renderLoop(3), "// loop start (head: IL_0003)\r\n");
+    EXPECT_EQ(renderLoop(-1), "// loop start\r\n");
+
+    EXPECT_EQ(renderHandler(ILStructureType::Try, MD::ExceptionHandlerClause{}),
+        ".try\r\n{\r\n");
+    EXPECT_EQ(renderHandler(ILStructureType::Filter, MD::ExceptionHandlerClause{}),
+        "filter\r\n{\r\n");
+
+    // The catch header: "catch" plus the catch type at TypeName syntax
+    // (through the structure's module and generic context), or bare
+    // "catch" when the catch type is nil.
+    MD::ExceptionHandlerClause catchWithType{};
+    catchWithType.Kind = MD::ExceptionHandlerKind::Catch;
+    catchWithType.ClassTokenOrFilterOffset = exceptionType;
+    EXPECT_EQ(renderHandler(ILStructureType::Handler, catchWithType),
+        "catch System.Exception\r\n{\r\n");
+
+    MD::ExceptionHandlerClause catchNil{};
+    catchNil.Kind = MD::ExceptionHandlerKind::Catch;
+    EXPECT_EQ(renderHandler(ILStructureType::Handler, catchNil),
+        "catch\r\n{\r\n");
+
+    MD::ExceptionHandlerClause finally{};
+    finally.Kind = MD::ExceptionHandlerKind::Finally;
+    EXPECT_EQ(renderHandler(ILStructureType::Handler, finally),
+        "finally\r\n{\r\n");
+
+    MD::ExceptionHandlerClause fault{};
+    fault.Kind = MD::ExceptionHandlerKind::Fault;
+    EXPECT_EQ(renderHandler(ILStructureType::Handler, fault),
+        "fault\r\n{\r\n");
+
+    // The handler block of a filter block has no header.
+    MD::ExceptionHandlerClause filterHandler{};
+    filterHandler.Kind = MD::ExceptionHandlerKind::Filter;
+    EXPECT_EQ(renderHandler(ILStructureType::Handler, filterHandler),
+        "{\r\n");
+
+    // The root structure is never a written header.
+    EXPECT_THROW(renderHandler(ILStructureType::Root, MD::ExceptionHandlerClause{}),
+        std::out_of_range);
+}
+
+TEST(MethodBodyDisassemblerTest, WriteStructureFooterMatrix) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    auto ctx = MD::MetadataGenericContext::ForMethod(0x06000001u, f);
+    auto render = [&](ILStructureType type) {
+        std::ostringstream stream;
+        OUT::PlainTextOutput out(stream);
+        MethodBodyDisassembler d(out);
+        out.Indent();  // the footer unindents first
+        ILStructure s(f, 0x06000001u, ctx, type, 0, 5,
+            MD::ExceptionHandlerClause{});
+        d.WriteStructureFooter(s);
+        return stream.str();
+    };
+    EXPECT_EQ(render(ILStructureType::Loop), "// end loop\r\n");
+    EXPECT_EQ(render(ILStructureType::Try), "} // end .try\r\n");
+    EXPECT_EQ(render(ILStructureType::Handler), "} // end handler\r\n");
+    EXPECT_EQ(render(ILStructureType::Filter), "} // end filter\r\n");
+    EXPECT_THROW(render(ILStructureType::Root), std::out_of_range);
+}
+
+TEST(MethodBodyDisassemblerTest, WriteStructureBodyBlankLinePlacement) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // br.s at 0 -> IL_0004 (marked as a branch target); the ret at 4 renders
+    // after the nop at 3 and in front of the branch-target bit.
+    const std::uint8_t il[] = {0x2B, 0x02, 0x00, 0x00, 0x2A};
+    Util::BitSet branchTargets(static_cast<int>(sizeof(il)));
+    std::size_t pos = 0;
+    SetBranchTargets(il, sizeof(il), pos, branchTargets);
+    pos = 0;
     std::ostringstream stream;
     OUT::PlainTextOutput out(stream);
     MethodBodyDisassembler d(out);
-    EXPECT_THROW(d.Disassemble(f, copy), std::logic_error);
+    ILStructure root = MakeRootOver(f, il, sizeof(il));
+    d.WriteStructureBody(f, root, branchTargets, il, sizeof(il), pos, 0);
+    EXPECT_EQ(stream.str(),
+        "IL_0000: br.s IL_0004\r\n"
+        "\r\n"
+        "IL_0002: nop\r\n"
+        "IL_0003: nop\r\n"
+        "\r\n"
+        "IL_0004: ret\r\n");
+}
+
+TEST(MethodBodyDisassemblerTest, WriteStructureBodyRendersLoopChild) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // Six nops, a backward br.s to IL_0001 (the loop entry point: the nop at
+    // 0 precedes it), and the ret after the loop: the root ctor detects the
+    // Loop child [1, 8) and the walk renders it indented between the
+    // root-level IL_0000 and IL_0008 instructions.
+    const std::uint8_t il[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2B, 0xF9, 0x2A};
+    Util::BitSet branchTargets(static_cast<int>(sizeof(il)));
+    std::size_t pos = 0;
+    SetBranchTargets(il, sizeof(il), pos, branchTargets);
+    pos = 0;
+    std::ostringstream stream;
+    OUT::PlainTextOutput out(stream);
+    MethodBodyDisassembler d(out);
+    ILStructure root = MakeRootOver(f, il, sizeof(il));
+    d.WriteStructureBody(f, root, branchTargets, il, sizeof(il), pos, 0);
+    EXPECT_EQ(stream.str(),
+        "IL_0000: nop\r\n"
+        "// loop start (head: IL_0001)\r\n"
+        "\tIL_0001: nop\r\n"
+        "\tIL_0002: nop\r\n"
+        "\tIL_0003: nop\r\n"
+        "\tIL_0004: nop\r\n"
+        "\tIL_0005: nop\r\n"
+        "\tIL_0006: br.s IL_0001\r\n"
+        "// end loop\r\n"
+        "IL_0008: ret\r\n");
+}
+
+TEST(MethodBodyDisassemblerTest, DisassembleStructuredRendersTryCatchBlocks) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    for (const auto& t : f.TypeDefs()) {
+        for (const auto& m : f.GetMethods(t.Token)) {
+            if (m.RVA == 0) continue;
+            auto mb = f.GetMethodBody(m.RVA);
+            if (!mb.IsValid() || mb.Handlers().empty()) continue;
+            const MD::ExceptionHandlerClause* catchEh = nullptr;
+            for (const auto& eh : mb.Handlers()) {
+                if (eh.Kind == MD::ExceptionHandlerKind::Catch
+                    && eh.ClassTokenOrFilterOffset != 0) {
+                    catchEh = &eh;
+                    break;
+                }
+            }
+            if (catchEh == nullptr) continue;
+            std::string text = DisassembleStructured(f, m.Token);
+            std::vector<std::string> lines = StrippedLines(text);
+            // The catch type rendered through the same EntityHandle.WriteTo
+            // the header uses, at the method's generic context.
+            std::ostringstream catchStream;
+            OUT::PlainTextOutput catchOut(catchStream);
+            ILD::WriteTo(f, catchOut,
+                MD::MetadataGenericContext::ForMethod(m.Token, f),
+                catchEh->ClassTokenOrFilterOffset, ILNameSyntax::TypeName);
+            std::string catchLine = "catch " + catchStream.str();
+            EXPECT_NE(std::find(lines.begin(), lines.end(), ".try"), lines.end()) << text;
+            EXPECT_NE(std::find(lines.begin(), lines.end(), catchLine), lines.end())
+                << text << "\nexpected catch line: " << catchLine;
+            EXPECT_NE(std::find(lines.begin(), lines.end(), "{"), lines.end()) << text;
+            EXPECT_NE(std::find(lines.begin(), lines.end(), "} // end handler"),
+                lines.end()) << text;
+            EXPECT_NE(std::find(lines.begin(), lines.end(), "} // end .try"),
+                lines.end()) << text;
+            // The flat trailing EH clause lines are gone in the structured
+            // path (the handlers render as blocks instead).
+            EXPECT_EQ(text.find(".try IL_"), std::string::npos) << text;
+            return;
+        }
+    }
+    FAIL() << "no method with a catch handler found";
+}
+
+TEST(MethodBodyDisassemblerTest, DisassembleStructuredRendersLoopBlocks) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    for (const auto& t : f.TypeDefs()) {
+        for (const auto& m : f.GetMethods(t.Token)) {
+            if (m.RVA == 0) continue;
+            auto mb = f.GetMethodBody(m.RVA);
+            if (!mb.IsValid() || mb.IL().empty()) continue;
+            std::string text = DisassembleStructured(f, m.Token);
+            if (text.find("// loop start") == std::string::npos) continue;
+            EXPECT_NE(text.find("// loop start (head: IL_"), std::string::npos) << text;
+            EXPECT_NE(text.find("// end loop"), std::string::npos) << text;
+            return;
+        }
+    }
+    FAIL() << "no method with a detected loop found";
+}
+
+TEST(MethodBodyDisassemblerTest, DisassembleStructuredMatchesFlatInstructionLines) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // The structured walk emits every instruction exactly once, in offset
+    // order, with the same per-instruction render as the flat path (modulo
+    // the indentation and the structure header/footer lines).
+    int compared = 0;
+    for (const auto& t : f.TypeDefs()) {
+        for (const auto& m : f.GetMethods(t.Token)) {
+            if (m.RVA == 0) continue;
+            auto mb = f.GetMethodBody(m.RVA);
+            if (!mb.IsValid() || mb.IL().empty()) continue;
+            std::string flat = DisassembleFlat(f, m.Token);
+            std::string structured = DisassembleStructured(f, m.Token);
+            EXPECT_EQ(InstructionLines(structured), InstructionLines(flat)) << m.Name;
+            if (++compared >= 300) return;
+        }
+    }
+    ASSERT_GT(compared, 0) << "no method bodies compared";
 }
 
 TEST(MethodBodyDisassemblerTest, DisassembleSmokeOverManyMethods) {

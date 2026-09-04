@@ -16,12 +16,13 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-// Port of ICSharpCode.Decompiler/Disassembler/MethodBodyDisassembler.cs (in
-// progress -- the flat-path chain lands across iterations): the option flags
-// and the opcode/token/raw-bytes writers the WriteInstruction operand switch
-// and the Disassemble scaffolding consume. The C# private members WriteOpCode
-// and WriteRVA and the WriteMetadataToken wrapper are the port's public
-// members so the tests can drive them before Disassemble itself exists.
+// Port of ICSharpCode.Decompiler/Disassembler/MethodBodyDisassembler.cs:
+// the option flags, the opcode/token/raw-bytes writers, the WriteInstruction
+// operand switch, and the Disassemble assembly with both body paths -- the
+// flat instruction loop and the DetectControlStructure structured branch
+// through the ILStructure tree (WriteStructureHeader/Body/Footer). The C#
+// private members are the port's public members so the tests can drive them
+// directly.
 //
 // The C# DebugInfo / sequence-point machinery (ShowSequencePoints +
 // IDebugInfoProvider) is deferred with the provider type -- the flag exists,
@@ -39,7 +40,13 @@ class MetadataFile;
 class MethodBody;
 }
 
+namespace ILSpy::Decompiler::Util {
+class BitSet;
+}
+
 namespace ILSpy::Decompiler::Disassembler {
+
+class ILStructure;
 
 class MethodBodyDisassembler {
 public:
@@ -103,14 +110,13 @@ public:
         std::uint32_t methodRva);
 
     // The C# `public virtual void Disassemble(MetadataFile module,
-    // MethodDefinitionHandle handle)` -- the flat-path assembly: the RVA
-    // header comments, the zero-RVA early-out, the .maxstack/.entrypoint
-    // lines, the locals block, the flat instruction loop, and the exception
-    // handlers. The handle ports as the raw method token. The C#
-    // DetectControlStructure structured branch (the ILStructure-based
-    // WriteStructureHeader/Body/Footer recursion) is not yet ported and
-    // throws std::logic_error when the flag is set -- loud rather than wrong;
-    // the flat path runs when the flag is false.
+    // MethodDefinitionHandle handle)`: the RVA header comments, the zero-RVA
+    // early-out, the .maxstack/.entrypoint lines, the locals block, and the
+    // body -- through the ILStructure tree when DetectControlStructure is
+    // set and the body is non-empty (the C# passes RelativeVirtualAddress +
+    // headerSize as the structured method RVA), or the flat instruction loop
+    // plus the trailing exception-handler clauses otherwise. The handle
+    // ports as the raw method token.
     void Disassemble(Metadata::MetadataFile& module, std::uint32_t methodToken);
 
     // The C# `void DisassembleLocalsBlock(MethodDefinitionHandle method,
@@ -127,6 +133,39 @@ public:
     // clause. The method token scopes the generic context.
     void WriteExceptionHandlers(const Metadata::MetadataFile& module,
         std::uint32_t methodToken, const Metadata::MethodBody& body);
+
+    // The C# `void WriteStructureHeader(ILStructure s)` (private): the
+    // header lines for a structure, then Indent -- "// loop start" (with the
+    // " (head: IL_xxxx)" entry-point part when one is recorded),
+    // ".try"/"{" for a try block, "filter"/"{" for a filter block, and for
+    // a handler block "catch [<type>]" (the catch type through the
+    // structure's module and generic context at TypeName syntax; a nil
+    // catch type writes bare "catch"), "finally", "fault", or nothing at
+    // all for a filter's handler block. The Root structure is never a
+    // written header (the C# ArgumentOutOfRangeException ports as
+    // std::out_of_range). Public so the tests can drive synthetic structure
+    // trees.
+    void WriteStructureHeader(const ILStructure& s);
+
+    // The C# `void WriteStructureBody(ILStructure s, BitSet branchTargets,
+    // ref BlobReader body, int methodRva)` (private): the recursive structure
+    // walk -- a child structure containing the next offset renders
+    // header/body/footer and consumes the walk through its range, an
+    // instruction renders with a blank line before it when the previous
+    // instruction was a branch/return/throw/rethrow/switch or the offset is a
+    // marked branch target (the C# blank-line comment), and the walk stops at
+    // the structure's end offset or the stream end. The module is the
+    // Disassemble caller's (the C# field); the instructions render at
+    // s.MethodHandle.
+    void WriteStructureBody(Metadata::MetadataFile& module, const ILStructure& s,
+        const Util::BitSet& branchTargets, const std::uint8_t* base,
+        std::size_t size, std::size_t& pos, std::uint32_t methodRva);
+
+    // The C# `void WriteStructureFooter(ILStructure s)` (private): Unindent,
+    // then the footer line -- "// end loop", "} // end .try",
+    // "} // end handler", "} // end filter". Public so the tests can drive
+    // synthetic structure trees.
+    void WriteStructureFooter(const ILStructure& s);
 
 private:
     Output::ITextOutput& output_;
