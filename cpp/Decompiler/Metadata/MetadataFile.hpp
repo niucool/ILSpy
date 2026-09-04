@@ -241,6 +241,12 @@ public:
     // True if the file was recognised as a PE/CLI module and parsed.
     bool IsValid() const noexcept;
 
+    // The C# `PEFile.FileName`: the path the file was opened from, exactly
+    // as passed to the constructor (the PdbProvider's PDB discovery derives
+    // the adjacent <module>.pdb path from it). Valid for an unparseable file
+    // too; never throws.
+    const std::string& FileName() const noexcept;
+
     // Row count of the TypeDef table.
     std::uint32_t TypeDefCount() const noexcept;
 

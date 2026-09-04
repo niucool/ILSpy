@@ -119,6 +119,10 @@ bool MetadataFile::IsValid() const noexcept {
     return impl_ && impl_->valid;
 }
 
+const std::string& MetadataFile::FileName() const noexcept {
+    return impl_->path;
+}
+
 std::uint32_t MetadataFile::TypeDefCount() const noexcept {
     return IsValid() ? impl_->db->TypeDef.size() : 0;
 }

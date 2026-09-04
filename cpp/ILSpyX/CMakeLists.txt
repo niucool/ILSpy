@@ -6,4 +6,5 @@
 
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/PdbProvider/PortableDebugInfoProvider.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/PdbProvider/DebugInfoUtils.cpp
 )
