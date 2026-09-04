@@ -20,6 +20,7 @@
 
 #include "ILSpyCmd/IlspyCmdProgram.hpp"
 
+#include "Decompiler/CSharp/ProjectDecompiler/WholeProjectDecompiler.hpp"
 #include "Decompiler/Disassembler/ReflectionDisassembler.hpp"
 #include "Decompiler/Disassembler/DisassemblerHelpers.hpp"
 #include "Decompiler/Metadata/SRMExtensions.hpp"
@@ -41,6 +42,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #if defined(_WIN32)
@@ -52,6 +54,7 @@ namespace {
 
 namespace fs = std::filesystem;
 namespace Sfb = ILSpy::Decompiler::SingleFileBundle;
+namespace ProjectDecompiler = ILSpy::Decompiler::CSharp::ProjectDecompiler;
 
 // The C# `Path.IsPathRooted(string)` over an entry RelativePath (the Windows
 // semantics): a leading directory separator or a drive-letter prefix roots
@@ -540,10 +543,16 @@ bool EndsWithBamlCaseInsensitive(const std::string& name) {
 // The C# `int ExtractResource(string assemblyFileName, string resourceName,
 // TextWriter output, string outputDirectory, CommandLineApplication app)`
 // (IlspyCmdProgram.cs): the --resource extraction (the header contract has
-// the full deferral/divergence notes).
+// the full deferral/divergence notes). The two path helpers it composes
+// are defined below, after the other -o path machinery (this file's
+// definition order, not the C# class layout).
+std::string FileNameOf(const std::string& path);
+std::string CombinePaths(const std::string& dir, const std::string& name);
+
 int ExtractResource(const std::string& assemblyFileName,
     const std::string& resourceName, std::ostringstream& output,
-    std::ostringstream& errorOutput) {
+    std::ostringstream& errorOutput,
+    const std::optional<std::string>& outputDirectory) {
     ILSpy::Decompiler::Metadata::MetadataFile module(assemblyFileName);
     std::optional<ResourceValue> value = TryGetResource(module, resourceName);
     if (!value) {
@@ -559,8 +568,9 @@ int ExtractResource(const std::string& assemblyFileName,
 
     // The C# `bool isBaml = resourceName.EndsWith(".baml", ...)` arm: with
     // a byte[] value the real tool runs the BamlDecompiler (decompiling to
-    // XAML); the port's BamlDecompiler is the deferred Phase-9 piece, so
-    // the arm fails loudly instead of silently writing raw bytes.
+    // XAML, with -o saving it under a '.xaml'-suffixed sanitized name);
+    // the port's BamlDecompiler is the deferred Phase-9 piece, so the arm
+    // fails loudly instead of silently writing raw bytes.
     if (EndsWithBamlCaseInsensitive(resourceName)
         && value->kind == ResourceValue::Kind::ByteArray) {
         errorOutput << "BAML resource decompilation ('" << resourceName
@@ -570,6 +580,18 @@ int ExtractResource(const std::string& assemblyFileName,
     }
 
     if (value->kind == ResourceValue::Kind::ByteArray) {
+        if (outputDirectory.has_value()) {
+            // The C# -o branch: `string fileName =
+            // WholeProjectDecompiler.SanitizeFileName(Path.GetFileName(
+            // resourceName)); File.WriteAllBytes(Path.Combine(
+            // outputDirectory, fileName), binary)` -- the bytes verbatim
+            // (the WriteOutputFile write is byte-transparent).
+            std::string fileName = ProjectDecompiler::SanitizeFileName(
+                FileNameOf(resourceName));
+            WriteOutputFile(CombinePaths(*outputDirectory, fileName),
+                std::string(value->bytes.begin(), value->bytes.end()));
+            return 0;
+        }
         // The C# `stdout = Console.OpenStandardOutput(); stdout.Write(...)`
         // binary write -- the port's output block (the ostringstream holds
         // arbitrary bytes; main.cpp writes them in binary mode).
@@ -580,8 +602,21 @@ int ExtractResource(const std::string& assemblyFileName,
     }
 
     // The C# `string text = value as string ?? value?.ToString() ??
-    // string.Empty; output.Write(text)` -- no trailing newline.
-    output << ResourceValueToText(*value);
+    // string.Empty`: the invariant-culture text render.
+    std::string text = ResourceValueToText(*value);
+    if (outputDirectory.has_value()) {
+        // The C# -o branch: `string fileName =
+        // WholeProjectDecompiler.SanitizeFileName(Path.GetFileName(
+        // resourceName)); File.WriteAllText(Path.Combine(
+        // outputDirectory, fileName), text)` -- UTF-8 without a BOM, the
+        // text verbatim (WriteOutputFile).
+        std::string fileName = ProjectDecompiler::SanitizeFileName(
+            FileNameOf(resourceName));
+        WriteOutputFile(CombinePaths(*outputDirectory, fileName), text);
+        return 0;
+    }
+    // The C# `output.Write(text)` -- no trailing newline.
+    output << text;
     return 0;
 }
 
@@ -621,6 +656,108 @@ std::filesystem::path ToNativePath(const std::string& utf8) {
     // directory or output name must survive -- on Windows the fs::path
     // narrow ctor would transcode through the ANSI code page instead.
     return ToFsPath(utf8);
+}
+
+// The C# `Path.GetFileName(path)` (the -o extraction branches' file-name
+// source). The .NET 10 Windows shape (decompiled from System.Private.CoreLib:
+// Path.GetFileName slices at max(rootLength, lastSeparator + 1)) needs the
+// full PathInternal.GetRootLength -- the DOS drive roots 'X:'/'X:\\',
+// the UNC roots '\\\\server\\share\\', and the device roots '\\\\?\\' --
+// so a separator inside a root yields the remainder past the root (an
+// incomplete UNC like '\\\\C:foo' is ALL root: the root scan runs past the
+// end and the name is empty). The plain cases: 'C:foo' -> 'foo', 'a:b'
+// -> 'b', '1:foo' and ':foo' stay whole (only a-z/A-Z are drive chars),
+// 'a\\b:c' -> 'b:c' (an embedded ':' never splits), and a path ending in
+// a separator yields the empty name. (POSIX has no volume separator and
+// only '/'-roots, so the non-Windows port arm splits at the last
+// separator -- the port's standing path convention.)
+#if defined(_WIN32)
+namespace {
+
+// The decompiled System.IO.PathInternal members (the Windows build):
+// IsDirectorySeparator, IsValidDriveChar, IsDevice, IsDeviceUNC and
+// GetRootLength, verbatim in shape.
+bool WinIsDirectorySeparator(char c) {
+    return c == '\\' || c == '/';
+}
+
+bool WinIsValidDriveChar(char value) {
+    // The C# `(uint)((value | 0x20) - 97) <= 25u`: the ASCII letters, both
+    // cases.
+    return static_cast<unsigned>((value | 0x20) - 'a') <= 25u;
+}
+
+bool WinIsDevice(std::string_view path) {
+    return path.size() >= 4 && path[0] == '\\'
+        && (path[1] == '\\' || path[1] == '?') && path[2] == '?'
+        && path[3] == '\\';
+}
+
+bool WinIsDeviceUnc(std::string_view path) {
+    return path.size() >= 8 && WinIsDevice(path)
+        && WinIsDirectorySeparator(path[7]) && path[4] == 'U'
+        && path[5] == 'N' && path[6] == 'C';
+}
+
+int WinGetRootLength(std::string_view path) {
+    std::size_t length = path.size();
+    std::size_t i = 0;
+    bool isDevice = WinIsDevice(path);
+    bool isDeviceUnc = isDevice && WinIsDeviceUnc(path);
+    if ((!isDevice || isDeviceUnc) && length > 0
+        && WinIsDirectorySeparator(path[0]))
+    {
+        if (isDeviceUnc || (length > 1 && WinIsDirectorySeparator(path[1])))
+        {
+            // The UNC root: skip the leading pair, then consume the server
+            // and share up to (and including) the second separator.
+            i = isDeviceUnc ? 8 : 2;
+            int num = 2;
+            for (; i < length; i++)
+            {
+                if (WinIsDirectorySeparator(path[i]) && --num <= 0)
+                    break;
+            }
+        }
+        else
+        {
+            // A single leading separator: a rooted relative path.
+            i = 1;
+        }
+    }
+    else if (isDevice)
+    {
+        // A device path: skip the '\\\\?\\' prefix, then consume the drive
+        // (or volume) up to its separator, inclusive.
+        for (i = 4; i < length && !WinIsDirectorySeparator(path[i]); i++)
+        {
+        }
+        if (i < length && i > 4 && WinIsDirectorySeparator(path[i]))
+            i++;
+    }
+    else if (length >= 2 && path[1] == ':' && WinIsValidDriveChar(path[0]))
+    {
+        // A DOS drive root, with or without its trailing separator.
+        i = 2;
+        if (length > 2 && WinIsDirectorySeparator(path[2]))
+            i++;
+    }
+    return static_cast<int>(i);
+}
+
+}  // namespace
+#endif
+
+std::string FileNameOf(const std::string& path) {
+#if defined(_WIN32)
+    int root = WinGetRootLength(path);
+    std::size_t num = path.find_last_of("\\/");
+    int sep = num == std::string::npos ? -1 : static_cast<int>(num);
+    return path.substr(static_cast<std::size_t>(sep < root ? root : sep + 1));
+#else
+    std::size_t sep = path.find_last_of("\\/");
+    return sep == std::string::npos ? path : path.substr(sep + 1);
+#endif
 }
 
 // The C# `Path.GetFileNameWithoutExtension(path)` (the -o writer

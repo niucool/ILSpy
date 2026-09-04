@@ -436,30 +436,27 @@ int RunMain(int argc, char** argv) {
     // EntityTypes, ShowIL, CreateDebugInfo, DumpPackage and ListResources
     // arms and BEFORE the DumpTableName arm, so a command line naming
     // several of those flags runs the earlier action): the resource lookup
-    // through ResourceExtensions.TryGetResource -- a byte[] value written
-    // raw to stdout (the Console.OpenStandardOutput binary write), any other
-    // value written as its ToString() text (no trailing newline), and the
-    // not-found arm rendering the available-resources listing to stderr
-    // with EX_DATAERR. The byte buffer may hold arbitrary bytes (including
-    // embedded NULs), so the block is written in binary mode; the error
-    // listing carries the CRLF TextWriter convention. The C# global catch
-    // (the `catch (Exception ex) { app.Error.WriteLine(ex.ToString());
-    // return EX_SOFTWARE; }` around PerformPerFileAction) covers the value
-    // decode's BadImageFormatException for a malformed container entry --
-    // the port renders the message only (no managed stack trace), same
-    // exit code. The -o outputDirectory branches (the SanitizeFileName-
-    // named extraction files: the byte[] value to <dir>/<sanitized name>,
-    // the text value likewise, the .baml arm's XAML) are deferred with the
-    // WholeProjectDecompiler.SanitizeFileName port -- with -o set the
-    // port still writes the value to stdout (a documented divergence until
-    // that lands).
+    // through ResourceExtensions.TryGetResource -- with no -o a byte[]
+    // value written raw to stdout (the Console.OpenStandardOutput binary
+    // write), any other value written as its ToString() text (no trailing
+    // newline), and the not-found arm rendering the available-resources
+    // listing to stderr with EX_DATAERR. The byte buffer may hold
+    // arbitrary bytes (including embedded NULs), so the block is written in
+    // binary mode; the error listing carries the CRLF TextWriter convention.
+    // The C# global catch (the `catch (Exception ex) { app.Error.WriteLine(
+    // ex.ToString()); return EX_SOFTWARE; }` around PerformPerFileAction)
+    // covers the value decode's BadImageFormatException for a malformed
+    // container entry -- the port renders the message only (no managed
+    // stack trace), same exit code. With -o set the value goes to the
+    // output file instead (the SanitizeFileName-named extraction file the
+    // ExtractResource port writes) and nothing to stdout.
     if (!resourceName.empty()) {
         std::ostringstream buffer;
         std::ostringstream errorBuffer;
         int rc;
         try {
             rc = ILSpy::ILSpyCmd::ExtractResource(
-                asmPath, resourceName, buffer, errorBuffer);
+                asmPath, resourceName, buffer, errorBuffer, outputDirectory);
         } catch (const std::exception& ex) {
             // The C# global handler: the exception render and
             // EX_SOFTWARE (the port carries no managed stack trace).

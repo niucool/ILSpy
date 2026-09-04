@@ -119,22 +119,30 @@ int ListResources(const std::string& assemblyFileName, std::ostringstream& outpu
 // (IlspyCmdProgram.cs): the --resource extraction -- the resource lookup
 // through TryGetResource with the '<name>' not-found error (the two stderr
 // lines plus the available-resources listing, rendered to errorOutput for
-// the caller to flush) and EX_DATAERR (65); a byte[] value written raw into
-// the output (the C# Console.OpenStandardOutput binary write -- the port's
-// ostringstream holds arbitrary bytes and main.cpp writes the block in
-// binary mode), and any other value written as its text (the C# ToString()
-// -- the port's invariant-culture render, matching the real tool whose
-// runtimeconfig sets System.Globalization.Invariant). The -o
-// outputDirectory branches (the SanitizeFileName-named extraction files
-// and the .baml arm's XAML save) are deferred with the
-// WholeProjectDecompiler.SanitizeFileName port.
-// The .baml arm (isBaml && a byte[] value -> DecompileBaml) is deferred with
+// the caller to flush) and EX_DATAERR (65); with no outputDirectory a
+// byte[] value written raw into the output (the C#
+// Console.OpenStandardOutput binary write -- the port's ostringstream
+// holds arbitrary bytes and main.cpp writes the block in binary mode), and
+// any other value written as its text (the C# ToString() -- the port's
+// invariant-culture render, matching the real tool whose runtimeconfig sets
+// System.Globalization.Invariant).
+// With an outputDirectory (-o set) the value goes to a file instead: the
+// file name is WholeProjectDecompiler.SanitizeFileName(Path.GetFileName(
+// resourceName)) (the port's CSharp::ProjectDecompiler sanitizer family
+// over the probed Path.GetFileName shape -- the ASCII drive-letter root
+// 'X:' is stripped before the last-separator split), joined under the -o
+// directory; a byte[] value's bytes and a text value's text are written
+// verbatim (File.WriteAllBytes / File.WriteAllText -- UTF-8 without a BOM,
+// the port's WriteOutputFile), and nothing goes to stdout.
+// The .baml arm (isBaml && a byte[] value -> DecompileBaml, the -o branch
+// saving the XAML under a '.xaml'-suffixed sanitized name) is deferred with
 // the Phase-9 BamlDecompiler: the port prints a not-yet-supported line to
 // errorOutput and returns EX_SOFTWARE (70) -- the same exit code the real
 // tool's own failure over an unparseable BAML stream produces.
 int ExtractResource(const std::string& assemblyFileName,
     const std::string& resourceName, std::ostringstream& output,
-    std::ostringstream& errorOutput);
+    std::ostringstream& errorOutput,
+    const std::optional<std::string>& outputDirectory = std::nullopt);
 
 // The C# `static string ResolveOutputDirectory(string outputDirectory)`
 // (IlspyCmdProgram.cs): the -o/--outputdir value resolved BEFORE any action

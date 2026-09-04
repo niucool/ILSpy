@@ -4,6 +4,7 @@
 # resolver/AST/output stages (see PORT_PLAN.md, Phase 5).
 
 add_subdirectory(TypeSystem)
+add_subdirectory(ProjectDecompiler)
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ILAstToCSharp.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Syntax/AstNode.cpp

@@ -39,6 +39,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -654,6 +655,95 @@ TEST(IlspyCmdProgramTest, ExtractResourceMscorlib)
     EXPECT_EQ(Cmd::ExtractResource(MscorlibPath(),
         "mscorlib.resources/Interop.COM_TypeMismatch", output, errorOutput), 0);
     EXPECT_EQ(output.str(), "Type mismatch between source and destination types.");
+}
+
+// The -o outputDirectory branches of the --resource extraction (the
+// C# `string fileName = WholeProjectDecompiler.SanitizeFileName(
+// Path.GetFileName(resourceName)); File.WriteAllBytes/WriteText(
+// Path.Combine(outputDirectory, fileName), ...)`): the sanitized name
+// under the output directory (the container prefix stripped by
+// GetFileName), the bytes verbatim for byte[] values, the text verbatim
+// for the others, and NOTHING to stdout.
+TEST(IlspyCmdProgramTest, ExtractResourceOutputDirectoryWritesFiles)
+{
+    std::string path = ILSpy::Tests::WriteValTestDll();
+    ASSERT_FALSE(path.empty());
+    fs::path dir = TempDir("resource-o");
+    std::optional<std::string> outputDirectory = dir.string();
+
+    struct FileCase {
+        const char* resource;
+        std::vector<std::uint8_t> expected;
+    };
+    const FileCase byteCases[] = {
+        {"v2.resources/Bytes", {0x01, 0x02, 0x03}},
+        {"bad.resources", {0xDE, 0xAD, 0xBE, 0xEF}},
+        {"plain.nlp", {0x11, 0x22, 0x33}},
+    };
+    for (const auto& c : byteCases) {
+        std::ostringstream output;
+        std::ostringstream errorOutput;
+        EXPECT_EQ(Cmd::ExtractResource(path, c.resource, output,
+            errorOutput, outputDirectory), 0) << c.resource;
+        EXPECT_EQ(output.str(), "") << c.resource;
+        EXPECT_EQ(errorOutput.str(), "") << c.resource;
+        // The container prefix is stripped (GetFileName), the plain name
+        // sanitizes to itself.
+        std::string name = fs::path(c.resource).filename().string();
+        fs::path file = dir / name;
+        ASSERT_TRUE(fs::exists(file)) << c.resource;
+        std::string read = ReadFileBytes(file);
+        ASSERT_EQ(read.size(), c.expected.size()) << c.resource;
+        for (std::size_t i = 0; i < c.expected.size(); i++)
+            EXPECT_EQ(static_cast<std::uint8_t>(read[i]), c.expected[i])
+                << c.resource << " byte " << i;
+    }
+
+    // The text value: the file holds the rendered text (File.WriteAllText
+    // -- UTF-8 without a BOM) and stdout stays empty.
+    {
+        std::ostringstream output;
+        std::ostringstream errorOutput;
+        EXPECT_EQ(Cmd::ExtractResource(path, "v2.resources/Str", output,
+            errorOutput, outputDirectory), 0);
+        EXPECT_EQ(output.str(), "");
+        EXPECT_EQ(ReadFileBytes(dir / "Str"), "one");
+    }
+
+    // Without an outputDirectory the value goes to stdout again (the
+    // default parameter -- the pre-existing behavior).
+    {
+        std::ostringstream output;
+        std::ostringstream errorOutput;
+        EXPECT_EQ(Cmd::ExtractResource(path, "v2.resources/Str", output,
+            errorOutput), 0);
+        EXPECT_EQ(output.str(), "one");
+    }
+}
+
+// The non-ASCII extraction file name (the res-test manifest's CJK-named
+// container entry): the letters survive the sanitizer (the file opens at
+// the Unicode name through the native path), the container prefix
+// stripped, the text verbatim.
+TEST(IlspyCmdProgramTest, ExtractResourceOutputDirectoryNonAsciiName)
+{
+    std::string path = ILSpy::Tests::WriteResTestDll();
+    ASSERT_FALSE(path.empty());
+    fs::path dir = TempDir("resource-o-nonascii");
+    std::optional<std::string> outputDirectory = dir.string();
+
+    // "test.resources/Unicode.Name.\u4E2D\u6587" (UTF-8 bytes).
+    std::string resource =
+        "test.resources/Unicode.Name.\xE4\xB8\xAD\xE6\x96\x87";
+    std::string fileName =
+        "Unicode.Name.\xE4\xB8\xAD\xE6\x96\x87";
+    std::ostringstream output;
+    std::ostringstream errorOutput;
+    EXPECT_EQ(Cmd::ExtractResource(path, resource, output, errorOutput,
+        outputDirectory), 0);
+    EXPECT_EQ(output.str(), "");
+    EXPECT_EQ(ReadFileBytes(dir / Cmd::ToNativePath(fileName)),
+        "unicode value");
 }
 
 // ---- the -o writer branches: OutputFilePath + WriteOutputFile ----

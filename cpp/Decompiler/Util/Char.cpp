@@ -1,0 +1,494 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+// See Char.hpp for the classification contract and the .NET probes behind
+// the range tables (System.Char semantics over UTF-16 code units, probed
+// from the .NET 10 runtime: C:\temp-probe\CharProbe\Program.cs).
+
+#include "Decompiler/Util/Char.hpp"
+
+#include <algorithm>
+#include <cstdint>
+
+namespace ILSpy::Decompiler::Util {
+namespace {
+
+// One inclusive BMP code-unit range. The tables are sorted ascending and
+// non-overlapping (the probe walks the units in order), so the lookup is a
+// binary search on the range starts.
+struct UnitRange {
+    std::uint16_t first;
+    std::uint16_t last;
+};
+
+bool ContainsRange(const UnitRange* ranges, std::size_t count, char16_t c) {
+    const UnitRange* end = ranges + count;
+    // lower_bound positions at the first range whose start exceeds c; the
+    // candidate containing c is the last range whose start is <= c -- the
+    // one just before it (the tables are sorted ascending by start).
+    const UnitRange* it = std::lower_bound(
+        ranges, end, c, [](const UnitRange& r, char16_t value) {
+            return r.first <= value;
+        });
+    if (it == ranges)
+        return false;
+    --it;
+    return c <= it->last;
+}
+
+// The char.IsLetterOrDigit units over the BMP: the Unicode categories
+// L* (letters) and Nd (decimal digits), probed unit-by-unit from the .NET
+// 10 runtime (note the non-letter-look items: U+00AA, U+00B5, U+00BA
+// are OtherLetter; U+017F long s is a letter). Surrogates are never
+// letters, so no supplementary plane is classified.
+constexpr UnitRange kLetterOrDigitRanges[] = {
+    { 0x0030, 0x0039 },  // 10 units
+    { 0x0041, 0x005A },  // 26 units
+    { 0x0061, 0x007A },  // 26 units
+    { 0x00AA, 0x00AA },
+    { 0x00B5, 0x00B5 },
+    { 0x00BA, 0x00BA },
+    { 0x00C0, 0x00D6 },  // 23 units
+    { 0x00D8, 0x00F6 },  // 31 units
+    { 0x00F8, 0x02C1 },  // 458 units
+    { 0x02C6, 0x02D1 },  // 12 units
+    { 0x02E0, 0x02E4 },  // 5 units
+    { 0x02EC, 0x02EC },
+    { 0x02EE, 0x02EE },
+    { 0x0370, 0x0374 },  // 5 units
+    { 0x0376, 0x0377 },  // 2 units
+    { 0x037A, 0x037D },  // 4 units
+    { 0x037F, 0x037F },
+    { 0x0386, 0x0386 },
+    { 0x0388, 0x038A },  // 3 units
+    { 0x038C, 0x038C },
+    { 0x038E, 0x03A1 },  // 20 units
+    { 0x03A3, 0x03F5 },  // 83 units
+    { 0x03F7, 0x0481 },  // 139 units
+    { 0x048A, 0x052F },  // 166 units
+    { 0x0531, 0x0556 },  // 38 units
+    { 0x0559, 0x0559 },
+    { 0x0560, 0x0588 },  // 41 units
+    { 0x05D0, 0x05EA },  // 27 units
+    { 0x05EF, 0x05F2 },  // 4 units
+    { 0x0620, 0x064A },  // 43 units
+    { 0x0660, 0x0669 },  // 10 units
+    { 0x066E, 0x066F },  // 2 units
+    { 0x0671, 0x06D3 },  // 99 units
+    { 0x06D5, 0x06D5 },
+    { 0x06E5, 0x06E6 },  // 2 units
+    { 0x06EE, 0x06FC },  // 15 units
+    { 0x06FF, 0x06FF },
+    { 0x0710, 0x0710 },
+    { 0x0712, 0x072F },  // 30 units
+    { 0x074D, 0x07A5 },  // 89 units
+    { 0x07B1, 0x07B1 },
+    { 0x07C0, 0x07EA },  // 43 units
+    { 0x07F4, 0x07F5 },  // 2 units
+    { 0x07FA, 0x07FA },
+    { 0x0800, 0x0815 },  // 22 units
+    { 0x081A, 0x081A },
+    { 0x0824, 0x0824 },
+    { 0x0828, 0x0828 },
+    { 0x0840, 0x0858 },  // 25 units
+    { 0x0860, 0x086A },  // 11 units
+    { 0x0870, 0x0887 },  // 24 units
+    { 0x0889, 0x088E },  // 6 units
+    { 0x08A0, 0x08C9 },  // 42 units
+    { 0x0904, 0x0939 },  // 54 units
+    { 0x093D, 0x093D },
+    { 0x0950, 0x0950 },
+    { 0x0958, 0x0961 },  // 10 units
+    { 0x0966, 0x096F },  // 10 units
+    { 0x0971, 0x0980 },  // 16 units
+    { 0x0985, 0x098C },  // 8 units
+    { 0x098F, 0x0990 },  // 2 units
+    { 0x0993, 0x09A8 },  // 22 units
+    { 0x09AA, 0x09B0 },  // 7 units
+    { 0x09B2, 0x09B2 },
+    { 0x09B6, 0x09B9 },  // 4 units
+    { 0x09BD, 0x09BD },
+    { 0x09CE, 0x09CE },
+    { 0x09DC, 0x09DD },  // 2 units
+    { 0x09DF, 0x09E1 },  // 3 units
+    { 0x09E6, 0x09F1 },  // 12 units
+    { 0x09FC, 0x09FC },
+    { 0x0A05, 0x0A0A },  // 6 units
+    { 0x0A0F, 0x0A10 },  // 2 units
+    { 0x0A13, 0x0A28 },  // 22 units
+    { 0x0A2A, 0x0A30 },  // 7 units
+    { 0x0A32, 0x0A33 },  // 2 units
+    { 0x0A35, 0x0A36 },  // 2 units
+    { 0x0A38, 0x0A39 },  // 2 units
+    { 0x0A59, 0x0A5C },  // 4 units
+    { 0x0A5E, 0x0A5E },
+    { 0x0A66, 0x0A6F },  // 10 units
+    { 0x0A72, 0x0A74 },  // 3 units
+    { 0x0A85, 0x0A8D },  // 9 units
+    { 0x0A8F, 0x0A91 },  // 3 units
+    { 0x0A93, 0x0AA8 },  // 22 units
+    { 0x0AAA, 0x0AB0 },  // 7 units
+    { 0x0AB2, 0x0AB3 },  // 2 units
+    { 0x0AB5, 0x0AB9 },  // 5 units
+    { 0x0ABD, 0x0ABD },
+    { 0x0AD0, 0x0AD0 },
+    { 0x0AE0, 0x0AE1 },  // 2 units
+    { 0x0AE6, 0x0AEF },  // 10 units
+    { 0x0AF9, 0x0AF9 },
+    { 0x0B05, 0x0B0C },  // 8 units
+    { 0x0B0F, 0x0B10 },  // 2 units
+    { 0x0B13, 0x0B28 },  // 22 units
+    { 0x0B2A, 0x0B30 },  // 7 units
+    { 0x0B32, 0x0B33 },  // 2 units
+    { 0x0B35, 0x0B39 },  // 5 units
+    { 0x0B3D, 0x0B3D },
+    { 0x0B5C, 0x0B5D },  // 2 units
+    { 0x0B5F, 0x0B61 },  // 3 units
+    { 0x0B66, 0x0B6F },  // 10 units
+    { 0x0B71, 0x0B71 },
+    { 0x0B83, 0x0B83 },
+    { 0x0B85, 0x0B8A },  // 6 units
+    { 0x0B8E, 0x0B90 },  // 3 units
+    { 0x0B92, 0x0B95 },  // 4 units
+    { 0x0B99, 0x0B9A },  // 2 units
+    { 0x0B9C, 0x0B9C },
+    { 0x0B9E, 0x0B9F },  // 2 units
+    { 0x0BA3, 0x0BA4 },  // 2 units
+    { 0x0BA8, 0x0BAA },  // 3 units
+    { 0x0BAE, 0x0BB9 },  // 12 units
+    { 0x0BD0, 0x0BD0 },
+    { 0x0BE6, 0x0BEF },  // 10 units
+    { 0x0C05, 0x0C0C },  // 8 units
+    { 0x0C0E, 0x0C10 },  // 3 units
+    { 0x0C12, 0x0C28 },  // 23 units
+    { 0x0C2A, 0x0C39 },  // 16 units
+    { 0x0C3D, 0x0C3D },
+    { 0x0C58, 0x0C5A },  // 3 units
+    { 0x0C5D, 0x0C5D },
+    { 0x0C60, 0x0C61 },  // 2 units
+    { 0x0C66, 0x0C6F },  // 10 units
+    { 0x0C80, 0x0C80 },
+    { 0x0C85, 0x0C8C },  // 8 units
+    { 0x0C8E, 0x0C90 },  // 3 units
+    { 0x0C92, 0x0CA8 },  // 23 units
+    { 0x0CAA, 0x0CB3 },  // 10 units
+    { 0x0CB5, 0x0CB9 },  // 5 units
+    { 0x0CBD, 0x0CBD },
+    { 0x0CDD, 0x0CDE },  // 2 units
+    { 0x0CE0, 0x0CE1 },  // 2 units
+    { 0x0CE6, 0x0CEF },  // 10 units
+    { 0x0CF1, 0x0CF2 },  // 2 units
+    { 0x0D04, 0x0D0C },  // 9 units
+    { 0x0D0E, 0x0D10 },  // 3 units
+    { 0x0D12, 0x0D3A },  // 41 units
+    { 0x0D3D, 0x0D3D },
+    { 0x0D4E, 0x0D4E },
+    { 0x0D54, 0x0D56 },  // 3 units
+    { 0x0D5F, 0x0D61 },  // 3 units
+    { 0x0D66, 0x0D6F },  // 10 units
+    { 0x0D7A, 0x0D7F },  // 6 units
+    { 0x0D85, 0x0D96 },  // 18 units
+    { 0x0D9A, 0x0DB1 },  // 24 units
+    { 0x0DB3, 0x0DBB },  // 9 units
+    { 0x0DBD, 0x0DBD },
+    { 0x0DC0, 0x0DC6 },  // 7 units
+    { 0x0DE6, 0x0DEF },  // 10 units
+    { 0x0E01, 0x0E30 },  // 48 units
+    { 0x0E32, 0x0E33 },  // 2 units
+    { 0x0E40, 0x0E46 },  // 7 units
+    { 0x0E50, 0x0E59 },  // 10 units
+    { 0x0E81, 0x0E82 },  // 2 units
+    { 0x0E84, 0x0E84 },
+    { 0x0E86, 0x0E8A },  // 5 units
+    { 0x0E8C, 0x0EA3 },  // 24 units
+    { 0x0EA5, 0x0EA5 },
+    { 0x0EA7, 0x0EB0 },  // 10 units
+    { 0x0EB2, 0x0EB3 },  // 2 units
+    { 0x0EBD, 0x0EBD },
+    { 0x0EC0, 0x0EC4 },  // 5 units
+    { 0x0EC6, 0x0EC6 },
+    { 0x0ED0, 0x0ED9 },  // 10 units
+    { 0x0EDC, 0x0EDF },  // 4 units
+    { 0x0F00, 0x0F00 },
+    { 0x0F20, 0x0F29 },  // 10 units
+    { 0x0F40, 0x0F47 },  // 8 units
+    { 0x0F49, 0x0F6C },  // 36 units
+    { 0x0F88, 0x0F8C },  // 5 units
+    { 0x1000, 0x102A },  // 43 units
+    { 0x103F, 0x1049 },  // 11 units
+    { 0x1050, 0x1055 },  // 6 units
+    { 0x105A, 0x105D },  // 4 units
+    { 0x1061, 0x1061 },
+    { 0x1065, 0x1066 },  // 2 units
+    { 0x106E, 0x1070 },  // 3 units
+    { 0x1075, 0x1081 },  // 13 units
+    { 0x108E, 0x108E },
+    { 0x1090, 0x1099 },  // 10 units
+    { 0x10A0, 0x10C5 },  // 38 units
+    { 0x10C7, 0x10C7 },
+    { 0x10CD, 0x10CD },
+    { 0x10D0, 0x10FA },  // 43 units
+    { 0x10FC, 0x1248 },  // 333 units
+    { 0x124A, 0x124D },  // 4 units
+    { 0x1250, 0x1256 },  // 7 units
+    { 0x1258, 0x1258 },
+    { 0x125A, 0x125D },  // 4 units
+    { 0x1260, 0x1288 },  // 41 units
+    { 0x128A, 0x128D },  // 4 units
+    { 0x1290, 0x12B0 },  // 33 units
+    { 0x12B2, 0x12B5 },  // 4 units
+    { 0x12B8, 0x12BE },  // 7 units
+    { 0x12C0, 0x12C0 },
+    { 0x12C2, 0x12C5 },  // 4 units
+    { 0x12C8, 0x12D6 },  // 15 units
+    { 0x12D8, 0x1310 },  // 57 units
+    { 0x1312, 0x1315 },  // 4 units
+    { 0x1318, 0x135A },  // 67 units
+    { 0x1380, 0x138F },  // 16 units
+    { 0x13A0, 0x13F5 },  // 86 units
+    { 0x13F8, 0x13FD },  // 6 units
+    { 0x1401, 0x166C },  // 620 units
+    { 0x166F, 0x167F },  // 17 units
+    { 0x1681, 0x169A },  // 26 units
+    { 0x16A0, 0x16EA },  // 75 units
+    { 0x16F1, 0x16F8 },  // 8 units
+    { 0x1700, 0x1711 },  // 18 units
+    { 0x171F, 0x1731 },  // 19 units
+    { 0x1740, 0x1751 },  // 18 units
+    { 0x1760, 0x176C },  // 13 units
+    { 0x176E, 0x1770 },  // 3 units
+    { 0x1780, 0x17B3 },  // 52 units
+    { 0x17D7, 0x17D7 },
+    { 0x17DC, 0x17DC },
+    { 0x17E0, 0x17E9 },  // 10 units
+    { 0x1810, 0x1819 },  // 10 units
+    { 0x1820, 0x1878 },  // 89 units
+    { 0x1880, 0x1884 },  // 5 units
+    { 0x1887, 0x18A8 },  // 34 units
+    { 0x18AA, 0x18AA },
+    { 0x18B0, 0x18F5 },  // 70 units
+    { 0x1900, 0x191E },  // 31 units
+    { 0x1946, 0x196D },  // 40 units
+    { 0x1970, 0x1974 },  // 5 units
+    { 0x1980, 0x19AB },  // 44 units
+    { 0x19B0, 0x19C9 },  // 26 units
+    { 0x19D0, 0x19D9 },  // 10 units
+    { 0x1A00, 0x1A16 },  // 23 units
+    { 0x1A20, 0x1A54 },  // 53 units
+    { 0x1A80, 0x1A89 },  // 10 units
+    { 0x1A90, 0x1A99 },  // 10 units
+    { 0x1AA7, 0x1AA7 },
+    { 0x1B05, 0x1B33 },  // 47 units
+    { 0x1B45, 0x1B4C },  // 8 units
+    { 0x1B50, 0x1B59 },  // 10 units
+    { 0x1B83, 0x1BA0 },  // 30 units
+    { 0x1BAE, 0x1BE5 },  // 56 units
+    { 0x1C00, 0x1C23 },  // 36 units
+    { 0x1C40, 0x1C49 },  // 10 units
+    { 0x1C4D, 0x1C7D },  // 49 units
+    { 0x1C80, 0x1C8A },  // 11 units
+    { 0x1C90, 0x1CBA },  // 43 units
+    { 0x1CBD, 0x1CBF },  // 3 units
+    { 0x1CE9, 0x1CEC },  // 4 units
+    { 0x1CEE, 0x1CF3 },  // 6 units
+    { 0x1CF5, 0x1CF6 },  // 2 units
+    { 0x1CFA, 0x1CFA },
+    { 0x1D00, 0x1DBF },  // 192 units
+    { 0x1E00, 0x1F15 },  // 278 units
+    { 0x1F18, 0x1F1D },  // 6 units
+    { 0x1F20, 0x1F45 },  // 38 units
+    { 0x1F48, 0x1F4D },  // 6 units
+    { 0x1F50, 0x1F57 },  // 8 units
+    { 0x1F59, 0x1F59 },
+    { 0x1F5B, 0x1F5B },
+    { 0x1F5D, 0x1F5D },
+    { 0x1F5F, 0x1F7D },  // 31 units
+    { 0x1F80, 0x1FB4 },  // 53 units
+    { 0x1FB6, 0x1FBC },  // 7 units
+    { 0x1FBE, 0x1FBE },
+    { 0x1FC2, 0x1FC4 },  // 3 units
+    { 0x1FC6, 0x1FCC },  // 7 units
+    { 0x1FD0, 0x1FD3 },  // 4 units
+    { 0x1FD6, 0x1FDB },  // 6 units
+    { 0x1FE0, 0x1FEC },  // 13 units
+    { 0x1FF2, 0x1FF4 },  // 3 units
+    { 0x1FF6, 0x1FFC },  // 7 units
+    { 0x2071, 0x2071 },
+    { 0x207F, 0x207F },
+    { 0x2090, 0x209C },  // 13 units
+    { 0x2102, 0x2102 },
+    { 0x2107, 0x2107 },
+    { 0x210A, 0x2113 },  // 10 units
+    { 0x2115, 0x2115 },
+    { 0x2119, 0x211D },  // 5 units
+    { 0x2124, 0x2124 },
+    { 0x2126, 0x2126 },
+    { 0x2128, 0x2128 },
+    { 0x212A, 0x212D },  // 4 units
+    { 0x212F, 0x2139 },  // 11 units
+    { 0x213C, 0x213F },  // 4 units
+    { 0x2145, 0x2149 },  // 5 units
+    { 0x214E, 0x214E },
+    { 0x2183, 0x2184 },  // 2 units
+    { 0x2C00, 0x2CE4 },  // 229 units
+    { 0x2CEB, 0x2CEE },  // 4 units
+    { 0x2CF2, 0x2CF3 },  // 2 units
+    { 0x2D00, 0x2D25 },  // 38 units
+    { 0x2D27, 0x2D27 },
+    { 0x2D2D, 0x2D2D },
+    { 0x2D30, 0x2D67 },  // 56 units
+    { 0x2D6F, 0x2D6F },
+    { 0x2D80, 0x2D96 },  // 23 units
+    { 0x2DA0, 0x2DA6 },  // 7 units
+    { 0x2DA8, 0x2DAE },  // 7 units
+    { 0x2DB0, 0x2DB6 },  // 7 units
+    { 0x2DB8, 0x2DBE },  // 7 units
+    { 0x2DC0, 0x2DC6 },  // 7 units
+    { 0x2DC8, 0x2DCE },  // 7 units
+    { 0x2DD0, 0x2DD6 },  // 7 units
+    { 0x2DD8, 0x2DDE },  // 7 units
+    { 0x2E2F, 0x2E2F },
+    { 0x3005, 0x3006 },  // 2 units
+    { 0x3031, 0x3035 },  // 5 units
+    { 0x303B, 0x303C },  // 2 units
+    { 0x3041, 0x3096 },  // 86 units
+    { 0x309D, 0x309F },  // 3 units
+    { 0x30A1, 0x30FA },  // 90 units
+    { 0x30FC, 0x30FF },  // 4 units
+    { 0x3105, 0x312F },  // 43 units
+    { 0x3131, 0x318E },  // 94 units
+    { 0x31A0, 0x31BF },  // 32 units
+    { 0x31F0, 0x31FF },  // 16 units
+    { 0x3400, 0x4DBF },  // 6592 units
+    { 0x4E00, 0xA48C },  // 22157 units
+    { 0xA4D0, 0xA4FD },  // 46 units
+    { 0xA500, 0xA60C },  // 269 units
+    { 0xA610, 0xA62B },  // 28 units
+    { 0xA640, 0xA66E },  // 47 units
+    { 0xA67F, 0xA69D },  // 31 units
+    { 0xA6A0, 0xA6E5 },  // 70 units
+    { 0xA717, 0xA71F },  // 9 units
+    { 0xA722, 0xA788 },  // 103 units
+    { 0xA78B, 0xA7CD },  // 67 units
+    { 0xA7D0, 0xA7D1 },  // 2 units
+    { 0xA7D3, 0xA7D3 },
+    { 0xA7D5, 0xA7DC },  // 8 units
+    { 0xA7F2, 0xA801 },  // 16 units
+    { 0xA803, 0xA805 },  // 3 units
+    { 0xA807, 0xA80A },  // 4 units
+    { 0xA80C, 0xA822 },  // 23 units
+    { 0xA840, 0xA873 },  // 52 units
+    { 0xA882, 0xA8B3 },  // 50 units
+    { 0xA8D0, 0xA8D9 },  // 10 units
+    { 0xA8F2, 0xA8F7 },  // 6 units
+    { 0xA8FB, 0xA8FB },
+    { 0xA8FD, 0xA8FE },  // 2 units
+    { 0xA900, 0xA925 },  // 38 units
+    { 0xA930, 0xA946 },  // 23 units
+    { 0xA960, 0xA97C },  // 29 units
+    { 0xA984, 0xA9B2 },  // 47 units
+    { 0xA9CF, 0xA9D9 },  // 11 units
+    { 0xA9E0, 0xA9E4 },  // 5 units
+    { 0xA9E6, 0xA9FE },  // 25 units
+    { 0xAA00, 0xAA28 },  // 41 units
+    { 0xAA40, 0xAA42 },  // 3 units
+    { 0xAA44, 0xAA4B },  // 8 units
+    { 0xAA50, 0xAA59 },  // 10 units
+    { 0xAA60, 0xAA76 },  // 23 units
+    { 0xAA7A, 0xAA7A },
+    { 0xAA7E, 0xAAAF },  // 50 units
+    { 0xAAB1, 0xAAB1 },
+    { 0xAAB5, 0xAAB6 },  // 2 units
+    { 0xAAB9, 0xAABD },  // 5 units
+    { 0xAAC0, 0xAAC0 },
+    { 0xAAC2, 0xAAC2 },
+    { 0xAADB, 0xAADD },  // 3 units
+    { 0xAAE0, 0xAAEA },  // 11 units
+    { 0xAAF2, 0xAAF4 },  // 3 units
+    { 0xAB01, 0xAB06 },  // 6 units
+    { 0xAB09, 0xAB0E },  // 6 units
+    { 0xAB11, 0xAB16 },  // 6 units
+    { 0xAB20, 0xAB26 },  // 7 units
+    { 0xAB28, 0xAB2E },  // 7 units
+    { 0xAB30, 0xAB5A },  // 43 units
+    { 0xAB5C, 0xAB69 },  // 14 units
+    { 0xAB70, 0xABE2 },  // 115 units
+    { 0xABF0, 0xABF9 },  // 10 units
+    { 0xAC00, 0xD7A3 },  // 11172 units
+    { 0xD7B0, 0xD7C6 },  // 23 units
+    { 0xD7CB, 0xD7FB },  // 49 units
+    { 0xF900, 0xFA6D },  // 366 units
+    { 0xFA70, 0xFAD9 },  // 106 units
+    { 0xFB00, 0xFB06 },  // 7 units
+    { 0xFB13, 0xFB17 },  // 5 units
+    { 0xFB1D, 0xFB1D },
+    { 0xFB1F, 0xFB28 },  // 10 units
+    { 0xFB2A, 0xFB36 },  // 13 units
+    { 0xFB38, 0xFB3C },  // 5 units
+    { 0xFB3E, 0xFB3E },
+    { 0xFB40, 0xFB41 },  // 2 units
+    { 0xFB43, 0xFB44 },  // 2 units
+    { 0xFB46, 0xFBB1 },  // 108 units
+    { 0xFBD3, 0xFD3D },  // 363 units
+    { 0xFD50, 0xFD8F },  // 64 units
+    { 0xFD92, 0xFDC7 },  // 54 units
+    { 0xFDF0, 0xFDFB },  // 12 units
+    { 0xFE70, 0xFE74 },  // 5 units
+    { 0xFE76, 0xFEFC },  // 135 units
+    { 0xFF10, 0xFF19 },  // 10 units
+    { 0xFF21, 0xFF3A },  // 26 units
+    { 0xFF41, 0xFF5A },  // 26 units
+    { 0xFF66, 0xFFBE },  // 89 units
+    { 0xFFC2, 0xFFC7 },  // 6 units
+    { 0xFFCA, 0xFFCF },  // 6 units
+    { 0xFFD2, 0xFFD7 },  // 6 units
+    { 0xFFDA, 0xFFDC },  // 3 units
+};
+
+// The char.IsWhiteSpace units over the BMP: the control characters
+// 09-0D and NEL (85), the space-like separators (20, A0, 1680,
+// 2000-200A, 2028-2029, 202F, 205F, 3000), probed unit-by-unit.
+constexpr UnitRange kWhiteSpaceRanges[] = {
+    { 0x0009, 0x000D },  // 5 units
+    { 0x0020, 0x0020 },
+    { 0x0085, 0x0085 },
+    { 0x00A0, 0x00A0 },
+    { 0x1680, 0x1680 },
+    { 0x2000, 0x200A },  // 11 units
+    { 0x2028, 0x2029 },  // 2 units
+    { 0x202F, 0x202F },
+    { 0x205F, 0x205F },
+    { 0x3000, 0x3000 },
+};
+
+
+}  // namespace
+
+bool IsLetterOrDigit(char16_t c) {
+    return ContainsRange(kLetterOrDigitRanges, std::size(kLetterOrDigitRanges), c);
+}
+
+bool IsWhiteSpace(char16_t c) {
+    return ContainsRange(kWhiteSpaceRanges, std::size(kWhiteSpaceRanges), c);
+}
+
+bool IsHighSurrogate(char16_t c) {
+    return c >= 0xD800 && c <= 0xDBFF;
+}
+
+}  // namespace ILSpy::Decompiler::Util
