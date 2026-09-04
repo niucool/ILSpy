@@ -52,9 +52,11 @@
 
 #include "Decompiler/DebugInfo/IDebugInfoProvider.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/TypeSystem/TypeKind.hpp"
 
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 
@@ -84,5 +86,20 @@ std::unique_ptr<Decompiler::DebugInfo::IDebugInfoProvider> TryLoadPDB(
 // C# return value).
 int ShowIL(const std::string& assemblyFileName, std::ostringstream& output,
     bool showILSequencePoints, const InputPDBFile& pdbFile);
+
+// The C# `int ListContent(string assemblyFileName, TextWriter output,
+// ISet<TypeKind> kinds)` (IlspyCmdProgram.cs): the -l/--list render -- every
+// type definition in the TypeDef table's ROW order (the C#
+// `decompiler.TypeSystem.MainModule.TypeDefinitions` walk -- MetadataModule
+// iterates metadata.TypeDefinitions, so <Module> is included and nested
+// types appear at their physical rows) whose kind is selected, as
+// `{Kind} {FullTypeName.ReflectionName}` lines: the TypeKind enum member
+// name (Enum.ToString) and the SRMExtensions GetFullTypeName declaring-chain
+// reflection name (the `n arity suffix and the '+' nesting separators).
+// Returns 0 (the C# return value; a kinds set that selects nothing prints
+// nothing). The -o writer branch (the <name>.list.txt file) is deferred with
+// the project output paths.
+int ListContent(const std::string& assemblyFileName, std::ostringstream& output,
+    const std::set<ILSpy::Decompiler::TypeSystem::TypeKind>& kinds);
 
 }  // namespace ILSpy::ILSpyCmd

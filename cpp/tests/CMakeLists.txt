@@ -40,6 +40,7 @@ add_executable(ilspy_tests
     ILSpyX/PdbProvider/DebugInfoUtils_Test.cpp
     ILSpyCmd/IlspyCmdProgram_Test.cpp
     ILSpyCmd/MetadataTableDumper_Test.cpp
+    ILSpyCmd/TypesParser_Test.cpp
     Decompiler/TypeSystem/TypeName_Test.cpp
     Decompiler/TypeSystem/SignatureDecoder_Test.cpp
     Decompiler/TypeSystem/TypeKindDerivation_Test.cpp

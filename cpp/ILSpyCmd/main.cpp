@@ -66,12 +66,22 @@
 #include "Decompiler/TypeSystem/TypeKind.hpp"
 #include "ILSpyCmd/IlspyCmdProgram.hpp"
 #include "ILSpyCmd/MetadataTableDumper.hpp"
+#include "ILSpyCmd/TypesParser.hpp"
 
 #if defined(_WIN32)
 #include <fcntl.h>
 #include <io.h>
 #endif
 
+// cxxopts' vector options split every value on ',' by default
+// (CXXOPTS_VECTOR_DELIMITER). The -l/--list values must reach the port's
+// SplitEntityTypeValues UNsplit: the C# String.Split(',', ';') preserves
+// the empty entries a trailing delimiter produces ("c," is two values,
+// which changes the ParseSelection path -- the single-value gate), and
+// ';' is not a cxxopts delimiter at all. Disabling the delimiter makes the
+// vector accumulate one entry per occurrence, whole, the faithful input
+// shape for the port's own split.
+#define CXXOPTS_VECTOR_DELIMITER '\0'
 #include <cxxopts.hpp>
 
 #include <cstdint>
@@ -79,8 +89,10 @@
 #include <cstdlib>
 #include <cctype>
 #include <iostream>
+#include <set>
 #include <sstream>
 #include <string>
+#include <vector>
 
 using namespace ILSpy::Decompiler::Metadata;
 
@@ -100,8 +112,8 @@ int main(int argc, char** argv) {
             cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("csharp", "Translate method bodies to C#-ish text (Phase 5 seed: gotos for control flow, var locals, approximate casts/names -- the real resolver back end lands in Phase 5)",
             cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
-        ("l,list", "List types of the given kind(s): c(lass), i(nterface), s(truct), d(elegate), e(num)",
-            cxxopts::value<std::string>()->default_value(""))
+        ("l,list", "Lists all entities of the specified type(s). Valid types: c(lass), i(nterface), s(truct), d(elegate), e(num)",
+            cxxopts::value<std::vector<std::string>>())
         ("dump-table", "Dump a metadata table: prints RID, token, names, heap offsets and coded indexes of every row. <table> is the ECMA-335 table name (e.g. TypeDef, Property, MethodSemantics; case-insensitive) or table number (decimal or 0x-prefixed hex, e.g. 0x17).",
             cxxopts::value<std::string>()->default_value(""))
         ("json", "Output as JSON. Currently only supported together with --dump-table.",
@@ -152,7 +164,13 @@ int main(int argc, char** argv) {
     bool wantIlAst = parsed.count("ilast") != 0 && parsed["ilast"].as<bool>();
     bool wantIlAstAll = parsed.count("ilast-all") != 0 && parsed["ilast-all"].as<bool>();
     bool wantCSharp = parsed.count("csharp") != 0 && parsed["csharp"].as<bool>();
-    std::string listKinds = parsed.count("list") != 0 ? parsed["list"].as<std::string>() : "";
+    // The C# `-l|--list <entity-type(s)>` (CommandOptionType.MultipleValue):
+    // one value per occurrence (cxxopts accumulates the vector; the ','
+    // delimiter is disabled above so the values reach the port's split
+    // unsplit).
+    std::vector<std::string> listValues;
+    if (parsed.count("list") != 0)
+        listValues = parsed["list"].as<std::vector<std::string>>();
     std::string dumpTable = parsed.count("dump-table") != 0 ? parsed["dump-table"].as<std::string>() : "";
     std::string typeFilter = parsed.count("type") != 0 ? parsed["type"].as<std::string>() : "";
     // The C# `(bool IsSet, string Value) InputPDBFile` -- the -usepdb option
@@ -176,7 +194,7 @@ int main(int argc, char** argv) {
         return 64;  // ProgramExitCodes.EX_USAGE
     }
 
-    if (!wantIl && !wantIlSequencePoints && !wantIlAst && !wantIlAstAll && !wantCSharp && listKinds.empty() && dumpTable.empty()) {
+    if (!wantIl && !wantIlSequencePoints && !wantIlAst && !wantIlAstAll && !wantCSharp && listValues.empty() && dumpTable.empty()) {
         std::cout << "ilspycmd: see --help for available options (--il, --il-sequence-points, --ilast, --ilast-all, --csharp, --list, --dump-table).\n";
         return 0;
     }
@@ -187,52 +205,24 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (!listKinds.empty()) {
-        // List types of the given kinds. Maps the kind chars to TypeKind values.
-        auto kindMatch = [&](ILSpy::Decompiler::TypeSystem::TypeKind k) {
-            char c = '\0';
-            switch (k) {
-                case ILSpy::Decompiler::TypeSystem::TypeKind::Class: c = 'c'; break;
-                case ILSpy::Decompiler::TypeSystem::TypeKind::Interface: c = 'i'; break;
-                case ILSpy::Decompiler::TypeSystem::TypeKind::Struct: c = 's'; break;
-                case ILSpy::Decompiler::TypeSystem::TypeKind::Delegate: c = 'd'; break;
-                case ILSpy::Decompiler::TypeSystem::TypeKind::Enum: c = 'e'; break;
-                default: return false;
-            }
-            return listKinds.find(c) != std::string::npos;
-        };
-        for (const auto& t : file.TypeDefs()) {
-            if (t.Name == "<Module>") continue;
-            if (!kindMatch(t.Kind)) continue;
-            std::string fullName = t.Namespace.empty() ? t.Name : t.Namespace + "." + t.Name;
-            if (!typeFilter.empty() && fullName != typeFilter) continue;
-            std::cout << fullName << '\n';
-        }
-        return 0;
-    }
-
-    if (!dumpTable.empty()) {
-        // The C# DumpTableName arm (IlspyCmdProgram.cs PerformPerFileAction,
-        // the `else if (DumpTableName != null)` branch): the table-name parse
-        // (an unknown name is a usage error -- the two stderr lines and
-        // EX_USAGE, the ProgramExitCodes port) then the whole-table dump
-        // through the MetadataTableDumper port (the aligned console table,
-        // or the JSON document with --json). The -o per-file writer branch
-        // is deferred with the project output paths (the port CLI has no
-        // --outputdir yet; the C# writes <name>.<table>.txt/.json there).
-        ILSpy::Decompiler::Metadata::CorTableIndex table;
-        if (!ILSpy::ILSpyCmd::TryParseTableName(dumpTable, table)) {
-            std::cerr << "Unknown metadata table '" << dumpTable << "'.\n";
-            std::cerr << "Supported tables: "
-                      << ILSpy::ILSpyCmd::SupportedTableNames() << '\n';
-            return 64;  // ProgramExitCodes.EX_USAGE
-        }
+    // The C# EntityTypes arm (IlspyCmdProgram.cs PerformPerFileAction, the
+    // `if (EntityTypes.Any())` branch): the option values split on ',' and
+    // ';' (the OnExecuteAsync SelectMany), the TypesParser.ParseSelection
+    // kinds selection, then the ListContent render -- every type definition
+    // in the TypeDef table's row order (<Module> included) whose kind is
+    // selected, as `{Kind} {ReflectionName}` lines. The -t type filter is
+    // NOT applied here (the C# ListContent ignores TypeName); the -o writer
+    // branch (the <name>.list.txt file) is deferred with the project output
+    // paths. The per-kind scaffold this replaces matched single characters
+    // anywhere in the value and printed bare Namespace.Name forms.
+    if (!listValues.empty()) {
+        std::set<ILSpy::Decompiler::TypeSystem::TypeKind> kinds =
+            ILSpy::ILSpyCmd::ParseSelection(ILSpy::ILSpyCmd::SplitEntityTypeValues(listValues));
         std::ostringstream buffer;
-        int rc = ILSpy::ILSpyCmd::DumpTable(asmPath, buffer, table, wantJson);
-        // The buffer carries the final CRLF text (the same TextWriter
-        // convention ShowIL renders); stdout's default text mode would
-        // translate every \n again, so the block is written in binary mode
-        // (the ShowIL pattern).
+        int rc = ILSpy::ILSpyCmd::ListContent(asmPath, buffer, kinds);
+        // The buffer carries the final CRLF text (the TextWriter.WriteLine
+        // Environment.NewLine convention -- the same bytes the C# Console.Out
+        // writes); the block is written in binary mode (the ShowIL pattern).
 #if defined(_WIN32)
         int stdoutFd = _fileno(stdout);
         int oldMode = _setmode(stdoutFd, _O_BINARY);
@@ -260,6 +250,44 @@ int main(int argc, char** argv) {
         // default text mode would translate every \n again (\r\n -> \r\r\n),
         // so the block is written in binary mode (restored after -- the other
         // paths print plain \n and rely on the text-mode translation).
+#if defined(_WIN32)
+        int stdoutFd = _fileno(stdout);
+        int oldMode = _setmode(stdoutFd, _O_BINARY);
+        std::cout << buffer.str();
+        std::cout.flush();
+        if (oldMode != -1)
+            _setmode(stdoutFd, oldMode);
+#else
+        std::cout << buffer.str();
+#endif
+        return rc;
+    }
+
+    if (!dumpTable.empty()) {
+        // The C# DumpTableName arm (IlspyCmdProgram.cs PerformPerFileAction,
+        // the `else if (DumpTableName != null)` branch -- it sits AFTER the
+        // EntityTypes, ShowIL, CreateDebugInfo, DumpPackage, ListResources and
+        // ResourceName arms, so a command line naming several of those flags
+        // runs the earlier action, not the table dump): the table-name parse
+        // (an unknown name is a usage error -- the two stderr lines and
+        // EX_USAGE, the ProgramExitCodes port) then the whole-table dump
+        // through the MetadataTableDumper port (the aligned console table,
+        // or the JSON document with --json). The -o per-file writer branch
+        // is deferred with the project output paths (the port CLI has no
+        // --outputdir yet; the C# writes <name>.<table>.txt/.json there).
+        ILSpy::Decompiler::Metadata::CorTableIndex table;
+        if (!ILSpy::ILSpyCmd::TryParseTableName(dumpTable, table)) {
+            std::cerr << "Unknown metadata table '" << dumpTable << "'.\n";
+            std::cerr << "Supported tables: "
+                      << ILSpy::ILSpyCmd::SupportedTableNames() << '\n';
+            return 64;  // ProgramExitCodes.EX_USAGE
+        }
+        std::ostringstream buffer;
+        int rc = ILSpy::ILSpyCmd::DumpTable(asmPath, buffer, table, wantJson);
+        // The buffer carries the final CRLF text (the same TextWriter
+        // convention ShowIL renders); stdout's default text mode would
+        // translate every \n again, so the block is written in binary mode
+        // (the ShowIL pattern).
 #if defined(_WIN32)
         int stdoutFd = _fileno(stdout);
         int oldMode = _setmode(stdoutFd, _O_BINARY);

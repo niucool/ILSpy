@@ -41,6 +41,7 @@ namespace {
 
 namespace fs = std::filesystem;
 using ILSpy::Decompiler::Metadata::MetadataFile;
+using ILSpy::Decompiler::TypeSystem::TypeKind;
 using ILSpy::Tests::FixtureId;
 using ILSpy::Tests::PatchedNetModule;
 using ILSpy::Tests::PortableCodeViewEntry;
@@ -259,4 +260,150 @@ TEST(IlspyCmdProgramTest, ModuleNameIsAssemblyNameElseModuleName) {
     MetadataFile bogus("no-such-file-at-all.dll");
     EXPECT_FALSE(bogus.IsValid());
     EXPECT_EQ(bogus.Name(), "");
+}
+
+// ---- ListContent: the -l/--list render ----
+
+// The tiny.netmodule fixture (two Class-kind typedefs, <Module> and Tiny):
+// the -l c render is the REAL ilspycmd 11.0 output byte for byte -- the
+// TypeKind enum name, a space, the GetFullTypeName reflection name, CRLF
+// line endings, <Module> included.
+TEST(IlspyCmdProgramTest, ListContentTinyNetmoduleExact) {
+    std::string tiny = ::WriteTinyNetModule();
+    ASSERT_FALSE(tiny.empty());
+    {
+        std::ostringstream output;
+        EXPECT_EQ(Cmd::ListContent(tiny, output, {TypeKind::Class}), 0);
+        EXPECT_EQ(output.str(), "Class <Module>\r\nClass Tiny\r\n");
+    }
+    // A kinds set that selects nothing renders nothing.
+    {
+        std::ostringstream output;
+        EXPECT_EQ(Cmd::ListContent(tiny, output, {TypeKind::Interface}), 0);
+        EXPECT_EQ(output.str(), "");
+    }
+    // Several kinds: the union, in the table order.
+    {
+        std::ostringstream output;
+        EXPECT_EQ(Cmd::ListContent(tiny, output, {TypeKind::Class, TypeKind::Struct}), 0);
+        EXPECT_EQ(output.str(), "Class <Module>\r\nClass Tiny\r\n");
+    }
+    // The empty kinds set: nothing matches, nothing renders.
+    {
+        std::ostringstream output;
+        EXPECT_EQ(Cmd::ListContent(tiny, output, {}), 0);
+        EXPECT_EQ(output.str(), "");
+    }
+}
+
+// The mscorlib -l c render opens with the exact gold prefix (the first 12
+// lines of the REAL tool's output -- the TypeDef table order: <Module>,
+// the compiler-generated anonymous types, then the Microsoft.Win32
+// classes), and carries the nested-type '+' renders.
+TEST(IlspyCmdProgramTest, ListContentMscorlibFirstLinesAndNestedRenders) {
+    std::string path = MscorlibPath();
+    if (!fs::exists(path))
+        GTEST_SKIP() << "mscorlib fixture not present";
+    MetadataFile mscorlib(path);
+    ASSERT_TRUE(mscorlib.IsValid());
+    std::ostringstream output;
+    EXPECT_EQ(Cmd::ListContent(path, output, {TypeKind::Class}), 0);
+    std::string text = output.str();
+    // The exact gold prefix (the real tool's first 12 lines).
+    EXPECT_EQ(text.rfind("Class <Module>\r\n"
+                          "Class <>f__AnonymousType0`1\r\n"
+                          "Class EmptyArray`1\r\n"
+                          "Class FXAssembly\r\n"
+                          "Class ThisAssembly\r\n"
+                          "Class AssemblyRef\r\n"
+                          "Class Microsoft.Win32.ASM_CACHE\r\n"
+                          "Class Microsoft.Win32.CANOF\r\n"
+                          "Class Microsoft.Win32.ASM_NAME\r\n"
+                          "Class Microsoft.Win32.Fusion\r\n"
+                          "Class Microsoft.Win32.Win32Native\r\n"
+                          "Class Microsoft.Win32.OAVariantLib\r\n",
+                          0),
+        0);
+    // The nested types render through the '+' separator at their physical
+    // table rows (the GetFullTypeName declaring-chain walk) -- one render
+    // per kind, each spot line from its own kind's list.
+    {
+        std::ostringstream all;
+        EXPECT_EQ(Cmd::ListContent(path, all,
+            {TypeKind::Class, TypeKind::Struct, TypeKind::Delegate, TypeKind::Enum}),
+            0);
+        std::string unionText = all.str();
+        EXPECT_NE(unionText.find("Class Microsoft.Win32.Win32Native+OSVERSIONINFO\r\n"),
+            std::string::npos);
+        EXPECT_NE(unionText.find("Delegate Microsoft.Win32.Win32Native+ConsoleCtrlHandlerRoutine\r\n"),
+            std::string::npos);
+        EXPECT_NE(unionText.find("Struct System.Collections.Generic.Dictionary`2+Enumerator\r\n"),
+            std::string::npos);
+        EXPECT_NE(
+            unionText.find(
+                "Enum System.Diagnostics.Tracing.ActivityTracker+ActivityInfo+NumberListCodes\r\n"),
+            std::string::npos);
+    }
+    // The framework base classes are Class (their base type is System.Object,
+    // not ValueType -- the IsValueType rule the kind derivation ports).
+    EXPECT_NE(text.find("Class System.Object\r\n"), std::string::npos);
+    EXPECT_NE(text.find("Class System.Enum\r\n"), std::string::npos);
+    EXPECT_NE(text.find("Class System.ValueType\r\n"), std::string::npos);
+}
+
+// The mscorlib kind counts -- every line of every kind's list starts with
+// the TypeKind enum name, System.Void is NOT a Struct (its Kind is Void,
+// outside the -l kinds), and the five lists partition the TypeDef table
+// (the counts are the REAL tool's line counts over this fixture:
+// 2033/324/415/75/508, plus the one Void-kind row == the 3356 typedefs).
+TEST(IlspyCmdProgramTest, ListContentMscorlibKindPartition) {
+    std::string path = MscorlibPath();
+    if (!fs::exists(path))
+        GTEST_SKIP() << "mscorlib fixture not present";
+    MetadataFile mscorlib(path);
+    ASSERT_TRUE(mscorlib.IsValid());
+    struct KindCount {
+        TypeKind kind;
+        const char* name;
+        std::size_t count;
+    };
+    const KindCount expected[] = {
+        {TypeKind::Class, "Class", 2033},
+        {TypeKind::Interface, "Interface", 324},
+        {TypeKind::Struct, "Struct", 415},
+        {TypeKind::Delegate, "Delegate", 75},
+        {TypeKind::Enum, "Enum", 508},
+    };
+    std::size_t total = 0;
+    for (const auto& e : expected) {
+        std::ostringstream output;
+        EXPECT_EQ(Cmd::ListContent(path, output, {e.kind}), 0);
+        std::string text = output.str();
+        // Line count (every line ends with CRLF).
+        std::size_t lines = 0;
+        for (std::size_t pos = text.find("\r\n"); pos != std::string::npos;
+             pos = text.find("\r\n", pos + 2))
+            ++lines;
+        EXPECT_EQ(lines, e.count);
+        // Every line starts with the kind name and a space.
+        std::string prefix = std::string(e.name) + " ";
+        for (std::size_t start = 0; start < text.size();) {
+            std::size_t end = text.find("\r\n", start);
+            ASSERT_NE(end, std::string::npos);
+            EXPECT_EQ(text.rfind(prefix, start), start)
+                << "line '" << text.substr(start, end - start) << "' in " << e.name;
+            start = end + 2;
+        }
+        total += lines;
+    }
+    // System.Void is the one non-enumerated kind (its Kind is Void, so -l s
+    // does not list it).
+    {
+        std::ostringstream output;
+        EXPECT_EQ(Cmd::ListContent(path, output, {TypeKind::Struct}), 0);
+        EXPECT_EQ(output.str().find("System.Void\r\n"), std::string::npos);
+    }
+    // The five kind lists partition the TypeDef table: the counts plus the
+    // one Void-kind row are all 3356 typedefs.
+    EXPECT_EQ(total + 1, mscorlib.TypeDefs().size());
 }

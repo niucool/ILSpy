@@ -21,6 +21,7 @@
 #include "ILSpyCmd/IlspyCmdProgram.hpp"
 
 #include "Decompiler/Disassembler/ReflectionDisassembler.hpp"
+#include "Decompiler/Metadata/SRMExtensions.hpp"
 #include "Decompiler/Output/PlainTextOutput.hpp"
 #include "ILSpyX/PdbProvider/DebugInfoUtils.hpp"
 
@@ -67,6 +68,76 @@ int ShowIL(const std::string& assemblyFileName, std::ostringstream& output,
     disassembler.DebugInfo(debugInfo.get());
     disassembler.ShowSequencePoints(showILSequencePoints);
     disassembler.WriteModuleContents(module);
+    return 0;
+}
+
+namespace {
+
+using ILSpy::Decompiler::TypeSystem::TypeKind;
+
+// The C# `$"{type.Kind} {type.FullTypeName.ReflectionName}"` interpolation:
+// the TypeKind enum member name (Enum.ToString). Every ported kind is a
+// named member, so the .NET decimal fallback for an unnamed value is
+// unreachable.
+const char* TypeKindName(TypeKind kind) {
+    switch (kind) {
+        case TypeKind::Other: return "Other";
+        case TypeKind::Class: return "Class";
+        case TypeKind::Interface: return "Interface";
+        case TypeKind::Struct: return "Struct";
+        case TypeKind::Delegate: return "Delegate";
+        case TypeKind::Enum: return "Enum";
+        case TypeKind::Void: return "Void";
+        case TypeKind::Unknown: return "Unknown";
+        case TypeKind::Null: return "Null";
+        case TypeKind::None: return "None";
+        case TypeKind::Dynamic: return "Dynamic";
+        case TypeKind::UnboundTypeArgument: return "UnboundTypeArgument";
+        case TypeKind::TypeParameter: return "TypeParameter";
+        case TypeKind::Array: return "Array";
+        case TypeKind::Pointer: return "Pointer";
+        case TypeKind::ByReference: return "ByReference";
+        case TypeKind::Intersection: return "Intersection";
+        case TypeKind::ArgList: return "ArgList";
+        case TypeKind::Tuple: return "Tuple";
+        case TypeKind::ModOpt: return "ModOpt";
+        case TypeKind::ModReq: return "ModReq";
+        case TypeKind::NInt: return "NInt";
+        case TypeKind::NUInt: return "NUInt";
+        case TypeKind::FunctionPointer: return "FunctionPointer";
+    }
+    return "";  // unreachable: every enum member is named above
+}
+
+}  // namespace
+
+// The C# `int ListContent(string assemblyFileName, TextWriter output,
+// ISet<TypeKind> kinds)` (IlspyCmdProgram.cs): the -l/--list render --
+// every type definition in the TypeDef table's row order whose kind is
+// selected, as `{Kind} {ReflectionName}` lines.
+int ListContent(const std::string& assemblyFileName, std::ostringstream& output,
+    const std::set<ILSpy::Decompiler::TypeSystem::TypeKind>& kinds)
+{
+    // The C# `var decompiler = GetDecompiler(assemblyFileName)` +
+    // `decompiler.TypeSystem.MainModule.TypeDefinitions`: MetadataModule
+    // iterates metadata.TypeDefinitions -- the TypeDef table in row order
+    // (<Module> included, nested types at their physical rows) -- the port's
+    // TypeDefs() walk. The C# type-system wrapper contributes nothing to
+    // this render beyond the metadata walk (no resolver is consulted).
+    ILSpy::Decompiler::Metadata::MetadataFile module(assemblyFileName);
+    for (const auto& t : module.TypeDefs()) {
+        if (kinds.find(t.Kind) == kinds.end())
+            continue;
+        // The C# `output.WriteLine($"{type.Kind} {type.FullTypeName.ReflectionName}")`:
+        // the TypeKind enum name, a space, the GetFullTypeName declaring-chain
+        // reflection name (the `n arity suffix, the '+' nesting separators).
+        // TextWriter.WriteLine uses Environment.NewLine -- the port's "\r\n"
+        // convention (PlainTextOutput hardcodes the Windows value).
+        output << TypeKindName(t.Kind) << ' '
+              << ILSpy::Decompiler::Metadata::GetFullTypeNameFromDefinition(module, t.Token)
+                     .ReflectionName()
+              << "\r\n";
+    }
     return 0;
 }
 
