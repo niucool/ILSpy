@@ -40,6 +40,7 @@
 #include "BamlDecompiler/Baml/BamlRecords.hpp"
 #include "BamlDecompiler/Baml/BamlWriter.hpp"
 
+#include "BamlDecompiler/BamlTestSupport.hpp"
 #include "TestFixtures/RealBaml.hpp"
 #include "TestFixtures/SynthBaml.hpp"
 
@@ -59,10 +60,13 @@ using Baml::BamlDocument;
 using Baml::BamlRecord;
 using Baml::BamlRecordType;
 
-// Reads a fixture's bytes through the reader (the byte-span convention).
+// The shared record-type name table (BamlTestSupport.hpp).
+using ILSpy::Tests::Baml::RecordTypeName;
+
+// Reads a fixture's bytes through the reader (the byte-span convention;
+// the shared helper's twin, kept for the suite's existing call sites).
 BamlDocument ReadBytes(const std::string& bytes) {
-    return Baml::ReadDocument(reinterpret_cast<const std::uint8_t*>(bytes.data()),
-        bytes.size());
+    return ILSpy::Tests::Baml::ReadBaml(bytes);
 }
 
 // The failing reader call: the exception's message (every mapped
@@ -89,62 +93,6 @@ std::string IsBamlHeaderThrowsMessage(const std::string& bytes) {
 template <typename T>
 const T& As(const BamlRecord& record) {
     return static_cast<const T&>(record);
-}
-
-// A readable record type name for the failure diffs.
-const char* RecordTypeName(BamlRecordType type) {
-    switch (type) {
-        case BamlRecordType::AssemblyInfo: return "AssemblyInfo";
-        case BamlRecordType::AttributeInfo: return "AttributeInfo";
-        case BamlRecordType::ConstructorParametersStart: return "ConstructorParametersStart";
-        case BamlRecordType::ConstructorParametersEnd: return "ConstructorParametersEnd";
-        case BamlRecordType::ConstructorParameterType: return "ConstructorParameterType";
-        case BamlRecordType::ContentProperty: return "ContentProperty";
-        case BamlRecordType::DefAttribute: return "DefAttribute";
-        case BamlRecordType::DefAttributeKeyString: return "DefAttributeKeyString";
-        case BamlRecordType::DefAttributeKeyType: return "DefAttributeKeyType";
-        case BamlRecordType::DeferableContentStart: return "DeferableContentStart";
-        case BamlRecordType::DocumentEnd: return "DocumentEnd";
-        case BamlRecordType::DocumentStart: return "DocumentStart";
-        case BamlRecordType::ElementEnd: return "ElementEnd";
-        case BamlRecordType::ElementStart: return "ElementStart";
-        case BamlRecordType::KeyElementEnd: return "KeyElementEnd";
-        case BamlRecordType::KeyElementStart: return "KeyElementStart";
-        case BamlRecordType::LineNumberAndPosition: return "LineNumberAndPosition";
-        case BamlRecordType::LinePosition: return "LinePosition";
-        case BamlRecordType::LiteralContent: return "LiteralContent";
-        case BamlRecordType::NamedElementStart: return "NamedElementStart";
-        case BamlRecordType::OptimizedStaticResource: return "OptimizedStaticResource";
-        case BamlRecordType::PIMapping: return "PIMapping";
-        case BamlRecordType::PresentationOptionsAttribute: return "PresentationOptionsAttribute";
-        case BamlRecordType::Property: return "Property";
-        case BamlRecordType::PropertyArrayEnd: return "PropertyArrayEnd";
-        case BamlRecordType::PropertyArrayStart: return "PropertyArrayStart";
-        case BamlRecordType::PropertyComplexEnd: return "PropertyComplexEnd";
-        case BamlRecordType::PropertyComplexStart: return "PropertyComplexStart";
-        case BamlRecordType::PropertyCustom: return "PropertyCustom";
-        case BamlRecordType::PropertyDictionaryEnd: return "PropertyDictionaryEnd";
-        case BamlRecordType::PropertyDictionaryStart: return "PropertyDictionaryStart";
-        case BamlRecordType::PropertyListEnd: return "PropertyListEnd";
-        case BamlRecordType::PropertyListStart: return "PropertyListStart";
-        case BamlRecordType::PropertyStringReference: return "PropertyStringReference";
-        case BamlRecordType::PropertyTypeReference: return "PropertyTypeReference";
-        case BamlRecordType::PropertyWithConverter: return "PropertyWithConverter";
-        case BamlRecordType::PropertyWithExtension: return "PropertyWithExtension";
-        case BamlRecordType::PropertyWithStaticResourceId: return "PropertyWithStaticResourceId";
-        case BamlRecordType::RoutedEvent: return "RoutedEvent";
-        case BamlRecordType::StaticResourceEnd: return "StaticResourceEnd";
-        case BamlRecordType::StaticResourceId: return "StaticResourceId";
-        case BamlRecordType::StaticResourceStart: return "StaticResourceStart";
-        case BamlRecordType::StringInfo: return "StringInfo";
-        case BamlRecordType::Text: return "Text";
-        case BamlRecordType::TextWithConverter: return "TextWithConverter";
-        case BamlRecordType::TextWithId: return "TextWithId";
-        case BamlRecordType::TypeInfo: return "TypeInfo";
-        case BamlRecordType::TypeSerializerInfo: return "TypeSerializerInfo";
-        case BamlRecordType::XmlnsProperty: return "XmlnsProperty";
-        default: return "<unnamed>";
-    }
 }
 
 void ExpectRecord(const BamlDocument& doc, std::size_t index,
