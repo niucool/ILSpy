@@ -26,6 +26,7 @@
 #include "Decompiler/Metadata/MethodBody.hpp"
 #include "Decompiler/Metadata/PortablePdb.hpp"
 #include "Decompiler/Util/Span.hpp"
+#include "Decompiler/Util/Utf.hpp"
 
 #include "Decompiler/Disassembler/ReflectionAttributes.hpp"
 
@@ -387,14 +388,16 @@ public:
         else { len = ((b0 & 0x1F) << 24) | (p[1] << 16) | (p[2] << 8) | p[3]; lenBytes = 4; }
         if (off + lenBytes + len > static_cast<std::size_t>(end - base) || len < 1) return {};
         const std::uint8_t* chars = p + lenBytes;
-        // The last byte is a trailing flag (not part of the string); the chars
-        // are UTF-16LE code units.
+        // The last byte of the blob is a trailing flag byte (not part of the
+        // string); the rest are UTF-16LE code units. The port's convention is
+        // UTF-8 everywhere (PORT_PLAN.md 5.6), so decode both bytes of every
+        // unit -- surrogate pairs included -- through the Util converter.
         std::size_t charBytes = len - 1;
-        std::string out;
-        out.reserve(charBytes / 2);
+        std::u16string units(charBytes / 2, u'\0');
         for (std::size_t i = 0; i + 1 < charBytes; i += 2)
-            out.push_back(static_cast<char>(chars[i]));  // drop high byte (ASCII subset)
-        return out;
+            units[i / 2] = static_cast<char16_t>(
+                chars[i] | (static_cast<std::uint16_t>(chars[i + 1]) << 8));
+        return Util::Utf16ToUtf8(units);
     }
 
     // The C# `MetadataReader.GetUserString(UserStringHandle)` returns null for
@@ -420,12 +423,14 @@ public:
         if (off + lenBytes + len > static_cast<std::size_t>(end - base) || len < 1)
             return std::nullopt;
         const std::uint8_t* chars = p + lenBytes;
+        // Same decode as GetUserString: UTF-16LE units (the trailing flag byte
+        // excluded) to UTF-8, both bytes of every unit.
         std::size_t charBytes = len - 1;
-        std::string out;
-        out.reserve(charBytes / 2);
+        std::u16string units(charBytes / 2, u'\0');
         for (std::size_t i = 0; i + 1 < charBytes; i += 2)
-            out.push_back(static_cast<char>(chars[i]));
-        return out;
+            units[i / 2] = static_cast<char16_t>(
+                chars[i] | (static_cast<std::uint16_t>(chars[i + 1]) << 8));
+        return Util::Utf16ToUtf8(units);
     }
 
 private:

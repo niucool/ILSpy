@@ -16,11 +16,13 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-// ilspycmd (C++ port) entry point. Phase 10 fills in the full option set; this
-// implements the IL-disassembly workflow first (the plan allows Phase 6 to run
-// early as a milestone): given an assembly, dump the IL of every method with a
-// body, optionally restricted to one type with -t. Token operands are resolved
-// to "Namespace.Type::Member" / "Namespace.Type" names.
+// ilspycmd (C++ port) entry point. Phase 10 fills in the full option set;
+// this wires the options the ported phases expose. The -il/
+// --il-sequence-points path renders the whole-module IL through the
+// ReflectionDisassembler (IlspyCmdProgram.cpp: the IlspyCmdProgram ShowIL/
+// TryLoadPDB port), with -usepdb loading variable names/sequence points from
+// the module's PDB; the --ilast/--ilast-all paths dump method bodies as
+// ILAst trees; --csharp translates them through the transform pipeline.
 
 #include "Decompiler/CSharp/ILAstToCSharp.hpp"
 #include "Decompiler/IL/ControlFlow/ControlFlowSimplification.hpp"
@@ -60,16 +62,23 @@
 #include "Decompiler/IL/Transforms/EarlyExpressionTransforms.hpp"
 #include "Decompiler/IL/Transforms/RemoveDeadVariableInit.hpp"
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
-#include "Decompiler/Metadata/ILTextEmitter.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
+#include "ILSpyCmd/IlspyCmdProgram.hpp"
+
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 #include <cxxopts.hpp>
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cctype>
 #include <iostream>
+#include <sstream>
 #include <string>
 
 using namespace ILSpy::Decompiler::Metadata;
@@ -82,7 +91,7 @@ int main(int argc, char** argv) {
         ("h,help", "Print help")
         ("v,version", "Print version")
         ("assembly", "Assembly file to decompile", cxxopts::value<std::string>())
-        ("il,ilcode", "Show IL for the assembly's methods", cxxopts::value<bool>()
+        ("il,ilcode", "Show IL code.", cxxopts::value<bool>()
             ->default_value("false")->implicit_value("true"))
         ("ilast", "Decode straight-line method bodies into an ILAst tree and dump it",
             cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
@@ -94,11 +103,31 @@ int main(int argc, char** argv) {
             cxxopts::value<std::string>()->default_value(""))
         ("dump-table", "Dump a metadata table (row count + key fields). Table name: TypeDef, MethodDef, Field, Property, Assembly, AssemblyRef, etc.",
             cxxopts::value<std::string>()->default_value(""))
-        ("t,type", "Restrict --il/--ilast to a single type by full name (Namespace.Type)",
-            cxxopts::value<std::string>());
+        ("t,type", "Restrict --ilast/--ilast-all/--csharp to a single type by full name (Namespace.Type)",
+            cxxopts::value<std::string>())
+        ("il-sequence-points", "Show IL with sequence points. Implies -il.",
+            cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
+        ("usepdb,use-varnames-from-pdb", "Use variable names from PDB. With a value (--usepdb=<file>), the PDB file to use; without, the PDB is discovered from the assembly's debug directory.",
+            cxxopts::value<std::string>()->implicit_value(""));
     options.parse_positional({ "assembly" });
 
-    auto parsed = options.parse(argc, argv);
+    // A malformed option form must not crash the tool: cxxopts throws
+    // (e.g. `-il`, which cxxopts parses as the short group -i -l and rejects
+    // with a missing argument for l -- the real ilspycmd's McMaster parser
+    // accepts single-dash long options, cxxopts does not, so the port's
+    // long options take the --option form; a documented CLI-parse
+    // divergence). Print the error and exit instead of letting the
+    // exception terminate the process (which the MSVC CRT reports as a
+    // fail-fast abort, or a blocked abort dialog in a Debug build).
+    cxxopts::ParseResult parsed = [&]() {
+        try {
+            return options.parse(argc, argv);
+        } catch (const cxxopts::exceptions::exception& ex) {
+            std::cerr << "ilspycmd: " << ex.what() << '\n'
+                      << "See --help for the option syntax (long options take the --option form).\n";
+            std::exit(1);
+        }
+    }();
     if (parsed.count("help") != 0) {
         std::cout << options.help() << '\n';
         return 0;
@@ -115,15 +144,29 @@ int main(int argc, char** argv) {
 
     std::string asmPath = parsed["assembly"].as<std::string>();
     bool wantIl = parsed.count("il") != 0 && parsed["il"].as<bool>();
+    bool wantIlSequencePoints = parsed.count("il-sequence-points") != 0
+        && parsed["il-sequence-points"].as<bool>();
     bool wantIlAst = parsed.count("ilast") != 0 && parsed["ilast"].as<bool>();
     bool wantIlAstAll = parsed.count("ilast-all") != 0 && parsed["ilast-all"].as<bool>();
     bool wantCSharp = parsed.count("csharp") != 0 && parsed["csharp"].as<bool>();
     std::string listKinds = parsed.count("list") != 0 ? parsed["list"].as<std::string>() : "";
     std::string dumpTable = parsed.count("dump-table") != 0 ? parsed["dump-table"].as<std::string>() : "";
     std::string typeFilter = parsed.count("type") != 0 ? parsed["type"].as<std::string>() : "";
+    // The C# `(bool IsSet, string Value) InputPDBFile` -- the -usepdb option
+    // (SingleOrNoValue). The cxxopts implicit_value shape cannot distinguish
+    // the bare form from an explicitly empty value, so both map to the C#
+    // null Value (the LoadSymbols discovery); a non-empty value names the
+    // PDB (the FromFile path).
+    ILSpy::ILSpyCmd::InputPDBFile pdbFile;
+    if (parsed.count("usepdb") != 0) {
+        pdbFile.IsSet = true;
+        std::string pdbValue = parsed["usepdb"].as<std::string>();
+        if (!pdbValue.empty())
+            pdbFile.Value = pdbValue;
+    }
 
-    if (!wantIl && !wantIlAst && !wantIlAstAll && !wantCSharp && listKinds.empty() && dumpTable.empty()) {
-        std::cout << "ilspycmd: see --help for available options (--il, --ilast, --ilast-all, --csharp, --list, --dump-table).\n";
+    if (!wantIl && !wantIlSequencePoints && !wantIlAst && !wantIlAstAll && !wantCSharp && listKinds.empty() && dumpTable.empty()) {
+        std::cout << "ilspycmd: see --help for available options (--il, --il-sequence-points, --ilast, --ilast-all, --csharp, --list, --dump-table).\n";
         return 0;
     }
 
@@ -196,6 +239,33 @@ int main(int argc, char** argv) {
             return 1;
         }
         return 0;
+    }
+
+    // The C# ShowIL branch (IlspyCmdProgram.cs PerformPerFileAction: the
+    // `ShowILCodeFlag || ShowILSequencePointsFlag` arm): the whole-module IL
+    // render through the ReflectionDisassembler WriteModuleContents walk,
+    // with the -usepdb PDB (variable names, and sequence points when
+    // --il-sequence-points is set). The per-method DisassembleILText scaffold
+    // this replaces was the pre-Phase-6 stand-in.
+    if (wantIl || wantIlSequencePoints) {
+        std::ostringstream buffer;
+        int rc = ILSpy::ILSpyCmd::ShowIL(asmPath, buffer, wantIlSequencePoints, pdbFile);
+        // The buffer carries the final CRLF text (PlainTextOutput's kNewLine
+        // convention -- the same bytes the C# Console.Out writes). stdout's
+        // default text mode would translate every \n again (\r\n -> \r\r\n),
+        // so the block is written in binary mode (restored after -- the other
+        // paths print plain \n and rely on the text-mode translation).
+#if defined(_WIN32)
+        int stdoutFd = _fileno(stdout);
+        int oldMode = _setmode(stdoutFd, _O_BINARY);
+        std::cout << buffer.str();
+        std::cout.flush();
+        if (oldMode != -1)
+            _setmode(stdoutFd, oldMode);
+#else
+        std::cout << buffer.str();
+#endif
+        return rc;
     }
 
     auto typeMatch = [&](const std::string& ns, const std::string& name) {
@@ -611,15 +681,6 @@ int main(int argc, char** argv) {
                 ++methodsPrinted;
                 continue;
             }
-            auto body = file.GetMethodBody(m.RVA);
-            if (!body.IsValid()) continue;
-            std::cout << ".method " << t.Namespace << "." << t.Name << "::" << m.Name
-                      << "  (maxstack " << body.MaxStack() << ", code size "
-                      << body.CodeSize() << ")\n";
-            std::cout << DisassembleILText(body.IL(),
-                [&](std::uint32_t tok) { return file.ResolveTokenToString(tok); });
-            std::cout << '\n';
-            ++methodsPrinted;
         }
     }
     if (methodsPrinted == 0) {

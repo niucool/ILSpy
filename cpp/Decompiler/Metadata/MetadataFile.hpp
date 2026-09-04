@@ -247,6 +247,15 @@ public:
     // too; never throws.
     const std::string& FileName() const noexcept;
 
+    // The C# MetadataFile `public string Name` (MetadataFile.cs, inherited
+    // by PEFile): the assembly's name when the file is an assembly manifest
+    // (the Assembly table Name), else the Module table Name (a netmodule) --
+    // the `// IL code: <name>` header line ShowIL renders. The C#
+    // debug-metadata third arm ("debug metadata") is n/a -- the port's
+    // reader never constructs the metadata-only shape. "" for an invalid
+    // file; never throws.
+    std::string Name() const;
+
     // Row count of the TypeDef table.
     std::uint32_t TypeDefCount() const noexcept;
 

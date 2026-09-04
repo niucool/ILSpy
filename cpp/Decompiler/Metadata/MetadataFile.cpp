@@ -123,6 +123,19 @@ const std::string& MetadataFile::FileName() const noexcept {
     return impl_->path;
 }
 
+std::string MetadataFile::Name() const {
+    // The C# MetadataFile.Name: the Assembly table Name when the file is an
+    // assembly manifest (metadata.IsAssembly), else the Module table Name
+    // (a netmodule). The debug-metadata third arm ("debug metadata") is
+    // n/a -- the port's reader never constructs the metadata-only shape;
+    // an invalid file yields "" (the never-throws contract).
+    if (std::optional<AssemblyDefinitionInfo> assembly = GetAssemblyDefinition())
+        return assembly->Name;
+    if (std::optional<ModuleDefinitionInfo> module = GetModuleDefinition())
+        return module->Name;
+    return {};
+}
+
 std::uint32_t MetadataFile::TypeDefCount() const noexcept {
     return IsValid() ? impl_->db->TypeDef.size() : 0;
 }

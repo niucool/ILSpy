@@ -1175,3 +1175,20 @@ TEST(MethodBodyDisassemblerTest, StructuredPathRendersSequencePoints) {
     }
     EXPECT_EQ(sequencePointLines, 6u);
 }
+
+TEST(MethodBodyDisassemblerTest, WriteInstructionLdstrNonAsciiRendersUtf8)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    // A non-ASCII #US row (the zh-TW calendar native name, token 0x70023674)
+    // renders the decoded UTF-16 units as raw UTF-8 bytes -- ground truth:
+    // the real ilspycmd 11.0 `-il` output over the same mscorlib renders
+    // ldstr "<U+4E2D U+83EF U+6C11 U+570B U+66C6>" (no \u escapes: the units
+    // are neither control, surrogate, nor uncommon white space).
+    std::uint32_t token = 0x70023674u;
+    const std::uint8_t body[] = {0x72,
+        static_cast<std::uint8_t>(token), static_cast<std::uint8_t>(token >> 8),
+        static_cast<std::uint8_t>(token >> 16), static_cast<std::uint8_t>(token >> 24)};
+    EXPECT_EQ(RenderInstruction(f, 0x06000001u, body, sizeof(body)),
+        "IL_0000: ldstr \"\xE4\xB8\xAD\xE8\x8F\xAF\xE6\xB0\x91\xE5\x9C\x8B\xE6\x9B\x86\"\r\n");
+}

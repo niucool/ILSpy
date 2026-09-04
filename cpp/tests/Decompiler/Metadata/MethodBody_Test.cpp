@@ -118,3 +118,26 @@ TEST(MethodBody_Decode, InvalidRvaIsGraceful) {
     auto bBad = file.GetMethodBody(0xFFFFFFFFu);
     EXPECT_FALSE(bBad.IsValid());
 }
+
+// ---- GetUserString: the #US heap decode ----
+
+// The #US blob's characters are UTF-16LE code units -- both bytes of each
+// unit decode into the string (the high byte is not dropped), with the
+// port's UTF-8-everywhere convention carrying them out. Ground truth (real
+// System.Reflection.Metadata over the same rows): token 0x700094C8 holds
+// the single unit U+5E74 and 0x70023674 the five-unit zh-TW calendar
+// native name.
+TEST(MethodBody_Decode, GetUserStringDecodesUtf16Units) {
+    const char* path = FixturePath();
+    if (!std::filesystem::exists(path)) GTEST_SKIP() << "fixture not present";
+    ILSpy::Decompiler::Metadata::MetadataFile file(path);
+    ASSERT_TRUE(file.IsValid());
+    auto year = file.TryGetUserString(0x700094C8u);
+    ASSERT_TRUE(year.has_value());
+    EXPECT_EQ(*year, "\xE5\xB9\xB4");  // U+5E74
+    auto nativeName = file.TryGetUserString(0x70023674u);
+    ASSERT_TRUE(nativeName.has_value());
+    // U+4E2D U+83EF U+6C11 U+570B U+66C6
+    EXPECT_EQ(*nativeName,
+        "\xE4\xB8\xAD\xE8\x8F\xAF\xE6\xB0\x91\xE5\x9C\x8B\xE6\x9B\x86");
+}
