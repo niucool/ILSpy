@@ -62,6 +62,12 @@ struct MetadataGenericContext {
     // module)`; method stays nil, so the !!N queries always fall back.
     static MetadataGenericContext ForType(std::uint32_t typeToken, const MetadataFile& module);
 
+    // The C# `default(MetadataGenericContext)` (ReflectionDisassembler's
+    // WriteAttributes renders an attribute constructor at the default
+    // context): a null module and nil type/method handles -- every query
+    // takes the nil-handle fallbacks.
+    static MetadataGenericContext Nil();
+
     // The authored name of the declaring type's Nth type parameter (!N), or
     // index.ToString() when the row is missing (nil declaring type, negative
     // or out-of-range index, or a null module). Returns the raw name string

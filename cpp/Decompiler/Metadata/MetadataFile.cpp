@@ -696,6 +696,42 @@ std::vector<std::uint32_t> MetadataFile::GetGenericParameterConstraintTokens(
     return result;
 }
 
+// The GenericParamConstraint rows (the C# GenericParameter.GetConstraints()
+// collection): the row's own token plus its constraint Type. See the header
+// for the full contract.
+std::vector<GenericParamConstraintInfo> MetadataFile::GetGenericParameterConstraints(
+        std::uint32_t genericParamToken) const {
+    std::vector<GenericParamConstraintInfo> result;
+    if (!IsValid()) return result;
+    std::uint32_t table = genericParamToken >> 24;
+    std::uint32_t row = genericParamToken & 0x00FFFFFFu;
+    if (table != 0x2A || row == 0) return result;
+    try {
+        for (std::uint32_t i = 0; i < impl_->db->GenericParamConstraint.size(); i++) {
+            if (impl_->db->GenericParamConstraint.get_value<std::uint32_t>(i, 0) != row)
+                continue;
+            GenericParamConstraintInfo info;
+            info.Token = (0x2Cu << 24) | ((i + 1) & 0x00FFFFFFu);
+            std::uint32_t v = impl_->db->GenericParamConstraint.get_value<std::uint32_t>(i, 1);
+            if (v != 0) {
+                std::uint32_t tag = v & 0x3u;
+                std::uint32_t rid = v >> 2;
+                if (rid != 0) {
+                    switch (tag) {
+                        case 0: info.TypeToken = (0x02u << 24) | rid; break;
+                        case 1: info.TypeToken = (0x01u << 24) | rid; break;
+                        case 2: info.TypeToken = (0x1Bu << 24) | rid; break;
+                    }
+                }
+            }
+            result.push_back(info);
+        }
+    } catch (const std::exception&) {
+        // A malformed table walk degrades to the partial result (never throws).
+    }
+    return result;
+}
+
 // A MethodDef row's authored Name. See the header for the full contract.
 std::string MetadataFile::GetMethodName(std::uint32_t methodToken) const {
     if (!IsValid()) return {};

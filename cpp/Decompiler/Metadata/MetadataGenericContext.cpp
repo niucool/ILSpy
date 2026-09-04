@@ -63,6 +63,13 @@ MetadataGenericContext MetadataGenericContext::ForType(std::uint32_t typeToken, 
     return ctx;
 }
 
+// The C# `default(MetadataGenericContext)`: a null module and nil handles
+// (the implicit default construction -- every query takes the nil-handle
+// fallbacks).
+MetadataGenericContext MetadataGenericContext::Nil() {
+    return MetadataGenericContext();
+}
+
 std::uint32_t MetadataGenericContext::GetGenericTypeParameterHandleOrNull(int index) const {
     std::vector<GenericParameterInfo> rows;
     const GenericParameterInfo* row = GenericParameterAt(module_, declaringTypeToken_, index, rows);

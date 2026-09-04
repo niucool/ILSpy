@@ -157,6 +157,15 @@ struct GenericParameterInfo {
     std::string Name;
 };
 
+// A GenericParamConstraint row (table 0x2C): the row's own token (the
+// HasCustomAttribute parent the `.param constraint` attribute block reads)
+// and the constraint Type (the TypeDefOrRef/TypeSpec coded index the
+// ReflectionDisassembler's `.param constraint` header renders).
+struct GenericParamConstraintInfo {
+    std::uint32_t Token = 0;     // 0x2C000000 | row (1-based)
+    std::uint32_t TypeToken = 0; // the Type column (0x02/0x01/0x1B); 0 = nil
+};
+
 // A TypeDef row's (table 0x02) name data: the authored Name/Namespace
 // strings and the declaring TypeDef's token (0 for a top-level type -- the
 // SRM TypeDefinition.GetDeclaringType() NestedClass-table walk). Consumed by
@@ -440,6 +449,15 @@ public:
     // Empty for an invalid file, an unknown token, or a row without
     // constraints; never throws.
     std::vector<std::uint32_t> GetGenericParameterConstraintTokens(
+        std::uint32_t genericParamToken) const;
+
+    // The GenericParamConstraint rows (table 0x2C) of a GenericParam row:
+    // each row's own token (the attribute parent) and its constraint Type
+    // (TypeDefOrRef/TypeSpec) -- the C# `GenericParameter.GetConstraints()`
+    // collection the ReflectionDisassembler's WriteGenericParametersAndAttributes
+    // walks (the `.param constraint` blocks). Empty for an invalid file, an
+    // unknown token, or a row without constraints; never throws.
+    std::vector<GenericParamConstraintInfo> GetGenericParameterConstraints(
         std::uint32_t genericParamToken) const;
 
     // A MethodDef row's (table 0x06) authored Name column -- the identifier

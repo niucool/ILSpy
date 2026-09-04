@@ -18,12 +18,13 @@
 
 // Port of ICSharpCode.Decompiler/Disassembler/ReflectionDisassembler.cs: the
 // disassembler class that renders whole modules/types/members as IL text
-// (the ilspycmd --il path). This slice carries the instance skeleton and
-// the output-shaping helpers every member renderer consumes, plus the
-// constant and parameter renderers the field/method headers embed
-// (WriteConstant, WriteParameters); the member renderers themselves
-// (DisassembleMethod/Field/Property/Event/Type, WriteAttributes, the
-// module headers) land with their metadata reads in later slices.
+// (the ilspycmd --il path). This slice carries the instance skeleton, the
+// output-shaping helpers every member renderer consumes, the constant and
+// parameter renderers the field/method headers embed (WriteConstant,
+// WriteParameters), and the attribute renderers every member header embeds
+// (WriteAttributes with the generic-parameter/parameter attribute blocks);
+// the member renderers themselves (DisassembleMethod/Field/Property/Event/
+// Type, the module headers) land with their metadata reads in later slices.
 //
 // C#-to-C++ porting decisions:
 //  * The C# field pair `output`/`cancellationToken`/`isInType`/
@@ -47,7 +48,10 @@
 //    auto-properties -- public bool fields.
 //  * `WriteBlob(BlobReader)` ports over a byte span (the C# blob reader over
 //    the marshalling/constant blobs). The BlobHandle overload (a heap-offset
-//    blob read) defers with WriteAssemblyHeader, its first caller.
+//    blob read) never needs a port shape of its own: every caller reaches a
+//    blob through a read that already materialized its bytes (the custom
+//    attribute's ValueBlob, the marshalling/constant blobs), so the span
+//    call covers both C# overloads.
 //  * `OpenBlock`/`CloseBlock` port faithfully, folding markers included (the
 //    PlainTextOutput no-ops); `CloseBlock(string comment = null)` keeps the
 //    null-vs-empty distinction through a `const char*` default of nullptr.
@@ -202,6 +206,49 @@ public:
     // ports as the GetParameters row vector (the vararg callers slice it).
     void WriteParameters(const std::vector<Metadata::ParameterInfo>& parameters,
         const Metadata::MethodSignatureT& signature);
+
+    // The C# `void WriteAttributes(MetadataFile module,
+    // CustomAttributeHandleCollection attributes)`
+    // (ReflectionDisassembler.cs lines 1851-1872): one ".custom" line per
+    // attribute -- the constructor rendered through EntityHandle.WriteTo at
+    // the DEFAULT generic context (the C# passes `default`; an attribute
+    // constructor never carries VAR/MVAR), the optional " = " + blob hex
+    // dump for a non-nil value, and the metadata-token comment when
+    // ShowMetadataTokens is on. The collection routes through Process (the
+    // EntityProcessor hook) as CustomAttribute rows. The attribute row ports
+    // as the GetCustomAttributeTokens vector; an out-of-range token throws
+    // std::out_of_range (the C# metadata.GetCustomAttribute(handle) throws
+    // for an invalid handle -- loud rather than wrong).
+    // WriteDecodedCustomAttributeBlob (the DecodeCustomAttributeBlobs path,
+    // the SecurityDeclarationDecoder custom-attribute-value decode) is not
+    // yet ported: with the flag set this throws std::logic_error.
+    void WriteAttributes(const Metadata::MetadataFile& module,
+        const std::vector<std::uint32_t>& attributeTokens);
+
+    // The C# `void WriteGenericParametersAndAttributes(MetadataFile module,
+    // MetadataGenericContext context, GenericParameterHandle handle)`
+    // (ReflectionDisassembler.cs lines 1175-1200): the ".param type <name>"
+    // block over the generic parameter's own custom attributes and the
+    // ".param constraint <name>, <type>" blocks over its constraint rows'
+    // attributes -- each block Indents around WriteAttributes. An unknown
+    // token throws std::out_of_range (the C# GetGenericParameter(handle)
+    // throws -- loud rather than wrong). The handle ports as the raw
+    // GenericParam token (a GetGenericParameters row).
+    void WriteGenericParametersAndAttributes(
+        const Metadata::MetadataFile& module,
+        const Metadata::MetadataGenericContext& context,
+        std::uint32_t genericParameterToken);
+
+    // The C# `void WriteParameterAttributes(MetadataFile module,
+    // ParameterHandle handle)` (ReflectionDisassembler.cs lines 1202-1218):
+    // the ".param [N]" line with the optional " = <constant>" tail (the
+    // Param row's Constant-table default) and the indented attribute block
+    // -- or nothing at all when the row has neither. The Sequence column
+    // renders as-is (the seq-0 return row included; the skip is the C# CALLER's
+    // WriteParameters rule, not this member's). The handle ports as the
+    // GetParameters row (the token drives the Constant/CustomAttribute reads).
+    void WriteParameterAttributes(const Metadata::MetadataFile& module,
+        const Metadata::ParameterInfo& parameter);
 
 private:
     Output::ITextOutput& output_;

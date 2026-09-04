@@ -23,6 +23,7 @@
 
 #include "Decompiler/Disassembler/DisassemblerHelpers.hpp"
 #include "Decompiler/Disassembler/ReflectionAttributes.hpp"
+#include "Decompiler/IL/InstructionOutputExtensions.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Output/ITextOutput.hpp"
 #include "Decompiler/Util/Utf.hpp"
@@ -935,6 +936,116 @@ std::vector<std::uint32_t> ReflectionDisassembler::Process(
     ProcessedEntityKind kind) const {
     if (entityProcessor_ == nullptr) return items;
     return entityProcessor_->Process(module, items, kind);
+}
+
+// The C# `void WriteAttributes(MetadataFile module,
+// CustomAttributeHandleCollection attributes)` (ReflectionDisassembler.cs
+// lines 1851-1872): the ".custom" line per attribute. See the header for
+// the porting decisions.
+void ReflectionDisassembler::WriteAttributes(const Metadata::MetadataFile& module,
+    const std::vector<std::uint32_t>& attributeTokens)
+{
+    for (std::uint32_t a : Process(module, attributeTokens,
+             ProcessedEntityKind::CustomAttribute)) {
+        output_.Write(".custom ");
+        WriteMetadataToken(output_, module, a, a, /*spaceAfter=*/true,
+            /*spaceBefore=*/false, ShowMetadataTokens(),
+            ShowMetadataTokensInBase10());
+        auto attr = module.GetCustomAttribute(a);
+        if (!attr.has_value()) {
+            // The C# metadata.GetCustomAttribute(handle) throws for an
+            // out-of-range row -- loud rather than wrong.
+            throw std::out_of_range("custom attribute handle out of range");
+        }
+        // The C# `attr.Constructor.WriteTo(module, output, default)` -- the
+        // default generic context (an attribute constructor never carries
+        // VAR/MVAR) at the default Signature syntax.
+        IL::WriteTo(module, output_, Metadata::MetadataGenericContext::Nil(),
+            attr->ConstructorToken);
+        if (attr->ValueBlob.has_value()) {
+            output_.Write(" = ");
+            if (DecodeCustomAttributeBlobs) {
+                // WriteDecodedCustomAttributeBlob (the SecurityDeclarationDecoder
+                // custom-attribute-value decode) is not yet ported -- loud
+                // rather than wrong.
+                throw std::logic_error(
+                    "WriteDecodedCustomAttributeBlob is not yet ported");
+            }
+            WriteBlob(attr->ValueBlob->data(), attr->ValueBlob->size());
+        }
+        output_.WriteLine();
+    }
+}
+
+// The C# `void WriteGenericParametersAndAttributes(MetadataFile module,
+// MetadataGenericContext context, GenericParameterHandle handle)`
+// (ReflectionDisassembler.cs lines 1175-1200): the ".param type" block over
+// the generic parameter's own attributes and the ".param constraint" blocks
+// over its constraint rows' attributes. See the header.
+void ReflectionDisassembler::WriteGenericParametersAndAttributes(
+    const Metadata::MetadataFile& module,
+    const Metadata::MetadataGenericContext& context,
+    std::uint32_t genericParameterToken)
+{
+    auto p = module.GetGenericParameterByToken(genericParameterToken);
+    if (!p.has_value()) {
+        // The C# metadata.GetGenericParameter(handle) throws for an invalid
+        // handle -- loud rather than wrong.
+        throw std::out_of_range("generic parameter handle out of range");
+    }
+    auto attributes = module.GetCustomAttributeTokens(genericParameterToken);
+    if (!attributes.empty()) {
+        output_.Write(".param type ");
+        output_.Write(p->Name);
+        output_.WriteLine();
+        output_.Indent();
+        WriteAttributes(module, attributes);
+        output_.Unindent();
+    }
+    for (const auto& constraint : module.GetGenericParameterConstraints(
+             genericParameterToken)) {
+        auto constraintAttributes = module.GetCustomAttributeTokens(
+            constraint.Token);
+        if (constraintAttributes.empty())
+            continue;
+        output_.Write(".param constraint ");
+        output_.Write(p->Name);
+        output_.Write(", ");
+        IL::WriteTo(module, output_, context, constraint.TypeToken,
+            ILNameSyntax::TypeName);
+        output_.WriteLine();
+        output_.Indent();
+        WriteAttributes(module, constraintAttributes);
+        output_.Unindent();
+    }
+}
+
+// The C# `void WriteParameterAttributes(MetadataFile module,
+// ParameterHandle handle)` (ReflectionDisassembler.cs lines 1202-1218): the
+// ".param [N]" line with its optional constant tail and attribute block.
+// See the header.
+void ReflectionDisassembler::WriteParameterAttributes(
+    const Metadata::MetadataFile& module,
+    const Metadata::ParameterInfo& parameter)
+{
+    auto constant = module.GetConstant(parameter.Token);
+    auto attributes = module.GetCustomAttributeTokens(parameter.Token);
+    // The C# `if (p.GetDefaultValue().IsNil && p.GetCustomAttributes().Count
+    // == 0) return;` -- the fused GetConstant read's nullopt is the nil
+    // ConstantHandle.
+    if (!constant.has_value() && attributes.empty())
+        return;
+    output_.Write(".param [");
+    output_.Write(std::to_string(parameter.SequenceNumber));
+    output_.Write("]");
+    if (constant.has_value()) {
+        output_.Write(" = ");
+        WriteConstant(*constant);
+    }
+    output_.WriteLine();
+    output_.Indent();
+    WriteAttributes(module, attributes);
+    output_.Unindent();
 }
 
 }  // namespace ILSpy::Decompiler::Disassembler

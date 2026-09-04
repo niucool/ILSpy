@@ -38,6 +38,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -1010,4 +1011,471 @@ TEST(ReflectionDisassemblerTest, WriteParametersRealMscorlibMethods) {
         }
     }
     EXPECT_GT(rendered, 5000u);
+}
+
+
+// ---------------------------------------------------------------------------
+// WriteAttributes / WriteGenericParametersAndAttributes /
+// WriteParameterAttributes (ReflectionDisassembler.cs lines 1851-1872,
+// 1175-1200, 1202-1218): the ".custom" attribute lines every member header
+// embeds, the ".param type"/".param constraint" generic-parameter blocks, and
+// the ".param [N]" parameter blocks. Fixtures pin the exact renders the
+// ilspycmd -il gold output shows for the same rows (mscorlib's
+// AggregateException .ctors, System.Exception/EventSource, System.dll's
+// IInternetSecurityManager MemberRef-ctor attributes, and the .NET 10
+// System.Private.CoreLib nullable-annotation rows -- the .NET Framework 4.8
+// mscorlib carries no generic-parameter or constraint attributes at all).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+#if defined(_WIN32)
+// The newest installed .NET shared runtime's System.Private.CoreLib.dll --
+// the only local fixture carrying custom attributes on generic parameters
+// and constraint rows (C# 8+ nullable annotations; the 4.8 framework
+// assemblies have none, verified over the full table).
+std::string CoreLibPath() {
+    namespace fs = std::filesystem;
+    const char* root = "C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App";
+    std::error_code ec;
+    std::string best;
+    for (fs::directory_iterator it(root, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        std::string candidate = it->path().string() + "\\System.Private.CoreLib.dll";
+        if (fs::exists(candidate, ec)) best = candidate;
+    }
+    return best;
+}
+#else
+std::string CoreLibPath() { return "/usr/share/dotnet/shared/System.Private.CoreLib.dll"; }
+#endif
+
+std::string Hex8(std::uint32_t token) {
+    char buf[9];
+    std::snprintf(buf, sizeof(buf), "%08X", static_cast<unsigned>(token));
+    return buf;
+}
+
+// The ".custom <ctor> = ( blob )" line over an already-rendered ctor string
+// (the ".custom " prefix + the space-separated blob inside parens, the bytes
+// at one indent level, 16 per line).
+std::string CustomLine(const std::string& ctorRender,
+    const std::vector<std::uint8_t>& blob) {
+    std::string line = ".custom " + ctorRender + " = (";
+    if (!blob.empty()) {
+        line += "\r\n";
+        for (std::size_t i = 0; i < blob.size(); ++i) {
+            if (i > 0) {
+                // A newline before each 16th byte except the last (the
+                // WriteBlob geometry); every other byte gets a space.
+                line += (i % 16 == 0 && i < blob.size() - 1) ? "\r\n\t" : " ";
+            } else {
+                line += '\t';
+            }
+            char buf[3];
+            std::snprintf(buf, sizeof(buf), "%02x", blob[i]);
+            line += buf;
+        }
+        line += "\r\n";
+    }
+    line += ")\r\n";
+    return line;
+}
+
+// A test EntityProcessor that reverses the collection (the visible routing
+// fixture -- SortByNameProcessor's key order over the attribute sets below
+// already equals the row order, so it cannot show the hook).
+class ReversingEntityProcessor : public DA::IEntityProcessor {
+public:
+    std::vector<std::uint32_t> Process(const MD::MetadataFile&,
+        const std::vector<std::uint32_t>& items,
+        DA::ProcessedEntityKind) const override {
+        return std::vector<std::uint32_t>(items.rbegin(), items.rend());
+    }
+};
+
+}  // namespace
+
+TEST(ReflectionDisassemblerTest, WriteAttributesRendersCustomAttributeLine) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t aggregateType = FindTypeDefTokenIn(f, "System", "AggregateException");
+    ASSERT_NE(aggregateType, 0u);
+    // The first .ctor with exactly one method attribute (the
+    // __DynamicallyInvokableAttribute row the -il gold shows for these).
+    std::uint32_t method = 0;
+    for (const auto& m : f.GetMethods(aggregateType)) {
+        if (f.GetCustomAttributeTokens(m.Token).size() == 1) { method = m.Token; break; }
+    }
+    ASSERT_NE(method, 0u);
+    auto tokens = f.GetCustomAttributeTokens(method);
+    ASSERT_EQ(tokens.size(), 1u);
+
+    OUT::PlainTextOutput output;
+    DA::ReflectionDisassembler rd(output);
+    rd.WriteAttributes(f, tokens);
+    EXPECT_EQ(output.ToString(),
+        CustomLine("instance void __DynamicallyInvokableAttribute::.ctor()",
+            Bytes({0x01, 0x00, 0x00, 0x00})));
+}
+
+TEST(ReflectionDisassemblerTest, WriteAttributesShowsMetadataTokenComment) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t aggregateType = FindTypeDefTokenIn(f, "System", "AggregateException");
+    ASSERT_NE(aggregateType, 0u);
+    std::uint32_t method = 0;
+    for (const auto& m : f.GetMethods(aggregateType)) {
+        if (f.GetCustomAttributeTokens(m.Token).size() == 1) { method = m.Token; break; }
+    }
+    ASSERT_NE(method, 0u);
+    auto tokens = f.GetCustomAttributeTokens(method);
+    ASSERT_EQ(tokens.size(), 1u);
+
+    OUT::PlainTextOutput output;
+    DA::ReflectionDisassembler rd(output);
+    rd.ShowMetadataTokens(true);
+    rd.WriteAttributes(f, tokens);
+    // The "/* XXXXXXXX */ " comment between ".custom " and the ctor render.
+    EXPECT_EQ(output.ToString(),
+        ".custom /* " + Hex8(tokens[0]) + " */ instance void __DynamicallyInvokableAttribute::.ctor() = (\r\n"
+        "\t01 00 00 00\r\n)\r\n");
+}
+
+TEST(ReflectionDisassemblerTest, WriteAttributesMemberRefCtorAndEntityProcessorRouting) {
+    MD::MetadataFile f("C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\System.dll");
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t type = FindTypeDefTokenIn(f, "Microsoft.Win32", "IInternetSecurityManager");
+    ASSERT_NE(type, 0u);
+    auto tokens = f.GetCustomAttributeTokens(type);
+    ASSERT_EQ(tokens.size(), 3u);
+
+    // The three gold -il lines, in row order (no processor):
+    // [ComVisible(false)], [Guid("7 9eac9ee-baf9-11ce-8c82-00aa004ba90b")],
+    // [InterfaceType(ComInterfaceType)] -- the ctors are MemberRefs into
+    // mscorlib (the "[mscorlib]" scope prefix).
+    const std::string comVisible = CustomLine(
+        "instance void [mscorlib]System.Runtime.InteropServices.ComVisibleAttribute::.ctor(bool)",
+        Bytes({0x01, 0x00, 0x00, 0x00, 0x00}));
+    const std::string guid = CustomLine(
+        "instance void [mscorlib]System.Runtime.InteropServices.GuidAttribute::.ctor(string)",
+        Bytes({0x01, 0x00, 0x24, 0x37, 0x39, 0x65, 0x61, 0x63, 0x39, 0x65, 0x65,
+               0x2d, 0x62, 0x61, 0x66, 0x39, 0x2d, 0x31, 0x31, 0x63, 0x65, 0x2d,
+               0x38, 0x63, 0x38, 0x32, 0x2d, 0x30, 0x30, 0x61, 0x61, 0x30, 0x30,
+               0x34, 0x62, 0x61, 0x39, 0x30, 0x62, 0x00, 0x00}));
+    const std::string interfaceType = CustomLine(
+        "instance void [mscorlib]System.Runtime.InteropServices.InterfaceTypeAttribute::"
+        ".ctor(valuetype [mscorlib]System.Runtime.InteropServices.ComInterfaceType)",
+        Bytes({0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00}));
+
+    {
+        OUT::PlainTextOutput output;
+        DA::ReflectionDisassembler rd(output);
+        rd.WriteAttributes(f, tokens);
+        EXPECT_EQ(output.ToString(), comVisible + guid + interfaceType);
+    }
+    {
+        // The EntityProcessor hook routes the collection (reversed order).
+        OUT::PlainTextOutput output;
+        DA::ReflectionDisassembler rd(output);
+        ReversingEntityProcessor processor;
+        rd.EntityProcessor(&processor);
+        rd.WriteAttributes(f, tokens);
+        EXPECT_EQ(output.ToString(), interfaceType + guid + comVisible);
+    }
+}
+
+TEST(ReflectionDisassemblerTest, WriteAttributesDecodeBlobsFlagAndInvalidToken) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t aggregateType = FindTypeDefTokenIn(f, "System", "AggregateException");
+    ASSERT_NE(aggregateType, 0u);
+    std::uint32_t method = 0;
+    for (const auto& m : f.GetMethods(aggregateType)) {
+        if (f.GetCustomAttributeTokens(m.Token).size() == 1) { method = m.Token; break; }
+    }
+    ASSERT_NE(method, 0u);
+    auto tokens = f.GetCustomAttributeTokens(method);
+    ASSERT_EQ(tokens.size(), 1u);
+
+    {
+        // With the flag off (the default) the blob is the raw hex dump
+        // (pinned by the other tests); with DecodeCustomAttributeBlobs on,
+        // the unported WriteDecodedCustomAttributeBlob path is loud rather
+        // than wrong.
+        OUT::PlainTextOutput output;
+        DA::ReflectionDisassembler rd(output);
+        rd.WriteAttributes(f, tokens);
+        EXPECT_EQ(output.ToString(),
+            CustomLine("instance void __DynamicallyInvokableAttribute::.ctor()",
+                Bytes({0x01, 0x00, 0x00, 0x00})));
+        rd.DecodeCustomAttributeBlobs = true;
+        EXPECT_THROW(rd.WriteAttributes(f, tokens), std::logic_error);
+    }
+    {
+        // An out-of-range attribute token (the C#
+        // metadata.GetCustomAttribute(handle) throws for an invalid handle).
+        OUT::PlainTextOutput output;
+        DA::ReflectionDisassembler rd(output);
+        EXPECT_THROW(rd.WriteAttributes(f, {0x0CFFFFFFu}), std::out_of_range);
+    }
+}
+
+TEST(ReflectionDisassemblerTest, WriteParameterAttributesConstantAndAttributeShapes) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+
+    // AggregateException..ctor(params Exception[] innerExceptions): the
+    // param [1] row carries [ParamArray] (the gold ".param [1]" block).
+    std::uint32_t aggregateType = FindTypeDefTokenIn(f, "System", "AggregateException");
+    ASSERT_NE(aggregateType, 0u);
+    bool found = false;
+    for (const auto& m : f.GetMethods(aggregateType)) {
+        for (const auto& p : f.GetParameters(m.Token)) {
+            if (p.SequenceNumber != 1 || p.Name != "innerExceptions") continue;
+            if (f.GetCustomAttributeTokens(p.Token).empty()) continue;
+            OUT::PlainTextOutput output;
+            DA::ReflectionDisassembler rd(output);
+            rd.WriteParameterAttributes(f, p);
+            EXPECT_EQ(output.ToString(),
+                ".param [1]\r\n\t.custom instance void System.ParamArrayAttribute::.ctor() = (\r\n"
+                "\t\t01 00 00 00\r\n\t)\r\n");
+            found = true;
+        }
+    }
+    // A plain parameter (String.Copy's str) has neither a default nor
+    // attributes: the member writes nothing at all.
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t copy = FindMethodIn(f, stringType, "Copy");
+    ASSERT_NE(copy, 0u);
+    for (const auto& p : f.GetParameters(copy)) {
+        OUT::PlainTextOutput output;
+        DA::ReflectionDisassembler rd(output);
+        rd.WriteParameterAttributes(f, p);
+        EXPECT_EQ(output.ToString(), "");
+    }
+    EXPECT_TRUE(found);
+
+    // System.Exception::AddExceptionDataForRestrictedErrorInfo: the [opt]
+    // hasrestrictedLanguageErrorObject default renders inline.
+    std::uint32_t exceptionType = FindTypeDefTokenIn(f, "System", "Exception");
+    ASSERT_NE(exceptionType, 0u);
+    std::uint32_t addData = FindMethodIn(f, exceptionType, "AddExceptionDataForRestrictedErrorInfo");
+    ASSERT_NE(addData, 0u);
+    for (const auto& p : f.GetParameters(addData)) {
+        if (p.SequenceNumber != 5) continue;
+        OUT::PlainTextOutput output;
+        DA::ReflectionDisassembler rd(output);
+        rd.WriteParameterAttributes(f, p);
+        EXPECT_EQ(output.ToString(), ".param [5] = bool(false)\r\n");
+    }
+
+    // EventSource..ctor(..., [opt] string[] traits = null): the nullref
+    // default (the ELEMENT_TYPE_CLASS-encoded null constant).
+    std::uint32_t eventSourceType = FindTypeDefTokenIn(f, "System.Diagnostics.Tracing", "EventSource");
+    ASSERT_NE(eventSourceType, 0u);
+    for (const auto& m : f.GetMethods(eventSourceType)) {
+        for (const auto& p : f.GetParameters(m.Token)) {
+            if (p.Name != "traits" || !f.GetConstant(p.Token).has_value()) continue;
+            OUT::PlainTextOutput output;
+            DA::ReflectionDisassembler rd(output);
+            rd.WriteParameterAttributes(f, p);
+            EXPECT_EQ(output.ToString(),
+                ".param [" + std::to_string(p.SequenceNumber) + "] = nullref\r\n");
+        }
+    }
+}
+
+TEST(ReflectionDisassemblerTest, WriteGenericParametersAndAttributesEmptyForPlainRows) {
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+
+    // The 4.8 mscorlib carries NO custom attributes on generic parameters or
+    // constraint rows (verified over the full tables): every generic
+    // parameter renders nothing. Sweep the generic parameters of the first
+    // types that carry them.
+    std::size_t driven = 0;
+    for (const auto& t : f.TypeDefs()) {
+        auto genericParameters = f.GetGenericParameters(t.Token);
+        if (genericParameters.empty()) continue;
+        MD::MetadataGenericContext context = MD::MetadataGenericContext::ForType(t.Token, f);
+        for (const auto& gp : genericParameters) {
+            OUT::PlainTextOutput output;
+            DA::ReflectionDisassembler rd(output);
+            rd.WriteGenericParametersAndAttributes(f, context, gp.Token);
+            EXPECT_EQ(output.ToString(), "");
+            ++driven;
+        }
+        if (driven >= 300) break;
+    }
+    EXPECT_GT(driven, 100u);
+}
+
+TEST(ReflectionDisassemblerTest, CoreLibGenericParameterAndConstraintBlocks) {
+    std::string path = CoreLibPath();
+    if (path.empty()) {
+        GTEST_SKIP() << "no .NET shared runtime System.Private.CoreLib.dll";
+    }
+    MD::MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    // System.Array::AsReadOnly<T>(T[] array): the method's T row carries
+    // [Nullable(2)] -- the gold ".param type T" block.
+    std::uint32_t arrayType = FindTypeDefTokenIn(f, "System", "Array");
+    ASSERT_NE(arrayType, 0u);
+    std::uint32_t asReadOnly = FindMethodIn(f, arrayType, "AsReadOnly");
+    ASSERT_NE(asReadOnly, 0u);
+    {
+        auto genericParameters = f.GetGenericParameters(asReadOnly);
+        ASSERT_EQ(genericParameters.size(), 1u);
+        EXPECT_EQ(genericParameters[0].Name, "T");
+        OUT::PlainTextOutput output;
+        DA::ReflectionDisassembler rd(output);
+        rd.WriteGenericParametersAndAttributes(f,
+            MD::MetadataGenericContext::ForMethod(asReadOnly, f),
+            genericParameters[0].Token);
+        EXPECT_EQ(output.ToString(),
+            ".param type T\r\n"
+            "\t.custom instance void System.Runtime.CompilerServices.NullableAttribute::.ctor(uint8) = (\r\n"
+            "\t\t01 00 02 00 00\r\n\t)\r\n");
+    }
+
+    // System.Delegate::EnumerateInvocationList<TDelegate>(TDelegate d) where
+    // TDelegate : Delegate: the TDelegate row itself has no attributes, but
+    // its constraint row does -- the gold ".param constraint" block.
+    std::uint32_t delegateType = FindTypeDefTokenIn(f, "System", "Delegate");
+    ASSERT_NE(delegateType, 0u);
+    std::uint32_t enumerate = FindMethodIn(f, delegateType, "EnumerateInvocationList");
+    ASSERT_NE(enumerate, 0u);
+    {
+        auto genericParameters = f.GetGenericParameters(enumerate);
+        ASSERT_EQ(genericParameters.size(), 1u);
+        auto constraints = f.GetGenericParameterConstraints(genericParameters[0].Token);
+        ASSERT_EQ(constraints.size(), 1u);
+        EXPECT_EQ(constraints[0].TypeToken, 0x02000088u);  // System.Delegate
+        OUT::PlainTextOutput output;
+        DA::ReflectionDisassembler rd(output);
+        rd.WriteGenericParametersAndAttributes(f,
+            MD::MetadataGenericContext::ForMethod(enumerate, f),
+            genericParameters[0].Token);
+        EXPECT_EQ(output.ToString(),
+            ".param constraint TDelegate, System.Delegate\r\n"
+            "\t.custom instance void System.Runtime.CompilerServices.NullableAttribute::.ctor(uint8) = (\r\n"
+            "\t\t01 00 01 00 00\r\n\t)\r\n");
+    }
+
+    // The same method's param rows: the seq-0 RETURN row carries
+    // [Nullable((byte[])...)] (the gold ".param [0]" block -- the caller
+    // passes every Param row, the seq-0 skip is WriteParameters' rule).
+    {
+        auto rows = f.GetParameters(enumerate);
+        ASSERT_EQ(rows.size(), 2u);
+        {
+            OUT::PlainTextOutput output;
+            DA::ReflectionDisassembler rd(output);
+            rd.WriteParameterAttributes(f, rows[0]);
+            EXPECT_EQ(rows[0].SequenceNumber, 0u);
+            EXPECT_EQ(output.ToString(),
+                ".param [0]\r\n"
+                "\t.custom instance void System.Runtime.CompilerServices.NullableAttribute::.ctor(uint8[]) = (\r\n"
+                "\t\t01 00 02 00 00 00 00 01 00 00\r\n\t)\r\n");
+        }
+        {
+            OUT::PlainTextOutput output;
+            DA::ReflectionDisassembler rd(output);
+            rd.WriteParameterAttributes(f, rows[1]);
+            EXPECT_EQ(output.ToString(),
+                ".param [1]\r\n"
+                "\t.custom instance void System.Runtime.CompilerServices.NullableAttribute::.ctor(uint8) = (\r\n"
+                "\t\t01 00 02 00 00\r\n\t)\r\n");
+        }
+    }
+
+    // System.Decimal::TryFormat(..., [opt] ReadOnlySpan<char> format = null,
+    // [opt] IFormatProvider provider = null): the format row carries BOTH a
+    // nullref default and [StringSyntax("NumericFormat")] -- the gold
+    // ".param [3] = nullref" with the attribute block inside.
+    std::uint32_t decimalType = FindTypeDefTokenIn(f, "System", "Decimal");
+    ASSERT_NE(decimalType, 0u);
+    bool found = false;
+    for (const auto& m : f.GetMethods(decimalType)) {
+        if (m.Name != "TryFormat") continue;
+        for (const auto& p : f.GetParameters(m.Token)) {
+            if (p.Name != "format" || !f.GetConstant(p.Token).has_value()) continue;
+            if (f.GetCustomAttributeTokens(p.Token).empty()) continue;
+            OUT::PlainTextOutput output;
+            DA::ReflectionDisassembler rd(output);
+            rd.WriteParameterAttributes(f, p);
+            EXPECT_EQ(output.ToString(),
+                ".param [3] = nullref\r\n"
+                "\t.custom instance void System.Diagnostics.CodeAnalysis.StringSyntaxAttribute::.ctor(string) = (\r\n"
+                "\t\t01 00 0d 4e 75 6d 65 72 69 63 46 6f 72 6d 61 74\r\n"
+                "\t\t00 00\r\n\t)\r\n");
+            found = true;
+        }
+    }
+    EXPECT_TRUE(found);
+}
+
+TEST(ReflectionDisassemblerTest, CoreLibAttributeWritersSweep) {
+    std::string path = CoreLibPath();
+    if (path.empty()) {
+        GTEST_SKIP() << "no .NET shared runtime System.Private.CoreLib.dll";
+    }
+    MD::MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    // Drive the three writers over every generic parameter and Param row of
+    // a few large types: no throw, and every output line carries the known
+    // block prefixes.
+    std::size_t attributeLines = 0;
+    std::size_t driven = 0;
+    auto checkLines = [&](const std::string& text) {
+        std::size_t pos = 0;
+        while (pos < text.size()) {
+            std::size_t eol = text.find("\r\n", pos);
+            if (eol == std::string::npos) break;
+            std::string line = text.substr(pos, eol - pos);
+            pos = eol + 2;
+            if (line.empty()) continue;
+            bool known = line.find(".param type ") == 0
+                || line.find(".param constraint ") == 0
+                || line.find(".param [") == 0
+                || line.find(".custom ") == 0
+                || line.find("\t.custom ") == 0
+                || line.find("\t\t") == 0
+                || line == "\t)"
+                || line.find('\t') == std::string::npos;
+            EXPECT_TRUE(known) << "unexpected line: " << line;
+            if (line.find(".custom ") != std::string::npos) ++attributeLines;
+        }
+    };
+    for (const char* typeName : {"String", "Decimal", "Delegate", "Array"}) {
+        std::uint32_t type = FindTypeDefTokenIn(f, "System", typeName);
+        ASSERT_NE(type, 0u) << typeName;
+        for (const auto& m : f.GetMethods(type)) {
+            auto genericParameters = f.GetGenericParameters(m.Token);
+            if (!genericParameters.empty()) {
+                MD::MetadataGenericContext context =
+                    MD::MetadataGenericContext::ForMethod(m.Token, f);
+                for (const auto& gp : genericParameters) {
+                    OUT::PlainTextOutput output;
+                    DA::ReflectionDisassembler rd(output);
+                    rd.WriteGenericParametersAndAttributes(f, context, gp.Token);
+                    checkLines(output.ToString());
+                    ++driven;
+                }
+            }
+            for (const auto& p : f.GetParameters(m.Token)) {
+                OUT::PlainTextOutput output;
+                DA::ReflectionDisassembler rd(output);
+                rd.WriteParameterAttributes(f, p);
+                checkLines(output.ToString());
+                ++driven;
+            }
+        }
+    }
+    EXPECT_GT(driven, 100u);
+    EXPECT_GT(attributeLines, 100u);
 }
