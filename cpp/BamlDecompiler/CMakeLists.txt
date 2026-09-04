@@ -8,9 +8,11 @@
 # members plus the binary path decoder (Xaml/XamlUtils, Xaml/XamlPathDeserializer
 # -- the PropertyCustomHandler serializer slice) -- plus the KnownThings id
 # enums (KnownTypes/KnownMembers: the BAML wire-format value tables WPF's
-# schema context fixes). The KnownThings tables (the assembly/type/member/
-# string/resource rows over the type system) and the Handlers/Rewrite/Xaml
-# layers follow in later slices.
+# schema context fixes) and the KnownThings data tables (KnownThingsTables:
+# the assembly/type/member/string/resource rows KnownThings.g.cs seeds its
+# dictionaries with, header-only pending the type-system resolution slice).
+# The KnownThings class itself (IDecompilerTypeSystem/SyntheticWpfModule
+# resolution) and the Handlers/Rewrite/Xaml layers follow in later slices.
 
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlBinaryReader.cpp
