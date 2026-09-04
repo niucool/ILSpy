@@ -8,6 +8,7 @@ add_executable(ilspy_tests
     Util/LongSet_Test.cpp
     Util/BitSet_Test.cpp
     Util/StringComparers_Test.cpp
+    Util/ResourcesFile_Test.cpp
     Util/CacheManager_Test.cpp
     Util/LazyInit_Test.cpp
     Util/CSharpPrimitiveCast_Test.cpp
@@ -39,6 +40,7 @@ add_executable(ilspy_tests
     ILSpyX/PdbProvider/PortableDebugInfoProvider_Test.cpp
     ILSpyX/PdbProvider/DebugInfoUtils_Test.cpp
     ILSpyCmd/IlspyCmdProgram_Test.cpp
+    ILSpyCmd/ResourceExtensions_Test.cpp
     ILSpyCmd/MetadataTableDumper_Test.cpp
     ILSpyCmd/TypesParser_Test.cpp
     Decompiler/TypeSystem/TypeName_Test.cpp

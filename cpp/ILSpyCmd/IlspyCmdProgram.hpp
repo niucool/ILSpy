@@ -102,4 +102,15 @@ int ShowIL(const std::string& assemblyFileName, std::ostringstream& output,
 int ListContent(const std::string& assemblyFileName, std::ostringstream& output,
     const std::set<ILSpy::Decompiler::TypeSystem::TypeKind>& kinds);
 
+// The C# `int ListResources(string assemblyFileName, TextWriter output)`
+// (IlspyCmdProgram.cs): the --list-resources render -- every embedded
+// manifest resource as one line, with .resources containers expanded to
+// their '<container>/<entry>' entries (the EnumerateResourcePaths port,
+// ResourceExtensions.hpp). WriteLine uses Environment.NewLine -- the
+// port's kNewLine "\r\n" convention (PlainTextOutput hardcodes the
+// Windows value). Returns 0 (the C# return value; an assembly with no
+// embedded resources prints nothing). The -o writer branch (the
+// <name>.resources.txt file) is deferred with the project output paths.
+int ListResources(const std::string& assemblyFileName, std::ostringstream& output);
+
 }  // namespace ILSpy::ILSpyCmd

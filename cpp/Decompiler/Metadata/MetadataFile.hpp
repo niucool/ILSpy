@@ -977,6 +977,52 @@ public:
     // WriteModuleContents walk). Empty for an invalid file; never throws.
     std::vector<std::uint32_t> GetTopLevelTypeDefinitions() const;
 
+    // The C# `ResourceType` enum (ICSharpCode.Decompiler/Metadata/Resource.cs):
+    // the ManifestResource row's Implementation column decides it -- a nil
+    // column is Embedded, an AssemblyRef target is AssemblyLinked, anything
+    // else (a File or ExportedType target) is Linked.
+    enum class ManifestResourceKind { Linked, Embedded, AssemblyLinked };
+
+    // The ManifestResource rows (table 0x28) in table order -- the C#
+    // `MetadataFile.Resources` collection (the MetadataResource views the
+    // CLI's --list-resources/--resource paths consume). Offset is the raw
+    // Offset column (the position inside the managed-resources block the
+    // cor20 header's Resources directory points at, where the row's blob
+    // lives behind a 4-byte little-endian length prefix); Attributes is
+    // the raw Flags column (System.Reflection.ManifestResourceAttributes);
+    // ImplementationToken is the Implementation coded index (2 tag bits:
+    // 0=File 0x26, 1=AssemblyRef 0x23, 2=ExportedType 0x27) as the raw
+    // target token, 0 for a nil column. Empty for an invalid file; never
+    // throws.
+    struct ManifestResourceInfo {
+        std::uint32_t Token = 0;  // 0x28000000 | row (1-based)
+        std::uint32_t Offset = 0;
+        std::uint32_t Attributes = 0;
+        std::string Name;
+        std::uint32_t ImplementationToken = 0;  // 0 = nil column
+        ManifestResourceKind Kind = ManifestResourceKind::Embedded;
+    };
+    std::vector<ManifestResourceInfo> GetManifestResources() const;
+
+    // An embedded ManifestResource's blob -- the C#
+    // MetadataResource.TryOpenStream/TryGetLength pair (Resource.cs): the
+    // section data at the cor20 Resources directory RVA (empty when the
+    // image has none), the row's Offset into it, and the 4-byte
+    // little-endian length prefix ahead of the blob. Nullopt when the row
+    // is not embedded, the resources directory RVA is 0, the section data
+    // is shorter than 4 bytes, the offset is out of [0, length - 4], or
+    // the decoded length exceeds the section data length (the C#
+    // TryReadResource validation arms). The returned vector is the blob
+    // after the length prefix. The C# length check is `length <=
+    // sectionData.Length` -- it accepts a length that nominally runs past
+    // the section's remaining bytes (an upstream quirk the port preserves
+    // in the check); the copy clamps at the image's end so such a row
+    // yields a short vector instead of reading past the image.
+    // Nullopt for an invalid file, an out-of-range row, a nil row, or a
+    // non-ManifestResource token; never throws.
+    std::optional<std::vector<std::uint8_t>> TryGetManifestResourceData(
+        std::uint32_t token) const;
+
     // The PE-header values the WriteModuleHeader PE lines render (the C#
     // `module is PEFile peFile` arm: .imagebase/.file alignment/.stackreserve
     // /.subsystem/.corflags over `peFile.Reader.PEHeaders`). Nullopt when the

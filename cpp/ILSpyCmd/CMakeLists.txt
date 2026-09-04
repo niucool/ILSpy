@@ -5,13 +5,15 @@
 # can exercise them directly (the ILSpyX convention); main.cpp parses the
 # options and calls them.
 
-# The IlspyCmdProgram port (ShowIL/TryLoadPDB/ListContent), the
-# MetadataTableDumper port (the --dump-table mode), and the TypesParser
-# port (the -l/--list entity-type selection).
+# The IlspyCmdProgram port (ShowIL/TryLoadPDB/ListContent/ListResources),
+# the MetadataTableDumper port (the --dump-table mode), the TypesParser
+# port (the -l/--list entity-type selection), and the ResourceExtensions
+# port (the --list-resources resource-path enumeration).
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/IlspyCmdProgram.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/MetadataTableDumper.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/TypesParser.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ResourceExtensions.cpp
 )
 
 add_executable(ilspy_cli ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp)

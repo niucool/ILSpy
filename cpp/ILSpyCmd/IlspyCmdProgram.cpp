@@ -24,6 +24,7 @@
 #include "Decompiler/Metadata/SRMExtensions.hpp"
 #include "Decompiler/Output/PlainTextOutput.hpp"
 #include "ILSpyX/PdbProvider/DebugInfoUtils.hpp"
+#include "ILSpyCmd/ResourceExtensions.hpp"
 
 namespace ILSpy::ILSpyCmd {
 
@@ -138,6 +139,20 @@ int ListContent(const std::string& assemblyFileName, std::ostringstream& output,
                      .ReflectionName()
               << "\r\n";
     }
+    return 0;
+}
+
+// The C# `int ListResources(string assemblyFileName, TextWriter output)`
+// (IlspyCmdProgram.cs): the --list-resources render.
+int ListResources(const std::string& assemblyFileName, std::ostringstream& output)
+{
+    // The C# `var module = new PEFile(assemblyFileName)` then one
+    // WriteLine per EnumerateResourcePaths path. The port's MetadataFile
+    // never throws -- an unparseable file has no resources and renders
+    // nothing (main.cpp gates IsValid before dispatching).
+    ILSpy::Decompiler::Metadata::MetadataFile module(assemblyFileName);
+    for (const auto& path : EnumerateResourcePaths(module))
+        output << path << "\r\n";
     return 0;
 }
 

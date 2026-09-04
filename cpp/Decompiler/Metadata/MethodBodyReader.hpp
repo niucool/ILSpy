@@ -128,7 +128,14 @@ public:
             : nt->OptionalHeader.DataDirectory[14].VirtualAddress;
         if (comRva != 0) {
             const auto* cor = reinterpret_cast<const image_cor20_header*>(RvaToPtr(comRva));
-            if (cor) corFlags_ = cor->Flags;
+            // The cor20 header's Flags and Resources directory -- the
+            // C# `peFile.Reader.PEHeaders.CorHeader.Flags` and the
+            // `CorHeader.Resources` data directory the embedded-resource
+            // read resolves (MetadataResource.TryReadResource).
+            if (cor) {
+                corFlags_ = cor->Flags;
+                resourcesDirectoryRva_ = cor->Resources.VirtualAddress;
+            }
         }
     }
 
@@ -147,6 +154,14 @@ public:
     // The cor20 header's Flags field (the .corflags line). Zero when the
     // image has no COM descriptor.
     std::uint32_t CorFlags() const noexcept { return corFlags_; }
+    // The cor20 header's Resources data directory RVA (the C#
+    // `CorHeader.Resources.RelativeVirtualAddress`) -- the start of the
+    // managed-resources block the embedded ManifestResource rows offset
+    // into. Zero when the image has no COM header or no resources
+    // directory (the C# `resources.RelativeVirtualAddress <= 0` arm).
+    std::uint32_t ResourcesDirectoryRva() const noexcept {
+        return resourcesDirectoryRva_;
+    }
 
     // The C# `PEHeaders.GetContainingSectionIndex(int relativeVirtualAddress)`
     // -- the index of the section whose [VirtualAddress, VirtualAddress +
@@ -455,6 +470,7 @@ private:
     std::uint64_t sizeOfStackReserve_ = 0;
     std::uint16_t subsystem_ = 0;
     std::uint32_t corFlags_ = 0;
+    std::uint32_t resourcesDirectoryRva_ = 0;
 
     // The debug data directory (optional-header data directory index 6)
     // the ReadDebugDirectory entry array lives at, captured during the PE
@@ -712,6 +728,12 @@ public:
     std::uint64_t SizeOfStackReserve() const noexcept { return pe_.SizeOfStackReserve(); }
     std::uint16_t Subsystem() const noexcept { return pe_.Subsystem(); }
     std::uint32_t CorFlags() const noexcept { return pe_.CorFlags(); }
+    // The cor20 header's Resources directory RVA (a straight PeImage
+    // passthrough -- the embedded-resource read the ManifestResource
+    // surface composes).
+    std::uint32_t ResourcesDirectoryRva() const noexcept {
+        return pe_.ResourcesDirectoryRva();
+    }
     std::optional<std::array<std::uint8_t, 16>> TryGetGuid(
         std::uint32_t heapIndex) const noexcept {
         return pe_.TryGetGuid(heapIndex);

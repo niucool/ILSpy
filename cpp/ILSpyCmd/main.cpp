@@ -114,6 +114,8 @@ int main(int argc, char** argv) {
             cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("l,list", "Lists all entities of the specified type(s). Valid types: c(lass), i(nterface), s(truct), d(elegate), e(num)",
             cxxopts::value<std::vector<std::string>>())
+        ("list-resources", "Lists all embedded resources in the assembly. Entries inside .resources containers are listed individually as '<container>/<entry>'.",
+            cxxopts::value<bool>()->default_value("false")->implicit_value("true"))
         ("dump-table", "Dump a metadata table: prints RID, token, names, heap offsets and coded indexes of every row. <table> is the ECMA-335 table name (e.g. TypeDef, Property, MethodSemantics; case-insensitive) or table number (decimal or 0x-prefixed hex, e.g. 0x17).",
             cxxopts::value<std::string>()->default_value(""))
         ("json", "Output as JSON. Currently only supported together with --dump-table.",
@@ -186,6 +188,8 @@ int main(int argc, char** argv) {
             pdbFile.Value = pdbValue;
     }
 
+    bool wantListResources = parsed.count("list-resources") != 0
+        && parsed["list-resources"].as<bool>();
     bool wantJson = parsed.count("json") != 0 && parsed["json"].as<bool>();
     // The C# `if (JsonOutputFlag && DumpTableName == null)` usage check
     // (IlspyCmdProgram.cs): --json alone is rejected before any file opens.
@@ -194,8 +198,8 @@ int main(int argc, char** argv) {
         return 64;  // ProgramExitCodes.EX_USAGE
     }
 
-    if (!wantIl && !wantIlSequencePoints && !wantIlAst && !wantIlAstAll && !wantCSharp && listValues.empty() && dumpTable.empty()) {
-        std::cout << "ilspycmd: see --help for available options (--il, --il-sequence-points, --ilast, --ilast-all, --csharp, --list, --dump-table).\n";
+    if (!wantIl && !wantIlSequencePoints && !wantIlAst && !wantIlAstAll && !wantCSharp && listValues.empty() && !wantListResources && dumpTable.empty()) {
+        std::cout << "ilspycmd: see --help for available options (--il, --il-sequence-points, --ilast, --ilast-all, --csharp, --list, --list-resources, --dump-table).\n";
         return 0;
     }
 
@@ -250,6 +254,36 @@ int main(int argc, char** argv) {
         // default text mode would translate every \n again (\r\n -> \r\r\n),
         // so the block is written in binary mode (restored after -- the other
         // paths print plain \n and rely on the text-mode translation).
+#if defined(_WIN32)
+        int stdoutFd = _fileno(stdout);
+        int oldMode = _setmode(stdoutFd, _O_BINARY);
+        std::cout << buffer.str();
+        std::cout.flush();
+        if (oldMode != -1)
+            _setmode(stdoutFd, oldMode);
+#else
+        std::cout << buffer.str();
+#endif
+        return rc;
+    }
+
+    // The C# ListResources arm (IlspyCmdProgram.cs PerformPerFileAction,
+    // the `else if (ListResourcesFlag)` branch -- it sits AFTER the
+    // EntityTypes, ShowIL, CreateDebugInfo and DumpPackage arms and
+    // BEFORE the ResourceName and DumpTableName arms, so a command line
+    // naming several of those flags runs the earlier action): one line per
+    // embedded manifest resource, with .resources containers expanded to
+    // their '<container>/<entry>' entries (the ResourceExtensions port's
+    // EnumerateResourcePaths). The -o per-file writer branch is deferred
+    // with the project output paths (the port CLI has no --outputdir yet;
+    // the C# writes <name>.resources.txt there).
+    if (wantListResources) {
+        std::ostringstream buffer;
+        int rc = ILSpy::ILSpyCmd::ListResources(asmPath, buffer);
+        // The buffer carries the final CRLF text (the same TextWriter
+        // convention ShowIL/ListContent render); stdout's default text
+        // mode would translate every \n again, so the block is written in
+        // binary mode (the ShowIL pattern).
 #if defined(_WIN32)
         int stdoutFd = _fileno(stdout);
         int oldMode = _setmode(stdoutFd, _O_BINARY);

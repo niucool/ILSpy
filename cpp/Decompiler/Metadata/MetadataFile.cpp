@@ -27,6 +27,7 @@
 
 #include "Decompiler/Metadata/Ecma335/WinmdInclude.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
@@ -2417,6 +2418,126 @@ std::optional<MetadataFile::PeHeaderInfo> MetadataFile::GetPeHeaderInfo()
     info.Subsystem = impl_->bodyReader->Subsystem();
     info.CorFlags = impl_->bodyReader->CorFlags();
     return info;
+}
+
+// The ManifestResource rows (table 0x28) in table order -- the C#
+// `MetadataFile.Resources` collection. See the header for the full
+// contract. Column layout (II.22.24): Offset(4), Flags(4), Name,
+// Implementation (the coded index over File/AssemblyRef/ExportedType;
+// winmd's composite_index_size fixes the tag order 0/1/2).
+std::vector<MetadataFile::ManifestResourceInfo>
+MetadataFile::GetManifestResources() const {
+    std::vector<ManifestResourceInfo> result;
+    if (!IsValid()) return result;
+    std::uint32_t count = static_cast<std::uint32_t>(
+        impl_->db->ManifestResource.size());
+    for (std::uint32_t row = 1; row <= count; row++) {
+        try {
+            ManifestResourceInfo info;
+            info.Token = (0x28u << 24) | row;
+            info.Offset = impl_->db->ManifestResource.get_value<std::uint32_t>(
+                row - 1, 0);
+            info.Attributes =
+                impl_->db->ManifestResource.get_value<std::uint32_t>(
+                    row - 1, 1);
+            info.Name = std::string{impl_->db->get_string(
+                impl_->db->ManifestResource.get_value<std::uint32_t>(
+                    row - 1, 2))};
+            // The Implementation coded index: 2 tag bits, the row shifted
+            // up; 0=File, 1=AssemblyRef, 2=ExportedType (the dumper's
+            // DecodeImplementation mapping).
+            std::uint32_t raw = impl_->db->ManifestResource.get_value<
+                std::uint32_t>(row - 1, 3);
+            static constexpr std::uint32_t kTables[3] = {0x26, 0x23, 0x27};
+            if (raw != 0) {
+                std::uint32_t tag = raw & 0x3u;
+                std::uint32_t rid = raw >> 2;
+                if (rid != 0 && tag < 3)
+                    info.ImplementationToken =
+                        (kTables[tag] << 24) | rid;
+            }
+            // The C# MetadataResource.GetResourceType: a nil
+            // implementation is Embedded, an AssemblyReference target is
+            // AssemblyLinked, anything else Linked.
+            if (info.ImplementationToken == 0) {
+                info.Kind = ManifestResourceKind::Embedded;
+            } else if ((info.ImplementationToken >> 24) == 0x23) {
+                info.Kind = ManifestResourceKind::AssemblyLinked;
+            } else {
+                info.Kind = ManifestResourceKind::Linked;
+            }
+            result.push_back(std::move(info));
+        } catch (const std::exception&) {
+            // Malformed table walk: stop at the first unreadable row (the
+            // rows before it stay readable).
+            break;
+        }
+    }
+    return result;
+}
+
+// An embedded ManifestResource's blob -- the C#
+// MetadataResource.TryOpenStream/TryGetLength pair. See the header for
+// the full contract.
+std::optional<std::vector<std::uint8_t>>
+MetadataFile::TryGetManifestResourceData(std::uint32_t token) const {
+    if (!IsValid()) return std::nullopt;
+    std::uint32_t table = token >> 24;
+    std::uint32_t row = token & 0x00FFFFFFu;
+    if (table != 0x28 || row == 0
+        || row > impl_->db->ManifestResource.size())
+        return std::nullopt;
+    try {
+        std::uint32_t implementation = impl_->db->ManifestResource.get_value<
+            std::uint32_t>(row - 1, 3);
+        std::uint32_t kind;
+        if (implementation == 0) {
+            kind = 0;  // nil: embedded
+        } else if ((implementation & 0x3u) == 1) {
+            kind = 1;  // AssemblyRef: assembly-linked
+        } else {
+            kind = 2;  // File/ExportedType: linked
+        }
+        // The C# `if (ResourceType != ResourceType.Embedded) return false`:
+        // only embedded resources carry a blob in this file.
+        if (kind != 0) return std::nullopt;
+        // The C# `if (Module.CorHeader == null) return false` and the
+        // `resources.RelativeVirtualAddress <= 0` guard: no cor20
+        // Resources directory means no embedded resource can be read.
+        if (!impl_->bodyReader || !impl_->bodyReader->HasImage())
+            return std::nullopt;
+        std::uint32_t resourcesRva =
+            impl_->bodyReader->ResourcesDirectoryRva();
+        if (resourcesRva == 0) return std::nullopt;
+        PeImage::SectionDataView sectionData =
+            impl_->bodyReader->GetSectionData(resourcesRva);
+        // Validate section length: we need at least 4 bytes to extract
+        // the actual length of the resource blob.
+        if (sectionData.length < 4) return std::nullopt;
+        std::uint32_t offset = impl_->db->ManifestResource.get_value<
+            std::uint32_t>(row - 1, 0);
+        // Validate resource offset (the C# `offset < 0 || offset >
+        // sectionData.Length - 4`; the column is unsigned, so the negative
+        // arm is the C#'s int read of the raw bits).
+        if (offset > sectionData.length - 4) return std::nullopt;
+        const std::uint8_t* ptr = sectionData.base + offset;
+        // Get actual length of resource blob.
+        std::uint64_t length = static_cast<std::uint64_t>(ptr[0])
+            | (static_cast<std::uint64_t>(ptr[1]) << 8)
+            | (static_cast<std::uint64_t>(ptr[2]) << 16)
+            | (static_cast<std::uint64_t>(ptr[3]) << 24);
+        if (length > sectionData.length) return std::nullopt;
+        // The stream the C# returns starts after the length prefix; the
+        // copy clamps at the section data's end (the nominal overrun the
+        // upstream length check permits never leaves the image).
+        std::size_t available = sectionData.length
+            - (static_cast<std::size_t>(offset) + 4);
+        std::size_t take = static_cast<std::size_t>(
+            std::min<std::uint64_t>(length, available));
+        return std::vector<std::uint8_t>(ptr + 4, ptr + 4 + take);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
 }
 
 // The PE debug-directory entries. See the header for the full contract.
