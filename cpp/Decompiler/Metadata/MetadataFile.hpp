@@ -29,6 +29,7 @@
 
 #include "Decompiler/Metadata/MethodBody.hpp"
 #include "Decompiler/Metadata/LocalTypeInfo.hpp"
+#include "Decompiler/Disassembler/ReflectionAttributes.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
 #include <array>
@@ -918,6 +919,46 @@ public:
         std::uint32_t CorFlags = 0;    // the cor20 header's Flags field
     };
     std::optional<PeHeaderInfo> GetPeHeaderInfo() const;
+
+    // The PE debug-directory entries (the C# `PEReader.ReadDebugDirectory()`
+    // -- the IMAGE_DEBUG_DIRECTORY array the debug data directory points
+    // at, the PdbProvider's PDB discovery walks). Empty when the image is
+    // invalid or carries no debug directory. Throws std::out_of_range (the
+    // C# BadImageFormatException arms) when the directory RVA resolves into
+    // no section, the size is not a multiple of the 28-byte entry, the block
+    // runs past the file, or an entry carries a nonzero Characteristics
+    // field (reserved, always 0).
+    struct DebugDirectoryEntryInfo {
+        std::uint32_t Stamp = 0;
+        std::uint16_t MajorVersion = 0;
+        std::uint16_t MinorVersion = 0;
+        Disassembler::DebugDirectoryEntryType Type
+            = Disassembler::DebugDirectoryEntryType::Unknown;
+        std::int32_t DataSize = 0;
+        std::int32_t DataRelativeVirtualAddress = 0;
+        std::int32_t DataPointer = 0;
+        // The C# `DebugDirectoryEntry.IsPortableCodeView` -- a CodeView entry
+        // emitted next to a portable PDB (MinorVersion 0x504D, "MP").
+        bool IsPortableCodeView() const { return MinorVersion == 0x504D; }
+    };
+    std::vector<DebugDirectoryEntryInfo> GetDebugDirectoryEntries() const;
+
+    // The C# `PEReader.ReadCodeViewDebugDirectoryData(entry)` -- the
+    // CV_INFO_PDB70 blob a CodeView entry points at: the "RSDS" signature,
+    // the PDB's GUID (the raw 16 bytes as stored, the canonical
+    // little-endian Guid form), the age, and the null-terminated UTF-8 path
+    // (a missing terminator yields the whole remaining block -- the C#
+    // ReadUtf8NullTerminated end-of-blob behavior). Nullopt when the file
+    // is invalid; throws std::invalid_argument when the entry is not a
+    // CodeView entry (the C# ArgumentException) and std::out_of_range for a
+    // truncated or non-RSDS block.
+    struct CodeViewDebugDirectoryDataInfo {
+        std::array<std::uint8_t, 16> Guid{};
+        std::int32_t Age = 0;
+        std::string Path;
+    };
+    std::optional<CodeViewDebugDirectoryDataInfo> GetCodeViewDebugDirectoryData(
+        const DebugDirectoryEntryInfo& entry) const;
 
 private:
     struct Impl;

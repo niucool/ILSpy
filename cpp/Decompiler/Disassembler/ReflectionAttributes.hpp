@@ -539,4 +539,21 @@ inline CorFlags operator~(CorFlags a) {
 	return static_cast<CorFlags>(~static_cast<std::int32_t>(a));
 }
 
+// ---------------------------------------------------------------------------
+// DebugDirectoryEntryType -- the BCL `System.Reflection.PortableExecutable.
+// DebugDirectoryEntryType` over the IMAGE_DEBUG_DIRECTORY Type field (the PE
+// debug data directory the PdbProvider's PDB discovery walks). The .NET 10
+// enum carries exactly these members (no Copysign); a raw Type value outside
+// the set casts to an unnamed value that compares unequal to every member --
+// the DebugInfoUtils discovery skips such entries, matching the C#.
+// ---------------------------------------------------------------------------
+enum class DebugDirectoryEntryType : std::int32_t {
+	Unknown = 0x0,
+	Coff = 0x1,
+	CodeView = 0x2,
+	Reproducible = 0x10,
+	EmbeddedPortablePdb = 0x11,
+	PdbChecksum = 0x13,
+};
+
 } // namespace ILSpy::Decompiler::Disassembler

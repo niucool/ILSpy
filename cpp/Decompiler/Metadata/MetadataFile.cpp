@@ -2402,4 +2402,47 @@ std::optional<MetadataFile::PeHeaderInfo> MetadataFile::GetPeHeaderInfo()
     return info;
 }
 
+// The PE debug-directory entries. See the header for the full contract.
+std::vector<MetadataFile::DebugDirectoryEntryInfo>
+MetadataFile::GetDebugDirectoryEntries() const {
+    if (!IsValid() || !impl_->bodyReader || !impl_->bodyReader->HasImage())
+        return {};
+    std::vector<DebugDirectoryEntryInfo> result;
+    for (const auto& e : impl_->bodyReader->ReadDebugDirectory()) {
+        DebugDirectoryEntryInfo info;
+        info.Stamp = e.Stamp;
+        info.MajorVersion = e.MajorVersion;
+        info.MinorVersion = e.MinorVersion;
+        info.Type = static_cast<Disassembler::DebugDirectoryEntryType>(e.Type);
+        info.DataSize = e.DataSize;
+        info.DataRelativeVirtualAddress = e.DataRelativeVirtualAddress;
+        info.DataPointer = e.DataPointer;
+        result.push_back(info);
+    }
+    return result;
+}
+
+// The CV_INFO_PDB70 blob a CodeView entry points at. See the header for
+// the full contract.
+std::optional<MetadataFile::CodeViewDebugDirectoryDataInfo>
+MetadataFile::GetCodeViewDebugDirectoryData(
+    const DebugDirectoryEntryInfo& entry) const {
+    if (!IsValid() || !impl_->bodyReader || !impl_->bodyReader->HasImage())
+        return std::nullopt;
+    PeImage::DebugDirectoryEntry internal;
+    internal.Stamp = entry.Stamp;
+    internal.MajorVersion = entry.MajorVersion;
+    internal.MinorVersion = entry.MinorVersion;
+    internal.Type = static_cast<std::int32_t>(entry.Type);
+    internal.DataSize = entry.DataSize;
+    internal.DataRelativeVirtualAddress = entry.DataRelativeVirtualAddress;
+    internal.DataPointer = entry.DataPointer;
+    auto data = impl_->bodyReader->ReadCodeViewDebugDirectoryData(internal);
+    CodeViewDebugDirectoryDataInfo info;
+    info.Guid = data.Guid;
+    info.Age = data.Age;
+    info.Path = std::move(data.Path);
+    return info;
+}
+
 } // namespace ILSpy::Decompiler::Metadata

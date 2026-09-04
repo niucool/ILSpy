@@ -26,6 +26,8 @@
 #include "Decompiler/Metadata/MethodBody.hpp"
 #include "Decompiler/Util/Span.hpp"
 
+#include "Decompiler/Disassembler/ReflectionAttributes.hpp"
+
 #include "Decompiler/Metadata/Ecma335/WinmdInclude.hpp"
 
 #include <algorithm>
@@ -35,6 +37,7 @@
 #include <cstring>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -103,12 +106,16 @@ public:
             fileAlignment_ = opt.FileAlignment;
             sizeOfStackReserve_ = opt.SizeOfStackReserve;
             subsystem_ = opt.Subsystem;
+            debugDirectoryRva_ = opt.DataDirectory[6].VirtualAddress;
+            debugDirectorySize_ = opt.DataDirectory[6].Size;
         } else {
             const auto& opt = nt->OptionalHeader;
             imageBase_ = opt.ImageBase;
             fileAlignment_ = opt.FileAlignment;
             sizeOfStackReserve_ = opt.SizeOfStackReserve;
             subsystem_ = opt.Subsystem;
+            debugDirectoryRva_ = opt.DataDirectory[6].VirtualAddress;
+            debugDirectorySize_ = opt.DataDirectory[6].Size;
         }
         // The cor20 header's Flags field (the C# `peFile.Reader.PEHeaders
         // .CorHeader.Flags`). A COM descriptor RVA of 0 (a non-managed PE)
@@ -189,6 +196,117 @@ public:
         if (num > rawAvail) return {};
         return { bytes_->data() + s.PointerToRawData + num,
                  static_cast<std::size_t>(rawAvail - num) };
+    }
+
+    // The C# `System.Reflection.PortableExecutable.DebugDirectoryEntry` --
+    // one IMAGE_DEBUG_DIRECTORY row (28 bytes: Characteristics, which is
+    // reserved and must be 0, is validated away by ReadDebugDirectory).
+    // Type is the raw int32 field; the Disassembler::DebugDirectoryEntryType
+    // enum view of it is the MetadataFile::DebugDirectoryEntryInfo mapping.
+    struct DebugDirectoryEntry {
+        std::uint32_t Stamp = 0;
+        std::uint16_t MajorVersion = 0;
+        std::uint16_t MinorVersion = 0;
+        std::int32_t Type = 0;
+        std::int32_t DataSize = 0;
+        std::int32_t DataRelativeVirtualAddress = 0;
+        std::int32_t DataPointer = 0;
+    };
+
+    // The C# `PEReader.ReadDebugDirectory()` -- the IMAGE_DEBUG_DIRECTORY
+    // array the debug data directory (optional-header data directory index
+    // 6) points at, the PdbProvider's PDB discovery walks. Empty when the
+    // image is invalid or carries no debug directory. Throws
+    // std::out_of_range (the C# BadImageFormatException arms) when the
+    // directory RVA resolves into no section, the size is not a multiple
+    // of the 28-byte entry, the directory block runs past the file, or an
+    // entry carries a nonzero Characteristics field (reserved, always 0).
+    std::vector<DebugDirectoryEntry> ReadDebugDirectory() const {
+        if (!sections_ || debugDirectorySize_ == 0) return {};
+        const std::uint8_t* p = RvaToPtr(debugDirectoryRva_);
+        if (!p) throw std::out_of_range("Invalid debug directory RVA");
+        if (debugDirectorySize_ % 28 != 0)
+            throw std::out_of_range("Invalid debug directory size");
+        if (static_cast<std::uint64_t>(p - bytes_->data()) + debugDirectorySize_
+                > static_cast<std::uint64_t>(bytes_->size()))
+            throw std::out_of_range("Debug directory block is truncated");
+        std::vector<DebugDirectoryEntry> entries;
+        entries.reserve(debugDirectorySize_ / 28);
+        for (std::uint32_t off = 0; off < debugDirectorySize_; off += 28) {
+            const std::uint8_t* e = p + off;
+            if (ReadLe<4>(e) != 0)
+                throw std::out_of_range(
+                    "Invalid debug directory entry characteristics");
+            DebugDirectoryEntry entry{};
+            entry.Stamp = ReadLe<4>(e + 4);
+            entry.MajorVersion = ReadLe<2>(e + 8);
+            entry.MinorVersion = ReadLe<2>(e + 10);
+            entry.Type = static_cast<std::int32_t>(ReadLe<4>(e + 12));
+            entry.DataSize = static_cast<std::int32_t>(ReadLe<4>(e + 16));
+            entry.DataRelativeVirtualAddress =
+                static_cast<std::int32_t>(ReadLe<4>(e + 20));
+            entry.DataPointer = static_cast<std::int32_t>(ReadLe<4>(e + 24));
+            entries.push_back(entry);
+        }
+        return entries;
+    }
+
+    // The C# `GetDebugDirectoryEntryDataBlock` (internal on PEReader): the
+    // raw block an entry's data lives in. A file-backed image -- the port is
+    // never a loaded image -- reads at the raw FILE POINTER the entry's
+    // PointerToRawData field carries (the C# `IsLoadedImage ? DataRVA :
+    // DataPointer` non-loaded arm), so the data may sit past the sections
+    // (entry-data blobs are not required to live inside any section). The
+    // view points into this image's bytes; empty for a zero DataSize.
+    // Throws std::out_of_range when the block runs past the file.
+    SectionDataView GetDebugDirectoryEntryData(const DebugDirectoryEntry& entry) const {
+        std::int64_t start = entry.DataPointer;
+        std::int64_t end = start + entry.DataSize;
+        if (start < 0 || end > static_cast<std::int64_t>(bytes_->size()))
+            throw std::out_of_range("Debug data block is out of range");
+        return { bytes_->data() + start,
+                 entry.DataSize > 0 ? static_cast<std::size_t>(entry.DataSize) : 0 };
+    }
+
+    // The C# `CodeViewDebugDirectoryData` -- the CV_INFO_PDB70 blob a
+    // CodeView entry points at: the "RSDS" signature, the PDB's GUID (the
+    // raw 16 bytes as stored, the canonical little-endian Guid form), the
+    // age, and the null-terminated UTF-8 path. The path is kept as the raw
+    // UTF-8 bytes (ASCII in practice; the port converts at boundaries).
+    struct CodeViewDebugDirectoryData {
+        std::array<std::uint8_t, 16> Guid{};
+        std::int32_t Age = 0;
+        std::string Path;
+    };
+
+    // The C# `PEReader.ReadCodeViewDebugDirectoryData(entry)`. Throws
+    // std::invalid_argument when the entry is not a CodeView entry (the
+    // C# ArgumentException) and std::out_of_range for a block that is
+    // truncated or does not start with the RSDS signature (the C#
+    // BadImageFormatException arms). A path with no NUL terminator inside
+    // the block yields the whole remaining block as the path (the C#
+    // ReadUtf8NullTerminated end-of-blob behavior -- no throw).
+    CodeViewDebugDirectoryData ReadCodeViewDebugDirectoryData(
+        const DebugDirectoryEntry& entry) const {
+        if (entry.Type != static_cast<std::int32_t>(
+                Disassembler::DebugDirectoryEntryType::CodeView)) {
+            throw std::invalid_argument("entry is not a CodeView entry");
+        }
+        SectionDataView data = GetDebugDirectoryEntryData(entry);
+        if (data.length < 24) throw std::out_of_range("Truncated CodeView data");
+        if (data.base[0] != 0x52 || data.base[1] != 0x53
+            || data.base[2] != 0x44 || data.base[3] != 0x53) {
+            throw std::out_of_range("Unexpected CodeView data signature");
+        }
+        CodeViewDebugDirectoryData result;
+        std::memcpy(result.Guid.data(), data.base + 4, 16);
+        result.Age = static_cast<std::int32_t>(ReadLe<4>(data.base + 20));
+        const std::uint8_t* p = data.base + 24;
+        const std::uint8_t* end = data.base + data.length;
+        while (p < end && *p != 0) ++p;
+        result.Path.assign(reinterpret_cast<const char*>(data.base + 24),
+                           static_cast<std::size_t>(p - (data.base + 24)));
+        return result;
     }
 
     // Resolve an RVA to a file offset, or nullptr if it falls outside every
@@ -290,6 +408,12 @@ private:
     std::uint64_t sizeOfStackReserve_ = 0;
     std::uint16_t subsystem_ = 0;
     std::uint32_t corFlags_ = 0;
+
+    // The debug data directory (optional-header data directory index 6)
+    // the ReadDebugDirectory entry array lives at, captured during the PE
+    // parse like the other optional-header values.
+    std::uint32_t debugDirectoryRva_ = 0;
+    std::uint32_t debugDirectorySize_ = 0;
 
 public:
     // The cor20 header's EntryPointTokenOrRelativeVirtualAddress, or 0 when
@@ -544,6 +668,19 @@ public:
     std::optional<std::array<std::uint8_t, 16>> TryGetGuid(
         std::uint32_t heapIndex) const noexcept {
         return pe_.TryGetGuid(heapIndex);
+    }
+
+    // The PE debug-directory reads the PdbProvider's PDB discovery composes
+    // (the C# `PEReader.ReadDebugDirectory()` /
+    // `ReadCodeViewDebugDirectoryData(entry)` pair). Straight PeImage
+    // passthroughs; the throw shapes propagate (the C# BadImageFormatException
+    // and ArgumentException arms).
+    std::vector<PeImage::DebugDirectoryEntry> ReadDebugDirectory() const {
+        return pe_.ReadDebugDirectory();
+    }
+    PeImage::CodeViewDebugDirectoryData ReadCodeViewDebugDirectoryData(
+        const PeImage::DebugDirectoryEntry& entry) const {
+        return pe_.ReadCodeViewDebugDirectoryData(entry);
     }
 
     // Decode the method body at `rva`. Returns an invalid MethodBody if the RVA
