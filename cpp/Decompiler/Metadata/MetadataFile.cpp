@@ -878,6 +878,154 @@ std::optional<std::string> MetadataFile::GetModuleReferenceName(std::uint32_t to
     }
 }
 
+// A MethodDef row's ImplAttributes column (II.23.1.12). See the header for
+// the full contract.
+std::uint32_t MetadataFile::GetMethodImplAttributes(std::uint32_t methodToken) const {
+    if (!IsValid()) return 0;
+    std::uint32_t table = methodToken >> 24;
+    std::uint32_t row = methodToken & 0x00FFFFFFu;
+    if (table != 0x06 || row == 0 || row > impl_->db->MethodDef.size()) return 0;
+    try {
+        // The ImplFlags column is 2 bytes (II.23.1.12), widened to uint32.
+        return impl_->db->MethodDef[row - 1].ImplFlags().value;
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
+// The ImplMap row whose MemberForwarded is the MethodDef -- the C#
+// MethodDefinition.GetImport() (the SRM MethodImport: Module, Name,
+// Attributes). See the header for the full contract.
+std::optional<MetadataFile::MethodImportInfo> MetadataFile::GetMethodImport(
+    std::uint32_t methodToken) const {
+    if (!IsValid()) return std::nullopt;
+    std::uint32_t table = methodToken >> 24;
+    std::uint32_t row = methodToken & 0x00FFFFFFu;
+    if (table != 0x06 || row == 0)
+        return std::nullopt;
+    try {
+        std::uint32_t count = static_cast<std::uint32_t>(impl_->db->ImplMap.size());
+        // The MemberForwarded coded index (II.24.2.4): 1 tag bit, tag 1 =
+        // MethodDef (the port's FieldMarshal scan convention for the sibling
+        // HasFieldMarshal column).
+        std::uint32_t want = (row << 1) | 1u;
+        for (std::uint32_t i = 0; i < count; i++) {
+            if (impl_->db->ImplMap.get_value<std::uint32_t>(i, 1) != want)
+                continue;
+            MethodImportInfo info;
+            info.Attributes =
+                impl_->db->ImplMap.get_value<std::uint32_t>(i, 0);
+            std::uint32_t nameOffset =
+                impl_->db->ImplMap.get_value<std::uint32_t>(i, 2);
+            if (nameOffset != 0) {
+                info.Name = std::string{impl_->db->get_string(nameOffset)};
+            }
+            std::uint32_t scope =
+                impl_->db->ImplMap.get_value<std::uint32_t>(i, 3);
+            if (scope != 0) {
+                info.ModuleRefToken = (0x1Au << 24) | scope;
+            }
+            return info;
+        }
+        return std::nullopt;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// The MethodImpl rows whose MethodBody is the MethodDef -- the C#
+// handle.GetMethodImplementations(metadata) ILSpy extension (the declaring
+// type's Class-column range filtered by MethodBody; the port scans the whole
+// table and filters on both the MethodBody column and the Class column --
+// well-formed metadata has Class == the method's declaring type). See the
+// header for the full contract.
+std::vector<MetadataFile::MethodImplementationInfo>
+MetadataFile::GetMethodImplementations(std::uint32_t methodToken) const {
+    std::vector<MethodImplementationInfo> result;
+    if (!IsValid()) return result;
+    std::uint32_t table = methodToken >> 24;
+    std::uint32_t row = methodToken & 0x00FFFFFFu;
+    if (table != 0x06 || row == 0)
+        return result;
+    try {
+        std::uint32_t declaringType = GetMethodDeclaringTypeToken(methodToken)
+            & 0x00FFFFFFu;
+        std::uint32_t count = static_cast<std::uint32_t>(impl_->db->MethodImpl.size());
+        for (std::uint32_t i = 0; i < count; i++) {
+            // MethodDefOrRef coded index (1 tag bit): the MethodBody column,
+            // tag 0 = MethodDef; the Class column is a plain TypeDef row
+            // index (the token's low 24 bits -- no coding).
+            std::uint32_t bodyRaw =
+                impl_->db->MethodImpl.get_value<std::uint32_t>(i, 1);
+            if ((bodyRaw >> 1) != row || (bodyRaw & 1u) != 0)
+                continue;
+            if (impl_->db->MethodImpl.get_value<std::uint32_t>(i, 0)
+                != declaringType)
+                continue;
+            MethodImplementationInfo info;
+            info.Token = (0x19u << 24) | ((i + 1) & 0x00FFFFFFu);
+            std::uint32_t declRaw =
+                impl_->db->MethodImpl.get_value<std::uint32_t>(i, 2);
+            if (declRaw != 0) {
+                std::uint32_t declRid = declRaw >> 1;
+                std::uint32_t declTable = (declRaw & 1u) ? 0x0Au : 0x06u;
+                if (declRid != 0)
+                    info.MethodDeclarationToken =
+                        (declTable << 24) | declRid;
+            }
+            result.push_back(std::move(info));
+        }
+    } catch (const std::exception&) {
+        // Best-effort: a malformed table walk degrades to the partial result.
+    }
+    return result;
+}
+
+// The DeclSecurity rows whose Parent is the token -- the C#
+// TypeDefinition/MethodDefinition.GetDeclarativeSecurityAttributes()
+// collection. See the header for the full contract.
+std::vector<MetadataFile::DeclarativeSecurityInfo>
+MetadataFile::GetDeclarativeSecurityAttributes(std::uint32_t parentToken) const {
+    std::vector<DeclarativeSecurityInfo> result;
+    if (!IsValid()) return result;
+    std::uint32_t row = parentToken & 0x00FFFFFFu;
+    if (row == 0) return result;
+    // The HasDeclSecurity coded index (II.24.2.4): 2 tag bits over TypeDef,
+    // MethodDef, Assembly (the winmd composite includes the assembly-level
+    // rows; the disassembler's member walks only reach the first two).
+    std::uint32_t tag;
+    switch (parentToken >> 24) {
+        case 0x02: tag = 0; break;  // TypeDef
+        case 0x06: tag = 1; break;  // MethodDef
+        case 0x20: tag = 2; break;  // Assembly
+        default: return result;
+    }
+    std::uint32_t want = (row << 2) | tag;
+    try {
+        std::uint32_t count = static_cast<std::uint32_t>(
+            impl_->db->DeclSecurity.size());
+        for (std::uint32_t i = 0; i < count; i++) {
+            if (impl_->db->DeclSecurity.get_value<std::uint32_t>(i, 1) != want)
+                continue;
+            DeclarativeSecurityInfo info;
+            info.Token = (0x0Eu << 24) | ((i + 1) & 0x00FFFFFFu);
+            info.Action =
+                impl_->db->DeclSecurity.get_value<std::uint32_t>(i, 0) & 0xFFFFu;
+            std::uint32_t blobOffset =
+                impl_->db->DeclSecurity.get_value<std::uint32_t>(i, 2);
+            if (blobOffset != 0) {
+                auto blob = impl_->db->get_blob(blobOffset);
+                info.PermissionSet =
+                    std::vector<std::uint8_t>(blob.begin(), blob.end());
+            }
+            result.push_back(std::move(info));
+        }
+    } catch (const std::exception&) {
+        // Best-effort: a malformed table walk degrades to the partial result.
+    }
+    return result;
+}
+
 // The whole-table enumerations. See the header for the full contract.
 std::vector<MetadataFile::MemberRefInfo> MetadataFile::MemberRefs() const {
     std::vector<MemberRefInfo> result;

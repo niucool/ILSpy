@@ -22,9 +22,12 @@
 #include "Decompiler/Disassembler/ReflectionDisassembler.hpp"
 
 #include "Decompiler/Disassembler/DisassemblerHelpers.hpp"
+#include "Decompiler/Disassembler/DisassemblerSignatureTypeProvider.hpp"
+#include "Decompiler/Disassembler/EnumNameCollection.hpp"
 #include "Decompiler/Disassembler/ReflectionAttributes.hpp"
 #include "Decompiler/IL/InstructionOutputExtensions.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/Metadata/SignatureTypeProvider.hpp"
 #include "Decompiler/Output/ITextOutput.hpp"
 #include "Decompiler/Util/Utf.hpp"
 
@@ -33,6 +36,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -1046,6 +1050,437 @@ void ReflectionDisassembler::WriteParameterAttributes(
     output_.Indent();
     WriteAttributes(module, attributes);
     output_.Unindent();
+}
+
+// ---------------------------------------------------------------------------
+// The method chain (ReflectionDisassembler.cs lines 153-170, 172-318, 354-389
+// and 390-467, 1755-1802).
+// ---------------------------------------------------------------------------
+
+// The C# `public void DisassembleMethod(MetadataFile module,
+// MethodDefinitionHandle handle)`: the ".method" reference, the header, and
+// the body block. See the header for the porting decisions.
+void ReflectionDisassembler::DisassembleMethod(Metadata::MetadataFile& module,
+    std::uint32_t methodToken)
+{
+    // The C# `new MetadataGenericContext(handle, module)` -- the method
+    // context (VAR names the method's declaring type's parameters, MVAR the
+    // method's own).
+    auto genericContext =
+        Metadata::MetadataGenericContext::ForMethod(methodToken, module);
+    // write method header
+    output_.WriteReference(module, methodToken, ".method", "decompile",
+        /*isDefinition=*/true);
+    output_.Write(" ");
+    DisassembleMethodHeaderInternal(module, methodToken, genericContext);
+    DisassembleMethodBlock(module, methodToken, genericContext);
+}
+
+// The C# `public void DisassembleMethodHeader(MetadataFile module,
+// MethodDefinitionHandle handle)`: the ".method" reference and the header,
+// no body block.
+void ReflectionDisassembler::DisassembleMethodHeader(Metadata::MetadataFile& module,
+    std::uint32_t methodToken)
+{
+    auto genericContext =
+        Metadata::MetadataGenericContext::ForMethod(methodToken, module);
+    output_.WriteReference(module, methodToken, ".method", "decompile",
+        /*isDefinition=*/true);
+    output_.Write(" ");
+    DisassembleMethodHeaderInternal(module, methodToken, genericContext);
+}
+
+// The C# `void DisassembleMethodHeaderInternal(MetadataFile module,
+// MethodDefinitionHandle handle, MetadataGenericContext genericContext)`.
+// See the header for the porting decisions.
+void ReflectionDisassembler::DisassembleMethodHeaderInternal(
+    Metadata::MetadataFile& module, std::uint32_t methodToken,
+    const Metadata::MetadataGenericContext& genericContext)
+{
+    WriteMetadataToken(output_, module, methodToken, methodToken,
+        /*spaceAfter=*/true, /*spaceBefore=*/false, ShowMetadataTokens(),
+        ShowMetadataTokensInBase10());
+    std::uint32_t attributes = module.GetMethodAttributes(methodToken);
+    std::string name = module.GetMethodName(methodToken);
+
+    //    .method public hidebysig  specialname
+    //               instance default class [mscorlib]System.IO.TextWriter get_BaseWriter ()  cil managed
+    //
+    //emit flags
+    WriteEnum(
+        static_cast<MethodAttributes>(attributes
+            & static_cast<std::uint32_t>(MethodAttributes::MemberAccessMask)),
+        methodVisibility, output_);
+    WriteFlags(static_cast<MethodAttributes>(
+                    attributes & ~static_cast<std::uint32_t>(
+                        MethodAttributes::MemberAccessMask)),
+        methodAttributeFlags, output_);
+    // The C# isCompilerControlled check: PrivateScope (the MemberAccessMask
+    // zero value) has no table entry -- the header spells it separately
+    // ("privatescope " here and the $PST name suffix below).
+    bool isCompilerControlled =
+        (attributes & static_cast<std::uint32_t>(
+             MethodAttributes::MemberAccessMask))
+        == static_cast<std::uint32_t>(MethodAttributes::PrivateScope);
+    if (isCompilerControlled)
+        output_.Write("privatescope ");
+
+    if ((attributes & static_cast<std::uint32_t>(MethodAttributes::PinvokeImpl))
+        != 0) {
+        output_.Write("pinvokeimpl");
+        auto info = module.GetMethodImport(methodToken);
+        if (info.has_value() && info->ModuleRefToken != 0) {
+            // The C# `metadata.GetModuleReference(info.Module).Name` -- the
+            // raw ModuleRef Name, escaped into the quoted spelling.
+            auto moduleRefName =
+                module.GetModuleReferenceName(info->ModuleRefToken);
+            output_.Write("(\"");
+            output_.Write(EscapeString(moduleRefName.value_or("")));
+            output_.Write("\"");
+
+            // The C# `!info.Name.IsNil && metadata.GetString(info.Name) !=
+            // metadata.GetString(methodDefinition.Name)` -- the alias is
+            // rendered only when the imported name differs from the
+            // declared one (compared raw, before escaping).
+            if (info->Name.has_value() && *info->Name != name) {
+                output_.Write(" as \"");
+                output_.Write(EscapeString(*info->Name));
+                output_.Write("\"");
+            }
+
+            auto importAttributes =
+                static_cast<MethodImportAttributes>(info->Attributes);
+            if ((importAttributes & MethodImportAttributes::ExactSpelling)
+                == MethodImportAttributes::ExactSpelling) {
+                output_.Write(" nomangle");
+            }
+
+            switch (static_cast<std::uint32_t>(
+                importAttributes & MethodImportAttributes::CharSetMask)) {
+                case static_cast<std::uint32_t>(MethodImportAttributes::CharSetAnsi):
+                    output_.Write(" ansi");
+                    break;
+                case static_cast<std::uint32_t>(MethodImportAttributes::CharSetAuto):
+                    output_.Write(" autochar");
+                    break;
+                case static_cast<std::uint32_t>(MethodImportAttributes::CharSetUnicode):
+                    output_.Write(" unicode");
+                    break;
+            }
+
+            if ((importAttributes & MethodImportAttributes::SetLastError)
+                == MethodImportAttributes::SetLastError) {
+                output_.Write(" lasterr");
+            }
+
+            switch (static_cast<std::uint32_t>(
+                importAttributes & MethodImportAttributes::CallingConventionMask)) {
+                case static_cast<std::uint32_t>(MethodImportAttributes::CallingConventionCDecl):
+                    output_.Write(" cdecl");
+                    break;
+                case static_cast<std::uint32_t>(MethodImportAttributes::CallingConventionFastCall):
+                    output_.Write(" fastcall");
+                    break;
+                case static_cast<std::uint32_t>(MethodImportAttributes::CallingConventionStdCall):
+                    output_.Write(" stdcall");
+                    break;
+                case static_cast<std::uint32_t>(MethodImportAttributes::CallingConventionThisCall):
+                    output_.Write(" thiscall");
+                    break;
+                case static_cast<std::uint32_t>(MethodImportAttributes::CallingConventionWinApi):
+                    output_.Write(" winapi");
+                    break;
+            }
+
+            output_.Write(')');
+        }
+        output_.Write(' ');
+    }
+
+    output_.WriteLine();
+    output_.Indent();
+    // The C# assigns `var declaringType = methodDefinition.GetDeclaringType()`
+    // here and never reads it -- the block's close comment re-reads the
+    // declaring type itself.
+    std::optional<Metadata::MethodSignatureT> signature;
+    try {
+        // The C# `new DisassemblerSignatureTypeProvider(module, output)` and
+        // `methodDefinition.DecodeSignature(signatureProvider,
+        // genericContext)` -- the provider is a local and the deferred
+        // type writers run entirely within this scope (the
+        // provider-outlives-writers contract).
+        auto blob = module.GetSignatureBlob(methodToken);
+        if (!blob.has_value())
+            throw std::logic_error("missing method signature blob");
+        DisassemblerSignatureTypeProvider provider(module, output_);
+        Metadata::SignatureTypeProviderDecoder decoder(provider, module);
+        signature = decoder.DecodeMethodSignature(blob->data(), blob->size(),
+            genericContext);
+        if (signature->Header.HasExplicitThis) {
+            output_.Write("instance explicit ");
+        } else if (signature->Header.IsInstance()) {
+            output_.Write("instance ");
+        }
+
+        //call convention
+        // The port's MethodSignatureT carries the Metadata-namespace
+        // convention enum; the callingConvention table is over the
+        // TypeSystem one (the byte-backed mirrors of the same C# enum).
+        WriteEnum(static_cast<TypeSystem::SignatureCallingConvention>(
+                      signature->Header.CallingConvention),
+            callingConvention, output_);
+
+        //return type
+        signature->ReturnType(ILNameSyntax::Signature);
+    } catch (const std::exception&) {
+        // The C# BadImageFormatException catch: whatever the decode managed
+        // to write stays on the output, then the marker -- and the parameter
+        // block below is skipped entirely.
+        signature = std::nullopt;
+        output_.Write("<bad signature>");
+    }
+    output_.Write(' ');
+
+    auto parameters = module.GetParameters(methodToken);
+    // The seq-0 return-value row may carry the RETURN type's marshalling
+    // descriptor (the C# firstParam.GetMarshallingDescriptor() -- rendered
+    // ahead of the method name, never inside the parameter list).
+    if (!parameters.empty()) {
+        const auto& firstParam = parameters.front();
+        if (firstParam.SequenceNumber == 0
+            && firstParam.MarshallingDescriptor.has_value()) {
+            WriteMarshalInfo(firstParam.MarshallingDescriptor->data(),
+                firstParam.MarshallingDescriptor->size());
+        }
+    }
+
+    if (isCompilerControlled) {
+        // The C# `name + "$PST" + MetadataTokens.GetToken(handle).ToString("X8")`
+        // -- the ILDasm compiler-controlled spelling, all of it escaped as
+        // one identifier.
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%08X", methodToken);
+        output_.Write(Escape(name + "$PST" + buf));
+    } else {
+        output_.Write(Escape(name));
+    }
+
+    WriteTypeParameters(output_, module, genericContext,
+        module.GetGenericParameters(methodToken));
+
+    //( params )
+    output_.Write(" (");
+    if (signature.has_value() && !signature->ParameterTypes.empty()) {
+        output_.WriteLine();
+        output_.Indent();
+        WriteParameters(parameters, *signature);
+        output_.Unindent();
+    }
+    output_.Write(") ");
+    //cil managed
+    std::uint32_t implAttributes = module.GetMethodImplAttributes(methodToken);
+    WriteEnum(
+        static_cast<MethodImplAttributes>(implAttributes
+            & static_cast<std::uint32_t>(MethodImplAttributes::CodeTypeMask)),
+        methodCodeType, output_);
+    if ((implAttributes
+            & static_cast<std::uint32_t>(MethodImplAttributes::ManagedMask))
+        == static_cast<std::uint32_t>(MethodImplAttributes::Managed)) {
+        output_.Write("managed ");
+    } else {
+        output_.Write("unmanaged ");
+    }
+    WriteFlags(static_cast<MethodImplAttributes>(
+                    implAttributes
+                    & ~(static_cast<std::uint32_t>(
+                            MethodImplAttributes::CodeTypeMask)
+                        | static_cast<std::uint32_t>(
+                            MethodImplAttributes::ManagedMask))),
+        methodImpl, output_);
+
+    output_.Unindent();
+}
+
+// The C# `void DisassembleMethodBlock(MetadataFile module,
+// MethodDefinitionHandle handle, MetadataGenericContext genericContext)`.
+// See the header for the porting decisions.
+void ReflectionDisassembler::DisassembleMethodBlock(Metadata::MetadataFile& module,
+    std::uint32_t methodToken,
+    const Metadata::MetadataGenericContext& genericContext)
+{
+    OpenBlock(/*defaultCollapsed=*/isInType_);
+    WriteAttributes(module, module.GetCustomAttributeTokens(methodToken));
+    for (const auto& impl : module.GetMethodImplementations(methodToken)) {
+        output_.Write(".override method ");
+        // The C# `impl.MethodDeclaration.WriteTo(module, output,
+        // genericContext)` -- the default Signature syntax.
+        IL::WriteTo(module, output_, genericContext,
+            impl.MethodDeclarationToken);
+        output_.WriteLine();
+    }
+
+    for (const auto& p : module.GetGenericParameters(methodToken)) {
+        WriteGenericParametersAndAttributes(module, genericContext, p.Token);
+    }
+    for (const auto& p : module.GetParameters(methodToken)) {
+        WriteParameterAttributes(module, p);
+    }
+    WriteSecurityDeclarations(module,
+        module.GetDeclarativeSecurityAttributes(methodToken));
+
+    // The C# `methodDefinition.HasBody()` -- RelativeVirtualAddress != 0
+    // (0 for abstract/extern/pinvoke-only methods).
+    if (module.GetMethodRVA(methodToken) != 0) {
+        methodBodyDisassembler_->Disassemble(module, methodToken);
+    }
+    // The C# close comment: the declaring type's short NAME, not the full
+    // name (the C# `declaringType.Name`), joined over the escaped method
+    // name.
+    auto declaringTypeToken = module.GetMethodDeclaringTypeToken(methodToken);
+    auto declaringTypeName =
+        module.GetTypeDefNameInfo(declaringTypeToken).value_or(
+            Metadata::TypeDefNameInfo{}).Name;
+    std::string comment = "end of method " + Escape(declaringTypeName)
+        + "::" + Escape(module.GetMethodName(methodToken));
+    CloseBlock(comment.c_str());
+}
+
+// The C# `void WriteSecurityDeclarations(MetadataFile module,
+// DeclarativeSecurityAttributeHandleCollection secDeclProvider)`. See the
+// header for the porting decisions.
+void ReflectionDisassembler::WriteSecurityDeclarations(Metadata::MetadataFile& module,
+    const std::vector<Metadata::MetadataFile::DeclarativeSecurityInfo>&
+        securityDeclarations)
+{
+    if (securityDeclarations.empty())
+        return;
+    for (const auto& secdecl : securityDeclarations) {
+        output_.Write(".permissionset ");
+        // The C# switch over `(ushort)secdecl.Action` with the fifteen
+        // DeclarativeSecurityAction spellings; the default arm is the C# enum
+        // ToString ("None" for 0, the decimal for unnamed values).
+        switch (secdecl.Action) {
+            case 1:  // DeclarativeSecurityAction.Request
+                output_.Write("request");
+                break;
+            case 2:  // DeclarativeSecurityAction.Demand
+                output_.Write("demand");
+                break;
+            case 3:  // DeclarativeSecurityAction.Assert
+                output_.Write("assert");
+                break;
+            case 4:  // DeclarativeSecurityAction.Deny
+                output_.Write("deny");
+                break;
+            case 5:  // DeclarativeSecurityAction.PermitOnly
+                output_.Write("permitonly");
+                break;
+            case 6:  // DeclarativeSecurityAction.LinkDemand
+                output_.Write("linkcheck");
+                break;
+            case 7:  // DeclarativeSecurityAction.InheritDemand
+                output_.Write("inheritcheck");
+                break;
+            case 8:  // DeclarativeSecurityAction.RequestMinimum
+                output_.Write("reqmin");
+                break;
+            case 9:  // DeclarativeSecurityAction.RequestOptional
+                output_.Write("reqopt");
+                break;
+            case 10:  // DeclarativeSecurityAction.RequestRefuse
+                output_.Write("reqrefuse");
+                break;
+            case 11:  // DeclarativeSecurityAction.PreJitGrant
+                output_.Write("prejitgrant");
+                break;
+            case 12:  // DeclarativeSecurityAction.PreJitDeny
+                output_.Write("prejitdeny");
+                break;
+            case 13:  // DeclarativeSecurityAction.NonCasDemand
+                output_.Write("noncasdemand");
+                break;
+            case 14:  // DeclarativeSecurityAction.NonCasLinkDemand
+                output_.Write("noncaslinkdemand");
+                break;
+            case 15:  // DeclarativeSecurityAction.NonCasInheritance
+                output_.Write("noncasinheritance");
+                break;
+            default:
+                // The C# default arm is the enum ToString: "None" for 0, the
+                // decimal for unnamed values (the enum is short-backed, so
+                // a raw value above 0x7FFF renders as the negative int16).
+                output_.Write(secdecl.Action == 0 ? "None"
+                    : std::to_string(
+                        static_cast<std::int16_t>(secdecl.Action)));
+                break;
+        }
+        // The C# AssemblyResolver == null path: the raw blob dump. The
+        // resolver's "bytearray"/decoded alternatives defer with the
+        // resolver type (the CLI never sets one).
+        output_.Write(" = ");
+        WriteBlob(secdecl.PermissionSet.data(), secdecl.PermissionSet.size());
+        output_.WriteLine();
+    }
+}
+
+// The C# `void WriteTypeParameters(ITextOutput output, MetadataFile module,
+// MetadataGenericContext context, GenericParameterHandleCollection p)`.
+// See the header for the porting decisions.
+void ReflectionDisassembler::WriteTypeParameters(Output::ITextOutput& output,
+    const Metadata::MetadataFile& module,
+    const Metadata::MetadataGenericContext& context,
+    const std::vector<Metadata::GenericParameterInfo>& parameters)
+{
+    if (parameters.empty())
+        return;
+    output.Write('<');
+    for (std::size_t i = 0; i < parameters.size(); i++) {
+        if (i > 0)
+            output.Write(", ");
+        const auto& gp = parameters[i];
+        // The raw Flags column as the GenericParameterAttributes bits (the
+        // modern BCL enum carries the raw ECMA values -- see
+        // ReflectionAttributes.hpp).
+        auto attributes = static_cast<GenericParameterAttributes>(gp.Flags);
+        if ((attributes & GenericParameterAttributes::ReferenceTypeConstraint)
+            == GenericParameterAttributes::ReferenceTypeConstraint) {
+            output.Write("class ");
+        } else if ((attributes
+                & GenericParameterAttributes::NotNullableValueTypeConstraint)
+            == GenericParameterAttributes::NotNullableValueTypeConstraint) {
+            output.Write("valuetype ");
+        }
+        if ((attributes & GenericParameterAttributes::AllowByRefLike)
+            == GenericParameterAttributes::AllowByRefLike) {
+            output.Write("byreflike ");
+        }
+        if ((attributes & GenericParameterAttributes::DefaultConstructorConstraint)
+            == GenericParameterAttributes::DefaultConstructorConstraint) {
+            output.Write(".ctor ");
+        }
+        auto constraints = module.GetGenericParameterConstraints(gp.Token);
+        if (!constraints.empty()) {
+            output.Write('(');
+            for (std::size_t j = 0; j < constraints.size(); j++) {
+                if (j > 0)
+                    output.Write(", ");
+                // The C# `constraint.Type.WriteTo(module, output, context,
+                // ILNameSyntax.TypeName)`.
+                IL::WriteTo(module, output, context,
+                    constraints[j].TypeToken, ILNameSyntax::TypeName);
+            }
+            output.Write(") ");
+        }
+        if ((attributes & GenericParameterAttributes::Contravariant)
+            == GenericParameterAttributes::Contravariant) {
+            output.Write('-');
+        } else if ((attributes & GenericParameterAttributes::Covariant)
+            == GenericParameterAttributes::Covariant) {
+            output.Write('+');
+        }
+        output.Write(Escape(gp.Name));
+    }
+    output.Write('>');
 }
 
 }  // namespace ILSpy::Decompiler::Disassembler

@@ -21,10 +21,12 @@
 // (the ilspycmd --il path). This slice carries the instance skeleton, the
 // output-shaping helpers every member renderer consumes, the constant and
 // parameter renderers the field/method headers embed (WriteConstant,
-// WriteParameters), and the attribute renderers every member header embeds
-// (WriteAttributes with the generic-parameter/parameter attribute blocks);
-// the member renderers themselves (DisassembleMethod/Field/Property/Event/
-// Type, the module headers) land with their metadata reads in later slices.
+// WriteParameters), the attribute renderers every member header embeds
+// (WriteAttributes with the generic-parameter/parameter attribute blocks),
+// and the method member renderer (DisassembleMethod with the header, the
+// body block, the security declarations, and the generic-parameter list);
+// the remaining member renderers (DisassembleField/Property/Event/Type, the
+// module headers) land with their metadata reads in later slices.
 //
 // C#-to-C++ porting decisions:
 //  * The C# field pair `output`/`cancellationToken`/`isInType`/
@@ -249,6 +251,76 @@ public:
     // GetParameters row (the token drives the Constant/CustomAttribute reads).
     void WriteParameterAttributes(const Metadata::MetadataFile& module,
         const Metadata::ParameterInfo& parameter);
+
+    // The C# `public void DisassembleMethod(MetadataFile module,
+    // MethodDefinitionHandle handle)` (ReflectionDisassembler.cs lines
+    // 153-161): the ".method" reference, the header, and the body block
+    // (the ilspycmd --il member entry). The handle ports as the raw
+    // MethodDef token. The module is non-const (the body disassembler's
+    // Disassemble takes it that way).
+    void DisassembleMethod(Metadata::MetadataFile& module,
+        std::uint32_t methodToken);
+
+    // The C# `public void DisassembleMethodHeader(MetadataFile module,
+    // MethodDefinitionHandle handle)` (lines 163-170): the ".method"
+    // reference and the header, no body block.
+    void DisassembleMethodHeader(Metadata::MetadataFile& module,
+        std::uint32_t methodToken);
+
+    // The C# `void DisassembleMethodHeaderInternal(MetadataFile module,
+    // MethodDefinitionHandle handle, MetadataGenericContext genericContext)`
+    // (lines 172-318): the flags line (the visibility WriteEnum + the
+    // methodAttributeFlags WriteFlags + the privatescope arm), the
+    // pinvokeimpl("dll" as "name" nomangle charset lasterr conv) arm over
+    // the ImplMap row, the indented signature line (the instance/explicit
+    // prefix, the calling-convention WriteEnum, the return type at Signature
+    // syntax, the seq-0 return marshalling descriptor, the escaped name --
+    // with the $PST<token> suffix on a compiler-controlled method -- and the
+    // generic-parameter list), the "( params )" block through
+    // WriteParameters, and the "cil managed <implflags>" tail. A malformed
+    // signature blob renders "<bad signature>" and skips the parameter
+    // block (the C# BadImageFormatException catch over the decode).
+    void DisassembleMethodHeaderInternal(Metadata::MetadataFile& module,
+        std::uint32_t methodToken,
+        const Metadata::MetadataGenericContext& genericContext);
+
+    // The C# `void DisassembleMethodBlock(MetadataFile module,
+    // MethodDefinitionHandle handle, MetadataGenericContext genericContext)`
+    // (lines 354-389): the OpenBlock/CloseBlock pair around the attributes,
+    // the ".override method" lines (the MethodImpl rows whose body is the
+    // method), the generic-parameter and parameter attribute blocks, the
+    // ".permissionset" lines, the method body through the
+    // MethodBodyDisassembler, and the "end of method <Type>::<name>" close
+    // comment.
+    void DisassembleMethodBlock(Metadata::MetadataFile& module,
+        std::uint32_t methodToken,
+        const Metadata::MetadataGenericContext& genericContext);
+
+    // The C# `void WriteSecurityDeclarations(MetadataFile module,
+    // DeclarativeSecurityAttributeHandleCollection secDeclProvider)`
+    // (lines 390-467): the ".permissionset <action> = " line per DeclSecurity
+    // row with the raw blob hex dump. The AssemblyResolver paths (the
+    // "bytearray" alternative and the SecurityDeclarationDecoder decode)
+    // defer with the resolver type -- with no resolver set the raw dump is
+    // the only path (and the ilspycmd --il output's shape: the CLI never
+    // sets a resolver). The action spellings are the C# switch's fifteen
+    // named values; anything else renders the decimal (the C# enum
+    // ToString).
+    void WriteSecurityDeclarations(Metadata::MetadataFile& module,
+        const std::vector<Metadata::MetadataFile::DeclarativeSecurityInfo>&
+            securityDeclarations);
+
+    // The C# `void WriteTypeParameters(ITextOutput output, MetadataFile module,
+    // MetadataGenericContext context, GenericParameterHandleCollection p)`
+    // (lines 1755-1802): the "<...>" generic-parameter list -- the
+    // class/valuetype/byreflike/.ctor flag prefixes over the raw Flags
+    // column, the "(constraint, ...)" type list at TypeName syntax, the
+    // '-'/'+' variance prefix, and the escaped name per parameter. The
+    // collection ports as the GetGenericParameters row vector.
+    void WriteTypeParameters(Output::ITextOutput& output,
+        const Metadata::MetadataFile& module,
+        const Metadata::MetadataGenericContext& context,
+        const std::vector<Metadata::GenericParameterInfo>& parameters);
 
 private:
     Output::ITextOutput& output_;

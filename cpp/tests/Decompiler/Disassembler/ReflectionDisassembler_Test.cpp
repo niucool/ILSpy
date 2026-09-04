@@ -21,10 +21,15 @@
 // ReflectionDisassembler.{hpp,cpp}): the two constructors (the owned and
 // the caller-supplied MethodBodyDisassembler) with the flag properties
 // delegating to it, the WriteBlob "(xx xx ...)" hex dump with its 16-byte
-// line geometry, the OpenBlock/CloseBlock "{" ... "} // comment" pair, and
+// line geometry, the OpenBlock/CloseBlock "{" ... "} // comment" pair,
 // the WriteMarshalInfo/WriteNativeType II.23.4 marshalling-descriptor walk
 // (the simple native-type spellings, the array/fixed-sysstring/safearray/
-// fixed-array/custom-marshaler shapes over synthetic blobs).
+// fixed-array/custom-marshaler shapes over synthetic blobs), the constant
+// and parameter renderers, the attribute writers, and the method member
+// renderer (DisassembleMethod/Header/HeaderInternal/Block with
+// WriteSecurityDeclarations and WriteTypeParameters, plus the underlying
+// MetadataFile reads: GetMethodImplAttributes, GetMethodImport,
+// GetMethodImplementations, GetDeclarativeSecurityAttributes).
 
 #include "Decompiler/Disassembler/MethodBodyDisassembler.hpp"
 #include "Decompiler/Disassembler/DisassemblerSignatureTypeProvider.hpp"
@@ -1478,4 +1483,467 @@ TEST(ReflectionDisassemblerTest, CoreLibAttributeWritersSweep) {
     }
     EXPECT_GT(driven, 100u);
     EXPECT_GT(attributeLines, 100u);
+}
+
+// ---------------------------------------------------------------------------
+// The metadata reads behind the method chain: GetMethodImplAttributes,
+// GetMethodImport (the ImplMap row), GetMethodImplementations (the MethodImpl
+// rows), GetDeclarativeSecurityAttributes (the DeclSecurity rows). The
+// fixtures are mscorlib rows the gold ilspycmd -il output pins: the
+// PreserveSig pinvoke imports, the Array explicit-interface-implementation
+// override, and the RegistryKey::get_Handle demand permission set.
+// ---------------------------------------------------------------------------
+
+TEST(ReflectionDisassemblerTest, GetMethodImplAttributesCilAndPreserveSig)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    std::uint32_t copy = FindMethodIn(f, stringType, "Copy");
+    ASSERT_NE(copy, 0u);
+    // String::Copy: IL + Managed (both the zero defaults) and nothing else.
+    EXPECT_EQ(f.GetMethodImplAttributes(copy), 0u);
+
+    std::uint32_t win32 = FindTypeDefTokenIn(f, "Microsoft.Win32", "Win32Native");
+    std::uint32_t localAlloc = FindMethodIn(f, win32, "LocalAlloc_NoSafeHandle");
+    ASSERT_NE(localAlloc, 0u);
+    // The pinvoke preserve-sig imports carry PreserveSig (0x0080).
+    EXPECT_EQ(f.GetMethodImplAttributes(localAlloc), 0x80u);
+}
+
+TEST(ReflectionDisassemblerTest, GetMethodImportPinvokeRows)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t win32 = FindTypeDefTokenIn(f, "Microsoft.Win32", "Win32Native");
+
+    // GetSystemInfo: SetLastError (0x40) + WinApi (0x100); the import name is
+    // the declared name, so the gold header shows no "as" alias.
+    std::uint32_t getSystemInfo = FindMethodIn(f, win32, "GetSystemInfo");
+    ASSERT_NE(getSystemInfo, 0u);
+    auto info = f.GetMethodImport(getSystemInfo);
+    ASSERT_TRUE(info.has_value());
+    auto moduleName = f.GetModuleReferenceName(info->ModuleRefToken);
+    ASSERT_TRUE(moduleName.has_value());
+    EXPECT_EQ(*moduleName, "kernel32.dll");
+    EXPECT_TRUE(info->Name.has_value());
+    EXPECT_EQ(*info->Name, "GetSystemInfo");
+    EXPECT_EQ(info->Attributes, 0x140u);
+
+    // FormatMessage: CharSetAuto (0x06) + BestFitMappingEnable (0x10, the
+    // raw row bit the header render never spells) + WinApi (0x100).
+    std::uint32_t formatMessage = FindMethodIn(f, win32, "FormatMessage");
+    ASSERT_NE(formatMessage, 0u);
+    info = f.GetMethodImport(formatMessage);
+    ASSERT_TRUE(info.has_value());
+    EXPECT_EQ(info->Attributes, 0x116u);
+
+    // LocalAlloc_NoSafeHandle: the aliased import -- the gold header spells
+    // pinvokeimpl("kernel32.dll" as "LocalAlloc" winapi).
+    std::uint32_t localAlloc = FindMethodIn(f, win32, "LocalAlloc_NoSafeHandle");
+    ASSERT_NE(localAlloc, 0u);
+    info = f.GetMethodImport(localAlloc);
+    ASSERT_TRUE(info.has_value());
+    ASSERT_TRUE(info->Name.has_value());
+    EXPECT_EQ(*info->Name, "LocalAlloc");
+    EXPECT_EQ(info->Attributes, 0x100u);
+
+    // A method without a pinvoke import has no ImplMap row.
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    std::uint32_t copy = FindMethodIn(f, stringType, "Copy");
+    ASSERT_NE(copy, 0u);
+    EXPECT_FALSE(f.GetMethodImport(copy).has_value());
+}
+
+TEST(ReflectionDisassemblerTest, GetMethodImplementationsOverrideRows)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t arrayType = FindTypeDefTokenIn(f, "System", "Array");
+    std::uint32_t getCount = FindMethodIn(f, arrayType,
+        "System.Collections.ICollection.get_Count");
+    ASSERT_NE(getCount, 0u);
+    auto impls = f.GetMethodImplementations(getCount);
+    ASSERT_EQ(impls.size(), 1u);
+    // The declaration is System.Collections.ICollection::get_Count -- a
+    // MethodDef in mscorlib itself (the gold .override line renders it).
+    EXPECT_EQ(impls[0].MethodDeclarationToken >> 24, 0x06u);
+    EXPECT_EQ(f.GetMethodName(impls[0].MethodDeclarationToken), "get_Count");
+
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    std::uint32_t copy = FindMethodIn(f, stringType, "Copy");
+    ASSERT_NE(copy, 0u);
+    EXPECT_TRUE(f.GetMethodImplementations(copy).empty());
+}
+
+TEST(ReflectionDisassemblerTest, GetDeclarativeSecurityAttributesDemand)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t registryKey = FindTypeDefTokenIn(f, "Microsoft.Win32",
+        "RegistryKey");
+    std::uint32_t getHandle = FindMethodIn(f, registryKey, "get_Handle");
+    ASSERT_NE(getHandle, 0u);
+    auto rows = f.GetDeclarativeSecurityAttributes(getHandle);
+    ASSERT_EQ(rows.size(), 1u);
+    // The DeclarativeSecurityAction.Demand row with the SecurityPermission
+    // blob the gold .permissionset line dumps (201 bytes, ".\x01\x80\x84..."
+    // -- the XML-compressed permission set).
+    EXPECT_EQ(rows[0].Action, 2u);
+    ASSERT_EQ(rows[0].PermissionSet.size(), 201u);
+    EXPECT_EQ(rows[0].PermissionSet[0], 0x2eu);
+    EXPECT_EQ(rows[0].PermissionSet[1], 0x01u);
+    EXPECT_EQ(rows[0].PermissionSet[2], 0x80u);
+    EXPECT_EQ(rows[0].PermissionSet[3], 0x84u);
+    EXPECT_EQ(rows[0].PermissionSet[200], 0x00u);
+
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    std::uint32_t copy = FindMethodIn(f, stringType, "Copy");
+    ASSERT_NE(copy, 0u);
+    EXPECT_TRUE(f.GetDeclarativeSecurityAttributes(copy).empty());
+}
+
+// ---------------------------------------------------------------------------
+// WriteTypeParameters (ReflectionDisassembler.cs lines 1755-1802): the
+// generic-parameter list render, over real mscorlib rows the gold output
+// pins (the Nullable`1 class header's valuetype .ctor constraint pair, the
+// variance prefixes, and Enum::TryParse<TEnum>).
+// ---------------------------------------------------------------------------
+
+TEST(ReflectionDisassemblerTest, WriteTypeParametersConstraintAndVariance)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::ostringstream stream;
+    OUT::PlainTextOutput output(stream);
+    DA::ReflectionDisassembler rd(output);
+
+    // Nullable`1: <valuetype .ctor (System.ValueType) T> (the class-header
+    // gold shape, driven here at the type context).
+    std::uint32_t nullable = FindTypeDefTokenIn(f, "System", "Nullable`1");
+    ASSERT_NE(nullable, 0u);
+    stream.str("");
+    rd.WriteTypeParameters(output, f,
+        MD::MetadataGenericContext::ForType(nullable, f),
+        f.GetGenericParameters(nullable));
+    EXPECT_EQ(stream.str(), "<valuetype .ctor (System.ValueType) T>");
+
+    // IEnumerable`1: <+T> (the covariant prefix).
+    std::uint32_t enumerable = FindTypeDefTokenIn(f, "System.Collections.Generic",
+        "IEnumerable`1");
+    ASSERT_NE(enumerable, 0u);
+    stream.str("");
+    rd.WriteTypeParameters(output, f,
+        MD::MetadataGenericContext::ForType(enumerable, f),
+        f.GetGenericParameters(enumerable));
+    EXPECT_EQ(stream.str(), "<+T>");
+
+    // Action`1: <-T> (the contravariant prefix).
+    std::uint32_t action = FindTypeDefTokenIn(f, "System", "Action`1");
+    ASSERT_NE(action, 0u);
+    stream.str("");
+    rd.WriteTypeParameters(output, f,
+        MD::MetadataGenericContext::ForType(action, f),
+        f.GetGenericParameters(action));
+    EXPECT_EQ(stream.str(), "<-T>");
+
+    // A non-generic owner renders nothing.
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    stream.str("");
+    rd.WriteTypeParameters(output, f,
+        MD::MetadataGenericContext::ForType(stringType, f),
+        f.GetGenericParameters(stringType));
+    EXPECT_EQ(stream.str(), "");
+}
+
+TEST(ReflectionDisassemblerTest, WriteTypeParametersGenericMethod)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t enumType = FindTypeDefTokenIn(f, "System", "Enum");
+    ASSERT_NE(enumType, 0u);
+    std::uint32_t tryParse = FindMethodIn(f, enumType, "TryParse");
+    ASSERT_NE(tryParse, 0u);
+    auto genericParameters = f.GetGenericParameters(tryParse);
+    ASSERT_EQ(genericParameters.size(), 1u);
+
+    std::ostringstream stream;
+    OUT::PlainTextOutput output(stream);
+    DA::ReflectionDisassembler rd(output);
+    rd.WriteTypeParameters(output, f,
+        MD::MetadataGenericContext::ForMethod(tryParse, f), genericParameters);
+    // The gold header of Enum::TryParse: <valuetype .ctor (System.ValueType)
+    // TEnum>.
+    EXPECT_EQ(stream.str(), "<valuetype .ctor (System.ValueType) TEnum>");
+}
+
+// ---------------------------------------------------------------------------
+// The method header chain (ReflectionDisassembler.cs lines 153-318): the
+// exact header renders, de-indented one level from the gold ilspycmd -il
+// module dump (which renders methods inside their type). The PlainTextOutput
+// writes CRLF line endings.
+// ---------------------------------------------------------------------------
+
+TEST(ReflectionDisassemblerTest, DisassembleMethodHeaderStaticMethod)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    std::uint32_t copy = FindMethodIn(f, stringType, "Copy");
+    ASSERT_NE(copy, 0u);
+
+    std::string actual = RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleMethodHeader(f, copy);
+    });
+    // The header ends mid-line (no trailing newline): the C# header writer
+    // leaves the line for the caller's OpenBlock to terminate.
+    EXPECT_EQ(actual,
+        ".method public hidebysig static \r\n"
+        "\tstring Copy (\r\n"
+        "\t\tstring str\r\n"
+        "\t) cil managed ");
+}
+
+TEST(ReflectionDisassemblerTest, DisassembleMethodHeaderInstanceEmptyParams)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringComparer = FindTypeDefTokenIn(f, "System",
+        "StringComparer");
+    ASSERT_NE(stringComparer, 0u);
+    std::uint32_t ctor = FindMethodIn(f, stringComparer, ".ctor");
+    ASSERT_NE(ctor, 0u);
+
+    std::string actual = RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleMethodHeader(f, ctor);
+    });
+    // The family-visibility WriteEnum spelling and the empty "()" parameter
+    // list (no indented parameter block at all).
+    EXPECT_EQ(actual,
+        ".method family hidebysig specialname rtspecialname \r\n"
+        "\tinstance void .ctor () cil managed ");
+}
+
+TEST(ReflectionDisassemblerTest, DisassembleMethodHeaderGenericConstraints)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t enumType = FindTypeDefTokenIn(f, "System", "Enum");
+    std::uint32_t tryParse = FindMethodIn(f, enumType, "TryParse");
+    ASSERT_NE(tryParse, 0u);
+
+    std::string actual = RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleMethodHeader(f, tryParse);
+    });
+    // The gold header of Enum::TryParse<TEnum>: the generic-method MVAR
+    // parameter types (!!TEnum&) and the escaped 'value' parameter name.
+    EXPECT_EQ(actual,
+        ".method public hidebysig static \r\n"
+        "\tbool TryParse<valuetype .ctor (System.ValueType) TEnum> (\r\n"
+        "\t\tstring 'value',\r\n"
+        "\t\t[out] !!TEnum& result\r\n"
+        "\t) cil managed ");
+}
+
+TEST(ReflectionDisassemblerTest, DisassembleMethodHeaderPinvokeImpl)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t win32 = FindTypeDefTokenIn(f, "Microsoft.Win32", "Win32Native");
+    std::uint32_t getSystemInfo = FindMethodIn(f, win32, "GetSystemInfo");
+    ASSERT_NE(getSystemInfo, 0u);
+
+    std::string actual = RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleMethodHeader(f, getSystemInfo);
+    });
+    // The pinvokeimpl arm over the ImplMap row, the preservesig
+    // methodImpl flag, and the nested SYSTEM_INFO& parameter type.
+    EXPECT_EQ(actual,
+        ".method assembly hidebysig static pinvokeimpl(\"kernel32.dll\" lasterr winapi) \r\n"
+        "\tvoid GetSystemInfo (\r\n"
+        "\t\tvaluetype Microsoft.Win32.Win32Native/SYSTEM_INFO& lpSystemInfo\r\n"
+        "\t) cil managed preservesig ");
+}
+
+TEST(ReflectionDisassemblerTest, DisassembleMethodHeaderMetadataTokenComment)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    std::uint32_t copy = FindMethodIn(f, stringType, "Copy");
+    ASSERT_NE(copy, 0u);
+
+    std::string actual = RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.ShowMetadataTokens(true);
+        rd.DisassembleMethodHeader(f, copy);
+    });
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "/* %08X */", copy);
+    // The WriteMetadataToken comment with spaceAfter, after the ".method"
+    // reference and its space.
+    EXPECT_EQ(actual,
+        ".method " + std::string(buf) +
+        " public hidebysig static \r\n"
+        "\tstring Copy (\r\n"
+        "\t\tstring str\r\n"
+        "\t) cil managed ");
+}
+
+// ---------------------------------------------------------------------------
+// DisassembleMethodBlock and the full DisassembleMethod render: the gold
+// blocks for the no-body pinvoke alias (the .custom + close comment), the
+// explicit-interface override with a body, and the .permissionset raw dump.
+// ---------------------------------------------------------------------------
+
+TEST(ReflectionDisassemblerTest, DisassembleMethodFullNoBodyPinvokeAlias)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t win32 = FindTypeDefTokenIn(f, "Microsoft.Win32", "Win32Native");
+    std::uint32_t localAlloc = FindMethodIn(f, win32, "LocalAlloc_NoSafeHandle");
+    ASSERT_NE(localAlloc, 0u);
+
+    std::string actual = RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleMethod(f, localAlloc);
+    });
+    // The gold block, de-indented: the aliased pinvokeimpl header, the
+    // typed ReliabilityContractAttribute custom attribute, no body (the
+    // pinvoke-only method has no RVA), and the close comment.
+    EXPECT_EQ(actual,
+        ".method assembly hidebysig static pinvokeimpl(\"kernel32.dll\" as \"LocalAlloc\" winapi) \r\n"
+        "\tnative int LocalAlloc_NoSafeHandle (\r\n"
+        "\t\tint32 uFlags,\r\n"
+        "\t\tnative uint sizetdwBytes\r\n"
+        "\t) cil managed preservesig \r\n"
+        "{\r\n"
+        "\t.custom instance void System.Runtime.ConstrainedExecution.ReliabilityContractAttribute::.ctor(valuetype System.Runtime.ConstrainedExecution.Consistency, valuetype System.Runtime.ConstrainedExecution.Cer) = (\r\n"
+        "\t\t01 00 03 00 00 00 01 00 00 00 00 00\r\n"
+        "\t)\r\n"
+        "} // end of method Win32Native::LocalAlloc_NoSafeHandle\r\n");
+}
+
+TEST(ReflectionDisassemblerTest, DisassembleMethodFullOverrideWithBody)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t arrayType = FindTypeDefTokenIn(f, "System", "Array");
+    std::uint32_t getCount = FindMethodIn(f, arrayType,
+        "System.Collections.ICollection.get_Count");
+    ASSERT_NE(getCount, 0u);
+
+    std::string actual = RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleMethod(f, getCount);
+    });
+    // The gold block, de-indented: the newslot virtual flag order, the
+    // __DynamicallyInvokableAttribute custom attribute, the .override line
+    // (the MethodImpl row's declaration), and the three-instruction body
+    // through the MethodBodyDisassembler.
+    EXPECT_EQ(actual,
+        ".method private final hidebysig specialname newslot virtual \r\n"
+        "\tinstance int32 System.Collections.ICollection.get_Count () cil managed \r\n"
+        "{\r\n"
+        "\t.custom instance void __DynamicallyInvokableAttribute::.ctor() = (\r\n"
+        "\t\t01 00 00 00\r\n"
+        "\t)\r\n"
+        "\t.override method instance int32 System.Collections.ICollection::get_Count()\r\n"
+        "\t// Method begins at RVA 0x692c\r\n"
+        "\t// Header size: 1\r\n"
+        "\t// Code size: 7 (0x7)\r\n"
+        "\t.maxstack 8\r\n"
+        "\r\n"
+        "\tIL_0000: ldarg.0\r\n"
+        "\tIL_0001: call instance int32 System.Array::get_Length()\r\n"
+        "\tIL_0006: ret\r\n"
+        "} // end of method Array::System.Collections.ICollection.get_Count\r\n");
+}
+
+TEST(ReflectionDisassemblerTest, WriteSecurityDeclarationsRawBlob)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t registryKey = FindTypeDefTokenIn(f, "Microsoft.Win32",
+        "RegistryKey");
+    std::uint32_t getHandle = FindMethodIn(f, registryKey, "get_Handle");
+    ASSERT_NE(getHandle, 0u);
+    auto rows = f.GetDeclarativeSecurityAttributes(getHandle);
+    ASSERT_EQ(rows.size(), 1u);
+
+    std::string actual = RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.WriteSecurityDeclarations(f, rows);
+    });
+    // The gold .permissionset demand line for get_Handle, de-indented: the
+    // action spelling, the " = " and the raw 201-byte blob through the
+    // WriteBlob 16-per-line geometry (twelve full lines and a nine-byte tail).
+    EXPECT_EQ(actual,
+        ".permissionset demand = (\r\n"
+        "\t2e 01 80 84 53 79 73 74 65 6d 2e 53 65 63 75 72\r\n"
+        "\t69 74 79 2e 50 65 72 6d 69 73 73 69 6f 6e 73 2e\r\n"
+        "\t53 65 63 75 72 69 74 79 50 65 72 6d 69 73 73 69\r\n"
+        "\t6f 6e 41 74 74 72 69 62 75 74 65 2c 20 6d 73 63\r\n"
+        "\t6f 72 6c 69 62 2c 20 56 65 72 73 69 6f 6e 3d 34\r\n"
+        "\t2e 30 2e 30 2e 30 2c 20 43 75 6c 74 75 72 65 3d\r\n"
+        "\t6e 65 75 74 72 61 6c 2c 20 50 75 62 6c 69 63 4b\r\n"
+        "\t65 79 54 6f 6b 65 6e 3d 62 37 37 61 35 63 35 36\r\n"
+        "\t31 39 33 34 65 30 38 39 40 01 54 55 32 53 79 73\r\n"
+        "\t74 65 6d 2e 53 65 63 75 72 69 74 79 2e 50 65 72\r\n"
+        "\t6d 69 73 73 69 6f 6e 73 2e 53 65 63 75 72 69 74\r\n"
+        "\t79 50 65 72 6d 69 73 73 69 6f 6e 46 6c 61 67 05\r\n"
+        "\t46 6c 61 67 73 02 00 00 00\r\n"
+        ")\r\n");
+}
+
+TEST(ReflectionDisassemblerTest, WriteSecurityDeclarationsEmptyRendersNothing)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    std::uint32_t copy = FindMethodIn(f, stringType, "Copy");
+    ASSERT_NE(copy, 0u);
+    auto rows = f.GetDeclarativeSecurityAttributes(copy);
+    ASSERT_TRUE(rows.empty());
+
+    std::string actual = RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.WriteSecurityDeclarations(f, rows);
+    });
+    EXPECT_EQ(actual, "");
+}
+
+// ---------------------------------------------------------------------------
+// An invariant sweep: every method of a few large mscorlib types renders a
+// DisassembleMethodHeader without throwing, and the renders carry the
+// ".method " prefix, the "cil managed"/"unmanaged" tail, and a name.
+// ---------------------------------------------------------------------------
+
+TEST(ReflectionDisassemblerTest, DisassembleMethodHeaderInvariantSweep)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t rendered = 0;
+    std::uint32_t managed = 0;
+    for (const char* typeName : {"String", "Enum", "Array", "GC"}) {
+        std::uint32_t type = FindTypeDefTokenIn(f, "System", typeName);
+        ASSERT_NE(type, 0u) << typeName;
+        for (const auto& m : f.GetMethods(type)) {
+            std::ostringstream stream;
+            OUT::PlainTextOutput output(stream);
+            DA::ReflectionDisassembler rd(output);
+            rd.DisassembleMethodHeader(f, m.Token);
+            std::string text = stream.str();
+            EXPECT_NE(text.find(".method "), std::string::npos) << m.Name;
+            // The header ends mid-line after the code-type/managed words
+            // (any methodImpl tail flags follow them).
+            EXPECT_NE(text.find("managed "), std::string::npos) << m.Name;
+            EXPECT_TRUE(text.find("cil ") != std::string::npos
+                || text.find("native ") != std::string::npos
+                || text.find("runtime ") != std::string::npos
+                || text.find("optil ") != std::string::npos)
+                << m.Name << ": " << text;
+            if (text.find("cil managed ") != std::string::npos)
+                ++managed;
+            ++rendered;
+        }
+    }
+    EXPECT_GT(rendered, 200u);
+    EXPECT_GT(managed, 200u);
 }

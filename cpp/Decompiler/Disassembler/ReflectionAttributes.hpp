@@ -19,7 +19,8 @@
 
 // The BCL `System.Reflection` attribute-flag enums, as port stand-ins -- the raw
 // ECMA-335 II.23.1 metadata flag values carried by the Field/Method/MethodImpl/
-// Property/Event/Type table rows.
+// Property/Event/Type table rows (plus the GenericParam Flags and ImplMap
+// MappingFlags columns -- II.23.1.7 and II.23.1.11).
 //
 // The C# ILSpy consumes these directly from the BCL (`using System.Reflection;`):
 // ReflectionDisassembler.cs builds its attribute-name tables over them
@@ -272,6 +273,75 @@ inline ParameterAttributes operator^(ParameterAttributes a, ParameterAttributes 
 }
 inline ParameterAttributes operator~(ParameterAttributes a) {
 	return static_cast<ParameterAttributes>(~static_cast<std::int32_t>(a));
+}
+
+// ---------------------------------------------------------------------------
+// GenericParameterAttributes (ECMA-335 II.23.1.7 "Flags for Generic Params").
+// The GenericParam row's raw Flags column -- the System.Reflection enum the
+// pinned SRM returns it as (GenericParamTableReader.GetFlags casts the raw
+// uint16 straight over, no remapping; the modern BCL enum carries exactly
+// the raw ECMA bits, probed over the installed .NET 10: Covariant 1,
+// Contravariant 2, ReferenceTypeConstraint 4, NotNullableValueTypeConstraint
+// 8, DefaultConstructorConstraint 0x10, plus the mask members and
+// AllowByRefLike 0x20 -- the bit ILSpy's SRMHacks alias targets, the C# 14
+// by-ref-like generics feature). WriteTypeParameters tests these bits to
+// spell the "class "/"valuetype "/"byreflike "/".ctor "/'-'/'+' generic
+// parameter prefixes.
+// ---------------------------------------------------------------------------
+enum class GenericParameterAttributes : std::int32_t {
+	None = 0x0000,
+	VarianceMask = 0x0003,
+	Covariant = 0x0001,             // "+" before the parameter name
+	Contravariant = 0x0002,          // "-" before the parameter name
+	SpecialConstraintMask = 0x001c,
+	ReferenceTypeConstraint = 0x0004,       // "class " prefix
+	NotNullableValueTypeConstraint = 0x0008, // "valuetype " prefix
+	DefaultConstructorConstraint = 0x0010,  // ".ctor " prefix
+	AllowByRefLike = 0x0020,          // "byreflike " prefix (the ILSpy alias
+											 // of the same bit -- SRMExtensions/SRMHacks)
+};
+
+// ---------------------------------------------------------------------------
+// MethodImportAttributes (ECMA-335 II.23.1.11 "Flags for ImplMap
+// [PInvokeImpl]"). The ImplMap row's MappingFlags column -- again the
+// System.Reflection enum over the raw bits (MethodImportAttributes: ExactWord
+// 1, CharSetNotSpec 0, CharSetAnsi 2, CharSetUnicode 4, CharSetAuto 6,
+// BestFitMapping 0x30, SupportsLastError 0x40, CallConvMask 0x0700, probed
+// over the installed .NET 10). The pinvokeimpl("...") arm of
+// DisassembleMethodHeaderInternal tests these bits for the nomangle /
+// charset / lasterr / calling-convention spellings.
+// ---------------------------------------------------------------------------
+enum class MethodImportAttributes : std::int32_t {
+	None = 0x0000,
+	ExactSpelling = 0x0001,   // " nomangle"
+	CharSetAnsi = 0x0002,     // " ansi"
+	CharSetUnicode = 0x0004,  // " unicode"
+	CharSetAuto = 0x0006,     // " autochar"
+	CharSetMask = 0x0006,
+	BestFitMappingEnable = 0x0010,
+	BestFitMappingDisable = 0x0020,
+	BestFitMappingMask = 0x0030,
+	SetLastError = 0x0040,     // " lasterr"
+	CallingConventionWinApi = 0x0100,   // " winapi"
+	CallingConventionCDecl = 0x0200,     // " cdecl"
+	CallingConventionStdCall = 0x0300,  // " stdcall"
+	CallingConventionThisCall = 0x0400, // " thiscall"
+	CallingConventionFastCall = 0x0500, // " fastcall"
+	CallingConventionMask = 0x0700,
+	ThrowOnUnmappableCharEnable = 0x1000,
+	ThrowOnUnmappableCharDisable = 0x2000,
+	ThrowOnUnmappableCharMask = 0x3000,
+};
+
+inline GenericParameterAttributes operator&(GenericParameterAttributes a,
+	GenericParameterAttributes b) {
+	return static_cast<GenericParameterAttributes>(
+		static_cast<std::int32_t>(a) & static_cast<std::int32_t>(b));
+}
+inline MethodImportAttributes operator&(MethodImportAttributes a,
+	MethodImportAttributes b) {
+	return static_cast<MethodImportAttributes>(
+		static_cast<std::int32_t>(a) & static_cast<std::int32_t>(b));
 }
 
 // ---------------------------------------------------------------------------

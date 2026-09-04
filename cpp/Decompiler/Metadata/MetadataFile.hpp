@@ -516,6 +516,57 @@ public:
     // an out-of-range row, or a non-ModuleRef token; never throws.
     std::optional<std::string> GetModuleReferenceName(std::uint32_t token) const;
 
+    // A MethodDef row's (table 0x06) ImplAttributes column (II.23.1.12) --
+    // the C# MethodDefinition.ImplAttributes the DisassembleMethodHeader's
+    // cil/managed flag split consumes. 2 bytes widened to uint32 (the BCL
+    // enum reading a row widens to int). 0 for an invalid file, an
+    // out-of-range row, a nil row, or a non-MethodDef token; never throws.
+    std::uint32_t GetMethodImplAttributes(std::uint32_t methodToken) const;
+
+    // The ImplMap row (table 0x1C) whose MemberForwarded is the MethodDef --
+    // the C# MethodDefinition.GetImport() (the SRM MethodImport struct:
+    // Module, Name, Attributes). The ImportScope column is a plain ModuleRef
+    // row index (no coding); the ImportName string is nullopt for a nil
+    // column. nullopt when the method has no pinvoke import; never throws.
+    struct MethodImportInfo {
+        std::uint32_t ModuleRefToken = 0;  // the 0x1A row token; 0 = nil
+        std::optional<std::string> Name;  // the ImportName column; nullopt = nil
+        std::uint32_t Attributes = 0;     // the raw MappingFlags (MethodImportAttributes)
+    };
+    std::optional<MethodImportInfo> GetMethodImport(
+        std::uint32_t methodToken) const;
+
+    // The MethodImpl rows (table 0x19) whose MethodBody is the MethodDef --
+    // the C# handle.GetMethodImplementations(metadata) extension (the
+    // declaring type's Class-column range filtered by MethodBody == handle,
+    // the ILSpy SRMExtensions implementation). The MethodDeclaration column
+    // is a MethodDefOrRef coded index (tag 0=MethodDef 0x06, 1=MemberRef
+    // 0x0A); the .override lines render it. Empty for an invalid file, an
+    // out-of-range row, a nil row, or a non-MethodDef token; never throws.
+    struct MethodImplementationInfo {
+        std::uint32_t Token = 0;  // the 0x19 row's own token
+        std::uint32_t MethodDeclarationToken = 0;  // the MethodDefOrRef target
+    };
+    std::vector<MethodImplementationInfo> GetMethodImplementations(
+        std::uint32_t methodToken) const;
+
+    // The DeclSecurity rows (table 0x0E) whose Parent is the token -- the C#
+    // TypeDefinition/MethodDefinition.GetDeclarativeSecurityAttributes()
+    // collection. The Parent column is a HasDeclSecurity coded index (tag
+    // 0=TypeDef 0x02, 1=MethodDef 0x06, 2=Assembly 0x20); the Action column
+    // is the raw II.23.1.9 DeclarativeSecurityAction the
+    // WriteSecurityDeclarations spellings switch on, and PermissionSet is
+    // the raw blob (empty for a nil handle -- the C# GetBlobReader over a
+    // nil blob renders the empty dump). Empty for an invalid file, an
+    // unknown token, or a row without security declarations; never throws.
+    struct DeclarativeSecurityInfo {
+        std::uint32_t Token = 0;       // the 0x0E row's own token
+        std::uint16_t Action = 0;      // the raw DeclarativeSecurityAction
+        std::vector<std::uint8_t> PermissionSet;  // the raw blob; empty = nil
+    };
+    std::vector<DeclarativeSecurityInfo> GetDeclarativeSecurityAttributes(
+        std::uint32_t parentToken) const;
+
     // Whole-table enumerations for the disassembler paths and the tests:
     // every MemberRef row, every MethodSpec row, and every StandaloneSig row's
     // 0x11 token. Never throws.
