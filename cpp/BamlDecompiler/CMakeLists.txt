@@ -2,9 +2,10 @@
 # The port begins with the Baml/ binary-format layer: the record classes
 # (BamlRecords), the reader (BamlReader/BamlBinaryReader), the document, the
 # round-trip writer (BamlWriter/BamlBinaryWriter), and the decompose step
-# (BamlNode, the flat record list folded into the block tree). The
-# KnownThings tables and the Handlers/Rewrite/Xaml layers follow in later
-# slices.
+# (BamlNode, the flat record list folded into the block tree), plus the first
+# type-system-free Xaml-layer leaves: NamespaceMap (Xaml/) and the scoped
+# xmlns bookkeeping (XmlnsDictionary/XmlnsScope). The KnownThings tables and
+# the Handlers/Rewrite/Xaml layers follow in later slices.
 
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlBinaryReader.cpp
@@ -13,4 +14,5 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlRecords.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlReader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlWriter.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/XmlnsDictionary.cpp
 )
