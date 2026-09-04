@@ -583,6 +583,13 @@ public:
     TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Method; }
     std::string Name() const override { return name_; }
 
+    // Configurable `DeclaringType` (the `IEntity.DeclaringType` IType reference) for the
+    // `DefaultAttribute` ctor-overload tests (the constructor-backed attribute derives
+    // its `AttributeType` from `constructor.DeclaringType`). The default empty preserves
+    // the original always-null behavior so existing tests that do not call the setter
+    // are unaffected (the additive-setter convention).
+    void SetDeclaringType(ITypePtr d) { declaringType_ = std::move(d); }
+
     // --- INamedElement ---
     std::string FullName() const override { return name_; }
     std::string ReflectionName() const override { return name_; }
@@ -594,7 +601,7 @@ public:
     // --- IEntity ---
     std::uint32_t MetadataToken() const override { return metadataToken_; }
     const ITypeDefinition* DeclaringTypeDefinition() const override { return declaringTypeDefinition_; }
-    ITypePtr DeclaringType() const override { return {}; }
+    ITypePtr DeclaringType() const override { return declaringType_; }
     const IModule* ParentModule() const override { return parentModule_; }
     std::vector<const IAttribute*> GetAttributes() const override { return {}; }
     bool HasAttribute(KnownAttribute) const override { return false; }
@@ -661,6 +668,7 @@ private:
     const IModule* parentModule_ = nullptr;
     KnownType returnType_{ KnownTypeCode::Object };
     const ITypeDefinition* declaringTypeDefinition_ = nullptr;
+    ITypePtr declaringType_;
     bool isStatic_ = false;
     bool isOperator_ = false;
     bool returnTypeIsRefReadOnly_ = false;

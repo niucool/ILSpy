@@ -54,6 +54,7 @@ add_executable(ilspy_tests
     BamlDecompiler/XamlUtils_Test.cpp
     BamlDecompiler/KnownThingsEnums_Test.cpp
     BamlDecompiler/KnownThingsTables_Test.cpp
+    BamlDecompiler/SyntheticWpfModule_Test.cpp
     Decompiler/TypeSystem/TypeName_Test.cpp
     Decompiler/TypeSystem/Version_Test.cpp
     Decompiler/TypeSystem/SignatureDecoder_Test.cpp
@@ -76,6 +77,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/ParameterizedTypeSubstitution_Test.cpp
     Decompiler/TypeSystem/SpecializedParameter_Test.cpp
     Decompiler/TypeSystem/DefaultParameter_Test.cpp
+    Decompiler/TypeSystem/DefaultAttribute_Test.cpp
     Decompiler/TypeSystem/ITypeTypeParameters_Test.cpp
     Decompiler/TypeSystem/SpecializedMember_Test.cpp
     Decompiler/TypeSystem/SpecializedField_Test.cpp
