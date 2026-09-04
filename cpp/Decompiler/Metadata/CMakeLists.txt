@@ -8,6 +8,7 @@
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/MetadataFile.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/MethodBody.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/PortablePdb.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/SignatureDecoder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ILOpCodes.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ILDisassembler.cpp
