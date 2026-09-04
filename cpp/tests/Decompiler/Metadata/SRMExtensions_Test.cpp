@@ -46,10 +46,13 @@
 #include <string>
 #include <string_view>
 
+using ILSpy::Decompiler::Metadata::FieldValueSizeDecoder;
 using ILSpy::Decompiler::Metadata::GetFullTypeName;
 using ILSpy::Decompiler::Metadata::GetFullTypeNameFromDefinition;
 using ILSpy::Decompiler::Metadata::GetFullTypeNameFromReference;
 using ILSpy::Decompiler::Metadata::MetadataFile;
+using ILSpy::Decompiler::Metadata::MetadataGenericContext;
+using ILSpy::Decompiler::Metadata::SignatureTypeProviderDecoder;
 using ILSpy::Decompiler::Metadata::ToILNameString;
 using ILSpy::Decompiler::TypeSystem::FullTypeName;
 using ILSpy::Decompiler::TypeSystem::SplitTypeParameterCountFromReflectionName;
@@ -484,4 +487,242 @@ TEST(GetFullTypeNameTest, DispatchTypeSpecTokenDecodesTheSignatureBlob)
         || ToILNameString(name) == "System.Collections.Generic.IEnumerable`1"
         || ToILNameString(name) == "System.IEquatable`1")
         << "unexpected interface: " << ToILNameString(name);
+}
+
+
+// ---------------------------------------------------------------------------
+// FieldValueSizeDecoder (the provider behind GetInitialValue) + the
+// MetadataFile reads the ReflectionDisassembler field renderer composes
+// (GetFieldRVA / GetFieldOffset / GetFieldMarshallingDescriptor /
+// GetTypeLayoutSize / GetContainingSectionIndex / GetSectionName /
+// GetFieldInitialValue). Fixture facts verified against the .NET Framework
+// 4.8 Framework64 mscorlib with the BCL MetadataReader and PEReader:
+//   - the '<PrivateImplementationDetails>' field
+//     '001F1D86E0BD2B1A9BF6D7CD56529284FCDA770A6E6E0EF7CF8B2238118033CB' has
+//     RVA 0x4E8FF8, its signature decodes to the nested
+//     '__StaticArrayInitTypeSize=40' struct (ClassLayout ClassSize 40), and
+//     its initial value is the 40 bytes ff*8 0d 00 00 00 04 00 00 00 ff*12
+//     0f 00 00 00 ff*4 0c 00 00 00;
+//   - RVA 0x4E8FF8 lands in section 0 (.text, VA 0x2000); section 1 is
+//     .rsrc (VA 0x4FA000);
+//   - CLAIM_SECURITY_ATTRIBUTE_INFORMATION_V1::pAttributeV1 carries the
+//     FieldLayout offset 0 and an IntPtr (native int) signature;
+//   - CLAIM_SECURITY_ATTRIBUTE_FQBN_VALUE::Name carries the FieldMarshal
+//     blob 0x15 (lpwstr) and a String signature.
+// ---------------------------------------------------------------------------
+
+TEST(FieldValueSizeDecoderTest, PrimitiveAndCompositeMatrix)
+{
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+
+    // One full type decoded through the size provider (the GetInitialValue
+    // drive: the field signature's single type at the nil context).
+    auto sizeOf = [&](std::vector<std::uint8_t> blob) {
+        FieldValueSizeDecoder provider(f);
+        SignatureTypeProviderDecoder<FieldValueSizeDecoder> decoder(provider, f);
+        return decoder.DecodeType(blob.data(), blob.size(),
+            MetadataGenericContext{});
+    };
+
+    // The C# primitive table: Boolean/Byte/SByte 1, Char/Int16/UInt16 2,
+    // Int32/UInt32/Single 4, Int64/UInt64/Double 8, IntPtr/UIntPtr the
+    // pointer size (8, the null-typeSystem IntPtr.Size shape); Void/String/
+    // TypedReference/Object 0 (no inline initial value).
+    EXPECT_EQ(sizeOf({0x02}), 1);   // bool
+    EXPECT_EQ(sizeOf({0x04}), 1);  // int8
+    EXPECT_EQ(sizeOf({0x05}), 1);  // unsigned int8
+    EXPECT_EQ(sizeOf({0x03}), 2);   // char
+    EXPECT_EQ(sizeOf({0x06}), 2);  // int16
+    EXPECT_EQ(sizeOf({0x07}), 2);  // unsigned int16
+    EXPECT_EQ(sizeOf({0x08}), 4);   // int32
+    EXPECT_EQ(sizeOf({0x09}), 4);  // unsigned int32
+    EXPECT_EQ(sizeOf({0x0C}), 4);  // float32
+    EXPECT_EQ(sizeOf({0x0A}), 8);   // int64
+    EXPECT_EQ(sizeOf({0x0B}), 8);  // unsigned int64
+    EXPECT_EQ(sizeOf({0x0D}), 8);  // float64
+    EXPECT_EQ(sizeOf({0x18}), 8);   // native int (IntPtr)
+    EXPECT_EQ(sizeOf({0x19}), 8);  // unsigned native int
+    EXPECT_EQ(sizeOf({0x01}), 0);   // void
+    EXPECT_EQ(sizeOf({0x0E}), 0);   // string
+    EXPECT_EQ(sizeOf({0x16}), 0);  // typedref
+    EXPECT_EQ(sizeOf({0x1C}), 0);   // object
+
+    // Ptr/ByRef/FnPtr read the pointer size; SZArray/Array read
+    // GetPrimitiveType(Object) = 0; VAR/MVAR read 0.
+    EXPECT_EQ(sizeOf({0x0F, 0x08}), 8);       // int32*
+    EXPECT_EQ(sizeOf({0x0F, 0x1D, 0x08}), 8);  // int32[]*
+    EXPECT_EQ(sizeOf({0x1D, 0x08}), 0);        // int32[]
+    EXPECT_EQ(sizeOf({0x14, 0x08, 0x01, 0x01, 0x01, 0x00}), 0);  // int32[0...0...]
+    EXPECT_EQ(sizeOf({0x13, 0x00}), 0);        // !0
+    EXPECT_EQ(sizeOf({0x1E, 0x00}), 0);        // !!0
+    // void() function pointer: FNPTR + header + count 0 + void return.
+    EXPECT_EQ(sizeOf({0x1B, 0x00, 0x00, 0x01}), 8);
+
+    // pinned/cmod fold to the unmodified/element size (GetPinnedType =>
+    // element; GetModifiedType => unmodified).
+    EXPECT_EQ(sizeOf({0x45, 0x08}), 4);  // pinned int32
+}
+
+TEST(FieldValueSizeDecoderTest, RealFieldSignatureShapes)
+{
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t pic = 0, win32 = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == "" && t.Name == "<PrivateImplementationDetails>")
+            pic = t.Token;
+        if (t.Namespace == "Microsoft.Win32" && t.Name == "Win32Native")
+            win32 = t.Token;
+    }
+    ASSERT_NE(pic, 0u);
+    ASSERT_NE(win32, 0u);
+    std::uint32_t information = FindNestedType(f,
+        "CLAIM_SECURITY_ATTRIBUTE_INFORMATION_V1", "Win32Native");
+    std::uint32_t fqbnType = FindNestedType(f,
+        "CLAIM_SECURITY_ATTRIBUTE_FQBN_VALUE", "Win32Native");
+    ASSERT_NE(information, 0u);
+    ASSERT_NE(fqbnType, 0u);
+
+    std::uint32_t dataField = 0, nativeIntField = 0, stringField = 0;
+    for (const auto& fd : f.GetFields(pic)) {
+        if (fd.Name == "001F1D86E0BD2B1A9BF6D7CD56529284FCDA770A6E6E0EF7CF8B2238118033CB")
+            dataField = fd.Token;
+    }
+    for (const auto& fd : f.GetFields(information)) {
+        if (fd.Name == "pAttributeV1") nativeIntField = fd.Token;
+    }
+    for (const auto& fd : f.GetFields(fqbnType)) {
+        if (fd.Name == "Name") stringField = fd.Token;
+    }
+    ASSERT_NE(dataField, 0u);
+    ASSERT_NE(nativeIntField, 0u);
+    ASSERT_NE(stringField, 0u);
+
+    // The GetInitialValue drive: the field signature's kind nibble then one
+    // full type at the nil context.
+    auto fieldSize = [&](std::uint32_t fieldToken) {
+        auto blob = f.GetSignatureBlob(fieldToken);
+        EXPECT_TRUE(blob.has_value());
+        FieldValueSizeDecoder provider(f);
+        SignatureTypeProviderDecoder<FieldValueSizeDecoder> decoder(provider, f);
+        return decoder.DecodeType(blob->data() + 1, blob->size() - 1,
+            MetadataGenericContext{});
+    };
+
+    // The data field's valuetype '__StaticArrayInitTypeSize=40' reads the
+    // ClassLayout ClassSize; the native int reads the pointer size (8); the
+    // string reads 0.
+    EXPECT_EQ(fieldSize(dataField), 40);
+    EXPECT_EQ(fieldSize(nativeIntField), 8);
+    EXPECT_EQ(fieldSize(stringField), 0);
+}
+
+TEST(FieldValueSizeDecoderTest, FieldRvaLayoutMarshalClassLayoutSectionReads)
+{
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t pic = 0, win32 = 0, stringType = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == "" && t.Name == "<PrivateImplementationDetails>")
+            pic = t.Token;
+        if (t.Namespace == "Microsoft.Win32" && t.Name == "Win32Native")
+            win32 = t.Token;
+        if (t.Namespace == "System" && t.Name == "String")
+            stringType = t.Token;
+    }
+    ASSERT_NE(pic, 0u);
+    ASSERT_NE(win32, 0u);
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t information = FindNestedType(f,
+        "CLAIM_SECURITY_ATTRIBUTE_INFORMATION_V1", "Win32Native");
+    std::uint32_t fqbnType = FindNestedType(f,
+        "CLAIM_SECURITY_ATTRIBUTE_FQBN_VALUE", "Win32Native");
+    std::uint32_t staticArray40 = FindNestedType(f,
+        "__StaticArrayInitTypeSize=40", "<PrivateImplementationDetails>");
+    ASSERT_NE(information, 0u);
+    ASSERT_NE(fqbnType, 0u);
+    ASSERT_NE(staticArray40, 0u);
+
+    std::uint32_t dataField = 0, emptyField = 0, nativeIntField = 0,
+        nameField = 0;
+    for (const auto& fd : f.GetFields(pic)) {
+        if (fd.Name == "001F1D86E0BD2B1A9BF6D7CD56529284FCDA770A6E6E0EF7CF8B2238118033CB")
+            dataField = fd.Token;
+    }
+    for (const auto& fd : f.GetFields(stringType)) {
+        if (fd.Name == "Empty") emptyField = fd.Token;
+    }
+    for (const auto& fd : f.GetFields(information)) {
+        if (fd.Name == "pAttributeV1") nativeIntField = fd.Token;
+    }
+    for (const auto& fd : f.GetFields(fqbnType)) {
+        if (fd.Name == "Name") nameField = fd.Token;
+    }
+    ASSERT_NE(dataField, 0u);
+    ASSERT_NE(emptyField, 0u);
+    ASSERT_NE(nativeIntField, 0u);
+    ASSERT_NE(nameField, 0u);
+
+    // GetFieldRVA: the FieldRVA table row's RVA; 0 without one.
+    EXPECT_EQ(f.GetFieldRVA(dataField), 0x4E8FF8u);
+    EXPECT_EQ(f.GetFieldRVA(emptyField), 0u);
+    // GetFieldOffset: the FieldLayout table row's Offset; -1 without one.
+    EXPECT_EQ(f.GetFieldOffset(nativeIntField), 0);
+    EXPECT_EQ(f.GetFieldOffset(emptyField), -1);
+    // GetFieldMarshallingDescriptor: the FieldMarshal blob (0x15 = lpwstr).
+    auto marshal = f.GetFieldMarshallingDescriptor(nameField);
+    ASSERT_TRUE(marshal.has_value());
+    EXPECT_EQ(*marshal, (std::vector<std::uint8_t>{0x15}));
+    EXPECT_FALSE(f.GetFieldMarshallingDescriptor(emptyField).has_value());
+    // GetTypeLayoutSize: the ClassLayout ClassSize; 0 without a row.
+    EXPECT_EQ(f.GetTypeLayoutSize(staticArray40), 40u);
+    EXPECT_EQ(f.GetTypeLayoutSize(stringType), 0u);
+
+    // The PE-section reads: .text is section 0 (VA 0x2000), .rsrc section 1
+    // (VA 0x4FA000); an RVA past every section reads -1.
+    EXPECT_EQ(f.GetContainingSectionIndex(0x4E8FF8), 0);
+    EXPECT_EQ(f.GetSectionName(0), ".text");
+    EXPECT_EQ(f.GetSectionName(1), ".rsrc");
+    EXPECT_EQ(f.GetContainingSectionIndex(0x7FFFFFFF), -1);
+    EXPECT_EQ(f.GetSectionName(99), "");
+}
+
+TEST(FieldValueSizeDecoderTest, GetFieldInitialValueDataFieldFortyBytes)
+{
+    MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t pic = 0, stringType = 0;
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Namespace == "" && t.Name == "<PrivateImplementationDetails>")
+            pic = t.Token;
+        if (t.Namespace == "System" && t.Name == "String")
+            stringType = t.Token;
+    }
+    ASSERT_NE(pic, 0u);
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t dataField = 0, emptyField = 0;
+    for (const auto& fd : f.GetFields(pic)) {
+        if (fd.Name == "001F1D86E0BD2B1A9BF6D7CD56529284FCDA770A6E6E0EF7CF8B2238118033CB")
+            dataField = fd.Token;
+    }
+    for (const auto& fd : f.GetFields(stringType)) {
+        if (fd.Name == "Empty") emptyField = fd.Token;
+    }
+    ASSERT_NE(dataField, 0u);
+    ASSERT_NE(emptyField, 0u);
+
+    // The 40 bytes at the RVA (the ClassLayout size of the field's
+    // '__StaticArrayInitTypeSize=40' valuetype, sliced out of .text).
+    std::vector<std::uint8_t> expected = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x0d, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0x0f, 0x00, 0x00, 0x00,
+        0xff, 0xff, 0xff, 0xff, 0x0c, 0x00, 0x00, 0x00,
+    };
+    EXPECT_EQ(f.GetFieldInitialValue(dataField), expected);
+    // A field without the HasFieldRVA flag reads empty.
+    EXPECT_EQ(f.GetFieldInitialValue(emptyField),
+        (std::vector<std::uint8_t>{}));
 }

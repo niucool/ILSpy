@@ -19,6 +19,9 @@
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/MethodBody.hpp"
 #include "Decompiler/Metadata/MethodBodyReader.hpp"
+#include "Decompiler/Metadata/MetadataGenericContext.hpp"
+#include "Decompiler/Metadata/SignatureTypeProvider.hpp"
+#include "Decompiler/Metadata/SRMExtensions.hpp"
 #include "Decompiler/Metadata/SignatureDecoder.hpp"
 #include "Decompiler/TypeSystem/TypeKindDerivation.hpp"
 
@@ -769,6 +772,155 @@ std::string MetadataFile::GetFieldName(std::uint32_t fieldToken) const {
     } catch (const std::exception&) {
         return {};
     }
+}
+
+// A Field row's RelativeVirtualAddress (the FieldRVA table row whose Field
+// is this row -- the C# FindFieldRvaRowId scan). See the header for the full
+// contract.
+std::uint32_t MetadataFile::GetFieldRVA(std::uint32_t fieldToken) const {
+    if (!IsValid()) return 0;
+    std::uint32_t table = fieldToken >> 24;
+    std::uint32_t row = fieldToken & 0x00FFFFFFu;
+    if (table != 0x04 || row == 0 || row > impl_->db->Field.size()) return 0;
+    try {
+        auto& db = *impl_->db;
+        // The Field column is a plain 1-based Field row index (the winmd
+        // MethodImpl Class-column convention).
+        for (std::uint32_t i = 0; i < db.FieldRVA.size(); i++) {
+            if (db.FieldRVA.get_value<std::uint32_t>(i, 1) != row) continue;
+            return db.FieldRVA.get_value<std::uint32_t>(i, 0);
+        }
+    } catch (const std::exception&) {
+        // Malformed image: report no RVA (the field renders without data).
+    }
+    return 0;
+}
+
+// A Field row's layout offset (the FieldLayout table row whose Field is this
+// row; -1 when none). See the header for the full contract.
+std::int32_t MetadataFile::GetFieldOffset(std::uint32_t fieldToken) const {
+    if (!IsValid()) return -1;
+    std::uint32_t table = fieldToken >> 24;
+    std::uint32_t row = fieldToken & 0x00FFFFFFu;
+    if (table != 0x04 || row == 0 || row > impl_->db->Field.size()) return -1;
+    try {
+        auto& db = *impl_->db;
+        for (std::uint32_t i = 0; i < db.FieldLayout.size(); i++) {
+            if (db.FieldLayout.get_value<std::uint32_t>(i, 1) != row) continue;
+            // The Offset column is a 4-byte uint; the > int.MaxValue shape
+            // reads -1 (the C# GetOffset clamp -- never a real layout).
+            std::uint32_t offset = db.FieldLayout.get_value<std::uint32_t>(i, 0);
+            if (offset > 0x7FFFFFFFu) return -1;
+            return static_cast<std::int32_t>(offset);
+        }
+    } catch (const std::exception&) {
+        // Malformed image: report no layout offset.
+    }
+    return -1;
+}
+
+// A Field row's marshalling-descriptor blob (the FieldMarshal row whose
+// HasFieldMarshal coded index -- Field tag 0, Param tag 1 -- points at this
+// row). See the header for the full contract.
+std::optional<std::vector<std::uint8_t>>
+MetadataFile::GetFieldMarshallingDescriptor(std::uint32_t fieldToken) const {
+    if (!IsValid()) return std::nullopt;
+    std::uint32_t table = fieldToken >> 24;
+    std::uint32_t row = fieldToken & 0x00FFFFFFu;
+    if (table != 0x04 || row == 0 || row > impl_->db->Field.size())
+        return std::nullopt;
+    try {
+        auto& db = *impl_->db;
+        std::uint32_t want = (row << 1) | 0;  // HasFieldMarshal: Field tag 0
+        for (std::uint32_t i = 0; i < db.FieldMarshal.size(); i++) {
+            if (db.FieldMarshal.get_value<std::uint32_t>(i, 0) != want)
+                continue;
+            auto blob = db.get_blob(
+                db.FieldMarshal.get_value<std::uint32_t>(i, 1));
+            return std::vector<std::uint8_t>(blob.begin(), blob.end());
+        }
+    } catch (const std::exception&) {
+        // Malformed image: report no descriptor.
+    }
+    return std::nullopt;
+}
+
+// A TypeDef row's ClassLayout ClassSize (0 when the row has no ClassLayout
+// row). See the header for the full contract.
+std::uint32_t MetadataFile::GetTypeLayoutSize(std::uint32_t typeDefToken) const {
+    if (!IsValid()) return 0;
+    std::uint32_t table = typeDefToken >> 24;
+    std::uint32_t row = typeDefToken & 0x00FFFFFFu;
+    if (table != 0x02 || row == 0 || row > impl_->db->TypeDef.size()) return 0;
+    try {
+        auto& db = *impl_->db;
+        // The Parent column is a plain 1-based TypeDef row index.
+        for (std::uint32_t i = 0; i < db.ClassLayout.size(); i++) {
+            if (db.ClassLayout.get_value<std::uint32_t>(i, 2) != row) continue;
+            return db.ClassLayout.get_value<std::uint32_t>(i, 1);
+        }
+    } catch (const std::exception&) {
+        // Malformed image: report no layout size.
+    }
+    return 0;
+}
+
+// The PE-section reads (PeImage passthroughs through the body reader).
+// See the header for the full contract.
+int MetadataFile::GetContainingSectionIndex(std::uint32_t rva) const {
+    if (!IsValid() || !impl_->bodyReader) return -1;
+    return impl_->bodyReader->GetContainingSectionIndex(rva);
+}
+
+std::string MetadataFile::GetSectionName(int sectionIndex) const {
+    if (!IsValid() || !impl_->bodyReader) return {};
+    return impl_->bodyReader->GetSectionName(sectionIndex);
+}
+
+// A HasFieldRVA field's initial value -- the C# SRMExtensions GetInitialValue
+// (the null-typeSystem shape). See the header for the full contract.
+std::vector<std::uint8_t> MetadataFile::GetFieldInitialValue(
+        std::uint32_t fieldToken) const {
+    // The C# `if (!field.HasFlag(FieldAttributes.HasFieldRVA)) return default;`
+    // and `if (rva == 0) return default;` -- fields without data read empty.
+    constexpr std::uint32_t kHasFieldRVA = 0x0100;  // FieldAttributes bit 8
+    if ((GetFieldAttributes(fieldToken) & kHasFieldRVA) == 0) return {};
+    std::uint32_t rva = GetFieldRVA(fieldToken);
+    if (rva == 0) return {};
+
+    // The C# `field.DecodeSignature(new FieldValueSizeDecoder(typeSystem:
+    // null), default)` -- the field signature's one type decoded through the
+    // size provider at the nil generic context (VAR/MVAR read 0). A
+    // malformed blob propagates the walker's std::logic_error (the C#
+    // BadImageFormatException out of DecodeFieldSignature).
+    auto blob = GetSignatureBlob(fieldToken);
+    if (!blob || blob->empty() || ((*blob)[0] & 0x0F) != 0x06)
+        throw std::logic_error("field signature");
+    FieldValueSizeDecoder sizeProvider(*this);
+    SignatureTypeProviderDecoder<FieldValueSizeDecoder> decoder(
+        sizeProvider, *this);
+    int size = decoder.DecodeType(blob->data() + 1, blob->size() - 1,
+        MetadataGenericContext::Nil());
+
+    auto sectionData = impl_->bodyReader
+        ? impl_->bodyReader->GetSectionData(rva)
+        : PeImage::SectionDataView{};
+    // The exact C# BadImageFormatException messages (the DisassembleField
+    // catch renders them into the `// .data ...` comment line).
+    if (sectionData.length == 0 && size != 0) {
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), "%x", rva);
+        throw std::runtime_error(std::string(
+            "Field data (rva=0x") + buf
+            + ") could not be found in any section!");
+    }
+    if (size < 0 || static_cast<std::uint64_t>(size) > sectionData.length) {
+        throw std::runtime_error(
+            "Invalid size " + std::to_string(size) + " for field data!");
+    }
+    if (size == 0) return {};
+    return std::vector<std::uint8_t>(sectionData.base,
+        sectionData.base + size);
 }
 
 // A MemberRef row's Name + MemberRefParent coded index. See the header for

@@ -1483,4 +1483,198 @@ void ReflectionDisassembler::WriteTypeParameters(Output::ITextOutput& output,
     output.Write('>');
 }
 
+// ---------------------------------------------------------------------------
+// The field member renderer (ReflectionDisassembler.cs lines 1270-1435:
+// DisassembleField / DisassembleFieldHeader / DisassembleFieldHeaderInternal
+// / GetRVASectionPrefix).
+// ---------------------------------------------------------------------------
+
+// The C# `public void DisassembleField(MetadataFile module,
+// FieldDefinitionHandle handle)` (lines 1288-1343). See the header for the
+// porting decisions.
+void ReflectionDisassembler::DisassembleField(Metadata::MetadataFile& module,
+    std::uint32_t fieldToken)
+{
+    // The header ends mid-line; this WriteLine terminates it (the constant
+    // tail or the flags leave no newline of their own).
+    char sectionPrefix = DisassembleFieldHeaderInternal(module, fieldToken);
+    output_.WriteLine();
+
+    // The C# `attributes.Count > 0` fold pair around the attribute lines --
+    // no braces or extra indent: a field has no body block.
+    auto attributeTokens = module.GetCustomAttributeTokens(fieldToken);
+    if (!attributeTokens.empty()) {
+        output_.MarkFoldStart();
+        WriteAttributes(module, attributeTokens);
+        output_.MarkFoldEnd();
+    }
+
+    // The C# `fieldDefinition.HasFlag(FieldAttributes.HasFieldRVA)`.
+    constexpr std::uint32_t kHasFieldRVA =
+        static_cast<std::uint32_t>(FieldAttributes::HasFieldRVA);
+    std::uint32_t attributes = module.GetFieldAttributes(fieldToken);
+    if ((attributes & kHasFieldRVA) != 0) {
+        std::uint32_t rva = module.GetFieldRVA(fieldToken);
+        int sectionIndex = module.GetContainingSectionIndex(rva);
+        if (sectionIndex < 0) {
+            // The C# $"// RVA {rva:X8} invalid (not in any section)".
+            char buf[40];
+            std::snprintf(buf, sizeof(buf),
+                "// RVA %08X invalid (not in any section)", rva);
+            Output::WriteLine(output_, buf);
+        } else {
+            std::vector<std::uint8_t> initVal;
+            try {
+                initVal = module.GetFieldInitialValue(fieldToken);
+            } catch (const std::exception& ex) {
+                // The C# `catch (BadImageFormatException ex)`: the
+                // failed-read comment line (the exact message).
+                initVal.clear();
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "// .data %c_%08X = %s",
+                    sectionPrefix, rva, ex.what());
+                Output::WriteLine(output_, buf);
+            }
+            if (!initVal.empty()) {
+                // The C# `module.SectionHeaders[sectionIndex].Name` walk.
+                auto sectionName = module.GetSectionName(sectionIndex);
+                output_.Write(".data ");
+                if (sectionName == ".text") {
+                    output_.Write("cil ");
+                } else if (sectionName == ".tls") {
+                    output_.Write("tls ");
+                } else if (sectionName != ".data") {
+                    // The C# `sectionHeader.Name is not (null or ".data")`:
+                    // the name is never null off a PE header, so this is
+                    // every other section.
+                    output_.Write("/* " + sectionName + " */ ");
+                }
+                // The C# $"{sectionPrefix}_{rva:X8} = bytearray ".
+                char buf[24];
+                std::snprintf(buf, sizeof(buf), "%c_%08X = bytearray ",
+                    sectionPrefix, rva);
+                output_.Write(buf);
+                WriteBlob(initVal.data(), initVal.size());
+                output_.WriteLine();
+            }
+        }
+    }
+}
+
+// The C# `public void DisassembleFieldHeader(MetadataFile module,
+// FieldDefinitionHandle handle)` (lines 1346-1351).
+void ReflectionDisassembler::DisassembleFieldHeader(
+    Metadata::MetadataFile& module, std::uint32_t fieldToken)
+{
+    DisassembleFieldHeaderInternal(module, fieldToken);
+}
+
+// The C# `private char DisassembleFieldHeaderInternal(MetadataFile module,
+// FieldDefinitionHandle handle, MetadataReader metadata, FieldDefinition
+// fieldDefinition)` (lines 1353-1417). See the header for the porting
+// decisions.
+char ReflectionDisassembler::DisassembleFieldHeaderInternal(
+    Metadata::MetadataFile& module, std::uint32_t fieldToken)
+{
+    output_.WriteReference(module, fieldToken, ".field", "decompile",
+        /*isDefinition=*/true);
+    WriteMetadataToken(output_, module, fieldToken, fieldToken,
+        /*spaceAfter=*/true, /*spaceBefore=*/true, ShowMetadataTokens(),
+        ShowMetadataTokensInBase10());
+    std::uint32_t attributes = module.GetFieldAttributes(fieldToken);
+
+    // The C# `int offset = fieldDefinition.GetOffset(); if (offset > -1)`.
+    std::int32_t offset = module.GetFieldOffset(fieldToken);
+    if (offset > -1) {
+        output_.Write("[" + std::to_string(offset) + "] ");
+    }
+
+    //emit flags -- the visibility WriteEnum + the attribute WriteFlags split;
+    // the HasDefault/HasFieldMarshal/HasFieldRVA bits are masked out (they
+    // render through the constant/marshal/at-<rva> arms below).
+    WriteEnum(
+        static_cast<FieldAttributes>(attributes
+            & static_cast<std::uint32_t>(FieldAttributes::FieldAccessMask)),
+        fieldVisibility, output_);
+    constexpr std::uint32_t kHasXAttributes =
+        static_cast<std::uint32_t>(FieldAttributes::HasDefault)
+        | static_cast<std::uint32_t>(FieldAttributes::HasFieldMarshal)
+        | static_cast<std::uint32_t>(FieldAttributes::HasFieldRVA);
+    WriteFlags(static_cast<FieldAttributes>(
+                    attributes
+                    & ~(static_cast<std::uint32_t>(
+                            FieldAttributes::FieldAccessMask)
+                        | kHasXAttributes)),
+        fieldAttributes, output_);
+
+    // The C# `fieldDefinition.DecodeSignature(new
+    // DisassemblerSignatureTypeProvider(module, output), new
+    // MetadataGenericContext(fieldDefinition.GetDeclaringType(), module))`:
+    // the field signature's kind nibble must be Field (0x06) -- the SRM
+    // DecodeFieldSignature header check (the IL field-arm convention) --
+    // then one full type decode; the VAR (!N) context scopes to the
+    // declaring TypeDef. A malformed blob throws (no catch in the field
+    // header -- the C# BadImageFormatException escapes).
+    auto blob = module.GetSignatureBlob(fieldToken);
+    if (!blob || blob->empty() || ((*blob)[0] & 0x0F) != 0x06)
+        throw std::logic_error("field signature");
+    DisassemblerSignatureTypeProvider provider(module, output_);
+    Metadata::SignatureTypeProviderDecoder decoder(provider, module);
+    Metadata::SignatureTypeWriter signature = decoder.DecodeType(
+        blob->data() + 1, blob->size() - 1,
+        Metadata::MetadataGenericContext::ForType(
+            module.GetFieldDeclaringTypeToken(fieldToken), module));
+
+    // The marshalling descriptor renders BETWEEN the flags and the type
+    // ("marshal(lpwstr) string Name").
+    auto marshallingDescriptor = module.GetFieldMarshallingDescriptor(fieldToken);
+    if (marshallingDescriptor.has_value()) {
+        WriteMarshalInfo(marshallingDescriptor->data(),
+            marshallingDescriptor->size());
+    }
+
+    signature(ILNameSyntax::Signature);
+    output_.Write(' ');
+    output_.Write(Escape(module.GetFieldName(fieldToken)));
+
+    char sectionPrefix = 'D';
+    if ((attributes & static_cast<std::uint32_t>(FieldAttributes::HasFieldRVA))
+        != 0) {
+        std::uint32_t rva = module.GetFieldRVA(fieldToken);
+        sectionPrefix = GetRVASectionPrefix(module, rva);
+        // The C# `output.Write(" at {1}_{0:X8}", rva, sectionPrefix)`.
+        char buf[24];
+        std::snprintf(buf, sizeof(buf), " at %c_%08X", sectionPrefix, rva);
+        output_.Write(buf);
+    }
+
+    // The C# `defaultValue = fieldDefinition.GetDefaultValue()` -- the
+    // Constant-table row parented by the field (the fused GetConstant).
+    auto defaultValue = module.GetConstant(fieldToken);
+    if (defaultValue.has_value()) {
+        output_.Write(" = ");
+        WriteConstant(*defaultValue);
+    }
+
+    return sectionPrefix;
+}
+
+// The C# `private char GetRVASectionPrefix(MetadataFile module, int rva)`
+// (lines 1419-1435). See the header for the porting decisions.
+char ReflectionDisassembler::GetRVASectionPrefix(
+    const Metadata::MetadataFile& module, std::uint32_t rva)
+{
+    // The C# `module is not PEFile peFile` NotSupportedException arm: the
+    // port's MetadataFile is always the PE-backed file (the winmd reader).
+    int sectionIndex = module.GetContainingSectionIndex(rva);
+    if (sectionIndex < 0)
+        return 'D';
+    auto name = module.GetSectionName(sectionIndex);
+    if (name == ".tls")
+        return 'T';
+    if (name == ".text")
+        return 'I';
+    return 'D';
+}
+
 }  // namespace ILSpy::Decompiler::Disassembler

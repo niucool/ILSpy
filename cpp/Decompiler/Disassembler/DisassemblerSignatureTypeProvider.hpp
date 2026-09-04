@@ -44,8 +44,12 @@ namespace ILSpy::Decompiler::Disassembler {
 // captures `this` (the C# captures the provider's `output` field), so the
 // provider must outlive the writers it produced -- the same liveness contract
 // the C# reference-type field has.
-class DisassemblerSignatureTypeProvider final : public Metadata::ISignatureTypeProvider {
+class DisassemblerSignatureTypeProvider final : public Metadata::ISignatureTypeProvider<Metadata::SignatureTypeWriter> {
 public:
+    // The provider's result type (the TType the generic contract and the
+    // SignatureTypeProviderDecoder read off the provider).
+    using TType = Metadata::SignatureTypeWriter;
+
     DisassemblerSignatureTypeProvider(const Metadata::MetadataFile& module,
         Output::ITextOutput& output);
 

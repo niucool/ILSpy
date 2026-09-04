@@ -352,4 +352,133 @@ std::uint32_t GetDeclaringType(const MetadataFile& metadata,
     }
 }
 
+// ---------------------------------------------------------------------------
+// FieldValueSizeDecoder (SRMExtensions.cs -- the sealed class nested behind
+// GetInitialValue): the provider that decodes a FIELD signature to the byte
+// size of the field's initial value.
+// ---------------------------------------------------------------------------
+
+FieldValueSizeDecoder::FieldValueSizeDecoder(const MetadataFile& module)
+    : module_(module) {
+    // The C# ctor's null-typeSystem shape (the ReflectionDisassembler
+    // DisassembleField caller): `module` is null, so the pointer size is
+    // IntPtr.Size -- the x64 process (the ilspycmd CLI runs x64, and the
+    // typeSystem-bearing arm defers with the type system).
+}
+
+// The C# switch: Boolean/Byte/SByte 1, Char/Int16/UInt16 2, Int32/UInt32/
+// Single 4, Int64/UInt64/Double 8, IntPtr/UIntPtr the pointer size; Void,
+// String, TypedReference, and Object fall to the default 0 (the reference
+// types have no inline initial value).
+int FieldValueSizeDecoder::GetPrimitiveType(PrimitiveTypeCode typeCode) {
+    switch (typeCode) {
+        case PrimitiveTypeCode::Boolean:
+        case PrimitiveTypeCode::Byte:
+        case PrimitiveTypeCode::SByte:
+            return 1;
+        case PrimitiveTypeCode::Char:
+        case PrimitiveTypeCode::Int16:
+        case PrimitiveTypeCode::UInt16:
+            return 2;
+        case PrimitiveTypeCode::Int32:
+        case PrimitiveTypeCode::UInt32:
+        case PrimitiveTypeCode::Single:
+            return 4;
+        case PrimitiveTypeCode::Int64:
+        case PrimitiveTypeCode::UInt64:
+        case PrimitiveTypeCode::Double:
+            return 8;
+        case PrimitiveTypeCode::IntPtr:
+        case PrimitiveTypeCode::UIntPtr:
+            return pointerSize_;
+        default:
+            return 0;
+    }
+}
+
+int FieldValueSizeDecoder::GetTypeFromDefinition(std::uint32_t typeDefToken,
+    std::uint8_t rawTypeKind) {
+    // The C# `reader.GetTypeDefinition(handle).GetLayout().Size` -- the
+    // ClassLayout ClassSize (0 for a type without a layout row).
+    return static_cast<int>(module_.GetTypeLayoutSize(typeDefToken));
+}
+
+int FieldValueSizeDecoder::GetTypeFromReference(std::uint32_t typeRefToken,
+    std::uint8_t rawTypeKind) {
+    // The C# `module?.ResolveType(handle, new GenericContext())` -- null under
+    // the null-typeSystem shape, so the arm reads 0 (the typeSystem-bearing
+    // resolution defers with the type system).
+    return 0;
+}
+
+int FieldValueSizeDecoder::GetTypeFromSpecification(std::uint32_t typeSpecToken,
+    std::uint8_t rawTypeKind, const MetadataGenericContext& genericContext) {
+    // The C# `reader.GetTypeSpecification(handle).DecodeSignature(this,
+    // genericContext)` -- the TypeSpec row's signature blob decoded through
+    // this same provider (a fresh decoder over it).
+    auto blob = module_.GetTypeSpecSignatureBlob(typeSpecToken);
+    if (!blob)
+        throw std::out_of_range("FieldValueSizeDecoder: invalid TypeSpec token");
+    SignatureTypeProviderDecoder<FieldValueSizeDecoder> decoder(*this, module_);
+    return decoder.DecodeType(blob->data(), blob->size(), genericContext);
+}
+
+// The C# `GetSZArrayType(int elementType) => GetPrimitiveType(
+// PrimitiveTypeCode.Object)` -- an SZArray has no inline initial value.
+int FieldValueSizeDecoder::GetSZArrayType(int elementType) {
+    return GetPrimitiveType(PrimitiveTypeCode::Object);
+}
+
+int FieldValueSizeDecoder::GetPointerType(int elementType) {
+    return pointerSize_;
+}
+
+int FieldValueSizeDecoder::GetByReferenceType(int elementType) {
+    return pointerSize_;
+}
+
+// The C# `GetPinnedType(int elementType) => elementType`.
+int FieldValueSizeDecoder::GetPinnedType(int elementType) {
+    return elementType;
+}
+
+// The C# `GetArrayType(int elementType, ArrayShape shape) =>
+// GetPrimitiveType(PrimitiveTypeCode.Object)`.
+int FieldValueSizeDecoder::GetArrayType(int elementType, const ArrayShape& shape) {
+    return GetPrimitiveType(PrimitiveTypeCode::Object);
+}
+
+// The C# `GetGenericInstantiation(int genericType, ImmutableArray<int>
+// typeArguments) => genericType` -- the generic head's own size.
+int FieldValueSizeDecoder::GetGenericInstantiation(int genericType,
+    std::vector<int> typeArguments) {
+    return genericType;
+}
+
+// The C# `GetGenericMethodParameter/GetGenericTypeParameter(..., int index)
+// => 0`.
+int FieldValueSizeDecoder::GetGenericTypeParameter(
+    const MetadataGenericContext& genericContext, int index) {
+    return 0;
+}
+
+int FieldValueSizeDecoder::GetGenericMethodParameter(
+    const MetadataGenericContext& genericContext, int index) {
+    return 0;
+}
+
+// The C# `GetModifiedType(int modifier, int unmodifiedType, bool isRequired)
+// => unmodifiedType`.
+int FieldValueSizeDecoder::GetModifiedType(int modifier, int unmodifiedType,
+    bool isRequired) {
+    return unmodifiedType;
+}
+
+// The C# `GetFunctionPointerType(MethodSignature<int> signature) =>
+// pointerSize` -- the signature's contents are irrelevant to the size.
+int FieldValueSizeDecoder::GetFunctionPointerType(
+    const ProviderMethodSignature<int>& signature) {
+    return pointerSize_;
+}
+
 } // namespace ILSpy::Decompiler::Metadata

@@ -115,4 +115,68 @@ std::uint32_t GetDeclaringType(const MetadataFile& metadata,
 // ToLowerInvariant()` fallback, unreachable for the 7 ported members).
 std::string ToILSyntax(SignatureCallingConvention callConv);
 
+// The C# `sealed class FieldValueSizeDecoder : ISignatureTypeProvider<int,
+// GenericContext>` (SRMExtensions.cs -- the private class behind
+// GetInitialValue): the provider that decodes a FIELD signature to the byte
+// SIZE of the field's initial value -- the `.data` blob length the
+// ReflectionDisassembler.DisassembleField HasFieldRVA arm reads through
+// GetFieldInitialValue. A nested private class in the C#, lifted public
+// here (the tests drive it over synthetic signature blobs through the
+// SignatureTypeProviderDecoder, the same walker GetFieldInitialValue
+// drives).
+//
+// The port models the null-typeSystem shape only (the C# ctor's `module`
+// field stays null): the pointer size is IntPtr.Size of the x64 process (8),
+// and GetTypeFromReference reads 0 (the typeSystem-bearing TypeRef resolution
+// and the PE32 4-byte pointer arm defer with the type system -- the CLI
+// never reaches them).
+//
+// The size arms, from the C#:
+//  * primitives -- the Boolean(1)/Char(2)/Int32(4)/Int64(8)/IntPtr(8) table,
+//    Void/String/TypedReference/Object 0 (no inline initial value);
+//  * Array/SZArray -- GetPrimitiveType(Object), i.e. 0;
+//  * Ptr/ByRef/FnPtr -- the pointer size;
+//  * GenericInstantiation -- the generic HEAD's size;
+//  * VAR/MVAR -- 0;
+//  * cmod/pinned -- the unmodified/element size;
+//  * TypeDef -- the ClassLayout ClassSize (GetTypeLayoutSize);
+//  * TypeRef -- 0 (null typeSystem);
+//  * TypeSpec -- the row's blob decoded through this same provider.
+class FieldValueSizeDecoder final : public ISignatureTypeProvider<int> {
+public:
+    // The provider's result type (the walker's TType).
+    using TType = int;
+
+    explicit FieldValueSizeDecoder(const MetadataFile& module);
+
+    int GetPrimitiveType(PrimitiveTypeCode typeCode) override;
+    int GetTypeFromDefinition(std::uint32_t typeDefToken,
+        std::uint8_t rawTypeKind) override;
+    int GetTypeFromReference(std::uint32_t typeRefToken,
+        std::uint8_t rawTypeKind) override;
+    int GetTypeFromSpecification(std::uint32_t typeSpecToken,
+        std::uint8_t rawTypeKind,
+        const MetadataGenericContext& genericContext) override;
+    int GetSZArrayType(int elementType) override;
+    int GetPointerType(int elementType) override;
+    int GetByReferenceType(int elementType) override;
+    int GetPinnedType(int elementType) override;
+    int GetArrayType(int elementType, const ArrayShape& shape) override;
+    int GetGenericInstantiation(int genericType,
+        std::vector<int> typeArguments) override;
+    int GetGenericTypeParameter(const MetadataGenericContext& genericContext,
+        int index) override;
+    int GetGenericMethodParameter(const MetadataGenericContext& genericContext,
+        int index) override;
+    int GetModifiedType(int modifier, int unmodifiedType,
+        bool isRequired) override;
+    int GetFunctionPointerType(
+        const ProviderMethodSignature<int>& signature) override;
+
+private:
+    const MetadataFile& module_;
+    // IntPtr.Size under the null-typeSystem shape -- the x64 process.
+    int pointerSize_ = 8;
+};
+
 } // namespace ILSpy::Decompiler::Metadata

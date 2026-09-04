@@ -28,10 +28,12 @@
 
 #include "Decompiler/Metadata/Ecma335/WinmdInclude.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace ILSpy::Decompiler::Metadata {
@@ -92,6 +94,58 @@ public:
     bool Valid() const noexcept { return sections_ != nullptr; }
     const std::uint8_t* Data() const noexcept { return bytes_->data(); }
     std::size_t Size() const noexcept { return bytes_->size(); }
+
+    // The C# `PEHeaders.GetContainingSectionIndex(int relativeVirtualAddress)`
+    // -- the index of the section whose [VirtualAddress, VirtualAddress +
+    // VirtualSize) range contains the RVA (-1 when none; the section-data
+    // mapping below uses the section's RAW extent, not this one).
+    int GetContainingSectionIndex(std::uint32_t rva) const noexcept {
+        if (!sections_) return -1;
+        for (std::uint32_t i = 0; i < sectionCount_; i++) {
+            const auto& s = sections_[i];
+            if (s.VirtualAddress <= rva && rva < s.VirtualAddress + s.Misc.VirtualSize)
+                return static_cast<int>(i);
+        }
+        return -1;
+    }
+
+    // A section header's 8-byte name field (IMAGE_SIZEOF_SHORT_NAME),
+    // trimmed at the first NUL. "" for an out-of-range index.
+    std::string SectionName(int index) const {
+        if (!sections_ || index < 0
+            || static_cast<std::uint32_t>(index) >= sectionCount_)
+            return {};
+        const char* name = reinterpret_cast<const char*>(sections_[index].Name);
+        std::size_t len = 0;
+        while (len < 8 && name[len] != 0) ++len;
+        return std::string(name, len);
+    }
+
+    // The C# `PEReader.GetSectionData(int relativeVirtualAddress)` -- the
+    // memory block from the RVA to the END of the containing section's raw
+    // data ([PointerToRawData, PointerToRawData + SizeOfRawData)), the block
+    // the HasFieldRVA initial-value read slices. Empty when the RVA is in no
+    // section or falls past the raw block (a section's virtual-only tail).
+    // The view points into this image's bytes (valid while the image is).
+    struct SectionDataView {
+        const std::uint8_t* base = nullptr;
+        std::size_t length = 0;
+    };
+    SectionDataView GetSectionData(std::uint32_t rva) const noexcept {
+        if (!sections_) return {};
+        int index = GetContainingSectionIndex(rva);
+        if (index < 0) return {};
+        const auto& s = sections_[index];
+        std::size_t rawAvail = 0;
+        if (s.PointerToRawData <= bytes_->size())
+            rawAvail = static_cast<std::size_t>(
+                std::min<std::uint64_t>(s.SizeOfRawData,
+                    bytes_->size() - s.PointerToRawData));
+        std::uint64_t num = static_cast<std::uint64_t>(rva) - s.VirtualAddress;
+        if (num > rawAvail) return {};
+        return { bytes_->data() + s.PointerToRawData + num,
+                 static_cast<std::size_t>(rawAvail - num) };
+    }
 
     // Resolve an RVA to a file offset, or nullptr if it falls outside every
     // section (e.g. RVA 0 for abstract/extern methods).
@@ -335,6 +389,18 @@ public:
     // The cor20 header's EntryPointTokenOrRelativeVirtualAddress (0 when the
     // image has no COM header -- the C# `module.CorHeader?... ?? 0`).
     std::uint32_t EntryPointToken() const { return pe_.EntryPointToken(); }
+
+    // The PE-section reads the ReflectionDisassembler field renderer drives:
+    // the containing-section index and name (the `.data` section-kind prefix
+    // and the GetRVASectionPrefix walk) and the section-data block (the
+    // HasFieldRVA initial-value read). Straight PeImage passthroughs.
+    int GetContainingSectionIndex(std::uint32_t rva) const {
+        return pe_.GetContainingSectionIndex(rva);
+    }
+    std::string GetSectionName(int index) const { return pe_.SectionName(index); }
+    PeImage::SectionDataView GetSectionData(std::uint32_t rva) const {
+        return pe_.GetSectionData(rva);
+    }
 
     // Decode the method body at `rva`. Returns an invalid MethodBody if the RVA
     // is 0 (abstract/extern) or the header is malformed -- graceful degradation

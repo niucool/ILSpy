@@ -322,6 +322,49 @@ public:
         const Metadata::MetadataGenericContext& context,
         const std::vector<Metadata::GenericParameterInfo>& parameters);
 
+    // The C# `public void DisassembleField(MetadataFile module,
+    // FieldDefinitionHandle handle)` (ReflectionDisassembler.cs lines
+    // 1288-1343): the ".field" header, the blank-line-terminated attribute
+    // block (a field carries no braces/body block -- the .custom lines land
+    // at the header's own indentation), and the HasFieldRVA arm: the
+    // "// RVA <rva> invalid (not in any section)" comment for an RVA in no
+    // section, else the ".data [cil|tls] <prefix>_<rva> = bytearray (...)"
+    // block over the field's initial value (GetFieldInitialValue), with the
+    // failed-read "// .data ..." comment for the BadImageFormatException
+    // shapes. The handle ports as the raw Field token (table 0x04).
+    void DisassembleField(Metadata::MetadataFile& module, std::uint32_t fieldToken);
+
+    // The C# `public void DisassembleFieldHeader(MetadataFile module,
+    // FieldDefinitionHandle handle)` (lines 1346-1351): the header only,
+    // no attribute lines or data block.
+    void DisassembleFieldHeader(Metadata::MetadataFile& module,
+        std::uint32_t fieldToken);
+
+    // The C# `private char DisassembleFieldHeaderInternal(MetadataFile module,
+    // FieldDefinitionHandle handle, MetadataReader metadata, FieldDefinition
+    // fieldDefinition)` (lines 1353-1417): the ".field" reference + token
+    // comment, the "[offset] " prefix over the FieldLayout row, the
+    // visibility WriteEnum + the attribute WriteFlags (the HasDefault/
+    // HasFieldMarshal/HasFieldRVA bits masked out -- rendered by the
+    // constant/marshal/at-<rva> arms), the field type decoded through the
+    // DisassemblerSignatureTypeProvider at the declaring type's context (the
+    // marshal(...) descriptor rendered before the type), the escaped name,
+    // the " at <prefix>_<rva>" suffix, and the " = <constant>" tail.
+    // Returns the section prefix the data block's name carries (the C#
+    // sectionPrefix; 'D' for fields without data). A malformed signature blob
+    // throws std::logic_error (the field header has NO catch -- the C#
+    // BadImageFormatException escapes to the caller, unlike the method
+    // header's "<bad signature>").
+    char DisassembleFieldHeaderInternal(Metadata::MetadataFile& module,
+        std::uint32_t fieldToken);
+
+    // The C# `private char GetRVASectionPrefix(MetadataFile module, int rva)`
+    // (lines 1419-1435): the PE section the RVA lands in as the data-name
+    // prefix -- 'T' for .tls, 'I' for .text, 'D' for anything else (and for
+    // an RVA in no section).
+    char GetRVASectionPrefix(const Metadata::MetadataFile& module,
+        std::uint32_t rva);
+
 private:
     Output::ITextOutput& output_;
 

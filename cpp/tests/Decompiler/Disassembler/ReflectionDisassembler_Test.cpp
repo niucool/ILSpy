@@ -151,7 +151,7 @@ std::uint32_t FindFieldIn(const MD::MetadataFile& f, std::uint32_t typeToken,
 // outlive-the-writers liveness contract).
 struct MethodSignatureHolder {
     std::unique_ptr<DA::DisassemblerSignatureTypeProvider> provider;
-    std::unique_ptr<MD::SignatureTypeProviderDecoder> decoder;
+    std::unique_ptr<MD::SignatureTypeProviderDecoder<DA::DisassemblerSignatureTypeProvider>> decoder;
     MD::MethodSignatureT sig;
 };
 
@@ -161,7 +161,8 @@ MethodSignatureHolder MethodSignatureOf(const MD::MetadataFile& f,
     MethodSignatureHolder holder;
     holder.provider = std::make_unique<DA::DisassemblerSignatureTypeProvider>(
         f, output);
-    holder.decoder = std::make_unique<MD::SignatureTypeProviderDecoder>(
+    holder.decoder = std::make_unique<
+        MD::SignatureTypeProviderDecoder<DA::DisassemblerSignatureTypeProvider>>(
         *holder.provider, f);
     holder.sig = holder.decoder->DecodeMethodSignature(blob->data(), blob->size(),
         MD::MetadataGenericContext::ForMethod(methodToken, f));
@@ -1946,4 +1947,241 @@ TEST(ReflectionDisassemblerTest, DisassembleMethodHeaderInvariantSweep)
     }
     EXPECT_GT(rendered, 200u);
     EXPECT_GT(managed, 200u);
+}
+
+// ---------------------------------------------------------------------------
+// The field member renderer (ReflectionDisassembler.cs lines 1270-1435:
+// DisassembleField / DisassembleFieldHeader / DisassembleFieldHeaderInternal
+// / GetRVASectionPrefix). Every exact render below is de-indented from the
+// ilspycmd 11.0 `-il` gold dump of the same Framework64 mscorlib (the
+// ReflectionDisassembler output); the fixture facts (RVA 0x4E8FF8, the
+// ClassLayout size 40, the 40 initial-value bytes, the lpwstr blob 0x15) are
+// verified independently against the BCL MetadataReader/PEReader (see the
+// SRMExtensions FieldValueSizeDecoder tests).
+// ---------------------------------------------------------------------------
+
+// A nested TypeDef token by its own name and its declaring type's name (the
+// nested rows carry an empty namespace column; the SRMExtensions test's
+// FindNestedType shape).
+std::uint32_t FindNestedTypeIn(const MD::MetadataFile& f, std::string_view name,
+    std::string_view declaringName) {
+    for (const auto& t : f.TypeDefs()) {
+        if (t.Name != name) continue;
+        auto info = f.GetTypeDefNameInfo(t.Token);
+        if (!info || info->DeclaringTypeToken == 0) continue;
+        auto declaring = f.GetTypeDefNameInfo(info->DeclaringTypeToken);
+        if (declaring && declaring->Name == declaringName) return t.Token;
+    }
+    return 0;
+}
+
+TEST(ReflectionDisassemblerTest, DisassembleFieldHeaderShapes)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t opCodeValues = FindTypeDefTokenIn(f, "System.Reflection.Emit", "OpCodeValues");
+    std::uint32_t win32 = FindTypeDefTokenIn(f, "Microsoft.Win32", "Win32Native");
+    std::uint32_t pic = FindTypeDefTokenIn(f, "", "<PrivateImplementationDetails>");
+    ASSERT_NE(opCodeValues, 0u);
+    ASSERT_NE(win32, 0u);
+    ASSERT_NE(pic, 0u);
+    std::uint32_t information = FindNestedTypeIn(f,
+        "CLAIM_SECURITY_ATTRIBUTE_INFORMATION_V1", "Win32Native");
+    std::uint32_t fqbnType = FindNestedTypeIn(f,
+        "CLAIM_SECURITY_ATTRIBUTE_FQBN_VALUE", "Win32Native");
+    ASSERT_NE(information, 0u);
+    ASSERT_NE(fqbnType, 0u);
+    std::uint32_t literalField = FindFieldIn(f, opCodeValues, "Conv_Ovf_I_Un");
+    std::uint32_t nativeIntField = FindFieldIn(f, information, "pAttributeV1");
+    std::uint32_t marshalField = FindFieldIn(f, fqbnType, "Name");
+    std::uint32_t dataField = FindFieldIn(f, pic,
+        "001F1D86E0BD2B1A9BF6D7CD56529284FCDA770A6E6E0EF7CF8B2238118033CB");
+    ASSERT_NE(literalField, 0u);
+    ASSERT_NE(nativeIntField, 0u);
+    ASSERT_NE(marshalField, 0u);
+    ASSERT_NE(dataField, 0u);
+
+    // The literal: visibility WriteEnum + the attribute WriteFlags, the
+    // valuetype render at Signature syntax, and the Constant-table tail.
+    // (Gold line: ".field public static literal valuetype
+    // System.Reflection.Emit.OpCodeValues Conv_Ovf_I_Un = int32(138)").
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleFieldHeader(f, literalField);
+    }),
+        ".field public static literal valuetype System.Reflection.Emit.OpCodeValues"
+        " Conv_Ovf_I_Un = int32(138)");
+
+    // The explicit-layout offset prefix "[0] " and the native int render.
+    // (Gold line: ".field [0] public native int pAttributeV1".)
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleFieldHeader(f, nativeIntField);
+    }),
+        ".field [0] public native int pAttributeV1");
+
+    // The marshalling descriptor renders between the flags and the type.
+    // (Gold line: ".field public marshal(lpwstr) string Name".)
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleFieldHeader(f, marshalField);
+    }),
+        ".field public marshal(lpwstr) string Name");
+
+    // The HasFieldRVA " at <prefix>_<rva>" tail -- the .text section's 'I'
+    // prefix, the escaped hex-name field, and the nested valuetype render.
+    // (Gold line: ".field assembly static initonly valuetype
+    // '<PrivateImplementationDetails>'/'__StaticArrayInitTypeSize=40'
+    // '001F1D86E0BD2B1A9BF6D7CD56529284FCDA770A6E6E0EF7CF8B2238118033CB' at
+    // I_004E8FF8".)
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleFieldHeader(f, dataField);
+    }),
+        ".field assembly static initonly valuetype"
+        " '<PrivateImplementationDetails>'/'__StaticArrayInitTypeSize=40'"
+        " '001F1D86E0BD2B1A9BF6D7CD56529284FCDA770A6E6E0EF7CF8B2238118033CB'"
+        " at I_004E8FF8");
+}
+
+TEST(ReflectionDisassemblerTest, DisassembleFieldHeaderShowsMetadataTokens)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    ASSERT_NE(stringType, 0u);
+    std::uint32_t emptyField = FindFieldIn(f, stringType, "Empty");
+    ASSERT_NE(emptyField, 0u);
+
+    // The field header's token comment comes BEFORE the flags with both
+    // surrounding spaces on ("/* 0400xxxx */ " -- the spaceBefore=true split
+    // from the method header's spaceBefore=false).
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.ShowMetadataTokens(true);
+        rd.DisassembleFieldHeader(f, emptyField);
+    }),
+        ".field /* " + Hex8(emptyField) + " */ public static initonly string Empty");
+}
+
+TEST(ReflectionDisassemblerTest, DisassembleFieldLiteralAndDataFieldRenders)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t opCodeValues = FindTypeDefTokenIn(f, "System.Reflection.Emit", "OpCodeValues");
+    std::uint32_t pic = FindTypeDefTokenIn(f, "", "<PrivateImplementationDetails>");
+    ASSERT_NE(opCodeValues, 0u);
+    ASSERT_NE(pic, 0u);
+    std::uint32_t literalField = FindFieldIn(f, opCodeValues, "Conv_Ovf_I_Un");
+    std::uint32_t dataField = FindFieldIn(f, pic,
+        "001F1D86E0BD2B1A9BF6D7CD56529284FCDA770A6E6E0EF7CF8B2238118033CB");
+    ASSERT_NE(literalField, 0u);
+    ASSERT_NE(dataField, 0u);
+
+    // A field without attributes or data renders the header plus the one
+    // terminating line break -- nothing else.
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleField(f, literalField);
+    }),
+        ".field public static literal valuetype System.Reflection.Emit.OpCodeValues"
+        " Conv_Ovf_I_Un = int32(138)\r\n");
+
+    // The HasFieldRVA data field: the header, then the ".data cil" block --
+    // the .text section kind, the I_<rva> data name, and the 40-byte blob
+    // (the gold's bytearray dump: ff*8 0d 00 00 00 04 00 00 00 / ff*12
+    // 0f 00 00 00 / ff*4 0c 00 00 00).
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleField(f, dataField);
+    }),
+        ".field assembly static initonly valuetype"
+        " '<PrivateImplementationDetails>'/'__StaticArrayInitTypeSize=40'"
+        " '001F1D86E0BD2B1A9BF6D7CD56529284FCDA770A6E6E0EF7CF8B2238118033CB'"
+        " at I_004E8FF8\r\n"
+        ".data cil I_004E8FF8 = bytearray (\r\n"
+        "\tff ff ff ff ff ff ff ff 0d 00 00 00 04 00 00 00\r\n"
+        "\tff ff ff ff ff ff ff ff ff ff ff ff 0f 00 00 00\r\n"
+        "\tff ff ff ff 0c 00 00 00\r\n"
+        ")\r\n");
+}
+
+TEST(ReflectionDisassemblerTest, DisassembleFieldAttributeFieldRender)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t win32 = FindTypeDefTokenIn(f, "Microsoft.Win32", "Win32Native");
+    ASSERT_NE(win32, 0u);
+    std::uint32_t findData = FindNestedTypeIn(f, "WIN32_FIND_DATA", "Win32Native");
+    ASSERT_NE(findData, 0u);
+    std::uint32_t fixedBufferField = FindFieldIn(f, findData, "_cFileName");
+    ASSERT_NE(fixedBufferField, 0u);
+
+    // The attribute-bearing field: the header, then the .custom lines at the
+    // header's own indentation (no braces, no extra indent), the
+    // FixedBufferAttribute blob from the gold dump.
+    EXPECT_EQ(RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.DisassembleField(f, fixedBufferField);
+    }),
+        ".field private valuetype Microsoft.Win32.Win32Native/WIN32_FIND_DATA/"
+        "'<_cFileName>e__FixedBuffer' _cFileName\r\n"
+        + CustomLine(
+            "instance void System.Runtime.CompilerServices.FixedBufferAttribute::"
+            ".ctor(class System.Type, int32)",
+            Bytes({0x01, 0x00, 0x0b, 0x53, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e,
+                0x43, 0x68, 0x61, 0x72, 0x04, 0x01,
+                0x00, 0x00, 0x00, 0x00})));
+}
+
+TEST(ReflectionDisassemblerTest, GetRVASectionPrefixShapes)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::ostringstream stream;
+    OUT::PlainTextOutput output(stream);
+    DA::ReflectionDisassembler rd(output);
+
+    // .text (the code section) carries the 'I' prefix.
+    EXPECT_EQ(rd.GetRVASectionPrefix(f, 0x4E8FF8), 'I');
+    // An RVA in no section reads the default 'D'.
+    EXPECT_EQ(rd.GetRVASectionPrefix(f, 0x7FFFFFFF), 'D');
+    // .rsrc (a non-.text/.tls section) reads the default 'D' as well.
+    EXPECT_EQ(rd.GetRVASectionPrefix(f, 0x4FA000), 'D');
+}
+
+TEST(ReflectionDisassemblerTest, DisassembleFieldHeaderMscorlibSweep)
+{
+    // A bounded no-throw sweep: every field of Microsoft.Win32.Win32Native
+    // and ALL its nested types (the marshalling-descriptor shapes), plus
+    // String, OpCodeValues, and the <PrivateImplementationDetails> data fields.
+    // Every render starts with the ".field " reference and ends mid-line
+    // (the header carries no line break of its own).
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+    std::uint32_t win32 = FindTypeDefTokenIn(f, "Microsoft.Win32", "Win32Native");
+    std::uint32_t stringType = FindTypeDefTokenIn(f, "System", "String");
+    std::uint32_t opCodeValues = FindTypeDefTokenIn(f, "System.Reflection.Emit", "OpCodeValues");
+    std::uint32_t pic = FindTypeDefTokenIn(f, "", "<PrivateImplementationDetails>");
+    ASSERT_NE(win32, 0u);
+    ASSERT_NE(stringType, 0u);
+    ASSERT_NE(opCodeValues, 0u);
+    ASSERT_NE(pic, 0u);
+
+    std::vector<std::uint32_t> types = {win32, stringType, opCodeValues, pic};
+    for (const auto& t : f.TypeDefs()) {
+        auto info = f.GetTypeDefNameInfo(t.Token);
+        if (info && info->DeclaringTypeToken == win32)
+            types.push_back(t.Token);
+    }
+    int rendered = 0;
+    int dataFields = 0;
+    for (std::uint32_t typeToken : types) {
+        for (const auto& fd : f.GetFields(typeToken)) {
+            std::ostringstream stream;
+            OUT::PlainTextOutput output(stream);
+            DA::ReflectionDisassembler rd(output);
+            rd.DisassembleFieldHeader(f, fd.Token);
+            std::string text = stream.str();
+            EXPECT_NE(text.find(".field "), std::string::npos) << fd.Name;
+            EXPECT_NE(text.find(" "), std::string::npos) << fd.Name;
+            if (text.find(" at ") != std::string::npos)
+                ++dataFields;
+            ++rendered;
+        }
+    }
+    EXPECT_GT(rendered, 400u);
+    EXPECT_GT(dataFields, 100u);
 }

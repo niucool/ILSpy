@@ -478,6 +478,66 @@ public:
     // row, a nil row, or a non-Field token; never throws.
     std::string GetFieldName(std::uint32_t fieldToken) const;
 
+    // A Field row's (table 0x04) RelativeVirtualAddress -- the C#
+    // `FieldDefinition.GetRelativeVirtualAddress()` the field header's
+    // `at <prefix>_<rva>` suffix and the HasFieldRVA initial-value read
+    // consume (0 for fields without data; the FieldRVA table row whose Field
+    // is this row -- the C# FindFieldRvaRowId scan). 0 for an invalid file, an
+    // out-of-range row, a nil row, or a non-Field token; never throws.
+    std::uint32_t GetFieldRVA(std::uint32_t fieldToken) const;
+
+    // A Field row's (table 0x04) layout offset -- the C#
+    // `FieldDefinition.GetOffset()`: the FieldLayout table row (table 0x10)
+    // whose Field is this row, or -1 when the row has none (the C# -1 for
+    // an absent row; the header renders the `[offset]` prefix only for
+    // offsets > -1). -1 for an invalid file, an out-of-range row, a nil row,
+    // or a non-Field token; never throws.
+    std::int32_t GetFieldOffset(std::uint32_t fieldToken) const;
+
+    // A Field row's (table 0x04) marshalling-descriptor blob -- the C#
+    // `FieldDefinition.GetMarshallingDescriptor()`: the FieldMarshal table
+    // row whose HasFieldMarshal coded index (Field tag 0, Param tag 1 -- 1
+    // tag bit) points at this row. nullopt when the row has no descriptor
+    // (the C# IsNil test); never throws.
+    std::optional<std::vector<std::uint8_t>> GetFieldMarshallingDescriptor(
+        std::uint32_t fieldToken) const;
+
+    // A TypeDef row's (table 0x02) layout size -- the C#
+    // `TypeDefinition.GetLayout().Size`: the ClassLayout table row (table
+    // 0x11) whose Parent is this row, ClassSize column, widened from the
+    // C# int cast; 0 when the row has no ClassLayout row. 0 for an invalid
+    // file, an out-of-range row, a nil row, or a non-TypeDef token; never
+    // throws.
+    std::uint32_t GetTypeLayoutSize(std::uint32_t typeDefToken) const;
+
+    // The PE-section reads the field renderer drives (PeImage passthroughs
+    // through the MethodBodyReader): the containing-section index (the C#
+    // `MetadataFile.GetContainingSectionIndex(rva)` -- the section whose
+    // [VirtualAddress, VirtualAddress + VirtualSize) range contains the
+    // RVA; -1 when none or the file is not a PE image) and the section name
+    // by index (the 8-byte name field trimmed at the first NUL; "" for an
+    // out-of-range index). Never throw.
+    int GetContainingSectionIndex(std::uint32_t rva) const;
+    std::string GetSectionName(int sectionIndex) const;
+
+    // A HasFieldRVA field's initial value -- the C# SRMExtensions
+    // `GetInitialValue(field, pefile, typeSystem: null)` (the
+    // ReflectionDisassembler.DisassembleField shape): the field's signature
+    // decoded through the FieldValueSizeDecoder (SRMExtensions) for its
+    // byte size, then that many bytes of the PE section data at the field's
+    // RVA. Fields without the HasFieldRVA flag or with a zero RVA read empty;
+    // a size that exceeds the section data, or a non-zero size with no
+    // section data at the RVA, throw std::runtime_error carrying the exact
+    // C# BadImageFormatException messages (the DisassembleField catch
+    // renders them into the `// .data ...` comment). The ICompilation
+    // typeSystem arm (the CSharpDecompiler/
+    // TransformArrayInitializers callers) defers with the type system -- the
+    // null arm is the only CLI shape.
+    // A malformed field signature blob throws std::logic_error (the C#
+    // BadImageFormatException out of DecodeFieldSignature).
+    std::vector<std::uint8_t> GetFieldInitialValue(
+        std::uint32_t fieldToken) const;
+
     // A MemberRef row (table 0x0A): the authored Name column and the
     // MemberRefParent coded index as a raw entity token (tag 0=TypeDef 0x02,
     // 1=TypeRef 0x01, 2=ModuleRef 0x1A, 3=MethodDef 0x06, 4=TypeSpec 0x1B;
