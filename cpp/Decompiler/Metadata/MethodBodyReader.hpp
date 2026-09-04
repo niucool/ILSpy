@@ -29,8 +29,10 @@
 #include "Decompiler/Metadata/Ecma335/WinmdInclude.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <string>
@@ -89,11 +91,53 @@ public:
             base + dos.e_lfanew + (nt->OptionalHeader.Magic == 0x20B
                                        ? sizeof(image_nt_headers32plus)
                                        : sizeof(image_nt_headers32)));
+        // The optional-header values the disassembler's module-header lines
+        // render (.imagebase/.file alignment/.stackreserve/.subsystem --
+        // the C# `peFile.Reader.PEHeaders.PEHeader` members; PE32 and PE32+
+        // place them at the same offsets but widen ImageBase and
+        // SizeOfStackReserve to 8 bytes in PE32+).
+        if (nt->OptionalHeader.Magic == 0x20B) {
+            const auto& opt = reinterpret_cast<const image_nt_headers32plus*>(
+                base + dos.e_lfanew)->OptionalHeader;
+            imageBase_ = opt.ImageBase;
+            fileAlignment_ = opt.FileAlignment;
+            sizeOfStackReserve_ = opt.SizeOfStackReserve;
+            subsystem_ = opt.Subsystem;
+        } else {
+            const auto& opt = nt->OptionalHeader;
+            imageBase_ = opt.ImageBase;
+            fileAlignment_ = opt.FileAlignment;
+            sizeOfStackReserve_ = opt.SizeOfStackReserve;
+            subsystem_ = opt.Subsystem;
+        }
+        // The cor20 header's Flags field (the C# `peFile.Reader.PEHeaders
+        // .CorHeader.Flags`). A COM descriptor RVA of 0 (a non-managed PE)
+        // leaves the flags 0.
+        std::uint32_t comRva = nt->OptionalHeader.Magic == 0x20B
+            ? reinterpret_cast<const image_nt_headers32plus*>(
+                  base + dos.e_lfanew)->OptionalHeader.DataDirectory[14].VirtualAddress
+            : nt->OptionalHeader.DataDirectory[14].VirtualAddress;
+        if (comRva != 0) {
+            const auto* cor = reinterpret_cast<const image_cor20_header*>(RvaToPtr(comRva));
+            if (cor) corFlags_ = cor->Flags;
+        }
     }
 
     bool Valid() const noexcept { return sections_ != nullptr; }
     const std::uint8_t* Data() const noexcept { return bytes_->data(); }
     std::size_t Size() const noexcept { return bytes_->size(); }
+
+    // The optional-header values the WriteModuleHeader PE lines render. The
+    // C# PEHeader members are widened (ImageBase/SizeOfStackReserve are
+    // ulong even for a PE32 image); the port carries the widened 64-bit
+    // values. Zero when the image is not a valid PE.
+    std::uint64_t ImageBase() const noexcept { return imageBase_; }
+    std::uint32_t FileAlignment() const noexcept { return fileAlignment_; }
+    std::uint64_t SizeOfStackReserve() const noexcept { return sizeOfStackReserve_; }
+    std::uint16_t Subsystem() const noexcept { return subsystem_; }
+    // The cor20 header's Flags field (the .corflags line). Zero when the
+    // image has no COM descriptor.
+    std::uint32_t CorFlags() const noexcept { return corFlags_; }
 
     // The C# `PEHeaders.GetContainingSectionIndex(int relativeVirtualAddress)`
     // -- the index of the section whose [VirtualAddress, VirtualAddress +
@@ -234,6 +278,19 @@ private:
     mutable const std::uint8_t* usEnd_ = nullptr;
     mutable bool usLocated_ = false;
 
+    // Lazily located #GUID heap bounds (mutable: computed on first use).
+    mutable const std::uint8_t* guidBase_ = nullptr;
+    mutable const std::uint8_t* guidEnd_ = nullptr;
+    mutable bool guidLocated_ = false;
+
+    // The optional-header values captured during the PE parse (the ctor
+    // reads them eagerly; they are constant per image).
+    std::uint64_t imageBase_ = 0;
+    std::uint32_t fileAlignment_ = 0;
+    std::uint64_t sizeOfStackReserve_ = 0;
+    std::uint16_t subsystem_ = 0;
+    std::uint32_t corFlags_ = 0;
+
 public:
     // The cor20 header's EntryPointTokenOrRelativeVirtualAddress, or 0 when
     // the image has no COM header (the C# `module.CorHeader?... ?? 0`). The
@@ -250,6 +307,29 @@ public:
         if (!usLocated_) LocateUsHeap();
         return usEnd_;
     }
+
+    // The C# `MetadataReader.GetGuid(GuidHandle)` -- a nil index (0) is the
+    // all-zeros GUID (Guid.Empty); a valid index N reads the 16 GUID bytes
+    // at heap offset (N-1)*16 (II.24.2.5: GUID heap indexing is 1-based).
+    // nullopt for an out-of-range index or a heap absent from the image;
+    // never throws.
+    std::optional<std::array<std::uint8_t, 16>> TryGetGuid(
+        std::uint32_t heapIndex) const noexcept {
+        std::array<std::uint8_t, 16> out{};
+        if (heapIndex == 0) return out;  // Guid.Empty
+        if (!sections_) return std::nullopt;
+        if (!guidLocated_) LocateGuidHeap();
+        if (!guidBase_) return std::nullopt;
+        std::uint64_t offset = (static_cast<std::uint64_t>(heapIndex) - 1) * 16;
+        if (offset + 16 > static_cast<std::uint64_t>(guidEnd_ - guidBase_))
+            return std::nullopt;
+        std::memcpy(out.data(), guidBase_ + offset, 16);
+        return out;
+    }
+
+    // Locates the #GUID stream by walking the metadata root's stream headers
+    // (the same walk LocateUsHeap performs for #US; the body sits below the
+    // LocateUsHeap definition).
     void LocateUsHeap() const {
         usLocated_ = true;
         if (!sections_ || !bytes_) return;
@@ -302,6 +382,57 @@ public:
             }
             // Advance past offset(4) + size(4) + name (padded to a 4-byte
             // boundary, the padding already covers the null terminator).
+            std::size_t padding = 4 - (nameLen % 4);
+            if (padding == 0) padding = 4;
+            p += 8 + nameLen + padding;
+        }
+    }
+
+    // The same metadata-root stream walk for the #GUID heap (the MVID bytes
+    // the module header renders).
+    void LocateGuidHeap() const {
+        guidLocated_ = true;
+        if (!sections_ || !bytes_) return;
+        const std::uint8_t* base = bytes_->data();
+        std::size_t size = bytes_->size();
+        if (size < sizeof(image_dos_header)) return;
+        const auto& dos = *reinterpret_cast<const image_dos_header*>(base);
+        if (dos.e_signature != 0x5A4D) return;
+        if (size < dos.e_lfanew + sizeof(image_nt_headers32)) return;
+        const auto* nt = reinterpret_cast<const image_nt_headers32*>(base + dos.e_lfanew);
+        std::uint32_t comRva = 0;
+        if (nt->OptionalHeader.Magic == 0x20B) {
+            const auto* ntPlus = reinterpret_cast<const image_nt_headers32plus*>(base + dos.e_lfanew);
+            comRva = ntPlus->OptionalHeader.DataDirectory[14].VirtualAddress;
+        } else {
+            comRva = nt->OptionalHeader.DataDirectory[14].VirtualAddress;
+        }
+        if (comRva == 0) return;
+        const auto* cor = reinterpret_cast<const image_cor20_header*>(RvaToPtr(comRva));
+        if (!cor) return;
+        const std::uint8_t* root = RvaToPtr(cor->MetaData.VirtualAddress);
+        if (!root) return;
+        if (root + 16 > base + size) return;
+        std::uint32_t versionLength = ReadLe<4>(root + 12);
+        std::size_t hdrsAt = static_cast<std::size_t>(versionLength + 20);
+        if (root + hdrsAt + 2 > base + size) return;
+        std::uint32_t streamCount = ReadLe<2>(root + versionLength + 18);
+        const std::uint8_t* p = root + hdrsAt;
+        const std::uint8_t* imageEnd = base + size;
+        for (std::uint32_t i = 0; i < streamCount && p + 8 <= imageEnd; ++i) {
+            std::uint32_t sOff = ReadLe<4>(p);
+            std::uint32_t sSize = ReadLe<4>(p + 4);
+            const char* name = reinterpret_cast<const char*>(p + 8);
+            const char* nameEnd = name;
+            while (nameEnd < reinterpret_cast<const char*>(imageEnd) && *nameEnd != 0) ++nameEnd;
+            std::size_t nameLen = static_cast<std::size_t>(nameEnd - name);
+            if (nameLen == 5 && name[0] == '#' && name[1] == 'G' && name[2] == 'U'
+                && name[3] == 'I' && name[4] == 'D') {
+                guidBase_ = root + sOff;
+                guidEnd_ = (sSize && static_cast<std::size_t>(sOff + sSize) <= static_cast<std::size_t>(imageEnd - root))
+                               ? root + sOff + sSize : imageEnd;
+                return;
+            }
             std::size_t padding = 4 - (nameLen % 4);
             if (padding == 0) padding = 4;
             p += 8 + nameLen + padding;
@@ -400,6 +531,19 @@ public:
     std::string GetSectionName(int index) const { return pe_.SectionName(index); }
     PeImage::SectionDataView GetSectionData(std::uint32_t rva) const {
         return pe_.GetSectionData(rva);
+    }
+
+    // The PE-header values the module-header lines render (the C#
+    // `peFile.Reader.PEHeaders.PEHeader`/`CorHeader` members) and the #GUID
+    // heap read (MetadataReader.GetGuid). Straight PeImage passthroughs.
+    std::uint64_t ImageBase() const noexcept { return pe_.ImageBase(); }
+    std::uint32_t FileAlignment() const noexcept { return pe_.FileAlignment(); }
+    std::uint64_t SizeOfStackReserve() const noexcept { return pe_.SizeOfStackReserve(); }
+    std::uint16_t Subsystem() const noexcept { return pe_.Subsystem(); }
+    std::uint32_t CorFlags() const noexcept { return pe_.CorFlags(); }
+    std::optional<std::array<std::uint8_t, 16>> TryGetGuid(
+        std::uint32_t heapIndex) const noexcept {
+        return pe_.TryGetGuid(heapIndex);
     }
 
     // Decode the method body at `rva`. Returns an invalid MethodBody if the RVA

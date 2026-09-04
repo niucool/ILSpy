@@ -706,3 +706,67 @@ TEST(DisassemblerHelpersExceptionRegionTest, RealMethodBodiesRenderTheirRegions)
 	}
 	ASSERT_TRUE(sawRegion) << "mscorlib must carry EH-bearing method bodies";
 }
+
+// ---------------------------------------------------------------------------
+// SubsystemToString / CorFlagsToString -- the System.Reflection
+// .PortableExecutable enum ToString semantics the WriteModuleHeader
+// .subsystem/.corflags comments render. The matrices below are probed
+// against the real .NET 10 enums (the mscorlib/System.Runtime renders pin
+// the real-fixture values; these pin the full spelling rules).
+// ---------------------------------------------------------------------------
+TEST(DisassemblerHelpersTest, SubsystemToStringMatchesNetEnum)
+{
+    // The named members (the probe-verified .NET spellings; note OS2Cui,
+    // PosixCui, and the EFI/Xbox family).
+    EXPECT_EQ(SubsystemToString(0), "Unknown");
+    EXPECT_EQ(SubsystemToString(1), "Native");
+    EXPECT_EQ(SubsystemToString(2), "WindowsGui");
+    EXPECT_EQ(SubsystemToString(3), "WindowsCui");
+    EXPECT_EQ(SubsystemToString(5), "OS2Cui");
+    EXPECT_EQ(SubsystemToString(7), "PosixCui");
+    EXPECT_EQ(SubsystemToString(8), "NativeWindows");
+    EXPECT_EQ(SubsystemToString(9), "WindowsCEGui");
+    EXPECT_EQ(SubsystemToString(10), "EfiApplication");
+    EXPECT_EQ(SubsystemToString(11), "EfiBootServiceDriver");
+    EXPECT_EQ(SubsystemToString(12), "EfiRuntimeDriver");
+    EXPECT_EQ(SubsystemToString(13), "EfiRom");
+    EXPECT_EQ(SubsystemToString(14), "Xbox");
+    EXPECT_EQ(SubsystemToString(16), "WindowsBootApplication");
+    // Unnamed values render the decimal (never negative -- ushort-backed).
+    EXPECT_EQ(SubsystemToString(4), "4");
+    EXPECT_EQ(SubsystemToString(17), "17");
+    EXPECT_EQ(SubsystemToString(0xFFFFu), "65535");
+}
+
+TEST(DisassemblerHelpersTest, CorFlagsToStringMatchesNetFlagsFormat)
+{
+    // The named flags.
+    EXPECT_EQ(CorFlagsToString(0x1), "ILOnly");
+    EXPECT_EQ(CorFlagsToString(0x2), "Requires32Bit");
+    EXPECT_EQ(CorFlagsToString(0x4), "ILLibrary");
+    EXPECT_EQ(CorFlagsToString(0x8), "StrongNameSigned");
+    EXPECT_EQ(CorFlagsToString(0x10), "NativeEntryPoint");
+    EXPECT_EQ(CorFlagsToString(0x10000), "TrackDebugData");
+    EXPECT_EQ(CorFlagsToString(0x20000), "Prefers32Bit");
+    // Exact unions join the names ascending by value with ", ".
+    EXPECT_EQ(CorFlagsToString(0x9), "ILOnly, StrongNameSigned");
+    EXPECT_EQ(CorFlagsToString(0x11), "ILOnly, NativeEntryPoint");
+    EXPECT_EQ(CorFlagsToString(0xC), "ILLibrary, StrongNameSigned");
+    EXPECT_EQ(CorFlagsToString(0x10009),
+        "ILOnly, StrongNameSigned, TrackDebugData");
+    EXPECT_EQ(CorFlagsToString(0x20009),
+        "ILOnly, StrongNameSigned, Prefers32Bit");
+    EXPECT_EQ(CorFlagsToString(0x2000C),
+        "ILLibrary, StrongNameSigned, Prefers32Bit");
+    // An unmatched leftover bit discards the names and renders the FULL
+    // value in decimal (the .NET flags-format fallback -- probed:
+    // (CorFlags)0x40000009 renders "1073741833", not
+    // "ILOnly, 1073741824").
+    EXPECT_EQ(CorFlagsToString(0x40000009), "1073741833");
+    EXPECT_EQ(CorFlagsToString(0x40000008), "1073741832");
+    EXPECT_EQ(CorFlagsToString(0x40000001), "1073741825");
+    EXPECT_EQ(CorFlagsToString(0x40000000), "1073741824");
+    // Zero renders "0" (CorFlags carries no None member).
+    EXPECT_EQ(CorFlagsToString(0), "0");
+}
+

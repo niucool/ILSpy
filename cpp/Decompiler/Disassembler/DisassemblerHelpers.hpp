@@ -197,4 +197,20 @@ std::string EscapeString(std::string_view str);
 // "System.IntPtr" -> "native int"), or nullptr where the C# returns null.
 const char* PrimitiveTypeName(std::string_view fullName);
 
+// The System.Reflection.PortableExecutable `Subsystem.ToString()` semantics
+// the WriteModuleHeader `.subsystem` comment renders: the member name for a
+// named value, the decimal value for an unnamed one (the enum is
+// ushort-backed, so the decimal is never negative). Not a C#
+// DisassemblerHelpers member -- the C# renders the BCL enum's ToString inline;
+// the port factors the spelling so it is directly testable.
+std::string SubsystemToString(std::uint16_t subsystem);
+
+// The System.Reflection.PortableExecutable `CorFlags.ToString()` semantics
+// the WriteModuleHeader `.corflags` comment renders ([Flags]): the member
+// names of an exact union of named flags joined with ", " in ascending value
+// order ("ILOnly, StrongNameSigned"); an unnamed leftover bit discards the
+// names and renders the FULL value in decimal (the .NET flags-format
+// fallback); 0 renders "0" (CorFlags carries no None member).
+std::string CorFlagsToString(std::uint32_t flags);
+
 } // namespace ILSpy::Decompiler::Disassembler

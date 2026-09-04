@@ -31,6 +31,7 @@
 #include "Decompiler/Metadata/LocalTypeInfo.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -847,6 +848,76 @@ public:
         std::string Name;
     };
     std::vector<ModuleReferenceInfo> GetModuleReferences() const;
+
+    // The ExportedType rows (table 0x27) in table order -- the C#
+    // `metadata.ExportedTypes` collection the WriteModuleHeader
+    // `.class extern` blocks render. The Implementation column is the
+    // Implementation coded index (2 tag bits: 0=File 0x26, 1=AssemblyRef
+    // 0x23, 2=ExportedType 0x27) as the raw target token; 0 for a nil column.
+    // NamespaceNil carries the C# `Namespace.IsNil` distinction (a nil column
+    // renders no "namespace." prefix; a string-index column -- even an empty
+    // string -- renders the dot). The SRM `IsForwarder` property is NOT
+    // precomputed: it fuses the ForwarderType flag (TypeAttributes 0x00200000)
+    // with an AssemblyReference implementation -- the writer composes the
+    // two raw columns. Empty for an invalid file; never throws.
+    struct ExportedTypeInfo {
+        std::uint32_t Token = 0;  // 0x27000000 | row (1-based)
+        std::uint32_t Attributes = 0;       // the raw Flags column
+        std::uint32_t TypeDefinitionId = 0; // the raw TypeDefId column
+        std::string Name;                    // the TypeName column
+        std::string Namespace;               // the TypeNamespace column ("" when nil)
+        bool NamespaceNil = false;
+        std::uint32_t ImplementationToken = 0;  // File/AssemblyRef/ExportedType; 0 = nil
+    };
+    std::vector<ExportedTypeInfo> GetExportedTypes() const;
+    // One ExportedType row by its own token (the C#
+    // `metadata.GetExportedType(handle)` the nested-implementation chain
+    // walk reads). Nullopt for an invalid file, an out-of-range row, a nil
+    // row, or a non-ExportedType token; never throws.
+    std::optional<ExportedTypeInfo> GetExportedType(std::uint32_t token) const;
+
+    // A File-table (table 0x26) row's Name -- the `.file <name>` line of the
+    // exported-type block (the C# `metadata.GetAssemblyFile(...).Name`).
+    // Nullopt for an invalid file, an out-of-range row, a nil row, or a
+    // non-File token; never throws.
+    std::optional<std::string> GetAssemblyFileName(std::uint32_t token) const;
+
+    // An AssemblyRef row's Name by token -- the exported-type block's
+    // `.assembly extern <name>` line (the whole-table variant
+    // GetAssemblyReferences renders). Nullopt for an invalid file, an
+    // out-of-range row, a nil row, or a non-AssemblyRef token; never throws.
+    std::optional<std::string> GetAssemblyReferenceName(std::uint32_t token) const;
+
+    // The Module table's (table 0x00) single row 1 -- the C#
+    // `metadata.GetModuleDefinition()` (Name + Mvid). The MVID is the raw
+    // 16-byte GUID (all zeros for a nil column -- the C#
+    // `GetGuid(nilHandle)` is Guid.Empty); the writer renders the "B" brace
+    // form uppercased. Nullopt for an invalid file or an empty Module
+    // table; never throws.
+    struct ModuleDefinitionInfo {
+        std::string Name;
+        std::array<std::uint8_t, 16> Mvid{};
+    };
+    std::optional<ModuleDefinitionInfo> GetModuleDefinition() const;
+
+    // The top-level TypeDef tokens (table 0x02) in row order -- the C# ILSpy
+    // MetadataExtensions.GetTopLevelTypeDefinitions(reader) extension: the
+    // rows whose NestedClass-table declaring-type back-reference is nil (the
+    // WriteModuleContents walk). Empty for an invalid file; never throws.
+    std::vector<std::uint32_t> GetTopLevelTypeDefinitions() const;
+
+    // The PE-header values the WriteModuleHeader PE lines render (the C#
+    // `module is PEFile peFile` arm: .imagebase/.file alignment/.stackreserve
+    // /.subsystem/.corflags over `peFile.Reader.PEHeaders`). Nullopt when the
+    // image is not a valid PE; never throws.
+    struct PeHeaderInfo {
+        std::uint64_t ImageBase = 0;
+        std::uint32_t FileAlignment = 0;
+        std::uint64_t SizeOfStackReserve = 0;
+        std::uint16_t Subsystem = 0;  // the raw optional-header field
+        std::uint32_t CorFlags = 0;    // the cor20 header's Flags field
+    };
+    std::optional<PeHeaderInfo> GetPeHeaderInfo() const;
 
 private:
     struct Impl;

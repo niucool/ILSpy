@@ -484,4 +484,59 @@ enum class AssemblyHashAlgorithm : std::uint32_t {
 	Sha1 = 0x8004,
 };
 
+// ---------------------------------------------------------------------------
+// Subsystem -- the BCL `System.Reflection.PortableExecutable.Subsystem` the
+// WriteModuleHeader `.subsystem` line renders. The enum is ushort-backed in
+// .NET, which is load-bearing: the `{0:x}` enum format pads to the underlying
+// type's full width, so the hex form is always four digits ("0x0003"). The
+// comment spelling is the plain enum ToString: the member name, or the
+// decimal value for an unnamed one (never negative -- ushort).
+// ---------------------------------------------------------------------------
+enum class Subsystem : std::uint16_t {
+	Unknown = 0x0,
+	Native = 0x1,
+	WindowsGui = 0x2,
+	WindowsCui = 0x3,
+	OS2Cui = 0x5,
+	PosixCui = 0x7,
+	NativeWindows = 0x8,
+	WindowsCEGui = 0x9,
+	EfiApplication = 0xA,
+	EfiBootServiceDriver = 0xB,
+	EfiRuntimeDriver = 0xC,
+	EfiRom = 0xD,
+	Xbox = 0xE,
+	WindowsBootApplication = 0x10,
+};
+
+// ---------------------------------------------------------------------------
+// CorFlags -- the BCL `System.Reflection.PortableExecutable.CorFlags` ([Flags],
+// int32-backed) over the cor20 header's Flags field, the WriteModuleHeader
+// `.corflags` line renders. The comment spelling is the flags ToString: the
+// member names of an exact union joined with ", " in ascending value order;
+// an unnamed leftover bit discards the names and renders the FULL value in
+// decimal (the .NET Enum flags-format fallback), and 0 renders "0" (CorFlags
+// carries no None member). The int32 backing pads the `{0:x}` hex form to
+// eight digits.
+// ---------------------------------------------------------------------------
+enum class CorFlags : std::int32_t {
+	ILOnly = 0x00000001,
+	Requires32Bit = 0x00000002,
+	ILLibrary = 0x00000004,
+	StrongNameSigned = 0x00000008,
+	NativeEntryPoint = 0x00000010,
+	TrackDebugData = 0x00010000,
+	Prefers32Bit = 0x00020000,
+};
+
+inline CorFlags operator|(CorFlags a, CorFlags b) {
+	return static_cast<CorFlags>(static_cast<std::int32_t>(a) | static_cast<std::int32_t>(b));
+}
+inline CorFlags operator&(CorFlags a, CorFlags b) {
+	return static_cast<CorFlags>(static_cast<std::int32_t>(a) & static_cast<std::int32_t>(b));
+}
+inline CorFlags operator~(CorFlags a) {
+	return static_cast<CorFlags>(~static_cast<std::int32_t>(a));
+}
+
 } // namespace ILSpy::Decompiler::Disassembler

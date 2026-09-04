@@ -30,8 +30,12 @@
 // implements list, the layout lines, the .interfaceimpl blocks, and the
 // member sections; DisassembleNamespace with the .namespace wrapper block;
 // WriteAssemblyHeader and WriteAssemblyReferences with the manifest
-// blocks); the remaining pieces (WriteModuleHeader and WriteModuleContents,
-// the module-level chain) land with their metadata reads in later slices.
+// blocks; WriteModuleHeader and WriteModuleContents with the module-level
+// chain -- the whole file is now ported apart from the documented
+// deferrals (DebugInfo/IDebugInfoProvider, CancellationToken, the
+// AssemblyResolver-driven permission-set decode inside
+// WriteSecurityDeclarations, and the DecodeCustomAttributeBlobs/
+// WriteDecodedCustomAttributeBlob path).
 //
 // C#-to-C++ porting decisions:
 //  * The C# field pair `output`/`cancellationToken`/`isInType`/
@@ -519,6 +523,33 @@ public:
     // for a non-nil column, and the ".ver" line). The C# MetadataReader
     // parameter ports as the MetadataFile (the reader is the file's metadata).
     void WriteAssemblyReferences(const Metadata::MetadataFile& module);
+
+    // The C# `public void WriteModuleHeader(MetadataFile module,
+    // bool skipMVID = false)` (ReflectionDisassembler.cs lines 2119-2197):
+    // the ".class extern" block per ExportedType row -- the optional
+    // "forwarder " prefix (the SRM IsForwarder property fuses the
+    // ForwarderType flag with an AssemblyReference implementation), the
+    // escaped namespace.name header (the namespace omitted for a nil
+    // column), and the implementation body: the ".file <name>" + optional
+    // ".class 0x..." TypeDefId lines for a File implementation, the
+    // ".class extern " + declaring-chain walk for a nested ExportedType
+    // implementation (each declaring row's namespace.name written with NO
+    // separator between chain links -- faithful to the C# while-loop), or
+    // the ".assembly extern <name>" line for an AssemblyRef; anything else
+    // throws (the C# BadImageFormatException). Then the ".module <name>"
+    // line (NOT escaped), the "// MVID: {...}" line in the "B" brace form
+    // uppercased (skipped when skipMVID), the five PE lines when the image
+    // is a PE (.imagebase/.file alignment/.stackreserve/.subsystem/.
+    // corflags with their .NET enum spellings), and the module's own custom
+    // attributes over the ModuleDefinition token.
+    void WriteModuleHeader(Metadata::MetadataFile& module,
+        bool skipMVID = false);
+
+    // The C# `public void WriteModuleContents(MetadataFile module)`
+    // (lines 2199-2206): every top-level type rendered through
+    // DisassembleType (routed through the EntityProcessor as TypeDef rows),
+    // each followed by a blank line -- the CLI's whole-module -il path.
+    void WriteModuleContents(Metadata::MetadataFile& module);
 
 private:
     Output::ITextOutput& output_;

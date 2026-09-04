@@ -499,4 +499,71 @@ const char* PrimitiveTypeName(std::string_view fullName)
 	return nullptr;
 }
 
+// ---------------------------------------------------------------------------
+// SubsystemToString / CorFlagsToString -- the System.Reflection
+// .PortableExecutable enum ToString semantics the WriteModuleHeader
+// .subsystem/.corflags comments render (the C# renders the BCL enum's
+// ToString inline; the port factors the spelling). Probed against
+// .NET 10 SRM empirically:
+//  * a plain (non-flags) enum: the member name, or the decimal value for an
+//    unnamed one;
+//  * a [Flags] enum: the ascending-value member names of an exact union,
+//    joined with ", "; an unnamed leftover bit discards the names and renders
+//    the FULL value in decimal ((CorFlags)0x40000009 renders "1073741833",
+//    not "ILOnly, 1073741824"), and 0 renders "0" when no None member
+//    exists.
+// ---------------------------------------------------------------------------
+std::string SubsystemToString(std::uint16_t subsystem)
+{
+	switch (static_cast<Subsystem>(subsystem)) {
+		case Subsystem::Unknown: return "Unknown";
+		case Subsystem::Native: return "Native";
+		case Subsystem::WindowsGui: return "WindowsGui";
+		case Subsystem::WindowsCui: return "WindowsCui";
+		case Subsystem::OS2Cui: return "OS2Cui";
+		case Subsystem::PosixCui: return "PosixCui";
+		case Subsystem::NativeWindows: return "NativeWindows";
+		case Subsystem::WindowsCEGui: return "WindowsCEGui";
+		case Subsystem::EfiApplication: return "EfiApplication";
+		case Subsystem::EfiBootServiceDriver: return "EfiBootServiceDriver";
+		case Subsystem::EfiRuntimeDriver: return "EfiRuntimeDriver";
+		case Subsystem::EfiRom: return "EfiRom";
+		case Subsystem::Xbox: return "Xbox";
+		case Subsystem::WindowsBootApplication: return "WindowsBootApplication";
+	}
+	return std::to_string(subsystem);
+}
+
+std::string CorFlagsToString(std::uint32_t flags)
+{
+	struct FlagName {
+		std::uint32_t value;
+		const char* name;
+	};
+	// Ascending by value (the .NET flags format joins in this order).
+	static constexpr FlagName kFlags[] = {
+		{ 0x00000001, "ILOnly" },
+		{ 0x00000002, "Requires32Bit" },
+		{ 0x00000004, "ILLibrary" },
+		{ 0x00000008, "StrongNameSigned" },
+		{ 0x00000010, "NativeEntryPoint" },
+		{ 0x00010000, "TrackDebugData" },
+		{ 0x00020000, "Prefers32Bit" },
+	};
+	if (flags == 0) return "0";
+	std::uint32_t remaining = flags;
+	std::string result;
+	for (const auto& f : kFlags) {
+		if ((remaining & f.value) == f.value) {
+			if (!result.empty()) result += ", ";
+			result += f.name;
+			remaining &= ~f.value;
+		}
+	}
+	// An unnamed leftover bit: the full value renders as a decimal number
+	// (the .NET flags-format fallback discards the collected names).
+	if (remaining != 0) return std::to_string(flags);
+	return result;
+}
+
 } // namespace ILSpy::Decompiler::Disassembler

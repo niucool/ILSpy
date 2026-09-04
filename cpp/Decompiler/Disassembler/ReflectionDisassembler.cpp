@@ -2219,4 +2219,166 @@ void ReflectionDisassembler::WriteAssemblyReferences(
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// WriteModuleHeader (ReflectionDisassembler.cs lines 2119-2197).
+// ---------------------------------------------------------------------------
+void ReflectionDisassembler::WriteModuleHeader(
+    Metadata::MetadataFile& module, bool skipMVID)
+{
+    using ExportedTypeInfo = Metadata::MetadataFile::ExportedTypeInfo;
+
+    // The C# local `void WriteExportedType(ExportedType exportedType)`: the
+    // escaped namespace + '.' prefix when the Namespace column is not nil,
+    // then the escaped name. A nil column is not the same as an empty-string
+    // column: the latter keeps the dot.
+    auto writeExportedType = [&](const ExportedTypeInfo& exportedType) {
+        if (!exportedType.NamespaceNil) {
+            output_.Write(Escape(exportedType.Namespace));
+            output_.Write(".");
+        }
+        output_.Write(Escape(exportedType.Name));
+    };
+
+    for (const auto& exportedType : module.GetExportedTypes()) {
+        output_.Write(".class extern ");
+        // The C# `exportedType.IsForwarder` -- the SRM property fuses the
+        // ForwarderType flag with an AssemblyReference implementation (a
+        // forwarder row always points into another assembly).
+        constexpr std::uint32_t kForwarderType = 0x00200000u;
+        bool isForwarder =
+            (exportedType.Attributes & kForwarderType) != 0
+            && (exportedType.ImplementationToken >> 24) == 0x23u;
+        if (isForwarder)
+            output_.Write("forwarder ");
+        writeExportedType(exportedType);
+        OpenBlock(false);
+        switch (exportedType.ImplementationToken >> 24) {
+            case 0x26u: {  // HandleKind.AssemblyFile
+                auto name = module.GetAssemblyFileName(
+                    exportedType.ImplementationToken);
+                if (!name)
+                    throw std::out_of_range("Invalid AssemblyFileHandle.");
+                Output::WriteLine(output_, ".file " + *name);
+                if (exportedType.TypeDefinitionId != 0) {
+                    char buf[16];
+                    std::snprintf(buf, sizeof(buf), "0x%08x",
+                        exportedType.TypeDefinitionId);
+                    Output::WriteLine(output_, ".class " + std::string(buf));
+                }
+                break;
+            }
+            case 0x27u: {  // HandleKind.ExportedType
+                output_.Write(".class extern ");
+                // The declaring-type chain walk: each declaring row's
+                // namespace.name, with NO separator between chain links (the
+                // C# while-loop calls WriteExportedType once per link) -- a
+                // doubly nested exported type renders the links
+                // concatenated.
+                std::uint32_t implementationToken =
+                    exportedType.ImplementationToken;
+                while (true) {
+                    auto declaringType = module.GetExportedType(
+                        implementationToken);
+                    if (!declaringType)
+                        throw std::out_of_range("Invalid ExportedTypeHandle.");
+                    writeExportedType(*declaringType);
+                    if ((declaringType->ImplementationToken >> 24) == 0x27u) {
+                        implementationToken =
+                            declaringType->ImplementationToken;
+                    } else {
+                        break;
+                    }
+                }
+                output_.WriteLine();
+                break;
+            }
+            case 0x23u: {  // HandleKind.AssemblyReference
+                output_.Write(".assembly extern ");
+                auto name = module.GetAssemblyReferenceName(
+                    exportedType.ImplementationToken);
+                if (!name)
+                    throw std::out_of_range("Invalid AssemblyReferenceHandle.");
+                output_.Write(Escape(*name));
+                output_.WriteLine();
+                break;
+            }
+            default:
+                throw std::runtime_error(
+                    "Implementation must either be an index into the File, "
+                    "ExportedType or AssemblyRef table.");
+        }
+        CloseBlock();
+    }
+    auto moduleDefinition = module.GetModuleDefinition();
+    if (!moduleDefinition)
+        throw std::out_of_range("Invalid ModuleDefinitionHandle.");
+
+    // The C# `.module {0}` -- the module name is NOT escaped (unlike the
+    // exported-type names).
+    Output::WriteLine(output_, ".module " + moduleDefinition->Name);
+    if (!skipMVID) {
+        // The C# `GetGuid(Mvid).ToString("B").ToUpperInvariant()`: the
+        // "B" brace form -- the first three groups little-endian, the
+        // last ten bytes in order -- uppercased.
+        const auto& g = moduleDefinition->Mvid;
+        std::uint32_t a = static_cast<std::uint32_t>(g[0])
+            | (static_cast<std::uint32_t>(g[1]) << 8)
+            | (static_cast<std::uint32_t>(g[2]) << 16)
+            | (static_cast<std::uint32_t>(g[3]) << 24);
+        std::uint32_t b = static_cast<std::uint32_t>(g[4])
+            | (static_cast<std::uint32_t>(g[5]) << 8);
+        std::uint32_t c = static_cast<std::uint32_t>(g[6])
+            | (static_cast<std::uint32_t>(g[7]) << 8);
+        char buf[64];
+        std::snprintf(buf, sizeof(buf),
+            "// MVID: {%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+            a, b, c, g[8], g[9], g[10], g[11], g[12], g[13], g[14], g[15]);
+        Output::WriteLine(output_, buf);
+    }
+
+    // The C# `module is PEFile peFile` arm -- the port's MetadataFile is
+    // always PE-backed, so the gate is the PE parse having succeeded.
+    if (auto headers = module.GetPeHeaderInfo()) {
+        char buf[64];
+        // `{0:x8}` over the ulong members: a MINIMUM width of eight hex
+        // digits (a PE32+ ImageBase renders all its digits).
+        std::snprintf(buf, sizeof(buf), "0x%08llx",
+            static_cast<unsigned long long>(headers->ImageBase));
+        Output::WriteLine(output_, std::string(".imagebase ") + buf);
+        std::snprintf(buf, sizeof(buf), "0x%08x", headers->FileAlignment);
+        Output::WriteLine(output_, std::string(".file alignment ") + buf);
+        std::snprintf(buf, sizeof(buf), "0x%08llx",
+            static_cast<unsigned long long>(headers->SizeOfStackReserve));
+        Output::WriteLine(output_, std::string(".stackreserve ") + buf);
+        // `{0:x}` over the BCL enums pads to the underlying type's full
+        // width: ushort Subsystem -> four digits, int32 CorFlags -> eight.
+        std::snprintf(buf, sizeof(buf), "0x%04x // %s",
+            headers->Subsystem,
+            SubsystemToString(headers->Subsystem).c_str());
+        Output::WriteLine(output_, std::string(".subsystem ") + buf);
+        std::snprintf(buf, sizeof(buf), "0x%08x // %s",
+            headers->CorFlags, CorFlagsToString(headers->CorFlags).c_str());
+        Output::WriteLine(output_, std::string(".corflags ") + buf);
+    }
+
+    // The module's own custom attributes (the ModuleDefinition token is the
+    // Module table's row 1).
+    WriteAttributes(module,
+        module.GetCustomAttributeTokens(0x00000001u));
+}
+
+// ---------------------------------------------------------------------------
+// WriteModuleContents (ReflectionDisassembler.cs lines 2199-2206).
+// ---------------------------------------------------------------------------
+void ReflectionDisassembler::WriteModuleContents(
+    Metadata::MetadataFile& module)
+{
+    for (std::uint32_t handle : Process(module,
+             module.GetTopLevelTypeDefinitions(),
+             ProcessedEntityKind::TypeDefinition)) {
+        DisassembleType(module, handle);
+        output_.WriteLine();
+    }
+}
 }  // namespace ILSpy::Decompiler::Disassembler

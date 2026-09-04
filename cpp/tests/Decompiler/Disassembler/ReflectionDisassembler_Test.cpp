@@ -3372,3 +3372,524 @@ TEST(ReflectionDisassemblerTest, DisassembleNamespaceEmptyRendersBareTypes)
     EXPECT_EQ(actual, typeRender + "\r\n");
     EXPECT_EQ(actual.find(".namespace"), std::string::npos);
 }
+
+
+// ===========================================================================
+// WriteModuleHeader / WriteModuleContents (ReflectionDisassembler.cs lines
+// 2119-2206) -- the module-level chain that completes the ilspycmd --il
+// whole-module path (the Tester.cs gold order: WriteAssemblyReferences,
+// WriteAssemblyHeader, WriteModuleHeader, WriteModuleContents).
+// ===========================================================================
+
+// The tiny_manifest.dll fixture: a 2 KB multi-file-assembly manifest built
+// with System.Reflection.Metadata's MetadataBuilder/ManagedPEBuilder -- the
+// File-implementation and nested-ExportedType arms no installed DLL carries
+// (every local assembly forwards through AssemblyRefs only). Six
+// ExportedType rows cover: a File implementation with a nonzero TypeDefId
+// (the ".class 0x..." line), a plain File row, a nested exported type
+// (Implementation -> the enclosing ExportedType row), a doubly nested one
+// (the chain links render concatenated, faithful to the C# while-loop), an
+// AssemblyRef forwarder, and a zero-flags File row (no "forwarder" prefix --
+// the SRM IsForwarder property fuses the flag with an AssemblyReference
+// implementation). The MVID carries hex letters (pinning the
+// ToUpperInvariant render), the subsystem is 17 (unnamed -> the decimal
+// spelling) and the corflags carry an unmatched bit (the full-value decimal
+// fallback). It declares no TypeDefs, so WriteModuleContents renders nothing
+// over it. The exact renders are byte-identical to the real C#
+// ReflectionDisassembler over the same bytes (gold dumped from the installed
+// ilspycmd's own ICSharpCode.Decompiler.dll).
+const char* kTinyManifestHex[] = {
+    "4D5A90000300000004000000FFFF0000B8000000000000004000000000000000",
+    "0000000000000000000000000000000000000000000000000000000080000000",
+    "0E1FBA0E00B409CD21B8014CCD21546869732070726F6772616D2063616E6E6F",
+    "742062652072756E20696E20444F53206D6F64652E0D0D0A2400000000000000",
+    "504500004C010200AA919A6A0000000000000000E00000200B01300000040000",
+    "0002000000000000DE2200000020000000400000000040000020000000020000",
+    "0400000000000000040000000000000000600000000200000000000011004085",
+    "0000100000100000000010000010000000000000100000000000000000000000",
+    "8C2200004F000000000000000000000000000000000000000000000000000000",
+    "004000000C000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000020000008000000",
+    "0000000000000000082000004800000000000000000000002E74657874000000",
+    "E402000000200000000400000002000000000000000000000000000020000060",
+    "2E72656C6F6300000C0000000040000000020000000600000000000000000000",
+    "0000000040000042000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "C022000000000000480000000200050050200000BC0100000900004000000000",
+    "00000000000000000C2200008000000000000000000000000000000000000000",
+    "0000000000000000000000000000000042534A42010001000000000014000000",
+    "74696E795F6D616E69666573742E646C6C0000000000050074000000C0000000",
+    "237E0000340100007000000023537472696E677300000000A401000004000000",
+    "23555300A8010000100000002347554944000000B80100000400000023426C6F",
+    "62000000000000000200000101000000C900000000FA01330016000001000000",
+    "0100000001000000010000000600000000002700010000000000048000000100",
+    "0200030004000000000000005C00000004000000000000000000000000000300",
+    "00000000000000000C00000000002000000400006A0039000400000020000000",
+    "00005600460004000000200000040000500000000A0000002000000000004B00",
+    "00000E0000002000000000001F00390005000000000000000000400001000400",
+    "00000000004E006D73636F726C69620074696E7966696C652E6E65746D6F6475",
+    "6C6500467764547970650074696E795F6D616E69666573742E646C6C00537973",
+    "74656D00506C61696E0044656D6F004465657000496E6E6572004F7574657200",
+    "74696E795F6D616E69666573740054696E7900000000000001EFCDAB45238967",
+    "ABCDEF0123456789000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "000000000000000000000000B42200000000000000000000CE22000000200000",
+    "0000000000000000000000000000000000000000C02200000000000000000000",
+    "00005F436F72446C6C4D61696E006D73636F7265652E646C6C0000000000FF25",
+    "0020400000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "002000000C000000E03200000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000"
+};
+
+// Writes the embedded manifest bytes to a temp file and returns the path
+// (MetadataFile needs a real file).
+std::string WriteTinyManifest() {
+    std::string bytes;
+    for (const char* line : kTinyManifestHex) {
+        std::size_t len = std::strlen(line);
+        EXPECT_EQ(len, 64u);
+        for (std::size_t i = 0; i + 1 < len; i += 2) {
+            int hi = line[i] <= '9' ? line[i] - '0' : (line[i] | 32) - 'a' + 10;
+            int lo = line[i + 1] <= '9' ? line[i + 1] - '0' : (line[i + 1] | 32) - 'a' + 10;
+            bytes.push_back(static_cast<char>(hi * 16 + lo));
+        }
+    }
+    namespace fs = std::filesystem;
+    fs::path path = fs::temp_directory_path() / "ilspy_tiny_manifest_test.dll";
+    std::FILE* out = std::fopen(path.string().c_str(), "wb");
+    if (out == nullptr) return "";
+    std::fwrite(bytes.data(), 1, bytes.size(), out);
+    std::fclose(out);
+    return path.string();
+}
+
+TEST(ReflectionDisassemblerTest, ModuleHeaderMetadataReads)
+{
+    MD::MetadataFile mscorlib(MscorlibPath());
+    ASSERT_TRUE(mscorlib.IsValid());
+
+    // The Module table's single row: mscorlib's module name is the authored
+    // "CommonLanguageRuntimeLibrary", and the MVID GUID bytes render in the
+    // brace form little-endian for the first three groups.
+    auto moduleDef = mscorlib.GetModuleDefinition();
+    ASSERT_TRUE(moduleDef.has_value());
+    EXPECT_EQ(moduleDef->Name, "CommonLanguageRuntimeLibrary");
+    const std::uint8_t expectedMvid[] = {0xD1, 0x3C, 0xBE, 0xCF, 0x51, 0x86,
+        0x71, 0x4C, 0xAE, 0x57, 0x6A, 0x86, 0x63, 0xCF, 0x23, 0x00};
+    EXPECT_EQ(std::vector<std::uint8_t>(moduleDef->Mvid.begin(),
+                  moduleDef->Mvid.end()),
+        std::vector<std::uint8_t>(std::begin(expectedMvid),
+            std::end(expectedMvid)));
+    // An invalid file reports no module row.
+    MD::MetadataFile missing("Z:\\no\\such\\file.dll");
+    EXPECT_FALSE(missing.IsValid());
+    EXPECT_FALSE(missing.GetModuleDefinition().has_value());
+
+    // The PE-header values mscorlib's module header renders: a PE32+ image
+    // (the 64-bit ImageBase renders all its digits at the x8 minimum
+    // width), stack reserve 4 MB, console subsystem 3, ILOnly +
+    // StrongNameSigned.
+    auto headers = mscorlib.GetPeHeaderInfo();
+    ASSERT_TRUE(headers.has_value());
+    EXPECT_EQ(headers->ImageBase, 0x64478000000ull);
+    EXPECT_EQ(headers->FileAlignment, 0x200u);
+    EXPECT_EQ(headers->SizeOfStackReserve, 0x400000ull);
+    EXPECT_EQ(headers->Subsystem, 3u);
+    EXPECT_EQ(headers->CorFlags, 9u);
+    EXPECT_FALSE(missing.GetPeHeaderInfo().has_value());
+
+    // mscorlib carries no exported types (it is self-contained; System.dll
+    // is the local forwarder fixture) but declares five File-table rows
+    // (the .nlp normalization data files) -- row 1 is normidna.nlp.
+    EXPECT_TRUE(mscorlib.GetExportedTypes().empty());
+    EXPECT_FALSE(mscorlib.GetExportedType(0x27000001u).has_value());
+    EXPECT_EQ(mscorlib.GetAssemblyFileName(0x26000001u),
+        std::optional<std::string>("normidna.nlp"));
+
+    // The top-level type definitions: row order, the <Module> row first,
+    // every nested type excluded (mscorlib declares 3356 TypeDefs, 660 of
+    // them nested -- 2696 remain), String top-level and Win32Native's
+    // SystemTime not.
+    auto topLevel = mscorlib.GetTopLevelTypeDefinitions();
+    ASSERT_EQ(topLevel.size(), 2696u);
+    EXPECT_EQ(topLevel.front(), 0x02000001u);
+    EXPECT_EQ(topLevel[1], 0x02000002u);
+    bool sawString = false, sawSystemTime = false;
+    for (std::uint32_t t : topLevel) {
+        if (auto info = mscorlib.GetTypeDefNameInfo(t)) {
+            if (info->Name == "String" && info->Namespace == "System")
+                sawString = true;
+            if (info->Name == "SystemTime") sawSystemTime = true;
+        }
+    }
+    EXPECT_TRUE(sawString);
+    EXPECT_FALSE(sawSystemTime);
+
+    MD::MetadataFile systemDll(SystemDllPath());
+    ASSERT_TRUE(systemDll.IsValid());
+    auto exported = systemDll.GetExportedTypes();
+    ASSERT_EQ(exported.size(), 1u);
+    EXPECT_EQ(exported[0].Token, 0x27000001u);
+    EXPECT_EQ(exported[0].Namespace, "System.Threading");
+    EXPECT_FALSE(exported[0].NamespaceNil);
+    EXPECT_EQ(exported[0].Name, "SemaphoreFullException");
+    EXPECT_EQ(exported[0].Attributes, 0x00200000u);
+    EXPECT_EQ(exported[0].TypeDefinitionId, 0u);
+    EXPECT_EQ(exported[0].ImplementationToken, 0x23000001u);
+    // The single-row read over the same token.
+    auto one = systemDll.GetExportedType(0x27000001u);
+    ASSERT_TRUE(one.has_value());
+    EXPECT_EQ(one->Name, "SemaphoreFullException");
+    EXPECT_FALSE(systemDll.GetExportedType(0x02000001u).has_value());
+    EXPECT_FALSE(systemDll.GetExportedType(0x27000002u).has_value());
+    // The forwarder's AssemblyRef name read (the block body's
+    // ".assembly extern mscorlib" line).
+    EXPECT_EQ(systemDll.GetAssemblyReferenceName(0x23000001u),
+        std::optional<std::string>("mscorlib"));
+    EXPECT_FALSE(systemDll.GetAssemblyReferenceName(0x23000009u).has_value());
+    EXPECT_FALSE(systemDll.GetAssemblyReferenceName(0x06000001u).has_value());
+
+    // The synthetic manifest's File row: the ".file tinyfile.netmodule"
+    // body line, plus the nested-row reads (nil namespaces, the chain
+    // targets).
+    std::string manifestPath = WriteTinyManifest();
+    ASSERT_FALSE(manifestPath.empty());
+    MD::MetadataFile manifest(manifestPath);
+    ASSERT_TRUE(manifest.IsValid());
+    EXPECT_EQ(manifest.GetAssemblyFileName(0x26000001u),
+        std::optional<std::string>("tinyfile.netmodule"));
+    EXPECT_FALSE(manifest.GetAssemblyFileName(0x26000002u).has_value());
+    auto rows = manifest.GetExportedTypes();
+    ASSERT_EQ(rows.size(), 6u);
+    EXPECT_EQ(rows[0].Token, 0x27000001u);
+    EXPECT_EQ(rows[0].Name, "Tiny");
+    EXPECT_EQ(rows[0].Namespace, "System");
+    EXPECT_EQ(rows[0].TypeDefinitionId, 0x400u);
+    EXPECT_EQ(rows[0].ImplementationToken, 0x26000001u);
+    EXPECT_EQ(rows[0].Attributes, 0x00200000u);
+    // The nested rows carry nil namespaces and point at the enclosing row.
+    EXPECT_EQ(rows[2].Name, "Inner");
+    EXPECT_TRUE(rows[2].NamespaceNil);
+    EXPECT_EQ(rows[2].Namespace, "");
+    EXPECT_EQ(rows[2].ImplementationToken, 0x27000002u);
+    EXPECT_EQ(rows[3].Name, "Deep");
+    EXPECT_EQ(rows[3].ImplementationToken, 0x27000003u);
+    // The zero-flags row.
+    EXPECT_EQ(rows[5].Attributes, 0u);
+    EXPECT_EQ(rows[5].ImplementationToken, 0x26000001u);
+    // The manifest's own module row and the weird PE values.
+    auto manifestDef = manifest.GetModuleDefinition();
+    ASSERT_TRUE(manifestDef.has_value());
+    EXPECT_EQ(manifestDef->Name, "tiny_manifest.dll");
+    auto manifestHeaders = manifest.GetPeHeaderInfo();
+    ASSERT_TRUE(manifestHeaders.has_value());
+    EXPECT_EQ(manifestHeaders->ImageBase, 0x400000ull);
+    EXPECT_EQ(manifestHeaders->Subsystem, 17u);
+    EXPECT_EQ(manifestHeaders->CorFlags, 0x40000009u);
+    // No TypeDefs: the contents walk is empty.
+    EXPECT_TRUE(manifest.GetTopLevelTypeDefinitions().empty());
+}
+
+TEST(ReflectionDisassemblerTest, WriteModuleHeaderMscorlibExact)
+{
+    MD::MetadataFile f(MscorlibPath());
+    ASSERT_TRUE(f.IsValid());
+
+    // The exact gold (byte-identical to the real C# render): no exported
+    // types, the module name, the MVID, the PE32+ imagebase at the x8
+    // minimum width, the subsystem/corflags spellings, and the module's own
+    // UnverifiableCodeAttribute (a same-module TypeRef, so no "[mscorlib]"
+    // scope prefix).
+    std::string actual = RenderWithDisassembler(
+        [&](DA::ReflectionDisassembler& rd) { rd.WriteModuleHeader(f); });
+    std::string expected =
+        ".module CommonLanguageRuntimeLibrary\r\n"
+        "// MVID: {CFBE3CD1-8651-4C71-AE57-6A8663CF2300}\r\n"
+        ".imagebase 0x64478000000\r\n"
+        ".file alignment 0x00000200\r\n"
+        ".stackreserve 0x00400000\r\n"
+        ".subsystem 0x0003 // WindowsCui\r\n"
+        ".corflags 0x00000009 // ILOnly, StrongNameSigned\r\n"
+        ".custom instance void System.Security.UnverifiableCodeAttribute::.ctor() = (\r\n"
+        "\t01 00 00 00\r\n"
+        ")\r\n";
+    EXPECT_EQ(actual, expected);
+}
+
+TEST(ReflectionDisassemblerTest, WriteModuleHeaderSystemDllExact)
+{
+    MD::MetadataFile f(SystemDllPath());
+    ASSERT_TRUE(f.IsValid());
+
+    // The exact gold: the one forwarder block (the SRM IsForwarder fuse: the
+    // flag AND an AssemblyReference implementation), the ".assembly extern"
+    // body, and the module attribute's cross-assembly "[mscorlib]" scope.
+    std::string actual = RenderWithDisassembler(
+        [&](DA::ReflectionDisassembler& rd) { rd.WriteModuleHeader(f); });
+    std::string expected =
+        ".class extern forwarder System.Threading.SemaphoreFullException\r\n"
+        "{\r\n"
+        "\t.assembly extern mscorlib\r\n"
+        "}\r\n"
+        ".module System.dll\r\n"
+        "// MVID: {402AF08D-116E-430D-9D66-BA6EE06AD4BB}\r\n"
+        ".imagebase 0x7a540000\r\n"
+        ".file alignment 0x00000200\r\n"
+        ".stackreserve 0x00100000\r\n"
+        ".subsystem 0x0003 // WindowsCui\r\n"
+        ".corflags 0x00000009 // ILOnly, StrongNameSigned\r\n"
+        ".custom instance void [mscorlib]System.Security.UnverifiableCodeAttribute::.ctor() = (\r\n"
+        "\t01 00 00 00\r\n"
+        ")\r\n";
+    EXPECT_EQ(actual, expected);
+}
+
+TEST(ReflectionDisassemblerTest, WriteModuleHeaderNetModuleExact)
+{
+    std::string path = WriteTinyNetModule();
+    ASSERT_FALSE(path.empty());
+    MD::MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    // The exact gold: a netmodule's module header (module name + MVID + the
+    // PE lines; corflags ILOnly only -- ilasm-assembled modules are not
+    // strong-name signed).
+    std::string actual = RenderWithDisassembler(
+        [&](DA::ReflectionDisassembler& rd) { rd.WriteModuleHeader(f); });
+    std::string expected =
+        ".module tiny\r\n"
+        "// MVID: {163CEFD4-809A-4644-82FD-23D0EB508D60}\r\n"
+        ".imagebase 0x00400000\r\n"
+        ".file alignment 0x00000200\r\n"
+        ".stackreserve 0x00100000\r\n"
+        ".subsystem 0x0003 // WindowsCui\r\n"
+        ".corflags 0x00000001 // ILOnly\r\n";
+    EXPECT_EQ(actual, expected);
+}
+
+TEST(ReflectionDisassemblerTest, WriteModuleHeaderSkipMvidOmitsMvidLine)
+{
+    std::string path = WriteTinyNetModule();
+    ASSERT_FALSE(path.empty());
+    MD::MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    // The skipMVID=true variant (the Tester.cs gold-generator's form): the
+    // MVID line is the only thing omitted.
+    std::string actual = RenderWithDisassembler(
+        [&](DA::ReflectionDisassembler& rd) { rd.WriteModuleHeader(f, true); });
+    std::string expected =
+        ".module tiny\r\n"
+        ".imagebase 0x00400000\r\n"
+        ".file alignment 0x00000200\r\n"
+        ".stackreserve 0x00100000\r\n"
+        ".subsystem 0x0003 // WindowsCui\r\n"
+        ".corflags 0x00000001 // ILOnly\r\n";
+    EXPECT_EQ(actual, expected);
+}
+
+TEST(ReflectionDisassemblerTest, WriteModuleHeaderSyntheticArmsExact)
+{
+    std::string path = WriteTinyManifest();
+    ASSERT_FALSE(path.empty());
+    MD::MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    // The exact gold over every exported-type arm: the File implementation
+    // with the nonzero TypeDefId, the nested row (the header renders the
+    // row's own nil-namespace name; the body renders the enclosing row),
+    // the doubly nested one (the chain links concatenate -- faithful to the
+    // C# while-loop), the AssemblyRef forwarder, the zero-flags row (no
+    // "forwarder" prefix), then the module name, the uppercased hex-letter
+    // MVID, the unnamed subsystem 17, and the unmatched-bit corflags.
+    std::string actual = RenderWithDisassembler(
+        [&](DA::ReflectionDisassembler& rd) { rd.WriteModuleHeader(f); });
+    std::string expected =
+        ".class extern System.Tiny\r\n"
+        "{\r\n"
+        "\t.file tinyfile.netmodule\r\n"
+        "\t.class 0x00000400\r\n"
+        "}\r\n"
+        ".class extern Demo.Outer\r\n"
+        "{\r\n"
+        "\t.file tinyfile.netmodule\r\n"
+        "}\r\n"
+        ".class extern Inner\r\n"
+        "{\r\n"
+        "\t.class extern Demo.Outer\r\n"
+        "}\r\n"
+        ".class extern Deep\r\n"
+        "{\r\n"
+        "\t.class extern InnerDemo.Outer\r\n"
+        "}\r\n"
+        ".class extern forwarder System.FwdType\r\n"
+        "{\r\n"
+        "\t.assembly extern mscorlib\r\n"
+        "}\r\n"
+        ".class extern N.Plain\r\n"
+        "{\r\n"
+        "\t.file tinyfile.netmodule\r\n"
+        "}\r\n"
+        ".module tiny_manifest.dll\r\n"
+        "// MVID: {ABCDEF01-2345-6789-ABCD-EF0123456789}\r\n"
+        ".imagebase 0x00400000\r\n"
+        ".file alignment 0x00000200\r\n"
+        ".stackreserve 0x00100000\r\n"
+        ".subsystem 0x0011 // 17\r\n"
+        ".corflags 0x40000009 // 1073741833\r\n";
+    EXPECT_EQ(actual, expected);
+}
+
+TEST(ReflectionDisassemblerTest, WriteModuleHeaderSystemRuntimeForwarderSweep)
+{
+    std::string path = "C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\System"
+        ".Runtime\\v4.0_4.0.0.0__b03f5f7f11d50a3a\\System.Runtime.dll";
+    if (!std::filesystem::exists(path))
+        GTEST_SKIP() << "the GAC System.Runtime facade is Windows-only";
+    MD::MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    // The System.Runtime facade is the many-forwarder fixture: 279
+    // ExportedType rows -- 273 AssemblyRef forwarders plus SIX nested
+    // exported types (the exported-type rows whose Implementation points
+    // at another row: System.Diagnostics.DebuggingModes,
+    // ConditionalWeakTable`2, RuntimeHelpers twice, AdjustmentRule and
+    // TransitionTime) -- then the module tail with no module-level
+    // custom attributes.
+    std::string actual = RenderWithDisassembler(
+        [&](DA::ReflectionDisassembler& rd) { rd.WriteModuleHeader(f); });
+    ASSERT_EQ(f.GetExportedTypes().size(), 279u);
+    std::size_t blocks = 0;
+    for (std::size_t pos = 0;
+         (pos = actual.find(".class extern forwarder ", pos)) != std::string::npos;
+         pos += 1)
+        blocks++;
+    EXPECT_EQ(blocks, 273u);
+    // The nested exported type chain body (a REAL nested-row fixture
+    // beyond the synthetic manifest: the header renders the row's own
+    // nil-namespace name, the body the enclosing row).
+    std::string nestedBlock =
+        ".class extern DebuggingModes\r\n"
+        "{\r\n"
+        "\t.class extern System.Diagnostics.DebuggableAttribute\r\n"
+        "}\r\n";
+    EXPECT_NE(actual.find(nestedBlock), std::string::npos);
+    std::string prefix = ".class extern forwarder System.Action";
+    EXPECT_TRUE(actual.rfind(prefix, 0) == 0);
+    std::string tail =
+        ".module System.Runtime.dll\r\n"
+        "// MVID: {BC07CD82-B9CF-482E-8948-4C252F8E1FDB}\r\n"
+        ".imagebase 0x10000000\r\n"
+        ".file alignment 0x00000200\r\n"
+        ".stackreserve 0x00100000\r\n"
+        ".subsystem 0x0003 // WindowsCui\r\n"
+        ".corflags 0x00000009 // ILOnly, StrongNameSigned\r\n";
+    ASSERT_GE(actual.size(), tail.size());
+    EXPECT_EQ(actual.substr(actual.size() - tail.size()), tail);
+}
+
+TEST(ReflectionDisassemblerTest, WriteModuleContentsTinyExact)
+{
+    std::string path = WriteTinyNetModule();
+    ASSERT_FALSE(path.empty());
+    MD::MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    // The exact gold: the CLI's whole-module -il render over the tiny
+    // netmodule -- <Module> and Tiny in top-level row order, each type
+    // followed by a blank line (including the last).
+    std::string actual = RenderWithDisassembler(
+        [&](DA::ReflectionDisassembler& rd) { rd.WriteModuleContents(f); });
+    std::string expected =
+        ".class private auto ansi '<Module>'\r\n"
+        "{\r\n"
+        "} // end of class <Module>\r\n"
+        "\r\n"
+        ".class public auto ansi Tiny\r\n"
+        "\textends [mscorlib]System.Object\r\n"
+        "{\r\n"
+        "\t// Methods\r\n"
+        "\t.method public hidebysig static \r\n"
+        "\t\tint32 Add (\r\n"
+        "\t\t\tint32 a,\r\n"
+        "\t\t\tint32 b\r\n"
+        "\t\t) cil managed \r\n"
+        "\t{\r\n"
+        "\t\t// Method begins at RVA 0x2050\r\n"
+        "\t\t// Header size: 12\r\n"
+        "\t\t// Code size: 4 (0x4)\r\n"
+        "\t\t.maxstack 2\r\n"
+        "\r\n"
+        "\t\tIL_0000: ldarg.0\r\n"
+        "\t\tIL_0001: ldarg.1\r\n"
+        "\t\tIL_0002: add\r\n"
+        "\t\tIL_0003: ret\r\n"
+        "\t} // end of method Tiny::Add\r\n"
+        "\r\n"
+        "} // end of class Tiny\r\n"
+        "\r\n";
+    EXPECT_EQ(actual, expected);
+}
+
+TEST(ReflectionDisassemblerTest, WriteModuleContentsRoutesThroughEntityProcessor)
+{
+    std::string path = WriteTinyNetModule();
+    ASSERT_FALSE(path.empty());
+    MD::MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    // The EntityProcessor hook routes the top-level collection: a reversing
+    // processor renders Tiny first (the DisassembleTypeEntityProcessor
+    // convention for the member collections, applied to the module walk).
+    ReversingEntityProcessor processor;
+    std::string actual = RenderWithDisassembler([&](DA::ReflectionDisassembler& rd) {
+        rd.EntityProcessor(&processor);
+        rd.WriteModuleContents(f);
+    });
+    // Tiny first, <Module> second (the reversal), each still blank-line
+    // separated.
+    std::string tinyHead = ".class public auto ansi Tiny\r\n";
+    EXPECT_TRUE(actual.rfind(tinyHead, 0) == 0);
+    std::string tail = "} // end of class <Module>\r\n\r\n";
+    ASSERT_GE(actual.size(), tail.size());
+    EXPECT_EQ(actual.substr(actual.size() - tail.size()), tail);
+}
+
+TEST(ReflectionDisassemblerTest, WriteModuleContentsEmptyModuleRendersNothing)
+{
+    std::string path = WriteTinyManifest();
+    ASSERT_FALSE(path.empty());
+    MD::MetadataFile f(path);
+    ASSERT_TRUE(f.IsValid());
+
+    // The synthetic manifest declares no types: the whole-module render is
+    // empty (the C# loop body never runs).
+    std::string actual = RenderWithDisassembler(
+        [&](DA::ReflectionDisassembler& rd) { rd.WriteModuleContents(f); });
+    EXPECT_TRUE(actual.empty());
+}
+

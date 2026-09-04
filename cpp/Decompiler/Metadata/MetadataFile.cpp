@@ -2237,4 +2237,169 @@ MetadataFile::GetModuleReferences() const {
     return result;
 }
 
+// The ExportedType rows (table 0x27) in table order -- the C#
+// `metadata.ExportedTypes` collection. See the header for the full
+// contract. Column layout (II.22.14): Flags(4), TypeDefId(4), TypeName,
+// TypeNamespace, Implementation (the coded index over File/AssemblyRef/
+// ExportedType; winmd's composite_index_size(File, AssemblyRef,
+// ExportedType) fixes the tag order 0/1/2).
+std::vector<MetadataFile::ExportedTypeInfo>
+MetadataFile::GetExportedTypes() const {
+    std::vector<ExportedTypeInfo> result;
+    if (!IsValid()) return result;
+    std::uint32_t count = static_cast<std::uint32_t>(
+        impl_->db->ExportedType.size());
+    for (std::uint32_t row = 1; row <= count; row++) {
+        try {
+            ExportedTypeInfo info;
+            info.Token = (0x27u << 24) | row;
+            info.Attributes =
+                impl_->db->ExportedType.get_value<std::uint32_t>(row - 1, 0);
+            info.TypeDefinitionId =
+                impl_->db->ExportedType.get_value<std::uint32_t>(row - 1, 1);
+            info.Name = std::string{impl_->db->get_string(
+                impl_->db->ExportedType.get_value<std::uint32_t>(row - 1, 2))};
+            std::uint32_t nsIndex =
+                impl_->db->ExportedType.get_value<std::uint32_t>(row - 1, 3);
+            info.NamespaceNil = nsIndex == 0;
+            if (!info.NamespaceNil)
+                info.Namespace = std::string{impl_->db->get_string(nsIndex)};
+            // The Implementation coded index: 2 tag bits, the row shifted up.
+            std::uint32_t raw =
+                impl_->db->ExportedType.get_value<std::uint32_t>(row - 1, 4);
+            std::uint32_t tag = raw & 0x3u;
+            std::uint32_t target = raw >> 2;
+            switch (tag) {
+                case 0: info.ImplementationToken = (0x26u << 24) | target; break;
+                case 1: info.ImplementationToken = (0x23u << 24) | target; break;
+                case 2: info.ImplementationToken = (0x27u << 24) | target; break;
+                default: info.ImplementationToken = 0; break;
+            }
+            result.push_back(std::move(info));
+        } catch (const std::exception&) {
+            // Malformed table walk: stop at the first unreadable row (the
+            // rows before it stay readable).
+            break;
+        }
+    }
+    return result;
+}
+
+// One ExportedType row by its own token. See the header for the full
+// contract.
+std::optional<MetadataFile::ExportedTypeInfo>
+MetadataFile::GetExportedType(std::uint32_t token) const {
+    if (!IsValid()) return std::nullopt;
+    if ((token >> 24) != 0x27u) return std::nullopt;
+    std::uint32_t row = token & 0x00FFFFFFu;
+    if (row == 0 || row > impl_->db->ExportedType.size())
+        return std::nullopt;
+    for (const auto& et : GetExportedTypes())
+        if (et.Token == token) return et;
+    return std::nullopt;
+}
+
+// A File-table (table 0x26) row's Name -- the exported-type block's
+// `.file <name>` line. See the header for the full contract.
+std::optional<std::string> MetadataFile::GetAssemblyFileName(
+    std::uint32_t token) const {
+    if (!IsValid()) return std::nullopt;
+    if ((token >> 24) != 0x26u) return std::nullopt;
+    std::uint32_t row = token & 0x00FFFFFFu;
+    if (row == 0 || row > impl_->db->File.size()) return std::nullopt;
+    try {
+        return std::string{impl_->db->get_string(
+            impl_->db->File.get_value<std::uint32_t>(row - 1, 1))};
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// An AssemblyRef row's Name by token. See the header for the full contract.
+// The Name reads through the winmd row accessor (winmd merges the version
+// columns, so its raw column order is not ECMA's).
+std::optional<std::string> MetadataFile::GetAssemblyReferenceName(
+    std::uint32_t token) const {
+    if (!IsValid()) return std::nullopt;
+    if ((token >> 24) != 0x23u) return std::nullopt;
+    std::uint32_t row = token & 0x00FFFFFFu;
+    if (row == 0 || row > impl_->db->AssemblyRef.size()) return std::nullopt;
+    try {
+        return std::string{impl_->db->AssemblyRef[row - 1].Name()};
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// The Module table's single row 1 -- the C# `metadata.GetModuleDefinition()`.
+// See the header for the full contract. Column layout (II.22.30):
+// Generation(2), Name, Mvid (a #GUID heap index), EncId, EncBaseId.
+std::optional<MetadataFile::ModuleDefinitionInfo>
+MetadataFile::GetModuleDefinition() const {
+    if (!IsValid() || impl_->db->Module.size() == 0)
+        return std::nullopt;
+    try {
+        ModuleDefinitionInfo info;
+        info.Name = std::string{impl_->db->Module[0].Name()};
+        std::uint32_t mvidIndex =
+            impl_->db->Module.get_value<std::uint32_t>(0, 2);
+        // The #GUID heap read (MetadataReader.GetGuid): a nil index is
+        // Guid.Empty (the all-zeros array the TryGetGuid nil arm returns).
+        if (impl_->bodyReader) {
+            auto guid = impl_->bodyReader->TryGetGuid(mvidIndex);
+            if (guid) info.Mvid = *guid;
+        }
+        return info;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// The top-level TypeDef tokens in row order -- the C# ILSpy
+// MetadataExtensions.GetTopLevelTypeDefinitions(reader) extension. See the
+// header for the full contract. A row is top-level when no NestedClass
+// table row names it as the nested type (the SRM
+// TypeDefinition.GetDeclaringType back-scan).
+std::vector<std::uint32_t> MetadataFile::GetTopLevelTypeDefinitions() const {
+    std::vector<std::uint32_t> result;
+    if (!IsValid()) return result;
+    try {
+        // The set of nested TypeDef row numbers -- the NestedClass table's
+        // first column (the nested type; the second names the enclosing
+        // class), in row order (the same rows GetNestedTypes walks).
+        std::vector<std::uint32_t> nestedRows;
+        nestedRows.reserve(impl_->db->NestedClass.size());
+        for (std::uint32_t i = 0;
+             i < impl_->db->NestedClass.size(); i++) {
+            nestedRows.push_back(
+                impl_->db->NestedClass.get_value<std::uint32_t>(i, 0));
+        }
+        for (std::uint32_t row = 1;
+             row <= impl_->db->TypeDef.size(); row++) {
+            if (std::find(nestedRows.begin(), nestedRows.end(), row)
+                == nestedRows.end()) {
+                result.push_back((0x02u << 24) | row);
+            }
+        }
+    } catch (const std::exception&) {
+        result.clear();
+    }
+    return result;
+}
+
+// The PE-header values the module-header lines render. See the header for
+// the full contract.
+std::optional<MetadataFile::PeHeaderInfo> MetadataFile::GetPeHeaderInfo()
+    const {
+    if (!IsValid() || !impl_->bodyReader || !impl_->bodyReader->HasImage())
+        return std::nullopt;
+    PeHeaderInfo info;
+    info.ImageBase = impl_->bodyReader->ImageBase();
+    info.FileAlignment = impl_->bodyReader->FileAlignment();
+    info.SizeOfStackReserve = impl_->bodyReader->SizeOfStackReserve();
+    info.Subsystem = impl_->bodyReader->Subsystem();
+    info.CorFlags = impl_->bodyReader->CorFlags();
+    return info;
+}
+
 } // namespace ILSpy::Decompiler::Metadata
