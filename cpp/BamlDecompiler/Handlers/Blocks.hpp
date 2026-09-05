@@ -35,8 +35,11 @@
 //    ResolveNamespace + rename pair.
 //  * ConstructorParametersStartHandler (ConstructorParametersStart): the
 //    pseudo-named <Ctor> wrapper element.
-// (KeyElementStartHandler -- the ElementHandler subclass -- lands with the
-// key/static-resource defer handlers.)
+//  * KeyElementStartHandler (KeyElementStart): the x:Key BLOCK -- the keyed
+//    element's content is the block's own children; the C# implements
+//    IHandler.Type/IHandler.Translate EXPLICITLY over the inherited
+//    ElementHandler, and the deferred arm renders the x:Key element
+//    wrapping the keyed element (the inherited walk).
 //
 // C#-to-C++ porting decisions:
 //  * The element annotations hold the OWNING `shared_ptr<XamlType>` the
@@ -73,6 +76,25 @@ public:
 
     std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
         BamlElement* parent) override;
+};
+
+// The C# `internal class KeyElementStartHandler : ElementHandler, IHandler,
+// IDeferHandler` (the KeyElementStartHandler.cs file): the x:Key BLOCK. The
+// C# implements IHandler.Type and IHandler.Translate EXPLICITLY (KeyElementStart
+// and the Create-and-null body -- NOT the inherited ElementHandler walk; the
+// inherited public Translate stays reachable through the base class), which the
+// port models as plain overrides; TranslateDefer renders the x:Key element and
+// re-drives the inherited ElementHandler::Translate over the block's own
+// children (the keyed element's content) inside it.
+class KeyElementStartHandler : public ElementHandler, public IDeferHandler {
+public:
+    Baml::BamlRecordType Type() const override;
+
+    std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
+        BamlElement* parent) override;
+
+    std::unique_ptr<BamlElement> TranslateDefer(XamlContext& ctx,
+        Baml::BamlNode& node, BamlElement* parent) override;
 };
 
 // The four property-element blocks (PropertyComplexStart/PropertyArrayStart/

@@ -91,6 +91,9 @@ std::vector<std::unique_ptr<IHandler>> HandlerMap::CreateBuiltinHandlers()
     handlers.push_back(std::make_unique<Handlers::TypeSerializerInfoHandler>());
     handlers.push_back(std::make_unique<Handlers::AttributeInfoHandler>());
     handlers.push_back(std::make_unique<Handlers::DeferableContentStartHandler>());
+    handlers.push_back(std::make_unique<Handlers::DefAttributeStringHandler>());
+    handlers.push_back(std::make_unique<Handlers::DefAttributeTypeHandler>());
+    handlers.push_back(std::make_unique<Handlers::KeyElementStartHandler>());
     handlers.push_back(std::make_unique<Handlers::ConnectionIdHandler>());
     handlers.push_back(std::make_unique<Handlers::ContentPropertyHandler>());
     handlers.push_back(std::make_unique<Handlers::TextWithIdHandler>());

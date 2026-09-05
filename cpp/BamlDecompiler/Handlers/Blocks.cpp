@@ -56,6 +56,35 @@ Baml::BamlBlockNode& BlockNodeOf(Baml::BamlNode& node)
     return *blockNode;
 }
 
+// The C# `parent.Xaml.Element` read: a null parent NREs at `parent.Xaml`, a
+// string-Xaml parent at the returned null element's use -- both arms carry
+// the same .NET message.
+Xml::XElement& ParentElementOf(BamlElement* parent)
+{
+    if (parent == nullptr || !parent->Xaml.Element)
+        throw std::runtime_error(kNullReferenceMessage);
+    return *parent->Xaml.Element;
+}
+
+// The C# `(XamlResourceKey)node.Annotation` unboxing cast of the key
+// handlers' TranslateDefer bodies (the second copy next to its consumer --
+// the Records.cpp original): a null annotation is the .NET
+// NullReferenceException (the unbox of a null reference), a foreign payload
+// the InvalidCastException with the fixed '<annotation>' placeholder
+// (unreachable through the engine).
+std::shared_ptr<Xaml::XamlResourceKey> KeyAnnotationOf(Baml::BamlNode& node)
+{
+    if (!node.Annotation.has_value())
+        throw std::runtime_error(kNullReferenceMessage);
+    auto* keyAny = std::any_cast<std::shared_ptr<Xaml::XamlResourceKey>>(
+        &node.Annotation);
+    if (keyAny == nullptr)
+        throw std::runtime_error(
+            "Unable to cast object of type '<annotation>' to type "
+            "'ICSharpCode.BamlDecompiler.Xaml.XamlResourceKey'.");
+    return *keyAny;
+}
+
 } // namespace
 
 // ===== DocumentHandler ======================================================
@@ -285,6 +314,71 @@ std::unique_ptr<BamlElement> ConstructorParametersStartHandler::Translate(
 
     HandlerMap::ProcessChildren(ctx, BlockNodeOf(node), *doc);
     return doc;
+}
+
+// ===== KeyElementStartHandler ================================================
+
+Baml::BamlRecordType KeyElementStartHandler::Type() const
+{
+    // The C# `BamlRecordType IHandler.Type => BamlRecordType.KeyElementStart`
+    // -- the EXPLICIT interface implementation over the inherited
+    // ElementHandler's ElementStart (the port models both as plain
+    // overrides; the inherited public members stay reachable through a
+    // base-class reference).
+    return Baml::BamlRecordType::KeyElementStart;
+}
+
+std::unique_ptr<BamlElement> KeyElementStartHandler::Translate(
+    XamlContext&, Baml::BamlNode& node, BamlElement*)
+{
+    // The C# EXPLICIT `IHandler.Translate` -- the Create-and-null body, NOT
+    // the inherited ElementHandler walk (the keyed element renders through
+    // TranslateDefer below).
+    Xaml::XamlResourceKey::Create(node);
+    return nullptr;
+}
+
+std::unique_ptr<BamlElement> KeyElementStartHandler::TranslateDefer(
+    XamlContext& ctx, Baml::BamlNode& node, BamlElement* parent)
+{
+    // The C# `var record = (KeyElementStartRecord)((BamlBlockNode)node).Header`
+    // -- the double cast is observable (a hand-built lying header); the
+    // record payload itself is never read (the keyed element's type comes
+    // from the header's ElementStartRecord base through the inherited walk).
+    Baml::BamlBlockNode& blockNode = BlockNodeOf(node);
+    Baml::BamlRecord* header = blockNode.Header;
+    if (header == nullptr)
+        throw std::runtime_error(kNullReferenceMessage);
+    auto* record = dynamic_cast<Baml::KeyElementStartRecord*>(header);
+    if (record == nullptr)
+        throw std::runtime_error(
+            "Unable to cast object of type 'ICSharpCode.BamlDecompiler.Baml.<record>' "
+            "to type 'ICSharpCode.BamlDecompiler.Baml.KeyElementStartRecord'.");
+    (void)record;
+    std::shared_ptr<Xaml::XamlResourceKey> key = KeyAnnotationOf(node);
+    // The C# `new XElement(ctx.GetKnownNamespace("Key", ..., parent.Xaml))`:
+    // the `parent.Xaml` read NREs for a null parent, the Add below for the
+    // null element.
+    if (parent == nullptr)
+        throw std::runtime_error(kNullReferenceMessage);
+    auto keyElement = std::make_shared<Xml::XElement>(
+        ctx.GetKnownNamespace("Key", XamlContext::KnownNamespace_Xaml,
+            parent->Xaml.Element.get()));
+    auto bamlElem = std::make_unique<BamlElement>(&node);
+    bamlElem->Xaml = keyElement;
+    ParentElementOf(parent).Add(keyElement);
+    key->KeyElement = bamlElem.get();
+    // The C# `base.Translate(ctx, node, bamlElem)` -- the inherited
+    // ElementHandler walk over the key block's OWN children (the keyed
+    // element's content): the walk's header cast accepts the
+    // KeyElementStartRecord (a DefAttributeKeyTypeRecord IS an
+    // ElementStartRecord), the keyed element lands INSIDE the x:Key element,
+    // the walk's own defer branch does not re-enter (the annotation's
+    // KeyNode is this very node), and the walk's returned BamlElement is
+    // discarded -- the XAML tree carries the content, the walk's own
+    // BamlElement children list dies with it.
+    ElementHandler::Translate(ctx, node, bamlElem.get());
+    return bamlElem;
 }
 
 } // namespace ILSpy::BamlDecompiler::Handlers

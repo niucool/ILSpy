@@ -36,6 +36,12 @@
 //    the record type),
 //  * ConstructorParameterTypeHandler (ConstructorParameterType -- the
 //    {x:Type} TypeExtension element),
+//  * DefAttributeStringHandler (DefAttributeKeyString) and
+//    DefAttributeTypeHandler (DefAttributeKeyType) -- the x:Key RECORD
+//    handlers: Translate only creates the XamlResourceKey annotation pair
+//    (the key node and its value element), and the IDeferHandler arm
+//    renders the x:Key element (the resolved string value / the
+//    TypeExtension child) that the ElementHandler defer branch drives.
 //  * the nine null-returning handlers (AssemblyInfo, AttributeInfo,
 //    ContentProperty, DeferableContentStart, LineNumberAndPosition,
 //    LinePosition, PIMapping, TypeInfo, TypeSerializerInfo).
@@ -158,6 +164,37 @@ public:
 
     std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
         BamlElement* parent) override;
+};
+
+// The C# `internal class DefAttributeStringHandler : IHandler,
+// IDeferHandler` (the DefAttributeKeyStringHandler.cs file): the x:Key
+// string record -- the C# class name diverges from its FILE name. Translate
+// only creates the key annotation pair; TranslateDefer renders the x:Key
+// element carrying the resolved string value.
+class DefAttributeStringHandler : public IHandler, public IDeferHandler {
+public:
+    Baml::BamlRecordType Type() const override;
+
+    std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
+        BamlElement* parent) override;
+
+    std::unique_ptr<BamlElement> TranslateDefer(XamlContext& ctx,
+        Baml::BamlNode& node, BamlElement* parent) override;
+};
+
+// The C# `internal class DefAttributeTypeHandler : IHandler, IDeferHandler`
+// (the DefAttributeKeyTypeHandler.cs file): the x:Key type record -- the
+// deferred arm renders the x:Key element wrapping the {x:Type}
+// TypeExtension child (the resolved type's name).
+class DefAttributeTypeHandler : public IHandler, public IDeferHandler {
+public:
+    Baml::BamlRecordType Type() const override;
+
+    std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
+        BamlElement* parent) override;
+
+    std::unique_ptr<BamlElement> TranslateDefer(XamlContext& ctx,
+        Baml::BamlNode& node, BamlElement* parent) override;
 };
 
 // The C# `internal class AssemblyInfoHandler : IHandler` -- the record walk

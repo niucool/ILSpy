@@ -43,6 +43,13 @@
 //    subclass, the four property-element blocks, ConstructorParametersStart,
 //    and ConstructorParameterType's TypeExtension renders -- every parent
 //    and element render byte-exact against the real handlers' drives.
+//  * the section-F x:Key defer-family drives (the HandlerMapProbe's F1-F10):
+//    the three key handlers' end-to-end ProcessChildren walks (the
+//    ElementHandler defer branch renders the x:Key element inside the value
+//    element) and the direct Translate/TranslateDefer drives over the
+//    crafted key+value sibling pairs, with the annotation wiring, the
+//    KeyElement back-pointer, and every exception arm -- byte-exact against
+//    the real handlers' drives.
 
 #include "BamlTestSupport.hpp"
 #include "BamlDecompiler/BamlConnectionId.hpp"
@@ -51,10 +58,12 @@
 #include "BamlDecompiler/Handlers/Records.hpp"
 #include "BamlDecompiler/IHandlers.hpp"
 #include "BamlDecompiler/Xaml/XamlProperty.hpp"
+#include "BamlDecompiler/Xaml/XamlResourceKey.hpp"
 #include "BamlDecompiler/Xaml/XamlType.hpp"
 
 #include <gtest/gtest.h>
 
+#include <any>
 #include <cstddef>
 #include <iterator>
 #include <memory>
@@ -70,6 +79,7 @@ using ILSpy::BamlDecompiler::BamlConnectionId;
 using ILSpy::BamlDecompiler::BamlElement;
 using ILSpy::BamlDecompiler::HandlerMap;
 using ILSpy::BamlDecompiler::IHandler;
+using ILSpy::BamlDecompiler::IDeferHandler;
 using ILSpy::BamlDecompiler::XamlContext;
 using ILSpy::Tests::Baml::XamlContextFixture;
 
@@ -105,15 +115,13 @@ protected:
     }
 };
 
-// The manifest: the 17 ported rows, every record type distinct, each inside
-// the gold registry inventory (the HandlerMapTest guard), with the class
-// The manifest: the 25 ported rows, every record type distinct, each inside
+// The manifest: the 28 ported rows, every record type distinct, each inside
 // the gold registry inventory (the HandlerMapTest guard), with the class
 // identities the manifest constructs.
-TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheTwentyFivePortedRows)
+TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheTwentyEightPortedRows)
 {
     std::vector<std::unique_ptr<IHandler>> handlers = HandlerMap::CreateBuiltinHandlers();
-    ASSERT_EQ(handlers.size(), 25u);
+    ASSERT_EQ(handlers.size(), 28u);
 
     const Baml::BamlRecordType expected[] = {
         Baml::BamlRecordType::DocumentStart,
@@ -135,6 +143,9 @@ TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheTwentyFivePortedRows)
         Baml::BamlRecordType::TypeSerializerInfo,
         Baml::BamlRecordType::AttributeInfo,
         Baml::BamlRecordType::DeferableContentStart,
+        Baml::BamlRecordType::DefAttributeKeyString,
+        Baml::BamlRecordType::DefAttributeKeyType,
+        Baml::BamlRecordType::KeyElementStart,
         Baml::BamlRecordType::ConnectionId,
         Baml::BamlRecordType::ContentProperty,
         Baml::BamlRecordType::TextWithId,
@@ -142,7 +153,7 @@ TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheTwentyFivePortedRows)
         Baml::BamlRecordType::LineNumberAndPosition,
         Baml::BamlRecordType::LinePosition,
     };
-    ASSERT_EQ(std::size(expected), 25u);
+    ASSERT_EQ(std::size(expected), 28u);
     for (Baml::BamlRecordType type : expected) {
         bool found = false;
         for (const auto& handler : handlers)
@@ -198,6 +209,23 @@ TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheTwentyFivePortedRows)
     EXPECT_NE(dynamic_cast<Handlers::ConstructorParameterTypeHandler*>(
                   HandlerMap::LookupHandler(Baml::BamlRecordType::ConstructorParameterType)),
         nullptr);
+    // The key-family rows: the two record handlers implement the defer
+    // interface directly; the KeyElementStart row is the ElementHandler
+    // subclass whose EXPLICIT IHandler.Translate re-bind the base cast still
+    // answers (the TextWithConverter re-bind pattern).
+    IHandler* keyString = HandlerMap::LookupHandler(Baml::BamlRecordType::DefAttributeKeyString);
+    ASSERT_NE(keyString, nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::DefAttributeStringHandler*>(keyString), nullptr);
+    EXPECT_NE(dynamic_cast<IDeferHandler*>(keyString), nullptr);
+    IHandler* keyType = HandlerMap::LookupHandler(Baml::BamlRecordType::DefAttributeKeyType);
+    ASSERT_NE(keyType, nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::DefAttributeTypeHandler*>(keyType), nullptr);
+    EXPECT_NE(dynamic_cast<IDeferHandler*>(keyType), nullptr);
+    IHandler* keyElement = HandlerMap::LookupHandler(Baml::BamlRecordType::KeyElementStart);
+    ASSERT_NE(keyElement, nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::KeyElementStartHandler*>(keyElement), nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::ElementHandler*>(keyElement), nullptr);
+    EXPECT_NE(dynamic_cast<IDeferHandler*>(keyElement), nullptr);
 }
 
 // The section-C end-to-end drive: the real manifest over the walk document
@@ -905,4 +933,492 @@ TEST_F(HandlersTest, ConstructorParameterTypeHandlerWithANullParentThrowsTheNRE)
     }
 }
 
+
+// ===== Section F: the x:Key defer-handler family ============================
+// (DefAttributeStringHandler / DefAttributeTypeHandler / KeyElementStartHandler
+// -- the gold the probe's section F dumped: the crafted key+value sibling
+// pairs over the section-E fixture, driven end-to-end through
+// HandlerMap.ProcessChildren (the ElementHandler defer branch renders the
+// x:Key element inside the value element) and directly (Translate creating
+// the key annotation pair, TranslateDefer rendering the x:Key element). The
+// crafted shape is the real defer-block wiring of findtoolbar.baml: the key
+// record's deferred `Record` property points at the value element's
+// ElementStart record instance, and XamlResourceKey.Create's children-walk
+// arm annotates BOTH the key node and the value block.)
+
+// The crafted defer-block pair (the probe's MakePair): the key node and the
+// value element block as SIBLINGS under a container block, every child's
+// Parent back-pointer wired (the parsed-tree shape -- the Create walk reads
+// node.Parent.Children).
+struct KeyPairFixture {
+    std::unique_ptr<Baml::BamlRecord> containerHeader;
+    std::unique_ptr<Baml::BamlRecord> keyRecord;
+    std::unique_ptr<Baml::BamlRecord> keyText;
+    std::unique_ptr<Baml::BamlRecord> keyEnd;
+    std::unique_ptr<Baml::BamlRecord> valueStart;
+    std::unique_ptr<Baml::BamlRecord> valueText;
+    std::unique_ptr<Baml::BamlRecord> valueEnd;
+
+    Baml::BamlBlockNode container;
+    std::unique_ptr<Baml::BamlBlockNode> valueBlock;
+    Baml::BamlNode* keyNode = nullptr;
+    Baml::BamlBlockNode* valueBlockPtr = nullptr;
+
+    // The construction guard the tests assert on first (ASSERT_* inside a
+    // constructor fails MSVC C2534 -- the CraftedTree convention).
+    bool Ok = false;
+
+    KeyPairFixture(std::unique_ptr<Baml::BamlRecord> keyRecordArg, bool keyIsBlock)
+    {
+        keyRecord = std::move(keyRecordArg);
+        containerHeader = std::make_unique<Baml::ElementStartRecord>();
+        static_cast<Baml::ElementStartRecord*>(containerHeader.get())->TypeId = 0xFD63;
+        valueStart = std::make_unique<Baml::ElementStartRecord>();
+        static_cast<Baml::ElementStartRecord*>(valueStart.get())->TypeId = 0xFD63;
+        valueText = std::make_unique<Baml::TextRecord>();
+        static_cast<Baml::TextRecord*>(valueText.get())->Value = "hello";
+        valueEnd = std::make_unique<Baml::ElementEndRecord>();
+        keyEnd = std::make_unique<Baml::KeyElementEndRecord>();
+        keyText = std::make_unique<Baml::TextRecord>();
+        static_cast<Baml::TextRecord*>(keyText.get())->Value = "inner";
+
+        // The deferred target: the value block's header record instance
+        // (the real defer-block wiring -- Create's children-walk arm matches
+        // it against the value block's own record).
+        auto* deferRecord = dynamic_cast<Baml::IBamlDeferRecord*>(keyRecord.get());
+        if (deferRecord == nullptr)
+            return; // a non-defer record leaves the fixture unbuilt; the
+                    // tests' ASSERT_TRUE(pair.Ok) reports it
+        deferRecord->SetRecord(valueStart.get());
+
+        // The value block: [Text(hello)], the parent wired.
+        valueBlock = std::make_unique<Baml::BamlBlockNode>();
+        valueBlock->Header = valueStart.get();
+        valueBlock->Footer = valueEnd.get();
+        auto valueTextNode = std::make_unique<Baml::BamlRecordNode>(valueText.get());
+        valueTextNode->Parent = valueBlock.get();
+        valueBlock->Children.push_back(std::move(valueTextNode));
+
+        // The key node: a leaf record node, or the keyed-content block (the
+        // KeyElementStart case -- its own children are the keyed element's
+        // content).
+        std::unique_ptr<Baml::BamlNode> key;
+        if (keyIsBlock) {
+            auto keyBlock = std::make_unique<Baml::BamlBlockNode>();
+            keyBlock->Header = keyRecord.get();
+            keyBlock->Footer = keyEnd.get();
+            auto keyTextNode = std::make_unique<Baml::BamlRecordNode>(keyText.get());
+            keyTextNode->Parent = keyBlock.get();
+            keyBlock->Children.push_back(std::move(keyTextNode));
+            key = std::move(keyBlock);
+        } else {
+            key = std::make_unique<Baml::BamlRecordNode>(keyRecord.get());
+        }
+        key->Parent = &container;
+
+        // The container: [key, value].
+        container.Header = containerHeader.get();
+        valueBlock->Parent = &container;
+        valueBlockPtr = valueBlock.get();
+        container.Children.push_back(std::move(key));
+        keyNode = container.Children.back().get();
+        container.Children.push_back(std::move(valueBlock));
+        Ok = true;
+    }
+
+    // The key annotation a node carries (null when none).
+    std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlResourceKey> KeyOf(Baml::BamlNode& node)
+    {
+        auto* annotation =
+            std::any_cast<std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlResourceKey>>(
+                &node.Annotation);
+        return annotation == nullptr ? nullptr : *annotation;
+    }
+};
+
+// F1: the DefAttributeKeyString end-to-end drive -- ProcessChildren over the
+// crafted defer block: the key handler annotates the pair, the value
+// element's ElementHandler defer branch renders the x:Key element (the
+// resolved known string id 0xffff -> "Name") AFTER the walked children.
+TEST_F(HandlersTest, DefAttributeStringKeyRendersInsideTheValueElement)
+{
+    auto ctx = fixture_.MakeContextE();
+    auto keyRecord = std::make_unique<Baml::DefAttributeKeyStringRecord>();
+    keyRecord->ValueId = 0xFFFF;
+    KeyPairFixture pair(std::move(keyRecord), false);
+    ASSERT_TRUE(pair.Ok);
+    BamlElement parentElem = MakeParentElem();
+
+    HandlerMap::ProcessChildren(*ctx, pair.container, parentElem);
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent>\r\n"
+        "  <ToolBar xmlns=\"http://probe.pi/ns\">hello"
+        "<Key xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">Name</Key>"
+        "</ToolBar>\r\n"
+        "</Parent>");
+
+    // The annotations: BOTH the key node and the value block carry the SAME
+    // key instance whose KeyNode is the key node (not the value block).
+    std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlResourceKey> keyAnn =
+        pair.KeyOf(*pair.keyNode);
+    ASSERT_NE(keyAnn, nullptr);
+    EXPECT_EQ(keyAnn->KeyNode, pair.keyNode);
+    std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlResourceKey> valueAnn =
+        pair.KeyOf(*pair.valueBlockPtr);
+    ASSERT_NE(valueAnn, nullptr);
+    EXPECT_EQ(valueAnn, keyAnn);
+    EXPECT_NE(valueAnn->KeyNode, pair.valueBlockPtr);
+
+    // The tree: the parent holds the value doc, the value doc holds the Key
+    // BamlElement (node = the key node) with its back-pointer, and the key
+    // annotation's KeyElement points at it.
+    ASSERT_EQ(parentElem.Children.size(), 1u);
+    BamlElement* valueDoc = parentElem.Children[0].get();
+    EXPECT_EQ(valueDoc->Node, pair.valueBlockPtr);
+    ASSERT_EQ(valueDoc->Children.size(), 1u);
+    BamlElement* keyElem = valueDoc->Children[0].get();
+    EXPECT_EQ(keyElem->Node, pair.keyNode);
+    EXPECT_EQ(keyElem->Parent, valueDoc);
+    EXPECT_EQ(keyAnn->KeyElement, keyElem);
+    EXPECT_EQ(keyElem->Xaml.Element->Name().NamespaceName(),
+        "http://schemas.microsoft.com/winfx/2006/xaml");
+    EXPECT_EQ(keyElem->Xaml.Element->Name().LocalName(), "Key");
+    EXPECT_EQ(keyElem->Xaml.Element->Value(), "Name");
+}
+
+// F2: the DefAttributeKeyType end-to-end drive -- the x:Key element carries
+// the {x:Type} TypeExtension child (the PI-mapped ToolBar type's name).
+TEST_F(HandlersTest, DefAttributeTypeKeyRendersTheTypeExtensionInsideTheValueElement)
+{
+    auto ctx = fixture_.MakeContextE();
+    auto keyRecord = std::make_unique<Baml::DefAttributeKeyTypeRecord>();
+    static_cast<Baml::DefAttributeKeyTypeRecord*>(keyRecord.get())->TypeId = 0xFD63;
+    KeyPairFixture pair(std::move(keyRecord), false);
+    ASSERT_TRUE(pair.Ok);
+    BamlElement parentElem = MakeParentElem();
+
+    HandlerMap::ProcessChildren(*ctx, pair.container, parentElem);
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent>\r\n"
+        "  <ToolBar xmlns=\"http://probe.pi/ns\">hello"
+        "<Key xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">"
+        "<TypeExtension><Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">ToolBar</Ctor>"
+        "</TypeExtension></Key>"
+        "</ToolBar>\r\n"
+        "</Parent>");
+    EXPECT_NE(pair.KeyOf(*pair.keyNode), nullptr);
+    EXPECT_NE(pair.KeyOf(*pair.valueBlockPtr), nullptr);
+}
+
+// F3: the KeyElementStart end-to-end drive -- the key BLOCK (its own
+// children are the keyed element's content) renders the x:Key element
+// wrapping the keyed element (the block header's type) inside the value
+// element.
+TEST_F(HandlersTest, KeyElementStartRendersTheKeyedElementInsideTheValueElement)
+{
+    auto ctx = fixture_.MakeContextE();
+    auto keyHeader = std::make_unique<Baml::KeyElementStartRecord>();
+    static_cast<Baml::KeyElementStartRecord*>(keyHeader.get())->TypeId = 0xFD63;
+    KeyPairFixture pair(std::move(keyHeader), true);
+    ASSERT_TRUE(pair.Ok);
+    BamlElement parentElem = MakeParentElem();
+
+    HandlerMap::ProcessChildren(*ctx, pair.container, parentElem);
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent>\r\n"
+        "  <ToolBar xmlns=\"http://probe.pi/ns\">hello"
+        "<Key xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">"
+        "<ToolBar xmlns=\"http://probe.pi/ns\">inner</ToolBar>"
+        "</Key>"
+        "</ToolBar>\r\n"
+        "</Parent>");
+
+    // The annotations over the key BLOCK and the value block.
+    std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlResourceKey> keyAnn =
+        pair.KeyOf(*pair.keyNode);
+    ASSERT_NE(keyAnn, nullptr);
+    EXPECT_EQ(keyAnn->KeyNode, pair.keyNode);
+    EXPECT_NE(pair.KeyOf(*pair.valueBlockPtr), nullptr);
+}
+
+// F4: the DefAttributeString direct drive -- Translate contributes nothing
+// and TranslateDefer renders the x:Key element into the parent (the
+// StaticResourceId consumer's shape).
+TEST_F(HandlersTest, DefAttributeStringDirectTranslateAndDeferRendersTheGold)
+{
+    auto ctx = fixture_.MakeContextE();
+    auto keyRecord = std::make_unique<Baml::DefAttributeKeyStringRecord>();
+    keyRecord->ValueId = 0xFFFF;
+    KeyPairFixture pair(std::move(keyRecord), false);
+    ASSERT_TRUE(pair.Ok);
+    BamlElement parentElem = MakeParentElem();
+
+    IHandler* handler = Lookup(Baml::BamlRecordType::DefAttributeKeyString);
+    std::unique_ptr<BamlElement> translated = handler->Translate(*ctx, *pair.keyNode, &parentElem);
+    EXPECT_EQ(translated, nullptr);
+    std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlResourceKey> keyAnn =
+        pair.KeyOf(*pair.keyNode);
+    ASSERT_NE(keyAnn, nullptr);
+
+    auto* deferHandler = dynamic_cast<ILSpy::BamlDecompiler::IDeferHandler*>(handler);
+    ASSERT_NE(deferHandler, nullptr);
+    std::unique_ptr<BamlElement> result = deferHandler->TranslateDefer(*ctx, *pair.keyNode, &parentElem);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Node, pair.keyNode);
+    EXPECT_EQ(result->Xaml.Element->ToString(),
+        "<Key xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">Name</Key>");
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent>\r\n"
+        "  <Key xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">Name</Key>\r\n"
+        "</Parent>");
+    EXPECT_EQ(keyAnn->KeyElement, result.get());
+}
+
+// F5: the DefAttributeType direct drive -- the x:Key element wrapping the
+// TypeExtension child (the resolved type's name through ctx.ToString).
+TEST_F(HandlersTest, DefAttributeTypeDirectTranslateAndDeferRendersTheGold)
+{
+    auto ctx = fixture_.MakeContextE();
+    auto keyRecord = std::make_unique<Baml::DefAttributeKeyTypeRecord>();
+    static_cast<Baml::DefAttributeKeyTypeRecord*>(keyRecord.get())->TypeId = 0xFD63;
+    KeyPairFixture pair(std::move(keyRecord), false);
+    ASSERT_TRUE(pair.Ok);
+    BamlElement parentElem = MakeParentElem();
+
+    IHandler* handler = Lookup(Baml::BamlRecordType::DefAttributeKeyType);
+    std::unique_ptr<BamlElement> translated = handler->Translate(*ctx, *pair.keyNode, &parentElem);
+    EXPECT_EQ(translated, nullptr);
+    std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlResourceKey> keyAnn =
+        pair.KeyOf(*pair.keyNode);
+    ASSERT_NE(keyAnn, nullptr);
+
+    auto* deferHandler = dynamic_cast<ILSpy::BamlDecompiler::IDeferHandler*>(handler);
+    ASSERT_NE(deferHandler, nullptr);
+    std::unique_ptr<BamlElement> result = deferHandler->TranslateDefer(*ctx, *pair.keyNode, &parentElem);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Xaml.Element->ToString(),
+        "<Key xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">\r\n"
+        "  <TypeExtension>\r\n"
+        "    <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">ToolBar</Ctor>\r\n"
+        "  </TypeExtension>\r\n"
+        "</Key>");
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent>\r\n"
+        "  <Key xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">\r\n"
+        "    <TypeExtension>\r\n"
+        "      <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">ToolBar</Ctor>\r\n"
+        "    </TypeExtension>\r\n"
+        "  </Key>\r\n"
+        "</Parent>");
+    EXPECT_EQ(keyAnn->KeyElement, result.get());
+}
+
+// F6: the KeyElementStart direct drive -- the inherited ElementHandler walk
+// over the key block's own children renders the keyed element inside the
+// x:Key element (the walk's own BamlElement return is discarded).
+TEST_F(HandlersTest, KeyElementStartDirectTranslateAndDeferRendersTheGold)
+{
+    auto ctx = fixture_.MakeContextE();
+    auto keyHeader = std::make_unique<Baml::KeyElementStartRecord>();
+    static_cast<Baml::KeyElementStartRecord*>(keyHeader.get())->TypeId = 0xFD63;
+    KeyPairFixture pair(std::move(keyHeader), true);
+    ASSERT_TRUE(pair.Ok);
+    BamlElement parentElem = MakeParentElem();
+
+    IHandler* handler = Lookup(Baml::BamlRecordType::KeyElementStart);
+    std::unique_ptr<BamlElement> translated = handler->Translate(*ctx, *pair.keyNode, &parentElem);
+    EXPECT_EQ(translated, nullptr);
+    std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlResourceKey> keyAnn =
+        pair.KeyOf(*pair.keyNode);
+    ASSERT_NE(keyAnn, nullptr);
+
+    auto* deferHandler = dynamic_cast<ILSpy::BamlDecompiler::IDeferHandler*>(handler);
+    ASSERT_NE(deferHandler, nullptr);
+    std::unique_ptr<BamlElement> result = deferHandler->TranslateDefer(*ctx, *pair.keyNode, &parentElem);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Xaml.Element->ToString(),
+        "<Key xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">\r\n"
+        "  <ToolBar xmlns=\"http://probe.pi/ns\">inner</ToolBar>\r\n"
+        "</Key>");
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent>\r\n"
+        "  <Key xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">\r\n"
+        "    <ToolBar xmlns=\"http://probe.pi/ns\">inner</ToolBar>\r\n"
+        "  </Key>\r\n"
+        "</Parent>");
+    EXPECT_EQ(keyAnn->KeyElement, result.get());
+    // The x:Key element wraps the keyed element (the inherited walk's
+    // element), which carries the owning XamlType annotation of the block
+    // header's type.
+    std::shared_ptr<ILSpy::Decompiler::Xml::XElement> keyedElement;
+    for (const std::shared_ptr<ILSpy::Decompiler::Xml::XElement>& element :
+        result->Xaml.Element->Elements()) {
+        keyedElement = element;
+        break;
+    }
+    ASSERT_NE(keyedElement, nullptr);
+    auto* typeAnnotation =
+        keyedElement->Annotation<std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlType>>();
+    ASSERT_NE(typeAnnotation, nullptr);
+    EXPECT_EQ((*typeAnnotation)->TypeName, "ToolBar");
+}
+
+// F8a: the missing-annotation arm -- TranslateDefer over a fresh key node
+// (no Create ran) NREs at the (XamlResourceKey)node.Annotation cast, for
+// each of the three handlers.
+TEST_F(HandlersTest, KeyHandlersWithoutTheAnnotationThrowTheNRE)
+{
+    for (Baml::BamlRecordType type : { Baml::BamlRecordType::DefAttributeKeyString,
+            Baml::BamlRecordType::DefAttributeKeyType }) {
+        auto ctx = fixture_.MakeContextE();
+        std::unique_ptr<Baml::BamlRecord> keyRecord;
+        if (type == Baml::BamlRecordType::DefAttributeKeyString) {
+            auto record = std::make_unique<Baml::DefAttributeKeyStringRecord>();
+            record->ValueId = 0xFFFF;
+            keyRecord = std::move(record);
+        } else {
+            auto record = std::make_unique<Baml::DefAttributeKeyTypeRecord>();
+            record->TypeId = 0xFD63;
+            keyRecord = std::move(record);
+        }
+        KeyPairFixture pair(std::move(keyRecord), false);
+        ASSERT_TRUE(pair.Ok);
+        BamlElement parentElem = MakeParentElem();
+
+        IHandler* handler = Lookup(type);
+        auto* deferHandler = dynamic_cast<ILSpy::BamlDecompiler::IDeferHandler*>(handler);
+        ASSERT_NE(deferHandler, nullptr);
+        try {
+            deferHandler->TranslateDefer(*ctx, *pair.keyNode, &parentElem);
+            FAIL() << "the missing-annotation defer must throw";
+        } catch (const std::runtime_error& ex) {
+            EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
+        }
+    }
+
+    // The KeyElementStart block arm (the record cast precedes the annotation
+    // cast -- the block node with its KeyElementStart header passes it).
+    {
+        auto ctx = fixture_.MakeContextE();
+        auto keyHeader = std::make_unique<Baml::KeyElementStartRecord>();
+        static_cast<Baml::KeyElementStartRecord*>(keyHeader.get())->TypeId = 0xFD63;
+        KeyPairFixture pair(std::move(keyHeader), true);
+        ASSERT_TRUE(pair.Ok);
+        BamlElement parentElem = MakeParentElem();
+
+        IHandler* handler = Lookup(Baml::BamlRecordType::KeyElementStart);
+        auto* deferHandler = dynamic_cast<ILSpy::BamlDecompiler::IDeferHandler*>(handler);
+        ASSERT_NE(deferHandler, nullptr);
+        try {
+            deferHandler->TranslateDefer(*ctx, *pair.keyNode, &parentElem);
+            FAIL() << "the missing-annotation defer must throw";
+        } catch (const std::runtime_error& ex) {
+            EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
+        }
+    }
+}
+
+// F9: the DefAttributeType ORDER pin -- ctx.ToString(parent.Xaml, type) runs
+// BEFORE the annotation cast: a mscorlib-backed type resolves the namespace
+// against the PARENT (the clr-namespace declaration the E14 gold pins) and
+// THEN the missing annotation NREs.
+TEST_F(HandlersTest, DefAttributeTypeDeferResolvesTheTypeBeforeTheAnnotationRead)
+{
+    auto ctx = fixture_.MakeContextE();
+    auto keyRecord = std::make_unique<Baml::DefAttributeKeyTypeRecord>();
+    static_cast<Baml::DefAttributeKeyTypeRecord*>(keyRecord.get())->TypeId = 1;
+    KeyPairFixture pair(std::move(keyRecord), false);
+    ASSERT_TRUE(pair.Ok);
+    BamlElement parentElem = MakeParentElem();
+
+    IHandler* handler = Lookup(Baml::BamlRecordType::DefAttributeKeyType);
+    auto* deferHandler = dynamic_cast<ILSpy::BamlDecompiler::IDeferHandler*>(handler);
+    ASSERT_NE(deferHandler, nullptr);
+    try {
+        deferHandler->TranslateDefer(*ctx, *pair.keyNode, &parentElem);
+        FAIL() << "the missing-annotation defer must throw";
+    } catch (const std::runtime_error& ex) {
+        EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
+    }
+    // The ToString mutation landed on the parent BEFORE the throw: the
+    // clr-namespace declaration of the mscorlib-backed System.String type.
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent xmlns:system=\"clr-namespace:System\" />");
+}
+
+// F9b: the missing-string-id arm -- ResolveString(999) answers the C# null
+// and the XElement.Value assignment throws its ArgumentNullException
+// ("Value cannot be null. (Parameter 'value')") AFTER the x:Key element is
+// attached to the parent.
+TEST_F(HandlersTest, DefAttributeStringWithAMissingStringIdThrowsTheNetArgumentNull)
+{
+    auto ctx = fixture_.MakeContextE();
+    auto keyRecord = std::make_unique<Baml::DefAttributeKeyStringRecord>();
+    keyRecord->ValueId = 999;
+    KeyPairFixture pair(std::move(keyRecord), false);
+    ASSERT_TRUE(pair.Ok);
+    BamlElement parentElem = MakeParentElem();
+
+    IHandler* handler = Lookup(Baml::BamlRecordType::DefAttributeKeyString);
+    std::unique_ptr<BamlElement> translated = handler->Translate(*ctx, *pair.keyNode, &parentElem);
+    EXPECT_EQ(translated, nullptr);
+
+    auto* deferHandler = dynamic_cast<ILSpy::BamlDecompiler::IDeferHandler*>(handler);
+    ASSERT_NE(deferHandler, nullptr);
+    try {
+        deferHandler->TranslateDefer(*ctx, *pair.keyNode, &parentElem);
+        FAIL() << "the missing-string-id defer must throw";
+    } catch (const std::invalid_argument& ex) {
+        EXPECT_STREQ(ex.what(), "Value cannot be null. (Parameter 'value')");
+    }
+    // The x:Key element was attached before the throw.
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent>\r\n"
+        "  <Key xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\" />\r\n"
+        "</Parent>");
+}
+
+// F10: the null-parent TranslateDefer arms -- the annotation present (a
+// prior Translate), the parent null at the direct drive.
+TEST_F(HandlersTest, KeyHandlersWithANullParentAtTranslateDeferThrowTheNRE)
+{
+    for (Baml::BamlRecordType type : { Baml::BamlRecordType::DefAttributeKeyString,
+            Baml::BamlRecordType::DefAttributeKeyType,
+            Baml::BamlRecordType::KeyElementStart }) {
+        auto ctx = fixture_.MakeContextE();
+        std::unique_ptr<Baml::BamlRecord> keyRecord;
+        bool keyIsBlock = false;
+        if (type == Baml::BamlRecordType::DefAttributeKeyString) {
+            auto record = std::make_unique<Baml::DefAttributeKeyStringRecord>();
+            record->ValueId = 0xFFFF;
+            keyRecord = std::move(record);
+        } else if (type == Baml::BamlRecordType::DefAttributeKeyType) {
+            auto record = std::make_unique<Baml::DefAttributeKeyTypeRecord>();
+            record->TypeId = 0xFD63;
+            keyRecord = std::move(record);
+        } else {
+            auto record = std::make_unique<Baml::KeyElementStartRecord>();
+            static_cast<Baml::KeyElementStartRecord*>(record.get())->TypeId = 0xFD63;
+            keyRecord = std::move(record);
+            keyIsBlock = true;
+        }
+        KeyPairFixture pair(std::move(keyRecord), keyIsBlock);
+        ASSERT_TRUE(pair.Ok);
+        BamlElement parentElem = MakeParentElem();
+
+        IHandler* handler = Lookup(type);
+        std::unique_ptr<BamlElement> translated = handler->Translate(*ctx, *pair.keyNode, &parentElem);
+        EXPECT_EQ(translated, nullptr);
+        ASSERT_NE(pair.KeyOf(*pair.keyNode), nullptr);
+
+        auto* deferHandler = dynamic_cast<ILSpy::BamlDecompiler::IDeferHandler*>(handler);
+        ASSERT_NE(deferHandler, nullptr);
+        try {
+            deferHandler->TranslateDefer(*ctx, *pair.keyNode, nullptr);
+            FAIL() << "the null-parent defer must throw";
+        } catch (const std::runtime_error& ex) {
+            EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
+        }
+    }
+}
 } // namespace

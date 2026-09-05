@@ -47,10 +47,11 @@
 # slices: the Handlers/Records leaf handlers (Text/TextWithId/
 # TextWithConverter, ConnectionId, DefAttribute, PresentationOptionsAttribute,
 # Property/PropertyWithConverter with the attached/x:Name/plain arm selection,
-# ConstructorParameterType's TypeExtension render, and the nine null-returning
+# ConstructorParameterType's TypeExtension render, the x:Key defer pair
+# DefAttributeStringHandler/DefAttributeTypeHandler, and the nine null-returning
 # info/mapping/line handlers) and the Handlers/Blocks block handlers
-# (DocumentHandler, ElementHandler, the four property-element blocks, and
-# ConstructorParametersStart) -- 25 of
+# (DocumentHandler, ElementHandler, the x:Key block KeyElementStartHandler,
+# the four property-element blocks, and ConstructorParametersStart) -- 28 of
 # the 37 gold-registry rows pinned in tests/BamlDecompiler/HandlerMap_Test.cpp,
 # the rest landing as their classes port), the lazy LookupHandler over it, the
 # duplicate-key InstallHandler, and the ProcessChildren walk with its

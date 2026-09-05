@@ -26,6 +26,7 @@
 #include "BamlDecompiler/BamlElement.hpp"
 #include "BamlDecompiler/Handlers/Records.hpp"
 #include "BamlDecompiler/Xaml/XamlProperty.hpp"
+#include "BamlDecompiler/Xaml/XamlResourceKey.hpp"
 #include "BamlDecompiler/Xaml/XamlType.hpp"
 #include "BamlDecompiler/Xaml/XamlUtils.hpp"
 #include "BamlDecompiler/XamlContext.hpp"
@@ -33,6 +34,7 @@
 #include "Decompiler/TypeSystem/IModule.hpp"
 #include "Decompiler/Xml/XAttribute.hpp"
 
+#include <any>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -87,6 +89,26 @@ std::string CheckedStringId(XamlContext& ctx, std::uint16_t id)
     if (!name)
         throw std::invalid_argument("Value cannot be null. (Parameter 'localName')");
     return std::move(*name);
+}
+
+// The C# `(XamlResourceKey)node.Annotation` unboxing cast of the key
+// handlers' TranslateDefer bodies: a null annotation is the .NET
+// NullReferenceException (the unbox of a null reference -- the gold-pinned
+// missing-Create arm), a foreign payload the InvalidCastException --
+// unreachable through the engine (only XamlResourceKey.Create sets the key
+// annotation), so the source type renders through the fixed '<annotation>'
+// placeholder (the XamlResourceKey convention).
+std::shared_ptr<Xaml::XamlResourceKey> KeyAnnotationOf(Baml::BamlNode& node)
+{
+    if (!node.Annotation.has_value())
+        throw std::runtime_error(kNullReferenceMessage);
+    auto* keyAny = std::any_cast<std::shared_ptr<Xaml::XamlResourceKey>>(
+        &node.Annotation);
+    if (keyAny == nullptr)
+        throw std::runtime_error(
+            "Unable to cast object of type '<annotation>' to type "
+            "'ICSharpCode.BamlDecompiler.Xaml.XamlResourceKey'.");
+    return *keyAny;
 }
 
 } // namespace
@@ -312,6 +334,107 @@ std::unique_ptr<BamlElement> PresentationOptionsAttributeHandler::Translate(
         record.Value);
     ParentElementOf(parent).Add(std::move(attribute));
     return nullptr;
+}
+
+// ===== DefAttributeStringHandler ===========================================
+
+Baml::BamlRecordType DefAttributeStringHandler::Type() const
+{
+    return Baml::BamlRecordType::DefAttributeKeyString;
+}
+
+std::unique_ptr<BamlElement> DefAttributeStringHandler::Translate(
+    XamlContext&, Baml::BamlNode& node, BamlElement*)
+{
+    // The C# `XamlResourceKey.Create(node); return null;` -- the handler
+    // contributes no element; the Create call is the whole body (the key
+    // annotation pair the value element's ElementHandler defer branch
+    // reads).
+    Xaml::XamlResourceKey::Create(node);
+    return nullptr;
+}
+
+std::unique_ptr<BamlElement> DefAttributeStringHandler::TranslateDefer(
+    XamlContext& ctx, Baml::BamlNode& node, BamlElement* parent)
+{
+    Baml::DefAttributeKeyStringRecord& record =
+        CheckedRecord<Baml::DefAttributeKeyStringRecord>(
+            node, "DefAttributeKeyStringRecord");
+    std::shared_ptr<Xaml::XamlResourceKey> key = KeyAnnotationOf(node);
+    // The C# `new XElement(ctx.GetKnownNamespace("Key", ..., parent.Xaml))`:
+    // the `parent.Xaml` read NREs for a null parent, and the Add below NREs
+    // for a string-Xaml parent's null element (the GetKnownNamespace context
+    // parameter takes the null element without a throw).
+    if (parent == nullptr)
+        throw std::runtime_error(kNullReferenceMessage);
+    auto keyElement = std::make_shared<Xml::XElement>(
+        ctx.GetKnownNamespace("Key", XamlContext::KnownNamespace_Xaml,
+            parent->Xaml.Element.get()));
+    auto bamlElem = std::make_unique<BamlElement>(&node);
+    bamlElem->Xaml = keyElement;
+    ParentElementOf(parent).Add(keyElement);
+    // The C# `bamlElem.Xaml.Element.Value = ctx.ResolveString(record.ValueId)`
+    // -- the missing-id arm hands the null to the XElement.Value setter,
+    // whose ArgumentNullException the gold pinned (AFTER the x:Key element
+    // is attached to the parent).
+    std::optional<std::string> value = ctx.ResolveString(record.ValueId);
+    if (!value)
+        throw std::invalid_argument("Value cannot be null. (Parameter 'value')");
+    keyElement->Value(std::move(*value));
+    // The C# `key.KeyElement = bamlElem` -- the non-owning back-pointer the
+    // StaticResource consumer lookups read.
+    key->KeyElement = bamlElem.get();
+    return bamlElem;
+}
+
+// ===== DefAttributeTypeHandler ==============================================
+
+Baml::BamlRecordType DefAttributeTypeHandler::Type() const
+{
+    return Baml::BamlRecordType::DefAttributeKeyType;
+}
+
+std::unique_ptr<BamlElement> DefAttributeTypeHandler::Translate(
+    XamlContext&, Baml::BamlNode& node, BamlElement*)
+{
+    // The C# `XamlResourceKey.Create(node); return null;`.
+    Xaml::XamlResourceKey::Create(node);
+    return nullptr;
+}
+
+std::unique_ptr<BamlElement> DefAttributeTypeHandler::TranslateDefer(
+    XamlContext& ctx, Baml::BamlNode& node, BamlElement* parent)
+{
+    Baml::DefAttributeKeyTypeRecord& record =
+        CheckedRecord<Baml::DefAttributeKeyTypeRecord>(
+            node, "DefAttributeKeyTypeRecord");
+    // The C# order: `ctx.ResolveType(record.TypeId)` THEN `ctx.ToString(
+    // parent.Xaml, type)` -- the parent read NREs HERE, BEFORE the annotation
+    // cast (the order the gold pinned: the ToString mutation lands on the
+    // parent even when the missing annotation NREs right after).
+    std::shared_ptr<Xaml::XamlType> type = ctx.ResolveTypeOwning(record.TypeId);
+    if (parent == nullptr || !parent->Xaml.Element)
+        throw std::runtime_error(kNullReferenceMessage);
+    std::string typeName = Xaml::ToString(ctx, *parent->Xaml.Element, *type);
+    std::shared_ptr<Xaml::XamlResourceKey> key = KeyAnnotationOf(node);
+    auto keyElement = std::make_shared<Xml::XElement>(
+        ctx.GetKnownNamespace("Key", XamlContext::KnownNamespace_Xaml,
+            parent->Xaml.Element.get()));
+    auto bamlElem = std::make_unique<BamlElement>(&node);
+    bamlElem->Xaml = keyElement;
+    ParentElementOf(parent).Add(keyElement);
+    // The C# TypeExtension child: the {x:Type} extension element (the known
+    // type annotation id 0xfd4d) wrapping the Ctor pseudo-element carrying
+    // the resolved type's name.
+    auto typeElem = std::make_shared<Xml::XElement>(
+        ctx.GetKnownNamespace("TypeExtension", XamlContext::KnownNamespace_Xaml,
+            parent->Xaml.Element.get()));
+    typeElem->AddAnnotation(ctx.ResolveTypeOwning(0xfd4d));
+    typeElem->Add(std::make_shared<Xml::XElement>(
+        ctx.GetPseudoName("Ctor"), std::move(typeName)));
+    keyElement->Add(typeElem);
+    key->KeyElement = bamlElem.get();
+    return bamlElem;
 }
 
 // ===== the null-returning handlers ==========================================
