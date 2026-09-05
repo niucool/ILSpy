@@ -40,9 +40,10 @@
 //    parent element's XmlnsScope annotation has Element() == the element
 //    itself, the info records are skipped, and the dispatch order is the
 //    document order. The port tests drive stub handlers through the same
-//    fixture shape for the wiring machinery; the first real-handler slice
-//    (17 rows -- the Handlers/Records leaf handlers and the
-//    Handlers/Blocks Document/Element handlers) is driven end-to-end against
+//    fixture shape for the wiring machinery; the landed real-handler slices
+//    (25 rows -- the Handlers/Records leaf handlers, the property-family
+//    records, and the Handlers/Blocks Document/Element/property-element/
+//    constructor handlers) are driven end-to-end against
 //    the probe's render gold in Handlers_Test.cpp.
 
 #include "BamlDecompiler/Baml/BamlNode.hpp"
@@ -615,8 +616,8 @@ TEST(HandlerMapGoldRegistryTest, BuiltinManifestStaysInsideTheGoldInventory)
 {
     // Every manifest row must be one of the probed registry's 37 -- and
     // never one of the types the real registry holds no handler for at all
-    // (the current slice: the first 17 rows, the Handlers/Records and
-    // Handlers/Blocks classes that have landed so far).
+    // (the landed slices: the Handlers/Records and Handlers/Blocks classes
+    // ported so far).
     for (const auto& handler : HandlerMap::CreateBuiltinHandlers()) {
         const int value = static_cast<int>(handler->Type());
         const bool known = std::any_of(std::begin(kGoldRegistry), std::end(kGoldRegistry),

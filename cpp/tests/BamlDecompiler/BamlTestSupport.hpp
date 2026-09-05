@@ -67,6 +67,10 @@ constexpr const char* kPresentationFrameworkFullName =
     "PresentationFramework, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35";
 constexpr const char* kPresentationCoreFullName =
     "PresentationCore, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35";
+// The probe's real mscorlib PEFile full name (the .NET Framework 4.8 GAC
+// assembly the HandlerMapProbe drives).
+constexpr const char* kMscorlibFullName =
+    "mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089";
 
 class XamlContextFixture {
 public:
@@ -79,6 +83,7 @@ public:
             std::optional<std::string>(kPresentationXmlns));
         presentationFramework_ = AddSynthetic("PresentationFramework", std::nullopt);
         AddSynthetic("System.Xml", std::nullopt);
+        RegisterMscorlibStubs();
     }
 
     ILSpy::Decompiler::TypeSystem::ICompilation& Compilation() { return compilation_; }
@@ -153,7 +158,109 @@ public:
         return ::ILSpy::BamlDecompiler::XamlContext::Construct(compilation_, *document_, settings);
     }
 
+    // The section-E document (the HandlerMapProbe's MakeDocumentE): the walk
+    // fixture plus the mscorlib-backed string/type rows -- a REAL resolved
+    // member (String.Length / Type.Name over the stub main-module types),
+    // which the non-attached and x:Name arms of PropertyHandler need.
+    ILSpy::BamlDecompiler::Baml::BamlDocument MakeDocumentE()
+    {
+        ILSpy::BamlDecompiler::Baml::BamlDocument doc = MakeDocument();
+        namespace Rec = ::ILSpy::BamlDecompiler::Baml;
+        // The insertion point: before the ElementStart block (the info
+        // records must stay inside the DocumentStart block).
+        std::size_t insertAt = doc.Records.size() - 3;
+        auto insert = [&doc, &insertAt](std::unique_ptr<Rec::BamlRecord> r) {
+            doc.Records.insert(doc.Records.begin() + insertAt++, std::move(r));
+        };
+
+        auto mscorlib = std::make_unique<Rec::AssemblyInfoRecord>();
+        mscorlib->AssemblyId = 1;
+        mscorlib->AssemblyFullName = kMscorlibFullName;
+        insert(std::move(mscorlib));
+
+        auto stringType = std::make_unique<Rec::TypeInfoRecord>();
+        stringType->TypeId = 1;
+        stringType->AssemblyId = 1;
+        stringType->TypeFullName = "System.String";
+        insert(std::move(stringType));
+
+        auto length = std::make_unique<Rec::AttributeInfoRecord>();
+        length->AttributeId = 1;
+        length->OwnerTypeId = 1;
+        length->AttributeUsage = 0;
+        length->Name = "Length";
+        insert(std::move(length));
+
+        auto typeType = std::make_unique<Rec::TypeInfoRecord>();
+        typeType->TypeId = 2;
+        typeType->AssemblyId = 1;
+        typeType->TypeFullName = "System.Type";
+        insert(std::move(typeType));
+
+        auto name = std::make_unique<Rec::AttributeInfoRecord>();
+        name->AttributeId = 2;
+        name->OwnerTypeId = 2;
+        name->AttributeUsage = 0;
+        name->Name = "Name";
+        insert(std::move(name));
+        return doc;
+    }
+
+    // Constructs the XamlContext over a fresh section-E document (the
+    // handler drives' fixture; each drive constructs its own -- the
+    // ResolveNamespace mutations couple drives that share a context). The
+    // main module takes the probe's real four-part mscorlib full name for
+    // these contexts (the real PEFile the HandlerMapProbe drives -- the
+    // XamlType.ResolveNamespace main-module arm compares against it; the
+    // short "mscorlib" shape the walk-fixture contexts keep is what the
+    // MainModuleArm fixture tests pin).
+    std::unique_ptr<::ILSpy::BamlDecompiler::XamlContext> MakeContextE()
+    {
+        compilation_.SetMainModuleFullAssemblyName(kMscorlibFullName);
+        document_ = std::make_unique<ILSpy::BamlDecompiler::Baml::BamlDocument>(MakeDocumentE());
+        return ::ILSpy::BamlDecompiler::XamlContext::Construct(compilation_, *document_, nullptr);
+    }
+
 private:
+    // The mscorlib-backed stub types the section-E document resolves
+    // (System.String with its Length property, System.Type with its Name
+    // property): a REAL resolved member on a main-module type, which the
+    // PropertyHandler non-attached and x:Name arms need. The definitions
+    // answer the module walk's `GetTypeDefinition` through the main
+    // module's type map; the properties' DeclaringType aliases their own
+    // definition (the IsAttachedTo FullName comparison).
+    void RegisterMscorlibStubs()
+    {
+        namespace TS = ::ILSpy::Decompiler::TypeSystem;
+        const TS::IModule* mainModule = &compilation_.MainModule();
+        auto makeType = [&](const std::string& ns, const std::string& name) {
+            return std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+                ns + "." + name, ns, TS::FullTypeName(TS::TopLevelTypeName(ns, name)),
+                TS::TypeKind::Class, TS::Accessibility::Public, compilation_, mainModule);
+        };
+        stringType_ = makeType("System", "String");
+        typeType_ = makeType("System", "Type");
+        auto makeProperty = [&](const std::string& name,
+                                TS::TestSupport::LookupTypeDefinition& declaring) {
+            // The property type is never read by the property-resolution
+            // paths (TryResolve's filter reads Name, IsAttachedTo reads
+            // DeclaringType) -- the declaring definition stands in.
+            auto property = std::make_shared<TS::TestSupport::LookupProperty>(
+                name, TS::ITypePtr(&declaring, [](TS::IType*) {}), compilation_);
+            property->SetDeclaringType(
+                TS::ITypePtr(&declaring, [](TS::IType*) {}));
+            return property;
+        };
+        lengthProperty_ = makeProperty("Length", *stringType_);
+        nameProperty_ = makeProperty("Name", *typeType_);
+        stringType_->SetProperties({ lengthProperty_.get() });
+        typeType_->SetProperties({ nameProperty_.get() });
+        compilation_.SetMainModuleTypeDefinition(
+            TS::TopLevelTypeName("System", "String"), stringType_.get());
+        compilation_.SetMainModuleTypeDefinition(
+            TS::TopLevelTypeName("System", "Type"), typeType_.get());
+    }
+
     const ILSpy::Decompiler::TypeSystem::IModule* AddSynthetic(
         const std::string& name, std::optional<std::string> xmlns)
     {
@@ -175,6 +282,13 @@ private:
     std::unique_ptr<ILSpy::BamlDecompiler::Baml::BamlDocument> document_;
     const ILSpy::Decompiler::TypeSystem::IModule* presentationCore_ = nullptr;
     const ILSpy::Decompiler::TypeSystem::IModule* presentationFramework_ = nullptr;
+    // The mscorlib-backed stubs (RegisterMscorlibStubs) -- owned here so the
+    // compilation's non-owning registrations stay valid for the fixture's
+    // lifetime.
+    std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition> stringType_;
+    std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition> typeType_;
+    std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupProperty> lengthProperty_;
+    std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupProperty> nameProperty_;
 };
 
 } // namespace ILSpy::Tests::Baml

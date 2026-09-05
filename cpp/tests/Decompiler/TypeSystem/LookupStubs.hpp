@@ -223,6 +223,25 @@ public:
     {
         mainModule_.SetAssemblyName(std::move(name));
     }
+    // Configurable FULL assembly name of the MAIN module (the XamlType
+    // ResolveNamespace main-module arm compares the XamlType's full
+    // assembly name against `MainModule.FullAssemblyName`; the probe's real
+    // mscorlib PEFile carries the four-part name). The default (the short
+    // assembly name) preserves the prior behavior so existing tests are
+    // unaffected (the additive-setter convention).
+    void SetMainModuleFullAssemblyName(std::string name)
+    {
+        mainModule_.SetFullAssemblyName(std::move(name));
+    }
+    // A `GetTypeDefinition` registration in the MAIN module's type map (the
+    // ReflectionHelper module walk resolves an unqualified reflection name
+    // through `IModule.GetTypeDefinition(TopLevelTypeName)`; the BAML fixture
+    // registers the mscorlib-backed string/type stubs there). The pointer is
+    // non-owning (the caller keeps the `ITypeDefinition` stubs alive).
+    void SetMainModuleTypeDefinition(const TopLevelTypeName& name, const ITypeDefinition* d)
+    {
+        mainModule_.SetTypeDefinition(name, d);
+    }
     // A module appended to `ReferencedModules` (the BamlContext
     // FindMatchingReference fixture: the WindowsBase version trio picking
     // the highest-version / last-of-equal reference). Defaults preserve the
@@ -996,6 +1015,14 @@ public:
         : name_(std::move(name)), propertyType_(std::move(propertyType)), compilation_(compilation)
     {}
 
+    // Configurable `DeclaringType` (the XamlProperty.IsAttachedTo walk reads
+    // `ResolvedMember.DeclaringType`'s FullName/TypeParameterCount). The
+    // default (an empty `ITypePtr` -- the C# null) preserves the prior
+    // behavior so existing tests are unaffected (the additive-setter
+    // convention); the pointer is non-owning (the caller keeps the stub
+    // alive).
+    void SetDeclaringType(ITypePtr type) { declaringType_ = std::move(type); }
+
     // --- ISymbol ---
     TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Property; }
     std::string Name() const override { return name_; }
@@ -1011,7 +1038,7 @@ public:
     // --- IEntity ---
     std::uint32_t MetadataToken() const override { return 0; }
     const ITypeDefinition* DeclaringTypeDefinition() const override { return nullptr; }
-    ITypePtr DeclaringType() const override { return {}; }
+    ITypePtr DeclaringType() const override { return declaringType_; }
     const IModule* ParentModule() const override { return nullptr; }
     std::vector<const IAttribute*> GetAttributes() const override { return {}; }
     bool HasAttribute(KnownAttribute) const override { return false; }
@@ -1050,6 +1077,7 @@ public:
 private:
     std::string name_;
     ITypePtr propertyType_;
+    ITypePtr declaringType_;
     const ICompilation& compilation_;
 };
 

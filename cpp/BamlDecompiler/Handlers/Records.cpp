@@ -25,7 +25,12 @@
 #include "BamlDecompiler/Baml/BamlNode.hpp"
 #include "BamlDecompiler/BamlElement.hpp"
 #include "BamlDecompiler/Handlers/Records.hpp"
+#include "BamlDecompiler/Xaml/XamlProperty.hpp"
+#include "BamlDecompiler/Xaml/XamlType.hpp"
+#include "BamlDecompiler/Xaml/XamlUtils.hpp"
 #include "BamlDecompiler/XamlContext.hpp"
+#include "Decompiler/TypeSystem/ITypeDefinition.hpp"
+#include "Decompiler/TypeSystem/IModule.hpp"
 #include "Decompiler/Xml/XAttribute.hpp"
 
 #include <memory>
@@ -85,6 +90,118 @@ std::string CheckedStringId(XamlContext& ctx, std::uint16_t id)
 }
 
 } // namespace
+
+// ===== PropertyHandler ======================================================
+
+Baml::BamlRecordType PropertyHandler::Type() const
+{
+    return Baml::BamlRecordType::Property;
+}
+
+std::unique_ptr<BamlElement> PropertyHandler::Translate(XamlContext& ctx,
+    Baml::BamlNode& node, BamlElement* parent)
+{
+    Baml::PropertyRecord& record = CheckedRecord<Baml::PropertyRecord>(
+        node, "PropertyRecord");
+    // The C# `parent.Xaml.Element.Annotation<XamlType>()` -- the parent read
+    // precedes the property resolution, and the annotation is the OWNING
+    // shared_ptr the ElementHandler attached (a plain parent carries none,
+    // and a null elemType takes the attached arm below).
+    Xml::XElement& parentElement = ParentElementOf(parent);
+    Xaml::XamlType* elemType = nullptr;
+    if (auto* annotation = parentElement.Annotation<std::shared_ptr<Xaml::XamlType>>())
+        elemType = annotation->get();
+    std::shared_ptr<Xaml::XamlProperty> xamlProp = ctx.ResolvePropertyOwning(
+        record.AttributeId);
+    std::string value = Xaml::Escape(record.Value);
+    // The C# `xamlProp.DeclaringType.ResolveNamespace(parent.Xaml, ctx)` --
+    // the mutation the arm selection below reads (the xmlns lands on the
+    // parent before the attribute is built). The C# mutates through the
+    // property's readonly `XamlType DeclaringType` reference (legal in C#);
+    // the port's non-owning pointer is const, so the cast carries the
+    // documented mutation.
+    const_cast<Xaml::XamlType*>(xamlProp->DeclaringType)
+        ->ResolveNamespace(parentElement, ctx);
+
+    // The C# local function `ConstructXAttribute()`, evaluated at Add time
+    // (after the ResolveNamespace mutation). The arm order: attached,
+    // x:Name, plain.
+    std::shared_ptr<Xml::XAttribute> attribute;
+    if (xamlProp->IsAttachedTo(elemType)) {
+        attribute = std::make_shared<Xml::XAttribute>(
+            xamlProp->ToXName(ctx, &parentElement, true), value);
+    } else if (xamlProp->PropertyName == "Name") {
+        // The C# `elemType.ResolvedType.GetDefinition()?.ParentModule.IsMainModule
+        // == true` -- the PropertyName == "Name" short-circuit guard means a
+        // null elemType never reaches here (IsAttachedTo(null) is true), but a
+        // null ResolvedType is the C# NRE at the GetDefinition call.
+        if (elemType->ResolvedType == nullptr)
+            throw std::runtime_error(kNullReferenceMessage);
+        const ILSpy::Decompiler::TypeSystem::ITypeDefinition* definition =
+            elemType->ResolvedType->GetDefinition();
+        const ILSpy::Decompiler::TypeSystem::IModule* module =
+            definition != nullptr ? definition->ParentModule() : nullptr;
+        if (module != nullptr && module->IsMainModule())
+            attribute = std::make_shared<Xml::XAttribute>(
+                ctx.GetKnownNamespace("Name", XamlContext::KnownNamespace_Xaml,
+                    &parentElement),
+                value);
+    }
+    if (attribute == nullptr)
+        attribute = std::make_shared<Xml::XAttribute>(
+            xamlProp->ToXName(ctx, &parentElement, false), value);
+    parentElement.Add(std::move(attribute));
+    return nullptr;
+}
+
+// ===== PropertyWithConverterHandler =========================================
+
+Baml::BamlRecordType PropertyWithConverterHandler::Type() const
+{
+    return Baml::BamlRecordType::PropertyWithConverter;
+}
+
+// ===== ConstructorParameterTypeHandler =======================================
+
+Baml::BamlRecordType ConstructorParameterTypeHandler::Type() const
+{
+    return Baml::BamlRecordType::ConstructorParameterType;
+}
+
+std::unique_ptr<BamlElement> ConstructorParameterTypeHandler::Translate(
+    XamlContext& ctx, Baml::BamlNode& node, BamlElement* parent)
+{
+    Baml::ConstructorParameterTypeRecord& record =
+        CheckedRecord<Baml::ConstructorParameterTypeRecord>(
+            node, "ConstructorParameterTypeRecord");
+    // The C# `ctx.GetKnownNamespace("TypeExtension", ..., parent.Xaml)` -- the
+    // `parent.Xaml` read NREs for a null parent, while a string-Xaml parent
+    // hands the null element to the context parameter (no default-namespace
+    // collapse; the Add below still NREs).
+    if (parent == nullptr)
+        throw std::runtime_error(kNullReferenceMessage);
+    Xml::XElement* context = parent->Xaml.Element.get();
+    auto elem = std::make_shared<Xml::XElement>(
+        ctx.GetKnownNamespace("TypeExtension", XamlContext::KnownNamespace_Xaml,
+            context));
+    // The C# `elem.AddAnnotation(ctx.ResolveType(0xfd4d))` -- the known type
+    // TypeExtension (the `(ushort)(-index)` wire form), held by the OWNING
+    // annotation handle.
+    elem->AddAnnotation(ctx.ResolveTypeOwning(0xfd4d));
+
+    auto bamlElem = std::make_unique<BamlElement>(&node);
+    bamlElem->Xaml = elem;
+    ParentElementOf(parent).Add(elem);
+
+    // The C# `var type = ctx.ResolveType(record.TypeId); var typeName =
+    // ctx.ToString(parent.Xaml, type)` -- the ToString resolves the type's
+    // namespace against the PARENT element (the mutation the prefix render
+    // reads).
+    std::shared_ptr<Xaml::XamlType> type = ctx.ResolveTypeOwning(record.TypeId);
+    std::string typeName = Xaml::ToString(ctx, ParentElementOf(parent), *type);
+    elem->Add(std::make_shared<Xml::XElement>(ctx.GetPseudoName("Ctor"), typeName));
+    return bamlElem;
+}
 
 // ===== TextHandler ==========================================================
 

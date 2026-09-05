@@ -43,11 +43,14 @@
 # attach through the node annotations, with the sibling/ancestor key lookups),
 # plus the record-type-to-handler dispatch (IHandlers: the IHandler/IDeferHandler
 # interfaces and the HandlerMap -- the explicit CreateBuiltinHandlers manifest
-# standing in for the C# reflection walk, populated lazily with the first
-# handler slice: the Handlers/Records leaf handlers (Text/TextWithId/
+# standing in for the C# reflection walk, populated lazily with the handler
+# slices: the Handlers/Records leaf handlers (Text/TextWithId/
 # TextWithConverter, ConnectionId, DefAttribute, PresentationOptionsAttribute,
-# and the nine null-returning info/mapping/line handlers) and the
-# Handlers/Blocks block handlers (DocumentHandler, ElementHandler) -- 17 of
+# Property/PropertyWithConverter with the attached/x:Name/plain arm selection,
+# ConstructorParameterType's TypeExtension render, and the nine null-returning
+# info/mapping/line handlers) and the Handlers/Blocks block handlers
+# (DocumentHandler, ElementHandler, the four property-element blocks, and
+# ConstructorParametersStart) -- 25 of
 # the 37 gold-registry rows pinned in tests/BamlDecompiler/HandlerMap_Test.cpp,
 # the rest landing as their classes port), the lazy LookupHandler over it, the
 # duplicate-key InstallHandler, and the ProcessChildren walk with its

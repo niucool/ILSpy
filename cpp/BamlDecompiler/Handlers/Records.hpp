@@ -30,6 +30,12 @@
 //  * DefAttributeHandler (DefAttribute -- the x:-namespaced attribute) and
 //    PresentationOptionsAttributeHandler (PresentationOptionsAttribute -- the
 //    presentation-options-namespaced attribute),
+//  * PropertyHandler (Property -- the property attribute, with the attached
+//    / x:Name / plain arm selection) and PropertyWithConverterHandler
+//    (PropertyWithConverter, the PropertyHandler subclass that only re-binds
+//    the record type),
+//  * ConstructorParameterTypeHandler (ConstructorParameterType -- the
+//    {x:Type} TypeExtension element),
 //  * the nine null-returning handlers (AssemblyInfo, AttributeInfo,
 //    ContentProperty, DeferableContentStart, LineNumberAndPosition,
 //    LinePosition, PIMapping, TypeInfo, TypeSerializerInfo).
@@ -56,6 +62,41 @@
 #include "BamlDecompiler/IHandlers.hpp"
 
 namespace ILSpy::BamlDecompiler::Handlers {
+
+// The C# `internal class PropertyHandler : IHandler` -- the plain property
+// attribute on the parent element (the attached form, the x:Name form, or
+// the plain declaring-type-qualified form; the arm selection runs at Add
+// time, after DeclaringType.ResolveNamespace mutated the parent).
+class PropertyHandler : public IHandler {
+public:
+    // The C# `public virtual BamlRecordType Type` (the PropertyWithConverter
+    // subclass re-binds it).
+    Baml::BamlRecordType Type() const override;
+
+    std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
+        BamlElement* parent) override;
+};
+
+// The C# `internal class PropertyWithConverterHandler : PropertyHandler,
+// IHandler` -- the explicit-interface re-bind of Type (the
+// TextWithConverterHandler pattern: the port re-binds through a virtual
+// override; the only observable difference is a call through a
+// `PropertyHandler*`, which no ported consumer makes).
+class PropertyWithConverterHandler : public PropertyHandler {
+public:
+    Baml::BamlRecordType Type() const override;
+};
+
+// The C# `internal class ConstructorParameterTypeHandler : IHandler` --
+// the {x:Type ...} constructor argument (a TypeExtension element whose Ctor
+// child carries the type name).
+class ConstructorParameterTypeHandler : public IHandler {
+public:
+    Baml::BamlRecordType Type() const override;
+
+    std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
+        BamlElement* parent) override;
+};
 
 // The C# `internal class TextHandler : IHandler` -- the record's value is a
 // plain text node of the parent element.

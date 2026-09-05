@@ -37,6 +37,12 @@
 //    contribute nothing;
 //  * the exception arms the probe pinned: the null-parent NRE (D9) and the
 //    missing-string-id ArgumentNullException (D8).
+//  * the section-E property-family drives (the HandlerMapProbe's E1-E16):
+//    PropertyHandler's three arm shapes (attached / non-attached / x:Name)
+//    over the mscorlib-backed fixture rows, the PropertyWithConverter
+//    subclass, the four property-element blocks, ConstructorParametersStart,
+//    and ConstructorParameterType's TypeExtension renders -- every parent
+//    and element render byte-exact against the real handlers' drives.
 
 #include "BamlTestSupport.hpp"
 #include "BamlDecompiler/BamlConnectionId.hpp"
@@ -44,6 +50,7 @@
 #include "BamlDecompiler/Handlers/Blocks.hpp"
 #include "BamlDecompiler/Handlers/Records.hpp"
 #include "BamlDecompiler/IHandlers.hpp"
+#include "BamlDecompiler/Xaml/XamlProperty.hpp"
 #include "BamlDecompiler/Xaml/XamlType.hpp"
 
 #include <gtest/gtest.h>
@@ -100,15 +107,25 @@ protected:
 
 // The manifest: the 17 ported rows, every record type distinct, each inside
 // the gold registry inventory (the HandlerMapTest guard), with the class
+// The manifest: the 25 ported rows, every record type distinct, each inside
+// the gold registry inventory (the HandlerMapTest guard), with the class
 // identities the manifest constructs.
-TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheSeventeenPortedRows)
+TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheTwentyFivePortedRows)
 {
     std::vector<std::unique_ptr<IHandler>> handlers = HandlerMap::CreateBuiltinHandlers();
-    ASSERT_EQ(handlers.size(), 17u);
+    ASSERT_EQ(handlers.size(), 25u);
 
     const Baml::BamlRecordType expected[] = {
         Baml::BamlRecordType::DocumentStart,
         Baml::BamlRecordType::ElementStart,
+        Baml::BamlRecordType::Property,
+        Baml::BamlRecordType::PropertyWithConverter,
+        Baml::BamlRecordType::PropertyComplexStart,
+        Baml::BamlRecordType::PropertyArrayStart,
+        Baml::BamlRecordType::PropertyListStart,
+        Baml::BamlRecordType::PropertyDictionaryStart,
+        Baml::BamlRecordType::ConstructorParametersStart,
+        Baml::BamlRecordType::ConstructorParameterType,
         Baml::BamlRecordType::Text,
         Baml::BamlRecordType::TextWithConverter,
         Baml::BamlRecordType::DefAttribute,
@@ -125,7 +142,7 @@ TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheSeventeenPortedRows)
         Baml::BamlRecordType::LineNumberAndPosition,
         Baml::BamlRecordType::LinePosition,
     };
-    ASSERT_EQ(std::size(expected), 17u);
+    ASSERT_EQ(std::size(expected), 25u);
     for (Baml::BamlRecordType type : expected) {
         bool found = false;
         for (const auto& handler : handlers)
@@ -155,6 +172,32 @@ TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheSeventeenPortedRows)
     ASSERT_NE(converter, nullptr);
     EXPECT_NE(dynamic_cast<Handlers::TextWithConverterHandler*>(converter), nullptr);
     EXPECT_NE(dynamic_cast<Handlers::TextHandler*>(converter), nullptr);
+    // The PropertyWithConverter row is the PropertyHandler subclass (the
+    // same re-bind pattern).
+    IHandler* propertyConverter =
+        HandlerMap::LookupHandler(Baml::BamlRecordType::PropertyWithConverter);
+    ASSERT_NE(propertyConverter, nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::PropertyWithConverterHandler*>(propertyConverter), nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::PropertyHandler*>(propertyConverter), nullptr);
+    // The four property-element blocks and the two constructor handlers.
+    EXPECT_NE(dynamic_cast<Handlers::PropertyComplexHandler*>(
+                  HandlerMap::LookupHandler(Baml::BamlRecordType::PropertyComplexStart)),
+        nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::PropertyArrayHandler*>(
+                  HandlerMap::LookupHandler(Baml::BamlRecordType::PropertyArrayStart)),
+        nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::PropertyListHandler*>(
+                  HandlerMap::LookupHandler(Baml::BamlRecordType::PropertyListStart)),
+        nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::PropertyDictionaryHandler*>(
+                  HandlerMap::LookupHandler(Baml::BamlRecordType::PropertyDictionaryStart)),
+        nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::ConstructorParametersStartHandler*>(
+                  HandlerMap::LookupHandler(Baml::BamlRecordType::ConstructorParametersStart)),
+        nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::ConstructorParameterTypeHandler*>(
+                  HandlerMap::LookupHandler(Baml::BamlRecordType::ConstructorParameterType)),
+        nullptr);
 }
 
 // The section-C end-to-end drive: the real manifest over the walk document
@@ -464,6 +507,401 @@ TEST_F(HandlersTest, TheNullReturningHandlersContributeNothing)
         EXPECT_EQ(parentElem.Xaml.Element->ToString(), "<Parent />")
             << Baml::RecordTypeName(nullCase.type);
         EXPECT_EQ(parentElem.Children.size(), 0u) << Baml::RecordTypeName(nullCase.type);
+    }
+}
+
+// ===== the property-family drives (the probe's section E) ===================
+//
+// Every expectation below is the byte-exact gold the HandlerMapProbe
+// dumped driving the REAL handlers from the installed
+// ICSharpCode.BamlDecompiler.dll over the identical section-E fixture (the
+// walk document plus the mscorlib-backed string/type rows whose members
+// resolve through the stub main-module types).
+
+// A parent BamlElement over a plain <Parent> element (the handler's
+// contribution target), optionally annotated with the XamlType the
+// ElementHandler would have attached.
+BamlElement MakeParentElem()
+{
+    BamlElement parentElem(nullptr);
+    parentElem.Xaml = std::make_shared<ILSpy::Decompiler::Xml::XElement>("Parent");
+    return parentElem;
+}
+
+// E1: the attached arm -- a parent with no XamlType annotation (a null
+// elemType makes IsAttachedTo true), and the fixture's Width property
+// (whose synthetic ToolBar declaring type resolves no member, so even an
+// annotated parent stays attached).
+TEST_F(HandlersTest, PropertyHandlerAttachedRendersTheGold)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = Lookup(Baml::BamlRecordType::Property);
+
+    auto record = std::make_unique<Baml::PropertyRecord>();
+    record->AttributeId = 0;
+    record->Value = "v";
+    Baml::BamlRecordNode node(record.get());
+    BamlElement parentElem = MakeParentElem();
+
+    std::unique_ptr<BamlElement> result = handler->Translate(*ctx, node, &parentElem);
+    EXPECT_EQ(result, nullptr);
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent p1:ToolBar.Width=\"v\" xmlns:p1=\"http://probe.pi/ns\" />");
+}
+
+// E2: the parent carries the ToolBar XamlType annotation -- the synthetic
+// type resolves no member, so IsAttachedTo stays true (the same render).
+TEST_F(HandlersTest, PropertyHandlerToolBarAnnotatedRendersTheGold)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = Lookup(Baml::BamlRecordType::Property);
+
+    BamlElement parentElem = MakeParentElem();
+    parentElem.Xaml.Element->AddAnnotation(ctx->ResolveTypeOwning(0xFD63));
+
+    auto record = std::make_unique<Baml::PropertyRecord>();
+    record->AttributeId = 0;
+    record->Value = "v";
+    Baml::BamlRecordNode node(record.get());
+
+    std::unique_ptr<BamlElement> result = handler->Translate(*ctx, node, &parentElem);
+    EXPECT_EQ(result, nullptr);
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent p1:ToolBar.Width=\"v\" xmlns:p1=\"http://probe.pi/ns\" />");
+}
+
+// E3: the null-parent NRE (the probed .NET message).
+TEST_F(HandlersTest, PropertyHandlerWithANullParentThrowsTheNRE)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = Lookup(Baml::BamlRecordType::Property);
+
+    auto record = std::make_unique<Baml::PropertyRecord>();
+    record->AttributeId = 0;
+    record->Value = "v";
+    Baml::BamlRecordNode node(record.get());
+
+    try {
+        handler->Translate(*ctx, node, nullptr);
+        FAIL() << "the null-parent translate must throw";
+    } catch (const std::runtime_error& ex) {
+        EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
+    }
+}
+
+// E4: the non-attached arm -- a REAL resolved member (String.Length declared
+// on the annotated main-module String type): the plain local-name form with
+// the clr-namespace declaration ResolveNamespace attached.
+TEST_F(HandlersTest, PropertyHandlerNonAttachedRendersTheGold)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = Lookup(Baml::BamlRecordType::Property);
+
+    BamlElement parentElem = MakeParentElem();
+    parentElem.Xaml.Element->AddAnnotation(ctx->ResolveTypeOwning(1));
+
+    auto record = std::make_unique<Baml::PropertyRecord>();
+    record->AttributeId = 1;
+    record->Value = "v";
+    Baml::BamlRecordNode node(record.get());
+
+    std::unique_ptr<BamlElement> result = handler->Translate(*ctx, node, &parentElem);
+    EXPECT_EQ(result, nullptr);
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent xmlns:system=\"clr-namespace:System\" Length=\"v\" />");
+}
+
+// E5: the x:Name arm -- a real Name member on the main-module System.Type
+// (GetDefinition()?.ParentModule.IsMainModule): the XAML-namespaced Name
+// attribute with the p2 auto-prefix (the xmlns:system push bumped the
+// writer's prefix counter).
+TEST_F(HandlersTest, PropertyHandlerXNameRendersTheGold)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = Lookup(Baml::BamlRecordType::Property);
+
+    BamlElement parentElem = MakeParentElem();
+    parentElem.Xaml.Element->AddAnnotation(ctx->ResolveTypeOwning(2));
+
+    auto record = std::make_unique<Baml::PropertyRecord>();
+    record->AttributeId = 2;
+    record->Value = "v";
+    Baml::BamlRecordNode node(record.get());
+
+    std::unique_ptr<BamlElement> result = handler->Translate(*ctx, node, &parentElem);
+    EXPECT_EQ(result, nullptr);
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent xmlns:system=\"clr-namespace:System\" "
+        "p2:Name=\"v\" xmlns:p2=\"http://schemas.microsoft.com/winfx/2006/xaml\" />");
+}
+
+// E6: PropertyWithConverterHandler inherits the PropertyHandler
+// translation over its own record type.
+TEST_F(HandlersTest, PropertyWithConverterHandlerInheritsThePropertyTranslate)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = Lookup(Baml::BamlRecordType::PropertyWithConverter);
+
+    auto record = std::make_unique<Baml::PropertyWithConverterRecord>();
+    record->AttributeId = 0;
+    record->Value = "cv";
+    record->ConverterTypeId = 0;
+    Baml::BamlRecordNode node(record.get());
+    BamlElement parentElem = MakeParentElem();
+
+    std::unique_ptr<BamlElement> result = handler->Translate(*ctx, node, &parentElem);
+    EXPECT_EQ(result, nullptr);
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent p1:ToolBar.Width=\"cv\" xmlns:p1=\"http://probe.pi/ns\" />");
+}
+
+// A crafted block node: the header record plus a Text child (the
+// ProcessChildren walk's contribution).
+struct BlockFixture {
+    std::unique_ptr<Baml::BamlRecord> header;
+    std::unique_ptr<Baml::BamlRecord> childRecord;
+    Baml::BamlBlockNode node;
+
+    BlockFixture(std::unique_ptr<Baml::BamlRecord> headerRecord,
+        std::unique_ptr<Baml::BamlRecord> child)
+        : header(std::move(headerRecord))
+        , childRecord(std::move(child))
+    {
+        node.Header = header.get();
+        node.Children.push_back(
+            std::make_unique<Baml::BamlRecordNode>(childRecord.get()));
+    }
+};
+
+std::unique_ptr<Baml::BamlRecord> PropertyStartRecord(Baml::BamlRecordType type,
+    std::uint16_t attributeId)
+{
+    // The four record classes all derive from PropertyComplexStartRecord;
+    // the shared body reads only the AttributeId member, so the fixture
+    // builds the concrete class per type.
+    if (type == Baml::BamlRecordType::PropertyComplexStart) {
+        auto record = std::make_unique<Baml::PropertyComplexStartRecord>();
+        record->AttributeId = attributeId;
+        return record;
+    }
+    if (type == Baml::BamlRecordType::PropertyArrayStart) {
+        auto record = std::make_unique<Baml::PropertyArrayStartRecord>();
+        record->AttributeId = attributeId;
+        return record;
+    }
+    if (type == Baml::BamlRecordType::PropertyListStart) {
+        auto record = std::make_unique<Baml::PropertyListStartRecord>();
+        record->AttributeId = attributeId;
+        return record;
+    }
+    auto record = std::make_unique<Baml::PropertyDictionaryStartRecord>();
+    record->AttributeId = attributeId;
+    return record;
+}
+
+// E7/E8/E9/E10: the four property-element blocks -- identical bodies over
+// their own record types (the C# classes are literally identical): the
+// property element under the parent with the PI-mapped namespace, the
+// recursive Text child inside, and the element's own XmlnsScope annotation.
+TEST_F(HandlersTest, ThePropertyElementBlocksRenderTheGold)
+{
+    struct Row {
+        Baml::BamlRecordType type;
+        const char* childText;
+    };
+    const Row rows[] = {
+        { Baml::BamlRecordType::PropertyComplexStart, "hello" },
+        { Baml::BamlRecordType::PropertyArrayStart, "a" },
+        { Baml::BamlRecordType::PropertyListStart, "l" },
+        { Baml::BamlRecordType::PropertyDictionaryStart, "d" },
+    };
+    for (const Row& row : rows) {
+        auto ctx = fixture_.MakeContextE();
+        IHandler* handler = Lookup(row.type);
+        ASSERT_NE(handler, nullptr);
+
+        auto text = std::make_unique<Baml::TextRecord>();
+        text->Value = row.childText;
+        BlockFixture block(PropertyStartRecord(row.type, 0), std::move(text));
+        BamlElement parentElem = MakeParentElem();
+
+        std::unique_ptr<BamlElement> result = handler->Translate(
+            *ctx, block.node, &parentElem);
+        ASSERT_NE(result, nullptr) << Baml::RecordTypeName(row.type);
+        // The returned element: the property's element with the text child,
+        // and its own scope annotation from ProcessChildren.
+        EXPECT_EQ(result->Node, &block.node) << Baml::RecordTypeName(row.type);
+        EXPECT_EQ(result->Parent, nullptr) << Baml::RecordTypeName(row.type);
+        EXPECT_EQ(result->Xaml.Element->ToString(),
+            "<ToolBar.Width xmlns=\"http://probe.pi/ns\">" + std::string(row.childText)
+                + "</ToolBar.Width>")
+            << Baml::RecordTypeName(row.type);
+        auto* scope = result->Xaml.Element->Annotation<
+            std::shared_ptr<ILSpy::BamlDecompiler::XmlnsScope>>();
+        ASSERT_NE(scope, nullptr) << Baml::RecordTypeName(row.type);
+        EXPECT_EQ(scope->get()->Element(), result.get())
+            << Baml::RecordTypeName(row.type);
+        EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+            "<Parent>\r\n  <ToolBar.Width xmlns=\"http://probe.pi/ns\">"
+                + std::string(row.childText)
+                + "</ToolBar.Width>\r\n</Parent>")
+            << Baml::RecordTypeName(row.type);
+        // The property annotation the rewrite passes read back.
+        auto* property = result->Xaml.Element->Annotation<
+            std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlProperty>>();
+        ASSERT_NE(property, nullptr) << Baml::RecordTypeName(row.type);
+        EXPECT_EQ((*property)->PropertyName, "Width")
+            << Baml::RecordTypeName(row.type);
+    }
+}
+
+// E11: the property block over the mscorlib-backed property (the
+// main-module namespace arm of ResolveNamespace -- the system-prefixed
+// full name with the clr-namespace declaration on the property's own
+// element).
+TEST_F(HandlersTest, PropertyComplexHandlerOverAMainModulePropertyRendersTheGold)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = Lookup(Baml::BamlRecordType::PropertyComplexStart);
+
+    auto text = std::make_unique<Baml::TextRecord>();
+    text->Value = "hello";
+    BlockFixture block(PropertyStartRecord(Baml::BamlRecordType::PropertyComplexStart, 1),
+        std::move(text));
+    BamlElement parentElem = MakeParentElem();
+
+    std::unique_ptr<BamlElement> result = handler->Translate(*ctx, block.node, &parentElem);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Xaml.Element->ToString(),
+        "<system:String.Length xmlns:system=\"clr-namespace:System\">"
+        "hello</system:String.Length>");
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent>\r\n  <system:String.Length xmlns:system=\"clr-namespace:System\">"
+        "hello</system:String.Length>\r\n</Parent>");
+}
+
+// E12: the null-parent NRE (the parent deref precedes the children walk).
+TEST_F(HandlersTest, PropertyComplexHandlerWithANullParentThrowsTheNRE)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = Lookup(Baml::BamlRecordType::PropertyComplexStart);
+
+    auto text = std::make_unique<Baml::TextRecord>();
+    text->Value = "hello";
+    BlockFixture block(PropertyStartRecord(Baml::BamlRecordType::PropertyComplexStart, 0),
+        std::move(text));
+
+    try {
+        handler->Translate(*ctx, block.node, nullptr);
+        FAIL() << "the null-parent translate must throw";
+    } catch (const std::runtime_error& ex) {
+        EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
+    }
+}
+
+// E13: ConstructorParametersStartHandler -- the pseudo-named <Ctor>
+// wrapper with the recursive Text child.
+TEST_F(HandlersTest, ConstructorParametersStartHandlerRendersTheGold)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = Lookup(Baml::BamlRecordType::ConstructorParametersStart);
+
+    auto text = std::make_unique<Baml::TextRecord>();
+    text->Value = "hello";
+    BlockFixture block(std::make_unique<Baml::ConstructorParametersStartRecord>(),
+        std::move(text));
+    BamlElement parentElem = MakeParentElem();
+
+    std::unique_ptr<BamlElement> result = handler->Translate(*ctx, block.node, &parentElem);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Xaml.Element->Name().NamespaceName(),
+        "https://github.com/icsharpcode/ILSpy");
+    EXPECT_EQ(result->Xaml.Element->Name().LocalName(), "Ctor");
+    EXPECT_EQ(result->Xaml.Element->ToString(),
+        "<Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">hello</Ctor>");
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent>\r\n  <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">"
+        "hello</Ctor>\r\n</Parent>");
+}
+
+// E14: ConstructorParameterTypeHandler over the mscorlib-backed string
+// type -- the TypeExtension element (the XAML namespace bound as its
+// default), its Ctor pseudo-child (the ILSpy namespace), and the
+// clr-namespace declaration ctx.ToString attached to the PARENT.
+TEST_F(HandlersTest, ConstructorParameterTypeHandlerOverStringRendersTheGold)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = Lookup(Baml::BamlRecordType::ConstructorParameterType);
+
+    auto record = std::make_unique<Baml::ConstructorParameterTypeRecord>();
+    record->TypeId = 1;
+    Baml::BamlRecordNode node(record.get());
+    BamlElement parentElem = MakeParentElem();
+
+    std::unique_ptr<BamlElement> result = handler->Translate(*ctx, node, &parentElem);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Node, &node);
+    EXPECT_EQ(result->Parent, nullptr);
+    EXPECT_EQ(result->Xaml.Element->ToString(),
+        "<TypeExtension xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">\r\n"
+        "  <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">system:String</Ctor>\r\n"
+        "</TypeExtension>");
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent xmlns:system=\"clr-namespace:System\">\r\n"
+        "  <TypeExtension xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">\r\n"
+        "    <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">system:String</Ctor>\r\n"
+        "  </TypeExtension>\r\n"
+        "</Parent>");
+    // The TypeExtension element carries the known TypeExtension type
+    // annotation (id 0xfd4d).
+    auto* typeAnnotation = result->Xaml.Element->Annotation<
+        std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlType>>();
+    ASSERT_NE(typeAnnotation, nullptr);
+    EXPECT_EQ((*typeAnnotation)->TypeName, "TypeExtension");
+    EXPECT_EQ(typeAnnotation->get(), ctx->ResolveType(0xfd4d));
+}
+
+// E15: over the synthetic ToolBar type (the PI-mapped namespace renders
+// with no prefix and no clr-namespace declaration).
+TEST_F(HandlersTest, ConstructorParameterTypeHandlerOverToolBarRendersTheGold)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = Lookup(Baml::BamlRecordType::ConstructorParameterType);
+
+    auto record = std::make_unique<Baml::ConstructorParameterTypeRecord>();
+    record->TypeId = 0xFD63;
+    Baml::BamlRecordNode node(record.get());
+    BamlElement parentElem = MakeParentElem();
+
+    std::unique_ptr<BamlElement> result = handler->Translate(*ctx, node, &parentElem);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Xaml.Element->ToString(),
+        "<TypeExtension xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">\r\n"
+        "  <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">ToolBar</Ctor>\r\n"
+        "</TypeExtension>");
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent>\r\n"
+        "  <TypeExtension xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">\r\n"
+        "    <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">ToolBar</Ctor>\r\n"
+        "  </TypeExtension>\r\n"
+        "</Parent>");
+}
+
+// E16: the null-parent NRE (the GetKnownNamespace parent read).
+TEST_F(HandlersTest, ConstructorParameterTypeHandlerWithANullParentThrowsTheNRE)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = Lookup(Baml::BamlRecordType::ConstructorParameterType);
+
+    auto record = std::make_unique<Baml::ConstructorParameterTypeRecord>();
+    record->TypeId = 1;
+    Baml::BamlRecordNode node(record.get());
+
+    try {
+        handler->Translate(*ctx, node, nullptr);
+        FAIL() << "the null-parent translate must throw";
+    } catch (const std::runtime_error& ex) {
+        EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
     }
 }
 

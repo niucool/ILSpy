@@ -28,6 +28,13 @@
 //    type's name, the owning XamlType annotation, the recursive children
 //    walk, the resource-key defer branch, and the ResolveNamespace + rename
 //    pair that attaches the xmlns.
+//  * PropertyComplexHandler/PropertyArrayHandler/PropertyListHandler/
+//    PropertyDictionaryHandler (the four property-element blocks -- the C#
+//    classes carry literally identical Translate bodies): the property
+//    element under the parent, the recursive children walk, and the
+//    ResolveNamespace + rename pair.
+//  * ConstructorParametersStartHandler (ConstructorParametersStart): the
+//    pseudo-named <Ctor> wrapper element.
 // (KeyElementStartHandler -- the ElementHandler subclass -- lands with the
 // key/static-resource defer handlers.)
 //
@@ -61,6 +68,53 @@ public:
 // The C# `internal class ElementHandler : IHandler` (KeyElementStartHandler's
 // base -- its TranslateDefer re-drives this Translate over the key element).
 class ElementHandler : public IHandler {
+public:
+    Baml::BamlRecordType Type() const override;
+
+    std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
+        BamlElement* parent) override;
+};
+
+// The four property-element blocks (PropertyComplexStart/PropertyArrayStart/
+// PropertyListStart/PropertyDictionaryStart): the C# classes carry literally
+// identical Translate bodies over their own record types -- the port's four
+// Translate members share the PropertyElementBlock helper.
+class PropertyComplexHandler : public IHandler {
+public:
+    Baml::BamlRecordType Type() const override;
+
+    std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
+        BamlElement* parent) override;
+};
+
+class PropertyArrayHandler : public IHandler {
+public:
+    Baml::BamlRecordType Type() const override;
+
+    std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
+        BamlElement* parent) override;
+};
+
+class PropertyListHandler : public IHandler {
+public:
+    Baml::BamlRecordType Type() const override;
+
+    std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
+        BamlElement* parent) override;
+};
+
+class PropertyDictionaryHandler : public IHandler {
+public:
+    Baml::BamlRecordType Type() const override;
+
+    std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
+        BamlElement* parent) override;
+};
+
+// The C# `internal class ConstructorParametersStartHandler : IHandler` --
+// the pseudo-named <Ctor> wrapper block (the constructor-argument children
+// render inside it).
+class ConstructorParametersStartHandler : public IHandler {
 public:
     Baml::BamlRecordType Type() const override;
 

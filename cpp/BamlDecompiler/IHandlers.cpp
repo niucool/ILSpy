@@ -74,6 +74,14 @@ std::vector<std::unique_ptr<IHandler>> HandlerMap::CreateBuiltinHandlers()
     std::vector<std::unique_ptr<IHandler>> handlers;
     handlers.push_back(std::make_unique<Handlers::DocumentHandler>());
     handlers.push_back(std::make_unique<Handlers::ElementHandler>());
+    handlers.push_back(std::make_unique<Handlers::PropertyHandler>());
+    handlers.push_back(std::make_unique<Handlers::PropertyWithConverterHandler>());
+    handlers.push_back(std::make_unique<Handlers::PropertyComplexHandler>());
+    handlers.push_back(std::make_unique<Handlers::PropertyArrayHandler>());
+    handlers.push_back(std::make_unique<Handlers::PropertyListHandler>());
+    handlers.push_back(std::make_unique<Handlers::PropertyDictionaryHandler>());
+    handlers.push_back(std::make_unique<Handlers::ConstructorParametersStartHandler>());
+    handlers.push_back(std::make_unique<Handlers::ConstructorParameterTypeHandler>());
     handlers.push_back(std::make_unique<Handlers::TextHandler>());
     handlers.push_back(std::make_unique<Handlers::TextWithConverterHandler>());
     handlers.push_back(std::make_unique<Handlers::DefAttributeHandler>());
