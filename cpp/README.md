@@ -28,7 +28,12 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   (`GetTypeDefinition(TopLevelTypeName)` / `GetTypeForwarder(FullTypeName)` --
   the lazy dictionaries the Phase-2 `MetadataModule` back end resolves
   through, plus the `SRMExtensions` ExportedType full-name reader with the
-  nested-forwarder-chain walk), and an IL text disassembler. DONE except:
+  nested-forwarder-chain walk), the `NamespaceDefinition` namespace tree
+  (SRM's `NamespaceCache`: the TypeDef/ExportedType namespace tree with the
+  duplicate-full-name merge and the synthesized intermediate namespaces --
+  the `MetadataReader.GetNamespaceDefinitionRoot` surface the Phase-2
+  `MetadataModule`/`MetadataNamespace` walk consumes), and an IL text
+  disassembler. DONE except:
   WebCIL, the assembly resolver (`.deps.json`).
 - **Phase 2** -- `Decompiler/TypeSystem/`: naming primitives (`TopLevelTypeName`,
   `FullTypeName`), `KnownTypeCode` (full 60-entry table), the `IType` hierarchy

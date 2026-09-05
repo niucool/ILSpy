@@ -29,6 +29,7 @@
 
 #include "Decompiler/Metadata/MethodBody.hpp"
 #include "Decompiler/Metadata/LocalTypeInfo.hpp"
+#include "Decompiler/Metadata/NamespaceDefinition.hpp"
 #include "Decompiler/Metadata/PortablePdb.hpp"
 #include "Decompiler/Disassembler/ReflectionAttributes.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -1001,6 +1002,37 @@ public:
     // throws.
     std::uint32_t GetTypeForwarder(
         const TypeSystem::FullTypeName& typeName) const;
+
+    // The C# `public NamespaceDefinition GetNamespaceDefinitionRoot()` and
+    // `public NamespaceDefinition GetNamespaceDefinition(NamespaceDefinition
+    // Handle handle)` on System.Reflection.Metadata's MetadataReader (the
+    // namespace-definition tree the C# MetadataNamespace / MetadataModule
+    // walk consumes): the lazily-built tree over this file's TypeDef and
+    // ExportedType tables (one node per namespace, the children/type/
+    // exported-type handle lists, the duplicate-full-name merge, and the
+    // synthesized intermediate namespaces). The port's cache hangs off the
+    // pimpl and is built on first use (NamespaceDefinition.hpp documents the
+    // full contract and the single-threaded divergence). GetNamespace
+    // Definition throws std::out_of_range ("Invalid handle.") for a handle
+    // that is not in the table; GetNamespaceDefinitionRoot never throws (an
+    // invalid file degrades to the root-only tree). The nodes are returned
+    // by const reference into the cache -- they stay alive as long as the
+    // MetadataFile.
+    const NamespaceDefinition& GetNamespaceDefinitionRoot() const;
+    const NamespaceDefinition& GetNamespaceDefinition(
+        NamespaceDefinitionHandle handle) const;
+
+    // The C# `public string GetString(NamespaceDefinitionHandle handle)` on
+    // the MetadataReader (the NamespaceCache.GetFullName surface): the full
+    // name of the node a handle maps to. Same throw contract as
+    // GetNamespaceDefinition.
+    std::string GetNamespaceString(NamespaceDefinitionHandle handle) const;
+
+    // The handle keys of the namespace table in insertion order (the
+    // reflection-dump seam NamespaceDefinition.hpp documents for the gold
+    // tests -- the C# surface exposes no equivalent).
+    std::vector<NamespaceDefinitionHandle>
+    GetNamespaceDefinitionHandlesInTableOrder() const;
 
     // The C# `ResourceType` enum (ICSharpCode.Decompiler/Metadata/Resource.cs):
     // the ManifestResource row's Implementation column decides it -- a nil

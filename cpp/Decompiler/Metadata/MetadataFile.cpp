@@ -134,6 +134,19 @@ struct MetadataFile::Impl {
              FullTypeNameOrder> typeForwarderLookup;
     bool typeForwarderLookupBuilt = false;
 
+    // The namespace-definition cache (the MetadataReader's NamespaceCache;
+    // NamespaceDefinition.hpp documents the lazy build).
+    std::unique_ptr<NamespaceCache> namespaceCache;
+
+    // The lazily-created cache (the MetadataFile const accessors reach the
+    // pimpl through a const unique_ptr, so the pointee's mutability suffices;
+    // the owner file is the caller -- the cache reads its raw tables).
+    const NamespaceCache& Namespaces(const MetadataFile* owner) {
+        if (!namespaceCache)
+            namespaceCache = std::make_unique<NamespaceCache>(owner);
+        return *namespaceCache;
+    }
+
     explicit Impl(std::string_view p) : path(p) {
         // winmd throws std::invalid_argument for a missing/unreadable file (out
         // of is_database()'s file_view ctor) and for a malformed image (out of
@@ -2519,6 +2532,28 @@ std::uint32_t MetadataFile::GetTypeForwarder(
         // surfaces differently, but the CLI never reaches it).
         return 0;
     }
+}
+
+// The namespace-definition tree (the MetadataReader's GetNamespaceDefinition
+// Root / GetNamespaceDefinition / GetString(NamespaceDefinitionHandle)
+// surface). See the header and NamespaceDefinition.hpp for the contracts.
+const NamespaceDefinition& MetadataFile::GetNamespaceDefinitionRoot() const {
+    return impl_->Namespaces(this).GetRootNamespace();
+}
+
+const NamespaceDefinition& MetadataFile::GetNamespaceDefinition(
+    NamespaceDefinitionHandle handle) const {
+    return impl_->Namespaces(this).GetNamespaceData(handle);
+}
+
+std::string MetadataFile::GetNamespaceString(
+    NamespaceDefinitionHandle handle) const {
+    return impl_->Namespaces(this).GetFullName(handle);
+}
+
+std::vector<NamespaceDefinitionHandle>
+MetadataFile::GetNamespaceDefinitionHandlesInTableOrder() const {
+    return impl_->Namespaces(this).GetHandlesInTableOrder();
 }
 
 // The PE-header values the module-header lines render. See the header for
