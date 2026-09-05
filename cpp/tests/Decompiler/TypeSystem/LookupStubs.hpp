@@ -42,6 +42,7 @@
 #include "Decompiler/TypeSystem/IMember.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/TypeSystem/IModule.hpp"
+#include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
@@ -108,6 +109,15 @@ public:
     {
         topLevelTypeDefinitions_.push_back(d);
     }
+    // Configurable `GetTypeDefinition` lookups (the non-synthetic `KnownThings.InitType`
+    // arm resolves each well-known row through `IModule.GetTypeDefinition` over the
+    // row's `TopLevelTypeName`). The default (an empty table -> always null) preserves
+    // the original hardcoded behavior so existing tests are unaffected (the
+    // additive-setter convention); the stored pointer is non-owning.
+    void SetTypeDefinition(const TopLevelTypeName& name, const ITypeDefinition* d)
+    {
+        typeMap_.push_back({ name, d });
+    }
 
     // --- ISymbol ---
     TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Module; }
@@ -135,8 +145,11 @@ public:
             != friendAssemblies_.end();
     }
     const INamespace& RootNamespace() const override { return rootNamespace_; }
-    const ITypeDefinition* GetTypeDefinition(const TopLevelTypeName&) const override
+    const ITypeDefinition* GetTypeDefinition(const TopLevelTypeName& name) const override
     {
+        for (const auto& entry : typeMap_)
+            if (entry.first == name)
+                return entry.second;
         return nullptr;
     }
     std::vector<const ITypeDefinition*> TopLevelTypeDefinitions() const override
@@ -155,6 +168,7 @@ private:
     const ILSpy::Decompiler::Metadata::MetadataFile* metadataFile_ = nullptr;
     std::vector<const ITypeDefinition*> typeDefinitions_;
     std::vector<const ITypeDefinition*> topLevelTypeDefinitions_;
+    std::vector<std::pair<TopLevelTypeName, const ITypeDefinition*>> typeMap_;
     TestNamespace rootNamespace_;
 };
 
@@ -295,6 +309,16 @@ public:
     void SetAttributes(std::vector<const IAttribute*> attributes) {
         attributes_ = std::move(attributes);
     }
+    // Configurable `Properties` for the `KnownThings.KnownMember` property lookup
+    // (the ctor's `GetProperties(p => p.Name == name, IgnoreInheritedMembers)` walks the
+    // stub's own list, and the no-flag arm collects the DirectBaseTypes walk like the
+    // real `GetMembersHelper`). The default (empty) preserves the prior always-empty
+    // behavior so existing tests are unaffected (the additive-setter convention); the
+    // stored pointers are non-owning (the caller keeps the `LookupProperty` stubs
+    // alive).
+    void SetProperties(std::vector<const IProperty*> properties) {
+        properties_ = std::move(properties);
+    }
 
     // --- IType ---
     TypeKind Kind() const override { return kind_; }
@@ -306,6 +330,30 @@ public:
     const ITypeDefinition* GetDefinition() const override { return this; }
     std::vector<ITypePtr> DirectBaseTypes() const override { return directBaseTypes_; }
     std::vector<const ITypeParameter*> TypeParameters() const override { return typeParameters_; }
+    // The `IType::GetProperties` member-enumeration virtual (the `AbstractType` empty
+    // default is replaced by the stub's own filtered list + the `GetMembersHelper`
+    // base-type walk when `IgnoreInheritedMembers` is absent).
+    std::vector<const IProperty*> GetProperties(
+        std::function<bool(const IProperty*)> filter = nullptr,
+        GetMemberOptions options = GetMemberOptions::None) const override
+    {
+        std::vector<const IProperty*> result;
+        for (const IProperty* p : properties_)
+            if (!filter || filter(p))
+                result.push_back(p);
+        if ((options & GetMemberOptions::IgnoreInheritedMembers) == GetMemberOptions::None)
+        {
+            // The real `GetMembersHelper.GetProperties` walks the non-interface base
+            // types, each with the declared-members flags added (so each base returns
+            // only its own properties and the walk terminates).
+            const GetMemberOptions declared = options | GetMemberOptions::IgnoreInheritedMembers
+                | GetMemberOptions::ReturnMemberDefinitions;
+            for (const ITypePtr& base : directBaseTypes_)
+                for (const IProperty* p : base->GetProperties(filter, declared))
+                    result.push_back(p);
+        }
+        return result;
+    }
 
     // --- ITypeDefinitionOrUnknown ---
     const TS::FullTypeName& FullTypeName() const override { return fullTypeName_; }
@@ -341,7 +389,7 @@ public:
     std::vector<const IMember*> Members() const override { return {}; }
     std::vector<const IField*> Fields() const override { return {}; }
     std::vector<const IMethod*> Methods() const override { return methods_; }
-    std::vector<const IProperty*> Properties() const override { return {}; }
+    std::vector<const IProperty*> Properties() const override { return properties_; }
     std::vector<const IEvent*> Events() const override { return {}; }
     TS::KnownTypeCode KnownTypeCode() const override { return knownTypeCode_; }
     ITypePtr EnumUnderlyingType() const override { return enumUnderlyingType_; }
@@ -376,6 +424,7 @@ private:
     std::vector<const ITypeParameter*> typeParameters_;
     ITypePtr enumUnderlyingType_;
     std::vector<const IMethod*> methods_;
+    std::vector<const IProperty*> properties_;
     bool hasExtensions_ = false;
     bool isAbstract_ = false;
     bool isSealed_ = false;
@@ -753,6 +802,73 @@ private:
     const ICompilation& compilation_;
     std::uint32_t metadataToken_ = 0;
     const IModule* parentModule_ = nullptr;
+};
+
+// A minimal `IProperty` for the `KnownThings.KnownMember` property lookup (and
+// future member-lookup property tests) -- the `LookupEvent` shape over the
+// `IProperty` surface (CanGet/CanSet/Getter/Setter/IsIndexer/
+// ReturnTypeIsRefReadOnly), with the name the lookup filters on.
+class LookupProperty : public IProperty {
+public:
+    LookupProperty(std::string name, ITypePtr propertyType, const ICompilation& compilation)
+        : name_(std::move(name)), propertyType_(std::move(propertyType)), compilation_(compilation)
+    {}
+
+    // --- ISymbol ---
+    TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Property; }
+    std::string Name() const override { return name_; }
+
+    // --- INamedElement ---
+    std::string FullName() const override { return name_; }
+    std::string ReflectionName() const override { return name_; }
+    std::string Namespace() const override { return {}; }
+
+    // --- ICompilationProvider ---
+    const ICompilation& Compilation() const override { return compilation_; }
+
+    // --- IEntity ---
+    std::uint32_t MetadataToken() const override { return 0; }
+    const ITypeDefinition* DeclaringTypeDefinition() const override { return nullptr; }
+    ITypePtr DeclaringType() const override { return {}; }
+    const IModule* ParentModule() const override { return nullptr; }
+    std::vector<const IAttribute*> GetAttributes() const override { return {}; }
+    bool HasAttribute(KnownAttribute) const override { return false; }
+    const IAttribute* GetAttribute(KnownAttribute) const override { return nullptr; }
+    TS::Accessibility Accessibility() const override { return TS::Accessibility::Public; }
+    bool IsStatic() const override { return false; }
+    bool IsAbstract() const override { return false; }
+    bool IsSealed() const override { return false; }
+
+    // --- IMember ---
+    const IMember* MemberDefinition() const override { return this; }
+    const IType& ReturnType() const override { return *propertyType_; }
+    std::vector<const IMember*> ExplicitlyImplementedInterfaceMembers() const override
+    {
+        return {};
+    }
+    bool IsExplicitInterfaceImplementation() const override { return false; }
+    bool IsVirtual() const override { return false; }
+    bool IsOverride() const override { return false; }
+    bool IsOverridable() const override { return false; }
+    const TypeParameterSubstitution* Substitution() const override { return nullptr; }
+    const IMember* Specialize(const TypeParameterSubstitution*) const override { return this; }
+    bool Equals(const IMember* obj, const TypeVisitor*) const override { return obj == this; }
+
+    // --- IParameterizedMember ---
+    std::vector<const IParameter*> Parameters() const override { return {}; }
+
+    // --- IProperty ---
+    bool CanGet() const override { return true; }
+    bool CanSet() const override { return false; }
+    const IMethod* Getter() const override { return nullptr; }
+    const IMethod* Setter() const override { return nullptr; }
+    bool IsIndexer() const override { return false; }
+    bool ReturnTypeIsRefReadOnly() const override { return false; }
+
+private:
+    std::string name_;
+    ITypePtr propertyType_;
+    const ICompilation& compilation_;
 };
 
 // A minimal `ITypeParameter` for the IsProtectedAccessAllowed type-parameter

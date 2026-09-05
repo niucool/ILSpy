@@ -54,6 +54,7 @@ add_executable(ilspy_tests
     BamlDecompiler/XamlUtils_Test.cpp
     BamlDecompiler/KnownThingsEnums_Test.cpp
     BamlDecompiler/KnownThingsTables_Test.cpp
+    BamlDecompiler/KnownThings_Test.cpp
     BamlDecompiler/SyntheticWpfModule_Test.cpp
     Decompiler/TypeSystem/TypeName_Test.cpp
     Decompiler/TypeSystem/Version_Test.cpp

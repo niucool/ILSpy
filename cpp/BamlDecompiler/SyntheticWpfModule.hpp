@@ -138,8 +138,17 @@ public:
     // never create new types. Registering also invalidates the cached xmlns attributes
     // (a namespace may have appeared). Non-owning return: the module owns the type
     // definition (the caller holds a raw pointer).
+    //
+    // The method is CONST despite mutating the module's type table: the C# has no
+    // const, so its mutation is callable through a readonly reference (the C#
+    // `InitType(IModule assembly, ...)` receives the module out of the `assemblies`
+    // dictionary and mutates it); the port's compilation surface hands modules out as
+    // `const IModule*` (the `ICompilation::Modules` snapshot), so the port keeps the
+    // method callable through that const handle with the `mutable` state stand-in (the
+    // `SyntheticModuleReference::Resolve` mutable-registry precedent) -- KnownThings'
+    // InitType seeds the 759 well-known rows through exactly this path.
     const ILSpy::Decompiler::TypeSystem::ITypeDefinition* RegisterType(const std::string& ns,
-                                                                       const std::string& name);
+                                                                       const std::string& name) const;
 
     // --- ICompilationProvider ---
     const ILSpy::Decompiler::TypeSystem::ICompilation& Compilation() const override;
@@ -194,9 +203,11 @@ private:
     // The seeded type definitions, in registration (insertion) order -- the faithful
     // substitute for the C# Dictionary iteration order (the header doc comment). The
     // module owns the definitions (shared_ptr so RegisterType hands back stable
-    // instances and the snapshots are non-owning pointers).
-    std::vector<std::pair<ILSpy::Decompiler::TypeSystem::TopLevelTypeName,
-                          std::shared_ptr<SyntheticTypeDefinition>>> typeDefinitions_;
+    // instances and the snapshots are non-owning pointers). `mutable`: the const
+    // `RegisterType` seeds through the `const IModule*` compilation surface (the
+    // RegisterType comment above).
+    mutable std::vector<std::pair<ILSpy::Decompiler::TypeSystem::TopLevelTypeName,
+                                  std::shared_ptr<SyntheticTypeDefinition>>> typeDefinitions_;
     // The module's root namespace (owned; the C# `new SyntheticNamespace(this, null,
     // string.Empty, string.Empty)`).
     std::shared_ptr<SyntheticNamespace> rootNamespace_;

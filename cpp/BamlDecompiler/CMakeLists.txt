@@ -16,9 +16,13 @@
 # materializing exactly the types RegisterType seeds -- the piece that lets
 # KnownThings work without the full MetadataModule back end; includes the
 # TypeSystem Implementation DefaultAttribute IAttribute class the
-# XmlnsDefinitionAttribute reconstruction builds).
-# The KnownThings class itself (IDecompilerTypeSystem resolution) and the
-# Handlers/Rewrite/Xaml layers follow in later slices.
+# XmlnsDefinitionAttribute reconstruction builds),
+# plus the KnownThings class itself (KnownThings: the ctor resolving the table
+# rows through the compilation's modules -- the SyntheticWpfModule seeding arm
+# and the GetTypeDefinition arm -- with the KnownMember row class and the
+# Func-shaped accessors).
+# The IDecompilerTypeSystem interface (the MetadataModule MainModule narrowing)
+# and the Handlers/Rewrite/Xaml layers follow in later slices.
 
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlBinaryReader.cpp
@@ -27,6 +31,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlRecords.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlReader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlWriter.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Baml/KnownThings.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/SyntheticWpfModule.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlPathDeserializer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlUtils.cpp

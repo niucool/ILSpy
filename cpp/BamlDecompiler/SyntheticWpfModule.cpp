@@ -67,7 +67,7 @@ SyntheticWpfModule::SyntheticWpfModule(
 //   `}`
 //   `return typeDef;`
 const ILSpy::Decompiler::TypeSystem::ITypeDefinition* SyntheticWpfModule::RegisterType(
-    const std::string& ns, const std::string& name)
+    const std::string& ns, const std::string& name) const
 {
     ILSpy::Decompiler::TypeSystem::TopLevelTypeName typeName(ns, name);
     for (const auto& entry : typeDefinitions_) {
