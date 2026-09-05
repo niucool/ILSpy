@@ -35,9 +35,14 @@
 # ICompilation.FindModuleByAssemblyNameInfo lookup -- the System.Reflection.Metadata
 # TypeName/AssemblyNameInfo parser it composes landed in
 # cpp/Decompiler/Metadata/TypeName.{hpp,cpp} and AssemblyNameInfo.{hpp,cpp}, and
-# the resolution chain in Decompiler/TypeSystem/ReflectionHelper.{hpp,cpp}).
-# The IDecompilerTypeSystem interface (the MetadataModule MainModule narrowing),
-# the XamlExtension/XamlResourceKey leaves, and the Handlers/Rewrite/XamlDecompiler
+# the resolution chain in Decompiler/TypeSystem/ReflectionHelper.{hpp,cpp}),
+# plus the XamlExtension markup-extension value (Xaml/XamlExtension: the
+# {TypeName args, name=value} render over the XamlUtils ToString extensions,
+# which land with it) and the resource-key annotation (Xaml/XamlResourceKey:
+# the key-node/key-element/static-resources row the key-record handlers
+# attach through the node annotations, with the sibling/ancestor key lookups).
+# The IDecompilerTypeSystem interface (the MetadataModule MainModule narrowing)
+# and the Handlers/Rewrite/XamlDecompiler
 # layers follow in later slices.
 
 target_sources(ilspy PRIVATE
@@ -50,8 +55,10 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlWriter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/KnownThings.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/SyntheticWpfModule.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlExtension.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlPathDeserializer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlProperty.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlResourceKey.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlType.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlUtils.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/XamlContext.cpp

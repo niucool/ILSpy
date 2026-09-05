@@ -18,13 +18,20 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// Port of the self-contained members of ICSharpCode.BamlDecompiler/Xaml/
-// XamlUtils.cs (see XamlUtils.hpp for the porting decisions).
+// Port of ICSharpCode.BamlDecompiler/Xaml/XamlUtils.cs (see XamlUtils.hpp
+// for the porting decisions) -- the self-contained members plus the two
+// ToString extension methods (the implementation halves need the complete
+// XamlContext/XamlType/XElement types, so they live here rather than the
+// header).
 
 #include "BamlDecompiler/Xaml/XamlUtils.hpp"
 
+#include "BamlDecompiler/Xaml/XamlType.hpp"
+#include "BamlDecompiler/XamlContext.hpp"
 #include "Decompiler/Util/Char.hpp"
 #include "Decompiler/Util/Utf.hpp"
+#include "Decompiler/Xml/XElement.hpp"
+#include "Decompiler/Xml/XName.hpp"
 
 #include <cstdio>
 #include <stdexcept>
@@ -93,6 +100,34 @@ std::string EscapeName(std::string_view name)
 {
 	std::string sb;
 	EscapeName(sb, name);
+	return sb;
+}
+
+// The C# `public static string ToString(this XamlContext ctx, XElement elem,
+// XamlType type)`.
+std::string ToString(XamlContext& ctx, ILSpy::Decompiler::Xml::XElement& elem,
+	XamlType& type)
+{
+	type.ResolveNamespace(elem, ctx);
+	return ToString(ctx, elem, type.ToXName(ctx));
+}
+
+// The C# `public static string ToString(this XamlContext ctx, XElement elem,
+// XName name)`.
+std::string ToString(const XamlContext&,
+	const ILSpy::Decompiler::Xml::XElement& elem,
+	const ILSpy::Decompiler::Xml::XName& name)
+{
+	std::string sb;
+	if (name.Namespace() != elem.GetDefaultNamespace()) {
+		const std::optional<std::string> prefix =
+			elem.GetPrefixOfNamespace(name.Namespace());
+		if (prefix.has_value() && !prefix->empty()) {
+			sb += *prefix;
+			sb += ':';
+		}
+	}
+	sb += name.LocalName();
 	return sb;
 }
 

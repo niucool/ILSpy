@@ -19,10 +19,9 @@
 // SOFTWARE.
 
 // Port of ICSharpCode.BamlDecompiler/Xaml/XamlUtils.cs (Ki, 2015, MIT) --
-// the self-contained members only. The two `ToString(this XamlContext,
-// XElement, ...)` extension methods stay DEFERRED with the Phase-7 gate: they
-// need XamlContext/XamlType/the System.Xml.Linq DOM, none of which the port
-// carries yet (they land with the Handlers/Rewrite layers).
+// the self-contained members plus the two `ToString(this XamlContext, ...)`
+// extension methods (the former Phase-7-gated deferral, landed with the
+// XamlContext/XamlType/XElement ports).
 //
 // Ported here:
 //  * Escape(string) -- the XAML "{}" curly-brace escape a leading '{'
@@ -42,6 +41,15 @@
 //    char.IsControl and char.IsSurrogate units over the UTF-16 code units
 //    (so a supplementary-plane character renders as its TWO surrogate
 //    halves, each escaped -- the C# `foreach (char)` walks the units).
+//  * ToString(this XamlContext, XElement, XamlType) -- resolves the type's
+//    XML namespace (mutating the type AND the element: the clr-namespace
+//    fallback appends the `xmlns:<prefix>` declaration) and renders the
+//    prefixed name through the XName overload below.
+//  * ToString(this XamlContext, XElement, XName) -- the prefixed-name
+//    render: no prefix when the name's namespace IS the element's default
+//    namespace, else the in-scope prefix of the name's namespace (the
+//    xml/xmlns reserved-prefix fallbacks included) when it is neither null
+//    nor empty, then the local name.
 //
 // C#-to-C++ porting decisions:
 //  * The port works in UTF-8 (std::string); EscapeName decodes to UTF-16
@@ -55,6 +63,10 @@
 //  * The `ReadXamlDouble` extension receiver ports to the plain
 //    BamlBinaryReader& parameter (the port's System.IO.BinaryReader
 //    stand-in over the .baml stream bytes).
+//  * The two `ToString` extension receivers port to free functions taking
+//    the context as the first parameter (C++ has no extension methods; the
+//    ReadXamlDouble precedent). The XName overload's `ctx` parameter is
+//    unused by the C# body too -- it ports unnamed.
 
 #pragma once
 
@@ -63,7 +75,18 @@
 
 #include "BamlDecompiler/Baml/BamlBinaryReader.hpp"
 
+namespace ILSpy::Decompiler::Xml {
+class XElement;
+class XName;
+}
+
+namespace ILSpy::BamlDecompiler {
+class XamlContext;
+}
+
 namespace ILSpy::BamlDecompiler::Xaml {
+
+class XamlType;
 
 // The C# `public static string Escape(string value)`.
 std::string Escape(std::string_view value);
@@ -71,6 +94,19 @@ std::string Escape(std::string_view value);
 // The C# `public static double ReadXamlDouble(this BinaryReader reader,
 // bool scaledInt = false)` -- see the file note for the wire form.
 double ReadXamlDouble(Baml::BamlBinaryReader& reader, bool scaledInt = false);
+
+// The C# `public static string ToString(this XamlContext ctx, XElement
+// elem, XamlType type)` -- resolves the type's namespace against the element
+// (see the file note for the mutation) and renders the prefixed name.
+std::string ToString(XamlContext& ctx, ILSpy::Decompiler::Xml::XElement& elem,
+    XamlType& type);
+
+// The C# `public static string ToString(this XamlContext ctx, XElement
+// elem, XName name)` (the receiver parameter is unused by the body and ports
+// unnamed).
+std::string ToString(const XamlContext& ctx,
+    const ILSpy::Decompiler::Xml::XElement& elem,
+    const ILSpy::Decompiler::Xml::XName& name);
 
 // The C# `public static StringBuilder EscapeName(StringBuilder sb,
 // string name)` -- appends the escaped name to the builder.
