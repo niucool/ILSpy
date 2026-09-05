@@ -29,15 +29,18 @@
 //
 // KEY PORT CONVENTIONS:
 //  (a) The BCL struct is generic (`CustomAttributeTypedArgument<TType>`); the ILSpy type
-//      system uses only the `IType` instantiation (the `CustomAttributeDecoder<TType>` in
-//      the Metadata layer is generic, but that layer is not yet ported, and the TypeSystem
-//      surface -- `IAttribute` and its consumers -- needs only `IType`). The faithful port
+//      system uses only the `IType` instantiation (the C# `CustomAttributeDecoder<TType>`
+//      in the Metadata layer is generic, but its ported half -- the
+//      `Metadata/CustomAttributeDecoder` -- absorbs the `<IType>` instantiation the same
+//      way, and the TypeSystem surface -- `IAttribute` and its consumers -- needs only
+//      `IType`). The faithful port
 //      therefore absorbs the `<IType>` instantiation into the `TypeSystem` namespace as a
 //      concrete (non-template) struct, the same convention the D384 `MethodSemanticsAttributes`
 //      / D381 `IEntity.MetadataToken` ports followed for BCL helper types, and the concrete-
 //      struct convention the `TypeConstraint` (D383) / `LifetimeAnnotation` (D382) /
 //      `FullTypeName` / `TopLevelTypeName` TypeSystem value types established. A future
-//      Metadata-layer port that needs the generic decoder can refactor or add a template then.
+//      port of the generic decoder (the SecurityDeclarationDecoder's tuple instantiation)
+//      can refactor or add a template then.
 //  (b) The C# `TType Type` (non-null for a decoded argument) ports to `ITypePtr` (the D271
 //      `std::shared_ptr<IType>` shared, cached handle -- the `TypeConstraint.Type` D383
 //      precedent); a null `shared_ptr` is the faithful representation of an argument whose

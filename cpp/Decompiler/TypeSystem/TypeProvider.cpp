@@ -160,7 +160,10 @@ std::optional<bool> TypeProvider::IsReferenceType(std::uint32_t entityToken,
 // The C# `GetTypeFromDefinition`: the module's entity cache answers in-range
 // rows; the UnknownType fallback (full name + reference-ness) is the
 // compilation-only arm (convention (b): the module-backed provider always
-// resolves its own module's rows).
+// resolves its own module's rows). The compilation-only throw carries the
+// reader-parameterized overload as its resolution: a caller WITH the
+// attribute's own module (the CustomAttributeDecoder TypeHandle arm) drives
+// `GetTypeFromDefinition(reader, ...)` below, which reaches the fallback.
 ITypePtr TypeProvider::GetTypeFromDefinition(std::uint32_t typeDefToken,
     std::uint8_t rawTypeKind) {
     const ITypeDefinition* td =
@@ -185,7 +188,8 @@ ITypePtr TypeProvider::GetTypeFromDefinition(std::uint32_t typeDefToken,
 // fallback with the reference-ness from the raw byte. The full name is read
 // from the provider's module (the C# reads it from the caller's reader) -- the
 // whole method is reader-dependent, so the compilation-only provider throws
-// (convention (b)).
+// (convention (b); the reader-parameterized overload below serves callers
+// that carry the attribute's own module).
 ITypePtr TypeProvider::GetTypeFromReference(std::uint32_t typeRefToken,
     std::uint8_t rawTypeKind) {
     if (module_ == nullptr) {
@@ -199,6 +203,52 @@ ITypePtr TypeProvider::GetTypeFromReference(std::uint32_t typeRefToken,
             typeRefToken);
     const IModule* resolvedModule =
         module_->GetDeclaringModule(typeRefToken);
+    if (resolvedModule != nullptr) {
+        const ITypeDefinition* type =
+            GetTypeDefinition(*resolvedModule, fullTypeName);
+        if (type != nullptr)
+            return SnapshotType(type);
+    } else {
+        for (const IModule* module : compilation_->Modules()) {
+            const ITypeDefinition* type =
+                GetTypeDefinition(*module, fullTypeName);
+            if (type != nullptr)
+                return SnapshotType(type);
+        }
+    }
+    return std::make_shared<class UnknownType>(fullTypeName,
+        IsReferenceType(typeRefToken, rawTypeKind));
+}
+
+// The C# `GetTypeFromDefinition(reader, handle, rawTypeKind)` -- the
+// reader-parameterized form (the header's convention note): the provider's
+// own module entity cache answers first (the handle interpreted in the
+// provider's module, the faithful cross-module shape), then the UnknownType
+// fallback reads the full type name through the CALLER's reader.
+ITypePtr TypeProvider::GetTypeFromDefinition(
+    const Metadata::MetadataFile& reader, std::uint32_t typeDefToken,
+    std::uint8_t rawTypeKind) const {
+    const ITypeDefinition* td =
+        module_ != nullptr ? module_->GetDefinition(typeDefToken) : nullptr;
+    if (td != nullptr)
+        return SnapshotType(td);
+    return std::make_shared<class UnknownType>(
+        Metadata::GetFullTypeNameFromDefinition(reader, typeDefToken),
+        IsReferenceType(typeDefToken, rawTypeKind));
+}
+
+// The C# `GetTypeFromReference(reader, handle, rawTypeKind)` -- the
+// reader-parameterized twin: the full type name comes from the caller's
+// reader; the declaring-module resolution still routes the provider's own
+// module; the compilation-only provider walks its compilation's modules.
+ITypePtr TypeProvider::GetTypeFromReference(
+    const Metadata::MetadataFile& reader, std::uint32_t typeRefToken,
+    std::uint8_t rawTypeKind) const {
+    const FullTypeName fullTypeName =
+        Metadata::GetFullTypeNameFromReference(reader, typeRefToken);
+    const IModule* resolvedModule =
+        module_ != nullptr ? module_->GetDeclaringModule(typeRefToken)
+                           : nullptr;
     if (resolvedModule != nullptr) {
         const ITypeDefinition* type =
             GetTypeDefinition(*resolvedModule, fullTypeName);

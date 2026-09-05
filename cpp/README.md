@@ -75,7 +75,16 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   over a `SimpleCompilation(MinimalCorlib.Instance)`, the provider the
   NullableContext/NullablePublicOnly/DefaultMember attribute-value decoders
   drive; gold-pinned against the real engine's public properties, with the
-  `KnownTypeCode`/`TypeCode` value-hole fidelity fix the gold exposed). STARTED
+  `KnownTypeCode`/`TypeCode` value-hole fidelity fix the gold exposed), and
+  the `CustomAttributeDecoder` (the SRM `CustomAttribute.DecodeValue` blob
+  decode fused with the repo copy's stripped-down named-args half and its
+  `provideBoxingTypeInfo` boxing, over `MetadataFile` + `TypeProvider` with
+  the reader-parameterized `GetTypeFromDefinition`/`GetTypeFromReference`
+  overloads the TypeHandle arm drives; gold-pinned byte-exact against the
+  real SRM engine over the full mscorlib/System/facade/CoreLib attribute
+  corpora incl. the ok/throw partitions and the running digests, the
+  synthetic manifest covering every exotic + failure arm, and the boxing
+  drive). STARTED
   (the member entity
   family (`MetadataField`/`MetadataMethod`/`MetadataProperty`/
   `MetadataEvent`), the `ResolveType`/`ApplyAttributeTypeVisitor` resolution

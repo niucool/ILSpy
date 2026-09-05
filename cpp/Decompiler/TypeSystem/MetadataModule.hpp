@@ -86,13 +86,14 @@
 //  (g) DEFERRED members (each loud `std::logic_error` where the ported surface
 //      reaches it, otherwise absent with this note): the whole `ResolveType` /
 //      `ResolveMethod` / `ResolveEntity` / `ResolveDeclaringType` /
-//      `CreateFakeMethod` family (the ApplyAttributeTypeVisitor +
-//      CustomAttributeDecoder slices -- the `TypeProvider` field and its class
-//      LANDED, so the provider itself is no longer a gate);
+//      `CreateFakeMethod` family (the ApplyAttributeTypeVisitor slice -- the
+//      `TypeProvider` field and its class LANDED, and the
+//      `Metadata/CustomAttributeDecoder` value-decode machinery LANDED too,
+//      so the attribute-blob decode is no longer a gate);
 //      `GetAssemblyAttributes` / `GetModuleAttributes` /
 //      `GetInternalsVisibleTo` / `InternalsVisibleTo`'s friend-list decode and the
 //      ctor's `NullableContext` / `FindMinimumAccessibilityForNRT` (the
-//      CustomAttributeDecoder value-decode machinery); the lazy
+//      AttributeListBuilder slice over the landed CustomAttributeDecoder); the lazy
 //      `typeDefs`/`fieldDefs`/`methodDefs`/`propertyDefs`/`eventDefs`/
 //      `referencedAssemblies` entity caches (convention (e));
 //      `DecodeMethodSignature`/`DecodeLocalSignature`; the `knownAttributeTypes`

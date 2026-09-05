@@ -30,10 +30,14 @@
 //      TGenericContext>` (the SRM gap fill) with `TType = ITypePtr` and
 //      `TGenericContext = GenericContext` (the VAR/MVAR scope, this slice's
 //      other file). The `ICustomAttributeTypeProvider<IType>` half is NOT a
-//      ported interface yet (the custom-attribute decoder slice); its four
+//      ported interface (the BCL interface stays absorbed); its four
 //      members port as plain methods (GetSystemType /
-//      GetTypeFromSerializedName / GetUnderlyingEnumType / IsSystemType) so the
-//      future decoder slice calls them directly.
+//      GetTypeFromSerializedName / GetUnderlyingEnumType / IsSystemType) that
+//      the CustomAttributeDecoder calls directly (the
+//      Metadata/CustomAttributeDecoder.hpp slice), plus the two
+//      reader-parameterized GetTypeFromDefinition/GetTypeFromReference
+//      overloads the decoder's TypeHandle arm drives over a foreign
+//      module's attribute rows.
 //  (b) The C# methods take the decoding `MetadataReader` as a parameter; the
 //      port's provider contract has no reader parameter (the walker derives
 //      every metadata read from the provider's own module -- the
@@ -145,7 +149,8 @@ public:
         const GenericContext& genericContext) override;
 
     // --- the ICustomAttributeTypeProvider<IType> surface (plain methods
-    // until the custom-attribute decoder slice ports the interface) ---
+    // the CustomAttributeDecoder calls directly; the BCL interface stays
+    // absorbed into the concrete class) ---
     // The C# `IType GetSystemType() => compilation.FindType(KnownTypeCode.Type)`.
     ITypePtr GetSystemType() const;
     // The C# `IType GetTypeFromSerializedName(string name)` -- the
@@ -160,6 +165,29 @@ public:
     Metadata::PrimitiveTypeCode GetUnderlyingEnumType(const IType& type) const;
     // The C# `bool IsSystemType(IType type) => type.IsKnownType(KnownTypeCode.Type)`.
     bool IsSystemType(const IType& type) const;
+
+    // The C# `GetTypeFromDefinition(SRM.MetadataReader reader,
+    // TypeDefinitionHandle handle, byte rawTypeKind)` -- the
+    // READER-PARAMETERIZED form the CustomAttributeDecoder drives: the
+    // attribute's own module may differ from the provider's module (the
+    // minimalCorlibTypeProvider shape), and the C# reads the fallback's
+    // full type name through the CALLER's reader. The provider's own
+    // module entity cache still answers first (the C# `module?.
+    // GetDefinition(handle)` -- the handle interpreted in the provider's
+    // module, the faithful cross-module shape), and the compilation-only
+    // provider reaches the UnknownType fallback instead of the
+    // convention-(b) throw (this overload carries the reader the C#
+    // passes, so the name is readable).
+    ITypePtr GetTypeFromDefinition(const Metadata::MetadataFile& reader,
+        std::uint32_t typeDefToken, std::uint8_t rawTypeKind) const;
+    // The C# `GetTypeFromReference(SRM.MetadataReader reader,
+    // TypeReferenceHandle handle, byte rawTypeKind)` -- the
+    // reader-parameterized twin: the full type name comes from the CALLER's
+    // reader, the declaring-module resolution still routes the provider's
+    // own module (the C# `module?.GetDeclaringModule(handle)`), and the
+    // compilation-only provider walks its compilation's modules.
+    ITypePtr GetTypeFromReference(const Metadata::MetadataFile& reader,
+        std::uint32_t typeRefToken, std::uint8_t rawTypeKind) const;
 
 private:
     // The C# private `bool? IsReferenceType(reader, handle, rawTypeKind)`
