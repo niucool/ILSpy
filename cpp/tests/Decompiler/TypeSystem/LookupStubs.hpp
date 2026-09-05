@@ -1071,6 +1071,13 @@ public:
     // alive).
     void SetDeclaringType(ITypePtr type) { declaringType_ = std::move(type); }
 
+    // Configurable `CanSet` (the rewrite passes' `IProperty { CanSet: false }`
+    // gate reads it -- the settable Thread.Name / Thread.Priority fixtures the
+    // AttributeRewritePass / MarkupExtensionRewritePass drives resolve). The
+    // default (false) preserves the prior behavior so existing tests are
+    // unaffected (the additive-setter convention).
+    void SetCanSet(bool canSet) { canSet_ = canSet; }
+
     // --- ISymbol ---
     TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Property; }
     std::string Name() const override { return name_; }
@@ -1116,7 +1123,7 @@ public:
 
     // --- IProperty ---
     bool CanGet() const override { return true; }
-    bool CanSet() const override { return false; }
+    bool CanSet() const override { return canSet_; }
     const IMethod* Getter() const override { return nullptr; }
     const IMethod* Setter() const override { return nullptr; }
     bool IsIndexer() const override { return false; }
@@ -1126,6 +1133,7 @@ private:
     std::string name_;
     ITypePtr propertyType_;
     ITypePtr declaringType_;
+    bool canSet_ = false;
     const ICompilation& compilation_;
 };
 

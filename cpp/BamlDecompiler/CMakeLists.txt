@@ -72,6 +72,16 @@
 # The IDecompilerTypeSystem interface (the MetadataModule MainModule narrowing)
 # and the Handlers/Rewrite/XamlDecompiler
 # layers follow in later slices.
+#
+# The Rewrite pass layer (Rewrite/: the IRewritePass interface and the four
+# IL-free passes XamlDecompiler.Decompile drives over the finished document
+# -- XClassRewritePass's main-module base-type rename with the x:Class /
+# x:ClassModifier attributes, MarkupExtensionRewritePass's
+# property-element-to-{Extension} inlining, AttributeRewritePass's
+# property-element-to-attribute inlining with the lazy-stop fixpoint, and
+# DocumentRewritePass's pseudo-Document wrapper collapse; the fifth pass,
+# ConnectionIdRewritePass, needs the ILAst/ILReader back end and stays
+# deferred with the Phase-3/4 machinery).
 
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlBinaryReader.cpp
@@ -85,6 +95,10 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Handlers/Blocks.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Handlers/Records.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/IHandlers.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Rewrite/AttributeRewritePass.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Rewrite/DocumentRewritePass.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Rewrite/MarkupExtensionRewritePass.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Rewrite/XClassRewritePass.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/SyntheticWpfModule.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlExtension.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlPathDeserializer.cpp

@@ -96,6 +96,44 @@ public:
         return presentationFramework_;
     }
 
+    // The rewrite-pass stub accessors (ConfigureRewriteStubs is idempotent;
+    // the tests hold their own shared_ptr aliases into the stubs).
+    ::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition& ObjectType()
+    {
+        ConfigureRewriteStubs();
+        return *objectType_;
+    }
+    ::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition& ThreadType()
+    {
+        ConfigureRewriteStubs();
+        return *threadType_;
+    }
+    ::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition& MarkupExtensionType()
+    {
+        ConfigureRewriteStubs();
+        return *markupExtensionType_;
+    }
+    ::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition& NullExtensionType()
+    {
+        ConfigureRewriteStubs();
+        return *nullExtensionType_;
+    }
+    ::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition& ArrayExtensionType()
+    {
+        ConfigureRewriteStubs();
+        return *arrayExtensionType_;
+    }
+    ::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition& CanonType()
+    {
+        ConfigureRewriteStubs();
+        return *canonType_;
+    }
+    ::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition& MemberInfoType()
+    {
+        ConfigureRewriteStubs();
+        return *memberInfoType_;
+    }
+
     // The probe's walk document (a DocumentStart-rooted two-block chain -- the
     // real BamlNode.Parse NREs when a leaf precedes the first header).
     ILSpy::BamlDecompiler::Baml::BamlDocument MakeDocument()
@@ -342,6 +380,75 @@ private:
             .SetAssemblyAttributes(std::move(attributes));
     }
 
+    // The rewrite-pass stub types (ConfigureRewriteStubs): the base-type
+    // graph the XClassRewritePass rename and the MarkupExtensionRewritePass
+    // CanInlineExt walk need (System.Object as the common base, the
+    // settable Thread.Name / Thread.Priority properties, the
+    // MarkupExtension chain, the internal __Canon, and the Type ->
+    // MemberInfo base) -- owned here so the compilation's non-owning
+    // registrations stay valid for the fixture's lifetime.
+    void ConfigureRewriteStubs()
+    {
+        namespace TS = ::ILSpy::Decompiler::TypeSystem;
+        if (objectType_ != nullptr)
+            return;
+        const TS::IModule* mainModule = &compilation_.MainModule();
+        auto makeType = [&](const std::string& ns, const std::string& name,
+                            TS::Accessibility accessibility) {
+            return std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+                ns + "." + name, ns, TS::FullTypeName(TS::TopLevelTypeName(ns, name)),
+                TS::TypeKind::Class, accessibility, compilation_, mainModule);
+        };
+        auto alias = [](TS::TestSupport::LookupTypeDefinition& definition) {
+            return TS::ITypePtr(&definition, [](TS::IType*) {});
+        };
+
+        // System.Object (the common base the XClass rename resolves to).
+        objectType_ = makeType("System", "Object", TS::Accessibility::Public);
+        // System.Threading.Thread with its settable Name / Priority
+        // properties (the rewrite passes' IProperty { CanSet } gates).
+        threadType_ = makeType("System.Threading", "Thread", TS::Accessibility::Public);
+        threadType_->AddDirectBaseType(alias(*objectType_));
+        auto makeThreadProperty = [&](const std::string& name) {
+            auto property = std::make_shared<TS::TestSupport::LookupProperty>(
+                name, alias(*threadType_), compilation_);
+            property->SetDeclaringType(alias(*threadType_));
+            property->SetCanSet(true);
+            return property;
+        };
+        threadNameProperty_ = makeThreadProperty("Name");
+        threadPriorityProperty_ = makeThreadProperty("Priority");
+        threadType_->SetProperties(
+            { threadNameProperty_.get(), threadPriorityProperty_.get() });
+        compilation_.SetMainModuleTypeDefinition(
+            TS::TopLevelTypeName("System.Threading", "Thread"), threadType_.get());
+
+        // The MarkupExtension chain (CanInlineExt's base-type walk).
+        markupExtensionType_ =
+            makeType("System.Windows.Markup", "MarkupExtension", TS::Accessibility::Public);
+        nullExtensionType_ =
+            makeType("System.Windows.Markup", "NullExtension", TS::Accessibility::Public);
+        nullExtensionType_->AddDirectBaseType(alias(*markupExtensionType_));
+        arrayExtensionType_ =
+            makeType("System.Windows.Markup", "ArrayExtension", TS::Accessibility::Public);
+        arrayExtensionType_->AddDirectBaseType(alias(*markupExtensionType_));
+
+        // The internal main-module type (the x:ClassModifier arm) and the
+        // System.Type -> System.Reflection.MemberInfo base (the two-children
+        // XClass drive's second rename).
+        canonType_ = makeType("System", "__Canon", TS::Accessibility::Internal);
+        canonType_->AddDirectBaseType(alias(*objectType_));
+        compilation_.SetMainModuleTypeDefinition(
+            TS::TopLevelTypeName("System", "__Canon"), canonType_.get());
+        memberInfoType_ =
+            makeType("System.Reflection", "MemberInfo", TS::Accessibility::Public);
+        typeType_->AddDirectBaseType(alias(*memberInfoType_));
+
+        // The existing String stub gains the Object base (the XClass rename
+        // of the section-E String rows).
+        stringType_->AddDirectBaseType(alias(*objectType_));
+    }
+
     // The mscorlib-backed stub types the section-E document resolves
     // (System.String with its Length property, System.Type with its Name
     // property): a REAL resolved member on a main-module type, which the
@@ -418,6 +525,23 @@ private:
     std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupProperty> targetTypeProperty_;
     std::vector<std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupAttribute>>
         xmlnsDefinitionAttributes_;
+    // The rewrite-pass stubs (ConfigureRewriteStubs) -- owned here so the
+    // compilation's non-owning registrations stay valid for the fixture's
+    // lifetime.
+    std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition> objectType_;
+    std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition> threadType_;
+    std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupProperty> threadNameProperty_;
+    std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupProperty>
+        threadPriorityProperty_;
+    std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition>
+        markupExtensionType_;
+    std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition>
+        nullExtensionType_;
+    std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition>
+        arrayExtensionType_;
+    std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition> canonType_;
+    std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition>
+        memberInfoType_;
 };
 
 } // namespace ILSpy::Tests::Baml
