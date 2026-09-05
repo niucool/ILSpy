@@ -96,6 +96,19 @@ public:
         return presentationFramework_;
     }
 
+    // The probe's real-mscorlib main-module full name (the MakeContextE
+    // shape) for the XamlDecompiler drives: the ResolveAssembly
+    // main-module-match arm and the XamlType.ResolveNamespace comparisons
+    // read the main module's FullAssemblyName, and the real engine the gold
+    // probe drives carries this exact four-part name on its real mscorlib
+    // PEFile. Per-context in the existing fixtures (the short "mscorlib"
+    // shape the walk-fixture contexts keep is what the
+    // MainModuleArmDropsAssemblyTail test pins).
+    void UseRealMscorlibMainFullName()
+    {
+        compilation_.SetMainModuleFullAssemblyName(kMscorlibFullName);
+    }
+
     // The rewrite-pass stub accessors (ConfigureRewriteStubs is idempotent;
     // the tests hold their own shared_ptr aliases into the stubs).
     ::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition& ObjectType()

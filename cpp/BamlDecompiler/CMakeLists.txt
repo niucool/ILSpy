@@ -70,8 +70,8 @@
 # XmlnsScope push/pop + annotation pairing; BamlConnectionId carries the
 # connection-id annotation payload).
 # The IDecompilerTypeSystem interface (the MetadataModule MainModule narrowing)
-# and the Handlers/Rewrite/XamlDecompiler
-# layers follow in later slices.
+# and the BamlDecompilerTypeSystem/ConnectionIdRewritePass slices stay gated on
+# the Phase-7 MetadataModule back end.
 #
 # The Rewrite pass layer (Rewrite/: the IRewritePass interface and the four
 # IL-free passes XamlDecompiler.Decompile drives over the finished document
@@ -81,7 +81,14 @@
 # property-element-to-attribute inlining with the lazy-stop fixpoint, and
 # DocumentRewritePass's pseudo-Document wrapper collapse; the fifth pass,
 # ConnectionIdRewritePass, needs the ILAst/ILReader back end and stays
-# deferred with the Phase-3/4 machinery).
+# deferred with the Phase-3/4 machinery),
+# plus the engine facade (XamlDecompiler + BamlDecompilationResult: the
+# static four-pass chain in the C# order and the Decompile composition --
+# BamlReader.ReadDocument -> XamlContext.Construct ->
+# HandlerMap.LookupHandler(RootNode.Type) -> Translate -> the passes -> the
+# result document with the AssemblyIdMap full names, the first x:Class name,
+# and the generated-member tokens; the C# constructor family's
+# BamlDecompilerTypeSystem/PEFile/resolver machinery is the Phase-7 gate).
 
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlBinaryReader.cpp
@@ -100,6 +107,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Rewrite/MarkupExtensionRewritePass.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Rewrite/XClassRewritePass.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/SyntheticWpfModule.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/XamlDecompiler.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlExtension.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlPathDeserializer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlProperty.cpp

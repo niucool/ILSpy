@@ -75,6 +75,7 @@ add_executable(ilspy_tests
     BamlDecompiler/XamlResourceKey_Test.cpp
     BamlDecompiler/XamlTypeProperty_Test.cpp
     BamlDecompiler/RewritePass_Test.cpp
+    BamlDecompiler/XamlDecompiler_Test.cpp
     Decompiler/TypeSystem/TypeName_Test.cpp
     Decompiler/TypeSystem/Version_Test.cpp
     Decompiler/TypeSystem/SignatureDecoder_Test.cpp
