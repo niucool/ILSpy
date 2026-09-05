@@ -61,8 +61,9 @@ KnownTypeReference::KnownTypeReference(KnownTypeCode knownTypeCode, TypeKind typ
 // The class is polymorphic (virtual destructor via `ITypeReference`), so the
 // array is not `constexpr`; the function-local static is the faithful
 // runtime-initialized counterpart. Each entry is constructed via the private
-// ctor (accessible from this member function). Index 0 (`None`) is a sentinel
-// that `Get` skips (returns `nullptr` for `None`).
+// ctor (accessible from this member function). Index 0 (`None`) and index 17
+// (the KnownTypeCode value hole) are sentinels that `Get` skips (returns
+// `nullptr` for both).
 const std::array<KnownTypeReference, KnownTypeCodeCount>&
 KnownTypeReference::Table()
 {
@@ -84,6 +85,9 @@ KnownTypeReference::Table()
         KnownTypeReference(KnownTypeCode::Double,  TypeKind::Struct,   "System", "Double"),
         KnownTypeReference(KnownTypeCode::Decimal, TypeKind::Struct,   "System", "Decimal"),
         KnownTypeReference(KnownTypeCode::DateTime, TypeKind::Struct,  "System", "DateTime"),
+        // Index 17: the KnownTypeCode value hole -- the C# `null` slot. The
+        // sentinel row carries `None` as its code so `Get` can answer nullptr.
+        KnownTypeReference(KnownTypeCode::None,     TypeKind::Unknown,  "", "", 0),
         KnownTypeReference(KnownTypeCode::String,  TypeKind::Class,    "System", "String"),
         KnownTypeReference(KnownTypeCode::Void,    TypeKind::Void,     "System", "Void", 0, KnownTypeCode::ValueType),
         KnownTypeReference(KnownTypeCode::Type,    TypeKind::Class,    "System", "Type"),
@@ -132,28 +136,33 @@ KnownTypeReference::Table()
 }
 
 // The C# `static KnownTypeReference? Get(KnownTypeCode typeCode)` -- the table
-// entry for `typeCode`, or `nullptr` for `None` (the C# `null` at index 0). The
-// C++ table carries a `None` sentinel at index 0 (no `null`), so `None` is
-// special-cased to `nullptr`.
+// entry for `typeCode`, or `nullptr` for `None` (the C# `null` at index 0) and
+// for the value hole at 17 (the C# `null` slot the sentinel row models). The
+// C++ table carries a `None`-coded sentinel for both slots, so both answer
+// `nullptr`.
 const KnownTypeReference* KnownTypeReference::Get(KnownTypeCode typeCode)
 {
     if (typeCode == KnownTypeCode::None)
         return nullptr;
     const auto i = static_cast<std::size_t>(typeCode);
     assert(i < KnownTypeCodeCount);
+    if (Table()[i].Code() == KnownTypeCode::None)
+        return nullptr;  // the value hole at 17
     return &Table()[i];
 }
 
 // The C# `static IEnumerable<KnownTypeReference> AllKnownTypes` -- every
-// non-`None` table entry (the 59 known types). The C++ table has no `null` slots
-// (the `None` sentinel at index 0 is the only skipped entry), so this yields
-// indices 1..59.
+// non-`null` table entry (the 59 known types; the C# skips the `None` slot and
+// the 17-hole's null the same way). This yields the 59 non-sentinel rows.
 std::vector<const KnownTypeReference*> KnownTypeReference::AllKnownTypes()
 {
     std::vector<const KnownTypeReference*> result;
-    result.reserve(KnownTypeCodeCount - 1);
-    for (std::size_t i = 1; i < KnownTypeCodeCount; ++i)
+    result.reserve(KnownTypeCodeCount - 2);
+    for (std::size_t i = 1; i < KnownTypeCodeCount; ++i) {
+        if (Table()[i].Code() == KnownTypeCode::None)
+            continue;  // the value hole at 17
         result.push_back(&Table()[i]);
+    }
     return result;
 }
 

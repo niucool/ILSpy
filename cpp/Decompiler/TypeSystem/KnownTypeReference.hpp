@@ -50,8 +50,10 @@
 // baseType = ValueType` adjustment (structs implicitly derive from
 // `System.ValueType`, not `System.Object`).
 // (c) The C# `static readonly KnownTypeReference?[] knownTypeReferences` table
-// (runtime-initialized, 60 slots, `null` at `None`) ports to a function-local
-// `static const std::array<KnownTypeReference, 60>` (the Meyers-singleton
+// (runtime-initialized, 61 slots -- the enum's 0..Range span with the 17
+// hole's `null` -- `null` at `None`) ports to a function-local
+// `static const std::array<KnownTypeReference, KnownTypeCodeCount>` (the
+// Meyers-singleton
 // pattern, the `KnownAttributeTypeNames` D378 / `StringComparer::Ordinal` D398
 // precedent) built at first use and thread-safe-initialized under C++11+. The
 // class is polymorphic (it derives from `ITypeReference`, which has a virtual
@@ -109,7 +111,9 @@ namespace ILSpy::Decompiler::TypeSystem {
 
 // The number of `KnownTypeCode` values (None..Range), the C#
 // `KnownTypeCodeCount = (int)KnownTypeCode.Range + 1`. The static table has one
-// entry per code (index 0 is the `None` sentinel, never returned by `Get`).
+// entry per code (index 0 is the `None` sentinel, never returned by `Get`);
+// index 17 is the KnownTypeCode value hole (the C# `null` slot), also never
+// returned by `Get`.
 constexpr std::size_t KnownTypeCodeCount =
     static_cast<std::size_t>(KnownTypeCode::Range) + 1;
 
@@ -187,9 +191,10 @@ private:
                        KnownTypeCode baseType = KnownTypeCode::Object);
 
     // The C# `static readonly KnownTypeReference?[] knownTypeReferences` table
-    // (60 slots, indexed by `KnownTypeCode`). A function-local `static const`
-    // array (Meyers singleton) built at first use; index 0 (`None`) is a
-    // sentinel that `Get` never returns.
+    // (indexed by `KnownTypeCode`). A function-local `static const`
+    // array (Meyers singleton) built at first use; index 0 (`None`) and
+    // index 17 (the KnownTypeCode value hole) are sentinels that `Get` never
+    // returns.
     static const std::array<KnownTypeReference, KnownTypeCodeCount>& Table();
 
     KnownTypeCode knownTypeCode_;

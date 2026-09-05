@@ -63,6 +63,8 @@ using ILSpy::Decompiler::TypeSystem::ITypeReference;
 using ILSpy::Decompiler::TypeSystem::ITypeResolveContext;
 using ILSpy::Decompiler::TypeSystem::KnownType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeCode;
+using ILSpy::Decompiler::TypeSystem::KnownTypeCodeCount;
+using ILSpy::Decompiler::TypeSystem::LookupKnownType;
 using ILSpy::Decompiler::TypeSystem::KnownTypeReference;
 using ILSpy::Decompiler::TypeSystem::StringComparer;
 using ILSpy::Decompiler::TypeSystem::TopLevelTypeName;
@@ -355,7 +357,7 @@ TEST(KnownTypeReferenceTest, ToStringReturnsMetadataFullNameForNonPrimitives)
 
 // ---------------------------------------------------------------------------
 // AllKnownTypes -- every non-`None` table entry (the 59 known types). Each is
-// non-null and distinct; the set covers codes 1..59.
+// non-null and distinct; the set covers codes 1..60 skipping the 17 hole.
 // ---------------------------------------------------------------------------
 TEST(KnownTypeReferenceTest, AllKnownTypesReturnsAllNonNoneEntries)
 {
@@ -363,9 +365,49 @@ TEST(KnownTypeReferenceTest, AllKnownTypesReturnsAllNonNoneEntries)
     EXPECT_EQ(all.size(), 59u);
     for (const auto* e : all)
         ASSERT_NE(e, nullptr);
-    // The first is `Object` (code 1), the last is `Range` (code 59).
+    // The first is `Object` (code 1), the last is `Range` (code 60).
     EXPECT_EQ(all.front()->Code(), KnownTypeCode::Object);
     EXPECT_EQ(all.back()->Code(), KnownTypeCode::Range);
+}
+
+// ---------------------------------------------------------------------------
+// The KnownTypeCode VALUE HOLE: the C# KnownTypeCode continues System.TypeCode's
+// numbering, where String is 18 and no member carries 17 (System.TypeCode itself
+// has the gap). The port reproduces the numbering (pinned against the real
+// engine's runtime ktc values -- the C:/temp-probe/MctpProbe gold: String=18,
+// Void=19, Type=20, IntPtr=28, UIntPtr=29, IEnumerableOfT=32, NullableOfT=44,
+// TypedReference=49) and the hole (the C# table's `null` slot): Get and
+// LookupKnownType answer nullptr for 17 and AllKnownTypes skips it.
+// ---------------------------------------------------------------------------
+TEST(KnownTypeReferenceTest, KnownTypeCodeValuesMatchTheCSharpNumbering)
+{
+    EXPECT_EQ(static_cast<int>(KnownTypeCode::None), 0);
+    EXPECT_EQ(static_cast<int>(KnownTypeCode::Object), 1);
+    EXPECT_EQ(static_cast<int>(KnownTypeCode::Boolean), 3);
+    EXPECT_EQ(static_cast<int>(KnownTypeCode::DateTime), 16);
+    EXPECT_EQ(static_cast<int>(KnownTypeCode::String), 18);
+    EXPECT_EQ(static_cast<int>(KnownTypeCode::Void), 19);
+    EXPECT_EQ(static_cast<int>(KnownTypeCode::Type), 20);
+    EXPECT_EQ(static_cast<int>(KnownTypeCode::IntPtr), 28);
+    EXPECT_EQ(static_cast<int>(KnownTypeCode::UIntPtr), 29);
+    EXPECT_EQ(static_cast<int>(KnownTypeCode::IEnumerableOfT), 32);
+    EXPECT_EQ(static_cast<int>(KnownTypeCode::NullableOfT), 44);
+    EXPECT_EQ(static_cast<int>(KnownTypeCode::TypedReference), 49);
+    EXPECT_EQ(static_cast<int>(KnownTypeCode::Index), 59);
+    EXPECT_EQ(static_cast<int>(KnownTypeCode::Range), 60);
+    EXPECT_EQ(KnownTypeCodeCount, 61u);
+
+    // The hole: no member at 17; both lookups answer nullptr (the C# `null`).
+    EXPECT_EQ(KnownTypeReference::Get(static_cast<KnownTypeCode>(17)), nullptr);
+    EXPECT_EQ(LookupKnownType(static_cast<KnownTypeCode>(17)), nullptr);
+    // The neighbors resolve the real rows (String's ToString is the primitive
+    // keyword "string" -- the ToStringReturnsPrimitiveKeywordForPrimitives
+    // contract; pin the metadata names through the entries instead).
+    EXPECT_NE(KnownTypeReference::Get(KnownTypeCode::String), nullptr);
+    EXPECT_EQ(KnownTypeReference::Get(KnownTypeCode::String)->Name(), "String");
+    EXPECT_NE(KnownTypeReference::Get(KnownTypeCode::DateTime), nullptr);
+    EXPECT_EQ(KnownTypeReference::Get(KnownTypeCode::DateTime)->Name(),
+              "DateTime");
 }
 
 // ---------------------------------------------------------------------------

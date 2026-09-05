@@ -25,7 +25,9 @@ namespace ILSpy::Decompiler::TypeSystem {
 
 namespace {
 // Ordered exactly as KnownTypeCode so the table is indexable by the enum.
-constexpr std::array<KnownTypeReferenceEntry, 60> kTable = {{
+// Index 17 is the value hole's sentinel row (Code None, no name): the C#
+// table carries `null` there, and `LookupKnownType` answers nullptr for it.
+constexpr std::array<KnownTypeReferenceEntry, 61> kTable = {{
     { KnownTypeCode::None,    TypeKind::Unknown,  "", "", 0 },
     { KnownTypeCode::Object,   TypeKind::Class,    "System", "Object", 0 },
     { KnownTypeCode::DBNull,   TypeKind::Class,    "System", "DBNull", 0 },
@@ -43,6 +45,8 @@ constexpr std::array<KnownTypeReferenceEntry, 60> kTable = {{
     { KnownTypeCode::Double,   TypeKind::Struct,   "System", "Double", 0 },
     { KnownTypeCode::Decimal,  TypeKind::Struct,   "System", "Decimal", 0 },
     { KnownTypeCode::DateTime, TypeKind::Struct,   "System", "DateTime", 0 },
+    // Index 17: the value hole (the C# `null` slot).
+    { KnownTypeCode::None,     TypeKind::Unknown,  "", "", 0 },
     { KnownTypeCode::String,   TypeKind::Class,    "System", "String", 0 },
     { KnownTypeCode::Void,     TypeKind::Void,     "System", "Void", 0 },
     { KnownTypeCode::Type,     TypeKind::Class,    "System", "Type", 0 },
@@ -95,6 +99,8 @@ std::size_t KnownTypeTableSize() { return kTable.size(); }
 const KnownTypeReferenceEntry* LookupKnownType(KnownTypeCode code) {
     auto i = static_cast<std::size_t>(code);
     if (i == 0 || i >= kTable.size()) return nullptr; // None has no entry
+    // The value hole at 17: the sentinel row answers nullptr (the C# null).
+    if (kTable[i].Code == KnownTypeCode::None) return nullptr;
     return &kTable[i];
 }
 

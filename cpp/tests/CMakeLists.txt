@@ -35,6 +35,7 @@ add_executable(ilspy_tests
     Decompiler/Metadata/ILTextEmitter_Test.cpp
     Decompiler/Metadata/MetadataGenericContext_Test.cpp
     Decompiler/Metadata/MetadataExtensions_Test.cpp
+    Decompiler/Metadata/MinimalCorlibTypeProvider_Test.cpp
     Decompiler/Metadata/AssemblyIdentity_Test.cpp
     Decompiler/Metadata/MetadataFileLookups_Test.cpp
     Decompiler/Metadata/NamespaceDefinition_Test.cpp

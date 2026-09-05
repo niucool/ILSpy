@@ -57,7 +57,12 @@ enum class KnownTypeCode : std::uint8_t {
     Double,
     Decimal,
     DateTime,
-    String,
+    // The C# KnownTypeCode continues System.TypeCode's numbering, where String
+    // is 18 and no member carries 17 (System.TypeCode itself has the gap). The
+    // port reproduces the value hole (the KnownMembers value-137-hole
+    // precedent): the member tables carry a sentinel row at index 17 and `Get`
+    // answers nullptr for it.
+    String = 18,
     Void,
     Type,
     Array,

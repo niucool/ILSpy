@@ -45,8 +45,11 @@ TypeCode GetTypeCode(const IType& type) {
     if (def != nullptr) {
         const KnownTypeCode typeCode = def->KnownTypeCode();
         if (typeCode <= KnownTypeCode::String && typeCode != KnownTypeCode::Void) {
-            // The C# `(TypeCode)typeCode` -- a numeric cast (the KnownTypeCode values 0-17 align with
-            // TypeCode 0-17 by construction; the guard excludes Void and anything past String).
+            // The C# `(TypeCode)typeCode` -- a numeric cast. The alignment is exact
+            // BY CONSTRUCTION of the real enums: KnownTypeCode continues
+            // System.TypeCode's numbering (both carry String=18 and NO member at
+            // 17), so the cast is the identity over the primitive range; the
+            // guard excludes Void and anything past String.
             return static_cast<TypeCode>(typeCode);
         }
         return TypeCode::Empty;
@@ -56,9 +59,9 @@ TypeCode GetTypeCode(const IType& type) {
 
 // The C# `public static IType FindType(this ICompilation compilation, TypeCode typeCode)`
 // (ReflectionHelper.cs line 106): `return compilation.FindType((KnownTypeCode)typeCode);` -- a
-// straight numeric cast forwarded to the interface lookup. The `KnownTypeCode` values 0-17
-// align with `TypeCode` 0-17 by construction (`None` <-> `Empty`, the rest identity), so the
-// cast is faithful for every `TypeCode` value.
+// straight numeric cast forwarded to the interface lookup. Both enums continue
+// System.TypeCode's numbering (String=18 in both, no member at 17), so the
+// cast is the identity for every `TypeCode` value (`None` <-> `Empty`).
 const IType& FindType(const ICompilation& compilation, TypeCode typeCode) {
     return compilation.FindType(static_cast<KnownTypeCode>(typeCode));
 }

@@ -42,7 +42,9 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   disassembler. DONE except:
   WebCIL, the assembly resolver (`.deps.json`).
 - **Phase 2** -- `Decompiler/TypeSystem/`: naming primitives (`TopLevelTypeName`,
-  `FullTypeName`), `KnownTypeCode` (full 60-entry table), the `IType` hierarchy
+  `FullTypeName`), `KnownTypeCode` (the full table -- 61 slots continuing
+  System.TypeCode's numbering, `String`=18 with the value-17 hole the C# keeps),
+  the `IType` hierarchy
   (`KnownType`/`SimpleType`/`ParameterizedType`/`ArrayType`/`ByReferenceType`/
   `PointerType`/`TypeParameter`/`SpecialType`), `DeriveTypeKind`, and the
   `MetadataModule` skeleton + `MetadataNamespace` (the ctor's assembly
@@ -66,7 +68,14 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   the `minimalCorlibTypeProvider` builds its provider over and
   `DecompilerTypeSystem`'s missing-known-types fallback appends, with the
   lifted `DummyTypeParameter.GetClassTypeParameterList`; gold-pinned against
-  the real engine over `MinimalCorlib.Instance`/`CreateWithTypes`). STARTED
+  the real engine over `MinimalCorlib.Instance`/`CreateWithTypes`), and the
+  `minimalCorlibTypeProvider` wiring (`MetadataExtensions`
+  `.MinimalAttributeTypeProvider` / `MinimalSignatureTypeProvider` -- one
+  process-lifetime `TypeProvider`
+  over a `SimpleCompilation(MinimalCorlib.Instance)`, the provider the
+  NullableContext/NullablePublicOnly/DefaultMember attribute-value decoders
+  drive; gold-pinned against the real engine's public properties, with the
+  `KnownTypeCode`/`TypeCode` value-hole fidelity fix the gold exposed). STARTED
   (the member entity
   family (`MetadataField`/`MetadataMethod`/`MetadataProperty`/
   `MetadataEvent`), the `ResolveType`/`ApplyAttributeTypeVisitor` resolution

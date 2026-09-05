@@ -22,8 +22,9 @@
 // `CSharpOperators` parameter tables are built through. The C#
 // `TypeCode GetTypeCode(this IType type)`: `dynamic_cast` to `ITypeDefinition`; if `KnownTypeCode <=
 // String && != Void`, return `(TypeCode)knownTypeCode` (numeric cast); else `Empty`. A non-definition
-// type (e.g. `KnownType`) is not an `ITypeDefinition` and yields `Empty`. The `KnownTypeCode` values
-// 0-17 align with `TypeCode` 0-17 (None<->Empty, rest identity). The C#
+// type (e.g. `KnownType`) is not an `ITypeDefinition` and yields `Empty`. Both enums continue
+// System.TypeCode's numbering (String=18 in both, no member at 17), so the cast is the identity.
+// The C#
 // `IType FindType(this ICompilation compilation, TypeCode typeCode)` delegates to
 // `ICompilation.FindType((KnownTypeCode)typeCode)` with the same numeric cast.
 
@@ -105,7 +106,8 @@ TEST(ReflectionHelperGetTypeCodeTest, NonDefinitionTypeYieldsEmpty) {
 }
 
 // ---------------------------------------------------------------------------
-// The `KnownTypeCode -> TypeCode` numeric-cast alignment for the full primitive range (0-17).
+// The `KnownTypeCode -> TypeCode` numeric-cast alignment for the full primitive range (both
+// enums continuing System.TypeCode's numbering, String=18 in both).
 // ---------------------------------------------------------------------------
 TEST(ReflectionHelperGetTypeCodeTest, FullPrimitiveRangeAlignment) {
     struct Pair { KnownTypeCode ktc; TypeCode tc; };

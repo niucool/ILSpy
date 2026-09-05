@@ -37,8 +37,10 @@ namespace {
 
 // The C# `$"[MinimalCorlibType {typeCode}]"` interpolates the enum's ToString() --
 // the KnownTypeCode MEMBER NAME. The port spells the names from this table (the
-// enum-name render the .NET interpolation produces).
-constexpr std::array<std::string_view, 60> KnownTypeCodeNames = {
+// enum-name render the .NET interpolation produces). Index 17 is the value
+// hole's sentinel (the KnownTypeCode numbering -- no member carries 17); no
+// KnownType ever has that code, so the empty entry is unreachable.
+constexpr std::array<std::string_view, 61> KnownTypeCodeNames = {
     "None",
     "Object",
     "DBNull",
@@ -56,6 +58,7 @@ constexpr std::array<std::string_view, 60> KnownTypeCodeNames = {
     "Double",
     "Decimal",
     "DateTime",
+    "",
     "String",
     "Void",
     "Type",

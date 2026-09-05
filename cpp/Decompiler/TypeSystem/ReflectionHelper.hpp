@@ -76,21 +76,28 @@ enum class TypeCode : std::uint8_t {
     Double = 14,
     Decimal = 15,
     DateTime = 16,
-    String = 17,
+    // The real System.TypeCode has NO member with value 17 (probed against
+    // .NET 10: String=18, and (TypeCode)17 renders the bare decimal). The hole
+    // is what makes the C# GetTypeCode's numeric cast `(TypeCode)typeCode` the
+    // identity over the KnownTypeCode range (KnownTypeCode.String is ALSO 18
+    // -- the TypeCode numbering is why the KnownTypeCode hole exists).
+    String = 18,
 };
 
 class IType;
 
 // The C# `public static TypeCode GetTypeCode(this IType type)` -- the type-code lookup. `dynamic_cast`s
 // the `IType` to `ITypeDefinition` (the C# `type as ITypeDefinition`); if the definition's `KnownTypeCode`
-// is `<= String` and not `Void`, returns `(TypeCode)knownTypeCode` (the numeric cast -- the `KnownTypeCode`
-// values 0-17 align with `TypeCode` 0-17); else `Empty`.
+// is `<= String` and not `Void`, returns `(TypeCode)knownTypeCode` (the numeric cast -- the identity,
+// since both enums continue System.TypeCode's numbering: String=18 in both, no member at 17);
+// else `Empty`.
 TypeCode GetTypeCode(const IType& type);
 
 // The C# `public static IType FindType(this ICompilation compilation, TypeCode typeCode)`
 // (ReflectionHelper.cs line 106) -- the built-in-type lookup by `System.TypeCode`: a faithful
-// `static_cast<KnownTypeCode>` (the `KnownTypeCode` values 0-17 align with `TypeCode` 0-17,
-// `None` <-> `Empty`) forwarded to `ICompilation.FindType(KnownTypeCode)`. The CSharpOperators
+// `static_cast<KnownTypeCode>` (the identity cast -- both enums continue System.TypeCode's
+// numbering, String=18 in both, no member at 17; `None` <-> `Empty`) forwarded to
+// `ICompilation.FindType(KnownTypeCode)`. The CSharpOperators
 // parameter tables (`InitParameterArrays`) are built through this lookup. A NON-NULL
 // reference return (the `ICompilation::FindType` contract, mirrored by the delegation).
 const IType& FindType(const ICompilation& compilation, TypeCode typeCode);

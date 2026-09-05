@@ -20,7 +20,10 @@
 
 #include "Decompiler/Disassembler/DisassemblerHelpers.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/SimpleCompilation.hpp"
+#include "Decompiler/TypeSystem/TypeProvider.hpp"
 #include "Decompiler/TypeSystem/Version.hpp"
 #include "Decompiler/Util/Sha1ForNonSecretPurposes.hpp"
 
@@ -309,6 +312,46 @@ std::string ToILNameString(const FullTypeName& typeName, bool omitGenerics)
             name += "`" + std::to_string(typeName.TypeParameterCount());
     }
     return Escape(name);
+}
+
+// --- the minimalCorlibTypeProvider (MetadataExtensions.cs lines 215-228) ---
+
+namespace {
+
+// The C# `internal static readonly TypeProvider minimalCorlibTypeProvider =
+// new TypeProvider(new SimpleCompilation(MinimalCorlib.Instance))`: one
+// process-lifetime provider over a compilation whose only module is a fresh
+// MinimalCorlib. The holder constructs the compilation FIRST (the provider
+// holds a non-owning pointer to it); the minimal-corlib module the compilation
+// resolves stays alive in the `MinimalCorlib::Instance()` reference's registry
+// (the MinimalCorlib header convention (b)), and the KnownTypeCache slots that
+// back `FindType` live in the compilation -- so the holder's static lifetime
+// keeps every decoded type alive for the process, matching the C# static
+// field's GC rooting.
+struct MinimalCorlibProviderHolder {
+    TypeSystem::SimpleCompilation compilation;
+    TypeSystem::TypeProvider provider;
+
+    MinimalCorlibProviderHolder()
+        : compilation(TypeSystem::Implementation::MinimalCorlib::Instance(), {}),
+          provider(compilation) {}
+};
+
+} // namespace
+
+TypeSystem::TypeProvider& MinimalAttributeTypeProvider()
+{
+    // The C# static-readonly field initializer: thread-safe first-use
+    // initialization (the magic-static; the C# relies on the class's static
+    // constructor).
+    static MinimalCorlibProviderHolder holder;
+    return holder.provider;
+}
+
+TypeSystem::TypeProvider& MinimalSignatureTypeProvider()
+{
+    // The C# `get => minimalCorlibTypeProvider` -- the same static field.
+    return MinimalAttributeTypeProvider();
 }
 
 } // namespace ILSpy::Decompiler::Metadata

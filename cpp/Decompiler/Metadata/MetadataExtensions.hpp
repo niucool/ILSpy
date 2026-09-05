@@ -24,10 +24,13 @@
 // CalculatePublicKeyToken (the SHA-1 public-key-token derivation),
 // GetPublicKeyToken / GetFullAssemblyName over the assembly definition (the
 // reader extensions), GetFullAssemblyName over an AssemblyReference row, and
-// the two TryGetFullAssemblyName forms. The remaining MetadataExtensions members
-// (ToHexString over a BlobReader, AppendHexString, GetTopLevelTypeDefinitions --
-// the last already ported in TypeSystemExtensions -- and the
-// minimalCorlibTypeProvider) land with the regions that consume them.
+// the two TryGetFullAssemblyName forms. The minimalCorlibTypeProvider (the
+// static TypeProvider over a SimpleCompilation(MinimalCorlib.Instance) the
+// NullableContext / NullablePublicOnly / DefaultMember attribute-value decoders
+// consume through CustomAttribute.DecodeValue) is the latest slice. The
+// remaining MetadataExtensions members (ToHexString over a BlobReader,
+// AppendHexString, and GetTopLevelTypeDefinitions -- the last already ported
+// in TypeSystemExtensions) land with the regions that consume them.
 
 #pragma once
 
@@ -39,9 +42,31 @@
 #include <optional>
 #include <string>
 
+// Forward declaration (the .cpp includes the full header): the return type
+// of the minimal-corlib accessors below.
+namespace ILSpy::Decompiler::TypeSystem { class TypeProvider; }
+
 namespace ILSpy::Decompiler::Metadata {
 
 class MetadataFile;
+
+// The C# `internal static readonly TypeProvider minimalCorlibTypeProvider =
+//     new TypeProvider(new SimpleCompilation(MinimalCorlib.Instance))`
+// (MetadataExtensions.cs lines 215-216) and its two public accessors:
+// `public static ICustomAttributeTypeProvider<IType>
+// MinimalAttributeTypeProvider { get => minimalCorlibTypeProvider; }` and
+// `public static ISignatureTypeProvider<IType, TypeSystem.GenericContext>
+// MinimalSignatureTypeProvider { get => minimalCorlibTypeProvider; }` -- one
+// process-lifetime provider over a compilation of nothing but MinimalCorlib,
+// usable to decode attribute signatures and other metadata blobs that only
+// mention built-in types (the GetNullableContext /
+// FindMinimumAccessibilityForNRT / GetDefaultMemberName consumers drive it
+// through CustomAttribute.DecodeValue). The C# properties are typed as the
+// SRM interfaces; the port returns the concrete TypeProvider (the attribute
+// half of its surface ports as plain methods -- the TypeProvider.hpp
+// convention (a), until the custom-attribute decoder slice ports the
+// interface). Both accessors return the SAME provider (the C# static field
+// behind both properties).
 
 // The C# `static string CalculatePublicKeyToken(BlobHandle blob,
 // MetadataReader reader)` (MetadataExtensions.cs): the strong-name public-key
@@ -123,5 +148,15 @@ TypeSystem::KnownTypeCode ToKnownTypeCode(PrimitiveTypeCode typeCode);
 // it: an enum's underlying known type code renders back into its
 // ELEMENT_TYPE byte.
 PrimitiveTypeCode ToPrimitiveTypeCode(TypeSystem::KnownTypeCode typeCode);
+
+// The two minimal-corlib accessors (the header comment above the namespace):
+// the C# `MinimalAttributeTypeProvider` / `MinimalSignatureTypeProvider`
+// properties. Both return the same process-lifetime provider (the C# static
+// field); thread-safe first-use initialization (the C# static-ctor semantics
+// via the magic-static). The reference is non-const: the C# signature-provider
+// interface members are non-const (the port's TypeProvider matches), so a
+// const reference could not drive them.
+TypeSystem::TypeProvider& MinimalAttributeTypeProvider();
+TypeSystem::TypeProvider& MinimalSignatureTypeProvider();
 
 } // namespace ILSpy::Decompiler::Metadata
