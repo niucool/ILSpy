@@ -36,7 +36,9 @@ namespace TS = ILSpy::Decompiler::TypeSystem;
 
 // ---------------------------------------------------------------------------
 // The enum is `: byte` with seven members in declaration order (Default=0
-// through Unmanaged=6). The values are pinned explicitly: the
+// through Unmanaged=9 -- the ECMA-335 II.23.2.1 byte, verified against
+// the decompiled System.Reflection.Metadata 10; the enum was originally
+// ported with the wrong value 6). The values are pinned explicitly: the
 // SignatureCallingConvention is read from the signature header's low nibble,
 // and the TypeSystemAstBuilder / ILAmbience consumers compare against the
 // named values, so reordering would silently remap the calling convention.
@@ -49,7 +51,7 @@ TEST(SignatureCallingConventionTest, EnumValuesMatchCSharpDeclarationOrder)
     EXPECT_EQ(static_cast<std::uint8_t>(TS::SignatureCallingConvention::ThisCall), 3);
     EXPECT_EQ(static_cast<std::uint8_t>(TS::SignatureCallingConvention::FastCall), 4);
     EXPECT_EQ(static_cast<std::uint8_t>(TS::SignatureCallingConvention::VarArgs), 5);
-    EXPECT_EQ(static_cast<std::uint8_t>(TS::SignatureCallingConvention::Unmanaged), 6);
+    EXPECT_EQ(static_cast<std::uint8_t>(TS::SignatureCallingConvention::Unmanaged), 9);
 }
 
 // ---------------------------------------------------------------------------
@@ -107,7 +109,7 @@ TEST(SignatureCallingConventionTest, SevenConventionsAreDistinguishable)
             case TS::SignatureCallingConvention::ThisCall: arm = 3; break;
             case TS::SignatureCallingConvention::FastCall: arm = 4; break;
             case TS::SignatureCallingConvention::VarArgs: arm = 5; break;
-            case TS::SignatureCallingConvention::Unmanaged: arm = 6; break;
+            case TS::SignatureCallingConvention::Unmanaged: arm = 9; break;
         }
         EXPECT_EQ(arm, static_cast<int>(static_cast<std::uint8_t>(value)));
     }

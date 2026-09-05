@@ -78,8 +78,10 @@
 //      `MetadataProperty`/`MetadataEvent` classes) and the IType-level
 //      member enumerations routed over them (`GetMembers` etc. -- the Void
 //      early-exit arms and the NestedTypes-only short-circuit arm ARE
-//      real); `DirectBaseTypes` (`module.ResolveType`, the TypeProvider
-//      slice); `GetAttributes`/`HasAttribute`/`GetAttribute`
+//      real); `DirectBaseTypes` (`module.ResolveType` -- the `TypeProvider`
+//      itself LANDED with the signature-provider slice, so the gate is now
+//      the `ResolveType` + `ApplyAttributeTypeVisitor` composition);
+//      `GetAttributes`/`HasAttribute`/`GetAttribute`
 //      (AttributeListBuilder + the custom-attribute value decoder);
 //      `ExtensionInfo`'s construction (the null arms are real: false when
 //      !HasExtensions or ExtensionMembers is off); `IsRecord` (the Methods

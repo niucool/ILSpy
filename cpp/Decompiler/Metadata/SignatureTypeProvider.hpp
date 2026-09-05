@@ -162,12 +162,19 @@ using MethodSignatureT = ProviderMethodSignature<SignatureTypeWriter>;
 
 // The C# `System.Reflection.Metadata.ISignatureTypeProvider<TType,
 // TGenericContext>` -- one pure-virtual per C# member, with the generic
-// context always the port's `MetadataGenericContext` value type. A provider
-// exposes its result type as the member typedef `TType` (the template
-// parameter the C# spells at the instantiation). The concrete writer
+// context always the provider's generic-context type -- the C#
+// `ISignatureTypeProvider<TType, TGenericContext>` is generic over BOTH; the
+// port carries the context type as the SECOND template parameter, defaulting
+// to the port's `MetadataGenericContext` value type so the writer/size
+// providers (the disassembler paths) keep their single-argument
+// instantiations unchanged. A provider exposes its result type as the member
+// typedef `TType` and its context type as `TGenericContext` (the template
+// parameters the C# spells at the instantiation). The concrete writer
 // implementation is the DisassemblerSignatureTypeProvider (Disassembler/);
-// the size implementation is the FieldValueSizeDecoder (SRMExtensions).
-template <typename TType>
+// the size implementation is the FieldValueSizeDecoder (SRMExtensions); the
+// type-system implementation is the TypeProvider (TypeSystem/, context = the
+// GenericContext VAR/MVAR scope).
+template <typename TType, typename TGenericContext = MetadataGenericContext>
 class ISignatureTypeProvider {
 public:
     virtual ~ISignatureTypeProvider() = default;
@@ -181,11 +188,11 @@ public:
     // handle ports as the raw 0x01 token.
     virtual TType GetTypeFromReference(std::uint32_t typeRefToken,
         std::uint8_t rawTypeKind) = 0;
-    // The C# `(MetadataReader, MetadataGenericContext, TypeSpecificationHandle,
+    // The C# `(MetadataReader, TGenericContext, TypeSpecificationHandle,
     // byte rawTypeKind)` -- the arm that decodes the TypeSpec row's signature
     // blob through the provider again.
     virtual TType GetTypeFromSpecification(std::uint32_t typeSpecToken,
-        std::uint8_t rawTypeKind, const MetadataGenericContext& genericContext) = 0;
+        std::uint8_t rawTypeKind, const TGenericContext& genericContext) = 0;
     virtual TType GetSZArrayType(TType elementType) = 0;
     virtual TType GetPointerType(TType elementType) = 0;
     virtual TType GetByReferenceType(TType elementType) = 0;
@@ -195,9 +202,9 @@ public:
     virtual TType GetGenericInstantiation(TType genericType,
         std::vector<TType> typeArguments) = 0;
     virtual TType GetGenericTypeParameter(
-        const MetadataGenericContext& genericContext, int index) = 0;
+        const TGenericContext& genericContext, int index) = 0;
     virtual TType GetGenericMethodParameter(
-        const MetadataGenericContext& genericContext, int index) = 0;
+        const TGenericContext& genericContext, int index) = 0;
     virtual TType GetModifiedType(TType modifier,
         TType unmodifiedType, bool isRequired) = 0;
     virtual TType GetFunctionPointerType(
@@ -262,6 +269,10 @@ public:
     // the provider exposes it -- `TProvider::TType`, the contract's template
     // parameter, spelled where the C# names TType at the instantiation).
     using TType = typename TProvider::TType;
+    // The provider's generic-context type (the C# TGenericContext; the
+    // provider exposes it -- every provider declares the context it scopes
+    // VAR/MVAR and the TypeSpec recursion through).
+    using TGenericContext = typename TProvider::TGenericContext;
 
     // The provider callbacks the walker drives, and the module the nested
     // TypeSpec blob reads go through (the C# passes the MetadataReader).
@@ -273,24 +284,24 @@ public:
     // exactly one full type (cmod/pinned prefixes included) from the blob.
     // The generic context scopes Var/MVar naming and the TypeSpec recursion.
     TType DecodeType(const std::uint8_t* data, std::size_t size,
-        const MetadataGenericContext& genericContext);
+        const TGenericContext& genericContext);
     // The C# `DecodeMethodSignature(ref BlobReader, TGenericContext)` entry.
     ProviderMethodSignature<TType> DecodeMethodSignature(const std::uint8_t* data,
-        std::size_t size, const MetadataGenericContext& genericContext);
+        std::size_t size, const TGenericContext& genericContext);
     // The SRM `MethodSpecification.DecodeSignature` shape: a compressed
     // type-argument count followed by that many full types (the MethodSpec
     // Instantiation blob). Trailing bytes throw std::logic_error (the same
     // strict-blob convention as the other entries).
     std::vector<TType> DecodeMethodSpecSignature(
         const std::uint8_t* data, std::size_t size,
-        const MetadataGenericContext& genericContext);
+        const TGenericContext& genericContext);
     // The SRM `StandaloneSignature.DecodeLocalSignature` shape: the Local-
     // Variables signature-kind nibble (0x7), then the compressed local count,
     // then that many full types (the C# caller checks GetKind first and
     // renders the " /* wrong signature kind */" comment itself).
     std::vector<TType> DecodeLocalSignature(
         const std::uint8_t* data, std::size_t size,
-        const MetadataGenericContext& genericContext);
+        const TGenericContext& genericContext);
 
 private:
     TProvider& provider_;
@@ -299,7 +310,7 @@ private:
     // The open blob (reset per Decode* call; nested decodes save/restore).
     const std::uint8_t* cur_ = nullptr;
     const std::uint8_t* end_ = nullptr;
-    const MetadataGenericContext* context_ = nullptr;
+    const TGenericContext* context_ = nullptr;
 
     [[noreturn]] void Fail(const char* what);
     std::uint8_t Byte();
@@ -572,7 +583,7 @@ template <typename TProvider>
 typename SignatureTypeProviderDecoder<TProvider>::TType
 SignatureTypeProviderDecoder<TProvider>::DecodeType(
         const std::uint8_t* data, std::size_t size,
-        const MetadataGenericContext& genericContext) {
+        const TGenericContext& genericContext) {
     cur_ = data;
     end_ = data + size;
     context_ = &genericContext;
@@ -586,7 +597,7 @@ template <typename TProvider>
 ProviderMethodSignature<typename SignatureTypeProviderDecoder<TProvider>::TType>
 SignatureTypeProviderDecoder<TProvider>::DecodeMethodSignature(
         const std::uint8_t* data, std::size_t size,
-        const MetadataGenericContext& genericContext) {
+        const TGenericContext& genericContext) {
     cur_ = data;
     end_ = data + size;
     context_ = &genericContext;
@@ -603,7 +614,7 @@ template <typename TProvider>
 std::vector<typename SignatureTypeProviderDecoder<TProvider>::TType>
 SignatureTypeProviderDecoder<TProvider>::DecodeMethodSpecSignature(
         const std::uint8_t* data, std::size_t size,
-        const MetadataGenericContext& genericContext) {
+        const TGenericContext& genericContext) {
     cur_ = data;
     end_ = data + size;
     context_ = &genericContext;
@@ -626,7 +637,7 @@ template <typename TProvider>
 std::vector<typename SignatureTypeProviderDecoder<TProvider>::TType>
 SignatureTypeProviderDecoder<TProvider>::DecodeLocalSignature(
         const std::uint8_t* data, std::size_t size,
-        const MetadataGenericContext& genericContext) {
+        const TGenericContext& genericContext) {
     cur_ = data;
     end_ = data + size;
     context_ = &genericContext;

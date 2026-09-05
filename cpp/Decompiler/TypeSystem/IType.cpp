@@ -25,6 +25,13 @@
 #include "Decompiler/TypeSystem/TypeVisitor.hpp"
 #include "Decompiler/TypeSystem/Implementation/GetMembersHelper.hpp"  // D490 routing arm
 
+// FromSignature (the metadata walker's ProviderMethodSignature<ITypePtr>
+// parameter, the PrimitiveTypeCode-based IsKnownType(KnownAttribute) helper,
+// and the KnownAttribute marker table it reads).
+#include "Decompiler/Metadata/SignatureTypeProvider.hpp"
+#include "Decompiler/TypeSystem/KnownAttribute.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // IsKnownType
+
 #include <utility>
 #include <vector>
 #include <string>
@@ -139,6 +146,27 @@ std::string PointerType::ReflectionName() const {
     std::string s = element_ ? element_->ReflectionName() : std::string("?");
     s += "*";
     return s;
+}
+
+// ---- PinnedType ----
+
+// The C# `Name`/`ReflectionName` are the element's plus the `" pinned"`
+// NameSuffix (the TypeWithElementType convention: `elementType.Name +
+// NameSuffix` / `elementType.ReflectionName + NameSuffix`).
+std::string PinnedType::Name() const {
+    return (element_ ? element_->Name() : std::string()) + " pinned";
+}
+std::string PinnedType::ReflectionName() const {
+    return (element_ ? element_->ReflectionName() : std::string("?")) + " pinned";
+}
+
+// Faithful port of PinnedType.cs VisitChildren: reconstruct with the visited
+// element if it changed, else return this.
+ITypePtr PinnedType::VisitChildren(TypeVisitor& visitor) {
+    if (!element_) return shared_from_this();
+    ITypePtr e = element_->AcceptVisitor(visitor);
+    if (e.get() == element_.get()) return shared_from_this();
+    return std::make_shared<PinnedType>(std::move(e));
 }
 
 // ---- TypeParameter ----
@@ -308,6 +336,120 @@ ITypePtr FunctionPointerType::VisitChildren(TypeVisitor& visitor) {
     return std::make_shared<FunctionPointerType>(callingConvention_, customCallingConventions_,
                                                  std::move(r), returnIsRefReadOnly_,
                                                  std::move(pt), parameterReferenceKinds_);
+}
+
+// ---- FunctionPointerType::FromSignature (the C# FunctionPointerType.cs lines
+// 33-95) ----
+
+namespace {
+
+// The `modReturn.Modifier.Namespace` read (the C# IType : INamedElement
+// `Namespace`): the port's minimal IType has no Namespace virtual, so the
+// namespace derives from the shapes reachable at this site -- a resolved
+// definition (IEntity::Namespace), an unresolvable TypeRef's UnknownType (the
+// full name's top-level namespace), or a parameterized type (its generic
+// definition's namespace, recursively). Everything else renders empty. The
+// read is gated by the `"CallConv"`-prefixed Name check, which over real
+// metadata means the marker is a real CallConv* definition or the
+// module-undefined marker's UnknownType -- both covered.
+std::string NamespaceOfModifier(const IType& type) {
+    if (const IEntity* entity = dynamic_cast<const IEntity*>(&type))
+        return entity->Namespace();
+    // The elaborated `class` specifier: a colliding free function
+    // `UnknownType()` lives in the namespace (the self-named null-object
+    // factory), hiding the class name in ordinary lookup.
+    if (const class UnknownType* unknown =
+            dynamic_cast<const class UnknownType*>(&type))
+        return unknown->FullTypeName().GetTopLevelTypeName().Namespace();
+    if (const ParameterizedType* pt =
+            dynamic_cast<const ParameterizedType*>(&type)) {
+        return pt->GenericType() ? NamespaceOfModifier(*pt->GenericType())
+                                 : std::string();
+    }
+    return std::string();
+}
+
+} // namespace
+
+std::shared_ptr<FunctionPointerType> FunctionPointerType::FromSignature(
+    const Metadata::ProviderMethodSignature<ITypePtr>& signature) {
+    ITypePtr returnType = signature.ReturnType;
+    bool returnIsRefReadOnly = false;
+    // The C# reads the SRM `SignatureHeader.CallingConvention`; the port's
+    // TypeSystem enum mirrors it member-for-member (Default=0 ... VarArgs=5,
+    // Unmanaged=9 -- the corrected value matching the decompiled
+    // System.Reflection.Metadata 10), so the static_cast is the identity.
+    SignatureCallingConvention callingConvention =
+        static_cast<SignatureCallingConvention>(signature.Header.CallingConvention);
+    std::vector<ITypePtr> customCallConvs;
+    while (const ModifiedType* modReturn =
+               dynamic_cast<const ModifiedType*>(returnType.get())) {
+        const ITypePtr& modifier = modReturn->Modifier();
+        if (modifier && IsKnownType(*modifier, KnownAttribute::In)) {
+            // The `[In]`-marked modreq on a byref return: `ref readonly`.
+            returnType = modReturn->Element();
+            returnIsRefReadOnly = true;
+        } else if (modifier && modifier->Name().rfind("CallConv", 0) == 0 &&
+                   NamespaceOfModifier(*modifier) ==
+                       "System.Runtime.CompilerServices") {
+            returnType = modReturn->Element();
+            if (callingConvention == SignatureCallingConvention::Unmanaged) {
+                const std::string& name = modifier->Name();
+                if (name == "CallConvCdecl") {
+                    callingConvention = SignatureCallingConvention::CDecl;
+                } else if (name == "CallConvFastcall") {
+                    callingConvention = SignatureCallingConvention::FastCall;
+                } else if (name == "CallConvStdcall") {
+                    callingConvention = SignatureCallingConvention::StdCall;
+                } else if (name == "CallConvThiscall") {
+                    callingConvention = SignatureCallingConvention::ThisCall;
+                } else {
+                    customCallConvs.push_back(modifier);
+                }
+            } else {
+                customCallConvs.push_back(modifier);
+            }
+        } else {
+            break;
+        }
+    }
+    std::vector<ITypePtr> parameterTypes;
+    parameterTypes.reserve(signature.ParameterTypes.size());
+    std::vector<ReferenceKind> parameterReferenceKinds;
+    parameterReferenceKinds.reserve(signature.ParameterTypes.size());
+    for (const ITypePtr& p : signature.ParameterTypes) {
+        ITypePtr paramType = p;
+        ReferenceKind kind = ReferenceKind::None;
+        if (const ModifiedType* mod =
+                dynamic_cast<const ModifiedType*>(paramType.get())) {
+            if (mod->Modifier() &&
+                IsKnownType(*mod->Modifier(), KnownAttribute::In)) {
+                kind = ReferenceKind::In;
+                paramType = mod->Element();
+            } else if (mod->Modifier() &&
+                       IsKnownType(*mod->Modifier(), KnownAttribute::Out)) {
+                kind = ReferenceKind::Out;
+                paramType = mod->Element();
+            } else if (mod->Modifier() &&
+                       IsKnownType(*mod->Modifier(),
+                                  KnownAttribute::RequiresLocation)) {
+                kind = ReferenceKind::RefReadOnly;
+                paramType = mod->Element();
+            }
+        }
+        if (paramType->Kind() == TypeKind::ByReference) {
+            if (kind == ReferenceKind::None)
+                kind = ReferenceKind::Ref;
+        } else {
+            kind = ReferenceKind::None;
+        }
+        parameterTypes.push_back(std::move(paramType));
+        parameterReferenceKinds.push_back(kind);
+    }
+    return std::make_shared<FunctionPointerType>(
+        callingConvention, std::move(customCallConvs), std::move(returnType),
+        returnIsRefReadOnly, std::move(parameterTypes),
+        std::move(parameterReferenceKinds));
 }
 
 ITypePtr TupleType::AcceptVisitor(TypeVisitor& visitor) {

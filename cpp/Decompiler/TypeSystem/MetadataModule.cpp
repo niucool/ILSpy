@@ -30,6 +30,7 @@
 #include "Decompiler/TypeSystem/Implementation/MetadataTypeDefinition.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataNamespace.hpp"
 #include "Decompiler/TypeSystem/StringComparer.hpp"
+#include "Decompiler/TypeSystem/TypeProvider.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
 #include "Decompiler/Util/BusyManager.hpp"
@@ -159,6 +160,19 @@ MetadataModule::MetadataModule(const ICompilation& compilation,
         referencedAssemblies_.resize(metadataFile_->CorTableRowCount(
             Metadata::CorTableIndex::AssemblyRef) + 1);
     }
+
+    // The C# `this.TypeProvider = new TypeProvider(this)` -- the module-owned
+    // signature provider (this slice). Constructed in the ctor BODY (after the
+    // `compilation_` member is initialized: the provider's ctor reads
+    // `module.Compilation()`).
+    typeProvider_ = std::make_unique<::ILSpy::Decompiler::TypeSystem::TypeProvider>(*this);
+}
+
+// The C# `internal readonly TypeProvider TypeProvider` field's accessor
+// (the header's self-named-accessor note).
+const ::ILSpy::Decompiler::TypeSystem::TypeProvider&
+MetadataModule::TypeProvider() const {
+    return *typeProvider_;
 }
 
 // Out-of-line: the `rootNamespace_` unique_ptr deleter needs

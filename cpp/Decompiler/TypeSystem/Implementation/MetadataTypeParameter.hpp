@@ -56,7 +56,9 @@
 //      `ShouldDecodeNullableAttributes` / `[Nullable]` byte decode -- the
 //      module's `minAccessibilityForNRT` computation and the
 //      CustomAttributeDecoder), and `TypeConstraints` (`module.ResolveType`
-//      -- the TypeProvider slice). The C#'s `DirectBaseTypes` /
+//      -- the `TypeProvider` itself LANDED with the
+//      signature-provider slice, so the gate is now the `ResolveType` +
+//      `ApplyAttributeTypeVisitor` composition). The C#'s `DirectBaseTypes` /
 //      `EffectiveBaseClass` / `EffectiveInterfaceSet` inherited machinery
 //      reads `TypeConstraints`, so those inherit the deferral through the
 //      base class unchanged.

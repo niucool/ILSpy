@@ -40,4 +40,5 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/TaskType.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/IntersectionType.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/MetadataModule.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/TypeProvider.cpp
 )

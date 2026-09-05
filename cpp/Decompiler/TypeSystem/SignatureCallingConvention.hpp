@@ -24,7 +24,9 @@
 // not-yet-ported `MethodSignature<TType>.Header.CallingConvention`.
 //
 // The BCL enum is `: byte` with seven members in declaration order (Default=0,
-// CDecl=1, StdCall=2, ThisCall=3, FastCall=4, VarArgs=5, Unmanaged=6). Like the
+// CDecl=1, StdCall=2, ThisCall=3, FastCall=4, VarArgs=5, Unmanaged=9 -- the
+// ECMA-335 II.23.2.1 byte, verified against the decompiled
+// System.Reflection.Metadata 10 enum). Like the
 // other BCL enums absorbed into the C++ port (the D384 MethodSemanticsAttributes
 // / D381 EntityHandle precedent), it is placed in ILSpy::Decompiler::TypeSystem
 // (the C++ port has no System::Reflection::Metadata namespace mirror) and
@@ -57,7 +59,12 @@ enum class SignatureCallingConvention : std::uint8_t {
     VarArgs = 5,
     // The generic unmanaged calling convention (`unmanaged`, with optional
     // custom `CallConv*` modifiers enumerated in CustomCallingConventions).
-    Unmanaged = 6,
+    // The value is 9 -- the ECMA-335 II.23.2.1 byte and the decompiled
+    // System.Reflection.Metadata 10 enum member (the enum was originally
+    // ported with the wrong value 6; corrected against the decompiled enum
+    // because `FunctionPointerType::FromSignature` compares the walker's
+    // header convention against this member).
+    Unmanaged = 9,
 };
 
 // Port of the SRMExtensions.cs `ToILSyntax` extension method (SRMExtensions.cs line

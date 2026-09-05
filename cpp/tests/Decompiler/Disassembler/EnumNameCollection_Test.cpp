@@ -296,11 +296,12 @@ TEST(WriteEnumTest, NullNamedMatchSuppressesALaterDuplicate) {
 TEST(WriteEnumTest, UnmatchedNonZeroRendersTheFlagsPlaceholder) {
 	PlainTextOutput concrete;
 	ITextOutput& output = concrete;
-	// Unmanaged (6) is the one real SignatureCallingConvention value NOT in the
-	// callingConvention table (the custom CallConv* modifiers render it) -- the
-	// unmatched arm falls through to the zero-padded fallback.
+	// Unmanaged (9 -- the ECMA byte, the corrected value) is the one real
+	// SignatureCallingConvention value NOT in the callingConvention table
+	// (the custom CallConv* modifiers render it) -- the unmatched arm falls
+	// through to the zero-padded fallback.
 	WriteEnum(SignatureCallingConvention::Unmanaged, DA::callingConvention, output);
-	EXPECT_EQ(concrete.ToString(), "flags(0006) ");
+	EXPECT_EQ(concrete.ToString(), "flags(0009) ");
 }
 
 TEST(WriteEnumTest, CDeclRendersUnmanagedCdecl) {

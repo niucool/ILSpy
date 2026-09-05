@@ -56,6 +56,20 @@ class TypeParameterSubstitution;
 class TypeVisitor;
 using ITypePtr = std::shared_ptr<IType>;
 
+} // namespace ILSpy::Decompiler::TypeSystem
+
+// Forward declaration of the metadata walker's provider method-signature
+// value type (Metadata/SignatureTypeProvider.hpp): the
+// `FunctionPointerType::FromSignature` declaration names the
+// `ProviderMethodSignature<ITypePtr>` instantiation, which needs only this
+// template declaration at the declaration site (the definition in IType.cpp
+// includes the full walker header).
+namespace ILSpy::Decompiler::Metadata {
+template <typename TType> struct ProviderMethodSignature;
+}
+
+namespace ILSpy::Decompiler::TypeSystem {
+
 // The C# `[Flags] enum GetMemberOptions` (IType.cs) -- the bitmask selecting which
 // members the member-enumeration functions below return / whether type substitution
 // is performed. An `int`-backed `enum class` (the C# has no underlying-type
@@ -669,6 +683,46 @@ private:
     ITypePtr element_;
 };
 
+// Faithful port of Implementation/PinnedType.cs (`sealed class PinnedType :
+// TypeWithElementType`, the ELEMENT_TYPE_PINNED wrapper the metadata signature
+// decoder produces for pinned locals -- the `TypeProvider.GetPinnedType` arm's
+// result). `Name`/`ReflectionName` are the element's plus the `" pinned"`
+// NameSuffix (the TypeWithElementType convention); `Kind` is `Other` (a pinned
+// type is not a distinct type kind); reference-ness and by-ref-like-ness
+// delegate to the element (the pinned-ness does not change them).
+// `AcceptVisitor` is NOT overridden: the C# inherits AbstractType's
+// `visitor.VisitOtherType(this)` (the TypeVisitor has no VisitPinnedType), so
+// the port inherits IType::AcceptVisitor's VisitOtherType default too.
+class PinnedType : public IType {
+public:
+    explicit PinnedType(ITypePtr element) : element_(std::move(element)) {}
+    TypeKind Kind() const override { return TypeKind::Other; }
+    std::string Name() const override;
+    std::string ReflectionName() const override;
+    int TypeParameterCount() const override { return 0; }
+    const ITypePtr& Element() const noexcept { return element_; }
+    // Faithful port of PinnedType.cs `bool? IsReferenceType =>
+    // elementType.IsReferenceType` (delegates to the element).
+    std::optional<bool> IsReferenceType() const override {
+        return element_ ? element_->IsReferenceType() : std::nullopt;
+    }
+    // Faithful port of PinnedType.cs `override bool IsByRefLike =>
+    // elementType.IsByRefLike` (delegates to the element).
+    bool IsByRefLike() const override {
+        return element_ ? element_->IsByRefLike() : false;
+    }
+    // Faithful port of PinnedType.cs VisitChildren: reconstruct with the
+    // visited element if it changed, else return this. AcceptVisitor keeps
+    // the inherited VisitOtherType dispatch (the header note).
+    ITypePtr VisitChildren(TypeVisitor& visitor) override;
+protected:
+    bool StructuralEquals(const IType& other) const override {
+        return element_->Equals(*static_cast<const PinnedType&>(other).element_);
+    }
+private:
+    ITypePtr element_;
+};
+
 // A generic type parameter. OwnerKind distinguishes class (Var) from method
 // (MVar) parameters, matching ELEMENT_TYPE_VAR / ELEMENT_TYPE_MVAR.
 class TypeParameter : public IType {
@@ -901,6 +955,24 @@ public:
     // matching the C# source).
     ITypePtr AcceptVisitor(TypeVisitor& visitor) override;
     ITypePtr VisitChildren(TypeVisitor& visitor) override;
+
+    // The C# `public static FunctionPointerType FromSignature(MethodSignature<IType>
+    // signature, MetadataModule module)` (FunctionPointerType.cs lines 33-95): the
+    // modreq/modopt walk over the return and parameter types that derives the
+    // calling convention (the `CallConv*` modopt table), the `returnIsRefReadOnly`
+    // flag (the `[In]`-marked modreq on a byref return), and the per-parameter
+    // `ReferenceKind`s (In/Out/RefReadOnly markers, byref -> Ref). The C#
+    // `module` argument feeds only the module-carrying C# ctor (the port's
+    // FunctionPointerType dropped the module field -- the ctor takes the five
+    // remaining fields), so the port drops the parameter (a documented
+    // divergence: the module is observable only through the deferred
+    // TypeSystemOptions.FunctionPointers gate the C# ctor reads it for).
+    // The parameter type is the metadata walker's provider method signature
+    // (the `MethodSignature<IType>` counterpart); only a forward declaration of
+    // the template is needed at this declaration site (the instantiation
+    // happens at the definition in IType.cpp, which includes the walker).
+    static std::shared_ptr<FunctionPointerType> FromSignature(
+        const Metadata::ProviderMethodSignature<ITypePtr>& signature);
 protected:
     bool StructuralEquals(const IType& other) const override {
         const auto& o = static_cast<const FunctionPointerType&>(other);

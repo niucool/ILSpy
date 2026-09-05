@@ -38,6 +38,7 @@
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
+#include "Decompiler/TypeSystem/KnownAttribute.hpp"  // the IsKnownType marker form
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 
 #include <stdexcept>
@@ -215,6 +216,17 @@ const IModule* FindModuleByReference(
 // parameterization of the type (and also for the definition itself)." -- `type.GetDefinition()?.KnownTypeCode
 // == knownType`. A null definition yields false.
 bool IsKnownType(const IType& type, KnownTypeCode knownType);
+
+// The C# `internal static bool IsKnownType(this IType type, KnownAttribute knownType)`
+// (TypeSystemExtensions.cs line 380): `type.GetDefinition()?.FullTypeName.
+// IsKnownType(knownType)` -- the definition's full name compared against the
+// attribute's known type name (`knownType.GetTypeName()`, the KnownAttribute
+// table). This is the MARKER form `FunctionPointerType.FromSignature` reads
+// (the `[In]`/`[Out]`/`[RequiresLocation]` modreq markers whose metadata
+// names carry the "Attribute" suffix -- real .NET 10 metadata emits
+// `modreq(System.Runtime.InteropServices.InAttribute)`), distinct from the
+// KnownTypeCode form above. A null definition yields false.
+bool IsKnownType(const IType& type, KnownAttribute knownType);
 
 // The C# `public static bool IsArrayInterfaceType(this IType type)` -- whether the type is one of the
 // 5 generic collection interfaces (`IEnumerable<T>`/`ICollection<T>`/`IList<T>`/`IReadOnlyCollection<T>`/

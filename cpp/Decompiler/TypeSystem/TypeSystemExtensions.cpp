@@ -35,6 +35,7 @@
 #include "Decompiler/TypeSystem/IParameterizedMember.hpp"
 #include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
+#include "Decompiler/TypeSystem/KnownAttribute.hpp"  // GetTypeName (IsKnownType)
 #include "Decompiler/TypeSystem/StringComparer.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
 
@@ -132,6 +133,17 @@ std::vector<const ITypeDefinition*> GetTopLevelTypeDefinitions(const ICompilatio
 bool IsKnownType(const IType& type, KnownTypeCode knownType) {
     const ITypeDefinition* def = type.GetDefinition();
     return def != nullptr && def->KnownTypeCode() == knownType;
+}
+
+// The C# `internal static bool IsKnownType(this IType type, KnownAttribute
+// knownType)` (line 380): `type.GetDefinition()?.FullTypeName.IsKnownType(
+// knownType)`, where the FullTypeName form compares against the attribute's
+// `GetTypeName()` table row (a TopLevelTypeName -- compared as a
+// NON-NESTED FullTypeName, the implicit conversion the C# applies).
+bool IsKnownType(const IType& type, KnownAttribute knownType) {
+    const ITypeDefinition* def = type.GetDefinition();
+    if (def == nullptr) return false;
+    return def->FullTypeName() == FullTypeName(GetTypeName(knownType));
 }
 
 bool IsArrayInterfaceType(const IType& type) {

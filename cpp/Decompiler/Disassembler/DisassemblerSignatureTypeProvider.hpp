@@ -49,6 +49,9 @@ public:
     // The provider's result type (the TType the generic contract and the
     // SignatureTypeProviderDecoder read off the provider).
     using TType = Metadata::SignatureTypeWriter;
+    // The provider's generic-context type (the TGenericContext the walker
+    // reads off the provider -- the disassembler's MetadataGenericContext).
+    using TGenericContext = Metadata::MetadataGenericContext;
 
     DisassemblerSignatureTypeProvider(const Metadata::MetadataFile& module,
         Output::ITextOutput& output);

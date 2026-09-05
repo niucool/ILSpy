@@ -84,13 +84,12 @@
 //      resolution family, this slice) are REAL; the miss arm falls through
 //      to `GetDefinition(nilHandle)` -> null.
 //  (g) DEFERRED members (each loud `std::logic_error` where the ported surface
-//      reaches it, otherwise absent with this note): the `TypeProvider` field and
-//      the whole `ResolveType` / `ResolveMethod` / `ResolveEntity` /
-//      `ResolveDeclaringType` / `CreateFakeMethod` family (the TypeProvider.cs +
-//      CustomAttributeDecoder + ApplyAttributeTypeVisitor slices);
-//      `ResolveModule(AssemblyReferenceHandle)` / `ResolveModule(ModuleReference
-//      Handle)` / `GetDeclaringModule(TypeReferenceHandle)` (the compilation-side
-//      module resolution); `GetAssemblyAttributes` / `GetModuleAttributes` /
+//      reaches it, otherwise absent with this note): the whole `ResolveType` /
+//      `ResolveMethod` / `ResolveEntity` / `ResolveDeclaringType` /
+//      `CreateFakeMethod` family (the ApplyAttributeTypeVisitor +
+//      CustomAttributeDecoder slices -- the `TypeProvider` field and its class
+//      LANDED, so the provider itself is no longer a gate);
+//      `GetAssemblyAttributes` / `GetModuleAttributes` /
 //      `GetInternalsVisibleTo` / `InternalsVisibleTo`'s friend-list decode and the
 //      ctor's `NullableContext` / `FindMinimumAccessibilityForNRT` (the
 //      CustomAttributeDecoder value-decode machinery); the lazy
@@ -146,6 +145,11 @@ namespace Implementation { class MetadataNamespace; }
 // complete).
 namespace Implementation { class MetadataTypeDefinition; }
 
+// Forward declaration of the signature provider (the sibling TypeProvider.hpp):
+// the `typeProvider_` member holds it by `unique_ptr`, complete with the
+// pointee incomplete (the same out-of-line-destructor convention).
+class TypeProvider;
+
 // The type-system implementation for a metadata PE file: one resolved module.
 // Not `final` (the C# class is unsealed).
 class MetadataModule : public IModule {
@@ -169,6 +173,16 @@ public:
     // The C# `public TypeSystemOptions TypeSystemOptions => options` (convention
     // (d): the return type is GLOBALLY QUALIFIED).
     ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions TypeSystemOptions() const;
+
+    // The C# `internal readonly TypeProvider TypeProvider` (the MetadataModule
+    // ctor's `new TypeProvider(this)`): the module-owned signature provider
+    // every ResolveType / attribute-decode path drives. An accessor (the
+    // port's field-to-accessor convention), owned by `unique_ptr` below
+    // (the C# GC root). SELF-NAMED-ACCESSOR TRAP: the `TypeProvider()`
+    // accessor hides the CLASS name `TypeProvider` for the rest of this
+    // class body, so the member below spells the GLOBAL qualification (the
+    // D372 crux).
+    const TypeProvider& TypeProvider() const;
 
     // The C# `public ITypeDefinition GetDefinition(TypeDefinitionHandle handle)`
     // -- the entity-resolving member over a raw TypeDef token (`0x02......`).
@@ -275,6 +289,7 @@ private:
     Version assemblyVersion_;
     std::string fullAssemblyName_;
     std::unique_ptr<Implementation::MetadataNamespace> rootNamespace_;
+    std::unique_ptr<::ILSpy::Decompiler::TypeSystem::TypeProvider> typeProvider_;
 
     // The C# `readonly MetadataTypeDefinition[] typeDefs` (allocated in the
     // ctor unless the Uncached option is set; index = the 1-based TypeDef row

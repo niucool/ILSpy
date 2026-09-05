@@ -115,4 +115,13 @@ std::string ToILNameString(const TypeSystem::FullTypeName& typeName, bool omitGe
 // equivalent. The FullTypeNameSignatureDecoder's primitive arm consumes it.
 TypeSystem::KnownTypeCode ToKnownTypeCode(PrimitiveTypeCode typeCode);
 
+// The C# `public static PrimitiveTypeCode ToPrimitiveTypeCode(this
+// KnownTypeCode typeCode)` (MetadataExtensions.cs line 234): the inverse
+// mapping -- the signature-blob primitive code for a known type, 0 (the C#
+// `default` value / `Unknown`) for everything that is not a primitive. The
+// TypeProvider's `GetUnderlyingEnumType` (the attribute-decoder arm) consumes
+// it: an enum's underlying known type code renders back into its
+// ELEMENT_TYPE byte.
+PrimitiveTypeCode ToPrimitiveTypeCode(TypeSystem::KnownTypeCode typeCode);
+
 } // namespace ILSpy::Decompiler::Metadata

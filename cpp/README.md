@@ -56,10 +56,16 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `AssemblyReference` row wrapper, `ResolveModule` over both handle kinds,
   `GetDeclaringModule`, `FindModuleByReference`, and the
   `GetTypeDefinition` forwarder arm through `ResolveForwardedType`; all
-  gold-pinned against the real engine). STARTED (the member entity
+  gold-pinned against the real engine), and the signature-provider layer
+  (`GenericContext` + the module-owned `TypeProvider` over the templated
+  `ISignatureTypeProvider` walker, `PinnedType`,
+  `FunctionPointerType.FromSignature`, `ToPrimitiveTypeCode`, and the
+  `EnumUnderlyingTypeResolveException`; gold-pinned end-to-end against the
+  real engine over the mscorlib+System fixture incl. the FnPtr/CallConv
+  modreq matrix). STARTED (the member entity
   family (`MetadataField`/`MetadataMethod`/`MetadataProperty`/
-  `MetadataEvent`), the `TypeProvider`/`ResolveType` resolution family,
-  interning remain).
+  `MetadataEvent`), the `ResolveType`/`ApplyAttributeTypeVisitor` resolution
+  family, interning remain).
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with

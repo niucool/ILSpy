@@ -252,6 +252,34 @@ KnownTypeCode ToKnownTypeCode(PrimitiveTypeCode typeCode)
     }
 }
 
+PrimitiveTypeCode ToPrimitiveTypeCode(KnownTypeCode typeCode)
+{
+    // The C# switch (MetadataExtensions.cs line 234): the primitive codes map
+    // back onto their element types; the default arm returns 0 (the C#
+    // `default(PrimitiveTypeCode)` -- the `Unknown`-spelled value 0).
+    switch (typeCode) {
+        case KnownTypeCode::Object: return PrimitiveTypeCode::Object;
+        case KnownTypeCode::Boolean: return PrimitiveTypeCode::Boolean;
+        case KnownTypeCode::Char: return PrimitiveTypeCode::Char;
+        case KnownTypeCode::SByte: return PrimitiveTypeCode::SByte;
+        case KnownTypeCode::Byte: return PrimitiveTypeCode::Byte;
+        case KnownTypeCode::Int16: return PrimitiveTypeCode::Int16;
+        case KnownTypeCode::UInt16: return PrimitiveTypeCode::UInt16;
+        case KnownTypeCode::Int32: return PrimitiveTypeCode::Int32;
+        case KnownTypeCode::UInt32: return PrimitiveTypeCode::UInt32;
+        case KnownTypeCode::Int64: return PrimitiveTypeCode::Int64;
+        case KnownTypeCode::UInt64: return PrimitiveTypeCode::UInt64;
+        case KnownTypeCode::Single: return PrimitiveTypeCode::Single;
+        case KnownTypeCode::Double: return PrimitiveTypeCode::Double;
+        case KnownTypeCode::String: return PrimitiveTypeCode::String;
+        case KnownTypeCode::Void: return PrimitiveTypeCode::Void;
+        case KnownTypeCode::TypedReference: return PrimitiveTypeCode::TypedReference;
+        case KnownTypeCode::IntPtr: return PrimitiveTypeCode::IntPtr;
+        case KnownTypeCode::UIntPtr: return PrimitiveTypeCode::UIntPtr;
+        default: return static_cast<PrimitiveTypeCode>(0);
+    }
+}
+
 std::string ToILNameString(const FullTypeName& typeName, bool omitGenerics)
 {
     std::string name;

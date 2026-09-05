@@ -252,6 +252,9 @@ class FieldValueSizeDecoder final : public ISignatureTypeProvider<int> {
 public:
     // The provider's result type (the walker's TType).
     using TType = int;
+    // The provider's generic-context type (the walker's TGenericContext --
+    // the disassembler's MetadataGenericContext, the default).
+    using TGenericContext = MetadataGenericContext;
 
     explicit FieldValueSizeDecoder(const MetadataFile& module);
 
