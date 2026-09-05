@@ -44,8 +44,13 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
 - **Phase 2** -- `Decompiler/TypeSystem/`: naming primitives (`TopLevelTypeName`,
   `FullTypeName`), `KnownTypeCode` (full 60-entry table), the `IType` hierarchy
   (`KnownType`/`SimpleType`/`ParameterizedType`/`ArrayType`/`ByReferenceType`/
-  `PointerType`/`TypeParameter`/`SpecialType`), `DeriveTypeKind`. STARTED (the full
-  entity layer, `ICompilation`/`MetadataModule`, interning remain).
+  `PointerType`/`TypeParameter`/`SpecialType`), `DeriveTypeKind`, and the
+  `MetadataModule` skeleton + `MetadataNamespace` (the ctor's assembly
+  identity arms over the raw Cor-table surface, the `IModule` identity surface,
+  and the per-module namespace tree over the `NamespaceDefinition` cache;
+  gold-pinned against the real engine). STARTED (the entity layer
+  (`MetadataTypeDefinition` and the `GetDefinition` family), the
+  `TypeProvider`/`ResolveType` resolution family, interning remain).
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with
