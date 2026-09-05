@@ -3051,6 +3051,9 @@ cpp/
     Util/                <- Util primitives (UTF-8/16, Span, ImmutableStack)
     Metadata/            <- Metadata layer (Phase 1)
       Ecma335/winmd/     <- vendored microsoft/winmd headers (MIT; pinned commit)
+    Xml/                 <- port-authored System.Xml(.Linq) stand-in (the XML name
+                           layer: XmlConvert.EncodeLocalName/VerifyNCName, XName, XNamespace; the
+                           BAML decompiler consumes the BCL classes directly)
   ILSpyX/                <- ICSharpCode.ILSpyX core subset (Phase 8)
   BamlDecompiler/        <- ICSharpCode.BamlDecompiler (Phase 9)
   ILSpyCmd/              <- ICSharpCode.ILSpyCmd CLI (Phase 10)

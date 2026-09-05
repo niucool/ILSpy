@@ -10,6 +10,7 @@ target_sources(ilspy PRIVATE
 add_subdirectory(Util)
 add_subdirectory(Metadata)
 add_subdirectory(TypeSystem)
+add_subdirectory(Xml)
 add_subdirectory(IL)
 add_subdirectory(CSharp)
 add_subdirectory(FlowAnalysis)
