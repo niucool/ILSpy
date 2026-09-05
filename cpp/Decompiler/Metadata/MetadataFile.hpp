@@ -311,6 +311,15 @@ public:
     // file; never throws.
     std::string Name() const;
 
+    // The C# MetadataFile `public string FullName` (MetadataFile.cs,
+    // inherited by PEFile): the assembly's full display name when the file
+    // is an assembly manifest (the GetFullAssemblyName extension over the
+    // Assembly table), else the Name (a netmodule). Like the C# property it
+    // propagates the raw-surface throws of a corrupt Assembly row -- use
+    // the TryGetFullAssemblyName extension for the caught form. The C#
+    // debug-metadata third arm is n/a for the port's PE-only reader.
+    std::string FullName() const;
+
     // Row count of the TypeDef table.
     std::uint32_t TypeDefCount() const noexcept;
 
@@ -1223,6 +1232,16 @@ public:
     // std::invalid_argument when the string misses its terminator (the
     // winmd Missing string terminator throw).
     std::string CorString(std::uint32_t heapOffset) const;
+
+    // The #Blob payload at a heap offset (the C#
+    // `metadata.GetBlobBytes(BlobHandle.FromOffset(offset))`): the bytes
+    // after the compressed length prefix, as a byte vector. The nil offset 0
+    // is the nil blob's zero length -- the empty vector (the callers gate on
+    // the nil column value first, the C# `IsNil` checks). Throws
+    // std::invalid_argument for an offset past the heap or a truncated length
+    // prefix (the winmd seek/check throws, the BadImageFormatException 'Read
+    // out of bounds.' analog) and for a missing file (#Blob stream).
+    std::vector<std::uint8_t> CorBlob(std::uint32_t heapOffset) const;
 
     // The 16 raw #GUID bytes at a 1-based heap index (the C#
     // `metadata.GetGuid(GuidHandle)` -- the canonical little-endian binary

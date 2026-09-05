@@ -17,6 +17,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 #include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/Metadata/MetadataExtensions.hpp"
 #include "Decompiler/Metadata/MethodBody.hpp"
 #include "Decompiler/Metadata/MethodBodyReader.hpp"
 #include "Decompiler/Metadata/MetadataGenericContext.hpp"
@@ -192,6 +193,18 @@ std::string MetadataFile::Name() const {
     if (std::optional<ModuleDefinitionInfo> module = GetModuleDefinition())
         return module->Name;
     return {};
+}
+
+std::string MetadataFile::FullName() const {
+    // The C# MetadataFile.FullName (MetadataFile.cs): the Assembly table's
+    // full display name for an assembly manifest, else Name. The IsAssembly
+    // test reads the raw Assembly row count (the C# metadata.IsAssembly), so
+    // a corrupt Assembly row still takes the assembly arm and propagates
+    // the raw-surface throw exactly as the C# propagates
+    // BadImageFormatException.
+    if (CorTableRowCount(CorTableIndex::Assembly) > 0)
+        return GetFullAssemblyName(*this);
+    return Name();
 }
 
 std::uint32_t MetadataFile::TypeDefCount() const noexcept {
@@ -2873,6 +2886,17 @@ std::string MetadataFile::CorString(std::uint32_t heapOffset) const {
     // which throws for a missing terminator.
     if (heapOffset == 0 || !IsValid()) return {};
     return std::string{impl_->db->get_string(heapOffset)};
+}
+
+std::vector<std::uint8_t> MetadataFile::CorBlob(std::uint32_t heapOffset) const {
+    // get_blob decodes the compressed length prefix at the offset and
+    // returns the payload view; the seek inside throws for an offset past
+    // the heap (the BadImageFormatException 'Read out of bounds.' analog).
+    // A missing file has no db to reach at all.
+    if (!IsValid())
+        throw std::invalid_argument("Invalid metadata");
+    auto blob = impl_->db->get_blob(heapOffset);
+    return std::vector<std::uint8_t>(blob.begin(), blob.end());
 }
 
 std::optional<std::array<std::uint8_t, 16>> MetadataFile::CorTryGuid(

@@ -32,7 +32,13 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   (SRM's `NamespaceCache`: the TypeDef/ExportedType namespace tree with the
   duplicate-full-name merge and the synthesized intermediate namespaces --
   the `MetadataReader.GetNamespaceDefinitionRoot` surface the Phase-2
-  `MetadataModule`/`MetadataNamespace` walk consumes), and an IL text
+  `MetadataModule`/`MetadataNamespace` walk consumes), the strong-name
+  assembly-identity family (the vendored `Sha1ForNonSecretPurposes` hashing,
+  `MetadataFile.CorBlob`, and the `MetadataExtensions`
+  `CalculatePublicKeyToken`/`GetPublicKeyToken`/`GetFullAssemblyName` trio
+  with the `TryGetFullAssemblyName` forms and the `MetadataFile.FullName`
+  property -- the display-name resolution the Phase-2 `MetadataModule` ctor
+  computes `FullAssemblyName` through), and an IL text
   disassembler. DONE except:
   WebCIL, the assembly resolver (`.deps.json`).
 - **Phase 2** -- `Decompiler/TypeSystem/`: naming primitives (`TopLevelTypeName`,

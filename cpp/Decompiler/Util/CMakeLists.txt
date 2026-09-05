@@ -10,4 +10,5 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/StringComparers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ResourcesFile.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Char.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Sha1ForNonSecretPurposes.cpp
 )

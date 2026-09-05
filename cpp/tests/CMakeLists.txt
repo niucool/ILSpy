@@ -13,6 +13,7 @@ add_executable(ilspy_tests
     Util/CacheManager_Test.cpp
     Util/LazyInit_Test.cpp
     Util/CSharpPrimitiveCast_Test.cpp
+    Util/Sha1ForNonSecretPurposes_Test.cpp
     Decompiler/Xml/XmlConvert_Test.cpp
     Decompiler/Xml/XmlSerialization_Test.cpp
     Decompiler/Xml/XmlTextParser_Test.cpp
@@ -33,6 +34,7 @@ add_executable(ilspy_tests
     Decompiler/Metadata/ILTextEmitter_Test.cpp
     Decompiler/Metadata/MetadataGenericContext_Test.cpp
     Decompiler/Metadata/MetadataExtensions_Test.cpp
+    Decompiler/Metadata/AssemblyIdentity_Test.cpp
     Decompiler/Metadata/MetadataFileLookups_Test.cpp
     Decompiler/Metadata/NamespaceDefinition_Test.cpp
     Decompiler/Metadata/SRMExtensions_Test.cpp
