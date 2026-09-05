@@ -158,8 +158,11 @@ Xaml::XamlType* XamlContext::ResolveType(std::uint16_t id)
 		// DEFERRIAL (loud, the DecodeCustomAttributeBlobs convention): the
 		// BAML-record arm resolves the record's type through
 		// `ReflectionHelper.ParseReflectionName(typeRec.TypeFullName, new
-		// SimpleTypeResolveContext(TypeSystem))`, which needs the
-		// System.Reflection.Metadata `TypeName` parser -- not yet ported. The
+		// SimpleTypeResolveContext(TypeSystem))`. The System.Reflection.Metadata
+		// `TypeName` parser it composes landed in
+		// cpp/Decompiler/Metadata/TypeName.{hpp,cpp}; the remaining pieces are the
+		// ReflectionHelper.ParseReflectionName/ResolveTypeName resolution chain and
+		// ICompilation.FindModuleByAssemblyNameInfo -- not yet ported. The
 		// throw keeps the arm unreachable instead of silently wrong; the
 		// KnownThings arm above is fully functional.
 		throw std::logic_error(

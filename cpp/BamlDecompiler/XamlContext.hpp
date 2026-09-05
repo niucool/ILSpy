@@ -47,8 +47,12 @@
 //    `Dictionary<ushort, XamlType>` holds GC references the accessors hand
 //    out); the handed-out pointers stay valid for the context's lifetime.
 //  * `Baml.ResolveType`'s BAML-record arm calls
-//    `ReflectionHelper.ParseReflectionName` -- NOT yet ported (it needs the
-//    System.Reflection.Metadata `TypeName` parser). Following the loud
+//    `ReflectionHelper.ParseReflectionName` -- NOT yet ported (the
+//    System.Reflection.Metadata `TypeName`/`AssemblyNameInfo` parser it
+//    composes landed in cpp/Decompiler/Metadata/TypeName.{hpp,cpp} and
+//    AssemblyNameInfo.{hpp,cpp}; the remaining pieces are the
+//    ReflectionHelper.ParseReflectionName/ResolveTypeName resolution chain
+//    and ICompilation.FindModuleByAssemblyNameInfo). Following the loud
 //    `std::logic_error` deferral convention, the arm throws until that lands;
 //    the KnownThings arm (ids above 0x7fff) is fully functional.
 //  * The `Baml()` accessor hides the namespace name `Baml` for the rest of

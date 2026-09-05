@@ -34,6 +34,8 @@ add_executable(ilspy_tests
     Decompiler/Metadata/MetadataExtensions_Test.cpp
     Decompiler/Metadata/SRMExtensions_Test.cpp
     Decompiler/Metadata/AssemblyNameReference_Test.cpp
+    Decompiler/Metadata/AssemblyNameInfo_Test.cpp
+    Decompiler/Metadata/TypeName_Test.cpp
     Decompiler/Metadata/PortablePdb_Test.cpp
     Decompiler/Metadata/DebugDirectory_Test.cpp
     Decompiler/Metadata/AssociatedPortablePdb_Test.cpp
