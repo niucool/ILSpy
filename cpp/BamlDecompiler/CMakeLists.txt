@@ -43,11 +43,16 @@
 # attach through the node annotations, with the sibling/ancestor key lookups),
 # plus the record-type-to-handler dispatch (IHandlers: the IHandler/IDeferHandler
 # interfaces and the HandlerMap -- the explicit CreateBuiltinHandlers manifest
-# standing in for the C# reflection walk, EMPTY until the Handlers/Blocks and
-# Handlers/Records classes land (the 37-row gold inventory they must reproduce
-# is pinned in tests/BamlDecompiler/HandlerMap_Test.cpp), the lazy LookupHandler
-# over it, the duplicate-key InstallHandler, and the ProcessChildren walk with
-# its XmlnsScope push/pop + annotation pairing).
+# standing in for the C# reflection walk, populated lazily with the first
+# handler slice: the Handlers/Records leaf handlers (Text/TextWithId/
+# TextWithConverter, ConnectionId, DefAttribute, PresentationOptionsAttribute,
+# and the nine null-returning info/mapping/line handlers) and the
+# Handlers/Blocks block handlers (DocumentHandler, ElementHandler) -- 17 of
+# the 37 gold-registry rows pinned in tests/BamlDecompiler/HandlerMap_Test.cpp,
+# the rest landing as their classes port), the lazy LookupHandler over it, the
+# duplicate-key InstallHandler, and the ProcessChildren walk with its
+# XmlnsScope push/pop + annotation pairing; BamlConnectionId carries the
+# connection-id annotation payload).
 # The IDecompilerTypeSystem interface (the MetadataModule MainModule narrowing)
 # and the Handlers/Rewrite/XamlDecompiler
 # layers follow in later slices.
@@ -61,6 +66,8 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlReader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlWriter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/KnownThings.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Handlers/Blocks.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Handlers/Records.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/IHandlers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/SyntheticWpfModule.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlExtension.cpp

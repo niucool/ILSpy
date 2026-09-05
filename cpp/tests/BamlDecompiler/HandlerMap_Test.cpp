@@ -25,7 +25,7 @@
 //  * the registry inventory: the probe dumps the real `handlers` static
 //    dictionary after its static ctor ran -- 37 (record type, handler class)
 //    rows, byte-backed enum values, 5 IDeferHandler implementors -- the
-//    completion target the port's empty CreateBuiltinHandlers manifest grows
+//    completion target the port's CreateBuiltinHandlers manifest grows
 //    toward (one construction line per ported handler; the guard test keeps
 //    every landed row inside the gold inventory);
 //  * LookupHandler: the release form -- null for every unregistered type
@@ -39,12 +39,16 @@
 //    the scope before/after is null (the PushScope/PopScope pairing), the
 //    parent element's XmlnsScope annotation has Element() == the element
 //    itself, the info records are skipped, and the dispatch order is the
-//    document order. The port tests drive stub handlers (the real handler
-//    classes are not ported yet) through the same fixture shape.
+//    document order. The port tests drive stub handlers through the same
+//    fixture shape for the wiring machinery; the first real-handler slice
+//    (17 rows -- the Handlers/Records leaf handlers and the
+//    Handlers/Blocks Document/Element handlers) is driven end-to-end against
+//    the probe's render gold in Handlers_Test.cpp.
 
 #include "BamlDecompiler/Baml/BamlNode.hpp"
 #include "BamlDecompiler/Baml/BamlRecords.hpp"
 #include "BamlDecompiler/BamlElement.hpp"
+#include "BamlDecompiler/Handlers/Blocks.hpp"
 #include "BamlDecompiler/IHandlers.hpp"
 #include "BamlDecompiler/XmlnsDictionary.hpp"
 #include "BamlDecompiler/XamlContext.hpp"
@@ -69,6 +73,7 @@ using ILSpy::BamlDecompiler::IDeferHandler;
 using ILSpy::BamlDecompiler::IHandler;
 using ILSpy::BamlDecompiler::XamlContext;
 namespace Baml = ILSpy::BamlDecompiler::Baml;
+namespace Handlers = ILSpy::BamlDecompiler::Handlers;
 namespace Xml = ILSpy::Decompiler::Xml;
 
 // ===== the gold registry inventory (the probe's 37 rows) =====================
@@ -174,11 +179,11 @@ public:
     Baml::BamlRecordType Type() const override { return type_; }
 
     std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
-        BamlElement& parent) override
+        BamlElement* parent) override
     {
         ctxSeen = &ctx;
         nodeSeen = &node;
-        parentSeen = &parent;
+        parentSeen = parent;
         scopeSeen = ctx.XmlNs().CurrentScope();
         translateCount++;
         if (returnNull_)
@@ -206,7 +211,7 @@ public:
     Baml::BamlRecordType Type() const override { return Baml::BamlRecordType::ElementStart; }
 
     std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
-        BamlElement& parent) override
+        BamlElement* parent) override
     {
         auto elem = std::make_unique<BamlElement>(&node);
         elem->Xaml = std::make_shared<Xml::XElement>("Inner");
@@ -230,14 +235,14 @@ public:
     Baml::BamlRecordType Type() const override { return Baml::BamlRecordType::KeyElementStart; }
 
     std::unique_ptr<BamlElement> Translate(XamlContext&, Baml::BamlNode&,
-        BamlElement&) override
+        BamlElement*) override
     {
         deferRan = false;
         return nullptr;
     }
 
     std::unique_ptr<BamlElement> TranslateDefer(XamlContext&, Baml::BamlNode& node,
-        BamlElement&) override
+        BamlElement*) override
     {
         deferRan = true;
         return std::make_unique<BamlElement>(&node);
@@ -280,18 +285,20 @@ TEST_F(HandlerMapRegistryTest, LookupReturnsRegisteredHandlerAndNullForMissing)
     EXPECT_EQ(HandlerMap::LookupHandler(Baml::BamlRecordType::ClrEvent), nullptr);
 }
 
-TEST_F(HandlerMapRegistryTest, LookupOfTheInfoRecordsIsNullWithoutThrow)
+TEST_F(HandlerMapRegistryTest, LookupOfTheInfoRecordsAnswersTheirBuiltinHandlers)
 {
-    // The four records the DEBUG arm exempts (the BamlContext record walk
-    // consumes them); the release form answers null for them like any other
-    // unregistered type (the probe: the AssemblyInfo lookup answers its
-    // handler, the StringInfo lookup <null>).
+    // The three info records the DEBUG arm exempts carry NULL-RETURNING
+    // builtin handlers in the real registry (the probe: the AssemblyInfo
+    // lookup answers AssemblyInfoHandler); StringInfo carries none (it is
+    // one of the never-handled types -- the record walk consumes it).
     for (Baml::BamlRecordType type : { Baml::BamlRecordType::AssemblyInfo,
               Baml::BamlRecordType::TypeInfo,
-              Baml::BamlRecordType::AttributeInfo,
-              Baml::BamlRecordType::StringInfo }) {
-        EXPECT_EQ(HandlerMap::LookupHandler(type), nullptr);
+              Baml::BamlRecordType::AttributeInfo }) {
+        IHandler* handler = HandlerMap::LookupHandler(type);
+        EXPECT_NE(handler, nullptr) << Baml::RecordTypeName(type);
+        EXPECT_EQ(handler->Type(), type);
     }
+    EXPECT_EQ(HandlerMap::LookupHandler(Baml::BamlRecordType::StringInfo), nullptr);
 }
 
 TEST_F(HandlerMapRegistryTest, InstallDuplicateTypeThrowsTheNetMessage)
@@ -318,12 +325,39 @@ TEST_F(HandlerMapRegistryTest, ClearHandlersResetsToTheUnpopulatedState)
     EXPECT_NE(HandlerMap::LookupHandler(Baml::BamlRecordType::Text), nullptr);
 
     HandlerMap::ClearHandlers();
-    EXPECT_EQ(HandlerMap::LookupHandler(Baml::BamlRecordType::Text), nullptr);
+    // The reset re-runs the manifest at the next lookup: the builtin
+    // TextHandler row comes back (the manifest is no longer empty).
+    IHandler* reloaded = HandlerMap::LookupHandler(Baml::BamlRecordType::Text);
+    EXPECT_NE(reloaded, nullptr);
+    EXPECT_EQ(reloaded->Type(), Baml::BamlRecordType::Text);
 
-    // Re-installing after the clear works (the next translation run would
-    // re-populate the manifest the same way).
-    HandlerMap::InstallHandler(std::make_unique<RecordingHandler>(Baml::BamlRecordType::Text));
-    EXPECT_NE(HandlerMap::LookupHandler(Baml::BamlRecordType::Text), nullptr);
+    // Re-installing after the clear works: the explicit stub shadows the
+    // manifest row for its type (the seam precedence -- see the next test).
+    auto stub = std::make_unique<RecordingHandler>(Baml::BamlRecordType::Text);
+    RecordingHandler* stubRaw = stub.get();
+    HandlerMap::ClearHandlers();
+    HandlerMap::InstallHandler(std::move(stub));
+    EXPECT_EQ(HandlerMap::LookupHandler(Baml::BamlRecordType::Text), stubRaw);
+}
+
+TEST_F(HandlerMapRegistryTest, ExplicitlyInstalledHandlersShadowTheManifest)
+{
+    // The lazy population SKIPS record types an explicit install has already
+    // claimed -- the test/embedding-seam precedence (the C# static ctor runs
+    // before any user code and its reflection walk is the only writer, so the
+    // port's seam must not fight the manifest over a claimed type).
+    auto stub = std::make_unique<RecordingHandler>(Baml::BamlRecordType::Text);
+    RecordingHandler* stubRaw = stub.get();
+    HandlerMap::InstallHandler(std::move(stub));
+
+    // The first lookup populates the manifest; the claimed Text row is
+    // skipped and the stub answers.
+    EXPECT_EQ(HandlerMap::LookupHandler(Baml::BamlRecordType::Text), stubRaw);
+    // The unclaimed rows still install (DocumentStart's builtin row).
+    EXPECT_NE(HandlerMap::LookupHandler(Baml::BamlRecordType::DocumentStart), nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::DocumentHandler*>(
+                  HandlerMap::LookupHandler(Baml::BamlRecordType::DocumentStart)),
+        nullptr);
 }
 
 TEST_F(HandlerMapTest, LookupHandlerAnswersTheIDeferHandlerCastSite)
@@ -339,7 +373,7 @@ TEST_F(HandlerMapTest, LookupHandlerAnswersTheIDeferHandlerCastSite)
     ASSERT_NE(defer, nullptr);
     Baml::BamlRecordNode node(nullptr);
     BamlElement parent(nullptr);
-    std::unique_ptr<BamlElement> deferred = defer->TranslateDefer(*ctx, node, parent);
+    std::unique_ptr<BamlElement> deferred = defer->TranslateDefer(*ctx, node, &parent);
     EXPECT_NE(deferred, nullptr);
     EXPECT_TRUE(static_cast<DeferringHandler*>(handler)->deferRan);
 }
@@ -365,8 +399,10 @@ TEST_F(HandlerMapTest, ProcessChildrenDispatchesInDocumentOrderAndWiresChildren)
     HandlerMap::ProcessChildren(*ctx, *root, parentElem);
 
     // The dispatch order is the child order of the block tree (the PIMapping
-    // leaf first, the AssemblyInfo leaf second -- the StringInfo/TypeInfo/
-    // AttributeInfo leaves in between carry no registered handler).
+    // leaf first, the AssemblyInfo leaf second; the StringInfo/TypeInfo/
+    // AttributeInfo leaves in between carry the builtin null-returning
+    // handlers, and the ElementStart block's builtin ElementHandler runs
+    // last -- the real-handler drive below pins its render byte-exactly).
     EXPECT_EQ(pi->translateCount, 1);
     EXPECT_EQ(asmStub->translateCount, 1);
     EXPECT_EQ(pi->ctxSeen, ctx.get());
@@ -377,14 +413,21 @@ TEST_F(HandlerMapTest, ProcessChildrenDispatchesInDocumentOrderAndWiresChildren)
     EXPECT_EQ(asmStub->parentSeen, &parentElem);
 
     // The returned elements land in the parent's children list, in order,
-    // each with the Parent back-pointer the Add does not assign.
-    ASSERT_EQ(parentElem.Children.size(), 2u);
+    // each with the Parent back-pointer the Add does not assign (the two
+    // stub elements, then the real ElementHandler's ToolBar BamlElement).
+    ASSERT_EQ(parentElem.Children.size(), 3u);
     EXPECT_EQ(parentElem.Children[0].get(), pi->createdElem);
     EXPECT_EQ(parentElem.Children[1].get(), asmStub->createdElem);
     EXPECT_EQ(parentElem.Children[0]->Node, root->Children[0].get());
     EXPECT_EQ(parentElem.Children[1]->Node, root->Children[1].get());
     EXPECT_EQ(parentElem.Children[0]->Parent, &parentElem);
     EXPECT_EQ(parentElem.Children[1]->Parent, &parentElem);
+    EXPECT_EQ(parentElem.Children[2]->Node, root->Children[5].get());
+    EXPECT_EQ(parentElem.Children[2]->Parent, &parentElem);
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Document>\r\n"
+        "  <ToolBar xmlns=\"http://probe.pi/ns\">hello</ToolBar>\r\n"
+        "</Document>");
 }
 
 TEST_F(HandlerMapTest, ProcessChildrenSkipsUnhandledChildrenAndContinues)
@@ -393,9 +436,11 @@ TEST_F(HandlerMapTest, ProcessChildrenSkipsUnhandledChildrenAndContinues)
     Baml::BamlBlockNode* root = ctx->RootNode();
     ASSERT_NE(root, nullptr);
 
-    // Only the LAST child (the ElementStart block) carries a handler: the
-    // five unhandled leaves before it are skipped without a crash and the
-    // walk still reaches it (the release Debug.WriteLine no-op path).
+    // Only the LAST child (the ElementStart block) carries a stub: the five
+    // leaves before it are handled-but-null or skipped (the builtin
+    // null-returning handlers for PIMapping/AssemblyInfo/TypeInfo/
+    // AttributeInfo, the never-handled StringInfo) and the walk still
+    // reaches the block (the release Debug.WriteLine no-op path).
     auto elemHandler = std::make_unique<RecordingHandler>(Baml::BamlRecordType::ElementStart);
     RecordingHandler* elemStub = elemHandler.get();
     HandlerMap::InstallHandler(std::move(elemHandler));
@@ -416,8 +461,13 @@ TEST_F(HandlerMapTest, ProcessChildrenHandlerReturningNullAddsNothing)
     Baml::BamlBlockNode* root = ctx->RootNode();
     ASSERT_NE(root, nullptr);
 
+    // The null-returning stubs claim BOTH the PIMapping leaf and the
+    // ElementStart block (whose builtin ElementHandler would otherwise
+    // contribute its own element): nothing is wired into the children list.
     HandlerMap::InstallHandler(
         std::make_unique<RecordingHandler>(Baml::BamlRecordType::PIMapping, /*returnNull=*/true));
+    HandlerMap::InstallHandler(
+        std::make_unique<RecordingHandler>(Baml::BamlRecordType::ElementStart, /*returnNull=*/true));
 
     BamlElement parentElem(root);
     parentElem.Xaml = std::make_shared<Xml::XElement>("Document");
@@ -464,6 +514,11 @@ TEST_F(HandlerMapTest, ProcessChildrenWithoutAnElementSkipsTheAnnotation)
 
     HandlerMap::InstallHandler(
         std::make_unique<RecordingHandler>(Baml::BamlRecordType::PIMapping));
+    // The ElementStart block's builtin ElementHandler would NRE on the
+    // string-Xaml parent (the real engine throws there); the stub keeps
+    // this test on ProcessChildren's own no-element guard.
+    HandlerMap::InstallHandler(
+        std::make_unique<RecordingHandler>(Baml::BamlRecordType::ElementStart, /*returnNull=*/true));
 
     // A string XamlNode (no XElement): the C# `if (nodeElem.Xaml.Element !=
     // null)` guard skips the annotation; the scope pairing still runs.
@@ -558,9 +613,10 @@ TEST(HandlerMapGoldRegistryTest, NeverHandledTypesAreOutsideTheGoldRegistry)
 
 TEST(HandlerMapGoldRegistryTest, BuiltinManifestStaysInsideTheGoldInventory)
 {
-    // The manifest is empty until the handler classes land; every row a
-    // future port appends must be one of the probed registry's 37 -- and
-    // never one of the types the real registry holds no handler for at all.
+    // Every manifest row must be one of the probed registry's 37 -- and
+    // never one of the types the real registry holds no handler for at all
+    // (the current slice: the first 17 rows, the Handlers/Records and
+    // Handlers/Blocks classes that have landed so far).
     for (const auto& handler : HandlerMap::CreateBuiltinHandlers()) {
         const int value = static_cast<int>(handler->Type());
         const bool known = std::any_of(std::begin(kGoldRegistry), std::end(kGoldRegistry),

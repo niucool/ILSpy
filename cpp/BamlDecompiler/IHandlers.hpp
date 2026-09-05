@@ -39,14 +39,20 @@
 //    `typeof(IHandler).Assembly.GetTypes()` + `Activator.CreateInstance` --
 //    C++ has no reflection, so the port carries the registry explicitly:
 //    `CreateBuiltinHandlers()` constructs every PORTED handler class once
-//    (the one-line-per-handler manifest -- empty until the handler classes
-//    land; the gold inventory it must eventually reproduce is pinned in
-//    HandlerMap_Test.cpp: the 37 (record type, class) rows the real engine's
-//    registry holds, dumped from the shipped assembly through the
-//    C:/temp-probe/HandlerMapProbe reflection probe). The map is populated
-//    lazily at first use (the function-local static, the C# static-ctor
-//    timing) and the instances are owned by the registry (`unique_ptr`, the
-//    C# GC holding the singletons).
+//    (the one-line-per-handler manifest -- the gold inventory it must
+//    eventually reproduce is pinned in HandlerMap_Test.cpp: the 37 (record
+//    type, class) rows the real engine's registry holds, dumped from the
+//    shipped assembly through the C:/temp-probe/HandlerMapProbe reflection
+//    probe). The map is populated lazily at first use (the function-local
+//    static, the C# static-ctor timing) and the instances are owned by the
+//    registry (`unique_ptr`, the C# GC holding the singletons).
+//    The population runs through `InstallHandler` EXCEPT for record types an
+//    explicit install has already claimed: the C# static ctor runs before
+//    any user code and its reflection walk is the only writer, so the
+//    pre-claimed skip is the port's test/embedding-seam precedence -- a
+//    `ClearHandlers` + `InstallHandler` run shadows the manifest rows for
+//    the types it claimed (manifest-internal duplicates still throw through
+//    `InstallHandler`, the C# reflection-walk invariant).
 //  * The C# `handlers.Add(handler.Type, handler)` throws
 //    `ArgumentException` ("An item with the same key has already been
 //    added. Key: Text") when two handler classes claim the same record
@@ -103,9 +109,12 @@ public:
     virtual Baml::BamlRecordType Type() const = 0;
 
     // The C# `BamlElement Translate(XamlContext ctx, BamlNode node,
-    // BamlElement parent)`.
+    // BamlElement parent)` -- the parent is NULLABLE (the
+    // XamlDecompiler.Decompile root call passes null; the null-parent derefs
+    // the handlers perform throw the .NET NullReferenceException message,
+    // the XmlnsDictionary convention).
     virtual std::unique_ptr<BamlElement> Translate(XamlContext& ctx,
-        Baml::BamlNode& node, BamlElement& parent) = 0;
+        Baml::BamlNode& node, BamlElement* parent) = 0;
 };
 
 // The C# `internal interface IDeferHandler`: the deferred arm the
@@ -115,9 +124,9 @@ public:
     virtual ~IDeferHandler() = default;
 
     // The C# `BamlElement TranslateDefer(XamlContext ctx, BamlNode node,
-    // BamlElement parent)`.
+    // BamlElement parent)` (the nullable-parent convention of Translate).
     virtual std::unique_ptr<BamlElement> TranslateDefer(XamlContext& ctx,
-        Baml::BamlNode& node, BamlElement& parent) = 0;
+        Baml::BamlNode& node, BamlElement* parent) = 0;
 };
 
 // The C# `internal static class HandlerMap`: the record-type dispatch.
@@ -142,7 +151,9 @@ public:
     // handler class ONCE (the explicit manifest standing in for the
     // reflection walk -- one construction line per ported handler). The
     // vector hands the instances to `EnsureLoaded`, which routes them
-    // through `InstallHandler` (the shared `handlers.Add` path).
+    // through `InstallHandler` (the shared `handlers.Add` path), skipping
+    // record types an explicit install has already claimed (the seam
+    // precedence -- see the porting decisions).
     static std::vector<std::unique_ptr<IHandler>> CreateBuiltinHandlers();
 
     // The `handlers.Add(handler.Type, handler)` step: takes ownership of

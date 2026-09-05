@@ -149,9 +149,16 @@ void XamlContext::BuildPIMappings(Baml::BamlDocument& document)
 // The C# `XamlType ResolveType(ushort id)`.
 Xaml::XamlType* XamlContext::ResolveType(std::uint16_t id)
 {
+	return ResolveTypeOwning(id).get();
+}
+
+// The annotation-rooting form (see the header): the cache entry is the
+// owning handle the handlers' element annotations share.
+std::shared_ptr<Xaml::XamlType> XamlContext::ResolveTypeOwning(std::uint16_t id)
+{
 	auto cached = typeMap_.find(id);
 	if (cached != typeMap_.end())
-		return cached->second.get();
+		return cached->second;
 
 	const ILSpy::Decompiler::TypeSystem::IType* type = nullptr;
 	// The record arm's resolved type (the ParseReflectionName result owns its
@@ -203,12 +210,12 @@ Xaml::XamlType* XamlContext::ResolveType(std::uint16_t id)
 	std::string clrNs = NamespaceOf(*type);
 	std::optional<std::string> xmlNs = xmlNs_.LookupXmlns(fullAssemblyName, clrNs);
 
-	auto xamlType = std::make_unique<Xaml::XamlType>(assembly, fullAssemblyName, clrNs,
+	auto xamlType = std::make_shared<Xaml::XamlType>(assembly, fullAssemblyName, clrNs,
 		type->Name(), GetXmlNamespace(xmlNs));
 	// The C# `{ ResolvedType = type }`.
 	xamlType->ResolvedType = resolvedType;
 
-	Xaml::XamlType* result = xamlType.get();
+	std::shared_ptr<Xaml::XamlType> result = xamlType;
 	typeMap_.emplace(id, std::move(xamlType));
 	return result;
 }
@@ -216,9 +223,15 @@ Xaml::XamlType* XamlContext::ResolveType(std::uint16_t id)
 // The C# `XamlProperty ResolveProperty(ushort id)`.
 Xaml::XamlProperty* XamlContext::ResolveProperty(std::uint16_t id)
 {
+	return ResolvePropertyOwning(id).get();
+}
+
+// The annotation-rooting form (see the header).
+std::shared_ptr<Xaml::XamlProperty> XamlContext::ResolvePropertyOwning(std::uint16_t id)
+{
 	auto cached = propertyMap_.find(id);
 	if (cached != propertyMap_.end())
-		return cached->second.get();
+		return cached->second;
 
 	Xaml::XamlType* type = nullptr;
 	std::string name;
@@ -241,11 +254,11 @@ Xaml::XamlProperty* XamlContext::ResolveProperty(std::uint16_t id)
 		member = nullptr;
 	}
 
-	auto xamlProp = std::make_unique<Xaml::XamlProperty>(type, name);
+	auto xamlProp = std::make_shared<Xaml::XamlProperty>(type, name);
 	xamlProp->ResolvedMember = member;
 	xamlProp->TryResolve();
 
-	Xaml::XamlProperty* result = xamlProp.get();
+	std::shared_ptr<Xaml::XamlProperty> result = xamlProp;
 	propertyMap_.emplace(id, std::move(xamlProp));
 	return result;
 }

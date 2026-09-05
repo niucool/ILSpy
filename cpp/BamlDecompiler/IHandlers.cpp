@@ -24,6 +24,8 @@
 
 #include "BamlDecompiler/Baml/BamlNode.hpp"
 #include "BamlDecompiler/BamlElement.hpp"
+#include "BamlDecompiler/Handlers/Blocks.hpp"
+#include "BamlDecompiler/Handlers/Records.hpp"
 #include "BamlDecompiler/IHandlers.hpp"
 #include "BamlDecompiler/XmlnsDictionary.hpp"
 #include "BamlDecompiler/XamlContext.hpp"
@@ -61,14 +63,32 @@ HandlerRegistry& Registry()
 } // namespace
 
 // The C# static ctor's reflection walk: the explicit manifest of every
-// ported handler class. Empty until the handler classes land (the
-// Handlers/Blocks and Handlers/Records ports append one construction line
-// each, in this order); the 37-row gold inventory it must eventually
-// reproduce is pinned in HandlerMap_Test.cpp (dumped from the shipped
-// assembly's registry through the C:/temp-probe/HandlerMapProbe probe).
+// ported handler class, one construction line each (the gold-registry's
+// ascending record-type order -- the C# Assembly.GetTypes() order is an
+// implementation detail the dictionary registry need not reproduce; the
+// 37-row gold inventory the manifest must eventually reproduce is pinned in
+// HandlerMap_Test.cpp, dumped from the shipped assembly's registry through
+// the C:/temp-probe/HandlerMapProbe probe).
 std::vector<std::unique_ptr<IHandler>> HandlerMap::CreateBuiltinHandlers()
 {
     std::vector<std::unique_ptr<IHandler>> handlers;
+    handlers.push_back(std::make_unique<Handlers::DocumentHandler>());
+    handlers.push_back(std::make_unique<Handlers::ElementHandler>());
+    handlers.push_back(std::make_unique<Handlers::TextHandler>());
+    handlers.push_back(std::make_unique<Handlers::TextWithConverterHandler>());
+    handlers.push_back(std::make_unique<Handlers::DefAttributeHandler>());
+    handlers.push_back(std::make_unique<Handlers::PIMappingHandler>());
+    handlers.push_back(std::make_unique<Handlers::AssemblyInfoHandler>());
+    handlers.push_back(std::make_unique<Handlers::TypeInfoHandler>());
+    handlers.push_back(std::make_unique<Handlers::TypeSerializerInfoHandler>());
+    handlers.push_back(std::make_unique<Handlers::AttributeInfoHandler>());
+    handlers.push_back(std::make_unique<Handlers::DeferableContentStartHandler>());
+    handlers.push_back(std::make_unique<Handlers::ConnectionIdHandler>());
+    handlers.push_back(std::make_unique<Handlers::ContentPropertyHandler>());
+    handlers.push_back(std::make_unique<Handlers::TextWithIdHandler>());
+    handlers.push_back(std::make_unique<Handlers::PresentationOptionsAttributeHandler>());
+    handlers.push_back(std::make_unique<Handlers::LineNumberAndPositionHandler>());
+    handlers.push_back(std::make_unique<Handlers::LinePositionHandler>());
     return handlers;
 }
 
@@ -97,12 +117,19 @@ void HandlerMap::ClearHandlers()
 IHandler* HandlerMap::LookupHandler(Baml::BamlRecordType type)
 {
     // The lazy population (the C# static ctor runs on the first
-    // LookupHandler/ProcessChildren touch).
+    // LookupHandler/ProcessChildren touch): every manifest row routes through
+    // InstallHandler EXCEPT the record types an explicit install has
+    // already claimed (the test/embedding-seam precedence -- see the
+    // header's porting decisions; manifest-internal duplicates still throw
+    // through InstallHandler, the C# reflection-walk invariant).
     HandlerRegistry& registry = Registry();
     if (!registry.builtinLoaded) {
         registry.builtinLoaded = true;
-        for (auto& handler : CreateBuiltinHandlers())
+        for (auto& handler : CreateBuiltinHandlers()) {
+            if (registry.map.find(handler->Type()) != registry.map.end())
+                continue;
             InstallHandler(std::move(handler));
+        }
     }
     auto& map = registry.map;
     auto it = map.find(type);
@@ -129,7 +156,7 @@ void HandlerMap::ProcessChildren(XamlContext& ctx, Baml::BamlBlockNode& node,
             // child.Type)` -- a release no-op; the child is skipped.
             continue;
         }
-        std::unique_ptr<BamlElement> elem = handler->Translate(ctx, *child, nodeElem);
+        std::unique_ptr<BamlElement> elem = handler->Translate(ctx, *child, &nodeElem);
         if (elem != nullptr) {
             // The C# `nodeElem.Children.Add(elem); elem.Parent = nodeElem;`
             // -- the Add does not assign the back-pointer, so the port

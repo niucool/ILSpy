@@ -43,9 +43,13 @@
 //  * `ResolveString`'s C# null (the missing-id arm) ports to
 //    `std::optional<std::string>` nullopt; `GetXmlNamespace`'s null input and
 //    output port to `std::optional<XNamespace>` the same way.
-//  * The type/property caches own their rows by `unique_ptr` (the C#
+//  * The type/property caches own their rows by `shared_ptr` (the C#
 //    `Dictionary<ushort, XamlType>` holds GC references the accessors hand
-//    out); the handed-out pointers stay valid for the context's lifetime.
+//    out -- and the handlers' element annotations root the same instances,
+//    so the cache must hand out owning handles: `ResolveTypeOwning`/
+//    `ResolvePropertyOwning`, the annotation-rooting forms the handlers use,
+//    while `ResolveType`/`ResolveProperty` keep the raw-pointer shape); the
+//    handed-out pointers stay valid for the context's lifetime.
 //  * `Baml.ResolveType`'s BAML-record arm resolves the record's type through
 //    `ReflectionHelper.ParseReflectionName(typeRec.TypeFullName, new
 //    SimpleTypeResolveContext(TypeSystem))` -- ported (the iteration-48
@@ -160,15 +164,30 @@ public:
 
     // The C# `XamlType ResolveType(ushort id)` -- the known-types arm (ids
     // above 0x7fff) through KnownThings, the BAML-record arm through the
-    // record's assembly and (deferred) ParseReflectionName; the result is
-    // cached under the raw id.
+    // record's assembly and ParseReflectionName; the result is cached under
+    // the raw id.
     Xaml::XamlType* ResolveType(std::uint16_t id);
+
+    // The annotation-rooting form of `ResolveType`: the C# handlers annotate
+    // elements with the resolved `XamlType` reference, and the returned
+    // XDocument outlives this context (the XamlDecompiler.Decompile
+    // contract), so the GC keeps the type alive through the annotation. The
+    // port's annotation is `std::any`, so the handlers must store the OWNING
+    // handle -- the caches are `shared_ptr`-backed and this accessor hands
+    // it out. `ResolveType` keeps the raw-pointer shape (the existing
+    // consumers) over the same cache entry.
+    std::shared_ptr<Xaml::XamlType> ResolveTypeOwning(std::uint16_t id);
 
     // The C# `XamlProperty ResolveProperty(ushort id)` -- the known-members
     // arm (ids above 0x7fff) through KnownThings, the AttributeInfoRecord arm
     // through `ResolveType(record.OwnerTypeId)`; `TryResolve` runs before the
     // result is returned, and it is cached under the raw id.
     Xaml::XamlProperty* ResolveProperty(std::uint16_t id);
+
+    // The annotation-rooting form of `ResolveProperty` (the
+    // `ResolveTypeOwning` contract, for the handlers that annotate elements
+    // with the resolved property).
+    std::shared_ptr<Xaml::XamlProperty> ResolvePropertyOwning(std::uint16_t id);
 
     // The C# `string ResolveString(ushort id)` (the null of the missing-id arm
     // ports to nullopt).
@@ -203,7 +222,7 @@ public:
         "http://schemas.microsoft.com/winfx/2006/xaml/presentation/options";
 
     // The out-of-line destructor: the caches hold the forward-declared
-    // XamlType/XamlProperty by unique_ptr, so it must be instantiated where
+    // XamlType/XamlProperty by shared_ptr, so it must be instantiated where
     // they are complete (the .cpp).
     ~XamlContext();
 
@@ -234,12 +253,14 @@ private:
                        const ILSpy::BamlDecompiler::Baml::BamlBlockNode*>
         nodeMap_;
 
-    // The C# `Dictionary<ushort, XamlType> typeMap` (owning -- the C# GC
+    // The C# `Dictionary<ushort, XamlType> typeMap` (shared_ptr-backed: the
+    // annotation-rooting contract of `ResolveTypeOwning` -- the C# GC
     // reference the dictionary holds).
-    std::unordered_map<std::uint16_t, std::unique_ptr<Xaml::XamlType>> typeMap_;
+    std::unordered_map<std::uint16_t, std::shared_ptr<Xaml::XamlType>> typeMap_;
 
-    // The C# `Dictionary<ushort, XamlProperty> propertyMap` (owning).
-    std::unordered_map<std::uint16_t, std::unique_ptr<Xaml::XamlProperty>> propertyMap_;
+    // The C# `Dictionary<ushort, XamlProperty> propertyMap` (shared_ptr-backed
+    // -- the `ResolveTypeOwning` contract).
+    std::unordered_map<std::uint16_t, std::shared_ptr<Xaml::XamlProperty>> propertyMap_;
 
     // The C# `Dictionary<string, XNamespace> xmlnsMap`.
     std::unordered_map<std::string, Xml::XNamespace> xmlnsMap_;
