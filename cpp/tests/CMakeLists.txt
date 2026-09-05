@@ -281,6 +281,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/SimpleCompilation_Test.cpp
     Decompiler/TypeSystem/IsReferenceType_Test.cpp
     Decompiler/TypeSystem/GetDefinition_Test.cpp
+    Decompiler/TypeSystem/ApplyAttributeTypeVisitor_Test.cpp
     Decompiler/TypeSystem/MetadataModule_Test.cpp
     Decompiler/TypeSystem/MetadataModuleResolution_Test.cpp
     Decompiler/TypeSystem/MetadataTypeDefinition_Test.cpp

@@ -84,11 +84,26 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   real SRM engine over the full mscorlib/System/facade/CoreLib attribute
   corpora incl. the ok/throw partitions and the running digests, the
   synthetic manifest covering every exotic + failure arm, and the boxing
-  drive). STARTED
+  drive), and the `ApplyAttributeTypeVisitor` (the dynamic/tuple/
+  nullability/native-integer substituting TypeVisitor with both
+  `ApplyAttributesToType` entries -- the metadata entry decoding the
+  `[Dynamic]`/`[NativeInteger]`/`[TupleElementNames]`/`[Nullable]` rows
+  through the `minimalCorlibTypeProvider` decoder, and the PDB entry over
+  `PdbExtraTypeInfo` -- plus its supporting slices: the
+  `SpecialType.Dynamic/NInt/NUInt` factories, `ArrayType`'s nullability
+  field + `ChangeNullability`, `ParameterizedType.Nullability` (the
+  generic-delegation the gold exposed was missing),
+  `FunctionPointerType.WithSignature`, the lifted `TupleType.IsTupleCompatible`
+  + the compilation-driven `CreateTupleType` (the C# ctor that builds the
+  underlying `ValueTuple<...>` chain), and the
+  `FindType(ICompilation, FullTypeName)` modules-scan extension; gold-pinned
+  byte-exact against the real engine over 41 drives: the tuple machinery
+  over the real mscorlib `ValueTuple` definitions, the dynamic/native/nullability
+  index walks, the KeepModifiers/typeChildrenOnly/no-options/accumulation/
+  additionalAttributes arms, and the PDB seeding). STARTED
   (the member entity
   family (`MetadataField`/`MetadataMethod`/`MetadataProperty`/
-  `MetadataEvent`), the `ResolveType`/`ApplyAttributeTypeVisitor` resolution
-  family, interning remain).
+  `MetadataEvent`), the `ResolveType` consumer, interning remain).
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with

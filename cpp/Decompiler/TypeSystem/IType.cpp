@@ -260,10 +260,23 @@ ITypePtr ArrayType::VisitChildren(TypeVisitor& visitor) {
     if (!element_) return shared_from_this();
     ITypePtr e = element_->AcceptVisitor(visitor);
     if (e.get() == element_.get()) return shared_from_this();
-    // Reconstruct preserving rank / isSzArray (the C# carries dimensions +
-    // nullability; the minimal port carries rank + the SZArray flag).
-    if (isSzArray_) return std::make_shared<ArrayType>(std::move(e));
-    return std::make_shared<ArrayType>(std::move(e), rank_);
+    // Reconstruct preserving rank / isSzArray / nullability (the C# carries
+    // dimensions + nullability through the public ctor; the minimal port
+    // carries rank + the SZArray flag through the full-field ctor).
+    return std::shared_ptr<ArrayType>(new ArrayType(std::move(e), rank_,
+        isSzArray_, nullability_));
+}
+
+// ArrayType.cs ChangeNullability: the same annotation returns this; a
+// different one reconstructs with the new annotation (every other field
+// carried over).
+ITypePtr ArrayType::ChangeNullability(
+    ::ILSpy::Decompiler::TypeSystem::Nullability nullability) {
+    if (nullability == nullability_) {
+        return shared_from_this();
+    }
+    return std::shared_ptr<ArrayType>(new ArrayType(element_, rank_,
+        isSzArray_, nullability));
 }
 
 ITypePtr ByReferenceType::AcceptVisitor(TypeVisitor& visitor) {

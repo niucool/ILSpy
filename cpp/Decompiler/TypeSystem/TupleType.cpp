@@ -21,7 +21,8 @@
 #include "Decompiler/TypeSystem/TupleType.hpp"
 
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
-#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // WithoutNullability (the .WithoutNullability() tail)
+#include "Decompiler/TypeSystem/IModule.hpp"  // GetTypeDefinition (FindValueTupleType)
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"  // WithoutNullability (the .WithoutNullability() tail) + FindType (the compilation fallback)
 
 #include <vector>
 
@@ -162,6 +163,132 @@ ITypePtr TupleUnderlyingTypeOrSelf(IType& type)
 	}
 	// C# `return t.WithoutNullability();`
 	return WithoutNullability(*t);
+}
+
+// The C# `public static bool IsTupleCompatible(IType type, out int tupleCardinality)`
+// (TupleType.cs line 111).
+bool IsTupleCompatible(const IType& type, int& tupleCardinality)
+{
+	switch (type.Kind()) {
+		case TypeKind::Tuple: {
+			// C# `tupleCardinality = ((TupleType)type).ElementTypes.Length; return true;`
+			const auto* tuple = dynamic_cast<const TupleType*>(&type);
+			if (tuple == nullptr) {
+				// A `TypeKind::Tuple` type that is not the port's `TupleType` class does not
+				// occur in the minimal type system; treat it as not-a-tuple (the safe fallback).
+				break;
+			}
+			tupleCardinality = static_cast<int>(tuple->ElementTypes().size());
+			return true;
+		}
+		case TypeKind::Struct: {
+			// The C# requires `TypeKind.Struct` -- a CLASS named ValueTuple must not become
+			// tuple syntax (the C# comment). The namespace/name check reads the definition's
+			// `Namespace()` (the `CollectTupleElements` convention above: the port's IType
+			// carries no Namespace virtual, and a `ParameterizedType::GetDefinition()`
+			// resolves the generic definition).
+			if (type.Name() != "ValueTuple") {
+				break;
+			}
+			const ITypeDefinition* def = type.GetDefinition();
+			if (def == nullptr || def->Namespace() != "System") {
+				break;
+			}
+			int tpc = type.TypeParameterCount();
+			if (tpc > 0 && tpc < kRestPosition) {
+				// C# `tupleCardinality = tpc; return true;`
+				tupleCardinality = tpc;
+				return true;
+			} else if (tpc == kRestPosition) {
+				// C# `type is ParameterizedType pt` then the `TRest` recursion -- the 8th type
+				// argument must itself be tuple-compatible, adding `RestPosition - 1` to the
+				// nested cardinality. A `Struct` `ValueTuple`8` that is not a
+				// `ParameterizedType` (the bare open-generic definition) falls to `break`
+				// (the port's `nullptr` guard; the C# `is` pattern fails the same way).
+				const auto* pt = dynamic_cast<const ParameterizedType*>(&type);
+				if (pt != nullptr && kRestIndex < static_cast<int>(pt->TypeArguments().size())) {
+					int nested = 0;
+					if (IsTupleCompatible(*pt->TypeArguments()[kRestIndex], nested)) {
+						nested += kRestPosition - 1;
+						tupleCardinality = nested;
+						return true;
+					}
+				}
+			}
+			break;
+		}
+		default:
+			break;
+	}
+	// C# `tupleCardinality = 0; return false;` (the out parameter assigned in every path).
+	tupleCardinality = 0;
+	return false;
+}
+
+namespace {
+
+// The C# `private static IType FindValueTupleType(ICompilation compilation,
+// IModule valueTupleAssembly, int tpc)` (TupleType.cs line 95): the
+// value-tuple-assembly's own `System.ValueTuple<tpc>` definition first, the
+// compilation-wide `FindType` fallback second. The module-owned definition
+// aliases with a no-op deleter (the TypeProvider convention).
+ITypePtr FindValueTupleType(const ICompilation& compilation,
+                             const IModule* valueTupleAssembly, int tpc)
+{
+	TopLevelTypeName typeName("System", "ValueTuple", tpc);
+	if (valueTupleAssembly != nullptr) {
+		const ITypeDefinition* typeDef = valueTupleAssembly->GetTypeDefinition(typeName);
+		if (typeDef != nullptr) {
+			return std::shared_ptr<IType>(
+				const_cast<IType*>(static_cast<const IType*>(typeDef)),
+				[](IType*) { /* no-op: the module owns the definition */ });
+		}
+	}
+	return FindType(compilation, FullTypeName(std::move(typeName)));
+}
+
+}  // namespace
+
+// The C# `public TupleType(ICompilation compilation, ImmutableArray<IType>
+// elementTypes, ImmutableArray<string> elementNames = default,
+// IModule valueTupleAssembly = null)` (TupleType.cs line 52) over its
+// `CreateUnderlyingType` (line 73).
+std::shared_ptr<TupleType> CreateTupleType(
+	const ICompilation& compilation,
+	std::vector<ITypePtr> elementTypes,
+	std::optional<std::vector<std::string>> elementNames,
+	const IModule* valueTupleAssembly)
+{
+	// C# `int remainder = (elementTypes.Length - 1) % (RestPosition - 1) + 1;` -- the
+	// count of elements the innermost `ValueTuple` carries (1..7; the C++/C#
+	// truncated-division `%` agree on the negative dividend of the degenerate
+	// empty-elementTypes shape, which no caller reaches -- the visitor gates on
+	// cardinality > 1).
+	const int count = static_cast<int>(elementTypes.size());
+	int remainder = (count - 1) % (kRestPosition - 1) + 1;
+	int pos = count - remainder;
+	std::vector<ITypePtr> tailArgs(elementTypes.begin() + pos, elementTypes.end());
+	ITypePtr type = std::make_shared<ParameterizedType>(
+		FindValueTupleType(compilation, valueTupleAssembly, remainder), std::move(tailArgs));
+	while (pos > 0) {
+		pos -= (kRestPosition - 1);
+		// C# `elementTypes.Slice(pos, RestPosition - 1).Concat(new[] { type })`.
+		std::vector<ITypePtr> args(elementTypes.begin() + pos,
+			elementTypes.begin() + pos + (kRestPosition - 1));
+		args.push_back(type);
+		type = std::make_shared<ParameterizedType>(
+			FindValueTupleType(compilation, valueTupleAssembly, kRestPosition),
+			std::move(args));
+	}
+	// The element names: `nullopt` is the C# `default` (the null-filled array --
+	// the port's TupleType ctor fills empty strings); a provided vector maps the
+	// C# null entries to empty strings (the established null-name convention).
+	std::vector<std::string> names;
+	if (elementNames) {
+		names = std::move(*elementNames);
+	}
+	return std::make_shared<TupleType>(std::move(type), std::move(elementTypes),
+		std::move(names));
 }
 
 }  // namespace ILSpy::Decompiler::TypeSystem

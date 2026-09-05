@@ -295,14 +295,19 @@ private:
     // The C# `readonly MetadataTypeDefinition[] typeDefs` (allocated in the
     // ctor unless the Uncached option is set; index = the 1-based TypeDef row
     // number, slot 0 unused): each slot OWNS its entity (the C# GC root the
-    // port's `unique_ptr` models), nullptr until lazily filled.
-    mutable std::vector<std::unique_ptr<Implementation::MetadataTypeDefinition>>
+    // port's `shared_ptr` models -- SHARED, not `unique_ptr`, because the
+    // C# `this` handle flows through `ChangeNullability` /
+    // `AcceptVisitor`/`VisitChildren` over these entities, which the port
+    // expresses with `shared_from_this` -- the entity must be
+    // shared-managed for the walk/annotation paths to hand the same object
+    // back), nullptr until lazily filled.
+    mutable std::vector<std::shared_ptr<Implementation::MetadataTypeDefinition>>
         typeDefs_;
     // The UNCACHED arm's keep-alive registry: every freshly constructed
     // definition stays owned here (the C# GC keeps uncached instances
     // alive; the port's returned raw pointers must not dangle -- the
     // SyntheticWpfModule mutable-registry precedent).
-    mutable std::vector<std::unique_ptr<Implementation::MetadataTypeDefinition>>
+    mutable std::vector<std::shared_ptr<Implementation::MetadataTypeDefinition>>
         uncachedDefs_;
 
     // The C# `readonly IModule[] referencedAssemblies` (allocated in the ctor

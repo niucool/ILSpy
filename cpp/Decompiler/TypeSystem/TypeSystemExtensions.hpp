@@ -183,6 +183,18 @@ bool IsUnbound(const IType& type);
 // FullTypeName)` (the resolver-holding overload's per-module lookup).
 const ITypeDefinition* GetTypeDefinition(const IModule& module, const FullTypeName& fullTypeName);
 
+// The C# `public static IType FindType(this ICompilation compilation,
+// FullTypeName fullTypeName)` (TypeSystemExtensions.cs line 501, the
+// `ICompilation.FindType` region): scans `compilation.Modules` with
+// `GetTypeDefinition(module, fullTypeName)` and returns the first module's
+// definition; a total miss falls back to `new UnknownType(fullTypeName)`.
+// The C# remarks note a full type name is only unique per assembly, so
+// multiple modules may match and "just one of them" comes back. The first
+// consumer is `TupleType.FindValueTupleType`'s compilation fallback (the
+// `System.ValueTuple<...>` lookup when the value-tuple assembly is null or
+// its own lookup missed).
+ITypePtr FindType(const ICompilation& compilation, const FullTypeName& fullTypeName);
+
 // The C# `public static IModule FindModuleByAssemblyNameInfo(this ICompilation compilation,
 // AssemblyNameInfo assemblyName)` (TypeSystemExtensions.cs line 840) -- the module lookup the
 // `ReflectionHelper.ParseReflectionName` assembly-qualified arm routes through: a FIRST pass over

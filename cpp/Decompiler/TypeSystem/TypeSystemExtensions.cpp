@@ -392,6 +392,26 @@ const ITypeDefinition* GetTypeDefinition(const IModule& module, const FullTypeNa
     return typeDef;
 }
 
+ITypePtr FindType(const ICompilation& compilation, const FullTypeName& fullTypeName)
+{
+    // The C# scans `compilation.Modules` with the per-module
+    // `GetTypeDefinition(module, fullTypeName)` and returns the FIRST module's
+    // definition (a full type name is only unique per assembly, so this is a
+    // first-match-wins scan); a total miss constructs the `UnknownType`
+    // carrying the full name.
+    for (const IModule* module : compilation.Modules()) {
+        const ITypeDefinition* typeDef = GetTypeDefinition(*module, fullTypeName);
+        if (typeDef != nullptr) {
+            // The definition is module-owned (non-owning); the returned
+            // `ITypePtr` aliases it with a no-op deleter (the TypeProvider
+            // aliasing convention: FindType results are compilation-owned).
+            return std::shared_ptr<IType>(const_cast<IType*>(
+                static_cast<const IType*>(typeDef)), [](IType*) {});
+        }
+    }
+    return std::make_shared<class UnknownType>(fullTypeName);
+}
+
 const IModule* FindModuleByAssemblyNameInfo(
     const ICompilation& compilation,
     const ::ILSpy::Decompiler::Metadata::AssemblyNameInfo& assemblyName)

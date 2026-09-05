@@ -452,6 +452,16 @@ public:
     // child changed, else return this.
     ITypePtr AcceptVisitor(TypeVisitor& visitor) override;
     ITypePtr VisitChildren(TypeVisitor& visitor) override;
+    // Faithful port of ParameterizedType.cs line 88 `public Nullability
+    // Nullability => genericType.Nullability` (delegates to the generic type
+    // -- an annotated generic definition makes the parameterized type read
+    // the same annotation). The return type is namespace-qualified (the D372
+    // crux: the member name shadows the enum type in MSVC's complete-class
+    // lookup).
+    ::ILSpy::Decompiler::TypeSystem::Nullability Nullability() const override {
+        return genericType_ ? genericType_->Nullability()
+                            : ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious;
+    }
     // Faithful port of ParameterizedType.cs ChangeNullability: forwards to the
     // generic type and rebuilds only when it changed (defined in IType.cpp).
     ITypePtr ChangeNullability(::ILSpy::Decompiler::TypeSystem::Nullability nullability) override;
@@ -616,9 +626,13 @@ private:
 class ArrayType : public IType {
 public:
     // SZArray constructor.
-    explicit ArrayType(ITypePtr element) : element_(std::move(element)), rank_(1), isSzArray_(true) {}
+    explicit ArrayType(ITypePtr element)
+        : element_(std::move(element)), rank_(1), isSzArray_(true),
+          nullability_(::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious) {}
     // Multi-dimensional array constructor.
-    ArrayType(ITypePtr element, int rank) : element_(std::move(element)), rank_(rank), isSzArray_(false) {}
+    ArrayType(ITypePtr element, int rank)
+        : element_(std::move(element)), rank_(rank), isSzArray_(false),
+          nullability_(::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious) {}
     TypeKind Kind() const override { return TypeKind::Array; }
     std::string Name() const override;
     std::string ReflectionName() const override;
@@ -629,6 +643,21 @@ public:
     // Faithful port of ArrayType.cs `bool? IsReferenceType => true` (an array is
     // always a reference type).
     std::optional<bool> IsReferenceType() const override { return std::optional<bool>(true); }
+    // Faithful port of ArrayType.cs `Nullability` (the ctor-supplied annotation
+    // the C# instance carries; `Oblivious` by default). The return type is
+    // namespace-qualified: the member name shadows the enum type in MSVC's
+    // complete-class lookup (the D372 crux; the `ChangeNullability` override
+    // below applies the same).
+    ::ILSpy::Decompiler::TypeSystem::Nullability Nullability() const override {
+        return nullability_;
+    }
+    // Faithful port of ArrayType.cs ChangeNullability: the same annotation
+    // returns this; a different one reconstructs with the new annotation
+    // (defined in IType.cpp). The reconstruction keeps the sz-array flag the
+    // C# shape cannot express (the C# ArrayType tracks only dimensions).
+    // NON-CONST (the D406 convention: the unchanged arm returns
+    // shared_from_this()).
+    ITypePtr ChangeNullability(::ILSpy::Decompiler::TypeSystem::Nullability nullability) override;
     // Faithful port of ArrayType.cs VisitChildren: reconstruct with the visited
     // element if it changed, else return this.
     ITypePtr AcceptVisitor(TypeVisitor& visitor) override;
@@ -636,9 +665,18 @@ public:
 protected:
     bool StructuralEquals(const IType& other) const override;
 private:
+    // The full-field reconstruction ctor ChangeNullability builds (private: the
+    // C# reconstruction passes every field through the public ctor; the port's
+    // sz-array flag has no C#-visible spelling).
+    ArrayType(ITypePtr element, int rank, bool isSzArray,
+              ::ILSpy::Decompiler::TypeSystem::Nullability nullability)
+        : element_(std::move(element)), rank_(rank), isSzArray_(isSzArray),
+          nullability_(nullability) {}
+
     ITypePtr element_;
     int rank_;
     bool isSzArray_;
+    ::ILSpy::Decompiler::TypeSystem::Nullability nullability_;
 };
 
 class ByReferenceType : public IType {
@@ -973,6 +1011,21 @@ public:
     // happens at the definition in IType.cpp, which includes the walker).
     static std::shared_ptr<FunctionPointerType> FromSignature(
         const Metadata::ProviderMethodSignature<ITypePtr>& signature);
+
+    // The C# `internal IType WithSignature(IType returnType,
+    // ImmutableArray<IType> parameterTypes)` (FunctionPointerType.cs line 232):
+    // reconstructs with a new return type and parameter types, carrying over
+    // the calling convention, the custom calling conventions, the
+    // return-ref-readonly flag, and the parameter reference kinds (the C# ctor
+    // re-reads every other field from `this`). Consumed by
+    // `ApplyAttributeTypeVisitor.VisitFunctionPointerType`'s changed-signature
+    // reconstruction.
+    std::shared_ptr<FunctionPointerType> WithSignature(
+        ITypePtr returnType, std::vector<ITypePtr> parameterTypes) const {
+        return std::make_shared<FunctionPointerType>(callingConvention_,
+            customCallingConventions_, std::move(returnType), returnIsRefReadOnly_,
+            std::move(parameterTypes), parameterReferenceKinds_);
+    }
 protected:
     bool StructuralEquals(const IType& other) const override {
         const auto& o = static_cast<const FunctionPointerType&>(other);
@@ -1205,6 +1258,32 @@ inline ITypePtr UnknownType() { return std::make_shared<SpecialType>(TypeKind::U
 
 // Convenience: the C# `SpecialType.NoType` singleton (a `SpecialType(TypeKind::None)`).
 inline ITypePtr NoType() { return std::make_shared<SpecialType>(TypeKind::None); }
+
+// Convenience: the C# `SpecialType.Dynamic` singleton (a
+// `SpecialType(TypeKind::Dynamic, isReferenceType: true)`). Introduces the
+// C# 'dynamic' type; the C# `ApplyAttributeTypeVisitor` substitutes it for
+// `System.Object` under `[Dynamic]` (the `TypeSystemOptions.Dynamic` gate),
+// and only `Dynamic` annotates nullability (SpecialType.cs
+// ChangeNullability).
+inline ITypePtr Dynamic() {
+    return std::make_shared<SpecialType>(TypeKind::Dynamic, std::optional<bool>(true));
+}
+
+// Convenience: the C# `SpecialType.NInt` singleton (a
+// `SpecialType(TypeKind::NInt, isReferenceType: false)`) -- the C# 9 'nint'
+// type `ApplyAttributeTypeVisitor` substitutes for `System.IntPtr` under
+// `[NativeInteger]`.
+inline ITypePtr NInt() {
+    return std::make_shared<SpecialType>(TypeKind::NInt, std::optional<bool>(false));
+}
+
+// Convenience: the C# `SpecialType.NUInt` singleton (a
+// `SpecialType(TypeKind::NUInt, isReferenceType: false)`) -- the C# 9 'nuint'
+// type `ApplyAttributeTypeVisitor` substitutes for `System.UIntPtr` under
+// `[NativeInteger]`.
+inline ITypePtr NUInt() {
+    return std::make_shared<SpecialType>(TypeKind::NUInt, std::optional<bool>(false));
+}
 
 // Convenience: the C# `SpecialType.UnboundTypeArgument` singleton (a
 // `SpecialType(TypeKind::UnboundTypeArgument)`). The C# uses this as the placeholder for a type

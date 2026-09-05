@@ -206,7 +206,7 @@ const ITypeDefinition* MetadataModule::GetDefinition(
     if (typeDefs_.empty())
     {
         auto definition =
-            std::make_unique<Implementation::MetadataTypeDefinition>(
+            std::make_shared<Implementation::MetadataTypeDefinition>(
                 *this, typeDefinitionToken);
         const ITypeDefinition* result = definition.get();
         uncachedDefs_.push_back(std::move(definition));
@@ -220,10 +220,10 @@ const ITypeDefinition* MetadataModule::GetDefinition(
     // The C# `LazyInit.VolatileRead(ref typeDefs[row])` + `GetOrSet`:
     // the empty slot constructs, the filled slot returns (the
     // single-threaded LazyInit convention).
-    std::unique_ptr<Implementation::MetadataTypeDefinition>& slot =
+    std::shared_ptr<Implementation::MetadataTypeDefinition>& slot =
         typeDefs_[row];
     if (slot == nullptr)
-        slot = std::make_unique<Implementation::MetadataTypeDefinition>(
+        slot = std::make_shared<Implementation::MetadataTypeDefinition>(
             *this, typeDefinitionToken);
     return slot.get();
 }
