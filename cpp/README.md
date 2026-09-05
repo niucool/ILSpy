@@ -2867,8 +2867,11 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `TypeCode` enum (mirroring `System.TypeCode`: `Empty=0`/`Object`/`DBNull`/`Boolean`/`Char`/`SByte`/`Byte`/
   `Int16`/`UInt16`/`Int32`/`UInt32`/`Int64`/`UInt64`/`Single`/`Double`/`Decimal`/`DateTime`/`String=17`) as the
   first member of the `ReflectionHelper` namespace (the C# `public static class ReflectionHelper` -> a
-  namespace of free functions). The other `ReflectionHelper` members (`ParseReflectionName`/
-  `ResolveTypeName`/`ApplyTypeArguments`/...) are deferred. The leaf unblocks the numeric-conversion
+  namespace of free functions). The `ParseReflectionName`/`ResolveTypeName`/`ReadTypeParameterCount`
+  members are ported (the reflection-name parser/resolver over the SRM `TypeName` tree: the six-arm
+  resolution chain, the `ReflectionNameParseException`, and the `ICompilation.FindModuleByAssemblyNameInfo`
+  module lookup -- the assembly-qualified-name arm of the resolution); the `FindType(Type)`/
+  `FindType(StackType, Sign)` members stay deferred with their consumers. The leaf unblocks the numeric-conversion
   helpers (the next `CSharpConversions` leaf). The leaf is dead in the CLI path (the helper is not yet
   called by `--csharp`) and the output is byte-identical. **4** new gtest cases in 1 suite pin: a primitive
   definition (`Int32`/`Object`/`Char`/`String`) yields its `TypeCode`; a non-primitive known definition

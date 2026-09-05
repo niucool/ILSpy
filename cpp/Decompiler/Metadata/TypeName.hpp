@@ -25,7 +25,7 @@
 // double-bracket argument forms) and the escape character backslash.
 //
 // Consumer: `ReflectionHelper.ParseReflectionName` (ICSharpCode.Decompiler/
-// TypeSystem/ReflectionHelper.cs, the named next-in-order port) parses every
+// TypeSystem/ReflectionHelper.cs) parses every
 // BAML TypeInfoRecord's type name through `TryParse` and resolves the parsed
 // tree against the compilation -- lifting the `XamlContext.ResolveType`
 // deferral. `TypeName.Unescape` and the assembly-part rendering also feed the

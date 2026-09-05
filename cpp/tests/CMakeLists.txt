@@ -123,6 +123,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/GetDelegateInvokeMethod_Test.cpp
     Decompiler/TypeSystem/InlineArrayHelpers_Test.cpp
     Decompiler/TypeSystem/ReflectionHelperGetTypeCode_Test.cpp
+    Decompiler/TypeSystem/ReflectionHelperParseReflectionName_Test.cpp
     Decompiler/CSharp/Resolver/ResolveParameterTypes_Test.cpp
     Decompiler/CSharp/Resolver/MapCorrespondingParameters_Test.cpp
     Decompiler/CSharp/Resolver/CheckApplicabilityArgumentCounts_Test.cpp

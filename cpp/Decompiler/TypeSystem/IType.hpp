@@ -1037,7 +1037,10 @@ private:
 // A minimal port of the C# `UnknownType` (ICSharpCode.Decompiler/TypeSystem/
 // Implementation/UnknownType.cs) -- an unknown type where (part of) the name is known.
 // The C# `UnknownType` carries a `FullTypeName` (namespace + name + type-parameter-
-// count) and a `namespaceKnown` flag (false when the namespace was passed as null).
+// count, possibly with a nested-type chain: the `ReflectionHelper.ResolveTypeName`
+// nested-type fallback constructs it over `new FullTypeName(result.FullName)`, and
+// the simple-type fallback over the parsed `TopLevelTypeName`) and a `namespaceKnown`
+// flag (false when the namespace was passed as null).
 // `Name` returns the known name, `TypeParameterCount` the known count, `Kind` is
 // `TypeKind::Unknown`, and `ReflectionName` is "?" when the namespace is unknown.
 // The full `IType` surface (`GetDefinitionOrUnknown`, `Namespace`, `FullName`,
@@ -1045,7 +1048,9 @@ private:
 // `GetHashCode`, `Equals`, `ToString`, `AcceptVisitor`, `VisitChildren`) lands with
 // the rest of Phase 2; this minimal leaf lands the concrete type so the
 // `NestedTypeReference` (and future consumers) can construct the null-namespace
-// `UnknownType(null, name, tpc)` fallback the `Resolve` path produces.
+// `UnknownType(null, name, tpc)` fallback the `Resolve` path produces, and the
+// `ReflectionHelper.ParseReflectionName` resolution chain can construct the
+// named fallbacks of its own two arms.
 //
 // The C# `string? namespaceName` (nullable reference) ports to
 // `std::optional<std::string>` (`std::nullopt` = the C# `null` -> `namespaceKnown =
@@ -1054,11 +1059,32 @@ private:
 // that a bare `std::string` cannot.
 class UnknownType : public IType {
 public:
+    // The C# `UnknownType(string namespaceName, string name, int typeParameterCount = 0,
+    // bool? isReferenceType = null)` (the (namespaceName, name) ctor) -- the field is
+    // built as `new TopLevelTypeName(namespaceName ?? string.Empty, name,
+    // typeParameterCount)` (no nested segments), with `namespaceKnown =
+    // namespaceName != null`.
     UnknownType(std::optional<std::string> ns, std::string name,
                 int typeParameterCount,
                 std::optional<bool> isReferenceType = std::nullopt)
-        : fullTypeName_(ns.value_or(""), std::move(name), typeParameterCount),
+        : fullTypeName_(TopLevelTypeName(ns.value_or(""), std::move(name),
+                                          typeParameterCount)),
           namespaceKnown_(ns.has_value()), isReferenceType_(isReferenceType) {}
+
+    // The C# `UnknownType(FullTypeName fullTypeName, bool? isReferenceType = null)`
+    // (the full-name ctor) -- the field is the passed `FullTypeName` VERBATIM
+    // (nested segments included: the `ResolveTypeName` nested-type fallback
+    // constructs `new UnknownType(new FullTypeName(result.FullName))`, whose name
+    // can carry an `Outer+Inner` chain), with `namespaceKnown = true`. The C#
+    // `fullTypeName.Name == null` arm (the `default(FullTypeName)` input remapping to
+    // the ("", "?", 0) name with `namespaceKnown = false`) is N/A in the port: the
+    // port's `FullTypeName::Name()` is a `std::string` with no null state, and no
+    // ported construction path produces a default `FullTypeName` (both
+    // `ResolveTypeName` fallbacks pass names that were parsed and carry a name).
+    explicit UnknownType(FullTypeName fullTypeName,
+                         std::optional<bool> isReferenceType = std::nullopt)
+        : fullTypeName_(std::move(fullTypeName)), namespaceKnown_(true),
+          isReferenceType_(isReferenceType) {}
 
     TypeKind Kind() const override { return TypeKind::Unknown; }
     std::string Name() const override { return fullTypeName_.Name(); }
@@ -1075,7 +1101,7 @@ public:
     // TypeProvider when it can derive reference-ness from the metadata raw type
     // kind).
     std::optional<bool> IsReferenceType() const override { return isReferenceType_; }
-    const TopLevelTypeName& FullTypeName() const noexcept { return fullTypeName_; }
+    const FullTypeName& FullTypeName() const noexcept { return fullTypeName_; }
     // Faithful port of UnknownType.cs ChangeNullability: `Oblivious` (and value
     // types) return `this`; a non-`Oblivious` annotation on a reference type wraps
     // in `NullabilityAnnotatedType` (defined in IType.cpp).
@@ -1089,7 +1115,10 @@ protected:
                && isReferenceType_ == o.isReferenceType_;
     }
 private:
-    TopLevelTypeName fullTypeName_;
+    // The `FullTypeName()` accessor above hides the class name for the rest of
+    // the class body (the KnownThings self-named-accessor MSVC trap), so the
+    // field's type is fully qualified.
+    ::ILSpy::Decompiler::TypeSystem::FullTypeName fullTypeName_;
     bool namespaceKnown_;
     std::optional<bool> isReferenceType_;
 };

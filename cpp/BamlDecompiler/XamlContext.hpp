@@ -46,15 +46,16 @@
 //  * The type/property caches own their rows by `unique_ptr` (the C#
 //    `Dictionary<ushort, XamlType>` holds GC references the accessors hand
 //    out); the handed-out pointers stay valid for the context's lifetime.
-//  * `Baml.ResolveType`'s BAML-record arm calls
-//    `ReflectionHelper.ParseReflectionName` -- NOT yet ported (the
-//    System.Reflection.Metadata `TypeName`/`AssemblyNameInfo` parser it
-//    composes landed in cpp/Decompiler/Metadata/TypeName.{hpp,cpp} and
-//    AssemblyNameInfo.{hpp,cpp}; the remaining pieces are the
-//    ReflectionHelper.ParseReflectionName/ResolveTypeName resolution chain
-//    and ICompilation.FindModuleByAssemblyNameInfo). Following the loud
-//    `std::logic_error` deferral convention, the arm throws until that lands;
-//    the KnownThings arm (ids above 0x7fff) is fully functional.
+//  * `Baml.ResolveType`'s BAML-record arm resolves the record's type through
+//    `ReflectionHelper.ParseReflectionName(typeRec.TypeFullName, new
+//    SimpleTypeResolveContext(TypeSystem))` -- ported (the iteration-48
+//    `TypeName`/`AssemblyNameInfo` parsers plus the
+//    ReflectionHelper.ParseReflectionName/ResolveTypeName chain and
+//    ICompilation.FindModuleByAssemblyNameInfo it composes). The resolved
+//    `IType` is an `ITypePtr` (owning for the parser's freshly built composites,
+//    a no-op-deleter alias for the module-owned definitions), and `type.Namespace`
+//    routes through the file-local `NamespaceOf` helper (the port's `IType`
+//    declares no `Namespace` virtual -- the ILAmbience precedent).
 //  * The `Baml()` accessor hides the namespace name `Baml` for the rest of
 //    the class body (the self-named-accessor MSVC trap), so every
 //    `Baml`-qualified declaration after it spells the fully-qualified

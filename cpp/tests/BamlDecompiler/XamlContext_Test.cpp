@@ -39,9 +39,10 @@
 //    table is the ONLY lookup ResolveType performs, so a PresentationCore/
 //    System.Windows type like ContentElement resolves with a NULL namespace),
 //    the per-id cache (the same instance), the out-of-table and
-//    missing-record throws, and the loud logic_error deferral of the
-//    BAML-record arm (the real engine resolves it through
-//    ReflectionHelper.ParseReflectionName -- the port's documented deferral);
+//    missing-record throws, and the BAML-record arm's real resolution through
+//    ReflectionHelper.ParseReflectionName (the synthetic module seeded by the
+//    KnownThings ctor answers the parser's module walk -- the real-engine
+//    gold: the PI xmlns attaches and ResolvedType is the synthetic Button);
 //  * ResolveProperty: the AttributeInfoRecord arm (the declaring type routed
 //    through the same cached ResolveType instance, the synthetic type's empty
 //    member tables leaving ResolvedMember null) and the known-members arm
@@ -302,17 +303,37 @@ TEST(XamlContextResolveTypeTest, OutOfTableAndMissingRecordThrows)
     EXPECT_THROW(ctx->ResolveType(5), std::out_of_range);
 }
 
-TEST(XamlContextResolveTypeTest, BamlRecordArmIsTheLoudDeferral)
+TEST(XamlContextResolveTypeTest, BamlRecordArmResolvesThroughParseReflectionName)
 {
-    // The BAML-record arm needs ReflectionHelper.ParseReflectionName (the
-    // System.Reflection.Metadata TypeName parser, not yet ported): the port
-    // throws the loud logic_error instead of silently resolving wrong (the
-    // real engine resolves the record's "System.Windows.Controls.Button"
-    // through ParseReflectionName over the compilation -- the gold recorded
-    // in the probe dump for the future lift of this deferral).
+    // The BAML-record arm resolves the record's "System.Windows.Controls.Button"
+    // through ReflectionHelper.ParseReflectionName over the compilation (the
+    // iteration-49 lift of the former loud logic_error deferral). The KnownThings
+    // ctor's RegisterType walk seeds the synthetic PresentationFramework module,
+    // so the parser's plain module scan finds the synthetic Button definition
+    // -- the real-engine gold: Assembly = the synthetic module, FullAssemblyName =
+    // the record's raw name, TypeNamespace = "System.Windows.Controls",
+    // TypeName = "Button", Namespace = the probe PI xmlns, ResolvedType = the
+    // Button type.
     XamlContextFixture fixture;
     auto ctx = fixture.MakeContext();
-    EXPECT_THROW(ctx->ResolveType(0), std::logic_error);
+    ILSpy::BamlDecompiler::Xaml::XamlType* t = ctx->ResolveType(0);
+    ASSERT_NE(t, nullptr);
+    EXPECT_EQ(t->TypeNamespace, "System.Windows.Controls");
+    EXPECT_EQ(t->TypeName, "Button");
+    EXPECT_EQ(t->Assembly, fixture.PresentationFramework());
+    EXPECT_EQ(t->FullAssemblyName,
+              "PresentationFramework, Version=4.0.0.0, Culture=neutral, "
+              "PublicKeyToken=31bf3856ad364e35");
+    ASSERT_NE(t->Namespace(), std::nullopt);
+    EXPECT_EQ(t->Namespace()->NamespaceName(), kProbePiNs);
+    // The resolved type is the synthetic module's registered Button definition
+    // (the parser's plain-walk hit -- a Class-kind type named "Button").
+    ASSERT_NE(t->ResolvedType, nullptr);
+    EXPECT_EQ(t->ResolvedType->Name(), "Button");
+    EXPECT_EQ(t->ResolvedType->Kind(),
+              ILSpy::Decompiler::TypeSystem::TypeKind::Class);
+    // The per-id cache hands back the same instance.
+    EXPECT_EQ(ctx->ResolveType(0), t);
 }
 
 // ===== XamlContext.ResolveProperty ============================================

@@ -31,6 +31,8 @@
 #include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/IModule.hpp"
+#include "Decompiler/TypeSystem/ReflectionHelper.hpp"
+#include "Decompiler/TypeSystem/SimpleTypeResolveContext.hpp"
 
 #include <algorithm>
 #include <any>
@@ -58,10 +60,30 @@ std::string FullNameOf(const ILSpy::Decompiler::TypeSystem::IType& type)
 	else if (const auto* pt = dynamic_cast<const ILSpy::Decompiler::TypeSystem::ParameterizedType*>(&type))
 		ns = pt->GenericType() ? FullNameOf(*pt->GenericType()) : std::string();
 	else if (const auto* unknown = dynamic_cast<const class ILSpy::Decompiler::TypeSystem::UnknownType*>(&type))
-		ns = unknown->FullTypeName().Namespace();
+		ns = unknown->FullTypeName().GetTopLevelTypeName().Namespace();
 	if (ns.empty())
 		return type.Name();
 	return ns + "." + type.Name();
+}
+
+// The C# `string type.Namespace` on the record arm's `IType` (a definition, an
+// UnknownType fallback, or a composite): the port's `IType` declares no `Namespace`
+// virtual (it lives on `INamedElement`, the IEntity base), so the ILAmbience /
+// TypeSystemAstBuilder `NamespaceOf` helper ships here as its third consumer --
+// entities delegate to their own `Namespace`, parameterized types to their generic,
+// `UnknownType` to its stored full-name namespace, everything else the empty default.
+std::string NamespaceOf(const ILSpy::Decompiler::TypeSystem::IType& type)
+{
+	if (const auto* entity =
+		dynamic_cast<const ILSpy::Decompiler::TypeSystem::IEntity*>(&type))
+		return entity->Namespace();
+	if (const auto* pt =
+		dynamic_cast<const ILSpy::Decompiler::TypeSystem::ParameterizedType*>(&type))
+		return pt->GenericType() ? NamespaceOf(*pt->GenericType()) : std::string();
+	if (const auto* unknown =
+		dynamic_cast<const class ILSpy::Decompiler::TypeSystem::UnknownType*>(&type))
+		return unknown->FullTypeName().GetTopLevelTypeName().Namespace();
+	return std::string();
 }
 
 } // namespace
@@ -131,7 +153,11 @@ Xaml::XamlType* XamlContext::ResolveType(std::uint16_t id)
 	if (cached != typeMap_.end())
 		return cached->second.get();
 
-	const ILSpy::Decompiler::TypeSystem::ITypeDefinition* type = nullptr;
+	const ILSpy::Decompiler::TypeSystem::IType* type = nullptr;
+	// The record arm's resolved type (the ParseReflectionName result owns its
+	// composites; the KnownThings arm aliases the module-owned definition with the
+	// no-op deleter) -- what `{ ResolvedType = type }` snapshots.
+	ILSpy::Decompiler::TypeSystem::ITypePtr resolvedType;
 	const ILSpy::Decompiler::TypeSystem::IModule* assembly = nullptr;
 	std::string fullAssemblyName;
 
@@ -139,50 +165,48 @@ Xaml::XamlType* XamlContext::ResolveType(std::uint16_t id)
 		// The C# `Baml.KnownThings.Types((KnownTypes)(short)-unchecked((short)id))`:
 		// the wire form of a known-type id is `(ushort)(-index)`, so the
 		// negation of the sign-extended id recovers it.
-		type = baml_->KnownThings().Types(static_cast<Baml::KnownTypes>(
-			static_cast<std::int16_t>(-static_cast<std::int16_t>(id))));
+		const ILSpy::Decompiler::TypeSystem::ITypeDefinition* knownType =
+			baml_->KnownThings().Types(static_cast<Baml::KnownTypes>(
+				static_cast<std::int16_t>(-static_cast<std::int16_t>(id))));
 		// The C# `type.GetDefinition().ParentModule` -- GetDefinition() on a
 		// definition returns itself; a null type (or its null parent module)
 		// is the C# NullReferenceException.
-		if (type == nullptr)
+		if (knownType == nullptr)
 			throw std::runtime_error(kNullReferenceMessage);
-		assembly = type->ParentModule();
+		assembly = knownType->ParentModule();
 		if (assembly == nullptr)
 			throw std::runtime_error(kNullReferenceMessage);
 		fullAssemblyName = assembly->FullAssemblyName();
+		type = knownType;
+		// The KnownThings cache owns the type definition; the port snapshots it as a
+		// NON-OWNING shared_ptr alias (the KnownTypeCache convention (d)
+		// no-op-deleter precedent).
+		resolvedType = ILSpy::Decompiler::TypeSystem::ITypePtr(
+			const_cast<ILSpy::Decompiler::TypeSystem::IType*>(
+				static_cast<const ILSpy::Decompiler::TypeSystem::IType*>(knownType)),
+			[](ILSpy::Decompiler::TypeSystem::IType*) {});
 	} else {
 		const Baml::TypeInfoRecord& typeRec = *baml_->TypeIdMap.at(id);
 		Baml::ResolvedAssembly resolved = baml_->ResolveAssembly(typeRec.AssemblyId);
 		fullAssemblyName = resolved.FullAssemblyName;
 		assembly = resolved.Assembly;
-		// DEFERRIAL (loud, the DecodeCustomAttributeBlobs convention): the
-		// BAML-record arm resolves the record's type through
-		// `ReflectionHelper.ParseReflectionName(typeRec.TypeFullName, new
-		// SimpleTypeResolveContext(TypeSystem))`. The System.Reflection.Metadata
-		// `TypeName` parser it composes landed in
-		// cpp/Decompiler/Metadata/TypeName.{hpp,cpp}; the remaining pieces are the
-		// ReflectionHelper.ParseReflectionName/ResolveTypeName resolution chain and
-		// ICompilation.FindModuleByAssemblyNameInfo -- not yet ported. The
-		// throw keeps the arm unreachable instead of silently wrong; the
-		// KnownThings arm above is fully functional.
-		throw std::logic_error(
-			"XamlContext.ResolveType: the BAML-record arm needs "
-			"ReflectionHelper.ParseReflectionName (not yet ported)");
+		// The C# `ReflectionHelper.ParseReflectionName(typeRec.TypeFullName, new
+		// SimpleTypeResolveContext(TypeSystem))` -- the reflection-name parser/resolver
+		// over the iteration-48 `TypeName` parser, resolving against this context's
+		// compilation (the IDecompilerTypeSystem narrowed to its ICompilation surface).
+		resolvedType = ILSpy::Decompiler::TypeSystem::ParseReflectionName(
+			typeRec.TypeFullName,
+			ILSpy::Decompiler::TypeSystem::SimpleTypeResolveContext(TypeSystem()));
+		type = resolvedType.get();
 	}
 
-	std::string clrNs = type->Namespace();
+	std::string clrNs = NamespaceOf(*type);
 	std::optional<std::string> xmlNs = xmlNs_.LookupXmlns(fullAssemblyName, clrNs);
 
 	auto xamlType = std::make_unique<Xaml::XamlType>(assembly, fullAssemblyName, clrNs,
 		type->Name(), GetXmlNamespace(xmlNs));
-	// The C# `{ ResolvedType = type }`: the KnownThings cache (or the future
-	// resolver) owns the type definition; the port snapshots it as a
-	// NON-OWNING shared_ptr alias (the KnownTypeCache convention (d)
-	// no-op-deleter precedent).
-	xamlType->ResolvedType = ILSpy::Decompiler::TypeSystem::ITypePtr(
-		const_cast<ILSpy::Decompiler::TypeSystem::IType*>(
-			static_cast<const ILSpy::Decompiler::TypeSystem::IType*>(type)),
-		[](ILSpy::Decompiler::TypeSystem::IType*) {});
+	// The C# `{ ResolvedType = type }`.
+	xamlType->ResolvedType = resolvedType;
 
 	Xaml::XamlType* result = xamlType.get();
 	typeMap_.emplace(id, std::move(xamlType));

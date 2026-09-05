@@ -25,7 +25,7 @@
 // System.Private.CoreLib 10.0.8 sources are the port's reference.
 //
 // Consumers: `TypeName` (this directory) parses the assembly part of every
-// assembly-qualified type name through `TryParse`, and the upcoming
+// assembly-qualified type name through `TryParse`, and the
 // `ReflectionHelper.ParseReflectionName` chain resolves the parsed name against a
 // compilation's modules through `ICompilation.FindModuleByAssemblyNameInfo`
 // (comparing `FullName`, then `Name`). `ToAssemblyName` (the System.Reflection

@@ -54,7 +54,7 @@ std::string FullNameOf(const ILSpy::Decompiler::TypeSystem::IType& type)
 	else if (const auto* pt = dynamic_cast<const ILSpy::Decompiler::TypeSystem::ParameterizedType*>(&type))
 		ns = pt->GenericType() ? FullNameOf(*pt->GenericType()) : std::string();
 	else if (const auto* unknown = dynamic_cast<const class ILSpy::Decompiler::TypeSystem::UnknownType*>(&type))
-		ns = unknown->FullTypeName().Namespace();
+		ns = unknown->FullTypeName().GetTopLevelTypeName().Namespace();
 	if (ns.empty())
 		return type.Name();
 	return ns + "." + type.Name();

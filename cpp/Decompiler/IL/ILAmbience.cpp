@@ -149,8 +149,8 @@ std::string NamespaceOf(const TypeSystem::IType& type) {
 		return entity->Namespace();
 	if (const auto* pt = dynamic_cast<const TypeSystem::ParameterizedType*>(&type))
 		return pt->GenericType() ? NamespaceOf(*pt->GenericType()) : std::string();
-	if (const auto* unknown = dynamic_cast<const class UnknownType*>(&type))
-		return unknown->FullTypeName().Namespace();
+	if (const auto* unknown = dynamic_cast<const class TypeSystem::UnknownType*>(&type))
+		return unknown->FullTypeName().GetTopLevelTypeName().Namespace();
 	return std::string();
 }
 

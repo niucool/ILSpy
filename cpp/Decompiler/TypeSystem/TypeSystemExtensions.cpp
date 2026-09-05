@@ -23,6 +23,7 @@
 
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
+#include "Decompiler/Metadata/AssemblyNameInfo.hpp"
 #include "Decompiler/TypeSystem/Implementation/BaseTypeCollector.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/IEntity.hpp"
@@ -33,6 +34,7 @@
 #include "Decompiler/TypeSystem/IParameterizedMember.hpp"
 #include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
+#include "Decompiler/TypeSystem/StringComparer.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
 
 #include <algorithm>
@@ -375,6 +377,27 @@ const ITypeDefinition* GetTypeDefinition(const IModule& module, const FullTypeNa
             break;
     }
     return typeDef;
+}
+
+const IModule* FindModuleByAssemblyNameInfo(
+    const ICompilation& compilation,
+    const ::ILSpy::Decompiler::Metadata::AssemblyNameInfo& assemblyName)
+{
+    // The C# first pass: `string.Equals(module.FullAssemblyName, assemblyName.FullName,
+    // StringComparison.OrdinalIgnoreCase)` over every module; the first match wins.
+    const StringComparer& ignoreCase = StringComparer::OrdinalIgnoreCase();
+    for (const IModule* module : compilation.Modules()) {
+        if (ignoreCase.Equals(module->FullAssemblyName(), assemblyName.FullName()))
+            return module;
+    }
+    // The C# second pass: the same scan over the short `Name`. Only reached when the
+    // FullName pass missed every module (a FullName match takes precedence even when a
+    // LATER module's short name would also match).
+    for (const IModule* module : compilation.Modules()) {
+        if (ignoreCase.Equals(module->Name(), assemblyName.Name()))
+            return module;
+    }
+    return nullptr;
 }
 
 // The C# `IsCompilerGeneratedOrIsInCompilerGeneratedClass` (NRExtensions.cs lines

@@ -54,6 +54,14 @@ class IParameter;
 class IProperty;
 } // namespace ILSpy::Decompiler::TypeSystem
 
+// The `AssemblyNameInfo` parameter type of `FindModuleByAssemblyNameInfo` (the C#
+// `System.Reflection.Metadata` class, ported as `ILSpy::Decompiler::Metadata::
+// AssemblyNameInfo`) -- forward-declared so the declaration below needs no Metadata
+// include (the .cpp includes the full header).
+namespace ILSpy::Decompiler::Metadata {
+class AssemblyNameInfo;
+} // namespace ILSpy::Decompiler::Metadata
+
 namespace ILSpy::Decompiler::TypeSystem {
 
 // The C# `IEnumerable<IType> GetAllBaseTypes(this IType type)`:
@@ -172,6 +180,19 @@ bool IsUnbound(const IType& type);
 // the definition). The first consumer is `TypeSystemAstBuilder.ConvertType(
 // FullTypeName)` (the resolver-holding overload's per-module lookup).
 const ITypeDefinition* GetTypeDefinition(const IModule& module, const FullTypeName& fullTypeName);
+
+// The C# `public static IModule FindModuleByAssemblyNameInfo(this ICompilation compilation,
+// AssemblyNameInfo assemblyName)` (TypeSystemExtensions.cs line 840) -- the module lookup the
+// `ReflectionHelper.ParseReflectionName` assembly-qualified arm routes through: a FIRST pass over
+// `compilation.Modules` comparing each module's `FullAssemblyName` against the parsed name's
+// `FullName` (case-insensitive ordinal), then -- only when no module matched -- a SECOND pass
+// comparing each module's `Name` the same way. Returns null when both passes miss (the caller
+// then falls through to the plain module walk). The C# `AssemblyNameInfo` lives in
+// `System.Reflection.Metadata` and ports as `ILSpy::Decompiler::Metadata::AssemblyNameInfo` (the
+// iteration-48 parse/FullName port); a reference parameter models the C# non-null argument.
+const IModule* FindModuleByAssemblyNameInfo(
+    const ICompilation& compilation,
+    const ::ILSpy::Decompiler::Metadata::AssemblyNameInfo& assemblyName);
 
 // The C# `public static bool IsKnownType(this IType type, KnownTypeCode knownType)`:
 //

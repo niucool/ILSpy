@@ -30,11 +30,12 @@
 # stand-in; XamlType/XamlProperty -- the resolved type/property rows; and
 # XamlContext -- the Construct composition over BamlContext + BamlNode.Parse
 # with the type/property/string id resolution and the XML-namespace helpers;
-# the BAML-record arm of ResolveType defers on the
-# ReflectionHelper.ParseReflectionName/ResolveTypeName chain plus
-# ICompilation.FindModuleByAssemblyNameInfo -- the System.Reflection.Metadata
+# the BAML-record arm of ResolveType resolves through the
+# ReflectionHelper.ParseReflectionName/ResolveTypeName chain over the
+# ICompilation.FindModuleByAssemblyNameInfo lookup -- the System.Reflection.Metadata
 # TypeName/AssemblyNameInfo parser it composes landed in
-# cpp/Decompiler/Metadata/TypeName.{hpp,cpp} and AssemblyNameInfo.{hpp,cpp}).
+# cpp/Decompiler/Metadata/TypeName.{hpp,cpp} and AssemblyNameInfo.{hpp,cpp}, and
+# the resolution chain in Decompiler/TypeSystem/ReflectionHelper.{hpp,cpp}).
 # The IDecompilerTypeSystem interface (the MetadataModule MainModule narrowing),
 # the XamlExtension/XamlResourceKey leaves, and the Handlers/Rewrite/XamlDecompiler
 # layers follow in later slices.

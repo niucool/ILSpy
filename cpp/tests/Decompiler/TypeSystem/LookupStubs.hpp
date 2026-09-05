@@ -95,6 +95,13 @@ public:
     // ctor name is unchanged for every existing test (the additive-setter
     // convention).
     void SetAssemblyName(std::string name) { assemblyName_ = std::move(name); }
+    // Configurable FULL assembly name for the `FindModuleByAssemblyNameInfo`
+    // tests (the C# compares `module.FullAssemblyName` against the parsed
+    // name's FullName in the FIRST pass and `module.Name` in the second --
+    // the two must be independently settable to pin the precedence). The
+    // default (empty -> the short name) preserves the prior behavior so
+    // existing tests are unaffected (the additive-setter convention).
+    void SetFullAssemblyName(std::string name) { fullAssemblyName_ = std::move(name); }
     // Configurable `MetadataFile` for the ILAmbience `ConvertSymbol` tests (the
     // metadata-driven flag prefixes read `entity.ParentModule.MetadataFile`'s
     // per-row attribute flags; a real mscorlib `MetadataFile` supplies the rows).
@@ -141,7 +148,10 @@ public:
     bool IsMainModule() const override { return true; }
     std::string AssemblyName() const override { return assemblyName_; }
     Version AssemblyVersion() const override { return {}; }
-    std::string FullAssemblyName() const override { return assemblyName_; }
+    std::string FullAssemblyName() const override
+    {
+        return fullAssemblyName_.empty() ? assemblyName_ : fullAssemblyName_;
+    }
     std::vector<const IAttribute*> GetAssemblyAttributes() const override { return {}; }
     std::vector<const IAttribute*> GetModuleAttributes() const override { return {}; }
     bool InternalsVisibleTo(const IModule& module) const override
@@ -171,6 +181,7 @@ public:
 private:
     const ICompilation& compilation_;
     std::string assemblyName_;
+    std::string fullAssemblyName_;
     std::vector<std::string> friendAssemblies_;
     const ILSpy::Decompiler::Metadata::MetadataFile* metadataFile_ = nullptr;
     std::vector<const ITypeDefinition*> typeDefinitions_;
@@ -356,6 +367,13 @@ public:
     // alive).
     void SetFields(std::vector<const IField*> fields) { fields_ = std::move(fields); }
     void SetEvents(std::vector<const IEvent*> events) { events_ = std::move(events); }
+    // Configurable `NestedTypes` for the ReflectionHelper.ResolveTypeName nested arm
+    // (the declaring type's `NestedTypes` walk matching the plain name and the
+    // summed type-parameter count). The default (empty) preserves the prior
+    // always-empty behavior so existing tests are unaffected (the additive-setter
+    // convention); the stored pointers are non-owning (the caller keeps the
+    // `LookupTypeDefinition` stubs alive).
+    void SetNestedTypes(std::vector<const ITypeDefinition*> nested) { nestedTypes_ = std::move(nested); }
 
     // --- IType ---
     TypeKind Kind() const override { return kind_; }
@@ -466,7 +484,7 @@ public:
     bool IsSealed() const override { return isSealed_; }
 
     // --- ITypeDefinition-own ---
-    std::vector<const ITypeDefinition*> NestedTypes() const override { return {}; }
+    std::vector<const ITypeDefinition*> NestedTypes() const override { return nestedTypes_; }
     std::vector<const IMember*> Members() const override { return {}; }
     std::vector<const IField*> Fields() const override { return fields_; }
     std::vector<const IMethod*> Methods() const override { return methods_; }
@@ -508,6 +526,7 @@ private:
     std::vector<const IProperty*> properties_;
     std::vector<const IField*> fields_;
     std::vector<const IEvent*> events_;
+    std::vector<const ITypeDefinition*> nestedTypes_;
     bool hasExtensions_ = false;
     bool isAbstract_ = false;
     bool isSealed_ = false;
