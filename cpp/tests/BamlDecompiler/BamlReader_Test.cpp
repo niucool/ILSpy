@@ -62,7 +62,7 @@ using Baml::BamlRecord;
 using Baml::BamlRecordType;
 
 // The shared record-type name table (BamlTestSupport.hpp).
-using ILSpy::Tests::Baml::RecordTypeName;
+using ILSpy::BamlDecompiler::Baml::RecordTypeName;
 
 // Reads a fixture's bytes through the reader (the byte-span convention;
 // the shared helper's twin, kept for the suite's existing call sites).

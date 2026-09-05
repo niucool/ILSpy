@@ -122,6 +122,12 @@ enum class BamlRecordType : std::uint8_t {
     XmlnsProperty = 0x14,
 };
 
+// The C# `BamlRecordType.ToString()`: the enum member name, or the decimal
+// byte value for a value with no member (the .NET enum ToString fallback).
+// The HandlerMap's duplicate-key message renders its key through this
+// spelling (the Dictionary.Add `Key: {key}` suffix).
+std::string RecordTypeName(BamlRecordType type);
+
 // The C# `BamlRecord` base.
 class BamlRecord {
 public:

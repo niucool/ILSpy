@@ -63,7 +63,7 @@ using Baml::BamlRecordNode;
 using Baml::BamlRecordType;
 
 using ILSpy::Tests::Baml::ReadBaml;
-using ILSpy::Tests::Baml::RecordTypeName;
+using ILSpy::BamlDecompiler::Baml::RecordTypeName;
 
 // One gold dump line: "B <headerType> @<pos> F=@<fpos>:<footerType>" (a
 // block; "F=@null" while an end record stays omitted) or "R <type> @<pos>"

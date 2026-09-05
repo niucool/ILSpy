@@ -532,4 +532,70 @@ void NamedElementStartRecord::Write(BamlBinaryWriter& writer) {
     writer.WriteString(RuntimeName);
 }
 
+std::string RecordTypeName(BamlRecordType type)
+{
+    switch (type) {
+        case BamlRecordType::ClrEvent: return "ClrEvent";
+        case BamlRecordType::Comment: return "Comment";
+        case BamlRecordType::AssemblyInfo: return "AssemblyInfo";
+        case BamlRecordType::AttributeInfo: return "AttributeInfo";
+        case BamlRecordType::ConstructorParametersStart: return "ConstructorParametersStart";
+        case BamlRecordType::ConstructorParametersEnd: return "ConstructorParametersEnd";
+        case BamlRecordType::ConstructorParameterType: return "ConstructorParameterType";
+        case BamlRecordType::ConnectionId: return "ConnectionId";
+        case BamlRecordType::ContentProperty: return "ContentProperty";
+        case BamlRecordType::DefAttribute: return "DefAttribute";
+        case BamlRecordType::DefAttributeKeyString: return "DefAttributeKeyString";
+        case BamlRecordType::DefAttributeKeyType: return "DefAttributeKeyType";
+        case BamlRecordType::DeferableContentStart: return "DeferableContentStart";
+        case BamlRecordType::DefTag: return "DefTag";
+        case BamlRecordType::DocumentEnd: return "DocumentEnd";
+        case BamlRecordType::DocumentStart: return "DocumentStart";
+        case BamlRecordType::ElementEnd: return "ElementEnd";
+        case BamlRecordType::ElementStart: return "ElementStart";
+        case BamlRecordType::EndAttributes: return "EndAttributes";
+        case BamlRecordType::KeyElementEnd: return "KeyElementEnd";
+        case BamlRecordType::KeyElementStart: return "KeyElementStart";
+        case BamlRecordType::LastRecordType: return "LastRecordType";
+        case BamlRecordType::LineNumberAndPosition: return "LineNumberAndPosition";
+        case BamlRecordType::LinePosition: return "LinePosition";
+        case BamlRecordType::LiteralContent: return "LiteralContent";
+        case BamlRecordType::NamedElementStart: return "NamedElementStart";
+        case BamlRecordType::OptimizedStaticResource: return "OptimizedStaticResource";
+        case BamlRecordType::PIMapping: return "PIMapping";
+        case BamlRecordType::PresentationOptionsAttribute: return "PresentationOptionsAttribute";
+        case BamlRecordType::ProcessingInstruction: return "ProcessingInstruction";
+        case BamlRecordType::Property: return "Property";
+        case BamlRecordType::PropertyArrayEnd: return "PropertyArrayEnd";
+        case BamlRecordType::PropertyArrayStart: return "PropertyArrayStart";
+        case BamlRecordType::PropertyComplexEnd: return "PropertyComplexEnd";
+        case BamlRecordType::PropertyComplexStart: return "PropertyComplexStart";
+        case BamlRecordType::PropertyCustom: return "PropertyCustom";
+        case BamlRecordType::PropertyDictionaryEnd: return "PropertyDictionaryEnd";
+        case BamlRecordType::PropertyDictionaryStart: return "PropertyDictionaryStart";
+        case BamlRecordType::PropertyListEnd: return "PropertyListEnd";
+        case BamlRecordType::PropertyListStart: return "PropertyListStart";
+        case BamlRecordType::PropertyStringReference: return "PropertyStringReference";
+        case BamlRecordType::PropertyTypeReference: return "PropertyTypeReference";
+        case BamlRecordType::PropertyWithConverter: return "PropertyWithConverter";
+        case BamlRecordType::PropertyWithExtension: return "PropertyWithExtension";
+        case BamlRecordType::PropertyWithStaticResourceId: return "PropertyWithStaticResourceId";
+        case BamlRecordType::RoutedEvent: return "RoutedEvent";
+        case BamlRecordType::StaticResourceEnd: return "StaticResourceEnd";
+        case BamlRecordType::StaticResourceId: return "StaticResourceId";
+        case BamlRecordType::StaticResourceStart: return "StaticResourceStart";
+        case BamlRecordType::StringInfo: return "StringInfo";
+        case BamlRecordType::Text: return "Text";
+        case BamlRecordType::TextWithConverter: return "TextWithConverter";
+        case BamlRecordType::TextWithId: return "TextWithId";
+        case BamlRecordType::TypeInfo: return "TypeInfo";
+        case BamlRecordType::TypeSerializerInfo: return "TypeSerializerInfo";
+        case BamlRecordType::XmlAttribute: return "XmlAttribute";
+        case BamlRecordType::XmlnsProperty: return "XmlnsProperty";
+    }
+    // The .NET enum ToString fallback: an unnamed value renders as the
+    // decimal of the underlying byte.
+    return std::to_string(static_cast<unsigned>(type));
+}
+
 } // namespace ILSpy::BamlDecompiler::Baml

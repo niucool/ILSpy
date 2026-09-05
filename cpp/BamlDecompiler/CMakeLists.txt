@@ -40,7 +40,14 @@
 # {TypeName args, name=value} render over the XamlUtils ToString extensions,
 # which land with it) and the resource-key annotation (Xaml/XamlResourceKey:
 # the key-node/key-element/static-resources row the key-record handlers
-# attach through the node annotations, with the sibling/ancestor key lookups).
+# attach through the node annotations, with the sibling/ancestor key lookups),
+# plus the record-type-to-handler dispatch (IHandlers: the IHandler/IDeferHandler
+# interfaces and the HandlerMap -- the explicit CreateBuiltinHandlers manifest
+# standing in for the C# reflection walk, EMPTY until the Handlers/Blocks and
+# Handlers/Records classes land (the 37-row gold inventory they must reproduce
+# is pinned in tests/BamlDecompiler/HandlerMap_Test.cpp), the lazy LookupHandler
+# over it, the duplicate-key InstallHandler, and the ProcessChildren walk with
+# its XmlnsScope push/pop + annotation pairing).
 # The IDecompilerTypeSystem interface (the MetadataModule MainModule narrowing)
 # and the Handlers/Rewrite/XamlDecompiler
 # layers follow in later slices.
@@ -54,6 +61,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlReader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlWriter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/KnownThings.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/IHandlers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/SyntheticWpfModule.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlExtension.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlPathDeserializer.cpp
