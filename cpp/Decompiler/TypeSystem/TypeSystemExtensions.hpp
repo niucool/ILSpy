@@ -60,6 +60,7 @@ class IProperty;
 // include (the .cpp includes the full header).
 namespace ILSpy::Decompiler::Metadata {
 class AssemblyNameInfo;
+class IAssemblyReference;
 } // namespace ILSpy::Decompiler::Metadata
 
 namespace ILSpy::Decompiler::TypeSystem {
@@ -193,6 +194,20 @@ const ITypeDefinition* GetTypeDefinition(const IModule& module, const FullTypeNa
 const IModule* FindModuleByAssemblyNameInfo(
     const ICompilation& compilation,
     const ::ILSpy::Decompiler::Metadata::AssemblyNameInfo& assemblyName);
+
+// The C# `public static IModule FindModuleByReference(this ICompilation compilation,
+// IAssemblyReference assemblyName)` (TypeSystemExtensions.cs line 821) -- the module
+// lookup `MetadataModule.ResolveModule(AssemblyReferenceHandle)` routes through: the
+// same two-pass scan as `FindModuleByAssemblyNameInfo` over the metadata-backed
+// `AssemblyReference` row wrapper (a FIRST pass over `compilation.Modules` comparing
+// each module's `FullAssemblyName` against the reference's `FullName` (case-insensitive
+// ordinal), then -- only when no module matched -- a SECOND pass comparing each module's
+// `Name` the same way). Returns null when both passes miss. The `IAssemblyReference`
+// parameter is the `AssemblyNameReference`/`AssemblyReference` interface (the
+// iteration-36 port).
+const IModule* FindModuleByReference(
+    const ICompilation& compilation,
+    const ::ILSpy::Decompiler::Metadata::IAssemblyReference& assemblyName);
 
 // The C# `public static bool IsKnownType(this IType type, KnownTypeCode knownType)`:
 //

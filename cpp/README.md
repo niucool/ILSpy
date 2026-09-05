@@ -49,9 +49,13 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   identity arms over the raw Cor-table surface, the `IModule` identity surface,
   and the per-module namespace tree over the `NamespaceDefinition` cache),
   the SRMExtensions kind/attribute predicates (`IsKnownType` / `IsEnum` /
-  `IsValueType` / `IsDelegate` / `HasKnownAttribute`), and the
+  `IsValueType` / `IsDelegate` / `HasKnownAttribute`), the
   type-definition entity layer (`MetadataTypeDefinition` +
-  `MetadataTypeParameter` + the `GetDefinition` entity cache; all
+  `MetadataTypeParameter` + the `GetDefinition` entity cache), and the
+  cross-module resolution family (`BusyManager`, the metadata-backed
+  `AssemblyReference` row wrapper, `ResolveModule` over both handle kinds,
+  `GetDeclaringModule`, `FindModuleByReference`, and the
+  `GetTypeDefinition` forwarder arm through `ResolveForwardedType`; all
   gold-pinned against the real engine). STARTED (the member entity
   family (`MetadataField`/`MetadataMethod`/`MetadataProperty`/
   `MetadataEvent`), the `TypeProvider`/`ResolveType` resolution family,

@@ -14,6 +14,7 @@ add_executable(ilspy_tests
     Util/LazyInit_Test.cpp
     Util/CSharpPrimitiveCast_Test.cpp
     Util/Sha1ForNonSecretPurposes_Test.cpp
+    Util/BusyManager_Test.cpp
     Decompiler/Xml/XmlConvert_Test.cpp
     Decompiler/Xml/XmlSerialization_Test.cpp
     Decompiler/Xml/XmlTextParser_Test.cpp
@@ -40,6 +41,7 @@ add_executable(ilspy_tests
     Decompiler/Metadata/SRMExtensions_Test.cpp
     Decompiler/Metadata/AssemblyNameReference_Test.cpp
     Decompiler/Metadata/AssemblyNameInfo_Test.cpp
+    Decompiler/Metadata/AssemblyReference_Test.cpp
     Decompiler/Metadata/TypeName_Test.cpp
     Decompiler/Metadata/PortablePdb_Test.cpp
     Decompiler/Metadata/DebugDirectory_Test.cpp
@@ -278,6 +280,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/IsReferenceType_Test.cpp
     Decompiler/TypeSystem/GetDefinition_Test.cpp
     Decompiler/TypeSystem/MetadataModule_Test.cpp
+    Decompiler/TypeSystem/MetadataModuleResolution_Test.cpp
     Decompiler/TypeSystem/MetadataTypeDefinition_Test.cpp
     Decompiler/Semantics/ResolveResult_Test.cpp
     Decompiler/Semantics/TypeResolveResult_Test.cpp

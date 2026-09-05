@@ -78,10 +78,11 @@
 //      (`Field`/`Method`/`Property`/`EventDefinitionHandle`) land with their
 //      entity classes. The C# `Debug.Assert(row != 0)` rows are compiled out.
 //  (f) `GetTypeDefinition(TopLevelTypeName)`: the `MetadataFile` reverse lookups
-//      (the iteration-61 ports) land now; the miss arm falls through to
-//      `GetDefinition(nilHandle)` -> null, and the forwarder-hit arm
-//      (`ResolveForwardedType(forwarder).GetDefinition()`) is a loud deferral
-//      (gated on `ResolveModule` / `Compilation.FindModuleByReference`).
+//      (the iteration-61 ports) plus the forwarder-hit arm
+//      (`ResolveForwardedType(forwarder).GetDefinition()` over the
+//      `ResolveModule` / `GetDeclaringModule` / `FindModuleByReference`
+//      resolution family, this slice) are REAL; the miss arm falls through
+//      to `GetDefinition(nilHandle)` -> null.
 //  (g) DEFERRED members (each loud `std::logic_error` where the ported surface
 //      reaches it, otherwise absent with this note): the `TypeProvider` field and
 //      the whole `ResolveType` / `ResolveMethod` / `ResolveEntity` /
@@ -107,6 +108,7 @@
 #pragma once
 
 #include "Decompiler/TypeSystem/IModule.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
 
 #include <cstdint>
@@ -208,10 +210,63 @@ public:
     std::vector<const ITypeDefinition*> TopLevelTypeDefinitions() const override;
     std::vector<const ITypeDefinition*> TypeDefinitions() const override;
 
+    // --- Resolve Module (MetadataModule.cs lines 305-368) ---
+    // The C# `public IModule ResolveModule(AssemblyReferenceHandle handle)` --
+    // the CACHED referenced-assembly resolution over a raw AssemblyRef token
+    // (`0x23......`): nil -> null; the Uncached option skips the cache (a
+    // fresh resolution per call, no range check -- the raw read throws); the
+    // cached arm range-checks (a row past the AssemblyRef table throws
+    // `Handle with invalid row number.`) and caches the resolved module
+    // per 1-based row (a null resolution is NOT cached -- the C#
+    // `LazyInit.GetOrSet` stores but the read side only short-circuits on a
+    // non-null slot, so a miss resolves again on every call).
+    const IModule* ResolveModule(std::uint32_t assemblyReferenceToken) const;
+    // The C# `public IModule ResolveModule(ModuleReferenceHandle handle)` --
+    // the by-name module scan over a raw ModuleRef token (`0x1A......`): the
+    // row's Name string (through the THROWING raw read -- a corrupt row
+    // propagates, the C# `GetString` BadImageFormatException arm), then the
+    // ORDINAL (case-sensitive) `mod.Name == name` scan over
+    // `Compilation.Modules`; nil -> null; a miss -> null (uncached).
+    const IModule* ResolveModuleReference(std::uint32_t moduleReferenceToken) const;
+    // The C# `public IModule GetDeclaringModule(TypeReferenceHandle handle)` --
+    // the resolution-scope walk over a raw TypeRef token (`0x01......`): a
+    // TypeRef-scoped row recurses into its scope's row; an AssemblyRef-scoped
+    // row routes `ResolveModule`; a ModuleRef-scoped row routes
+    // `ResolveModuleReference`; every other kind (Module/nil) returns `this`.
+    // Nil -> null; a row past the TypeRef table propagates the raw read's
+    // throw (the C# `Read out of bounds.` BadImageFormatException arm, mapped
+    // to the same-message `std::invalid_argument`); an invalid FILE degrades
+    // to null (the iteration-61 convention).
+    const IModule* GetDeclaringModule(std::uint32_t typeReferenceToken) const;
+
 private:
     // The C# `void HandleOutOfRange(EntityHandle handle)` -- throws the exact
     // message through the port's `std::out_of_range` (convention (e)).
     [[noreturn]] static void HandleOutOfRange();
+
+    // The C# `IType ResolveForwardedType(ExportedType forwarder)` (the private
+    // member, MetadataModule.cs lines 890-935): the forwarder's target module
+    // (the local `ResolveModule(ExportedType)` walk over the Implementation
+    // column), the forwarder's full name, then -- guarded by the BusyManager
+    // reentrance lock -- the target module's `GetTypeDefinition(FullTypeName)`
+    // nested walk; a null module, a busy lock, or a miss yields an
+    // `UnknownType`. The returned `ITypePtr` OWNS a fresh `UnknownType` or
+    // aliases the target module's cache-owned definition (the no-op-deleter
+    // aliasing convention).
+    ITypePtr ResolveForwardedType(std::uint32_t exportedTypeToken) const;
+    // The C# local `IModule ResolveModule(ExportedType type)` inside
+    // `ResolveForwardedType`: the Implementation column dispatch -- a File
+    // row returns `this` (the C# TODO, the gold-pinned behavior), an
+    // ExportedType row recurses into the outer row, an AssemblyRef row scans
+    // `Compilation.Modules` by the SHORT assembly name (ordinal
+    // case-insensitive -- NOTE: a DIFFERENT scan than `FindModuleByReference`'s
+    // FullName-first two-pass), and anything else throws the default-arm
+    // `BadImageFormatException` (unreachable in the C# through any real or
+    // crafted input: a nil column decodes as a nil FILE handle -- the
+    // AssemblyFile arm -- and the invalid tag 3 throws at the SRM ctor-time
+    // namespace read BEFORE this member runs; the port carries the faithful
+    // dead arm).
+    const IModule* ResolveForwarderModule(std::uint32_t exportedTypeToken) const;
 
     const ICompilation& compilation_;
     const Metadata::MetadataFile* metadataFile_;
@@ -233,6 +288,14 @@ private:
     // SyntheticWpfModule mutable-registry precedent).
     mutable std::vector<std::unique_ptr<Implementation::MetadataTypeDefinition>>
         uncachedDefs_;
+
+    // The C# `readonly IModule[] referencedAssemblies` (allocated in the ctor
+    // unless the Uncached option is set; index = the 1-based AssemblyRef row
+    // number, slot 0 unused): the resolved modules are owned by the
+    // COMPILATION (non-owning pointers); nullptr until lazily filled, and a
+    // resolved-NULL slot is never cached (the read side only short-circuits
+    // on non-null). An EMPTY vector is the C# null array -- the Uncached arm.
+    mutable std::vector<const IModule*> referencedAssemblies_;
 };
 
 } // namespace ILSpy::Decompiler::TypeSystem

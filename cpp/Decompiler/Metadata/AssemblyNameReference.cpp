@@ -34,9 +34,15 @@
 //     parsed version carries fewer than four components.
 
 #include "Decompiler/Metadata/AssemblyNameReference.hpp"
+#include "Decompiler/Disassembler/ReflectionAttributes.hpp"
+#include "Decompiler/Metadata/MetadataExtensions.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Util/Char.hpp"
+#include "Decompiler/Util/Sha1ForNonSecretPurposes.hpp"
 #include "Decompiler/Util/Utf.hpp"
+#include "Decompiler/TypeSystem/Version.hpp"
 
+#include <array>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -219,6 +225,165 @@ std::string AssemblyNameReference::FullName() const
 std::string AssemblyNameReference::ToString() const
 {
     return FullName();
+}
+
+// --- AssemblyReference (the metadata-backed row wrapper) ---
+
+namespace {
+
+// The AssemblyRef table's column indexes in winmd's merged-version layout
+// (the same layout the iteration-63 GetFullAssemblyName reads): the merged
+// 8-byte version column, Flags, PublicKeyOrToken, Name, Culture.
+constexpr std::uint32_t kAssemblyRefFlagsColumn = 1;
+constexpr std::uint32_t kAssemblyRefPublicKeyOrTokenColumn = 2;
+constexpr std::uint32_t kAssemblyRefNameColumn = 3;
+constexpr std::uint32_t kAssemblyRefCultureColumn = 4;
+
+// The C# `$"AR:{Handle}"` fallback (convention (b)): the SRM handle struct's
+// ToString is its TYPE NAME (no override), so the interpolation renders the
+// fully-qualified handle type.
+constexpr const char* kHandleToString =
+    "System.Reflection.Metadata.AssemblyReferenceHandle";
+
+} // namespace
+
+AssemblyReference::AssemblyReference(const MetadataFile& file,
+                                     std::uint32_t token)
+    : file_(&file), token_(token)
+{
+}
+
+std::string AssemblyReference::Name() const
+{
+    // The C# LazyInit.VolatileRead + the raw read + the catch fallback.
+    if (name_.has_value())
+        return *name_;
+    try
+    {
+        std::uint32_t row = (token_ & 0x00FFFFFFu) - 1;
+        name_ = file_->CorString(file_->CorTableColumnValue(
+            CorTableIndex::AssemblyRef, row,
+            kAssemblyRefNameColumn));
+    }
+    catch (const std::invalid_argument&)
+    {
+        // The C# `catch (BadImageFormatException) { name = $"AR:{Handle}"; }`
+        // -- the raw-surface exception family is the C# analog (the
+        // iteration-63 convention).
+        name_ = std::string("AR:") + kHandleToString;
+    }
+    catch (const std::out_of_range&)
+    {
+        name_ = std::string("AR:") + kHandleToString;
+    }
+    return *name_;
+}
+
+std::string AssemblyReference::FullName() const
+{
+    if (fullName_.has_value())
+        return *fullName_;
+    try
+    {
+        // The C# `entry.GetFullAssemblyName(Metadata)` -- the AssemblyRef-row
+        // extension (the iteration-63 port).
+        fullName_ = GetFullAssemblyName(*file_, token_);
+    }
+    catch (const std::invalid_argument&)
+    {
+        // The C# `catch (BadImageFormatException) { fullName =
+        // $"fullname(AR:{Handle})"; }`.
+        fullName_ = std::string("fullname(AR:") + kHandleToString + ")";
+    }
+    catch (const std::out_of_range&)
+    {
+        fullName_ = std::string("fullname(AR:") + kHandleToString + ")";
+    }
+    return *fullName_;
+}
+
+std::optional<TypeSystem::Version> AssemblyReference::Version() const
+{
+    // The C# `Version? Version => entry.Version` -- the merged 8-byte
+    // version column as the four components (convention (d); the raw
+    // fixed-width read has no corrupt-heap arm). A nil row takes the same
+    // underflow path as Name (the raw bounds throw), so the always-engaged
+    // optional only surfaces for a real row.
+    std::uint32_t row = (token_ & 0x00FFFFFFu) - 1;
+    MetadataFile::CorTableVersion version = file_->CorTableVersionValue(
+        CorTableIndex::AssemblyRef, row);
+    return TypeSystem::Version(version.MajorVersion, version.MinorVersion,
+                               version.BuildNumber, version.RevisionNumber);
+}
+
+std::optional<std::string> AssemblyReference::Culture() const
+{
+    // The C# `string Culture => Metadata.GetString(entry.Culture)` -- the raw
+    // column string; the nil offset 0 reads as "" (convention (d)), never
+    // null.
+    std::uint32_t row = (token_ & 0x00FFFFFFu) - 1;
+    return file_->CorString(file_->CorTableColumnValue(
+        CorTableIndex::AssemblyRef, row,
+        kAssemblyRefCultureColumn));
+}
+
+bool AssemblyReference::IsWindowsRuntime() const
+{
+    std::uint32_t row = (token_ & 0x00FFFFFFu) - 1;
+    std::uint32_t flags = file_->CorTableColumnValue(
+        CorTableIndex::AssemblyRef, row,
+        kAssemblyRefFlagsColumn);
+    return (flags & static_cast<std::uint32_t>(
+                        Disassembler::AssemblyAttributes::WindowsRuntime)) != 0;
+}
+
+bool AssemblyReference::IsRetargetable() const
+{
+    std::uint32_t row = (token_ & 0x00FFFFFFu) - 1;
+    std::uint32_t flags = file_->CorTableColumnValue(
+        CorTableIndex::AssemblyRef, row,
+        kAssemblyRefFlagsColumn);
+    return (flags & static_cast<std::uint32_t>(
+                        Disassembler::AssemblyAttributes::Retargetable)) != 0;
+}
+
+std::optional<std::vector<std::uint8_t>>
+AssemblyReference::GetPublicKeyToken() const
+{
+    // The C# nil check comes FIRST (before the cache check): a nil column
+    // returns null WITHOUT caching, re-reading the column on every call
+    // (convention (c): no throw, no cache).
+    std::uint32_t row = (token_ & 0x00FFFFFFu) - 1;
+    std::uint32_t keyOffset = file_->CorTableColumnValue(
+        CorTableIndex::AssemblyRef, row,
+        kAssemblyRefPublicKeyOrTokenColumn);
+    if (keyOffset == 0)
+    {
+        // The C# `if (entry.PublicKeyOrToken.IsNil) return null;`.
+        return std::nullopt;
+    }
+    // The C# lazy cache: `if (publicKeyToken == null) { ... }` -- the FIELD
+    // null-ness, not the value (the port's optional engaged state).
+    if (publicKeyToken_.has_value())
+        return *publicKeyToken_;
+    std::vector<std::uint8_t> bytes = file_->CorBlob(keyOffset);
+    std::uint32_t flags = file_->CorTableColumnValue(
+        CorTableIndex::AssemblyRef, row,
+        kAssemblyRefFlagsColumn);
+    if ((flags & static_cast<std::uint32_t>(
+                    Disassembler::AssemblyAttributes::PublicKey)) != 0)
+    {
+        // The C# PublicKey-flag arm: `Sha1ForNonSecretPurposes.HashData(bytes,
+        // hash)` over the 20-byte digest, then `hash.Skip(12).ToArray()` --
+        // the digest's LAST 8 bytes.
+        std::array<std::uint8_t, 20> digest{};
+        Util::Sha1ForNonSecretPurposes::HashData(
+            Util::Span<const std::uint8_t>(bytes.data(), bytes.size()),
+            Util::Span<std::uint8_t>(digest.data(), digest.size()));
+        bytes.assign(digest.begin() + 12, digest.end());
+    }
+    publicKeyToken_ = std::move(bytes);
+    return publicKeyToken_;
 }
 
 } // namespace ILSpy::Decompiler::Metadata

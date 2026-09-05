@@ -19,14 +19,22 @@
 
 #include "Decompiler/TypeSystem/MetadataModule.hpp"
 
+#include "Decompiler/Metadata/AssemblyNameReference.hpp"
 #include "Decompiler/Metadata/MetadataExtensions.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/Metadata/SRMExtensions.hpp"
 #include "Decompiler/TypeSystem/FullTypeName.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
+#include "Decompiler/TypeSystem/IModule.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataTypeDefinition.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataNamespace.hpp"
+#include "Decompiler/TypeSystem/StringComparer.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
+#include "Decompiler/Util/BusyManager.hpp"
 
+#include <memory>
 #include <stdexcept>
 #include <utility>
 
@@ -140,14 +148,16 @@ MetadataModule::MetadataModule(const ICompilation& compilation,
     // The C# `if (!options.HasFlag(TypeSystemOptions.Uncached)) { this.typeDefs
     // = new MetadataTypeDefinition[metadata.TypeDefinitions.Count + 1]; ... }` --
     // the type-definition entity cache (index = the 1-based TypeDef row
-    // number, slot 0 unused). The sibling entity arrays (`fieldDefs` /
-    // `methodDefs` / `propertyDefs` / `eventDefs` / `referencedAssemblies`)
-    // defer with their entity classes (the MetadataField/... family).
+    // number, slot 0 unused). The sibling entity arrays defer with their
+    // entity classes (the MetadataField/... family); `referencedAssemblies`
+    // (the ResolveModule cache, this slice) allocates here too.
     if ((options_
          & ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::Uncached)
         == ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::None)
     {
         typeDefs_.resize(metadataFile_->TypeDefCount() + 1);
+        referencedAssemblies_.resize(metadataFile_->CorTableRowCount(
+            Metadata::CorTableIndex::AssemblyRef) + 1);
     }
 }
 
@@ -202,6 +212,243 @@ const ITypeDefinition* MetadataModule::GetDefinition(
         slot = std::make_unique<Implementation::MetadataTypeDefinition>(
             *this, typeDefinitionToken);
     return slot.get();
+}
+
+// --- Resolve Module (MetadataModule.cs lines 305-368) ---
+
+namespace {
+
+// The C# `IModule ResolveModuleUncached(AssemblyReferenceHandle handle)`:
+// `var asmRef = new Metadata.AssemblyReference(metadata, handle); return
+// Compilation.FindModuleByReference(asmRef);` -- the metadata-backed row
+// wrapper (the iteration-36 interface's third implementation, this slice)
+// feeding the two-pass module lookup (the TypeSystemExtensions port).
+const IModule* ResolveModuleUncached(const ICompilation& compilation,
+                                     const Metadata::MetadataFile& file,
+                                     std::uint32_t assemblyReferenceToken)
+{
+    Metadata::AssemblyReference asmRef(file, assemblyReferenceToken);
+    return FindModuleByReference(compilation, asmRef);
+}
+
+// The AssemblyRef table's Name column (the same merged-version layout the
+// AssemblyReference class and the iteration-63 GetFullAssemblyName read).
+constexpr std::uint32_t kAssemblyRefNameColumn = 3;
+
+} // namespace
+
+// The C# `public IModule ResolveModule(AssemblyReferenceHandle handle)`.
+const IModule* MetadataModule::ResolveModule(
+    std::uint32_t assemblyReferenceToken) const
+{
+    std::uint32_t row = assemblyReferenceToken & 0x00FFFFFFu;
+    // The C# `if (handle.IsNil) return null;`.
+    if (row == 0)
+        return nullptr;
+    // The C# `if (referencedAssemblies == null) return
+    // ResolveModuleUncached(handle);` -- the UNCACHED arm: no range check
+    // (the row read inside the uncached resolution throws instead; an
+    // out-of-range row reaches the AssemblyReference catch fallbacks and
+    // resolves to NULL through the name-scan miss).
+    if (referencedAssemblies_.empty())
+        return ResolveModuleUncached(Compilation(), *metadataFile_,
+                                     assemblyReferenceToken);
+    // The C# `if (row >= referencedAssemblies.Length)
+    // HandleOutOfRange(handle);` -- the 1-based row against the count+1-sized
+    // array.
+    if (row >= referencedAssemblies_.size())
+        HandleOutOfRange();
+    // The C# `LazyInit.VolatileRead` + `GetOrSet`: the non-null slot returns,
+    // the null slot resolves again (the null resolution is re-resolved on
+    // every call -- storing it is a no-op on the nullptr slot).
+    const IModule*& slot = referencedAssemblies_[row];
+    if (slot != nullptr)
+        return slot;
+    slot = ResolveModuleUncached(Compilation(), *metadataFile_,
+                                 assemblyReferenceToken);
+    return slot;
+}
+
+// The C# `public IModule ResolveModule(ModuleReferenceHandle handle)`.
+const IModule* MetadataModule::ResolveModuleReference(
+    std::uint32_t moduleReferenceToken) const
+{
+    std::uint32_t row = moduleReferenceToken & 0x00FFFFFFu;
+    // The C# `if (handle.IsNil) return null;`.
+    if (row == 0)
+        return nullptr;
+    // The C# cannot construct a module over an invalid file (the MetadataFile
+    // ctor throws); the port's degrading reader maps the state to the null
+    // miss (the iteration-61 invalid-file convention).
+    if (!metadataFile_->IsValid())
+        return nullptr;
+    // The C# `metadata.GetModuleReference(handle)` + `GetString(modRef.Name)`
+    // -- the THROWING raw reads (the corrupt-row BadImageFormatException
+    // propagates out of the member; the port's raw-surface exception family
+    // is the analog). The ModuleRef row's Name is column 0 (II.22.31).
+    std::uint32_t nameOffset = metadataFile_->CorTableColumnValue(
+        Metadata::CorTableIndex::ModuleRef, row - 1, 0);
+    std::string name = metadataFile_->CorString(nameOffset);
+    // The C# ordinal `==` scan over `Compilation.Modules` (case-SENSITIVE,
+    // unlike the FindModuleByReference scans).
+    for (const IModule* module : Compilation().Modules())
+    {
+        if (module->Name() == name)
+            return module;
+    }
+    return nullptr;
+}
+
+// The C# `public IModule GetDeclaringModule(TypeReferenceHandle handle)` --
+// the resolution-scope walk.
+const IModule* MetadataModule::GetDeclaringModule(
+    std::uint32_t typeReferenceToken) const
+{
+    std::uint32_t row = typeReferenceToken & 0x00FFFFFFu;
+    // The C# `if (handle.IsNil) return null;`.
+    if (row == 0)
+        return nullptr;
+    // The invalid-file degrade (see ResolveModuleReference).
+    if (!metadataFile_->IsValid())
+        return nullptr;
+    // The C# `metadata.GetTypeReference(handle)` -- the THROWING row read (an
+    // out-of-range row surfaces the SRM `Read out of bounds.` message; the
+    // port reproduces the exact message through std::invalid_argument, the
+    // raw-surface family mapped).
+    std::optional<Metadata::TypeRefScopeInfo> scope =
+        metadataFile_->GetTypeRefScopeInfo(typeReferenceToken);
+    if (!scope)
+        throw std::invalid_argument("Read out of bounds.");
+    switch (scope->Scope)
+    {
+        case Metadata::TypeRefScopeInfo::Kind::TypeRef:
+            // The C# `case HandleKind.TypeReference: return
+            // GetDeclaringModule((TypeReferenceHandle)tr.ResolutionScope);`.
+            return GetDeclaringModule(scope->ScopeToken);
+        case Metadata::TypeRefScopeInfo::Kind::AssemblyRef:
+            // The C# `case HandleKind.AssemblyReference: return
+            // ResolveModule((AssemblyReferenceHandle)tr.ResolutionScope);`.
+            return ResolveModule(scope->ScopeToken);
+        case Metadata::TypeRefScopeInfo::Kind::ModuleRef:
+            // The C# `case HandleKind.ModuleReference: return
+            // ResolveModule((ModuleReferenceHandle)tr.ResolutionScope);`.
+            return ResolveModuleReference(scope->ScopeToken);
+        default:
+            // The C# `default: return this;` -- the Module kind and the nil
+            // scope (a nil scope decodes as HandleKind.ModuleDefinition).
+            return this;
+    }
+}
+
+// The C# private `IType ResolveForwardedType(ExportedType forwarder)`.
+ITypePtr MetadataModule::ResolveForwardedType(
+    std::uint32_t exportedTypeToken) const
+{
+    const IModule* module = ResolveForwarderModule(exportedTypeToken);
+    // The C# `var typeName = forwarder.GetFullTypeName(metadata);` -- the
+    // iteration-61 reader (the nested-forwarder declaring-chain walk included).
+    FullTypeName typeName =
+        Metadata::GetFullTypeNameFromExportedType(*metadataFile_,
+                                                   exportedTypeToken);
+    if (module == nullptr)
+    {
+        // The C# `if (module == null) return new UnknownType(typeName);`.
+        return std::shared_ptr<IType>(
+            new class ::ILSpy::Decompiler::TypeSystem::UnknownType(
+                std::move(typeName)));
+    }
+    {
+        // The C# `using (var busyLock = BusyManager.Enter(this))` -- the
+        // reentrance guard: a forwarder chain that resolves back into THIS
+        // module (a cyclic pair, or the File-implementation TODO resolving
+        // within `this`) terminates in the UnknownType below instead of
+        // recursing forever.
+        Util::BusyLock busyLock = Util::BusyManager::Enter(this);
+        if (busyLock.Success())
+        {
+            // The C# `var td = module.GetTypeDefinition(typeName);` -- the
+            // IModule GetTypeDefinition(FullTypeName) extension (the nested-name
+            // walk). The call is GLOBALLY QUALIFIED: the member
+            // `GetTypeDefinition(TopLevelTypeName)` hides the namespace-scope
+            // overload inside the class scope (the self-named-member trap).
+            const ITypeDefinition* td =
+                ::ILSpy::Decompiler::TypeSystem::GetTypeDefinition(
+                    *module, typeName);
+            if (td != nullptr)
+            {
+                // The non-owning alias over the target module's cache-owned
+                // definition (the no-op-deleter convention; the module owns
+                // the definition for the compilation's lifetime).
+                return std::shared_ptr<IType>(
+                    const_cast<IType*>(static_cast<const IType*>(td)),
+                    [](IType*) { /* no-op: the module owns the definition */ });
+            }
+        }
+    }
+    return std::shared_ptr<IType>(
+        new class ::ILSpy::Decompiler::TypeSystem::UnknownType(
+            std::move(typeName)));
+}
+
+// The C# local `IModule ResolveModule(ExportedType type)` inside
+// ResolveForwardedType (the Implementation-column dispatch).
+const IModule* MetadataModule::ResolveForwarderModule(
+    std::uint32_t exportedTypeToken) const
+{
+    // The C# `metadata.GetExportedType(...)` row read -- the token comes from
+    // the GetTypeForwarder reverse lookup (an existing row), so the
+    // out-of-range arm is unreachable through the public surface; the port
+    // maps it to the same `Read out of bounds.` family.
+    std::optional<Metadata::MetadataFile::ExportedTypeInfo> row =
+        metadataFile_->GetExportedType(exportedTypeToken);
+    if (!row)
+        throw std::invalid_argument("Read out of bounds.");
+    std::uint32_t implementation = row->ImplementationToken;
+    std::uint32_t kind = implementation >> 24;
+    if (kind == 0x26u)
+    {
+        // The C# `case HandleKind.AssemblyFile: // TODO : Resolve assembly
+        // file (module)... return this;` -- the unresolved TODO: the gold
+        // pins the observable behavior (resolving within `this` reaches the
+        // busy-lock fallback unless the type is local).
+        return this;
+    }
+    if (kind == 0x27u)
+    {
+        // The C# `case HandleKind.ExportedType: var outerType =
+        // metadata.GetExportedType(...); return ResolveModule(outerType);` --
+        // the declaring-row recursion (the nested-forwarder chain walks up
+        // to the row whose implementation names the assembly).
+        return ResolveForwarderModule(implementation);
+    }
+    if (kind == 0x23u)
+    {
+        // The C# `case HandleKind.AssemblyReference:` -- the SHORT-NAME scan
+        // (ordinal-ignore-case on `AssemblyName`, NOT the FindModuleByReference
+        // FullName-first two-pass). The name read goes through the THROWING
+        // raw reads (the corrupt-row arm propagates).
+        std::uint32_t refRow = (implementation & 0x00FFFFFFu) - 1;
+        std::string shortName = metadataFile_->CorString(
+            metadataFile_->CorTableColumnValue(
+                Metadata::CorTableIndex::AssemblyRef, refRow,
+                kAssemblyRefNameColumn));
+        const StringComparer& ignoreCase = StringComparer::OrdinalIgnoreCase();
+        for (const IModule* candidate : Compilation().Modules())
+        {
+            if (ignoreCase.Equals(candidate->AssemblyName(), shortName))
+                return candidate;
+        }
+        return nullptr;
+    }
+    // The C# `default: throw new BadImageFormatException("Expected
+    // implementation to be either an AssemblyFile, ExportedType or
+    // AssemblyReference.");` -- UNREACHABLE in the C# (a nil column decodes as
+    // a nil FILE handle, and the invalid tag throws at the SRM ctor-time
+    // namespace read before this member runs); the port carries the faithful
+    // dead arm through its tag-3-to-nil decode.
+    throw std::out_of_range(
+        "Expected implementation to be either an AssemblyFile, ExportedType "
+        "or AssemblyReference.");
 }
 
 // --- ISymbol ---
@@ -302,12 +549,11 @@ const ITypeDefinition* MetadataModule::GetTypeDefinition(
             metadataFile_->GetTypeForwarder(FullTypeName(topLevelTypeName));
         if (forwarderToken != 0)
         {
-            // The C# `ResolveForwardedType(forwarder).GetDefinition()` -- the
-            // forwarder resolution through the referenced module
-            // (`ResolveModule` / `Compilation.FindModuleByReference`) is deferred.
-            throw std::logic_error(
-                "MetadataModule::GetTypeDefinition: ResolveForwardedType is not "
-                "yet ported (gated on ResolveModule / FindModuleByReference)");
+            // The C# `return ResolveForwardedType(forwarder).GetDefinition()` --
+            // the forwarder resolution (the target module's nested-name walk,
+            // an UnknownType for a null module / a busy lock / a miss, whose
+            // GetDefinition() is null).
+            return ResolveForwardedType(forwarderToken)->GetDefinition();
         }
     }
     return GetDefinition(typeDefinitionToken);
