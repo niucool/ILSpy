@@ -88,6 +88,12 @@ public:
           rootNamespace_(compilation) {}
 
     void AddFriendAssembly(std::string name) { friendAssemblies_.push_back(std::move(name)); }
+    // Configurable assembly name (the BamlContext main-module-match fixture
+    // renames a module to "mscorlib": the C# ResolveAssembly arm compares the
+    // parsed reference Name against `MainModule.AssemblyName`). The default
+    // ctor name is unchanged for every existing test (the additive-setter
+    // convention).
+    void SetAssemblyName(std::string name) { assemblyName_ = std::move(name); }
     // Configurable `MetadataFile` for the ILAmbience `ConvertSymbol` tests (the
     // metadata-driven flag prefixes read `entity.ParentModule.MetadataFile`'s
     // per-row attribute flags; a real mscorlib `MetadataFile` supplies the rows).
@@ -197,6 +203,20 @@ public:
     // the module alive (the type system owns the entities -- the compilation stores
     // non-owning pointers).
     void AddModule(const IModule* module) { extraModules_.push_back(module); }
+    // Renames the MAIN module (the BamlContext main-module-match fixture:
+    // a main module named "mscorlib" standing in for the probe's real
+    // mscorlib PEFile main module). Existing tests keep the ctor default
+    // (the additive-setter convention).
+    void SetMainModuleAssemblyName(std::string name)
+    {
+        mainModule_.SetAssemblyName(std::move(name));
+    }
+    // A module appended to `ReferencedModules` (the BamlContext
+    // FindMatchingReference fixture: the WindowsBase version trio picking
+    // the highest-version / last-of-equal reference). Defaults preserve the
+    // original behavior (an empty list) so existing tests are unaffected;
+    // the caller keeps the module alive.
+    void AddReferencedModule(const IModule* module) { referencedModules_.push_back(module); }
 
     // --- ICompilation ---
     const IModule& MainModule() const override { return mainModule_; }
@@ -206,7 +226,10 @@ public:
         modules.insert(modules.end(), extraModules_.begin(), extraModules_.end());
         return modules;
     }
-    std::vector<const IModule*> ReferencedModules() const override { return {}; }
+    std::vector<const IModule*> ReferencedModules() const override
+    {
+        return referencedModules_;
+    }
     const INamespace& RootNamespace() const override { return mainModule_.RootNamespace(); }
     const INamespace* GetNamespaceForExternAlias(const std::string&) const override
     {
@@ -229,6 +252,9 @@ public:
 private:
     LookupModule mainModule_;
     std::vector<const IModule*> extraModules_;
+    // The configurable `ReferencedModules` list (AddReferencedModule;
+    // empty by default -- the original behavior).
+    std::vector<const IModule*> referencedModules_;
     SpecialType unknownType_{ TypeKind::Unknown };
     ILSpy::Decompiler::Util::CacheManager cacheManager_;
     std::map<KnownTypeCode, const IType*> knownTypes_;

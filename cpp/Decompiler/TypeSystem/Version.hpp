@@ -74,6 +74,22 @@ struct Version {
     }
     bool operator!=(const Version& o) const noexcept { return !(*this == o); }
 
+    // The `System.Version.CompareTo(Version)` ordering (decompiled from the
+    // .NET 10 runtime): Major, Minor, Build, Revision in declaration order,
+    // an unspecified component (-1) sorting BELOW a specified one -- so
+    // `Version(4, 0) < Version(4, 0, 0)`. The BamlContext
+    // FindMatchingReference version criterion consumes `<=` over exactly
+    // this ordering.
+    int CompareTo(const Version& o) const noexcept {
+        if (Major != o.Major) return Major < o.Major ? -1 : 1;
+        if (Minor != o.Minor) return Minor < o.Minor ? -1 : 1;
+        if (Build != o.Build) return Build < o.Build ? -1 : 1;
+        if (Revision != o.Revision) return Revision < o.Revision ? -1 : 1;
+        return 0;
+    }
+    bool operator<(const Version& o) const noexcept { return CompareTo(o) < 0; }
+    bool operator<=(const Version& o) const noexcept { return CompareTo(o) <= 0; }
+
     // Mirrors `System.Version.ToString`: "Major.Minor" when `Build` is
     // unspecified (-1), "Major.Minor.Build" when `Revision` is unspecified,
     // "Major.Minor.Build.Revision" otherwise.

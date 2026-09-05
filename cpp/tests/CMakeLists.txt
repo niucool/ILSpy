@@ -48,6 +48,7 @@ add_executable(ilspy_tests
     ILSpyCmd/DumpPackage_Test.cpp
     Decompiler/SingleFileBundle_Test.cpp
     BamlDecompiler/BamlReader_Test.cpp
+    BamlDecompiler/BamlContext_Test.cpp
     BamlDecompiler/BamlNode_Test.cpp
     BamlDecompiler/XmlnsDictionary_Test.cpp
     BamlDecompiler/XamlPathDeserializer_Test.cpp

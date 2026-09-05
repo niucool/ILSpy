@@ -20,13 +20,19 @@
 # plus the KnownThings class itself (KnownThings: the ctor resolving the table
 # rows through the compilation's modules -- the SyntheticWpfModule seeding arm
 # and the GetTypeDefinition arm -- with the KnownMember row class and the
-# Func-shaped accessors).
+# Func-shaped accessors), plus the BAML-side resolution context (BamlContext:
+# the four info-record id maps ConstructContext builds from the flat
+# document, the KnownThings instance the ctor resolves, and the
+# ResolveAssembly assembly resolution -- the main-module match arm,
+# FindMatchingReference's highest-version pick over ReferencedModules, and
+# the 0xfff id mask).
 # The IDecompilerTypeSystem interface (the MetadataModule MainModule narrowing)
 # and the Handlers/Rewrite/Xaml layers follow in later slices.
 
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlBinaryReader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlBinaryWriter.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlContext.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlNode.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlRecords.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlReader.cpp
