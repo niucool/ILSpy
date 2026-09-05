@@ -22,22 +22,29 @@
 // The header carries the porting decisions; this file is the translations.
 
 #include "BamlDecompiler/BamlConnectionId.hpp"
+#include "BamlDecompiler/Baml/BamlBinaryReader.hpp"
 #include "BamlDecompiler/Baml/BamlNode.hpp"
+#include "BamlDecompiler/Baml/KnownTypes.hpp"
 #include "BamlDecompiler/BamlElement.hpp"
 #include "BamlDecompiler/Handlers/Records.hpp"
 #include "BamlDecompiler/Xaml/XamlExtension.hpp"
+#include "BamlDecompiler/Xaml/XamlPathDeserializer.hpp"
 #include "BamlDecompiler/Xaml/XamlProperty.hpp"
 #include "BamlDecompiler/Xaml/XamlResourceKey.hpp"
 #include "BamlDecompiler/Xaml/XamlType.hpp"
 #include "BamlDecompiler/Xaml/XamlUtils.hpp"
 #include "BamlDecompiler/XamlContext.hpp"
+#include "Decompiler/Disassembler/DisassemblerHelpers.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/IModule.hpp"
+#include "Decompiler/Util/Char.hpp"
+#include "Decompiler/Util/Utf.hpp"
 #include "Decompiler/Xml/XmlConvert.hpp"
 #include "Decompiler/Xml/XAttribute.hpp"
 
 #include <any>
+#include <cstdio>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -201,6 +208,45 @@ std::vector<std::optional<std::string>> ResolveCLRNamespaces(
             : std::nullopt);
     }
     return result;
+}
+
+// The C# `sb.ToString().Trim()` of PropertyCustomHandler's collection
+// arms: the char.IsWhiteSpace units removed from both ends (the
+// XamlPathDeserializer.cpp twin, copied next to this consumer).
+std::string TrimWhitespace(const std::string& text)
+{
+    const std::u16string units = ILSpy::Decompiler::Util::Utf8ToUtf16(text);
+    std::size_t start = 0;
+    std::size_t end = units.size();
+    while (start < end && ILSpy::Decompiler::Util::IsWhiteSpace(units[start]))
+        start++;
+    while (end > start && ILSpy::Decompiler::Util::IsWhiteSpace(units[end - 1]))
+        end--;
+    if (start == 0 && end == units.size())
+        return text;
+    return ILSpy::Decompiler::Util::Utf16ToUtf8(units.substr(start, end - start));
+}
+
+// The C# `IntegerCollectionType.ToString()` (the private nested enum of
+// PropertyCustomHandler): the member name, or the decimal of the byte for
+// a value with no member -- the NotSupportedException message of the
+// unknown-collection-type arm.
+std::string IntegerCollectionTypeName(std::uint8_t value)
+{
+    switch (value) {
+    case 0:
+        return "Unknown";
+    case 1:
+        return "Consecutive";
+    case 2:
+        return "U1";
+    case 3:
+        return "U2";
+    case 4:
+        return "I4";
+    default:
+        return std::to_string(value);
+    }
 }
 
 } // namespace
@@ -1184,6 +1230,232 @@ std::unique_ptr<BamlElement> PropertyWithExtensionHandler::Translate(
         xamlProp->ToXName(ctx, &parentElement, xamlProp->IsAttachedTo(elemType)),
         std::move(extValue));
     parentElement.Add(std::move(attribute));
+    return nullptr;
+}
+
+// ===== PropertyCustomHandler ==============================================
+
+Baml::BamlRecordType PropertyCustomHandler::Type() const
+{
+    return Baml::BamlRecordType::PropertyCustom;
+}
+
+bool PropertyCustomHandler::NeedsFullName(const Xaml::XamlProperty& property,
+    XamlContext& ctx, Xml::XElement& elem)
+{
+    // The C# `XElement p = elem.Parent;` -- the walk starts one level above
+    // the element carrying the attribute.
+    Xml::XElement* p = elem.Parent();
+    while (p != nullptr) {
+        // The C# `p.Annotation<XamlType>()?.ResolvedType.FullName !=
+        // "System.Windows.Style"`: a null annotation keeps the walk going
+        // (the whole chain reads null), while a null ResolvedType is the
+        // ?. chain's NRE (the null-conditional only guards the annotation).
+        Xaml::XamlType* annotation = nullptr;
+        if (auto* ann = p->Annotation<std::shared_ptr<Xaml::XamlType>>())
+            annotation = ann->get();
+        if (annotation == nullptr) {
+            p = p->Parent();
+            continue;
+        }
+        if (annotation->ResolvedType == nullptr)
+            throw std::runtime_error(kNullReferenceMessage);
+        if (FullNameOf(*annotation->ResolvedType) != "System.Windows.Style") {
+            p = p->Parent();
+            continue;
+        }
+        // The nearest Style-annotated ancestor: the walk stops here.
+        break;
+    }
+    // The C# `var type = p?.Annotation<TargetTypeAnnotation>()?.Type;`.
+    Xaml::XamlType* type = nullptr;
+    if (p != nullptr) {
+        if (auto* ann = p->Annotation<std::shared_ptr<TargetTypeAnnotation>>())
+            type = (*ann)->Type.get();
+    }
+    if (type == nullptr)
+        return true;
+    return property.IsAttachedTo(type);
+}
+
+std::string PropertyCustomHandler::Deserialize(XamlContext& ctx,
+    Xml::XElement& elem, Baml::KnownTypes ser,
+    const std::vector<std::uint8_t>& value)
+{
+    // The C# `new BinaryReader(new MemoryStream(value))`: the reads start
+    // at the payload's first byte and never rewind (the using block only
+    // disposes).
+    Baml::BamlBinaryReader reader(value.data(), value.size());
+    switch (ser) {
+    case Baml::KnownTypes::DependencyPropertyConverter:
+        if (value.size() == 2) {
+            // The short form: the 2-byte property id; the value renders
+            // through ctx.ToString over the name form NeedsFullName picks.
+            // The C# evaluates the call's arguments left-to-right (the read,
+            // then NeedsFullName inside the ToXName argument); MSVC may
+            // evaluate right-to-left, so NeedsFullName lands in a named
+            // local before the render (the iteration-35 trap -- the walk
+            // and the render are both pure reads, but the sequencing keeps
+            // the C# evaluation order explicit).
+            std::shared_ptr<Xaml::XamlProperty> property =
+                ctx.ResolvePropertyOwning(reader.ReadUInt16());
+            const bool needsFullName = NeedsFullName(*property, ctx, elem);
+            return Xaml::ToString(ctx, elem,
+                property->ToXName(ctx, &elem, needsFullName));
+        }
+        {
+            // The long form: the 2-byte type id plus the 7-bit string name;
+            // ctx.ToString(elem, type) resolves the type's namespace
+            // against the element (the mutation) and the render is
+            // "TypeName.Name".
+            std::shared_ptr<Xaml::XamlType> type =
+                ctx.ResolveTypeOwning(reader.ReadUInt16());
+            std::string name = reader.ReadString();
+            std::string typeName = Xaml::ToString(ctx, elem, *type);
+            return typeName + "." + name;
+        }
+    case Baml::KnownTypes::EnumConverter:
+        // The C# `enumVal.ToString("D", CultureInfo.InvariantCulture)`: the
+        // raw uint32 in decimal (the TODO: Convert to enum names is
+        // faithful).
+        return std::to_string(reader.ReadUInt32());
+    case Baml::KnownTypes::BooleanConverter:
+        // The C# `(reader.ReadByte() == 1).ToString(...)`: True/False. The
+        // Debug.Assert(value.Length == 1) is compiled out of the release
+        // assembly -- a longer payload reads its first byte.
+        return reader.ReadByte() == 1 ? "True" : "False";
+    case Baml::KnownTypes::XamlBrushSerializer:
+        switch (reader.ReadByte()) {
+        case 1: {
+            // KnownSolidColor: the uint32 ARGB as "#RRGGBBAA" (the {0:X8}
+            // zero-padded uppercase hex).
+            char buffer[16];
+            std::snprintf(buffer, sizeof(buffer), "#%08X",
+                static_cast<unsigned>(reader.ReadUInt32()));
+            return buffer;
+        }
+        case 2:
+            // OtherColor: the embedded 7-bit string.
+            return reader.ReadString();
+        }
+        // The C# `break`: the byte matched neither color form -- the switch
+        // falls through to the outer NotSupportedException below.
+        break;
+    case Baml::KnownTypes::XamlPathDataSerializer:
+        return Xaml::XamlPathDeserializer::Deserialize(reader);
+    case Baml::KnownTypes::XamlPoint3DCollectionSerializer:
+    case Baml::KnownTypes::XamlVector3DCollectionSerializer: {
+        std::string result;
+        std::uint32_t count = reader.ReadUInt32();
+        for (std::uint32_t i = 0; i < count; i++) {
+            // The C# AppendFormat("{0:R},{1:R},{2:R} ") evaluates its three
+            // ReadXamlDouble calls left-to-right; MSVC may evaluate call
+            // arguments right-to-left, so each read lands in a named local
+            // before the render (the X/Y-swap trap).
+            const double x = Xaml::ReadXamlDouble(reader);
+            const double y = Xaml::ReadXamlDouble(reader);
+            const double z = Xaml::ReadXamlDouble(reader);
+            result += ILSpy::Decompiler::Disassembler::FormatRoundTrip(x);
+            result += ',';
+            result += ILSpy::Decompiler::Disassembler::FormatRoundTrip(y);
+            result += ',';
+            result += ILSpy::Decompiler::Disassembler::FormatRoundTrip(z);
+            result += ' ';
+        }
+        return TrimWhitespace(result);
+    }
+    case Baml::KnownTypes::XamlPointCollectionSerializer: {
+        std::string result;
+        std::uint32_t count = reader.ReadUInt32();
+        for (std::uint32_t i = 0; i < count; i++) {
+            const double x = Xaml::ReadXamlDouble(reader);
+            const double y = Xaml::ReadXamlDouble(reader);
+            result += ILSpy::Decompiler::Disassembler::FormatRoundTrip(x);
+            result += ',';
+            result += ILSpy::Decompiler::Disassembler::FormatRoundTrip(y);
+            result += ' ';
+        }
+        return TrimWhitespace(result);
+    }
+    case Baml::KnownTypes::XamlInt32CollectionSerializer: {
+        std::string result;
+        const IntegerCollectionType type =
+            static_cast<IntegerCollectionType>(reader.ReadByte());
+        const std::int32_t count = reader.ReadInt32();
+        switch (type) {
+        case IntegerCollectionType::Consecutive: {
+            // The C# reads the start BEFORE the loop: a negative count never
+            // iterates but the start is consumed.
+            const std::int32_t start = reader.ReadInt32();
+            for (std::int32_t i = 0; i < count; i++)
+                result += std::to_string(start + i);
+            break;
+        }
+        case IntegerCollectionType::U1:
+            for (std::int32_t i = 0; i < count; i++)
+                result += std::to_string(reader.ReadByte());
+            break;
+        case IntegerCollectionType::U2:
+            for (std::int32_t i = 0; i < count; i++)
+                result += std::to_string(reader.ReadUInt16());
+            break;
+        case IntegerCollectionType::I4:
+            for (std::int32_t i = 0; i < count; i++)
+                result += std::to_string(reader.ReadInt32());
+            break;
+        default:
+            // The C# `throw new NotSupportedException(type.ToString())`:
+            // the Unknown member and every byte beyond I4.
+            throw std::runtime_error(
+                IntegerCollectionTypeName(static_cast<std::uint8_t>(type)));
+        }
+        return TrimWhitespace(result);
+    }
+    }
+    // The C# `throw new NotSupportedException(ser.ToString())` -- every
+    // serializer id the matrix does not handle (and the XamlBrush arm whose
+    // color byte matched neither form).
+    throw std::runtime_error(Baml::KnownTypeName(ser));
+}
+
+std::unique_ptr<BamlElement> PropertyCustomHandler::Translate(
+    XamlContext& ctx, Baml::BamlNode& node, BamlElement* parent)
+{
+    Baml::PropertyCustomRecord& record =
+        CheckedRecord<Baml::PropertyCustomRecord>(node, "PropertyCustomRecord");
+    // The C# `((short)record.SerializerTypeId & 0xfff)`: the int promotion
+    // of the C# & operator carries the sign extension (0x8000 & 0xfff == 0
+    // == Unknown).
+    const int serTypeId =
+        static_cast<std::int16_t>(record.SerializerTypeId) & 0xfff;
+    // The C# `bool valueType = ...` -- computed and never read (the gold
+    // pins the 0x4000 flag bit has no observable effect); the port keeps
+    // the computation for the record-contract documentation.
+    const bool valueType =
+        (static_cast<std::int16_t>(record.SerializerTypeId) & 0x4000) == 0x4000;
+    (void)valueType;
+
+    // The C# `parent.Xaml.Element.Annotation<XamlType>()` -- the FIRST
+    // parent deref (the null-parent gold's NRE site).
+    Xml::XElement& parentElement = ParentElementOf(parent);
+    Xaml::XamlType* elemType = nullptr;
+    if (auto* annotation =
+            parentElement.Annotation<std::shared_ptr<Xaml::XamlType>>())
+        elemType = annotation->get();
+    std::shared_ptr<Xaml::XamlProperty> xamlProp =
+        ctx.ResolvePropertyOwning(record.AttributeId);
+
+    std::string value = Deserialize(ctx, parentElement,
+        static_cast<Baml::KnownTypes>(serTypeId), record.Data);
+    // The C# `new XAttribute(xamlProp.ToXName(ctx, parent.Xaml,
+    // xamlProp.IsAttachedTo(elemType)), value)` -- the same name-form
+    // selection as PropertyHandler's plain arm (the full form when the
+    // property is attached to the parent's type, the short form when it is
+    // an instance property there).
+    auto attr = std::make_shared<Xml::XAttribute>(
+        xamlProp->ToXName(ctx, &parentElement, xamlProp->IsAttachedTo(elemType)),
+        std::move(value));
+    parentElement.Add(std::move(attr));
     return nullptr;
 }
 

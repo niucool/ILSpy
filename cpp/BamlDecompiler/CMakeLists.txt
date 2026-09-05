@@ -56,14 +56,17 @@
 # the ancestors for the registered resource), the misc family
 # (XmlnsPropertyHandler's NamespaceMap adds and xmlns attribute,
 # PropertyTypeReferenceHandler's Style.TargetType annotation payload
-# TargetTypeAnnotation, and PropertyWithExtensionHandler's four initializer
-# arms), and the nine null-returning info/mapping/line handlers) and the
+# TargetTypeAnnotation, PropertyWithExtensionHandler's four initializer
+# arms, and PropertyCustomHandler's KnownTypes serializer matrix over the
+# record's binary payload with the NeedsFullName Style-ancestor walk),
+# and the nine null-returning info/mapping/line handlers) and the
 # Handlers/Blocks block handlers
 # (DocumentHandler, ElementHandler, the x:Key block KeyElementStartHandler,
-# the four property-element blocks, and ConstructorParametersStart) -- 35 of
+# the four property-element blocks, and ConstructorParametersStart) -- 36 of
 # the 37 gold-registry rows pinned in tests/BamlDecompiler/HandlerMap_Test.cpp,
-# the rest landing as their classes port), the lazy LookupHandler over it, the
-# duplicate-key InstallHandler, and the ProcessChildren walk with its
+# the rest (the XElement.Parse-gated LiteralContentHandler) landing as its
+# class ports), the lazy LookupHandler over it, the duplicate-key
+# InstallHandler, and the ProcessChildren walk with its
 # XmlnsScope push/pop + annotation pairing; BamlConnectionId carries the
 # connection-id annotation payload).
 # The IDecompilerTypeSystem interface (the MetadataModule MainModule narrowing)

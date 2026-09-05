@@ -56,6 +56,30 @@ TEST(KnownTypesEnumTest, UnknownIsZeroAndLastIs759)
     EXPECT_EQ(static_cast<std::int16_t>(Baml::KnownTypes::ZoomPercentageConverter), 759);
 }
 
+// The C# `KnownTypes.ToString()`: the member name, or the decimal for a
+// value with no member (the .NET enum ToString fallback) -- the spelling
+// PropertyCustomHandler's unhandled-serializer NotSupportedException
+// renders its message through (the serializer ids the 0xfff mask can
+// produce run 0..4095, so every value above 759 is the decimal arm).
+TEST(KnownTypesEnumTest, NameSpellingCoversTheTableAndTheDecimalFallback)
+{
+    EXPECT_EQ(Baml::KnownTypeName(Baml::KnownTypes::Unknown), "Unknown");
+    EXPECT_EQ(Baml::KnownTypeName(Baml::KnownTypes::AccessText), "AccessText");
+    EXPECT_EQ(Baml::KnownTypeName(Baml::KnownTypes::DependencyPropertyConverter),
+        "DependencyPropertyConverter");
+    EXPECT_EQ(Baml::KnownTypeName(Baml::KnownTypes::XamlBrushSerializer),
+        "XamlBrushSerializer");
+    EXPECT_EQ(Baml::KnownTypeName(Baml::KnownTypes::ZoomPercentageConverter),
+        "ZoomPercentageConverter");
+    // The decimal fallback for values with no member.
+    EXPECT_EQ(Baml::KnownTypeName(static_cast<Baml::KnownTypes>(760)), "760");
+    EXPECT_EQ(Baml::KnownTypeName(static_cast<Baml::KnownTypes>(800)), "800");
+    EXPECT_EQ(Baml::KnownTypeName(static_cast<Baml::KnownTypes>(4095)), "4095");
+    // The boundary is exact: 759 is the last member.
+    EXPECT_EQ(Baml::KnownTypeName(static_cast<Baml::KnownTypes>(759)),
+        "ZoomPercentageConverter");
+}
+
 TEST(KnownTypesEnumTest, AllMembersMatchGoldValues) // 760 members
 {
     EXPECT_EQ(static_cast<std::int16_t>(Baml::KnownTypes::Unknown), 0);

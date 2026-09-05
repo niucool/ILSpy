@@ -55,12 +55,19 @@
 //  * the misc family: XmlnsPropertyHandler (the xmlns declaration record --
 //    the NamespaceMap adds plus the xmlns attribute),
 //    PropertyTypeReferenceHandler with its TargetTypeAnnotation payload
-//    (the Style.TargetType property element), and
+//    (the Style.TargetType property element),
 //    PropertyWithExtensionHandler (the markup-extension attribute's four
-//    initializer arms).
-//  * the nine null-returning handlers (AssemblyInfo, AttributeInfo,
-//    ContentProperty, DeferableContentStart, LineNumberAndPosition,
-//    LinePosition, PIMapping, TypeInfo, TypeSerializerInfo).
+//    initializer arms), and PropertyCustomHandler (the serializer-serialized
+//    property attribute -- the KnownTypes serializer matrix over the record's
+//    binary payload, with the NeedsFullName Style-ancestor walk the
+//    DependencyPropertyConverter short form takes its name form through).
+//  * the nine null-returning info/mapping/line handlers (PIMapping,
+//    AssemblyInfo, TypeInfo, TypeSerializerInfo, AttributeInfo,
+//    DeferableContentStart, ContentProperty, LineNumberAndPosition,
+//    LinePosition).
+//
+// The one remaining Records leaf is LiteralContentHandler (gated on the
+// XElement.Parse XML-parser slice the Xml stand-in does not carry).
 //
 // C#-to-C++ porting decisions:
 //  * `Translate`'s C# `BamlElement parent` parameter is nullable (the
@@ -91,13 +98,26 @@
 
 #include "BamlDecompiler/IHandlers.hpp"
 
+#include <cstdint>
 #include <memory>
 
-// The XamlType the TargetTypeAnnotation payload holds (a forward
-// declaration suffices -- the shared_ptr member only needs the complete
-// type at construction, which lives in the .cpp).
+// The Xml DOM alias (the BamlDecompiler tree is not nested in
+// ILSpy::Decompiler, so every Xml reference needs the alias).
+namespace Xml = ::ILSpy::Decompiler::Xml;
+
+// The KnownTypes serializer-matrix ids PropertyCustomHandler dispatches
+// over (the fixed int16_t underlying type allows the forward declaration;
+// the generated KnownTypes.hpp defines the enum and its ToString spelling).
+namespace ILSpy::BamlDecompiler::Baml {
+enum class KnownTypes : std::int16_t;
+} // namespace ILSpy::BamlDecompiler::Baml
+
+// The XamlType/XamlProperty the handlers annotate and resolve (a forward
+// declaration suffices -- the shared_ptr members only need the complete
+// types at construction, which lives in the .cpp).
 namespace ILSpy::BamlDecompiler::Xaml {
 class XamlType;
+class XamlProperty;
 } // namespace ILSpy::BamlDecompiler::Xaml
 
 namespace ILSpy::BamlDecompiler::Handlers {
@@ -436,6 +456,71 @@ public:
 
     std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
         BamlElement* parent) override;
+};
+
+// The C# `internal class PropertyCustomHandler : IHandler` -- the property
+// attribute whose value the BAML stream carries in a serializer's binary
+// form: the 0xfff-masked serializer type id selects the KnownTypes
+// serializer matrix over the record's payload (the DependencyProperty
+// converter's 2-byte property-id and type-id-plus-string forms, the enum
+// and boolean renders, the XamlBrush solid/other color arms, the geometry
+// path data, the Point3D/Vector3D/Point collections, and the Int32
+// collection's consecutive/U1/U2/I4 forms), rendered into the property
+// attribute the same PropertyHandler-style name form picks.
+//
+// C#-to-C++ porting decisions:
+//  * The C# reads the payload through `new BinaryReader(new
+//    MemoryStream(value))` -- the port reads it through the BamlBinaryReader
+//    (the port's BinaryReader stand-in; the XamlPathDeserializer arm passes
+//    the same reader, and the reader's EndOfStream message IS .NET's).
+//  * The three-argument `AppendFormat("{0:R},{1:R},{2:R} ", ...)` calls of
+//    the collection arms evaluate their ReadXamlDouble arguments
+//    LEFT-TO-RIGHT by C# spec; MSVC may evaluate call arguments
+//    right-to-left, so the port sequences each read through a named local
+//    (the iteration-35 X/Y-swap trap).
+//  * `valueType` (the 0x4000 flag bit) is computed by the C# Translate and
+//    never read -- the port computes and discards it for the record-contract
+//    documentation (the gold pins it has no observable effect).
+//  * `Debug.Assert(value.Length == 1)` (BooleanConverter) is compiled out
+//    of the shipped release assembly: a longer payload reads its first
+//    byte and the rest is ignored.
+//  * The .NET enum ToString of the nested private IntegerCollectionType
+//    ("Unknown"/"Consecutive"/"U1"/"U2"/"I4", the decimal for values
+//    without a member) and of the KnownTypes serializer id live in
+//    IntegerCollectionTypeName/KnownTypeName; NotSupportedException maps
+//    to std::runtime_error carrying the exact message (the custom-message
+//    convention).
+class PropertyCustomHandler : public IHandler {
+public:
+    Baml::BamlRecordType Type() const override;
+
+    std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
+        BamlElement* parent) override;
+
+private:
+    // The C# private nested `enum IntegerCollectionType : byte`.
+    enum class IntegerCollectionType : std::uint8_t {
+        Unknown,
+        Consecutive,
+        U1,
+        U2,
+        I4,
+    };
+
+    // The C# `string Deserialize(XamlContext ctx, XElement elem, KnownTypes
+    // ser, byte[] value)` -- the serializer matrix.
+    std::string Deserialize(XamlContext& ctx, Xml::XElement& elem,
+        Baml::KnownTypes ser, const std::vector<std::uint8_t>& value);
+
+    // The C# `bool NeedsFullName(XamlProperty property, XamlContext ctx,
+    // XElement elem)` -- the Style-ancestor walk: the nearest ancestor whose
+    // XamlType annotation resolves to System.Windows.Style carries the
+    // TargetTypeAnnotation whose type decides the property's name form
+    // (attached to the target -> the full form; an instance property there
+    // -> the short form; no Style ancestor or no annotation -> the full
+    // form).
+    bool NeedsFullName(const Xaml::XamlProperty& property, XamlContext& ctx,
+        Xml::XElement& elem);
 };
 
 } // namespace ILSpy::BamlDecompiler::Handlers

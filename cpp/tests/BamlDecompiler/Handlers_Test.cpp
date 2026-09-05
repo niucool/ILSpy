@@ -18,8 +18,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// Tests for the first handler-port slice (cpp/BamlDecompiler/Handlers/ --
-// Handlers/Records.hpp and Handlers/Blocks.hpp): the 17 CreateBuiltinHandlers
+// Tests for the handler-port slices (cpp/BamlDecompiler/Handlers/ --
+// Handlers/Records.hpp and Handlers/Blocks.hpp): the 36 CreateBuiltinHandlers
 // manifest rows, and every handler's Translate behavior, gold-pinned against
 // the REAL internal handlers from the installed ICSharpCode.BamlDecompiler.dll
 // driven through reflection by the gold probe
@@ -86,7 +86,6 @@
 #include <gtest/gtest.h>
 
 #include <any>
-#include <cstddef>
 #include <cstdint>
 #include <iterator>
 #include <memory>
@@ -142,18 +141,19 @@ protected:
     }
 };
 
-// The manifest: the 35 ported rows, every record type distinct, each inside
+// The manifest: the 36 ported rows, every record type distinct, each inside
 // the gold registry inventory (the HandlerMapTest guard), with the class
 // identities the manifest constructs.
-TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheThirtyFivePortedRows)
+TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheThirtySixPortedRows)
 {
     std::vector<std::unique_ptr<IHandler>> handlers = HandlerMap::CreateBuiltinHandlers();
-    ASSERT_EQ(handlers.size(), 35u);
+    ASSERT_EQ(handlers.size(), 36u);
 
     const Baml::BamlRecordType expected[] = {
         Baml::BamlRecordType::DocumentStart,
         Baml::BamlRecordType::ElementStart,
         Baml::BamlRecordType::Property,
+        Baml::BamlRecordType::PropertyCustom,
         Baml::BamlRecordType::PropertyWithConverter,
         Baml::BamlRecordType::PropertyComplexStart,
         Baml::BamlRecordType::PropertyArrayStart,
@@ -187,7 +187,7 @@ TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheThirtyFivePortedRows)
         Baml::BamlRecordType::PropertyTypeReference,
         Baml::BamlRecordType::PropertyWithExtension,
     };
-    ASSERT_EQ(std::size(expected), 35u);
+    ASSERT_EQ(std::size(expected), 36u);
     for (Baml::BamlRecordType type : expected) {
         bool found = false;
         for (const auto& handler : handlers)
@@ -224,6 +224,13 @@ TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheThirtyFivePortedRows)
     ASSERT_NE(propertyConverter, nullptr);
     EXPECT_NE(dynamic_cast<Handlers::PropertyWithConverterHandler*>(propertyConverter), nullptr);
     EXPECT_NE(dynamic_cast<Handlers::PropertyHandler*>(propertyConverter), nullptr);
+    // The PropertyCustom row is its own IHandler (no PropertyHandler
+    // inheritance).
+    IHandler* propertyCustom =
+        HandlerMap::LookupHandler(Baml::BamlRecordType::PropertyCustom);
+    ASSERT_NE(propertyCustom, nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::PropertyCustomHandler*>(propertyCustom), nullptr);
+    EXPECT_EQ(dynamic_cast<Handlers::PropertyHandler*>(propertyCustom), nullptr);
     // The four property-element blocks and the two constructor handlers.
     EXPECT_NE(dynamic_cast<Handlers::PropertyComplexHandler*>(
                   HandlerMap::LookupHandler(Baml::BamlRecordType::PropertyComplexStart)),
@@ -2756,6 +2763,294 @@ TEST_F(HandlersTest, PropertyWithExtensionExceptionArmsThrowTheNetNre)
         } catch (const std::runtime_error& ex) {
             EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
         }
+    }
+}
+
+
+// ===== section I: PropertyCustomHandler =====================================
+
+// The PropertyCustom drive helper (the probe's section I): a fresh context
+// (ResolveNamespace mutates the cached XamlType instances, so sharing a
+// context across drives would couple them), the crafted record payload, the
+// parent element optionally annotated with the resolved XamlType and
+// optionally nested inside the Style-annotated grandparent (with its
+// optional TargetTypeAnnotation and the optional non-Style annotated
+// intermediate the NeedsFullName walk skips), and the byte-exact
+// result/parent render assertions.
+void DrivePropertyCustom(XamlContextFixture& fixture, const char* name,
+    std::uint16_t attributeId, std::uint16_t serializerTypeId,
+    const std::vector<std::uint8_t>& data, const std::string& expectedParentRender,
+    bool useContextH = false, std::uint16_t annotatedTypeId = 0,
+    std::uint16_t styleAncestorId = 0, std::uint16_t targetTypeAnnotationId = 0,
+    std::uint16_t intermediateTypeId = 0)
+{
+    auto ctx = useContextH ? fixture.MakeContextH() : fixture.MakeContextE();
+    IHandler* handler = HandlerMap::LookupHandler(Baml::BamlRecordType::PropertyCustom);
+    ASSERT_NE(handler, nullptr) << name;
+    auto record = std::make_unique<Baml::PropertyCustomRecord>();
+    record->AttributeId = attributeId;
+    record->SerializerTypeId = serializerTypeId;
+    record->Data = data;
+    Baml::BamlRecordNode node(record.get());
+    BamlElement parentElem = MakeParentElem();
+    // The ancestor-tree owners: the child's parent_ back-pointer is raw,
+    // and the C# GC roots the detached ancestor tree through the child's
+    // parent reference -- the port's owning shared_ptrs must outlive the
+    // drive, so they live at the function scope, not inside the wiring
+    // block (a block-scoped grandparent frees at the closing brace and
+    // NeedsFullName's walk dereferences the dangling parent_).
+    std::shared_ptr<Xml::XElement> grandparent;
+    std::shared_ptr<Xml::XElement> intermediate;
+    if (styleAncestorId != 0) {
+        grandparent = std::make_shared<Xml::XElement>("Grandparent");
+        if (intermediateTypeId != 0) {
+            intermediate = std::make_shared<Xml::XElement>("Intermediate");
+            grandparent->Add(intermediate);
+            intermediate->Add(parentElem.Xaml.Element);
+            intermediate->AddAnnotation(ctx->ResolveTypeOwning(intermediateTypeId));
+        } else {
+            grandparent->Add(parentElem.Xaml.Element);
+        }
+        grandparent->AddAnnotation(ctx->ResolveTypeOwning(styleAncestorId));
+        if (targetTypeAnnotationId != 0) {
+            grandparent->AddAnnotation(
+                std::make_shared<Handlers::TargetTypeAnnotation>(
+                    ctx->ResolveTypeOwning(targetTypeAnnotationId)));
+        }
+    }
+    if (annotatedTypeId != 0)
+        parentElem.Xaml.Element->AddAnnotation(ctx->ResolveTypeOwning(annotatedTypeId));
+
+    std::unique_ptr<BamlElement> result = handler->Translate(*ctx, node, &parentElem);
+    EXPECT_EQ(result, nullptr) << name;
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(), expectedParentRender) << name;
+}
+
+// The PropertyCustom throw-drive helper: the same crafted-record shape with
+// the expected exception message. The port maps .NET's EndOfStreamException
+// to std::out_of_range (the BamlBinaryReader convention) and the
+// NotSupportedException/InvalidDataException arms to std::runtime_error
+// (the custom-message convention) -- the flag selects which arm the drive
+// must produce.
+void DrivePropertyCustomThrow(XamlContextFixture& fixture, const char* name,
+    std::uint16_t attributeId, std::uint16_t serializerTypeId,
+    const std::vector<std::uint8_t>& data, const char* expectedMessage,
+    bool outOfRange = false)
+{
+    auto ctx = fixture.MakeContextE();
+    IHandler* handler = HandlerMap::LookupHandler(Baml::BamlRecordType::PropertyCustom);
+    ASSERT_NE(handler, nullptr) << name;
+    auto record = std::make_unique<Baml::PropertyCustomRecord>();
+    record->AttributeId = attributeId;
+    record->SerializerTypeId = serializerTypeId;
+    record->Data = data;
+    Baml::BamlRecordNode node(record.get());
+    BamlElement parentElem = MakeParentElem();
+    try {
+        handler->Translate(*ctx, node, &parentElem);
+        FAIL() << name << ": the drive must throw";
+    } catch (const std::out_of_range& ex) {
+        EXPECT_TRUE(outOfRange) << name << ": expected the runtime_error arm";
+        EXPECT_STREQ(ex.what(), expectedMessage) << name;
+    } catch (const std::runtime_error& ex) {
+        EXPECT_FALSE(outOfRange) << name << ": expected the EndOfStream arm";
+        EXPECT_STREQ(ex.what(), expectedMessage) << name;
+    }
+}
+
+// I1 + I4: the DependencyPropertyConverter short form (value.Length == 2):
+// the 2-byte property id; NeedsFullName answers true with no Style
+// ancestor, so the value renders the full name form (the unresolved
+// declaring type's namespace renders bare). The 0x4000 valueType flag bit
+// is computed and never read -- the same render.
+TEST_F(HandlersTest, PropertyCustomDependencyPropertyShortFormRendersTheGold)
+{
+    DrivePropertyCustom(fixture_, "dpShort", 1, 137, { 0x01, 0x00 },
+        "<Parent String.Length=\"String.Length\" />");
+    DrivePropertyCustom(fixture_, "valueTypeBit", 1, 137 | 0x4000, { 0x01, 0x00 },
+        "<Parent String.Length=\"String.Length\" />");
+}
+
+// I2: the short form's attached property (the PI-mapped ToolBar.Width --
+// the declaring type's namespace is pre-set at resolution time, so the
+// ATTRIBUTE renders the auto-generated prefix while the value's
+// ctx.ToString read finds no in-scope prefix and renders bare).
+TEST_F(HandlersTest, PropertyCustomDependencyPropertyAttachedRendersTheGold)
+{
+    DrivePropertyCustom(fixture_, "dpShortAttached", 0, 137, { 0x00, 0x00 },
+        "<Parent p1:ToolBar.Width=\"ToolBar.Width\" xmlns:p1=\"http://probe.pi/ns\" />");
+}
+
+// I3: the long form (type id + 7-bit string): ctx.ToString(elem, type)
+// resolves String's namespace against the parent element (the
+// clr-namespace declaration), and the SHARED cached XamlType carries the
+// resolved namespace into the attribute's own name form.
+TEST_F(HandlersTest, PropertyCustomDependencyPropertyLongFormRendersTheGold)
+{
+    DrivePropertyCustom(fixture_, "dpLong", 1, 137,
+        { 0x01, 0x00, 0x03, 'A', 'm', 'b' },
+        "<Parent xmlns:system=\"clr-namespace:System\" "
+        "system:String.Length=\"system:String.Amb\" />");
+}
+
+// I5-I8: the EnumConverter (the raw uint32 in decimal -- the C#'s TODO to
+// convert to enum names is faithful) and BooleanConverter renders.
+TEST_F(HandlersTest, PropertyCustomEnumAndBooleanConvertersRenderTheGold)
+{
+    DrivePropertyCustom(fixture_, "enumZero", 1, 195, { 0x00, 0x00, 0x00, 0x00 },
+        "<Parent String.Length=\"0\" />");
+    DrivePropertyCustom(fixture_, "enumMax", 1, 195, { 0xFF, 0xFF, 0xFF, 0xFF },
+        "<Parent String.Length=\"4294967295\" />");
+    DrivePropertyCustom(fixture_, "boolTrue", 1, 46, { 0x01 },
+        "<Parent String.Length=\"True\" />");
+    DrivePropertyCustom(fixture_, "boolFalse", 1, 46, { 0x00 },
+        "<Parent String.Length=\"False\" />");
+}
+
+// I9 + I10: the XamlBrushSerializer arms -- KnownSolidColor (the uint32
+// ARGB as the {0:X8} "#RRGGBBAA" render) and OtherColor (the embedded
+// 7-bit string).
+TEST_F(HandlersTest, PropertyCustomBrushArmsRenderTheGold)
+{
+    DrivePropertyCustom(fixture_, "brushSolid", 1, 744,
+        { 0x01, 0x80, 0x00, 0x00, 0xFF },
+        "<Parent String.Length=\"#FF000080\" />");
+    DrivePropertyCustom(fixture_, "brushOther", 1, 744,
+        { 0x02, 0x06, 'F', 'r', 'o', 'z', 'e', 'n' },
+        "<Parent String.Length=\"Frozen\" />");
+}
+
+// I12: the XamlPathDataSerializer passthrough to the XamlPathDeserializer
+// (BeginFigure(1,-1), LineTo(1,1), Closed -- the mini-language string).
+TEST_F(HandlersTest, PropertyCustomPathDataPassthroughRendersTheGold)
+{
+    DrivePropertyCustom(fixture_, "path", 1, 746,
+        { 0x00, 0x02, 0x03, 0x01, 0x02, 0x02, 0x08 },
+        "<Parent String.Length=\"M1,-1 L1,1\" />");
+}
+
+// I13-I15: the collection serializers -- the 3D collections (the {0:R}
+// triples over the tagged ReadXamlDouble forms 1/-1/0) and the point
+// collection (the pairs; the second point pairs the raw-double and the
+// scaled-int32 tag forms, 2.5 and 11.700684).
+TEST_F(HandlersTest, PropertyCustomCollectionSerializersRenderTheGold)
+{
+    DrivePropertyCustom(fixture_, "point3d", 1, 747,
+        { 0x01, 0x00, 0x00, 0x00, 0x02, 0x03, 0x01 },
+        "<Parent String.Length=\"1,-1,0\" />");
+    DrivePropertyCustom(fixture_, "vector3d", 1, 752,
+        { 0x01, 0x00, 0x00, 0x00, 0x02, 0x03, 0x01 },
+        "<Parent String.Length=\"1,-1,0\" />");
+    DrivePropertyCustom(fixture_, "pointColl", 1, 748,
+        { 0x02, 0x00, 0x00, 0x00,
+          0x02, 0x03,
+          0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x40,
+          0x04, 0xCC, 0x89, 0xB2, 0x00 },
+        "<Parent String.Length=\"1,-1 2.5,11.700684\" />");
+}
+
+// I16-I20: the XamlInt32CollectionSerializer forms -- Consecutive (the
+// start consumed before the loop), U1, U2, I4, and the negative count (the
+// loop never iterates, so the empty render is the attribute value).
+TEST_F(HandlersTest, PropertyCustomInt32CollectionFormsRenderTheGold)
+{
+    DrivePropertyCustom(fixture_, "int32Consecutive", 1, 745,
+        { 0x01, 0x03, 0x00, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00 },
+        "<Parent String.Length=\"101112\" />");
+    DrivePropertyCustom(fixture_, "int32U1", 1, 745,
+        { 0x02, 0x02, 0x00, 0x00, 0x00, 0x05, 0x00 },
+        "<Parent String.Length=\"50\" />");
+    DrivePropertyCustom(fixture_, "int32U2", 1, 745,
+        { 0x03, 0x02, 0x00, 0x00, 0x00, 0xF9, 0x00, 0x00, 0x01 },
+        "<Parent String.Length=\"249256\" />");
+    DrivePropertyCustom(fixture_, "int32I4", 1, 745,
+        { 0x04, 0x02, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00 },
+        "<Parent String.Length=\"-10\" />");
+    DrivePropertyCustom(fixture_, "int32NegativeCount", 1, 745,
+        { 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0x0A, 0x00, 0x00, 0x00 },
+        "<Parent String.Length=\"\" />");
+}
+
+// I21-I24 + I11 + I27: the NotSupportedException/InvalidDataException arms
+// -- the third brush byte (the fallthrough out of the switch), the unknown
+// integer-collection type (the Unknown member: the switch has no case for
+// it), the unhandled serializer id (the enum member name, the decimal for an
+// unnamed value, and the sign-extension mask ((short)0x8000 & 0xfff == 0 ==
+// Unknown)), and the unknown ReadXamlDouble tag.
+TEST_F(HandlersTest, PropertyCustomUnsupportedArmsThrowTheNetMessages)
+{
+    DrivePropertyCustomThrow(fixture_, "brushThird", 1, 744, { 0x03 },
+        "XamlBrushSerializer");
+    DrivePropertyCustomThrow(fixture_, "int32Unknown", 1, 745,
+        { 0x00, 0x01, 0x00, 0x00, 0x00, 0x05 }, "Unknown");
+    DrivePropertyCustomThrow(fixture_, "unhandledSer", 1, 1,
+        { 0x00, 0x00, 0x00, 0x00 }, "AccessText");
+    DrivePropertyCustomThrow(fixture_, "unhandledSerUnnamed", 1, 800,
+        { 0x00, 0x00, 0x00, 0x00 }, "800");
+    DrivePropertyCustomThrow(fixture_, "unhandledSerMasked", 1, 0x8000,
+        { 0x00, 0x00, 0x00, 0x00 }, "Unknown");
+    DrivePropertyCustomThrow(fixture_, "unknownDouble", 1, 748,
+        { 0x01, 0x00, 0x00, 0x00, 0x09 }, "Unknown double type.");
+}
+
+// I25 + I26: the truncated payloads -- the EnumConverter's short uint32 and
+// the empty BooleanConverter payload both throw the .NET EndOfStream
+// message (the BamlBinaryReader convention).
+TEST_F(HandlersTest, PropertyCustomTruncatedPayloadsThrowTheEndOfStream)
+{
+    DrivePropertyCustomThrow(fixture_, "truncatedEnum", 1, 195, { 0x00, 0x00 },
+        "Unable to read beyond the end of the stream.", true);
+    DrivePropertyCustomThrow(fixture_, "truncatedBool", 1, 46, {},
+        "Unable to read beyond the end of the stream.", true);
+}
+
+// I28: the attribute's own name form through IsAttachedTo(elemType) --
+// String.Length is an instance property of the String-annotated parent's
+// type, so the attribute takes the SHORT form (no ResolveNamespace
+// mutation: the plain local name).
+TEST_F(HandlersTest, PropertyCustomAnnotatedParentTakesTheShortForm)
+{
+    DrivePropertyCustom(fixture_, "annotatedParent", 1, 195,
+        { 0xFF, 0xFF, 0xFF, 0xFF }, "<Parent Length=\"4294967295\" />", false, 1);
+}
+
+// I29-I32: the NeedsFullName Style-ancestor walk -- the TargetTypeAnnotation
+// whose String type HAS the property as an instance property (the short
+// form), the System.Type target the property is attached to (the full
+// form), the Style ancestor without the annotation (the null-target
+// default: the full form), and the deep chain (the walk skips the
+// non-Style annotated intermediate and finds the grandparent's
+// annotation).
+TEST_F(HandlersTest, PropertyCustomNeedsFullNameStyleWalkRendersTheGold)
+{
+    DrivePropertyCustom(fixture_, "styleTargetString", 1, 137, { 0x01, 0x00 },
+        "<Parent String.Length=\"Length\" />", true, 0, 3, 1);
+    DrivePropertyCustom(fixture_, "styleTargetType", 1, 137, { 0x01, 0x00 },
+        "<Parent String.Length=\"String.Length\" />", true, 0, 3, 2);
+    DrivePropertyCustom(fixture_, "styleNoAnnotation", 1, 137, { 0x01, 0x00 },
+        "<Parent String.Length=\"String.Length\" />", true, 0, 3);
+    DrivePropertyCustom(fixture_, "styleDeepAncestor", 1, 137, { 0x01, 0x00 },
+        "<Parent String.Length=\"Length\" />", true, 0, 3, 1, 2);
+}
+
+
+// I33: the null-parent NRE (the parent.Xaml.Element annotation read -- the
+// first parent deref, before the property resolution).
+TEST_F(HandlersTest, PropertyCustomNullParentThrowsTheNetNre)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = Lookup(Baml::BamlRecordType::PropertyCustom);
+    auto record = std::make_unique<Baml::PropertyCustomRecord>();
+    record->AttributeId = 1;
+    record->SerializerTypeId = 195;
+    record->Data = { 0x00, 0x00, 0x00, 0x00 };
+    Baml::BamlRecordNode node(record.get());
+
+    try {
+        handler->Translate(*ctx, node, nullptr);
+        FAIL() << "the null-parent translate must throw";
+    } catch (const std::runtime_error& ex) {
+        EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
     }
 }
 } // namespace
