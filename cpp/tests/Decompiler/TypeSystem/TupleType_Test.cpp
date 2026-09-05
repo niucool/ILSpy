@@ -98,10 +98,11 @@ TEST(TupleTypeTest, NameDelegatesToUnderlyingType) {
 
 TEST(TupleTypeTest, ReflectionNameDelegatesToUnderlyingType) {
     // The C# `ReflectionName` delegates to `UnderlyingType.ReflectionName` -- the full
-    // `System.ValueTuple`2<System.Int32, System.String>` form, NOT a tuple-syntax form
-    // like "(int, string)" (the tuple syntax the C# surfaces only in `ToString`).
+    // `System.ValueTuple`2[[System.Int32],[System.String]]` form (the ParameterizedType
+    // reflection-name geometry), NOT a tuple-syntax form like "(int, string)" (the
+    // tuple syntax the C# surfaces only in `ToString`).
     TupleType t = IntStringTuple();
-    EXPECT_EQ(t.ReflectionName(), "System.ValueTuple`2<System.Int32, System.String>");
+    EXPECT_EQ(t.ReflectionName(), "System.ValueTuple`2[[System.Int32],[System.String]]");
 }
 
 TEST(TupleTypeTest, TypeParameterCountIsZero) {
@@ -221,7 +222,7 @@ TEST(TupleTypeTest, DispatchesPolymorphicallyThroughITypeReference) {
     const IType& asBase = t;
     EXPECT_EQ(asBase.Kind(), TypeKind::Tuple);
     EXPECT_EQ(asBase.Name(), "ValueTuple");
-    EXPECT_EQ(asBase.ReflectionName(), "System.ValueTuple`2<System.Int32, System.String>");
+    EXPECT_EQ(asBase.ReflectionName(), "System.ValueTuple`2[[System.Int32],[System.String]]");
     EXPECT_EQ(asBase.TypeParameterCount(), 0);
     // The Cardinality / ElementTypes / ElementNames / UnderlyingType accessors are
     // TupleType-own (not IType virtuals in the minimal port -- the full IType surface

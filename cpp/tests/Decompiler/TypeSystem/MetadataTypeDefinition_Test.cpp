@@ -255,9 +255,9 @@ TEST(MetadataTypeDefinitionTest, KindAndFlagMatrixMatchesGoldOverMscorlib)
           TS::TypeKind::Class, TS::KnownTypeCode::None,
           TS::Accessibility::Public, false, false, true,
           std::optional<bool>(true), 0x020008ADu },
-        // The Extends column is a TypeSpec (the GENERICINST Collection`1<T>
-        // base): the kind chain runs the SignatureIsKnownType walk and lands
-        // on Class (gold).
+        // A generic collection whose bases include parameterized interfaces
+        // (the TypeSpec InterfaceImpl rows): the kind chain runs the
+        // SignatureIsKnownType walk and lands on Class (gold).
         { "System.Collections.ObjectModel", "ReadOnlyCollection", 1,
           TS::TypeKind::Class, TS::KnownTypeCode::None,
           TS::Accessibility::Public, false, false, false,
@@ -697,14 +697,14 @@ TEST(MetadataTypeDefinitionTest, DeferralContracts)
     const TS::ITypeDefinition* string_ = f.Type("System", "String");
     ASSERT_NE(string_, nullptr);
 
-    // The member family, the attribute snapshot, the base-type resolution,
-    // and the record scan are the loud deferrals of this slice.
+    // The member family, the attribute snapshot, and the record scan are
+    // the loud deferrals of this slice (DirectBaseTypes landed with the
+    // ResolveType pair -- the ResolveType_Test suite pins it).
     EXPECT_THROW(string_->Members(), std::logic_error);
     EXPECT_THROW(string_->Fields(), std::logic_error);
     EXPECT_THROW(string_->Methods(), std::logic_error);
     EXPECT_THROW(string_->Properties(), std::logic_error);
     EXPECT_THROW(string_->Events(), std::logic_error);
-    EXPECT_THROW(string_->DirectBaseTypes(), std::logic_error);
     EXPECT_THROW(string_->GetAttributes(), std::logic_error);
     EXPECT_THROW(string_->HasAttribute(TS::KnownAttribute::Obsolete),
                  std::logic_error);

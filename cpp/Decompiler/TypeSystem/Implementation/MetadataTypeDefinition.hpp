@@ -78,10 +78,7 @@
 //      `MetadataProperty`/`MetadataEvent` classes) and the IType-level
 //      member enumerations routed over them (`GetMembers` etc. -- the Void
 //      early-exit arms and the NestedTypes-only short-circuit arm ARE
-//      real); `DirectBaseTypes` (`module.ResolveType` -- the `TypeProvider`
-//      itself LANDED with the signature-provider slice, so the gate is now
-//      the `ResolveType` + `ApplyAttributeTypeVisitor` composition);
-//      `GetAttributes`/`HasAttribute`/`GetAttribute`
+//      real); `GetAttributes`/`HasAttribute`/`GetAttribute`
 //      (AttributeListBuilder + the custom-attribute value decoder);
 //      `ExtensionInfo`'s construction (the null arms are real: false when
 //      !HasExtensions or ExtensionMembers is off); `IsRecord` (the Methods
@@ -95,6 +92,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -164,8 +162,9 @@ public:
     // The C# `IEnumerable<IType> GetNestedTypes(filter, options)`: the
     // `(IgnoreInheritedMembers | ReturnMemberDefinitions)` arm is the
     // NestedTypes-only short-circuit (real); every other arm routes
-    // GetMembersHelper, which walks DirectBaseTypes (the ResolveType
-    // deferral, convention (e)).
+    // GetMembersHelper, whose base-type walk is real (DirectBaseTypes
+    // landed) but whose member reads hit the member-family deferral
+    // (convention (e)).
     std::vector<ITypePtr> GetNestedTypes(
         std::function<bool(const ITypeDefinition*)> filter,
         GetMemberOptions options) const override;
@@ -202,8 +201,17 @@ public:
         std::function<bool(const IMethod*)> filter,
         GetMemberOptions options) const override;
 
-    // DEFERRED (convention (e)): `module.ResolveType` (the TypeProvider
-    // slice) -- the Extends/InterfaceImpl resolution.
+    // The C# `IEnumerable<IType> DirectBaseTypes` -- the Extends resolution
+    // through `module.ResolveType` (the type's OWN attribute rows feed the
+    // ApplyAttributeTypeVisitor wrap -- the nullability bytes that annotate
+    // the base-type position live on the DERIVED type's [Nullable] rows), the
+    // interface->Object fallback over `Compilation.FindType(Object)`, and the
+    // InterfaceImpl rows resolved with each row's OWN attributes; the whole
+    // list is `LazyInit`-cached (UNCONDITIONALLY -- no `Uncached` bypass, the
+    // C# `directBaseTypes` field), and the Extends resolution's
+    // `BadImageFormatException` arms are swallowed into
+    // `SpecialType.UnknownType` (the port's `std::invalid_argument` /
+    // `std::out_of_range` mappings of the raw-surface throws).
     std::vector<ITypePtr> DirectBaseTypes() const override;
 
 protected:
@@ -288,6 +296,11 @@ private:
     // null until the first read; the Uncached option skips the store).
     mutable std::vector<const ITypeDefinition*> nestedTypes_;
     mutable bool nestedTypesLoaded_ = false;
+
+    // The lazily-loaded `directBaseTypes` cache (the C# `List<IType>`
+    // `directBaseTypes` field -- `LazyInit.GetOrSet`, NO `Uncached` bypass:
+    // the C# caches the list unconditionally); engaged state = read.
+    mutable std::optional<std::vector<ITypePtr>> directBaseTypes_;
 };
 
 } // namespace ILSpy::Decompiler::TypeSystem::Implementation

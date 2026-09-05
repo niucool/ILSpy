@@ -22,6 +22,7 @@
 #include "Decompiler/Metadata/MetadataExtensions.hpp"  // ToKnownTypeCode
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/SRMExtensions.hpp"
+#include "Decompiler/TypeSystem/GenericContext.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
@@ -339,7 +340,7 @@ std::vector<ITypePtr> MetadataTypeDefinition::GetNestedTypes(
     }
     throw std::logic_error(
         "MetadataTypeDefinition::GetNestedTypes: GetMembersHelper is not yet "
-        "routed (gated on DirectBaseTypes / the ResolveType slice)");
+        "routed (gated on the member entity family)");
 }
 
 std::vector<ITypePtr> MetadataTypeDefinition::GetNestedTypes(
@@ -352,8 +353,8 @@ std::vector<ITypePtr> MetadataTypeDefinition::GetNestedTypes(
     (void)options;
     throw std::logic_error(
         "MetadataTypeDefinition::GetNestedTypes(typeArguments): "
-        "GetMembersHelper is not yet routed (gated on DirectBaseTypes / the "
-        "ResolveType slice)");
+        "GetMembersHelper is not yet routed (gated on the member entity "
+        "family)");
 }
 
 // The Void early-exit arms (the C# `if (Kind == TypeKind.Void) return
@@ -465,13 +466,85 @@ std::vector<const IMethod*> MetadataTypeDefinition::GetAccessors(
         "not yet ported");
 }
 
-// DEFERRED (convention (e)): the Extends/InterfaceImpl resolution through
-// module.ResolveType.
+// The C# `IEnumerable<IType> DirectBaseTypes` (MetadataTypeDefinition.cs
+// lines 340-380): the LazyInit-cached Extends + InterfaceImpl resolution
+// through `module.ResolveType`.
 std::vector<ITypePtr> MetadataTypeDefinition::DirectBaseTypes() const
 {
-    throw std::logic_error(
-        "MetadataTypeDefinition::DirectBaseTypes: ResolveType is not yet "
-        "ported (gated on the TypeProvider slice)");
+    // The C# `LazyInit.VolatileRead(ref this.directBaseTypes)` -- the
+    // unconditional cache (NO Uncached bypass, unlike the member lists).
+    if (directBaseTypes_)
+        return *directBaseTypes_;
+    const Metadata::MetadataFile* metadata = module_.MetadataFile();
+    // The C# `var context = new GenericContext(TypeParameters);`.
+    GenericContext context(TypeParameters());
+    std::vector<Metadata::MetadataFile::InterfaceImplementationInfo>
+        interfaceImplCollection = metadata->GetInterfaceImplementations(
+            handle_);
+    std::vector<ITypePtr> baseTypes;
+    baseTypes.reserve(1 + interfaceImplCollection.size());
+    ITypePtr baseType;
+    // The C# `try { ... } catch (BadImageFormatException) { baseType =
+    // SpecialType.UnknownType; }` -- the Extends read plus its resolution;
+    // the port's BadImageFormatException family is the raw-surface
+    // `std::invalid_argument` / `std::out_of_range` pair (the iteration-63
+    // convention), caught here exactly where the C# catches its exception.
+    try
+    {
+        // The C# `EntityHandle baseTypeHandle = td.BaseType;` -- the port's
+        // read (0 for the nil column; never throws).
+        std::uint32_t baseTypeHandle = metadata->GetBaseTypeToken(handle_);
+        if (baseTypeHandle != 0)
+        {
+            // The C# `module.ResolveType(baseTypeHandle, context,
+            // metadata.GetCustomAttributes(this.handle),
+            // Nullability.Oblivious)` -- NOTE the DERIVED type's own
+            // attribute rows: the nullability bytes annotating the base-type
+            // position are encoded on the referencing type.
+            baseType = module_.ResolveType(
+                baseTypeHandle, context,
+                std::optional<std::vector<std::uint32_t>>(
+                    metadata->GetCustomAttributeTokens(handle_)),
+                ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious);
+        }
+    }
+    catch (const std::invalid_argument&)
+    {
+        baseType = UnknownType();
+    }
+    catch (const std::out_of_range&)
+    {
+        baseType = UnknownType();
+    }
+    if (baseType != nullptr)
+    {
+        baseTypes.push_back(std::move(baseType));
+    }
+    else if (kind_ == TypeKind::Interface)
+    {
+        // The C# `td.BaseType.IsNil is always true for interfaces, but the
+        // type system expects every interface to derive from System.Object
+        // as well` -- `Compilation.FindType(KnownTypeCode.Object)` aliased
+        // non-owning (the compilation's KnownTypeCache owns it).
+        baseTypes.push_back(SnapshotType(
+            &module_.Compilation().FindType(
+                ::ILSpy::Decompiler::TypeSystem::KnownTypeCode::Object)));
+    }
+    for (const auto& h : interfaceImplCollection)
+    {
+        // The C# `module.ResolveType(iface.Interface, context,
+        // iface.GetCustomAttributes(), Nullability.Oblivious)` -- each
+        // InterfaceImpl row's OWN attribute rows (the nullability bytes over
+        // the interface positions).
+        baseTypes.push_back(module_.ResolveType(
+            h.InterfaceToken, context,
+            std::optional<std::vector<std::uint32_t>>(
+                metadata->GetCustomAttributeTokens(h.Token)),
+            ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious));
+    }
+    // The C# `LazyInit.GetOrSet(ref this.directBaseTypes, baseTypes)`.
+    directBaseTypes_ = std::move(baseTypes);
+    return *directBaseTypes_;
 }
 
 // The C# `public override bool Equals(object obj)`.

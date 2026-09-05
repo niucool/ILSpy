@@ -105,11 +105,59 @@ static void StripGenericArity(std::string& s, std::size_t start) {
     }
 }
 
+// Convert the metadata reflection form's generic-argument geometry into the
+// C# display form: `Type`N[[A],[B]]` -> `Type<A, B>` (nested instantiations
+// and array-suffix arguments included). Each `[[` opens an argument list,
+// `]]` closes it, and `],[` separates two arguments; a single `[`/`]` pair
+// inside an argument is an array suffix (`A[]`, `A[,]`). Malformed input
+// keeps its original text.
+static void FlattenReflectionArgs(std::string& s) {
+    std::size_t pos;
+    while ((pos = s.find("[[")) != std::string::npos) {
+        std::string out = s.substr(0, pos) + "<";
+        std::size_t i = pos + 2;
+        std::size_t depth = 1;
+        while (i < s.size()) {
+            if (i + 1 < s.size() && s[i] == '[' && s[i + 1] == '[') {
+                depth++;
+                out += '<';
+                i += 2;
+            } else if (i + 1 < s.size() && s[i] == ']' && s[i + 1] == ']') {
+                depth--;
+                out += '>';
+                i += 2;
+                if (depth == 0)
+                    break;
+            } else if (i + 2 < s.size() && s.compare(i, 3, "],[") == 0) {
+                out += ", ";
+                i += 3;
+            } else if (s[i] == '[') {
+                // An array suffix: copy through its closing ']'.
+                std::size_t j = s.find(']', i);
+                if (j == std::string::npos) {
+                    out += s.substr(i);
+                    i = s.size();
+                } else {
+                    out += s.substr(i, j - i + 1);
+                    i = j + 1;
+                }
+            } else {
+                out += s[i];
+                ++i;
+            }
+        }
+        if (depth != 0)
+            return;  // malformed: keep the original string
+        s = out + s.substr(i);
+    }
+}
+
 std::string FlattenMetadataName(std::string name) {
     for (std::size_t pos; (pos = name.find("::")) != std::string::npos;)
         name.replace(pos, 2, ".");
     if (name.size() >= 2 && name.compare(name.size() - 2, 2, "..") == 0)
         name.erase(name.size() - 1);  // fold ".." left by an empty member segment
+    FlattenReflectionArgs(name);
     StripGenericArity(name, 0);
     return name;
 }
@@ -1745,9 +1793,15 @@ private:
     static std::string DeclaringTypeName(std::string_view methodName) {
         auto pos = methodName.rfind("::");
         if (pos == std::string_view::npos) return std::string{};
-        std::string_view type = methodName.substr(0, pos);
+        std::string type(methodName.substr(0, pos));
+        // A generic declaring type carries the ECMA arity marker and the
+        // reflection-argument geometry (e.g.
+        // `Span`1[[T]]::op_Implicit`); flatten both so the cast renders the
+        // C# form (`(Span<T>)(x)`).
+        FlattenReflectionArgs(type);
+        StripGenericArity(type, 0);
         auto dot = type.rfind('.');
-        return std::string(dot != std::string_view::npos ? type.substr(dot + 1) : type);
+        return std::string(dot != std::string::npos ? type.substr(dot + 1) : type);
     }
 
     // True if methodName is op_Explicit or op_Implicit (a conversion operator).
@@ -1779,11 +1833,20 @@ private:
                     auto pos = call.MethodName.rfind("::");
                     std::string_view type = (pos != std::string_view::npos)
                         ? std::string_view(call.MethodName).substr(0, pos) : std::string_view{};
-                    // A generic declaring type carries its ECMA arity marker
-                    // (e.g. `EqualityComparer`1<T1>::get_Default`); strip it so
-                    // the accessor renders the C# form (`EqualityComparer<T1>.Default`).
-                    auto dot = type.rfind('.');
-                    std::string shortType(dot != std::string_view::npos ? type.substr(dot + 1) : type);
+                    // A generic declaring type carries the ECMA arity
+                    // marker and the reflection-argument geometry (e.g.
+                    // `System.Collections.Generic.EqualityComparer`1[[System.
+                    // Object]]::get_Default`); flatten the geometry, then take
+                    // the short name before the argument list (the last '.'
+                    // inside the args would leak `Object>`), so the accessor
+                    // renders `EqualityComparer<System.Object>.Default`.
+                    std::string fullType(type);
+                    FlattenReflectionArgs(fullType);
+                    std::size_t lt = fullType.find('<');
+                    std::size_t dot = fullType.rfind('.',
+                        (lt == std::string::npos) ? std::string::npos : lt);
+                    std::string shortType(dot == std::string::npos
+                        ? fullType : fullType.substr(dot + 1));
                     StripGenericArity(shortType, 0);
                     return shortType + "." + prop;
                 }

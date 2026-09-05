@@ -84,12 +84,12 @@
 //      resolution family, this slice) are REAL; the miss arm falls through
 //      to `GetDefinition(nilHandle)` -> null.
 //  (g) DEFERRED members (each loud `std::logic_error` where the ported surface
-//      reaches it, otherwise absent with this note): the whole `ResolveType` /
+//      reaches it, otherwise absent with this note): the whole
 //      `ResolveMethod` / `ResolveEntity` / `ResolveDeclaringType` /
-//      `CreateFakeMethod` family (the ApplyAttributeTypeVisitor slice -- the
-//      `TypeProvider` field and its class LANDED, and the
-//      `Metadata/CustomAttributeDecoder` value-decode machinery LANDED too,
-//      so the attribute-blob decode is no longer a gate);
+//      `CreateFakeMethod` family (the member-entity slice -- the
+//      `ResolveType` pair LANDED, as have the `TypeProvider` field and its
+//      class plus the `Metadata/CustomAttributeDecoder` value-decode
+//      machinery);
 //      `GetAssemblyAttributes` / `GetModuleAttributes` /
 //      `GetInternalsVisibleTo` / `InternalsVisibleTo`'s friend-list decode and the
 //      ctor's `NullableContext` / `FindMinimumAccessibilityForNRT` (the
@@ -131,6 +131,12 @@ namespace ILSpy::Decompiler::TypeSystem {
 // incomplete.
 class IAttribute;
 class ITypeDefinition;
+
+// Forward declaration of the VAR/MVAR scope (the sibling GenericContext.hpp,
+// already ported): `ResolveType` takes it by const reference only, so the
+// incomplete type suffices in the declarations (the full include lives in
+// the .cpp).
+class GenericContext;
 
 // Forward declaration of the per-module namespace node (the sibling
 // Implementation/MetadataNamespace.hpp): the `rootNamespace_` member is a
@@ -253,6 +259,44 @@ public:
     // to the same-message `std::invalid_argument`); an invalid FILE degrades
     // to null (the iteration-61 convention).
     const IModule* GetDeclaringModule(std::uint32_t typeReferenceToken) const;
+
+    // --- Resolve Type (MetadataModule.cs lines 371-397) ---
+    // The C# `public IType ResolveType(EntityHandle typeRefDefSpec,
+    // GenericContext context, CustomAttributeHandleCollection? typeAttributes
+    // = null, Nullability nullableContext = Nullability.Oblivious)` -- the
+    // delegating overload over the module's own options. The handle is a raw
+    // token whose top byte names the table: `0x02` TypeDefinition (the
+    // module's entity cache), `0x01` TypeReference (the declaring-module
+    // resolution), `0x1B` TypeSpecification (the blob decode over the
+    // GenericContext), `0x27` ExportedType (the forwarder); nil (0) returns
+    // the `SpecialType.UnknownType` null object; any other top byte throws
+    // the C# `BadImageFormatException("Not a type handle")` mapped to
+    // `std::invalid_argument`. The resolved type then flows through
+    // `ApplyAttributeTypeVisitor.ApplyAttributesToType` over the (optional)
+    // attribute rows. The `typeAttributes` parameter carries the C#
+    // `CustomAttributeHandleCollection?` as raw row tokens (the null state
+    // is `std::nullopt`).
+    ITypePtr ResolveType(
+        std::uint32_t typeRefDefSpec, const GenericContext& context,
+        const std::optional<std::vector<std::uint32_t>>& typeAttributes
+            = std::nullopt,
+        ::ILSpy::Decompiler::TypeSystem::Nullability nullableContext
+            = ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious) const;
+    // The C# `public IType ResolveType(EntityHandle typeRefDefSpec,
+    // GenericContext context, TypeSystemOptions customOptions,
+    // CustomAttributeHandleCollection? typeAttributes = null, Nullability
+    // nullableContext = Nullability.Oblivious)` -- the core overload every
+    // arm routes through (the options carry into the
+    // ApplyAttributeTypeVisitor walk). The `customOptions` parameter is
+    // GLOBALLY QUALIFIED (the `TypeSystemOptions()` accessor hides the enum
+    // name for the rest of the class body -- the D372 crux).
+    ITypePtr ResolveType(
+        std::uint32_t typeRefDefSpec, const GenericContext& context,
+        ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions customOptions,
+        const std::optional<std::vector<std::uint32_t>>& typeAttributes
+            = std::nullopt,
+        ::ILSpy::Decompiler::TypeSystem::Nullability nullableContext
+            = ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious) const;
 
 private:
     // The C# `void HandleOutOfRange(EntityHandle handle)` -- throws the exact

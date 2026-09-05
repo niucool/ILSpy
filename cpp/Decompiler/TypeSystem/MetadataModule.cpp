@@ -23,7 +23,9 @@
 #include "Decompiler/Metadata/MetadataExtensions.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/SRMExtensions.hpp"
+#include "Decompiler/TypeSystem/ApplyAttributeTypeVisitor.hpp"
 #include "Decompiler/TypeSystem/FullTypeName.hpp"
+#include "Decompiler/TypeSystem/GenericContext.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/IModule.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -606,6 +608,86 @@ std::vector<const ITypeDefinition*> MetadataModule::TopLevelTypeDefinitions() co
 void MetadataModule::HandleOutOfRange()
 {
     throw std::out_of_range("Handle with invalid row number.");
+}
+
+// --- Resolve Type (MetadataModule.cs lines 371-397) ---
+
+// The C# `public IType ResolveType(EntityHandle typeRefDefSpec,
+// GenericContext context, CustomAttributeHandleCollection? typeAttributes =
+// null, Nullability nullableContext = Nullability.Oblivious)` -- the
+// delegating overload over the module's own options.
+ITypePtr MetadataModule::ResolveType(
+    std::uint32_t typeRefDefSpec, const GenericContext& context,
+    const std::optional<std::vector<std::uint32_t>>& typeAttributes,
+    ::ILSpy::Decompiler::TypeSystem::Nullability nullableContext) const
+{
+    return ResolveType(typeRefDefSpec, context, options_, typeAttributes,
+                       nullableContext);
+}
+
+// The C# `public IType ResolveType(EntityHandle typeRefDefSpec,
+// GenericContext context, TypeSystemOptions customOptions,
+// CustomAttributeHandleCollection? typeAttributes = null, Nullability
+// nullableContext = Nullability.Oblivious)` -- the core overload: the
+// top-byte table dispatch, then the ApplyAttributeTypeVisitor wrap.
+ITypePtr MetadataModule::ResolveType(
+    std::uint32_t typeRefDefSpec, const GenericContext& context,
+    ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions customOptions,
+    const std::optional<std::vector<std::uint32_t>>& typeAttributes,
+    ::ILSpy::Decompiler::TypeSystem::Nullability nullableContext) const
+{
+    // The C# `if (typeRefDefSpec.IsNil) return SpecialType.UnknownType;` --
+    // the null-object convention (a nil raw token is 0).
+    if (typeRefDefSpec == 0)
+        return UnknownType();
+    ITypePtr ty;
+    std::uint32_t kind = typeRefDefSpec >> 24;
+    switch (kind)
+    {
+    case 0x02u:  // HandleKind.TypeDefinition
+        // The C# `TypeProvider.GetTypeFromDefinition(metadata,
+        // (TypeDefinitionHandle)typeRefDefSpec, 0)` -- the module's entity
+        // cache (the CACHED arm range-check throws through the port's
+        // `std::out_of_range`). `typeProvider_` is reached directly (the C#
+        // field): the accessor returns `const TypeProvider&` while the
+        // walker-interface members are non-const (the const `unique_ptr`
+        // still hands back the mutable pointee).
+        ty = typeProvider_->GetTypeFromDefinition(typeRefDefSpec, 0);
+        break;
+    case 0x01u:  // HandleKind.TypeReference
+        // The C# `TypeProvider.GetTypeFromReference(metadata,
+        // (TypeReferenceHandle)typeRefDefSpec, 0)` -- the declaring-module
+        // resolution with the UnknownType fallback.
+        ty = typeProvider_->GetTypeFromReference(typeRefDefSpec, 0);
+        break;
+    case 0x1Bu:  // HandleKind.TypeSpecification
+        // The C# `var typeSpec = metadata.GetTypeSpecification(...); ty =
+        // typeSpec.DecodeSignature(TypeProvider, context);` -- exactly the
+        // provider's GetTypeFromSpecification over the row's signature blob
+        // (the rawTypeKind is dropped faithfully: the inner
+        // CLASS/VALUETYPE marker decides).
+        ty = typeProvider_->GetTypeFromSpecification(typeRefDefSpec, 0,
+                                                      context);
+        break;
+    case 0x27u:  // HandleKind.ExportedType
+        // The C# `return ResolveForwardedType(metadata.GetExportedType(...))`
+        // -- the forwarder arm skips the attribute wrap entirely.
+        return ResolveForwardedType(typeRefDefSpec);
+    default:
+        // The C# `throw new BadImageFormatException("Not a type handle")`
+        // (convention (b): the std::invalid_argument mapping).
+        throw std::invalid_argument("Not a type handle");
+    }
+    // The C# `ty = ApplyAttributeTypeVisitor.ApplyAttributesToType(ty,
+    // Compilation, typeAttributes, metadata, customOptions, nullableContext)`
+    // -- the [Dynamic]/[NativeInteger]/[TupleElementNames]/[Nullable] decode
+    // over the resolved type. The `const_cast` carries the C#'s mutable
+    // compilation reference through the port's const-module convention (the
+    // visitor never mutates the compilation; the parameter is a non-const
+    // reference only because the C# property returns the mutable reference).
+    return ApplyAttributeTypeVisitor::ApplyAttributesToType(
+        std::move(ty), const_cast<ICompilation&>(Compilation()),
+        typeAttributes, *metadataFile_, customOptions, nullableContext);
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem

@@ -86,13 +86,18 @@ std::string ParameterizedType::Name() const {
     return genericType_ ? genericType_->Name() : std::string();
 }
 std::string ParameterizedType::ReflectionName() const {
+    // The C# (ParameterizedType.cs lines 129-144):
+    // `genericType.ReflectionName + "[" + each "[" + arg.ReflectionName +
+    // "]" joined by "," + "]"` -- e.g. `List`1[[System.String]]`.
     std::string s = genericType_ ? genericType_->ReflectionName() : std::string("?");
-    s += "<";
+    s += "[";
     for (std::size_t i = 0; i < typeArgs_.size(); ++i) {
-        if (i) s += ", ";
+        if (i > 0) s += ",";
+        s += "[";
         s += typeArgs_[i] ? typeArgs_[i]->ReflectionName() : "?";
+        s += "]";
     }
-    s += ">";
+    s += "]";
     return s;
 }
 bool ParameterizedType::StructuralEquals(const IType& other) const {

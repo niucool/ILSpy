@@ -103,7 +103,11 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   additionalAttributes arms, and the PDB seeding). STARTED
   (the member entity
   family (`MetadataField`/`MetadataMethod`/`MetadataProperty`/
-  `MetadataEvent`), the `ResolveType` consumer, interning remain).
+  `MetadataEvent`) and interning remain; `MetadataModule.ResolveType`
+  (the top-byte table dispatch + the `ApplyAttributeTypeVisitor` wrap)
+  and `MetadataTypeDefinition.DirectBaseTypes` LANDED, gold-pinned
+  against the real engine, together with the `ParameterizedType`
+  reflection-name reconciliation to the C# `[[...]]` geometry).
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with
