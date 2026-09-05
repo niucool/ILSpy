@@ -39,11 +39,23 @@ struct DummyTypeParameterCaches {
     std::mutex Mutex;
     std::vector<std::shared_ptr<ITypeParameter>> Method;
     std::vector<std::shared_ptr<ITypeParameter>> Class;
+    // The C# `static IReadOnlyList<ITypeParameter>[] classTypeParameterLists =
+    // { EmptyList<ITypeParameter>.Instance }` -- entry i holds the OWNING list of the
+    // first i class dummies, grown lazily. The shared ownership keeps the dummy
+    // instances alive so the non-owning `GetClassTypeParameterList` snapshots stay
+    // stable for the process lifetime (the C# static array holds the same
+    // instances forever).
+    std::vector<std::vector<std::shared_ptr<ITypeParameter>>> ClassLists;
 };
 
 DummyTypeParameterCaches& Caches()
 {
     static DummyTypeParameterCaches caches;
+    // The C# array initializer `{ EmptyList<ITypeParameter>.Instance }` -- the lists
+    // cache starts with the one empty-list entry.
+    if (caches.ClassLists.empty()) {
+        caches.ClassLists.emplace_back();
+    }
     return caches;
 }
 
@@ -79,6 +91,41 @@ std::shared_ptr<ITypeParameter> DummyTypeParameter::GetClassTypeParameter(int in
     auto& caches = Caches();
     std::lock_guard<std::mutex> lock(caches.Mutex);
     return GetTypeParameter(caches.Class, ::ILSpy::Decompiler::TypeSystem::SymbolKind::TypeDefinition, index);
+}
+
+std::vector<const ITypeParameter*> DummyTypeParameter::GetClassTypeParameterList(int length)
+{
+    // The C# `internal static IReadOnlyList<ITypeParameter> GetClassTypeParameterList(
+    // int length)`: grow `classTypeParameterLists` until entry `length` exists (each
+    // new entry i is a fresh list of the first i class dummies), then return it.
+    // A negative length is out of range for a std::size_t index (the C# grow-loop's
+    // `tps[length]` would throw IndexOutOfRangeException for a negative index).
+    if (length < 0) {
+        throw std::out_of_range("DummyTypeParameter list length must be non-negative");
+    }
+    auto& caches = Caches();
+    std::lock_guard<std::mutex> lock(caches.Mutex);
+    auto& lists = caches.ClassLists;
+    const auto wanted = static_cast<std::size_t>(length);
+    while (wanted >= lists.size()) {
+        std::vector<std::shared_ptr<ITypeParameter>> newList;
+        newList.reserve(lists.size());
+        for (std::size_t j = 0; j < lists.size(); ++j) {
+            // The caches mutex is already held here; call the internal grow path
+            // directly (GetClassTypeParameter would re-lock the same mutex).
+            newList.push_back(GetTypeParameter(
+                caches.Class,
+                ::ILSpy::Decompiler::TypeSystem::SymbolKind::TypeDefinition,
+                static_cast<int>(j)));
+        }
+        lists.push_back(std::move(newList));
+    }
+    std::vector<const ITypeParameter*> snapshot;
+    snapshot.reserve(lists[wanted].size());
+    for (const auto& tp : lists[wanted]) {
+        snapshot.push_back(tp.get());
+    }
+    return snapshot;
 }
 
 ITypePtr DummyTypeParameter::AcceptVisitor(TypeVisitor& visitor)

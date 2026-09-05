@@ -62,7 +62,12 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `FunctionPointerType.FromSignature`, `ToPrimitiveTypeCode`, and the
   `EnumUnderlyingTypeResolveException`; gold-pinned end-to-end against the
   real engine over the mscorlib+System fixture incl. the FnPtr/CallConv
-  modreq matrix). STARTED (the member entity
+  modreq matrix), and `MinimalCorlib` (the artificial all-known-types module
+  the `minimalCorlibTypeProvider` builds its provider over and
+  `DecompilerTypeSystem`'s missing-known-types fallback appends, with the
+  lifted `DummyTypeParameter.GetClassTypeParameterList`; gold-pinned against
+  the real engine over `MinimalCorlib.Instance`/`CreateWithTypes`). STARTED
+  (the member entity
   family (`MetadataField`/`MetadataMethod`/`MetadataProperty`/
   `MetadataEvent`), the `ResolveType`/`ApplyAttributeTypeVisitor` resolution
   family, interning remain).

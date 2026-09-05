@@ -47,9 +47,11 @@
 //  (d) `ChangeNullability` wraps non-Oblivious annotations into the
 //      `NullabilityAnnotatedTypeParameter` (the nested class of
 //      Implementation/NullabilityAnnotatedType.cs, landed in `ITypeParameter.hpp`).
-//  (e) DEFERRED from the C# file: `GetClassTypeParameterList(int)` (the
-//      `IReadOnlyList<ITypeParameter>` cache backing `UnknownType.TypeParameters` --
-//      no ported consumer yet) and the `ITypeReference.Resolve` / interner surface.
+//  (e) `GetClassTypeParameterList(int)` (the `IReadOnlyList<ITypeParameter>` cache
+//      backing `UnknownType.TypeParameters` and `MinimalCorlib`'s
+//      `CorlibTypeDefinition.TypeParameters`) IS ported (the first consumer landed with
+//      MinimalCorlib); still deferred from the C# file: the `ITypeReference.Resolve` /
+//      interner surface.
 
 #pragma once
 
@@ -76,6 +78,13 @@ public:
     // The C# `GetClassTypeParameter(int index)` -- a cached dummy for the class
     // type parameter at `index`.
     static std::shared_ptr<ITypeParameter> GetClassTypeParameter(int index);
+    // The C# `internal static IReadOnlyList<ITypeParameter> GetClassTypeParameterList(
+    // int length)` -- the cached list of the first `length` class dummies
+    // (`[GetClassTypeParameter(0) .. GetClassTypeParameter(length-1)]`, the empty list
+    // for 0), grown lazily entry-by-entry like the per-index caches. The returned
+    // snapshot is non-owning (the process-lifetime cache owns the dummies; the same
+    // pointers come back for the same `length`).
+    static std::vector<const ITypeParameter*> GetClassTypeParameterList(int length);
 
     // --- IType ---
     TypeKind Kind() const override { return TypeKind::TypeParameter; }
