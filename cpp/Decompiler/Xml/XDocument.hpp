@@ -73,6 +73,10 @@ class XDocument : public XContainer {
 public:
     XDocument() = default;
 
+    // XDocument.Parse(text) -- LoadOptions.None. Implemented in
+    // XmlTextParser.cpp (the XmlReader text-parser stand-in).
+    static std::shared_ptr<XDocument> Parse(const std::string& text);
+
     // The C# `XDocument(XDeclaration? declaration, params object?[] content)`.
     XDocument(XDeclaration declaration, XContent content);
 

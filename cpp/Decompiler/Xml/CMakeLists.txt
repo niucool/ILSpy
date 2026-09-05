@@ -12,11 +12,14 @@
 # slice (XmlWriter -- the flattened XmlWellFormedWriter/
 # XmlEncodedRawTextWriterIndent composition -- plus the ElementWriter walk
 # and the XNode/XElement/XDocument/XAttribute ToString/WriteTo/Save
-# surface). The XmlReader Load/Parse paths extend this directory.
+# surface), and the XML text-parser slice (XmlTextParser: the XmlReader
+# machinery behind XElement.Parse/XDocument.Parse -- LoadOptions.None, the
+# LiteralContentHandler form).
 
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ElementWriter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/XmlConvert.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/XmlTextParser.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/XmlWriter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/XAttribute.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/XContainer.cpp

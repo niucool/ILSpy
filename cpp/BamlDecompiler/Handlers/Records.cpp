@@ -38,6 +38,7 @@
 #include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/IModule.hpp"
+#include "Decompiler/Xml/XmlTextParser.hpp"
 #include "Decompiler/Util/Char.hpp"
 #include "Decompiler/Util/Utf.hpp"
 #include "Decompiler/Xml/XmlConvert.hpp"
@@ -1456,6 +1457,38 @@ std::unique_ptr<BamlElement> PropertyCustomHandler::Translate(
         xamlProp->ToXName(ctx, &parentElement, xamlProp->IsAttachedTo(elemType)),
         std::move(value));
     parentElement.Add(std::move(attr));
+    return nullptr;
+}
+
+// ===== LiteralContentHandler ==================================================
+
+Baml::BamlRecordType LiteralContentHandler::Type() const
+{
+    return Baml::BamlRecordType::LiteralContent;
+}
+
+std::unique_ptr<BamlElement> LiteralContentHandler::Translate(XamlContext& ctx,
+    Baml::BamlNode& node, BamlElement* parent)
+{
+    Baml::LiteralContentRecord& record = CheckedRecord<Baml::LiteralContentRecord>(
+        node, "LiteralContentRecord");
+    // The C# `parent.Xaml` read NREs for a null parent, while a string-Xaml
+    // parent hands the null element to the GetKnownNamespace context (the
+    // ConstructorParameterType convention).
+    if (parent == nullptr)
+        throw std::runtime_error(kNullReferenceMessage);
+    Xml::XElement* context = parent->Xaml.Element.get();
+    auto elem = std::make_shared<Xml::XElement>(
+        ctx.GetKnownNamespace("XData", XamlContext::KnownNamespace_Xaml, context));
+    // The C# `XElement.Parse(record.Value)` -- LoadOptions.None through the
+    // XmlReader text-parser stand-in (cpp/Decompiler/Xml/XmlTextParser).
+    auto content = Xml::ParseElementText(record.Value);
+    elem->Add(Xml::XContent(std::move(content)));
+    // The C# `parent.Xaml.Element.Add(elem)` -- a string-Xaml parent's null
+    // element NREs at the Add (the null-deref convention).
+    if (parent->Xaml.Element == nullptr)
+        throw std::runtime_error(kNullReferenceMessage);
+    parent->Xaml.Element->Add(Xml::XContent(std::move(elem)));
     return nullptr;
 }
 

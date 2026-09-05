@@ -172,6 +172,11 @@ public:
     // XElement.Name setter.
     void Name(XName value) { name_ = std::move(value); }
 
+    // XElement.Parse(text) -- LoadOptions.None (the only form the
+    // BamlDecompiler's LiteralContentHandler uses). Implemented in
+    // XmlTextParser.cpp (the XmlReader text-parser stand-in).
+    static std::shared_ptr<XElement> Parse(const std::string& text);
+
     // XElement.FirstAttribute: the first attribute (in insertion order), or
     // null.
     XAttribute* FirstAttribute() const { return lastAttr_ != nullptr ? lastAttr_->next_ : nullptr; }
@@ -273,6 +278,11 @@ public:
     // XAttribute sibling walks and the attach machinery.
     XAttribute* lastAttr_ = nullptr;
 
+    // internal XElement.AppendAttributeSkipNotify: the list attach (no
+    // duplicate check). C# internal; public for the XmlTextParser load path
+    // (the same access the C# XLinq ContentReader has).
+    void AppendAttributeSkipNotify(std::shared_ptr<XAttribute> attribute);
+
     // The C# internal `name` field: public for the XContainer::Element/
     // Elements lookups (they compare it directly, like the C# internal
     // access). The Name() getter remains the public surface.
@@ -291,10 +301,10 @@ protected:
 private:
     friend class XElementAttributes;
 
-    // internal XElement.AppendAttribute/AppendAttributeSkipNotify: the list
-    // attach (no duplicate check).
+    // internal XElement.AppendAttribute: the list attach with the
+    // parented-node guard (AppendAttributeSkipNotify is public above for
+    // the XmlTextParser load path).
     void AppendAttribute(std::shared_ptr<XAttribute> attribute);
-    void AppendAttributeSkipNotify(std::shared_ptr<XAttribute> attribute);
 
     // private XElement.AttributesEqual: the pairwise attribute comparison
     // behind DeepEquals.

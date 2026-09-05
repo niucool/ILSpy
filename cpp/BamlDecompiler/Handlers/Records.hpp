@@ -458,6 +458,18 @@ public:
         BamlElement* parent) override;
 };
 
+// The C# `internal class LiteralContentHandler : IHandler` -- the x:XData
+// literal content: the record's raw XML text parses through XElement.Parse
+// (LoadOptions.None -- the XmlTextParser slice) under the XData element in
+// the xaml known namespace and attaches to the parent's element.
+class LiteralContentHandler : public IHandler {
+public:
+    Baml::BamlRecordType Type() const override;
+
+    std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
+        BamlElement* parent) override;
+};
+
 // The C# `internal class PropertyCustomHandler : IHandler` -- the property
 // attribute whose value the BAML stream carries in a serializer's binary
 // form: the 0xfff-masked serializer type id selects the KnownTypes

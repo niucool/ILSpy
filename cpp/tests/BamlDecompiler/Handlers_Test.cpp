@@ -141,13 +141,13 @@ protected:
     }
 };
 
-// The manifest: the 36 ported rows, every record type distinct, each inside
+// The manifest: the 37 ported rows, every record type distinct, each inside
 // the gold registry inventory (the HandlerMapTest guard), with the class
 // identities the manifest constructs.
-TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheThirtySixPortedRows)
+TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheThirtySevenPortedRows)
 {
     std::vector<std::unique_ptr<IHandler>> handlers = HandlerMap::CreateBuiltinHandlers();
-    ASSERT_EQ(handlers.size(), 36u);
+    ASSERT_EQ(handlers.size(), 37u);
 
     const Baml::BamlRecordType expected[] = {
         Baml::BamlRecordType::DocumentStart,
@@ -183,11 +183,12 @@ TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheThirtySixPortedRows)
         Baml::BamlRecordType::StaticResourceId,
         Baml::BamlRecordType::OptimizedStaticResource,
         Baml::BamlRecordType::PropertyWithStaticResourceId,
+        Baml::BamlRecordType::LiteralContent,
         Baml::BamlRecordType::XmlnsProperty,
         Baml::BamlRecordType::PropertyTypeReference,
         Baml::BamlRecordType::PropertyWithExtension,
     };
-    ASSERT_EQ(std::size(expected), 36u);
+    ASSERT_EQ(std::size(expected), 37u);
     for (Baml::BamlRecordType type : expected) {
         bool found = false;
         for (const auto& handler : handlers)
@@ -230,6 +231,11 @@ TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheThirtySixPortedRows)
         HandlerMap::LookupHandler(Baml::BamlRecordType::PropertyCustom);
     ASSERT_NE(propertyCustom, nullptr);
     EXPECT_NE(dynamic_cast<Handlers::PropertyCustomHandler*>(propertyCustom), nullptr);
+    // The LiteralContent row (the 37th -- the XmlTextParser slice unblocked
+    // it): the x:XData literal content.
+    IHandler* literalContent = HandlerMap::LookupHandler(Baml::BamlRecordType::LiteralContent);
+    ASSERT_NE(literalContent, nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::LiteralContentHandler*>(literalContent), nullptr);
     EXPECT_EQ(dynamic_cast<Handlers::PropertyHandler*>(propertyCustom), nullptr);
     // The four property-element blocks and the two constructor handlers.
     EXPECT_NE(dynamic_cast<Handlers::PropertyComplexHandler*>(
@@ -3053,4 +3059,153 @@ TEST_F(HandlersTest, PropertyCustomNullParentThrowsTheNetNre)
         EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
     }
 }
+// ===== The LiteralContentHandler drives (the 37th manifest row: the
+// x:XData literal content through the XmlTextParser slice) =====
+
+// J1/J8: the simple and declaration-led forms (the XData element in the xaml
+// known namespace, the parsed content nested, the parent render indented).
+TEST_F(HandlersTest, LiteralContentSimpleAndDeclRenderTheGold)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = Lookup(Baml::BamlRecordType::LiteralContent);
+
+    {
+        auto record = std::make_unique<Baml::LiteralContentRecord>();
+        record->Value = "<x/>";
+        Baml::BamlRecordNode node(record.get());
+        BamlElement parentElem = MakeParentElem();
+        std::unique_ptr<BamlElement> result = handler->Translate(*ctx, node, &parentElem);
+        EXPECT_EQ(result, nullptr);
+        EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+            "<Parent>\r\n  <XData xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">"
+            "\r\n    <x xmlns=\"\" />\r\n  </XData>\r\n</Parent>");
+    }
+    {
+        auto record = std::make_unique<Baml::LiteralContentRecord>();
+        record->Value = "<?xml version=\"1.0\"?><x/>";
+        Baml::BamlRecordNode node(record.get());
+        BamlElement parentElem = MakeParentElem();
+        std::unique_ptr<BamlElement> result = handler->Translate(*ctx, node, &parentElem);
+        EXPECT_EQ(result, nullptr);
+        EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+            "<Parent>\r\n  <XData xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">"
+            "\r\n    <x xmlns=\"\" />\r\n  </XData>\r\n</Parent>");
+    }
+}
+
+// J2: the rich content (attributes, text, children, a comment).
+TEST_F(HandlersTest, LiteralContentRichRendersTheGold)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = Lookup(Baml::BamlRecordType::LiteralContent);
+
+    auto record = std::make_unique<Baml::LiteralContentRecord>();
+    record->Value = "<r attr=\"1\">t<c/><!--n--></r>";
+    Baml::BamlRecordNode node(record.get());
+    BamlElement parentElem = MakeParentElem();
+
+    std::unique_ptr<BamlElement> result = handler->Translate(*ctx, node, &parentElem);
+    EXPECT_EQ(result, nullptr);
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent>\r\n  <XData xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">"
+        "\r\n    <r attr=\"1\" xmlns=\"\">t<c /><!--n--></r>\r\n  </XData>\r\n</Parent>");
+}
+
+// J3/J4: the whitespace-run content (skipped) and the entity/char refs.
+TEST_F(HandlersTest, LiteralContentWhitespaceAndEntitiesRenderTheGold)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = Lookup(Baml::BamlRecordType::LiteralContent);
+
+    {
+        auto record = std::make_unique<Baml::LiteralContentRecord>();
+        record->Value = "<r>  <c/>  </r>";
+        Baml::BamlRecordNode node(record.get());
+        BamlElement parentElem = MakeParentElem();
+        handler->Translate(*ctx, node, &parentElem);
+        EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+            "<Parent>\r\n  <XData xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">"
+            "\r\n    <r xmlns=\"\">\r\n      <c />\r\n    </r>\r\n  </XData>\r\n</Parent>");
+    }
+    {
+        auto record = std::make_unique<Baml::LiteralContentRecord>();
+        record->Value = "<r>&#65;&amp;&lt;z</r>";
+        Baml::BamlRecordNode node(record.get());
+        BamlElement parentElem = MakeParentElem();
+        handler->Translate(*ctx, node, &parentElem);
+        EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+            "<Parent>\r\n  <XData xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">"
+            "\r\n    <r xmlns=\"\">A&amp;&lt;z</r>\r\n  </XData>\r\n</Parent>");
+    }
+}
+
+// J5: namespaced content.
+TEST_F(HandlersTest, LiteralContentNamespacedRendersTheGold)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = Lookup(Baml::BamlRecordType::LiteralContent);
+
+    auto record = std::make_unique<Baml::LiteralContentRecord>();
+    record->Value = "<r xmlns=\"urn:x\"><c/></r>";
+    Baml::BamlRecordNode node(record.get());
+    BamlElement parentElem = MakeParentElem();
+
+    std::unique_ptr<BamlElement> result = handler->Translate(*ctx, node, &parentElem);
+    EXPECT_EQ(result, nullptr);
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent>\r\n  <XData xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">"
+        "\r\n    <r xmlns=\"urn:x\">\r\n      <c />\r\n    </r>\r\n  </XData>\r\n</Parent>");
+}
+
+// J6/J7: the null parent and the string-Xaml parent (both the probed .NET
+// NRE messages -- the parent.Xaml read and the parent.Xaml.Element.Add).
+TEST_F(HandlersTest, LiteralContentNullAndStringXamlParentsThrowTheNRE)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = Lookup(Baml::BamlRecordType::LiteralContent);
+
+    auto record = std::make_unique<Baml::LiteralContentRecord>();
+    record->Value = "<x/>";
+    Baml::BamlRecordNode node(record.get());
+
+    try {
+        handler->Translate(*ctx, node, nullptr);
+        FAIL() << "the null-parent translate must throw";
+    } catch (const std::runtime_error& ex) {
+        EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
+    }
+
+    // The string-Xaml parent: GetKnownNamespace takes the null context (no
+    // throw), then parent.Xaml.Element NREs at the Add.
+    BamlElement parentElem(nullptr);
+    parentElem.Xaml = std::string("pn");
+    try {
+        handler->Translate(*ctx, node, &parentElem);
+        FAIL() << "the string-Xaml parent must throw";
+    } catch (const std::runtime_error& ex) {
+        EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
+    }
+}
+
+// J9: the malformed value (the XmlException propagates through the handler
+// with the exact parser message).
+TEST_F(HandlersTest, LiteralContentMalformedValuePropagatesTheXmlException)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = Lookup(Baml::BamlRecordType::LiteralContent);
+
+    auto record = std::make_unique<Baml::LiteralContentRecord>();
+    record->Value = "<r></c>";
+    Baml::BamlRecordNode node(record.get());
+    BamlElement parentElem = MakeParentElem();
+
+    try {
+        handler->Translate(*ctx, node, &parentElem);
+        FAIL() << "the malformed value must throw";
+    } catch (const Xml::XmlException& ex) {
+        EXPECT_STREQ(ex.what(),
+            "The 'r' start tag on line 1 position 2 does not match the end tag of 'c'. Line 1, position 6.");
+    }
+}
+
 } // namespace
