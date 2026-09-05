@@ -977,6 +977,31 @@ public:
     // WriteModuleContents walk). Empty for an invalid file; never throws.
     std::vector<std::uint32_t> GetTopLevelTypeDefinitions() const;
 
+    // The C# `public TypeDefinitionHandle GetTypeDefinition(TopLevelTypeName
+    // typeName)` (MetadataFile.cs line 167): the reverse lookup over this
+    // module's TOP-LEVEL TypeDefs -- every non-nested row keyed by its
+    // (namespace, arity-split name, type-parameter-count) triple, the LAST
+    // duplicate row winning (the C# dictionary-indexer insert), the lazy
+    // dictionary cached across calls (the C# LazyInit cache; the port builds
+    // it on first use and keeps it in the pimpl). Returns the raw TypeDef
+    // token, 0 (the nil handle) for a miss -- a nested type spelled as a
+    // top-level name never hits (nested rows are skipped), and neither does
+    // an arity-mismatched query. 0 for an invalid file (the never-throw
+    // invalid-file convention); never throws.
+    std::uint32_t GetTypeDefinition(
+        const TypeSystem::TopLevelTypeName& typeName) const;
+
+    // The C# `public ExportedTypeHandle GetTypeForwarder(FullTypeName
+    // typeName)` (MetadataFile.cs line 203): the reverse lookup over this
+    // module's ExportedType rows (the type forwarders) -- every row keyed by
+    // its full name through the SRMExtensions ExportedType reader (a nested
+    // forwarder keys on its declaring-chain name), the LAST duplicate
+    // winning, cached like GetTypeDefinition. Returns the raw ExportedType
+    // token, 0 (the nil handle) for a miss. 0 for an invalid file; never
+    // throws.
+    std::uint32_t GetTypeForwarder(
+        const TypeSystem::FullTypeName& typeName) const;
+
     // The C# `ResourceType` enum (ICSharpCode.Decompiler/Metadata/Resource.cs):
     // the ManifestResource row's Implementation column decides it -- a nil
     // column is Embedded, an AssemblyRef target is AssemblyLinked, anything

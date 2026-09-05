@@ -90,6 +90,25 @@ TypeSystem::FullTypeName GetFullTypeName(const MetadataFile& metadata, std::uint
 TypeSystem::FullTypeName GetFullTypeNameFromSpecification(
     const MetadataFile& metadata, const std::uint8_t* data, std::size_t size);
 
+// The C# `public static FullTypeName GetFullTypeName(this ExportedType type,
+// MetadataReader metadata)` (SRMExtensions.cs line 461): an ExportedType
+// (table 0x27) row's full name -- the row's own name split through
+// ReflectionHelper.SplitTypeParameterCountFromReflectionName, then either
+// the top-level form (ns + name, the row's own TypeNamespace column) or, when
+// the row's Implementation column targets ANOTHER ExportedType row (the
+// nested-forwarder chain the .NET facades carry), the outer row's full name
+// with this row nested inside it. The key
+// MetadataFile.GetTypeForwarder(FullTypeName) builds its reverse lookup
+// from. The C# overload takes the ExportedType ROW struct (never nil), so
+// the port's token-shaped entry adds the reader-family nil contract itself:
+// std::invalid_argument for a nil token, std::out_of_range for an invalid
+// row (the GetFullTypeNameFromReference/Definition convention). The cyclic
+// chain the C# would infinitely recurse on is capped at the family's
+// kMaxNestingWalkDepth (a documented divergence confined to corrupt
+// metadata).
+TypeSystem::FullTypeName GetFullTypeNameFromExportedType(
+    const MetadataFile& metadata, std::uint32_t exportedTypeToken);
+
 // The C# `public static EntityHandle GetDeclaringType(this EntityHandle
 // entity, MetadataReader metadata)` (SRMExtensions.cs): the declaring type
 // of a member entity, as a raw token (0 = the nil handle -- a top-level

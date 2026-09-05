@@ -88,6 +88,33 @@ FullTypeName GetFullTypeNameFromDefinitionImpl(const MetadataFile& metadata,
         .NestedType(name, typeParameterCount);
 }
 
+// The ExportedType row reader body (SRMExtensions.cs
+// `GetFullTypeName(this ExportedType, MetadataReader)`): split the row's
+// name, then either compose the top-level name or recurse into the outer
+// ExportedType the Implementation column targets and nest. The C# recurses
+// unconditionally on a cyclic Implementation chain and stack-overflows; the
+// port stops at the family's depth cap and treats the current row as
+// top-level -- a documented divergence confined to corrupt metadata.
+FullTypeName GetFullTypeNameFromExportedTypeImpl(const MetadataFile& metadata,
+                                                  std::uint32_t exportedTypeToken,
+                                                  int depth) {
+    auto row = metadata.GetExportedType(exportedTypeToken);
+    if (!row)
+        throw std::out_of_range(
+            "GetFullTypeNameFromExportedType: invalid token");
+    int typeParameterCount = 0;
+    std::string name = TypeSystem::SplitTypeParameterCountFromReflectionName(
+        row->Name, typeParameterCount);
+    // HandleKind.ExportedType == 0x27: the nested-forwarder chain.
+    if ((row->ImplementationToken >> 24) == 0x27
+        && depth < kMaxNestingWalkDepth) {
+        return GetFullTypeNameFromExportedTypeImpl(
+                   metadata, row->ImplementationToken, depth + 1)
+            .NestedType(name, typeParameterCount);
+    }
+    return FullTypeName(TopLevelTypeName(row->Namespace, name, typeParameterCount));
+}
+
 } // namespace
 
 // The TypeSpec blob walker (the FullTypeNameSignatureDecoder shrinking
@@ -304,6 +331,17 @@ FullTypeName GetFullTypeNameFromSpecification(const MetadataFile& metadata,
     const std::uint8_t* data, std::size_t size) {
     TypeNameBlobCursor cursor(data, size);
     return DecodeTypeNameBlob(metadata, cursor);
+}
+
+FullTypeName GetFullTypeNameFromExportedType(const MetadataFile& metadata,
+                                            std::uint32_t exportedTypeToken) {
+    // The C# overload takes the ExportedType ROW struct (never nil); the
+    // port's token-shaped entry carries the reader-family nil contract
+    // itself (the GetFullTypeNameFromReference/Definition convention).
+    if (exportedTypeToken == 0)
+        throw std::invalid_argument(
+            "GetFullTypeNameFromExportedType: nil token");
+    return GetFullTypeNameFromExportedTypeImpl(metadata, exportedTypeToken, 0);
 }
 
 std::uint32_t GetDeclaringType(const MetadataFile& metadata,

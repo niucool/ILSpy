@@ -23,6 +23,7 @@
 #include "Decompiler/Metadata/SignatureTypeProvider.hpp"
 #include "Decompiler/Metadata/SRMExtensions.hpp"
 #include "Decompiler/Metadata/SignatureDecoder.hpp"
+#include "Decompiler/TypeSystem/ReflectionHelper.hpp"
 #include "Decompiler/TypeSystem/TypeKindDerivation.hpp"
 
 #include "Decompiler/Metadata/Ecma335/WinmdInclude.hpp"
@@ -32,6 +33,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -89,6 +91,48 @@ struct MetadataFile::Impl {
     std::unique_ptr<winmd::reader::database> db;
     std::shared_ptr<const std::vector<std::uint8_t>> image;  // for method bodies
     std::unique_ptr<MethodBodyReader> bodyReader;
+
+    // The GetTypeDefinition / GetTypeForwarder reverse-lookup caches (the
+    // C# LazyInit dictionaries, built on first use -- the port is
+    // single-threaded, so a plain built-flag gate is the VolatileRead/
+    // GetOrSet pair's behavioral equivalent). The name keys are ordered
+    // maps over the value types' structural fields (the C# Dictionary
+    // hash is an implementation detail; only membership/lookup order at
+    // the key level is observable, and both containers agree on that).
+    struct TopLevelTypeNameOrder {
+        bool operator()(const TypeSystem::TopLevelTypeName& a,
+                        const TypeSystem::TopLevelTypeName& b) const {
+            if (a.Namespace() != b.Namespace()) return a.Namespace() < b.Namespace();
+            if (a.Name() != b.Name()) return a.Name() < b.Name();
+            return a.TypeParameterCount() < b.TypeParameterCount();
+        }
+    };
+    struct FullTypeNameOrder {
+        bool operator()(const TypeSystem::FullTypeName& a,
+                        const TypeSystem::FullTypeName& b) const {
+            const auto& ta = a.GetTopLevelTypeName();
+            const auto& tb = b.GetTopLevelTypeName();
+            TopLevelTypeNameOrder topLevelOrder;
+            if (topLevelOrder(ta, tb)) return true;
+            if (topLevelOrder(tb, ta)) return false;
+            int n = std::min(a.NestingLevel(), b.NestingLevel());
+            for (int i = 0; i < n; i++) {
+                std::string na = a.GetNestedTypeName(i);
+                std::string nb = b.GetNestedTypeName(i);
+                if (na != nb) return na < nb;
+                int ca = a.GetNestedTypeAdditionalTypeParameterCount(i);
+                int cb = b.GetNestedTypeAdditionalTypeParameterCount(i);
+                if (ca != cb) return ca < cb;
+            }
+            return a.NestingLevel() < b.NestingLevel();
+        }
+    };
+    std::map<TypeSystem::TopLevelTypeName, std::uint32_t,
+             TopLevelTypeNameOrder> typeLookup;
+    bool typeLookupBuilt = false;
+    std::map<TypeSystem::FullTypeName, std::uint32_t,
+             FullTypeNameOrder> typeForwarderLookup;
+    bool typeForwarderLookupBuilt = false;
 
     explicit Impl(std::string_view p) : path(p) {
         // winmd throws std::invalid_argument for a missing/unreadable file (out
@@ -2403,6 +2447,78 @@ std::vector<std::uint32_t> MetadataFile::GetTopLevelTypeDefinitions() const {
         result.clear();
     }
     return result;
+}
+
+// The C# `public TypeDefinitionHandle GetTypeDefinition(TopLevelTypeName
+// typeName)` (MetadataFile.cs line 167): the top-level-type reverse lookup.
+// See the header for the full contract.
+std::uint32_t MetadataFile::GetTypeDefinition(
+    const TypeSystem::TopLevelTypeName& typeName) const {
+    if (!IsValid()) return 0;
+    try {
+        if (!impl_->typeLookupBuilt) {
+            // The C# build walk: every non-nested TypeDef row keyed by its
+            // (namespace, arity-split name, count) triple, the dictionary
+            // indexer overwriting duplicates (the LAST row wins).
+            std::vector<std::uint32_t> nestedRows;
+            nestedRows.reserve(impl_->db->NestedClass.size());
+            for (std::uint32_t i = 0;
+                 i < impl_->db->NestedClass.size(); i++) {
+                nestedRows.push_back(
+                    impl_->db->NestedClass.get_value<std::uint32_t>(i, 0));
+            }
+            for (std::uint32_t row = 1;
+                 row <= impl_->db->TypeDef.size(); row++) {
+                if (std::find(nestedRows.begin(), nestedRows.end(), row)
+                    != nestedRows.end())
+                    continue;  // the C# `td.GetDeclaringType().IsNil` skip
+                auto t = impl_->db->TypeDef[row - 1];
+                int typeParameterCount = 0;
+                std::string name =
+                    TypeSystem::SplitTypeParameterCountFromReflectionName(
+                        std::string{t.TypeName()}, typeParameterCount);
+                impl_->typeLookup[TypeSystem::TopLevelTypeName(
+                                       std::string{t.TypeNamespace()}, name,
+                                       typeParameterCount)] =
+                    (0x02u << 24) | row;
+            }
+            impl_->typeLookupBuilt = true;
+        }
+        auto it = impl_->typeLookup.find(typeName);
+        return it == impl_->typeLookup.end() ? 0 : it->second;
+    } catch (const std::exception&) {
+        // Corrupt columns inside an otherwise-valid file degrade to the
+        // miss arm (the never-throw surface convention).
+        return 0;
+    }
+}
+
+// The C# `public ExportedTypeHandle GetTypeForwarder(FullTypeName typeName)`
+// (MetadataFile.cs line 203): the type-forwarder reverse lookup. See the
+// header for the full contract.
+std::uint32_t MetadataFile::GetTypeForwarder(
+    const TypeSystem::FullTypeName& typeName) const {
+    if (!IsValid()) return 0;
+    try {
+        if (!impl_->typeForwarderLookupBuilt) {
+            // The C# build walk: every ExportedType row keyed by its full
+            // name through the ExportedType reader (nested rows key on
+            // their declaring-chain names), the LAST duplicate winning.
+            for (const auto& row : GetExportedTypes()) {
+                impl_->typeForwarderLookup[
+                    GetFullTypeNameFromExportedType(*this, row.Token)] =
+                    row.Token;
+            }
+            impl_->typeForwarderLookupBuilt = true;
+        }
+        auto it = impl_->typeForwarderLookup.find(typeName);
+        return it == impl_->typeForwarderLookup.end() ? 0 : it->second;
+    } catch (const std::exception&) {
+        // Corrupt rows degrade to the miss arm (the never-throw surface
+        // convention; the C# BadImageFormatException out of the reader
+        // surfaces differently, but the CLI never reaches it).
+        return 0;
+    }
 }
 
 // The PE-header values the module-header lines render. See the header for

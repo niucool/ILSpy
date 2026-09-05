@@ -24,8 +24,12 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   baseline: method-body decoding (ECMA-335 II.25.4 tiny/fat + exception handlers),
   signature decoding (Type/Method/Field -> IType), the entity surface (TypeDef/
   Method/Field/Property + base types + custom attributes + TypeKind derivation),
-  token resolution, and an IL text disassembler. DONE except: Portable PDB debug
-  tables, WebCIL, single-file bundles, the assembly resolver (`.deps.json`).
+  token resolution, the `MetadataFile` name reverse lookups
+  (`GetTypeDefinition(TopLevelTypeName)` / `GetTypeForwarder(FullTypeName)` --
+  the lazy dictionaries the Phase-2 `MetadataModule` back end resolves
+  through, plus the `SRMExtensions` ExportedType full-name reader with the
+  nested-forwarder-chain walk), and an IL text disassembler. DONE except:
+  WebCIL, the assembly resolver (`.deps.json`).
 - **Phase 2** -- `Decompiler/TypeSystem/`: naming primitives (`TopLevelTypeName`,
   `FullTypeName`), `KnownTypeCode` (full 60-entry table), the `IType` hierarchy
   (`KnownType`/`SimpleType`/`ParameterizedType`/`ArrayType`/`ByReferenceType`/
