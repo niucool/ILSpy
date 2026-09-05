@@ -42,6 +42,16 @@
 //    (the key node and its value element), and the IDeferHandler arm
 //    renders the x:Key element (the resolved string value / the
 //    TypeExtension child) that the ElementHandler defer branch drives.
+//  * the static-resource family (the StaticResourceStart block, the
+//    OptimizedStaticResource leaf, and the StaticResourceId /
+//    PropertyWithStaticResourceId consumers): the resource handlers'
+//    Translate registers the node under the nearest annotated SIBLING
+//    (the key node -- the real defer-block wiring the registrations
+//    precede the consumer-carrying value blocks in document order), and
+//    the IDeferHandler arms render the StaticResourceStart element / the
+//    {StaticResource} extension element the consumers re-drive; the
+//    consumers walk the ancestors for the key whose StaticResources list
+//    holds the referenced node.
 //  * the nine null-returning handlers (AssemblyInfo, AttributeInfo,
 //    ContentProperty, DeferableContentStart, LineNumberAndPosition,
 //    LinePosition, PIMapping, TypeInfo, TypeSerializerInfo).
@@ -60,6 +70,14 @@
 //  * The C# `Debug.Assert`/`Debug.WriteLine` bodies (DeferableContentStart's
 //    footer check, ContentProperty's TODO) are compiled out of the release
 //    assembly the tool ships -- the port targets the release behavior.
+//  * The C# `StaticResourceIdHandler.Translate` adds the rendered element
+//    to `parent.Children` AND returns it -- `ProcessChildren` then re-adds
+//    the same reference into the SAME list (no C# reader ever iterates
+//    BamlElement.Children; the double-add is write-only bookkeeping). The
+//    port's owning children vector cannot hold one element twice, so the
+//    handler returns the element and leaves the list add to its caller
+//    (`ProcessChildren`'s add is the single owner; the direct-call
+//    parent-list population is the documented divergence).
 //  * The annotations hold OWNING shared_ptrs (the GC-rooting convention:
 //    the payload must survive the XamlContext).
 
@@ -279,6 +297,70 @@ public:
 
 // The C# `internal class TypeSerializerInfoHandler : IHandler`.
 class TypeSerializerInfoHandler : public IHandler {
+public:
+    Baml::BamlRecordType Type() const override;
+
+    std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
+        BamlElement* parent) override;
+};
+
+// The C# `internal class StaticResourceStartHandler : IHandler,
+// IDeferHandler`: the deferred static-resource VALUE block. Translate
+// registers the block node under the nearest annotated sibling (the key
+// node the x:Key handler annotated) and contributes no element;
+// TranslateDefer renders the block's typed element and walks its children
+// (the consumer's re-render -- no ResolveNamespace/rename pair and no
+// defer branch of its own, unlike ElementHandler).
+class StaticResourceStartHandler : public IHandler, public IDeferHandler {
+public:
+    Baml::BamlRecordType Type() const override;
+
+    std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
+        BamlElement* parent) override;
+
+    std::unique_ptr<BamlElement> TranslateDefer(XamlContext& ctx,
+        Baml::BamlNode& node, BamlElement* parent) override;
+};
+
+// The C# `internal class StaticResourceIdHandler : IHandler`: the
+// deferred static-resource REFERENCE -- walks the ancestors for the key
+// whose StaticResources list holds the referenced node (skipping keys
+// whose list is too short), re-drives the resource handler's TranslateDefer
+// into the parent, and returns the rendered element (see the file note for
+// the children-list ownership divergence).
+class StaticResourceIdHandler : public IHandler {
+public:
+    Baml::BamlRecordType Type() const override;
+
+    std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
+        BamlElement* parent) override;
+};
+
+// The C# `internal class OptimizedStaticResourceHandler : IHandler,
+// IDeferHandler`: the optimized (short-form) static-resource reference.
+// Translate registers the leaf node under the nearest annotated sibling;
+// TranslateDefer renders the {StaticResource} extension element whose
+// Ctor child carries the key -- the {x:Type} TypeExtension element, the
+// {x:Static} StaticExtension element (the resolved property's name, or
+// the KnownThings resource row for the high wire ids with the 232/464/467
+// magic-range arithmetic), or the resolved string.
+class OptimizedStaticResourceHandler : public IHandler, public IDeferHandler {
+public:
+    Baml::BamlRecordType Type() const override;
+
+    std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
+        BamlElement* parent) override;
+
+    std::unique_ptr<BamlElement> TranslateDefer(XamlContext& ctx,
+        Baml::BamlNode& node, BamlElement* parent) override;
+};
+
+// The C# `internal class PropertyWithStaticResourceIdHandler : IHandler`:
+// the deferred static-resource reference in its property-element form --
+// renders the property element, re-drives the resource handler's
+// TranslateDefer into it, and finishes with the ResolveNamespace + rename
+// pair over the property element.
+class PropertyWithStaticResourceIdHandler : public IHandler {
 public:
     Baml::BamlRecordType Type() const override;
 

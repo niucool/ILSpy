@@ -41,9 +41,10 @@
 //    itself, the info records are skipped, and the dispatch order is the
 //    document order. The port tests drive stub handlers through the same
 //    fixture shape for the wiring machinery; the landed real-handler slices
-//    (28 rows -- the Handlers/Records leaf handlers, the property-family
-//    records, the x:Key defer family, and the Handlers/Blocks
-//    Document/Element/key/property-element/constructor handlers) are driven
+//    (32 rows -- the Handlers/Records leaf handlers, the property-family
+//    records, the x:Key defer family, the static-resource family, and the
+//    Handlers/Blocks Document/Element/key/property-element/constructor
+//    handlers) are driven
 //    end-to-end against
 //    the probe's render gold in Handlers_Test.cpp.
 

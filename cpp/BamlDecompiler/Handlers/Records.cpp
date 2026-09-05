@@ -35,11 +35,14 @@
 #include "Decompiler/Xml/XAttribute.hpp"
 
 #include <any>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <variant>
+#include <vector>
 
 namespace ILSpy::BamlDecompiler::Handlers {
 
@@ -78,6 +81,20 @@ Xml::XElement& ParentElementOf(BamlElement* parent)
     if (parent == nullptr || !parent->Xaml.Element)
         throw std::runtime_error(kNullReferenceMessage);
     return *parent->Xaml.Element;
+}
+
+// The C# `(BamlBlockNode)node` cast of the static-resource block handlers
+// (the Blocks.cpp BlockNodeOf twin): only a leaf node can fail it (the
+// block-opening record types always parse as blocks), so the source type in
+// the .NET InvalidCastException message is exact.
+Baml::BamlBlockNode& BlockNodeOf(Baml::BamlNode& node)
+{
+    auto* blockNode = dynamic_cast<Baml::BamlBlockNode*>(&node);
+    if (blockNode == nullptr)
+        throw std::runtime_error(
+            "Unable to cast object of type 'ICSharpCode.BamlDecompiler.Baml.BamlRecordNode' "
+            "to type 'ICSharpCode.BamlDecompiler.Baml.BamlBlockNode'.");
+    return *blockNode;
 }
 
 // The C# `ctx.GetKnownNamespace(name, ...)` over a null-resolved string id:
@@ -545,6 +562,317 @@ std::unique_ptr<BamlElement> TypeSerializerInfoHandler::Translate(XamlContext&,
     Baml::BamlNode&, BamlElement*)
 {
     return nullptr;
+}
+
+// ===== the static-resource family ==========================================
+
+namespace {
+
+// The C# registration body the StaticResourceStart and
+// OptimizedStaticResource Translate arms share (both handlers carry the
+// identical FindKeyInSiblings + Add pair over their own record casts).
+void RegisterStaticResource(Baml::BamlNode& node)
+{
+    // The C# `var key = XamlResourceKey.FindKeyInSiblings(node)` -- a null
+    // answer NREs at the `key.StaticResources` read (the unregistered-
+    // sibling arm).
+    std::shared_ptr<Xaml::XamlResourceKey> key =
+        Xaml::XamlResourceKey::FindKeyInSiblings(node);
+    if (key == nullptr)
+        throw std::runtime_error(kNullReferenceMessage);
+    key->StaticResources.push_back(&node);
+}
+
+// The C# `((IDeferHandler)HandlerMap.LookupHandler(resNode.Type))` cast of
+// the two consumer handlers: a null handler NREs at the TranslateDefer
+// call (the C# null cast succeeds); a non-defer handler is the
+// InvalidCastException -- reachable through a hand-registered resource node
+// of another record type, with the concrete class name rendered through the
+// fixed '<handler>' placeholder (the Blocks.cpp convention).
+IDeferHandler* DeferHandlerOf(Baml::BamlNode& resNode)
+{
+    IHandler* handler = HandlerMap::LookupHandler(resNode.Type());
+    if (handler == nullptr)
+        throw std::runtime_error(kNullReferenceMessage);
+    auto* deferHandler = dynamic_cast<IDeferHandler*>(handler);
+    if (deferHandler == nullptr)
+        throw std::runtime_error(
+            "Unable to cast object of type '<handler>' to type "
+            "'ICSharpCode.BamlDecompiler.IDeferHandler'.");
+    return deferHandler;
+}
+
+// The C# do-while ancestors walk the two consumer handlers share: keep
+// walking while the found key's StaticResources list is too short for the
+// id, starting the search at the node's own parent (a null parent is the
+// FindKeyInAncestors(null) NRE at n.Annotation).
+Baml::BamlNode& FindStaticResourceNode(Baml::BamlNode& node,
+    std::uint16_t staticResourceId)
+{
+    Baml::BamlNode* found = &node;
+    std::shared_ptr<Xaml::XamlResourceKey> key;
+    do {
+        Baml::BamlNode* next = found->Parent;
+        if (next == nullptr)
+            throw std::runtime_error(kNullReferenceMessage);
+        key = Xaml::XamlResourceKey::FindKeyInAncestors(*next, found);
+    } while (key != nullptr && staticResourceId >= key->StaticResources.size());
+
+    // The C# `throw new Exception("Cannot find StaticResource @" +
+    // node.Record.Position)` -- the plain System.Exception over the
+    // record's absolute stream position.
+    if (key == nullptr)
+        throw std::runtime_error("Cannot find StaticResource @" +
+            std::to_string(node.Record()->Position));
+    return *key->StaticResources[staticResourceId];
+}
+
+} // namespace
+
+// ===== StaticResourceStartHandler ===========================================
+
+Baml::BamlRecordType StaticResourceStartHandler::Type() const
+{
+    return Baml::BamlRecordType::StaticResourceStart;
+}
+
+std::unique_ptr<BamlElement> StaticResourceStartHandler::Translate(
+    XamlContext&, Baml::BamlNode& node, BamlElement*)
+{
+    // The C# `var record = (StaticResourceStartRecord)((BamlBlockNode)
+    // node).Record` -- the cast is the only observable behavior (the record
+    // local is unused): a null header casts fine, a wrong-typed header is
+    // the InvalidCastException (the fixed '<record>' placeholder).
+    Baml::BamlBlockNode& blockNode = BlockNodeOf(node);
+    if (blockNode.Header != nullptr &&
+        dynamic_cast<Baml::StaticResourceStartRecord*>(blockNode.Header) == nullptr)
+        throw std::runtime_error(
+            "Unable to cast object of type 'ICSharpCode.BamlDecompiler.Baml.<record>' "
+            "to type 'ICSharpCode.BamlDecompiler.Baml.StaticResourceStartRecord'.");
+    RegisterStaticResource(node);
+    return nullptr;
+}
+
+std::unique_ptr<BamlElement> StaticResourceStartHandler::TranslateDefer(
+    XamlContext& ctx, Baml::BamlNode& node, BamlElement* parent)
+{
+    // The C# `var record = (StaticResourceStartRecord)((BamlBlockNode)node)
+    // .Record` -- a headerless block keeps the null-cast shape and NREs at
+    // the TypeId read; a wrong-typed header is the InvalidCastException
+    // (the KeyElementStartHandler precedent).
+    Baml::BamlBlockNode& blockNode = BlockNodeOf(node);
+    Baml::BamlRecord* header = blockNode.Header;
+    if (header == nullptr)
+        throw std::runtime_error(kNullReferenceMessage);
+    auto* record = dynamic_cast<Baml::StaticResourceStartRecord*>(header);
+    if (record == nullptr)
+        throw std::runtime_error(
+            "Unable to cast object of type 'ICSharpCode.BamlDecompiler.Baml.<record>' "
+            "to type 'ICSharpCode.BamlDecompiler.Baml.StaticResourceStartRecord'.");
+
+    auto doc = std::make_unique<BamlElement>(&node);
+    std::shared_ptr<Xaml::XamlType> elemType = ctx.ResolveTypeOwning(record->TypeId);
+    doc->Xaml = std::make_shared<Xml::XElement>(elemType->ToXName(ctx));
+    doc->Xaml.Element->AddAnnotation(elemType);
+    // The C# `parent.Xaml.Element.Add(...)`: the null-parent deref NREs.
+    if (parent == nullptr || !parent->Xaml.Element)
+        throw std::runtime_error(kNullReferenceMessage);
+    parent->Xaml.Element->Add(doc->Xaml.Element);
+    HandlerMap::ProcessChildren(ctx, blockNode, *doc);
+    return doc;
+}
+
+// ===== StaticResourceIdHandler ==============================================
+
+Baml::BamlRecordType StaticResourceIdHandler::Type() const
+{
+    return Baml::BamlRecordType::StaticResourceId;
+}
+
+std::unique_ptr<BamlElement> StaticResourceIdHandler::Translate(XamlContext& ctx,
+    Baml::BamlNode& node, BamlElement* parent)
+{
+    Baml::StaticResourceIdRecord& record =
+        CheckedRecord<Baml::StaticResourceIdRecord>(node, "StaticResourceIdRecord");
+    Baml::BamlNode& resNode = FindStaticResourceNode(node, record.StaticResourceId);
+    std::unique_ptr<BamlElement> resElem =
+        DeferHandlerOf(resNode)->TranslateDefer(ctx, resNode, parent);
+    // The C# `parent.Children.Add(resElem); resElem.Parent = parent;` -- a
+    // null resElem NREs at the Parent write; the children-list add is the
+    // caller's (see the header note for the C#'s unread double-add).
+    BamlElement* rawResElem = resElem.get();
+    if (parent == nullptr || rawResElem == nullptr)
+        throw std::runtime_error(kNullReferenceMessage);
+    rawResElem->Parent = parent;
+    return resElem;
+}
+
+// ===== OptimizedStaticResourceHandler =======================================
+
+Baml::BamlRecordType OptimizedStaticResourceHandler::Type() const
+{
+    return Baml::BamlRecordType::OptimizedStaticResource;
+}
+
+std::unique_ptr<BamlElement> OptimizedStaticResourceHandler::Translate(
+    XamlContext&, Baml::BamlNode& node, BamlElement*)
+{
+    // The C# `var record = (OptimizedStaticResourceRecord)((BamlRecordNode)
+    // node).Record` -- the cast is the only observable behavior.
+    CheckedRecord<Baml::OptimizedStaticResourceRecord>(
+        node, "OptimizedStaticResourceRecord");
+    RegisterStaticResource(node);
+    return nullptr;
+}
+
+std::unique_ptr<BamlElement> OptimizedStaticResourceHandler::TranslateDefer(
+    XamlContext& ctx, Baml::BamlNode& node, BamlElement* parent)
+{
+    Baml::OptimizedStaticResourceRecord& record =
+        CheckedRecord<Baml::OptimizedStaticResourceRecord>(
+            node, "OptimizedStaticResourceRecord");
+    auto bamlElem = std::make_unique<BamlElement>(&node);
+    // The C# `object key` -- an XElement (the extension arms), a string (the
+    // value arm), or null (the missing string id, the XContainer null-
+    // content no-op at the Add below).
+    std::variant<std::monostate, std::string,
+        std::shared_ptr<Xml::XElement>> key;
+    if (record.IsType()) {
+        std::shared_ptr<Xaml::XamlType> value = ctx.ResolveTypeOwning(record.ValueId);
+        // The C# `ctx.GetKnownNamespace("TypeExtension", ..., parent.Xaml)`
+        // -- the parent.Xaml read NREs for a null parent; a string-Xaml
+        // parent's null element reaches the ToString below (the
+        // ConstructorParameterTypeHandler shape).
+        if (parent == nullptr)
+            throw std::runtime_error(kNullReferenceMessage);
+        auto typeElem = std::make_shared<Xml::XElement>(
+            ctx.GetKnownNamespace("TypeExtension", XamlContext::KnownNamespace_Xaml,
+                parent->Xaml.Element.get()));
+        typeElem->AddAnnotation(ctx.ResolveTypeOwning(0xfd4d));
+        typeElem->Add(std::make_shared<Xml::XElement>(
+            ctx.GetPseudoName("Ctor"),
+            Xaml::ToString(ctx, ParentElementOf(parent), *value)));
+        key = std::move(typeElem);
+    } else if (record.IsStatic()) {
+        std::string attrName;
+        if (record.ValueId > 0x7fff) {
+            // The C# `short bamlId = unchecked((short)-record.ValueId)` --
+            // the two's-complement wrap of the negated id, then the
+            // SystemResourceIds magic ranges (each range shifts the id into
+            // the KnownThings resource rows and picks the *Key property-name
+            // form or the resource form).
+            std::int16_t bamlId = static_cast<std::int16_t>(
+                (0x10000u - record.ValueId) & 0xFFFFu);
+            bool isKey = true;
+            if (bamlId > 232 && bamlId < 464) {
+                bamlId = static_cast<std::int16_t>(bamlId - 232);
+                isKey = false;
+            } else if (bamlId > 464 && bamlId < 467) {
+                bamlId = static_cast<std::int16_t>(bamlId - 231);
+            } else if (bamlId > 467 && bamlId < 470) {
+                bamlId = static_cast<std::int16_t>(bamlId - 234);
+                isKey = false;
+            }
+            Baml::KnownResource res = ctx.Baml().KnownThings().Resources(bamlId);
+            std::string name =
+                isKey ? res.Item1 + "." + res.Item2 : res.Item1 + "." + res.Item3;
+            // The C# GetXmlNamespace never answers null for the non-null
+            // presentation constant.
+            Xml::XNamespace xmlns =
+                *ctx.GetXmlNamespace(XamlContext::KnownNamespace_Presentation);
+            attrName = Xaml::ToString(ctx, ParentElementOf(parent),
+                xmlns.GetName(std::move(name)));
+        } else {
+            std::shared_ptr<Xaml::XamlProperty> value =
+                ctx.ResolvePropertyOwning(record.ValueId);
+            // The C# `value.DeclaringType.ResolveNamespace(parent.Xaml, ctx)`
+            // -- the first parent.Xaml read of the arm (the mutation the
+            // prefixed-name render below reads; the readonly-reference
+            // const_cast convention).
+            Xml::XElement& parentElement = ParentElementOf(parent);
+            const_cast<Xaml::XamlType*>(value->DeclaringType)
+                ->ResolveNamespace(parentElement, ctx);
+            Xml::XName xName = value->ToXName(ctx, &parentElement);
+            attrName = Xaml::ToString(ctx, parentElement, xName);
+        }
+        auto staticElem = std::make_shared<Xml::XElement>(
+            ctx.GetKnownNamespace("StaticExtension", XamlContext::KnownNamespace_Xaml,
+                &ParentElementOf(parent)));
+        staticElem->AddAnnotation(ctx.ResolveTypeOwning(0xfda6));
+        staticElem->Add(std::make_shared<Xml::XElement>(
+            ctx.GetPseudoName("Ctor"), std::move(attrName)));
+        key = std::move(staticElem);
+    } else {
+        std::optional<std::string> value = ctx.ResolveString(record.ValueId);
+        if (value)
+            key = std::move(*value);
+    }
+
+    // The C# tail: the {StaticResource} extension element (the known type
+    // 0xfda5 -- StaticResourceExtension) carrying the Ctor pseudo-element.
+    std::shared_ptr<Xaml::XamlType> extType = ctx.ResolveTypeOwning(0xfda5);
+    auto resElem = std::make_shared<Xml::XElement>(extType->ToXName(ctx));
+    resElem->AddAnnotation(extType);
+    bamlElem->Xaml = resElem;
+    ParentElementOf(parent).Add(resElem);
+
+    auto attrElem = std::make_shared<Xml::XElement>(ctx.GetPseudoName("Ctor"));
+    // The C# `attrElem.Add(key)`: the element arm appends the element, the
+    // string arm the text, the null arm nothing (the XContainer
+    // null-content no-op).
+    if (auto* elemKey = std::get_if<std::shared_ptr<Xml::XElement>>(&key))
+        attrElem->Add(*elemKey);
+    else if (auto* stringKey = std::get_if<std::string>(&key))
+        attrElem->Add(*stringKey);
+    resElem->Add(attrElem);
+    return bamlElem;
+}
+
+// ===== PropertyWithStaticResourceIdHandler ==================================
+
+Baml::BamlRecordType PropertyWithStaticResourceIdHandler::Type() const
+{
+    return Baml::BamlRecordType::PropertyWithStaticResourceId;
+}
+
+std::unique_ptr<BamlElement> PropertyWithStaticResourceIdHandler::Translate(
+    XamlContext& ctx, Baml::BamlNode& node, BamlElement* parent)
+{
+    Baml::PropertyWithStaticResourceIdRecord& record =
+        CheckedRecord<Baml::PropertyWithStaticResourceIdRecord>(
+            node, "PropertyWithStaticResourceIdRecord");
+    auto doc = std::make_unique<BamlElement>(&node);
+    std::shared_ptr<Xaml::XamlProperty> elemAttr =
+        ctx.ResolvePropertyOwning(record.AttributeId);
+    // The C# `doc.Xaml = new XElement(elemAttr.ToXName(ctx, null))` -- the
+    // name is built BEFORE ResolveNamespace runs (the bare unqualified
+    // name; the rename below re-renders it after the namespace attached).
+    doc->Xaml = std::make_shared<Xml::XElement>(elemAttr->ToXName(ctx, nullptr));
+    doc->Xaml.Element->AddAnnotation(elemAttr);
+    // The C# `parent.Xaml.Element.Add(...)`: the null-parent deref NREs
+    // BEFORE the ancestors walk.
+    if (parent == nullptr || !parent->Xaml.Element)
+        throw std::runtime_error(kNullReferenceMessage);
+    parent->Xaml.Element->Add(doc->Xaml.Element);
+
+    Baml::BamlNode& resNode = FindStaticResourceNode(node, record.StaticResourceId);
+    std::unique_ptr<BamlElement> resElem =
+        DeferHandlerOf(resNode)->TranslateDefer(ctx, resNode, doc.get());
+    // The C# `doc.Children.Add(resElem); resElem.Parent = doc;` -- the add
+    // targets the handler's OWN doc, so the owning AddChild is faithful (a
+    // null resElem NREs at the Parent write, after the add).
+    BamlElement* rawResElem = resElem.get();
+    doc->AddChild(std::move(resElem));
+    if (rawResElem == nullptr)
+        throw std::runtime_error(kNullReferenceMessage);
+    rawResElem->Parent = doc.get();
+
+    // The C# pair that attaches the xmlns and re-renders the name (the
+    // ElementHandler pair, over the property's own element).
+    const_cast<Xaml::XamlType*>(elemAttr->DeclaringType)
+        ->ResolveNamespace(*doc->Xaml.Element, ctx);
+    doc->Xaml.Element->Name(elemAttr->ToXName(ctx, nullptr));
+    return doc;
 }
 
 } // namespace ILSpy::BamlDecompiler::Handlers

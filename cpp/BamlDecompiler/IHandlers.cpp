@@ -100,6 +100,10 @@ std::vector<std::unique_ptr<IHandler>> HandlerMap::CreateBuiltinHandlers()
     handlers.push_back(std::make_unique<Handlers::PresentationOptionsAttributeHandler>());
     handlers.push_back(std::make_unique<Handlers::LineNumberAndPositionHandler>());
     handlers.push_back(std::make_unique<Handlers::LinePositionHandler>());
+    handlers.push_back(std::make_unique<Handlers::StaticResourceStartHandler>());
+    handlers.push_back(std::make_unique<Handlers::StaticResourceIdHandler>());
+    handlers.push_back(std::make_unique<Handlers::OptimizedStaticResourceHandler>());
+    handlers.push_back(std::make_unique<Handlers::PropertyWithStaticResourceIdHandler>());
     return handlers;
 }
 

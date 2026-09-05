@@ -50,6 +50,15 @@
 //    crafted key+value sibling pairs, with the annotation wiring, the
 //    KeyElement back-pointer, and every exception arm -- byte-exact against
 //    the real handlers' drives.
+//  * the section-G static-resource-family drives (the HandlerMapProbe's
+//    G1-G18): the end-to-end ProcessChildren walks over the crafted
+//    key+resource+value-block wiring (the real findtoolbar defer-block
+//    layout -- the registrations precede the consumer-carrying value
+//    blocks), the StaticResourceStart block's direct drives, the
+//    OptimizedStaticResource arm matrix (the string/type/static-low arms and
+//    the static-high SystemResourceIds magic ranges), the StaticId /
+//    PropertyWithStaticResourceId consumer drives, and every exception arm
+//    -- byte-exact against the real handlers' drives.
 
 #include "BamlTestSupport.hpp"
 #include "BamlDecompiler/BamlConnectionId.hpp"
@@ -65,10 +74,12 @@
 
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <iterator>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -115,13 +126,13 @@ protected:
     }
 };
 
-// The manifest: the 28 ported rows, every record type distinct, each inside
+// The manifest: the 32 ported rows, every record type distinct, each inside
 // the gold registry inventory (the HandlerMapTest guard), with the class
 // identities the manifest constructs.
-TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheTwentyEightPortedRows)
+TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheThirtyTwoPortedRows)
 {
     std::vector<std::unique_ptr<IHandler>> handlers = HandlerMap::CreateBuiltinHandlers();
-    ASSERT_EQ(handlers.size(), 28u);
+    ASSERT_EQ(handlers.size(), 32u);
 
     const Baml::BamlRecordType expected[] = {
         Baml::BamlRecordType::DocumentStart,
@@ -152,8 +163,12 @@ TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheTwentyEightPortedRows)
         Baml::BamlRecordType::PresentationOptionsAttribute,
         Baml::BamlRecordType::LineNumberAndPosition,
         Baml::BamlRecordType::LinePosition,
+        Baml::BamlRecordType::StaticResourceStart,
+        Baml::BamlRecordType::StaticResourceId,
+        Baml::BamlRecordType::OptimizedStaticResource,
+        Baml::BamlRecordType::PropertyWithStaticResourceId,
     };
-    ASSERT_EQ(std::size(expected), 28u);
+    ASSERT_EQ(std::size(expected), 32u);
     for (Baml::BamlRecordType type : expected) {
         bool found = false;
         for (const auto& handler : handlers)
@@ -226,6 +241,26 @@ TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheTwentyEightPortedRows)
     EXPECT_NE(dynamic_cast<Handlers::KeyElementStartHandler*>(keyElement), nullptr);
     EXPECT_NE(dynamic_cast<Handlers::ElementHandler*>(keyElement), nullptr);
     EXPECT_NE(dynamic_cast<IDeferHandler*>(keyElement), nullptr);
+    // The static-resource family rows: the two resource handlers implement
+    // the defer interface (the consumers' TranslateDefer re-drive), the two
+    // consumers do not.
+    IHandler* srStart = HandlerMap::LookupHandler(Baml::BamlRecordType::StaticResourceStart);
+    ASSERT_NE(srStart, nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::StaticResourceStartHandler*>(srStart), nullptr);
+    EXPECT_NE(dynamic_cast<IDeferHandler*>(srStart), nullptr);
+    IHandler* srId = HandlerMap::LookupHandler(Baml::BamlRecordType::StaticResourceId);
+    ASSERT_NE(srId, nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::StaticResourceIdHandler*>(srId), nullptr);
+    EXPECT_EQ(dynamic_cast<IDeferHandler*>(srId), nullptr);
+    IHandler* osr = HandlerMap::LookupHandler(Baml::BamlRecordType::OptimizedStaticResource);
+    ASSERT_NE(osr, nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::OptimizedStaticResourceHandler*>(osr), nullptr);
+    EXPECT_NE(dynamic_cast<IDeferHandler*>(osr), nullptr);
+    IHandler* pwid =
+        HandlerMap::LookupHandler(Baml::BamlRecordType::PropertyWithStaticResourceId);
+    ASSERT_NE(pwid, nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::PropertyWithStaticResourceIdHandler*>(pwid), nullptr);
+    EXPECT_EQ(dynamic_cast<IDeferHandler*>(pwid), nullptr);
 }
 
 // The section-C end-to-end drive: the real manifest over the walk document
@@ -1416,6 +1451,789 @@ TEST_F(HandlersTest, KeyHandlersWithANullParentAtTranslateDeferThrowTheNRE)
         try {
             deferHandler->TranslateDefer(*ctx, *pair.keyNode, nullptr);
             FAIL() << "the null-parent defer must throw";
+        } catch (const std::runtime_error& ex) {
+            EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
+        }
+    }
+}
+
+// ===== the static-resource family (the probe's section G) ===================
+//
+// The crafted wiring (the probe's MakeStaticPair): the key node, the
+// resource node, and the keyed value block as SIBLINGS under the container
+// -- the key record's deferred Record pointing at the value block's header,
+// the resource registrations BEFORE the consumer-carrying value block in
+// document order (the real findtoolbar defer-block layout), and the
+// consumers INSIDE the keyed value block whose annotation the ancestors
+// walk finds.
+
+namespace {
+
+// The crafted StaticResourceStart block node (the header/footer/text
+// bundle): the records move into `owned` (the caller keeps them alive for
+// the node tree's raw pointers).
+std::unique_ptr<Baml::BamlBlockNode> MakeStaticResourceStartBlock(
+    std::vector<std::unique_ptr<Baml::BamlRecord>>& owned)
+{
+    auto header = std::make_unique<Baml::StaticResourceStartRecord>();
+    header->TypeId = 0xFD63;
+    auto footer = std::make_unique<Baml::StaticResourceEndRecord>();
+    auto text = std::make_unique<Baml::TextRecord>();
+    text->Value = "inner";
+    auto block = std::make_unique<Baml::BamlBlockNode>();
+    block->Header = header.get();
+    block->Footer = footer.get();
+    auto textNode = std::make_unique<Baml::BamlRecordNode>(text.get());
+    textNode->Parent = block.get();
+    block->Children.push_back(std::move(textNode));
+    owned.push_back(std::move(header));
+    owned.push_back(std::move(footer));
+    owned.push_back(std::move(text));
+    return block;
+}
+
+// The crafted OptimizedStaticResource leaf node over its record.
+std::unique_ptr<Baml::BamlRecordNode> MakeOptimizedStaticResourceNode(
+    std::vector<std::unique_ptr<Baml::BamlRecord>>& owned, std::uint8_t flags,
+    std::uint16_t valueId)
+{
+    auto record = std::make_unique<Baml::OptimizedStaticResourceRecord>();
+    record->Flags = flags;
+    record->ValueId = valueId;
+    auto node = std::make_unique<Baml::BamlRecordNode>(record.get());
+    owned.push_back(std::move(record));
+    return node;
+}
+
+std::unique_ptr<Baml::BamlRecord> MakeStaticIdRecord(std::uint16_t id)
+{
+    auto record = std::make_unique<Baml::StaticResourceIdRecord>();
+    record->StaticResourceId = id;
+    return record;
+}
+
+std::unique_ptr<Baml::BamlRecord> MakePwidRecord(std::uint16_t attributeId,
+    std::uint16_t id)
+{
+    auto record = std::make_unique<Baml::PropertyWithStaticResourceIdRecord>();
+    record->AttributeId = attributeId;
+    record->StaticResourceId = id;
+    return record;
+}
+
+// The crafted static-resource wiring: the container [key, resource node?,
+// value block[...consumer]], every child's Parent back-pointer wired (the
+// parsed-tree shape -- the Create walk and the ancestors walk read it).
+struct StaticPairFixture {
+    std::unique_ptr<Baml::BamlRecord> containerHeader;
+    std::unique_ptr<Baml::BamlRecord> keyRecord;
+    std::unique_ptr<Baml::BamlRecord> valueStart;
+    std::unique_ptr<Baml::BamlRecord> valueEnd;
+    std::unique_ptr<Baml::BamlRecord> consumerRecord;
+    std::vector<std::unique_ptr<Baml::BamlRecord>> ownedRecords;
+
+    Baml::BamlBlockNode container;
+    std::unique_ptr<Baml::BamlBlockNode> valueBlock;
+    Baml::BamlNode* keyNode = nullptr;
+    Baml::BamlNode* resNodePtr = nullptr;
+    Baml::BamlBlockNode* valueBlockPtr = nullptr;
+    Baml::BamlNode* consumerNode = nullptr;
+
+    // The construction guard the tests assert on first (ASSERT_* inside a
+    // constructor fails MSVC C2534 -- the CraftedTree convention).
+    bool Ok = false;
+
+    StaticPairFixture(std::unique_ptr<Baml::BamlNode> resNodeArg,
+        std::vector<std::unique_ptr<Baml::BamlRecord>> extraRecords,
+        std::unique_ptr<Baml::BamlRecord> consumerRecordArg)
+    {
+        ownedRecords = std::move(extraRecords);
+        consumerRecord = std::move(consumerRecordArg);
+        keyRecord = std::make_unique<Baml::DefAttributeKeyStringRecord>();
+        static_cast<Baml::DefAttributeKeyStringRecord*>(keyRecord.get())->ValueId = 0xFFFF;
+        containerHeader = std::make_unique<Baml::ElementStartRecord>();
+        static_cast<Baml::ElementStartRecord*>(containerHeader.get())->TypeId = 0xFD63;
+        valueStart = std::make_unique<Baml::ElementStartRecord>();
+        static_cast<Baml::ElementStartRecord*>(valueStart.get())->TypeId = 0xFD63;
+        valueEnd = std::make_unique<Baml::ElementEndRecord>();
+
+        // The deferred target: the value block's header record instance
+        // (the real defer-block wiring -- Create's children-walk arm
+        // annotates the key node and the value block).
+        auto* deferRecord = dynamic_cast<Baml::IBamlDeferRecord*>(keyRecord.get());
+        if (deferRecord == nullptr)
+            return; // unreachable: DefAttributeKeyStringRecord implements the defer interface
+        deferRecord->SetRecord(valueStart.get());
+
+        valueBlock = std::make_unique<Baml::BamlBlockNode>();
+        valueBlock->Header = valueStart.get();
+        valueBlock->Footer = valueEnd.get();
+        if (consumerRecord != nullptr) {
+            auto consumerHolder = std::make_unique<Baml::BamlRecordNode>(consumerRecord.get());
+            consumerHolder->Parent = valueBlock.get();
+            consumerNode = consumerHolder.get();
+            valueBlock->Children.push_back(std::move(consumerHolder));
+        }
+
+        container.Header = containerHeader.get();
+        valueBlock->Parent = &container;
+        valueBlockPtr = valueBlock.get();
+
+        auto keyHolder = std::make_unique<Baml::BamlRecordNode>(keyRecord.get());
+        keyHolder->Parent = &container;
+        keyNode = keyHolder.get();
+        container.Children.push_back(std::move(keyHolder));
+
+        if (resNodeArg != nullptr) {
+            resNodeArg->Parent = &container;
+            resNodePtr = resNodeArg.get();
+            container.Children.push_back(std::move(resNodeArg));
+        }
+
+        container.Children.push_back(std::move(valueBlock));
+        Ok = true;
+    }
+
+    // The key annotation a node carries (null when none).
+    std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlResourceKey> KeyOf(Baml::BamlNode& node)
+    {
+        auto* annotation =
+            std::any_cast<std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlResourceKey>>(
+                &node.Annotation);
+        return annotation == nullptr ? nullptr : *annotation;
+    }
+
+    // Runs the KEY handler's Translate over the key node (the Create that
+    // annotates the pair) -- the probe's RunKeyCreate.
+    void RunKeyCreate(XamlContext& ctx, BamlElement& parentElem)
+    {
+        IHandler* keyHandler = HandlerMap::LookupHandler(
+            Baml::BamlRecordType::DefAttributeKeyString);
+        ASSERT_NE(keyHandler, nullptr);
+        EXPECT_EQ(keyHandler->Translate(ctx, *keyNode, &parentElem), nullptr);
+    }
+};
+
+// The osr arm drive (the probe's DriveGDirect): a fresh section-E context,
+// the crafted pair, the key Create, the registration, and the defer
+// render -- asserting the result and parent renders against the gold.
+void DriveOsrArm(XamlContextFixture& fixture, const char* name, std::uint8_t flags,
+    std::uint16_t valueId, const std::string& expectedResultRender,
+    const std::string& expectedParentRender)
+{
+    auto ctx = fixture.MakeContextE();
+    std::vector<std::unique_ptr<Baml::BamlRecord>> owned;
+    auto osrNode = MakeOptimizedStaticResourceNode(owned, flags, valueId);
+    StaticPairFixture pair(std::move(osrNode), std::move(owned), nullptr);
+    ASSERT_TRUE(pair.Ok) << name;
+    BamlElement parentElem = MakeParentElem();
+
+    pair.RunKeyCreate(*ctx, parentElem);
+    IHandler* handler = HandlerMap::LookupHandler(Baml::BamlRecordType::OptimizedStaticResource);
+    ASSERT_NE(handler, nullptr);
+    EXPECT_EQ(handler->Translate(*ctx, *pair.resNodePtr, &parentElem), nullptr) << name;
+    std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlResourceKey> keyAnn =
+        pair.KeyOf(*pair.keyNode);
+    ASSERT_NE(keyAnn, nullptr) << name;
+    ASSERT_EQ(keyAnn->StaticResources.size(), 1u) << name;
+    EXPECT_EQ(keyAnn->StaticResources[0], pair.resNodePtr) << name;
+
+    auto* deferHandler = dynamic_cast<IDeferHandler*>(handler);
+    ASSERT_NE(deferHandler, nullptr) << name;
+    std::unique_ptr<BamlElement> result =
+        deferHandler->TranslateDefer(*ctx, *pair.resNodePtr, &parentElem);
+    ASSERT_NE(result, nullptr) << name;
+    EXPECT_EQ(result->Xaml.Element->ToString(), expectedResultRender) << name;
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(), expectedParentRender) << name;
+}
+
+} // namespace
+
+// G1: the StaticResourceStart + StaticResourceId end-to-end drive -- the
+// container [key, srBlock, valueBlock[StaticId 0]]: the srBlock registers
+// under the key, the StaticId consumer inside the keyed value block
+// re-renders it through TranslateDefer, and the ElementHandler defer branch
+// appends the x:Key element after the walked children.
+TEST_F(HandlersTest, StaticResourceStartAndStaticIdRenderEndToEnd)
+{
+    auto ctx = fixture_.MakeContextE();
+    std::vector<std::unique_ptr<Baml::BamlRecord>> owned;
+    auto srBlock = MakeStaticResourceStartBlock(owned);
+    Baml::BamlNode* srBlockPtr = srBlock.get();
+    StaticPairFixture pair(std::move(srBlock), std::move(owned), MakeStaticIdRecord(0));
+    ASSERT_TRUE(pair.Ok);
+    BamlElement parentElem = MakeParentElem();
+
+    HandlerMap::ProcessChildren(*ctx, pair.container, parentElem);
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent>\r\n"
+        "  <ToolBar xmlns=\"http://probe.pi/ns\">\r\n"
+        "    <ToolBar>inner</ToolBar>\r\n"
+        "    <Key xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">Name</Key>\r\n"
+        "  </ToolBar>\r\n"
+        "</Parent>");
+
+    // The registration: the srBlock node sits in the key annotation's
+    // StaticResources list (the handler's own Translate during the walk).
+    std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlResourceKey> keyAnn =
+        pair.KeyOf(*pair.keyNode);
+    ASSERT_NE(keyAnn, nullptr);
+    ASSERT_EQ(keyAnn->StaticResources.size(), 1u);
+    EXPECT_EQ(keyAnn->StaticResources[0], srBlockPtr);
+
+    // The tree: the parent holds the value doc; the value doc holds the
+    // StaticId resElem (the ProcessChildren add of the returned element --
+    // the port's single-add form of the C#'s unread double-add) and the
+    // Key element.
+    ASSERT_EQ(parentElem.Children.size(), 1u);
+    BamlElement* valueDoc = parentElem.Children[0].get();
+    EXPECT_EQ(valueDoc->Node, pair.valueBlockPtr);
+    ASSERT_EQ(valueDoc->Children.size(), 2u);
+    EXPECT_EQ(valueDoc->Children[0]->Node, srBlockPtr);
+    EXPECT_EQ(valueDoc->Children[0]->Parent, valueDoc);
+    EXPECT_EQ(valueDoc->Children[1]->Node, pair.keyNode);
+    EXPECT_EQ(valueDoc->Children[1]->Xaml.Element->Name().NamespaceName(),
+        "http://schemas.microsoft.com/winfx/2006/xaml");
+}
+
+// G2: the OptimizedStaticResource + PropertyWithStaticResourceId
+// end-to-end drive -- the container [key, osr(string), valueBlock[PWID
+// (String.Length, id 0)]]: the osr registers under the key, the PWID
+// consumer renders the property element wrapping the {StaticResource}
+// extension element (the default-namespace rebinding the inner
+// no-namespace extension element carries inside the pi-namespaced scope).
+TEST_F(HandlersTest, OptimizedStaticResourceAndPwidRenderEndToEnd)
+{
+    auto ctx = fixture_.MakeContextE();
+    std::vector<std::unique_ptr<Baml::BamlRecord>> owned;
+    auto osrNode = MakeOptimizedStaticResourceNode(owned, 0, 0);
+    StaticPairFixture pair(std::move(osrNode), std::move(owned), MakePwidRecord(1, 0));
+    ASSERT_TRUE(pair.Ok);
+    BamlElement parentElem = MakeParentElem();
+
+    HandlerMap::ProcessChildren(*ctx, pair.container, parentElem);
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent>\r\n"
+        "  <ToolBar xmlns=\"http://probe.pi/ns\">\r\n"
+        "    <system:String.Length xmlns:system=\"clr-namespace:System\">\r\n"
+        "      <StaticResourceExtension xmlns=\"\">\r\n"
+        "        <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">s0</Ctor>\r\n"
+        "      </StaticResourceExtension>\r\n"
+        "    </system:String.Length>\r\n"
+        "    <Key xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">Name</Key>\r\n"
+        "  </ToolBar>\r\n"
+        "</Parent>");
+
+    // The registration under the key.
+    std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlResourceKey> keyAnn =
+        pair.KeyOf(*pair.keyNode);
+    ASSERT_NE(keyAnn, nullptr);
+    ASSERT_EQ(keyAnn->StaticResources.size(), 1u);
+    EXPECT_EQ(keyAnn->StaticResources[0], pair.resNodePtr);
+
+    // The tree: the value doc holds the PWID doc (with the osr resElem
+    // inside it -- the handler's own children add) and the Key element.
+    ASSERT_EQ(parentElem.Children.size(), 1u);
+    BamlElement* valueDoc = parentElem.Children[0].get();
+    ASSERT_EQ(valueDoc->Children.size(), 2u);
+    EXPECT_EQ(valueDoc->Children[0]->Node, pair.consumerNode);
+    ASSERT_EQ(valueDoc->Children[0]->Children.size(), 1u);
+    EXPECT_EQ(valueDoc->Children[0]->Children[0]->Node, pair.resNodePtr);
+    EXPECT_EQ(valueDoc->Children[0]->Children[0]->Parent, valueDoc->Children[0].get());
+    EXPECT_EQ(valueDoc->Children[1]->Node, pair.keyNode);
+}
+
+// G3: the StaticResourceStart direct drive -- Translate registers the
+// block, TranslateDefer renders its element into the parent with the
+// walked children (the StaticId consumer's re-render target).
+TEST_F(HandlersTest, StaticResourceStartDirectTranslateAndDeferRendersTheGold)
+{
+    auto ctx = fixture_.MakeContextE();
+    std::vector<std::unique_ptr<Baml::BamlRecord>> owned;
+    auto srBlock = MakeStaticResourceStartBlock(owned);
+    StaticPairFixture pair(std::move(srBlock), std::move(owned), MakeStaticIdRecord(0));
+    ASSERT_TRUE(pair.Ok);
+    BamlElement parentElem = MakeParentElem();
+
+    pair.RunKeyCreate(*ctx, parentElem);
+    IHandler* handler = Lookup(Baml::BamlRecordType::StaticResourceStart);
+    std::unique_ptr<BamlElement> translated =
+        handler->Translate(*ctx, *pair.resNodePtr, &parentElem);
+    EXPECT_EQ(translated, nullptr);
+    std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlResourceKey> keyAnn =
+        pair.KeyOf(*pair.keyNode);
+    ASSERT_NE(keyAnn, nullptr);
+    ASSERT_EQ(keyAnn->StaticResources.size(), 1u);
+    EXPECT_EQ(keyAnn->StaticResources[0], pair.resNodePtr);
+
+    auto* deferHandler = dynamic_cast<IDeferHandler*>(handler);
+    ASSERT_NE(deferHandler, nullptr);
+    std::unique_ptr<BamlElement> result =
+        deferHandler->TranslateDefer(*ctx, *pair.resNodePtr, &parentElem);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Node, pair.resNodePtr);
+    EXPECT_EQ(result->Parent, nullptr);
+    EXPECT_EQ(result->Xaml.Element->ToString(),
+        "<ToolBar xmlns=\"http://probe.pi/ns\">inner</ToolBar>");
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent>\r\n"
+        "  <ToolBar xmlns=\"http://probe.pi/ns\">inner</ToolBar>\r\n"
+        "</Parent>");
+    // The walked children's scope annotation roots through the rendered
+    // element (the ProcessChildren inside TranslateDefer).
+    auto* scope = result->Xaml.Element->Annotation<
+        std::shared_ptr<ILSpy::BamlDecompiler::XmlnsScope>>();
+    ASSERT_NE(scope, nullptr);
+    EXPECT_EQ(scope->get()->Element(), result.get());
+}
+
+// G4 + G7f: the osr string arm -- the Ctor carries the resolved string
+// (the known string id 0 -> "s0"); a MISSING string id answers the C# null
+// and the Ctor's XContainer.Add(null) is the null-content no-op (the
+// element renders empty).
+TEST_F(HandlersTest, OptimizedStaticResourceStringArmRendersTheGold)
+{
+    DriveOsrArm(fixture_, "string", 0, 0,
+        "<StaticResourceExtension>\r\n"
+        "  <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">s0</Ctor>\r\n"
+        "</StaticResourceExtension>",
+        "<Parent>\r\n"
+        "  <StaticResourceExtension>\r\n"
+        "    <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">s0</Ctor>\r\n"
+        "  </StaticResourceExtension>\r\n"
+        "</Parent>");
+    DriveOsrArm(fixture_, "missingString", 0, 999,
+        "<StaticResourceExtension>\r\n"
+        "  <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\" />\r\n"
+        "</StaticResourceExtension>",
+        "<Parent>\r\n"
+        "  <StaticResourceExtension>\r\n"
+        "    <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\" />\r\n"
+        "  </StaticResourceExtension>\r\n"
+        "</Parent>");
+}
+
+// G5: the osr IsType arm -- the Ctor carries the {x:Type} TypeExtension
+// element whose own Ctor holds the resolved type's name.
+TEST_F(HandlersTest, OptimizedStaticResourceTypeArmRendersTheTypeExtensionChild)
+{
+    DriveOsrArm(fixture_, "type", 1, 0xFD63,
+        "<StaticResourceExtension>\r\n"
+        "  <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">\r\n"
+        "    <TypeExtension xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">\r\n"
+        "      <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">ToolBar</Ctor>\r\n"
+        "    </TypeExtension>\r\n"
+        "  </Ctor>\r\n"
+        "</StaticResourceExtension>",
+        "<Parent>\r\n"
+        "  <StaticResourceExtension>\r\n"
+        "    <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">\r\n"
+        "      <TypeExtension xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">\r\n"
+        "        <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">ToolBar</Ctor>\r\n"
+        "      </TypeExtension>\r\n"
+        "    </Ctor>\r\n"
+        "  </StaticResourceExtension>\r\n"
+        "</Parent>");
+}
+
+// G6: the osr IsStatic low arm -- the Ctor carries the {x:Static}
+// StaticExtension element with the resolved property's prefixed name, and
+// the ResolveNamespace mutation attached the clr-namespace declaration to
+// the PARENT element before the render.
+TEST_F(HandlersTest, OptimizedStaticResourceStaticLowArmRendersTheStaticExtensionChild)
+{
+    DriveOsrArm(fixture_, "staticLow", 2, 1,
+        "<StaticResourceExtension>\r\n"
+        "  <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">\r\n"
+        "    <StaticExtension xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">\r\n"
+        "      <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">system:String.Length</Ctor>\r\n"
+        "    </StaticExtension>\r\n"
+        "  </Ctor>\r\n"
+        "</StaticResourceExtension>",
+        "<Parent xmlns:system=\"clr-namespace:System\">\r\n"
+        "  <StaticResourceExtension>\r\n"
+        "    <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">\r\n"
+        "      <StaticExtension xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">\r\n"
+        "        <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">system:String.Length</Ctor>\r\n"
+        "      </StaticExtension>\r\n"
+        "    </Ctor>\r\n"
+        "  </StaticResourceExtension>\r\n"
+        "</Parent>");
+}
+
+// G7: the osr IsStatic high arm matrix -- the ValueId's two's-complement
+// bamlId and the SystemResourceIds magic ranges select the KnownThings
+// resource row and the *Key-property-name vs resource-name form: the plain
+// id form (bamlId 1 and 200), the first magic range (233 -> 1, the
+// resource name), the second (465 -> 234, the *Key name), and the third
+// (468 -> 234, the resource name).
+TEST_F(HandlersTest, OptimizedStaticResourceStaticHighArmsRenderTheResourceRows)
+{
+    struct Arm {
+        std::uint16_t valueId;
+        const char* ctorName;
+    };
+    const Arm arms[] = {
+        { 0xFFFF, "SystemColors.ActiveBorderBrushKey" },
+        { 0xFF38, "SystemParameters.ForegroundFlashCountKey" },
+        { 0xFF17, "SystemColors.ActiveBorderBrush" },
+        { 0xFE2F, "SystemColors.InactiveSelectionHighlightBrushKey" },
+        { 0xFE2C, "SystemColors.InactiveSelectionHighlightBrush" },
+    };
+    for (const Arm& arm : arms) {
+        const std::string ctorName = arm.ctorName;
+        const std::string resultRender =
+            "<StaticResourceExtension>\r\n"
+            "  <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">\r\n"
+            "    <StaticExtension xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">\r\n"
+            "      <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">" + ctorName +
+            "</Ctor>\r\n"
+            "    </StaticExtension>\r\n"
+            "  </Ctor>\r\n"
+            "</StaticResourceExtension>";
+        const std::string parentRender =
+            "<Parent>\r\n"
+            "  <StaticResourceExtension>\r\n"
+            "    <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">\r\n"
+            "      <StaticExtension xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">\r\n"
+            "        <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">" + ctorName +
+            "</Ctor>\r\n"
+            "      </StaticExtension>\r\n"
+            "    </Ctor>\r\n"
+            "  </StaticResourceExtension>\r\n"
+            "</Parent>";
+        DriveOsrArm(fixture_, arm.ctorName, 2, arm.valueId, resultRender, parentRender);
+    }
+}
+
+// G8: the StaticId consumer drive -- the ancestors walk finds the value
+// block's key, the registered StaticResourceStart re-renders through
+// TranslateDefer into the parent, and the returned element's Parent
+// back-pointer is set (the port leaves the parent's children-list add to
+// the ProcessChildren caller -- the documented divergence; no C# reader
+// iterates the list).
+TEST_F(HandlersTest, StaticResourceIdConsumerReDrivesTheRegisteredStaticResourceStart)
+{
+    auto ctx = fixture_.MakeContextE();
+    std::vector<std::unique_ptr<Baml::BamlRecord>> owned;
+    auto srBlock = MakeStaticResourceStartBlock(owned);
+    StaticPairFixture pair(std::move(srBlock), std::move(owned), MakeStaticIdRecord(0));
+    ASSERT_TRUE(pair.Ok);
+    BamlElement parentElem = MakeParentElem();
+
+    pair.RunKeyCreate(*ctx, parentElem);
+    IHandler* resourceHandler = Lookup(Baml::BamlRecordType::StaticResourceStart);
+    EXPECT_EQ(resourceHandler->Translate(*ctx, *pair.resNodePtr, &parentElem), nullptr);
+
+    IHandler* handler = Lookup(Baml::BamlRecordType::StaticResourceId);
+    std::unique_ptr<BamlElement> result =
+        handler->Translate(*ctx, *pair.consumerNode, &parentElem);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Node, pair.resNodePtr);
+    EXPECT_EQ(result->Parent, &parentElem);
+    EXPECT_EQ(result->Xaml.Element->ToString(),
+        "<ToolBar xmlns=\"http://probe.pi/ns\">inner</ToolBar>");
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent>\r\n"
+        "  <ToolBar xmlns=\"http://probe.pi/ns\">inner</ToolBar>\r\n"
+        "</Parent>");
+    EXPECT_TRUE(parentElem.Children.empty());
+}
+
+// G9: the StaticId consumer over the registered osr leaf -- the
+// {StaticResource} extension element re-renders into the parent.
+TEST_F(HandlersTest, StaticResourceIdConsumerReDrivesTheRegisteredOptimizedStaticResource)
+{
+    auto ctx = fixture_.MakeContextE();
+    std::vector<std::unique_ptr<Baml::BamlRecord>> owned;
+    auto osrNode = MakeOptimizedStaticResourceNode(owned, 0, 0);
+    StaticPairFixture pair(std::move(osrNode), std::move(owned), MakeStaticIdRecord(0));
+    ASSERT_TRUE(pair.Ok);
+    BamlElement parentElem = MakeParentElem();
+
+    pair.RunKeyCreate(*ctx, parentElem);
+    IHandler* resourceHandler = Lookup(Baml::BamlRecordType::OptimizedStaticResource);
+    EXPECT_EQ(resourceHandler->Translate(*ctx, *pair.resNodePtr, &parentElem), nullptr);
+
+    IHandler* handler = Lookup(Baml::BamlRecordType::StaticResourceId);
+    std::unique_ptr<BamlElement> result =
+        handler->Translate(*ctx, *pair.consumerNode, &parentElem);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Node, pair.resNodePtr);
+    EXPECT_EQ(result->Parent, &parentElem);
+    EXPECT_EQ(result->Xaml.Element->ToString(),
+        "<StaticResourceExtension>\r\n"
+        "  <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">s0</Ctor>\r\n"
+        "</StaticResourceExtension>");
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent>\r\n"
+        "  <StaticResourceExtension>\r\n"
+        "    <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">s0</Ctor>\r\n"
+        "  </StaticResourceExtension>\r\n"
+        "</Parent>");
+}
+
+// G10: the PropertyWithStaticResourceId consumer over the registered osr
+// leaf (AttributeId 1 -> String.Length): the property element wraps the
+// {StaticResource} extension element, the resElem lands in the doc's own
+// children with its back-pointer, and the ResolveNamespace + rename pair
+// re-renders the property's prefixed name with the clr-namespace
+// declaration attached.
+TEST_F(HandlersTest, PropertyWithStaticResourceIdConsumerRendersThePropertyElement)
+{
+    auto ctx = fixture_.MakeContextE();
+    std::vector<std::unique_ptr<Baml::BamlRecord>> owned;
+    auto osrNode = MakeOptimizedStaticResourceNode(owned, 0, 0);
+    StaticPairFixture pair(std::move(osrNode), std::move(owned), MakePwidRecord(1, 0));
+    ASSERT_TRUE(pair.Ok);
+    BamlElement parentElem = MakeParentElem();
+
+    pair.RunKeyCreate(*ctx, parentElem);
+    IHandler* resourceHandler = Lookup(Baml::BamlRecordType::OptimizedStaticResource);
+    EXPECT_EQ(resourceHandler->Translate(*ctx, *pair.resNodePtr, &parentElem), nullptr);
+
+    IHandler* handler = Lookup(Baml::BamlRecordType::PropertyWithStaticResourceId);
+    std::unique_ptr<BamlElement> result =
+        handler->Translate(*ctx, *pair.consumerNode, &parentElem);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->Node, pair.consumerNode);
+    EXPECT_EQ(result->Parent, nullptr);
+    EXPECT_EQ(result->Xaml.Element->ToString(),
+        "<system:String.Length xmlns:system=\"clr-namespace:System\">\r\n"
+        "  <StaticResourceExtension>\r\n"
+        "    <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">s0</Ctor>\r\n"
+        "  </StaticResourceExtension>\r\n"
+        "</system:String.Length>");
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent>\r\n"
+        "  <system:String.Length xmlns:system=\"clr-namespace:System\">\r\n"
+        "    <StaticResourceExtension>\r\n"
+        "      <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">s0</Ctor>\r\n"
+        "    </StaticResourceExtension>\r\n"
+        "  </system:String.Length>\r\n"
+        "</Parent>");
+    // The doc's own children: the resElem with its back-pointer (the
+    // handler's add targets its OWN doc -- faithful to the C#).
+    ASSERT_EQ(result->Children.size(), 1u);
+    EXPECT_EQ(result->Children[0]->Node, pair.resNodePtr);
+    EXPECT_EQ(result->Children[0]->Parent, result.get());
+}
+
+// G11 + G12: the registration arms with NO annotated sibling --
+// FindKeyInSiblings answers null and the key.StaticResources read NREs
+// (for the StaticResourceStart block and the OptimizedStaticResource
+// leaf alike).
+TEST_F(HandlersTest, ResourceHandlersWithoutAnAnnotatedSiblingThrowTheNRE)
+{
+    {
+        auto ctx = fixture_.MakeContextE();
+        std::vector<std::unique_ptr<Baml::BamlRecord>> owned;
+        auto srBlock = MakeStaticResourceStartBlock(owned);
+        auto header = std::make_unique<Baml::ElementStartRecord>();
+        static_cast<Baml::ElementStartRecord*>(header.get())->TypeId = 0xFD63;
+        Baml::BamlBlockNode container;
+        container.Header = header.get();
+        srBlock->Parent = &container;
+        Baml::BamlNode* srBlockPtr = srBlock.get();
+        container.Children.push_back(std::move(srBlock));
+
+        IHandler* handler = Lookup(Baml::BamlRecordType::StaticResourceStart);
+        try {
+            handler->Translate(*ctx, *srBlockPtr, nullptr);
+            FAIL() << "the unregistered-sibling translate must throw";
+        } catch (const std::runtime_error& ex) {
+            EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
+        }
+    }
+    {
+        auto ctx = fixture_.MakeContextE();
+        std::vector<std::unique_ptr<Baml::BamlRecord>> owned;
+        auto osrNode = MakeOptimizedStaticResourceNode(owned, 0, 0);
+        auto header = std::make_unique<Baml::ElementStartRecord>();
+        static_cast<Baml::ElementStartRecord*>(header.get())->TypeId = 0xFD63;
+        Baml::BamlBlockNode container;
+        container.Header = header.get();
+        osrNode->Parent = &container;
+        Baml::BamlNode* osrPtr = osrNode.get();
+        container.Children.push_back(std::move(osrNode));
+
+        IHandler* handler = Lookup(Baml::BamlRecordType::OptimizedStaticResource);
+        try {
+            handler->Translate(*ctx, *osrPtr, nullptr);
+            FAIL() << "the unregistered-sibling translate must throw";
+        } catch (const std::runtime_error& ex) {
+            EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
+        }
+    }
+}
+
+// G13: the StaticResourceStart TranslateDefer with a NULL parent (the
+// registration done first -- the parent.Xaml read NREs).
+TEST_F(HandlersTest, StaticResourceStartDeferWithANullParentThrowsTheNRE)
+{
+    auto ctx = fixture_.MakeContextE();
+    std::vector<std::unique_ptr<Baml::BamlRecord>> owned;
+    auto srBlock = MakeStaticResourceStartBlock(owned);
+    StaticPairFixture pair(std::move(srBlock), std::move(owned), MakeStaticIdRecord(0));
+    ASSERT_TRUE(pair.Ok);
+    BamlElement parentElem = MakeParentElem();
+
+    pair.RunKeyCreate(*ctx, parentElem);
+    IHandler* handler = Lookup(Baml::BamlRecordType::StaticResourceStart);
+    EXPECT_EQ(handler->Translate(*ctx, *pair.resNodePtr, &parentElem), nullptr);
+
+    auto* deferHandler = dynamic_cast<IDeferHandler*>(handler);
+    ASSERT_NE(deferHandler, nullptr);
+    try {
+        deferHandler->TranslateDefer(*ctx, *pair.resNodePtr, nullptr);
+        FAIL() << "the null-parent defer must throw";
+    } catch (const std::runtime_error& ex) {
+        EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
+    }
+}
+
+// G14 + G15: the consumer arms with no usable key up the ancestor chain --
+// the plain System.Exception "Cannot find StaticResource @<position>"
+// (the crafted records' Position defaults to 0): a consumer under a bare
+// container (no key at all), and a consumer inside a keyed value block
+// whose key collected no static resources (the do-while walks PAST the
+// found key and exhausts the chain).
+TEST_F(HandlersTest, StaticResourceIdConsumersWithoutAUsableKeyThrowCannotFind)
+{
+    {
+        auto ctx = fixture_.MakeContextE();
+        auto idRecord = std::make_unique<Baml::StaticResourceIdRecord>();
+        idRecord->StaticResourceId = 0;
+        auto header = std::make_unique<Baml::ElementStartRecord>();
+        static_cast<Baml::ElementStartRecord*>(header.get())->TypeId = 0xFD63;
+        Baml::BamlBlockNode container;
+        container.Header = header.get();
+        auto idNode = std::make_unique<Baml::BamlRecordNode>(idRecord.get());
+        idNode->Parent = &container;
+        Baml::BamlNode* idPtr = idNode.get();
+        container.Children.push_back(std::move(idNode));
+
+        IHandler* handler = Lookup(Baml::BamlRecordType::StaticResourceId);
+        BamlElement parentElem = MakeParentElem();
+        try {
+            handler->Translate(*ctx, *idPtr, &parentElem);
+            FAIL() << "the no-key consumer must throw";
+        } catch (const std::runtime_error& ex) {
+            EXPECT_STREQ(ex.what(), "Cannot find StaticResource @0");
+        }
+    }
+    {
+        auto ctx = fixture_.MakeContextE();
+        std::vector<std::unique_ptr<Baml::BamlRecord>> owned;
+        StaticPairFixture pair(nullptr, std::move(owned), MakeStaticIdRecord(0));
+        ASSERT_TRUE(pair.Ok);
+        BamlElement parentElem = MakeParentElem();
+
+        pair.RunKeyCreate(*ctx, parentElem);
+        IHandler* handler = Lookup(Baml::BamlRecordType::StaticResourceId);
+        try {
+            handler->Translate(*ctx, *pair.consumerNode, &parentElem);
+            FAIL() << "the empty-key consumer must throw";
+        } catch (const std::runtime_error& ex) {
+            EXPECT_STREQ(ex.what(), "Cannot find StaticResource @0");
+        }
+    }
+}
+
+// G16: the do-while's null-parent NRE -- a key annotated DIRECTLY on the
+// container (an empty StaticResources list) and an id that stays out of
+// range: the second iteration calls FindKeyInAncestors(found.Parent) with
+// a null parent (the container has no parent of its own).
+TEST_F(HandlersTest, StaticResourceIdWithAnAnnotatedRootAndOutOfRangeIdThrowsTheNRE)
+{
+    auto ctx = fixture_.MakeContextE();
+    std::vector<std::unique_ptr<Baml::BamlRecord>> sourceOwned;
+    StaticPairFixture source(nullptr, std::move(sourceOwned), nullptr);
+    ASSERT_TRUE(source.Ok);
+    BamlElement dummy = MakeParentElem();
+    source.RunKeyCreate(*ctx, dummy);
+    std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlResourceKey> keyAnn =
+        source.KeyOf(*source.keyNode);
+    ASSERT_NE(keyAnn, nullptr);
+    ASSERT_TRUE(keyAnn->StaticResources.empty());
+
+    auto idRecord = std::make_unique<Baml::StaticResourceIdRecord>();
+    idRecord->StaticResourceId = 5;
+    auto header = std::make_unique<Baml::ElementStartRecord>();
+    static_cast<Baml::ElementStartRecord*>(header.get())->TypeId = 0xFD63;
+    Baml::BamlBlockNode container;
+    container.Header = header.get();
+    container.Annotation = keyAnn;
+    auto idNode = std::make_unique<Baml::BamlRecordNode>(idRecord.get());
+    idNode->Parent = &container;
+    Baml::BamlNode* idPtr = idNode.get();
+    container.Children.push_back(std::move(idNode));
+
+    IHandler* handler = Lookup(Baml::BamlRecordType::StaticResourceId);
+    BamlElement parentElem = MakeParentElem();
+    try {
+        handler->Translate(*ctx, *idPtr, &parentElem);
+        FAIL() << "the out-of-range annotated-root consumer must throw";
+    } catch (const std::runtime_error& ex) {
+        EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
+    }
+}
+
+// G17 + G18: a hand-registered resource node whose handler is not a defer
+// handler (a Text node -- the InvalidCastException with the fixed
+// '<handler>' placeholder, the documented divergence from the concrete
+// class name the real engine renders), and one whose record type has no
+// handler at all (a StringInfo node -- the null handler's TranslateDefer
+// call NREs).
+TEST_F(HandlersTest, StaticResourceIdWithAHandRegisteredForeignResourceThrows)
+{
+    {
+        auto ctx = fixture_.MakeContextE();
+        std::vector<std::unique_ptr<Baml::BamlRecord>> owned;
+        StaticPairFixture pair(nullptr, std::move(owned), MakeStaticIdRecord(0));
+        ASSERT_TRUE(pair.Ok);
+        BamlElement parentElem = MakeParentElem();
+        pair.RunKeyCreate(*ctx, parentElem);
+
+        auto textRecord = std::make_unique<Baml::TextRecord>();
+        textRecord->Value = "not-a-resource";
+        auto textNode = std::make_unique<Baml::BamlRecordNode>(textRecord.get());
+        Baml::BamlNode* textPtr = textNode.get();
+        std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlResourceKey> keyAnn =
+            pair.KeyOf(*pair.keyNode);
+        ASSERT_NE(keyAnn, nullptr);
+        keyAnn->StaticResources.push_back(textPtr);
+
+        IHandler* handler = Lookup(Baml::BamlRecordType::StaticResourceId);
+        try {
+            handler->Translate(*ctx, *pair.consumerNode, &parentElem);
+            FAIL() << "the non-defer resource must throw";
+        } catch (const std::runtime_error& ex) {
+            EXPECT_STREQ(ex.what(),
+                "Unable to cast object of type '<handler>' to type "
+                "'ICSharpCode.BamlDecompiler.IDeferHandler'.");
+        }
+    }
+    {
+        auto ctx = fixture_.MakeContextE();
+        std::vector<std::unique_ptr<Baml::BamlRecord>> owned;
+        StaticPairFixture pair(nullptr, std::move(owned), MakeStaticIdRecord(0));
+        ASSERT_TRUE(pair.Ok);
+        BamlElement parentElem = MakeParentElem();
+        pair.RunKeyCreate(*ctx, parentElem);
+
+        auto stringInfoRecord = std::make_unique<Baml::StringInfoRecord>();
+        auto stringInfoNode = std::make_unique<Baml::BamlRecordNode>(stringInfoRecord.get());
+        Baml::BamlNode* stringInfoPtr = stringInfoNode.get();
+        std::shared_ptr<ILSpy::BamlDecompiler::Xaml::XamlResourceKey> keyAnn =
+            pair.KeyOf(*pair.keyNode);
+        ASSERT_NE(keyAnn, nullptr);
+        keyAnn->StaticResources.push_back(stringInfoPtr);
+
+        IHandler* handler = Lookup(Baml::BamlRecordType::StaticResourceId);
+        try {
+            handler->Translate(*ctx, *pair.consumerNode, &parentElem);
+            FAIL() << "the unhandled resource must throw";
         } catch (const std::runtime_error& ex) {
             EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
         }
