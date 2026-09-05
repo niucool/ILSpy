@@ -53,10 +53,14 @@
 # OptimizedStaticResource {StaticResource} extension element with the
 # {x:Type}/{x:Static}/string key arms and the SystemResourceIds magic
 # ranges, and the StaticId / PropertyWithStaticResourceId consumers walking
-# the ancestors for the registered resource), and the nine null-returning
-# info/mapping/line handlers) and the Handlers/Blocks block handlers
+# the ancestors for the registered resource), the misc family
+# (XmlnsPropertyHandler's NamespaceMap adds and xmlns attribute,
+# PropertyTypeReferenceHandler's Style.TargetType annotation payload
+# TargetTypeAnnotation, and PropertyWithExtensionHandler's four initializer
+# arms), and the nine null-returning info/mapping/line handlers) and the
+# Handlers/Blocks block handlers
 # (DocumentHandler, ElementHandler, the x:Key block KeyElementStartHandler,
-# the four property-element blocks, and ConstructorParametersStart) -- 32 of
+# the four property-element blocks, and ConstructorParametersStart) -- 35 of
 # the 37 gold-registry rows pinned in tests/BamlDecompiler/HandlerMap_Test.cpp,
 # the rest landing as their classes port), the lazy LookupHandler over it, the
 # duplicate-key InstallHandler, and the ProcessChildren walk with its

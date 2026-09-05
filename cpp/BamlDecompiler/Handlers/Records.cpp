@@ -25,13 +25,16 @@
 #include "BamlDecompiler/Baml/BamlNode.hpp"
 #include "BamlDecompiler/BamlElement.hpp"
 #include "BamlDecompiler/Handlers/Records.hpp"
+#include "BamlDecompiler/Xaml/XamlExtension.hpp"
 #include "BamlDecompiler/Xaml/XamlProperty.hpp"
 #include "BamlDecompiler/Xaml/XamlResourceKey.hpp"
 #include "BamlDecompiler/Xaml/XamlType.hpp"
 #include "BamlDecompiler/Xaml/XamlUtils.hpp"
 #include "BamlDecompiler/XamlContext.hpp"
+#include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/IModule.hpp"
+#include "Decompiler/Xml/XmlConvert.hpp"
 #include "Decompiler/Xml/XAttribute.hpp"
 
 #include <any>
@@ -126,6 +129,78 @@ std::shared_ptr<Xaml::XamlResourceKey> KeyAnnotationOf(Baml::BamlNode& node)
             "Unable to cast object of type '<annotation>' to type "
             "'ICSharpCode.BamlDecompiler.Xaml.XamlResourceKey'.");
     return *keyAny;
+}
+
+// The C# IType.FullName read (the ILAmbience FullNameOf shape, copied next
+// to this consumer -- the XamlContext/XamlProperty twins).
+std::string FullNameOf(const ILSpy::Decompiler::TypeSystem::IType& type)
+{
+    std::string ns;
+    if (const auto* entity = dynamic_cast<
+            const ILSpy::Decompiler::TypeSystem::IEntity*>(&type))
+        ns = entity->Namespace();
+    else if (const auto* pt = dynamic_cast<
+            const ILSpy::Decompiler::TypeSystem::ParameterizedType*>(&type))
+        ns = pt->GenericType() ? FullNameOf(*pt->GenericType()) : std::string();
+    else if (const auto* unknown = dynamic_cast<
+            const class ILSpy::Decompiler::TypeSystem::UnknownType*>(&type))
+        ns = unknown->FullTypeName().GetTopLevelTypeName().Namespace();
+    if (ns.empty())
+        return type.Name();
+    return ns + "." + type.Name();
+}
+
+// The C# TypeSystemExtensions `FullNameIs(this IMember member, string
+// type, string name)`: `member.Name == name && member.DeclaringType?.
+// FullName == type` -- the null-conditional makes a null declaring type
+// (or a null member, the caller's guard) simply false.
+bool MemberFullNameIs(const ILSpy::Decompiler::TypeSystem::IMember& member,
+    const char* type, const char* name)
+{
+    if (member.Name() != name)
+        return false;
+    ILSpy::Decompiler::TypeSystem::ITypePtr declaringType = member.DeclaringType();
+    return declaringType != nullptr && FullNameOf(*declaringType) == type;
+}
+
+// The C# `IEnumerable<string> ResolveCLRNamespaces(IModule assembly,
+// string ns)` (the XmlnsPropertyHandler iterator): the XmlnsDefinition-
+// Attribute rows mapping the given XML namespace, yielded in attribute
+// order. The Debug.Asserts are compiled out of the release assembly; a
+// null fixed-argument value never matches (the C# `(string)null == ns`),
+// while a non-null non-string value is the `(string)` cast's
+// InvalidCastException -- unreachable through every ported producer (the
+// synthetic module's reconstructed rows and the real metadata rows are
+// always (string, string) pairs), so the source type renders through the
+// fixed '<value>' placeholder (the XamlResourceKey convention).
+std::vector<std::optional<std::string>> ResolveCLRNamespaces(
+    const ILSpy::Decompiler::TypeSystem::IModule* assembly, const std::string& ns)
+{
+    std::vector<std::optional<std::string>> result;
+    for (const auto* attr : assembly->GetAssemblyAttributes()) {
+        if (FullNameOf(attr->AttributeType())
+            != "System.Windows.Markup.XmlnsDefinitionAttribute")
+            continue;
+        auto fixedArguments = attr->FixedArguments();
+        if (fixedArguments.size() < 2)
+            throw std::out_of_range("Index was outside the bounds of the array.");
+        const std::any& xmlNsAny = fixedArguments[0].Value();
+        const std::any& clrNsAny = fixedArguments[1].Value();
+        const std::string* xmlNs = std::any_cast<std::string>(&xmlNsAny);
+        const std::string* clrNs = std::any_cast<std::string>(&clrNsAny);
+        if (xmlNsAny.has_value() && xmlNs == nullptr)
+            throw std::runtime_error(
+                "Unable to cast object of type '<value>' to type 'System.String'.");
+        if (xmlNs == nullptr || *xmlNs != ns)
+            continue;
+        if (clrNsAny.has_value() && clrNs == nullptr)
+            throw std::runtime_error(
+                "Unable to cast object of type '<value>' to type 'System.String'.");
+        result.emplace_back(clrNs != nullptr
+            ? std::optional<std::string>(*clrNs)
+            : std::nullopt);
+    }
+    return result;
 }
 
 } // namespace
@@ -873,6 +948,243 @@ std::unique_ptr<BamlElement> PropertyWithStaticResourceIdHandler::Translate(
         ->ResolveNamespace(*doc->Xaml.Element, ctx);
     doc->Xaml.Element->Name(elemAttr->ToXName(ctx, nullptr));
     return doc;
+}
+
+// ===== XmlnsPropertyHandler =================================================
+
+Baml::BamlRecordType XmlnsPropertyHandler::Type() const
+{
+    return Baml::BamlRecordType::XmlnsProperty;
+}
+
+std::unique_ptr<BamlElement> XmlnsPropertyHandler::Translate(
+    XamlContext& ctx, Baml::BamlNode& node, BamlElement* parent)
+{
+    Baml::XmlnsPropertyRecord& record = CheckedRecord<Baml::XmlnsPropertyRecord>(
+        node, "XmlnsPropertyRecord");
+    // The C# assembly-id loop runs BEFORE the parent deref: every map is
+    // added (the null-parent gold pins the scope state), and only then
+    // does `parent.Xaml` NRE.
+    for (std::uint16_t asmId : record.AssemblyIds) {
+        Baml::ResolvedAssembly assembly = ctx.Baml().ResolveAssembly(asmId);
+        ctx.XmlNs().Add(std::make_shared<Xaml::NamespaceMap>(
+            record.Prefix, assembly.FullAssemblyName, record.XmlNamespace));
+
+        if (assembly.Assembly != nullptr && assembly.Assembly->IsMainModule()) {
+            for (const std::optional<std::string>& clrNs :
+                ResolveCLRNamespaces(assembly.Assembly, record.XmlNamespace)) {
+                ctx.XmlNs().Add(std::make_shared<Xaml::NamespaceMap>(
+                    record.Prefix, assembly.FullAssemblyName,
+                    record.XmlNamespace, clrNs));
+            }
+        }
+    }
+
+    // The C# `string.IsNullOrEmpty(record.Prefix) ? "xmlns" :
+    // XNamespace.Xmlns + XmlConvert.EncodeLocalName(record.Prefix)` (a
+    // null prefix is the empty string -- the null=="" equivalence).
+    Xml::XName xmlnsDef = record.Prefix.empty()
+        ? Xml::XName("xmlns")
+        : Xml::XNamespace::Xmlns() + Xml::EncodeLocalName(record.Prefix);
+    // The C# attribute value is the XNamespace object itself; its string
+    // form (the implicit conversion the XAttribute value read takes over)
+    // is the namespace URI. GetXmlNamespace never answers null for a
+    // non-null input, so the optional is always engaged here.
+    Xml::XNamespace xmlns = *ctx.GetXmlNamespace(record.XmlNamespace);
+    ParentElementOf(parent).Add(
+        std::make_shared<Xml::XAttribute>(xmlnsDef, xmlns.NamespaceName()));
+    return nullptr;
+}
+
+// ===== PropertyTypeReferenceHandler ========================================
+
+Baml::BamlRecordType PropertyTypeReferenceHandler::Type() const
+{
+    return Baml::BamlRecordType::PropertyTypeReference;
+}
+
+std::unique_ptr<BamlElement> PropertyTypeReferenceHandler::Translate(
+    XamlContext& ctx, Baml::BamlNode& node, BamlElement* parent)
+{
+    Baml::PropertyTypeReferenceRecord& record =
+        CheckedRecord<Baml::PropertyTypeReferenceRecord>(
+            node, "PropertyTypeReferenceRecord");
+    std::shared_ptr<Xaml::XamlProperty> attr = ctx.ResolvePropertyOwning(
+        record.AttributeId);
+    std::shared_ptr<Xaml::XamlType> type = ctx.ResolveTypeOwning(record.TypeId);
+    // The C# `ctx.ToString(parent.Xaml, type)` -- the FIRST parent deref
+    // (a null parent or a string-Xaml parent NREs here, before anything is
+    // built): the ResolveNamespace mutation runs against the PARENT element
+    // and the prefixed render reads it back.
+    Xml::XElement& parentElement = ParentElementOf(parent);
+    std::string typeName = Xaml::ToString(ctx, parentElement, *type);
+
+    auto bamlElem = std::make_unique<BamlElement>(&node);
+    // The C# resolves the property a SECOND time (the cached instance) and
+    // builds the element from ToXName(ctx, null) -- the full declaring-
+    // type-qualified form, namespaced only when the type's namespace is
+    // already resolved (the ToString above did resolve it).
+    std::shared_ptr<Xaml::XamlProperty> elemAttr = ctx.ResolvePropertyOwning(
+        record.AttributeId);
+    auto elem = std::make_shared<Xml::XElement>(elemAttr->ToXName(ctx, nullptr));
+    bamlElem->Xaml = elem;
+
+    // The C# `attr.ResolvedMember?.FullNameIs("System.Windows.Style",
+    // "TargetType") == true` -- the null-conditional makes a null member
+    // (an unresolved property) simply false.
+    if (attr->ResolvedMember != nullptr
+        && MemberFullNameIs(*attr->ResolvedMember,
+            "System.Windows.Style", "TargetType")) {
+        parentElement.AddAnnotation(
+            std::make_shared<TargetTypeAnnotation>(type));
+    }
+
+    elem->AddAnnotation(elemAttr);
+    parentElement.Add(elem);
+
+    // The C# `ctx.GetKnownNamespace("TypeExtension", ..., parent.Xaml)` --
+    // the XamlNode-to-XElement implicit conversion hands the (non-null)
+    // parent element; the TypeExtension child carries the TypeExtension
+    // known type and the Ctor pseudo-element with the rendered type name.
+    auto typeElem = std::make_shared<Xml::XElement>(
+        ctx.GetKnownNamespace("TypeExtension", XamlContext::KnownNamespace_Xaml,
+            &parentElement));
+    typeElem->AddAnnotation(ctx.ResolveTypeOwning(0xfd4d));
+    typeElem->Add(std::make_shared<Xml::XElement>(
+        ctx.GetPseudoName("Ctor"), typeName));
+    elem->Add(typeElem);
+
+    // The C# pair over the property's OWN element (an already-resolved
+    // namespace early-returns; the rename re-renders the same name).
+    const_cast<Xaml::XamlType*>(elemAttr->DeclaringType)
+        ->ResolveNamespace(*elem, ctx);
+    elem->Name(elemAttr->ToXName(ctx, nullptr));
+    return bamlElem;
+}
+
+// ===== PropertyWithExtensionHandler ========================================
+
+Baml::BamlRecordType PropertyWithExtensionHandler::Type() const
+{
+    return Baml::BamlRecordType::PropertyWithExtension;
+}
+
+std::unique_ptr<BamlElement> PropertyWithExtensionHandler::Translate(
+    XamlContext& ctx, Baml::BamlNode& node, BamlElement* parent)
+{
+    Baml::PropertyWithExtensionRecord& record =
+        CheckedRecord<Baml::PropertyWithExtensionRecord>(
+            node, "PropertyWithExtensionRecord");
+    // The C# `((short)record.Flags & 0xfff)` and the two flag bits -- the
+    // int promotion of the C# & operator carries the sign-extended mask.
+    int extTypeId = static_cast<std::int16_t>(record.Flags) & 0xfff;
+    bool valTypeExt = (static_cast<std::int16_t>(record.Flags) & 0x4000) == 0x4000;
+    bool valStaticExt = (static_cast<std::int16_t>(record.Flags) & 0x2000) == 0x2000;
+
+    // The C# `parent.Xaml.Element.Annotation<XamlType>()` -- the FIRST
+    // parent deref (the null-parent gold's NRE site).
+    Xml::XElement& parentElement = ParentElementOf(parent);
+    Xaml::XamlType* elemType = nullptr;
+    if (auto* annotation = parentElement.Annotation<std::shared_ptr<Xaml::XamlType>>())
+        elemType = annotation->get();
+    std::shared_ptr<Xaml::XamlProperty> xamlProp = ctx.ResolvePropertyOwning(
+        record.AttributeId);
+    // The C# `ctx.ResolveType(unchecked((ushort)-extTypeId))` -- the
+    // known-type wire arithmetic (the OSR convention; extTypeId is always
+    // a positive index <= 0xfff).
+    std::shared_ptr<Xaml::XamlType> extType = ctx.ResolveTypeOwning(
+        static_cast<std::uint16_t>(
+            (0x10000u - static_cast<std::uint16_t>(extTypeId)) & 0xFFFFu));
+    extType->ResolveNamespace(parentElement, ctx);
+
+    auto ext = std::make_shared<Xaml::XamlExtension>(extType.get());
+    if (valTypeExt
+        || extTypeId == static_cast<int>(Baml::KnownTypes::TypeExtension)) {
+        // The {x:Type} arm: the initializer is the resolved type's rendered
+        // name -- or, under the valTypeExt flag, that string wrapped in a
+        // nested TypeExtension extension.
+        std::shared_ptr<Xaml::XamlType> value = ctx.ResolveTypeOwning(
+            record.ValueId);
+        std::vector<Xaml::XamlObject> initializer{ Xaml::XamlObject(
+            Xaml::ToString(ctx, parentElement, *value)) };
+        if (valTypeExt) {
+            auto nested = std::make_shared<Xaml::XamlExtension>(
+                ctx.ResolveTypeOwning(0xfd4d).get());
+            nested->Initializer = std::move(initializer);
+            initializer = std::vector<Xaml::XamlObject>{ Xaml::XamlObject(nested) };
+        }
+        ext->Initializer = std::move(initializer);
+    } else if (extTypeId
+        == static_cast<int>(Baml::KnownTypes::TemplateBindingExtension)) {
+        // The {TemplateBinding} arm: the initializer is the resolved
+        // property's full prefixed name.
+        std::shared_ptr<Xaml::XamlProperty> value = ctx.ResolvePropertyOwning(
+            record.ValueId);
+        const_cast<Xaml::XamlType*>(value->DeclaringType)
+            ->ResolveNamespace(parentElement, ctx);
+        Xml::XName xName = value->ToXName(ctx, &parentElement, true);
+        ext->Initializer = std::vector<Xaml::XamlObject>{ Xaml::XamlObject(
+            Xaml::ToString(ctx, parentElement, xName)) };
+    } else if (valStaticExt
+        || extTypeId == static_cast<int>(Baml::KnownTypes::StaticExtension)) {
+        // The {x:Static} arm -- the OSR static arm's twin: the high value
+        // ids decode through the SystemResourceIds magic ranges into the
+        // KnownThings resource rows, the low ids resolve the property.
+        std::string attrName;
+        if (record.ValueId > 0x7fff) {
+            std::int16_t bamlId = static_cast<std::int16_t>(
+                (0x10000u - record.ValueId) & 0xFFFFu);
+            bool isKey = true;
+            if (bamlId > 232 && bamlId < 464) {
+                bamlId = static_cast<std::int16_t>(bamlId - 232);
+                isKey = false;
+            } else if (bamlId > 464 && bamlId < 467) {
+                bamlId = static_cast<std::int16_t>(bamlId - 231);
+            } else if (bamlId > 467 && bamlId < 470) {
+                bamlId = static_cast<std::int16_t>(bamlId - 234);
+                isKey = false;
+            }
+            Baml::KnownResource res = ctx.Baml().KnownThings().Resources(bamlId);
+            std::string name =
+                isKey ? res.Item1 + "." + res.Item2 : res.Item1 + "." + res.Item3;
+            Xml::XNamespace xmlns =
+                *ctx.GetXmlNamespace(XamlContext::KnownNamespace_Presentation);
+            attrName = Xaml::ToString(ctx, parentElement,
+                xmlns.GetName(std::move(name)));
+        } else {
+            std::shared_ptr<Xaml::XamlProperty> value = ctx.ResolvePropertyOwning(
+                record.ValueId);
+            const_cast<Xaml::XamlType*>(value->DeclaringType)
+                ->ResolveNamespace(parentElement, ctx);
+            Xml::XName xName = value->ToXName(ctx, &parentElement);
+            attrName = Xaml::ToString(ctx, parentElement, xName);
+        }
+        std::vector<Xaml::XamlObject> initializer{ Xaml::XamlObject(
+            std::move(attrName)) };
+        if (valStaticExt) {
+            auto nested = std::make_shared<Xaml::XamlExtension>(
+                ctx.ResolveTypeOwning(0xfda6).get());
+            nested->Initializer = std::move(initializer);
+            initializer = std::vector<Xaml::XamlObject>{ Xaml::XamlObject(nested) };
+        }
+        ext->Initializer = std::move(initializer);
+    } else {
+        // The plain-string arm: the escaped resolved string. The C#
+        // `XamlUtils.Escape(ctx.ResolveString(...))` -- ResolveString answers
+        // null for an unknown low id and Escape's `value.StartsWith` NREs.
+        std::optional<std::string> value = ctx.ResolveString(record.ValueId);
+        if (!value)
+            throw std::runtime_error(kNullReferenceMessage);
+        ext->Initializer = std::vector<Xaml::XamlObject>{ Xaml::XamlObject(
+            Xaml::Escape(*value)) };
+    }
+
+    std::string extValue = ext->ToString(ctx, parentElement);
+    auto attribute = std::make_shared<Xml::XAttribute>(
+        xamlProp->ToXName(ctx, &parentElement, xamlProp->IsAttachedTo(elemType)),
+        std::move(extValue));
+    parentElement.Add(std::move(attribute));
+    return nullptr;
 }
 
 } // namespace ILSpy::BamlDecompiler::Handlers

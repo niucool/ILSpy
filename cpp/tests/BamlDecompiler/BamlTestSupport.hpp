@@ -178,6 +178,14 @@ public:
         mscorlib->AssemblyFullName = kMscorlibFullName;
         insert(std::move(mscorlib));
 
+        // The Escape arm's leading-brace string (the PropertyWithExtension
+        // plain-string initializer gold -- no E/F/G drive reads id 1, so the
+        // row is additively invisible to the pinned section-E/F/G gold).
+        auto brace = std::make_unique<Rec::StringInfoRecord>();
+        brace->StringId = 1;
+        brace->Value = "{Brace}";
+        insert(std::move(brace));
+
         auto stringType = std::make_unique<Rec::TypeInfoRecord>();
         stringType->TypeId = 1;
         stringType->AssemblyId = 1;
@@ -221,7 +229,119 @@ public:
         return ::ILSpy::BamlDecompiler::XamlContext::Construct(compilation_, *document_, nullptr);
     }
 
+    // The section-H document (the probe's MakeDocumentH): the section-E
+    // rows plus the System.Windows.Style / TargetType rows -- a REAL
+    // resolved member whose declaring type's FullName is
+    // System.Windows.Style (the TargetTypeAnnotation arm's gate).
+    ILSpy::BamlDecompiler::Baml::BamlDocument MakeDocumentH()
+    {
+        ILSpy::BamlDecompiler::Baml::BamlDocument doc = MakeDocumentE();
+        namespace Rec = ::ILSpy::BamlDecompiler::Baml;
+        // The insertion point: before the ElementStart block (the info
+        // records must stay inside the DocumentStart block).
+        std::size_t insertAt = doc.Records.size() - 3;
+        auto insert = [&doc, &insertAt](std::unique_ptr<Rec::BamlRecord> r) {
+            doc.Records.insert(doc.Records.begin() + insertAt++, std::move(r));
+        };
+
+        auto style = std::make_unique<Rec::TypeInfoRecord>();
+        style->TypeId = 3;
+        style->AssemblyId = 1;
+        style->TypeFullName = "System.Windows.Style";
+        insert(std::move(style));
+
+        auto targetType = std::make_unique<Rec::AttributeInfoRecord>();
+        targetType->AttributeId = 3;
+        targetType->OwnerTypeId = 3;
+        targetType->AttributeUsage = 0;
+        targetType->Name = "TargetType";
+        insert(std::move(targetType));
+        return doc;
+    }
+
+    // Constructs the XamlContext over a fresh section-H document: the
+    // probe's MakeCtxH counterpart over the stub fixture (the real
+    // PresentationFramework main replaced by the stub mscorlib main module
+    // carrying the XmlnsDefinitionAttribute rows the Style resolution and
+    // the XmlnsProperty CLR-namespaces arm read, plus the System.Windows.
+    // Style / TargetType stubs a real resolved member needs). The
+    // registrations are idempotent (a shared fixture calling both
+    // MakeContextE and MakeContextH keeps each shape intact).
+    std::unique_ptr<::ILSpy::BamlDecompiler::XamlContext> MakeContextH()
+    {
+        ConfigureStyleStubs();
+        compilation_.SetMainModuleFullAssemblyName(kMscorlibFullName);
+        document_ = std::make_unique<ILSpy::BamlDecompiler::Baml::BamlDocument>(MakeDocumentH());
+        return ::ILSpy::BamlDecompiler::XamlContext::Construct(compilation_, *document_, nullptr);
+    }
+
 private:
+    // The Style / TargetType / XmlnsDefinitionAttribute stubs the
+    // section-H contexts need (the TargetTypeAnnotation and
+    // CLR-namespaces arms), registered once per fixture (idempotent --
+    // SetMainModuleTypeDefinition replaces the same key, and the attribute
+    // list is rebuilt wholesale).
+    void ConfigureStyleStubs()
+    {
+        namespace TS = ::ILSpy::Decompiler::TypeSystem;
+        if (styleType_ != nullptr)
+            return;
+
+        // System.Windows.Style with its TargetType property (a REAL
+        // resolved member on a main-module type -- the FullNameIs gate:
+        // the property's DeclaringType aliases its own definition, the
+        // IsAttachedTo / FullName comparisons).
+        const TS::IModule* mainModule = &compilation_.MainModule();
+        styleType_ = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+            "System.Windows.Style", "System.Windows",
+            TS::FullTypeName(TS::TopLevelTypeName("System.Windows", "Style")),
+            TS::TypeKind::Class, TS::Accessibility::Public, compilation_, mainModule);
+        targetTypeProperty_ = std::make_shared<TS::TestSupport::LookupProperty>(
+            "TargetType", TS::ITypePtr(styleType_.get(), [](TS::IType*) {}), compilation_);
+        targetTypeProperty_->SetDeclaringType(
+            TS::ITypePtr(styleType_.get(), [](TS::IType*) {}));
+        styleType_->SetProperties({ targetTypeProperty_.get() });
+        compilation_.SetMainModuleTypeDefinition(
+            TS::TopLevelTypeName("System.Windows", "Style"), styleType_.get());
+
+        // The main module's XmlnsDefinitionAttribute rows (the real
+        // PresentationFramework's reconstructed counterpart over the stub
+        // main module): the presentation xmlns mapping to System.Windows
+        // (the Style render's namespace resolution) and to
+        // System.Windows.Controls (the second row of the multi-row
+        // CLR-namespaces drive -- the yield order is the attribute order).
+        xmlnsDefinitionAttributeType_ =
+            std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+                "System.Windows.Markup.XmlnsDefinitionAttribute",
+                "System.Windows.Markup",
+                TS::FullTypeName(TS::TopLevelTypeName(
+                    "System.Windows.Markup", "XmlnsDefinitionAttribute")),
+                TS::TypeKind::Class, TS::Accessibility::Public, compilation_, mainModule);
+        // The compilation's String type for the fixed-argument values (the
+        // SyntheticWpfModule.cpp precedent: the FindType reference is const,
+        // and the no-op-deleter alias needs the non-const pointer).
+        TS::ITypePtr stringType(
+            const_cast<TS::IType*>(&compilation_.FindType(TS::KnownTypeCode::String)),
+            [](TS::IType*) {});
+        auto makeRow = [&](const char* xmlNs, const char* clrNs) {
+            std::vector<TS::CustomAttributeTypedArgument> fixedArguments;
+            fixedArguments.emplace_back(stringType, std::string(xmlNs));
+            fixedArguments.emplace_back(stringType, std::string(clrNs));
+            return std::make_shared<TS::TestSupport::LookupAttribute>(
+                TS::ITypePtr(xmlnsDefinitionAttributeType_.get(), [](TS::IType*) {}),
+                std::move(fixedArguments));
+        };
+        xmlnsDefinitionAttributes_.push_back(makeRow(kPresentationXmlns, "System.Windows"));
+        xmlnsDefinitionAttributes_.push_back(
+            makeRow(kPresentationXmlns, "System.Windows.Controls"));
+        std::vector<const TS::IAttribute*> attributes;
+        for (const auto& attribute : xmlnsDefinitionAttributes_)
+            attributes.push_back(attribute.get());
+        static_cast<TS::TestSupport::LookupModule&>(
+            const_cast<TS::IModule&>(compilation_.MainModule()))
+            .SetAssemblyAttributes(std::move(attributes));
+    }
+
     // The mscorlib-backed stub types the section-E document resolves
     // (System.String with its Length property, System.Type with its Name
     // property): a REAL resolved member on a main-module type, which the
@@ -289,6 +409,15 @@ private:
     std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition> typeType_;
     std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupProperty> lengthProperty_;
     std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupProperty> nameProperty_;
+    // The section-H stubs (ConfigureStyleStubs) -- owned here so the
+    // compilation's non-owning registrations stay valid for the fixture's
+    // lifetime.
+    std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition> styleType_;
+    std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition>
+        xmlnsDefinitionAttributeType_;
+    std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupProperty> targetTypeProperty_;
+    std::vector<std::shared_ptr<::ILSpy::Decompiler::TypeSystem::TestSupport::LookupAttribute>>
+        xmlnsDefinitionAttributes_;
 };
 
 } // namespace ILSpy::Tests::Baml

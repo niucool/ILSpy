@@ -59,6 +59,19 @@
 //    the static-high SystemResourceIds magic ranges), the StaticId /
 //    PropertyWithStaticResourceId consumer drives, and every exception arm
 //    -- byte-exact against the real handlers' drives.
+//  * the section-H misc-family drives (the HandlerMapProbe's H1-H22):
+//    XmlnsProperty's end-to-end walk and direct drives (the NamespaceMap
+//    adds, the prefixed/escaped declarations, the assembly-id loop, the
+//    main-module CLR-rows arm, the scope-less Add and null-parent NREs),
+//    PropertyTypeReference's String.Length and Style.TargetType drives (the
+//    latter over the section-H context -- the real PresentationFramework
+//    main's stub counterpart carrying the XmlnsDefinitionAttribute rows and
+//    the Style stub -- attaching the TargetTypeAnnotation), and
+//    PropertyWithExtension's four initializer arms (the {x:Type} plain and
+//    annotated forms, the valTypeExt/valStaticExt nested wraps, the
+//    TemplateBinding/static-low/static-high arms with the magic-range
+//    resource rows, the escaped string arm, and the exception arms) -- every
+//    render byte-exact against the real handlers' drives.
 
 #include "BamlTestSupport.hpp"
 #include "BamlDecompiler/BamlConnectionId.hpp"
@@ -86,6 +99,7 @@ namespace {
 
 namespace Baml = ILSpy::BamlDecompiler::Baml;
 namespace Handlers = ILSpy::BamlDecompiler::Handlers;
+namespace Xml = ILSpy::Decompiler::Xml;
 using ILSpy::BamlDecompiler::BamlConnectionId;
 using ILSpy::BamlDecompiler::BamlElement;
 using ILSpy::BamlDecompiler::HandlerMap;
@@ -93,6 +107,8 @@ using ILSpy::BamlDecompiler::IHandler;
 using ILSpy::BamlDecompiler::IDeferHandler;
 using ILSpy::BamlDecompiler::XamlContext;
 using ILSpy::Tests::Baml::XamlContextFixture;
+using ILSpy::Tests::Baml::kPresentationXmlns;
+using ILSpy::Tests::Baml::kProbePiNs;
 
 // The gold render of the probe's section-C drive (the real registry's
 // ProcessChildren over the walk document, dumped from the real engine).
@@ -126,13 +142,13 @@ protected:
     }
 };
 
-// The manifest: the 32 ported rows, every record type distinct, each inside
+// The manifest: the 35 ported rows, every record type distinct, each inside
 // the gold registry inventory (the HandlerMapTest guard), with the class
 // identities the manifest constructs.
-TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheThirtyTwoPortedRows)
+TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheThirtyFivePortedRows)
 {
     std::vector<std::unique_ptr<IHandler>> handlers = HandlerMap::CreateBuiltinHandlers();
-    ASSERT_EQ(handlers.size(), 32u);
+    ASSERT_EQ(handlers.size(), 35u);
 
     const Baml::BamlRecordType expected[] = {
         Baml::BamlRecordType::DocumentStart,
@@ -167,8 +183,11 @@ TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheThirtyTwoPortedRows)
         Baml::BamlRecordType::StaticResourceId,
         Baml::BamlRecordType::OptimizedStaticResource,
         Baml::BamlRecordType::PropertyWithStaticResourceId,
+        Baml::BamlRecordType::XmlnsProperty,
+        Baml::BamlRecordType::PropertyTypeReference,
+        Baml::BamlRecordType::PropertyWithExtension,
     };
-    ASSERT_EQ(std::size(expected), 32u);
+    ASSERT_EQ(std::size(expected), 35u);
     for (Baml::BamlRecordType type : expected) {
         bool found = false;
         for (const auto& handler : handlers)
@@ -261,6 +280,19 @@ TEST(HandlersManifestTest, CreateBuiltinHandlersHasTheThirtyTwoPortedRows)
     ASSERT_NE(pwid, nullptr);
     EXPECT_NE(dynamic_cast<Handlers::PropertyWithStaticResourceIdHandler*>(pwid), nullptr);
     EXPECT_EQ(dynamic_cast<IDeferHandler*>(pwid), nullptr);
+    // The misc-family rows (no defer interface among them).
+    IHandler* xmlnsProp = HandlerMap::LookupHandler(Baml::BamlRecordType::XmlnsProperty);
+    ASSERT_NE(xmlnsProp, nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::XmlnsPropertyHandler*>(xmlnsProp), nullptr);
+    EXPECT_EQ(dynamic_cast<IDeferHandler*>(xmlnsProp), nullptr);
+    IHandler* ptr = HandlerMap::LookupHandler(Baml::BamlRecordType::PropertyTypeReference);
+    ASSERT_NE(ptr, nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::PropertyTypeReferenceHandler*>(ptr), nullptr);
+    EXPECT_EQ(dynamic_cast<IDeferHandler*>(ptr), nullptr);
+    IHandler* pwe = HandlerMap::LookupHandler(Baml::BamlRecordType::PropertyWithExtension);
+    ASSERT_NE(pwe, nullptr);
+    EXPECT_NE(dynamic_cast<Handlers::PropertyWithExtensionHandler*>(pwe), nullptr);
+    EXPECT_EQ(dynamic_cast<IDeferHandler*>(pwe), nullptr);
 }
 
 // The section-C end-to-end drive: the real manifest over the walk document
@@ -2234,6 +2266,493 @@ TEST_F(HandlersTest, StaticResourceIdWithAHandRegisteredForeignResourceThrows)
         try {
             handler->Translate(*ctx, *pair.consumerNode, &parentElem);
             FAIL() << "the unhandled resource must throw";
+        } catch (const std::runtime_error& ex) {
+            EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
+        }
+    }
+}
+
+// ===== the misc family (the probe's section H) =============================
+
+// H1: the XmlnsProperty end-to-end walk (the realistic shape: the record
+// inside an element block -- ProcessChildren pushes the scope, the handler
+// adds the NamespaceMap and the xmlns attribute, and the element's scope
+// annotation carries the rows).
+TEST_F(HandlersTest, XmlnsPropertyEndToEndOverAnElementBlockMatchesTheGold)
+{
+    auto ctx = fixture_.MakeContextE();
+    std::vector<std::unique_ptr<Baml::BamlRecord>> owned;
+    auto header = std::make_unique<Baml::ElementStartRecord>();
+    header->TypeId = 0xFD63;
+    auto xmlnsRecord = std::make_unique<Baml::XmlnsPropertyRecord>();
+    xmlnsRecord->Prefix = "";
+    xmlnsRecord->XmlNamespace = kProbePiNs;
+    xmlnsRecord->AssemblyIds = { 0 };
+    auto block = std::make_unique<Baml::BamlBlockNode>();
+    block->Header = header.get();
+    auto leaf = std::make_unique<Baml::BamlRecordNode>(xmlnsRecord.get());
+    leaf->Parent = block.get();
+    block->Children.push_back(std::move(leaf));
+    owned.push_back(std::move(header));
+    owned.push_back(std::move(xmlnsRecord));
+
+    // The parent element resolves INTO the declared namespace (the real
+    // documents' parents always do -- a no-namespace element carrying a
+    // default xmlns declaration throws at serialization).
+    BamlElement nodeElem(nullptr);
+    nodeElem.Xaml = std::make_shared<Xml::XElement>(
+        Xml::XNamespace::Get(kProbePiNs) + "Parent");
+
+    HandlerMap::ProcessChildren(*ctx, *block, nodeElem);
+    EXPECT_EQ(nodeElem.Xaml.Element->ToString(), "<Parent xmlns=\"http://probe.pi/ns\" />");
+
+    // The scope the walk pushed (the ProcessChildren annotation): the one
+    // plain map over the PresentationFramework record.
+    auto* scopeAnn = nodeElem.Xaml.Element
+        ->Annotation<std::shared_ptr<ILSpy::BamlDecompiler::XmlnsScope>>();
+    ASSERT_NE(scopeAnn, nullptr);
+    ASSERT_EQ((*scopeAnn)->Maps().size(), 1u);
+    EXPECT_EQ((*scopeAnn)->Maps()[0]->ToString(),
+        ":[PresentationFramework, Version=4.0.0.0, Culture=neutral, "
+        "PublicKeyToken=31bf3856ad364e35|http://probe.pi/ns]");
+}
+
+// H2 + H3: the direct drives over a pushed scope -- the prefixed declaration
+// (xmlns:p) and the EncodeLocalName wiring (a prefix with a space renders
+// xmlns:a_x0020_b while the NamespaceMap keeps the RAW prefix).
+TEST_F(HandlersTest, XmlnsPropertyPrefixedAndEscapedPrefixesRenderTheGold)
+{
+    {
+        auto ctx = fixture_.MakeContextE();
+        IHandler* handler = Lookup(Baml::BamlRecordType::XmlnsProperty);
+        auto record = std::make_unique<Baml::XmlnsPropertyRecord>();
+        record->Prefix = "p";
+        record->XmlNamespace = kProbePiNs;
+        record->AssemblyIds = { 0 };
+        Baml::BamlRecordNode node(record.get());
+        BamlElement parentElem(nullptr);
+        parentElem.Xaml = std::make_shared<Xml::XElement>("Parent");
+
+        ctx->XmlNs().PushScope(&parentElem);
+        EXPECT_EQ(handler->Translate(*ctx, node, &parentElem), nullptr);
+        std::shared_ptr<ILSpy::BamlDecompiler::XmlnsScope> scope = ctx->XmlNs().CurrentScope();
+        ctx->XmlNs().PopScope();
+
+        EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+            "<Parent xmlns:p=\"http://probe.pi/ns\" />");
+        ASSERT_EQ(scope->Maps().size(), 1u);
+        EXPECT_EQ(scope->Maps()[0]->ToString(),
+            "p:[PresentationFramework, Version=4.0.0.0, Culture=neutral, "
+            "PublicKeyToken=31bf3856ad364e35|http://probe.pi/ns]");
+    }
+    {
+        auto ctx = fixture_.MakeContextE();
+        IHandler* handler = Lookup(Baml::BamlRecordType::XmlnsProperty);
+        auto record = std::make_unique<Baml::XmlnsPropertyRecord>();
+        record->Prefix = "a b";
+        record->XmlNamespace = kProbePiNs;
+        record->AssemblyIds = { 0 };
+        Baml::BamlRecordNode node(record.get());
+        BamlElement parentElem(nullptr);
+        parentElem.Xaml = std::make_shared<Xml::XElement>("Parent");
+
+        ctx->XmlNs().PushScope(&parentElem);
+        EXPECT_EQ(handler->Translate(*ctx, node, &parentElem), nullptr);
+        std::shared_ptr<ILSpy::BamlDecompiler::XmlnsScope> scope = ctx->XmlNs().CurrentScope();
+        ctx->XmlNs().PopScope();
+
+        EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+            "<Parent xmlns:a_x0020_b=\"http://probe.pi/ns\" />");
+        ASSERT_EQ(scope->Maps().size(), 1u);
+        EXPECT_EQ(scope->Maps()[0]->ToString(),
+            "a b:[PresentationFramework, Version=4.0.0.0, Culture=neutral, "
+            "PublicKeyToken=31bf3856ad364e35|http://probe.pi/ns]");
+    }
+}
+
+// H4 + H5: the assembly-id loop -- one plain map per id (the synthetic
+// PresentationFramework record AND the main module), and the main-module
+// branch with no XmlnsDefinitionAttribute rows adds no clr-namespace maps.
+TEST_F(HandlersTest, XmlnsPropertyAddsOneMapPerAssemblyId)
+{
+    {
+        auto ctx = fixture_.MakeContextE();
+        IHandler* handler = Lookup(Baml::BamlRecordType::XmlnsProperty);
+        auto record = std::make_unique<Baml::XmlnsPropertyRecord>();
+        record->Prefix = "";
+        record->XmlNamespace = kProbePiNs;
+        record->AssemblyIds = { 0, 1 };
+        Baml::BamlRecordNode node(record.get());
+        BamlElement parentElem(nullptr);
+        parentElem.Xaml = std::make_shared<Xml::XElement>(
+            Xml::XNamespace::Get(kProbePiNs) + "Parent");
+
+        ctx->XmlNs().PushScope(&parentElem);
+        EXPECT_EQ(handler->Translate(*ctx, node, &parentElem), nullptr);
+        std::shared_ptr<ILSpy::BamlDecompiler::XmlnsScope> scope = ctx->XmlNs().CurrentScope();
+        ctx->XmlNs().PopScope();
+
+        EXPECT_EQ(parentElem.Xaml.Element->ToString(), "<Parent xmlns=\"http://probe.pi/ns\" />");
+        ASSERT_EQ(scope->Maps().size(), 2u);
+        EXPECT_EQ(scope->Maps()[0]->ToString(),
+            ":[PresentationFramework, Version=4.0.0.0, Culture=neutral, "
+            "PublicKeyToken=31bf3856ad364e35|http://probe.pi/ns]");
+        EXPECT_EQ(scope->Maps()[1]->ToString(),
+            ":[mscorlib, Version=4.0.0.0, Culture=neutral, "
+            "PublicKeyToken=b77a5c561934e089|http://probe.pi/ns]");
+    }
+    {
+        auto ctx = fixture_.MakeContextE();
+        IHandler* handler = Lookup(Baml::BamlRecordType::XmlnsProperty);
+        auto record = std::make_unique<Baml::XmlnsPropertyRecord>();
+        record->Prefix = "";
+        record->XmlNamespace = kProbePiNs;
+        record->AssemblyIds = { 1 };
+        Baml::BamlRecordNode node(record.get());
+        BamlElement parentElem(nullptr);
+        parentElem.Xaml = std::make_shared<Xml::XElement>(
+            Xml::XNamespace::Get(kProbePiNs) + "Parent");
+
+        ctx->XmlNs().PushScope(&parentElem);
+        EXPECT_EQ(handler->Translate(*ctx, node, &parentElem), nullptr);
+        std::shared_ptr<ILSpy::BamlDecompiler::XmlnsScope> scope = ctx->XmlNs().CurrentScope();
+        ctx->XmlNs().PopScope();
+
+        EXPECT_EQ(parentElem.Xaml.Element->ToString(), "<Parent xmlns=\"http://probe.pi/ns\" />");
+        // The main-module branch fired but the stub main module carries no
+        // XmlnsDefinitionAttribute rows in the E contexts: only the plain map.
+        ASSERT_EQ(scope->Maps().size(), 1u);
+        EXPECT_EQ(scope->Maps()[0]->ToString(),
+            ":[mscorlib, Version=4.0.0.0, Culture=neutral, "
+            "PublicKeyToken=b77a5c561934e089|http://probe.pi/ns]");
+    }
+}
+
+// H8: the CLR-namespaces arm over the section-H context (the probe's real
+// PresentationFramework main replaced by the stub main module carrying the
+// configured XmlnsDefinitionAttribute rows): the plain map plus one
+// clr-namespace map per matching row, in attribute order.
+TEST_F(HandlersTest, XmlnsPropertyMainModuleClrRowsMatchTheGoldShape)
+{
+    auto ctx = fixture_.MakeContextH();
+    IHandler* handler = Lookup(Baml::BamlRecordType::XmlnsProperty);
+    auto record = std::make_unique<Baml::XmlnsPropertyRecord>();
+    record->Prefix = "";
+    record->XmlNamespace = kPresentationXmlns;
+    record->AssemblyIds = { 1 };
+    Baml::BamlRecordNode node(record.get());
+    BamlElement parentElem(nullptr);
+    parentElem.Xaml = std::make_shared<Xml::XElement>(
+        Xml::XNamespace::Get(kPresentationXmlns) + "Parent");
+
+    ctx->XmlNs().PushScope(&parentElem);
+    EXPECT_EQ(handler->Translate(*ctx, node, &parentElem), nullptr);
+    std::shared_ptr<ILSpy::BamlDecompiler::XmlnsScope> scope = ctx->XmlNs().CurrentScope();
+    ctx->XmlNs().PopScope();
+
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(),
+        "<Parent xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/presentation\" />");
+    ASSERT_EQ(scope->Maps().size(), 3u);
+    EXPECT_EQ(scope->Maps()[0]->ToString(),
+        ":[mscorlib, Version=4.0.0.0, Culture=neutral, "
+        "PublicKeyToken=b77a5c561934e089|http://schemas.microsoft.com/winfx/2006/xaml/presentation]");
+    EXPECT_EQ(scope->Maps()[1]->ToString(),
+        ":[mscorlib, Version=4.0.0.0, Culture=neutral, "
+        "PublicKeyToken=b77a5c561934e089|System.Windows]");
+    EXPECT_EQ(scope->Maps()[2]->ToString(),
+        ":[mscorlib, Version=4.0.0.0, Culture=neutral, "
+        "PublicKeyToken=b77a5c561934e089|System.Windows.Controls]");
+}
+
+// H6 + H7: the exception arms -- the Add without a current scope NREs (the
+// XmlnsDictionary convention), and the null-parent drive adds the maps
+// FIRST (the scope state survives) and NREs at the parent deref.
+TEST_F(HandlersTest, XmlnsPropertyExceptionArmsThrowTheNetNre)
+{
+    {
+        auto ctx = fixture_.MakeContextE();
+        IHandler* handler = Lookup(Baml::BamlRecordType::XmlnsProperty);
+        auto record = std::make_unique<Baml::XmlnsPropertyRecord>();
+        record->Prefix = "";
+        record->XmlNamespace = kProbePiNs;
+        record->AssemblyIds = { 0 };
+        Baml::BamlRecordNode node(record.get());
+        BamlElement parentElem(nullptr);
+        parentElem.Xaml = std::make_shared<Xml::XElement>(
+            Xml::XNamespace::Get(kProbePiNs) + "Parent");
+
+        try {
+            handler->Translate(*ctx, node, &parentElem);
+            FAIL() << "the scope-less Add must throw";
+        } catch (const std::runtime_error& ex) {
+            EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
+        }
+    }
+    {
+        auto ctx = fixture_.MakeContextE();
+        IHandler* handler = Lookup(Baml::BamlRecordType::XmlnsProperty);
+        auto record = std::make_unique<Baml::XmlnsPropertyRecord>();
+        record->Prefix = "";
+        record->XmlNamespace = kProbePiNs;
+        record->AssemblyIds = { 0 };
+        Baml::BamlRecordNode node(record.get());
+        BamlElement parentElem(nullptr);
+        parentElem.Xaml = std::make_shared<Xml::XElement>(
+            Xml::XNamespace::Get(kProbePiNs) + "Parent");
+
+        ctx->XmlNs().PushScope(&parentElem);
+        try {
+            handler->Translate(*ctx, node, nullptr);
+            FAIL() << "the null-parent translate must throw";
+        } catch (const std::runtime_error& ex) {
+            EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
+        }
+        // The adds ran before the parent deref: the scope holds the map.
+        std::shared_ptr<ILSpy::BamlDecompiler::XmlnsScope> scope = ctx->XmlNs().CurrentScope();
+        ctx->XmlNs().PopScope();
+        ASSERT_EQ(scope->Maps().size(), 1u);
+        EXPECT_EQ(scope->Maps()[0]->ToString(),
+            ":[PresentationFramework, Version=4.0.0.0, Culture=neutral, "
+            "PublicKeyToken=31bf3856ad364e35|http://probe.pi/ns]");
+    }
+}
+
+// The PropertyTypeReference drive helper (the probe's H9/H10): a fresh
+// context, the crafted record, the parent element, and the byte-exact
+// result/parent render assertions.
+void DrivePropertyTypeReference(XamlContextFixture& fixture, const char* name,
+    std::uint16_t attributeId, std::uint16_t typeId,
+    const std::string& expectedResultRender, const std::string& expectedParentRender)
+{
+    auto ctx = attributeId == 3 ? fixture.MakeContextH() : fixture.MakeContextE();
+    IHandler* handler = HandlerMap::LookupHandler(Baml::BamlRecordType::PropertyTypeReference);
+    ASSERT_NE(handler, nullptr) << name;
+    auto record = std::make_unique<Baml::PropertyTypeReferenceRecord>();
+    record->AttributeId = attributeId;
+    record->TypeId = typeId;
+    Baml::BamlRecordNode node(record.get());
+    BamlElement parentElem(nullptr);
+    parentElem.Xaml = std::make_shared<Xml::XElement>("Parent");
+
+    std::unique_ptr<BamlElement> result = handler->Translate(*ctx, node, &parentElem);
+    ASSERT_NE(result, nullptr) << name;
+    ASSERT_NE(result->Xaml.Element, nullptr) << name;
+    EXPECT_EQ(result->Xaml.Element->ToString(), expectedResultRender) << name;
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(), expectedParentRender) << name;
+}
+
+// H9: the PropertyTypeReference over String.Length -- the element named in
+// the clr-namespace the ToString resolved against the parent (the attached
+// child renders with the parent's in-scope prefix), the TypeExtension child
+// with the Ctor pseudo-element carrying the prefixed type name.
+TEST_F(HandlersTest, PropertyTypeReferenceOverStringRendersTheGold)
+{
+    DrivePropertyTypeReference(fixture_, "string", 1, 1,
+        "<system:String.Length xmlns:system=\"clr-namespace:System\">\r\n"
+        "  <TypeExtension xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">\r\n"
+        "    <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">system:String</Ctor>\r\n"
+        "  </TypeExtension>\r\n"
+        "</system:String.Length>",
+        "<Parent xmlns:system=\"clr-namespace:System\">\r\n"
+        "  <system:String.Length>\r\n"
+        "    <TypeExtension xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">\r\n"
+        "      <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">system:String</Ctor>\r\n"
+        "    </TypeExtension>\r\n"
+        "  </system:String.Length>\r\n"
+        "</Parent>");
+}
+
+// H10: the TargetTypeAnnotation arm -- the REAL Style.TargetType member
+// (FullNameIs matches), so the parent carries the annotation and the
+// property element resolves through the assembly's XmlnsDefinitionAttribute
+// rows (the presentation namespace, the detached-child default rebind).
+TEST_F(HandlersTest, PropertyTypeReferenceStyleAttachesTheTargetTypeAnnotation)
+{
+    DrivePropertyTypeReference(fixture_, "style", 3, 3,
+        "<Style.TargetType xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/presentation\">\r\n"
+        "  <TypeExtension xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">\r\n"
+        "    <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">Style</Ctor>\r\n"
+        "  </TypeExtension>\r\n"
+        "</Style.TargetType>",
+        "<Parent>\r\n"
+        "  <Style.TargetType xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/presentation\">\r\n"
+        "    <TypeExtension xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml\">\r\n"
+        "      <Ctor xmlns=\"https://github.com/icsharpcode/ILSpy\">Style</Ctor>\r\n"
+        "    </TypeExtension>\r\n"
+        "  </Style.TargetType>\r\n"
+        "</Parent>");
+
+    // The annotation the drive attached: the owning handle holding the
+    // resolved Style XamlType.
+    auto ctx = fixture_.MakeContextH();
+    IHandler* handler = HandlerMap::LookupHandler(Baml::BamlRecordType::PropertyTypeReference);
+    ASSERT_NE(handler, nullptr);
+    auto record = std::make_unique<Baml::PropertyTypeReferenceRecord>();
+    record->AttributeId = 3;
+    record->TypeId = 3;
+    Baml::BamlRecordNode node(record.get());
+    BamlElement parentElem(nullptr);
+    parentElem.Xaml = std::make_shared<Xml::XElement>("Parent");
+    std::unique_ptr<BamlElement> result = handler->Translate(*ctx, node, &parentElem);
+    ASSERT_NE(result, nullptr);
+    auto* targetAnn = parentElem.Xaml.Element
+        ->Annotation<std::shared_ptr<Handlers::TargetTypeAnnotation>>();
+    ASSERT_NE(targetAnn, nullptr);
+    ASSERT_NE(*targetAnn, nullptr);
+    ASSERT_NE((*targetAnn)->Type, nullptr);
+    EXPECT_EQ((*targetAnn)->Type->TypeNamespace, "System.Windows");
+    EXPECT_EQ((*targetAnn)->Type->TypeName, "Style");
+}
+
+// H11: the null-parent NRE (the ToString's parent.Xaml deref).
+TEST_F(HandlersTest, PropertyTypeReferenceWithANullParentThrowsTheNRE)
+{
+    auto ctx = fixture_.MakeContextE();
+    IHandler* handler = HandlerMap::LookupHandler(Baml::BamlRecordType::PropertyTypeReference);
+    ASSERT_NE(handler, nullptr);
+    auto record = std::make_unique<Baml::PropertyTypeReferenceRecord>();
+    record->AttributeId = 1;
+    record->TypeId = 1;
+    Baml::BamlRecordNode node(record.get());
+
+    try {
+        handler->Translate(*ctx, node, nullptr);
+        FAIL() << "the null-parent translate must throw";
+    } catch (const std::runtime_error& ex) {
+        EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
+    }
+}
+
+// The PropertyWithExtension drive helper (the probe's H12-H21): a fresh
+// section-E context, the crafted record, an optionally annotated parent,
+// and the byte-exact parent render assertion (the handler contributes only
+// the attribute).
+void DrivePropertyWithExtension(XamlContextFixture& fixture, const char* name,
+    std::uint16_t flags, std::uint16_t valueId, bool annotatedParent,
+    const std::string& expectedParentRender)
+{
+    auto ctx = fixture.MakeContextE();
+    IHandler* handler = HandlerMap::LookupHandler(Baml::BamlRecordType::PropertyWithExtension);
+    ASSERT_NE(handler, nullptr) << name;
+    auto record = std::make_unique<Baml::PropertyWithExtensionRecord>();
+    record->AttributeId = 1;
+    record->Flags = flags;
+    record->ValueId = valueId;
+    Baml::BamlRecordNode node(record.get());
+    BamlElement parentElem(nullptr);
+    parentElem.Xaml = std::make_shared<Xml::XElement>("Parent");
+    if (annotatedParent)
+        parentElem.Xaml.Element->AddAnnotation(ctx->ResolveTypeOwning(1));
+
+    std::unique_ptr<BamlElement> result = handler->Translate(*ctx, node, &parentElem);
+    EXPECT_EQ(result, nullptr) << name;
+    EXPECT_EQ(parentElem.Xaml.Element->ToString(), expectedParentRender) << name;
+}
+
+// H12 + H13: the TypeExtension arm (Flags 691 == KnownTypes.TypeExtension,
+// ValueId 0 = the Button type) -- the plain parent takes the attached
+// full-form attribute name; the String-annotated parent takes the short
+// form (IsAttachedTo's resolved-member walk finds String.Length).
+TEST_F(HandlersTest, PropertyWithExtensionTypeArmRendersTheGold)
+{
+    DrivePropertyWithExtension(fixture_, "type", 691, 0, false,
+        "<Parent xmlns:markup=\"clr-namespace:System.Windows.Markup;assembly=PresentationFramework\" "
+        "String.Length=\"{markup:Type Button}\" />");
+    DrivePropertyWithExtension(fixture_, "typeAnnotated", 691, 0, true,
+        "<Parent xmlns:markup=\"clr-namespace:System.Windows.Markup;assembly=PresentationFramework\" "
+        "Length=\"{markup:Type Button}\" />");
+}
+
+// H14: the valTypeExt arm (Flags 0x4000 | 691): the initializer wraps the
+// rendered type name in a nested TypeExtension extension.
+TEST_F(HandlersTest, PropertyWithExtensionValTypeExtWrapsTheNestedTypeExtension)
+{
+    DrivePropertyWithExtension(fixture_, "valTypeExt", 0x42B3, 0, false,
+        "<Parent xmlns:markup=\"clr-namespace:System.Windows.Markup;assembly=PresentationFramework\" "
+        "String.Length=\"{markup:Type {markup:Type Button}}\" />");
+}
+
+// H15: the TemplateBinding arm (Flags 634 == KnownTypes.
+// TemplateBindingExtension, ValueId 1 = the String.Length property): the
+// value arm resolves String's namespace against the parent (the xmlns:
+// system attach), and the full attribute name renders with that prefix.
+TEST_F(HandlersTest, PropertyWithExtensionTemplateBindingArmRendersTheGold)
+{
+    DrivePropertyWithExtension(fixture_, "templateBinding", 634, 1, false,
+        "<Parent xmlns:windows=\"clr-namespace:System.Windows;assembly=PresentationFramework\" "
+        "xmlns:system=\"clr-namespace:System\" "
+        "system:String.Length=\"{windows:TemplateBinding system:String.Length}\" />");
+}
+
+// H16 + H17 + H18: the StaticExtension arms (Flags 602 == KnownTypes.
+// StaticExtension): the low id resolves the property, the high id decodes
+// through the SystemResourceIds magic ranges into the KnownThings resource
+// row (bamlId 1 -> SystemColors.ActiveBorderBrushKey), and the valStaticExt
+// flag wraps the initializer in a nested StaticExtension.
+TEST_F(HandlersTest, PropertyWithExtensionStaticArmsRenderTheGold)
+{
+    DrivePropertyWithExtension(fixture_, "staticLow", 602, 1, false,
+        "<Parent xmlns:markup=\"clr-namespace:System.Windows.Markup;assembly=PresentationFramework\" "
+        "xmlns:system=\"clr-namespace:System\" "
+        "system:String.Length=\"{markup:Static system:String.Length}\" />");
+    DrivePropertyWithExtension(fixture_, "staticHigh", 602, 0xFFFF, false,
+        "<Parent xmlns:markup=\"clr-namespace:System.Windows.Markup;assembly=PresentationFramework\" "
+        "String.Length=\"{markup:Static SystemColors.ActiveBorderBrushKey}\" />");
+    // The high arm's first magic range (ValueId 0xFF17 -> bamlId 233 -> the
+    // isKey=false resource form).
+    DrivePropertyWithExtension(fixture_, "staticHighNonKey", 602, 0xFF17, false,
+        "<Parent xmlns:markup=\"clr-namespace:System.Windows.Markup;assembly=PresentationFramework\" "
+        "String.Length=\"{markup:Static SystemColors.ActiveBorderBrush}\" />");
+    DrivePropertyWithExtension(fixture_, "valStaticExt", 0x225A, 1, false,
+        "<Parent xmlns:markup=\"clr-namespace:System.Windows.Markup;assembly=PresentationFramework\" "
+        "xmlns:system=\"clr-namespace:System\" "
+        "system:String.Length=\"{markup:Static {markup:Static system:String.Length}}\" />");
+}
+
+// H19: the plain-string arm (Flags 1 = the AccessText known type, ValueId 1
+// = the "{Brace}" string): the Escape arm's leading-brace render.
+TEST_F(HandlersTest, PropertyWithExtensionStringArmEscapesTheBraces)
+{
+    DrivePropertyWithExtension(fixture_, "string", 1, 1, false,
+        "<Parent String.Length=\"{AccessText {}{Brace}}\" />");
+}
+
+// H20 + H21: the exception arms -- the missing string id (ResolveString
+// answers null and XamlUtils.Escape(null) NREs) and the null parent (the
+// elemType annotation read).
+TEST_F(HandlersTest, PropertyWithExtensionExceptionArmsThrowTheNetNre)
+{
+    {
+        auto ctx = fixture_.MakeContextE();
+        IHandler* handler = HandlerMap::LookupHandler(Baml::BamlRecordType::PropertyWithExtension);
+        ASSERT_NE(handler, nullptr);
+        auto record = std::make_unique<Baml::PropertyWithExtensionRecord>();
+        record->AttributeId = 1;
+        record->Flags = 1;
+        record->ValueId = 5;
+        Baml::BamlRecordNode node(record.get());
+        BamlElement parentElem = MakeParentElem();
+
+        try {
+            handler->Translate(*ctx, node, &parentElem);
+            FAIL() << "the missing string id must throw";
+        } catch (const std::runtime_error& ex) {
+            EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
+        }
+    }
+    {
+        auto ctx = fixture_.MakeContextE();
+        IHandler* handler = HandlerMap::LookupHandler(Baml::BamlRecordType::PropertyWithExtension);
+        ASSERT_NE(handler, nullptr);
+        auto record = std::make_unique<Baml::PropertyWithExtensionRecord>();
+        record->AttributeId = 1;
+        record->Flags = 691;
+        record->ValueId = 0;
+        Baml::BamlRecordNode node(record.get());
+
+        try {
+            handler->Translate(*ctx, node, nullptr);
+            FAIL() << "the null-parent translate must throw";
         } catch (const std::runtime_error& ex) {
             EXPECT_STREQ(ex.what(), "Object reference not set to an instance of an object.");
         }

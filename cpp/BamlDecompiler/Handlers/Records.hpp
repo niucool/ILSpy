@@ -52,6 +52,12 @@
 //    {StaticResource} extension element the consumers re-drive; the
 //    consumers walk the ancestors for the key whose StaticResources list
 //    holds the referenced node.
+//  * the misc family: XmlnsPropertyHandler (the xmlns declaration record --
+//    the NamespaceMap adds plus the xmlns attribute),
+//    PropertyTypeReferenceHandler with its TargetTypeAnnotation payload
+//    (the Style.TargetType property element), and
+//    PropertyWithExtensionHandler (the markup-extension attribute's four
+//    initializer arms).
 //  * the nine null-returning handlers (AssemblyInfo, AttributeInfo,
 //    ContentProperty, DeferableContentStart, LineNumberAndPosition,
 //    LinePosition, PIMapping, TypeInfo, TypeSerializerInfo).
@@ -84,6 +90,15 @@
 #pragma once
 
 #include "BamlDecompiler/IHandlers.hpp"
+
+#include <memory>
+
+// The XamlType the TargetTypeAnnotation payload holds (a forward
+// declaration suffices -- the shared_ptr member only needs the complete
+// type at construction, which lives in the .cpp).
+namespace ILSpy::BamlDecompiler::Xaml {
+class XamlType;
+} // namespace ILSpy::BamlDecompiler::Xaml
 
 namespace ILSpy::BamlDecompiler::Handlers {
 
@@ -361,6 +376,61 @@ public:
 // TranslateDefer into it, and finishes with the ResolveNamespace + rename
 // pair over the property element.
 class PropertyWithStaticResourceIdHandler : public IHandler {
+public:
+    Baml::BamlRecordType Type() const override;
+
+    std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
+        BamlElement* parent) override;
+};
+
+// The C# `internal class XmlnsPropertyHandler : IHandler` -- the xmlns
+// declaration record: the assembly-id loop adds one plain NamespaceMap per
+// id plus, when the resolved assembly is the MAIN module, one clr-namespace
+// map per XmlnsDefinitionAttribute row mapping the record's XML namespace;
+// then the xmlns (or xmlns:<prefix>) attribute on the parent element.
+class XmlnsPropertyHandler : public IHandler {
+public:
+    Baml::BamlRecordType Type() const override;
+
+    std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
+        BamlElement* parent) override;
+};
+
+// The C# `internal class TargetTypeAnnotation` (declared inside
+// PropertyTypeReferenceHandler.cs): the resolved target type the
+// Style.TargetType property element carries, consumed by
+// PropertyCustomHandler's NeedsFullName parent walk.
+// The TargetTypeAnnotation payload holds the OWNING XamlType handle (the
+// annotation is the GC root; the shared_ptr construction needs the
+// complete type, which the .cpp includes).
+class TargetTypeAnnotation {
+public:
+    explicit TargetTypeAnnotation(std::shared_ptr<Xaml::XamlType> type)
+        : Type(std::move(type))
+    {
+    }
+
+    // The C# `XamlType Type { get; }`.
+    std::shared_ptr<Xaml::XamlType> Type;
+};
+
+// The C# `internal class PropertyTypeReferenceHandler : IHandler` -- the
+// property element whose value is a type reference: a TypeExtension child
+// element carrying the type name, plus the TargetTypeAnnotation the
+// Style.TargetType shape attaches to the parent.
+class PropertyTypeReferenceHandler : public IHandler {
+public:
+    Baml::BamlRecordType Type() const override;
+
+    std::unique_ptr<BamlElement> Translate(XamlContext& ctx, Baml::BamlNode& node,
+        BamlElement* parent) override;
+};
+
+// The C# `internal class PropertyWithExtensionHandler : IHandler` -- the
+// markup-extension property attribute: the {x:Type}/{TemplateBinding}/
+// {x:Static}/plain-string initializer arms selected by the extension type
+// id and the flag bits, rendered through XamlExtension's ToString.
+class PropertyWithExtensionHandler : public IHandler {
 public:
     Baml::BamlRecordType Type() const override;
 

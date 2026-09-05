@@ -36,6 +36,7 @@
 
 #pragma once
 
+#include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/IEntity.hpp"
 #include "Decompiler/TypeSystem/IEvent.hpp"
@@ -76,6 +77,39 @@ namespace ILSpy::Decompiler::TypeSystem::TestSupport {
 // after it -- uses the qualified `TS::` form (the ITypeDefinition_Test /
 // IEntity_Test stub convention). A local alias keeps that noise down.
 namespace TS = ILSpy::Decompiler::TypeSystem;
+
+// A configurable `IAttribute` stub: a fixed attribute type and positional
+// arguments (the `GetAssemblyAttributes` consumers read `AttributeType`'s
+// FullName and the `FixedArguments` values -- the XmlnsPropertyHandler /
+// XamlType.ResolveNamespace XmlnsDefinitionAttribute arms). The stored type
+// handle is a non-owning shared_ptr alias (the caller keeps the type stub
+// alive); `Constructor` stays null and `HasDecodeErrors` false -- no ported
+// consumer reads either through the module-attribute surface.
+class LookupAttribute : public IAttribute {
+public:
+    LookupAttribute(ITypePtr attributeType,
+            std::vector<CustomAttributeTypedArgument> fixedArguments)
+        : attributeType_(std::move(attributeType)),
+          fixedArguments_(std::move(fixedArguments))
+    {
+    }
+
+    const IType& AttributeType() const override { return *attributeType_; }
+    const IMethod* Constructor() const override { return nullptr; }
+    bool HasDecodeErrors() const override { return false; }
+    std::vector<CustomAttributeTypedArgument> FixedArguments() const override
+    {
+        return fixedArguments_;
+    }
+    std::vector<CustomAttributeNamedArgument> NamedArguments() const override
+    {
+        return {};
+    }
+
+private:
+    ITypePtr attributeType_;
+    std::vector<CustomAttributeTypedArgument> fixedArguments_;
+};
 
 // A friend-aware `IModule` for the InternalsVisibleTo accessibility arm: the
 // friend list is a set of assembly names the module grants internals access to
@@ -132,6 +166,16 @@ public:
     {
         typeMap_.push_back({ name, d });
     }
+    // Configurable assembly attributes (the XmlnsPropertyHandler /
+    // XamlType.ResolveNamespace XmlnsDefinitionAttribute arms read them:
+    // `GetAssemblyAttributes` rows whose `AttributeType.FullName` matches).
+    // The default (empty) preserves the prior behavior for every existing
+    // test (the additive-setter convention); the stored pointers are
+    // non-owning (the test fixture keeps the attribute stubs alive).
+    void SetAssemblyAttributes(std::vector<const IAttribute*> attributes)
+    {
+        assemblyAttributes_ = std::move(attributes);
+    }
 
     // --- ISymbol ---
     TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::Module; }
@@ -152,7 +196,10 @@ public:
     {
         return fullAssemblyName_.empty() ? assemblyName_ : fullAssemblyName_;
     }
-    std::vector<const IAttribute*> GetAssemblyAttributes() const override { return {}; }
+    std::vector<const IAttribute*> GetAssemblyAttributes() const override
+    {
+        return assemblyAttributes_;
+    }
     std::vector<const IAttribute*> GetModuleAttributes() const override { return {}; }
     bool InternalsVisibleTo(const IModule& module) const override
     {
@@ -184,6 +231,7 @@ private:
     std::string fullAssemblyName_;
     std::vector<std::string> friendAssemblies_;
     const ILSpy::Decompiler::Metadata::MetadataFile* metadataFile_ = nullptr;
+    std::vector<const IAttribute*> assemblyAttributes_;
     std::vector<const ITypeDefinition*> typeDefinitions_;
     std::vector<const ITypeDefinition*> topLevelTypeDefinitions_;
     std::vector<std::pair<TopLevelTypeName, const ITypeDefinition*>> typeMap_;

@@ -104,6 +104,9 @@ std::vector<std::unique_ptr<IHandler>> HandlerMap::CreateBuiltinHandlers()
     handlers.push_back(std::make_unique<Handlers::StaticResourceIdHandler>());
     handlers.push_back(std::make_unique<Handlers::OptimizedStaticResourceHandler>());
     handlers.push_back(std::make_unique<Handlers::PropertyWithStaticResourceIdHandler>());
+    handlers.push_back(std::make_unique<Handlers::XmlnsPropertyHandler>());
+    handlers.push_back(std::make_unique<Handlers::PropertyTypeReferenceHandler>());
+    handlers.push_back(std::make_unique<Handlers::PropertyWithExtensionHandler>());
     return handlers;
 }
 
