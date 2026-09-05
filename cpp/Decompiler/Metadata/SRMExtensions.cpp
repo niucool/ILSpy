@@ -19,6 +19,8 @@
 #include "Decompiler/Metadata/SRMExtensions.hpp"
 
 #include "Decompiler/Metadata/MetadataExtensions.hpp"
+#include "Decompiler/TypeSystem/FullTypeName.hpp"
+#include "Decompiler/TypeSystem/KnownAttribute.hpp"
 #include "Decompiler/TypeSystem/KnownTypeReference.hpp"
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
 #include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
@@ -388,6 +390,401 @@ std::uint32_t GetDeclaringType(const MetadataFile& metadata,
             throw std::out_of_range(
                 "GetDeclaringType: unsupported handle kind");
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// The known-type / kind predicate family (SRMExtensions.cs lines 59-135 and
+// 246-375): IsKnownType over an EntityHandle (the TypeRef/TypeDef/TypeSpec
+// arms with the nested/scope rejections), SignatureIsKnownType (the TypeSpec
+// blob walk), GetAttributeType / HasKnownAttribute (the attribute-class
+// classification), and IsValueType / IsEnum / IsDelegate (the TypeDef kind
+// predicates MetadataTypeDefinition's ctor consumes).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The .NET 10 `HandleKind.ToString()` spelling for a token's table byte --
+// the kind ids equal the II.24.2.6 table ids with the *Ptr tables skipped
+// (probed from the 10.0.8 runtime: 0=ModuleDefinition, 4=FieldDefinition,
+// 6=MethodDefinition, ...); a byte outside the enum renders its decimal
+// value (the .NET enum ToString fallback).
+std::string HandleKindName(std::uint32_t kind) {
+    switch (kind) {
+        case 0: return "ModuleDefinition";
+        case 1: return "TypeReference";
+        case 2: return "TypeDefinition";
+        case 4: return "FieldDefinition";
+        case 6: return "MethodDefinition";
+        case 8: return "Parameter";
+        case 9: return "InterfaceImplementation";
+        case 10: return "MemberReference";
+        case 11: return "Constant";
+        case 12: return "CustomAttribute";
+        case 14: return "DeclarativeSecurityAttribute";
+        case 17: return "StandaloneSignature";
+        case 20: return "EventDefinition";
+        case 23: return "PropertyDefinition";
+        case 25: return "MethodImplementation";
+        case 26: return "ModuleReference";
+        case 27: return "TypeSpecification";
+        case 32: return "AssemblyDefinition";
+        case 35: return "AssemblyReference";
+        case 38: return "AssemblyFile";
+        case 39: return "ExportedType";
+        case 40: return "ManifestResource";
+        case 42: return "GenericParameter";
+        case 43: return "MethodSpecification";
+        case 44: return "GenericParameterConstraint";
+        case 48: return "Document";
+        case 49: return "MethodDebugInformation";
+        case 50: return "LocalScope";
+        case 51: return "LocalVariable";
+        case 52: return "LocalConstant";
+        case 53: return "ImportScope";
+        case 55: return "CustomDebugInformation";
+        default: return std::to_string(kind);
+    }
+}
+
+// The C# `TopLevelTypeName.IsKnownType(KnownTypeCode)` extension
+// (TypeSystemExtensions.cs line 391): `typeName ==
+// KnownTypeReference.Get(knownType).TypeName`. The none-code arm is
+// unreachable for every caller (the primitive/Enum/ValueType/MulticastDelegate
+// codes are all real); the null guard mirrors the C# null table row.
+bool IsKnownTypeName(const TypeSystem::TopLevelTypeName& knownType,
+                     TypeSystem::KnownTypeCode knownTypeCode) {
+    const TypeSystem::KnownTypeReference* reference =
+        TypeSystem::KnownTypeReference::Get(knownTypeCode);
+    return reference != nullptr && reference->TypeName() == knownType;
+}
+
+// The C# `private static bool IsKnownType(EntityHandle handle, MetadataReader
+// reader, TopLevelTypeName knownType)` (SRMExtensions.cs line 258): the core
+// behind both public overloads. The whole row-read switch sits inside the C#
+// `try { } catch (BadImageFormatException) { return false; }`, so a corrupt
+// row is FALSE -- the port maps the reader's throws (std::out_of_range /
+// std::invalid_argument, the winmd seek/row family) to the same false. (The
+// C# reads the name/namespace HANDLES in the try and compares them outside;
+// a handle whose string read throws propagates out of the C# -- the port's
+// never-throw name reads make that shape false instead, a divergence
+// confined to a corrupt name column with a readable row.)
+bool IsKnownTypeCore(const MetadataFile& metadata, std::uint32_t entityToken,
+                     const TypeSystem::TopLevelTypeName& knownType);
+
+// The C# `private static bool SignatureIsKnownType(MetadataReader reader,
+// TopLevelTypeName knownType, ref BlobReader blob)` (SRMExtensions.cs line
+// 316): the ELEMENT_TYPE walk over a TypeSpec signature blob -- the primitive
+// comparisons, the never-matching pointer/byref/array/fnptr/var arms, the
+// cmod skip-then-recurse, the GENERICINST head recursion, and the
+// CLASS/VALUETYPE coded-index recursion into the IsKnownType core. The entry
+// read is the C# TryReadCompressedInteger (FALSE at end-of-blob); every later
+// read is the throwing form whose BadImageFormatException the caller's catch
+// takes as false.
+bool SignatureIsKnownType(const MetadataFile& metadata, TypeNameBlobCursor& cursor,
+                          const TypeSystem::TopLevelTypeName& knownType) {
+    std::uint32_t typeCode;
+    try {
+        typeCode = cursor.CompressedUnsigned();
+    } catch (const std::out_of_range&) {
+        return false;  // the C# `!blob.TryReadCompressedInteger(...)`
+    }
+    switch (typeCode) {
+        case 0x01:  // ELEMENT_TYPE_VOID
+            return IsKnownTypeName(knownType, TypeSystem::KnownTypeCode::Void);
+        case 0x02:  // ELEMENT_TYPE_BOOLEAN
+            return IsKnownTypeName(knownType, TypeSystem::KnownTypeCode::Boolean);
+        case 0x03:  // ELEMENT_TYPE_CHAR
+            return IsKnownTypeName(knownType, TypeSystem::KnownTypeCode::Char);
+        case 0x04:  // ELEMENT_TYPE_I1
+            return IsKnownTypeName(knownType, TypeSystem::KnownTypeCode::SByte);
+        case 0x05:  // ELEMENT_TYPE_U1
+            return IsKnownTypeName(knownType, TypeSystem::KnownTypeCode::Byte);
+        case 0x06:  // ELEMENT_TYPE_I2
+            return IsKnownTypeName(knownType, TypeSystem::KnownTypeCode::Int16);
+        case 0x07:  // ELEMENT_TYPE_U2
+            return IsKnownTypeName(knownType, TypeSystem::KnownTypeCode::UInt16);
+        case 0x08:  // ELEMENT_TYPE_I4
+            return IsKnownTypeName(knownType, TypeSystem::KnownTypeCode::Int32);
+        case 0x09:  // ELEMENT_TYPE_U4
+            return IsKnownTypeName(knownType, TypeSystem::KnownTypeCode::UInt32);
+        case 0x0A:  // ELEMENT_TYPE_I8
+            return IsKnownTypeName(knownType, TypeSystem::KnownTypeCode::Int64);
+        case 0x0B:  // ELEMENT_TYPE_U8
+            return IsKnownTypeName(knownType, TypeSystem::KnownTypeCode::UInt64);
+        case 0x0C:  // ELEMENT_TYPE_R4
+            return IsKnownTypeName(knownType, TypeSystem::KnownTypeCode::Single);
+        case 0x0D:  // ELEMENT_TYPE_R8
+            return IsKnownTypeName(knownType, TypeSystem::KnownTypeCode::Double);
+        case 0x0E:  // ELEMENT_TYPE_STRING
+            return IsKnownTypeName(knownType, TypeSystem::KnownTypeCode::String);
+        case 0x16:  // ELEMENT_TYPE_TYPEDBYREF
+            return IsKnownTypeName(knownType,
+                                    TypeSystem::KnownTypeCode::TypedReference);
+        case 0x18:  // ELEMENT_TYPE_I
+            return IsKnownTypeName(knownType, TypeSystem::KnownTypeCode::IntPtr);
+        case 0x19:  // ELEMENT_TYPE_U
+            return IsKnownTypeName(knownType, TypeSystem::KnownTypeCode::UIntPtr);
+        case 0x1C:  // ELEMENT_TYPE_OBJECT
+            return IsKnownTypeName(knownType, TypeSystem::KnownTypeCode::Object);
+        case 0x0F:  // ELEMENT_TYPE_PTR
+        case 0x10:  // ELEMENT_TYPE_BYREF
+        case 0x45:  // ELEMENT_TYPE_PINNED
+        case 0x1D:  // ELEMENT_TYPE_SZARRAY
+        case 0x1B:  // ELEMENT_TYPE_FNPTR
+        case 0x14:  // ELEMENT_TYPE_ARRAY
+        case 0x13:  // ELEMENT_TYPE_VAR
+        case 0x1E:  // ELEMENT_TYPE_MVAR
+            return false;
+        case 0x1F:  // ELEMENT_TYPE_CMOD_REQD
+        case 0x20:  // ELEMENT_TYPE_CMOD_OPT
+            // The C# `blob.ReadTypeHandle(); // skip modifier` then recurse.
+            ReadTypeDefOrRefEncoded(cursor);
+            return SignatureIsKnownType(metadata, cursor, knownType);
+        case 0x15:  // ELEMENT_TYPE_GENERICINST
+            // The C# recurses into the generic type's own signature.
+            return SignatureIsKnownType(metadata, cursor, knownType);
+        case 0x11:  // ELEMENT_TYPE_VALUETYPE
+        case 0x12:  // ELEMENT_TYPE_CLASS
+            // The C# `IsKnownType(blob.ReadTypeHandle(), reader, knownType)`
+            // -- a fresh IsKnownType invocation with its own try/catch.
+            return IsKnownTypeCore(metadata, ReadTypeDefOrRefEncoded(cursor),
+                                   knownType);
+        default:
+            return false;
+    }
+}
+
+bool IsKnownTypeCore(const MetadataFile& metadata, std::uint32_t entityToken,
+                     const TypeSystem::TopLevelTypeName& knownType) {
+    if (entityToken == 0)
+        return false;  // the C# `if (handle.IsNil) return false;`
+    std::string name;
+    std::string ns;
+    try {
+        switch (entityToken >> 24) {
+            case 0x01: {  // HandleKind.TypeReference
+                auto info = metadata.GetTypeRefNameInfo(entityToken);
+                if (!info)
+                    return false;  // the C# row-fetch BadImageFormatException
+                // The C#: `if (tr.ResolutionScope.IsNil ||
+                // tr.ResolutionScope.Kind == HandleKind.TypeReference)
+                // return false;` -- ignore exported and nested types. The
+                // scope read distinguishes the nil scope (Kind::None) from
+                // every non-TypeRef scope.
+                auto scope = metadata.GetTypeRefScopeInfo(entityToken);
+                if (!scope)
+                    return false;
+                if (scope->Scope == TypeRefScopeInfo::Kind::None)
+                    return false;
+                if (scope->Scope == TypeRefScopeInfo::Kind::TypeRef)
+                    return false;
+                name = info->Name;
+                ns = info->Namespace;
+                break;
+            }
+            case 0x02: {  // HandleKind.TypeDefinition
+                // The C# `if (td.IsNested) return false;` -- the
+                // TypeAttributesExtensions bit trick: (flags & 0x6) != 0 is
+                // true for every nested visibility (2..7) and false for
+                // NotPublic/Public (the iteration-62 decompiled-SRM pin).
+                if ((metadata.GetTypeDefAttributes(entityToken) & 0x6u) != 0)
+                    return false;
+                auto info = metadata.GetTypeDefNameInfo(entityToken);
+                if (!info)
+                    return false;
+                name = info->Name;
+                ns = info->Namespace;
+                break;
+            }
+            case 0x1B: {  // HandleKind.TypeSpecification
+                auto blob = metadata.GetTypeSpecSignatureBlob(entityToken);
+                if (!blob)
+                    return false;
+                TypeNameBlobCursor cursor(blob->data(), blob->size());
+                return SignatureIsKnownType(metadata, cursor, knownType);
+            }
+            default:
+                return false;
+        }
+    } catch (const std::out_of_range&) {
+        return false;  // the C# catch (BadImageFormatException)
+    } catch (const std::invalid_argument&) {
+        return false;
+    }
+    // The name/namespace comparison: a 0-arity known type compares the row
+    // name ordinally; a generic known type splits the row name's backtick
+    // arity and compares name AND count.
+    if (knownType.TypeParameterCount() == 0) {
+        if (name != knownType.Name())
+            return false;
+    } else {
+        int typeParameterCount = 0;
+        std::string splitName =
+            TypeSystem::SplitTypeParameterCountFromReflectionName(
+                name, typeParameterCount);
+        if (typeParameterCount != knownType.TypeParameterCount()
+            || splitName != knownType.Name())
+            return false;
+    }
+    // The nil-vs-empty namespace distinction is not observable through the
+    // result: the C# nil arm tests `knownType.Namespace.Length == 0` and the
+    // non-nil arm compares the string -- both reduce to the row namespace
+    // ("" for a nil column) equaling the known namespace (the port's name
+    // read already collapsed the distinction).
+    return ns == knownType.Namespace();
+}
+
+// The C# `internal static bool IsKnownAttribute(this SRM.CustomAttribute attr,
+// MetadataReader metadata, KnownAttribute attrType)` (line 634):
+// `attr.GetAttributeType(metadata).IsKnownType(metadata, attrType)` -- the
+// GetAttributeType throw propagates (no catch here).
+bool IsKnownAttribute(const MetadataFile& metadata,
+                      std::uint32_t attributeToken,
+                      TypeSystem::KnownAttribute attribute) {
+    return IsKnownTypeCore(metadata, GetAttributeType(metadata, attributeToken),
+                           TypeSystem::GetTypeName(attribute));
+}
+
+} // namespace
+
+// The C# `public static bool IsKnownType(this EntityHandle handle,
+// MetadataReader reader, KnownTypeCode knownType)` (line 246).
+bool IsKnownType(const MetadataFile& metadata, std::uint32_t entityToken,
+                 TypeSystem::KnownTypeCode knownType) {
+    const TypeSystem::KnownTypeReference* reference =
+        TypeSystem::KnownTypeReference::Get(knownType);
+    if (reference == nullptr)
+        throw std::runtime_error(
+            "Object reference not set to an instance of an object.");
+    return IsKnownTypeCore(metadata, entityToken, reference->TypeName());
+}
+
+// The C# `internal static bool IsKnownType(this EntityHandle handle,
+// MetadataReader reader, KnownAttribute knownType)` (line 252).
+bool IsKnownType(const MetadataFile& metadata, std::uint32_t entityToken,
+                 TypeSystem::KnownAttribute knownAttribute) {
+    return IsKnownTypeCore(metadata, entityToken,
+                           TypeSystem::GetTypeName(knownAttribute));
+}
+
+// The C# `public static EntityHandle GetAttributeType(this SRM.CustomAttribute
+// attribute, MetadataReader reader)` (line 606): the constructor's declaring
+// type. The port takes the CustomAttribute ROW token (the C# takes the row
+// struct); a bogus row token throws std::out_of_range (the reader-family
+// row-fetch convention).
+std::uint32_t GetAttributeType(const MetadataFile& metadata,
+                               std::uint32_t attributeToken) {
+    auto row = metadata.GetCustomAttribute(attributeToken);
+    if (!row)
+        throw std::out_of_range("GetAttributeType: invalid CustomAttribute token");
+    switch (row->ConstructorToken >> 24) {
+        case 0x06:  // HandleKind.MethodDefinition
+            // The C# `md.GetDeclaringType()` throws BadImageFormatException
+            // for a bogus row; the port's never-throw read yields the nil
+            // token instead (the GetCustomAttribute nil-tag precedent).
+            return metadata.GetMethodDeclaringTypeToken(row->ConstructorToken);
+        case 0x0A: {  // HandleKind.MemberReference
+            auto memberRef = metadata.GetMemberReference(row->ConstructorToken);
+            if (!memberRef)
+                throw std::out_of_range(
+                    "GetAttributeType: invalid MemberRef token");
+            return memberRef->ParentToken;
+        }
+        default:
+            // The C# `throw new BadImageFormatException("Unexpected token
+            // kind for attribute constructor: " + attribute.Constructor.Kind)`
+            // -- the HandleKind name for the token's table byte (the
+            // II.24.2.6 kind ids equal the table ids), decimal for a kind
+            // outside the enum (the .NET ToString fallback).
+            throw std::out_of_range(
+                "Unexpected token kind for attribute constructor: "
+                + HandleKindName(row->ConstructorToken >> 24));
+    }
+}
+
+// The C# `public static bool HasKnownAttribute(this
+// CustomAttributeHandleCollection customAttributes, MetadataReader metadata,
+// KnownAttribute type)` (line 622). The port takes the PARENT token (the
+// GetCustomAttributeTokens composition).
+bool HasKnownAttribute(const MetadataFile& metadata, std::uint32_t entityToken,
+                       TypeSystem::KnownAttribute attribute) {
+    for (std::uint32_t attributeToken :
+         metadata.GetCustomAttributeTokens(entityToken)) {
+        if (IsKnownAttribute(metadata, attributeToken, attribute))
+            return true;
+    }
+    return false;
+}
+
+// The C# `public static bool IsValueType(this TypeDefinition typeDefinition,
+// MetadataReader reader)` (line 64).
+bool IsValueType(const MetadataFile& metadata, std::uint32_t typeDefToken) {
+    std::uint32_t baseType = metadata.GetBaseTypeToken(typeDefToken);
+    if (baseType == 0)
+        return false;  // the C# `if (baseType.IsNil) return false;`
+    if (IsKnownType(metadata, baseType, TypeSystem::KnownTypeCode::Enum))
+        return true;
+    if (!IsKnownType(metadata, baseType, TypeSystem::KnownTypeCode::ValueType))
+        return false;
+    // The C# `var thisType = typeDefinition.GetFullTypeName(reader); return
+    // !thisType.IsKnownType(KnownTypeCode.Enum);` -- the FullTypeName ==
+    // TopLevelTypeName comparison over the known type's top-level name.
+    TypeSystem::FullTypeName thisType =
+        GetFullTypeNameFromDefinition(metadata, typeDefToken);
+    return !(thisType == TypeSystem::FullTypeName(
+                             TypeSystem::KnownTypeReference::Get(
+                                 TypeSystem::KnownTypeCode::Enum)->TypeName()));
+}
+
+// The C# `public static bool IsEnum(this TypeDefinition typeDefinition,
+// MetadataReader reader)` (line 82).
+bool IsEnum(const MetadataFile& metadata, std::uint32_t typeDefToken) {
+    std::uint32_t baseType = metadata.GetBaseTypeToken(typeDefToken);
+    return baseType != 0
+        && IsKnownType(metadata, baseType, TypeSystem::KnownTypeCode::Enum);
+}
+
+// The C# `public static bool IsEnum(this TypeDefinition typeDefinition,
+// MetadataReader reader, out PrimitiveTypeCode underlyingType)` (line 96).
+bool IsEnum(const MetadataFile& metadata, std::uint32_t typeDefToken,
+            PrimitiveTypeCode& underlyingType) {
+    underlyingType = static_cast<PrimitiveTypeCode>(0);  // the C# `= 0`
+    std::uint32_t baseType = metadata.GetBaseTypeToken(typeDefToken);
+    if (baseType == 0)
+        return false;
+    if (!IsKnownType(metadata, baseType, TypeSystem::KnownTypeCode::Enum))
+        return false;
+    for (const FieldInfo& field : metadata.GetFields(typeDefToken)) {
+        // The C# `if ((field.Attributes & FieldAttributes.Static) != 0)
+        // continue;` -- Static = 0x10 (II.23.1.5).
+        if ((metadata.GetFieldAttributes(field.Token) & 0x10u) != 0)
+            continue;
+        auto blob = metadata.GetSignatureBlob(field.Token);
+        if (!blob)
+            throw std::out_of_range("IsEnum: invalid field signature blob");
+        // `blob.ReadSignatureHeader().Kind != SignatureKind.Field` -- the
+        // field calling-convention nibble is 0x06 (II.23.2).
+        if (blob->empty() || ((*blob)[0] & 0x0Fu) != 0x06u)
+            return false;
+        // `underlyingType = (PrimitiveTypeCode)blob.ReadByte()` -- a
+        // truncated byte read is the C# BadImageFormatException (the throw
+        // propagates out of IsEnum; the port maps it to std::out_of_range).
+        if (blob->size() < 2)
+            throw std::out_of_range("IsEnum: truncated field signature blob");
+        underlyingType = static_cast<PrimitiveTypeCode>((*blob)[1]);
+        return true;
+    }
+    return false;
+}
+
+// The C# `public static bool IsDelegate(this TypeDefinition typeDefinition,
+// MetadataReader reader)` (line 124).
+bool IsDelegate(const MetadataFile& metadata, std::uint32_t typeDefToken) {
+    std::uint32_t baseType = metadata.GetBaseTypeToken(typeDefToken);
+    return baseType != 0
+        && IsKnownType(metadata, baseType,
+                      TypeSystem::KnownTypeCode::MulticastDelegate);
 }
 
 // ---------------------------------------------------------------------------

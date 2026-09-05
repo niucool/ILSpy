@@ -23,7 +23,9 @@
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/TypeSystem/FullTypeName.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
+#include "Decompiler/TypeSystem/Implementation/MetadataTypeDefinition.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataNamespace.hpp"
+#include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
 
 #include <stdexcept>
 #include <utility>
@@ -134,6 +136,19 @@ MetadataModule::MetadataModule(const ICompilation& compilation,
     // contract).
     rootNamespace_ = std::make_unique<Implementation::MetadataNamespace>(
         *this, nullptr, std::string(), metadataFile_->GetNamespaceDefinitionRoot());
+
+    // The C# `if (!options.HasFlag(TypeSystemOptions.Uncached)) { this.typeDefs
+    // = new MetadataTypeDefinition[metadata.TypeDefinitions.Count + 1]; ... }` --
+    // the type-definition entity cache (index = the 1-based TypeDef row
+    // number, slot 0 unused). The sibling entity arrays (`fieldDefs` /
+    // `methodDefs` / `propertyDefs` / `eventDefs` / `referencedAssemblies`)
+    // defer with their entity classes (the MetadataField/... family).
+    if ((options_
+         & ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::Uncached)
+        == ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::None)
+    {
+        typeDefs_.resize(metadataFile_->TypeDefCount() + 1);
+    }
 }
 
 // Out-of-line: the `rootNamespace_` unique_ptr deleter needs
@@ -150,19 +165,43 @@ MetadataModule::TypeSystemOptions() const
 // The C# `public ITypeDefinition GetDefinition(TypeDefinitionHandle handle)`
 // (convention (e)): the token's low 24 bits are the 1-based TypeDef row number
 // (`MetadataTokens.GetRowNumber`); the callers pass TypeDef tokens (`0x02......`).
-// Nil -> null; a row past the TypeDef table throws the exact message; the entity
-// construction is the next slice, so every in-range non-nil row hits the loud
-// deferral (the entity-cache array the C# fills around it lands with it).
+// Nil -> null; the cached arm range-checks and lazily fills the `typeDefs`
+// slot with a real `MetadataTypeDefinition`; the uncached arm constructs
+// without any range check (the row read inside the ctor throws instead).
 const ITypeDefinition* MetadataModule::GetDefinition(
     std::uint32_t typeDefinitionToken) const
 {
     std::uint32_t row = typeDefinitionToken & 0x00FFFFFFu;
     if (row == 0)
         return nullptr;
-    if (row > metadataFile_->TypeDefCount())
+    // The C# `if (typeDefs == null) return new MetadataTypeDefinition(this,
+    // handle);` -- the UNCACHED arm constructs without any range check (the
+    // row read inside the ctor throws for a bogus row); the keep-alive
+    // registry owns the instance so the returned pointer cannot dangle
+    // (the C# GC root).
+    if (typeDefs_.empty())
+    {
+        auto definition =
+            std::make_unique<Implementation::MetadataTypeDefinition>(
+                *this, typeDefinitionToken);
+        const ITypeDefinition* result = definition.get();
+        uncachedDefs_.push_back(std::move(definition));
+        return result;
+    }
+    // The C# `int row = MetadataTokens.GetRowNumber(handle); if (row >=
+    // typeDefs.Length) HandleOutOfRange(handle);` -- the 1-based row
+    // against the count+1-sized array.
+    if (row >= typeDefs_.size())
         HandleOutOfRange();
-    throw std::logic_error(
-        "MetadataModule::GetDefinition: MetadataTypeDefinition is not yet ported");
+    // The C# `LazyInit.VolatileRead(ref typeDefs[row])` + `GetOrSet`:
+    // the empty slot constructs, the filled slot returns (the
+    // single-threaded LazyInit convention).
+    std::unique_ptr<Implementation::MetadataTypeDefinition>& slot =
+        typeDefs_[row];
+    if (slot == nullptr)
+        slot = std::make_unique<Implementation::MetadataTypeDefinition>(
+            *this, typeDefinitionToken);
+    return slot.get();
 }
 
 // --- ISymbol ---
@@ -250,7 +289,7 @@ const INamespace& MetadataModule::RootNamespace() const
 
 // The C# `IModule.GetTypeDefinition(TopLevelTypeName)`: the MetadataFile reverse
 // lookup (the iteration-61 port, raw token / 0 = nil), the forwarder arm
-// deferred, and the hit routed through `GetDefinition` (the entity deferral).
+// deferred, and the hit routed through `GetDefinition` (the real entity).
 const ITypeDefinition* MetadataModule::GetTypeDefinition(
     const TopLevelTypeName& topLevelTypeName) const
 {
@@ -275,9 +314,8 @@ const ITypeDefinition* MetadataModule::GetTypeDefinition(
 }
 
 // The C# `IEnumerable<ITypeDefinition> TypeDefinitions` -- every TypeDef row
-// handle in row order routed through `GetDefinition`: the deferral fires at
-// the first token for every non-empty TypeDef table (an empty table yields the
-// empty snapshot).
+// handle in row order routed through `GetDefinition` (the entity cache
+// constructs each definition on first touch).
 std::vector<const ITypeDefinition*> MetadataModule::TypeDefinitions() const
 {
     std::vector<const ITypeDefinition*> result;
@@ -289,14 +327,18 @@ std::vector<const ITypeDefinition*> MetadataModule::TypeDefinitions() const
 }
 
 // The C# `TopLevelTypeDefinitions => TypeDefinitions.Where(td =>
-// td.DeclaringTypeDefinition == null)`: the filter reads each definition's
-// declaring type, so the enumeration runs the `GetDefinition` deferral before
-// any filter can apply -- `TypeDefinitions()` throws at its first token. The
-// filter itself lands with the entity slice (DeclaringTypeDefinition is a
-// MetadataTypeDefinition-own member).
+// td.DeclaringTypeDefinition == null)` -- the non-nested rows of the full
+// TypeDef walk (the entity cache keeps the filter's `DeclaringTypeDefinition`
+// read cheap).
 std::vector<const ITypeDefinition*> MetadataModule::TopLevelTypeDefinitions() const
 {
-    return TypeDefinitions();
+    std::vector<const ITypeDefinition*> result;
+    for (const ITypeDefinition* definition : TypeDefinitions())
+    {
+        if (definition->DeclaringTypeDefinition() == nullptr)
+            result.push_back(definition);
+    }
+    return result;
 }
 
 // The C# `void HandleOutOfRange(EntityHandle handle)` -- the exact message

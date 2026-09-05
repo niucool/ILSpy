@@ -67,13 +67,12 @@
 //      `return std::string()` (an empty string; MetadataNamespace never carries an
 //      extern alias -- only the deferred MergedNamespace forms do).
 //  (f) `Types` routes each `ns.TypeDefinitions` token through
-//      `module.GetDefinition(token)` -- in this skeleton slice that member is the
-//      loud `MetadataTypeDefinition` deferral, so a namespace WITH direct types
-//      throws `std::logic_error` at its first token while a namespace with NO
-//      direct types (the SRM-synthesized virtual intermediates like mscorlib's
-//      "Microsoft" or "Windows") yields the empty snapshot without reaching the
-//      deferral -- the gold-pinned virtual-namespace arm. The `if (def != null)`
-//      filter is the C# shape (a non-nil token always resolves in the full port).
+//      `module.GetDefinition(token)` -- the type-definition entity slice landed,
+//      so every token resolves to the real `MetadataTypeDefinition` (a namespace
+//      with direct types enumerates them; the SRM-synthesized virtual
+//      intermediates like mscorlib's "Microsoft" or "Windows" carry no direct
+//      types and yield the empty snapshot -- the gold-pinned virtual-namespace
+//      arm). The `if (def != null)` filter is the C# shape.
 //  (g) `GetTypeDefinition(name, typeParameterCount)` routes through the extension
 //      `module.GetTypeDefinition(FullName, name, tpc)` -- literally
 //      `module.GetTypeDefinition(new TopLevelTypeName(FullName, name, tpc))`

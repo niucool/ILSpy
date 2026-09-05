@@ -101,11 +101,8 @@ std::vector<const INamespace*> MetadataNamespace::ChildNamespaces() const
 
 // The C# `IEnumerable<ITypeDefinition> INamespace.Types`: every
 // `ns.TypeDefinitions` token routed through `module.GetDefinition(typeHandle)`,
-// the non-null results yielded. In this skeleton slice `GetDefinition` is the
-// loud `MetadataTypeDefinition` deferral for every non-nil token, so the loop
-// reaches the deferral at the FIRST token of a namespace with direct types --
-// while a namespace with NO direct types (the SRM-synthesized virtual
-// intermediates) yields the empty snapshot without ever calling it.
+// the non-null results yielded (the type-definition entity slice constructs
+// each definition through the module's cache).
 std::vector<const ITypeDefinition*> MetadataNamespace::Types() const
 {
     std::vector<const ITypeDefinition*> result;

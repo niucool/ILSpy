@@ -22,11 +22,15 @@
 // `Metadata.PEFile`. This is the SKELETON slice: the ctor (the assembly-identity
 // computation + the root namespace over the iteration-62 namespace tree), the
 // `IModule` identity surface, and `MetadataNamespace` (the sibling in
-// Implementation/MetadataNamespace.hpp); the entity-resolving members
-// (`GetDefinition` over the `MetadataTypeDefinition` / `MetadataField` /
-// `MetadataMethod` / `MetadataProperty` / `MetadataEvent` family) land as the
-// following slices, and the members that need them are loud
-// `std::logic_error` deferrals in the meantime.
+// Implementation/MetadataNamespace.hpp). The TYPE-DEFINITION entity slice
+// landed: `GetDefinition(TypeDefinitionHandle)` fills the `typeDefs` cache
+// with real `MetadataTypeDefinition` entities (the sibling in
+// Implementation/MetadataTypeDefinition.hpp), and `TypeDefinitions` /
+// `TopLevelTypeDefinitions` / `MetadataNamespace::Types` enumerate them.
+// The four sibling entity classes (`MetadataField` / `MetadataMethod` /
+// `MetadataProperty` / `MetadataEvent`) and their `GetDefinition`
+// overloads land as the following slices; the members that need them stay
+// loud `std::logic_error` deferrals in the meantime.
 //
 // KEY PORT CONVENTIONS:
 //  (a) The C# `internal MetadataModule(ICompilation compilation, MetadataFile
@@ -133,6 +137,13 @@ class ITypeDefinition;
 // incomplete-type `unique_ptr` convention).
 namespace Implementation { class MetadataNamespace; }
 
+// Forward declaration of the type-definition entity (the sibling
+// Implementation/MetadataTypeDefinition.hpp): the entity-cache members below
+// hold it by `unique_ptr`, complete with the pointee incomplete (the
+// destructor and the cache fills are out-of-line in the .cpp where it is
+// complete).
+namespace Implementation { class MetadataTypeDefinition; }
+
 // The type-system implementation for a metadata PE file: one resolved module.
 // Not `final` (the C# class is unsealed).
 class MetadataModule : public IModule {
@@ -159,10 +170,12 @@ public:
 
     // The C# `public ITypeDefinition GetDefinition(TypeDefinitionHandle handle)`
     // -- the entity-resolving member over a raw TypeDef token (`0x02......`).
-    // Convention (e): the nil token returns null, a row past the TypeDef table
-    // throws `std::out_of_range("Handle with invalid row number.")`, and every
-    // in-range non-nil row currently hits the loud `MetadataTypeDefinition`
-    // deferral (the entity-construction slice lands it for real).
+    // Convention (e): the nil token returns null; the CACHED arm range-checks
+    // (a row past the TypeDef table throws `std::out_of_range("Handle with
+    // invalid row number.")`) and lazily fills the `typeDefs` slot per 1-based
+    // row; the UNCACHED arm constructs without any range check (the C# shape:
+    // the row read inside the ctor throws instead). The returned definition is
+    // owned by this module (the cache slot or the keep-alive registry).
     const ITypeDefinition* GetDefinition(std::uint32_t typeDefinitionToken) const;
 
     // --- ISymbol ---
@@ -207,6 +220,19 @@ private:
     Version assemblyVersion_;
     std::string fullAssemblyName_;
     std::unique_ptr<Implementation::MetadataNamespace> rootNamespace_;
+
+    // The C# `readonly MetadataTypeDefinition[] typeDefs` (allocated in the
+    // ctor unless the Uncached option is set; index = the 1-based TypeDef row
+    // number, slot 0 unused): each slot OWNS its entity (the C# GC root the
+    // port's `unique_ptr` models), nullptr until lazily filled.
+    mutable std::vector<std::unique_ptr<Implementation::MetadataTypeDefinition>>
+        typeDefs_;
+    // The UNCACHED arm's keep-alive registry: every freshly constructed
+    // definition stays owned here (the C# GC keeps uncached instances
+    // alive; the port's returned raw pointers must not dangle -- the
+    // SyntheticWpfModule mutable-registry precedent).
+    mutable std::vector<std::unique_ptr<Implementation::MetadataTypeDefinition>>
+        uncachedDefs_;
 };
 
 } // namespace ILSpy::Decompiler::TypeSystem

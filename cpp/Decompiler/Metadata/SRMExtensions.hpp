@@ -42,6 +42,14 @@
 #include <string>
 
 #include "Decompiler/Metadata/SignatureTypeProvider.hpp"  // SignatureCallingConvention
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+
+// Forward declaration of the attribute-classification enum (KnownAttribute.hpp,
+// already ported) -- a scoped enum with a fixed underlying type is
+// opaque-declarable (`enum class KnownAttribute : int;`), so the predicate
+// family below needs only the declaration (the header-include-graph minimal
+// convention).
+namespace ILSpy::Decompiler::TypeSystem { enum class KnownAttribute : int; }
 
 namespace ILSpy::Decompiler::Metadata {
 
@@ -124,6 +132,85 @@ TypeSystem::FullTypeName GetFullTypeNameFromExportedType(
 // throws std::out_of_range (the C# ArgumentOutOfRangeException).
 std::uint32_t GetDeclaringType(const MetadataFile& metadata,
                                std::uint32_t entityToken);
+
+// The C# `public static bool IsKnownType(this EntityHandle handle,
+// MetadataReader reader, KnownTypeCode knownType)` (SRMExtensions.cs line
+// 246): whether the entity names the known type -- a TypeRef in the
+// referenced assembly (a Module/ModuleRef/AssemblyRef scope; nested and
+// nil-scoped refs are rejected), a top-level TypeDef (nested types are
+// rejected), or a TypeSpec naming it (the SignatureIsKnownType blob walk,
+// the primitive comparisons plus the cmod/GENERICINST recursions and the
+// CLASS/VALUETYPE coded-index recursion). Every other kind is false, and
+// every row read happens under the C# `catch (BadImageFormatException)`
+// (a corrupt row is FALSE, not a throw). The port takes the raw entity
+// token (0x01 / 0x02 / 0x1B / ...; nil is false). KnownTypeCode::None has
+// no KnownTypeReference (the C# `Get(None).TypeName` NREs); the port maps
+// it to the standard NRE message.
+bool IsKnownType(const MetadataFile& metadata, std::uint32_t entityToken,
+                 TypeSystem::KnownTypeCode knownType);
+
+// The C# `internal static bool IsKnownType(this EntityHandle handle,
+// MetadataReader reader, KnownAttribute knownType)` (SRMExtensions.cs line
+// 252): the KnownAttribute variant over the same core -- the attribute's
+// type name (KnownAttribute::GetTypeName) against the entity.
+bool IsKnownType(const MetadataFile& metadata, std::uint32_t entityToken,
+                 TypeSystem::KnownAttribute knownAttribute);
+
+// The C# `public static EntityHandle GetAttributeType(this SRM.CustomAttribute
+// attribute, MetadataReader reader)` (SRMExtensions.cs line 606): the
+// attribute's constructor's declaring type -- a MethodDef constructor's
+// declaring TypeDef, or a MemberRef constructor's MemberRefParent. The C#
+// takes the CustomAttribute ROW; the port takes the row's token (the
+// GetCustomAttribute read; a bogus token throws std::out_of_range, the
+// reader-family row-fetch convention). Any other constructor kind throws
+// std::out_of_range carrying the exact C# BadImageFormatException message
+// (the HandleKind name rendered for the token's table byte, decimal for a
+// kind outside the enum). A bogus ctor ROW (a reserved coded-index tag) read
+// as a nil token by GetCustomAttribute's never-throw decode lands in that
+// throw too -- the C# throws BadImageFormatException from the same shape
+// (a documented divergence only in the message's kind spelling).
+std::uint32_t GetAttributeType(const MetadataFile& metadata,
+                               std::uint32_t attributeToken);
+
+// The C# `public static bool HasKnownAttribute(this
+// CustomAttributeHandleCollection customAttributes, MetadataReader metadata,
+// KnownAttribute type)` (SRMExtensions.cs line 622): whether any custom
+// attribute of the ENTITY is the known attribute -- each row classified
+// through GetAttributeType + IsKnownType. The C# takes the collection
+// handle; the port takes the PARENT token (the GetCustomAttributeTokens
+// composition -- the HasSemantics/GetCustomAttributeTokens convention). An
+// attribute row with an unexpected constructor kind propagates
+// GetAttributeType's throw (the C# propagates the BadImageFormatException).
+bool HasKnownAttribute(const MetadataFile& metadata, std::uint32_t entityToken,
+                       TypeSystem::KnownAttribute attribute);
+
+// The C# `public static bool IsValueType(this TypeDefinition typeDefinition,
+// MetadataReader reader)` (SRMExtensions.cs line 64): the Extends column is
+// System.Enum, or it is System.ValueType and this type is not System.Enum
+// itself. Takes the raw TypeDef token.
+bool IsValueType(const MetadataFile& metadata, std::uint32_t typeDefToken);
+
+// The C# `public static bool IsEnum(this TypeDefinition typeDefinition,
+// MetadataReader reader)` (SRMExtensions.cs line 82): the Extends column is
+// System.Enum.
+bool IsEnum(const MetadataFile& metadata, std::uint32_t typeDefToken);
+
+// The C# `public static bool IsEnum(this TypeDefinition typeDefinition,
+// MetadataReader reader, out PrimitiveTypeCode underlyingType)`
+// (SRMExtensions.cs line 96): the Extends column is System.Enum, and the
+// first non-static field's FIELD-signature blob names the underlying
+// primitive (the element-type byte after the 0x06 field header; a non-field
+// signature header or a truncated byte read is the C# BadImageFormatException
+// family, mapped to std::out_of_range). An enum with no instance field is
+// FALSE (the C# loop falls through). `underlyingType` is assigned 0 (the
+// C# `underlyingType = 0`) before every arm.
+bool IsEnum(const MetadataFile& metadata, std::uint32_t typeDefToken,
+            PrimitiveTypeCode& underlyingType);
+
+// The C# `public static bool IsDelegate(this TypeDefinition typeDefinition,
+// MetadataReader reader)` (SRMExtensions.cs line 124): the Extends column is
+// System.MulticastDelegate.
+bool IsDelegate(const MetadataFile& metadata, std::uint32_t typeDefToken);
 
 // The C# `public static string ToILSyntax(this SignatureCallingConvention
 // callConv)` (SRMExtensions.cs line 783) -- the ILAsm calling-convention

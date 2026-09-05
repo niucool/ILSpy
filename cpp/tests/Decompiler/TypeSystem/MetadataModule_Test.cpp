@@ -30,11 +30,11 @@
 // a real MetadataNamespace; the full dump in
 // C:/temp-probe/MetaModProbe/gold_raw.txt).
 //
-// The entity-resolving members (GetDefinition's entity construction,
-// TypeDefinitions, the attribute snapshots, the InternalsVisibleTo friend
-// list) are the loud deferrals of the skeleton slice: their tests pin the
-// deferral contracts (which member throws, from which routed call) alongside
-// the plumbing that IS landed (the nil / row-range checks).
+// The type-definition entity slice landed (MetadataTypeDefinition + the
+// GetDefinition entity cache; the full identity tests live in
+// MetadataTypeDefinition_Test.cpp). The attribute snapshots and the
+// InternalsVisibleTo friend list remain the loud deferrals: their tests
+// pin the deferral contracts alongside the real enumerations.
 
 #include "TestFixtures/AssemblyIdentityFixtures.hpp"
 #include "TestFixtures/TinyNetModule.hpp"
@@ -43,6 +43,8 @@
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/INamespace.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/ITypeDefinition.hpp"
+#include "Decompiler/TypeSystem/Implementation/MetadataTypeDefinition.hpp"
 #include "Decompiler/TypeSystem/MetadataModule.hpp"
 #include "Decompiler/TypeSystem/StringComparer.hpp"
 #include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
@@ -268,21 +270,40 @@ TEST(MetadataModuleTest, GetTypeDefinitionMissArmsReturnNull)
               nullptr);
 }
 
-TEST(MetadataModuleTest, GetTypeDefinitionHitThrowsTheEntityDeferral)
+TEST(MetadataModuleTest, GetTypeDefinitionHitResolvesTheDefinition)
 {
     MscorlibFixture f;
     // The reverse lookup hits System.String (0x02000073); the hit routes
-    // through GetDefinition, whose entity construction is the next slice.
-    EXPECT_THROW(f.module.GetTypeDefinition(
-                     TS::TopLevelTypeName("System", "String", 0)),
-                 std::logic_error);
+    // through GetDefinition, whose entity cache constructs the real
+    // MetadataTypeDefinition (the gold: kind Class, sealed, the String
+    // known-type code).
+    const TS::ITypeDefinition* td = f.module.GetTypeDefinition(
+        TS::TopLevelTypeName("System", "String", 0));
+    ASSERT_NE(td, nullptr);
+    EXPECT_EQ(td->Kind(), TS::TypeKind::Class);
+    EXPECT_EQ(td->KnownTypeCode(), TS::KnownTypeCode::String);
+    EXPECT_TRUE(td->IsSealed());
+    EXPECT_EQ(td->MetadataToken(), 0x02000073u);
+    // The C# object.ToString override is a PLAIN member in the port (no
+    // object.ToString virtual) -- through the concrete class.
+    EXPECT_EQ(
+        dynamic_cast<const TS::Implementation::MetadataTypeDefinition*>(td)
+            ->ToString(),
+        "02000073 System.String");
 }
 
-TEST(MetadataModuleTest, TypeEnumerationsThrowTheEntityDeferral)
+TEST(MetadataModuleTest, TypeEnumerationsMatchGold)
 {
     MscorlibFixture f;
-    EXPECT_THROW(f.module.TypeDefinitions(), std::logic_error);
-    EXPECT_THROW(f.module.TopLevelTypeDefinitions(), std::logic_error);
+    // The gold counts: 3356 TypeDef rows, 2696 of them top-level.
+    EXPECT_EQ(f.module.TypeDefinitions().size(), 3356u);
+    EXPECT_EQ(f.module.TopLevelTypeDefinitions().size(), 2696u);
+    // Row 1 is <Module>: an empty-namespace type whose declaring type
+    // is null (every top-level definition's is).
+    const TS::ITypeDefinition* first = f.module.TypeDefinitions()[0];
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first->Name(), "<Module>");
+    EXPECT_EQ(first->DeclaringTypeDefinition(), nullptr);
 }
 
 TEST(MetadataModuleTest, AttributeAndIvtDeferrals)
@@ -308,11 +329,16 @@ TEST(MetadataModuleTest, GetDefinitionPlumbing)
     MscorlibFixture f;
     // The nil token (row 0) returns null.
     EXPECT_EQ(f.module.GetDefinition(0x02000000u), nullptr);
-    // The <Module> row (row 1) hits the entity deferral.
-    EXPECT_THROW(f.module.GetDefinition(0x02000001u), std::logic_error);
-    // The last in-range row (3356 = the full TypeDef row count) still hits the
-    // deferral, not the range check.
-    EXPECT_THROW(f.module.GetDefinition(0x02000000u + 3356), std::logic_error);
+    // The <Module> row (row 1) constructs (an empty-namespace type).
+    const TS::ITypeDefinition* moduleType = f.module.GetDefinition(0x02000001u);
+    ASSERT_NE(moduleType, nullptr);
+    EXPECT_EQ(moduleType->Name(), "<Module>");
+    // The last in-range row (3356 = the full TypeDef row count) constructs too.
+    const TS::ITypeDefinition* last =
+        f.module.GetDefinition(0x02000000u + 3356);
+    ASSERT_NE(last, nullptr);
+    // The cache: the same row returns the same instance.
+    EXPECT_EQ(f.module.GetDefinition(0x02000001u), moduleType);
     // A row past the table end throws the exact C# message.
     try
     {
@@ -424,16 +450,24 @@ TEST(MetadataNamespaceTest, VirtualNamespacesCarryNoDirectTypes)
     EXPECT_EQ(Join(windows->ChildNamespaces()), "Windows.Foundation");
 }
 
-TEST(MetadataNamespaceTest, DirectTypeNamespaceThrowsTheEntityDeferral)
+TEST(MetadataNamespaceTest, DirectTypeNamespaceEnumeratesTheDefinitions)
 {
     MscorlibFixture f;
-    // The System namespace carries 312 direct types (the gold count): its
-    // Types() enumeration routes the first token through GetDefinition, which
-    // throws the MetadataTypeDefinition deferral.
+    // The System namespace carries 312 direct types (the gold count): the
+    // Types() enumeration routes every token through GetDefinition, which
+    // now constructs the real entities.
     const TS::INamespace* system =
         f.module.RootNamespace().GetChildNamespace("System");
     ASSERT_NE(system, nullptr);
-    EXPECT_THROW(system->Types(), std::logic_error);
+    std::vector<const TS::ITypeDefinition*> types = system->Types();
+    EXPECT_EQ(types.size(), 312u);
+    // Every direct type is top-level (a null declaring type) and carries
+    // the System namespace.
+    for (const TS::ITypeDefinition* td : types)
+    {
+        ASSERT_EQ(td->DeclaringTypeDefinition(), nullptr);
+        ASSERT_EQ(td->Namespace(), "System");
+    }
 }
 
 TEST(MetadataNamespaceTest, NestedChainMatchesGold)
