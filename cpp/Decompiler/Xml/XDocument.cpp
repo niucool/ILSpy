@@ -20,6 +20,7 @@
 
 #include "Decompiler/Xml/XDocument.hpp"
 
+#include "Decompiler/Xml/XElement.hpp"
 #include "Decompiler/Xml/XDocumentType.hpp"
 #include "Decompiler/Xml/XText.hpp"
 
@@ -40,6 +41,11 @@ XDocument::XDocument(const XDocument& other)
 XDocumentType* XDocument::DocumentType()
 {
     return GetFirstNode<XDocumentType>();
+}
+
+XElement* XDocument::Root()
+{
+    return GetFirstNode<XElement>();
 }
 
 std::shared_ptr<XNode> XDocument::CloneNode() const
@@ -134,5 +140,6 @@ T* XDocument::GetFirstNode()
 }
 
 template XDocumentType* XDocument::GetFirstNode<XDocumentType>();
+template XElement* XDocument::GetFirstNode<XElement>();
 
 } // namespace ILSpy::Decompiler::Xml

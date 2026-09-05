@@ -34,8 +34,7 @@
 // is still accepted, and the doctype-then-comments content walk.
 //
 // DEFERRED (with the serialization slice): XDeclaration/Declaration,
-// ToString/Save/WriteTo. DEFERRED (with the XElement slice): Root (the
-// first child element). DEFERRED (the XmlReader paths): Load/Parse and the
+// ToString/Save/WriteTo. DEFERRED (the XmlReader paths): Load/Parse and the
 // line-info/base-URI annotations they record.
 
 #pragma once
@@ -65,6 +64,10 @@ public:
 
     // XDocument.DocumentType: the first document-type child, if any.
     XDocumentType* DocumentType();
+
+    // XDocument.Root: the first child element (the document's root), or
+    // null. Defined with the complete XElement type in XDocument.cpp.
+    XElement* Root();
 
     std::shared_ptr<XNode> CloneNode() const override;
 

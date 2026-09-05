@@ -85,6 +85,14 @@ public:
         return XNamespace::Get(std::move(namespaceName)).GetName(std::move(localName));
     }
 
+    // The C# implicit operator XName(string) -- the const char* form lets
+    // string literals convert with a single user-defined conversion
+    // (C++ forbids the const char* -> std::string -> XName chain).
+    XName(const char* expandedName)
+        : XName(Get(std::string(expandedName)))
+    {
+    }
+
     // The C# implicit operator XName(string).
     XName(std::string expandedName)
         : XName(Get(std::move(expandedName)))

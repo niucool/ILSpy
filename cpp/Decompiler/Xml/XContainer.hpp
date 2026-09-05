@@ -55,13 +55,14 @@
 // identical.
 //
 // DEFERRED (with the serialization slice): ToString/Save/WriteTo and the
-// SaveOptions machinery. DEFERRED (with the XElement slice): Element(XName),
-// Elements(), Descendants(), DescendantNodes() and the attribute surface
-// (they need the complete XElement/XAttribute types); XContainer::AddNode's
-// `ValidateNode(n, this)` quirk is ported faithfully (the C# passes the
-// container itself as `previous`, so the document-structure position check
-// never flips on the append path -- only the Inserter path passes a real
-// predecessor).
+// SaveOptions machinery. The Element/Elements surface is declared here and
+// defined in XElement.cpp with the XElement slice (it needs the complete
+// XElement type). XContainer::AddNode's `ValidateNode(n, this)` quirk is
+// ported faithfully (the C# passes the container itself as `previous`, so
+// the document-structure position check never flips on the append path --
+// only the Inserter path passes a real predecessor). The ancestor/descendant
+// sequences (Ancestors/Descendants/DescendantNodes) are deferred: no
+// BamlDecompiler call site walks XElement ancestors or descendants.
 //
 // The DOM API is non-const throughout: the C# has no notion of const and
 // several C# "getters" mutate (LastNode materializes string content).
@@ -73,11 +74,13 @@
 #include <variant>
 #include <vector>
 
+#include "XName.hpp"
 #include "XNode.hpp"
 
 namespace ILSpy::Decompiler::Xml {
 
 class XAttribute;
+class XElement;
 
 // The C# internal Inserter (XNode.cs): the insert-before/after engine over a
 // container and an anchor node, with the pending-text batching that merges
@@ -101,6 +104,80 @@ private:
     XContainer& parent_;
     XNode* previous_;
     std::optional<std::string> text_;
+};
+
+// The lazy `Elements()` sequence over a container's child elements (the C#
+// GetElements iterator: only XElement children pass, the stop condition
+// re-read against the tree on every step -- removing the yielded element
+// ends the iteration). Defined in XElement.cpp (the iterator needs the
+// complete XElement type).
+class XContainerElements final {
+public:
+    class Iterator final {
+    public:
+        using iterator_category = std::input_iterator_tag;
+        using value_type = std::shared_ptr<XElement>;
+        using difference_type = std::ptrdiff_t;
+        using pointer = const std::shared_ptr<XElement>*;
+        using reference = const std::shared_ptr<XElement>&;
+
+        // The end sentinel.
+        Iterator() = default;
+
+        reference operator*() const { return current_; }
+        Iterator& operator++()
+        {
+            Advance();
+            return *this;
+        }
+
+        friend bool operator==(const Iterator& lhs, const Iterator& rhs)
+        {
+            return lhs.done_ == rhs.done_;
+        }
+        friend bool operator!=(const Iterator& lhs, const Iterator& rhs)
+        {
+            return !(lhs == rhs);
+        }
+
+    private:
+        friend class XContainerElements;
+        explicit Iterator(XContainer* container, const XName* name)
+            : container_(container)
+            , name_(name)
+            , done_(false)
+        {
+            Advance();
+        }
+
+        void Advance();
+
+        XContainer* container_ = nullptr;
+        const XName* name_ = nullptr;
+        XNode* position_ = nullptr;
+        std::shared_ptr<XElement> current_;
+        bool started_ = false;
+        bool done_ = true;
+    };
+
+    explicit XContainerElements(XContainer& container)
+        : container_(&container)
+    {
+    }
+
+    // The filtered form (XContainer.Elements(XName)).
+    XContainerElements(XContainer& container, const XName& name)
+        : container_(&container)
+        , name_(name)
+    {
+    }
+
+    Iterator begin() const { return Iterator(container_, name_ ? &*name_ : nullptr); }
+    Iterator end() const { return Iterator(); }
+
+private:
+    XContainer* container_;
+    std::optional<XName> name_;
 };
 
 // The lazy `Nodes()` sequence over a container's children (the C# iterator's
@@ -184,6 +261,15 @@ public:
 
     // XContainer.Nodes: the lazy child sequence.
     XContainerNodes Nodes();
+
+    // XContainer.Element(XName): the first child element with the exact
+    // name, or null. Defined in XElement.cpp (the complete XElement type).
+    XElement* Element(const XName& name);
+
+    // XContainer.Elements()/Elements(XName): the lazy child-element
+    // sequences (see XContainerElements).
+    XContainerElements Elements() { return XContainerElements(*this); }
+    XContainerElements Elements(const XName& name) { return XContainerElements(*this, name); }
 
     // XContainer.RemoveNodes: detaches every child (string content is
     // dropped without materializing it).
