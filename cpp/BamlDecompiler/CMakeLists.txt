@@ -25,9 +25,16 @@
 # document, the KnownThings instance the ctor resolves, and the
 # ResolveAssembly assembly resolution -- the main-module match arm,
 # FindMatchingReference's highest-version pick over ReferencedModules, and
-# the 0xfff id mask).
-# The IDecompilerTypeSystem interface (the MetadataModule MainModule narrowing)
-# and the Handlers/Rewrite/Xaml layers follow in later slices.
+# the 0xfff id mask), plus the XAML-side context layer (BamlDecompilerSettings,
+# BamlElement/XamlNode -- the handler value types over the System.Xml.Linq
+# stand-in; XamlType/XamlProperty -- the resolved type/property rows; and
+# XamlContext -- the Construct composition over BamlContext + BamlNode.Parse
+# with the type/property/string id resolution and the XML-namespace helpers;
+# the BAML-record arm of ResolveType defers on ReflectionHelper.ParseReflectionName
+# until the System.Reflection.Metadata TypeName parser lands).
+# The IDecompilerTypeSystem interface (the MetadataModule MainModule narrowing),
+# the XamlExtension/XamlResourceKey leaves, and the Handlers/Rewrite/XamlDecompiler
+# layers follow in later slices.
 
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlBinaryReader.cpp
@@ -40,6 +47,9 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/KnownThings.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/SyntheticWpfModule.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlPathDeserializer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlProperty.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlType.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Xaml/XamlUtils.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/XamlContext.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/XmlnsDictionary.cpp
 )

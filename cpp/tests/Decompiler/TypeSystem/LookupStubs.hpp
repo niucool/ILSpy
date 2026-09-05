@@ -39,6 +39,7 @@
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/IEntity.hpp"
 #include "Decompiler/TypeSystem/IEvent.hpp"
+#include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IMember.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/TypeSystem/IModule.hpp"
@@ -345,6 +346,16 @@ public:
     void SetProperties(std::vector<const IProperty*> properties) {
         properties_ = std::move(properties);
     }
+    // Configurable `Fields` / `Events` for the `XamlProperty.TryResolve` field
+    // and event arms (the `<name>Property` / `<name>Event` static-field lookups
+    // and the event lookup walk the stub's own lists through the same filtered
+    // `GetMembersHelper` shape as `GetProperties`). The defaults (empty)
+    // preserve the prior always-empty behavior so existing tests are
+    // unaffected (the additive-setter convention); the stored pointers are
+    // non-owning (the caller keeps the `LookupField` / `LookupEvent` stubs
+    // alive).
+    void SetFields(std::vector<const IField*> fields) { fields_ = std::move(fields); }
+    void SetEvents(std::vector<const IEvent*> events) { events_ = std::move(events); }
 
     // --- IType ---
     TypeKind Kind() const override { return kind_; }
@@ -381,6 +392,50 @@ public:
         return result;
     }
 
+    // The `IType::GetFields` member-enumeration virtual over the stub's own
+    // filtered list + the `GetMembersHelper` base-type walk when
+    // `IgnoreInheritedMembers` is absent (the `GetProperties` override shape).
+    std::vector<const IField*> GetFields(
+        std::function<bool(const IField*)> filter = nullptr,
+        GetMemberOptions options = GetMemberOptions::None) const override
+    {
+        std::vector<const IField*> result;
+        for (const IField* f : fields_)
+            if (!filter || filter(f))
+                result.push_back(f);
+        if ((options & GetMemberOptions::IgnoreInheritedMembers) == GetMemberOptions::None)
+        {
+            const GetMemberOptions declared = options | GetMemberOptions::IgnoreInheritedMembers
+                | GetMemberOptions::ReturnMemberDefinitions;
+            for (const ITypePtr& base : directBaseTypes_)
+                for (const IField* f : base->GetFields(filter, declared))
+                    result.push_back(f);
+        }
+        return result;
+    }
+
+    // The `IType::GetEvents` member-enumeration virtual over the stub's own
+    // filtered list + the `GetMembersHelper` base-type walk (the `GetProperties`
+    // override shape).
+    std::vector<const IEvent*> GetEvents(
+        std::function<bool(const IEvent*)> filter = nullptr,
+        GetMemberOptions options = GetMemberOptions::None) const override
+    {
+        std::vector<const IEvent*> result;
+        for (const IEvent* e : events_)
+            if (!filter || filter(e))
+                result.push_back(e);
+        if ((options & GetMemberOptions::IgnoreInheritedMembers) == GetMemberOptions::None)
+        {
+            const GetMemberOptions declared = options | GetMemberOptions::IgnoreInheritedMembers
+                | GetMemberOptions::ReturnMemberDefinitions;
+            for (const ITypePtr& base : directBaseTypes_)
+                for (const IEvent* e : base->GetEvents(filter, declared))
+                    result.push_back(e);
+        }
+        return result;
+    }
+
     // --- ITypeDefinitionOrUnknown ---
     const TS::FullTypeName& FullTypeName() const override { return fullTypeName_; }
 
@@ -413,10 +468,10 @@ public:
     // --- ITypeDefinition-own ---
     std::vector<const ITypeDefinition*> NestedTypes() const override { return {}; }
     std::vector<const IMember*> Members() const override { return {}; }
-    std::vector<const IField*> Fields() const override { return {}; }
+    std::vector<const IField*> Fields() const override { return fields_; }
     std::vector<const IMethod*> Methods() const override { return methods_; }
     std::vector<const IProperty*> Properties() const override { return properties_; }
-    std::vector<const IEvent*> Events() const override { return {}; }
+    std::vector<const IEvent*> Events() const override { return events_; }
     TS::KnownTypeCode KnownTypeCode() const override { return knownTypeCode_; }
     ITypePtr EnumUnderlyingType() const override { return enumUnderlyingType_; }
     bool IsReadOnly() const override { return isReadOnly_; }
@@ -451,6 +506,8 @@ private:
     ITypePtr enumUnderlyingType_;
     std::vector<const IMethod*> methods_;
     std::vector<const IProperty*> properties_;
+    std::vector<const IField*> fields_;
+    std::vector<const IEvent*> events_;
     bool hasExtensions_ = false;
     bool isAbstract_ = false;
     bool isSealed_ = false;
@@ -531,6 +588,13 @@ public:
         : name_(std::move(name)), kind_(kind), returnType_(std::move(returnType)),
           compilation_(compilation) {}
 
+    // Configurable `DeclaringType` for the `XamlProperty.IsAttachedTo` base-chain
+    // walk (the resolved member's declaring type drives the attached-property
+    // decision). The default (the empty `ITypePtr`, the prior behavior) leaves
+    // the NRE arm reachable for tests that do not call the setter (the
+    // additive-setter convention).
+    void SetDeclaringType(ITypePtr declaringType) { declaringType_ = std::move(declaringType); }
+
     // --- ISymbol ---
     TS::SymbolKind SymbolKind() const override { return kind_; }
     std::string Name() const override { return name_; }
@@ -546,7 +610,7 @@ public:
     // --- IEntity ---
     std::uint32_t MetadataToken() const override { return 0; }
     const ITypeDefinition* DeclaringTypeDefinition() const override { return nullptr; }
-    ITypePtr DeclaringType() const override { return {}; }
+    ITypePtr DeclaringType() const override { return declaringType_; }
     const IModule* ParentModule() const override { return nullptr; }
     std::vector<const IAttribute*> GetAttributes() const override { return {}; }
     bool HasAttribute(KnownAttribute) const override { return false; }
@@ -575,6 +639,79 @@ private:
     std::string name_;
     TS::SymbolKind kind_;
     ITypePtr returnType_;
+    ITypePtr declaringType_;
+    const ICompilation& compilation_;
+};
+
+// A minimal `IField` for the `XamlProperty.TryResolve` field arms (the
+// `<name>Property` / `<name>Event` static-field lookups) -- the `LookupEvent`
+// shape over the `IField` surface (`IVariable::Type` / `IsConst` /
+// `GetConstantValue`), with the name the lookup filters on.
+class LookupField : public IField {
+public:
+    LookupField(std::string name, ITypePtr fieldType, const ICompilation& compilation)
+        : name_(std::move(name)), fieldType_(std::move(fieldType)),
+          compilation_(compilation) {}
+
+    // --- ISymbol ---
+    ::ILSpy::Decompiler::TypeSystem::SymbolKind SymbolKind() const override
+    {
+        return ::ILSpy::Decompiler::TypeSystem::SymbolKind::Field;
+    }
+
+    // The `IField::Name` disambiguation override (the shared-`ISymbol`-base
+    // diamond -- one override serves both base `Name` slots).
+    std::string Name() const override { return name_; }
+
+    // --- INamedElement ---
+    std::string FullName() const override { return name_; }
+    std::string ReflectionName() const override { return name_; }
+    std::string Namespace() const override { return {}; }
+
+    // --- ICompilationProvider ---
+    const ICompilation& Compilation() const override { return compilation_; }
+
+    // --- IEntity ---
+    std::uint32_t MetadataToken() const override { return 0; }
+    const ITypeDefinition* DeclaringTypeDefinition() const override { return nullptr; }
+    ITypePtr DeclaringType() const override { return {}; }
+    const IModule* ParentModule() const override { return nullptr; }
+    std::vector<const IAttribute*> GetAttributes() const override { return {}; }
+    bool HasAttribute(KnownAttribute) const override { return false; }
+    const IAttribute* GetAttribute(KnownAttribute) const override { return nullptr; }
+    TS::Accessibility Accessibility() const override { return TS::Accessibility::Public; }
+    bool IsStatic() const override { return false; }
+    bool IsAbstract() const override { return false; }
+    bool IsSealed() const override { return false; }
+
+    // --- IMember ---
+    const IMember* MemberDefinition() const override { return this; }
+    const IType& ReturnType() const override { return *fieldType_; }
+    std::vector<const IMember*> ExplicitlyImplementedInterfaceMembers() const override
+    {
+        return {};
+    }
+    bool IsExplicitInterfaceImplementation() const override { return false; }
+    bool IsVirtual() const override { return false; }
+    bool IsOverride() const override { return false; }
+    bool IsOverridable() const override { return false; }
+    const TypeParameterSubstitution* Substitution() const override { return nullptr; }
+    const IMember* Specialize(const TypeParameterSubstitution*) const override { return this; }
+    bool Equals(const IMember* obj, const TypeVisitor*) const override { return obj == this; }
+
+    // --- IVariable ---
+    const IType& Type() const override { return *fieldType_; }
+    bool IsConst() const override { return false; }
+    std::any GetConstantValue(bool) const override { return {}; }
+
+    // --- IField ---
+    bool IsReadOnly() const override { return false; }
+    bool IsVolatile() const override { return false; }
+    bool ReturnTypeIsRefReadOnly() const override { return false; }
+
+private:
+    std::string name_;
+    ITypePtr fieldType_;
     const ICompilation& compilation_;
 };
 
