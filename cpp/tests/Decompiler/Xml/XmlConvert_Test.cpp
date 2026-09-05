@@ -212,4 +212,30 @@ TEST(XmlConvertTest, VerifyNCNameSurrogateMessages)
 	}), std::string("Name cannot begin with the '\xED\xA0\x80" "b' character, hexadecimal value 0xFFFF2462."));
 }
 
+// (probe: "leaf value members" VerifyName[...]) XmlConvert.VerifyName -- the
+// QName-style name validation XDocumentType uses (colons allowed anywhere,
+// unlike the NCName rule).
+TEST(XmlConvertTest, VerifyNameQNameRules)
+{
+	// The colon acceptance: leading, trailing, multiple.
+	EXPECT_EQ(Xml::VerifyName("ns:e"), std::string("ns:e"));
+	EXPECT_EQ(Xml::VerifyName(":a"), std::string(":a"));
+	EXPECT_EQ(Xml::VerifyName("a:"), std::string("a:"));
+	EXPECT_EQ(Xml::VerifyName("a:b:c"), std::string("a:b:c"));
+	EXPECT_EQ(Xml::VerifyName("_x"), std::string("_x"));
+	EXPECT_EQ(Xml::VerifyName("\xC3\xA9x"), std::string("\xC3\xA9x"));
+	EXPECT_EQ(Xml::VerifyName("x\xC3\xA9y"), std::string("x\xC3\xA9y"));
+
+	// The rejection shapes match VerifyNCName.
+	EXPECT_EQ(ThrowsMessage<Xml::XmlException>([] {
+		return Xml::VerifyName("a b");
+	}), std::string("The ' ' character, hexadecimal value 0x20, cannot be included in a name."));
+	EXPECT_EQ(ThrowsMessage<Xml::XmlException>([] {
+		return Xml::VerifyName("1bad");
+	}), std::string("Name cannot begin with the '1' character, hexadecimal value 0x31."));
+	EXPECT_EQ(ThrowsMessage<std::invalid_argument>([] {
+		return Xml::VerifyName("");
+	}), std::string("The value cannot be an empty string. (Parameter 'name')"));
+}
+
 } // namespace

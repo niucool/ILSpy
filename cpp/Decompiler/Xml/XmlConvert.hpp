@@ -109,4 +109,13 @@ std::string EncodeLocalName(const std::string& name);
 // is empty; returns the name unchanged otherwise.
 std::string VerifyNCName(const std::string& name);
 
+// XmlConvert.VerifyName: the QName-style name validation XDocumentType uses
+// -- a Name (not an NCName): the first unit is a start-NCName char OR ':', and
+// the continuation units are NCName chars OR ':' (ValidateNames.
+// ParseNameNoNamespaces, so "ns:e", ":a", "a:" and "a:b:c" are all valid
+// while a space anywhere is rejected with the same XmlException shapes as
+// VerifyNCName; std::invalid_argument when empty). Returns the name
+// unchanged.
+std::string VerifyName(const std::string& name);
+
 } // namespace ILSpy::Decompiler::Xml

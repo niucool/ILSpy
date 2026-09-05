@@ -842,6 +842,29 @@ std::string VerifyNCName(const std::string& name)
     return name;
 }
 
+std::string VerifyName(const std::string& name)
+{
+    // ArgumentException.ThrowIfNullOrEmpty(name, "name") -- the null arm is
+    // unreachable (std::string has no null).
+    if (name.empty())
+        throw std::invalid_argument("The value cannot be an empty string. (Parameter 'name')");
+    std::vector<DecodedUnit> units = DecodeAll(name);
+    // ValidateNames.ParseNameNoNamespaces: a Name may start with an NCName
+    // start char OR ':', and ':' is a valid continuation unit (multiple
+    // colons included).
+    std::size_t i = 0;
+    if (i < units.size()) {
+        if (!IsStartNameChar(units[i].cp) && units[i].cp != ':')
+            ThrowInvalidNameChar(units, 0);
+        for (i++; i < units.size() && (IsNameChar(units[i].cp) || units[i].cp == ':'); i++) {
+        }
+    }
+    // XmlConvert.VerifyName: the parse must consume the whole name.
+    if (i != units.size())
+        ThrowInvalidNameChar(units, i);
+    return name;
+}
+
 std::string EncodeLocalName(const std::string& name)
 {
     if (name.empty())
