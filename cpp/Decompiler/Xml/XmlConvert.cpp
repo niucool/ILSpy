@@ -569,6 +569,8 @@ constexpr UnitRange kNameCharRanges[] = {
 };
 
 
+} // namespace
+
 bool IsStartNameChar(std::uint32_t cp)
 {
     // The first UTF-16 unit of a supplementary code point is a high
@@ -581,10 +583,14 @@ bool IsNameChar(std::uint32_t cp)
     return ContainsRange(kNameCharRanges, std::size(kNameCharRanges), cp);
 }
 
+namespace {
+
 bool IsHexDigit(std::uint32_t cp)
 {
     return (cp >= '0' && cp <= '9') || (cp >= 'a' && cp <= 'f') || (cp >= 'A' && cp <= 'F');
 }
+
+} // namespace
 
 bool IsHighSurrogateUnit(std::uint32_t cp)
 {
@@ -595,6 +601,8 @@ bool IsLowSurrogateUnit(std::uint32_t cp)
 {
     return cp >= 0xDC00 && cp <= 0xDFFF;
 }
+
+namespace {
 
 // One decoded code point with the byte span it came from. The decoder is
 // permissive: it accepts every well-formed-looking sequence that decodes to
@@ -725,6 +733,8 @@ void AppendHexX2(std::string& out, std::int32_t value)
 // The XmlException.BuildCharExceptionArgs pair: the display string for the
 // invalid unit (the '.' stand-in for NUL, both units for a high surrogate
 // followed by any non-NUL unit) and the "0x{...:X2}" value.
+} // namespace
+
 std::string InvalidCharDisplay(std::uint32_t invChar, std::uint32_t nextChar)
 {
     if (invChar == 0)
@@ -764,6 +774,8 @@ std::int32_t InvalidCharValue(std::uint32_t invChar, std::uint32_t nextChar)
         return CombineSurrogateValue(nextChar, invChar);
     return static_cast<std::int32_t>(invChar);
 }
+
+namespace {
 
 // Throws the XmlException XmlConvert.CreateInvalidNameCharException builds:
 // the first-unit form when index is 0, the later-unit form otherwise.

@@ -19,6 +19,7 @@
 // SOFTWARE.
 
 #include "Decompiler/Xml/XContainer.hpp"
+#include "Decompiler/Xml/XDocument.hpp"
 
 #include "Decompiler/Xml/XCData.hpp"
 #include "Decompiler/Xml/XText.hpp"
@@ -466,6 +467,25 @@ void XContainerNodes::Iterator::Advance()
     }
     position_ = position_->next_;
     current_ = position_->shared_from_this();
+}
+
+void XContainer::WriteContentTo(XmlWriter& writer) const
+{
+    if (std::holds_alternative<std::monostate>(content_))
+        return;
+    if (const std::string* text = std::get_if<std::string>(&content_)) {
+        if (dynamic_cast<const XDocument*>(this))
+            writer.WriteWhitespace(*text);
+        else
+            writer.WriteString(*text);
+        return;
+    }
+    const XNode* last = std::get<XNode*>(content_);
+    const XNode* n = last;
+    do {
+        n = n->next_;
+        n->WriteTo(writer);
+    } while (n != last);
 }
 
 } // namespace ILSpy::Decompiler::Xml

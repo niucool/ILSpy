@@ -83,6 +83,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 
@@ -117,5 +118,21 @@ std::string VerifyNCName(const std::string& name);
 // VerifyNCName; std::invalid_argument when empty). Returns the name
 // unchanged.
 std::string VerifyName(const std::string& name);
+
+// XmlCharType.IsStartNCNameSingleChar / IsNCNameSingleChar (the per-unit
+// classification the writer's CheckNCName and the name validations walk; the
+// IsStartNameChar/IsNameChar spellings are the port's original names from the
+// VerifyNCName slice -- extensionally identical to the single-char bits).
+bool IsStartNameChar(std::uint32_t cp);
+bool IsNameChar(std::uint32_t cp);
+bool IsHighSurrogateUnit(std::uint32_t cp);
+bool IsLowSurrogateUnit(std::uint32_t cp);
+
+// The XmlException.BuildCharExceptionArgs pair rendered for an invalid unit
+// and its successor: the display string (the '.' stand-in for NUL, both units
+// for a high surrogate followed by any non-NUL unit) and the full-width
+// hex-value formatting input. The writer's exception messages compose these.
+std::string InvalidCharDisplay(std::uint32_t invChar, std::uint32_t nextChar);
+std::int32_t InvalidCharValue(std::uint32_t invChar, std::uint32_t nextChar);
 
 } // namespace ILSpy::Decompiler::Xml

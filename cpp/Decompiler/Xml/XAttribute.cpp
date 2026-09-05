@@ -21,6 +21,10 @@
 #include "Decompiler/Xml/XAttribute.hpp"
 
 #include "Decompiler/Xml/XElement.hpp"
+#include "Decompiler/Xml/XmlWriter.hpp"
+
+#include "Decompiler/Util/Char.hpp"
+#include "Decompiler/Util/Utf.hpp"
 
 #include <functional>
 #include <stdexcept>
@@ -149,6 +153,57 @@ void XAttribute::ValidateAttribute(const XName& name, const std::string& value)
                 "not be bound to this namespace name, and it must not be declared as the default "
                 "namespace.");
     }
+}
+
+namespace {
+
+// The .NET string.Trim(): both ends over the char.IsWhiteSpace set.
+std::string TrimString(const std::string& utf8)
+{
+    std::u16string units = Util::Utf8ToUtf16(utf8);
+    std::size_t b = 0, e = units.size();
+    while (b < e && Util::IsWhiteSpace(units[b]))
+        ++b;
+    while (e > b && Util::IsWhiteSpace(units[e - 1]))
+        --e;
+    return Util::Utf16ToUtf8(std::u16string_view(units.data() + b, e - b));
+}
+
+} // namespace
+
+std::string XAttribute::ToString() const
+{
+    // The C#: a fragment-conformance writer, the attribute written through
+    // XAttribute.GetPrefixOfNamespace (the parent element's scope when
+    // parented, the reserved xml/xmlns fallbacks otherwise), and the result
+    // trimmed (string.Trim).
+    XmlWriterSettings settings;
+    settings.ConformanceLevel = ConformanceLevel::Fragment;
+    XmlWriter writer(std::move(settings), XmlWriterSink::Text);
+    const std::string& namespaceName = name_.NamespaceName();
+    std::string prefixValue;
+    const char* prefix = nullptr;
+    if (namespaceName.empty()) {
+        prefixValue = "";
+        prefix = prefixValue.c_str();
+    } else {
+        std::optional<std::string> resolved;
+        const XElement* parent = dynamic_cast<const XElement*>(parent_);
+        if (parent != nullptr) {
+            resolved = parent->GetPrefixOfNamespace(name_.Namespace());
+        } else if (namespaceName == "http://www.w3.org/XML/1998/namespace") {
+            resolved = "xml";
+        } else if (namespaceName == "http://www.w3.org/2000/xmlns/") {
+            resolved = "xmlns";
+        }
+        if (resolved) {
+            prefixValue = std::move(*resolved);
+            prefix = prefixValue.c_str();
+        }
+    }
+    writer.WriteAttributeString(prefix, name_.LocalName(), namespaceName.c_str(), value_.c_str());
+    writer.Close();
+    return TrimString(writer.OutputUtf8());
 }
 
 } // namespace ILSpy::Decompiler::Xml

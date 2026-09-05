@@ -14,6 +14,8 @@ add_executable(ilspy_tests
     Util/LazyInit_Test.cpp
     Util/CSharpPrimitiveCast_Test.cpp
     Decompiler/Xml/XmlConvert_Test.cpp
+    Decompiler/Xml/XmlSerialization_Test.cpp
+    Decompiler/Xml/XmlWriter_Test.cpp
     Decompiler/Xml/XAttribute_Test.cpp
     Decompiler/Xml/XContainer_Test.cpp
     Decompiler/Xml/XElement_Test.cpp

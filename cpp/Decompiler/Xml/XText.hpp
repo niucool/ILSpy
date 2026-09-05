@@ -37,11 +37,14 @@
 #include <string>
 
 #include "XNode.hpp"
+#include "XDocument.hpp"
 #include "XmlNodeType.hpp"
+#include "XmlWriter.hpp"
 
 namespace ILSpy::Decompiler::Xml {
 
 class XContainer;
+class XDocument;
 class Inserter;
 
 class XText : public XNode {
@@ -68,6 +71,16 @@ public:
     bool DeepEquals(const XNode& other) const override;
 
     void AppendText(std::string& text) const override { text += text_; }
+
+    // XText.WriteTo: a document-level text node is serialized as whitespace
+    // (the document-level validation only admits whitespace text).
+    void WriteTo(XmlWriter& writer) const override
+    {
+        if (dynamic_cast<const XDocument*>(parent_) != nullptr)
+            writer.WriteWhitespace(text_);
+        else
+            writer.WriteString(text_);
+    }
 
     std::int32_t GetDeepHashCode() const override;
 

@@ -3055,7 +3055,10 @@ cpp/
                            layer: XmlConvert.EncodeLocalName/VerifyNCName, XName, XNamespace;
                            the XLinq DOM: XObject/XNode/XContainer/XDocument, the leaf nodes,
                            XAttribute/XElement, and the lazy Elements()/Attributes()
-                           sequences; the BAML decompiler consumes the BCL classes directly)
+                           sequences; and the serialization slice: XmlWriter (the flattened
+                           XmlWellFormedWriter/XmlEncodedRawTextWriterIndent composition),
+                           the ElementWriter walk, and the ToString/WriteTo/Save surface;
+                           the BAML decompiler consumes the BCL classes directly)
   ILSpyX/                <- ICSharpCode.ILSpyX core subset (Phase 8)
   BamlDecompiler/        <- ICSharpCode.BamlDecompiler (Phase 9)
   ILSpyCmd/              <- ICSharpCode.ILSpyCmd CLI (Phase 10)

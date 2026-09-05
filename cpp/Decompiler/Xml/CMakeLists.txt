@@ -8,12 +8,16 @@
 # XProcessingInstruction/XDocumentType, and XDocument as the concrete
 # container), and the element half (XAttribute, XElement with the circular
 # attribute list and the namespace prefix resolution, and the lazy
-# Elements()/Attributes() sequences on XContainer). The ToString
-# serialization (the eventual --decompile-baml output gate) and the
-# XmlReader Load/Parse paths extend this directory.
+# Elements()/Attributes() sequences on XContainer), and the serialization
+# slice (XmlWriter -- the flattened XmlWellFormedWriter/
+# XmlEncodedRawTextWriterIndent composition -- plus the ElementWriter walk
+# and the XNode/XElement/XDocument/XAttribute ToString/WriteTo/Save
+# surface). The XmlReader Load/Parse paths extend this directory.
 
 target_sources(ilspy PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/ElementWriter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/XmlConvert.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/XmlWriter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/XAttribute.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/XContainer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/XDocument.cpp

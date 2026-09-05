@@ -54,8 +54,8 @@
 // SkipNotify() check is unconditionally true, so the observable behavior is
 // identical.
 //
-// DEFERRED (with the serialization slice): ToString/Save/WriteTo and the
-// SaveOptions machinery. The Element/Elements surface is declared here and
+// WriteContentTo (the serialization walk over the content) is ported with the
+// XmlWriter slice. The Element/Elements surface is declared here and
 // defined in XElement.cpp with the XElement slice (it needs the complete
 // XElement type). XContainer::AddNode's `ValidateNode(n, this)` quirk is
 // ported faithfully (the C# passes the container itself as `previous`, so
@@ -76,6 +76,7 @@
 
 #include "XName.hpp"
 #include "XNode.hpp"
+#include "XmlWriter.hpp"
 
 namespace ILSpy::Decompiler::Xml {
 
@@ -320,6 +321,11 @@ protected:
     // internal XContainer.RemoveNode: unlinks the node and drops the
     // container's reference (the node survives while externally held).
     void RemoveNode(XNode* node);
+
+    // internal XContainer.WriteContentTo: serializes the child content (a
+    // string content through WriteString, or WriteWhitespace for a document;
+    // the node list in document order).
+    void WriteContentTo(XmlWriter& writer) const;
 
     // internal XContainer.AppendText: appends the concatenated text content
     // (string content directly; a node list through each node's AppendText).

@@ -41,6 +41,7 @@
 
 #include "XmlConvert.hpp"
 #include "XNode.hpp"
+#include "XmlWriter.hpp"
 #include "XmlNodeType.hpp"
 
 namespace ILSpy::Decompiler::Xml {
@@ -83,6 +84,15 @@ public:
     void InternalSubset(std::optional<std::string> value) { internalSubset_ = std::move(value); }
 
     std::shared_ptr<XNode> CloneNode() const override { return std::make_shared<XDocumentType>(*this); }
+
+    // XDocumentType.WriteTo. The null-vs-empty distinction of the three
+    // fields is observable through the rendered DOCTYPE.
+    void WriteTo(XmlWriter& writer) const override
+    {
+        writer.WriteDocType(name_, publicId_ ? publicId_->c_str() : nullptr,
+            systemId_ ? systemId_->c_str() : nullptr,
+            internalSubset_ ? internalSubset_->c_str() : nullptr);
+    }
 
     bool DeepEquals(const XNode& other) const override
     {

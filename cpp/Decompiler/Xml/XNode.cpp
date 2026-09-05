@@ -21,6 +21,8 @@
 #include "Decompiler/Xml/XNode.hpp"
 
 #include "Decompiler/Xml/XContainer.hpp"
+#include "Decompiler/Xml/XDocument.hpp"
+#include "Decompiler/Xml/XText.hpp"
 
 #include <stdexcept>
 
@@ -226,6 +228,71 @@ void XNodesBeforeSelf::Iterator::Advance()
         return;
     }
     current_ = position_->shared_from_this();
+}
+
+// --- the serialization surface (XNode.ToString / GetXmlString) ---
+
+SaveOptions XObject::GetSaveOptionsFromAnnotations() const
+{
+    // The C# walks up the parent chain: an object with no annotations is
+    // skipped, the first SaveOptions annotation wins.
+    const XObject* x = this;
+    while (true) {
+        if (x != nullptr && !x->HasAnnotations()) {
+            x = x->parent_;
+            continue;
+        }
+        if (x == nullptr)
+            return SaveOptions::None;
+        if (const SaveOptions* options = x->Annotation<SaveOptions>())
+            return *options;
+        x = x->parent_;
+    }
+}
+
+XmlWriterSettings XNode::GetXmlWriterSettings(SaveOptions o)
+{
+    XmlWriterSettings settings;
+    if ((static_cast<std::uint32_t>(o) & static_cast<std::uint32_t>(SaveOptions::DisableFormatting)) == 0)
+        settings.Indent = true;
+    if ((static_cast<std::uint32_t>(o) & static_cast<std::uint32_t>(SaveOptions::OmitDuplicateNamespaces))
+        != static_cast<std::uint32_t>(SaveOptions::None))
+        settings.NamespaceHandling = static_cast<NamespaceHandling>(
+            static_cast<std::uint32_t>(settings.NamespaceHandling)
+            | static_cast<std::uint32_t>(NamespaceHandling::OmitDuplicates));
+    return settings;
+}
+
+std::string XNode::ToString() const
+{
+    return GetXmlString(GetSaveOptionsFromAnnotations());
+}
+
+std::string XNode::ToString(SaveOptions options) const
+{
+    return GetXmlString(options);
+}
+
+std::string XNode::GetXmlString(SaveOptions o) const
+{
+    XmlWriterSettings settings;
+    settings.OmitXmlDeclaration = true;
+    if ((static_cast<std::uint32_t>(o) & static_cast<std::uint32_t>(SaveOptions::DisableFormatting)) == 0)
+        settings.Indent = true;
+    if ((static_cast<std::uint32_t>(o) & static_cast<std::uint32_t>(SaveOptions::OmitDuplicateNamespaces))
+        != static_cast<std::uint32_t>(SaveOptions::None))
+        settings.NamespaceHandling = static_cast<NamespaceHandling>(
+            static_cast<std::uint32_t>(settings.NamespaceHandling)
+            | static_cast<std::uint32_t>(NamespaceHandling::OmitDuplicates));
+    if (dynamic_cast<const XText*>(this))
+        settings.ConformanceLevel = ConformanceLevel::Fragment;
+    XmlWriter writer(std::move(settings), XmlWriterSink::Text);
+    if (const XDocument* document = dynamic_cast<const XDocument*>(this))
+        document->WriteContentTo(writer);
+    else
+        WriteTo(writer);
+    writer.Close();
+    return writer.OutputUtf8();
 }
 
 } // namespace ILSpy::Decompiler::Xml

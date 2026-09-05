@@ -71,6 +71,7 @@
 
 #include "XObject.hpp"
 #include "XmlNodeType.hpp"
+#include "XmlWriter.hpp"
 
 namespace ILSpy::Decompiler::Xml {
 
@@ -191,6 +192,27 @@ public:
     XNodesAfterSelf NodesAfterSelf() const;
     XNodesBeforeSelf NodesBeforeSelf() const;
 
+    // XNode.WriteTo: serialize this node to the writer (abstract; the leaf
+    // overrides live on the node classes, XElement's on the ElementWriter).
+    virtual void WriteTo(XmlWriter& writer) const = 0;
+
+    // XNode.ToString(): the XML for this node, honoring a SaveOptions
+    // annotation (the walk up the parent chain). XNode.ToString(options)
+    // renders with the given options regardless of annotations.
+    std::string ToString() const;
+    std::string ToString(SaveOptions options) const;
+
+    // internal XNode.GetXmlWriterSettings: the settings the Save(TextWriter /
+    // file) overloads build from the save options.
+    static XmlWriterSettings GetXmlWriterSettings(SaveOptions o);
+
+private:
+    // internal XNode.GetXmlString: the StringWriter-based render behind
+    // ToString (OmitXmlDeclaration, Indent unless DisableFormatting, fragment
+    // conformance for a text node).
+    std::string GetXmlString(SaveOptions o) const;
+
+public:
     // internal XNode.CloneNode(): a deep copy of this node, detached (the
     // Add paths clone already-parented nodes through this). Exposed public
     // for tests, the port's standing internal-surface convention.

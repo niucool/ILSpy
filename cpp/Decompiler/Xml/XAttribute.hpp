@@ -45,10 +45,10 @@
 //    attribute value) are not ported: no BamlDecompiler call site uses them
 //    (they parse through System.Xml.XmlConvert), and the C++ equivalent is
 //    a plain value parse by the consumer.
-//  * DEFERRED (with the serialization slice): ToString() -- it renders
-//    through an XmlWriter over a fragment (name="value" with the XmlWriter
-//    attribute-value escaping and the auto-generated p{n} prefix for
-//    namespace names not in scope), which needs the XmlWriter stand-in.
+//  * ToString() renders through the XmlWriter over a fragment
+//    (name="value" with the XmlWriter attribute-value escaping and the
+//    auto-generated p{n} prefix for namespace names not in scope), resolved
+//    through the parent element's prefix scope (the ported slice).
 //  * ArgumentNullException arms (null name/value in the ctor, null value in
 //    the Value setter) are unreachable: std::string has no null.
 
@@ -85,6 +85,12 @@ public:
 
     // XAttribute.Value: the attribute value.
     const std::string& Value() const noexcept { return value_; }
+
+    // XAttribute.ToString: the fragment render -- the attribute through the
+    // writer's attribute path over the parent element's prefix scope (an
+    // unparented attribute in a namespace gets a generated prefix), trimmed.
+    // Defined in XAttribute.cpp.
+    std::string ToString() const;
 
     // XAttribute.Value setter: validates the new value against the name
     // (the xmlns rules) and assigns it.

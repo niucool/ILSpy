@@ -26,6 +26,8 @@
 
 #include <stdexcept>
 
+#include <cstdio>
+
 namespace ILSpy::Decompiler::Xml {
 
 XDocument::XDocument(XContent content)
@@ -141,5 +143,53 @@ T* XDocument::GetFirstNode()
 
 template XDocumentType* XDocument::GetFirstNode<XDocumentType>();
 template XElement* XDocument::GetFirstNode<XElement>();
+
+XDocument::XDocument(XDeclaration declaration, XContent content)
+    : XDocument(std::move(content))
+{
+    declaration_ = std::move(declaration);
+}
+
+void XDocument::WriteTo(XmlWriter& writer) const
+{
+    if (declaration_.has_value()) {
+        if (declaration_->Standalone == "yes")
+            writer.WriteStartDocument(true);
+        else if (declaration_->Standalone == "no")
+            writer.WriteStartDocument(false);
+        else
+            writer.WriteStartDocument();
+    } else {
+        writer.WriteStartDocument();
+    }
+    WriteContentTo(writer);
+    writer.WriteEndDocument();
+}
+
+void XDocument::Save(const std::string& fileName) const
+{
+    Save(fileName, GetSaveOptionsFromAnnotations());
+}
+
+void XDocument::Save(const std::string& fileName, SaveOptions options) const
+{
+    XmlWriterSettings settings = GetXmlWriterSettings(options);
+    if (declaration_.has_value() && !declaration_->Encoding.empty()) {
+        // The C# resolves Encoding.GetEncoding(name) and silently keeps the
+        // default when the name is unknown; the port carries the web name
+        // verbatim (the file bytes stay UTF-8 regardless -- see the
+        // XmlWriter.hpp sink note).
+        settings.Encoding = declaration_->Encoding;
+    }
+    XmlWriter writer(std::move(settings), XmlWriterSink::File);
+    WriteTo(writer);
+    writer.Close();
+    std::vector<std::uint8_t> bytes = writer.FileBytes();
+    std::FILE* file = std::fopen(fileName.c_str(), "wb");
+    if (file == nullptr)
+        throw std::runtime_error("Cannot create file '" + fileName + "'.");
+    std::fwrite(bytes.data(), 1, bytes.size(), file);
+    std::fclose(file);
+}
 
 } // namespace ILSpy::Decompiler::Xml

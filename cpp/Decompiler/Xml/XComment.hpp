@@ -32,6 +32,7 @@
 #include <string>
 
 #include "XNode.hpp"
+#include "XmlWriter.hpp"
 #include "XmlNodeType.hpp"
 
 namespace ILSpy::Decompiler::Xml {
@@ -54,6 +55,12 @@ public:
     void Value(std::string value) { value_ = std::move(value); }
 
     std::shared_ptr<XNode> CloneNode() const override { return std::make_shared<XComment>(*this); }
+
+    // XComment.WriteTo.
+    void WriteTo(XmlWriter& writer) const override
+    {
+        writer.WriteComment(Value());
+    }
 
     bool DeepEquals(const XNode& other) const override
     {

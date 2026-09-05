@@ -33,25 +33,48 @@
 // incorrectly structured document.") while a document type AFTER a comment
 // is still accepted, and the doctype-then-comments content walk.
 //
-// DEFERRED (with the serialization slice): XDeclaration/Declaration,
-// ToString/Save/WriteTo. DEFERRED (the XmlReader paths): Load/Parse and the
-// line-info/base-URI annotations they record.
+// XDeclaration, ToString/Save/WriteTo are ported with the XmlWriter slice
+// (Save(fileName) writes the UTF-8 preamble + the declaration). DEFERRED
+// (the XmlReader paths): Load/Parse and the line-info/base-URI annotations
+// they record.
 
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "XContainer.hpp"
 #include "XmlNodeType.hpp"
+#include "XmlWriter.hpp"
 
 namespace ILSpy::Decompiler::Xml {
 
 class XDocumentType;
 
+// System.Xml.Linq.XDeclaration (the members the Save/WriteTo paths read: the
+// encoding web name for the file save, the standalone value for the
+// declaration).
+class XDeclaration {
+public:
+    XDeclaration(std::string version, std::string encoding, std::string standalone)
+        : Version(std::move(version))
+        , Encoding(std::move(encoding))
+        , Standalone(std::move(standalone))
+    {
+    }
+
+    std::string Version;
+    std::string Encoding;
+    std::string Standalone;
+};
+
 class XDocument : public XContainer {
 public:
     XDocument() = default;
+
+    // The C# `XDocument(XDeclaration? declaration, params object?[] content)`.
+    XDocument(XDeclaration declaration, XContent content);
 
     // The C# `XDocument(params object?[] content)` -- a braced XContent list
     // is the params form; a single content item is the one-element array.
@@ -59,6 +82,11 @@ public:
 
     // The C# `XDocument(XDocument other)`: the deep-copy constructor.
     explicit XDocument(const XDocument& other);
+
+    // XDocument.Declaration: the XML declaration of this document (null when
+    // the document was built without one).
+    const XDeclaration* Declaration() const { return declaration_ ? &*declaration_ : nullptr; }
+    void Declaration(XDeclaration value) { declaration_ = std::move(value); }
 
     XmlNodeType NodeType() const override { return XmlNodeType::Document; }
 
@@ -75,6 +103,15 @@ public:
 
     std::int32_t GetDeepHashCode() const override;
 
+    // XDocument.WriteTo: the declaration (per XDeclaration.Standalone) +
+    // the content + WriteEndDocument.
+    void WriteTo(XmlWriter& writer) const override;
+
+    // XDocument.Save(fileName): the file render (the declaration with the
+    // XDeclaration encoding when it names one, else the settings' utf-8).
+    void Save(const std::string& fileName) const;
+    void Save(const std::string& fileName, SaveOptions options) const;
+
 protected:
     void ValidateNode(const XNode& node, const XNode* previous) override;
     void ValidateString(const std::string& s) override;
@@ -85,6 +122,8 @@ protected:
 private:
     template <typename T>
     T* GetFirstNode();
+
+    std::optional<XDeclaration> declaration_;
 
     void ValidateDocument(const XNode* previous, XmlNodeType allowBefore, XmlNodeType allowAfter);
 };

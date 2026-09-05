@@ -44,9 +44,9 @@
 //  * The C# `Attributes(XName?)/Elements(XName?)` null-name arms (returning
 //    the empty sequence) are covered by the no-argument overloads; the port
 //    has no nullable name to pass.
-//  * DEFERRED (with the serialization slice): ToString()/Save/WriteTo (the
-//    SaveOptions formatting and the XmlWriter machinery) and
-//    XAttribute::ToString. DEFERRED (the XmlReader paths): Load/Parse and
+//  * ToString()/Save/WriteTo (through the ElementWriter and the ported
+//    XmlWriter stand-in) and XAttribute::ToString are ported with the
+//    serialization slice. DEFERRED (the XmlReader paths): Load/Parse and
 //    XElement.Parse (the BamlDecompiler's LiteralContentHandler needs it --
 //    it requires the XmlReader text-parser stand-in). DEFERRED (unused by
 //    the BamlDecompiler): Ancestors/AncestorsAndSelf/Descendants/
@@ -64,6 +64,7 @@
 
 #include "XAttribute.hpp"
 #include "XContainer.hpp"
+#include "XmlWriter.hpp"
 #include "XName.hpp"
 #include "XNamespace.hpp"
 #include "XmlNodeType.hpp"
@@ -244,6 +245,16 @@ public:
     // it (a default-namespace declaration never answers -- its own name
     // carries an empty namespace).
     std::optional<std::string> GetPrefixOfNamespace(const XNamespace& ns) const;
+
+    // XElement.WriteTo: the ElementWriter serialization (the xmlns scope
+    // walk and the prefix resolution). Defined in XElement.cpp.
+    void WriteTo(XmlWriter& writer) const override;
+
+    // XElement.Save(fileName): the file render (the declaration with the
+    // settings' encoding, indented per the save options). The SaveOptions
+    // overload is the C#'s Save(string, SaveOptions).
+    void Save(const std::string& fileName) const;
+    void Save(const std::string& fileName, SaveOptions options) const;
 
     // internal XElement.RemoveAttribute(XAttribute): detaches the attribute
     // from this element (throws when the attribute belongs to another

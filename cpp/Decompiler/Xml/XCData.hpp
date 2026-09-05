@@ -49,6 +49,13 @@ public:
     XmlNodeType NodeType() const override { return XmlNodeType::CDATA; }
 
     std::shared_ptr<XNode> CloneNode() const override { return std::make_shared<XCData>(*this); }
+
+    // XCData.WriteTo: the CDATA section form (overrides XText's WriteString
+    // serialization).
+    void WriteTo(XmlWriter& writer) const override
+    {
+        writer.WriteCData(Value());
+    }
 };
 
 } // namespace ILSpy::Decompiler::Xml

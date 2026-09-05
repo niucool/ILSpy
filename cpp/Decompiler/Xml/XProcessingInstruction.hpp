@@ -37,6 +37,7 @@
 
 #include "XmlConvert.hpp"
 #include "XNode.hpp"
+#include "XmlWriter.hpp"
 #include "XmlNodeType.hpp"
 
 namespace ILSpy::Decompiler::Xml {
@@ -71,6 +72,12 @@ public:
     std::shared_ptr<XNode> CloneNode() const override
     {
         return std::make_shared<XProcessingInstruction>(*this);
+    }
+
+    // XProcessingInstruction.WriteTo.
+    void WriteTo(XmlWriter& writer) const override
+    {
+        writer.WriteProcessingInstruction(target_, data_);
     }
 
     bool DeepEquals(const XNode& other) const override

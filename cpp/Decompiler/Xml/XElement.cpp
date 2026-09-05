@@ -19,6 +19,10 @@
 // SOFTWARE.
 
 #include "Decompiler/Xml/XElement.hpp"
+#include "Decompiler/Xml/ElementWriter.hpp"
+
+#include <cstdio>
+
 
 #include "Decompiler/Xml/XDocument.hpp"
 #include "Decompiler/Xml/XDocumentType.hpp"
@@ -409,6 +413,33 @@ void XContainerElements::Iterator::Advance()
         }
         position_ = position_->next_;
     }
+}
+
+void XElement::WriteTo(XmlWriter& writer) const
+{
+    ElementWriter elementWriter(writer);
+    elementWriter.WriteElement(*this);
+}
+
+void XElement::Save(const std::string& fileName) const
+{
+    Save(fileName, GetSaveOptionsFromAnnotations());
+}
+
+void XElement::Save(const std::string& fileName, SaveOptions options) const
+{
+    // The C#: XmlWriter.Create(fileName, GetXmlWriterSettings(options)) +
+    // WriteTo. The file sink writes the UTF-8 preamble and the declaration.
+    XmlWriterSettings settings = GetXmlWriterSettings(options);
+    XmlWriter writer(std::move(settings), XmlWriterSink::File);
+    WriteTo(writer);
+    writer.Close();
+    std::vector<std::uint8_t> bytes = writer.FileBytes();
+    std::FILE* file = std::fopen(fileName.c_str(), "wb");
+    if (file == nullptr)
+        throw std::runtime_error("Cannot create file '" + fileName + "'.");
+    std::fwrite(bytes.data(), 1, bytes.size(), file);
+    std::fclose(file);
 }
 
 } // namespace ILSpy::Decompiler::Xml

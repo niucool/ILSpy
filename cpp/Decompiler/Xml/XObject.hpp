@@ -59,6 +59,7 @@
 #pragma once
 
 #include <any>
+#include <cstdint>
 #include <vector>
 
 #include "XmlNodeType.hpp"
@@ -70,12 +71,31 @@ class XDocument;
 class XElement;
 class XNode;
 
+// System.Xml.Linq.SaveOptions.
+enum class SaveOptions : std::uint32_t {
+    None = 0,
+    DisableFormatting = 1,
+    OmitDuplicateNamespaces = 2,
+};
+
 class XObject {
 public:
     XObject() = default;
     XObject(const XObject&) = delete;
     XObject& operator=(const XObject&) = delete;
     virtual ~XObject() = default;
+
+    // Whether any annotation is held (the C# `annotations != null` walk gate
+    // of GetSaveOptionsFromAnnotations).
+    bool HasAnnotations() const
+    {
+        return !annotations_.empty();
+    }
+
+    // XObject.GetSaveOptionsFromAnnotations (internal): walks up the parent
+    // chain for a SaveOptions annotation (the boxed enum value the C#
+    // stores), or SaveOptions::None.
+    SaveOptions GetSaveOptionsFromAnnotations() const;
 
     // The node type of this XObject (element, text, comment, ...).
     virtual XmlNodeType NodeType() const = 0;
