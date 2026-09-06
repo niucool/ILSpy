@@ -27,6 +27,7 @@
 #include "Decompiler/TypeSystem/ApplyAttributeTypeVisitor.hpp"
 #include "Decompiler/TypeSystem/GenericContext.hpp"
 #include "Decompiler/TypeSystem/Implementation/DecimalConstantHelper.hpp"
+#include "Decompiler/TypeSystem/Implementation/SpecializedField.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
 #include "Decompiler/TypeSystem/MetadataModule.hpp"
 #include "Decompiler/TypeSystem/TypeParameterSubstitution.hpp"
@@ -530,14 +531,36 @@ const TypeParameterSubstitution* MetadataField::Substitution() const
     return &TypeParameterSubstitution::Identity();
 }
 
-// DEFERRED (convention (d)): the SpecializedField::Create factory.
+// The C# `public IMember Specialize(TypeParameterSubstitution substitution) =>
+// SpecializedField.Create(this, substitution)` (MetadataField.cs lines 317-319). The alias
+// over `this` carries the no-op deleter (this module's `fieldDefs_` cache owns the
+// instance); the keep-alive registry owns every fresh result.
 const IMember* MetadataField::Specialize(
     const TypeParameterSubstitution* substitution) const
 {
-    (void)substitution;
-    throw std::logic_error(
-        "MetadataField::Specialize: SpecializedField::Create is not yet "
-        "ported (the GetMembersHelper routing that calls it)");
+    // A null pointer is the Identity (the `IMember::Specialize` convention).
+    TypeParameterSubstitution sub = (substitution != nullptr)
+        ? *substitution
+        : TypeParameterSubstitution(std::nullopt, std::nullopt);
+    std::shared_ptr<IField> alias(
+        static_cast<IField*>(const_cast<MetadataField*>(this)),
+        [](IField*) {
+            // no-op: the module's fieldDefs_ cache owns this instance
+        });
+    std::shared_ptr<IField> result =
+        SpecializedField::Create(std::move(alias), std::move(sub));
+    const IField* raw = result.get();
+    if (raw != static_cast<const IField*>(this)) {
+        // A fresh `SpecializedField` (the Identity / declaring-tpc-0 arms return
+        // `this` itself, needing no registry slot).
+        specializedFields_.push_back(std::move(result));
+    }
+    // The returned `IMember*` view is the SpecializedField's own `IField`
+    // subobject (sub B); the same-instance arms return the FakeMember-free
+    // `MetadataField` view (its direct `IField` base). Both views dispatch to
+    // the same final overriders, and fresh-vs-same-instance pointer
+    // comparisons against either view of `this` stay correct.
+    return static_cast<const IMember*>(raw);
 }
 
 bool MetadataField::Equals(const IMember* obj,

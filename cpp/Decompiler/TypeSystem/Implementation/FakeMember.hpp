@@ -49,17 +49,21 @@
 //      `AccessorOwner`) are NON-OWNING raw pointers (the C# references; the
 //      pointed-at methods are module- or test-owned -- the C# GC reference the
 //      port models as a non-owning handle).
-//  (d) `Specialize` implements the `SpecializedX.Create` SHORT-CIRCUITS
-//      faithfully: the `Identity` substitution and the
-//      declaring-type-`TypeParameterCount == 0` (plus, for `FakeMethod`, the
-//      own-`TypeParameters`-empty) cases return THE SAME instance
-//      (gold-pinned: `ReferenceEquals(spec, fake)` is true). The general arm
-//      constructs a `SpecializedX` -- DEFERRED with the owning-`Specialize`
-//      design (the SpecializedX::Create header notes: `IMember::Specialize`
-//      returns non-owning while the factories return owned; the C#
-//      `NullReferenceException` of a null `DeclaringType` in the
-//      short-circuit evaluation maps to `std::runtime_error` carrying the
-//      .NET message, the XamlContext NRE convention).
+//  (d) `Specialize` routes through the `SpecializedX.Create` factories
+//      faithfully (LANDED with the owning-Specialize design): the `Identity`
+//      substitution and the declaring-type-`TypeParameterCount == 0` (plus,
+//      for `FakeMethod`, the own-`TypeParameters`-empty) cases return THE SAME
+//      instance (gold-pinned: `ReferenceEquals(spec, fake)` is true); the
+//      general arm constructs a fresh owning `SpecializedX` kept alive in the
+//      per-fake keep-alive registry (the C# GC root; the
+//      `VarArgInstanceMethod` rewrap-registry precedent). The returned
+//      `IMember*` view for the field/property/event forms is the fake's own
+//      concrete-interface subobject (the `IField` / `IProperty` / `IEvent`
+//      view) -- BOTH arms take the same view, so fresh-vs-same-instance
+//      pointer comparisons stay correct; the C#
+//      `NullReferenceException` of a null `DeclaringType` in the Create arm
+//      chain maps to `std::runtime_error` carrying the .NET message, the
+//      XamlContext NRE convention).
 //  (e) `Equals` is the C# DEFAULT reference equality (`bool IMember.Equals(IMember,
 //      TypeVisitor) => Equals(obj)` -- `FakeMember` overrides no `Equals`):
 //      the port compares pointer identity (`obj == this`). `GetHashCode` is a
@@ -319,7 +323,10 @@ public:
         return FakeMember::Substitution();
     }
     // The C# `public override IMember Specialize` --
-    // `SpecializedField.Create(this, substitution)` (convention (d)).
+    // `SpecializedField.Create(this, substitution)` (convention (d)). REAL: routes
+    // through the landed `SpecializedField::Create` factory with the no-op-deleter alias
+    // over `this`; every fresh result is kept alive in the registry below (the
+    // `MetadataField::Specialize` convention).
     const IMember* Specialize(const TypeParameterSubstitution* substitution)
         const override;
     bool Equals(const IMember* obj, const TypeVisitor* typeNormalization)
@@ -344,6 +351,13 @@ public:
     bool ReturnTypeIsRefReadOnly() const override { return false; }
     // The C# `bool IField.IsVolatile => false`.
     bool IsVolatile() const override { return false; }
+
+private:
+    // The keep-alive registry for the `Specialize`-created instances (the C#
+    // GC roots them; the returned `const IMember*` must stay valid while this
+    // fake is alive -- the `VarArgInstanceMethod` rewrap-registry precedent).
+    // `mutable` (`Specialize` is const).
+    mutable std::vector<std::shared_ptr<IField>> specializedFields_;
 };
 
 // Port of the C# `class FakeMethod : FakeMember, IMethod` -- the fake method
@@ -529,6 +543,10 @@ private:
     const IMember* accessorOwner_ = nullptr;
     ::ILSpy::Decompiler::TypeSystem::MethodSemanticsAttributes accessorKind_
         = ::ILSpy::Decompiler::TypeSystem::MethodSemanticsAttributes::None;
+
+    // The keep-alive registry for the `Specialize`-created instances (the
+    // `FakeField::specializedFields_` precedent).
+    mutable std::vector<std::shared_ptr<IMethod>> specializedMethods_;
 };
 
 // Port of the C# `sealed class FakeProperty : FakeMember, IProperty`.
@@ -647,6 +665,10 @@ private:
     const IMethod* setter_ = nullptr;
     bool isIndexer_ = false;
     std::vector<std::shared_ptr<const IParameter>> parameters_;
+
+    // The keep-alive registry for the `Specialize`-created instances (the
+    // `FakeField::specializedFields_` precedent).
+    mutable std::vector<std::shared_ptr<IProperty>> specializedProperties_;
 };
 
 // Port of the C# `sealed class FakeEvent : FakeMember, IEvent`.
@@ -753,6 +775,10 @@ private:
     const IMethod* addAccessor_ = nullptr;
     const IMethod* removeAccessor_ = nullptr;
     const IMethod* invokeAccessor_ = nullptr;
+
+    // The keep-alive registry for the `Specialize`-created instances (the
+    // `FakeField::specializedFields_` precedent).
+    mutable std::vector<std::shared_ptr<IEvent>> specializedEvents_;
 };
 
 } // namespace ILSpy::Decompiler::TypeSystem::Implementation

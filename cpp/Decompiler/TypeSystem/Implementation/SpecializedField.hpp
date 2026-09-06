@@ -65,11 +65,13 @@
 //      (the port convention: defaults are not repeated in overrides); the override takes the
 //      explicit `bool`.
 //  (f) The C# `internal static IField Create(...)` factory (the `Identity`-or-`TypeParameterCount
-//      == 0` short-circuit + the `MethodTypeArguments`-stripping) is DEFERRED -- it needs the
-//      owning-`Specialize` design (the `IMember::Specialize` returns non-owning; the factory
-//      returns an owned `IField`); lands with the `GetMembersHelper` routing that calls it.
-//      The ctor-based construction (what `GetMembersHelper` uses directly) is the faithful
-//      surface ported here.
+//      == 0` short-circuit + the `MethodTypeArguments`-stripping) LANDED with the owning-
+//      `Specialize` design: it returns an OWNING `std::shared_ptr<IField>` (the short-circuit
+//      arms hand the caller-supplied handle straight back -- the caller passes the
+//      no-op-deleter alias over its own instance; the general arm a fresh owning
+//      `SpecializedField`), and every caller keeps the result alive in its keep-alive
+//      registry (the C# GC root). The `GetMembersHelper` construction path keeps using
+//      the ctor directly.
 //  (g) HEADER-ONLY (all simple delegations + the `mutable`-free surface; the complex
 //      `SpecializedMember` lazy `ReturnType` / `DeclaringType` are inherited, not
 //      re-implemented); NOT added to the ilspy `CMakeLists.txt` (compiles into each TU that
@@ -81,6 +83,7 @@
 #include "Decompiler/TypeSystem/Implementation/SpecializedMember.hpp"
 
 #include <memory>
+#include <stdexcept>
 #include <utility>
 
 namespace ILSpy::Decompiler::TypeSystem::Implementation {
@@ -98,6 +101,38 @@ public:
         : SpecializedMember(fieldDefinition),  // upcast shared_ptr<IField> -> shared_ptr<IMember>
           fieldDefinition_(std::move(fieldDefinition)) {
         AddSubstitution(std::move(substitution));
+    }
+
+    // The C# `internal static IField Create(IField fieldDefinition,
+    // TypeParameterSubstitution substitution)` (SpecializedField.cs lines 28-37) -- the
+    // field factory (the `SpecializedMethod::Create` ownership convention: the Identity /
+    // declaring-tpc-0 arms return the caller-supplied handle, the general arm a fresh owning
+    // `SpecializedField`; the caller keeps the result alive in its keep-alive registry).
+    // NOTE the differences from the method factory: NO ArrayType arm, and the tpc-0 test
+    // fires regardless of the field's own type parameters (a field is never generic). A
+    // null `DeclaringType` maps the C# `NullReferenceException` to `std::runtime_error`
+    // carrying the .NET message (checked AFTER the Identity arm).
+    static std::shared_ptr<IField> Create(
+        std::shared_ptr<IField> fieldDefinition,
+        TypeParameterSubstitution substitution)
+    {
+        if (TypeParameterSubstitution::Identity().Equals(&substitution)) {
+            return fieldDefinition;
+        }
+        if (fieldDefinition->DeclaringType() == nullptr) {
+            throw std::runtime_error(
+                "Object reference not set to an instance of an object.");
+        }
+        if (fieldDefinition->DeclaringType()->TypeParameterCount() == 0) {
+            return fieldDefinition;
+        }
+        const auto& methodArgs = substitution.MethodTypeArguments();
+        if (methodArgs.has_value() && !methodArgs->empty()) {
+            substitution = TypeParameterSubstitution(substitution.ClassTypeArguments(),
+                                                     std::vector<ITypePtr>{});
+        }
+        return std::make_shared<SpecializedField>(std::move(fieldDefinition),
+                                                   std::move(substitution));
     }
 
     // --- ISymbol (redeclared by IField to disambiguate the shared-ISymbol-base diamond;

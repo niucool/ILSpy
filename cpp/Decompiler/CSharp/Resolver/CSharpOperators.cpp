@@ -1730,7 +1730,7 @@ LiftedUserDefinedOperator::LiftedUserDefinedOperator(
     SetParameters(CreateParameters(
         [&compilation, &substitution](const ILSpy::Decompiler::TypeSystem::IType& type)
             -> ILSpy::Decompiler::TypeSystem::ITypePtr {
-            return Create(
+            return ILSpy::Decompiler::TypeSystem::Create(
                 compilation,
                 *const_cast<ILSpy::Decompiler::TypeSystem::IType&>(type).AcceptVisitor(
                     substitution));
@@ -1747,7 +1747,7 @@ LiftedUserDefinedOperator::LiftedUserDefinedOperator(
         SetReturnType(std::const_pointer_cast<ILSpy::Decompiler::TypeSystem::IType>(
             nonLiftedMethod->ReturnType().shared_from_this()));
     } else {
-        SetReturnType(Create(
+        SetReturnType(ILSpy::Decompiler::TypeSystem::Create(
             compilation,
             *const_cast<ILSpy::Decompiler::TypeSystem::IType&>(nonLiftedMethod->ReturnType())
                  .AcceptVisitor(substitution)));

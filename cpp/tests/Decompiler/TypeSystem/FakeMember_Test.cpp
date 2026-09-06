@@ -29,6 +29,10 @@
 #include "Decompiler/TypeSystem/IModuleReference.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
+#include "Decompiler/TypeSystem/Implementation/SpecializedEvent.hpp"
+#include "Decompiler/TypeSystem/Implementation/SpecializedField.hpp"
+#include "Decompiler/TypeSystem/Implementation/SpecializedMethod.hpp"
+#include "Decompiler/TypeSystem/Implementation/SpecializedProperty.hpp"
 #include "Decompiler/TypeSystem/MetadataModule.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
 #include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
@@ -367,10 +371,11 @@ TEST_F(FakeMemberTest, FakeEventDefaultsAndSetters)
     EXPECT_EQ(fe.InvokeAccessor(), dummy.get());
 }
 
-// The Specialize short-circuits (the probe's Specialize drives): the
-// same-instance arms gold-pinned refeq=True; the fresh-SpecializedX general
-// arms are the port's documented deferral; the null-DeclaringType arm is the
-// .NET NRE (mapped to std::runtime_error).
+// The Specialize same-instance arms (the probe's Specialize drives): the
+// Identity / declaring-tpc-0 arms gold-pinned refeq=True (the view through
+// each fake's own concrete interface -- the Specialize_Test C-section
+// convention); the null-DeclaringType arm is the .NET NRE (mapped to
+// std::runtime_error).
 TEST_F(FakeMemberTest, SpecializeShortCircuits)
 {
     FakeFixture fx;
@@ -382,7 +387,7 @@ TEST_F(FakeMemberTest, SpecializeShortCircuits)
         f.SetDeclaringType(fx.TypePtr(fx.StringType()));
         EXPECT_EQ(f.Specialize(&classSub),
                   static_cast<const TS::IMember*>(
-                      static_cast<const TI::FakeMember*>(&f)));
+                      static_cast<const TS::IField*>(&f)));
     }
     // fmTpc0: TypeParameters empty + the declaring tpc-0 -> the same instance.
     {
@@ -397,14 +402,14 @@ TEST_F(FakeMemberTest, SpecializeShortCircuits)
         p.SetDeclaringType(fx.TypePtr(fx.StringType()));
         EXPECT_EQ(p.Specialize(&classSub),
                   static_cast<const TS::IMember*>(
-                      static_cast<const TI::FakeMember*>(&p)));
+                      static_cast<const TS::IProperty*>(&p)));
     }
     {
         TI::FakeEvent e(fx.comp);
         e.SetDeclaringType(fx.TypePtr(fx.StringType()));
         EXPECT_EQ(e.Specialize(&classSub),
                   static_cast<const TS::IMember*>(
-                      static_cast<const TI::FakeMember*>(&e)));
+                      static_cast<const TS::IEvent*>(&e)));
     }
     // ffNoDecl: the null DeclaringType NRE (the .NET message).
     {
@@ -419,32 +424,44 @@ TEST_F(FakeMemberTest, SpecializeShortCircuits)
     }
 }
 
-TEST_F(FakeMemberTest, SpecializeGeneralArmsAreTheDocumentedDeferral)
+// The Specialize general arms (the fresh-SpecializedX construction): the
+// tpc-1 declaring types build a fresh specialized instance of each kind
+// (gold refeq=False; the Specialize_Test C-section pins the full renders).
+TEST_F(FakeMemberTest, SpecializeGeneralArmsBuildFreshSpecialized)
 {
     FakeFixture fx;
     TS::TypeParameterSubstitution classSub = fx.ClassSub();
 
-    // The tpc-1 declaring types reach the fresh-SpecializedX construction
-    // (gold refeq=False; the port defers with the owning-Specialize design).
     {
         TI::FakeField f(fx.comp);
         f.SetDeclaringType(fx.TypePtr(fx.ListOfTType()));
-        EXPECT_THROW(f.Specialize(&classSub), std::logic_error);
+        const TS::IMember* spec = f.Specialize(&classSub);
+        EXPECT_NE(spec, static_cast<const TS::IMember*>(
+                                static_cast<const TS::IField*>(&f)));
+        EXPECT_NE(dynamic_cast<const TI::SpecializedField*>(spec), nullptr);
     }
     {
         TI::FakeMethod m(fx.comp, TS::SymbolKind::Method);
         m.SetDeclaringType(fx.TypePtr(fx.ListOfTType()));
-        EXPECT_THROW(m.Specialize(&classSub), std::logic_error);
+        const TS::IMethod* spec = m.Specialize(&classSub);
+        EXPECT_NE(spec, static_cast<const TS::IMethod*>(&m));
+        EXPECT_NE(dynamic_cast<const TI::SpecializedMethod*>(spec), nullptr);
     }
     {
         TI::FakeProperty p(fx.comp);
         p.SetDeclaringType(fx.TypePtr(fx.ListOfTType()));
-        EXPECT_THROW(p.Specialize(&classSub), std::logic_error);
+        const TS::IMember* spec = p.Specialize(&classSub);
+        EXPECT_NE(spec, static_cast<const TS::IMember*>(
+                                static_cast<const TS::IProperty*>(&p)));
+        EXPECT_NE(dynamic_cast<const TI::SpecializedProperty*>(spec), nullptr);
     }
     {
         TI::FakeEvent e(fx.comp);
         e.SetDeclaringType(fx.TypePtr(fx.ListOfTType()));
-        EXPECT_THROW(e.Specialize(&classSub), std::logic_error);
+        const TS::IMember* spec = e.Specialize(&classSub);
+        EXPECT_NE(spec, static_cast<const TS::IMember*>(
+                                static_cast<const TS::IEvent*>(&e)));
+        EXPECT_NE(dynamic_cast<const TI::SpecializedEvent*>(spec), nullptr);
     }
 }
 

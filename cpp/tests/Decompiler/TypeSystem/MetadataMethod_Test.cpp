@@ -1140,7 +1140,10 @@ TEST_F(MetadataMethodTest, DeferralContracts)
     EXPECT_THROW(plain->GetAttribute(TS::KnownAttribute::Obsolete),
         std::logic_error);
     EXPECT_THROW(plain->GetReturnTypeAttributes(), std::logic_error);
-    EXPECT_THROW(plain->Specialize(nullptr), std::logic_error);
+    // `Specialize` LANDED: the Identity substitution returns the same
+    // instance (the Specialize_Test suite pins the full arm matrix).
+    EXPECT_EQ(plain->Specialize(nullptr),
+        static_cast<const TS::IMethod*>(plain));
 }
 
 // A MetadataParameter drive over a real parameter row (the ctor-owned row):

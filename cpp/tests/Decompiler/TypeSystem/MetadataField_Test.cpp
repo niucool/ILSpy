@@ -1014,8 +1014,7 @@ TEST(MetadataFieldTest, MakeDecimalScaleCheckMatchesGold) {
     EXPECT_EQ(minusQuarter.Flags(), 0x80020000u);
 }
 
-// The deferral contracts: the AttributeListBuilder machinery and the
-// SpecializedField::Create factory stay loud.
+// The deferral contracts: the AttributeListBuilder machinery stays loud.
 TEST(MetadataFieldTest, DeferralContractsThrow) {
     if (!MscorlibAvailable())
         GTEST_SKIP() << "mscorlib fixture not available";
@@ -1029,7 +1028,8 @@ TEST(MetadataFieldTest, DeferralContractsThrow) {
                  std::logic_error);
     EXPECT_THROW(first->GetAttribute(TS::KnownAttribute::Obsolete),
                  std::logic_error);
-    EXPECT_THROW(
-        first->Specialize(&TS::TypeParameterSubstitution::Identity()),
-        std::logic_error);
+    // `Specialize` LANDED: the declaring type's tpc-0 arm returns the same
+    // instance (the Specialize_Test suite pins the full arm matrix).
+    EXPECT_EQ(first->Specialize(&TS::TypeParameterSubstitution::Identity()),
+              static_cast<const TS::IMember*>(first));
 }

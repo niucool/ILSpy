@@ -96,7 +96,12 @@
 //      this.Substitution)` -- the owning-`Specialize` design; the override returns
 //      `methodDefinition_->AccessorOwner()` unspecialized, the `SpecializedProperty::Getter`
 //      deferral precedent). `ToString` is DEFERRED (needs `IType::ToString`). The C# `internal
-//      static IMethod Create(...)` factory is DEFERRED (needs the owning-`Specialize` design).
+//      static IMethod Create(...)` factory LANDED as the ownership-design slice: the factory
+//      returns an OWNING `std::shared_ptr<IMethod>` (the Identity / declaring-tpc-0 arms hand
+//      the CALLER-SUPPLIED handle straight back; the caller passes the no-op-deleter alias
+//      over its own instance, so `.get() == methodDefinition.get()`), and every caller keeps
+//      the result alive in a keep-alive registry (the `VarArgInstanceMethod` rewrap-registry
+//      precedent).
 //  (h) OUT-OF-LINE: the ctor + `Equals` / `GetHashCode` / `Specialize` (covariant) /
 //      `TypeArguments` / `TypeParameters` are in the .cpp (they need `TypeParameterSubstitution`
 //      / `IMethod` / `SpecializedTypeParameter` complete); the class is added to the ilspy
@@ -211,6 +216,25 @@ private:
 // from it -- the C# `sealed class LiftedUserDefinedOperator : SpecializedMethod, ILiftedOperator`.
 class SpecializedMethod : public SpecializedParameterizedMember, public IMethod {
 public:
+    // The C# `internal static IMethod Create(IMethod methodDefinition,
+    // TypeParameterSubstitution substitution)` (SpecializedMethod.cs lines 34-49) -- the
+    // factory every `IMethod::Specialize` implementation routes through
+    // (`MetadataMethod::Specialize` / `FakeMethod::Specialize` / the
+    // `SpecializedMethod::Specialize` compose path). The port returns an OWNING
+    // `std::shared_ptr<IMethod>`: the Identity and the declaring-tpc-0 arms hand the
+    // CALLER-SUPPLIED `methodDefinition` handle straight back (the caller passes the
+    // no-op-deleter alias over its own instance, so `.get() == methodDefinition.get()` --
+    // the `ResolveForwardedType` no-op-deleter-alias convention), while the
+    // ArrayType-declaring-type and general arms return a fresh `SpecializedMethod` OWNING
+    // the handle. The CALLER keeps the result alive (the keep-alive registry -- the C# GC
+    // root; the `VarArgInstanceMethod` rewrap-registry precedent). A null `DeclaringType`
+    // maps the C# `NullReferenceException` to `std::runtime_error` carrying the .NET
+    // message (checked AFTER the Identity arm, which never touches the declaring type).
+    // Out-of-line (the arm chain reads `DeclaringType` / `TypeParameters`).
+    static std::shared_ptr<IMethod> Create(
+        std::shared_ptr<IMethod> methodDefinition,
+        TypeParameterSubstitution substitution);
+
     // The C# `SpecializedMethod(IMethod methodDefinition, TypeParameterSubstitution substitution)`.
     // `methodDefinition` is shared with the `SpecializedParameterizedMember` base (its
     // `baseMember_`, upcast to `IParameterizedMember`) AND stored as the typed

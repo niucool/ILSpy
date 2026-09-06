@@ -27,6 +27,10 @@
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
+#include "Decompiler/TypeSystem/Implementation/SpecializedEvent.hpp"
+#include "Decompiler/TypeSystem/Implementation/SpecializedField.hpp"
+#include "Decompiler/TypeSystem/Implementation/SpecializedMethod.hpp"
+#include "Decompiler/TypeSystem/Implementation/SpecializedProperty.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/TypeParameterSubstitution.hpp"
 
@@ -63,21 +67,6 @@ std::string FullNameOf(const IType& type)
     if (ns.empty())
         return type.Name();
     return ns + "." + type.Name();
-}
-
-// The C# `DeclaringType.TypeParameterCount` read the `SpecializedX.Create`
-// short-circuits perform -- the `NullReferenceException` of the null
-// `DeclaringType` (gold-pinned: `D: ffNoDecl specialize EX=
-// NullReferenceException`) maps to `std::runtime_error` carrying the .NET
-// message (convention (d)).
-int DeclaringTypeParameterCountOf(const FakeMember& member)
-{
-    ITypePtr declaringType = member.DeclaringType();
-    if (!declaringType) {
-        throw std::runtime_error(
-            "Object reference not set to an instance of an object.");
-    }
-    return declaringType->TypeParameterCount();
 }
 
 }  // namespace
@@ -138,24 +127,35 @@ std::string FakeMember::Namespace() const
 // --- FakeField ---
 
 // The C# `public override IMember Specialize` --
-// `SpecializedField.Create(this, substitution)`: the `Identity`-or-declaring-
-// tpc-0 short-circuit returns the same instance (gold-pinned); the general
-// arm constructs a `SpecializedField` -- DEFERRED with the owning-`Specialize`
-// design (convention (d)).
+// `SpecializedField.Create(this, substitution)` (convention (d)). The alias over `this`
+// carries the no-op deleter (the fake's creator -- the test fixture, the keep-alive registry
+// of the member enumeration that built it -- owns the instance); every fresh result is
+// kept alive in the registry below, so the fake outliving the results is the caller's
+// lifetime contract.
 const IMember* FakeField::Specialize(
     const TypeParameterSubstitution* substitution) const
 {
-    if (TypeParameterSubstitution::Identity().Equals(substitution)
-        || DeclaringTypeParameterCountOf(*this) == 0)
-    {
-        // The unambiguous sub-A conversion (`this` alone is ambiguous: the
-        // FakeField carries two IMember subobjects, convention (g)).
-        return static_cast<const FakeMember*>(this);
+    // A null pointer is the Identity (the `IMember::Specialize` convention).
+    TypeParameterSubstitution sub = (substitution != nullptr)
+        ? *substitution
+        : TypeParameterSubstitution(std::nullopt, std::nullopt);
+    std::shared_ptr<IField> alias(
+        static_cast<IField*>(const_cast<FakeField*>(this)),
+        [](IField*) {
+            // no-op: the fake's creator owns this instance
+        });
+    std::shared_ptr<IField> result =
+        SpecializedField::Create(std::move(alias), std::move(sub));
+    const IField* raw = result.get();
+    if (raw != static_cast<const IField*>(this)) {
+        // A fresh `SpecializedField` (the Identity / declaring-tpc-0 arms return
+        // `this` itself, needing no registry slot).
+        specializedFields_.push_back(std::move(result));
     }
-    throw std::logic_error(
-        "FakeField::Specialize: the SpecializedField construction is not "
-        "yet ported (the owning-Specialize design the SpecializedX::Create "
-        "factories are gated on)");
+    // The `IMember*` view through the `IField` subobject (sub B) -- the same view
+    // BOTH arms take (the same-instance arm's `raw` is the `IField` view of `this`),
+    // so fresh-vs-same-instance pointer comparisons stay correct.
+    return static_cast<const IMember*>(raw);
 }
 
 // --- FakeMethod ---
@@ -225,27 +225,31 @@ std::vector<ITypePtr> FakeMethod::TypeArguments() const
 }
 
 // The C# `public override IMember Specialize` --
-// `SpecializedMethod.Create(this, substitution)`: the `Identity` short-circuit
-// and the own-TypeParameters-empty + declaring-tpc-0 short-circuit return the
-// same instance (gold-pinned); the general arm constructs a
-// `SpecializedMethod` -- DEFERRED (convention (d)).
+// `SpecializedMethod.Create(this, substitution)` (convention (d), both the
+// IMember and the IMethod interface form). The alias over `this` carries the no-op
+// deleter (the fake's creator owns the instance); every fresh result is kept alive
+// in the registry below.
 const IMethod* FakeMethod::Specialize(
     const TypeParameterSubstitution* substitution) const
 {
-    if (TypeParameterSubstitution::Identity().Equals(substitution)) {
-        // `this` converts to the covariant `const IMethod*` unambiguously
-        // (IMethod is a direct base of FakeMethod).
-        return this;
+    // A null pointer is the Identity (the `IMember::Specialize` convention).
+    TypeParameterSubstitution sub = (substitution != nullptr)
+        ? *substitution
+        : TypeParameterSubstitution(std::nullopt, std::nullopt);
+    std::shared_ptr<IMethod> alias(
+        static_cast<IMethod*>(const_cast<FakeMethod*>(this)),
+        [](IMethod*) {
+            // no-op: the fake's creator owns this instance
+        });
+    std::shared_ptr<IMethod> result =
+        SpecializedMethod::Create(std::move(alias), std::move(sub));
+    const IMethod* raw = result.get();
+    if (raw != static_cast<const IMethod*>(this)) {
+        // A fresh `SpecializedMethod` (the Identity / ArrayType / declaring-tpc-0
+        // arms return `this` itself, needing no registry slot).
+        specializedMethods_.push_back(std::move(result));
     }
-    if (TypeParameters().empty()
-        && DeclaringTypeParameterCountOf(*this) == 0)
-    {
-        return this;
-    }
-    throw std::logic_error(
-        "FakeMethod::Specialize: the SpecializedMethod construction is not "
-        "yet ported (the owning-Specialize design the SpecializedX::Create "
-        "factories are gated on)");
+    return raw;
 }
 
 // --- FakeProperty ---
@@ -264,37 +268,51 @@ std::vector<const IParameter*> FakeProperty::Parameters() const
 }
 
 // The C# `public override IMember Specialize` --
-// `SpecializedProperty.Create(this, substitution)` (the Field form).
+// `SpecializedProperty.Create(this, substitution)` (the Field form: the alias over
+// `this`, the keep-alive registry, and the `IProperty`-subobject `IMember*` view).
 const IMember* FakeProperty::Specialize(
     const TypeParameterSubstitution* substitution) const
 {
-    if (TypeParameterSubstitution::Identity().Equals(substitution)
-        || DeclaringTypeParameterCountOf(*this) == 0)
-    {
-        return static_cast<const FakeMember*>(this);
+    TypeParameterSubstitution sub = (substitution != nullptr)
+        ? *substitution
+        : TypeParameterSubstitution(std::nullopt, std::nullopt);
+    std::shared_ptr<IProperty> alias(
+        static_cast<IProperty*>(const_cast<FakeProperty*>(this)),
+        [](IProperty*) {
+            // no-op: the fake's creator owns this instance
+        });
+    std::shared_ptr<IProperty> result =
+        SpecializedProperty::Create(std::move(alias), std::move(sub));
+    const IProperty* raw = result.get();
+    if (raw != static_cast<const IProperty*>(this)) {
+        specializedProperties_.push_back(std::move(result));
     }
-    throw std::logic_error(
-        "FakeProperty::Specialize: the SpecializedProperty construction is "
-        "not yet ported (the owning-Specialize design the SpecializedX::"
-        "Create factories are gated on)");
+    return static_cast<const IMember*>(raw);
 }
 
 // --- FakeEvent ---
 
 // The C# `public override IMember Specialize` --
-// `SpecializedEvent.Create(this, substitution)` (the Field form).
+// `SpecializedEvent.Create(this, substitution)` (the Field form: the alias over
+// `this`, the keep-alive registry, and the `IEvent`-subobject `IMember*` view).
 const IMember* FakeEvent::Specialize(
     const TypeParameterSubstitution* substitution) const
 {
-    if (TypeParameterSubstitution::Identity().Equals(substitution)
-        || DeclaringTypeParameterCountOf(*this) == 0)
-    {
-        return static_cast<const FakeMember*>(this);
+    TypeParameterSubstitution sub = (substitution != nullptr)
+        ? *substitution
+        : TypeParameterSubstitution(std::nullopt, std::nullopt);
+    std::shared_ptr<IEvent> alias(
+        static_cast<IEvent*>(const_cast<FakeEvent*>(this)),
+        [](IEvent*) {
+            // no-op: the fake's creator owns this instance
+        });
+    std::shared_ptr<IEvent> result =
+        SpecializedEvent::Create(std::move(alias), std::move(sub));
+    const IEvent* raw = result.get();
+    if (raw != static_cast<const IEvent*>(this)) {
+        specializedEvents_.push_back(std::move(result));
     }
-    throw std::logic_error(
-        "FakeEvent::Specialize: the SpecializedEvent construction is not "
-        "yet ported (the owning-Specialize design the SpecializedX::Create "
-        "factories are gated on)");
+    return static_cast<const IMember*>(raw);
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem::Implementation

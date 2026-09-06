@@ -23,9 +23,60 @@
 #include "Decompiler/TypeSystem/Implementation/SpecializedMethod.hpp"
 
 #include <cstdint>
+#include <stdexcept>
 #include <utility>
 
 namespace ILSpy::Decompiler::TypeSystem::Implementation {
+
+// The C# `internal static IMethod Create(IMethod methodDefinition,
+// TypeParameterSubstitution substitution)` (SpecializedMethod.cs lines 34-49) -- the factory
+// every `IMethod::Specialize` implementation routes through. The ownership design: the
+// Identity / declaring-tpc-0 arms return the caller-supplied handle back (an alias over the
+// caller-owned instance), the ArrayType-declaring-type and general arms a fresh owning
+// `SpecializedMethod`.
+std::shared_ptr<IMethod> SpecializedMethod::Create(
+    std::shared_ptr<IMethod> methodDefinition,
+    TypeParameterSubstitution substitution)
+{
+    // The C# `if (TypeParameterSubstitution.Identity.Equals(substitution))
+    // return methodDefinition;` -- evaluated FIRST, so a null declaring type never
+    // reaches the reads below.
+    if (TypeParameterSubstitution::Identity().Equals(&substitution)) {
+        return methodDefinition;
+    }
+    // The C# `if (methodDefinition.DeclaringType is ArrayType) return new
+    // SpecializedMethod(methodDefinition, substitution);` -- `DeclaringType()` returns the
+    // nullable `ITypePtr` handle; the `dynamic_cast` over a null handle is the C# `is` over
+    // null (false), and a null declaring type NREs at the reads below (mapped to the .NET
+    // message).
+    ITypePtr declaringType = methodDefinition->DeclaringType();
+    if (declaringType == nullptr) {
+        throw std::runtime_error(
+            "Object reference not set to an instance of an object.");
+    }
+    if (dynamic_cast<const ArrayType*>(declaringType.get()) != nullptr) {
+        return std::make_shared<SpecializedMethod>(std::move(methodDefinition),
+                                                   std::move(substitution));
+    }
+    // The C# `if (methodDefinition.TypeParameters.Count == 0) { ... }`.
+    if (methodDefinition->TypeParameters().empty()) {
+        if (declaringType->TypeParameterCount() == 0) {
+            return methodDefinition;
+        }
+        // The C# `if (substitution.MethodTypeArguments != null &&
+        // substitution.MethodTypeArguments.Count > 0) substitution = new
+        // TypeParameterSubstitution(substitution.ClassTypeArguments, EmptyList<IType>.Instance);`
+        // -- the method type args on a non-generic method are DROPPED (replaced by the EMPTY
+        // list, which the substitution render spells `[]`).
+        const auto& methodArgs = substitution.MethodTypeArguments();
+        if (methodArgs.has_value() && !methodArgs->empty()) {
+            substitution = TypeParameterSubstitution(substitution.ClassTypeArguments(),
+                                                     std::vector<ITypePtr>{});
+        }
+    }
+    return std::make_shared<SpecializedMethod>(std::move(methodDefinition),
+                                               std::move(substitution));
+}
 
 // The C# `SpecializedMethod(IMethod methodDefinition, TypeParameterSubstitution substitution)`.
 // The specialized-type-parameter machinery (see the header comment (d)).

@@ -152,8 +152,8 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   member-enumeration slice LANDED (`VarArgInstanceMethod`, the vararg
   call-site wrapper with the fresh-wrapper `Specialize`; `FakeMember`
   (the `FakeMethod.CreateDummyConstructor` factory + the SpecializedX::
-  Create short-circuits, the general arms the documented owning-
-  `Specialize` deferral); and the real `MetadataTypeDefinition.Methods`
+  Create routing, the general arms landed with the owning-`Specialize`
+  slice); and the real `MetadataTypeDefinition.Methods`
   (the accessor-row drop over the landed MethodSemanticsLookup + the
   `IsMethodVisible` filter + the FakeMethod dummy-constructor append for
   structs/enums without a parameterless ctor), `GetMethods` (both
@@ -170,11 +170,23 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   IsRecord corpus digests (all-false over the three BCL corpora) and the
   nine REAL record fixtures of the Roslyn Microsoft.CodeAnalysis.dll
   shipped in the SDK (8 record structs + the record class with
-  `<Clone>$`) -- the explicit-interface members
+  `<Clone>$`)) -- and the owning-`Specialize` slice LANDED (the four
+  `SpecializedX::Create` factories -- `SpecializedMethod.Create` with its
+  ArrayType-declaring-type arm, the `SpecializedField` / `SpecializedProperty`
+  / `SpecializedEvent` forms with the Identity / declaring-tpc-0
+  same-instance arms and the `MethodTypeArguments`-stripping -- each
+  returning an OWNING `std::shared_ptr` with the caller passing the
+  no-op-deleter alias over its own instance and keeping every fresh result
+  alive in a keep-alive registry (the C# GC root), plus the real
+  `MetadataMethod.Specialize` / `MetadataField.Specialize` and the four
+  `FakeX.Specialize` general arms; gold-pinned byte-exact against the real
+  engine over the full Create-arm matrix, the fake drives incl. the
+  ArrayType arm only a fake can reach, and the whole-type FNV digests over
+  every method + field of List`1/Dictionary`2/String specialized with the
+  full class substitution); the explicit-interface members
   (`HasOverrides`/`GetOverrides` + `ResolveMethod`), the attribute members
-  (AttributeListBuilder), `AccessorOwner` (the property/event caches), and
-  `Specialize` (SpecializedMethod::Create) stay the documented loud
-  deferrals).
+  (AttributeListBuilder), and `AccessorOwner` (the property/event caches)
+  stay the documented loud deferrals).
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with

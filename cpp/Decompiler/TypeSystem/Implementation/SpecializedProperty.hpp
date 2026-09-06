@@ -66,8 +66,9 @@
 //      Getter)` lazily builds a `SpecializedMethod` for each accessor via
 //      `accessorDefinition.Specialize(substitution)` and caches it (an OWNING `LazyInit`
 //      cache). The port's `IMember::Specialize` returns a NON-OWNING `const IMember*` (the
-//      "type system owns" convention), so the owning-`Specialize` / owning-cache design
-//      `WrapAccessor` needs is not yet in place (lands with the owning-`Specialize` refactor).
+//      "type system owns" convention), so the owning-cache design
+//      `WrapAccessor` needs is not yet in place (the owning-`Specialize` design
+//      LANDED; the remaining gap is the accessor-wrapper's lazy owning cache).
 //      The deferred override delegates to `propertyDefinition_->Getter()` (the base
 //      accessor, unspecialized) -- a documented divergence (the accessor's `DeclaringType` /
 //      `ReturnType` / `Parameters` are not substituted). The `GetMembersHelper` /
@@ -76,10 +77,11 @@
 //      the divergence is benign for the routing; the faithful specialized accessors land
 //      with the owning-`Specialize` design + `WrapAccessor`.
 //  (f) The C# `internal static IProperty Create(...)` factory (the `Identity`-or-
-//      `TypeParameterCount == 0` short-circuit + the `MethodTypeArguments`-stripping) is
-//      DEFERRED -- it needs the owning-`Specialize` design; lands with the `GetMembersHelper`
-//      routing that calls it. The ctor-based construction (what `GetMembersHelper` uses
-//      directly) is the faithful surface ported here.
+//      `TypeParameterCount == 0` short-circuit + the `MethodTypeArguments`-stripping) LANDED
+//      with the owning-`Specialize` design (the `SpecializedField::Create` convention: an
+//      OWNING `std::shared_ptr<IProperty>`, the short-circuit arms handing the caller's
+//      alias back, the caller keeping the result alive). The `GetMembersHelper` construction
+//      path keeps using the ctor directly.
 //  (g) HEADER-ONLY (all simple delegations + the deferred accessors; the complex lazy
 //      `ReturnType` / `DeclaringType` / `Parameters` are inherited, not re-implemented); NOT
 //      added to the ilspy `CMakeLists.txt` (compiles into each TU that includes it, the
@@ -91,6 +93,7 @@
 #include "Decompiler/TypeSystem/Implementation/SpecializedParameterizedMember.hpp"
 
 #include <memory>
+#include <stdexcept>
 #include <utility>
 
 namespace ILSpy::Decompiler::TypeSystem::Implementation {
@@ -111,6 +114,36 @@ public:
         : SpecializedParameterizedMember(propertyDefinition),  // upcast -> IParameterizedMember
           propertyDefinition_(std::move(propertyDefinition)) {
         AddSubstitution(std::move(substitution));
+    }
+
+    // The C# `internal static IProperty Create(IProperty propertyDefinition,
+    // TypeParameterSubstitution substitution)` (SpecializedProperty.cs lines 28-37) -- the
+    // property factory (the `SpecializedField::Create` shape: no ArrayType arm, the Identity /
+    // declaring-tpc-0 arms return the caller-supplied handle, the general arm a fresh owning
+    // `SpecializedProperty`; the caller keeps the result alive in its keep-alive registry).
+    // A null `DeclaringType` maps the C# `NullReferenceException` to `std::runtime_error`
+    // carrying the .NET message (checked AFTER the Identity arm).
+    static std::shared_ptr<IProperty> Create(
+        std::shared_ptr<IProperty> propertyDefinition,
+        TypeParameterSubstitution substitution)
+    {
+        if (TypeParameterSubstitution::Identity().Equals(&substitution)) {
+            return propertyDefinition;
+        }
+        if (propertyDefinition->DeclaringType() == nullptr) {
+            throw std::runtime_error(
+                "Object reference not set to an instance of an object.");
+        }
+        if (propertyDefinition->DeclaringType()->TypeParameterCount() == 0) {
+            return propertyDefinition;
+        }
+        const auto& methodArgs = substitution.MethodTypeArguments();
+        if (methodArgs.has_value() && !methodArgs->empty()) {
+            substitution = TypeParameterSubstitution(substitution.ClassTypeArguments(),
+                                                     std::vector<ITypePtr>{});
+        }
+        return std::make_shared<SpecializedProperty>(std::move(propertyDefinition),
+                                                      std::move(substitution));
     }
 
     // --- ISymbol (the single override is the final overrider for all three IMember

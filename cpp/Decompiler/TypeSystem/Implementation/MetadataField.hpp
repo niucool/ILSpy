@@ -44,9 +44,10 @@
 //      convention: the C# builds them through `AttributeListBuilder` over the
 //      FieldOffset / NotSerialized / SpecialName flags, the marshalling
 //      descriptor, and the custom-attribute rows).
-//  (d) `Specialize` is the loud DEFERRAL gated on `SpecializedField::Create`
-//      (the SpecializedField.hpp convention-(f) note: the factory lands with the
-//      GetMembersHelper routing that calls it).
+//  (d) `Specialize` is REAL: `SpecializedField.Create(this, substitution)`
+//      with the no-op-deleter alias over `this` and the keep-alive registry
+//      (the landed owning-Specialize design; the Specialize_Test suite pins
+//      the arm matrix byte-exact against the real engine).
 //  (e) `module.OptionsForEntity(this)` in `DecodeTypeAndVolatileFlag` ports to
 //      `module.TypeSystemOptions()` directly: the `OptionsForEntity` /
 //      `ShouldDecodeNullableAttributes` NRT-visibility filter is deferred with
@@ -180,7 +181,11 @@ public:
     bool IsOverridable() const override;
     // `TypeParameterSubstitution.Identity`.
     const TypeParameterSubstitution* Substitution() const override;
-    // DEFERRED (convention (d)): SpecializedField::Create.
+    // The C# `public IMember Specialize(TypeParameterSubstitution substitution) =>
+    // SpecializedField.Create(this, substitution)` (MetadataField.cs lines 317-319). REAL:
+    // routes through the landed `SpecializedField::Create` factory with the no-op-deleter
+    // alias over `this`; every fresh result is kept alive in the registry below (the
+    // `MetadataMethod::Specialize` convention).
     const IMember* Specialize(
         const TypeParameterSubstitution* substitution) const override;
     // The C# `bool IMember.Equals(IMember obj, TypeVisitor typeNormalization)
@@ -209,6 +214,12 @@ private:
     const MetadataModule& module_;
     std::uint32_t handle_;  // the raw 0x04...... token
     std::uint32_t attr_;    // the raw FieldAttributes column
+
+    // The keep-alive registry for the `Specialize`-created instances (the C#
+    // GC roots them; the returned `const IMember*` must stay valid while this
+    // field is alive -- the `MetadataMethod::SpecializedMethods_` precedent).
+    // `mutable` (`Specialize` is const).
+    mutable std::vector<std::shared_ptr<IField>> specializedFields_;
 
     // The lazy members (convention (b)).
     mutable std::optional<std::string> name_;

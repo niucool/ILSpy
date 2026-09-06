@@ -32,6 +32,7 @@
 #include "Decompiler/TypeSystem/Implementation/MetadataParameter.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataTypeDefinition.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataTypeParameter.hpp"
+#include "Decompiler/TypeSystem/Implementation/SpecializedMethod.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
 #include "Decompiler/TypeSystem/MetadataModule.hpp"
 #include "Decompiler/TypeSystem/TypeProvider.hpp"
@@ -533,13 +534,35 @@ const TypeParameterSubstitution* MetadataMethod::Substitution() const
     return &TypeParameterSubstitution::Identity();
 }
 
-// DEFERRED (convention (f)): SpecializedMethod::Create.
+// The C# `public IMethod Specialize(TypeParameterSubstitution substitution) =>
+// SpecializedMethod.Create(this, substitution)` (MetadataMethod.cs lines 645-653, both the
+// IMethod and the IMember explicit-interface form). The alias over `this` carries the
+// no-op deleter (this module's `methodDefs_` cache owns the instance); the keep-alive
+// registry owns every fresh result, so the module outliving the results is the lifetime
+// contract the whole type system carries (the `ResolveForwardedType` no-op-deleter-alias
+// convention).
 const IMethod* MetadataMethod::Specialize(
-    const TypeParameterSubstitution* /*substitution*/) const
+    const TypeParameterSubstitution* substitution) const
 {
-    throw std::logic_error(
-        "MetadataMethod::Specialize: SpecializedMethod::Create is not yet "
-        "ported");
+    // A null pointer is the Identity (the `IMember::Specialize` nullable-parameter
+    // convention; the C# takes the substitution by value).
+    TypeParameterSubstitution sub = (substitution != nullptr)
+        ? *substitution
+        : TypeParameterSubstitution(std::nullopt, std::nullopt);
+    std::shared_ptr<IMethod> alias(
+        static_cast<IMethod*>(const_cast<MetadataMethod*>(this)),
+        [](IMethod*) {
+            // no-op: the module's methodDefs_ cache owns this instance
+        });
+    std::shared_ptr<IMethod> result =
+        SpecializedMethod::Create(std::move(alias), std::move(sub));
+    const IMethod* raw = result.get();
+    if (raw != static_cast<const IMethod*>(this)) {
+        // A fresh `SpecializedMethod` (the Identity / declaring-tpc-0 arms return
+        // `this` itself, needing no registry slot).
+        specializedMethods_.push_back(std::move(result));
+    }
+    return raw;
 }
 
 // The C# `bool IMember.Equals(IMember obj, TypeVisitor typeNormalization)

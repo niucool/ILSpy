@@ -293,6 +293,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/FakeMember_Test.cpp
     Decompiler/TypeSystem/MetadataTypeDefinitionMethods_Test.cpp
     Decompiler/TypeSystem/ResolveType_Test.cpp
+    Decompiler/TypeSystem/Specialize_Test.cpp
     Decompiler/TypeSystem/TypeProvider_Test.cpp
     Decompiler/Semantics/ResolveResult_Test.cpp
     Decompiler/Semantics/TypeResolveResult_Test.cpp

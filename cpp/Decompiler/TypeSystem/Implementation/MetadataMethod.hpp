@@ -52,8 +52,10 @@
 //      caches (the MetadataProperty/MetadataEvent siblings -- the ctor still
 //      records the accessorOwner token, so `IsAccessor`/`AccessorKind` are
 //      real).
-//  (f) `Specialize` is the loud DEFERRAL gated on
-//      `SpecializedMethod::Create` (the SpecializedField convention (d)).
+//  (f) `Specialize` is REAL: `SpecializedMethod.Create(this, substitution)`
+//      with the no-op-deleter alias over `this` and the keep-alive registry
+//      (the landed owning-Specialize design; the Specialize_Test suite pins
+//      the arm matrix byte-exact against the real engine).
 //  (g) `module.OptionsForEntity(this)` ports to
 //      `module.TypeSystemOptions()` directly (the MetadataField convention
 //      (e): the OptionsForEntity NRT-visibility filter is deferred with the
@@ -221,7 +223,13 @@ public:
     bool IsOverridable() const override;
     // `TypeParameterSubstitution.Identity`.
     const TypeParameterSubstitution* Substitution() const override;
-    // DEFERRED (convention (f)): SpecializedMethod::Create.
+    // The C# `public IMethod Specialize(TypeParameterSubstitution substitution)
+    // => SpecializedMethod.Create(this, substitution)` (+ the `IMember` explicit
+    // interface form, the same body). REAL: routes through the landed
+    // `SpecializedMethod::Create` factory with the no-op-deleter alias over `this`
+    // (the module's `methodDefs_` cache owns this instance); every fresh result is
+    // kept alive in the registry below, the Identity / declaring-tpc-0 arms return
+    // `this` itself (convention (f) resolved).
     const IMethod* Specialize(
         const TypeParameterSubstitution* substitution) const override;
     // The C# `bool IMember.Equals(IMember obj, TypeVisitor typeNormalization)
@@ -274,6 +282,12 @@ private:
     const MetadataModule& module_;
     std::uint32_t handle_;  // the raw 0x06000000-form token
     std::uint32_t attr_;    // the raw MethodAttributes column
+
+    // The keep-alive registry for the `Specialize`-created instances (the C#
+    // GC roots them; the returned `const IMethod*` must stay valid while this
+    // method is alive -- the `VarArgInstanceMethod` rewrap-registry
+    // precedent). `mutable` (`Specialize` is const).
+    mutable std::vector<std::shared_ptr<IMethod>> specializedMethods_;
 
     // The eagerly loaded ctor set (convention (a)).
     ::ILSpy::Decompiler::TypeSystem::SymbolKind symbolKind_;
