@@ -1180,8 +1180,10 @@ TEST_F(MetadataMethodTest, ParameterSurfaceOverRealRows)
     EXPECT_EQ(mp->ToString(),
         TokenString(mp->MetadataToken()) + " out result:System.Int32&");
     EXPECT_FALSE(ps[1]->HasConstantValueInSignature());
-    // The GetAttributes deferral (the AttributeListBuilder gate).
-    EXPECT_THROW(mp->GetAttributes(), std::logic_error);
+    // The GetAttributes member LANDED (the AttributeListBuilder slice; the
+    // TryParse out-param carries no custom rows -- the [Out] synthetic row
+    // comes through the AttributeListBuilder Optional/In/Out logic).
+    EXPECT_NO_THROW(mp->GetAttributes());
 }
 
 } // namespace

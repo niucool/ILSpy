@@ -161,7 +161,9 @@ public:
     ITypePtr DeclaringType() const override;
     const IModule* ParentModule() const override;
     const ICompilation& Compilation() const override;
-    // DEFERRED (convention (c)): the AttributeListBuilder machinery.
+    // LANDED (the AttributeListBuilder slice): the FieldOffset /
+    // NotSerialized / SpecialName flags, the marshalling descriptor, and
+    // the custom-attribute rows.
     std::vector<const IAttribute*> GetAttributes() const override;
     bool HasAttribute(KnownAttribute attribute) const override;
     const IAttribute* GetAttribute(KnownAttribute attribute) const override;
@@ -230,6 +232,16 @@ private:
     mutable bool isVolatile_ = false;
     // The C# `byte decimalConstantState` (Unknown=0 / False=1 / True=2).
     mutable std::uint8_t decimalConstantState_;
+
+    // The attribute snapshot (the AttributeListBuilder slice): the C#
+    // `GetAttributes()` REBUILDS per call (no LazyInit field); the port caches
+    // the built list once -- the divergence documented at the
+    // MetadataTypeDefinition cache (object identity across calls is the only
+    // observable difference). The found `GetAttribute` results are kept
+    // alive per call (the C# GC root; a fresh instance per call, like the C#).
+    mutable std::vector<std::shared_ptr<IAttribute>> attributeList_;
+    mutable bool attributeListLoaded_ = false;
+    mutable std::vector<std::shared_ptr<IAttribute>> foundAttributes_;
 };
 
 } // namespace ILSpy::Decompiler::TypeSystem::Implementation

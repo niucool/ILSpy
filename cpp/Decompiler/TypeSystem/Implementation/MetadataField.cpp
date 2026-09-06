@@ -26,10 +26,14 @@
 #include "Decompiler/Metadata/SRMExtensions.hpp"
 #include "Decompiler/TypeSystem/ApplyAttributeTypeVisitor.hpp"
 #include "Decompiler/TypeSystem/GenericContext.hpp"
+#include "Decompiler/TypeSystem/Implementation/AttributeListBuilder.hpp"
 #include "Decompiler/TypeSystem/Implementation/DecimalConstantHelper.hpp"
 #include "Decompiler/TypeSystem/Implementation/SpecializedField.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/MetadataModule.hpp"
+#include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/TypeParameterSubstitution.hpp"
 #include "Decompiler/TypeSystem/TypeProvider.hpp"
 #include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
@@ -446,31 +450,89 @@ const ICompilation& MetadataField::Compilation() const
     return module_.Compilation();
 }
 
-// DEFERRED (convention (c)): the AttributeListBuilder machinery (the
-// FieldOffset / NotSerialized / SpecialName flags, the marshalling
-// descriptor, and the custom-attribute rows).
+// The attribute members (the AttributeListBuilder slice): the C# bodies
+// over the builder (the header convention (c) note is retired).
 std::vector<const IAttribute*> MetadataField::GetAttributes() const
 {
-    throw std::logic_error(
-        "MetadataField::GetAttributes: AttributeListBuilder is not yet "
-        "ported (the member-entity attribute snapshots)");
+    // The C# rebuilds the list per call; the port caches it (the divergence
+    // documented at the cache members).
+    if (!attributeListLoaded_)
+    {
+        Implementation::AttributeListBuilder b(module_);
+        const Metadata::MetadataFile* metadata = module_.MetadataFile();
+
+        // The raw II.23.1.5 FieldAttributes bits (the System.Reflection
+        // FieldAttributes enum; the raw-flags convention).
+        constexpr std::uint32_t kNotSerialized = 0x0080;
+        constexpr std::uint32_t kSpecialName = 0x0200;
+        constexpr std::uint32_t kRTSpecialName = 0x0400;
+
+        // FieldOffsetAttribute
+        int offset = metadata->GetFieldOffset(handle_);
+        if (offset != -1)
+        {
+            b.Add(KnownAttribute::FieldOffset, KnownTypeCode::Int32,
+                  std::any(offset));
+        }
+
+        // NonSerializedAttribute
+        if ((attr_ & kNotSerialized) != 0)
+            b.Add(KnownAttribute::NonSerialized);
+
+        // SpecialName
+        if ((attr_ & (kSpecialName | kRTSpecialName)) == kSpecialName)
+        {
+            b.Add(KnownAttribute::SpecialName);
+        }
+
+        b.AddMarshalInfo(metadata->GetFieldMarshallingDescriptor(handle_));
+        b.Add(handle_, SymbolKind::Field);
+
+        attributeList_ = b.Build();
+        attributeListLoaded_ = true;
+    }
+    std::vector<const IAttribute*> result;
+    result.reserve(attributeList_.size());
+    for (const auto& attr : attributeList_)
+        result.push_back(attr.get());
+    return result;
 }
 
 bool MetadataField::HasAttribute(KnownAttribute attribute) const
 {
-    (void)attribute;
-    throw std::logic_error(
-        "MetadataField::HasAttribute: AttributeListBuilder is not yet "
-        "ported (the member-entity attribute snapshots)");
+    if (!IsCustomAttribute(attribute))
+    {
+        for (const IAttribute* attr : GetAttributes())
+        {
+            if (IsKnownType(attr->AttributeType(), attribute))
+                return true;
+        }
+        return false;
+    }
+    Implementation::AttributeListBuilder b(module_);
+    return b.HasAttribute(*module_.MetadataFile(), handle_, attribute,
+                          SymbolKind::Field);
 }
 
-const IAttribute* MetadataField::GetAttribute(
-    KnownAttribute attribute) const
+const IAttribute* MetadataField::GetAttribute(KnownAttribute attribute) const
 {
-    (void)attribute;
-    throw std::logic_error(
-        "MetadataField::GetAttribute: AttributeListBuilder is not yet "
-        "ported (the member-entity attribute snapshots)");
+    if (!IsCustomAttribute(attribute))
+    {
+        for (const IAttribute* attr : GetAttributes())
+        {
+            if (IsKnownType(attr->AttributeType(), attribute))
+                return attr;
+        }
+        return nullptr;
+    }
+    Implementation::AttributeListBuilder b(module_);
+    std::shared_ptr<IAttribute> found = b.GetAttribute(
+        *module_.MetadataFile(), handle_, attribute, SymbolKind::Field);
+    if (!found)
+        return nullptr;
+    // A fresh instance per call (the C# GC root; the keep-alive registry).
+    foundAttributes_.push_back(std::move(found));
+    return foundAttributes_.back().get();
 }
 
 bool MetadataField::IsAbstract() const
@@ -641,17 +703,19 @@ const IType& MetadataField::DecodeTypeAndVolatileFlag() const
         // Compilation, fieldDef.GetCustomAttributes(), metadata,
         // module.OptionsForEntity(this), DeclaringTypeDefinition?
         // .NullableContext ?? Nullability.Oblivious)` -- the field's OWN
-        // attribute rows; the options pass is the OptionsForEntity deferral
-        // (convention (e)); the declaring type's NullableContext() read is the
-        // deferred [NullableContext] decode (convention (f)). The const_cast
-        // carries the C#'s mutable compilation reference through the port's
-        // const-module convention (the ResolveType precedent).
+        // attribute rows; the OptionsForEntity / NullableContext passes are
+        // LANDED (the NRT-context sub-slice)
+        // (convention (e)); the OptionsForEntity(this) + the declaring
+        // type's NullableContext() are LANDED (the NRT-context sub-slice).
+        // The const_cast carries the C#'s mutable compilation reference
+        // through the port's const-module convention (the ResolveType
+        // precedent).
         const ITypeDefinition* decl = DeclaringTypeDefinition();
         ty = ApplyAttributeTypeVisitor::ApplyAttributesToType(
             std::move(ty), const_cast<ICompilation&>(Compilation()),
             std::optional<std::vector<std::uint32_t>>(
                 metadata->GetCustomAttributeTokens(handle_)),
-            *metadata, module_.TypeSystemOptions(),
+            *metadata, module_.OptionsForEntity(this),
             decl != nullptr
                 ? decl->NullableContext()
                 : ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious);

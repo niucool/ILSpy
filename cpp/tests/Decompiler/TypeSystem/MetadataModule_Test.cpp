@@ -306,14 +306,21 @@ TEST(MetadataModuleTest, TypeEnumerationsMatchGold)
     EXPECT_EQ(first->DeclaringTypeDefinition(), nullptr);
 }
 
+// The module-level attribute members + the friend-list decode LANDED (the
+// AttributeListBuilder slice): the assembly/module attribute lists are real,
+// the self arm answers before the list, and the friend-list query answers
+// through mscorlib's nine [InternalsVisibleTo] rows (the
+// AttributeListBuilder_Test suite pins the byte-exact renders and the
+// list contents).
 TEST(MetadataModuleTest, AttributeAndIvtDeferrals)
 {
     MscorlibFixture f;
-    EXPECT_THROW(f.module.GetAssemblyAttributes(), std::logic_error);
-    EXPECT_THROW(f.module.GetModuleAttributes(), std::logic_error);
+    EXPECT_NO_THROW(f.module.GetAssemblyAttributes());
+    EXPECT_NO_THROW(f.module.GetModuleAttributes());
+    EXPECT_FALSE(f.module.GetAssemblyAttributes().empty());
+    EXPECT_FALSE(f.module.GetModuleAttributes().empty());
 
-    // The self arm returns true before the friend-list decode (which is the
-    // deferred GetInternalsVisibleTo).
+    // The self arm returns true before the friend-list scan.
     EXPECT_TRUE(f.module.InternalsVisibleTo(f.module));
 
     std::string tinyPath = WriteTinyNetModule();
@@ -321,7 +328,8 @@ TEST(MetadataModuleTest, AttributeAndIvtDeferrals)
     TM::MetadataFile file(tinyPath);
     MainModuleCompilation tinyCompilation;
     TS::MetadataModule tiny(tinyCompilation, &file, TS::TypeSystemOptions::Default);
-    EXPECT_THROW(f.module.InternalsVisibleTo(tiny), std::logic_error);
+    // tiny (a netmodule, the empty friend list) is not in mscorlib's list.
+    EXPECT_FALSE(f.module.InternalsVisibleTo(tiny));
 }
 
 TEST(MetadataModuleTest, GetDefinitionPlumbing)

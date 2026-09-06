@@ -70,6 +70,15 @@ namespace ILSpy::Decompiler::TypeSystem {
 // like the C# `readonly struct`.
 class GenericContext {
 public:
+    // The C# `new GenericContext()` -- the `readonly struct`'s implicit
+    // parameterless ctor (both fields null). The AttributeListBuilder
+    // attribute-ctor resolution (AttributeListBuilder.cs lines 194/299) drives
+    // it: "Attribute types shouldn't be open generic, so we don't need a
+    // generic context". The C# null lists and the port's empty vectors are
+    // equivalent everywhere (`?.Count` guards, `ToSubstitution`'s
+    // null-over-empty collapse).
+    GenericContext() = default;
+
     // The C# `GenericContext(IReadOnlyList<ITypeParameter> classTypeParameters)`
     // -- no method parameters.
     explicit GenericContext(

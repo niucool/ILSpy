@@ -44,6 +44,7 @@
 
 #include <array>
 #include <cassert>
+#include <stdexcept>
 #include <cstddef>
 
 #include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
@@ -233,13 +234,24 @@ inline const std::array<TopLevelTypeName, KnownAttributeCount>& KnownAttributeTy
 }
 
 // The C# `public static ref readonly TopLevelTypeName GetTypeName(this KnownAttribute attr)`
-// -- the metadata type name for a known attribute. The C# `Debug.Assert(attr !=
-// KnownAttribute.None)` ports to `assert(...)` (debug-only, the D371/D373 precedent). The
-// `ref readonly` return ports to `const TopLevelTypeName&` (the const-reference-return
-// convention, the ITypeDefinitionOrUnknown::FullTypeName D377 precedent).
+// -- the metadata type name for a known attribute. The C# carries a
+// `Debug.Assert(attr != KnownAttribute.None)` that is COMPILED OUT of the
+// shipped release assembly (the release-form convention, the LookupHandler
+// precedent): the `AttributeListBuilder.HasAttribute/GetAttribute` drives
+// reach this member with `KnownAttribute.None` (the gold pins the shipped
+// behavior -- the default table entry flows on into the classification,
+// whose null-name string compare throws the ArgumentNullException the
+// `HasMatrix` drives pin). The assert is therefore NOT ported (a live
+// Debug assert here would abort where the shipped engine runs on); the
+// out-of-range index guard below reproduces the C# array-bounds throw for
+// values outside the enum's range instead. The `ref readonly` return ports
+// to `const TopLevelTypeName&` (the const-reference-return convention, the
+// ITypeDefinitionOrUnknown::FullTypeName D377 precedent).
 inline const TopLevelTypeName& GetTypeName(KnownAttribute attr) {
-	assert(attr != KnownAttribute::None);
-	return KnownAttributeTypeNames()[static_cast<std::size_t>(attr)];
+	const std::size_t index = static_cast<std::size_t>(attr);
+	if (index >= static_cast<std::size_t>(KnownAttributeCount))
+		throw std::out_of_range("Index was outside the bounds of the array.");
+	return KnownAttributeTypeNames()[index];
 }
 
 // The C# `public static bool IsCustomAttribute(this KnownAttribute knownAttribute)` -- true

@@ -443,6 +443,22 @@ bool IsClosureParameter(const IParameter* parameter,
 // tests -- the D516 safe-fallback convention).
 bool IsDefaultValueAssignmentAllowed(const IParameter& parameter);
 
+// The C# `public static bool HasAttribute(this IParameter parameter,
+// KnownAttribute attributeType)` (TypeSystemExtensions.cs line 651, the
+// IParameter.GetAttribute region): `GetAttribute(...) != null` -- the
+// parameter's attribute classification over its GetAttributes() list (the
+// parameters have no per-row AttributeListBuilder scan: the extension
+// classifies the RESOLVED attribute types).
+bool HasAttribute(const IParameter& parameter,
+                  KnownAttribute attributeType);
+// The C# `public static IAttribute GetAttribute(this IParameter parameter,
+// KnownAttribute attributeType)` (line 664): the FIRST attribute whose type
+// `IsKnownType(attributeType)`, or null. The returned pointer is owned by
+// the parameter's attribute snapshot (the port's GetAttributes cache; the
+// C# GC root).
+const IAttribute* GetAttribute(const IParameter& parameter,
+                               KnownAttribute attributeType);
+
 // The C# `public static bool IsParameterizedProperty(this IProperty property)`
 // (TypeSystemExtensions.cs line 180, the property region before `IsOpen`) --
 // whether the property is a parameterized property that is NOT an indexer,

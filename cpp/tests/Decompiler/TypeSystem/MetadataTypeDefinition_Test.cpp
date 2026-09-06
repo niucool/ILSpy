@@ -708,11 +708,13 @@ TEST(MetadataTypeDefinitionTest, DeferralContracts)
     EXPECT_EQ(string_->Methods().size(), 191u);
     EXPECT_THROW(string_->Properties(), std::logic_error);
     EXPECT_THROW(string_->Events(), std::logic_error);
-    EXPECT_THROW(string_->GetAttributes(), std::logic_error);
-    EXPECT_THROW(string_->HasAttribute(TS::KnownAttribute::Obsolete),
-                 std::logic_error);
-    EXPECT_THROW(string_->GetAttribute(TS::KnownAttribute::Obsolete),
-                 std::logic_error);
+    // GetAttributes/HasAttribute/GetAttribute LANDED (the AttributeListBuilder
+    // slice): String carries [Serializable]/[ComImport]/[StructLayout] and no
+    // [Obsolete] row (the AttributeListBuilder_Test suite pins the byte-exact
+    // renders).
+    EXPECT_FALSE(string_->GetAttributes().empty());
+    EXPECT_FALSE(string_->HasAttribute(TS::KnownAttribute::Obsolete));
+    EXPECT_EQ(string_->GetAttribute(TS::KnownAttribute::Obsolete), nullptr);
     // IsRecord landed (the raw method-name scan): String is not a record.
     EXPECT_FALSE(string_->IsRecord());
 

@@ -106,9 +106,22 @@ inline Accessibility Union(Accessibility a, Accessibility b) noexcept {
     return b;
 }
 
-// Deferred: AccessibilityExtensions.EffectiveAccessibility(IEntity entity) walks
-// entity.DeclaringTypeDefinition, intersecting the entity's Accessibility with
-// each enclosing type definition's. It lands with the IEntity / ITypeDefinition
-// interfaces (the next TypeSystem pieces TypeSystemAstBuilder needs).
+// The C# `public static Accessibility EffectiveAccessibility(this IEntity
+// entity)` -- the effective accessibility of the entity (a public member of
+// an internal class is internal): the entity's own Accessibility intersected
+// with each enclosing type definition's, up the DeclaringTypeDefinition
+// chain. DECLARED here, DEFINED in TypeSystemExtensions.cpp (the definition
+// derefs the IEntity surface; Accessibility.hpp is a leaf included by the
+// entity headers).
+class IEntity;
+
+// The C# `public static Accessibility EffectiveAccessibility(this IEntity
+// entity)` -- the effective accessibility (a public member of an internal
+// class is internal): the entity's own Accessibility intersected with each
+// enclosing type definition's, up the DeclaringTypeDefinition chain.
+// DECLARED here, DEFINED in TypeSystemExtensions.cpp (the definition derefs
+// the IEntity surface; Accessibility.hpp is a leaf included by the entity
+// headers).
+Accessibility EffectiveAccessibility(const IEntity& entity);
 
 } // namespace ILSpy::Decompiler::TypeSystem

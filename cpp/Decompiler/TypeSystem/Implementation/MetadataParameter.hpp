@@ -112,8 +112,9 @@ public:
     std::any GetConstantValue(bool throwOnInvalidMetadata) const override;
 
     // --- IParameter ---
-    // The C# `public IEnumerable<IAttribute> GetAttributes()` -- the loud
-    // DEFERRAL gated on the AttributeListBuilder (convention (c)).
+    // LANDED (the AttributeListBuilder slice): the Optional /
+    // DefaultParameterValue / In / Out synthetic rows, the custom-attribute
+    // rows, and the marshalling descriptor.
     std::vector<const IAttribute*> GetAttributes() const override;
     // The C# `ReferenceKind ReferenceKind => DetectRefKind()` -- the return
     // type GLOBALLY qualified (the inherited `IParameter::ReferenceKind`
@@ -161,6 +162,12 @@ private:
     // (ThreeState: 0=Unknown / 1=False / 2=True).
     mutable std::uint8_t constantValueInSignatureState_ = 0;
     mutable std::uint8_t decimalConstantState_ = 0;
+
+    // The attribute snapshot (the AttributeListBuilder slice): cached where
+    // the C# rebuilds per call (the divergence documented at the
+    // MetadataTypeDefinition cache).
+    mutable std::vector<std::shared_ptr<IAttribute>> attributeList_;
+    mutable bool attributeListLoaded_ = false;
 };
 
 } // namespace ILSpy::Decompiler::TypeSystem::Implementation

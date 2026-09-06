@@ -62,15 +62,12 @@
 //      outer definition's -- the MetadataTypeParameter convention (a)),
 //      projected through the `IType::TypeParameters()` override as the
 //      non-owning pointer snapshot.
-//  (d) The C# `NullableContext` computation (`GetCustomAttributes().
-//      GetNullableContext(metadata) ?? module.NullableContext ?? ...`) needs
-//      the custom-attribute VALUE decoder -- deferred with the module's
-//      `NullableContext` / `minAccessibilityForNRT` (the MetadataModule
-//      convention (g)) -- so the port's `NullableContext()` always returns
-//      `Oblivious` (the value the C# computes for every assembly without
-//      `[NullableContext]` attributes, e.g. every .NET Framework 4.8
-//      fixture; a documented divergence observable only over
-//      nullable-annotated assemblies such as CoreLib).
+//  (d) LANDED: the `NullableContext` computation (the C# EAGER ctor
+//      field -- the row-level `GetNullableContext(metadata) ?? DeclaringType
+//      Definition.NullableContext` for a nested type, `?? module.
+//      NullableContext` for a top-level one) over the SRMExtensions row
+//      decode + the module's EAGER context (the AttributeListBuilder slice's
+//      NRT-context sub-slice).
 //  (e) DEFERRED members (each a loud `std::logic_error` naming the gating
 //      machinery, or absent with this note where the port's interface omits
 //      the member): the member families that remain -- `Members`/
@@ -86,8 +83,9 @@
 //      `get_EqualityContract` is an accessor row the Methods enumeration
 //      drops, so the raw scan is the only shape that classifies records
 //      correctly); `Fields` landed earlier over the `MetadataField` family;
-//      `GetAttributes`/`HasAttribute`/`GetAttribute` (AttributeListBuilder +
-//      the custom-attribute value decoder); `ExtensionInfo`'s construction
+//      `GetAttributes`/`HasAttribute`/`GetAttribute` LANDED over the
+//      AttributeListBuilder + CustomAttribute classes (the custom-attribute
+//      value decoder slice); `ExtensionInfo`'s construction
 //      (the null arms are real: false when !HasExtensions or
 //      ExtensionMembers is off); `DefaultMemberName` (absent -- the port's
 //      ITypeDefinition omits the member); `GetOverrides`/`HasOverrides`
@@ -99,6 +97,7 @@
 #pragma once
 
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
+#include "Decompiler/TypeSystem/Nullability.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -268,8 +267,10 @@ public:
     // (c)).
     ITypePtr DeclaringType() const override;
     const IModule* ParentModule() const override;
-    // DEFERRED (convention (e)): AttributeListBuilder + the custom-attribute
-    // value decoder.
+    // LANDED (the AttributeListBuilder slice): the Serializable/ComImport/
+    // SpecialName/StructLayout synthetic rows, the custom-attribute rows,
+    // and the security declarations; the list is cached where the C#
+    // rebuilds per call (the divergence documented at the cache).
     std::vector<const IAttribute*> GetAttributes() const override;
     bool HasAttribute(KnownAttribute attribute) const override;
     const IAttribute* GetAttribute(KnownAttribute attribute) const override;
@@ -342,6 +343,9 @@ private:
     ::ILSpy::Decompiler::TypeSystem::KnownTypeCode knownTypeCode_
         = ::ILSpy::Decompiler::TypeSystem::KnownTypeCode::None;
     ITypePtr enumUnderlyingType_;
+    // The C# EAGER `NullableContext` ctor field (convention (d) landed).
+    ::ILSpy::Decompiler::TypeSystem::Nullability nullableContext_
+        = ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious;
 
     // The lazily-loaded `nestedTypes` cache (the C# `ITypeDefinition[]`,
     // null until the first read; the Uncached option skips the store).
@@ -360,8 +364,22 @@ private:
     mutable std::optional<std::vector<const IField*>> fields_;
 
     // The lazily-loaded `methods` cache (the C# `IMethod[] methods` field,
-    // the same `LazyInit.GetOrSet` + `Uncached` bypass shape as `fields_`).
+    // `LazyInit.GetOrSet` with the `Uncached` BYPASS -- the fresh list
+    // per read under the option; the port's by-value vector reuses the
+    // engaged-state-as-read shape).
     mutable std::optional<std::vector<const IMethod*>> methods_;
+
+    // The attribute snapshot (the AttributeListBuilder slice): the C#
+    // `GetAttributes()` REBUILDS the list per call (no LazyInit field);
+    // the port caches the built list once -- a documented divergence
+    // observable only through object identity across calls (no ported
+    // consumer re-reads the list expecting fresh instances). The found
+    // `GetAttribute` results are kept alive per call in the registry
+    // below (the C# GC root; each C# call returns a fresh instance, and
+    // so does the port).
+    mutable std::vector<std::shared_ptr<IAttribute>> attributeList_;
+    mutable bool attributeListLoaded_ = false;
+    mutable std::vector<std::shared_ptr<IAttribute>> foundAttributes_;
 
     // The keep-alive registry for the OWNED method instances this type
     // constructs itself: the `FakeMethod` dummy constructors the Methods()
@@ -371,6 +389,11 @@ private:
     // LocalFunctionMethod rewraps precedent -- each read appends, so the
     // `Uncached` option's fresh-per-read entities stay alive).
     mutable std::vector<std::shared_ptr<const IMethod>> methodKeepAlives_;
+
+    // The GetFields inherited-walk keep-alive (the `methodKeepAlives_`
+    // precedent): the fresh `SpecializedField` instances the helper's
+    // non-IgnoreInheritedMembers arm hands back.
+    mutable std::vector<std::shared_ptr<const IField>> fieldKeepAlives_;
 
     // The ThreeState-cached `isRecord` field (the C# `byte isRecord =
     // ThreeState.Unknown`; 0 = Unknown, 1 = False, 2 = True).

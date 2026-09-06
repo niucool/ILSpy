@@ -43,6 +43,7 @@
 
 #include "Decompiler/Metadata/SignatureTypeProvider.hpp"  // SignatureCallingConvention
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/Nullability.hpp"
 
 // Forward declaration of the attribute-classification enum (KnownAttribute.hpp,
 // already ported) -- a scoped enum with a fixed underlying type is
@@ -183,6 +184,18 @@ std::uint32_t GetAttributeType(const MetadataFile& metadata,
 // GetAttributeType's throw (the C# propagates the BadImageFormatException).
 bool HasKnownAttribute(const MetadataFile& metadata, std::uint32_t entityToken,
                        TypeSystem::KnownAttribute attribute);
+
+// The C# `public static Nullability? GetNullableContext(this
+// CustomAttributeHandleCollection customAttributes, MetadataReader
+// metadata)` (SRMExtensions.cs line 640): the entity's [NullableContext]
+// byte -- the FIRST [NullableContext] row's value decoded through the
+// minimal attribute type provider (the catch-continue decode-error arms:
+// a BadImageFormat / EnumUnderlyingTypeResolve error row is skipped, the
+// scan continues), gated to a single byte argument with a value <= 2 (the
+// Nullability enum range). Nullopt when no row decodes. The port takes the
+// PARENT token (the GetCustomAttributeTokens composition).
+std::optional<TypeSystem::Nullability> GetNullableContext(
+    const MetadataFile& metadata, std::uint32_t entityToken);
 
 // The C# `internal static bool IsKnownAttribute(this SRM.CustomAttribute attr,
 // MetadataReader metadata, KnownAttribute attrType)` (line 634):

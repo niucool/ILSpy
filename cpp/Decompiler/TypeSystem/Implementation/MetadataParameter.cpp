@@ -23,10 +23,13 @@
 
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/SRMExtensions.hpp"
+#include "Decompiler/TypeSystem/Implementation/AttributeListBuilder.hpp"
 #include "Decompiler/TypeSystem/Implementation/DecimalConstantHelper.hpp"
 #include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/MetadataModule.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
 #include "Decompiler/Util/Utf.hpp"
 
@@ -418,13 +421,63 @@ bool MetadataParameter::IsDecimalConstant() const
     return ::ILSpy::Decompiler::TypeSystem::SymbolKind::Parameter;
 }
 
-// The C# `public IEnumerable<IAttribute> GetAttributes()` -- the loud
-// DEFERRAL gated on the AttributeListBuilder (the header convention (c)).
+// The C# `public IEnumerable<IAttribute> GetAttributes()` (the
+// AttributeListBuilder slice): the [Optional] / [DefaultParameterValue] /
+// [In] / [Out] synthetic rows over the parameter's own state, then the
+// custom-attribute rows and the marshalling descriptor. Cached where the C#
+// rebuilds per call (the divergence documented at the cache members).
 std::vector<const IAttribute*> MetadataParameter::GetAttributes() const
 {
-    throw std::logic_error(
-        "MetadataParameter::GetAttributes: the AttributeListBuilder is not "
-        "yet ported");
+    if (!attributeListLoaded_)
+    {
+        Implementation::AttributeListBuilder b(module_);
+
+        bool defaultValueAssignmentAllowed =
+            IsDefaultValueAssignmentAllowed(*this);
+
+        if (IsOptional() && !defaultValueAssignmentAllowed)
+        {
+            b.Add(KnownAttribute::Optional);
+        }
+
+        if (!IsDecimalConstant() && HasConstantValueInSignature()
+            && !defaultValueAssignmentAllowed)
+        {
+            b.Add(KnownAttribute::DefaultParameterValue, KnownTypeCode::Object,
+                  GetConstantValue(false));
+        }
+
+        // The raw II.23.1.12 ParameterAttributes bits.
+        constexpr std::uint32_t kParamIn = 0x0001;
+        constexpr std::uint32_t kParamOut = 0x0002;
+        if ((attributes_ & kParamIn) == kParamIn
+            && ReferenceKind() != ::ILSpy::Decompiler::TypeSystem::
+                                      ReferenceKind::In
+            && ReferenceKind()
+                != ::ILSpy::Decompiler::TypeSystem::ReferenceKind::
+                    RefReadOnly)
+        {
+            b.Add(KnownAttribute::In);
+        }
+        if ((attributes_ & kParamOut) == kParamOut
+            && ReferenceKind()
+                != ::ILSpy::Decompiler::TypeSystem::ReferenceKind::Out)
+        {
+            b.Add(KnownAttribute::Out);
+        }
+        b.Add(handle_, SymbolKind::Parameter);
+        b.AddMarshalInfo(
+            module_.MetadataFile()->GetParameter(handle_)
+                ->MarshallingDescriptor);
+
+        attributeList_ = b.Build();
+        attributeListLoaded_ = true;
+    }
+    std::vector<const IAttribute*> result;
+    result.reserve(attributeList_.size());
+    for (const auto& attr : attributeList_)
+        result.push_back(attr.get());
+    return result;
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem::Implementation

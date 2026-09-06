@@ -92,29 +92,29 @@
 //      `ResolveModule` / `GetDeclaringModule` / `FindModuleByReference`
 //      resolution family, this slice) are REAL; the miss arm falls through
 //      to `GetDefinition(nilHandle)` -> null.
-//  (g) DEFERRED members (each loud `std::logic_error` where the ported surface
-//      reaches it, otherwise absent with this note): `ResolveMethod` /
-//      `ResolveEntity` / `ResolveDeclaringType` / `CreateFakeMethod` LANDED
-//      (the resolve-method slice, with the `DefaultTypeParameter` factory
-//      dependency); the accessor-search arm of `ResolveMethodReference`
+//  (g) LANDED members (each a loud `std::logic_error` before its slice, now
+//      real): `ResolveMethod` / `ResolveEntity` / `ResolveDeclaringType` /
+//      `CreateFakeMethod` (the resolve-method slice); `GetAssemblyAttributes`
+//      / `GetModuleAttributes` / `GetInternalsVisibleTo` (the friend-list
+//      decode behind `InternalsVisibleTo`) / the `MakeAttribute` /
+//      `GetAttributeType` caches and the NRT-visibility context
+//      (`NullableContext`, `FindMinimumAccessibilityForNRT`,
+//      `ShouldDecodeNullableAttributes`, `OptionsForEntity` -- the
+//      AttributeListBuilder slice over the CustomAttributeDecoder); the
+//      `knownAttributeTypes` / `knownAttributes` caches and the entity
+//      classes' attribute members (MetadataTypeDefinition / MetadataField /
+//      MetadataParameter GetAttributes / HasAttribute / GetAttribute --
+//      MetadataMethod's GetAttributes body, the DllImport / PreserveSig /
+//      MethodImpl synthetic rows, remains the named follow-up); the
+//      `IsVisible(MethodAttributes)` filter; the `methodDefs` /
+//      `referencedAssemblies` / `typeDefs` / `fieldDefs` entity caches.
+//      STILL DEFERRED: the accessor-search arm of `ResolveMethodReference`
 //      routes through `MetadataTypeDefinition::GetAccessors`, the loud
 //      MetadataProperty/MetadataEvent deferral until that slice lands (a
 //      member reference to an ACCESSOR whose declaring type carries no
 //      same-name plain method throws; the method/ctor search and the
-//      fake-method fallback are REAL);
-//      `GetAssemblyAttributes` / `GetModuleAttributes` /
-//      `GetInternalsVisibleTo` / `InternalsVisibleTo`'s friend-list decode and the
-//      ctor's `NullableContext` / `FindMinimumAccessibilityForNRT` (the
-//      AttributeListBuilder slice over the landed CustomAttributeDecoder); the lazy
-//      `methodDefs`/`propertyDefs`/`eventDefs` entity caches (convention (e);
-//      the `typeDefs`/`fieldDefs`/`referencedAssemblies` caches LANDED, and the
-//      `methodDefs` cache LANDED with the method slice);
-//      `DecodeMethodSignature`/`DecodeLocalSignature`; the `knownAttributeTypes`
-//      / `knownAttributes` attribute-type caches; the `IsVisible(MethodAttributes)`
-//      filter and the `ShouldDecodeNullableAttributes` / `OptionsForEntity`
-//      NRT-visibility filter (consumed only by the entity classes; the
-//      `IsVisible(FieldAttributes)` / `IncludeInternalMembers` half LANDED with
-//      the field slice); and the internal
+//      fake-method fallback are REAL); the `propertyDefs`/`eventDefs` entity
+//      caches; `DecodeMethodSignature`/`DecodeLocalSignature`; and the internal
 //      `GetString(StringHandle)` helper (the port's NamespaceDefinition::Name
 //      already stores the resolved name, so MetadataNamespace needs no such
 //      helper).
@@ -124,10 +124,12 @@
 #include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IModule.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/KnownAttribute.hpp"
 #include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -184,6 +186,13 @@ class IParameter;
 // pointee incomplete (the same out-of-line-destructor convention).
 class TypeProvider;
 
+namespace Implementation {
+// Forward declaration of the attribute-list builder (the sibling
+// Implementation/AttributeListBuilder.hpp): the AddTypeForwarderAttributes
+// parameter needs only the incomplete type (a reference parameter).
+class AttributeListBuilder;
+} // namespace Implementation
+
 // The type-system implementation for a metadata PE file: one resolved module.
 // Not `final` (the C# class is unsealed).
 class MetadataModule : public IModule {
@@ -217,6 +226,37 @@ public:
     // class body, so the member below spells the GLOBAL qualification (the
     // D372 crux).
     const TypeProvider& TypeProvider() const;
+
+    // The C# `internal IType GetAttributeType(KnownAttribute attr)`
+    // (MetadataModule.cs lines 943-951): the per-slot LazyInit cache of the
+    // known attribute's `Compilation.FindType(GetTypeName(attr))` result
+    // (the C# `knownAttributeTypes` array). The returned handle OWNS or
+    // ALIASES the cached type (the FindType result is the compilation's).
+    ITypePtr GetAttributeType(KnownAttribute attr) const;
+
+    // The C# `internal IAttribute MakeAttribute(KnownAttribute type)`
+    // (MetadataModule.cs lines 960-968): the per-slot LazyInit cache of the
+    // parameterless known-attribute instance (a `DefaultAttribute` over
+    // `GetAttributeType(type)` with no arguments -- the C# `knownAttributes`
+    // array). The returned shared_ptr SHARES the module-cached instance
+    // (the C# `LazyInit.GetOrSet` identity).
+    std::shared_ptr<IAttribute> MakeAttribute(KnownAttribute type) const;
+
+    // --- The NRT-visibility context (MetadataModule.cs lines 84-1060) ---
+    // The C# `internal readonly Nullability NullableContext` -- the MODULE
+    // row's own [NullableContext] byte, or Oblivious when the module carries
+    // none (the ctor computation; the entity contexts chain onto it).
+    ::ILSpy::Decompiler::TypeSystem::Nullability NullableContext() const;
+    // The C# `internal bool ShouldDecodeNullableAttributes(IEntity entity)`
+    // -- the NullabilityAnnotations option gate plus the [NullablePublicOnly]
+    // minimum-effective-accessibility filter (a null entity passes; an
+    // assembly without [NullablePublicOnly] decodes for every entity).
+    bool ShouldDecodeNullableAttributes(const IEntity* entity) const;
+    // The C# `internal TypeSystemOptions OptionsForEntity(IEntity entity)` --
+    // the per-entity options with NullabilityAnnotations stripped when the
+    // entity is below the [NullablePublicOnly] accessibility threshold.
+    ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions OptionsForEntity(
+        const IEntity* entity) const;
 
     // The C# `public ITypeDefinition GetDefinition(TypeDefinitionHandle handle)`
     // -- the entity-resolving member over a raw TypeDef token (`0x02......`).
@@ -280,10 +320,19 @@ public:
     std::string AssemblyName() const override;
     Version AssemblyVersion() const override;
     std::string FullAssemblyName() const override;
-    // The AttributeListBuilder + custom-attribute value-decode machinery is
-    // deferred (convention (g)): both throw `std::logic_error` naming it.
+    // LANDED over the AttributeListBuilder + CustomAttribute classes: the
+    // assembly's own custom attributes + security declarations + the
+    // [AssemblyVersion] synthetic row + the `AddTypeForwarderAttributes`
+    // walk (the [TypeForwardedTo] rows over the ExportedType table through
+    // `ResolveForwardedType`); the module attributes add the module row's
+    // own attributes (+ the forwarder walk for a netmodule).
     std::vector<const IAttribute*> GetAssemblyAttributes() const override;
     std::vector<const IAttribute*> GetModuleAttributes() const override;
+    // LANDED: the friend-list decode (the C# private `GetInternalsVisibleTo`
+    // over the assembly's [InternalsVisibleTo] rows -- exposed for the tests,
+    // the internal-access convention). Each entry is the SHORT name (the
+    // portion before the first ',').
+    const std::vector<std::string>& GetInternalsVisibleTo() const;
     // The C# self arm returns true before the friend-list decode; the list decode
     // (`GetInternalsVisibleTo`) is deferred (convention (g)), so every non-self
     // module throws.
@@ -428,6 +477,21 @@ private:
     // aliases the target module's cache-owned definition (the no-op-deleter
     // aliasing convention).
     ITypePtr ResolveForwardedType(std::uint32_t exportedTypeToken) const;
+
+    // The C# `private void AddTypeForwarderAttributes(ref AttributeListBuilder
+    // b)` (MetadataModule.cs, the GetAssemblyAttributes/GetModuleAttributes
+    // composition): one [TypeForwardedTo] per forwarder ExportedType row.
+    void AddTypeForwarderAttributes(
+        Implementation::AttributeListBuilder& b) const;
+
+    // The C# `static Accessibility FindMinimumAccessibilityForNRT(
+    // MetadataReader metadata, CustomAttributeHandleCollection
+    // customAttributes)` (MetadataModule.cs line 997): the module's
+    // [NullablePublicOnly(bool includesInternals)] row -- ProtectedAndInternal
+    // when internals are included, Protected otherwise, None without the
+    // row.
+    ::ILSpy::Decompiler::TypeSystem::Accessibility
+    FindMinimumAccessibilityForNRT() const;
     // The C# local `IModule ResolveModule(ExportedType type)` inside
     // `ResolveForwardedType`: the Implementation column dispatch -- a File
     // row returns `this` (the C# TODO, the gold-pinned behavior), an
@@ -609,6 +673,35 @@ private:
     // so BOTH objects live in module registries instead of owning each
     // other).
     mutable std::vector<std::shared_ptr<void>> resolvedMethodAux_;
+
+    // --- The attribute helpers' caches (the C# `knownAttributeTypes` /
+    // `knownAttributes` arrays and the `internalsVisibleTo` LazyInit field,
+    // MetadataModule.cs lines 938-968) ---
+    // `knownAttributeTypes`: one slot per `KnownAttribute` (sized
+    // `KnownAttributeCount` in the ctor), nullptr until lazily filled with
+    // the compilation's FindType result.
+    mutable std::vector<ITypePtr> knownAttributeTypes_;
+    // `knownAttributes`: one slot per `KnownAttribute`, the parameterless
+    // instance cache.
+    mutable std::vector<std::shared_ptr<IAttribute>> knownAttributes_;
+    // `internalsVisibleTo`: nullopt until the first `GetInternalsVisibleTo()`
+    // call fills it (the C# LazyInit null-vs-loaded distinction).
+    mutable std::optional<std::vector<std::string>> internalsVisibleTo_;
+    // The C# `readonly Nullability NullableContext` / `readonly Accessibility
+    // minAccessibilityForNRT` fields (the ctor computations over the MODULE
+    // row's custom attributes).
+    ::ILSpy::Decompiler::TypeSystem::Nullability nullableContext_
+        = ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious;
+    ::ILSpy::Decompiler::TypeSystem::Accessibility
+        minAccessibilityForNRT_
+        = ::ILSpy::Decompiler::TypeSystem::Accessibility::None;
+    // The module-level attribute snapshots (the C# rebuilds them per call;
+    // the port caches the built list -- a documented divergence observable
+    // only through object identity across calls).
+    mutable std::vector<std::shared_ptr<IAttribute>> assemblyAttributes_;
+    mutable bool assemblyAttributesLoaded_ = false;
+    mutable std::vector<std::shared_ptr<IAttribute>> moduleAttributes_;
+    mutable bool moduleAttributesLoaded_ = false;
 };
 
 } // namespace ILSpy::Decompiler::TypeSystem

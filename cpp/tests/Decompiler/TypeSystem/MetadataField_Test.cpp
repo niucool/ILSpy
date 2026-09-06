@@ -1014,7 +1014,11 @@ TEST(MetadataFieldTest, MakeDecimalScaleCheckMatchesGold) {
     EXPECT_EQ(minusQuarter.Flags(), 0x80020000u);
 }
 
-// The deferral contracts: the AttributeListBuilder machinery stays loud.
+// The deferral contracts: the property/event member families stay loud;
+// the attribute members LANDED (the AttributeListBuilder slice -- String's
+// first field `m_arrayLength` carries no [Obsolete] row and a non-empty
+// attribute snapshot; the AttributeListBuilder_Test suite pins the
+// byte-exact renders).
 TEST(MetadataFieldTest, DeferralContractsThrow) {
     if (!MscorlibAvailable())
         GTEST_SKIP() << "mscorlib fixture not available";
@@ -1023,11 +1027,9 @@ TEST(MetadataFieldTest, DeferralContractsThrow) {
     ASSERT_NE(string_, nullptr);
     const TS::IField* first = string_->Fields().at(0);
     ASSERT_NE(first, nullptr);
-    EXPECT_THROW(first->GetAttributes(), std::logic_error);
-    EXPECT_THROW(first->HasAttribute(TS::KnownAttribute::Obsolete),
-                 std::logic_error);
-    EXPECT_THROW(first->GetAttribute(TS::KnownAttribute::Obsolete),
-                 std::logic_error);
+    EXPECT_NO_THROW(first->GetAttributes());
+    EXPECT_FALSE(first->HasAttribute(TS::KnownAttribute::Obsolete));
+    EXPECT_EQ(first->GetAttribute(TS::KnownAttribute::Obsolete), nullptr);
     // `Specialize` LANDED: the declaring type's tpc-0 arm returns the same
     // instance (the Specialize_Test suite pins the full arm matrix).
     EXPECT_EQ(first->Specialize(&TS::TypeParameterSubstitution::Identity()),

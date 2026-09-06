@@ -18,14 +18,19 @@
 
 #include "Decompiler/Metadata/SRMExtensions.hpp"
 
+#include "Decompiler/Metadata/CustomAttributeDecoder.hpp"
+#include "Decompiler/Metadata/EnumUnderlyingTypeResolveException.hpp"
 #include "Decompiler/Metadata/MetadataExtensions.hpp"
 #include "Decompiler/TypeSystem/FullTypeName.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
 #include "Decompiler/TypeSystem/KnownTypeReference.hpp"
+#include "Decompiler/TypeSystem/Nullability.hpp"
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
 #include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
 
+#include <any>
 #include <cstddef>
+#include <optional>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -612,6 +617,19 @@ bool IsKnownTypeCore(const MetadataFile& metadata, std::uint32_t entityToken,
     } catch (const std::invalid_argument&) {
         return false;
     }
+    // The C# `reader.StringComparer.Equals(nameHandle, knownType.Name)`
+    // with the NULL name of the default-entry `TopLevelTypeName`
+    // (`KnownAttribute.None` -- the C# `default(TopLevelTypeName)` carries
+    // null strings) throws ArgumentNullException ("Value cannot be null.
+    // (Parameter 'value')") -- the observable shape of driving the
+    // None/sentinel entry through the row classification. The port's
+    // `TopLevelTypeName` cannot carry null; the default-entry SHAPE (both
+    // strings empty -- no real table entry is nameless) is the stand-in.
+    // The check sits AFTER the kind dispatch (exactly where the C# compare
+    // fires), so the nested/nil-scope early returns stay ahead of it.
+    if (knownType.Name().empty() && knownType.Namespace().empty())
+        throw std::invalid_argument(
+            "Value cannot be null. (Parameter 'value')");
     // The name/namespace comparison: a 0-arity known type compares the row
     // name ordinally; a generic known type splits the row name's backtick
     // arity and compares name AND count.
@@ -699,6 +717,51 @@ std::uint32_t GetAttributeType(const MetadataFile& metadata,
 // the file-local anonymous namespace): the DecimalConstantHelper row walk
 // drives it directly (the C# internal-extension surface the port exposes
 // alongside HasKnownAttribute).
+// The C# `public static Nullability? GetNullableContext(...)`
+// (SRMExtensions.cs line 640): see the header.
+std::optional<TypeSystem::Nullability> GetNullableContext(
+    const MetadataFile& metadata, std::uint32_t entityToken) {
+    for (std::uint32_t attributeToken :
+         metadata.GetCustomAttributeTokens(entityToken)) {
+        if (!IsKnownAttribute(metadata, attributeToken,
+                              TypeSystem::KnownAttribute::NullableContext))
+            continue;
+        std::optional<Metadata::CustomAttributeRowInfo> row =
+            metadata.GetCustomAttribute(attributeToken);
+        if (!row)
+            continue;
+        try {
+            // The C# `customAttribute.DecodeValue(Metadata.MetadataExtensions.
+            // MinimalAttributeTypeProvider)` -- the minimal provider (the
+            // MinimalCorlibTypeProvider wiring).
+            Metadata::CustomAttributeDecoder decoder(
+                metadata,
+                Metadata::MinimalAttributeTypeProvider());
+            Metadata::CustomAttributeValue value = decoder.DecodeValue(
+                row->ConstructorToken,
+                row->ValueBlob ? row->ValueBlob->data() : nullptr,
+                row->ValueBlob ? row->ValueBlob->size() : 0);
+            if (value.FixedArguments.size() == 1) {
+                // The C# `value.FixedArguments[0].Value is byte b && b <= 2`
+                // -- a real byte box (the decode-error rows are skipped by
+                // the catch arms above).
+                std::any boxed = value.FixedArguments[0].Value();
+                if (auto b = std::any_cast<std::uint8_t>(&boxed)) {
+                    if (*b <= 2)
+                        return static_cast<TypeSystem::Nullability>(*b);
+                }
+            }
+        } catch (const EnumUnderlyingTypeResolveException&) {
+            // The C# `catch (EnumUnderlyingTypeResolveException) { continue; }`.
+            continue;
+        } catch (const std::invalid_argument&) {
+            // The C# `catch (BadImageFormatException) { continue; }`.
+            continue;
+        }
+    }
+    return std::nullopt;
+}
+
 bool IsKnownAttribute(const MetadataFile& metadata,
                       std::uint32_t attributeToken,
                       TypeSystem::KnownAttribute attribute) {

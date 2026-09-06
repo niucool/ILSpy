@@ -215,9 +215,36 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   filter-over-raw-fields semantics (the C# filter runs BEFORE the
   specialization wrap; the port's return-time cache filter diverged on the
   first type-sensitive consumer), and the disassembler's memberref-kind
-  rule corrected to the decompiled `low nibble <= 5 or == 9` form; the
-  attribute members (AttributeListBuilder) and `AccessorOwner` (the
-  property/event caches) stay the documented loud deferrals).
+  rule corrected to the decompiled `low nibble <= 5 or == 9` form) -- and
+  the AttributeListBuilder slice LANDED (the `AttributeListBuilder` /
+  `AttributeBuilder` / `CustomAttribute` classes, the
+  `MetadataModule.MakeAttribute`/`GetAttributeType` caches, the entity
+  attribute members of `MetadataTypeDefinition`/`MetadataField`/
+  `MetadataParameter` (GetAttributes/HasAttribute/GetAttribute) with the
+  `GetFields` GetMembersHelper routing the [StructLayout]/[MarshalAs]/
+  [PermissionSet] named-arg classification needed, the module-level
+  `GetAssemblyAttributes`/`GetModuleAttributes` incl. the
+  `AddTypeForwarderAttributes` walk and the `GetInternalsVisibleTo`
+  friend-list decode behind the real `InternalsVisibleTo`, and the
+  NRT-visibility context (`GetNullableContext`, the module's
+  `NullableContext`/`FindMinimumAccessibilityForNRT`/
+  `ShouldDecodeNullableAttributes`/`OptionsForEntity`, and the eager
+  `MetadataTypeDefinition.NullableContext` -- the CoreLib [AssemblyVersion]
+  ctor=null gold pin forced the whole chain, the nullability-annotated
+  parameter types make the DefaultAttribute ctor scan miss where the real
+  engine's does); gold-pinned against the real engine through the AlProbe
+  public-API probe: the whole-corpus FNV digests over EVERY TypeDef
+  (3356/2365-ish/2898) and Field (14717/15896/9816) and method+ctor
+  Parameter GetAttributes of mscorlib/System.dll/CoreLib, all byte-exact,
+  plus the module-level attribute renders incl. the GAC facade's 279
+  [TypeForwardedTo] rows and mscorlib's nine [InternalsVisibleTo] friends,
+  the curated HasAttribute/GetAttribute matrices over a fixed
+  KnownAttribute subset (incl. the KnownAttribute.None drives pinning the
+  C# ArgumentNullException the null-name classification throws), and the
+  TypeSystemOptions.None CoreLib module pinning the IgnoreAttribute gates
+  in the KEEP direction -- `AccessorOwner` (the property/event caches)
+  and `MetadataMethod.GetAttributes` (the DllImport/PreserveSig/MethodImpl
+  synthetic rows) stay the documented loud deferrals).
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with

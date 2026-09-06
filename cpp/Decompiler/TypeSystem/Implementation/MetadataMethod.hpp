@@ -40,9 +40,13 @@
 //      (the member owns its parameters, the `Parameters()` snapshot returns
 //      raw pointers -- the IParameterizedMember contract).
 //  (c) `GetAttributes` / `HasAttribute` / `GetAttribute` /
-//      `GetReturnTypeAttributes` are the loud `std::logic_error` DEFERRALS
-//      gated on the AttributeListBuilder + custom-attribute machinery (the
-//      MetadataField convention (c)).
+//      `GetReturnTypeAttributes` remain the loud `std::logic_error`
+//      DEFERRALS -- the AttributeListBuilder machinery they compose LANDED
+//      (the builder's HasAttribute/GetAttribute row scans, the
+//      MakeAttribute/GetAttributeType caches), so the named follow-up slice
+//      is the MetadataMethod GetAttributes body itself (the DllImport /
+//      PreserveSig / MethodImpl synthetic rows) landing the three members
+//      together (the MetadataField convention (c) for what landed).
 //  (d) `IsExplicitInterfaceImplementation` / `ExplicitlyImplementedInterfaceMembers`
 //      are REAL (the resolve-method slice): the declaring type's
 //      `HasOverrides`/`GetOverrides` MethodImpl-table walk over the landed

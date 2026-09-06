@@ -627,6 +627,42 @@ bool HasReadonlyModifier(const IMethod& accessor)
         && !declaringTypeDefinition->IsReadOnly();
 }
 
+// The C# `public static Accessibility EffectiveAccessibility(this IEntity
+// entity)` (Accessibility.cs): the entity's own accessibility intersected
+// with each enclosing type definition's, up the DeclaringTypeDefinition
+// chain (a public member of an internal class is internal).
+Accessibility EffectiveAccessibility(const IEntity& entity)
+{
+    Accessibility accessibility = entity.Accessibility();
+    for (const ITypeDefinition* typeDef = entity.DeclaringTypeDefinition();
+         typeDef != nullptr;
+         typeDef = typeDef->DeclaringTypeDefinition()) {
+        accessibility = Intersect(accessibility, typeDef->Accessibility());
+    }
+    return accessibility;
+}
+
+// The C# `public static bool HasAttribute(this IParameter parameter,
+// KnownAttribute attributeType)` (TypeSystemExtensions.cs line 651): the
+// found-attribute test over the GetAttribute extension.
+bool HasAttribute(const IParameter& parameter, KnownAttribute attributeType)
+{
+    return GetAttribute(parameter, attributeType) != nullptr;
+}
+
+// The C# `public static IAttribute GetAttribute(this IParameter parameter,
+// KnownAttribute attributeType)` (line 664): the FIRST attribute of the
+// parameter's GetAttributes() list whose type IsKnownType(attributeType).
+const IAttribute* GetAttribute(const IParameter& parameter,
+                               KnownAttribute attributeType)
+{
+    for (const IAttribute* attribute : parameter.GetAttributes()) {
+        if (IsKnownType(attribute->AttributeType(), attributeType))
+            return attribute;
+    }
+    return nullptr;
+}
+
 // The C# `public static IType AsParameterizedType(this ITypeDefinition td)`
 // (TypeSystemExtensions.cs line 864) -- the self-parameterized type of a
 // generic type definition (the type of `this` within the type definition),

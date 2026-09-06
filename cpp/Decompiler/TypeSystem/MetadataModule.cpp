@@ -20,6 +20,8 @@
 #include "Decompiler/TypeSystem/MetadataModule.hpp"
 
 #include "Decompiler/Metadata/AssemblyNameReference.hpp"
+#include "Decompiler/Metadata/CustomAttributeDecoder.hpp"
+#include "Decompiler/Metadata/EnumUnderlyingTypeResolveException.hpp"
 #include "Decompiler/Metadata/MetadataExtensions.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/SRMExtensions.hpp"
@@ -29,6 +31,9 @@
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/IModule.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/Implementation/AttributeListBuilder.hpp"
+#include "Decompiler/TypeSystem/Implementation/CustomAttribute.hpp"
+#include "Decompiler/TypeSystem/Implementation/DefaultAttribute.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataTypeDefinition.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataField.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataMethod.hpp"
@@ -36,15 +41,18 @@
 #include "Decompiler/TypeSystem/Implementation/DefaultTypeParameter.hpp"
 #include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataNamespace.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/NormalizeTypeVisitor.hpp"
 #include "Decompiler/TypeSystem/TypeParameterSubstitution.hpp"
 #include "Decompiler/TypeSystem/VarArgInstanceMethod.hpp"
 #include "Decompiler/TypeSystem/StringComparer.hpp"
+#include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
 #include "Decompiler/TypeSystem/TypeProvider.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
 #include "Decompiler/Util/BusyManager.hpp"
 
+#include <any>
 #include <memory>
 #include <stdexcept>
 #include <utility>
@@ -182,6 +190,127 @@ MetadataModule::MetadataModule(const ICompilation& compilation,
     // `compilation_` member is initialized: the provider's ctor reads
     // `module.Compilation()`).
     typeProvider_ = std::make_unique<::ILSpy::Decompiler::TypeSystem::TypeProvider>(*this);
+
+    // The C# `readonly IType[] knownAttributeTypes = new IType[KnownAttributes.
+    // Count]` / `readonly IAttribute[] knownAttributes = new IAttribute[
+    // KnownAttributes.Count]` (the field initializers -- allocated regardless
+    // of the Uncached option, the attribute-slice caches).
+    knownAttributeTypes_.resize(KnownAttributeCount);
+    knownAttributes_.resize(KnownAttributeCount);
+
+    // The C# `var customAttrs = metadata.GetModuleDefinition().
+    // GetCustomAttributes(); this.NullableContext = customAttrs.
+    // GetNullableContext(metadata) ?? Nullability.Oblivious;
+    // this.minAccessibilityForNRT = FindMinimumAccessibilityForNRT(metadata,
+    // customAttrs);` -- the MODULE row's NRT context, computed EAGERLY (every
+    // entity context chains onto it; the lazy entities always construct after
+    // the module).
+    constexpr std::uint32_t kModuleDefinitionToken = 0x00000001;
+    nullableContext_ = Metadata::GetNullableContext(
+                           *metadataFile_, kModuleDefinitionToken)
+                           .value_or(
+                               ::ILSpy::Decompiler::TypeSystem::Nullability::
+                                   Oblivious);
+    minAccessibilityForNRT_ = FindMinimumAccessibilityForNRT();
+}
+
+// The C# `static Accessibility FindMinimumAccessibilityForNRT(MetadataReader
+// metadata, CustomAttributeHandleCollection customAttributes)`
+// (MetadataModule.cs line 997): the module's [NullablePublicOnly] row.
+::ILSpy::Decompiler::TypeSystem::Accessibility
+MetadataModule::FindMinimumAccessibilityForNRT() const
+{
+    constexpr std::uint32_t kModuleDefinitionToken = 0x00000001;
+    for (std::uint32_t attributeToken :
+         metadataFile_->GetCustomAttributeTokens(kModuleDefinitionToken))
+    {
+        if (!Metadata::IsKnownAttribute(*metadataFile_, attributeToken,
+                                        KnownAttribute::NullablePublicOnly))
+            continue;
+        std::optional<Metadata::CustomAttributeRowInfo> row =
+            metadataFile_->GetCustomAttribute(attributeToken);
+        if (!row)
+            continue;
+        try
+        {
+            // The C# `customAttribute.DecodeValue(Metadata.MetadataExtensions.
+            // MinimalAttributeTypeProvider)` with the catch-continue arms.
+            Metadata::CustomAttributeDecoder decoder(
+                *metadataFile_, Metadata::MinimalAttributeTypeProvider());
+            Metadata::CustomAttributeValue value = decoder.DecodeValue(
+                row->ConstructorToken,
+                row->ValueBlob ? row->ValueBlob->data() : nullptr,
+                row->ValueBlob ? row->ValueBlob->size() : 0);
+            if (value.FixedArguments.size() == 1)
+            {
+                // The C# `value.FixedArguments[0].Value is bool
+                // includesInternals` -- the bool box.
+                std::any boxed = value.FixedArguments[0].Value();
+                if (auto includesInternals = std::any_cast<bool>(&boxed))
+                {
+                    return *includesInternals
+                               ? ::ILSpy::Decompiler::TypeSystem::
+                                     Accessibility::ProtectedAndInternal
+                               : ::ILSpy::Decompiler::TypeSystem::
+                                     Accessibility::Protected;
+                }
+            }
+        }
+        catch (const Metadata::EnumUnderlyingTypeResolveException&)
+        {
+            continue;
+        }
+        catch (const std::invalid_argument&)
+        {
+            continue;
+        }
+    }
+    return ::ILSpy::Decompiler::TypeSystem::Accessibility::None;
+}
+
+::ILSpy::Decompiler::TypeSystem::Nullability
+MetadataModule::NullableContext() const
+{
+    return nullableContext_;
+}
+
+// The C# `internal bool ShouldDecodeNullableAttributes(IEntity entity)`
+// (MetadataModule.cs line 1027).
+bool MetadataModule::ShouldDecodeNullableAttributes(
+    const IEntity* entity) const
+{
+    if ((options_
+         & ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::
+             NullabilityAnnotations)
+        == ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::None)
+        return false;
+    if (minAccessibilityForNRT_
+            == ::ILSpy::Decompiler::TypeSystem::Accessibility::None
+        || entity == nullptr)
+        return true;
+    return LessThanOrEqual(minAccessibilityForNRT_,
+                           EffectiveAccessibility(*entity));
+}
+
+// The C# `internal TypeSystemOptions OptionsForEntity(IEntity entity)`
+// (MetadataModule.cs line 1036): the NullabilityAnnotations bit stripped when
+// the entity is below the [NullablePublicOnly] accessibility threshold.
+::ILSpy::Decompiler::TypeSystem::TypeSystemOptions
+MetadataModule::OptionsForEntity(const IEntity* entity) const
+{
+    ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions opt = options_;
+    if ((opt & ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::
+                   NullabilityAnnotations)
+        != ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::None)
+    {
+        if (!ShouldDecodeNullableAttributes(entity))
+        {
+            opt = opt
+                & ~::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::
+                       NullabilityAnnotations;
+        }
+    }
+    return opt;
 }
 
 // The C# `internal readonly TypeProvider TypeProvider` field's accessor
@@ -634,31 +763,174 @@ std::string MetadataModule::FullAssemblyName() const
     return fullAssemblyName_;
 }
 
-// Deferred (convention (g)): the AttributeListBuilder + the custom-attribute
-// value decode it drives.
+// The C# `public IEnumerable<IAttribute> GetAssemblyAttributes()` over the
+// AttributeListBuilder (this slice): the assembly row's own custom attributes
+// + security declarations, the synthetic [AssemblyVersion] (the raw version
+// column's ToString), and the [TypeForwardedTo] rows. The built list is
+// CACHED (the C# rebuilds per call; a documented divergence observable only
+// through object identity across calls) and projected as raw pointers.
 std::vector<const IAttribute*> MetadataModule::GetAssemblyAttributes() const
 {
-    throw std::logic_error(
-        "MetadataModule::GetAssemblyAttributes: AttributeListBuilder is not yet "
-        "ported (gated on the custom-attribute value decoder)");
+    if (!assemblyAttributesLoaded_)
+    {
+        Implementation::AttributeListBuilder b(*this);
+        // The C# `if (metadata.IsAssembly)` -- the Assembly-table row exists.
+        if (metadataFile_->CorTableRowCount(
+                Metadata::CorTableIndex::Assembly)
+            != 0)
+        {
+            constexpr std::uint32_t kAssemblyDefinitionToken = 0x20000001;
+            b.Add(kAssemblyDefinitionToken,
+                  ::ILSpy::Decompiler::TypeSystem::SymbolKind::Module);
+            b.AddSecurityAttributes(kAssemblyDefinitionToken);
+            // The C# `if (assembly.Version != null)` -- the raw version columns
+            // are uint16 (never -1), so the port's default-constructed Version
+            // stand-in (Build == -1, the corrupt-row catch arm) is the null
+            // test.
+            if (assemblyVersion_.Build != -1)
+            {
+                b.Add(KnownAttribute::AssemblyVersion,
+                      KnownTypeCode::String, std::any(assemblyVersion_.ToString()));
+            }
+            AddTypeForwarderAttributes(b);
+        }
+        assemblyAttributes_ = b.Build();
+        assemblyAttributesLoaded_ = true;
+    }
+    std::vector<const IAttribute*> result;
+    result.reserve(assemblyAttributes_.size());
+    for (const auto& attr : assemblyAttributes_)
+        result.push_back(attr.get());
+    return result;
 }
 
+// The C# `public IEnumerable<IAttribute> GetModuleAttributes()`: the Module
+// row's own custom attributes + (for a netmodule) the [TypeForwardedTo] rows.
 std::vector<const IAttribute*> MetadataModule::GetModuleAttributes() const
 {
-    throw std::logic_error(
-        "MetadataModule::GetModuleAttributes: AttributeListBuilder is not yet "
-        "ported (gated on the custom-attribute value decoder)");
+    if (!moduleAttributesLoaded_)
+    {
+        Implementation::AttributeListBuilder b(*this);
+        // The C# `metadata.GetCustomAttributes(Handle.ModuleDefinition)` --
+        // the Module row 1 parent token (table 0x00).
+        constexpr std::uint32_t kModuleDefinitionToken = 0x00000001;
+        b.Add(kModuleDefinitionToken,
+              ::ILSpy::Decompiler::TypeSystem::SymbolKind::Module);
+        if (metadataFile_->CorTableRowCount(
+                Metadata::CorTableIndex::Assembly)
+            == 0)
+        {
+            AddTypeForwarderAttributes(b);
+        }
+        moduleAttributes_ = b.Build();
+        moduleAttributesLoaded_ = true;
+    }
+    std::vector<const IAttribute*> result;
+    result.reserve(moduleAttributes_.size());
+    for (const auto& attr : moduleAttributes_)
+        result.push_back(attr.get());
+    return result;
+}
+
+// The C# `private void AddTypeForwarderAttributes(ref AttributeListBuilder b)`:
+// one [TypeForwardedTo] attribute per forwarder ExportedType row. The SRM
+// `IsForwarder` is the FUSED predicate (the 0x00200000 flag bit AND an
+// AssemblyRef implementation -- iteration 12's WriteModuleHeader learning),
+// and the value is the `ResolveForwardedType` result (an IType handle in the
+// std::any box).
+void MetadataModule::AddTypeForwarderAttributes(
+    Implementation::AttributeListBuilder& b) const
+{
+    for (const auto& row : metadataFile_->GetExportedTypes())
+    {
+        if ((row.Attributes & 0x00200000u) != 0
+            && (row.ImplementationToken >> 24) == 0x23u)
+        {
+            b.Add(KnownAttribute::TypeForwardedTo, KnownTypeCode::Type,
+                  std::any(ResolveForwardedType(row.Token)));
+        }
+    }
 }
 
 // The C# `this == module` early-return; the friend-list decode behind the loop
 // is deferred (convention (g)).
 bool MetadataModule::InternalsVisibleTo(const IModule& module) const
 {
+    // The C# `if (this == module) return true;` then the friend-list scan
+    // (`string.Equals(module.AssemblyName, shortName, OrdinalIgnoreCase)`).
     if (this == &module)
         return true;
-    throw std::logic_error(
-        "MetadataModule::InternalsVisibleTo: GetInternalsVisibleTo is not yet "
-        "ported (gated on the custom-attribute value decoder)");
+    const StringComparer& ignoreCase = StringComparer::OrdinalIgnoreCase();
+    for (const std::string& shortName : GetInternalsVisibleTo())
+    {
+        if (ignoreCase.Equals(module.AssemblyName(), shortName))
+            return true;
+    }
+    return false;
+}
+
+// The C# `private string[] GetInternalsVisibleTo()` (MetadataModule.cs lines
+// ~1030-1060): the LazyInit-cached short names of the assembly's
+// [InternalsVisibleTo] rows. Each row is classified through the raw
+// `IsKnownAttribute` (no IgnoreAttribute gate here -- the C# reads the rows
+// directly), its value decoded over the module TypeProvider, and the FIRST
+// fixed argument -- when it is a string -- reduced to the SHORT name (the
+// portion before the first comma). A non-assembly yields the EMPTY list; the
+// per-row decode errors PROPAGATE (the C# has no catch here).
+const std::vector<std::string>& MetadataModule::GetInternalsVisibleTo() const
+{
+    if (!internalsVisibleTo_.has_value())
+    {
+        std::vector<std::string> list;
+        if (metadataFile_->CorTableRowCount(
+                Metadata::CorTableIndex::Assembly)
+            != 0)
+        {
+            constexpr std::uint32_t kAssemblyDefinitionToken = 0x20000001;
+            for (std::uint32_t attributeToken :
+                 metadataFile_->GetCustomAttributeTokens(
+                     kAssemblyDefinitionToken))
+            {
+                if (!Metadata::IsKnownAttribute(*metadataFile_, attributeToken,
+                                                KnownAttribute::InternalsVisibleTo))
+                    continue;
+                std::optional<Metadata::CustomAttributeRowInfo>
+                    row = metadataFile_->GetCustomAttribute(attributeToken);
+                // An existing row always decodes (the read above succeeded);
+                // the C# `attr.DecodeValue(this.TypeProvider)` drives the
+                // decoder directly over the row's own constructor token and
+                // value blob.
+                Metadata::CustomAttributeDecoder decoder(
+                    *metadataFile_,
+                    const_cast<
+                        ::ILSpy::Decompiler::TypeSystem::TypeProvider&>(
+                        *typeProvider_));
+                Metadata::CustomAttributeValue value = decoder.DecodeValue(
+                    row->ConstructorToken,
+                    row->ValueBlob ? row->ValueBlob->data() : nullptr,
+                    row->ValueBlob ? row->ValueBlob->size() : 0);
+                if (value.FixedArguments.size() == 1)
+                {
+                    // The C# `if (attrValue.FixedArguments[0].Value is string
+                    // s) list.Add(GetShortName(s))` -- the null SerString (an
+                    // EMPTY std::any) fails the `is string` test, so only a
+                    // real string reaches the short-name cut. The any is
+                    // MATERIALIZED into a named local (the
+                    // dangling-temporary trap: `Value()` returns by value).
+                    std::any boxed = value.FixedArguments[0].Value();
+                    if (auto s = std::any_cast<std::string>(&boxed))
+                    {
+                        std::size_t pos = s->find(',');
+                        list.push_back(pos == std::string::npos
+                                            ? *s
+                                            : s->substr(0, pos));
+                    }
+                }
+            }
+        }
+        internalsVisibleTo_ = std::move(list);
+    }
+    return *internalsVisibleTo_;
 }
 
 const INamespace& MetadataModule::RootNamespace() const
@@ -1587,6 +1859,46 @@ const IEntity* MetadataModule::ResolveEntity(
     default:
         return nullptr;
     }
+}
+
+// --- The attribute helpers (MetadataModule.cs lines 938-968) ---
+
+// The C# `internal IType GetAttributeType(KnownAttribute attr)`: the
+// per-slot LazyInit cache over `Compilation.FindType(attr.GetTypeName())`
+// (the implicit TopLevelTypeName -> FullTypeName conversion drives the
+// modules-scan FindType extension).
+ITypePtr MetadataModule::GetAttributeType(KnownAttribute attr) const
+{
+    int index = static_cast<int>(attr);
+    if (index < 0 || index >= KnownAttributeCount)
+        throw std::out_of_range("Index was outside the bounds of the array.");
+    ITypePtr& slot = knownAttributeTypes_[static_cast<std::size_t>(index)];
+    if (!slot)
+        slot = FindType(Compilation(),
+                        ::ILSpy::Decompiler::TypeSystem::FullTypeName(
+                            GetTypeName(attr)));
+    return slot;
+}
+
+// The C# `internal IAttribute MakeAttribute(KnownAttribute type)`: the
+// per-slot LazyInit cache of the parameterless known-attribute instance (the
+// C# `LazyInit.GetOrSet` identity -- the same instance every call).
+std::shared_ptr<IAttribute> MetadataModule::MakeAttribute(
+    KnownAttribute type) const
+{
+    int index = static_cast<int>(type);
+    if (index < 0 || index >= KnownAttributeCount)
+        throw std::out_of_range("Index was outside the bounds of the array.");
+    std::shared_ptr<IAttribute>& slot =
+        knownAttributes_[static_cast<std::size_t>(index)];
+    if (!slot)
+    {
+        slot = std::make_shared<Implementation::DefaultAttribute>(
+            GetAttributeType(type),
+            std::vector<CustomAttributeTypedArgument>(),
+            std::vector<CustomAttributeNamedArgument>());
+    }
+    return slot;
 }
 
 

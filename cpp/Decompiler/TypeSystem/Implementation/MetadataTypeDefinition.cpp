@@ -23,13 +23,18 @@
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/MethodSemanticsLookup.hpp"
 #include "Decompiler/Metadata/SRMExtensions.hpp"
+#include "Decompiler/Metadata/SRMExtensions.hpp"
 #include "Decompiler/TypeSystem/GenericContext.hpp"
+#include "Decompiler/TypeSystem/FullTypeName.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/KnownTypeReference.hpp"
 #include "Decompiler/TypeSystem/MetadataModule.hpp"
+#include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
+#include "Decompiler/TypeSystem/Implementation/AttributeListBuilder.hpp"
 #include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
 #include "Decompiler/TypeSystem/Implementation/GetMembersHelper.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataTypeParameter.hpp"
@@ -90,8 +95,12 @@ MetadataTypeDefinition::MetadataTypeDefinition(const MetadataModule& module,
         typeParameters_ = MetadataTypeParameter::Create(
             module_, declaringTypeDefinition_, this,
             metadata->GetGenericParameters(handle_));
-        // `this.NullableContext = ... ?? this.DeclaringTypeDefinition
-        // .NullableContext` -- DEFERRED (convention (d)): Oblivious.
+        // `this.NullableContext = td.GetCustomAttributes().GetNullableContext(
+        // metadata) ?? this.DeclaringTypeDefinition.NullableContext;` (the
+        // row-level context chained onto the outer type's, convention (d)).
+        nullableContext_ = Metadata::GetNullableContext(*metadata, handle_)
+                               .value_or(declaringTypeDefinition_
+                                             ->NullableContext());
     }
     else
     {
@@ -99,7 +108,11 @@ MetadataTypeDefinition::MetadataTypeDefinition(const MetadataModule& module,
         // td.GetGenericParameters());`
         typeParameters_ = MetadataTypeParameter::Create(
             module_, this, metadata->GetGenericParameters(handle_));
-        // `module.NullableContext` -- DEFERRED (convention (d)): Oblivious.
+        // `this.NullableContext = td.GetCustomAttributes().GetNullableContext(
+        // metadata) ?? module.NullableContext;` (the row-level context
+        // chained onto the module's EAGER context, convention (d)).
+        nullableContext_ = Metadata::GetNullableContext(*metadata, handle_)
+                               .value_or(module_.NullableContext());
 
         // `var topLevelTypeName = fullTypeName.TopLevelTypeName; for (int i =
         // 0; i < KnownTypeReference.KnownTypeCodeCount; i++) { var ktr =
@@ -515,9 +528,22 @@ std::vector<const IField*> MetadataTypeDefinition::GetFields(
         }
         return result;
     }
-    throw std::logic_error(
-        "MetadataTypeDefinition::GetFields: GetMembersHelper is not yet "
-        "routed (gated on the member entity family)");
+    // The C# `return GetMembersHelper.GetFields(this, filter, options);` --
+    // the inherited-members walk (the GetMethods precedent: the helper's
+    // owning results -- the fresh `SpecializedField` instances a
+    // parameterized base produces -- are kept alive in the
+    // `fieldKeepAlives_` registry; the definitions arm returns
+    // module-owned aliases).
+    std::vector<std::shared_ptr<const IField>> owned
+        = GetMembersHelper::GetFields(this, filter, options);
+    std::vector<const IField*> result;
+    result.reserve(owned.size());
+    for (std::shared_ptr<const IField>& f : owned)
+    {
+        result.push_back(f.get());
+        fieldKeepAlives_.push_back(std::move(f));
+    }
+    return result;
 }
 
 std::vector<const IEvent*> MetadataTypeDefinition::GetEvents(
@@ -753,26 +779,155 @@ const IModule* MetadataTypeDefinition::ParentModule() const
 
 std::vector<const IAttribute*> MetadataTypeDefinition::GetAttributes() const
 {
-    throw std::logic_error(
-        "MetadataTypeDefinition::GetAttributes: AttributeListBuilder is not "
-        "yet ported (gated on the custom-attribute value decoder)");
+    // The C# rebuilds the list per call; the port caches it (the divergence
+    // documented at the cache members).
+    if (!attributeListLoaded_)
+    {
+        Implementation::AttributeListBuilder b(module_);
+        const Metadata::MetadataFile* metadata = module_.MetadataFile();
+
+        // The raw II.23.1 TypeAttributes bits (the System.Reflection
+        // TypeAttributes enum; the raw-flags convention).
+        constexpr std::uint32_t kSerializable = 0x2000;
+        constexpr std::uint32_t kImport = 0x1000;
+        constexpr std::uint32_t kSpecialName = 0x0400;
+        constexpr std::uint32_t kRTSpecialName = 0x0800;
+        constexpr std::uint32_t kLayoutMask = 0x0018;
+        constexpr std::uint32_t kSequentialLayout = 0x0008;
+        constexpr std::uint32_t kExplicitLayout = 0x0010;
+        constexpr std::uint32_t kStringFormatMask = 0x30000;
+        constexpr std::uint32_t kUnicodeClass = 0x10000;
+        constexpr std::uint32_t kAutoClass = 0x20000;
+
+        // SerializableAttribute
+        if ((attributes_ & kSerializable) != 0)
+            b.Add(KnownAttribute::Serializable);
+
+        // ComImportAttribute
+        if ((attributes_ & kImport) != 0)
+            b.Add(KnownAttribute::ComImport);
+
+        // SpecialName
+        if ((attributes_ & (kSpecialName | kRTSpecialName))
+            == kSpecialName)
+        {
+            b.Add(KnownAttribute::SpecialName);
+        }
+
+        // StructLayoutAttribute
+        int layoutKind = 3;  // System.Runtime.InteropServices.LayoutKind.Auto
+        switch (attributes_ & kLayoutMask)
+        {
+            case kSequentialLayout:
+                layoutKind = 0;  // LayoutKind.Sequential
+                break;
+            case kExplicitLayout:
+                layoutKind = 2;  // LayoutKind.Explicit
+                break;
+        }
+        int charSet = 1;  // System.Runtime.InteropServices.CharSet.None
+        switch (attributes_ & kStringFormatMask)
+        {
+            case 0x0000:
+                charSet = 2;  // CharSet.Ansi
+                break;
+            case kAutoClass:
+                charSet = 4;  // CharSet.Auto
+                break;
+            case kUnicodeClass:
+                charSet = 3;  // CharSet.Unicode
+                break;
+        }
+        Metadata::MetadataFile::TypeLayoutInfo layout =
+            metadata->GetTypeLayout(handle_);
+        int defaultLayoutKind = kind_ == TypeKind::Struct ? 0 : 3;
+        if (layoutKind != defaultLayoutKind || charSet != 2
+            || layout.PackingSize > 0 || layout.ClassSize > 0)
+        {
+            Implementation::AttributeBuilder structLayout(
+                module_, KnownAttribute::StructLayout);
+            structLayout.AddFixedArg(
+                TopLevelTypeName("System.Runtime.InteropServices",
+                                "LayoutKind", 0),
+                std::any(layoutKind));
+            if (charSet != 2)
+            {
+                structLayout.AddNamedArg(
+                    "CharSet",
+                    FindType(module_.Compilation(),
+                             ::ILSpy::Decompiler::TypeSystem::FullTypeName(
+                                 TopLevelTypeName(
+                                     "System.Runtime.InteropServices",
+                                     "CharSet", 0))),
+                    std::any(charSet));
+            }
+            if (layout.PackingSize > 0)
+            {
+                structLayout.AddNamedArg("Pack", KnownTypeCode::Int32,
+                                         std::any(static_cast<int>(
+                                             layout.PackingSize)));
+            }
+            if (layout.ClassSize > 0)
+            {
+                structLayout.AddNamedArg("Size", KnownTypeCode::Int32,
+                                         std::any(static_cast<int>(
+                                             layout.ClassSize)));
+            }
+            b.Add(structLayout.Build());
+        }
+
+        b.Add(handle_, SymbolKind::TypeDefinition);
+        b.AddSecurityAttributes(handle_);
+
+        attributeList_ = b.Build();
+        attributeListLoaded_ = true;
+    }
+    std::vector<const IAttribute*> result;
+    result.reserve(attributeList_.size());
+    for (const auto& attr : attributeList_)
+        result.push_back(attr.get());
+    return result;
 }
 
 bool MetadataTypeDefinition::HasAttribute(KnownAttribute attribute) const
 {
-    (void)attribute;
-    throw std::logic_error(
-        "MetadataTypeDefinition::HasAttribute: AttributeListBuilder is not "
-        "yet ported (gated on the custom-attribute value decoder)");
+    if (!IsCustomAttribute(attribute))
+    {
+        // The C# `GetAttributes().Any(attr => attr.AttributeType.
+        // IsKnownType(attribute))`.
+        for (const IAttribute* attr : GetAttributes())
+        {
+            if (IsKnownType(attr->AttributeType(), attribute))
+                return true;
+        }
+        return false;
+    }
+    Implementation::AttributeListBuilder b(module_);
+    return b.HasAttribute(*module_.MetadataFile(), handle_, attribute,
+                          SymbolKind::TypeDefinition);
 }
 
 const IAttribute* MetadataTypeDefinition::GetAttribute(
     KnownAttribute attribute) const
 {
-    (void)attribute;
-    throw std::logic_error(
-        "MetadataTypeDefinition::GetAttribute: AttributeListBuilder is not "
-        "yet ported (gated on the custom-attribute value decoder)");
+    if (!IsCustomAttribute(attribute))
+    {
+        for (const IAttribute* attr : GetAttributes())
+        {
+            if (IsKnownType(attr->AttributeType(), attribute))
+                return attr;
+        }
+        return nullptr;
+    }
+    Implementation::AttributeListBuilder b(module_);
+    std::shared_ptr<IAttribute> found = b.GetAttribute(
+        *module_.MetadataFile(), handle_, attribute,
+        SymbolKind::TypeDefinition);
+    if (!found)
+        return nullptr;
+    // A fresh instance per call (the C# GC root; the keep-alive registry).
+    foundAttributes_.push_back(std::move(found));
+    return foundAttributes_.back().get();
 }
 
 // The C# `public Accessibility Accessibility` -- the VisibilityMask switch
@@ -1008,11 +1163,13 @@ MetadataTypeDefinition::ExtensionInfo() const
         "construction is not yet ported (gated on the MetadataMethod family)");
 }
 
-// The deferred [NullableContext] decode (convention (d)): Oblivious.
+// The C# `public Nullability NullableContext { get; }` -- the EAGERLY
+// computed ctor field (the row-level [NullableContext] ?? the declaring
+// type's / the module's; convention (d) landed).
 ::ILSpy::Decompiler::TypeSystem::Nullability
 MetadataTypeDefinition::NullableContext() const
 {
-    return ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious;
+    return nullableContext_;
 }
 
 // The C# `public bool IsRecord` -- the ThreeState-cached raw method-name

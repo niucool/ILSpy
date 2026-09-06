@@ -679,18 +679,20 @@ bool MetadataMethod::IsSealed() const
 }
 
 // The C# `internal Nullability NullableContext` -- the method's own
-// [NullableContext] row ?? the declaring type's context: the deferred
-// [NullableContext] value decode (the MetadataTypeDefinition convention (d))
-// always reads the declaring type's `Oblivious` -- the value the C# computes
-// for every assembly without [NullableContext] rows (every local .NET
-// Framework fixture).
+// [NullableContext] row ?? the declaring type's context (LANDED, the
+// NRT-context sub-slice). The null-declaring-type fallback keeps the
+// port's stub-shape guard (the C# NREs there; unreachable through real
+// metadata -- the C# reads `DeclaringTypeDefinition.NullableContext` with
+// no null fallback).
 ::ILSpy::Decompiler::TypeSystem::Nullability MetadataMethod::NullableContext()
     const
 {
     const ITypeDefinition* decl = DeclaringTypeDefinition();
-    return decl != nullptr
-        ? decl->NullableContext()
-        : ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious;
+    return Metadata::GetNullableContext(*module_.MetadataFile(), handle_)
+        .value_or(decl != nullptr
+                      ? decl->NullableContext()
+                      : ::ILSpy::Decompiler::TypeSystem::Nullability::
+                            Oblivious);
 }
 
 // The C# `public override int GetHashCode() => 0x5a00d671 ^
@@ -735,7 +737,7 @@ void MetadataMethod::DecodeSignature() const
         DecodedSignature decoded = DecodeSignature(
             module_, this, signature,
             &metadata->GetParameters(handle_),
-            NullableContext(), module_.TypeSystemOptions());
+            NullableContext(), module_.OptionsForEntity(this));
         returnType = std::move(decoded.ReturnType);
         parameters = std::move(decoded.Parameters);
         mod = std::move(decoded.ReturnTypeModifier);
