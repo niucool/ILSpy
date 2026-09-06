@@ -148,6 +148,17 @@ struct MetadataFile::Impl {
         return *namespaceCache;
     }
 
+    // The accessor->association lookup (the C# MetadataFile's lazy
+    // MethodSemanticsLookup property -- the header's GetMethodSemanticsLookup
+    // contract; same lazy-build-in-impl shape as the namespace cache).
+    std::unique_ptr<MethodSemanticsLookup> methodSemanticsLookup;
+
+    MethodSemanticsLookup& SemanticsLookup(const MetadataFile* owner) {
+        if (!methodSemanticsLookup)
+            methodSemanticsLookup = std::make_unique<MethodSemanticsLookup>(*owner);
+        return *methodSemanticsLookup;
+    }
+
     explicit Impl(std::string_view p) : path(p) {
         // winmd throws std::invalid_argument for a missing/unreadable file (out
         // of is_database()'s file_view ctor) and for a malformed image (out of
@@ -1524,6 +1535,48 @@ std::vector<std::uint32_t> MetadataFile::StandaloneSignatureTokens() const {
         result.push_back((0x11u << 24) | row);
     }
     return result;
+}
+
+// The whole MethodSemantics table (the lookup ctor's raw material). See the
+// header for the full contract.
+std::vector<MetadataFile::MethodSemanticsRowInfo>
+MetadataFile::MethodSemanticsRows() const {
+    std::vector<MethodSemanticsRowInfo> result;
+    if (!IsValid()) return result;
+    try {
+        for (std::uint32_t i = 0; i < impl_->db->MethodSemantics.size(); i++) {
+            MethodSemanticsRowInfo info;
+            // The flags column is 2 bytes (ECMA II.22.28); the raw value is
+            // observable (combined or unknown values match no accessor arm
+            // -- the exact-value switch), so it comes back verbatim.
+            info.RawSemantics =
+                impl_->db->MethodSemantics.get_value<std::uint32_t>(i, 0);
+            // The Method column is a plain 1-based MethodDef row index (no
+            // coding); 0 = the nil method.
+            std::uint32_t methodRow =
+                impl_->db->MethodSemantics.get_value<std::uint32_t>(i, 1);
+            if (methodRow != 0)
+                info.MethodToken = (0x06u << 24) | (methodRow & 0x00FFFFFFu);
+            // The Association column is the HasSemantics coded index (1 tag
+            // bit: 0=Event 0x14, 1=Property 0x17).
+            std::uint32_t association =
+                impl_->db->MethodSemantics.get_value<std::uint32_t>(i, 2);
+            std::uint32_t assocRow = association >> 1;
+            if (assocRow != 0) {
+                std::uint32_t table = (association & 0x1u) ? 0x17u : 0x14u;
+                info.AssociationToken = (table << 24) | assocRow;
+            }
+            result.push_back(info);
+        }
+    } catch (const std::exception&) {
+        // Best-effort: a malformed table walk degrades to the partial result
+        // (the GetPropertyAccessors convention).
+    }
+    return result;
+}
+
+const MethodSemanticsLookup& MetadataFile::GetMethodSemanticsLookup() const {
+    return impl_->SemanticsLookup(this);
 }
 
 ILSpy::Decompiler::TypeSystem::ITypePtr MetadataFile::GetFieldSignature(std::uint32_t fieldToken) const {

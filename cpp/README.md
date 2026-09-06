@@ -118,7 +118,19 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   real engine with the whole-corpus FNV-1a-64 digests over EVERY field of
   mscorlib (14717 fields) and System.dll (15896 fields), both
   byte-exact, plus the crafted `MfSynth.dll` manifest covering every
-  crafted arm).
+  crafted arm), and `MethodSemanticsLookup` LANDED (the
+  `Metadata/MethodSemanticsLookup.cs` accessor->association lookup the
+  `MetadataMethod` ctor consults, with the `MetadataFile` lazy property +
+  the `MethodSemanticsRows` whole-table read -- the single-pass build
+  reproducing SRM's per-association exact-value last-row-wins `GetAccessors`
+  slots incl. nil-method rows, the `csharpAccessors` filter with the
+  Raiser drop and the Other rejection, and the verbatim .NET binary
+  search; gold-pinned against the real engine with the whole-corpus
+  digests over every entry AND every `GetSemantics` drive of
+  mscorlib/System.dll/CoreLib (5986+5407+6134 entries, all
+  byte-exact) plus the crafted `MslSynth.dll` manifest covering every
+  crafted arm -- the last-row-wins pair, the nil-method pair, the
+  combined-flags row, the Raiser filter, and the Other rejection).
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with

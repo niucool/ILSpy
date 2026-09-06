@@ -29,6 +29,7 @@
 
 #include "Decompiler/Metadata/MethodBody.hpp"
 #include "Decompiler/Metadata/LocalTypeInfo.hpp"
+#include "Decompiler/Metadata/MethodSemanticsLookup.hpp"
 #include "Decompiler/Metadata/NamespaceDefinition.hpp"
 #include "Decompiler/Metadata/PortablePdb.hpp"
 #include "Decompiler/Disassembler/ReflectionAttributes.hpp"
@@ -785,6 +786,33 @@ public:
     std::vector<MemberRefInfo> MemberRefs() const;
     std::vector<MethodSpecInfo> MethodSpecs() const;
     std::vector<std::uint32_t> StandaloneSignatureTokens() const;
+
+    // The MethodSemantics table (0x18), whole (the MethodSemanticsLookup
+    // ctor's raw material -- the C# lookup reads the same rows through SRM's
+    // PropertyDefinition/EventDefinition.GetAccessors): every row's raw
+    // ECMA II.22.28 flags column VERBATIM (combined or unknown values are
+    // observable -- the exact-value accessor switches match no arm), the
+    // accessor's 0x06...... method token (0 when the Method column is nil),
+    // and the association token (0x17...... Property / 0x14...... Event --
+    // the 1-bit HasSemantics tag, 0=Event 1=Property; 0 for a nil
+    // association, which MetadataBuilder cannot produce but a byte patch
+    // can). Empty for an invalid file; never throws.
+    struct MethodSemanticsRowInfo {
+        std::uint32_t RawSemantics = 0;
+        std::uint32_t MethodToken = 0;       // 0x06...... | row; 0 = nil
+        std::uint32_t AssociationToken = 0;  // 0x17....../0x14......; 0 = nil
+    };
+    std::vector<MethodSemanticsRowInfo> MethodSemanticsRows() const;
+
+    // The C# `internal MethodSemanticsLookup MethodSemanticsLookup { get; }`
+    // (MetadataFile.cs lines 222-231): the lazily-built accessor->association
+    // lookup every MetadataMethod ctor consults (the SymbolKind.Accessor arm,
+    // AccessorOwner / AccessorKind). Built on first use and kept in the pimpl
+    // (the LazyInit.GetOrSet property's single-threaded equivalent, the
+    // namespace-cache precedent); the returned reference stays alive as long
+    // as the MetadataFile. Never throws (an invalid file yields the empty
+    // lookup).
+    const MethodSemanticsLookup& GetMethodSemanticsLookup() const;
 
     // Custom attributes applied to an entity (TypeDef/MethodDef/Field/Property
     // token). Returns the attribute type namespace+name for each; never throws.
