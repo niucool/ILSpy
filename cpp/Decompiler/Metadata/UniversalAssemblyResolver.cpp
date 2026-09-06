@@ -22,12 +22,15 @@
 
 #include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
 
+#include "Decompiler/Metadata/DotNetCorePathFinder.hpp"
 #include "Decompiler/Util/Char.hpp"
 #include "Decompiler/Util/Utf.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -226,10 +229,23 @@ bool WinIsValidDriveChar(char value) {
     return static_cast<unsigned>((value | 0x20) - 'a') <= 25u;
 }
 
-bool WinIsDevice(std::string_view path) {
+bool WinIsExtended(std::string_view path) {
     return path.size() >= 4 && path[0] == '\\'
         && (path[1] == '\\' || path[1] == '?') && path[2] == '?'
         && path[3] == '\\';
+}
+
+// The decompiled System.IO.PathInternal.IsDevice: an extended path is
+// always a device; otherwise the `\\.\` (local device) and `\\?\`
+// (extended) prefixes over separators.
+bool WinIsDevice(std::string_view path) {
+    if (!WinIsExtended(path)) {
+        return path.size() >= 4 && WinIsDirectorySeparator(path[0])
+            && WinIsDirectorySeparator(path[1])
+            && (path[2] == '.' || path[2] == '?')
+            && WinIsDirectorySeparator(path[3]);
+    }
+    return true;
 }
 
 bool WinIsDeviceUnc(std::string_view path) {
@@ -241,40 +257,78 @@ bool WinIsDeviceUnc(std::string_view path) {
 std::size_t WinGetRootLength(std::string_view path) {
     std::size_t length = path.size();
     std::size_t i = 0;
-    if (length >= 1 && (path[0] == '\\' || path[0] == '/')
-        && length >= 2 && path[1] == path[0]) {
+    bool isDevice = WinIsDevice(path);
+    bool isDeviceUnc = isDevice && WinIsDeviceUnc(path);
+    if ((!isDevice || isDeviceUnc) && length > 0
+        && WinIsDirectorySeparator(path[0])) {
         // UNC or device: \\server\\share or \\?\...
-        if (WinIsDevice(path)) {
-            i = 4;
-            if (length > 6 && path[4] == '.' && path[5] == '.'
-                && WinIsDirectorySeparator(path[6])) {
-                return 6;
-            }
-            if (WinIsDeviceUnc(path)) {
-                i = 8;
-            } else {
-                return length;
-            }
+        if (isDeviceUnc) {
+            i = 8;
         } else {
             i = 2;
         }
-        // Scan past the server and the share
+        // The decompiled scan: TWO separator events END the root (a
+        // repeated separator is two events -- the port's old
+        // skip-consecutive walk diverged on doubled-separator inputs).
         int segments = 2;
-        while (i < length && segments > 0) {
-            if (WinIsDirectorySeparator(path[i])) {
-                segments--;
-                while (i < length && WinIsDirectorySeparator(path[i])) i++;
-            } else {
-                i++;
+        for (; i < length; i++) {
+            if (WinIsDirectorySeparator(path[i]) && --segments <= 0) {
+                break;
             }
         }
-        return i;
-    }
-    if (length >= 2 && WinIsValidDriveChar(path[0]) && path[1] == ':') {
+    } else if (isDevice) {
+        // The device scan: past the device name, then one separator.
+        for (i = 4; i < length && !WinIsDirectorySeparator(path[i]); i++) {
+        }
+        if (i < length && i > 4 && WinIsDirectorySeparator(path[i])) {
+            i++;
+        }
+    } else if (length >= 2 && path[1] == ':'
+        && WinIsValidDriveChar(path[0])) {
         i = 2;
         if (length > 2 && WinIsDirectorySeparator(path[2])) i++;
+    } else if (length >= 1 && WinIsDirectorySeparator(path[0])) {
+        // A single leading separator is itself the root.
+        i = 1;
     }
     return i;
+}
+
+// The decompiled System.IO.PathInternal.NormalizeDirectorySeparators: the
+// fast-path scan (every separator a backslash with a non-separator after
+// it), then the rebuild -- one leading backslash and every separator run
+// collapsed to its last member, forward slashes replaced.
+std::string NormalizeDirectorySeparators(const std::string& path) {
+    if (path.empty()) return path;
+    bool needsNormalization = false;
+    for (std::size_t i = 0; i < path.size(); i++) {
+        char c = path[i];
+        if (WinIsDirectorySeparator(c)
+            && (c != '\\'
+                || (i > 0 && i + 1 < path.size()
+                    && WinIsDirectorySeparator(path[i + 1])))) {
+            needsNormalization = true;
+            break;
+        }
+    }
+    if (!needsNormalization) return path;
+    std::string result;
+    std::size_t num = 0;
+    if (WinIsDirectorySeparator(path[num])) {
+        num++;
+        result += '\\';
+    }
+    for (std::size_t j = num; j < path.size(); j++) {
+        char c = path[j];
+        if (WinIsDirectorySeparator(c)) {
+            if (j + 1 < path.size() && WinIsDirectorySeparator(path[j + 1])) {
+                continue;
+            }
+            c = '\\';
+        }
+        result += c;
+    }
+    return result;
 }
 
 // The .NET `Path.IsPathRooted(string)` (the `JoinPaths` rooted-second rule).
@@ -301,20 +355,30 @@ std::string JoinPaths(const std::string& first, std::string_view second) {
 // string and for root forms; everything before the LAST separator, with the
 // returned text NORMALIZED to the platform separator.
 std::optional<std::string> GetDirectoryName(const std::string& path) {
-    if (path.empty()) return std::nullopt;
-    std::size_t root = WinGetRootLength(path);
-    if (path.size() <= root) return std::nullopt;
-    std::string result;
-    std::size_t lastSep = path.find_last_of("\\/");
-    if (lastSep == std::string::npos) {
-        result = path.substr(0, root);
-    } else {
-        result = path.substr(0, lastSep);
+    // The C# `path == null || PathInternal.IsEffectivelyEmpty(...)` -- an
+    // all-spaces (or empty) path has no directory information.
+    bool allSpaces = true;
+    for (char c : path) {
+        if (c != ' ') {
+            allSpaces = false;
+            break;
+        }
     }
-    for (char& c : result) {
-        if (c == '/') c = '\\';
+    if (allSpaces) return std::nullopt;
+    // The decompiled GetDirectoryNameOffset: the LAST separator run before
+    // the root end, then the trailing-separator trim.
+    std::size_t rootLength = WinGetRootLength(path);
+    if (path.size() <= rootLength) return std::nullopt;
+    std::size_t num = path.size();
+    while (num > rootLength && !WinIsDirectorySeparator(path[--num])) {
     }
-    return result;
+    while (num > rootLength && WinIsDirectorySeparator(path[num - 1])) {
+        num--;
+    }
+    // The C# `PathInternal.NormalizeDirectorySeparators(path.Substring(
+    // 0, directoryNameOffset))` -- the repeated-separator collapse the
+    // UNC drives exercise.
+    return NormalizeDirectorySeparators(path.substr(0, num));
 }
 
 // The .NET `File.Exists` (a directory is NOT a file; errors are false).
@@ -619,6 +683,510 @@ std::vector<AssemblyNameReference> UniversalAssemblyResolver::EnumerateGac() {
         }
     }
     return entries;
+}
+
+// ---------------------------------------------------------------------------
+// The instance surface (the C# UniversalAssemblyResolver.cs lines 78-226,
+// 293-411, and 496-575).
+
+namespace {
+
+// The .NET `string.IsNullOrWhiteSpace(string)`.
+bool IsNullOrWhiteSpace(const std::string& text) {
+    std::u16string wide = Util::Utf8ToUtf16(text);
+    for (char16_t c : wide) {
+        if (!Util::IsWhiteSpace(c)) return false;
+    }
+    return true;
+}
+
+// The .NET `Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles)`
+// / `...ProgramFilesX86` -- the process env vars (the known-folder values
+// they carry on the x64 host the resolver machinery targets; a 64-bit
+// process sees exactly these strings, gold-pinned).
+std::optional<std::string> GetFolderPathProgramFiles() {
+    return GetEnvironmentVariableUtf8(L"PROGRAMFILES", "PROGRAMFILES");
+}
+
+std::optional<std::string> GetFolderPathProgramFilesX86() {
+    return GetEnvironmentVariableUtf8(L"PROGRAMFILES(X86)", "PROGRAMFILES(X86)");
+}
+
+// The .NET `Environment.SystemDirectory` -- `<windir>\system32` for a
+// 64-bit process (the value GetSystemDirectory returns; composed from the
+// Windows folder, gold-pinned equal on this host).
+std::optional<std::string> GetSystemDirectoryPath() {
+    std::optional<std::string> windir = GetWindowsFolderPath();
+    if (!windir) return std::nullopt;
+    return JoinPaths(*windir, "system32");
+}
+
+// The .NET `Environment.CurrentDirectory` -- the process-wide current
+// directory (fs::current_path resolves through the same
+// GetCurrentDirectoryW).
+std::optional<std::string> GetCurrentDirectoryUtf8() {
+    std::error_code ec;
+    fs::path p = fs::current_path(ec);
+    if (ec) return std::nullopt;
+    return FromFsPath(p);
+}
+
+// The .NET `Environment.Is64BitOperatingSystem` -- the ProgramFiles(x86)
+// env var exists exactly on a 64-bit Windows installation (a 32-bit process
+// of a 64-bit OS still sees it, matching the C# predicate's WOW64-aware
+// semantics).
+bool Is64BitOperatingSystem() {
+    return GetFolderPathProgramFilesX86().has_value();
+}
+
+// The C# `Path.GetDirectoryName(typeof(object).Module.FullyQualifiedName)`
+// -- the shared-framework directory of the runtime executing the decompiler.
+// The port pins the machine shape the gold tool exhibits: the NEWEST
+// installed Microsoft.NETCore.App version folder under the dotnet root
+// (FindDotNetExeDirectory's PATH scan). The two diverge only when the host
+// process runs an OLDER runtime than the newest installed -- the standing
+// single-framework machine shape makes them identical, and a miss (no
+// dotnet on PATH) skips the arm instead of the C#'s always-present module
+// directory.
+std::optional<std::string> GetHostRuntimeDirectory() {
+    std::optional<std::string> dotnetDir = DotNetCorePathFinder::FindDotNetExeDirectory();
+    if (!dotnetDir) return std::nullopt;
+    std::string basePath =
+        JoinPaths(JoinPaths(*dotnetDir, "shared"), "Microsoft.NETCore.App");
+    if (!DirectoryExists(basePath)) return std::nullopt;
+    std::optional<TypeSystem::Version> best;
+    std::string bestName;
+    std::error_code ec;
+    fs::directory_iterator it(ToFsPath(basePath), ec);
+    fs::directory_iterator end;
+    for (; !ec && it != end; it.increment(ec)) {
+        std::error_code dirEc;
+        if (!it->is_directory(dirEc) || dirEc) continue;
+        std::string name = FromFsPath(it->path().filename());
+        std::optional<TypeSystem::Version> version =
+            DotNetCorePathFinder::ConvertToVersion(name);
+        if (!version) continue;
+        if (!best || best->CompareTo(*version) < 0) {
+            best = *version;
+            bestName = name;
+        }
+    }
+    if (!best) return std::nullopt;
+    return JoinPaths(basePath, bestName);
+}
+
+// The C# `reference.PublicKeyToken.ToHexString(8)` (the MetadataExtensions
+// IEnumerable<byte> extension): the lowercase two-digit-per-byte hex render.
+std::string ToHexTokenLower(const std::vector<std::uint8_t>& bytes) {
+    constexpr char kHexDigits[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(bytes.size() * 2);
+    for (std::uint8_t byte : bytes) {
+        result += kHexDigits[byte >> 4];
+        result += kHexDigits[byte & 0xf];
+    }
+    return result;
+}
+
+// The `DirectoryInfo.EnumerateDirectories()`/`GetDirectories()` entries of
+// a directory (the fs::directory_iterator order -- the same FindFirstFile
+// order .NET's own enumeration uses on NTFS).
+std::vector<std::string> GetSubdirectoryNames(const std::string& path) {
+    std::vector<std::string> names;
+    std::error_code ec;
+    fs::directory_iterator it(ToFsPath(path), ec);
+    fs::directory_iterator end;
+    for (; !ec && it != end; it.increment(ec)) {
+        std::error_code dirEc;
+        if (!it->is_directory(dirEc) || dirEc) continue;
+        names.push_back(FromFsPath(it->path().filename()));
+    }
+    return names;
+}
+
+}  // namespace
+
+UniversalAssemblyResolver::UniversalAssemblyResolver(
+    std::optional<std::string> mainAssemblyFileName, bool throwOnError,
+    std::optional<std::string> targetFramework, std::optional<std::string> runtimePack,
+    PEStreamOptions streamOptions, MetadataReaderOptions metadataOptions)
+    : mainAssemblyFileName_(std::move(mainAssemblyFileName)),
+      throwOnError_(throwOnError),
+      streamOptions_(streamOptions),
+      metadataOptions_(metadataOptions),
+      targetFramework_(targetFramework ? std::move(*targetFramework) : std::string()),
+      runtimePack_(
+          runtimePack ? std::move(*runtimePack) : std::string("Microsoft.NETCore.App")) {
+    ParsedTargetFramework parsed = ParseTargetFramework(targetFramework_);
+    targetFrameworkIdentifier_ = parsed.Identifier;
+    targetFrameworkVersion_ = parsed.ParsedVersion;
+    if (mainAssemblyFileName_) {
+        // The C# `baseDirectory = Path.GetDirectoryName(mainAssemblyFileName)`
+        // -- null (a root path / no directory), empty, or whitespace-only all
+        // map to Environment.CurrentDirectory.
+        std::optional<std::string> dir = GetDirectoryName(*mainAssemblyFileName_);
+        if (!dir || IsNullOrWhiteSpace(*dir)) {
+            baseDirectory_ = GetCurrentDirectoryUtf8();
+        } else {
+            baseDirectory_ = *dir;
+        }
+        AddSearchDirectory(baseDirectory_);
+    }
+}
+
+UniversalAssemblyResolver::~UniversalAssemblyResolver() = default;
+
+void UniversalAssemblyResolver::AddSearchDirectory(std::optional<std::string> directory) {
+    directories_.push_back(directory);
+    // The C# `if (dotNetCorePathFinder.IsValueCreated)`.
+    if (dotNetCorePathFinder_) {
+        dotNetCorePathFinder_->AddSearchDirectory(std::move(directory));
+    }
+}
+
+void UniversalAssemblyResolver::RemoveSearchDirectory(std::optional<std::string> directory) {
+    // The C# `List<string?>.Remove` -- the FIRST matching entry (null
+    // compares equal to null).
+    for (auto it = directories_.begin(); it != directories_.end(); ++it) {
+        if (*it == directory) {
+            directories_.erase(it);
+            break;
+        }
+    }
+    if (dotNetCorePathFinder_) {
+        dotNetCorePathFinder_->RemoveSearchDirectory(std::move(directory));
+    }
+}
+
+std::vector<std::optional<std::string>> UniversalAssemblyResolver::GetSearchDirectories()
+    const {
+    return directories_;
+}
+
+bool UniversalAssemblyResolver::IsSharedAssembly(const IAssemblyReference& reference,
+    std::optional<std::string>& runtimePack) const {
+    return Finder().TryResolveDotNetCoreShared(reference, runtimePack).has_value();
+}
+
+std::optional<std::string> UniversalAssemblyResolver::FindAssemblyFile(
+    const IAssemblyReference& name) const {
+    return FindAssemblyFileCore(name);
+}
+
+std::optional<std::string> UniversalAssemblyResolver::FindAssemblyFileCore(
+    const IAssemblyReference& name) const {
+    if (name.IsWindowsRuntime()) {
+        return FindWindowsMetadataFile(name);
+    }
+
+    // The C# switch's `goto default` arms: every non-returning arm falls
+    // through to ResolveInternal (the default case).
+    std::optional<std::string> file;
+    switch (targetFrameworkIdentifier_) {
+        case TargetFrameworkIdentifier::NET:
+        case TargetFrameworkIdentifier::NETCoreApp:
+        case TargetFrameworkIdentifier::NETStandard:
+            if (!IsZeroOrAllOnes(targetFrameworkVersion_)) {
+                file = Finder().TryResolveDotNetCore(name);
+                if (file) return file;
+            }
+            break;
+        case TargetFrameworkIdentifier::Silverlight:
+            if (!IsZeroOrAllOnes(targetFrameworkVersion_)) {
+                file = ResolveSilverlight(name, targetFrameworkVersion_);
+                if (file) return file;
+            }
+            break;
+        default:
+            break;
+    }
+    return ResolveInternal(name);
+}
+
+std::unique_ptr<DotNetCorePathFinder> UniversalAssemblyResolver::InitDotNetCorePathFinder()
+    const {
+    std::unique_ptr<DotNetCorePathFinder> finder;
+    if (!mainAssemblyFileName_) {
+        finder = std::make_unique<DotNetCorePathFinder>(
+            targetFrameworkIdentifier_, targetFrameworkVersion_, runtimePack_);
+    } else {
+        finder = std::make_unique<DotNetCorePathFinder>(*mainAssemblyFileName_,
+            targetFramework_, runtimePack_, targetFrameworkIdentifier_,
+            targetFrameworkVersion_);
+    }
+    for (const auto& directory : directories_) {
+        finder->AddSearchDirectory(directory);
+    }
+    return finder;
+}
+
+DotNetCorePathFinder& UniversalAssemblyResolver::Finder() const {
+    if (!dotNetCorePathFinder_) {
+        dotNetCorePathFinder_ = InitDotNetCorePathFinder();
+    }
+    return *dotNetCorePathFinder_;
+}
+
+std::optional<std::string> UniversalAssemblyResolver::FindWindowsMetadataFile(
+    const IAssemblyReference& name) const {
+    // The C# `Environment.OSVersion.Platform != PlatformID.Win32NT` early
+    // return is unreachable on the Windows host the resolver machinery
+    // targets (pinned).
+    std::optional<std::string> programFilesX86 = GetFolderPathProgramFilesX86();
+    if (!programFilesX86) {
+        return FindWindowsMetadataInSystemDirectory(name);
+    }
+    std::string basePath =
+        JoinPaths(JoinPaths(JoinPaths(*programFilesX86, "Windows Kits"), "10"), "References");
+    if (!DirectoryExists(basePath)) {
+        return FindWindowsMetadataInSystemDirectory(name);
+    }
+    // The C# `foreach (var versionFolder in di.EnumerateDirectories())
+    // basePath = versionFolder.FullName;` -- the LAST enumerated directory
+    // (the newest SDK folder under the shared FindFirstFile enumeration
+    // order).
+    std::optional<std::string> last;
+    std::error_code ec;
+    fs::directory_iterator it(ToFsPath(basePath), ec);
+    fs::directory_iterator end;
+    for (; !ec && it != end; it.increment(ec)) {
+        std::error_code dirEc;
+        if (!it->is_directory(dirEc) || dirEc) continue;
+        last = FromFsPath(it->path());
+    }
+    if (!last) {
+        return FindWindowsMetadataInSystemDirectory(name);
+    }
+    basePath = JoinPaths(*last, name.Name());
+    if (!DirectoryExists(basePath)) {
+        return FindWindowsMetadataInSystemDirectory(name);
+    }
+    basePath =
+        JoinPaths(basePath, FindClosestVersionDirectory(basePath, name.Version()));
+    if (!DirectoryExists(basePath)) {
+        return FindWindowsMetadataInSystemDirectory(name);
+    }
+    std::string file = JoinPaths(basePath, name.Name() + ".winmd");
+    if (!FileExists(file)) {
+        return FindWindowsMetadataInSystemDirectory(name);
+    }
+    return file;
+}
+
+std::optional<std::string> UniversalAssemblyResolver::FindWindowsMetadataInSystemDirectory(
+    const IAssemblyReference& name) const {
+    std::optional<std::string> systemDirectory = GetSystemDirectoryPath();
+    if (!systemDirectory) return std::nullopt;
+    std::string file =
+        JoinPaths(JoinPaths(*systemDirectory, "WinMetadata"), name.Name() + ".winmd");
+    if (FileExists(file)) return file;
+    return std::nullopt;
+}
+
+std::optional<std::string> UniversalAssemblyResolver::ResolveSilverlight(
+    const IAssemblyReference& name, const std::optional<TypeSystem::Version>& version) const {
+    for (const std::optional<std::string>& programFiles :
+        {GetFolderPathProgramFiles(), GetFolderPathProgramFilesX86()}) {
+        if (!programFiles) continue;
+        std::string baseDirectory = JoinPaths(*programFiles, "Microsoft Silverlight");
+        if (!DirectoryExists(baseDirectory)) continue;
+        std::string versionDirectory =
+            JoinPaths(baseDirectory, FindClosestVersionDirectory(baseDirectory, version));
+        std::optional<std::string> file = SearchDirectory(name, versionDirectory);
+        if (file) return file;
+    }
+    return std::nullopt;
+}
+
+std::string UniversalAssemblyResolver::FindClosestVersionDirectory(const std::string& basePath,
+    const std::optional<TypeSystem::Version>& version) const {
+    // The C# `GetDirectories().Select(ConvertToVersion).Where(v => v.Item1
+    // != null).OrderByDescending(v => v.Item1)` -- the stable descending
+    // sort (the subdirectory enumeration order is not observable through
+    // the sort).
+    struct FolderEntry {
+        TypeSystem::Version Version;
+        std::string Name;
+    };
+    std::vector<FolderEntry> folders;
+    for (const std::string& name : GetSubdirectoryNames(basePath)) {
+        std::optional<TypeSystem::Version> parsed =
+            DotNetCorePathFinder::ConvertToVersion(name);
+        if (parsed) folders.push_back({*parsed, name});
+    }
+    std::stable_sort(folders.begin(), folders.end(), [](const FolderEntry& a,
+                              const FolderEntry& b) {
+        return a.Version.CompareTo(b.Version) > 0;
+    });
+    // The C# `if (path == null || version == null || folder.Item1 >= version)
+    // path = folder.Item2.Name;` walk.
+    std::optional<std::string> path;
+    for (const FolderEntry& folder : folders) {
+        if (!path || !version || folder.Version.CompareTo(*version) >= 0) {
+            path = folder.Name;
+        }
+    }
+    if (path) return *path;
+    return version ? version->ToString() : ".";
+}
+
+std::optional<std::string> UniversalAssemblyResolver::ResolveInternal(
+    const IAssemblyReference& name) const {
+    std::optional<std::string> assembly = SearchDirectory(name, directories_);
+    if (assembly) return assembly;
+
+    // The pinned NETCoreApp host arm: `<windir>\Microsoft.NET\\Framework64\\
+    // v4.0.30319`. The C#'s `goto default` fallback when the Windows folder
+    // is unavailable, and the Mono/NETFramework default arms (the decompiler
+    // host's own runtime-module directory -- no native analogue), are
+    // unreachable on the Windows host; an unavailable Windows folder leaves
+    // the framework directories empty (the searches skip).
+    std::vector<std::optional<std::string>> frameworkDirs;
+    if (std::optional<std::string> windir = GetWindowsFolderPath()) {
+        frameworkDirs.push_back(JoinPaths(
+            JoinPaths(JoinPaths(*windir, "Microsoft.NET"), "Framework64"), "v4.0.30319"));
+    }
+
+    if (IsSpecialVersionOrRetargetable(name)) {
+        assembly = SearchDirectory(name, frameworkDirs);
+        if (assembly) return assembly;
+    }
+
+    if (name.Name() == "mscorlib") {
+        assembly = GetCorlib(name);
+        if (assembly) return assembly;
+    }
+
+    assembly = GetAssemblyInGac(name);
+    if (assembly) return assembly;
+
+    // "when decompiling assemblies that target frameworks prior to 4.0, we
+    // can fall back to the 4.0 assemblies ... but when looking for
+    // Microsoft.Build.Framework, Version=15.0.0.0 we should not use the
+    // version 4.0 assembly here". The C# `name.Version <= new Version(4, 0,
+    // 0, 0)` over the NULLABLE operator: a null version is LESS than every
+    // version (gold-pinned), so a version-less reference takes the arm.
+    const std::optional<TypeSystem::Version> version = name.Version();
+    if (!version || version->CompareTo(TypeSystem::Version(4, 0, 0, 0)) <= 0) {
+        assembly = SearchDirectory(name, frameworkDirs);
+        if (assembly) return assembly;
+    }
+
+    // The NETCoreApp host arm: "Hosts without a .NET Framework installation
+    // (e.g. Linux, macOS) have no GAC; the only system-wide assembly store
+    // there is the shared-framework directory of the runtime executing the
+    // decompiler. Search it as the last resort, regardless of the requested
+    // version (the runtime itself rolls forward in the same way)."
+    if (std::optional<std::string> runtimeDir = GetHostRuntimeDirectory()) {
+        assembly = SearchDirectory(name, *runtimeDir);
+        if (assembly) return assembly;
+    }
+
+    if (throwOnError_) {
+        throw ResolutionException(&name, std::nullopt);
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> UniversalAssemblyResolver::SearchDirectory(
+    const IAssemblyReference& name,
+    const std::vector<std::optional<std::string>>& directories) const {
+    for (const std::optional<std::string>& directory : directories) {
+        if (!directory) continue;
+        std::optional<std::string> file = SearchDirectory(name, *directory);
+        if (file) return file;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> UniversalAssemblyResolver::SearchDirectory(
+    const IAssemblyReference& name, const std::string& directory) const {
+    static const char* const kWinmdExtensions[] = { ".winmd", ".dll" };
+    static const char* const kDllExtensions[] = { ".dll", ".exe" };
+    const bool isWindowsRuntime = name.IsWindowsRuntime();
+    const char* const* extensions = isWindowsRuntime ? kWinmdExtensions : kDllExtensions;
+    for (std::size_t i = 0; i < 2; i++) {
+        const char* extension = extensions[i];
+        std::string file = JoinPaths(directory, name.Name() + extension);
+        if (!FileExists(file)) continue;
+        return file;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> UniversalAssemblyResolver::GetCorlib(
+    const IAssemblyReference& reference) const {
+    // The C# `decompilerRuntime != DecompilerRuntime.NETCoreApp` arm (the
+    // host corlib identity check returning typeof(object).Module.
+    // FullyQualifiedName) is unreachable under the pinned host.
+    const std::optional<std::vector<std::uint8_t>>& token = reference.PublicKeyToken();
+    if (!token) return std::nullopt;
+    std::optional<TypeSystem::Version> version = reference.Version();
+    if (!version) return std::nullopt;
+    // The C# Mono arm (GetMonoMscorlibBasePath) is unreachable under the
+    // pinned host.
+    std::optional<std::string> path =
+        GetMscorlibBasePath(*version, ToHexTokenLower(*token));
+    if (!path) return std::nullopt;
+    std::string file = JoinPaths(*path, "mscorlib.dll");
+    if (FileExists(file)) return file;
+    return std::nullopt;
+}
+
+std::optional<std::string> UniversalAssemblyResolver::GetMscorlibBasePath(
+    const TypeSystem::Version& version, const std::optional<std::string>& publicKeyToken)
+    const {
+    // The C# local `GetSubFolderForVersion()`: the Major / MajorRevision
+    // table (MajorRevision is the REVISION's high 16 bits through the
+    // arithmetic shift -- an unspecified revision (-1) reads -1, gold-
+    // pinned).
+    auto getSubFolderForVersion = [&]() -> std::optional<std::string> {
+        switch (version.Major) {
+            case 1:
+                if ((version.Revision >> 16) == 3300) return "v1.0.3705";
+                return "v1.1.4322";
+            case 2:
+                return "v2.0.50727";
+            case 4:
+                return "v4.0.30319";
+            default:
+                if (throwOnError_) {
+                    throw std::runtime_error("Version not supported: " + version.ToString());
+                }
+                return std::nullopt;
+        }
+    };
+
+    if (publicKeyToken && *publicKeyToken == "969db8053d3322ac") {
+        // The .NET CompactFramework arm.
+        std::optional<std::string> programFiles = Is64BitOperatingSystem()
+            ? GetFolderPathProgramFilesX86()
+            : GetFolderPathProgramFiles();
+        if (programFiles) {
+            std::string cfPath = "Microsoft.NET\\SDK\\CompactFramework\\v"
+                + std::to_string(version.Major) + "." + std::to_string(version.Minor)
+                + "\\WindowsCE\\";
+            std::string cfBasePath = JoinPaths(*programFiles, cfPath);
+            if (DirectoryExists(cfBasePath)) return cfBasePath;
+        }
+    } else {
+        std::optional<std::string> folder = getSubFolderForVersion();
+        if (folder) {
+            std::optional<std::string> windir = GetWindowsFolderPath();
+            if (windir) {
+                std::string rootPath = JoinPaths(*windir, "Microsoft.NET");
+                for (const char* frameworkPath : { "Framework", "Framework64" }) {
+                    std::string basePath = JoinPaths(JoinPaths(rootPath, frameworkPath), *folder);
+                    if (DirectoryExists(basePath)) return basePath;
+                }
+            }
+        }
+    }
+
+    if (throwOnError_) {
+        throw std::runtime_error("Version not supported: " + version.ToString());
+    }
+    return std::nullopt;
 }
 
 }  // namespace ILSpy::Decompiler::Metadata

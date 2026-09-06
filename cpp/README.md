@@ -47,8 +47,15 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   bookkeeping, and the `UniversalAssemblyResolver` enums +
   `ParseTargetFramework` classifier, and an IL text
   disassembler. DONE except:
-  WebCIL, the `UniversalAssemblyResolver` instance surface (the ctor + the
-  `Resolve`/`FindAssemblyFile` walk; the class's static GAC machinery --
+  WebCIL and the `Resolve`/`ResolveModule`/`CreatePEFileFromFileName`
+  members of the `UniversalAssemblyResolver` instance surface (the
+  `IAssemblyResolver` file-loading half; the ctor, the search-directory
+  trio, `IsSharedAssembly` through the lazy `DotNetCorePathFinder`, the
+  `FindAssemblyFile`/`FindAssemblyFileCore` target-framework dispatch with
+  the full `ResolveInternal` chain, the winmd arms, and
+  `GetCorlib`/`GetMscorlibBasePath` landed gold-pinned over this machine's
+  framework directories, GAC, Windows Kits references, and .NET 10
+  shared-framework install, alongside the static GAC machinery --
   `GetGacPaths`/`GetAssemblyInGac`/`EnumerateGac`/`IsZeroOrAllOnes`/
   `IsSpecialVersionOrRetargetable`/`GetAssemblyFile` over the
   `AssemblyReferenceClassifier` base and `ResolutionException` -- landed
@@ -330,11 +337,19 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   Framework 4.8 GAC (the 608-entry `EnumerateGac` snapshot digests
   byte-exact; the crafted regex matrix pins the unanchored scan, the greedy
   optional `v4.0_` prefix with its fallback, and the forced group lengths).
-  The remaining `UniversalAssemblyResolver` gate for the `--decompile-baml`
-  CLI wiring is the resolver's INSTANCE surface (the ctor + the
-  `Lazy<DotNetCorePathFinder>` wiring, the `IAssemblyResolver`
-  implementation, and the `FindAssemblyFileCore` target-framework dispatch
-  consuming this slice's detection).
+  The resolver's INSTANCE file-resolution half landed next (the ctor + the
+  `Lazy<DotNetCorePathFinder>` wiring, the search-directory trio,
+  `IsSharedAssembly` through the lazy finder, the `FindAssemblyFile`/
+  `FindAssemblyFileCore` dispatch with the full `ResolveInternal` chain --
+  the search-directory walk, the special-version framework arm, the
+  `GetCorlib`/`GetMscorlibBasePath` arm, the GAC arm, the <= 4.0 fallback,
+  and the shared-runtime last resort -- the winmd arms, and the
+  `FindClosestVersionDirectory` picker), gold-pinned against the real
+  engine's drives over this machine's framework directories, GAC, Windows
+  Kits references, and .NET 10 shared-framework install. The remaining
+  `UniversalAssemblyResolver` gate for the `--decompile-baml` CLI wiring is
+  the `IAssemblyResolver` file-loading half (`Resolve`/`ResolveModule`/
+  `CreatePEFileFromFileName` over the port's `MetadataFile`).
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with

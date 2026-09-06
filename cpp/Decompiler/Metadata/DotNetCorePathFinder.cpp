@@ -132,10 +132,23 @@ bool WinIsValidDriveChar(char value) {
     return static_cast<unsigned>((value | 0x20) - 'a') <= 25u;
 }
 
-bool WinIsDevice(std::string_view path) {
+bool WinIsExtended(std::string_view path) {
     return path.size() >= 4 && path[0] == '\\'
         && (path[1] == '\\' || path[1] == '?') && path[2] == '?'
         && path[3] == '\\';
+}
+
+// The decompiled System.IO.PathInternal.IsDevice: an extended path is
+// always a device; otherwise the `\\.\` (local device) and `\\?\`
+// (extended) prefixes over separators.
+bool WinIsDevice(std::string_view path) {
+    if (!WinIsExtended(path)) {
+        return path.size() >= 4 && WinIsDirectorySeparator(path[0])
+            && WinIsDirectorySeparator(path[1])
+            && (path[2] == '.' || path[2] == '?')
+            && WinIsDirectorySeparator(path[3]);
+    }
+    return true;
 }
 
 bool WinIsDeviceUnc(std::string_view path) {
@@ -150,42 +163,78 @@ bool WinIsDeviceUnc(std::string_view path) {
 std::size_t WinGetRootLength(std::string_view path) {
     std::size_t length = path.size();
     std::size_t i = 0;
-    if (length >= 1 && (path[0] == '\\' || path[0] == '/')
-        && length >= 2 && path[1] == path[0]) {
+    bool isDevice = WinIsDevice(path);
+    bool isDeviceUnc = isDevice && WinIsDeviceUnc(path);
+    if ((!isDevice || isDeviceUnc) && length > 0
+        && WinIsDirectorySeparator(path[0])) {
         // UNC or device: \\server\share or \\?\...
-        if (WinIsDevice(path)) {
-            i = 4;
-            if (length > 6 && path[4] == '.' && path[5] == '.'
-                && WinIsDirectorySeparator(path[6])) {
-                // \\.\ (the local device)
-                return 6;
-            }
-            if (WinIsDeviceUnc(path)) {
-                i = 8;
-            } else {
-                return length;  // the device form with no recognizable tail
-            }
+        if (isDeviceUnc) {
+            i = 8;
         } else {
-            i = 2;  // the UNC prefix: \\server\share
+            i = 2;
         }
-        // Scan past the server and the share
+        // The decompiled scan: TWO separator events END the root (a
+        // repeated separator is two events -- the port's old
+        // skip-consecutive walk diverged on doubled-separator inputs).
         int segments = 2;
-        while (i < length && segments > 0) {
-            if (WinIsDirectorySeparator(path[i])) {
-                segments--;
-                while (i < length && WinIsDirectorySeparator(path[i])) i++;
-            } else {
-                i++;
+        for (; i < length; i++) {
+            if (WinIsDirectorySeparator(path[i]) && --segments <= 0) {
+                break;
             }
         }
-        return i;
-    }
-    if (length >= 2 && WinIsValidDriveChar(path[0]) && path[1] == ':') {
-        // A DOS drive root, with or without its trailing separator.
+    } else if (isDevice) {
+        // The device scan: past the device name, then one separator.
+        for (i = 4; i < length && !WinIsDirectorySeparator(path[i]); i++) {
+        }
+        if (i < length && i > 4 && WinIsDirectorySeparator(path[i])) {
+            i++;
+        }
+    } else if (length >= 2 && path[1] == ':'
+        && WinIsValidDriveChar(path[0])) {
         i = 2;
         if (length > 2 && WinIsDirectorySeparator(path[2])) i++;
+    } else if (length >= 1 && WinIsDirectorySeparator(path[0])) {
+        // A single leading separator is itself the root.
+        i = 1;
     }
     return i;
+}
+
+// The decompiled System.IO.PathInternal.NormalizeDirectorySeparators: the
+// fast-path scan (every separator a backslash with a non-separator after
+// it), then the rebuild -- one leading backslash and every separator run
+// collapsed to its last member, forward slashes replaced.
+std::string NormalizeDirectorySeparators(const std::string& path) {
+    if (path.empty()) return path;
+    bool needsNormalization = false;
+    for (std::size_t i = 0; i < path.size(); i++) {
+        char c = path[i];
+        if (WinIsDirectorySeparator(c)
+            && (c != '\\'
+                || (i > 0 && i + 1 < path.size()
+                    && WinIsDirectorySeparator(path[i + 1])))) {
+            needsNormalization = true;
+            break;
+        }
+    }
+    if (!needsNormalization) return path;
+    std::string result;
+    std::size_t num = 0;
+    if (WinIsDirectorySeparator(path[num])) {
+        num++;
+        result += '\\';
+    }
+    for (std::size_t j = num; j < path.size(); j++) {
+        char c = path[j];
+        if (WinIsDirectorySeparator(c)) {
+            if (j + 1 < path.size() && WinIsDirectorySeparator(path[j + 1])) {
+                continue;
+            }
+            c = '\\';
+        }
+        result += c;
+    }
+    return result;
 }
 
 // The .NET `Path.IsPathRooted(string)`: a leading separator or a
@@ -260,20 +309,30 @@ std::string CombinePaths(const std::optional<std::string>& path1,
 // 'a\b\c') and no separator at all yielding the root ('a' -> '', 'C:x' ->
 // 'C:').
 std::optional<std::string> GetDirectoryName(const std::string& path) {
-    if (path.empty()) return std::nullopt;
-    std::size_t root = WinGetRootLength(path);
-    if (path.size() <= root) return std::nullopt;
-    std::string result;
-    std::size_t lastSep = path.find_last_of("\\/");
-    if (lastSep == std::string::npos) {
-        result = path.substr(0, root);
-    } else {
-        result = path.substr(0, lastSep);
+    // The C# `path == null || PathInternal.IsEffectivelyEmpty(...)` -- an
+    // all-spaces (or empty) path has no directory information.
+    bool allSpaces = true;
+    for (char c : path) {
+        if (c != ' ') {
+            allSpaces = false;
+            break;
+        }
     }
-    for (char& c : result) {
-        if (c == '/') c = '\\';
+    if (allSpaces) return std::nullopt;
+    // The decompiled GetDirectoryNameOffset: the LAST separator run before
+    // the root end, then the trailing-separator trim.
+    std::size_t rootLength = WinGetRootLength(path);
+    if (path.size() <= rootLength) return std::nullopt;
+    std::size_t num = path.size();
+    while (num > rootLength && !WinIsDirectorySeparator(path[--num])) {
     }
-    return result;
+    while (num > rootLength && WinIsDirectorySeparator(path[num - 1])) {
+        num--;
+    }
+    // The C# `PathInternal.NormalizeDirectorySeparators(path.Substring(
+    // 0, directoryNameOffset))` -- the repeated-separator collapse the
+    // UNC drives exercise.
+    return NormalizeDirectorySeparators(path.substr(0, num));
 }
 
 // The .NET `Path.GetFileNameWithoutExtension(string)` (gold-pinned): the

@@ -24,30 +24,36 @@
 // functions at the mirror-layout positions so the class's future instance
 // surface can call them unchanged.
 //
-// The SECOND (this slice): the class's STATIC half -- the `#region .NET /
-// mono GAC handling` machinery (`GetGacPaths` / `GetAssemblyInGac` /
-// `EnumerateGac` / `IsZeroOrAllOnes` / `IsSpecialVersionOrRetargetable` /
-// `GetAssemblyFile` and the `gac_paths` static field) plus the
-// `AssemblyReferenceClassifier` base it derives. Every member is
-// gold-pinned against the real installed resolver over this machine's
-// real .NET Framework GAC.
+// The SECOND sub-slice (landed with the GAC static machinery): the class's
+// STATIC half -- the `#region .NET / mono GAC handling` machinery
+// (`GetGacPaths` / `GetAssemblyInGac` / `EnumerateGac` / `IsZeroOrAllOnes` /
+// `IsSpecialVersionOrRetargetable` / `GetAssemblyFile` and the `gac_paths`
+// static field) plus the `AssemblyReferenceClassifier` base it derives. Every
+// member is gold-pinned against the real installed resolver over this
+// machine's real .NET Framework GAC.
 //
-// The class's INSTANCE surface stays a documented deferral until the
-// following slices (each is additive to the class below):
-//   * the `IAssemblyResolver` base itself (the interface's two members are
-//     the `Resolve`/`ResolveModule` pair) plus the ctor
-//     (`mainAssemblyFileName`/`throwOnError`/`streamOptions`/
-//     `metadataOptions`, the `Lazy<DotNetCorePathFinder>` wiring) and
-//     `AddSearchDirectory`/`RemoveSearchDirectory`/
-//     `GetSearchDirectories`;
-//   * `IsSharedAssembly` (the override resolving through the
-//     `dotNetCorePathFinder` Lazy) and `FindAssemblyFile`/
-//     `FindAssemblyFileCore` (the target-framework dispatch, consuming
-//     `TypeReferenceMetadata`/`ExportedTypeMetadata`);
-//   * `FindWindowsMetadataFile`/`FindWindowsMetadataInSystemDirectory`,
-//     `ResolveSilverlight`, `FindClosestVersionDirectory`,
-//     `ResolveInternal`, `GetCorlib`/`GetMscorlibBasePath`, and
-//     `CreatePEFileFromFileName`.
+// The THIRD sub-slice (this slice): the class's INSTANCE surface -- the ctor
+// (`mainAssemblyFileName`/`throwOnError`/`streamOptions`/`metadataOptions`,
+// the `Lazy<DotNetCorePathFinder>` wiring), the search-directory trio
+// (`AddSearchDirectory`/`RemoveSearchDirectory`/`GetSearchDirectories`),
+// `IsSharedAssembly` (the override resolving through the lazy finder),
+// `FindAssemblyFile`/`FindAssemblyFileCore` (the target-framework dispatch),
+// `FindWindowsMetadataFile`/`FindWindowsMetadataInSystemDirectory`,
+// `ResolveSilverlight`, `FindClosestVersionDirectory`, `ResolveInternal`,
+// `SearchDirectory` (both overloads), and `GetCorlib`/
+// `GetMscorlibBasePath` -- everything gold-pinned against the real
+// engine's drives over this machine's framework directories, GAC, Windows
+// Kits references, and .NET 10 shared-framework install. Every helper is
+// public per the standing internal-to-public convention (the C# members are
+// `private`); `FindClosestVersionDirectory` is a direct-drive test target
+// (the C# probe invokes it by reflection over a crafted version-folder
+// layout).
+//
+// The `Resolve`/`ResolveModule`/`CreatePEFileFromFileName` members (the
+// `IAssemblyResolver` file-loading half) stay a documented deferral: they
+// construct the port's `MetadataFile` over an opened stream, a separate
+// verifiable unit that lands with the `IAssemblyResolver` derivation of the
+// class.
 //
 // The Mono arms (`GetDefaultMonoGacPaths`/`GetCurrentMonoGac`/
 // `GetAssemblyInMonoGac`/`GetMonoMscorlibBasePath` and the Mono static ctor
@@ -56,16 +62,18 @@
 // through `decompilerRuntime == Mono` -- the port pins the host statically
 // as `kDecompilerRuntime = NETCoreApp` (the ilspycmd 11.0 build this port is
 // gold-pinned against runs on .NET 10), so every Mono arm is unreachable in
-// the shipped-tool shape and stays unported.
-//
-// The C# members are `internal`/`private`; the port exposes the statics
-// publicly (the standing internal-to-public convention for test access).
+// the shipped-tool shape and stays unported. The C#
+// `ResolveInternal`'s NETFramework/`goto default` host arms (the decompiler
+// host's own runtime directory as the framework search path) are likewise
+// unreachable: the pinned NETCoreApp host always takes the
+// `<windir>\Microsoft.NET\Framework64\v4.0.30319` arm.
 
 #pragma once
 
 #include "Decompiler/Metadata/AssemblyNameReference.hpp"
 #include "Decompiler/TypeSystem/Version.hpp"
 
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -73,6 +81,11 @@
 #include <vector>
 
 namespace ILSpy::Decompiler::Metadata {
+
+// The lazy path finder the resolver owns -- forward-declared here (the C#
+// file pair resolves the circular reference across the two files the same
+// way `AssemblyReferenceClassifier::IsGacAssembly` does).
+class DotNetCorePathFinder;
 
 // The C# `public enum TargetRuntime` -- the classic .NET runtime versions the
 // legacy API surface names (the port has no consumer yet; the resolver slice
@@ -112,6 +125,28 @@ enum class DecompilerRuntime {
 
 // The port's `DecompilerRuntime` value (the `NETCoreApp` arm above).
 constexpr DecompilerRuntime kDecompilerRuntime = DecompilerRuntime::NETCoreApp;
+
+// The C# `System.Reflection.PortableExecutable.PEStreamOptions` -- the
+// stream options the resolver ctor carries for the `PEReader` it creates
+// (the port's `MetadataFile` opens files eagerly, so the options are carried
+// verbatim; the `Resolve` deferral note above). The member tables are
+// gold-pinned from the .NET 10 runtime (the I1 enum drives).
+enum class PEStreamOptions {
+    Default = 0,
+    LeaveOpen = 1,
+    PrefetchMetadata = 2,
+    PrefetchEntireImage = 4,
+    IsLoadedImage = 8,
+};
+
+// The C# `System.Reflection.Metadata.MetadataReaderOptions` (Default and
+// ApplyWindowsRuntimeProjections alias the same value -- the I1 gold table
+// pins both names at 1).
+enum class MetadataReaderOptions {
+    None = 0,
+    Default = 1,
+    ApplyWindowsRuntimeProjections = 1,
+};
 
 // The `internal static (TargetFrameworkIdentifier, Version)
 // ParseTargetFramework(string targetFramework)` result pair.
@@ -203,6 +238,57 @@ public:
     static std::string GetAssemblyFile(const IAssemblyReference& reference,
         const std::string& prefix, const std::string& gac);
 
+    // The C# `public UniversalAssemblyResolver(string? mainAssemblyFileName,
+    // bool throwOnError, string? targetFramework, string? runtimePack = null,
+    // PEStreamOptions streamOptions = PEStreamOptions.Default,
+    // MetadataReaderOptions metadataOptions = MetadataReaderOptions.Default)`.
+    // `targetFramework` null means the empty string, `runtimePack` null
+    // "Microsoft.NETCore.App"; the pair is classified through
+    // `ParseTargetFramework`; a non-null `mainAssemblyFileName` derives the
+    // base directory (the `Path.GetDirectoryName` null/whitespace rule
+    // falling back to Environment.CurrentDirectory) and adds it as the first
+    // search directory. The C# `Lazy<DotNetCorePathFinder>` is a lazily
+    // built unique_ptr (the `Finder()` accessor materializes it on first
+    // use).
+    explicit UniversalAssemblyResolver(
+        std::optional<std::string> mainAssemblyFileName, bool throwOnError,
+        std::optional<std::string> targetFramework,
+        std::optional<std::string> runtimePack = std::nullopt,
+        PEStreamOptions streamOptions = PEStreamOptions::Default,
+        MetadataReaderOptions metadataOptions = MetadataReaderOptions::Default);
+    ~UniversalAssemblyResolver();
+
+    // The C# `public void AddSearchDirectory(string? directory)` -- a null
+    // entry is stored (the C# `List<string?>`), and the lazy finder
+    // receives it only once materialized.
+    void AddSearchDirectory(std::optional<std::string> directory);
+
+    // The C# `public void RemoveSearchDirectory(string? directory)` -- the
+    // FIRST matching entry (a null removes the first null).
+    void RemoveSearchDirectory(std::optional<std::string> directory);
+
+    // The C# `public string?[] GetSearchDirectories()`.
+    std::vector<std::optional<std::string>> GetSearchDirectories() const;
+
+    // The C# `public override bool IsSharedAssembly(...)` -- through the lazy
+    // `DotNetCorePathFinder.TryResolveDotNetCoreShared` (forcing the lazy).
+    bool IsSharedAssembly(const IAssemblyReference& reference,
+        std::optional<std::string>& runtimePack) const override;
+
+    // The C# `public string? FindAssemblyFile(IAssemblyReference name)` (the
+    // Instrumentation event-source logging of the C# VSADDIN-off build has
+    // no observable effect outside the ETW log and does not port).
+    std::optional<std::string> FindAssemblyFile(const IAssemblyReference& name) const;
+
+    // The C# `string? FindClosestVersionDirectory(string basePath,
+    // Version? version)` -- the closest-version-folder picker over the
+    // `ConvertToVersion`-parsed subdirectory names (descending order, the
+    // `path == null || version == null || folder >= version` walk), with the
+    // `version?.ToString() ?? "."` fallback. Public per the
+    // internal-to-public convention (the C# probe drives it by reflection).
+    std::string FindClosestVersionDirectory(const std::string& basePath,
+        const std::optional<TypeSystem::Version>& version) const;
+
 private:
     // The C# `static readonly List<string> gac_paths = GetGacPaths()` -- the
     // process-lifetime singleton (a function-local static; `EnumerateGac`
@@ -214,6 +300,72 @@ private:
     // roots, the root index picking the `""`/`"v4.0_"` prefix.
     static std::optional<std::string> GetAssemblyInNetGac(
         const IAssemblyReference& reference);
+
+    // The C# `string? FindAssemblyFileCore(IAssemblyReference name)` -- the
+    // target-framework dispatch: the winmd arm, the shared-framework arms
+    // (gated on `IsZeroOrAllOnes(targetFrameworkVersion)`), the Silverlight
+    // arm, and the `ResolveInternal` default.
+    std::optional<std::string> FindAssemblyFileCore(const IAssemblyReference& name) const;
+
+    // The C# `DotNetCorePathFinder InitDotNetCorePathFinder()` -- the lazy
+    // factory (the two ctor shapes + the search-directory replay).
+    std::unique_ptr<DotNetCorePathFinder> InitDotNetCorePathFinder() const;
+
+    // The C# `dotNetCorePathFinder.Value` Lazy read -- the first access
+    // builds through `InitDotNetCorePathFinder` (the C# Lazy thread-safety
+    // ports as a non-const mutable field; the C# semantics are
+    // observable-order identical for the single-threaded resolver callers).
+    DotNetCorePathFinder& Finder() const;
+
+    // The C# `string? FindWindowsMetadataFile(...)` (the Windows Kits
+    // References layout) and `...InSystemDirectory` (the system32\WinMetadata
+    // fallback).
+    std::optional<std::string> FindWindowsMetadataFile(const IAssemblyReference& name) const;
+    std::optional<std::string> FindWindowsMetadataInSystemDirectory(
+        const IAssemblyReference& name) const;
+
+    // The C# `string? ResolveSilverlight(...)` -- the two ProgramFiles
+    // search roots.
+    std::optional<std::string> ResolveSilverlight(const IAssemblyReference& name,
+        const std::optional<TypeSystem::Version>& version) const;
+
+    // The C# `string? ResolveInternal(IAssemblyReference name)` -- the
+    // search-directory walk, the special-version framework-directory arm,
+    // the corlib arm, the GAC arm, the <= 4.0 framework-directory fallback,
+    // and the shared-runtime last resort, then the `throwOnError` throw.
+    std::optional<std::string> ResolveInternal(const IAssemblyReference& name) const;
+
+    // The C# `SearchDirectory` pair -- the multi-directory walk (null
+    // entries skipped) and the two-extension probe (`.winmd`/`.dll` for a
+    // Windows-Runtime reference, `.dll`/`.exe` otherwise).
+    std::optional<std::string> SearchDirectory(const IAssemblyReference& name,
+        const std::vector<std::optional<std::string>>& directories) const;
+    std::optional<std::string> SearchDirectory(const IAssemblyReference& name,
+        const std::string& directory) const;
+
+    // The C# `string? GetCorlib(...)` + `string? GetMscorlibBasePath(...)`
+    // -- the corlib identity arm (the pinned host skips the
+    // `decompilerRuntime != NETCoreApp` shortcut) and the Major/
+    // MajorRevision subfolder table with the CompactFramework arm.
+    std::optional<std::string> GetCorlib(const IAssemblyReference& reference) const;
+    std::optional<std::string> GetMscorlibBasePath(const TypeSystem::Version& version,
+        const std::optional<std::string>& publicKeyToken) const;
+
+    // The C# readonly fields (the C# `baseDirectory` is write-only --
+    // assigned in the ctor, never read -- and the port carries it for
+    // fidelity).
+    std::optional<std::string> mainAssemblyFileName_;
+    bool throwOnError_ = false;
+    PEStreamOptions streamOptions_ = PEStreamOptions::Default;
+    MetadataReaderOptions metadataOptions_ = MetadataReaderOptions::Default;
+    std::string targetFramework_;
+    std::string runtimePack_;
+    TargetFrameworkIdentifier targetFrameworkIdentifier_ =
+        TargetFrameworkIdentifier::NETFramework;
+    TypeSystem::Version targetFrameworkVersion_;
+    std::optional<std::string> baseDirectory_;
+    std::vector<std::optional<std::string>> directories_;
+    mutable std::unique_ptr<DotNetCorePathFinder> dotNetCorePathFinder_;
 };
 
 // The port's hand-rolled equivalent of `EnumerateGac`'s
