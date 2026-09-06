@@ -495,6 +495,31 @@ public:
         return usEnd_;
     }
 
+    // The C# `MetadataReader.MetadataVersion` -- the version string of the
+    // metadata root's storage signature (ECMA-335 II.24.2.1: the length at
+    // root+12, the NUL-padded string at root+16). SRM's ReadMetadataHeader
+    // reads it as PeekUtf8NullTerminated over the padded length: the bytes
+    // up to the first NUL, or the whole padded block when it has no NUL.
+    // Empty when the image has no COM header or the root cannot be located;
+    // never throws (the port's never-throws accessor convention; the C#
+    // BadImageFormatException arms are unreachable for any file winmd
+    // opened, which is every file the port can construct).
+    std::string MetadataVersionString() const noexcept {
+        const std::uint8_t* root = MetadataRootPtr();
+        if (!root) return {};
+        const std::uint8_t* base = bytes_->data();
+        std::size_t size = bytes_->size();
+        if (root + 16 > base + size) return {};
+        std::uint32_t versionLength = ReadLe<4>(root + 12);
+        if (static_cast<std::uint64_t>(16 + versionLength) >
+            static_cast<std::uint64_t>(base + size - root))
+            return {};
+        const std::uint8_t* str = root + 16;
+        std::size_t len = 0;
+        while (len < versionLength && str[len] != 0) ++len;
+        return std::string(reinterpret_cast<const char*>(str), len);
+    }
+
     // The C# `MetadataReader.GetGuid(GuidHandle)` -- a nil index (0) is the
     // all-zeros GUID (Guid.Empty); a valid index N reads the 16 GUID bytes
     // at heap offset (N-1)*16 (II.24.2.5: GUID heap indexing is 1-based).
@@ -512,6 +537,32 @@ public:
             return std::nullopt;
         std::memcpy(out.data(), guidBase_ + offset, 16);
         return out;
+    }
+
+    // The PE -> cor20 -> metadata-root walk shared by the lazily located heap
+    // bounds and the version string (LocateUsHeap/LocateGuidHeap keep their
+    // own copies for the entry-point side effect; this one is the plain
+    // locator).
+    const std::uint8_t* MetadataRootPtr() const {
+        if (!sections_ || !bytes_) return nullptr;
+        const std::uint8_t* base = bytes_->data();
+        std::size_t size = bytes_->size();
+        if (size < sizeof(image_dos_header)) return nullptr;
+        const auto& dos = *reinterpret_cast<const image_dos_header*>(base);
+        if (dos.e_signature != 0x5A4D) return nullptr;
+        if (size < dos.e_lfanew + sizeof(image_nt_headers32)) return nullptr;
+        const auto* nt = reinterpret_cast<const image_nt_headers32*>(base + dos.e_lfanew);
+        std::uint32_t comRva = 0;
+        if (nt->OptionalHeader.Magic == 0x20B) {
+            const auto* ntPlus = reinterpret_cast<const image_nt_headers32plus*>(base + dos.e_lfanew);
+            comRva = ntPlus->OptionalHeader.DataDirectory[14].VirtualAddress;
+        } else {
+            comRva = nt->OptionalHeader.DataDirectory[14].VirtualAddress;
+        }
+        if (comRva == 0) return nullptr;
+        const auto* cor = reinterpret_cast<const image_cor20_header*>(RvaToPtr(comRva));
+        if (!cor) return nullptr;
+        return RvaToPtr(cor->MetaData.VirtualAddress);
     }
 
     // Locates the #GUID stream by walking the metadata root's stream headers
@@ -707,6 +758,12 @@ public:
     // The cor20 header's EntryPointTokenOrRelativeVirtualAddress (0 when the
     // image has no COM header -- the C# `module.CorHeader?... ?? 0`).
     std::uint32_t EntryPointToken() const { return pe_.EntryPointToken(); }
+
+    // The metadata root's version string (the C#
+    // `MetadataReader.MetadataVersion`). Straight PeImage passthrough.
+    std::string MetadataVersionString() const {
+        return pe_.MetadataVersionString();
+    }
 
     // The PE-section reads the ReflectionDisassembler field renderer drives:
     // the containing-section index and name (the `.data` section-kind prefix

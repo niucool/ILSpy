@@ -41,6 +41,7 @@ add_executable(ilspy_tests
     Decompiler/Metadata/MetadataFileLookups_Test.cpp
     Decompiler/Metadata/NamespaceDefinition_Test.cpp
     Decompiler/Metadata/CustomAttributeDecoder_Test.cpp
+    Decompiler/Metadata/DotNetCorePathFinderExtensions_Test.cpp
     Decompiler/Metadata/SRMExtensions_Test.cpp
     Decompiler/Metadata/AssemblyNameReference_Test.cpp
     Decompiler/Metadata/AssemblyNameInfo_Test.cpp

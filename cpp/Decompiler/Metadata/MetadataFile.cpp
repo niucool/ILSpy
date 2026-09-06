@@ -2392,6 +2392,12 @@ std::uint32_t MetadataFile::GetEntryPointToken() const {
     return impl_->bodyReader->EntryPointToken();
 }
 
+// The metadata root's version string. See the header for the full contract.
+std::string MetadataFile::MetadataVersion() const {
+    if (!IsValid() || !impl_->bodyReader) return {};
+    return impl_->bodyReader->MetadataVersionString();
+}
+
 // The Assembly table's single row (row 1 -- ECMA allows exactly one
 // assembly-manifest row). See the header for the full contract.
 std::optional<MetadataFile::AssemblyDefinitionInfo>

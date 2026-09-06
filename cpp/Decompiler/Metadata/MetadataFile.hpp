@@ -451,6 +451,13 @@ public:
     // throws.
     std::uint32_t GetEntryPointToken() const;
 
+    // The C# `MetadataReader.MetadataVersion` -- the version string of the
+    // metadata root's storage signature (e.g. "v4.0.30319"; the bytes up to
+    // the first NUL over the padded length field at root+12). Empty for an
+    // invalid file or an image whose metadata root cannot be located; never
+    // throws.
+    std::string MetadataVersion() const;
+
     // Decode the local-variable signature referenced by a method body's
     // LocalVarSigToken (a StandAloneSig token, table 0x11). Returns the local
     // types in index order; an empty vector if the token is 0/invalid/malformed.

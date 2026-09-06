@@ -290,7 +290,18 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   exact .NET message), gold-pinned through the SsProbe probe with
   whole-corpus FNV digests over every StandaloneSig row of mscorlib
   (3908) and System.dll (2788) and CoreLib's 24 method-kind rows, all
-  byte-exact against the real engine.
+  byte-exact against the real engine. The `DotNetCorePathFinderExtensions`
+  family landed next (the target-framework detection the CLI hands to the
+  `UniversalAssemblyResolver` ctor: `DetectTargetFrameworkId` with the
+  TargetFrameworkAttribute walk, the assembly-name and AssemblyReference
+  fallbacks, and the six-alternative path-pattern regex hand-rolled as a
+  leftmost-first-alternative segment matcher; `IsReferenceAssembly`;
+  `DetectRuntimePack`; plus `MetadataFile::MetadataVersion` reading the
+  root's version string), gold-pinned over twelve real assemblies, 23
+  crafted manifests, and the 29-case path matrix via the DtfProbe probe.
+  The remaining `UniversalAssemblyResolver` gate for the `--decompile-baml`
+  CLI wiring is the resolver itself (the search-directory/GAC/
+  DotNetCorePathFinder walk consuming this slice's detection).
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with
