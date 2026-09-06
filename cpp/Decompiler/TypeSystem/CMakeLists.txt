@@ -39,6 +39,8 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Implementation/DecimalConstantHelper.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Implementation/MetadataField.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Implementation/MetadataMethod.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Implementation/MetadataProperty.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Implementation/MetadataEvent.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Implementation/MetadataParameter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Implementation/MetadataTypeParameter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Implementation/DefaultTypeParameter.cpp

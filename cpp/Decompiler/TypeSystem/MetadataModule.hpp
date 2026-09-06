@@ -109,13 +109,11 @@
 //      LANDED); the
 //      `IsVisible(MethodAttributes)` filter; the `methodDefs` /
 //      `referencedAssemblies` / `typeDefs` / `fieldDefs` entity caches.
-//      STILL DEFERRED: the accessor-search arm of `ResolveMethodReference`
-//      routes through `MetadataTypeDefinition::GetAccessors`, the loud
-//      MetadataProperty/MetadataEvent deferral until that slice lands (a
-//      member reference to an ACCESSOR whose declaring type carries no
-//      same-name plain method throws; the method/ctor search and the
-//      fake-method fallback are REAL); the `propertyDefs`/`eventDefs` entity
-//      caches; `DecodeMethodSignature`/`DecodeLocalSignature`; and the internal
+//      The `propertyDefs`/`eventDefs` entity caches and the accessor-search
+//      arm of `ResolveMethodReference` (over
+//      `MetadataTypeDefinition::GetAccessors`) LANDED with the
+//      MetadataProperty/MetadataEvent slice; STILL DEFERRED:
+//      `DecodeMethodSignature`/`DecodeLocalSignature`; and the internal
 //      `GetString(StringHandle)` helper (the port's NamespaceDefinition::Name
 //      already stores the resolved name, so MetadataNamespace needs no such
 //      helper).
@@ -171,6 +169,8 @@ namespace Implementation { class MetadataNamespace; }
 namespace Implementation { class MetadataTypeDefinition; }
 namespace Implementation { class MetadataField; }
 namespace Implementation { class MetadataMethod; }
+namespace Implementation { class MetadataProperty; }
+namespace Implementation { class MetadataEvent; }
 namespace Implementation { class FakeMethod; }
 
 // Forward declarations of the member/result types the resolve-method slice
@@ -292,6 +292,25 @@ public:
     // method is owned by this module. The distinct C++ name follows the
     // `GetDefinitionField` disambiguation convention.
     const IMethod* GetDefinitionMethod(std::uint32_t methodToken) const;
+
+    // The C# `public IProperty GetDefinition(PropertyDefinitionHandle
+    // handle)` (MetadataModule.cs lines 269-283) -- the per-row PROPERTY
+    // entity cache (the `propertyDefs` slots, index = the 1-based Property
+    // row number). Same conventions as the field arm (the nil token ->
+    // null; the CACHED arm range-checks against the `propertyDefs` slot
+    // count with the `HandleOutOfRange` throw; the UNCACHED arm constructs
+    // without a range check, the keep-alive registry owning the instance);
+    // the returned property is owned by this module. The distinct C++ name
+    // follows the `GetDefinitionField` disambiguation convention.
+    const IProperty* GetDefinitionProperty(
+        std::uint32_t propertyToken) const;
+
+    // The C# `public IEvent GetDefinition(EventDefinitionHandle handle)`
+    // (MetadataModule.cs lines 286-299) -- the per-row EVENT entity cache
+    // (the `eventDefs` slots, index = the 1-based Event row number). Same
+    // conventions as the property arm; the returned event is owned by
+    // this module.
+    const IEvent* GetDefinitionEvent(std::uint32_t eventToken) const;
 
     // --- Visibility Filter (MetadataModule.cs lines 971-993) ---
     // The C# `internal bool IncludeInternalMembers`.
@@ -456,9 +475,9 @@ public:
     // MemberReferenceKind"` default arm is unreachable dead code the port
     // carries faithfully), MethodDef/FieldDef through the entity caches,
     // MethodSpec through `ResolveMethodSpecification(expandVarArgs: false)`,
-    // and Property/Event rows through the `GetDefinition` property/event
-    // caches (the loud MetadataProperty/MetadataEvent deferral until that
-    // slice lands). Any other top byte returns null.
+    // and Property/Event rows through the `GetDefinitionProperty` /
+    // `GetDefinitionEvent` caches (the MetadataProperty/MetadataEvent
+    // slice). Any other top byte returns null.
     const IEntity* ResolveEntity(
         std::uint32_t entityHandle,
         const GenericContext& context) const;
@@ -533,9 +552,9 @@ private:
     // the type-children-only tuple pass), decodes the signature over the
     // declaring type's type parameters, and searches the overloads
     // (`.ctor` over the constructors, `.cctor` over the static constructors,
-    // the plain name over `GetMethods` concatenated with `GetAccessors` -- the
-    // accessor path stays the loud MetadataProperty/MetadataEvent deferral
-    // until that slice lands), matching by the normalized-type signature
+    // the plain name over `GetMethods` concatenated with `GetAccessors`,
+    // both REAL since the MetadataProperty/MetadataEvent slice), matching
+    // by the normalized-type signature
     // comparison; a miss builds the `CreateFakeMethod` fallback. The resolved
     // method is then `Specialize`d over the declaring type's / the supplied
     // method type arguments and wrapped in `VarArgInstanceMethod` for a
@@ -648,6 +667,26 @@ private:
     // The method cache's UNCACHED-arm keep-alive registry.
     mutable std::vector<std::shared_ptr<Implementation::MetadataMethod>>
         uncachedMethodDefs_;
+
+    // The C# `readonly MetadataProperty[] propertyDefs` (allocated in the
+    // ctor unless the Uncached option is set; index = the 1-based Property
+    // row number, slot 0 unused): each slot OWNS its entity (the same
+    // `shared_ptr` convention as `fieldDefs_`).
+    mutable std::vector<std::shared_ptr<Implementation::MetadataProperty>>
+        propertyDefs_;
+    // The property cache's UNCACHED-arm keep-alive registry.
+    mutable std::vector<std::shared_ptr<Implementation::MetadataProperty>>
+        uncachedPropertyDefs_;
+
+    // The C# `readonly MetadataEvent[] eventDefs` (allocated in the ctor
+    // unless the Uncached option is set; index = the 1-based Event row
+    // number, slot 0 unused): each slot OWNS its entity (the same
+    // `shared_ptr` convention as `fieldDefs_`).
+    mutable std::vector<std::shared_ptr<Implementation::MetadataEvent>>
+        eventDefs_;
+    // The event cache's UNCACHED-arm keep-alive registry.
+    mutable std::vector<std::shared_ptr<Implementation::MetadataEvent>>
+        uncachedEventDefs_;
 
     // The C# `readonly IModule[] referencedAssemblies` (allocated in the ctor
     // unless the Uncached option is set; index = the 1-based AssemblyRef row

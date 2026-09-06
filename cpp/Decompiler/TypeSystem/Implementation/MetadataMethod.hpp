@@ -60,11 +60,11 @@
 //      pointing at an ACCESSOR (a get_/set_/add_/remove_/raise_ name form)
 //      still throws through `MetadataTypeDefinition::GetAccessors` (the loud
 //      MetadataProperty/MetadataEvent deferral) until that slice lands.
-//  (e) `AccessorOwner` is the loud DEFERRAL gated on the
-//      `GetDefinition(PropertyDefinitionHandle/EventDefinitionHandle)` entity
-//      caches (the MetadataProperty/MetadataEvent siblings -- the ctor still
-//      records the accessorOwner token, so `IsAccessor`/`AccessorKind` are
-//      real).
+//  (e) `AccessorOwner` is REAL (the MetadataProperty/MetadataEvent slice):
+//      the nil handle -> null; a PropertyDefinition handle routes through
+//      `GetDefinitionProperty`, an EventDefinition handle through
+//      `GetDefinitionEvent`, anything else -> null (the ctor records the
+//      accessorOwner token, so `IsAccessor`/`AccessorKind` are real too).
 //  (f) `Specialize` is REAL: `SpecializedMethod.Create(this, substitution)`
 //      with the no-op-deleter alias over `this` and the keep-alive registry
 //      (the landed owning-Specialize design; the Specialize_Test suite pins

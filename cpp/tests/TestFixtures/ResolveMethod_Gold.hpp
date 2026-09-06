@@ -49,20 +49,26 @@ inline constexpr std::uint64_t kMscMethoddefDigest = 0x6CDE8CE2DC6DD65DULL;
 inline constexpr int kMscMethoddefRows = 15;
 // All 824 accessor-shaped method memberrefs of mscorlib have RESOLVABLE
 // declaring types (every parent is a TypeSpec into mscorlib itself), so
-// the port throws the MetadataProperty/MetadataEvent deferral for every
-// one of them (the real engine resolves all 824).
+// the accessor-search arm resolves every one of them to a REAL accessor
+// method (both engines agree; the digest is byte-exact).
 inline constexpr int kMscAccRealCount = 824;
+inline constexpr std::uint64_t kMscAccRealDigest = 0x81C6DD381736A0BFULL;
 inline constexpr int kMscAccFakeCount = 0;
 
-// The accessor-named cross-module MethodImpl declarations: the fakes
-// (UNRESOLVABLE declaring types -- both engines build the fake member)
-// vs the resolvable-parent subset the port defers on.
+// The accessor-named cross-module MethodImpl declarations, partitioned the
+// way the probe partitions them: the FAKE subset (UNRESOLVABLE declaring
+// types -- both engines build the fake member) vs the REAL subset (the
+// resolvable-parent rows the accessor-search arm of ResolveMethodReference
+// resolves -- the MetadataProperty/MetadataEvent slice landed them; both
+// digests byte-exact against the real engine).
 inline constexpr int kMscAccDeclFakeCount = 0;
 inline constexpr std::uint64_t kMscAccDeclFakeDigest = 0xCBF29CE484222325ULL;
 inline constexpr int kMscAccDeclRealCount = 51;
+inline constexpr std::uint64_t kMscAccDeclRealDigest = 0xF98236131FFFF86BULL;
 inline constexpr int kSysAccDeclFakeCount = 16;
 inline constexpr std::uint64_t kSysAccDeclFakeDigest = 0x28F55211D80EF420ULL;
 inline constexpr int kSysAccDeclRealCount = 166;
+inline constexpr std::uint64_t kSysAccDeclRealDigest = 0x33C78D02658BAD96ULL;
 
 // The System.dll paired compilation digests (System main + mscorlib ref).
 inline constexpr std::uint64_t kSysMethodDigest = 0x85E10B86B73175E3ULL;
@@ -78,6 +84,7 @@ inline constexpr int kSysImplMethods = 627;
 inline constexpr int kSysMemberRefDeclMethods = 494;
 inline constexpr int kSysAccessorDeclMethods = 182;
 inline constexpr int kSysAccRealCount = 630;
+inline constexpr std::uint64_t kSysAccRealDigest = 0x7AD6BB74EF847768ULL;
 inline constexpr int kSysAccFakeCount = 74;
 inline constexpr std::uint64_t kSysAccFakeDigest = 0xF5FCB155DC7D015FULL;
 

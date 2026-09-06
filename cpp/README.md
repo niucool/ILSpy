@@ -205,10 +205,10 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   over the System+mscorlib paired compilation), every MethodSpec row (656
   / 174), and every MethodImpl-carrying method (1185 same-module + 82
   cross-plain over mscorlib; 133 + 312 over System.dll), all byte-exact,
-  with the accessor-shaped partition pinned as the loud
-  MetadataProperty/MetadataEvent deferral (824 resolvable-parent
-  mscorlib rows throw; 74 System.Configuration-parent memberrefs resolve
-  through the fake-guess path in both engines) -- plus the two gold-driven
+  with the accessor-shaped partition now resolving through the
+  Properties/Events enumerations (824 resolvable-parent mscorlib rows all
+  REAL; 630 System rows real + 74 System.Configuration-parent memberrefs
+  through the fake-guess path in both engines -- all byte-exact) -- plus the two gold-driven
   fidelity fixes the digests exposed: the `TupleType::VisitChildren`
   underlying-type rebuild (the C# recomputes the ValueTuple chain from the
   substituted elements) and `ParameterizedType::GetFields`'s
@@ -246,8 +246,20 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   whole-corpus digests over every method GetAttributes/GetReturnTypeAttributes
   of mscorlib/System.dll/CoreLib and the curated DllImport/PreserveSig/
   MethodImpl/SpecialName synthetic-row matrices, all byte-exact against the
-  real engine. `AccessorOwner` (the property/event caches) stays the
-  documented loud deferral).
+  real engine -- plus the MetadataProperty/MetadataEvent entity slice: the
+  property/indexer and event classes over the module's property/event
+  caches (the ctor's symbolKind chain with the DetermineIsIndexer
+  [DefaultMember] comparison and the explicit-interface dotted-name arm,
+  the shared static DecodeSignature routing, the ComputeAccessibility
+  base-copy walk, the [IndexerName]/SpecialName synthetic rows), the
+  MetadataMethod::AccessorOwner routing, MetadataTypeDefinition's
+  Properties/Events/Members enumerations and the plain DefaultMemberName
+  member, the ResolveEntity property/event arms, and the accessor-search
+  arm of ResolveMethodReference -- whole-corpus FNV digests over every
+  property (5011/4089/5581 over mscorlib/System.dll/CoreLib) and event
+  (33/115/32) plus the accessor-shaped memberref partitions (824 mscorlib
+  real / 630 System real + 74 fake) all byte-exact against the real
+  engine through the PeProbe gold probe.
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with

@@ -370,20 +370,28 @@ TEST_F(ResolveMethodTest, MscSingleMemberRefDigests)
     RmFixture fx;
     const TM::MetadataFile* file = fx.mscSingle.MetadataFile();
     TS::GenericContext context({}, {});
-    Fnv64 methodFnv, fieldFnv;
+    Fnv64 methodFnv, fieldFnv, accFakeFnv, accRealFnv;
     int methodRows = 0, fieldRows = 0, accReal = 0, accFake = 0;
     for (const TM::MetadataFile::MemberRefInfo& row : file->MemberRefs()) {
         bool methodKind = MemberRefIsMethodKind(*file, row.Token);
         if (methodKind) {
             if (AccessorShaped(row.Name)) {
                 // The resolvable declaring type: the methods search misses,
-                // the accessor search hits the loud MetadataProperty/MetadataEvent
-                // deferral.
-                EXPECT_THROW(
-                    fx.mscSingle.ResolveMethod(row.Token, context),
-                    std::logic_error)
-                    << "token " << std::hex << row.Token;
-                accReal++;
+                // the accessor search hits (the Properties/Events
+                // enumerations -- the MetadataProperty/MetadataEvent slice
+                // landed it; every one of mscorlib's 824 resolves to a REAL
+                // accessor method, both engines byte-exact).
+                const TS::IMethod* acc =
+                    fx.mscSingle.ResolveMethod(row.Token, context);
+                std::string accLine =
+                    LinePrefix('M', row.Token) + RenderMethod(acc);
+                if (accLine.find("FakeMethod") != std::string::npos) {
+                    accFakeFnv.Add(accLine);
+                    accFake++;
+                } else {
+                    accRealFnv.Add(accLine);
+                    accReal++;
+                }
                 continue;
             }
             const TS::IMethod* m =
@@ -401,6 +409,7 @@ TEST_F(ResolveMethodTest, MscSingleMemberRefDigests)
     EXPECT_EQ(methodRows, G::kMscMethodRows);
     EXPECT_EQ(fieldRows, G::kMscFieldRows);
     EXPECT_EQ(accReal, G::kMscAccRealCount);
+    EXPECT_EQ(accRealFnv.Digest(), G::kMscAccRealDigest);
     EXPECT_EQ(accFake, G::kMscAccFakeCount);
     EXPECT_EQ(methodFnv.Digest(), G::kMscMethodDigest);
     EXPECT_EQ(fieldFnv.Digest(), G::kMscFieldDigest);
@@ -443,7 +452,7 @@ TEST_F(ResolveMethodTest, MscMethodImplDrives)
     }
     int implMethods = 0, sameDecl = 0, memberRefDecl = 0, accessorDecl = 0;
     int accDeclFake = 0, accDeclReal = 0;
-    Fnv64 sameFnv, crossPlainFnv, accDeclFakeFnv;
+    Fnv64 sameFnv, crossPlainFnv, accDeclFakeFnv, accDeclRealFnv;
     for (const auto& kv : byMethod) {
         const TS::IMethod* method =
             fx.mscSingle.GetDefinitionMethod(kv.first);
@@ -468,14 +477,19 @@ TEST_F(ResolveMethodTest, MscMethodImplDrives)
         } else {
             memberRefDecl++;
             if (anyAccessor) {
-                // The cross-assembly accessor declaration: the memberref
-                // resolution hits the accessor-search deferral (the
-                // resolvable-parent subset) or builds the fake member (the
-                // unresolvable-parent subset -- both engines agree there).
-                try {
-                    accDeclFakeFnv.Add(ImplDriveLine(kv.first, method));
+                // The cross-assembly accessor declaration: the resolution
+                // lands in the accessor-search arm (over the declaring
+                // type's Properties/Events enumerations) -- either the
+                // REAL accessor method or the FakeMethod the
+                // unresolvable declaring type builds (both engines agree
+                // on both subsets; the partition mirrors the probe's
+                // FakeMethod-line test).
+                std::string accLine = ImplDriveLine(kv.first, method);
+                if (accLine.find("FakeMethod") != std::string::npos) {
+                    accDeclFakeFnv.Add(accLine);
                     accDeclFake++;
-                } catch (const std::logic_error&) {
+                } else {
+                    accDeclRealFnv.Add(accLine);
                     accDeclReal++;
                 }
                 accessorDecl++;
@@ -487,6 +501,7 @@ TEST_F(ResolveMethodTest, MscMethodImplDrives)
     EXPECT_EQ(accDeclFake, G::kMscAccDeclFakeCount);
     EXPECT_EQ(accDeclFakeFnv.Digest(), G::kMscAccDeclFakeDigest);
     EXPECT_EQ(accDeclReal, G::kMscAccDeclRealCount);
+    EXPECT_EQ(accDeclRealFnv.Digest(), G::kMscAccDeclRealDigest);
     EXPECT_EQ(implMethods, G::kMscImplMethods);
     EXPECT_EQ(sameDecl, G::kMscSameDeclMethods);
     EXPECT_EQ(memberRefDecl, G::kMscMemberRefDeclMethods);
@@ -507,27 +522,16 @@ TEST_F(ResolveMethodTest, MscMethodDefSamples)
         std::uint32_t token = std::stoul(
             G::kMscMethoddefLines[i].first, nullptr, 16);
         const TS::IMethod* m = fx.mscSingle.ResolveMethod(token, context);
-        // The owner field is the second-to-last '|'-separated field; a
-        // non-<null> gold owner (the real property/event entity) swaps for
-        // the <deferred> marker (the port's AccessorOwner deferral).
-        std::string expected = G::kMscMethoddefLines[i].second;
-        std::size_t lastBar = expected.rfind('|');
-        std::size_t ownerBar = expected.rfind('|', lastBar - 1);
-        std::string ownerField = expected.substr(
-            ownerBar + 1, lastBar - ownerBar - 1);
-        if (ownerField != "<null>")
-            expected.replace(ownerBar + 1, lastBar - ownerBar - 1,
-                "<deferred>");
-        EXPECT_EQ(RenderMethod(m), expected)
+        // The gold lines carry the real engine's AccessorOwner renders
+        // ("Property:message" -- four of the samples carry accessor
+        // owners), byte-exact since the MetadataProperty/MetadataEvent
+        // slice landed (the owner field is the second-to-last
+        // '|'-separated field).
+        EXPECT_EQ(RenderMethod(m), std::string(
+            G::kMscMethoddefLines[i].second))
             << "token " << std::hex << token;
         methoddefRows++;
     }
-    // The probe's methoddef DIGEST folds the real engine's AccessorOwner
-    // renders ("Property:message" -- four of the samples carry accessor
-    // owners), which the port's AccessorOwner deferral cannot reproduce
-    // until the MetadataProperty/MetadataEvent slice lands; the per-line
-    // comparison above (with the owner field swapped for the marker) is the
-    // reproducible pin.
     EXPECT_EQ(methoddefRows, G::kMscMethoddefRows);
 }
 
@@ -601,22 +605,26 @@ TEST_F(ResolveMethodTest, SysPairedMemberRefDigests)
     RmFixture fx;
     const TM::MetadataFile* file = fx.sysPaired.MetadataFile();
     TS::GenericContext context({}, {});
-    Fnv64 methodFnv, fieldFnv, accFakeFnv;
+    Fnv64 methodFnv, fieldFnv, accFakeFnv, accRealFnv;
     int methodRows = 0, fieldRows = 0, accReal = 0, accFake = 0;
     for (const TM::MetadataFile::MemberRefInfo& row : file->MemberRefs()) {
         bool methodKind = MemberRefIsMethodKind(*file, row.Token);
         if (methodKind) {
             if (AccessorShaped(row.Name)) {
-                try {
-                    const TS::IMethod* m =
-                        fx.sysPaired.ResolveMethod(row.Token, context);
-                    // The unresolvable declaring types produce the fake
-                    // method (the accessor-kind guess) -- both engines
-                    // render them identically.
-                    accFakeFnv.Add(LinePrefix('M', row.Token)
-                        + RenderMethod(m));
+                // The accessor-search arm: the REAL accessor methods for
+                // the resolvable parents, the FakeMethod the accessor-kind
+                // guess builds for the unresolvable System.Configuration
+                // parents (both engines agree on both subsets; the digest
+                // over each subset is byte-exact).
+                const TS::IMethod* m =
+                    fx.sysPaired.ResolveMethod(row.Token, context);
+                std::string accLine =
+                    LinePrefix('M', row.Token) + RenderMethod(m);
+                if (accLine.find("FakeMethod") != std::string::npos) {
+                    accFakeFnv.Add(accLine);
                     accFake++;
-                } catch (const std::logic_error&) {
+                } else {
+                    accRealFnv.Add(accLine);
                     accReal++;
                 }
                 continue;
@@ -636,6 +644,7 @@ TEST_F(ResolveMethodTest, SysPairedMemberRefDigests)
     EXPECT_EQ(methodRows, G::kSysMethodRows);
     EXPECT_EQ(fieldRows, G::kSysFieldRows);
     EXPECT_EQ(accReal, G::kSysAccRealCount);
+    EXPECT_EQ(accRealFnv.Digest(), G::kSysAccRealDigest);
     EXPECT_EQ(accFake, G::kSysAccFakeCount);
     EXPECT_EQ(methodFnv.Digest(), G::kSysMethodDigest);
     EXPECT_EQ(fieldFnv.Digest(), G::kSysFieldDigest);
@@ -687,7 +696,7 @@ TEST_F(ResolveMethodTest, SysPairedSpecAndImplDigests)
     }
     int implMethods = 0, sameDecl = 0, memberRefDecl = 0, accessorDecl = 0;
     int accDeclFake = 0, accDeclReal = 0;
-    Fnv64 sameFnv, crossPlainFnv, accDeclFakeFnv;
+    Fnv64 sameFnv, crossPlainFnv, accDeclFakeFnv, accDeclRealFnv;
     for (const auto& kv : byMethod) {
         const TS::IMethod* method =
             fx.sysPaired.GetDefinitionMethod(kv.first);
@@ -711,10 +720,13 @@ TEST_F(ResolveMethodTest, SysPairedSpecAndImplDigests)
         } else {
             memberRefDecl++;
             if (anyAccessor) {
-                try {
-                    accDeclFakeFnv.Add(ImplDriveLine(kv.first, method));
+                // The accessor-search partition (the msc body's note).
+                std::string accLine = ImplDriveLine(kv.first, method);
+                if (accLine.find("FakeMethod") != std::string::npos) {
+                    accDeclFakeFnv.Add(accLine);
                     accDeclFake++;
-                } catch (const std::logic_error&) {
+                } else {
+                    accDeclRealFnv.Add(accLine);
                     accDeclReal++;
                 }
                 accessorDecl++;
@@ -726,6 +738,7 @@ TEST_F(ResolveMethodTest, SysPairedSpecAndImplDigests)
     EXPECT_EQ(accDeclFake, G::kSysAccDeclFakeCount);
     EXPECT_EQ(accDeclFakeFnv.Digest(), G::kSysAccDeclFakeDigest);
     EXPECT_EQ(accDeclReal, G::kSysAccDeclRealCount);
+    EXPECT_EQ(accDeclRealFnv.Digest(), G::kSysAccDeclRealDigest);
     EXPECT_EQ(implMethods, G::kSysImplMethods);
     EXPECT_EQ(sameDecl, G::kSysSameDeclMethods);
     EXPECT_EQ(memberRefDecl, G::kSysMemberRefDeclMethods);

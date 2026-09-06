@@ -36,7 +36,9 @@
 #include "Decompiler/TypeSystem/Implementation/DefaultAttribute.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataTypeDefinition.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataField.hpp"
+#include "Decompiler/TypeSystem/Implementation/MetadataEvent.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataMethod.hpp"
+#include "Decompiler/TypeSystem/Implementation/MetadataProperty.hpp"
 #include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
 #include "Decompiler/TypeSystem/Implementation/DefaultTypeParameter.hpp"
 #include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
@@ -181,6 +183,16 @@ MetadataModule::MetadataModule(const ICompilation& compilation,
         // The C# `methodDefs = new MetadataMethod[metadata.MethodDefinitions
         // .Count + 1]` (the method entity cache, the method slice).
         methodDefs_.resize(metadataFile_->MethodCount() + 1);
+        // The C# `propertyDefs = new MetadataProperty[metadata
+        // .PropertyDefinitions.Count + 1]` (the property entity cache).
+        propertyDefs_.resize(
+            metadataFile_->CorTableRowCount(
+                Metadata::CorTableIndex::Property) + 1);
+        // The C# `eventDefs = new MetadataEvent[metadata.EventDefinitions
+        // .Count + 1]` (the event entity cache).
+        eventDefs_.resize(
+            metadataFile_->CorTableRowCount(
+                Metadata::CorTableIndex::Event) + 1);
         referencedAssemblies_.resize(metadataFile_->CorTableRowCount(
             Metadata::CorTableIndex::AssemblyRef) + 1);
     }
@@ -433,6 +445,62 @@ const IMethod* MetadataModule::GetDefinitionMethod(
     if (slot == nullptr)
         slot = std::make_shared<Implementation::MetadataMethod>(
             *this, methodToken);
+    return slot.get();
+}
+
+// The C# `public IProperty GetDefinition(PropertyDefinitionHandle handle)`
+// (MetadataModule.cs lines 269-283) -- the per-row property entity cache:
+// the nil token -> null; the UNCACHED arm constructs without a range check
+// (the keep-alive registry owning the instance); the CACHED arm
+// range-checks against the `propertyDefs` slot count and fills the
+// per-row slot.
+const IProperty* MetadataModule::GetDefinitionProperty(
+    std::uint32_t propertyToken) const
+{
+    std::uint32_t row = propertyToken & 0x00FFFFFFu;
+    if (row == 0)
+        return nullptr;
+    if (propertyDefs_.empty())
+    {
+        auto property = std::make_shared<Implementation::MetadataProperty>(
+            *this, propertyToken);
+        const IProperty* result = property.get();
+        uncachedPropertyDefs_.push_back(std::move(property));
+        return result;
+    }
+    if (row >= propertyDefs_.size())
+        HandleOutOfRange();
+    std::shared_ptr<Implementation::MetadataProperty>& slot =
+        propertyDefs_[row];
+    if (slot == nullptr)
+        slot = std::make_shared<Implementation::MetadataProperty>(
+            *this, propertyToken);
+    return slot.get();
+}
+
+// The C# `public IEvent GetDefinition(EventDefinitionHandle handle)`
+// (MetadataModule.cs lines 286-299) -- the per-row event entity cache (the
+// same conventions as the property arm).
+const IEvent* MetadataModule::GetDefinitionEvent(
+    std::uint32_t eventToken) const
+{
+    std::uint32_t row = eventToken & 0x00FFFFFFu;
+    if (row == 0)
+        return nullptr;
+    if (eventDefs_.empty())
+    {
+        auto ev = std::make_shared<Implementation::MetadataEvent>(
+            *this, eventToken);
+        const IEvent* result = ev.get();
+        uncachedEventDefs_.push_back(std::move(ev));
+        return result;
+    }
+    if (row >= eventDefs_.size())
+        HandleOutOfRange();
+    std::shared_ptr<Implementation::MetadataEvent>& slot = eventDefs_[row];
+    if (slot == nullptr)
+        slot = std::make_shared<Implementation::MetadataEvent>(
+            *this, eventToken);
     return slot.get();
 }
 
@@ -1379,9 +1447,10 @@ const IMethod* MetadataModule::ResolveMethodReference(
             // `.cctor` over the static constructors, and the plain name over
             // the declared methods CONCATENATED with the accessors (the
             // accessor methods are dropped from the Methods enumeration, so
-            // the concat is what makes accessor memberrefs resolvable -- the
-            // accessor arm is the loud MetadataProperty/MetadataEvent
-            // deferral until that slice lands).
+            // the concat is what makes accessor memberrefs resolvable --
+            // the accessor arm resolves through the Properties/Events
+            // enumerations since the MetadataProperty/MetadataEvent slice
+            // landed).
             std::vector<const IMethod*> methods;
             if (memberRef->Name == ".ctor")
             {
@@ -1406,8 +1475,8 @@ const IMethod* MetadataModule::ResolveMethodReference(
                 // LAZY concat: the accessor enumeration evaluates only when
                 // the methods search is exhausted without a match (a
                 // same-name plain method resolves without ever touching the
-                // accessor path -- the loud MetadataProperty/MetadataEvent
-                // deferral only fires for the accessor-shaped misses).
+                // accessor path -- only the accessor-shaped misses reach
+                // it).
                 const std::string& name = memberRef->Name;
                 methods = declaringTypeDefinition->GetMethods(
                     [&name](const IMethod* m) {
@@ -1848,14 +1917,9 @@ const IEntity* MetadataModule::ResolveEntity(
     case 0x04u:  // HandleKind.FieldDefinition
         return GetDefinitionField(entityHandle);
     case 0x14u:  // HandleKind.EventDefinition
+        return GetDefinitionEvent(entityHandle);
     case 0x17u:  // HandleKind.PropertyDefinition
-        // The C# `GetDefinition((EventDefinitionHandle /
-        // PropertyDefinitionHandle) entityHandle)` -- the property/event
-        // entity caches land with the MetadataProperty / MetadataEvent
-        // slice (the loud deferral).
-        throw std::logic_error(
-            "MetadataModule::ResolveEntity: the MetadataProperty / "
-            "MetadataEvent entity family is not yet ported");
+        return GetDefinitionProperty(entityHandle);
     default:
         return nullptr;
     }

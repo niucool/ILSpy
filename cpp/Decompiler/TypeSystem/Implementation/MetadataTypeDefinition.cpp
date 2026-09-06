@@ -38,7 +38,9 @@
 #include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
 #include "Decompiler/TypeSystem/Implementation/GetMembersHelper.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataTypeParameter.hpp"
+#include "Decompiler/Metadata/CustomAttributeDecoder.hpp"
 
+#include <any>
 #include <cstdio>
 #include <optional>
 #include <utility>
@@ -493,13 +495,40 @@ std::vector<const IProperty*> MetadataTypeDefinition::GetProperties(
     std::function<bool(const IProperty*)> filter,
     GetMemberOptions options) const
 {
-    (void)filter;
-    (void)options;
+    // The C# `if (Kind == TypeKind.Void) return EmptyList<IProperty>
+    // .Instance;` and the IgnoreInheritedMembers BIT TEST (the GetFields
+    // precedent).
     if (kind_ == TypeKind::Void)
         return {};
-    throw std::logic_error(
-        "MetadataTypeDefinition::GetProperties: the MetadataProperty entity "
-        "family is not yet ported");
+    if ((options
+         & ::ILSpy::Decompiler::TypeSystem::GetMemberOptions::
+             IgnoreInheritedMembers)
+        == ::ILSpy::Decompiler::TypeSystem::GetMemberOptions::
+            IgnoreInheritedMembers)
+    {
+        std::vector<const IProperty*> result;
+        for (const IProperty* property : Properties())
+        {
+            if (!filter || filter(property))
+                result.push_back(property);
+        }
+        return result;
+    }
+    // The C# `return GetMembersHelper.GetProperties(this, filter,
+    // options);` -- the inherited-members walk (the GetFields precedent:
+    // the helper's owning results -- the fresh `SpecializedProperty`
+    // instances a parameterized base produces -- are kept alive in the
+    // registry below).
+    std::vector<std::shared_ptr<const IProperty>> owned
+        = GetMembersHelper::GetProperties(this, filter, options);
+    std::vector<const IProperty*> result;
+    result.reserve(owned.size());
+    for (std::shared_ptr<const IProperty>& p : owned)
+    {
+        result.push_back(p.get());
+        propertyKeepAlives_.push_back(std::move(p));
+    }
+    return result;
 }
 
 std::vector<const IField*> MetadataTypeDefinition::GetFields(
@@ -550,26 +579,77 @@ std::vector<const IEvent*> MetadataTypeDefinition::GetEvents(
     std::function<bool(const IEvent*)> filter,
     GetMemberOptions options) const
 {
-    (void)filter;
-    (void)options;
+    // The C# `if (Kind == TypeKind.Void) return EmptyList<IEvent>
+    // .Instance;` and the IgnoreInheritedMembers BIT TEST.
     if (kind_ == TypeKind::Void)
         return {};
-    throw std::logic_error(
-        "MetadataTypeDefinition::GetEvents: the MetadataEvent entity family "
-        "is not yet ported");
+    if ((options
+         & ::ILSpy::Decompiler::TypeSystem::GetMemberOptions::
+             IgnoreInheritedMembers)
+        == ::ILSpy::Decompiler::TypeSystem::GetMemberOptions::
+            IgnoreInheritedMembers)
+    {
+        std::vector<const IEvent*> result;
+        for (const IEvent* ev : Events())
+        {
+            if (!filter || filter(ev))
+                result.push_back(ev);
+        }
+        return result;
+    }
+    // The C# `return GetMembersHelper.GetEvents(this, filter, options);`
+    // -- the inherited-members walk (the property precedent's registry).
+    std::vector<std::shared_ptr<const IEvent>> owned
+        = GetMembersHelper::GetEvents(this, filter, options);
+    std::vector<const IEvent*> result;
+    result.reserve(owned.size());
+    for (std::shared_ptr<const IEvent>& e : owned)
+    {
+        result.push_back(e.get());
+        eventKeepAlives_.push_back(std::move(e));
+    }
+    return result;
 }
 
 std::vector<const IMember*> MetadataTypeDefinition::GetMembers(
     std::function<bool(const IMember*)> filter,
     GetMemberOptions options) const
 {
-    (void)filter;
-    (void)options;
+    // The C# `if (Kind == TypeKind.Void) return EmptyList<IMember>
+    // .Instance;` and the IgnoreInheritedMembers BIT TEST over `Members`
+    // (the C# GetFiltered(this.Members, filter)).
     if (kind_ == TypeKind::Void)
         return {};
-    throw std::logic_error(
-        "MetadataTypeDefinition::GetMembers: the member entity family is "
-        "not yet ported");
+    if ((options
+         & ::ILSpy::Decompiler::TypeSystem::GetMemberOptions::
+             IgnoreInheritedMembers)
+        == ::ILSpy::Decompiler::TypeSystem::GetMemberOptions::
+            IgnoreInheritedMembers)
+    {
+        std::vector<const IMember*> result;
+        for (const IMember* member : Members())
+        {
+            if (!filter || filter(member))
+                result.push_back(member);
+        }
+        return result;
+    }
+    // The C# `return GetMembersHelper.GetMembers(this, filter, options);`
+    // -- the inherited-members walk (the GetMembersHelper composition over
+    // every family; the fresh specialized instances stay owned by the
+    // helper's per-family keep-alive registries through the shared_ptr
+    // view -- the GetFields precedent: the helper returns owning handles
+    // which the port registers here).
+    std::vector<std::shared_ptr<const IMember>> owned
+        = GetMembersHelper::GetMembers(this, filter, options);
+    std::vector<const IMember*> result;
+    result.reserve(owned.size());
+    for (std::shared_ptr<const IMember>& m : owned)
+    {
+        result.push_back(m.get());
+        memberKeepAlives_.push_back(std::move(m));
+    }
+    return result;
 }
 
 std::vector<const IMethod*> MetadataTypeDefinition::GetAccessors(
@@ -591,8 +671,8 @@ std::vector<const IMethod*> MetadataTypeDefinition::GetAccessors(
         // yield return remover;` -- the INVOKER check yields the REMOVER
         // (MetadataTypeDefinition.cs GetFilteredAccessors), preserved
         // verbatim (the real engine's observable behavior).
-        // The Properties()/Events() enumerations are the loud
-        // MetadataProperty/MetadataEvent deferral until that slice lands.
+        // The Properties()/Events() enumerations are REAL (the
+        // MetadataProperty/MetadataEvent slice).
         std::vector<const IMethod*> result;
         for (const IProperty* prop : Properties())
         {
@@ -1002,13 +1082,9 @@ std::vector<const ITypeDefinition*> MetadataTypeDefinition::NestedTypes()
     return nestedTypes_;
 }
 
-// DEFERRED (convention (e)): the member family.
-std::vector<const IMember*> MetadataTypeDefinition::Members() const
-{
-    throw std::logic_error(
-        "MetadataTypeDefinition::Members: the member entity family is not "
-        "yet ported");
-}
+// The C# `public IReadOnlyList<IMember> Members` -- LANDED with the
+// MetadataProperty/MetadataEvent slice; the body lives with the property
+// and event enumerations below.
 
 std::vector<const IField*> MetadataTypeDefinition::Fields() const
 {
@@ -1108,16 +1184,178 @@ std::vector<const IMethod*> MetadataTypeDefinition::Methods() const
 
 std::vector<const IProperty*> MetadataTypeDefinition::Properties() const
 {
-    throw std::logic_error(
-        "MetadataTypeDefinition::Properties: the MetadataProperty entity "
-        "family is not yet ported");
+    // The C# `LazyInit.VolatileRead(ref this.properties)`.
+    if (properties_.has_value())
+        return *properties_;
+    const Metadata::MetadataFile* metadata = module_.MetadataFile();
+    // The C# `var propertyCollection = metadata.GetTypeDefinition(handle)
+    // .GetProperties();` -- the TypeDef's property list in row order.
+    std::vector<Metadata::PropertyInfo> propertyCollection
+        = metadata->GetProperties(handle_);
+    std::vector<const IProperty*> propertyList;
+    propertyList.reserve(propertyCollection.size());
+    for (const Metadata::PropertyInfo& h : propertyCollection)
+    {
+        // The C# `var property = metadata.GetPropertyDefinition(h); var
+        // accessors = property.GetAccessors(); bool getterVisible =
+        // !accessors.Getter.IsNil && module.IsVisible(metadata
+        // .GetMethodDefinition(accessors.Getter).Attributes); bool
+        // setterVisible = ...; if (getterVisible || setterVisible)
+        // propertyList.Add(module.GetDefinition(h));`
+        Metadata::MetadataFile::PropertyAccessorsInfo accessors
+            = metadata->GetPropertyAccessors(h.Token);
+        bool getterVisible = accessors.GetterToken != 0
+            && module_.IsMethodVisible(
+                metadata->GetMethodAttributes(accessors.GetterToken));
+        bool setterVisible = accessors.SetterToken != 0
+            && module_.IsMethodVisible(
+                metadata->GetMethodAttributes(accessors.SetterToken));
+        if (getterVisible || setterVisible)
+        {
+            propertyList.push_back(
+                module_.GetDefinitionProperty(h.Token));
+        }
+    }
+    // The C# `if ((module.TypeSystemOptions & TypeSystemOptions.Uncached)
+    // != 0) return propertyList;`.
+    if ((module_.TypeSystemOptions()
+         & ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::Uncached)
+        != ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::None)
+        return propertyList;
+    properties_ = std::move(propertyList);
+    return *properties_;
 }
 
 std::vector<const IEvent*> MetadataTypeDefinition::Events() const
 {
-    throw std::logic_error(
-        "MetadataTypeDefinition::Events: the MetadataEvent entity family is "
-        "not yet ported");
+    // The C# `LazyInit.VolatileRead(ref this.events)`.
+    if (events_.has_value())
+        return *events_;
+    const Metadata::MetadataFile* metadata = module_.MetadataFile();
+    // The C# `var eventCollection = metadata.GetTypeDefinition(handle)
+    // .GetEvents();` -- the TypeDef's event list in row order.
+    std::vector<Metadata::EventInfo> eventCollection
+        = metadata->GetEvents(handle_);
+    std::vector<const IEvent*> eventList;
+    eventList.reserve(eventCollection.size());
+    for (const Metadata::EventInfo& h : eventCollection)
+    {
+        // The C# `var ev = metadata.GetEventDefinition(h); var accessors =
+        // ev.GetAccessors(); if (accessors.Adder.IsNil) continue; var
+        // addMethod = metadata.GetMethodDefinition(accessors.Adder); if
+        // (module.IsVisible(addMethod.Attributes)) eventList.Add(
+        // module.GetDefinition(h));` -- an event is visible iff it has a
+        // VISIBLE ADDER (the remover/raiser play no part).
+        Metadata::MetadataFile::EventAccessorsInfo accessors
+            = metadata->GetEventAccessors(h.Token);
+        if (accessors.AdderToken == 0)
+            continue;
+        if (module_.IsMethodVisible(
+                metadata->GetMethodAttributes(accessors.AdderToken)))
+        {
+            eventList.push_back(module_.GetDefinitionEvent(h.Token));
+        }
+    }
+    // The C# `if ((module.TypeSystemOptions & TypeSystemOptions.Uncached)
+    // != 0) return eventList;`.
+    if ((module_.TypeSystemOptions()
+         & ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::Uncached)
+        != ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::None)
+        return eventList;
+    events_ = std::move(eventList);
+    return *events_;
+}
+
+// The C# `public IReadOnlyList<IMember> Members` (MetadataTypeDefinition
+// .cs lines 190-201): the Fields.Concat(Methods).Concat(Properties)
+// .Concat(Events) composition, cached with the `Uncached` BYPASS.
+std::vector<const IMember*> MetadataTypeDefinition::Members() const
+{
+    // The C# `LazyInit.VolatileRead(ref this.members)`.
+    if (members_.has_value())
+        return *members_;
+    std::vector<const IField*> fields = Fields();
+    std::vector<const IMethod*> methods = Methods();
+    std::vector<const IProperty*> properties = Properties();
+    std::vector<const IEvent*> events = Events();
+    std::vector<const IMember*> memberList;
+    memberList.reserve(fields.size() + methods.size() + properties.size()
+        + events.size());
+    // The C# `members.Fields.Concat<IMember>(this.Methods).Concat(
+    // this.Properties).Concat(this.Events).ToArray();` -- fields, then
+    // methods, then properties, then events.
+    for (const IField* f : fields)
+        memberList.push_back(f);
+    for (const IMethod* m : methods)
+        memberList.push_back(m);
+    for (const IProperty* p : properties)
+        memberList.push_back(p);
+    for (const IEvent* e : events)
+        memberList.push_back(e);
+    // The C# `if ((module.TypeSystemOptions & TypeSystemOptions.Uncached)
+    // != 0) return members;`.
+    if ((module_.TypeSystemOptions()
+         & ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::Uncached)
+        != ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::None)
+        return memberList;
+    members_ = std::move(memberList);
+    return *members_;
+}
+
+// The C# `public string DefaultMemberName` (MetadataTypeDefinition.cs
+// lines 489-512): the lazy [DefaultMember] row walk over the type's own
+// custom-attribute rows -- the first row that IS a [DefaultMember] and
+// decodes a single string fixed argument. The ENGAGED state of the outer
+// optional carries the C# `defaultMemberNameInitialized` flag (a null
+// result still caches; the C# flag, not the LazyInit field, stops the
+// rescan).
+std::optional<std::string> MetadataTypeDefinition::DefaultMemberName() const
+{
+    if (defaultMemberName_.has_value())
+        return *defaultMemberName_;
+    std::optional<std::string> defaultMemberName;
+    const Metadata::MetadataFile* metadata = module_.MetadataFile();
+    // The C# `foreach (var h in typeDefinition.GetCustomAttributes())` --
+    // the row-order walk over the type's own rows. A decode failure
+    // PROPAGATES (the C# has no catch here; the GetNullableContext
+    // catch-continue pattern does not apply).
+    for (std::uint32_t attributeToken :
+         metadata->GetCustomAttributeTokens(handle_))
+    {
+        // The C# `var a = metadata.GetCustomAttribute(h); if
+        // (!a.IsKnownAttribute(metadata, KnownAttribute.DefaultMember))
+        // continue;`.
+        if (!Metadata::IsKnownAttribute(
+                *metadata, attributeToken, KnownAttribute::DefaultMember))
+            continue;
+        // The C# `var value = a.DecodeValue(module.TypeProvider);` -- the
+        // decoder over the row's own constructor token and value blob
+        // (the InternalsVisibleTo recipe).
+        std::optional<Metadata::CustomAttributeRowInfo> row
+            = metadata->GetCustomAttribute(attributeToken);
+        Metadata::CustomAttributeDecoder decoder(
+            *metadata,
+            const_cast<::ILSpy::Decompiler::TypeSystem::TypeProvider&>(
+                module_.TypeProvider()));
+        Metadata::CustomAttributeValue value = decoder.DecodeValue(
+            row->ConstructorToken,
+            row->ValueBlob ? row->ValueBlob->data() : nullptr,
+            row->ValueBlob ? row->ValueBlob->size() : 0);
+        // The C# `if (value.FixedArguments.Length == 1 &&
+        // value.FixedArguments[0].Value is string name)`. The any is
+        // MATERIALIZED into a named local (the dangling-temporary trap).
+        if (value.FixedArguments.size() == 1)
+        {
+            std::any boxed = value.FixedArguments[0].Value();
+            if (auto* name = std::any_cast<std::string>(&boxed))
+            {
+                defaultMemberName = *name;
+                break;
+            }
+        }
+    }
+    defaultMemberName_ = defaultMemberName;
+    return defaultMemberName;
 }
 
 KnownTypeCode MetadataTypeDefinition::KnownTypeCode() const

@@ -68,14 +68,15 @@
 //      NullableContext` for a top-level one) over the SRMExtensions row
 //      decode + the module's EAGER context (the AttributeListBuilder slice's
 //      NRT-context sub-slice).
-//  (e) DEFERRED members (each a loud `std::logic_error` naming the gating
-//      machinery, or absent with this note where the port's interface omits
-//      the member): the member families that remain -- `Members`/
-//      `Properties`/`Events` (the `MetadataProperty`/`MetadataEvent` classes;
-//      the `GetMembers`/`GetProperties`/`GetEvents`/`GetAccessors`
-//      enumerations route over them; the Void early-exit arms and the
-//      NestedTypes-only short-circuit arm ARE real) and `GetConstructors`
-//      (the ComHelper.IsComImport co-class arm); `Methods` LANDED over the
+//  (e) LANDED members: `Members`/`Properties`/`Events` (over the
+//      `MetadataProperty`/`MetadataEvent` classes -- the
+//      `GetMembers`/`GetProperties`/`GetEvents`/`GetAccessors`
+//      enumerations route over them, the Void early-exit arms and the
+//      NestedTypes-only short-circuit arm real) plus the plain
+//      `DefaultMemberName` member (the [DefaultMember] row walk the
+//      MetadataProperty ctor's DetermineIsIndexer consumes); the
+//      remaining `GetConstructors` deferral is the ComHelper.IsComImport
+//      co-class arm; `Methods` LANDED over the
 //      `MetadataMethod` family together with `GetMethods` (both overloads,
 //      the GetMembersHelper routing included) and `IsRecord` (the raw
 //      method-name scan -- note the C# scans the RAW method list, NOT the
@@ -87,8 +88,8 @@
 //      AttributeListBuilder + CustomAttribute classes (the custom-attribute
 //      value decoder slice); `ExtensionInfo`'s construction
 //      (the null arms are real: false when !HasExtensions or
-//      ExtensionMembers is off); `DefaultMemberName` (absent -- the port's
-//      ITypeDefinition omits the member); `GetOverrides`/`HasOverrides`
+//      ExtensionMembers is off); `DefaultMemberName` LANDED as the plain
+//      concrete-class member; `GetOverrides`/`HasOverrides`
 //      LANDED with the resolve-method slice (the MethodImpl-table walk over
 //      `MetadataModule::ResolveMethod`, consumed by `MetadataMethod`'s
 //      explicit-interface surface and the upcoming MetadataProperty /
@@ -262,6 +263,17 @@ public:
     // --- IEntity ---
     std::uint32_t MetadataToken() const override;
     const ITypeDefinition* DeclaringTypeDefinition() const override;
+
+    // The C# `public string DefaultMemberName` (MetadataTypeDefinition.cs
+    // lines 489-512) -- a PLAIN member (the C# property lives on the
+    // CONCRETE class, not the ITypeDefinition interface; the C#
+    // consumers cast down -- MetadataProperty.DetermineIsIndexer). The
+    // lazy [DefaultMember] row walk: the first row decoding a single
+    // string fixed argument; null (nullopt) when no row matches. The C#
+    // `defaultMemberNameInitialized` flag ports to the ENGAGED state of
+    // the outer optional (a null result still caches -- the C# flag, not
+    // the LazyInit field, is what stops the rescan).
+    std::optional<std::string> DefaultMemberName() const;
     // The C# `IType DeclaringType => DeclaringTypeDefinition` -- the
     // non-owning alias over the module-owned declaring type (convention
     // (c)).
@@ -369,6 +381,25 @@ private:
     // engaged-state-as-read shape).
     mutable std::optional<std::vector<const IMethod*>> methods_;
 
+    // The lazily-loaded `properties` cache (the C# `IProperty[] properties`
+    // field, the same `LazyInit.GetOrSet` + `Uncached` BYPASS shape).
+    mutable std::optional<std::vector<const IProperty*>> properties_;
+
+    // The lazily-loaded `events` cache (the C# `IEvent[] events` field,
+    // the same shape).
+    mutable std::optional<std::vector<const IEvent*>> events_;
+
+    // The lazily-loaded `members` cache (the C# `IMember[] members` field
+    // -- the Fields.Concat(Methods).Concat(Properties).Concat(Events)
+    // composition).
+    mutable std::optional<std::vector<const IMember*>> members_;
+
+    // The lazily-loaded `defaultMemberName` cache (the plain member's
+    // backing store; the ENGAGED state of the OUTER optional carries the
+    // C# `defaultMemberNameInitialized` flag semantics -- a null result
+    // still caches).
+    mutable std::optional<std::optional<std::string>> defaultMemberName_;
+
     // The attribute snapshot (the AttributeListBuilder slice): the C#
     // `GetAttributes()` REBUILDS the list per call (no LazyInit field);
     // the port caches the built list once -- a documented divergence
@@ -394,6 +425,14 @@ private:
     // precedent): the fresh `SpecializedField` instances the helper's
     // non-IgnoreInheritedMembers arm hands back.
     mutable std::vector<std::shared_ptr<const IField>> fieldKeepAlives_;
+
+    // The GetProperties / GetEvents / GetMembers inherited-walk
+    // keep-alives (the `methodKeepAlives_` / `fieldKeepAlives_`
+    // precedent -- the helper's fresh SpecializedProperty /
+    // SpecializedEvent / specialized member results).
+    mutable std::vector<std::shared_ptr<const IProperty>> propertyKeepAlives_;
+    mutable std::vector<std::shared_ptr<const IEvent>> eventKeepAlives_;
+    mutable std::vector<std::shared_ptr<const IMember>> memberKeepAlives_;
 
     // The ThreeState-cached `isRecord` field (the C# `byte isRecord =
     // ThreeState.Unknown`; 0 = Unknown, 1 = False, 2 = True).

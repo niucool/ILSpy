@@ -697,17 +697,20 @@ TEST(MetadataTypeDefinitionTest, DeferralContracts)
     const TS::ITypeDefinition* string_ = f.Type("System", "String");
     ASSERT_NE(string_, nullptr);
 
-    // The property/event members and the attribute snapshot are the loud
-    // deferrals of the remaining slices (DirectBaseTypes landed with the
-    // ResolveType pair -- the ResolveType_Test suite pins it; Fields landed
-    // with the MetadataField family -- the MetadataField_Test suite pins
-    // it; Methods landed with the FakeMember dummy-constructor slice -- the
-    // MemberEnumeration_Test suite pins the whole-corpus sweeps).
-    EXPECT_THROW(string_->Members(), std::logic_error);
+    // The member families are all LANDED (DirectBaseTypes with the
+    // ResolveType pair -- the ResolveType_Test suite pins it; Fields with
+    // the MetadataField family -- the MetadataField_Test suite pins it;
+    // Methods with the FakeMember dummy-constructor slice -- the
+    // MemberEnumeration_Test suite pins the whole-corpus sweeps;
+    // Properties/Events/Members with the MetadataProperty/MetadataEvent
+    // slice -- the MetadataPropertyEvent_Test suite pins the whole-corpus
+    // sweeps). String: 8 fields, 191 methods, 3 properties
+    // (FirstChar/Chars/Length), no events, 202 members.
     EXPECT_EQ(string_->Fields().size(), 8u);
     EXPECT_EQ(string_->Methods().size(), 191u);
-    EXPECT_THROW(string_->Properties(), std::logic_error);
-    EXPECT_THROW(string_->Events(), std::logic_error);
+    EXPECT_EQ(string_->Properties().size(), 3u);
+    EXPECT_EQ(string_->Events().size(), 0u);
+    EXPECT_EQ(string_->Members().size(), 202u);
     // GetAttributes/HasAttribute/GetAttribute LANDED (the AttributeListBuilder
     // slice): String carries [Serializable]/[ComImport]/[StructLayout] and no
     // [Obsolete] row (the AttributeListBuilder_Test suite pins the byte-exact

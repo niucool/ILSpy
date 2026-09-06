@@ -21,6 +21,9 @@
 
 #include "Decompiler/TypeSystem/Implementation/MetadataMethod.hpp"
 
+#include "Decompiler/TypeSystem/IEvent.hpp"
+#include "Decompiler/TypeSystem/IProperty.hpp"
+
 #include "Decompiler/CSharp/Syntax/OperatorDeclaration.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/MethodSemanticsLookup.hpp"
@@ -412,15 +415,21 @@ bool MetadataMethod::HasBody() const
         && metadata->GetMethodRVA(handle_) > 0;
 }
 
-// The C# `public IMember AccessorOwner` -- the loud DEFERRAL gated on the
-// property/event entity caches (convention (e)).
+// The C# `public IMember AccessorOwner` (MetadataMethod.cs lines 150-163):
+// the nil handle -> null; a PropertyDefinition handle routes through the
+// module's property entity cache, an EventDefinition handle through the
+// event cache, anything else -> null (the entity caches landed with the
+// MetadataProperty / MetadataEvent slice).
 const IMember* MetadataMethod::AccessorOwner() const
 {
     if (accessorOwner_ == 0)
         return nullptr;
-    throw std::logic_error(
-        "MetadataMethod::AccessorOwner: the MetadataProperty/"
-        "MetadataEvent entity caches are not yet ported");
+    std::uint32_t top = accessorOwner_ >> 24;
+    if (top == 0x17u)
+        return module_.GetDefinitionProperty(accessorOwner_);
+    if (top == 0x14u)
+        return module_.GetDefinitionEvent(accessorOwner_);
+    return nullptr;
 }
 
 ::ILSpy::Decompiler::TypeSystem::MethodSemanticsAttributes

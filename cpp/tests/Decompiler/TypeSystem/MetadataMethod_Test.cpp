@@ -46,6 +46,7 @@
 #include "Decompiler/TypeSystem/IModuleReference.hpp"
 #include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/IParameter.hpp"
+#include "Decompiler/TypeSystem/IProperty.hpp"
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
 #include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
@@ -1129,7 +1130,16 @@ TEST_F(MetadataMethodTest, DeferralContracts)
     const TS::ITypeDefinition* str = fx.TypeA("System", "String");
     const TS::IMethod* accessor = fx.Get(fx.mscA, str, "get_Chars", 0);
     ASSERT_NE(accessor, nullptr);
-    EXPECT_THROW(accessor->AccessorOwner(), std::logic_error);
+    // AccessorOwner LANDED (the MetadataProperty/MetadataEvent slice): the
+    // getter of String.Chars routes to the property itself (the
+    // MetadataPropertyEvent_Test suite pins the whole-corpus round trip).
+    const TS::IMember* owner = accessor->AccessorOwner();
+    ASSERT_NE(owner, nullptr);
+    const TS::IProperty* ownerProp =
+        dynamic_cast<const TS::IProperty*>(owner);
+    ASSERT_NE(ownerProp, nullptr);
+    EXPECT_EQ(ownerProp->Name(), "Chars");
+    EXPECT_EQ(ownerProp->Getter(), accessor);
     const TS::IMethod* plain = fx.Get(fx.mscA, str, "Substring", 0);
     ASSERT_NE(plain, nullptr);
     // The explicit-interface surface LANDED (the resolve-method slice): a
