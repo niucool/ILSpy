@@ -103,9 +103,10 @@
 //      AttributeListBuilder slice over the CustomAttributeDecoder); the
 //      `knownAttributeTypes` / `knownAttributes` caches and the entity
 //      classes' attribute members (MetadataTypeDefinition / MetadataField /
-//      MetadataParameter GetAttributes / HasAttribute / GetAttribute --
-//      MetadataMethod's GetAttributes body, the DllImport / PreserveSig /
-//      MethodImpl synthetic rows, remains the named follow-up); the
+//      MetadataParameter / MetadataMethod GetAttributes / HasAttribute /
+//      GetAttribute / GetReturnTypeAttributes -- the MetadataMethod body's
+//      DllImport / PreserveSig / MethodImpl / SpecialName synthetic rows
+//      LANDED); the
 //      `IsVisible(MethodAttributes)` filter; the `methodDefs` /
 //      `referencedAssemblies` / `typeDefs` / `fieldDefs` entity caches.
 //      STILL DEFERRED: the accessor-search arm of `ResolveMethodReference`

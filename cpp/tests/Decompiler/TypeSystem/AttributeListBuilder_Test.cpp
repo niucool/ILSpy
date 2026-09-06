@@ -60,6 +60,7 @@
 #include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
 #include "Decompiler/Util/Utf.hpp"
 #include "TestFixtures/AttributeGold.hpp"
+#include "TestFixtures/MethodAttrGold.hpp"
 #include "TestFixtures/TinyNetModule.hpp"
 
 #include <any>
@@ -68,6 +69,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -704,6 +706,112 @@ void ParamSweep(Sink& out, const TS::MetadataModule& module) {
     }
 }
 
+// The render of one method's GetReturnTypeAttributes() (the probe's
+// EntityLines over the return-type list -- the IMethod member, not the
+// IEntity surface).
+void MethodReturnLines(Sink& out, const std::string& id,
+                       const TS::IMethod& m) {
+    try {
+        std::vector<const TS::IAttribute*> attrs =
+            m.GetReturnTypeAttributes();
+        out.Out("E " + id + " n=" + std::to_string(attrs.size()));
+        for (std::size_t i = 0; i < attrs.size(); i++)
+            AttrLines(out, "A" + std::to_string(i) + ":", attrs[i]);
+    } catch (const std::exception& ex) {
+        out.Out("E " + id + " " + ExText(ex));
+    }
+}
+
+// The method GetAttributes sweep: every MethodDef row in table order (the
+// probe's metadata.MethodDefinitions + GetDefinition walk).
+void MethodSweep(Sink& out, const TS::MetadataModule& module) {
+    std::uint32_t total = module.MetadataFile()->MethodCount();
+    for (std::uint32_t row = 1; row <= total; row++) {
+        const TS::IMethod* m = module.GetDefinitionMethod(0x06000000u | row);
+        if (m == nullptr) {
+            out.Out("E " + std::to_string(0x06000000u | row) + " MISSING");
+            continue;
+        }
+        EntityLines(out, TokenOf(*m), *m);
+    }
+}
+
+// The method GetReturnTypeAttributes sweep (the same row walk).
+void MethodReturnSweep(Sink& out, const TS::MetadataModule& module) {
+    std::uint32_t total = module.MetadataFile()->MethodCount();
+    for (std::uint32_t row = 1; row <= total; row++) {
+        const TS::IMethod* m = module.GetDefinitionMethod(0x06000000u | row);
+        if (m == nullptr) {
+            out.Out("E R:" + std::to_string(0x06000000u | row)
+                    + " MISSING");
+            continue;
+        }
+        MethodReturnLines(out, "R:" + TokenOf(*m), *m);
+    }
+}
+
+// The KnownAttribute subset the METHOD HasAttribute/GetAttribute drives
+// cover (the MmAProbe's AttrSubset -- the method-specific list, distinct
+// from the entity subset above; same order).
+const std::pair<TS::KnownAttribute, const char*> kMethodAttrSubset[] = {
+    {TS::KnownAttribute::None, "None"},
+    {TS::KnownAttribute::Serializable, "Serializable"},
+    {TS::KnownAttribute::SpecialName, "SpecialName"},
+    {TS::KnownAttribute::Obsolete, "Obsolete"},
+    {TS::KnownAttribute::Extension, "Extension"},
+    {TS::KnownAttribute::CompilerGenerated, "CompilerGenerated"},
+    {TS::KnownAttribute::Nullable, "Nullable"},
+    {TS::KnownAttribute::NullableContext, "NullableContext"},
+    {TS::KnownAttribute::DllImport, "DllImport"},
+    {TS::KnownAttribute::PreserveSig, "PreserveSig"},
+    {TS::KnownAttribute::MethodImpl, "MethodImpl"},
+    {TS::KnownAttribute::PermissionSet, "PermissionSet"},
+    {TS::KnownAttribute::MarshalAs, "MarshalAs"},
+    {TS::KnownAttribute::Optional, "Optional"},
+    {TS::KnownAttribute::DefaultParameterValue, "DefaultParameterValue"},
+};
+
+void MethodHasMatrix(Sink& out, const std::string& id,
+                     const TS::IMethod& m) {
+    for (const auto& [ka, name] : kMethodAttrSubset) {
+        try {
+            out.Out("H " + id + " " + name + "="
+                    + std::string(m.HasAttribute(ka) ? "True" : "False"));
+        } catch (const std::exception& ex) {
+            out.Out("H " + id + " " + name + "=" + ExText(ex));
+        }
+    }
+    for (const auto& [ka, name] : kMethodAttrSubset) {
+        const TS::IAttribute* a;
+        try {
+            a = m.GetAttribute(ka);
+        } catch (const std::exception& ex) {
+            out.Out("G " + id + " " + name + " " + ExText(ex));
+            continue;
+        }
+        if (a == nullptr) {
+            out.Out("G " + id + " " + name + " null");
+            continue;
+        }
+        out.Out("G " + id + " " + name + " found");
+        AttrLines(out, "GA:", a);
+    }
+}
+
+// The curated-section drive: one "C method <tok>" block (the GetAttributes
+// render followed by the return-type render), the probe's exact line order.
+void CuratedMethodBlock(Sink& out, const TS::MetadataModule& module,
+                        const char* label, std::uint32_t token) {
+    const TS::IMethod* m = module.GetDefinitionMethod(token);
+    if (m == nullptr) {
+        out.Out(std::string("C ") + label + " MISSING");
+        return;
+    }
+    out.Out("C " + std::string(label) + " " + TokenOf(*m));
+    EntityLines(out, TokenOf(*m), *m);
+    MethodReturnLines(out, "R:" + TokenOf(*m), *m);
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -1076,4 +1184,209 @@ TEST(AttributeListBuilderTest, InternalsVisibleToListMatchesGold) {
     // tiny.netmodule: not an assembly -- the empty list.
     EXPECT_EQ(fx.tiny.GetInternalsVisibleTo().size(),
               static_cast<std::size_t>(0));
+}
+
+// ---------------------------------------------------------------------------
+// The MetadataMethod attribute slice (the MmAProbe gold): the method
+// GetAttributes / GetReturnTypeAttributes sweeps and the curated drives.
+// ---------------------------------------------------------------------------
+
+TEST(AttributeListBuilderTest, MethodSweepDigestsMatchGold) {
+    if (!MscorlibAvailable())
+        GTEST_SKIP() << "mscorlib fixture not available";
+    if (!SystemAvailable())
+        GTEST_SKIP() << "System.dll fixture not available";
+    if (!CoreLibAvailable())
+        GTEST_SKIP() << "CoreLib fixture not available";
+    AlFixture fx;
+    Sink sink;
+    MethodSweep(sink, fx.msc);
+    sink.Dump("MM-msc");
+    EXPECT_EQ(sink.lines.size(), static_cast<std::size_t>(52412));
+    EXPECT_EQ(sink.fnv.Str(), "7BF24123E426D092")
+        << "MM-msc digest (lines=" << sink.lines.size() << ")";
+    sink = Sink{};
+    MethodSweep(sink, fx.sys);
+    sink.Dump("MM-sys");
+    EXPECT_EQ(sink.lines.size(), static_cast<std::size_t>(23575));
+    EXPECT_EQ(sink.fnv.Str(), "A1892EABD7C1EDA1")
+        << "MM-sys digest (lines=" << sink.lines.size() << ")";
+    sink = Sink{};
+    MethodSweep(sink, fx.core);
+    sink.Dump("MM-core");
+    EXPECT_EQ(sink.lines.size(), static_cast<std::size_t>(68197));
+    EXPECT_EQ(sink.fnv.Str(), "30EA44D203D0FE20")
+        << "MM-core digest (lines=" << sink.lines.size() << ")";
+}
+
+TEST(AttributeListBuilderTest, MethodReturnSweepDigestsMatchGold) {
+    if (!MscorlibAvailable())
+        GTEST_SKIP() << "mscorlib fixture not available";
+    if (!SystemAvailable())
+        GTEST_SKIP() << "System.dll fixture not available";
+    if (!CoreLibAvailable())
+        GTEST_SKIP() << "CoreLib fixture not available";
+    AlFixture fx;
+    Sink sink;
+    MethodReturnSweep(sink, fx.msc);
+    sink.Dump("RR-msc");
+    EXPECT_EQ(sink.lines.size(), static_cast<std::size_t>(29652));
+    EXPECT_EQ(sink.fnv.Str(), "64386D20900F4E6D")
+        << "RR-msc digest (lines=" << sink.lines.size() << ")";
+    sink = Sink{};
+    MethodReturnSweep(sink, fx.sys);
+    sink.Dump("RR-sys");
+    EXPECT_EQ(sink.lines.size(), static_cast<std::size_t>(18184));
+    EXPECT_EQ(sink.fnv.Str(), "A0DDFB338CB69749")
+        << "RR-sys digest (lines=" << sink.lines.size() << ")";
+    sink = Sink{};
+    MethodReturnSweep(sink, fx.core);
+    sink.Dump("RR-core");
+    EXPECT_EQ(sink.lines.size(), static_cast<std::size_t>(42763));
+    EXPECT_EQ(sink.fnv.Str(), "C55C221A7D1781B2")
+        << "RR-core digest (lines=" << sink.lines.size() << ")";
+}
+
+TEST(AttributeListBuilderTest, MethodCuratedMatchesGold) {
+    if (!MscorlibAvailable())
+        GTEST_SKIP() << "mscorlib fixture not available";
+    if (!SystemAvailable())
+        GTEST_SKIP() << "System.dll fixture not available";
+    if (!CoreLibAvailable())
+        GTEST_SKIP() << "CoreLib fixture not available";
+    AlFixture fx;
+    Sink sink;
+
+    // The pinvoke fixture set (the census-picked shapes covering every
+    // DllImport named-arg arm reachable on the local corpora).
+    for (std::uint32_t tok :
+         {0x0600001Au, 0x0600001Du, 0x06000026u, 0x06000153u, 0x060064C5u,
+          0x0600001Bu, 0x06002EA4u, 0x06005021u}) {
+        CuratedMethodBlock(sink, fx.msc, "method", tok);
+    }
+    if (const TS::IMethod* pinvoke =
+            fx.msc.GetDefinitionMethod(0x0600001Au))
+        MethodHasMatrix(sink, "M:pinvoke", *pinvoke);
+
+    // System.dll's ThrowOnUnmappableChar pinvokes (GetAttributes only --
+    // the probe's block shape).
+    for (std::uint32_t tok : {0x060040ADu, 0x060040BAu}) {
+        const TS::IMethod* m = fx.sys.GetDefinitionMethod(tok);
+        ASSERT_NE(m, nullptr);
+        sink.Out("C sys method " + TokenOf(*m));
+        EntityLines(sink, TokenOf(*m), *m);
+    }
+
+    // The MethodImpl / PreserveSig synthetic-row fixtures.
+    for (std::uint32_t tok :
+         {0x060000EFu, 0x06001D8Fu, 0x06004090u, 0x060040EAu, 0x06000007u}) {
+        CuratedMethodBlock(sink, fx.msc, "method", tok);
+    }
+    {
+        // sys .ctor with impl 0x1003: InternalCall + MethodCodeType Runtime.
+        const TS::IMethod* m = fx.sys.GetDefinitionMethod(0x06000277u);
+        ASSERT_NE(m, nullptr);
+        sink.Out("C sys method " + TokenOf(*m));
+        EntityLines(sink, TokenOf(*m), *m);
+    }
+
+    // The by-name lookups (String.Copy, Object.ToString, Math.Abs).
+    const TS::GetMemberOptions opts =
+        TS::GetMemberOptions::IgnoreInheritedMembers
+        | TS::GetMemberOptions::ReturnMemberDefinitions;
+    for (const auto& [tname, tpc, name, mname] :
+         std::vector<std::tuple<const char*, int, const char*,
+                                const char*>>{
+             {"System", 0, "String", "Copy"},
+             {"System", 0, "Object", "ToString"},
+             {"System", 0, "Math", "Abs"}}) {
+        const TS::ITypeDefinition* td =
+            fx.msc.GetTypeDefinition(TS::TopLevelTypeName(tname, name, tpc));
+        ASSERT_NE(td, nullptr);
+        const TS::IMethod* m = nullptr;
+        for (const TS::IMethod* cand : td->GetMethods(
+                 [&mname](const TS::IMethod* mm) {
+                     return mm->Name() == mname;
+                 },
+                 opts)) {
+            m = cand;
+            break;
+        }
+        ASSERT_NE(m, nullptr) << tname << '.' << name << '.' << mname;
+        sink.Out("C method " + TokenOf(*m) + " " + tname + "." + name
+                 + "." + mname);
+        EntityLines(sink, TokenOf(*m), *m);
+        MethodReturnLines(sink, "R:" + TokenOf(*m), *m);
+    }
+
+    // The SymbolKind-shape fixtures (a .ctor, the Destructor/interface-Method
+    // Finalize pair, an op_ operator).
+    for (std::uint32_t tok :
+         {0x060004E5u, 0x06000231u, 0x06000011u, 0x06000D78u}) {
+        CuratedMethodBlock(sink, fx.msc, "method", tok);
+    }
+    {
+        // The HasAttribute/GetAttribute matrix over String.Copy.
+        const TS::ITypeDefinition* td = fx.msc.GetTypeDefinition(
+            TS::TopLevelTypeName("System", "String", 0));
+        ASSERT_NE(td, nullptr);
+        const TS::IMethod* m = nullptr;
+        for (const TS::IMethod* cand : td->GetMethods(
+                 [](const TS::IMethod* mm) {
+                     return mm->Name() == "Copy";
+                 },
+                 opts)) {
+            m = cand;
+            break;
+        }
+        ASSERT_NE(m, nullptr);
+        MethodHasMatrix(sink, "M:plain", *m);
+    }
+
+    // System.dll's EventLog.WriteEntry overloads (the first three).
+    {
+        const TS::ITypeDefinition* td = fx.sys.GetTypeDefinition(
+            TS::TopLevelTypeName("System.Diagnostics", "EventLog", 0));
+        ASSERT_NE(td, nullptr);
+        std::size_t taken = 0;
+        for (const TS::IMethod* m : td->GetMethods(
+                 [](const TS::IMethod* mm) {
+                     return mm->Name() == "WriteEntry";
+                 },
+                 opts)) {
+            if (taken == 3)
+                break;
+            taken++;
+            sink.Out("C method " + TokenOf(*m)
+                     + " System.Diagnostics.EventLog.WriteEntry");
+            EntityLines(sink, TokenOf(*m), *m);
+            MethodReturnLines(sink, "R:" + TokenOf(*m), *m);
+        }
+        ASSERT_EQ(taken, static_cast<std::size_t>(3));
+    }
+
+    // CoreLib: the RuntimeAsync impl bits (0x2000 -- the SRMHacks
+    // MethodImplAsync mask this engine never clears under default
+    // options), AggressiveOptimization 0x200, and the return-value
+    // custom-attribute rows (the only local corpus carrying them).
+    for (std::uint32_t tok :
+         {0x060080CAu, 0x060080CCu, 0x060081C6u, 0x0600028Du, 0x060002C0u,
+          0x06000020u, 0x0600030Fu}) {
+        CuratedMethodBlock(sink, fx.core, "core", tok);
+    }
+
+    // mscorlib's return-value marshalling row (IsWow64Process: the [return:
+    // MarshalAs] GetReturnTypeAttributes shape).
+    CuratedMethodBlock(sink, fx.msc, "method", 0x06000029u);
+
+    // The gold comparison (281 lines).
+    ASSERT_EQ(sink.lines.size(),
+        ILSpy::Tests::MethodAttrGold::kGoldMethodCuratedCount);
+    for (std::size_t i = 0; i < sink.lines.size(); i++) {
+        EXPECT_EQ(sink.lines[i],
+            ILSpy::Tests::MethodAttrGold::kGoldMethodCurated[i])
+            << "MethodCuratedMatchesGold: line " << i << ":\n  produced: "
+            << sink.lines[i] << "\n  expected: "
+            << ILSpy::Tests::MethodAttrGold::kGoldMethodCurated[i];
+    }
 }

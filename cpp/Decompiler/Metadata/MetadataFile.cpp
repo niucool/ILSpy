@@ -902,6 +902,24 @@ std::string MetadataFile::GetMethodName(std::uint32_t methodToken) const {
     }
 }
 
+// A MethodDef row's Name column as the raw #Strings heap offset. See the
+// header for the full contract (the SRM StringHandle comparison value).
+std::uint32_t MetadataFile::GetMethodNameOffset(
+    std::uint32_t methodToken) const {
+    if (!IsValid()) return 0;
+    std::uint32_t table = methodToken >> 24;
+    std::uint32_t row = methodToken & 0x00FFFFFFu;
+    if (table != 0x06 || row == 0 || row > impl_->db->MethodDef.size())
+        return 0;
+    try {
+        // The Name column is column 3 (RVA, ImplFlags, Flags, Name,
+        // Signature, ParamList -- the schema.h declaration order).
+        return impl_->db->MethodDef.get_value<std::uint32_t>(row - 1, 3);
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
 // A MethodDef row's RVA column. See the header for the full contract.
 std::uint32_t MetadataFile::GetMethodRVA(std::uint32_t methodToken) const {
     if (!IsValid()) return 0;
@@ -1249,6 +1267,7 @@ std::optional<MetadataFile::MethodImportInfo> MetadataFile::GetMethodImport(
                 impl_->db->ImplMap.get_value<std::uint32_t>(i, 0);
             std::uint32_t nameOffset =
                 impl_->db->ImplMap.get_value<std::uint32_t>(i, 2);
+            info.NameOffset = nameOffset;
             if (nameOffset != 0) {
                 info.Name = std::string{impl_->db->get_string(nameOffset)};
             }

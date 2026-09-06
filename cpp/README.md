@@ -242,9 +242,12 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   KnownAttribute subset (incl. the KnownAttribute.None drives pinning the
   C# ArgumentNullException the null-name classification throws), and the
   TypeSystemOptions.None CoreLib module pinning the IgnoreAttribute gates
-  in the KEEP direction -- `AccessorOwner` (the property/event caches)
-  and `MetadataMethod.GetAttributes` (the DllImport/PreserveSig/MethodImpl
-  synthetic rows) stay the documented loud deferrals).
+  in the KEEP direction -- plus the MetadataMethod attribute slice: the
+  whole-corpus digests over every method GetAttributes/GetReturnTypeAttributes
+  of mscorlib/System.dll/CoreLib and the curated DllImport/PreserveSig/
+  MethodImpl/SpecialName synthetic-row matrices, all byte-exact against the
+  real engine. `AccessorOwner` (the property/event caches) stays the
+  documented loud deferral).
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with

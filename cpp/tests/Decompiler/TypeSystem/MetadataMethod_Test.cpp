@@ -44,6 +44,7 @@
 #include "Decompiler/Disassembler/DisassemblerHelpers.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/TypeSystem/IModuleReference.hpp"
+#include "Decompiler/TypeSystem/IAttribute.hpp"
 #include "Decompiler/TypeSystem/IParameter.hpp"
 #include "Decompiler/TypeSystem/ITypeParameter.hpp"
 #include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
@@ -1137,12 +1138,19 @@ TEST_F(MetadataMethodTest, DeferralContracts)
     // override rows).
     EXPECT_FALSE(plain->IsExplicitInterfaceImplementation());
     EXPECT_TRUE(plain->ExplicitlyImplementedInterfaceMembers().empty());
-    EXPECT_THROW(plain->GetAttributes(), std::logic_error);
-    EXPECT_THROW(plain->HasAttribute(TS::KnownAttribute::Obsolete),
-        std::logic_error);
-    EXPECT_THROW(plain->GetAttribute(TS::KnownAttribute::Obsolete),
-        std::logic_error);
-    EXPECT_THROW(plain->GetReturnTypeAttributes(), std::logic_error);
+    // The attribute members LANDED (the MetadataMethod attribute slice;
+    // the AttributeListBuilderTest Method* suite pins the full corpus
+    // byte-exactly -- the gold: String.Substring's single
+    // [__DynamicallyInvokable] row, the empty return-type list).
+    {
+        std::vector<const TS::IAttribute*> attrs = plain->GetAttributes();
+        ASSERT_EQ(attrs.size(), static_cast<std::size_t>(1));
+        EXPECT_EQ(attrs[0]->AttributeType().ReflectionName(),
+            "__DynamicallyInvokableAttribute");
+        EXPECT_TRUE(plain->GetReturnTypeAttributes().empty());
+    }
+    EXPECT_FALSE(plain->HasAttribute(TS::KnownAttribute::Obsolete));
+    EXPECT_EQ(plain->GetAttribute(TS::KnownAttribute::Obsolete), nullptr);
     // `Specialize` LANDED: the Identity substitution returns the same
     // instance (the Specialize_Test suite pins the full arm matrix).
     EXPECT_EQ(plain->Specialize(nullptr),

@@ -721,10 +721,21 @@ public:
     struct MethodImportInfo {
         std::uint32_t ModuleRefToken = 0;  // the 0x1A row token; 0 = nil
         std::optional<std::string> Name;  // the ImportName column; nullopt = nil
+        std::uint32_t NameOffset = 0;  // the ImportName column's RAW #Strings
+                                       // heap offset (0 = nil; the SRM
+                                       // StringHandle value)
         std::uint32_t Attributes = 0;     // the raw MappingFlags (MethodImportAttributes)
     };
     std::optional<MethodImportInfo> GetMethodImport(
         std::uint32_t methodToken) const;
+
+    // A MethodDef row's Name column as the RAW #Strings heap offset (the
+    // SRM StringHandle value the C# `info.Name != def.Name` handle
+    // comparison compares -- an OFFSET comparison, not a text comparison;
+    // two same-text strings at different heap offsets are NOT equal). 0 for
+    // an invalid file, an out-of-range row, a nil row, or a non-MethodDef
+    // token; never throws.
+    std::uint32_t GetMethodNameOffset(std::uint32_t methodToken) const;
 
     // The MethodImpl rows (table 0x19) whose MethodBody is the MethodDef --
     // the C# handle.GetMethodImplementations(metadata) extension (the

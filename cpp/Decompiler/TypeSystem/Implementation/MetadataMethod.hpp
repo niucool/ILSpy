@@ -40,13 +40,19 @@
 //      (the member owns its parameters, the `Parameters()` snapshot returns
 //      raw pointers -- the IParameterizedMember contract).
 //  (c) `GetAttributes` / `HasAttribute` / `GetAttribute` /
-//      `GetReturnTypeAttributes` remain the loud `std::logic_error`
-//      DEFERRALS -- the AttributeListBuilder machinery they compose LANDED
-//      (the builder's HasAttribute/GetAttribute row scans, the
-//      MakeAttribute/GetAttributeType caches), so the named follow-up slice
-//      is the MetadataMethod GetAttributes body itself (the DllImport /
-//      PreserveSig / MethodImpl synthetic rows) landing the three members
-//      together (the MetadataField convention (c) for what landed).
+//      `GetReturnTypeAttributes` are REAL (the AttributeListBuilder slice):
+//      the GetAttributes body over the builder composes the DllImport
+//      reconstruction (the ImplMap row's module name, entry point, calling
+//      convention, charset, BestFitMapping/ExactSpelling/PreserveSig/
+//      SetLastError/ThrowOnUnmappableChar named args), the PreserveSig and
+//      MethodImpl synthetic rows over the ImplAttributes column (the
+//      `MethodImplAsync` 0x2000 mask under the RuntimeAsync option), the
+//      SpecialName row, the custom-attribute row walk at `symbolKind_`, and
+//      the security declarations; GetReturnTypeAttributes renders the seq-0
+//      Param row's marshalling descriptor + custom attributes at
+//      SymbolKind.ReturnType. The C# rebuilds both lists per call; the port
+//      caches them (the documented divergence at the MetadataField
+//      convention (c)).
 //  (d) `IsExplicitInterfaceImplementation` / `ExplicitlyImplementedInterfaceMembers`
 //      are REAL (the resolve-method slice): the declaring type's
 //      `HasOverrides`/`GetOverrides` MethodImpl-table walk over the landed
@@ -198,7 +204,9 @@ public:
     bool IsLocalFunction() const override { return false; }
     // The C# `IMethod IMethod.ReducedFrom => null`.
     const IMethod* ReducedFrom() const override { return nullptr; }
-    // DEFERRED (convention (c)): the AttributeListBuilder machinery.
+    // The C# `IEnumerable<IAttribute> GetReturnTypeAttributes()` -- the
+    // seq-0 Param row's marshalling descriptor + custom attributes at
+    // SymbolKind.ReturnType (convention (c)).
     std::vector<const IAttribute*> GetReturnTypeAttributes() const override;
     // The ThreeState-cached seq-0-Param-row [IsReadOnly] classification.
     bool ReturnTypeIsRefReadOnly() const override;
@@ -253,7 +261,6 @@ public:
     ITypePtr DeclaringType() const override;
     const IModule* ParentModule() const override;
     const ICompilation& Compilation() const override;
-    // DEFERRED (convention (c)): the AttributeListBuilder machinery.
     std::vector<const IAttribute*> GetAttributes() const override;
     bool HasAttribute(KnownAttribute attribute) const override;
     const IAttribute* GetAttribute(KnownAttribute attribute) const override;
@@ -313,6 +320,17 @@ private:
     mutable bool isInitOnly_ = false;
     mutable std::uint8_t returnTypeIsRefReadonly_ = 0;  // ThreeState
     mutable std::uint8_t thisIsRefReadonly_ = 0;        // ThreeState
+
+    // The attribute caches (convention (c)): the C# rebuilds both lists per
+    // call; the port caches (the MetadataField divergence). The found
+    // GetAttribute instances are kept alive per call (the GC-root
+    // equivalent).
+    mutable std::vector<std::shared_ptr<IAttribute>> attributeList_;
+    mutable bool attributeListLoaded_ = false;
+    mutable std::vector<std::shared_ptr<IAttribute>>
+        returnTypeAttributeList_;
+    mutable bool returnTypeAttributeListLoaded_ = false;
+    mutable std::vector<std::shared_ptr<IAttribute>> foundAttributes_;
 };
 
 } // namespace ILSpy::Decompiler::TypeSystem::Implementation

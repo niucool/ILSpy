@@ -27,6 +27,7 @@
 #include "Decompiler/Metadata/SRMExtensions.hpp"
 #include "Decompiler/Metadata/SignatureTypeProvider.hpp"
 #include "Decompiler/TypeSystem/ApplyAttributeTypeVisitor.hpp"
+#include "Decompiler/TypeSystem/Implementation/AttributeListBuilder.hpp"
 #include "Decompiler/TypeSystem/GenericContext.hpp"
 #include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataParameter.hpp"
@@ -70,6 +71,49 @@ constexpr std::uint32_t kFinalizerAttributes = 0x0040 | 0x0004 | 0x0080;
 constexpr std::uint32_t kNoBodyAttrs = 0x0400 | 0x2000;
 constexpr std::uint32_t kNoBodyImplAttrs = 0x1000 | 0x0001 | 0x0004 | 0x0003;
 
+// The raw ECMA-335 II.23.1.12 MethodImplAttributes bits the attribute body
+// consults (the System.Reflection.MethodImplAttributes enum; the
+// Disassembler layer's ReflectionAttributes.hpp copy is not included from
+// the TypeSystem layer -- the raw-flags convention).
+constexpr std::uint32_t kCodeTypeMask = 0x0003;
+constexpr std::uint32_t kMethodImplPreserveSig = 0x0080;
+// The SRMHacks `MethodImplAsync` constant (the SRMExtensions alias):
+// (MethodImplAttributes)0x2000.
+constexpr std::uint32_t kMethodImplAsync = 0x2000;
+
+// The raw ECMA-335 II.23.1.11 MethodImportAttributes bits (the ImplMap row's
+// MappingFlags column; the System.Reflection enum over the raw bits).
+constexpr std::uint32_t kImportBestFitEnable = 0x0010;
+constexpr std::uint32_t kImportBestFitDisable = 0x0020;
+constexpr std::uint32_t kImportCharSetMask = 0x0006;
+constexpr std::uint32_t kImportCharSetAnsi = 0x0002;
+constexpr std::uint32_t kImportCharSetUnicode = 0x0004;
+constexpr std::uint32_t kImportCharSetAuto = 0x0006;
+constexpr std::uint32_t kImportExactSpelling = 0x0001;
+constexpr std::uint32_t kImportSetLastError = 0x0040;
+constexpr std::uint32_t kImportCallingConventionMask = 0x0700;
+constexpr std::uint32_t kImportCallingConventionWinApi = 0x0100;
+constexpr std::uint32_t kImportCallingConventionCDecl = 0x0200;
+constexpr std::uint32_t kImportCallingConventionStdCall = 0x0300;
+constexpr std::uint32_t kImportCallingConventionThisCall = 0x0400;
+constexpr std::uint32_t kImportCallingConventionFastCall = 0x0500;
+constexpr std::uint32_t kImportThrowOnUnmappableEnable = 0x1000;
+constexpr std::uint32_t kImportThrowOnUnmappableDisable = 0x2000;
+
+// The BCL System.Runtime.InteropServices enum values the DllImport named
+// args carry (probed over the installed .NET 10: CallingConvention Winapi=1
+// Cdecl=2 StdCall=3 ThisCall=4 FastCall=5; CharSet None=1 Ansi=2 Unicode=3
+// Auto=4; MethodCodeType IL=0 Native=1 OPTIL=2 Runtime=3 -- the same values
+// as the MethodImplAttributes CodeTypeMask slots).
+constexpr int kCallingConventionWinapi = 1;
+constexpr int kCallingConventionCdecl = 2;
+constexpr int kCallingConventionStdCall = 3;
+constexpr int kCallingConventionThisCall = 4;
+constexpr int kCallingConventionFastCall = 5;
+constexpr int kCharSetAnsi = 2;
+constexpr int kCharSetUnicode = 3;
+constexpr int kCharSetAuto = 4;
+
 // The C# `mod.Modifier.Namespace` -- the port's `IType` carries no `Namespace`
 // member (the documented minimal-IType divergence), so the read routes through
 // the entity/parameterized/unknown dispatch -- the MetadataField.cpp
@@ -85,6 +129,20 @@ std::string NamespaceOf(const IType& type)
             dynamic_cast<const class UnknownType*>(&type))
         return unknown->FullTypeName().GetTopLevelTypeName().Namespace();
     return std::string();
+}
+
+// The C# `private IType FindInteropType(string name) => module.Compilation.
+// FindType(new TopLevelTypeName("System.Runtime.InteropServices", name))` --
+// the modules-scan extension over the explicit TopLevelTypeName ->
+// FullTypeName conversion (the AttributeListBuilder.cpp helper's second
+// consumer, copied here per the convention).
+ITypePtr FindInteropType(const ICompilation& compilation,
+                         const char* name)
+{
+    return FindType(
+        compilation,
+        FullTypeName(TopLevelTypeName(
+            "System.Runtime.InteropServices", name, 0)));
 }
 
 } // namespace
@@ -376,13 +434,42 @@ bool MetadataMethod::IsExtensionMethod() const
     return isExtensionMethod_;
 }
 
-// DEFERRED (convention (c)): the AttributeListBuilder machinery.
-std::vector<const IAttribute*>
-MetadataMethod::GetReturnTypeAttributes() const
+// The C# `public IEnumerable<IAttribute> GetReturnTypeAttributes()` (the
+// header convention (c) note): the seq-0 Param row's marshalling descriptor
+// plus its custom attributes at SymbolKind.ReturnType. Only the FIRST Param
+// row is consulted -- a range whose first row is not the return row yields
+// no return-type attributes (the faithful C# shape).
+std::vector<const IAttribute*> MetadataMethod::GetReturnTypeAttributes()
+    const
 {
-    throw std::logic_error(
-        "MetadataMethod::GetReturnTypeAttributes: the AttributeListBuilder "
-        "is not yet ported");
+    // The C# rebuilds the list per call; the port caches it (the documented
+    // divergence at the cache members).
+    if (!returnTypeAttributeListLoaded_)
+    {
+        Implementation::AttributeListBuilder b(module_);
+        const Metadata::MetadataFile* metadata = module_.MetadataFile();
+        std::vector<Metadata::ParameterInfo> params =
+            metadata->GetParameters(handle_);
+        if (!params.empty())
+        {
+            const Metadata::ParameterInfo& retParam =
+                params.front();
+            if (retParam.SequenceNumber == 0)
+            {
+                b.AddMarshalInfo(retParam.MarshallingDescriptor);
+                b.Add(retParam.Token,
+                      ::ILSpy::Decompiler::TypeSystem::SymbolKind::
+                          ReturnType);
+            }
+        }
+        returnTypeAttributeList_ = b.Build();
+        returnTypeAttributeListLoaded_ = true;
+    }
+    std::vector<const IAttribute*> result;
+    result.reserve(returnTypeAttributeList_.size());
+    for (const auto& attr : returnTypeAttributeList_)
+        result.push_back(attr.get());
+    return result;
 }
 
 // The C# `public bool ReturnTypeIsRefReadOnly`: the ThreeState-cached
@@ -636,27 +723,268 @@ const ICompilation& MetadataMethod::Compilation() const
     return module_.Compilation();
 }
 
-// DEFERRED (convention (c)): the AttributeListBuilder machinery.
+// The C# `public IEnumerable<IAttribute> GetAttributes()` (the header
+// convention (c) note): the DllImport / PreserveSig / MethodImpl /
+// SpecialName synthetic rows over the raw ImplMap + ImplAttributes
+// columns, then the custom-attribute rows at `symbolKind_` and the
+// security declarations.
 std::vector<const IAttribute*> MetadataMethod::GetAttributes() const
 {
-    throw std::logic_error(
-        "MetadataMethod::GetAttributes: the AttributeListBuilder is not yet "
-        "ported");
+    // The C# rebuilds the list per call; the port caches it (the documented
+    // divergence at the cache members).
+    if (!attributeListLoaded_)
+    {
+        Implementation::AttributeListBuilder b(module_);
+        const Metadata::MetadataFile* metadata = module_.MetadataFile();
+
+        std::uint32_t rawImpl = metadata->GetMethodImplAttributes(handle_);
+        // The C# `def.ImplAttributes & ~MethodImplAttributes.CodeTypeMask`,
+        // with the RuntimeAsync option clearing the SRMHacks MethodImplAsync
+        // bit (0x2000).
+        std::uint32_t implAttributes = rawImpl & ~kCodeTypeMask;
+        if ((module_.TypeSystemOptions()
+             & ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::
+                 RuntimeAsync)
+            == ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::
+                   RuntimeAsync)
+        {
+            implAttributes &= ~kMethodImplAsync;
+        }
+        std::uint32_t methodCodeType = rawImpl & kCodeTypeMask;
+
+        // DllImportAttribute: the ImplMap row behind the PinvokeImpl flag.
+        std::optional<Metadata::MetadataFile::MethodImportInfo> import =
+            metadata->GetMethodImport(handle_);
+        constexpr std::uint32_t kPinvokeImpl = 0x2000;
+        if ((attr_ & kPinvokeImpl) == kPinvokeImpl && import
+            && import->ModuleRefToken != 0)
+        {
+            Implementation::AttributeBuilder dllImport(
+                module_, ::ILSpy::Decompiler::TypeSystem::KnownAttribute::
+                             DllImport);
+            dllImport.AddFixedArg(
+                ::ILSpy::Decompiler::TypeSystem::KnownTypeCode::String,
+                std::any(*metadata->GetModuleReferenceName(
+                    import->ModuleRefToken)));
+
+            std::uint32_t importAttrs = import->Attributes;
+            if ((importAttrs & kImportBestFitDisable) != 0)
+                dllImport.AddNamedArg(
+                    "BestFitMapping",
+                    ::ILSpy::Decompiler::TypeSystem::KnownTypeCode::Boolean,
+                    std::any(false));
+            if ((importAttrs & kImportBestFitEnable) != 0)
+                dllImport.AddNamedArg(
+                    "BestFitMapping",
+                    ::ILSpy::Decompiler::TypeSystem::KnownTypeCode::Boolean,
+                    std::any(true));
+
+            // The C# calling-convention switch: the wire mask value maps to
+            // the BCL enum (an unset wire convention maps to 0 -- not
+            // Winapi -- so the named arg IS emitted with value 0).
+            int callingConvention;
+            switch (importAttrs & kImportCallingConventionMask)
+            {
+                case 0:
+                    callingConvention = 0;
+                    break;
+                case kImportCallingConventionCDecl:
+                    callingConvention = kCallingConventionCdecl;
+                    break;
+                case kImportCallingConventionFastCall:
+                    callingConvention = kCallingConventionFastCall;
+                    break;
+                case kImportCallingConventionStdCall:
+                    callingConvention = kCallingConventionStdCall;
+                    break;
+                case kImportCallingConventionThisCall:
+                    callingConvention = kCallingConventionThisCall;
+                    break;
+                case kImportCallingConventionWinApi:
+                    callingConvention = kCallingConventionWinapi;
+                    break;
+                default:
+                    // The C# `throw new NotSupportedException("unknown
+                    // calling convention")`.
+                    throw std::runtime_error(
+                        "unknown calling convention");
+            }
+            if (callingConvention != kCallingConventionWinapi)
+            {
+                dllImport.AddNamedArg(
+                    "CallingConvention",
+                    FindInteropType(module_.Compilation(),
+                                    "CallingConvention"),
+                    std::any(callingConvention));
+            }
+
+            int charSet = 0;  // CharSet.None
+            switch (importAttrs & kImportCharSetMask)
+            {
+                case kImportCharSetAnsi:
+                    charSet = kCharSetAnsi;
+                    break;
+                case kImportCharSetAuto:
+                    charSet = kCharSetAuto;
+                    break;
+                case kImportCharSetUnicode:
+                    charSet = kCharSetUnicode;
+                    break;
+            }
+            if (charSet != 0)
+            {
+                dllImport.AddNamedArg(
+                    "CharSet", FindInteropType(module_.Compilation(),
+                                                "CharSet"),
+                    std::any(charSet));
+            }
+
+            // The C# `!info.Name.IsNil && info.Name != def.Name` -- an SRM
+            // StringHandle OFFSET comparison (same-text strings at
+            // different heap offsets are NOT equal), so the port compares
+            // the raw heap offsets.
+            if (import->NameOffset != 0
+                && import->NameOffset
+                    != metadata->GetMethodNameOffset(handle_))
+            {
+                dllImport.AddNamedArg(
+                    "EntryPoint",
+                    ::ILSpy::Decompiler::TypeSystem::KnownTypeCode::String,
+                    std::any(*import->Name));
+            }
+
+            if ((importAttrs & kImportExactSpelling) != 0)
+            {
+                dllImport.AddNamedArg(
+                    "ExactSpelling",
+                    ::ILSpy::Decompiler::TypeSystem::KnownTypeCode::Boolean,
+                    std::any(true));
+            }
+
+            if ((implAttributes & kMethodImplPreserveSig) != 0)
+            {
+                implAttributes &= ~kMethodImplPreserveSig;
+            }
+            else
+            {
+                dllImport.AddNamedArg(
+                    "PreserveSig",
+                    ::ILSpy::Decompiler::TypeSystem::KnownTypeCode::Boolean,
+                    std::any(false));
+            }
+
+            if ((importAttrs & kImportSetLastError) != 0)
+                dllImport.AddNamedArg(
+                    "SetLastError",
+                    ::ILSpy::Decompiler::TypeSystem::KnownTypeCode::Boolean,
+                    std::any(true));
+
+            if ((importAttrs & kImportThrowOnUnmappableDisable) != 0)
+                dllImport.AddNamedArg(
+                    "ThrowOnUnmappableChar",
+                    ::ILSpy::Decompiler::TypeSystem::KnownTypeCode::Boolean,
+                    std::any(false));
+            if ((importAttrs & kImportThrowOnUnmappableEnable) != 0)
+                dllImport.AddNamedArg(
+                    "ThrowOnUnmappableChar",
+                    ::ILSpy::Decompiler::TypeSystem::KnownTypeCode::Boolean,
+                    std::any(true));
+
+            b.Add(dllImport.Build());
+        }
+
+        // PreserveSigAttribute: the standalone synthetic row over the
+        // surviving bit (the DllImport arm may have cleared it).
+        if (implAttributes == kMethodImplPreserveSig && methodCodeType == 0)
+        {
+            b.Add(::ILSpy::Decompiler::TypeSystem::KnownAttribute::
+                      PreserveSig);
+            implAttributes = 0;
+        }
+
+        // MethodImplAttribute: the surviving ImplAttributes bits as the
+        // MethodImplOptions fixed arg, with the MethodCodeType named arg for
+        // the non-IL code types.
+        if (implAttributes != 0)
+        {
+            Implementation::AttributeBuilder methodImpl(
+                module_, ::ILSpy::Decompiler::TypeSystem::KnownAttribute::
+                             MethodImpl);
+            methodImpl.AddFixedArg(
+                TopLevelTypeName("System.Runtime.CompilerServices",
+                                 "MethodImplOptions", 0),
+                std::any(static_cast<int>(implAttributes)));
+            if (methodCodeType != 0)
+            {
+                methodImpl.AddNamedArg(
+                    "MethodCodeType",
+                    TopLevelTypeName("System.Runtime.CompilerServices",
+                                     "MethodCodeType", 0),
+                    std::any(static_cast<int>(methodCodeType)));
+            }
+            b.Add(methodImpl.Build());
+        }
+
+        // SpecialName: the raw flag pair (SpecialName without RTSpecialName)
+        // gated on the resolved symbol kind (accessors and operators are
+        // excluded -- their own gates).
+        if ((attr_ & (kSpecialName | kRTSpecialName)) == kSpecialName
+            && symbolKind_
+                == ::ILSpy::Decompiler::TypeSystem::SymbolKind::Method)
+        {
+            b.Add(
+                ::ILSpy::Decompiler::TypeSystem::KnownAttribute::SpecialName);
+        }
+
+        b.Add(handle_, symbolKind_);
+        b.AddSecurityAttributes(handle_);
+
+        attributeList_ = b.Build();
+        attributeListLoaded_ = true;
+    }
+    std::vector<const IAttribute*> result;
+    result.reserve(attributeList_.size());
+    for (const auto& attr : attributeList_)
+        result.push_back(attr.get());
+    return result;
 }
 
-bool MetadataMethod::HasAttribute(KnownAttribute /*attribute*/) const
+bool MetadataMethod::HasAttribute(KnownAttribute attribute) const
 {
-    throw std::logic_error(
-        "MetadataMethod::HasAttribute: the AttributeListBuilder is not yet "
-        "ported");
+    if (!IsCustomAttribute(attribute))
+    {
+        for (const IAttribute* attr : GetAttributes())
+        {
+            if (IsKnownType(attr->AttributeType(), attribute))
+                return true;
+        }
+        return false;
+    }
+    Implementation::AttributeListBuilder b(module_);
+    return b.HasAttribute(*module_.MetadataFile(), handle_, attribute,
+                          symbolKind_);
 }
 
 const IAttribute* MetadataMethod::GetAttribute(
-    KnownAttribute /*attribute*/) const
+    KnownAttribute attribute) const
 {
-    throw std::logic_error(
-        "MetadataMethod::GetAttribute: the AttributeListBuilder is not yet "
-        "ported");
+    if (!IsCustomAttribute(attribute))
+    {
+        for (const IAttribute* attr : GetAttributes())
+        {
+            if (IsKnownType(attr->AttributeType(), attribute))
+                return attr;
+        }
+        return nullptr;
+    }
+    Implementation::AttributeListBuilder b(module_);
+    std::shared_ptr<IAttribute> found = b.GetAttribute(
+        *module_.MetadataFile(), handle_, attribute, symbolKind_);
+    if (!found)
+        return nullptr;
+    // A fresh instance per call (the C# GC root; the keep-alive registry).
+    foundAttributes_.push_back(std::move(found));
+    return foundAttributes_.back().get();
 }
 
 // The C# `public bool IsStatic => (attributes & Static) != 0`.
