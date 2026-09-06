@@ -349,7 +349,27 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   engine's drives over this machine's framework directories, GAC, Windows
   Kits references, and .NET 10 shared-framework install. The
   `UniversalAssemblyResolver` is now fully ported including the
-  `IAssemblyResolver` file-loading half.
+  `IAssemblyResolver` file-loading half; with it the BAML engine's whole
+  `XamlDecompiler` class landed: the constructor family (the four ctors --
+  the concrete `BamlDecompilerTypeSystem` one with the
+  `TypeSystemOptions.Uncached` check, the file/resolver pair, and the
+  `(fileName, settings)` one through the private
+  `CreateTypeSystemFromFile` chain owning the loaded file, the built
+  resolver, and the type system), and the `LoadPEFile` failure arms
+  reproduced through the port-authored .NET 10 `PEReader`/`PEHeaders`
+  eager-parse stand-in (`Decompiler/Metadata/PEReaderParse`: the decompiled
+  `SkipDosHeader`/`CoffHeader`/`PEHeader`/`ReadSectionHeaders`/
+  cor-directory walk with the exact `BadImageFormatException` message
+  matrix -- "Image is too small."/"Image is either too small..."/
+  "Invalid PE signature."/"Unknown file format."/"Unknown PE Magic
+  value."/"Invalid number of sections..."/"Invalid COR header size."/
+  "Section too small."/"Missing data directory."/"Invalid metadata section
+  span." -- plus the FileNotFoundException/DirectoryNotFoundException arms
+  by parent existence, the `MetadataFileNotSupportedException`, and the
+  representative OverflowException message the real engine's
+  corrupt-metadata root throws), every ctor drive and failure arm
+  gold-pinned against the real engine over the real mscorlib by the
+  XamlDecompilerProbe ctor-family section.
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with

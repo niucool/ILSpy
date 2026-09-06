@@ -96,11 +96,18 @@
 # BamlReader.ReadDocument -> XamlContext.Construct ->
 # HandlerMap.LookupHandler(RootNode.Type) -> Translate -> the passes -> the
 # result document with the AssemblyIdMap full names, the first x:Class name,
-# and the generated-member tokens; the C# constructor family's
-# BamlDecompilerTypeSystem/PEFile machinery is ported (Bdts landed); the
-# remaining piece is the `UniversalAssemblyResolver` INSTANCE surface
-# (the ctor + the Resolve/FindAssemblyFile walk -- its static GAC machinery
-# landed with the resolver slice), the `CreateTypeSystemFromFile` gate).
+# and the generated-member tokens). The C# constructor family is now ported
+# end to end: the four ctors (the concrete BamlDecompilerTypeSystem one with
+# the Uncached check, the file/resolver pair, and the (fileName, settings)
+# one through CreateTypeSystemFromFile's LoadPEFile + UniversalAssemblyResolver
+# + BamlDecompilerTypeSystem chain -- the decompiler owning the loaded file,
+# the built resolver, and the type system), the LoadPEFile failure arms
+# reproduced through the .NET 10 PEHeaders eager parse in
+# Decompiler/Metadata/PEReaderParse.{hpp,cpp} (the decompiled
+# SkipDosHeader/CoffHeader/PEHeader/ReadSectionHeaders/cor-directory walk
+# with the exact BadImageFormatException messages), and the
+# MetadataFileNotSupportedException arm. ConnectionIdRewritePass stays
+# deferred on the ILAst/ILReader back end.
 
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlBinaryReader.cpp
