@@ -23,6 +23,9 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/NamespaceDefinition.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CustomAttributeDecoder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/DotNetCorePathFinderExtensions.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/DotNetCorePathFinder.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ReferenceLoadInfo.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/UniversalAssemblyResolver.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/SRMExtensions.cpp
 )
 

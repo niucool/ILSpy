@@ -29,7 +29,9 @@
 // a ported consumer reaches them:
 //   * `ResolutionException` and `IAssemblyReferenceClassifier` /
 //     `AssemblyReferenceClassifier` (the UniversalAssemblyResolver / GAC lookup
-//     machinery -- the resolver itself is a Phase-7 deferral),
+//     machinery -- the resolver's enums and `ParseTargetFramework` classifier
+//     landed with the `DotNetCorePathFinder` slice; the class body itself
+//     remains a following slice),
 //   * `TypeReferenceMetadata` and `ExportedTypeMetadata` (the classifier's
 //     lazy per-reference row collections).
 //

@@ -38,9 +38,18 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `CalculatePublicKeyToken`/`GetPublicKeyToken`/`GetFullAssemblyName` trio
   with the `TryGetFullAssemblyName` forms and the `MetadataFile.FullName`
   property -- the display-name resolution the Phase-2 `MetadataModule` ctor
-  computes `FullAssemblyName` through), and an IL text
+  computes `FullAssemblyName` through), the `DotNetCorePathFinder`
+  (the `.deps.json` package-base-path discovery, the shared-framework
+  resolution, the reference-assembly pack path, and the PATH scan for the
+  dotnet executable, gold-pinned against the real engine over the crafted
+  `.deps.json` scenarios and the real dotnet install), the
+  `ReferenceLoadInfo`/`UnresolvedAssemblyNameReference` diagnostics
+  bookkeeping, and the `UniversalAssemblyResolver` enums +
+  `ParseTargetFramework` classifier (the resolver class body itself is the
+  next sub-slice), and an IL text
   disassembler. DONE except:
-  WebCIL, the assembly resolver (`.deps.json`).
+  WebCIL, the `UniversalAssemblyResolver` class body (the GAC handling and
+  the `Resolve`/`FindAssemblyFile` surface).
 - **Phase 2** -- `Decompiler/TypeSystem/`: naming primitives (`TopLevelTypeName`,
   `FullTypeName`), `KnownTypeCode` (the full table -- 61 slots continuing
   System.TypeCode's numbering, `String`=18 with the value-17 hole the C# keeps),
@@ -299,6 +308,16 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `DetectRuntimePack`; plus `MetadataFile::MetadataVersion` reading the
   root's version string), gold-pinned over twelve real assemblies, 23
   crafted manifests, and the 29-case path matrix via the DtfProbe probe.
+  The `DotNetCorePathFinder` / `ReferenceLoadInfo` / `ParseTargetFramework`
+  slice landed next (the first sub-slice of the resolver itself: the
+  `.deps.json` package-base-path discovery over nlohmann-json's SAX parser
+  with LightJson's duplicate-key rejection and exception-message mapping,
+  the shared-framework and reference-assembly-pack resolution with the
+  version-folder walk, the PATH scan for the dotnet executable, and the
+  target-framework classifier with the `TargetFrameworkIdentifier`/
+  `TargetRuntime`/`DecompilerRuntime` enums), gold-pinned against the real
+  engine via the DncpfProbe probe over the 18 crafted `.deps.json`
+  scenarios, the Path BCL matrix, and the real dotnet install.
   The remaining `UniversalAssemblyResolver` gate for the `--decompile-baml`
   CLI wiring is the resolver itself (the search-directory/GAC/
   DotNetCorePathFinder walk consuming this slice's detection).
