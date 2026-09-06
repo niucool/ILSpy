@@ -73,19 +73,26 @@
 //      nullable-annotated assemblies such as CoreLib).
 //  (e) DEFERRED members (each a loud `std::logic_error` naming the gating
 //      machinery, or absent with this note where the port's interface omits
-//      the member): the member family `Members`/`Methods`/`Properties`/
-//      `Events` (the `MetadataMethod`/`MetadataProperty`/`MetadataEvent`
-//      classes) and the IType-level member enumerations routed over them
-//      (`GetMembers` etc. -- the Void early-exit arms and the
-//      NestedTypes-only short-circuit arm ARE real; `Fields` LANDED over the
-//      `MetadataField` family, together with the `GetFields` bit-test
-//      short-circuit arm); `GetAttributes`/`HasAttribute`/`GetAttribute`
-//      (AttributeListBuilder + the custom-attribute value decoder);
-//      `ExtensionInfo`'s construction (the null arms are real: false when
-//      !HasExtensions or ExtensionMembers is off); `IsRecord` (the Methods
-//      name scan); `DefaultMemberName` (absent -- the port's
+//      the member): the member families that remain -- `Members`/
+//      `Properties`/`Events` (the `MetadataProperty`/`MetadataEvent` classes;
+//      the `GetMembers`/`GetProperties`/`GetEvents`/`GetAccessors`
+//      enumerations route over them; the Void early-exit arms and the
+//      NestedTypes-only short-circuit arm ARE real) and `GetConstructors`
+//      (the ComHelper.IsComImport co-class arm); `Methods` LANDED over the
+//      `MetadataMethod` family together with `GetMethods` (both overloads,
+//      the GetMembersHelper routing included) and `IsRecord` (the raw
+//      method-name scan -- note the C# scans the RAW method list, NOT the
+//      accessor-dropped `Methods` enumeration: a record class's
+//      `get_EqualityContract` is an accessor row the Methods enumeration
+//      drops, so the raw scan is the only shape that classifies records
+//      correctly); `Fields` landed earlier over the `MetadataField` family;
+//      `GetAttributes`/`HasAttribute`/`GetAttribute` (AttributeListBuilder +
+//      the custom-attribute value decoder); `ExtensionInfo`'s construction
+//      (the null arms are real: false when !HasExtensions or
+//      ExtensionMembers is off); `DefaultMemberName` (absent -- the port's
 //      ITypeDefinition omits the member) and `GetOverrides`/`HasOverrides`
-//      (absent -- internal members consumed by the future MetadataMethod).
+//      (absent -- internal members consumed by the future
+//      MetadataProperty/MetadataEvent slice).
 
 #pragma once
 
@@ -258,6 +265,13 @@ public:
     // module's per-row field entity cache; the `LazyInit` cache with the
     // `Uncached` bypass (the lazy `fields_` member).
     std::vector<const IField*> Fields() const override;
+    // The C# `IEnumerable<IMethod> Methods`: the TypeDef's Method-list rows
+    // in row order, dropping the accessor rows (the MethodSemanticsLookup
+    // `GetSemantics(h).Item2 == 0` test) and the rows the `IsVisible`
+    // filter rejects, each resolved through the module's per-row method
+    // entity cache, with the FakeMethod dummy constructor appended for a
+    // struct/enum declaring no parameterless instance constructor; the
+    // `LazyInit` cache with the `Uncached` bypass.
     std::vector<const IMethod*> Methods() const override;
     std::vector<const IProperty*> Properties() const override;
     std::vector<const IEvent*> Events() const override;
@@ -275,13 +289,17 @@ public:
     // The deferred [NullableContext] decode (convention (d)).
     ::ILSpy::Decompiler::TypeSystem::Nullability NullableContext()
         const override;
-    // DEFERRED (convention (e)): the Methods name scan.
+    // The C# `public bool IsRecord` -- the ThreeState-cached raw method-name
+    // scan (convention (e): the scan reads the RAW method list, not the
+    // accessor-dropped Methods enumeration).
     bool IsRecord() const override;
 
 private:
     // The C# `internal bool HasOverrides(MethodDefinitionHandle)` /
-    // `GetOverrides` (absent, convention (e)) and the private
-    // `ComputeIsRecord` stay unported with their consumers.
+    // `GetOverrides` (absent, convention (e)) stay unported with their
+    // consumers; the private `ComputeIsRecord` is the ThreeState-fed helper
+    // behind `IsRecord()`.
+    bool ComputeIsRecord() const;
 
     const MetadataModule& module_;
     std::uint32_t handle_;  // the raw 0x02...... TypeDef token
@@ -315,6 +333,23 @@ private:
     // per read under the option; the port's by-value vector reuses the
     // engaged-state-as-read shape).
     mutable std::optional<std::vector<const IField*>> fields_;
+
+    // The lazily-loaded `methods` cache (the C# `IMethod[] methods` field,
+    // the same `LazyInit.GetOrSet` + `Uncached` bypass shape as `fields_`).
+    mutable std::optional<std::vector<const IMethod*>> methods_;
+
+    // The keep-alive registry for the OWNED method instances this type
+    // constructs itself: the `FakeMethod` dummy constructors the Methods()
+    // enumeration adds to structs/enums without a default constructor, and
+    // the fresh `SpecializedMethod` instances the GetMembersHelper routing
+    // produces (the C# GC owns both; the port's owning-slot stand-in, the
+    // LocalFunctionMethod rewraps precedent -- each read appends, so the
+    // `Uncached` option's fresh-per-read entities stay alive).
+    mutable std::vector<std::shared_ptr<const IMethod>> methodKeepAlives_;
+
+    // The ThreeState-cached `isRecord` field (the C# `byte isRecord =
+    // ThreeState.Unknown`; 0 = Unknown, 1 = False, 2 = True).
+    mutable std::uint8_t isRecord_ = 0;
 };
 
 } // namespace ILSpy::Decompiler::TypeSystem::Implementation

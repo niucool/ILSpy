@@ -697,14 +697,15 @@ TEST(MetadataTypeDefinitionTest, DeferralContracts)
     const TS::ITypeDefinition* string_ = f.Type("System", "String");
     ASSERT_NE(string_, nullptr);
 
-    // The method/property/event members, the attribute snapshot, and the
-    // record scan are the loud deferrals of this slice (DirectBaseTypes
-    // landed with the ResolveType pair -- the ResolveType_Test suite pins
-    // it; Fields landed with the MetadataField family -- the
-    // MetadataField_Test suite pins it).
+    // The property/event members and the attribute snapshot are the loud
+    // deferrals of the remaining slices (DirectBaseTypes landed with the
+    // ResolveType pair -- the ResolveType_Test suite pins it; Fields landed
+    // with the MetadataField family -- the MetadataField_Test suite pins
+    // it; Methods landed with the FakeMember dummy-constructor slice -- the
+    // MemberEnumeration_Test suite pins the whole-corpus sweeps).
     EXPECT_THROW(string_->Members(), std::logic_error);
     EXPECT_EQ(string_->Fields().size(), 8u);
-    EXPECT_THROW(string_->Methods(), std::logic_error);
+    EXPECT_EQ(string_->Methods().size(), 191u);
     EXPECT_THROW(string_->Properties(), std::logic_error);
     EXPECT_THROW(string_->Events(), std::logic_error);
     EXPECT_THROW(string_->GetAttributes(), std::logic_error);
@@ -712,7 +713,8 @@ TEST(MetadataTypeDefinitionTest, DeferralContracts)
                  std::logic_error);
     EXPECT_THROW(string_->GetAttribute(TS::KnownAttribute::Obsolete),
                  std::logic_error);
-    EXPECT_THROW(string_->IsRecord(), std::logic_error);
+    // IsRecord landed (the raw method-name scan): String is not a record.
+    EXPECT_FALSE(string_->IsRecord());
 
     // The Void early-exit arms return the empty list without touching the
     // member family (the C# `if (Kind == TypeKind.Void) return

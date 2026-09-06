@@ -148,11 +148,33 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   them); gold-pinned with the whole-corpus FNV digests over EVERY
   MethodDef row of mscorlib (29257) and System.dll (18170), both
   byte-exact, plus the CoreLib curated drives (the IsInitOnly setter, the
-  `[return: IsReadOnly]` method, the readonly-struct census) -- the
-  explicit-interface members (`HasOverrides`/`GetOverrides` +
-  `ResolveMethod`), the attribute members (AttributeListBuilder),
-  `AccessorOwner` (the property/event caches), and `Specialize`
-  (SpecializedMethod::Create) stay the documented loud deferrals).
+  `[return: IsReadOnly]` method, the readonly-struct census) -- and the
+  member-enumeration slice LANDED (`VarArgInstanceMethod`, the vararg
+  call-site wrapper with the fresh-wrapper `Specialize`; `FakeMember`
+  (the `FakeMethod.CreateDummyConstructor` factory + the SpecializedX::
+  Create short-circuits, the general arms the documented owning-
+  `Specialize` deferral); and the real `MetadataTypeDefinition.Methods`
+  (the accessor-row drop over the landed MethodSemanticsLookup + the
+  `IsMethodVisible` filter + the FakeMethod dummy-constructor append for
+  structs/enums without a parameterless ctor), `GetMethods` (both
+  overloads -- the `IgnoreInheritedMembers` declared arm and the
+  GetMembersHelper inherited walk with the keep-alive registry for the
+  fresh SpecializedMethod instances), and `IsRecord` (the raw
+  method-name scan -- it reads the RAW method list, NOT the
+  accessor-dropped `Methods` enumeration, because a record class's
+  `get_EqualityContract` is an accessor row the enumeration drops);
+  gold-pinned with the whole-corpus FNV-1a-64 digests over the `Methods()`
+  enumeration of every TypeDef of mscorlib (3356 types / 24194 methods /
+  923 dummy ctors) / System.dll (2365/13385/622) / CoreLib
+  (2898/37261/1024), all byte-exact on the first green run, plus the
+  IsRecord corpus digests (all-false over the three BCL corpora) and the
+  nine REAL record fixtures of the Roslyn Microsoft.CodeAnalysis.dll
+  shipped in the SDK (8 record structs + the record class with
+  `<Clone>$`) -- the explicit-interface members
+  (`HasOverrides`/`GetOverrides` + `ResolveMethod`), the attribute members
+  (AttributeListBuilder), `AccessorOwner` (the property/event caches), and
+  `Specialize` (SpecializedMethod::Create) stay the documented loud
+  deferrals).
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with

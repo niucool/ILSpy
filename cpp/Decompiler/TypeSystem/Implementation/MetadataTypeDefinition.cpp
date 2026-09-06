@@ -21,6 +21,7 @@
 
 #include "Decompiler/Metadata/MetadataExtensions.hpp"  // ToKnownTypeCode
 #include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/Metadata/MethodSemanticsLookup.hpp"
 #include "Decompiler/Metadata/SRMExtensions.hpp"
 #include "Decompiler/TypeSystem/GenericContext.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
@@ -29,6 +30,8 @@
 #include "Decompiler/TypeSystem/KnownTypeReference.hpp"
 #include "Decompiler/TypeSystem/MetadataModule.hpp"
 #include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
+#include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
+#include "Decompiler/TypeSystem/Implementation/GetMembersHelper.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataTypeParameter.hpp"
 
 #include <cstdio>
@@ -377,13 +380,42 @@ std::vector<const IMethod*> MetadataTypeDefinition::GetMethods(
     std::function<bool(const IMethod*)> filter,
     GetMemberOptions options) const
 {
-    (void)filter;
-    (void)options;
+    // The C# `if (Kind == TypeKind.Void) return EmptyList<IMethod>.Instance;`.
     if (kind_ == TypeKind::Void)
         return {};
-    throw std::logic_error(
-        "MetadataTypeDefinition::GetMethods: the MetadataMethod entity "
-        "family is not yet ported");
+    // The C# `if ((options & GetMemberOptions.IgnoreInheritedMembers) ==
+    // GetMemberOptions.IgnoreInheritedMembers) return GetFiltered(this.Methods,
+    // ExtensionMethods.And(m => !m.IsConstructor, filter));` -- a BIT TEST
+    // (the GetFields precedent).
+    if ((options
+         & ::ILSpy::Decompiler::TypeSystem::GetMemberOptions::
+             IgnoreInheritedMembers)
+        == ::ILSpy::Decompiler::TypeSystem::GetMemberOptions::
+            IgnoreInheritedMembers)
+    {
+        std::vector<const IMethod*> result;
+        for (const IMethod* method : Methods())
+        {
+            if (!method->IsConstructor() && (!filter || filter(method)))
+                result.push_back(method);
+        }
+        return result;
+    }
+    // The C# `return GetMembersHelper.GetMethods(this, filter, options);`.
+    // The helper's owning results (the fresh `SpecializedMethod` instances a
+    // parameterized base produces) are kept alive in the methodKeepAlives_
+    // registry (the port's GC stand-in); the unspecialized definitions in
+    // the definitions arm are module-owned.
+    std::vector<std::shared_ptr<const IMethod>> owned
+        = GetMembersHelper::GetMethods(this, filter, options);
+    std::vector<const IMethod*> result;
+    result.reserve(owned.size());
+    for (std::shared_ptr<const IMethod>& m : owned)
+    {
+        result.push_back(m.get());
+        methodKeepAlives_.push_back(std::move(m));
+    }
+    return result;
 }
 
 std::vector<const IMethod*> MetadataTypeDefinition::GetMethods(
@@ -391,16 +423,21 @@ std::vector<const IMethod*> MetadataTypeDefinition::GetMethods(
     std::function<bool(const IMethod*)> filter,
     GetMemberOptions options) const
 {
-    (void)typeArguments;
-    (void)filter;
-    (void)options;
+    // The C# `if (Kind == TypeKind.Void) return EmptyList<IMethod>.Instance;
+    // return GetMembersHelper.GetMethods(this, typeArguments, filter,
+    // options);`.
     if (kind_ == TypeKind::Void)
         return {};
-    throw std::logic_error(
-        "MetadataTypeDefinition::GetMethods(typeArguments): the "
-        "MetadataMethod enumeration is not yet ported (the per-row "
-        "MetadataMethod entities are driven through "
-        "MetadataModule::GetDefinitionMethod)");
+    std::vector<std::shared_ptr<const IMethod>> owned
+        = GetMembersHelper::GetMethods(this, &typeArguments, filter, options);
+    std::vector<const IMethod*> result;
+    result.reserve(owned.size());
+    for (std::shared_ptr<const IMethod>& m : owned)
+    {
+        result.push_back(m.get());
+        methodKeepAlives_.push_back(std::move(m));
+    }
+    return result;
 }
 
 std::vector<const IProperty*> MetadataTypeDefinition::GetProperties(
@@ -748,11 +785,62 @@ std::vector<const IField*> MetadataTypeDefinition::Fields() const
 
 std::vector<const IMethod*> MetadataTypeDefinition::Methods() const
 {
-    throw std::logic_error(
-        "MetadataTypeDefinition::Methods: the FakeMethod.CreateDummyConstructor "
-        "dummy ctor and the GetMembersHelper routing are not yet ported "
-        "(the MetadataMethod entity itself LANDED -- the per-row entities "
-        "are driven through MetadataModule::GetDefinitionMethod)");
+    // The C# `LazyInit.VolatileRead(ref this.methods)`.
+    if (methods_.has_value())
+        return *methods_;
+    const Metadata::MetadataFile* metadata = module_.MetadataFile();
+    std::vector<Metadata::MethodInfo> methodCollection
+        = metadata->GetMethods(handle_);
+    std::vector<const IMethod*> methodList;
+    methodList.reserve(methodCollection.size());
+    const Metadata::MethodSemanticsLookup& methodSemantics
+        = metadata->GetMethodSemanticsLookup();
+    bool hasDefaultCtor = false;
+    for (const Metadata::MethodInfo& methodInfo : methodCollection)
+    {
+        // The C# `if (methodSemantics.GetSemantics(h).Item2 == 0 &&
+        // module.IsVisible(md.Attributes))` -- the accessor grouping drops
+        // every accessor row (the lookup answers None for a non-accessor).
+        const std::uint32_t attributes
+            = metadata->GetMethodAttributes(methodInfo.Token);
+        if (methodSemantics.GetSemantics(methodInfo.Token).Semantics
+                == ::ILSpy::Decompiler::TypeSystem::
+                    MethodSemanticsAttributes::None
+            && module_.IsMethodVisible(attributes))
+        {
+            const IMethod* method = module_.GetDefinitionMethod(methodInfo.Token);
+            if (method->SymbolKind()
+                    == ::ILSpy::Decompiler::TypeSystem::SymbolKind::
+                        Constructor
+                && !method->IsStatic() && method->Parameters().empty())
+            {
+                hasDefaultCtor = true;
+            }
+            methodList.push_back(method);
+        }
+    }
+    // The C# `if (!hasDefaultCtor && (this.Kind == TypeKind.Struct ||
+    // this.Kind == TypeKind.Enum)) methodsList.Add(FakeMethod.
+    // CreateDummyConstructor(Compilation, this, Accessibility.Public));` --
+    // the dummy's keep-alive slot is the registry (the GC stand-in).
+    if (!hasDefaultCtor
+        && (kind_ == TypeKind::Struct || kind_ == TypeKind::Enum))
+    {
+        std::shared_ptr<IMethod> dummy = FakeMethod::CreateDummyConstructor(
+            Compilation(), SnapshotType(this),
+            ::ILSpy::Decompiler::TypeSystem::Accessibility::Public);
+        methodKeepAlives_.push_back(std::move(dummy));
+        methodList.push_back(methodKeepAlives_.back().get());
+    }
+    // The C# `if ((module.TypeSystemOptions & TypeSystemOptions.Uncached)
+    // != 0) return methodsList; return LazyInit.GetOrSet(ref this.methods,
+    // methodsList.ToArray());`.
+    if ((module_.TypeSystemOptions()
+         & ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::Uncached)
+        != ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::None)
+        return methodList;
+    methods_ = std::move(methodList);
+    return *methods_;
 }
 
 std::vector<const IProperty*> MetadataTypeDefinition::Properties() const
@@ -819,12 +907,70 @@ MetadataTypeDefinition::NullableContext() const
     return ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious;
 }
 
-// DEFERRED (convention (e)): the Methods name scan.
+// The C# `public bool IsRecord` -- the ThreeState-cached raw method-name
+// scan (convention (e): the scan reads the RAW method list through
+// `MetadataFile::GetMethods`, NOT the accessor-dropped Methods()
+// enumeration -- a record class's `get_EqualityContract` is an accessor row
+// the enumeration drops, so the raw scan is the only shape that classifies
+// records correctly).
 bool MetadataTypeDefinition::IsRecord() const
 {
-    throw std::logic_error(
-        "MetadataTypeDefinition::IsRecord: the Methods name scan is not yet "
-        "ported (gated on the MetadataMethod family)");
+    if (isRecord_ != 0) {
+        return isRecord_ == 2;  // ThreeState: 1 = False, 2 = True
+    }
+    isRecord_ = ComputeIsRecord() ? 2 : 1;
+    return isRecord_ == 2;
+}
+
+// The C# `private bool ComputeIsRecord()` (the file-local helper): the
+// eight-method-signature test over the raw method names -- a record
+// requires get_EqualityContract/PrintMembers/GetHashCode/Equals/
+// op_Equality/op_Inequality/<Clone>$ (the struct arms relax: clone and
+// getEqualityContract start true, but toString is required), and ANY method
+// literally named `Clone` disqualifies (CS8859: members named 'Clone' are
+// disallowed in records).
+bool MetadataTypeDefinition::ComputeIsRecord() const
+{
+    if (kind_ != TypeKind::Class && kind_ != TypeKind::Struct)
+        return false;
+    bool isStruct = kind_ == TypeKind::Struct;
+
+    const Metadata::MetadataFile* metadata = module_.MetadataFile();
+    bool getEqualityContract = isStruct;
+    bool toString = false;
+    bool printMembers = false;
+    bool getHashCode = false;
+    bool equals = false;
+    bool opEquality = false;
+    bool opInequality = false;
+    bool clone = isStruct;
+    for (const Metadata::MethodInfo& methodInfo : metadata->GetMethods(handle_))
+    {
+        // The C# `metadata.StringComparer.Equals(method.Name, "...")` --
+        // ordinal string equality.
+        const std::string& name = methodInfo.Name;
+        if (name == "Clone") {
+            // error CS8859: Members named 'Clone' are disallowed in records.
+            return false;
+        }
+        getEqualityContract |= name == "get_EqualityContract";
+        toString |= name == "ToString";
+        printMembers |= name == "PrintMembers";
+        getHashCode |= name == "GetHashCode";
+        equals |= name == "Equals";
+        opEquality |= name == "op_Equality";
+        opInequality |= name == "op_Inequality";
+        clone |= name == "<Clone>$";
+    }
+    // Relaxed check for toString: record classes may have their ToString
+    // implementation only in the base class, so the type hierarchy is not
+    // yet known here; in record structs we require a ToString implementation
+    // because the PrintMembers method needs to be called.
+    if (isStruct && !toString) {
+        return false;
+    }
+    return getEqualityContract & printMembers & getHashCode & equals
+        & opEquality & opInequality & clone;
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem::Implementation
