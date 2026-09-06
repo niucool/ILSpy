@@ -226,6 +226,10 @@ std::uint32_t MetadataFile::FieldCount() const noexcept {
     return IsValid() ? impl_->db->Field.size() : 0;
 }
 
+std::uint32_t MetadataFile::MethodCount() const noexcept {
+    return IsValid() ? impl_->db->MethodDef.size() : 0;
+}
+
 std::uint32_t MetadataFile::TypeRefCount() const noexcept {
     return IsValid() ? impl_->db->TypeRef.size() : 0;
 }
@@ -2186,6 +2190,37 @@ std::vector<ParameterInfo> MetadataFile::GetParameters(std::uint32_t methodToken
         // Best-effort: a malformed row leaves the result short.
     }
     return result;
+}
+
+std::optional<ParameterInfo> MetadataFile::GetParameter(std::uint32_t paramToken) const {
+    if (!IsValid()) return std::nullopt;
+    std::uint32_t table = paramToken >> 24;
+    std::uint32_t row = paramToken & 0x00FFFFFFu;
+    if (table != 0x08 || row == 0 || row > impl_->db->Param.size()) return std::nullopt;
+    try {
+        auto& db = *impl_->db;
+        ParameterInfo info;
+        info.Token = paramToken;
+        info.SequenceNumber = db.Param.get_value<std::uint16_t>(row - 1, 1);
+        info.Attributes = db.Param.get_value<std::uint16_t>(row - 1, 0);
+        info.Name = std::string(db.Param[row - 1].Name());
+        // The FieldMarshal row whose HasFieldMarshal coded index (Field tag 0,
+        // Param tag 1 -- 1 tag bit) points at this row (the GetParameters
+        // scan, factored per-row).
+        std::uint32_t want = (row << 1) | 1;
+        for (unsigned j = 0; j < db.FieldMarshal.size(); ++j) {
+            if (db.FieldMarshal.get_value<std::uint32_t>(j, 0) == want) {
+                auto blob = db.get_blob(
+                    db.FieldMarshal.get_value<std::uint32_t>(j, 1));
+                info.MarshallingDescriptor = std::vector<std::uint8_t>(
+                    blob.begin(), blob.end());
+                break;
+            }
+        }
+        return info;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
 }
 
 std::optional<ConstantInfo> MetadataFile::GetConstant(std::uint32_t parentToken) const {

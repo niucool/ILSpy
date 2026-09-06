@@ -286,13 +286,14 @@ TEST(LambdaResolveResultTest, GetChildResultsDispatchesThroughResolveResultBaseP
 
 // ===========================================================================
 // LambdaResolveResult -- the inherited ToString bracket form (the C# does NOT override
-// ToString), yielding "[<concrete ClassName> None]" (NoType's ReflectionName is "None").
+// ToString), yielding "[<concrete ClassName> ?]" (NoType's ReflectionName is
+// the C# `SpecialType.NoType` singleton's name "?").
 // ===========================================================================
 
 TEST(LambdaResolveResultTest, ToStringUsesInheritedBracketForm)
 {
     TestLambdaResolveResult rr;
-    EXPECT_EQ(rr.ToString(), "[TestLambdaResolveResult None]");
+    EXPECT_EQ(rr.ToString(), "[TestLambdaResolveResult ?]");
 }
 
 // ===========================================================================

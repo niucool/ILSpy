@@ -31,6 +31,7 @@
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataTypeDefinition.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataField.hpp"
+#include "Decompiler/TypeSystem/Implementation/MetadataMethod.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataNamespace.hpp"
 #include "Decompiler/TypeSystem/StringComparer.hpp"
 #include "Decompiler/TypeSystem/TypeProvider.hpp"
@@ -163,6 +164,9 @@ MetadataModule::MetadataModule(const ICompilation& compilation,
         // The C# `fieldDefs = new MetadataField[metadata.FieldDefinitions.Count
         // + 1]` (the member-entity caches, this slice).
         fieldDefs_.resize(metadataFile_->FieldCount() + 1);
+        // The C# `methodDefs = new MetadataMethod[metadata.MethodDefinitions
+        // .Count + 1]` (the method entity cache, the method slice).
+        methodDefs_.resize(metadataFile_->MethodCount() + 1);
         referencedAssemblies_.resize(metadataFile_->CorTableRowCount(
             Metadata::CorTableIndex::AssemblyRef) + 1);
     }
@@ -267,6 +271,36 @@ const IField* MetadataModule::GetDefinitionField(
     return slot.get();
 }
 
+// The C# `public IMethod GetDefinition(MethodDefinitionHandle handle)`
+// (MetadataModule.cs lines 252-266) -- the per-row METHOD entity cache: the
+// nil token -> null; the UNCACHED arm constructs without a range check (the
+// keep-alive registry owning the instance); the CACHED arm range-checks
+// against the `methodDefs` slot count and fills the per-row slot (the C#
+// `Debug.Assert(row != 0)` is compiled out of the release assembly).
+const IMethod* MetadataModule::GetDefinitionMethod(
+    std::uint32_t methodToken) const
+{
+    std::uint32_t row = methodToken & 0x00FFFFFFu;
+    if (row == 0)
+        return nullptr;
+    if (methodDefs_.empty())
+    {
+        auto method = std::make_shared<Implementation::MetadataMethod>(
+            *this, methodToken);
+        const IMethod* result = method.get();
+        uncachedMethodDefs_.push_back(std::move(method));
+        return result;
+    }
+    if (row >= methodDefs_.size())
+        HandleOutOfRange();
+    std::shared_ptr<Implementation::MetadataMethod>& slot =
+        methodDefs_[row];
+    if (slot == nullptr)
+        slot = std::make_shared<Implementation::MetadataMethod>(
+            *this, methodToken);
+    return slot.get();
+}
+
 // --- Visibility Filter (MetadataModule.cs lines 971-993) ---
 
 // The C# `internal bool IncludeInternalMembers =>
@@ -288,6 +322,19 @@ bool MetadataModule::IncludeInternalMembers() const
 bool MetadataModule::IsFieldVisible(std::uint32_t fieldAttributes) const
 {
     std::uint32_t att = fieldAttributes & 0x0007u;  // FieldAccessMask
+    return IncludeInternalMembers() || att == 0x0006u   // Public
+        || att == 0x0004u                                // Family
+        || att == 0x0005u;                               // FamORAssem
+}
+
+// The C# `internal bool IsVisible(MethodAttributes att)` (MetadataModule.cs
+// lines 985-993): the method half of the visibility filter -- the same
+// MemberAccessMask (0x0007, identical bit layout for methods), the same
+// IncludeInternalMembers / Public / Family / FamORAssem accept set (the
+// `IsFieldVisible` shape).
+bool MetadataModule::IsMethodVisible(std::uint32_t methodAttributes) const
+{
+    std::uint32_t att = methodAttributes & 0x0007u;  // MemberAccessMask
     return IncludeInternalMembers() || att == 0x0006u   // Public
         || att == 0x0004u                                // Family
         || att == 0x0005u;                               // FamORAssem

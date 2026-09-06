@@ -130,7 +130,29 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   mscorlib/System.dll/CoreLib (5986+5407+6134 entries, all
   byte-exact) plus the crafted `MslSynth.dll` manifest covering every
   crafted arm -- the last-row-wins pair, the nil-method pair, the
-  combined-flags row, the Raiser filter, and the Other rejection).
+  combined-flags row, the Raiser filter, and the Other rejection), and
+  `MetadataMethod` LANDED (the biggest member sibling: the ctor's
+  symbolKind chain -- Accessor/Constructor/Operator/Destructor incl. the
+  static-explicit-interface-operator re-test -- over the landed
+  MethodSemanticsLookup, the eager type-parameter creation, the
+  IsExtensionMethod option+attribute gate, and the signature-decode chain
+  (`Parameters`/`ReturnType`/`IsInitOnly` through the shared static
+  `DecodeSignature` Param-row walk with the gap-filling DefaultParameters,
+  the vararg `__arglist` sentinel -- mscorlib's 3 vararg methods pin it --
+  the `modreq(IsExternalInit)` init-only test, and the return-type
+  attribute application), together with the `MetadataParameter` companion
+  (the per-row IParameter: the DetectRefKind In/Out/Ref/In/RefReadOnly
+  chain, IsParams, Lifetime, the constant-value decimal/Constant arms)
+  and the `MetadataModule.GetDefinitionMethod` per-row entity cache +
+  `IsMethodVisible` (the `MetadataFile::GetParameter` per-token read behind
+  them); gold-pinned with the whole-corpus FNV digests over EVERY
+  MethodDef row of mscorlib (29257) and System.dll (18170), both
+  byte-exact, plus the CoreLib curated drives (the IsInitOnly setter, the
+  `[return: IsReadOnly]` method, the readonly-struct census) -- the
+  explicit-interface members (`HasOverrides`/`GetOverrides` +
+  `ResolveMethod`), the attribute members (AttributeListBuilder),
+  `AccessorOwner` (the property/event caches), and `Specialize`
+  (SpecializedMethod::Create) stay the documented loud deferrals).
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with

@@ -648,8 +648,11 @@ TEST(TypeSystemAstBuilderConvertTypeTest, UnboundGenericRendersPlaceholdersByDef
     ASSERT_EQ(typeRef->TypeArguments().Count(), 1);
     auto* argument = dynamic_cast<SimpleType*>(typeRef->TypeArguments()[0]);
     ASSERT_NE(argument, nullptr);
-    // The UnboundTypeArgument placeholder's Name is "?" (the SpecialType table).
-    EXPECT_EQ(*argument->Identifier(), "?");
+    // The UnboundTypeArgument placeholder's Name is "" (the C#
+    // `SpecialType.UnboundTypeArgument` singleton's name) -- the SimpleType
+    // gets a NULL identifier (the `CreateIfNotEmpty` empty-name rule), the
+    // shape the C# `MakeSimpleType(type.Name)` default arm produces.
+    EXPECT_FALSE(argument->Identifier().has_value());
 }
 
 TEST(TypeSystemAstBuilderConvertTypeTest, ParameterizedTypeRendersGenericWithArguments) {

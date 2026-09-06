@@ -398,7 +398,9 @@ std::vector<const IMethod*> MetadataTypeDefinition::GetMethods(
         return {};
     throw std::logic_error(
         "MetadataTypeDefinition::GetMethods(typeArguments): the "
-        "MetadataMethod entity family is not yet ported");
+        "MetadataMethod enumeration is not yet ported (the per-row "
+        "MetadataMethod entities are driven through "
+        "MetadataModule::GetDefinitionMethod)");
 }
 
 std::vector<const IProperty*> MetadataTypeDefinition::GetProperties(
@@ -747,8 +749,10 @@ std::vector<const IField*> MetadataTypeDefinition::Fields() const
 std::vector<const IMethod*> MetadataTypeDefinition::Methods() const
 {
     throw std::logic_error(
-        "MetadataTypeDefinition::Methods: the MetadataMethod entity family "
-        "is not yet ported");
+        "MetadataTypeDefinition::Methods: the FakeMethod.CreateDummyConstructor "
+        "dummy ctor and the GetMembersHelper routing are not yet ported "
+        "(the MetadataMethod entity itself LANDED -- the per-row entities "
+        "are driven through MetadataModule::GetDefinitionMethod)");
 }
 
 std::vector<const IProperty*> MetadataTypeDefinition::Properties() const

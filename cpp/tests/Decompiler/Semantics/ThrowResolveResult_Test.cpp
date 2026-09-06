@@ -30,7 +30,7 @@
 // == TypeKind::None`, distinct from `UnknownType()`'s `TypeKind::Unknown`), the
 // inherited base defaults the subclass does NOT override (`IsError` /
 // `IsCompileTimeConstant` / `ConstantValue` / `GetChildResults`), the `ToString`
-// subclass-class-name format (`[ThrowResolveResult None]` -- the `None` is the
+// subclass-class-name format (`[ThrowResolveResult ?]` -- the `?` is the
 // `NoType()` SpecialType's `ReflectionName`), the `ShallowClone` runtime-type
 // preservation (not sliced) plus shared-ownership clone plus distinct-instance, the
 // polymorphic `ClassName()` dispatch through a `ResolveResult*` base pointer, and
@@ -64,10 +64,10 @@ TEST(ThrowResolveResultTest, ConstructorForwardsNoTypeToBase)
 TEST(ThrowResolveResultTest, TypeReflectionNameIsNoTypeName)
 {
     // The `NoType()` SpecialType's `ReflectionName()` is its `Name()` which the
-    // `SpecialType::Name()` switch returns as "None" for `TypeKind::None` (distinct
+    // `SpecialType::Name()` switch returns the C# `SpecialType.NoType` singleton's name "?" for `TypeKind::None` (the same
     // from `UnknownType()`'s "?" for `TypeKind::Unknown`).
     ILSpy::Decompiler::Semantics::ThrowResolveResult trr;
-    EXPECT_EQ(trr.Type().ReflectionName(), "None");
+    EXPECT_EQ(trr.Type().ReflectionName(), "?");
 }
 
 TEST(ThrowResolveResultTest, InheritedDefaultsArePreserved)
@@ -88,9 +88,9 @@ TEST(ThrowResolveResultTest, ToStringReportsSubclassClassName)
     // polymorphic and yields "ThrowResolveResult". The C++ port reproduces this via
     // the ClassName() override so the inherited ToString reports the subclass name
     // (not the base "ResolveResult"). The {type} field is the NoType() SpecialType's
-    // ReflectionName "None".
+    // ReflectionName "?".
     ILSpy::Decompiler::Semantics::ThrowResolveResult trr;
-    EXPECT_EQ(trr.ToString(), "[ThrowResolveResult None]");
+    EXPECT_EQ(trr.ToString(), "[ThrowResolveResult ?]");
 }
 
 TEST(ThrowResolveResultTest, ClassNameDispatchesThroughBasePointer)
@@ -100,7 +100,7 @@ TEST(ThrowResolveResultTest, ClassNameDispatchesThroughBasePointer)
     // the base pointer's ToString reports the subclass name, not the base.
     ILSpy::Decompiler::Semantics::ThrowResolveResult trr;
     ILSpy::Decompiler::Semantics::ResolveResult* base = &trr;
-    EXPECT_EQ(base->ToString(), "[ThrowResolveResult None]");
+    EXPECT_EQ(base->ToString(), "[ThrowResolveResult ?]");
 }
 
 TEST(ThrowResolveResultTest, ShallowClonePreservesRuntimeType)
@@ -120,13 +120,13 @@ TEST(ThrowResolveResultTest, ShallowCloneSharesType)
 {
     // The clone shares the NoType() SpecialType via the shared_ptr member (faithful
     // to MemberwiseClone's reference copy): the same IType object backs both the
-    // original and the clone, so both report TypeKind::None and ReflectionName "None".
+    // original and the clone, so both report TypeKind::None and ReflectionName "?".
     ILSpy::Decompiler::Semantics::ThrowResolveResult trr;
     auto clone = trr.ShallowClone();
     ASSERT_NE(clone, nullptr);
     EXPECT_EQ(&clone->Type(), &trr.Type());
     EXPECT_EQ(clone->Type().Kind(), ILSpy::Decompiler::TypeSystem::TypeKind::None);
-    EXPECT_EQ(clone->Type().ReflectionName(), "None");
+    EXPECT_EQ(clone->Type().ReflectionName(), "?");
 }
 
 TEST(ThrowResolveResultTest, ShallowCloneIsDistinctInstance)

@@ -187,16 +187,19 @@ std::string TypeParameter::ReflectionName() const {
 
 std::string SpecialType::Name() const {
     switch (kind_) {
+        // The C# `SpecialType` singletons' names (SpecialType.cs lines 33-64:
+        // each static singleton passes its name to the private ctor):
+        // UnknownType "?" / NullType "null" / NoType "?" / Dynamic
+        // "dynamic" / NInt "nint" / NUInt "nuint" / ArgList "__arglist"
+        // / UnboundTypeArgument "".
         case TypeKind::Unknown: return "?";
         case TypeKind::Null: return "null";
-        case TypeKind::None: return "None";
+        case TypeKind::None: return "?";
         case TypeKind::Dynamic: return "dynamic";
-        // The C# SpecialType.NInt / NUInt singleton names (added when the
-        // normalize-to-nint/nuint arm landed them; the rest of the table lands
-        // with the remaining special singletons).
         case TypeKind::NInt: return "nint";
         case TypeKind::NUInt: return "nuint";
-        case TypeKind::UnboundTypeArgument: return "?";
+        case TypeKind::ArgList: return "__arglist";
+        case TypeKind::UnboundTypeArgument: return "";
         default: return "?";
     }
 }

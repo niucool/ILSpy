@@ -31,10 +31,14 @@
 // cache with real `MetadataField` entities (the sibling in
 // Implementation/MetadataField.hpp, with its DecimalConstantHelper), and
 // the `IsFieldVisible` / `IncludeInternalMembers` visibility filter the
-// `MetadataTypeDefinition::Fields` enumeration consumes. The remaining
-// sibling entity classes (`MetadataMethod` / `MetadataProperty` /
-// `MetadataEvent`) and their `GetDefinition` overloads land as the
-// following slices; the members that need them stay
+// `MetadataTypeDefinition::Fields` enumeration consumes. The METHOD entity
+// slice landed: `GetDefinitionMethod` fills the `methodDefs` cache with
+// real `MetadataMethod` entities (the sibling in
+// Implementation/MetadataMethod.hpp, with its `MetadataParameter` companion
+// in Implementation/MetadataParameter.hpp), and `IsMethodVisible` is the
+// method half of the visibility filter. The remaining sibling entity
+// classes (`MetadataProperty` / `MetadataEvent`) and their `GetDefinition`
+// overloads land as the following slices; the members that need them stay
 // loud `std::logic_error` deferrals in the meantime.
 //
 // KEY PORT CONVENTIONS:
@@ -100,7 +104,8 @@
 //      ctor's `NullableContext` / `FindMinimumAccessibilityForNRT` (the
 //      AttributeListBuilder slice over the landed CustomAttributeDecoder); the lazy
 //      `methodDefs`/`propertyDefs`/`eventDefs` entity caches (convention (e);
-//      the `typeDefs`/`fieldDefs`/`referencedAssemblies` caches LANDED);
+//      the `typeDefs`/`fieldDefs`/`referencedAssemblies` caches LANDED, and the
+//      `methodDefs` cache LANDED with the method slice);
 //      `DecodeMethodSignature`/`DecodeLocalSignature`; the `knownAttributeTypes`
 //      / `knownAttributes` attribute-type caches; the `IsVisible(MethodAttributes)`
 //      filter and the `ShouldDecodeNullableAttributes` / `OptionsForEntity`
@@ -159,6 +164,7 @@ namespace Implementation { class MetadataNamespace; }
 // complete).
 namespace Implementation { class MetadataTypeDefinition; }
 namespace Implementation { class MetadataField; }
+namespace Implementation { class MetadataMethod; }
 
 // Forward declaration of the signature provider (the sibling TypeProvider.hpp):
 // the `typeProvider_` member holds it by `unique_ptr`, complete with the
@@ -222,6 +228,17 @@ public:
     // instance); the returned field is owned by this module.
     const IField* GetDefinitionField(std::uint32_t fieldToken) const;
 
+    // The C# `public IMethod GetDefinition(MethodDefinitionHandle handle)`
+    // (MetadataModule.cs lines 252-266) -- the per-row METHOD entity cache
+    // (the `methodDefs` slots, index = the 1-based MethodDef row number).
+    // Same conventions as the field arm (the nil token -> null; the CACHED
+    // arm range-checks against the `methodDefs` slot count with the
+    // `HandleOutOfRange` throw; the UNCACHED arm constructs without a range
+    // check, the keep-alive registry owning the instance); the returned
+    // method is owned by this module. The distinct C++ name follows the
+    // `GetDefinitionField` disambiguation convention.
+    const IMethod* GetDefinitionMethod(std::uint32_t methodToken) const;
+
     // --- Visibility Filter (MetadataModule.cs lines 971-993) ---
     // The C# `internal bool IncludeInternalMembers`.
     bool IncludeInternalMembers() const;
@@ -230,6 +247,11 @@ public:
     // name carries the `Field` qualifier because the C#'s MethodAttributes twin
     // (the MetadataMethod slice) will need the distinct C++ spelling too.
     bool IsFieldVisible(std::uint32_t fieldAttributes) const;
+    // The C# `internal bool IsVisible(MethodAttributes att)` (MetadataModule.cs
+    // lines 985-993) -- the method half of the visibility filter (the port
+    // takes the RAW flags column, masked internally over the
+    // MemberAccessMask; the `IsFieldVisible` naming convention).
+    bool IsMethodVisible(std::uint32_t methodAttributes) const;
 
     // --- ISymbol ---
     // `SymbolKind` return type GLOBALLY QUALIFIED (the D372 name-hiding crux).
@@ -394,6 +416,16 @@ private:
     // precedent).
     mutable std::vector<std::shared_ptr<Implementation::MetadataField>>
         uncachedFieldDefs_;
+
+    // The C# `readonly MetadataMethod[] methodDefs` (allocated in the ctor
+    // unless the Uncached option is set; index = the 1-based MethodDef row
+    // number, slot 0 unused): each slot OWNS its entity (the same
+    // `shared_ptr` convention as `fieldDefs_`).
+    mutable std::vector<std::shared_ptr<Implementation::MetadataMethod>>
+        methodDefs_;
+    // The method cache's UNCACHED-arm keep-alive registry.
+    mutable std::vector<std::shared_ptr<Implementation::MetadataMethod>>
+        uncachedMethodDefs_;
 
     // The C# `readonly IModule[] referencedAssemblies` (allocated in the ctor
     // unless the Uncached option is set; index = the 1-based AssemblyRef row

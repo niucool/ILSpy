@@ -32,7 +32,7 @@
 // distinction (the base is `NoType`, the field is the configured type), the inherited
 // base defaults the subclass does NOT override (`IsError` /
 // `IsCompileTimeConstant` / `ConstantValue` / `GetChildResults`), the `ToString`
-// subclass-class-name format (`[OutVarResolveResult None]` -- the `None` is the
+// subclass-class-name format (`[OutVarResolveResult ?]` -- the `?` is the
 // `NoType()` SpecialType's `ReflectionName`), the `ShallowClone` runtime-type
 // preservation (not sliced) plus shared-ownership of BOTH `IType` fields plus
 // distinct-instance, the polymorphic `ClassName()` dispatch through a
@@ -89,11 +89,11 @@ TEST(OutVarResolveResultTest, ConstructorForwardsNoTypeToBase)
 TEST(OutVarResolveResultTest, TypeReflectionNameIsNoTypeName)
 {
     // The `NoType()` SpecialType's `ReflectionName()` is its `Name()` which the
-    // `SpecialType::Name()` switch returns as "None" for `TypeKind::None` (distinct
+    // `SpecialType::Name()` switch returns the C# `SpecialType.NoType` singleton's name "?" for `TypeKind::None` (the same
     // from `UnknownType()`'s "?" for `TypeKind::Unknown`).
     auto type = MakeStringType();
     ILSpy::Decompiler::Semantics::OutVarResolveResult ovrr(type);
-    EXPECT_EQ(ovrr.Type().ReflectionName(), "None");
+    EXPECT_EQ(ovrr.Type().ReflectionName(), "?");
 }
 
 TEST(OutVarResolveResultTest, OriginalVariableTypeReturnsConfiguredType)
@@ -164,10 +164,10 @@ TEST(OutVarResolveResultTest, ToStringReportsSubclassClassName)
     // polymorphic and yields "OutVarResolveResult". The C++ port reproduces this via
     // the ClassName() override so the inherited ToString reports the subclass name (not
     // the base "ResolveResult"). The {type} field is the NoType() SpecialType's
-    // ReflectionName "None".
+    // ReflectionName "?".
     auto type = MakeStringType();
     ILSpy::Decompiler::Semantics::OutVarResolveResult ovrr(std::move(type));
-    EXPECT_EQ(ovrr.ToString(), "[OutVarResolveResult None]");
+    EXPECT_EQ(ovrr.ToString(), "[OutVarResolveResult ?]");
 }
 
 TEST(OutVarResolveResultTest, ClassNameDispatchesThroughBasePointer)
@@ -178,7 +178,7 @@ TEST(OutVarResolveResultTest, ClassNameDispatchesThroughBasePointer)
     auto type = MakeStringType();
     ILSpy::Decompiler::Semantics::OutVarResolveResult ovrr(std::move(type));
     ILSpy::Decompiler::Semantics::ResolveResult* base = &ovrr;
-    EXPECT_EQ(base->ToString(), "[OutVarResolveResult None]");
+    EXPECT_EQ(base->ToString(), "[OutVarResolveResult ?]");
 }
 
 TEST(OutVarResolveResultTest, ShallowClonePreservesRuntimeType)

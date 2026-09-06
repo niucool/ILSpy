@@ -326,6 +326,9 @@ public:
     // The Field table row count (the `MetadataModule` field entity cache
     // sizes itself over it -- the TypeDefCount precedent).
     std::uint32_t FieldCount() const noexcept;
+    // The MethodDef table (0x06) row count (the `MetadataModule` method
+    // entity cache sizes itself over it -- the FieldCount precedent).
+    std::uint32_t MethodCount() const noexcept;
 
     // Row count of the TypeRef table (0x01) -- the scan bound for callers
     // that locate TypeRef rows by name. 0 for an invalid file; never throws.
@@ -387,6 +390,15 @@ public:
     // invalid file, an out-of-range row, a nil row, or a non-MethodDef token;
     // never throws.
     std::vector<ParameterInfo> GetParameters(std::uint32_t methodToken) const;
+
+    // A single Param table row (table 0x08) by its 0x08000000-form token --
+    // the C# `metadata.GetParameter(handle)` per-row read the MetadataParameter
+    // entity drives (the eager Flags read in the ctor, the lazy Name and the
+    // marshalling descriptor; the custom-attribute rows go through
+    // GetCustomAttributeTokens and the default value through GetConstant with
+    // this token as the parent). nullopt for an invalid file, a nil row, an
+    // out-of-range row, or a non-Param token; never throws.
+    std::optional<ParameterInfo> GetParameter(std::uint32_t paramToken) const;
 
     // The Constant table row (table 0x0B) a Field (0x04), Param (0x08), or
     // Property (0x17) token's DefaultValue resolves to -- the C#
