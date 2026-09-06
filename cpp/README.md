@@ -259,7 +259,27 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   property (5011/4089/5581 over mscorlib/System.dll/CoreLib) and event
   (33/115/32) plus the accessor-shaped memberref partitions (824 mscorlib
   real / 630 System real + 74 fake) all byte-exact against the real
-  engine through the PeProbe gold probe.
+  engine through the PeProbe gold probe; with the member entity family
+  complete, the BAML decompiler's compilation subclass LANDED:
+  `BamlDecompilerTypeSystem` (cpp/BamlDecompiler/, the SimpleCompilation
+  subclass with the reference-queue ctor resolving the main module's
+  ModuleRef rows matching metadata-bearing File-table rows, its AssemblyRef
+  rows, and the seven default BAML references through the IAssemblyResolver
+  -- the "A:"+FullName/"M:"+name key dedup, the transitive ExportedType-
+  implementation walk re-queueing AssemblyReference rows and AssemblyFile
+  module names -- substituting a SyntheticWpfModule stand-in for every
+  unresolved well-known assembly with the presentation xmlns mapping, and
+  falling back to MinimalCorlib when neither the main module nor a
+  resolved reference defines Void/Int32; the `new MetadataModule MainModule`
+  narrowing realized as a covariant override; backed by `MetadataFile.
+  WithOptions`, the MetadataFileWithOptions IModuleReference adapter that
+  constructs the MetadataModule on Resolve, and the `MetadataFile.
+  GetAssemblyFiles` File-table read; gold-pinned against the real class
+  driven over the identical fixed-map stub resolver by the BdtsProbe probe:
+  the resolver call order, the module list/order/identity, the synthetic
+  substitution, the MinimalCorlib fallback, and the FindType results over
+  mscorlib/the WPF assemblies/tiny.netmodule/the GAC facade/a crafted
+  ModuleRef+AssemblyFile manifest, all byte-exact).
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with

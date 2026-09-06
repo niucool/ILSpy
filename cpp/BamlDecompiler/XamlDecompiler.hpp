@@ -29,10 +29,13 @@
 //    `fileName` pair through `CreateTypeSystemFromFile`'s PEFile +
 //    UniversalAssemblyResolver, the `PEFile` pair through the resolver, and
 //    the `BamlDecompilerTypeSystem` pair directly) and run the
-//    `TypeSystemOptions.Uncached` check over the concrete MetadataModule --
-//    all gated on the Phase-7 MetadataModule back end (the port has no
-//    concrete metadata-loading module type system yet), documented here as
-//    deferred with it. The port's constructor takes the `ICompilation`
+//    `TypeSystemOptions.Uncached` check over the concrete MetadataModule.
+//    The `BamlDecompilerTypeSystem` class itself is now ported
+//    (BamlDecompilerTypeSystem.{hpp,cpp} -- the reference-queue ctor over
+//    MetadataFile + IAssemblyResolver); the remaining constructor machinery
+//    is the `UniversalAssemblyResolver` (the assembly-resolver
+//    implementation `CreateTypeSystemFromFile` builds, still unported)
+//    plus the port's `XamlDecompiler` constructor keeping the `ICompilation`
 //    surface (the `XamlContext.Construct` narrowing precedent); the
 //    settings parameter keeps the C# shape (nullable -- the C# ctor accepts
 //    a null settings and `XamlContext.Construct`'s `?? new
@@ -72,10 +75,11 @@ namespace ILSpy::BamlDecompiler {
 class XamlDecompiler {
 public:
     // The port's stand-in for the C# constructor family (see the header
-    // porting decisions: the BamlDecompilerTypeSystem/PEFile/resolver
-    // machinery is deferred with the Phase-7 MetadataModule back end);
-    // `settings` may be null (the C# null-tolerant ctor shape -- Decompile
-    // passes it to `XamlContext.Construct`, which builds the default).
+    // porting decisions: `BamlDecompilerTypeSystem` itself is ported -- the
+    // remaining constructor machinery is the `UniversalAssemblyResolver`
+    // `CreateTypeSystemFromFile` builds); `settings` may be null (the C#
+    // null-tolerant ctor shape -- Decompile passes it to
+    // `XamlContext.Construct`, which builds the default).
     XamlDecompiler(const ILSpy::Decompiler::TypeSystem::ICompilation& typeSystem,
         const BamlDecompilerSettings* settings = nullptr)
         : typeSystem_(typeSystem), settings_(settings)

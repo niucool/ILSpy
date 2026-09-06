@@ -34,6 +34,7 @@
 #include "Decompiler/Metadata/PortablePdb.hpp"
 #include "Decompiler/Disassembler/ReflectionAttributes.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
 
 #include <array>
 #include <cstddef>
@@ -43,6 +44,13 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+// Global-scope forward declaration (the iteration-69 MSVC learning: a
+// qualified namespace-declaration inside the enclosing namespace creates a
+// NEW nested chain, so sibling-namespace forward declarations sit at global
+// scope before it). `IModuleReference` is the return type of `WithOptions`
+// below (a pointer-to-incomplete return type needs only the declaration).
+namespace ILSpy::Decompiler::TypeSystem { class IModuleReference; }
 
 namespace ILSpy::Decompiler::Metadata {
 
@@ -320,6 +328,21 @@ public:
     // the TryGetFullAssemblyName extension for the caught form. The C#
     // debug-metadata third arm is n/a for the port's PE-only reader.
     std::string FullName() const;
+
+    // The C# `public IModuleReference WithOptions(TypeSystemOptions options)`
+    // (MetadataFile.cs lines 298-301): the deferred-resolution module
+    // reference over this file -- `Resolve` constructs the `MetadataModule`
+    // for (context.Compilation, this file, options), so a compilation
+    // accepts the file through its `IModuleReference` ctor surface. The C#
+    // returns a GC-owned `MetadataFileWithOptions` (the private nested
+    // `IModuleReference` impl); the port returns a caller-owned `unique_ptr`
+    // which must outlive any compilation built over it (the compilation
+    // keeps non-owning pointers to the module the reference creates; the
+    // adapter -- defined in the .cpp so this header stays free of the
+    // TypeSystem implementation includes -- owns every module its `Resolve`
+    // constructs, the GC-ownership stand-in).
+    std::unique_ptr<TypeSystem::IModuleReference> WithOptions(
+        ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions options) const;
 
     // Row count of the TypeDef table.
     std::uint32_t TypeDefCount() const noexcept;
@@ -1026,6 +1049,19 @@ public:
     // walk reads). Nullopt for an invalid file, an out-of-range row, a nil
     // row, or a non-ExportedType token; never throws.
     std::optional<ExportedTypeInfo> GetExportedType(std::uint32_t token) const;
+
+    // The File-table (table 0x26) rows in table order -- the C#
+    // `metadata.AssemblyFiles` collection (the SRM `AssemblyFile` handles).
+    // `ContainsMetadata` is the C# `AssemblyFile.ContainsMetadata`: the
+    // Flags column == 0 (the SRM FileTable.GetFlags == 0 rule -- the bit
+    // 0x00000001 marks a resource file that carries no metadata). Empty for
+    // an invalid file; never throws.
+    struct AssemblyFileInfo {
+        std::uint32_t Token = 0;  // 0x26000000 | row (1-based)
+        std::string Name;
+        bool ContainsMetadata = true;
+    };
+    std::vector<AssemblyFileInfo> GetAssemblyFiles() const;
 
     // A File-table (table 0x26) row's Name -- the `.file <name>` line of the
     // exported-type block (the C# `metadata.GetAssemblyFile(...).Name`).

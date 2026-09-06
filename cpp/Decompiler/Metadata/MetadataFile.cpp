@@ -26,6 +26,9 @@
 #include "Decompiler/Metadata/SignatureDecoder.hpp"
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
 #include "Decompiler/TypeSystem/TypeKindDerivation.hpp"
+#include "Decompiler/TypeSystem/IModuleReference.hpp"
+#include "Decompiler/TypeSystem/ITypeResolveContext.hpp"
+#include "Decompiler/TypeSystem/MetadataModule.hpp"
 
 #include "Decompiler/Metadata/Ecma335/WinmdInclude.hpp"
 
@@ -2539,6 +2542,31 @@ MetadataFile::GetExportedType(std::uint32_t token) const {
     return std::nullopt;
 }
 
+// The File-table (table 0x26) rows in table order. See the header for the
+// full contract. Column layout (II.22.12): Flags(4), Name, HashValue.
+std::vector<MetadataFile::AssemblyFileInfo> MetadataFile::GetAssemblyFiles()
+    const {
+    std::vector<AssemblyFileInfo> result;
+    if (!IsValid()) return result;
+    try {
+        for (std::uint32_t row = 1; row <= impl_->db->File.size(); row++) {
+            AssemblyFileInfo info;
+            info.Token = (0x26u << 24) | row;
+            // The C# `AssemblyFile.ContainsMetadata` =>
+            // `FileTable.GetFlags(Handle) == 0` (the decompiled SRM 10 rule:
+            // the bit 0x00000001 marks a resource file with no metadata).
+            info.ContainsMetadata =
+                impl_->db->File.get_value<std::uint32_t>(row - 1, 0) == 0;
+            info.Name = std::string{impl_->db->get_string(
+                impl_->db->File.get_value<std::uint32_t>(row - 1, 1))};
+            result.push_back(std::move(info));
+        }
+    } catch (const std::exception&) {
+        result.clear();
+    }
+    return result;
+}
+
 // A File-table (table 0x26) row's Name -- the exported-type block's
 // `.file <name>` line. See the header for the full contract.
 std::optional<std::string> MetadataFile::GetAssemblyFileName(
@@ -3060,6 +3088,51 @@ std::optional<std::array<std::uint8_t, 16>> MetadataFile::CorTryGuid(
     if (heapIndex == 0 || !IsValid() || !impl_->bodyReader)
         return std::nullopt;
     return impl_->bodyReader->TryGetGuid(heapIndex);
+}
+
+namespace {
+
+// The C# private nested `MetadataFileWithOptions : IModuleReference`
+// (MetadataFile.cs lines 313-331) -- the `MetadataFile.WithOptions` return
+// value: a deferred-resolution reference that constructs the `MetadataModule`
+// for (context.Compilation, file, options) on `Resolve`. The C# `Resolve`
+// news a fresh module each call and the GC roots every one; the port's
+// adapter owns each constructed module in a keep-alive registry (the
+// iteration-39 Resolve-ownership precedent) so every `Resolve` result stays
+// valid for the adapter's lifetime.
+class MetadataFileWithOptions final
+    : public ILSpy::Decompiler::TypeSystem::IModuleReference {
+public:
+    MetadataFileWithOptions(const MetadataFile& file,
+                           ILSpy::Decompiler::TypeSystem::TypeSystemOptions options)
+        : file_(&file), options_(options) {}
+
+    // The C# `IModule IModuleReference.Resolve(ITypeResolveContext context)`
+    // -> `new MetadataModule(context.Compilation, peFile, options)`.
+    const ILSpy::Decompiler::TypeSystem::IModule* Resolve(
+        const ILSpy::Decompiler::TypeSystem::ITypeResolveContext& context)
+        const override {
+        modules_.push_back(std::make_unique<
+            ILSpy::Decompiler::TypeSystem::MetadataModule>(
+            context.Compilation(), file_, options_));
+        return modules_.back().get();
+    }
+
+private:
+    const MetadataFile* file_;
+    ILSpy::Decompiler::TypeSystem::TypeSystemOptions options_;
+    mutable std::vector<std::unique_ptr<
+        ILSpy::Decompiler::TypeSystem::MetadataModule>> modules_;
+};
+
+} // namespace
+
+// The C# `public IModuleReference WithOptions(TypeSystemOptions options)`.
+// See the header for the full contract.
+std::unique_ptr<ILSpy::Decompiler::TypeSystem::IModuleReference>
+MetadataFile::WithOptions(
+    ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions options) const {
+    return std::make_unique<MetadataFileWithOptions>(*this, options);
 }
 
 } // namespace ILSpy::Decompiler::Metadata

@@ -69,9 +69,18 @@
 # InstallHandler, and the ProcessChildren walk with its
 # XmlnsScope push/pop + annotation pairing; BamlConnectionId carries the
 # connection-id annotation payload).
-# The IDecompilerTypeSystem interface (the MetadataModule MainModule narrowing)
-# and the BamlDecompilerTypeSystem/ConnectionIdRewritePass slices stay gated on
-# the Phase-7 MetadataModule back end.
+# The IDecompilerTypeSystem narrowing convention and the
+# BamlDecompilerTypeSystem slice landed: the compilation subclass
+# (BamlDecompilerTypeSystem -- the reference-queue ctor resolving the module
+# references, the AssemblyRef rows, and the seven default BAML references
+# through the IAssemblyResolver with the ExportedType-implementation
+# transitive walk and the "A:"/"M:" key dedup, the SyntheticWpfModule
+# stand-ins for the unresolved well-known assemblies with the presentation
+# xmlns mapping, and the MinimalCorlib fallback when Void/Int32 are missing;
+# the `new MetadataModule MainModule` narrowing realized as a covariant
+# override -- backed by MetadataFile.WithOptions, the MetadataFileWithOptions
+# IModuleReference adapter constructing the MetadataModule on Resolve);
+# ConnectionIdRewritePass stays deferred on the ILAst/ILReader back end.
 #
 # The Rewrite pass layer (Rewrite/: the IRewritePass interface and the four
 # IL-free passes XamlDecompiler.Decompile drives over the finished document
@@ -99,6 +108,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlReader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlWriter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/KnownThings.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/BamlDecompilerTypeSystem.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Handlers/Blocks.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Handlers/Records.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/IHandlers.cpp
