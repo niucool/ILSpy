@@ -80,17 +80,15 @@
 # the `new MetadataModule MainModule` narrowing realized as a covariant
 # override -- backed by MetadataFile.WithOptions, the MetadataFileWithOptions
 # IModuleReference adapter constructing the MetadataModule on Resolve);
-# ConnectionIdRewritePass stays deferred on the ILAst/ILReader back end.
 #
 # The Rewrite pass layer (Rewrite/: the IRewritePass interface and the four
 # IL-free passes XamlDecompiler.Decompile drives over the finished document
 # -- XClassRewritePass's main-module base-type rename with the x:Class /
 # x:ClassModifier attributes, MarkupExtensionRewritePass's
 # property-element-to-{Extension} inlining, AttributeRewritePass's
-# property-element-to-attribute inlining with the lazy-stop fixpoint, and
-# DocumentRewritePass's pseudo-Document wrapper collapse; the fifth pass,
-# ConnectionIdRewritePass, needs the ILAst/ILReader back end and stays
-# deferred with the Phase-3/4 machinery),
+# property-element-to-attribute inlining with the lazy-stop fixpoint,
+# ConnectionIdRewritePass's ILAst-driven x:Name/event wiring, and
+# DocumentRewritePass's pseudo-Document wrapper collapse),
 # plus the engine facade (XamlDecompiler + BamlDecompilationResult: the
 # static four-pass chain in the C# order and the Decompile composition --
 # BamlReader.ReadDocument -> XamlContext.Construct ->
@@ -106,7 +104,7 @@
 # Decompiler/Metadata/PEReaderParse.{hpp,cpp} (the decompiled
 # SkipDosHeader/CoffHeader/PEHeader/ReadSectionHeaders/cor-directory walk
 # with the exact BadImageFormatException messages), and the
-# MetadataFileNotSupportedException arm. ConnectionIdRewritePass stays
+# MetadataFileNotSupportedException arm.
 #
 # The CLI --decompile-baml surface is reachable end to end through the
 # --resource .baml arm (IlspyCmdProgram.cpp ExtractResource +
@@ -116,7 +114,6 @@
 # saving it under the -o directory (the '.xaml'-suffixed SanitizeFileName
 # name, the XDocument.Save render); a BamlReader rejection propagates out
 # of ExtractResource to the CLI global catch (EX_SOFTWARE).
-# ConnectionIdRewritePass stays deferred on the ILAst/ILReader back end.
 
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlBinaryReader.cpp
@@ -132,6 +129,7 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Handlers/Records.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/IHandlers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Rewrite/AttributeRewritePass.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Rewrite/ConnectionIdRewritePass.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Rewrite/DocumentRewritePass.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Rewrite/MarkupExtensionRewritePass.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Rewrite/XClassRewritePass.cpp

@@ -29,6 +29,7 @@
 #include "BamlDecompiler/BamlElement.hpp"
 #include "BamlDecompiler/IHandlers.hpp"
 #include "BamlDecompiler/Rewrite/AttributeRewritePass.hpp"
+#include "BamlDecompiler/Rewrite/ConnectionIdRewritePass.hpp"
 #include "BamlDecompiler/Rewrite/DocumentRewritePass.hpp"
 #include "BamlDecompiler/Rewrite/MarkupExtensionRewritePass.hpp"
 #include "BamlDecompiler/Rewrite/XClassRewritePass.hpp"
@@ -78,11 +79,7 @@ constexpr const char* kMetadataOverflowMessage =
 // The C# `static readonly IRewritePass[] rewritePasses` (the one static
 // field -- XClassRewritePass, MarkupExtensionRewritePass,
 // AttributeRewritePass, ConnectionIdRewritePass, DocumentRewritePass, in
-// order). The port's array holds the four ported passes in that order;
-// ConnectionIdRewritePass's row is deferred with the Phase-3/4 ILAst
-// machinery (for a document with no ConnectionId annotations -- every
-// stream the port can currently decompile -- the C# pass is a no-op, so
-// the observable chain is identical).
+// order).
 const std::vector<std::unique_ptr<Rewrite::IRewritePass>>& RewritePasses()
 {
     static const std::vector<std::unique_ptr<Rewrite::IRewritePass>> passes = [] {
@@ -90,6 +87,7 @@ const std::vector<std::unique_ptr<Rewrite::IRewritePass>>& RewritePasses()
         v.push_back(std::make_unique<Rewrite::XClassRewritePass>());
         v.push_back(std::make_unique<Rewrite::MarkupExtensionRewritePass>());
         v.push_back(std::make_unique<Rewrite::AttributeRewritePass>());
+        v.push_back(std::make_unique<Rewrite::ConnectionIdRewritePass>());
         v.push_back(std::make_unique<Rewrite::DocumentRewritePass>());
         return v;
     }();

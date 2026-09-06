@@ -60,7 +60,20 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `MetadataFileNotSupportedException` escape arm -- the class now derives
   `IAssemblyResolver`; all gold-pinned over this machine's framework
   directories, GAC, Windows Kits references, .NET 10 shared-framework
-  install, and crafted garbage/native-PE module fixtures).
+  install, and crafted garbage/native-PE module fixtures). The
+  `ConnectionIdRewritePass` -- the last BamlDecompiler deferral,
+  unblocked when the Phase-3/4 ILAst back end landed -- also landed: the
+  ILAst-driven rewrite pass reads the x:Class type's Connect method body
+  through the IL reader + the shared `IL::RunGetILTransforms` pipeline
+  (the flattened `CSharpDecompiler.GetILTransforms()` +
+  `ILFunction.RunTransforms` list, extracted from the CLI so both
+  consumers drive one list), matches its switch (or if-ladder fallback)
+  for the field assignments and event registrations, and renders the
+  x:Name/x:FieldModifier/event attributes, the Style target's EventSetter
+  child, and the unknown-id comments -- gold-pinned byte-exact against
+  the real ilspycmd 11.0 `--resource` over a real csc-compiled fixture
+  assembly with the WPF stand-in shapes and a 4-case code-behind Connect
+  switch).
 - **Phase 2** -- `Decompiler/TypeSystem/`: naming primitives (`TopLevelTypeName`,
   `FullTypeName`), `KnownTypeCode` (the full table -- 61 slots continuing
   System.TypeCode's numbering, `String`=18 with the value-17 hole the C# keeps),

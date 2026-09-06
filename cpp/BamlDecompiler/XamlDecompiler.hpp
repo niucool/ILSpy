@@ -64,13 +64,8 @@
 //    XamlContext convention: no ported consumer cancels).
 //  * The C# `static readonly IRewritePass[] rewritePasses` (XClass,
 //    MarkupExtension, Attribute, ConnectionId, Document) ports to a
-//    function-local static array of the four ported passes in that order;
-//    ConnectionIdRewritePass's row stays deferred with the Phase-3/4
-//    ILAst machinery (its position -- between AttributeRewritePass and
-//    DocumentRewritePass -- is what the port resumes when that lands). For
-//    a document with no ConnectionId annotations the pass is a no-op in
-//    the C#, so the port's four-pass chain is observably identical over
-//    every stream the port can currently decompile.
+//    function-local static array of the five ported passes in that order
+//    (ConnectionIdRewritePass is the ILAst-driven x:Name/event wiring).
 //  * `Decompile(Stream stream)` ports to the byte-span convention
 //    (`BamlReader.ReadDocument`'s signature).
 //  * The C# `ctx.RootNode.Type` and `elem.Xaml.Element` null-derefs (an
