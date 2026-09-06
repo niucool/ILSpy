@@ -468,6 +468,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/Resolver/MethodGroupResolveResult_Test.cpp
     Decompiler/CSharp/Resolver/MemberLookup_Test.cpp
     Decompiler/CSharp/Resolver/Log_Test.cpp
+    Decompiler/CSharp/Annotations_Test.cpp
     Decompiler/CSharp/Syntax/InterpolatedString_Test.cpp
     Decompiler/CSharp/Syntax/QueryExpression_Test.cpp
     Decompiler/CSharp/Syntax/QueryClauses_Test.cpp

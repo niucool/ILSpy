@@ -140,6 +140,17 @@ public:
         return result;
     }
 
+    // The owning shared_ptr view of the same storage (the port's addition): the C#
+    // extension methods that COPY a node's annotations to another node as the same
+    // objects (`AnnotationExtensions.CopyAnnotationsFrom`, Annotations.cs -- the
+    // reference-sharing the GC gives for free) need the owning handles to re-attach
+    // them verbatim; the raw `Annotations()` view above loses them. Port-added
+    // surface consumed only by the annotation-copy helpers.
+    const std::vector<std::shared_ptr<AnnotationBase>>& SharedAnnotations() const {
+        static const std::vector<std::shared_ptr<AnnotationBase>> kEmpty;
+        return annotations_ ? *annotations_ : kEmpty;
+    }
+
 protected:
     // Replaces the C# `MemberwiseClone` + `protected CloneAnnotations()` combo for the
     // annotation channel. The concrete node's `Clone` calls this on the fresh clone

@@ -23,6 +23,8 @@
 
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 
+#include "Decompiler/CSharp/Resolver/DynamicInvocationResolveResult.hpp"
+#include "Decompiler/CSharp/Resolver/DynamicMemberResolveResult.hpp"
 #include "Decompiler/Metadata/AssemblyNameInfo.hpp"
 #include "Decompiler/Metadata/AssemblyNameReference.hpp"
 #include "Decompiler/TypeSystem/Implementation/BaseTypeCollector.hpp"
@@ -38,12 +40,18 @@
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"  // GetTypeName (IsKnownType)
 #include "Decompiler/TypeSystem/StringComparer.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
+#include "Decompiler/Semantics/ConversionResolveResult.hpp"
+#include "Decompiler/Semantics/LocalResolveResult.hpp"
+#include "Decompiler/Semantics/MemberResolveResult.hpp"
+#include "Decompiler/Semantics/TypeResolveResult.hpp"
 
 #include <algorithm>
 #include <any>
 #include <stdexcept>
 
 namespace ILSpy::Decompiler::TypeSystem {
+
+namespace Sem = ::ILSpy::Decompiler::Semantics;
 
 std::vector<const IType*> GetAllBaseTypes(const IType* type)
 {
@@ -688,6 +696,35 @@ ITypePtr AsParameterizedType(const ITypeDefinition& td)
     return std::make_shared<ParameterizedType>(
         std::const_pointer_cast<IType>(td.shared_from_this()),
         std::move(typeArguments));
+}
+
+// The C# `public static ISymbol GetSymbol(this ResolveResult rr)` -- the is-a chain
+// over the six result kinds the C# checks, in order (the last two reach into the
+// CSharp.Resolver namespace, exactly as the C# file does).
+const ISymbol* GetSymbol(const ILSpy::Decompiler::Semantics::ResolveResult& resolveResult)
+{
+    if (const auto* local =
+            dynamic_cast<const Sem::LocalResolveResult*>(&resolveResult)) {
+        return local->Variable();
+    } else if (const auto* member =
+                   dynamic_cast<const Sem::MemberResolveResult*>(&resolveResult)) {
+        return member->Member();
+    } else if (const auto* type =
+                   dynamic_cast<const Sem::TypeResolveResult*>(&resolveResult)) {
+        return type->Type().GetDefinition();
+    } else if (const auto* conversion =
+                   dynamic_cast<const Sem::ConversionResolveResult*>(&resolveResult)) {
+        return GetSymbol(*conversion->Input());
+    } else if (const auto* dynamicMember = dynamic_cast<
+                   const ILSpy::Decompiler::CSharp::Resolver::DynamicMemberResolveResult*>(
+                   &resolveResult)) {
+        return dynamicMember->Symbol();
+    } else if (const auto* dynamicInvocation = dynamic_cast<
+                   const ILSpy::Decompiler::CSharp::Resolver::
+                       DynamicInvocationResolveResult*>(&resolveResult)) {
+        return dynamicInvocation->Symbol();
+    }
+    return nullptr;
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem

@@ -1921,10 +1921,34 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `RecursivePatternExpression`). The port is exercised by direct unit tests
   (5859 gtest cases; the CLI `--csharp` output is byte-identical run-to-run at
   the known-good seed signature). Remaining to wire `--csharp` to the real
-  back end: the declaration/query/interpolation Visit methods, the
-  `ExpressionBuilder`/`StatementBuilder`/`CallBuilder` (the resolver-checked
-  translation from ILAst to the C# AST), the ~15 AST prettification
-  transforms, and the `RequiredNamespaceCollector`.
+  back end: the `ExpressionBuilder`/`StatementBuilder`/`CallBuilder` (the
+  resolver-checked translation from ILAst to the C# AST), the ~15 AST
+  prettification transforms, and the `RequiredNamespaceCollector`. The
+  translated-value foundation layer of that back end landed:
+  `Decompiler/CSharp/TranslatedExpression.{hpp,cpp}` (the C#
+  `ExpressionWithILInstruction` / `ExpressionWithResolveResult` /
+  `TranslatedExpression` wrapper structs with `UnwrapChild`, whose
+  `ConvertTo`/`ConvertToBoolean` machinery is DEFERRED with the
+  ExpressionBuilder skeleton it consumes), `TranslatedStatement.hpp`, and
+  `TranslationContext.hpp` (the visitor `TypeHint` struct), plus
+  `Decompiler/CSharp/Annotations.{hpp,cpp}` (the C# `Annotations.cs`: the
+  `ILVariableResolveResult` + eight annotation-holder classes and the
+  `WithILInstruction`/`WithoutILInstruction`/`WithRR`/`GetSymbol`/
+  `GetResolveResult`/`GetILVariable`/`WithILVariable`/`CopyAnnotationsFrom`/
+  `CopyInstructionsFrom` extension surface). The C# stores the ILInstruction
+  object itself as the annotation; the port's annotation channel owns via
+  `shared_ptr` while the IL tree owns instructions uniquely, so the channel
+  stores a NON-OWNING `ILInstructionAnnotation` holder (the With*/query
+  helpers are its only access forms -- builder call sites stay C#-shaped),
+  and `AbstractAnnotatable` gained the `SharedAnnotations()` owning-view the
+  C# reference-sharing `CopyAnnotationsFrom` needs. `TypeSystemExtensions`
+  gained the `GetSymbol(ResolveResult)` region extension (the C#
+  TypeSystemExtensions.cs `#region ResolveResult`) the `GetSymbol(AstNode)`
+  query composes. Verified by the 38-test `AnnotationsTest`/
+  `TranslationContextTest` suite (the binding/query/copy matrices over
+  synthetic ASTs, the GetSymbol dispatch over six real resolve-result kinds,
+  the trivia-holder skip, the UnknownError fallbacks), proven with a
+  neuter round (7 RED, restored green).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

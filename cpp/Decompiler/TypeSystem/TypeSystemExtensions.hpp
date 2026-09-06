@@ -55,6 +55,12 @@ class IParameter;
 class IProperty;
 } // namespace ILSpy::Decompiler::TypeSystem
 
+// Forward declaration for the `GetSymbol` resolve-result parameter (pointer only;
+// the .cpp includes the full header).
+namespace ILSpy::Decompiler::Semantics {
+class ResolveResult;
+} // namespace ILSpy::Decompiler::Semantics
+
 // The `AssemblyNameInfo` parameter type of `FindModuleByAssemblyNameInfo` (the C#
 // `System.Reflection.Metadata` class, ported as `ILSpy::Decompiler::Metadata::
 // AssemblyNameInfo`) -- forward-declared so the declaration below needs no Metadata
@@ -481,5 +487,16 @@ bool IsParameterizedProperty(const IProperty& property);
 // port is the null check plus the negation (the iteration-103 corrected
 // nullable-equality semantics).
 bool HasReadonlyModifier(const IMethod& accessor);
+
+// The C# `public static ISymbol GetSymbol(this ResolveResult rr)`
+// (TypeSystemExtensions.cs line 726, the `#region ResolveResult` block): the symbol a
+// resolve result represents -- the local variable of a `LocalResolveResult`, the
+// member of a `MemberResolveResult`, the type definition of a `TypeResolveResult`, the
+// recursion through a `ConversionResolveResult`'s input, and the nullable symbol of
+// the two `dynamic` resolve results (`DynamicMemberResolveResult` /
+// `DynamicInvocationResolveResult`); null for every other result kind. Uses ordinal
+// name-free identity semantics (the C# doc applies to the sibling `GetTypeDefinition`
+// overload -- this member reads only the result's own fields).
+const ISymbol* GetSymbol(const ILSpy::Decompiler::Semantics::ResolveResult& resolveResult);
 
 } // namespace ILSpy::Decompiler::TypeSystem
