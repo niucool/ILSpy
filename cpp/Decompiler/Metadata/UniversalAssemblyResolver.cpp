@@ -23,11 +23,16 @@
 #include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
 
 #include "Decompiler/Metadata/DotNetCorePathFinder.hpp"
+#include "Decompiler/Metadata/EnumUnderlyingTypeResolveException.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/Metadata/MethodBodyReader.hpp"
 #include "Decompiler/Util/Char.hpp"
 #include "Decompiler/Util/Utf.hpp"
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
+#include <fstream>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
@@ -1187,6 +1192,166 @@ std::optional<std::string> UniversalAssemblyResolver::GetMscorlibBasePath(
         throw std::runtime_error("Version not supported: " + version.ToString());
     }
     return std::nullopt;
+}
+
+// ---------------------------------------------------------------------------
+// The file-loading half: `Resolve` / `ResolveModule` /
+// `CreatePEFileFromFileName`.
+//
+// The probe machinery below is file-local.
+namespace {
+//
+// The C# failure classification over the file bytes: the C# `new FileStream`
+// open failure is the IOException arm, the C# `new PEReader` eager header
+// validation is the BadImageFormatException arm, and the C# `MetadataFile`
+// ctor over a valid image with no CLI directory throws
+// `MetadataFileNotSupportedException`, which escapes BOTH catches and
+// propagates out of Resolve/ResolveModule regardless of throwOnError. The
+// port's MetadataFile constructor never throws (it reports IsValid()), so
+// the classification is a file-bytes probe over the port's own PE-header
+// parser: a non-PE (or truncated-header) file is the PEReager arm, a valid
+// PE with no cor20 directory is the escape arm, and a valid CLI image whose
+// metadata does not parse is the GetMetadataReader arm (the port's
+// IsValid() = false after the cor-directory probe).
+struct PeHeaderProbe {
+    bool validPe = false;         // the C# `new PEReader` eager validation
+    bool hasCorDirectory = false; // the C# `reader.HasMetadata` test
+};
+
+// The probe's local ReadAllBytes copy (the MetadataFile.cpp local is not
+// exported; the established per-consumer convention).
+std::shared_ptr<const std::vector<std::uint8_t>> ReadAllBytesForProbe(
+    std::string_view path) {
+    std::ifstream f((std::string{path}), std::ios::binary);
+    if (!f) return nullptr;
+    auto bytes = std::make_shared<std::vector<std::uint8_t>>();
+    f.seekg(0, std::ios::end);
+    auto sz = f.tellg();
+    if (sz < 0) return nullptr;
+    bytes->resize(static_cast<std::size_t>(sz));
+    f.seekg(0);
+    f.read(reinterpret_cast<char*>(bytes->data()), bytes->size());
+    if (f.gcount() != static_cast<std::streamsize>(bytes->size())) return nullptr;
+    return bytes;
+}
+
+PeHeaderProbe ProbePeHeaders(const std::string& path) {
+    PeHeaderProbe probe;
+    auto image = ReadAllBytesForProbe(path);
+    if (!image) return probe;
+    PeImage pe(image);
+    // The PE signature check sits between the port's PeImage header parse
+    // (MZ + e_lfanew bounds) and the C# PEReader's full validation matrix
+    // (the documented divergence: the port's probe carries the MZ/PE-sig
+    // subset, which is what every real resolver fixture separates).
+    if (!pe.Valid()) return probe;
+    if (pe.Size() < 4) return probe;
+    const auto* bytes = pe.Data();
+    std::uint32_t e_lfanew = 0;
+    std::memcpy(&e_lfanew, bytes + 0x3C, sizeof(e_lfanew));
+    if (e_lfanew + 4 > pe.Size()) return probe;
+    if (bytes[e_lfanew] != 'P' || bytes[e_lfanew + 1] != 'E'
+        || bytes[e_lfanew + 2] != 0 || bytes[e_lfanew + 3] != 0) {
+        return probe;
+    }
+    probe.validPe = true;
+    // The C# `PEReader.HasMetadata`: the CLI directory entry's presence
+    // (winmd's own is_database reads the same directory; a zero entry is a
+    // non-managed PE -- the MetadataFileNotSupportedException arm).
+    probe.hasCorDirectory = pe.ComDirectoryRva() != 0;
+    return probe;
+}
+
+}  // namespace
+
+const MetadataFile* UniversalAssemblyResolver::Resolve(
+    const IAssemblyReference& name) const {
+    std::optional<std::string> file = FindAssemblyFile(name);
+    // The C# factory captures `name` and `file`; the ctor-1
+    // ResolutionException renders `resolvedPath ?? "<not found>"` from the
+    // captured file.
+    ResolutionExceptionFactory makeException =
+        [&name, &file](const std::exception*) {
+            return ResolutionException(&name, file);
+        };
+    return CreatePEFileFromFileName(file, makeException);
+}
+
+const MetadataFile* UniversalAssemblyResolver::ResolveModule(
+    const MetadataFile& mainModule, const std::string& moduleName) const {
+    // The C# `Path.GetDirectoryName(mainModule.FileName)` -- null for the
+    // empty string and the root forms, so a main-module file name with no
+    // directory information takes the early return.
+    std::optional<std::string> baseDirectory = GetDirectoryName(mainModule.FileName());
+    if (!baseDirectory) return nullptr;
+    // The C# `Path.Combine(baseDirectory, moduleName)` (the rooted-second
+    // and empty-component rules the local JoinPaths carries).
+    std::string moduleFileName = JoinPaths(*baseDirectory, moduleName);
+    // The ctor-2 factory: the exception carries the main-module path, the
+    // module name, and the composed module path.
+    ResolutionExceptionFactory makeException =
+        [&mainModule, &moduleName, &moduleFileName](const std::exception*) {
+            return ResolutionException(mainModule.FileName(), moduleName,
+                                       moduleFileName);
+        };
+    return CreatePEFileFromFileName(moduleFileName, makeException);
+}
+
+// The C# private `MetadataFile? CreatePEFileFromFileName(string? fileName,
+// Func<Exception?, Exception> makeException)` -- the load-and-fail machinery
+// both Resolve arms share (the header documents the failure classes).
+const MetadataFile* UniversalAssemblyResolver::CreatePEFileFromFileName(
+    std::optional<std::string> fileName,
+    const ResolutionExceptionFactory& makeException) const {
+    // The C# null-fileName arm.
+    if (!fileName) {
+        if (throwOnError_) throw makeException(nullptr);
+        return nullptr;
+    }
+
+    // The C# `new FileStream(fileName, FileMode.Open, FileAccess.Read)`
+    // open failure -- FileNotFoundException/DirectoryNotFoundException (the
+    // IOException catch arm). An UnauthorizedAccessException would escape
+    // the C# catches; unreachable through the port's swallow-everything
+    // MetadataFile constructor, so every unopenable file maps to the
+    // IOException arm (documented divergence).
+    {
+        std::ifstream probe(*fileName, std::ios::binary);
+        if (!probe.is_open()) {
+            if (throwOnError_) throw makeException(nullptr);
+            return nullptr;
+        }
+    }
+
+    // The PE-header probe: the C# `new PEReader(stream, streamOptions)`
+    // validates the headers eagerly (the BadImageFormatException catch
+    // arm), then the C# MetadataFile ctor throws
+    // MetadataFileNotSupportedException for a valid image with no CLI
+    // directory -- the exception that escapes both catches.
+    PeHeaderProbe pe = ProbePeHeaders(*fileName);
+    if (!pe.validPe) {
+        if (throwOnError_) throw makeException(nullptr);
+        return nullptr;
+    }
+    if (!pe.hasCorDirectory) {
+        throw MetadataFileNotSupportedException(
+            "PE file does not contain any managed metadata.");
+    }
+
+    // The metadata parse: the C# GetMetadataReader BadImageFormatException
+    // over a valid CLI image with corrupt tables -- the
+    // BadImageFormatException catch arm again (the port's IsValid() report).
+    auto file = std::make_unique<MetadataFile>(*fileName);
+    if (!file->IsValid()) {
+        if (throwOnError_) throw makeException(nullptr);
+        return nullptr;
+    }
+
+    // The keep-alive registry: the C# GC roots every PEFile the resolver
+    // returns; the port's non-owning pointer borrows the registry's entry.
+    const MetadataFile* result = file.get();
+    resolvedFiles_.push_back(std::move(file));
+    return result;
 }
 
 }  // namespace ILSpy::Decompiler::Metadata

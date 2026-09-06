@@ -38,8 +38,11 @@
 //   * the I7 FindClosestVersionDirectory crafted matrix over the version
 //   folder layout the test builds.
 
+#include "Decompiler/Metadata/EnumUnderlyingTypeResolveException.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
 #include "TestFixtures/UarInstanceGold.hpp"
+#include "TestFixtures/UarResolveGold.hpp"
 
 #include <gtest/gtest.h>
 
@@ -64,6 +67,7 @@ using ILSpy::Tests::kUarDirsGold;
 using ILSpy::Tests::kUarDispatchGold;
 using ILSpy::Tests::kUarFrameworkChainGold;
 using ILSpy::Tests::kUarOptionEnumGold;
+using ILSpy::Tests::kUarResolveGold;
 using ILSpy::Tests::kUarSharedGold;
 using ILSpy::Tests::kUarThrowGold;
 using ILSpy::Tests::kUarWinmdGold;
@@ -121,6 +125,34 @@ void BuildVersionsLayout() {
     }
     fs::create_directories(
         fs::path(JoinPath(kVersionsDir, "empty")), ec);
+}
+
+// The machine fixture roots for the R2 file-loading drives (the probe's
+// own fixture directory).
+constexpr const char* kResolveDir = "C:\\temp-probe\\uar_resolve";
+// The managed main module source (the real .NET Framework 4.8
+// System.Configuration.dll) and the native-PE source (a real PE image with
+// no CLI directory) the R2 layout copies from.
+constexpr const char* kManagedSource =
+    "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\System.Configuration.dll";
+constexpr const char* kNativeSource = "C:\\Windows\\System32\\acppage.dll";
+
+// Builds the R2 fixture directory once: main.dll (the managed assembly
+// copy), garbage.dll (a text file renamed -- the BadImageFormatException
+// arm), and nativelib.dll (the native-PE copy -- the
+// MetadataFileNotSupportedException escape arm).
+void BuildResolveLayout() {
+    std::error_code ec;
+    fs::remove_all(fs::path(kResolveDir), ec);
+    fs::create_directories(fs::path(kResolveDir), ec);
+    fs::copy_file(fs::path(kManagedSource),
+        fs::path(JoinPath(kResolveDir, "main.dll")),
+        fs::copy_options::overwrite_existing, ec);
+    WriteAllText(JoinPath(kResolveDir, "garbage.dll"),
+        "this is not a PE image\n");
+    fs::copy_file(fs::path(kNativeSource),
+        fs::path(JoinPath(kResolveDir, "nativelib.dll")),
+        fs::copy_options::overwrite_existing, ec);
 }
 
 // The C# probe's `dumpDirs` render: "[a, b, <null>]".
@@ -200,6 +232,7 @@ protected:
         if (!layoutBuilt) {
             BuildInstanceLayout();
             BuildVersionsLayout();
+            BuildResolveLayout();
             layoutBuilt = true;
         }
 #else
@@ -563,6 +596,250 @@ TEST_F(UniversalAssemblyResolverInstanceTest, FindClosestVersionMatrix) {
     for (std::size_t i = 0; i < observed.size(); i++) {
         EXPECT_STREQ(observed[i].c_str(),
             std::string(kUarClosestVersionGold[i]).c_str())
+            << "line " << i;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The R2 file-loading drives (Resolve/ResolveModule/CreatePEFileFromFileName)
+// over the kResolveDir fixture: every expectation gold-dumped from the real
+// installed ICSharpCode.Decompiler 11.0 (the C:/temp-probe/UarResolveProbe).
+
+// The C# `bool` render of a null-file check ("True"/"False").
+std::string R2Bool(bool value) { return value ? "True" : "False"; }
+
+// The C# `path ?? "<null>"` render of an optional path.
+std::string R2Path(const std::optional<std::string>& path) {
+    return path ? *path : std::string("<null>");
+}
+
+// The R2 fixture report lines (the probe's F family): the directory and the
+// three fixture files with their sizes.
+void RenderResolveFixture(std::vector<std::string>& observed) {
+    observed.push_back(std::string("F|dir=") + kResolveDir);
+    for (const char* name : {"main.dll", "garbage.dll", "nativelib.dll"}) {
+        std::string path = JoinPath(kResolveDir, name);
+        std::error_code ec;
+        auto size = fs::file_size(fs::path(path), ec);
+        const char* tag = name == std::string("main.dll") ? "F|main="
+                          : name == std::string("garbage.dll") ? "F|garbage="
+                                                               : "F|native=";
+        observed.push_back(std::string(tag) + path + "|" +
+                            std::to_string(size));
+    }
+}
+
+TEST_F(UniversalAssemblyResolverInstanceTest, ResolveHappyPath) {
+    std::vector<std::string> observed;
+    RenderResolveFixture(observed);
+
+    // -- A: the Resolve happy path --
+    TM::UniversalAssemblyResolver resolverA(
+        std::nullopt, false, ".NETFramework,Version=v4.0");
+    TM::AssemblyNameReference mscorlibRef = TM::AssemblyNameReference::Parse(
+        "mscorlib, Version=4.0.0.0, Culture=neutral, "
+        "PublicKeyToken=b77a5c561934e089");
+    std::optional<std::string> found = resolverA.FindAssemblyFile(mscorlibRef);
+    observed.push_back("A|find=" + R2Path(found));
+    const TM::MetadataFile* fileA = resolverA.Resolve(mscorlibRef);
+    observed.push_back(std::string("A|null=") + R2Bool(fileA == nullptr));
+    ASSERT_NE(fileA, nullptr);
+    observed.push_back("A|fileName=" + fileA->FileName());
+    observed.push_back("A|name=" + fileA->Name());
+    observed.push_back("A|fullName=" + fileA->FullName());
+    observed.push_back(std::string("A|isAssembly=") +
+                       R2Bool(fileA->GetAssemblyDefinition().has_value()));
+    const TM::MetadataFile* fileA2 = resolverA.Resolve(mscorlibRef);
+    ASSERT_NE(fileA2, nullptr);
+    // The C# `new PEFile` per call: distinct instances, same content.
+    observed.push_back(std::string("A|distinct=") +
+                       R2Bool(fileA2 != fileA));
+    observed.push_back(std::string("A|sameName=") +
+                       R2Bool(fileA2->Name() == fileA->Name()));
+
+    // The F(4) + A(8) rows are gold lines 0..11.
+    EXPECT_EQ(observed.size(), std::size_t(12));
+    for (std::size_t i = 0; i < observed.size(); i++) {
+        EXPECT_STREQ(observed[i].c_str(),
+            std::string(ILSpy::Tests::kUarResolveGold[i]).c_str())
+            << "line " << i;
+    }
+}
+
+TEST_F(UniversalAssemblyResolverInstanceTest, ResolveNotFoundArms) {
+    std::vector<std::string> observed;
+
+    // -- B: not found, throwOnError=false --
+    TM::UniversalAssemblyResolver resolverB(
+        std::nullopt, false, ".NETFramework,Version=v4.0");
+    TM::AssemblyNameReference bogusRef = TM::AssemblyNameReference::Parse(
+        "NoSuchAssembly.XYZ, Version=1.0.0.0, Culture=neutral, "
+        "PublicKeyToken=7777777777777777");
+    const TM::MetadataFile* fileB = resolverB.Resolve(bogusRef);
+    observed.push_back(std::string("B|null=") + R2Bool(fileB == nullptr));
+
+    // -- C: not found, throwOnError=true --
+    TM::UniversalAssemblyResolver resolverC(
+        std::nullopt, true, ".NETFramework,Version=v4.0");
+    try {
+        resolverC.Resolve(bogusRef);
+        observed.push_back("C|NO-THROW");
+    } catch (const TM::ResolutionException& ex) {
+        observed.push_back("C|msg=" + EscapeMessage(ex.what()));
+        ASSERT_NE(ex.Reference(), nullptr);
+        observed.push_back("C|ref=" + ex.Reference()->FullName());
+        observed.push_back("C|resolved=" + R2Path(ex.ResolvedFullPath()));
+        observed.push_back("C|module=" + R2Path(ex.ModuleName()) + "|main=" +
+                           R2Path(ex.MainModuleFullPath()));
+    }
+
+    // The B(1) + C(4) rows are gold lines 12..16.
+    EXPECT_EQ(observed.size(), std::size_t(5));
+    for (std::size_t i = 0; i < observed.size(); i++) {
+        EXPECT_STREQ(observed[i].c_str(),
+            std::string(ILSpy::Tests::kUarResolveGold[12 + i]).c_str())
+            << "line " << i;
+    }
+}
+
+TEST_F(UniversalAssemblyResolverInstanceTest, ResolveModuleArms) {
+    std::vector<std::string> observed;
+
+    // -- D: the ResolveModule happy path --
+    TM::UniversalAssemblyResolver resolverD(
+        std::nullopt, false, ".NETFramework,Version=v4.0");
+    TM::AssemblyNameReference mscorlibRef = TM::AssemblyNameReference::Parse(
+        "mscorlib, Version=4.0.0.0, Culture=neutral, "
+        "PublicKeyToken=b77a5c561934e089");
+    const TM::MetadataFile* mscorlibD = resolverD.Resolve(mscorlibRef);
+    ASSERT_NE(mscorlibD, nullptr);
+    const TM::MetadataFile* sysD = resolverD.ResolveModule(*mscorlibD, "System.dll");
+    observed.push_back(std::string("D|null=") + R2Bool(sysD == nullptr));
+    ASSERT_NE(sysD, nullptr);
+    observed.push_back("D|fileName=" + sysD->FileName());
+    observed.push_back("D|name=" + sysD->Name());
+    const TM::MetadataFile* sysD2 = resolverD.ResolveModule(*mscorlibD, "System.dll");
+    ASSERT_NE(sysD2, nullptr);
+    observed.push_back(std::string("D|distinct=") + R2Bool(sysD2 != sysD));
+
+    // -- E: ResolveModule missing, throwOnError=true --
+    TM::UniversalAssemblyResolver resolverE(
+        std::nullopt, true, ".NETFramework,Version=v4.0");
+    const TM::MetadataFile* mscorlibE = resolverE.Resolve(mscorlibRef);
+    ASSERT_NE(mscorlibE, nullptr);
+    try {
+        resolverE.ResolveModule(*mscorlibE, "missingmodule.dll");
+        observed.push_back("E|NO-THROW");
+    } catch (const TM::ResolutionException& ex) {
+        observed.push_back("E|msg=" + EscapeMessage(ex.what()));
+        observed.push_back("E|module=" + R2Path(ex.ModuleName()) + "|main=" +
+                           R2Path(ex.MainModuleFullPath()) + "|resolved=" +
+                           R2Path(ex.ResolvedFullPath()));
+    }
+
+    // -- F2: ResolveModule missing, throwOnError=false --
+    TM::UniversalAssemblyResolver resolverF(
+        std::nullopt, false, ".NETFramework,Version=v4.0");
+    const TM::MetadataFile* mscorlibF = resolverF.Resolve(mscorlibRef);
+    ASSERT_NE(mscorlibF, nullptr);
+    observed.push_back(std::string("F2|null=") +
+                       R2Bool(resolverF.ResolveModule(*mscorlibF,
+                                                      "missingmodule.dll") ==
+                              nullptr));
+
+    // The D(4) + E(2) + F2(1) rows are gold lines 17..23.
+    EXPECT_EQ(observed.size(), std::size_t(7));
+    for (std::size_t i = 0; i < observed.size(); i++) {
+        EXPECT_STREQ(observed[i].c_str(),
+            std::string(ILSpy::Tests::kUarResolveGold[17 + i]).c_str())
+            << "line " << i;
+    }
+}
+
+TEST_F(UniversalAssemblyResolverInstanceTest, ResolveModuleFailureClasses) {
+    std::vector<std::string> observed;
+
+    // The fixture main module: the managed assembly copy.
+    TM::MetadataFile mainG(JoinPath(kResolveDir, "main.dll"));
+    observed.push_back("G|mainName=" + mainG.Name());
+
+    // -- G: the garbage .dll, throwOnError=false (the BadImageFormatException
+    // arm swallowed) --
+    TM::UniversalAssemblyResolver resolverG(
+        std::nullopt, false, ".NETFramework,Version=v4.0");
+    const TM::MetadataFile* g0 =
+        resolverG.ResolveModule(mainG, "garbage.dll");
+    observed.push_back(std::string("G|null0=") + R2Bool(g0 == nullptr));
+
+    // -- G1: the garbage .dll, throwOnError=true --
+    TM::UniversalAssemblyResolver resolverG1(
+        std::nullopt, true, ".NETFramework,Version=v4.0");
+    try {
+        resolverG1.ResolveModule(mainG, "garbage.dll");
+        observed.push_back("G1|NO-THROW");
+    } catch (const TM::ResolutionException& ex) {
+        observed.push_back("G1|msg=" + EscapeMessage(ex.what()));
+        observed.push_back("G1|resolved=" + R2Path(ex.ResolvedFullPath()));
+    }
+
+    // -- H: the native .dll, both arms (the MetadataFileNotSupportedException
+    // escape arm -- propagates regardless of throwOnError) --
+    try {
+        const TM::MetadataFile* h0 =
+            resolverG.ResolveModule(mainG, "nativelib.dll");
+        observed.push_back(std::string("H0|null=") + R2Bool(h0 == nullptr));
+    } catch (const TM::MetadataFileNotSupportedException& ex) {
+        observed.push_back("H0|type=ICSharpCode.Decompiler.Metadata."
+                           "MetadataFileNotSupportedException");
+        observed.push_back(std::string("H0|msg=") + EscapeMessage(ex.what()));
+    }
+    try {
+        resolverG1.ResolveModule(mainG, "nativelib.dll");
+        observed.push_back("H1|NO-THROW");
+    } catch (const TM::MetadataFileNotSupportedException& ex) {
+        observed.push_back("H1|type=ICSharpCode.Decompiler.Metadata."
+                           "MetadataFileNotSupportedException");
+        observed.push_back(std::string("H1|msg=") + EscapeMessage(ex.what()));
+    }
+
+    // The G(2) + G1(2) + H0(2) + H1(2) rows are gold lines 24..31.
+    EXPECT_EQ(observed.size(), std::size_t(8));
+    for (std::size_t i = 0; i < observed.size(); i++) {
+        EXPECT_STREQ(observed[i].c_str(),
+            std::string(ILSpy::Tests::kUarResolveGold[24 + i]).c_str())
+            << "line " << i;
+    }
+}
+
+TEST_F(UniversalAssemblyResolverInstanceTest, ResolveModuleBaseDirectoryNull) {
+    std::vector<std::string> observed;
+
+    // -- I: the baseDirectory-null early return --
+    TM::UniversalAssemblyResolver resolverG(
+        std::nullopt, false, ".NETFramework,Version=v4.0");
+    // The root-form main-module file name: Path.GetDirectoryName answers null.
+    TM::MetadataFile mainI1("\\\\server\\share");
+    observed.push_back(std::string("I|null1=") +
+                       R2Bool(resolverG.ResolveModule(mainI1, "System.dll") ==
+                              nullptr));
+    // The empty main-module file name: GetDirectoryName answers null.
+    TM::MetadataFile mainI2("");
+    observed.push_back(std::string("I|null2=") +
+                       R2Bool(resolverG.ResolveModule(mainI2, "System.dll") ==
+                              nullptr));
+    // The no-directory relative form: GetDirectoryName answers the EMPTY
+    // string (not null), so the module name resolves relative to the process
+    // CWD (which carries no nativelib.dll -- the probe's shape).
+    TM::MetadataFile mainI3("x.dll");
+    const TM::MetadataFile* i3 = resolverG.ResolveModule(mainI3, "nativelib.dll");
+    observed.push_back(std::string("I|null3=") + R2Bool(i3 == nullptr) +
+                       "|fileName=" + (i3 ? i3->FileName() : std::string("<null>")));
+
+    // The I rows are gold lines 32..34 (after the H1 family).
+    EXPECT_EQ(observed.size(), std::size_t(3));
+    for (std::size_t i = 0; i < observed.size(); i++) {
+        EXPECT_STREQ(observed[i].c_str(),
+            std::string(ILSpy::Tests::kUarResolveGold[32 + i]).c_str())
             << "line " << i;
     }
 }

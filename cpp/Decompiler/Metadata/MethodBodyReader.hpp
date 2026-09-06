@@ -126,6 +126,7 @@ public:
             ? reinterpret_cast<const image_nt_headers32plus*>(
                   base + dos.e_lfanew)->OptionalHeader.DataDirectory[14].VirtualAddress
             : nt->OptionalHeader.DataDirectory[14].VirtualAddress;
+        comRva_ = comRva;
         if (comRva != 0) {
             const auto* cor = reinterpret_cast<const image_cor20_header*>(RvaToPtr(comRva));
             // The cor20 header's Flags and Resources directory -- the
@@ -142,6 +143,12 @@ public:
     bool Valid() const noexcept { return sections_ != nullptr; }
     const std::uint8_t* Data() const noexcept { return bytes_->data(); }
     std::size_t Size() const noexcept { return bytes_->size(); }
+    // The cor20 directory entry's RVA (the CLI-directory presence test the
+    // C# `PEReader.HasMetadata` performs -- the resolver's
+    // `CreatePEFileFromFileName` classifies a valid PE with none as the
+    // MetadataFileNotSupportedException escape arm). Zero when the optional
+    // header carries no entry (a non-managed PE).
+    std::uint32_t ComDirectoryRva() const noexcept { return comRva_; }
 
     // The optional-header values the WriteModuleHeader PE lines render. The
     // C# PEHeader members are widened (ImageBase/SizeOfStackReserve are
@@ -471,6 +478,9 @@ private:
     std::uint16_t subsystem_ = 0;
     std::uint32_t corFlags_ = 0;
     std::uint32_t resourcesDirectoryRva_ = 0;
+    // The cor20 directory entry's RVA as captured above (zero when the
+    // optional header carries none).
+    std::uint32_t comRva_ = 0;
 
     // The debug data directory (optional-header data directory index 6)
     // the ReadDebugDirectory entry array lives at, captured during the PE

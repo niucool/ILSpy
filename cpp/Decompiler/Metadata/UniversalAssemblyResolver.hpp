@@ -49,11 +49,13 @@
 // (the C# probe invokes it by reflection over a crafted version-folder
 // layout).
 //
-// The `Resolve`/`ResolveModule`/`CreatePEFileFromFileName` members (the
-// `IAssemblyResolver` file-loading half) stay a documented deferral: they
-// construct the port's `MetadataFile` over an opened stream, a separate
-// verifiable unit that lands with the `IAssemblyResolver` derivation of the
-// class.
+// The FOURTH sub-slice: the `IAssemblyResolver` file-loading half -- the
+// `Resolve`/`ResolveModule` interface members routing the located paths
+// through `CreatePEFileFromFileName` (the C# `new FileStream` + `new
+// PEFile` chain with its BadImageFormatException/IOException catches and
+// the MetadataFileNotSupportedException escape arm -- gold-pinned against
+// the real engine over this machine's assemblies plus crafted
+// garbage/native-PE module fixtures).
 //
 // The Mono arms (`GetDefaultMonoGacPaths`/`GetCurrentMonoGac`/
 // `GetAssemblyInMonoGac`/`GetMonoMscorlibBasePath` and the Mono static ctor
@@ -73,6 +75,7 @@
 #include "Decompiler/Metadata/AssemblyNameReference.hpp"
 #include "Decompiler/TypeSystem/Version.hpp"
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -186,13 +189,23 @@ ParsedTargetFramework ParseTargetFramework(const std::string& targetFramework);
 // `IsZeroOrAllOnes` gate use.
 const TypeSystem::Version& ZeroVersion();
 
+// The C# `Func<Exception?, Exception> makeException` factory type of the
+// private `CreatePEFileFromFileName`: the factory receives the
+// inner-exception-or-null marker and returns the exception to throw (by
+// value -- the throw-expression copies it, preserving the
+// ResolutionException type identity the tests catch).
+using ResolutionExceptionFactory =
+    std::function<ResolutionException(const std::exception*)>;
+
 // The C# `public class UniversalAssemblyResolver : AssemblyReferenceClassifier,
 // IAssemblyResolver` (UniversalAssemblyResolver.cs lines 76-813) -- the
 // assembly resolver over the .NET Framework GAC, the .deps.json-driven
-// `DotNetCorePathFinder`, Silverlight, and winmd layouts. This slice is the
-// STATIC half (the header comment above); the `IAssemblyResolver` base lands
-// with the instance surface.
-class UniversalAssemblyResolver : public AssemblyReferenceClassifier {
+// `DotNetCorePathFinder`, Silverlight, and winmd layouts. The `IAssemblyResolver`
+// base is the file-loading half: `Resolve`/`ResolveModule` locate the file
+// (the instance slice's `FindAssemblyFile`/`Path` machinery) and construct
+// the port's `MetadataFile` over it through `CreatePEFileFromFileName`.
+class UniversalAssemblyResolver : public AssemblyReferenceClassifier,
+                                 public IAssemblyResolver {
 public:
     // The C# `public static List<string> GetGacPaths()` -- the GAC root
     // directories: `<windir>\assembly` (the pre-v4 GAC) and
@@ -280,6 +293,23 @@ public:
     // no observable effect outside the ETW log and does not port).
     std::optional<std::string> FindAssemblyFile(const IAssemblyReference& name) const;
 
+    // The C# `public MetadataFile? Resolve(IAssemblyReference name)` -- the
+    // `IAssemblyResolver` file-loading arm: `FindAssemblyFile` locates the
+    // path and `CreatePEFileFromFileName` loads it, wrapping every failure
+    // in the ctor-1 `ResolutionException` (`resolvedPath` = the found path,
+    // nullopt when not found). The returned file is non-owning (the
+    // keep-alive registry below holds it).
+    const MetadataFile* Resolve(const IAssemblyReference& name) const override;
+
+    // The C# `public MetadataFile? ResolveModule(MetadataFile mainModule,
+    // string moduleName)`: the module resolves beside the main module
+    // (`Path.GetDirectoryName` + `Path.Combine`), with the
+    // baseDirectory-null early return and the ctor-2 `ResolutionException`
+    // factory. A module-name composition is never existence-checked before
+    // the load, so the composed path drives the failure classes directly.
+    const MetadataFile* ResolveModule(
+        const MetadataFile& mainModule, const std::string& moduleName) const override;
+
     // The C# `string? FindClosestVersionDirectory(string basePath,
     // Version? version)` -- the closest-version-folder picker over the
     // `ConvertToVersion`-parsed subdirectory names (descending order, the
@@ -351,6 +381,33 @@ private:
     std::optional<std::string> GetMscorlibBasePath(const TypeSystem::Version& version,
         const std::optional<std::string>& publicKeyToken) const;
 
+    // The C# private `MetadataFile?
+    // CreatePEFileFromFileName(string? fileName,
+    // Func<Exception?, Exception> makeException)` -- the load-and-fail
+    // machinery both Resolve arms share. The C# factory receives the
+    // caught exception and returns the exception to throw; the port's
+    // MetadataFile constructor never throws (it reports IsValid()), so the
+    // factory receives the inner-exception-or-null marker -- nullptr at
+    // every reachable call (the ResolutionException never renders its
+    // inner; the port's exception carries no inner chain, the documented
+    // divergence). The failure classes:
+    //   * a missing/unopenable file is the C# `new FileStream` failure
+    //   (FileNotFoundException : IOException -- the IOException catch arm);
+    //   * a file whose PE headers do not parse is the C# `new PEReader`
+    //   eager BadImageFormatException (the BadImageFormatException catch
+    //   arm);
+    //   * a VALID PE image with no CLI directory throws the C#
+    //   `MetadataFileNotSupportedException` ("PE file does not contain any
+    //   managed metadata.") which ESCAPES both catches -- propagating out
+    //   of Resolve/ResolveModule regardless of throwOnError (gold-pinned);
+    //   * a valid CLI image whose metadata does not parse is the C#
+    //   GetMetadataReader BadImageFormatException (the catch arm again).
+    // A valid file is returned through the keep-alive registry (the C# GC
+    // root).
+    const MetadataFile* CreatePEFileFromFileName(
+        std::optional<std::string> fileName,
+        const ResolutionExceptionFactory& makeException) const;
+
     // The C# readonly fields (the C# `baseDirectory` is write-only --
     // assigned in the ctor, never read -- and the port carries it for
     // fidelity).
@@ -366,6 +423,13 @@ private:
     std::optional<std::string> baseDirectory_;
     std::vector<std::optional<std::string>> directories_;
     mutable std::unique_ptr<DotNetCorePathFinder> dotNetCorePathFinder_;
+
+    // The keep-alive registry for the files Resolve/ResolveModule create:
+    // the C# GC roots every PEFile the resolver hands out (the caller may
+    // drop it, the interface's non-owning pointer must stay valid -- the
+    // resolved-module-registry convention of the port's reference
+    // factories).
+    mutable std::vector<std::unique_ptr<MetadataFile>> resolvedFiles_;
 };
 
 // The port's hand-rolled equivalent of `EnumerateGac`'s

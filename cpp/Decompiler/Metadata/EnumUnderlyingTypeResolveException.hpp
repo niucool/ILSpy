@@ -32,6 +32,20 @@
 // BadImageFormatException || ex is EnumUnderlyingTypeResolveException)` shows
 // the catch-site contract: a plain runtime-error family member, caught
 // alongside the metadata-read throws.
+//
+// The same C# file carries the sibling `public class
+// MetadataFileNotSupportedException : Exception` -- the exception the
+// MetadataFile ctor over a PEReader throws for a valid PE image with no CLI
+// directory ("PE file does not contain any managed metadata."). It is the
+// one failure shape `UniversalAssemblyResolver.CreatePEFileFromFileName`
+// does NOT catch: it escapes the resolver's two catch arms (only
+// BadImageFormatException and IOException are handled) and propagates out of
+// Resolve/ResolveModule regardless of throwOnError -- gold-pinned against
+// the real engine over a native-PE module fixture.
+// ReflectionDisassembler's `catch (Exception ex) when (ex is
+// BadImageFormatException || ex is EnumUnderlyingTypeResolveException)` shows
+// the catch-site contract: a plain runtime-error family member, caught
+// alongside the metadata-read throws.
 
 #pragma once
 
@@ -50,4 +64,16 @@ public:
                             "was thrown.") {}
 };
 
+// The sibling `public class MetadataFileNotSupportedException : Exception`
+// of the same C# file -- the MetadataFile-over-PEReader ctor's no-CLI-directory
+// rejection. `CreatePEFileFromFileName` does not catch it, so it propagates
+// out of Resolve/ResolveModule regardless of throwOnError.
+class MetadataFileNotSupportedException : public std::runtime_error {
+public:
+    // The C# string ctor (the only ctor the resolver path reaches).
+    explicit MetadataFileNotSupportedException(const std::string& message)
+        : std::runtime_error(message) {}
+};
+
 } // namespace ILSpy::Decompiler::Metadata
+

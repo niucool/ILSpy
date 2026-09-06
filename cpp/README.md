@@ -46,20 +46,21 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `ReferenceLoadInfo`/`UnresolvedAssemblyNameReference` diagnostics
   bookkeeping, and the `UniversalAssemblyResolver` enums +
   `ParseTargetFramework` classifier, and an IL text
-  disassembler. DONE except:
-  WebCIL and the `Resolve`/`ResolveModule`/`CreatePEFileFromFileName`
-  members of the `UniversalAssemblyResolver` instance surface (the
-  `IAssemblyResolver` file-loading half; the ctor, the search-directory
-  trio, `IsSharedAssembly` through the lazy `DotNetCorePathFinder`, the
-  `FindAssemblyFile`/`FindAssemblyFileCore` target-framework dispatch with
-  the full `ResolveInternal` chain, the winmd arms, and
-  `GetCorlib`/`GetMscorlibBasePath` landed gold-pinned over this machine's
-  framework directories, GAC, Windows Kits references, and .NET 10
-  shared-framework install, alongside the static GAC machinery --
-  `GetGacPaths`/`GetAssemblyInGac`/`EnumerateGac`/`IsZeroOrAllOnes`/
+  disassembler. DONE except WebCIL:
+  the `UniversalAssemblyResolver` instance surface is fully landed -- the
+  ctor, the search-directory trio, `IsSharedAssembly` through the lazy
+  `DotNetCorePathFinder`, the `FindAssemblyFile`/`FindAssemblyFileCore`
+  target-framework dispatch with the full `ResolveInternal` chain, the
+  winmd arms, `GetCorlib`/`GetMscorlibBasePath`, the static GAC machinery
+  (`GetGacPaths`/`GetAssemblyInGac`/`EnumerateGac`/`IsZeroOrAllOnes`/
   `IsSpecialVersionOrRetargetable`/`GetAssemblyFile` over the
-  `AssemblyReferenceClassifier` base and `ResolutionException` -- landed
-  gold-pinned over this machine's real GAC).
+  `AssemblyReferenceClassifier` base and `ResolutionException`), and the
+  `IAssemblyResolver` file-loading half (`Resolve`/`ResolveModule`/
+  `CreatePEFileFromFileName` over the port's `MetadataFile` with its
+  `MetadataFileNotSupportedException` escape arm -- the class now derives
+  `IAssemblyResolver`; all gold-pinned over this machine's framework
+  directories, GAC, Windows Kits references, .NET 10 shared-framework
+  install, and crafted garbage/native-PE module fixtures).
 - **Phase 2** -- `Decompiler/TypeSystem/`: naming primitives (`TopLevelTypeName`,
   `FullTypeName`), `KnownTypeCode` (the full table -- 61 slots continuing
   System.TypeCode's numbering, `String`=18 with the value-17 hole the C# keeps),
@@ -346,10 +347,9 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   and the shared-runtime last resort -- the winmd arms, and the
   `FindClosestVersionDirectory` picker), gold-pinned against the real
   engine's drives over this machine's framework directories, GAC, Windows
-  Kits references, and .NET 10 shared-framework install. The remaining
-  `UniversalAssemblyResolver` gate for the `--decompile-baml` CLI wiring is
-  the `IAssemblyResolver` file-loading half (`Resolve`/`ResolveModule`/
-  `CreatePEFileFromFileName` over the port's `MetadataFile`).
+  Kits references, and .NET 10 shared-framework install. The
+  `UniversalAssemblyResolver` is now fully ported including the
+  `IAssemblyResolver` file-loading half.
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with
