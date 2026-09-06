@@ -60,6 +60,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace ILSpy::ILSpyCmd {
 
@@ -134,15 +135,23 @@ int ListResources(const std::string& assemblyFileName, std::ostringstream& outpu
 // directory; a byte[] value's bytes and a text value's text are written
 // verbatim (File.WriteAllBytes / File.WriteAllText -- UTF-8 without a BOM,
 // the port's WriteOutputFile), and nothing goes to stdout.
-// The .baml arm (isBaml && a byte[] value -> DecompileBaml, the -o branch
-// saving the XAML under a '.xaml'-suffixed sanitized name) is deferred with
-// the Phase-9 BamlDecompiler: the port prints a not-yet-supported line to
-// errorOutput and returns EX_SOFTWARE (70) -- the same exit code the real
-// tool's own failure over an unparseable BAML stream produces.
+// The .baml arm (isBaml && a byte[] value -> DecompileBaml): the real arm
+// over the landed BamlDecompiler -- the resolver built for the assembly
+// (throwOnError=false, DetectTargetFrameworkId) with every -r reference
+// path added, and the BamlDecompilerSettings ThrowOnAssemblyResolveErrors
+// from GetSettings, which without --ilspy-settingsfile (the option the port
+// does not register) is ALWAYS false (the C# DecompilerSettings
+// initializer). With -o the XAML saves under the '.xaml'-suffixed
+// sanitized name (the XDocument.Save render: declaration + BOM); otherwise
+// the ToString render (no declaration) goes to output. A BamlReader
+// rejection (e.g. "Invalid BAML signature length.") propagates out to the
+// global catch (EX_SOFTWARE) with the port rendering the message only (the
+// C# stack trace is omitted).
 int ExtractResource(const std::string& assemblyFileName,
     const std::string& resourceName, std::ostringstream& output,
     std::ostringstream& errorOutput,
-    const std::optional<std::string>& outputDirectory = std::nullopt);
+    const std::optional<std::string>& outputDirectory = std::nullopt,
+    const std::vector<std::string>& referencePaths = {});
 
 // The C# `static string ResolveOutputDirectory(string outputDirectory)`
 // (IlspyCmdProgram.cs): the -o/--outputdir value resolved BEFORE any action

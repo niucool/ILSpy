@@ -18,19 +18,29 @@
 
 // Port of ICSharpCode.ILSpyCmd/ResourceExtensions.cs -- the resource
 // surface the CLI's --list-resources and --resource paths consume: the
-// resource-path enumeration (EnumerateResourcePaths) and the resource
-// lookup (TryGetResource over the ResourcesFile value decode).
-// DecompileBaml (the BamlDecompiler bridge) stays deferred with the
-// Phase-9 BamlDecompiler.
+// resource-path enumeration (EnumerateResourcePaths), the resource
+// lookup (TryGetResource over the ResourcesFile value decode), and the
+// DecompileBaml BamlDecompiler bridge.
 
 #pragma once
 
+#include "BamlDecompiler/BamlDecompilerSettings.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
 #include "Decompiler/Util/ResourcesFile.hpp"
 
+#include <cstddef>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
+
+namespace ILSpy::Decompiler::Xml {
+class XDocument;
+}
+
+namespace ILSpy::Decompiler::Metadata {
+class IAssemblyResolver;
+} // namespace ILSpy::Decompiler::Metadata
 
 namespace ILSpy::ILSpyCmd {
 
@@ -60,5 +70,23 @@ std::vector<std::string> EnumerateResourcePaths(
 std::optional<Decompiler::Util::ResourceValue> TryGetResource(
     const Decompiler::Metadata::MetadataFile& module,
     const std::string& resourcePath);
+
+// The C# `XDocument DecompileBaml(MetadataFile module, IAssemblyResolver
+// resolver, Stream bamlStream, BamlDecompilerSettings settings,
+// CancellationToken cancellationToken)` -- the BamlDecompiler bridge the
+// CLI's --resource .baml arm drives: a BamlDecompilerTypeSystem over the
+// caller's module and resolver, an XamlDecompiler with the caller's
+// settings, and Decompile over the BAML stream bytes returning the result's
+// Xaml document. The C# CancellationToken property is the documented
+// XamlDecompiler deferral (no ported consumer cancels); the C# Stream
+// parameter carries the resource's whole blob, which the port takes as the
+// byte span (the Decompile byte-span convention). A BamlReader rejection
+// (an invalid BAML signature length and friends) propagates out -- the C#
+// InvalidDataException escapes ExtractResource to the global catch.
+std::shared_ptr<Decompiler::Xml::XDocument> DecompileBaml(
+    const Decompiler::Metadata::MetadataFile& module,
+    const Decompiler::Metadata::IAssemblyResolver& resolver,
+    const std::uint8_t* bamlStream, std::size_t bamlStreamSize,
+    const BamlDecompiler::BamlDecompilerSettings& settings);
 
 }  // namespace ILSpy::ILSpyCmd

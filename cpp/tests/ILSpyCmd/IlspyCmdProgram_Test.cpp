@@ -29,6 +29,7 @@
 #include "ILSpyCmd/IlspyCmdProgram.hpp"
 #include "ILSpyCmd/ResourceExtensions.hpp"
 #include "ILSpyX/PdbProvider/PortableDebugInfoProvider.hpp"
+#include "TestFixtures/BamlResFixtures.hpp"
 #include "TestFixtures/DiscoveryNetModule.hpp"
 #include "TestFixtures/ResourcesTestFixtures.hpp"
 
@@ -614,21 +615,45 @@ TEST(IlspyCmdProgramTest, ExtractResourceNotFound)
         "  page.baml\r\n");
 }
 
-// The .baml arm: the deferred BamlDecompiler -- the port renders its
-// not-yet-supported line and EX_SOFTWARE (70, the same exit code the real
-// tool's own unparseable-BAML failure produces) instead of silently
-// writing the raw bytes.
-TEST(IlspyCmdProgramTest, ExtractResourceBamlDeferred)
+// The .baml arm: the landed BamlDecompiler. Over the BAML-resource fixture
+// the real tool renders the decompiled XAML to stdout with no trailing
+// newline, and over the valtest fixture's garbage .baml blob the
+// BamlReader's signature-length rejection propagates out of ExtractResource
+// to the global catch (the real tool's InvalidDataException -> EX_SOFTWARE
+// 70 with the stack trace the port omits).
+TEST(IlspyCmdProgramTest, ExtractResourceBamlToolBar)
+{
+    std::string path = ILSpy::Tests::WriteBamlResDll();
+    ASSERT_FALSE(path.empty());
+    std::ostringstream output;
+    std::ostringstream errorOutput;
+    EXPECT_EQ(Cmd::ExtractResource(path, "page.xaml.baml", output, errorOutput), 0);
+    EXPECT_EQ(output.str(),
+        "<ToolBar xmlns=\"http://probe.pi/ns\">hello</ToolBar>");
+    EXPECT_EQ(errorOutput.str(), "");
+}
+
+TEST(IlspyCmdProgramTest, ExtractResourceBamlXClassRename)
+{
+    std::string path = ILSpy::Tests::WriteBamlResDll();
+    ASSERT_FALSE(path.empty());
+    std::ostringstream output;
+    std::ostringstream errorOutput;
+    EXPECT_EQ(Cmd::ExtractResource(path, "page2.xaml.baml", output, errorOutput), 0);
+    EXPECT_EQ(output.str(),
+        "<String xmlns=\"http://probe.pi/ns\">hello</String>");
+    EXPECT_EQ(errorOutput.str(), "");
+}
+
+TEST(IlspyCmdProgramTest, ExtractResourceBamlGarbagePropagates)
 {
     std::string path = ILSpy::Tests::WriteValTestDll();
     ASSERT_FALSE(path.empty());
     std::ostringstream output;
     std::ostringstream errorOutput;
-    EXPECT_EQ(Cmd::ExtractResource(path, "page.baml", output, errorOutput), 70);
-    EXPECT_EQ(output.str(), "");
-    EXPECT_EQ(errorOutput.str(),
-        "BAML resource decompilation ('page.baml') is not supported by the "
-        "C++ port yet (the BamlDecompiler port is pending).\r\n");
+    EXPECT_THROW(
+        (void)Cmd::ExtractResource(path, "page.baml", output, errorOutput),
+        std::exception);
     // A .baml-suffixed path that is not found takes the not-found arm (the
     // isBaml gate only applies to a found byte[] value).
     {
@@ -744,6 +769,47 @@ TEST(IlspyCmdProgramTest, ExtractResourceOutputDirectoryNonAsciiName)
     EXPECT_EQ(output.str(), "");
     EXPECT_EQ(ReadFileBytes(dir / Cmd::ToNativePath(fileName)),
         "unicode value");
+}
+
+// The BAML arm's -o branch: the C# `string xamlFile =
+// WholeProjectDecompiler.SanitizeFileName(Path.GetFileNameWithoutExtension(
+// resourceName) + ".xaml")` -- 'page.xaml.baml' loses its extension
+// ('page.xaml') and gains '.xaml' back, so the file is 'page.xaml.xaml' --
+// holding the XDocument.Save render (the UTF-8 BOM, the declaration, the
+// CRLF break, and the indented content), with nothing to stdout. The
+// garbage-blob arm propagates with -o set exactly as it does without.
+TEST(IlspyCmdProgramTest, ExtractResourceBamlOutputDirectorySavesXaml)
+{
+    std::string path = ILSpy::Tests::WriteBamlResDll();
+    ASSERT_FALSE(path.empty());
+    fs::path dir = TempDir("resource-o-baml");
+    std::optional<std::string> outputDirectory = dir.string();
+
+    std::ostringstream output;
+    std::ostringstream errorOutput;
+    EXPECT_EQ(Cmd::ExtractResource(path, "page.xaml.baml", output,
+        errorOutput, outputDirectory), 0);
+    EXPECT_EQ(output.str(), "");
+    EXPECT_EQ(errorOutput.str(), "");
+    // The XDocument.Save bytes: the BOM, the declaration, the CRLF, the
+    // element, no trailing newline (94 bytes over the real fixture).
+    const std::string expectedFile =
+        "\xEF\xBB\xBF"
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n"
+        "<ToolBar xmlns=\"http://probe.pi/ns\">hello</ToolBar>";
+    EXPECT_EQ(ReadFileBytes(dir / "page.xaml.xaml"), expectedFile);
+
+    // The garbage blob still propagates with -o set (no file created).
+    std::string valPath = ILSpy::Tests::WriteValTestDll();
+    ASSERT_FALSE(valPath.empty());
+    fs::path dir2 = TempDir("resource-o-baml-bad");
+    std::ostringstream output2;
+    std::ostringstream errorOutput2;
+    EXPECT_THROW(
+        (void)Cmd::ExtractResource(valPath, "page.baml", output2,
+            errorOutput2, dir2.string()),
+        std::exception);
+    EXPECT_FALSE(fs::exists(dir2 / "page.xaml.xaml"));
 }
 
 // ---- the -o writer branches: OutputFilePath + WriteOutputFile ----

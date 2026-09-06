@@ -207,6 +207,20 @@ void XamlDecompiler::Init(const BamlDecompilerTypeSystem& typeSystem,
         throw std::invalid_argument(kUncachedMessage);
 }
 
+// The out-of-line default: the implicit destructor would need the complete
+// unique_ptr member types in every consuming TU (the header convention
+// note).
+XamlDecompiler::~XamlDecompiler() = default;
+
+// The interface-typed stand-in ctor (the header note): no owning member is
+// initialized, so no exception specification over the incomplete types.
+XamlDecompiler::XamlDecompiler(
+    const ILSpy::Decompiler::TypeSystem::ICompilation& typeSystem,
+    const BamlDecompilerSettings* settings)
+    : typeSystem_(&typeSystem), settings_(settings)
+{
+}
+
 XamlDecompiler::XamlDecompiler(const std::string& fileName,
                                const BamlDecompilerSettings& settings)
 {

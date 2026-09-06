@@ -114,6 +114,12 @@ class BamlDecompilerTypeSystem;
 // The C# `public class XamlDecompiler`.
 class XamlDecompiler {
 public:
+    // The out-of-line destructor: the owning unique_ptr members are over
+    // types only forward-declared here (UniversalAssemblyResolver), so the
+    // implicit destructor instantiated in a consuming TU would need the
+    // complete types (the XamlContext convention).
+    ~XamlDecompiler();
+
     // The C# `public XamlDecompiler(string fileName, BamlDecompilerSettings
     // settings)` -- through `CreateTypeSystemFromFile`: the decompiler owns
     // the loaded file, the built `UniversalAssemblyResolver`, and the type
@@ -150,12 +156,12 @@ public:
     // stubs are not BamlDecompilerTypeSystems): the Uncached check is not
     // possible over the interface and the module field stays null (the
     // check's only consumer). Passes a `BamlDecompilerTypeSystem` bind the
-    // concrete overload above.
+    // concrete overload above. Out-of-line like its siblings: an inline
+    // definition would make every consuming TU compute this ctor's
+    // exception specification over the owning unique_ptr members, whose
+    // deleters need the complete forward-declared types.
     XamlDecompiler(const ILSpy::Decompiler::TypeSystem::ICompilation& typeSystem,
-                   const BamlDecompilerSettings* settings = nullptr)
-        : typeSystem_(&typeSystem), settings_(settings)
-    {
-    }
+                   const BamlDecompilerSettings* settings = nullptr);
 
     // The C# `BamlDecompilerSettings Settings { get; set; }` (the stored
     // reference, possibly null -- the C# get has no null-substitute).

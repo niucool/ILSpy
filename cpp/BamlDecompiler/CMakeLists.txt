@@ -107,7 +107,16 @@
 # SkipDosHeader/CoffHeader/PEHeader/ReadSectionHeaders/cor-directory walk
 # with the exact BadImageFormatException messages), and the
 # MetadataFileNotSupportedException arm. ConnectionIdRewritePass stays
-# deferred on the ILAst/ILReader back end.
+#
+# The CLI --decompile-baml surface is reachable end to end through the
+# --resource .baml arm (IlspyCmdProgram.cpp ExtractResource +
+# ResourceExtensions.cpp DecompileBaml): the BAML-resource byte[] value
+# decompiles through BamlDecompilerTypeSystem + XamlDecompiler over the
+# CLI-built UniversalAssemblyResolver, rendering the XAML to stdout or
+# saving it under the -o directory (the '.xaml'-suffixed SanitizeFileName
+# name, the XDocument.Save render); a BamlReader rejection propagates out
+# of ExtractResource to the CLI global catch (EX_SOFTWARE).
+# ConnectionIdRewritePass stays deferred on the ILAst/ILReader back end.
 
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlBinaryReader.cpp

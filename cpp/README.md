@@ -370,6 +370,18 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   corrupt-metadata root throws), every ctor drive and failure arm
   gold-pinned against the real engine over the real mscorlib by the
   XamlDecompilerProbe ctor-family section.
+  The CLI --resource .baml arm now reaches the landed BamlDecompiler
+  end to end (ResourceExtensions.DecompileBaml + the
+  IlspyCmdProgram.ExtractResource branch): the BAML-resource
+  byte[] value decompiles through BamlDecompilerTypeSystem +
+  XamlDecompiler over the CLI-built UniversalAssemblyResolver
+  (throwOnError=false, the MetadataReader-overload
+  DetectTargetFrameworkId, the new -r|--referencepath search
+  paths), rendering the XAML to stdout or saving it under the -o
+  directory (the .xaml-suffixed sanitized name, the
+  XDocument.Save render with the BOM + declaration), with a
+  BamlReader rejection propagating out of ExtractResource to the
+  CLI global catch (EX_SOFTWARE).
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with

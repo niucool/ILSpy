@@ -24,9 +24,14 @@
 
 #include "ILSpyCmd/ResourceExtensions.hpp"
 
+#include "BamlDecompiler/BamlDecompilationResult.hpp"
+#include "BamlDecompiler/BamlDecompilerTypeSystem.hpp"
+#include "BamlDecompiler/XamlDecompiler.hpp"
 #include "Decompiler/Util/ResourcesFile.hpp"
+#include "Decompiler/Xml/XDocument.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 
@@ -197,6 +202,27 @@ std::optional<ResourceValue> TryGetResource(
         }
     }
     return std::nullopt;
+}
+
+// The C# `XDocument DecompileBaml(MetadataFile module, IAssemblyResolver
+// resolver, Stream bamlStream, BamlDecompilerSettings settings,
+// CancellationToken cancellationToken)` -- the bridge body: a
+// BamlDecompilerTypeSystem over the caller's module and resolver, an
+// XamlDecompiler with the caller's settings, and Decompile over the BAML
+// stream returning the result's Xaml document. The C# locals are GC-rooted
+// past the call; the port scopes the type system and decompiler to the
+// function (the result's XDocument carries no live type-system reference
+// -- the rewrite passes finish before Decompile returns).
+std::shared_ptr<Decompiler::Xml::XDocument> DecompileBaml(
+    const Decompiler::Metadata::MetadataFile& module,
+    const Decompiler::Metadata::IAssemblyResolver& resolver,
+    const std::uint8_t* bamlStream, std::size_t bamlStreamSize,
+    const BamlDecompiler::BamlDecompilerSettings& settings) {
+    BamlDecompiler::BamlDecompilerTypeSystem typeSystem(module, resolver);
+    BamlDecompiler::XamlDecompiler decompiler(typeSystem, &settings);
+    BamlDecompiler::BamlDecompilationResult result =
+        decompiler.Decompile(bamlStream, bamlStreamSize);
+    return result.Xaml();
 }
 
 }  // namespace ILSpy::ILSpyCmd

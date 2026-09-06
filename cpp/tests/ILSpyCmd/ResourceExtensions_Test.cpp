@@ -30,8 +30,13 @@
 #include "ILSpyCmd/IlspyCmdProgram.hpp"
 #include "ILSpyCmd/ResourceExtensions.hpp"
 
+#include "BamlDecompiler/BamlDecompilerSettings.hpp"
+#include "Decompiler/Metadata/DotNetCorePathFinderExtensions.hpp"
+#include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
 #include "Decompiler/Util/ResourcesFile.hpp"
+#include "Decompiler/Xml/XDocument.hpp"
 
+#include "TestFixtures/BamlResFixtures.hpp"
 #include "TestFixtures/ResourcesTestFixtures.hpp"
 #include "TestFixtures/TinyNetModule.hpp"
 
@@ -441,5 +446,69 @@ TEST(ResourceExtensionsTest, TryGetResourceMscorlib)
         EXPECT_EQ(value->kind,
             ILSpy::Decompiler::Util::ResourceValue::Kind::ByteArray);
         EXPECT_EQ(value->bytes.size(), 36992u);
+    }
+}
+
+// ---- The DecompileBaml BamlDecompiler bridge (the landed Phase-9 port)
+
+// The fixture's page.xaml.baml blob: the crafted ToolBar stream's real
+// decompile (the XamlDecompilerProbe gold render over the identical
+// stream bytes, and the real ilspycmd --resource over the identical
+// fixture bytes renders the same line).
+TEST(ResourceExtensionsTest, DecompileBamlToolBarRender)
+{
+    std::string path = ILSpy::Tests::WriteBamlResDll();
+    ASSERT_FALSE(path.empty());
+    MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+    auto value = Cmd::TryGetResource(module, "page.xaml.baml");
+    ASSERT_TRUE(value.has_value());
+    ASSERT_EQ(value->kind,
+        ILSpy::Decompiler::Util::ResourceValue::Kind::ByteArray);
+
+    ILSpy::Decompiler::Metadata::UniversalAssemblyResolver resolver(
+        path, false,
+        ILSpy::Decompiler::Metadata::DetectTargetFrameworkId(module,
+            std::nullopt));
+    ILSpy::BamlDecompiler::BamlDecompilerSettings settings;
+    auto xaml = Cmd::DecompileBaml(module, resolver, value->bytes.data(),
+        value->bytes.size(), settings);
+    ASSERT_NE(xaml, nullptr);
+    EXPECT_EQ(xaml->ToString(),
+        "<ToolBar xmlns=\"http://probe.pi/ns\">hello</ToolBar>");
+}
+
+// The fixture's page2.xaml.baml blob: the crafted main-module System.String
+// stream through the full rewrite chain (the XClass rename render), and
+// the bad.baml blob rejected by the BamlReader's signature-length check
+// (the C# InvalidDataException the CLI's global catch turns into
+// EX_SOFTWARE).
+TEST(ResourceExtensionsTest, DecompileBamlXClassRenameAndGarbage)
+{
+    std::string path = ILSpy::Tests::WriteBamlResDll();
+    ASSERT_FALSE(path.empty());
+    MetadataFile module(path);
+    ASSERT_TRUE(module.IsValid());
+    ILSpy::Decompiler::Metadata::UniversalAssemblyResolver resolver(
+        path, false,
+        ILSpy::Decompiler::Metadata::DetectTargetFrameworkId(module,
+            std::nullopt));
+    ILSpy::BamlDecompiler::BamlDecompilerSettings settings;
+    {
+        auto value = Cmd::TryGetResource(module, "page2.xaml.baml");
+        ASSERT_TRUE(value.has_value());
+        auto xaml = Cmd::DecompileBaml(module, resolver, value->bytes.data(),
+            value->bytes.size(), settings);
+        ASSERT_NE(xaml, nullptr);
+        EXPECT_EQ(xaml->ToString(),
+            "<String xmlns=\"http://probe.pi/ns\">hello</String>");
+    }
+    {
+        auto value = Cmd::TryGetResource(module, "bad.baml");
+        ASSERT_TRUE(value.has_value());
+        EXPECT_THROW(
+            (void)Cmd::DecompileBaml(module, resolver, value->bytes.data(),
+                value->bytes.size(), settings),
+            std::exception);
     }
 }

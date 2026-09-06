@@ -133,6 +133,8 @@ int RunMain(int argc, char** argv) {
             cxxopts::value<std::string>()->implicit_value(""))
         ("o,outputdir", "The output directory, if omitted decompiler output is written to standard out.",
             cxxopts::value<std::string>())
+        ("r,referencepath", "Path to a directory containing dependencies of the assembly that is being decompiled.",
+            cxxopts::value<std::vector<std::string>>())
         ("d,dump-package", "Dump package assemblies into a folder. This requires the output directory option.",
             cxxopts::value<bool>()->default_value("false")->implicit_value("true"));
     options.parse_positional({ "assembly" });
@@ -221,6 +223,16 @@ int RunMain(int argc, char** argv) {
         if (outputDirectory.has_value())
             std::filesystem::create_directories(
                 ILSpy::ILSpyCmd::ToNativePath(*outputDirectory));
+    }
+    // The C# `string[] ReferencePaths` option (the -r/--referencepath
+    // MultipleValue): one vector entry per occurrence, consumed by the
+    // --resource BAML arm (the C# loops over the static Options property;
+    // the port passes the values through).
+    std::vector<std::string> referencePaths;
+    if (parsed.count("referencepath") != 0) {
+        for (const auto& p : parsed["referencepath"].as<
+                 std::vector<std::string>>())
+            referencePaths.push_back(p);
     }
     // The C# `if (JsonOutputFlag && DumpTableName == null)` usage check
     // (IlspyCmdProgram.cs): --json alone is rejected before any file opens.
@@ -456,7 +468,8 @@ int RunMain(int argc, char** argv) {
         int rc;
         try {
             rc = ILSpy::ILSpyCmd::ExtractResource(
-                asmPath, resourceName, buffer, errorBuffer, outputDirectory);
+                asmPath, resourceName, buffer, errorBuffer, outputDirectory,
+                referencePaths);
         } catch (const std::exception& ex) {
             // The C# global handler: the exception render and
             // EX_SOFTWARE (the port carries no managed stack trace).

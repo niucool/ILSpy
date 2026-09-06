@@ -191,8 +191,9 @@ inline std::string WriteResTestDll() {
 //    container -- usesSerializationFormat true: the [kind][len]-wrapped
 //    serialized user types and an unwrapped primitive string), bad.resources
 //    (the garbage parse-failure blob), plain.nlp (a plain embedded blob),
-//    page.baml (a garbage .baml-named blob -- the deferred BamlDecompiler
-//    arm), and a File-table-linked row (excluded).
+//    page.baml (a garbage .baml-named blob whose BamlReader
+//    signature-length rejection drives the --resource arm's global-catch
+//    failure), and a File-table-linked row (excluded).
 //  * kBadV2ResourcesHex: the standalone failure-arm container (351 bytes)
 //    -- an unmatched typeCode below StartOfUserTypes ("Invalid typeCode"),
 //    a user typeCode with an out-of-bounds type index ("Type index out of

@@ -20,7 +20,12 @@
 
 #include "ILSpyCmd/IlspyCmdProgram.hpp"
 
+#include "BamlDecompiler/BamlDecompilerSettings.hpp"
 #include "Decompiler/CSharp/ProjectDecompiler/WholeProjectDecompiler.hpp"
+#include "Decompiler/Metadata/DotNetCorePathFinderExtensions.hpp"
+#include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
+#include "Decompiler/Xml/XDocument.hpp"
 #include "Decompiler/Disassembler/ReflectionDisassembler.hpp"
 #include "Decompiler/Disassembler/DisassemblerHelpers.hpp"
 #include "Decompiler/Metadata/SRMExtensions.hpp"
@@ -543,16 +548,21 @@ bool EndsWithBamlCaseInsensitive(const std::string& name) {
 // The C# `int ExtractResource(string assemblyFileName, string resourceName,
 // TextWriter output, string outputDirectory, CommandLineApplication app)`
 // (IlspyCmdProgram.cs): the --resource extraction (the header contract has
-// the full deferral/divergence notes). The two path helpers it composes
-// are defined below, after the other -o path machinery (this file's
-// definition order, not the C# class layout).
+// the full deferral/divergence notes). The C# reads the -r/--referencepath
+// values off the static Options property; the port takes them as the
+// referencePaths parameter (the caller main.cpp collects the option's
+// occurrences). The two path helpers it composes are defined below, after
+// the other -o path machinery (this file's definition order, not the C#
+// class layout).
 std::string FileNameOf(const std::string& path);
 std::string CombinePaths(const std::string& dir, const std::string& name);
+std::string FileNameWithoutExtensionOf(const std::string& path);
 
 int ExtractResource(const std::string& assemblyFileName,
     const std::string& resourceName, std::ostringstream& output,
     std::ostringstream& errorOutput,
-    const std::optional<std::string>& outputDirectory) {
+    const std::optional<std::string>& outputDirectory,
+    const std::vector<std::string>& referencePaths) {
     ILSpy::Decompiler::Metadata::MetadataFile module(assemblyFileName);
     std::optional<ResourceValue> value = TryGetResource(module, resourceName);
     if (!value) {
@@ -567,16 +577,53 @@ int ExtractResource(const std::string& assemblyFileName,
     }
 
     // The C# `bool isBaml = resourceName.EndsWith(".baml", ...)` arm: with
-    // a byte[] value the real tool runs the BamlDecompiler (decompiling to
-    // XAML, with -o saving it under a '.xaml'-suffixed sanitized name);
-    // the port's BamlDecompiler is the deferred Phase-9 piece, so the arm
-    // fails loudly instead of silently writing raw bytes.
+    // a byte[] value the real tool runs the BamlDecompiler over a resolver
+    // built for the assembly (throwOnError=false, DetectTargetFrameworkId)
+    // with every -r reference path added, and the bamlSettings flag from
+    // GetSettings -- which, without --ilspy-settingsfile (the option the
+    // port does not register), is ALWAYS false (the C#
+    // `ThrowOnAssemblyResolveErrors = false` initializer), so the resolver
+    // degrades unresolvable references instead of throwing. With -o the
+    // XAML saves under the '.xaml'-suffixed sanitized name; otherwise the
+    // ToString render (no declaration, no trailing newline) goes to output.
+    // A BamlReader rejection (e.g. "Invalid BAML signature length.")
+    // propagates out -- the C# InvalidDataException reaches the global
+    // catch (EX_SOFTWARE) with the stack trace the port omits.
     if (EndsWithBamlCaseInsensitive(resourceName)
         && value->kind == ResourceValue::Kind::ByteArray) {
-        errorOutput << "BAML resource decompilation ('" << resourceName
-                    << "') is not supported by the C++ port yet"
-                    << " (the BamlDecompiler port is pending).\r\n";
-        return 70;  // ProgramExitCodes.EX_SOFTWARE
+        ILSpy::Decompiler::Metadata::UniversalAssemblyResolver resolver(
+            assemblyFileName, false,
+            // The C# CLI calls `module.Metadata.DetectTargetFrameworkId()` --
+            // the MetadataReader overload with the DEFAULT null assemblyPath
+            // (no path-pattern fallback), so an assembly with no detect
+            // answer resolves to the empty string.
+            ILSpy::Decompiler::Metadata::DetectTargetFrameworkId(
+                module, std::nullopt));
+        for (const auto& path : referencePaths)
+            resolver.AddSearchDirectory(path);
+        BamlDecompiler::BamlDecompilerSettings bamlSettings;
+        // The C# GetSettings(module).ThrowOnAssemblyResolveErrors -- the
+        // CLI's always-false default without --ilspy-settingsfile (the
+        // DecompilerSettings initializer the C# OnExecute path builds).
+        bamlSettings.SetThrowOnAssemblyResolveErrors(false);
+        std::shared_ptr<Decompiler::Xml::XDocument> xaml =
+            DecompileBaml(module, resolver, value->bytes.data(),
+                value->bytes.size(), bamlSettings);
+        if (outputDirectory.has_value()) {
+            // The C# -o branch: `string xamlFile =
+            // WholeProjectDecompiler.SanitizeFileName(
+            // Path.GetFileNameWithoutExtension(resourceName) + ".xaml")`;
+            // xaml.Save(Path.Combine(outputDirectory, xamlFile))` -- the
+            // XML declaration + BOM render.
+            std::string xamlFile = ProjectDecompiler::SanitizeFileName(
+                FileNameWithoutExtensionOf(resourceName) + ".xaml");
+            xaml->Save(CombinePaths(*outputDirectory, xamlFile));
+            return 0;
+        }
+        // The C# `output.Write(xaml.ToString())` -- the XNode.ToString()
+        // plain render.
+        output << xaml->ToString();
+        return 0;
     }
 
     if (value->kind == ResourceValue::Kind::ByteArray) {
