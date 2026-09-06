@@ -279,7 +279,18 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   the resolver call order, the module list/order/identity, the synthetic
   substitution, the MinimalCorlib fallback, and the FindType results over
   mscorlib/the WPF assemblies/tiny.netmodule/the GAC facade/a crafted
-  ModuleRef+AssemblyFile manifest, all byte-exact).
+  ModuleRef+AssemblyFile manifest, all byte-exact). The last named
+  `MetadataModule` deferral landed with it: the
+  `DecodeMethodSignature`/`DecodeLocalSignature` surface forms (the
+  "#region Decode Standalone Signature" -- the kind gate over the
+  header nibble with the "Expected Method/LocalVariables signature"
+  and parameterless BadImageFormatException arms, the walker decode
+  over the module `TypeProvider`, and the `IntroduceTupleTypes` wrap;
+  plus the walker's `DecodeTypeSequence` zero-count rejection with the
+  exact .NET message), gold-pinned through the SsProbe probe with
+  whole-corpus FNV digests over every StandaloneSig row of mscorlib
+  (3908) and System.dll (2788) and CoreLib's 24 method-kind rows, all
+  byte-exact against the real engine.
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with

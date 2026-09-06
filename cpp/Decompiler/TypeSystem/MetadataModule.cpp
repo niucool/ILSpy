@@ -1870,6 +1870,100 @@ MetadataModule::MemberReferenceKind MetadataModule::GetMemberReferenceKind(
         "Format of the executable (.exe) or library (.dll) is invalid.");
 }
 
+// --- Decode Standalone Signature (MetadataModule.cs lines 820-838) ---
+
+// The C# `standaloneSignature.GetKind() != StandaloneSignatureKind.X`
+// gate both decode entries run: the raw row read (the nil/out-of-range
+// token and the empty blob both throw "Read out of bounds." -- the SRM
+// table read and the BlobReader.ReadByte-at-EOF arms), then the header
+// nibble (<= 5 or == 9 is Method, 7 is LocalVariables, anything else the
+// `GetKind` parameterless BadImageFormatException), then the mismatch
+// message ("Expected Method signature" / "Expected LocalVariables
+// signature" -- convention (b), the std::invalid_argument mapping).
+namespace {
+// The blob of the StandaloneSig row, or the "Read out of bounds." throw
+// (the nil/out-of-range row and the empty blob share the arm). Returned BY
+// VALUE: `GetStandaloneSignatureBlob` hands back a by-value optional, so a
+// reference into it would dangle at the return.
+std::vector<std::uint8_t> StandaloneSignatureBlobOrThrow(
+    const Metadata::MetadataFile* metadataFile, std::uint32_t token)
+{
+    auto blob = metadataFile->GetStandaloneSignatureBlob(token);
+    if (!blob)
+        throw std::invalid_argument("Read out of bounds.");
+    if (blob->empty())
+        throw std::invalid_argument("Read out of bounds.");
+    return std::move(*blob);
+}
+} // namespace
+
+MetadataModule::DecodedStandaloneMethodSignature
+MetadataModule::DecodeMethodSignature(
+    std::uint32_t standaloneSignatureToken,
+    const GenericContext& genericContext) const
+{
+    auto blob = StandaloneSignatureBlobOrThrow(
+        metadataFile_, standaloneSignatureToken);
+    int lowNibble = blob[0] & 0x0F;
+    if (!(lowNibble <= 5 || lowNibble == 9))
+    {
+        if (lowNibble == 7)
+            throw std::invalid_argument("Expected Method signature");
+        // The `GetKind` parameterless form (the field/property-kind
+        // header).
+        throw std::invalid_argument(
+            "Format of the executable (.exe) or library (.dll) is invalid.");
+    }
+    // The C# `standaloneSignature.DecodeMethodSignature(TypeProvider,
+    // genericContext)` -- the walker over the row's blob (the malformed-
+    // blob std::logic_error propagates, the documented walker divergence).
+    Metadata::SignatureTypeProviderDecoder<
+        ::ILSpy::Decompiler::TypeSystem::TypeProvider> decoder(
+            const_cast<::ILSpy::Decompiler::TypeSystem::TypeProvider&>(
+                TypeProvider()),
+            *metadataFile_);
+    auto signature = decoder.DecodeMethodSignature(
+        blob.data(), blob.size(), genericContext);
+    // The C# `FunctionPointerType.FromSignature(sig, this)` then the
+    // `(FunctionPointerType)IntroduceTupleTypes(fpt)` cast (the visitor
+    // returns the same instance unless the walk rebuilds it).
+    auto fpt = FunctionPointerType::FromSignature(signature);
+    return {signature.Header,
+            std::static_pointer_cast<FunctionPointerType>(
+                IntroduceTupleTypes(std::move(fpt)))};
+}
+
+std::vector<ITypePtr> MetadataModule::DecodeLocalSignature(
+    std::uint32_t standaloneSignatureToken,
+    const GenericContext& genericContext) const
+{
+    auto blob = StandaloneSignatureBlobOrThrow(
+        metadataFile_, standaloneSignatureToken);
+    int lowNibble = blob[0] & 0x0F;
+    if (lowNibble != 7)
+    {
+        if (lowNibble <= 5 || lowNibble == 9)
+            throw std::invalid_argument(
+                "Expected LocalVariables signature");
+        // The `GetKind` parameterless form.
+        throw std::invalid_argument(
+            "Format of the executable (.exe) or library (.dll) is invalid.");
+    }
+    Metadata::SignatureTypeProviderDecoder<
+        ::ILSpy::Decompiler::TypeSystem::TypeProvider> decoder(
+            const_cast<::ILSpy::Decompiler::TypeSystem::TypeProvider&>(
+                TypeProvider()),
+            *metadataFile_);
+    auto types = decoder.DecodeLocalSignature(
+        blob.data(), blob.size(), genericContext);
+    // The C# `ImmutableArray.CreateRange(types, IntroduceTupleTypes)`.
+    std::vector<ITypePtr> result;
+    result.reserve(types.size());
+    for (auto& t : types)
+        result.push_back(IntroduceTupleTypes(std::move(t)));
+    return result;
+}
+
 // --- Resolve Entity (MetadataModule.cs lines 755-787) ---
 
 // The C# `public IEntity ResolveEntity(EntityHandle entityHandle,

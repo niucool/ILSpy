@@ -291,6 +291,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/AttributeListBuilder_Test.cpp
     Decompiler/TypeSystem/MetadataMethod_Test.cpp
     Decompiler/TypeSystem/MetadataPropertyEvent_Test.cpp
+    Decompiler/TypeSystem/StandaloneSignature_Test.cpp
     Decompiler/TypeSystem/MinimalCorlib_Test.cpp
     Decompiler/TypeSystem/VarArgInstanceMethod_Test.cpp
     Decompiler/TypeSystem/FakeMember_Test.cpp

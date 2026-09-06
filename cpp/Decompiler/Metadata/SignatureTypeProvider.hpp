@@ -100,6 +100,18 @@ struct SignatureHeader {
     bool HasExplicitThis = false;
     bool IsGeneric = false;
 
+    // The C# `byte RawValue => _rawValue` -- the reconstructed header byte
+    // (every bit maps to a field: the low nibble is the calling
+    // convention, 0x10 the generic marker, 0x20/0x40 the has-this flags).
+    std::uint8_t RawValue() const
+    {
+        return static_cast<std::uint8_t>(
+            static_cast<std::uint8_t>(CallingConvention)
+            | (IsGeneric ? 0x10 : 0x00)
+            | (HasThis ? 0x20 : 0x00)
+            | (HasExplicitThis ? 0x40 : 0x00));
+    }
+
     // The ECMA-335 II.23.2.1 header-byte decode (the C# ctor over the raw
     // byte). An unknown convention byte keeps Default (the C# would throw on
     // an out-of-range cast; corrupt blobs are not expected through the
@@ -620,6 +632,15 @@ SignatureTypeProviderDecoder<TProvider>::DecodeMethodSpecSignature(
     context_ = &genericContext;
     if (Byte() != 0x0A) Fail("bad method specification marker");
     std::uint32_t count = CompressedUnsigned();
+    // The C# `DecodeTypeSequence`: `if (num == 0) throw new
+    // BadImageFormatException(System.SR.
+    // SignatureTypeSequenceMustHaveAtLeastOneElement)` -- a zero-count
+    // type sequence is rejected before any element decode (the exact .NET
+    // message; a std::logic_error so the existing malformed-blob catch
+    // conventions keep working).
+    if (count == 0)
+        throw std::logic_error(
+            "Signature type sequence must have at least one element.");
     std::vector<TType> result;
     result.reserve(count);
     for (std::uint32_t i = 0; i < count; i++) {
@@ -644,6 +665,13 @@ SignatureTypeProviderDecoder<TProvider>::DecodeLocalSignature(
     std::uint8_t header = Byte();
     if ((header & 0x0F) != 0x07) Fail("bad local signature kind");
     std::uint32_t count = CompressedUnsigned();
+    // The C# `DecodeTypeSequence` zero-count rejection (the exact .NET
+    // message -- the DecodeMethodSpecSignature note above): a LOCAL_SIG
+    // with zero locals throws where an empty vector would silently
+    // decompile as a locals-free body.
+    if (count == 0)
+        throw std::logic_error(
+            "Signature type sequence must have at least one element.");
     std::vector<TType> result;
     result.reserve(count);
     for (std::uint32_t i = 0; i < count; i++) {

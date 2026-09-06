@@ -112,14 +112,17 @@
 //      The `propertyDefs`/`eventDefs` entity caches and the accessor-search
 //      arm of `ResolveMethodReference` (over
 //      `MetadataTypeDefinition::GetAccessors`) LANDED with the
-//      MetadataProperty/MetadataEvent slice; STILL DEFERRED:
-//      `DecodeMethodSignature`/`DecodeLocalSignature`; and the internal
+//      MetadataProperty/MetadataEvent slice; the
+//      `DecodeMethodSignature`/`DecodeLocalSignature` surface forms LANDED
+//      (the StandaloneSig decode entries over the walker +
+//      `IntroduceTupleTypes`); the internal
 //      `GetString(StringHandle)` helper (the port's NamespaceDefinition::Name
 //      already stores the resolved name, so MetadataNamespace needs no such
 //      helper).
 
 #pragma once
 
+#include "Decompiler/Metadata/SignatureTypeProvider.hpp"
 #include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IModule.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
@@ -482,6 +485,35 @@ public:
         std::uint32_t entityHandle,
         const GenericContext& context) const;
 
+    // The C# `(SignatureHeader, FunctionPointerType) DecodeMethodSignature(
+    // StandaloneSignatureHandle handle, GenericContext genericContext)`
+    // (MetadataModule.cs lines 820-829, the "#region Decode Standalone
+    // Signature"): the kind check (`GetKind() !=
+    // StandaloneSignatureKind.Method` -> the "Expected Method signature"
+    // BadImageFormatException; `GetKind` itself throws the parameterless
+    // form over a field/property-kind header and "Read out of bounds."
+    // over an empty blob or a nil/out-of-range handle -- convention (b),
+    // std::invalid_argument), then the walker's method-signature decode
+    // over the module TypeProvider and `FunctionPointerType::FromSignature`,
+    // the result passed through `IntroduceTupleTypes`. The handle ports as
+    // the raw 0x11...... token.
+    struct DecodedStandaloneMethodSignature {
+        Metadata::SignatureHeader Header;
+        std::shared_ptr<FunctionPointerType> Type;
+    };
+    DecodedStandaloneMethodSignature DecodeMethodSignature(
+        std::uint32_t standaloneSignatureToken,
+        const GenericContext& genericContext) const;
+    // The C# `ImmutableArray<IType> DecodeLocalSignature(
+    // StandaloneSignatureHandle handle, GenericContext genericContext)`
+    // (MetadataModule.cs lines 830-838): the same kind check against
+    // `StandaloneSignatureKind.LocalVariables` ("Expected LocalVariables
+    // signature"), then the walker's local-signature decode with each
+    // element passed through `IntroduceTupleTypes`.
+    std::vector<ITypePtr> DecodeLocalSignature(
+        std::uint32_t standaloneSignatureToken,
+        const GenericContext& genericContext) const;
+
 private:
     // The C# `void HandleOutOfRange(EntityHandle handle)` -- throws the exact
     // message through the port's `std::out_of_range` (convention (e)).
@@ -619,6 +651,7 @@ private:
     enum class MemberReferenceKind { Method, Field };
     static MemberReferenceKind GetMemberReferenceKind(
         const std::vector<std::uint8_t>& signatureBlob);
+
 
     const ICompilation& compilation_;
     const Metadata::MetadataFile* metadataFile_;
