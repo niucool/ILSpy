@@ -17,6 +17,9 @@
 // DEALINGS IN THE SOFTWARE.
 
 #include "Decompiler/TypeSystem/IType.hpp"
+
+#include "Decompiler/TypeSystem/IModule.hpp"
+#include "Decompiler/TypeSystem/TupleType.hpp"
 #include "Decompiler/TypeSystem/IEvent.hpp"
 #include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
@@ -487,10 +490,28 @@ ITypePtr TupleType::VisitChildren(TypeVisitor& visitor) {
         newElementTypes.push_back(std::move(newType));
     }
     if (!changed) return shared_from_this();
-    // Minimal-port reconstruction: carry over the underlying ValueTuple<...> type
-    // and the element names; the C# Compilation / GetDefinition().ParentModule
-    // reconstruction inputs are deferred to the Phase 2 type-resolution stage.
-    return std::make_shared<TupleType>(underlyingType_, std::move(newElementTypes), elementNames_);
+    // The C# `return new TupleType(Compilation, array.ToImmutableArray(),
+    // ElementNames, GetDefinition()?.ParentModule);` -- the rebuild RECOMPUTES
+    // the underlying ValueTuple chain from the substituted elements (the
+    // `CreateTupleType` factory; carrying the old underlying over would leave
+    // the unsubstituted type arguments in every render -- `TupleType::
+    // ReflectionName` delegates to the underlying type). The compilation and
+    // the ValueTuple-assembly hint route through the underlying type's
+    // definition (`GetDefinition()?.ParentModule`).
+    const IModule* valueTupleAssembly = nullptr;
+    if (const ITypeDefinition* definition = GetDefinition())
+        valueTupleAssembly = definition->ParentModule();
+    if (valueTupleAssembly != nullptr) {
+        return CreateTupleType(valueTupleAssembly->Compilation(),
+            std::move(newElementTypes), elementNames_, valueTupleAssembly);
+    }
+    // No definition reachable (a minimal-port shape over an unresolved
+    // underlying): substitute the existing underlying type directly -- the
+    // element-wise equivalence holds for the substitution visitors.
+    ITypePtr newUnderlying =
+        underlyingType_ ? underlyingType_->AcceptVisitor(visitor) : nullptr;
+    return std::make_shared<TupleType>(std::move(newUnderlying),
+        std::move(newElementTypes), elementNames_);
 }
 
 // ---- IType member-enumeration defaults ----
@@ -684,13 +705,35 @@ std::vector<const IField*> ParameterizedType::GetFields(
     GetMemberOptions options) const {
     if (ptReturningDefs(options))
         return genericType_ ? genericType_->GetFields(filter, options) : std::vector<const IField*>{};
+    // The C# `return GetMembersHelper.GetFields(this, filter, options);` --
+    // the FILTER runs over the RAW definition fields (the helper's
+    // declaredMembers re-entry delegates to the generic type WITH the
+    // filter), and only the survivors are specialized. The port's UNFILTERED
+    // path keeps the cache (the identical set, materialized once); a FILTERED
+    // call takes the faithful fresh walk: applying a type-sensitive filter at
+    // return time over the SPECIALIZED members (the cache's original shape)
+    // would compare the substituted types where the C# compares the raw
+    // definition's -- `ResolveFieldReference`'s `CompareTypes(f.ReturnType,
+    // signature)` search is the first type-sensitive consumer.
+    if (filter) {
+        std::vector<std::shared_ptr<const IField>> owned =
+            Implementation::GetMembersHelper::GetFields(this, filter,
+                                                        options);
+        std::vector<const IField*> result;
+        result.reserve(owned.size());
+        for (std::shared_ptr<const IField>& m : owned) {
+            result.push_back(m.get());
+            fieldsKeepAlive_.push_back(std::move(m));
+        }
+        return result;
+    }
     if (fieldsCache_.empty() && genericType_) {
         fieldsCache_ = Implementation::GetMembersHelper::GetFields(
             this, nullptr, GetMemberOptions::IgnoreInheritedMembers);
     }
     std::vector<const IField*> result;
     for (const auto& m : fieldsCache_) {
-        if (!filter || filter(m.get())) result.push_back(m.get());
+        result.push_back(m.get());
     }
     return result;
 }

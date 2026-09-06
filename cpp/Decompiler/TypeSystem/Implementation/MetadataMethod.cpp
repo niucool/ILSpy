@@ -473,23 +473,38 @@ const IMember* MetadataMethod::MemberDefinition() const
     return this;
 }
 
-// DEFERRED (convention (d)): the MethodImpl-table walk.
+// The C# `IEnumerable<IMember> ExplicitlyImplementedInterfaceMembers` --
+// the declaring type's `GetOverrides(handle)` walk (the MethodImpl rows
+// whose MethodBody is this method, each MethodDeclaration resolved through
+// `module.ResolveMethod` over the declaring type's type parameters).
 std::vector<const IMember*>
 MetadataMethod::ExplicitlyImplementedInterfaceMembers() const
 {
-    throw std::logic_error(
-        "MetadataMethod::ExplicitlyImplementedInterfaceMembers: "
-        "HasOverrides/GetOverrides + MetadataModule::ResolveMethod are not "
-        "yet ported");
+    const auto* typeDef = dynamic_cast<
+        const Implementation::MetadataTypeDefinition*>(
+            DeclaringTypeDefinition());
+    if (typeDef == nullptr)
+        return {};
+    std::vector<const IMember*> result;
+    for (const IMethod* method : typeDef->GetOverrides(handle_))
+        result.push_back(method);
+    return result;
 }
 
-// DEFERRED (convention (d)): the MethodImpl-table walk.
+// The C# `bool IsExplicitInterfaceImplementation` -- a dotted-name method
+// (the explicit-interface-implementation name form) whose declaring type
+// carries a MethodImpl row for it.
 bool MetadataMethod::IsExplicitInterfaceImplementation() const
 {
-    throw std::logic_error(
-        "MetadataMethod::IsExplicitInterfaceImplementation: "
-        "HasOverrides/GetOverrides + MetadataModule::ResolveMethod are not "
-        "yet ported");
+    // The C# `if (Name.IndexOf('.') < 0) return false;`.
+    if (Name().find('.') == std::string::npos)
+        return false;
+    const auto* typeDef = dynamic_cast<
+        const Implementation::MetadataTypeDefinition*>(
+            DeclaringTypeDefinition());
+    if (typeDef == nullptr)
+        return false;
+    return typeDef->HasOverrides(handle_);
 }
 
 // The C# `public bool IsVirtual`:

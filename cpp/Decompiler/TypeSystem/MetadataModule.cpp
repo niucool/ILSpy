@@ -32,7 +32,13 @@
 #include "Decompiler/TypeSystem/Implementation/MetadataTypeDefinition.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataField.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataMethod.hpp"
+#include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
+#include "Decompiler/TypeSystem/Implementation/DefaultTypeParameter.hpp"
+#include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataNamespace.hpp"
+#include "Decompiler/TypeSystem/NormalizeTypeVisitor.hpp"
+#include "Decompiler/TypeSystem/TypeParameterSubstitution.hpp"
+#include "Decompiler/TypeSystem/VarArgInstanceMethod.hpp"
 #include "Decompiler/TypeSystem/StringComparer.hpp"
 #include "Decompiler/TypeSystem/TypeProvider.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
@@ -799,5 +805,789 @@ ITypePtr MetadataModule::ResolveType(
         std::move(ty), const_cast<ICompilation&>(Compilation()),
         typeAttributes, *metadataFile_, customOptions, nullableContext);
 }
+
+// --- Resolve Method (MetadataModule.cs lines 418-753) ---
+
+namespace {
+
+// The C# `static readonly NormalizeTypeVisitor normalizeTypeVisitor = new
+// NormalizeTypeVisitor { ReplaceClassTypeParametersWithDummy = true,
+// ReplaceMethodTypeParametersWithDummy = true }` -- every option field
+// defaults to true, so the default-constructed visitor IS the C# singleton
+// (the CompareTypes body is exactly the default visitor's EquivalentTypes).
+NormalizeTypeVisitor& CompareTypeNormalizer()
+{
+    static NormalizeTypeVisitor instance;
+    return instance;
+}
+
+// A non-owning alias over a method this module (or one of its registries)
+// keeps alive -- the `VarArgInstanceMethod` ctor's `shared_ptr<IMethod>`
+// parameter over a module-cache-owned `MetadataMethod` (the
+// no-op-deleter-alias convention).
+std::shared_ptr<IMethod> AliasMethod(IMethod* method)
+{
+    return std::shared_ptr<IMethod>(method, [](IMethod*) {
+        // no-op: the module's cache or registry owns this instance
+    });
+}
+
+// A non-owning alias over an IType object its owner keeps alive (a
+// parameter's type flowing into a fake property's ReturnType, the C#
+// reference assignment -- the ReflectionHelper.cpp alias convention).
+ITypePtr AliasType(const IType& type)
+{
+    return ITypePtr(const_cast<IType*>(&type), [](IType*) {
+        // no-op: the owner (the parameter / the module registry) keeps it
+    });
+}
+
+// The decompiled .NET 10 `SignatureKind` ToString spelling for the
+// `DecodeFieldSignature` header-check message (Method / Field /
+// LocalVariables / Property / MethodSpecification; an unlisted nibble
+// renders the decimal value, the .NET enum ToString rule).
+std::string SignatureKindName(int lowNibble)
+{
+    switch (lowNibble)
+    {
+    case 0: case 1: case 2: case 3: case 4: case 5: case 9:
+        return "Method";
+    case 6:
+        return "Field";
+    case 7:
+        return "LocalVariables";
+    case 8:
+        return "Property";
+    case 10:
+        return "MethodSpecification";
+    default:
+        return std::to_string(lowNibble);
+    }
+}
+
+// The C# `IType.TypeArguments` (the AbstractType empty default; the C#
+// overrides are ParameterizedType's real list, TupleType's explicit empty,
+// and UnknownType's TypeParameters -- the port's UnknownType carries no type
+// parameters, so its arm is a documented divergence until that changes).
+const std::vector<ITypePtr>& TypeArgumentsOf(const IType& type)
+{
+    if (const auto* pt = dynamic_cast<const ParameterizedType*>(&type))
+        return pt->TypeArguments();
+    static const std::vector<ITypePtr> empty;
+    return empty;
+}
+
+// The C# overload-search loop extracted (the lazy Concat's two arms share
+// it): the first candidate matching the generic parameter count, the
+// instance/static polarity, and the normalized-signature shape.
+const IMethod* SearchOverloads(
+    const std::vector<const IMethod*>& candidates,
+    const Metadata::ProviderMethodSignature<ITypePtr>& signature,
+    const std::vector<ITypePtr>& parameterTypes)
+{
+    for (const IMethod* m : candidates)
+    {
+        if (static_cast<int>(m->TypeParameters().size())
+            != static_cast<int>(signature.GenericParameterCount))
+            continue;
+        if (signature.Header.IsInstance() != !m->IsStatic())
+            continue;
+        if (MetadataModule::CompareSignatures(m->Parameters(), parameterTypes)
+            && MetadataModule::CompareTypes(m->ReturnType(),
+                                            *signature.ReturnType))
+            return m;
+    }
+    return nullptr;
+}
+
+// The C# `IType.GetSubstitution()` (the AbstractType Identity default; the
+// ParameterizedType override). Only reached through a non-empty
+// TypeArguments guard in the C# call sites.
+TypeParameterSubstitution GetSubstitutionOf(const IType& type)
+{
+    if (const auto* pt = dynamic_cast<const ParameterizedType*>(&type))
+        return pt->GetSubstitution();
+    return TypeParameterSubstitution::Identity();
+}
+
+// A two-lowercase-hex-digit byte render (the SR `0x{0:x2}` format piece).
+std::string HexByte2(std::uint8_t value)
+{
+    static const char* digits = "0123456789abcdef";
+    std::string result;
+    result += digits[(value >> 4) & 0xF];
+    result += digits[value & 0xF];
+    return result;
+}
+
+} // namespace
+
+// The C# `public IMethod ResolveMethod(EntityHandle methodReference,
+// GenericContext context)` -- the top-byte dispatch.
+const IMethod* MetadataModule::ResolveMethod(
+    std::uint32_t methodReference, const GenericContext& context) const
+{
+    // The C# `if (methodReference.IsNil) throw new
+    // ArgumentNullException(nameof(methodReference))`.
+    if (methodReference == 0)
+        throw std::invalid_argument(
+            "Value cannot be null. (Parameter 'methodReference')");
+    switch (methodReference >> 24)
+    {
+    case 0x06u:  // HandleKind.MethodDefinition
+        return ResolveMethodDefinition(methodReference, /*expandVarArgs=*/true);
+    case 0x0Au:  // HandleKind.MemberReference
+        return ResolveMethodReference(methodReference, context,
+                                      std::nullopt, /*expandVarArgs=*/true);
+    case 0x2Bu:  // HandleKind.MethodSpecification
+        return ResolveMethodSpecification(methodReference, context,
+                                          /*expandVarArgs=*/true);
+    default:
+        // The C# `throw new BadImageFormatException("Metadata token must be
+        // either a methoddef, memberref or methodspec")`.
+        throw std::invalid_argument(
+            "Metadata token must be either a methoddef, memberref or "
+            "methodspec");
+    }
+}
+
+// The C# `IMethod ResolveMethodDefinition(MethodDefinitionHandle
+// methodDefHandle, bool expandVarArgs)` -- the entity-cache read plus the
+// vararg expansion.
+const IMethod* MetadataModule::ResolveMethodDefinition(
+    std::uint32_t methodDefToken, bool expandVarArgs) const
+{
+    const IMethod* method = GetDefinitionMethod(methodDefToken);
+    if (expandVarArgs)
+    {
+        // The C# `if (expandVarArgs &&
+        // method.Parameters.LastOrDefault()?.Type.Kind == TypeKind.ArgList)`
+        // -- a `?.` over a null LastOrDefault is false; the trailing
+        // `__arglist` sentinel marks the vararg method.
+        std::vector<const IParameter*> parameters = method->Parameters();
+        if (!parameters.empty()
+            && parameters.back()->Type().Kind() == TypeKind::ArgList)
+        {
+            auto wrapper = std::make_shared<VarArgInstanceMethod>(
+                AliasMethod(const_cast<IMethod*>(method)),
+                std::vector<ITypePtr>{});
+            resolvedMethods_.push_back(wrapper);
+            method = wrapper.get();
+        }
+    }
+    return method;
+}
+
+// The C# `IMethod ResolveMethodSpecification(MethodSpecificationHandle
+// methodSpecHandle, GenericContext context, bool expandVarArgs)`.
+const IMethod* MetadataModule::ResolveMethodSpecification(
+    std::uint32_t methodSpecToken, const GenericContext& context,
+    bool expandVarArgs) const
+{
+    // The C# `metadata.GetMethodSpecification(...)` / `methodSpec.Method`:
+    // the port's soft row read maps an unreadable row to the same-mapped
+    // `BadImageFormatException` the SRM row read throws (the garbage-read
+    // layout an out-of-range token produces in SRM is undefined -- the
+    // port's documented clean divergence).
+    auto methodSpec = metadataFile_->GetMethodSpecification(methodSpecToken);
+    auto blob = metadataFile_->GetMethodSpecificationInstantiationBlob(
+        methodSpecToken);
+    if (!methodSpec || !blob)
+        throw std::invalid_argument("Read out of bounds.");
+    // The C# `methodSpec.DecodeSignature(TypeProvider, context)
+    // .SelectReadOnlyArray(IntroduceTupleTypes)`.
+    std::vector<ITypePtr> methodTypeArgs;
+    {
+        Metadata::SignatureTypeProviderDecoder<::ILSpy::Decompiler::TypeSystem::TypeProvider> decoder(
+            const_cast<::ILSpy::Decompiler::TypeSystem::TypeProvider&>(
+            TypeProvider()), *metadataFile_);
+        std::vector<ITypePtr> decoded = decoder.DecodeMethodSpecSignature(
+            blob->data(), blob->size(), context);
+        methodTypeArgs.reserve(decoded.size());
+        for (ITypePtr& ty : decoded)
+            methodTypeArgs.push_back(IntroduceTupleTypes(std::move(ty)));
+    }
+    const IMethod* method;
+    if ((methodSpec->MethodToken >> 24) == 0x06u)
+    {
+        // The C# `if (methodSpec.Method.Kind == HandleKind.MethodDefinition)`
+        // -- the generic instance of a methoddef: resolve the definition,
+        // then specialize the method type arguments onto it.
+        method = ResolveMethodDefinition(methodSpec->MethodToken,
+                                         expandVarArgs);
+        TypeParameterSubstitution substitution(std::nullopt,
+                                               std::move(methodTypeArgs));
+        method = method->Specialize(&substitution);
+    }
+    else
+    {
+        // The C# else arm: a MemberRef target carries the method type
+        // arguments into the reference resolution.
+        method = ResolveMethodReference(methodSpec->MethodToken, context,
+                                        std::move(methodTypeArgs),
+                                        expandVarArgs);
+    }
+    return method;
+}
+
+// The C# `IMethod ResolveMethodReference(MemberReferenceHandle memberRefHandle,
+// GenericContext context, IReadOnlyList<IType> methodTypeArguments = null,
+// bool expandVarArgs = true)` -- the member-reference resolution with the
+// overload search and the fake-method fallback.
+const IMethod* MetadataModule::ResolveMethodReference(
+    std::uint32_t memberRefToken, const GenericContext& context,
+    const std::optional<std::vector<ITypePtr>>& methodTypeArguments,
+    bool expandVarArgs) const
+{
+    auto memberRef = metadataFile_->GetMemberReference(memberRefToken);
+    auto blob = metadataFile_->GetSignatureBlob(memberRefToken);
+    if (!memberRef || !blob)
+        throw std::invalid_argument("Read out of bounds.");
+    // The C# `if (memberRef.GetKind() != MemberReferenceKind.Method) throw
+    // new BadImageFormatException($"Member reference must be method, but
+    // was: {memberRef.GetKind()}")` -- the GetKind call itself throws the
+    // parameterless BadImageFormatException for a signature header that is
+    // neither a method nor a field form (the decompiled .NET 10
+    // SignatureHeader.Kind rule).
+    MemberReferenceKind kind = GetMemberReferenceKind(*blob);
+    if (kind != MemberReferenceKind::Method)
+    {
+        throw std::invalid_argument(
+            "Member reference must be method, but was: Field");
+    }
+    Metadata::ProviderMethodSignature<ITypePtr> signature;
+    std::optional<std::vector<ITypePtr>> classTypeArguments;
+    const IMethod* method;
+    if ((memberRef->ParentToken >> 24) == 0x06u)
+    {
+        // The C# `if (memberRef.Parent.Kind == HandleKind.MethodDefinition)`
+        // -- a memberref whose parent is a methoddef (the vararg-call form
+        // emitted inside the defining module): resolve straight to the
+        // definition and decode the signature over the CALLER's context.
+        method = ResolveMethodDefinition(memberRef->ParentToken,
+                                         /*expandVarArgs=*/false);
+        Metadata::SignatureTypeProviderDecoder<::ILSpy::Decompiler::TypeSystem::TypeProvider> decoder(
+            const_cast<::ILSpy::Decompiler::TypeSystem::TypeProvider&>(
+            TypeProvider()), *metadataFile_);
+        signature = decoder.DecodeMethodSignature(
+            blob->data(), blob->size(), context);
+    }
+    else
+    {
+        // The C# `var declaringType = ResolveDeclaringType(memberRef.Parent,
+        // context); var declaringTypeDefinition = declaringType.GetDefinition();`
+        ITypePtr declaringType =
+            ResolveDeclaringType(memberRef->ParentToken, context);
+        const ITypeDefinition* declaringTypeDefinition =
+            declaringType->GetDefinition();
+        // The C# `if (declaringType.TypeArguments.Count > 0) classTypeArguments
+        // = declaringType.TypeArguments;` -- a REFERENCE the C# GC roots past
+        // the declaringType local's block; the port COPIES the vector (the
+        // elements are shared_ptr handles to the same IType objects, so the
+        // copy is the faithful GC-root equivalent -- a pointer into the
+        // short-lived declaringType would dangle at the Specialize below).
+        if (!TypeArgumentsOf(*declaringType).empty())
+            classTypeArguments = TypeArgumentsOf(*declaringType);
+        // The C# `signature = memberRef.DecodeMethodSignature(TypeProvider,
+        // new GenericContext(declaringTypeDefinition?.TypeParameters));` --
+        // the signature is for the ORIGINAL method definition, decoded over
+        // the declaring type's type parameters only.
+        std::vector<const ITypeParameter*> declaringTypeParameters;
+        if (declaringTypeDefinition != nullptr)
+            declaringTypeParameters = declaringTypeDefinition->TypeParameters();
+        GenericContext declaringContext(std::move(declaringTypeParameters));
+        Metadata::SignatureTypeProviderDecoder<::ILSpy::Decompiler::TypeSystem::TypeProvider> decoder(
+            const_cast<::ILSpy::Decompiler::TypeSystem::TypeProvider&>(
+            TypeProvider()), *metadataFile_);
+        signature = decoder.DecodeMethodSignature(
+            blob->data(), blob->size(), declaringContext);
+        if (declaringTypeDefinition != nullptr)
+        {
+            // The C# overload-set selection: `.ctor` over the constructors,
+            // `.cctor` over the static constructors, and the plain name over
+            // the declared methods CONCATENATED with the accessors (the
+            // accessor methods are dropped from the Methods enumeration, so
+            // the concat is what makes accessor memberrefs resolvable -- the
+            // accessor arm is the loud MetadataProperty/MetadataEvent
+            // deferral until that slice lands).
+            std::vector<const IMethod*> methods;
+            if (memberRef->Name == ".ctor")
+            {
+                methods = declaringTypeDefinition->GetConstructors(
+                    nullptr,
+                    GetMemberOptions::IgnoreInheritedMembers);
+            }
+            else if (memberRef->Name == ".cctor")
+            {
+                // The C# `declaringTypeDefinition.Methods.Where(m =>
+                // m.IsConstructor && m.IsStatic)` -- the raw Methods
+                // property (the declared, accessor-dropped enumeration).
+                for (const IMethod* m : declaringTypeDefinition->Methods())
+                {
+                    if (m->IsConstructor() && m->IsStatic())
+                        methods.push_back(m);
+                }
+            }
+            else
+            {
+                // The C# `GetMethods(...).Concat(GetAccessors(...))` is a
+                // LAZY concat: the accessor enumeration evaluates only when
+                // the methods search is exhausted without a match (a
+                // same-name plain method resolves without ever touching the
+                // accessor path -- the loud MetadataProperty/MetadataEvent
+                // deferral only fires for the accessor-shaped misses).
+                const std::string& name = memberRef->Name;
+                methods = declaringTypeDefinition->GetMethods(
+                    [&name](const IMethod* m) {
+                        return m->Name() == name;
+                    },
+                    GetMemberOptions::IgnoreInheritedMembers);
+            }
+            // The C# vararg expected-parameters: the required prefix plus
+            // the `__arglist` sentinel.
+            std::vector<ITypePtr> parameterTypes;
+            if (signature.Header.CallingConvention
+                == Metadata::SignatureCallingConvention::VarArgs)
+            {
+                parameterTypes.reserve(signature.RequiredParameterCount + 1);
+                for (std::uint32_t i = 0; i < signature.RequiredParameterCount;
+                     i++)
+                    parameterTypes.push_back(signature.ParameterTypes[i]);
+                parameterTypes.push_back(
+                    std::make_shared<SpecialType>(TypeKind::ArgList));
+            }
+            else
+            {
+                parameterTypes = signature.ParameterTypes;
+            }
+            // The C# search loop: the first overload matching the generic
+            // parameter count, the instance/static polarity, and the
+            // normalized-signature shape. The lazy Concat's second arm --
+            // the accessor search -- runs only when the methods search is
+            // exhausted without a match.
+            const std::string& name = memberRef->Name;
+            method = SearchOverloads(methods, signature, parameterTypes);
+            if (method == nullptr)
+            {
+                std::vector<const IMethod*> accessors =
+                    declaringTypeDefinition->GetAccessors(
+                        [&name](const IMethod* m) {
+                            return m->Name() == name;
+                        },
+                        GetMemberOptions::IgnoreInheritedMembers);
+                method = SearchOverloads(accessors, signature, parameterTypes);
+            }
+        }
+        else
+        {
+            method = nullptr;
+        }
+        if (method == nullptr)
+        {
+            method = CreateFakeMethod(std::move(declaringType),
+                                      memberRef->Name, signature);
+        }
+    }
+    if (classTypeArguments.has_value() || methodTypeArguments.has_value())
+    {
+        // The C# `method.Specialize(new TypeParameterSubstitution(
+        // classTypeArguments, methodTypeArguments))` -- a null list keeps
+        // that kind of type parameter unmodified (the std::nullopt state).
+        TypeParameterSubstitution substitution(classTypeArguments,
+                                               methodTypeArguments);
+        method = method->Specialize(&substitution);
+    }
+    if (expandVarArgs
+        && signature.Header.CallingConvention
+            == Metadata::SignatureCallingConvention::VarArgs)
+    {
+        // The C# `new VarArgInstanceMethod(method,
+        // signature.ParameterTypes.Skip(signature.RequiredParameterCount))`.
+        std::vector<ITypePtr> varArgTypes(
+            signature.ParameterTypes.begin() + signature.RequiredParameterCount,
+            signature.ParameterTypes.end());
+        auto wrapper = std::make_shared<VarArgInstanceMethod>(
+            AliasMethod(const_cast<IMethod*>(method)),
+            std::move(varArgTypes));
+        resolvedMethods_.push_back(wrapper);
+        method = wrapper.get();
+    }
+    return method;
+}
+
+// The C# `IType ResolveDeclaringType(EntityHandle declaringTypeReference,
+// GenericContext context)` -- resolve WITHOUT the annotation options, then
+// introduce tuple types in the type arguments only.
+ITypePtr MetadataModule::ResolveDeclaringType(
+    std::uint32_t declaringTypeReference, const GenericContext& context) const
+{
+    // The C# `const TypeSystemOptions removedOptions = ...` -- the annotation
+    // options stripped for the resolution itself (the raw shape reaches the
+    // overload search, so the signature comparisons see the same types on
+    // both sides).
+    const ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions removedOptions =
+        ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::Dynamic
+        | ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::Tuple
+        | ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::NullabilityAnnotations
+        | ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::NativeIntegers
+        | ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::NativeIntegersWithoutAttribute;
+    ITypePtr ty = ResolveType(
+        declaringTypeReference, context,
+        static_cast<::ILSpy::Decompiler::TypeSystem::TypeSystemOptions>(
+            options_ & ~removedOptions));
+    return ApplyAttributeTypeVisitor::ApplyAttributesToType(
+        std::move(ty), const_cast<ICompilation&>(Compilation()),
+        std::nullopt, *metadataFile_, options_,
+        Nullability::Oblivious,
+        /*typeChildrenOnly=*/true);
+}
+
+// The C# `IType IntroduceTupleTypes(IType ty)`.
+ITypePtr MetadataModule::IntroduceTupleTypes(ITypePtr ty) const
+{
+    return ApplyAttributeTypeVisitor::ApplyAttributesToType(
+        std::move(ty), const_cast<ICompilation&>(Compilation()),
+        std::nullopt, *metadataFile_, options_,
+        Nullability::Oblivious);
+}
+
+// The C# `IField ResolveFieldReference(MemberReferenceHandle
+// memberReferenceHandle, GenericContext context)`.
+const IField* MetadataModule::ResolveFieldReference(
+    std::uint32_t memberReferenceToken, const GenericContext& context) const
+{
+    auto memberRef = metadataFile_->GetMemberReference(memberReferenceToken);
+    auto blob = metadataFile_->GetSignatureBlob(memberReferenceToken);
+    if (!memberRef || !blob)
+        throw std::invalid_argument("Read out of bounds.");
+    ITypePtr declaringType =
+        ResolveDeclaringType(memberRef->ParentToken, context);
+    const ITypeDefinition* declaringTypeDefinition =
+        declaringType->GetDefinition();
+    // The C# `memberRef.DecodeFieldSignature(...)` runs the SRM
+    // `CheckHeader(header, SignatureKind.Field)` first: the SR-formatted
+    // message for a non-field header.
+    std::uint8_t raw = (*blob)[0];
+    int lowNibble = raw & 0x0F;
+    if (lowNibble != 6)
+        throw std::invalid_argument(
+            "Expected signature header for 'Field', but found '"
+            + SignatureKindName(lowNibble) + "' (0x" + HexByte2(raw) + ").");
+    // The field signature is for the definition, not the generic instance.
+    std::vector<const ITypeParameter*> declaringTypeParameters;
+    if (declaringTypeDefinition != nullptr)
+        declaringTypeParameters = declaringTypeDefinition->TypeParameters();
+    GenericContext declaringContext(std::move(declaringTypeParameters));
+    Metadata::SignatureTypeProviderDecoder<::ILSpy::Decompiler::TypeSystem::TypeProvider> decoder(
+        const_cast<::ILSpy::Decompiler::TypeSystem::TypeProvider&>(
+            TypeProvider()), *metadataFile_);
+    ITypePtr signature = decoder.DecodeType(
+        blob->data() + 1, blob->size() - 1, declaringContext);
+    // The C# `declaringType.GetFields(f => f.Name == name &&
+    // CompareTypes(f.ReturnType, signature), IgnoreInheritedMembers)
+    // .FirstOrDefault()`.
+    const IField* field = nullptr;
+    {
+        const std::string& name = memberRef->Name;
+        std::vector<const IField*> fields = declaringType->GetFields(
+            [&name, &signature](const IField* f) {
+                return f->Name() == name
+                    && CompareTypes(f->ReturnType(), *signature);
+            },
+            GetMemberOptions::IgnoreInheritedMembers);
+        if (!fields.empty())
+            field = fields.front();
+    }
+    if (field == nullptr)
+    {
+        // The C# fallback: substitute the type arguments of a generic
+        // declaring type into the signature, then build the `FakeField`.
+        ITypePtr substituted = std::move(signature);
+        if (!TypeArgumentsOf(*declaringType).empty())
+        {
+            TypeParameterSubstitution substitution =
+                GetSubstitutionOf(*declaringType);
+            substituted = substituted->AcceptVisitor(substitution);
+        }
+        auto fake = std::make_shared<Implementation::FakeField>(
+            Compilation());
+        fake->SetReturnType(std::move(substituted));
+        fake->SetName(memberRef->Name);
+        fake->SetDeclaringType(std::move(declaringType));
+        resolvedFields_.push_back(std::move(fake));
+        field = resolvedFields_.back().get();
+    }
+    return field;
+}
+
+// The C# `IMethod CreateFakeMethod(IType declaringType, string name,
+// MethodSignature<IType> signature)`.
+const IMethod* MetadataModule::CreateFakeMethod(
+    ITypePtr declaringType, const std::string& name,
+    const Metadata::ProviderMethodSignature<ITypePtr>& signature) const
+{
+    ::ILSpy::Decompiler::TypeSystem::SymbolKind symbolKind =
+        ::ILSpy::Decompiler::TypeSystem::SymbolKind::Method;
+    if (name == ".ctor" || name == ".cctor")
+        symbolKind = ::ILSpy::Decompiler::TypeSystem::SymbolKind::Constructor;
+    auto m = std::make_shared<Implementation::FakeMethod>(Compilation(),
+                                                          symbolKind);
+    m->SetDeclaringType(std::move(declaringType));
+    m->SetName(name);
+    m->SetReturnType(signature.ReturnType);
+    m->SetIsStatic(!signature.Header.IsInstance());
+    // The C# `TypeParameterSubstitution substitution = null;` -- the
+    // optional state: the owned method type parameters for a generic
+    // signature, else the declaring type's own substitution.
+    std::optional<TypeParameterSubstitution> substitution;
+    if (signature.GenericParameterCount > 0)
+    {
+        std::vector<std::shared_ptr<const ITypeParameter>> typeParameters;
+        std::vector<ITypePtr> methodArgs;
+        typeParameters.reserve(signature.GenericParameterCount);
+        methodArgs.reserve(signature.GenericParameterCount);
+        for (std::uint32_t i = 0; i < signature.GenericParameterCount; i++)
+        {
+            auto tp = std::make_shared<Implementation::DefaultTypeParameter>(
+                static_cast<const IMethod*>(m.get()), static_cast<int>(i));
+            methodArgs.push_back(tp);
+            typeParameters.push_back(std::move(tp));
+        }
+        m->SetTypeParameters(std::move(typeParameters));
+        substitution.emplace(TypeArgumentsOf(*m->DeclaringType()),
+                             std::move(methodArgs));
+    }
+    else if (!TypeArgumentsOf(*m->DeclaringType()).empty())
+    {
+        substitution.emplace(
+            GetSubstitutionOf(*m->DeclaringType()));
+    }
+    std::vector<std::shared_ptr<const IParameter>> parameters;
+    parameters.reserve(signature.RequiredParameterCount);
+    for (std::uint32_t i = 0; i < signature.RequiredParameterCount; i++)
+    {
+        ITypePtr type = signature.ParameterTypes[i];
+        if (substitution.has_value())
+        {
+            // The C# `type.AcceptVisitor(substitution)` -- replace the
+            // dummy method type parameters with the owned instances.
+            type = type->AcceptVisitor(*substitution);
+        }
+        parameters.push_back(
+            std::make_shared<Implementation::DefaultParameter>(
+                std::move(type), ""));
+    }
+    m->SetParameters(parameters);
+    GuessFakeMethodAccessor(m->DeclaringType(), name, signature, m,
+                            parameters);
+    resolvedMethods_.push_back(std::move(m));
+    return resolvedMethods_.back().get();
+}
+
+// The C# `void GuessFakeMethodAccessor(...)`: the get_/set_/add_/remove_/
+// raise_ name-forms guess the accessor kind and build the owning
+// FakeProperty / FakeEvent.
+void MetadataModule::GuessFakeMethodAccessor(
+    ITypePtr declaringType, const std::string& name,
+    const Metadata::ProviderMethodSignature<ITypePtr>& signature,
+    const std::shared_ptr<Implementation::FakeMethod>& m,
+    const std::vector<std::shared_ptr<const IParameter>>& parameters) const
+{
+    if (signature.GenericParameterCount > 0)
+        return;
+    const bool guessedGetter = name.rfind("get_", 0) == 0;
+    const bool guessedSetter = name.rfind("set_", 0) == 0;
+    if (guessedGetter || guessedSetter)
+    {
+        std::string propertyName = name.substr(4);
+        auto fakeProperty = std::make_shared<Implementation::FakeProperty>(
+            Compilation());
+        fakeProperty->SetName(propertyName);
+        fakeProperty->SetDeclaringType(declaringType);
+        fakeProperty->SetIsStatic(m->IsStatic());
+        if (guessedGetter)
+        {
+            if (signature.ReturnType->Kind() == TypeKind::Void)
+                return;
+            m->SetAccessorKind(MethodSemanticsAttributes::Getter);
+            m->SetAccessorOwner(
+                static_cast<const IProperty*>(fakeProperty.get()));
+            fakeProperty->SetGetter(m.get());
+            fakeProperty->SetReturnType(signature.ReturnType);
+            fakeProperty->SetIsIndexer(!parameters.empty());
+            fakeProperty->SetParameters(parameters);
+            resolvedMethodAux_.push_back(std::move(fakeProperty));
+            return;
+        }
+        if (guessedSetter)
+        {
+            if (parameters.empty()
+                || signature.ReturnType->Kind() != TypeKind::Void)
+                return;
+            m->SetAccessorKind(MethodSemanticsAttributes::Setter);
+            m->SetAccessorOwner(
+                static_cast<const IProperty*>(fakeProperty.get()));
+            fakeProperty->SetSetter(m.get());
+            fakeProperty->SetReturnType(
+                AliasType(parameters.back()->Type()));
+            fakeProperty->SetIsIndexer(parameters.size() > 1);
+            fakeProperty->SetParameters(
+                std::vector<std::shared_ptr<const IParameter>>(
+                    parameters.begin(), parameters.end() - 1));
+            resolvedMethodAux_.push_back(std::move(fakeProperty));
+            return;
+        }
+    }
+    const bool guessedAdd = name.rfind("add_", 0) == 0;
+    const bool guessedRemove = name.rfind("remove_", 0) == 0;
+    const bool guessedRaise = name.rfind("raise_", 0) == 0;
+    if (guessedAdd || guessedRemove || guessedRaise)
+    {
+        auto fakeEvent = std::make_shared<Implementation::FakeEvent>(
+            Compilation());
+        fakeEvent->SetDeclaringType(declaringType);
+        fakeEvent->SetIsStatic(m->IsStatic());
+        if (guessedAdd)
+        {
+            if (parameters.size() != 1)
+                return;
+            m->SetAccessorKind(MethodSemanticsAttributes::Adder);
+            m->SetAccessorOwner(
+                static_cast<const IEvent*>(fakeEvent.get()));
+            fakeEvent->SetName(name.substr(4));
+            fakeEvent->SetAddAccessor(m.get());
+            fakeEvent->SetReturnType(AliasType(parameters.front()->Type()));
+            resolvedMethodAux_.push_back(std::move(fakeEvent));
+            return;
+        }
+        if (guessedRemove)
+        {
+            if (parameters.size() != 1)
+                return;
+            m->SetAccessorKind(MethodSemanticsAttributes::Remover);
+            m->SetAccessorOwner(
+                static_cast<const IEvent*>(fakeEvent.get()));
+            fakeEvent->SetName(name.substr(7));
+            fakeEvent->SetRemoveAccessor(m.get());
+            fakeEvent->SetReturnType(AliasType(parameters.front()->Type()));
+            resolvedMethodAux_.push_back(std::move(fakeEvent));
+            return;
+        }
+        if (guessedRaise)
+        {
+            fakeEvent->SetName(name.substr(6));
+            fakeEvent->SetInvokeAccessor(m.get());
+            m->SetAccessorKind(MethodSemanticsAttributes::Raiser);
+            m->SetAccessorOwner(
+                static_cast<const IEvent*>(fakeEvent.get()));
+            resolvedMethodAux_.push_back(std::move(fakeEvent));
+            return;
+        }
+    }
+}
+
+// The C# `static bool CompareTypes(IType a, IType b)` -- the default
+// NormalizeTypeVisitor's EquivalentTypes (all option fields true).
+bool MetadataModule::CompareTypes(const IType& a, const IType& b)
+{
+    return CompareTypeNormalizer().EquivalentTypes(
+        const_cast<IType&>(a), const_cast<IType&>(b));
+}
+
+// The C# `static bool CompareSignatures(IReadOnlyList<IParameter> parameters,
+// ImmutableArray<IType> parameterTypes)`.
+bool MetadataModule::CompareSignatures(
+    const std::vector<const IParameter*>& parameters,
+    const std::vector<ITypePtr>& parameterTypes)
+{
+    if (parameterTypes.size() != parameters.size())
+        return false;
+    for (std::size_t i = 0; i < parameterTypes.size(); i++)
+    {
+        if (!CompareTypes(parameters[i]->Type(), *parameterTypes[i]))
+            return false;
+    }
+    return true;
+}
+
+// The decompiled .NET 10 `SignatureHeader.Kind` rule behind
+// `MemberReference.GetKind()`: the low nibble <= 5 or == 9 is a method
+// signature, 6 is a field signature, anything else is an invalid header
+// (the parameterless BadImageFormatException).
+MetadataModule::MemberReferenceKind MetadataModule::GetMemberReferenceKind(
+    const std::vector<std::uint8_t>& signatureBlob)
+{
+    if (signatureBlob.empty())
+        throw std::invalid_argument(
+            "Format of the executable (.exe) or library (.dll) is invalid.");
+    int lowNibble = signatureBlob[0] & 0x0F;
+    if (lowNibble <= 5 || lowNibble == 9)
+        return MemberReferenceKind::Method;
+    if (lowNibble == 6)
+        return MemberReferenceKind::Field;
+    throw std::invalid_argument(
+        "Format of the executable (.exe) or library (.dll) is invalid.");
+}
+
+// --- Resolve Entity (MetadataModule.cs lines 755-787) ---
+
+// The C# `public IEntity ResolveEntity(EntityHandle entityHandle,
+// GenericContext context = default)` -- the any-entity resolution.
+const IEntity* MetadataModule::ResolveEntity(
+    std::uint32_t entityHandle, const GenericContext& context) const
+{
+    switch (entityHandle >> 24)
+    {
+    case 0x01u:  // HandleKind.TypeReference
+    case 0x02u:  // HandleKind.TypeDefinition
+    case 0x1Bu:  // HandleKind.TypeSpecification
+    case 0x27u:  // HandleKind.ExportedType
+        // The C# `ResolveDeclaringType(entityHandle, context).GetDefinition()`
+        // -- a type without a definition resolves to null.
+        return ResolveDeclaringType(entityHandle, context)->GetDefinition();
+    case 0x0Au:  // HandleKind.MemberReference
+    {
+        auto memberRef = metadataFile_->GetMemberReference(entityHandle);
+        auto blob = metadataFile_->GetSignatureBlob(entityHandle);
+        if (!memberRef || !blob)
+            throw std::invalid_argument("Read out of bounds.");
+        MemberReferenceKind kind = GetMemberReferenceKind(*blob);
+        if (kind == MemberReferenceKind::Method)
+        {
+            // The C# `for consistency with the MethodDefinition case, never
+            // expand varargs`.
+            return ResolveMethodReference(entityHandle, context, std::nullopt,
+                                          /*expandVarArgs=*/false);
+        }
+        if (kind == MemberReferenceKind::Field)
+        {
+            return ResolveFieldReference(entityHandle, context);
+        }
+        // The C# `default: throw new BadImageFormatException("Unknown
+        // MemberReferenceKind")` -- unreachable (GetMemberReferenceKind
+        // throws first for any other header), carried faithfully.
+        throw std::invalid_argument("Unknown MemberReferenceKind");
+    }
+    case 0x06u:  // HandleKind.MethodDefinition
+        return GetDefinitionMethod(entityHandle);
+    case 0x2Bu:  // HandleKind.MethodSpecification
+        return ResolveMethodSpecification(entityHandle, context,
+                                          /*expandVarArgs=*/false);
+    case 0x04u:  // HandleKind.FieldDefinition
+        return GetDefinitionField(entityHandle);
+    case 0x14u:  // HandleKind.EventDefinition
+    case 0x17u:  // HandleKind.PropertyDefinition
+        // The C# `GetDefinition((EventDefinitionHandle /
+        // PropertyDefinitionHandle) entityHandle)` -- the property/event
+        // entity caches land with the MetadataProperty / MetadataEvent
+        // slice (the loud deferral).
+        throw std::logic_error(
+            "MetadataModule::ResolveEntity: the MetadataProperty / "
+            "MetadataEvent entity family is not yet ported");
+    default:
+        return nullptr;
+    }
+}
+
 
 } // namespace ILSpy::Decompiler::TypeSystem

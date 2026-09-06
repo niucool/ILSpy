@@ -618,6 +618,11 @@ private:
     mutable std::vector<std::shared_ptr<const IMethod>> accessorsCache_;
     mutable std::vector<std::shared_ptr<const IProperty>> propertiesCache_;
     mutable std::vector<std::shared_ptr<const IField>> fieldsCache_;
+    // The keep-alive registry for the FILTERED `GetFields` walks (the C#
+    // GC roots each fresh `SpecializedField`; the port's raw-pointer return
+    // contract keeps them alive for the parameterized type's lifetime -- the
+    // established registry pattern).
+    mutable std::vector<std::shared_ptr<const IField>> fieldsKeepAlive_;
     mutable std::vector<std::shared_ptr<const IEvent>> eventsCache_;
 };
 

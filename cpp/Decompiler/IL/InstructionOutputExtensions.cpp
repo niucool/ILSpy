@@ -293,15 +293,19 @@ void WriteTo(const MetadataFile& module, ITextOutput& output,
         }
         case 0x0A:  // HandleKind.MemberReference
         {
-            // The C# `mr.GetKind()` splits on the signature-blob kind nibble:
-            // Method (0) takes the method-signature arm with the parent
-            // rendered through WriteParent; anything else is the field arm
-            // (a bare type decode, no parameter list).
+            // The C# `mr.GetKind()` splits on the decompiled .NET 10
+            // `SignatureHeader.Kind` rule: the low nibble <= 5 or == 9 is a
+            // METHOD signature (the DEFAULT/C/STDCALL/THISCALL/FASTCALL/
+            // VARARG/UNMANAGED calling conventions -- a vararg memberref has
+            // nibble 5), 6 is a field; the method arm renders the parent
+            // through WriteParent, the field arm a bare type decode with no
+            // parameter list.
             auto blob = module.GetSignatureBlob(entityToken);
             if (!blob || blob->empty())
                 throw std::logic_error("member signature");
             std::string memberName = module.GetMemberReference(entityToken)->Name;
-            if (((*blob)[0] & 0x0F) == 0x00) {  // method kind
+            int memberKindNibble = (*blob)[0] & 0x0F;
+            if (memberKindNibble <= 5 || memberKindNibble == 9) {  // method kind
                 Metadata::MetadataGenericContext outerContext(genericContext);
                 Disassembler::DisassemblerSignatureTypeProvider provider(module, output);
                 Metadata::SignatureTypeProviderDecoder decoder(provider, module);

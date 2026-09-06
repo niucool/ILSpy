@@ -44,9 +44,12 @@
 //      gated on the AttributeListBuilder + custom-attribute machinery (the
 //      MetadataField convention (c)).
 //  (d) `IsExplicitInterfaceImplementation` / `ExplicitlyImplementedInterfaceMembers`
-//      are the loud DEFERRALS gated on `MetadataTypeDefinition.
-//      HasOverrides/GetOverrides` + `MetadataModule::ResolveMethod` (the
-//      explicit-interface MethodImpl-table walk -- the named follow-up slice).
+//      are REAL (the resolve-method slice): the declaring type's
+//      `HasOverrides`/`GetOverrides` MethodImpl-table walk over the landed
+//      `MetadataModule::ResolveMethod`. A cross-assembly MethodDeclaration
+//      pointing at an ACCESSOR (a get_/set_/add_/remove_/raise_ name form)
+//      still throws through `MetadataTypeDefinition::GetAccessors` (the loud
+//      MetadataProperty/MetadataEvent deferral) until that slice lands.
 //  (e) `AccessorOwner` is the loud DEFERRAL gated on the
 //      `GetDefinition(PropertyDefinitionHandle/EventDefinitionHandle)` entity
 //      caches (the MetadataProperty/MetadataEvent siblings -- the ctor still

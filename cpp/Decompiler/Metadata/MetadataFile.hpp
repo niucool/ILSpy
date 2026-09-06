@@ -740,6 +740,22 @@ public:
     std::vector<MethodImplementationInfo> GetMethodImplementations(
         std::uint32_t methodToken) const;
 
+    // The WHOLE MethodImpl table (table 0x19), every row: the row's own
+    // token, the MethodBody column as a raw 0x06...... token (the coded
+    // index's tag-0 arm; a nil or tag-1 row reads 0), the MethodDeclaration
+    // column as a raw MethodDef (0x06......) or MemberRef (0x0A......)
+    // token (0 for a nil row), and the raw Class column as a 0x02......
+    // token (the plain TypeDef row index). The whole-corpus grouping the
+    // `MetadataTypeDefinition::GetOverrides` / `HasOverrides` replay and the
+    // explicit-interface-implementation drives build over. Never throws.
+    struct MethodImplRowInfo {
+        std::uint32_t Token = 0;
+        std::uint32_t MethodBodyToken = 0;
+        std::uint32_t MethodDeclarationToken = 0;
+        std::uint32_t ClassToken = 0;
+    };
+    std::vector<MethodImplRowInfo> MethodImplRows() const;
+
     // The DeclSecurity rows (table 0x0E) whose Parent is the token -- the C#
     // TypeDefinition/MethodDefinition.GetDeclarativeSecurityAttributes()
     // collection. The Parent column is a HasDeclSecurity coded index (tag

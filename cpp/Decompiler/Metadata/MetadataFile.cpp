@@ -1313,6 +1313,47 @@ MetadataFile::GetMethodImplementations(std::uint32_t methodToken) const {
     return result;
 }
 
+// The whole MethodImpl table. See the header for the full contract.
+std::vector<MetadataFile::MethodImplRowInfo> MetadataFile::MethodImplRows()
+    const {
+    std::vector<MethodImplRowInfo> result;
+    if (!IsValid()) return result;
+    try {
+        std::uint32_t count =
+            static_cast<std::uint32_t>(impl_->db->MethodImpl.size());
+        result.reserve(count);
+        for (std::uint32_t i = 0; i < count; i++) {
+            MethodImplRowInfo info;
+            info.Token = (0x19u << 24) | ((i + 1) & 0x00FFFFFFu);
+            // MethodDefOrRef coded index (1 tag bit): tag 0 = MethodDef,
+            // tag 1 = MemberRef.
+            std::uint32_t bodyRaw =
+                impl_->db->MethodImpl.get_value<std::uint32_t>(i, 1);
+            if (bodyRaw != 0 && (bodyRaw & 1u) == 0)
+                info.MethodBodyToken = 0x06000000u | (bodyRaw >> 1);
+            std::uint32_t declRaw =
+                impl_->db->MethodImpl.get_value<std::uint32_t>(i, 2);
+            if (declRaw != 0) {
+                std::uint32_t declRid = declRaw >> 1;
+                std::uint32_t declTable = (declRaw & 1u) ? 0x0Au : 0x06u;
+                if (declRid != 0)
+                    info.MethodDeclarationToken =
+                        (declTable << 24) | declRid;
+            }
+            // The Class column is a plain 1-based TypeDef row index.
+            std::uint32_t classRaw =
+                impl_->db->MethodImpl.get_value<std::uint32_t>(i, 0);
+            if (classRaw != 0)
+                info.ClassToken = 0x02000000u | classRaw;
+            result.push_back(info);
+        }
+    } catch (const std::exception&) {
+        // Best-effort: a malformed table walk degrades to the partial result.
+    }
+    return result;
+}
+
+
 // The DeclSecurity rows whose Parent is the token -- the C#
 // TypeDefinition/MethodDefinition.GetDeclarativeSecurityAttributes()
 // collection. See the header for the full contract.

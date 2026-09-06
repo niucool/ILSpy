@@ -183,10 +183,41 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   engine over the full Create-arm matrix, the fake drives incl. the
   ArrayType arm only a fake can reach, and the whole-type FNV digests over
   every method + field of List`1/Dictionary`2/String specialized with the
-  full class substitution); the explicit-interface members
-  (`HasOverrides`/`GetOverrides` + `ResolveMethod`), the attribute members
-  (AttributeListBuilder), and `AccessorOwner` (the property/event caches)
-  stay the documented loud deferrals).
+  full class substitution); and the resolve-method slice LANDED
+  (`MetadataModule.ResolveMethod`/`ResolveEntity`/`ResolveDeclaringType`/
+  `CreateFakeMethod` with the `GuessFakeMethodAccessor` accessor-kind guess
+  and the `DefaultTypeParameter` factory dependency, the
+  `MemberReference.GetKind` rule decompiled from the real
+  `SignatureHeader.Kind`, the `NormalizeTypeVisitor`-backed
+  `CompareTypes`/`CompareSignatures`, `ResolveMethodDefinition`/
+  `ResolveMethodSpecification`/`ResolveMethodReference` with the
+  overload search, the vararg `VarArgInstanceMethod` expansion, the
+  fake-method fallback, and `ResolveFieldReference` with the
+  SR-formatted field-header check; `MetadataTypeDefinition.
+  GetConstructors`/`GetAccessors` (the accessor arm preserving the
+  C# invoker-yields-remover bug verbatim) and
+  `HasOverrides`/`GetOverrides` over the new `MetadataFile.MethodImplRows`
+  whole-table read, and `MetadataMethod.
+  IsExplicitInterfaceImplementation`/
+  `ExplicitlyImplementedInterfaceMembers` real -- gold-pinned against
+  the real engine with the whole-corpus FNV digests over every memberref
+  row (1717 method + 888 field over mscorlib single-module; 2275 + 280
+  over the System+mscorlib paired compilation), every MethodSpec row (656
+  / 174), and every MethodImpl-carrying method (1185 same-module + 82
+  cross-plain over mscorlib; 133 + 312 over System.dll), all byte-exact,
+  with the accessor-shaped partition pinned as the loud
+  MetadataProperty/MetadataEvent deferral (824 resolvable-parent
+  mscorlib rows throw; 74 System.Configuration-parent memberrefs resolve
+  through the fake-guess path in both engines) -- plus the two gold-driven
+  fidelity fixes the digests exposed: the `TupleType::VisitChildren`
+  underlying-type rebuild (the C# recomputes the ValueTuple chain from the
+  substituted elements) and `ParameterizedType::GetFields`'s
+  filter-over-raw-fields semantics (the C# filter runs BEFORE the
+  specialization wrap; the port's return-time cache filter diverged on the
+  first type-sensitive consumer), and the disassembler's memberref-kind
+  rule corrected to the decompiled `low nibble <= 5 or == 9` form; the
+  attribute members (AttributeListBuilder) and `AccessorOwner` (the
+  property/event caches) stay the documented loud deferrals).
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with

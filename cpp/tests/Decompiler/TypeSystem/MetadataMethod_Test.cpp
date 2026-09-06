@@ -1131,9 +1131,12 @@ TEST_F(MetadataMethodTest, DeferralContracts)
     EXPECT_THROW(accessor->AccessorOwner(), std::logic_error);
     const TS::IMethod* plain = fx.Get(fx.mscA, str, "Substring", 0);
     ASSERT_NE(plain, nullptr);
-    EXPECT_THROW(plain->ExplicitlyImplementedInterfaceMembers(),
-        std::logic_error);
-    EXPECT_THROW(plain->IsExplicitInterfaceImplementation(), std::logic_error);
+    // The explicit-interface surface LANDED (the resolve-method slice): a
+    // plain method answers false / the empty list; the positive drives live
+    // in ResolveMethod_Test (Array's System.Collections.ICollection
+    // override rows).
+    EXPECT_FALSE(plain->IsExplicitInterfaceImplementation());
+    EXPECT_TRUE(plain->ExplicitlyImplementedInterfaceMembers().empty());
     EXPECT_THROW(plain->GetAttributes(), std::logic_error);
     EXPECT_THROW(plain->HasAttribute(TS::KnownAttribute::Obsolete),
         std::logic_error);

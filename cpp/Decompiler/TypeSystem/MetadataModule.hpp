@@ -93,12 +93,15 @@
 //      resolution family, this slice) are REAL; the miss arm falls through
 //      to `GetDefinition(nilHandle)` -> null.
 //  (g) DEFERRED members (each loud `std::logic_error` where the ported surface
-//      reaches it, otherwise absent with this note): the whole
-//      `ResolveMethod` / `ResolveEntity` / `ResolveDeclaringType` /
-//      `CreateFakeMethod` family (the member-entity slice -- the
-//      `ResolveType` pair LANDED, as have the `TypeProvider` field and its
-//      class plus the `Metadata/CustomAttributeDecoder` value-decode
-//      machinery);
+//      reaches it, otherwise absent with this note): `ResolveMethod` /
+//      `ResolveEntity` / `ResolveDeclaringType` / `CreateFakeMethod` LANDED
+//      (the resolve-method slice, with the `DefaultTypeParameter` factory
+//      dependency); the accessor-search arm of `ResolveMethodReference`
+//      routes through `MetadataTypeDefinition::GetAccessors`, the loud
+//      MetadataProperty/MetadataEvent deferral until that slice lands (a
+//      member reference to an ACCESSOR whose declaring type carries no
+//      same-name plain method throws; the method/ctor search and the
+//      fake-method fallback are REAL);
 //      `GetAssemblyAttributes` / `GetModuleAttributes` /
 //      `GetInternalsVisibleTo` / `InternalsVisibleTo`'s friend-list decode and the
 //      ctor's `NullableContext` / `FindMinimumAccessibilityForNRT` (the
@@ -165,6 +168,16 @@ namespace Implementation { class MetadataNamespace; }
 namespace Implementation { class MetadataTypeDefinition; }
 namespace Implementation { class MetadataField; }
 namespace Implementation { class MetadataMethod; }
+namespace Implementation { class FakeMethod; }
+
+// Forward declarations of the member/result types the resolve-method slice
+// returns by raw pointer while the registries own them (`IMethod` / `IField`
+// are complete through the includes above; `IEntity` is complete through
+// IModule.hpp).
+class IMethod;
+class IField;
+class IEntity;
+class IParameter;
 
 // Forward declaration of the signature provider (the sibling TypeProvider.hpp):
 // the `typeProvider_` member holds it by `unique_ptr`, complete with the
@@ -350,6 +363,56 @@ public:
         ::ILSpy::Decompiler::TypeSystem::Nullability nullableContext
             = ::ILSpy::Decompiler::TypeSystem::Nullability::Oblivious) const;
 
+    // The C# `static bool CompareTypes(IType a, IType b)` (a PRIVATE static
+    // in the C#; PUBLIC in the port -- the test pin seam, the
+    // public-nested-names precedent): normalize both types through the
+    // static `NormalizeTypeVisitor` (all options default) and compare --
+    // exactly the default visitor's `EquivalentTypes`.
+    static bool CompareTypes(const IType& a, const IType& b);
+    // The C# `static bool CompareSignatures(IReadOnlyList<IParameter>
+    // parameters, ImmutableArray<IType> parameterTypes)` -- the length check
+    // then the per-position `CompareTypes`. Same public seam.
+    static bool CompareSignatures(
+        const std::vector<const IParameter*>& parameters,
+        const std::vector<ITypePtr>& parameterTypes);
+
+    // --- Resolve Method (MetadataModule.cs lines 418-753) ---
+    // The C# `public IMethod ResolveMethod(EntityHandle methodReference,
+    // GenericContext context)` -- resolves a method-def / member-ref /
+    // method-spec token to an `IMethod` (varargs expanded): the dispatch over
+    // the top byte (0x06 MethodDef -> the entity cache, 0x0A MemberRef -> the
+    // overload search with the fake-method fallback, 0x2B MethodSpec -> the
+    // generic instantiation specialized onto its target). A nil token throws
+    // the `ArgumentNullException` message (mapped to `std::invalid_argument`);
+    // any other top byte throws the C# `BadImageFormatException("Metadata
+    // token must be either a methoddef, memberref or methodspec")` mapped to
+    // `std::invalid_argument` carrying the same text. The returned method is
+    // owned by this module (the cache slots, the per-entity Specialize
+    // registries, or the `resolvedMethods_` registry below) -- a non-owning
+    // pointer the module outlives (the whole type-system lifetime contract).
+    const IMethod* ResolveMethod(
+        std::uint32_t methodReference,
+        const GenericContext& context) const;
+
+    // --- Resolve Entity (MetadataModule.cs lines 755-787) ---
+    // The C# `public IEntity ResolveEntity(EntityHandle entityHandle,
+    // GenericContext context = default)` -- resolves any entity token to an
+    // `IEntity`: the type handles through `ResolveDeclaringType(...).
+    // GetDefinition()` (types without a definition resolve to null), a
+    // MemberRef through its kind (method -> `ResolveMethodReference` with
+    // `expandVarArgs: false`, field -> `ResolveFieldReference`; the kind read
+    // itself throws the parameterless `BadImageFormatException` for a
+    // non-field/non-method signature header, so the `"Unknown
+    // MemberReferenceKind"` default arm is unreachable dead code the port
+    // carries faithfully), MethodDef/FieldDef through the entity caches,
+    // MethodSpec through `ResolveMethodSpecification(expandVarArgs: false)`,
+    // and Property/Event rows through the `GetDefinition` property/event
+    // caches (the loud MetadataProperty/MetadataEvent deferral until that
+    // slice lands). Any other top byte returns null.
+    const IEntity* ResolveEntity(
+        std::uint32_t entityHandle,
+        const GenericContext& context) const;
+
 private:
     // The C# `void HandleOutOfRange(EntityHandle handle)` -- throws the exact
     // message through the port's `std::out_of_range` (convention (e)).
@@ -378,6 +441,100 @@ private:
     // namespace read BEFORE this member runs; the port carries the faithful
     // dead arm).
     const IModule* ResolveForwarderModule(std::uint32_t exportedTypeToken) const;
+
+    // --- Resolve Method internals (MetadataModule.cs lines 438-753) ---
+    // The C# `IMethod ResolveMethodDefinition(MethodDefinitionHandle
+    // methodDefHandle, bool expandVarArgs)`: the entity cache read, plus the
+    // vararg expansion (`Parameters.LastOrDefault()?.Type.Kind ==
+    // TypeKind.ArgList` -> the `VarArgInstanceMethod` wrap over the empty
+    // vararg-type list).
+    const IMethod* ResolveMethodDefinition(
+        std::uint32_t methodDefToken, bool expandVarArgs) const;
+    // The C# `IMethod ResolveMethodSpecification(MethodSpecificationHandle
+    // methodSpecHandle, GenericContext context, bool expandVarArgs)`: the
+    // instantiation blob decode (the tuple-type-introducing walk over each
+    // type argument), then the target resolution -- a MethodDef target
+    // resolves the definition and `Specialize`s the method type arguments
+    // onto it; a MemberRef target passes them through `ResolveMethodReference`.
+    const IMethod* ResolveMethodSpecification(
+        std::uint32_t methodSpecToken, const GenericContext& context,
+        bool expandVarArgs) const;
+    // The C# `IMethod ResolveMethodReference(MemberReferenceHandle
+    // memberRefHandle, GenericContext context, IReadOnlyList<IType>
+    // methodTypeArguments = null, bool expandVarArgs = true)`: the
+    // MemberRefParent dispatch -- a MethodDef parent resolves straight to the
+    // definition (the memberref signature decoded for the vararg check);
+    // anything else resolves the DECLARING TYPE (the un-annotated form, then
+    // the type-children-only tuple pass), decodes the signature over the
+    // declaring type's type parameters, and searches the overloads
+    // (`.ctor` over the constructors, `.cctor` over the static constructors,
+    // the plain name over `GetMethods` concatenated with `GetAccessors` -- the
+    // accessor path stays the loud MetadataProperty/MetadataEvent deferral
+    // until that slice lands), matching by the normalized-type signature
+    // comparison; a miss builds the `CreateFakeMethod` fallback. The resolved
+    // method is then `Specialize`d over the declaring type's / the supplied
+    // method type arguments and wrapped in `VarArgInstanceMethod` for a
+    // vararg signature when `expandVarArgs`.
+    const IMethod* ResolveMethodReference(
+        std::uint32_t memberRefToken, const GenericContext& context,
+        const std::optional<std::vector<ITypePtr>>& methodTypeArguments
+            = std::nullopt,
+        bool expandVarArgs = true) const;
+    // The C# `IType ResolveDeclaringType(EntityHandle declaringTypeReference,
+    // GenericContext context)`: `ResolveType` with the annotation options
+    // REMOVED (Dynamic / Tuple / NullabilityAnnotations / NativeIntegers /
+    // NativeIntegersWithoutAttribute), then the type-children-only
+    // `ApplyAttributeTypeVisitor` pass introducing tuple types in the type
+    // arguments (the nullability annotations at the top level stay off).
+    ITypePtr ResolveDeclaringType(
+        std::uint32_t declaringTypeReference,
+        const GenericContext& context) const;
+    // The C# `IType IntroduceTupleTypes(IType ty)`: the plain
+    // `ApplyAttributeTypeVisitor` pass over the module's own options (no
+    // attribute rows).
+    ITypePtr IntroduceTupleTypes(ITypePtr ty) const;
+    // The C# `IField ResolveFieldReference(MemberReferenceHandle
+    // memberReferenceHandle, GenericContext context)`: the declaring type
+    // resolution, the FIELD-signature decode over the declaring type's type
+    // parameters (the signature is for the definition), and the
+    // `GetFields` name-and-type search (`IgnoreInheritedMembers`); a miss
+    // builds the `FakeField` fallback (substituted when the declaring type
+    // is a generic instance).
+    const IField* ResolveFieldReference(
+        std::uint32_t memberReferenceToken,
+        const GenericContext& context) const;
+    // The C# `IMethod CreateFakeMethod(IType declaringType, string name,
+    // MethodSignature<IType> signature)`: the `FakeMethod` with the
+    // symbolKind ctor/name split, the owned `DefaultTypeParameter` list for a
+    // generic signature, the parameter list (substituted over the declaring
+    // type's / the owned method type parameters), and the
+    // `GuessFakeMethodAccessor` accessor-kind guess. The created method (and
+    // the guessed property/event + its parameters + type parameters) are
+    // kept alive in the registries below (the C# GC root).
+    const IMethod* CreateFakeMethod(
+        ITypePtr declaringType, const std::string& name,
+        const Metadata::ProviderMethodSignature<ITypePtr>& signature) const;
+    // The C# `void GuessFakeMethodAccessor(IType declaringType, string name,
+    // MethodSignature<IType> signature, FakeMethod m, List<IParameter>
+    // parameters)`: the get_/set_/add_/remove_/raise_ name-forms guess the
+    // accessor kind and build the owning `FakeProperty` / `FakeEvent`
+    // (non-generic signatures only; a wrong return/parameter shape leaves
+    // the method unannotated).
+    void GuessFakeMethodAccessor(
+        ITypePtr declaringType, const std::string& name,
+        const Metadata::ProviderMethodSignature<ITypePtr>& signature,
+        const std::shared_ptr<Implementation::FakeMethod>& m,
+        const std::vector<std::shared_ptr<const IParameter>>& parameters)
+        const;
+    // The C# `MemberReference.GetKind()` over the decompiled .NET 10
+    // `SignatureHeader.Kind` rule: the signature blob's low nibble <= 5 or
+    // == 9 is Method, 6 is Field, anything else is the parameterless
+    // `BadImageFormatException` (the `GetKind` call itself throws -- the C#
+    // `ResolveMethodReference` interpolation evaluates it inside the
+    // `!= MemberReferenceKind.Method` message only for Field).
+    enum class MemberReferenceKind { Method, Field };
+    static MemberReferenceKind GetMemberReferenceKind(
+        const std::vector<std::uint8_t>& signatureBlob);
 
     const ICompilation& compilation_;
     const Metadata::MetadataFile* metadataFile_;
@@ -434,6 +591,24 @@ private:
     // resolved-NULL slot is never cached (the read side only short-circuits
     // on non-null). An EMPTY vector is the C# null array -- the Uncached arm.
     mutable std::vector<const IModule*> referencedAssemblies_;
+
+    // --- The resolve-method slice's keep-alive registries (the C# GC roots
+    // for the freshly built `VarArgInstanceMethod` / `FakeMethod` /
+    // `FakeField` results `ResolveMethod` returns) ---
+    // Every freshly built IMethod a `ResolveMethod` arm hands back (the C# GC
+    // keeps `new VarArgInstanceMethod(...)` / the `CreateFakeMethod` product
+    // alive while the caller holds the reference).
+    mutable std::vector<std::shared_ptr<IMethod>> resolvedMethods_;
+    // Every freshly built IField a `ResolveEntity`/`ResolveFieldReference`
+    // arm hands back (the `FakeField` fallback).
+    mutable std::vector<std::shared_ptr<IField>> resolvedFields_;
+    // The auxiliary objects the fake methods reference -- the guessed
+    // `FakeProperty`/`FakeEvent` (the `AccessorOwner` back-pointers) and their
+    // freshly built members -- kept alive beside the fake method (the C# GC
+    // roots the whole reachable graph through; a cycle of raw back-pointers,
+    // so BOTH objects live in module registries instead of owning each
+    // other).
+    mutable std::vector<std::shared_ptr<void>> resolvedMethodAux_;
 };
 
 } // namespace ILSpy::Decompiler::TypeSystem

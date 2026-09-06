@@ -367,13 +367,49 @@ std::vector<const IMethod*> MetadataTypeDefinition::GetConstructors(
     std::function<bool(const IMethod*)> filter,
     GetMemberOptions options) const
 {
-    (void)filter;
-    (void)options;
+    // The C# `if (Kind == TypeKind.Void) return EmptyList<IMethod>.Instance;`.
     if (kind_ == TypeKind::Void)
         return {};
-    throw std::logic_error(
-        "MetadataTypeDefinition::GetConstructors: the MetadataMethod entity "
-        "family is not yet ported");
+    // The C# `if (ComHelper.IsComImport(this))` co-class arm -- DEFERRED
+    // (ComHelper needs the entity attribute machinery, the AttributeListBuilder
+    // slice): the port returns the interface's OWN declared constructors (an
+    // empty set for a ComImport interface), where the C# returns the
+    // co-class's constructors under the BusyManager lock. Reachable only
+    // through a `.ctor` member reference onto a co-class'd ComImport
+    // interface -- the documented divergence.
+    if ((options
+         & ::ILSpy::Decompiler::TypeSystem::GetMemberOptions::
+             IgnoreInheritedMembers)
+        == ::ILSpy::Decompiler::TypeSystem::GetMemberOptions::
+            IgnoreInheritedMembers)
+    {
+        // The C# `return GetFiltered(this.Methods, ExtensionMethods.And(m =>
+        // m.IsConstructor && !m.IsStatic, filter));` -- the declared
+        // instance constructors over the accessor-dropped Methods
+        // enumeration (the dummy constructor the enumeration appends is an
+        // instance constructor and matches too).
+        std::vector<const IMethod*> result;
+        for (const IMethod* method : Methods())
+        {
+            if (method->IsConstructor() && !method->IsStatic()
+                && (!filter || filter(method)))
+                result.push_back(method);
+        }
+        return result;
+    }
+    // The C# `return GetMembersHelper.GetConstructors(this, filter,
+    // options);` -- the inherited walk (the helper's owning results kept
+    // alive in the methodKeepAlives_ registry, the GetMethods precedent).
+    std::vector<std::shared_ptr<const IMethod>> owned
+        = GetMembersHelper::GetConstructors(this, filter, options);
+    std::vector<const IMethod*> result;
+    result.reserve(owned.size());
+    for (std::shared_ptr<const IMethod>& m : owned)
+    {
+        result.push_back(m.get());
+        methodKeepAlives_.push_back(std::move(m));
+    }
+    return result;
 }
 
 std::vector<const IMethod*> MetadataTypeDefinition::GetMethods(
@@ -514,13 +550,85 @@ std::vector<const IMethod*> MetadataTypeDefinition::GetAccessors(
     std::function<bool(const IMethod*)> filter,
     GetMemberOptions options) const
 {
-    (void)filter;
-    (void)options;
+    // The C# `if (Kind == TypeKind.Void) return EmptyList<IMethod>.Instance;`.
     if (kind_ == TypeKind::Void)
         return {};
-    throw std::logic_error(
-        "MetadataTypeDefinition::GetAccessors: the member entity family is "
-        "not yet ported");
+    if ((options
+         & ::ILSpy::Decompiler::TypeSystem::GetMemberOptions::
+             IgnoreInheritedMembers)
+        == ::ILSpy::Decompiler::TypeSystem::GetMemberOptions::
+            IgnoreInheritedMembers)
+    {
+        // The C# `GetFilteredAccessors(filter)`: the property getters and
+        // setters, then the event adders / removers / invokers. NOTE the
+        // faithful C# bug in the invoker arm -- `if (invoker != null && ...)
+        // yield return remover;` -- the INVOKER check yields the REMOVER
+        // (MetadataTypeDefinition.cs GetFilteredAccessors), preserved
+        // verbatim (the real engine's observable behavior).
+        // The Properties()/Events() enumerations are the loud
+        // MetadataProperty/MetadataEvent deferral until that slice lands.
+        std::vector<const IMethod*> result;
+        for (const IProperty* prop : Properties())
+        {
+            const IMethod* getter = prop->Getter();
+            if (getter != nullptr && (!filter || filter(getter)))
+                result.push_back(getter);
+            const IMethod* setter = prop->Setter();
+            if (setter != nullptr && (!filter || filter(setter)))
+                result.push_back(setter);
+        }
+        for (const IEvent* ev : Events())
+        {
+            const IMethod* adder = ev->AddAccessor();
+            if (adder != nullptr && (!filter || filter(adder)))
+                result.push_back(adder);
+            const IMethod* remover = ev->RemoveAccessor();
+            if (remover != nullptr && (!filter || filter(remover)))
+                result.push_back(remover);
+            const IMethod* invoker = ev->InvokeAccessor();
+            if (invoker != nullptr && (!filter || filter(invoker)))
+                result.push_back(remover);  // the C# invoker-arm bug, faithful
+        }
+        return result;
+    }
+    // The C# `return GetMembersHelper.GetAccessors(this, filter, options);`
+    // -- the inherited walk.
+    std::vector<std::shared_ptr<const IMethod>> owned
+        = GetMembersHelper::GetAccessors(this, filter, options);
+    std::vector<const IMethod*> result;
+    result.reserve(owned.size());
+    for (std::shared_ptr<const IMethod>& m : owned)
+    {
+        result.push_back(m.get());
+        methodKeepAlives_.push_back(std::move(m));
+    }
+    return result;
+}
+
+// The C# `internal IEnumerable<IMethod> GetOverrides(MethodDefinitionHandle
+// method)` (MetadataTypeDefinition.cs lines 777-787): each MethodImpl row
+// whose MethodBody is the method, the row's MethodDeclaration resolved
+// through `module.ResolveMethod` over the declaring type's type parameters.
+std::vector<const IMethod*> MetadataTypeDefinition::GetOverrides(
+    std::uint32_t methodToken) const
+{
+    std::vector<const IMethod*> result;
+    GenericContext context(TypeParameters());
+    for (const Metadata::MetadataFile::MethodImplementationInfo& impl
+        : module_.MetadataFile()->GetMethodImplementations(methodToken))
+    {
+        result.push_back(
+            module_.ResolveMethod(impl.MethodDeclarationToken, context));
+    }
+    return result;
+}
+
+// The C# `internal bool HasOverrides(MethodDefinitionHandle method)` -- the
+// same row walk with the first-hit short-circuit.
+bool MetadataTypeDefinition::HasOverrides(std::uint32_t methodToken) const
+{
+    return !module_.MetadataFile()->GetMethodImplementations(methodToken)
+        .empty();
 }
 
 // The C# `IEnumerable<IType> DirectBaseTypes` (MetadataTypeDefinition.cs

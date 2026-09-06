@@ -90,9 +90,11 @@
 //      the custom-attribute value decoder); `ExtensionInfo`'s construction
 //      (the null arms are real: false when !HasExtensions or
 //      ExtensionMembers is off); `DefaultMemberName` (absent -- the port's
-//      ITypeDefinition omits the member) and `GetOverrides`/`HasOverrides`
-//      (absent -- internal members consumed by the future
-//      MetadataProperty/MetadataEvent slice).
+//      ITypeDefinition omits the member); `GetOverrides`/`HasOverrides`
+//      LANDED with the resolve-method slice (the MethodImpl-table walk over
+//      `MetadataModule::ResolveMethod`, consumed by `MetadataMethod`'s
+//      explicit-interface surface and the upcoming MetadataProperty /
+//      MetadataEvent slice).
 
 #pragma once
 
@@ -210,6 +212,29 @@ public:
     std::vector<const IMethod*> GetAccessors(
         std::function<bool(const IMethod*)> filter,
         GetMemberOptions options) const override;
+
+    // --- The C# internal GetOverrides region (MetadataTypeDefinition.cs
+    // lines 776-800) -- the MethodImpl-table walk behind
+    // `MetadataMethod.IsExplicitInterfaceImplementation` /
+    // `ExplicitlyImplementedInterfaceMembers`. PUBLIC in the port (the
+    // tests pin the surface directly, the probe-equivalent access --
+    // the SyntheticWpfModule public-nested-names precedent). The row
+    // walk is the port's `MetadataFile::GetMethodImplementations`
+    // (the declaring-type's Class-column range filtered by
+    // `MethodBody == handle`, the C# `td.GetMethodImplementations()`
+    // loop condition inlined).
+    // The C# `internal IEnumerable<IMethod> GetOverrides(
+    // MethodDefinitionHandle method)`: each MethodImpl row whose
+    // MethodBody is the method, resolved through
+    // `module.ResolveMethod(impl.MethodDeclaration, new
+    // GenericContext(this.TypeParameters))`. The resolved methods are
+    // owned by the module (the entity caches and the resolve-method
+    // registries).
+    std::vector<const IMethod*> GetOverrides(
+        std::uint32_t methodToken) const;
+    // The C# `internal bool HasOverrides(MethodDefinitionHandle method)`
+    // -- the empty-walk short-circuit.
+    bool HasOverrides(std::uint32_t methodToken) const;
 
     // The C# `IEnumerable<IType> DirectBaseTypes` -- the Extends resolution
     // through `module.ResolveType` (the type's OWN attribute rows feed the
