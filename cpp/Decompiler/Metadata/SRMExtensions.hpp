@@ -184,6 +184,18 @@ std::uint32_t GetAttributeType(const MetadataFile& metadata,
 bool HasKnownAttribute(const MetadataFile& metadata, std::uint32_t entityToken,
                        TypeSystem::KnownAttribute attribute);
 
+// The C# `internal static bool IsKnownAttribute(this SRM.CustomAttribute attr,
+// MetadataReader metadata, KnownAttribute attrType)` (line 634):
+// `attr.GetAttributeType(metadata).IsKnownType(metadata, attrType)` -- ONE
+// attribute ROW's classification (the per-row form HasKnownAttribute loops
+// over); the GetAttributeType throw propagates (no catch here). The port takes
+// the row's own token (the GetCustomAttribute read convention). Exported for
+// the DecimalConstantHelper row walk (the C# internal-extension surface the
+// port exposes alongside HasKnownAttribute).
+bool IsKnownAttribute(const MetadataFile& metadata,
+                      std::uint32_t attributeToken,
+                      TypeSystem::KnownAttribute attribute);
+
 // The C# `public static bool IsValueType(this TypeDefinition typeDefinition,
 // MetadataReader reader)` (SRMExtensions.cs line 64): the Extends column is
 // System.Enum, or it is System.ValueType and this type is not System.Enum

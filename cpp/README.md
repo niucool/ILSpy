@@ -101,13 +101,24 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   over the real mscorlib `ValueTuple` definitions, the dynamic/native/nullability
   index walks, the KeepModifiers/typeChildrenOnly/no-options/accumulation/
   additionalAttributes arms, and the PDB seeding). STARTED
-  (the member entity
-  family (`MetadataField`/`MetadataMethod`/`MetadataProperty`/
-  `MetadataEvent`) and interning remain; `MetadataModule.ResolveType`
-  (the top-byte table dispatch + the `ApplyAttributeTypeVisitor` wrap)
-  and `MetadataTypeDefinition.DirectBaseTypes` LANDED, gold-pinned
-  against the real engine, together with the `ParameterizedType`
-  reflection-name reconciliation to the C# `[[...]]` geometry).
+  (the member entity family remains: `MetadataMethod`/
+  `MetadataProperty`/`MetadataEvent` and interning; `MetadataModule.
+  ResolveType` (the top-byte table dispatch + the
+  `ApplyAttributeTypeVisitor` wrap) and `MetadataTypeDefinition.
+  DirectBaseTypes` LANDED, gold-pinned against the real engine, together
+  with the `ParameterizedType` reflection-name reconciliation to the C#
+  `[[...]]` geometry; and `MetadataField` LANDED -- the first member
+  entity, with its `DecimalConstantHelper` (the [DecimalConstantAttribute]
+  const decode incl. the scale-29 ArgumentOutOfRange that escapes both
+  `GetConstantValue` arms), the `MetadataModule.GetDefinitionField`
+  per-row entity cache, the `IsFieldVisible`/`IncludeInternalMembers`
+  visibility filter (`OnlyPublicAPI` drops the non-public rows), and
+  `MetadataTypeDefinition.Fields` with the `GetFields`
+  `IgnoreInheritedMembers` short-circuit arm -- gold-pinned against the
+  real engine with the whole-corpus FNV-1a-64 digests over EVERY field of
+  mscorlib (14717 fields) and System.dll (15896 fields), both
+  byte-exact, plus the crafted `MfSynth.dll` manifest covering every
+  crafted arm).
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with

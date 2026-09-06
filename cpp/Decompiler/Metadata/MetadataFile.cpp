@@ -211,6 +211,10 @@ std::uint32_t MetadataFile::TypeDefCount() const noexcept {
     return IsValid() ? impl_->db->TypeDef.size() : 0;
 }
 
+std::uint32_t MetadataFile::FieldCount() const noexcept {
+    return IsValid() ? impl_->db->Field.size() : 0;
+}
+
 std::uint32_t MetadataFile::TypeRefCount() const noexcept {
     return IsValid() ? impl_->db->TypeRef.size() : 0;
 }

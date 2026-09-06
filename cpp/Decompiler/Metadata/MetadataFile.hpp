@@ -322,6 +322,9 @@ public:
 
     // Row count of the TypeDef table.
     std::uint32_t TypeDefCount() const noexcept;
+    // The Field table row count (the `MetadataModule` field entity cache
+    // sizes itself over it -- the TypeDefCount precedent).
+    std::uint32_t FieldCount() const noexcept;
 
     // Row count of the TypeRef table (0x01) -- the scan bound for callers
     // that locate TypeRef rows by name. 0 for an invalid file; never throws.

@@ -285,6 +285,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/MetadataModule_Test.cpp
     Decompiler/TypeSystem/MetadataModuleResolution_Test.cpp
     Decompiler/TypeSystem/MetadataTypeDefinition_Test.cpp
+    Decompiler/TypeSystem/MetadataField_Test.cpp
     Decompiler/TypeSystem/MinimalCorlib_Test.cpp
     Decompiler/TypeSystem/ResolveType_Test.cpp
     Decompiler/TypeSystem/TypeProvider_Test.cpp

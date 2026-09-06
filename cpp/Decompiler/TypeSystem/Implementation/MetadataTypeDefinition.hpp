@@ -73,12 +73,13 @@
 //      nullable-annotated assemblies such as CoreLib).
 //  (e) DEFERRED members (each a loud `std::logic_error` naming the gating
 //      machinery, or absent with this note where the port's interface omits
-//      the member): the member family `Members`/`Fields`/`Methods`/
-//      `Properties`/`Events` (the `MetadataField`/`MetadataMethod`/
-//      `MetadataProperty`/`MetadataEvent` classes) and the IType-level
-//      member enumerations routed over them (`GetMembers` etc. -- the Void
-//      early-exit arms and the NestedTypes-only short-circuit arm ARE
-//      real); `GetAttributes`/`HasAttribute`/`GetAttribute`
+//      the member): the member family `Members`/`Methods`/`Properties`/
+//      `Events` (the `MetadataMethod`/`MetadataProperty`/`MetadataEvent`
+//      classes) and the IType-level member enumerations routed over them
+//      (`GetMembers` etc. -- the Void early-exit arms and the
+//      NestedTypes-only short-circuit arm ARE real; `Fields` LANDED over the
+//      `MetadataField` family, together with the `GetFields` bit-test
+//      short-circuit arm); `GetAttributes`/`HasAttribute`/`GetAttribute`
 //      (AttributeListBuilder + the custom-attribute value decoder);
 //      `ExtensionInfo`'s construction (the null arms are real: false when
 //      !HasExtensions or ExtensionMembers is off); `IsRecord` (the Methods
@@ -174,7 +175,9 @@ public:
         GetMemberOptions options) const override;
     // The C# member enumerations: the `Kind == Void` early exit (the empty
     // list, real) precedes every routed arm -- the routed arms need the
-    // member family (the deferral, convention (e)).
+    // member family (the deferral, convention (e)); the `GetFields`
+    // `IgnoreInheritedMembers` bit-test short-circuit over `Fields` is
+    // REAL (the `MetadataField` family landed).
     std::vector<const IMethod*> GetConstructors(
         std::function<bool(const IMethod*)> filter,
         GetMemberOptions options) const override;
@@ -246,9 +249,14 @@ public:
 
     // --- ITypeDefinition ---
     std::vector<const ITypeDefinition*> NestedTypes() const override;
-    // DEFERRED (convention (e)): the MetadataField/MetadataMethod/
-    // MetadataProperty/MetadataEvent family.
+    // DEFERRED (convention (e)): the MetadataMethod/MetadataProperty/
+    // MetadataEvent family (`Members` concatenates all four lists).
     std::vector<const IMember*> Members() const override;
+    // The C# `IEnumerable<IField> Fields`: the TypeDef's Field-list rows
+    // in row order, filtered through `module.IsVisible` (the OnlyPublicAPI
+    // option drops the non-public rows), each resolved through the
+    // module's per-row field entity cache; the `LazyInit` cache with the
+    // `Uncached` bypass (the lazy `fields_` member).
     std::vector<const IField*> Fields() const override;
     std::vector<const IMethod*> Methods() const override;
     std::vector<const IProperty*> Properties() const override;
@@ -301,6 +309,12 @@ private:
     // `directBaseTypes` field -- `LazyInit.GetOrSet`, NO `Uncached` bypass:
     // the C# caches the list unconditionally); engaged state = read.
     mutable std::optional<std::vector<ITypePtr>> directBaseTypes_;
+
+    // The lazily-loaded `fields` cache (the C# `IField[] fields` field,
+    // `LazyInit.GetOrSet` with the `Uncached` BYPASS -- the fresh list
+    // per read under the option; the port's by-value vector reuses the
+    // engaged-state-as-read shape).
+    mutable std::optional<std::vector<const IField*>> fields_;
 };
 
 } // namespace ILSpy::Decompiler::TypeSystem::Implementation

@@ -635,17 +635,6 @@ bool IsKnownTypeCore(const MetadataFile& metadata, std::uint32_t entityToken,
     return ns == knownType.Namespace();
 }
 
-// The C# `internal static bool IsKnownAttribute(this SRM.CustomAttribute attr,
-// MetadataReader metadata, KnownAttribute attrType)` (line 634):
-// `attr.GetAttributeType(metadata).IsKnownType(metadata, attrType)` -- the
-// GetAttributeType throw propagates (no catch here).
-bool IsKnownAttribute(const MetadataFile& metadata,
-                      std::uint32_t attributeToken,
-                      TypeSystem::KnownAttribute attribute) {
-    return IsKnownTypeCore(metadata, GetAttributeType(metadata, attributeToken),
-                           TypeSystem::GetTypeName(attribute));
-}
-
 } // namespace
 
 // The C# `public static bool IsKnownType(this EntityHandle handle,
@@ -701,6 +690,20 @@ std::uint32_t GetAttributeType(const MetadataFile& metadata,
                 "Unexpected token kind for attribute constructor: "
                 + HandleKindName(row->ConstructorToken >> 24));
     }
+}
+
+// The C# `internal static bool IsKnownAttribute(this SRM.CustomAttribute attr,
+// MetadataReader metadata, KnownAttribute attrType)` (line 634):
+// `attr.GetAttributeType(metadata).IsKnownType(metadata, attrType)` -- the
+// GetAttributeType throw propagates (no catch here). Exported (moved out of
+// the file-local anonymous namespace): the DecimalConstantHelper row walk
+// drives it directly (the C# internal-extension surface the port exposes
+// alongside HasKnownAttribute).
+bool IsKnownAttribute(const MetadataFile& metadata,
+                      std::uint32_t attributeToken,
+                      TypeSystem::KnownAttribute attribute) {
+    return IsKnownTypeCore(metadata, GetAttributeType(metadata, attributeToken),
+                           TypeSystem::GetTypeName(attribute));
 }
 
 // The C# `public static bool HasKnownAttribute(this

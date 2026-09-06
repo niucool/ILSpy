@@ -697,11 +697,13 @@ TEST(MetadataTypeDefinitionTest, DeferralContracts)
     const TS::ITypeDefinition* string_ = f.Type("System", "String");
     ASSERT_NE(string_, nullptr);
 
-    // The member family, the attribute snapshot, and the record scan are
-    // the loud deferrals of this slice (DirectBaseTypes landed with the
-    // ResolveType pair -- the ResolveType_Test suite pins it).
+    // The method/property/event members, the attribute snapshot, and the
+    // record scan are the loud deferrals of this slice (DirectBaseTypes
+    // landed with the ResolveType pair -- the ResolveType_Test suite pins
+    // it; Fields landed with the MetadataField family -- the
+    // MetadataField_Test suite pins it).
     EXPECT_THROW(string_->Members(), std::logic_error);
-    EXPECT_THROW(string_->Fields(), std::logic_error);
+    EXPECT_EQ(string_->Fields().size(), 8u);
     EXPECT_THROW(string_->Methods(), std::logic_error);
     EXPECT_THROW(string_->Properties(), std::logic_error);
     EXPECT_THROW(string_->Events(), std::logic_error);

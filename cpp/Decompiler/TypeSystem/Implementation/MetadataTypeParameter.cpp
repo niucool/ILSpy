@@ -164,7 +164,7 @@ std::vector<const IAttribute*> MetadataTypeParameter::GetAttributes() const
 {
     throw std::logic_error(
         "MetadataTypeParameter::GetAttributes: AttributeListBuilder is not "
-        "yet ported (gated on the custom-attribute value decoder)");
+        "yet ported");
 }
 
 // The C# `public override bool HasUnmanagedConstraint` (convention (c)): the

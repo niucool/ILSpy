@@ -27,9 +27,14 @@
 // with real `MetadataTypeDefinition` entities (the sibling in
 // Implementation/MetadataTypeDefinition.hpp), and `TypeDefinitions` /
 // `TopLevelTypeDefinitions` / `MetadataNamespace::Types` enumerate them.
-// The four sibling entity classes (`MetadataField` / `MetadataMethod` /
-// `MetadataProperty` / `MetadataEvent`) and their `GetDefinition`
-// overloads land as the following slices; the members that need them stay
+// The FIELD entity slice landed: `GetDefinitionField` fills the `fieldDefs`
+// cache with real `MetadataField` entities (the sibling in
+// Implementation/MetadataField.hpp, with its DecimalConstantHelper), and
+// the `IsFieldVisible` / `IncludeInternalMembers` visibility filter the
+// `MetadataTypeDefinition::Fields` enumeration consumes. The remaining
+// sibling entity classes (`MetadataMethod` / `MetadataProperty` /
+// `MetadataEvent`) and their `GetDefinition` overloads land as the
+// following slices; the members that need them stay
 // loud `std::logic_error` deferrals in the meantime.
 //
 // KEY PORT CONVENTIONS:
@@ -94,19 +99,21 @@
 //      `GetInternalsVisibleTo` / `InternalsVisibleTo`'s friend-list decode and the
 //      ctor's `NullableContext` / `FindMinimumAccessibilityForNRT` (the
 //      AttributeListBuilder slice over the landed CustomAttributeDecoder); the lazy
-//      `typeDefs`/`fieldDefs`/`methodDefs`/`propertyDefs`/`eventDefs`/
-//      `referencedAssemblies` entity caches (convention (e));
+//      `methodDefs`/`propertyDefs`/`eventDefs` entity caches (convention (e);
+//      the `typeDefs`/`fieldDefs`/`referencedAssemblies` caches LANDED);
 //      `DecodeMethodSignature`/`DecodeLocalSignature`; the `knownAttributeTypes`
-//      / `knownAttributes` attribute-type caches; the `IsVisible(FieldAttributes)`
-//      / `IsVisible(MethodAttributes)` / `IncludeInternalMembers` /
-//      `ShouldDecodeNullableAttributes` / `OptionsForEntity` visibility filter
-//      (consumed only by the entity classes); and the internal
+//      / `knownAttributes` attribute-type caches; the `IsVisible(MethodAttributes)`
+//      filter and the `ShouldDecodeNullableAttributes` / `OptionsForEntity`
+//      NRT-visibility filter (consumed only by the entity classes; the
+//      `IsVisible(FieldAttributes)` / `IncludeInternalMembers` half LANDED with
+//      the field slice); and the internal
 //      `GetString(StringHandle)` helper (the port's NamespaceDefinition::Name
 //      already stores the resolved name, so MetadataNamespace needs no such
 //      helper).
 
 #pragma once
 
+#include "Decompiler/TypeSystem/IField.hpp"
 #include "Decompiler/TypeSystem/IModule.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/TypeSystemOptions.hpp"
@@ -151,6 +158,7 @@ namespace Implementation { class MetadataNamespace; }
 // destructor and the cache fills are out-of-line in the .cpp where it is
 // complete).
 namespace Implementation { class MetadataTypeDefinition; }
+namespace Implementation { class MetadataField; }
 
 // Forward declaration of the signature provider (the sibling TypeProvider.hpp):
 // the `typeProvider_` member holds it by `unique_ptr`, complete with the
@@ -200,6 +208,28 @@ public:
     // the row read inside the ctor throws instead). The returned definition is
     // owned by this module (the cache slot or the keep-alive registry).
     const ITypeDefinition* GetDefinition(std::uint32_t typeDefinitionToken) const;
+
+    // The C# `public IField GetDefinition(FieldDefinitionHandle handle)`
+    // (MetadataModule.cs lines 236-252) -- the FIELD entity cache, the first
+    // member-entity cache (the MetadataField family; the MetadataMethod /
+    // MetadataProperty / MetadataEvent siblings follow). The C++ name is
+    // DISTINCT (a C++-only disambiguation with no C# counterpart): the C#
+    // overloads `GetDefinition` on the HANDLE TYPE, but the port's raw-token
+    // convention would give both overloads the same `(std::uint32_t)` signature.
+    // Same conventions as the TypeDef arm (the nil token -> null; the CACHED arm
+    // range-checks against the `fieldDefs` slot count; the UNCACHED arm
+    // constructs without a range check, the keep-alive registry owning the
+    // instance); the returned field is owned by this module.
+    const IField* GetDefinitionField(std::uint32_t fieldToken) const;
+
+    // --- Visibility Filter (MetadataModule.cs lines 971-993) ---
+    // The C# `internal bool IncludeInternalMembers`.
+    bool IncludeInternalMembers() const;
+    // The C# `internal bool IsVisible(FieldAttributes att)` -- the port takes
+    // the RAW flags column (masked internally over the FieldAccessMask); the
+    // name carries the `Field` qualifier because the C#'s MethodAttributes twin
+    // (the MetadataMethod slice) will need the distinct C++ spelling too.
+    bool IsFieldVisible(std::uint32_t fieldAttributes) const;
 
     // --- ISymbol ---
     // `SymbolKind` return type GLOBALLY QUALIFIED (the D372 name-hiding crux).
@@ -353,6 +383,17 @@ private:
     // SyntheticWpfModule mutable-registry precedent).
     mutable std::vector<std::shared_ptr<Implementation::MetadataTypeDefinition>>
         uncachedDefs_;
+
+    // The C# `readonly MetadataField[] fieldDefs` (allocated in the ctor unless
+    // the Uncached option is set; index = the 1-based Field row number, slot 0
+    // unused): each slot OWNS its entity (the same `shared_ptr` convention as
+    // `typeDefs_` -- the C# GC root), nullptr until lazily filled.
+    mutable std::vector<std::shared_ptr<Implementation::MetadataField>>
+        fieldDefs_;
+    // The field cache's UNCACHED-arm keep-alive registry (the `uncachedDefs_`
+    // precedent).
+    mutable std::vector<std::shared_ptr<Implementation::MetadataField>>
+        uncachedFieldDefs_;
 
     // The C# `readonly IModule[] referencedAssemblies` (allocated in the ctor
     // unless the Uncached option is set; index = the 1-based AssemblyRef row

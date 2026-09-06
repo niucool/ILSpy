@@ -418,13 +418,31 @@ std::vector<const IField*> MetadataTypeDefinition::GetFields(
     std::function<bool(const IField*)> filter,
     GetMemberOptions options) const
 {
-    (void)filter;
-    (void)options;
+    // The C# `if (Kind == TypeKind.Void) return EmptyList<IField>.Instance;`.
     if (kind_ == TypeKind::Void)
         return {};
+    // The C# `if ((options & GetMemberOptions.IgnoreInheritedMembers) ==
+    // GetMemberOptions.IgnoreInheritedMembers) return GetFiltered(this.Fields,
+    // filter);` -- a BIT TEST (not the NestedTypes equality form), so
+    // `IgnoreInheritedMembers | ReturnMemberDefinitions` takes this arm too.
+    // `GetFiltered` is `filter == null ? input : ApplyFilter(input, filter)`.
+    if ((options
+         & ::ILSpy::Decompiler::TypeSystem::GetMemberOptions::
+             IgnoreInheritedMembers)
+        == ::ILSpy::Decompiler::TypeSystem::GetMemberOptions::
+            IgnoreInheritedMembers)
+    {
+        std::vector<const IField*> result;
+        for (const IField* field : Fields())
+        {
+            if (!filter || filter(field))
+                result.push_back(field);
+        }
+        return result;
+    }
     throw std::logic_error(
-        "MetadataTypeDefinition::GetFields: the MetadataField entity family "
-        "is not yet ported");
+        "MetadataTypeDefinition::GetFields: GetMembersHelper is not yet "
+        "routed (gated on the member entity family)");
 }
 
 std::vector<const IEvent*> MetadataTypeDefinition::GetEvents(
@@ -692,9 +710,38 @@ std::vector<const IMember*> MetadataTypeDefinition::Members() const
 
 std::vector<const IField*> MetadataTypeDefinition::Fields() const
 {
-    throw std::logic_error(
-        "MetadataTypeDefinition::Fields: the MetadataField entity family is "
-        "not yet ported");
+    // The C# `var fields = LazyInit.VolatileRead(ref this.fields); if (fields
+    // != null) return fields;` (the Uncached option bypasses the cache -- the
+    // fresh list per read).
+    if (fields_)
+        return *fields_;
+    const Metadata::MetadataFile* metadata = module_.MetadataFile();
+    // The C# `var fieldCollection = metadata.GetTypeDefinition(handle)
+    // .GetFields();` -- the TypeDef's Field-list range in row order.
+    std::vector<Metadata::FieldInfo> fieldCollection =
+        metadata->GetFields(handle_);
+    std::vector<const IField*> fieldList;
+    fieldList.reserve(fieldCollection.size());
+    for (const auto& h : fieldCollection)
+    {
+        // The C# `var @field = metadata.GetFieldDefinition(h); var attr =
+        // @field.Attributes; if (module.IsVisible(attr)) fieldList.Add(
+        // module.GetDefinition(h));` -- the per-row visibility filter, then
+        // the module's per-row entity cache.
+        if (module_.IsFieldVisible(
+                metadata->GetFieldAttributes(h.Token)))
+        {
+            fieldList.push_back(module_.GetDefinitionField(h.Token));
+        }
+    }
+    // The C# `if ((module.TypeSystemOptions & TypeSystemOptions.Uncached)
+    // != 0) return fieldList;`.
+    if ((module_.TypeSystemOptions()
+         & ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::Uncached)
+        != ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::None)
+        return fieldList;
+    fields_ = std::move(fieldList);
+    return *fields_;
 }
 
 std::vector<const IMethod*> MetadataTypeDefinition::Methods() const

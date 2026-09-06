@@ -30,6 +30,7 @@
 #include "Decompiler/TypeSystem/IModule.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataTypeDefinition.hpp"
+#include "Decompiler/TypeSystem/Implementation/MetadataField.hpp"
 #include "Decompiler/TypeSystem/Implementation/MetadataNamespace.hpp"
 #include "Decompiler/TypeSystem/StringComparer.hpp"
 #include "Decompiler/TypeSystem/TypeProvider.hpp"
@@ -159,6 +160,9 @@ MetadataModule::MetadataModule(const ICompilation& compilation,
         == ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::None)
     {
         typeDefs_.resize(metadataFile_->TypeDefCount() + 1);
+        // The C# `fieldDefs = new MetadataField[metadata.FieldDefinitions.Count
+        // + 1]` (the member-entity caches, this slice).
+        fieldDefs_.resize(metadataFile_->FieldCount() + 1);
         referencedAssemblies_.resize(metadataFile_->CorTableRowCount(
             Metadata::CorTableIndex::AssemblyRef) + 1);
     }
@@ -228,6 +232,65 @@ const ITypeDefinition* MetadataModule::GetDefinition(
         slot = std::make_shared<Implementation::MetadataTypeDefinition>(
             *this, typeDefinitionToken);
     return slot.get();
+}
+
+// The C# `public IField GetDefinition(FieldDefinitionHandle handle)`
+// (MetadataModule.cs lines 236-252): the FIELD entity cache -- the first
+// member-entity cache (the MetadataField family). Convention (e): the nil
+// token returns null; the CACHED arm range-checks (a row past the Field table
+// throws the same `Handle with invalid row number.`) and lazily fills the
+// `fieldDefs` slot per 1-based row; the UNCACHED arm constructs without any
+// range check (the C# shape: the row read inside the ctor throws instead), the
+// keep-alive registry owning the instance. NOTE the C# has NO
+// `Debug.Assert(row != 0)` on the field arm (the TypeDef arm's assert exists
+// only there).
+const IField* MetadataModule::GetDefinitionField(
+    std::uint32_t fieldToken) const
+{
+    std::uint32_t row = fieldToken & 0x00FFFFFFu;
+    if (row == 0)
+        return nullptr;
+    if (fieldDefs_.empty())
+    {
+        auto field = std::make_shared<Implementation::MetadataField>(
+            *this, fieldToken);
+        const IField* result = field.get();
+        uncachedFieldDefs_.push_back(std::move(field));
+        return result;
+    }
+    if (row >= fieldDefs_.size())
+        HandleOutOfRange();
+    std::shared_ptr<Implementation::MetadataField>& slot = fieldDefs_[row];
+    if (slot == nullptr)
+        slot = std::make_shared<Implementation::MetadataField>(
+            *this, fieldToken);
+    return slot.get();
+}
+
+// --- Visibility Filter (MetadataModule.cs lines 971-993) ---
+
+// The C# `internal bool IncludeInternalMembers =>
+// (options & TypeSystemOptions.OnlyPublicAPI) == 0`.
+bool MetadataModule::IncludeInternalMembers() const
+{
+    return (options_
+            & ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::
+                OnlyPublicAPI)
+        == ::ILSpy::Decompiler::TypeSystem::TypeSystemOptions::None;
+}
+
+// The C# `internal bool IsVisible(FieldAttributes att)`:
+// `att &= FieldAttributes.FieldAccessMask; return IncludeInternalMembers
+// || att == FieldAttributes.Public || att == FieldAttributes.Family ||
+// att == FieldAttributes.FamORAssem;` -- the raw ECMA visibility bits (the
+// port takes the raw masked uint32; the PrivateScope/zero value and the
+// Assembly/FamANDAssem kinds are internal-only).
+bool MetadataModule::IsFieldVisible(std::uint32_t fieldAttributes) const
+{
+    std::uint32_t att = fieldAttributes & 0x0007u;  // FieldAccessMask
+    return IncludeInternalMembers() || att == 0x0006u   // Public
+        || att == 0x0004u                                // Family
+        || att == 0x0005u;                               // FamORAssem
 }
 
 // --- Resolve Module (MetadataModule.cs lines 305-368) ---

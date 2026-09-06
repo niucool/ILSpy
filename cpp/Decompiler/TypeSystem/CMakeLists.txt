@@ -34,6 +34,8 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Implementation/MetadataNamespace.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Implementation/MinimalCorlib.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Implementation/MetadataTypeDefinition.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Implementation/DecimalConstantHelper.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Implementation/MetadataField.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Implementation/MetadataTypeParameter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/InheritanceHelper.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ReflectionHelper.cpp
