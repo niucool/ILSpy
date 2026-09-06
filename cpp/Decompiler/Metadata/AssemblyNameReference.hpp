@@ -25,15 +25,18 @@
 // parses its default BAML reference list; both consume `Parse`/`Name`/`FullName`
 // only.
 //
-// The remaining members of the C# file are documented deferrals, unported until
-// a ported consumer reaches them:
-//   * `ResolutionException` and `IAssemblyReferenceClassifier` /
-//     `AssemblyReferenceClassifier` (the UniversalAssemblyResolver / GAC lookup
-//     machinery -- the resolver's enums and `ParseTargetFramework` classifier
-//     landed with the `DotNetCorePathFinder` slice; the class body itself
-//     remains a following slice),
+// The remaining members of the C# file stay documented deferrals, unported
+// until a ported consumer reaches them:
 //   * `TypeReferenceMetadata` and `ExportedTypeMetadata` (the classifier's
-//     lazy per-reference row collections).
+//     lazy per-reference row collections -- consumed by the resolver's
+//     target-framework dispatch, which lands with the instance surface of
+//     `UniversalAssemblyResolver`).
+//
+// `ResolutionException`, `IAssemblyReferenceClassifier`, and
+// `AssemblyReferenceClassifier` (the other members of the C# file's first
+// hundred lines) ARE ported below: they are the `UniversalAssemblyResolver`
+// base class and its `throwOnError` exception, landed with the resolver's
+// GAC-machinery slice (the static half of UniversalAssemblyResolver.cs).
 //
 // The metadata-backed `AssemblyReference` row wrapper class (the third
 // `IAssemblyReference` implementation, AssemblyReferences.cs lines 219-330)
@@ -59,6 +62,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -118,6 +122,100 @@ public:
     // The C# `MetadataFile? ResolveModule(MetadataFile mainModule, string moduleName)`.
     virtual const MetadataFile* ResolveModule(
         const MetadataFile& mainModule, const std::string& moduleName) const = 0;
+};
+
+// The C# `public sealed class ResolutionException : Exception`
+// (AssemblyReferences.cs lines 32-55) -- the exception the resolver's
+// `throwOnError` arms throw. The message carries `Environment.NewLine`
+// (CRLF on the Windows host the resolver machinery targets) and the
+// `resolvedPath ?? "<not found>"` fallback.
+//
+// Divergences:
+//  * The inner-exception chain does not port (`std::runtime_error` carries
+//    no inner; the message never renders it).
+//  * The ctor-1 message interpolates the reference's `ToString()`: for
+//    `AssemblyNameReference` that IS `FullName` (its override), so the port
+//    renders the interface's `FullName()` -- a divergence only for an
+//    implementation whose C# `ToString()` renders the class name (the
+//    metadata-backed `AssemblyReference`, whose message no ported caller
+//    renders).
+//  * The ctor-2 `mainModule` / `moduleName` null guards (`?? throw new
+//    ArgumentNullException`) are structurally unreachable through
+//    `std::string` parameters; the ctor-1 reference guard IS reachable (the
+//    pointer parameter) and throws before the message renders -- exactly
+//    the observable shape of the C#, where the base message renders first
+//    and the exception object is then discarded.
+class ResolutionException : public std::runtime_error {
+public:
+    // The C# `ResolutionException(IAssemblyReference? reference, string?
+    // resolvedPath, Exception? innerException)` (the null guards above; a
+    // null `reference` throws `std::invalid_argument` carrying the exact
+    // `ArgumentNullException` text).
+    ResolutionException(const IAssemblyReference* reference,
+        const std::optional<std::string>& resolvedPath);
+
+    // The C# `ResolutionException(string mainModule, string moduleName,
+    // string? resolvedPath, Exception? innerException)`.
+    ResolutionException(const std::string& mainModule, const std::string& moduleName,
+        const std::optional<std::string>& resolvedPath);
+
+    // The C# `IAssemblyReference? Reference` -- the non-owning reference the
+    // exception holds (the C# GC root; the port's pointer must outlive the
+    // exception, which holds at every throw site the ported resolver
+    // reaches: the caller-owned reference).
+    const IAssemblyReference* Reference() const { return reference_; }
+
+    // The C# `string? ModuleName` / `string? MainModuleFullPath` /
+    // `string? ResolvedFullPath` (null = the disengaged optional).
+    const std::optional<std::string>& ModuleName() const { return moduleName_; }
+    const std::optional<std::string>& MainModuleFullPath() const { return mainModuleFullPath_; }
+    const std::optional<std::string>& ResolvedFullPath() const { return resolvedFullPath_; }
+
+private:
+    const IAssemblyReference* reference_ = nullptr;
+    std::optional<std::string> moduleName_;
+    std::optional<std::string> mainModuleFullPath_;
+    std::optional<std::string> resolvedFullPath_;
+};
+
+// The C# `public interface IAssemblyReferenceClassifier` -- the GAC/shared
+// assembly classification surface `WholeProjectDecompiler`'s reference
+// handling consumes (the base class of `UniversalAssemblyResolver`).
+class IAssemblyReferenceClassifier {
+public:
+    virtual ~IAssemblyReferenceClassifier() = default;
+
+    // The C# `bool IsGacAssembly(IAssemblyReference reference)`.
+    virtual bool IsGacAssembly(const IAssemblyReference& reference) const = 0;
+
+    // The C# `bool IsSharedAssembly(IAssemblyReference reference,
+    // [NotNullWhen(true)] out string? runtimePack)` -- the out parameter as a
+    // reference; a null `runtimePack` is the disengaged optional.
+    virtual bool IsSharedAssembly(const IAssemblyReference& reference,
+        std::optional<std::string>& runtimePack) const = 0;
+};
+
+// The C# `public class AssemblyReferenceClassifier :
+// IAssemblyReferenceClassifier` (AssemblyReferences.cs lines 76-94). Both
+// virtuals are non-const in the C#; the port's interface marks them const
+// (the `IAssemblyResolver` convention).
+class AssemblyReferenceClassifier : public IAssemblyReferenceClassifier {
+public:
+    // The C# `public virtual bool IsGacAssembly(IAssemblyReference reference)`:
+    // `UniversalAssemblyResolver.GetAssemblyInGac(reference) != null`.
+    // Defined out-of-line in AssemblyNameReference.cpp -- the C# file pair's
+    // own circular reference (UniversalAssemblyResolver.cs references
+    // AssemblyReferences.cs and vice versa) resolves there.
+    bool IsGacAssembly(const IAssemblyReference& reference) const override;
+
+    // The C# `public virtual bool IsSharedAssembly(...)`:
+    // `runtimePack = null; return false;` -- the base implementation the
+    // resolver's override replaces.
+    bool IsSharedAssembly(const IAssemblyReference& reference,
+        std::optional<std::string>& runtimePack) const override {
+        runtimePack = std::nullopt;
+        return false;
+    }
 };
 
 // The C# `AssemblyNameReference : IAssemblyReference` -- a parsed assembly full

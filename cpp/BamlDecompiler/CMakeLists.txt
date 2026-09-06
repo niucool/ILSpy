@@ -97,7 +97,10 @@
 # HandlerMap.LookupHandler(RootNode.Type) -> Translate -> the passes -> the
 # result document with the AssemblyIdMap full names, the first x:Class name,
 # and the generated-member tokens; the C# constructor family's
-# BamlDecompilerTypeSystem/PEFile/resolver machinery is the Phase-7 gate).
+# BamlDecompilerTypeSystem/PEFile machinery is ported (Bdts landed); the
+# remaining piece is the `UniversalAssemblyResolver` INSTANCE surface
+# (the ctor + the Resolve/FindAssemblyFile walk -- its static GAC machinery
+# landed with the resolver slice), the `CreateTypeSystemFromFile` gate).
 
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Baml/BamlBinaryReader.cpp

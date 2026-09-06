@@ -45,11 +45,14 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `.deps.json` scenarios and the real dotnet install), the
   `ReferenceLoadInfo`/`UnresolvedAssemblyNameReference` diagnostics
   bookkeeping, and the `UniversalAssemblyResolver` enums +
-  `ParseTargetFramework` classifier (the resolver class body itself is the
-  next sub-slice), and an IL text
+  `ParseTargetFramework` classifier, and an IL text
   disassembler. DONE except:
-  WebCIL, the `UniversalAssemblyResolver` class body (the GAC handling and
-  the `Resolve`/`FindAssemblyFile` surface).
+  WebCIL, the `UniversalAssemblyResolver` instance surface (the ctor + the
+  `Resolve`/`FindAssemblyFile` walk; the class's static GAC machinery --
+  `GetGacPaths`/`GetAssemblyInGac`/`EnumerateGac`/`IsZeroOrAllOnes`/
+  `IsSpecialVersionOrRetargetable`/`GetAssemblyFile` over the
+  `AssemblyReferenceClassifier` base and `ResolutionException` -- landed
+  gold-pinned over this machine's real GAC).
 - **Phase 2** -- `Decompiler/TypeSystem/`: naming primitives (`TopLevelTypeName`,
   `FullTypeName`), `KnownTypeCode` (the full table -- 61 slots continuing
   System.TypeCode's numbering, `String`=18 with the value-17 hole the C# keeps),
@@ -318,9 +321,20 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `TargetRuntime`/`DecompilerRuntime` enums), gold-pinned against the real
   engine via the DncpfProbe probe over the 18 crafted `.deps.json`
   scenarios, the Path BCL matrix, and the real dotnet install.
+  The `UniversalAssemblyResolver` static GAC-machinery slice landed next
+  (the class-body static half: the `AssemblyReferenceClassifier` base and
+  `ResolutionException` prerequisites, `GetGacPaths`/`GetAssemblyInGac`/
+  `GetAssemblyFile`/`EnumerateGac` with the hand-rolled GAC folder-name
+  regex, and `IsZeroOrAllOnes`/`IsSpecialVersionOrRetargetable`),
+  gold-pinned against the real engine over this machine's real .NET
+  Framework 4.8 GAC (the 608-entry `EnumerateGac` snapshot digests
+  byte-exact; the crafted regex matrix pins the unanchored scan, the greedy
+  optional `v4.0_` prefix with its fallback, and the forced group lengths).
   The remaining `UniversalAssemblyResolver` gate for the `--decompile-baml`
-  CLI wiring is the resolver itself (the search-directory/GAC/
-  DotNetCorePathFinder walk consuming this slice's detection).
+  CLI wiring is the resolver's INSTANCE surface (the ctor + the
+  `Lazy<DotNetCorePathFinder>` wiring, the `IAssemblyResolver`
+  implementation, and the `FindAssemblyFileCore` target-framework dispatch
+  consuming this slice's detection).
 - **Phase 3** -- `Decompiler/IL/`: the ILAst instruction model (`OpCode` (101,
   verbatim from the generated `Instructions.cs`), `InstructionFlags`, `SlotInfo`,
   `StackType`, `ILVariable`, the `ILInstruction` strict-tree base with

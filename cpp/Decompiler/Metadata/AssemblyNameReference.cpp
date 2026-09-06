@@ -37,6 +37,7 @@
 #include "Decompiler/Disassembler/ReflectionAttributes.hpp"
 #include "Decompiler/Metadata/MetadataExtensions.hpp"
 #include "Decompiler/Metadata/MetadataFile.hpp"
+#include "Decompiler/Metadata/UniversalAssemblyResolver.hpp"
 #include "Decompiler/Util/Char.hpp"
 #include "Decompiler/Util/Sha1ForNonSecretPurposes.hpp"
 #include "Decompiler/Util/Utf.hpp"
@@ -384,6 +385,49 @@ AssemblyReference::GetPublicKeyToken() const
     }
     publicKeyToken_ = std::move(bytes);
     return publicKeyToken_;
+}
+
+// ---------------------------------------------------------------------------
+// ResolutionException and AssemblyReferenceClassifier (the
+// UniversalAssemblyResolver prerequisites).
+
+// The interpolation of the reference parameter in the ctor-1 message: the
+// `AssemblyNameReference.ToString()` override IS its `FullName`, so the
+// render routes through the interface's `FullName()` (the divergence note on
+// the class).
+ResolutionException::ResolutionException(const IAssemblyReference* reference,
+    const std::optional<std::string>& resolvedPath)
+    : std::runtime_error("Failed to resolve assembly: '"
+          + (reference != nullptr ? reference->FullName() : std::string())
+          + "'\r\nResolve result: "
+          + (resolvedPath ? *resolvedPath : std::string("<not found>"))),
+      reference_(reference),
+      resolvedFullPath_(resolvedPath) {
+    // The C# null guard (`this.Reference = reference ?? throw new
+    // ArgumentNullException(nameof(reference))`) runs AFTER the base ctor --
+    // the message is never observable for a null reference, so the guard
+    // here throws the same observable exception.
+    if (reference == nullptr) {
+        throw std::invalid_argument("Value cannot be null. (Parameter 'reference')");
+    }
+}
+
+ResolutionException::ResolutionException(const std::string& mainModule,
+    const std::string& moduleName, const std::optional<std::string>& resolvedPath)
+    : std::runtime_error("Failed to resolve module: '" + moduleName + " of " + mainModule
+          + "'\r\nResolve result: "
+          + (resolvedPath ? *resolvedPath : std::string("<not found>"))),
+      moduleName_(moduleName),
+      mainModuleFullPath_(mainModule),
+      resolvedFullPath_(resolvedPath) {
+    // The C# `mainModule ?? throw ...` / `moduleName ?? throw ...` guards:
+    // structurally unreachable through `std::string` parameters (the class
+    // divergence note).
+}
+
+bool AssemblyReferenceClassifier::IsGacAssembly(
+    const IAssemblyReference& reference) const {
+    return UniversalAssemblyResolver::GetAssemblyInGac(reference).has_value();
 }
 
 } // namespace ILSpy::Decompiler::Metadata
