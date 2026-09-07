@@ -26,6 +26,7 @@
 
 #include "Decompiler/IL/ILInstruction.hpp"
 #include "Decompiler/IL/Instructions/SimpleInstruction.hpp"
+#include "Decompiler/IL/Instructions/UnaryInstruction.hpp"
 #include "Decompiler/IL/StackTypeOf.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
@@ -173,6 +174,50 @@ protected:
         assert(i == 0 || i == 1);
         if (i == 0) { auto old = std::move(Target); Target = std::move(n); return old; }
         auto old = std::move(Value); Value = std::move(n); return old;
+    }
+};
+
+// localloc: allocate the argument's many bytes on the stack. One Argument child
+// (the byte count, inlineable). Result I (an unmanaged pointer);
+// DirectFlags = MayThrow (the C# LocAlloc.ComputeFlags). Port of the C#
+// `LocAlloc : UnaryInstruction` (Instructions.cs line 3340).
+//
+// This port's IL reader still decodes the raw `localloc` opcode as an LdNull
+// placeholder (the seed --csharp render's convention); tests drive this node by
+// hand and the future reader/seed reconcile slice wires it into the pipeline.
+class LocAlloc : public UnaryInstruction {
+public:
+    explicit LocAlloc(std::unique_ptr<ILInstruction> argument)
+        : UnaryInstruction(OpCode::LocAlloc, std::move(argument)) {}
+    InstructionFlags DirectFlags() const override { return InstructionFlags::MayThrow; }
+    StackType ResultType() const override { return StackType::I; }
+    void WriteTo(std::string& out) const override {
+        out += "localloc(";
+        if (Argument) Argument->WriteTo(out); else out += "(null)";
+        out += ')';
+    }
+};
+
+// locallocspan (the ExpressionTransforms localloc + newobj Span<T> fold): allocate
+// a block of the argument's many bytes on the stack wrapped in the type operand
+// (Span<T> or ReadOnlySpan<T>). One Argument child (the count, inlineable) plus the
+// non-child Type field. Result O; DirectFlags = MayThrow (the C#
+// LocAllocSpan.ComputeFlags). Port of the C# `LocAllocSpan : UnaryInstruction`
+// (Instructions.cs line 3371); the Type operand is the C# `IType type` field.
+// The same reader placeholder note as LocAlloc applies.
+class LocAllocSpan : public UnaryInstruction {
+public:
+    TypeSystem::ITypePtr Type;
+    LocAllocSpan(std::unique_ptr<ILInstruction> argument, TypeSystem::ITypePtr type)
+        : UnaryInstruction(OpCode::LocAllocSpan, std::move(argument)), Type(std::move(type)) {}
+    InstructionFlags DirectFlags() const override { return InstructionFlags::MayThrow; }
+    StackType ResultType() const override { return StackType::O; }
+    void WriteTo(std::string& out) const override {
+        out += "locallocspan ";
+        out += Type ? Type->ReflectionName() : std::string("?");
+        out += '(';
+        if (Argument) Argument->WriteTo(out); else out += "(null)";
+        out += ')';
     }
 };
 

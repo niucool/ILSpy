@@ -41,6 +41,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/SizeOfExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/StackAllocExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TypeOfExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
@@ -64,6 +65,9 @@
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Instructions/PinnedRegion.hpp"
 #include "Decompiler/IL/ILTypeExtensions.hpp"
+#include "Decompiler/IL/PointerArithmeticOffset.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
@@ -152,6 +156,23 @@ bool IsZeroConstant(const std::any& value)
 const Sem::ResolveResult* ResolveResultAnnotation(const Expression& expr)
 {
     return expr.Annotation<Sem::ResolveResult>();
+}
+
+// The C# `inst.UnwrapConv(kind)` (ILInstruction, Instructions.cs): recursively
+// descend Conv chains of the requested ConversionKind. Mirrors the file-local
+// UnwrapConv copies in the Transforms (the "copied next to its consumer"
+// convention) -- this copy backs TranslateLocAlloc's sizeof matching.
+const IL::ILInstruction* UnwrapConv(const IL::ILInstruction* inst,
+                                    IL::ConversionKind kind)
+{
+    while (inst && inst->Op == IL::OpCode::Conv)
+    {
+        auto* conv = static_cast<const IL::Conv*>(inst);
+        if (conv->Kind != kind)
+            break;
+        inst = conv->Argument.get();
+    }
+    return inst;
 }
 
 
@@ -379,6 +400,10 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitNewArr(inst, context);
         case IL::OpCode::Conv:
             return VisitConv(inst, context);
+        case IL::OpCode::LocAlloc:
+            return VisitLocAlloc(inst, context);
+        case IL::OpCode::LocAllocSpan:
+            return VisitLocAllocSpan(inst, context);
         default:
             return Default(inst, context);
     }
@@ -1525,6 +1550,180 @@ TranslatedExpression ExpressionBuilder::PrepareArithmeticArgument(TranslatedExpr
         arg = arg.ConvertTo(*targetType, *this);
     }
     return arg;
+}
+
+// ---------------------------------------------------------------------------
+// The stackalloc arms (the C# lines 517-579 and 1506-1592)
+
+// The C# `TranslatedExpression? GetPointerArithmeticOffset(ILInstruction
+// byteOffsetInst, TranslatedExpression byteOffsetExpr, IType
+// pointerElementType, bool checkForOverflow, bool unwrapZeroExtension)`
+// (ExpressionBuilder.cs lines 1516-1531): run PointerArithmeticOffset.Detect
+// over the byte-count instruction and translate the detected element-count
+// instruction. When the detected instruction is the input itself the already
+// translated byteOffsetExpr is reused; otherwise the freshly translated
+// expression carries the ORIGINAL byte-offset instruction as its annotation
+// (the C# removes the fresh constant's own annotation first).
+std::optional<TranslatedExpression> ExpressionBuilder::GetPointerArithmeticOffset(
+    IL::ILInstruction* byteOffsetInst, TranslatedExpression byteOffsetExpr,
+    const TS::IType* pointerElementType, bool checkForOverflow, bool unwrapZeroExtension)
+{
+    IL::PointerArithmeticOffset::DetectOutcome countOffsetInst =
+        IL::PointerArithmeticOffset::Detect(
+            byteOffsetInst, pointerElementType, checkForOverflow, unwrapZeroExtension);
+    if (!countOffsetInst)
+        return std::nullopt;
+    if (countOffsetInst.Inst == byteOffsetInst)
+    {
+        return EnsureIntegerType(std::move(byteOffsetExpr));
+    }
+    else
+    {
+        TranslatedExpression expr = Translate(
+            const_cast<IL::ILInstruction*>(countOffsetInst.Inst));
+        // Keep original ILInstruction as annotation.
+        expr.Expression()->RemoveAnnotations<ILInstructionAnnotation>();
+        return EnsureIntegerType(WithILInstruction(expr, byteOffsetInst));
+    }
+}
+
+// The C# `TranslatedExpression EnsureIntegerType(TranslatedExpression expr)`
+// (ExpressionBuilder.cs line 1506): pointer arithmetic accepts all primitive
+// integer types, but no enums etc. -- convert anything else to the arithmetic
+// type of the expression's own stack type and sign.
+TranslatedExpression ExpressionBuilder::EnsureIntegerType(TranslatedExpression expr)
+{
+    if (!TS::IsCSharpPrimitiveIntegerType(&expr.Type())
+        && !TS::IsCSharpNativeIntegerType(&expr.Type()))
+    {
+        expr = expr.ConvertTo(
+            *FindArithmeticType(TS::GetStackType(expr.Type()), TS::GetSign(&expr.Type())),
+            *this);
+    }
+    return expr;
+}
+
+// The C# `StackAllocExpression TranslateLocAllocSpan(LocAllocSpan inst, IType
+// typeHint, out IType elementType)` (ExpressionBuilder.cs lines 530-539): the
+// span's Type operand supplies the element type; the count is translated and
+// converted to int32.
+Syntax::StackAllocExpression* ExpressionBuilder::TranslateLocAllocSpan(
+    IL::LocAllocSpan* inst, const TS::IType* /*typeHint*/, TS::ITypePtr& elementType)
+{
+    // `inst.Type.TypeArguments[0]` -- the port's IType carries no TypeArguments
+    // virtual, so the dynamic_cast-to-ParameterizedType dispatch (the
+    // ResolveMethod convention) reads the span's element type. An empty type
+    // argument list throws the .NET IndexOutOfRangeException message.
+    auto* spanType = dynamic_cast<TS::ParameterizedType*>(inst->Type.get());
+    if (spanType == nullptr || spanType->TypeArguments().empty())
+        throw std::out_of_range("Index was outside the bounds of the array.");
+    elementType = spanType->TypeArguments().front();
+    TranslatedExpression countExpression =
+        Translate(inst->Argument.get())
+            .ConvertTo(const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Int32)), *this);
+    auto* expr = new Syntax::StackAllocExpression();
+    expr->Type(ConvertType(*elementType));
+    expr->CountExpression(countExpression.Expression());
+    return expr;
+}
+
+// The C# `StackAllocExpression TranslateLocAlloc(LocAlloc inst, IType typeHint,
+// out IType elementType)` (ExpressionBuilder.cs lines 541-579): the element
+// type from the count's `sizeof` operand, from the type hint's pointer element
+// (via GetPointerArithmeticOffset), or the byte fallback; the count is
+// converted to int32.
+Syntax::StackAllocExpression* ExpressionBuilder::TranslateLocAlloc(
+    IL::LocAlloc* inst, const TS::IType* typeHint, TS::ITypePtr& elementType)
+{
+    TranslatedExpression countExpression;
+    std::shared_ptr<TS::PointerType> pointerType;
+    // `inst.Argument.MatchBinaryNumericInstruction(Mul, out left, out right)`
+    // `&& right.UnwrapConv(SignExtend).UnwrapConv(ZeroExtend).MatchSizeOf(out
+    // sizeOfElementType)`: determine the element type from the sizeof.
+    bool sizeofArm = false;
+    IL::BinaryNumericInstruction* mul = nullptr;
+    if (inst->Argument != nullptr
+        && inst->Argument->Op == IL::OpCode::BinaryNumericInstruction)
+    {
+        mul = static_cast<IL::BinaryNumericInstruction*>(inst->Argument.get());
+        const IL::ILInstruction* unwrappedRight =
+            UnwrapConv(UnwrapConv(mul->Right.get(), IL::ConversionKind::SignExtend),
+                       IL::ConversionKind::ZeroExtend);
+        if (unwrappedRight != nullptr && unwrappedRight->Op == IL::OpCode::SizeOf
+            && static_cast<const IL::SizeOf*>(unwrappedRight)->Type != nullptr)
+        {
+            elementType = static_cast<const IL::SizeOf*>(unwrappedRight)->Type;
+            sizeofArm = true;
+        }
+    }
+    if (sizeofArm)
+    {
+        // Determine the element type from the sizeof
+        countExpression = Translate(
+            const_cast<IL::ILInstruction*>(UnwrapConv(mul->Left.get(), IL::ConversionKind::ZeroExtend)));
+        pointerType = std::make_shared<TS::PointerType>(elementType);
+    }
+    else
+    {
+        // Determine the element type from the expected pointer type in this context
+        auto* hintPointer =
+            typeHint != nullptr ? dynamic_cast<const TS::PointerType*>(typeHint) : nullptr;
+        if (hintPointer != nullptr)
+        {
+            if (auto offset = GetPointerArithmeticOffset(
+                    inst->Argument.get(), Translate(inst->Argument.get()),
+                    hintPointer->Element().get(), /*checkForOverflow=*/true,
+                    /*unwrapZeroExtension=*/true))
+            {
+                countExpression = std::move(*offset);
+                elementType = hintPointer->Element();
+            }
+        }
+        if (elementType == nullptr)
+        {
+            // no matching pointer type: fall back to bytes
+            elementType = const_cast<TS::IType&>(
+                compilation->FindType(KnownTypeCode::Byte))
+                .shared_from_this();
+            countExpression = Translate(inst->Argument.get());
+        }
+        pointerType = std::make_shared<TS::PointerType>(elementType);
+    }
+    countExpression =
+        countExpression.ConvertTo(const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Int32)), *this);
+    auto* expr = new Syntax::StackAllocExpression();
+    expr->Type(ConvertType(*elementType));
+    expr->CountExpression(countExpression.Expression());
+    return expr;
+}
+
+// The C# `protected internal override TranslatedExpression VisitLocAlloc(LocAlloc
+// inst, TranslationContext context)` (ExpressionBuilder.cs lines 517-522): the
+// stackalloc render with a pointer resolve result over the element type.
+TranslatedExpression ExpressionBuilder::VisitLocAlloc(IL::ILInstruction* inst,
+                                                     TranslationContext context)
+{
+    auto* locAlloc = static_cast<IL::LocAlloc*>(inst);
+    TS::ITypePtr elementType;
+    Syntax::StackAllocExpression* expr =
+        TranslateLocAlloc(locAlloc, context.TypeHint, elementType);
+    return WithRR(WithILInstruction(*expr, inst),
+                  std::make_shared<Sem::ResolveResult>(
+                      std::make_shared<TS::PointerType>(elementType)));
+}
+
+// The C# `protected internal override TranslatedExpression VisitLocAllocSpan(
+// LocAllocSpan inst, TranslationContext context)` (ExpressionBuilder.cs lines
+// 523-528): the span stackalloc render with the span type as the resolve result.
+TranslatedExpression ExpressionBuilder::VisitLocAllocSpan(IL::ILInstruction* inst,
+                                                         TranslationContext context)
+{
+    auto* locAllocSpan = static_cast<IL::LocAllocSpan*>(inst);
+    TS::ITypePtr elementType;
+    Syntax::StackAllocExpression* expr =
+        TranslateLocAllocSpan(locAllocSpan, context.TypeHint, elementType);
+    return WithRR(WithILInstruction(*expr, inst),
+                  std::make_shared<Sem::ResolveResult>(locAllocSpan->Type));
 }
 
 // ---------------------------------------------------------------------------

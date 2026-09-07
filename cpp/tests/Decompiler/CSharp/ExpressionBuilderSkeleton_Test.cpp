@@ -75,6 +75,8 @@
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/ILTypeExtensions.hpp"
+#include "Decompiler/IL/PointerArithmeticOffset.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/StackAllocExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThrowExpression.hpp"
 #include "Decompiler/Semantics/ThrowResolveResult.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
@@ -2356,4 +2358,374 @@ TEST(ExpressionBuilderConvTest, ValueMightBeOversizedMatrix)
                 std::const_pointer_cast<TS::IType>(int32Type.shared_from_this()))});
     EXPECT_TRUE(builder.ValueMightBeOversized(nonPointerSubtraction, IL::StackType::I));
 }
+// ---------------------------------------------------------------------------
+// The PointerArithmeticOffset unit tests (IL/PointerArithmeticOffset.cs -- the
+// port landing with the stackalloc arms).
+
+TEST(PointerArithmeticOffsetTest, ComputeSizeOfMatrix)
+{
+    BuilderFixture fixture;
+    EXPECT_EQ(1, IL::PointerArithmeticOffset::ComputeSizeOf(
+        &fixture.compilation.FindType(TS::KnownTypeCode::Byte)));
+    EXPECT_EQ(1, IL::PointerArithmeticOffset::ComputeSizeOf(
+        &fixture.compilation.FindType(TS::KnownTypeCode::SByte)));
+    EXPECT_EQ(1, IL::PointerArithmeticOffset::ComputeSizeOf(
+        &fixture.compilation.FindType(TS::KnownTypeCode::Boolean)));
+    EXPECT_EQ(2, IL::PointerArithmeticOffset::ComputeSizeOf(
+        &fixture.compilation.FindType(TS::KnownTypeCode::Char)));
+    EXPECT_EQ(2, IL::PointerArithmeticOffset::ComputeSizeOf(
+        &fixture.compilation.FindType(TS::KnownTypeCode::Int16)));
+    EXPECT_EQ(2, IL::PointerArithmeticOffset::ComputeSizeOf(
+        &fixture.compilation.FindType(TS::KnownTypeCode::UInt16)));
+    EXPECT_EQ(4, IL::PointerArithmeticOffset::ComputeSizeOf(
+        &fixture.compilation.FindType(TS::KnownTypeCode::Int32)));
+    EXPECT_EQ(4, IL::PointerArithmeticOffset::ComputeSizeOf(
+        &fixture.compilation.FindType(TS::KnownTypeCode::UInt32)));
+    EXPECT_EQ(4, IL::PointerArithmeticOffset::ComputeSizeOf(
+        &fixture.compilation.FindType(TS::KnownTypeCode::Single)));
+    EXPECT_EQ(8, IL::PointerArithmeticOffset::ComputeSizeOf(
+        &fixture.compilation.FindType(TS::KnownTypeCode::Int64)));
+    EXPECT_EQ(8, IL::PointerArithmeticOffset::ComputeSizeOf(
+        &fixture.compilation.FindType(TS::KnownTypeCode::UInt64)));
+    EXPECT_EQ(8, IL::PointerArithmeticOffset::ComputeSizeOf(
+        &fixture.compilation.FindType(TS::KnownTypeCode::Double)));
+    EXPECT_EQ(16, IL::PointerArithmeticOffset::ComputeSizeOf(
+        &fixture.compilation.FindType(TS::KnownTypeCode::Decimal)));
+    // Non-primitive element types answer nullopt (IntPtr is not in the C#
+    // ComputeSizeOf table either).
+    EXPECT_FALSE(IL::PointerArithmeticOffset::ComputeSizeOf(
+        &fixture.compilation.FindType(TS::KnownTypeCode::Object)).has_value());
+    EXPECT_FALSE(IL::PointerArithmeticOffset::ComputeSizeOf(
+        &fixture.compilation.FindType(TS::KnownTypeCode::IntPtr)).has_value());
+}
+
+TEST(PointerArithmeticOffsetTest, DetectSizeOneReturnsInput)
+{
+    BuilderFixture fixture;
+    IL::LdcI4 constant(40);
+    const TS::IType& byteType = fixture.compilation.FindType(TS::KnownTypeCode::Byte);
+    auto outcome = IL::PointerArithmeticOffset::Detect(&constant, &byteType, false);
+    ASSERT_TRUE(outcome);
+    EXPECT_EQ(outcome.Inst, &constant);
+    EXPECT_TRUE(outcome.Owned == nullptr);
+}
+
+TEST(PointerArithmeticOffsetTest, DetectConstantFoldDivision)
+{
+    BuilderFixture fixture;
+    IL::LdcI4 constant(40);
+    constant.SetILRange(0x10, 0x12);
+    const TS::IType& intType = fixture.compilation.FindType(TS::KnownTypeCode::Int32);
+    auto outcome = IL::PointerArithmeticOffset::Detect(&constant, &intType, false);
+    ASSERT_TRUE(outcome);
+    ASSERT_TRUE(outcome.Owned != nullptr);
+    auto* folded = dynamic_cast<IL::LdcI4*>(const_cast<IL::ILInstruction*>(outcome.Inst));
+    ASSERT_TRUE(folded != nullptr);
+    EXPECT_EQ(folded->Value, 10);
+    // The fresh constant carries the input's IL byte range.
+    EXPECT_EQ(folded->StartILOffset, 0x10);
+    EXPECT_EQ(folded->EndILOffset, 0x12);
+}
+
+TEST(PointerArithmeticOffsetTest, DetectConstantNotDivisibleOrZero)
+{
+    BuilderFixture fixture;
+    IL::LdcI4 seven(7);
+    IL::LdcI4 zero(0);
+    const TS::IType& intType = fixture.compilation.FindType(TS::KnownTypeCode::Int32);
+    EXPECT_FALSE(IL::PointerArithmeticOffset::Detect(&seven, &intType, false));
+    EXPECT_FALSE(IL::PointerArithmeticOffset::Detect(&zero, &intType, false));
+}
+
+TEST(PointerArithmeticOffsetTest, DetectConstantOverflowAfterDivide)
+{
+    BuilderFixture fixture;
+    // 10000000000 / 4 = 2500000000 does not fit in int32 -> no match;
+    // 8000000000 / 4 = 2000000000 fits -> a fresh LdcI4.
+    IL::LdcI8 tooLarge(10000000000LL);
+    IL::LdcI8 fits(8000000000LL);
+    const TS::IType& intType = fixture.compilation.FindType(TS::KnownTypeCode::Int32);
+    EXPECT_FALSE(IL::PointerArithmeticOffset::Detect(&tooLarge, &intType, false));
+    auto outcome = IL::PointerArithmeticOffset::Detect(&fits, &intType, false);
+    ASSERT_TRUE(outcome);
+    auto* folded = dynamic_cast<IL::LdcI4*>(const_cast<IL::ILInstruction*>(outcome.Inst));
+    ASSERT_TRUE(folded != nullptr);
+    EXPECT_EQ(folded->Value, 2000000000);
+}
+
+TEST(PointerArithmeticOffsetTest, DetectMulWithConstantSize)
+{
+    BuilderFixture fixture;
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "n");
+    IL::BinaryNumericInstruction mul(
+        std::make_unique<IL::LdLoc>(local), std::make_unique<IL::LdcI4>(4),
+        IL::BinaryNumericOperator::Mul, true, TS::Sign::Unsigned);
+    const TS::IType& intType = fixture.compilation.FindType(TS::KnownTypeCode::Int32);
+    auto outcome = IL::PointerArithmeticOffset::Detect(&mul, &intType, true);
+    ASSERT_TRUE(outcome);
+    EXPECT_EQ(outcome.Inst, mul.Left.get());
+    // The overflow-checking flag must match: a non-checking mul never matches a
+    // checking query and vice versa.
+    IL::BinaryNumericInstruction uncheckedMul(
+        std::make_unique<IL::LdLoc>(local), std::make_unique<IL::LdcI4>(4),
+        IL::BinaryNumericOperator::Mul, false, TS::Sign::Unsigned);
+    EXPECT_FALSE(IL::PointerArithmeticOffset::Detect(&uncheckedMul, &intType, true));
+    EXPECT_TRUE(IL::PointerArithmeticOffset::Detect(&uncheckedMul, &intType, false));
+    // A lifted mul never matches.
+    IL::BinaryNumericInstruction liftedMul(
+        std::make_unique<IL::LdLoc>(local), std::make_unique<IL::LdcI4>(4),
+        IL::BinaryNumericOperator::Mul, true, TS::Sign::Unsigned);
+    liftedMul.IsLifted = true;
+    EXPECT_FALSE(IL::PointerArithmeticOffset::Detect(&liftedMul, &intType, true));
+}
+
+TEST(PointerArithmeticOffsetTest, DetectMulWithSizeOfRightOperand)
+{
+    BuilderFixture fixture;
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "n");
+    const TS::IType& intType = fixture.compilation.FindType(TS::KnownTypeCode::Int32);
+    IL::SizeOf sizeOf(
+        std::const_pointer_cast<TS::IType>(intType.shared_from_this()), "int");
+    IL::BinaryNumericInstruction mul(
+        std::make_unique<IL::LdLoc>(local), std::make_unique<IL::SizeOf>(sizeOf),
+        IL::BinaryNumericOperator::Mul, false, TS::Sign::None);
+    auto outcome = IL::PointerArithmeticOffset::Detect(&mul, &intType, false);
+    ASSERT_TRUE(outcome);
+    EXPECT_EQ(outcome.Inst, mul.Left.get());
+    // A sizeof of a DIFFERENT element type does not match.
+    const TS::IType& byteType = fixture.compilation.FindType(TS::KnownTypeCode::Byte);
+    IL::SizeOf byteSizeOf(
+        std::const_pointer_cast<TS::IType>(byteType.shared_from_this()), "byte");
+    IL::BinaryNumericInstruction byteMul(
+        std::make_unique<IL::LdLoc>(local), std::make_unique<IL::SizeOf>(byteSizeOf),
+        IL::BinaryNumericOperator::Mul, false, TS::Sign::None);
+    EXPECT_FALSE(IL::PointerArithmeticOffset::Detect(&byteMul, &intType, false));
+}
+
+TEST(PointerArithmeticOffsetTest, DetectUnwrapZeroExtension)
+{
+    BuilderFixture fixture;
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "n");
+    const TS::IType& intType = fixture.compilation.FindType(TS::KnownTypeCode::Int32);
+    // conv.u over the int32 local (target U from I4 with a None input sign is a
+    // zero extension) around the count.
+    IL::BinaryNumericInstruction mul(
+        std::make_unique<IL::Conv>(
+            std::make_unique<IL::LdLoc>(local), IL::PrimitiveType::U, false,
+            TS::Sign::None),
+        std::make_unique<IL::LdcI4>(4), IL::BinaryNumericOperator::Mul, true,
+        TS::Sign::Unsigned);
+    auto withoutUnwrap = IL::PointerArithmeticOffset::Detect(&mul, &intType, true, false);
+    ASSERT_TRUE(withoutUnwrap);
+    EXPECT_EQ(withoutUnwrap.Inst, mul.Left.get());
+    auto withUnwrap = IL::PointerArithmeticOffset::Detect(&mul, &intType, true, true);
+    ASSERT_TRUE(withUnwrap);
+    auto* mulConv = dynamic_cast<IL::Conv*>(mul.Left.get());
+    ASSERT_TRUE(mulConv != nullptr);
+    EXPECT_EQ(withUnwrap.Inst, mulConv->Argument.get());
+}
+
+TEST(PointerArithmeticOffsetTest, DetectBareSizeOfAnswersOneElement)
+{
+    BuilderFixture fixture;
+    const TS::IType& intType = fixture.compilation.FindType(TS::KnownTypeCode::Int32);
+    IL::SizeOf sizeOf(
+        std::const_pointer_cast<TS::IType>(intType.shared_from_this()), "int");
+    auto outcome = IL::PointerArithmeticOffset::Detect(&sizeOf, &intType, false);
+    ASSERT_TRUE(outcome);
+    auto* folded = dynamic_cast<IL::LdcI4*>(const_cast<IL::ILInstruction*>(outcome.Inst));
+    ASSERT_TRUE(folded != nullptr);
+    EXPECT_EQ(folded->Value, 1);
+    // A different element type never matches (an int64 element never equals an
+    // int sizeof; a byte element would take the size-1 arm first and return
+    // the input itself).
+    const TS::IType& int64Type = fixture.compilation.FindType(TS::KnownTypeCode::Int64);
+    EXPECT_FALSE(IL::PointerArithmeticOffset::Detect(&sizeOf, &int64Type, false));
+}
+
+TEST(PointerArithmeticOffsetTest, DetectUnwrapsConvI8ToI)
+{
+    BuilderFixture fixture;
+    const TS::IType& intType = fixture.compilation.FindType(TS::KnownTypeCode::Int32);
+    // The reader's wide-to-native conv (InputType I8, ResultType I) around a
+    // constant byte count unwraps before the constant folding.
+    IL::Conv conv(std::make_unique<IL::LdcI8>(40), IL::PrimitiveType::I, false,
+                  TS::Sign::None);
+    ASSERT_EQ(conv.ResultType(), IL::StackType::I);
+    ASSERT_EQ(conv.InputType, IL::StackType::I8);
+    auto outcome = IL::PointerArithmeticOffset::Detect(&conv, &intType, false);
+    ASSERT_TRUE(outcome);
+    auto* folded = dynamic_cast<IL::LdcI4*>(const_cast<IL::ILInstruction*>(outcome.Inst));
+    ASSERT_TRUE(folded != nullptr);
+    EXPECT_EQ(folded->Value, 10);
+}
+
+TEST(PointerArithmeticOffsetTest, IsFixedVariableMatrix)
+{
+    BuilderFixture fixture;
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "n");
+    // ldloca of an uncaptured local is fixed (the port reader never sets a
+    // capture scope).
+    IL::LdLoca locala(local);
+    EXPECT_TRUE(IL::PointerArithmeticOffset::IsFixedVariable(&locala));
+    // A field address is fixed if its target is fixed.
+    IL::LdFlda fielda(std::make_unique<IL::LdLoca>(local), "T::f");
+    EXPECT_TRUE(IL::PointerArithmeticOffset::IsFixedVariable(&fielda));
+    // Everything else answers on the stack type: an ldloc is not a native int.
+    IL::LdLoc localLoad(local);
+    EXPECT_FALSE(IL::PointerArithmeticOffset::IsFixedVariable(&localLoad));
+}
+
+// ---------------------------------------------------------------------------
+// The stackalloc arms (ExpressionBuilder.cs lines 517-579 + the
+// GetPointerArithmeticOffset/EnsureIntegerType helpers at 1506-1531). The
+// renders are pinned against the real ilspycmd 11.0 --csharp output over a
+// csc-compiled stackalloc fixture: stackalloc int[n], stackalloc byte[(int)n],
+// stackalloc int[(int)(uint)c] and the Span<int> arm stackalloc int[n].
+
+TEST(ExpressionBuilderStackAllocTest, SizeOfArmRendersStackAllocIntN)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "n");
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto intTypePtr = std::const_pointer_cast<TS::IType>(intType);
+    IL::LocAlloc locAlloc(std::make_unique<IL::BinaryNumericInstruction>(
+        std::make_unique<IL::LdLoc>(local),
+        std::make_unique<IL::SizeOf>(intTypePtr, "int"),
+        IL::BinaryNumericOperator::Mul, false, TS::Sign::None));
+    auto expr = builder.Translate(&locAlloc);
+    auto* stackAlloc = dynamic_cast<Syntax::StackAllocExpression*>(expr.Expression());
+    ASSERT_TRUE(stackAlloc != nullptr);
+    EXPECT_EQ(stackAlloc->ToString(), "stackalloc int[n]");
+    // The resolve result is a plain ResolveResult over the element pointer type.
+    const auto* rr = dynamic_cast<const Sem::ResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(rr != nullptr);
+    EXPECT_EQ(rr->Type().Kind(), TS::TypeKind::Pointer);
+    EXPECT_EQ(rr->Type().ReflectionName(), "System.Int32*");
+}
+
+TEST(ExpressionBuilderStackAllocTest, ByteHintRendersIntCastOfByteCount)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Byte, "n");
+    auto byteType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Byte).shared_from_this());
+    // The compiler shape: ldarg.0; conv.u; localloc -- the conv.u is a zero
+    // extension that Detect's size-1 arm leaves in place.
+    IL::LocAlloc locAlloc(std::make_unique<IL::Conv>(
+        std::make_unique<IL::LdLoc>(local), IL::PrimitiveType::U, false,
+        TS::Sign::None));
+    TS::PointerType bytePointer(
+        std::const_pointer_cast<TS::IType>(byteType));
+    auto expr = builder.Translate(&locAlloc, &bytePointer);
+    auto* stackAlloc = dynamic_cast<Syntax::StackAllocExpression*>(expr.Expression());
+    ASSERT_TRUE(stackAlloc != nullptr);
+    EXPECT_EQ(stackAlloc->ToString(), "stackalloc byte[(int)n]");
+}
+
+TEST(ExpressionBuilderStackAllocTest, IntHintUnwrapsZeroExtension)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "n");
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    // The compiler shape for stackalloc int[n]: ldarg.0; conv.u; ldc.i4.4;
+    // mul.ovf.un; localloc -- the conv.u unwraps with unwrapZeroExtension.
+    IL::LocAlloc locAlloc(std::make_unique<IL::BinaryNumericInstruction>(
+        std::make_unique<IL::Conv>(std::make_unique<IL::LdLoc>(local),
+                                   IL::PrimitiveType::U, false, TS::Sign::None),
+        std::make_unique<IL::LdcI4>(4), IL::BinaryNumericOperator::Mul, true,
+        TS::Sign::Unsigned));
+    TS::PointerType intPointer(intType);
+    auto expr = builder.Translate(&locAlloc, &intPointer);
+    auto* stackAlloc = dynamic_cast<Syntax::StackAllocExpression*>(expr.Expression());
+    ASSERT_TRUE(stackAlloc != nullptr);
+    EXPECT_EQ(stackAlloc->ToString(), "stackalloc int[n]");
+}
+
+TEST(ExpressionBuilderStackAllocTest, NoHintFallsBackToByteElement)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "n");
+    IL::LocAlloc locAlloc(std::make_unique<IL::LdLoc>(local));
+    auto expr = builder.Translate(&locAlloc);
+    auto* stackAlloc = dynamic_cast<Syntax::StackAllocExpression*>(expr.Expression());
+    ASSERT_TRUE(stackAlloc != nullptr);
+    EXPECT_EQ(stackAlloc->ToString(), "stackalloc byte[n]");
+}
+
+TEST(ExpressionBuilderStackAllocTest, CharCountRendersUintIntermediate)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Char, "c");
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    // The compiler shape for stackalloc int[c]: ldarg.0; conv.u; ldc.i4.4;
+    // mul.ovf.un; localloc. The char survives the zero-extension unwrap and the
+    // EnsureIntegerType conversion renders (uint)c; the int32 count conversion
+    // then wraps the (int).
+    IL::LocAlloc locAlloc(std::make_unique<IL::BinaryNumericInstruction>(
+        std::make_unique<IL::Conv>(std::make_unique<IL::LdLoc>(local),
+                                   IL::PrimitiveType::U, false, TS::Sign::None),
+        std::make_unique<IL::LdcI4>(4), IL::BinaryNumericOperator::Mul, true,
+        TS::Sign::Unsigned));
+    TS::PointerType intPointer(intType);
+    auto expr = builder.Translate(&locAlloc, &intPointer);
+    auto* stackAlloc = dynamic_cast<Syntax::StackAllocExpression*>(expr.Expression());
+    ASSERT_TRUE(stackAlloc != nullptr);
+    EXPECT_EQ(stackAlloc->ToString(), "stackalloc int[(int)(uint)c]");
+}
+
+TEST(ExpressionBuilderStackAllocTest, SpanArmRendersStackAllocIntN)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "n");
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto spanType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::SpanOfT).shared_from_this());
+    auto spanOfInt = std::make_shared<TS::ParameterizedType>(spanType,
+                                                             std::vector<TS::ITypePtr>{intType});
+    IL::LocAllocSpan locAllocSpan(std::make_unique<IL::LdLoc>(local), spanOfInt);
+    auto expr = builder.Translate(&locAllocSpan);
+    auto* stackAlloc = dynamic_cast<Syntax::StackAllocExpression*>(expr.Expression());
+    ASSERT_TRUE(stackAlloc != nullptr);
+    EXPECT_EQ(stackAlloc->ToString(), "stackalloc int[n]");
+    // The resolve result type is the span type itself.
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.Span`1[[System.Int32]]");
+}
+
+TEST(ExpressionBuilderStackAllocTest, LocAllocCloneCopiesTypeAndArgument)
+{
+    BuilderFixture fixture;
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "n");
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    IL::LocAllocSpan span(std::make_unique<IL::LdLoc>(local),
+                          std::make_shared<TS::ParameterizedType>(
+                              std::const_pointer_cast<TS::IType>(
+                                  fixture.compilation.FindType(TS::KnownTypeCode::SpanOfT)
+                                      .shared_from_this()),
+                              std::vector<TS::ITypePtr>{intType}));
+    auto spanClone = span.Clone();
+    auto* spanCloneTyped = dynamic_cast<IL::LocAllocSpan*>(spanClone.get());
+    ASSERT_TRUE(spanCloneTyped != nullptr);
+    EXPECT_EQ(spanCloneTyped->Type, span.Type);
+    ASSERT_TRUE(spanCloneTyped->Argument != nullptr);
+    EXPECT_EQ(spanCloneTyped->Argument->Op, IL::OpCode::LdLoc);
+    IL::LocAlloc alloc(std::make_unique<IL::LdLoc>(local));
+    auto allocClone = alloc.Clone();
+    auto* allocCloneTyped = dynamic_cast<IL::LocAlloc*>(allocClone.get());
+    ASSERT_TRUE(allocCloneTyped != nullptr);
+    EXPECT_EQ(allocCloneTyped->Op, IL::OpCode::LocAlloc);
+}
+
+
 } // namespace ILSpy::Tests

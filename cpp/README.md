@@ -2185,6 +2185,37 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   standing skips / zero failures, and all four CLI baselines unchanged
   (--csharp mscorlib 10106366 bytes, --il byte-identical to the
   41246545-byte real-ilspycmd gold, -l c 109438, --json-alone rc 64).
+- **`ExpressionBuilder` stackalloc arms + `PointerArithmeticOffset`** --
+  `VisitLocAlloc`/`VisitLocAllocSpan` (ExpressionBuilder.cs lines 517-528),
+  `TranslateLocAlloc`/`TranslateLocAllocSpan` (lines 530-579: the element type
+  from the count's `sizeof` operand, from the type hint's pointer element via
+  `GetPointerArithmeticOffset`, or the byte fallback; the span arm reads
+  `inst.Type.TypeArguments[0]`), `GetPointerArithmeticOffset` +
+  `EnsureIntegerType` (lines 1506-1531: non-primitive/non-native-integer counts
+  convert to the arithmetic type of their own stack type and sign), the
+  `OpCode::LocAlloc`/`LocAllocSpan` visitor cases, the `LocAlloc`/`LocAllocSpan`
+  IL node classes in `MemoryInstructions.hpp` (with the clone cases; the port's
+  IL reader still decodes raw `localloc` as an LdNull placeholder -- the seed
+  --csharp convention -- so the new nodes are driven by hand-built trees until
+  the reader/seed reconcile slice), and the full `PointerArithmeticOffset`
+  struct port (`IL/PointerArithmeticOffset.{hpp,cpp}`: `Detect` with the
+  I8->I conv unwrap, the size-1 passthrough, the mul gates (lifted/overflow),
+  the constant-fold division arm with the fresh LdcI4 ownership struct, the
+  bare-sizeof arm, and `unwrapZeroExtension`; `ComputeSizeOf` over the
+  GetEnumUnderlyingType-definition KnownTypeCode with the dual-shape wrapper
+  fallback; `IsFixedVariable` lifted beside the TranslatedExpression local
+  helper). Renders pinned against the real ilspycmd 11.0 --csharp output over
+  a csc-compiled stackalloc fixture (`stackalloc int[n]`, `stackalloc
+  byte[(int)n]` -- the ConvertTo with allowImplicitConversion=false forces
+  the explicit int cast for a byte count, `stackalloc int[(int)(uint)c]` --
+  char is NOT a C# primitive integer type so EnsureIntegerType renders the
+  (uint) intermediate, and the Span<int> arm). Verified by 18 new tests
+  (11 `PointerArithmeticOffsetTest` + 7 `ExpressionBuilderStackAllocTest`),
+  a three-behavior neuter round (5 RED: the constant folding, the overflow
+  gate, the zero-extension unwrap) restored green; full suite 12014 ran /
+  12012 passed / the 2 standing skips / zero failures, and all four CLI
+  baselines unchanged (--csharp mscorlib 10106366 bytes, --il byte-identical
+  to the 41246545-byte real-ilspycmd gold, -l c 109438, --json-alone rc 64).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

@@ -344,6 +344,17 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             c = std::make_unique<LdObj>(s.Target ? s.Target->Clone() : nullptr, s.Type);
             break;
         }
+        case OpCode::LocAlloc: {
+            const auto& s = static_cast<const LocAlloc&>(*this);
+            c = std::make_unique<LocAlloc>(s.Argument ? s.Argument->Clone() : nullptr);
+            break;
+        }
+        case OpCode::LocAllocSpan: {
+            const auto& s = static_cast<const LocAllocSpan&>(*this);
+            c = std::make_unique<LocAllocSpan>(s.Argument ? s.Argument->Clone() : nullptr,
+                s.Type);
+            break;
+        }
         case OpCode::StObj: {
             const auto& s = static_cast<const StObj&>(*this);
             c = std::make_unique<StObj>(s.Target ? s.Target->Clone() : nullptr,

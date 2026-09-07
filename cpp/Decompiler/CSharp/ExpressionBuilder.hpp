@@ -84,6 +84,8 @@ namespace ILSpy::Decompiler::IL {
 class UnboxAny;
 class BinaryInstruction;
 class IsInst;
+class LocAlloc;
+class LocAllocSpan;
 }
 
 namespace ILSpy::Decompiler::CSharp {
@@ -227,6 +229,45 @@ public:
     // Invalid unknown->O arm, and the default simple cast with the TypeHint-aware
     // target-type pick.
     TranslatedExpression VisitConv(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitLocAlloc(LocAlloc
+    // inst, TranslationContext context)` (ExpressionBuilder.cs lines 517-522): the
+    // `stackalloc` render -- TranslateLocAlloc's element type plus a pointer resolve
+    // result.
+    TranslatedExpression VisitLocAlloc(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitLocAllocSpan(
+    // LocAllocSpan inst, TranslationContext context)` (ExpressionBuilder.cs lines
+    // 523-528): the Span<T> stackalloc render -- TranslateLocAllocSpan's element type
+    // over the span's own type as the resolve result.
+    TranslatedExpression VisitLocAllocSpan(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `StackAllocExpression TranslateLocAllocSpan(LocAllocSpan inst, IType
+    // typeHint, out IType elementType)` (ExpressionBuilder.cs lines 530-539): the
+    // span's element type, the count converted to int32, and the StackAllocExpression.
+    Syntax::StackAllocExpression* TranslateLocAllocSpan(IL::LocAllocSpan* inst,
+                                                        const TS::IType* typeHint,
+                                                        TS::ITypePtr& elementType);
+    // The C# `StackAllocExpression TranslateLocAlloc(LocAlloc inst, IType typeHint,
+    // out IType elementType)` (ExpressionBuilder.cs lines 541-579): the element type
+    // from the count's `sizeof` operand, the type hint's pointer element (via
+    // GetPointerArithmeticOffset), or the byte fallback, each with the count converted
+    // to int32.
+    Syntax::StackAllocExpression* TranslateLocAlloc(IL::LocAlloc* inst,
+                                                    const TS::IType* typeHint,
+                                                    TS::ITypePtr& elementType);
+    // The C# `TranslatedExpression EnsureIntegerType(TranslatedExpression expr)`
+    // (ExpressionBuilder.cs line 1506): convert non-primitive/non-native-integer
+    // types to the arithmetic type of their stack type and sign (pointer arithmetic
+    // accepts all primitive integer types, but no enums etc.).
+    TranslatedExpression EnsureIntegerType(TranslatedExpression expr);
+    // The C# `TranslatedExpression? GetPointerArithmeticOffset(ILInstruction
+    // byteOffsetInst, TranslatedExpression byteOffsetExpr, IType
+    // pointerElementType, bool checkForOverflow, bool unwrapZeroExtension)`
+    // (ExpressionBuilder.cs line 1516): run PointerArithmeticOffset.Detect and
+    // translate the detected element-count instruction, keeping the ORIGINAL
+    // byte-offset instruction as the annotation.
+    std::optional<TranslatedExpression> GetPointerArithmeticOffset(
+        IL::ILInstruction* byteOffsetInst, TranslatedExpression byteOffsetExpr,
+        const TS::IType* pointerElementType, bool checkForOverflow,
+        bool unwrapZeroExtension = false);
     // The C# `TranslatedExpression TranslateArrayIndex(ILInstruction i)` (a private
     // helper, ExpressionBuilder.cs line 3248): translate the index and convert it to
     // its own stack type with allowIntPtr: false.
