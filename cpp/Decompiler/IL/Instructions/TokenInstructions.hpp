@@ -62,12 +62,22 @@ public:
     }
 };
 
-// sizeof <T>: push the size of T in bytes. Result I4.
+// sizeof <T>: push the size of T in bytes. Result I4. The C# `SizeOf(IType type)`
+// carries an `IType` field (the C# node's `type` field -- the type operand the
+// ExpressionBuilder's VisitSizeOf arm consumes); the port additionally keeps the
+// resolved display string the seed renders (`sizeof(TypeName)`) -- the C# WriteToCore
+// writes the IType through `type.WriteTo`, which the port's display string approximates
+// for the seed (the LdFtn/LdVirtFtn precedent). The Type may be null when the token did
+// not resolve (the reader's never-throw ResolveTypeToken convention).
 class SizeOf : public SimpleInstruction {
 public:
+    TypeSystem::ITypePtr Type;
     std::string TypeName;
     explicit SizeOf(std::string type = std::string())
         : SimpleInstruction(OpCode::SizeOf), TypeName(std::move(type)) {}
+    // The C# `SizeOf(IType type)` ctor -- the type-bearing form the IL reader builds.
+    SizeOf(TypeSystem::ITypePtr type, std::string typeName)
+        : SimpleInstruction(OpCode::SizeOf), Type(std::move(type)), TypeName(std::move(typeName)) {}
     StackType ResultType() const override { return StackType::I4; }
     void WriteTo(std::string& out) const override {
         out += "sizeof("; out += TypeName; out += ')';
@@ -107,12 +117,23 @@ public:
 };
 
 // ldtoken <T>/<method>/<field>: push a RuntimeTypeHandle/MethodHandle/FieldHandle.
-// Result O (a boxed handle).
+// Result O (a boxed handle). The C# `LdTypeToken(IType type)` carries an `IType` field
+// (the type operand VisitLdTypeToken renders through `typeof(T).TypeHandle`); the port
+// additionally keeps the resolved display string the seed renders -- the C#
+// WriteToCore writes the IType, which the port's display string approximates (the
+// LdFtn/LdVirtFtn precedent). The Type may be null: the `arglist` opcode decodes as
+// this node with only a display name (the port's degenerate `Arglist` stand-in, the
+// C# `Arglist` node being a separate SimpleInstruction the port has not landed), and
+// an unresolved token leaves the type null per the reader's never-throw convention.
 class LdTypeToken : public SimpleInstruction {
 public:
+    TypeSystem::ITypePtr Type;
     std::string TokenName;
     explicit LdTypeToken(std::string name = std::string())
         : SimpleInstruction(OpCode::LdTypeToken), TokenName(std::move(name)) {}
+    // The C# `LdTypeToken(IType type)` ctor -- the type-bearing form the IL reader builds.
+    LdTypeToken(TypeSystem::ITypePtr type, std::string name)
+        : SimpleInstruction(OpCode::LdTypeToken), Type(std::move(type)), TokenName(std::move(name)) {}
     StackType ResultType() const override { return StackType::O; }
     void WriteTo(std::string& out) const override {
         out += "ldtoken("; out += TokenName; out += ')';

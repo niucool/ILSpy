@@ -1152,6 +1152,12 @@ public:
     // `InferTypeArguments` contract is `typeParameters[i].Index == i`). The default 0
     // preserves the original behavior (the additive-setter convention).
     void SetIndex(int index) { index_ = index; }
+    // Configurable owner kind for the substitution tests (the
+    // `TypeParameterSubstitution::VisitTypeParameter` dispatch reads
+    // `OwnerType() == SymbolKind::TypeDefinition` to pick the class-argument
+    // list). The default (`Method`) preserves the original behavior so existing
+    // tests are unaffected (the additive-setter convention).
+    void SetOwnerType(TS::SymbolKind kind) { ownerType_ = kind; }
     // Configurable constraint flags / direct base types for the constraint-validation tests
     // (`Detail::ValidateConstraints` -- the `where T : class` / `where T : struct` / `where T : new()`
     // / `where T : Base` checks). The defaults preserve the original behavior (all flags false,
@@ -1191,7 +1197,7 @@ public:
     TS::SymbolKind SymbolKind() const override { return TS::SymbolKind::TypeParameter; }
 
     // --- ITypeParameter ---
-    TS::SymbolKind OwnerType() const override { return TS::SymbolKind::Method; }
+    TS::SymbolKind OwnerType() const override { return ownerType_; }
     const IEntity* Owner() const override { return nullptr; }
     int Index() const override { return index_; }
     std::vector<const IAttribute*> GetAttributes() const override { return attributes_; }
@@ -1210,6 +1216,16 @@ public:
     // convention). Returns the hand-wired shared_ptr list so the entries stay alive.
     std::vector<ITypePtr> DirectBaseTypes() const override { return directBaseTypes_; }
 
+    // The C# `AbstractTypeParameter.AcceptVisitor` dispatches straight to the
+    // type-parameter visit method (the D478 DummyTypeParameter precedent) -- the
+    // substitution walkers (e.g. `TypeParameterSubstitution::VisitTypeParameter`)
+    // reach their type-parameter arm only through this dispatch. Without it the
+    // IType default (`VisitOtherType`) hides the parameter from every substitution.
+    ITypePtr AcceptVisitor(TypeVisitor& visitor) override
+    {
+        return visitor.VisitTypeParameter(*this);
+    }
+
 protected:
     bool StructuralEquals(const IType& other) const override
     {
@@ -1221,6 +1237,9 @@ private:
     VarianceModifier variance_;
     ITypePtr effectiveBaseClass_;
     int index_ = 0;
+    // The configurable owner kind (SetOwnerType; the default keeps the original
+    // hardcoded `SymbolKind::Method`).
+    TS::SymbolKind ownerType_ = TS::SymbolKind::Method;
     bool hasDefaultConstructorConstraint_ = false;
     bool hasReferenceTypeConstraint_ = false;
     bool hasValueTypeConstraint_ = false;

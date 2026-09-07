@@ -2027,7 +2027,34 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   (the constant-fold/int-local/byte-promotion/bool-ternary/char-cast shapes,
   the type-hint-sign drive, the lifted nullable form, the throw shape, and the
   three-valued and/or/nullable-left matrices), proven with a two-behavior
-  neuter round (5 RED, restored green).
+  neuter round (5 RED, restored green). The type-operand arms landed as the
+  next builder slice: `IsType(IsInst)` (the `expr is T` helper the comp and
+  unbox.any special cases build -- the type renders through
+  `TupleUnderlyingTypeOrSelf` and the resolve result is the
+  `TypeIsResolveResult` over the boxing-unwrapped input), `VisitIsInst` (the
+  reference-type arm renders `expr as T` over `Conversion.TryCast`; the
+  value-type arm renders the pure-argument fallback `expr is T ? expr : null`
+  -- the conditional carries a plain ResolveResult over the ARGUMENT's type
+  because isinst over a value type yields the boxed value -- or the loud
+  error expression for an impure argument), `VisitSizeOf` (`sizeof T` over an
+  unmanaged type via the new `TypeSystemExtensions::IsUnmanagedType` port --
+  the Enum/Pointer/FunctionPointer/NInt/NUInt kinds, the type-parameter
+  unmanaged-constraint gate, the 16 primitive KnownTypeCodes, and the
+  struct-field walk with its self-cycle guard and the allowGenerics gate --
+  else the `System.Unsafe.SizeOf<T>()` intrinsic), and `VisitLdTypeToken`
+  (`typeof(T).TypeHandle` over the TypeOfResolveResult pair, the outer one
+  typed to the resolved System.RuntimeTypeHandle). The two IL nodes the arms
+  read gained the C# `IType` fields (`SizeOf.Type` / `LdTypeToken.Type`, the
+  reader populating them via `ResolveTypeToken` while the display strings
+  the seed renders stay unchanged, the LdFtn precedent). Verified by the
+  15-test `ExpressionBuilderIsInstTest`/`ExpressionBuilderSizeOfTest`/
+  `ExpressionBuilderLdTypeTokenTest` + `IsUnmanagedType` suites over the
+  MinimalCorlib fixture, proven with a three-behavior neuter round (5 RED,
+  restored green); the value-type isinst arms are driven through the direct
+  `Visit` entry because Translate's DEBUG post-condition assert would fire on
+  them (IsInst.ResultType is O while the conditional's type is the argument
+  type -- the C# keeps those arms for the consumers that special-case
+  value-type isinsts before Translate ever runs).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

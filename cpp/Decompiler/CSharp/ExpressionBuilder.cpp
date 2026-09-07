@@ -25,6 +25,7 @@
 #include "Decompiler/CSharp/Syntax/AstType.hpp"
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AsExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ConditionalExpression.hpp"
@@ -33,10 +34,13 @@
 #include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/SizeOfExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeOfExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThrowExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
@@ -48,6 +52,8 @@
 #include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/IsInst.hpp"
+#include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdcDecimal.hpp"
@@ -59,13 +65,18 @@
 #include "Decompiler/IL/OpCodeName.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
+#include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/ErrorResolveResult.hpp"
 #include "Decompiler/Semantics/OperatorResolveResult.hpp"
+#include "Decompiler/Semantics/SizeOfResolveResult.hpp"
 #include "Decompiler/Semantics/ThrowResolveResult.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
+#include "Decompiler/Semantics/TypeIsResolveResult.hpp"
+#include "Decompiler/Semantics/TypeOfResolveResult.hpp"
 #include "Decompiler/TypeSystem/KnownTypeReference.hpp"
 #include "Decompiler/TypeSystem/NullableType.hpp"
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
+#include "Decompiler/TypeSystem/TupleType.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
 
@@ -343,6 +354,12 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitThreeValuedBoolAnd(inst, context);
         case IL::OpCode::ThreeValuedBoolOr:
             return VisitThreeValuedBoolOr(inst, context);
+        case IL::OpCode::IsInst:
+            return VisitIsInst(inst, context);
+        case IL::OpCode::SizeOf:
+            return VisitSizeOf(inst, context);
+        case IL::OpCode::LdTypeToken:
+            return VisitLdTypeToken(inst, context);
         default:
             return Default(inst, context);
     }
@@ -590,6 +607,125 @@ TranslatedExpression ExpressionBuilder::VisitThreeValuedBoolOr(IL::ILInstruction
 {
     return HandleThreeValuedLogic(static_cast<IL::BinaryInstruction&>(*inst),
                                   Syntax::BinaryOperatorType::BitwiseOr, TS::ExpressionType::Or);
+}
+
+// The C# `TranslatedExpression IsType(IsInst inst)` helper (ExpressionBuilder.cs lines
+// 425-432): the `expr is T` expression the comp and unbox.any special cases build. The
+// type renders through `TupleUnderlyingTypeOrSelf` (a tuple element's `is` test names the
+// underlying ValueTuple type).
+TranslatedExpression ExpressionBuilder::IsType(IL::IsInst& inst)
+{
+    TranslatedExpression arg = Translate(inst.Argument.get());
+    arg = UnwrapBoxingConversion(arg);
+    TS::ITypePtr tupleUnderlying = TS::TupleUnderlyingTypeOrSelf(*inst.Type);
+    auto* isExpr = new Syntax::IsExpression(arg.Expression(), ConvertType(*tupleUnderlying));
+    return WithRR(WithILInstruction(*isExpr, &inst),
+                  std::make_shared<Sem::TypeIsResolveResult>(
+                      SharedResolveResultAnnotation(*arg.Expression()), inst.Type,
+                      const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Boolean)).shared_from_this()));
+}
+
+// The C# `protected internal override TranslatedExpression VisitIsInst(IsInst inst,
+// TranslationContext context)` (ExpressionBuilder.cs lines 434-483): the reference-type
+// arm renders `expr as T` over the boxing-unwrapped input; the value-type/unconstrained
+// generic arm renders the pure-argument fallback `expr is T ? expr : null` (an isinst
+// over a value type boxes, which C# cannot express -- Roslyn pattern matching emits
+// exactly this shape, so the doubling of the pure side effect is harmless) or the loud
+// error expression.
+TranslatedExpression ExpressionBuilder::VisitIsInst(IL::ILInstruction* inst, TranslationContext context)
+{
+    auto* isInst = static_cast<IL::IsInst*>(inst);
+    TranslatedExpression arg = Translate(isInst->Argument.get());
+    if (TS::IsReferenceType(isInst->Type.get()) != std::optional<bool>(true))
+    {
+        // isinst with a value type results in an expression of "boxed value type",
+        // which is not supported in C#.
+        // It's also not supported for unconstrained generic types.
+        // Note that several other instructions special-case isinst arguments:
+        //  unbox.any T(isinst T(expr)) ==> "expr as T" for nullable value types and class-constrained generic types
+        //  comp(isinst T(expr) != null) ==> "expr is T"
+        //  on block level (StatementBuilder.VisitIsInst) => "expr is T"
+        if (IL::IsPure(isInst->Argument ? isInst->Argument->Flags() : IL::InstructionFlags::None))
+        {
+            // We can emulate isinst using
+            //   expr is T ? expr : null
+            // (doubling the boxing side-effect is harmless because the "expr is T" part won't observe object identity,
+            //  and we need to support this because Roslyn pattern matching sometimes generates such code.)
+            auto* isExpr = new Syntax::IsExpression(arg.Expression(), ConvertType(*isInst->Type));
+            WithILInstruction(*isExpr, inst);
+            auto* condExpr = new Syntax::ConditionalExpression(
+                isExpr, arg.Expression()->Clone(), new Syntax::NullReferenceExpression());
+            return WithRR(WithoutILInstruction(*condExpr),
+                          std::make_shared<Sem::ResolveResult>(
+                              const_cast<TS::IType&>(arg.Type()).shared_from_this()));
+        }
+        else
+        {
+            return ErrorExpression("isinst with value type is only supported in some contexts");
+        }
+    }
+    arg = UnwrapBoxingConversion(arg);
+    auto* asExpr = new Syntax::AsExpression(arg.Expression(), ConvertType(*isInst->Type));
+    return WithRR(
+        WithILInstruction(*asExpr, inst),
+        std::make_shared<Sem::ConversionResolveResult>(
+            isInst->Type, SharedResolveResultAnnotation(*arg.Expression()),
+            Sem::Conversions::TryCast()));
+}
+
+// The C# `protected internal override TranslatedExpression VisitSizeOf(SizeOf inst,
+// TranslationContext context)` (ExpressionBuilder.cs lines 712-734): `sizeof T` over an
+// unmanaged type, else the `System.Unsafe.SizeOf<T>()` intrinsic (a managed type's size
+// is not a compile-time constant).
+TranslatedExpression ExpressionBuilder::VisitSizeOf(IL::ILInstruction* inst, TranslationContext context)
+{
+    auto* sizeOf = static_cast<IL::SizeOf*>(inst);
+    if (sizeOf->Type && TS::IsUnmanagedType(*sizeOf->Type, settings->IntroduceUnmanagedConstraint()))
+    {
+        auto* sizeOfExpr = new Syntax::SizeOfExpression(ConvertType(*sizeOf->Type));
+        return WithRR(WithILInstruction(*sizeOfExpr, inst),
+                      std::make_shared<Sem::SizeOfResolveResult>(
+                          const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Int32)).shared_from_this(),
+                          sizeOf->Type, std::nullopt));
+    }
+    else
+    {
+        std::optional<std::vector<TS::ITypePtr>> typeArguments;
+        if (sizeOf->Type)
+            typeArguments = std::vector<TS::ITypePtr>{sizeOf->Type};
+        return CallUnsafeIntrinsic(
+            "SizeOf", {},
+            compilation->FindType(KnownTypeCode::Int32), inst,
+            typeArguments);
+    }
+}
+
+// The C# `protected internal override TranslatedExpression VisitLdTypeToken(
+// LdTypeToken inst, TranslationContext context)` (ExpressionBuilder.cs lines 736-744):
+// the `typeof(T).TypeHandle` render. The port's degenerate `arglist`-as-LdTypeToken
+// decode keeps a null Type (the C# `Arglist` is its own node), so the null-type shape
+// falls back to the error expression (the C# would NRE on the null `inst.Type`).
+TranslatedExpression ExpressionBuilder::VisitLdTypeToken(IL::ILInstruction* inst, TranslationContext context)
+{
+    auto* token = static_cast<IL::LdTypeToken*>(inst);
+    if (!token->Type)
+        return ErrorExpression("ldtoken without a type operand");
+    auto* typeofExpr = new Syntax::TypeOfExpression(ConvertType(*token->Type));
+    WithRR(*typeofExpr,
+           std::make_shared<Sem::TypeOfResolveResult>(
+               const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Type)).shared_from_this(),
+               token->Type));
+    auto* memberRef = new Syntax::MemberReferenceExpression(typeofExpr, "TypeHandle");
+    // The C# `compilation.FindType(new TopLevelTypeName("System", "RuntimeTypeHandle"))` --
+    // the modules-scan extension over the full type name (the ICompilation member FindType
+    // only resolves KnownTypeCodes, and RuntimeTypeHandle is not one).
+    TS::ITypePtr runtimeTypeHandleType =
+        TS::FindType(*compilation, TS::FullTypeName(TS::TopLevelTypeName("System", "RuntimeTypeHandle")));
+    return WithRR(
+        WithILInstruction(*memberRef, inst),
+        std::make_shared<Sem::TypeOfResolveResult>(
+            std::move(runtimeTypeHandleType),
+            token->Type));
 }
 
 

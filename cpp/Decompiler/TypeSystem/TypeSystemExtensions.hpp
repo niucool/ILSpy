@@ -171,6 +171,31 @@ std::vector<const ITypeDefinition*> GetTopLevelTypeDefinitions(const ICompilatio
 // placeholders).
 bool IsUnbound(const IType& type);
 
+// The C# `public static bool IsUnmanagedType(this IType type, bool allowGenerics)`
+// (TypeSystemExtensions.cs line 249, the same `IsOpen / IsUnbound / IsUnmanagedType /
+// IsKnownType` region): whether the type is a blittable "unmanaged" type -- the C#
+// `unmanaged` constraint's extensional set. The C# body is a local recursive function
+// over a `HashSet<IType>` cycle-detection set (a struct field referencing its own
+// containing type through a second field would otherwise recurse forever):
+//
+//  * an Enum/Pointer/FunctionPointer/NInt/NUInt kind is unmanaged;
+//  * an ITypeParameter is unmanaged iff it carries the `unmanaged` constraint;
+//  * a null definition (arrays, pointers shaped as ParameterizedTypes...) yields false;
+//  * the 16 primitive KnownTypeCodes (Void..TypedReference) are unmanaged;
+//  * a Struct kind walks its non-static instance fields recursively (with the
+//    `!allowGenerics && def.TypeParameterCount > 0` generic gate first) and answers
+//    true only when every field is;
+//  * anything else (Class/Interface/Delegate/...) yields false.
+//
+// The C# `HashSet<IType>` uses the runtime type's Equals, which for the metadata
+// types is reference equality -- the port stores raw `const IType*` pointers (the
+// D475 BaseTypeCollector identity convention), so a structurally-equal but distinct
+// instance is a new node in the walk. The C# `types.Add(type)` / `types.Remove(type)`
+// symmetric bookkeeping is preserved (a struct whose field list is examined while the
+// struct itself is in the set -- the direct self-cycle -- is caught by the Contains
+// check, not by re-insertion).
+bool IsUnmanagedType(const IType& type, bool allowGenerics);
+
 // The C# `public static ITypeDefinition GetTypeDefinition(this IModule module,
 // FullTypeName fullTypeName)` (TypeSystemExtensions.cs line 519, the
 // `IAssembly.GetTypeDefinition()` region):

@@ -166,12 +166,12 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         }
         case OpCode::SizeOf: {
             const auto& s = static_cast<const SizeOf&>(*this);
-            c = std::make_unique<SizeOf>(s.TypeName);
+            c = std::make_unique<SizeOf>(s.Type, s.TypeName);
             break;
         }
         case OpCode::LdTypeToken: {
             const auto& s = static_cast<const LdTypeToken&>(*this);
-            c = std::make_unique<LdTypeToken>(s.TokenName);
+            c = std::make_unique<LdTypeToken>(s.Type, s.TokenName);
             break;
         }
         case OpCode::LdLoc: {

@@ -40,6 +40,8 @@
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"  // GetTypeName (IsKnownType)
 #include "Decompiler/TypeSystem/StringComparer.hpp"
 #include "Decompiler/TypeSystem/KnownAttribute.hpp"
+
+#include <unordered_set>
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/LocalResolveResult.hpp"
 #include "Decompiler/Semantics/MemberResolveResult.hpp"
@@ -361,6 +363,87 @@ bool IsUnbound(const IType& type)
         dynamic_cast<const ITypeDefinition*>(&type) != nullptr
         || dynamic_cast<const class UnknownType*>(&type) != nullptr;
     return isDefinitionOrUnknown && type.TypeParameterCount() > 0;
+}
+
+namespace {
+
+// The C# local recursive function `bool IsUnmanagedTypeInternal(IType type)` inside
+// `IsUnmanagedType` (TypeSystemExtensions.cs line 249): the closure over `types` and
+// `allowGenerics` ports to an explicit parameter pair.
+bool IsUnmanagedTypeInternal(const IType& type, bool allowGenerics,
+                             std::unordered_set<const IType*>& types)
+{
+    switch (type.Kind())
+    {
+        case TypeKind::Enum:
+        case TypeKind::Pointer:
+        case TypeKind::FunctionPointer:
+        case TypeKind::NInt:
+        case TypeKind::NUInt:
+            return true;
+        default:
+            break;
+    }
+    if (const auto* tp = dynamic_cast<const ITypeParameter*>(&type))
+        return tp->HasUnmanagedConstraint();
+    const ITypeDefinition* def = type.GetDefinition();
+    if (def == nullptr)
+        return false;
+    switch (def->KnownTypeCode())
+    {
+        case KnownTypeCode::Void:
+        case KnownTypeCode::Boolean:
+        case KnownTypeCode::Char:
+        case KnownTypeCode::SByte:
+        case KnownTypeCode::Byte:
+        case KnownTypeCode::Int16:
+        case KnownTypeCode::UInt16:
+        case KnownTypeCode::Int32:
+        case KnownTypeCode::UInt32:
+        case KnownTypeCode::Int64:
+        case KnownTypeCode::UInt64:
+        case KnownTypeCode::Decimal:
+        case KnownTypeCode::Single:
+        case KnownTypeCode::Double:
+        case KnownTypeCode::IntPtr:
+        case KnownTypeCode::UIntPtr:
+        case KnownTypeCode::TypedReference:
+            //case KnownTypeCode.ArgIterator:
+            //case KnownTypeCode.RuntimeArgumentHandle:
+            return true;
+        default:
+            break;
+    }
+    if (type.Kind() == TypeKind::Struct)
+    {
+        if (!allowGenerics && def->TypeParameterCount() > 0)
+            return false;
+        types.insert(&type);
+        for (const IField* field : type.GetFields([](const IField* f) { return !f->IsStatic(); }))
+        {
+            if (types.count(&field->Type()) != 0)
+            {
+                types.erase(&type);
+                return false;
+            }
+            if (!IsUnmanagedTypeInternal(field->Type(), allowGenerics, types))
+            {
+                types.erase(&type);
+                return false;
+            }
+        }
+        types.erase(&type);
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
+bool IsUnmanagedType(const IType& type, bool allowGenerics)
+{
+    std::unordered_set<const IType*> types;
+    return IsUnmanagedTypeInternal(type, allowGenerics, types);
 }
 
 namespace {

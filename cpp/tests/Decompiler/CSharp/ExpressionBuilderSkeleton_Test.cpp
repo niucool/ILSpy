@@ -27,15 +27,23 @@
 
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AsExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ConditionalExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DefaultValueExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/SizeOfExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeOfExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
@@ -52,12 +60,19 @@
 #include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
+#include "Decompiler/IL/Instructions/IsInst.hpp"
+#include "Decompiler/IL/Instructions/TokenInstructions.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThrowExpression.hpp"
 #include "Decompiler/Semantics/ThrowResolveResult.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
+#include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/OperatorResolveResult.hpp"
+#include "Decompiler/Semantics/SizeOfResolveResult.hpp"
+#include "Decompiler/Semantics/TypeIsResolveResult.hpp"
+#include "Decompiler/Semantics/TypeOfResolveResult.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
@@ -971,5 +986,186 @@ TEST(ExpressionBuilderOperatorTest, ThreeValuedBoolAndNullableLeftConvertsNullab
     EXPECT_EQ(opRR->OperatorType(), TS::ExpressionType::And);
     EXPECT_TRUE(opRR->IsLiftedOperator());
     EXPECT_TRUE(TS::IsNullable(expr.Type()));
+}
+
+// ---------------------------------------------------------------------------
+// The type-operand expression arms (VisitIsInst / VisitSizeOf / VisitLdTypeToken):
+// the next ExpressionBuilder slice after the operator arms. Expectations derived
+// from the C# IsType helper (ExpressionBuilder.cs lines 425-432), VisitIsInst
+// (434-483), VisitSizeOf (712-734), and VisitLdTypeToken (736-744) bodies over
+// the MinimalCorlib fixture.
+// ---------------------------------------------------------------------------
+
+TEST(ExpressionBuilderIsInstTest, IsInstOverReferenceTypeRendersAsExpression)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto stringType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    auto variable = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, stringType, 0);
+    variable->Name = "s";
+    IL::IsInst isInst(std::const_pointer_cast<TS::IType>(
+                          fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this()),
+                      std::make_unique<IL::LdLoc>(variable));
+    auto expr = builder.Translate(&isInst);
+    auto* asExpr = dynamic_cast<Syntax::AsExpression*>(expr.Expression());
+    ASSERT_TRUE(asExpr != nullptr);
+    EXPECT_TRUE(asExpr->Type() != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(asExpr->Expression()) != nullptr);
+    // The resolve result is the TryCast conversion over the operand.
+    const auto* convRR = dynamic_cast<const Sem::ConversionResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(convRR != nullptr);
+    EXPECT_TRUE(convRR->ConversionProperty()->IsTryCast());
+    EXPECT_EQ(&convRR->Type(), stringType.get());
+}
+
+TEST(ExpressionBuilderIsInstTest, IsInstOverValueTypeWithPureArgumentRendersConditional)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto variable = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, intType, 0);
+    variable->Name = "num";
+    IL::IsInst isInst(std::const_pointer_cast<TS::IType>(
+                          fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this()),
+                      std::make_unique<IL::LdLoc>(variable));
+    // The value-type arm never flows through Translate (its DEBUG post-condition
+    // assert would fire: IsInst.ResultType is O but the conditional's type is the
+    // argument type -- the C# keeps this arm for the consumers that special-case
+    // value-type isinsts before Translate ever runs), so the drive is the direct
+    // Visit call over the default context.
+    auto expr = builder.Visit(&isInst, CSharp::TranslationContext{});
+    auto* cond = dynamic_cast<Syntax::ConditionalExpression*>(expr.Expression());
+    ASSERT_TRUE(cond != nullptr);
+    // The condition is the `expr is T` expression carrying the isinst's annotation.
+    auto* isExpr = dynamic_cast<Syntax::IsExpression*>(cond->Condition());
+    ASSERT_TRUE(isExpr != nullptr);
+    EXPECT_TRUE(isExpr->Type() != nullptr);
+    EXPECT_EQ(expr.ILInstructions().size(), std::size_t{0});
+    // ... while the IS expression itself carries the isinst.
+    EXPECT_EQ(CSharp::GetILInstructions(*isExpr).size(), std::size_t{1});
+    // The true arm is a CLONE of the operand (a distinct identifier), the false
+    // arm the null literal.
+    auto* trueIdent = dynamic_cast<Syntax::IdentifierExpression*>(cond->TrueExpression());
+    ASSERT_TRUE(trueIdent != nullptr);
+    auto* operandIdent = dynamic_cast<Syntax::IdentifierExpression*>(isExpr->Expression());
+    ASSERT_TRUE(operandIdent != nullptr);
+    EXPECT_NE(operandIdent, trueIdent);
+    EXPECT_TRUE(dynamic_cast<Syntax::NullReferenceExpression*>(cond->FalseExpression()) != nullptr);
+    // The conditional carries a plain ResolveResult over the ARGUMENT's type
+    // (isinst over a value type yields the boxed value, so the conditional's
+    // type is the unboxed argument type).
+    const Sem::ResolveResult* rr = expr.ResolveResult();
+    EXPECT_TRUE(dynamic_cast<const Sem::ConversionResolveResult*>(rr) == nullptr);
+    EXPECT_EQ(&rr->Type(), intType.get());
+}
+
+TEST(ExpressionBuilderIsInstTest, IsInstOverValueTypeWithImpureArgumentIsError)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    // A Call has SideEffect|MayThrow, so the pure check fails and the C# error
+    // expression fires.
+    IL::IsInst isInst(std::const_pointer_cast<TS::IType>(
+                          fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this()),
+                      std::make_unique<IL::Call>("Impure"));
+    // The direct Visit drive: the same value-type isinst never flows through
+    // Translate (see the conditional test above).
+    auto expr = builder.Visit(&isInst, CSharp::TranslationContext{});
+    auto* errorExpr = dynamic_cast<Syntax::ErrorExpression*>(expr.Expression());
+    ASSERT_TRUE(errorExpr != nullptr);
+    EXPECT_TRUE(expr.ResolveResult()->IsError());
+}
+
+TEST(ExpressionBuilderIsInstTest, IsTypeHelperRendersIsExpressionWithTypeIsResolveResult)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto stringType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    auto variable = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, stringType, 0);
+    variable->Name = "s";
+    IL::IsInst isInst(std::const_pointer_cast<TS::IType>(
+                          fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this()),
+                      std::make_unique<IL::LdLoc>(variable));
+    auto expr = builder.IsType(isInst);
+    auto* isExpr = dynamic_cast<Syntax::IsExpression*>(expr.Expression());
+    ASSERT_TRUE(isExpr != nullptr);
+    // The resolve result is the TypeIsResolveResult over the operand.
+    const auto* typeIs = dynamic_cast<const Sem::TypeIsResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(typeIs != nullptr);
+    EXPECT_EQ(&typeIs->TargetType(), stringType.get());
+    ASSERT_TRUE(typeIs->Input() != nullptr);
+    EXPECT_EQ(&typeIs->Input()->Type(), stringType.get());
+    // The expression's own type is the forwarded boolean type.
+    EXPECT_EQ(&expr.Type(), &fixture.compilation.FindType(TS::KnownTypeCode::Boolean));
+}
+
+TEST(ExpressionBuilderSizeOfTest, SizeOfOverUnmanagedTypeRendersSizeOfExpression)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    IL::SizeOf sizeOf(intType, "System.Int32");
+    auto expr = builder.Translate(&sizeOf);
+    auto* sizeOfExpr = dynamic_cast<Syntax::SizeOfExpression*>(expr.Expression());
+    ASSERT_TRUE(sizeOfExpr != nullptr);
+    EXPECT_TRUE(sizeOfExpr->Type() != nullptr);
+    const auto* rr = dynamic_cast<const Sem::SizeOfResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(rr != nullptr);
+    EXPECT_EQ(&rr->ReferencedType(), intType.get());
+    // The expression's own type is the forwarded Int32.
+    EXPECT_EQ(&expr.Type(), intType.get());
+}
+
+TEST(ExpressionBuilderSizeOfTest, SizeOfOverManagedTypeCallsUnsafeIntrinsic)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto stringType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    IL::SizeOf sizeOf(stringType, "System.String");
+    auto expr = builder.Translate(&sizeOf);
+    // A managed type is not `sizeof`-able in C#, so the arm renders the
+    // System.Unsafe.SizeOf<String>() intrinsic.
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(expr.Expression());
+    ASSERT_TRUE(invocation != nullptr);
+    auto* target = dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Target());
+    ASSERT_TRUE(target != nullptr);
+    EXPECT_EQ(target->MemberName(), "SizeOf");
+    EXPECT_TRUE(dynamic_cast<Syntax::TypeReferenceExpression*>(target->Target()) != nullptr);
+    EXPECT_EQ(target->TypeArguments().Count(), 1);
+    // The intrinsic's own type is Int32.
+    EXPECT_EQ(&expr.Type(), &fixture.compilation.FindType(TS::KnownTypeCode::Int32));
+}
+
+TEST(ExpressionBuilderLdTypeTokenTest, LdTypeTokenRendersTypeofTypeHandle)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto stringType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    IL::LdTypeToken token(stringType, "System.String");
+    auto expr = builder.Translate(&token);
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(expr.Expression());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "TypeHandle");
+    // The typeof expression carries its own TypeOfResolveResult over the String type.
+    auto* typeofExpr = dynamic_cast<Syntax::TypeOfExpression*>(memberRef->Target());
+    ASSERT_TRUE(typeofExpr != nullptr);
+    const auto* innerRR = dynamic_cast<const Sem::TypeOfResolveResult*>(
+        CSharp::GetResolveResult(*typeofExpr));
+    ASSERT_TRUE(innerRR != nullptr);
+    EXPECT_EQ(&innerRR->ReferencedType(), stringType.get());
+    EXPECT_EQ(&innerRR->Type(), &fixture.compilation.FindType(TS::KnownTypeCode::Type));
+    // The outer resolve result is the TypeOfResolveResult over the resolved
+    // System.RuntimeTypeHandle (over MinimalCorlib the UnknownType fallback
+    // carrying the requested full name).
+    const auto* typeOfRR = dynamic_cast<const Sem::TypeOfResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(typeOfRR != nullptr);
+    EXPECT_EQ(&typeOfRR->ReferencedType(), stringType.get());
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.RuntimeTypeHandle");
 }
 } // namespace ILSpy::Tests

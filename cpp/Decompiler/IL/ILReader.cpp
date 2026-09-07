@@ -1107,12 +1107,16 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         }
         case ILOpCode::Sizeof: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
-            if (!s.Push(std::make_unique<SizeOf>(file.ResolveTokenToString(tok, s.ownerMethodToken)))) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<SizeOf>(file.ResolveTypeToken(tok, s.ownerMethodToken),
+                                                 file.ResolveTokenToString(tok, s.ownerMethodToken))))
+                return DecodeOutcome::Bail;
             break;
         }
         case ILOpCode::Ldtoken: {
             std::uint32_t tok = 0; if (!ReadU32(b, size, pos, tok)) return DecodeOutcome::Bail; pos += 4;
-            if (!s.Push(std::make_unique<LdTypeToken>(file.ResolveTokenToString(tok, s.ownerMethodToken)))) return DecodeOutcome::Bail;
+            if (!s.Push(std::make_unique<LdTypeToken>(file.ResolveTypeToken(tok, s.ownerMethodToken),
+                                                      file.ResolveTokenToString(tok, s.ownerMethodToken))))
+                return DecodeOutcome::Bail;
             break;
         }
 

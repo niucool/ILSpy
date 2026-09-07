@@ -166,10 +166,11 @@ bool MatchLogicNot(ILInstruction* inst, ILInstruction*& arg) {
 // operand is `&`-ed with must be the bit width minus one for the mask to be
 // redundant in C# (the shift already masks the count). `a << (b & 31)` is `a << b`
 // for an int (I4) shift; `a << (b & 63)` for a long (I8). The native-int (I) case
-// is `sizeof(IntPtr) * 8 - 1` -- deferred (this port's SizeOf carries only a name
-// string, no IType with GetStackType, so the `size.MatchSizeOf(out var
-// sizeofType) && sizeofType.GetStackType() == StackType.I` check cannot be
-// faithful); it returns false so the native-int mask is left in place.
+// is `sizeof(IntPtr) * 8 - 1` -- deferred (the `size.MatchSizeOf(out var
+// sizeofType) && sizeofType.GetStackType() == StackType.I` check needs the
+// `MatchSizeOf` pattern helper over the SizeOf's IType operand, which no
+// transform consumes yet); it returns false so the native-int mask is left in
+// place.
 bool MatchExpectedShiftSize(const ILInstruction* rhs, StackType resultType) {
     switch (resultType) {
         case StackType::I4:

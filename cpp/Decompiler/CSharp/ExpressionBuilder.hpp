@@ -82,6 +82,7 @@
 namespace ILSpy::Decompiler::IL {
 class UnboxAny;
 class BinaryInstruction;
+class IsInst;
 }
 
 namespace ILSpy::Decompiler::CSharp {
@@ -180,7 +181,7 @@ public:
     // TranslationContext context)`: the "OpCode not supported" error expression.
     TranslatedExpression Default(IL::ILInstruction* inst, TranslationContext context);
 
-    // -- The ported Visit arms (the leaf loads/stores) --------------------------------
+    // -- The ported Visit arms (the leaf loads/stores and the type-operand family) ------
 
     TranslatedExpression VisitLdLoc(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitLdLoca(IL::ILInstruction* inst, TranslationContext context);
@@ -196,6 +197,14 @@ public:
     TranslatedExpression VisitThrow(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitThreeValuedBoolAnd(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitThreeValuedBoolOr(IL::ILInstruction* inst, TranslationContext context);
+    // The type-operand family (the C# lines 434-483 and 712-744): the `isinst`-
+    // shaped `is`/`as` expression, `sizeof T`, and `typeof(T).TypeHandle`.
+    TranslatedExpression VisitIsInst(IL::ILInstruction* inst, TranslationContext context);
+    TranslatedExpression VisitSizeOf(IL::ILInstruction* inst, TranslationContext context);
+    TranslatedExpression VisitLdTypeToken(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `TranslatedExpression IsType(IsInst inst)` helper (ExpressionBuilder.cs
+    // line 425): the `expr is T` expression the comp/unbox.any special cases build.
+    TranslatedExpression IsType(IL::IsInst& inst);
 
     // The C# `TranslatedExpression HandleThreeValuedLogic(BinaryInstruction inst,
     // BinaryOperatorType op, ExpressionType eop)` -- the shared body of the two

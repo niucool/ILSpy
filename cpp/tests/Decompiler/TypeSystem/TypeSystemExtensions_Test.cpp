@@ -1183,3 +1183,140 @@ TEST(TypeSystemExtensionsTest, HasReadonlyModifierNonRefReadOnlyIsFalse) {
     method.SetDeclaringTypeDefinition(declaringType.get());
     EXPECT_FALSE(TS::HasReadonlyModifier(method));
 }
+
+// ---------------------------------------------------------------------------
+// IsUnmanagedType -- the `unmanaged` constraint's extensional set
+// (TypeSystemExtensions.cs lines 249-316). The reachable arms over the stub
+// machinery: the Enum/Pointer/FunctionPointer/NInt kinds, the ITypeParameter
+// unmanaged-constraint gate, the primitive-KnownTypeCode switch, the
+// NullableOfT recursion with the allowGenerics gate, and the struct-field
+// walk with its self-cycle guard.
+// ---------------------------------------------------------------------------
+
+TEST(TypeSystemExtensionsTest, IsUnmanagedTypeEnumAndPointerKindsAreTrue) {
+    LookupCompilation compilation;
+    auto enumDef = MakeDefinition(compilation, "E", "Ns", TS::TypeKind::Enum);
+    EXPECT_TRUE(TS::IsUnmanagedType(*enumDef, true));
+    auto intDef = MakeDefinition(compilation, "Int32", "System", TS::TypeKind::Struct,
+                                 nullptr, TS::KnownTypeCode::Int32);
+    auto ptrType = std::make_shared<TS::PointerType>(MakeDefinition(compilation, "S", "Ns"));
+    EXPECT_TRUE(TS::IsUnmanagedType(*ptrType, true));
+    // A function pointer over the int32 primitive: the 6-arg signature ctor (the
+    // C# default signature -- convention C# `<2>`, one parameter, Int32 return).
+    std::shared_ptr<TS::FunctionPointerType> fnPtr = std::make_shared<TS::FunctionPointerType>(
+        TS::SignatureCallingConvention::Default, std::vector<TS::ITypePtr>{},
+        intDef, false, std::vector<TS::ITypePtr>{intDef},
+        std::vector<TS::ReferenceKind>{TS::ReferenceKind::None});
+    EXPECT_TRUE(TS::IsUnmanagedType(*fnPtr, true));
+}
+
+TEST(TypeSystemExtensionsTest, IsUnmanagedTypePrimitiveKnownTypeCodesAreTrue) {
+    LookupCompilation compilation;
+    auto intDef = MakeDefinition(compilation, "Int32", "System", TS::TypeKind::Struct,
+                                 nullptr, TS::KnownTypeCode::Int32);
+    EXPECT_TRUE(TS::IsUnmanagedType(*intDef, true));
+    auto boolDef = MakeDefinition(compilation, "Boolean", "System", TS::TypeKind::Struct,
+                                  nullptr, TS::KnownTypeCode::Boolean);
+    EXPECT_TRUE(TS::IsUnmanagedType(*boolDef, true));
+    // The TypedReference switch arm's last member.
+    auto trDef = MakeDefinition(compilation, "TypedReference", "System",
+                                TS::TypeKind::Other, nullptr, TS::KnownTypeCode::TypedReference);
+    EXPECT_TRUE(TS::IsUnmanagedType(*trDef, true));
+}
+
+TEST(TypeSystemExtensionsTest, IsUnmanagedTypeDefinitionlessTypeIsFalse) {
+    LookupCompilation compilation;
+    // The `SpecialType` of an unknown kind has no definition (GetDefinition null).
+    TS::SpecialType dynamicType{TS::TypeKind::Dynamic};
+    EXPECT_FALSE(TS::IsUnmanagedType(dynamicType, true));
+}
+
+TEST(TypeSystemExtensionsTest, IsUnmanagedTypeTypeParameterFollowsConstraint) {
+    LookupCompilation compilation;
+    TS::TestSupport::LookupTypeParameter constrained("T");
+    constrained.SetHasUnmanagedConstraint(true);
+    EXPECT_TRUE(TS::IsUnmanagedType(constrained, true));
+    TS::TestSupport::LookupTypeParameter unconstrained("T");
+    unconstrained.SetHasUnmanagedConstraint(false);
+    EXPECT_FALSE(TS::IsUnmanagedType(unconstrained, true));
+}
+
+TEST(TypeSystemExtensionsTest, IsUnmanagedTypeStructWalksInstanceFields) {
+    LookupCompilation compilation;
+    // struct S { int X; }
+    auto sDef = MakeDefinition(compilation, "S", "Ns", TS::TypeKind::Struct);
+    auto intDef = MakeDefinition(compilation, "Int32", "System", TS::TypeKind::Struct,
+                                 nullptr, TS::KnownTypeCode::Int32);
+    TS::TestSupport::LookupField field("X", intDef, compilation);
+    sDef->SetFields({ &field });
+    EXPECT_TRUE(TS::IsUnmanagedType(*sDef, true));
+    // struct S { string Name; } -- a reference-type field is not unmanaged.
+    auto stringDef = MakeDefinition(compilation, "String", "System", TS::TypeKind::Class,
+                                    nullptr, TS::KnownTypeCode::String);
+    TS::TestSupport::LookupField refField("Name", stringDef, compilation);
+    auto s2Def = MakeDefinition(compilation, "S2", "Ns", TS::TypeKind::Struct);
+    s2Def->SetFields({ &refField });
+    EXPECT_FALSE(TS::IsUnmanagedType(*s2Def, true));
+}
+
+TEST(TypeSystemExtensionsTest, IsUnmanagedTypeSelfReferencingStructIsFalse) {
+    LookupCompilation compilation;
+    // struct S { S[] Next; } -- the array field's type is NOT the struct itself
+    // (an ArrayType has no definition), so this walks the array type -> false.
+    auto sDef = MakeDefinition(compilation, "S", "Ns", TS::TypeKind::Struct);
+    auto arrayOfType = std::make_shared<TS::ArrayType>(sDef);
+    TS::TestSupport::LookupField arrayField("Next", arrayOfType, compilation);
+    sDef->SetFields({ &arrayField });
+    EXPECT_FALSE(TS::IsUnmanagedType(*sDef, true));
+    // The direct self-cycle: a struct whose field type IS the struct itself.
+    auto selfDef = MakeDefinition(compilation, "S3", "Ns", TS::TypeKind::Struct);
+    TS::TestSupport::LookupField selfField("Inner", selfDef, compilation);
+    selfDef->SetFields({ &selfField });
+    EXPECT_FALSE(TS::IsUnmanagedType(*selfDef, true));
+}
+
+TEST(TypeSystemExtensionsTest, IsUnmanagedTypeNullableOfTRecursesWithGenericsGate) {
+    LookupCompilation compilation;
+    auto intDef = MakeDefinition(compilation, "Int32", "System", TS::TypeKind::Struct,
+                                 nullptr, TS::KnownTypeCode::Int32);
+    auto stringDef = MakeDefinition(compilation, "String", "System", TS::TypeKind::Class,
+                                     nullptr, TS::KnownTypeCode::String);
+    // The real System.Nullable<T> shape: the definition is a Struct with the type
+    // parameter T and the instance field `T value` (the field the walk specializes
+    // through the ParameterizedType's substitution).
+    auto tp = std::make_shared<TS::TestSupport::LookupTypeParameter>("T");
+    tp->SetIndex(0);
+    tp->SetOwnerType(TS::SymbolKind::TypeDefinition);
+    auto nullableDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        "Nullable`1", "System", TS::FullTypeName("System.Nullable`1"), TS::TypeKind::Struct,
+        TS::Accessibility::Public, compilation, nullptr, TS::KnownTypeCode::NullableOfT);
+    nullableDef->SetTypeParameters({ tp.get() });
+    TS::TestSupport::LookupField valueField("value", std::const_pointer_cast<TS::IType>(
+                                                                   std::static_pointer_cast<TS::IType>(tp)),
+                                           compilation);
+    nullableDef->SetFields({ &valueField });
+    // The ParameterizedTypes are heap-owned (the GetMembersHelper specialization path
+    // aliases the base type through shared_from_this -- the enable_shared_from_this
+    // convention every test fixture carrying ITypes follows).
+    // Nullable<int> is unmanaged: the specialized `value` field type is Int32.
+    auto nullableInt = std::make_shared<TS::ParameterizedType>(
+        nullableDef, std::vector<TS::ITypePtr>{intDef});
+    EXPECT_TRUE(TS::IsUnmanagedType(*nullableInt, true));
+    // Nullable<string> is not: `value` specializes to String.
+    auto nullableString = std::make_shared<TS::ParameterizedType>(
+        nullableDef, std::vector<TS::ITypePtr>{stringDef});
+    EXPECT_FALSE(TS::IsUnmanagedType(*nullableString, true));
+    // With allowGenerics=false a generic struct is NOT unmanaged regardless of its
+    // fields (the `!allowGenerics && def.TypeParameterCount > 0` gate first).
+    EXPECT_TRUE(TS::IsUnmanagedType(*nullableInt, true));
+    EXPECT_FALSE(TS::IsUnmanagedType(*nullableInt, false));
+}
+
+TEST(TypeSystemExtensionsTest, IsUnmanagedTypeClassAndInterfaceAreFalse) {
+    LookupCompilation compilation;
+    auto classDef = MakeDefinition(compilation, "String", "System", TS::TypeKind::Class,
+                                   nullptr, TS::KnownTypeCode::String);
+    EXPECT_FALSE(TS::IsUnmanagedType(*classDef, true));
+    auto ifaceDef = MakeDefinition(compilation, "I", "Ns", TS::TypeKind::Interface);
+    EXPECT_FALSE(TS::IsUnmanagedType(*ifaceDef, true));
+}
