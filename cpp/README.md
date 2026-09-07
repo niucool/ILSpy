@@ -1924,7 +1924,21 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   back end: the `ExpressionBuilder`/`StatementBuilder`/`CallBuilder` (the
   resolver-checked translation from ILAst to the C# AST), the ~15 AST
   prettification transforms, and the `RequiredNamespaceCollector`. The
-  translated-value foundation layer of that back end landed:
+  `DecompilerSettings` bag (the full ICSharpCode.Decompiler/DecompilerSettings.cs
+  property class with the C# `LanguageVersion` enum: 121 compare-then-write
+  accessor pairs over the C# source's own field spellings -- two source typos
+  preserved -- the `LifetimeAnnotations` obsolete alias, the SetLanguageVersion
+  if-ladder with the union-over-newer-blocks rule, the GetMinimumRequiredVersion
+  ladder with the source's own three-gated-field omissions, the lazy
+  `CreateAllman` `CSharpFormattingOptions` default, and `Clone`, with the
+  `INotifyPropertyChanged` event the documented deferral) landed as the ctor
+  prerequisite the ExpressionBuilder/DecompileRun slices consume; verified
+  against the tables generated from the source and cross-checked against the
+  shipped ilspycmd 11.0 engine (which is NEWER here than this repo: it carries
+  a CSharp1 gating block, gates switchOnReadOnlySpanChar at CSharp11, and
+  spells the two irregular fields `objectOrCollectionInitializers` /
+  `introducePrivateProtectedAccessibility` -- the fixture header documents
+  each). The translated-value foundation layer of that back end landed:
   `Decompiler/CSharp/TranslatedExpression.{hpp,cpp}` (the C#
   `ExpressionWithILInstruction` / `ExpressionWithResolveResult` /
   `TranslatedExpression` wrapper structs with `UnwrapChild`, whose

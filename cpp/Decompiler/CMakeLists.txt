@@ -5,6 +5,7 @@
 # not under a subdirectory).
 target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/SingleFileBundle.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/DecompilerSettings.cpp
 )
 
 add_subdirectory(Util)
