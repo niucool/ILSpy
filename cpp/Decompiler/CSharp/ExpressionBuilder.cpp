@@ -21,6 +21,7 @@
 
 #include "Decompiler/CSharp/ExpressionBuilder.hpp"
 
+#include "Decompiler/CSharp/CallBuilder.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
 #include "Decompiler/CSharp/Syntax/AstType.hpp"
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
@@ -51,6 +52,8 @@
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/CSharp/Transforms/AddCheckedBlocks.hpp"
+#include "Decompiler/CSharp/Transforms/ReplaceMethodCallsWithOperators.hpp"
+#include "Decompiler/CSharp/Syntax/OperatorDeclaration.hpp"
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
 #include "Decompiler/IL/Instructions/DefaultValue.hpp"
 #include "Decompiler/IL/ConversionKind.hpp"
@@ -70,10 +73,12 @@
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
+#include "Decompiler/IL/Instructions/CompoundAssignmentInstruction.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdcDecimal.hpp"
 #include "Decompiler/Semantics/ConversionFactories.hpp"
+#include "Decompiler/TypeSystem/IParameter.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
@@ -97,6 +102,7 @@
 #include "Decompiler/TypeSystem/TupleType.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
+#include "Decompiler/CSharp/Syntax/SyntaxExtensions.hpp"
 #include "Decompiler/Util/CSharpPrimitiveCast.hpp"
 
 #include <cassert>
@@ -489,6 +495,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitComp(inst, context);
         case IL::OpCode::BinaryNumericInstruction:
             return VisitBinaryNumericInstruction(inst, context);
+        case IL::OpCode::UserDefinedCompoundAssign:
+            return VisitUserDefinedCompoundAssign(inst, context);
         case IL::OpCode::SizeOf:
             return VisitSizeOf(inst, context);
         case IL::OpCode::LdTypeToken:
@@ -2966,6 +2974,254 @@ TranslatedExpression ExpressionBuilder::VisitLocAllocSpan(IL::ILInstruction* ins
         TranslateLocAllocSpan(locAllocSpan, context.TypeHint, elementType);
     return WithRR(WithILInstruction(*expr, inst),
                   std::make_shared<Sem::ResolveResult>(locAllocSpan->Type));
+}
+
+// ---------------------------------------------------------------------------
+// The user-defined compound-assignment arm (the VisitUserDefinedCompoundAssign
+// slice) and the LdObj dereference helper it shares with the later LdObj arm
+
+// The C# `ExpressionWithResolveResult LdObj(ILInstruction address, IType
+// loadType)` (ExpressionBuilder.cs lines 2894-2962). See the header comment
+// for the arm contract.
+ExpressionWithResolveResult ExpressionBuilder::LdObj(IL::ILInstruction* address,
+                                                     const TS::IType& loadType)
+{
+    TS::ITypePtr addressTypeHint;
+    if (address->ResultType() == IL::StackType::Ref)
+        addressTypeHint = std::make_shared<TS::ByReferenceType>(TS::ITypePtr(
+            const_cast<TS::IType&>(loadType).shared_from_this()));
+    else
+        addressTypeHint = std::make_shared<TS::PointerType>(TS::ITypePtr(
+            const_cast<TS::IType&>(loadType).shared_from_this()));
+    TranslatedExpression target = Translate(address, addressTypeHint.get());
+    if (TS::IsCompatiblePointerTypeForMemoryAccess(
+            const_cast<TS::IType&>(target.Type()),
+            const_cast<TS::IType&>(loadType)))
+    {
+        if (auto* dirExpr = dynamic_cast<Syntax::DirectionExpression*>(target.Expression()))
+        {
+            // we can dereference the managed reference by stripping away the 'ref'
+            TranslatedExpression unwrapped = target.UnwrapChild(dirExpr->Expression());
+            return ExpressionWithResolveResult(unwrapped.Expression(),
+                                               unwrapped.ResolveResult());
+        }
+        if (auto* pointerType = dynamic_cast<const TS::PointerType*>(&target.Type()))
+        {
+            if (auto* uoe = dynamic_cast<Syntax::UnaryOperatorExpression*>(target.Expression());
+                uoe != nullptr && uoe->Operator() == Syntax::UnaryOperatorType::AddressOf)
+            {
+                // We can dereference the pointer by stripping away the '&'
+                TranslatedExpression unwrapped = target.UnwrapChild(uoe->Expression());
+                return ExpressionWithResolveResult(unwrapped.Expression(),
+                                                   unwrapped.ResolveResult());
+            }
+            // Dereference the existing pointer
+            return WithRR(
+                *new Syntax::UnaryOperatorExpression(
+                    target.Expression(), Syntax::UnaryOperatorType::Dereference),
+                std::make_shared<Sem::ResolveResult>(pointerType->Element()));
+        }
+        // reference type behind non-DirectionExpression?
+        // this case should be impossible, but we can use a pointer cast
+        // just to make sure
+        target = target.ConvertTo(
+            *std::make_shared<TS::PointerType>(TS::ITypePtr(
+                const_cast<TS::IType&>(loadType).shared_from_this())),
+            *this);
+        return WithRR(
+            *new Syntax::UnaryOperatorExpression(
+                target.Expression(), Syntax::UnaryOperatorType::Dereference),
+            std::make_shared<Sem::ResolveResult>(TS::ITypePtr(
+                const_cast<TS::IType&>(loadType).shared_from_this())));
+    }
+    // We need to cast the pointer type:
+    if (dynamic_cast<Syntax::DirectionExpression*>(target.Expression()) != nullptr)
+    {
+        target = target.ConvertTo(
+            *std::make_shared<TS::ByReferenceType>(TS::ITypePtr(
+                const_cast<TS::IType&>(loadType).shared_from_this())),
+            *this);
+    }
+    else if (!TS::IsUnmanagedType(loadType, settings->IntroduceUnmanagedConstraint()))
+    {
+        // Use: Unsafe.Read<T>(void*)
+        target = target.ConvertTo(
+            *std::make_shared<TS::PointerType>(
+                const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Void))
+                    .shared_from_this()),
+            *this, false, true);
+        TranslatedExpression intrinsic =
+            CallUnsafeIntrinsic(
+                "Read", {target.Expression()}, loadType, nullptr,
+                std::vector<TS::ITypePtr>{
+                    const_cast<TS::IType&>(loadType).shared_from_this()});
+        return ExpressionWithResolveResult(intrinsic.Expression(),
+                                           intrinsic.ResolveResult());
+    }
+    else
+    {
+        target = target.ConvertTo(
+            *std::make_shared<TS::PointerType>(TS::ITypePtr(
+                const_cast<TS::IType&>(loadType).shared_from_this())),
+            *this);
+    }
+    if (auto* dirExpr = dynamic_cast<Syntax::DirectionExpression*>(target.Expression()))
+    {
+        TranslatedExpression unwrapped = target.UnwrapChild(dirExpr->Expression());
+        return ExpressionWithResolveResult(unwrapped.Expression(),
+                                           unwrapped.ResolveResult());
+    }
+    return WithRR(
+        *new Syntax::UnaryOperatorExpression(target.Expression(),
+                                             Syntax::UnaryOperatorType::Dereference),
+        std::make_shared<Sem::ResolveResult>(TS::ITypePtr(
+            const_cast<TS::IType&>(loadType).shared_from_this())));
+}
+
+// The C# `protected internal override TranslatedExpression
+// VisitUserDefinedCompoundAssign(UserDefinedCompoundAssign inst, TranslationContext
+// context)` (ExpressionBuilder.cs lines 1912-1998). See the header comment for
+// the arm contract.
+TranslatedExpression ExpressionBuilder::VisitUserDefinedCompoundAssign(
+    IL::ILInstruction* inst, TranslationContext context)
+{
+    auto* compoundAssign = static_cast<IL::UserDefinedCompoundAssign*>(inst);
+    if (!compoundAssign->Method)
+    {
+        // The C# node's `readonly IMethod Method` is never null; the port's
+        // seed string-stand-in construction form (TransformAssignment's
+        // Call-based folds) carries no resolved method, and the C# Visit
+        // consumes the method's parameters/return type unconditionally -- a
+        // loud deferral is the only faithful behavior for the stand-in.
+        throw std::logic_error(
+            "VisitUserDefinedCompoundAssign: the seed string stand-in node has "
+            "no resolved IMethod; the resolved-method construction form is "
+            "required for the C# back end");
+    }
+    const TS::IMethod& method = *compoundAssign->Method;
+    bool isSpanBasedStringConcat = CallBuilder::IsSpanBasedStringConcat(method);
+    const TS::IType* loadType;
+    if (isSpanBasedStringConcat)
+    {
+        loadType = &compilation->FindType(KnownTypeCode::String);
+    }
+    else
+    {
+        // The C# `inst.Method.Parameters[0].Type`.
+        const auto& parameters = method.Parameters();
+        if (parameters.empty() || parameters[0] == nullptr)
+            throw std::out_of_range("VisitUserDefinedCompoundAssign: the operator "
+                                    "method has no first parameter");
+        loadType = &parameters[0]->Type();
+    }
+
+    ExpressionWithResolveResult target;
+    if (compoundAssign->TargetKind == IL::CompoundTargetKind::Address)
+    {
+        target = LdObj(compoundAssign->Target.get(), *loadType);
+    }
+    else
+    {
+        TranslatedExpression translated = Translate(compoundAssign->Target.get(), loadType);
+        target = ExpressionWithResolveResult(translated.Expression(),
+                                             translated.ResolveResult());
+    }
+    auto opType = Syntax::OperatorDeclaration::GetOperatorType(method.Name());
+    if (opType.has_value() && Syntax::OperatorDeclaration::IsChecked(*opType))
+    {
+        target.Expression()->AddAnnotation(Transforms::CheckedAnnotationHandle());
+    }
+    else if (Transforms::ReplaceMethodCallsWithOperators::HasCheckedEquivalent(method))
+    {
+        target.Expression()->AddAnnotation(Transforms::UncheckedAnnotationHandle());
+    }
+    if (IL::UserDefinedCompoundAssign::IsStringConcat(method))
+    {
+        assert(method.Parameters().size() == 2
+               && "string.Concat compound assign must have two parameters");
+        Syntax::Expression* valueExpr = nullptr;
+        std::shared_ptr<Sem::ResolveResult> valueResolveResult;
+        auto* newObj = dynamic_cast<IL::Call*>(compoundAssign->Value.get());
+        if (isSpanBasedStringConcat && newObj != nullptr && newObj->IsNewObj
+            && newObj->Arguments.size() == 1
+            && newObj->Arguments[0]->Op == IL::OpCode::AddressOf
+            && newObj->Arguments[0]->ChildCount() == 1)
+        {
+            // `inst.Value is NewObj { Arguments: [AddressOf addressOf] }` --
+            // the port has no dedicated AddressOf node class, so the value's
+            // single child (the wrapped computation) is read generically.
+            const TS::IType& charType = compilation->FindType(KnownTypeCode::Char);
+            TranslatedExpression value = Translate(
+                newObj->Arguments[0]->GetChild(0),
+                &charType).ConvertTo(const_cast<TS::IType&>(charType), *this);
+            valueExpr = value.Expression();
+            valueResolveResult = SharedResolveResultAnnotation(*value.Expression());
+        }
+        else
+        {
+            const auto& concatParams = method.Parameters();
+            if (concatParams.size() < 2 || concatParams[1] == nullptr)
+                throw std::out_of_range("VisitUserDefinedCompoundAssign: the "
+                                        "string.Concat method has no second parameter");
+            TranslatedExpression value =
+                Translate(compoundAssign->Value.get())
+                    .ConvertTo(const_cast<TS::IType&>(concatParams[1]->Type()), *this,
+                               false, true);
+            valueExpr = Syntax::Detach(Transforms::ReplaceMethodCallsWithOperators::
+                                           RemoveRedundantToStringInConcat(
+                                               value.Expression(), method, true));
+            valueResolveResult = SharedResolveResultAnnotation(*value.Expression());
+        }
+        auto* assignment = new Syntax::AssignmentExpression(
+            target.Expression(), Syntax::AssignmentOperatorType::Add, valueExpr);
+        return WithILInstruction(
+            WithRR(*assignment,
+                   std::make_shared<Sem::OperatorResolveResult>(
+                       const_cast<TS::IType&>(method.ReturnType()).shared_from_this(),
+                       TS::ExpressionType::AddAssign, &method, compoundAssign->IsLifted,
+                       std::vector<std::shared_ptr<Sem::ResolveResult>>{
+                           SharedResolveResultAnnotation(*target.Expression()),
+                           valueResolveResult})),
+            inst);
+    }
+    if (method.Parameters().size() == 2)
+    {
+        const auto& parameters = method.Parameters();
+        TranslatedExpression value =
+            Translate(compoundAssign->Value.get())
+                .ConvertTo(const_cast<TS::IType&>(parameters[1]->Type()), *this);
+        std::optional<Syntax::AssignmentOperatorType> op =
+            GetAssignmentOperatorTypeFromMetadataName(method.Name(), *settings);
+        assert(op.has_value() && "the operator name must map to an assignment operator");
+
+        auto* assignment = new Syntax::AssignmentExpression(
+            target.Expression(), *op, value.Expression());
+        return WithILInstruction(
+            WithRR(*assignment,
+                   std::make_shared<Sem::OperatorResolveResult>(
+                       const_cast<TS::IType&>(method.ReturnType()).shared_from_this(),
+                       Syntax::AssignmentExpression::GetLinqNodeType(*op, false), &method,
+                       compoundAssign->IsLifted,
+                       std::vector<std::shared_ptr<Sem::ResolveResult>>{
+                           SharedResolveResultAnnotation(*target.Expression()),
+                           SharedResolveResultAnnotation(*value.Expression())})),
+            inst);
+    }
+    std::optional<Syntax::UnaryOperatorType> op = GetUnaryOperatorTypeFromMetadataName(
+        method.Name(),
+        compoundAssign->EvalMode == IL::CompoundEvalMode::EvaluatesToOldValue);
+    assert(op.has_value() && "the operator name must map to a unary operator");
+
+    auto* unary = new Syntax::UnaryOperatorExpression(target.Expression(), *op);
+    return WithILInstruction(
+        WithRR(*unary,
+               std::make_shared<Sem::OperatorResolveResult>(
+                   const_cast<TS::IType&>(method.ReturnType()).shared_from_this(),
+                   Syntax::UnaryOperatorExpression::GetLinqNodeType(*op, false), &method,
+                   compoundAssign->IsLifted,
+                   std::vector<std::shared_ptr<Sem::ResolveResult>>{
+                       SharedResolveResultAnnotation(*target.Expression())})),
+        inst);
 }
 
 // ---------------------------------------------------------------------------

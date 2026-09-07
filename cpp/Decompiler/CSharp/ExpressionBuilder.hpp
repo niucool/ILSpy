@@ -520,6 +520,19 @@ public:
         Syntax::BinaryOperatorType op, const std::shared_ptr<Sem::ResolveResult>& left,
         const std::shared_ptr<Sem::ResolveResult>& right) const;
 
+    // The C# `protected internal override TranslatedExpression
+    // VisitUserDefinedCompoundAssign(UserDefinedCompoundAssign inst,
+    // TranslationContext context)` (ExpressionBuilder.cs lines 1912-1998): the
+    // user-defined compound-assignment render -- the string-concat detection
+    // (span-based vs the plain `s += value` shape), the Address target kind's
+    // LdObj dereference, the checked/unchecked target annotations (the
+    // op_Checked... name / the HasCheckedEquivalent twin), the 2-parameter
+    // AssignmentExpression render through GetAssignmentOperatorTypeFromMetadata
+    // Name, and the 1-parameter UnaryOperatorExpression render through
+    // GetUnaryOperatorTypeFromMetadataName (EvaluatesToOldValue = postfix).
+    TranslatedExpression VisitUserDefinedCompoundAssign(IL::ILInstruction* inst,
+                                                        TranslationContext context);
+
     // -- The self-contained statics ----------------------------------------------------
 
     // The C# `internal static AssignmentOperatorType?
@@ -579,6 +592,15 @@ public:
     // The C# `static TranslatedExpression LdcI4(ICompilation compilation, int val)`
     // (a private TranslatedExpression helper): the int32 literal over its constant.
     static TranslatedExpression LdcI4(const TS::ICompilation& compilation, std::int32_t val);
+
+    // The C# `ExpressionWithResolveResult LdObj(ILInstruction address, IType
+    // loadType)` (a private helper, ExpressionBuilder.cs lines 2894-2962): the
+    // dereference render -- translate the address with the byref/pointer type
+    // hint, then either unwrap the managed-reference/`&`-wrapper child, render
+    // the `*pointer` dereference, or re-type through ConvertTo (the incompatible
+    // pointer arm with the Unsafe.Read<T> intrinsic for a managed load type).
+    // Declared private in the C#; the port's no-visibility-level convention.
+    ExpressionWithResolveResult LdObj(IL::ILInstruction* address, const TS::IType& loadType);
 
     // -- The field surface (the C# `internal readonly` fields) ------------------------
 

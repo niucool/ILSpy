@@ -2312,6 +2312,60 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   standing skips / zero failures, and all four CLI baselines unchanged
   (--csharp mscorlib 10106366 bytes, --il byte-identical to the
   41246545-byte real-ilspycmd gold, -l c 109438, --json-alone rc 64).
+- **`ExpressionBuilder` VisitUserDefinedCompoundAssign arm + the LdObj helper +
+  its support statics** -- `VisitUserDefinedCompoundAssign`
+  (ExpressionBuilder.cs lines 1912-1998: the span-based vs plain
+  string.Concat detection through `CallBuilder.IsSpanBasedStringConcat`, the
+  Address target kind's `LdObj` dereference, the op_Checked...-name
+  CheckedAnnotation / `ReplaceMethodCallsWithOperators.HasCheckedEquivalent`
+  twin UncheckedAnnotation on the target, the 2-parameter AssignmentExpression
+  render through `GetAssignmentOperatorTypeFromMetadataName`, and the
+  1-parameter UnaryOperatorExpression render through
+  `GetUnaryOperatorTypeFromMetadataName` with EvaluatesToOldValue = postfix),
+  the private `LdObj` helper (lines 2894-2962: the byref/pointer type-hint
+  translate, the managed-reference/`&`-wrapper `UnwrapChild` dereference, the
+  `*pointer` render, the incompatible-pointer ConvertTo re-type with the
+  `Unsafe.Read<T>(void*)` intrinsic for a managed load type), and the
+  first slices of two CSharp classes: `CallBuilder::IsSpanBasedStringConcat`
+  (the static `string.Concat(ReadOnlySpan<char>...)` detector -- the Build
+  machinery deferred with the VisitCall arms) and
+  `ReplaceMethodCallsWithOperators::{HasCheckedEquivalent,
+  RemoveRedundantToStringInConcat, ToStringIsKnownEffectFree,
+  MatchToStringCallPattern}` (the checked-twin `DeclaringType.GetMethods`
+  walk; the ToStringCallPattern two-shape structural match with the
+  string-parameter gate, the by-ref-like/ordering/NullReferenceException/
+  struct-copy elimination rules and the 16-primitive+String effect-free
+  table), plus `IL::MethodRequiresCopyForReadonlyLValue` (the reference-type /
+  readonly-struct copy rule, the port's IMethod carrying no
+  ThisIsRefReadOnly metadata override yet so the readonly arm reads
+  false -- conservative) and `TypeUtils::IsCompatiblePointerTypeForMemoryAccess`
+  (the TypeWithElementType cast ported as the PointerType/ByReferenceType
+  dynamic-cast pair). The `UserDefinedCompoundAssign` IL node gained the C#
+  `readonly IMethod Method` as a real resolved-method shared_ptr (the seed
+  string stand-in remains the dump path and the transforms' construction
+  form; a seed node driven through the Visit throws the loud
+  `std::logic_error` deferral, since the C# Visit consumes the method
+  unconditionally), with the IMethod-taking `IsIncrementOrDecrement` /
+  `IsStringConcat` node statics and the ctor Debug asserts. Render facts
+  pinned by the tests: the checked-annotation arm is reachable only through
+  the unary op_CheckedIncrement/Decrement or concat shapes (the 2-parameter
+  assignment table has no op_CheckedXxx spellings, so a checked-name
+  2-parameter node would fail the C# Debug.Assert on
+  GetAssignmentOperatorTypeFromMetadataName); the incompatible-pointer +
+  managed-load-type LdObj arm renders `Unsafe.Read<string>(ptr) += "!"` (the
+  intrinsic invocation IS the compound assignment's left operand); byte*/bool
+  is pointer-compatible (bool loads as I4 with the same 1-byte size) while
+  byte*/int64 is not; and the port's ToStringCallPattern hand-writes the two
+  declarative shapes (the C# Pattern framework stays deferred). Verified by
+  15 new tests (the support matrices, the RemoveRedundantToStringInConcat
+  elimination rules over the three distinct outcomes -- effect-free both
+  positions, effect-full value type kept in both positions with the
+  struct-copy rule, reference type kept without a null-conditional and
+  removed with one -- and the five Visit drives) over the MinimalCorlib
+  fixture; full suite 12074 ran / 12072 passed / the 2 standing skips /
+  zero failures, and all four CLI baselines unchanged (--csharp mscorlib
+  10106366 bytes, --il byte-identical to the 41246545-byte real-ilspycmd
+  gold, -l c 109438, --json-alone rc 64).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

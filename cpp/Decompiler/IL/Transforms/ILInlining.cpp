@@ -93,6 +93,28 @@ ILInstruction* TopLevelStatement(const ILInstruction* inst) {
     return result;
 }
 
+// The C# `internal static bool MethodRequiresCopyForReadonlyLValue(IMethod
+// method, IType constrainedTo = null)` (IL/Transforms/ILInlining.cs line 438).
+// See the header comment for the ThisIsRefReadOnly deferral note.
+bool MethodRequiresCopyForReadonlyLValue(const TypeSystem::IMethod* method,
+                                         const TypeSystem::IType* constrainedTo) {
+    if (method == nullptr)
+        return true;
+    TypeSystem::ITypePtr declaringType = method->DeclaringType();
+    const TypeSystem::IType* type = constrainedTo;
+    if (type == nullptr)
+        type = declaringType.get();
+    if (type == nullptr)
+        return true;
+    // The C# `type.IsReferenceType == true` (the nullable-bool comparison):
+    // reference types are never implicitly copied.
+    if (type->IsReferenceType() == std::optional<bool>(true))
+        return false;
+    if (method->ThisIsRefReadOnly())
+        return false;
+    return true;
+}
+
 // True when `inst` sits in the constructor initializer (before the chained
 // `: base(...)`/`: this(...)` call). Faithful to the C#
 // ILInlining.IsInConstructorInitializer: a null function or an instruction

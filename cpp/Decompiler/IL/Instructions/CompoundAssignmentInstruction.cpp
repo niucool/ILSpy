@@ -31,6 +31,8 @@
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/Sign.hpp"
+#include "Decompiler/TypeSystem/TypeUtils.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
 
@@ -173,6 +175,65 @@ bool UserDefinedCompoundAssign::IsStringConcat(const Call* call) {
     return call->DeclaringType &&
            NullableLiftingTransform::IsKnownType(call->DeclaringType.get(),
                                                   TypeSystem::KnownTypeCode::String);
+}
+
+// The C# ctor form (the resolved-method construction form): the resolved
+// method populates the string stand-ins and the C# ctor's two Debug asserts
+// port as debug asserts over the IMethod-taking static helpers.
+UserDefinedCompoundAssign::UserDefinedCompoundAssign(
+    std::shared_ptr<TypeSystem::IMethod> method,
+    CompoundEvalMode evalMode,
+    std::unique_ptr<ILInstruction> target,
+    CompoundTargetKind targetKind,
+    std::unique_ptr<ILInstruction> value)
+    : CompoundAssignmentInstruction(OpCode::UserDefinedCompoundAssign, evalMode,
+        std::move(target), targetKind, std::move(value)),
+      Method(std::move(method)) {
+    assert((Method->IsOperator() || IsStringConcat(*Method))
+           && "Method must be an operator or string.Concat");
+    assert((evalMode == CompoundEvalMode::EvaluatesToNewValue
+            || IsIncrementOrDecrement(*Method, nullptr))
+           && "EvalMode must be EvaluatesToNewValue or the method an increment/decrement");
+    // The dump stand-ins: the C# WriteToCore prints the method through the
+    // ambience; the port's display form is the ReflectionName::Name the seed
+    // convention uses.
+    TypeSystem::ITypePtr declaring = Method->DeclaringType();
+    if (declaring)
+        MethodName = declaring->ReflectionName() + "::" + Method->Name();
+    else
+        MethodName = Method->Name();
+    MethodDeclaringType = declaring;
+}
+
+// The C# `public static bool IsIncrementOrDecrement(IMethod method,
+// DecompilerSettings? settings = null)` over the real method.
+bool UserDefinedCompoundAssign::IsIncrementOrDecrement(const TypeSystem::IMethod& method,
+                                                       const ILTransformSettings* settings) {
+    // The C# `if (!(method.IsOperator && method.IsStatic)) return false;`.
+    if (!method.IsOperator() || !method.IsStatic()) return false;
+    const std::string& name = method.Name();
+    // `op_Increment` / `op_Decrement` are always recognised (the C# 1.0
+    // increment/decrement operators).
+    if (name == "op_Increment" || name == "op_Decrement") return true;
+    // `op_CheckedIncrement` / `op_CheckedDecrement` are the C# 11.0 checked
+    // variants, recognised only when the CheckedOperators setting is on (the
+    // C# `settings?.CheckedOperators ?? true` -- a null settings is permissive,
+    // matching the C# `?? true`).
+    if (name == "op_CheckedIncrement" || name == "op_CheckedDecrement")
+        return settings == nullptr || settings->CheckedOperators;
+    return false;
+}
+
+// The C# `public static bool IsStringConcat(IMethod method)` over the real
+// method.
+bool UserDefinedCompoundAssign::IsStringConcat(const TypeSystem::IMethod& method) {
+    // The C# `method.Name == "Concat" && method.IsStatic && method.DeclaringType.
+    // IsKnownType(KnownTypeCode.String)`.
+    if (method.Name() != "Concat") return false;
+    if (!method.IsStatic()) return false;
+    TypeSystem::ITypePtr declaring = method.DeclaringType();
+    return declaring
+           && TypeSystem::IsKnownType(*declaring, TypeSystem::KnownTypeCode::String);
 }
 
 }  // namespace ILSpy::Decompiler::IL

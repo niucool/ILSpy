@@ -39,6 +39,12 @@
 
 #include "Decompiler/IL/Transforms/IILTransform.hpp"
 #include "Decompiler/IL/Transforms/StatementTransform.hpp"
+// The type-system method interface the free `MethodRequiresCopyForReadonlyLValue`
+// takes (the IL/Instructions headers' full-include convention; a nested
+// forward-declaration block would shadow the real `ILSpy::Decompiler::TypeSystem`
+// namespace).
+#include "Decompiler/TypeSystem/IMethod.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
 
 namespace ILSpy::Decompiler::IL {
 
@@ -101,6 +107,21 @@ bool IsInConstructorInitializer(const ILFunction* function, const ILInstruction*
 // inst) whose parent is a Block, or null when no such ancestor exists. Exposed so
 // the hoisted-constructor-argument null-guard fold can reuse the ancestor walk.
 ILInstruction* TopLevelStatement(const ILInstruction* inst);
+
+// The C# `internal static bool MethodRequiresCopyForReadonlyLValue(IMethod
+// method, IType constrainedTo = null)` (IL/Transforms/ILInlining.cs line 438):
+// whether calling `method` on a readonly lvalue requires an implicit copy --
+// always for a null method (the caller's `toStringMethod != null` guard pairs
+// with this C#-side default), never for a reference-type declaring type
+// (reference types are never implicitly copied) or a readonly-struct method,
+// otherwise yes. `constrainedTo` (the call's constrained prefix) wins over the
+// method's declaring type. The port's IMethod interface carries no
+// ThisIsRefReadOnly override for metadata methods yet, so the readonly-struct
+// arm reads false -- a readonly-struct method is treated as requiring the copy
+// (the conservative direction; the ReadonlyRefLike metadata shape is deferred
+// with the interface's remaining ref-read-only surface).
+bool MethodRequiresCopyForReadonlyLValue(const TypeSystem::IMethod* method,
+                                         const TypeSystem::IType* constrainedTo = nullptr);
 
 class ILInlining : public IILTransform, public IStatementTransform {
 public:

@@ -76,6 +76,11 @@
 #include "Decompiler/IL/OpCode.hpp"
 #include "Decompiler/IL/StackType.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+// The resolved-method surface: the C# `readonly IMethod Method` needs the full
+// interface (the inline ResultType reads Method->ReturnType through
+// TypeUtils::GetStackType).
+#include "Decompiler/TypeSystem/IMethod.hpp"
+#include "Decompiler/TypeSystem/TypeUtils.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/Sign.hpp"
 
@@ -319,18 +324,25 @@ private:
 // operator call (`target op= value` where op is a user-defined operator, or
 // `target++`/`++target` for op_Increment/op_Decrement). Faithful to the C#
 // UserDefinedCompoundAssign (CompoundAssignmentInstruction; the generated node
-// overrides ComputeFlags/DirectFlags to add SideEffect|MayThrow). This port
-// has no IMethod, so the C# `readonly IMethod Method` is modelled as the
-// resolved method name + declaring type + the return StackType (Method.
-// ReturnType.GetStackType() drives ResultType); the IsLifted flag is hardcoded
-// false, faithful to the C# `public bool IsLifted => false; // TODO`.
+// overrides ComputeFlags/DirectFlags to add SideEffect|MayThrow). The C#
+// `readonly IMethod Method` is carried as the resolved `Method` shared_ptr; the
+// seed's string stand-in (resolved method name + declaring type + the return
+// StackType) remains the dump/WriteTo path and the transforms' construction
+// form, populated from the resolved method when the real one is supplied. The
+// IsLifted flag is a settable field defaulting false, faithful to the C#
+// `public bool IsLifted => false; // TODO`.
 //
 // The IsIncrementOrDecrement / IsStringConcat static helpers are the gates the
 // TransformAssignment folds consult on the operator Call BEFORE building the
-// node (the C# takes the IMethod; this port takes the Call, which carries the
-// method metadata -- IsOperator, IsInstanceCall, MethodName, DeclaringType).
+// node (this port takes the Call, which carries the method metadata --
+// IsOperator, IsInstanceCall, MethodName, DeclaringType); the C# IMethod
+// overloads are the ones the C# node itself carries and the Visit arm consumes.
 // They are declared here (forward-declared Call) and implemented out-of-line in
 // CompoundAssignmentInstruction.cpp.
+//
+// The string stand-in construction form remains "tested-but-not-yet-wired" in
+// the transforms; the resolved-method construction form is what the Expression
+// Builder's VisitUserDefinedCompoundAssign arm drives.
 //
 // This is a tested-but-not-yet-wired foundation (the NumericCompoundAssign /
 // MatchInstruction / UsingInstruction precedent): no pipeline transform
@@ -341,25 +353,37 @@ private:
 // TransformAssignment increment/decrement folds (D134's first deferred target).
 class UserDefinedCompoundAssign : public CompoundAssignmentInstruction {
 public:
+	// The C# `public readonly IMethod Method` -- the resolved operator method
+	// the Visit arm consumes (the parameter types drive the load type and the
+	// value conversion, ReturnType drives the OperatorResolveResult and the
+	// ResultType, the name drives the operator lookups, and the declaring
+	// type's method walk drives HasCheckedEquivalent). Null for the seed
+	// stand-in construction form, whose string fields take over everywhere
+	// the real method is consulted.
+	std::shared_ptr<TypeSystem::IMethod> Method;
 	// The resolved method name ("Namespace.Type::Method"), the faithful
 	// stand-in for the C# `IMethod` (this port models a method by its resolved
 	// name + declaring type, like Call). The seed and the dump consult the part
-	// after "::" to derive the C# operator.
+	// after "::" to derive the C# operator. Populated from the resolved method
+	// when the real one is supplied (the ReflectionName::Name display form the
+	// C# `Method.WriteTo` prints through the ambience).
 	std::string MethodName;
 	// The resolved declaring type of the method (the C# `Method.DeclaringType`).
 	// Carried so the IsStringConcat helper and a future HandleCompoundAssign
 	// string.Concat case can consult it without a MetadataFile handle.
 	TypeSystem::ITypePtr MethodDeclaringType;
 	// The method's return StackType (the C# `Method.ReturnType.GetStackType()`).
-	// Drives ResultType -- a user-defined compound assign evaluates to the
-	// operator's return type (e.g. op_Increment returns the type, so `target++`
-	// evaluates to that type).
+	// Drives ResultType when the resolved method is absent -- a user-defined
+	// compound assign evaluates to the operator's return type (e.g. op_Increment
+	// returns the type, so `target++` evaluates to that type).
 	StackType MethodReturnType = StackType::Unknown;
 	// Faithful to the C# `public bool IsLifted => false; // TODO: implement
 	// lifted user-defined compound assignments`. A settable field so a future
 	// resolver-backed path can mark a lifted user-defined operator.
 	bool IsLifted = false;
 
+	// The seed stand-in construction form (the transforms' form): resolved
+	// method name + declaring type + return StackType.
 	UserDefinedCompoundAssign(std::string methodName,
 	                          TypeSystem::ITypePtr methodDeclaringType,
 	                          StackType methodReturnType,
@@ -372,6 +396,20 @@ public:
 		  MethodName(std::move(methodName)),
 		  MethodDeclaringType(std::move(methodDeclaringType)),
 		  MethodReturnType(methodReturnType) {}
+
+	// The C# ctor form (`UserDefinedCompoundAssign(IMethod method,
+	// CompoundEvalMode evalMode, ILInstruction target, CompoundTargetKind
+	// targetKind, ILInstruction value)`): the resolved method populates the
+	// string stand-ins (the C# WriteToCore prints the method through the
+	// ambience, so the dump fields derive from it) and the C# ctor's two Debug
+	// asserts port as debug asserts over the IMethod-taking static helpers.
+	// Implemented out-of-line in the .cpp (the stand-in derivation needs the
+	// Ambience-free ReflectionName/Name display).
+	UserDefinedCompoundAssign(std::shared_ptr<TypeSystem::IMethod> method,
+	                          CompoundEvalMode evalMode,
+	                          std::unique_ptr<ILInstruction> target,
+	                          CompoundTargetKind targetKind,
+	                          std::unique_ptr<ILInstruction> value);
 
 	// Faithful to the C# ComputeFlags/DirectFlags: base (Target.Flags |
 	// Value.Flags) | SideEffect | MayThrow (a user-defined operator call can
@@ -386,7 +424,32 @@ public:
 	}
 	// Faithful to the C# `public override StackType ResultType => Method.
 	// ReturnType.GetStackType()`.
-	StackType ResultType() const override { return MethodReturnType; }
+	// Faithful to the C# `public override StackType ResultType => Method.
+	// ReturnType.GetStackType()`: the resolved method's return type when
+	// present, else the seed stand-in field.
+	StackType ResultType() const override {
+		if (Method)
+			return ::ILSpy::Decompiler::TypeSystem::GetStackType(Method->ReturnType());
+		return MethodReturnType;
+	}
+
+	// The C# `public static bool IsIncrementOrDecrement(IMethod method,
+	// DecompilerSettings? settings = null)`: the operator overload is a static
+	// operator named op_Increment / op_Decrement (always), or
+	// op_CheckedIncrement / op_CheckedDecrement (only when the C# 11.0
+	// CheckedOperators setting is on, matching the C# `settings?.CheckedOperators
+	// ?? true`). The C# takes the IMethod; the Call variant below mirrors
+	// it over the resolved-method stand-in (the ILTransformSettings stand-in
+	// -- the IL layer does not see the CSharp-layer DecompilerSettings).
+	static bool IsIncrementOrDecrement(const TypeSystem::IMethod& method,
+	                                   const ILTransformSettings* settings);
+
+	// The C# `public static bool IsStringConcat(IMethod method)`: the operator
+	// method is a static `string.Concat` (the C# compound-assign lowering of
+	// `s += "..."` rewrites the Concat call into a UserDefinedCompoundAssign
+	// that renders as `s += value`). Recognised by the method name "Concat" +
+	// a static method + a System.String declaring type.
+	static bool IsStringConcat(const TypeSystem::IMethod& method);
 
 	// Faithful port of UserDefinedCompoundAssign.IsIncrementOrDecrement: the
 	// operator Call is a static operator overload named op_Increment /

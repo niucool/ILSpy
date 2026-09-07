@@ -582,4 +582,25 @@ inline bool IsCompatibleTypeForMemoryAccess(IType& memoryType, IType& accessType
     return memory->Kind() == TypeKind::Unknown || access->Kind() == TypeKind::Unknown;
 }
 
+// Port of TypeUtils.IsCompatiblePointerTypeForMemoryAccess(IType, IType)
+// (TypeUtils.cs line 223): whether reading/writing an element of accessType
+// from the pointer is equivalent to reading/writing an element of the
+// pointer's element type. The C# `((TypeWithElementType)pointerType).
+// ElementType` cast ports to the PointerType/ByReferenceType dynamic-cast pair
+// (the port carries the two leaf classes with no shared base); a type that is
+// neither answers false before the memory-access comparison. NON-CONST inputs
+// (the IsCompatibleTypeForMemoryAccess convention).
+inline bool IsCompatiblePointerTypeForMemoryAccess(IType& pointerType,
+                                                   IType& accessType) {
+    ITypePtr memoryType;
+    if (auto* ptr = dynamic_cast<PointerType*>(&pointerType)) {
+        memoryType = ptr->Element();
+    } else if (auto* byRef = dynamic_cast<ByReferenceType*>(&pointerType)) {
+        memoryType = byRef->Element();
+    } else {
+        return false;
+    }
+    return IsCompatibleTypeForMemoryAccess(*memoryType, accessType);
+}
+
 } // namespace ILSpy::Decompiler::TypeSystem
