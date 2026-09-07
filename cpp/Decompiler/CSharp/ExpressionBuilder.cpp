@@ -51,6 +51,8 @@
 #include "Decompiler/CSharp/Transforms/AddCheckedBlocks.hpp"
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
 #include "Decompiler/IL/Instructions/DefaultValue.hpp"
+#include "Decompiler/IL/ConversionKind.hpp"
+#include "Decompiler/IL/Instructions/Conv.hpp"
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
@@ -84,6 +86,7 @@
 #include "Decompiler/Semantics/TypeIsResolveResult.hpp"
 #include "Decompiler/Semantics/TypeOfResolveResult.hpp"
 #include "Decompiler/TypeSystem/KnownTypeReference.hpp"
+#include "Decompiler/TypeSystem/ExpressionType.hpp"
 #include "Decompiler/TypeSystem/NullableType.hpp"
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
 #include "Decompiler/TypeSystem/TupleType.hpp"
@@ -374,6 +377,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitLdTypeToken(inst, context);
         case IL::OpCode::NewArr:
             return VisitNewArr(inst, context);
+        case IL::OpCode::Conv:
+            return VisitConv(inst, context);
         default:
             return Default(inst, context);
     }
@@ -822,6 +827,259 @@ TranslatedExpression ExpressionBuilder::ConvertArrayIndex(TranslatedExpression i
     }
     TS::ITypePtr targetType = FindArithmeticType(stackType, TS::GetSign(&input.Type()));
     return input.ConvertTo(*targetType, *this);
+}
+
+// The C# `protected internal override TranslatedExpression VisitConv(Conv inst,
+// TranslationContext context)` (ExpressionBuilder.cs lines 2227-2386): the numeric
+// conversion render. We're dealing with two conversions: a) the implicit one from
+// the argument's C# type to the conv's input stack type (oversized when widening,
+// undersized when narrowing), b) the conv instruction itself from the input stack
+// type to the target type. In C#, zero vs. sign-extension depends on the input
+// type, but in the ILAst conv instruction it depends on the output type --
+// however, in the conv.ovf instructions the .NET runtime behavior depends on the
+// input type (in violation of the ECMA-335 spec).
+TranslatedExpression ExpressionBuilder::VisitConv(IL::ILInstruction* inst,
+                                                 TranslationContext context)
+{
+    auto* conv = static_cast<IL::Conv*>(inst);
+    TS::Sign hintSign = conv->InputSign;
+    if (hintSign == TS::Sign::None)
+    {
+        hintSign = TS::GetSign(context.TypeHint);
+    }
+    TranslatedExpression arg =
+        Translate(conv->Argument.get(), FindArithmeticType(conv->InputType, hintSign).get());
+    const TS::IType& inputType = TS::GetUnderlyingType(arg.Type());
+    IL::StackType inputStackType = conv->InputType;
+
+    // The C# local function `IType GetType(KnownTypeCode typeCode)`: the FindType
+    // with the n(u)int preference over (U)IntPtr under the NativeIntegers setting,
+    // then the IsLifted Nullable<T> wrap.
+    auto GetType = [&](TS::KnownTypeCode typeCode) -> TS::ITypePtr
+    {
+        TS::ITypePtr type = const_cast<TS::IType&>(compilation->FindType(typeCode))
+                                .shared_from_this();
+        // Prefer n(u)int over (U)IntPtr
+        if (typeCode == TS::KnownTypeCode::IntPtr && settings->NativeIntegers()
+            && !type->Equals(*context.TypeHint))
+        {
+            type = TS::NInt();
+        }
+        else if (typeCode == TS::KnownTypeCode::UIntPtr && settings->NativeIntegers()
+                 && !type->Equals(*context.TypeHint))
+        {
+            type = TS::NUInt();
+        }
+        if (conv->IsLifted)
+        {
+            type = TS::Create(*compilation, *type);
+        }
+        return type;
+    };
+
+    if (conv->CheckForOverflow || conv->Kind == IL::ConversionKind::IntToFloat)
+    {
+        // We need to first convert the argument to the expected sign.
+        // We also need to perform any input narrowing conversion so that it doesn't
+        // get mixed up with the overflow check. Because casts with overflow check
+        // match C# semantics (zero/sign-extension depends on source type), we can
+        // just directly cast to the target type.
+        if (TS::GetSize(&inputType) > TS::GetSize(inputStackType)
+            || TS::GetSign(&inputType) != conv->InputSign)
+        {
+            arg = arg.ConvertTo(
+                *GetType(TS::ToKnownTypeCode(inputStackType, conv->InputSign)), *this);
+        }
+        TranslatedExpression result =
+            arg.ConvertTo(*GetType(TS::ToKnownTypeCode(conv->TargetType)), *this,
+                          conv->CheckForOverflow);
+        return WithILInstruction(result, conv);
+    }
+
+    switch (conv->Kind)
+    {
+        case IL::ConversionKind::StartGCTracking:
+            // A "start gc tracking" conversion is inserted in the ILAst whenever
+            // some instruction expects a managed pointer, but we pass an unmanaged
+            // pointer. We'll leave the C#-level conversion (from T* to ref T) to the
+            // consumer that expects the managed pointer.
+            return arg;
+        case IL::ConversionKind::StopGCTracking:
+            if (inputType.Kind() == TS::TypeKind::ByReference)
+            {
+                if (IsFixedVariableInstruction(*conv->Argument))
+                {
+                    // cast to corresponding pointer type:
+                    auto pointerType = std::make_shared<TS::PointerType>(
+                        static_cast<const TS::ByReferenceType&>(inputType).Element());
+                    TranslatedExpression result = arg.ConvertTo(*pointerType, *this);
+                    return WithILInstruction(result, conv);
+                }
+                else
+                {
+                    // emit Unsafe.AsPointer() intrinsic:
+                    auto pointerType = std::make_shared<TS::PointerType>(
+                        const_cast<TS::IType&>(
+                            compilation->FindType(TS::KnownTypeCode::Void))
+                            .shared_from_this());
+                    return CallUnsafeIntrinsic("AsPointer", {arg.Expression()},
+                                               *pointerType, conv);
+                }
+            }
+            else if (IL::IsIntegerType(TS::GetStackType(arg.Type())))
+            {
+                // ConversionKind.StopGCTracking should only be used with managed
+                // references, but it's possible that we're supposed to stop tracking
+                // something we just started to track.
+                return arg;
+            }
+            else
+            {
+                goto defaultArm;
+            }
+        case IL::ConversionKind::SignExtend:
+            // We just need to ensure the input type before the conversion is signed.
+            // Also, if the argument was translated into an oversized C# type, we need
+            // to perform the truncatation to the input stack type. An undersized C#
+            // type is handled just fine: if it is unsigned we'll zero-extend it to
+            // the width of the inputStackType here, and if it is signed we just
+            // combine the two sign-extensions into a single sign-extending
+            // conversion. Then we can just return the argument as-is: the
+            // ExpressionBuilder post-condition allows us to force our parent
+            // instruction to handle the actual sign-extension conversion (our caller
+            // may have more information to pick a better fitting target type).
+            if (TS::GetSign(&inputType) != TS::Sign::Signed
+                || ValueMightBeOversized(*arg.ResolveResult(), inputStackType))
+            {
+                arg = arg.ConvertTo(
+                    *GetType(TS::ToKnownTypeCode(inputStackType, TS::Sign::Signed)), *this);
+            }
+            return WithILInstruction(arg, conv);
+        case IL::ConversionKind::ZeroExtend:
+            // If overflow check cannot fail, handle this just like sign extension
+            // (except for swapped signs)
+            if (TS::GetSign(&inputType) != TS::Sign::Unsigned
+                || TS::GetSize(&inputType) > TS::GetSize(inputStackType))
+            {
+                arg = arg.ConvertTo(
+                    *GetType(TS::ToKnownTypeCode(inputStackType, TS::Sign::Unsigned)), *this);
+            }
+            return WithILInstruction(arg, conv);
+        case IL::ConversionKind::Nop:
+            // no need to generate any C# code for a nop conversion
+            return WithILInstruction(arg, conv);
+        case IL::ConversionKind::Truncate:
+            // There are three sizes involved here: A = inputType.GetSize(),
+            // B = inputStackType.GetSize(), C = TargetType.GetSize() (and C < B).
+            if (IL::IsSmallIntegerType(conv->TargetType))
+            {
+                // If the target type is a small integer type, IL will implicitly
+                // sign- or zero-extend the result after the truncation back to
+                // StackType.I4 (which means there's actually 3 conversions
+                // involved!). We must handle truncation to small integer types
+                // ourselves: our caller only sees the StackType.I4 and doesn't know
+                // to truncate to the small type.
+                if (TS::GetSize(&inputType) <= IL::GetSize(conv->TargetType)
+                    && TS::GetSign(&inputType) == IL::GetSign(conv->TargetType))
+                {
+                    // There's no actual truncation involved, and the result of the
+                    // Conv instruction is extended the same way as the original
+                    // instruction -> we can return arg directly.
+                    return WithILInstruction(arg, conv);
+                }
+                else
+                {
+                    // We need to actually truncate; *or* we need to change the sign
+                    // for the remaining extension to I4.
+                    goto defaultArm;  // Emit simple cast to inst.TargetType
+                }
+            }
+            else
+            {
+                // For non-small integer types, we can let the whole unchecked
+                // truncation get handled by our caller (using the ExpressionBuilder
+                // post-condition). Case 4 (left-over extension from implicit
+                // conversion) can also be handled by our caller.
+                return WithILInstruction(arg, conv);
+            }
+        case IL::ConversionKind::Invalid:
+            if (conv->InputType == IL::StackType::Unknown
+                && conv->TargetType == IL::PrimitiveType::None
+                && arg.Type().Kind() == TS::TypeKind::Unknown)
+            {
+                // Unknown -> O conversion. Our post-condition allows us to also use
+                // expressions with unknown type where O is expected, so avoid
+                // introducing an `(object)` cast because we're likely to cast back
+                // to the same unknown type, just in a signature context where we
+                // know that it's a class type.
+                return WithILInstruction(arg, conv);
+            }
+            goto defaultArm;
+        default:
+        defaultArm: {
+            // We need to convert to inst.TargetType, or to an equivalent type.
+            TS::ITypePtr targetType;
+            if (conv->TargetType
+                    == TS::ToPrimitiveType(&TS::GetUnderlyingType(*context.TypeHint))
+                && TS::IsNullable(*context.TypeHint) == conv->IsLifted)
+            {
+                targetType = TS::ITypePtr(
+                    const_cast<TS::IType*>(context.TypeHint),
+                    [](TS::IType*) noexcept {});
+            }
+            else if (conv->TargetType == IL::PrimitiveType::Ref)
+            {
+                // converting to unknown ref-type
+                targetType = std::make_shared<TS::ByReferenceType>(
+                    const_cast<TS::IType&>(compilation->FindType(TS::KnownTypeCode::Byte))
+                        .shared_from_this());
+            }
+            else if (conv->TargetType == IL::PrimitiveType::None)
+            {
+                // convert to some object type (e.g. invalid I4->O conversion)
+                targetType = const_cast<TS::IType&>(
+                    compilation->FindType(TS::KnownTypeCode::Object))
+                                 .shared_from_this();
+            }
+            else
+            {
+                targetType = GetType(TS::ToKnownTypeCode(conv->TargetType));
+            }
+            TranslatedExpression result =
+                arg.ConvertTo(*targetType, *this, conv->CheckForOverflow);
+            return WithILInstruction(result, conv);
+        }
+    }
+}
+
+// The C# `bool ValueMightBeOversized(ResolveResult rr, StackType stackType)`
+// (ExpressionBuilder.cs lines 2388-2406): whether the resolve result computes a
+// value that might be oversized for the specified stack type.
+bool ExpressionBuilder::ValueMightBeOversized(const Sem::ResolveResult& rr,
+                                              IL::StackType stackType)
+{
+    const TS::IType& inputType = TS::GetUnderlyingType(rr.Type());
+    if (TS::GetSize(&inputType) <= TS::GetSize(stackType))
+    {
+        // The input type is smaller or equal to the stack type, it can't be an
+        // oversized value.
+        return false;
+    }
+    if (const auto* orr = dynamic_cast<const Sem::OperatorResolveResult*>(&rr))
+    {
+        if (stackType == IL::StackType::I
+            && orr->OperatorType() == TS::ExpressionType::Subtract
+            && orr->Operands().size() == 2
+            && orr->Operands()[0]->Type().Kind() == TS::TypeKind::Pointer
+            && orr->Operands()[1]->Type().Kind() == TS::TypeKind::Pointer)
+        {
+            // Even though a pointer subtraction produces a value of type long in
+            // C#, the value will always fit in a native int.
+            return false;
+        }
+    }
+    // We don't have any information about the value, so it might be oversized.
+    return true;
 }
 
 // The C# `protected internal override TranslatedExpression VisitStLoc(StLoc inst,

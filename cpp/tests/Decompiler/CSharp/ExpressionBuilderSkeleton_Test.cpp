@@ -50,6 +50,8 @@
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
 #include "Decompiler/DecompileRun.hpp"
+#include "Decompiler/IL/ConversionKind.hpp"
+#include "Decompiler/IL/Instructions/Conv.hpp"
 #include "Decompiler/IL/Instructions/DefaultValue.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/Instructions/LdcDecimal.hpp"
@@ -1875,4 +1877,483 @@ TEST(ExpressionBuilderNewArrTest, ConvertArrayIndexPassesIntPtrWhenAllowed)
     EXPECT_EQ(converted.Type().ReflectionName(), "System.Int64");
 }
 
+
+// ---------------------------------------------------------------------------
+// VisitConv (the numeric-conversion arm)
+
+TEST(ExpressionBuilderConvTest, NopConversionPassesThroughWithAnnotation)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "num");
+    IL::Conv conv(std::make_unique<IL::LdLoc>(local), IL::PrimitiveType::I4, false,
+                  TS::Sign::None);
+    auto expr = builder.Translate(&conv);
+    auto* ident = dynamic_cast<Syntax::IdentifierExpression*>(expr.Expression());
+    ASSERT_TRUE(ident != nullptr);
+    // The nop conversion adds no cast; the conv annotation rides on the node after
+    // the argument's own LdLoc annotation (the WithILInstruction add semantics).
+    ASSERT_EQ(expr.ILInstructions().size(), std::size_t{2});
+    EXPECT_EQ(expr.ILInstructions()[0]->Op, IL::OpCode::LdLoc);
+    EXPECT_EQ(expr.ILInstructions()[1], &conv);
+    EXPECT_EQ(expr.Type().Kind(), TS::TypeKind::Struct);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.Int32");
+}
+
+TEST(ExpressionBuilderConvTest, SignExtendKeepsSignedInputWithoutCast)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "num");
+    IL::Conv conv(std::make_unique<IL::LdLoc>(local), IL::PrimitiveType::I8, false,
+                  TS::Sign::None);
+    auto expr = builder.Translate(&conv);
+    // The input type is already signed and not oversized -> return the argument as-is
+    // (the caller handles the sign extension through the post-condition).
+    auto* ident = dynamic_cast<Syntax::IdentifierExpression*>(expr.Expression());
+    ASSERT_TRUE(ident != nullptr);
+    ASSERT_EQ(expr.ILInstructions().size(), std::size_t{2});
+    EXPECT_EQ(expr.ILInstructions()[0]->Op, IL::OpCode::LdLoc);
+    EXPECT_EQ(expr.ILInstructions()[1], &conv);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.Int32");
+}
+
+TEST(ExpressionBuilderConvTest, SignExtendNormalizesUnsignedInputToInt64)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::UInt32, "num");
+    IL::Conv conv(std::make_unique<IL::LdLoc>(local), IL::PrimitiveType::I8, false,
+                  TS::Sign::None);
+    auto expr = builder.Translate(&conv);
+    // The unsigned input is normalized to the SIGNED INPUT STACK TYPE (Int32) -- the
+    // sign extension to the target type is left to the caller through the
+    // post-condition, so the result type is Int32, not the conv target.
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(expr.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.Int32");
+    auto* inner = dynamic_cast<Syntax::IdentifierExpression*>(cast->Expression());
+    ASSERT_TRUE(inner != nullptr);
+    // The ConvertTo cast node does not carry the argument's own annotation
+    // (WithoutILInstruction in the ConvertTo tail), so only the conv rides on it.
+    ASSERT_EQ(expr.ILInstructions().size(), std::size_t{1});
+    EXPECT_EQ(expr.ILInstructions()[0], &conv);
+}
+
+TEST(ExpressionBuilderConvTest, ZeroExtendNormalizesSignedInputToUInt64)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "num");
+    IL::Conv conv(std::make_unique<IL::LdLoc>(local), IL::PrimitiveType::U8, false,
+                  TS::Sign::None);
+    auto expr = builder.Translate(&conv);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(expr.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.UInt32");
+    auto* inner = dynamic_cast<Syntax::IdentifierExpression*>(cast->Expression());
+    ASSERT_TRUE(inner != nullptr);
+    ASSERT_EQ(expr.ILInstructions().size(), std::size_t{1});
+    EXPECT_EQ(expr.ILInstructions()[0], &conv);
+}
+
+TEST(ExpressionBuilderConvTest, IntToFloatConvertsToDouble)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "num");
+    // conv.r8 carries the Signed input sign (the ILReader passes Sign.Signed).
+    IL::Conv conv(std::make_unique<IL::LdLoc>(local), IL::PrimitiveType::R8, false,
+                  TS::Sign::Signed);
+    auto expr = builder.Translate(&conv);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(expr.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.Double");
+    auto* inner = dynamic_cast<Syntax::IdentifierExpression*>(cast->Expression());
+    ASSERT_TRUE(inner != nullptr);
+    ASSERT_EQ(expr.ILInstructions().size(), std::size_t{1});
+    EXPECT_EQ(expr.ILInstructions()[0], &conv);
+}
+
+TEST(ExpressionBuilderConvTest, CheckedArmNormalizesSignBeforeCheckedCast)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::UInt32, "num");
+    // conv.ovf.i8 over an unsigned input: the checked arm normalizes the input to the
+    // conv's Signed sign first, then casts checked to Int64.
+    IL::Conv conv(std::make_unique<IL::LdLoc>(local), IL::PrimitiveType::I8, true,
+                  TS::Sign::Signed);
+    auto expr = builder.Translate(&conv);
+    auto* outer = dynamic_cast<Syntax::CastExpression*>(expr.Expression());
+    ASSERT_TRUE(outer != nullptr);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.Int64");
+    auto* inner = dynamic_cast<Syntax::CastExpression*>(outer->Expression());
+    ASSERT_TRUE(inner != nullptr);
+    auto* innerType = dynamic_cast<Syntax::PrimitiveType*>(inner->Type());
+    ASSERT_TRUE(innerType != nullptr);
+    EXPECT_EQ(innerType->Keyword(), "int");
+    auto* innermost = dynamic_cast<Syntax::IdentifierExpression*>(inner->Expression());
+    ASSERT_TRUE(innermost != nullptr);
+    ASSERT_EQ(expr.ILInstructions().size(), std::size_t{1});
+    EXPECT_EQ(expr.ILInstructions()[0], &conv);
+}
+
+TEST(ExpressionBuilderConvTest, CheckedArmSkipsSignNormalizeWhenSignMatches)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "num");
+    // conv.ovf.u8 over a signed input with the conv's sign Unsigned: the input is
+    // normalized to the Unsigned form first.
+    IL::Conv conv(std::make_unique<IL::LdLoc>(local), IL::PrimitiveType::U8, true,
+                  TS::Sign::Unsigned);
+    auto expr = builder.Translate(&conv);
+    auto* outer = dynamic_cast<Syntax::CastExpression*>(expr.Expression());
+    ASSERT_TRUE(outer != nullptr);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.UInt64");
+    // The input was already Int32-sized with the matching Unsigned input sign
+    // after the normalization... the pre-cast goes to the Unsigned I4 type.
+    auto* inner = dynamic_cast<Syntax::CastExpression*>(outer->Expression());
+    ASSERT_TRUE(inner != nullptr);
+    auto* innerType = dynamic_cast<Syntax::PrimitiveType*>(inner->Type());
+    ASSERT_TRUE(innerType != nullptr);
+    EXPECT_EQ(innerType->Keyword(), "uint");
+    auto* innermost = dynamic_cast<Syntax::IdentifierExpression*>(inner->Expression());
+    ASSERT_TRUE(innermost != nullptr);
+}
+
+TEST(ExpressionBuilderConvTest, TruncateToSmallIntegerEmitsCast)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "num");
+    IL::Conv conv(std::make_unique<IL::LdLoc>(local), IL::PrimitiveType::I1, false,
+                  TS::Sign::None);
+    auto expr = builder.Translate(&conv);
+    // Truncation to a small integer type: the input is larger than the target and the
+    // sign differs -> the default arm emits the simple cast.
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(expr.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    auto* castType = dynamic_cast<Syntax::PrimitiveType*>(cast->Type());
+    ASSERT_TRUE(castType != nullptr);
+    EXPECT_EQ(castType->Keyword(), "sbyte");
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.SByte");
+    auto* inner = dynamic_cast<Syntax::IdentifierExpression*>(cast->Expression());
+    ASSERT_TRUE(inner != nullptr);
+}
+
+TEST(ExpressionBuilderConvTest, TruncateToSameSizeSameSignPassesThrough)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::SByte, "num");
+    IL::Conv conv(std::make_unique<IL::LdLoc>(local), IL::PrimitiveType::I1, false,
+                  TS::Sign::None);
+    auto expr = builder.Translate(&conv);
+    // No actual truncation involved, and the result extends the same way -> the
+    // argument is returned directly.
+    auto* ident = dynamic_cast<Syntax::IdentifierExpression*>(expr.Expression());
+    ASSERT_TRUE(ident != nullptr);
+    ASSERT_EQ(expr.ILInstructions().size(), std::size_t{2});
+    EXPECT_EQ(expr.ILInstructions()[0]->Op, IL::OpCode::LdLoc);
+    EXPECT_EQ(expr.ILInstructions()[1], &conv);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.SByte");
+}
+
+TEST(ExpressionBuilderConvTest, NonSmallTruncatePassesThroughToCaller)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int64, "num");
+    IL::Conv conv(std::make_unique<IL::LdLoc>(local), IL::PrimitiveType::U4, false,
+                  TS::Sign::None);
+    auto expr = builder.Translate(&conv);
+    // Truncation to U4 (not a small integer type): the whole unchecked truncation is
+    // handled by the caller through the post-condition.
+    auto* ident = dynamic_cast<Syntax::IdentifierExpression*>(expr.Expression());
+    ASSERT_TRUE(ident != nullptr);
+    ASSERT_EQ(expr.ILInstructions().size(), std::size_t{2});
+    EXPECT_EQ(expr.ILInstructions()[0]->Op, IL::OpCode::LdLoc);
+    EXPECT_EQ(expr.ILInstructions()[1], &conv);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.Int64");
+}
+
+TEST(ExpressionBuilderConvTest, StopGCTrackingFixedAddressCastsToCorrespondingPointer)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "num");
+    IL::Conv conv(std::make_unique<IL::LdLoca>(local), IL::PrimitiveType::I8, false,
+                  TS::Sign::None);
+    auto expr = builder.Translate(&conv);
+    // An uncaptured local's address is fixed -> the reference-to-pointer conversion
+    // renders the address-of operator over the identifier (the ConvertTo
+    // reference-to-pointer arm), and the pointer type needs no further cast.
+    auto* addressOf = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(addressOf != nullptr);
+    EXPECT_EQ(addressOf->Operator(), Syntax::UnaryOperatorType::AddressOf);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(addressOf->Expression()) != nullptr);
+    EXPECT_EQ(expr.Type().Kind(), TS::TypeKind::Pointer);
+    const auto* pointerType = dynamic_cast<const TS::PointerType*>(&expr.Type());
+    ASSERT_TRUE(pointerType != nullptr);
+    EXPECT_EQ(pointerType->Element()->ReflectionName(), "System.Int32");
+    ASSERT_EQ(expr.ILInstructions().size(), std::size_t{1});
+    EXPECT_EQ(expr.ILInstructions()[0], &conv);
+}
+
+TEST(ExpressionBuilderConvTest, StopGCTrackingUnfixedAddressCallsAsPointerIntrinsic)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto elementType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto byRefType = std::make_shared<TS::ByReferenceType>(elementType);
+    auto variable = std::make_shared<IL::ILVariable>(IL::VariableKind::Parameter, byRefType, 0);
+    variable->Name = "arg";
+    IL::Conv conv(std::make_unique<IL::LdLoc>(variable), IL::PrimitiveType::I8, false,
+                  TS::Sign::None);
+    auto expr = builder.Translate(&conv);
+    // A moveable (non-fixed) address emits the Unsafe.AsPointer() intrinsic; the
+    // return type is the void* pointer type.
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(expr.Expression());
+    ASSERT_TRUE(invocation != nullptr);
+    auto* memberRef = dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Target());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "AsPointer");
+    EXPECT_TRUE(dynamic_cast<Syntax::TypeReferenceExpression*>(memberRef->Target()) != nullptr);
+    EXPECT_EQ(invocation->Arguments().Count(), 1);
+    EXPECT_TRUE(dynamic_cast<Syntax::DirectionExpression*>(invocation->Arguments().FirstOrNull())
+                != nullptr);
+    EXPECT_EQ(expr.Type().Kind(), TS::TypeKind::Pointer);
+    const auto* pointerType = dynamic_cast<const TS::PointerType*>(&expr.Type());
+    ASSERT_TRUE(pointerType != nullptr);
+    EXPECT_EQ(pointerType->Element()->ReflectionName(), "System.Void");
+    // The invocation is a fresh node: only the conv annotation rides on it (the
+    // argument's own annotation stays on the DirectionExpression argument).
+    ASSERT_EQ(expr.ILInstructions().size(), std::size_t{1});
+    EXPECT_EQ(expr.ILInstructions()[0], &conv);
+}
+
+TEST(ExpressionBuilderConvTest, StopGCTrackingOverIntegerPassthrough)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    // A stop-tracking over something that was just tracked (an integer value the
+    // start-gc-tracking arm put on the stack): the argument passes through.
+    IL::Conv conv(std::make_unique<IL::LdcI4>(42), IL::StackType::Ref, TS::Sign::None,
+                  IL::PrimitiveType::I8, false, /*isLifted=*/false);
+    ASSERT_EQ(conv.Kind, IL::ConversionKind::StopGCTracking);
+    auto expr = builder.Translate(&conv);
+    auto* primitive = dynamic_cast<Syntax::PrimitiveExpression*>(expr.Expression());
+    ASSERT_TRUE(primitive != nullptr);
+    const auto* value = std::get_if<std::int32_t>(&primitive->Value());
+    ASSERT_TRUE(value != nullptr);
+    EXPECT_EQ(*value, 42);
+    // The C# `return arg` adds NO conv annotation here (the caller handles the
+    // stop-tracking passthrough through the post-condition), so only the
+    // argument's own LdcI4 annotation is present.
+    ASSERT_EQ(expr.ILInstructions().size(), std::size_t{1});
+    EXPECT_EQ(expr.ILInstructions()[0]->Op, IL::OpCode::LdcI4);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.Int32");
+}
+
+TEST(ExpressionBuilderConvTest, StopGCTrackingNonIntegerTargetFallsToDefaultCast)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::String, "s");
+    IL::Conv conv(std::make_unique<IL::LdLoc>(local), IL::PrimitiveType::I8, false,
+                  TS::Sign::None);
+    ASSERT_EQ(conv.Kind, IL::ConversionKind::StopGCTracking);
+    auto expr = builder.Translate(&conv);
+    // The argument's C# type is not a managed reference and not an integer -> the
+    // default arm casts to the target type.
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(expr.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.Int64");
+    auto* inner = dynamic_cast<Syntax::IdentifierExpression*>(cast->Expression());
+    ASSERT_TRUE(inner != nullptr);
+    EXPECT_EQ(expr.ILInstructions().size(), std::size_t{1});
+    EXPECT_EQ(expr.ILInstructions()[0], &conv);
+}
+
+TEST(ExpressionBuilderConvTest, NIntPreferenceOverIntPtrWithoutHint)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "num");
+    // conv.ovf.i over an int input: the checked arm casts to nint (NativeIntegers is
+    // on by default and the type hint does not equal IntPtr).
+    IL::Conv conv(std::make_unique<IL::LdLoc>(local), IL::PrimitiveType::I, true,
+                  TS::Sign::Signed);
+    auto expr = builder.Translate(&conv);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(expr.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    EXPECT_EQ(expr.Type().Kind(), TS::TypeKind::NInt);
+    auto* inner = dynamic_cast<Syntax::IdentifierExpression*>(cast->Expression());
+    ASSERT_TRUE(inner != nullptr);
+}
+
+TEST(ExpressionBuilderConvTest, IntPtrWithoutNativeIntegers)
+{
+    BuilderFixture fixture;
+    fixture.settings.SetNativeIntegers(false);
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "num");
+    IL::Conv conv(std::make_unique<IL::LdLoc>(local), IL::PrimitiveType::I, true,
+                  TS::Sign::Signed);
+    auto expr = builder.Translate(&conv);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(expr.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    // Without the nint setting the target type stays System.IntPtr.
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.IntPtr");
+    auto* inner = dynamic_cast<Syntax::IdentifierExpression*>(cast->Expression());
+    ASSERT_TRUE(inner != nullptr);
+}
+
+TEST(ExpressionBuilderConvTest, IntPtrHintMatchesStayIntPtr)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "num");
+    IL::Conv conv(std::make_unique<IL::LdLoc>(local), IL::PrimitiveType::I, true,
+                  TS::Sign::Signed);
+    // With the IntPtr type as the hint the GetType preference does not fire (the
+    // hint equals the found type), so the raw System.IntPtr is used.
+    const TS::IType& hint = fixture.compilation.FindType(TS::KnownTypeCode::IntPtr);
+    auto expr = builder.Visit(&conv, CSharp::TranslationContext{&hint});
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(expr.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.IntPtr");
+    EXPECT_EQ(expr.Type().Kind(), TS::TypeKind::Struct);
+}
+
+TEST(ExpressionBuilderConvTest, LiftedCheckedConvWrapsNullableDouble)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    // A lifted conv.nop.ovf-style conv over a boxed Nullable<T> argument: the target
+    // type is wrapped in Nullable<T> by the GetType local function.
+    IL::Conv conv(std::make_unique<IL::LdcI4>(42), IL::StackType::I4, TS::Sign::Signed,
+                  IL::PrimitiveType::R8, true, /*isLifted=*/true);
+    auto expr = builder.Translate(&conv);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(expr.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    EXPECT_EQ(expr.Type().Kind(), TS::TypeKind::Struct);
+    EXPECT_TRUE(TS::IsNullable(expr.Type()));
+    const auto* nullable = dynamic_cast<const TS::ParameterizedType*>(&expr.Type());
+    ASSERT_TRUE(nullable != nullptr);
+    EXPECT_EQ(nullable->TypeArguments()[0]->ReflectionName(), "System.Double");
+}
+
+TEST(ExpressionBuilderConvTest, InvalidUnknownToObjectPassthrough)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    // A variable typed with the Unknown null object loads with the Unknown stack type
+    // -> the Invalid arm's Unknown->O conversion passes through without the (object)
+    // cast (we're likely to cast back to the same unknown type).
+    auto unknownVariable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local, TS::UnknownType(), 0);
+    unknownVariable->Name = "u";
+    IL::Conv conv(std::make_unique<IL::LdLoc>(unknownVariable), IL::PrimitiveType::None,
+                  false, TS::Sign::None);
+    ASSERT_EQ(conv.Kind, IL::ConversionKind::Invalid);
+    auto expr = builder.Translate(&conv);
+    // The argument's own shape (the identifier over the unknown-typed variable) is
+    // returned unchanged with the conv annotation added.
+    auto* ident = dynamic_cast<Syntax::IdentifierExpression*>(expr.Expression());
+    ASSERT_TRUE(ident != nullptr);
+    EXPECT_EQ(ident->Identifier(), "u");
+    EXPECT_EQ(expr.Type().Kind(), TS::TypeKind::Unknown);
+    ASSERT_EQ(expr.ILInstructions().size(), std::size_t{2});
+    EXPECT_EQ(expr.ILInstructions()[0]->Op, IL::OpCode::LdLoc);
+    EXPECT_EQ(expr.ILInstructions()[1], &conv);
+}
+
+TEST(ExpressionBuilderConvTest, InvalidWithKnownArgumentFallsToObjectCast)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::String, "s");
+    IL::Conv conv(std::make_unique<IL::LdLoc>(local), IL::PrimitiveType::None, false,
+                  TS::Sign::None);
+    ASSERT_EQ(conv.Kind, IL::ConversionKind::Invalid);
+    auto expr = builder.Translate(&conv);
+    // The argument type is not Unknown -> the default arm casts to object.
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(expr.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.Object");
+    auto* inner = dynamic_cast<Syntax::IdentifierExpression*>(cast->Expression());
+    ASSERT_TRUE(inner != nullptr);
+    ASSERT_EQ(expr.ILInstructions().size(), std::size_t{1});
+    EXPECT_EQ(expr.ILInstructions()[0], &conv);
+}
+
+TEST(ExpressionBuilderConvTest, DefaultArmUsesHintWhenItMatches)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::String, "s");
+    IL::Conv conv(std::make_unique<IL::LdLoc>(local), IL::PrimitiveType::I8, false,
+                  TS::Sign::None);
+    // With the Int64 type as the hint the default arm picks the hint (the target type
+    // matches the hint's primitive form and the hint is not nullable).
+    const TS::IType& hint = fixture.compilation.FindType(TS::KnownTypeCode::Int64);
+    auto expr = builder.Visit(&conv, CSharp::TranslationContext{&hint});
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(expr.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    EXPECT_EQ(&expr.Type(), &hint);
+    auto* inner = dynamic_cast<Syntax::IdentifierExpression*>(cast->Expression());
+    ASSERT_TRUE(inner != nullptr);
+}
+
+TEST(ExpressionBuilderConvTest, ValueMightBeOversizedMatrix)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    // A smaller-or-equal input type cannot be oversized.
+    const TS::IType& int32Type = fixture.compilation.FindType(TS::KnownTypeCode::Int32);
+    Sem::ConstantResolveResult smallRr(
+        std::const_pointer_cast<TS::IType>(int32Type.shared_from_this()),
+        std::any{std::int32_t{1}});
+    EXPECT_FALSE(builder.ValueMightBeOversized(smallRr, IL::StackType::I8));
+    // A larger input type without any operator information might be oversized.
+    const TS::IType& int64Type = fixture.compilation.FindType(TS::KnownTypeCode::Int64);
+    Sem::ConstantResolveResult largeRr(
+        std::const_pointer_cast<TS::IType>(int64Type.shared_from_this()),
+        std::any{std::int64_t{1}});
+    EXPECT_TRUE(builder.ValueMightBeOversized(largeRr, IL::StackType::I4));
+    // A pointer subtraction is known to fit in a native int: with the result type
+    // oversized relative to StackType.I (Int64 is 8 bytes over the 6-byte native
+    // int), the operator arm is the only path that answers false.
+    auto pointerType = std::make_shared<TS::PointerType>(
+        std::const_pointer_cast<TS::IType>(int32Type.shared_from_this()));
+    Sem::OperatorResolveResult pointerSubtraction(
+        std::const_pointer_cast<TS::IType>(int64Type.shared_from_this()),
+        TS::ExpressionType::Subtract,
+        std::vector<std::shared_ptr<Sem::ResolveResult>>{
+            std::make_shared<Sem::ResolveResult>(pointerType),
+            std::make_shared<Sem::ResolveResult>(pointerType)});
+    EXPECT_FALSE(builder.ValueMightBeOversized(pointerSubtraction, IL::StackType::I));
+    // The same oversized value without the pointer-subtraction shape is oversized.
+    Sem::OperatorResolveResult nonSubtraction(
+        std::const_pointer_cast<TS::IType>(int64Type.shared_from_this()),
+        TS::ExpressionType::Add,
+        std::vector<std::shared_ptr<Sem::ResolveResult>>{
+            std::make_shared<Sem::ResolveResult>(pointerType),
+            std::make_shared<Sem::ResolveResult>(pointerType)});
+    EXPECT_TRUE(builder.ValueMightBeOversized(nonSubtraction, IL::StackType::I));
+    // Two non-pointer operands do not answer false either.
+    Sem::OperatorResolveResult nonPointerSubtraction(
+        std::const_pointer_cast<TS::IType>(int64Type.shared_from_this()),
+        TS::ExpressionType::Subtract,
+        std::vector<std::shared_ptr<Sem::ResolveResult>>{
+            std::make_shared<Sem::ResolveResult>(
+                std::const_pointer_cast<TS::IType>(int32Type.shared_from_this())),
+            std::make_shared<Sem::ResolveResult>(
+                std::const_pointer_cast<TS::IType>(int32Type.shared_from_this()))});
+    EXPECT_TRUE(builder.ValueMightBeOversized(nonPointerSubtraction, IL::StackType::I));
+}
 } // namespace ILSpy::Tests

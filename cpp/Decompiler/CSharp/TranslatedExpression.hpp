@@ -161,6 +161,15 @@ private:
     const Sem::ResolveResult* resolveResult_ = nullptr;
 };
 
+// The C# `PointerArithmeticOffset.IsFixedVariable(ILInstruction)` scan (IL/
+// PointerArithmeticOffset.cs line 120): whether an instruction computes the address
+// of a fixed variable -- an uncaptured local (LdLoca; the port's IL reader does not
+// yet model closures, so every local is uncaptured), the address of another fixed
+// field (LdFlda recursion), or any other StackType.I computation. The VisitConv
+// StopGCTracking arm composes it; the IsFixedVariable(Expression) helper below
+// shares the implementation.
+bool IsFixedVariableInstruction(const IL::ILInstruction& inst);
+
 // The C# `struct TranslatedExpression` -- "Output of C# ExpressionBuilder -- a
 // decompiled C# expression that has both a resolve result and ILInstruction
 // annotation". The resolve result is also always available as an annotation on the

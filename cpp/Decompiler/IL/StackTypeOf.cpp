@@ -18,6 +18,7 @@
 
 #include "Decompiler/IL/StackTypeOf.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/TypeUtils.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 
 namespace ILSpy::Decompiler::IL {
@@ -54,6 +55,11 @@ StackType StackTypeOf(const IType* type) {
     }
     if (dynamic_cast<const ByReferenceType*>(type)) return StackType::Ref;
     if (dynamic_cast<const PointerType*>(type)) return StackType::I;  // unmanaged pointer
+    if (type->Kind() == TypeKind::Unknown) {
+        // The C# GetStackType(TypeKind.Unknown): O only when IsReferenceType == true,
+        // else StackType.Unknown (the error-type null object is not a reference type).
+        return GetStackType(*type);
+    }
     if (const ITypeDefinition* def = type->GetDefinition()) {
         switch (def->KnownTypeCode()) {
             case KnownTypeCode::Boolean: case KnownTypeCode::Char:

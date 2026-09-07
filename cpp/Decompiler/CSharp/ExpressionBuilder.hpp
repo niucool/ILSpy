@@ -215,6 +215,18 @@ public:
     // over the reconstructed array type (`Empty<ResolveResult>.Array` as the
     // present-but-empty initializer, the C# non-null-empty-list state).
     TranslatedExpression VisitNewArr(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitConv(Conv inst,
+    // TranslationContext context)` (ExpressionBuilder.cs lines 2227-2386): the numeric
+    // conversion render -- the checked/IntToFloat arm (first normalize the input to
+    // the conv's sign, then one direct cast), then the ConversionKind switch:
+    // StartGCTracking passthrough, StopGCTracking (the pointer cast for a fixed
+    // address, the Unsafe.AsPointer intrinsic otherwise, the integer passthrough for
+    // a start-tracking-then-stop), SignExtend/ZeroExtend (normalize the input to the
+    // right sign/size and let the caller handle the extension), Nop, Truncate (the
+    // small-integer case with its own double truncation, else the caller's), the
+    // Invalid unknown->O arm, and the default simple cast with the TypeHint-aware
+    // target-type pick.
+    TranslatedExpression VisitConv(IL::ILInstruction* inst, TranslationContext context);
     // The C# `TranslatedExpression TranslateArrayIndex(ILInstruction i)` (a private
     // helper, ExpressionBuilder.cs line 3248): translate the index and convert it to
     // its own stack type with allowIntPtr: false.
@@ -231,6 +243,12 @@ public:
     // The C# `TranslatedExpression IsType(IsInst inst)` helper (ExpressionBuilder.cs
     // line 425): the `expr is T` expression the comp/unbox.any special cases build.
     TranslatedExpression IsType(IL::IsInst& inst);
+
+    // The C# `bool ValueMightBeOversized(ResolveResult rr, StackType stackType)`
+    // (ExpressionBuilder.cs lines 2388-2406): whether the resolve result computes a
+    // value that might be oversized for the stack type -- only a pointer subtraction
+    // under StackType.I is known to fit; everything else might be oversized.
+    static bool ValueMightBeOversized(const Sem::ResolveResult& rr, IL::StackType stackType);
 
     // The C# `TranslatedExpression HandleThreeValuedLogic(BinaryInstruction inst,
     // BinaryOperatorType op, ExpressionType eop)` -- the shared body of the two

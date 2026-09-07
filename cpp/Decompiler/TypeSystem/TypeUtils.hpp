@@ -236,6 +236,32 @@ inline ILSpy::Decompiler::IL::PrimitiveType ToPrimitiveType(const IType* type) {
     return PrimitiveType::None;
 }
 
+// Port of TypeUtils.ToKnownTypeCode(PrimitiveType): the KnownTypeCode a
+// primitive target type maps to. I1..I8 -> the signed sizes, R4 -> Single,
+// R8/R -> Double, U1..U8 -> the unsigned sizes, I -> IntPtr, U -> UIntPtr;
+// Ref/None/Unknown yield None (the C# default arm). The VisitConv callers
+// map a Conv's TargetType/input stack type through here before FindType.
+inline KnownTypeCode ToKnownTypeCode(ILSpy::Decompiler::IL::PrimitiveType primitiveType) {
+    using ILSpy::Decompiler::IL::PrimitiveType;
+    switch (primitiveType) {
+        case PrimitiveType::I1: return KnownTypeCode::SByte;
+        case PrimitiveType::I2: return KnownTypeCode::Int16;
+        case PrimitiveType::I4: return KnownTypeCode::Int32;
+        case PrimitiveType::I8: return KnownTypeCode::Int64;
+        case PrimitiveType::R4: return KnownTypeCode::Single;
+        case PrimitiveType::R8:
+        case PrimitiveType::R:
+            return KnownTypeCode::Double;
+        case PrimitiveType::U1: return KnownTypeCode::Byte;
+        case PrimitiveType::U2: return KnownTypeCode::UInt16;
+        case PrimitiveType::U4: return KnownTypeCode::UInt32;
+        case PrimitiveType::U8: return KnownTypeCode::UInt64;
+        case PrimitiveType::I: return KnownTypeCode::IntPtr;
+        case PrimitiveType::U: return KnownTypeCode::UIntPtr;
+        default: return KnownTypeCode::None;
+    }
+}
+
 // Port of TypeUtils.ToKnownTypeCode(StackType, Sign): the KnownTypeCode a
 // StackType + Sign maps to. I4 -> Int32 (or UInt32 when unsigned); I8 -> Int64
 // (or UInt64); I -> IntPtr (or UIntPtr); F4 -> Single; F8 -> Double; O -> Object;

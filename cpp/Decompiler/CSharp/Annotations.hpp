@@ -278,6 +278,12 @@ TranslatedExpression WithILInstruction(
 // resolve result without touching the annotations.
 TranslatedExpression WithoutILInstruction(const ExpressionWithResolveResult& expression);
 
+// The C# `internal static TranslatedExpression WithILInstruction(
+// this TranslatedExpression expression, ILInstruction instruction)` (Annotations.cs
+// line 109): adds the annotation to the expression and returns the same wrapper.
+TranslatedExpression WithILInstruction(const TranslatedExpression& expression,
+                                       IL::ILInstruction* instruction);
+
 // The C# `internal static ExpressionWithResolveResult WithRR(
 // this Expression expression, ResolveResult resolveResult)`: adds the resolve result
 // as an annotation on the expression and returns the bound wrapper.

@@ -181,34 +181,6 @@ std::shared_ptr<T> FindSharedAnnotation(const Syntax::AstNode& node)
 }
 
 
-// The C# `bool IsFixedVariable()` private helper + the
-// `PointerArithmeticOffset.IsFixedVariable(ILInstruction)` scan it composes
-// (IL/PointerArithmeticOffset.cs line 120): whether the DirectionExpression's
-// inner instruction computes the address of a fixed variable -- an uncaptured
-// local (LdLoca; this port's IL reader does not yet model closures, so every
-// local is uncaptured), the address of another fixed field (LdFlda
-// recursion), or any other StackType.I computation.
-bool IsFixedVariableInstruction(const IL::ILInstruction& inst)
-{
-    switch (inst.Op)
-    {
-        case IL::OpCode::LdLoca:
-            // The C# `ldloca.Variable.CaptureScope == null` -- the port's IL
-            // reader never sets a capture scope (the closure machinery is not
-            // ported yet), so every local is uncaptured.
-            return true;
-        case IL::OpCode::LdFlda:
-            if (const auto* ldflda = dynamic_cast<const IL::LdFlda*>(&inst))
-            {
-                return ldflda->Target != nullptr
-                       && IsFixedVariableInstruction(*ldflda->Target);
-            }
-            return false;
-        default:
-            return inst.ResultType() == IL::StackType::I;
-    }
-}
-
 // The C# `bool CastCanBeMadeImplicit(Resolver.CSharpConversions conversions,
 // Conversion conversion, IType inputType, IType oldTargetType, IType
 // newTargetType)` private helper.
@@ -275,6 +247,34 @@ bool IsZeroConstant(const std::any& value)
 }
 
 } // namespace
+
+// The C# `PointerArithmeticOffset.IsFixedVariable(ILInstruction)` scan
+// (IL/PointerArithmeticOffset.cs line 120): whether an instruction computes the
+// address of a fixed variable -- an uncaptured local (LdLoca; this port's IL
+// reader does not yet model closures, so every local is uncaptured), the address
+// of another fixed field (LdFlda recursion), or any other StackType.I
+// computation. Declared in the header so VisitConv's StopGCTracking arm shares
+// the one implementation with the IsFixedVariable(Expression) helper above.
+bool IsFixedVariableInstruction(const IL::ILInstruction& inst)
+{
+    switch (inst.Op)
+    {
+        case IL::OpCode::LdLoca:
+            // The C# `ldloca.Variable.CaptureScope == null` -- the port's IL
+            // reader never sets a capture scope (the closure machinery is not
+            // ported yet), so every local is uncaptured.
+            return true;
+        case IL::OpCode::LdFlda:
+            if (const auto* ldflda = dynamic_cast<const IL::LdFlda*>(&inst))
+            {
+                return ldflda->Target != nullptr
+                       && IsFixedVariableInstruction(*ldflda->Target);
+            }
+            return false;
+        default:
+            return inst.ResultType() == IL::StackType::I;
+    }
+}
 
 // The C# `typeDef.Fields.Any(f => f.GetConstantValue() is { } val &&
 // (ulong)CSharpPrimitiveCast.Cast(TypeCode.UInt64, val, false) == 0L)` filter of

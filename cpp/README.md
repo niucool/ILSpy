@@ -2133,7 +2133,58 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   NativeIntegers-off IntPtr allowIntPtr arm), no neuter round (the two
   divergences were proven RED by the first run's two failures before the
   fixes), full suite 11974 ran / 11972 passed / the 2 standing skips / zero
-  failures.
+  failures. The numeric-conversion arm landed as the next builder slice:
+  `VisitConv` (ExpressionBuilder.cs lines 2227-2386) -- the checked/
+  IntToFloat arm (first normalize the input to the conv's sign -- the C#
+  zero/sign-extension depends on the INPUT type while the ILAst conv
+  depends on the output, the conv.ovf exception the port carries verbatim),
+  then the ConversionKind switch: the StartGCTracking passthrough, the
+  StopGCTracking arm (a fixed address casts to the corresponding pointer
+  type through the reference-to-pointer `&x` render; a moveable address
+  emits the `Unsafe.AsPointer(ref x)` intrinsic over a shared-owned void
+  pointer type; an integer input is the start-tracking-then-stop
+  passthrough with NO conv annotation -- the C# `return arg`; anything
+  else falls to the default simple cast), SignExtend/ZeroExtend (normalize
+  the input to the SIGNED/UNSIGNED INPUT STACK TYPE and let the caller
+  handle the extension through the post-condition -- the result type is
+  the input stack type's form, not the conv target), Nop, Truncate (the
+  small-integer case with its own double truncation vs the same-size-
+  same-sign passthrough, else the caller's), the Invalid Unknown->O
+  passthrough (no `(object)` cast over an unknown-typed argument), and the
+  default TypeHint-aware target pick (`TargetType ==
+  ToPrimitiveType(GetUnderlyingType(hint))` and the nullable-state match
+  -> the hint itself; Ref -> the byte by-reference type; None -> object;
+  else `GetType(ToKnownTypeCode(TargetType))` with the n(u)int preference
+  over (U)IntPtr under NativeIntegers and the IsLifted Nullable<T> wrap).
+  Supporting pieces: `TypeUtils::ToKnownTypeCode(PrimitiveType)` (the
+  primitive-target mapping VisitConv composes), the
+  `WithILInstruction(TranslatedExpression, ILInstruction*)` overload
+  (the C# Annotations.cs line 109 extension -- the returned node carries
+  [argInst, conv] on a passthrough, only [conv] on a fresh ConvertTo cast
+  node), the header-exposed `IsFixedVariableInstruction` shared with the
+  TranslatedExpression IsFixedVariable helper, the `ValueMightBeOversized`
+  helper (only a pointer subtraction under StackType.I is known to fit;
+  GetSize reports 0 for Decimal so the oversized-type tests pin through
+  Int64), and the `IL::StackTypeOf` Unknown-kind fix (the C#
+  GetStackType(TypeKind.Unknown) answers StackType.Unknown when
+  IsReferenceType != true -- the port's reader primitive returned O for
+  every unknown-typed variable, a divergence the Invalid-arm drive
+  surfaced). Verified by the 22-test `ExpressionBuilderConvTest` suite
+  over the MinimalCorlib fixture (the Nop/SignExtend/ZeroExtend/
+  IntToFloat/checked-sign-normalize/checked-same-sign matrices, the
+  truncate-to-small-integer cast and same-size passthrough, the
+  non-small-truncate caller passthrough, the three StopGCTracking arms
+  with the `&num`/`Unsafe.AsPointer(ref arg)`/integer-passthrough shapes,
+  the nint preference over IntPtr with and without NativeIntegers and
+  the IntPtr-hint Equals keep, the lifted checked Nullable<double> wrap,
+  the Invalid passthrough + object-cast pair, the hint-match default arm,
+  and the ValueMightBeOversized matrix), proven with a four-behavior
+  neuter round (5 RED: the checked sign normalization, the SignExtend
+  sign check, the StopGC fixed branch, the pointer-subtraction operator
+  arm), restored green; full suite 11996 ran / 11994 passed / the 2
+  standing skips / zero failures, and all four CLI baselines unchanged
+  (--csharp mscorlib 10106366 bytes, --il byte-identical to the
+  41246545-byte real-ilspycmd gold, -l c 109438, --json-alone rc 64).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

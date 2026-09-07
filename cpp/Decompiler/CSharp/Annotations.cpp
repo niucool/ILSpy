@@ -91,6 +91,14 @@ TranslatedExpression WithoutILInstruction(const ExpressionWithResolveResult& exp
     return TranslatedExpression(expression.Expression(), expression.ResolveResult());
 }
 
+TranslatedExpression WithILInstruction(const TranslatedExpression& expression,
+                                       IL::ILInstruction* instruction) {
+    // The C# annotates the wrapped expression and returns the same wrapper (the
+    // `AddAnnotation` mutates the node).
+    AddILInstructionAnnotation(*expression.Expression(), instruction);
+    return TranslatedExpression(expression.Expression(), expression.ResolveResult());
+}
+
 ExpressionWithResolveResult WithRR(Syntax::Expression& expression,
                                    std::shared_ptr<Sem::ResolveResult> resolveResult) {
     expression.AddAnnotation(resolveResult);
