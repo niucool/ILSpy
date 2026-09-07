@@ -38,12 +38,16 @@
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ThrowExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
 #include "Decompiler/CSharp/Transforms/AddCheckedBlocks.hpp"
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
 #include "Decompiler/IL/Instructions/DefaultValue.hpp"
+#include "Decompiler/IL/Instructions/BitNot.hpp"
+#include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
+#include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdcDecimal.hpp"
@@ -57,6 +61,7 @@
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
 #include "Decompiler/Semantics/ErrorResolveResult.hpp"
 #include "Decompiler/Semantics/OperatorResolveResult.hpp"
+#include "Decompiler/Semantics/ThrowResolveResult.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
 #include "Decompiler/TypeSystem/KnownTypeReference.hpp"
 #include "Decompiler/TypeSystem/NullableType.hpp"
@@ -330,6 +335,14 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitLdcF8(inst, context);
         case IL::OpCode::LdcDecimal:
             return VisitLdcDecimal(inst, context);
+        case IL::OpCode::BitNot:
+            return VisitBitNot(inst, context);
+        case IL::OpCode::Throw:
+            return VisitThrow(inst, context);
+        case IL::OpCode::ThreeValuedBoolAnd:
+            return VisitThreeValuedBoolAnd(inst, context);
+        case IL::OpCode::ThreeValuedBoolOr:
+            return VisitThreeValuedBoolOr(inst, context);
         default:
             return Default(inst, context);
     }
@@ -459,6 +472,124 @@ TranslatedExpression ExpressionBuilder::VisitLdcDecimal(IL::ILInstruction* inst,
     auto* expr = astBuilder->ConvertConstantValue(
         const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Decimal)), ldc->Value);
     return TranslatedExpression(WithILInstruction(*expr, inst).Expression());
+}
+
+// The C# `protected internal override TranslatedExpression VisitBitNot(BitNot inst,
+// TranslationContext context)` (ExpressionBuilder.cs lines 746-777): translate the
+// argument, and when the argument type is undersized for the operator (smaller
+// than the underlying result stack type, a small-integer enum, a native integer
+// over StackType.I, or a bool/char that does not support `~`), sign/zero-extend
+// it to the arithmetic type first -- the extension sign comes from the type hint,
+// falling back to the argument type's own sign.
+TranslatedExpression ExpressionBuilder::VisitBitNot(IL::ILInstruction* inst, TranslationContext context)
+{
+    auto* bitNot = static_cast<IL::BitNot*>(inst);
+    TranslatedExpression argument = Translate(bitNot->Argument.get());
+    const TS::IType& argUType = TS::GetUnderlyingType(argument.Type());
+
+    if (TS::GetSize(TS::GetStackType(argUType)) < TS::GetSize(bitNot->UnderlyingResultType)
+        || (argUType.Kind() == TypeKind::Enum && TS::IsSmallIntegerType(&argUType))
+        || (TS::GetStackType(argUType) == IL::StackType::I
+            && !TS::IsCSharpNativeIntegerType(&argUType))
+        || TS::IsKnownType(argUType, KnownTypeCode::Boolean)
+        || TS::IsKnownType(argUType, KnownTypeCode::Char))
+    {
+        // Argument is undersized (even after implicit integral promotion to I4)
+        // -> we need to perform sign/zero-extension before the BitNot.
+        // Same if the argument is an enum based on a small integer type
+        // (those don't undergo numeric promotion in C# the way non-enum small
+        // integer types do).
+        // Same if the type is one that does not support ~ (IntPtr, bool and char).
+        Sign sign = TS::GetSign(context.TypeHint);
+        if (sign == Sign::None)
+        {
+            sign = TS::GetSign(&argUType);
+        }
+        TS::ITypePtr targetType = FindArithmeticType(bitNot->UnderlyingResultType, sign);
+        if (bitNot->IsLifted)
+        {
+            targetType = TS::Create(*compilation, *targetType);
+        }
+        argument = argument.ConvertTo(*targetType, *this);
+    }
+
+    auto* unary = new Syntax::UnaryOperatorExpression(argument.Expression(),
+                                                      Syntax::UnaryOperatorType::BitNot);
+    return WithILInstruction(
+        WithRR(*unary,
+               resolver->ResolveUnaryOperator(Syntax::UnaryOperatorType::BitNot,
+                                              SharedResolveResultAnnotation(*argument.Expression()))),
+        inst);
+}
+
+// The C# `protected internal override TranslatedExpression VisitThrow(Throw inst,
+// TranslationContext context)` (line 1226): the throw-expression node over the
+// translated operand, with the ThrowResolveResult annotation.
+TranslatedExpression ExpressionBuilder::VisitThrow(IL::ILInstruction* inst, TranslationContext)
+{
+    auto* throwInst = static_cast<IL::Throw*>(inst);
+    auto* throwExpr = new Syntax::ThrowExpression(Translate(throwInst->Argument.get()).Expression());
+    return WithILInstruction(WithRR(*throwExpr, std::make_shared<Sem::ThrowResolveResult>()), inst);
+}
+
+// The C# `TranslatedExpression HandleThreeValuedLogic(BinaryInstruction inst,
+// BinaryOperatorType op, ExpressionType eop)` (lines 1197-1224): the shared body of
+// the two three-valued-logic arms. Both operands always evaluate (the C# `&`/`|` on
+// `bool?` does not short-circuit): the nullable side converts to Nullable<bool>, the
+// non-nullable side to plain bool, and the operator resolve result is the LIFTED
+// bitwise operator over Nullable<bool>.
+TranslatedExpression ExpressionBuilder::HandleThreeValuedLogic(IL::BinaryInstruction& inst,
+                                                              Syntax::BinaryOperatorType op,
+                                                              TS::ExpressionType eop)
+{
+    TranslatedExpression left = Translate(inst.Left.get());
+    TranslatedExpression right = Translate(inst.Right.get());
+    TS::ITypePtr boolType =
+        const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Boolean)).shared_from_this();
+    TS::ITypePtr nullableBoolType = TS::Create(*compilation, *boolType);
+    if (TS::IsNullable(left.Type()))
+    {
+        left = left.ConvertTo(*nullableBoolType, *this);
+        if (TS::IsNullable(right.Type()))
+        {
+            right = right.ConvertTo(*nullableBoolType, *this);
+        }
+        else
+        {
+            right = right.ConvertTo(*boolType, *this);
+        }
+    }
+    else
+    {
+        left = left.ConvertTo(*boolType, *this);
+        right = right.ConvertTo(*nullableBoolType, *this);
+    }
+    auto* binary = new Syntax::BinaryOperatorExpression(left.Expression(), op, right.Expression());
+    return WithILInstruction(
+        WithRR(*binary,
+               std::make_shared<Sem::OperatorResolveResult>(
+                   nullableBoolType, eop, static_cast<const TS::IMethod*>(nullptr), true,
+                   std::vector<std::shared_ptr<Sem::ResolveResult>>{
+                       SharedResolveResultAnnotation(*left.Expression()),
+                       SharedResolveResultAnnotation(*right.Expression())})),
+        &inst);
+}
+
+// The C# `protected internal override TranslatedExpression VisitThreeValuedBoolAnd(
+// ThreeValuedBoolAnd inst, TranslationContext context)` (line 1188) / its Or sibling
+// (1192): the three-valued `&` / `|` over bool?.
+TranslatedExpression ExpressionBuilder::VisitThreeValuedBoolAnd(IL::ILInstruction* inst,
+                                                               TranslationContext context)
+{
+    return HandleThreeValuedLogic(static_cast<IL::BinaryInstruction&>(*inst),
+                                  Syntax::BinaryOperatorType::BitwiseAnd, TS::ExpressionType::And);
+}
+
+TranslatedExpression ExpressionBuilder::VisitThreeValuedBoolOr(IL::ILInstruction* inst,
+                                                              TranslationContext context)
+{
+    return HandleThreeValuedLogic(static_cast<IL::BinaryInstruction&>(*inst),
+                                  Syntax::BinaryOperatorType::BitwiseOr, TS::ExpressionType::Or);
 }
 
 

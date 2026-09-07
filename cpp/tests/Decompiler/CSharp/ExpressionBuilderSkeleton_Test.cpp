@@ -49,12 +49,19 @@
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/BitNot.hpp"
+#include "Decompiler/IL/Instructions/Throw.hpp"
+#include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ThrowExpression.hpp"
+#include "Decompiler/Semantics/ThrowResolveResult.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
 #include "Decompiler/Semantics/OperatorResolveResult.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
+#include "Decompiler/TypeSystem/NullableType.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
 
 #include <gtest/gtest.h>
@@ -693,4 +700,276 @@ TEST(ExpressionBuilderStaticsTest, UnwrapBoxingConversionNoOpWithoutCast)
     EXPECT_EQ(unwrapped.Expression(), expr.Expression());
 }
 
+
+// ---------------------------------------------------------------------------
+// The operator-expression arms (VisitBitNot / VisitThrow / the three-valued
+// logic arms): the next ExpressionBuilder slice after the leaf loads -- the
+// arms that need no CallBuilder and no statement machinery. Expectations
+// derived from the C# VisitBitNot (ExpressionBuilder.cs lines 746-777),
+// VisitThrow (1226-1231), and HandleThreeValuedLogic (1197-1224) bodies over
+// the MinimalCorlib fixture.
+
+TEST(ExpressionBuilderOperatorTest, BitNotOverIntConstantFoldsResolveResult)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::BitNot bitNot(std::make_unique<IL::LdcI4>(42));
+    auto expr = builder.Translate(&bitNot);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::BitNot);
+    // GetSize(Int32) == GetSize(I4): no extension cast is inserted.
+    auto* primitive = dynamic_cast<Syntax::PrimitiveExpression*>(unary->Expression());
+    ASSERT_TRUE(primitive != nullptr);
+    const std::int32_t* value = std::get_if<std::int32_t>(&primitive->Value());
+    ASSERT_TRUE(value != nullptr);
+    EXPECT_EQ(*value, 42);
+    // The resolver folds the constant operand into the resolve result (~42).
+    const auto* constantRR = dynamic_cast<const Sem::ConstantResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(constantRR != nullptr);
+    auto folded = std::any_cast<std::int32_t>(constantRR->ConstantValue());
+    EXPECT_EQ(folded, -43);
+}
+
+TEST(ExpressionBuilderOperatorTest, BitNotOverIntLocalNoConversion)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local,
+        std::const_pointer_cast<TS::IType>(
+            fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this()),
+        0);
+    variable->Name = "num";
+    IL::BitNot bitNot(std::make_unique<IL::LdLoc>(variable));
+    auto expr = builder.Translate(&bitNot);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::BitNot);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(unary->Expression()) != nullptr);
+    const auto* opRR = dynamic_cast<const Sem::OperatorResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(opRR != nullptr);
+    EXPECT_EQ(opRR->OperatorType(), TS::ExpressionType::OnesComplement);
+    EXPECT_FALSE(opRR->IsLiftedOperator());
+    EXPECT_FALSE(TS::IsNullable(expr.Type()));
+}
+
+TEST(ExpressionBuilderOperatorTest, BitNotOverByteLocalPromotesToInt32)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local,
+        std::const_pointer_cast<TS::IType>(
+            fixture.compilation.FindType(TS::KnownTypeCode::Byte).shared_from_this()),
+        0);
+    variable->Name = "b";
+    IL::BitNot bitNot(std::make_unique<IL::LdLoc>(variable));
+    auto expr = builder.Translate(&bitNot);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    // GetSize(GetStackType(Byte)) == GetSize(I4): no extension cast. The
+    // resolver's unary numeric promotion (char..uint16 -> int32) answers the
+    // built-in `~` over the PROMOTED type -- `~b` is valid C#.
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(unary->Expression()) != nullptr);
+    const auto* opRR = dynamic_cast<const Sem::OperatorResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(opRR != nullptr);
+    EXPECT_EQ(opRR->OperatorType(), TS::ExpressionType::OnesComplement);
+    EXPECT_TRUE(TS::IsKnownType(expr.Type(), TS::KnownTypeCode::Int32));
+}
+
+TEST(ExpressionBuilderOperatorTest, BitNotOverBoolLocalExtendsToUnsigned)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local,
+        std::const_pointer_cast<TS::IType>(
+            fixture.compilation.FindType(TS::KnownTypeCode::Boolean).shared_from_this()),
+        0);
+    variable->Name = "flag";
+    IL::BitNot bitNot(std::make_unique<IL::LdLoc>(variable));
+    auto expr = builder.Translate(&bitNot);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    // bool does not support ~ in C#: the ConvertTo Boolean->integer arm renders
+    // the argument as the ternary `flag ? 1 : 0` over the arithmetic type.
+    auto* ternary = dynamic_cast<Syntax::ConditionalExpression*>(unary->Expression());
+    ASSERT_TRUE(ternary != nullptr);
+    const auto* opRR = dynamic_cast<const Sem::OperatorResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(opRR != nullptr);
+    EXPECT_EQ(opRR->OperatorType(), TS::ExpressionType::OnesComplement);
+    EXPECT_TRUE(TS::IsKnownType(expr.Type(), TS::KnownTypeCode::UInt32));
+}
+
+TEST(ExpressionBuilderOperatorTest, BitNotOverCharLocalExtendsToUnsigned)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local,
+        std::const_pointer_cast<TS::IType>(
+            fixture.compilation.FindType(TS::KnownTypeCode::Char).shared_from_this()),
+        0);
+    variable->Name = "c";
+    IL::BitNot bitNot(std::make_unique<IL::LdLoc>(variable));
+    auto expr = builder.Translate(&bitNot);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::CastExpression*>(unary->Expression()) != nullptr);
+    EXPECT_TRUE(TS::IsKnownType(expr.Type(), TS::KnownTypeCode::UInt32));
+}
+
+TEST(ExpressionBuilderOperatorTest, BitNotTypeHintSignDrivesExtension)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local,
+        std::const_pointer_cast<TS::IType>(
+            fixture.compilation.FindType(TS::KnownTypeCode::Char).shared_from_this()),
+        0);
+    variable->Name = "c";
+    IL::BitNot bitNot(std::make_unique<IL::LdLoc>(variable));
+    // A SIGNED type hint drives the extension sign before the argument type's
+    // own sign is consulted: the hint's Int64 sign picks int32, not uint32.
+    const TS::IType& int64Type = fixture.compilation.FindType(TS::KnownTypeCode::Int64);
+    auto expr = builder.Translate(&bitNot, &int64Type);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(unary->Expression());
+    ASSERT_TRUE(cast != nullptr);
+    const auto* opRR = dynamic_cast<const Sem::OperatorResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(opRR != nullptr);
+    EXPECT_EQ(opRR->OperatorType(), TS::ExpressionType::OnesComplement);
+    EXPECT_TRUE(TS::IsKnownType(expr.Type(), TS::KnownTypeCode::Int32));
+}
+
+TEST(ExpressionBuilderOperatorTest, BitNotLiftedOverNullableResolvesLiftedOperator)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto int32Type =
+        std::const_pointer_cast<TS::IType>(
+            fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto nullableInt = TS::Create(fixture.compilation, *int32Type);
+    auto variable = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullableInt, 0);
+    variable->Name = "maybeNum";
+    // The lifted form: the argument stays the Nullable<T> load; the underlying
+    // result type is the original I4.
+    IL::BitNot bitNot(std::make_unique<IL::LdLoc>(variable), true, IL::StackType::I4);
+    auto expr = builder.Translate(&bitNot);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::BitNot);
+    // GetStackType(Int32) == GetSize(I4): no extension cast; the lifted
+    // operator table answers over Nullable<int>.
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(unary->Expression()) != nullptr);
+    const auto* opRR = dynamic_cast<const Sem::OperatorResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(opRR != nullptr);
+    EXPECT_EQ(opRR->OperatorType(), TS::ExpressionType::OnesComplement);
+    EXPECT_TRUE(opRR->IsLiftedOperator());
+    EXPECT_TRUE(TS::IsNullable(expr.Type()));
+}
+
+TEST(ExpressionBuilderOperatorTest, ThrowRendersThrowExpression)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    IL::Throw throwInst(std::make_unique<IL::LdStr>("boom"));
+    auto expr = builder.Translate(&throwInst);
+    auto* throwExpr = dynamic_cast<Syntax::ThrowExpression*>(expr.Expression());
+    ASSERT_TRUE(throwExpr != nullptr);
+    auto* primitive = dynamic_cast<Syntax::PrimitiveExpression*>(throwExpr->Expression());
+    ASSERT_TRUE(primitive != nullptr);
+    const std::string* value = std::get_if<std::string>(&primitive->Value());
+    ASSERT_TRUE(value != nullptr);
+    EXPECT_EQ(*value, "boom");
+    EXPECT_TRUE(dynamic_cast<const Sem::ThrowResolveResult*>(expr.ResolveResult()) != nullptr);
+}
+
+TEST(ExpressionBuilderOperatorTest, ThreeValuedBoolAndBuildsLiftedBitwiseAnd)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto boolType =
+        std::const_pointer_cast<TS::IType>(
+            fixture.compilation.FindType(TS::KnownTypeCode::Boolean).shared_from_this());
+    auto var1 = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, boolType, 0);
+    var1->Name = "flag1";
+    auto var2 = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, boolType, 1);
+    var2->Name = "flag2";
+    IL::ThreeValuedBoolAnd and3vl(std::make_unique<IL::LdLoc>(var1),
+                                  std::make_unique<IL::LdLoc>(var2));
+    auto expr = builder.Translate(&and3vl);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::BitwiseAnd);
+    // The left operand converts to plain bool (identity); the right operand
+    // converts to Nullable<bool> -- the TypeErasure equivalence ignores only
+    // REFERENCE-type nullability, so the value-type wrap is a real cast.
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(binary->Left()) != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::CastExpression*>(binary->Right()) != nullptr);
+    // The resolve result is the LIFTED bitwise-and over Nullable<bool>.
+    const auto* opRR = dynamic_cast<const Sem::OperatorResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(opRR != nullptr);
+    EXPECT_EQ(opRR->OperatorType(), TS::ExpressionType::And);
+    EXPECT_TRUE(opRR->IsLiftedOperator());
+    EXPECT_EQ(opRR->Operands().size(), 2u);
+    EXPECT_TRUE(TS::IsNullable(expr.Type()));
+}
+
+TEST(ExpressionBuilderOperatorTest, ThreeValuedBoolOrBuildsLiftedBitwiseOr)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto boolType =
+        std::const_pointer_cast<TS::IType>(
+            fixture.compilation.FindType(TS::KnownTypeCode::Boolean).shared_from_this());
+    auto var1 = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, boolType, 0);
+    var1->Name = "flag1";
+    auto var2 = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, boolType, 1);
+    var2->Name = "flag2";
+    IL::ThreeValuedBoolOr or3vl(std::make_unique<IL::LdLoc>(var1),
+                                std::make_unique<IL::LdLoc>(var2));
+    auto expr = builder.Translate(&or3vl);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::BitwiseOr);
+    const auto* opRR = dynamic_cast<const Sem::OperatorResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(opRR != nullptr);
+    EXPECT_EQ(opRR->OperatorType(), TS::ExpressionType::Or);
+    EXPECT_TRUE(opRR->IsLiftedOperator());
+    EXPECT_TRUE(TS::IsNullable(expr.Type()));
+}
+
+TEST(ExpressionBuilderOperatorTest, ThreeValuedBoolAndNullableLeftConvertsNullableRight)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto int32Type =
+        std::const_pointer_cast<TS::IType>(
+            fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto nullableInt = TS::Create(fixture.compilation, *int32Type);
+    auto var1 = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullableInt, 0);
+    var1->Name = "maybe1";
+    auto var2 = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullableInt, 1);
+    var2->Name = "maybe2";
+    IL::ThreeValuedBoolAnd and3vl(std::make_unique<IL::LdLoc>(var1),
+                                  std::make_unique<IL::LdLoc>(var2));
+    auto expr = builder.Translate(&and3vl);
+    // A nullable LEFT operand takes the IsNullable branch: both operands
+    // convert to Nullable<bool> -- over the int? loads both sides are the
+    // explicit (bool?) casts.
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::BitwiseAnd);
+    EXPECT_TRUE(dynamic_cast<Syntax::CastExpression*>(binary->Left()) != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::CastExpression*>(binary->Right()) != nullptr);
+    const auto* opRR = dynamic_cast<const Sem::OperatorResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(opRR != nullptr);
+    EXPECT_EQ(opRR->OperatorType(), TS::ExpressionType::And);
+    EXPECT_TRUE(opRR->IsLiftedOperator());
+    EXPECT_TRUE(TS::IsNullable(expr.Type()));
+}
 } // namespace ILSpy::Tests

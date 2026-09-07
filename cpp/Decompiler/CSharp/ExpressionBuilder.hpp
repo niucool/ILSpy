@@ -74,11 +74,14 @@
 #include <string>
 #include <unordered_set>
 
-// The UnboxAny forward declaration at GLOBAL scope (the nested-namespace trap: a
-// declaration written inside namespace CSharp would create CSharp::IL and shadow
-// the real ILSpy::Decompiler::IL).
+// The forward declarations at GLOBAL scope (the nested-namespace trap: a declaration
+// written inside namespace CSharp would create CSharp::IL and shadow the real
+// ILSpy::Decompiler::IL). UnboxAny is a ByValueInstruction parameter; BinaryInstruction
+// is the HandleThreeValuedLogic parameter type (an incomplete type is fine in a member
+// declaration).
 namespace ILSpy::Decompiler::IL {
 class UnboxAny;
+class BinaryInstruction;
 }
 
 namespace ILSpy::Decompiler::CSharp {
@@ -189,6 +192,20 @@ public:
     TranslatedExpression VisitLdcF4(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitLdcF8(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitLdcDecimal(IL::ILInstruction* inst, TranslationContext context);
+    TranslatedExpression VisitBitNot(IL::ILInstruction* inst, TranslationContext context);
+    TranslatedExpression VisitThrow(IL::ILInstruction* inst, TranslationContext context);
+    TranslatedExpression VisitThreeValuedBoolAnd(IL::ILInstruction* inst, TranslationContext context);
+    TranslatedExpression VisitThreeValuedBoolOr(IL::ILInstruction* inst, TranslationContext context);
+
+    // The C# `TranslatedExpression HandleThreeValuedLogic(BinaryInstruction inst,
+    // BinaryOperatorType op, ExpressionType eop)` -- the shared body of the two
+    // three-valued-logic arms: convert both operands to bool / Nullable<bool>
+    // (the nullable side lifts, the non-nullable side converts through the
+    // ConvertTo machinery) and build the LIFTED bitwise operator resolve result.
+    // (Declared private in the C#; the port has no visibility levels.)
+    TranslatedExpression HandleThreeValuedLogic(IL::BinaryInstruction& inst,
+                                               Syntax::BinaryOperatorType op,
+                                               TS::ExpressionType eop);
 
     // -- The value helpers ------------------------------------------------------------
 

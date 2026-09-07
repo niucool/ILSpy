@@ -2009,7 +2009,25 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   the by-ref ref-wrap, the TranslateCondition constant/negate shapes, the
   ConvertToBoolean constant/non-constant/pointer arms, the ConvertTo
   identity/void/constant-fold/cast/conditional arms, and the error-expression
-  shapes).
+  shapes). The operator-expression arms landed as the next builder slice:
+  `VisitBitNot` (the undersized-argument extension -- the small-integer-enum /
+  StackType.I-native-integer / bool / char clauses with the extension sign
+  from the type hint falling back to the argument type's own sign; the resolver's
+  unary numeric promotion (char..uint16 -> int32) handles byte/short directly so
+  no AST cast is inserted for them, while the Boolean->integer ConvertTo arm
+  renders the `flag ? 1 : 0` ternary), `VisitThrow` (the ThrowExpression over
+  the translated operand with the ThrowResolveResult), and
+  `VisitThreeValuedBoolAnd`/`VisitThreeValuedBoolOr` + the shared
+  `HandleThreeValuedLogic` helper (the non-short-circuiting `&`/`|` on `bool?`:
+  the nullable side lifts, the non-nullable side converts, and the operator
+  resolve result is the LIFTED bitwise-and/or over Nullable<bool>; the TypeErasure
+  equivalence ignores only REFERENCE-type nullability, so a value-type
+  `bool` -> `bool?` conversion is a real `(bool?)` cast). Verified by the 11-test
+  `ExpressionBuilderOperatorTest` suite over the MinimalCorlib fixture
+  (the constant-fold/int-local/byte-promotion/bool-ternary/char-cast shapes,
+  the type-hint-sign drive, the lifted nullable form, the throw shape, and the
+  three-valued and/or/nullable-left matrices), proven with a two-behavior
+  neuter round (5 RED, restored green).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
