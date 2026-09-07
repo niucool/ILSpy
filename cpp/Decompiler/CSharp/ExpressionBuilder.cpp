@@ -53,6 +53,12 @@
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/MatchInstruction.hpp"
+#include "Decompiler/IL/Instructions/UsingInstruction.hpp"
+#include "Decompiler/IL/Instructions/TryInstructions.hpp"
+#include "Decompiler/IL/Instructions/PinnedRegion.hpp"
+#include "Decompiler/IL/ILTypeExtensions.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
@@ -356,6 +362,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitThreeValuedBoolOr(inst, context);
         case IL::OpCode::IsInst:
             return VisitIsInst(inst, context);
+        case IL::OpCode::StLoc:
+            return VisitStLoc(inst, context);
         case IL::OpCode::SizeOf:
             return VisitSizeOf(inst, context);
         case IL::OpCode::LdTypeToken:
@@ -729,6 +737,167 @@ TranslatedExpression ExpressionBuilder::VisitLdTypeToken(IL::ILInstruction* inst
 }
 
 
+// The C# `protected internal override TranslatedExpression VisitStLoc(StLoc inst,
+// TranslationContext context)` (ExpressionBuilder.cs lines 809-870): the assignment
+// arm -- the stack-slot type refinement (the ILAst's stack slots carry inaccurate
+// widened types), the by-ref re-assignment `ref (a = ref b)` shape, and the plain
+// Assignment.
+TranslatedExpression ExpressionBuilder::VisitStLoc(IL::ILInstruction* inst,
+                                                   TranslationContext context)
+{
+    auto* stLoc = static_cast<IL::StLoc*>(inst);
+    const IL::ILVariablePtr& variable = stLoc->Variable;
+    TranslatedExpression translatedValue =
+        Translate(stLoc->Value.get(), variable ? variable->Type.get() : nullptr);
+    if (variable && variable->Kind == IL::VariableKind::StackSlot
+        && loadedVariablesSet.count(variable) == 0)
+    {
+        // Stack slots in the ILAst have inaccurate types (e.g. System.Object for StackType.O)
+        // so we should replace them with more accurate types where possible:
+        if (CanUseTypeForStackSlot(*variable, translatedValue.Type())
+            && variable->StackType() == TS::GetStackType(translatedValue.Type())
+            && translatedValue.Type().Kind() != TypeKind::Null)
+        {
+            variable->Type = const_cast<TS::IType&>(translatedValue.Type()).shared_from_this();
+        }
+        else
+        {
+            TS::ITypePtr defaultValueType;
+            if (MatchDefaultValue(stLoc->Value.get(), defaultValueType)
+                && IsOtherValueType(*defaultValueType))
+            {
+                variable->Type = std::move(defaultValueType);
+            }
+        }
+    }
+    TranslatedExpression lhs = WithoutILInstruction(ConvertVariable(variable));
+    auto* dirExpr = dynamic_cast<Syntax::DirectionExpression*>(lhs.Expression());
+    auto* lhsRefRR = dynamic_cast<Sem::ByReferenceResolveResult*>(
+        const_cast<Sem::ResolveResult*>(lhs.ResolveResult()));
+    if (dirExpr != nullptr && lhsRefRR != nullptr)
+    {
+        // ref (re-)assignment, emit "ref (a = ref b)".
+        lhs = lhs.UnwrapChild(dirExpr->Expression());
+        translatedValue = translatedValue.ConvertTo(const_cast<TS::IType&>(lhsRefRR->Type()), *this,
+                                                    /*checkForOverflow=*/false,
+                                                    /*allowImplicitConversion=*/true);
+        auto* assign = new Syntax::AssignmentExpression(lhs.Expression(),
+                                                       translatedValue.Expression());
+        WithRR(*assign,
+               std::make_shared<Sem::OperatorResolveResult>(
+                   const_cast<TS::IType&>(lhs.Type()).shared_from_this(),
+                   TS::ExpressionType::Assign,
+                   std::vector<std::shared_ptr<Sem::ResolveResult>>{
+                       SharedResolveResultAnnotation(*dirExpr),
+                       SharedResolveResultAnnotation(*translatedValue.Expression())}));
+        auto* outer = new Syntax::DirectionExpression(Syntax::FieldDirection::Ref, assign);
+        // The C# `.WithRR(lhsRefRR)` re-attaches the SAME ByReferenceResolveResult
+        // object to the outer DirectionExpression.
+        return WithRR(WithoutILInstruction(*outer),
+                      SharedResolveResultAnnotation(*dirExpr));
+    }
+    else
+    {
+        return WithILInstruction(Assignment(lhs, translatedValue), inst);
+    }
+}
+
+// The C# `bool CanUseTypeForStackSlot(ILVariable v, IType type)` local function
+// of VisitStLoc.
+bool ExpressionBuilder::CanUseTypeForStackSlot(const IL::ILVariable& variable,
+                                               const TS::IType& type)
+{
+    return variable.IsSingleDefinition()
+           || IsOtherValueType(type) || variable.StackType() == IL::StackType::Ref
+           || AllStoresUseConsistentType(StoreInstructionsOf(variable), type);
+}
+
+// The C# `bool IsOtherValueType(IType type)` local function of VisitStLoc:
+// a value type the eval stack carries as O.
+bool ExpressionBuilder::IsOtherValueType(const TS::IType& type)
+{
+    return TS::IsReferenceType(&type) == std::optional<bool>(false)
+           && TS::GetStackType(type) == IL::StackType::O;
+}
+
+// The C# `bool AllStoresUseConsistentType(IReadOnlyList<IStoreInstruction>
+// storeInstructions, IType expectedType)` local function of VisitStLoc.
+bool ExpressionBuilder::AllStoresUseConsistentType(
+    const std::vector<IL::ILInstruction*>& storeInstructions,
+    const TS::IType& expectedType)
+{
+    TS::ITypePtr expected =
+        const_cast<TS::IType&>(expectedType).AcceptVisitor(TS::NormalizeTypeVisitor::TypeErasure());
+    for (IL::ILInstruction* store : storeInstructions)
+    {
+        if (store == nullptr || store->Op != IL::OpCode::StLoc)
+            return false;
+        auto* stloc = static_cast<IL::StLoc*>(store);
+        if (stloc->Value == nullptr)
+            return false;
+        TS::ITypePtr type = IL::InferType(*stloc->Value, compilation);
+        type = type->AcceptVisitor(TS::NormalizeTypeVisitor::TypeErasure());
+        if (!type->Equals(*expected))
+            return false;
+    }
+    return true;
+}
+
+// The port stand-in for the C# `ILVariable.StoreInstructions` list (see the header
+// note): one recursive scan of the current function's live body grouping every
+// IStoreInstruction-shaped node by its Variable.
+void ExpressionBuilderCollectStores(IL::ILInstruction* inst,
+                                    std::unordered_map<const IL::ILVariable*,
+                                                       std::vector<IL::ILInstruction*>>& out)
+{
+    if (inst == nullptr)
+        return;
+    const IL::ILVariable* variable = nullptr;
+    switch (inst->Op)
+    {
+        case IL::OpCode::StLoc:
+            variable = static_cast<IL::StLoc*>(inst)->Variable.get();
+            break;
+        case IL::OpCode::MatchInstruction:
+            variable = static_cast<IL::MatchInstruction*>(inst)->Variable.get();
+            break;
+        case IL::OpCode::UsingInstruction:
+            variable = static_cast<IL::UsingInstruction*>(inst)->Variable.get();
+            break;
+        case IL::OpCode::TryCatchHandler:
+            variable = static_cast<IL::TryCatchHandler*>(inst)->Variable.get();
+            break;
+        case IL::OpCode::PinnedRegion:
+            variable = static_cast<IL::PinnedRegion*>(inst)->Variable.get();
+            break;
+        default:
+            break;
+    }
+    if (variable != nullptr)
+        out[variable].push_back(inst);
+    for (int i = 0; i < inst->ChildCount(); ++i)
+        ExpressionBuilderCollectStores(inst->GetChild(i), out);
+}
+
+const std::vector<IL::ILInstruction*>& ExpressionBuilder::StoreInstructionsOf(
+    const IL::ILVariable& variable)
+{
+    if (storeScanFunction != currentFunction)
+    {
+        storeInstructions.clear();
+        storeScanFunction = currentFunction;
+        // The scan starts at the FUNCTION node (not the Body): ILFunction's
+        // children are the Body plus the LocalFunctions collection, so stores
+        // inside nested local functions are gathered too (the C# list covers
+        // every connected store instruction).
+        if (currentFunction != nullptr)
+            ExpressionBuilderCollectStores(currentFunction, storeInstructions);
+    }
+    static const std::vector<IL::ILInstruction*> empty;
+    auto it = storeInstructions.find(&variable);
+    return it != storeInstructions.end() ? it->second : empty;
+}
+
 // ---------------------------------------------------------------------------
 // The value helpers
 
@@ -761,6 +930,26 @@ ExpressionWithResolveResult ExpressionBuilder::ConvertVariable(const IL::ILVaria
         return WithRR(*expr, std::make_shared<ILVariableResolveResult>(variable,
                                                                             variable->Type));
     }
+}
+
+// The C# `ExpressionWithResolveResult Assignment(TranslatedExpression left,
+// TranslatedExpression right)` (ExpressionBuilder.cs line 1255): convert the value
+// to the assignment target type (implicit conversions allowed) and build the
+// AssignmentExpression over the Assign OperatorResolveResult.
+ExpressionWithResolveResult ExpressionBuilder::Assignment(TranslatedExpression left,
+                                                         TranslatedExpression right)
+{
+    right = right.ConvertTo(const_cast<TS::IType&>(left.Type()), *this,
+                            /*checkForOverflow=*/false,
+                            /*allowImplicitConversion=*/true);
+    auto* assign = new Syntax::AssignmentExpression(left.Expression(), right.Expression());
+    return WithRR(*assign,
+                  std::make_shared<Sem::OperatorResolveResult>(
+                      const_cast<TS::IType&>(left.Type()).shared_from_this(),
+                      TS::ExpressionType::Assign,
+                      std::vector<std::shared_ptr<Sem::ResolveResult>>{
+                          SharedResolveResultAnnotation(*left.Expression()),
+                          SharedResolveResultAnnotation(*right.Expression())}));
 }
 
 bool ExpressionBuilder::HidesVariableWithName(const std::string& name) const

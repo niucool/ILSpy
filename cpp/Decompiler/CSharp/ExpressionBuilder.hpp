@@ -72,6 +72,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 // The forward declarations at GLOBAL scope (the nested-namespace trap: a declaration
@@ -202,6 +203,11 @@ public:
     TranslatedExpression VisitIsInst(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitSizeOf(IL::ILInstruction* inst, TranslationContext context);
     TranslatedExpression VisitLdTypeToken(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitStLoc(StLoc inst,
+    // TranslationContext context)` (ExpressionBuilder.cs lines 809-870): the
+    // assignment arm -- the stack-slot type refinement, the by-ref re-assignment
+    // `ref (a = ref b)` shape, and the plain Assignment.
+    TranslatedExpression VisitStLoc(IL::ILInstruction* inst, TranslationContext context);
     // The C# `TranslatedExpression IsType(IsInst inst)` helper (ExpressionBuilder.cs
     // line 425): the `expr is T` expression the comp/unbox.any special cases build.
     TranslatedExpression IsType(IL::IsInst& inst);
@@ -223,6 +229,45 @@ public:
     // element resolve result on the identifier + the DirectionExpression over
     // the ByReferenceResolveResult), else the plain ILVariableResolveResult.
     ExpressionWithResolveResult ConvertVariable(const IL::ILVariablePtr& variable);
+
+    // The C# `ExpressionWithResolveResult Assignment(TranslatedExpression left,
+    // TranslatedExpression right)` (ExpressionBuilder.cs line 1255): convert the
+    // value to the assignment target type (implicit conversions allowed) and
+    // build the AssignmentExpression over the Assign OperatorResolveResult.
+    ExpressionWithResolveResult Assignment(TranslatedExpression left,
+                                           TranslatedExpression right);
+
+    // -- The VisitStLoc stack-slot refinement helpers (the C# local functions) -------
+
+    // The C# `bool CanUseTypeForStackSlot(ILVariable v, IType type)` local
+    // function: a stack-slot's declared type may be replaced with the value's
+    // type when the variable is single-definition, the type is an "other value
+    // type", the variable is a ref slot, or all stores agree on the type.
+    bool CanUseTypeForStackSlot(const IL::ILVariable& variable, const TS::IType& type);
+
+    // The C# `bool IsOtherValueType(IType type)` local function: a value type
+    // carried on the eval stack as O (the stack slot's widened-object shape).
+    static bool IsOtherValueType(const TS::IType& type);
+
+    // The C# `bool AllStoresUseConsistentType(IReadOnlyList<IStoreInstruction>
+    // storeInstructions, IType expectedType)` local function: every store to the
+    // variable is an StLoc whose value infers to the expected type (compared
+    // through the TypeErasure normalization).
+    bool AllStoresUseConsistentType(const std::vector<IL::ILInstruction*>& storeInstructions,
+                                    const TS::IType& expectedType);
+
+    // The port stand-in for the C# `ILVariable.StoreInstructions` per-variable
+    // store list AllStoresUseConsistentType walks: the port keeps no per-variable
+    // use lists (the tree owns the instructions), so the lists are gathered by
+    // one recursive scan of the current function's live body (every
+    // IStoreInstruction-shaped node -- StLoc, MatchInstruction, UsingInstruction,
+    // TryCatchHandler, PinnedRegion -- keyed by its Variable) on the first
+    // VisitStLoc call of the function. The builder never mutates the tree during
+    // translation, so the snapshot stays valid for the whole run; the scan is
+    // redone when currentFunction changes.
+    const std::vector<IL::ILInstruction*>& StoreInstructionsOf(const IL::ILVariable& variable);
+    std::unordered_map<const IL::ILVariable*, std::vector<IL::ILInstruction*>> storeInstructions;
+    IL::ILFunction* storeScanFunction = nullptr;
 
     // The C# `internal bool HidesVariableWithName(string name)` / static overload:
     // whether any enclosing ILFunction (the ancestor walk INCLUDES the function

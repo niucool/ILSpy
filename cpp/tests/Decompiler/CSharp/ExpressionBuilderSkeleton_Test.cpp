@@ -62,7 +62,15 @@
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
 #include "Decompiler/IL/Instructions/IsInst.hpp"
 #include "Decompiler/IL/Instructions/TokenInstructions.hpp"
+#include "Decompiler/IL/Instructions/Block.hpp"
+#include "Decompiler/IL/Instructions/BlockContainer.hpp"
 #include "Decompiler/IL/Instructions/Call.hpp"
+#include "Decompiler/IL/Instructions/StLoc.hpp"
+#include "Decompiler/IL/Instructions/MatchInstruction.hpp"
+#include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
+#include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
+#include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
+#include "Decompiler/IL/ILTypeExtensions.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThrowExpression.hpp"
 #include "Decompiler/Semantics/ThrowResolveResult.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
@@ -133,6 +141,13 @@ struct BuilderFixture {
     {
         IL::ILFunction function;
         return function;
+    }
+
+    // The fixture's own function (the one MakeBuilder/Translate point the builder
+    // at) -- the VisitStLoc store-scan walks its live body.
+    IL::ILFunction& Function()
+    {
+        return function_;
     }
 
     // A Translate over the fixture's builder.
@@ -1168,4 +1183,434 @@ TEST(ExpressionBuilderLdTypeTokenTest, LdTypeTokenRendersTypeofTypeHandle)
     EXPECT_EQ(&typeOfRR->ReferencedType(), stringType.get());
     EXPECT_EQ(expr.Type().ReflectionName(), "System.RuntimeTypeHandle");
 }
+// ---------------------------------------------------------------------------
+// The VisitStLoc assignment arm (the C# ExpressionBuilder.cs lines 809-870):
+// the stack-slot type refinement, the by-ref re-assignment `ref (a = ref b)`
+// shape, and the plain Assignment. Expectations derived from the C# body over
+// the MinimalCorlib fixture.
+
+namespace {
+
+// The Object-typed stack slot the refinement fixtures reuse.
+std::shared_ptr<IL::ILVariable> MakeStackSlot(const BuilderFixture& fixture, int storeCount)
+{
+    auto slot = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::StackSlot,
+        std::const_pointer_cast<TS::IType>(
+            fixture.compilation.FindType(TS::KnownTypeCode::Object).shared_from_this()));
+    slot->Name = "S_0";
+    slot->StoreCount = storeCount;
+    return slot;
+}
+
+std::shared_ptr<IL::ILVariable> MakeLocal(const BuilderFixture& fixture,
+                                          TS::KnownTypeCode code, const char* name)
+{
+    auto local = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local,
+        std::const_pointer_cast<TS::IType>(
+            fixture.compilation.FindType(code).shared_from_this()));
+    local->Name = name;
+    return local;
+}
+
+} // namespace
+
+TEST(ExpressionBuilderStLocTest, StLocRendersAssignmentWithOperatorResolveResult)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = MakeLocal(fixture, TS::KnownTypeCode::Int32, "num");
+    IL::StLoc stLoc(variable, std::make_unique<IL::LdcI4>(42));
+    auto expr = builder.Translate(&stLoc);
+    auto* assign = dynamic_cast<Syntax::AssignmentExpression*>(expr.Expression());
+    ASSERT_TRUE(assign != nullptr);
+    auto* left = dynamic_cast<Syntax::IdentifierExpression*>(assign->Left());
+    ASSERT_TRUE(left != nullptr);
+    EXPECT_EQ(left->Identifier(), "num");
+    auto* right = dynamic_cast<Syntax::PrimitiveExpression*>(assign->Right());
+    ASSERT_TRUE(right != nullptr);
+    const std::int32_t* value = std::get_if<std::int32_t>(&right->Value());
+    ASSERT_TRUE(value != nullptr);
+    EXPECT_EQ(*value, 42);
+    // The resolve result is the Assign OperatorResolveResult over the variable's
+    // type with both operands, and the node carries the StLoc IL annotation.
+    const auto* operatorRR =
+        dynamic_cast<const Sem::OperatorResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(operatorRR != nullptr);
+    EXPECT_EQ(operatorRR->OperatorType(), TS::ExpressionType::Assign);
+    EXPECT_EQ(operatorRR->Type().ReflectionName(), "System.Int32");
+    EXPECT_EQ(operatorRR->Operands().size(), std::size_t(2));
+    const auto ilInstructions = expr.ILInstructions();
+    ASSERT_EQ(ilInstructions.size(), std::size_t(1));
+    EXPECT_EQ(ilInstructions[0], &stLoc);
+}
+
+TEST(ExpressionBuilderStLocTest, StLocTranslatesTheValueWithTheVariableTypeHint)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = MakeLocal(fixture, TS::KnownTypeCode::Int64, "num");
+    IL::StLoc stLoc(variable, std::make_unique<IL::LdcI4>(42));
+    auto expr = builder.Translate(&stLoc);
+    auto* assign = dynamic_cast<Syntax::AssignmentExpression*>(expr.Expression());
+    ASSERT_TRUE(assign != nullptr);
+    // The int32 constant was re-typed to the hint (Int64) inside
+    // AdjustConstantToType, so the assignment needs no cast.
+    const auto* operatorRR =
+        dynamic_cast<const Sem::OperatorResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(operatorRR != nullptr);
+    EXPECT_EQ(operatorRR->Type().ReflectionName(), "System.Int64");
+    const auto* rightRR =
+        dynamic_cast<const Sem::ResolveResult*>(operatorRR->Operands()[1].get());
+    ASSERT_TRUE(rightRR != nullptr);
+    EXPECT_EQ(rightRR->Type().ReflectionName(), "System.Int64");
+}
+
+TEST(ExpressionBuilderStLocTest, StLocByRefVariableRendersRefReAssignment)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto& intType = fixture.compilation.FindType(TS::KnownTypeCode::Int32);
+    auto target = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local,
+        std::make_shared<TS::ByReferenceType>(
+            std::const_pointer_cast<TS::IType>(intType.shared_from_this())));
+    target->Name = "refLocal";
+    auto source = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local,
+        std::make_shared<TS::ByReferenceType>(
+            std::const_pointer_cast<TS::IType>(intType.shared_from_this())));
+    source->Name = "other";
+    IL::StLoc stLoc(target, std::make_unique<IL::LdLoca>(source));
+    auto expr = builder.Translate(&stLoc);
+    // ref (refLocal = ref other)
+    auto* outer = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(outer != nullptr);
+    EXPECT_EQ(outer->FieldDirection(), Syntax::FieldDirection::Ref);
+    auto* assign = dynamic_cast<Syntax::AssignmentExpression*>(outer->Expression());
+    ASSERT_TRUE(assign != nullptr);
+    auto* left = dynamic_cast<Syntax::IdentifierExpression*>(assign->Left());
+    ASSERT_TRUE(left != nullptr);
+    EXPECT_EQ(left->Identifier(), "refLocal");
+    auto* right = dynamic_cast<Syntax::DirectionExpression*>(assign->Right());
+    ASSERT_TRUE(right != nullptr);
+    // The SAME ByReferenceResolveResult object rides the outer node (the C#
+    // `.WithRR(lhsRefRR)` re-attachment).
+    const auto* outerRR =
+        dynamic_cast<const Sem::ByReferenceResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(outerRR != nullptr);
+    EXPECT_EQ(outerRR->Type().ReflectionName(), "System.Int32&");
+}
+
+TEST(ExpressionBuilderStLocTest, StLocRefinesSingleDefinitionStackSlotType)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto slot = MakeStackSlot(fixture, /*storeCount=*/1);
+    auto strLocal = MakeLocal(fixture, TS::KnownTypeCode::String, "str");
+    IL::StLoc stLoc(slot, std::make_unique<IL::LdLoc>(strLocal));
+    builder.Translate(&stLoc);
+    // The single-definition slot adopts the value's type (String).
+    EXPECT_EQ(slot->Type->ReflectionName(), "System.String");
+}
+
+TEST(ExpressionBuilderStLocTest, StLocSkipsRefinementWhenTheSlotWasLoaded)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto slot = MakeStackSlot(fixture, /*storeCount=*/1);
+    auto strLocal = MakeLocal(fixture, TS::KnownTypeCode::String, "str");
+    IL::LdLoc load(slot);
+    // Loading the stack slot first registers it in the loadedVariablesSet.
+    builder.Visit(&load, CSharp::TranslationContext{});
+    IL::StLoc stLoc(slot, std::make_unique<IL::LdLoc>(strLocal));
+    builder.Translate(&stLoc);
+    // The load marks the slot as read (its inaccurate Object type is in use).
+    EXPECT_EQ(slot->Type->ReflectionName(), "System.Object");
+}
+
+TEST(ExpressionBuilderStLocTest,
+     StLocRefinesSlotToTheDefaultValueTypeWhenStoresAreInconsistent)
+{
+    BuilderFixture fixture;
+    auto slot = MakeStackSlot(fixture, /*storeCount=*/2);
+    auto intLocal = MakeLocal(fixture, TS::KnownTypeCode::Int32, "num");
+    auto& fn = fixture.Function();
+    fn.Body = std::make_unique<IL::BlockContainer>();
+    auto block = std::make_unique<IL::Block>();
+    block->Add(std::make_unique<IL::StLoc>(
+        slot, std::make_unique<IL::DefaultValue>(
+                  std::const_pointer_cast<TS::IType>(
+                      fixture.compilation.FindType(TS::KnownTypeCode::Decimal)
+                          .shared_from_this()))));
+    block->Add(std::make_unique<IL::StLoc>(slot, std::make_unique<IL::LdLoc>(intLocal)));
+    fn.Body->AddBlock(std::move(block));
+    auto builder = fixture.MakeBuilder();
+    IL::StLoc* first = static_cast<IL::StLoc*>(
+        static_cast<IL::Block*>(fn.Body->Blocks[0].get())->Instructions[0].get());
+    builder.Translate(first);
+    // The stores disagree, so the consistent-type arm fails; the
+    // default-value arm still adopts the Decimal value type.
+    EXPECT_EQ(slot->Type->ReflectionName(), "System.Decimal");
+}
+
+TEST(ExpressionBuilderStLocTest, StLocRefinesMultiStoreSlotWhenAllStoresAgree)
+{
+    BuilderFixture fixture;
+    auto slot = MakeStackSlot(fixture, /*storeCount=*/2);
+    auto strLocal = MakeLocal(fixture, TS::KnownTypeCode::String, "str");
+    auto strLocal2 = MakeLocal(fixture, TS::KnownTypeCode::String, "str2");
+    auto& fn = fixture.Function();
+    fn.Body = std::make_unique<IL::BlockContainer>();
+    auto block = std::make_unique<IL::Block>();
+    block->Add(std::make_unique<IL::StLoc>(slot, std::make_unique<IL::LdLoc>(strLocal)));
+    block->Add(std::make_unique<IL::StLoc>(slot, std::make_unique<IL::LdLoc>(strLocal2)));
+    fn.Body->AddBlock(std::move(block));
+    auto builder = fixture.MakeBuilder();
+    IL::StLoc* first = static_cast<IL::StLoc*>(
+        static_cast<IL::Block*>(fn.Body->Blocks[0].get())->Instructions[0].get());
+    builder.Translate(first);
+    // Every store infers String, so the consistent-type arm refines the slot.
+    EXPECT_EQ(slot->Type->ReflectionName(), "System.String");
+}
+
+TEST(ExpressionBuilderStLocTest, StLocKeepsWidenedTypeWhenStoresDisagree)
+{
+    BuilderFixture fixture;
+    auto slot = MakeStackSlot(fixture, /*storeCount=*/2);
+    auto strLocal = MakeLocal(fixture, TS::KnownTypeCode::String, "str");
+    auto intLocal = MakeLocal(fixture, TS::KnownTypeCode::Int32, "num");
+    auto& fn = fixture.Function();
+    fn.Body = std::make_unique<IL::BlockContainer>();
+    auto block = std::make_unique<IL::Block>();
+    block->Add(std::make_unique<IL::StLoc>(slot, std::make_unique<IL::LdLoc>(strLocal)));
+    block->Add(std::make_unique<IL::StLoc>(slot, std::make_unique<IL::LdLoc>(intLocal)));
+    fn.Body->AddBlock(std::move(block));
+    auto builder = fixture.MakeBuilder();
+    IL::StLoc* first = static_cast<IL::StLoc*>(
+        static_cast<IL::Block*>(fn.Body->Blocks[0].get())->Instructions[0].get());
+    builder.Translate(first);
+    // Inconsistent stores and no default-value value keep the widened type.
+    EXPECT_EQ(slot->Type->ReflectionName(), "System.Object");
+}
+
+TEST(ExpressionBuilderStLocTest, StLocNonStLocStoreBlocksTheConsistencyRefinement)
+{
+    BuilderFixture fixture;
+    auto slot = MakeStackSlot(fixture, /*storeCount=*/2);
+    auto strLocal = MakeLocal(fixture, TS::KnownTypeCode::String, "str");
+    auto& fn = fixture.Function();
+    fn.Body = std::make_unique<IL::BlockContainer>();
+    auto block = std::make_unique<IL::Block>();
+    block->Add(std::make_unique<IL::StLoc>(slot, std::make_unique<IL::LdLoc>(strLocal)));
+    // A MatchInstruction is an IStoreInstruction that is not an StLoc -- the C#
+    // AllStoresUseConsistentType rejects the list outright.
+    block->Add(std::make_unique<IL::MatchInstruction>(slot, std::make_unique<IL::LdNull>()));
+    fn.Body->AddBlock(std::move(block));
+    auto builder = fixture.MakeBuilder();
+    IL::StLoc* first = static_cast<IL::StLoc*>(
+        static_cast<IL::Block*>(fn.Body->Blocks[0].get())->Instructions[0].get());
+    builder.Translate(first);
+    EXPECT_EQ(slot->Type->ReflectionName(), "System.Object");
+}
+
+TEST(ExpressionBuilderStLocTest, AssignmentHelperBuildsAssignOperatorResolveResult)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto variable = MakeLocal(fixture, TS::KnownTypeCode::Int32, "num");
+    IL::LdcI4 ldc(42);
+    auto value = builder.Translate(&ldc);
+    // The C# `Assignment(TranslatedExpression, TranslatedExpression)` helper over
+    // a variable-typed left side.
+    IL::LdLoc ldLoc(variable);
+    auto left = builder.Translate(&ldLoc);
+    auto result = builder.Assignment(left, value);
+    auto* assign = dynamic_cast<Syntax::AssignmentExpression*>(result.Expression());
+    ASSERT_TRUE(assign != nullptr);
+    const auto* operatorRR =
+        dynamic_cast<const Sem::OperatorResolveResult*>(result.ResolveResult());
+    ASSERT_TRUE(operatorRR != nullptr);
+    EXPECT_EQ(operatorRR->OperatorType(), TS::ExpressionType::Assign);
+    EXPECT_EQ(operatorRR->Type().ReflectionName(), "System.Int32");
+    EXPECT_EQ(operatorRR->Operands().size(), std::size_t(2));
+}
+
+// ---------------------------------------------------------------------------
+// The ILTypeExtensions port (ILTypeExtensions.cs): the InferType extension the
+// AllStoresUseConsistentType helper consumes, the MatchDefaultValue bare match,
+// the ILVariable.StackType derived read, and the TypeUtils.
+// IsCompatibleTypeForMemoryAccess port the LdElema arm composes.
+
+TEST(ILTypeExtensionsTest, InferTypeLoadsReadTheVariableType)
+{
+    BuilderFixture fixture;
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "num");
+    IL::LdLoc ldLoc(local);
+    auto type = IL::InferType(ldLoc, &fixture.compilation);
+    EXPECT_EQ(type->ReflectionName(), "System.Int32");
+    IL::StLoc stLoc(local, std::make_unique<IL::LdcI4>(1));
+    type = IL::InferType(stLoc, &fixture.compilation);
+    EXPECT_EQ(type->ReflectionName(), "System.Int32");
+}
+
+TEST(ILTypeExtensionsTest, InferTypeLdLocaWrapsByReferenceType)
+{
+    BuilderFixture fixture;
+    // ldloca loads the ADDRESS of the variable, so the inferred type is the
+    // variable's type wrapped in a ByReferenceType (int& over the int local).
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "num");
+    IL::LdLoca ldLoca(local);
+    auto type = IL::InferType(ldLoca, &fixture.compilation);
+    ASSERT_EQ(type->Kind(), TS::TypeKind::ByReference);
+    auto* byRef = static_cast<TS::ByReferenceType*>(type.get());
+    EXPECT_EQ(byRef->Element()->ReflectionName(), "System.Int32");
+}
+
+TEST(ILTypeExtensionsTest, InferTypeDefaultValueReturnsItsType)
+{
+    BuilderFixture fixture;
+    auto decimalType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Decimal).shared_from_this());
+    IL::DefaultValue defaultValue(decimalType);
+    TS::ITypePtr matched;
+    ASSERT_TRUE(IL::MatchDefaultValue(&defaultValue, matched));
+    EXPECT_TRUE(matched->Equals(*decimalType));
+    auto type = IL::InferType(defaultValue, &fixture.compilation);
+    EXPECT_TRUE(type->Equals(*decimalType));
+    // The bare match rejects other instructions.
+    IL::LdcI4 ldc(1);
+    EXPECT_FALSE(IL::MatchDefaultValue(&ldc, matched));
+}
+
+TEST(ILTypeExtensionsTest, InferTypeCallUsesTheResolvedReturnType)
+{
+    BuilderFixture fixture;
+    IL::Call call("Test::Method");
+    call.ReturnIType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int64).shared_from_this());
+    auto type = IL::InferType(call, &fixture.compilation);
+    EXPECT_EQ(type->ReflectionName(), "System.Int64");
+    // The newobj shape answers the DECLARING type (the constructed object).
+    IL::Call newObj("System.Decimal::.ctor");
+    newObj.IsNewObj = true;
+    newObj.DeclaringType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Decimal).shared_from_this());
+    type = IL::InferType(newObj, &fixture.compilation);
+    EXPECT_EQ(type->ReflectionName(), "System.Decimal");
+}
+
+TEST(ILTypeExtensionsTest, InferTypeNewArrBuildsArrayType)
+{
+    BuilderFixture fixture;
+    auto stringType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    indices.push_back(std::make_unique<IL::LdcI4>(1));
+    indices.push_back(std::make_unique<IL::LdcI4>(2));
+    IL::NewArr newArr(stringType, std::move(indices));
+    auto type = IL::InferType(newArr, &fixture.compilation);
+    auto* arrayType = dynamic_cast<TS::ArrayType*>(type.get());
+    ASSERT_TRUE(arrayType != nullptr);
+    EXPECT_EQ(arrayType->Rank(), 2);
+    EXPECT_EQ(arrayType->Element()->ReflectionName(), "System.String");
+}
+
+TEST(ILTypeExtensionsTest, InferTypeCompByLiftingKind)
+{
+    BuilderFixture fixture;
+    IL::Comp comp(std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdcI4>(2));
+    auto type = IL::InferType(comp, &fixture.compilation);
+    EXPECT_EQ(type->ReflectionName(), "System.Boolean");
+    IL::Comp lifted(std::make_unique<IL::LdNull>(), std::make_unique<IL::LdNull>(),
+                    IL::ComparisonKind::Equality, IL::ComparisonLiftingKind::ThreeValuedLogic,
+                    IL::StackType::O);
+    type = IL::InferType(lifted, &fixture.compilation);
+    EXPECT_EQ(TS::GetUnderlyingType(*type).ReflectionName(), "System.Boolean");
+}
+
+TEST(ILTypeExtensionsTest, InferTypeBitAndOfEqualPrimitivesFoldsToTheType)
+{
+    BuilderFixture fixture;
+    auto intLocal = MakeLocal(fixture, TS::KnownTypeCode::Int32, "num");
+    IL::BinaryNumericInstruction sameTypes(
+        std::make_unique<IL::LdLoc>(intLocal), std::make_unique<IL::LdLoc>(intLocal),
+        IL::BinaryNumericOperator::BitAnd);
+    auto type = IL::InferType(sameTypes, &fixture.compilation);
+    EXPECT_EQ(type->ReflectionName(), "System.Int32");
+    auto int64Local = MakeLocal(fixture, TS::KnownTypeCode::Int64, "big");
+    IL::BinaryNumericInstruction mixedTypes(
+        std::make_unique<IL::LdLoc>(intLocal), std::make_unique<IL::LdLoc>(int64Local),
+        IL::BinaryNumericOperator::BitAnd);
+    type = IL::InferType(mixedTypes, &fixture.compilation);
+    EXPECT_EQ(type->Kind(), TS::TypeKind::Unknown);
+    // Non-bitwise operators have no type inference rule.
+    IL::BinaryNumericInstruction addInst(std::make_unique<IL::LdLoc>(intLocal),
+                                         std::make_unique<IL::LdLoc>(intLocal),
+                                         IL::BinaryNumericOperator::Add);
+    type = IL::InferType(addInst, &fixture.compilation);
+    EXPECT_EQ(type->Kind(), TS::TypeKind::Unknown);
+}
+
+TEST(ILTypeExtensionsTest, InferTypeUnsupportedFallsToUnknownType)
+{
+    BuilderFixture fixture;
+    IL::Nop nop;
+    auto type = IL::InferType(nop, &fixture.compilation);
+    EXPECT_EQ(type->Kind(), TS::TypeKind::Unknown);
+    IL::LdStr ldStr("text");
+    type = IL::InferType(ldStr, &fixture.compilation);
+    EXPECT_EQ(type->Kind(), TS::TypeKind::Unknown);
+}
+
+TEST(ILTypeExtensionsTest, ILVariableStackTypeFollowsTheDeclaredType)
+{
+    BuilderFixture fixture;
+    auto intLocal = MakeLocal(fixture, TS::KnownTypeCode::Int32, "num");
+    EXPECT_EQ(intLocal->StackType(), IL::StackType::I4);
+    auto strLocal = MakeLocal(fixture, TS::KnownTypeCode::String, "str");
+    EXPECT_EQ(strLocal->StackType(), IL::StackType::O);
+    auto& intType = fixture.compilation.FindType(TS::KnownTypeCode::Int32);
+    auto refLocal = std::make_shared<IL::ILVariable>(
+        IL::VariableKind::Local,
+        std::make_shared<TS::ByReferenceType>(
+            std::const_pointer_cast<TS::IType>(intType.shared_from_this())));
+    EXPECT_EQ(refLocal->StackType(), IL::StackType::Ref);
+    // A variable with no type reads Unknown (the default-constructed shape).
+    IL::ILVariable empty;
+    EXPECT_EQ(empty.StackType(), IL::StackType::Unknown);
+    // The value is derived on read, so re-assigning the type updates it (the
+    // port's Type is a plain field the reader re-assigns after construction).
+    empty.Type = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int64).shared_from_this());
+    EXPECT_EQ(empty.StackType(), IL::StackType::I8);
+}
+
+TEST(ILTypeExtensionsTest, IsCompatibleTypeForMemoryAccessMatrix)
+{
+    BuilderFixture fixture;
+    auto& intType = fixture.compilation.FindType(TS::KnownTypeCode::Int32);
+    auto& uintType = fixture.compilation.FindType(TS::KnownTypeCode::UInt32);
+    auto& longType = fixture.compilation.FindType(TS::KnownTypeCode::Int64);
+    auto& objectType = fixture.compilation.FindType(TS::KnownTypeCode::Object);
+    auto& stringType = fixture.compilation.FindType(TS::KnownTypeCode::String);
+    // Equal types.
+    EXPECT_TRUE(TS::IsCompatibleTypeForMemoryAccess(
+        const_cast<TS::IType&>(intType), const_cast<TS::IType&>(intType)));
+    // Same integer stack type and size (int32 vs uint32).
+    EXPECT_TRUE(TS::IsCompatibleTypeForMemoryAccess(
+        const_cast<TS::IType&>(intType), const_cast<TS::IType&>(uintType)));
+    // Different integer sizes.
+    EXPECT_FALSE(TS::IsCompatibleTypeForMemoryAccess(
+        const_cast<TS::IType&>(intType), const_cast<TS::IType&>(longType)));
+    // Both reference types.
+    EXPECT_TRUE(TS::IsCompatibleTypeForMemoryAccess(
+        const_cast<TS::IType&>(objectType), const_cast<TS::IType&>(stringType)));
+    // Unknown types are compatible with everything.
+    auto unknown = TS::UnknownType();
+    EXPECT_TRUE(
+        TS::IsCompatibleTypeForMemoryAccess(const_cast<TS::IType&>(intType), *unknown));
+}
+
 } // namespace ILSpy::Tests

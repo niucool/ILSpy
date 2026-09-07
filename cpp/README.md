@@ -2054,7 +2054,52 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `Visit` entry because Translate's DEBUG post-condition assert would fire on
   them (IsInst.ResultType is O while the conditional's type is the argument
   type -- the C# keeps those arms for the consumers that special-case
-  value-type isinsts before Translate ever runs).
+  value-type isinsts before Translate ever runs). The assignment arm landed
+  as the next builder slice: `VisitStLoc` (ExpressionBuilder.cs lines
+  809-870) -- the value Translate with the VARIABLE's type as hint, the
+  stack-slot type refinement (a StackSlot not yet in `loadedVariablesSet`
+  adopts the value's type when `CanUseTypeForStackSlot` -- single
+  definition / other-value-type / Ref slot / all stores consistent -- and the
+  StackType + non-Null guards hold, else the `MatchDefaultValue` other-value
+  -type arm), the by-ref re-assignment `ref (a = ref b)` shape over the
+  UnwrapChild'd identifier + the Assign `OperatorResolveResult` (the C#
+  passes the UNWRAPPED child's element type as the assign's result type and
+  re-attaches the SAME `ByReferenceResolveResult` to the outer
+  DirectionExpression), and the plain `Assignment(lhs, value)` helper
+  (ExpressionBuilder.cs line 1255) over the implicit-conversion-allowed
+  ConvertTo. The port stand-in for the C# `ILVariable.StoreInstructions`
+  per-variable list `AllStoresUseConsistentType` walks: one recursive scan of
+  the current function's live body grouping every IStoreInstruction-shaped
+  node (StLoc/MatchInstruction/UsingInstruction/TryCatchHandler/
+  PinnedRegion) by its Variable, cached on the builder for the whole
+  translation (the builder never mutates the tree; the scan is redone when
+  `currentFunction` changes) -- the port keeps no per-variable use lists, so
+  the live-tree scan is the faithful equivalent. Supporting pieces:
+  `ILVariable::StackType()` -- the C# readonly property the C# ctor derives
+  from `type.GetStackType()` and the Type setter guards; the port derives it
+  on read because the port's Type is a plain field several reader/transform
+  sites re-assign after construction (a cached field would go stale) -- and
+  the new `Decompiler/IL/ILTypeExtensions.{hpp,cpp}` port of
+  ILTypeExtensions.cs's `InferType(ILInstruction, ICompilation)` extension
+  (the LdLoc/StLoc/LdObj/StObj/LdLoca/LdFlda/LdsFlda/LdElema/NewObj/Call/
+  NewArr/Comp/BinaryNumericInstruction/DefaultValue arms with the
+  documented divergences: the port's Call node unifies call/callvirt/newobj
+  via IsNewObj/IsInstanceCall so the newobj DeclaringType arm must win over
+  the ReturnType arm; the port's UserDefinedLogicOperator carries no return
+  type, ILFunction has no DelegateType, the field-address nodes carry no
+  field IType, and there is no CallIndirect node -- each falls to
+  UnknownType) + the `MatchDefaultValue` bare match, plus the
+  `TypeUtils::IsCompatibleTypeForMemoryAccess` port (TypeUtils.cs line 241,
+  the TypeErasure-normalized memory-access compatibility query the LdElema
+  arm composes). Verified by the 20-test `ExpressionBuilderStLocTest` +
+  `ILTypeExtensionsTest` suites over the MinimalCorlib fixture (the plain
+  assignment shape with the Assign resolve result + IL annotation, the
+  type-hint constant re-typing, the by-ref re-assignment, the five
+  stack-slot refinement matrices incl. the loaded-slot guard and the
+  non-StLoc store rejection, the Assignment helper, and the InferType/
+  MatchDefaultValue/StackType/IsCompatibleTypeForMemoryAccess tables),
+  proven with a five-test RED neuter round plus a second Comp-arm neuter
+  round, restored green.
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

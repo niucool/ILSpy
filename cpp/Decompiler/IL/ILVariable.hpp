@@ -23,8 +23,10 @@
 
 #pragma once
 
+#include "Decompiler/IL/StackType.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/TypeUtils.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -67,6 +69,21 @@ public:
     ILVariable() = default;
     ILVariable(VariableKind kind, TypeSystem::ITypePtr type, std::int32_t index = -1)
         : Kind(kind), Type(std::move(type)), Index(index) {}
+
+    // The C# `public readonly StackType StackType` property: the variable's
+    // evaluation-stack type. The C# ctor derives it from `type.GetStackType()`
+    // and its Type setter GUARDS the invariant (a mismatch throws
+    // ArgumentException); the port's Type is a plain field that several reader
+    // and transform sites re-assign after construction, so the value is derived
+    // on read instead of cached (a stale cache would be the worse divergence).
+    // The C# IL reader's stack-slot ctor overload takes the stack type
+    // explicitly, but always as FindType(stackType), which GetStackType maps
+    // back onto -- the derived value is faithful on every reader path. A
+    // variable with no type yields StackType.Unknown.
+    StackType StackType() const
+    {
+        return Type ? TypeSystem::GetStackType(*Type) : IL::StackType::Unknown;
+    }
 };
 
 using ILVariablePtr = std::shared_ptr<ILVariable>;

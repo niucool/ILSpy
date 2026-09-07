@@ -38,6 +38,7 @@
 #include "Decompiler/TypeSystem/IType.hpp"
 #include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/NormalizeTypeVisitor.hpp"
 #include "Decompiler/TypeSystem/Sign.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
 #include "Decompiler/IL/PrimitiveType.hpp"
@@ -511,6 +512,32 @@ inline ITypePtr SwapSign(const IType* type) {
         default: return nullptr;
     }
     return std::make_shared<KnownType>(target);
+}
+
+// Port of TypeUtils.IsCompatibleTypeForMemoryAccess(IType, IType) (TypeUtils.cs
+// line 241): whether reading/writing an element of accessType from the pointer
+// is equivalent to reading/writing an element of memoryType. The C# normalizes
+// both inputs through NormalizeTypeVisitor.TypeErasure before comparing (an
+// object->dynamic / tuple->underlying-type erasure, not just this type).
+// NON-CONST inputs: `IType::AcceptVisitor` is non-const (the D406 convention).
+inline bool IsCompatibleTypeForMemoryAccess(IType& memoryType, IType& accessType) {
+    ITypePtr memory = memoryType.AcceptVisitor(NormalizeTypeVisitor::TypeErasure());
+    ITypePtr access = accessType.AcceptVisitor(NormalizeTypeVisitor::TypeErasure());
+    if (memory->Equals(*access))
+        return true;
+    // If the types are not equal, the access still might produce equal results in some cases:
+    // 1) Both types are reference types
+    if (IsReferenceType(memory.get()) == std::optional<bool>(true)
+        && IsReferenceType(access.get()) == std::optional<bool>(true))
+        return true;
+    // 2) Both types are integer types of equal size
+    IL::StackType memoryStackType = GetStackType(*memory);
+    IL::StackType accessStackType = GetStackType(*access);
+    if (memoryStackType == accessStackType && IL::IsIntegerType(memoryStackType)
+        && GetSize(memory.get()) == GetSize(access.get()))
+        return true;
+    // 3) Any of the types is unknown: we assume they are compatible.
+    return memory->Kind() == TypeKind::Unknown || access->Kind() == TypeKind::Unknown;
 }
 
 } // namespace ILSpy::Decompiler::TypeSystem
