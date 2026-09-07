@@ -38,6 +38,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/SizeOfExpression.hpp"
@@ -96,6 +97,7 @@
 #include "Decompiler/TypeSystem/TupleType.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
+#include "Decompiler/Util/CSharpPrimitiveCast.hpp"
 
 #include <cassert>
 #include <cstdio>
@@ -226,6 +228,44 @@ bool IsZeroLdc(const IL::ILInstruction* inst)
 {
     std::int64_t val = 0;
     return MatchLdcI(inst, val) && val == 0;
+}
+
+// The C# `SyntaxExtensions.IsBitwise(BinaryOperatorType)` (SyntaxExtensions.cs line
+// 49): bitwise and, bitwise or, or exclusive or. Ported as a file-local helper
+// beside its consumer (the SyntaxExtensions extension-method convention -- the
+// InsertParenthesesVisitor carries the same-shape file-local copy).
+bool IsBitwise(Syntax::BinaryOperatorType op)
+{
+    return op == Syntax::BinaryOperatorType::BitwiseAnd
+           || op == Syntax::BinaryOperatorType::BitwiseOr
+           || op == Syntax::BinaryOperatorType::ExclusiveOr;
+}
+
+// The C# `ILInstruction.MatchBinaryNumericInstruction(BinaryNumericOperator op,
+// out ILInstruction left, out ILInstruction right)` (PatternMatching.cs line 526):
+// the bare BinaryNumericInstruction match. Returns false when the instruction is
+// not a BinaryNumericInstruction of the requested operator (left/right untouched).
+bool MatchBinaryNumericInstruction(const IL::ILInstruction* inst, IL::BinaryNumericOperator op,
+                                   const IL::ILInstruction*& left, const IL::ILInstruction*& right)
+{
+    if (inst == nullptr || inst->Op != IL::OpCode::BinaryNumericInstruction)
+        return false;
+    const auto* bni = static_cast<const IL::BinaryNumericInstruction*>(inst);
+    if (bni->Operator != op)
+        return false;
+    left = bni->Left.get();
+    right = bni->Right.get();
+    return true;
+}
+
+// The C# `ILInstruction.MatchSizeOf(out IType type)` (Instructions.cs line 8955):
+// the bare SizeOf match returning the node's Type operand.
+bool MatchSizeOf(const IL::ILInstruction* inst, const TS::IType*& type)
+{
+    if (inst == nullptr || inst->Op != IL::OpCode::SizeOf)
+        return false;
+    type = static_cast<const IL::SizeOf*>(inst)->Type.get();
+    return true;
 }
 
 
@@ -447,6 +487,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitStLoc(inst, context);
         case IL::OpCode::Comp:
             return VisitComp(inst, context);
+        case IL::OpCode::BinaryNumericInstruction:
+            return VisitBinaryNumericInstruction(inst, context);
         case IL::OpCode::SizeOf:
             return VisitSizeOf(inst, context);
         case IL::OpCode::LdTypeToken:
@@ -2094,6 +2136,664 @@ TranslatedExpression ExpressionBuilder::PrepareArithmeticArgument(TranslatedExpr
     return arg;
 }
 
+// ---------------------------------------------------------------------------
+// The binary-numeric family (the VisitBinaryNumericInstruction arm + helpers)
+
+// The C# `protected internal override TranslatedExpression
+// VisitBinaryNumericInstruction(BinaryNumericInstruction inst, TranslationContext
+// context)` (ExpressionBuilder.cs lines 1262-1298): the arithmetic dispatch.
+TranslatedExpression ExpressionBuilder::VisitBinaryNumericInstruction(
+    IL::ILInstruction* inst, TranslationContext context)
+{
+    auto* bni = static_cast<IL::BinaryNumericInstruction*>(inst);
+    switch (bni->Operator)
+    {
+        case IL::BinaryNumericOperator::Add:
+            return HandleBinaryNumeric(*bni, Syntax::BinaryOperatorType::Add, context);
+        case IL::BinaryNumericOperator::Sub:
+            return HandleBinaryNumeric(*bni, Syntax::BinaryOperatorType::Subtract, context);
+        case IL::BinaryNumericOperator::Mul:
+            return HandleBinaryNumeric(*bni, Syntax::BinaryOperatorType::Multiply, context);
+        case IL::BinaryNumericOperator::Div:
+        {
+            // The C# `HandlePointerSubtraction(inst) ?? HandleBinaryNumeric(...)`
+            // fallback order: the pointer-subtraction attempt runs first.
+            if (auto ptrResult = HandlePointerSubtraction(*bni))
+                return *ptrResult;
+            return HandleBinaryNumeric(*bni, Syntax::BinaryOperatorType::Divide, context);
+        }
+        case IL::BinaryNumericOperator::Rem:
+            return HandleBinaryNumeric(*bni, Syntax::BinaryOperatorType::Modulus, context);
+        case IL::BinaryNumericOperator::BitAnd:
+            return HandleBinaryNumeric(*bni, Syntax::BinaryOperatorType::BitwiseAnd,
+                                       context);
+        case IL::BinaryNumericOperator::BitOr:
+            return HandleBinaryNumeric(*bni, Syntax::BinaryOperatorType::BitwiseOr,
+                                       context);
+        case IL::BinaryNumericOperator::BitXor:
+            return HandleBinaryNumeric(*bni, Syntax::BinaryOperatorType::ExclusiveOr,
+                                       context);
+        case IL::BinaryNumericOperator::ShiftLeft:
+            return HandleShift(*bni, Syntax::BinaryOperatorType::ShiftLeft, context);
+        case IL::BinaryNumericOperator::ShiftRight:
+            return HandleShift(*bni, Syntax::BinaryOperatorType::ShiftRight, context);
+        default:
+            // The C# `throw new ArgumentOutOfRangeException()` (the parameterless
+            // form; the ToBinaryOperatorType std::out_of_range convention).
+            throw std::out_of_range(
+                "Exception of type 'System.ArgumentOutOfRangeException' was thrown.");
+    }
+}
+
+// The C# `TranslatedExpression? HandlePointerArithmetic(BinaryNumericInstruction
+// inst, TranslatedExpression left, TranslatedExpression right, TranslationContext
+// context)` (ExpressionBuilder.cs lines 1300-1384): translates pointer arithmetic
+// (ptr + int / int + ptr / ptr - int). 'ptr - ptr' is not handled here, but in
+// HandlePointerSubtraction. Returns nullopt when 'inst' is not performing pointer
+// arithmetic.
+std::optional<TranslatedExpression> ExpressionBuilder::HandlePointerArithmetic(
+    IL::BinaryNumericInstruction& inst, TranslatedExpression left,
+    TranslatedExpression right, TranslationContext context)
+{
+    if (!(inst.Operator == IL::BinaryNumericOperator::Add
+          || inst.Operator == IL::BinaryNumericOperator::Sub))
+        return std::nullopt;
+    if (inst.CheckForOverflow || inst.IsLifted)
+        return std::nullopt;
+    if (!(inst.LeftInputType == IL::StackType::I && inst.RightInputType == IL::StackType::I))
+        return std::nullopt;
+    const TS::PointerType* pointerType = nullptr;
+    IL::ILInstruction* byteOffsetInst = nullptr;
+    TranslatedExpression byteOffsetExpr;
+    if (left.Type().Kind() == TypeKind::Pointer)
+    {
+        byteOffsetInst = inst.Right.get();
+        byteOffsetExpr = std::move(right);
+        pointerType = static_cast<const TS::PointerType*>(&left.Type());
+    }
+    else if (right.Type().Kind() == TypeKind::Pointer)
+    {
+        if (inst.Operator != IL::BinaryNumericOperator::Add)
+            return std::nullopt;
+        byteOffsetInst = inst.Left.get();
+        byteOffsetExpr = std::move(left);
+        pointerType = static_cast<const TS::PointerType*>(&right.Type());
+    }
+    else
+    {
+        return std::nullopt;
+    }
+    TranslatedExpression offsetExpressionFromTypeHint;
+    bool hasOffsetExpressionFromTypeHint = false;
+    if (context.TypeHint != nullptr && context.TypeHint->Kind() == TypeKind::Pointer)
+    {
+        // We use the type hint if one of the following is true:
+        // * The current element type is a non-primitive struct.
+        // * The current element type has a different size than the type hint element
+        //   type.
+        // This prevents the type hint from overriding in undesirable situations (eg
+        // changing char* to short*).
+        const auto& typeHint = static_cast<const TS::PointerType&>(*context.TypeHint);
+        int elementTypeSize = GetSize(pointerType->Element().get());
+        if (elementTypeSize == 0 || GetSize(typeHint.Element().get()) != elementTypeSize)
+        {
+            if (auto offset = GetPointerArithmeticOffset(
+                    byteOffsetInst, std::move(byteOffsetExpr), typeHint.Element().get(),
+                    inst.CheckForOverflow))
+            {
+                offsetExpressionFromTypeHint = std::move(*offset);
+                hasOffsetExpressionFromTypeHint = true;
+                pointerType = &typeHint;
+            }
+        }
+    }
+    TS::ITypePtr pointerTypePtr;
+    TranslatedExpression offsetExpr;
+    if (hasOffsetExpressionFromTypeHint)
+    {
+        pointerTypePtr = const_cast<TS::PointerType*>(pointerType)->shared_from_this();
+        offsetExpr = std::move(offsetExpressionFromTypeHint);
+    }
+    else if (auto offset = GetPointerArithmeticOffset(
+                 byteOffsetInst, std::move(byteOffsetExpr), pointerType->Element().get(),
+                 inst.CheckForOverflow))
+    {
+        pointerTypePtr = const_cast<TS::PointerType*>(pointerType)->shared_from_this();
+        offsetExpr = std::move(*offset);
+    }
+    else
+    {
+        // FallBackToBytePointer: the C# local function reassigns the enclosing
+        // `pointerType` local before returning the integer-typed offset.
+        pointerTypePtr = std::make_shared<TS::PointerType>(
+            const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Byte))
+                .shared_from_this());
+        pointerType = static_cast<const TS::PointerType*>(pointerTypePtr.get());
+        offsetExpr = EnsureIntegerType(std::move(byteOffsetExpr));
+    }
+
+    Syntax::BinaryOperatorType operatorType =
+        inst.Operator == IL::BinaryNumericOperator::Add
+            ? Syntax::BinaryOperatorType::Add
+            : Syntax::BinaryOperatorType::Subtract;
+    if (left.Type().Kind() == TypeKind::Pointer)
+    {
+        left = left.ConvertTo(*pointerTypePtr, *this);
+        right = std::move(offsetExpr);
+    }
+    else
+    {
+        left = std::move(offsetExpr);
+        right = right.ConvertTo(*pointerTypePtr, *this);
+    }
+    auto* binary = new Syntax::BinaryOperatorExpression(left.Expression(), operatorType,
+                                                        right.Expression());
+    return WithILInstruction(
+        WithRR(*binary, std::make_shared<Sem::OperatorResolveResult>(
+                            pointerTypePtr,
+                            Syntax::BinaryOperatorExpression::GetLinqNodeType(
+                                operatorType, inst.CheckForOverflow),
+                            std::vector<std::shared_ptr<Sem::ResolveResult>>{
+                                SharedResolveResultAnnotation(*left.Expression()),
+                                SharedResolveResultAnnotation(*right.Expression())})),
+        &inst);
+}
+
+// The C# `TranslatedExpression? HandleManagedPointerArithmetic(
+// BinaryNumericInstruction inst, TranslatedExpression left, TranslatedExpression
+// right)` (ExpressionBuilder.cs lines 1386-1484): translates pointer arithmetic with
+// managed pointers (ref + int / int + ref / ref - int / ref - ref).
+std::optional<TranslatedExpression> ExpressionBuilder::HandleManagedPointerArithmetic(
+    IL::BinaryNumericInstruction& inst, TranslatedExpression left,
+    TranslatedExpression right)
+{
+    if (!(inst.Operator == IL::BinaryNumericOperator::Add
+          || inst.Operator == IL::BinaryNumericOperator::Sub))
+        return std::nullopt;
+    if (inst.CheckForOverflow || inst.IsLifted)
+        return std::nullopt;
+    if (inst.Operator == IL::BinaryNumericOperator::Sub
+        && inst.LeftInputType == IL::StackType::Ref
+        && inst.RightInputType == IL::StackType::Ref)
+    {
+        // ref - ref => i
+        // ByteOffset() expects the parameters the wrong way around, so order using
+        // named arguments
+        auto* target = new Syntax::NamedArgumentExpression("target", left.Expression());
+        auto* origin = new Syntax::NamedArgumentExpression("origin", right.Expression());
+        return CallUnsafeIntrinsic(
+            "ByteOffset", {static_cast<Syntax::Expression*>(target),
+                           static_cast<Syntax::Expression*>(origin)},
+            compilation->FindType(KnownTypeCode::IntPtr), &inst);
+    }
+    if (inst.LeftInputType == IL::StackType::Ref
+        && IsIntegerType(inst.RightInputType))
+    {
+        // ref [+-] int
+        const TS::ByReferenceType* brt =
+            dynamic_cast<const TS::ByReferenceType*>(&left.Type());
+        TS::ITypePtr brtPtr;
+        if (brt == nullptr)
+        {
+            // The C# `GetReferenceType` local function: a pointer type re-types to a
+            // reference of its element type, everything else to a byte reference.
+            const TS::PointerType* pt =
+                dynamic_cast<const TS::PointerType*>(&left.Type());
+            brtPtr = std::make_shared<TS::ByReferenceType>(
+                pt != nullptr
+                    ? pt->Element()->shared_from_this()
+                    : const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Byte))
+                          .shared_from_this());
+            brt = static_cast<const TS::ByReferenceType*>(brtPtr.get());
+            left = left.ConvertTo(*brtPtr, *this);
+        }
+        else
+        {
+            brtPtr = const_cast<TS::ByReferenceType*>(brt)->shared_from_this();
+        }
+        std::string name =
+            inst.Operator == IL::BinaryNumericOperator::Sub ? "Subtract" : "Add";
+        TS::ITypePtr brtElem = brt->Element()->shared_from_this();
+        IL::PointerArithmeticOffset::DetectOutcome offsetInst =
+            IL::PointerArithmeticOffset::Detect(inst.Right.get(), brtElem.get(),
+                                                inst.CheckForOverflow);
+        if (offsetInst)
+        {
+            // The fixed-buffer indexer arm: the C# `settings.FixedBuffers &&
+            // Add && LdFlda-of-LdFlda && IsFixedField` shape -- deferred with the
+            // ConvertField/IsFixedField machinery (the CSharpAmbience deferral);
+            // every other shape falls through to the element-offset render.
+            if (settings->FixedBuffers()
+                && inst.Operator == IL::BinaryNumericOperator::Add
+                && inst.Left != nullptr && inst.Left->Op == IL::OpCode::LdFlda
+                && static_cast<const IL::LdFlda*>(inst.Left.get())->Target != nullptr
+                && static_cast<const IL::LdFlda*>(inst.Left.get())->Target->Op
+                       == IL::OpCode::LdFlda)
+            {
+                throw std::logic_error(
+                    "FixedBuffers pointer indexing is not supported yet (the "
+                    "ConvertField/IsFixedField machinery is deferred).");
+            }
+            right = Translate(const_cast<IL::ILInstruction*>(offsetInst.Inst));
+            right = ConvertArrayIndex(std::move(right), inst.RightInputType, true);
+            return CallUnsafeIntrinsic(name, {left.Expression(), right.Expression()},
+                                       *brtPtr, &inst);
+        }
+        else
+        {
+            right = ConvertArrayIndex(std::move(right), inst.RightInputType, true);
+            return CallUnsafeIntrinsic(name + "ByteOffset",
+                                       {left.Expression(), right.Expression()},
+                                       *brtPtr, &inst);
+        }
+    }
+
+    if (inst.LeftInputType == IL::StackType::I
+        && inst.RightInputType == IL::StackType::Ref
+        && inst.Operator == IL::BinaryNumericOperator::Add)
+    {
+        // int + ref
+        const TS::ByReferenceType* brt =
+            dynamic_cast<const TS::ByReferenceType*>(&right.Type());
+        TS::ITypePtr brtPtr;
+        if (brt == nullptr)
+        {
+            const TS::PointerType* pt =
+                dynamic_cast<const TS::PointerType*>(&right.Type());
+            brtPtr = std::make_shared<TS::ByReferenceType>(
+                pt != nullptr
+                    ? pt->Element()->shared_from_this()
+                    : const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Byte))
+                          .shared_from_this());
+            brt = static_cast<const TS::ByReferenceType*>(brtPtr.get());
+            right = right.ConvertTo(*brtPtr, *this);
+        }
+        else
+        {
+            brtPtr = const_cast<TS::ByReferenceType*>(brt)->shared_from_this();
+        }
+        TS::ITypePtr brtElem = brt->Element()->shared_from_this();
+        IL::PointerArithmeticOffset::DetectOutcome offsetInst =
+            IL::PointerArithmeticOffset::Detect(inst.Left.get(), brtElem.get(),
+                                                inst.CheckForOverflow);
+        if (offsetInst)
+        {
+            left = Translate(const_cast<IL::ILInstruction*>(offsetInst.Inst));
+            left = ConvertArrayIndex(std::move(left), inst.LeftInputType, true);
+            auto* elementOffset = new Syntax::NamedArgumentExpression("elementOffset",
+                                                                      left.Expression());
+            auto* source =
+                new Syntax::NamedArgumentExpression("source", right.Expression());
+            return CallUnsafeIntrinsic(
+                "Add",
+                {static_cast<Syntax::Expression*>(elementOffset),
+                 static_cast<Syntax::Expression*>(source)},
+                *brtPtr, &inst);
+        }
+        else
+        {
+            left = ConvertArrayIndex(std::move(left), inst.LeftInputType, true);
+            auto* byteOffset =
+                new Syntax::NamedArgumentExpression("byteOffset", left.Expression());
+            auto* source =
+                new Syntax::NamedArgumentExpression("source", right.Expression());
+            return CallUnsafeIntrinsic(
+                "AddByteOffset",
+                {static_cast<Syntax::Expression*>(byteOffset),
+                 static_cast<Syntax::Expression*>(source)},
+                *brtPtr, &inst);
+        }
+    }
+    return std::nullopt;
+}
+
+// The C# `TranslatedExpression? HandlePointerSubtraction(BinaryNumericInstruction
+// inst)` (ExpressionBuilder.cs lines 1565-1619): called for divisions, detects and
+// handles the code pattern div(sub(a, b), sizeof(T)) when a,b are of type T* -- what
+// the C# compiler generates for pointer subtraction.
+std::optional<TranslatedExpression> ExpressionBuilder::HandlePointerSubtraction(
+    IL::BinaryNumericInstruction& inst)
+{
+    assert(inst.Operator == IL::BinaryNumericOperator::Div);
+    if (inst.CheckForOverflow || inst.LeftInputType != IL::StackType::I)
+        return std::nullopt;
+    if (inst.Left == nullptr || inst.Left->Op != IL::OpCode::BinaryNumericInstruction)
+        return std::nullopt;
+    auto* sub = static_cast<IL::BinaryNumericInstruction*>(inst.Left.get());
+    if (sub->Operator != IL::BinaryNumericOperator::Sub)
+        return std::nullopt;
+    if (sub->CheckForOverflow)
+        return std::nullopt;
+    // First, attempt to parse the 'sizeof' on the RHS
+    const TS::IType* elementType = nullptr;
+    long long elementSize = 0;
+    if (MatchLdcI(inst.Right.get(), elementSize))
+    {
+        // OK, might be pointer subtraction if the element size matches
+        }
+    else if (MatchSizeOf(UnwrapConv(inst.Right.get(), IL::ConversionKind::SignExtend),
+                         elementType))
+    {
+        // OK, might be pointer subtraction if the element type matches
+    }
+    else
+    {
+        return std::nullopt;
+    }
+    TranslatedExpression left = Translate(sub->Left.get());
+    TranslatedExpression right = Translate(sub->Right.get());
+    TS::ITypePtr pointerType;
+    auto isMatchingPointerType = [&](const TS::IType& type) {
+        if (const auto* pt = dynamic_cast<const TS::PointerType*>(&type))
+        {
+            if (elementType != nullptr)
+                return elementType->Equals(*pt->Element());
+            if (elementSize > 0)
+                return IL::PointerArithmeticOffset::ComputeSizeOf(pt->Element().get())
+                           == elementSize;
+        }
+        return false;
+    };
+    if (isMatchingPointerType(left.Type()))
+    {
+        pointerType = const_cast<TS::IType&>(left.Type()).shared_from_this();
+    }
+    else if (isMatchingPointerType(right.Type()))
+    {
+        pointerType = const_cast<TS::IType&>(right.Type()).shared_from_this();
+    }
+    else if (elementSize == 1 && left.Type().Kind() == TypeKind::Pointer
+             && right.Type().Kind() == TypeKind::Pointer)
+    {
+        // two pointers (neither matching), we're dividing by 1 (debug builds only),
+        // -> subtract two byte pointers
+        pointerType = std::make_shared<TS::PointerType>(
+            const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Byte))
+                .shared_from_this());
+    }
+    else
+    {
+        // neither is a matching pointer type
+        // -> not a pointer subtraction after all
+        return std::nullopt;
+    }
+    // We got a pointer subtraction.
+    left = left.ConvertTo(*pointerType, *this);
+    right = right.ConvertTo(*pointerType, *this);
+    auto rr = std::make_shared<Sem::OperatorResolveResult>(
+        const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Int64))
+            .shared_from_this(),
+        TS::ExpressionType::Subtract,
+        std::vector<std::shared_ptr<Sem::ResolveResult>>{
+            SharedResolveResultAnnotation(*left.Expression()),
+            SharedResolveResultAnnotation(*right.Expression())});
+    auto* binary = new Syntax::BinaryOperatorExpression(
+        left.Expression(), Syntax::BinaryOperatorType::Subtract, right.Expression());
+    return WithILInstruction(WithRR(*binary, rr),
+                             std::vector<IL::ILInstruction*>{&inst, sub});
+}
+
+// The C# `TranslatedExpression HandleBinaryNumeric(BinaryNumericInstruction inst,
+// BinaryOperatorType op, TranslationContext context)` (ExpressionBuilder.cs lines
+// 1619-1746): the shared arithmetic render.
+TranslatedExpression ExpressionBuilder::HandleBinaryNumeric(
+    IL::BinaryNumericInstruction& inst, Syntax::BinaryOperatorType op,
+    TranslationContext context)
+{
+    std::shared_ptr<const Resolver::CSharpResolver> resolverWithOverflowCheck =
+        resolver->WithCheckForOverflow(inst.CheckForOverflow);
+    bool propagateTypeHint = IsBitwise(op) && inst.LeftInputType != inst.RightInputType;
+    TranslatedExpression left =
+        Translate(inst.Left.get(), propagateTypeHint ? context.TypeHint : nullptr);
+    TranslatedExpression right =
+        Translate(inst.Right.get(), propagateTypeHint ? context.TypeHint : nullptr);
+
+    if (inst.UnderlyingResultType() == IL::StackType::Ref)
+    {
+        if (auto ptrResult =
+                HandleManagedPointerArithmetic(inst, std::move(left), std::move(right)))
+            return *ptrResult;
+    }
+    if (left.Type().Kind() == TypeKind::Pointer
+        || right.Type().Kind() == TypeKind::Pointer)
+    {
+        if (auto ptrResult = HandlePointerArithmetic(inst, std::move(left),
+                                                     std::move(right), context))
+            return *ptrResult;
+    }
+
+    left = PrepareArithmeticArgument(std::move(left), inst.LeftInputType, inst.Sign,
+                                     inst.IsLifted);
+    right = PrepareArithmeticArgument(std::move(right), inst.RightInputType, inst.Sign,
+                                      inst.IsLifted);
+
+    if (op == Syntax::BinaryOperatorType::Subtract && IsZeroLdc(inst.Left.get()))
+    {
+        const TS::IType& rightUType = TS::GetUnderlyingType(right.Type());
+        if (IsKnownType(rightUType, KnownTypeCode::Int32)
+            || IsKnownType(rightUType, KnownTypeCode::Int64)
+            || IsCSharpSmallIntegerType(&rightUType)
+            || rightUType.Kind() == TypeKind::NInt)
+        {
+            // unary minus is supported on signed int, nint and long, and on the small
+            // integer types (since they promote to int)
+            auto* uoe = new Syntax::UnaryOperatorExpression(
+                right.Expression(), Syntax::UnaryOperatorType::Minus);
+            uoe->AddAnnotation(inst.CheckForOverflow
+                                   ? Transforms::CheckedAnnotationHandle()
+                                   : Transforms::UncheckedAnnotationHandle());
+            TS::ITypePtr resultType =
+                FindArithmeticType(inst.RightInputType, TS::Sign::Signed);
+            if (inst.IsLifted)
+                resultType = TS::Create(*compilation, *resultType);
+            return WithILInstruction(
+                WithRR(*uoe, std::make_shared<Sem::OperatorResolveResult>(
+                                 std::move(resultType),
+                                 inst.CheckForOverflow
+                                     ? TS::ExpressionType::NegateChecked
+                                     : TS::ExpressionType::Negate,
+                                 std::vector<std::shared_ptr<Sem::ResolveResult>>{
+                                     SharedResolveResultAnnotation(*right.Expression())})),
+                &inst);
+        }
+    }
+    if (IsBitwise(op)
+        && (left.Type().Kind() == TypeKind::Enum
+            || right.Type().Kind() == TypeKind::Enum))
+    {
+        left = AdjustConstantExpressionToType(
+            std::move(left), const_cast<TS::IType&>(right.Type()));
+        right = AdjustConstantExpressionToType(
+            std::move(right), const_cast<TS::IType&>(left.Type()));
+    }
+
+    auto opResult = resolverWithOverflowCheck->ResolveBinaryOperator(
+        op, SharedResolveResultAnnotation(*left.Expression()),
+        SharedResolveResultAnnotation(*right.Expression()));
+    auto* rr = dynamic_cast<Sem::OperatorResolveResult*>(opResult.get());
+    if (rr == nullptr || rr->IsError()
+        || TS::GetStackType(TS::GetUnderlyingType(rr->Type()))
+                   != inst.UnderlyingResultType()
+        || !IsCompatibleWithSign(rr->Type(), inst.Sign))
+    {
+        // Left and right operands are incompatible, so convert them to a common type
+        TS::Sign sign = inst.Sign;
+        if (sign == TS::Sign::None)
+        {
+            // If the sign doesn't matter, try to use the same sign as expected by the
+            // context
+            sign = TS::GetSign(context.TypeHint);
+            if (sign == TS::Sign::None)
+            {
+                sign = IsBitwise(op) ? TS::Sign::Unsigned : TS::Sign::Signed;
+            }
+        }
+        TS::ITypePtr targetType = FindArithmeticType(inst.UnderlyingResultType(), sign);
+        left = left.ConvertTo(
+            IsNullable(left.Type()) ? *TS::Create(*compilation, *targetType) : *targetType,
+            *this);
+        right = right.ConvertTo(
+            IsNullable(right.Type()) ? *TS::Create(*compilation, *targetType) : *targetType,
+            *this);
+        opResult = resolverWithOverflowCheck->ResolveBinaryOperator(
+            op, SharedResolveResultAnnotation(*left.Expression()),
+            SharedResolveResultAnnotation(*right.Expression()));
+    }
+    if (IsBitwise(op))
+    {
+        if (left.ResolveResult() != nullptr
+            && left.ResolveResult()->ConstantValue().has_value())
+        {
+            long long value = std::any_cast<long long>(::ILSpy::Decompiler::Util::Cast(
+                TS::TypeCode::Int64, left.ResolveResult()->ConstantValue(), false));
+            left = WithILInstruction(
+                ConvertConstantValue(SharedResolveResultAnnotation(*left.Expression()),
+                                     false, ShouldDisplayAsHex(value, left.Type())),
+                left.ILInstructions());
+        }
+        if (right.ResolveResult() != nullptr
+            && right.ResolveResult()->ConstantValue().has_value())
+        {
+            long long value = std::any_cast<long long>(::ILSpy::Decompiler::Util::Cast(
+                TS::TypeCode::Int64, right.ResolveResult()->ConstantValue(), false));
+            right = WithILInstruction(
+                ConvertConstantValue(SharedResolveResultAnnotation(*right.Expression()),
+                                     false,
+                                     ShouldDisplayAsHex(value, right.Type())),
+                right.ILInstructions());
+        }
+    }
+    auto* resultExpr = new Syntax::BinaryOperatorExpression(left.Expression(), op,
+                                                           right.Expression());
+    auto withInst = WithILInstruction(*resultExpr, &inst);
+    TranslatedExpression result = WithRR(withInst, opResult);
+    if (BinaryOperatorMightCheckForOverflow(op)
+        && !IsFloatType(inst.UnderlyingResultType()))
+    {
+        if (inst.CheckForOverflow)
+        {
+            result.Expression()->AddAnnotation(Transforms::CheckedAnnotationHandle());
+        }
+        else if (opResult->IsCompileTimeConstant()
+                 && ConstantBinaryOperatorOverflows(
+                     op, SharedResolveResultAnnotation(*left.Expression()),
+                     SharedResolveResultAnnotation(*right.Expression())))
+        {
+            // A compile-time constant subexpression is always evaluated in a checked
+            // context, even within an (implicitly) unchecked context, so emitting it
+            // bare would fail to compile with CS0220 ("operation overflows at compile
+            // time in checked mode"). Force an explicit unchecked(...) wrapper, just
+            // like an overflowing constant n(u)int cast. This typically happens after
+            // inlining turns a runtime accumulator (e.g. a GetHashCode prime chain)
+            // into a constant subexpression.
+            result.Expression()->AddAnnotation(
+                Transforms::ExplicitUncheckedAnnotationHandle());
+        }
+        else
+        {
+            result.Expression()->AddAnnotation(Transforms::UncheckedAnnotationHandle());
+        }
+    }
+    return result;
+}
+
+// The C# `bool ConstantBinaryOperatorOverflows(BinaryOperatorType op, ResolveResult
+// left, ResolveResult right)` (ExpressionBuilder.cs lines 1842-1847): returns true if
+// the (already unchecked-resolved) constant binary operation overflows when evaluated
+// in a checked context. The C# GC-reference operands port to the shared handles (the
+// SharedResolveResultAnnotation call-site convention -- ResolveResult is not
+// shared_from_this-able).
+bool ExpressionBuilder::ConstantBinaryOperatorOverflows(
+    Syntax::BinaryOperatorType op, const std::shared_ptr<Sem::ResolveResult>& left,
+    const std::shared_ptr<Sem::ResolveResult>& right) const
+{
+    if (!left->ConstantValue().has_value() || !right->ConstantValue().has_value())
+        return false;
+    auto checkedResult = resolver->WithCheckForOverflow(true)->ResolveBinaryOperator(
+        op, left, right);
+    return checkedResult->IsError();
+}
+
+// The C# `TranslatedExpression HandleShift(BinaryNumericInstruction inst,
+// BinaryOperatorType op, TranslationContext context)` (ExpressionBuilder.cs lines
+// 1849-1912).
+TranslatedExpression ExpressionBuilder::HandleShift(IL::BinaryNumericInstruction& inst,
+                                                    Syntax::BinaryOperatorType op,
+                                                    TranslationContext context)
+{
+    TranslatedExpression left = Translate(inst.Left.get());
+    TranslatedExpression right = Translate(inst.Right.get());
+
+    left = PrepareArithmeticArgument(std::move(left), inst.LeftInputType, inst.Sign,
+                                     inst.IsLifted);
+
+    TS::Sign sign = inst.Sign;
+    const TS::IType& leftUType = TS::GetUnderlyingType(left.Type());
+    bool couldUseUnsignedRightShift =
+        sign == TS::Sign::Unsigned && op == Syntax::BinaryOperatorType::ShiftRight
+        && settings->UnsignedRightShift()
+        && (IsCSharpPrimitiveIntegerType(&leftUType)
+            || IsCSharpNativeIntegerType(&leftUType))
+        // If we need to cast to unsigned anyway, don't use >>> operator.
+        && TS::GetSign(context.TypeHint) != TS::Sign::Unsigned;
+    if (IsCSharpSmallIntegerType(&leftUType)
+        && inst.UnderlyingResultType() == IL::StackType::I4
+        && (sign != TS::Sign::Unsigned || couldUseUnsignedRightShift))
+    {
+        // With small integer types, C# will promote to int and perform signed shifts.
+        // We thus don't need any casts in this case.
+        // The >>> operator also promotes to signed int, but then performs an unsigned
+        // shift.
+        if (sign == TS::Sign::Unsigned)
+        {
+            op = Syntax::BinaryOperatorType::UnsignedShiftRight;
+        }
+    }
+    else if (couldUseUnsignedRightShift
+             && GetSize(&leftUType) == GetSize(inst.UnderlyingResultType())
+             && TS::GetSign(&leftUType) == TS::Sign::Signed)
+    {
+        // Use C# 11 unsigned right shift operator. We don't need any casts in this case.
+        op = Syntax::BinaryOperatorType::UnsignedShiftRight;
+    }
+    else
+    {
+        // Insert cast to target type.
+        if (sign == TS::Sign::None)
+        {
+            // if we don't need a specific sign, prefer keeping that of the input:
+            sign = TS::GetSign(&leftUType);
+        }
+        TS::ITypePtr targetType = FindArithmeticType(inst.UnderlyingResultType(), sign);
+        if (IsNullable(left.Type()))
+        {
+            targetType = TS::Create(*compilation, *targetType);
+        }
+        left = left.ConvertTo(*targetType, *this);
+    }
+
+    // Shift operators in C# always expect type 'int' on the right-hand-side
+    if (IsNullable(right.Type()))
+    {
+        right = right.ConvertTo(
+            *TS::Create(*compilation,
+                        const_cast<TS::IType&>(
+                            compilation->FindType(KnownTypeCode::Int32))),
+            *this);
+    }
+    else
+    {
+        right = right.ConvertTo(
+            const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Int32)), *this);
+    }
+
+    auto opResult = resolver->ResolveBinaryOperator(
+        op, SharedResolveResultAnnotation(*left.Expression()),
+        SharedResolveResultAnnotation(*right.Expression()));
+    auto* binary = new Syntax::BinaryOperatorExpression(left.Expression(), op,
+                                                        right.Expression());
+    return WithILInstruction(WithRR(*binary, opResult), &inst);
+}
 // ---------------------------------------------------------------------------
 // The stackalloc arms (the C# lines 517-579 and 1506-1592)
 

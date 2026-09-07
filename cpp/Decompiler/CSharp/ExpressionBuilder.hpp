@@ -87,6 +87,7 @@ class IsInst;
 class LocAlloc;
 class LocAllocSpan;
 class Comp;
+class BinaryNumericInstruction;
 enum class ComparisonKind : std::uint8_t;
 }
 
@@ -448,6 +449,76 @@ public:
     // reaches it yet).
     TranslatedExpression PrepareArithmeticArgument(TranslatedExpression arg, IL::StackType argStackType,
                                                    TS::Sign sign, bool isLifted) const;
+
+    // -- The binary-numeric family (the VisitBinaryNumericInstruction arm) ------------
+
+    // The C# `protected internal override TranslatedExpression
+    // VisitBinaryNumericInstruction(BinaryNumericInstruction inst, TranslationContext
+    // context)` (ExpressionBuilder.cs lines 1262-1298): the arithmetic dispatch --
+    // every operator through HandleBinaryNumeric, Div first through
+    // HandlePointerSubtraction, the shifts through HandleShift; the default arm
+    // throws the parameterless ArgumentOutOfRangeException (mapped to
+    // std::out_of_range, the ToBinaryOperatorType convention).
+    TranslatedExpression VisitBinaryNumericInstruction(IL::ILInstruction* inst,
+                                                       TranslationContext context);
+
+    // The C# `TranslatedExpression HandleBinaryNumeric(BinaryNumericInstruction inst,
+    // BinaryOperatorType op, TranslationContext context)` (lines 1619-1746): the
+    // shared arithmetic render -- the type-hint propagation gate for bitwise ops over
+    // mixed input stack types, the managed/plain pointer-arithmetic arms,
+    // PrepareArithmeticArgument on both inputs, the `0 - x` unary-minus rewrite,
+    // the enum-constant adjustment for bitwise ops, the resolver-driven render with
+    // the common-type fallback, the bitwise constant re-render (the hex gate), and
+    // the checked/unchecked/constant-overflow annotation tail.
+    TranslatedExpression HandleBinaryNumeric(IL::BinaryNumericInstruction& inst,
+                                             Syntax::BinaryOperatorType op,
+                                             TranslationContext context);
+
+    // The C# `TranslatedExpression HandleShift(BinaryNumericInstruction inst,
+    // BinaryOperatorType op, TranslationContext context)` (lines 1849-1912): the
+    // shift render -- the small-integer promotion rule, the C# 11 >>> operator
+    // selection (the UnsignedRightShift setting + the type-hint sign gate), the
+    // sign-preferring cast fallback, and the always-int32 right-hand conversion.
+    TranslatedExpression HandleShift(IL::BinaryNumericInstruction& inst,
+                                     Syntax::BinaryOperatorType op,
+                                     TranslationContext context);
+
+    // The C# `TranslatedExpression? HandlePointerArithmetic(BinaryNumericInstruction
+    // inst, TranslatedExpression left, TranslatedExpression right, TranslationContext
+    // context)` (lines 1300-1384): the raw-pointer arithmetic -- the type-hint
+    // element-type rule over non-primitive/differently-sized element types,
+    // GetPointerArithmeticOffset or the byte-pointer fallback, and the
+    // ptr +/- int BinaryOperatorExpression over the pointer resolve result.
+    std::optional<TranslatedExpression> HandlePointerArithmetic(
+        IL::BinaryNumericInstruction& inst, TranslatedExpression left,
+        TranslatedExpression right, TranslationContext context);
+
+    // The C# `TranslatedExpression? HandleManagedPointerArithmetic(
+    // BinaryNumericInstruction inst, TranslatedExpression left, TranslatedExpression
+    // right)` (lines 1386-1484): the managed-pointer (ref) arithmetic -- the
+    // ref-ref ByteOffset intrinsic, the ref +/- int Add/Subtract(+ByteOffset)
+    // intrinsics over the detected element offset, the int + ref named-argument
+    // arms, and the fixed-buffer indexer direction (the FixedBuffers setting; the
+    // ConvertField/IsFixedField machinery deferred).
+    std::optional<TranslatedExpression> HandleManagedPointerArithmetic(
+        IL::BinaryNumericInstruction& inst, TranslatedExpression left,
+        TranslatedExpression right);
+
+    // The C# `TranslatedExpression? HandlePointerSubtraction(BinaryNumericInstruction
+    // inst)` (lines 1565-1619): the ptr - ptr -> long division render -- the div(sub(a,b), sizeof(T))
+    // or div(sub(a,b), constant) pattern over the matching pointer types, with the
+    // debug-build divide-by-1 two-pointer arm.
+    std::optional<TranslatedExpression> HandlePointerSubtraction(IL::BinaryNumericInstruction& inst);
+
+    // The C# `bool ConstantBinaryOperatorOverflows(BinaryOperatorType op,
+    // ResolveResult left, ResolveResult right)` (lines 1842-1847): whether the
+    // already-unchecked-resolved constant binary operation overflows in a checked
+    // context (the explicit unchecked(...) wrapper gate). The C# GC-reference
+    // operands port to the shared handles (the SharedResolveResultAnnotation
+    // call-site convention -- ResolveResult is not shared_from_this-able).
+    bool ConstantBinaryOperatorOverflows(
+        Syntax::BinaryOperatorType op, const std::shared_ptr<Sem::ResolveResult>& left,
+        const std::shared_ptr<Sem::ResolveResult>& right) const;
 
     // -- The self-contained statics ----------------------------------------------------
 

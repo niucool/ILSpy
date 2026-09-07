@@ -24,6 +24,7 @@
 // LdcI4/I8 with the type-hint adjustment, LdLoc/LdLoca through ConvertVariable).
 
 #include "Decompiler/CSharp/ExpressionBuilder.hpp"
+#include "Decompiler/CSharp/Transforms/AddCheckedBlocks.hpp"
 
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AsExpression.hpp"
@@ -39,6 +40,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IsExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/NamedArgumentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/SizeOfExpression.hpp"
@@ -3189,5 +3191,471 @@ TEST(ExpressionBuilderCompTest, AdjustConstantToTypeEnumHintRetypesConstant)
     EXPECT_EQ(adjusted->Type().ReflectionName(), "Ns.E");
 }
 
+
+// ---------------------------------------------------------------------------
+// The binary-numeric family (VisitBinaryNumericInstruction + the Handle* helpers)
+
+// The translation drives through Visit (the OpCode switch), so every test uses the
+// public Translate entry over a hand-built BinaryNumericInstruction (the
+// ExpressionBuilderConvTest convention).
+
+TEST(ExpressionBuilderBinaryNumericTest, AddOverIntLocalsRendersAdd)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto a = MakeLocal(fixture, TS::KnownTypeCode::Int32, "a");
+    auto b = MakeLocal(fixture, TS::KnownTypeCode::Int32, "b");
+    IL::BinaryNumericInstruction bni(std::make_unique<IL::LdLoc>(a),
+                                     std::make_unique<IL::LdLoc>(b),
+                                     IL::BinaryNumericOperator::Add);
+    auto expr = builder.Translate(&bni);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::Add);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.Int32");
+    // The arithmetic operators carry the checked/unchecked annotation; over a
+    // non-constant (implicitly unchecked) add the unchecked annotation is added.
+    EXPECT_TRUE(binary->Annotation<CSharp::Transforms::CheckedUncheckedAnnotation>()
+                != nullptr);
+    // The fresh BinaryOperatorExpression node carries only the bni annotation
+    // (the operands' own annotations ride on their identifier nodes).
+    EXPECT_EQ(expr.ILInstructions().size(), std::size_t{1});
+    EXPECT_EQ(expr.ILInstructions()[0], &bni);
+}
+
+TEST(ExpressionBuilderBinaryNumericTest, ZeroMinusXRenderUnaryMinus)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto b = MakeLocal(fixture, TS::KnownTypeCode::Int32, "b");
+    IL::BinaryNumericInstruction bni(std::make_unique<IL::LdcI4>(0),
+                                     std::make_unique<IL::LdLoc>(b),
+                                     IL::BinaryNumericOperator::Sub);
+    auto expr = builder.Translate(&bni);
+    // `0 - x` over a signed int is the unary-minus rewrite.
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::Minus);
+    EXPECT_TRUE(unary->Annotation<CSharp::Transforms::CheckedUncheckedAnnotation>()
+                != nullptr);
+    // The resolve result is the negate operator over Int32.
+    const auto* opResult =
+        dynamic_cast<const Sem::OperatorResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(opResult != nullptr);
+    EXPECT_EQ(opResult->OperatorType(), TS::ExpressionType::Negate);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.Int32");
+}
+
+TEST(ExpressionBuilderBinaryNumericTest, ZeroMinusUncheckedCheckedAnnotationChoosesChecked)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto b = MakeLocal(fixture, TS::KnownTypeCode::Int32, "b");
+    IL::BinaryNumericInstruction bni(std::make_unique<IL::LdcI4>(0),
+                                     std::make_unique<IL::LdLoc>(b),
+                                     IL::BinaryNumericOperator::Sub);
+    bni.CheckForOverflow = true;
+    auto expr = builder.Translate(&bni);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    const auto* annotation =
+        unary->Annotation<CSharp::Transforms::CheckedUncheckedAnnotation>();
+    ASSERT_TRUE(annotation != nullptr);
+    EXPECT_TRUE(annotation->IsChecked);
+    const auto* opResult =
+        dynamic_cast<const Sem::OperatorResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(opResult != nullptr);
+    EXPECT_EQ(opResult->OperatorType(), TS::ExpressionType::NegateChecked);
+}
+
+TEST(ExpressionBuilderBinaryNumericTest, LongOperandTruncatesToInt32)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto a = MakeLocal(fixture, TS::KnownTypeCode::Int64, "a");
+    auto b = MakeLocal(fixture, TS::KnownTypeCode::Int64, "b");
+    // An add whose IL input type is I4 over 8-byte long locals: the operands are
+    // oversized and truncate to the I4 arithmetic type (int32) first.
+    IL::BinaryNumericInstruction bni(std::make_unique<IL::LdLoc>(a),
+                                     std::make_unique<IL::LdLoc>(b),
+                                     IL::BinaryNumericOperator::Add);
+    bni.LeftInputType = IL::StackType::I4;
+    bni.RightInputType = IL::StackType::I4;
+    bni.ResultStackType = IL::StackType::I4;
+    auto expr = builder.Translate(&bni);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    auto* leftCast = dynamic_cast<Syntax::CastExpression*>(binary->Left());
+    ASSERT_TRUE(leftCast != nullptr);
+    auto* rightCast = dynamic_cast<Syntax::CastExpression*>(binary->Right());
+    ASSERT_TRUE(rightCast != nullptr);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.Int32");
+}
+
+TEST(ExpressionBuilderBinaryNumericTest, IntPtrInputConvertsToNativeInt)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto a = MakeLocal(fixture, TS::KnownTypeCode::IntPtr, "a");
+    auto b = MakeLocal(fixture, TS::KnownTypeCode::IntPtr, "b");
+    // StackType.I-sized IntPtr inputs: none of the operators are supported on
+    // IntPtr, so both inputs convert to the native-integer arithmetic type
+    // (NativeIntegers on -> nint).
+    IL::BinaryNumericInstruction bni(std::make_unique<IL::LdLoc>(a),
+                                     std::make_unique<IL::LdLoc>(b),
+                                     IL::BinaryNumericOperator::Add);
+    bni.LeftInputType = IL::StackType::I;
+    bni.RightInputType = IL::StackType::I;
+    bni.ResultStackType = IL::StackType::I;
+    auto expr = builder.Translate(&bni);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    auto* leftCast = dynamic_cast<Syntax::CastExpression*>(binary->Left());
+    ASSERT_TRUE(leftCast != nullptr);
+    EXPECT_EQ(expr.Type().ReflectionName(), "nint");
+}
+
+TEST(ExpressionBuilderBinaryNumericTest, AddOverMixedWidthOperandsTruncatesOnlyTheOversizedOne)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto a = MakeLocal(fixture, TS::KnownTypeCode::Int64, "a");
+    auto b = MakeLocal(fixture, TS::KnownTypeCode::Int32, "b");
+    // An add whose IL input type is I4 over a long and an int32: only the long
+    // operand is oversized and truncates; the int32 operand keeps its identity
+    // (the common-type fallback would have converted BOTH operands).
+    IL::BinaryNumericInstruction bni(std::make_unique<IL::LdLoc>(a),
+                                     std::make_unique<IL::LdLoc>(b),
+                                     IL::BinaryNumericOperator::Add);
+    bni.LeftInputType = IL::StackType::I4;
+    bni.RightInputType = IL::StackType::I4;
+    bni.ResultStackType = IL::StackType::I4;
+    auto expr = builder.Translate(&bni);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    auto* leftCast = dynamic_cast<Syntax::CastExpression*>(binary->Left());
+    ASSERT_TRUE(leftCast != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(binary->Right()) != nullptr);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.Int32");
+}
+
+TEST(ExpressionBuilderBinaryNumericTest, BitwiseOrConstantLeftStaysConstant)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto b = MakeLocal(fixture, TS::KnownTypeCode::UInt32, "b");
+    // A bitwise op with a constant operand re-renders the constant through
+    // ConvertConstantValue (the hex-gate arm); the value itself is unchanged.
+    IL::BinaryNumericInstruction bni(std::make_unique<IL::LdcI4>(0xFF),
+                                     std::make_unique<IL::LdLoc>(b),
+                                     IL::BinaryNumericOperator::BitOr);
+    bni.LeftInputType = IL::StackType::I4;
+    bni.RightInputType = IL::StackType::I4;
+    bni.ResultStackType = IL::StackType::I4;
+    auto expr = builder.Translate(&bni);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::BitwiseOr);
+    auto* constant = dynamic_cast<Syntax::PrimitiveExpression*>(binary->Left());
+    ASSERT_TRUE(constant != nullptr);
+    const auto* value = std::get_if<std::int32_t>(&constant->Value());
+    ASSERT_TRUE(value != nullptr);
+    EXPECT_EQ(*value, 0xFF);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.UInt32");
+    // Bitwise operators never carry a checked/unchecked annotation
+    // (BinaryOperatorMightCheckForOverflow is false for them).
+    EXPECT_EQ(binary->Annotation<CSharp::Transforms::CheckedUncheckedAnnotation>(),
+              nullptr);
+}
+
+TEST(ExpressionBuilderBinaryNumericTest, SmallIntegerShiftLeftPromotesWithoutCast)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto a = MakeLocal(fixture, TS::KnownTypeCode::Int16, "a");
+    auto b = MakeLocal(fixture, TS::KnownTypeCode::Int32, "b");
+    // With small integer types, C# promotes to int and performs signed shifts -- no
+    // cast is needed on the left operand.
+    IL::BinaryNumericInstruction bni(std::make_unique<IL::LdLoc>(a),
+                                     std::make_unique<IL::LdLoc>(b),
+                                     IL::BinaryNumericOperator::ShiftLeft);
+    auto expr = builder.Translate(&bni);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::ShiftLeft);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(binary->Left()) != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::CastExpression*>(binary->Left()) == nullptr);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.Int32");
+}
+
+TEST(ExpressionBuilderBinaryNumericTest, UnsignedShiftRightOverSignedIntUsesUnsignedOperator)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto a = MakeLocal(fixture, TS::KnownTypeCode::Int32, "a");
+    auto b = MakeLocal(fixture, TS::KnownTypeCode::Int32, "b");
+    // An unsigned right shift over a same-size signed type with an unsigned
+    // instruction sign uses the C# 11 >>> operator (the UnsignedRightShift
+    // setting is on).
+    IL::BinaryNumericInstruction bni(std::make_unique<IL::LdLoc>(a),
+                                     std::make_unique<IL::LdLoc>(b),
+                                     IL::BinaryNumericOperator::ShiftRight);
+    bni.Sign = TS::Sign::Unsigned;
+    bni.Signed = false;
+    auto expr = builder.Translate(&bni);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::UnsignedShiftRight);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(binary->Left()) != nullptr);
+}
+
+TEST(ExpressionBuilderBinaryNumericTest, UnsignedShiftRightOverUnsignedIntStaysShiftRight)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto a = MakeLocal(fixture, TS::KnownTypeCode::UInt32, "a");
+    auto b = MakeLocal(fixture, TS::KnownTypeCode::Int32, "b");
+    // An unsigned shift over an already-unsigned type: casting to unsigned anyway,
+    // so the plain >> operator is kept (the couldUseUnsignedRightShift else-if's
+    // sign check fails).
+    IL::BinaryNumericInstruction bni(std::make_unique<IL::LdLoc>(a),
+                                     std::make_unique<IL::LdLoc>(b),
+                                     IL::BinaryNumericOperator::ShiftRight);
+    bni.Sign = TS::Sign::Unsigned;
+    bni.Signed = false;
+    auto expr = builder.Translate(&bni);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::ShiftRight);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(binary->Left()) != nullptr);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.UInt32");
+}
+
+TEST(ExpressionBuilderBinaryNumericTest, ManagedRefPlusIntRendersAddByteOffset)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto elementType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto byRefType = std::make_shared<TS::ByReferenceType>(elementType);
+    auto variable = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, byRefType);
+    variable->Name = "a";
+    // `ref a + 4` over an int reference: the LdLoca's ByReferenceResolveResult
+    // nests the managed reference (int& &), so brt.ElementType is itself a
+    // managed reference and PointerArithmeticOffset.Detect answers no match --
+    // the raw byte offset falls through to the byte-offset intrinsic.
+    IL::BinaryNumericInstruction bni(std::make_unique<IL::LdLoca>(variable),
+                                     std::make_unique<IL::LdcI4>(4),
+                                     IL::BinaryNumericOperator::Add, false,
+                                     TS::Sign::None);
+    auto expr = builder.Translate(&bni);
+    // The reference-returning invocation is wrapped in a ref DirectionExpression.
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    EXPECT_EQ(direction->FieldDirection(), Syntax::FieldDirection::Ref);
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(direction->Expression());
+    ASSERT_TRUE(invocation != nullptr);
+    auto* memberRef =
+        dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Target());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "AddByteOffset");
+    EXPECT_EQ(invocation->Arguments().Count(), 2);
+    auto* refArg = dynamic_cast<Syntax::DirectionExpression*>(invocation->Arguments().FirstOrNull());
+    ASSERT_TRUE(refArg != nullptr);
+    auto* offset = dynamic_cast<Syntax::PrimitiveExpression*>(invocation->Arguments().NodeAt(1));
+    ASSERT_TRUE(offset != nullptr);
+    // The raw byte offset stays (the element type is a managed reference, so
+    // Detect's element-size read answers null).
+    const auto* value = std::get_if<std::int32_t>(&offset->Value());
+    ASSERT_TRUE(value != nullptr);
+    EXPECT_EQ(*value, 4);
+}
+
+TEST(ExpressionBuilderBinaryNumericTest, ManagedRefPlusElementOffsetRendersAdd)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto elementType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto byRefType = std::make_shared<TS::ByReferenceType>(elementType);
+    auto variable = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, byRefType);
+    variable->Name = "a";
+    // `ref a + 4 * sizeof(int)`: the mul-by-sizeof pattern detects the element count
+    // (4), so the plain Add intrinsic renders the element offset.
+    auto mul = std::make_unique<IL::BinaryNumericInstruction>(
+        std::make_unique<IL::LdcI4>(4),
+        std::make_unique<IL::SizeOf>(elementType, "System.Int32"),
+        IL::BinaryNumericOperator::Mul);
+    IL::BinaryNumericInstruction bni(std::make_unique<IL::LdLoca>(variable),
+                                     std::move(mul),
+                                     IL::BinaryNumericOperator::Add, false,
+                                     TS::Sign::None);
+    auto expr = builder.Translate(&bni);
+    auto* direction = dynamic_cast<Syntax::DirectionExpression*>(expr.Expression());
+    ASSERT_TRUE(direction != nullptr);
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(direction->Expression());
+    ASSERT_TRUE(invocation != nullptr);
+    auto* memberRef =
+        dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Target());
+    ASSERT_TRUE(memberRef != nullptr);
+    // The mul is not unwrapped (the element type is a managed reference) --
+    // the raw byte offset renders as the `4 * sizeof(int)` binary expression.
+    EXPECT_EQ(memberRef->MemberName(), "AddByteOffset");
+    auto* offset = dynamic_cast<Syntax::BinaryOperatorExpression*>(invocation->Arguments().NodeAt(1));
+    ASSERT_TRUE(offset != nullptr);
+    EXPECT_EQ(offset->Operator(), Syntax::BinaryOperatorType::Multiply);
+    auto* constant = dynamic_cast<Syntax::PrimitiveExpression*>(offset->Left());
+    ASSERT_TRUE(constant != nullptr);
+    const auto* value = std::get_if<std::int32_t>(&constant->Value());
+    ASSERT_TRUE(value != nullptr);
+    EXPECT_EQ(*value, 4);
+}
+
+TEST(ExpressionBuilderBinaryNumericTest, ManagedRefMinusRefRendersByteOffsetNamedArgs)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto elementType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto byRefType = std::make_shared<TS::ByReferenceType>(elementType);
+    auto a = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, byRefType);
+    a->Name = "a";
+    auto b = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, byRefType);
+    b->Name = "b";
+    // `ref a - ref b` => Unsafe.ByteOffset(target: ..., origin: ...) -- the named
+    // arguments order the operands the wrong way around.
+    IL::BinaryNumericInstruction bni(std::make_unique<IL::LdLoca>(a),
+                                     std::make_unique<IL::LdLoca>(b),
+                                     IL::BinaryNumericOperator::Sub, false,
+                                     TS::Sign::None);
+    auto expr = builder.Translate(&bni);
+    auto* invocation = dynamic_cast<Syntax::InvocationExpression*>(expr.Expression());
+    ASSERT_TRUE(invocation != nullptr);
+    auto* memberRef =
+        dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Target());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "ByteOffset");
+    EXPECT_EQ(invocation->Arguments().Count(), 2);
+    auto* namedTarget =
+        dynamic_cast<Syntax::NamedArgumentExpression*>(invocation->Arguments().FirstOrNull());
+    ASSERT_TRUE(namedTarget != nullptr);
+    EXPECT_EQ(namedTarget->Name(), "target");
+    auto* namedOrigin =
+        dynamic_cast<Syntax::NamedArgumentExpression*>(invocation->Arguments().NodeAt(1));
+    ASSERT_TRUE(namedOrigin != nullptr);
+    EXPECT_EQ(namedOrigin->Name(), "origin");
+    // The result type is the IntPtr integer the C# infers for the byte offset.
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.IntPtr");
+}
+
+TEST(ExpressionBuilderBinaryNumericTest, PointerSubtractionRendersSubtractOverLong)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto ptrType = std::make_shared<TS::PointerType>(intType);
+    auto p1 = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, ptrType);
+    p1->Name = "p1";
+    auto p2 = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, ptrType);
+    p2->Name = "p2";
+    // div(sub(p1, p2), 4) with matching int* pointer types: the pointer-subtraction
+    // render is the pointer difference with an Int64 resolve result.
+    // The sub's own stack type is I (the reader's pointer-arithmetic shape).
+    auto sub = std::make_unique<IL::BinaryNumericInstruction>(
+        std::make_unique<IL::LdLoc>(p1), std::make_unique<IL::LdLoc>(p2),
+        IL::BinaryNumericOperator::Sub, IL::StackType::I);
+    IL::BinaryNumericInstruction bni(std::move(sub), std::make_unique<IL::LdcI4>(4),
+                                     IL::BinaryNumericOperator::Div);
+    auto expr = builder.Translate(&bni);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(binary != nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::Subtract);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(binary->Left()) != nullptr);
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(binary->Right()) != nullptr);
+    const auto* opResult =
+        dynamic_cast<const Sem::OperatorResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(opResult != nullptr);
+    EXPECT_EQ(opResult->OperatorType(), TS::ExpressionType::Subtract);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.Int64");
+    // The C# `.WithILInstruction(new[] { inst, sub })` -- two IL annotations.
+    ASSERT_EQ(expr.ILInstructions().size(), std::size_t{2});
+    EXPECT_EQ(expr.ILInstructions()[0], &bni);
+}
+
+TEST(ExpressionBuilderBinaryNumericTest, PointerSubtractionGatesRejectNonMatchingShapes)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto ptrType = std::make_shared<TS::PointerType>(intType);
+    auto p1 = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, ptrType);
+    auto p2 = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, ptrType);
+    // Overflow-checked divisions are never pointer subtractions.
+    {
+        auto sub = std::make_unique<IL::BinaryNumericInstruction>(
+            std::make_unique<IL::LdLoc>(p1), std::make_unique<IL::LdLoc>(p2),
+            IL::BinaryNumericOperator::Sub, IL::StackType::I);
+        IL::BinaryNumericInstruction bni(std::move(sub), std::make_unique<IL::LdcI4>(4),
+                                         IL::BinaryNumericOperator::Div);
+        bni.CheckForOverflow = true;
+        EXPECT_FALSE(builder.HandlePointerSubtraction(bni).has_value());
+    }
+    // A div whose left input type is not StackType.I is not a pointer subtraction.
+    {
+        auto sub = std::make_unique<IL::BinaryNumericInstruction>(
+            std::make_unique<IL::LdLoc>(p1), std::make_unique<IL::LdLoc>(p2),
+            IL::BinaryNumericOperator::Sub, IL::StackType::I);
+        IL::BinaryNumericInstruction bni(std::move(sub), std::make_unique<IL::LdcI4>(4),
+                                         IL::BinaryNumericOperator::Div);
+        bni.LeftInputType = IL::StackType::I8;
+        EXPECT_FALSE(builder.HandlePointerSubtraction(bni).has_value());
+    }
+    // A div whose left operand is not a subtraction is not a pointer subtraction.
+    {
+        IL::BinaryNumericInstruction bni(std::make_unique<IL::LdLoc>(p1),
+                                         std::make_unique<IL::LdcI4>(4),
+                                         IL::BinaryNumericOperator::Div);
+        EXPECT_FALSE(builder.HandlePointerSubtraction(bni).has_value());
+    }
+}
+
+TEST(ExpressionBuilderBinaryNumericTest, UnknownOperatorThrows)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto a = MakeLocal(fixture, TS::KnownTypeCode::Int32, "a");
+    auto b = MakeLocal(fixture, TS::KnownTypeCode::Int32, "b");
+    IL::BinaryNumericInstruction bni(std::make_unique<IL::LdLoc>(a),
+                                     std::make_unique<IL::LdLoc>(b),
+                                     IL::BinaryNumericOperator::None);
+    EXPECT_THROW(builder.Translate(&bni), std::out_of_range);
+}
+
+TEST(ExpressionBuilderBinaryNumericTest, IsCSharpSmallIntegerTypeReadsTheDefinition)
+{
+    BuilderFixture fixture;
+    // A real corlib definition (Int16): the definition-based dispatch answers true.
+    const TS::IType& int16Def = fixture.compilation.FindType(TS::KnownTypeCode::Int16);
+    EXPECT_TRUE(TS::IsCSharpSmallIntegerType(&int16Def));
+    // The minimal KnownType wrapper over Int16 (no definition): the wrapper
+    // fallback answers true as well.
+    auto wrapper = std::make_shared<TS::KnownType>(TS::KnownTypeCode::Int16);
+    EXPECT_TRUE(TS::IsCSharpSmallIntegerType(wrapper.get()));
+    // Int32 is not a small integer.
+    const TS::IType& int32Def = fixture.compilation.FindType(TS::KnownTypeCode::Int32);
+    EXPECT_FALSE(TS::IsCSharpSmallIntegerType(&int32Def));
+    // An enum with a small underlying type is NOT a C# small integer (the C#
+    // reads the definition's KnownTypeCode, which is None for enums).
+    auto enumDef = std::make_shared<TestSupport::LookupTypeDefinition>(
+        "E", "Ns", TS::FullTypeName(TS::TopLevelTypeName("Ns", "E")),
+        TS::TypeKind::Enum, TS::Accessibility::Public, fixture.compilation,
+        &fixture.compilation.MainModule());
+    enumDef->SetEnumUnderlyingType(
+        std::const_pointer_cast<TS::IType>(
+            fixture.compilation.FindType(TS::KnownTypeCode::Int16).shared_from_this()));
+    EXPECT_FALSE(TS::IsCSharpSmallIntegerType(enumDef.get()));
+}
 
 } // namespace ILSpy::Tests

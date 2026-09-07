@@ -455,22 +455,31 @@ inline bool IsSmallIntegerType(const IType* type) {
 
 // Port of TypeUtils.IsCSharpSmallIntegerType(IType): whether the type is a C#
 // small integer (byte/sbyte/short/ushort). Unlike the ILAst IsSmallIntegerType,
-// C# does not consider bool, char or enums to be small integers. The compound-
-// assignment validation consults this to decide whether a small-integer LHS
-// requires the binary to be signed (C# numeric-promotes a small integer to int).
+// C# does not consider bool, char or enums to be small integers. The C# reads
+// type.GetDefinition()?.KnownTypeCode (the definition-vs-wrapper dispatch -- a
+// real CorlibTypeDefinition/MetadataTypeDefinition and the minimal KnownType
+// wrapper both reach the same switch, the GetSize dual-shape convention).
+// The compound-assignment validation consults this to decide whether a
+// small-integer LHS requires the binary to be signed (C# numeric-promotes a
+// small integer to int).
 inline bool IsCSharpSmallIntegerType(const IType* type) {
-    if (const auto* k = dynamic_cast<const KnownType*>(type)) {
-        switch (k->Code()) {
-            case KnownTypeCode::Byte:
-            case KnownTypeCode::SByte:
-            case KnownTypeCode::Int16:
-            case KnownTypeCode::UInt16:
-                return true;
-            default:
-                break;
-        }
+    const ITypeDefinition* definition = type != nullptr ? type->GetDefinition() : nullptr;
+    KnownTypeCode code = definition != nullptr ? definition->KnownTypeCode()
+                                               : KnownTypeCode::None;
+    if (code == KnownTypeCode::None)
+    {
+        if (const auto* k = dynamic_cast<const KnownType*>(type))
+            code = k->Code();
     }
-    return false;
+    switch (code) {
+        case KnownTypeCode::Byte:
+        case KnownTypeCode::SByte:
+        case KnownTypeCode::Int16:
+        case KnownTypeCode::UInt16:
+            return true;
+        default:
+            return false;
+    }
 }
 
 // Port of TypeUtils.IsCSharpNativeIntegerType(IType) (TypeUtils.cs line 147):

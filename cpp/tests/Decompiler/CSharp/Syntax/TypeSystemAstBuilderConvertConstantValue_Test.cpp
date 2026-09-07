@@ -783,7 +783,9 @@ TEST_F(ConvertEnumValueTest, ByteBasedComplementDoesNotCompileInsideInitializer)
     Expression* expression = builder_.ConvertEnumValue(*byteEnum, 5, &memberSelf);
     const auto* literal = dynamic_cast<const PrimitiveExpression*>(expression);
     ASSERT_NE(nullptr, literal);
-    EXPECT_EQ(5, HeldUInt32(literal));
+    // The C# remaps small-integer literals to int (the integerTypeMismatch arm),
+    // so the held value is the int32 form of the byte value.
+    EXPECT_EQ(5, HeldInt32(literal));
 }
 
 // The enum routing of the 3-arg ConvertConstantValue: an enum-typed constant

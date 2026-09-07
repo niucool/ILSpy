@@ -2253,6 +2253,65 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   standing skips / zero failures, and all four CLI baselines unchanged
   (--csharp mscorlib 10106366 bytes, --il byte-identical to the
   41246545-byte real-ilspycmd gold, -l c 109438, --json-alone rc 64).
+- **`ExpressionBuilder` VisitBinaryNumericInstruction arithmetic family** --
+  `VisitBinaryNumericInstruction` (ExpressionBuilder.cs lines 1262-1298: the
+  ten-operator dispatch through `HandleBinaryNumeric`, Div first through
+  `HandlePointerSubtraction`, the shifts through `HandleShift`),
+  `HandleBinaryNumeric` (lines 1619-1746: the type-hint propagation gate for
+  bitwise ops over mixed input stack types, the managed/plain
+  pointer-arithmetic arms, `PrepareArithmeticArgument` on both inputs, the
+  `0 - x` unary-minus rewrite with the checked/unchecked annotation, the
+  enum-constant adjustment for bitwise ops, the resolver-driven render with
+  the common-type fallback, the bitwise constant re-render with the hex gate,
+  and the checked/unchecked/constant-overflow annotation tail -- the C#
+  explicit-`unchecked(...)` wrapper for a compile-time constant that would
+  overflow CS0220), `HandleShift` (lines 1849-1912: the small-integer
+  promotion rule, the C# 11 `>>>` operator selection over
+  `UnsignedRightShift` + the type-hint sign gate, the sign-preferring cast
+  fallback, and the always-int32 right-hand conversion),
+  `HandlePointerArithmetic` (lines 1300-1384: the type-hint element-type rule
+  over non-primitive/differently-sized element types, the
+  `GetPointerArithmeticOffset` or byte-pointer fallback, and the ptr +/- int
+  render), `HandleManagedPointerArithmetic` (lines 1386-1484: the ref-ref
+  `Unsafe.ByteOffset(target:, origin:)` named-argument intrinsic, the
+  ref +/- int `Unsafe.Add`/`Subtract(+ByteOffset)` intrinsics over the
+  detected element offset, the int + ref named-argument arms, and the
+  fixed-buffer indexer direction documented as a loud deferral on the
+  ConvertField/IsFixedField machinery), `HandlePointerSubtraction` (lines
+  1565-1619: the div(sub(a,b), sizeof(T)) / div(sub(a,b), constant)
+  pointer-subtraction render over the matching pointer types with the
+  debug-build divide-by-1 two-pointer arm), and
+  `ConstantBinaryOperatorOverflows` (lines 1842-1847). Fixed
+  `TypeUtils.IsCSharpSmallIntegerType` to the C# `GetDefinition()` dispatch
+  (the real CorlibTypeDefinition/MetadataTypeDefinition shapes answered false
+  under the old wrapper-only `dynamic_cast<KnownType>` read, flipping the
+  TypeSystemAstBuilder's small-integer literal remap -- the held value type
+  for a byte enum's numeric render changed from the raw byte form to the
+  C#-faithful int32 form, and one stale test pin followed). Render facts
+  pinned by the tests: the LdLoca by-ref type nests the managed reference
+  (int& &), so `brt.ElementType` is itself a managed reference and
+  `PointerArithmeticOffset.Detect` answers no match -- the managed-ref
+  byte-offset intrinsics render the RAW byte offset (`Unsafe.AddByteOffset(ref
+  a, 4)`), and the C# `ComputeResultType`'s `sub(&,&) = I` arm is dead code
+  (the left==right first branch answers Ref). Verified by 17 new
+  `ExpressionBuilderBinaryNumericTest` tests over the MinimalCorlib fixture
+  (the add/overflow-annotation shapes, the 0-x negate rewrite with both
+  overflow arms, the mixed-width truncation observable, the IntPtr -> nint
+  conversion, the bitwise constant + hex-gate absence, the small-integer shift
+  promotion, the >>> operator over a same-size signed type with an unsigned
+  sign, the plain >> fallback over uint, the managed ref + byte-offset /
+  element-offset / ref-ref named-argument intrinsics, the pointer-subtraction
+  render with the two-IL-instruction annotation, the gate matrix, the unknown
+  operator throw, and the IsCSharpSmallIntegerType definition-dispatch
+  matrix), proven with the neuter rounds (6 RED across the managed-pointer
+  gate, the small-integer shift promotion, the overflow-annotation tail, and
+  HandlePointerSubtraction; the PrepareArithmeticArgument truncation arms are
+  masked by the common-type fallback for add shapes over MinimalCorlib -- the
+  distinguishing observable needs a resolver shape the minimal corlib cannot
+  express), restored green; full suite 12055 ran / 12053 passed / the 2
+  standing skips / zero failures, and all four CLI baselines unchanged
+  (--csharp mscorlib 10106366 bytes, --il byte-identical to the
+  41246545-byte real-ilspycmd gold, -l c 109438, --json-alone rc 64).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
