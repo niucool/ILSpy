@@ -264,6 +264,24 @@ bool MatchBinaryNumericInstruction(const IL::ILInstruction* inst, IL::BinaryNume
     return true;
 }
 
+// The C# `inst.Value.MatchLdcI(1) || inst.Value.MatchLdcF4(1) ||
+// inst.Value.MatchLdcF8(1)` shape of the EvaluatesToOldValue DEBUG assert in
+// HandleCompoundAssignment: the post-increment constant is the integer 1 (an
+// LdcI4/LdcI8, through MatchLdcI's conv unwrapping) or the float 1.0 (an
+// LdcF4/LdcF8 -- the `double++`/`float++` shapes). File-local beside the other
+// Match helpers.
+bool MatchConstantOne(const IL::ILInstruction* inst)
+{
+    std::int64_t value = 0;
+    if (MatchLdcI(inst, value))
+        return value == 1;
+    return inst != nullptr
+           && ((inst->Op == IL::OpCode::LdcF4
+                && static_cast<const IL::LdcF4*>(inst)->Value == 1.0f)
+               || (inst->Op == IL::OpCode::LdcF8
+                   && static_cast<const IL::LdcF8*>(inst)->Value == 1.0));
+}
+
 // The C# `ILInstruction.MatchSizeOf(out IType type)` (Instructions.cs line 8955):
 // the bare SizeOf match returning the node's Type operand.
 bool MatchSizeOf(const IL::ILInstruction* inst, const TS::IType*& type)
@@ -497,6 +515,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitBinaryNumericInstruction(inst, context);
         case IL::OpCode::UserDefinedCompoundAssign:
             return VisitUserDefinedCompoundAssign(inst, context);
+        case IL::OpCode::NumericCompoundAssign:
+            return VisitNumericCompoundAssign(inst, context);
         case IL::OpCode::SizeOf:
             return VisitSizeOf(inst, context);
         case IL::OpCode::LdTypeToken:
@@ -3222,6 +3242,292 @@ TranslatedExpression ExpressionBuilder::VisitUserDefinedCompoundAssign(
                    std::vector<std::shared_ptr<Sem::ResolveResult>>{
                        SharedResolveResultAnnotation(*target.Expression())})),
         inst);
+}
+
+// ---------------------------------------------------------------------------
+// The numeric compound-assignment family (VisitNumericCompoundAssign + the
+// HandleCompoundAssignment / ConvertValue / HandleCompoundShift helpers)
+
+// The C# `protected internal override TranslatedExpression
+// VisitNumericCompoundAssign(NumericCompoundAssign inst, TranslationContext
+// context)` (ExpressionBuilder.cs lines 2032-2073): the numeric compound-assignment
+// dispatch. The eight arithmetic/bitwise operators route through
+// HandleCompoundAssignment; the two shift operators route through
+// HandleCompoundShift, with the ShiftRight gates preserving the C# `>>>=` spelling
+// when the sign/small-integer combination allows it (the setting gates both).
+TranslatedExpression ExpressionBuilder::VisitNumericCompoundAssign(
+    IL::ILInstruction* inst, TranslationContext context)
+{
+    auto* compoundAssign = static_cast<IL::NumericCompoundAssign*>(inst);
+    // The C# `inst.Type` is a non-nullable IType reference (the node ctor takes it);
+    // the port's foundation ctor admits null until the transform lands, so the Visit
+    // asserts the resolved-node contract.
+    assert(compoundAssign->Type != nullptr
+           && "NumericCompoundAssign.Type is non-nullable in C#");
+    switch (compoundAssign->Operator)
+    {
+        case IL::BinaryNumericOperator::Add:
+            return HandleCompoundAssignment(*compoundAssign,
+                                            Syntax::AssignmentOperatorType::Add);
+        case IL::BinaryNumericOperator::Sub:
+            return HandleCompoundAssignment(*compoundAssign,
+                                            Syntax::AssignmentOperatorType::Subtract);
+        case IL::BinaryNumericOperator::Mul:
+            return HandleCompoundAssignment(*compoundAssign,
+                                            Syntax::AssignmentOperatorType::Multiply);
+        case IL::BinaryNumericOperator::Div:
+            return HandleCompoundAssignment(*compoundAssign,
+                                            Syntax::AssignmentOperatorType::Divide);
+        case IL::BinaryNumericOperator::Rem:
+            return HandleCompoundAssignment(*compoundAssign,
+                                            Syntax::AssignmentOperatorType::Modulus);
+        case IL::BinaryNumericOperator::BitAnd:
+            return HandleCompoundAssignment(*compoundAssign,
+                                            Syntax::AssignmentOperatorType::BitwiseAnd);
+        case IL::BinaryNumericOperator::BitOr:
+            return HandleCompoundAssignment(*compoundAssign,
+                                            Syntax::AssignmentOperatorType::BitwiseOr);
+        case IL::BinaryNumericOperator::BitXor:
+            return HandleCompoundAssignment(*compoundAssign,
+                                            Syntax::AssignmentOperatorType::ExclusiveOr);
+        case IL::BinaryNumericOperator::ShiftLeft:
+            return HandleCompoundShift(*compoundAssign,
+                                       Syntax::AssignmentOperatorType::ShiftLeft);
+        case IL::BinaryNumericOperator::ShiftRight:
+            if (compoundAssign->Sign == Sign::Unsigned
+                && TS::GetSign(compoundAssign->Type.get()) == Sign::Signed)
+            {
+                assert(settings->UnsignedRightShift());
+                return HandleCompoundShift(*compoundAssign,
+                                           Syntax::AssignmentOperatorType::UnsignedShiftRight);
+            }
+            else if (compoundAssign->Sign == Sign::Unsigned
+                     && TS::IsCSharpSmallIntegerType(compoundAssign->Type.get())
+                     && settings->UnsignedRightShift())
+            {
+                // For small unsigned integer types promoted to signed int, the sign bit
+                // will be zero, so there is no difference between signed and unsigned
+                // shift. However the IL still indicates which C# operator was used, so
+                // preserve that if the setting allows us to.
+                return HandleCompoundShift(*compoundAssign,
+                                           Syntax::AssignmentOperatorType::UnsignedShiftRight);
+            }
+            else
+            {
+                return HandleCompoundShift(*compoundAssign,
+                                           Syntax::AssignmentOperatorType::ShiftRight);
+            }
+        default:
+            // The C# `throw new ArgumentOutOfRangeException()` (the parameterless
+            // form; the ToBinaryOperatorType std::out_of_range convention).
+            throw std::out_of_range(
+                "Exception of type 'System.ArgumentOutOfRangeException' was thrown.");
+    }
+}
+
+// The C# `TranslatedExpression HandleCompoundAssignment(NumericCompoundAssign
+// inst, AssignmentOperatorType op)` (ExpressionBuilder.cs lines 2075-2165).
+TranslatedExpression ExpressionBuilder::HandleCompoundAssignment(
+    const IL::NumericCompoundAssign& inst, Syntax::AssignmentOperatorType op)
+{
+    assert(inst.Type != nullptr && "NumericCompoundAssign.Type is non-nullable in C#");
+    ExpressionWithResolveResult target;
+    if (inst.TargetKind == IL::CompoundTargetKind::Address)
+    {
+        target = LdObj(inst.Target.get(), *inst.Type);
+    }
+    else
+    {
+        TranslatedExpression translated = Translate(inst.Target.get(), inst.Type.get());
+        target = ExpressionWithResolveResult(translated.Expression(),
+                                             translated.ResolveResult());
+    }
+
+    TranslatedExpression resultExpr;
+    if (inst.EvalMode == IL::CompoundEvalMode::EvaluatesToOldValue)
+    {
+        assert((op == Syntax::AssignmentOperatorType::Add
+                || op == Syntax::AssignmentOperatorType::Subtract)
+               && "EvaluatesToOldValue only supports Add/Subtract");
+        // The C# #if DEBUG block: the pointer arm re-detects the element offset and
+        // asserts the ldc.i4 1 shape; the constant arm asserts the constant 1 (the
+        // integer or float post-increment shape). Debug-only: the Release build the
+        // real engine ships compiles it out, so the port's Release build is neutral.
+        if (const TS::PointerType* ptrType =
+                dynamic_cast<const TS::PointerType*>(&target.Type()))
+        {
+            IL::PointerArithmeticOffset::DetectOutcome instValue =
+                IL::PointerArithmeticOffset::Detect(inst.Value.get(), ptrType->Element().get(),
+                                                    inst.CheckForOverflow);
+            assert(instValue.Inst != nullptr);
+            std::int64_t pointerOffset = 0;
+            assert(MatchLdcI(instValue.Inst, pointerOffset) && pointerOffset == 1);
+        }
+        else
+        {
+            assert(MatchConstantOne(inst.Value.get()));
+        }
+        Syntax::UnaryOperatorType unary;
+        TS::ExpressionType exprType;
+        if (op == Syntax::AssignmentOperatorType::Add)
+        {
+            unary = Syntax::UnaryOperatorType::PostIncrement;
+            exprType = TS::ExpressionType::PostIncrementAssign;
+        }
+        else
+        {
+            unary = Syntax::UnaryOperatorType::PostDecrement;
+            exprType = TS::ExpressionType::PostDecrementAssign;
+        }
+        auto* unaryExpr = new Syntax::UnaryOperatorExpression(target.Expression(), unary);
+        resultExpr = WithILInstruction(
+            WithRR(*unaryExpr,
+                   std::make_shared<Sem::OperatorResolveResult>(
+                       const_cast<TS::IType&>(target.Type()).shared_from_this(), exprType,
+                       std::vector<std::shared_ptr<Sem::ResolveResult>>{
+                           SharedResolveResultAnnotation(*target.Expression())})),
+            const_cast<IL::ILInstruction*>(static_cast<const IL::ILInstruction*>(&inst)));
+    }
+    else
+    {
+        TranslatedExpression value = Translate(inst.Value.get());
+        value = PrepareArithmeticArgument(std::move(value), inst.RightInputType, inst.Sign,
+                                          inst.IsLifted);
+        switch (op)
+        {
+            case Syntax::AssignmentOperatorType::Add:
+            case Syntax::AssignmentOperatorType::Subtract:
+                if (target.Type().Kind() == TypeKind::Pointer)
+                {
+                    auto pao = GetPointerArithmeticOffset(
+                        inst.Value.get(), value,
+                        dynamic_cast<const TS::PointerType&>(target.Type()).Element().get(),
+                        inst.CheckForOverflow);
+                    if (pao.has_value())
+                    {
+                        value = *pao;
+                    }
+                    else
+                    {
+                        value.Expression()->AddTrailingTrivia(new Syntax::Comment(
+                            "ILSpy Error: GetPointerArithmeticOffset() failed",
+                            Syntax::CommentType::MultiLine));
+                    }
+                }
+                else
+                {
+                    const TS::IType& targetType =
+                        *TS::GetEnumUnderlyingType(&TS::GetUnderlyingType(target.Type()));
+                    value = ConvertValue(std::move(value),
+                                         const_cast<TS::IType&>(targetType),
+                                         inst.CheckForOverflow);
+                }
+                break;
+            case Syntax::AssignmentOperatorType::Multiply:
+            case Syntax::AssignmentOperatorType::Divide:
+            case Syntax::AssignmentOperatorType::Modulus:
+            case Syntax::AssignmentOperatorType::BitwiseAnd:
+            case Syntax::AssignmentOperatorType::BitwiseOr:
+            case Syntax::AssignmentOperatorType::ExclusiveOr:
+            {
+                TS::IType& targetType =
+                    const_cast<TS::IType&>(TS::GetUnderlyingType(target.Type()));
+                value = ConvertValue(std::move(value), targetType, inst.CheckForOverflow);
+                break;
+            }
+            default:
+                break;
+        }
+        auto* assignment = new Syntax::AssignmentExpression(
+            target.Expression(), op, value.Expression());
+        resultExpr = WithILInstruction(
+            WithRR(*assignment,
+                   std::make_shared<Sem::OperatorResolveResult>(
+                       const_cast<TS::IType&>(target.Type()).shared_from_this(),
+                       Syntax::AssignmentExpression::GetLinqNodeType(op,
+                                                                     inst.CheckForOverflow),
+                       std::vector<std::shared_ptr<Sem::ResolveResult>>{
+                           SharedResolveResultAnnotation(*target.Expression()),
+                           SharedResolveResultAnnotation(*value.Expression())})),
+            const_cast<IL::ILInstruction*>(static_cast<const IL::ILInstruction*>(&inst)));
+    }
+    if (AssignmentOperatorMightCheckForOverflow(op)
+        && !IsFloatType(inst.UnderlyingResultType()))
+    {
+        if (inst.CheckForOverflow)
+            resultExpr.Expression()->AddAnnotation(Transforms::CheckedAnnotationHandle());
+        else
+            resultExpr.Expression()->AddAnnotation(
+                Transforms::UncheckedAnnotationHandle());
+    }
+    return resultExpr;
+}
+
+// The C# `TranslatedExpression ConvertValue(TranslatedExpression value, IType
+// targetType)` -- the local function inside HandleCompoundAssignment
+// (ExpressionBuilder.cs lines 2155-2164).
+TranslatedExpression ExpressionBuilder::ConvertValue(
+    TranslatedExpression value, TS::IType& inTargetType, bool checkForOverflow)
+{
+    TS::ITypePtr targetType =
+        const_cast<TS::IType&>(inTargetType).shared_from_this();
+    bool allowImplicitConversion = true;
+    if (TS::GetStackType(*targetType) == IL::StackType::I)
+    {
+        // Force explicit cast for (U)IntPtr, keep allowing implicit conversion only
+        // for n(u)int
+        allowImplicitConversion = TS::IsCSharpNativeIntegerType(targetType.get());
+        targetType = TS::GetSign(targetType.get()) == Sign::Unsigned ? TS::NUInt() : TS::NInt();
+    }
+    if (TS::IsNullable(value.Type()))
+    {
+        targetType = TS::Create(*compilation, *targetType);
+    }
+    return value.ConvertTo(*targetType, *this, checkForOverflow, allowImplicitConversion);
+}
+
+// The C# `TranslatedExpression HandleCompoundShift(NumericCompoundAssign inst,
+// AssignmentOperatorType op)` (ExpressionBuilder.cs lines 2167-2188).
+TranslatedExpression ExpressionBuilder::HandleCompoundShift(
+    const IL::NumericCompoundAssign& inst, Syntax::AssignmentOperatorType op)
+{
+    assert(inst.EvalMode == IL::CompoundEvalMode::EvaluatesToNewValue);
+    assert(inst.Type != nullptr && "NumericCompoundAssign.Type is non-nullable in C#");
+    ExpressionWithResolveResult target;
+    if (inst.TargetKind == IL::CompoundTargetKind::Address)
+    {
+        target = LdObj(inst.Target.get(), *inst.Type);
+    }
+    else
+    {
+        TranslatedExpression translated = Translate(inst.Target.get(), inst.Type.get());
+        target = ExpressionWithResolveResult(translated.Expression(),
+                                             translated.ResolveResult());
+    }
+    TranslatedExpression value = Translate(inst.Value.get());
+
+    // Shift operators in C# always expect type 'int' on the right-hand-side
+    if (TS::IsNullable(value.Type()))
+    {
+        value = value.ConvertTo(
+            *TS::Create(*compilation, const_cast<TS::IType&>(compilation->FindType(
+                                                           KnownTypeCode::Int32))),
+            *this);
+    }
+    else
+    {
+        value = value.ConvertTo(
+            const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Int32)), *this);
+    }
+
+    auto* assignment = new Syntax::AssignmentExpression(
+        target.Expression(), op, value.Expression());
+    return WithILInstruction(
+        WithRR(*assignment,
+               resolver->ResolveAssignment(
+                   op, SharedResolveResultAnnotation(*target.Expression()),
+                   SharedResolveResultAnnotation(*value.Expression()))),
+        const_cast<IL::ILInstruction*>(static_cast<const IL::ILInstruction*>(&inst)));
 }
 
 // ---------------------------------------------------------------------------

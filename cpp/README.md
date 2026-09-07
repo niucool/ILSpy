@@ -2366,6 +2366,52 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   zero failures, and all four CLI baselines unchanged (--csharp mscorlib
   10106366 bytes, --il byte-identical to the 41246545-byte real-ilspycmd
   gold, -l c 109438, --json-alone rc 64).
+- **`ExpressionBuilder` VisitNumericCompoundAssign arm + helpers** --
+  `VisitNumericCompoundAssign` (ExpressionBuilder.cs lines 2032-2073: the
+  ten-operator dispatch -- the eight arithmetic/bitwise operators through
+  `HandleCompoundAssignment`, the two shifts through `HandleCompoundShift`,
+  and the ShiftRight gates that preserve the C# `>>>=` spelling when the
+  sign is Unsigned and either the store type is signed or the small-integer
+  gate plus the UnsignedRightShift setting fire), `HandleCompoundAssignment`
+  (lines 2075-2165: the Address/LdObj target, the EvaluatesToOldValue postfix
+  ++/-- UnaryOperatorExpression render with the DEBUG MatchLdcI(1) /
+  MatchLdcF4(1) / MatchLdcF8(1) / pointer-offset asserts, the
+  EvaluatesToNewValue value preparation -- PrepareArithmeticArgument then the
+  pointer-offset fold (GetPointerArithmeticOffset, the failure arm adding
+  the multi-line "ILSpy Error: GetPointerArithmeticOffset() failed" trailing
+  comment) / the enum-underlying conversion
+  (`NullableType.GetUnderlyingType(...).GetEnumUnderlyingType()`) / the
+  Nullable-stripped underlying-type conversion for the other six operators
+  -- the AssignmentExpression render, and the checked/unchecked overflow
+  annotation tail (`AssignmentOperatorMightCheckForOverflow(op) &&
+  !UnderlyingResultType.IsFloatType()`), which runs for BOTH eval modes),
+  the `ConvertValue` local function as a private member (the n(u)int
+  collapse: a StackType.I target loses implicit conversions unless it is
+  already a C# native integer type, replacing itself with
+  `SpecialType.NUInt`/`NInt`, then the Nullable wrap of the target when the
+  value is nullable, then `ConvertTo(..., checkForOverflow,
+  allowImplicitConversion)`), and `HandleCompoundShift` (lines 2167-2188:
+  the value always converted to Int32 -- the C# shift operator's RHS type,
+  nullable-wrapped when the value is Nullable<T> -- and the
+  AssignmentExpression resolved through `resolver.ResolveAssignment`). The
+  port reuses the pre-existing `AssignmentOperatorMightCheckForOverflow`
+  static (the C# does NOT include UnsignedShiftRight in its false list --
+  the port's added case is unreachable: the >>> spelling only flows through
+  HandleCompoundShift, which never applies annotations) and the resolver's
+  already-ported `ResolveAssignment` region. New file-local helper
+  `MatchConstantOne` beside the Match helpers (the three-Match disjunction
+  shape). Verified by 15 new tests over the MinimalCorlib fixture (the
+  operator matrices with the LINQ-kind pins incl. the checked
+  AddAssignChecked forms, the bitwise/shift no-annotation rule, the postfix
+  and postfix-decrement renders with the float-constant DEBUG arm, the
+  Address/LdObj dereference, the pointer-offset fold (`p += 40` over int32
+  renders `p += 10`) and its failure-comment arm, the three ShiftRight
+  gates, and the default-arm std::out_of_range), proven with a 3-behavior
+  neuter RED round (5 failures: the annotation tail, the pointer fold, the
+  unsigned gate) then restored green; full suite 12089 ran / 12087 passed /
+  the 2 standing skips / zero failures, and all four CLI baselines unchanged
+  (--csharp mscorlib 10106366 bytes, --il byte-identical to the
+  41246545-byte real-ilspycmd gold, -l c 109438, --json-alone rc 64).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

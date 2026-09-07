@@ -67,6 +67,7 @@
 #include "Decompiler/DecompileRun.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
+#include "Decompiler/IL/Instructions/CompoundAssignmentInstruction.hpp"
 #include "Decompiler/TypeSystem/ICompilation.hpp"
 #include "Decompiler/TypeSystem/ITypeResolveContext.hpp"
 
@@ -532,6 +533,41 @@ public:
     // GetUnaryOperatorTypeFromMetadataName (EvaluatesToOldValue = postfix).
     TranslatedExpression VisitUserDefinedCompoundAssign(IL::ILInstruction* inst,
                                                         TranslationContext context);
+
+    // The C# `protected internal override TranslatedExpression
+    // VisitNumericCompoundAssign(NumericCompoundAssign inst, TranslationContext
+    // context)` (ExpressionBuilder.cs lines 2032-2073): the numeric compound
+    // assignment dispatch -- the eight arithmetic/bitwise operators through
+    // HandleCompoundAssignment, the two shift operators through HandleCompoundShift
+    // (ShiftRight with the sign/small-integer gates that preserve the C# >>> spelling
+    // when the setting allows), and the ArgumentOutOfRangeException default arm.
+    TranslatedExpression VisitNumericCompoundAssign(IL::ILInstruction* inst,
+                                                    TranslationContext context);
+
+    // The C# `TranslatedExpression HandleCompoundAssignment(NumericCompoundAssign
+    // inst, AssignmentOperatorType op)` (ExpressionBuilder.cs lines 2075-2165): the
+    // arithmetic/bitwise compound assignment -- the Address/LdObj target, the
+    // EvaluatesToOldValue postfix ++/-- render, the EvaluatesToNewValue value
+    // preparation (the pointer-offset / enum-underlying / underlying-type conversions
+    // through the ConvertValue local function), the AssignmentExpression render,
+    // and the checked/unchecked overflow annotation tail.
+    TranslatedExpression HandleCompoundAssignment(const IL::NumericCompoundAssign& inst,
+                                                  Syntax::AssignmentOperatorType op);
+
+    // The C# `TranslatedExpression ConvertValue(TranslatedExpression value, IType
+    // targetType)` -- the local function inside HandleCompoundAssignment
+    // (ExpressionBuilder.cs lines 2155-2164): the n(u)int collapse (an implicit
+    // conversion is kept only for n(u)int) and the nullable wrap of the target.
+    TranslatedExpression ConvertValue(TranslatedExpression value, TS::IType& targetType,
+                                      bool checkForOverflow);
+
+    // The C# `TranslatedExpression HandleCompoundShift(NumericCompoundAssign inst,
+    // AssignmentOperatorType op)` (ExpressionBuilder.cs lines 2167-2188): the shift
+    // compound assignment -- the value always converted to int (the C# shift
+    // operator's RHS type, nullable-wrapped when the value is nullable), rendered
+    // through the resolver's ResolveAssignment.
+    TranslatedExpression HandleCompoundShift(const IL::NumericCompoundAssign& inst,
+                                             Syntax::AssignmentOperatorType op);
 
     // -- The self-contained statics ----------------------------------------------------
 
