@@ -271,15 +271,13 @@ inline KnownTypeCode ToKnownTypeCode(ILSpy::Decompiler::IL::StackType stackType,
 inline constexpr int kNativeIntSize = 6;
 
 // Port of TypeUtils.GetSize(IType): the size in bytes of a type. Pointer-sized
-// kinds (Pointer/ByReference/Class/NInt/NUInt) report kNativeIntSize; an Enum
-// defers to its underlying type in the C# (the GetEnumUnderlyingType-unwrapped
-// definition's size); this GetSize reduction does not unwrap there, so an
-// Enum type falls through to the KnownTypeCode lookup and reports 0 (the
-// compound-assignment call sites that consult GetSize for small integers only
-// deal with the primitive KnownTypes); a KnownType reports its primitive size
-// by KnownTypeCode (1 for Boolean/SByte/
-// Byte, 2 for Char/Int16/UInt16, 4 for Int32/UInt32/Single, kNativeIntSize for
-// IntPtr/UIntPtr, 8 for Int64/UInt64/Double); 0 otherwise (O/F/Void/Unknown).
+// kinds (Pointer/ByReference/Class/NInt/NUInt) report this size from GetSize. An
+// Enum defers to its underlying type (the GetEnumUnderlyingType unwrap) and a
+// ModOpt/ModReq to SkipModifiers, exactly as the C# switch does; the final arm
+// reads GetDefinition()'s KnownTypeCode (the Definition-vs-wrapper dispatch -- a
+// KnownType wrapper and a CorlibTypeDefinition/MetadataTypeDefinition both reach
+// the same table, matching the C# type.GetDefinition() access; the
+// GetStackType/GetSign precedent), and a definitionless type reports 0.
 inline int GetSize(const IType* type) {
     if (!type) return 0;
     switch (type->Kind()) {
@@ -290,41 +288,50 @@ inline int GetSize(const IType* type) {
         case TypeKind::NUInt:
             return kNativeIntSize;
         case TypeKind::Enum:
-            // The C# unwraps GetEnumUnderlyingType().GetDefinition() and reports
-            // its size; this reduction does not unwrap (the call sites that
-            // consult GetSize for small integers only deal with the primitive
-            // KnownTypes), so an Enum type falls through to the KnownTypeCode
-            // lookup below and reports 0.
+            type = GetEnumUnderlyingType(type);
+            if (!type) return 0;
             break;
+        case TypeKind::ModOpt:
+        case TypeKind::ModReq:
+            return GetSize(SkipModifiers(*type));
         default:
             break;
     }
-    if (const auto* k = dynamic_cast<const KnownType*>(type)) {
-        switch (k->Code()) {
-            case KnownTypeCode::Boolean:
-            case KnownTypeCode::SByte:
-            case KnownTypeCode::Byte:
-                return 1;
-            case KnownTypeCode::Char:
-            case KnownTypeCode::Int16:
-            case KnownTypeCode::UInt16:
-                return 2;
-            case KnownTypeCode::Int32:
-            case KnownTypeCode::UInt32:
-            case KnownTypeCode::Single:
-                return 4;
-            case KnownTypeCode::IntPtr:
-            case KnownTypeCode::UIntPtr:
-                return kNativeIntSize;
-            case KnownTypeCode::Int64:
-            case KnownTypeCode::UInt64:
-            case KnownTypeCode::Double:
-                return 8;
-            default:
-                return 0;
-        }
+    // The C# reads type.GetDefinition(); the minimal-port synthetic types carry
+    // no definition, so the KnownType wrapper's own code falls back beside it
+    // (the GetSign dual-shape convention).
+    const ITypeDefinition* typeDef = type->GetDefinition();
+    KnownTypeCode code = typeDef != nullptr ? typeDef->KnownTypeCode()
+                                            : KnownTypeCode::None;
+    if (code == KnownTypeCode::None)
+    {
+        if (const auto* k = dynamic_cast<const KnownType*>(type))
+            code = k->Code();
+        if (code == KnownTypeCode::None) return 0;
     }
-    return 0;
+    switch (code) {
+        case KnownTypeCode::Boolean:
+        case KnownTypeCode::SByte:
+        case KnownTypeCode::Byte:
+            return 1;
+        case KnownTypeCode::Char:
+        case KnownTypeCode::Int16:
+        case KnownTypeCode::UInt16:
+            return 2;
+        case KnownTypeCode::Int32:
+        case KnownTypeCode::UInt32:
+        case KnownTypeCode::Single:
+            return 4;
+        case KnownTypeCode::IntPtr:
+        case KnownTypeCode::UIntPtr:
+            return kNativeIntSize;
+        case KnownTypeCode::Int64:
+        case KnownTypeCode::UInt64:
+        case KnownTypeCode::Double:
+            return 8;
+        default:
+            return 0;
+    }
 }
 
 // Port of TypeUtils.GetSize(StackType) (TypeUtils.cs line 90): the size in bytes

@@ -73,17 +73,22 @@ namespace {
 
 // The KnownTypeCode of a small-integer type, or None when `type` is not a known
 // small-integer type. The C# `type.GetEnumUnderlyingType().GetDefinition()?.
-// KnownTypeCode` reduces to the KnownType's code directly here: this port's
-// IsSmallIntegerType(IType*) is only true for the small-integer KnownTypes
-// (Boolean/SByte/Byte/Char/Int16/UInt16 -- an Enum KnownType reports GetSize 0,
-// not small, so GetEnumUnderlyingType is moot for the small-integer guard). The
-// ldc.i4 case in CheckImplicitTruncation consults this to decide whether the
-// constant fits the target's range.
+// KnownTypeCode`: the GetEnumUnderlyingType unwrap (a non-enum type passes
+// through, an enum unwraps to its definition's underlying type) then the
+// definition's KnownTypeCode (the Definition-vs-wrapper dispatch: a KnownType
+// wrapper and a real definition both reach the table). The ldc.i4 case in
+// CheckImplicitTruncation consults this to decide whether the constant fits the
+// target's range.
 TypeSystem::KnownTypeCode SmallIntegerKnownTypeCode(const TypeSystem::IType* type) {
     if (!type) return TypeSystem::KnownTypeCode::None;
-    if (const auto* k = dynamic_cast<const TypeSystem::KnownType*>(type)) {
+    type = TypeSystem::GetEnumUnderlyingType(type);
+    if (!type) return TypeSystem::KnownTypeCode::None;
+    // The definition's KnownTypeCode (the real-definition shapes), falling back
+    // to the minimal-port KnownType wrapper's own code (the GetSign convention).
+    if (const TypeSystem::ITypeDefinition* def = type->GetDefinition())
+        return def->KnownTypeCode();
+    if (const auto* k = dynamic_cast<const TypeSystem::KnownType*>(type))
         return k->Code();
-    }
     return TypeSystem::KnownTypeCode::None;
 }
 

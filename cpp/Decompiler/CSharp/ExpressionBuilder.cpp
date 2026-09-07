@@ -24,6 +24,8 @@
 #include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
 #include "Decompiler/CSharp/Syntax/AstType.hpp"
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
+#include "Decompiler/CSharp/Syntax/ComposedType.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AsExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
@@ -49,6 +51,7 @@
 #include "Decompiler/CSharp/Transforms/AddCheckedBlocks.hpp"
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
 #include "Decompiler/IL/Instructions/DefaultValue.hpp"
+#include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
 #include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/ThreeValuedBoolInstructions.hpp"
 #include "Decompiler/IL/Instructions/Throw.hpp"
@@ -69,6 +72,7 @@
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/Instructions/UnboxAny.hpp"
 #include "Decompiler/IL/OpCodeName.hpp"
+#include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
@@ -368,6 +372,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitSizeOf(inst, context);
         case IL::OpCode::LdTypeToken:
             return VisitLdTypeToken(inst, context);
+        case IL::OpCode::NewArr:
+            return VisitNewArr(inst, context);
         default:
             return Default(inst, context);
     }
@@ -736,6 +742,87 @@ TranslatedExpression ExpressionBuilder::VisitLdTypeToken(IL::ILInstruction* inst
             token->Type));
 }
 
+
+// The C# `protected internal override TranslatedExpression VisitNewArr(NewArr inst,
+// TranslationContext context)` (ExpressionBuilder.cs lines 502-516): the `new T[...]`
+// array-creation render -- every index through TranslateArrayIndex, the ComposedType
+// specifier move ("new (int[,])[10]" to "new int[10][,]"), the size arguments added
+// to the AST node, and the ArrayCreateResolveResult over the reconstructed array type.
+TranslatedExpression ExpressionBuilder::VisitNewArr(IL::ILInstruction* inst,
+                                                    TranslationContext context)
+{
+    auto* newArr = static_cast<IL::NewArr*>(inst);
+    int dimensions = static_cast<int>(newArr->Indices.size());
+    std::vector<TranslatedExpression> args;
+    for (const std::unique_ptr<IL::ILInstruction>& arg : newArr->Indices)
+        args.push_back(TranslateArrayIndex(arg.get()));
+    auto* expr = new Syntax::ArrayCreateExpression(ConvertType(*newArr->Type));
+    if (auto* ct = dynamic_cast<Syntax::ComposedType*>(expr->Type()))
+    {
+        // change "new (int[,])[10]" to "new int[10][,]"
+        ct->ArraySpecifiers().MoveTo(expr->AdditionalArraySpecifiers());
+    }
+    for (const TranslatedExpression& arg : args)
+        expr->Arguments().Add(arg.Expression());
+    // The C# `new ArrayType(compilation, inst.Type, dimensions)`: one dimension is
+    // the SZArray shape, more are the multi-dimensional rank (the port's ArrayType
+    // splits the two forms over its two ctors).
+    TS::ITypePtr arrayType = dimensions == 1
+                                 ? std::make_shared<TS::ArrayType>(newArr->Type)
+                                 : std::make_shared<TS::ArrayType>(newArr->Type, dimensions);
+    std::vector<std::shared_ptr<Sem::ResolveResult>> sizeArguments;
+    for (const TranslatedExpression& arg : args)
+        sizeArguments.push_back(SharedResolveResultAnnotation(*arg.Expression()));
+    return WithRR(
+        WithILInstruction(*expr, inst),
+        std::make_shared<Sem::ArrayCreateResolveResult>(
+            std::move(arrayType), std::move(sizeArguments),
+            std::optional<std::vector<std::shared_ptr<Sem::ResolveResult>>>{
+                std::vector<std::shared_ptr<Sem::ResolveResult>>{}}));
+}
+
+// The C# `TranslatedExpression TranslateArrayIndex(ILInstruction i)` (a private
+// helper, ExpressionBuilder.cs line 3248): translate the index and convert it to its
+// own stack type with allowIntPtr: false.
+TranslatedExpression ExpressionBuilder::TranslateArrayIndex(IL::ILInstruction* i)
+{
+    TranslatedExpression input = Translate(i);
+    return ConvertArrayIndex(std::move(input), i->ResultType(), false);
+}
+
+// The C# `TranslatedExpression ConvertArrayIndex(TranslatedExpression input,
+// StackType stackType, bool allowIntPtr)` (a private helper, ExpressionBuilder.cs
+// line 3253): the array-index conversion decision tree.
+TranslatedExpression ExpressionBuilder::ConvertArrayIndex(TranslatedExpression input,
+                                                          IL::StackType stackType,
+                                                          bool allowIntPtr)
+{
+    if (TS::GetSize(&input.Type()) > TS::GetSize(stackType))
+    {
+        // truncate oversized result
+        return input.ConvertTo(*FindType(stackType, TS::GetSign(&input.Type())), *this);
+    }
+    if (TS::IsCSharpPrimitiveIntegerType(&input.Type())
+        || TS::IsCSharpNativeIntegerType(&input.Type()))
+    {
+        // can be used as array index as-is
+        return input;
+    }
+    if (allowIntPtr
+        && (TS::IsKnownType(input.Type(), KnownTypeCode::IntPtr)
+            || TS::IsKnownType(input.Type(), KnownTypeCode::UIntPtr)))
+    {
+        return input;
+    }
+    if (stackType != IL::StackType::I4
+        && TS::GetStackType(input.Type()) == IL::StackType::I4)
+    {
+        // prefer casting to int if that's big enough
+        stackType = IL::StackType::I4;
+    }
+    TS::ITypePtr targetType = FindArithmeticType(stackType, TS::GetSign(&input.Type()));
+    return input.ConvertTo(*targetType, *this);
+}
 
 // The C# `protected internal override TranslatedExpression VisitStLoc(StLoc inst,
 // TranslationContext context)` (ExpressionBuilder.cs lines 809-870): the assignment

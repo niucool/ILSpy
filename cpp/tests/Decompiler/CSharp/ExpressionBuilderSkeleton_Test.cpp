@@ -26,8 +26,9 @@
 #include "Decompiler/CSharp/ExpressionBuilder.hpp"
 
 #include "Decompiler/CSharp/Annotations.hpp"
-#include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AsExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ConditionalExpression.hpp"
@@ -45,6 +46,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/TypeOfExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/ComposedType.hpp"
 #include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
 #include "Decompiler/DecompileRun.hpp"
@@ -77,6 +79,7 @@
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
 #include "Decompiler/Semantics/ConversionResolveResult.hpp"
+#include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
 #include "Decompiler/Semantics/OperatorResolveResult.hpp"
 #include "Decompiler/Semantics/SizeOfResolveResult.hpp"
 #include "Decompiler/Semantics/TypeIsResolveResult.hpp"
@@ -1611,6 +1614,265 @@ TEST(ILTypeExtensionsTest, IsCompatibleTypeForMemoryAccessMatrix)
     auto unknown = TS::UnknownType();
     EXPECT_TRUE(
         TS::IsCompatibleTypeForMemoryAccess(const_cast<TS::IType&>(intType), *unknown));
+}
+
+// ---------------------------------------------------------------------------
+// The VisitNewArr array-creation family (ExpressionBuilder.cs lines 502-516 +
+// the TranslateArrayIndex/ConvertArrayIndex helpers at 3248-3277). The renders are
+// pinned against the real ilspycmd 11.0 decompiler's --csharp output over a
+// csc-compiled fixture (new int[5], new int[n], new long[n], new int[(uint)c],
+// new string[n], new int[n][], new int[5, 6]).
+
+TEST(ExpressionBuilderNewArrTest, ConstantSizeRendersNewInt5)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    indices.push_back(std::make_unique<IL::LdcI4>(5));
+    IL::NewArr newArr(intType, std::move(indices));
+    auto expr = builder.Translate(&newArr);
+    auto* create = dynamic_cast<Syntax::ArrayCreateExpression*>(expr.Expression());
+    ASSERT_TRUE(create != nullptr);
+    auto* type = dynamic_cast<Syntax::PrimitiveType*>(create->Type());
+    ASSERT_TRUE(type != nullptr);
+    EXPECT_EQ(type->Keyword(), "int");
+    ASSERT_EQ(create->Arguments().Count(), 1);
+    auto* size = dynamic_cast<Syntax::PrimitiveExpression*>(create->Arguments().At(0));
+    ASSERT_TRUE(size != nullptr);
+    const std::int32_t* value = std::get_if<std::int32_t>(&size->Value());
+    ASSERT_TRUE(value != nullptr);
+    EXPECT_EQ(*value, 5);
+    EXPECT_EQ(create->AdditionalArraySpecifiers().Count(), 0);
+    EXPECT_EQ(create->ToString(), "new int[5]");
+    // The resolve result is the ArrayCreateResolveResult over the reconstructed
+    // one-dimensional array type, with the present-but-empty initializer list
+    // (the C# `Empty<ResolveResult>.Array` non-null-empty state).
+    const auto* rr = dynamic_cast<const Sem::ArrayCreateResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(rr != nullptr);
+    auto* arrayType = dynamic_cast<const TS::ArrayType*>(&rr->Type());
+    ASSERT_TRUE(arrayType != nullptr);
+    EXPECT_TRUE(arrayType->IsSzArray());
+    EXPECT_EQ(arrayType->Element()->ReflectionName(), "System.Int32");
+    ASSERT_EQ(rr->SizeArguments().size(), std::size_t(1));
+    ASSERT_TRUE(rr->InitializerElements().has_value());
+    EXPECT_TRUE(rr->InitializerElements()->empty());
+}
+
+TEST(ExpressionBuilderNewArrTest, VariableIndexRendersNewIntN)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "n");
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    indices.push_back(std::make_unique<IL::LdLoc>(local));
+    IL::NewArr newArr(intType, std::move(indices));
+    auto expr = builder.Translate(&newArr);
+    auto* create = dynamic_cast<Syntax::ArrayCreateExpression*>(expr.Expression());
+    ASSERT_TRUE(create != nullptr);
+    ASSERT_EQ(create->Arguments().Count(), 1);
+    auto* size = dynamic_cast<Syntax::IdentifierExpression*>(create->Arguments().At(0));
+    ASSERT_TRUE(size != nullptr);
+    EXPECT_EQ(size->Identifier(), "n");
+    EXPECT_EQ(create->ToString(), "new int[n]");
+    const auto* rr = dynamic_cast<const Sem::ArrayCreateResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(rr != nullptr);
+    ASSERT_EQ(rr->SizeArguments().size(), std::size_t(1));
+    ASSERT_TRUE(rr->SizeArguments()[0] != nullptr);
+    EXPECT_EQ(rr->SizeArguments()[0]->Type().ReflectionName(), "System.Int32");
+}
+
+TEST(ExpressionBuilderNewArrTest, LongIndexLongElementRendersNewLong)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int64, "n");
+    auto longType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int64).shared_from_this());
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    indices.push_back(std::make_unique<IL::LdLoc>(local));
+    IL::NewArr newArr(longType, std::move(indices));
+    auto expr = builder.Translate(&newArr);
+    auto* create = dynamic_cast<Syntax::ArrayCreateExpression*>(expr.Expression());
+    ASSERT_TRUE(create != nullptr);
+    auto* type = dynamic_cast<Syntax::PrimitiveType*>(create->Type());
+    ASSERT_TRUE(type != nullptr);
+    EXPECT_EQ(type->Keyword(), "long");
+    EXPECT_EQ(create->ToString(), "new long[n]");
+}
+
+TEST(ExpressionBuilderNewArrTest, CharIndexConvertsToUint)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Char, "c");
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    indices.push_back(std::make_unique<IL::LdLoc>(local));
+    IL::NewArr newArr(intType, std::move(indices));
+    auto expr = builder.Translate(&newArr);
+    auto* create = dynamic_cast<Syntax::ArrayCreateExpression*>(expr.Expression());
+    ASSERT_TRUE(create != nullptr);
+    ASSERT_EQ(create->Arguments().Count(), 1);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(create->Arguments().At(0));
+    ASSERT_TRUE(cast != nullptr);
+    auto* castType = dynamic_cast<Syntax::PrimitiveType*>(cast->Type());
+    ASSERT_TRUE(castType != nullptr);
+    EXPECT_EQ(castType->Keyword(), "uint");
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(cast->Expression()) != nullptr);
+    EXPECT_EQ(create->ToString(), "new int[(uint)c]");
+    // The size argument's own type is the converted uint32.
+    const auto* rr = dynamic_cast<const Sem::ArrayCreateResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(rr != nullptr);
+    ASSERT_EQ(rr->SizeArguments().size(), std::size_t(1));
+    ASSERT_TRUE(rr->SizeArguments()[0] != nullptr);
+    EXPECT_EQ(rr->SizeArguments()[0]->Type().ReflectionName(), "System.UInt32");
+}
+
+TEST(ExpressionBuilderNewArrTest, UIntIndexRendersNewString)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::UInt32, "n");
+    auto stringType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::String).shared_from_this());
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    indices.push_back(std::make_unique<IL::LdLoc>(local));
+    IL::NewArr newArr(stringType, std::move(indices));
+    auto expr = builder.Translate(&newArr);
+    auto* create = dynamic_cast<Syntax::ArrayCreateExpression*>(expr.Expression());
+    ASSERT_TRUE(create != nullptr);
+    auto* type = dynamic_cast<Syntax::PrimitiveType*>(create->Type());
+    ASSERT_TRUE(type != nullptr);
+    EXPECT_EQ(type->Keyword(), "string");
+    ASSERT_EQ(create->Arguments().Count(), 1);
+    // The uint index is a C# primitive integer type and passes through as-is.
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(create->Arguments().At(0)) != nullptr);
+    EXPECT_EQ(create->ToString(), "new string[n]");
+}
+
+TEST(ExpressionBuilderNewArrTest, JaggedElementMovesSpecifierToAdditional)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int32, "n");
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto jaggedType = std::make_shared<TS::ArrayType>(intType);
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    indices.push_back(std::make_unique<IL::LdLoc>(local));
+    IL::NewArr newArr(jaggedType, std::move(indices));
+    auto expr = builder.Translate(&newArr);
+    auto* create = dynamic_cast<Syntax::ArrayCreateExpression*>(expr.Expression());
+    ASSERT_TRUE(create != nullptr);
+    // "new (int[])[n]" becomes "new int[n][]": the ConvertType of the jagged
+    // element type is a ComposedType over the "int" base with one array specifier;
+    // the specifier moves out of the Type slot into AdditionalArraySpecifiers (the
+    // ComposedType itself stays the Type slot and renders as its bare base).
+    auto* type = dynamic_cast<Syntax::ComposedType*>(create->Type());
+    ASSERT_TRUE(type != nullptr);
+    auto* base = dynamic_cast<Syntax::PrimitiveType*>(type->BaseType());
+    ASSERT_TRUE(base != nullptr);
+    EXPECT_EQ(base->Keyword(), "int");
+    EXPECT_EQ(type->ArraySpecifiers().Count(), 0);
+    ASSERT_EQ(create->AdditionalArraySpecifiers().Count(), 1);
+    auto* specifier = create->AdditionalArraySpecifiers().At(0);
+    ASSERT_TRUE(specifier != nullptr);
+    EXPECT_EQ(specifier->Dimensions(), 1);
+    EXPECT_EQ(create->ToString(), "new int[n][]");
+}
+
+TEST(ExpressionBuilderNewArrTest, TwoIndicesBuildRank2)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    std::vector<std::unique_ptr<IL::ILInstruction>> indices;
+    indices.push_back(std::make_unique<IL::LdcI4>(5));
+    indices.push_back(std::make_unique<IL::LdcI4>(6));
+    IL::NewArr newArr(intType, std::move(indices));
+    auto expr = builder.Translate(&newArr);
+    auto* create = dynamic_cast<Syntax::ArrayCreateExpression*>(expr.Expression());
+    ASSERT_TRUE(create != nullptr);
+    ASSERT_EQ(create->Arguments().Count(), 2);
+    EXPECT_EQ(create->ToString(), "new int[5, 6]");
+    // Two indices reconstruct a rank-2 (non-SZ) array type in the resolve result.
+    const auto* rr = dynamic_cast<const Sem::ArrayCreateResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(rr != nullptr);
+    auto* arrayType = dynamic_cast<const TS::ArrayType*>(&rr->Type());
+    ASSERT_TRUE(arrayType != nullptr);
+    EXPECT_FALSE(arrayType->IsSzArray());
+    EXPECT_EQ(arrayType->Rank(), 2);
+    ASSERT_EQ(rr->SizeArguments().size(), std::size_t(2));
+}
+
+// The direct ConvertArrayIndex decision-tree arms (the C# private helper at
+// ExpressionBuilder.cs line 3253; the port exposes every member).
+
+TEST(ExpressionBuilderNewArrTest, ConvertArrayIndexTruncatesOversizedInput)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Int64, "num");
+    IL::LdLoc ldloc(local);
+    auto input = builder.Translate(&ldloc);
+    // A long-typed input against an I4 stack type is oversized: it truncates to
+    // the stack type (Int32), rendering the explicit cast.
+    auto converted = builder.ConvertArrayIndex(input, IL::StackType::I4, false);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(converted.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    auto* castType = dynamic_cast<Syntax::PrimitiveType*>(cast->Type());
+    ASSERT_TRUE(castType != nullptr);
+    EXPECT_EQ(castType->Keyword(), "int");
+    EXPECT_TRUE(dynamic_cast<Syntax::IdentifierExpression*>(cast->Expression()) != nullptr);
+    EXPECT_EQ(converted.Type().ReflectionName(), "System.Int32");
+}
+
+TEST(ExpressionBuilderNewArrTest, ConvertArrayIndexPrefersIntOverI8)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::Char, "c");
+    IL::LdLoc ldloc(local);
+    auto input = builder.Translate(&ldloc);
+    // A char input against an I8 stack type prefers casting to int's stack size:
+    // without the I4-preference branch the target would be the I8 arithmetic type
+    // (UInt64 for the unsigned char sign).
+    auto converted = builder.ConvertArrayIndex(input, IL::StackType::I8, false);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(converted.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    auto* castType = dynamic_cast<Syntax::PrimitiveType*>(cast->Type());
+    ASSERT_TRUE(castType != nullptr);
+    EXPECT_EQ(castType->Keyword(), "uint");
+    EXPECT_EQ(converted.Type().ReflectionName(), "System.UInt32");
+}
+
+TEST(ExpressionBuilderNewArrTest, ConvertArrayIndexPassesIntPtrWhenAllowed)
+{
+    BuilderFixture fixture;
+    // Native integers off: the not-allowed path falls to the I8 arithmetic type.
+    fixture.settings.SetNativeIntegers(false);
+    auto builder = fixture.MakeBuilder();
+    auto local = MakeLocal(fixture, TS::KnownTypeCode::IntPtr, "p");
+    IL::LdLoc ldloc(local);
+    auto input = builder.Translate(&ldloc);
+    // With allowIntPtr the IntPtr input passes through unchanged.
+    auto kept = builder.ConvertArrayIndex(input, IL::StackType::I, true);
+    EXPECT_EQ(kept.Expression(), input.Expression());
+    EXPECT_EQ(&kept.Type(), &input.Type());
+    // Without it the input converts to the I8 arithmetic type (Int64).
+    auto converted = builder.ConvertArrayIndex(input, IL::StackType::I, false);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(converted.Expression());
+    ASSERT_TRUE(cast != nullptr);
+    auto* castType = dynamic_cast<Syntax::PrimitiveType*>(cast->Type());
+    ASSERT_TRUE(castType != nullptr);
+    EXPECT_EQ(castType->Keyword(), "long");
+    EXPECT_EQ(converted.Type().ReflectionName(), "System.Int64");
 }
 
 } // namespace ILSpy::Tests

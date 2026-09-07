@@ -208,6 +208,26 @@ public:
     // assignment arm -- the stack-slot type refinement, the by-ref re-assignment
     // `ref (a = ref b)` shape, and the plain Assignment.
     TranslatedExpression VisitStLoc(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitNewArr(NewArr inst,
+    // TranslationContext context)` (ExpressionBuilder.cs lines 502-516): the
+    // `new T[...]` array-creation render -- every index through TranslateArrayIndex,
+    // the `new int[n][]` ComposedType specifier move, and the ArrayCreateResolveResult
+    // over the reconstructed array type (`Empty<ResolveResult>.Array` as the
+    // present-but-empty initializer, the C# non-null-empty-list state).
+    TranslatedExpression VisitNewArr(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `TranslatedExpression TranslateArrayIndex(ILInstruction i)` (a private
+    // helper, ExpressionBuilder.cs line 3248): translate the index and convert it to
+    // its own stack type with allowIntPtr: false.
+    TranslatedExpression TranslateArrayIndex(IL::ILInstruction* i);
+    // The C# `TranslatedExpression ConvertArrayIndex(TranslatedExpression input,
+    // StackType stackType, bool allowIntPtr)` (a private helper, ExpressionBuilder.cs
+    // line 3253): the array-index conversion decision tree -- truncate an oversized
+    // result to the stack type, pass C# primitive/native integer types through,
+    // pass (U)IntPtr through only when allowIntPtr is set, prefer int over the
+    // stack type when the input is small, else convert to the stack type's
+    // arithmetic type.
+    TranslatedExpression ConvertArrayIndex(TranslatedExpression input, IL::StackType stackType,
+                                           bool allowIntPtr);
     // The C# `TranslatedExpression IsType(IsInst inst)` helper (ExpressionBuilder.cs
     // line 425): the `expr is T` expression the comp/unbox.any special cases build.
     TranslatedExpression IsType(IL::IsInst& inst);

@@ -2099,7 +2099,41 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   non-StLoc store rejection, the Assignment helper, and the InferType/
   MatchDefaultValue/StackType/IsCompatibleTypeForMemoryAccess tables),
   proven with a five-test RED neuter round plus a second Comp-arm neuter
-  round, restored green.
+  round, restored green. The array-creation arm landed as the next builder
+  slice: `VisitNewArr` (ExpressionBuilder.cs lines 502-516) -- every index
+  through the new `TranslateArrayIndex`/`ConvertArrayIndex` helper pair (the
+  oversized-input truncation to the index's own stack type, the
+  primitive/native-integer passthrough, the `allowIntPtr` (U)IntPtr arm, the
+  I4-preference branch for small non-primitive inputs, and the
+  `FindArithmeticType` conversion), the `new int[n][]` ComposedType
+  specifier move (`MoveTo` out of the element type's own array specifier,
+  which stays a bare-base ComposedType in the Type slot), the reconstructed
+  array type (SZArray for one dimension, the rank constructor beyond), and
+  the `ArrayCreateResolveResult` with the present-but-empty initializer list
+  (the C# `Empty<ResolveResult>.Array` non-null-empty state the
+  `std::optional` distinguishes from nullopt). Two latent type-system
+  divergences the slice's tests exposed and fixed: `TypeUtils::GetSize` read
+  only the minimal `KnownType` wrapper's code (a CorlibTypeDefinition
+  reported 0, breaking every small-integer/oversize query over real
+  definitions) and now reads `GetDefinition()`'s KnownTypeCode with the
+  Enum unwrap + SkipModifiers arms and the wrapper fallback (the
+  GetStackType/GetSign dual-shape convention), and
+  `TransformAssignment`'s `SmallIntegerKnownTypeCode` read only the wrapper
+  the same way and now mirrors the C#
+  `type.GetEnumUnderlyingType().GetDefinition()?.KnownTypeCode` (the
+  CheckImplicitTruncation suite was passing vacuously on the old dead
+  small-integer path over real-definition fixtures). Verified by the 10-test
+  `ExpressionBuilderNewArrTest` suite over the MinimalCorlib fixture with
+  every render pinned against the real ilspycmd 11.0 `--csharp` output over
+  a csc-compiled array fixture (`new int[5]`, `new int[n]`, `new long[n]`,
+  `new int[(uint)c]` -- the char index converts to the I4 arithmetic type
+  uint32, `new string[n]`, `new int[n][]`, and the rank-2 shape), plus the
+  three direct `ConvertArrayIndex` decision-tree arms (the I4 truncation of
+  an oversized long, the I8 input's I4 preference, and the
+  NativeIntegers-off IntPtr allowIntPtr arm), no neuter round (the two
+  divergences were proven RED by the first run's two failures before the
+  fixes), full suite 11974 ran / 11972 passed / the 2 standing skips / zero
+  failures.
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of
