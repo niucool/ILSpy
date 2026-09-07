@@ -112,9 +112,9 @@ bool IsLdcI4ZeroMaybeConv(const ILInstruction* inst) {
     return IsLdcI4(inst, 0);
 }
 
-bool IsEqualityOrInequality(ComparisonKind k) {
-    return k == ComparisonKind::Equality || k == ComparisonKind::Inequality;
-}
+// Delegates to the lib-side IL::IsEqualityOrInequality (Comp.hpp) -- the
+// file-local copy would make every unqualified call ambiguous via ADL (the
+// iteration-51 RecordTypeName convention).
 
 // Detach the ldc.i4 0 that IsLdcI4ZeroMaybeConv found at the bottom of a
 // sign/zero-extend conv chain, mirroring the C# `inst.Right = rightWithoutConv`

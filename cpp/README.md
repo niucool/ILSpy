@@ -2216,6 +2216,43 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   12012 passed / the 2 standing skips / zero failures, and all four CLI
   baselines unchanged (--csharp mscorlib 10106366 bytes, --il byte-identical
   to the 41246545-byte real-ilspycmd gold, -l c 109438, --json-alone rc 64).
+- **`ExpressionBuilder` VisitComp comparison family** -- `VisitComp`
+  (ExpressionBuilder.cs lines 871-946: the ThreeValuedLogic lifted-not arm
+  (the `!b` render over a `Nullable<bool>` operand with the lifted `Not`
+  `OperatorResolveResult`, else the exact-message error expression), the `Ref`
+  arm over the Unsafe intrinsics (`AreSame`/`IsAddressLessThan`/
+  `IsAddressGreaterThan` with the negate forms and the byte-ref common-type
+  conversion), then `TranslateCeq` (equality/inequality: the `(e as T) ==
+  null` -> `!(e is T)` rewrites, the redundant-bool-comparison removal, the
+  pointer-null comparisons through `MatchLdcI`, the enum/char literal type
+  unification via `TryUniteEqualityOperandType`, the string/delegate-with-null
+  reference-comparison special case, and the resolver-driven render with the
+  `ConvertTo` retries and the fresh-`OperatorResolveResult` fallback) or
+  `TranslateComp` (the relational operators: the pointer-pointer builtin, the
+  `PrepareArithmeticArgument` pair, the `AdjustConstantExpressionToType`
+  constant adjustment, the sign-corrected `FindArithmeticType` re-typing, and
+  the object-type `Unsafe.As<object, UIntPtr>` wrap)) plus the shared helpers
+  `CreateBuiltinBinaryOperator`, `AdjustConstantExpressionToType` and the
+  `ToBinaryOperatorType`/`IsEqualityOrInequality` ComparisonKind extensions.
+  The slice also landed the faithful `Comp::Sign` field (the C# has only
+  `Sign`; the port's `bool Unsigned` stays as the redundant derived view), the
+  reader's static sign mapping per opcode (the equality/inequality forms
+  Sign.None, the relational forms Signed/Unsigned -- the type-dependent
+  float-computation residual gap documented at the macro), the clone's `Sign`
+  carry, the lifted transforms' `comp.Sign` propagation, and fixed the
+  pre-existing `AdjustConstantToType`/`PrepareArithmeticArgument`/
+  `IsCompatibleWithSign` `GetEnumUnderlyingType` divergence (the C# uses
+  `NullableType.GetUnderlyingType` -- the Nullable<T> unwrap, not the enum
+  unwrap). Renders pinned against the real ilspycmd 11.0 --csharp output over
+  a csc-compiled comparison fixture (`a < b`, `x == false` -> `!x`, `x ==
+  true` -> `x`, `s == null`, `p == null` through the `ldc.i4.0; conv.u` shape,
+  `x == y` over int? locals). Verified by 24 new tests and a four-behavior
+  neuter round (3 RED: the 3VL arm, the bool-comparison negate, the Ref-arm
+  method name; the string-null special case is render-equivalent through the
+  resolver path) restored green; full suite 12038 ran / 12036 passed / the 2
+  standing skips / zero failures, and all four CLI baselines unchanged
+  (--csharp mscorlib 10106366 bytes, --il byte-identical to the
+  41246545-byte real-ilspycmd gold, -l c 109438, --json-alone rc 64).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

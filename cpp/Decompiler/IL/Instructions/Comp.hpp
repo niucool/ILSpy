@@ -25,6 +25,7 @@
 
 #include "Decompiler/IL/Instructions/BinaryInstruction.hpp"
 #include "Decompiler/IL/StackType.hpp"
+#include "Decompiler/TypeSystem/Sign.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -54,6 +55,12 @@ enum class ComparisonLiftingKind : std::uint8_t {
     ThreeValuedLogic,
 };
 
+// Port of ComparisonKindExtensions.IsEqualityOrInequality (Comp.cs): whether the
+// comparison is one of the two equality forms (the TranslateCeq routing gate).
+inline bool IsEqualityOrInequality(ComparisonKind kind) {
+    return kind == ComparisonKind::Equality || kind == ComparisonKind::Inequality;
+}
+
 // Negate a comparison kind (ECMA-335 II.3.2): == <=> !=, < => >=, <= => >.
 // Port of ComparisonKind.Negate in Comp.cs.
 inline ComparisonKind NegateComparison(ComparisonKind kind) {
@@ -71,6 +78,18 @@ inline ComparisonKind NegateComparison(ComparisonKind kind) {
 class Comp : public BinaryInstruction {
 public:
     ComparisonKind Kind = ComparisonKind::Equality;
+    // The C# `public readonly Sign Sign` field ("If this is an integer comparison,
+    // specifies the sign used to interpret the integers"): None for equality/float/
+    // reference comparisons, Signed/Unsigned for the relational integer comparisons.
+    // The reader's opcode-dispatch supplies the static value (the C# reader derives
+    // it type-dependently in its Comparison helper -- the float/equality shapes are
+    // None -- which the port's reader mirrors through the explicit-Sign ctor sites;
+    // the doc comment on the reader macro records the residual type-dependent gap).
+    // The member is named after the type (the self-named-accessor trap): every type
+    // use inside the class body needs the TypeSystem:: qualification.
+    TypeSystem::Sign Sign = TypeSystem::Sign::None;
+    // The redundant Unsigned view the port's existing consumers read (the C# has no
+    // such field): kept consistent in every ctor as `Sign == Sign::Unsigned`.
     bool Unsigned = false;
     // The lifting kind (None for an ordinary comparison). A non-None value
     // marks this Comp as a lifted comparison the nullable-lifting transform
@@ -85,21 +104,35 @@ public:
 
     // Ordinary comparison (the C# `Comp(kind, sign, left, right)`): InputType
     // is the left operand's ResultType, LiftingKind is None. The default
-    // args keep every existing call site working.
+    // args keep every existing call site working. The bool overload maps
+    // unsigned->Unsigned / false->Signed (the reader's static relational mapping);
+    // the Sign overload carries the exact C# value (the None-sign equality sites).
     Comp(std::unique_ptr<ILInstruction> left, std::unique_ptr<ILInstruction> right,
          ComparisonKind kind = ComparisonKind::Equality, bool unsigned_ = false)
+        : Comp(std::move(left), std::move(right), kind,
+               unsigned_ ? TypeSystem::Sign::Unsigned : TypeSystem::Sign::Signed) {}
+    Comp(std::unique_ptr<ILInstruction> left, std::unique_ptr<ILInstruction> right,
+         ComparisonKind kind, TypeSystem::Sign sign)
         : BinaryInstruction(OpCode::Comp, std::move(left), std::move(right)),
-          Kind(kind), Unsigned(unsigned_) {
+          Kind(kind), Sign(sign), Unsigned(sign == TypeSystem::Sign::Unsigned) {
         if (Left) InputType = Left->ResultType();
     }
     // Lifted comparison (the C# `Comp(kind, lifting, inputType, sign, left,
     // right)`): LiftingKind and InputType are set explicitly, the
-    // nullable-lifting machinery uses this to build a lifted Comp.
+    // nullable-lifting machinery uses this to build a lifted Comp. The bool
+    // overload maps unsigned->Unsigned / false->Signed; the Sign overload
+    // carries the exact C# value (the lifted machinery propagates comp.Sign).
     Comp(std::unique_ptr<ILInstruction> left, std::unique_ptr<ILInstruction> right,
          ComparisonKind kind, ComparisonLiftingKind lifting, StackType inputType,
          bool unsigned_ = false)
+        : Comp(std::move(left), std::move(right), kind, lifting, inputType,
+               unsigned_ ? TypeSystem::Sign::Unsigned : TypeSystem::Sign::Signed) {}
+    Comp(std::unique_ptr<ILInstruction> left, std::unique_ptr<ILInstruction> right,
+         ComparisonKind kind, ComparisonLiftingKind lifting, StackType inputType,
+         TypeSystem::Sign sign)
         : BinaryInstruction(OpCode::Comp, std::move(left), std::move(right)),
-          Kind(kind), Unsigned(unsigned_), LiftingKind(lifting), InputType(inputType) {}
+          Kind(kind), Sign(sign), Unsigned(sign == TypeSystem::Sign::Unsigned),
+          LiftingKind(lifting), InputType(inputType) {}
 
     // Port of Comp.IsLifted: a non-None LiftingKind marks a lifted comparison.
     bool IsLifted() const { return LiftingKind != ComparisonLiftingKind::None; }

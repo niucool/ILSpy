@@ -277,7 +277,7 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         case OpCode::Comp: {
             const auto& s = static_cast<const Comp&>(*this);
             c = std::make_unique<Comp>(s.Left ? s.Left->Clone() : nullptr,
-                s.Right ? s.Right->Clone() : nullptr, s.Kind, s.LiftingKind, s.InputType, s.Unsigned);
+                s.Right ? s.Right->Clone() : nullptr, s.Kind, s.LiftingKind, s.InputType, s.Sign);
             break;
         }
         case OpCode::BinaryNumericInstruction: {

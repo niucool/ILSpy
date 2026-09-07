@@ -86,6 +86,8 @@ class BinaryInstruction;
 class IsInst;
 class LocAlloc;
 class LocAllocSpan;
+class Comp;
+enum class ComparisonKind : std::uint8_t;
 }
 
 namespace ILSpy::Decompiler::CSharp {
@@ -210,6 +212,12 @@ public:
     // assignment arm -- the stack-slot type refinement, the by-ref re-assignment
     // `ref (a = ref b)` shape, and the plain Assignment.
     TranslatedExpression VisitStLoc(IL::ILInstruction* inst, TranslationContext context);
+    // The C# `protected internal override TranslatedExpression VisitComp(Comp inst,
+    // TranslationContext context)` (ExpressionBuilder.cs lines 871-946): the comparison
+    // dispatch -- the ThreeValuedLogic lifted-not arm, the Ref arm over the Unsafe
+    // AreSame/IsAddressLessThan intrinsics, then TranslateCeq (equality/inequality) or
+    // TranslateComp (the relational operators).
+    TranslatedExpression VisitComp(IL::ILInstruction* inst, TranslationContext context);
     // The C# `protected internal override TranslatedExpression VisitNewArr(NewArr inst,
     // TranslationContext context)` (ExpressionBuilder.cs lines 502-516): the
     // `new T[...]` array-creation render -- every index through TranslateArrayIndex,
@@ -374,6 +382,52 @@ public:
     std::shared_ptr<Sem::ResolveResult> AdjustConstantToType(std::shared_ptr<Sem::ResolveResult> rr,
                                                              TS::IType& typeHint) const;
 
+    // -- The comparison family (the VisitComp helpers) --------------------------------
+
+    // The C# `TranslatedExpression AdjustConstantExpressionToType(TranslatedExpression
+    // expr, IType typeHint)` (ExpressionBuilder.cs line 3861): the constant re-typing
+    // wrapper -- re-render the expression when AdjustConstantToType re-typed the
+    // resolve result, else keep the original expression.
+    TranslatedExpression AdjustConstantExpressionToType(TranslatedExpression expr,
+                                                        TS::IType& typeHint) const;
+
+    // The C# `TranslatedExpression TranslateCeq(Comp inst, out bool negateOutput)`
+    // (line 947): the equality/inequality comparison -- the '(e as T) == null'
+    // rewrites, the redundant-bool-comparison removal, the pointer-null comparisons,
+    // the enum/char literal type unification, the string/delegate-with-null reference
+    // special case, and the resolver-driven render with the ConvertTo retries.
+    TranslatedExpression TranslateCeq(IL::Comp& inst, bool& negateOutput);
+
+    // The C# `TranslatedExpression TryUniteEqualityOperandType(TranslatedExpression
+    // left, TranslatedExpression right)` (line 1098): the enum-flag-check constant
+    // adjustment ((enum & EnumType.SomeValue) == 0 renders 0 as an integer) and the
+    // plain AdjustConstantExpressionToType(left, right.Type) fallback.
+    TranslatedExpression TryUniteEqualityOperandType(TranslatedExpression left,
+                                                     TranslatedExpression right) const;
+
+    // The C# `bool IsSpecialCasedReferenceComparisonWithNull(TranslatedExpression lhs,
+    // TranslatedExpression rhs)` (line 1111): when comparing a string/delegate with
+    // null, the C# compiler generates a reference comparison -- the special case is
+    // rendered as a builtin reference comparison rather than a value comparison.
+    bool IsSpecialCasedReferenceComparisonWithNull(TranslatedExpression lhs,
+                                                   TranslatedExpression rhs) const;
+
+    // The C# `ExpressionWithResolveResult CreateBuiltinBinaryOperator(TranslatedExpression
+    // left, BinaryOperatorType type, TranslatedExpression right, bool checkForOverflow
+    // = false)` (line 1117): the BinaryOperatorExpression over a fresh
+    // OperatorResolveResult with the Linq node type of the operator.
+    ExpressionWithResolveResult CreateBuiltinBinaryOperator(TranslatedExpression left,
+                                                            Syntax::BinaryOperatorType type,
+                                                            TranslatedExpression right,
+                                                            bool checkForOverflow = false) const;
+
+    // The C# `TranslatedExpression TranslateComp(Comp inst)` (line 1122): handle the
+    // Comp instruction for operators other than equality/inequality -- the pointer-
+    // pointer builtin, the arithmetic-argument preparation, the constant adjustment,
+    // the sign-corrected conversion through FindArithmeticType, and the object-type
+    // Unsafe.As<object, UIntPtr> wrap for StackType.O.
+    TranslatedExpression TranslateComp(IL::Comp& inst);
+
     // -- The arithmetic-type helpers (the FindArithmeticType family) ------------------
 
     // The C# `IType FindType(StackType stackType, Sign sign)` (a private instance
@@ -480,5 +534,13 @@ public:
     // stores the run for the later slices that consult it).
     const DecompileRun* decompileRun = nullptr;
 };
+
+// The C# `public static BinaryOperatorType ToBinaryOperatorType(this ComparisonKind
+// kind)` (IL/Instructions/Comp.cs line 66): the IL ComparisonKind -> CSharp
+// BinaryOperatorType mapping. Ported as a free function beside its only ported
+// consumer (the C# extension lives in Comp.cs, whose GetToken already references
+// the CSharp::Syntax layer; putting the function here keeps the port's include
+// direction -- the IL layer does not see the CSharp::Syntax layer).
+Syntax::BinaryOperatorType ToBinaryOperatorType(IL::ComparisonKind kind);
 
 } // namespace ILSpy::Decompiler::CSharp

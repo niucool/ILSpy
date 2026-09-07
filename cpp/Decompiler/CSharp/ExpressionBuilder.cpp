@@ -175,6 +175,59 @@ const IL::ILInstruction* UnwrapConv(const IL::ILInstruction* inst,
     return inst;
 }
 
+// The C# `ILInstruction.MatchLdcI4(int)` (IL/Instructions/PatternMatching.cs line
+// 27): an LdcI4 constant with the given value. The "copied next to its consumer"
+// convention (the UnwrapConv precedent above).
+bool MatchLdcI4(const IL::ILInstruction* inst, std::int32_t val)
+{
+    return inst != nullptr && inst->Op == IL::OpCode::LdcI4
+           && static_cast<const IL::LdcI4*>(inst)->Value == val;
+}
+
+// The C# `ILInstruction.MatchLdcI(long)` (PatternMatching.cs line 73): the out-
+// parameter form over LdcI8/LdcI4 with the conv unwrapping (a sign-extend conv
+// recurses; a zero-extend from I4 recurses and clears the top 32 bits -- the
+// reader never wraps constants in conv, so the plain forms cover every real
+// shape; the conv arms follow the PointerArithmeticOffset local-copy precedent).
+bool MatchLdcI(const IL::ILInstruction* inst, std::int64_t& val)
+{
+    if (inst == nullptr)
+        return false;
+    if (inst->Op == IL::OpCode::LdcI8)
+    {
+        val = static_cast<const IL::LdcI8*>(inst)->Value;
+        return true;
+    }
+    if (inst->Op == IL::OpCode::LdcI4)
+    {
+        val = static_cast<const IL::LdcI4*>(inst)->Value;
+        return true;
+    }
+    if (inst->Op == IL::OpCode::Conv)
+    {
+        auto* conv = static_cast<const IL::Conv*>(inst);
+        if (conv->Kind == IL::ConversionKind::SignExtend)
+            return MatchLdcI(conv->Argument.get(), val);
+        if (conv->Kind == IL::ConversionKind::ZeroExtend && conv->InputType == IL::StackType::I4
+            && MatchLdcI(conv->Argument.get(), val))
+        {
+            val &= 0xFFFFFFFFll; // clear top 32 bits
+            return true;
+        }
+    }
+    return false;
+}
+
+// The C# `ILInstruction.MatchLdcI(long val)` value form (PatternMatching.cs line
+// 73): `MatchLdcI(out v) && v == val` -- spelled as a distinct helper because C++
+// cannot overload (T&) against (T) for an lvalue argument (the C# overloads are
+// distinguishable only by the parameter mode).
+bool IsZeroLdc(const IL::ILInstruction* inst)
+{
+    std::int64_t val = 0;
+    return MatchLdcI(inst, val) && val == 0;
+}
+
 
 // The owning shared_ptr of the node's resolve-result annotation (the port's
 // ResolveResult is not enable_shared_from_this; the annotation channel owns the
@@ -392,6 +445,8 @@ TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, Translati
             return VisitIsInst(inst, context);
         case IL::OpCode::StLoc:
             return VisitStLoc(inst, context);
+        case IL::OpCode::Comp:
+            return VisitComp(inst, context);
         case IL::OpCode::SizeOf:
             return VisitSizeOf(inst, context);
         case IL::OpCode::LdTypeToken:
@@ -1442,7 +1497,7 @@ std::shared_ptr<Sem::ResolveResult> ExpressionBuilder::AdjustConstantToType(
 {
     if (!rr->IsCompileTimeConstant())
         return rr;
-    TS::IType& hint = *const_cast<TS::IType*>(GetEnumUnderlyingType(&typeHint));
+    TS::IType& hint = const_cast<TS::IType&>(TS::GetUnderlyingType(typeHint));
     if (rr->Type().Equals(hint))
         return rr;
     // Convert to type hint, if this is possible without loss of accuracy
@@ -1482,6 +1537,493 @@ std::shared_ptr<Sem::ResolveResult> ExpressionBuilder::AdjustConstantToType(
                                                           std::any{});
     }
     return rr;
+}
+
+// ---------------------------------------------------------------------------
+// The comparison family (the VisitComp arm + the TranslateCeq/TranslateComp helpers)
+
+// The C# `public static BinaryOperatorType ToBinaryOperatorType(this ComparisonKind
+// kind)` (IL/Instructions/Comp.cs line 66): the IL ComparisonKind -> CSharp
+// BinaryOperatorType mapping, ported as a free function beside its only ported
+// consumer (see the header note).
+Syntax::BinaryOperatorType ToBinaryOperatorType(IL::ComparisonKind kind)
+{
+    switch (kind)
+    {
+        case IL::ComparisonKind::Equality:
+            return Syntax::BinaryOperatorType::Equality;
+        case IL::ComparisonKind::Inequality:
+            return Syntax::BinaryOperatorType::InEquality;
+        case IL::ComparisonKind::LessThan:
+            return Syntax::BinaryOperatorType::LessThan;
+        case IL::ComparisonKind::LessThanOrEqual:
+            return Syntax::BinaryOperatorType::LessThanOrEqual;
+        case IL::ComparisonKind::GreaterThan:
+            return Syntax::BinaryOperatorType::GreaterThan;
+        case IL::ComparisonKind::GreaterThanOrEqual:
+            return Syntax::BinaryOperatorType::GreaterThanOrEqual;
+    }
+    // The C# default arm throws ArgumentOutOfRangeException (an unnamed value);
+    // unreachable through the port's exhaustive call sites.
+    throw std::out_of_range("Invalid value for ComparisonKind");
+}
+
+// The C# `protected internal override TranslatedExpression VisitComp(Comp inst,
+// TranslationContext context)` (ExpressionBuilder.cs lines 871-946): the comparison
+// dispatch -- the ThreeValuedLogic lifted-not arm, the Ref arm over the Unsafe
+// AreSame/IsAddressLessThan intrinsics, then TranslateCeq (equality/inequality) or
+// TranslateComp (the relational operators).
+TranslatedExpression ExpressionBuilder::VisitComp(IL::ILInstruction* inst, TranslationContext)
+{
+    auto* comp = static_cast<IL::Comp*>(inst);
+    if (comp->LiftingKind == IL::ComparisonLiftingKind::ThreeValuedLogic)
+    {
+        if (comp->Kind == IL::ComparisonKind::Equality && MatchLdcI4(comp->Right.get(), 0))
+        {
+            // lifted logic.not
+            TS::ITypePtr boolType = const_cast<TS::IType&>(
+                compilation->FindType(KnownTypeCode::Boolean)).shared_from_this();
+            TS::ITypePtr targetType = TS::Create(*compilation, *boolType);
+            TranslatedExpression arg =
+                Translate(comp->Left.get(), targetType.get()).ConvertTo(*targetType, *this);
+            auto* unary = new Syntax::UnaryOperatorExpression(
+                arg.Expression(), Syntax::UnaryOperatorType::Not);
+            return WithILInstruction(
+                WithRR(*unary, std::make_shared<Sem::OperatorResolveResult>(
+                                   targetType, TS::ExpressionType::Not,
+                                   std::vector<std::shared_ptr<Sem::ResolveResult>>{
+                                       SharedResolveResultAnnotation(*arg.Expression())})),
+                inst);
+        }
+        return ErrorExpression(
+            "Nullable comparisons with three-valued-logic not supported in C#");
+    }
+    if (comp->InputType == IL::StackType::Ref)
+    {
+        // Reference comparison using Unsafe intrinsics
+        // (The C# Debug.Assert(!inst.IsLifted) is compiled out of the shipped assembly.)
+        const char* methodName;
+        bool negate;
+        switch (comp->Kind)
+        {
+            case IL::ComparisonKind::Equality:
+                methodName = "AreSame";
+                negate = false;
+                break;
+            case IL::ComparisonKind::Inequality:
+                methodName = "AreSame";
+                negate = true;
+                break;
+            case IL::ComparisonKind::LessThan:
+                methodName = "IsAddressLessThan";
+                negate = false;
+                break;
+            case IL::ComparisonKind::LessThanOrEqual:
+                methodName = "IsAddressGreaterThan";
+                negate = true;
+                break;
+            case IL::ComparisonKind::GreaterThan:
+                methodName = "IsAddressGreaterThan";
+                negate = false;
+                break;
+            case IL::ComparisonKind::GreaterThanOrEqual:
+                methodName = "IsAddressLessThan";
+                negate = true;
+                break;
+            default:
+                throw std::logic_error("Invalid ComparisonKind");
+        }
+        TranslatedExpression left = Translate(comp->Left.get());
+        TranslatedExpression right = Translate(comp->Right.get());
+        if (left.Type().Kind() != TypeKind::ByReference
+            || !TS::NormalizeTypeVisitor::TypeErasure().EquivalentTypes(
+                const_cast<TS::IType&>(left.Type()),
+                const_cast<TS::IType&>(right.Type())))
+        {
+            TS::ITypePtr commonRefType = std::make_shared<TS::ByReferenceType>(
+                const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Byte))
+                    .shared_from_this());
+            left = left.ConvertTo(*commonRefType, *this);
+            right = right.ConvertTo(*commonRefType, *this);
+        }
+        TS::ITypePtr boolType = const_cast<TS::IType&>(
+            compilation->FindType(KnownTypeCode::Boolean)).shared_from_this();
+        TranslatedExpression expr = CallUnsafeIntrinsic(
+            methodName, {left.Expression(), right.Expression()}, *boolType, inst);
+        if (negate)
+        {
+            auto* unary = new Syntax::UnaryOperatorExpression(
+                expr.Expression(), Syntax::UnaryOperatorType::Not);
+            expr = WithRR(WithoutILInstruction(*unary),
+                          std::make_shared<Sem::ResolveResult>(boolType));
+        }
+        return expr;
+    }
+    if (IL::IsEqualityOrInequality(comp->Kind))
+    {
+        bool negateOutput = false;
+        TranslatedExpression result = TranslateCeq(*comp, negateOutput);
+        if (negateOutput)
+            return WithILInstruction(LogicNot(result), inst);
+        else
+            return result;
+    }
+    else
+    {
+        return TranslateComp(*comp);
+    }
+}
+
+// The C# `TranslatedExpression AdjustConstantExpressionToType(TranslatedExpression
+// expr, IType typeHint)` (ExpressionBuilder.cs line 3861): re-render the expression
+// when AdjustConstantToType re-typed the resolve result (a new node over the new
+// resolve result carrying the ORIGINAL expression's IL annotations), else keep the
+// original.
+TranslatedExpression ExpressionBuilder::AdjustConstantExpressionToType(
+    TranslatedExpression expr, TS::IType& typeHint) const
+{
+    std::shared_ptr<Sem::ResolveResult> newRR =
+        AdjustConstantToType(std::shared_ptr<Sem::ResolveResult>(
+                                 SharedResolveResultAnnotation(*expr.Expression())),
+                             typeHint);
+    if (newRR.get() == SharedResolveResultAnnotation(*expr.Expression()).get())
+    {
+        return expr;
+    }
+    else
+    {
+        return WithILInstruction(ConvertConstantValue(std::move(newRR), true),
+                                 expr.ILInstructions());
+    }
+}
+
+// The C# `TranslatedExpression TryUniteEqualityOperandType(TranslatedExpression
+// left, TranslatedExpression right)` (ExpressionBuilder.cs line 1098): the enum-flag
+// check special case renders the 0 constant as the int32 literal (not the enum
+// member), else the plain constant adjustment to the right operand's type.
+TranslatedExpression ExpressionBuilder::TryUniteEqualityOperandType(
+    TranslatedExpression left, TranslatedExpression right) const
+{
+    std::shared_ptr<Sem::ResolveResult> leftRR =
+        SharedResolveResultAnnotation(*left.Expression());
+    // Special case for enum flag check "(enum & EnumType.SomeValue) == 0"
+    // so that the const 0 value is printed as 0 integer and not as enum type,
+    // e.g. EnumType.None
+    if (leftRR != nullptr && leftRR->IsCompileTimeConstant()
+        && TS::IsCSharpPrimitiveIntegerType(&leftRR->Type())
+        && leftRR->ConstantValue().has_value()
+        && leftRR->ConstantValue().type() == typeid(std::int32_t)
+        && std::any_cast<std::int32_t>(leftRR->ConstantValue()) == 0
+        && TS::GetUnderlyingType(right.Type()).Kind() == TypeKind::Enum)
+    {
+        auto* binaryExpr = dynamic_cast<Syntax::BinaryOperatorExpression*>(right.Expression());
+        if (binaryExpr != nullptr
+            && binaryExpr->Operator() == Syntax::BinaryOperatorType::BitwiseAnd)
+        {
+            return AdjustConstantExpressionToType(
+                std::move(left),
+                const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Int32)));
+        }
+    }
+    return AdjustConstantExpressionToType(std::move(left),
+                                          const_cast<TS::IType&>(right.Type()));
+}
+
+// The C# `bool IsSpecialCasedReferenceComparisonWithNull(TranslatedExpression lhs,
+// TranslatedExpression rhs)` (ExpressionBuilder.cs line 1111): when comparing a
+// string/delegate with null, the C# compiler generates a reference comparison.
+bool ExpressionBuilder::IsSpecialCasedReferenceComparisonWithNull(
+    TranslatedExpression lhs, TranslatedExpression rhs) const
+{
+    if (lhs.Type().Kind() == TypeKind::Null)
+        std::swap(lhs, rhs);
+    const TS::ITypeDefinition* lhsDefinition = lhs.Type().GetDefinition();
+    return rhs.Type().Kind() == TypeKind::Null
+           && (lhs.Type().Kind() == TypeKind::Delegate
+               || TS::IsKnownType(lhs.Type(), KnownTypeCode::String))
+           && lhsDefinition != decompilationContext->CurrentTypeDefinition();
+}
+
+// The C# `ExpressionWithResolveResult CreateBuiltinBinaryOperator(TranslatedExpression
+// left, BinaryOperatorType type, TranslatedExpression right, bool checkForOverflow =
+// false)` (ExpressionBuilder.cs line 1117): the BinaryOperatorExpression over a fresh
+// OperatorResolveResult with the Linq node type of the operator.
+ExpressionWithResolveResult ExpressionBuilder::CreateBuiltinBinaryOperator(
+    TranslatedExpression left, Syntax::BinaryOperatorType type, TranslatedExpression right,
+    bool checkForOverflow) const
+{
+    auto* binary = new Syntax::BinaryOperatorExpression(left.Expression(), type,
+                                                        right.Expression());
+    return WithRR(
+        *binary,
+        std::make_shared<Sem::OperatorResolveResult>(
+            const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Boolean))
+                .shared_from_this(),
+            Syntax::BinaryOperatorExpression::GetLinqNodeType(type, checkForOverflow),
+            std::vector<std::shared_ptr<Sem::ResolveResult>>{
+                SharedResolveResultAnnotation(*left.Expression()),
+                SharedResolveResultAnnotation(*right.Expression())}));
+}
+
+// The C# `TranslatedExpression TranslateCeq(Comp inst, out bool negateOutput)`
+// (ExpressionBuilder.cs lines 947-1107): the equality/inequality comparison.
+TranslatedExpression ExpressionBuilder::TranslateCeq(IL::Comp& inst, bool& negateOutput)
+{
+    // Translate '(e as T) == null' to '!(e is T)'.
+    // This is necessary for correctness when T is a value type.
+    if (inst.Left->Op == IL::OpCode::IsInst && inst.Right->Op == IL::OpCode::LdNull)
+    {
+        negateOutput = inst.Kind == IL::ComparisonKind::Equality;
+        return IsType(*static_cast<IL::IsInst*>(inst.Left.get()));
+    }
+    else if (inst.Right->Op == IL::OpCode::IsInst && inst.Left->Op == IL::OpCode::LdNull)
+    {
+        negateOutput = inst.Kind == IL::ComparisonKind::Equality;
+        return IsType(*static_cast<IL::IsInst*>(inst.Right.get()));
+    }
+
+    TranslatedExpression left = Translate(inst.Left.get());
+    TranslatedExpression right = Translate(inst.Right.get());
+
+    // Remove redundant bool comparisons
+    if (TS::IsKnownType(left.Type(), KnownTypeCode::Boolean))
+    {
+        if (MatchLdcI4(inst.Right.get(), 0))
+        {
+            // 'b == 0' => '!b'
+            // 'b != 0' => 'b'
+            negateOutput = inst.Kind == IL::ComparisonKind::Equality;
+            return left;
+        }
+        if (MatchLdcI4(inst.Right.get(), 1))
+        {
+            // 'b == 1' => 'b'
+            // 'b != 1' => '!b'
+            negateOutput = inst.Kind == IL::ComparisonKind::Inequality;
+            return left;
+        }
+    }
+    else if (TS::IsKnownType(right.Type(), KnownTypeCode::Boolean))
+    {
+        if (MatchLdcI4(inst.Left.get(), 0))
+        {
+            // '0 == b' => '!b'
+            // '0 != b' => 'b'
+            negateOutput = inst.Kind == IL::ComparisonKind::Equality;
+            return right;
+        }
+        if (MatchLdcI4(inst.Left.get(), 1))
+        {
+            // '1 == b' => 'b'
+            // '1 != b' => '!b'
+            negateOutput = inst.Kind == IL::ComparisonKind::Inequality;
+            return right;
+        }
+    }
+    // Handle comparisons between unsafe pointers and null:
+    if (left.Type().Kind() == TypeKind::Pointer && IsZeroLdc(inst.Right.get()))
+    {
+        negateOutput = false;
+        auto nullRR = std::make_shared<Sem::ConstantResolveResult>(
+            NullType(), std::any{});
+        auto* nullExpr = new Syntax::NullReferenceExpression();
+        right = WithRR(WithILInstruction(*nullExpr, inst.Right.get()), nullRR);
+        return WithILInstruction(CreateBuiltinBinaryOperator(
+                                     left, ToBinaryOperatorType(inst.Kind), right),
+                                 &inst);
+    }
+    else if (right.Type().Kind() == TypeKind::Pointer && IsZeroLdc(inst.Left.get()))
+    {
+        negateOutput = false;
+        auto nullRR = std::make_shared<Sem::ConstantResolveResult>(
+            NullType(), std::any{});
+        auto* nullExpr = new Syntax::NullReferenceExpression();
+        left = WithRR(WithILInstruction(*nullExpr, inst.Left.get()), nullRR);
+        return WithILInstruction(CreateBuiltinBinaryOperator(
+                                     left, ToBinaryOperatorType(inst.Kind), right),
+                                 &inst);
+    }
+
+    // Special case comparisons with enum and char literals
+    left = TryUniteEqualityOperandType(std::move(left), right);
+    right = TryUniteEqualityOperandType(std::move(right), left);
+
+    if (IsSpecialCasedReferenceComparisonWithNull(left, right))
+    {
+        // When comparing a string/delegate with null, the C# compiler generates a
+        // reference comparison.
+        negateOutput = false;
+        return WithILInstruction(CreateBuiltinBinaryOperator(
+                                     left, ToBinaryOperatorType(inst.Kind), right),
+                                 &inst);
+    }
+
+    auto op = ToBinaryOperatorType(inst.Kind);
+    auto opResult = resolver->ResolveBinaryOperator(
+        op, SharedResolveResultAnnotation(*left.Expression()),
+        SharedResolveResultAnnotation(*right.Expression()));
+    auto* rr = dynamic_cast<Sem::OperatorResolveResult*>(opResult.get());
+    if (rr == nullptr || rr->IsError() || rr->UserDefinedOperatorMethod() != nullptr
+        || TS::GetStackType(TS::GetUnderlyingType(rr->Operands()[0]->Type()))
+               != inst.InputType
+        || !TS::IsKnownType(rr->Type(), KnownTypeCode::Boolean))
+    {
+        TS::ITypePtr targetType;
+        if (inst.InputType == IL::StackType::O)
+        {
+            targetType = const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Object))
+                             .shared_from_this();
+        }
+        else
+        {
+            const TS::IType& leftUType = TS::GetUnderlyingType(left.Type());
+            const TS::IType& rightUType = TS::GetUnderlyingType(right.Type());
+            if (TS::GetStackType(leftUType) == inst.InputType
+                && !TS::IsSmallIntegerType(&leftUType))
+            {
+                targetType = const_cast<TS::IType&>(leftUType).shared_from_this();
+            }
+            else if (TS::GetStackType(rightUType) == inst.InputType
+                     && !TS::IsSmallIntegerType(&rightUType))
+            {
+                targetType = const_cast<TS::IType&>(rightUType).shared_from_this();
+            }
+            else
+            {
+                targetType = FindType(inst.InputType, TS::GetSign(&leftUType));
+            }
+        }
+        if (inst.IsLifted())
+        {
+            targetType = TS::Create(*compilation, *targetType);
+        }
+        if (targetType->Equals(left.Type()))
+        {
+            right = right.ConvertTo(*targetType, *this);
+        }
+        else
+        {
+            left = left.ConvertTo(*targetType, *this);
+        }
+        opResult = resolver->ResolveBinaryOperator(
+            op, SharedResolveResultAnnotation(*left.Expression()),
+            SharedResolveResultAnnotation(*right.Expression()));
+        rr = dynamic_cast<Sem::OperatorResolveResult*>(opResult.get());
+        if (rr == nullptr || rr->IsError() || rr->UserDefinedOperatorMethod() != nullptr
+            || TS::GetStackType(TS::GetUnderlyingType(rr->Operands()[0]->Type()))
+                   != inst.InputType
+            || !TS::IsKnownType(rr->Type(), KnownTypeCode::Boolean))
+        {
+            // If converting one input wasn't sufficient, convert both:
+            left = left.ConvertTo(*targetType, *this);
+            right = right.ConvertTo(*targetType, *this);
+            rr = new Sem::OperatorResolveResult(
+                const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Boolean))
+                    .shared_from_this(),
+                Syntax::BinaryOperatorExpression::GetLinqNodeType(op, false),
+                std::vector<std::shared_ptr<Sem::ResolveResult>>{
+                    SharedResolveResultAnnotation(*left.Expression()),
+                    SharedResolveResultAnnotation(*right.Expression())});
+            opResult.reset(rr);
+        }
+    }
+    negateOutput = false;
+    auto* binary = new Syntax::BinaryOperatorExpression(left.Expression(), op,
+                                                        right.Expression());
+    return WithILInstruction(WithRR(*binary, opResult), &inst);
+}
+
+// The C# `TranslatedExpression TranslateComp(Comp inst)` (ExpressionBuilder.cs lines
+// 1122-1187): handle the Comp instruction for operators other than
+// equality/inequality.
+TranslatedExpression ExpressionBuilder::TranslateComp(IL::Comp& inst)
+{
+    auto op = ToBinaryOperatorType(inst.Kind);
+    TranslatedExpression left = Translate(inst.Left.get());
+    TranslatedExpression right = Translate(inst.Right.get());
+
+    if (left.Type().Kind() == TypeKind::Pointer
+        && right.Type().Kind() == TypeKind::Pointer)
+    {
+        return WithILInstruction(CreateBuiltinBinaryOperator(left, op, right), &inst);
+    }
+
+    left = PrepareArithmeticArgument(std::move(left), inst.InputType, inst.Sign,
+                                     inst.IsLifted());
+    right = PrepareArithmeticArgument(std::move(right), inst.InputType, inst.Sign,
+                                      inst.IsLifted());
+
+    // Special case comparisons with enum and char literals
+    left = AdjustConstantExpressionToType(std::move(left),
+                                          const_cast<TS::IType&>(right.Type()));
+    right = AdjustConstantExpressionToType(std::move(right),
+                                           const_cast<TS::IType&>(left.Type()));
+
+    // attempt comparison without any additional casts
+    auto opResult = resolver->ResolveBinaryOperator(
+        op, SharedResolveResultAnnotation(*left.Expression()),
+        SharedResolveResultAnnotation(*right.Expression()));
+    auto* rr = dynamic_cast<Sem::OperatorResolveResult*>(opResult.get());
+    if (rr != nullptr && !rr->IsError())
+    {
+        const TS::IType& compUType =
+            TS::GetUnderlyingType(rr->Operands()[0]->Type());
+        if (TS::GetSign(&compUType) == inst.Sign
+            && TS::GetStackType(compUType) == inst.InputType)
+        {
+            auto* binary = new Syntax::BinaryOperatorExpression(
+                left.Expression(), op, right.Expression());
+            return WithILInstruction(WithRR(*binary, opResult), &inst);
+        }
+    }
+
+    if (IsIntegerType(inst.InputType))
+    {
+        // Ensure the inputs have the correct sign:
+        TS::ITypePtr inputType = FindArithmeticType(inst.InputType, inst.Sign);
+        if (inst.IsLifted())
+        {
+            inputType = TS::Create(*compilation, *inputType);
+        }
+        left = left.ConvertTo(*inputType, *this);
+        right = right.ConvertTo(*inputType, *this);
+    }
+    else if (inst.InputType == IL::StackType::O)
+    {
+        // Unsafe.As<object, UIntPtr>(ref left) op Unsafe.As<object, UIntPtr>(ref right)
+        // TTo Unsafe.As<TFrom, TTo>(ref TFrom source)
+        TS::ITypePtr integerType =
+            inst.Sign == Sign::Signed
+                ? const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::IntPtr))
+                      .shared_from_this()
+                : const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::UIntPtr))
+                      .shared_from_this();
+        // The C# local function `WrapInUnsafeAs(TranslatedExpression expr, ILInstruction
+        // inst)` (lines 1171-1176), modeled as a lambda capturing `this` and the
+        // integer type (the C# closure over `integerType`).
+        auto wrapInUnsafeAs = [&](TranslatedExpression expr,
+                                  IL::ILInstruction* innerInst) -> TranslatedExpression {
+            TS::ITypePtr type = const_cast<TS::IType&>(expr.Type()).shared_from_this();
+            expr = WrapInRef(*expr.Expression(), *type);
+            return CallUnsafeIntrinsic("As", {expr.Expression()}, *integerType, innerInst,
+                                       std::vector<TS::ITypePtr>{type, integerType});
+        };
+        left = wrapInUnsafeAs(std::move(left), inst.Left.get());
+        right = wrapInUnsafeAs(std::move(right), inst.Right.get());
+    }
+    auto* binary = new Syntax::BinaryOperatorExpression(left.Expression(), op,
+                                                        right.Expression());
+    return WithILInstruction(
+        WithRR(
+            *binary,
+            std::make_shared<Sem::OperatorResolveResult>(
+                const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Boolean))
+                    .shared_from_this(),
+                Syntax::BinaryOperatorExpression::GetLinqNodeType(op, false),
+                std::vector<std::shared_ptr<Sem::ResolveResult>>{
+                    SharedResolveResultAnnotation(*left.Expression()),
+                    SharedResolveResultAnnotation(*right.Expression())})),
+        &inst);
 }
 
 // ---------------------------------------------------------------------------
@@ -1526,7 +2068,7 @@ TranslatedExpression ExpressionBuilder::PrepareArithmeticArgument(TranslatedExpr
         isLifted = false; // don't cast to nullable if this input wasn't already nullable
     }
     const TS::IType* argUType =
-        isLifted ? GetEnumUnderlyingType(&arg.Type()) : &arg.Type();
+        isLifted ? &const_cast<TS::IType&>(TS::GetUnderlyingType(arg.Type())) : &arg.Type();
     if (IsIntegerType(argStackType) && GetSize(argStackType) < GetSize(argUType))
     {
         // If the argument is oversized (needs truncation to match stack size of its
@@ -1762,7 +2304,7 @@ ExpressionBuilder::GetUnaryOperatorTypeFromMetadataName(const std::string& name,
 
 bool ExpressionBuilder::IsCompatibleWithSign(const TS::IType& type, Sign sign)
 {
-    return sign == Sign::None || GetSign(GetEnumUnderlyingType(&type)) == sign;
+    return sign == Sign::None || GetSign(&TS::GetUnderlyingType(type)) == sign;
 }
 
 bool ExpressionBuilder::BinaryOperatorMightCheckForOverflow(Syntax::BinaryOperatorType op)

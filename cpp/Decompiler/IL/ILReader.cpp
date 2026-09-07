@@ -687,19 +687,27 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
         IL_BIN(Shl, ShiftLeft, None, false) IL_BIN(Shr, ShiftRight, Signed, false) IL_BIN(Shr_un, ShiftRight, Unsigned, false)
 #undef IL_BIN
 
-#define IL_CMP(opc, kind, uns) \
+#define IL_CMP(opc, kind, sign) \
     case ILOpCode::opc: { \
         auto r = s.Pop(); auto l = s.Pop(); \
         if (!l || !r) return DecodeOutcome::Bail; \
         if (!s.Push(std::make_unique<Comp>(std::move(l), std::move(r), \
-            ComparisonKind::kind, uns))) return DecodeOutcome::Bail; \
+            ComparisonKind::kind, Sign::sign))) return DecodeOutcome::Bail; \
         break; \
     }
-        IL_CMP(Ceq, Equality, false)
-        IL_CMP(Cgt, GreaterThan, false)
-        IL_CMP(Cgt_un, GreaterThan, true)
-        IL_CMP(Clt, LessThan, false)
-        IL_CMP(Clt_un, LessThan, true)
+        // The static sign per opcode (the C# Comparison helper derives it
+        // type-dependently: floats and equality/inequality over same-type
+        // operands are Sign.None, integer non-equality Signed/Unsigned by 'un').
+        // The port's static mapping is exact for every opcode it covers; the
+        // residual type-dependent gap (a relational .un over FLOAT operands is
+        // Sign.None in the C#) is documented here and in the Comp.Sign field
+        // note -- the reader's operand-normalization pass (the explicit convs
+        // above) never mixes float and integer stack types in one comparison.
+        IL_CMP(Ceq, Equality, None)
+        IL_CMP(Cgt, GreaterThan, Signed)
+        IL_CMP(Cgt_un, GreaterThan, Unsigned)
+        IL_CMP(Clt, LessThan, Signed)
+        IL_CMP(Clt_un, LessThan, Unsigned)
 #undef IL_CMP
 
         // ---- neg/not (unary) -> emit via BinaryNumeric with zero, or a Conv ----
@@ -979,7 +987,8 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
                 // produces I4 and is left as-is.
                 if (cond->ResultType() == StackType::O) {
                     condition = std::make_unique<Comp>(std::move(cond),
-                        std::make_unique<LdNull>(), ComparisonKind::Inequality, false);
+                        std::make_unique<LdNull>(), ComparisonKind::Inequality,
+                        Sign::None);
                 } else {
                     condition = std::move(cond);
                 }
@@ -989,7 +998,7 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
                     ? std::unique_ptr<ILInstruction>(std::make_unique<LdNull>())
                     : std::unique_ptr<ILInstruction>(std::make_unique<LdcI4>(0));
                 condition = std::make_unique<Comp>(std::move(cond), std::move(zero),
-                                                   ComparisonKind::Equality, false);
+                                                   ComparisonKind::Equality, Sign::None);
             }
             FlushExpressionStack(s, block);
             MergeStackIntoTarget(s, target, s.currentStack);
@@ -999,13 +1008,13 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
                                                            std::make_unique<Branch>(target)));
             return DecodeOutcome::BranchInstr;
         }
-#define IL_CBR(opc, kind, uns, isShort) \
+#define IL_CBR(opc, kind, sign, isShort) \
     case ILOpCode::opc: { \
         std::uint32_t target = 0; \
         if (!ReadBranchTarget(b, size, pos, isShort, start, target)) return DecodeOutcome::Bail; \
         auto r = s.Pop(); auto l = s.Pop(); \
         if (!l || !r) return DecodeOutcome::Bail; \
-        auto comp = std::make_unique<Comp>(std::move(l), std::move(r), ComparisonKind::kind, uns); \
+        auto comp = std::make_unique<Comp>(std::move(l), std::move(r), ComparisonKind::kind, Sign::sign); \
         FlushExpressionStack(s, block); \
         MergeStackIntoTarget(s, target, s.currentStack); \
         if (pos < size) \
@@ -1014,16 +1023,20 @@ DecodeOutcome DecodeOne(const MetadataFile& file, ReaderState& s, Block* block,
             std::make_unique<Branch>(target))); \
         return DecodeOutcome::BranchInstr; \
     }
-        IL_CBR(Beq, Equality, false, false) IL_CBR(Beq_s, Equality, false, true)
-        IL_CBR(Bge, GreaterThanOrEqual, false, false) IL_CBR(Bge_s, GreaterThanOrEqual, false, true)
-        IL_CBR(Bgt, GreaterThan, false, false) IL_CBR(Bgt_s, GreaterThan, false, true)
-        IL_CBR(Ble, LessThanOrEqual, false, false) IL_CBR(Ble_s, LessThanOrEqual, false, true)
-        IL_CBR(Blt, LessThan, false, false) IL_CBR(Blt_s, LessThan, false, true)
-        IL_CBR(Bne_un, Inequality, true, false) IL_CBR(Bne_un_s, Inequality, true, true)
-        IL_CBR(Bge_un, GreaterThanOrEqual, true, false) IL_CBR(Bge_un_s, GreaterThanOrEqual, true, true)
-        IL_CBR(Bgt_un, GreaterThan, true, false) IL_CBR(Bgt_un_s, GreaterThan, true, true)
-        IL_CBR(Ble_un, LessThanOrEqual, true, false) IL_CBR(Ble_un_s, LessThanOrEqual, true, true)
-        IL_CBR(Blt_un, LessThan, true, false) IL_CBR(Blt_un_s, LessThan, true, true)
+        // The static sign per opcode (see the IL_CMP note above): the
+        // equality/inequality branch forms are Sign.None (the C# Table-4 logic
+        // routes them through the same-type arm), the relational forms
+        // Signed/Unsigned by 'un'.
+        IL_CBR(Beq, Equality, None, false) IL_CBR(Beq_s, Equality, None, true)
+        IL_CBR(Bge, GreaterThanOrEqual, Signed, false) IL_CBR(Bge_s, GreaterThanOrEqual, Signed, true)
+        IL_CBR(Bgt, GreaterThan, Signed, false) IL_CBR(Bgt_s, GreaterThan, Signed, true)
+        IL_CBR(Ble, LessThanOrEqual, Signed, false) IL_CBR(Ble_s, LessThanOrEqual, Signed, true)
+        IL_CBR(Blt, LessThan, Signed, false) IL_CBR(Blt_s, LessThan, Signed, true)
+        IL_CBR(Bne_un, Inequality, None, false) IL_CBR(Bne_un_s, Inequality, None, true)
+        IL_CBR(Bge_un, GreaterThanOrEqual, Unsigned, false) IL_CBR(Bge_un_s, GreaterThanOrEqual, Unsigned, true)
+        IL_CBR(Bgt_un, GreaterThan, Unsigned, false) IL_CBR(Bgt_un_s, GreaterThan, Unsigned, true)
+        IL_CBR(Ble_un, LessThanOrEqual, Unsigned, false) IL_CBR(Ble_un_s, LessThanOrEqual, Unsigned, true)
+        IL_CBR(Blt_un, LessThan, Unsigned, false) IL_CBR(Blt_un_s, LessThan, Unsigned, true)
 #undef IL_CBR
 
         case ILOpCode::Switch: {

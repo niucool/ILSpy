@@ -279,7 +279,7 @@ std::unique_ptr<ILInstruction> NegateCondition(std::unique_ptr<ILInstruction> co
             ? std::unique_ptr<ILInstruction>(std::make_unique<LdNull>())
             : std::unique_ptr<ILInstruction>(std::make_unique<LdcI4>(0));
         return std::make_unique<Comp>(std::move(cond), std::move(zero),
-                                      ComparisonKind::Equality);
+                                      ComparisonKind::Equality, TypeSystem::Sign::None);
     }
     // Otherwise wrap as logic.not: comp(x == 0) for primitives, comp(x == null)
     // for object-typed conditions (a bare reference used as a boolean).
@@ -287,7 +287,7 @@ std::unique_ptr<ILInstruction> NegateCondition(std::unique_ptr<ILInstruction> co
         ? std::unique_ptr<ILInstruction>(std::make_unique<LdNull>())
         : std::unique_ptr<ILInstruction>(std::make_unique<LdcI4>(0));
     return std::make_unique<Comp>(std::move(cond), std::move(zero),
-                                    ComparisonKind::Equality);
+                                    ComparisonKind::Equality, TypeSystem::Sign::None);
 }
 
 // Whether `arm` is an empty if-arm: a Nop, or a Block with no instructions

@@ -540,7 +540,7 @@ NullableLiftingTransform::DoLiftResult NullableLiftingTransform::DoLift(
                     r.Lifted = std::make_unique<Comp>(
                         std::move(argR.Lifted), std::move(rightClone),
                         comp->Kind, ComparisonLiftingKind::ThreeValuedLogic,
-                        comp->InputType, comp->Unsigned);
+                        comp->InputType, comp->Sign);
                     return r;
                 }
                 return failure;
@@ -631,7 +631,7 @@ std::unique_ptr<ILInstruction> CompOrDecimal::MakeLifted(
         return std::make_unique<Comp>(
             std::move(left), std::move(right),
             newComparisonKind, ComparisonLiftingKind::CSharp,
-            comp->InputType, comp->Unsigned);
+            comp->InputType, comp->Sign);
     }
     return nullptr;
 }

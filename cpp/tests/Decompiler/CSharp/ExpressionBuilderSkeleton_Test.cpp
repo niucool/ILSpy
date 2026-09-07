@@ -92,6 +92,7 @@
 #include "Decompiler/TypeSystem/SimpleCompilation.hpp"
 #include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/TypeSystem/NullableType.hpp"
+#include "Decompiler/TypeSystem/LookupStubs.hpp"
 #include "Decompiler/TypeSystem/TypeUtils.hpp"
 
 #include <gtest/gtest.h>
@@ -113,6 +114,9 @@ namespace TS = ::ILSpy::Decompiler::TypeSystem;
 namespace Syntax = ::ILSpy::Decompiler::CSharp::Syntax;
 namespace Sem = ::ILSpy::Decompiler::Semantics;
 namespace IL = ::ILSpy::Decompiler::IL;
+// The TypeSystem test stubs (the LookupTypeDefinition enum fixture shape) -- the
+// BamlDecompiler suites' TestSupport convention.
+namespace TestSupport = ::ILSpy::Decompiler::TypeSystem::TestSupport;
 
 // The default settings bag (the C# `new DecompilerSettings()`).
 DecompilerSettings DefaultSettings()
@@ -2725,6 +2729,464 @@ TEST(ExpressionBuilderStackAllocTest, LocAllocCloneCopiesTypeAndArgument)
     auto* allocCloneTyped = dynamic_cast<IL::LocAlloc*>(allocClone.get());
     ASSERT_TRUE(allocCloneTyped != nullptr);
     EXPECT_EQ(allocCloneTyped->Op, IL::OpCode::LocAlloc);
+}
+
+// The VisitComp comparison family (ExpressionBuilder.cs lines 871-1187 plus the
+// shared AdjustConstantExpressionToType/CreateBuiltinBinaryOperator helpers at
+// 3861-1120). The renders are pinned against the real ilspycmd 11.0 --csharp
+// output over a csc-compiled comparison fixture (C:/temp-probe/CmpTest):
+// a < b, x == false -> !x, s == null, p == null, x == y over int?, the
+// three-valued-logic lifted-not arm and the Unsafe.AreSame ref intrinsics.
+
+TEST(ExpressionBuilderCompTest, RelationalRendersBinaryOperator)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto a = MakeLocal(fixture, TS::KnownTypeCode::Int32, "a");
+    auto b = MakeLocal(fixture, TS::KnownTypeCode::Int32, "b");
+    IL::Comp comp(std::make_unique<IL::LdLoc>(a), std::make_unique<IL::LdLoc>(b),
+                  IL::ComparisonKind::LessThan, TS::Sign::Signed);
+    auto expr = builder.Translate(&comp);
+    auto* bin = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(bin != nullptr);
+    EXPECT_EQ(bin->Operator(), Syntax::BinaryOperatorType::LessThan);
+    EXPECT_EQ(bin->ToString(), "a < b");
+    ASSERT_EQ(expr.ILInstructions().size(), std::size_t{1});
+    EXPECT_EQ(expr.ILInstructions()[0], &comp);
+}
+
+TEST(ExpressionBuilderCompTest, EqualityRendersBinaryOperator)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto a = MakeLocal(fixture, TS::KnownTypeCode::Int32, "a");
+    auto b = MakeLocal(fixture, TS::KnownTypeCode::Int32, "b");
+    IL::Comp comp(std::make_unique<IL::LdLoc>(a), std::make_unique<IL::LdLoc>(b),
+                  IL::ComparisonKind::Equality, TS::Sign::None);
+    auto expr = builder.Translate(&comp);
+    auto* bin = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(bin != nullptr);
+    EXPECT_EQ(bin->Operator(), Syntax::BinaryOperatorType::Equality);
+    EXPECT_EQ(bin->ToString(), "a == b");
+}
+
+TEST(ExpressionBuilderCompTest, BoolEqualsZeroRendersNot)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto x = MakeLocal(fixture, TS::KnownTypeCode::Boolean, "x");
+    IL::Comp comp(std::make_unique<IL::LdLoc>(x), std::make_unique<IL::LdcI4>(0),
+                  IL::ComparisonKind::Equality, TS::Sign::None);
+    auto expr = builder.Translate(&comp);
+    // 'x == false' renders '!x': the redundant-bool-comparison arm returns the
+    // translated bool operand with negateOutput=true.
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::Not);
+    EXPECT_EQ(unary->ToString(), "!x");
+    ASSERT_EQ(expr.ILInstructions().size(), std::size_t{1});
+    EXPECT_EQ(expr.ILInstructions()[0], &comp);
+}
+
+TEST(ExpressionBuilderCompTest, BoolEqualsOneRendersIdentity)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto x = MakeLocal(fixture, TS::KnownTypeCode::Boolean, "x");
+    IL::Comp comp(std::make_unique<IL::LdLoc>(x), std::make_unique<IL::LdcI4>(1),
+                  IL::ComparisonKind::Equality, TS::Sign::None);
+    auto expr = builder.Translate(&comp);
+    // 'x == true' renders 'x': the identity arm returns the operand unmodified.
+    auto* ident = dynamic_cast<Syntax::IdentifierExpression*>(expr.Expression());
+    ASSERT_TRUE(ident != nullptr);
+    EXPECT_EQ(ident->Identifier(), "x");
+    // The identity arm returns the translated operand directly (the C# `return
+    // left` before the WithILInstruction(inst) wrap), so the IL annotation is
+    // the LdLoc's.
+    ASSERT_EQ(expr.ILInstructions().size(), std::size_t{1});
+    EXPECT_EQ(expr.ILInstructions()[0]->Op, IL::OpCode::LdLoc);
+}
+
+TEST(ExpressionBuilderCompTest, BoolNotEqualsOneRendersNot)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto x = MakeLocal(fixture, TS::KnownTypeCode::Boolean, "x");
+    IL::Comp comp(std::make_unique<IL::LdLoc>(x), std::make_unique<IL::LdcI4>(1),
+                  IL::ComparisonKind::Inequality, TS::Sign::None);
+    auto expr = builder.Translate(&comp);
+    // 'x != true' renders '!x' (the negate-output arm).
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->ToString(), "!x");
+}
+
+TEST(ExpressionBuilderCompTest, BoolConstantLeftOperands)
+{
+    BuilderFixture fixture;
+    {
+        auto builder = fixture.MakeBuilder();
+        auto b = MakeLocal(fixture, TS::KnownTypeCode::Boolean, "b");
+        IL::Comp comp(std::make_unique<IL::LdcI4>(0), std::make_unique<IL::LdLoc>(b),
+                      IL::ComparisonKind::Equality, TS::Sign::None);
+        auto expr = builder.Translate(&comp);
+        // '0 == b' renders '!b' (the right-operand bool arm).
+        auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+        ASSERT_TRUE(unary != nullptr);
+        EXPECT_EQ(unary->ToString(), "!b");
+    }
+    {
+        auto builder = fixture.MakeBuilder();
+        auto b = MakeLocal(fixture, TS::KnownTypeCode::Boolean, "b");
+        IL::Comp comp(std::make_unique<IL::LdcI4>(1), std::make_unique<IL::LdLoc>(b),
+                      IL::ComparisonKind::Equality, TS::Sign::None);
+        auto expr = builder.Translate(&comp);
+        // '1 == b' renders 'b'.
+        auto* ident = dynamic_cast<Syntax::IdentifierExpression*>(expr.Expression());
+        ASSERT_TRUE(ident != nullptr);
+        EXPECT_EQ(ident->Identifier(), "b");
+    }
+}
+
+TEST(ExpressionBuilderCompTest, IntZeroConstantsRenderPlain)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto a = MakeLocal(fixture, TS::KnownTypeCode::Int32, "a");
+    {
+        IL::Comp comp(std::make_unique<IL::LdLoc>(a), std::make_unique<IL::LdcI4>(0),
+                      IL::ComparisonKind::Equality, TS::Sign::None);
+        auto expr = builder.Translate(&comp);
+        auto* bin = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+        ASSERT_TRUE(bin != nullptr);
+        EXPECT_EQ(bin->ToString(), "a == 0");
+    }
+    {
+        IL::Comp comp(std::make_unique<IL::LdLoc>(a), std::make_unique<IL::LdcI4>(0),
+                      IL::ComparisonKind::Inequality, TS::Sign::None);
+        auto expr = builder.Translate(&comp);
+        auto* bin = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+        ASSERT_TRUE(bin != nullptr);
+        EXPECT_EQ(bin->ToString(), "a != 0");
+    }
+}
+
+TEST(ExpressionBuilderCompTest, StringNullRendersReferenceComparison)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto s = MakeLocal(fixture, TS::KnownTypeCode::String, "s");
+    IL::Comp comp(std::make_unique<IL::LdLoc>(s), std::make_unique<IL::LdNull>(),
+                  IL::ComparisonKind::Equality, TS::Sign::None);
+    auto expr = builder.Translate(&comp);
+    // When comparing a string with null, the C# compiler generates a reference
+    // comparison -- the special case renders the builtin operator directly.
+    auto* bin = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(bin != nullptr);
+    EXPECT_EQ(bin->ToString(), "s == null");
+    ASSERT_EQ(expr.ILInstructions().size(), std::size_t{1});
+    EXPECT_EQ(expr.ILInstructions()[0], &comp);
+}
+
+TEST(ExpressionBuilderCompTest, PointerNullComparisonRendersNullLiteral)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto ptrType = std::make_shared<TS::PointerType>(intType);
+    auto p = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, ptrType);
+    p->Name = "p";
+    // The compiler shape for 'p == null': ldarg.0; ldc.i4.0; conv.u; ceq --
+    // the conv.u is the zero extension MatchLdcI unwraps.
+    IL::Comp comp(
+        std::make_unique<IL::LdLoc>(p),
+        std::make_unique<IL::Conv>(std::make_unique<IL::LdcI4>(0), IL::PrimitiveType::U,
+                                   false, TS::Sign::None),
+        IL::ComparisonKind::Equality, TS::Sign::None);
+    auto expr = builder.Translate(&comp);
+    auto* bin = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(bin != nullptr);
+    EXPECT_EQ(bin->ToString(), "p == null");
+}
+
+TEST(ExpressionBuilderCompTest, PointerIdentityRendersPlain)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto ptrType = std::make_shared<TS::PointerType>(intType);
+    auto p = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, ptrType);
+    p->Name = "p";
+    auto q = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, ptrType);
+    q->Name = "q";
+    IL::Comp comp(std::make_unique<IL::LdLoc>(p), std::make_unique<IL::LdLoc>(q),
+                  IL::ComparisonKind::Equality, TS::Sign::None);
+    auto expr = builder.Translate(&comp);
+    auto* bin = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(bin != nullptr);
+    EXPECT_EQ(bin->ToString(), "p == q");
+}
+
+TEST(ExpressionBuilderCompTest, LiftedCSharpEqualityOverNullableLocals)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto nullableInt = TS::Create(fixture.compilation, *intType);
+    auto x = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullableInt);
+    x->Name = "x";
+    auto y = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullableInt);
+    y->Name = "y";
+    // The nullable-lifting shape: comp(Equality, CSharp lift, InputType I4,
+    // Sign None) over the nullable-typed locals; the resolver resolves the lifted
+    // operator and the render stays 'x == y'.
+    IL::Comp comp(std::make_unique<IL::LdLoc>(x), std::make_unique<IL::LdLoc>(y),
+                  IL::ComparisonKind::Equality, IL::ComparisonLiftingKind::CSharp,
+                  IL::StackType::I4, TS::Sign::None);
+    auto expr = builder.Translate(&comp);
+    auto* bin = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(bin != nullptr);
+    EXPECT_EQ(bin->ToString(), "x == y");
+    auto* opRR = dynamic_cast<const Sem::OperatorResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(opRR != nullptr);
+    EXPECT_TRUE(opRR->IsLiftedOperator());
+}
+
+TEST(ExpressionBuilderCompTest, LiftedCSharpRelationalOverNullableLocals)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto nullableInt = TS::Create(fixture.compilation, *intType);
+    auto x = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullableInt);
+    x->Name = "x";
+    auto y = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullableInt);
+    y->Name = "y";
+    IL::Comp comp(std::make_unique<IL::LdLoc>(x), std::make_unique<IL::LdLoc>(y),
+                  IL::ComparisonKind::LessThan, IL::ComparisonLiftingKind::CSharp,
+                  IL::StackType::I4, TS::Sign::None);
+    auto expr = builder.Translate(&comp);
+    auto* bin = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(bin != nullptr);
+    EXPECT_EQ(bin->ToString(), "x < y");
+    // The resolve result is a Boolean-typed operator over the two operand
+    // resolve results (the render is pinned against the real ilspycmd N2
+    // render; the resolver's lifted-RELATIONAL shape is a resolver-side detail
+    // -- the lifted-equality sibling test pins the IsLiftedOperator flag).
+    auto* opRR = dynamic_cast<const Sem::OperatorResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(opRR != nullptr);
+    EXPECT_EQ(opRR->Type().ReflectionName(), "System.Boolean");
+}
+
+TEST(ExpressionBuilderCompTest, ThreeValuedLogicEqualityZeroRendersNot)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto boolType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Boolean).shared_from_this());
+    auto nullableBool = TS::Create(fixture.compilation, *boolType);
+    auto b = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullableBool);
+    b->Name = "b";
+    // The lifted logic.not arm: comp(Equality, ThreeValuedLogic lift, I4, None,
+    // ldloc b, ldc.i4 0) renders '!b' with the lifted Not operator resolve result.
+    IL::Comp comp(std::make_unique<IL::LdLoc>(b), std::make_unique<IL::LdcI4>(0),
+                  IL::ComparisonKind::Equality, IL::ComparisonLiftingKind::ThreeValuedLogic,
+                  IL::StackType::I4, TS::Sign::None);
+    auto expr = builder.Translate(&comp);
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(expr.Expression());
+    ASSERT_TRUE(unary != nullptr);
+    EXPECT_EQ(unary->ToString(), "!b");
+    auto* opRR = dynamic_cast<const Sem::OperatorResolveResult*>(expr.ResolveResult());
+    ASSERT_TRUE(opRR != nullptr);
+    EXPECT_EQ(opRR->OperatorType(), TS::ExpressionType::Not);
+    EXPECT_EQ(opRR->Type().ReflectionName(),
+              "System.Nullable`1[[System.Boolean]]");
+}
+
+TEST(ExpressionBuilderCompTest, ThreeValuedLogicRelationalRendersError)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto boolType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Boolean).shared_from_this());
+    auto nullableBool = TS::Create(fixture.compilation, *boolType);
+    auto b = std::make_shared<IL::ILVariable>(IL::VariableKind::Local, nullableBool);
+    b->Name = "b";
+    // Any non-equality three-valued-logic comparison is not expressible in C#:
+    // the error expression with the exact message.
+    IL::Comp comp(std::make_unique<IL::LdLoc>(b), std::make_unique<IL::LdcI4>(0),
+                  IL::ComparisonKind::LessThan, IL::ComparisonLiftingKind::ThreeValuedLogic,
+                  IL::StackType::I4, TS::Sign::None);
+    auto expr = builder.Translate(&comp);
+    auto* error = dynamic_cast<Syntax::ErrorExpression*>(expr.Expression());
+    ASSERT_TRUE(error != nullptr);
+    ASSERT_EQ(error->TrailingTrivia().size(), std::size_t{1});
+    auto* comment = dynamic_cast<Syntax::Comment*>(error->TrailingTrivia()[0]);
+    ASSERT_TRUE(comment != nullptr);
+    EXPECT_EQ(comment->Content(),
+              "Nullable comparisons with three-valued-logic not supported in C#");
+}
+
+// The Ref-arm drives assert STRUCTURE (the existing CallUnsafeIntrinsic convention --
+// the AsPointer test's member-name/target/arguments shape) because the port's
+// InvocationExpression::ToString renders with the " (" spacing while the real output
+// visitor writes none.
+namespace {
+// Drives a Ref-type comp over two int32 locals and asserts the intrinsic shape.
+void DriveRefComp(IL::ComparisonKind kind, const char* expectedMethod, bool negated)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto a = MakeLocal(fixture, TS::KnownTypeCode::Int32, "a");
+    auto b = MakeLocal(fixture, TS::KnownTypeCode::Int32, "b");
+    IL::Comp comp(std::make_unique<IL::LdLoca>(a), std::make_unique<IL::LdLoca>(b),
+                  kind, TS::Sign::None);
+    comp.InputType = IL::StackType::Ref;
+    auto expr = builder.Translate(&comp);
+    const Syntax::Expression* node = expr.Expression();
+    if (negated)
+    {
+        // The negate arm wraps WITHOUT carrying the IL instruction (the C#
+        // `.WithoutILInstruction()`), so the outer node has no IL annotations.
+        EXPECT_EQ(expr.ILInstructions().size(), std::size_t{0});
+        auto* unary = dynamic_cast<const Syntax::UnaryOperatorExpression*>(node);
+        ASSERT_TRUE(unary != nullptr);
+        EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::Not);
+        node = unary->Expression();
+    }
+    auto* invocation = dynamic_cast<const Syntax::InvocationExpression*>(node);
+    ASSERT_TRUE(invocation != nullptr);
+    auto* memberRef =
+        dynamic_cast<const Syntax::MemberReferenceExpression*>(invocation->Target());
+    ASSERT_TRUE(memberRef != nullptr);
+    EXPECT_EQ(memberRef->MemberName(), expectedMethod);
+    // The target is the Unsafe type reference.
+    EXPECT_TRUE(dynamic_cast<Syntax::TypeReferenceExpression*>(memberRef->Target()) != nullptr);
+    // Two ref-direction arguments over the two locals.
+    EXPECT_EQ(invocation->Arguments().Count(), 2);
+    auto* first = dynamic_cast<Syntax::DirectionExpression*>(invocation->Arguments().FirstOrNull());
+    ASSERT_TRUE(first != nullptr);
+    auto* second =
+        dynamic_cast<Syntax::DirectionExpression*>(invocation->Arguments().NodeAt(1));
+    ASSERT_TRUE(second != nullptr);
+    EXPECT_EQ(expr.Type().ReflectionName(), "System.Boolean");
+    EXPECT_TRUE(expr.ResolveResult()->IsError() == false);
+}
+} // namespace
+
+TEST(ExpressionBuilderCompTest, RefArmRendersAreSame)
+{
+    DriveRefComp(IL::ComparisonKind::Equality, "AreSame", false);
+}
+
+TEST(ExpressionBuilderCompTest, RefInequalityNegatesAreSame)
+{
+    DriveRefComp(IL::ComparisonKind::Inequality, "AreSame", true);
+}
+
+TEST(ExpressionBuilderCompTest, RefLessThanRendersIsAddressLessThan)
+{
+    DriveRefComp(IL::ComparisonKind::LessThan, "IsAddressLessThan", false);
+}
+
+TEST(ExpressionBuilderCompTest, RefGreaterThanOrEqualNegatesIsAddressLessThan)
+{
+    DriveRefComp(IL::ComparisonKind::GreaterThanOrEqual, "IsAddressLessThan", true);
+}
+
+TEST(ExpressionBuilderCompTest, RefGreaterThanRendersIsAddressGreaterThan)
+{
+    DriveRefComp(IL::ComparisonKind::GreaterThan, "IsAddressGreaterThan", false);
+}
+
+TEST(ExpressionBuilderCompTest, RefLessThanOrEqualNegatesIsAddressGreaterThan)
+{
+    DriveRefComp(IL::ComparisonKind::LessThanOrEqual, "IsAddressGreaterThan", true);
+}
+
+TEST(ExpressionBuilderCompTest, ToBinaryOperatorTypeMatrix)
+{
+    EXPECT_EQ(CSharp::ToBinaryOperatorType(IL::ComparisonKind::Equality),
+              Syntax::BinaryOperatorType::Equality);
+    EXPECT_EQ(CSharp::ToBinaryOperatorType(IL::ComparisonKind::Inequality),
+              Syntax::BinaryOperatorType::InEquality);
+    EXPECT_EQ(CSharp::ToBinaryOperatorType(IL::ComparisonKind::LessThan),
+              Syntax::BinaryOperatorType::LessThan);
+    EXPECT_EQ(CSharp::ToBinaryOperatorType(IL::ComparisonKind::LessThanOrEqual),
+              Syntax::BinaryOperatorType::LessThanOrEqual);
+    EXPECT_EQ(CSharp::ToBinaryOperatorType(IL::ComparisonKind::GreaterThan),
+              Syntax::BinaryOperatorType::GreaterThan);
+    EXPECT_EQ(CSharp::ToBinaryOperatorType(IL::ComparisonKind::GreaterThanOrEqual),
+              Syntax::BinaryOperatorType::GreaterThanOrEqual);
+    EXPECT_THROW(CSharp::ToBinaryOperatorType(static_cast<IL::ComparisonKind>(99)),
+                 std::out_of_range);
+}
+
+TEST(ExpressionBuilderCompTest, CompCloneCarriesSign)
+{
+    IL::Comp comp(std::make_unique<IL::LdLoc>(nullptr), std::make_unique<IL::LdLoc>(nullptr),
+                  IL::ComparisonKind::GreaterThan, TS::Sign::Unsigned);
+    EXPECT_TRUE(comp.Unsigned);
+    EXPECT_EQ(comp.Sign, TS::Sign::Unsigned);
+    EXPECT_EQ(comp.InputType, IL::StackType::Unknown);
+    auto clone = comp.Clone();
+    auto* compClone = dynamic_cast<IL::Comp*>(clone.get());
+    ASSERT_TRUE(compClone != nullptr);
+    EXPECT_EQ(compClone->Sign, TS::Sign::Unsigned);
+    EXPECT_TRUE(compClone->Unsigned);
+    // The equality shape carries Sign.None with the false Unsigned view.
+    IL::Comp eqComp(nullptr, nullptr, IL::ComparisonKind::Equality, TS::Sign::None);
+    EXPECT_FALSE(eqComp.Unsigned);
+    EXPECT_EQ(eqComp.Sign, TS::Sign::None);
+    // The bool ctor maps false to Signed (the reader's relational mapping).
+    IL::Comp relComp(nullptr, nullptr, IL::ComparisonKind::LessThan, false);
+    EXPECT_FALSE(relComp.Unsigned);
+    EXPECT_EQ(relComp.Sign, TS::Sign::Signed);
+}
+
+TEST(ExpressionBuilderCompTest, AdjustConstantToTypeNullableHintStaysUnchanged)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    auto nullableInt = TS::Create(fixture.compilation, *intType);
+    // The C# `NullableType.GetUnderlyingType(typeHint)` unwraps the Nullable<T>
+    // hint to T: an Int32 constant over a Nullable<Int32> hint compares equal
+    // after the unwrap and is returned unchanged.
+    auto rr = std::make_shared<Sem::ConstantResolveResult>(intType, 42);
+    auto adjusted = builder.AdjustConstantToType(rr, *nullableInt);
+    EXPECT_EQ(adjusted.get(), rr.get());
+    // The lifted form: a Nullable<Int32> constant over the same hint also stays.
+    auto liftedRR = std::make_shared<Sem::ConstantResolveResult>(nullableInt, 42);
+    auto liftedAdjusted = builder.AdjustConstantToType(liftedRR, *nullableInt);
+    EXPECT_EQ(liftedAdjusted.get(), liftedRR.get());
+}
+
+TEST(ExpressionBuilderCompTest, AdjustConstantToTypeEnumHintRetypesConstant)
+{
+    BuilderFixture fixture;
+    auto builder = fixture.MakeBuilder();
+    auto intType = std::const_pointer_cast<TS::IType>(
+        fixture.compilation.FindType(TS::KnownTypeCode::Int32).shared_from_this());
+    // A stub enum (the LookupTypeDefinition fixture shape): Kind Enum with the
+    // Int32 underlying type -- the resolver's enum cast arm folds the constant
+    // through the underlying type.
+    auto enumDef = std::make_shared<TestSupport::LookupTypeDefinition>(
+        "E", "Ns", TS::FullTypeName(TS::TopLevelTypeName("Ns", "E")),
+        TS::TypeKind::Enum, TS::Accessibility::Public, fixture.compilation,
+        &fixture.compilation.MainModule());
+    enumDef->SetEnumUnderlyingType(intType);
+    // The Int32 constant over the enum hint re-types to the enum (the value is
+    // in range so the checked cast folds).
+    auto rr = std::make_shared<Sem::ConstantResolveResult>(intType, 1);
+    auto adjusted = builder.AdjustConstantToType(rr, *enumDef);
+    EXPECT_TRUE(adjusted->IsCompileTimeConstant());
+    EXPECT_EQ(adjusted->Type().ReflectionName(), "Ns.E");
 }
 
 
