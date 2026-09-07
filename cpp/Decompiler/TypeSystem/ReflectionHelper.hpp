@@ -30,13 +30,16 @@
 // parser/resolver that turns a (possibly assembly-qualified, possibly nested/decorated)
 // `System.Reflection.Metadata` `TypeName` into an `IType` against an `ITypeResolveContext`, plus
 // the `ReadTypeParameterCount` scan helper the same `#region` declares (its `IdStringProvider`
-// consumer stays deferred with the Documentation tree). The remaining members
-// (`FindType(Type)`/`FindType(StackType, Sign)` -- the `System.Type`/`IL` stack-type inputs) are
-// deferred with their consumers.
+// consumer stays deferred with the Documentation tree). The remaining member
+// (`FindType(Type)` -- the `System.Type` input) is deferred with its consumer; the
+// `FindType(StackType, Sign)` overload is landed below (the ExpressionBuilder
+// arithmetic-type lookups consume it).
 
 #pragma once
 
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"  // KnownTypeCode (the GetTypeCode source domain)
+#include "Decompiler/IL/StackType.hpp"  // IL::StackType (the FindType(StackType, Sign) input)
+#include "Decompiler/TypeSystem/Sign.hpp"  // Sign (the FindType default)
 
 #include <cstdint>
 #include <memory>
@@ -101,6 +104,17 @@ TypeCode GetTypeCode(const IType& type);
 // parameter tables (`InitParameterArrays`) are built through this lookup. A NON-NULL
 // reference return (the `ICompilation::FindType` contract, mirrored by the delegation).
 const IType& FindType(const ICompilation& compilation, TypeCode typeCode);
+
+// The C# `public static IType FindType(this ICompilation compilation, StackType
+// stackType, Sign sign = Sign.None)` (ReflectionHelper.cs line 47) -- the IL stack-
+// type input the ExpressionBuilder's arithmetic-type lookups run through: Unknown
+// -> the SpecialType.UnknownType null object, Ref -> a ByReferenceType over
+// UnknownType, everything else the StackType's ToKnownTypeCode(sign) lookup
+// (TypeUtils.ToKnownTypeCode -- I4 -> Int32/UInt32, I8 -> Int64/UInt64, I ->
+// IntPtr/UIntPtr, F4 -> Single, F8 -> Double, O -> Object, Void -> Void). A NON-NULL
+// reference return (the `ICompilation::FindType` contract).
+const IType& FindType(const ICompilation& compilation, IL::StackType stackType,
+                      Sign sign = Sign::None);
 
 // The C# `public static string SplitTypeParameterCountFromReflectionName(string reflectionName)`
 // (ReflectionHelper.cs line 66) -- strip everything from the LAST '`' onward, unconditionally

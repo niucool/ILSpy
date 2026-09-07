@@ -55,9 +55,19 @@
 
 #include <cassert>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
+
+// Forward-declared (the ConvertTo / ConvertToBoolean / UnwrapImplicitBoolConversion
+// parameters; the definitions in TranslatedExpression.cpp include the full header).
+namespace ILSpy::Decompiler::TypeSystem {
+class IType;
+}
+namespace ILSpy::Decompiler::CSharp {
+class ExpressionBuilder;
+}
 
 namespace ILSpy::Decompiler::CSharp {
 
@@ -192,6 +202,33 @@ public:
     // is detached from the AST. The C# ArgumentException for a non-descendant ports
     // to `std::invalid_argument` (the established argument-exception convention).
     TranslatedExpression UnwrapChild(Syntax::Expression* descendant) const;
+
+    // -- The conversion machinery (the C# TranslatedExpression.cs tail) ---------------
+
+    // The C# `public TranslatedExpression ConvertTo(IType targetType,
+    // ExpressionBuilder expressionBuilder, bool checkForOverflow = false, bool
+    // allowImplicitConversion = false)`: adds casts (if necessary) to convert this
+    // expression to the specified target type (see the C# remarks for the
+    // post-condition). Non-const (the implicit-conversion unwrap arms mutate the
+    // node's annotations).
+    TranslatedExpression ConvertTo(TypeSystem::IType& targetType,
+                                   const ExpressionBuilder& expressionBuilder,
+                                   bool checkForOverflow = false,
+                                   bool allowImplicitConversion = false);
+
+    // The C# `public TranslatedExpression ConvertToBoolean(ExpressionBuilder
+    // expressionBuilder, bool negate = false)`: converts to a boolean expression
+    // (`!= 0`, or the negated `== 0`) through the constant/pointer/enum arms.
+    TranslatedExpression ConvertToBoolean(const ExpressionBuilder& expressionBuilder,
+                                          bool negate = false);
+
+    // The C# `public TranslatedExpression UnwrapImplicitBoolConversion(Func<IType,
+    // bool>? typeFilter = null)`: removes the bool-cast emitted when converting an
+    // "implicit operator bool" invocation (in conditional contexts). The C#
+    // `typeFilter` ports to a `std::function<bool(const IType&)>` (an empty one is
+    // the C# null filter).
+    TranslatedExpression UnwrapImplicitBoolConversion(
+        std::function<bool(const TypeSystem::IType&)> typeFilter = nullptr) const;
 
 private:
     Syntax::Expression* expression_ = nullptr;

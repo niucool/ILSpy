@@ -148,30 +148,38 @@ inline Sign GetSign(const IType* type) {
         default:
             break;
     }
-    if (const auto* k = dynamic_cast<const KnownType*>(type)) {
-        switch (k->Code()) {
-            case KnownTypeCode::SByte:
-            case KnownTypeCode::Int16:
-            case KnownTypeCode::Int32:
-            case KnownTypeCode::Int64:
-            case KnownTypeCode::IntPtr:
-            case KnownTypeCode::Single:
-            case KnownTypeCode::Double:
-            case KnownTypeCode::Decimal:
-                return Sign::Signed;
-            case KnownTypeCode::UIntPtr:
-            case KnownTypeCode::Char:
-            case KnownTypeCode::Boolean:
-            case KnownTypeCode::Byte:
-            case KnownTypeCode::UInt16:
-            case KnownTypeCode::UInt32:
-            case KnownTypeCode::UInt64:
-                return Sign::Unsigned;
-            default:
-                return Sign::None;
-        }
+    // The C# reads the GetEnumUnderlyingType().GetDefinition().KnownTypeCode (a real
+    // definition's code -- the CorlibTypeDefinition/MetadataTypeDefinition shapes the
+    // minimal KnownType wrapper misses), falling back to the wrapper's own code for
+    // the minimal-port synthetic types.
+    KnownTypeCode code = KnownTypeCode::None;
+    const IType* underlying = GetEnumUnderlyingType(type);
+    if (const ITypeDefinition* def =
+            underlying != nullptr ? underlying->GetDefinition() : nullptr)
+        code = def->KnownTypeCode();
+    else if (const auto* k = dynamic_cast<const KnownType*>(type))
+        code = k->Code();
+    switch (code) {
+        case KnownTypeCode::SByte:
+        case KnownTypeCode::Int16:
+        case KnownTypeCode::Int32:
+        case KnownTypeCode::Int64:
+        case KnownTypeCode::IntPtr:
+        case KnownTypeCode::Single:
+        case KnownTypeCode::Double:
+        case KnownTypeCode::Decimal:
+            return Sign::Signed;
+        case KnownTypeCode::UIntPtr:
+        case KnownTypeCode::Char:
+        case KnownTypeCode::Boolean:
+        case KnownTypeCode::Byte:
+        case KnownTypeCode::UInt16:
+        case KnownTypeCode::UInt32:
+        case KnownTypeCode::UInt64:
+            return Sign::Unsigned;
+        default:
+            return Sign::None;
     }
-    return Sign::None;
 }
 
 // Port of TypeUtils.ToPrimitiveType(KnownTypeCode): maps a known primitive's
@@ -316,6 +324,90 @@ inline int GetSize(const IType* type) {
         }
     }
     return 0;
+}
+
+// Port of TypeUtils.GetSize(StackType) (TypeUtils.cs line 90): the size in bytes
+// of an evaluation-stack type -- 4 for I4, 8 for I8, NativeIntSize for I and
+// Ref, 0 for everything else.
+inline int GetSize(IL::StackType stackType) {
+    switch (stackType) {
+        case IL::StackType::I4:
+            return 4;
+        case IL::StackType::I8:
+            return 8;
+        case IL::StackType::I:
+        case IL::StackType::Ref:
+            return kNativeIntSize;
+        default:
+            return 0;
+    }
+}
+
+// Port of TypeUtils.GetStackType(IType) (TypeUtils.cs line 263): the evaluation-
+// stack type corresponding to a type. Unknown -> O or Unknown (by its
+// IsReferenceType state); ByReference -> Ref; Pointer/NInt/NUInt/FunctionPointer
+// -> I; TypeParameter -> O (always, even when instantiated with a primitive);
+// ModOpt/ModReq -> the unwrapped element's stack type (SkipModifiers); every
+// other kind resolves through GetEnumUnderlyingType().GetDefinition()'s
+// KnownTypeCode: the 4-byte-or-less integer/enum family (Boolean through
+// UInt32, Char included) -> I4, Int64/UInt64 -> I8, Single -> F4, Double -> F8,
+// Void -> Void, IntPtr/UIntPtr -> I, everything else (definitions, classes,
+// tuples, ...) -> O. A definitionless type (type parameters already handled,
+// open generics) yields O.
+inline IL::StackType GetStackType(const IType& type) {
+    using ILSpy::Decompiler::IL::StackType;
+    switch (type.Kind()) {
+        case TypeKind::Unknown:
+            if (IsReferenceType(&type) == true)
+                return StackType::O;
+            return StackType::Unknown;
+        case TypeKind::ByReference:
+            return StackType::Ref;
+        case TypeKind::Pointer:
+        case TypeKind::NInt:
+        case TypeKind::NUInt:
+        case TypeKind::FunctionPointer:
+            return StackType::I;
+        case TypeKind::TypeParameter:
+            return StackType::O;
+        case TypeKind::ModOpt:
+        case TypeKind::ModReq:
+            if (const IType* skipped = SkipModifiers(type))
+                return GetStackType(*skipped);
+            return StackType::O;
+        default:
+            break;
+    }
+    const ITypeDefinition* typeDef = nullptr;
+    if (const IType* underlying = GetEnumUnderlyingType(&type))
+        typeDef = underlying->GetDefinition();
+    if (typeDef == nullptr)
+        return StackType::O;
+    switch (typeDef->KnownTypeCode()) {
+        case KnownTypeCode::Boolean:
+        case KnownTypeCode::Char:
+        case KnownTypeCode::SByte:
+        case KnownTypeCode::Byte:
+        case KnownTypeCode::Int16:
+        case KnownTypeCode::UInt16:
+        case KnownTypeCode::Int32:
+        case KnownTypeCode::UInt32:
+            return StackType::I4;
+        case KnownTypeCode::Int64:
+        case KnownTypeCode::UInt64:
+            return StackType::I8;
+        case KnownTypeCode::Single:
+            return StackType::F4;
+        case KnownTypeCode::Double:
+            return StackType::F8;
+        case KnownTypeCode::Void:
+            return StackType::Void;
+        case KnownTypeCode::IntPtr:
+        case KnownTypeCode::UIntPtr:
+            return StackType::I;
+        default:
+            return StackType::O;
+    }
 }
 
 // Port of TypeUtils.IsSmallIntegerType(IType): a small integer type is one

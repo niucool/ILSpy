@@ -8,6 +8,9 @@ target_sources(ilspy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/DecompilerSettings.cpp
 )
 
+# DecompileRun is header-only (the C# class carries no behavior beyond the field
+# surface the builders consume).
+
 add_subdirectory(Util)
 add_subdirectory(Metadata)
 add_subdirectory(TypeSystem)

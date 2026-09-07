@@ -18,6 +18,7 @@
 
 #include "Decompiler/IL/StackTypeOf.hpp"
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/TypeSystem/ITypeDefinition.hpp"
 
 namespace ILSpy::Decompiler::IL {
 
@@ -29,6 +30,11 @@ StackType StackTypeOf(const ITypePtr& type) {
 
 StackType StackTypeOf(const IType* type) {
     if (!type) return StackType::Unknown;
+    // The C# GetStackType reads the GetEnumUnderlyingType().GetDefinition().
+    // KnownTypeCode -- a real definition's code (the CorlibTypeDefinition /
+    // MetadataTypeDefinition shapes the minimal KnownType wrapper misses) -- with
+    // the minimal-port synthetic wrapper (KnownType) and the decorated types
+    // (ByReference/Pointer) checked first.
     if (const auto* k = dynamic_cast<const KnownType*>(type)) {
         switch (k->Code()) {
             case KnownTypeCode::Boolean: case KnownTypeCode::Char:
@@ -48,6 +54,24 @@ StackType StackTypeOf(const IType* type) {
     }
     if (dynamic_cast<const ByReferenceType*>(type)) return StackType::Ref;
     if (dynamic_cast<const PointerType*>(type)) return StackType::I;  // unmanaged pointer
+    if (const ITypeDefinition* def = type->GetDefinition()) {
+        switch (def->KnownTypeCode()) {
+            case KnownTypeCode::Boolean: case KnownTypeCode::Char:
+            case KnownTypeCode::SByte: case KnownTypeCode::Byte:
+            case KnownTypeCode::Int16: case KnownTypeCode::UInt16:
+            case KnownTypeCode::Int32: case KnownTypeCode::UInt32:
+                return StackType::I4;
+            case KnownTypeCode::Int64: case KnownTypeCode::UInt64:
+                return StackType::I8;
+            case KnownTypeCode::Single: return StackType::F4;
+            case KnownTypeCode::Double: return StackType::F8;
+            case KnownTypeCode::IntPtr: case KnownTypeCode::UIntPtr:
+                return StackType::I;
+            case KnownTypeCode::Void: return StackType::Void;
+            case KnownTypeCode::None: return StackType::O;
+            default: return StackType::O;
+        }
+    }
     return StackType::O;
 }
 

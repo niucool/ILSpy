@@ -38,6 +38,17 @@ public:
     std::unique_ptr<BlockContainer> Body;
     std::vector<ILVariablePtr> Variables;
 
+    // The C# `public string Name` (a get/set field the local-function decoders
+    // assign): the source-side name of this function. Empty for functions whose
+    // producer did not set one (the ExpressionBuilder's HidesVariableWithName
+    // consults it over nested local functions).
+    std::string Name;
+
+    // The C# `public InstructionCollection<ILFunction> LocalFunctions` (child
+    // slot 1): the local functions / lambdas nested in this function. Owned here
+    // (the C# tree's parent ownership); appended by the closure-decoder slices.
+    std::vector<std::unique_ptr<ILFunction>> LocalFunctions;
+
     // The constructor/static status of this function's method, the pre-resolved
     // subset of the C# ILFunction.Method handle the transforms consult. Defaults
     // false (a null Method, matching the C# `function?.Method is not {...}` bail)
@@ -89,8 +100,15 @@ public:
     StackType ResultType() const override { return StackType::Void; }
     bool IsRoot() const override { return true; }
 
-    int ChildCount() const override { return 1; }
-    ILInstruction* GetChild(int i) const override { return i == 0 ? static_cast<ILInstruction*>(Body.get()) : nullptr; }
+    // The C# ILFunction children: the Body (slot 0) plus the LocalFunctions
+    // collection (slot 1, in order).
+    int ChildCount() const override { return 1 + static_cast<int>(LocalFunctions.size()); }
+    ILInstruction* GetChild(int i) const override {
+        if (i == 0) return static_cast<ILInstruction*>(Body.get());
+        if (i - 1 < static_cast<int>(LocalFunctions.size()))
+            return static_cast<ILInstruction*>(LocalFunctions[static_cast<std::size_t>(i - 1)].get());
+        return nullptr;
+    }
 
     void WriteTo(std::string& out) const override {
         out += "ILFunction {\n  ";
@@ -99,7 +117,14 @@ public:
     }
 protected:
     std::unique_ptr<ILInstruction> SetChildRaw(int i, std::unique_ptr<ILInstruction> n) override {
-        assert(i == 0);
+        if (i != 0) {
+            // Slot 1+ are the LocalFunctions (the C# LocalFunctionsSlot).
+            assert(i - 1 >= 0 && i - 1 <= static_cast<int>(LocalFunctions.size()));
+            auto& slot = LocalFunctions[static_cast<std::size_t>(i - 1)];
+            auto old = std::move(slot);
+            slot.reset(static_cast<ILFunction*>(n.release()));
+            return old;
+        }
         auto old = std::move(Body);
         // The function body slot always holds a BlockContainer.
         Body.reset(static_cast<BlockContainer*>(n.release()));

@@ -128,6 +128,13 @@ public:
     // constructed via the `internal` ctor.
     ResolveResult* ElementResult() const noexcept { return elementResult_.get(); }
 
+    // The owning `shared_ptr` handle behind `ElementResult()` (the C# field is a GC
+    // reference the annotation channel aliases; consumers re-owning the element need
+    // the shared view).
+    const std::shared_ptr<ResolveResult>& ElementResultShared() const noexcept {
+        return elementResult_;
+    }
+
     // The C# `public IType ElementType => ((ByReferenceType)this.Type).ElementType`
     // -- the inner `IType` of the wrapping `ByReferenceType`.  `Type()` is always a
     // `ByReferenceType` (both ctors build the base from one), so the

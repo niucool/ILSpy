@@ -1962,7 +1962,54 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   `TranslationContextTest` suite (the binding/query/copy matrices over
   synthetic ASTs, the GetSymbol dispatch over six real resolve-result kinds,
   the trivia-holder skip, the UnknownError fallbacks), proven with a
-  neuter round (7 RED, restored green).
+  neuter round (7 RED, restored green). The `ExpressionBuilder` skeleton
+  (`Decompiler/CSharp/ExpressionBuilder.{hpp,cpp}`) and the `DecompileRun`
+  prerequisite (the root `Decompiler/DecompileRun.hpp` with the
+  `EnumValueDisplayMode` enum) landed as the first builder slice: the ctor with
+  the resolver/ast-builder/type-inference field construction over the ICompilation
+  narrowing (the BamlDecompilerTypeSystem convention; the C# IDecompilerTypeSystem
+  interface stays the documented diamond-free deferral), the entry family
+  (ConvertType / ConvertConstantValue x2 with the small/native-integer cast arms
+  and the displayAsHex try/finally, Translate with the DEBUG post-condition
+  asserts, TranslateCondition, ConvertVariable with the by-ref ref-wrap,
+  HidesVariableWithName over the ILFunction ancestor walk), the visitor-dispatch
+  entry (an OpCode switch -- the ExpressionTransforms convention; the port's IL
+  tree has no AcceptVisitor surface) with the ported leaf arms (LdNull,
+  DefaultValue, LdStr, LdLoc/LdLoca, LdcI4/I8/F4/F8/Decimal, the Default
+  'OpCode not supported' ErrorExpression fallback the unported arms degrade to),
+  and the self-contained statics (the operator-name tables, the
+  overflow-check pairs, IsCompatibleWithSign, IsUnboxAnyWithIsInst,
+  UnwrapBoxingConversion, ChangeDirectionExpressionTo, ErrorExpression,
+  CallUnsafeIntrinsic, WrapInRef, LdcI4, the FindType/FindArithmeticType/
+  PrepareArithmeticArgument family, ShouldDisplayAsHex, AdjustConstantToType).
+  The `TranslatedExpression` conversion machinery landed with it (lifting the
+  iteration-99 deferral): the full `ConvertTo` cast-insertion machinery (the
+  implicit-conversion unwrap arms through `FindSharedAnnotation` over the
+  annotation channel, the tuple-literal element-wise arm through `CreateTupleType`,
+  the IntPtr/UIntPtr special cases, the enum/char/pointer conversions, the
+  ByReference arm with the `Unsafe.As` intrinsic and the fixed-variable check,
+  the resolver-cast constant folding with the primitive-format copy, the
+  checked/unchecked annotation trio from the new `Transforms/AddCheckedBlocks.{hpp,cpp}`),
+  `ConvertToBoolean` (the constant/pointer/enum arms), `UnwrapImplicitBoolConversion`,
+  and the `IsFixedVariable`/`CastCanBeMadeImplicit`/`LdcI4` helpers. Supporting
+  repairs the slice exposed: `TypeUtils` gained the `GetStackType(IType)` /
+  `GetSize(StackType)` ports, `ReflectionHelper` gained the
+  `FindType(compilation, StackType, Sign)` overload, `IType.hpp` gained the
+  `SpecialType::NullType`/`ArgList` factory singletons, `ILFunction` gained the
+  `Name`/`LocalFunctions` surface the ancestor walk reads, `StackTypeOf`/
+  `TypeUtils.GetSign` now read the DEFINITION's KnownTypeCode (the C#
+  `GetDefinition().KnownTypeCode` shape the minimal `KnownType` wrapper missed --
+  the CorlibTypeDefinition fixture exposed it), and the
+  `SpecialType`/`StackTypeOf` null-object handling hardened against the
+  `.get()`-of-a-fresh-singleton dangling-temporary trap (the iteration-73
+  learning, hit three times in one slice). Verified by the 35-test
+  `ExpressionBuilderSkeleton`/`DecompileRun`/`EnumValueDisplayMode` suite over a
+  real `SimpleCompilation(MinimalCorlib)` fixture (the statics tables, the ctor
+  surface, the Translate leaf arms incl. the type-hint constant adjustment and
+  the by-ref ref-wrap, the TranslateCondition constant/negate shapes, the
+  ConvertToBoolean constant/non-constant/pointer arms, the ConvertTo
+  identity/void/constant-fold/cast/conditional arms, and the error-expression
+  shapes).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

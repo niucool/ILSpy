@@ -23,6 +23,7 @@
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
 
 #include "Decompiler/Metadata/TypeName.hpp"  // TypeName (the SRM parser, the ParseReflectionName input)
+#include "Decompiler/TypeSystem/TypeUtils.hpp"  // ToKnownTypeCode / GetSize (the FindType(StackType, Sign) arms)
 #include "Decompiler/TypeSystem/FullTypeName.hpp"  // FullTypeName (the nested-arm UnknownType fallback)
 #include "Decompiler/TypeSystem/ICompilation.hpp"  // ICompilation (FindType's compilation)
 #include "Decompiler/TypeSystem/IMethod.hpp"  // IMethod (the ``N CurrentMember arm)
@@ -64,6 +65,39 @@ TypeCode GetTypeCode(const IType& type) {
 // cast is the identity for every `TypeCode` value (`None` <-> `Empty`).
 const IType& FindType(const ICompilation& compilation, TypeCode typeCode) {
     return compilation.FindType(static_cast<KnownTypeCode>(typeCode));
+}
+
+// The C# `public static IType FindType(this ICompilation compilation, StackType
+// stackType, Sign sign = Sign.None)` (ReflectionHelper.cs line 47): the stack-type
+// input through the `TypeUtils.ToKnownTypeCode` mapping -- Unknown -> the
+// SpecialType.UnknownType null object, Ref -> a ByReferenceType over it, the rest
+// the ToKnownTypeCode(sign) lookup (TypeUtils.ToKnownTypeCode: I4 -> Int32/UInt32,
+// I8 -> Int64/UInt64, I -> IntPtr/UIntPtr, F4 -> Single, F8 -> Double, O ->
+// Object, Void -> Void).
+const IType& FindType(const ICompilation& compilation, IL::StackType stackType, Sign sign) {
+    switch (stackType) {
+        case IL::StackType::Unknown:
+            // The C# `return SpecialType.UnknownType` -- the null object's static
+            // singleton; the port hands the same fresh-instance shape the factory
+            // gives every caller (the SpecialType singletons compare by kind, so
+            // the value semantics are identical).
+            {
+                static const std::shared_ptr<IType> unknownType = UnknownType();
+                return *unknownType;
+            }
+        case IL::StackType::Ref:
+            // The C# `new ByReferenceType(SpecialType.UnknownType)`: a fresh
+            // wrapper over the error-type null object per call; the port caches
+            // one immutable instance (ByReferenceType carries no mutable state
+            // and the callers never mutate it).
+            {
+                static const std::shared_ptr<IType> refType =
+                    std::make_shared<ByReferenceType>(UnknownType());
+                return *refType;
+            }
+        default:
+            return compilation.FindType(ToKnownTypeCode(stackType, sign));
+    }
 }
 
 // The C# `public static string SplitTypeParameterCountFromReflectionName(string)`

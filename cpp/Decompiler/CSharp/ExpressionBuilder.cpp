@@ -1,0 +1,929 @@
+// Copyright (c) 2026 ILSpy Contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of
+// this software and associated documentation files (the "Software"), to deal in the
+// Software without restriction, including without limitation the rights to use, copy,
+// modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
+// and to permit persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies
+// or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+// PARTICULAR PURPOSE NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+// LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT
+// OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+// ExpressionBuilder skeleton implementation -- see the header for the port notes.
+
+#include "Decompiler/CSharp/ExpressionBuilder.hpp"
+
+#include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
+#include "Decompiler/CSharp/Syntax/AstType.hpp"
+#include "Decompiler/CSharp/Syntax/Comment.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ConditionalExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DefaultValueExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ErrorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
+#include "Decompiler/CSharp/Syntax/TypeSystemAstBuilder.hpp"
+#include "Decompiler/CSharp/Transforms/AddCheckedBlocks.hpp"
+#include "Decompiler/CSharp/TranslatedExpression.hpp"
+#include "Decompiler/IL/Instructions/DefaultValue.hpp"
+#include "Decompiler/IL/Instructions/LdcConstants.hpp"
+#include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdcDecimal.hpp"
+#include "Decompiler/Semantics/ConversionFactories.hpp"
+#include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdLoca.hpp"
+#include "Decompiler/IL/Instructions/LdStr.hpp"
+#include "Decompiler/IL/Instructions/UnboxAny.hpp"
+#include "Decompiler/IL/OpCodeName.hpp"
+#include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
+#include "Decompiler/Semantics/ConstantResolveResult.hpp"
+#include "Decompiler/Semantics/ErrorResolveResult.hpp"
+#include "Decompiler/Semantics/OperatorResolveResult.hpp"
+#include "Decompiler/Semantics/ResolveResult.hpp"
+#include "Decompiler/TypeSystem/KnownTypeReference.hpp"
+#include "Decompiler/TypeSystem/NullableType.hpp"
+#include "Decompiler/TypeSystem/ReflectionHelper.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
+#include "Decompiler/TypeSystem/TypeUtils.hpp"
+
+#include <cassert>
+#include <cstdio>
+#include <stdexcept>
+#include <unordered_set>
+
+namespace ILSpy::Decompiler::CSharp {
+
+// The REAL type-system namespace alias (the ExpressionBuilder TS:: convention -- the
+// CSharp/TypeSystem sub-namespace shadows the plain TypeSystem:: lookup here).
+namespace TS = ::ILSpy::Decompiler::TypeSystem;
+
+using namespace ILSpy::Decompiler::TypeSystem;
+using IL::ILVariable;
+using IL::ILVariablePtr;
+using Syntax::AstType;
+using Syntax::Expression;
+
+namespace {
+
+// The C#-small-integer cast arm of ConvertConstantValue: the
+// `KnownTypeReference.GetCSharpNameByTypeCode(rr.Type.GetDefinition().KnownTypeCode)`
+// keyword. The C# `!` non-null assert is the port's checked access -- the
+// small-integer codes always resolve.
+std::string CSharpNameByKnownTypeCode(KnownTypeCode code)
+{
+    auto name = KnownTypeReference::GetCSharpNameByTypeCode(code);
+    assert(name.has_value());
+    return std::string(name.value_or("int"));
+}
+
+// The C# `$"IL_{offset:x4}"` interpolation: lowercase hex, minimum four digits
+// (the C# 'x4' format pads to four, more digits for larger values).
+std::string ILOffsetHex(std::int32_t offset)
+{
+    char buffer[16];
+    std::snprintf(buffer, sizeof(buffer), "%x", static_cast<std::uint32_t>(offset));
+    std::string result(buffer);
+    while (result.size() < 4)
+        result.insert(result.begin(), '0');
+    return result;
+}
+
+// The C# `object.Equals(rr.ConstantValue, 0)` / `(0u)` pair (the
+// AdjustConstantToType zero check): the value is a boxed int/uint zero.
+bool IsZeroConstant(const std::any& value)
+{
+    if (!value.has_value())
+        return false;
+    if (value.type() == typeid(std::int32_t))
+        return std::any_cast<std::int32_t>(value) == 0;
+    if (value.type() == typeid(std::uint32_t))
+        return std::any_cast<std::uint32_t>(value) == 0u;
+    return false;
+}
+
+// The C# `expression.Annotation<ResolveResult>()` query over an Expression node.
+const Sem::ResolveResult* ResolveResultAnnotation(const Expression& expr)
+{
+    return expr.Annotation<Sem::ResolveResult>();
+}
+
+
+// The owning shared_ptr of the node's resolve-result annotation (the port's
+// ResolveResult is not enable_shared_from_this; the annotation channel owns the
+// shared handle the C# GC reference aliases).
+std::shared_ptr<Sem::ResolveResult> SharedResolveResultAnnotation(const Expression& expr)
+{
+    for (const auto& a : expr.SharedAnnotations())
+    {
+        if (dynamic_cast<Sem::ResolveResult*>(a.get()) != nullptr)
+            return std::static_pointer_cast<Sem::ResolveResult>(a);
+    }
+    return nullptr;
+}
+
+
+// The shared handle of a node's resolve-result annotation (the port's ResolveResult
+// is not enable_shared_from_this; the annotation channel owns the shared handle the
+// C# GC reference aliases).
+std::shared_ptr<Sem::ResolveResult> WithSharedResolveResult(const Expression& expr)
+{
+    for (const auto& a : expr.SharedAnnotations())
+    {
+        if (dynamic_cast<Sem::ResolveResult*>(a.get()) != nullptr)
+            return std::static_pointer_cast<Sem::ResolveResult>(a);
+    }
+    return nullptr;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// ctor
+
+ExpressionBuilder::ExpressionBuilder(const StatementBuilder* statementBuilderValue,
+                                     const TS::ICompilation& typeSystem,
+                                     const TS::ITypeResolveContext& decompilationContext,
+                                     IL::ILFunction* currentFunctionValue,
+                                     const DecompilerSettings* settingsValue,
+                                     const DecompileRun* decompileRunValue)
+{
+    // The C# `Debug.Assert(decompilationContext != null)` -- the port's guard.
+    if (decompileRunValue == nullptr)
+        throw std::invalid_argument("decompileRun");
+    if (settingsValue == nullptr)
+        throw std::invalid_argument("settings");
+    statementBuilder = statementBuilderValue;
+    this->decompilationContext = &decompilationContext;
+    currentFunction = currentFunctionValue;
+    settings = settingsValue;
+    decompileRun = decompileRunValue;
+    compilation = &decompilationContext.Compilation();
+    const auto context = std::make_shared<TypeSystem::CSharpTypeResolveContext>(
+        compilation->MainModule(), decompileRun->UsingScope(),
+        decompilationContext.CurrentTypeDefinition(),
+        decompilationContext.CurrentMember());
+    resolver = std::make_shared<const Resolver::CSharpResolver>(context);
+    astBuilder.emplace(std::make_shared<const Resolver::CSharpResolver>(*resolver));
+    astBuilder->AlwaysUseShortTypeNames() = true;
+    astBuilder->AddResolveResultAnnotations() = true;
+    astBuilder->ShowAttributes() = true;
+    astBuilder->UseNullableSpecifierForValueTypes() = settings->LiftNullables();
+    astBuilder->AlwaysUseGlobal() = settings->AlwaysUseGlobal();
+    typeInference = TypeInferenceInstance{compilation,
+                                          Resolver::TypeInferenceAlgorithm::Improved};
+}
+
+// ---------------------------------------------------------------------------
+// ConvertType / ConvertConstantValue
+
+AstType* ExpressionBuilder::ConvertType(TS::IType& type) const
+{
+    return astBuilder->ConvertType(type);
+}
+
+ExpressionWithResolveResult ExpressionBuilder::ConvertConstantValue(
+    std::shared_ptr<Sem::ResolveResult> rr, bool allowImplicitConversion) const
+{
+    if (!rr)
+        throw std::invalid_argument("rr");
+    Expression* expr = astBuilder->ConvertConstantValue(rr);
+    if (!allowImplicitConversion)
+    {
+        const TS::IType& type = rr->Type();
+        if (auto* nullExpr = dynamic_cast<Syntax::NullReferenceExpression*>(expr);
+            nullExpr != nullptr && type.Kind() != TypeKind::Null)
+        {
+            expr = new Syntax::CastExpression(ConvertType(const_cast<TS::IType&>(type)),
+                                              nullExpr);
+        }
+        else if (IsCSharpSmallIntegerType(&type))
+        {
+            expr = new Syntax::CastExpression(
+                new Syntax::PrimitiveType(CSharpNameByKnownTypeCode(
+                    type.GetDefinition()->KnownTypeCode())),
+                expr);
+            // Note: no unchecked annotation necessary, because the constant was
+            // folded to be in-range
+        }
+        else if (IsCSharpNativeIntegerType(&type))
+        {
+            expr = new Syntax::CastExpression(new Syntax::PrimitiveType(type.Name()), expr);
+            // Note: no unchecked annotation necessary, because the rr wouldn't be
+            // a constant if the value wasn't in-range on 32bit
+        }
+    }
+    const Sem::ResolveResult* exprRR = ResolveResultAnnotation(*expr);
+    if (exprRR == nullptr)
+    {
+        exprRR = rr.get();
+        expr->AddAnnotation(rr);
+    }
+    return ExpressionWithResolveResult(expr, exprRR);
+}
+
+ExpressionWithResolveResult ExpressionBuilder::ConvertConstantValue(
+    std::shared_ptr<Sem::ResolveResult> rr, bool allowImplicitConversion, bool displayAsHex) const
+{
+    astBuilder->PrintIntegralValuesAsHex() = displayAsHex;
+    // The C# try/finally (restore the flag on every path).
+    struct Restore
+    {
+        Syntax::TypeSystemAstBuilder& builder;
+        ~Restore() { builder.PrintIntegralValuesAsHex() = false; }
+    } restore{*astBuilder};
+    return ConvertConstantValue(std::move(rr), allowImplicitConversion);
+}
+
+// ---------------------------------------------------------------------------
+// Translate / TranslateCondition / the visitor dispatch
+
+TranslatedExpression ExpressionBuilder::Translate(IL::ILInstruction* inst,
+                                                 const TS::IType* typeHint)
+{
+    assert(inst != nullptr);
+    // The UnknownType null object is a fresh handle per call; hold it through the
+    // visit (the .get()-of-a-temporary dangling trap).
+    TS::ITypePtr unknownHint;
+    if (typeHint == nullptr)
+        unknownHint = UnknownType();
+    TranslationContext context;
+    context.TypeHint = typeHint != nullptr ? typeHint : unknownHint.get();
+    TranslatedExpression cexpr = Visit(inst, context);
+#ifndef NDEBUG
+    // The C# DEBUG post-condition validation (documented at the top of the C#
+    // file): validate the translated type against the instruction's result type.
+    const auto& instType = cexpr.Type();
+    if (inst->ResultType() != IL::StackType::Void
+        && instType.Kind() != TypeKind::Unknown && inst->ResultType() != IL::StackType::Unknown
+        && instType.Kind() != TypeKind::None)
+    {
+        if (IsIntegerType(inst->ResultType()))
+        {
+            assert(IsIntegerType(GetStackType(instType))
+                   && "IL instructions of integer type must convert into C# expressions of integer type");
+            assert(GetSign(&instType) != Sign::None && "Must have a sign specified for zero/sign-extension");
+        }
+        else if (inst->ResultType() == IL::StackType::Ref)
+        {
+            assert(GetStackType(instType) == IL::StackType::Ref
+                   || IsIntegerType(GetStackType(instType)));
+        }
+        else
+        {
+            assert(GetStackType(instType) == inst->ResultType());
+        }
+    }
+#endif
+    return cexpr;
+}
+
+TranslatedExpression ExpressionBuilder::TranslateCondition(IL::ILInstruction* condition, bool negate)
+{
+    assert(condition->ResultType() == IL::StackType::I4);
+    TranslatedExpression expr = Translate(condition, &compilation->FindType(KnownTypeCode::Boolean));
+    if (GetSize(GetStackType(expr.Type())) > 4)
+    {
+        expr = expr.ConvertTo(*FindType(IL::StackType::I4, GetSign(&expr.Type())), *this);
+    }
+    return expr.ConvertToBoolean(*this, negate);
+}
+
+TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, TranslationContext context)
+{
+    switch (inst->Op)
+    {
+        case IL::OpCode::LdLoc:
+            return VisitLdLoc(inst, context);
+        case IL::OpCode::LdLoca:
+            return VisitLdLoca(inst, context);
+        case IL::OpCode::LdNull:
+            return VisitLdNull(inst, context);
+        case IL::OpCode::DefaultValue:
+            return VisitDefaultValue(inst, context);
+        case IL::OpCode::LdStr:
+            return VisitLdStr(inst, context);
+        case IL::OpCode::LdcI4:
+            return VisitLdcI4(inst, context);
+        case IL::OpCode::LdcI8:
+            return VisitLdcI8(inst, context);
+        case IL::OpCode::LdcF4:
+            return VisitLdcF4(inst, context);
+        case IL::OpCode::LdcF8:
+            return VisitLdcF8(inst, context);
+        case IL::OpCode::LdcDecimal:
+            return VisitLdcDecimal(inst, context);
+        default:
+            return Default(inst, context);
+    }
+}
+
+TranslatedExpression ExpressionBuilder::Default(IL::ILInstruction* inst, TranslationContext)
+{
+    return ErrorExpression("OpCode not supported: " + std::string(IL::OpCodeName(inst->Op)));
+}
+
+// ---------------------------------------------------------------------------
+// The ported Visit arms
+
+TranslatedExpression ExpressionBuilder::VisitLdLoc(IL::ILInstruction* inst, TranslationContext)
+{
+    auto* ldloc = static_cast<IL::LdLoc*>(inst);
+    const IL::ILVariablePtr& variable = ldloc->Variable;
+    if (variable && variable->Kind == IL::VariableKind::StackSlot && variable->IsSingleDefinition())
+    {
+        loadedVariablesSet.insert(variable);
+    }
+    return WithILInstruction(ConvertVariable(variable), inst);
+}
+
+TranslatedExpression ExpressionBuilder::VisitLdLoca(IL::ILInstruction* inst, TranslationContext)
+{
+    auto* ldloca = static_cast<IL::LdLoca*>(inst);
+    // Note that we put the instruction on the IdentifierExpression instead of the
+    // DirectionExpression, because the DirectionExpression might get removed by
+    // dereferencing instructions such as LdObj
+    TranslatedExpression expr = WithILInstruction(ConvertVariable(ldloca->Variable), inst);
+    return WithRR(
+        WithoutILInstruction(
+            *new Syntax::DirectionExpression(Syntax::FieldDirection::Ref, expr.Expression())),
+        std::make_shared<Sem::ByReferenceResolveResult>(
+            SharedResolveResultAnnotation(*expr.Expression()), TS::ReferenceKind::Ref));
+}
+
+TranslatedExpression ExpressionBuilder::VisitLdNull(IL::ILInstruction* inst, TranslationContext)
+{
+    // The factory returns a fresh handle; keep it alive through the call (the
+    // .get()-of-a-temporary dangling trap).
+    const TS::ITypePtr nullType = NullType();
+    return WithILInstruction(GetDefaultValueExpression(*nullType), inst);
+}
+
+TranslatedExpression ExpressionBuilder::VisitDefaultValue(IL::ILInstruction* inst, TranslationContext)
+{
+    auto* defaultValue = static_cast<IL::DefaultValue*>(inst);
+    return WithILInstruction(GetDefaultValueExpression(*defaultValue->Type), inst);
+}
+
+TranslatedExpression ExpressionBuilder::VisitLdStr(IL::ILInstruction* inst, TranslationContext)
+{
+    auto* ldstr = static_cast<IL::LdStr*>(inst);
+    return WithRR(WithILInstruction(
+                      *new Syntax::PrimitiveExpression(ldstr->Value), inst),
+                  std::make_shared<Sem::ConstantResolveResult>(
+                      const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::String))
+                          .shared_from_this(),
+                      ldstr->Value));
+}
+
+TranslatedExpression ExpressionBuilder::VisitLdcI4(IL::ILInstruction* inst, TranslationContext context)
+{
+    auto* ldc = static_cast<IL::LdcI4*>(inst);
+    std::shared_ptr<Sem::ResolveResult> rr;
+    if (GetSign(context.TypeHint) == Sign::Unsigned)
+    {
+        rr = std::make_shared<Sem::ConstantResolveResult>(
+            const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::UInt32))
+                .shared_from_this(),
+            static_cast<std::uint32_t>(ldc->Value));
+    }
+    else
+    {
+        rr = std::make_shared<Sem::ConstantResolveResult>(
+            const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Int32))
+                .shared_from_this(),
+            ldc->Value);
+    }
+    rr = AdjustConstantToType(rr, const_cast<TS::IType&>(*context.TypeHint));
+    return WithILInstruction(ConvertConstantValue(std::move(rr), true), inst);
+}
+
+TranslatedExpression ExpressionBuilder::VisitLdcI8(IL::ILInstruction* inst, TranslationContext context)
+{
+    auto* ldc = static_cast<IL::LdcI8*>(inst);
+    std::shared_ptr<Sem::ResolveResult> rr;
+    if (GetSign(context.TypeHint) == Sign::Unsigned)
+    {
+        rr = std::make_shared<Sem::ConstantResolveResult>(
+            const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::UInt64))
+                .shared_from_this(),
+            static_cast<std::uint64_t>(ldc->Value));
+    }
+    else
+    {
+        rr = std::make_shared<Sem::ConstantResolveResult>(
+            const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Int64))
+                .shared_from_this(),
+            ldc->Value);
+    }
+    rr = AdjustConstantToType(rr, const_cast<TS::IType&>(*context.TypeHint));
+    return WithILInstruction(ConvertConstantValue(std::move(rr), true), inst);
+}
+
+TranslatedExpression ExpressionBuilder::VisitLdcF4(IL::ILInstruction* inst, TranslationContext)
+{
+    auto* ldc = static_cast<IL::LdcF4*>(inst);
+    auto* expr = astBuilder->ConvertConstantValue(
+        const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Single)), ldc->Value);
+    return TranslatedExpression(WithILInstruction(*expr, inst).Expression());
+}
+
+TranslatedExpression ExpressionBuilder::VisitLdcF8(IL::ILInstruction* inst, TranslationContext)
+{
+    auto* ldc = static_cast<IL::LdcF8*>(inst);
+    auto* expr = astBuilder->ConvertConstantValue(
+        const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Double)), ldc->Value);
+    return TranslatedExpression(WithILInstruction(*expr, inst).Expression());
+}
+
+TranslatedExpression ExpressionBuilder::VisitLdcDecimal(IL::ILInstruction* inst, TranslationContext)
+{
+    auto* ldc = static_cast<IL::LdcDecimal*>(inst);
+    auto* expr = astBuilder->ConvertConstantValue(
+        const_cast<TS::IType&>(compilation->FindType(KnownTypeCode::Decimal)), ldc->Value);
+    return TranslatedExpression(WithILInstruction(*expr, inst).Expression());
+}
+
+
+// ---------------------------------------------------------------------------
+// The value helpers
+
+ExpressionWithResolveResult ExpressionBuilder::ConvertVariable(const IL::ILVariablePtr& variable)
+{
+    Expression* expr;
+    if (variable && variable->Kind == IL::VariableKind::Parameter && variable->Index < 0)
+        expr = new Syntax::ThisReferenceExpression();
+    else
+        expr = new Syntax::IdentifierExpression(variable ? variable->Name : std::string());
+    const TS::IType* type = variable ? variable->Type.get() : nullptr;
+    if (type && type->Kind() == TypeKind::ByReference)
+    {
+        // When loading a by-ref parameter, use 'ref paramName'.
+        // We'll strip away the 'ref' when dereferencing.
+
+        // Ensure that the IdentifierExpression itself also gets a resolve result,
+        // as that might get used after the 'ref' is stripped away:
+        const auto& brType = static_cast<const ByReferenceType&>(*type);
+        const ITypePtr& elementType = brType.Element();
+        auto elementRR = std::make_shared<ILVariableResolveResult>(variable, elementType);
+        WithRR(*expr, elementRR);
+
+        expr = new Syntax::DirectionExpression(Syntax::FieldDirection::Ref, expr);
+        return WithRR(*expr, std::make_shared<Sem::ByReferenceResolveResult>(
+                                 elementRR, TS::ReferenceKind::Ref));
+    }
+    else
+    {
+        return WithRR(*expr, std::make_shared<ILVariableResolveResult>(variable,
+                                                                            variable->Type));
+    }
+}
+
+bool ExpressionBuilder::HidesVariableWithName(const std::string& name) const
+{
+    return currentFunction != nullptr && HidesVariableWithName(*currentFunction, name);
+}
+
+bool ExpressionBuilder::HidesVariableWithName(const IL::ILFunction& currentFunctionValue,
+                                              const std::string& name)
+{
+    // The C# `currentFunction.Ancestors.OfType<ILFunction>()` INCLUDES the
+    // function itself (Ancestors yields this first).
+    for (const IL::ILInstruction* node = &currentFunctionValue; node != nullptr;
+         node = node->Parent)
+    {
+        const auto* function = dynamic_cast<const IL::ILFunction*>(node);
+        if (function == nullptr)
+            continue;
+        for (const auto& v : function->Variables)
+        {
+            if (v && v->Name == name)
+                return true;
+        }
+        for (const auto& f : function->LocalFunctions)
+        {
+            if (f && f->Name == name)
+                return true;
+        }
+    }
+    return false;
+}
+
+ExpressionWithResolveResult ExpressionBuilder::LogicNot(const TranslatedExpression& exprIn) const
+{
+    TranslatedExpression expr = exprIn;
+    // "!expr" implicitly converts to bool so we can remove the cast;
+    // but only if doing so wouldn't cause us to call a user-defined "operator !"
+    expr = expr.UnwrapImplicitBoolConversion(
+        [](const TS::IType& type) {
+            for (const IMethod* m : type.GetMethods([](const IMethod* method) {
+                     return method->IsOperator() && method->Name() == "op_LogicalNot";
+                 }))
+            {
+                (void)m;
+                return true;
+            }
+            return false;
+        });
+    Expression* notExpr =
+        new Syntax::UnaryOperatorExpression(expr.Expression(), Syntax::UnaryOperatorType::Not);
+    return WithRR(*notExpr, std::make_shared<Sem::OperatorResolveResult>(
+                                 const_cast<TS::IType&>(
+                                     compilation->FindType(KnownTypeCode::Boolean))
+                                     .shared_from_this(),
+                                 TS::ExpressionType::Not,
+                                 std::vector<std::shared_ptr<Sem::ResolveResult>>{
+                                     WithSharedResolveResult(*expr.Expression())}));
+}
+
+ExpressionWithResolveResult ExpressionBuilder::GetDefaultValueExpression(TS::IType& type) const
+{
+    Expression* expr;
+    TS::ITypePtr constantTypeHandle;  // the fresh-singleton arms (the null literal)
+    const TS::IType* constantType;
+    std::any constantValue;
+    if (IsReferenceType(&type) == true)
+    {
+        expr = new Syntax::NullReferenceExpression();
+        constantTypeHandle = NullType();
+        constantType = constantTypeHandle.get();
+        constantValue = {};  // null
+        return WithRR(*expr, std::make_shared<Sem::ConstantResolveResult>(
+                                 const_cast<TS::IType*>(constantType)->shared_from_this(),
+                                 constantValue));
+    }
+    else if (IsKnownType(type, KnownTypeCode::NullableOfT))
+    {
+        expr = new Syntax::NullReferenceExpression();
+        constantTypeHandle = NullType();
+        constantType = constantTypeHandle.get();
+        constantValue = {};
+        auto crr = std::make_shared<Sem::ConstantResolveResult>(
+            const_cast<TS::IType*>(constantType)->shared_from_this(), constantValue);
+        return WithRR(
+            *new Syntax::CastExpression(ConvertType(type), expr),
+            std::make_shared<Sem::ConversionResolveResult>(
+                type.shared_from_this(), crr, Sem::Conversions::NullLiteralConversion()));
+    }
+    else if (IsKnownType(type, KnownTypeCode::Decimal))
+    {
+        expr = new Syntax::PrimitiveExpression(IL::DecimalValue{});
+        constantType = &type;
+        constantValue = IL::DecimalValue{};
+        return WithRR(*expr, std::make_shared<Sem::ConstantResolveResult>(
+                                 const_cast<TS::IType*>(constantType)->shared_from_this(),
+                                 constantValue));
+    }
+    else
+    {
+        expr = new Syntax::DefaultValueExpression(ConvertType(type));
+        constantType = &type;
+        constantValue = Resolver::CSharpResolver::GetDefaultValue(type);
+        return WithRR(*expr, std::make_shared<Sem::ConstantResolveResult>(
+                                 const_cast<TS::IType*>(constantType)->shared_from_this(),
+                                 constantValue));
+    }
+}
+
+bool ExpressionBuilder::ShouldDisplayAsHex(long long value, const TS::IType& type) const
+{
+    if (value >= 0 && value <= 9)
+        return false;
+    if (value < 0 && GetSign(&type) == Sign::Signed)
+        return false;
+    return true;
+}
+
+std::shared_ptr<Sem::ResolveResult> ExpressionBuilder::AdjustConstantToType(
+    std::shared_ptr<Sem::ResolveResult> rr, TS::IType& typeHint) const
+{
+    if (!rr->IsCompileTimeConstant())
+        return rr;
+    TS::IType& hint = *const_cast<TS::IType*>(GetEnumUnderlyingType(&typeHint));
+    if (rr->Type().Equals(hint))
+        return rr;
+    // Convert to type hint, if this is possible without loss of accuracy
+    if (IsKnownType(hint, KnownTypeCode::Boolean))
+    {
+        auto equalsValue = [&](int v) {
+            return rr->ConstantValue().has_value()
+                   && (rr->ConstantValue().type() == typeid(std::int32_t)
+                           ? std::any_cast<std::int32_t>(rr->ConstantValue()) == v
+                           : rr->ConstantValue().type() == typeid(std::uint32_t)
+                                 ? static_cast<int>(std::any_cast<std::uint32_t>(rr->ConstantValue()))
+                                       == v
+                                 : false);
+        };
+        if (equalsValue(0))
+        {
+            rr = std::make_shared<Sem::ConstantResolveResult>(hint.shared_from_this(), false);
+        }
+        else if (equalsValue(1))
+        {
+            rr = std::make_shared<Sem::ConstantResolveResult>(hint.shared_from_this(), true);
+        }
+    }
+    else if (hint.Kind() == TypeKind::Enum || IsKnownType(hint, KnownTypeCode::Char)
+             || IsCSharpSmallIntegerType(&hint))
+    {
+        auto castRR = resolver->WithCheckForOverflow(true)->ResolveCast(
+            hint, rr);
+        if (castRR->IsCompileTimeConstant() && !castRR->IsError())
+        {
+            rr = castRR;
+        }
+    }
+    else if (IsAnyPointer(hint.Kind()) && IsZeroConstant(rr->ConstantValue()))
+    {
+        rr = std::make_shared<Sem::ConstantResolveResult>(hint.shared_from_this(),
+                                                          std::any{});
+    }
+    return rr;
+}
+
+// ---------------------------------------------------------------------------
+// The arithmetic-type helpers
+
+TS::ITypePtr ExpressionBuilder::FindType(IL::StackType stackType, Sign sign) const
+{
+    if (stackType == IL::StackType::I && settings->NativeIntegers())
+    {
+        return sign == Sign::Unsigned ? NUInt() : NInt();
+    }
+    else
+    {
+        return const_cast<TS::IType&>(TS::FindType(*compilation, stackType, sign)).shared_from_this();
+    }
+}
+
+TS::ITypePtr ExpressionBuilder::FindArithmeticType(IL::StackType stackType,
+                                                           Sign sign) const
+{
+    if (stackType == IL::StackType::I)
+    {
+        if (settings->NativeIntegers())
+        {
+            return sign == Sign::Unsigned ? NUInt() : NInt();
+        }
+        else
+        {
+            // If native integers are not available, use 64-bit arithmetic instead
+            stackType = IL::StackType::I8;
+        }
+    }
+    return FindType(stackType, sign);
+}
+
+TranslatedExpression ExpressionBuilder::PrepareArithmeticArgument(TranslatedExpression arg,
+                                                                 IL::StackType argStackType,
+                                                                 Sign sign, bool isLifted) const
+{
+    if (isLifted && !IsNullable(arg.Type()))
+    {
+        isLifted = false; // don't cast to nullable if this input wasn't already nullable
+    }
+    const TS::IType* argUType =
+        isLifted ? GetEnumUnderlyingType(&arg.Type()) : &arg.Type();
+    if (IsIntegerType(argStackType) && GetSize(argStackType) < GetSize(argUType))
+    {
+        // If the argument is oversized (needs truncation to match stack size of its
+        // ILInstruction), perform the truncation now.
+        TS::ITypePtr targetType = FindType(argStackType, sign);
+        argUType = targetType.get();
+        if (isLifted)
+            targetType = TS::Create(*compilation, *targetType);
+        arg = arg.ConvertTo(*targetType, *this);
+    }
+    if (IsKnownType(*argUType, KnownTypeCode::IntPtr)
+        || IsKnownType(*argUType, KnownTypeCode::UIntPtr))
+    {
+        // None of the operators we might want to apply are supported by
+        // IntPtr/UIntPtr. Also, pointer arithmetic has different semantics (works
+        // in number of elements, not bytes). So any inputs of size StackType.I
+        // must be converted to long/ulong.
+        TS::ITypePtr targetType = FindArithmeticType(IL::StackType::I, sign);
+        if (isLifted)
+            targetType = TS::Create(*compilation, *targetType);
+        arg = arg.ConvertTo(*targetType, *this);
+    }
+    return arg;
+}
+
+// ---------------------------------------------------------------------------
+// The self-contained statics
+
+std::optional<Syntax::AssignmentOperatorType>
+ExpressionBuilder::GetAssignmentOperatorTypeFromMetadataName(const std::string& name,
+                                                             const DecompilerSettings& settings)
+{
+    if (name == "op_Addition") return Syntax::AssignmentOperatorType::Add;
+    if (name == "op_Subtraction") return Syntax::AssignmentOperatorType::Subtract;
+    if (name == "op_Multiply") return Syntax::AssignmentOperatorType::Multiply;
+    if (name == "op_Division") return Syntax::AssignmentOperatorType::Divide;
+    if (name == "op_Modulus") return Syntax::AssignmentOperatorType::Modulus;
+    if (name == "op_BitwiseAnd") return Syntax::AssignmentOperatorType::BitwiseAnd;
+    if (name == "op_BitwiseOr") return Syntax::AssignmentOperatorType::BitwiseOr;
+    if (name == "op_ExclusiveOr") return Syntax::AssignmentOperatorType::ExclusiveOr;
+    if (name == "op_LeftShift") return Syntax::AssignmentOperatorType::ShiftLeft;
+    if (name == "op_RightShift") return Syntax::AssignmentOperatorType::ShiftRight;
+    if (name == "op_UnsignedRightShift" && settings.UnsignedRightShift())
+        return Syntax::AssignmentOperatorType::UnsignedShiftRight;
+    return std::nullopt;
+}
+
+std::optional<Syntax::UnaryOperatorType>
+ExpressionBuilder::GetUnaryOperatorTypeFromMetadataName(const std::string& name, bool isPostfix)
+{
+    if (name == "op_Increment" || name == "op_CheckedIncrement")
+        return isPostfix ? Syntax::UnaryOperatorType::PostIncrement
+                         : Syntax::UnaryOperatorType::Increment;
+    if (name == "op_Decrement" || name == "op_CheckedDecrement")
+        return isPostfix ? Syntax::UnaryOperatorType::PostDecrement
+                         : Syntax::UnaryOperatorType::Decrement;
+    return std::nullopt;
+}
+
+bool ExpressionBuilder::IsCompatibleWithSign(const TS::IType& type, Sign sign)
+{
+    return sign == Sign::None || GetSign(GetEnumUnderlyingType(&type)) == sign;
+}
+
+bool ExpressionBuilder::BinaryOperatorMightCheckForOverflow(Syntax::BinaryOperatorType op)
+{
+    switch (op)
+    {
+        case Syntax::BinaryOperatorType::BitwiseAnd:
+        case Syntax::BinaryOperatorType::BitwiseOr:
+        case Syntax::BinaryOperatorType::ExclusiveOr:
+        case Syntax::BinaryOperatorType::ShiftLeft:
+        case Syntax::BinaryOperatorType::ShiftRight:
+        case Syntax::BinaryOperatorType::UnsignedShiftRight:
+            return false;
+        default:
+            return true;
+    }
+}
+
+bool ExpressionBuilder::AssignmentOperatorMightCheckForOverflow(Syntax::AssignmentOperatorType op)
+{
+    switch (op)
+    {
+        case Syntax::AssignmentOperatorType::BitwiseAnd:
+        case Syntax::AssignmentOperatorType::BitwiseOr:
+        case Syntax::AssignmentOperatorType::ExclusiveOr:
+        case Syntax::AssignmentOperatorType::ShiftLeft:
+        case Syntax::AssignmentOperatorType::ShiftRight:
+            return false;
+        default:
+            return true;
+    }
+}
+
+bool ExpressionBuilder::IsUnboxAnyWithIsInst(const IL::UnboxAny& unboxAny,
+                                             const TS::IType& isInstType)
+{
+    return unboxAny.Type->Equals(isInstType)
+           && (IsKnownType(*unboxAny.Type, KnownTypeCode::NullableOfT)
+               || IsReferenceType(&isInstType) == true);
+}
+
+TranslatedExpression ExpressionBuilder::UnwrapBoxingConversion(TranslatedExpression arg)
+{
+    if (auto* cast = dynamic_cast<Syntax::CastExpression*>(arg.Expression());
+        cast != nullptr && IsKnownType(arg.Type(), KnownTypeCode::Object))
+    {
+        if (const auto* crr =
+                dynamic_cast<const Sem::ConversionResolveResult*>(arg.ResolveResult());
+            crr != nullptr && crr->ConversionProperty()->IsBoxingConversion())
+        {
+            // When 'is' or 'as' is used with a value type or type parameter,
+            // the C# compiler implicitly boxes the input.
+            arg = arg.UnwrapChild(cast->Expression());
+        }
+    }
+    return arg;
+}
+
+TranslatedExpression ExpressionBuilder::ChangeDirectionExpressionTo(TranslatedExpression input,
+                                                                   ReferenceKind kind,
+                                                                   bool isAddressOf)
+{
+    auto* dirExpr = dynamic_cast<Syntax::DirectionExpression*>(input.Expression());
+    const auto* brrr = dynamic_cast<const Sem::ByReferenceResolveResult*>(input.ResolveResult());
+    if (dirExpr == nullptr || brrr == nullptr)
+        return input;
+    if ((isAddressOf || dynamic_cast<Syntax::ThisReferenceExpression*>(dirExpr->Expression()) != nullptr)
+        && (kind == TS::ReferenceKind::In || kind == TS::ReferenceKind::RefReadOnly))
+    {
+        return input.UnwrapChild(dirExpr->Expression());
+    }
+    switch (kind)
+    {
+        case TS::ReferenceKind::Ref:
+            dirExpr->FieldDirection(Syntax::FieldDirection::Ref);
+            break;
+        case TS::ReferenceKind::Out:
+            dirExpr->FieldDirection(Syntax::FieldDirection::Out);
+            break;
+        case TS::ReferenceKind::In:
+            dirExpr->FieldDirection(Syntax::FieldDirection::In);
+            break;
+        case TS::ReferenceKind::RefReadOnly:
+            dirExpr->FieldDirection(Syntax::FieldDirection::In);
+            break;
+        default:
+            throw std::runtime_error("Unsupported reference kind: " + std::to_string(static_cast<int>(kind)));
+    }
+    dirExpr->RemoveAnnotations<Sem::ByReferenceResolveResult>();
+    std::shared_ptr<Sem::ResolveResult> newBrrr;
+    if (brrr->ElementResult() == nullptr)
+        newBrrr = std::make_shared<Sem::ByReferenceResolveResult>(
+            const_cast<TS::IType&>(brrr->ElementType()).shared_from_this(), kind);
+    else
+        newBrrr = std::make_shared<Sem::ByReferenceResolveResult>(brrr->ElementResultShared(),
+                                                                  kind);
+    dirExpr->AddAnnotation(newBrrr);
+    return TranslatedExpression(dirExpr);
+}
+
+TranslatedExpression ExpressionBuilder::ErrorExpression(const std::string& message)
+{
+    auto* e = new Syntax::ErrorExpression();
+    e->AddTrailingTrivia(new Syntax::Comment(message, Syntax::CommentType::MultiLine));
+    std::shared_ptr<Sem::ResolveResult> errorRR(
+        const_cast<Sem::ErrorResolveResult*>(&Sem::ErrorResolveResult::UnknownError()),
+        [](Sem::ResolveResult*) noexcept {});
+    return WithRR(WithoutILInstruction(*e), std::move(errorRR));
+}
+
+TranslatedExpression ExpressionBuilder::CallUnsafeIntrinsic(
+    const std::string& name, std::vector<Expression*> arguments, const TS::IType& returnType,
+    IL::ILInstruction* inst, std::optional<std::vector<TS::ITypePtr>> typeArguments) const
+{
+    auto* target = new Syntax::MemberReferenceExpression();
+    target->Target(new Syntax::TypeReferenceExpression(
+        astBuilder->ConvertType(const_cast<TS::IType&>(
+            compilation->FindType(KnownTypeCode::Unsafe)))));
+    target->MemberName(name);
+    if (typeArguments.has_value())
+    {
+        for (const auto& typeArgument : typeArguments.value())
+            target->TypeArguments().Add(astBuilder->ConvertType(const_cast<TS::IType&>(*typeArgument)));
+    }
+    auto* invocationExpr = new Syntax::InvocationExpression();
+    invocationExpr->Target(target);
+    for (Expression* argument : arguments)
+        invocationExpr->Arguments().Add(argument);
+    Expression* invocation = invocationExpr;
+    if (inst != nullptr)
+        WithILInstruction(*invocation, inst);
+    if (returnType.Kind() == TypeKind::ByReference)
+    {
+        return WrapInRef(*invocation, *static_cast<const TS::ByReferenceType&>(returnType).Element());
+    }
+    else
+    {
+        return WithRR(WithoutILInstruction(*invocation),
+                      std::make_shared<Sem::ResolveResult>(
+                          const_cast<TS::IType&>(returnType).shared_from_this()));
+    }
+}
+
+TranslatedExpression ExpressionBuilder::WrapInRef(Expression& expression, const TS::IType& type)
+{
+    auto* direction = new Syntax::DirectionExpression(Syntax::FieldDirection::Ref, &expression);
+    return WithRR(WithoutILInstruction(*direction),
+                  std::make_shared<Sem::ByReferenceResolveResult>(
+                      const_cast<TS::IType&>(type).shared_from_this(), TS::ReferenceKind::Ref));
+}
+
+TranslatedExpression ExpressionBuilder::LdcI4(const TS::ICompilation& compilationValue,
+                                              std::int32_t val)
+{
+    return WithRR(
+        WithoutILInstruction(*new Syntax::PrimitiveExpression(val)),
+        std::make_shared<Sem::ConstantResolveResult>(
+            const_cast<TS::IType&>(const_cast<TS::ICompilation&>(compilationValue)
+                                       .FindType(KnownTypeCode::Int32))
+                .shared_from_this(),
+            val));
+}
+
+} // namespace ILSpy::Decompiler::CSharp

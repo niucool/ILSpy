@@ -1301,4 +1301,21 @@ inline ITypePtr UnboundTypeArgument() {
     return std::make_shared<SpecialType>(TypeKind::UnboundTypeArgument);
 }
 
+// Convenience: the C# `SpecialType.NullType` singleton (a
+// `SpecialType(TypeKind::Null, isReferenceType: true)`). The type of the null
+// literal: a reference type without any members that is a subtype of all
+// reference types. The ExpressionBuilder's default-value/null-literal paths
+// and the ConvertTo null-pointer constant arm report it.
+inline ITypePtr NullType() {
+    return std::make_shared<SpecialType>(TypeKind::Null, std::optional<bool>(true));
+}
+
+// Convenience: the C# `SpecialType.ArgList` singleton (a
+// `SpecialType(TypeKind::ArgList, isReferenceType: null)`). The type of the
+// C# `__arglist()` expression (the vararg sentinel's SpecialType the
+// MetadataMethod signature decode already reports through its Name).
+inline ITypePtr ArgList() {
+    return std::make_shared<SpecialType>(TypeKind::ArgList);
+}
+
 } // namespace ILSpy::Decompiler::TypeSystem
