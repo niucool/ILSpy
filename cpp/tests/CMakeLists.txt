@@ -473,6 +473,7 @@ add_executable(ilspy_tests
     Decompiler/CSharp/ExpressionBuilderSkeleton_Test.cpp
     Decompiler/CSharp/ExpressionBuilderUserDefinedCompoundAssign_Test.cpp
     Decompiler/CSharp/ExpressionBuilderNumericCompoundAssign_Test.cpp
+    Decompiler/CSharp/ExpressionBuilderTranslateTargetTest.cpp
     Decompiler/CSharp/CallBuilder_Test.cpp
     Decompiler/CSharp/Syntax/InterpolatedString_Test.cpp
     Decompiler/CSharp/Syntax/QueryExpression_Test.cpp
@@ -535,6 +536,7 @@ add_executable(ilspy_tests
     Decompiler/IL/Instructions/BinaryNumericInstruction_Test.cpp
     Decompiler/IL/Instructions/ThreeValuedBoolInstructions_Test.cpp
     Decompiler/IL/Instructions/UserDefinedLogicOperator_Test.cpp
+    Decompiler/IL/Instructions/PatternMatching_Test.cpp
     Decompiler/IL/Transforms/NullCoalescingTransform_Test.cpp
     Decompiler/IL/Transforms/NullPropagationTransform_Test.cpp
     Decompiler/IL/Transforms/TransformAssignment_Test.cpp

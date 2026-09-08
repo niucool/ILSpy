@@ -2455,6 +2455,46 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   12111 passed / the 2 standing skips / zero failures, and all four CLI
   baselines unchanged (--csharp mscorlib 10106366 bytes, --il whole-module
   41246545 bytes, -l c 109438, --json-alone rc 64).
+- **`ExpressionBuilder` TranslateTarget call-target arm + the IL match helpers**
+  -- `ExpressionBuilder::TranslateTarget` (ExpressionBuilder.cs lines 2734-2844:
+  the call/field target translation the `CallBuilder.Build` entry and the
+  `ConvertField` family share): the base-reference arm over the current type
+  definition's non-interface base types (`ShouldUseBaseReference`'s three
+  guards + the `baseReferenceType ?? memberDeclaringType` fallback), the
+  pointer/ref type-hint machinery for value-type receivers (`CallInstruction.
+  ExpectedTypeForThisPointer == Ref` selects the by-ref hint for a Ref receiver
+  and the pointer hint otherwise, then the issue-#1333 reference-of-the-
+  correct-type re-conversion through `ConvertTo(ByReferenceType(...))`), the
+  `(ref x).member => x.member` DirectionExpression unwrap, the
+  `(ref x)?.member => x?.member` null-conditional unwrap (the new resolve
+  result over the underlying type), the `EnsureTargetNotNullable` identity
+  pass-through (the C# body is fully commented out), and the static
+  type-reference arm (the `constrainedTo ?? memberDeclaringType` precedence).
+  The local `MatchLdThis` closure (the direct `ldloc this` match + the struct
+  `box T(ldobj T(ldloc this))` shape, gated on the current type definition's
+  struct kind) and its null-`CurrentTypeDefinition` NullReferenceException arm
+  are pinned. Supporting ports: the shared `Decompiler/IL/PatternMatching.hpp`
+  (the C# `ILInstruction.MatchLdThis` / `MatchBox` / `MatchLdObj` extension
+  methods as free functions over the port's node pointers -- the child `out`
+  params are non-owning raw pointers, the type `out` params alias the node's
+  own `ITypePtr`) with `ExpectedTypeForThisPointer` beside the `Call` node
+  (the constrained-to-Ref / type-parameter-Ref / reference-O / value-Ref /
+  unknown-Unknown matrix over the `IsReferenceType` tri-state). The C# local
+  functions are visible throughout their method, so `ShouldUseBaseReference`
+  calls the local `MatchLdThis` (the struct-box arm is reachable from the
+  base-reference gate too). Verified by the 12-test
+  `ExpressionBuilderTranslateTargetTest` suite over the MinimalCorlib fixture
+  with the decompilation context's current-type-definition slot configurable
+  (the CSharpTypeResolveContext With* clone factories: the static arms, the
+  base-reference matrix incl. the empty-DirectBaseTypes fallback and the
+  same-declaring-type suppression, the reference-type `this` receiver, the
+  value-type constrained arms incl. the dereference-of-pointer-cast final
+  shape, and the null-NRE arm) plus the 7-test `PatternMatchingTest` /
+  5-test `ExpectedTypeForThisPointerTest` matrices, proven with a
+  3-behavior neuter RED round (the base-arm gate, the DirectionExpression
+  unwrap, the static-arm constrainedTo preference: exactly the 7 predicted
+  failures) then restored green; full suite 12137 ran / 12135 passed / the
+  2 standing skips / zero failures, and all four CLI baselines unchanged.
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

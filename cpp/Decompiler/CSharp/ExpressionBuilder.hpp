@@ -178,6 +178,29 @@ public:
     // (the deferred ConvertTo -- a loud deferral), then ConvertToBoolean.
     TranslatedExpression TranslateCondition(IL::ILInstruction* condition, bool negate = false);
 
+    // The C# `internal TranslatedExpression TranslateTarget(ILInstruction? target,
+    // bool nonVirtualInvocation, bool memberStatic, IType memberDeclaringType,
+    // IType? constrainedTo = null)` (ExpressionBuilder.cs lines 2734-2844): the
+    // call/field TARGET translation -- the base-reference arm over the current
+    // type definition's base types, the pointer/ref type-hint machinery for
+    // value-type receivers (the `ExpectedTypeForThisPointer == Ref` walk with
+    // the issue-#1333 reference-of-the-correct-type conversion), the
+    // DirectionExpression and null-conditional unwraps, and the static
+    // type-reference arm. `memberDeclaringType` is a non-null reference (the C#
+    // parameter has no null check); `constrainedTo` is the optional
+    // constrained-prefix type operand.
+    TranslatedExpression TranslateTarget(IL::ILInstruction* target, bool nonVirtualInvocation,
+                                         bool memberStatic, const TS::IType& memberDeclaringType,
+                                         const TS::IType* constrainedTo = nullptr);
+
+    // The C# `private TranslatedExpression EnsureTargetNotNullable(TranslatedExpression
+    // expr, ILInstruction inst)` (ExpressionBuilder.cs lines 2846-2873): the whole
+    // nullability-annotation body is commented out in the C# source (the TODO for
+    // the nullability support that would sprinkle `!` operators), so the member is
+    // the identity pass-through. The `inst` parameter is unused there as well.
+    TranslatedExpression EnsureTargetNotNullable(TranslatedExpression expr,
+                                                 IL::ILInstruction* inst);
+
     // -- The visitor-dispatch surface (the C# ILVisitor base) -------------------------
 
     // The C# double-dispatch: the OpCode switch calling the per-instruction

@@ -32,6 +32,29 @@
 
 namespace ILSpy::Decompiler::IL {
 
+// The C# `internal static StackType CallInstruction.ExpectedTypeForThisPointer(
+// IType declaringType, IType? constrainedTo)` (CallInstruction.cs lines 107-124):
+// the expected stack type for passing the this pointer in a method call.
+// Returns StackType.Ref when constrainedTo is not null, StackType.O for
+// reference types (the this pointer passed as an object reference), and
+// StackType.Ref for type parameters and value types (the this pointer passed
+// as a managed reference). Returns StackType.Unknown when the input type is
+// unknown (the `IsReferenceType` tri-state carries neither true nor false --
+// e.g. a type whose reference-ness is indeterminate).
+inline StackType ExpectedTypeForThisPointer(const TypeSystem::IType* declaringType,
+                                            const TypeSystem::IType* constrainedTo)
+{
+    if (constrainedTo != nullptr)
+        return StackType::Ref;
+    assert(declaringType != nullptr);
+    if (declaringType->Kind() == TypeSystem::TypeKind::TypeParameter)
+        return StackType::Ref;
+    const std::optional<bool> isReferenceType = declaringType->IsReferenceType();
+    if (isReferenceType.has_value())
+        return *isReferenceType ? StackType::O : StackType::Ref;
+    return StackType::Unknown;
+}
+
 class Call : public ILInstruction {
 public:
     std::string MethodName;  // "Namespace.Type::Method" (resolved by the IL reader)

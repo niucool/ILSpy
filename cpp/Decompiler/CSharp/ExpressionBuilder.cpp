@@ -29,6 +29,7 @@
 #include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AsExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ConditionalExpression.hpp"
@@ -69,6 +70,8 @@
 #include "Decompiler/IL/Instructions/TryInstructions.hpp"
 #include "Decompiler/IL/Instructions/PinnedRegion.hpp"
 #include "Decompiler/IL/ILTypeExtensions.hpp"
+#include "Decompiler/IL/PatternMatching.hpp"
+#include "Decompiler/IL/Instructions/Call.hpp"
 #include "Decompiler/IL/PointerArithmeticOffset.hpp"
 #include "Decompiler/IL/Instructions/MemoryInstructions.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
@@ -91,12 +94,15 @@
 #include "Decompiler/Semantics/ErrorResolveResult.hpp"
 #include "Decompiler/Semantics/OperatorResolveResult.hpp"
 #include "Decompiler/Semantics/SizeOfResolveResult.hpp"
+#include "Decompiler/Semantics/ThisResolveResult.hpp"
 #include "Decompiler/Semantics/ThrowResolveResult.hpp"
 #include "Decompiler/Semantics/ResolveResult.hpp"
 #include "Decompiler/Semantics/TypeIsResolveResult.hpp"
 #include "Decompiler/Semantics/TypeOfResolveResult.hpp"
+#include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/TypeSystem/KnownTypeReference.hpp"
 #include "Decompiler/TypeSystem/ExpressionType.hpp"
+#include "Decompiler/TypeSystem/NormalizeTypeVisitor.hpp"
 #include "Decompiler/TypeSystem/NullableType.hpp"
 #include "Decompiler/TypeSystem/ReflectionHelper.hpp"
 #include "Decompiler/TypeSystem/TupleType.hpp"
@@ -471,6 +477,190 @@ TranslatedExpression ExpressionBuilder::TranslateCondition(IL::ILInstruction* co
         expr = expr.ConvertTo(*FindType(IL::StackType::I4, GetSign(&expr.Type())), *this);
     }
     return expr.ConvertToBoolean(*this, negate);
+}
+
+// The C# `internal TranslatedExpression TranslateTarget(ILInstruction? target,
+// bool nonVirtualInvocation, bool memberStatic, IType memberDeclaringType,
+// IType? constrainedTo = null)` (ExpressionBuilder.cs lines 2734-2844).
+TranslatedExpression ExpressionBuilder::TranslateTarget(IL::ILInstruction* target,
+                                                        bool nonVirtualInvocation,
+                                                        bool memberStatic,
+                                                        const TS::IType& memberDeclaringType,
+                                                        const TS::IType* constrainedTo)
+{
+    if (!memberStatic && target != nullptr)
+    {
+        // -- The local functions (the C# closure bodies) -------------------
+
+        // The C# `bool MatchLdThis(ILInstruction inst)` local function -- the
+        // direct `ldloc this` match, then the struct `box T(ldobj T(ldloc this))
+        //` shape the struct builder emits (checked only against the current type
+        // definition's own struct kind). Declared before ShouldUseBaseReference
+        // (the C# local functions are visible throughout the method).
+        auto MatchLdThisLocal = [&](IL::ILInstruction* inst) {
+            if (IL::MatchLdThis(inst))
+                return true;
+            const TS::ITypeDefinition* currentTypeDefinition =
+                resolver->CurrentTypeDefinition();
+            if (currentTypeDefinition == nullptr)
+            {
+                // The C# `resolver.CurrentTypeDefinition.Kind` null-deref (the
+                // established invalid_argument convention).
+                throw std::invalid_argument(
+                    "NullReferenceException: Object reference not set to an instance of an object.");
+            }
+            if (currentTypeDefinition->Kind() != TS::TypeKind::Struct)
+                return false;
+            IL::ILInstruction* arg = nullptr;
+            TS::ITypePtr type;
+            if (!IL::MatchBox(inst, arg, type))
+                return false;
+            IL::ILInstruction* arg2 = nullptr;
+            TS::ITypePtr type2;
+            if (!IL::MatchLdObj(arg, arg2, type2))
+                return false;
+            if (type == nullptr || type2 == nullptr || !type->Equals(*type2)
+                || !type->Equals(*currentTypeDefinition))
+                return false;
+            return IL::MatchLdThis(arg2);
+        };
+
+        // The C# `bool ShouldUseBaseReference()` local function (it calls the
+        // MatchLdThis local function, which includes the struct-box arm).
+        auto ShouldUseBaseReference = [&]() {
+            if (!nonVirtualInvocation)
+                return false;
+            if (!MatchLdThisLocal(target))
+                return false;
+            if ((constrainedTo != nullptr ? constrainedTo : &memberDeclaringType)
+                    ->GetDefinition()
+                == resolver->CurrentTypeDefinition())
+                return false;
+            return true;
+        };
+
+        if (ShouldUseBaseReference())
+        {
+            const TS::ITypeDefinition* currentTypeDefinition =
+                resolver->CurrentTypeDefinition();
+            if (currentTypeDefinition == nullptr)
+            {
+                // The C# `resolver.CurrentTypeDefinition.DirectBaseTypes`
+                // null-deref (the C# builder is only constructed with a current
+                // type, so the null case is theoretical; the established
+                // invalid_argument convention).
+                throw std::invalid_argument(
+                    "NullReferenceException: Object reference not set to an instance of an object.");
+            }
+            // The C# `DirectBaseTypes.FirstOrDefault(t => t.Kind != TypeKind.Interface)`.
+            const TS::IType* baseReferenceType = nullptr;
+            for (const TS::ITypePtr& baseType : currentTypeDefinition->DirectBaseTypes())
+            {
+                if (baseType != nullptr && baseType->Kind() != TS::TypeKind::Interface)
+                {
+                    baseReferenceType = baseType.get();
+                    break;
+                }
+            }
+            TS::ITypePtr thisType = std::const_pointer_cast<TS::IType>(
+                baseReferenceType != nullptr ? baseReferenceType->shared_from_this()
+                                             : memberDeclaringType.shared_from_this());
+            return WithRR(
+                WithILInstruction(*new Syntax::BaseReferenceExpression(), target),
+                std::make_shared<Sem::ThisResolveResult>(thisType, nonVirtualInvocation));
+        }
+        else
+        {
+            // The pointer/ref type-hint machinery: a value-type receiver passes
+            // the this pointer as a managed reference (a by-ref hint for a Ref
+            // receiver, a pointer hint otherwise).
+            TS::ITypePtr hintWrapper;
+            const TS::IType* targetTypeHint =
+                constrainedTo != nullptr ? constrainedTo : &memberDeclaringType;
+            if (IL::ExpectedTypeForThisPointer(&memberDeclaringType, constrainedTo)
+                == IL::StackType::Ref)
+            {
+                if (target->ResultType() == IL::StackType::Ref)
+                {
+                    hintWrapper = std::make_shared<TS::ByReferenceType>(
+                        std::const_pointer_cast<TS::IType>(targetTypeHint->shared_from_this()));
+                }
+                else
+                {
+                    hintWrapper = std::make_shared<TS::PointerType>(
+                        std::const_pointer_cast<TS::IType>(targetTypeHint->shared_from_this()));
+                }
+                targetTypeHint = hintWrapper.get();
+            }
+            TranslatedExpression translatedTarget = Translate(target, targetTypeHint);
+            if (IL::ExpectedTypeForThisPointer(&memberDeclaringType, constrainedTo)
+                == IL::StackType::Ref)
+            {
+                // When accessing members on value types, ensure we use a reference of the correct type,
+                // and not a pointer or a reference to a different type (issue #1333)
+                const auto* byRefTargetType =
+                    dynamic_cast<const TS::ByReferenceType*>(&translatedTarget.Type());
+                TS::IType& expectedElementType = const_cast<TS::IType&>(
+                    constrainedTo != nullptr ? *constrainedTo : memberDeclaringType);
+                bool sameElementType = byRefTargetType != nullptr
+                    && TS::NormalizeTypeVisitor::TypeErasure().EquivalentTypes(
+                        const_cast<TS::IType&>(*byRefTargetType->Element()), expectedElementType);
+                if (!sameElementType)
+                {
+                    TS::ITypePtr refType = std::make_shared<TS::ByReferenceType>(
+                        std::const_pointer_cast<TS::IType>(
+                            (constrainedTo != nullptr ? constrainedTo : &memberDeclaringType)
+                                ->shared_from_this()));
+                    translatedTarget = translatedTarget.ConvertTo(*refType, *this);
+                }
+            }
+            if (auto* directionExpression =
+                    dynamic_cast<Syntax::DirectionExpression*>(translatedTarget.Expression()))
+            {
+                // (ref x).member => x.member
+                translatedTarget = translatedTarget.UnwrapChild(directionExpression->Expression());
+            }
+            else if (auto* operatorExpression =
+                         dynamic_cast<Syntax::UnaryOperatorExpression*>(translatedTarget.Expression());
+                     operatorExpression != nullptr
+                     && operatorExpression->Operator() == Syntax::UnaryOperatorType::NullConditional
+                     && dynamic_cast<Syntax::DirectionExpression*>(operatorExpression->Expression())
+                         != nullptr)
+            {
+                // (ref x)?.member => x?.member
+                // note: we need to create a new ResolveResult for the null-conditional operator,
+                // using the underlying type of the input expression without the DirectionExpression
+                TranslatedExpression unwrapped = translatedTarget.UnwrapChild(
+                    dynamic_cast<Syntax::DirectionExpression*>(operatorExpression->Expression())
+                        ->Expression());
+                translatedTarget =
+                    WithRR(WithoutILInstruction(*new Syntax::UnaryOperatorExpression(
+                               unwrapped.Expression(), Syntax::UnaryOperatorType::NullConditional)),
+                           std::make_shared<Sem::ResolveResult>(std::const_pointer_cast<TS::IType>(
+                               TS::GetUnderlyingType(unwrapped.Type()).shared_from_this())));
+            }
+            return EnsureTargetNotNullable(translatedTarget, target);
+        }
+    }
+    else
+    {
+        const TS::IType& targetType =
+            constrainedTo != nullptr ? *constrainedTo : memberDeclaringType;
+        return WithRR(
+            WithoutILInstruction(
+                *new Syntax::TypeReferenceExpression(ConvertType(const_cast<TS::IType&>(targetType)))),
+            std::make_shared<Sem::TypeResolveResult>(
+                std::const_pointer_cast<TS::IType>(targetType.shared_from_this())));
+    }
+}
+
+TranslatedExpression ExpressionBuilder::EnsureTargetNotNullable(TranslatedExpression expr,
+                                                                 IL::ILInstruction* inst)
+{
+    // The C# body is fully commented out (the nullability-support TODO), so the
+    // member is the identity pass-through; `inst` is unused there as well.
+    (void)inst;
+    return expr;
 }
 
 TranslatedExpression ExpressionBuilder::Visit(IL::ILInstruction* inst, TranslationContext context)
