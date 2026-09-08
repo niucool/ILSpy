@@ -21,39 +21,212 @@
 // Port of ICSharpCode.Decompiler/CSharp/CallBuilder.cs -- the call-expression
 // builder the ExpressionBuilder VisitNewObj/VisitCall arms construct.
 //
-// This file is the FIRST SLICE: the `IsSpanBasedStringConcat(IMethod)` static
-// the VisitUserDefinedCompoundAssign arm consults to detect the
-// span-based `string.Concat(ReadOnlySpan<char>, ...)` compound-assign lowering
-// (`s += "..."` on a const string). The Build/BuildStringConcat machinery and
-// the `IsStringToReadOnlySpanCharImplicitConversion` helper are DEFERRED with
-// the VisitCall/VisitNewObj slices they serve.
+// Landed so far: the data carriers (ExpectedTargetDetails + ArgumentList, the
+// C# nested structs that carry the translated call arguments through the
+// Build arms) and the span-based string-concat family (the
+// IsSpanBasedStringConcat(CallInstruction) overload, its
+// IsStringToReadOnlySpanCharImplicitConversion prerequisite, and
+// BuildStringConcat -- the `s1 + s2 + ...` fold the C# string-concat setting
+// lowers the span-based `string.Concat(ReadOnlySpan<char>, ...)` overload to).
+//
+// The Build/BuildArgumentList machinery and the remaining arms
+// (HandleDelegateConstruction, the tuple construction, TranslateTarget,
+// HandleConstructorCall/HandleAccessorCall, HandleRangeConstruction,
+// HandleStringInterpolation, IsDelegateEqualityComparison, ...) are DEFERRED
+// with the VisitNewObj/VisitCall slices they serve.
 
 #pragma once
 
+#include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
+#include "Decompiler/CSharp/TranslatedExpression.hpp"
+#include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
+#include "Decompiler/DecompilerSettings.hpp"
+#include "Decompiler/IL/OpCode.hpp"
 #include "Decompiler/TypeSystem/IMethod.hpp"
+#include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/KnownTypeCode.hpp"
+#include "Decompiler/Util/BitSet.hpp"
+
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace ILSpy::Decompiler::IL {
+class Call;
+class ILInstruction;
+}
+
 // The real type-system namespace alias (the ExpressionBuilder TS:: convention --
 // the CSharp/TypeSystem sub-namespace shadows the plain `TypeSystem::` lookup).
 namespace TS = ::ILSpy::Decompiler::TypeSystem;
 
 namespace ILSpy::Decompiler::CSharp {
 
-// The C# `public class CallBuilder` -- the port carries the static half first
-// (the VisitUserDefinedCompoundAssign prerequisite); the instance Build family
-// lands with the call arms.
+class ExpressionBuilder;
+
+// The C# `struct ExpectedTargetDetails` (CallBuilder.cs lines 34-38): the
+// call-opcode + boxing-need pair the Build arms thread to the target/argument
+// builders.
+struct ExpectedTargetDetails {
+    // The C# `public OpCode CallOpCode;` -- the IL call opcode (the port models
+    // call/callvirt/newobj as one shared Call node, so a node-level
+    // call-vs-callvirt distinction is deferred with the reader's decode; the
+    // field carries the caller-provided opcode verbatim).
+    IL::OpCode CallOpCode = IL::OpCode::Nop;
+    // The C# `public bool NeedsBoxingConversion;` -- set when a boxing
+    // conversion on the call target was unwrapped and must be re-applied.
+    bool NeedsBoxingConversion = false;
+};
+
+// The C# `struct ArgumentList` (CallBuilder.cs lines 40-198): the translated
+// call arguments plus the parameter bookkeeping the render arms consume.
+struct ArgumentList {
+    // The C# `public TranslatedExpression[] Arguments;`
+    std::vector<TranslatedExpression> Arguments;
+    // The C# `public IParameter[] ExpectedParameters;` -- the parameters in
+    // ARGUMENT order (the expanded-params form reorders them).
+    std::vector<const TS::IParameter*> ExpectedParameters;
+    // The C# `public string[] ParameterNames;`
+    std::vector<std::string> ParameterNames;
+    // The C# `public string[]? ArgumentNames;` -- the assigned argument names
+    // (null when no out-of-place argument demanded names).
+    std::optional<std::vector<std::string>> ArgumentNames;
+    // The C# `public int FirstOptionalArgumentIndex;` -- -2 none / -1 forbidden
+    // / >= 0 the first removable optional argument.
+    int FirstOptionalArgumentIndex = 0;
+    // The C# `public BitSet IsPrimitiveValue;`
+    Util::BitSet IsPrimitiveValue;
+    // The C# `public IReadOnlyList<int>? ArgumentToParameterMap;`
+    std::optional<std::vector<int>> ArgumentToParameterMap;
+
+    // The C# `public bool AddNamesToPrimitiveValues;`
+    bool AddNamesToPrimitiveValues = false;
+    // The C# `public bool UseImplicitlyTypedOut;`
+    bool UseImplicitlyTypedOut = false;
+    // The C# `public bool IsExpandedForm;`
+    bool IsExpandedForm = false;
+
+    // The C# `public int Length => Arguments.Length;`
+    int Length() const { return static_cast<int>(Arguments.size()); }
+
+private:
+    // The C# `private int GetActualArgumentCount()`.
+    int GetActualArgumentCount() const {
+        if (FirstOptionalArgumentIndex < 0)
+            return static_cast<int>(Arguments.size());
+        return FirstOptionalArgumentIndex;
+    }
+
+public:
+    // The C# `public string[]? GetArgumentNames(int skipCount = 0)`: the
+    // argument names to render -- the field's array, with the
+    // parameter-name fills for unnamed primitive arguments applied when
+    // `AddNamesToPrimitiveValues` is set. The C# aliases the FIELD array when
+    // one exists (the fills mutate the shared array; a second call observes
+    // them), so the port mutates `ArgumentNames` in place when engaged and
+    // builds a fresh local (never stored back) when disengaged -- the C#
+    // `argumentNames = new string[...]` arm.
+    std::optional<std::vector<std::string>> GetArgumentNames(int skipCount = 0);
+
+    // The C# `public IList<ResolveResult> GetArgumentResolveResults(int
+    // skipCount = 0)`: the resolve results of the first
+    // `GetActualArgumentCount()` arguments from `skipCount` on, with the
+    // implicitly-typed-out rule applied (an Out parameter over a
+    // ByReferenceType argument type answers a fresh OutVarResolveResult over
+    // the reference's element type -- a resolve result NOT attached to the
+    // node, so the port's returned shared handles own the fresh instances and
+    // alias the annotation channel for the plain ones).
+    std::vector<std::shared_ptr<Sem::ResolveResult>> GetArgumentResolveResults(
+        int skipCount = 0);
+
+    // The C# `public IList<ResolveResult> GetArgumentResolveResultsDirect(int
+    // skipCount = 0)`: the same slice without the out-var rule.
+    std::vector<std::shared_ptr<Sem::ResolveResult>>
+    GetArgumentResolveResultsDirect(int skipCount = 0);
+
+    // The C# `public IEnumerable<Expression> GetArgumentExpressions(int
+    // skipCount = 0)`: the argument expressions, wrapped in
+    // NamedArgumentExpression where the composed name is non-null and the
+    // `UseImplicitlyTypedOutAnnotation` applied to out-variable expressions
+    // when the flag is set (the annotation mutates the node).
+    std::vector<Syntax::Expression*> GetArgumentExpressions(int skipCount = 0);
+
+    // The C# `public bool CanInferAnonymousTypePropertyNamesFromArguments()`:
+    // whether every argument's expression is an identifier or member reference
+    // whose inferred name equals the expected parameter's name.
+    bool CanInferAnonymousTypePropertyNamesFromArguments() const;
+
+    // The C# `[Conditional("DEBUG")] public void
+    // CheckNoNamedOrOptionalArguments()`: the debug-only guard the accessor
+    // arms call before their positional render. The port's assert() compiles
+    // out with NDEBUG (the C# Conditional contract).
+    void CheckNoNamedOrOptionalArguments() const;
+};
+
+// The C# `public class CallBuilder`. The port carries the string-concat family
+// and the data carriers first; the instance Build family lands with the call
+// arms.
 class CallBuilder {
 public:
     virtual ~CallBuilder() = default;
+
+    // The C# `public CallBuilder(ExpressionBuilder expressionBuilder,
+    // IDecompilerTypeSystem typeSystem, DecompilerSettings settings)`: the
+    // resolver is read off the builder (the C# `expressionBuilder.resolver`
+    // internal-field read). The null-builder guard ports the C#'s implicit
+    // NullReferenceException (the established invalid_argument convention). The
+    // builder reference is MUTABLE in the C# (BuildStringConcat's Translate
+    // calls mutate the builder's caches), so the port carries a non-const
+    // pointer.
+    CallBuilder(ExpressionBuilder* expressionBuilder,
+                const TS::ICompilation& typeSystem,
+                const DecompilerSettings* settings);
 
     // The C# `internal static bool IsSpanBasedStringConcat(IMethod method)`
     // (CallBuilder.cs lines 300-318): whether the method is a static
     // `string.Concat` whose every parameter is `ReadOnlySpan<char>` -- the
     // span-based overload shape the C# compiler emits for `s += "literal"`.
-    // Recognized by the method name, the static form, the
-    // System.String declaring type (the C# `DeclaringType.IsKnownType
-    // (KnownTypeCode.String)` extension), and the per-parameter
-    // `ReadOnlySpan<char>` element check (`p.Type.TypeArguments[0]`).
     // Implemented out-of-line in the .cpp.
     static bool IsSpanBasedStringConcat(const TS::IMethod& method);
+
+    // The C# `static bool IsSpanBasedStringConcat(CallInstruction call, out
+    // List<(ILInstruction, KnownTypeCode)>? operands)` (CallBuilder.cs lines
+    // 275-298): the argument walk over the span-based call -- each argument is
+    // either the `string -> ReadOnlySpan<char>` op_Implicit conversion call
+    // (its single argument is a String operand) or the
+    // `newobj ReadOnlySpan<char>(&c)` constructor over an AddressOf (the
+    // referenced value is a Char operand); any other shape rejects the whole
+    // call. The `call.Arguments.Count >= 2 && firstStringArgumentIndex <= 1`
+    // tail requires at least one STRING argument in the first two slots (the
+    // C# `int?` comparison is lifted: no string argument at all answers
+    // false). Returns the operands (empty on the method-shaped-but-no-operand
+    // degenerate) or nullopt.
+    static bool IsSpanBasedStringConcat(
+        const IL::Call& call,
+        std::optional<std::vector<std::pair<IL::ILInstruction*, TS::KnownTypeCode>>>&
+            operands);
+
+    // The C# `internal static bool
+    // IsStringToReadOnlySpanCharImplicitConversion(IMethod method)` (lines
+    // 322-330): the `string -> ReadOnlySpan<char>` op_Implicit operator.
+    static bool IsStringToReadOnlySpanCharImplicitConversion(
+        const TS::IMethod* method);
+
+    // The C# `private ExpressionWithResolveResult BuildStringConcat(IMethod
+    // method, List<(ILInstruction, KnownTypeCode)> operands)` (lines 227-252):
+    // the `s1 + s2 + ...` fold -- every operand translated to its type code's
+    // type and folded left-associatively with the SAME MemberResolveResult(null,
+    // method) annotation on every node.
+    ExpressionWithResolveResult BuildStringConcat(
+        const TS::IMethod& method,
+        const std::vector<std::pair<IL::ILInstruction*, TS::KnownTypeCode>>& operands);
+
+private:
+    ExpressionBuilder* expressionBuilder_ = nullptr;
+    std::shared_ptr<const Resolver::CSharpResolver> resolver_;
+    const DecompilerSettings* settings_ = nullptr;
+    const TS::ICompilation* typeSystem_ = nullptr;
 };
 
 } // namespace ILSpy::Decompiler::CSharp

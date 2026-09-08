@@ -17,6 +17,9 @@
 // DEALINGS IN THE SOFTWARE.
 
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
+#include "Decompiler/IL/Transforms/ILInlining.hpp"
+#include "Decompiler/TypeSystem/IParameter.hpp"
+#include "Decompiler/TypeSystem/TypeSystemExtensions.hpp"
 #include "Decompiler/IL/ControlFlow/VariableUsage.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/VariableKind.hpp"
@@ -113,6 +116,44 @@ bool MethodRequiresCopyForReadonlyLValue(const TypeSystem::IMethod* method,
     if (method->ThisIsRefReadOnly())
         return false;
     return true;
+}
+
+// The C# `internal static bool IsReadOnlySpanCharCtor(IMethod method)`
+// (IL/Transforms/ILInlining.cs line 541): a one-parameter constructor over the
+// closed `ReadOnlySpan<char>` instantiation whose parameter is
+// `ref readonly char` (a ByReferenceType whose element is Char). The C#
+// `DeclaringType.TypeArguments[0]` ports through the ParameterizedType
+// dispatch (a non-ParameterizedType declaring type answers false -- the
+// CallBuilder divergence note; an `IsKnownType(ReadOnlySpanOfT)` declaring type
+// is always a closed ParameterizedType in practice).
+bool IsReadOnlySpanCharCtor(const TypeSystem::IMethod* method) {
+    if (method == nullptr || !method->IsConstructor())
+        return false;
+    auto parameters = method->Parameters();
+    if (parameters.size() != 1)
+        return false;
+    TypeSystem::ITypePtr declaringType = method->DeclaringType();
+    if (!declaringType
+        || !TypeSystem::IsKnownType(*declaringType,
+                                        TypeSystem::KnownTypeCode::ReadOnlySpanOfT)) {
+        return false;
+    }
+    auto* parameterized =
+        dynamic_cast<const TypeSystem::ParameterizedType*>(declaringType.get());
+    if (!parameterized || parameterized->TypeArguments().empty())
+        return false;
+    if (!TypeSystem::IsKnownType(*parameterized->TypeArguments()[0],
+                                     TypeSystem::KnownTypeCode::Char)) {
+        return false;
+    }
+    auto* parameterType = parameters[0] != nullptr
+                              ? &parameters[0]->Type()
+                              : nullptr;
+    auto* byRef = dynamic_cast<const TypeSystem::ByReferenceType*>(parameterType);
+    if (!byRef)
+        return false;
+    return TypeSystem::IsKnownType(*byRef->Element(),
+                                       TypeSystem::KnownTypeCode::Char);
 }
 
 // True when `inst` sits in the constructor initializer (before the chained

@@ -2412,6 +2412,49 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   the 2 standing skips / zero failures, and all four CLI baselines unchanged
   (--csharp mscorlib 10106366 bytes, --il byte-identical to the
   41246545-byte real-ilspycmd gold, -l c 109438, --json-alone rc 64).
+- **`CallBuilder` slice 1 -- the data carriers + the span-based string-concat
+  family** -- `CallBuilder.{hpp,cpp}` now carries the C# nested structs
+  (`ExpectedTargetDetails`, the `ArgumentList` with its full helper surface:
+  `GetArgumentNames` with the primitive-fill rule whose C# local ALIASES the
+  field's array (the fills mutate the stored array in place when engaged; a
+  fresh never-stored-back local when disengaged -- the port reproduces the
+  aliasing), `GetArgumentResolveResults` with the implicitly-typed-out rule
+  (an Out parameter over a `ByReferenceType` argument answers a FRESH
+  `OutVarResolveResult` over the reference's element type -- a resolve
+  result NOT attached to the node, so the returned shared handles own the
+  fresh instances and alias the annotation channel for the plain ones),
+  `GetArgumentResolveResultsDirect`, `GetArgumentExpressions` with the
+  `NamedArgumentExpression` wrapping + the `UseImplicitlyTypedOutAnnotation`
+  application, `CanInferAnonymousTypePropertyNamesFromArguments`, and the
+  DEBUG `CheckNoNamedOrOptionalArguments`), plus the string-concat family:
+  the `IsSpanBasedStringConcat(Call, out operands)` argument walk (the
+  `op_Implicit string -> ReadOnlySpan<char>` conversion-call arm and the
+  `newobj ReadOnlySpan<char>(&c)`-over-`AddressOf` arm, with the C#
+  out-parameter shape -- the collected operand list SURVIVES a failing count
+  check, only a failing method check leaves the out param null),
+  `IsStringToReadOnlySpanCharImplicitConversion`, and `BuildStringConcat`
+  (the `s1 + s2 + ...` left-associative fold whose ONE
+  `MemberResolveResult(null, method)` annotation is reused for every node).
+  Enabling pieces: the `Call` IL node gained the C# `Method`/`IsTail`/
+  `ConstrainedTo` surface (the resolved `IMethod` optional on the seed path;
+  the reader wires it when the type-system plumbing reaches it), the new
+  `IL/Instructions/AddressOf.hpp` node class (the generated `AddressOf`:
+  one Value child, the Type operand, ResultType Ref, DirectFlags None with
+  the child-flags delegation -- plus the clone case), and
+  `ILInlining::IsReadOnlySpanCharCtor` (the 6-line static the concat walk
+  consumes). The `UseImplicitlyTypedOutAnnotation` gained the owning
+  `SharedInstance()` handle the annotation channel needs. Verified by the
+  24-test `ArgumentListTest` / `StringConcatDetectionTest` /
+  `BuildStringConcatTest` suites over the MinimalCorlib fixture (the
+  argument-count slices, the fill matrix incl. the field-aliasing mutation,
+  the out-var rule, the named-argument wrapping + annotation, the inference
+  matrix, the conversion/ctor matrices, the call walk incl. the surviving
+  -operand shapes, and the fold with the shared resolve result), proven
+  with a 3-behavior neuter RED round (the index bound, the shared result,
+  the expanded-form gate) then restored green; full suite 12113 ran /
+  12111 passed / the 2 standing skips / zero failures, and all four CLI
+  baselines unchanged (--csharp mscorlib 10106366 bytes, --il whole-module
+  41246545 bytes, -l c 109438, --json-alone rc 64).
 - **`CSharp/Resolver` leaves (in progress -- the `CSharpResolver` dependency
   surface)** -- `cpp/Decompiler/CSharp/Resolver/` now holds **13** ported leaves
   toward the `CSharpResolver` leaf deps (the long-pole remaining blocker of

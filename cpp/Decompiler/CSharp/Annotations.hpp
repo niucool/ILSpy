@@ -230,6 +230,10 @@ public:
         static const UseImplicitlyTypedOutAnnotation instance;
         return instance;
     }
+    // The port's owning shared handle of the same singleton (the annotation
+    // channel owns via shared_ptr; the CheckedAnnotationHandle convention) --
+    // `Instance()` stays the reference-identity read the C# shape carries.
+    static std::shared_ptr<UseImplicitlyTypedOutAnnotation> SharedInstance();
 };
 
 // ---------------------------------------------------------------------------

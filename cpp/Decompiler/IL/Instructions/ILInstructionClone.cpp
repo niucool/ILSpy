@@ -38,6 +38,7 @@
 #include "Decompiler/IL/ILInstruction.hpp"
 
 #include "Decompiler/IL/Instructions/ArrayInstructions.hpp"
+#include "Decompiler/IL/Instructions/AddressOf.hpp"
 #include "Decompiler/IL/Instructions/BinaryNumericInstruction.hpp"
 #include "Decompiler/IL/Instructions/BitNot.hpp"
 #include "Decompiler/IL/Instructions/Block.hpp"
@@ -404,8 +405,17 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
             clone->IsOperator = s.IsOperator;
             clone->TypeArgumentsCount = s.TypeArgumentsCount;
             clone->IsLifted = s.IsLifted;
+            clone->Method = s.Method;
+            clone->IsTail = s.IsTail;
+            clone->ConstrainedTo = s.ConstrainedTo;
             for (auto& a : s.Arguments) clone->AddArg(a ? a->Clone() : nullptr);
             c = std::move(clone);
+            break;
+        }
+        case OpCode::AddressOf: {
+            const auto& s = static_cast<const AddressOf&>(*this);
+            c = std::make_unique<AddressOf>(s.Argument ? s.Argument->Clone() : nullptr,
+                s.Type);
             break;
         }
         case OpCode::MatchInstruction: {

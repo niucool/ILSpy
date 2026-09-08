@@ -160,4 +160,14 @@ Syntax::ForeachStatement* WithILVariable(Syntax::ForeachStatement& loop,
     return &loop;
 }
 
+// The C# `UseImplicitlyTypedOutAnnotation.Instance` shared handle (the port's
+// annotation channel owns via shared_ptr; the aliasing-shared_ptr convention --
+// the static Instance() object aliased with a no-op deleter).
+std::shared_ptr<UseImplicitlyTypedOutAnnotation>
+UseImplicitlyTypedOutAnnotation::SharedInstance() {
+    return std::shared_ptr<UseImplicitlyTypedOutAnnotation>(
+        const_cast<UseImplicitlyTypedOutAnnotation*>(&Instance()),
+        [](UseImplicitlyTypedOutAnnotation*) {});
+}
+
 }  // namespace ILSpy::Decompiler::CSharp

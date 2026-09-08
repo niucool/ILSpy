@@ -123,6 +123,15 @@ ILInstruction* TopLevelStatement(const ILInstruction* inst);
 bool MethodRequiresCopyForReadonlyLValue(const TypeSystem::IMethod* method,
                                          const TypeSystem::IType* constrainedTo = nullptr);
 
+// The C# `internal static bool IsReadOnlySpanCharCtor(IMethod method)`
+// (IL/Transforms/ILInlining.cs line 541): whether the method is the
+// `ReadOnlySpan<char>..ctor(ref readonly char)` constructor -- a one-parameter
+// constructor whose declaring type is the closed `ReadOnlySpan<char>` generic
+// instantiation and whose parameter type is `ref readonly char` (a
+// ByReferenceType over Char). The CallBuilder's span-based string-concat
+// detection walks it over the `newobj ReadOnlySpan<char>(&c)` operand shapes.
+bool IsReadOnlySpanCharCtor(const TypeSystem::IMethod* method);
+
 class ILInlining : public IILTransform, public IStatementTransform {
 public:
     // IILTransform: the whole-function inlining pass (runs early in the

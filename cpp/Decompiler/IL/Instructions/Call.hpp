@@ -23,6 +23,7 @@
 #pragma once
 
 #include "Decompiler/IL/ILInstruction.hpp"
+#include "Decompiler/TypeSystem/IMethod.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
 
 #include <memory>
@@ -113,6 +114,23 @@ public:
     // so a default-false call never trips that bail). It is a settable field so
     // a future resolver-backed path can mark a lifted operator call.
     bool IsLifted = false;
+
+    // The C# `public readonly IMethod Method` -- the resolved method identity the
+    // CSharp back end consumes (the CallBuilder's MemberResolveResult render, the
+    // span-based string-concat detection, the accessor/operator checks). Null on
+    // the seed path (the IL reader fills the MethodName/flag stand-ins above; the
+    // call arms that need the IMethod are not yet wired into the reader), so every
+    // consumer must null-check before dereferencing -- the same optional-method
+    // shape the UserDefinedCompoundAssign upgrade carried before its second ctor
+    // landed. Set directly by tests (the FakeMethod/LookupMethod fixtures) and
+    // later by the reader once the type-system plumbing reaches it.
+    std::shared_ptr<TypeSystem::IMethod> Method;
+    // The C# `public bool IsTail` -- whether the call carries the IL 'tail.'
+    // prefix (the C# surfaces it as an inline `/*tail.*/` comment marker).
+    bool IsTail = false;
+    // The C# `public IType? ConstrainedTo` -- the type operand of the
+    // 'constrained.' prefix; null when no prefix exists.
+    TypeSystem::ITypePtr ConstrainedTo;
 
     explicit Call(std::string method = std::string()) : ILInstruction(OpCode::Call), MethodName(std::move(method)) {}
 
