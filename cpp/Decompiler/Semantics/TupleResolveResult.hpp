@@ -26,24 +26,24 @@
 // singleton the None/Null-branch returns), `TypeKind` (D271, the `None`/`Null`
 // discriminator).
 //
-// The C# ctor takes an `ICompilation` (used by the C# `TupleType` ctor's
-// `CreateUnderlyingType` / `FindValueTupleType` recursion which calls
-// `ICompilation.FindType` at runtime to build the `System.ValueTuple<...>` chain), a
-// nullable `ImmutableArray<string> elementNames`, and a nullable `IModule
-// valueTupleAssembly`. The D405 minimal port of `TupleType` DEFERRED that
-// `ICompilation`-driven construction by accepting an ALREADY-BUILT `UnderlyingType` as
-// a ctor parameter; this `TupleResolveResult` port follows the same deferral -- the C++
-// ctor accepts a pre-built `underlyingType` (`ITypePtr`, the `System.ValueTuple<...>`
-// parameterized type) in place of the `ICompilation` / `valueTupleAssembly` pair, so the
-// leaf needs no `ICompilation` at construction. The `GetTupleType` helper's None/Null
-// early-return (which yields `SpecialType.NoType` when any element's type is
-// `TypeKind.None` or `TypeKind.Null`) IS ported faithfully.
+// The C# ctor takes an `ICompilation` (threaded to the C# `TupleType` ctor's
+// `CreateUnderlyingType` / `FindValueTupleType` recursion which resolves the
+// `System.ValueTuple<...>` chain through the `valueTupleAssembly` module first and the
+// compilation-wide `ICompilation.FindType` fallback second), a nullable
+// `ImmutableArray<string> elementNames`, and a nullable `IModule valueTupleAssembly`.
+// The D405 minimal `TupleType` port had DEFERRED that `ICompilation`-driven
+// construction by accepting an ALREADY-BUILT `UnderlyingType`; the compilation-driven
+// `CreateTupleType` factory has since landed, so the deferral is LIFTED and the ctor
+// takes the full C# signature. The `GetTupleType` helper's None/Null early-return
+// (which yields `SpecialType.NoType` when any element's type is `TypeKind.None` or
+// `TypeKind.Null`) ports faithfully on top of it.
 
 #ifndef ILSPY_DECOMPILER_SEMANTICS_TUPLERESOLVERESULT_HPP
 #define ILSPY_DECOMPILER_SEMANTICS_TUPLERESOLVERESULT_HPP
 
 #include "Decompiler/Semantics/ResolveResult.hpp"
 #include "Decompiler/TypeSystem/IType.hpp"
+#include "Decompiler/TypeSystem/TupleType.hpp"  // CreateTupleType (the lifted D405 deferral)
 
 #include <memory>
 #include <optional>
@@ -64,15 +64,12 @@ namespace ILSpy::Decompiler::Semantics {
 //     `TypeKind.None` or `TypeKind.Null`, else `new TupleType(...)`.
 //
 // KEY PORT CONVENTIONS:
-//  * The C# `ICompilation compilation` / `IModule valueTupleAssembly` pair (used by the
-//    C# `TupleType` ctor to call `ICompilation.FindType` and build the
-//    `System.ValueTuple<...>` chain at runtime) is DEFERRED. The C++ ctor accepts a
-//    pre-built `underlyingType` (`ITypePtr`, the `System.ValueTuple<...>`
-//    parameterized type) in their place -- the D405 `TupleType` minimal-port deferral
-//    convention. The caller builds the underlying type and hands it in, so the leaf
-//    needs no `ICompilation` at construction. The `underlyingType` is used only in the
-//    `GetTupleType` else-branch (the normal tuple case); the None/Null early-return
-//    discards it.
+//  * The C# `ICompilation compilation` / `IModule valueTupleAssembly` pair (threaded
+//    by `GetTupleType` to the `CreateTupleType` factory, which resolves the
+//    `System.ValueTuple<...>` chain through the value-tuple-assembly definition first
+//    and the compilation-wide `FindType` fallback second). The former D405 deferral
+//    (a pre-built `underlyingType` ctor parameter) was lifted when `CreateTupleType`
+//    landed; the None/Null early-return discards the pair exactly as before.
 //  * The C# `ImmutableArray<ResolveResult> elements` (a non-null value-type array the
 //    ctor does NOT guard with `ArgumentNullException` -- an `ImmutableArray` is a value
 //    type, never null as a reference) ports to a `std::vector<std::shared_ptr<ResolveResult>>`
@@ -98,8 +95,8 @@ namespace ILSpy::Decompiler::Semantics {
 //    inline helper (D433, `SpecialType(TypeKind::None)`). The else-branch builds the
 //    `elementTypes` from the elements' `Type()` via the `shared_from_this` bridge (the
 //    D437 `MemberResolveResult::ComputeType` pattern: `const_cast<IType&>(type).shared_from_this()`
-//    -- the `IType` is `shared_ptr`-owned throughout the port, D271/D406) and constructs a
-//    `TupleType(underlyingType, elementTypes, elementNames)`.
+//    -- the `IType` is `shared_ptr`-owned throughout the port, D271/D406) and constructs
+//    the `TupleType` through `CreateTupleType` (the compilation-driven factory).
 //  * The C# `override IEnumerable<ResolveResult> GetChildResults()` returns `Elements`
 //    directly (a 2-tuple yields 2 children, a 3-tuple 3). The base default returns empty,
 //    but this override returns the elements. The snapshot is
@@ -117,17 +114,21 @@ namespace ILSpy::Decompiler::Semantics {
 //    the base `type_` shared_ptr, faithfully mirroring the C# reference-copy).
 class TupleResolveResult : public ResolveResult {
 public:
-    // The C++ ctor: defers the C# `ICompilation` / `valueTupleAssembly` pair (used by the
-    // C# `TupleType` ctor to build the `System.ValueTuple<...>` chain via
-    // `ICompilation.FindType` at runtime) by accepting a pre-built `underlyingType`
-    // (the `System.ValueTuple<...>` parameterized type). The `elementNames` defaults to
+    // The C++ ctor: the C#-faithful signature `TupleResolveResult(ICompilation compilation,
+    // ImmutableArray<ResolveResult> elements, ImmutableArray<string> elementNames = default,
+    // IModule valueTupleAssembly = null)`: the compilation and the module (the assembly
+    // defining `System.ValueTuple`, nullable) are threaded to `GetTupleType` which resolves
+    // the underlying `System.ValueTuple<...>` chain through the ported `CreateTupleType`
+    // factory (the value-tuple-assembly definition first, the compilation-wide lookup
+    // fallback second -- the `FindValueTupleType` order). The `elementNames` defaults to
     // `std::nullopt` (the C# `default(ImmutableArray<string>)` "not provided" sentinel).
-    // The `elements` vector is stored (shared ownership); the `elementNames` and
-    // `underlyingType` are threaded to `GetTupleType` to build the base type.
-    TupleResolveResult(std::vector<std::shared_ptr<ResolveResult>> elements,
+    // The `elements` vector is stored (shared ownership, the C# GC references the
+    // caller's resolve results).
+    TupleResolveResult(const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
+                       std::vector<std::shared_ptr<ResolveResult>> elements,
                        std::optional<std::vector<std::string>> elementNames = std::nullopt,
-                       ILSpy::Decompiler::TypeSystem::ITypePtr underlyingType = nullptr)
-        : ResolveResult(GetTupleType(elements, elementNames, std::move(underlyingType))),
+                       const ILSpy::Decompiler::TypeSystem::IModule* valueTupleAssembly = nullptr)
+        : ResolveResult(GetTupleType(compilation, elements, elementNames, valueTupleAssembly)),
           elements_(std::move(elements)) {}
 
     // The C# `ImmutableArray<ResolveResult> Elements` -- the tuple's element results.
@@ -167,21 +168,16 @@ private:
     // The C# `static IType GetTupleType(ICompilation compilation,
     // ImmutableArray<ResolveResult> elements, ImmutableArray<string> elementNames,
     // IModule valueTupleAssembly)`: returns `SpecialType.NoType` when any element's type
-    // is `TypeKind.None` or `TypeKind.Null`, else `new TupleType(...)`. The C++ port
-    // defers the `ICompilation` / `valueTupleAssembly` pair (used by the C# `TupleType`
-    // ctor to build the `System.ValueTuple<...>` chain via `ICompilation.FindType`) by
-    // accepting a pre-built `underlyingType` (the D405 `TupleType` minimal-port deferral).
-    //
-    // The None/Null early-return ports the C# `elements.Any(...)` as a loop over the
-    // elements' `Type().Kind()`; `SpecialType.NoType` ports to the `NoType()` inline
-    // helper (D433). The else-branch builds the `elementTypes` from the elements' `Type()`
-    // via the `shared_from_this` bridge (the D437 `ComputeType` pattern -- the `IType` is
-    // `shared_ptr`-owned throughout the port, D271/D406) and constructs a
-    // `TupleType(underlyingType, elementTypes, elementNames)`.
+    // is `TypeKind.None` or `TypeKind.Null`, else `new TupleType(...)`. The
+    // `ICompilation` / `valueTupleAssembly` pair resolves the underlying
+    // `System.ValueTuple<...>` chain through the ported `CreateTupleType` factory (the
+    // value-tuple-assembly definition first, the compilation-wide lookup fallback --
+    // the `FindValueTupleType` order the C# `TupleType` ctor spells).
     static ILSpy::Decompiler::TypeSystem::ITypePtr GetTupleType(
+        const ILSpy::Decompiler::TypeSystem::ICompilation& compilation,
         const std::vector<std::shared_ptr<ResolveResult>>& elements,
         const std::optional<std::vector<std::string>>& elementNames,
-        ILSpy::Decompiler::TypeSystem::ITypePtr underlyingType) {
+        const ILSpy::Decompiler::TypeSystem::IModule* valueTupleAssembly) {
         namespace TS = ILSpy::Decompiler::TypeSystem;
         // The C# `elements.Any(e => e.Type.Kind == TypeKind.None || e.Type.Kind == TypeKind.Null)`.
         for (const auto& e : elements) {
@@ -190,20 +186,15 @@ private:
                 return TS::NoType();
         }
         // The C# `new TupleType(compilation, elements.Select(e => e.Type).ToImmutableArray(),
-        // elementNames, valueTupleAssembly)`. The D405 minimal port defers the
-        // `ICompilation`-driven `CreateUnderlyingType` / `FindValueTupleType` recursion,
-        // so the `underlyingType` is pre-built by the caller.
+        // elementNames, valueTupleAssembly)` -- the compilation-driven construction
+        // building the `System.ValueTuple<...>` chain at runtime.
         std::vector<TS::ITypePtr> elementTypes;
         elementTypes.reserve(elements.size());
         for (const auto& e : elements) {
             elementTypes.push_back(const_cast<TS::IType&>(e->Type()).shared_from_this());
         }
-        std::vector<std::string> names;
-        if (elementNames.has_value())
-            names = *elementNames;
-        return std::make_shared<TS::TupleType>(std::move(underlyingType),
-                                                std::move(elementTypes),
-                                                std::move(names));
+        return TS::CreateTupleType(compilation, std::move(elementTypes),
+                                   elementNames, valueTupleAssembly);
     }
 
     std::vector<std::shared_ptr<ResolveResult>> elements_;

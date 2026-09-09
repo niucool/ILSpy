@@ -54,6 +54,8 @@
 #include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TupleExpression.hpp"
+#include "Decompiler/Semantics/TupleResolveResult.hpp"
 #include "Decompiler/CSharp/Resolver/MemberLookup.hpp"
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/Semantics/InitializedObjectResolveResult.hpp"
@@ -1764,10 +1766,69 @@ TranslatedExpression CallBuilder::Build(const IL::Call& inst, const TS::IType* t
         std::vector<IL::ILInstruction*> tupleElements;
         if (MatchTupleConstruction(&inst, tupleElements) && tupleElements.size() >= 2)
         {
-            // The C# tuple-expression render (the TupleExpression +
-            // TupleResolveResult arm) is DEFERRED with its slice.
-            throw std::logic_error("The tuple-construction arm is deferred with the "
-                                   "TupleExpression slice (CallBuilder.cs lines 209-240)");
+            // The C# tuple-expression render (CallBuilder.cs lines 209-240): the
+            // TupleExpression + TupleResolveResult arm.
+            auto elementTypes = TS::GetTupleElementTypes(*inst.Method->DeclaringType());
+            // C# `typeHint is TupleType tt ? tt.ElementNames : default`.
+            std::optional<std::vector<std::string>> elementNames;
+            if (const auto* tupleHint = dynamic_cast<const TS::TupleType*>(typeHint))
+                elementNames = tupleHint->ElementNames();
+            // The C# `Debug.Assert(!elementTypes.IsDefault, ...)` and
+            // `Debug.Assert(elementTypes.Length == tupleElements.Length)` are
+            // compiled out of the release engine; the port keeps them as assert().
+            assert(elementTypes.has_value());
+            assert(elementTypes->size() == tupleElements.size());
+            auto* tuple = new Syntax::TupleExpression();
+            std::vector<std::shared_ptr<Sem::ResolveResult>> elementRRs;
+            for (std::size_t index = 0; index < tupleElements.size(); index++)
+            {
+                // ConvertTo takes a NON-CONST IType& (the ChangeNullability shared_from_this
+                // convention), so the element handle derefs non-const; the visitor never
+                // mutates the hint type.
+                TS::IType& elementType = *(*elementTypes)[index];
+                TranslatedExpression translatedElement =
+                    expressionBuilder_->Translate(tupleElements[index], &elementType)
+                        .ConvertTo(elementType, *expressionBuilder_,
+                                   /*checkForOverflow=*/false,
+                                   /*allowImplicitConversion=*/true);
+                // C# `elementNames.IsDefaultOrEmpty || elementNames.
+                // ElementAtOrDefault(index) is not string { Length: > 0 }` -- a null
+                // OR empty name renders the bare element (the port's ElementNames
+                // maps the C# null entries to empty strings, so one check covers
+                // both).
+                const bool hasName = elementNames.has_value() && !elementNames->empty()
+                    && index < elementNames->size() && !(*elementNames)[index].empty();
+                if (!hasName)
+                {
+                    tuple->Elements().Add(translatedElement.Expression());
+                }
+                else
+                {
+                    tuple->Elements().Add(new Syntax::NamedArgumentExpression(
+                        (*elementNames)[index], translatedElement.Expression()));
+                }
+                // C# `elementRRs.Add(translatedElement.ResolveResult)` -- the C#
+                // GC references the element resolve result; the port needs the
+                // OWNING shared handle off the node's annotation channel (the
+                // UnknownError fallback path leaves no annotation, so the alias
+                // over the raw pointer covers that shape).
+                std::shared_ptr<Sem::ResolveResult> elementRR =
+                    SharedResolveResultAnnotation(*translatedElement.Expression());
+                if (!elementRR)
+                    elementRR = AliasResolveResult(translatedElement.ResolveResult());
+                elementRRs.push_back(std::move(elementRR));
+            }
+            // C# `inst.Method.DeclaringType.GetDefinition()?.ParentModule`.
+            const TS::ITypeDefinition* valueTupleDef =
+                inst.Method->DeclaringType()->GetDefinition();
+            const TS::IModule* valueTupleAssembly =
+                valueTupleDef != nullptr ? valueTupleDef->ParentModule() : nullptr;
+            return WithILInstruction(
+                WithRR(*tuple, std::make_shared<Sem::TupleResolveResult>(
+                                  *expressionBuilder_->compilation,
+                                  std::move(elementRRs), std::move(elementNames),
+                                  valueTupleAssembly)),
+                const_cast<IL::ILInstruction*>(static_cast<const IL::ILInstruction*>(&inst)));
         }
     }
     {

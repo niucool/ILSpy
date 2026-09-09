@@ -2589,6 +2589,27 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   standing skips / zero regressions, and all four CLI baselines unchanged (--csharp mscorlib
   10106366 bytes, --il whole-module byte-identical to the 41246545-byte real-ilspycmd gold,
   -l c 109438, the --json usage check rc 64).
+- **`CallBuilder` slice 7 -- the tuple-expression render** -- the LAST `Build(CallInstruction)`
+  loud deferral lifted (`CallBuilder.cs` lines 209-240): over a matching
+  `TupleTransform.MatchTupleConstruction` newobj (arity >= 2, the `TupleTypes` setting on),
+  the render builds a `Syntax::TupleExpression` whose elements are the translated tuple
+  elements (`Translate` against the declaring type's type argument as the hint, then
+  `ConvertTo(..., allowImplicitConversion: true)`), wrapped in `NamedArgumentExpression`
+  where the `typeHint is TupleType` element names carry a non-empty name, annotated with
+  a `TupleResolveResult` over the element resolve results. The companion change lifts the
+  `TupleResolveResult` ctor to the C#-faithful signature `(ICompilation, elements,
+  elementNames, valueTupleAssembly)` -- the D405 pre-built-underlying deferral
+  (`GetTupleType` now resolves the underlying `System.ValueTuple<...>` chain through the
+  ported `CreateTupleType` factory, the value-tuple-assembly definition first and the
+  compilation-wide lookup fallback second), with the existing `TranslatedExpression.
+  ConvertTo` tuple-arm call site re-shaped onto it (the C# passes NO elementNames there).
+  Verified by 5 new tests over the MinimalCorlib fixture (the bare render with element
+  structure/type/IL-annotation pins, the named-hint render with the resolve-result
+  ElementNames pin, the non-tuple hint rendering bare elements, the below-two-elements
+  fall-through to the mainline constructor call, and the `TupleTypes` setting gate),
+  proven with a 2-behavior neuter RED round (the typeHint names read + the
+  NamedArgumentExpression arm) then restored green; full suite 12253 ran / 12251 passed /
+  the 2 standing skips / zero regressions.
 - **`ExpressionBuilder` TranslateTarget call-target arm + the IL match helpers**
   -- `ExpressionBuilder::TranslateTarget` (ExpressionBuilder.cs lines 2734-2844:
   the call/field target translation the `CallBuilder.Build` entry and the

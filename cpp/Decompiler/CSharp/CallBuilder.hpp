@@ -40,8 +40,9 @@
 // PinTypesOfNullArguments / NewAnonymousTypeInstance over the NRExtensions
 // predicate family), and the call-build composition itself: the
 // Build(CallInstruction) entry (the delegate-construction arm renders through
-// HandleDelegateConstruction; the tuple arm DEFERs
-// loudly, the span-based string-concat arm wired) and the mainline
+// HandleDelegateConstruction; the tuple arm renders the TupleExpression +
+// TupleResolveResult pair over the MatchTupleConstruction flattening; the
+// span-based string-concat arm wired) and the mainline
 // Build(OpCode, ...) body -- the EII sealed-class rewrite, the local-function
 // target arm (with ExpressionBuilder.ResolveLocalFunction and ToMethodGroup),
 // the TranslateTarget + boxing unwrap, the VarArgInstanceMethod arm, the
@@ -53,9 +54,13 @@
 // StatementBuilder slice; the CastArguments lambda-return-type arm is deferred
 // with ModifyReturnTypeOfLambda/DecompiledLambdaResolveResult.
 //
-// The remaining render arm is one loud deferral behind its real C# gate
-// condition: TupleTransform.MatchTupleConstruction's tuple-expression render
-// (the TupleExpression slice). The delegate-reference family
+// Every render arm of the Build(CallInstruction) entry and the mainline is now
+// ported: the tuple-expression render (the TupleExpression + TupleResolveResult
+// pair over the MatchTupleConstruction flattening, with the typeHint's element
+// names driving the NamedArgumentExpression wrappers) landed with the
+// TupleResolveResult ctor upgrade to the C# compilation-driven signature (the
+// D405 pre-built-underlying deferral lifted through the ported CreateTupleType).
+// The delegate-reference family
 // (HandleDelegateConstruction + CanUseDelegateConstruction +
 // BuildDelegateReference/DisambiguateDelegateReference +
 // IsUnambiguousMethodReference + BuildMethodReference + Build(LdVirtDelegate))
@@ -509,10 +514,10 @@ public:
     // InlineArray and GetValueOrDefault arms, the
     // GetRequiredTransformationsForCall fix ladder, and the final
     // RequireTarget/RequireTypeArguments invocation render.
-    // HandleRangeConstruction is ported; the tuple-expression render is the
-    // remaining loud deferral behind its real C# gate condition (the
-    // accessor-call slice, the interpolation slice, the constructor-call
-    // slice, and the delegate-reference family are ported now).
+    // HandleRangeConstruction is ported; the accessor-call, interpolation,
+    // constructor-call, delegate-reference, and tuple-expression renders are
+    // ported too (the tuple-expression render lands with the TupleResolveResult
+    // ctor upgrade to the C# compilation-driven signature).
     ExpressionWithResolveResult Build(
         IL::OpCode callOpCode, const TS::IMethod& method,
         const std::vector<IL::ILInstruction*>& callArguments,

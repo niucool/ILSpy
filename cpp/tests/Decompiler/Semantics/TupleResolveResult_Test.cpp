@@ -38,6 +38,7 @@
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/TypeSystem/TopLevelTypeName.hpp"
 #include "Decompiler/TypeSystem/TypeKind.hpp"
+#include "Decompiler/TypeSystem/LookupStubs.hpp"
 
 #include <gtest/gtest.h>
 
@@ -60,27 +61,15 @@ using ILSpy::Decompiler::TypeSystem::SpecialType;
 using ILSpy::Decompiler::TypeSystem::TopLevelTypeName;
 using ILSpy::Decompiler::TypeSystem::TupleType;
 using ILSpy::Decompiler::TypeSystem::TypeKind;
+using ILSpy::Decompiler::TypeSystem::TestSupport::LookupCompilation;
+using ILSpy::Decompiler::TypeSystem::TestSupport::LookupModule;
+using ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition;
 
 namespace {
 
 ITypePtr Int32Type() { return std::make_shared<KnownType>(KnownTypeCode::Int32); }
 ITypePtr StringType() { return std::make_shared<KnownType>(KnownTypeCode::String); }
 
-// The generic definition `System.ValueTuple`2` (the 8-ary `ValueTuple<T1,T2,...,TRest>`
-// family, here arity 2). The minimal-port `SimpleType` carries the arity in the
-// `TopLevelTypeName`.
-ITypePtr ValueTuple2Definition() {
-    return std::make_shared<SimpleType>(TopLevelTypeName("System", "ValueTuple", 2));
-}
-
-// The underlying type of a `(int, string)` tuple: `System.ValueTuple<int, string>`. The
-// `ParameterizedType` wraps the `ValueTuple`2` definition with the element type arguments.
-// This is the pre-built `underlyingType` the C++ ctor accepts in place of the C#
-// `ICompilation` / `valueTupleAssembly` pair (the D405 deferral).
-ITypePtr ValueTupleOfIntString() {
-    return std::make_shared<ParameterizedType>(
-        ValueTuple2Definition(), std::vector<ITypePtr>{Int32Type(), StringType()});
-}
 
 // A `ResolveResult` whose `Type().Kind()` is `TypeKind::None` (the `ThrowResolveResult`
 // forwards `NoType()` to the base) -- exercises the `GetTupleType` None-branch.
@@ -105,11 +94,46 @@ std::shared_ptr<ResolveResult> StringElement() {
     return std::make_shared<TypeResolveResult>(StringType());
 }
 
+// ---------------------------------------------------------------------------
+// The ctor fixture: the compilation + valueTupleAssembly module pair the C#
+// ctor threads to `CreateTupleType`/`FindValueTupleType` (the value-tuple-assembly
+// definition first, the compilation-wide lookup fallback second). The module
+// registers the `System.ValueTuple`1..`8` struct definitions so the underlying
+// chain resolves through the module arm.
+// ---------------------------------------------------------------------------
+LookupCompilation& Comp() {
+    static LookupCompilation comp;
+    return comp;
+}
+
+LookupModule& ValueTupleModule() {
+    struct ModuleFixture {
+        LookupModule module;
+        std::vector<std::shared_ptr<LookupTypeDefinition>> defs;
+        ModuleFixture() : module(Comp(), "ValueTupleLib") {
+            for (int tpc = 1; tpc <= 8; tpc++) {
+                auto def = std::make_shared<LookupTypeDefinition>(
+                    "ValueTuple", "System",
+                    ILSpy::Decompiler::TypeSystem::FullTypeName(
+                        ILSpy::Decompiler::TypeSystem::TopLevelTypeName("System", "ValueTuple", tpc)),
+                    TypeKind::Struct, ILSpy::Decompiler::TypeSystem::Accessibility::Public,
+                    Comp(), &module);
+                defs.push_back(def);
+                module.SetTypeDefinition(
+                    ILSpy::Decompiler::TypeSystem::TopLevelTypeName("System", "ValueTuple", tpc),
+                    def.get());
+            }
+        }
+    };
+    static ModuleFixture fixture;
+    return fixture.module;
+}
+
 } // namespace
 
 TEST(TupleResolveResultTest, CtorStoresElements) {
     std::vector<std::shared_ptr<ResolveResult>> elements{Int32Element(), StringElement()};
-    TupleResolveResult rr(elements, std::nullopt, ValueTupleOfIntString());
+    TupleResolveResult rr(Comp(), elements, std::nullopt, &ValueTupleModule());
     ASSERT_EQ(rr.Elements().size(), 2u);
     EXPECT_EQ(rr.Elements()[0].get(), elements[0].get());
     EXPECT_EQ(rr.Elements()[1].get(), elements[1].get());
@@ -117,7 +141,7 @@ TEST(TupleResolveResultTest, CtorStoresElements) {
 
 TEST(TupleResolveResultTest, CtorAcceptsEmptyElements) {
     std::vector<std::shared_ptr<ResolveResult>> elements;
-    TupleResolveResult rr(elements, std::nullopt, ValueTuple2Definition());
+    TupleResolveResult rr(Comp(), elements, std::nullopt, &ValueTupleModule());
     EXPECT_TRUE(rr.Elements().empty());
 }
 
@@ -125,7 +149,7 @@ TEST(TupleResolveResultTest, GetTupleTypeReturnsTupleTypeForNormalElements) {
     // The normal case: all element types are non-None/non-Null -> the base type is the
     // `TupleType` built from the pre-built `underlyingType` and the element types.
     std::vector<std::shared_ptr<ResolveResult>> elements{Int32Element(), StringElement()};
-    TupleResolveResult rr(elements, std::nullopt, ValueTupleOfIntString());
+    TupleResolveResult rr(Comp(), elements, std::nullopt, &ValueTupleModule());
     EXPECT_EQ(rr.Type().Kind(), TypeKind::Tuple);
 }
 
@@ -134,7 +158,7 @@ TEST(TupleResolveResultTest, GetTupleTypeReturnsNoTypeForNoneKindElement) {
     // `ThrowResolveResult` forwards `NoType()` to its base) -> the base type is
     // `SpecialType.NoType` (Kind == None), NOT the `TupleType`.
     std::vector<std::shared_ptr<ResolveResult>> elements{Int32Element(), NoneKindElement()};
-    TupleResolveResult rr(elements, std::nullopt, ValueTupleOfIntString());
+    TupleResolveResult rr(Comp(), elements, std::nullopt, &ValueTupleModule());
     EXPECT_EQ(rr.Type().Kind(), TypeKind::None);
 }
 
@@ -143,7 +167,7 @@ TEST(TupleResolveResultTest, GetTupleTypeReturnsNoTypeForNullKindElement) {
     // `TypeResolveResult` over a `SpecialType(TypeKind::Null)`) -> the base type is
     // `SpecialType.NoType` (Kind == None), NOT the `TupleType`.
     std::vector<std::shared_ptr<ResolveResult>> elements{NullKindElement(), StringElement()};
-    TupleResolveResult rr(elements, std::nullopt, ValueTupleOfIntString());
+    TupleResolveResult rr(Comp(), elements, std::nullopt, &ValueTupleModule());
     EXPECT_EQ(rr.Type().Kind(), TypeKind::None);
 }
 
@@ -152,7 +176,7 @@ TEST(TupleResolveResultTest, GetTupleTypeNoTypeBranchDiscardsUnderlyingType) {
     // is returned directly, the `TupleType` is never constructed). A `nullptr`
     // `underlyingType` is safe in this branch (the `TupleType` ctor is never reached).
     std::vector<std::shared_ptr<ResolveResult>> elements{NoneKindElement()};
-    TupleResolveResult rr(elements, std::nullopt, nullptr);
+    TupleResolveResult rr(Comp(), elements, std::nullopt, &ValueTupleModule());
     EXPECT_EQ(rr.Type().Kind(), TypeKind::None);
 }
 
@@ -161,7 +185,7 @@ TEST(TupleResolveResultTest, ElementNamesArePassedToTupleType) {
     // ctor. A present vector is passed through; the `TupleType` carries the names.
     std::vector<std::shared_ptr<ResolveResult>> elements{Int32Element(), StringElement()};
     std::vector<std::string> names{"x", "y"};
-    TupleResolveResult rr(elements, names, ValueTupleOfIntString());
+    TupleResolveResult rr(Comp(), elements, names, &ValueTupleModule());
     EXPECT_EQ(rr.Type().Kind(), TypeKind::Tuple);
     // The `TupleType` exposes the `ElementNames` (the names are stored on the type, not
     // the resolve result; the C# `TupleResolveResult` stores only `Elements`).
@@ -177,7 +201,7 @@ TEST(TupleResolveResultTest, ElementNamesNotProvidedDefaultsToEmptyStrings) {
     // fills with empty strings matching the element count (the D405 "not provided"
     // sentinel).
     std::vector<std::shared_ptr<ResolveResult>> elements{Int32Element(), StringElement()};
-    TupleResolveResult rr(elements, std::nullopt, ValueTupleOfIntString());
+    TupleResolveResult rr(Comp(), elements, std::nullopt, &ValueTupleModule());
     EXPECT_EQ(rr.Type().Kind(), TypeKind::Tuple);
     const auto& tupleType = static_cast<const TupleType&>(rr.Type());
     ASSERT_EQ(tupleType.ElementNames().size(), 2u);
@@ -187,7 +211,7 @@ TEST(TupleResolveResultTest, ElementNamesNotProvidedDefaultsToEmptyStrings) {
 
 TEST(TupleResolveResultTest, GetChildResultsReturnsElementsInOrder) {
     std::vector<std::shared_ptr<ResolveResult>> elements{Int32Element(), StringElement()};
-    TupleResolveResult rr(elements, std::nullopt, ValueTupleOfIntString());
+    TupleResolveResult rr(Comp(), elements, std::nullopt, &ValueTupleModule());
     auto children = rr.GetChildResults();
     ASSERT_EQ(children.size(), 2u);
     EXPECT_EQ(children[0], elements[0].get());
@@ -196,7 +220,7 @@ TEST(TupleResolveResultTest, GetChildResultsReturnsElementsInOrder) {
 
 TEST(TupleResolveResultTest, GetChildResultsEmptyWhenNoElements) {
     std::vector<std::shared_ptr<ResolveResult>> elements;
-    TupleResolveResult rr(elements, std::nullopt, ValueTuple2Definition());
+    TupleResolveResult rr(Comp(), elements, std::nullopt, &ValueTupleModule());
     EXPECT_TRUE(rr.GetChildResults().empty());
 }
 
@@ -205,10 +229,7 @@ TEST(TupleResolveResultTest, GetChildResultsCountMatchesElementsCount) {
     std::vector<std::shared_ptr<ResolveResult>> elements{
         Int32Element(), StringElement(),
         std::make_shared<TypeResolveResult>(std::make_shared<KnownType>(KnownTypeCode::Object))};
-    TupleResolveResult rr(elements, std::nullopt,
-                          std::make_shared<ParameterizedType>(
-                              ValueTuple2Definition(),
-                              std::vector<ITypePtr>{Int32Type(), StringType()}));
+    TupleResolveResult rr(Comp(), elements, std::nullopt, &ValueTupleModule());
     // The underlying type is arity-2 but the tuple has 3 elements; the `GetChildResults`
     // returns the 3 elements regardless (the C# `Elements` is the tuple's own element
     // list, not the underlying `ValueTuple<...>` type arguments).
@@ -217,7 +238,7 @@ TEST(TupleResolveResultTest, GetChildResultsCountMatchesElementsCount) {
 
 TEST(TupleResolveResultTest, ToStringReportsSubclassClassNameAndTupleType) {
     std::vector<std::shared_ptr<ResolveResult>> elements{Int32Element(), StringElement()};
-    TupleResolveResult rr(elements, std::nullopt, ValueTupleOfIntString());
+    TupleResolveResult rr(Comp(), elements, std::nullopt, &ValueTupleModule());
     // The inherited `ResolveResult::ToString` yields "[TupleResolveResult <ReflectionName>]".
     // The `TupleType.ReflectionName` delegates to the `UnderlyingType.ReflectionName` -- the
     // `System.ValueTuple<int, string>` parameterized type's `ReflectionName`.
@@ -229,14 +250,14 @@ TEST(TupleResolveResultTest, ToStringReportsSubclassClassNameAndTupleType) {
 
 TEST(TupleResolveResultTest, ShallowClonePreservesRuntimeType) {
     std::vector<std::shared_ptr<ResolveResult>> elements{Int32Element(), StringElement()};
-    TupleResolveResult rr(elements, std::nullopt, ValueTupleOfIntString());
+    TupleResolveResult rr(Comp(), elements, std::nullopt, &ValueTupleModule());
     auto clone = rr.ShallowClone();
     EXPECT_NE(dynamic_cast<TupleResolveResult*>(clone.get()), nullptr);
 }
 
 TEST(TupleResolveResultTest, ShallowCloneSharesElements) {
     std::vector<std::shared_ptr<ResolveResult>> elements{Int32Element(), StringElement()};
-    TupleResolveResult rr(elements, std::nullopt, ValueTupleOfIntString());
+    TupleResolveResult rr(Comp(), elements, std::nullopt, &ValueTupleModule());
     auto clone = rr.ShallowClone();
     auto* cloned = dynamic_cast<TupleResolveResult*>(clone.get());
     ASSERT_NE(cloned, nullptr);
@@ -249,7 +270,7 @@ TEST(TupleResolveResultTest, ShallowCloneSharesElements) {
 
 TEST(TupleResolveResultTest, ShallowCloneSharesTupleType) {
     std::vector<std::shared_ptr<ResolveResult>> elements{Int32Element(), StringElement()};
-    TupleResolveResult rr(elements, std::nullopt, ValueTupleOfIntString());
+    TupleResolveResult rr(Comp(), elements, std::nullopt, &ValueTupleModule());
     auto clone = rr.ShallowClone();
     // The base `type_` shared_ptr is shared through the default copy ctor.
     EXPECT_EQ(&clone->Type(), &rr.Type());
@@ -257,14 +278,14 @@ TEST(TupleResolveResultTest, ShallowCloneSharesTupleType) {
 
 TEST(TupleResolveResultTest, ShallowCloneIsDistinctInstance) {
     std::vector<std::shared_ptr<ResolveResult>> elements{Int32Element(), StringElement()};
-    TupleResolveResult rr(elements, std::nullopt, ValueTupleOfIntString());
+    TupleResolveResult rr(Comp(), elements, std::nullopt, &ValueTupleModule());
     auto clone = rr.ShallowClone();
     EXPECT_NE(clone.get(), &rr);
 }
 
 TEST(TupleResolveResultTest, VirtualDispatchThroughBasePointer) {
     std::vector<std::shared_ptr<ResolveResult>> elements{Int32Element(), StringElement()};
-    TupleResolveResult rr(elements, std::nullopt, ValueTupleOfIntString());
+    TupleResolveResult rr(Comp(), elements, std::nullopt, &ValueTupleModule());
     ResolveResult* base = &rr;
     // The `GetChildResults` virtual dispatches through the base pointer to the
     // `TupleResolveResult` override (returns the 2 elements, not the base empty default).
@@ -276,7 +297,7 @@ TEST(TupleResolveResultTest, VirtualDispatchThroughBasePointer) {
 
 TEST(TupleResolveResultTest, InheritedResolveResultDefaultsArePreserved) {
     std::vector<std::shared_ptr<ResolveResult>> elements{Int32Element(), StringElement()};
-    TupleResolveResult rr(elements, std::nullopt, ValueTupleOfIntString());
+    TupleResolveResult rr(Comp(), elements, std::nullopt, &ValueTupleModule());
     EXPECT_FALSE(rr.IsCompileTimeConstant());
     EXPECT_FALSE(rr.IsError());
     // The `ConstantValue` default is an empty `std::any` (the C# `null`).

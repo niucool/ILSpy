@@ -93,6 +93,7 @@ using ILSpy::Decompiler::TypeSystem::ParameterizedType;
 using ILSpy::Decompiler::TypeSystem::TopLevelTypeName;
 using ILSpy::Decompiler::TypeSystem::TypeKind;
 using ILSpy::Decompiler::TypeSystem::TestSupport::LookupCompilation;
+using ILSpy::Decompiler::TypeSystem::TestSupport::LookupModule;
 using ILSpy::Decompiler::TypeSystem::TestSupport::LookupTypeDefinition;
 
 LookupCompilation& Compilation() {
@@ -144,14 +145,34 @@ std::shared_ptr<ResolveResult> ElementResult(ITypePtr type) {
 	return std::make_shared<ResolveResult>(std::move(type));
 }
 
-// A `TupleResolveResult` carrying the per-element `ResolveResult`s and the pre-built underlying
-// `ValueTuple<...>` (the D405 `TupleType` minimal-port ctor accepts a pre-built underlying, so the
-// `TupleResolveResult` ctor threads it to `GetTupleType`). The `elementNames` default to
+// A `TupleResolveResult` carrying the per-element `ResolveResult`s, built through the
+// C#-faithful ctor over the shared compilation and a valueTupleAssembly module that
+// registers the `System.ValueTuple`8` definition (the C# `FindValueTupleType` resolves
+// the underlying chain through the module arm). The `elementNames` default to
 // `std::nullopt` (the C# `default(ImmutableArray<string>)` "not provided" sentinel).
+// The value-tuple module the `TupleLiteral` helper hands to the C#-faithful ctor (the
+// registered `System.ValueTuple`8` definition covers every arity the tests build).
+struct VtModuleFixture {
+	LookupCompilation comp;
+	LookupModule module;
+	std::shared_ptr<LookupTypeDefinition> def;
+	VtModuleFixture() : module(comp, "VtLib") {
+		def = std::make_shared<LookupTypeDefinition>(
+			"ValueTuple", "System",
+			FullTypeName(TopLevelTypeName("System", "ValueTuple", 8)),
+			TypeKind::Struct, Accessibility::Public, comp, &module);
+		module.SetTypeDefinition(TopLevelTypeName("System", "ValueTuple", 8), def.get());
+	}
+};
+VtModuleFixture& VtFixture() {
+	static VtModuleFixture f;
+	return f;
+}
+
 std::shared_ptr<TupleResolveResult> TupleLiteral(
-		std::vector<std::shared_ptr<ResolveResult>> elements, ITypePtr underlying) {
-	return std::make_shared<TupleResolveResult>(std::move(elements), std::nullopt,
-	                                            std::move(underlying));
+		std::vector<std::shared_ptr<ResolveResult>> elements, ITypePtr /*underlying*/) {
+	return std::make_shared<TupleResolveResult>(VtFixture().comp, std::move(elements),
+	                                            std::nullopt, &VtFixture().module);
 }
 
 } // namespace

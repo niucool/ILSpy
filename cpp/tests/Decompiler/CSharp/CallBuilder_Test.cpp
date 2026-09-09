@@ -60,6 +60,8 @@
 #include "Decompiler/CSharp/Syntax/Expressions/DirectionExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NullReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ObjectCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TupleExpression.hpp"
+#include "Decompiler/Semantics/TupleResolveResult.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/AnonymousTypeCreateExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/NamedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/PrimitiveExpression.hpp"
@@ -2850,31 +2852,223 @@ TEST(BuildEntryTest, RoutesTheSpanBasedStringConcat)
     EXPECT_EQ(result.ILInstructions().front(), static_cast<IL::ILInstruction*>(&call));
 }
 
-TEST(BuildEntryTest, DefersTupleConstructionLoudly)
-{
+// The tuple-expression render (CallBuilder.cs lines 209-240): the fixture builds the
+// instantiated `ValueTuple`2` declaring type (the real-metadata shape -- the C#
+// `newobj Method.DeclaringType` is the SUBSTITUTED type whose type arguments are the
+// element types `GetTupleElementTypes` flattens).
+struct TupleFixture {
     BuilderFixture fixture;
-    fixture.settings.SetTupleTypes(true);
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> tupleDef;
+    TS::ITypePtr declaringType;
+    std::shared_ptr<TS::Implementation::FakeMethod> tupleCtor;
 
-    // newobj ValueTuple`2(a, b) -- the 2-element tuple shape.
-    auto tupleDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
-        "ValueTuple", "System",
-        TS::FullTypeName(TS::TopLevelTypeName("System", "ValueTuple", 2)),
-        TS::TypeKind::Struct, TS::Accessibility::Public, fixture.holder.compilation,
-        &fixture.holder.compilation.MainModule());
-    auto tupleCtor = std::make_shared<TS::Implementation::FakeMethod>(
-        fixture.holder.compilation, TS::SymbolKind::Constructor);
-    tupleCtor->SetName(".ctor");
-    tupleCtor->SetIsStatic(false);
-    tupleCtor->SetDeclaringType(TS::ITypePtr(tupleDef.get(), [](TS::IType*) {}));
+    TS::TestSupport::LookupTypeParameter tp0{"T"};
+    TS::TestSupport::LookupTypeParameter tp1{"T2"};
+
+    TupleFixture()
+    {
+        fixture.settings.SetTupleTypes(true);
+        tupleDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+            "ValueTuple", "System",
+            TS::FullTypeName(TS::TopLevelTypeName("System", "ValueTuple", 2)),
+            TS::TypeKind::Struct, TS::Accessibility::Public, fixture.holder.compilation,
+            &fixture.holder.compilation.MainModule());
+        // The declared type parameters (the TypeSystemAstBuilder's generic-type
+        // render reads them: `ValueTuple<int, string>` over `ValueTuple`2`).
+        tupleDef->SetTypeParameters({&tp0, &tp1});
+        declaringType = std::make_shared<TS::ParameterizedType>(
+            TS::ITypePtr(tupleDef.get(), [](TS::IType*) {}),
+            std::vector<TS::ITypePtr>{fixture.holder.KnownType(TS::KnownTypeCode::Int32),
+                                      fixture.holder.KnownType(TS::KnownTypeCode::String)});
+        tupleCtor = std::make_shared<TS::Implementation::FakeMethod>(
+            fixture.holder.compilation, TS::SymbolKind::Constructor);
+        tupleCtor->SetName(".ctor");
+        tupleCtor->SetIsStatic(false);
+        tupleCtor->SetDeclaringType(declaringType);
+        // The ctor's declared parameter list (the C# BuildArgumentList DEBUG
+        // assert ties the call arguments to the declared parameters -- a real
+        // ValueTuple`2 ctor carries one parameter per element).
+        ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "a");
+        ParamFixture b(fixture.holder.KnownType(TS::KnownTypeCode::String), "b");
+        tupleCtor->SetParameters({a.parameter, b.parameter});
+    }
+
+    // A typed local over the given known type (the element instructions).
+    std::shared_ptr<IL::ILVariable> MakeLocal(const char* name, TS::KnownTypeCode code)
+    {
+        auto var = std::make_shared<IL::ILVariable>();
+        var->Name = name;
+        var->Type = fixture.holder.KnownType(code);
+        var->Kind = IL::VariableKind::Local;
+        return var;
+    }
+};
+
+TEST(BuildEntryTest, TupleArmRendersTheTupleExpression)
+{
+    TupleFixture f;
+    auto varA = f.MakeLocal("a", TS::KnownTypeCode::Int32);
+    auto varB = f.MakeLocal("b", TS::KnownTypeCode::String);
+
     IL::Call call(".ctor");
     call.IsNewObj = true;
-    call.Method = tupleCtor;
-    call.DeclaringType = TS::ITypePtr(tupleDef.get(), [](TS::IType*) {});
-    call.AddArg(std::make_unique<IL::LdNull>());
-    call.AddArg(std::make_unique<IL::LdNull>());
+    call.Method = f.tupleCtor;
+    call.AddArg(std::make_unique<IL::LdLoc>(varA));
+    call.AddArg(std::make_unique<IL::LdLoc>(varB));
 
-    CS::CallBuilder builder = fixture.MakeCallBuilder();
-    EXPECT_THROW((void)builder.Build(call), std::logic_error);
+    CS::CallBuilder builder = f.fixture.MakeCallBuilder();
+    CS::TranslatedExpression result = builder.Build(call);
+
+    auto* tupleExpr = dynamic_cast<Syntax::TupleExpression*>(result.Expression());
+    ASSERT_NE(tupleExpr, nullptr);
+    ASSERT_EQ(tupleExpr->Elements().Count(), 2);
+    // The element renders are the identifiers over the locals.
+    auto* elem0 =
+        dynamic_cast<Syntax::IdentifierExpression*>(tupleExpr->Elements().At(0));
+    ASSERT_NE(elem0, nullptr);
+    EXPECT_EQ(elem0->Identifier(), "a");
+    auto* elem1 =
+        dynamic_cast<Syntax::IdentifierExpression*>(tupleExpr->Elements().At(1));
+    ASSERT_NE(elem1, nullptr);
+    EXPECT_EQ(elem1->Identifier(), "b");
+    // The resolve result is the TupleResolveResult over the two element results,
+    // and its type is the tuple type over the declaring type's type arguments.
+    const auto* rr =
+        dynamic_cast<const Sem::TupleResolveResult*>(CS::GetResolveResult(*tupleExpr));
+    ASSERT_NE(rr, nullptr);
+    ASSERT_EQ(rr->Elements().size(), 2u);
+    ASSERT_EQ(rr->Type().Kind(), TS::TypeKind::Tuple);
+    const auto& tupleType = static_cast<const TS::TupleType&>(rr->Type());
+    ASSERT_EQ(tupleType.ElementTypes().size(), 2u);
+    EXPECT_EQ(tupleType.ElementTypes()[0]->Kind(), TS::TypeKind::Struct);
+    EXPECT_EQ(tupleType.ElementTypes()[1]->Kind(), TS::TypeKind::Class);
+    // The un-named hint renders no NamedArgumentExpression wrappers.
+    EXPECT_EQ(dynamic_cast<Syntax::NamedArgumentExpression*>(tupleExpr->Elements().At(0)),
+              nullptr);
+    // The IL annotation is on the tuple expression.
+    ASSERT_EQ(result.ILInstructions().size(), 1u);
+    EXPECT_EQ(result.ILInstructions().front(), static_cast<IL::ILInstruction*>(&call));
+}
+
+TEST(BuildEntryTest, TupleArmRendersNamedElementsFromTheTypeHint)
+{
+    TupleFixture f;
+    auto varA = f.MakeLocal("a", TS::KnownTypeCode::Int32);
+    auto varB = f.MakeLocal("b", TS::KnownTypeCode::String);
+
+    // The typeHint tuple type carrying the element names (the C# `typeHint is
+    // TupleType tt ? tt.ElementNames : default` walk).
+    auto hintType = std::make_shared<TS::TupleType>(
+        f.declaringType,
+        std::vector<TS::ITypePtr>{f.fixture.holder.KnownType(TS::KnownTypeCode::Int32),
+                                  f.fixture.holder.KnownType(TS::KnownTypeCode::String)},
+        std::vector<std::string>{"x", "y"});
+
+    IL::Call call(".ctor");
+    call.IsNewObj = true;
+    call.Method = f.tupleCtor;
+    call.AddArg(std::make_unique<IL::LdLoc>(varA));
+    call.AddArg(std::make_unique<IL::LdLoc>(varB));
+
+    CS::CallBuilder builder = f.fixture.MakeCallBuilder();
+    CS::TranslatedExpression result = builder.Build(call, hintType.get());
+
+    auto* tupleExpr = dynamic_cast<Syntax::TupleExpression*>(result.Expression());
+    ASSERT_NE(tupleExpr, nullptr);
+    ASSERT_EQ(tupleExpr->Elements().Count(), 2);
+    auto* named0 =
+        dynamic_cast<Syntax::NamedArgumentExpression*>(tupleExpr->Elements().At(0));
+    ASSERT_NE(named0, nullptr);
+    EXPECT_EQ(named0->Name(), "x");
+    auto* named1 =
+        dynamic_cast<Syntax::NamedArgumentExpression*>(tupleExpr->Elements().At(1));
+    ASSERT_NE(named1, nullptr);
+    EXPECT_EQ(named1->Name(), "y");
+    // The hint's names flow into the resolve result's tuple type as well.
+    const auto* rr =
+        dynamic_cast<const Sem::TupleResolveResult*>(CS::GetResolveResult(*tupleExpr));
+    ASSERT_NE(rr, nullptr);
+    const auto& tupleType = static_cast<const TS::TupleType&>(rr->Type());
+    ASSERT_EQ(tupleType.ElementNames().size(), 2u);
+    EXPECT_EQ(tupleType.ElementNames()[0], "x");
+    EXPECT_EQ(tupleType.ElementNames()[1], "y");
+}
+
+TEST(BuildEntryTest, TupleArmNonTupleTypeHintRendersBareElements)
+{
+    TupleFixture f;
+    auto varA = f.MakeLocal("a", TS::KnownTypeCode::Int32);
+    auto varB = f.MakeLocal("b", TS::KnownTypeCode::String);
+
+    IL::Call call(".ctor");
+    call.IsNewObj = true;
+    call.Method = f.tupleCtor;
+    call.AddArg(std::make_unique<IL::LdLoc>(varA));
+    call.AddArg(std::make_unique<IL::LdLoc>(varB));
+
+    CS::CallBuilder builder = f.fixture.MakeCallBuilder();
+    // A non-TupleType hint (Int32) -- the C# `typeHint is TupleType` test fails
+    // and the elements render bare (no names).
+    TS::ITypePtr intHint = f.fixture.holder.KnownType(TS::KnownTypeCode::Int32);
+    CS::TranslatedExpression result = builder.Build(call, intHint.get());
+
+    auto* tupleExpr = dynamic_cast<Syntax::TupleExpression*>(result.Expression());
+    ASSERT_NE(tupleExpr, nullptr);
+    ASSERT_EQ(tupleExpr->Elements().Count(), 2);
+    EXPECT_EQ(dynamic_cast<Syntax::NamedArgumentExpression*>(tupleExpr->Elements().At(0)),
+              nullptr);
+    EXPECT_EQ(dynamic_cast<Syntax::NamedArgumentExpression*>(tupleExpr->Elements().At(1)),
+              nullptr);
+}
+
+TEST(BuildEntryTest, TupleArmFallsThroughBelowTwoElements)
+{
+    TupleFixture f;
+    auto varA = f.MakeLocal("a", TS::KnownTypeCode::Int32);
+
+    IL::Call call(".ctor");
+    call.IsNewObj = true;
+    call.Method = f.tupleCtor;
+    // A 2-arity ValueTuple with ONE argument -- the MatchTupleConstruction
+    // `Arguments.Count != elementCount` gate fails and the arm falls through to the
+    // mainline (which renders the constructor call). The declared parameter list is
+    // trimmed to one entry (the C# BuildArgumentList DEBUG assert ties the call
+    // arguments to the declared parameters).
+    {
+        ParamFixture only(f.fixture.holder.KnownType(TS::KnownTypeCode::Int32), "a");
+        f.tupleCtor->SetParameters({only.parameter});
+    }
+    call.AddArg(std::make_unique<IL::LdLoc>(varA));
+
+    CS::CallBuilder builder = f.fixture.MakeCallBuilder();
+    CS::TranslatedExpression result = builder.Build(call);
+    // The mainline constructor-call render.
+    auto* objCreate =
+        dynamic_cast<Syntax::ObjectCreateExpression*>(result.Expression());
+    ASSERT_NE(objCreate, nullptr);
+    EXPECT_EQ(dynamic_cast<Syntax::TupleExpression*>(result.Expression()), nullptr);
+}
+
+TEST(BuildEntryTest, TupleArmGateRespectsTheSetting)
+{
+    TupleFixture f;
+    f.fixture.settings.SetTupleTypes(false);
+    auto varA = f.MakeLocal("a", TS::KnownTypeCode::Int32);
+    auto varB = f.MakeLocal("b", TS::KnownTypeCode::String);
+
+    IL::Call call(".ctor");
+    call.IsNewObj = true;
+    call.Method = f.tupleCtor;
+    call.AddArg(std::make_unique<IL::LdLoc>(varA));
+    call.AddArg(std::make_unique<IL::LdLoc>(varB));
+
+    CS::CallBuilder builder = f.fixture.MakeCallBuilder();
+    // The C# `settings.TupleTypes && ...` gate: with the setting off the valid
+    // tuple shape falls through to the mainline constructor-call render.
+    CS::TranslatedExpression result = builder.Build(call);
+    auto* objCreate =
+        dynamic_cast<Syntax::ObjectCreateExpression*>(result.Expression());
+    ASSERT_NE(objCreate, nullptr);
 }
 
 TEST(BuildMainlineTest, DelegateInvokeArmRendersTheInvocation)

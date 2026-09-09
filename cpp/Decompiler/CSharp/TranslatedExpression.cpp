@@ -564,16 +564,18 @@ TranslatedExpression TranslatedExpression::ConvertTo(TS::IType& targetType,
                 index++;
             }
             // The C# `valueTupleAssembly: targetTupleType.GetDefinition()?.ParentModule`.
+            // The C#-faithful TupleResolveResult ctor threads the compilation and the
+            // value-tuple assembly to `GetTupleType` (which builds the underlying
+            // `System.ValueTuple<...>` chain through `CreateTupleType`); the C# call site
+            // passes NO elementNames (the `default(ImmutableArray<string>)` -- the names
+            // render only on the NamedArgumentExpression nodes).
             return WithRR(
                 WithoutILInstruction(*newTupleExpr),
                 std::make_shared<Sem::TupleResolveResult>(
-                    std::move(newElementRRs), std::nullopt,
-                    TS::CreateTupleType(*expressionBuilder.compilation,
-                                        targetTupleType->ElementTypes(),
-                                        targetTupleType->ElementNames(),
-                                        targetTupleType->GetDefinition() != nullptr
-                                            ? targetTupleType->GetDefinition()->ParentModule()
-                                            : nullptr)));
+                    *expressionBuilder.compilation, std::move(newElementRRs), std::nullopt,
+                    targetTupleType->GetDefinition() != nullptr
+                        ? targetTupleType->GetDefinition()->ParentModule()
+                        : nullptr));
         }
     }
     auto& conversions = Resolver::CSharpConversions::Get(*expressionBuilder.compilation);
