@@ -51,6 +51,7 @@
 #include "Decompiler/TypeSystem/Implementation/SyntheticRangeIndexer.hpp"
 #include "Decompiler/Semantics/ConversionFactories.hpp"
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
+#include "Decompiler/Semantics/InitializedObjectResolveResult.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
@@ -3014,3 +3015,434 @@ TEST(BuildMainlineTest, NewObjDefersTheConstructorCallLoudly)
                  std::logic_error);
 }
 
+
+// ---------------------------------------------------------------------------
+// CallBuilder::IsUnambiguousAccess / HandleAccessorCall -- the accessor-call
+// slice (CallBuilder.cs lines 1665-1831, appended by the accessor-call slice).
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+// The accessor-call fixture: a LookupTypeDefinition holder with a FakeProperty
+// (optionally registered so the resolver / member-lookup paths see it) and the
+// getter/setter FakeMethod accessors over it (the MethodFixtures MakeMethod
+// shape with the SymbolKind::Accessor + SetAccessorOwner extension).
+struct AccessorFixture : BuildArgsFixture
+{
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> holderDef;
+    std::shared_ptr<Impl::FakeProperty> prop;
+    std::shared_ptr<Impl::FakeMethod> getter;
+    std::shared_ptr<Impl::FakeMethod> setter;
+
+    explicit AccessorFixture(bool registerProp = true)
+    {
+        holderDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+            "Holder", "H", TS::FullTypeName(TS::TopLevelTypeName("H", "Holder")),
+            TS::TypeKind::Class, TS::Accessibility::Public, holder.compilation,
+            &holder.compilation.MainModule());
+        prop = std::make_shared<Impl::FakeProperty>(holder.compilation);
+        prop->SetName("Foo");
+        prop->SetDeclaringType(TS::ITypePtr(holderDef.get(), [](TS::IType*) {}));
+        prop->SetReturnType(holder.KnownType(TS::KnownTypeCode::Int32));
+        getter = MakeAccessor("get_Foo", holder.KnownType(TS::KnownTypeCode::Int32), {});
+        setter = MakeAccessor("set_Foo", holder.KnownType(TS::KnownTypeCode::Void),
+                              {holder.KnownType(TS::KnownTypeCode::Int32)});
+        if (registerProp)
+            holderDef->SetProperties({prop.get()});
+        SetCurrentTypeDefinition(holderDef.get());
+    }
+
+    std::shared_ptr<Impl::FakeMethod> MakeAccessor(
+        const char* name, TS::ITypePtr returnType,
+        std::vector<TS::ITypePtr> parameterTypes)
+    {
+        auto method = std::make_shared<Impl::FakeMethod>(
+            holder.compilation, TS::SymbolKind::Accessor);
+        method->SetName(name);
+        method->SetIsStatic(false);
+        method->SetDeclaringType(TS::ITypePtr(holderDef.get(), [](TS::IType*) {}));
+        std::vector<std::shared_ptr<const TS::IParameter>> parameters;
+        for (std::size_t i = 0; i < parameterTypes.size(); i++)
+        {
+            parameters.push_back(std::make_shared<Impl::DefaultParameter>(
+                parameterTypes[i], "p" + std::to_string(i)));
+        }
+        method->SetParameters(parameters);
+        method->SetReturnType(std::move(returnType));
+        method->SetAccessorOwner(
+            static_cast<const TS::IMember*>(
+                static_cast<const Impl::FakeMember*>(prop.get())));
+        return method;
+    }
+
+    TS::ITypePtr HolderType()
+    {
+        return TS::ITypePtr(holderDef.get(), [](TS::IType*) {});
+    }
+};
+
+// The indexer variant: the property is an indexer with one int index (the
+// SymbolKind::Indexer shape the IsUnambiguousAccess indexer arm resolves
+// through the OverloadResolution path).
+struct IndexerFixture : AccessorFixture
+{
+    std::shared_ptr<Impl::FakeMethod> indexGetter;
+    std::shared_ptr<Impl::FakeMethod> indexSetter;
+
+    explicit IndexerFixture(bool registerProp = true) : AccessorFixture(false)
+    {
+        prop->SetIsIndexer(true);
+        prop->SetParameters(
+            {std::make_shared<Impl::DefaultParameter>(
+                holder.KnownType(TS::KnownTypeCode::Int32), "index")});
+        indexGetter = MakeAccessor("get_Item", holder.KnownType(TS::KnownTypeCode::Int32),
+                                   {holder.KnownType(TS::KnownTypeCode::Int32)});
+        indexSetter = MakeAccessor(
+            "set_Item", holder.KnownType(TS::KnownTypeCode::Void),
+            {holder.KnownType(TS::KnownTypeCode::Int32),
+             holder.KnownType(TS::KnownTypeCode::Int32)});
+        if (registerProp)
+            holderDef->SetProperties({prop.get()});
+        SetCurrentTypeDefinition(holderDef.get());
+    }
+};
+
+// The event variant: a FakeEvent "Click" with the add/remove accessors.
+struct EventFixture : AccessorFixture
+{
+    std::shared_ptr<Impl::FakeEvent> click;
+    std::shared_ptr<Impl::FakeMethod> addAccessor;
+    std::shared_ptr<Impl::FakeMethod> removeAccessor;
+
+    explicit EventFixture(bool registerProp = true) : AccessorFixture(false)
+    {
+        click = std::make_shared<Impl::FakeEvent>(holder.compilation);
+        click->SetName("Click");
+        click->SetDeclaringType(HolderType());
+        addAccessor = MakeAccessor("add_Click", holder.KnownType(TS::KnownTypeCode::Void),
+                                   {holder.KnownType(TS::KnownTypeCode::Int32)});
+        removeAccessor =
+            MakeAccessor("remove_Click", holder.KnownType(TS::KnownTypeCode::Void),
+                         {holder.KnownType(TS::KnownTypeCode::Int32)});
+        // The event accessors' owner is the EVENT (MakeAccessor's default owner is
+        // the fixture's property).
+        const TS::IMember* clickView =
+            static_cast<const TS::IMember*>(static_cast<const Impl::FakeMember*>(click.get()));
+        addAccessor->SetAccessorOwner(clickView);
+        removeAccessor->SetAccessorOwner(clickView);
+        click->SetAddAccessor(addAccessor.get());
+        click->SetRemoveAccessor(removeAccessor.get());
+        if (registerProp)
+            holderDef->SetEvents({click.get()});
+        SetCurrentTypeDefinition(holderDef.get());
+    }
+};
+
+} // namespace
+
+TEST(AccessorCallTest, NullTargetResolvesThroughTheSimpleName)
+{
+    AccessorFixture fixture;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    const TS::IMember* foundMember = nullptr;
+    bool ok = builder.IsUnambiguousAccess(CS::ExpectedTargetDetails{}, nullptr,
+                                          *fixture.getter, {}, std::nullopt,
+                                          foundMember);
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(foundMember->MemberDefinition(), fixture.prop->MemberDefinition());
+}
+
+TEST(AccessorCallTest, NullTargetUnresolvableNameAnswersFalse)
+{
+    AccessorFixture fixture(/*registerProp=*/false);
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    const TS::IMember* foundMember = nullptr;
+    bool ok = builder.IsUnambiguousAccess(CS::ExpectedTargetDetails{}, nullptr,
+                                          *fixture.getter, {}, std::nullopt,
+                                          foundMember);
+    EXPECT_FALSE(ok);
+    EXPECT_EQ(foundMember, nullptr);
+}
+
+TEST(AccessorCallTest, TargetLookupArmResolvesTheProperty)
+{
+    AccessorFixture fixture;
+    CS::TranslatedExpression target = MakeThisTarget(fixture.HolderType());
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    const TS::IMember* foundMember = nullptr;
+    bool ok = builder.IsUnambiguousAccess(CS::ExpectedTargetDetails{},
+                                          target.ResolveResult(), *fixture.getter, {},
+                                          std::nullopt, foundMember);
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(foundMember->MemberDefinition(), fixture.prop->MemberDefinition());
+}
+
+TEST(AccessorCallTest, TargetLookupArmMissAnswersFalse)
+{
+    AccessorFixture fixture(/*registerProp=*/false);
+    CS::TranslatedExpression target = MakeThisTarget(fixture.HolderType());
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    const TS::IMember* foundMember = nullptr;
+    bool ok = builder.IsUnambiguousAccess(CS::ExpectedTargetDetails{},
+                                          target.ResolveResult(), *fixture.getter, {},
+                                          std::nullopt, foundMember);
+    EXPECT_FALSE(ok);
+    EXPECT_EQ(foundMember, nullptr);
+}
+
+TEST(AccessorCallTest, IndexerArmResolvesThroughOverloadResolution)
+{
+    IndexerFixture fixture;
+    CS::TranslatedExpression target = MakeThisTarget(fixture.HolderType());
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    // One int32 argument (the index) -- matching the indexer's parameter. The
+    // OwnedArgument keeps the expression alive (the TranslatedExpression aliases
+    // the owned node).
+    IL::LdcI4 arg1(1);
+    std::vector<CS::TranslatedExpression> arguments;
+    OwnedArgument owned(std::make_unique<Syntax::PrimitiveExpression>(
+                            Syntax::PrimitiveValue(std::int32_t(1))),
+                        ConstantRR(fixture.holder.KnownType(TS::KnownTypeCode::Int32),
+                                   1),
+                        1);
+    arguments.push_back(owned.Bound());
+    const TS::IMember* foundMember = nullptr;
+    bool ok = builder.IsUnambiguousAccess(CS::ExpectedTargetDetails{},
+                                          target.ResolveResult(),
+                                          *fixture.indexGetter, arguments, std::nullopt,
+                                          foundMember);
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(foundMember->MemberDefinition(), fixture.prop->MemberDefinition());
+}
+
+TEST(AccessorCallTest, CastArgumentsArmInsertsTheExplicitCast)
+{
+    // An indexer getter with an int64 argument against the int32 index over a
+    // NON-this target (requireTarget forced by the Indexer symbol kind): the
+    // fix loop's first attempt fails with argumentsCasted false (a one-
+    // parameter getter), so the CastArguments arm runs -- the int64 argument
+    // converts to the int32 parameter type (the constant folds through the
+    // resolver's ResolveCast -- the constant's variant becomes the int32 form)
+    // and the second attempt resolves.
+    IndexerFixture fixture(/*registerProp=*/true);
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    OwnedArgument targetOwned(
+        std::make_unique<Syntax::IdentifierExpression>("obj"),
+        std::make_shared<Sem::ResolveResult>(fixture.HolderType()), 0);
+    OwnedArgument arg(std::make_unique<Syntax::PrimitiveExpression>(
+                          Syntax::PrimitiveValue(std::int64_t(5))),
+                      ConstantRR(fixture.holder.KnownType(TS::KnownTypeCode::Int64), 5),
+                      5);
+    CS::ExpressionWithResolveResult result = builder.HandleAccessorCall(
+        CS::ExpectedTargetDetails{}, *fixture.indexGetter, targetOwned.Bound(),
+        {arg.Bound()}, std::nullopt);
+    auto* indexer = dynamic_cast<Syntax::IndexerExpression*>(result.Expression());
+    ASSERT_NE(indexer, nullptr);
+    ASSERT_EQ(indexer->Arguments().Count(), 1);
+    // The CastArguments arm's observable effect: the int64 constant argument
+    // folded to the int32 parameter type (a cast would only be observable on
+    // non-constant arguments).
+    auto* foldedArg = dynamic_cast<Syntax::PrimitiveExpression*>(
+        indexer->Arguments().FirstOrNull());
+    ASSERT_NE(foldedArg, nullptr);
+    EXPECT_TRUE(std::holds_alternative<std::int32_t>(foldedArg->Value()));
+}
+
+TEST(AccessorCallTest, GetterResolvesToTheIdentifier)
+{
+    AccessorFixture fixture;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ExpressionWithResolveResult result = builder.HandleAccessorCall(
+        CS::ExpectedTargetDetails{}, *fixture.getter,
+        MakeThisTarget(fixture.HolderType()), {}, std::nullopt);
+    auto* identifier =
+        dynamic_cast<Syntax::IdentifierExpression*>(result.Expression());
+    ASSERT_NE(identifier, nullptr);
+    EXPECT_EQ(identifier->Identifier(), "Foo");
+    // The resolve result is the property member over the `this` target.
+    auto* rr = dynamic_cast<const Sem::MemberResolveResult*>(result.ResolveResult());
+    ASSERT_NE(rr, nullptr);
+    EXPECT_EQ(rr->Member()->MemberDefinition(), fixture.prop->MemberDefinition());
+    ASSERT_NE(rr->TargetResult(), nullptr);
+    EXPECT_TRUE(dynamic_cast<const Sem::ThisResolveResult*>(rr->TargetResult())
+                != nullptr);
+}
+
+TEST(AccessorCallTest, SetterRendersTheAssignment)
+{
+    AccessorFixture fixture;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    // The value argument (the setter's single parameter value).
+    OwnedArgument value(std::make_unique<Syntax::PrimitiveExpression>(
+                            Syntax::PrimitiveValue(std::int32_t(42))),
+                        ConstantRR(fixture.holder.KnownType(TS::KnownTypeCode::Int32), 42),
+                        42);
+    CS::ExpressionWithResolveResult result = builder.HandleAccessorCall(
+        CS::ExpectedTargetDetails{}, *fixture.setter,
+        MakeThisTarget(fixture.HolderType()), {value.Bound()}, std::nullopt);
+    auto* assignment = dynamic_cast<Syntax::AssignmentExpression*>(result.Expression());
+    ASSERT_NE(assignment, nullptr);
+    EXPECT_EQ(assignment->Operator(), Syntax::AssignmentOperatorType::Assign);
+    auto* left = dynamic_cast<Syntax::IdentifierExpression*>(assignment->Left());
+    ASSERT_NE(left, nullptr);
+    EXPECT_EQ(left->Identifier(), "Foo");
+    ASSERT_NE(assignment->Right(), nullptr);
+    auto* right = dynamic_cast<Syntax::PrimitiveExpression*>(assignment->Right());
+    ASSERT_NE(right, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(right->Value()), 42);
+    // The assignment's resolve result is the TypeResolveResult over the owner's
+    // return type (the C# `new TypeResolveResult(method.AccessorOwner.ReturnType)`).
+    auto* rr = dynamic_cast<const Sem::TypeResolveResult*>(result.ResolveResult());
+    ASSERT_NE(rr, nullptr);
+    EXPECT_TRUE(rr->Type().Equals(fixture.prop->ReturnType()));
+}
+
+TEST(AccessorCallTest, EventAddAccessorRendersThePlusEqual)
+{
+    EventFixture fixture;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    OwnedArgument value(std::make_unique<Syntax::PrimitiveExpression>(
+                            Syntax::PrimitiveValue(std::int32_t(1))),
+                        ConstantRR(fixture.holder.KnownType(TS::KnownTypeCode::Int32), 1),
+                        1);
+    CS::ExpressionWithResolveResult result = builder.HandleAccessorCall(
+        CS::ExpectedTargetDetails{}, *fixture.addAccessor,
+        MakeThisTarget(fixture.HolderType()), {value.Bound()}, std::nullopt);
+    auto* assignment = dynamic_cast<Syntax::AssignmentExpression*>(result.Expression());
+    ASSERT_NE(assignment, nullptr);
+    EXPECT_EQ(assignment->Operator(), Syntax::AssignmentOperatorType::Add);
+    auto* left = dynamic_cast<Syntax::IdentifierExpression*>(assignment->Left());
+    ASSERT_NE(left, nullptr);
+    EXPECT_EQ(left->Identifier(), "Click");
+}
+
+TEST(AccessorCallTest, EventRemoveAccessorRendersTheMinusEqual)
+{
+    EventFixture fixture;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    OwnedArgument value(std::make_unique<Syntax::PrimitiveExpression>(
+                            Syntax::PrimitiveValue(std::int32_t(1))),
+                        ConstantRR(fixture.holder.KnownType(TS::KnownTypeCode::Int32), 1),
+                        1);
+    CS::ExpressionWithResolveResult result = builder.HandleAccessorCall(
+        CS::ExpectedTargetDetails{}, *fixture.removeAccessor,
+        MakeThisTarget(fixture.HolderType()), {value.Bound()}, std::nullopt);
+    auto* assignment = dynamic_cast<Syntax::AssignmentExpression*>(result.Expression());
+    ASSERT_NE(assignment, nullptr);
+    EXPECT_EQ(assignment->Operator(), Syntax::AssignmentOperatorType::Subtract);
+    auto* left = dynamic_cast<Syntax::IdentifierExpression*>(assignment->Left());
+    ASSERT_NE(left, nullptr);
+    EXPECT_EQ(left->Identifier(), "Click");
+}
+
+TEST(AccessorCallTest, IndexerGetterRendersTheIndexerExpression)
+{
+    IndexerFixture fixture;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    // A non-this target (an identifier over the holder type) so requireTarget
+    // drives the IndexerExpression's Target slot.
+    OwnedArgument targetOwned(
+        std::make_unique<Syntax::IdentifierExpression>("obj"),
+        std::make_shared<Sem::ResolveResult>(fixture.HolderType()), 0);
+    OwnedArgument arg(std::make_unique<Syntax::PrimitiveExpression>(
+                          Syntax::PrimitiveValue(std::int32_t(3))),
+                      ConstantRR(fixture.holder.KnownType(TS::KnownTypeCode::Int32), 3),
+                      3);
+    CS::ExpressionWithResolveResult result = builder.HandleAccessorCall(
+        CS::ExpectedTargetDetails{}, *fixture.indexGetter, targetOwned.Bound(),
+        {arg.Bound()}, std::nullopt);
+    auto* indexer = dynamic_cast<Syntax::IndexerExpression*>(result.Expression());
+    ASSERT_NE(indexer, nullptr);
+    auto* targetExpr =
+        dynamic_cast<Syntax::IdentifierExpression*>(indexer->Target());
+    ASSERT_NE(targetExpr, nullptr);
+    EXPECT_EQ(targetExpr->Identifier(), "obj");
+    EXPECT_EQ(indexer->Arguments().Count(), 1);
+    auto* rr = dynamic_cast<const Sem::MemberResolveResult*>(result.ResolveResult());
+    ASSERT_NE(rr, nullptr);
+    EXPECT_EQ(rr->Member()->MemberDefinition(), fixture.prop->MemberDefinition());
+}
+
+TEST(AccessorCallTest, UnresolvableNameFallsBackToTheAccessorOwner)
+{
+    AccessorFixture fixture(/*registerProp=*/false);
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ExpressionWithResolveResult result = builder.HandleAccessorCall(
+        CS::ExpectedTargetDetails{}, *fixture.getter,
+        MakeThisTarget(fixture.HolderType()), {}, std::nullopt);
+    // The fix loop exhausts CastArguments/requireTarget/targetCast and takes the
+    // accessor-owner fallback; the requireTarget arm renders the member
+    // reference over the `this` target.
+    auto* memberRef =
+        dynamic_cast<Syntax::MemberReferenceExpression*>(result.Expression());
+    ASSERT_NE(memberRef, nullptr);
+    EXPECT_EQ(memberRef->MemberName(), "Foo");
+    ASSERT_NE(memberRef->Target(), nullptr);
+    EXPECT_TRUE(dynamic_cast<const Syntax::ThisReferenceExpression*>(memberRef->Target())
+                != nullptr);
+    auto* rr = dynamic_cast<const Sem::MemberResolveResult*>(result.ResolveResult());
+    ASSERT_NE(rr, nullptr);
+    EXPECT_EQ(rr->Member()->MemberDefinition(), fixture.prop->MemberDefinition());
+}
+
+TEST(AccessorCallTest, InitializedObjectTargetRendersTheNullTargetIndexer)
+{
+    IndexerFixture fixture;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    // An initialized-object target (the object-initializer shape): the render
+    // drops the target (the C# `target.ResolveResult is
+    // InitializedObjectResolveResult ? null : target.Expression`).
+    OwnedArgument targetOwned(
+        std::make_unique<Syntax::IdentifierExpression>("obj"),
+        std::make_shared<Sem::InitializedObjectResolveResult>(fixture.HolderType()),
+        0);
+    // The indexer setter's call arguments: [index, value] -- the value is
+    // removed as the Last() argument, leaving the index in arguments.
+    OwnedArgument index(std::make_unique<Syntax::PrimitiveExpression>(
+                            Syntax::PrimitiveValue(std::int32_t(3))),
+                        ConstantRR(fixture.holder.KnownType(TS::KnownTypeCode::Int32), 3),
+                        3);
+    OwnedArgument value(std::make_unique<Syntax::PrimitiveExpression>(
+                            Syntax::PrimitiveValue(std::int32_t(7))),
+                        ConstantRR(fixture.holder.KnownType(TS::KnownTypeCode::Int32), 7),
+                        7);
+    CS::ExpressionWithResolveResult result = builder.HandleAccessorCall(
+        CS::ExpectedTargetDetails{}, *fixture.indexSetter, targetOwned.Bound(),
+        {index.Bound(), value.Bound()}, std::nullopt);
+    auto* assignment = dynamic_cast<Syntax::AssignmentExpression*>(result.Expression());
+    ASSERT_NE(assignment, nullptr);
+    EXPECT_EQ(assignment->Operator(), Syntax::AssignmentOperatorType::Assign);
+    auto* indexer = dynamic_cast<Syntax::IndexerExpression*>(assignment->Left());
+    ASSERT_NE(indexer, nullptr);
+    EXPECT_EQ(indexer->Target(), nullptr);
+    EXPECT_EQ(indexer->Arguments().Count(), 1);
+}
+
+TEST(AccessorCallTest, AccessorArmThroughBuildRendersTheIdentifier)
+{
+    AccessorFixture fixture;
+    // The getter call over `this` (a parameter LdLoc over the synthetic `this`
+    // slot -- the MatchLdThis shape): the mainline accessor gate fires (a zero-
+    // parameter getter against allowedParamCount 0).
+    auto thisVar = std::make_shared<IL::ILVariable>();
+    thisVar->Name = "this";
+    thisVar->Kind = IL::VariableKind::Parameter;
+    thisVar->Index = -1;
+    thisVar->Type = fixture.HolderType();
+    IL::Call call("get_Foo");
+    call.Method = fixture.getter;
+    call.AddArg(std::make_unique<IL::LdLoc>(std::move(thisVar)));
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ExpressionWithResolveResult result = builder.Build(
+        IL::OpCode::Call, *fixture.getter, CallChildPtrsForTest(call), std::nullopt,
+        nullptr);
+    auto* identifier =
+        dynamic_cast<Syntax::IdentifierExpression*>(result.Expression());
+    ASSERT_NE(identifier, nullptr);
+    EXPECT_EQ(identifier->Identifier(), "Foo");
+    auto* rr = dynamic_cast<const Sem::MemberResolveResult*>(result.ResolveResult());
+    ASSERT_NE(rr, nullptr);
+    EXPECT_EQ(rr->Member()->MemberDefinition(), fixture.prop->MemberDefinition());
+}

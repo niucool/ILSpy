@@ -2420,16 +2420,25 @@ it). Everything else follows the phase plan in `PORT_PLAN.md`:
   the ported `MethodGroupResolveResult`), the TranslateTarget + boxing-conversion unwrap (the
   NeedsBoxingConversion flag), BuildArgumentList, the VarArgInstanceMethod arm (the
   `UndocumentedExpression` `__arglist` block with the converted tail arguments), the
-  delegate-invoke arm (`isDelegateInvocation` over a Delegate-kind declaring type), the  delegate-equality and op_Implicit special cases (the HandleImplicitConversion cast over the
+  delegate-invoke arm (`isDelegateInvocation` over a Delegate-kind declaring type), the
+  delegate-equality and op_Implicit special cases (the HandleImplicitConversion cast over the
   re-looked-up conversion with the `in`-DirectionExpression unwrap), the HandleRangeConstruction
   arms (the four Range forms + the Index caret form over the new
   `TypeSystem/Implementation/SyntheticRangeIndexer.hpp` port and the slicing indexer), the
   InlineArrayAsSpan arm (GetInlineArrayLength/GetInlineArrayElementType over the ported extensions)
   and the GetValueOrDefault(Boolean) arm, the GetRequiredTransformationsForCall fix ladder with the
   parameter-name update, and the final RequireTarget/RequireTypeArguments invocation render (the EII
-  `((IDisposable)this).Dispose()` cast and the constrained. cast comment included). The four big
-  render arms (HandleDelegateConstruction, the tuple-expression render, HandleConstructorCall,
-  HandleAccessorCall, HandleStringInterpolation) are the loud deferrals behind their real C# gate
+  `((IDisposable)this).Dispose()` cast and the constrained. cast comment included). The accessor-call
+  slice (IsUnambiguousAccess + HandleAccessorCall, CallBuilder.cs lines 1665-1831) is ported -- the
+  null-target simple-name arm over ResolveSimpleName, the member-lookup arms (the indexer arm over
+  LookupIndexers + OverloadResolution, the property/event arm over Lookup), the requireTarget/isSetter
+  pre-computation, the fix loop with one transformation per failed attempt (CastArguments ->
+  requireTarget -> the target cast -> the accessor-owner fallback), and the setter/getter render
+  matrix over the Indexer/MemberReference/Identifier forms (the setter's event +=/-= assignment
+  operators included, compared through the canonical MemberDefinition views -- the C#
+  `method.Equals(parentEvent.AddAccessor)` binds to object.Equals reference equality). The remaining
+  big render arms (HandleDelegateConstruction, the tuple-expression render, HandleConstructorCall,
+  HandleStringInterpolation) are the loud deferrals behind their real C# gate
   conditions. Supporting pieces: the `LdObjIfRef` IL node class (the constrained this-argument
   wrapper the mainline unwraps) with its clone case, the `ILFunction.Method` field (the C#
   IMethod handle the seed reader does not yet populate), the `ILFunctionAnnotation` holder (the

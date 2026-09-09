@@ -51,6 +51,11 @@
 #include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/AssignmentExpression.hpp"
+#include "Decompiler/CSharp/Resolver/MemberLookup.hpp"
+#include "Decompiler/Semantics/TypeResolveResult.hpp"
+#include "Decompiler/Semantics/InitializedObjectResolveResult.hpp"
+#include "Decompiler/TypeSystem/IEvent.hpp"
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/IL/Instructions/LdObjIfRef.hpp"
@@ -1374,6 +1379,205 @@ bool CallBuilder::IsAppropriateCallTarget(
     return false;
 }
 
+bool CallBuilder::IsUnambiguousAccess(
+    const ExpectedTargetDetails& expectedTargetDetails, const Sem::ResolveResult* target,
+    const TS::IMethod& method, const std::vector<TranslatedExpression>& arguments,
+    const std::optional<std::vector<std::string>>& argumentNames,
+    const TS::IMember*& foundMember) const
+{
+    foundMember = nullptr;
+    if (target == nullptr)
+    {
+        auto lookupResult = resolver_->ResolveSimpleName(method.AccessorOwner()->Name(),
+                                                         {}, false);
+        auto* result = dynamic_cast<const Sem::MemberResolveResult*>(lookupResult.get());
+        if (result == nullptr || result->IsError())
+            return false;
+        foundMember = result->Member();
+    }
+    else
+    {
+        const TS::ITypeDefinition* currentTypeDefinition = resolver_->CurrentTypeDefinition();
+        Resolver::MemberLookup lookup(
+            currentTypeDefinition,
+            currentTypeDefinition != nullptr ? currentTypeDefinition->ParentModule()
+                                             : nullptr);
+        if (method.AccessorOwner()->SymbolKind() == TS::SymbolKind::Indexer)
+        {
+            std::vector<std::shared_ptr<Sem::ResolveResult>> argumentResolveResults;
+            argumentResolveResults.reserve(arguments.size());
+            for (const TranslatedExpression& a : arguments)
+                argumentResolveResults.push_back(SharedResolveResultAnnotation(*a.Expression()));
+            Resolver::OverloadResolution or_(resolver_->Compilation(),
+                std::move(argumentResolveResults), argumentNames,
+                std::vector<TS::ITypePtr>{},
+                &expressionBuilder_->resolver->Conversions());
+            or_.AddMethodLists(lookup.LookupIndexers(*target));
+            if (or_.BestCandidateErrors() != Resolver::OverloadResolutionErrors::None)
+                return false;
+            if (or_.IsAmbiguous())
+                return false;
+            foundMember = or_.GetBestCandidateWithSubstitutedTypeArguments();
+        }
+        else
+        {
+            auto lookupResult =
+                lookup.Lookup(*target, method.AccessorOwner()->Name(), {}, false);
+            auto* result = dynamic_cast<const Sem::MemberResolveResult*>(lookupResult.get());
+            if (result == nullptr || result->IsError())
+                return false;
+            foundMember = result->Member();
+        }
+    }
+    return foundMember != nullptr
+        && IsAppropriateCallTarget(expectedTargetDetails, *method.AccessorOwner(),
+                                   *foundMember);
+}
+
+ExpressionWithResolveResult CallBuilder::HandleAccessorCall(
+    const ExpectedTargetDetails& expectedTargetDetails, const TS::IMethod& method,
+    TranslatedExpression target, std::vector<TranslatedExpression> arguments,
+    std::optional<std::vector<std::string>> argumentNames)
+{
+    bool requireTarget;
+    if (settings_->AlwaysQualifyMemberReferences()
+        || method.AccessorOwner()->SymbolKind() == TS::SymbolKind::Indexer
+        || expressionBuilder_->HidesVariableWithName(method.AccessorOwner()->Name()))
+        requireTarget = true;
+    else if (method.IsStatic())
+        requireTarget =
+            !expressionBuilder_->IsCurrentOrContainingType(method.DeclaringTypeDefinition());
+    else
+        requireTarget =
+            dynamic_cast<const Syntax::ThisReferenceExpression*>(target.Expression())
+            == nullptr;
+    bool targetCasted = false;
+    bool isSetter = TS::IsKnownType(method.ReturnType(), TS::KnownTypeCode::Void);
+    bool argumentsCasted =
+        (isSetter && method.Parameters().size() == 1)
+        || (!isSetter && method.Parameters().empty());
+    const Sem::ResolveResult* targetResolveResult =
+        requireTarget ? target.ResolveResult() : nullptr;
+
+    TranslatedExpression value;
+    if (isSetter)
+    {
+        // The C# `value = arguments.Last(); arguments.Remove(value);` -- Last() on an
+        // empty list throws the .NET InvalidOperationException; the value's own
+        // expression (possibly null for the empty-list shape the LINQ throw
+        // prevents) reaches the AssignmentExpression's Right slot unchanged.
+        if (arguments.empty())
+            throw std::runtime_error("Sequence contains no elements.");
+        value = arguments.back();
+        arguments.pop_back();
+    }
+
+    const TS::IMember* foundMember;
+    while (!IsUnambiguousAccess(expectedTargetDetails, targetResolveResult, method,
+                                arguments, argumentNames, foundMember))
+    {
+        if (!argumentsCasted)
+        {
+            argumentsCasted = true;
+            CastArguments(arguments, method.Parameters());
+        }
+        else if (!requireTarget)
+        {
+            requireTarget = true;
+            targetResolveResult = target.ResolveResult();
+        }
+        else if (!targetCasted)
+        {
+            targetCasted = true;
+            target = target.ConvertTo(*method.AccessorOwner()->DeclaringType(),
+                                      *expressionBuilder_);
+            targetResolveResult = target.ResolveResult();
+        }
+        else
+        {
+            foundMember = method.AccessorOwner();
+            break;
+        }
+    }
+
+    auto rr = std::make_shared<Sem::MemberResolveResult>(
+        SharedResolveResultAnnotation(*target.Expression()), foundMember);
+
+    if (isSetter)
+    {
+        Syntax::Expression* expr;
+
+        if (!arguments.empty())
+        {
+            auto* indexer = new Syntax::IndexerExpression(
+                dynamic_cast<const Sem::InitializedObjectResolveResult*>(
+                    target.ResolveResult())
+                    != nullptr
+                    ? nullptr
+                    : target.Expression());
+            for (const TranslatedExpression& a : arguments)
+                indexer->Arguments().Add(a.Expression());
+            expr = WithoutILInstruction(WithRR(*indexer, rr)).Expression();
+        }
+        else if (requireTarget)
+        {
+            auto* mre = new Syntax::MemberReferenceExpression(
+                target.Expression(), method.AccessorOwner()->Name());
+            expr = WithoutILInstruction(WithRR(*mre, rr)).Expression();
+        }
+        else
+        {
+            auto* ide = new Syntax::IdentifierExpression(method.AccessorOwner()->Name());
+            expr = WithoutILInstruction(WithRR(*ide, rr)).Expression();
+        }
+
+        Syntax::AssignmentOperatorType op = Syntax::AssignmentOperatorType::Assign;
+        const TS::IEvent* parentEvent =
+            dynamic_cast<const TS::IEvent*>(method.AccessorOwner());
+        if (parentEvent != nullptr)
+        {
+            // The C# `method.Equals(parentEvent.AddAccessor)` binds to
+            // object.Equals (reference equality -- no single-arg Equals overload
+            // exists on ISymbol/IMember), so the port compares the canonical
+            // member views (the two-IMember-subobject convention).
+            const TS::IMethod* addAccessor = parentEvent->AddAccessor();
+            if (addAccessor != nullptr
+                && method.MemberDefinition() == addAccessor->MemberDefinition())
+                op = Syntax::AssignmentOperatorType::Add;
+            const TS::IMethod* removeAccessor = parentEvent->RemoveAccessor();
+            if (removeAccessor != nullptr
+                && method.MemberDefinition() == removeAccessor->MemberDefinition())
+                op = Syntax::AssignmentOperatorType::Subtract;
+        }
+        return WithRR(
+            *new Syntax::AssignmentExpression(expr, op, value.Expression()),
+            std::make_shared<Sem::TypeResolveResult>(
+                const_cast<TS::IType&>(method.AccessorOwner()->ReturnType())
+                    .shared_from_this()));
+    }
+    else
+    {
+        if (!arguments.empty())
+        {
+            auto* indexer = new Syntax::IndexerExpression(target.Expression());
+            for (const TranslatedExpression& a : arguments)
+                indexer->Arguments().Add(a.Expression());
+            return WithRR(*indexer, rr);
+        }
+        else if (requireTarget)
+        {
+            auto* mre = new Syntax::MemberReferenceExpression(
+                target.Expression(), method.AccessorOwner()->Name());
+            return WithRR(*mre, rr);
+        }
+        else
+        {
+            auto* ide = new Syntax::IdentifierExpression(method.AccessorOwner()->Name());
+            return WithRR(*ide, rr);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 
 // The call-build composition (CallBuilder.cs lines 202-594)
@@ -1895,12 +2099,12 @@ ExpressionWithResolveResult CallBuilder::Build(
         && (resolvedMethod->AccessorOwner()->SymbolKind() == TS::SymbolKind::Indexer
             || static_cast<int>(argumentList.ExpectedParameters.size()) == allowedParamCount))
     {
-        // The C# `argumentList.CheckNoNamedOrOptionalArguments(); return
-        // HandleAccessorCall(...)` -- the accessor render (the
-        // IsUnambiguousAccess fix loop over indexer/property/event forms) is
-        // DEFERRED with its slice.
-        throw std::logic_error("HandleAccessorCall is deferred with the "
-                               "accessor-call slice (CallBuilder.cs line 467)");
+        argumentList.CheckNoNamedOrOptionalArguments();
+        // The C# `argumentList.Arguments.ToList()` copies the argument list; the
+        // names array is shared (neither the accessor fix loop nor the overload
+        // resolution mutates it, so the port's by-value copy is faithful).
+        return HandleAccessorCall(expectedTargetDetails, *resolvedMethod, target,
+                                  argumentList.Arguments, argumentList.ArgumentNames);
     }
 
     if (IsDelegateEqualityComparison(*resolvedMethod, argumentList.Arguments))

@@ -56,8 +56,10 @@
 // conditions: HandleDelegateConstruction (the delegate-reference slice),
 // TupleTransform.MatchTupleConstruction's tuple-expression render (the
 // TupleExpression slice), HandleConstructorCall (the constructor-call slice),
-// HandleAccessorCall (the accessor-call slice), and HandleStringInterpolation
-// (the interpolation slice).
+// and HandleStringInterpolation (the interpolation slice). The accessor-call
+// slice (IsUnambiguousAccess + HandleAccessorCall) is ported.
+    // HandleRangeConstruction / HandleConstructorCall / HandleStringInterpolation
+    // are loud deferrals behind their real C# gate
 
 #pragma once
 
@@ -385,6 +387,39 @@ public:
                                  const TS::IMember& expectedTarget,
                                  const TS::IMember& actualTarget) const;
 
+    // The C# `bool IsUnambiguousAccess(ExpectedTargetDetails, ResolveResult? target,
+    // IMethod method, IList<TranslatedExpression> arguments, string[]? argumentNames,
+    // out IMember? foundMember)` (lines 1665-1698): the accessor overload-resolution
+    // driver -- the null-target simple-name arm over ResolveSimpleName and the
+    // member-lookup arms (the indexer arm over LookupIndexers + OverloadResolution,
+    // the property/event arm over Lookup), each answering the resolved member.
+    // `foundMember` is an out parameter (the C# `out` + NotNullWhen convention):
+    // the caller must not read it when the call answers false. Made public for
+    // tests.
+    bool IsUnambiguousAccess(
+        const ExpectedTargetDetails& expectedTargetDetails,
+        const Sem::ResolveResult* target, const TS::IMethod& method,
+        const std::vector<TranslatedExpression>& arguments,
+        const std::optional<std::vector<std::string>>& argumentNames,
+        const TS::IMember*& foundMember) const;
+
+    // The C# `private ExpressionWithResolveResult HandleAccessorCall(
+    // ExpectedTargetDetails, IMethod method, TranslatedExpression target,
+    // List<TranslatedExpression> arguments, string[]? argumentNames)`
+    // (lines 1712-1831): the accessor-call render -- the requireTarget/isSetter
+    // pre-computation, the IsUnambiguousAccess fix loop with one transformation
+    // per failed attempt (CastArguments -> requireTarget -> target cast -> the
+    // accessor-owner fallback), and the setter/getter render matrix over the
+    // Indexer/MemberReference/Identifier forms (the setter's event
+    // +=/-= assignment operators included). `arguments` and `argumentNames` are
+    // by-value copies (the C# caller passes `argumentList.Arguments.ToList()`).
+    // Made public for tests.
+    ExpressionWithResolveResult HandleAccessorCall(
+        const ExpectedTargetDetails& expectedTargetDetails,
+        const TS::IMethod& method, TranslatedExpression target,
+        std::vector<TranslatedExpression> arguments,
+        std::optional<std::vector<std::string>> argumentNames);
+
     // The C# `internal static bool IsSpanBasedStringConcat(IMethod method)`
     // (CallBuilder.cs lines 300-318): whether the method is a static
     // `string.Concat` whose every parameter is `ReadOnlySpan<char>` -- the
@@ -446,9 +481,10 @@ public:
     // InlineArray and GetValueOrDefault arms, the
     // GetRequiredTransformationsForCall fix ladder, and the final
     // RequireTarget/RequireTypeArguments invocation render.
-    // HandleRangeConstruction / HandleConstructorCall / the accessor arm /
-    // HandleStringInterpolation are loud deferrals behind their real C# gate
-    // conditions (the four render arms land with their own slices).
+    // HandleRangeConstruction / HandleConstructorCall / HandleStringInterpolation
+    // are loud deferrals behind their real C# gate conditions (the accessor-call
+    // slice and the three remaining render arms land with their own slices -- the
+    // accessor arm is ported now).
     ExpressionWithResolveResult Build(
         IL::OpCode callOpCode, const TS::IMethod& method,
         const std::vector<IL::ILInstruction*>& callArguments,
