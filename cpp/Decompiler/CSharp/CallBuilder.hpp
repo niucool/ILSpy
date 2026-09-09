@@ -55,15 +55,20 @@
 // The remaining render arms are the loud deferrals behind their real C# gate
 // conditions: HandleDelegateConstruction (the delegate-reference slice),
 // TupleTransform.MatchTupleConstruction's tuple-expression render (the
-// TupleExpression slice), HandleConstructorCall (the constructor-call slice),
-// and HandleStringInterpolation (the interpolation slice). The accessor-call
-// slice (IsUnambiguousAccess + HandleAccessorCall) is ported.
-    // HandleRangeConstruction / HandleConstructorCall / HandleStringInterpolation
-    // are loud deferrals behind their real C# gate
+// TupleExpression slice), and HandleConstructorCall (the constructor-call
+// slice). The accessor-call slice (IsUnambiguousAccess + HandleAccessorCall)
+// and the interpolation slice (HandleStringInterpolation +
+// TryGetStringInterpolationTokens + TokenizeFormatString) are ported.
+    // HandleRangeConstruction / HandleConstructorCall are loud deferrals
+    // behind their real C# gate
 
 #pragma once
 
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InterpolatedStringExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Interpolation.hpp"
+#include "Decompiler/CSharp/Syntax/InterpolatedStringText.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
 #include "Decompiler/CSharp/ExpressionBuilder.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
@@ -481,10 +486,10 @@ public:
     // InlineArray and GetValueOrDefault arms, the
     // GetRequiredTransformationsForCall fix ladder, and the final
     // RequireTarget/RequireTypeArguments invocation render.
-    // HandleRangeConstruction / HandleConstructorCall / HandleStringInterpolation
-    // are loud deferrals behind their real C# gate conditions (the accessor-call
-    // slice and the three remaining render arms land with their own slices -- the
-    // accessor arm is ported now).
+    // HandleRangeConstruction / HandleConstructorCall are loud deferrals
+    // behind their real C# gate conditions (the accessor-call slice and the
+    // two remaining render arms land with their own slices -- the accessor
+    // arm and the interpolation slice are ported now).
     ExpressionWithResolveResult Build(
         IL::OpCode callOpCode, const TS::IMethod& method,
         const std::vector<IL::ILInstruction*>& callArguments,
@@ -520,9 +525,78 @@ public:
                                                         TranslatedExpression argument);
 
     // The C# `private static bool IsInterpolatedStringCreation(IMethod method,
-    // ArgumentList argumentList)` (lines 755-765). Made public for tests.
+    // ArgumentList argumentList)` (lines 755-765): the interpolation gate --
+    // a static `string.Format` or a
+    // `System.Runtime.CompilerServices.FormattableStringFactory.Create` over
+    // a positional-only argument list that is either expanded-form, a
+    // non-params overload, or a two-argument array literal. Made public for
+    // tests.
     static bool IsInterpolatedStringCreation(const TS::IMethod& method,
                                              const ArgumentList& argumentList);
+
+    // -- The string-interpolation slice (CallBuilder.cs lines 595-648 + 766-935) --
+
+    // The C# `private enum TokenKind` (lines 874-881): the format-string token
+    // kinds TokenizeFormatString classifies. Private in the C#; the port's
+    // no-visibility-level convention keeps it public (the CallTransformation
+    // precedent), int32-backed.
+    enum class TokenKind : std::int32_t {
+        Error,
+        String,
+        Argument,
+        ArgumentWithFormat,
+        ArgumentWithAlignment,
+        ArgumentWithAlignmentAndFormat,
+    };
+
+    // The C# anonymous tuple `(TokenKind Kind, int Index, int Alignment, string?
+    // Format)` the tokens list carries: the token's kind, the 0-based argument
+    // slot index (-1 for a String token), the alignment (0 when absent), and
+    // the format suffix or the literal text (nullopt for the C# null).
+    struct FormatToken {
+        TokenKind Kind = TokenKind::Error;
+        int Index = 0;
+        int Alignment = 0;
+        std::optional<std::string> Format;
+    };
+
+    // The C# `private IEnumerable<(TokenKind, string?)> TokenizeFormatString(
+    // string value)` (lines 883-935): the format-string tokenizer over the
+    // `{`/`}`/`:`/`,` state machine -- `{{`/`}}` collapse to doubled literal
+    // text, a `{` starts an argument run, a `}` ends it, `:` and `,` refine
+    // the run's kind, an unterminated run is the Error token. The C# iterator
+    // yields (kind, text) pairs; the text is nullopt for the C# null (the
+    // Error token's shape). Made public for tests.
+    static std::vector<std::pair<TokenKind, std::optional<std::string>>>
+    TokenizeFormatString(const std::string& value);
+
+    // The C# `private bool TryGetStringInterpolationTokens(ArgumentList
+    // argumentList, out string? format, out List<(...)>? tokens)` (lines
+    // 766-842): the interpolation-token gate over the argument list -- the
+    // first argument is the format string (a String-typed compile-time
+    // constant), no later argument carries a string literal (a nested literal
+    // would make the render untrackable), no argument names, no
+    // argument-to-parameter map, and the format's argument slots are
+    // consecutive from 0 and exactly fill the remaining arguments. `format`
+    // / `tokens` are the C# out parameters: both nullopt on false, both
+    // engaged on true (the C# NotNullWhen contract). Made public for tests.
+    bool TryGetStringInterpolationTokens(
+        const ArgumentList& argumentList, std::optional<std::string>& format,
+        std::optional<std::vector<FormatToken>>& tokens) const;
+
+    // The C# `private ExpressionWithResolveResult HandleStringInterpolation(
+    // IMethod method, ArgumentList argumentList)` (lines 595-648): the `$"..."
+    // render -- the InterpolatedStringExpression over the token stream (each
+    // argument token renders an Interpolation over its argument; a trailing
+    // single-element array-literal argument is unwrapped into its element),
+    // the `string.Format` arm answering the bare interpolation and the
+    // `FormattableStringFactory.Create` arm the cast over the
+    // ImplicitInterpolatedStringConversion. Returns the default (null
+    // expression) when the tokens do not parse or the token list is empty.
+    // Made public for tests.
+    ExpressionWithResolveResult HandleStringInterpolation(
+        const TS::IMethod& method, ArgumentList argumentList);
+
 
     // The C# `private bool HandleRangeConstruction(out ExpressionWithResolveResult
     // result, OpCode callOpCode, IMethod method, TranslatedExpression target,

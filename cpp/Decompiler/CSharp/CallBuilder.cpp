@@ -55,7 +55,12 @@
 #include "Decompiler/CSharp/Resolver/MemberLookup.hpp"
 #include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/Semantics/InitializedObjectResolveResult.hpp"
+#include "Decompiler/Semantics/InterpolatedStringResolveResult.hpp"
+#include "Decompiler/Semantics/ConstantResolveResult.hpp"
+#include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/TypeSystem/IEvent.hpp"
+#include "Decompiler/Util/Char.hpp"
+#include "Decompiler/Util/Utf.hpp"
 #include "Decompiler/CSharp/Syntax/Comment.hpp"
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/IL/Instructions/LdObjIfRef.hpp"
@@ -68,7 +73,6 @@
 #include "Decompiler/IL/Transforms/AssignVariableNames.hpp"
 #include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
-#include "Decompiler/Semantics/ConversionResolveResult.hpp"
 #include "Decompiler/Semantics/MemberResolveResult.hpp"
 #include "Decompiler/Semantics/OutVarResolveResult.hpp"
 #include "Decompiler/TypeSystem/ArrayTypeReference.hpp"
@@ -132,6 +136,70 @@ bool AnyTypeArgumentContainsAnonymousType(
             return true;
     }
     return false;
+}
+
+// The C# `string.Split(char[] separators, int count)` for the token shapes:
+// split at the first `count - 1` separator occurrences, the last piece
+// carrying the remainder verbatim (including further separators); a string
+// with no separator is one piece.
+std::vector<std::string> SplitWithCount(const std::string& value,
+                                        const std::string& separators, int count)
+{
+    std::vector<std::string> pieces;
+    std::size_t start = 0;
+    while (static_cast<int>(pieces.size()) + 1 < count)
+    {
+        std::size_t next = std::string::npos;
+        for (char sep : separators)
+        {
+            std::size_t at = value.find(sep, start);
+            if (at != std::string::npos && (next == std::string::npos || at < next))
+                next = at;
+        }
+        if (next == std::string::npos)
+            break;
+        pieces.push_back(value.substr(start, next - start));
+        start = next + 1;
+    }
+    pieces.push_back(value.substr(start));
+    return pieces;
+}
+
+// The .NET `int.TryParse(string, out int)` over NumberStyles.Integer and the
+// invariant culture: leading/trailing whitespace (the char.IsWhiteSpace units
+// -- the Util::IsWhiteSpace table over UTF-16 code units), an optional leading
+// sign, one or more decimal digits, and the int32 magnitude gate. A failing
+// parse leaves `result` untouched (the .NET out-parameter 0 assignment is
+// unobservable through the call sites -- every failure rejects the token).
+bool TryParseInt32(const std::string& text, std::int32_t& result)
+{
+    std::u16string u16 = Util::Utf8ToUtf16(text);
+    std::size_t begin = 0;
+    std::size_t end = u16.size();
+    while (begin < end && Util::IsWhiteSpace(u16[begin]))
+        begin++;
+    while (end > begin && Util::IsWhiteSpace(u16[end - 1]))
+        end--;
+    bool negative = false;
+    if (begin < end && (u16[begin] == u'+' || u16[begin] == u'-'))
+    {
+        negative = u16[begin] == u'-';
+        begin++;
+    }
+    if (begin == end)
+        return false;
+    std::int64_t value = 0;
+    for (std::size_t i = begin; i < end; i++)
+    {
+        char16_t c = u16[i];
+        if (c < u'0' || c > u'9')
+            return false;
+        value = value * 10 + (c - '0');
+        if (value > (negative ? INT64_C(2147483648) : INT64_C(2147483647)))
+            return false;
+    }
+    result = negative ? static_cast<std::int32_t>(-value) : static_cast<std::int32_t>(value);
+    return true;
 }
 
 // The C# `GetActualArgumentCount()` body shared by the three argument slices.
@@ -1794,15 +1862,356 @@ bool CallBuilder::IsInterpolatedStringCreation(const TS::IMethod& method,
 {
     const TS::ITypeDefinition* declaringDef =
         method.DeclaringType() != nullptr ? method.DeclaringType()->GetDefinition() : nullptr;
-    return method.IsStatic()
+    bool nameArm = method.IsStatic()
         && ((declaringDef != nullptr
                 && TS::IsKnownType(*method.DeclaringType(), TS::KnownTypeCode::String)
                 && method.Name() == "Format")
             || (method.Name() == "Create"
                 && declaringDef != nullptr
                 && declaringDef->Name() == "FormattableStringFactory"
-                && declaringDef->Namespace() == "System.Runtime.CompilerServices"))
-        && argumentList.Length() >= 1;
+                && declaringDef->Namespace() == "System.Runtime.CompilerServices"));
+    if (!nameArm || argumentList.ArgumentNames.has_value())
+        return false;
+    // The C# `(argumentList.IsExpandedForm || !method.Parameters.Last().IsParams
+    // || (argumentList.Length == 2 && argumentList.Arguments[1].Expression is
+    // ArrayCreateExpression))` chain: the .NET `Last()` over a parameterless
+    // method throws 'Sequence contains no elements' (the established
+    // out_of_range convention), and the C# || short-circuit makes the
+    // expanded-form arm bypass the params check entirely.
+    if (argumentList.IsExpandedForm)
+        return true;
+    const std::vector<const TS::IParameter*>& parameters = method.Parameters();
+    if (parameters.empty())
+        throw std::out_of_range("Sequence contains no elements");
+    if (!parameters.back()->IsParams())
+        return true;
+    return argumentList.Length() == 2
+        && dynamic_cast<const Syntax::ArrayCreateExpression*>(
+               argumentList.Arguments[1].Expression())
+               != nullptr;
+}
+
+// The C# `private ExpressionWithResolveResult HandleStringInterpolation(
+// IMethod method, ArgumentList argumentList)` (CallBuilder.cs lines 595-648).
+ExpressionWithResolveResult CallBuilder::HandleStringInterpolation(
+    const TS::IMethod& method, ArgumentList argumentList)
+{
+    std::optional<std::string> format;
+    std::optional<std::vector<FormatToken>> tokens;
+    if (!TryGetStringInterpolationTokens(argumentList, format, tokens))
+        return ExpressionWithResolveResult();
+
+    const std::vector<TranslatedExpression>& arguments = argumentList.Arguments;
+    std::vector<Syntax::InterpolatedStringContent*> content;
+
+    // The C# `bool unpackSingleElementArray` local: only a two-argument call
+    // whose second argument is an array-literal creation with exactly one
+    // element. The C# `argumentList.Length == 2 && ...` chain SHORT-CIRCUITS
+    // before indexing Arguments[1] -- the port mirrors that order (a shorter
+    // argument list never indexes past the end; the MSVC debug-iterator
+    // assertion would abort the otherwise-valid shorter-call arms).
+    const Syntax::ArrayCreateExpression* arrayCreation = nullptr;
+    const Sem::ArrayCreateResolveResult* arrayCreationRR = nullptr;
+    bool unpackSingleElementArray = false;
+    if (!argumentList.IsExpandedForm && argumentList.Length() == 2)
+    {
+        arrayCreation = dynamic_cast<const Syntax::ArrayCreateExpression*>(
+            arguments[1].Expression());
+        arrayCreationRR = dynamic_cast<const Sem::ArrayCreateResolveResult*>(
+            arguments[1].ResolveResult());
+        unpackSingleElementArray = arrayCreation != nullptr
+            && arrayCreation->Initializer() != nullptr
+            && arrayCreation->Initializer()->Elements().Count() == 1
+            && arrayCreationRR != nullptr
+            && arrayCreationRR->InitializerElements().has_value()
+            && !arrayCreationRR->InitializerElements()->empty();
+    }
+
+    // The C# `void UnpackSingleElementArray(ref TranslatedExpression argument)`
+    // local function: replace the argument with the initializer element (the
+    // node detached from the initializer, its own resolve result read through
+    // the ArrayCreateResolveResult.InitializerElements entry -- both annotated
+    // on the detached node, so the TranslatedExpression ctor assert holds).
+    auto unpackArgument = [&]() -> TranslatedExpression {
+        if (!unpackSingleElementArray)
+            return TranslatedExpression();
+        Syntax::Expression* element = arrayCreation->Initializer()->Elements().At(0);
+        element->Remove();
+        return TranslatedExpression(
+            element, (*arrayCreationRR->InitializerElements())[0].get());
+    };
+
+    if (tokens->empty())
+    {
+        return ExpressionWithResolveResult();
+    }
+
+    for (const FormatToken& token : *tokens)
+    {
+        TranslatedExpression argument;
+        switch (token.Kind)
+        {
+            case TokenKind::String:
+                content.push_back(new Syntax::InterpolatedStringText(*token.Format));
+                break;
+            case TokenKind::Argument:
+                argument = arguments[token.Index + 1];
+                {
+                    TranslatedExpression unpacked = unpackArgument();
+                    if (unpacked.Expression() != nullptr)
+                        argument = unpacked;
+                }
+                content.push_back(new Syntax::Interpolation(argument.Expression()));
+                break;
+            case TokenKind::ArgumentWithFormat:
+                argument = arguments[token.Index + 1];
+                {
+                    TranslatedExpression unpacked = unpackArgument();
+                    if (unpacked.Expression() != nullptr)
+                        argument = unpacked;
+                }
+                content.push_back(
+                    new Syntax::Interpolation(argument.Expression(), 0, token.Format));
+                break;
+            case TokenKind::ArgumentWithAlignment:
+                argument = arguments[token.Index + 1];
+                {
+                    TranslatedExpression unpacked = unpackArgument();
+                    if (unpacked.Expression() != nullptr)
+                        argument = unpacked;
+                }
+                content.push_back(
+                    new Syntax::Interpolation(argument.Expression(), token.Alignment));
+                break;
+            case TokenKind::ArgumentWithAlignmentAndFormat:
+                argument = arguments[token.Index + 1];
+                {
+                    TranslatedExpression unpacked = unpackArgument();
+                    if (unpacked.Expression() != nullptr)
+                        argument = unpacked;
+                }
+                content.push_back(new Syntax::Interpolation(
+                    argument.Expression(), token.Alignment, token.Format));
+                break;
+            case TokenKind::Error:
+                // The C# switch has no Error arm (TryGetStringInterpolationTokens
+                // rejects every Error token before the render runs).
+                break;
+        }
+    }
+    auto formattableStringType =
+        const_cast<TS::IType&>(
+            expressionBuilder_->compilation->FindType(TS::KnownTypeCode::FormattableString))
+            .shared_from_this();
+    auto resolveResults = argumentList.GetArgumentResolveResults(1);
+    auto isrr = std::make_shared<Sem::InterpolatedStringResolveResult>(
+        const_cast<TS::IType&>(
+            expressionBuilder_->compilation->FindType(TS::KnownTypeCode::String))
+            .shared_from_this(),
+        *format, std::move(resolveResults));
+    auto* expr = new Syntax::InterpolatedStringExpression();
+    for (Syntax::InterpolatedStringContent* c : content)
+    {
+        expr->Content().Add(c);
+    }
+    if (method.Name() == "Format")
+        return WithRR(*expr, isrr);
+    auto* cast = new Syntax::CastExpression(
+        expressionBuilder_->ConvertType(*formattableStringType),
+        WithRR(*expr, isrr).Expression());
+    return WithRR(
+        *cast,
+        std::make_shared<Sem::ConversionResolveResult>(
+            formattableStringType, isrr,
+            Sem::Conversions::ImplicitInterpolatedStringConversion()));
+}
+
+// The C# `private bool TryGetStringInterpolationTokens(ArgumentList
+// argumentList, out string? format, out List<(...)>? tokens)` (CallBuilder.cs
+// lines 766-842).
+bool CallBuilder::TryGetStringInterpolationTokens(
+    const ArgumentList& argumentList, std::optional<std::string>& format,
+    std::optional<std::vector<FormatToken>>& tokens) const
+{
+    tokens.reset();
+    format.reset();
+    const std::vector<TranslatedExpression>& arguments = argumentList.Arguments;
+    if (arguments.empty() || argumentList.ArgumentNames.has_value()
+        || argumentList.ArgumentToParameterMap.has_value())
+        return false;
+    const auto* crr = dynamic_cast<const Sem::ConstantResolveResult*>(
+        arguments[0].ResolveResult());
+    if (crr == nullptr
+        || !TS::IsKnownType(crr->Type(), TS::KnownTypeCode::String))
+        return false;
+    for (std::size_t i = 1; i < arguments.size(); i++)
+    {
+        for (const Syntax::AstNode* node :
+             arguments[i].Expression()->DescendantsAndSelf())
+        {
+            if (auto* primitive = dynamic_cast<const Syntax::PrimitiveExpression*>(node))
+            {
+                if (std::holds_alternative<std::string>(primitive->Value()))
+                    return false;
+            }
+        }
+    }
+    tokens.emplace();
+    int i2 = 0;
+    format = std::any_cast<std::string>(crr->ConstantValue());
+    for (const auto& [kind, data] : TokenizeFormatString(*format))
+    {
+        int index = 0;
+        std::vector<std::string> arg;
+        int alignment = 0;
+        switch (kind)
+        {
+            case TokenKind::Error:
+                return false;
+            case TokenKind::String:
+                tokens->push_back({kind, -1, 0, data});
+                break;
+            case TokenKind::Argument:
+                if (!TryParseInt32(*data, index) || index != i2)
+                    return false;
+                i2++;
+                tokens->push_back({kind, index, 0, std::nullopt});
+                break;
+            case TokenKind::ArgumentWithFormat:
+                arg = SplitWithCount(*data, ":", 2);
+                if (arg.size() != 2 || arg[1].empty())
+                    return false;
+                if (!TryParseInt32(arg[0], index) || index != i2)
+                    return false;
+                i2++;
+                tokens->push_back({kind, index, 0, arg[1]});
+                break;
+            case TokenKind::ArgumentWithAlignment:
+                arg = SplitWithCount(*data, ",", 2);
+                if (arg.size() != 2 || arg[1].empty())
+                    return false;
+                if (!TryParseInt32(arg[0], index) || index != i2)
+                    return false;
+                if (!TryParseInt32(arg[1], alignment))
+                    return false;
+                i2++;
+                tokens->push_back({kind, index, alignment, std::nullopt});
+                break;
+            case TokenKind::ArgumentWithAlignmentAndFormat:
+                arg = SplitWithCount(*data, ",:", 3);
+                if (arg.size() != 3 || arg[1].empty() || arg[2].empty())
+                    return false;
+                if (!TryParseInt32(arg[0], index) || index != i2)
+                    return false;
+                if (!TryParseInt32(arg[1], alignment))
+                    return false;
+                i2++;
+                tokens->push_back({kind, index, alignment, arg[2]});
+                break;
+        }
+    }
+    return i2 == static_cast<int>(arguments.size()) - 1;
+}
+
+// The C# `private IEnumerable<(TokenKind, string?)> TokenizeFormatString(
+// string value)` (CallBuilder.cs lines 883-935) -- the `Peek`/`Next` local
+// functions inlined over the string (the C# iterator yields pairs; the port
+// returns them, the text nullopt for the C# null).
+std::vector<std::pair<CallBuilder::TokenKind, std::optional<std::string>>>
+CallBuilder::TokenizeFormatString(const std::string& value)
+{
+    std::vector<std::pair<TokenKind, std::optional<std::string>>> tokens;
+    int pos = -1;
+    TokenKind kind = TokenKind::String;
+    std::string sb;
+
+    // The C# `int Peek(int steps = 1)` local: the code unit `steps` past `pos`,
+    // or -1 past the end. The port iterates UTF-8 bytes: every character the
+    // state machine tests (`{`, `}`, `:`, `,`) is ASCII and single-byte, and
+    // every appended byte preserves the UTF-8 sequence, so the state machine
+    // is byte-faithful over the port's UTF-8 strings.
+    auto peek = [&value, &pos](int steps = 1) -> int {
+        if (pos + steps < static_cast<int>(value.size()))
+            return static_cast<unsigned char>(value[pos + steps]);
+        return -1;
+    };
+    // The C# `int Next()` local: `Peek()` then advance.
+    auto next = [&pos, &peek]() -> int {
+        int val = peek();
+        pos++;
+        return val;
+    };
+
+    int nextChar;
+    while ((nextChar = next()) > -1)
+    {
+        switch (static_cast<char>(nextChar))
+        {
+            case '{':
+                if (peek() == '{')
+                {
+                    kind = TokenKind::String;
+                    sb += "{{";
+                    next();
+                }
+                else
+                {
+                    if (!sb.empty())
+                    {
+                        tokens.emplace_back(kind, sb);
+                    }
+                    kind = TokenKind::Argument;
+                    sb.clear();
+                }
+                break;
+            case '}':
+                if (kind != TokenKind::String)
+                {
+                    tokens.emplace_back(kind, sb);
+                    sb.clear();
+                    kind = TokenKind::String;
+                }
+                else if (peek() == '}')
+                {
+                    sb += "}}";
+                    next();
+                }
+                else
+                {
+                    tokens.emplace_back(TokenKind::Error, std::nullopt);
+                }
+                break;
+            case ':':
+                if (kind == TokenKind::Argument)
+                {
+                    kind = TokenKind::ArgumentWithFormat;
+                }
+                else if (kind == TokenKind::ArgumentWithAlignment)
+                {
+                    kind = TokenKind::ArgumentWithAlignmentAndFormat;
+                }
+                sb += ':';
+                break;
+            case ',':
+                if (kind == TokenKind::Argument)
+                {
+                    kind = TokenKind::ArgumentWithAlignment;
+                }
+                sb += ',';
+                break;
+            default:
+                sb += static_cast<char>(nextChar);
+                break;
+        }
+    }
+    if (!sb.empty())
+    {
+        if (kind == TokenKind::String)
+            tokens.emplace_back(kind, sb);
+        else
+            tokens.emplace_back(TokenKind::Error, std::nullopt);
+    }
+    return tokens;
 }
 
 // The C# `private bool HandleRangeConstruction(out ExpressionWithResolveResult
@@ -2085,12 +2494,13 @@ ExpressionWithResolveResult CallBuilder::Build(
     if (settings_->StringInterpolation()
         && IsInterpolatedStringCreation(*resolvedMethod, argumentList))
     {
-        // The C# renders the interpolation (TryGetStringInterpolationTokens + the
-        // InterpolatedStringExpression arm) and FALLS THROUGH when the tokens do not
-        // parse; the port cannot reproduce the fall-through without the token parser,
-        // so the arm is a loud deferral behind the real gate.
-        throw std::logic_error("HandleStringInterpolation is deferred with the "
-                               "interpolation slice (CallBuilder.cs line 460)");
+        // The C# `var result = HandleStringInterpolation(method, argumentList);`
+        // and falls through to the accessor arm when the tokens do not parse
+        // (the default-result shape).
+        ExpressionWithResolveResult result =
+            HandleStringInterpolation(*resolvedMethod, argumentList);
+        if (result.Expression() != nullptr)
+            return result;
     }
 
     int allowedParamCount =
@@ -2398,11 +2808,16 @@ std::vector<std::shared_ptr<Sem::ResolveResult>> ArgumentList::GetArgumentResolv
         results.push_back(SharedResolveResultAnnotation(*expression.Expression()));
     }
 
+    // The C# `.Skip(skipCount).Take(GetActualArgumentCount())`: Take caps the
+    // slice at the remaining elements, so the count is clamped BEFORE the
+    // iterator arithmetic (an unclamped begin + count seeks past end(), the
+    // MSVC debug-iterator assertion the interpolation slice's skipCount=1
+    // call first exercised).
     int actualCount = GetActualArgumentCount();
-    auto begin = results.begin() + std::min(skipCount, static_cast<int>(results.size()));
-    auto end = begin + std::max(0, actualCount);
-    if (end > results.end())
-        end = results.end();
+    int skipped = std::min(skipCount, static_cast<int>(results.size()));
+    actualCount = std::max(0, std::min(actualCount, static_cast<int>(results.size()) - skipped));
+    auto begin = results.begin() + skipped;
+    auto end = begin + actualCount;
     return std::vector<std::shared_ptr<Sem::ResolveResult>>(begin, end);
 }
 
@@ -2414,11 +2829,12 @@ ArgumentList::GetArgumentResolveResultsDirect(int skipCount)
     for (const TranslatedExpression& a : Arguments)
         results.push_back(SharedResolveResultAnnotation(*a.Expression()));
 
+    // The same clamped-before-arithmetic slice (the C# Skip/Take cap).
     int actualCount = GetActualArgumentCount();
-    auto begin = results.begin() + std::min(skipCount, static_cast<int>(results.size()));
-    auto end = begin + std::max(0, actualCount);
-    if (end > results.end())
-        end = results.end();
+    int skipped = std::min(skipCount, static_cast<int>(results.size()));
+    actualCount = std::max(0, std::min(actualCount, static_cast<int>(results.size()) - skipped));
+    auto begin = results.begin() + skipped;
+    auto end = begin + actualCount;
     return std::vector<std::shared_ptr<Sem::ResolveResult>>(begin, end);
 }
 

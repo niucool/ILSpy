@@ -76,6 +76,13 @@
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Transforms/ILInlining.hpp"
 #include "Decompiler/Semantics/ByReferenceResolveResult.hpp"
+#include "Decompiler/Semantics/InterpolatedStringResolveResult.hpp"
+#include "Decompiler/Semantics/ConversionResolveResult.hpp"
+#include "Decompiler/Semantics/ArrayCreateResolveResult.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayCreateExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ArrayInitializerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/InterpolatedStringText.hpp"
+#include "Decompiler/CSharp/Syntax/Interpolation.hpp"
 #include "Decompiler/Semantics/ConstantResolveResult.hpp"
 #include "Decompiler/Semantics/MemberResolveResult.hpp"
 #include "Decompiler/Semantics/OutVarResolveResult.hpp"
@@ -3445,4 +3452,639 @@ TEST(AccessorCallTest, AccessorArmThroughBuildRendersTheIdentifier)
     auto* rr = dynamic_cast<const Sem::MemberResolveResult*>(result.ResolveResult());
     ASSERT_NE(rr, nullptr);
     EXPECT_EQ(rr->Member()->MemberDefinition(), fixture.prop->MemberDefinition());
+}
+
+// ---------------------------------------------------------------------------
+// HandleStringInterpolation: the interpolation render (CallBuilder.cs lines
+// 595-648 + 766-935).
+// ---------------------------------------------------------------------------
+
+TEST(HandleStringInterpolationTest, TokenizeFormatStringMatrix)
+{
+    using Tok = CS::CallBuilder::TokenKind;
+    using Token = std::pair<Tok, std::optional<std::string>>;
+    // Plain text only.
+    auto tokens = CS::CallBuilder::TokenizeFormatString("abc");
+    ASSERT_EQ(tokens.size(), 1u);
+    EXPECT_EQ(tokens[0].first, Tok::String);
+    EXPECT_EQ(tokens[0].second, "abc");
+    // A single argument slot.
+    tokens = CS::CallBuilder::TokenizeFormatString("{0}");
+    ASSERT_EQ(tokens.size(), 1u);
+    EXPECT_EQ(tokens[0].first, Tok::Argument);
+    EXPECT_EQ(tokens[0].second, "0");
+    // Escaped braces collapse to doubled literal text.
+    tokens = CS::CallBuilder::TokenizeFormatString("{{x}}");
+    ASSERT_EQ(tokens.size(), 1u);
+    EXPECT_EQ(tokens[0].first, Tok::String);
+    EXPECT_EQ(tokens[0].second, "{{x}}");
+    // A leading literal then an unterminated brace.
+    tokens = CS::CallBuilder::TokenizeFormatString("a{{");
+    ASSERT_EQ(tokens.size(), 1u);
+    EXPECT_EQ(tokens[0].first, Tok::String);
+    EXPECT_EQ(tokens[0].second, "a{{");
+    // An unterminated argument run yields the Error token after the text.
+    tokens = CS::CallBuilder::TokenizeFormatString("{0");
+    // The unterminated run is never closed: the tail yields ONLY the
+    // Error token (the ":"/"," cases never yield -- they only refine
+    // the run kind and append).
+    ASSERT_EQ(tokens.size(), 1u);
+    EXPECT_EQ(tokens[0].first, Tok::Error);
+    EXPECT_FALSE(tokens[0].second.has_value());
+    // Format / alignment / both suffixes refine the argument run's kind.
+    tokens = CS::CallBuilder::TokenizeFormatString("{0:x}");
+    ASSERT_EQ(tokens.size(), 1u);
+    EXPECT_EQ(tokens[0].first, Tok::ArgumentWithFormat);
+    EXPECT_EQ(tokens[0].second, "0:x");
+    tokens = CS::CallBuilder::TokenizeFormatString("{0,5}");
+    ASSERT_EQ(tokens.size(), 1u);
+    EXPECT_EQ(tokens[0].first, Tok::ArgumentWithAlignment);
+    EXPECT_EQ(tokens[0].second, "0,5");
+    tokens = CS::CallBuilder::TokenizeFormatString("{0,5:x}");
+    ASSERT_EQ(tokens.size(), 1u);
+    EXPECT_EQ(tokens[0].first, Tok::ArgumentWithAlignmentAndFormat);
+    EXPECT_EQ(tokens[0].second, "0,5:x");
+    // A bare closing brace inside literal text is the Error token.
+    tokens = CS::CallBuilder::TokenizeFormatString("a{0}b}");
+    // The bare closing brace yields the Error token WITHOUT clearing sb,
+    // so the tail still yields the pending literal (the C# shape).
+    ASSERT_EQ(tokens.size(), 4u);
+    EXPECT_EQ(tokens[0].second, "a");
+    EXPECT_EQ(tokens[1].first, Tok::Argument);
+    EXPECT_EQ(tokens[2].first, Tok::Error);
+    EXPECT_FALSE(tokens[2].second.has_value());
+    EXPECT_EQ(tokens[3].first, Tok::String);
+    EXPECT_EQ(tokens[3].second, "b");
+    // The literal runs BETWEEN argument runs each yield: a{0}b is
+    // three tokens (the tail yields the trailing "b").
+    tokens = CS::CallBuilder::TokenizeFormatString("a{0}b");
+    ASSERT_EQ(tokens.size(), 3u);
+    EXPECT_EQ(tokens[0].second, "a");
+    EXPECT_EQ(tokens[1].first, Tok::Argument);
+    EXPECT_EQ(tokens[2].first, Tok::String);
+    EXPECT_EQ(tokens[2].second, "b");
+    // An empty string yields no tokens.
+    tokens = CS::CallBuilder::TokenizeFormatString("");
+    EXPECT_EQ(tokens.size(), 0u);
+}
+
+TEST(HandleStringInterpolationTest, TryGetStringInterpolationTokensHappyPath)
+{
+    BuilderFixture fixture;
+    auto format = std::make_shared<Impl::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    format->SetName("Format");
+    format->SetIsStatic(true);
+    format->SetDeclaringType(
+        fixture.holder.KnownType(TS::KnownTypeCode::String));
+    ParamFixture fmtArg(fixture.holder.KnownType(TS::KnownTypeCode::String), "format");
+    ParamFixture arg(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "arg");
+    format->SetParameters({fmtArg.parameter, arg.parameter});
+
+    IL::LdStr formatStr("Hello {0}!");
+    IL::LdcI4 value(42);
+    std::vector<IL::ILInstruction*> callArguments{&formatStr, &value};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *format, 0, callArguments, std::nullopt);
+
+    std::optional<std::string> outFormat;
+    std::optional<std::vector<CS::CallBuilder::FormatToken>> tokens;
+    ASSERT_TRUE(builder.TryGetStringInterpolationTokens(list, outFormat, tokens));
+    ASSERT_TRUE(outFormat.has_value());
+    EXPECT_EQ(*outFormat, "Hello {0}!");
+    ASSERT_TRUE(tokens.has_value());
+    ASSERT_EQ(tokens->size(), 3u);
+    EXPECT_EQ((*tokens)[0].Kind, CS::CallBuilder::TokenKind::String);
+    EXPECT_EQ(*(*tokens)[0].Format, "Hello ");
+    EXPECT_EQ((*tokens)[0].Index, -1);
+    EXPECT_EQ((*tokens)[1].Kind, CS::CallBuilder::TokenKind::Argument);
+    EXPECT_EQ((*tokens)[1].Index, 0);
+    EXPECT_FALSE((*tokens)[1].Format.has_value());
+    EXPECT_EQ((*tokens)[2].Kind, CS::CallBuilder::TokenKind::String);
+    EXPECT_EQ(*(*tokens)[2].Format, "!");
+}
+
+TEST(HandleStringInterpolationTest, TryGetStringInterpolationTokensFormatSuffixes)
+{
+    BuilderFixture fixture;
+    auto format = std::make_shared<Impl::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    format->SetName("Format");
+    format->SetIsStatic(true);
+    format->SetDeclaringType(
+        fixture.holder.KnownType(TS::KnownTypeCode::String));
+    ParamFixture fmtArg(fixture.holder.KnownType(TS::KnownTypeCode::String), "format");
+    ParamFixture arg(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "arg");
+    format->SetParameters({fmtArg.parameter, arg.parameter});
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    // The {0:x} form: the ArgumentWithFormat token carries the suffix.
+    {
+        IL::LdStr formatStr("v{0:x}");
+        IL::LdcI4 value(42);
+        std::vector<IL::ILInstruction*> callArguments{&formatStr, &value};
+        CS::ArgumentList list = builder.BuildArgumentList(
+            CS::ExpectedTargetDetails{}, nullptr, *format, 0, callArguments,
+            std::nullopt);
+        std::optional<std::string> outFormat;
+        std::optional<std::vector<CS::CallBuilder::FormatToken>> tokens;
+        ASSERT_TRUE(builder.TryGetStringInterpolationTokens(list, outFormat, tokens));
+        ASSERT_EQ(tokens->size(), 2u);
+        EXPECT_EQ((*tokens)[1].Kind,
+                  CS::CallBuilder::TokenKind::ArgumentWithFormat);
+        EXPECT_EQ((*tokens)[1].Index, 0);
+        EXPECT_EQ((*tokens)[1].Alignment, 0);
+        ASSERT_TRUE((*tokens)[1].Format.has_value());
+        EXPECT_EQ(*(*tokens)[1].Format, "x");
+    }
+    // The {0,5} form: the ArgumentWithAlignment token carries the alignment
+    // and a null suffix.
+    {
+        IL::LdStr formatStr("v{0,5}");
+        IL::LdcI4 value(42);
+        std::vector<IL::ILInstruction*> callArguments{&formatStr, &value};
+        CS::ArgumentList list = builder.BuildArgumentList(
+            CS::ExpectedTargetDetails{}, nullptr, *format, 0, callArguments,
+            std::nullopt);
+        std::optional<std::string> outFormat;
+        std::optional<std::vector<CS::CallBuilder::FormatToken>> tokens;
+        ASSERT_TRUE(builder.TryGetStringInterpolationTokens(list, outFormat, tokens));
+        ASSERT_EQ(tokens->size(), 2u);
+        EXPECT_EQ((*tokens)[1].Kind,
+                  CS::CallBuilder::TokenKind::ArgumentWithAlignment);
+        EXPECT_EQ((*tokens)[1].Alignment, 5);
+        EXPECT_FALSE((*tokens)[1].Format.has_value());
+    }
+    // The {0,-5:x} form: a negative alignment parses, the suffix survives.
+    {
+        IL::LdStr formatStr("v{0,-5:x}");
+        IL::LdcI4 value(42);
+        std::vector<IL::ILInstruction*> callArguments{&formatStr, &value};
+        CS::ArgumentList list = builder.BuildArgumentList(
+            CS::ExpectedTargetDetails{}, nullptr, *format, 0, callArguments,
+            std::nullopt);
+        std::optional<std::string> outFormat;
+        std::optional<std::vector<CS::CallBuilder::FormatToken>> tokens;
+        ASSERT_TRUE(builder.TryGetStringInterpolationTokens(list, outFormat, tokens));
+        ASSERT_EQ(tokens->size(), 2u);
+        EXPECT_EQ((*tokens)[1].Kind,
+                  CS::CallBuilder::TokenKind::ArgumentWithAlignmentAndFormat);
+        EXPECT_EQ((*tokens)[1].Alignment, -5);
+        ASSERT_TRUE((*tokens)[1].Format.has_value());
+        EXPECT_EQ(*(*tokens)[1].Format, "x");
+    }
+}
+
+TEST(HandleStringInterpolationTest, TryGetStringInterpolationTokensFailureMatrix)
+{
+    BuilderFixture fixture;
+    auto format = std::make_shared<Impl::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    format->SetName("Format");
+    format->SetIsStatic(true);
+    format->SetDeclaringType(
+        fixture.holder.KnownType(TS::KnownTypeCode::String));
+    ParamFixture fmtArg(fixture.holder.KnownType(TS::KnownTypeCode::String), "format");
+    ParamFixture arg(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "arg");
+    ParamFixture arg2(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "arg2");
+    format->SetParameters({fmtArg.parameter, arg.parameter, arg2.parameter});
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    std::optional<std::string> outFormat;
+    std::optional<std::vector<CS::CallBuilder::FormatToken>> tokens;
+    // Argument names (an out-of-place argument) reject the whole walk.
+    {
+        IL::LdStr formatStr("Hello {0}!");
+        IL::LdcI4 value(42);
+        IL::LdcI4 value2(43);
+        std::vector<IL::ILInstruction*> callArguments{&formatStr, &value2, &value};
+        // An out-of-place argumentToParameterMap is what assigns names
+        // (the C# argumentNames path).
+        CS::ArgumentList list = builder.BuildArgumentList(
+            CS::ExpectedTargetDetails{}, nullptr, *format, 0, callArguments,
+            std::vector<int>{0, 2, 1});
+        ASSERT_TRUE(list.ArgumentNames.has_value());
+        EXPECT_FALSE(builder.TryGetStringInterpolationTokens(list, outFormat, tokens));
+        EXPECT_FALSE(outFormat.has_value());
+        EXPECT_FALSE(tokens.has_value());
+    }
+    // A non-constant first argument rejects the walk.
+    {
+        CS::ArgumentList raw;
+        Syntax::IdentifierExpression ident("value");
+        ident.AddAnnotation(std::make_shared<Sem::TypeResolveResult>(
+            fixture.holder.KnownType(TS::KnownTypeCode::Int32)));
+        raw.Arguments.push_back(
+            CS::TranslatedExpression(&ident, CS::GetResolveResult(ident)));
+        EXPECT_FALSE(builder.TryGetStringInterpolationTokens(raw, outFormat, tokens));
+    }
+    // A first argument typed as a NON-String constant rejects the walk.
+    {
+        CS::ArgumentList raw;
+        Syntax::PrimitiveExpression nonString(Syntax::PrimitiveValue(std::int32_t(7)));
+        nonString.AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+            fixture.holder.KnownType(TS::KnownTypeCode::Int32), 7));
+        raw.Arguments.push_back(CS::TranslatedExpression(
+            &nonString, CS::GetResolveResult(nonString)));
+        EXPECT_FALSE(builder.TryGetStringInterpolationTokens(raw, outFormat, tokens));
+    }
+    // A later argument carrying a string literal rejects the walk.
+    {
+        IL::LdStr formatStr("Hello {0}!");
+        IL::LdStr literalArg("nested");
+        IL::LdcI4 value(42);
+        std::vector<IL::ILInstruction*> callArguments{&formatStr, &literalArg, &value};
+        CS::ArgumentList list = builder.BuildArgumentList(
+            CS::ExpectedTargetDetails{}, nullptr, *format, 0, callArguments,
+            std::nullopt);
+        EXPECT_FALSE(builder.TryGetStringInterpolationTokens(list, outFormat, tokens));
+    }
+    // A two-parameter method for the two-argument rejection cases (the
+    // BuildArgumentList argument/parameter count assert).
+    auto format2 = std::make_shared<Impl::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    format2->SetName("Format");
+    format2->SetIsStatic(true);
+    format2->SetDeclaringType(
+        fixture.holder.KnownType(TS::KnownTypeCode::String));
+    format2->SetParameters({fmtArg.parameter, arg.parameter});
+    // A slot index that is not consecutive rejects the walk.
+    {
+        IL::LdStr formatStr("{1}");
+        IL::LdcI4 value(42);
+        std::vector<IL::ILInstruction*> callArguments{&formatStr, &value};
+        CS::ArgumentList list = builder.BuildArgumentList(
+            CS::ExpectedTargetDetails{}, nullptr, *format2, 0, callArguments,
+            std::nullopt);
+        EXPECT_FALSE(builder.TryGetStringInterpolationTokens(list, outFormat, tokens));
+    }
+    // More slots than arguments rejects the walk (the final i check).
+    {
+        IL::LdStr formatStr("{0}{1}");
+        IL::LdcI4 value(42);
+        std::vector<IL::ILInstruction*> callArguments{&formatStr, &value};
+        CS::ArgumentList list = builder.BuildArgumentList(
+            CS::ExpectedTargetDetails{}, nullptr, *format2, 0, callArguments,
+            std::nullopt);
+        EXPECT_FALSE(builder.TryGetStringInterpolationTokens(list, outFormat, tokens));
+    }
+    // A repeated slot rejects the walk (the second 0 is not consecutive).
+    {
+        IL::LdStr formatStr("{0}{0}");
+        IL::LdcI4 value(42);
+        std::vector<IL::ILInstruction*> callArguments{&formatStr, &value};
+        CS::ArgumentList list = builder.BuildArgumentList(
+            CS::ExpectedTargetDetails{}, nullptr, *format2, 0, callArguments,
+            std::nullopt);
+        EXPECT_FALSE(builder.TryGetStringInterpolationTokens(list, outFormat, tokens));
+    }
+    // An unparsable alignment rejects the walk.
+    {
+        IL::LdStr formatStr("{0,x}");
+        IL::LdcI4 value(42);
+        std::vector<IL::ILInstruction*> callArguments{&formatStr, &value};
+        CS::ArgumentList list = builder.BuildArgumentList(
+            CS::ExpectedTargetDetails{}, nullptr, *format2, 0, callArguments,
+            std::nullopt);
+        EXPECT_FALSE(builder.TryGetStringInterpolationTokens(list, outFormat, tokens));
+    }
+    // An empty format suffix rejects the walk.
+    {
+        IL::LdStr formatStr("{0:}");
+        IL::LdcI4 value(42);
+        std::vector<IL::ILInstruction*> callArguments{&formatStr, &value};
+        CS::ArgumentList list = builder.BuildArgumentList(
+            CS::ExpectedTargetDetails{}, nullptr, *format2, 0, callArguments,
+            std::nullopt);
+        EXPECT_FALSE(builder.TryGetStringInterpolationTokens(list, outFormat, tokens));
+    }
+    // Empty arguments reject the walk.
+    {
+        CS::ArgumentList raw;
+        EXPECT_FALSE(builder.TryGetStringInterpolationTokens(raw, outFormat, tokens));
+    }
+}
+
+TEST(HandleStringInterpolationTest, FormatArmRendersTheInterpolatedString)
+{
+    BuilderFixture fixture;
+    auto format = std::make_shared<Impl::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    format->SetName("Format");
+    format->SetIsStatic(true);
+    format->SetDeclaringType(
+        fixture.holder.KnownType(TS::KnownTypeCode::String));
+    ParamFixture fmtArg(fixture.holder.KnownType(TS::KnownTypeCode::String), "format");
+    ParamFixture arg(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "arg");
+    format->SetParameters({fmtArg.parameter, arg.parameter});
+
+    IL::LdStr formatStr("Hello {0}!");
+    IL::LdcI4 value(42);
+    std::vector<IL::ILInstruction*> callArguments{&formatStr, &value};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *format, 0, callArguments, std::nullopt);
+
+    CS::ExpressionWithResolveResult result =
+        builder.HandleStringInterpolation(*format, list);
+    auto* interpolated =
+        dynamic_cast<Syntax::InterpolatedStringExpression*>(result.Expression());
+    ASSERT_NE(interpolated, nullptr);
+    // The content: text / interpolation / text.
+    ASSERT_EQ(interpolated->Content().Count(), 3);
+    auto* text1 = dynamic_cast<Syntax::InterpolatedStringText*>(
+        interpolated->Content().At(0));
+    ASSERT_NE(text1, nullptr);
+    EXPECT_EQ(text1->Text(), "Hello ");
+    auto* interpolation = dynamic_cast<Syntax::Interpolation*>(
+        interpolated->Content().At(1));
+    ASSERT_NE(interpolation, nullptr);
+    auto* argExpr = dynamic_cast<Syntax::PrimitiveExpression*>(
+        interpolation->Expression());
+    ASSERT_NE(argExpr, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(argExpr->Value()), 42);
+    EXPECT_EQ(interpolation->Alignment(), 0);
+    EXPECT_FALSE(interpolation->Suffix().has_value());
+    auto* text2 = dynamic_cast<Syntax::InterpolatedStringText*>(
+        interpolated->Content().At(2));
+    ASSERT_NE(text2, nullptr);
+    EXPECT_EQ(text2->Text(), "!");
+    // The resolve result is the InterpolatedStringResolveResult over the
+    // format string and the argument resolve results (skipCount 1).
+    auto* isrr = dynamic_cast<const Sem::InterpolatedStringResolveResult*>(
+        result.ResolveResult());
+    ASSERT_NE(isrr, nullptr);
+    EXPECT_EQ(isrr->FormatString(), "Hello {0}!");
+    ASSERT_EQ(isrr->Arguments().size(), 1u);
+    EXPECT_TRUE(TS::IsKnownType(isrr->Type(), TS::KnownTypeCode::String));
+}
+
+TEST(HandleStringInterpolationTest, CreateArmRendersTheCastOverFormattableString)
+{
+    BuilderFixture fixture;
+    // `FormattableStringFactory.Create` over the right namespace.
+    auto factory = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        "FormattableStringFactory", "System.Runtime.CompilerServices",
+        TS::FullTypeName(TS::TopLevelTypeName("System.Runtime.CompilerServices",
+                                              "FormattableStringFactory")),
+        TS::TypeKind::Class, TS::Accessibility::Public, fixture.holder.compilation,
+        &fixture.holder.compilation.MainModule());
+    auto create = std::make_shared<Impl::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    create->SetName("Create");
+    create->SetIsStatic(true);
+    create->SetDeclaringType(TS::ITypePtr(factory.get(), [](TS::IType*) {}));
+    ParamFixture fmtArg(fixture.holder.KnownType(TS::KnownTypeCode::String), "format");
+    ParamFixture arg(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "arg");
+    create->SetParameters({fmtArg.parameter, arg.parameter});
+
+    IL::LdStr formatStr("Hello {0}!");
+    IL::LdcI4 value(42);
+    std::vector<IL::ILInstruction*> callArguments{&formatStr, &value};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *create, 0, callArguments, std::nullopt);
+
+    CS::ExpressionWithResolveResult result =
+        builder.HandleStringInterpolation(*create, list);
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(result.Expression());
+    ASSERT_NE(cast, nullptr);
+    // The inner expression is the interpolation; the cast's resolve result is
+    // the ImplicitInterpolatedStringConversion over FormattableString.
+    auto* interpolated = dynamic_cast<Syntax::InterpolatedStringExpression*>(
+        cast->Expression());
+    ASSERT_NE(interpolated, nullptr);
+    ASSERT_EQ(interpolated->Content().Count(), 3);
+    auto* interpolation = dynamic_cast<Syntax::Interpolation*>(
+        interpolated->Content().At(1));
+    ASSERT_NE(interpolation, nullptr);
+    // The OUTER resolve result is the cast's ConversionResolveResult; the
+    // InterpolatedStringResolveResult lives on the inner interpolation node
+    // (the C# `new CastExpression(..., expr.WithRR(isrr)).WithRR(new
+    // ConversionResolveResult(...))` shape).
+    const auto* conversionRr =
+        dynamic_cast<const Sem::ConversionResolveResult*>(result.ResolveResult());
+    ASSERT_NE(conversionRr, nullptr);
+    auto* isrr = dynamic_cast<const Sem::InterpolatedStringResolveResult*>(
+        CS::GetResolveResult(*interpolated));
+    ASSERT_NE(isrr, nullptr);
+    EXPECT_TRUE(TS::IsKnownType(isrr->Type(), TS::KnownTypeCode::String));
+    EXPECT_EQ(isrr->FormatString(), "Hello {0}!");
+    ASSERT_EQ(isrr->Arguments().size(), 1u);
+    ASSERT_NE(conversionRr->ConversionProperty(), nullptr);
+    EXPECT_TRUE(
+        conversionRr->ConversionProperty()->IsInterpolatedStringConversion());
+}
+
+TEST(HandleStringInterpolationTest, UnwrapsTheSingleElementArrayLiteral)
+{
+    BuilderFixture fixture;
+    auto format = std::make_shared<Impl::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    format->SetName("Format");
+    format->SetIsStatic(true);
+    format->SetDeclaringType(
+        fixture.holder.KnownType(TS::KnownTypeCode::String));
+    ParamFixture fmtArg(fixture.holder.KnownType(TS::KnownTypeCode::String), "format");
+    ParamFixture arg(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "arg");
+    format->SetParameters({fmtArg.parameter, arg.parameter});
+
+    // The one-element array-literal argument: an ArrayCreateExpression over an
+    // initializer whose sole element is the int constant, with the
+    // ArrayCreateResolveResult the unpack reads. The node list is hand-built
+    // (the IL shape for `new[] { x }` is the multi-instruction newarr/stelem
+    // chain the C# does not read -- the render consumes the TRANSLATED shape).
+    auto elementType = fixture.holder.KnownType(TS::KnownTypeCode::Int32);
+    // The element's resolve result IS the InitializerElements entry (the same
+    // object -- the TranslatedExpression ctor assert reads the node's
+    // annotation through the ArrayCreateResolveResult entry).
+    auto elementRr = std::make_shared<Sem::ConstantResolveResult>(elementType, 42);
+    auto elementExpr = std::make_unique<Syntax::PrimitiveExpression>(
+        Syntax::PrimitiveValue(std::int32_t(42)));
+    elementExpr->AddAnnotation(elementRr);
+    Syntax::PrimitiveExpression* element = elementExpr.get();
+    auto* initializer = new Syntax::ArrayInitializerExpression();
+    initializer->Elements().Add(elementExpr.release());
+    auto* arrayCreate = new Syntax::ArrayCreateExpression();
+    arrayCreate->Type(new Syntax::PrimitiveType("int"));
+    arrayCreate->Initializer(initializer);
+    auto arrayType = std::make_shared<TS::ArrayType>(elementType);
+    auto arrayRr = std::make_shared<Sem::ArrayCreateResolveResult>(
+        arrayType, std::vector<std::shared_ptr<Sem::ResolveResult>>{},
+        std::vector<std::shared_ptr<Sem::ResolveResult>>{elementRr});
+    arrayCreate->AddAnnotation(arrayRr);
+
+
+
+    // The ArgumentList the C# render consumes is always built through
+    // BuildArgumentList, whose ExpectedParameters bookkeeping the resolve-result
+    // slice indexes -- the hand-built fixture must carry it too.
+    CS::ArgumentList raw;
+    raw.ExpectedParameters.push_back(fmtArg.parameter.get());
+    raw.ExpectedParameters.push_back(arg.parameter.get());
+    auto formatExpr = std::make_unique<Syntax::PrimitiveExpression>(
+        Syntax::PrimitiveValue("Hello {0}!"));
+    formatExpr->AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+        fixture.holder.KnownType(TS::KnownTypeCode::String),
+        std::string("Hello {0}!")));
+    raw.Arguments.push_back(CS::TranslatedExpression(
+        formatExpr.get(), CS::GetResolveResult(*formatExpr)));
+    raw.Arguments.push_back(CS::TranslatedExpression(
+        arrayCreate, CS::GetResolveResult(*arrayCreate)));
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ExpressionWithResolveResult result =
+        builder.HandleStringInterpolation(*format, raw);
+    auto* interpolated =
+        dynamic_cast<Syntax::InterpolatedStringExpression*>(result.Expression());
+    ASSERT_NE(interpolated, nullptr);
+    ASSERT_EQ(interpolated->Content().Count(), 3);
+    auto* interpolation = dynamic_cast<Syntax::Interpolation*>(
+        interpolated->Content().At(1));
+    ASSERT_NE(interpolation, nullptr);
+    // The interpolation renders over the ELEMENT (the array literal is
+    // unwrapped), not over the array-creation node.
+    auto* argExpr = dynamic_cast<Syntax::PrimitiveExpression*>(
+        interpolation->Expression());
+    ASSERT_NE(argExpr, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(argExpr->Value()), 42);
+}
+
+TEST(HandleStringInterpolationTest, EmptyTokensAnswersDefault)
+{
+    BuilderFixture fixture;
+    auto format = std::make_shared<Impl::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    format->SetName("Format");
+    format->SetIsStatic(true);
+    format->SetDeclaringType(
+        fixture.holder.KnownType(TS::KnownTypeCode::String));
+    ParamFixture fmtArg(fixture.holder.KnownType(TS::KnownTypeCode::String), "format");
+    format->SetParameters({fmtArg.parameter});
+
+    // An empty format string with no further arguments: the tokens list is
+    // empty and the render answers the default (a null expression).
+    IL::LdStr formatStr("");
+    std::vector<IL::ILInstruction*> callArguments{&formatStr};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *format, 0, callArguments, std::nullopt);
+    CS::ExpressionWithResolveResult result =
+        builder.HandleStringInterpolation(*format, list);
+    EXPECT_EQ(result.Expression(), nullptr);
+}
+
+TEST(HandleStringInterpolationTest, UnparsableTokensAnswerDefault)
+{
+    BuilderFixture fixture;
+    auto format = std::make_shared<Impl::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    format->SetName("Format");
+    format->SetIsStatic(true);
+    format->SetDeclaringType(
+        fixture.holder.KnownType(TS::KnownTypeCode::String));
+    ParamFixture fmtArg(fixture.holder.KnownType(TS::KnownTypeCode::String), "format");
+    ParamFixture arg(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "arg");
+    format->SetParameters({fmtArg.parameter, arg.parameter});
+
+    // A non-consecutive slot index fails TryGetStringInterpolationTokens; the
+    // render answers the default and the mainline falls through to the next
+    // arm.
+    IL::LdStr formatStr("{1}");
+    IL::LdcI4 value(42);
+    std::vector<IL::ILInstruction*> callArguments{&formatStr, &value};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *format, 0, callArguments, std::nullopt);
+    CS::ExpressionWithResolveResult result =
+        builder.HandleStringInterpolation(*format, list);
+    EXPECT_EQ(result.Expression(), nullptr);
+}
+
+TEST(HandleStringInterpolationTest, BuildMainlineRendersTheInterpolation)
+{
+    BuilderFixture fixture;
+    auto format = std::make_shared<Impl::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    format->SetName("Format");
+    format->SetIsStatic(true);
+    format->SetDeclaringType(
+        fixture.holder.KnownType(TS::KnownTypeCode::String));
+    ParamFixture fmtArg(fixture.holder.KnownType(TS::KnownTypeCode::String), "format");
+    ParamFixture arg(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "arg");
+    format->SetParameters({fmtArg.parameter, arg.parameter});
+
+    IL::LdStr formatStr("Hello {0}!");
+    IL::LdcI4 value(42);
+    IL::Call call("Format");
+    call.Method = format;
+    call.AddArg(std::make_unique<IL::LdStr>("Hello {0}!"));
+    call.AddArg(std::make_unique<IL::LdcI4>(42));
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ExpressionWithResolveResult result = builder.Build(
+        IL::OpCode::Call, *format, CallChildPtrsForTest(call), std::nullopt,
+        nullptr);
+    auto* interpolated =
+        dynamic_cast<Syntax::InterpolatedStringExpression*>(result.Expression());
+    ASSERT_NE(interpolated, nullptr);
+    ASSERT_EQ(interpolated->Content().Count(), 3);
+    auto* isrr = dynamic_cast<const Sem::InterpolatedStringResolveResult*>(
+        result.ResolveResult());
+    ASSERT_NE(isrr, nullptr);
+    EXPECT_EQ(isrr->FormatString(), "Hello {0}!");
+    ASSERT_EQ(isrr->Arguments().size(), 1u);
+}
+
+TEST(IsInterpolatedStringCreationTest, ParamsOverloadRequiresTheArrayLiteral)
+{
+    BuilderFixture fixture;
+    // A params `Format` over String: the non-expanded form rejects the arm
+    // unless the second argument is an array literal.
+    auto format = std::make_shared<Impl::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    format->SetName("Format");
+    format->SetIsStatic(true);
+    format->SetDeclaringType(
+        fixture.holder.KnownType(TS::KnownTypeCode::String));
+    auto paramsType =
+        std::make_shared<TS::ArrayType>(
+            fixture.holder.KnownType(TS::KnownTypeCode::Object));
+    auto paramsParameter =
+        std::make_shared<Impl::DefaultParameter>(
+            paramsType, "args", nullptr, std::vector<const TS::IAttribute*>(),
+            TS::ReferenceKind::None, true);
+    ParamFixture fmtArg(fixture.holder.KnownType(TS::KnownTypeCode::String), "format");
+    format->SetParameters(
+        {fmtArg.parameter, paramsParameter});
+
+    IL::LdStr formatStr("Hello {0}!");
+    IL::LdcI4 value(42);
+    std::vector<IL::ILInstruction*> callArguments{&formatStr, &value};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *format, 0, callArguments, std::nullopt);
+    // The non-expanded two-argument call over a params overload rejects.
+    EXPECT_FALSE(CS::CallBuilder::IsInterpolatedStringCreation(*format, list));
+    // A parameterless method reaching the params arm throws (the .NET Last()
+    // over the empty list) -- unreachable through real IL (the format string
+    // is always the first argument), pinned as the faithful Last() shape.
+    auto noParams = std::make_shared<Impl::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    noParams->SetName("Format");
+    noParams->SetIsStatic(true);
+    noParams->SetDeclaringType(
+        fixture.holder.KnownType(TS::KnownTypeCode::String));
+    CS::ArgumentList emptyParamsList;
+    auto literal = std::make_unique<Syntax::PrimitiveExpression>(
+        Syntax::PrimitiveValue("x"));
+    literal->AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+        fixture.holder.KnownType(TS::KnownTypeCode::String), std::string("x")));
+    emptyParamsList.Arguments.push_back(CS::TranslatedExpression(
+        literal.get(), CS::GetResolveResult(*literal)));
+    EXPECT_THROW(
+        (void)CS::CallBuilder::IsInterpolatedStringCreation(*noParams,
+                                                            emptyParamsList),
+        std::out_of_range);
 }
