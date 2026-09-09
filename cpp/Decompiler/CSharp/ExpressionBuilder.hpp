@@ -387,6 +387,22 @@ public:
     bool HidesVariableWithName(const std::string& name) const;
     static bool HidesVariableWithName(const IL::ILFunction& currentFunction, const std::string& name);
 
+    // The C# `internal bool IsCurrentOrContainingType(ITypeDefinition? type)`
+    // (ExpressionBuilder.cs lines 2476-2487): the null-tolerant
+    // declaring-chain walk -- `type` is the current type definition or any of
+    // its enclosing type definitions.
+    bool IsCurrentOrContainingType(const TS::ITypeDefinition* type) const;
+
+    // The C# `internal bool IsBaseTypeOfCurrentType(ITypeDefinition? type)`
+    // (ExpressionBuilder.cs lines 2488-2491): whether the decompilation
+    // context's current type definition derives from `type` (the
+    // GetAllBaseTypeDefinitions extension over the context's slot). The C#
+    // NREs when the context carries no current type definition (a null
+    // receiver on the extension call); the port answers false there -- the
+    // degenerate-stub shape no caller reaches (every decompilation context
+    // carries the current type definition).
+    bool IsBaseTypeOfCurrentType(const TS::ITypeDefinition* type) const;
+
     // The C# `internal ExpressionWithResolveResult LogicNot(TranslatedExpression
     // expr)`: the "!" operator, with the implicit-bool-conversion unwrap unless the
     // input type declares a user-defined op_LogicalNot.

@@ -853,6 +853,13 @@ bool IsDelegate(const MetadataFile& metadata, std::uint32_t typeDefToken) {
                       TypeSystem::KnownTypeCode::MulticastDelegate);
 }
 
+// The C# `internal static bool IsGeneratedName(string name)` (line 517).
+bool IsGeneratedName(const std::string& name) {
+    // The C# `name.StartsWith("<", StringComparison.Ordinal) ||
+    // name.Contains("$")` -- ordinal in both cases (no culture fallback).
+    return name.rfind("<", 0) == 0 || name.find('$') != std::string::npos;
+}
+
 // ---------------------------------------------------------------------------
 // FieldValueSizeDecoder (SRMExtensions.cs -- the sealed class nested behind
 // GetInitialValue): the provider that decodes a FIELD signature to the byte

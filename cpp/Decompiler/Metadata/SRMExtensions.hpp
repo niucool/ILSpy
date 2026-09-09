@@ -237,6 +237,16 @@ bool IsEnum(const MetadataFile& metadata, std::uint32_t typeDefToken,
 // System.MulticastDelegate.
 bool IsDelegate(const MetadataFile& metadata, std::uint32_t typeDefToken);
 
+// The C# `internal static bool IsGeneratedName(string name)`
+// (SRMExtensions.cs line 517, the #region HasGeneratedName helper): the
+// mangled-name classifier -- a `<` prefix (the C# compiler's
+// compiler-generated names) or a `$` separator (the VB compiler's
+// VB$AnonymousType_0 / VB$StateMachine_1_Foo spellings); neither character is
+// legal in a C# or VB identifier. The port carries the string overload only
+// (the StringHandle / MethodDefinitionHandle / TypeDefinitionHandle
+// metadata-reader overloads need no ported consumer yet).
+bool IsGeneratedName(const std::string& name);
+
 // The C# `public static string ToILSyntax(this SignatureCallingConvention
 // callConv)` (SRMExtensions.cs line 783) -- the ILAsm calling-convention
 // spelling the SignatureHeader.WriteTo writer (IL/InstructionOutputExtensions)

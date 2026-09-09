@@ -98,6 +98,7 @@ add_executable(ilspy_tests
     Decompiler/TypeSystem/SignatureDecoder_Test.cpp
     Decompiler/TypeSystem/TypeKindDerivation_Test.cpp
     Decompiler/TypeSystem/TypeUtils_Test.cpp
+    Decompiler/TypeSystem/NRExtensions_Test.cpp
     Decompiler/TypeSystem/ISymbol_Test.cpp
     Decompiler/TypeSystem/IVariable_Test.cpp
     Decompiler/TypeSystem/INamedElement_Test.cpp

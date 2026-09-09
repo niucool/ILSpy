@@ -159,7 +159,13 @@ public:
     // The C# `bool IMember.IsExplicitInterfaceImplementation => false`.
     bool IsExplicitInterfaceImplementation() const override { return false; }
     // The C# `bool IMember.IsVirtual => false`.
-    bool IsVirtual() const override { return false; }
+    bool IsVirtual() const override { return isVirtual_; }
+    // Configurable `IsVirtual` for the call-builder tests (the
+    // BaseReferenceExpression arm of the C# GetRequiredTransformationsForCall
+    // requireTarget block reads the resolved method's IsVirtual). The default
+    // false preserves the prior hardcoded behavior (the additive-setter
+    // convention).
+    void SetIsVirtual(bool value) { isVirtual_ = value; }
     // The C# `bool IMember.IsOverride => false`.
     bool IsOverride() const override { return false; }
     // The C# `bool IMember.IsOverridable => false`.
@@ -234,6 +240,7 @@ protected:
     ::ILSpy::Decompiler::TypeSystem::Accessibility accessibility_
         = ::ILSpy::Decompiler::TypeSystem::Accessibility::Public;
     bool isStatic_ = false;
+    bool isVirtual_ = false;
 };
 
 // The `abstract` members each leaf provides:

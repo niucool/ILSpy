@@ -1667,6 +1667,43 @@ bool ExpressionBuilder::HidesVariableWithName(const IL::ILFunction& currentFunct
     return false;
 }
 
+// The C# `internal bool IsCurrentOrContainingType(ITypeDefinition? type)`
+// (ExpressionBuilder.cs lines 2476-2487).
+bool ExpressionBuilder::IsCurrentOrContainingType(const TS::ITypeDefinition* type) const
+{
+    const TS::ITypeDefinition* currentTypeDefinition =
+        decompilationContext->CurrentTypeDefinition();
+    while (currentTypeDefinition != nullptr)
+    {
+        if (type == currentTypeDefinition)
+            return true;
+        currentTypeDefinition = currentTypeDefinition->DeclaringTypeDefinition();
+    }
+    return false;
+}
+
+// The C# `internal bool IsBaseTypeOfCurrentType(ITypeDefinition? type)`
+// (ExpressionBuilder.cs lines 2488-2491): the C#
+// `decompilationContext.CurrentTypeDefinition.GetAllBaseTypeDefinitions()
+// .Any(t => t == type)` -- the Any predicate is a pointer equality over the
+// definition chain. The C# NREs when the context carries no current type
+// definition (a null receiver on the extension call); the port answers
+// false there (the degenerate-stub shape documented at the declaration).
+bool ExpressionBuilder::IsBaseTypeOfCurrentType(const TS::ITypeDefinition* type) const
+{
+    const TS::ITypeDefinition* currentTypeDefinition =
+        decompilationContext->CurrentTypeDefinition();
+    if (currentTypeDefinition == nullptr)
+        return false;
+    for (const TS::ITypeDefinition* base :
+         TS::GetAllBaseTypeDefinitions(currentTypeDefinition))
+    {
+        if (base == type)
+            return true;
+    }
+    return false;
+}
+
 ExpressionWithResolveResult ExpressionBuilder::LogicNot(const TranslatedExpression& exprIn) const
 {
     TranslatedExpression expr = exprIn;

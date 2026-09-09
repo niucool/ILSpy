@@ -32,7 +32,16 @@
 // Landed additionally: the argument-list machinery (BuildArgumentList,
 // IsPrimitiveValueThatShouldBeNamedArgument, TransformParamsArgument,
 // IsOptionalArgument) with the overload-resolution composition it validates
-// through (IsUnambiguousCall + IsAppropriateCallTarget).
+// through (IsUnambiguousCall + IsAppropriateCallTarget), and the
+// overload-resolution driver itself (GetRequiredTransformationsForCall with the
+// nested CallTransformation flags enum, CastArguments, EnforceExplicitIn /
+// WrapInAsRefReadOnly, IsPossibleExtensionMethodCallOnNull,
+// CanInferTypeArgumentsFromArguments, and the anonymous-type helpers
+// PinTypesOfNullArguments / NewAnonymousTypeInstance over the NRExtensions
+// predicate family). The EnforceExplicitIn statementBuilder
+// EmitAsRefReadOnly flag write is deferred with the StatementBuilder slice; the
+// CastArguments lambda-return-type arm is deferred with
+// ModifyReturnTypeOfLambda/DecompiledLambdaResolveResult.
 //
 // The remaining arms (HandleDelegateConstruction, the tuple construction,
 // the mainline Build(OpCode, ...) body, HandleConstructorCall/
@@ -44,6 +53,7 @@
 
 #include "Decompiler/CSharp/Syntax/Expressions/Expression.hpp"
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
+#include "Decompiler/CSharp/ExpressionBuilder.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
 #include "Decompiler/CSharp/Resolver/OverloadResolution.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
@@ -53,6 +63,7 @@
 #include "Decompiler/TypeSystem/KnownTypeCode.hpp"
 #include "Decompiler/Util/BitSet.hpp"
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -179,6 +190,26 @@ public:
 // arms.
 class CallBuilder {
 public:
+    // The C# `[Flags] enum CallTransformation` (CallBuilder.cs lines 1138-1150,
+    // nested PRIVATE in the class): the fix actions the
+    // GetRequiredTransformationsForCall loop applied (or permits) on the way to
+    // an unambiguous call -- the flags the Build arms re-apply when emitting the
+    // call's shape. The C# is private; the port's no-visibility-level convention
+    // keeps it public for tests (the [Flags] enum port convention, the
+    // OverloadResolutionErrors precedent -- int32-backed with the bitwise
+    // operators).
+    enum class CallTransformation : std::int32_t {
+        None = 0,
+        RequireTarget = 1,
+        RequireTypeArguments = 2,
+        NoOptionalArgumentAllowed = 4,
+        // Add calls to AsRefReadOnly for in parameters that did not have an
+        // explicit DirectionExpression yet.
+        EnforceExplicitIn = 8,
+        NoNamedArgsForPrettiness = 0x10,
+        All = 0x1f,
+    };
+
     virtual ~CallBuilder() = default;
 
     // The C# `public CallBuilder(ExpressionBuilder expressionBuilder,
@@ -238,6 +269,86 @@ public:
     // Caller*Attribute parameters are never removable. Made public for tests.
     bool IsOptionalArgument(const TS::IParameter& parameter,
                             const TranslatedExpression& arg);
+
+    // The C# `private CallTransformation GetRequiredTransformationsForCall(
+    // ExpectedTargetDetails, IMethod, ref TranslatedExpression target, ref
+    // ArgumentList, CallTransformation allowedTransforms, out IParameterizedMember?)`
+    // (CallBuilder.cs lines 1152-1343): the overload-resolution driver -- the
+    // requireTarget/requireTypeArguments initialization, then the fix loop that
+    // drives IsUnambiguousCall and applies one transformation per failed
+    // resolution until the call is unambiguous or the ladder gives up, and the
+    // final transformation-flag aggregation. `target` / `argumentList` are the
+    // C# `ref` parameters (mutated in place); `foundMethod` is the C# `out`
+    // (the resolved member, or `method` itself when the ladder gives up). Made
+    // public for tests.
+    CallTransformation GetRequiredTransformationsForCall(
+        const ExpectedTargetDetails& expectedTargetDetails,
+        const TS::IMethod& method, TranslatedExpression& target,
+        ArgumentList& argumentList, CallTransformation allowedTransforms,
+        const TS::IParameterizedMember*& foundMethod);
+
+    // The C# `private void CastArguments(IList<TranslatedExpression> arguments,
+    // IList<IParameter> expectedParameters)` (lines 1446-1478): the explicit-cast
+    // insertion the fix ladder's argumentsCasted arm applies -- every argument is
+    // converted to its parameter type with allowImplicitConversion: false (the
+    // dynamic-parameter Object substitution, the `in`-parameter element unwrap,
+    // and the anonymous-type lambda-return-type arm all live here). Made public
+    // for tests.
+    void CastArguments(std::vector<TranslatedExpression>& arguments,
+                       const std::vector<const TS::IParameter*>& expectedParameters);
+
+    // The C# `private void EnforceExplicitIn(TranslatedExpression[] arguments,
+    // IParameter[] expectedParameters)` (lines 1345-1356): wraps every argument
+    // over an `in` parameter whose expression is not already a
+    // DirectionExpression in the AsRefReadOnly invocation. The C# also sets
+    // `expressionBuilder.statementBuilder.EmitAsRefReadOnly = true` -- that
+    // flag write is DEFERRED with the StatementBuilder slice (the port's
+    // statementBuilder field is a forward-declared placeholder; the wrap
+    // itself is the observable state the accessor-arm render consumes).
+    void EnforceExplicitIn(std::vector<TranslatedExpression>& arguments,
+                           const std::vector<const TS::IParameter*>& expectedParameters);
+
+    // The C# `private TranslatedExpression WrapInAsRefReadOnly(TranslatedExpression
+    // arg)` (lines 1357-1368): the `in ILSpyHelper_AsRefReadOnly(arg)` invocation
+    // wrapped in an `in` DirectionExpression over a ByReferenceResolveResult of
+    // the argument's type, with no IL-instruction annotations.
+    static TranslatedExpression WrapInAsRefReadOnly(const TranslatedExpression& arg);
+
+    // The C# `private bool IsPossibleExtensionMethodCallOnNull(IMethod method,
+    // IList<TranslatedExpression> arguments)` (lines 1369-1373): an extension
+    // method whose first argument is the null literal -- the shape whose type
+    // arguments can never be inferred from the arguments (RequireTypeArguments
+    // is forced without the inference probe).
+    static bool IsPossibleExtensionMethodCallOnNull(
+        const TS::IMethod& method,
+        const std::vector<TranslatedExpression>& arguments);
+
+    // The C# `static bool CanInferTypeArgumentsFromArguments(IMethod method,
+    // ArgumentList argumentList, TypeInference typeInference)` (lines 1374-1403):
+    // whether the type inference answers every type parameter of the
+    // (unspecialized) method from the arguments -- always true for a non-generic
+    // method; the parameter types come from the map when present (an unmapped
+    // argument positions SpecialType.UnknownType) else positionally.
+    static bool CanInferTypeArgumentsFromArguments(
+        const TS::IMethod& method, const ArgumentList& argumentList,
+        const ExpressionBuilder::TypeInferenceInstance& typeInference);
+
+    // The C# `private bool PinTypesOfNullArguments(ArgumentList argumentList)`
+    // (lines 1404-1430): rewrites null-literal arguments whose expected type is
+    // an anonymous type with the `true ? null : new { ... }` conditional that
+    // makes the anonymous type inferable. Over the port's type system no type
+    // IS anonymous yet (the machinery is not ported), so the predicate is
+    // observable but the replacement is unreachable. Made public for tests.
+    bool PinTypesOfNullArguments(ArgumentList& argumentList);
+
+    // The C# `private NewObj? NewAnonymousTypeInstance(IType type)` (lines
+    // 1431-1445): the `newobj` instruction whose translation yields the
+    // object-initializer syntax that names the anonymous type. The port's Call
+    // node models newobj through its IsNewObj flag (the seed convention), so
+    // the factory builds a Call with the flag set; null when a property type
+    // involves an anonymous type other than by direct nesting. Made public for
+    // tests.
+    std::unique_ptr<IL::Call> NewAnonymousTypeInstance(const TS::IType& type);
 
     // The C# `OverloadResolutionErrors IsUnambiguousCall(...)` (lines
     // 1554-1650): the overload-resolution driver -- the NewObj arm over the
@@ -314,5 +425,29 @@ private:
     // registry -- the uncached-entity-cache convention).
     std::vector<std::shared_ptr<const TS::IParameter>> ownedParameters_;
 };
+
+// The CallTransformation [Flags] operator surface (the OverloadResolutionErrors
+// port convention -- the C# compiler generates the bitwise operators for every
+// [Flags] enum; namespace-scope non-members are what enum-class operands find
+// through ADL).
+inline CallBuilder::CallTransformation operator|(
+    CallBuilder::CallTransformation a, CallBuilder::CallTransformation b) {
+    return static_cast<CallBuilder::CallTransformation>(
+        static_cast<std::int32_t>(a) | static_cast<std::int32_t>(b));
+}
+inline CallBuilder::CallTransformation operator&(
+    CallBuilder::CallTransformation a, CallBuilder::CallTransformation b) {
+    return static_cast<CallBuilder::CallTransformation>(
+        static_cast<std::int32_t>(a) & static_cast<std::int32_t>(b));
+}
+inline CallBuilder::CallTransformation operator^(
+    CallBuilder::CallTransformation a, CallBuilder::CallTransformation b) {
+    return static_cast<CallBuilder::CallTransformation>(
+        static_cast<std::int32_t>(a) ^ static_cast<std::int32_t>(b));
+}
+inline CallBuilder::CallTransformation operator~(CallBuilder::CallTransformation a) {
+    return static_cast<CallBuilder::CallTransformation>(
+        ~static_cast<std::int32_t>(a));
+}
 
 } // namespace ILSpy::Decompiler::CSharp

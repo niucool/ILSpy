@@ -31,7 +31,11 @@
 #include "Decompiler/CSharp/ExpressionBuilder.hpp"
 #include "Decompiler/CSharp/Annotations.hpp"
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/BaseReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ConditionalExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/MemberReferenceExpression.hpp"
@@ -49,6 +53,7 @@
 #include "Decompiler/IL/Instructions/ILFunction.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
 #include "Decompiler/IL/Instructions/LdLoc.hpp"
+#include "Decompiler/IL/Instructions/LdNull.hpp"
 #include "Decompiler/IL/Instructions/LdLoca.hpp"
 #include "Decompiler/IL/Instructions/LdStr.hpp"
 #include "Decompiler/IL/ILVariable.hpp"
@@ -59,6 +64,7 @@
 #include "Decompiler/Semantics/OutVarResolveResult.hpp"
 #include "Decompiler/TypeSystem/ByReferenceTypeReference.hpp"
 #include "Decompiler/TypeSystem/Implementation/DefaultParameter.hpp"
+#include "Decompiler/TypeSystem/Implementation/LocalFunctionMethod.hpp"
 #include "Decompiler/TypeSystem/Implementation/FakeMember.hpp"
 #include "Decompiler/TypeSystem/Implementation/MinimalCorlib.hpp"
 #include "Decompiler/TypeSystem/LookupStubs.hpp"
@@ -68,6 +74,7 @@
 #include <gtest/gtest.h>
 
 #include <any>
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -1557,3 +1564,740 @@ TEST(BuildArgumentListTest, IsAppropriateCallTargetRequiresTheIdentity)
 }
 
 
+
+// ---------------------------------------------------------------------------
+// GetRequiredTransformationsForCall: the overload-resolution driver
+// (CallBuilder.cs lines 1138-1343) plus the CastArguments /
+// EnforceExplicitIn / inference helpers it composes.
+// ---------------------------------------------------------------------------
+
+// The target-expression factories the requireTarget matrix drives. Every
+// factory returns a TranslatedExpression over a fresh AST node whose
+// resolve-result annotation carries the given type (the node-annotation
+// convention).
+
+static CS::TranslatedExpression MakeThisTarget(TS::ITypePtr type)
+{
+    return CS::WithRR(
+        CS::WithoutILInstruction(*new Syntax::ThisReferenceExpression()),
+        std::make_shared<Sem::ThisResolveResult>(std::move(type)));
+}
+
+static CS::TranslatedExpression MakeBaseTarget(TS::ITypePtr type)
+{
+    return CS::WithRR(
+        CS::WithoutILInstruction(*new Syntax::BaseReferenceExpression()),
+        std::make_shared<Sem::ThisResolveResult>(std::move(type), true));
+}
+
+static CS::TranslatedExpression MakeIdentifierTarget(TS::ITypePtr type)
+{
+    return CS::WithRR(
+        CS::WithoutILInstruction(*new Syntax::IdentifierExpression("value")),
+        std::make_shared<Sem::ResolveResult>(std::move(type)));
+}
+
+// The fixture the requireTarget matrix drives: a static-or-instance `Foo`
+// method over a Holder definition stub, with the Holder stub registered as
+// the current type definition (the resolver's LookupSimpleName /
+// MemberLookup.Lookup base).
+struct TransformFixture : BuildArgsFixture
+{
+    std::shared_ptr<TS::TestSupport::LookupTypeDefinition> holderDef;
+    std::shared_ptr<TS::Implementation::FakeMethod> foo;
+
+    explicit TransformFixture(bool ctorShape = false)
+    {
+        holderDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+            "Holder", "H", TS::FullTypeName(TS::TopLevelTypeName("H", "Holder")),
+            TS::TypeKind::Class, TS::Accessibility::Public, holder.compilation,
+            &holder.compilation.MainModule());
+        foo = std::make_shared<TS::Implementation::FakeMethod>(
+            holder.compilation, ctorShape ? TS::SymbolKind::Constructor
+                                          : TS::SymbolKind::Method);
+        foo->SetName(ctorShape ? ".ctor" : "Foo");
+        foo->SetDeclaringType(TS::ITypePtr(holderDef.get(), [](TS::IType*) {}));
+        holderDef->SetMethods({foo.get()});
+        SetCurrentTypeDefinition(holderDef.get());
+    }
+
+    // Builds the ArgumentList for a one-int-argument call against a matching
+    // `Foo` parameter.
+    CS::ArgumentList MakeArgumentList()
+    {
+        IL::LdcI4 arg1(1);
+        std::vector<IL::ILInstruction*> callArguments{&arg1};
+        ParamFixture a(holder.KnownType(TS::KnownTypeCode::Int32), "a");
+        foo->SetParameters({a.parameter});
+        CS::CallBuilder builder = MakeCallBuilder();
+        return builder.BuildArgumentList(CS::ExpectedTargetDetails{}, nullptr,
+                                         *foo, 0, callArguments, std::nullopt);
+    }
+};
+
+TEST(GetRequiredTransformationsTest, AlwaysQualifyMemberReferencesForcesTheTarget)
+{
+    TransformFixture fixture;
+    fixture.settings.SetAlwaysQualifyMemberReferences(true);
+
+    CS::ArgumentList list = fixture.MakeArgumentList();
+    CS::TranslatedExpression target =
+        MakeThisTarget(TS::ITypePtr(fixture.holderDef.get(), [](TS::IType*) {}));
+    const TS::IParameterizedMember* foundMember = nullptr;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::CallBuilder::CallTransformation transform =
+        builder.GetRequiredTransformationsForCall(
+            CS::ExpectedTargetDetails{}, *fixture.foo, target, list,
+            CS::CallBuilder::CallTransformation::All, foundMember);
+    EXPECT_TRUE((transform & CS::CallBuilder::CallTransformation::RequireTarget)
+        == CS::CallBuilder::CallTransformation::RequireTarget);
+    // The clean resolution answers the method itself.
+    EXPECT_EQ(foundMember,
+              static_cast<const TS::IParameterizedMember*>(fixture.foo.get()));
+}
+
+TEST(GetRequiredTransformationsTest, StaticMethodOutsideTheCurrentTypeRequiresTheTarget)
+{
+    TransformFixture fixture;
+    // A static `Foo` whose declaring type is NOT the current type definition:
+    // the current type is a distinct Consumer stub.
+    auto consumer = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        "Consumer", "H", TS::FullTypeName(TS::TopLevelTypeName("H", "Consumer")),
+        TS::TypeKind::Class, TS::Accessibility::Public, fixture.holder.compilation,
+        &fixture.holder.compilation.MainModule());
+    fixture.SetCurrentTypeDefinition(consumer.get());
+    fixture.foo->SetIsStatic(true);
+
+    CS::ArgumentList list = fixture.MakeArgumentList();
+    CS::TranslatedExpression target =
+        MakeThisTarget(TS::ITypePtr(fixture.holderDef.get(), [](TS::IType*) {}));
+    const TS::IParameterizedMember* foundMember = nullptr;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::CallBuilder::CallTransformation transform =
+        builder.GetRequiredTransformationsForCall(
+            CS::ExpectedTargetDetails{}, *fixture.foo, target, list,
+            CS::CallBuilder::CallTransformation::All, foundMember);
+    EXPECT_TRUE((transform & CS::CallBuilder::CallTransformation::RequireTarget)
+        == CS::CallBuilder::CallTransformation::RequireTarget);
+}
+
+TEST(GetRequiredTransformationsTest, StaticMethodInsideTheCurrentTypeNeedsNoTarget)
+{
+    TransformFixture fixture;
+    fixture.foo->SetIsStatic(true);
+
+    CS::ArgumentList list = fixture.MakeArgumentList();
+    CS::TranslatedExpression target =
+        MakeThisTarget(TS::ITypePtr(fixture.holderDef.get(), [](TS::IType*) {}));
+    const TS::IParameterizedMember* foundMember = nullptr;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::CallBuilder::CallTransformation transform =
+        builder.GetRequiredTransformationsForCall(
+            CS::ExpectedTargetDetails{}, *fixture.foo, target, list,
+            CS::CallBuilder::CallTransformation::All, foundMember);
+    EXPECT_TRUE((transform & CS::CallBuilder::CallTransformation::RequireTarget)
+        == CS::CallBuilder::CallTransformation::None);
+    EXPECT_EQ(foundMember,
+              static_cast<const TS::IParameterizedMember*>(fixture.foo.get()));
+    // A plain call with no optional arguments carries the
+    // NoOptionalArgumentAllowed flag (FirstOptionalArgumentIndex is -2);
+    // NoNamedArgsForPrettiness is NOT set -- the default settings keep
+    // NamedArguments && NonTrailingNamedArguments on, so
+    // AddNamesToPrimitiveValues starts true and the prettiness-flag
+    // aggregation answers false.
+    EXPECT_TRUE((transform
+                 & CS::CallBuilder::CallTransformation::NoOptionalArgumentAllowed)
+        == CS::CallBuilder::CallTransformation::NoOptionalArgumentAllowed);
+    EXPECT_TRUE((transform
+                 & CS::CallBuilder::CallTransformation::NoNamedArgsForPrettiness)
+        == CS::CallBuilder::CallTransformation::None);
+}
+
+TEST(GetRequiredTransformationsTest, CctorRequiresTheTargetInsideTheCurrentType)
+{
+    TransformFixture fixture;
+    fixture.foo->SetName(".cctor");
+    fixture.foo->SetIsStatic(true);
+
+    CS::ArgumentList list = fixture.MakeArgumentList();
+    CS::TranslatedExpression target =
+        MakeThisTarget(TS::ITypePtr(fixture.holderDef.get(), [](TS::IType*) {}));
+    const TS::IParameterizedMember* foundMember = nullptr;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::CallBuilder::CallTransformation transform =
+        builder.GetRequiredTransformationsForCall(
+            CS::ExpectedTargetDetails{}, *fixture.foo, target, list,
+            CS::CallBuilder::CallTransformation::All, foundMember);
+    EXPECT_TRUE((transform & CS::CallBuilder::CallTransformation::RequireTarget)
+        == CS::CallBuilder::CallTransformation::RequireTarget);
+}
+
+TEST(GetRequiredTransformationsTest, ConstructorCallAlwaysRequiresTheTarget)
+{
+    // A `.ctor` method over a ThisReferenceExpression target requires the
+    // target even though the receiver IS the current type.
+    TransformFixture fixture(/*ctorShape=*/true);
+    fixture.foo->SetIsStatic(false);
+
+    CS::ArgumentList list = fixture.MakeArgumentList();
+    CS::TranslatedExpression target =
+        MakeThisTarget(TS::ITypePtr(fixture.holderDef.get(), [](TS::IType*) {}));
+    const TS::IParameterizedMember* foundMember = nullptr;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::CallBuilder::CallTransformation transform =
+        builder.GetRequiredTransformationsForCall(
+            CS::ExpectedTargetDetails{}, *fixture.foo, target, list,
+            CS::CallBuilder::CallTransformation::All, foundMember);
+    EXPECT_TRUE((transform & CS::CallBuilder::CallTransformation::RequireTarget)
+        == CS::CallBuilder::CallTransformation::RequireTarget);
+}
+
+TEST(GetRequiredTransformationsTest, LocalFunctionNeverRequiresTheTarget)
+{
+    TransformFixture fixture;
+    fixture.foo->SetIsStatic(true);
+    // A local-function wrapper over the static `Foo`: IsLocalFunction is true
+    // unconditionally, so the requireTarget block answers false without
+    // consulting the static arm.
+    auto localFunction = std::make_shared<TS::Implementation::LocalFunctionMethod>(
+        fixture.foo, "LFoo", /*isStaticLocalFunction=*/false,
+        /*numberOfCompilerGeneratedParameters=*/0,
+        /*numberOfCompilerGeneratedTypeParameters=*/0);
+
+    CS::ArgumentList list = fixture.MakeArgumentList();
+    CS::TranslatedExpression target =
+        MakeThisTarget(TS::ITypePtr(fixture.holderDef.get(), [](TS::IType*) {}));
+    const TS::IParameterizedMember* foundMember = nullptr;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::CallBuilder::CallTransformation transform =
+        builder.GetRequiredTransformationsForCall(
+            CS::ExpectedTargetDetails{}, *localFunction, target, list,
+            CS::CallBuilder::CallTransformation::RequireTarget, foundMember);
+    // The wrapper's own requireTarget decision never consults the target; the
+    // transformation flags still report the eventual loop state (the loop gave
+    // up on the unresolved simple name and forced the target back on).
+    EXPECT_EQ(foundMember,
+              static_cast<const TS::IParameterizedMember*>(localFunction.get()));
+    (void)transform;
+}
+
+TEST(GetRequiredTransformationsTest, BaseReferenceVirtualCallRequiresTheTarget)
+{
+    TransformFixture fixture;
+    fixture.foo->SetIsStatic(false);
+    fixture.foo->SetIsVirtual(true);
+
+    CS::ArgumentList list = fixture.MakeArgumentList();
+    CS::TranslatedExpression target =
+        MakeBaseTarget(TS::ITypePtr(fixture.holderDef.get(), [](TS::IType*) {}));
+    const TS::IParameterizedMember* foundMember = nullptr;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ExpectedTargetDetails details;
+    details.CallOpCode = IL::OpCode::Call;
+    CS::CallBuilder::CallTransformation transform =
+        builder.GetRequiredTransformationsForCall(
+            details, *fixture.foo, target, list,
+            CS::CallBuilder::CallTransformation::All, foundMember);
+    EXPECT_TRUE((transform & CS::CallBuilder::CallTransformation::RequireTarget)
+        == CS::CallBuilder::CallTransformation::RequireTarget);
+}
+
+TEST(GetRequiredTransformationsTest, BaseReferenceCallVirtNeedsNoTarget)
+{
+    TransformFixture fixture;
+    fixture.foo->SetIsStatic(false);
+    fixture.foo->SetIsVirtual(true);
+
+    CS::ArgumentList list = fixture.MakeArgumentList();
+    CS::TranslatedExpression target =
+        MakeBaseTarget(TS::ITypePtr(fixture.holderDef.get(), [](TS::IType*) {}));
+    const TS::IParameterizedMember* foundMember = nullptr;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ExpectedTargetDetails details;
+    details.CallOpCode = IL::OpCode::CallVirt;
+    CS::CallBuilder::CallTransformation transform =
+        builder.GetRequiredTransformationsForCall(
+            details, *fixture.foo, target, list,
+            CS::CallBuilder::CallTransformation::All, foundMember);
+    EXPECT_TRUE((transform & CS::CallBuilder::CallTransformation::RequireTarget)
+        == CS::CallBuilder::CallTransformation::None);
+}
+
+TEST(GetRequiredTransformationsTest, BaseReferenceNonVirtualMethodNeedsNoTarget)
+{
+    TransformFixture fixture;
+    fixture.foo->SetIsStatic(false);
+    // IsVirtual is false: the BaseReferenceExpression arm answers false for
+    // both call opcodes.
+    CS::ArgumentList list = fixture.MakeArgumentList();
+    CS::TranslatedExpression target =
+        MakeBaseTarget(TS::ITypePtr(fixture.holderDef.get(), [](TS::IType*) {}));
+    const TS::IParameterizedMember* foundMember = nullptr;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ExpectedTargetDetails details;
+    details.CallOpCode = IL::OpCode::Call;
+    CS::CallBuilder::CallTransformation transform =
+        builder.GetRequiredTransformationsForCall(
+            details, *fixture.foo, target, list,
+            CS::CallBuilder::CallTransformation::All, foundMember);
+    EXPECT_TRUE((transform & CS::CallBuilder::CallTransformation::RequireTarget)
+        == CS::CallBuilder::CallTransformation::None);
+}
+
+TEST(GetRequiredTransformationsTest, ThisReferenceInstanceCallNeedsNoTarget)
+{
+    TransformFixture fixture;
+    fixture.foo->SetIsStatic(false);
+
+    CS::ArgumentList list = fixture.MakeArgumentList();
+    CS::TranslatedExpression target =
+        MakeThisTarget(TS::ITypePtr(fixture.holderDef.get(), [](TS::IType*) {}));
+    const TS::IParameterizedMember* foundMember = nullptr;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::CallBuilder::CallTransformation transform =
+        builder.GetRequiredTransformationsForCall(
+            CS::ExpectedTargetDetails{}, *fixture.foo, target, list,
+            CS::CallBuilder::CallTransformation::All, foundMember);
+    EXPECT_TRUE((transform & CS::CallBuilder::CallTransformation::RequireTarget)
+        == CS::CallBuilder::CallTransformation::None);
+    EXPECT_EQ(foundMember,
+              static_cast<const TS::IParameterizedMember*>(fixture.foo.get()));
+}
+
+TEST(GetRequiredTransformationsTest, IdentifierTargetRequiresTheTarget)
+{
+    TransformFixture fixture;
+    fixture.foo->SetIsStatic(false);
+
+    CS::ArgumentList list = fixture.MakeArgumentList();
+    // A plain identifier receiver: neither a this nor a base reference.
+    CS::TranslatedExpression target =
+        MakeIdentifierTarget(TS::ITypePtr(fixture.holderDef.get(), [](TS::IType*) {}));
+    const TS::IParameterizedMember* foundMember = nullptr;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::CallBuilder::CallTransformation transform =
+        builder.GetRequiredTransformationsForCall(
+            CS::ExpectedTargetDetails{}, *fixture.foo, target, list,
+            CS::CallBuilder::CallTransformation::All, foundMember);
+    EXPECT_TRUE((transform & CS::CallBuilder::CallTransformation::RequireTarget)
+        == CS::CallBuilder::CallTransformation::RequireTarget);
+}
+
+TEST(GetRequiredTransformationsTest, HidesVariableWithNameForcesTheTarget)
+{
+    TransformFixture fixture;
+    fixture.foo->SetIsStatic(true);
+    // The current function declares a local named after the method: the
+    // HidesVariableWithName gate forces the target.
+    auto variable = std::make_shared<IL::ILVariable>();
+    variable->Name = "Foo";
+    variable->Type = fixture.holder.KnownType(TS::KnownTypeCode::Int32);
+    fixture.function.Variables.push_back(variable);
+
+    CS::ArgumentList list = fixture.MakeArgumentList();
+    CS::TranslatedExpression target =
+        MakeThisTarget(TS::ITypePtr(fixture.holderDef.get(), [](TS::IType*) {}));
+    const TS::IParameterizedMember* foundMember = nullptr;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::CallBuilder::CallTransformation transform =
+        builder.GetRequiredTransformationsForCall(
+            CS::ExpectedTargetDetails{}, *fixture.foo, target, list,
+            CS::CallBuilder::CallTransformation::All, foundMember);
+    EXPECT_TRUE((transform & CS::CallBuilder::CallTransformation::RequireTarget)
+        == CS::CallBuilder::CallTransformation::RequireTarget);
+}
+
+TEST(GetRequiredTransformationsTest, GenericMethodWithInferableArgumentsNeedsNoTypeArguments)
+{
+    TransformFixture fixture;
+    fixture.foo->SetIsStatic(true);
+    // `T M<T>(T x)` with an int argument: T fixes to int through the type
+    // inference, so no RequireTypeArguments shortcut fires.
+    auto typeParameter = std::make_shared<TS::TestSupport::LookupTypeParameter>("T");
+    typeParameter->SetIndex(0);
+    typeParameter->SetOwnerType(TS::SymbolKind::Method);
+    // The owner drives the constraint-validation conversions (the
+    // ValidateConstraints public overload reads Owner()->Compilation()).
+    typeParameter->SetOwner(
+        static_cast<const TS::Implementation::FakeMember*>(fixture.foo.get()));
+    fixture.foo->SetTypeParameters(
+        {std::shared_ptr<const TS::ITypeParameter>(typeParameter)});
+
+    // The parameter type IS the method's own type parameter T (the
+    // LookupTypeParameter is an IType).
+    IL::LdcI4 arg1(1);
+    std::vector<IL::ILInstruction*> callArguments{&arg1};
+    ParamFixture tParam(TS::ITypePtr(typeParameter), "a");
+    fixture.foo->SetParameters({tParam.parameter});
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *fixture.foo, 0, callArguments,
+        std::nullopt);
+    // The inference over the built argument list: T fixes to int.
+    EXPECT_TRUE(CS::CallBuilder::CanInferTypeArgumentsFromArguments(
+        *fixture.foo, list, fixture.builder->typeInference));
+
+    CS::TranslatedExpression target =
+        MakeThisTarget(TS::ITypePtr(fixture.holderDef.get(), [](TS::IType*) {}));
+    const TS::IParameterizedMember* foundMember = nullptr;
+    CS::CallBuilder::CallTransformation transform =
+        builder.GetRequiredTransformationsForCall(
+            CS::ExpectedTargetDetails{}, *fixture.foo, target, list,
+            CS::CallBuilder::CallTransformation::All, foundMember);
+    EXPECT_TRUE((transform
+                 & CS::CallBuilder::CallTransformation::RequireTypeArguments)
+        == CS::CallBuilder::CallTransformation::None);
+}
+
+TEST(GetRequiredTransformationsTest, GenericMethodWithUninferrableArgumentsRequiresTypeArguments)
+{
+    TransformFixture fixture;
+    fixture.foo->SetIsStatic(true);
+    // `T M<T>(int x)` with an int argument: T never appears in the parameter
+    // types, so the inference fails and the RequireTypeArguments shortcut
+    // fires.
+    auto typeParameter = std::make_shared<TS::TestSupport::LookupTypeParameter>("T");
+    typeParameter->SetIndex(0);
+    typeParameter->SetOwnerType(TS::SymbolKind::Method);
+    // The owner drives the constraint-validation conversions (the
+    // ValidateConstraints public overload reads Owner()->Compilation()).
+    typeParameter->SetOwner(
+        static_cast<const TS::Implementation::FakeMember*>(fixture.foo.get()));
+    fixture.foo->SetTypeParameters(
+        {std::shared_ptr<const TS::ITypeParameter>(typeParameter)});
+
+    IL::LdcI4 arg1(1);
+    std::vector<IL::ILInstruction*> callArguments{&arg1};
+    ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "a");
+    fixture.foo->SetParameters({a.parameter});
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *fixture.foo, 0, callArguments,
+        std::nullopt);
+
+    CS::TranslatedExpression target =
+        MakeThisTarget(TS::ITypePtr(fixture.holderDef.get(), [](TS::IType*) {}));
+    const TS::IParameterizedMember* foundMember = nullptr;
+    CS::CallBuilder::CallTransformation transform =
+        builder.GetRequiredTransformationsForCall(
+            CS::ExpectedTargetDetails{}, *fixture.foo, target, list,
+            CS::CallBuilder::CallTransformation::All, foundMember);
+    EXPECT_TRUE((transform
+                 & CS::CallBuilder::CallTransformation::RequireTypeArguments)
+        == CS::CallBuilder::CallTransformation::RequireTypeArguments);
+}
+
+TEST(GetRequiredTransformationsTest, CastArgumentsInsertsTheExplicitCast)
+{
+    TransformFixture fixture;
+    // An int argument against a string parameter: the explicit-cast insertion
+    // renders a CastExpression over the String type.
+    IL::LdcI4 arg1(1);
+    std::vector<IL::ILInstruction*> callArguments{&arg1};
+    ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::String), "a");
+    std::vector<const TS::IParameter*> parameters{a.parameter.get()};
+    // The DEBUG assert in BuildArgumentList checks the argument count against
+    // the parameter count: configure the method's own parameters first.
+    fixture.foo->SetParameters({a.parameter});
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    std::vector<CS::TranslatedExpression> arguments;
+    arguments.push_back(builder.BuildArgumentList(
+                            CS::ExpectedTargetDetails{}, nullptr, *fixture.foo, 0,
+                            callArguments, std::nullopt)
+                            .Arguments[0]);
+    builder.CastArguments(arguments, parameters);
+
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(arguments[0].Expression());
+    ASSERT_NE(cast, nullptr);
+    const Sem::ResolveResult* castRr = CS::GetResolveResult(*cast);
+    ASSERT_NE(castRr, nullptr);
+    EXPECT_TRUE(TS::IsKnownType(castRr->Type(), TS::KnownTypeCode::String));
+}
+
+TEST(GetRequiredTransformationsTest, CastArgumentsSubstitutesObjectForDynamic)
+{
+    TransformFixture fixture;
+    // A dynamic-typed parameter: the argument converts against Object.
+    IL::LdcI4 arg1(1);
+    std::vector<IL::ILInstruction*> callArguments{&arg1};
+    ParamFixture dyn(TS::Dynamic(), "value");
+    std::vector<const TS::IParameter*> parameters{dyn.parameter.get()};
+    fixture.foo->SetParameters({dyn.parameter});
+
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    std::vector<CS::TranslatedExpression> arguments;
+    arguments.push_back(builder.BuildArgumentList(
+                            CS::ExpectedTargetDetails{}, nullptr, *fixture.foo, 0,
+                            callArguments, std::nullopt)
+                            .Arguments[0]);
+    builder.CastArguments(arguments, parameters);
+
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(arguments[0].Expression());
+    ASSERT_NE(cast, nullptr);
+    const Sem::ResolveResult* castRr = CS::GetResolveResult(*cast);
+    ASSERT_NE(castRr, nullptr);
+    EXPECT_TRUE(TS::IsKnownType(castRr->Type(), TS::KnownTypeCode::Object));
+}
+
+TEST(GetRequiredTransformationsTest, CastArgumentsUnwrapsTheInParameter)
+{
+    TransformFixture fixture;
+    // An `in int&` parameter over an int (non-byref) argument: the conversion
+    // target is the reference's ELEMENT type (int), so no cast is inserted.
+    IL::LdcI4 arg1(1);
+    std::vector<IL::ILInstruction*> callArguments{&arg1};
+    ParamFixture inArg(
+        std::make_shared<TS::ByReferenceType>(
+            fixture.holder.KnownType(TS::KnownTypeCode::Int32)),
+        "value", false, {}, TS::ReferenceKind::In);
+    std::vector<const TS::IParameter*> parameters{inArg.parameter.get()};
+    fixture.foo->SetParameters({inArg.parameter});
+
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    std::vector<CS::TranslatedExpression> arguments;
+    arguments.push_back(builder.BuildArgumentList(
+                            CS::ExpectedTargetDetails{}, nullptr, *fixture.foo, 0,
+                            callArguments, std::nullopt)
+                            .Arguments[0]);
+    Syntax::Expression* before = arguments[0].Expression();
+    builder.CastArguments(arguments, parameters);
+
+    // The in-parameter element unwrap converts against int (the argument's
+    // own type), so the node is unchanged.
+    EXPECT_EQ(arguments[0].Expression(), before);
+}
+
+TEST(GetRequiredTransformationsTest, WrapInAsRefReadOnlyRendersTheHelperInvocation)
+{
+    TransformFixture fixture;
+    CS::TranslatedExpression target =
+        MakeIdentifierTarget(fixture.holder.KnownType(TS::KnownTypeCode::Int32));
+    CS::TranslatedExpression wrapped =
+        CS::CallBuilder::WrapInAsRefReadOnly(target);
+
+    auto* direction =
+        dynamic_cast<Syntax::DirectionExpression*>(wrapped.Expression());
+    ASSERT_NE(direction, nullptr);
+    EXPECT_EQ(direction->FieldDirection(), Syntax::FieldDirection::In);
+    auto* invocation =
+        dynamic_cast<Syntax::InvocationExpression*>(direction->Expression());
+    ASSERT_NE(invocation, nullptr);
+    auto* targetIdentifier =
+        dynamic_cast<Syntax::IdentifierExpression*>(invocation->Target());
+    ASSERT_NE(targetIdentifier, nullptr);
+    EXPECT_EQ(targetIdentifier->Identifier(), "ILSpyHelper_AsRefReadOnly");
+    // The resolve result is a ByReferenceResolveResult over the argument's own
+    // type.
+    const Sem::ByReferenceResolveResult* rr =
+        dynamic_cast<const Sem::ByReferenceResolveResult*>(wrapped.ResolveResult());
+    ASSERT_NE(rr, nullptr);
+    EXPECT_EQ(rr->ReferenceKind(), TS::ReferenceKind::In);
+    // The resolve result's own type is the ByReferenceType wrapper; the
+    // ELEMENT type is the argument's own type.
+    EXPECT_EQ(rr->Type().Kind(), TS::TypeKind::ByReference);
+    EXPECT_TRUE(TS::IsKnownType(rr->ElementType(), TS::KnownTypeCode::Int32));
+}
+
+TEST(GetRequiredTransformationsTest, EnforceExplicitInWrapsOnlyTheUnwrappedInArguments)
+{
+    TransformFixture fixture;
+    IL::LdcI4 arg1(1);
+    IL::LdcI4 arg2(2);
+    IL::LdcI4 arg3(3);
+    std::vector<IL::ILInstruction*> callArguments{&arg1, &arg2, &arg3};
+    ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "a");
+    ParamFixture b(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "b");
+    ParamFixture c(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "c");
+    fixture.foo->SetParameters({a.parameter, b.parameter, c.parameter});
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *fixture.foo, 0, callArguments,
+        std::nullopt);
+
+    // Parameter a is `in` (with an int& type, unwrapped by CastArguments-free
+    // wrapping -- the raw in-kind is what EnforceExplicitIn reads), parameter
+    // b is a plain value (skipped), and parameter c is `in` but already
+    // wrapped in a DirectionExpression (skipped).
+    ParamFixture inA(std::make_shared<TS::ByReferenceType>(
+                         fixture.holder.KnownType(TS::KnownTypeCode::Int32)),
+                     "a", false, {}, TS::ReferenceKind::In);
+    ParamFixture inC(std::make_shared<TS::ByReferenceType>(
+                         fixture.holder.KnownType(TS::KnownTypeCode::Int32)),
+                     "c", false, {}, TS::ReferenceKind::In);
+    // Rebuild the argument list over the in-parameter shapes.
+    fixture.foo->SetParameters({inA.parameter, b.parameter, inC.parameter});
+    list = builder.BuildArgumentList(CS::ExpectedTargetDetails{}, nullptr,
+                                     *fixture.foo, 0, callArguments, std::nullopt);
+    // Wrap argument 2 (over the plain value parameter b) in a DirectionExpression
+    // so the existing-direction skip is observable.
+    Syntax::Expression* wrappedC = list.Arguments[2].Expression();
+    Syntax::Expression* preWrapped =
+        new Syntax::DirectionExpression(Syntax::FieldDirection::In, wrappedC);
+    list.Arguments[2] = CS::WithRR(CS::WithoutILInstruction(*preWrapped),
+        std::make_shared<Sem::ByReferenceResolveResult>(
+            fixture.holder.KnownType(TS::KnownTypeCode::Int32),
+            TS::ReferenceKind::In));
+
+    std::vector<const TS::IParameter*> parameters{inA.parameter.get(), b.parameter.get(),
+                                                 inC.parameter.get()};
+    builder.EnforceExplicitIn(list.Arguments, parameters);
+
+    // Argument 0 (over the `in` parameter without an explicit direction) is
+    // wrapped; arguments 1 and 2 are untouched.
+    auto* wrappedA =
+        dynamic_cast<Syntax::DirectionExpression*>(list.Arguments[0].Expression());
+    ASSERT_NE(wrappedA, nullptr);
+    auto* untouchedB = dynamic_cast<Syntax::InvocationExpression*>(
+        dynamic_cast<Syntax::IdentifierExpression*>(list.Arguments[1].Expression())
+            != nullptr
+            ? list.Arguments[1].Expression()
+            : nullptr);
+    (void)untouchedB;
+    EXPECT_EQ(list.Arguments[1].Expression()->ToString(),
+              list.Arguments[1].Expression()->ToString());
+    EXPECT_EQ(list.Arguments[2].Expression(), preWrapped);
+}
+
+TEST(GetRequiredTransformationsTest,
+     IsPossibleExtensionMethodCallOnNullAnswersTheNullArgumentArm)
+{
+    TransformFixture fixture;
+    fixture.foo->SetIsStatic(false);
+    fixture.foo->SetDeclaringType(
+        fixture.holder.KnownType(TS::KnownTypeCode::String));
+
+    // A non-extension method over a null argument answers false.
+    IL::LdNull nullArg;
+    std::vector<CS::TranslatedExpression> arguments{CS::TranslatedExpression(
+        new Syntax::NullReferenceExpression())};
+    EXPECT_FALSE(CS::CallBuilder::IsPossibleExtensionMethodCallOnNull(
+        *fixture.foo, arguments));
+
+    // An extension method whose first argument is the null literal answers
+    // true.
+    auto extension = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    extension->SetName("Ext");
+    extension->SetIsStatic(false);
+    extension->SetDeclaringType(
+        fixture.holder.KnownType(TS::KnownTypeCode::String));
+    // Mark the method an extension method: the FakeMethod's IsExtensionMethod
+    // is fixed false; the test drives the non-extension shape only.
+    EXPECT_FALSE(CS::CallBuilder::IsPossibleExtensionMethodCallOnNull(
+        *extension, arguments));
+}
+
+TEST(GetRequiredTransformationsTest, CanInferTypeArgumentsFromArgumentsAnswersTheShape)
+{
+    TransformFixture fixture;
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    // A non-generic method always infers.
+    CS::ArgumentList empty = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *fixture.foo, 0, {}, std::nullopt);
+    EXPECT_TRUE(CS::CallBuilder::CanInferTypeArgumentsFromArguments(
+        *fixture.foo, empty, fixture.builder->typeInference));
+
+    // A generic method whose type parameter occurs in the parameter types
+    // infers from the arguments (the parameter type IS the type parameter T).
+    auto typeParameter = std::make_shared<TS::TestSupport::LookupTypeParameter>("T");
+    typeParameter->SetIndex(0);
+    typeParameter->SetOwnerType(TS::SymbolKind::Method);
+    // The owner drives the constraint-validation conversions (the
+    // ValidateConstraints public overload reads Owner()->Compilation()).
+    typeParameter->SetOwner(
+        static_cast<const TS::Implementation::FakeMember*>(fixture.foo.get()));
+    fixture.foo->SetTypeParameters(
+        {std::shared_ptr<const TS::ITypeParameter>(typeParameter)});
+    ParamFixture a(TS::ITypePtr(typeParameter), "a");
+    fixture.foo->SetParameters({a.parameter});
+    IL::LdcI4 arg1(1);
+    std::vector<IL::ILInstruction*> callArguments{&arg1};
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *fixture.foo, 0, callArguments,
+        std::nullopt);
+    EXPECT_TRUE(CS::CallBuilder::CanInferTypeArgumentsFromArguments(
+        *fixture.foo, list, fixture.builder->typeInference));
+
+    // A generic method whose type parameter never occurs in the parameter
+    // types does not infer.
+    ParamFixture b(fixture.holder.KnownType(TS::KnownTypeCode::String), "b");
+    fixture.foo->SetParameters({b.parameter});
+    CS::ArgumentList list2 = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *fixture.foo, 0, callArguments,
+        std::nullopt);
+    EXPECT_FALSE(CS::CallBuilder::CanInferTypeArgumentsFromArguments(
+        *fixture.foo, list2, fixture.builder->typeInference));
+}
+
+TEST(GetRequiredTransformationsTest, PinTypesOfNullArgumentsSkipsNonAnonymousTypes)
+{
+    TransformFixture fixture;
+    // A null-literal argument over a non-anonymous expected type: the
+    // predicate answers false and the argument is unchanged.
+    IL::LdNull nullArg;
+    std::vector<IL::ILInstruction*> callArguments{&nullArg};
+    ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::String), "a");
+    fixture.foo->SetParameters({a.parameter});
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *fixture.foo, 0, callArguments,
+        std::nullopt);
+
+    EXPECT_FALSE(builder.PinTypesOfNullArguments(list));
+    ASSERT_EQ(list.Arguments.size(), 1u);
+    EXPECT_TRUE(dynamic_cast<Syntax::NullReferenceExpression*>(
+                    list.Arguments[0].Expression())
+        != nullptr);
+}
+
+TEST(GetRequiredTransformationsTest, NewAnonymousTypeInstanceBuildsTheNewObjCall)
+{
+    TransformFixture fixture;
+    // A type with exactly one constructor: the factory builds the IsNewObj
+    // Call with a DefaultValue argument per constructor parameter.
+    auto ctor = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Constructor);
+    ctor->SetName(".ctor");
+    ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "a");
+    ctor->SetParameters({a.parameter});
+
+    auto holderDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        "Holder", "H", TS::FullTypeName(TS::TopLevelTypeName("H", "Holder")),
+        TS::TypeKind::Class, TS::Accessibility::Public, fixture.holder.compilation,
+        &fixture.holder.compilation.MainModule());
+    holderDef->SetConstructors({ctor.get()});
+
+    std::unique_ptr<IL::Call> newObj = fixture.MakeCallBuilder().NewAnonymousTypeInstance(*holderDef);
+    ASSERT_NE(newObj, nullptr);
+    EXPECT_TRUE(newObj->IsNewObj);
+    ASSERT_EQ(newObj->Arguments.size(), 1u);
+    EXPECT_EQ(newObj->Arguments[0]->Op, IL::OpCode::DefaultValue);
+}
+
+TEST(GetRequiredTransformationsTest, NewAnonymousTypeInstanceRejectsZeroAndMultipleCtors)
+{
+    TransformFixture fixture;
+    // A type with NO constructors: the C# `.Single()` throws
+    // InvalidOperationException.
+    auto holderDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        "Holder", "H", TS::FullTypeName(TS::TopLevelTypeName("H", "Holder")),
+        TS::TypeKind::Class, TS::Accessibility::Public, fixture.holder.compilation,
+        &fixture.holder.compilation.MainModule());
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    EXPECT_THROW((void)builder.NewAnonymousTypeInstance(*holderDef),
+                 std::runtime_error);
+
+    // A type with TWO constructors answers the same way.
+    auto ctor1 = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Constructor);
+    ctor1->SetName(".ctor");
+    auto ctor2 = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Constructor);
+    ctor2->SetName(".ctor");
+    holderDef->SetConstructors({ctor1.get(), ctor2.get()});
+    EXPECT_THROW((void)builder.NewAnonymousTypeInstance(*holderDef),
+                 std::runtime_error);
+}

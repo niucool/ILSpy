@@ -503,6 +503,26 @@ public:
         return result;
     }
 
+    // The `IType::GetConstructors` member-enumeration virtual over the stub's own
+    // filtered list (the `GetMethods` shape without the base-type walk -- the
+    // C# instance-ctor enumeration returns no base ctors). The default
+    // (empty) preserves the prior always-empty behavior; the stored pointers
+    // are non-owning (the caller keeps the method stubs alive).
+    void SetConstructors(std::vector<const IMethod*> constructors) {
+        constructors_ = std::move(constructors);
+    }
+    std::vector<const IMethod*> GetConstructors(
+        std::function<bool(const IMethod*)> filter = nullptr,
+        GetMemberOptions options = GetMemberOptions::IgnoreInheritedMembers) const override
+    {
+        (void)options;
+        std::vector<const IMethod*> result;
+        for (const IMethod* c : constructors_)
+            if (!filter || filter(c))
+                result.push_back(c);
+        return result;
+    }
+
     // The `IType::GetFields` member-enumeration virtual over the stub's own
     // filtered list + the `GetMembersHelper` base-type walk when
     // `IgnoreInheritedMembers` is absent (the `GetProperties` override shape).
@@ -569,7 +589,19 @@ public:
     ITypePtr DeclaringType() const override { return {}; }
     const IModule* ParentModule() const override { return parentModule_; }
     std::vector<const IAttribute*> GetAttributes() const override { return attributes_; }
-    bool HasAttribute(KnownAttribute) const override { return false; }
+    // Configurable `HasAttribute` answers for the NRExtensions predicate tests
+    // (the IsCompilerGenerated check reads the entity's attribute set). The
+    // default (empty) preserves the prior hardcoded-false behavior (the
+    // additive-setter convention).
+    void SetKnownAttributes(std::vector<KnownAttribute> attributes) {
+        knownAttributes_ = std::move(attributes);
+    }
+    bool HasAttribute(KnownAttribute attribute) const override
+    {
+        return std::find(knownAttributes_.begin(), knownAttributes_.end(),
+                         attribute)
+            != knownAttributes_.end();
+    }
     const IAttribute* GetAttribute(KnownAttribute) const override { return nullptr; }
     TS::Accessibility Accessibility() const override { return accessibility_; }
     bool IsStatic() const override { return isStatic_; }
@@ -627,6 +659,8 @@ private:
     bool isRecord_ = false;
     bool isByRefLike_ = false;
     std::vector<const IAttribute*> attributes_;
+    std::vector<KnownAttribute> knownAttributes_;
+    std::vector<const IMethod*> constructors_;
 };
 
 // A plain `IEntity` stub (NOT an IMember) -- the smallest concrete entity for
@@ -1224,7 +1258,13 @@ public:
 
     // --- ITypeParameter ---
     TS::SymbolKind OwnerType() const override { return ownerType_; }
-    const IEntity* Owner() const override { return nullptr; }
+    // Configurable `Owner` for the constraint-validation tests (the
+    // `ValidateConstraints` public overload resolves the conversions from the
+    // type parameter's own compilation through `Owner()->Compilation()`). The
+    // default (null) preserves the prior behavior (the additive-setter
+    // convention; the null owner is the soft not-satisfied fallback).
+    void SetOwner(const IEntity* owner) { owner_ = owner; }
+    const IEntity* Owner() const override { return owner_; }
     int Index() const override { return index_; }
     std::vector<const IAttribute*> GetAttributes() const override { return attributes_; }
     VarianceModifier Variance() const override { return variance_; }
@@ -1266,6 +1306,7 @@ private:
     // The configurable owner kind (SetOwnerType; the default keeps the original
     // hardcoded `SymbolKind::Method`).
     TS::SymbolKind ownerType_ = TS::SymbolKind::Method;
+    const IEntity* owner_ = nullptr;
     bool hasDefaultConstructorConstraint_ = false;
     bool hasReferenceTypeConstraint_ = false;
     bool hasValueTypeConstraint_ = false;
