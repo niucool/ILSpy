@@ -32,22 +32,32 @@
 // Landed additionally: the argument-list machinery (BuildArgumentList,
 // IsPrimitiveValueThatShouldBeNamedArgument, TransformParamsArgument,
 // IsOptionalArgument) with the overload-resolution composition it validates
-// through (IsUnambiguousCall + IsAppropriateCallTarget), and the
+// through (IsUnambiguousCall + IsAppropriateCallTarget), the
 // overload-resolution driver itself (GetRequiredTransformationsForCall with the
 // nested CallTransformation flags enum, CastArguments, EnforceExplicitIn /
 // WrapInAsRefReadOnly, IsPossibleExtensionMethodCallOnNull,
 // CanInferTypeArgumentsFromArguments, and the anonymous-type helpers
 // PinTypesOfNullArguments / NewAnonymousTypeInstance over the NRExtensions
-// predicate family). The EnforceExplicitIn statementBuilder
-// EmitAsRefReadOnly flag write is deferred with the StatementBuilder slice; the
-// CastArguments lambda-return-type arm is deferred with
-// ModifyReturnTypeOfLambda/DecompiledLambdaResolveResult.
+// predicate family), and the call-build composition itself: the
+// Build(CallInstruction) entry (the delegate-construction and tuple arms DEFER
+// loudly, the span-based string-concat arm wired) and the mainline
+// Build(OpCode, ...) body -- the EII sealed-class rewrite, the local-function
+// target arm (with ExpressionBuilder.ResolveLocalFunction and ToMethodGroup),
+// the TranslateTarget + boxing unwrap, the VarArgInstanceMethod arm, the
+// delegate-invoke / delegate-equality / op_Implicit special cases, the
+// HandleRangeConstruction arms (over the ported SyntheticRangeIndexAccessor),
+// the InlineArray and GetValueOrDefault arms, and the final
+// RequireTarget/RequireTypeArguments invocation render. The EnforceExplicitIn
+// statementBuilder EmitAsRefReadOnly flag write is deferred with the
+// StatementBuilder slice; the CastArguments lambda-return-type arm is deferred
+// with ModifyReturnTypeOfLambda/DecompiledLambdaResolveResult.
 //
-// The remaining arms (HandleDelegateConstruction, the tuple construction,
-// the mainline Build(OpCode, ...) body, HandleConstructorCall/
-// HandleAccessorCall, HandleRangeConstruction, HandleStringInterpolation,
-// IsDelegateEqualityComparison, ...) are DEFERRED with the VisitNewObj/
-// VisitCall slices they serve.
+// The remaining render arms are the loud deferrals behind their real C# gate
+// conditions: HandleDelegateConstruction (the delegate-reference slice),
+// TupleTransform.MatchTupleConstruction's tuple-expression render (the
+// TupleExpression slice), HandleConstructorCall (the constructor-call slice),
+// HandleAccessorCall (the accessor-call slice), and HandleStringInterpolation
+// (the interpolation slice).
 
 #pragma once
 
@@ -55,6 +65,7 @@
 #include "Decompiler/CSharp/TranslatedExpression.hpp"
 #include "Decompiler/CSharp/ExpressionBuilder.hpp"
 #include "Decompiler/CSharp/Resolver/CSharpResolver.hpp"
+#include "Decompiler/CSharp/Resolver/MethodGroupResolveResult.hpp"
 #include "Decompiler/CSharp/Resolver/OverloadResolution.hpp"
 #include "Decompiler/DecompilerSettings.hpp"
 #include "Decompiler/IL/OpCode.hpp"
@@ -412,6 +423,89 @@ public:
     ExpressionWithResolveResult BuildStringConcat(
         const TS::IMethod& method,
         const std::vector<std::pair<IL::ILInstruction*, TS::KnownTypeCode>>& operands);
+
+    // -- The call-build composition (CallBuilder.cs lines 202-594) ---------------------
+
+    // The C# `public TranslatedExpression Build(CallInstruction inst, IType?
+    // typeHint = null)` (lines 202-241): the call entry -- the
+    // delegate-construction arm (a newobj the IL match recognizes) and the
+    // tuple-construction arm are DEFERRED loudly (HandleDelegateConstruction
+    // needs the delegate-reference chain; TupleTransform is unported), the
+    // span-based string-concat arm renders its fold, and everything else
+    // routes through the mainline Build with the IL-instruction and tail
+    // markers applied.
+    TranslatedExpression Build(const IL::Call& inst, const TS::IType* typeHint = nullptr);
+
+    // The C# `public ExpressionWithResolveResult Build(OpCode callOpCode,
+    // IMethod method, IReadOnlyList<ILInstruction> callArguments,
+    // IReadOnlyList<int>? argumentToParameterMap = null, IType? constrainedTo =
+    // null)` (lines 332-594): the mainline call render -- the EII sealed-class
+    // rewrite, the local-function target arm, the TranslateTarget + boxing
+    // unwrap, BuildArgumentList, the VarArgInstanceMethod arm, the delegate
+    // invoke arm, the delegate-equality and op_Implicit special cases, the
+    // InlineArray and GetValueOrDefault arms, the
+    // GetRequiredTransformationsForCall fix ladder, and the final
+    // RequireTarget/RequireTypeArguments invocation render.
+    // HandleRangeConstruction / HandleConstructorCall / the accessor arm /
+    // HandleStringInterpolation are loud deferrals behind their real C# gate
+    // conditions (the four render arms land with their own slices).
+    ExpressionWithResolveResult Build(
+        IL::OpCode callOpCode, const TS::IMethod& method,
+        const std::vector<IL::ILInstruction*>& callArguments,
+        const std::optional<std::vector<int>>& argumentToParameterMap = std::nullopt,
+        const TS::IType* constrainedTo = nullptr);
+
+    // The C# `static bool IsNullConditional(Expression expr)` (line 1480-1485):
+    // a `?.` unary operator expression (the target shape the delegate-invoke
+    // arm rejects).
+    static bool IsNullConditional(const Syntax::Expression* expr);
+
+    // The C# `private bool IsDelegateEqualityComparison(IMethod method,
+    // IList<TranslatedExpression> arguments)` (lines 1523-1534): comparison on
+    // a delegate type is a C# builtin operator that compiles down to a
+    // Delegate.op_Equality call -- a special case that avoids inserting a
+    // cast to System.Delegate. Made public for tests.
+    static bool IsDelegateEqualityComparison(
+        const TS::IMethod& method, const std::vector<TranslatedExpression>& arguments);
+
+    // The C# `private Expression HandleDelegateEqualityComparison(IMethod
+    // method, IList<TranslatedExpression> arguments)` (lines 1536-1543): the
+    // plain `a == b` / `a != b` binary render. Made public for tests.
+    static Syntax::Expression* HandleDelegateEqualityComparison(
+        const TS::IMethod& method, const std::vector<TranslatedExpression>& arguments);
+
+    // The C# `private ExpressionWithResolveResult HandleImplicitConversion(
+    // IMethod method, TranslatedExpression argument)` (lines 1545-1565): the
+    // op_Implicit user-defined conversion render -- the user-defined check
+    // with the argument-type re-cast fallback, the `in`-DirectionExpression
+    // unwrap, and the cast over the (possibly re-looked-up) conversion.
+    // Made public for tests.
+    ExpressionWithResolveResult HandleImplicitConversion(const TS::IMethod& method,
+                                                        TranslatedExpression argument);
+
+    // The C# `private static bool IsInterpolatedStringCreation(IMethod method,
+    // ArgumentList argumentList)` (lines 755-765). Made public for tests.
+    static bool IsInterpolatedStringCreation(const TS::IMethod& method,
+                                             const ArgumentList& argumentList);
+
+    // The C# `private bool HandleRangeConstruction(out ExpressionWithResolveResult
+    // result, OpCode callOpCode, IMethod method, TranslatedExpression target,
+    // ArgumentList argumentList)` (lines 2245-2300): the C# 8 range/index render
+    // -- the four Range arms, the Index '^' arm, and the synthetic
+    // range-indexer slicing arm. Made public for tests. The ArgumentList is
+    // the C# by-value parameter (a copy -- GetArgumentExpressions' fills must
+    // not leak into the caller's list).
+    static bool HandleRangeConstruction(ExpressionWithResolveResult& result,
+                                        IL::OpCode callOpCode, const TS::IMethod& method,
+                                        const TranslatedExpression& target,
+                                        ArgumentList argumentList);
+
+    // The C# `static MethodGroupResolveResult ToMethodGroup(IMethod method,
+    // ILFunction localFunction)` (lines 2199-2210): the local-function method
+    // group -- a null target, the function's name, one declaring-type bucket
+    // over the method, and the method's type arguments.
+    static std::shared_ptr<Resolver::MethodGroupResolveResult> ToMethodGroup(
+        const TS::IMethod& method, const IL::ILFunction& localFunction);
 
 private:
     ExpressionBuilder* expressionBuilder_ = nullptr;

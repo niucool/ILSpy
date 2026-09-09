@@ -576,6 +576,7 @@ public:
     // --- INamedElement ---
     std::string FullName() const override { return fullName_; }
     std::string Namespace() const override { return namespace_; }
+    void SetNamespace(std::string ns) { namespace_ = std::move(ns); }
 
     // --- ICompilationProvider ---
     const ICompilation& Compilation() const override { return compilation_; }

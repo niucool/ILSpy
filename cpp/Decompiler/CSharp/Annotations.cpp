@@ -160,6 +160,17 @@ Syntax::ForeachStatement* WithILVariable(Syntax::ForeachStatement& loop,
     return &loop;
 }
 
+// The C# `ide.AddAnnotation(localFunction)` over the holder channel.
+void WithILFunction(Syntax::AstNode& node, IL::ILFunction* function) {
+    node.AddAnnotation(std::make_shared<ILFunctionAnnotation>(function));
+}
+
+// The C# `node.Annotation<ILFunction>()` over the holder channel.
+IL::ILFunction* GetILFunction(const Syntax::AstNode& node) {
+    const auto* annotation = node.Annotation<ILFunctionAnnotation>();
+    return annotation ? annotation->Function : nullptr;
+}
+
 // The C# `UseImplicitlyTypedOutAnnotation.Instance` shared handle (the port's
 // annotation channel owns via shared_ptr; the aliasing-shared_ptr convention --
 // the static Instance() object aliased with a no-op deleter).

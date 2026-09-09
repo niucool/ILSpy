@@ -381,6 +381,15 @@ public:
     std::unordered_map<const IL::ILVariable*, std::vector<IL::ILInstruction*>> storeInstructions;
     IL::ILFunction* storeScanFunction = nullptr;
 
+    // The C# `internal ILFunction? ResolveLocalFunction(IMethod method)`
+    // (ExpressionBuilder.cs lines 278-292): the local-function lookup -- the
+    // method's member definition's ReducedFrom's member definition is matched
+    // against every ILFunction ancestor's (this one first) LocalFunctions by
+    // their own method's member definition. Null when no ancestor declares the
+    // local function (the C# `FirstOrDefault` shape -- the Debug.Assert only
+    // covers the call's own assertion that the method IS one).
+    IL::ILFunction* ResolveLocalFunction(const TS::IMethod& method) const;
+
     // The C# `internal bool HidesVariableWithName(string name)` / static overload:
     // whether any enclosing ILFunction (the ancestor walk INCLUDES the function
     // itself) declares a variable or a local function with that name.

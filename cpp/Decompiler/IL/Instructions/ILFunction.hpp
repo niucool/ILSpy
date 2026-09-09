@@ -24,6 +24,7 @@
 
 #include "Decompiler/IL/ILVariable.hpp"
 #include "Decompiler/IL/Instructions/BlockContainer.hpp"
+#include "Decompiler/TypeSystem/IMethod.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -57,6 +58,14 @@ public:
     // consults is `IsConstructor && !IsStatic` (an instance constructor).
     bool IsConstructor = false;
     bool IsStatic = false;
+
+    // The C# `public IMethod Method { get; set; }` -- the resolved method identity
+    // of this function (the ResolveLocalFunction lookup key's member definition,
+    // the DebugInfoGenerator's per-node method annotation). Null on the seed path
+    // (the IL reader's type-system plumbing has not yet wired it), set directly
+    // by tests and later by the reader. Non-owning: the type system owns methods
+    // (the C# GC reference).
+    TypeSystem::IMethod* Method = nullptr;
 
     // The IL offset of the first chained `: base(...)`/`: this(...)` constructor
     // call in this function's body, or -1 when this is not an instance

@@ -327,6 +327,26 @@ Syntax::VariableInitializer* WithILVariable(Syntax::VariableInitializer& initial
 Syntax::ForeachStatement* WithILVariable(Syntax::ForeachStatement& loop,
                                          const IL::ILVariablePtr& variable);
 
+// The C# `ide.AddAnnotation(localFunction)` -- the local-function ILFunction object
+// itself as the identifier-expression's AST annotation (consumed by DeclareVariables'
+// scope walk and the DebugInfoGenerator). The port's annotation channel owns via
+// shared_ptr<AnnotationBase>, so the non-owning function pointer is wrapped in this
+// holder (the ILInstructionAnnotation precedent).
+class ILFunctionAnnotation final : public Syntax::AnnotationBase {
+public:
+    IL::ILFunction* Function;
+
+    explicit ILFunctionAnnotation(IL::ILFunction* function) : Function(function) {}
+};
+
+// The C# `node.AddAnnotation(localFunction)` over the holder channel -- attach the
+// function as the node's ILFunction annotation.
+void WithILFunction(Syntax::AstNode& node, IL::ILFunction* function);
+
+// The C# `node.Annotation<ILFunction>()` -- the function carried by the node's
+// ILFunction annotation, or null.
+IL::ILFunction* GetILFunction(const Syntax::AstNode& node);
+
 // The C# `public static T CopyAnnotationsFrom<T>(this T node, AstNode other)
 // where T : AstNode` -- copies all annotations from `other` to `node` (the same
 // objects, the C# reference-sharing), skipping the trivia holder (each trivia's

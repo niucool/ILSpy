@@ -1642,6 +1642,49 @@ bool ExpressionBuilder::HidesVariableWithName(const std::string& name) const
     return currentFunction != nullptr && HidesVariableWithName(*currentFunction, name);
 }
 
+// The C# `internal ILFunction? ResolveLocalFunction(IMethod method)`
+// (ExpressionBuilder.cs lines 278-292).
+IL::ILFunction* ExpressionBuilder::ResolveLocalFunction(const TS::IMethod& method) const
+{
+    assert(method.IsLocalFunction());
+    // The C# `method = (IMethod)((IMethod)method.MemberDefinition!).ReducedFrom!.MemberDefinition`
+    // -- the hard cast of the member definition to IMethod (the member's own
+    // definition view) then the unwrapped base method's own member definition.
+    // The C# `ReducedFrom!` NREs when null; the port carries the message.
+    const auto* methodDef = dynamic_cast<const TS::IMethod*>(method.MemberDefinition());
+    assert(methodDef != nullptr);
+    const TS::IMethod* reducedFrom = methodDef->ReducedFrom();
+    if (reducedFrom == nullptr)
+        throw std::runtime_error("Object reference not set to an instance of an object.");
+    // The C# comparison is the member-definition identity (`f.Method!.MemberDefinition
+    // .Equals(method)` over the reassigned, already-unwrapped method) -- both sides
+    // normalize through MemberDefinition() (the two-view discipline).
+    const TS::IMember* resolved = reducedFrom->MemberDefinition();
+
+    if (currentFunction == nullptr)
+        throw std::runtime_error("Object reference not set to an instance of an object.");
+    // The C# `currentFunction.Ancestors.OfType<ILFunction>()` INCLUDES the function
+    // itself (Ancestors yields this first).
+    for (const IL::ILInstruction* node = currentFunction; node != nullptr; node = node->Parent)
+    {
+        const auto* parent = dynamic_cast<const IL::ILFunction*>(node);
+        if (parent == nullptr)
+            continue;
+        for (const auto& f : parent->LocalFunctions)
+        {
+            if (f == nullptr)
+                continue;
+            // The C# `f.Method!` -- the C# NREs when the local function carries no
+            // method (the compiler-trust operator).
+            if (f->Method == nullptr)
+                throw std::runtime_error("Object reference not set to an instance of an object.");
+            if (f->Method->MemberDefinition() == resolved)
+                return f.get();
+        }
+    }
+    return nullptr;
+}
+
 bool ExpressionBuilder::HidesVariableWithName(const IL::ILFunction& currentFunctionValue,
                                               const std::string& name)
 {

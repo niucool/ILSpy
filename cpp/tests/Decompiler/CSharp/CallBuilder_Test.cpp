@@ -35,6 +35,22 @@
 #include "Decompiler/CSharp/Syntax/Expressions/BinaryOperatorExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ConditionalExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/InvocationExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UnaryOperatorExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/TypeReferenceExpression.hpp"
+#include "Decompiler/CSharp/Syntax/PrimitiveType.hpp"
+#include "Decompiler/CSharp/Resolver/CSharpInvocationResolveResult.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/IndexerExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Expressions/UndocumentedExpression.hpp"
+#include "Decompiler/CSharp/Syntax/Comment.hpp"
+#include "Decompiler/CSharp/Annotations.hpp"
+#include "Decompiler/IL/Instructions/LdObjIfRef.hpp"
+#include "Decompiler/IL/Instructions/TokenInstructions.hpp"
+#include "Decompiler/IL/Transforms/DelegateConstruction.hpp"
+#include "Decompiler/TypeSystem/VarArgInstanceMethod.hpp"
+#include "Decompiler/TypeSystem/TupleType.hpp"
+#include "Decompiler/TypeSystem/Implementation/SyntheticRangeIndexer.hpp"
+#include "Decompiler/Semantics/ConversionFactories.hpp"
+#include "Decompiler/Semantics/TypeResolveResult.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/ThisReferenceExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/CastExpression.hpp"
 #include "Decompiler/CSharp/Syntax/Expressions/IdentifierExpression.hpp"
@@ -2301,3 +2317,700 @@ TEST(GetRequiredTransformationsTest, NewAnonymousTypeInstanceRejectsZeroAndMulti
     EXPECT_THROW((void)builder.NewAnonymousTypeInstance(*holderDef),
                  std::runtime_error);
 }
+
+
+namespace
+{
+
+// The Call node's children as raw pointers (the file-local CallChildPtrs helper
+// in the library's anonymous namespace is not visible here).
+std::vector<IL::ILInstruction*> CallChildPtrsForTest(const IL::Call& call)
+{
+    std::vector<IL::ILInstruction*> children;
+    children.reserve(call.Arguments.size());
+    for (const std::unique_ptr<IL::ILInstruction>& child : call.Arguments)
+        children.push_back(child.get());
+    return children;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// CallBuilder::Build -- the call-build composition (CallBuilder.cs lines
+// 202-594) and its prerequisites (appended by the Build-composition slice).
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+// The LocalFunctionMethod fixture over a FakeMethod base (the ResolveLocalFunction
+// comparison is the member-definition identity through the wrapper's ReducedFrom).
+struct LocalFunctionFixture {
+    BuildArgsFixture fixture;
+    std::shared_ptr<TS::Implementation::FakeMethod> base;
+    std::shared_ptr<TS::Implementation::LocalFunctionMethod> wrapper;
+
+    LocalFunctionFixture()
+    {
+        base = std::make_shared<TS::Implementation::FakeMethod>(
+            fixture.holder.compilation, TS::SymbolKind::Method);
+        base->SetName("Local");
+        base->SetIsStatic(false);
+        base->SetDeclaringType(fixture.holder.KnownType(TS::KnownTypeCode::Object));
+        wrapper = std::make_shared<TS::Implementation::LocalFunctionMethod>(
+            base, std::string("Local"), false, 0, 0);
+        // The nested local-function declaration: an ILFunction whose Method is
+        // the BASE method (the C# entity-cache identity shape).
+        auto nested = std::make_unique<IL::ILFunction>();
+        nested->Name = "Local";
+        nested->Method = base.get();
+        fixture.function.LocalFunctions.push_back(std::move(nested));
+    }
+};
+
+} // namespace
+
+TEST(ResolveLocalFunctionTest, FindsTheNestedDeclarationByMemberDefinition)
+{
+    LocalFunctionFixture fixture;
+    // The nested declaration's Method (the base method, the entity-cache shape)
+    // resolves by its member definition against the wrapper's ReducedFrom's
+    // member definition.
+    IL::ILFunction* resolved =
+        fixture.fixture.builder->ResolveLocalFunction(*fixture.wrapper);
+    ASSERT_NE(resolved, nullptr);
+    EXPECT_EQ(resolved, fixture.fixture.function.LocalFunctions.front().get());
+}
+
+TEST(ResolveLocalFunctionTest, AnswersNullWhenNoAncestorDeclares)
+{
+    LocalFunctionFixture fixture;
+    // A wrapper over a DIFFERENT base method does not match the declaration.
+    auto otherBase = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.fixture.holder.compilation, TS::SymbolKind::Method);
+    otherBase->SetName("Other");
+    otherBase->SetDeclaringType(
+        fixture.fixture.holder.KnownType(TS::KnownTypeCode::Object));
+    auto otherWrapper = std::make_shared<TS::Implementation::LocalFunctionMethod>(
+        otherBase, std::string("Other"), false, 0, 0);
+    IL::ILFunction* resolved =
+        fixture.fixture.builder->ResolveLocalFunction(*otherWrapper);
+    EXPECT_EQ(resolved, nullptr);
+}
+
+TEST(ToMethodGroupTest, BuildsTheNullTargetMethodGroup)
+{
+    LocalFunctionFixture fixture;
+    auto group = CS::CallBuilder::ToMethodGroup(
+        *fixture.wrapper, *fixture.fixture.function.LocalFunctions.front());
+    ASSERT_NE(group, nullptr);
+    EXPECT_EQ(group->TargetResult(), nullptr);
+    EXPECT_EQ(group->MethodName(), "Local");
+    ASSERT_EQ(group->MethodsGroupedByDeclaringType().size(), 1u);
+    // The bucket holds the WRAPPER (the method passed in, not its base).
+    ASSERT_EQ(group->Methods().size(), 1u);
+    EXPECT_EQ(group->Methods().front(),
+              static_cast<const TS::IMethod*>(fixture.wrapper.get()));
+}
+
+TEST(IsNullConditionalTest, MatchesTheUnaryOperatorShape)
+{
+    Syntax::IdentifierExpression ident("d");
+    Syntax::UnaryOperatorExpression uoe(&ident,
+                                        Syntax::UnaryOperatorType::NullConditional);
+    EXPECT_TRUE(CS::CallBuilder::IsNullConditional(&uoe));
+    Syntax::IdentifierExpression ident2("d");
+    Syntax::UnaryOperatorExpression notUoe(&ident2, Syntax::UnaryOperatorType::Not);
+    EXPECT_FALSE(CS::CallBuilder::IsNullConditional(&notUoe));
+    // A non-unary expression is not the shape.
+    Syntax::IdentifierExpression ident3("d");
+    EXPECT_FALSE(CS::CallBuilder::IsNullConditional(&ident3));
+}
+
+
+TEST(IsDelegateEqualityTest, MatchesTheOpEqualityShapeOverDelegates)
+{
+    BuildArgsFixture fixture;
+    auto delegateType = fixture.holder.KnownType(TS::KnownTypeCode::Delegate);
+    auto op = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Operator);
+    op->SetName("op_Equality");
+    op->SetIsStatic(true);
+    op->SetDeclaringType(fixture.holder.KnownType(TS::KnownTypeCode::Delegate));
+    // The argument/parameter types are a real DELEGATE-KIND type stub (the C#
+    // `arguments[0].Type.Kind == TypeKind.Delegate` gate; MinimalCorlib's own
+    // Delegate known type is TypeKind.Class, the KnownTypeReference table's
+    // declaration -- the real-engine comparison fires over metadata-backed
+    // delegate definitions).
+    auto delegateKindType = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        "Action", "System",
+        TS::FullTypeName(TS::TopLevelTypeName("System", "Action")),
+        TS::TypeKind::Delegate, TS::Accessibility::Public, fixture.holder.compilation,
+        &fixture.holder.compilation.MainModule());
+    auto delegateKindPtr = TS::ITypePtr(delegateKindType.get(), [](TS::IType*) {});
+    ParamFixture a(delegateKindPtr, "a");
+    ParamFixture b(delegateKindPtr, "b");
+    op->SetParameters({a.parameter, b.parameter});
+    auto varA = std::make_shared<IL::ILVariable>();
+    varA->Name = "a";
+    varA->Type = TS::ITypePtr(delegateKindType.get(), [](TS::IType*) {});
+    auto varB = std::make_shared<IL::ILVariable>();
+    varB->Name = "b";
+    varB->Type = varA->Type;
+    IL::LdLoc ldA(varA);
+    IL::LdLoc ldB(varB);
+    std::vector<IL::ILInstruction*> callArguments{&ldA, &ldB};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *op, 0, callArguments, std::nullopt);
+    ASSERT_EQ(list.Arguments.size(), 2u);
+    EXPECT_TRUE(list.Arguments[0].Type().Kind() == TS::TypeKind::Delegate);
+    EXPECT_TRUE(list.Arguments[1].Type().Kind() == TS::TypeKind::Delegate);
+    EXPECT_TRUE(CS::CallBuilder::IsDelegateEqualityComparison(*op, list.Arguments));
+
+    // A non-operator method of the same name fails the IsOperator gate.
+    auto plain = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    plain->SetName("op_Equality");
+    plain->SetIsStatic(true);
+    plain->SetDeclaringType(fixture.holder.KnownType(TS::KnownTypeCode::Delegate));
+    plain->SetParameters({a.parameter, b.parameter});
+    EXPECT_FALSE(CS::CallBuilder::IsDelegateEqualityComparison(*plain, list.Arguments));
+
+    // A non-delegate declaring type fails the IsKnownType gate.
+    auto wrongType = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Operator);
+    wrongType->SetName("op_Equality");
+    wrongType->SetIsStatic(true);
+    wrongType->SetDeclaringType(fixture.holder.KnownType(TS::KnownTypeCode::Object));
+    wrongType->SetParameters({a.parameter, b.parameter});
+    EXPECT_FALSE(
+        CS::CallBuilder::IsDelegateEqualityComparison(*wrongType, list.Arguments));
+}
+
+TEST(HandleDelegateEqualityTest, RendersTheBinaryComparison)
+{
+    BuildArgsFixture fixture;
+    auto delegateType = fixture.holder.KnownType(TS::KnownTypeCode::Delegate);
+    auto op = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Operator);
+    op->SetName("op_Inequality");
+    op->SetIsStatic(true);
+    op->SetDeclaringType(fixture.holder.KnownType(TS::KnownTypeCode::Delegate));
+    ParamFixture a(delegateType, "a");
+    ParamFixture b(delegateType, "b");
+    op->SetParameters({a.parameter, b.parameter});
+
+    auto delegateKindType = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        "Action", "System",
+        TS::FullTypeName(TS::TopLevelTypeName("System", "Action")),
+        TS::TypeKind::Delegate, TS::Accessibility::Public, fixture.holder.compilation,
+        &fixture.holder.compilation.MainModule());
+    auto varA = std::make_shared<IL::ILVariable>();
+    varA->Name = "a";
+    varA->Type = TS::ITypePtr(delegateKindType.get(), [](TS::IType*) {});
+    auto varB = std::make_shared<IL::ILVariable>();
+    varB->Name = "b";
+    varB->Type = varA->Type;
+    IL::LdLoc ldA(varA);
+    IL::LdLoc ldB(varB);
+    std::vector<IL::ILInstruction*> callArguments{&ldA, &ldB};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *op, 0, callArguments, std::nullopt);
+    Syntax::Expression* expr =
+        CS::CallBuilder::HandleDelegateEqualityComparison(*op, list.Arguments);
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(expr);
+    ASSERT_NE(binary, nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::InEquality);
+    delete expr;
+}
+
+TEST(HandleImplicitConversionTest, RendersTheCastOverTheReTypedArgument)
+{
+    BuildArgsFixture fixture;
+    // An op_Implicit whose parameter is Int32 and whose return type is String:
+    // over MinimalCorlib no user-defined conversion is resolvable, so the
+    // helper inserts the argument-type re-cast (an identity for an Int32
+    // argument) and answers the cast over the second lookup's (invalid)
+    // conversion.
+    auto op = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Operator);
+    op->SetName("op_Implicit");
+    op->SetIsStatic(true);
+    ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "value");
+    op->SetParameters({a.parameter});
+    op->SetReturnType(fixture.holder.KnownType(TS::KnownTypeCode::String));
+
+    // The argument: an int32 constant.
+    Syntax::PrimitiveExpression argExpr(Syntax::PrimitiveValue(std::int32_t(42)));
+    argExpr.AddAnnotation(std::make_shared<Sem::ConstantResolveResult>(
+        fixture.holder.KnownType(TS::KnownTypeCode::Int32), 42));
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ExpressionWithResolveResult result = builder.HandleImplicitConversion(
+        *op, CS::TranslatedExpression(&argExpr, CS::GetResolveResult(argExpr)));
+    auto* cast = dynamic_cast<Syntax::CastExpression*>(result.Expression());
+    ASSERT_NE(cast, nullptr);
+    // The cast's resolve result is a ConversionResolveResult typed String.
+    EXPECT_TRUE(TS::IsKnownType(result.Type(), TS::KnownTypeCode::String));
+    const auto* rr =
+        dynamic_cast<const Sem::ConversionResolveResult*>(CS::GetResolveResult(*cast));
+    ASSERT_NE(rr, nullptr);
+    // The inner expression is the argument itself (the re-cast is an identity).
+    auto* inner = dynamic_cast<Syntax::PrimitiveExpression*>(cast->Expression());
+    ASSERT_NE(inner, nullptr);
+    EXPECT_EQ(std::get<std::int32_t>(inner->Value()), 42);
+}
+
+TEST(IsInterpolatedStringCreationTest, GateMatrix)
+{
+    BuildArgsFixture fixture;
+    // `string.Format(...)` -- a static Format over the String known type.
+    auto format = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    format->SetName("Format");
+    format->SetIsStatic(true);
+    format->SetDeclaringType(fixture.holder.KnownType(TS::KnownTypeCode::String));
+    ParamFixture arg(fixture.holder.KnownType(TS::KnownTypeCode::String), "arg");
+    format->SetParameters({arg.parameter});
+
+    IL::LdStr formatArg("a");
+    std::vector<IL::ILInstruction*> callArguments{&formatArg};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *format, 0, callArguments, std::nullopt);
+    EXPECT_TRUE(CS::CallBuilder::IsInterpolatedStringCreation(*format, list));
+
+    // An instance Format fails the IsStatic gate.
+    format->SetIsStatic(false);
+    EXPECT_FALSE(CS::CallBuilder::IsInterpolatedStringCreation(*format, list));
+    format->SetIsStatic(true);
+
+    // A differently-named static over String fails.
+    format->SetName("Concat");
+    EXPECT_FALSE(CS::CallBuilder::IsInterpolatedStringCreation(*format, list));
+    format->SetName("Format");
+
+    // `FormattableStringFactory.Create` over the right namespace.
+    auto factory = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        "FormattableStringFactory", "System.Runtime.CompilerServices",
+        TS::FullTypeName(TS::TopLevelTypeName("System.Runtime.CompilerServices",
+                                              "FormattableStringFactory")),
+        TS::TypeKind::Class, TS::Accessibility::Public, fixture.holder.compilation,
+        &fixture.holder.compilation.MainModule());
+    auto create = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    create->SetName("Create");
+    create->SetIsStatic(true);
+    create->SetDeclaringType(TS::ITypePtr(factory.get(), [](TS::IType*) {}));
+    create->SetParameters({arg.parameter});
+    CS::ArgumentList createList = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *create, 0, callArguments, std::nullopt);
+    EXPECT_TRUE(CS::CallBuilder::IsInterpolatedStringCreation(*create, createList));
+
+    // The same Create over the wrong namespace fails.
+    factory->SetNamespace("System.Wrong");
+    EXPECT_FALSE(CS::CallBuilder::IsInterpolatedStringCreation(*create, createList));
+}
+
+
+TEST(HandleRangeConstructionTest, RangeNewObjRendersTheBinaryRange)
+{
+    BuildArgsFixture fixture;
+    // `new Range(from, to)` -- a NewObj over the Range known type with two args.
+    auto rangeCtor = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Constructor);
+    rangeCtor->SetName(".ctor");
+    rangeCtor->SetIsStatic(false);
+    rangeCtor->SetDeclaringType(fixture.holder.KnownType(TS::KnownTypeCode::Range));
+    ParamFixture from(fixture.holder.KnownType(TS::KnownTypeCode::Index), "from");
+    ParamFixture to(fixture.holder.KnownType(TS::KnownTypeCode::Index), "to");
+    rangeCtor->SetParameters({from.parameter, to.parameter});
+
+    IL::LdNull fromArg;
+    IL::LdNull toArg;
+    std::vector<IL::ILInstruction*> callArguments{&fromArg, &toArg};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *rangeCtor, 0, callArguments, std::nullopt);
+
+    // A static-method target shape: the range arms read only the resolve result.
+    Syntax::TypeReferenceExpression nullTarget(
+        new Syntax::PrimitiveType("System.Range"));
+    CS::WithRR(nullTarget,
+               std::make_shared<Sem::TypeResolveResult>(
+                   fixture.holder.KnownType(TS::KnownTypeCode::Object)));
+    auto target = CS::TranslatedExpression(
+        &nullTarget, CS::GetResolveResult(nullTarget));
+
+    CS::ExpressionWithResolveResult result;
+    EXPECT_TRUE(CS::CallBuilder::HandleRangeConstruction(result, IL::OpCode::NewObj,
+                                                         *rangeCtor, target, list));
+    auto* binary = dynamic_cast<Syntax::BinaryOperatorExpression*>(result.Expression());
+    ASSERT_NE(binary, nullptr);
+    EXPECT_EQ(binary->Operator(), Syntax::BinaryOperatorType::Range);
+    // The resolve result is a MemberResolveResult over the method.
+    const auto* memberRr =
+        dynamic_cast<const Sem::MemberResolveResult*>(result.ResolveResult());
+    ASSERT_NE(memberRr, nullptr);
+    EXPECT_EQ(memberRr->Member(),
+              static_cast<const TS::IMember*>(
+                  static_cast<const TS::IMethod*>(rangeCtor.get())));
+}
+
+TEST(HandleRangeConstructionTest, IndexNewObjRendersTheIndexFromEnd)
+{
+    BuildArgsFixture fixture;
+    // `new Index(n, fromEnd: true)` -- the trailing-argument-true flag selects
+    // the caret form.
+    auto indexCtor = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Constructor);
+    indexCtor->SetName(".ctor");
+    indexCtor->SetIsStatic(false);
+    indexCtor->SetDeclaringType(fixture.holder.KnownType(TS::KnownTypeCode::Index));
+    ParamFixture value(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "value");
+    ParamFixture fromEnd(fixture.holder.KnownType(TS::KnownTypeCode::Boolean), "fromEnd");
+    indexCtor->SetParameters({value.parameter, fromEnd.parameter});
+
+    IL::LdcI4 valueArg(3);
+    IL::LdcI4 fromEndArg(1);
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *indexCtor, 0,
+        std::vector<IL::ILInstruction*>{&valueArg, &fromEndArg}, std::nullopt);
+    // The second argument is the `true` literal (the C# `Value is true` test
+    // reads the EXPRESSION, not the IL).
+    {
+        auto trueRr = std::make_shared<Sem::ConstantResolveResult>(
+            fixture.holder.KnownType(TS::KnownTypeCode::Boolean), true);
+        auto* trueExpr = new Syntax::PrimitiveExpression(Syntax::PrimitiveValue(true));
+        trueExpr->AddAnnotation(trueRr);
+        // The second argument is REPLACED by the `true` literal (the C#
+    // `Value is true` test reads the EXPRESSION, not the IL).
+    list.Arguments[1] =
+        CS::TranslatedExpression(trueExpr, CS::GetResolveResult(*trueExpr));
+    }
+
+    Syntax::TypeReferenceExpression nullTarget(
+        new Syntax::PrimitiveType("System.Index"));
+    CS::WithRR(nullTarget,
+               std::make_shared<Sem::TypeResolveResult>(
+                   fixture.holder.KnownType(TS::KnownTypeCode::Object)));
+    auto target = CS::TranslatedExpression(
+        &nullTarget, CS::GetResolveResult(nullTarget));
+
+    CS::ExpressionWithResolveResult result;
+    EXPECT_TRUE(CS::CallBuilder::HandleRangeConstruction(result, IL::OpCode::NewObj,
+                                                         *indexCtor, target, list));
+    auto* unary = dynamic_cast<Syntax::UnaryOperatorExpression*>(result.Expression());
+    ASSERT_NE(unary, nullptr);
+    EXPECT_EQ(unary->Operator(), Syntax::UnaryOperatorType::IndexFromEnd);
+}
+
+TEST(HandleRangeConstructionTest, NamedArgumentsRejectTheWholeArm)
+{
+    BuildArgsFixture fixture;
+    auto rangeCtor = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Constructor);
+    rangeCtor->SetName(".ctor");
+    rangeCtor->SetIsStatic(false);
+    rangeCtor->SetDeclaringType(fixture.holder.KnownType(TS::KnownTypeCode::Range));
+    ParamFixture from(fixture.holder.KnownType(TS::KnownTypeCode::Index), "from");
+    ParamFixture to(fixture.holder.KnownType(TS::KnownTypeCode::Index), "to");
+    rangeCtor->SetParameters({from.parameter, to.parameter});
+
+    IL::LdNull fromArg;
+    IL::LdNull toArg;
+    std::vector<IL::ILInstruction*> callArguments{&fromArg, &toArg};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *rangeCtor, 0, callArguments, std::nullopt);
+    list.ArgumentNames = std::vector<std::string>{"from", "to"};
+
+    Syntax::TypeReferenceExpression nullTarget(
+        new Syntax::PrimitiveType("System.Range"));
+    CS::WithRR(nullTarget,
+               std::make_shared<Sem::TypeResolveResult>(
+                   fixture.holder.KnownType(TS::KnownTypeCode::Object)));
+    auto target = CS::TranslatedExpression(
+        &nullTarget, CS::GetResolveResult(nullTarget));
+
+    CS::ExpressionWithResolveResult result;
+    EXPECT_FALSE(CS::CallBuilder::HandleRangeConstruction(result, IL::OpCode::NewObj,
+                                                          *rangeCtor, target, list));
+}
+
+TEST(HandleRangeConstructionTest, NonMatchingArmsFallThrough)
+{
+    BuildArgsFixture fixture;
+    // A Range ctor with ONE argument does not match the two-arg NewObj arm.
+    auto rangeCtor = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Constructor);
+    rangeCtor->SetName(".ctor");
+    rangeCtor->SetIsStatic(false);
+    rangeCtor->SetDeclaringType(fixture.holder.KnownType(TS::KnownTypeCode::Range));
+    ParamFixture single(fixture.holder.KnownType(TS::KnownTypeCode::Index), "from");
+    rangeCtor->SetParameters({single.parameter});
+
+    IL::LdNull fromArg;
+    std::vector<IL::ILInstruction*> callArguments{&fromArg};
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ArgumentList list = builder.BuildArgumentList(
+        CS::ExpectedTargetDetails{}, nullptr, *rangeCtor, 0, callArguments, std::nullopt);
+    Syntax::TypeReferenceExpression nullTarget(
+        new Syntax::PrimitiveType("System.Range"));
+    CS::WithRR(nullTarget,
+               std::make_shared<Sem::TypeResolveResult>(
+                   fixture.holder.KnownType(TS::KnownTypeCode::Object)));
+    auto target = CS::TranslatedExpression(
+        &nullTarget, CS::GetResolveResult(nullTarget));
+    CS::ExpressionWithResolveResult result;
+    EXPECT_FALSE(CS::CallBuilder::HandleRangeConstruction(result, IL::OpCode::NewObj,
+                                                          *rangeCtor, target, list));
+}
+
+TEST(LdObjIfRefTest, NodeSurfaceAndClone)
+{
+    // The node class: one Target child, a Type operand, ResultType Ref, the
+    // SideEffect|MayThrow direct flags with the child-flags union.
+    auto variable = std::make_shared<IL::ILVariable>();
+    variable->Name = "v";
+    variable->Type = std::make_shared<TS::ByReferenceType>(
+        std::make_shared<TS::SpecialType>(TS::TypeKind::Null));
+    auto inner = std::make_unique<IL::LdLoc>(variable);
+    TS::ITypePtr intType = std::make_shared<TS::SpecialType>(TS::TypeKind::Null);
+    IL::LdObjIfRef node(inner->Clone(), intType);
+    EXPECT_EQ(node.ResultType(), IL::StackType::Ref);
+    EXPECT_EQ(node.ChildCount(), 1);
+    EXPECT_NE(node.Target(), nullptr);
+    EXPECT_EQ(node.Type, intType);
+
+    // The clone owns its own child copy.
+    auto clone = node.Clone();
+    ASSERT_NE(clone, nullptr);
+    EXPECT_EQ(clone->Op, IL::OpCode::LdObjIfRef);
+    auto* cloneNode = dynamic_cast<IL::LdObjIfRef*>(clone.get());
+    ASSERT_NE(cloneNode, nullptr);
+    EXPECT_NE(cloneNode->Target(), node.Target());
+    // The flags union reaches the child (an LdLoc child adds no extra flags).
+    EXPECT_TRUE((node.Flags() & IL::InstructionFlags::MayThrow)
+        == IL::InstructionFlags::MayThrow);
+}
+
+
+TEST(BuildEntryTest, RoutesTheSpanBasedStringConcat)
+{
+    BuilderFixture fixture;
+    MethodFixtures fixtures(fixture.holder);
+
+    // Argument 1: the op_Implicit conversion call over an LdStr.
+    auto implicitCall = std::make_unique<IL::Call>("op_Implicit");
+    implicitCall->Method = fixtures.implicitConversion;
+    implicitCall->AddArg(std::make_unique<IL::LdStr>("hello"));
+    // Argument 2: the newobj ReadOnlySpan<char>(&c) over an AddressOf.
+    auto variable = std::make_shared<IL::ILVariable>();
+    variable->Name = "c";
+    variable->Type = fixture.holder.KnownType(TS::KnownTypeCode::Char);
+    auto addressOf =
+        std::make_unique<IL::AddressOf>(std::make_unique<IL::LdLoc>(variable),
+                                        fixture.holder.KnownType(TS::KnownTypeCode::Char));
+    auto spanCtorCall = std::make_unique<IL::Call>(".ctor");
+    spanCtorCall->IsNewObj = true;
+    spanCtorCall->Method = fixtures.spanCharCtor;
+    spanCtorCall->AddArg(std::move(addressOf));
+
+    IL::Call call("Concat");
+    call.Method = fixtures.spanConcat;
+    call.AddArg(std::move(implicitCall));
+    call.AddArg(std::move(spanCtorCall));
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::TranslatedExpression result = builder.Build(call);
+
+    // The fold renders the add chain with the IL annotation on the expression.
+    auto* outer = dynamic_cast<Syntax::BinaryOperatorExpression*>(result.Expression());
+    ASSERT_NE(outer, nullptr);
+    EXPECT_EQ(outer->Operator(), Syntax::BinaryOperatorType::Add);
+    ASSERT_EQ(result.ILInstructions().size(), 1u);
+    EXPECT_EQ(result.ILInstructions().front(), static_cast<IL::ILInstruction*>(&call));
+}
+
+TEST(BuildEntryTest, DefersDelegateConstructionLoudly)
+{
+    BuilderFixture fixture;
+    MethodFixtures fixtures(fixture.holder);
+
+    // newobj Delegate(target, ldftn) -- the MatchDelegateConstruction shape.
+    IL::Call call(".ctor");
+    call.IsNewObj = true;
+    call.Method = fixtures.spanConcat;
+    call.DeclaringType = fixture.holder.KnownType(TS::KnownTypeCode::Delegate);
+    call.AddArg(std::make_unique<IL::LdNull>());
+    call.AddArg(std::make_unique<IL::LdFtn>("Target"));
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    EXPECT_THROW((void)builder.Build(call), std::logic_error);
+}
+
+TEST(BuildEntryTest, DefersTupleConstructionLoudly)
+{
+    BuilderFixture fixture;
+    fixture.settings.SetTupleTypes(true);
+
+    // newobj ValueTuple`2(a, b) -- the 2-element tuple shape.
+    auto tupleDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        "ValueTuple", "System",
+        TS::FullTypeName(TS::TopLevelTypeName("System", "ValueTuple", 2)),
+        TS::TypeKind::Struct, TS::Accessibility::Public, fixture.holder.compilation,
+        &fixture.holder.compilation.MainModule());
+    auto tupleCtor = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Constructor);
+    tupleCtor->SetName(".ctor");
+    tupleCtor->SetIsStatic(false);
+    tupleCtor->SetDeclaringType(TS::ITypePtr(tupleDef.get(), [](TS::IType*) {}));
+    IL::Call call(".ctor");
+    call.IsNewObj = true;
+    call.Method = tupleCtor;
+    call.DeclaringType = TS::ITypePtr(tupleDef.get(), [](TS::IType*) {});
+    call.AddArg(std::make_unique<IL::LdNull>());
+    call.AddArg(std::make_unique<IL::LdNull>());
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    EXPECT_THROW((void)builder.Build(call), std::logic_error);
+}
+
+TEST(BuildMainlineTest, DelegateInvokeArmRendersTheInvocation)
+{
+    BuildArgsFixture fixture;
+    // An `Invoke` method over a Delegate declaring type: the mainline renders
+    // the plain invocation with isDelegateInvocation (no `.Invoke()` member
+    // reference).
+    auto invoke = std::make_shared<TS::Implementation::FakeMethod>(
+        fixture.holder.compilation, TS::SymbolKind::Method);
+    invoke->SetName("Invoke");
+    invoke->SetIsStatic(false);
+    // A real DELEGATE-KIND declaring type (the C# `DeclaringType.Kind ==
+    // TypeKind.Delegate` gate; MinimalCorlib's Delegate known type is
+    // TypeKind.Class).
+    auto delegateType = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        "Action", "System",
+        TS::FullTypeName(TS::TopLevelTypeName("System", "Action")),
+        TS::TypeKind::Delegate, TS::Accessibility::Public, fixture.holder.compilation,
+        &fixture.holder.compilation.MainModule());
+    invoke->SetDeclaringType(TS::ITypePtr(delegateType.get(), [](TS::IType*) {}));
+    auto holderDef = std::make_shared<TS::TestSupport::LookupTypeDefinition>(
+        "Holder", "H", TS::FullTypeName(TS::TopLevelTypeName("H", "Holder")),
+        TS::TypeKind::Class, TS::Accessibility::Public, fixture.holder.compilation,
+        &fixture.holder.compilation.MainModule());
+    ParamFixture arg(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "value");
+    invoke->SetParameters({arg.parameter});
+    // The resolver's current type definition slot (the TranslateTarget arm's
+    // base-reference gate reads it).
+    fixture.SetCurrentTypeDefinition(holderDef.get());
+
+    // The receiver: an LdLoc over a delegate-typed variable.
+    auto receiverVar = std::make_shared<IL::ILVariable>();
+    receiverVar->Name = "d";
+    receiverVar->Type = TS::ITypePtr(delegateType.get(), [](TS::IType*) {});
+    receiverVar->Kind = IL::VariableKind::Local;
+    auto receiver = std::make_unique<IL::LdLoc>(receiverVar);
+    IL::LdcI4 arg1(1);
+    IL::Call call("Invoke");
+    call.Method = invoke;
+    call.AddArg(std::move(receiver));
+    call.AddArg(std::make_unique<IL::LdcI4>(1));
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ExpressionWithResolveResult result = builder.Build(
+        IL::OpCode::Call, *invoke, CallChildPtrsForTest(call), std::nullopt, nullptr);
+    auto* invocation =
+        dynamic_cast<Syntax::InvocationExpression*>(result.Expression());
+    ASSERT_NE(invocation, nullptr);
+    // The target is the receiver identifier (not a member reference).
+    auto* target = dynamic_cast<Syntax::IdentifierExpression*>(invocation->Target());
+    ASSERT_NE(target, nullptr);
+    EXPECT_EQ(target->Identifier(), "d");
+    // The resolve result carries isDelegateInvocation.
+    const auto* csi = dynamic_cast<const Resolver::CSharpInvocationResolveResult*>(
+        result.ResolveResult());
+    ASSERT_NE(csi, nullptr);
+    EXPECT_TRUE(csi->IsDelegateInvocation());
+}
+
+TEST(BuildMainlineTest, StaticCallRendersTheIdentifierInvocation)
+{
+    TransformFixture fixture;
+    fixture.foo->SetIsStatic(true);
+    // A static `Foo` over the holder type: the mainline renders the plain
+    // identifier invocation.
+    {
+        ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "a");
+        fixture.foo->SetParameters({a.parameter});
+    }
+    IL::LdcI4 arg1(1);
+    IL::Call call("Foo");
+    call.Method = fixture.foo;
+    call.AddArg(std::make_unique<IL::LdcI4>(1));
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ExpressionWithResolveResult result = builder.Build(
+        IL::OpCode::Call, *fixture.foo, CallChildPtrsForTest(call), std::nullopt,
+        nullptr);
+    auto* invocation =
+        dynamic_cast<Syntax::InvocationExpression*>(result.Expression());
+    ASSERT_NE(invocation, nullptr);
+    auto* target = dynamic_cast<Syntax::IdentifierExpression*>(invocation->Target());
+    ASSERT_NE(target, nullptr);
+    EXPECT_EQ(target->Identifier(), "Foo");
+}
+
+TEST(BuildMainlineTest, AlwaysQualifyRendersTheMemberReference)
+{
+    TransformFixture fixture;
+    fixture.settings.SetAlwaysQualifyMemberReferences(true);
+    fixture.foo->SetIsStatic(true);
+    // The one-int-argument shape (the TransformFixture ctor carries no
+    // parameter list).
+    {
+        ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "a");
+        fixture.foo->SetParameters({a.parameter});
+    }
+
+    IL::Call call("Foo");
+    call.Method = fixture.foo;
+    call.AddArg(std::make_unique<IL::LdcI4>(1));
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    CS::ExpressionWithResolveResult result = builder.Build(
+        IL::OpCode::Call, *fixture.foo, CallChildPtrsForTest(call), std::nullopt,
+        nullptr);
+    auto* invocation =
+        dynamic_cast<Syntax::InvocationExpression*>(result.Expression());
+    ASSERT_NE(invocation, nullptr);
+    auto* target = dynamic_cast<Syntax::MemberReferenceExpression*>(invocation->Target());
+    ASSERT_NE(target, nullptr);
+    EXPECT_EQ(target->MemberName(), "Foo");
+}
+
+TEST(BuildMainlineTest, NewObjDefersTheConstructorCallLoudly)
+{
+    TransformFixture fixture(/*ctorShape=*/true);
+    fixture.settings.SetAlwaysQualifyMemberReferences(true);
+    {
+        ParamFixture a(fixture.holder.KnownType(TS::KnownTypeCode::Int32), "a");
+        fixture.foo->SetParameters({a.parameter});
+    }
+
+    IL::Call call(".ctor");
+    call.IsNewObj = true;
+    call.Method = fixture.foo;
+    call.DeclaringType = TS::ITypePtr(fixture.holderDef.get(), [](TS::IType*) {});
+    call.AddArg(std::make_unique<IL::LdcI4>(1));
+
+    CS::CallBuilder builder = fixture.MakeCallBuilder();
+    EXPECT_THROW((void)builder.Build(IL::OpCode::NewObj, *fixture.foo,
+                                     CallChildPtrsForTest(call), std::nullopt, nullptr),
+                 std::logic_error);
+}
+

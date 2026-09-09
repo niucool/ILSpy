@@ -62,6 +62,7 @@
 #include "Decompiler/IL/Instructions/LdcConstants.hpp"
 #include "Decompiler/IL/Instructions/LdcDecimal.hpp"
 #include "Decompiler/IL/Instructions/LdcI4.hpp"
+#include "Decompiler/IL/Instructions/LdObjIfRef.hpp"
 #include "Decompiler/IL/Instructions/Leave.hpp"
 #include "Decompiler/IL/Instructions/LockInstruction.hpp"
 #include "Decompiler/IL/Instructions/MatchInstruction.hpp"
@@ -415,6 +416,12 @@ std::unique_ptr<ILInstruction> ILInstruction::Clone() const {
         case OpCode::AddressOf: {
             const auto& s = static_cast<const AddressOf&>(*this);
             c = std::make_unique<AddressOf>(s.Argument ? s.Argument->Clone() : nullptr,
+                s.Type);
+            break;
+        }
+        case OpCode::LdObjIfRef: {
+            const auto& s = static_cast<const LdObjIfRef&>(*this);
+            c = std::make_unique<LdObjIfRef>(s.Target() ? s.Target()->Clone() : nullptr,
                 s.Type);
             break;
         }
